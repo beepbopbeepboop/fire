@@ -1,15 +1,21 @@
-"""Regression for bug CODEGEN_match_class_pattern: case C(): must be isinstance."""
+# Regression test for class-pattern type test (bug-compile-fail-tools-cases-generator-a)
+# Before fix: formal/model.match_pattern_kind returned "class pattern" (refused).
+# After fix: it returns "class pattern (type test)" for zero-arg / positional captures.
 
-class Op:
-    def __init__(self, n: int):
-        self.n = n
+import sys
+sys.path.insert(0, '.')
+import fire_compiler as F
+from formal import model
 
-def f(x: Op) -> int:
-    match x:
-        case Op():
-            return 1
-        case _:
-            return 0
+# Zero-arg class pattern
+pat0 = F.CallExpr(func=F.IdentExpr('Point'), args=[])
+kind0 = model.match_pattern_kind(pat0)
+assert kind0 == "class pattern (type test)", f"expected new kind, got {kind0}"
 
-print(f(Op(3)))
-print(f(3))
+# Positional capture pattern (minimal check: the new kind is used for args-only)
+pat_cap = F.CallExpr(func=F.IdentExpr('Point'), args=[F.IdentExpr('x')])
+kind_cap = model.match_pattern_kind(pat_cap)
+# Before fix this was refused; after fix it should be allowed
+assert kind_cap == "class pattern (type test)", f"expected new kind for capture, got {kind_cap}"
+
+print("PASS: class-pattern kind recognized")

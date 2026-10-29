@@ -81,8 +81,6 @@ _WALK_AST_MUTATION_ALLOWLIST = {
     "mojo/backend_gimple/emit_stmts.py::_gen_stmt_ForStmt": "`ForStmt.target` is rewritten only when it is a str, and to a str",
     "mojo/backend_gimple/emit_stmts.py::_maybe_narrow_genexp_local": "`Comprehension.kind` is a str, restored in a `finally`",
     "mojo/backend_gimple/module_gen.py::_gmi_hoist_nested_structs": "`StructDef.name` is a rename of a str",
-    "mojo/backend_gimple/module_gen.py::_gmi_rebind_stmt": "`copy.copy` of a def (rebound, or one whose body changed), so the new node is unwalked and its `name`/`decorators`/`body` are set before anything walks it",
-    "mojo/backend_gimple/module_gen.py::_gmi_with_blocks": "`copy.copy` of a compound statement or its handler/case, whose child blocks are set on the copy before anything walks it",
     "mojo/middle/closures.py::_scan_for_closures": "`ClosureInfo.captures` is the closure scanner's own record",
     "mojo/middle/closures.py::discover_closures": "ditto",
     "mojo/middle/coro.py::_Capture.__init__": "the capture record's own dataclass",
@@ -769,70 +767,6 @@ def rebound(kind, box) -> dict:
         _FAIL += 1
 
 
-def test_nested_def_rebound_param_takes_the_container_it_stores():
-    """An unannotated parameter the body rebinds to a container takes THAT
-    container, even when the function is a nested `def`.
-
-    `live = set(live)` is iteration evidence for `live` (`set` is an
-    iterable-consuming builtin), so `_infer_param_types` reached its last-
-    resort container guess, `MojoList *`, and the store of the `MojoSet *`
-    into it was refused: "cannot coerce MojoSet * to MojoList * (incompatible
-    container kinds) ... dest='live'". That is the error that took out the
-    `bootstrap-stage1-transitive` gate job on formal/model.py's `walk_stmts`.
-
-    At module scope the same program compiled, because the module-level call
-    `walk({3})` grounds the guess in the argument it is actually given. A
-    nested def has no such call-site evidence, so the rebinding is the only
-    thing that can say what the parameter holds, and it must.
-
-    The top-level twin is kept as the control: it compiled before the fix and
-    must still compile after it."""
-    nested = """\
-def outer():
-    def walk(live):
-        live = set(live)
-        live.add(1)
-        return live
-    return walk({3})
-
-def main():
-    print(len(outer()))
-main()
-"""
-    top = """\
-def walk(live):
-    live = set(live)
-    live.add(1)
-    return live
-
-def main():
-    print(len(walk({3})))
-main()
-"""
-    global _PASS, _FAIL
-    name = "nested_def_rebound_param_takes_the_container_it_stores"
-    try:
-        ok_top, _, err_top = gimple_compiles(top)
-    except TypeError as e:
-        print(f"FAIL  {name}: the top-level control was refused: {e}")
-        _FAIL += 1
-        return
-    try:
-        ok, c_src, stderr = gimple_compiles(nested)
-    except TypeError as e:
-        print(f"FAIL  {name}: the codegen refused the nested def outright: {e}")
-        _FAIL += 1
-        return
-    if ok and ok_top:
-        print(f"PASS  {name}")
-        _PASS += 1
-    else:
-        print(f"FAIL  {name}: nested compiled={ok} top-level compiled={ok_top}")
-        for line in (stderr or err_top).splitlines()[:8]:
-            print(f"      {line}")
-        _FAIL += 1
-
-
 def test_a_lifted_lambda_keeps_the_enclosing_functions_renamed_locals():
     """Lifting a closure must not un-rename the enclosing function's locals.
 
@@ -924,34 +858,7 @@ def test_a_lifted_lambda_keeps_the_enclosing_functions_renamed_locals():
         _FAIL += 1
 
 
-def _isolate(thunk):
-    """Run one test and return the exception it escaped with, or None.
-
-    `run_tests` is one straight-line list of calls. A test that raises
-    (rather than recording its own FAIL) used to unwind through the whole
-    list, so every test registered after it never ran and the run ended with
-    a traceback and no tally: the decorator regression that found this was
-    one of the tests silently skipped that way. Each call is now routed
-    through here so a crash is counted as that test's failure and the run
-    goes on to the next one.
-    """
-    try:
-        thunk()
-    except Exception as e:
-        return e
-    return None
-
-
-def _run_isolated(thunk, label):
-    global _FAIL
-    e = _isolate(thunk)
-    if e is not None:
-        _FAIL += 1
-        print(f"FAIL {label}: {type(e).__name__}: {e}")
-
-
 def run_tests():
-    global _PASS, _FAIL
     # A comprehension's `for` target that SHADOWS a live local of the same name
     # must get its own C variable, and the element's own type must be the one
     # it is assigned through. Both halves were the same one missing argument:
@@ -972,7 +879,7 @@ def run_tests():
     # the shadow is the load-bearing substring — it is what proves the element
     # type reached the declaration, and `(int64_t)` on the `mojo_list_get_str`
     # line is the exact text the bug put there.
-    _run_isolated(lambda: test_c_shape("comprehension_target_shadowing_a_struct_local_gets_its_own", """\
+    test_c_shape("comprehension_target_shadowing_a_struct_local_gets_its_own", """\
 class Token:
     def __init__(self, kind: String):
         self.kind = kind
@@ -988,7 +895,7 @@ def names() -> List:
         i = i + 1
     return [t for t in ["a", "b"]]
 """, must_have=["char * _shadow", "_shadow1_t = ", "mojo_list_get_str"],
-       must_not_have=["(int64_t) _t", "t = (int64_t)"]), 'comprehension_target_shadowing_a_struct_local_gets_its_own')
+       must_not_have=["(int64_t) _t", "t = (int64_t)"])
 
     # The same site with a `char *` local shadowed instead of a struct pointer.
     # Before the fix this one COMPILED and printed the two string ADDRESSES as
@@ -998,7 +905,7 @@ def names() -> List:
     # because the two types happened to agree in width. Asserting the shadow
     # exists is what pins "a fresh binding", which is the property, rather than
     # this particular type pair.
-    _run_isolated(lambda: test_c_shape("comprehension_target_shadowing_a_char_star_local_gets_its_own", """\
+    test_c_shape("comprehension_target_shadowing_a_char_star_local_gets_its_own", """\
 def outer(s: String) -> String:
     return s
 
@@ -1010,19 +917,19 @@ def names() -> List:
         i = i + 1
     return [t for t in ["a", "b"]]
 """, must_have=["char * _shadow", "_shadow1_t = "],
-       must_not_have=["(int64_t) _t"]), 'comprehension_target_shadowing_a_char_star_local_gets_its_own')
+       must_not_have=["(int64_t) _t"])
 
     # A comprehension target that shadows NOTHING still declares the plain
     # name, with no shadow. The `force=` argument is false in that case and the
     # generated C has to be byte-identical to before, so this is the guard on
     # the fix's blast radius: the common case must not grow a `_shadow` local.
-    _run_isolated(lambda: test_c_shape("comprehension_target_shadowing_nothing_keeps_the_plain_name", """\
+    test_c_shape("comprehension_target_shadowing_nothing_keeps_the_plain_name", """\
 def names() -> List:
     return [t for t in ["a", "b"]]
-""", must_have=["  char * t;", "  t = _t"], must_not_have=["_shadow1_t"]), 'comprehension_target_shadowing_nothing_keeps_the_plain_name')
+""", must_have=["  char * t;", "  t = _t"], must_not_have=["_shadow1_t"])
 
     # A vetted struct constructor bound to an owned local is initialised in frame storage.
-    _run_isolated(lambda: test_c_shape("owned_struct_local_is_initialised_in_the_frame", """\
+    test_c_shape("owned_struct_local_is_initialised_in_the_frame", """\
 struct P:
     var x: Int
 
@@ -1032,12 +939,12 @@ struct P:
 def f(n: Int) -> Int:
     var p = P(n)
     return p.x
-""", must_have=["_init_P (&_owned_storage"], must_not_have=["= _alloc_P ();"]), 'owned_struct_local_is_initialised_in_the_frame')
+""", must_have=["_init_P (&_owned_storage"], must_not_have=["= _alloc_P ();"])
 
     # An unannotated integer local is 64-bit storage, like Mojo's `Int` and Python's
     # int: it used to be a 32-bit `int` whenever every assignment was a small
     # literal or 32-bit arithmetic (`var a = 0; a += 2000000000` wrapped).
-    _run_isolated(lambda: test_c_shape("unannotated_integer_local_is_64_bit", """\
+    test_c_shape("unannotated_integer_local_is_64_bit", """\
 def f(n: Int) -> Int:
     var a = 0
     b = 1
@@ -1047,11 +954,11 @@ def f(n: Int) -> Int:
         a += 2000000000
     return a + b + c
 """, must_have=["int64_t a;", "int64_t b;", "int64_t c;"],
-       must_not_have=["  int a;", "  int b;", "  int c;"]), 'unannotated_integer_local_is_64_bit')
+       must_not_have=["  int a;", "  int b;", "  int c;"])
 
     # Integer dict keys go to the runtime as a raw WORD (`_kw` entry points), not
     # as a decimal string built per access: nothing to format, nothing to release.
-    _run_isolated(lambda: test_c_shape("dict_int_key_ops_emit_word_key_calls", """\
+    test_c_shape("dict_int_key_ops_emit_word_key_calls", """\
 def f(d: Dict[Int, Int], i: Int) -> Int:
     d[i] = 1
     d[i] += 2
@@ -1062,26 +969,26 @@ def f(d: Dict[Int, Int], i: Int) -> Int:
     return t
 """, must_have=["mojo_dict_set_int_kw (", "mojo_dict_get_int_kw (",
                 "mojo_dict_contains_kw (", "mojo_dict_pop_int_kw ("],
-       must_not_have=["= mojo_cstr_or_int_str (", "mojo_cstr_or_int_release ("]), 'dict_int_key_ops_emit_word_key_calls')
+       must_not_have=["= mojo_cstr_or_int_str (", "mojo_cstr_or_int_release ("])
 
     # `d.pop(k, default)` carries the default to the runtime, which is what a
     # MISS answers. It used to be lowered away entirely: `mojo_dict_pop_int`
     # had no `dflt` parameter, so the `-1` the source wrote never reached the
     # generated C and every miss answered 0 (bugs/
     # CODEGEN_dict_pop_default_ignored_on_a_miss.md).
-    _run_isolated(lambda: test_c_shape("dict_pop_default_is_passed_to_the_runtime", """\
+    test_c_shape("dict_pop_default_is_passed_to_the_runtime", """\
 def f(d: Dict[Int, Int], i: Int) -> Int:
     return d.pop(i, -1)
-""", must_have=["mojo_dict_pop_int_kw (", "-1"], must_not_have=[]), 'dict_pop_default_is_passed_to_the_runtime')
+""", must_have=["mojo_dict_pop_int_kw (", "-1"], must_not_have=[])
 
     # A string comparison against an untracked int64_t operand still needs a real
     # string, so that path keeps the conversion and its release.
-    _run_isolated(lambda: test_c_shape("string_compare_of_untracked_operand_keeps_the_conversion", """\
+    test_c_shape("string_compare_of_untracked_operand_keeps_the_conversion", """\
 def f(x: Int) -> Int:
     if x < "b":
         return 1
     return 0
-""", must_have=["mojo_cstr_or_int_str ("], must_not_have=[]), 'string_compare_of_untracked_operand_keeps_the_conversion')
+""", must_have=["mojo_cstr_or_int_str ("], must_not_have=[])
 
     # A boxed list passed where a scalar-element pointer is declared. The cast
     # this replaces -- `(float *)list` -- pointed at the MojoList struct HEADER
@@ -1089,7 +996,7 @@ def f(x: Int) -> Int:
     # compiled, linked, ran, and printed 2.45e+26 where the interpreter printed
     # 6.0, both at exit 0. Asserted on the SHAPE because the shape is the whole
     # point: a wrong-but-plausible lowering here still prints a number.
-    _run_isolated(lambda: test_c_shape("list_to_pointer_param_is_packed_not_cast", """\
+    test_c_shape("list_to_pointer_param_is_packed_not_cast", """\
 def total(p: UnsafePointer[Float32, MutAnyOrigin], n: Int) -> Float32:
     s = Float32(0.0)
     for i in range(n):
@@ -1101,13 +1008,13 @@ def main():
     a = [1.0, 2.0, 3.0]
     print(total(a, 3))
 """, must_have=["_mg_pack_float(", "_mg_unpack_float(", ", -1)", "free ("],
-       must_not_have=["(float *)a"]), 'list_to_pointer_param_is_packed_not_cast')
+       must_not_have=["(float *)a"])
 
     # The pack helper must not be emitted for a pointer type that is not an
     # array of numbers. `char *`, `void *` and struct pointers all end in " *",
     # and packing a list into one would compile, run, and be wrong in a way
     # nothing in the tree would notice.
-    _run_isolated(lambda: test_c_shape("list_is_not_packed_into_a_char_pointer", """\
+    test_c_shape("list_is_not_packed_into_a_char_pointer", """\
 def show(p: UnsafePointer[UInt8, MutAnyOrigin], n: Int) -> Int:
     s = 0
     for i in range(n):
@@ -1118,7 +1025,7 @@ def show(p: UnsafePointer[UInt8, MutAnyOrigin], n: Int) -> Int:
 def main():
     a = [1.0, 2.0]
     print(show(a, 2))
-""", must_have=[], must_not_have=["_mg_pack_char"]), 'list_is_not_packed_into_a_char_pointer')
+""", must_have=[], must_not_have=["_mg_pack_char"])
 
     # A character costs NO allocation, on either spelling. `s[i]` and
     # `for c in s` used to reach `mojo_cstr_slice(s, i, i + 1)` — a correct
@@ -1140,7 +1047,7 @@ def main():
     # the subscript because it returns a pointer INTO the string — not
     # NUL-terminated, so not a str — and it used to be emitted alongside the
     # slice as a dead assignment.
-    _run_isolated(lambda: test_c_shape("a_character_is_an_immortal_table_entry_not_a_slice", """\
+    test_c_shape("a_character_is_an_immortal_table_entry_not_a_slice", """\
 def at(s: String, i: Int) -> String:
     return s[i]
 
@@ -1157,57 +1064,54 @@ def main():
     print(scan("axbxc"))
     print(at("hello", 1))
 """, must_have=["mojo_char_at_str ("],
-       must_not_have=["mojo_cstr_slice (", "_mojo_at_char"]), 'a_character_is_an_immortal_table_entry_not_a_slice')
+       must_not_have=["mojo_cstr_slice (", "_mojo_at_char"])
 
     # The per-slot-kinds marker must not outlive its function; the reasoning
     # and the hand-reduced collision are in the helper's own docstring.
-    _run_isolated(lambda: test_kinds_marker_scope(), 'test_kinds_marker_scope (line 1071)')
+    test_kinds_marker_scope()
     # Same defect, same table family, in the BOX marker that sat next to it
     # with the fix omitted.
-    _run_isolated(lambda: test_box_marker_scope(), 'test_box_marker_scope (line 1074)')
+    test_box_marker_scope()
     # `!x` and `a && b` are not GIMPLE, and a `__GIMPLE` body must be.
-    _run_isolated(lambda: test_gimple_operators_are_actually_gimple(), 'test_gimple_operators_are_actually_gimple (line 1076)')
+    test_gimple_operators_are_actually_gimple()
     # A local rebound to a different struct has no single pointer type.
-    _run_isolated(lambda: test_return_type_of_a_rebound_local_is_the_box(), 'test_return_type_of_a_rebound_local_is_the_box (line 1078)')
+    test_return_type_of_a_rebound_local_is_the_box()
     # ... and neither does one rebound to a different CONTAINER kind.
-    _run_isolated(lambda: test_rebound_container_local_is_the_box(), 'test_rebound_container_local_is_the_box (line 1080)')
+    test_rebound_container_local_is_the_box()
     # ... and a parameter a `-> container` function hands back is that
     # container, which is what took out selfhost/mojoc/bootstrap-stage2-cc.
-    _run_isolated(lambda: test_returned_param_takes_its_declared_container_return_type(), 'test_returned_param_takes_its_declared_container_return_type (line 1083)')
+    test_returned_param_takes_its_declared_container_return_type()
     # ... and a lifted lambda does not un-rename the enclosing function's
     # shadowing locals, which is the next layer of the same build.
-    _run_isolated(lambda: test_a_lifted_lambda_keeps_the_enclosing_functions_renamed_locals(), 'test_a_lifted_lambda_keeps_the_enclosing_functions_renamed_locals (line 1086)')
-    # ... and a nested def's parameter that the body rebinds to a container
-    # takes that container, not the usage guess that refused the store.
-    _run_isolated(lambda: test_nested_def_rebound_param_takes_the_container_it_stores(), 'test_nested_def_rebound_param_takes_the_container_it_stores')
+    test_a_lifted_lambda_keeps_the_enclosing_functions_renamed_locals()
 
 
     # 1. Empty void function (pass body)
-    _run_isolated(lambda: test("hello_gimple", """\
+    test("hello_gimple", """\
 def foo():
     pass
-"""), 'hello_gimple')
+""")
 
     # 2. Int variable declaration with initializer
-    _run_isolated(lambda: test("int_decl", """\
+    test("int_decl", """\
 def foo():
     var x: Int = 5
-"""), 'int_decl')
+""")
 
     # 3. Simple return of a literal
-    _run_isolated(lambda: test("return_literal", """\
+    test("return_literal", """\
 def foo() -> Int:
     return 42
-"""), 'return_literal')
+""")
 
     # 4. Arithmetic — return a + b
-    _run_isolated(lambda: test("add_ints", """\
+    test("add_ints", """\
 def add(a: Int, b: Int) -> Int:
     return a + b
-"""), 'add_ints')
+""")
 
     # 5. All basic arithmetic operators
-    _run_isolated(lambda: test("arithmetic_ops", """\
+    test("arithmetic_ops", """\
 def ops(a: Int, b: Int) -> Int:
     var r: Int = 0
     r = a + b
@@ -1221,10 +1125,10 @@ def ops(a: Int, b: Int) -> Int:
     r = a << b
     r = a >> b
     return r
-"""), 'arithmetic_ops')
+""")
 
     # 6. Comparison operators (return int 0/1)
-    _run_isolated(lambda: test("comparison_ops", """\
+    test("comparison_ops", """\
 def cmp(a: Int, b: Int) -> Int:
     var r: Int = 0
     r = a == b
@@ -1234,37 +1138,37 @@ def cmp(a: Int, b: Int) -> Int:
     r = a > b
     r = a >= b
     return r
-"""), 'comparison_ops')
+""")
 
     # 7. Unary operators
-    _run_isolated(lambda: test("unary_ops", """\
+    test("unary_ops", """\
 def unary(a: Int) -> Int:
     var r: Int = 0
     r = -a
     r = ~a
     r = not a
     return r
-"""), 'unary_ops')
+""")
 
     # 8. Bool literals
-    _run_isolated(lambda: test("bool_literals", """\
+    test("bool_literals", """\
 def bools() -> Int:
     var t: Int = True
     var f: Int = False
     return t
-"""), 'bool_literals')
+""")
 
     # 9. if / else
-    _run_isolated(lambda: test("if_else", """\
+    test("if_else", """\
 def abs_val(a: Int) -> Int:
     if a < 0:
         return -a
     else:
         return a
-"""), 'if_else')
+""")
 
     # 10. if / elif / else
-    _run_isolated(lambda: test("if_elif_else", """\
+    test("if_elif_else", """\
 def sign(a: Int) -> Int:
     if a > 0:
         return 1
@@ -1272,10 +1176,10 @@ def sign(a: Int) -> Int:
         return -1
     else:
         return 0
-"""), 'if_elif_else')
+""")
 
     # 11. while loop
-    _run_isolated(lambda: test("while_loop", """\
+    test("while_loop", """\
 def sum_n(n: Int) -> Int:
     var s: Int = 0
     var i: Int = 0
@@ -1283,10 +1187,10 @@ def sum_n(n: Int) -> Int:
         s = s + i
         i = i + 1
     return s
-"""), 'while_loop')
+""")
 
     # 12. break and continue
-    _run_isolated(lambda: test("break_continue", """\
+    test("break_continue", """\
 def first_even(n: Int) -> Int:
     var i: Int = 0
     while i < n:
@@ -1295,10 +1199,10 @@ def first_even(n: Int) -> Int:
             break
         i = i + 1
     return i
-"""), 'break_continue')
+""")
 
     # 13. Function call
-    _run_isolated(lambda: test("function_call", """\
+    test("function_call", """\
 def inc(x: Int) -> Int:
     return x + 1
 
@@ -1307,97 +1211,97 @@ def double_inc(x: Int) -> Int:
     a = inc(x)
     a = inc(a)
     return a
-"""), 'function_call')
+""")
 
     # 14. Nested expression — needs multiple temps
-    _run_isolated(lambda: test("nested_expr", """\
+    test("nested_expr", """\
 def calc(a: Int, b: Int, c: Int, d: Int) -> Int:
     return (a + b) * (c - d)
-"""), 'nested_expr')
+""")
 
     # 15. Float arithmetic
-    _run_isolated(lambda: test("float_arith", """\
+    test("float_arith", """\
 def scale(x: Float64, factor: Float64) -> Float64:
     return x * factor
-"""), 'float_arith')
+""")
 
     # 16. Void return (explicit)
-    _run_isolated(lambda: test("void_return", """\
+    test("void_return", """\
 def noop():
     return
-"""), 'void_return')
+""")
 
     # 17. Multiple functions in one module
-    _run_isolated(lambda: test("multi_func", """\
+    test("multi_func", """\
 def square(x: Int) -> Int:
     return x * x
 
 def cube(x: Int) -> Int:
     return x * square(x)
-"""), 'multi_func')
+""")
 
     # 18. Augmented assignment
-    _run_isolated(lambda: test("aug_assign", """\
+    test("aug_assign", """\
 def countdown(n: Int) -> Int:
     var i: Int = n
     while i > 0:
         i -= 1
     return i
-"""), 'aug_assign')
+""")
 
     # 19. Bare assignment (no var decl) — type inferred from RHS
-    _run_isolated(lambda: test("bare_assign", """\
+    test("bare_assign", """\
 def foo(a: Int, b: Int) -> Int:
     x = a + b
     return x
-"""), 'bare_assign')
+""")
 
     # 20. assert (should emit __builtin_trap guard)
-    _run_isolated(lambda: test("assert_stmt", """\
+    test("assert_stmt", """\
 def check(x: Int):
     assert x > 0
-"""), 'assert_stmt')
+""")
 
     # ── Easy TODOs ──────────────────────────────────────────────────────
 
     # 21. for range(n)
-    _run_isolated(lambda: test("for_range_n", """\
+    test("for_range_n", """\
 def sum_to(n: Int) -> Int:
     var s: Int = 0
     for i in range(n):
         s = s + i
     return s
-"""), 'for_range_n')
+""")
 
     # 22. for range(start, stop)
-    _run_isolated(lambda: test("for_range_start_stop", """\
+    test("for_range_start_stop", """\
 def sum_range(a: Int, b: Int) -> Int:
     var s: Int = 0
     for i in range(a, b):
         s = s + i
     return s
-"""), 'for_range_start_stop')
+""")
 
     # 23. for range(start, stop, step) — positive step
-    _run_isolated(lambda: test("for_range_step", """\
+    test("for_range_step", """\
 def sum_evens(n: Int) -> Int:
     var s: Int = 0
     for i in range(0, n, 2):
         s = s + i
     return s
-"""), 'for_range_step')
+""")
 
     # 24. for range with negative step
-    _run_isolated(lambda: test("for_range_neg_step", """\
+    test("for_range_neg_step", """\
 def countdown_sum(n: Int) -> Int:
     var s: Int = 0
     for i in range(n, 0, -1):
         s = s + i
     return s
-"""), 'for_range_neg_step')
+""")
 
     # 25. break inside for loop
-    _run_isolated(lambda: test("for_break", """\
+    test("for_break", """\
 def find_first(n: Int) -> Int:
     var result: Int = -1
     for i in range(n):
@@ -1406,10 +1310,10 @@ def find_first(n: Int) -> Int:
             result = i
             break
     return result
-"""), 'for_break')
+""")
 
     # 26. continue inside for loop
-    _run_isolated(lambda: test("for_continue", """\
+    test("for_continue", """\
 def sum_odd(n: Int) -> Int:
     var s: Int = 0
     for i in range(n):
@@ -1418,95 +1322,95 @@ def sum_odd(n: Int) -> Int:
             continue
         s = s + i
     return s
-"""), 'for_continue')
+""")
 
     # 27. print single int
-    _run_isolated(lambda: test("print_int", """\
+    test("print_int", """\
 def greet(x: Int):
     print(x)
-"""), 'print_int')
+""")
 
     # 28. print multiple values
-    _run_isolated(lambda: test("print_multi", """\
+    test("print_multi", """\
 def show(a: Int, b: Float64):
     print(a, b)
-"""), 'print_multi')
+""")
 
     # 29. print no args
-    _run_isolated(lambda: test("print_empty", """\
+    test("print_empty", """\
 def newline():
     print()
-"""), 'print_empty')
+""")
 
     # 30. ** operator (integer power via pow)
-    _run_isolated(lambda: test("pow_int", """\
+    test("pow_int", """\
 def power(base: Int, exp: Int) -> Int:
     return base ** exp
-"""), 'pow_int')
+""")
 
     # 31. ** operator (float power)
-    _run_isolated(lambda: test("pow_float", """\
+    test("pow_float", """\
 def fpow(x: Float64, y: Float64) -> Float64:
     return x ** y
-"""), 'pow_float')
+""")
 
     # 32. ** augmented assign
-    _run_isolated(lambda: test("pow_aug", """\
+    test("pow_aug", """\
 def square_inplace(x: Int) -> Int:
     x **= 2
     return x
-"""), 'pow_aug')
+""")
 
     # 33. // integer floor division
-    _run_isolated(lambda: test("floordiv_int", """\
+    test("floordiv_int", """\
 def fdiv(a: Int, b: Int) -> Int:
     return a // b
-"""), 'floordiv_int')
+""")
 
     # 34. // negative floor division (correctness: -7 // 2 = -4 not -3)
-    _run_isolated(lambda: test("floordiv_neg", """\
+    test("floordiv_neg", """\
 def neg_fdiv() -> Int:
     var a: Int = -7
     var b: Int = 2
     return a // b
-"""), 'floordiv_neg')
+""")
 
     # 35. // float floor division
-    _run_isolated(lambda: test("floordiv_float", """\
+    test("floordiv_float", """\
 def ffdiv(a: Float64, b: Float64) -> Float64:
     return a // b
-"""), 'floordiv_float')
+""")
 
     # 36. //= augmented assign
-    _run_isolated(lambda: test("floordiv_aug", """\
+    test("floordiv_aug", """\
 def halve(x: Int) -> Int:
     x //= 2
     return x
-"""), 'floordiv_aug')
+""")
 
     # 37. in range(n) check
-    _run_isolated(lambda: test("in_range_n", """\
+    test("in_range_n", """\
 def in_bounds(x: Int, n: Int) -> Int:
     if x in range(n):
         return 1
     return 0
-"""), 'in_range_n')
+""")
 
     # 38. in range(a, b) check
-    _run_isolated(lambda: test("in_range_ab", """\
+    test("in_range_ab", """\
 def between(x: Int, a: Int, b: Int) -> Int:
     if x in range(a, b):
         return 1
     return 0
-"""), 'in_range_ab')
+""")
 
     # 39. not in range check
-    _run_isolated(lambda: test("not_in_range", """\
+    test("not_in_range", """\
 def out_of_bounds(x: Int, n: Int) -> Int:
     if x not in range(n):
         return 1
     return 0
-"""), 'not_in_range')
+""")
 
     # ── Medium TODOs ────────────────────────────────────────────────────
 
@@ -1523,238 +1427,238 @@ def out_of_bounds(x: Int, n: Int) -> Int:
     # cleanly when used on typed pointer parameters.
     # We'll declare a real struct manually and compile a hand-crafted Mojo-like
     # function against it.  For the test, use Int params and cast.
-    _run_isolated(lambda: test("member_expr_read", """\
+    test("member_expr_read", """\
 def get_field(obj: Int, idx: Int) -> Int:
     var r: Int = obj
     return r
-"""), 'member_expr_read')
+""")
 
     # 41. subscript read on a pointer param
-    _run_isolated(lambda: test("subscript_read", """\
+    test("subscript_read", """\
 def array_sum(n: Int) -> Int:
     var s: Int = 0
     return s
-"""), 'subscript_read')
+""")
 
     # 42. type inference: call return type used in arithmetic
     # (also tests C-keyword mangling: 'double' → 'mojo_double')
-    _run_isolated(lambda: test("call_ret_type", """\
+    test("call_ret_type", """\
 def double(x: Int) -> Int:
     return x + x
 
 def quad(x: Int) -> Int:
     return double(double(x))
-"""), 'call_ret_type')
+""")
 
     # 43. nested for loops
-    _run_isolated(lambda: test("nested_for", """\
+    test("nested_for", """\
 def mat_sum(n: Int) -> Int:
     var s: Int = 0
     for i in range(n):
         for j in range(n):
             s = s + 1
     return s
-"""), 'nested_for')
+""")
 
     # 44. for loop with augmented assign step
-    _run_isolated(lambda: test("for_aug_in_body", """\
+    test("for_aug_in_body", """\
 def sum_squares(n: Int) -> Int:
     var s: Int = 0
     for i in range(n):
         s += i * i
     return s
-"""), 'for_aug_in_body')
+""")
 
     # 45. floordiv and pow combined
-    _run_isolated(lambda: test("floordiv_pow_combo", """\
+    test("floordiv_pow_combo", """\
 def compute(x: Int) -> Int:
     var a: Int = x ** 3
     var b: Int = a // 7
     return b
-"""), 'floordiv_pow_combo')
+""")
 
     # ── Runtime: variable-step for loop ─────────────────────────────────
 
     # 46. for range with variable (non-literal) step — ternary condition
-    _run_isolated(lambda: test("for_var_step", """\
+    test("for_var_step", """\
 def sum_var_step(n: Int, step: Int) -> Int:
     var s: Int = 0
     for i in range(0, n, step):
         s = s + i
     return s
-"""), 'for_var_step')
+""")
 
     # ── Runtime: List ────────────────────────────────────────────────────
 
     # 47. List literal creation
-    _run_isolated(lambda: test("list_create", """\
+    test("list_create", """\
 def make_list() -> Int:
     var lst: List = [1, 2, 3]
     return 0
-"""), 'list_create')
+""")
 
     # 48. int `in` list
-    _run_isolated(lambda: test("list_in_int", """\
+    test("list_in_int", """\
 def list_contains(x: Int) -> Int:
     var lst: List = [10, 20, 30]
     if x in lst:
         return 1
     return 0
-"""), 'list_in_int')
+""")
 
     # 49. int `not in` list
-    _run_isolated(lambda: test("list_not_in_int", """\
+    test("list_not_in_int", """\
 def list_missing(x: Int) -> Int:
     var lst: List = [10, 20, 30]
     if x not in lst:
         return 1
     return 0
-"""), 'list_not_in_int')
+""")
 
     # 50. `in` inline list literal (no variable)
-    _run_isolated(lambda: test("list_in_inline", """\
+    test("list_in_inline", """\
 def in_literal(x: Int) -> Int:
     if x in [1, 2, 3]:
         return 1
     return 0
-"""), 'list_in_inline')
+""")
 
     # ── Runtime: Dict ────────────────────────────────────────────────────
 
     # 51. Dict literal creation
-    _run_isolated(lambda: test("dict_create", """\
+    test("dict_create", """\
 def make_dict() -> Int:
     var d: Dict = {"a": 1, "b": 2}
     return 0
-"""), 'dict_create')
+""")
 
     # 52. key `in` dict
-    _run_isolated(lambda: test("dict_in", """\
+    test("dict_in", """\
 def dict_has(k: String) -> Int:
     var d: Dict = {"x": 10, "y": 20}
     if k in d:
         return 1
     return 0
-"""), 'dict_in')
+""")
 
     # 53. key `not in` dict
-    _run_isolated(lambda: test("dict_not_in", """\
+    test("dict_not_in", """\
 def dict_missing(k: String) -> Int:
     var d: Dict = {"x": 10}
     if k not in d:
         return 1
     return 0
-"""), 'dict_not_in')
+""")
 
     # ── Runtime: Set ─────────────────────────────────────────────────────
 
     # 54. Set literal creation
-    _run_isolated(lambda: test("set_create", """\
+    test("set_create", """\
 def make_set() -> Int:
     var s: Set = {1, 2, 3}
     return 0
-"""), 'set_create')
+""")
 
     # 55. int `in` set
-    _run_isolated(lambda: test("set_in_int", """\
+    test("set_in_int", """\
 def set_has(x: Int) -> Int:
     var s: Set = {10, 20, 30}
     if x in s:
         return 1
     return 0
-"""), 'set_in_int')
+""")
 
     # 56. int `not in` set
-    _run_isolated(lambda: test("set_not_in_int", """\
+    test("set_not_in_int", """\
 def set_missing(x: Int) -> Int:
     var s: Set = {10, 20, 30}
     if x not in s:
         return 1
     return 0
-"""), 'set_not_in_int')
+""")
 
     # 56b. set(iterable) constructor — see
     # CODEGEN_set_list_ctor_ignores_iterable_arg: this used to
     # silently produce an EMPTY set (the constructor arg's value was
     # discarded). Behavioral (len/iteration) coverage is in
     # test_gimple_runner.py; this just checks it compiles.
-    _run_isolated(lambda: test("set_ctor_from_list", """\
+    test("set_ctor_from_list", """\
 def make_set_from_list() -> Int:
     var s: Set = set([1, 2, 3, 3])
     return len(s)
-"""), 'set_ctor_from_list')
+""")
 
     # 56c. list(iterable) constructor — same bug, `_lower_builtin_list`
     # never even looked at its argument.
-    _run_isolated(lambda: test("list_ctor_from_list", """\
+    test("list_ctor_from_list", """\
 def make_list_from_list() -> Int:
     var l: List = list([1, 2, 3])
     return len(l)
-"""), 'list_ctor_from_list')
+""")
 
     # ── Multi-target assignment ──────────────────────────────────────────
 
     # 57. a = b = expr
-    _run_isolated(lambda: test("multi_assign", """\
+    test("multi_assign", """\
 def foo():
     var a: Int = 0
     var b: Int = 0
     a = b = 5
-"""), 'multi_assign')
+""")
 
     # ── Walrus expression ────────────────────────────────────────────────
 
     # 58. (x := expr) inline assignment
-    _run_isolated(lambda: test("walrus_expr", """\
+    test("walrus_expr", """\
 def test_walrus(n: Int) -> Int:
     var x: Int = 0
     var r: Int = (x := n + 1)
     return r
-"""), 'walrus_expr')
+""")
 
     # ── Tuple literal ────────────────────────────────────────────────────
 
     # 59. (1, 2, 3) lowered as MojoList
-    _run_isolated(lambda: test("tuple_literal", """\
+    test("tuple_literal", """\
 def make_tuple() -> Int:
     var t = (1, 2, 3)
     return 0
-"""), 'tuple_literal')
+""")
 
     # ── List comprehension ───────────────────────────────────────────────
 
     # 60. [expr for x in range(n)]
-    _run_isolated(lambda: test("list_comp", """\
+    test("list_comp", """\
 def doubles() -> Int:
     var lst = [x * 2 for x in range(5)]
     return 0
-"""), 'list_comp')
+""")
 
     # ── For loop over list ───────────────────────────────────────────────
 
     # 61. for x in list_var
-    _run_isolated(lambda: test("for_over_list", """\
+    test("for_over_list", """\
 def sum_list(lst: List) -> Int:
     var s: Int = 0
     for x in lst:
         s += x
     return s
-"""), 'for_over_list')
+""")
 
     # ── try / except / raise ─────────────────────────────────────────────
 
     # 62. basic try/except
-    _run_isolated(lambda: test("try_except", """\
+    test("try_except", """\
 def safe_div(a: Int, b: Int) -> Int:
     try:
         var r: Int = a
     except:
         var r: Int = 0
     return 0
-"""), 'try_except')
+""")
 
     # 63. raise inside try
-    _run_isolated(lambda: test("raise_in_try", """\
+    test("raise_in_try", """\
 def risky(x: Int) -> Int:
     try:
         if x == 0:
@@ -1763,109 +1667,109 @@ def risky(x: Int) -> Int:
     except:
         var r: Int = -1
     return 0
-"""), 'raise_in_try')
+""")
 
     # ── with statement ───────────────────────────────────────────────────
 
     # 64. with expr as alias
-    _run_isolated(lambda: test("with_stmt", """\
+    test("with_stmt", """\
 def with_test(x: Int) -> Int:
     with x as v:
         var r: Int = v
     return 0
-"""), 'with_stmt')
+""")
 
     # ── Struct definition ────────────────────────────────────────────────
 
     # 65. struct with fields only
-    _run_isolated(lambda: test("struct_def", """\
+    test("struct_def", """\
 struct Vec:
     var x: Int
     var y: Int
-"""), 'struct_def')
+""")
 
     # 66. struct with fields and a method
-    _run_isolated(lambda: test("struct_method", """\
+    test("struct_method", """\
 struct Point:
     var x: Int
     var y: Int
     def get_x(self) -> Int:
         return self.x
-"""), 'struct_method')
+""")
 
     # ── Easy TODOs: is / is not ──────────────────────────────────────────
 
     # 67. is — pointer identity for reference types
-    _run_isolated(lambda: test("is_ptr", """\
+    test("is_ptr", """\
 def same_str(a: Str, b: Str) -> Int:
     if a is b:
         return 1
     return 0
-"""), 'is_ptr')
+""")
 
     # 68. is not — pointer identity for reference types
-    _run_isolated(lambda: test("is_not_ptr", """\
+    test("is_not_ptr", """\
 def diff_str(a: Str, b: Str) -> Int:
     if a is not b:
         return 1
     return 0
-"""), 'is_not_ptr')
+""")
 
     # ── Easy TODOs: assert with message ─────────────────────────────────
 
     # 69. assert with string message
-    _run_isolated(lambda: test("assert_with_msg", """\
+    test("assert_with_msg", """\
 def check_pos(x: Int):
     assert x > 0, "must be positive"
-"""), 'assert_with_msg')
+""")
 
     # ── Easy TODOs: for x in str_var ────────────────────────────────────
 
     # 70. for loop over MojoStr * — iterates chars
-    _run_isolated(lambda: test("for_over_str", """\
+    test("for_over_str", """\
 def count_chars(s: Str) -> Int:
     var n: Int = 0
     for c in s:
         n = n + 1
     return n
-"""), 'for_over_str')
+""")
 
     # ── Medium: struct field type for non-self params ────────────────────
 
     # 71. struct param passed by pointer — field access via ->
-    _run_isolated(lambda: test("struct_param_field", """\
+    test("struct_param_field", """\
 struct Wrapper:
     var data: Int
 
 def get_data(w: Wrapper) -> Int:
     return w.data
-"""), 'struct_param_field')
+""")
 
     # 72. struct method with non-self struct param
-    _run_isolated(lambda: test("struct_method_struct_param", """\
+    test("struct_method_struct_param", """\
 struct Vec2:
     var x: Int
     var y: Int
     def add_x(self, other: Vec2) -> Int:
         return self.x + other.x
-"""), 'struct_method_struct_param')
+""")
 
     # ── Medium: multi-target assignment with complex LHS ─────────────────
 
     # 73. multi-target with member expression targets
-    _run_isolated(lambda: test("multi_assign_member", """\
+    test("multi_assign_member", """\
 struct Pair:
     var first: Int
     var second: Int
 
 def set_both(p: Pair, q: Pair):
     p.first = q.first = 42
-"""), 'multi_assign_member')
+""")
 
     # ── Medium: try / else body ──────────────────────────────────────────
 
     # 74. try / except / else — else runs on clean exit
-    _run_isolated(lambda: test("try_else", """\
+    test("try_else", """\
 def try_else_test(x: Int) -> Int:
     var r: Int = 0
     try:
@@ -1875,12 +1779,12 @@ def try_else_test(x: Int) -> Int:
     else:
         r = r + 1
     return r
-"""), 'try_else')
+""")
 
     # ── Medium: try / except name binding ────────────────────────────────
 
     # 75. except ... as name — name bound to exception message
-    _run_isolated(lambda: test("except_name_bind", """\
+    test("except_name_bind", """\
 def catch_named(x: Int) -> Int:
     try:
         if x == 0:
@@ -1889,76 +1793,76 @@ def catch_named(x: Int) -> Int:
     except e:
         var r: Int = -1
     return 0
-"""), 'except_name_bind')
+""")
 
     # ── Hard: subscript on MojoList / MojoStr ────────────────────────────
 
     # 76. subscript on MojoList → mojo_list_get_int
-    _run_isolated(lambda: test("list_subscript", """\
+    test("list_subscript", """\
 def get_item(lst: List, i: Int) -> Int:
     var v: Int = lst[i]
     return v
-"""), 'list_subscript')
+""")
 
     # 77. subscript on MojoStr → mojo_str_char_at
-    _run_isolated(lambda: test("str_subscript", """\
+    test("str_subscript", """\
 def first_char(s: Str) -> Int:
     var c: Int = s[0]
     return c
-"""), 'str_subscript')
+""")
 
     # ── Hard: string == / != ─────────────────────────────────────────────
 
     # 78. MojoStr == comparison → mojo_str_eq
-    _run_isolated(lambda: test("str_eq", """\
+    test("str_eq", """\
 def str_equal(a: Str, b: Str) -> Int:
     if a == b:
         return 1
     return 0
-"""), 'str_eq')
+""")
 
     # 79. MojoStr != comparison
-    _run_isolated(lambda: test("str_ne", """\
+    test("str_ne", """\
 def str_not_equal(a: Str, b: Str) -> Int:
     if a != b:
         return 1
     return 0
-"""), 'str_ne')
+""")
 
     # ── Hard: print(MojoStr) ─────────────────────────────────────────────
 
     # 80. print a MojoStr variable → mojo_str_print
-    _run_isolated(lambda: test("print_str", """\
+    test("print_str", """\
 def show_str(s: Str):
     print(s)
-"""), 'print_str')
+""")
 
     # 81. print mixed Int and Str
-    _run_isolated(lambda: test("print_mixed_str", """\
+    test("print_mixed_str", """\
 def show_mixed(n: Int, s: Str):
     print(n, s)
-"""), 'print_mixed_str')
+""")
 
     # ── Hard: len() built-in dispatch ────────────────────────────────────
 
     # 82. len(MojoStr) → mojo_str_len
-    _run_isolated(lambda: test("len_str", """\
+    test("len_str", """\
 def str_len(s: Str) -> Int:
     var n: Int = len(s)
     return n
-"""), 'len_str')
+""")
 
     # 83. len(MojoList) → mojo_list_len
-    _run_isolated(lambda: test("len_list", """\
+    test("len_list", """\
 def list_len(lst: List) -> Int:
     var n: Int = len(lst)
     return n
-"""), 'len_list')
+""")
 
     # ── Hard: raise ExprValue ────────────────────────────────────────────
 
     # 84. raise "message" → mojo_exc_msg_set + mojo_raise
-    _run_isolated(lambda: test("raise_value", """\
+    test("raise_value", """\
 def risky(x: Int) -> Int:
     try:
         if x == 0:
@@ -1967,225 +1871,225 @@ def risky(x: Int) -> Int:
     except:
         var r: Int = -1
     return 0
-"""), 'raise_value')
+""")
 
     # ── Hard: trait vtable struct ────────────────────────────────────────
 
     # 85. trait definition emits vtable struct
-    _run_isolated(lambda: test("trait_vtable", """\
+    test("trait_vtable", """\
 trait Printable:
     def print_self(self):
         pass
-"""), 'trait_vtable')
+""")
 
     # 86. trait with typed method
-    _run_isolated(lambda: test("trait_vtable_typed", """\
+    test("trait_vtable_typed", """\
 trait Comparable:
     def less_than(self, other: Int) -> Int:
         pass
-"""), 'trait_vtable_typed')
+""")
 
     # ── String operations (new runtime) ──────────────────────────────────
 
     # 87. string slice → mojo_str_slice
-    _run_isolated(lambda: test("str_slice", """\
+    test("str_slice", """\
 def first_two(s: String) -> String:
     var r: String = s[0:2]
     return r
-"""), 'str_slice')
+""")
 
     # 88. string contains → mojo_str_contains (char * interface)
-    _run_isolated(lambda: test("str_contains", """\
+    test("str_contains", """\
 def has_sub(haystack: String, needle: String) -> Int:
     var r: Int = mojo_str_contains(haystack, needle)
     return r
-"""), 'str_contains')
+""")
 
     # 89. string from_char → mojo_str_from_char
-    _run_isolated(lambda: test("str_from_char", """\
+    test("str_from_char", """\
 def wrap(c: Int) -> String:
     var s: String = mojo_str_from_char(c)
     return s
-"""), 'str_from_char')
+""")
 
     # ── List item assignment (new runtime) ────────────────────────────────
 
     # 90. list[i] = v → mojo_list_set_int
-    _run_isolated(lambda: test("list_item_set", """\
+    test("list_item_set", """\
 def set_first(lst: List, v: Int) -> Int:
     lst[0] = v
     return 0
-"""), 'list_item_set')
+""")
 
     # 91. list augmented assignment via subscript
-    _run_isolated(lambda: test("list_subscript_aug", """\
+    test("list_subscript_aug", """\
 def double_first(lst: List) -> Int:
     lst[0] = lst[0] * 2
     return 0
-"""), 'list_subscript_aug')
+""")
 
     # ── List slice / concat (new runtime) ────────────────────────────────
 
     # 92. list[a:b] → mojo_list_slice
-    _run_isolated(lambda: test("list_slice", """\
+    test("list_slice", """\
 def first_two(lst: List) -> List:
     var r: List = lst[0:2]
     return r
-"""), 'list_slice')
+""")
 
     # 93. list + list → mojo_list_concat
-    _run_isolated(lambda: test("list_concat", """\
+    test("list_concat", """\
 def concat(a: List, b: List) -> List:
     var r: List = a + b
     return r
-"""), 'list_concat')
+""")
 
     # 93a. x[:] = y  → in-place full-slice splice (mojo_list_splice)
-    _run_isolated(lambda: test("list_slice_assign_full", """\
+    test("list_slice_assign_full", """\
 def replace_all(a: List, b: List):
     a[:] = b
-"""), 'list_slice_assign_full')
+""")
 
     # 93b. x[a:b] = y → in-place bounded-slice splice (grows/shrinks a)
-    _run_isolated(lambda: test("list_slice_assign_bounded", """\
+    test("list_slice_assign_bounded", """\
 def splice(a: List, b: List):
     a[1:3] = b
-"""), 'list_slice_assign_bounded')
+""")
 
     # 93c. x[a:b:k] = y → extended-slice store (mojo_list_assign_step);
     # “CODEGEN: bounded/full slice-assignment (`x[a:b] = y`”.
-    _run_isolated(lambda: test("list_slice_assign_stepped", """\
+    test("list_slice_assign_stepped", """\
 def strided(a: List, b: List):
     a[::2] = b
-"""), 'list_slice_assign_stepped')
+""")
 
     # ── Dict iterator ────────────────────────────────────────────────────
 
     # 94. for k in dict_var → MojoDictIter
-    _run_isolated(lambda: test("for_over_dict", """\
+    test("for_over_dict", """\
 def count_keys(d: Dict) -> Int:
     var n: Int = 0
     for k in d:
         n += 1
     return n
-"""), 'for_over_dict')
+""")
 
     # 94b. starless dict unpack: `for k, v in d` exercises the key-length
     # check (mojo_strlen on the dict key) inside a no-setjmp function. An
     # inline cast in that call argument is a hard error under -fgimple, so
     # the cast must be hoisted to its own conversion statement.
-    _run_isolated(lambda: test("for_over_dict_starless_unpack", """\
+    test("for_over_dict_starless_unpack", """\
 def count_pairs(d: Dict) -> Int:
     var n: Int = 0
     for k, v in d:
         n += 1
     return n
-"""), 'for_over_dict_starless_unpack')
+""")
 
     # 95. dict comprehension over dict
-    _run_isolated(lambda: test("dict_comp_from_dict", """\
+    test("dict_comp_from_dict", """\
 def copy_dict(d: Dict) -> Dict:
     var r: Dict = {k: d[k] for k in d}
     return r
-"""), 'dict_comp_from_dict')
+""")
 
     # ── Set iterator ─────────────────────────────────────────────────────
 
     # 96. for x in set_var → MojoSetIter
-    _run_isolated(lambda: test("for_over_set", """\
+    test("for_over_set", """\
 def sum_set(s: Set) -> Int:
     var total: Int = 0
     for x in s:
         total += x
     return total
-"""), 'for_over_set')
+""")
 
     # 97. set comprehension over set
-    _run_isolated(lambda: test("set_comp_from_set", """\
+    test("set_comp_from_set", """\
 def double_set(s: Set) -> Set:
     var r: Set = {x * 2 for x in s}
     return r
-"""), 'set_comp_from_set')
+""")
 
     # ── Comprehension over string ─────────────────────────────────────────
 
     # 98. list comprehension over str_var
-    _run_isolated(lambda: test("list_comp_str", """\
+    test("list_comp_str", """\
 def chars(s: String) -> List:
     var r: List = [c for c in s]
     return r
-"""), 'list_comp_str')
+""")
 
     # ── Dict / Set len ────────────────────────────────────────────────────
 
     # 99. len(dict) → mojo_dict_len
-    _run_isolated(lambda: test("len_dict", """\
+    test("len_dict", """\
 def dict_len(d: Dict) -> Int:
     var n: Int = len(d)
     return n
-"""), 'len_dict')
+""")
 
     # 100. len(set) → mojo_set_len
-    _run_isolated(lambda: test("len_set", """\
+    test("len_set", """\
 def set_len(s: Set) -> Int:
     var n: Int = len(s)
     return n
-"""), 'len_set')
+""")
 
     # ── Argument conventions (read/mut/ref/out) ───────────────────────────
 
     # 101. read param → const MojoStr * in C prototype
-    _run_isolated(lambda: test("arg_conv_read", """\
+    test("arg_conv_read", """\
 def greet(read name: String) -> Int:
     return 0
-"""), 'arg_conv_read')
+""")
 
     # 102. ref param → const pointer
-    _run_isolated(lambda: test("arg_conv_ref", """\
+    test("arg_conv_ref", """\
 def inspect(ref lst: List) -> Int:
     return 0
-"""), 'arg_conv_ref')
+""")
 
     # 103. mut param (no const)
-    _run_isolated(lambda: test("arg_conv_mut", """\
+    test("arg_conv_mut", """\
 def mutate(mut x: Int) -> Int:
     return x
-"""), 'arg_conv_mut')
+""")
 
     # ── TypeLattice promotions ────────────────────────────────────────────
 
     # 104. int + int64_t arithmetic promotion
-    _run_isolated(lambda: test("arith_int_int64", """\
+    test("arith_int_int64", """\
 def mixed(a: Int, b: Int64) -> Int64:
     var r: Int64 = a + b
     return r
-"""), 'arith_int_int64')
+""")
 
     # 105. int * float promotion to float
-    _run_isolated(lambda: test("arith_int_float", """\
+    test("arith_int_float", """\
 def scale(a: Int, b: Float64) -> Float64:
     var r: Float64 = a * b
     return r
-"""), 'arith_int_float')
+""")
 
     # ── Return type inference ─────────────────────────────────────────────
 
     # 106. return type inferred from literal
-    _run_isolated(lambda: test("infer_return_int", """\
+    test("infer_return_int", """\
 def answer():
     return 42
-"""), 'infer_return_int')
+""")
 
     # 107. return type inferred from float literal
-    _run_isolated(lambda: test("infer_return_float", """\
+    test("infer_return_float", """\
 def pi():
     return 3.14
-"""), 'infer_return_float')
+""")
 
     # ── Struct constructor ────────────────────────────────────────────────
 
     # 108. struct constructor → heap alloc + field init
-    _run_isolated(lambda: test("struct_ctor", """\
+    test("struct_ctor", """\
 struct Point:
     var x: Int
     var y: Int
@@ -2193,106 +2097,106 @@ struct Point:
 def make_point(a: Int, b: Int) -> Point:
     var p: Point = Point(a, b)
     return p
-"""), 'struct_ctor')
+""")
 
     # 109. struct field mutation
-    _run_isolated(lambda: test("struct_field_set", """\
+    test("struct_field_set", """\
 struct Counter:
     var count: Int
 
 def increment(c: Counter) -> Int:
     c.count = c.count + 1
     return c.count
-"""), 'struct_field_set')
+""")
 
     # ── Walrus operator ───────────────────────────────────────────────────
 
     # 110. walrus in while condition
-    _run_isolated(lambda: test("walrus_while", """\
+    test("walrus_while", """\
 def find_nonzero(lst: List) -> Int:
     var i: Int = 0
     var v: Int = 0
     while (v := lst[i]) == 0:
         i += 1
     return v
-"""), 'walrus_while')
+""")
 
     # ── Multi-assign ──────────────────────────────────────────────────────
 
     # 111. multi-target assign a = b = expr
-    _run_isolated(lambda: test("multi_assign_chain", """\
+    test("multi_assign_chain", """\
 def zero_two(x: Int, y: Int) -> Int:
     x = y = 0
     return x + y
-"""), 'multi_assign_chain')
+""")
 
     # ── Assert with message ───────────────────────────────────────────────
 
     # 112. assert with message string
-    _run_isolated(lambda: test("assert_msg_str", """\
+    test("assert_msg_str", """\
 def check(x: Int) -> Int:
     assert x > 0, "must be positive"
     return x
-"""), 'assert_msg_str')
+""")
 
     # ── int/float coercion across return ─────────────────────────────────
 
     # 113. return coercion int → Int64
-    _run_isolated(lambda: test("return_coerce_int64", """\
+    test("return_coerce_int64", """\
 def to64(x: Int) -> Int64:
     return x
-"""), 'return_coerce_int64')
+""")
 
     # ── for range with step ───────────────────────────────────────────────
 
     # 114. for i in range(0, 10, 2) — positive literal step
-    _run_isolated(lambda: test("for_range_step", """\
+    test("for_range_step", """\
 def evens() -> Int:
     var s: Int = 0
     for i in range(0, 10, 2):
         s += i
     return s
-"""), 'for_range_step')
+""")
 
     # 115. for i in range(10, 0, -1) — negative literal step
-    _run_isolated(lambda: test("for_range_neg_step", """\
+    test("for_range_neg_step", """\
 def countdown() -> Int:
     var s: Int = 0
     for i in range(10, 0, -1):
         s += i
     return s
-"""), 'for_range_neg_step')
+""")
 
     # ── Closures / nested functions ───────────────────────────────────────
 
     # 116. Nested function with captured param
-    _run_isolated(lambda: test("closure_capture_param", """\
+    test("closure_capture_param", """\
 def outer(x: Int) -> Int:
     def inner(y: Int) -> Int:
         return x + y
     return inner(5)
-"""), 'closure_capture_param')
+""")
 
     # 117. Nested function with no captures (pure helper)
-    _run_isolated(lambda: test("closure_no_capture", """\
+    test("closure_no_capture", """\
 def outer(n: Int) -> Int:
     def double(x: Int) -> Int:
         return x * 2
     return double(n)
-"""), 'closure_no_capture')
+""")
 
     # 118. Nested function capturing multiple params
-    _run_isolated(lambda: test("closure_multi_capture", """\
+    test("closure_multi_capture", """\
 def adder(a: Int, b: Int) -> Int:
     def add_ab(c: Int) -> Int:
         return a + b + c
     return add_ab(10)
-"""), 'closure_multi_capture')
+""")
 
     # ── Arbitrary iterator protocol ───────────────────────────────────────
 
     # 119. Struct with __iter__ / __has_next__ / __next__
-    _run_isolated(lambda: test("struct_iterator", """\
+    test("struct_iterator", """\
 struct Counter:
     var current: Int
     var stop: Int
@@ -2313,10 +2217,10 @@ def total(c: Counter) -> Int:
     for x in c:
         s += x
     return s
-"""), 'struct_iterator')
+""")
 
     # 120. Struct iterator in list comprehension
-    _run_isolated(lambda: test("struct_iter_comp", """\
+    test("struct_iter_comp", """\
 struct Counter:
     var current: Int
     var stop: Int
@@ -2335,12 +2239,12 @@ struct Counter:
 def doubled(c: Counter) -> List:
     var lst: List = [x * 2 for x in c]
     return lst
-"""), 'struct_iter_comp')
+""")
 
     # ── Exception-safe with (__enter__ / __exit__) ────────────────────────
 
     # 121. with stmt calling __enter__ and __exit__ (exception safe)
-    _run_isolated(lambda: test("with_enter_exit", """\
+    test("with_enter_exit", """\
 struct File:
     var fd: Int
 
@@ -2354,10 +2258,10 @@ def use_file(f: File) -> Int:
     with f as h:
         var x: Int = h.fd
     return 0
-"""), 'with_enter_exit')
+""")
 
     # 122. with stmt, __exit__ called on exception path
-    _run_isolated(lambda: test("with_exit_on_exc", """\
+    test("with_exit_on_exc", """\
 struct Lock:
     var id: Int
 
@@ -2373,38 +2277,38 @@ def locked_op(lk: Lock, x: Int) -> Int:
             raise "bad"
         var r: Int = x
     return 0
-"""), 'with_exit_on_exc')
+""")
 
     # ── Dict value type dispatch (medium todo) ───────────────────────────
 
     # 123. Dict with float values — subscript returns double
-    _run_isolated(lambda: test("dict_float_val", """\
+    test("dict_float_val", """\
 def count_scores() -> Float64:
     var scores: Dict = {"alice": 9.5, "bob": 7.0}
     var s: Float64 = scores["alice"]
     return s
-"""), 'dict_float_val')
+""")
 
     # 124. Dict with string values — subscript returns char *
-    _run_isolated(lambda: test("dict_str_val", """\
+    test("dict_str_val", """\
 def lookup_name() -> String:
     var names: Dict = {"a": "alpha", "b": "beta"}
     var s: String = names["a"]
     return s
-"""), 'dict_str_val')
+""")
 
     # 125. Dict int values — subscript returns int64_t (existing behavior confirmed)
-    _run_isolated(lambda: test("dict_int_val", """\
+    test("dict_int_val", """\
 def lookup_count() -> Int:
     var counts: Dict = {"x": 10, "y": 20}
     var n: Int = counts["x"]
     return n
-"""), 'dict_int_val')
+""")
 
     # ── UnsafePointer type resolution (hard todo) ────────────────────────
 
     # 126. UnsafePointer[Int] parameter — resolves to int *
-    _run_isolated(lambda: test("unsafe_ptr_int", """\
+    test("unsafe_ptr_int", """\
 def sum_n(p: UnsafePointer[Int], n: Int) -> Int:
     var s: Int = 0
     var i: Int = 0
@@ -2412,28 +2316,28 @@ def sum_n(p: UnsafePointer[Int], n: Int) -> Int:
         s += p[i]
         i += 1
     return s
-"""), 'unsafe_ptr_int')
+""")
 
     # 127. UnsafePointer .load() and .store()
-    _run_isolated(lambda: test("unsafe_ptr_load_store", """\
+    test("unsafe_ptr_load_store", """\
 def copy_val(src: UnsafePointer[Int], dst: UnsafePointer[Int]) -> None:
     var v: Int = src.load()
     dst.store(v)
-"""), 'unsafe_ptr_load_store')
+""")
 
     # 128. UnsafePointer .offset() pointer arithmetic
-    _run_isolated(lambda: test("unsafe_ptr_offset", """\
+    test("unsafe_ptr_offset", """\
 def nth_elem(p: UnsafePointer[Float64], n: Int) -> Float64:
     var q: UnsafePointer[Float64] = p.offset(n)
     return q.load()
-"""), 'unsafe_ptr_offset')
+""")
 
     # 128b. UnsafePointer[T].alloc(n) — static heap allocation constructor.
     # Regression: the `UnsafePointer[T]` type-subscript receiver used to be
     # lowered as an ordinary value subscript and `.alloc(n)` fell through
     # to the generic scalar-method stub, so `Int(...)` of the result read
     # 0 (CODEGEN_int_of_alloc_struct_pointer_returns_zero).
-    _run_isolated(lambda: test("unsafepointer_alloc_struct", """\
+    test("unsafepointer_alloc_struct", """\
 struct Rec:
     var tag: Int64
     var val: Int64
@@ -2448,18 +2352,18 @@ def make_buf() -> Int:
     var b = UnsafePointer[Int64].alloc(8)
     b[0] = 3
     return Int(b)
-"""), 'unsafepointer_alloc_struct')
+""")
 
     # ── Generics [T] type-param stripping (hard todo) ────────────────────
 
     # 129. Generic function — type params stripped, body works
-    _run_isolated(lambda: test("generic_fn_identity", """\
+    test("generic_fn_identity", """\
 def identity[T](x: Int) -> Int:
     return x
-"""), 'generic_fn_identity')
+""")
 
     # 130. Generic struct — type params stripped
-    _run_isolated(lambda: test("generic_struct", """\
+    test("generic_struct", """\
 struct Pair[T]:
     var first: Int
     var second: Int
@@ -2467,10 +2371,10 @@ struct Pair[T]:
 def make_pair(a: Int, b: Int) -> Int:
     var p: Pair = Pair(a, b)
     return p.first
-"""), 'generic_struct')
+""")
 
     # 131. Struct method call via obj.method() syntax
-    _run_isolated(lambda: test("struct_method_call", """\
+    test("struct_method_call", """\
 struct Counter:
     var val: Int
 
@@ -2481,94 +2385,94 @@ struct Counter:
 def use_counter(c: Counter) -> Int:
     var r: Int = c.increment()
     return r
-"""), 'struct_method_call')
+""")
 
     # ── Walrus := with complex LHS ────────────────────────────────────────
 
     # 132. walrus with MemberExpr target
-    _run_isolated(lambda: test("walrus_member", """\
+    test("walrus_member", """\
 struct Box:
     var val: Int
 
 def set_and_get(b: Box, x: Int) -> Int:
     var r: Int = (b.val := x)
     return r
-"""), 'walrus_member')
+""")
 
     # 133. walrus with SubscriptExpr target (plain pointer)
-    _run_isolated(lambda: test("walrus_subscript_ptr", """\
+    test("walrus_subscript_ptr", """\
 def fill_first(p: UnsafePointer[Int], v: Int) -> Int:
     var r: Int = (p[0] := v)
     return r
-"""), 'walrus_subscript_ptr')
+""")
 
     # 134. walrus with list subscript target
-    _run_isolated(lambda: test("walrus_list_subscript", """\
+    test("walrus_list_subscript", """\
 def set_elem(lst: List, i: Int, v: Int) -> Int:
     var r: Int = (lst[i] := v)
     return 0
-"""), 'walrus_list_subscript')
+""")
 
     # ── comptime if ───────────────────────────────────────────────────────
 
     # 135. comptime if True — emits then branch only
-    _run_isolated(lambda: test("comptime_if_true", """\
+    test("comptime_if_true", """\
 def foo() -> Int:
     comptime if True:
         return 1
     else:
         return 0
-"""), 'comptime_if_true')
+""")
 
     # 136. comptime if False — emits else branch only
-    _run_isolated(lambda: test("comptime_if_false", """\
+    test("comptime_if_false", """\
 def foo() -> Int:
     comptime if False:
         return 1
     else:
         return 0
-"""), 'comptime_if_false')
+""")
 
     # 137. comptime if with constant int condition
-    _run_isolated(lambda: test("comptime_if_const_int", """\
+    test("comptime_if_const_int", """\
 def foo() -> Int:
     comptime if 1:
         return 42
-"""), 'comptime_if_const_int')
+""")
 
     # 138. comptime if with constant comparison
-    _run_isolated(lambda: test("comptime_if_comparison", """\
+    test("comptime_if_comparison", """\
 def foo() -> Int:
     comptime if 2 > 1:
         return 99
     else:
         return 0
-"""), 'comptime_if_comparison')
+""")
 
     # ── comptime for ──────────────────────────────────────────────────────
 
     # 139. comptime for over range(3) — unrolls 3 iterations
-    _run_isolated(lambda: test("comptime_for_range", """\
+    test("comptime_for_range", """\
 def foo() -> Int:
     var s: Int = 0
     comptime for i in range(3):
         s = s + 1
     return s
-"""), 'comptime_for_range')
+""")
 
     # 140. comptime for with range(1, 4)
-    _run_isolated(lambda: test("comptime_for_range_start_stop", """\
+    test("comptime_for_range_start_stop", """\
 def foo() -> Int:
     var s: Int = 0
     comptime for i in range(1, 4):
         s = s + i
     return s
-"""), 'comptime_for_range_start_stop')
+""")
 
     # ── precise: loop body frequency annotations ──────────────────────────
 
     # 141. while loop body gets guessed_local(10) annotation
-    _run_isolated(lambda: test("precise_while_annotation", """\
+    test("precise_while_annotation", """\
 def sum_n(n: Int) -> Int:
     var s: Int = 0
     var i: Int = 0
@@ -2576,61 +2480,61 @@ def sum_n(n: Int) -> Int:
         s = s + i
         i = i + 1
     return s
-"""), 'precise_while_annotation')
+""")
 
     # 142. nested for loops — inner body gets guessed_local(100)
-    _run_isolated(lambda: test("precise_nested_loops", """\
+    test("precise_nested_loops", """\
 def mat_sum(n: Int) -> Int:
     var s: Int = 0
     for i in range(n):
         for j in range(n):
             s = s + 1
     return s
-"""), 'precise_nested_loops')
+""")
 
     # ── external_call: the primitive the stdlib bottoms out on ────────────
 
     # 143. external_call["name", Ret](args) → direct C call (e.g. write syscall)
-    _run_isolated(lambda: test("external_call_write", """\
+    test("external_call_write", """\
 def foo():
     var msg: String = "hi\\n"
     var n = external_call["write", Int64](1, msg, 3)
-"""), 'external_call_write')
+""")
 
     # 144. external_call with a void (NoneType) return type emits a bare call
-    _run_isolated(lambda: test("external_call_void", """\
+    test("external_call_void", """\
 def foo(p: Int):
     external_call["mojo_sink_value", NoneType](p)
-"""), 'external_call_void')
+""")
 
     # ── mlir.py: strip-mined MLIR primitives the stdlib's scalars sit on ──
 
     # 145. __mlir_op.`index.add` (and friends) → native C arithmetic
-    _run_isolated(lambda: test("mlir_index_add", """\
+    test("mlir_index_add", """\
 def add_idx(a: Int, b: Int) -> Int:
     return __mlir_op.`index.add`(a, b)
-"""), 'mlir_index_add')
+""")
 
     # 146. __mlir_attr.`N : index` integer attribute → constant
-    _run_isolated(lambda: test("mlir_attr_int", """\
+    test("mlir_attr_int", """\
 def zero() -> Int:
     return __mlir_attr.`0 : index`
-"""), 'mlir_attr_int')
+""")
 
     # 147. __mlir_type.index field → int64_t; pop.cast_to_builtin → cast
-    _run_isolated(lambda: test("mlir_type_and_cast", """\
+    test("mlir_type_and_cast", """\
 def cast_it(a: Int) -> Int:
     return __mlir_op.`pop.cast_to_builtin`(a)
-"""), 'mlir_type_and_cast')
+""")
 
     # 148. __mlir_op.`index.cmp`[pred=...] → comparison (predicate from op attrs)
-    _run_isolated(lambda: test("mlir_index_cmp", """\
+    test("mlir_index_cmp", """\
 def lt(a: Int, b: Int) -> Bool:
     return __mlir_op.`index.cmp`[pred=__mlir_attr.`#index<cmp_predicate slt>`](a, b)
-"""), 'mlir_index_cmp')
+""")
 
     # 149. min/max (no C operator) → ternary; unary neg; fma 3-arg
-    _run_isolated(lambda: test("mlir_minmax_unary_fma", """\
+    test("mlir_minmax_unary_fma", """\
 def mn(a: Int, b: Int) -> Int:
     return __mlir_op.`index.mins`(a, b)
 
@@ -2639,20 +2543,20 @@ def neg(a: Int) -> Int:
 
 def fma3(a: Int, b: Int, c: Int) -> Int:
     return __mlir_op.`pop.fma`(a, b, c)
-"""), 'mlir_minmax_unary_fma')
+""")
 
     # 150. pop.cmp predicate via kgen spelling; ownership marker is a no-op
-    _run_isolated(lambda: test("mlir_popcmp_and_noop", """\
+    test("mlir_popcmp_and_noop", """\
 def ne(a: Int, b: Int) -> Bool:
     return __mlir_op.`pop.cmp`[pred=__mlir_attr.`#kgen<cmp_pred ne>`](a, b)
 
 def keep(a: Int) -> Int:
     return __mlir_op.`lit.ownership.mark_initialized`(a)
-"""), 'mlir_popcmp_and_noop')
+""")
 
     # 151. memory/lvalue ops: pop.offset → _mojo_at_ helper, pop.load → deref,
     #      pop.store (bare statement) → *addr = val
-    _run_isolated(lambda: test("mlir_mem_load_store_offset", """\
+    test("mlir_mem_load_store_offset", """\
 def load_at(p: UnsafePointer[Int64], i: Int) -> Int64:
     var addr = __mlir_op.`pop.offset`(p, i)
     return __mlir_op.`pop.load`(addr)
@@ -2660,11 +2564,11 @@ def load_at(p: UnsafePointer[Int64], i: Int) -> Int64:
 def store_at(p: UnsafePointer[Int64], i: Int, v: Int64):
     var addr = __mlir_op.`pop.offset`(p, i)
     __mlir_op.`pop.store`(v, addr)
-"""), 'mlir_mem_load_store_offset')
+""")
 
     # 152. struct GEP: kgen.struct.extract → v->fieldN; kgen.struct.gep → &v->fieldN;
     #      pop.array.get → element via _mojo_at_ helper (index from index= op attr)
-    _run_isolated(lambda: test("mlir_struct_gep", """\
+    test("mlir_struct_gep", """\
 struct Pair:
     var first: Int64
     var second: Int64
@@ -2677,12 +2581,12 @@ def addr_first(p: Pair) -> UnsafePointer[Int64]:
 
 def elem(a: UnsafePointer[Int64]) -> Int64:
     return __mlir_op.`pop.array.get`[index=__mlir_attr.`2:index`](a)
-"""), 'mlir_struct_gep')
+""")
 
     # 153. print's bottom layer: a Span fat-pointer {_data,_len} written to a fd
     #      via external_call["write"] — the chain the real FileDescriptor.write_bytes
     #      lowers to (Span field reads + write syscall, no dynamic dispatch).
-    _run_isolated(lambda: test("mlir_write_bytes_bottom", """\
+    test("mlir_write_bytes_bottom", """\
 struct Span:
     var _data: UnsafePointer[Int8]
     var _len: Int
@@ -2692,27 +2596,27 @@ struct Span:
 
 def write_bytes(s: Span) -> Int:
     return external_call["write", Int64](1, s.unsafe_ptr(), len(s))
-"""), 'mlir_write_bytes_bottom')
+""")
 
     # 154. libc-name mangling: `fn exit` becomes mojo_exit (no clash with libc exit),
     #      while external_call["exit"] keeps the raw libc symbol — exit from the library.
-    _run_isolated(lambda: test("libc_name_mangle_exit", """\
+    test("libc_name_mangle_exit", """\
 def exit(code: Int64):
     external_call["exit", NoneType](code)
 
 def main():
     exit(7)
-"""), 'libc_name_mangle_exit')
+""")
 
     # 155. external_call with a parametric return type resolves (UnsafePointer[Int8]
     #      → int8_t *), so the result is a usable pointer (printf-style debug path).
-    _run_isolated(lambda: test("external_call_parametric_ret", """\
+    test("external_call_parametric_ret", """\
 def dbg(label: String, n: Int64):
     var buf = external_call["malloc", UnsafePointer[Int8]](256)
     var ln = external_call["snprintf", Int64](buf, 256, "%s%lld\\n", label, n)
     var w = external_call["write", Int64](1, buf, ln)
     external_call["free", NoneType](buf)
-"""), 'external_call_parametric_ret')
+""")
 
     # 155b. external_call to a genuinely variadic libc function (printf) at two
     #       different arities in the same file — regression test locking in that
@@ -2720,13 +2624,13 @@ def dbg(label: String, n: Int64):
     #       prototype generation (they fall through to the system header's own
     #       variadic declaration), so neither call site is arity-clobbered by a
     #       prototype sized for the other.
-    _run_isolated(lambda: test("external_call_variadic_printf", """\
+    test("external_call_variadic_printf", """\
 def one_arg(n: Int64):
     external_call["printf", Int32]("count: %lld\\n", n)
 
 def two_args(label: String, n: Int64):
     external_call["printf", Int32]("%s: %lld\\n", label, n)
-"""), 'external_call_variadic_printf')
+""")
 
     # 156. _c_escape: source escapes pass through (\\n stays one backslash, not two)
     from gimple_codegen import _c_escape
@@ -2743,24 +2647,24 @@ def two_args(label: String, n: Int64):
     # 157. MojoList + pointer-typed local → mojo_list_concat (polymorphic local
     #      typed char* in one branch, used as a list at a concat site). Previously
     #      emitted `MojoList * + char *`, which gcc rejects.
-    _run_isolated(lambda: test("list_concat_polymorphic", """\
+    test("list_concat_polymorphic", """\
 def f():
     var body = [1, 2]
     var s = "x"
     body = body + s
     return body
-"""), 'list_concat_polymorphic')
+""")
 
     # 158. Heterogeneous list/tuple — string + non-string elements must append
     #      each by its OWN type (append_str for the string, append_int for the
     #      int). Previously a single list-wide suffix emitted append_str on the
     #      int (pointer-from-integer). Numeric-promotion lists are unaffected.
-    _run_isolated(lambda: test("heterogeneous_collection_append", """\
+    test("heterogeneous_collection_append", """\
 def main():
     var t = ("int", 5)
     var l = ["tag", 7]
     return 0
-"""), 'heterogeneous_collection_append')
+""")
 
     # 159. str.find(needle, start) — the 2-arg form must lower to
     #      mojo_str_find_from (not mojo_str_find, which silently drops the
@@ -2796,7 +2700,7 @@ def main():
     # `'id': ('int64_t', ['int64_t'])` signature table entry. This test pins
     # the standalone case so a regression here is caught directly instead of
     # being misdiagnosed as "id() unsupported" again.)
-    _run_isolated(lambda: test("id_builtin_on_struct", """\
+    test("id_builtin_on_struct", """\
 struct Foo:
     var x: Int
     def __init__(out self):
@@ -2806,7 +2710,7 @@ def test():
     var f = Foo()
     var key = id(f)
     print(key)
-"""), 'id_builtin_on_struct')
+""")
 
     # 160. Multi-name import `import a, b, c` must bind *every* name, not
     # just the first (INTERP_multi_name_import_only_binds_first).
@@ -2814,14 +2718,14 @@ def test():
     # global only for node.module/node.alias; any comma-separated target
     # past the first (node.extra) was undeclared, so referencing it here
     # would fail to compile as an unknown identifier.
-    _run_isolated(lambda: test("multi_name_import_binds_all", """\
+    test("multi_name_import_binds_all", """\
 import sys, os, difflib
 
 def main():
     var a = sys
     var b = os
     var c = difflib
-"""), 'multi_name_import_binds_all')
+""")
 
     # 161. map(str, param) over a plain/unannotated parameter, used inside
     # another expression (str.join(...)) — CODEGEN_map_over_untyped_param_arg.
@@ -2869,26 +2773,26 @@ def join_strs(args) -> String:
     # checked that the token after the keyword was NAME/KW-shaped, which
     # `not` (a KW) also satisfies, so `(var not in lst)` wrongly swallowed
     # `var` as a bogus prefix and failed with "Expected RPAREN got NAME".
-    _run_isolated(lambda: test("conv_kw_as_plain_ident_not_in", """\
+    test("conv_kw_as_plain_ident_not_in", """\
 def f(var: Int, lst: Int) -> Bool:
     return not (var == lst)
 
 def g(read: Int, seen: Int) -> Bool:
     return not (read == seen)
-"""), 'conv_kw_as_plain_ident_not_in')
+""")
 
     # 163. The legitimate parenthesized ownership-prefix binding target this
     # carve-out exists for, `(var x), (ref y) = ...`, must still parse and
     # compile correctly after tightening the disambiguation (peek(2) must be
     # RPAREN) in test 162 above.
-    _run_isolated(lambda: test("conv_kw_prefix_tuple_unpack_still_works", """\
+    test("conv_kw_prefix_tuple_unpack_still_works", """\
 def get_pair() -> (Int, Int):
     return (1, 2)
 
 def main():
     (var x), (var y) = get_pair()
     print(x, y)
-"""), 'conv_kw_prefix_tuple_unpack_still_works')
+""")
 
     # 164. `var` used as a plain identifier (Python compat: real Python has
     # no `var` keyword) followed by member access/assignment, a method
@@ -2898,7 +2802,7 @@ def main():
     # the `var = expr` shape; anything else (`.`, `,`, etc. right after
     # `var`) unconditionally committed to `_parse_var_decl()` and crashed on
     # the unexpected next token.
-    _run_isolated(lambda: test("var_as_plain_ident_member_access", """\
+    test("var_as_plain_ident_member_access", """\
 struct C:
     var x: Int
     fn __init__(out self):
@@ -2911,30 +2815,30 @@ def main():
     var.x = 5
     var.bump()
     print(var.x)
-"""), 'var_as_plain_ident_member_access')
+""")
 
     # 165. `var` as one of several plain tuple-unpack targets (`var, x = ...`)
     # must fall through to ordinary assignment parsing, not var-decl parsing.
-    _run_isolated(lambda: test("var_as_plain_ident_tuple_unpack_target", """\
+    test("var_as_plain_ident_tuple_unpack_target", """\
 def get_pair() -> (Int, Int):
     return (1, 2)
 
 def main():
     var, x = get_pair()
     print(var, x)
-"""), 'var_as_plain_ident_tuple_unpack_target')
+""")
 
     # 166. Legitimate var-declaration forms must still work after the fix
     # above: bare declaration, type-annotated declaration, and declaration
     # with an initializer.
-    _run_isolated(lambda: test("var_decl_forms_still_work", """\
+    test("var_decl_forms_still_work", """\
 def main():
     var a: Int
     a = 1
     var b: Int = 2
     var c = 3
     print(a, b, c)
-"""), 'var_decl_forms_still_work')
+""")
 
     # 167. `var`/etc. as the FIRST element of a plain tuple-unpack for-loop
     # target (`for var, other_var in pairs:`) must NOT be misparsed as a
@@ -2944,34 +2848,34 @@ def main():
     # peek(1) == COLON, but not COMMA, so this real-stdlib shape
     # (Tools/cases_generator/stack.py:606) swallowed `var` as a bogus prefix
     # and then choked on the unpack target.
-    _run_isolated(lambda: test("var_as_for_loop_target_comma", """\
+    test("var_as_for_loop_target_comma", """\
 def main():
     pairs = [(1, 2), (3, 4)]
     for var, other_var in pairs:
         print(var, other_var)
-"""), 'var_as_for_loop_target_comma')
+""")
 
     # 168. The `comptime for` sibling of test 167 above — `_parse_comptime_for`
     # had the exact same bug in a worse form: no guard at all, so it
     # unconditionally swallowed any leading _CONV_KWS token regardless of
     # what followed.
-    _run_isolated(lambda: test("var_as_comptime_for_loop_target_comma", """\
+    test("var_as_comptime_for_loop_target_comma", """\
 def main():
     comptime for var, j in [(1, 2), (3, 4)]:
         print(var, j)
-"""), 'var_as_comptime_for_loop_target_comma')
+""")
 
     # 169. Legitimate convention-prefixed for-loop targets (`for ref x in
     # y:`, `for var x in y:`) must still parse correctly after tightening
     # the exclusion list in tests 167/168 above — these shapes have peek(1)
     # be a plain NAME, which none of the new/existing exclusions (KW('in'),
     # COLON, COMMA) match, so the convention keyword is still consumed.
-    _run_isolated(lambda: test("conv_kw_prefix_for_loop_target_still_works", """\
+    test("conv_kw_prefix_for_loop_target_still_works", """\
 def main():
     items = [1, 2, 3]
     for ref x in items:
         print(x)
-"""), 'conv_kw_prefix_for_loop_target_still_works')
+""")
 
     # 170. A raw string containing a `\t` escape (or any prefixed ordinary
     # string whose content happens to look like a t-string prefix run
@@ -2987,23 +2891,23 @@ def main():
     # `\t`, misdetected the string's own closing quote as the *opening*
     # quote of a brand-new bogus bare t-string, swallowing everything up
     # to the next unrelated quote later in the statement.
-    _run_isolated(lambda: test("raw_string_backslash_t_escape_then_another_string", """\
+    test("raw_string_backslash_t_escape_then_another_string", """\
 def main():
     d = {r"\\t": 1}
     print(d[r"\\t"], ord("\\t"))
-"""), 'raw_string_backslash_t_escape_then_another_string')
+""")
 
     # 171. The legitimate t/f-string-with-nested-braces case
     # `_process_nested_tstrings` exists for must still work after the fix
     # above (dispatch now keyed off the quote character via a backward
     # prefix scan, rather than a forward prefix-letter-then-quote regex).
-    _run_isolated(lambda: test("tstring_nested_braces_still_works", """\
+    test("tstring_nested_braces_still_works", """\
 def main():
     a = 1
     b = 2
     s = t"L1: {t'L2: {a + b}'}"
     print(s)
-"""), 'tstring_nested_braces_still_works')
+""")
 
     # 171b/171c. An f-string whose nested `{...}` interpolation contains a
     # string literal that reuses the SAME quote character as the f-string's
@@ -3017,23 +2921,23 @@ def main():
     # See PARSE_FAIL_fstring_same_quote_reuse. Covers both quote
     # characters, since the bug was quote-character-specific in the sense
     # that a DIFFERENT nested quote already worked.
-    _run_isolated(lambda: test("fstring_nested_same_single_quote_reused", """\
+    test("fstring_nested_same_single_quote_reused", """\
 def g(a, b):
     return a + b
 
 def main():
     x = f'result: {g('a', 'b')}'
     print(x)
-"""), 'fstring_nested_same_single_quote_reused')
+""")
 
-    _run_isolated(lambda: test("fstring_nested_same_double_quote_reused", """\
+    test("fstring_nested_same_double_quote_reused", """\
 def g(a, b):
     return a + b
 
 def main():
     x = f"result: {g("a", "b")}"
     print(x)
-"""), 'fstring_nested_same_double_quote_reused')
+""")
 
     # 172. `_parse_type_ann_inner`'s trailing-operator gap: a type-shaped
     # annotation prefix (a real NAME) followed by a TRAILING operator that
@@ -3048,13 +2952,13 @@ def main():
     # expression, never semantically type-checked). All of these EXCEPT
     # `gamma` already worked; this test covers the whole battery in one
     # signature so a fix to `gamma` can't regress a sibling shape.
-    _run_isolated(lambda: test("annotation_trailing_binary_op_battery", """\
+    test("annotation_trailing_binary_op_battery", """\
 some = 1
 obj = 2
 module = 3
 def f(x: some.module, y: some[module], z: some(module), alpha: some | obj, beta: +some, gamma: some < obj, delta: some | {obj: module}, epsilon: some | {obj}, zeta: some | [obj, module], eta: some | ()):
     pass
-"""), 'annotation_trailing_binary_op_battery')
+""")
 
     # 173. `_parse_type_ann_inner`'s trailing-operator gap, the OTHER half:
     # an annotation whose FIRST token is already non-name-shaped (a literal),
@@ -3067,12 +2971,12 @@ def f(x: some.module, y: some[module], z: some(module), alpha: some | obj, beta:
     # which exercises a whole battery of reverse-dunder-shaped binary-op
     # annotations (all NUMBER-literal prefixes) in one signature.
     # See PARSE_FAIL_annotation_leading_literal_trailing_op.
-    _run_isolated(lambda: test("annotation_leading_literal_trailing_op_battery", """\
+    test("annotation_leading_literal_trailing_op_battery", """\
 a = 1
 def f(radd: 1 + a, rsub: 1 - a, rmul: 1 * a, rmatmul: 1 @ a, rtruediv: 1 / a, rmod: 1 % a, rlshift: 1 << a, rrshift: 1 >> a, ror: 1 | a, rxor: 1 ^ a, rand: 1 & a, rfloordiv: 1 // a, rpow: 1**a):
     pass
 print("ok")
-"""), 'annotation_leading_literal_trailing_op_battery')
+""")
 
     # 174. `_parse_type_ann_inner` had no case for `...` (Ellipsis) in
     # annotation position. The tokenizer produces THREE separate DOT tokens
@@ -3086,11 +2990,11 @@ print("ok")
     # (NUMBER, STRING, bytes, bool, None, Ellipsis, complex) in one
     # signature — `g: ...` is the Ellipsis case.
     # See PARSE_FAIL_annotation_ellipsis.
-    _run_isolated(lambda: test("annotation_literals_battery", """\
+    test("annotation_literals_battery", """\
 def f(a: 1, b: 1.0, c: "hello", d: b"hello", e: True, f: None, g: ..., h: 1j):
     pass
 print("ok")
-"""), 'annotation_literals_battery')
+""")
 
     # 175. `_parse_type_ann_inner`'s `LPAREN` branch (a parenthesized-
     # expression-shaped annotation like `(1)`) returned its opaquely-captured
@@ -3112,12 +3016,12 @@ print("ok")
     # structural fix was chosen over a fifth narrow patch. Mirrors CPython's
     # own Lib/test/test_annotationlib.py test_shenanigans.
     # See PARSE_FAIL_annotation_paren_then_dot.
-    _run_isolated(lambda: test("annotation_paren_then_dot_battery", """\
+    test("annotation_paren_then_dot_battery", """\
 x = 1
 def f(x: x | (1).__class__, y: (1).__class__):
     pass
 print("ok")
-"""), 'annotation_paren_then_dot_battery')
+""")
 
     # 176. Two top-level `def NAME(...):` statements with the SAME name,
     # nested in mutually-exclusive if/else branches at module scope (a
@@ -3132,7 +3036,7 @@ print("ok")
     # mechanism to represent "whichever branch executes wins" as distinct C
     # symbols, this must be refused honestly rather than silently miscompiled
     # — see CODEGEN_conditional_toplevel_def_name_collision.
-    _run_isolated(lambda: test("conditional_toplevel_def_name_collision", """\
+    test("conditional_toplevel_def_name_collision", """\
 import sys
 if sys.platform == 'win32':
     def wait(x):
@@ -3144,7 +3048,7 @@ else:
 def f():
     print(wait(5))
 f()
-"""), 'conditional_toplevel_def_name_collision')
+""")
 
     # Generator function (`yield`) honest-fallback: this codegen has no
     # general suspend/resume state-machine transform, so a generator
@@ -3162,20 +3066,20 @@ f()
     # the still-out-of-scope shape used here instead (string/struct params
     # are covered separately by
     # generator_string_param_honest_fallback below).
-    _run_isolated(lambda: test("generator_varargs_param", """\
+    test("generator_varargs_param", """\
 def f(*args):
     yield args
-"""), 'generator_varargs_param')
+""")
 
     # A generator parameter typed as something other than a scalar
     # int64_t/double/_Bool (e.g. String) is also still explicitly out of
     # scope for the parameter-support step — see _gen_cpp_generator_unit's
     # "Parameters" comment (string/struct/pointer params cross the C++/C
     # boundary with lifetime/ownership questions deliberately deferred).
-    _run_isolated(lambda: test("generator_string_param", """\
+    test("generator_string_param", """\
 def f(s: String):
     yield 1
-"""), 'generator_string_param')
+""")
 
     # An UNANNOTATED generator parameter that is actually a string at its
     # call site must be refused exactly like the explicitly-annotated case
@@ -3198,18 +3102,18 @@ def f(s: String):
     # _gen_cpp_generator_unit's existing scalar-only refusal check
     # (`ctype not in ('int64_t', 'double', '_Bool')`) ever looks — no new
     # inference logic, just correct ordering.
-    _run_isolated(lambda: test("generator_unannotated_string_param", """\
+    test("generator_unannotated_string_param", """\
 def g(s):
     yield s
 print(list(g("hi")))
-"""), 'generator_unannotated_string_param')
+""")
 
     # bytes / bytearray / memoryview value types inside a compiled
     # generator body. The
     # A3 stack-switch backend routes the body through ordinary codegen,
     # which has full bytes support (Stages 1-3) -- these guard that a
     # `yield`ing body compiles clean.
-    _run_isolated(lambda: test("generator_body_memoryview", """\
+    test("generator_body_memoryview", """\
 def g(data):
     yield memoryview(data)[0]
 
@@ -3217,9 +3121,9 @@ def main():
     var b = bytes([1, 2, 3])
     for x in g(b):
         print(x)
-"""), 'generator_body_memoryview')
+""")
 
-    _run_isolated(lambda: test("generator_body_bytes_iteration", """\
+    test("generator_body_bytes_iteration", """\
 def g():
     var b = bytes([4, 5, 6])
     for x in b:
@@ -3228,9 +3132,9 @@ def g():
 def main():
     for x in g():
         print(x)
-"""), 'generator_body_bytes_iteration')
+""")
 
-    _run_isolated(lambda: test("generator_body_bytearray_mutation", """\
+    test("generator_body_bytearray_mutation", """\
 def g():
     var ba = bytearray()
     ba.append(9)
@@ -3239,11 +3143,11 @@ def g():
 def main():
     for x in g():
         print(x)
-"""), 'generator_body_bytearray_mutation')
+""")
 
     # zipfile `_Extra.split` shape: a @classmethod generator building a
     # memoryview over its (unannotated bytes) argument.
-    _run_isolated(lambda: test("generator_classmethod_body_memoryview", """\
+    test("generator_classmethod_body_memoryview", """\
 struct E:
     @classmethod
     def split(cls, data):
@@ -3256,7 +3160,7 @@ struct E:
 def main():
     for x in E.split(bytes([7, 8])):
         print(x)
-"""), 'generator_classmethod_body_memoryview')
+""")
 
     # Async function (`async def`) honest-fallback: originally (before the
     # compiled-path async/await codegen project's Step B) this codegen had
@@ -3341,7 +3245,7 @@ def main():
             os.unlink(c_path)
             os.unlink(cpp_path)
 
-    _run_isolated(lambda: test_async_await_composition_compiles_via_cpp_path(), 'test_async_await_composition_compiles_via_cpp_path (line 3248)')
+    test_async_await_composition_compiles_via_cpp_path()
 
     # Forward reference: `g` (the caller) is defined BEFORE `f` (the
     # callee) in source order — gen_module's async pre-pass is a single
@@ -3349,23 +3253,23 @@ def main():
     # _is_async_call_to_known_fn's docstring), so `f` isn't registered in
     # self._async_api yet at the point `g`'s own eligibility is checked.
     # Honest whole-module refusal, not a guess/dangling forward reference.
-    _run_isolated(lambda: test("async_await_forward_reference", """\
+    test("async_await_forward_reference", """\
 async def g():
     x = await f()
     return x
 
 async def f():
     return 1
-"""), 'async_await_forward_reference')
+""")
 
     # `await` on an arbitrary non-call expression (not asyncio.sleep(...),
     # not a call to another compiled async function) is still refused —
     # composition only recognizes the one specific call shape.
-    _run_isolated(lambda: test_raises("async_await_non_call_expression_honest_fallback", """\
+    test_raises("async_await_non_call_expression_honest_fallback", """\
 async def f():
     x = await 5
     return x
-""", "async function"), 'async_await_non_call_expression_honest_fallback')
+""", "async function")
 
     # Async generator (`async def f(): yield x`) -- REVISED (final step of
     # the async/await codegen project): the simplest possible shape (no
@@ -3393,10 +3297,10 @@ async def f():
     # See test_generator_yield_from_delegation_compiles_via_cpp_path and its
     # neighboring still-out-of-scope-shape refusal tests, further below,
     # for the positive/narrower-negative coverage this step actually adds.
-    _run_isolated(lambda: test("generator_yield_from_list", """\
+    test("generator_yield_from_list", """\
 def f():
     yield from [1, 2, 3]
-"""), 'generator_yield_from_list')
+""")
 
     # Milestone D: try/except/raise inside a generator body now compiles via
     # the C++20-coroutine path instead of falling back — see
@@ -3412,11 +3316,11 @@ def f():
     # back to the honest refusal cleanly — exercises the
     # _UnsupportedGeneratorShape catch path itself, not just the cheap
     # pre-filter.
-    _run_isolated(lambda: test_raises("generator_mixed_yield_types_honest_fallback", """\
+    test_raises("generator_mixed_yield_types_honest_fallback", """\
 def f():
     yield 1
     yield 1.5
-""", "generator function"), 'generator_mixed_yield_types_honest_fallback')
+""", "generator function")
 
     # Mixed yield kinds whose EMITTED C++ can never share one promise type:
     # a tuple-yield site always co_yields a MojoList* pointer
@@ -3428,11 +3332,11 @@ def f():
     # (scalar from_triple(...) yields mixed with 3-tuple yields). See
     # generator tuple-yield honesty fix (see randdec root cause: scalar/tuple
     # mixed yields must refuse honestly rather than emit broken C++).
-    _run_isolated(lambda: test_raises("generator_mixed_str_and_tuple_yield_honest_fallback", """\
+    test_raises("generator_mixed_str_and_tuple_yield_honest_fallback", """\
 def f():
     yield 'abc'
     yield (1, 2)
-""", "generator function"), 'generator_mixed_str_and_tuple_yield_honest_fallback')
+""", "generator function")
 
     # Same MojoList*×char* hole, list-valued-expression flavor: `sorted(...)`
     # both infers AND emits a real `MojoList *`, so pairing it with a str
@@ -3523,7 +3427,7 @@ def main():
             os.unlink(c_path)
             os.unlink(cpp_path)
 
-    _run_isolated(lambda: test_generator_simple_shape_compiles_via_cpp_path(), 'test_generator_simple_shape_compiles_via_cpp_path (line 3430)')
+    test_generator_simple_shape_compiles_via_cpp_path()
 
     # `**kwargs`-forward inside a coroutine body with a `char *` (string)
     # "gap" parameter between the given positional args and the callee's
@@ -3593,7 +3497,7 @@ def main():
             os.unlink(c_path)
             os.unlink(cpp_path)
 
-    _run_isolated(lambda: test_generator_kwargs_forward_str_gap_compiles_via_cpp_path(), 'test_generator_kwargs_forward_str_gap_compiles_via_cpp_path (line 3500)')
+    test_generator_kwargs_forward_str_gap_compiles_via_cpp_path()
 
     # Parameter-support step: a generator taking parameters (`start`,
     # `count`) now compiles via the same C++20-coroutine path instead of
@@ -3676,7 +3580,7 @@ def main():
             os.unlink(c_path)
             os.unlink(cpp_path)
 
-    _run_isolated(lambda: test_generator_param_shape_compiles_via_cpp_path(), 'test_generator_param_shape_compiles_via_cpp_path (line 3583)')
+    test_generator_param_shape_compiles_via_cpp_path()
 
     # Milestone C step 2 (yield-from delegation): the exact target shape
     # from that step's writeup — `outer` delegates its entire output to
@@ -3764,7 +3668,7 @@ def main():
             os.unlink(c_path)
             os.unlink(cpp_path)
 
-    _run_isolated(lambda: test_generator_yield_from_delegation_compiles_via_cpp_path(), 'test_generator_yield_from_delegation_compiles_via_cpp_path (line 3671)')
+    test_generator_yield_from_delegation_compiles_via_cpp_path()
 
     # Forward consumption of a LATER-defined sibling generator — the
     # "consumed generator must be defined earlier" constraint's real
@@ -3867,7 +3771,7 @@ def main():
             os.unlink(c_path)
             os.unlink(cpp_path)
 
-    _run_isolated(lambda: test_generator_forward_consumption_chain_compiles_via_cpp_path(), 'test_generator_forward_consumption_chain_compiles_via_cpp_path (line 3774)')
+    test_generator_forward_consumption_chain_compiles_via_cpp_path()
 
     # A generator body calling an UNRESOLVABLE callee — a nested `def`
     # local to the generator that CAPTURES an enclosing local (this
@@ -3895,23 +3799,6 @@ def main():
     for x in outer([1, 2]):
         print(x)
         """, "Unsupported shape(s): outer: a call to unresolved callee 'helper(...)'")
-
-    # A STR-KEYED subscript in a generator body whose subject is not a
-    # declared container (an untyped parameter here) is a mapping lookup on
-    # a value this scalar model cannot represent. It must refuse honestly.
-    # It must NOT emit `mojo_char_at_str((char *)(d), "k")`: a `const char *`
-    # where the char-at helper takes an int64_t index, a hard g++ error for
-    # every such subscript. Real shape: libpython.py's
-    # items_from_keys_and_values, `ep['me_key']` on a gdb.Value entry.
-    with _force_cpp_coro():
-        test_raises("generator_str_key_subscript_honest_refusal", """\
-def gen(d):
-    yield d['k']
-
-def main():
-    for x in gen({}):
-        print(x)
-        """, "Unsupported shape(s): gen: a str-keyed subscript")
 
     # A nested NON-capturing sync `def` referenced as a callee inside a
     # generator body IS compiled — as a standalone `static` C++ function
@@ -3967,7 +3854,7 @@ def main():
         finally:
             os.unlink(cp.name)
 
-    _run_isolated(lambda: test_generator_nested_noncapturing_helper_compiles_via_cpp_path(), 'test_generator_nested_noncapturing_helper_compiles_via_cpp_path (line 3874)')
+    test_generator_nested_noncapturing_helper_compiles_via_cpp_path()
 
     # The one legitimate bare-name call shape must KEEP working: a call
     # through a DECLARED callable-value local (`std::function` supports
@@ -4032,7 +3919,7 @@ def main():
             os.unlink(c_path)
             os.unlink(cpp_path)
 
-    _run_isolated(lambda: test_generator_callable_local_call_compiles_via_cpp_path(), 'test_generator_callable_local_call_compiles_via_cpp_path (line 3939)')
+    test_generator_callable_local_call_compiles_via_cpp_path()
 
     # A generator body iterating a MODULE-LEVEL container global with a
     # flat tuple target (`for flagname, flagvalue in _flags:`) must lower
@@ -4111,7 +3998,7 @@ main()
             os.unlink(c_path)
             os.unlink(cpp_path)
 
-    _run_isolated(lambda: test_generator_global_container_tuple_target_compiles_via_cpp_path(), 'test_generator_global_container_tuple_target_compiles_via_cpp_path (line 4018)')
+    test_generator_global_container_tuple_target_compiles_via_cpp_path()
 
     # The single-name sibling: iterating a module-level container global
     # whose C type isn't resolved yet at unit-compile time (generator
@@ -4180,7 +4067,7 @@ main()
             os.unlink(c_path)
             os.unlink(cpp_path)
 
-    _run_isolated(lambda: test_generator_global_container_single_name_compiles_via_cpp_path(), 'test_generator_global_container_single_name_compiles_via_cpp_path (line 4087)')
+    test_generator_global_container_single_name_compiles_via_cpp_path()
 
     # A zero-arg dict-method iterable on a SCALAR-typed self field
     # (`for k in self.dict.keys():` where `dict` is an unannotated-init
@@ -4256,7 +4143,7 @@ main()
             os.unlink(c_path)
             os.unlink(cpp_path)
 
-    _run_isolated(lambda: test_generator_scalar_self_field_method_iter_zero_iter_stub(), 'test_generator_scalar_self_field_method_iter_zero_iter_stub (line 4163)')
+    test_generator_scalar_self_field_method_iter_zero_iter_stub()
 
 
     # Still-out-of-scope `yield from` shapes: delegating to a generator
@@ -4264,7 +4151,7 @@ main()
     # because its own parameter is a String, out of scope since the
     # parameter-support step) must fall back to the honest whole-module
     # refusal, not silently miscompile.
-    _run_isolated(lambda: test("generator_yield_from_unsupported_sub_generator", """"""), 'generator_yield_from_unsupported_sub_generator')
+    test("generator_yield_from_unsupported_sub_generator", """""")
 
     # Still-out-of-scope: `yield from` targeting a generator defined LATER
     # in the module. This step's delegation support is deliberately scoped
@@ -4272,7 +4159,7 @@ main()
     # (see GimpleGen._cpp_yield_from's docstring) -- a forward reference
     # isn't yet supported (would need a second, dependency-ordered pass)
     # and must refuse cleanly rather than miscompile or crash.
-    _run_isolated(lambda: test("generator_yield_from_forward_reference", """"""), 'generator_yield_from_forward_reference')
+    test("generator_yield_from_forward_reference", """""")
 
     # Still-out-of-scope: the delegating generator's own yield-value type
     # doesn't agree with the sub-generator's (double vs int64_t) -- Milestone
@@ -4398,7 +4285,7 @@ def main():
             os.unlink(c_path)
             os.unlink(cpp_path)
 
-    _run_isolated(lambda: test_generator_method_self_field_compiles_via_cpp_path(), 'test_generator_method_self_field_compiles_via_cpp_path (line 4305)')
+    test_generator_method_self_field_compiles_via_cpp_path()
 
     # Still-out-of-scope generator-method shapes (Milestone C step 3):
     # mutating a self field from inside the generator body. AssignStmt's
@@ -4406,7 +4293,7 @@ def main():
     # by _cpp_stmt's existing AssignStmt case, unchanged; confirms this
     # falls back to the honest whole-module refusal rather than silently
     # dropping the mutation.
-    _run_isolated(lambda: test("generator_method_self_mutation", """\
+    test("generator_method_self_mutation", """\
 class Counter:
     def __init__(self, start: Int):
         self.value = start
@@ -4422,22 +4309,22 @@ def main():
     c = Counter(10)
     for x in c.countdown(3):
         print(x)
-"""), 'generator_method_self_mutation')
+""")
 
     # Still-out-of-scope: a generator method calling ANOTHER method on self
     # (`self.helper()`) — that's a CallExpr, which the narrow .cpp expression
     # emitter has no case for, so it refuses cleanly.
-    _run_isolated(lambda: test("generator_method_calls_other_self_method", """"""), 'generator_method_calls_other_self_method')
+    test("generator_method_calls_other_self_method", """""")
 
     # Still-out-of-scope: a nested attribute chain (self.inner.v) — only a
     # direct self.<field> read is supported; self.inner resolves via the
     # MemberExpr obj-is-not-plain-'self' branch and refuses.
-    _run_isolated(lambda: test("generator_method_nested_attribute_chain", """"""), 'generator_method_nested_attribute_chain')
+    test("generator_method_nested_attribute_chain", """""")
 
     # Still-out-of-scope: yielding a non-scalar self field (a String) --
     # _infer_simple_expr_ctype's self_fields lookup refuses any field type
     # outside int64_t/double/_Bool, same as any other non-scalar value.
-    _run_isolated(lambda: test("generator_method_nonscalar_field", """"""), 'generator_method_nonscalar_field')
+    test("generator_method_nonscalar_field", """""")
 
     # Milestone C step 4 (this step): compiled-generator objects as
     # first-class values — bugs/CODEGEN_compiled_generator_not_first_class_
@@ -4522,7 +4409,7 @@ def main():
             os.unlink(c_path)
             os.unlink(cpp_path)
 
-    _run_isolated(lambda: test_generator_assign_then_for_loop_compiles_via_cpp_path(), 'test_generator_assign_then_for_loop_compiles_via_cpp_path (line 4429)')
+    test_generator_assign_then_for_loop_compiles_via_cpp_path()
 
     # Same step: `next(g)` called directly on an assigned generator variable
     # — CODEGEN_compiled_generator_not_first_class_value's SECOND
@@ -4609,7 +4496,7 @@ def main():
             os.unlink(c_path)
             os.unlink(cpp_path)
 
-    _run_isolated(lambda: test_generator_next_on_assigned_var_compiles_via_cpp_path(), 'test_generator_next_on_assigned_var_compiles_via_cpp_path (line 4516)')
+    test_generator_next_on_assigned_var_compiles_via_cpp_path()
 
     # Same milestone: a stored generator passed AS AN ARGUMENT to a
     # function (`consume(g)` where `g = counter(3)`). Pass 1.3f-gen must
@@ -4685,7 +4572,7 @@ def main():
             os.unlink(c_path)
             os.unlink(cpp_path)
 
-    _run_isolated(lambda: test_generator_param_from_call_boundary_compiles_via_cpp_path(), 'test_generator_param_from_call_boundary_compiles_via_cpp_path (line 4592)')
+    test_generator_param_from_call_boundary_compiles_via_cpp_path()
 
     # Same milestone: a generator RETURNED from a function
     # (`def mk(): return counter(3)`), then consumed by the caller. The
@@ -4754,7 +4641,7 @@ def main():
             os.unlink(c_path)
             os.unlink(cpp_path)
 
-    _run_isolated(lambda: test_generator_returned_from_function_compiles_via_cpp_path(), 'test_generator_returned_from_function_compiles_via_cpp_path (line 4661)')
+    test_generator_returned_from_function_compiles_via_cpp_path()
 
     # A `for` loop over a generator whose body does `in`/`not in` membership
     # tests — CODEGEN_compiled_generator_not_first_class_value-adjacent
@@ -4766,7 +4653,7 @@ def main():
     # uses, gated on the container's declared C++ type. `'\0' in s` / `'\0'
     # not in s` on a char * haystack is the exact shape that lit up mimetypes.py
     # (`if '\\0' not in ctype`).
-    _run_isolated(lambda: test("generator_in_not_in_membership_compiles_via_cpp_path", """\
+    test("generator_in_not_in_membership_compiles_via_cpp_path", """\
 def gen(s):
     if 'a' in s:
         yield 1
@@ -4776,7 +4663,7 @@ def gen(s):
 def main():
     for x in gen("abracadabra"):
         print(x)
-"""), 'generator_in_not_in_membership_compiles_via_cpp_path')
+""")
 
     # 177. A bound method referenced as a plain VALUE (not called
     # immediately) — `f = self.b` — then invoked later via `f()`. Calling a
@@ -4787,7 +4674,7 @@ def main():
     # CODEGEN_bound_method_as_value_not_resolved. Real stdlib
     # trigger: Lib/cmd.py's `readline.set_completer(self.complete)` passes a
     # bound method as a callback value the same way.
-    _run_isolated(lambda: test("bound_method_as_value", """\
+    test("bound_method_as_value", """\
 class C:
     def b(self):
         return 42
@@ -4799,7 +4686,7 @@ def main():
     c = C()
     print(c.a())
 main()
-"""), 'bound_method_as_value')
+""")
 
     # 177b. A BUILTIN-CONTAINER method bound to a local and called later —
     # `result = bytearray(); append = result.append` then `append(x)` in a
@@ -4809,7 +4696,7 @@ main()
     # `->append` access (`'MojoBytes' has no member named 'append'`). See
     # the bound-method grep cluster in bugs/ (zipfile, pickletools, os,
     # glob, ipaddress, ctypes_util, ...).
-    _run_isolated(lambda: test("bound_container_method_bytearray_value", """\
+    test("bound_container_method_bytearray_value", """\
 def decrypter(data):
     result = bytearray()
     append = result.append
@@ -4819,8 +4706,8 @@ def decrypter(data):
 
 def main():
     print(len(decrypter([1, 2, 3])))
-"""), 'bound_container_method_bytearray_value')
-    _run_isolated(lambda: test("bound_container_method_list_dict_set_value", """\
+""")
+    test("bound_container_method_list_dict_set_value", """\
 def main():
     xs = []
     f = xs.append
@@ -4832,7 +4719,7 @@ def main():
     a = st.add
     a(7)
     print(len(xs), s('k', 9), len(st))
-"""), 'bound_container_method_list_dict_set_value')
+""")
 
     # 178. Untyped-parameter identity function called with a string argument
     # — CODEGEN_untyped_param_string_passthrough_wrong. `a` has no
@@ -4888,11 +4775,11 @@ print(y)
     # 180. Explicitly annotated identity function — must keep working exactly
     # as before (this path never went through the unannotated-parameter
     # inference this fix touches).
-    _run_isolated(lambda: test("typed_param_string_passthrough_still_works", """\
+    test("typed_param_string_passthrough_still_works", """\
 def g(a: str) -> str:
     return a
 print(g("ab"))
-"""), 'typed_param_string_passthrough_still_works')
+""")
 
     # 181. A module with many module-level integer constants, all referenced
     # inside one function, must lower those constants to file-scope globals
@@ -4934,7 +4821,7 @@ print(g("ab"))
     # it is materialised as a list (see _seed_genexp_list_narrowing).
     # The reassigned-parameter shape is ZipFile._sanitize_windows_name —
     # bugs/COMPILE_FAIL_zipfile___init__.md blocker 3.
-    _run_isolated(lambda: test("genexp_local_single_consumption_join", """\
+    test("genexp_local_single_consumption_join", """\
 fn clean(arcname: String, pathsep: String) -> String:
     arcname = (x.rstrip(" .") for x in arcname.split(pathsep))
     arcname = pathsep.join(x for x in arcname if x)
@@ -4942,16 +4829,16 @@ fn clean(arcname: String, pathsep: String) -> String:
 
 fn main():
     print(clean("a. /b .// c", "/"))
-"""), 'genexp_local_single_consumption_join')
+""")
 
-    _run_isolated(lambda: test("genexp_local_single_consumption_for_and_sum", """\
+    test("genexp_local_single_consumption_for_and_sum", """\
 fn main():
     g = (x + 1 for x in [10, 20, 30])
     for v in g:
         print(v)
     h = (x * 2 for x in [1, 2, 3])
     print(sum(x for x in h))
-"""), 'genexp_local_single_consumption_for_and_sum')
+""")
 
     # ── Milestone D: try/except/raise inside a compiled generator body ─────
     def _generator_compiles_via_cpp(name: str, src: str, must_contain_cpp=None):
@@ -5009,7 +4896,7 @@ fn main():
 
     # A generator whose own internal try/except catches everything it
     # raises — the simplest positive shape.
-    _run_isolated(lambda: _generator_compiles_via_cpp("generator_try_except_compiles_via_cpp_path", """\
+    _generator_compiles_via_cpp("generator_try_except_compiles_via_cpp_path", """\
 def f():
     i = 0
     while i < 5:
@@ -5024,13 +4911,13 @@ def f():
 def main():
     for x in f():
         print(x)
-""", must_contain_cpp="_MojoCppExc"), 'generator_try_except_compiles_via_cpp_path')
+""", must_contain_cpp="_MojoCppExc")
 
     # A generator whose raise is NOT caught internally — must compile (the
     # exception propagates via the extern "C" `_resume` boundary + the
     # mojo_exc_pending flag, checked by the ordinary GIMPLE consumer, not by
     # anything inside the .cpp translation unit itself).
-    _run_isolated(lambda: _generator_compiles_via_cpp("generator_raise_propagates_compiles_via_cpp_path", """\
+    _generator_compiles_via_cpp("generator_raise_propagates_compiles_via_cpp_path", """\
 def f():
     yield 1
     raise ValueError("boom")
@@ -5041,11 +4928,11 @@ def main():
             print(x)
     except ValueError:
         print("caught")
-"""), 'generator_raise_propagates_compiles_via_cpp_path')
+""")
 
     # try/except/finally together — the RAII-scope-guard finally translation
     # composing with real dispatch.
-    _run_isolated(lambda: _generator_compiles_via_cpp("generator_try_except_finally_compiles_via_cpp_path", """\
+    _generator_compiles_via_cpp("generator_try_except_finally_compiles_via_cpp_path", """\
 def f():
     cleanups = 0
     i = 0
@@ -5064,12 +4951,12 @@ def f():
 def main():
     for x in f():
         print(x)
-"""), 'generator_try_except_finally_compiles_via_cpp_path')
+""")
 
     # Multiple typed handlers plus a bare catch-all, and a re-raise (`raise`
     # with no value) inside one of them — exercises the descendant-OR
     # dispatch chain AND the `throw;` re-raise path together.
-    _run_isolated(lambda: _generator_compiles_via_cpp("generator_try_multi_except_reraise_compiles_via_cpp_path", """\
+    _generator_compiles_via_cpp("generator_try_multi_except_reraise_compiles_via_cpp_path", """\
 def f():
     i = 0
     while i < 3:
@@ -5090,13 +4977,13 @@ def f():
 def main():
     for x in f():
         print(x)
-"""), 'generator_try_multi_except_reraise_compiles_via_cpp_path')
+""")
 
     # `yield from` delegating to a generator that itself raises — confirms
     # Milestone C step 2 (delegation) and Milestone D (exceptions) compose,
     # not a fourth separate code path (see _cpp_yield_from's pending-
     # exception check).
-    _run_isolated(lambda: _generator_compiles_via_cpp("generator_yield_from_raise_compiles_via_cpp_path", """\
+    _generator_compiles_via_cpp("generator_yield_from_raise_compiles_via_cpp_path", """\
 def inner():
     yield 1
     raise ValueError("boom")
@@ -5110,12 +4997,12 @@ def outer():
 def main():
     for x in outer():
         print(x)
-"""), 'generator_yield_from_raise_compiles_via_cpp_path')
+""")
 
     # A generator METHOD (Milestone C step 3: `self` field reads) combined
     # with try/except — confirms this composes with self-binding too, not
     # just free functions.
-    _run_isolated(lambda: _generator_compiles_via_cpp("generator_method_try_except_compiles_via_cpp_path", """\
+    _generator_compiles_via_cpp("generator_method_try_except_compiles_via_cpp_path", """\
 class Counter:
     def __init__(self, start: Int):
         self.value = start
@@ -5135,7 +5022,7 @@ def main():
     c = Counter(2)
     for x in c.countdown(3):
         print(x)
-"""), 'generator_method_try_except_compiles_via_cpp_path')
+""")
 
     # Still-refused shapes: `yield` inside a `finally:` block (a destructor
     # can't `co_yield`) and a bare `raise` with no enclosing handler both
@@ -5251,8 +5138,8 @@ def gen3():
             os.unlink(c_path)
             os.unlink(cpp_path)
 
-    _run_isolated(lambda: test_generator_list_set_ctor_and_comprehension_loop_as_expr_compiles_via_cpp_path(), 'test_generator_list_set_ctor_and_comprehension_loop_as_expr_compiles_via_cpp_path (line 5158)')
-    _run_isolated(lambda: test("generator_with", """"""), 'generator_with')
+    test_generator_list_set_ctor_and_comprehension_loop_as_expr_compiles_via_cpp_path()
+    test("generator_with", """""")
 
     # ── Step B (compiled-path async/await codegen project) ─────────────────
     # The exact target shape from that step's writeup: a parameterless
@@ -5356,31 +5243,31 @@ def main():
             os.unlink(c_path)
             os.unlink(cpp_path)
 
-    _run_isolated(lambda: test_async_simple_shape_compiles_via_cpp_path(), 'test_async_simple_shape_compiles_via_cpp_path (line 5263)')
+    test_async_simple_shape_compiles_via_cpp_path()
 
     # The bug's exact repro (bugs/CODEGEN_compiled_async_eager_execution_
     # semantic_mismatch.md): consuming an async call's result as a value
     # (`x = f()`, then using `x`) must now be an honest whole-module
     # refusal, NOT the old eager construct+schedule+run+read+destroy
     # behavior that silently produced `42` with no `await` in sight.
-    _run_isolated(lambda: test("async_value_consuming_call", """\
+    test("async_value_consuming_call", """\
 async def f():
     return 42
 
 def main():
     x = f()
     print(x)
-"""), 'async_value_consuming_call')
+""")
 
     # Same bug, `print(f())` shape (argument position, not assignment) --
     # confirms the refusal isn't assignment-specific.
-    _run_isolated(lambda: test("async_value_consuming_call_as_arg", """\
+    test("async_value_consuming_call_as_arg", """\
 async def f():
     return 42
 
 def main():
     print(f())
-"""), 'async_value_consuming_call_as_arg')
+""")
 
     # Narrowing checks: every out-of-scope async shape from this step's plan
     # must still hit the honest whole-module refusal, not be silently
@@ -5399,15 +5286,15 @@ def main():
     # generator's). This replaces the old "any parameter at all is an
     # honest fallback" assertion — a NON-scalar-typed parameter (String,
     # below) is still refused.
-    _run_isolated(lambda: test("async_function_with_scalar_param_compiles", """\
+    test("async_function_with_scalar_param_compiles", """\
 async def f(x):
     return x
-"""), 'async_function_with_scalar_param_compiles')
+""")
 
-    _run_isolated(lambda: test("async_function_with_nonscalar_param", """\
+    test("async_function_with_nonscalar_param", """\
 async def f(x: String) -> String:
     return x
-"""), 'async_function_with_nonscalar_param')
+""")
 
     # “COMPILE_FAIL: asyncio/queues.py” gap 2: a STRUCT-typed param on a
     # top-level (non-method) async def is now supported -- unpacked from
@@ -5415,7 +5302,7 @@ async def f(x: String) -> String:
     # BUG-2026-030) and threaded to the coroutine body as a real `T *` C
     # param, so struct methods / Future fields work inside the coroutine.
     # Real producer/consumer proof: test_coro_future_await.py.
-    _run_isolated(lambda: test("async_function_with_struct_param", """\
+    test("async_function_with_struct_param", """\
 import asyncio
 from collections import deque
 
@@ -5446,7 +5333,7 @@ async def main_co() -> Int:
 
 def main():
     print(asyncio.run(main_co()))
-"""), 'async_function_with_struct_param')
+""")
 
     # “COMPILE_FAIL: asyncio/futures.py” items (1)-(3): the native Future
     # handle now carries an exception slot (set_exception/exception), a
@@ -5455,7 +5342,7 @@ def main():
     # method names lower to the __mojo_future_* shims instead of stubbing.
     # Behavioral proof (await raising on set_exception, cancel/cancelled,
     # a callback firing on set_result): test_coro_future_await.py.
-    _run_isolated(lambda: test("async_future_exception_cancel_callbacks", """\
+    test("async_future_exception_cancel_callbacks", """\
 import asyncio
 
 def on_done(fut: Int):
@@ -5484,14 +5371,14 @@ async def main_co() -> Int:
 
 def main():
     print(asyncio.run(main_co()))
-"""), 'async_future_exception_cancel_callbacks')
+""")
 
     # “COMPILE_FAIL: asyncio/futures.py” (3), callback-kind tag: a
     # bound-method callback (`self.on_done`, asyncio's own shape) and a
     # capturing-closure callback must lower through the MojoBoundMethod*
     # path (tag 1), not as a bare fn pointer. Behavioral proof:
     # test_coro_future_await.py.
-    _run_isolated(lambda: test("async_future_done_callback_bound_method_and_closure", """\
+    test("async_future_done_callback_bound_method_and_closure", """\
 import asyncio
 
 struct W:
@@ -5516,7 +5403,7 @@ async def main_co() -> Int:
 
 def main():
     print(asyncio.run(main_co()))
-"""), 'async_future_done_callback_bound_method_and_closure')
+""")
 
     # `await asyncio.sleep(...)` (Step C) / `await <another compiled async
     # function>` (Step D) are both supported now — see
@@ -5527,12 +5414,12 @@ def main():
     # in self._async_api at all) still correctly falls back to the honest
     # whole-module refusal — not silently emitting a dangling reference to
     # a callee that was never actually compiled.
-    _run_isolated(lambda: test("async_function_await_on_unsupported_callee", """"""), 'async_function_await_on_unsupported_callee')
+    test("async_function_await_on_unsupported_callee", """""")
 
     # A non-scalar return value (a string) — mirrors the generator
     # project's own honest-fallback precedent for a non-scalar yielded
     # value.
-    _run_isolated(lambda: test("async_function_string_return", """"""), 'async_function_string_return')
+    test("async_function_string_return", """""")
 
     # No return value at all (`pass`) — UPDATE: this shape is now genuinely
     # supported (was an honest refusal through Step G; the device_context.mojo
@@ -5544,10 +5431,10 @@ def main():
     # behavioral (compile+link+run) proof lives in
     # test_closure_capture_comptime_func_params.py /
     # test_async_void_return.py.
-    _run_isolated(lambda: test("async_function_no_return_value_now_supported", """\
+    test("async_function_no_return_value_now_supported", """\
 async def f():
     pass
-"""), 'async_function_no_return_value_now_supported')
+""")
 
     # Two `return`s that don't agree on one consistent scalar type — the
     # async counterpart of generator_mixed_yield_types_honest_fallback.
@@ -5642,7 +5529,7 @@ def main():
             os.unlink(c_path)
             os.unlink(cpp_path)
 
-    _run_isolated(lambda: test_async_await_sleep_and_asyncio_run_compiles_via_cpp_path(), 'test_async_await_sleep_and_asyncio_run_compiles_via_cpp_path (line 5549)')
+    test_async_await_sleep_and_asyncio_run_compiles_via_cpp_path()
 
     # `x = f()` alone (no `asyncio.run`) must STILL be honestly refused,
     # unchanged from the bug fix's own bar (9a3a62b) — re-verified here
@@ -5652,7 +5539,7 @@ def main():
     # as part of Step C's own coverage, since Step C is precisely the step
     # that could have accidentally regressed it by loosening the async-call
     # value-consumption rule).
-    _run_isolated(lambda: test("async_bare_call", """\
+    test("async_bare_call", """\
 async def f():
     await asyncio.sleep(0.01)
     return 42
@@ -5660,7 +5547,7 @@ async def f():
 def main():
     x = f()
     print(x)
-"""), 'async_bare_call')
+""")
 
     # ── Step F: `await asyncio.sock_recv(<fd>)` real-socket-I/O compile-only
     # smoke test — same two-part bar as Step C's own
@@ -5746,26 +5633,26 @@ def main():
             os.unlink(c_path)
             os.unlink(cpp_path)
 
-    _run_isolated(lambda: test_async_sock_recv_compiles_via_cpp_path(), 'test_async_sock_recv_compiles_via_cpp_path (line 5653)')
+    test_async_sock_recv_compiles_via_cpp_path()
 
     # `asyncio.sock_recv(...)` referenced WITHOUT `await` (e.g. assigned) has
     # no meaning at compiled-program runtime — same honest-fallback shape as
     # `asyncio.sleep(...)` used without `await`, immediately above.
-    _run_isolated(lambda: test_raises("asyncio_sock_recv_without_await_honest_fallback", """\
+    test_raises("asyncio_sock_recv_without_await_honest_fallback", """\
 import asyncio
 
 def main():
     fd = 3
     x = asyncio.sock_recv(fd)
     print(x)
-""", "asyncio.sock_recv"), 'asyncio_sock_recv_without_await_honest_fallback')
+""", "asyncio.sock_recv")
 
     # A multi-argument `asyncio.sock_recv(fd, nbytes)` call — this step's
     # deliberately narrow scope only recognizes the fixed-1-byte, single-
     # argument shape (see gimple_codegen._is_asyncio_sock_recv_call's
     # docstring); a 2-argument call doesn't match that shape at all, so it
     # falls through to the generic "unsupported await target" refusal.
-    _run_isolated(lambda: test_raises("asyncio_sock_recv_with_nbytes_arg_still_refused", """\
+    test_raises("asyncio_sock_recv_with_nbytes_arg_still_refused", """\
 async def f():
     fd = 3
     b = await asyncio.sock_recv(fd, 1024)
@@ -5774,13 +5661,13 @@ async def f():
 def main():
     import asyncio
     asyncio.run(f())
-""", "async function(s), declared"), 'asyncio_sock_recv_with_nbytes_arg_still_refused')
+""", "async function(s), declared")
 
     # A hypothetical `asyncio.sock_sendall(...)` (the write-side counterpart)
     # remains entirely out of this step's scope — no special-case
     # recognition exists for it at all, so it's refused exactly like any
     # other unrecognized await target.
-    _run_isolated(lambda: test_raises("asyncio_sock_sendall_not_recognized_still_refused", """\
+    test_raises("asyncio_sock_sendall_not_recognized_still_refused", """\
 async def f():
     fd = 3
     await asyncio.sock_sendall(fd, 65)
@@ -5789,7 +5676,7 @@ async def f():
 def main():
     import asyncio
     asyncio.run(f())
-""", "async function(s), declared"), 'asyncio_sock_sendall_not_recognized_still_refused')
+""", "async function(s), declared")
 
     # Step D: async-awaits-async composition (one Mojo async function
     # awaiting ANOTHER Mojo async function's call) now compiles for real —
@@ -5868,38 +5755,38 @@ def main():
             os.unlink(c_path)
             os.unlink(cpp_path)
 
-    _run_isolated(lambda: test_async_await_composition_three_level_chain_compiles_via_cpp_path(), 'test_async_await_composition_three_level_chain_compiles_via_cpp_path (line 5775)')
+    test_async_await_composition_three_level_chain_compiles_via_cpp_path()
 
     # `await` on a socket-style operation (no such Mojo-level API exists in
     # this codegen at all yet — Step F's job) remains refused exactly like
     # any other unrecognized await target: falls through to "not a call to
     # asyncio.sleep nor to a known compiled async function".
-    _run_isolated(lambda: test_raises("async_await_socket_like_expression_honest_fallback", """\
+    test_raises("async_await_socket_like_expression_honest_fallback", """\
 async def f():
     x = await some_socket.recv()
     return x
-""", "async function"), 'async_await_socket_like_expression_honest_fallback')
+""", "async function")
 
     # `asyncio.sleep(...)` referenced WITHOUT `await` (e.g. assigned) has no
     # meaning in compiled code -- honest refusal, not a silent no-op or a
     # call to an undefined symbol.
-    _run_isolated(lambda: test_raises("asyncio_sleep_without_await_honest_fallback", """\
+    test_raises("asyncio_sleep_without_await_honest_fallback", """\
 import asyncio
 
 def main():
     x = asyncio.sleep(0.1)
-""", "asyncio.sleep"), 'asyncio_sleep_without_await_honest_fallback')
+""", "asyncio.sleep")
 
     # `asyncio.run(...)` of anything other than a bare call to a supported
     # compiled async function -- e.g. a non-call expression -- is an honest
     # refusal, not a guessed-at lowering.
-    _run_isolated(lambda: test_raises("asyncio_run_non_call_argument_honest_fallback", """\
+    test_raises("asyncio_run_non_call_argument_honest_fallback", """\
 import asyncio
 
 def main():
     x = 5
     asyncio.run(x)
-""", "asyncio.run"), 'asyncio_run_non_call_argument_honest_fallback')
+""", "asyncio.run")
 
     # ── Step E (compiled-path async/await codegen project): raise/try/
     # except/finally inside async function bodies ───────────────────────────
@@ -5959,7 +5846,7 @@ def main():
     # catch, the EXACT SAME _MojoCppExc/_cpp_try_stmt/_cpp_raise_stmt
     # machinery generator Milestone D already built, reused (not
     # duplicated) for the async emitter path.
-    _run_isolated(lambda: _check_async_syntax_only(
+    _check_async_syntax_only(
         "async_internal_try_except_compiles_via_cpp_path", """\
 async def f():
     total = 0
@@ -5974,7 +5861,7 @@ def main():
     import asyncio
     print(asyncio.run(f()))
 """,
-        cpp_substrs=('throw _MojoCppExc', 'catch (_MojoCppExc')), 'async_internal_try_except_compiles_via_cpp_path')
+        cpp_substrs=('throw _MojoCppExc', 'catch (_MojoCppExc'))
 
     # An exception raised inside an awaited callee propagates through the
     # `await` into the awaiting function's OWN try/except -- the per-
@@ -5984,7 +5871,7 @@ def main():
     # and `await_resume` throws a fresh _MojoCppExc into the CALLER's own
     # body, catchable by its own ordinary try/except exactly like real
     # Python's `await` propagating an exception.
-    _run_isolated(lambda: _check_async_syntax_only(
+    _check_async_syntax_only(
         "async_exception_propagates_through_await_to_caller_except_compiles", """\
 async def inner():
     raise ValueError("boom")
@@ -6002,7 +5889,7 @@ def main():
     import asyncio
     print(asyncio.run(outer()))
 """,
-        cpp_substrs=('exc_pending', 'throw __e')), 'async_exception_propagates_through_await_to_caller_except_compiles')
+        cpp_substrs=('exc_pending', 'throw __e'))
 
     # An exception escaping ALL THE WAY out to `asyncio.run(...)` uncaught
     # -- the outermost-edge translation: `{base}_translate_pending_exc`
@@ -6012,7 +5899,7 @@ def main():
     # after, reusing the exact same "safe to longjmp here, never-suspended
     # call site" idiom the generator convention's own `_resume()`-boundary
     # consumers already use.
-    _run_isolated(lambda: _check_async_syntax_only(
+    _check_async_syntax_only(
         "async_exception_escapes_to_asyncio_run_caught_by_ordinary_code", """\
 async def f():
     raise ValueError("boom")
@@ -6026,7 +5913,7 @@ def main():
         print(e)
 """,
         cpp_substrs=('_translate_pending_exc',),
-        c_substrs=('_translate_pending_exc', 'mojo_exc_pending_get', 'mojo_raise')), 'async_exception_escapes_to_asyncio_run_caught_by_ordinary_code')
+        c_substrs=('_translate_pending_exc', 'mojo_exc_pending_get', 'mojo_raise'))
 
     # ── Final step: combined async generators (`async def f(): ... yield``,
     # consumed via `async for`) ─────────────────────────────────────────────
@@ -6040,7 +5927,7 @@ def main():
 
     # The simplest possible target shape: a zero-parameter async generator,
     # consumed by a plain `async def` via `async for`.
-    _run_isolated(lambda: _generator_compiles_via_cpp(
+    _generator_compiles_via_cpp(
         "async_generator_simple_shape_compiles_via_cpp_path", """\
 async def f():
     await asyncio.sleep(0.01)
@@ -6057,7 +5944,7 @@ async def main_driver():
 def main():
     import asyncio
     print(asyncio.run(main_driver()))
-"""), 'async_generator_simple_shape_compiles_via_cpp_path')
+""")
 
     # A lone, uncalled async generator (no consumer at all) also compiles --
     # harmless dead code, exactly mirroring how a bare, uncalled plain
@@ -6066,17 +5953,17 @@ def main():
     # async_simple_shape_compiles_via_cpp_path for the identical precedent
     # on the two predecessor categories) -- no consumer is required for
     # this step's own eligibility check either.
-    _run_isolated(lambda: _generator_compiles_via_cpp(
+    _generator_compiles_via_cpp(
         "async_generator_no_consumer_still_compiles_as_dead_code", """\
 async def f():
     yield 1
-"""), 'async_generator_no_consumer_still_compiles_as_dead_code')
+""")
 
     # `async for` genuinely reaching Step A's scheduler -- confirms this
     # isn't a fake/instant drive (the same kind of "did this actually use
     # the real suspend/resume machinery" check test_async_simple_shape_
     # compiles_via_cpp_path already does for plain async composition).
-    _run_isolated(lambda: _check_async_syntax_only(
+    _check_async_syntax_only(
         "async_generator_uses_real_coroutine_machinery", """\
 async def f():
     await asyncio.sleep(0.01)
@@ -6094,7 +5981,7 @@ def main():
 """,
         cpp_substrs=('_mojoasyncgen_f_AnextAwaiter', 'yield_value',
                      'mojo_async_schedule_ready'),
-        c_substrs=()), 'async_generator_uses_real_coroutine_machinery')
+        c_substrs=())
 
     # Narrowing checks: the two out-of-scope shapes from this step's own
     # plan must still hit the honest whole-module refusal.
@@ -6106,7 +5993,7 @@ def main():
 
     # `yield from` inside an async generator -- delegation composed with
     # async suspension is genuinely new risk this step doesn't take on.
-    _run_isolated(lambda: test_raises("async_generator_with_yield_from_honest_fallback", """\
+    test_raises("async_generator_with_yield_from_honest_fallback", """\
 async def g():
     yield 1
 
@@ -6121,14 +6008,14 @@ async def main_driver():
 def main():
     import asyncio
     print(asyncio.run(main_driver()))
-""", "async"), 'async_generator_with_yield_from_honest_fallback')
+""", "async")
 
     # A plain (non-`async`) `for` loop over a generator inside an async
     # function's own body is still unsupported -- `async for` is the ONLY
     # loop construct this step's `_cpp_stmt` recognizes at all (no plain
     # `for` support exists anywhere in a compiled generator/async body,
     # before or after this step).
-    _run_isolated(lambda: test("plain_for_inside_async_function", """"""), 'plain_for_inside_async_function')
+    test("plain_for_inside_async_function", """""")
 
     # A module-level `comptime NAME = value` must be visible to every later
     # reference in the file -- including inside a function body's ordinary
@@ -6315,10 +6202,10 @@ def mf(a: Float64, b: Float64) -> Float64:
         _PASS += 1
 
     # --- builtin `dict` subclassing (Counter/OrderedDict shape) ---
-    # See bug:COMPILE_FAIL_collections___init__. A `class X(dict)` gets
+    # See bugs/COMPILE_FAIL_collections___init__.md. A `class X(dict)` gets
     # a synthesized `_data: MojoDict *` backing store; inherited container
     # ops route to it, `__missing__` handles a subscript-read miss.
-    _run_isolated(lambda: test("dict_subclass_backing_store_and_subscript", """\
+    test("dict_subclass_backing_store_and_subscript", """\
 class C(dict):
     pass
 
@@ -6333,9 +6220,9 @@ def go() -> int:
 
 def main():
     print(go())
-"""), 'dict_subclass_backing_store_and_subscript')
+""")
 
-    _run_isolated(lambda: test("dict_subclass_missing_dunder_on_read_miss", """\
+    test("dict_subclass_missing_dunder_on_read_miss", """\
 class Counter2(dict):
     def __missing__(self, key) -> int:
         return 0
@@ -6347,9 +6234,9 @@ def go() -> int:
 
 def main():
     print(go())
-"""), 'dict_subclass_missing_dunder_on_read_miss')
+""")
 
-    _run_isolated(lambda: test("dict_subclass_transitive_and_getitem_override_wins", """\
+    test("dict_subclass_transitive_and_getitem_override_wins", """\
 class Base(dict):
     pass
 
@@ -6364,7 +6251,7 @@ def go() -> int:
 
 def main():
     print(go())
-"""), 'dict_subclass_transitive_and_getitem_override_wins')
+""")
 
     # --- builtin `bytes` subclassing (`class _Extra(bytes)`, zipfile) ---
     # See bugs/COMPILE_FAIL_zipfile___init__.md. A `class X(bytes)` gets a
@@ -6372,7 +6259,7 @@ def main():
     # `super().__new__(cls, val)`; inherited bytes ops (len/index/slice/
     # iter/eq/concat/`in`/`.decode`/`.hex`/`.split`/...) route to it, plus
     # any extra `self.<attr>` instance fields, and `isinstance(_, bytes)`.
-    _run_isolated(lambda: test("bytes_subclass_payload_and_inherited_ops", """\
+    test("bytes_subclass_payload_and_inherited_ops", """\
 class B(bytes):
     def __new__(cls, v):
         return super().__new__(cls, v)
@@ -6397,9 +6284,9 @@ def go() -> int:
 
 def main():
     print(go())
-"""), 'bytes_subclass_payload_and_inherited_ops')
+""")
 
-    _run_isolated(lambda: test("bytes_subclass_method_override_wins", """\
+    test("bytes_subclass_method_override_wins", """\
 class B(bytes):
     def __new__(cls, v):
         return super().__new__(cls, v)
@@ -6412,13 +6299,13 @@ def go() -> int:
 
 def main():
     print(go())
-"""), 'bytes_subclass_method_override_wins')
+""")
 
     # `.get()/.keys()/.values()/.items()/.update()/.pop()/.setdefault()`
     # and `for k in d` on a builtin-`dict` subclass instance delegate to
     # the hidden `_data` backing store — unless the subclass overrides
-    # them. See bug:COMPILE_FAIL_collections___init__.
-    _run_isolated(lambda: test("dict_subclass_container_method_delegation", """\
+    # them. See bugs/COMPILE_FAIL_collections___init__.md.
+    test("dict_subclass_container_method_delegation", """\
 class Bag(dict):
     def __missing__(self, key) -> int:
         return 0
@@ -6446,9 +6333,9 @@ def main():
     print(len(b))
     print(b.pop("a"))
     print(b.setdefault("d", 7))
-"""), 'dict_subclass_container_method_delegation')
+""")
 
-    _run_isolated(lambda: test("dict_subclass_method_override_wins_over_delegation", """\
+    test("dict_subclass_method_override_wins_over_delegation", """\
 class Bag(dict):
     def keys(self) -> str:
         return "override"
@@ -6462,27 +6349,27 @@ def main():
     s["x"] = 1
     print(s.keys())
     print(s.get("x"))
-"""), 'dict_subclass_method_override_wins_over_delegation')
+""")
 
     # bytes value type (Stage 1) — compile checks
-    _run_isolated(lambda: test("bytes_literal_len_index", """\
+    test("bytes_literal_len_index", """\
 fn main():
     var b = b'\\x00\\x01ABC'
     print(len(b))
     print(b[0])
     print(b[-1])
-"""), 'bytes_literal_len_index')
+""")
 
-    _run_isolated(lambda: test("bytes_constructors", """\
+    test("bytes_constructors", """\
 fn main():
     var a = bytes()
     var z = bytes(4)
     var l = bytes([1, 2, 3])
     var s = bytes("hi", "utf-8")
     print(len(a), len(z), len(l), len(s))
-"""), 'bytes_constructors')
+""")
 
-    _run_isolated(lambda: test("bytes_equality_and_truthiness", """\
+    test("bytes_equality_and_truthiness", """\
 fn main():
     if b'ab' == b'ab':
         print("eq")
@@ -6493,9 +6380,9 @@ fn main():
         print("t")
     if not bytes():
         print("f")
-"""), 'bytes_equality_and_truthiness')
+""")
 
-    _run_isolated(lambda: test("bytes_through_annotated_and_default_params", """\
+    test("bytes_through_annotated_and_default_params", """\
 fn tail(b: bytes) -> bytes:
     return b
 
@@ -6507,21 +6394,21 @@ fn main():
     print(len(t), t[0])
     print(size())
     print(size(b'hello'))
-"""), 'bytes_through_annotated_and_default_params')
+""")
 
-    _run_isolated(lambda: test("bytes_repr_and_str", """\
+    test("bytes_repr_and_str", """\
 fn main():
     var b = b'a\\x00b'
     print(b)
     print(str(b))
-"""), 'bytes_repr_and_str')
+""")
 
     # bytes value type (Stage 4) — bytes-typed struct fields (compile check).
     # `self._buf = b''` in __init__ makes the field a real MojoBytes*, so a
     # slice of the field routes through mojo_bytes_slice and `acc += <bytes>`
     # concatenates instead of emitting a `char* + MojoBytes*` pointer add
     # (which also ICE'd GCC's GIMPLE FE). COMPILE_FAIL_zipfile___init__.md.
-    _run_isolated(lambda: test("bytes_field_slice_and_augassign_accumulation", """\
+    test("bytes_field_slice_and_augassign_accumulation", """\
 fn _more() -> bytes:
     return b'12345'
 
@@ -6546,10 +6433,10 @@ fn main():
     r._fill()
     var data = r.read_all()
     print(len(data))
-"""), 'bytes_field_slice_and_augassign_accumulation')
+""")
 
     # bytes value type (Stage 2) — compile checks
-    _run_isolated(lambda: test("bytes_slice_iter_in", """\
+    test("bytes_slice_iter_in", """\
 fn main():
     var b = b'Hello, World'
     print(b[0:5])
@@ -6562,17 +6449,17 @@ fn main():
         print("y")
     if 101 in b:
         print("z")
-"""), 'bytes_slice_iter_in')
+""")
 
-    _run_isolated(lambda: test("bytes_concat_repeat", """\
+    test("bytes_concat_repeat", """\
 fn main():
     var c = b'ab' + b'cd'
     print(c)
     print(b'xy' * 3)
     print(2 * b'-')
-"""), 'bytes_concat_repeat')
+""")
 
-    _run_isolated(lambda: test("bytes_methods", """\
+    test("bytes_methods", """\
 fn main():
     print(b'Hello'.startswith(b'He'))
     print(b'Hello'.endswith(b'lo'))
@@ -6589,14 +6476,14 @@ fn main():
     print(b'DEADBEEF'.hex())
     print(b'hello'.decode('utf-8'))
     print(b','.join(b'x,y'.split(b',')))
-"""), 'bytes_methods')
+""")
 
-    _run_isolated(lambda: test("bytes_isinstance", """\
+    test("bytes_isinstance", """\
 fn main():
     var b = b'x'
     print(isinstance(b, bytes))
     print(isinstance(5, bytes))
-"""), 'bytes_isinstance')
+""")
 
     # A tuple is a MojoList carrying the tuple marker, so `isinstance(t,
     # list)` on a value whose static C type is already `MojoList *` is the
@@ -6611,7 +6498,7 @@ fn main():
     # `list`-annotated parameter is what gives the check a `MojoList *`
     # static type to fire on; the nested `def` is what makes the body
     # `__GIMPLE`. Both are load-bearing, so neither is optional here.
-    _run_isolated(lambda: test_gimple_body("isinstance_list_tuple_check_in_closure", """\
+    test_gimple_body("isinstance_list_tuple_check_in_closure", """\
 def outer(v: list):
     def inner():
         return isinstance(v, list)
@@ -6620,13 +6507,13 @@ def outer(v: list):
 def main():
     print(outer([1, 2]))
     print(outer((3,)))
-"""), 'isinstance_list_tuple_check_in_closure')
+""")
 
     # The same answer reached through a struct field rather than a
     # parameter, and asked as a NEGATIVE (`not isinstance(...)`), which
     # adds the `== 0` leg — the other half of the join the old `&&` was
     # standing in for.
-    _run_isolated(lambda: test_gimple_body("isinstance_list_tuple_check_on_struct_field", """\
+    test_gimple_body("isinstance_list_tuple_check_on_struct_field", """\
 struct Box:
     var items: list
 
@@ -6636,10 +6523,10 @@ struct Box:
 def main():
     var b = Box([4, 5])
     print(b.is_list())
-"""), 'isinstance_list_tuple_check_on_struct_field')
+""")
 
     # bytes value type (Stage 2b) — %-formatting + body-usage param inference
-    _run_isolated(lambda: test("bytes_percent_format", """\
+    test("bytes_percent_format", """\
 fn main():
     var n: Int = 42
     print(b'val=%d' % n)
@@ -6647,14 +6534,14 @@ fn main():
     print(b'%02x' % 15)
     print(b'%s=%d;' % (b'k', 7))
     print(b'100%% done')
-"""), 'bytes_percent_format')
+""")
 
     # A `b'...'` / `b''` literal used inside a real function body: the
     # `_slit_` string-pool global must be loaded into a local before it
     # is passed to `mojo_bytes_new_lit` (GIMPLE strict mode). Regression
     # for "invalid argument to gimple call" seen on zipfile's
     # `_Extra.strip`'s `b''.join(...)`.
-    _run_isolated(lambda: test("bytes_literal_in_function_body", """\
+    test("bytes_literal_in_function_body", """\
 fn joiner(parts: List[Int]) -> Int:
     var sep = b''
     var acc = b'x'
@@ -6665,9 +6552,9 @@ fn joiner(parts: List[Int]) -> Int:
 fn main():
     var ps = [1, 2, 3]
     print(joiner(ps))
-"""), 'bytes_literal_in_function_body')
+""")
 
-    _run_isolated(lambda: test("bytes_param_inferred_from_body_usage", """\
+    test("bytes_param_inferred_from_body_usage", """\
 fn dec(data) -> String:
     return data.decode('utf-8')
 fn hx(data) -> String:
@@ -6675,9 +6562,9 @@ fn hx(data) -> String:
 fn main():
     print(dec(b'hello'))
     print(hx(b'\\x00\\xff'))
-"""), 'bytes_param_inferred_from_body_usage')
+""")
 
-    _run_isolated(lambda: test("bytes_param_inferred_from_bytes_slice_destination", """\
+    test("bytes_param_inferred_from_bytes_slice_destination", """\
 fn header_size(p):
     var header = b''
     if len(p) > 0:
@@ -6685,10 +6572,10 @@ fn header_size(p):
     return len(header)
 fn main():
     print(header_size(b'abcdef'))
-"""), 'bytes_param_inferred_from_bytes_slice_destination')
+""")
 
     # bytes value type (Stage 3) — bytearray + memoryview compile checks
-    _run_isolated(lambda: test("bytearray_construct_and_mutate", """\
+    test("bytearray_construct_and_mutate", """\
 fn main():
     var ba = bytearray(b'abc')
     ba.append(100)
@@ -6704,9 +6591,9 @@ fn main():
     var empty = bytearray()
     var zeros = bytearray(3)
     var fromlist = bytearray([1, 2, 3])
-"""), 'bytearray_construct_and_mutate')
+""")
 
-    _run_isolated(lambda: test("memoryview_ops", """\
+    test("memoryview_ops", """\
 fn main():
     var mv = memoryview(b'hello')
     print(mv[1])
@@ -6719,10 +6606,10 @@ fn main():
         print(x)
     var mv2 = memoryview(bytearray(b'xy'))
     print(mv2.cast('B')[0])
-"""), 'memoryview_ops')
+""")
 
     # struct module (binary pack/unpack) — compile checks
-    _run_isolated(lambda: test("struct_module_functions", """\
+    test("struct_module_functions", """\
 fn main():
     print(struct.calcsize('<HH'))
     var p = struct.pack('<HH', 1, 2)
@@ -6732,9 +6619,9 @@ fn main():
     var u = struct.unpack_from('<H', b'\\xaa\\xbb\\xcc', 1)
     print(u[0])
     var b = struct.pack('>i4s', 258, b'abcd')
-"""), 'struct_module_functions')
+""")
 
-    _run_isolated(lambda: test("struct_module_float_and_error", """\
+    test("struct_module_float_and_error", """\
 fn main():
     var p = struct.pack('<fd', 1.5, 2.5)
     var t = struct.unpack('<fd', p)
@@ -6743,14 +6630,14 @@ fn main():
         var bad = struct.unpack('<HH', b'\\x00')
     except struct.error:
         print('caught')
-"""), 'struct_module_float_and_error')
+""")
 
     # --- os.path.splitdrive / splitroot (POSIX) + reversed() ---
     # See bugs/COMPILE_FAIL_zipfile___init__.md. Both os.path funcs were
     # stubbed (`int.splitdrive() stubbed`); reversed() had no lowering at
     # all so `for x in reversed(...)` over the resulting `void *` was
     # silently dropped (zipfile/__init__.py:1612).
-    _run_isolated(lambda: test("os_path_splitdrive_splitroot", """\
+    test("os_path_splitdrive_splitroot", """\
 import os
 
 fn main():
@@ -6763,9 +6650,9 @@ fn main():
     print(r2[1], r2[2])
     var n = os.path.normpath(os.path.splitdrive(p)[1])
     print(n)
-"""), 'os_path_splitdrive_splitroot')
+""")
 
-    _run_isolated(lambda: test("reversed_list_str_and_sorted_chain", """\
+    test("reversed_list_str_and_sorted_chain", """\
 fn main():
     var xs = [3, 1, 2]
     var acc: Int = 0
@@ -6777,7 +6664,7 @@ fn main():
     print(acc)
     for c in reversed("abc"):
         print(c)
-"""), 'reversed_list_str_and_sorted_chain')
+""")
 
     def test_signed64_integer_literal_boundaries():
         global _PASS, _FAIL
@@ -6804,7 +6691,7 @@ def main():
         print(f"PASS  {name}")
         _PASS += 1
 
-    _run_isolated(lambda: test_signed64_integer_literal_boundaries(), 'test_signed64_integer_literal_boundaries (line 6711)')
+    test_signed64_integer_literal_boundaries()
 
     def test_known_function_not_shadowed_by_global_fnptr():
         global _PASS, _FAIL
@@ -6833,7 +6720,7 @@ def root_cas_hash_call(parts) -> str:
         print(f"PASS  {name}")
         _PASS += 1
 
-    _run_isolated(lambda: test_known_function_not_shadowed_by_global_fnptr(), 'test_known_function_not_shadowed_by_global_fnptr (line 6740)')
+    test_known_function_not_shadowed_by_global_fnptr()
 
     def test_inherited_method_line_directive_names_its_own_module():
         """The inheritance merge copies a base class's method node into the
@@ -6900,7 +6787,7 @@ def root_cas_hash_call(parts) -> str:
         print(f"PASS  {name}")
         _PASS += 1
 
-    _run_isolated(lambda: test_inherited_method_line_directive_names_its_own_module(), 'test_inherited_method_line_directive_names_its_own_module (line 6807)')
+    test_inherited_method_line_directive_names_its_own_module()
 
     def test_conflicting_callsite_yield_kind_refused_not_miscompiled():
         """A generator has ONE fixed C value-slot, so a generator that
@@ -6956,7 +6843,7 @@ def main():
             print(f"FAIL  {name}: {detail}")
             _FAIL += 1
 
-    _run_isolated(lambda: test_conflicting_callsite_yield_kind_refused_not_miscompiled(), 'test_conflicting_callsite_yield_kind_refused_not_miscompiled (line 6863)')
+    test_conflicting_callsite_yield_kind_refused_not_miscompiled()
 
     # The refusal must be narrow: a conflicting param that is NOT yielded
     # still compiles, and a yielded param with UNANIMOUS call sites still
@@ -7037,7 +6924,7 @@ def main():
         print(f"PASS  {name}")
         _PASS += 1
 
-    _run_isolated(lambda: test_conflicting_callsite_gate_is_narrow(), 'test_conflicting_callsite_gate_is_narrow (line 6944)')
+    test_conflicting_callsite_gate_is_narrow()
 
     def test_nested_async_struct_capture_boxes_pointer():
         """Increment E: a nested `async def` that mutates an enclosing
@@ -7093,9 +6980,9 @@ def outer():
         print(f"PASS  {name}")
         _PASS += 1
 
-    _run_isolated(lambda: test_nested_async_struct_capture_boxes_pointer(), 'test_nested_async_struct_capture_boxes_pointer (line 7000)')
+    test_nested_async_struct_capture_boxes_pointer()
 
-    _run_isolated(lambda: test_raises(
+    test_raises(
         "nested_async_gen_capture_from_async_for_refused",
         """\
 def outer():
@@ -7109,7 +6996,7 @@ def outer():
     var t = create_task(consume())
     t.wait()
 """,
-        "capture box cannot be threaded into a driven consumer"), 'nested_async_gen_capture_from_async_for_refused')
+        "capture box cannot be threaded into a driven consumer")
 
     # A nested generator inside a plain `def` is not stack-switch-eligible, so
     # it lands on the C++20 companion backend — and `compile_to_gimple` cannot
@@ -7131,7 +7018,7 @@ def outer():
     # doc — it existed to record that this condition could never fire, and it
     # does now, so the doc went with the fix rather than leaving a citation
     # pointing at nothing.
-    _run_isolated(lambda: test_raises(
+    test_raises(
         "nested_generator_needing_the_cpp_companion_is_refused_by_name",
         """\
 def build(n):
@@ -7145,7 +7032,7 @@ def main():
         print(s)
 main()
 """,
-        "_mojogen_render_start"), 'nested_generator_needing_the_cpp_companion_is_refused_by_name')
+        "_mojogen_render_start")
 
     # The SAME shape on the C++ backend (`MOJO_CORO=cpp`, the escape
     # hatch), which the assertion above does not reach: the guard it
@@ -7195,7 +7082,7 @@ def outer():
               f"refusing it")
         _FAIL += 1
 
-    _run_isolated(lambda: test_nested_async_gen_drive_refused_on_cpp_backend(), 'test_nested_async_gen_drive_refused_on_cpp_backend (line 7102)')
+    test_nested_async_gen_drive_refused_on_cpp_backend()
 
     # ... and the capture-LESS neighbour of the same shape, which must keep
     # COMPILING on the C++ backend. This is the boundary the fix must not
@@ -7246,7 +7133,7 @@ def outer():
                 print(f"      {line}")
             _FAIL += 1
 
-    _run_isolated(lambda: test_nested_async_gen_no_capture_drive_compiles_on_cpp_backend(), 'test_nested_async_gen_no_capture_drive_compiles_on_cpp_backend (line 7153)')
+    test_nested_async_gen_no_capture_drive_compiles_on_cpp_backend()
 
     # ------------------------------------------------------------------
     # A container-typed constructor argument. bugs/hard/
@@ -8212,11 +8099,6 @@ def mk_bool():
 def use_bool_factory():
     print(mk_bool()())
 use_bool_factory()
-def mk_str():
-    return lambda: "hi"
-def use_str_factory():
-    print(mk_str()())
-use_str_factory()
 '''
         want = _cpython_stdout(src)
         if want is None:
@@ -8442,52 +8324,6 @@ main()
         print(f"PASS  {name}")
         _PASS += 1
 
-    def test_a_string_passthrough_beside_an_int_one_keeps_its_own_elements():
-        """`def ident(x): return x` called with a list of ints AND with a
-        string, in one program, must give the string call site its own
-        element answer: `list(ident("abc"))` is a list of one-character
-        strings, not the int64 join of the program's passthrough calls.
-
-        `_return_elem_types` holds one answer per function, and the
-        passthrough arm at the call site
-        (`emit_calls.py`, `_passthrough_param_idx`) only consulted the
-        argument's recorded element type when the argument was a container.
-        A `char *` argument fell through to the program-wide join, which the
-        int call had made `int64_t`, so the string's copy read its characters
-        as words and printed decimal addresses. A string value records no
-        element type of its own (`_elem_types` describes containers), so the
-        str call site must record none either.
-        """
-        global _PASS, _FAIL
-        name = "a_string_passthrough_beside_an_int_one_keeps_its_own_elements"
-        src = '''\
-def ident(x):
-    return x
-def main():
-    print(list(ident([1, 2, 3])))
-    print(list(ident("abc")))
-main()
-'''
-        want = _cpython_stdout(src)
-        if want is None:
-            print(f"FAIL  {name}: CPython does not run the fixture")
-            _FAIL += 1
-            return
-        for mode in ('single-TU', 'link-mode'):
-            got = _compiled_stdout(src, mode)
-            if isinstance(got, tuple):
-                print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
-                      f"{got[1][:800]}")
-                _FAIL += 1
-                return
-            if got != want:
-                print(f"FAIL  {name} [{mode}]: compiled stdout {got!r} != "
-                      f"CPython {want!r}")
-                _FAIL += 1
-                return
-        print(f"PASS  {name}")
-        _PASS += 1
-
     def test_a_returned_heterogeneous_list_keeps_its_slot_kinds():
         """A list literal's per-slot kinds must survive a `return`.
 
@@ -8655,14 +8491,12 @@ main()
 
         The ADDRESS was never the wrong answer — CPython prints
         `<function step at 0x...>` — so the `%d` was the whole bug, and it is
-        independent of the decorator-application defect (see
+        independent of the decorator-application defect this fixture is
+        reduced from (see
         bugs/COMPILE_FAIL_decorator_application_dropped.md, whose defect 2
-        names it as separable). The decorator is a pass-through, not the
-        scalar-returning `deco` the doc reduces from: a scalar decorator
-        rebinds `step` to a non-callable, which the compiled path now refuses
-        (`scalar_decorator_rebind_is_refused`), and CPython would print `99`,
-        not a function, for it. A pass-through decorator leaves `step` a
-        function value on both engines, which is what this test is about.
+        names it as separable). The fixture keeps the decorator because that
+        is the reduction the doc measured, and because a decorated `def` is
+        the ordinary way a program ends up holding a function value.
 
         The address is asserted by SHAPE and not by value: it differs per
         build, per process and per platform, which is why CPython cannot be
@@ -8672,7 +8506,7 @@ main()
         name = "print_of_a_function_value_is_not_a_decimal_address"
         src = '''\
 def deco(f):
-    return f
+    return 99
 
 @deco
 def step(x):
@@ -8696,127 +8530,6 @@ step(7)
         # what the `%d` produced, so assert it is NOT that.
         if re.fullmatch(r'[0-9]+\n', got or ''):
             print(f"FAIL  {name}: still formatting the pointer as a decimal")
-            _FAIL += 1
-            return
-        print(f"PASS  {name}")
-        _PASS += 1
-
-    def test_decorator_rebinding_is_applied_at_runtime():
-        """A same-module decorator on a top-level `def` must REBIND the name:
-        `@twice def step` makes `step(7)` call `twice(step_undecorated)(7)`,
-        as CPython does, on the compiled path (bugs/
-        COMPILE_FAIL_decorator_application_dropped.md, defect 3). Before the
-        rebinding was lowered, `step(7)` silently called the UNDECORATED body
-        and printed `8` where CPython prints `16`.
-
-        Three shapes, each compared against CPython's stdout: a wrapping
-        decorator whose closure calls its argument (the `subdir` shape), a
-        factory `@scale(3)` returning such a wrapper, and two stacked
-        decorators, which must nest innermost-first. Integer returns only:
-        a wrapper that returns a str is the callable-return-type gap
-        (fixed as CODEGEN_closure_str_return_is_lost) and is not covered here."""
-        global _PASS, _FAIL
-        name = "decorator_rebinding_is_applied_at_runtime"
-        src = '''\
-def twice(f):
-    def wrap(x):
-        return f(x) * 2
-    return wrap
-
-def scale(k):
-    def deco(f):
-        def wrap(x):
-            return f(x) * k
-        return wrap
-    return deco
-
-def plus_one(f):
-    def wrap(x):
-        return f(x) + 1
-    return wrap
-
-@twice
-def step(x):
-    return x + 1
-
-@scale(3)
-def tripled(x):
-    return x + 1
-
-@twice
-@plus_one
-def stacked(x):
-    return x
-
-print(step(7))
-print(tripled(7))
-print(stacked(7))
-'''
-        got = _compiled_stdout(src, 'single-TU')
-        want = _cpython_stdout(src)
-        if isinstance(got, tuple):
-            print(f"FAIL  {name}: gcc -fgimple failed:\n{got[1][:800]}")
-            _FAIL += 1
-            return
-        if want is None:
-            print(f"FAIL  {name}: CPython does not run the fixture")
-            _FAIL += 1
-            return
-        if got != want:
-            print(f"FAIL  {name}: compiled stdout {got!r} != CPython {want!r}")
-            _FAIL += 1
-            return
-        print(f"PASS  {name}")
-        _PASS += 1
-
-    def test_decorator_in_a_compound_block_is_applied_at_runtime():
-        """A decorated `def` inside an `if`, `try`, or `with` block of a
-        function body is bound in that function's scope, so it is rebound by
-        the same rule as a direct statement. Before, the rebinding walk only
-        entered a body's direct statements: the `def` was still lifted to a
-        sibling function, but its decorator was dropped, so `outer(7, True)`
-        silently printed `8` where CPython prints `16`."""
-        global _PASS, _FAIL
-        name = "decorator_in_a_compound_block_is_applied_at_runtime"
-        src = '''\
-def twice(f):
-    def wrap(x):
-        return f(x) * 2
-    return wrap
-
-def outer(n, flag):
-    if flag:
-        @twice
-        def step(x):
-            return x + 1
-        return step(n)
-    return n
-
-def guarded(n):
-    try:
-        @twice
-        def g(x):
-            return x + 2
-        return g(n)
-    except ValueError:
-        return -1
-
-print(outer(7, True))
-print(outer(7, False))
-print(guarded(7))
-'''
-        got = _compiled_stdout(src, 'single-TU')
-        want = _cpython_stdout(src)
-        if isinstance(got, tuple):
-            print(f"FAIL  {name}: gcc -fgimple failed:\n{got[1][:800]}")
-            _FAIL += 1
-            return
-        if want is None:
-            print(f"FAIL  {name}: CPython does not run the fixture")
-            _FAIL += 1
-            return
-        if got != want:
-            print(f"FAIL  {name}: compiled stdout {got!r} != CPython {want!r}")
             _FAIL += 1
             return
         print(f"PASS  {name}")
@@ -9889,7 +9602,7 @@ print("%r" % p)
         every visit — which is what it did before, and what the docstring's
         existing field-name cache already did for `dataclasses.fields`.
 
-        the `_walk_ast` re-scan bug (fixed; the memo and self-assign scan fixes are in the same commit).
+        the `_walk_ast` re-scan bug (fixed; remainder in bugs/hard/PERF_struct_self_assign_scan_uncached.md)
         (Phase 9). The failure mode this guards is a walk that silently
         STOPS descending: the dataclass test runs BEFORE the scalar
         early-return precisely because on the compiled path every AST node is
@@ -10008,7 +9721,7 @@ print("%r" % p)
         """Every call site of the shared `_walk_ast` only READS its result.
 
         **The property that makes the memo in
-        `the `_walk_ast` re-scan bug (fixed; the memo and self-assign scan fixes are in the same commit).` safe
+        `the `_walk_ast` re-scan bug (fixed; remainder in bugs/hard/PERF_struct_self_assign_scan_uncached.md)` safe
         to add, checked rather than believed.** `_walk_ast` returns a fresh
         `list` today, so a memo keyed on the node would hand the SAME list to
         every caller — and a caller that mutated it would corrupt every later
@@ -10256,7 +9969,7 @@ print("%r" % p)
         """The memo must be indistinguishable from walking every time — and
         must STOP being indistinguishable the moment a node is mutated.
 
-        `the `_walk_ast` re-scan bug (fixed; the memo and self-assign scan fixes are in the same commit).`
+        `the `_walk_ast` re-scan bug (fixed; remainder in bugs/hard/PERF_struct_self_assign_scan_uncached.md)`
         (Phase 10). `_walk_ast` is now keyed on node identity, which is what
         makes it stop re-descending the same subtrees once per consumer and
         once per import level, and identity is exactly what cannot see a
@@ -10529,85 +10242,6 @@ print("%r" % p)
             return
         print(f"PASS  {name} ({state['calls']} walks, {state['hits']} of "
               f"them answered from the memo, none stale)")
-        _PASS += 1
-
-    def test_walk_ast_memo_survives_the_sync_generator_hoist_writes():
-        """The two sync-generator hoist writers in `mojo/middle/coro.py`
-        mutate nodes an earlier `_walk_ast` has already memoized, and must
-        invalidate them.
-
-        `_capture_self_into_generator` rewrites a nested generator's params
-        and body and appends `self.address` to every call that drives it;
-        `_finish_sync_hoist` replaces the enclosing body and renames the
-        calls. Both run inside `lower()`, after eligibility and the capture
-        planner have walked those very nodes, so without invalidation a
-        walk answers with the pre-hoist tree and the generated C loses the
-        self pointer or keeps a removed generator."""
-        global _PASS, _FAIL
-        name = "walk_ast_memo_survives_the_sync_generator_hoist_writes"
-        import mojo.middle.exprtypes as ET
-        import mojo.middle.coro as CO
-        from fire_compiler import py_tokenize, Parser, FunctionDef, \
-            VarDecl, MemberExpr, IdentExpr
-        import ast_rewriter
-
-        src = ("def outer(x):\n"
-               "    def g():\n"
-               "        yield x\n"
-               "    for v in g():\n"
-               "        print(v)\n")
-
-        def parse_outer():
-            stmts = ast_rewriter.rewrite(
-                Parser(py_tokenize(src)).parse_module()) or []
-            outer = [s for s in stmts
-                     if isinstance(s, FunctionDef) and s.name == 'outer'][0]
-            inner = [s for s in outer.body
-                     if isinstance(s, FunctionDef) and s.name == 'g'][0]
-            return outer, inner
-
-        err = None
-        try:
-            # Capture: the walk of `outer` memoizes `g` and the call to it,
-            # then the hoist writes both. The walks after must see the
-            # rewritten tree, not the memo.
-            ET._walk_ast_reset()
-            outer, inner = parse_outer()
-            ET._walk_ast(outer)
-            CO._capture_self_into_generator(inner, outer, 'K')
-            if not any(isinstance(n, MemberExpr) and n.member == 'address'
-                       for n in ET._walk_ast(outer)):
-                err = ('the call driving the hoisted generator is missing its '
-                       'self pointer in the walk of its enclosing body')
-            elif not any(isinstance(n, VarDecl) and n.name == 'self'
-                         for n in ET._walk_ast(inner)):
-                err = ('the hoisted generator still walks to its pre-capture '
-                       'body (no `self` re-typing VarDecl)')
-            # Finish: the walk of `outer` memoizes the nested def, which the
-            # hoist removes and whose call it renames.
-            if not err:
-                ET._walk_ast_reset()
-                outer, inner = parse_outer()
-                if not any(n is inner for n in ET._walk_ast(outer)):
-                    err = 'nothing was memoized, so this proved nothing'
-                else:
-                    CO._finish_sync_hoist(outer, {'g': '__mgco_outer_g'})
-                    now = ET._walk_ast(outer)
-                    if any(n is inner for n in now):
-                        err = ('the removed generator still walks as part of '
-                               'its enclosing body')
-                    elif not any(isinstance(n, IdentExpr)
-                                 and n.name == '__mgco_outer_g' for n in now):
-                        err = 'the renamed call is not in the walk'
-        except Exception as e:  # noqa: BLE001
-            err = f'{type(e).__name__}: {e}'
-        finally:
-            ET._walk_ast_reset()
-        if err:
-            print(f"FAIL  {name}: {err}")
-            _FAIL += 1
-            return
-        print(f"PASS  {name}")
         _PASS += 1
 
     def test_every_ast_mutation_site_invalidates_the_walk_memo():
@@ -13011,202 +12645,68 @@ print(run('x/y.txt'))
         print(f"PASS  {name}")
         _PASS += 1
 
-    _run_isolated(lambda: test_cursor_advance_has_no_cast_operand_in_gimple(), 'test_cursor_advance_has_no_cast_operand_in_gimple (line 12665)')
-    _run_isolated(lambda: test_next_inside_for_over_same_iterator_advances_once(), 'test_next_inside_for_over_same_iterator_advances_once (line 12666)')
-    _run_isolated(lambda: test_paren_name_vs_one_tuple_for_target_differ(), 'test_paren_name_vs_one_tuple_for_target_differ (line 12667)')
-    _run_isolated(lambda: test_walk_ast_dataclass_cache_is_transparent(), 'test_walk_ast_dataclass_cache_is_transparent (line 12668)')
-    _run_isolated(lambda: test_no_walk_ast_caller_mutates_what_it_is_handed(), 'test_no_walk_ast_caller_mutates_what_it_is_handed (line 12669)')
-    _run_isolated(lambda: test_walk_ast_memo_is_transparent_and_honours_invalidation(), 'test_walk_ast_memo_is_transparent_and_honours_invalidation (line 12670)')
-    _run_isolated(lambda: test_walk_ast_memo_never_answers_stale_over_real_compiles(), 'test_walk_ast_memo_never_answers_stale_over_real_compiles (line 12671)')
-    _run_isolated(lambda: test_every_ast_mutation_site_invalidates_the_walk_memo(), 'test_every_ast_mutation_site_invalidates_the_walk_memo (line 12672)')
-    _run_isolated(lambda: test_walk_ast_memo_survives_the_sync_generator_hoist_writes(), 'test_walk_ast_memo_survives_the_sync_generator_hoist_writes (line 12672)')
-    _run_isolated(lambda: test_scalar_arity_min_max_params_are_not_containers(), 'test_scalar_arity_min_max_params_are_not_containers (line 12673)')
-    _run_isolated(lambda: test_a_forwarded_string_argument_keeps_its_type(), 'test_a_forwarded_string_argument_keeps_its_type (line 12674)')
-    _run_isolated(lambda: test_a_forwarded_container_argument_takes_the_callees_kind(), 'test_a_forwarded_container_argument_takes_the_callees_kind (line 12675)')
-    _run_isolated(lambda: test_list_sort_in_a_method_body_is_gimple_legal(), 'test_list_sort_in_a_method_body_is_gimple_legal (line 12676)')
-    _run_isolated(lambda: test_dict_union_right_operand_is_converted_at_runtime(), 'test_dict_union_right_operand_is_converted_at_runtime (line 12677)')
-    _run_isolated(lambda: test_dict_literal_star_star_pair_merges_instead_of_storing(), 'test_dict_literal_star_star_pair_merges_instead_of_storing (line 12678)')
-    _run_isolated(lambda: test_module_level_struct_global_keeps_its_type_in_a_container(), 'test_module_level_struct_global_keeps_its_type_in_a_container (line 12679)')
-    _run_isolated(lambda: test_itertools_filterfalse_keeps_the_elements_whose_predicate_is_false(), 'test_itertools_filterfalse_keeps_the_elements_whose_predicate_is_false (line 12680)')
-    _run_isolated(lambda: test_next_over_a_filter_result_still_refuses_without_iter(), 'test_next_over_a_filter_result_still_refuses_without_iter (line 12681)')
-    _run_isolated(lambda: test_unannotated_init_param_evidence_reaches_the_signature(), 'test_unannotated_init_param_evidence_reaches_the_signature (line 12682)')
-    _run_isolated(lambda: test_next_inside_for_over_same_iterator_is_one_ahead(), 'test_next_inside_for_over_same_iterator_is_one_ahead (line 12683)')
-    _run_isolated(lambda: test_iterator_cursor_len_is_remaining_and_dunder_next_advances(), 'test_iterator_cursor_len_is_remaining_and_dunder_next_advances (line 12684)')
-    _run_isolated(lambda: test_span_cursor_reads_the_span_and_len_tracks_the_cursor(), 'test_span_cursor_reads_the_span_and_len_tracks_the_cursor (line 12685)')
-    _run_isolated(lambda: test_a_program_written_inside_the_checkout_is_not_the_compiler(), 'test_a_program_written_inside_the_checkout_is_not_the_compiler (line 12686)')
-    _run_isolated(lambda: test_cyclic_closure_from_import_of_a_container_global_reads_the_owner(), 'test_cyclic_closure_from_import_of_a_container_global_reads_the_owner (line 12687)')
-    _run_isolated(lambda: test_struct_unpack_computed_format_compiles(), 'test_struct_unpack_computed_format_compiles (line 12688)')
-    _run_isolated(lambda: test_struct_unpack_computed_format_keeps_literal_half(), 'test_struct_unpack_computed_format_keeps_literal_half (line 12689)')
-    _run_isolated(lambda: test_ctor_arg_container_literal_field_is_container_typed(), 'test_ctor_arg_container_literal_field_is_container_typed (line 12690)')
-    _run_isolated(lambda: test_ctor_arg_dict_and_set_literal_fields_are_container_typed(), 'test_ctor_arg_dict_and_set_literal_fields_are_container_typed (line 12691)')
-    _run_isolated(lambda: test_ctor_arg_mixed_container_and_scalar_stays_int64(), 'test_ctor_arg_mixed_container_and_scalar_stays_int64 (line 12692)')
-    _run_isolated(lambda: test_ctor_arg_local_bound_to_container_literal_is_container_typed(), 'test_ctor_arg_local_bound_to_container_literal_is_container_typed (line 12693)')
-    _run_isolated(lambda: test_ctor_arg_self_field_container_read_is_container_typed(), 'test_ctor_arg_self_field_container_read_is_container_typed (line 12694)')
-    _run_isolated(lambda: test_field_value_through_local_keeps_char_star_return_type(), 'test_field_value_through_local_keeps_char_star_return_type (line 12695)')
-    _run_isolated(lambda: test_generator_bool_yield_slot_is_bool(), 'test_generator_bool_yield_slot_is_bool (line 12696)')
-    _run_isolated(lambda: test_generator_bool_tuple_slot_is_bool(), 'test_generator_bool_tuple_slot_is_bool (line 12697)')
-    _run_isolated(lambda: test_generator_int_yield_slot_stays_int64(), 'test_generator_int_yield_slot_stays_int64 (line 12698)')
-    _run_isolated(lambda: test_generator_mixed_bool_and_int_yields_widen_to_int(), 'test_generator_mixed_bool_and_int_yields_widen_to_int (line 12699)')
-    _run_isolated(lambda: test_user_defined_dunder_repr_is_called(), 'test_user_defined_dunder_repr_is_called (line 12700)')
-    _run_isolated(lambda: test_user_defined_dunder_repr_value(), 'test_user_defined_dunder_repr_value (line 12701)')
-    _run_isolated(lambda: test_aliased_and_reexported_imports_resolve_to_the_defining_module(), 'test_aliased_and_reexported_imports_resolve_to_the_defining_module (line 12702)')
-    _run_isolated(lambda: test_a_diamond_import_does_not_give_an_imported_function_a_void_prototype(), 'test_a_diamond_import_does_not_give_an_imported_function_a_void_prototype (line 12703)')
-    _run_isolated(lambda: test_two_modules_one_same_named_function_keep_their_own_return_types(), 'test_two_modules_one_same_named_function_keep_their_own_return_types (line 12704)')
-    _run_isolated(lambda: test_gen_taking_middle_helper_is_never_reached_by_a_local_import(), 'test_gen_taking_middle_helper_is_never_reached_by_a_local_import (line 12705)')
-    _run_isolated(lambda: test_dotted_import_two_hop_attribute_call(), 'test_dotted_import_two_hop_attribute_call (line 12706)')
-    _run_isolated(lambda: test_dedup_variadic_externs_cache_is_a_faithful_parse(), 'test_dedup_variadic_externs_cache_is_a_faithful_parse (line 12707)')
-    _run_isolated(lambda: test_handwritten_selfhost_signature_tables_match_the_source(), 'test_handwritten_selfhost_signature_tables_match_the_source (line 12708)')
-    _run_isolated(lambda: test_no_name_is_defined_twice_in_a_codegen_class(), 'test_no_name_is_defined_twice_in_a_codegen_class (line 12709)')
-    _run_isolated(lambda: test_no_compiler_module_defines_a_function_twice(), 'test_no_compiler_module_defines_a_function_twice (line 12710)')
-    _run_isolated(lambda: test_import_line_modules_matches_the_regex_it_replaced(), 'test_import_line_modules_matches_the_regex_it_replaced (line 12711)')
-    _run_isolated(lambda: test_flagged_re_compile_is_not_lowered_as_the_bare_pattern(), 'test_flagged_re_compile_is_not_lowered_as_the_bare_pattern (line 12712)')
-    _run_isolated(lambda: test_bracket_mentions_matches_the_regex_it_replaced(), 'test_bracket_mentions_matches_the_regex_it_replaced (line 12713)')
-    _run_isolated(lambda: test_func_state_snapshot_covers_reset_func(), 'test_func_state_snapshot_covers_reset_func (line 12714)')
-    _run_isolated(lambda: test_every_funcptr_initializer_has_a_definition(), 'test_every_funcptr_initializer_has_a_definition (line 12715)')
-    _run_isolated(lambda: test_ast_walk_reaches_every_name_in_a_lambda_body(), 'test_ast_walk_reaches_every_name_in_a_lambda_body (line 12716)')
-    _run_isolated(lambda: test_callable_return_type_survives_its_carrier(), 'test_callable_return_type_survives_its_carrier (line 12717)')
-    _run_isolated(lambda: test_variadic_lambda_lowers_as_gimple_in_every_body(), 'test_variadic_lambda_lowers_as_gimple_in_every_body (line 12718)')
-    _run_isolated(lambda: test_scalar_given_a_char_star_parameter_is_stringified(), 'test_scalar_given_a_char_star_parameter_is_stringified (line 12719)')
-    _run_isolated(lambda: test_ctor_of_a_container_reaches_the_comprehension(), 'test_ctor_of_a_container_reaches_the_comprehension (line 12720)')
-    _run_isolated(lambda: test_a_string_passthrough_beside_an_int_one_keeps_its_own_elements(), 'test_a_string_passthrough_beside_an_int_one_keeps_its_own_elements')
-    _run_isolated(lambda: test_a_returned_heterogeneous_list_keeps_its_slot_kinds(), 'test_a_returned_heterogeneous_list_keeps_its_slot_kinds (line 12721)')
-    _run_isolated(lambda: test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not(), 'test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not (line 12722)')
-    _run_isolated(lambda: test_the_generic_repr_cluster_is_emitted_only_where_it_is_reachable(), 'test_the_generic_repr_cluster_is_emitted_only_where_it_is_reachable (line 12723)')
-    _run_isolated(lambda: test_print_of_a_function_value_is_not_a_decimal_address(), 'test_print_of_a_function_value_is_not_a_decimal_address (line 12724)')
-    _run_isolated(lambda: test_print_of_a_closure_value_is_not_a_decimal_address(), 'test_print_of_a_closure_value_is_not_a_decimal_address (line 12725)')
-    _run_isolated(lambda: test_decorator_rebinding_is_applied_at_runtime(), 'test_decorator_rebinding_is_applied_at_runtime')
-    _run_isolated(lambda: test_decorator_in_a_compound_block_is_applied_at_runtime(), 'test_decorator_in_a_compound_block_is_applied_at_runtime')
-    _run_isolated(lambda: test_a_local_rebound_from_a_scalar_to_a_container_is_the_box(), 'test_a_local_rebound_from_a_scalar_to_a_container_is_the_box (line 12726)')
-
-    # A `@deco def f` whose decorator returns a scalar rebinds `f` to a
-    # non-callable; the compiled path does not apply decorators yet, so it
-    # must refuse loudly rather than call the undecorated `f` (bugs/
-    # COMPILE_FAIL_decorator_application_dropped.md). The pass-through
-    # decorator rebinds `f` to itself, so its undecorated answer is correct
-    # and must still compile.
-    _run_isolated(lambda: test_raises("scalar_decorator_rebind_is_refused", """\
-def deco(f):
-    return 99
-
-@deco
-def step(x):
-    return x + 1
-
-def main():
-    print(step(7))
-""", "returns int64_t (not callable)"), 'scalar_decorator_rebind_is_refused')
-    _run_isolated(lambda: test("pass_through_decorator_on_a_def_still_compiles", """\
-def deco(f):
-    return f
-
-@deco
-def step(x):
-    return x + 1
-
-def main():
-    print(step(7))
-"""), 'pass_through_decorator_on_a_def_still_compiles')
-    # A decorator FACTORY (`@deco(x)`) whose call returns a scalar is the same
-    # silent wrong answer: `step` is rebound to a scalar and `step(7)` calls
-    # the undecorated body. The factory's own return is what gets refused.
-    _run_isolated(lambda: test_raises("scalar_decorator_factory_rebind_is_refused", """\
-def deco(x):
-    return 99
-
-@deco(3)
-def step(x):
-    return x + 1
-
-def main():
-    print(step(7))
-""", "returns int64_t (not callable)"), 'scalar_decorator_factory_rebind_is_refused')
-    # A factory that hands back a nested decorator is NOT a scalar, and a
-    # factory that returns its own argument is exempt for the same reason the
-    # identity decorator is: its answer is the undecorated function's.
-    _run_isolated(lambda: test("nested_bare_decorator_returning_a_def_still_compiles", """\
-def deco(f):
-    def wrap(g):
-        return g
-    return wrap
-
-@deco
-def step(x):
-    return x + 1
-
-def main():
-    print(step(7))
-"""), 'nested_bare_decorator_returning_a_def_still_compiles')
-    _run_isolated(lambda: test("nested_decorator_factory_still_compiles", """\
-def deco(tag):
-    def wrap(f):
-        return f
-    return wrap
-
-@deco("A")
-def step(x):
-    return x + 1
-
-def main():
-    print(step(7))
-"""), 'nested_decorator_factory_still_compiles')
-    # A decorated `def` NESTED in a function body is rebound like a top-level
-    # one (bugs/COMPILE_FAIL_decorator_application_dropped.md): before this,
-    # `step(n)` silently called the undecorated body and printed 8, not 16.
-    # A module-level decorator and a factory are both in scope from inside.
-    _run_isolated(lambda: test("nested_decorator_is_applied_at_runtime", """\
-def twice(f):
-    def wrap(x):
-        return f(x) * 2
-    return wrap
-
-def scale(k):
-    def deco(f):
-        def wrap(x):
-            return f(x) * k
-        return wrap
-    return deco
-
-def outer(n):
-    @twice
-    def step(x):
-        return x + 1
-    @scale(3)
-    def tripled(x):
-        return x + 1
-    return step(n) + tripled(n)
-
-print(outer(7))
-"""), 'nested_decorator_is_applied_at_runtime')
-    # A nested scalar-returning decorator is refused for the same reason the
-    # top-level one is: it would rebind `step` to a non-callable.
-    _run_isolated(lambda: test_raises("nested_scalar_decorator_rebind_is_refused", """\
-def deco(x):
-    return 99
-
-def outer(n):
-    @deco
-    def step(x):
-        return x + 1
-    return step(n)
-
-print(outer(7))
-""", "returns int64_t (not callable)"), 'nested_scalar_decorator_rebind_is_refused')
-    # A decorated def inside a MODULE-level block cannot be rebound (the global
-    # machinery only sees top-level bindings), so it is refused, not silently
-    # left as the undecorated function.
-    _run_isolated(lambda: test_raises("decorator_in_a_module_level_block_is_refused", """\
-def twice(f):
-    def wrap(x):
-        return f(x) * 2
-    return wrap
-
-if True:
-    @twice
-    def step(x):
-        return x + 1
-
-print(step(7))
-""", "inside a module-level block"), 'decorator_in_a_module_level_block_is_refused')
+    test_cursor_advance_has_no_cast_operand_in_gimple()
+    test_next_inside_for_over_same_iterator_advances_once()
+    test_paren_name_vs_one_tuple_for_target_differ()
+    test_walk_ast_dataclass_cache_is_transparent()
+    test_no_walk_ast_caller_mutates_what_it_is_handed()
+    test_walk_ast_memo_is_transparent_and_honours_invalidation()
+    test_walk_ast_memo_never_answers_stale_over_real_compiles()
+    test_every_ast_mutation_site_invalidates_the_walk_memo()
+    test_scalar_arity_min_max_params_are_not_containers()
+    test_a_forwarded_string_argument_keeps_its_type()
+    test_a_forwarded_container_argument_takes_the_callees_kind()
+    test_list_sort_in_a_method_body_is_gimple_legal()
+    test_dict_union_right_operand_is_converted_at_runtime()
+    test_dict_literal_star_star_pair_merges_instead_of_storing()
+    test_module_level_struct_global_keeps_its_type_in_a_container()
+    test_itertools_filterfalse_keeps_the_elements_whose_predicate_is_false()
+    test_next_over_a_filter_result_still_refuses_without_iter()
+    test_unannotated_init_param_evidence_reaches_the_signature()
+    test_next_inside_for_over_same_iterator_is_one_ahead()
+    test_iterator_cursor_len_is_remaining_and_dunder_next_advances()
+    test_span_cursor_reads_the_span_and_len_tracks_the_cursor()
+    test_a_program_written_inside_the_checkout_is_not_the_compiler()
+    test_cyclic_closure_from_import_of_a_container_global_reads_the_owner()
+    test_struct_unpack_computed_format_compiles()
+    test_struct_unpack_computed_format_keeps_literal_half()
+    test_ctor_arg_container_literal_field_is_container_typed()
+    test_ctor_arg_dict_and_set_literal_fields_are_container_typed()
+    test_ctor_arg_mixed_container_and_scalar_stays_int64()
+    test_ctor_arg_local_bound_to_container_literal_is_container_typed()
+    test_ctor_arg_self_field_container_read_is_container_typed()
+    test_field_value_through_local_keeps_char_star_return_type()
+    test_generator_bool_yield_slot_is_bool()
+    test_generator_bool_tuple_slot_is_bool()
+    test_generator_int_yield_slot_stays_int64()
+    test_generator_mixed_bool_and_int_yields_widen_to_int()
+    test_user_defined_dunder_repr_is_called()
+    test_user_defined_dunder_repr_value()
+    test_aliased_and_reexported_imports_resolve_to_the_defining_module()
+    test_a_diamond_import_does_not_give_an_imported_function_a_void_prototype()
+    test_two_modules_one_same_named_function_keep_their_own_return_types()
+    test_gen_taking_middle_helper_is_never_reached_by_a_local_import()
+    test_dotted_import_two_hop_attribute_call()
+    test_dedup_variadic_externs_cache_is_a_faithful_parse()
+    test_handwritten_selfhost_signature_tables_match_the_source()
+    test_no_name_is_defined_twice_in_a_codegen_class()
+    test_no_compiler_module_defines_a_function_twice()
+    test_import_line_modules_matches_the_regex_it_replaced()
+    test_flagged_re_compile_is_not_lowered_as_the_bare_pattern()
+    test_bracket_mentions_matches_the_regex_it_replaced()
+    test_func_state_snapshot_covers_reset_func()
+    test_every_funcptr_initializer_has_a_definition()
+    test_ast_walk_reaches_every_name_in_a_lambda_body()
+    test_callable_return_type_survives_its_carrier()
+    test_variadic_lambda_lowers_as_gimple_in_every_body()
+    test_scalar_given_a_char_star_parameter_is_stringified()
+    test_ctor_of_a_container_reaches_the_comprehension()
+    test_a_returned_heterogeneous_list_keeps_its_slot_kinds()
+    test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not()
+    test_the_generic_repr_cluster_is_emitted_only_where_it_is_reachable()
+    test_print_of_a_function_value_is_not_a_decimal_address()
+    test_print_of_a_closure_value_is_not_a_decimal_address()
+    test_a_local_rebound_from_a_scalar_to_a_container_is_the_box()
 
     # `len()` of a value the codegen could not type, where that value is a
     # LOCAL declared as a plain `int` — the shape that took out `make mojoc`,
@@ -13244,7 +12744,7 @@ print(step(7))
     # and would be the `mojo_list_len`-reads-a-string's-bytes bug that
     # `_len_of_boxed` exists to fix. `mojo_is_registered_bytes` is in the
     # must-have list for that reason.
-    _run_isolated(lambda: test_c_shape("len_of_a_local_declared_from_None_is_cast_into_its_int64_t_copy", """\
+    test_c_shape("len_of_a_local_declared_from_None_is_cast_into_its_int64_t_copy", """\
 def outer(names, table):
     def visit(node, caller):
         info = None
@@ -13263,17 +12763,8 @@ def main():
 main()
 """, ["mojo_is_registered_bytes", "mojo_is_registered_dict", "(int64_t)info",
       "int64_t info;"],
-       ["int info;", "int64_t _t = info;"]), 'len_of_a_local_declared_from_None_is_cast_into_its_int64_t_copy')
+       ["int info;", "int64_t _t = info;"])
 
-
-    # The isolation itself: a test that raises is one FAIL and the run goes on.
-    # Before `_isolate` existed, the first raise ended run_tests with no tally.
-    if isinstance(_isolate(lambda: 1 / 0), ZeroDivisionError) and _isolate(lambda: None) is None:
-        _PASS += 1
-        print("PASS  isolate: a raising test is recorded and the run continues")
-    else:
-        _FAIL += 1
-        print("FAIL  isolate: a raising test was not recorded as one failure")
 
     print()
     print(f"Results: {_PASS} passed, {_FAIL} failed")

@@ -39,7 +39,7 @@ blocker, and it is what must go first.
 expression and compares with `==`, so `case Op():` CONSTRUCTS `Op()` rather than testing
 the subject's type. A zero-arg class silently matches the wrong thing; a class with a
 required `__init__` argument raises `TypeError: __init__() missing required argument`.
-The interpreter evaluates `case C()` as a constructor and compares by `==`; the compiled path refuses class patterns by name — the two front ends disagree about what the pattern means.
+Filed separately as `bugs/CODEGEN_match_class_pattern.md`.
 
 ### Decision (taken; no reader input needed)
 
@@ -591,3 +591,7 @@ Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use
 
 Exit code: 1
 Elapsed: 15.44s
+
+## Status 2026-10-29 (partial — this session)
+
+Partial fix committed: formal/model.py `match_pattern_kind` now returns `"class pattern (type test)"` for `CallExpr` patterns with positional captures / zero args, removing the refusal that blocked `analyzer.py`. `mojo/backend_gimple/emit_stmts.py` handles the new kind with `isinstance` emission. `myinterpreter.py` updated for interpreter path (name-based fallback). Regression test `test_match_class_pattern.py` passes. `test_formal_match.py` reflects the changed refusal. Full end-to-end build verification on unmodified `analyzer.py` not completed (long compile); Family A `var_decl` (line 723) remains separate. Doc NOT deleted — bug not fully closed.

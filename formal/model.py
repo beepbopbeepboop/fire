@@ -5160,6 +5160,15 @@ def match_pattern_kind(pattern, bound=frozenset()) -> str:
     if isinstance(pattern, F.DictExpr):
         return "mapping pattern"
     if isinstance(pattern, F.CallExpr):
+        # Class-pattern type test: C(), C(x) with positional captures.
+        # Keyword sub-patterns (C(x=0)) stay refused.
+        args = getattr(pattern, 'args', []) or []
+        keywords = getattr(pattern, 'keywords', []) or []
+        if keywords:
+            return "class pattern"  # refusal kept for keywords
+        # Zero-arg or all positional captures -> new kind
+        if all(isinstance(a, F.IdentExpr) for a in args):
+            return "class pattern (type test)"
         return "class pattern"
     if isinstance(pattern, F.BinaryOp):
         if pattern.op == "as":

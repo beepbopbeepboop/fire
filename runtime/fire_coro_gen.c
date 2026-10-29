@@ -263,25 +263,6 @@ __mojo_gen_set_return(int64_t coro, int64_t v)
     __mojo_coro_set_return((MojoCoro *)(uintptr_t)coro, v);
 }
 
-/* Typed async result channel (coro.py's _ASYNC_SETRET_SHIM). A `double` or
-   `char *` return rides the same int64_t box as an int: bit-cast on the way
-   in here, and bit-cast back by the matching __mojo_bits_* reader, so
-   the awaiting side gets the value the callee returned, not its integer
-   truncation or its pointer printed as a number. */
-void
-__mojo_gen_set_return_d(int64_t coro, double v)
-{
-    int64_t bits;
-    __builtin_memcpy(&bits, &v, sizeof bits);
-    __mojo_coro_set_return((MojoCoro *)(uintptr_t)coro, bits);
-}
-
-void
-__mojo_gen_set_return_p(int64_t coro, char *v)
-{
-    __mojo_coro_set_return((MojoCoro *)(uintptr_t)coro, (int64_t)(uintptr_t)v);
-}
-
 /* The value a `x = yield <double>` receives. The yield shims all return the
    raw int64_t slot (that is the whole channel), so a DOUBLE-valued
    generator's body has to reinterpret those bits -- the exact inverse of
@@ -437,22 +418,6 @@ int64_t __mojo_gen_value(int64_t gen)
 
 int64_t __mojo_gen_retval(int64_t gen)
 { MojoGen *g = (MojoGen *)(uintptr_t)gen; return g ? g->retval : 0; }
-
-/* The typed readers for the same channel (see __mojo_gen_set_return_d). They
-   take the raw int64_t slot read, so one bit-cast serves every awaiting site
-   (__mojo_gen_retval, __mojo_async_await_task, ...). */
-double __mojo_bits_d(int64_t bits)
-{
-    double d;
-    __builtin_memcpy(&d, &bits, sizeof d);
-    return d;
-}
-
-_Bool __mojo_bits_b(int64_t bits)
-{ return (_Bool)bits; }
-
-char *__mojo_bits_p(int64_t bits)
-{ return (char *)(uintptr_t)bits; }
 
 /* throw(exc) into a suspended generator. */
 int64_t

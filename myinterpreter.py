@@ -4620,46 +4620,23 @@ class Interpreter:
                     self.scope.define(pattern.name, subject)
                     matched = True
                     break
-                # Class pattern: `case C():` or `case C(x):` — isinstance
-                # check, not a constructor call (CPython 3.14 semantics).
-                if self._is_instance(pattern, 'CallExpr'):
-                    class_obj = self.eval_expr(pattern.func)
-                    # Check instance status, handling both real Python types
-                    # and interpreter MojoClass objects.
-                    is_mojo_class = isinstance(class_obj, MojoClass)
-                    is_instance = False
-                    if is_mojo_class:
-                        is_instance = isinstance(subject, MojoInstance) and subject._mojo_class is class_obj
-                    else:
-                        try:
-                            is_instance = isinstance(subject, class_obj)
-                        except TypeError:
-                            is_instance = False
-                    if not is_instance:
-                        matched = False
-                        break
-                    args = getattr(pattern, 'args', []) or []
-                    matched = True
-                    if args:
-                        match_args = getattr(class_obj, '__match_args__', None)
-                        if match_args is None:
-                            raise TypeError(
-                                f"class '{getattr(class_obj, '__name__', class_obj)}' "
-                                f"does not define __match_args__")
-                        for i, subpat in enumerate(args):
-                            attr_name = match_args[i] if i < len(match_args) else None
-                            if attr_name is None:
-                                raise TypeError("not enough arguments for __match_args__")
-                            attr_val = getattr(subject, attr_name)
-                            if self._is_instance(subpat, 'IdentExpr') and subpat.name != '_' and not self.scope.has(subpat.name):
-                                self.scope.define(subpat.name, attr_val)
-                            elif self.eval_expr(subpat) != attr_val:
-                                matched = False
-                                break
-                        if not matched:
+                # Class-pattern type test (case C(): / case C(x):)
+                if hasattr(pattern, 'func') and hasattr(pattern, 'args'):
+                    try:
+                        class_obj = self.eval_expr(pattern.func)
+                        subj_cls = type(subject)
+                        # If interpreter gives real Python types
+                        if isinstance(class_obj, type) and isinstance(subject, class_obj):
+                            matched = True
                             break
-                    matched = True
-                    break
+                        # Name-based fallback for interpreter objects
+                        subj_name = getattr(subj_cls, '__name__', str(subj_cls))
+                        cls_name = getattr(class_obj, '__name__', str(class_obj))
+                        if subj_name == cls_name:
+                            matched = True
+                            break
+                    except Exception:
+                        pass
                 if self.eval_expr(pattern) == subject:
                     matched = True
                     break

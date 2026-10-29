@@ -28,8 +28,7 @@ from fire_compiler import (
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
     py_tokenize, Parser, _as_str, _as_int, _as_structdef_node, _as_funcdef_node,
-    desugar_genexps, DESUGARED_GENEXP_NAMES, desugar_namedtuples,
-    DESUGARED_NAMEDTUPLE_NAMES,
+    desugar_genexps, DESUGARED_GENEXP_NAMES,
 )
 from module_loader import load_module, get_symbol_type, compiler_source_dir
 import ast_rewriter
@@ -917,9 +916,6 @@ class GimpleGen:
         # struct-protocol dispatch this project relies on, and both used to
         # emit a call to a symbol nothing defines.
         self._ambiguous_struct_methods: set = set()
-        # Per-root-compile memo of imported modules whose compilation raised,
-        # so rollback + parent-recompile does not redo the same failed module.
-        self._failed_modules: set = set()
         # Milestone B (C++20-coroutine generator codegen): name -> FunctionDef
         # for every top-level generator in THIS module that gen_module's
         # pre-pass found to match the narrow supported shape (see
@@ -1790,7 +1786,7 @@ class GimpleGen:
         # or transitively) — populated by gen_module_impl. Such a struct
         # gets a synthesized `_data: MojoDict *` backing field, and
         # inherited container ops route to it. See
-        # bug:COMPILE_FAIL_collections___init__ (3-arg type() refusal; feature open).
+        # bugs/COMPILE_FAIL_collections___init__.md.
         self._dict_subclass_structs: set = set()
         # Names of user structs that subclass the builtin `bytes` (directly
         # or transitively) — populated by gen_module_impl. Such a struct
@@ -2092,10 +2088,6 @@ class GimpleGen:
         # child generator's yield slot (see coro.lower). Shared down the chain
         # the same way `_compiled_modules` is.
         self._closure_call_stmts: list = []
-        # Class names of this module's literal namedtuple lowerings (see
-        # fire_compiler.desugar_namedtuples); a tuple operation on a value
-        # of one of these is refused where its static type is known.
-        self._namedtuple_class_names: list = []
         # Absolute file paths currently being compiled anywhere in this whole-
         # program flattening (root file plus every transitively-imported
         # module), keyed by PATH rather than module NAME — a real self-
@@ -2676,10 +2668,6 @@ class GimpleGen:
         # and the next read (`emit_fallthrough_frees`) crashed on garbage/
         # near-null memory (confirmed via lldb: EXC_BAD_ACCESS in
         # `mojo_set_len`, called via `gen._owned_free_candidates`).
-        # The per-execution cell pointers the function being emitted must
-        # write back on exit: `[gname, saved temp]` pairs, set by
-        # emit_methods._cattr_restore_begin and cleared by _cattr_restore_end.
-        self._cattr_restores: list = []
         self._owned_free_candidates: set = set()
         self._owned_free_pushed: set = set()
         self._owned_stack_allocated: set = set()
@@ -4795,24 +4783,6 @@ class GimpleGen:
                 f'static int64_t {hname} (void) '
                 f'{{ return (int64_t)sizeof({struct_name}); }}')
         return hname
-    def _c_cell_alloc_helper(self, ctype: str) -> str:
-        """Name of a `static` accessor that heap-allocates one zeroed cell of C
-        type `ctype` and returns a pointer to it, registered for emission into
-        the non-GIMPLE prelude.
-
-        The `_c_sizeof_helper` reason, with one more: that helper takes a struct
-        NAME, and a pointer type (`int64_t *`) is neither a name nor a valid
-        `sizeof` operand inside a `__GIMPLE` body. The accessor takes the whole
-        allocation, and its plain-C body does the `sizeof`. Used for the
-        per-execution storage of a function-scoped class attribute (see
-        `_gen_stmt_StructDef`).
-        """
-        hname = '_mojo_cellnew_' + ctype.replace('*', 'P').replace(' ', '_')
-        if hname not in self._c_helpers_needed:
-            self._c_helpers_needed[hname] = (
-                f'static {ctype} * {hname} (void) '
-                f'{{ return ({ctype} *) calloc (1, sizeof ({ctype})); }}')
-        return hname
     def _c_fnaddr_helper(self, func_name: str) -> str:
         """Name of a `static void *` accessor returning `(void *)func_name`,
         registering it for emission into the non-GIMPLE prelude.
@@ -4950,8 +4920,8 @@ class GimpleGen:
         return glo._gen_lifted_closure(self, ci, outer_name)
     def _emit_generator_tuple_unpack(self, var_names: list, slot_types: list, list_ptr: str, nested_flags: list | None=None) -> None:
         return glo._emit_generator_tuple_unpack(self, var_names, slot_types, list_ptr, nested_flags)
-    def _gen_for_generator_iter(self, var: str, gen_val: str, api: dict, body: list, destroy_after: bool=True, shadow_name: str | None=None):
-        return glo._gen_for_generator_iter(self, var, gen_val, api, body, destroy_after, shadow_name)
+    def _gen_for_generator_iter(self, var: str, gen_val: str, api: dict, body: list, destroy_after: bool=True):
+        return glo._gen_for_generator_iter(self, var, gen_val, api, body, destroy_after)
     def _emit_generator_pending_exc_check(self, gen_val: str, base: str, destroy_after: bool, bb_not_pending: str):
         return glo._emit_generator_pending_exc_check(self, gen_val, base, destroy_after, bb_not_pending)
     def _gen_for_struct_iter(self, var: str, struct_type: str, obj_val: str, body: list, shadow_name: str | None=None, node=None):
@@ -5218,8 +5188,8 @@ class GimpleGen:
         return gca._cpp_match_stmt(self, s, declared, indent)
     def _cpp_except_handler_body(self, handler, caught_var: str, declared: dict, indent: str) -> list[str]:
         return gca._cpp_except_handler_body(self, handler, caught_var, declared, indent)
-    def _gen_cpp_generator_unit(self, fn: FunctionDef, struct_name: str | None=None, struct_def: str | None=None) -> tuple[str, str, str, list]:
-        return gca._gen_cpp_generator_unit(self, fn, struct_name, struct_def)
+    def _gen_cpp_generator_unit(self, fn: FunctionDef, struct_name: str | None=None) -> tuple[str, str, str, list]:
+        return gca._gen_cpp_generator_unit(self, fn, struct_name)
     def _compute_nested_closure_captures(self, inner: FunctionDef, outer_scope: dict) -> list:
         return gca._compute_nested_closure_captures(self, inner, outer_scope)
     def _enclosing_scope_with_locals(self, outer_fn: FunctionDef) -> dict:
@@ -6127,12 +6097,7 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     # (a name rebound later in the enclosing function, or `self`) it
     # deliberately leaves alone.
     stmts = desugar_genexps(stmts)
-    # Literal `Name = namedtuple('Name', [...])` at module level becomes the
-    # static class it denotes (see fire_compiler.desugar_namedtuples); every
-    # other namedtuple call is refused by name in emit_calls.
-    stmts = desugar_namedtuples(stmts)
     _desugared_names = list(DESUGARED_GENEXP_NAMES)
-    _namedtuple_names = list(DESUGARED_NAMEDTUPLE_NAMES)
     # A3 stack-switch coroutine lowering (doc/COROUTINE.html §5.4), gated by
     # MOJO_CORO=stackswitch. Replaces eligible generator FunctionDefs with a
     # plain `__mgco_<g>_body` the ordinary codegen lowers; ineligible ones
@@ -6143,7 +6108,6 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     # The root's own call sites are what an imported module's generators are
     # typed by (see GimpleGen._closure_call_stmts).
     gen._closure_call_stmts = [stmts]
-    gen._namedtuple_class_names = _namedtuple_names
     gimple_gen_coro.register_abi_externs(gen)
     if _coro_meta or gimple_gen_coro._NATIVE_FUTURE_CLASSES:
         gimple_gen_coro.register(gen, _coro_meta)
