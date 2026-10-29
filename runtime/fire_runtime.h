@@ -689,7 +689,6 @@ int mojo_is_tuple(MojoList *l);
  * `mojo_list_inherit_kinds` is what every list->list copy calls, so
  * `list(t)` / `t[:]` / `t + t` of a heterogeneous list stay describable. */
 void        mojo_list_set_kinds(MojoList *l, const char *kinds);
-void        mojo_list_set_kinds_uniform(MojoList *l, char kind);
 const char *mojo_list_get_kinds(MojoList *l);
 char        mojo_list_slot_kind(MojoList *l, int64_t i);
 void        mojo_list_inherit_kinds(MojoList *dst, MojoList *src);

@@ -871,29 +871,6 @@ void mojo_list_set_kinds(MojoList *l, const char *kinds)
     if (fresh && !kinds) _kinds_forget(addr);
 }
 
-void mojo_list_set_kinds_uniform(MojoList *l, char kind)
-{
-    /* Set every slot's kind byte to the same uniform kind, and mark the
-     * result so that mojo_list_get_boxed and its consumers read the boxed
-     * form rather than the raw int word (decimal address). */
-    if (!l) return;
-    int64_t n = mojo_list_len(l);
-    if (n == 0) {
-        mojo_list_set_kinds(l, NULL);
-        return;
-    }
-    char *k = (char *)malloc((size_t)n + 1);
-    if (!k) return;
-    memset(k, (int)(unsigned char)kind, (size_t)n);
-    k[n] = '\0';
-    uint64_t addr = (uint64_t)(uintptr_t)l;
-    int fresh = 0;
-    _KindRow *r = _kinds_row_for_write(addr, &fresh);
-    r->kinds = k;
-    r->owned = 1;   /* private copy — not shared with the string pool */
-    if (fresh && !k) _kinds_forget(addr);
-}
-
 /* The kind of one slot, 'i' for anything this table does not describe. */
 char mojo_list_slot_kind(MojoList *l, int64_t i)
 {

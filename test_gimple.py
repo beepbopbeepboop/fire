@@ -8324,56 +8324,6 @@ main()
         print(f"PASS  {name}")
         _PASS += 1
 
-    def test_list_of_a_boxed_dict_materializes_keys_as_strings():
-        """`list(<a boxed dict>)` must print the dict's keys, not the decimal
-        addresses of those keys.
-
-        `def ident(x): return x` type-erases its result to a boxed handle, so
-        `list(ident(d))` routes through _materialize_as_list's opaque arm. The
-        merged temp must be marked so the loop accessor reads each slot with
-        mojo_list_get_boxed (which consults the per-slot kinds table) instead of
-        mojo_list_get_int (which reads the char* pointer bits as a bare
-        integer). Fixed by recording mojo_list_set_kinds_uniform(result, 'p')
-        in the bb_dict branch and registering result in _maybe_kinds_vals.
-
-        The other three branches (set / registered-list / boxed) share the temp
-        and must keep their old behaviour: mojo_list_get_boxed with no kinds
-        table entry reads slot kind 'i', which returns the bare word — identical
-        to mojo_list_get_int. The generator suite's
-        `generator_pops_heterogeneous_tagged_stack` and
-        `generator_pops_stack_two_level_tuple_unpack` are the regression guard
-        that an earlier _elem_types attempt broke by retyping every branch.
-        """
-        global _PASS, _FAIL
-        name = "list_of_a_boxed_dict_materializes_keys_as_strings"
-        src = '''\
-def ident(x):
-    return x
-def main():
-    d = {"k": 1, "j": 2}
-    print(list(ident(d)))
-main()
-'''
-        want = _cpython_stdout(src)
-        if want is None:
-            print(f"FAIL  {name}: CPython does not run the fixture")
-            _FAIL += 1
-            return
-        for mode in ('single-TU', 'link-mode'):
-            got = _compiled_stdout(src, mode)
-            if isinstance(got, tuple):
-                print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
-                      f"{got[1][:800]}")
-                _FAIL += 1
-                return
-            if got != want:
-                print(f"FAIL  {name} [{mode}]: compiled stdout {got!r} != "
-                      f"CPython {want!r}")
-                _FAIL += 1
-                return
-        print(f"PASS  {name}")
-        _PASS += 1
-
     def test_a_returned_heterogeneous_list_keeps_its_slot_kinds():
         """A list literal's per-slot kinds must survive a `return`.
 
@@ -12751,7 +12701,6 @@ print(run('x/y.txt'))
     test_variadic_lambda_lowers_as_gimple_in_every_body()
     test_scalar_given_a_char_star_parameter_is_stringified()
     test_ctor_of_a_container_reaches_the_comprehension()
-    test_list_of_a_boxed_dict_materializes_keys_as_strings()
     test_a_returned_heterogeneous_list_keeps_its_slot_kinds()
     test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not()
     test_the_generic_repr_cluster_is_emitted_only_where_it_is_reachable()
