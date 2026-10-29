@@ -916,6 +916,9 @@ class GimpleGen:
         # struct-protocol dispatch this project relies on, and both used to
         # emit a call to a symbol nothing defines.
         self._ambiguous_struct_methods: set = set()
+        # Per-root-compile memo of imported modules whose compilation raised,
+        # so rollback + parent-recompile does not redo the same failed module.
+        self._failed_modules: set = set()
         # Milestone B (C++20-coroutine generator codegen): name -> FunctionDef
         # for every top-level generator in THIS module that gen_module's
         # pre-pass found to match the narrow supported shape (see
