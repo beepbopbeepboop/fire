@@ -64,7 +64,7 @@ rather than merely detectable, so a program with one call site would compile
 instead of falling back.
 
 **Original report.** Measured 2026-10-02 while fixing the struct-pointer
-forwarding chain in `bugs/hard/CODEGEN_param_used_only_as_method_receiver.md`.
+forwarding chain (commit 6379400b1, "a struct pointer forwards across free functions").
 Found by writing the test for that fix's VETO and finding the veto has no
 cleanly assertable observable, because the shape it protects is already wrong.
 
@@ -162,8 +162,8 @@ unimplemented one.
 
 ## Related
 
-- `bugs/hard/CODEGEN_param_used_only_as_method_receiver.md` — the doc whose
-  fix named the veto this shape hides behind.
+- Commit 6379400b1 ("a struct pointer forwards across free functions") — the
+  fix whose veto this shape hides behind.
 - `bugs/UNTESTED.md` §3.3: "a non-zero exit is the only verdict
   `tools/suite.py` can see", and this is a step below that — the compiled
   answer itself is wrong, and no test in the estate exercises the shape.
