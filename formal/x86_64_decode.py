@@ -115,11 +115,7 @@ def _modrm_fields(modrm: int, rex: int, code: bytes, at: int):
     that produces plausible addresses.
 
     `mem_base` is the register an r/m operand addresses through, or None when
-    the operand is a register or RIP-relative.  For a SIB operand with an index
-    (`mov [base + index], r`), `mem_base` is the base register; the index and
-    scale live in the SIB byte and are read by the model (`lib/X86.lean`'s
-    `x86_mem_addr`) from the bytes, which is the one place the effective address
-    is computed.
+    the operand is a register or RIP-relative.
     """
     mod = modrm >> 6
     reg = ((modrm >> 3) & 7) | (8 if rex & R else 0)
@@ -132,12 +128,9 @@ def _modrm_fields(modrm: int, rex: int, code: bytes, at: int):
     if rm == 4:                                   # a SIB byte follows
         sib = code[at + 1]
         extra = 1
-        # The index field: 4 means "no index" (a base+displacement address);
-        # anything else is an index register, REX.X-extended, contributing
-        # index * 2^scale to the address.  The float-repr helper emits the
-        # indexed form (`encode_mov_rm8_r8_idx`, `encode_movzx_r64_rm8_idx`),
-        # and this decoder is the encoder's inverse, so it reads it here rather
-        # than refusing: `mem_base` is the base, as for every other SIB form.
+        index = (sib >> 3) & 7
+        if index != 4:                            # index field 4 = no index
+            raise DecodeError(f"SIB with index {index} is not emitted")
         base = (sib & 7) | (8 if rex & B else 0)
         mem_base, rm = base, base
     elif rm == 5 and mod == 0:
@@ -597,24 +590,6 @@ def decode_all(code: bytes, start: int = 0, end: int = None) -> list:
         out.append(insn)
         off = insn.next_offset
     return out
-
-
-def body_end(info: dict) -> int:
-    """The offset into `code` at which a linear sweep of a body must stop.
-
-    Every function body comes before the string pool and before the float-repr
-    helper, and the helper follows the bodies. Neither is an instruction a
-    body's chain reaches (a body calls the helper, and the chain does not follow
-    a `call`), and the helper's SIB-indexed byte stores are not a form this
-    decoder reads. So the sweep ends at the first of them. Both consumers of a
-    body's decode, `x86_64_proof_gen._decode_function_body` and the end-to-end
-    emitter's `_body`, take their end from here.
-    """
-    base = info["base_addr"]
-    ends = [a for name, a in (info.get("labels") or {}).items()
-            if name.startswith("str_")]
-    ends.append(info["float_repr_addr"])
-    return min(ends) - base
 
 
 def forms(insns: list) -> set:

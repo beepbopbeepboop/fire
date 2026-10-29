@@ -2,8 +2,7 @@
 
 ## Status
 
-OPEN. Step 0 (measurement) is done, 2026-10-29, and it changes the plan: see "Step 0 result" below. Nothing is
-parallelized yet. The next round needs the decision in "Re-plan" before any code is written.
+OPEN (BLOCKED 2026-10-29 — worker round, no code change). Step 0 (measurement) done; nothing parallelized. Next step requires owner's decision from "Re-plan" (option a: accept ~1.5x ceiling and do steps 1-4; option b: measure fire.py --dump-full first) before any parallel work can begin. No root-cause code fix is possible without that decision — the serial path in gimple_codegen.compile_to_gimple(src, do_imports=True) (fire.py ~line 1569) is the intended current behaviour, not an implementation error.
 
 ## Measured / known
 

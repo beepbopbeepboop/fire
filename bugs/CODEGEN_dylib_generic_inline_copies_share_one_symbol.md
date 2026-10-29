@@ -56,43 +56,6 @@ Next round can start on step 1 once A is confirmed.
 Separately found while scoping: a bare call to a generic function binds the weak stub in link mode (fixed by
 `test_same_module_call_to_generic_with_default_binds_instantiation`, the defaulted-bracket-parameter inference).
 
-### 2026-10-30 partial fix (landed; the dylib part is still open)
-
-**What landed.** The repro `test_two_modules_specialize_one_generic_differently` was not a shared-symbol
-bug. In the inline `do_imports=True` path, `_register_imported_generics` returned early, so a sibling
-module's generic (`scale` from `pkg/gen.py`) was never registered. The bracketed call `scale[2](10)`
-then matched nothing and lowered to `(int64_t)0 /* indirect call via SubscriptExpr */`, a silent zero
-stub. The guard is removed (`mojo/backend_gimple/emit_funcs.py`), so the call elaborates a concrete
-instantiation in both modes. The repro now prints `20`/`30`, and `test_link_mode.py` is 26 passed,
-0 failed on this tree.
-
-**What did not change, and is still open.** The dylib still excludes 130 modules as "symbol already
-defined" (`_dlsym` in `dedup.log`). The shared-name copies are still emitted with bare names, so the
-Option A design above (per-specialization `mangle` names and bodies, dedup removed) is the next step.
-Two expectations to re-measure at the integrator's gate:
-- `build_stdlib_dylib.py`: the exclusion count should move, and the `skip` count must not increase.
-- `_register_imported_generic_structs` has the same `do_imports` guard. It was NOT changed here;
-  check whether it hides the same silent-zero shape for generic structs before touching it.
-
-**Not verified here.** No stdlib sweep, self-host build, or `make gate` was run. The integrator owns that.
-
-**A rejected experiment.** Widening the elaboration seed to every generic function (`_fn_has_type_params`
-in `elab_intu.py`) did not fix the repro, because the call never reached the seed in the do_imports path.
-It also changed dylib skip and exclude counts. Not landed.
-
-### 2026-10-29 repro round (regression test landed, red)
-
-Landed: `test_link_mode.py::test_two_modules_specialize_one_generic_differently` (in `CASES`). Two modules call one
-generic with different specializations (`scale[2]` in `a`, `scale[3]` in `b`, body `x * k`). Expected stdout `20`/`30`.
-
-**Measured (red, before any fix):** `python3 test_link_mode.py`-equivalent run through `driver.compile_program`
-prints `0` / `0`, rc 0. This is a silent miscompile. The bare symbol `_scale` is shared, so both callers run one body
-(`k` erased). It is the same mechanism as `_dlsym`, with a smaller case.
-
-Option A (the recommended design above) is still the next step, not yet implemented. It needs the full gate, so the
-integrator should gate it. The test stays red until step 1 lands. Do not add an `expect=` marker for it, because that
-would hide the miscompile.
-
 ## Measured
 
 `python3 build_stdlib_dylib.py -o …` with `MOJO_DEDUP_LOG` set (the dedup log is now kept, see the commit that added it):
@@ -101,7 +64,7 @@ would hide the miscompile.
 - The 130 excluded modules are `std/gpu/*` and their importers; their symbols are lost from the dylib (clients fall
   back to compiling source, so the failure is silent and slow).
 - The 4 `case .PASS:` skips (dtype, logger, address_space, testing/suite) are a separate bug, already on file as
-  the `stdlib-syntax` gate failure (fixed by the enum-case / .NAME resolution).
+  `bugs/CODEGEN_gate_stdlib_syntax_red.md`.
 
 ## Why
 

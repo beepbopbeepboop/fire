@@ -458,10 +458,6 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
 
     Returns (code: str, stmts: list) where stmts are parsed statements from the module.
     """
-    # If this module already failed in this root compile, skip re-compile
-    # (rollback-recompile path is the root cause of the quadratic walk).
-    if module_name in getattr(gen, '_failed_modules', set()):
-        return (None, [])
     mojo_paths = gen._module_candidate_paths(module_name)
     for path in mojo_paths:
         if gimple_ctypes.os.path.exists(path):
@@ -1022,13 +1018,6 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # _imported_generator_bindings deliberately stays
                 # per-instance: each module's import bindings are its own.
                 temp_gen._generator_home_api = gen._generator_home_api
-                # share: a generator held in a module global (`_coro = _coro()`)
-                # is recorded by its DEFINING module's store and read by an
-                # importer through the accessor; both tables are keyed by
-                # (defining module, name) so sharing them cannot cross-wire two
-                # modules' same-named globals. See `ginf.global_generator_key`.
-                temp_gen._global_generator_api = gen._global_generator_api
-                temp_gen._global_generator_api_poisoned = gen._global_generator_api_poisoned
                 # share: link mode's own link-line accumulators
                 # (dylibs/objects the final `fire.py build` link step
                 # needs — see compile_linked's own docstring) must be
@@ -1319,10 +1308,6 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 gen._scope_live = []
                 gen._scope_live_depth = []
                 gen._scope_live_fn = []
-                # Remember this module failed for this root compile so the
-                # next parent that imports it doesn't redo the failed compile.
-                if hasattr(gen, '_failed_modules'):
-                    gen._failed_modules.add(module_name)
                 # Note: _module_globals / _module_global_inits are intentionally NOT
                 # rolled back. Partial data from a failed compilation (e.g. build_stdlib_dylib
                 # failing but having populated its globals) is still needed so that the
@@ -1467,8 +1452,7 @@ def _module_marker_attribute_reads(stmts) -> dict:
     this module — ONE AST walk for the whole module, so a module with N bare
     imports costs one walk and not N (the walk is the expensive half of
     `_inline_bare_import_struct`; see
-    the `_walk_ast` re-scan bug (fixed; the memo and self-assign scan fixes are
-    in the same commit).)"""
+    the `_walk_ast` re-scan bug (fixed; remainder in bugs/hard/PERF_struct_self_assign_scan_uncached.md))."""
     out: dict = {}
     for _n in gimple_exprtypes._walk_ast(stmts):
         if not isinstance(_n, gimple_ctypes.MemberExpr):
@@ -2323,9 +2307,6 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
         filename = getattr(gen, '_current_filename', '') or '<unknown>'
         line = getattr(gen, '_current_line', None)
         loc = f'{filename}:{line}' if line else filename
-        _fn = getattr(gen, 'current_func_name', None)
-        if _fn:
-            loc = f'{loc} in function `{_fn}`'
         raise TypeError(
             f'cannot coerce {s} to {d} (incompatible container kinds) '
             f'at {loc}: value={v!r} dest={dest!r}')
@@ -3215,7 +3196,8 @@ def _generic_struct_field_types(gen, info: dict) -> dict:
     stdlib's `_PeekableIterator[InnerIterator]`'s `var _inner:
     Self.InnerIterator` ended up an integer, and how `next(self._inner)` /
     `next(it)` then had no receiver type to dispatch the iterator protocol
-    through (`the user-iterator next() bug (db724c4d6)`).
+    through (`bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_
+    unlowered.md`).
 
     So: materialize the instantiation to its mangled name, then resolve with
     `gen._resolve_type`, which is the one resolver that consults
@@ -3253,7 +3235,7 @@ def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
     # '<name>'` — a definition with this codegen's real parameter types next
     # to a declaration with the elaborator's erased ones — which is the
     # regression that made the first in-TU attempt be reverted
-    # (the user-iterator next() bug (doc deleted in db724c4d6)).
+    # (bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md).
     # Keyed on `(base, args)` and NOT on "is this name already a struct here":
     # the second test would also fire for a struct this module defines itself,
     # which is a different situation with a different (unrelated) answer.
@@ -3432,7 +3414,7 @@ def _register_generic_struct(gen, base_name, info):
         # same erasure that destroys the function `overload_suffix_for` is
         # computed from, so this cannot be resolved by composing harder — it
         # needs the CALLER's real argument types, which is the in-TU route
-        # (see bug:CODEGEN_imported_generic_never_elaborated_calls_nothing_
+        # (see bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_
         # defines.md).
         _ambiguous: set = set()
         for mname, _ret, _ps in info['methods']:
@@ -3695,9 +3677,9 @@ def _compr_enumerate_loop(gen, node, gen0, res: str, res_type: str, it_val: str,
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
     # The comprehension is over: every name it bound is the enclosing
-    # function's own binding again (see `ginf._restore_binding`).
+    # function's own binding again (see `ginf._compr_restore_target`).
     for _gn in gi:
-        ginf._restore_binding(gen, _gn[0], _gn[1])
+        ginf._compr_restore_target(gen, _gn[0], _gn[1])
 
 
 def _compr_str_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
@@ -3721,7 +3703,7 @@ def _compr_str_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     gen._emit(f"  {idx64} = {st};")
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
-    ginf._restore_binding(gen, _as_str(gen0.target), saved_target)
+    ginf._compr_restore_target(gen, _as_str(gen0.target), saved_target)
 
 
 def _compr_cstr_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
@@ -3775,7 +3757,7 @@ def _compr_cstr_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     gen._emit(f"  {idx64} = {st};")
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
-    ginf._restore_binding(gen, _as_str(gen0.target), saved_target)
+    ginf._compr_restore_target(gen, _as_str(gen0.target), saved_target)
 
 
 def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,

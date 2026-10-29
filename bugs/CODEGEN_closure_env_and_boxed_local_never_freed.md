@@ -1,48 +1,5 @@
 # CODEGEN: closure environments and boxed mutable locals are never freed
 
-## Status (2026-10-30 — OPEN 2 is PARTLY CLOSED: a `{mut}` box is now freed at
-## its function's exit when no closure built there can outlive the call)
-
-Landed: `_emit_mut_local_box_allocs(gen, fn)` registers each heap box the way
-`register_nested_env_free` registers an env — the box is a plain `malloc`
-block, a `mojo_cleanup_push_ptr` thunk covers the unwind, and a bare `free`
-runs at `emit_return_frees`/`emit_fallthrough_frees` — when
-`infra_infer._no_closure_escapes(fn)` holds. That predicate is per owner:
-every nested `def` must be a direct statement of the body it sits in and be
-owned by it (`nested_def_env_owned`), and so on recursively, so a closure
-inside an owned closure is judged by the closure that holds it. Lambda
-bindings are judged by the existing whole-tree rule, which is conservative.
-
-Box names live in `gen._owned_box_names`. It is reset in `_reset_func`, not
-in `_reset_scope_state`, because `begin_function` and `reset_no_candidates`
-run AFTER the prologue allocates the boxes; the lifted-closure path saves and
-restores it around the lifted body, as it does the env set.
-
-Measured, 4,000,000 calls of a function whose `nonlocal` box is only called
-inside it: peak RSS **63.2 MB → 1.9 MB**. Regression tests in
-`test_gimple_runner.py` (the `gimple_boxed_mut_*` cases): bounded memory for a
-`var` box, a `{mut}` parameter, a struct method, a box in a lifted child, and a
-box under `try`/`raise`; stdout for a box whose closure escapes (returned) and
-for a box held by an inner closure that its middle function returns. Each
-freeing case fails with the rule forced off (63 MB). Each escape case fails
-with the rule wrongly forced on — the returned-closure probe prints `3`/`4`
-instead of `6`/`7`, and the held-by-returned-inner probe, with the per-owner
-recursion blinded, prints `4`/`5` instead of `6`/`7`/`11`.
-
-**Still open (the escaping half):** a box that a closure which ESCAPES its
-call can reach — returned, stored in a container, passed on — is still never
-freed, because its lifetime is the closure's, and nothing frees a closure's
-environment once it escapes. Next step: give an escaping closure's environment
-and the boxes it holds a single owner (the closure value's own lifetime — the
-same owner-of-the-value question `lambda_value_owned` answers for a local
-callable, asked of the value that leaves the function). That is a design
-change, not a missing check, and it is the only remaining path to a flat
-profile for a function that returns a closure. Secondary: `_no_closure_escapes`
-refuses a function outright when any lambda in it is not a plain owned binding,
-including a lambda mentioned inside a nested `def`, so such a function keeps its
-boxes. That is conservative and could be tightened by applying the lambda rule
-per owner as the nested-`def` rule now is.
-
 ## Status (2026-10-02 — OPEN 1 is CLOSED. OPEN 2, the mutable-capture box, is
 ## still open and is the only thing left in this document)
 
@@ -230,16 +187,28 @@ there was never a local to key anything on — and the piece of work was not a
 new mechanism but the ownership machinery's own scope exits, applied to the env
 var. See the 2026-10-02 Status at the top of this file.
 
-### OPEN 2 (partly closed 2026-10-30; the escaping half is still open): the box for a mutable captured local
+### OPEN 2: the box for a mutable captured local — `malloc(8)` per call, per variable
 
-The box is malloc'd once per call in the prologue (`_emit_mut_local_box_allocs`),
-so the cost is per call, not per closure creation. Its lifetime is the call's
-when no closure built in the function can outlive it, and that case is now
-freed at the function's exit — see the 2026-10-30 Status at the top of this
-file. What is still open is the case where a closure escapes: its box then
-lives as long as that closure, and a free at the function's exit would be a
-use-after-free (the `escapes_is_kept` probes in `test_gimple_runner.py` pin
-that). The design question is in the top Status's "Still open" paragraph.
+`_emit_mut_local_box_allocs` (runtime `fire_runtime.c`'s
+`mojo_cleanup_*` aside, `mojo/backend_gimple/emit_infra.py`) mallocs one cell
+per `{mut}`-captured local in the function PROLOGUE, so the cost is per call
+rather than per closure creation.
+
+NOT attempted, and the reason is the same one that keeps the escape rules
+narrow above: the box is what the closure's environment holds — the env field
+IS the box pointer — so the box's lifetime is the CLOSURE's, not the
+function's. Freeing it at the function's return requires proving no closure
+built here outlives the call, which is the escape analysis
+`ownership_destruct.lambda_value_owned` does not do (it answers the opposite
+question: whether a closure can be freed at ITS scope's exit). The two would
+have to be answered together, and a `{mut}` box reachable from a returned
+closure is a use-after-free.
+
+Next step: extend `lambda_value_owned` to the reverse direction — "no closure
+built in this function escapes it" — and free the box at the same exit where
+the env is. The same analysis would then let the env itself be freed at
+FUNCTION level for a closure stored in a local that never escapes, which is
+OPEN 1's other half.
 
 ## The original finding (2026-09-28) follows
 
@@ -346,8 +315,8 @@ unchanged, each with a runner test that fails when its rule is disabled
 `d` a local container still needs to demonstrably keep `d` alive. `make gate`
 green.
 
-**Remaining after all that: the escaping half of OPEN 2 (a `{mut}` box reachable
-from a returned or stored closure), and trap 2's first bullet.** Both are the same unfinished analysis — `_is_free_eligible_function`
+**Remaining after all that: OPEN 2, the mutable-capture box, and trap 2's first
+bullet.** Both are the same unfinished analysis — `_is_free_eligible_function`
 still refuses to look at a function containing a nested `def`/`lambda`, so such
 a function still gets no container freeing, and a `{mut}` box's lifetime is the
 CLOSURE's, which means it cannot be freed until "does any closure built here

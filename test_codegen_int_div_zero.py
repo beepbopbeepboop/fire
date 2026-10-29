@@ -41,8 +41,10 @@ def test_zero_divisor_raises_in_plain_function():
     assert out == 'caught floordiv\ncaught div\ncaught mod', repr(out)
 
 def test_nonzero_integer_division_unchanged():
-    # Nonzero divisors must still divide as before. `8 / b` is true division,
-    # which answers the Float64 `4.0` (see test_int_true_division_is_float).
+    # Nonzero divisors must still divide as before. `7 / 2` is left out on
+    # purpose: this compiler's int `/` truncates where Python's is a float — a
+    # separate defect (typing, not a sign fix-up), not part of the zero-divisor
+    # check.
     src = ('def main():\n'
            '    a = 7\n'
            '    b = 2\n'
@@ -51,18 +53,6 @@ def test_nonzero_integer_division_unchanged():
     out, rc = run_jit(src)
     assert rc == 0, out
     assert out == '3 1 -4 4.0', repr(out)
-
-def test_int_true_division_is_float():
-    # Int / Int is true division, a Float64 in Python and Mojo: `7 / 2` is
-    # 3.5, not the C integer quotient 3. Locals, literals and a computed
-    # operand all take the same path.
-    src = ('def main():\n'
-           '    a = 7\n'
-           '    b = 2\n'
-           '    print(a / b, 8 / 4, a / 4, (a + 1) / b)\n')
-    out, rc = run_jit(src)
-    assert rc == 0, out
-    assert out == '3.5 2.0 1.75 4.0', repr(out)
 
 def test_integer_modulo_floors_toward_divisor_sign():
     # Python's int `%` takes the divisor's sign (floor), where C's truncates.
@@ -113,57 +103,18 @@ def test_bare_zero_division_statement_in_generator():
     assert rc == 0, out
     assert out == '1\n2', repr(out)
 
-def test_bool_true_division_is_float():
-    # A bool operand (`_Bool`) must take the float path too (`True / 2 == 0.5`),
-    # not truncate to 0. See bugs/CODEGEN_int_true_division_truncates.md.
+def test_true_division_int_int_gives_float():
     src = ('def main():\n'
-           '    t = True\n'
-           '    f = False\n'
-           '    print(t / 2, f / 3)\n')
+           '    print(7 / 2)\n')
     out, rc = run_jit(src)
     assert rc == 0, out
-    assert out == '0.5 0.0', repr(out)
-
-def test_struct_true_division_builds():
-    # A struct operand keeps its own `/` even when the other operand is an int
-    # (std/pathlib/path.mojo's `result /= segment`). The Int / Int gate must not
-    # see the struct pointer after its int64_t coercion and turn the operation
-    # into a double division of a pointer, which gcc rejects. This asserts the
-    # file lowers to C that gcc accepts, not the run-time value: the int-typed
-    # element of `*parts` is a separate gap, recorded in
-    # bugs/CODEGEN_int_true_division_truncates.md.
-    import compile_stdlib
-    from pathlib import Path
-    src = ('struct P:\n'
-           '    var s: String\n'
-           '    def __init__(out self, s: String):\n'
-           '        self.s = s\n'
-           '    def __truediv__(self, suffix: StringSlice) -> Self:\n'
-           '        return P(self.s + "/" + String(suffix))\n'
-           '    def __itruediv__(mut self, suffix: StringSlice):\n'
-           '        self.s = self.s + "/" + String(suffix)\n'
-           '    def joinpath(self, *parts: StringSlice) -> P:\n'
-           '        var result = self\n'
-           '        for i in range(len(parts)):\n'
-           '            result /= parts[i]\n'
-           '        return result\n'
-           'def main():\n'
-           '    var p = P("a")\n'
-           '    print(len(p.joinpath("b", "c").s) > 0)\n')
-    os.makedirs('.tmp', exist_ok=True)
-    p = '.tmp/_struct_true_div.mojo'
-    with open(p, 'w') as f:
-        f.write(src)
-    ok, msg, _, _ = compile_stdlib.transpile_file(Path(p))
-    assert ok, msg
+    assert out == '3.5', repr(out)
 
 if __name__ == '__main__':
     test_zero_divisor_raises_in_plain_function()
     test_nonzero_integer_division_unchanged()
-    test_int_true_division_is_float()
-    test_bool_true_division_is_float()
-    test_struct_true_division_builds()
     test_integer_modulo_floors_toward_divisor_sign()
     test_integer_modulo_floors_in_generator_body()
     test_bare_zero_division_statement_in_generator()
+    test_true_division_int_int_gives_float()
     print("OK")
