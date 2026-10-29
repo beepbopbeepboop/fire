@@ -161,8 +161,10 @@ separate compiled-generator/async-codegen project (tasks #95-135). No code
 change to the compiler itself attempted — that work belongs to the broader
 async-codegen lane, not this focused fix.
 
-NOT DONE (needs separate async-codegen branch): real `mkdtemp`/`rmtree`
-backed runtime plumbing + path-value category + full `_build_stencils`/
-`_compile`/`_parse` method lowering.
+## Status (2026-10-29, work/bug-compile-fail-tools-jit-targets): PARTIAL — regression test present, refusal still structural
+
+Verified today: `test_regress_compile_fail_tools_jit_targets.py` is present and pins the exact refusal (`_build_stencils`/`_compile`/`_parse`, `not CallExpr` on `tempfile.TemporaryDirectory()`). The external source `/Users/mrs/net/Python-3.14.6/Tools/jit/_targets.py` is unchanged; the build refusal remains identical to the 2026-08-09 root-cause analysis. Root cause remains genuinely structural (needs `mkdtemp`/`rmtree` runtime plumbing + new path-value representation through `declared`/`_cpp_expr`, plus downstream async-method gaps in the same 3 methods). Part of the separate compiled-generator/async-codegen project (tasks #95-135). No compiler code change attempted — outside the scope of this focused fix.
+
+NOT DONE (needs separate async-codegen branch): real `mkdtemp`/`rmtree` backed runtime plumbing + path-value category + full `_build_stencils`/`_compile`/`_parse` method lowering.
 
 (Older status entries preserved below for history.)
