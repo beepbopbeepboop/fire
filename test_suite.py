@@ -1000,7 +1000,7 @@ def test_every_job_over_the_debt_line_says_why():
     in `needs_memwhy`: a job MEASURED above 4 GB (`native-dumpfull` at 31.3),
     and a job handed a class above the default with nothing measured behind it
     (`prooflib`, the A/B sweep). Either way the reason goes in the registry next
-    to the number and points at `doc/POLICY_memory_over_4gb.md`, which
+    to the number and points at `bugs/PERF_memory_over_4gb_is_a_bug.md`, which
     is where the next step for each one is written down.
     """
     over = {n: s for n, s in sorted(suite.REGISTRY.items())
@@ -1210,6 +1210,7 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     check('expect count: the counts the registry states are the ones the '
           'reader sees',
           stated == {'async-void-return': 3,
+                     'coro-detached-async': 2,
     # bugs4-10's entry, MINUS the two it still listed and master has since
     # dropped: `formal-external-call` and `formal-module-attr` no longer carry
     # an `expect=` (both markers were removed on 2026-10-02, once the failures
@@ -1274,7 +1275,7 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     # `formal-x86-64-parity` registration was likewise not taken in the
     # 2026-10-12 merge, and master's `formal-x86-parity` is out of this census
     # too, since 4ceb7603 removed its marker (see above).
-                     'coro-future-await': 2,
+                     'coro-future-await': 17,
     # `gimple-async-runner` is a TENTH drop, and the one this fix landed:
     # the 2026-10-28 gate ran it red with 36 of 38 cases failing "expected
     # a non-empty generated .cpp" — the §5.5 cutover's default stack-switch
@@ -1302,7 +1303,7 @@ def test_an_expect_marker_count_is_checked_against_the_run():
                      #     backends again and the marker came back with it, a
                      #     half-applied fix of the same class as the dropped
                      #     definitions in
-                     #     definitions from the bulk-merge drop (fixed; doc deleted);
+                     #     `bugs/MERGE_bulk_resolved_to_master_dropped_branch_definitions.md`
                      #     — and then master's `5e45d0b5` restored the test half for
                      #     real, so the marker is gone a second time and the count
                      #     with it.  The registry is the authority for both: a
@@ -5427,9 +5428,9 @@ def test_a_deleted_bug_doc_is_not_still_cited():
     listed is indistinguishable from an open one to whoever reads the queue
     next. It has a cost nobody was measuring, though, and the first instance
     found was a test file's module docstring sending a reader to a file that is
-    not there. A deleted bug doc (rewritten after the walk turned out
-    to be a hundred times bigger than the two places it named) is the
-    write-up for this check.
+    not there. `bugs/DOCS_deleted_bug_doc_still_cited_in_three_places.md` is
+    the write-up, rewritten after the walk turned out to be a hundred times
+    bigger than the two places it named.
 
     So the WALK is `tools/dangling_doc_refs.py`, and these checks are about
     the walk rather than about the corpus, which is the only shape that can

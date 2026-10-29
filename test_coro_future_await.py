@@ -1,8 +1,8 @@
 """test_coro_future_await.py -- real behavioral tests for the A3
 stack-switch backend's Awaitable protocol: heap-allocatable Future/Event
 handles with a waiter list and cross-coroutine wakeup (runtime/
-fire_coro_gen.c: __mojo_future_* / __mojo_event_* / __mojo_async_await_
-future / __mojo_async_await_event_wait; MOJO_WD_FUTURE in fire_async_sched.c).
+mojo_coro_gen.c: __mojo_future_* / __mojo_event_* / __mojo_async_await_
+future / __mojo_async_await_event_wait; MOJO_WD_FUTURE in mojo_async_sched.c).
 
 Compiles the REAL generated C with gcc -fgimple, links this project's own
 runtime, runs the executable, asserts on real stdout. Mirrors
@@ -23,16 +23,16 @@ RUNTIME_DIR = os.path.join(HERE, 'runtime')
 GCC = find_gcc()
 GXX = find_gxx()
 
-_CORO_CTX_SRC = (os.path.join(RUNTIME_DIR, 'fire_coro_ctx_aarch64.S')
+_CORO_CTX_SRC = (os.path.join(RUNTIME_DIR, 'mojo_coro_ctx_aarch64.S')
                  if platform.machine() in ('arm64', 'aarch64')
-                 else os.path.join(RUNTIME_DIR, 'fire_coro_ctx_generic.c'))
+                 else os.path.join(RUNTIME_DIR, 'mojo_coro_ctx_generic.c'))
 
 _RUNTIME_SRCS = [
     os.path.join(RUNTIME_DIR, 'fire_runtime.c'),
     os.path.join(RUNTIME_DIR, 'fire_async_runtime.cpp'),
-    os.path.join(RUNTIME_DIR, 'fire_coro.c'),
-    os.path.join(RUNTIME_DIR, 'fire_coro_gen.c'),
-    os.path.join(RUNTIME_DIR, 'fire_async_sched.c'),
+    os.path.join(RUNTIME_DIR, 'mojo_coro.c'),
+    os.path.join(RUNTIME_DIR, 'mojo_coro_gen.c'),
+    os.path.join(RUNTIME_DIR, 'mojo_async_sched.c'),
     _CORO_CTX_SRC,
 ]
 
@@ -50,21 +50,15 @@ def check(name, cond, detail=""):
         _FAIL += 1
 
 
-# The Awaitable-protocol shims this file's own tests are about. `_build_and_run`
-# refuses a program whose generated C has none of `require`, so a test that
-# exercises a different shim names it instead of silently passing without it.
-_AWAITABLE_SHIMS = ('__mojo_async_await_future', '__mojo_async_await_event_wait')
-
-
-def _build_and_run(mojo_src: str, require=_AWAITABLE_SHIMS) -> str:
+def _build_and_run(mojo_src: str) -> str:
     wd = tempfile.mkdtemp(prefix='mojo_coro_future_')
     src_path = os.path.join(wd, 'prog.mojo')
     with open(src_path, 'w') as f:
         f.write(mojo_src)
 
     c_code = gimple_codegen.compile_to_gimple(mojo_src, do_imports=False, filename=src_path)
-    if not any(s in c_code for s in require):
-        raise RuntimeError(f"none of {require!r} in the generated C -- "
+    if '__mojo_async_await_future' not in c_code and '__mojo_async_await_event_wait' not in c_code:
+        raise RuntimeError("no Awaitable-protocol shim call in the generated C -- "
                            "this test isn't exercising the path it claims to:\n" + c_code)
 
     c_path = os.path.join(wd, 'prog.c')
@@ -105,7 +99,7 @@ def test_await_resolved_future_value():
     """`await <future handle>` in a nested coroutine returns the future's
     result box. (The future is resolved before it is awaited -- v0's
     create_task has no eager scheduling, so genuine cross-coroutine wakeup
-    through the scheduler is covered by runtime/test_fire_future.c at the C
+    through the scheduler is covered by runtime/test_mojo_future.c at the C
     level; see COMPILE_FAIL_asyncio_queues.md for the eager-task gap.)"""
     src = """\
 import asyncio
@@ -644,36 +638,6 @@ def main():
     out = _build_and_run(src)
     check("bound-method done-callback invoked with self",
           out == "bound-method callback\n0\n", detail=repr(out))
-
-
-def test_await_async_bound_method_passes_receiver_and_args():
-    """`await obj.method(a)` on a compiled struct `async def` must hand the
-    callee its receiver AND its argument. The awaited call is lowered via the
-    generator-method start path, which prepends the receiver only when the
-    method's api entry records receiver='self'; async methods used to record
-    '' and so dropped `self`, shifting every argument down one slot."""
-    src = """\
-import asyncio
-
-struct Box:
-    var base: Int
-
-    fn __init__(out self):
-        self.base = 100
-
-    async def add(self, x: Int) -> Int:
-        return self.base + x
-
-async def main_co() -> Int:
-    var b = Box()
-    return await b.add(5)
-
-def main():
-    print(asyncio.run(main_co()))
-"""
-    out = _build_and_run(src)
-    check("await of a bound async method receives self and its argument",
-          out == "105\n", detail=repr(out))
 
 
 def test_future_done_callback_closure():

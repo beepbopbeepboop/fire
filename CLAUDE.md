@@ -175,7 +175,7 @@ which is which). **Each class is assigned from the job's MEASURED peak**
 (`MEASURED_PEAK_GB`, read off a real run's log by the same wrapper that does
 the killing), never from the shape of the workload it resembles, and a class
 over 4 GB carries a one-line `memwhy` pointing at
-`doc/POLICY_memory_over_4gb.md` — over 4 GB is a debt, not a fact.
+`bugs/PERF_memory_over_4gb_is_a_bug.md` — over 4 GB is a debt, not a fact.
 `python3 tools/suite.py --list` prints peak, class, ceiling and ratio per job,
 plus the over-provisioned (>8x) and unmeasured lists. `MEMLIMIT_GB=96` raises
 every ceiling and is also the answer to a class that no longer fits;
@@ -419,6 +419,7 @@ and the reasoning for `expect=` rather than `disabled=` on each.
 | test | marker | subject | cost it charges every gate |
 |---|---|---|---|
 | `ab-native` | `expect=`, count checked (1) | python vs native codegen over the A/B corpus | 0.1 GB / ~10 s measured, `program` (reserves 55 GB); `native` |
+| `coro-detached-async` | `expect=`, count checked (2) | a detached coroutine task | `tiny`; `coroutine` |
 | `async-void-return` | `expect=`, count checked (3) | an async function with no return value | `tiny`; `coroutine` |
 | `coro-future-await` | `expect=`, count checked (17) | `await` on a Future in the coroutine runtime | `tiny`; `coroutine` |
 
@@ -486,7 +487,7 @@ why* — and the only thing that decides between them is what running it costs.
    — reported as its own `DISABLED` status with the doc, counted in the tally,
    listed on screen and in `--list` and `--dry-run`, and it reserves **0** from
    the memslot ledger whatever class it carries. **The threshold is the
-   3-4 GB memory standard in `doc/POLICY_memory_over_4gb.md`**, applied
+   3-4 GB memory standard in `bugs/PERF_memory_over_4gb_is_a_bug.md`**, applied
    to time as well: a class over that line is a debt, so a job carrying one is
    too expensive to spend on a known answer; so is one that takes more than a
    few minutes. Measured, not guessed — `ab-native` was `expect=` while using

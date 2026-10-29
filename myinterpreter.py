@@ -1405,7 +1405,8 @@ class BoundMethod:
                 # An overloaded method taken as a value (and then bound to
                 # an instance) has no single `_invoke` to delegate to; route
                 # through the overload set's own dispatch instead, with `self`
-                # prepended as the receiver.
+                # prepended as the receiver. See
+                # bugs/CODEGEN_method_with_overloads_is_unresolvable_as_a_value.md.
                 #
                 # The receiver is folded into the `*`-unpack (`invoke(f,
                 # *_merged, **kwargs)`) rather than written as an explicit
@@ -4618,46 +4619,6 @@ class Interpreter:
                     # a pre-existing constant and wrongly fall through to
                     # equality-dispatch instead of re-capturing.
                     self.scope.define(pattern.name, subject)
-                    matched = True
-                    break
-                # Class pattern: `case C():` or `case C(x):` — isinstance
-                # check, not a constructor call (CPython 3.14 semantics).
-                if self._is_instance(pattern, 'CallExpr'):
-                    class_obj = self.eval_expr(pattern.func)
-                    # Check instance status, handling both real Python types
-                    # and interpreter MojoClass objects.
-                    is_mojo_class = isinstance(class_obj, MojoClass)
-                    is_instance = False
-                    if is_mojo_class:
-                        is_instance = isinstance(subject, MojoInstance) and subject._mojo_class is class_obj
-                    else:
-                        try:
-                            is_instance = isinstance(subject, class_obj)
-                        except TypeError:
-                            is_instance = False
-                    if not is_instance:
-                        matched = False
-                        break
-                    args = getattr(pattern, 'args', []) or []
-                    matched = True
-                    if args:
-                        match_args = getattr(class_obj, '__match_args__', None)
-                        if match_args is None:
-                            raise TypeError(
-                                f"class '{getattr(class_obj, '__name__', class_obj)}' "
-                                f"does not define __match_args__")
-                        for i, subpat in enumerate(args):
-                            attr_name = match_args[i] if i < len(match_args) else None
-                            if attr_name is None:
-                                raise TypeError("not enough arguments for __match_args__")
-                            attr_val = getattr(subject, attr_name)
-                            if self._is_instance(subpat, 'IdentExpr') and subpat.name != '_' and not self.scope.has(subpat.name):
-                                self.scope.define(subpat.name, attr_val)
-                            elif self.eval_expr(subpat) != attr_val:
-                                matched = False
-                                break
-                        if not matched:
-                            break
                     matched = True
                     break
                 if self.eval_expr(pattern) == subject:
