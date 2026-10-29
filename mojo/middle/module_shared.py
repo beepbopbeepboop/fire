@@ -84,10 +84,6 @@ from mojo.middle.funcs_shared import _selfhost_parsed_source
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
-# Memo for _gmi_collect_self_assigns (PERF_struct_self_assign_scan_uncached)
-_SELF_ASSIGN_MEMO: dict = {}
-# Memo for _gmi_collect_self_assigns (PERF_struct_self_assign_scan_uncached)
-_SELF_ASSIGN_MEMO: dict = {}
 
 def _selfhost_modglobal_is_pathcall(_v) -> bool:
     """`os.path.<fn>(...)` (any nesting) — a char*-producing path expression."""
@@ -1172,39 +1168,6 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict,
     fields. The descent below walks into `if`/`else`/`try`/`match`/nested-
     `def` bodies, so this is read at every level of that descent rather than
     captured once."""
-    # Memo (PERF_struct_self_assign_scan_uncached): `_walk_ast` is already
-    # memoized on node identity, but this whole scan was re-run on the SAME
-    # method body once per consumer pass and once per import level of the
-    # closure — 26,080 calls / 7.5% of a 23.3s profiled n=160 chain for the
-    # assigns half alone. The body list is the stable key: each method body is
-    # a single AST list object with a stable identity, and `param_types`
-    # (_sname) is rebuilt per method so it is part of the answer rather than the
-    # key. Cache the RAW SYNTACTIC SHAPE (the (field, ctype) pairs + side notes
-    # this pass emits) keyed on `id(body)` + the per-method inputs, replayed
-    # into the caller's `found`/`self.*` tables on every call. Invalidated by
-    # `_walk_ast_invalidate` at every struct-field mutation site (the only
-    # place `self.struct_field_types`/`self.struct_bool_fields` move under a
-    # body that was already scanned) — see the three `_walk_ast_invalidate(s)`
-    # calls in `_emit_struct_method`. A fresh walk is still the source of truth
-    # for the pinning test `every_ast_mutation_site_invalidates_the_walk_memo`-
-    # style guard in test_gimple.py.
-    _key = (id(body), id(param_types), str(_sname))
-    _hit = _SELF_ASSIGN_MEMO.get(_key)
-    if _hit is not None:
-        _updates, _bool_hits, _dv_hits, _et_hits = _hit
-        for fn, ft in _updates:
-            found[fn] = ft
-        for fn, bv in _bool_hits:
-            self.struct_bool_fields.setdefault(_sname, set()).add(fn) if bv else None
-        for fn, dv in _dv_hits:
-            self._field_dict_val_types.setdefault(_sname, {})[fn] = dv
-        for fn, et in _et_hits:
-            self._field_elem_types.setdefault(_sname, {})[fn] = et
-        return
-    _updates: list = []
-    _bool_hits: list = []
-    _dv_hits: list = []
-    _et_hits: list = []
     for node in _walk_ast(body):
         if isinstance(node, AssignStmt):
             fn = _gmi_self_member(node.target)
@@ -1366,7 +1329,7 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict,
                         ft = _UNKNOWN_FIELD_CTYPE
                 else:
                     ft = _UNKNOWN_FIELD_CTYPE
-                _updates.append((fn, ft))
+                found[fn] = ft
                 # `self._str_pool: dict[str, str] = {}` in
                 # __init__: capture the dict VALUE type from the
                 # annotation so `for k, v in self._str_pool.
@@ -1376,7 +1339,8 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict,
                 if ft == 'MojoDict *' and getattr(node, 'type_ann', None):
                     _dv_sa = self._annotation_dict_val_type(node.type_ann)
                     if _dv_sa is not None:
-                        _dv_hits.append((fn, _dv_sa))
+                        self._field_dict_val_types.setdefault(
+                            _sname, {})[fn] = _dv_sa
                 # `self._struct_allocs_needed: set[str] = set()` /
                 # `self._x: list[Foo] = []` in __init__ — seed the
                 # element type from the annotation, mirroring the
@@ -1391,7 +1355,8 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict,
                     if _li_sa:
                         _et_sa = self._resolve_type(_li_sa[0].strip())
                         if _et_sa and _et_sa != 'int64_t':
-                            _et_hits.append((fn, _et_sa))
+                            self._field_elem_types.setdefault(
+                                _sname, {})[fn] = _et_sa
         elif isinstance(node, MultiAssignStmt):
             for tgt in node.targets:
                 fn = _gmi_self_member(tgt)
@@ -1452,18 +1417,6 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict,
         elif isinstance(_nn, MatchStmt):
             for _ci in range(len(_nn.cases)):
                 _gmi_collect_self_assigns(self, _sname, _nn.cases[_ci].body, param_types, found)
-    # Apply the updates to the caller's tables BEFORE memoizing
-    for fn, ft in _updates:
-        found[fn] = ft
-    for fn, bv in _bool_hits:
-        self.struct_bool_fields.setdefault(_sname, set()).add(fn) if bv else None
-    for fn, dv in _dv_hits:
-        self._field_dict_val_types.setdefault(_sname, {})[fn] = dv
-    for fn, et in _et_hits:
-        self._field_elem_types.setdefault(_sname, {})[fn] = et
-    # Memoize the raw syntactic shape (PERF_struct_self_assign_scan_uncached)
-    # AFTER the descent, so the cache holds the full answer for this body.
-    _SELF_ASSIGN_MEMO[_key] = (_updates, _bool_hits, _dv_hits, _et_hits)
 
 def _gmi_scan_import_modules(mod_stmts, all_modules: dict) -> None:
     """Record every module named by `import m` / `import m as a, m2` /

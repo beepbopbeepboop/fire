@@ -1,5 +1,33 @@
 # CODEGEN_generator_function: Lib/mailbox.py
 
+## Status (2026-10-29, branch work/bug-codegen-generator-function-lib-mailb-6509 — the isolated entry C's 15 gcc -fgimple errors are FIXED; the whole-program 7-error class is NOT re-measured here)
+
+- **Measured first:** isolated entry C (`compile_to_gimple_with_cpp(do_imports=False)`,
+  `gcc-mp-15 -fgimple -fsyntax-only -I runtime`) = **15 errors, all one class**:
+  `non-trivial conversion in 'integer_cst'` at every `_t = 'p';` store. The
+  source is `_materialize_as_list`'s dict arm (`emit_infra.py`), which passed
+  `_new_val('char', "'p'")` as the `mojo_list_set_kinds_uniform` kind. A C
+  character literal is an `int`; GCC -fgimple rejects an int constant stored to
+  a `char` temp. The `Maildir.clean`/`time.time()`/`getatime` class named in the
+  2026-10-28 entry below was NOT among these 15 and was not reproduced in
+  isolation (an isolated probe of `Maildir.clean` is 0 errors); it lives only in
+  the whole-program entry, whose full `do_imports=True` measurement is a
+  whole-closure compile (~1.5 GB; it had not finished after an hour and was
+  stopped), so it is NOT re-measured in this round.
+- **Fixed:** the kind is now `(char)'p'` (the explicit cast every other char
+  constant in the emitters carries; `gcc -fgimple` accepts it, verified on a
+  hand fixture). Isolated entry C: **15 → 0 errors**.
+- **Regression test:** `test_tuple_unpack_of_a_boxed_dict_inside_a_method_builds`
+  in `test_gimple.py` — FAILED before (gcc `non-trivial conversion in
+  'integer_cst'`, `Box_show`), passes after. It is build-only: the printed keys
+  are still wrong (raw pointer words), a separate defect filed as
+  `bugs/CODEGEN_tuple_unpack_of_a_boxed_dict_reads_slots_as_pointer_words.md`.
+- **Still open for this row:** the whole-program entry's own-file class (the
+  2026-10-28 `Maildir.clean` 7-error set, if it still reproduces on the
+  whole-program path) and the transitive cascade (`next(...)` on a call result,
+  the `case A | B` or-pattern, `d.pop(key, default)` on an int64 dict, all in
+  other modules). The file still does not build end-to-end; the doc stays open.
+
 ## Status (2026-10-28, master 8c19a643f — the 2-error cascade pair is FIXED (247363aa); a 7-error own-file class the owner's landings introduced now leads; re-measure before scheduling)
 
 - **The residual 2-error pair from the 93d13780-era Status below is GONE.**

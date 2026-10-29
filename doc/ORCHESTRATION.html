@@ -205,7 +205,7 @@ Run `python3 tools/dangling_doc_refs.py --ratchet`. No gate, no bootstrap/mojo/ 
 <div class="warn"><b>Why "resolve to master's side" is dangerous:</b> bulk merges that resolved every conflict to master's side silently dropped the branch's half of shared
 signatures, import blocks and definitions while keeping the branch's bodies: NameErrors, <code>TypeError: unexpected keyword argument</code>, duplicate definitions, half-applied fixes
 (a fix landed, a later merge took one side and reverted its test half). Rule: keep both halves; verify with compile(), an undefined-name check, and the narrow tests.
-See the bulk-merge dropped-definition fix (MERGE bug doc, deleted after fix) for the follow-up queue.</div>
+See <code>bugs/MERGE_bulk_resolved_to_master_dropped_branch_definitions.md</code> for the open follow-up queue.</div>
 
 <h2 id="gate">8. The gate and <code>check</code></h2>
 <p><code>tools/suite.py</code> is the only definition of what is tested. <code>python3 tools/suite.py check</code> is the everyday subset (about 53 jobs, ~9-10 min);
