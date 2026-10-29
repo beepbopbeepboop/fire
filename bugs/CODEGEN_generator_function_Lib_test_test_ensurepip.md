@@ -26,17 +26,33 @@ Landed (this round):
   `nested_class_local_attr_refused` (failed before the gate, passes after) and
   `nested_class_literal_attr_compiles` (literal class attribute still lowers to 7).
 
-Still open for THIS test file (feature-sized, unchanged in substance):
+### 2026-10-29 round — items 2 and 3 measured as already working; item 1 is the only blocker
+
+Measured on the minimal `fake_pip` shapes, under `tools/memslot.py --gb 8`:
+
+- A no-`__init__` class with a LITERAL class attribute, constructed as
+  `FakePip()` inside a generator body: compiles and prints `7`. The
+  `_struct_has_init`-gated branch in `cpp_core.py` is not the path taken; the
+  ordinary struct-constructor path handles it. Item 2 does not need a fix.
+- The same class used through a `@contextmanager` generator in a
+  `with fake_pip() as v:`: compiles and prints `7`. Item 3 does not need a fix.
+- The captured-local shape (`def g(version): class FakePip(): __version__ = version`)
+  is still refused at the generator gate with `unsupported sta...`, and the
+  module falls back to interpretation, as designed.
+
+Pinned by two tests in `test_gimple_generator_runner.py`:
+`nested_class_noinit_ctor_in_generator_compiles` and
+`nested_class_literal_attr_contextmanager_compiles`. Both pass now (263/263 in
+that file); they are coverage pins, not fail-before-fix tests, because there
+was no behaviour to change.
+
+Still open for THIS test file, and only this:
 1. The class attribute must capture the generator's own local at the moment the
-   `class` statement executes. That is the plain-function silent case too:
-   `bugs/CODEGEN_nested_class_attr_reads_enclosing_local_silently_zero.md`.
-2. A `class` with NO `__init__` and only class-level attributes must be
-   constructible as `FakePip()` from inside a generator body. The
-   generator-body constructor branch (`mojo/backend_gimple/cpp_core.py` near
-   `fname in gen._struct_has_init`) only fires for a struct with an `__init__`.
-3. `fake_pip` is a `@contextmanager`, so once 1 and 2 land, the `with fake_pip(...)`
-   use in the test also has to lower through the existing `MojoGenerator *` `with`
-   branch. Not yet exercised for this shape.
+   `class` statement executes. The plain-function silent case is the same root
+   cause: `bugs/CODEGEN_nested_class_attr_reads_enclosing_local_silently_zero.md`.
+   That bug is claimed by another worker, so it was not edited here. Once it
+   lands, the captured-local shape above should compile, and the `with` path is
+   already known to work for a literal attribute.
 
 Next step: item 1 (see the linked doc). Until it lands, this file stays refused
 at the generator and the module is interpreted, which is the honest path.
