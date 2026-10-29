@@ -4388,8 +4388,8 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # str ordering for ASCII.
     if op in ('<', '>', '<=', '>=') and (
             lt == 'char *' or rt == 'char *'
-            or gen._actual_types.get(lv) == 'char'
-            or gen._actual_types.get(rv) == 'char'):
+            or gen._actual_types.get(_as_str(lv)) == 'char'
+            or gen._actual_types.get(_as_str(rv)) == 'char'):
         ls = lv if lt == 'char *' else gen._char_to_cstr(lt, lv, True)[1]
         rs = rv if rt == 'char *' else gen._char_to_cstr(rt, rv, True)[1]
         cmp_t = gen._call_expr('int', 'mojo_cstr_cmp', [('char *', ls), ('char *', rs)])
@@ -4452,12 +4452,12 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # the character ("Hello, World!" became "72101108111144..." in
     # box.3d/game's ComputerMonitor.print_text). Mirror append's recovery.
     if op == '+' and lt == 'char *' and rt in ('char', 'int', 'int64_t') \
-            and (rt == 'char' or gen._actual_types.get(rv) == 'char'):
+            and (rt == 'char' or gen._actual_types.get(_as_str(rv)) == 'char'):
         rv_s = gen._call_expr('char *', 'mojo_char_to_str', [('char', rv)])
         t = gen._call_expr('char *', 'mojo_str_cat', [('char *', lv), ('char *', rv_s)])
         return 'char *', t
     if op == '+' and rt == 'char *' and lt in ('char', 'int', 'int64_t') \
-            and (lt == 'char' or gen._actual_types.get(lv) == 'char'):
+            and (lt == 'char' or gen._actual_types.get(_as_str(lv)) == 'char'):
         lv_s = gen._call_expr('char *', 'mojo_char_to_str', [('char', lv)])
         t = gen._call_expr('char *', 'mojo_str_cat', [('char *', lv_s), ('char *', rv)])
         return 'char *', t

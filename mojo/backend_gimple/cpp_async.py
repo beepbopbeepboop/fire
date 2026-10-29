@@ -1456,7 +1456,7 @@ def _compute_nested_closure_captures(gen, inner: gimple_ctypes.FunctionDef, oute
     # Plain unpack loop, NOT `{pn.lstrip('*') for pn, _ in ...}` — a
     # comprehension's target unpack over a `list[tuple[str, str]]` boxes
     # both slots to int64_t self-hosted. See
-    # bugs/CODEGEN_selfhost_actual_types_identifier_field_key.md.
+    # identifier-field-key identity.
     inner_params = set()
     for _pn, _pt in (inner.params or []):
         inner_params.add(_pn.lstrip('*'))

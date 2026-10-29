@@ -5359,7 +5359,7 @@ def gen_module_impl(self, stmts):
         _bsc_idx = 0
         if _bsc_new is not None:
             # Plain unpack loop, NOT a comprehension — see
-            # bugs/CODEGEN_selfhost_actual_types_identifier_field_key.md.
+            # identifier-field-key identity.
             _bsc_pnames = []
             for _bpn, _bpt in (_bsc_new.params or []):
                 _bsc_pnames.append(_as_str(_bpn))
@@ -5405,7 +5405,7 @@ def gen_module_impl(self, stmts):
                 # 21577).
                 _cs_key = _as_str(_s.name)
                 # Plain unpack loop, NOT a comprehension — see
-                # bugs/CODEGEN_selfhost_actual_types_identifier_field_key.md.
+                # identifier-field-key identity.
                 _cip_list = []
                 for _cipn, _cipt in (_init.params or []):
                     if _cipn != 'self' and not _cipn.startswith('*'):
@@ -7278,7 +7278,7 @@ def gen_module_impl(self, stmts):
                     if m.name == '__init__':
                         self._struct_has_init.add(s.name)
                         # Plain unpack loops, NOT comprehensions — see
-                        # bugs/CODEGEN_selfhost_actual_types_identifier_field_key.md.
+                        # identifier-field-key identity.
                         _sip_list = []
                         for _sipn, _sipt in m.params:
                             if _sipn != 'self':
@@ -7504,7 +7504,7 @@ def gen_module_impl(self, stmts):
                 # unambiguous for an index under both evaluators.
                 # Plain loops throughout this block, NOT comprehensions/
                 # genexprs with tuple-unpack targets — see
-                # bugs/CODEGEN_selfhost_actual_types_identifier_field_key.md.
+                # identifier-field-key identity.
                 _star_idx = -1
                 for _psi in range(len(_params_no_self)):
                     _psn = _params_no_self[_psi][0]
