@@ -1510,6 +1510,36 @@ def main():
 main()
 """, "/r/a\n")
 
+    # A class defined INSIDE a generator body is hoisted to module scope, but
+    # its class-level attributes are seeded from module-level globals at
+    # allocation time, so one whose value names a local of the generator
+    # (`__version__ = version`, test_ensurepip.py's `fake_pip`) was never
+    # assigned: the stack-switch body lowered the `class` statement to a bare
+    # `/* TODO */` no-op and the attribute read stayed 0 at exit 0. The gate
+    # must refuse that shape honestly (the whole module then falls back to
+    # interpreting the source) rather than compile it.
+    test_generator_a3_ineligible("nested_class_local_attr_refused", """\
+def g(version=5):
+    class FakePip():
+        __version__ = version
+    pip = FakePip()
+    yield pip.__version__
+""", "g", "nested class 'FakePip'")
+    # ...and a LITERAL class attribute IS faithfully lowered (the allocator
+    # seeds `_classattr_FakePip____version__ = 7`), so the refusal above is
+    # about the captured local and not about nested classes in general.
+    test_generator_stdout("nested_class_literal_attr_compiles", """\
+def g():
+    class Tag():
+        __version__ = 7
+    t = Tag()
+    yield t.__version__
+
+def main():
+    for v in g():
+        print(v)
+""", "7\n")
+
     # The eligibility gate replaced a blanket `kwonly params (v0)` refusal
     # with "is every keyword-only default faithfully lowerable?". These two
     # are the answers it must still give NO on, because admitting either

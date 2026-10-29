@@ -64,6 +64,7 @@ import mojo.middle.coro as gimple_gen_coro
 # `emit_funcs._struct_method_qualifier`'s function-local
 # `from mojo.middle.module_shared import module_qualifier`.
 from mojo.middle.exprtypes import _walk_ast, _walk_ast_invalidate, expr_provably_str as _gmi_expr_provably_str
+from mojo.middle.exprtypes import _gmi_nested_struct_defs
 import gimple_codegen
 import mojo.backend_gimple.emit_funcs as _ggf_dup
 from mojo.middle.closures import discover_closures, closure_lifted_name
@@ -2845,87 +2846,6 @@ def _gmi_has_unresolved_base(_struct_bases_map: dict, _all_struct_names: set,
             break
     _memo[_name] = result
     return result
-
-
-# The statement-lists a `class` statement can be nested inside. A tuple of
-# names, not a dict of attribute name -> is-a-list: the walk has to try EVERY
-# slot on every node type (only the statement types that carry one of them
-# actually have it, and `getattr(..., None)` answers the rest), so the test is
-# "does this attribute hold a statement list", not "is this node a kind that
-# does". Written out rather than reusing the shared `_walk_ast`, for the
-# reason `_gmi_collect_self_assigns`'s own nested-def descent documents:
-# `_walk_ast` does not reliably recurse into a nested `StructDef`/`FunctionDef`
-# self-hosted (the node is misclassified as a scalar leaf), so a walker built
-# on it would find nested classes in the CPython shim and miss them under
-# `mojoc`. Every consumer of "is there a class declared in here" has to be
-# written out, so it is written out once here.
-_NESTED_CLASS_BODY_SLOTS = (
-    'body', 'then_body', 'else_body', 'finally_body', 'items',
-)
-
-
-def _gmi_nested_struct_defs(body, enclosing, out: list, top: bool = False) -> None:
-    """Every `StructDef` written INSIDE `body`, in source order, as
-    `[node, enclosing_key]` PAIRS rather than 2-tuples.
-
-    The pairs are index-addressed by the one caller for the reason the rest of
-    this file writes index loops instead of `zip()`: the self-hosted backend
-    has no `zip()` lowering, and a 2-tuple unpack in a `for` header boxes both
-    slots to `int64_t` — which here would box the `StructDef` POINTER (losing
-    the node) and the string (losing the name). A list element read by index
-    keeps each slot's own type.
-
-    Recursive over the statement-lists a class can hide in: a plain function
-    body, an `if`/`else`/`while`/`for`/`try`/`with`/`match` body, and a nested
-    `def` or `class` body. `enclosing` is the `current_func_name`-shaped key of
-    the innermost enclosing function — which is exactly the value
-    `current_func_name` holds while that function's body is lowered, so the
-    rename map the caller builds is keyed the same way the constructor call
-    site reads it. `top` is True only for the module-level statement list,
-    whose classes are already module scope and must not be collected again.
-    """
-    for _nc in (body or []):
-        if isinstance(_nc, StructDef):
-            if not top:
-                out.append([_nc, enclosing])
-            # A struct METHOD's enclosing key is `current_func_name`, which the
-            # method emitter sets to `<struct>_<method>` — the class's own name
-            # with no enclosing-function prefix (`closures.discover_closures`
-            # composes it the same way).
-            _cname = _as_str(_nc.name)
-            for _ncm in (_nc.methods or []):
-                if isinstance(_ncm, FunctionDef):
-                    _gmi_nested_struct_defs(
-                        _ncm.body, _cname + '_' + _as_str(_ncm.name), out)
-            continue
-        if isinstance(_nc, FunctionDef):
-            # A nested `def` is LIFTED as `<outer>_<name>`, and `current_func_name`
-            # is the lifted name while its body is lowered — so the key
-            # composes rather than replacing. `closures.discover_closures`'s
-            # `lifted = f"{outer_name}_{inner.name}"` is the other half of
-            # that fact.
-            _gmi_nested_struct_defs(
-                _nc.body,
-                enclosing + '_' + _as_str(_nc.name) if enclosing else _as_str(_nc.name),
-                out)
-            continue
-        if isinstance(_nc, IfStmt):
-            _gmi_nested_struct_defs(_nc.then_body, enclosing, out)
-            # `elifs` is a list of (condition, body) PAIRS, so the body is an
-            # indexed slot read and not another statement list — the same
-            # shape `_gmi_collect_self_assigns` walks.
-            for _nce in range(len(_nc.elifs or [])):
-                _gmi_nested_struct_defs(_nc.elifs[_nce][1], enclosing, out)
-            _gmi_nested_struct_defs(_nc.else_body, enclosing, out)
-            continue
-        if isinstance(_nc, MatchStmt):
-            for _ncmc in (_nc.cases or []):
-                _gmi_nested_struct_defs(
-                    getattr(_ncmc, 'body', None), enclosing, out)
-            continue
-        for _slot in _NESTED_CLASS_BODY_SLOTS:
-            _gmi_nested_struct_defs(
-                getattr(_nc, _slot, None), enclosing, out)
 
 
 def _gmi_target_leaf_names(target, out: set) -> None:

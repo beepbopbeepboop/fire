@@ -63,7 +63,7 @@ def _cm_as_str(x) -> str:
 # `_await_drive_stmts` needs anyway) fixes the collision at the root
 # instead of just renaming around it, per this project's own "consolidate
 # duplicates" convention.
-from mojo.middle.exprtypes import _is_asyncio_sleep_call, _is_asyncio_sock_recv_call, _walk_ast_invalidate
+from mojo.middle.exprtypes import _is_asyncio_sleep_call, _is_asyncio_sock_recv_call, _walk_ast_invalidate, _gmi_nested_struct_defs
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.exprtypes as gimple_exprtypes
 _ENV = 'MOJO_CORO'
@@ -1141,6 +1141,37 @@ def _unrepresentable_kwonly(fn: N.FunctionDef) -> list:
     return _bad
 
 
+def _nested_class_nonliteral_attr(fn: N.FunctionDef):
+    """`(class name, attribute name)` for the first class-level attribute of a
+    class DEFINED INSIDE `fn`'s body whose value is not a literal, else None.
+
+    Why this refuses rather than lowers: the nested class is hoisted to module
+    scope with the rest of the struct pipeline, and its class-level attributes
+    are seeded from module-level `_classattr_` globals at allocation. A value
+    that names a local of the generator (`__version__ = version`) is never
+    assigned to that global, and the stack-switch body lowers the `class`
+    statement itself to a no-op, so the attribute silently reads 0 at exit 0.
+    A literal IS assigned (`_classattr_X__a = 7`), which is why only the
+    literal shapes are admitted here. Refusing is the honest path: the
+    generator falls back, and the module is interpreted from source.
+    """
+    _found: list = []
+    _gmi_nested_struct_defs(fn.body, '', _found, False)
+    for _ni in range(len(_found)):
+        _sd = _found[_ni][0]
+        for _f in (_sd.fields or []):
+            if isinstance(_f, N.AssignStmt) and isinstance(_f.target, N.IdentExpr):
+                _aname, _v = _f.target.name, _f.value
+            elif isinstance(_f, N.VarDecl) and _f.name and _f.value is not None:
+                _aname, _v = _f.name, _f.value
+            else:
+                continue
+            if not isinstance(_v, (N.IntLiteral, N.FloatLiteral, N.StringLiteral,
+                                   N.BoolLiteral, N.NoneLiteral)):
+                return _cm_as_str(_sd.name), _cm_as_str(_aname)
+    return None
+
+
 def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
               struct_def=None, prop_names: dict | None = None) -> tuple[bool, str]:
     if fn.is_async:
@@ -1251,6 +1282,12 @@ def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
         _kwbad = _unrepresentable_kwonly(fn)
         if _kwbad:
             return False, f'kwonly params (v0): {_kwbad}'
+    _nc_attr = _nested_class_nonliteral_attr(fn)
+    if _nc_attr is not None:
+        return False, (f'nested class {_nc_attr[0]!r} has a non-literal class '
+                       f'attribute {_nc_attr[1]!r} (v0: only literal class '
+                       f'attributes are seeded; a value naming a generator '
+                       f'local is never assigned)')
     kind, why = _generator_value_kind(fn, _static_env(fn, struct_def),
                                    _delegated_yield_kind)
     if kind is None:
