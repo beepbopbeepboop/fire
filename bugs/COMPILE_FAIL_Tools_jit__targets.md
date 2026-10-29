@@ -146,4 +146,23 @@ and so is gracefully skipped/stubbed rather than hard-failing; they
 are not part of this file's own refusal.)
 
 
-(An older status further down used to show a stale raw GCC warning dump and a now-unreproducible `_stencils.py` enum-keyword parse error from a much earlier run — removed as no longer reflecting current behavior; re-verified 2026-08-09 that the module now fails cleanly at the up-front async-refusal gate above, with no `_stencils` import error at all.)
+## Status (2026-10-29, work/bug-compile-fail-tools-jit-targets): PARTIAL — regression test landed, root cause unchanged
+
+Added `test_regress_compile_fail_tools_jit_targets.py` (next to existing
+async tests) that pins the exact refusal (`_build_stencils`/`_compile`/\n`_parse`, `not CallExpr` on `tempfile.TemporaryDirectory()`) against the
+external `/Users/mrs/net/Python-3.14.6/Tools/jit/_targets.py`. The test
+confirms the refusal is still present and structural; no silent regression
+to an incorrect compile can go unnoticed.
+
+Root cause remains genuinely structural (needs `mkdtemp`/`rmtree` runtime
+plumbing + new path-value representation through `declared`/`_cpp_expr`,
+plus downstream async-method gaps in the same 3 methods). Part of the
+separate compiled-generator/async-codegen project (tasks #95-135). No code
+change to the compiler itself attempted — that work belongs to the broader
+async-codegen lane, not this focused fix.
+
+NOT DONE (needs separate async-codegen branch): real `mkdtemp`/`rmtree`
+backed runtime plumbing + path-value category + full `_build_stencils`/
+`_compile`/`_parse` method lowering.
+
+(Older status entries preserved below for history.)
