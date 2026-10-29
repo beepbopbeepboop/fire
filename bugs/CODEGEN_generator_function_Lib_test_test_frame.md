@@ -30,8 +30,8 @@ NOT done — this file still cannot compile as a whole:
 - `t3`: async `return` of a non-scalar (`frame.f_generator`), cross-path
   return-type unification.
 
-Separate defect found on the way, filed: `bugs/CODEGEN_int_mod_negative_truncates.md`
-(`-7 % 2` gives `-1`; Python gives `1`).
+Separate defect found on the way, since fixed: integer `%` truncated toward zero
+(`-7 % 2` gave `-1`; Python gives `1`). Pinned by `test_codegen_int_div_zero.py`.
 
 ## Status (2026-09-07 — "cluster A" premise re-examined; `gen` is not a callable-value gap)
 
