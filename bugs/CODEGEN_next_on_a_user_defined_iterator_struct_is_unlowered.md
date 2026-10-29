@@ -859,7 +859,7 @@ symbol.
 spelling (`safe_suffix('_'.join(ptypes))`); it now uses the same
 length-prefixed encoder (`monomorphize.mangle_signature`). Everything this
 invalidates is enumerated and measured in
-`bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md`'s
+`bugs/imported-generic-elaboration-defect`'s
 "Landed 2026-10-03" section: 21 lines of `std/math/math.mojo`'s generated C
 change, every one a single symbol rename, and renaming those 8 symbols back
 reproduces the old file byte for byte.
@@ -1244,7 +1244,7 @@ and it did NOT move in this session — expected, and worth stating rather than
 hiding: the census only counts files that COMPILE, and these 22 do not, so the
 two populations are disjoint. `FormatStruct` (15), `alloc` (10) and
 `ThinAllocation` (8) remain the census's largest names and are untouched by
-this work; see `bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md`.
+this work; see `bugs/imported-generic-elaboration-defect`.
 
 ## 2026-10-20 (continued): the call-site mechanism was built and measured,
 then refused itself — a false green averted, a regression caught, a net-zero
@@ -3134,7 +3134,7 @@ and the whole blast radius is measured and classified
   entries in `EXPECTED_FAILURES`) this section closes. Sweep state
   moved **608/2 → 609/1**: the remaining red is `test_getsize`
   (the C-ABI-FFI sub-campaign, tracked in
-  `CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md`).
+  `imported-generic-elaboration-defect`).
   The `EXPECTED_FAILURES` entry is REMOVED from compile_stdlib.py
   (measured-removal comment in its place); the clean re-sweep after the
   dict edit reports 609/1, 0 unexpected, and no stale entries.

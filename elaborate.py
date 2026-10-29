@@ -243,7 +243,7 @@ def _is_param_marker(p: str) -> bool:
     elaborator declines measured over the stdlib sweep, which is why
     `ceildiv`/`exp`/`sqrt`/`isnan`/`black_box` and the rest of the numeric
     library reached the generated C as bare externs (see
-    bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md).
+    bugs/imported-generic-elaboration-defect).
     """
     return bool(p) and all(ch in '/*' for ch in p)
 
@@ -281,7 +281,7 @@ def type_param_defaults(template_src: str):
     exactly as the stdlib writes it — `size_of[UInt8]()` — was declined before
     anything was compiled, and its call site reached the generated C as a bare
     `extern int64_t size_of (...)`. See
-    `bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md`.
+    `bugs/imported-generic-elaboration-defect`.
 
     Only the text is returned; whether it is USABLE as a concrete argument is
     `_default_type_arg`'s question, and it is deliberately narrow."""
@@ -805,7 +805,7 @@ def infer_struct_type_args(module_src: str, struct_name: str, arg_ctypes,
     `FormatStruct (writer, _t2);` — a call to a symbol nothing defines. That
     single shape was 56 of the 108 real undefined-call sites measured over the
     stdlib sweep (see
-    `bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md`).
+    `bugs/imported-generic-elaboration-defect`).
 
     Every candidate `__init__` whose arity matches is tried, and the type args
     must agree across all of them that bind: a struct with two constructors
@@ -983,7 +983,7 @@ def _defined_symbols(obj: str) -> set:
     This is how the elaborator learns what the instantiation TU actually NAMED
     its methods, instead of re-deriving the names — which is impossible, and
     was measured impossible (see the `FormatStruct` section of
-    bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md:
+    bugs/imported-generic-elaboration-defect:
     the erasure that makes two `fields` overloads look identical is the same
     erasure that destroys the function `overload_suffix_for` is computed from).
 

@@ -1561,7 +1561,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # ordinary call path and emitted a bare call to a symbol nothing
         # defines; `elaborate_generic_struct_inferred` recovers the type args
         # from the `__init__` annotations. See
-        # bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md.
+        # bugs/imported-generic-elaboration-defect.
         res = gen._elaborate_generic_struct_call(node)
         if res is not None:
             return res
