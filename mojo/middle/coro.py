@@ -210,11 +210,12 @@ _NUMERIC_CTORS = {'Float64': 'd', 'Float32': 'd', 'Float': 'd', 'float': 'd',
                   'String': 'p', 'StringSlice': 'p', 'str': 'p'}
 
 
-def _callee_return_kind(expr) -> str | None:
+def _callee_return_kind(expr, env: dict | None = None) -> str | None:
     """Scalar kind of `expr`'s value when `expr` is a call to a BARE name whose
-    return type this module knows: a builtin scalar CONSTRUCTOR
-    (`float(x)` -> 'd') or a same-module `def` that states one, by annotation
-    (`_FUNC_RET_KIND`, fed by `_scan_func_ret_kinds`).
+    return type this module knows: a lambda-bound local of the enclosing
+    function (`env`'s `('callable', kind)` entry, see `_static_env`), a builtin
+    scalar CONSTRUCTOR (`float(x)` -> 'd') or a same-module `def` that states
+    one, by annotation (`_FUNC_RET_KIND`, fed by `_scan_func_ret_kinds`).
 
     One function for the three places that answer this question -- a yielded
     expression (`_yield_kind`), a call-site ARGUMENT (`_argkind`) and a local's
@@ -224,10 +225,27 @@ def _callee_return_kind(expr) -> str | None:
     (under `_scan_callsite_param_kinds`' hole rule) a refusal over a program
     whose every kind was in fact knowable. Only a BARE name is matched, so
     `x.float()` and `self.compute()` are deliberately not answered here.
+
+    A local that holds a lambda SHADOWS a same-named builtin or `def`, so the
+    env is consulted first, and a lambda whose body kind is unknown answers
+    None rather than falling through to the `def` table.
     """
     if not (isinstance(expr, N.CallExpr) and isinstance(expr.func, N.IdentExpr)):
         return None
+    if env is not None:
+        _cv = env.get(expr.func.name)
+        if isinstance(_cv, tuple) and _cv[0] == 'callable':
+            return _cv[1]
     return _NUMERIC_CTORS.get(expr.func.name) or _FUNC_RET_KIND.get(expr.func.name)
+
+
+def _lambda_ret_kind(lam: N.LambdaExpr, env: dict) -> str | None:
+    """Scalar kind of the value `lam` returns, read off its body. The lambda's
+    OWN parameters are removed from `env` first: `lambda x: x` must not take
+    the enclosing function's kind for a local `x`, since `x` is the parameter
+    here. None == can't tell, which is what an untyped body answered before."""
+    _params = {_p for _p, _d in lam.params}
+    return _yield_kind(lam.body, {k: v for k, v in env.items() if k not in _params})
 
 
 def _ann_kind(ann) -> str | None:
@@ -308,6 +326,28 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
         env.setdefault(pname, k)
     for pname, k in _PLAIN_CALLSITE_PARAM_KINDS.get(_fname, {}).items():
         env.setdefault(pname, k)
+    # Lambda-bound locals: `f = lambda: <body>` makes `f()` answer the body's
+    # kind, so `r = f()` / `yield f()` are typed the way `r = h()` for a named
+    # `def h` already is (`_callee_return_kind`). Recorded BEFORE the walk
+    # below, because that walk is what reads `f()`. A name is recorded only
+    # when EVERY binding of it in this function is a lambda, and they all agree
+    # on the kind: a rebind to a non-lambda, or two lambdas that disagree, is
+    # left unrecorded, which answers None (as an untyped callee always did)
+    # rather than a wrong kind. Parameters are excluded for the same reason:
+    # a parameter's binding is not a lambda's.
+    _lam_binds: dict = {}
+    for n in _walk(fn):
+        if isinstance(n, N.AssignStmt) and isinstance(n.target, N.IdentExpr):
+            _lam_binds.setdefault(n.target.name, []).append(n.value)
+        elif isinstance(n, N.VarDecl):
+            _lam_binds.setdefault(n.name, []).append(n.value)
+    _param_names = {_pn for _pn, _pa in getattr(fn, 'params', [])}
+    for _nm, _vals in _lam_binds.items():
+        if _nm in _param_names or not all(isinstance(_v, N.LambdaExpr) for _v in _vals):
+            continue
+        _kinds = {_lambda_ret_kind(_v, env) for _v in _vals}
+        if len(_kinds) == 1:
+            env[_nm] = ('callable', _kinds.pop())
     list_elem: dict = {}   # local name -> {elem kinds seen via `= [...]` / .append(...)}
     for n in _walk(fn):
         tgt = val = ann = None
@@ -327,7 +367,7 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
                 # third answer to the same question is the one that had
                 # drifted.
                 if k is None:
-                    k = _callee_return_kind(val)
+                    k = _callee_return_kind(val, env)
             # `var b = bytes([...])` / `bytearray(...)` / `memoryview(...)`:
             # a byte container, so its element kind is 'i' BY DEFINITION --
             # not an inference, so it is safe to record even though the
@@ -498,7 +538,7 @@ def _yield_kind(expr, env: dict | None = None) -> str | None:
     # expression. Only a BARE name is matched, so `x.bool()` / `self.flag()`
     # are not.
     if isinstance(expr, N.CallExpr) and isinstance(expr.func, N.IdentExpr):
-        return _callee_return_kind(expr)
+        return _callee_return_kind(expr, env)
     # A str METHOD CALL on a string receiver (`'ab'.upper()`, `t.lower()`,
     # `s.replace(a, b).upper()`) is a string. The method set is the shared
     # `_STR_RETURNING_METHODS` (the same table `module_shared` and
@@ -3502,7 +3542,7 @@ def _argkind(expr, caller_env: dict | None = None) -> str | tuple | None:
     if isinstance(expr, N.UnaryOp) and expr.op in ('-', '+'):
         return _argkind(expr.operand, caller_env)
     if isinstance(expr, N.CallExpr) and isinstance(expr.func, N.IdentExpr):
-        return _callee_return_kind(expr)
+        return _callee_return_kind(expr, caller_env)
     # `is not None`, not truthiness: an EMPTY caller env is still a caller
     # env, and every shape below is answered from the EXPRESSION alone when
     # the env has nothing to add. Gating on truthiness instead made

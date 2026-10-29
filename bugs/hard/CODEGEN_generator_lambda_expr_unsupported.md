@@ -1,5 +1,45 @@
 # HARD BUG: some `lambda` shapes unsupported inside a compiled generator body
 
+## Status (2026-10-29, second pass — the generator-yield residue of a lambda call is FIXED; the rest of the residue is filed in two docs)
+
+### Landed this pass
+
+- **A lambda-bound local's return kind now reaches a generator's yield slot.**
+  `def gen(): f = lambda: False; r = f(); yield r` yielded through an
+  `int64_t` slot and printed `0`; it now prints `False`, matching CPython.
+  The yield-kind scan that types the value slot is `mojo/middle/coro.py`'s
+  `_static_env` (the A3 path) — **not** `exprtypes.py`'s `known` map, which the
+  residue row below originally named. `_static_env` now records `f = lambda:
+  <body>` as `('callable', body_kind)` before its walk, and
+  `_callee_return_kind` answers a call through that local from it (a local
+  shadows a same-named builtin or `def`). A name is recorded only when every
+  binding of it is a lambda and they all agree; a lambda's own parameters are
+  removed from the env before its body is typed, so `lambda x: x` does not take
+  an outer local `x`'s kind.
+- Pinned in `test_gimple_generator_runner.py`:
+  `generator_lambda_bool_call_result_yields_bool`,
+  `generator_lambda_call_yielded_directly`,
+  `generator_lambda_float_call_result_yields_float` (each fails without the
+  change: `0`/`1`/`1` for `False`/`True`/`1.5`), and
+  `generator_lambda_param_does_not_read_outer_local_kind`, which PASSES
+  without the change too. It guards the parameter-exclusion rule the change
+  introduces, not a defect that existed before.
+
+### Residue, after this pass
+
+| shape | compiled | CPython | where |
+|---|---|---|---|
+| a generator whose yields mix a bool-lambda call and a float-lambda call | `1`, `1` | `True`, `1.5` | **new doc** `bugs/CODEGEN_generator_yield_kind_rebound_name_silent_wrong_value.md` (shape 2). A3 refuses correctly; the legacy C++ fallback then types both yields `int64_t`. Predates this pass. |
+| `r = 2.5` rebinding a local first bound to `False`, then `yield r` (no lambdas) | `True` | `2.5` | same new doc (shape 1: `_static_env`'s first-binding `setdefault`). Predates this pass. |
+| two generators in one module, a bool-yielding and a float-yielding one | float one prints `True` | `1.5` | **new doc** `bugs/CODEGEN_two_generators_bool_float_value_kind_bleed.md`. No lambdas; predates this pass. |
+| `def outer(x): n = 2; def inner(y): g = lambda z: z + n; return g(y)` | `4` | `6` | `bugs/hard/CODEGEN_nested_def_lambda_reads_outer_capture_as_zero.md` (existing doc). |
+| `sorted(key=<user function>)` | not re-measured | | `CODEGEN_interpreter_user_function_as_builtin_callback_crashes` |
+
+Because this doc is still cited by ~20 live locations and its nested-def row is
+open, it is not deleted. Its disposition is the one the 2026-10-02 entry below
+states: delete it in the same commit that closes its last row and repoints
+every citation.
+
 ## Status (2026-10-29 — the lambda-call-result return type is fixed for plain functions; one generator-yield residue and one nested-def silent miscompile remain)
 
 ### Landed
@@ -18,7 +58,7 @@ Pinned by `gimple_lambda_call_result_bound_to_a_local_keeps_its_type` in
 `test_gimple_runner.py` (CPython-compared). Before the fix the first two rows
 printed `0` and the variadic row printed `0`; after, all three match CPython.
 
-### Residue found this round (all still open)
+### Residue found 2026-10-29, first pass (row 1 is FIXED — see the second pass above; the rest as stated)
 
 | shape | compiled | CPython | where |
 |---|---|---|---|

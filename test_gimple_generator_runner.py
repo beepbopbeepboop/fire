@@ -4012,6 +4012,100 @@ def main():
         print(v)
 """, "7\n7\n7\n")
 
+    # A lambda's RETURN kind reaches the generator's yield slot, not just the
+    # body that calls it: `r = f()` / `yield f()` with `f = lambda: False`
+    # yielded through an int64_t slot and printed `0` (CPython: `False`). The
+    # yield-kind scan (`coro._static_env`) now records a lambda-bound local's
+    # body kind, so the slot is `_Bool`. The parameter-shadowing case pins
+    # that a lambda's own `x` is not read as the enclosing local `x`.
+    test_generator_matches_cpython("generator_lambda_bool_call_result_yields_bool", """\
+def gen():
+    f = lambda: False
+    r = f()
+    yield r
+
+def main():
+    for v in gen():
+        print(v)
+main()
+""", """\
+def gen():
+    f = lambda: False
+    r = f()
+    yield r
+
+def main():
+    for v in gen():
+        print(v)
+main()
+""")
+
+    test_generator_matches_cpython("generator_lambda_call_yielded_directly", """\
+def gen(n):
+    f = lambda: n > 2
+    yield f()
+
+def main():
+    for v in gen(5):
+        print(v)
+main()
+""", """\
+def gen(n):
+    f = lambda: n > 2
+    yield f()
+
+def main():
+    for v in gen(5):
+        print(v)
+main()
+""")
+
+    test_generator_matches_cpython("generator_lambda_float_call_result_yields_float", """\
+def gen():
+    g = lambda: 1.5
+    r = g()
+    yield r
+
+def main():
+    for v in gen():
+        print(v)
+main()
+""", """\
+def gen():
+    g = lambda: 1.5
+    r = g()
+    yield r
+
+def main():
+    for v in gen():
+        print(v)
+main()
+""")
+
+    test_generator_matches_cpython("generator_lambda_param_does_not_read_outer_local_kind", """\
+def gen():
+    x = "hi"
+    f = lambda x: x
+    r = f(3)
+    yield r
+
+def main():
+    for v in gen():
+        print(v)
+main()
+""", """\
+def gen():
+    x = "hi"
+    f = lambda x: x
+    r = f(3)
+    yield r
+
+def main():
+    for v in gen():
+        print(v)
+main()
+""")
+
     test_generator_stdout("generator_one_arg_lambda_over_list", """\
 def g(xs):
     f = lambda m: m + 1
