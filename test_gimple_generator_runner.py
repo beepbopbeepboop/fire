@@ -5646,6 +5646,52 @@ def go():
 go()
 """, "A\nB\n")
 
+    # A local bound to a str METHOD CALL. `_yield_kind` had no arm for a
+    # method call on a string, so `s` got no kind, `for it in s` found no
+    # element kind, and `yield it` fell through to the int64_t slot: the
+    # consumer printed the char* as an integer address (a generator yielding
+    # an element of a str method call's result). The receiver
+    # is a literal here, then a str PARAMETER (its kind is only known through
+    # the env), then a chained call, which needs the inner call's kind.
+    test_generator_stdout("generator_iterating_a_str_method_call_local_yields_characters", """\
+def gen():
+    s = 'ab'.upper()
+    for it in s:
+        yield it
+
+def go():
+    for v in gen():
+        print(v)
+
+go()
+""", "A\nB\n")
+
+    test_generator_stdout("generator_iterating_a_str_method_on_a_parameter_yields_characters", """\
+def gen(t):
+    s = t.lower()
+    for it in s:
+        yield it
+
+def go():
+    for v in gen('XY'):
+        print(v)
+
+go()
+""", "x\ny\n")
+
+    test_generator_stdout("generator_iterating_a_chained_str_method_call_yields_characters", """\
+def gen():
+    s = 'a-b'.replace('-', '').upper()
+    for it in s:
+        yield it
+
+def go():
+    for v in gen():
+        print(v)
+
+go()
+""", "A\nB\n")
+
     # ── a VARIADIC lambda inside a compiled generator body ────────────────
     # `mojo/middle/coro.py`'s `_lambdas_ok` used to refuse EVERY lambda with a
     # `*args`/`**kwargs` parameter (or a defaulted one) in a generator body,
