@@ -1,5 +1,41 @@
 # FORMAL_known_limits: the sweep residue, audited — which refusals are true
 
+**Last audited: 2026-10-28 (master 8c19a643f, the closing-gate adjudication —
+§0 added: the sqliteruntime cold-worktree budget, measured; plus the
+owner-WIP red status pointer).**
+
+## 0. (2026-10-28) sqliteruntime: the cold-worktree budget shortfall, measured
+
+Not a code defect. The job's registered budget (`tools/suite.py:2493`,
+`timeout=600`; the suite-wide default is 3600 s) is below the measured
+quiet-cold duration in a fresh worktree, so ANY fresh-worktree gate run
+exceeds it under load:
+
+| scenario (8c19a643f, uncached) | wall | result |
+|---|---|---|
+| warm main checkout, quiet | 71.9 s | PASS 66/66 |
+| main checkout, 1st solo, quiet | 517.1 s | PASS |
+| fresh worktree, fully cold, quiet | 484 s | PASS 66/66 |
+| fresh worktree, -j18 gate load | > 600 s | TIMEOUT |
+
+Contributors: the self-host bootstrap's double-compile fallback (see
+`CODEGEN_selfhost_closure_set_kind_refusal_double_compiles_the_module.md`)
++ the shared dylib lock (in the closing gate another job held it
+10:47-10:59, finishing 7 min after the kill) + -j18 contention. Calibration
+levers (both backed by measured termination — not masking): warm the gate
+worktree's cache before gating, or relax the registered budget to ~1200 s.
+Also recorded same window: `formal-os` is load-sensitive — 3/3 quiet solo
+runs PASS ~90 s; under the gate's -j18 stretch the two 84-case string
+binaries crossed the 60 s per-binary `RUN_TIMEOUT` (test_formal_os.py:59),
+CPU starvation, no defect (f620e1096 + 3d58c18ce exonerated).
+
+**Owner-WIP red status pointer (NOT limits, do not schedule as new bugs):**
+as of the 8c19a643f closing gate, `gimplegenerators` / `gimplerunner` /
+`formal-sweep-truth` are red — byte-identical failure signatures at
+pre-batch 6c8aba839 (`T/opencode/prebatch_*.log`); the integ batch did not
+move them. They are the owner's in-flight work; resume from those logs.
+`selfhost` is the owner's bootstrap campaign (FAIL 193 s recorded).
+
 **Last audited: 2026-09-27 (the five-agent round 1, agent [5] — §6 added).**
 Sections 1–5 are wave 5's audit and are **not** re-measured here; §6 is a
 separate, later measurement of the same sweep on a tree four other agents were

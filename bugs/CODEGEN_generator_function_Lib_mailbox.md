@@ -1,5 +1,39 @@
 # CODEGEN_generator_function: Lib/mailbox.py
 
+## Status (2026-10-28, master 8c19a643f — the 2-error cascade pair is FIXED (247363aa); a 7-error own-file class the owner's landings introduced now leads; re-measure before scheduling)
+
+- **The residual 2-error pair from the 93d13780-era Status below is GONE.**
+  It was the `Mailbox___iter__` forward decl (C:1476) preceding the
+  `MojoGenerator` typedef (C:2809) — a declaration-before-typedef cascade.
+  Fixed in 247363aa ("codegen: emit generator typedef ahead of method
+  prototypes"): the entry section now emits the typedef ahead of the
+  method-prototype pass, with a membership guard at the generator block's
+  original site so the section carries exactly one. Measured: standalone
+  entry C 2 -> 0 errors (pure within-section relocation, nothing else
+  moves); the full-closure C is byte-identical except the moved typedef
+  line inside generator-bearing sections; gimplegenerators suite green
+  (253/0 at merge time).
+- **NEW, owner-side: a 7-error own-file entry-C class introduced by the
+  owner's landings between 1d2bdfe0..b1a55d9d** (measured 2026-10-27 on
+  2b9d5807; absent before that window): `Maildir.clean` / `_get_message`
+  stub-emission paths — `time.time()` -> module-not-compiled, a `getatime`
+  pointer -> int coercion chain, and `mojo_cstr_slice` error operands
+  (gcc-15 -fgimple class; cf. the documented family at
+  `test_gimple.py:8121`). No fix landed in 2b9d5807..8c19a643f (grep over
+  the window: no maildir/getatime/time.time commit). RE-MEASURE on the
+  current tree before scheduling (regenerate the entry C with
+  do_imports=True, gcc-mp-15 -fgimple -fsyntax-only; the 2b9d5807
+  artifacts are in T/opencode/fsdec/).
+- **The row's first wall is unchanged**: the `_collections_abc`
+  `generator .close()` refusal (66 rejects whole-closure, byte-identical
+  composition across aed8bd53 + the owner's ~100-commit integration). It is
+  closure-contextual — the same file compiles in the relaxed import context
+  alone. Now documented standalone:
+  `CODEGEN_the_collections_abc_coro_close_idiom_refuses_only_in_a_full_closure.md`
+  (owes a solo quiet-window live-table dump at the refusal point).
+- Related generator-row finding (value path, not this file's compile path):
+  a None yield value prints 0 — `CODEGEN_a_bare_or_explicit_yield_of_none_prints_zero.md`.
+
 ## Status (2026-10-25, master 93d13780 — the 2026-09-05 named refusal no longer fires; the first own-file class is the value-position enumerate() cast, fixed as 93d13780 (12 sites → 0); the residual 2 are a new small class)
 
 Re-measured post merge (mojo-reference2 b35a79ea + f234a398 + baa9854b + cb156b54 + 93d13780). Entry module via the in-process do_imports=False entry C (byte-identical to the fire.py build's C for this file), gated by `gcc-mp-15 -fgimple -fsyntax-only`:

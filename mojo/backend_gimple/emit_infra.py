@@ -2764,6 +2764,18 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             # char* to void* conversion
             vp = gen._new_val('void *', f'(void *){aval}')
             coerced_args.append(vp)
+        elif ptype == 'Span *' and actual_atype == 'char *':
+            # A String (or string literal) passed to a StringSlice parameter. A Span is the fat pointer
+            # {_data, _len} the callee reads, so the argument must be WRAPPED in one: casting the bare
+            # char * to Span * handed the callee the character bytes as a Span header and it read `x->_data`
+            # from them (2026-10-28, gs3.mojo: EXC_BAD_ACCESS at the callee's first field read; real Mojo
+            # prints the value). The String is NUL-terminated, so its byte length is mojo_strlen.
+            gen._struct_allocs_needed.add('Span')
+            _sp = gen._new_temp('Span *')
+            gen._emit(f'  {_sp} = _alloc_Span ();')
+            gen._emit(f'  {_sp}->_data = {aval};')
+            gen._emit(f'  {_sp}->_len = mojo_strlen ({aval});')
+            coerced_args.append(_sp)
         elif ptype.endswith(' *') and atype == 'char *':
             # char* passed where other pointer type expected
             ip = gen._new_temp('int64_t')
