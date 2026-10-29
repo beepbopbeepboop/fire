@@ -125,8 +125,8 @@ def _walk_ast_into(node, out, _depth=0, _from=0):
     intermediate per-subtree lists (`result.extend(_walk_ast(child))`
     copied every node once per ancestor level before being discarded).
 
-    Phase 5 (bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_
-    rescan.md): this is the whole-program walk utility itself, called by
+    Phase 5 (the `_walk_ast` re-scan bug, closed
+    ): this is the whole-program walk utility itself, called by
     the struct-field scans, Pass 1.2's self-assign/self-read collectors,
     gen_func, closure/async pre-passes — every consumer of the flat
     node list. A fresh cProfile of Lib/contextlib.py showed ~29s of its

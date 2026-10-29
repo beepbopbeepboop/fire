@@ -2150,8 +2150,8 @@ class GimpleGen:
         self._asdict_dispatch_needed: set = set()
         self._module_stmts: dict[str, list] = {}    # module_name → parsed stmts (shared across all gens)
         # Flattened, incrementally-maintained mirror of the UNION of every
-        # list ever stored into `self._module_stmts` (see bugs/hard/
-        # PERF_nested_module_compile_walk_ast_quadratic_rescan.md, Phase 1)
+        # list ever stored into `self._module_stmts` (see the `_walk_ast` re-scan
+        # bug, Phase 1)
         # — shared by reference into every nested temp_gen exactly like
         # `_module_stmts` itself (see `_compile_imported_module`'s sharing
         # block). Appended to ONCE per statement, ever, right where

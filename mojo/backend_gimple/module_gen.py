@@ -6197,8 +6197,8 @@ def gen_module_impl(self, stmts):
                 # is the only place that knows which FIELD a parameter feeds,
                 # and re-walking the body here to recover that is exactly the
                 # quadratic-rescan cost
-                # bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_
-                # rescan.md is about. Rebuilt per method, so one method's
+                # the `_walk_ast` re-scan bug
+                # is about. Rebuilt per method, so one method's
                 # answer can never leak into the next one's fields.
                 self._gmi_bool_params = set()
                 _defaults = getattr(method, 'param_defaults', {}) or {}

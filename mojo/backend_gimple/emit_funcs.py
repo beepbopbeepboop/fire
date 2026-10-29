@@ -1114,8 +1114,8 @@ def _selfhost_walk_stmts_for_assign_targets(stmts, p0, fields):
     `gimple_exprtypes._walk_ast` (a full generic-dataclass-reflection
     walker used ~48 places across the compiler, and the documented
     subject of a well-known, actively-tracked O(N^2) whole-program
-    rescan cost — see bugs/hard/PERF_nested_module_compile_walk_ast_
-    quadratic_rescan.md). `self.x = <literal>` assignments are always
+    rescan cost — see the `_walk_ast` re-scan bug,
+    closed). `self.x = <literal>` assignments are always
     direct statements, never nested inside an expression, so this only
     needs to recurse into STATEMENT-level body-bearing fields (if/while/
     for/try/with/match/comptime blocks) — far cheaper and, critically,

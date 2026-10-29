@@ -1731,7 +1731,7 @@ def _selfhost_gen_self_param_ctype(gen, pname, ptype, node) -> str | None:
     # build directly gives ~1.5s for 448 entries, so the real win is ~1.5s
     # per process, paid once. Small but free, and a larger fraction of a
     # quick `fire.py build small.mojo` than of a whole-stdlib sweep. See
-    # bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md.)
+    # the `_walk_ast` re-scan bug (fixed; remainder in bugs/hard/PERF_struct_self_assign_scan_uncached.md).)
     #
     # The flag itself: set once the GimpleGen registry pre-pass has run for
     # this (shared) compile — see _selfhost_register_gimplegen in
