@@ -2199,8 +2199,7 @@ test('nested-async-generic', [PY, 'test_nested_async_generic.py'], mem='tiny',
      desc='a generic inside a nested async')
 test('coro-detached-async', [PY, 'test_coro_detached_async.py'], mem='tiny',
      deps=['preflight'],
-     expect='2 failing: a detached coroutine task',
-     desc='2 failing: a detached coroutine task')
+     desc='a detached coroutine task')
 test('async-runtime-scaffold', [PY, 'test_async_runtime_scaffold.py'], mem='tiny',
      deps=['preflight'],
      desc='toolchain/runtime proof for step A of compiled-path async/await')
@@ -4523,7 +4522,7 @@ BUCKETS = {
     # Measured one at a time under `tools/memslot.py --gb 8`; `mem` is `tiny`
     # (0.0-0.2 GB each, against the `small`/8 GB they carried while ungated):
     #   gimple-async-runner  41.4 s  0.1 GB  39 passed   (green since 2026-10-28)
-    #   coro-detached-async  2.2 s  0.1 GB   2 failing             (expect=)
+    #   coro-detached-async  2.2 s  0.1 GB   2 passed   (was red: stale mojo_coro.c paths)
     #   async-void-return    3.3 s  0.1 GB   3 failing             (expect=)
     #   coro-future-await   11.6 s  0.1 GB  17 failing             (expect=)
     #   async-with-lock-guard 2.7 s 0.1 GB   3 passed
