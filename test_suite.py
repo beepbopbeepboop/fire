@@ -1302,7 +1302,7 @@ def test_an_expect_marker_count_is_checked_against_the_run():
                      #     backends again and the marker came back with it, a
                      #     half-applied fix of the same class as the dropped
                      #     definitions in
-                     #     `bugs/MERGE_bulk_resolved_to_master_dropped_branch_definitions.md`
+                     #     definitions from the bulk-merge drop (fixed; doc deleted);
                      #     — and then master's `5e45d0b5` restored the test half for
                      #     real, so the marker is gone a second time and the count
                      #     with it.  The registry is the authority for both: a
