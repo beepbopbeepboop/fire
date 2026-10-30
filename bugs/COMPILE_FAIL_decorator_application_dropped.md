@@ -5,6 +5,56 @@ Found 2026-09-27 while closing
 opposite kind of problem, and the reason that file needed a separate
 correctness caveat even after it started building.
 
+## Status (2026-10-29, rebinding landed for same-module decorators — defect 3 is fixed for integer returns; the rest is open)
+
+**Landed (the step-(b) rebinding model, in its simplest correct form):**
+
+- `module_gen.py` `_gmi_rebind_decorated_defs`: a top-level `@deco` or
+  `@deco(x)` whose name is a top-level `def` in the SAME module is rewritten
+  to `def step__undecorated(...)` plus `step = deco(step__undecorated)` at the
+  def's position, in source order. Stacked decorators nest innermost-first
+  (`@a @b` -> `a(b(...))`). A factory is `step = deco(x)(step__undecorated)`.
+  The global then holds the decoration's value, and the existing module-global
+  call machinery (`_root_globals` + `mojo_fnptr_call_N`) calls it. No call
+  site had to learn about decorators. Annotation decorators (`staticmethod`,
+  `export`, `doc_hidden`, ...) and imported decorators stay on the `def`.
+- `emit_calls.py` `_callee_is_fnptr_value`: one predicate for "a bare-name
+  callee is a value, not a C symbol", now used by BOTH the expression call
+  path and the statement call path. Before, a discarded top-level `step(7)`
+  checked only locals and called the absent `step` symbol, which lowered to a
+  weak `unavailable in compiled mode` stub. That stub bug was already present
+  for an ordinary module-level closure (`f = outer(3); f(10)` as a statement).
+- `emit_exprs.py`: a global read carries `_global_func_value_names` to its
+  read-back temp, so `print(step)` formats a function value.
+- The scalar refusal (a) still runs first, so a scalar decorator is still
+  refused rather than rebound to a non-callable.
+
+**Tests:** `test_gimple.py` `decorator_rebinding_is_applied_at_runtime`
+compares compiled stdout with CPython for a wrapping decorator, a factory
+wrapper, and stacked decorators. Against the pre-change `module_gen.py` it
+prints `8` where CPython prints `16` (checked by disabling the rewrite); with
+the change it passes. `test_gimple.py` as a whole: 412 passed, 0 failed.
+`every_ast_mutation_site_invalidates_the_walk_memo` needed one allowlist
+entry for the new `copy.copy`'d node, with its reason.
+
+**Still OPEN:**
+
+- **Decorators from another module** and a decorated `def` nested in a
+  function body are still silently unapplied.
+- **A wrapper that returns `str`** prints a decimal address. That is the
+  closure str-return gap, not this rebinding: `bugs/CODEGEN_closure_str_return_is_lost.md`.
+  The runtime test is integer-only for that reason.
+- **Defect 1** (the decorator's own parameter typed `int64_t`) is not
+  addressed. It works today because a function pointer is carried as an
+  `int64_t` bit pattern, which is fragile and not the model the planning entry
+  below intended.
+- **The repr of a decorated wrapper** is the decorated name (`<function step at
+  ...>`), where CPython prints `<function twice.<locals>.wrap at ...>`. The
+  pass-through case matches CPython; the wrapper case does not.
+- **Integrator gate:** the rewrite applies to every same-module decorated
+  top-level `def` in the stdlib too. The `stdlib-dylib` `skip` count and
+  `stdlib-syntax` `U` count must be compared before and after.
+
 ## Status (2026-10-29, worker round — refusal extended to factories; a false refusal in (a) fixed; defects 1-3 still open)
 
 - **Factory decorators are now refused too.** `@deco(x) def step` where
