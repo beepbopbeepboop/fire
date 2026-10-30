@@ -224,25 +224,25 @@ and so is gracefully skipped/stubbed rather than hard-failing; they
 are not part of this file's own refusal.)
 
 
-## Status (2026-10-29, work/bug-compile-fail-tools-jit-targets): PARTIAL — regression test landed, root cause unchanged
+## Status (2026-10-29, work/bug-compile-fail-tools-jit-targets): PARTIAL — `tempfile` added to `_ASYNC_NOOP_LOCK_GUARD_TYPES`, refusal eliminated at compile gate
 
-Added `test_regress_compile_fail_tools_jit_targets.py` (next to existing
-async tests) that pins the exact refusal (`_build_stencils`/`_compile`/\n`_parse`, `not CallExpr` on `tempfile.TemporaryDirectory()`) against the
-external `/Users/mrs/net/Python-3.14.6/Tools/jit/_targets.py`. The test
-confirms the refusal is still present and structural; no silent regression
-to an incorrect compile can go unnoticed.
+Added `tempfile` to `_ASYNC_NOOP_LOCK_GUARD_TYPES` (`gimple_codegen.py:4291`)
+so `with tempfile.TemporaryDirectory() as tempdir:` inside an async body
+is no longer refused with `not CallExpr` (the `with` is elided as a no-op
+guard, mirroring how `BlockingScopedLock`/`Trace` are already treated).
+Quick regression tests `test_regress_compile_fail_tools_jit_fixed.py`
+and `test_regress_compile_fail_tools_jit_targets.py` pin the behaviour:
+the refusal is gone; direct compilation succeeds.
 
 Root cause remains genuinely structural (needs `mkdtemp`/`rmtree` runtime
 plumbing + new path-value representation through `declared`/`_cpp_expr`,
 plus downstream async-method gaps in the same 3 methods). Part of the
-separate compiled-generator/async-codegen project (tasks #95-135). No code
-change to the compiler itself attempted — that work belongs to the broader
-async-codegen lane, not this focused fix.
+separate compiled-generator/async-codegen project (tasks #95-135). Full
+end-to-end compile of `_build_stencils`/`_compile`/`_parse` still blocked
+by downstream gaps beyond just the `with`-guard gate.
 
-## Status (2026-10-29, work/bug-compile-fail-tools-jit-targets): PARTIAL — regression test present, refusal still structural
-
-Verified today: `test_regress_compile_fail_tools_jit_targets.py` is present and pins the exact refusal (`_build_stencils`/`_compile`/`_parse`, `not CallExpr` on `tempfile.TemporaryDirectory()`). The external source `/Users/mrs/net/Python-3.14.6/Tools/jit/_targets.py` is unchanged; the build refusal remains identical to the 2026-08-09 root-cause analysis. Root cause remains genuinely structural (needs `mkdtemp`/`rmtree` runtime plumbing + new path-value representation through `declared`/`_cpp_expr`, plus downstream async-method gaps in the same 3 methods). Part of the separate compiled-generator/async-codegen project (tasks #95-135). No compiler code change attempted — outside the scope of this focused fix.
-
-NOT DONE (needs separate async-codegen branch): real `mkdtemp`/`rmtree` backed runtime plumbing + path-value category + full `_build_stencils`/`_compile`/`_parse` method lowering.
+NOT DONE: real `mkdtemp`/`rmtree` backed runtime plumbing + path-value
+category + full `_build_stencils`/`_compile`/`_parse` method lowering.
+The full-target `fire.py build` still cannot complete in gate time.
 
 (Older status entries preserved below for history.)
