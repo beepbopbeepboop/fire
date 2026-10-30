@@ -1,5 +1,25 @@
 # COMPILE_FAIL (hard): Tools/c-analyzer/c_common/fsutil.py
 
+## Status 2026-10-30 — `items = iter(items)` on a PARAMETER now gets a cursor; `iterutil.peek_and_iter` no longer refuses
+
+Re-measured (copy `c_common/` to `.tmp/ca/`, `python3 fire.py build -o ../out-fsutil c_common/fsutil.py`):
+the build printed `# ERROR ... iterutil ... next(IdentExpr) (receiver typed MojoList *) in function
+peek_and_iter`, from `_try_bind_iter_cursor` (`emit_stmts.py`) refusing any target already in
+`var_types`, so the rebinding `items = iter(items)` — line 1 of both `peek_and_iter` and `iter_many`
+— never got a cursor and `next(items)` fell to the never-defined `next` extern. **Landed:** an
+already-declared target whose C type equals the argument's (a parameter or earlier plain-container
+local) and that is not already a cursor (`iter(<iterator>)` must not rewind) is now bound to a cursor
+over itself. Pinned by `gimple_iter_rebinds_a_parameter_to_a_cursor` in `test_gimple_runner.py`
+(next, then `for` resuming, 2-arg `next` default; output equals CPython). Runner: 489 pass, 1 fail —
+`gimple_ctor_param_polymorphic_slot_reads_receiver`, which fails identically with this change
+stashed (unrelated; prints pointer bits).
+
+The module-level refusal list is still `_walk_tree, glob_tree, iter_files, process_filenames`, so
+this file does not build yet. `process_filenames`'s tuple `for` target is over `iter_many(...)`, whose
+own yields are `(first, False)` / `(item, True)` tuples and whose `onempty` is a callable parameter;
+that is the remaining next step for it (give a call to a same-closure tuple-yielding generator a
+per-slot tuple `for` target). The other three are unchanged from the entries below.
+
 ## Status 2026-10-26 — the star/kwarg unpack-call capability LANDED; this file's refusal is unchanged, as its own entry predicted
 
 The "new, separate capability" this file's 2026-10-25 entry names as

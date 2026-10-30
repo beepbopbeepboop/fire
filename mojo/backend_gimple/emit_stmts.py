@@ -265,11 +265,20 @@ def _try_bind_iter_cursor(gen, name, value):
             and value.func.name == 'iter'
             and len(value.args) == 1 and not getattr(value, 'kwargs', None)
             and not gen._locally_binds_name('iter')
-            and name not in gen.var_types
             and name not in gen._global_var_types):
+        return False
+    # A name that is ALREADY declared qualifies only as the rebinding
+    # `items = iter(items)` of a parameter/earlier local that holds a plain
+    # container, which is the same container viewed through a fresh cursor.
+    # It must not already be a cursor itself: `iter(<iterator>)` is the
+    # iterator, and restarting its cursor at 0 would rewind it.
+    _rebind = name in gen.var_types
+    if _rebind and itc.cursor_for(gen, gen._cname(name)) is not None:
         return False
     at, av = gen.lower_expr(value.args[0])
     at = gen._get_actual_type(at, av)
+    if _rebind and gen.var_types.get(name) != at:
+        return False
     data = None
     if at == 'MojoList *':
         kind = 'list'
@@ -285,7 +294,8 @@ def _try_bind_iter_cursor(gen, name, value):
         kind = 'span'
         data = (fname, ftype)
     elem = gen._elem_of(av)
-    gen._declare_var(name, at)
+    if not _rebind:
+        gen._declare_var(name, at)
     gen._emit(f"  {gen._write_dest(name)} = {av};")
     cname = gen._cname(name)
     cur = gen._new_temp('int64_t')

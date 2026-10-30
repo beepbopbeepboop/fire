@@ -3204,6 +3204,33 @@ def bylen(s):
 print(sorted(["ccc", "a", "bb"], key=bylen))
 """, "['a', 'bb', 'ccc']\n")
 
+    # `items = iter(items)` rebinds an already-declared PARAMETER to a cursor
+    # over itself (the first line of c_common/iterutil.py's peek_and_iter and
+    # iter_many). Before, only a fresh local got the cursor, so `next(items)`
+    # on the rebound parameter fell to the always-refused `next` extern.
+    # `for` must resume where `next` stopped, and a 2-arg `next` must default.
+    test_gimple_stdout("gimple_iter_rebinds_a_parameter_to_a_cursor", """\
+def rest(items):
+    items = iter(items)
+    a = next(items)
+    out = []
+    for x in items:
+        out.append(x * 10)
+    return a, out
+
+def twice(items):
+    items = iter(items)
+    a = next(items)
+    b = next(items)
+    return a + b
+
+def dflt(items):
+    items = iter(items)
+    return next(items, -1)
+
+print(rest([1, 2, 3]), twice([4, 5, 6]), dflt([]), dflt([9]))
+""", "(1, [20, 30]) 9 -1 9\n")
+
     # A string key is compared as a string, not as the address in its int64_t
     # slot (which would order by ADDRESS): the runtime picks the comparison
     # with mojo_boxed_is_str, since a lambda's declared return type is
