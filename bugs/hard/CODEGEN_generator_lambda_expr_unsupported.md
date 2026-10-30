@@ -23,7 +23,7 @@ printed `0` and the variadic row printed `0`; after, all three match CPython.
 | shape | compiled | CPython | where |
 |---|---|---|---|
 | `def gen(): f = lambda: False; r = f(); yield r` — the generator's YIELD value | `0` | `False` | the A3 yield ctype is inferred from `known`, which is built without the lambda-call table. `_Bool r` IS declared correctly in the body lambda, so only the yield's value slot (`int64_t`) is wrong. Next step: give the generator's yield-type scan the same `_lambda_call_ret_table` the pre-pass now uses (`exprtypes._generator_yield_ctype`'s `known`). A plain `r = h()` for a named `def h` already works. |
-| `def outer(x): n = 2; def inner(y): g = lambda z: z + n; return g(y)` | `4` | `6` | **new doc**: `bugs/hard/CODEGEN_nested_def_lambda_reads_outer_capture_as_zero.md`. Not generator-specific. |
+| `def outer(x): n = 2; def inner(y): g = lambda z: z + n; return g(y)` | `4` | `6` | Fixed 2026-10-29: the nested `def` did not capture a name its own lambda read (`_lambda_free_names` in `mojo/middle/closures.py`), and the lambda's env fill read a bare name (`_env_field_value`). Test: `gimple_lambda_in_nested_def_reads_outer_outer_local`. Not generator-specific. |
 | `sorted(key=<user function>)` | not re-measured this round | | |
 
 ### Two corrections to the entries below

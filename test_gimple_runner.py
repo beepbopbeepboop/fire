@@ -1109,6 +1109,34 @@ def main():
 main()
 """)
 
+    # A lambda inside a nested `def` that reads a local of the enclosing
+    # function's OWN enclosing scope. The `def` never names `n` itself, only
+    # its lambda does, and a lambda is a closure boundary to the capture
+    # analysis, so `inner` used to skip the capture and the lifted lambda read
+    # `n` as 0: exit 0, stdout 4, CPython 6. Also the value the lambda reads
+    # must survive the `def`'s own env: `m` is captured one hop further in.
+    test_gimple_matches_cpython("gimple_lambda_in_nested_def_reads_outer_outer_local", """\
+def outer(x):
+    n = 2
+    def inner(y):
+        g = lambda z: z + n
+        return g(y)
+    return inner(x)
+
+def outer2(x):
+    n = 2
+    m = 10
+    def inner2(y):
+        g = lambda z: z + n + m
+        return g(y)
+    return inner2(x)
+
+def main():
+    print(outer(4))
+    print(outer2(4))
+main()
+""")
+
     # Two arguments through a slot that may hold a string: the discriminator
     # arm used to print its own answer immediately and `continue` WITHOUT
     # appending to the resolved-argument list, so the pair came out SWAPPED

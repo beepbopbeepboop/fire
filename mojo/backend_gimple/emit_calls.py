@@ -6298,6 +6298,18 @@ def _env_field_value(gen, name: str, field_ctype: str,
     _ft = _as_str(field_ctype)
     if src_text is not None:
         return gen._coerce_to_type(_as_str(src_ctype or 'int64_t'), _ft, src_text)
+    if name in gen._captures and gen._env_param:
+        # The value is not a local of THIS function but a field of its own
+        # closure env: a lambda inside a nested `def` that reads a name the
+        # `def` captured from ITS enclosing scope (`def outer(): n = 2; def
+        # inner(y): g = lambda z: z + n`). Storing the bare name copied an
+        # identifier with no declaration in this C function (`'n' undeclared`
+        # to gcc). Read it the way the body does, through the env, so the
+        # lambda receives the captured value.
+        _cap_t, _cap_v = gen.lower_expr(gimple_ctypes.IdentExpr(name=name))
+        if _as_str(_cap_t) == _ft:
+            return _cap_v
+        return gen._coerce_to_type(_as_str(_cap_t), _ft, _cap_v)
     if _ft.endswith(' *'):
         _local_t = _as_str(gen.var_types.get(name, 'int64_t'))
         if _local_t.endswith(' *'):
