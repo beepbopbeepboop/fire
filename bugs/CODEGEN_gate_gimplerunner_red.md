@@ -2,7 +2,7 @@
 
 ## Status
 
-OPEN. Found in the full `make gate` run on the `get_sign` String-argument fix (`974d0e538`, landed 2026-10-28 with the gate red). The failure is not confirmed to come from that fix: `mojoc` is red on master as well (see `bugs/CODEGEN_imported_function_default_argument_dropped_at_call.md`), and the other jobs are not compared against master yet.
+PARTIAL (2026-10-29, branch work/fix-gate-gimplerunner). Reproduced alone (not load): `python3 test_gimple_runner.py` gives `477 passed, 4 failed` on the pre-fix tree. The four failures are the cases in `bugs/CODEGEN_mixed_kind_struct_and_list_reads_red_on_head.md`. Three are fixed in this round; the fourth (`gimple_ctor_param_polymorphic_slot_reads_receiver`) is the method-receiver bug in `bugs/CODEGEN_unresolved_method_receiver_returns_its_own_pointer.md`, which is owned by another worker. The `gimplerunner` job stays red until that lands.
 
 ## Gate output (first lines)
 
