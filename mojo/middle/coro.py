@@ -72,6 +72,14 @@ _OLD_MODE = 'cpp'
 
 ARG_SHIM     = '__mojo_gen_arg'
 SETRET_SHIM  = '__mojo_gen_set_return'
+# The async result slot's typed channel (see `_async_result_kind`). Every
+# async `return` writes through the setter for its unit's kind, and the
+# awaiting side reads back through the matching reader. 'i' and 'b' ride the
+# plain int64_t box; 'd' and 'p' bit-cast through it, so the awaiter gets the
+# value the callee returned rather than its truncated integer.
+_ASYNC_SETRET_SHIM = {'i': SETRET_SHIM, 'b': SETRET_SHIM,
+                      'd': '__mojo_gen_set_return_d', 'p': '__mojo_gen_set_return_p'}
+_ASYNC_BITS_SHIM = {'b': '__mojo_bits_b', 'd': '__mojo_bits_d', 'p': '__mojo_bits_p'}
 # The value-slot lattice. 'b' is NOT redundant with 'i': the slot's C type IS
 # the type the consumer's loop target / tuple slot / `next()` result is
 # declared with, and `print` dispatches on it (`emit_infra`'s `_Bool` branch
@@ -1221,28 +1229,12 @@ def _nested_class_nonliteral_attr(fn: N.FunctionDef):
     return None
 
 
-def _async_return_refusal(fn: N.FunctionDef) -> str | None:
-    """Why `fn`'s async result cannot ride its int64_t value slot, or None.
-
-    `_lower_one_async` declares the result slot `int64_t` and writes every
-    `return <value>` into it with `__mojo_gen_set_return`, so the awaiting
-    side reads the slot's bits back as an integer. That is exact for an int
-    and for nothing else:
-
-      * two returns of DIFFERENT known kinds (`return 1` on one path,
-        `return "s"` on another) put a `char *` and an int into one slot;
-        awaited, the string comes back as its pointer printed as a number
-        (measured: `4367193456`), and
-      * a float return is stored truncated (`return 1.5` awaited as `1`).
-
-    Both are silent wrong answers, so both are refused here, in the one place
-    every async unit passes through, rather than compiled. A return whose
-    kind cannot be established is NOT refused: that is the same convention
-    `_generator_value_kind` documents for a HOLE (an unresolved expression is
-    read as an int64_t). A bool counts as an int, since both fit the slot.
-    `_yield_kind` supplies the kinds, and nested `def`s are skipped because
-    their `return`s belong to them, not to `fn`.
-    """
+def _async_return_kinds(fn: N.FunctionDef) -> set:
+    """The kind of every value-carrying `return` in `fn`'s own body, as
+    `_yield_kind` reads them ('i' 'b' 'p' 'd'). A `return` whose kind cannot be
+    established contributes nothing: that is a HOLE, and
+    `_generator_value_kind` documents the same convention for one. Nested `def`s
+    are skipped, because their `return`s belong to them, not to `fn`."""
     env = _static_env(fn, None)
     kinds: set = set()
 
@@ -1251,7 +1243,7 @@ def _async_return_refusal(fn: N.FunctionDef) -> str | None:
             if node.value is not None:
                 k = _yield_kind(node.value, env)
                 if k is not None:
-                    kinds.add('i' if k == 'b' else k)
+                    kinds.add(k)
             return
         d = getattr(node, '__dict__', None)
         if not d:
@@ -1266,15 +1258,130 @@ def _async_return_refusal(fn: N.FunctionDef) -> str | None:
     for st in getattr(fn, 'body', []) or []:
         if not isinstance(st, N.FunctionDef):
             _visit(st)
-    if 'd' in kinds:
-        return (f'{fn.name}: a float `return` value cannot be carried by the '
-                'async result slot, which is one int64_t (v0): it would be '
-                'awaited as its truncated integer')
-    if len(kinds) > 1:
+    return kinds
+
+
+def _async_result_kind(fn: N.FunctionDef) -> str:
+    """The kind of `fn`'s async result slot (`_KIND_CTYPE` key).
+
+    The slot is typed by the one kind every known `return` shares, so an
+    awaited float comes back as a float and a string as a string, instead of
+    their truncated / pointer bits read as an integer. 'b' and 'i' are the same
+    width on the wire, so a mix of the two is 'i'; a function with no
+    value-carrying return, or only holes, is 'i', the historical default. A
+    mix that cannot share one slot is refused by `_async_return_refusal` before
+    this is consulted.
+    """
+    kinds = _async_return_kinds(fn)
+    if kinds == {'b'}:
+        return 'b'
+    folded: set = set()
+    for k in kinds:
+        folded.add('i' if k == 'b' else k)
+    if len(folded) == 1:
+        for k in folded:
+            return k
+    return 'i'
+
+
+def _async_return_refusal(fn: N.FunctionDef) -> str | None:
+    """Why `fn`'s `return` values cannot share its one async result slot, or
+    None.
+
+    `_lower_one_async` types the result slot by `_async_result_kind`, so every
+    `return` in a unit has to write the same kind. Two returns of DIFFERENT
+    known kinds (`return 1` on one path, `return "s"` on another) cannot: the
+    slot has one type, and awaited, the other kind would come back as bits of
+    the wrong type (measured before the typed slot: a string printed as its
+    pointer, `4367193456`). That is a silent wrong answer, so it is refused
+    here, in the one place every async unit passes through, rather than
+    compiled. A bool counts as an int, since both fit the integer channel.
+    """
+    kinds = _async_return_kinds(fn)
+    folded: set = set()
+    for k in kinds:
+        folded.add('i' if k == 'b' else k)
+    if len(folded) > 1:
+        names = sorted(folded)
         return (f'{fn.name}: its `return` values disagree on one kind '
-                f'({", ".join(sorted(kinds))}), and the async result slot is '
-                'one int64_t (v0)')
+                f'({", ".join(names)}), and the async result slot carries '
+                'one kind (v0)')
     return None
+
+
+def _note_async_kind(table: dict, name: str, kind) -> None:
+    """Record `kind` as `name`'s async result kind. A second, DIFFERENT kind
+    for the same name makes it ambiguous (None), which the reader refuses."""
+    if name in table and table[name] != kind:
+        table[name] = None
+    else:
+        table[name] = kind
+
+
+def _register_async_result_kinds(stmts) -> None:
+    """Fill `_ASYNC_RESULT_KIND` and `_ASYNC_HANDLE_KIND` for this module (see
+    their comments). Walks every `def`, nested and method ones included, so the
+    kind of a callee is known before the awaiter that reads it is lowered."""
+    _ASYNC_RESULT_KIND.clear()
+    _ASYNC_HANDLE_KIND.clear()
+    for s in stmts:
+        for n in _walk(s):
+            if (isinstance(n, N.FunctionDef) and getattr(n, 'is_async', False)
+                    and not any(isinstance(x, N.YieldExpr) for x in _walk(n))):
+                _note_async_kind(_ASYNC_RESULT_KIND, _cm_as_str(n.name),
+                                 _async_result_kind(n))
+    for s in stmts:
+        for n in _walk(s):
+            if not isinstance(n, (N.AssignStmt, N.VarDecl)):
+                continue
+            call = _unwrap_transfer(n.value)
+            if _is_create_task_call(call) and call.args:
+                call = call.args[0]
+            tname = _await_target_name(call)
+            if tname is None or tname not in _ASYNC_RESULT_KIND:
+                continue
+            if isinstance(n, N.VarDecl):
+                var = n.name
+            else:
+                var = n.target.name if isinstance(n.target, N.IdentExpr) else None
+            if var:
+                _note_async_kind(_ASYNC_HANDLE_KIND, _cm_as_str(var),
+                                 _ASYNC_RESULT_KIND[tname])
+
+
+def _async_result_read(kind: str, raw):
+    """`raw` (an int64_t result-slot read) as a value of the unit's `kind`.
+    'i' is the slot's own type, so it is returned unchanged."""
+    if kind == 'i':
+        return raw
+    return _call(_ASYNC_BITS_SHIM[kind], [raw])
+
+
+def _result_kind_of(expr) -> str:
+    """The result kind an awaited or driven async expression carries.
+
+    A fresh `f(args)` is answered by `f`'s kind; a handle (`task^`, or a
+    variable bound from `f(...)` / `create_task(f(...))`) by the kind of the
+    call that bound it. Anything else answers 'i', the int64_t read the slot
+    always had: a handle passed in from elsewhere is not traced here.
+    """
+    u = _unwrap_transfer(expr)
+    name = _await_target_name(u)
+    if name is not None:
+        table, key = _ASYNC_RESULT_KIND, name
+    elif isinstance(u, N.IdentExpr):
+        table, key = _ASYNC_HANDLE_KIND, _cm_as_str(u.name)
+    else:
+        return 'i'
+    if key not in table:
+        return 'i'
+    kind = table[key]
+    if kind is None:
+        raise RuntimeError(
+            f'cannot compile module: {key!r} names async functions whose '
+            'results have different kinds, so this await cannot tell which '
+            'result slot to read (v0)')
+    return kind
 
 
 def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
@@ -1550,6 +1657,21 @@ _CALLSITE_PARAM_CONFLICTS: dict[str, set] = {}
 # handle>` (Awaitable-protocol waiter-list park). Same per-lower() lifetime
 # and single-threaded rationale as _PARAM_NAMES.
 _TASK_VARS: set = set()
+
+# The result kind of the async unit `_rewrite_async_stmts` is lowering right
+# now (a one-cell box, like `_CVAR`'s single-threaded per-unit state; set by
+# `_lower_one_async` before its rewrite). It picks the setter each `return`
+# uses (`_ASYNC_SETRET_SHIM`).
+_ASYNC_RET_KIND: list = ['i']
+
+# Module-wide answer to "what kind does an awaited/driven async call carry?",
+# populated by `_register_async_result_kinds` before any unit is lowered (so a
+# callee defined AFTER its awaiter still answers). Name -> kind; a name that
+# two defs give different kinds maps to None, which the reader refuses rather
+# than guess. `_ASYNC_HANDLE_KIND` is the same for a variable bound from a
+# call (or `create_task(call)`) to such a name.
+_ASYNC_RESULT_KIND: dict = {}
+_ASYNC_HANDLE_KIND: dict = {}
 
 # Bare names of struct `async def` METHODS in the module currently being
 # lowered that passed async-method eligibility -- populated fresh at the
@@ -2665,8 +2787,10 @@ def _await_drive_stmts(cvar: str, inner, forward=_forward_plain) -> tuple[list, 
         _AW_COUNTER[0] += 1
         rv = f'__ar{_AW_COUNTER[0]}'
         stmts = [N.VarDecl(name=rv, type_ann=None,
-                           value=_call('__mojo_async_await_task',
-                                       [_c_ident(cvar), _c_ident(_hh.name)]))]
+                           value=_async_result_read(
+                               _result_kind_of(inner),
+                               _call('__mojo_async_await_task',
+                                     [_c_ident(cvar), _c_ident(_hh.name)])))]
         return stmts, _c_ident(rv)
     name = _await_target_name(inner)
     if name is not None:
@@ -2687,7 +2811,8 @@ def _await_drive_stmts(cvar: str, inner, forward=_forward_plain) -> tuple[list, 
     stmts.append(N.WhileStmt(condition=_call('__mojo_gen_resume', [_c_ident(h), N.IntLiteral(value=0)]),
                              body=loop_body, else_body=None))
     stmts.append(N.VarDecl(name=rv, type_ann=None,
-                           value=_call('__mojo_gen_retval', [_c_ident(h)])))
+                           value=_async_result_read(_result_kind_of(inner),
+                                                    _call('__mojo_gen_retval', [_c_ident(h)]))))
     stmts.append(N.ExprStmt(value=_call('__mojo_gen_destroy', [_c_ident(h)])))
     return stmts, _c_ident(rv)
 
@@ -2726,12 +2851,12 @@ def _rewrite_async_stmts(stmts: list, cvar: str) -> list:
         if isinstance(s, N.ReturnStmt) and isinstance(s.value, N.AwaitExpr):
             drive, rv = _await_drive_stmts(cvar, s.value.value)
             out.extend(drive)
-            out.append(N.ExprStmt(value=_call(SETRET_SHIM, [_c_ident(cvar), rv])))
+            out.append(N.ExprStmt(value=_call(_ASYNC_SETRET_SHIM[_ASYNC_RET_KIND[0]], [_c_ident(cvar), rv])))
             out.append(N.ReturnStmt(value=None))
             continue
         if isinstance(s, N.ReturnStmt):
             if s.value is not None:
-                out.append(N.ExprStmt(value=_call(SETRET_SHIM,
+                out.append(N.ExprStmt(value=_call(_ASYNC_SETRET_SHIM[_ASYNC_RET_KIND[0]],
                                                   [_c_ident(cvar), _rewrite_async_expr(s.value, cvar)])))
             out.append(N.ReturnStmt(value=None))
             continue
@@ -3037,11 +3162,13 @@ def _lower_one_async(fn: N.FunctionDef, meta: list, base: str | None = None,
     _refusal = _async_return_refusal(fn)
     if _refusal is not None:
         raise RuntimeError(f'cannot compile module: {_refusal}')
+    kind = _async_result_kind(fn)
     base, is_method, real_params, prologue, body_params, c_params = \
         _async_method_setup(fn, base, struct_name)
     body_name = f'{base}_body'
     _TASK_VARS.clear()
     _TASK_VARS.update(_scan_task_vars(fn))
+    _ASYNC_RET_KIND[0] = kind
     new_body = prologue + _rewrite_async_stmts([_deep_copy_stmt(s) for s in fn.body], _CVAR)
     body_fd = N.FunctionDef(name=body_name, params=body_params, return_type=None, body=new_body)
     body_fd.is_generator = False
@@ -3052,7 +3179,7 @@ def _lower_one_async(fn: N.FunctionDef, meta: list, base: str | None = None,
         'receiver': _async_receiver_kind(fn, is_method),
         'base': base, 'body_name': body_name,
         'params': c_params,
-        'nargs': len(real_params), 'value_ctype': 'int64_t', 'value_kind': 'i',
+        'nargs': len(real_params), 'value_ctype': _KIND_CTYPE[kind], 'value_kind': kind,
         'tuple_slot_ctypes': None,
         'no_wd_forward': _base_is_channel_free(base),
         'defaults': list((getattr(fn, 'param_defaults', None) or {}).items()),
@@ -3200,8 +3327,11 @@ def _rewrite_asyncio_run(node, cvar: str | None, task_vars: set, local_map: dict
             task_expr = _unwrap_transfer(node.func.obj)
             pre.append(N.VarDecl(name=h, type_ann=None, value=task_expr))
             pre.append(N.ExprStmt(value=_call('__mojo_async_run_gen', [_c_ident(h)])))
+        _driven = node.args[0] if _is_asyncio_run_call(node) else node.func.obj
         pre.append(N.VarDecl(name=rv, type_ann=None,
-                             value=_call('__mojo_gen_retval', [_c_ident(h)])))
+                             value=_async_result_read(
+                                 _result_kind_of(_driven),
+                                 _call('__mojo_gen_retval', [_c_ident(h)]))))
         return _c_ident(rv), pre
     return node, pre
 
@@ -4084,6 +4214,7 @@ def lower(stmts: list, closure_stmts=(),
     # to drive it for real rather than bind the descriptor as the loop
     # variable. See `_compute_no_wd_forward`.
     _compute_no_wd_forward(stmts)
+    _register_async_result_kinds(stmts)
     for s in stmts:
         if isinstance(s, N.FunctionDef) and getattr(s, 'is_generator', False):
             ok, _why = _eligible(s, prop_names=_prop_names)
@@ -5538,6 +5669,19 @@ def register(gen, meta: list) -> None:
     gen.func_return_types.setdefault('__mojo_async_await_sock_recv', 'int64_t')
     gen.func_param_types.setdefault('__mojo_gen_retval', ['int64_t'])
     gen.func_return_types.setdefault('__mojo_gen_retval', 'int64_t')
+    # The typed async result channel (see _ASYNC_SETRET_SHIM / _ASYNC_BITS_SHIM):
+    # the setters take the value as its own C type, and the bit-casts hand the
+    # raw int64_t slot back as that type, so the awaiting local is typed by it.
+    gen.func_param_types.setdefault('__mojo_gen_set_return_d', ['int64_t', 'double'])
+    gen.func_return_types.setdefault('__mojo_gen_set_return_d', 'void')
+    gen.func_param_types.setdefault('__mojo_gen_set_return_p', ['int64_t', 'char *'])
+    gen.func_return_types.setdefault('__mojo_gen_set_return_p', 'void')
+    gen.func_param_types.setdefault('__mojo_bits_d', ['int64_t'])
+    gen.func_return_types.setdefault('__mojo_bits_d', 'double')
+    gen.func_param_types.setdefault('__mojo_bits_b', ['int64_t'])
+    gen.func_return_types.setdefault('__mojo_bits_b', '_Bool')
+    gen.func_param_types.setdefault('__mojo_bits_p', ['int64_t'])
+    gen.func_return_types.setdefault('__mojo_bits_p', 'char *')
     gen.func_param_types.setdefault('__mojo_gen_resume', ['int64_t', 'int64_t'])
     gen.func_return_types.setdefault('__mojo_gen_resume', 'int64_t')
     gen.func_param_types.setdefault('__mojo_gen_value', ['int64_t'])
