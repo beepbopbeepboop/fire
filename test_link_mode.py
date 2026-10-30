@@ -900,6 +900,16 @@ def test_unannotated_param_with_disagreeing_call_sites() -> bool:
         # comes first.
         ('def f(x):\n    print(x)\n\n\nf(2.5)\nf(1)\n', '2.5\n1\n'),
         ('def f(x):\n    print(x)\n\n\nf(1)\nf(2.5)\n', '1\n2.5\n'),
+        # The same float-possible slot FORWARDED into a second function. `g`
+        # only ever sees an identifier at its one call site, so its own
+        # call-site walk observes no double and nothing marks its parameter;
+        # the float has to reach it through `f`'s parameter, which does carry
+        # the property. Without the forwarding hop `g(x)` printed the box's
+        # address (`4312044272` for `f(2.5)`). Both orders, as above.
+        ('def g(x):\n    print(x)\n\n\ndef f(x):\n    g(x)\n\n\n'
+         'f(2.5)\nf(1)\n', '2.5\n1\n'),
+        ('def g(x):\n    print(x)\n\n\ndef f(x):\n    g(x)\n\n\n'
+         'f(1)\nf(2.5)\n', '1\n2.5\n'),
     ]
     # The two pairs that used to be a HARD GCC ERROR and are now only wrong:
     #

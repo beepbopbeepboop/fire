@@ -24,7 +24,30 @@ The pre-fix output was `2` for `2.5` and the test failed; post-fix the whole
 function passes. The generated C was checked by hand: the call site emits
 `mojo_box_from_double (2.5)`, and the print emits `mojo_repr_boxed (x)`.
 
-### Status 2026-10-29 (second round) — arithmetic operands no longer read the address
+#### Status 2026-10-29 (third round) — a float forwarded into another call keeps its box
+
+Landed: the second round's open item 2, the forwarding hop. `_int64_may_hold_float`
+now propagates like `_int64_may_hold_str` (`mojo/backend_gimple/module_gen.py`,
+the float fixed point after the str one): a float-possible name flows along an
+identifier call argument and along a copy into the callee's parameter, when
+that slot is still a plain `int64_t` (unannotated, no container observation,
+not str-owned, not resolved by Pass 1.3d). A slot that ends up both str- and
+float-possible is removed from the float set, so the str row keeps its answer.
+Nested defs are not reached (Pass 1.3d never records them either).
+
+Measured, `def g(x): print(x)` / `def f(x): g(x)` / `f(2.5)` + `f(1)` through
+`driver.compile_program`: before, `4353676016` / `1` and `1` / `4345221872`
+(box addresses); after, `2.5` / `1` and `1` / `2.5`. Pinned in
+`test_link_mode.py`'s `test_unannotated_param_with_disagreeing_call_sites`, both
+orders.
+
+Still open: item 1 of the second round (the real double read: `x * 2` must print
+`5.0`), item 2's float beside str/list/bytes/None, the bytes/list tags, None, and
+box lifetime. Also not reached: a float-possible parameter RETURNED from a
+function (`return x` then `print(f(2.5))`), which needs a float-possible
+return set consumed by `_gen_print`'s call-result path.
+
+## Status 2026-10-29 (second round) — arithmetic operands no longer read the address
 
 Landed: the doc's own next step 1, for the operand positions of a binary
 operator only. `_lower_binary` (`mojo/backend_gimple/emit_exprs.py`) passes
@@ -52,10 +75,8 @@ Still open, and NOT measured on this change:
    prints a box address (`fwd` probe: `4312044272` for `f(2.5)`, where
    `f(1)` prints `1`). `g`'s slot never observed a double (its only call site
    passes an IdentExpr), so `_int64_may_hold_float` never names it, and the
-   raw box word reaches a print that asks no box. The fix is in Pass 1.3d
-   (`mojo/backend_gimple/module_gen.py`): propagate float-possibility through
-   a call argument that is a float-possible parameter of the caller, the same
-   way `_int64_may_hold_str` propagates a string. Not done here.
+   raw box word reaches a print that asks no box. LANDED in the third round
+   below (the float fixed point in `module_gen.py`).
 2. **Float beside `str` / `list` / `bytes` / `None`.** Excluded from the float
    set on purpose: a `char *` or container observation keeps the existing rows
    in charge. These pairs are not re-measured here.
