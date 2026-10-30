@@ -1,5 +1,21 @@
 # COMPILE_FAIL: Lib/importlib/resources/readers.py
 
+## Status (2026-10-29, branch work/bug-compile-fail-importlib-resources-rea, HEAD 8578fe684 — pin re-run, exit code still open)
+
+The root-cause fix is on this branch: `0e5ddad7c` is an ancestor of HEAD.
+`python3 tools/memslot.py --gb 8 --label readers-pin -- python3 test_gimple.py`
+ran 407 tests: `itertools_filterfalse_keeps_the_elements_whose_predicate_is_false`
+PASSES (both single-TU and link-mode). Two other tests fail and are owned
+elsewhere: `ctor_of_a_container_reaches_the_comprehension`
+(`bugs/CODEGEN_ctor_of_a_passthrough_string_prints_nothing.md`) and
+`test_print_of_a_function_value_is_not_a_decimal_address` (decorator
+application, `bugs/COMPILE_FAIL_decorator_application_dropped.md`).
+
+Still open, unchanged: the readers.py build's exit code has not been measured
+(the whole-closure build is a heavy integrator job, not run here). The doc
+stays until that run says exit 0 (then `git rm` it and run
+`dangling_doc_refs.py --ratchet`) or exit 1 (then keep the sibling list below).
+
 ## Status (2026-10-29 — the `_common.py:105` refusal below is GONE on master; the file's closure now shows only sibling-module fallbacks; exit code NOT measured)
 
 The blocker this doc was left open on is fixed. Commit `0e5ddad7c`
