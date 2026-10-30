@@ -2386,7 +2386,122 @@ def main():
 """, "variable(s) self")
 
 
+def run_star_args_call_tests():
+    """A generator with a `*args` parameter, called with its positional
+    arguments. The coroutine takes ONE MojoList * slot for the `*args`
+    parameter, so every positional argument from that slot on must be packed
+    into the list at the call site. Before this, the call passed each
+    argument flat (`__mgco_gen_var_start(list, 2, 3)`), which gcc rejects with
+    "too many arguments to function" -- so no multi-argument call to a `*args`
+    generator compiled at all. Each case runs the built binary and checks its
+    stdout, so the packing is proven to reach the body, not just to compile."""
+    test_generator_stdout("star_args_generator_many_positionals", """\
+def gen_var(*xs):
+    for x in xs:
+        yield x
+
+def main():
+    for v in gen_var(1, 2, 3):
+        print(v)
+""", "1\n2\n3\n")
+    test_generator_stdout("star_args_generator_no_positionals", """\
+def gen_var(*xs):
+    for x in xs:
+        yield x
+
+def main():
+    for v in gen_var():
+        print(v)
+    print("done")
+""", "done\n")
+    test_generator_stdout("star_args_generator_fixed_then_star", """\
+def gen_mix(a, *xs):
+    yield a
+    for x in xs:
+        yield x
+
+def main():
+    for v in gen_mix(10, 1, 2):
+        print(v)
+""", "10\n1\n2\n")
+    # `await f(args)` / `async for x in f(args)` lower to `__mgco_<f>_start(...)`
+    # from coro.py, a symbol name the api registry is not keyed by. Before the
+    # `_generator_api_for_start_symbol` lookup these passed the arguments flat:
+    # `await count(1, 2, 3)` became `__mgco_count_start(1)`, silently. `len(xs)`
+    # reads the packed list's length without depending on element typing.
+    test_generator_stdout("star_args_coroutine_await_packs", """\
+import asyncio
+
+async def count(*xs) -> Int:
+    return len(xs)
+
+async def main_async() -> Int:
+    var n = await count(1, 2, 3)
+    print(n)
+    var m = await count()
+    print(m)
+    return n
+
+def main():
+    asyncio.run(main_async())
+""", "3\n0\n")
+    # The shape bugs/COMPILE_FAIL_Lib_contextlib_request_... is blocked on:
+    # an async METHOD taking `*exc_details`, awaited with three arguments (the
+    # `__aexit__(exc_type, exc, tb)` call a `with` statement makes).
+    test_generator_stdout("star_args_async_method_aexit_shape", """\
+import asyncio
+
+struct Box:
+    var n: Int
+    fn __init__(out self, n: Int):
+        self.n = n
+
+    async def __aexit__(self, *exc_details) -> Int:
+        return len(exc_details) + self.n
+
+async def main_async() -> Int:
+    var b = Box(100)
+    var r = await b.__aexit__(1, 2, 3)
+    print(r)
+    return r
+
+def main():
+    asyncio.run(main_async())
+""", "103\n")
+    test_generator_stdout("star_args_async_generator_for_packs", """\
+import asyncio
+
+async def agen(*xs):
+    yield len(xs)
+    yield len(xs) + 10
+
+async def main_async() -> Int:
+    async for v in agen(1, 2, 3):
+        print(v)
+    return 0
+
+def main():
+    asyncio.run(main_async())
+""", "3\n13\n")
+    test_generator_stdout("star_args_generator_method_packs", """\
+struct Bag:
+    var base: Int
+    fn __init__(out self, base: Int):
+        self.base = base
+    def items(self, *xs):
+        yield self.base
+        for x in xs:
+            yield x
+
+def main():
+    var b = Bag(100)
+    for v in b.items(4, 5):
+        print(v)
+""", "100\n4\n5\n")
+
+
 def run_tests():
+    run_star_args_call_tests()
     run_callable_param_tests()
     run_lambda_capture_tests()
     run_variadic_lambda_value_tests()

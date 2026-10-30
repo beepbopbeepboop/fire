@@ -59,6 +59,61 @@ from mojo.middle.calls_shared import (
 )
 from mojo.middle.methods_shared import _is_selfhost_source_file
 
+def _generator_star_slot(api: dict, node) -> int | None:
+    """The C-signature slot of a generator's `*args` parameter, when this
+    call packs its positional arguments into it, else None.
+
+    A `*args` coroutine takes ONE `MojoList *` slot (see `_star_slot` in
+    mojo/middle/coro.py), so the caller must build that list from the
+    trailing positional arguments. A call that spreads an iterable into the
+    argument list (`gen(*xs)`) is NOT packed here: its element count is not
+    known at compile time, so it keeps the spread's own lowering and this
+    returns None."""
+    _star = api.get('star_slot')
+    if _star is None:
+        return None
+    for _a in getattr(node, 'args', None) or []:
+        if isinstance(_a, gimple_ctypes.UnaryOp) and _as_str(_a.op) == '*':
+            return None
+    return _star
+
+
+def _pack_generator_star_args(gen, arg_pairs: list, star: int) -> list:
+    """Replace the trailing positional arguments from slot `star` on with
+    one `MojoList *` built from them. Each element is appended with the
+    accessor its own C type needs -- `mojo_list_append_str` for a `char *`,
+    `mojo_list_append_double` for a `double`, and `mojo_list_append_int`
+    otherwise (the int64_t default, as `_pack_vararg_trailing_params` uses)
+    -- so the body's element reads (`mojo_list_get_str` / `_get_double` /
+    `_get_int`, chosen from the call-site element kind) see the same bits
+    they were stored as. The scanner refuses a call whose trailing arguments
+    disagree in kind, so one list never mixes accessors. Expects every fixed
+    slot before `star` to be filled already."""
+    _fixed = arg_pairs[:star]
+    _lst = gen._new_val('MojoList *', "mojo_list_new ()")
+    for _at, _av in arg_pairs[star:]:
+        _ct = _as_str(_at)
+        if _ct == 'char *':
+            gen._emit(f"  mojo_list_append_str ({_lst}, {_av});")
+        elif _ct == 'double':
+            gen._emit(f"  mojo_list_append_double ({_lst}, {_av});")
+        else:
+            _av = gen._coerce_to_type(_at, 'int64_t', _av)
+            gen._emit(f"  mojo_list_append_int ({_lst}, {_av});")
+    return _fixed + [('MojoList *', _lst)]
+
+
+def _generator_api_for_start_symbol(gen, start_name: str):
+    """The registered coroutine api whose `_start` symbol is `start_name`
+    (`<api base>_start`), or None. The api registry is keyed by source name,
+    which a `__mgco_<name>_start` symbol does not carry, so the lookup goes
+    through the api's own `base`."""
+    for _api in gen._generator_api.values():
+        if f"{_api.get('base')}_start" == start_name:
+            return _api
+    return None
+
+
 def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
                                fname_raw: str) -> str:
     """Shared lowering for every bare-call CONSTRUCTION of a compiled
@@ -117,11 +172,17 @@ def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
     # the moment the generator body reads its own `**kwargs`.
     _gen_kwslot = gen._func_kwargs_slot.get(
         fname_raw, gen._func_kwargs_slot.get(f"{api['base']}_start", -1))
-    if _gen_expected and len(arg_pairs) < len(_gen_expected):
+    # A `*args` callee: the fixed slots before it are padded here, and the
+    # positional arguments from its own slot on are packed into one list
+    # below. `_gen_nfixed` is therefore the count of FIXED slots, which is
+    # `len(_gen_expected)` only when there is no `*args` slot.
+    _gen_star = _generator_star_slot(api, node)
+    _gen_nfixed = _gen_star if _gen_star is not None else len(_gen_expected)
+    if _gen_expected and len(arg_pairs) < _gen_nfixed:
         _gen_kwarg_dict = {kn: gen.lower_expr(ke) for kn, ke in _gen_kwargs}
         _gen_kwarg_values = list(_gen_kwarg_dict.values())
         _gen_dflts = gen._func_param_defaults.get(f"{api['base']}_start", [])
-        while len(arg_pairs) < len(_gen_expected):
+        while len(arg_pairs) < _gen_nfixed:
             _pos = len(arg_pairs)
             if _gen_kwslot >= 0 and _pos == _gen_kwslot:
                 arg_pairs.append(('MojoDict *', gen._pack_kwargs_dict(_gen_kwarg_dict)))
@@ -136,7 +197,7 @@ def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
             # `_gen_dflts[_pos]` indexing missed every time here, silently
             # miscompiling the omitted arg to a typed zero).
             _dv = gimple_exprtypes._trailing_default_at(
-                _gen_dflts, len(_gen_expected), _pos)
+                _gen_dflts, _gen_nfixed, _pos)
             if _dv is not None:
                 arg_pairs.append(gen._default_expr_to_pair(_dv))
             else:
@@ -144,6 +205,8 @@ def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
     else:
         for _, _ke in _gen_kwargs:
             gen.lower_expr(_ke)
+    if _gen_star is not None:
+        arg_pairs = _pack_generator_star_args(gen, arg_pairs, _gen_star)
     t = gen._call_expr('MojoGenerator *', f"{api['base']}_start", arg_pairs)
     gen._generator_var_api[t] = api
     return t
@@ -2325,6 +2388,20 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             and gen.func_return_types.get(fname_raw) == 'MojoGenerator *'):
         return 'MojoGenerator *', _emit_generator_start_call(
             gen, node, gen._generator_api[_ss_base], _ss_base)
+    # The same construction under its SYMBOL name, `__mgco_<name>_start`:
+    # coro.py's `await f(args)` / `async for x in f(args)` lowering emits that
+    # spelling, and a top-level coroutine is registered under its bare name,
+    # so neither lookup above finds it. Without this the call fell through to
+    # an ordinary call that passed the arguments flat -- `await total(1, 2,
+    # 3)` against a `*xs` coroutine became `__mgco_total_start(1)`, silently
+    # dropping 2 and 3. Matched on the api's own `base`, the one the
+    # coroutine's `_start` symbol was emitted under.
+    if (fname_raw.endswith('_start')
+            and gen.func_return_types.get(fname_raw) == 'MojoGenerator *'):
+        _sym_api = _generator_api_for_start_symbol(gen, fname_raw)
+        if _sym_api is not None:
+            return 'MojoGenerator *', _emit_generator_start_call(
+                gen, node, _sym_api, _sym_api['base'])
     # Same construction, but the callee is a generator this module only
     # knows through an (optionally aliased) cross-module import (`from a
     # import walk as walk_a`): _imported_generator_bindings — populated at

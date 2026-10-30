@@ -3752,7 +3752,12 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # `arg_pairs`.
         _gm_kwargs = getattr(node, 'kwargs', []) or []
         _gm_expected = gen.func_param_types.get(f"{_gm_api['base']}_start", [])
-        if _gm_expected and len(all_args) < len(_gm_expected):
+        # `*args` callee: pad the fixed slots (self included) up to its slot,
+        # then pack the positionals from there on -- see
+        # ggc._emit_generator_start_call, which this mirrors.
+        _gm_star = ggc._generator_star_slot(_gm_api, node)
+        _gm_nfixed = _gm_star if _gm_star is not None else len(_gm_expected)
+        if _gm_expected and len(all_args) < _gm_nfixed:
             # Explicit loop, NOT `{kn: gen.lower_expr(ke) for kn, ke in
             # _gm_kwargs}` — the comprehension's tuple-unpacked key `kn`
             # erases to int64_t (the pointer-decimal key trap) and the
@@ -3762,7 +3767,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 _gm_kwarg_dict[_gmm_as_str(_gm_kn)] = gen.lower_expr(_gm_ke)
             _gm_kwarg_values = list(_gm_kwarg_dict.values())
             _gm_dflts = gen._func_param_defaults.get(f"{_gm_api['base']}_start", [])
-            while len(all_args) < len(_gm_expected):
+            while len(all_args) < _gm_nfixed:
                 if _gm_kwarg_values:
                     all_args.append(_gm_kwarg_values.pop(0))
                     continue
@@ -3777,7 +3782,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 # step with 0 instead of 2).
                 _pos = len(all_args) - 1
                 _dv = gimple_exprtypes._trailing_default_at(
-                    _gm_dflts, len(_gm_expected) - 1, _pos)
+                    _gm_dflts, _gm_nfixed - 1, _pos)
                 if _dv is not None:
                     all_args.append(ggc._default_expr_to_pair(gen, _dv))
                 else:
@@ -3785,6 +3790,8 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         else:
             for _, _ke in _gm_kwargs:
                 gen.lower_expr(_ke)
+        if _gm_star is not None:
+            all_args = ggc._pack_generator_star_args(gen, all_args, _gm_star)
         t = gen._call_expr('MojoGenerator *', f"{_gm_api['base']}_start", all_args)
         gen._generator_var_api[t] = _gm_api
         return 'MojoGenerator *', t
