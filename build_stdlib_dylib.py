@@ -672,9 +672,17 @@ def _local_dep_fingerprint(path: str, dep_src_by_key: dict) -> str:
     return '\n'.join(f"{k}={seen[k]}" for k in sorted(seen))
 
 
-def _defined_symbols(gcc: str, obj: str) -> set:
+def _defined_symbols(gcc: str, obj: str, *, include_weak: bool = False) -> set:
     """External symbols *defined* (not undefined) by an object file, via nm.
-    Used to drop modules whose symbols collide with an already-included one."""
+
+    By default a WEAK definition is left out: it is the clash check's question
+    ("which names would collide if this module joined the dylib?"), and a weak
+    definition is merged by the linker rather than colliding. Questions about
+    what the object SURFACES — the runtime's export table, or whether a header
+    declaration has a definition — pass `include_weak=True`, because a weak
+    definition is a real, callable, exported symbol (`input` in fire_runtime.c
+    is one: the stdlib's own `input` overrides it, but the runtime still defines
+    it for everyone who does not)."""
     nm = 'nm'  # llvm/bsd nm on the PATH; gcc toolchains ship a compatible one
     try:
         # -m names a Mach-O weak definition as "weak external"; plain nm reports it as an ordinary `T`.
@@ -683,7 +691,7 @@ def _defined_symbols(gcc: str, obj: str) -> set:
         return set()
     syms = set()
     for line in out.splitlines():
-        if 'weak' in line:
+        if 'weak' in line and not include_weak:
             # A WEAK definition is merged by the linker, not a clash: every module that carries the same weak
             # copy (the empty GPU sidecar's introspection stubs, in ~every stdlib module) links fine.
             continue
@@ -1173,7 +1181,7 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
         # dylib that can't even be loaded.
         all_defs = set()
         for o in objs:
-            all_defs |= _defined_symbols(gcc, o)
+            all_defs |= _defined_symbols(gcc, o, include_weak=True)
         _kept = []
         _misresolved, _undefined = [], []
         for e in all_exports:
@@ -1553,7 +1561,7 @@ def runtime_export_entries(gcc: str, objs: list) -> tuple:
             exports.append(e)
     defined = set()
     for o in objs:
-        defined |= _defined_symbols(gcc, o)
+        defined |= _defined_symbols(gcc, o, include_weak=True)
     kept = []
     misresolved, undefined = [], []
     for e in exports:

@@ -566,6 +566,12 @@ void mojo_cleanup_push_list_strs(void *p);
 /* A closure's bound method and its environment are one allocation unit; this
  * is the unwind thunk that frees both (see mojo_closure_free). */
 void mojo_cleanup_push_closure(void *p);
+/* A class-attribute cell global (see emit_methods._cattr_restore_begin): `slot`
+ * is the address of the global and `saved` the cell pointer it held on entry
+ * to the function. Unwinding past this thunk writes `saved` back, so a caller
+ * whose own class-name reads go through the global gets its cell back even
+ * when the exception is caught by a function that never restores it. */
+void mojo_cleanup_push_cattr(void **slot, void *saved);
 /* Pop the `n` most-recently-pushed thunks WITHOUT invoking them -- call
  * immediately at a point that is itself about to (or just did) free those
  * same `n` locals inline. */
@@ -761,6 +767,12 @@ int64_t     mojo_box_int(int64_t v);
  * `_int64_may_hold_float`): a fresh kind-'d' box, never freed, whose address
  * is the word. mojo_repr_boxed / mojo_box_double read it back. */
 int64_t     mojo_box_from_double(double v);
+/* The result of `+`, `-` or `*` where one operand is a float-possible
+ * parameter (see `_float_param_arith` in emit_infra.py): `ires` is the integer
+ * answer and `dres` the double answer, both already computed. Returns a fresh
+ * double box holding `dres` when either raw operand word is a double box, and
+ * `ires` otherwise, so the caller never allocates on the integer path. */
+int64_t     mojo_float_arith_select(int64_t a, int64_t b, int64_t ires, double dres);
 /* The box's OWN word for every kind that has one — a str/bytes/list box gives
  * back its pointer, a None box the NULL word that IS None in this value model,
  * an int/bool box its integer — and the box itself, unchanged, for a float

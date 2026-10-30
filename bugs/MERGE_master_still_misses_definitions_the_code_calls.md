@@ -1,7 +1,8 @@
 # MERGE: master still calls definitions it does not define (the bulk merge's dropped half, round 2)
 
-**Status: OPEN.** `bugs/MERGE_bulk_resolved_to_master_dropped_branch_definitions.md`
-records the first round of this and the fixtures that were already put back.
+**Status: OPEN.** The first round of the bulk-merge dropped-branch-definitions
+issue (dropped `SET_ALGEBRA_OPS` / duplicated signatures) is fixed and the
+bug doc deleted; this file tracks round 2 (still live definitions missing).
 The round two of the same class is still live on `master` at `f4cc426c`, and the
 98-branch merge on `work/merge-qwen5-r2-r2` inherits it. Each row is a name a
 file CALLS that no file DEFINES, so the call is an `AttributeError`/`NameError`
