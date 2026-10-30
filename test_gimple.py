@@ -8144,6 +8144,11 @@ def mk_bool():
 def use_bool_factory():
     print(mk_bool()())
 use_bool_factory()
+def mk_str():
+    return lambda: "hi"
+def use_str_factory():
+    print(mk_str()())
+use_str_factory()
 '''
         want = _cpython_stdout(src)
         if want is None:
@@ -8640,8 +8645,8 @@ step(7)
         decorator whose closure calls its argument (the `subdir` shape), a
         factory `@scale(3)` returning such a wrapper, and two stacked
         decorators, which must nest innermost-first. Integer returns only:
-        a wrapper that returns a str is the callable-return-type gap in
-        bugs/CODEGEN_closure_str_return_is_lost.md and is not covered here."""
+        a wrapper that returns a str is the callable-return-type gap
+        (fixed as CODEGEN_closure_str_return_is_lost) and is not covered here."""
         global _PASS, _FAIL
         name = "decorator_rebinding_is_applied_at_runtime"
         src = '''\
