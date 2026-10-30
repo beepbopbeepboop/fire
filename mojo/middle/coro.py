@@ -1389,13 +1389,20 @@ def _note_async_kind(table: dict, name: str, kind) -> None:
         table[name] = kind
 
 
-def _register_async_result_kinds(stmts) -> None:
+def _register_async_result_kinds(stmts, closure_stmts=()) -> None:
     """Fill `_ASYNC_RESULT_KIND` and `_ASYNC_HANDLE_KIND` for this module (see
-    their comments). Walks every `def`, nested and method ones included, so the
-    kind of a callee is known before the awaiter that reads it is lowered."""
+    their comments), and also for any imported modules in the closure so
+    awaited handles whose origin is not in this module resolve the right
+    kind. Walks the current module plus `closure_stmts`."""
     _ASYNC_RESULT_KIND.clear()
     _ASYNC_HANDLE_KIND.clear()
-    for s in stmts:
+    all_stmts = list(stmts)
+    for sub in closure_stmts:
+        if isinstance(sub, (list, tuple)):
+            all_stmts.extend(sub)
+        else:
+            all_stmts.append(sub)
+    for s in all_stmts:
         for n in _walk(s):
             if (isinstance(n, N.FunctionDef) and getattr(n, 'is_async', False)
                     and not any(isinstance(x, N.YieldExpr) for x in _walk(n))):
@@ -4354,7 +4361,7 @@ def lower(stmts: list, closure_stmts=(),
     # to drive it for real rather than bind the descriptor as the loop
     # variable. See `_compute_no_wd_forward`.
     _compute_no_wd_forward(stmts)
-    _register_async_result_kinds(stmts)
+    _register_async_result_kinds(stmts, closure_stmts)
     for s in stmts:
         if isinstance(s, N.FunctionDef) and getattr(s, 'is_generator', False):
             ok, _why = _eligible(s, prop_names=_prop_names)
