@@ -109,8 +109,13 @@ def feed():
         if f.endswith(".json") and f.startswith(PREFIXES):
             q = json.load(open(os.path.join(C.qdir(), f))).get("pool")
             queued[q] = queued.get(q, 0) + 1
-    need = {sl["name"]: max(0, sl["count"] - running.get(sl["name"], 0) + 1 - queued.get(sl["name"], 0))
-            for sl in pool["slots"]}
+    # Tasks are not tied to a slot (refill gives each to a free one), so the feeder keeps the WHOLE queue stocked:
+    # total capacity + 1, less what runs and what waits. A task is queued with no preferred slot.
+    total_need = max(0, C.pool_total() - sum(running.values()) + 1 - sum(queued.values()))
+    need = {sl["name"]: 0 for sl in pool["slots"]}
+    live_slots = [sl["name"] for sl in pool["slots"] if sl["count"] > 0]
+    if live_slots:
+        need[live_slots[0]] = total_need
     paths = sorted(set(p for g in pool["feed"] for p in glob.glob(os.path.join(C.MAIN, g))))
     slots = [sl for sl in pool["slots"] if need[sl["name"]] > 0 and sl["count"] > 0]   # count 0: no new runs
     for p in paths:
@@ -146,7 +151,7 @@ def feed():
                 "the stdlib compile after you land. If the bug is fully fixed, git rm its doc in the same commit and run "
                 "python3 tools/dangling_doc_refs.py --ratchet. Commit, end with a clean tree and the CONTROL-STATUS line." % doc_path(doc))
         r = subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "enqueue", name, "--claim", "bug:" + base,
-                            "--pool", sl["name"], "--task", task], capture_output=True, text=True, cwd=C.MAIN)
+                            "--task", task], capture_output=True, text=True, cwd=C.MAIN)
         st["fed"][doc] = st["fed"].get(doc, 0) + 1
         if r.returncode == 0:
             made += 1
