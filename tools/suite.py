@@ -3902,6 +3902,7 @@ test('formal-host-import-shapes', [PY, 'test_formal_host_import_shapes.py'],
      mem='tiny',
      deps=['preflight'],
      extra=['test_formal_host_import_shapes.py', 'tools/formal_host_import_shapes.py',
+            'tools/formal_host_import_wall.py',
             'formal/imports.py', 'tools/formal_sweep_causes.py'] + FORMAL_BUILD_INPUTS,
      desc='the host-import shapes instrument: which shapes each reader maps to')
 # The other file the same estate check named on the same day, registered on
