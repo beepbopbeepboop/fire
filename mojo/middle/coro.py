@@ -1471,7 +1471,7 @@ def _result_kind_of(expr) -> str:
 _CPP_SLOT_FOR_KIND = {'d': 'double', 'b': '_Bool'}
 
 
-def cpp_value_slot_refusal(fn: N.FunctionDef, slot_ctype: str, struct_def: str | None = None) -> str | None:
+def cpp_value_slot_refusal(fn: N.FunctionDef, slot_ctype: str, struct_def=None) -> str | None:
     """Why the COMPILED (cpp) backend's single value slot of `slot_ctype`
     cannot hold `fn`'s yields faithfully, or None when it can.
 
