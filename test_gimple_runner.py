@@ -3132,16 +3132,16 @@ main()
     # that only checked the crash could not tell a catchable raise from a
     # hard abort.
     test_gimple_runtime_error("gimple_imported_callable_default_raises", """\
-def probe(x, *, g=os.walk):
+def probe(x, *, g=os.getloadavg):
     return g(x)
 
 def main():
     print(probe("."))
 main()
-""", "NotImplementedError: os.walk is a callable that is not available in compiled mode")
+""", "NotImplementedError: os.getloadavg is a callable that is not available in compiled mode")
 
     test_gimple_stdout("gimple_imported_callable_default_raise_is_catchable", """\
-def probe(x, *, g=os.walk):
+def probe(x, *, g=os.getloadavg):
     return g(x)
 
 def main():
@@ -3149,7 +3149,7 @@ def main():
         r = probe(".")
     except NotImplementedError as e:
         print('NotImplementedError')
-        print('os.walk' in str(e))
+        print('os.getloadavg' in str(e))
     else:
         print('no exception')
 main()
@@ -3161,7 +3161,7 @@ main()
     # spurious exception in every program that merely mentions a callable
     # default.
     test_gimple_stdout("gimple_uncalled_imported_callable_default_is_silent", """\
-def probe(x, *, g=os.walk):
+def probe(x, *, g=os.getloadavg):
     return x
 
 def main():
@@ -3203,6 +3203,67 @@ def bylen(s):
 
 print(sorted(["ccc", "a", "bb"], key=bylen))
 """, "['a', 'bb', 'ccc']\n")
+
+    # `items = iter(items)` rebinds an already-declared PARAMETER to a cursor
+    # over itself (the first line of c_common/iterutil.py's peek_and_iter and
+    # iter_many). Before, only a fresh local got the cursor, so `next(items)`
+    # on the rebound parameter fell to the always-refused `next` extern.
+    # `for` must resume where `next` stopped, and a 2-arg `next` must default.
+    test_gimple_stdout("gimple_iter_rebinds_a_parameter_to_a_cursor", """\
+def rest(items):
+    items = iter(items)
+    a = next(items)
+    out = []
+    for x in items:
+        out.append(x * 10)
+    return a, out
+
+def twice(items):
+    items = iter(items)
+    a = next(items)
+    b = next(items)
+    return a + b
+
+def dflt(items):
+    items = iter(items)
+    return next(items, -1)
+
+print(rest([1, 2, 3]), twice([4, 5, 6]), dflt([]), dflt([9]))
+""", "(1, [20, 30]) 9 -1 9\n")
+
+    # A FLAT list parameter whose call sites disagree on the element type
+    # (ints, strings, floats; literal and bound-to-a-name). The contract is
+    # unknown, so the loop reads each slot through mojo_list_get_boxed and the
+    # CALLER records the kind of a string/float list it passes
+    # (`_tag_mixed_list_call_args`). Before, the strings and the second list's
+    # floats printed their addresses/bits, exit 0.
+    test_gimple_stdout("gimple_mixed_kind_flat_list_param_loop", """\
+def show(items):
+    for it in items:
+        print(it)
+
+def go():
+    a = ["p", "q"]
+    show(a)
+    b = [1.5, 2.5]
+    show(b)
+
+show([1, 2])
+show(["a", "b"])
+show([2.5])
+go()
+""", "1\n2\na\nb\n2.5\np\nq\n1.5\n2.5\n")
+
+    # String site FIRST, int site second (an int list records no contract, so
+    # it used to be invisible as a disagreeing call site).
+    test_gimple_stdout("gimple_mixed_kind_flat_list_param_str_first", """\
+def show(items):
+    for it in items:
+        print(it)
+
+show(["a", "b"])
+show([1, 2])
+""", "a\nb\n1\n2\n")
 
     # A string key is compared as a string, not as the address in its int64_t
     # slot (which would order by ADDRESS): the runtime picks the comparison

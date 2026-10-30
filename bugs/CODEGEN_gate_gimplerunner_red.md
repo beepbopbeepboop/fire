@@ -31,6 +31,11 @@ not five, and they were not one bug:
   a one-line fix. The plan is in
   `bugs/CODEGEN_unresolved_method_receiver_returns_its_own_pointer.md`.
 
+Previously (branch `work/bug-codegen-imported-function-default-ar`, now merged):
+`mojoc` was red on master due to the imported-function trailing-default drop
+(`bugs/CODEGEN_imported_function_default_argument_dropped_at_call.md`), fixed in
+`work/bug-codegen-imported-function-default-ar`; that doc stays removed.
+
 Coverage hole, fixed in `57b2704de`: seven `test_*` functions in
 `test_gimple_runner.py` were never invoked. The `if __name__` guard sat above
 them and `main()` ends in `sys.exit`, so nothing ran them. `main()` now calls

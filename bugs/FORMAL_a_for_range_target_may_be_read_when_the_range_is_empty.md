@@ -35,6 +35,83 @@ architectures. What is left is §"What is wrong"'s parameter-bound range, whose
 emptiness is a RUN-TIME fact and cannot be one by any build-time decision, and
 it carries the measurement that closes option 1 below.**
 
+**2026-10-30 — the run-time half landed: the per-name bound flag, in both
+emitters. This is the doc's own "What is left" design, and the residual
+program now answers CPython instead of the caller's leftover.** The reader is
+`formal/model.py::loop_bound_flags(fn, params)` — the ONE answer both
+backends ask, so the two flag the same loops. A name is flagged when one of
+its `'maybe'`-empty loops (a `for` over `range` OR over a container whose
+length is a run-time fact — the for-list half came with the same rule, since
+`_for_emptiness` already reads both) has a single-name, non-`global` target
+that (a) is NOT definitely stored on every path before it — the
+`_definitely_stored` dataflow, the same one `read_before_store` runs, so the
+two cannot answer "is this name bound here" differently; the parameters are
+its seed, which is what keeps a parameter target out, because the
+prologue's argument store is the one store that does not run the flag hook —
+and (b) is read in a possibly-unbound state (the dual dataflow, per-statement
+walk, because a block's entry state and the state at its last read differ).
+The "no path stores it" draft of (a) was over-excluding: the store a path
+makes is the store that SETS the flag, so a name stored on SOME path before
+the loop is flagged, not excluded, and the two paths get their two answers.
+
+Each flagged name gets one backend-local word `_lb{i}` (allocated after the
+user's locals in both `_collect_var_names`), zeroed in the prologue after the
+frame is reserved, set to 1 by EVERY store of the name through the
+`_store_var` hook (the loop's `init:` store, a for-list's per-element store,
+a comprehension's per-element store, a plain assignment — the same hook),
+and a read whose build-time state says the flag may be zero (the `self._mub`
+set: save/restore around loop bodies and else bodies, per-arm copies with an
+OR-join in `if`s) loads the flag and branches on zero to the function's one
+unbound label, where the image takes its error exit — the same
+`CBZ`/`TEST`+`JZ` → `exit(1)` shape the divide-by-zero guard emits, which is
+what keeps the proof generators' walk from meeting an instruction it has no
+step for. Measured, both architectures, `fire.py build --formal --no-prove`:
+the residual program answers `exit 1` for `n = 0` (was `q=9`, CPython
+`UnboundLocalError`) and `q=2`/`exit 0` for `n = 3` (was `q=9`, CPython
+`2`); `k = n - n + 3` then `return q` answers `2` (the loop ran, the flag
+must NOT fire); `q = 7` before the loop still answers `7` with no flag
+allocated at all (definitely stored on every path); the mixed case `if n:
+q = 5` before the loop answers `5` for `n = 10` and `exit 1` for `n = 0` —
+the shape the over-exclusion draft left as garbage; `for q in xs` over a
+runtime list behaves the same as the range form. The prescribed tests are
+green — `test_formal_read_before_store.py` 176 checks / 0 fail plus the new
+15-case `check_loop_bound_flags` group, and `test_formal_run.py`'s four
+for-range rows — with four new `BOTH_ARCH_CASES` rows pinning the empty-read
+exit, the ran-loop no-fire, the non-empty `q=9` false-positive guard and the
+branch-read exit.
+
+**What is left, and why this stays a recorded divergence (tier 2, not a
+deletion):**
+
+1. **The proof side.** A `--formal` (prove) build refuses every program
+   carrying a `'maybe'`-bound `for` — `ForStmt needs the generic loop
+   contract` (the loop layer's ladder: `accumulator-not-classified` /
+   `sum-accumulator`, 0/3 obligations closed) — and it refuses the FLAG-FREE
+   variant of the same loop with the identical word, so the refusal sits in
+   the proof generator's loop-contract domain, not in the emitted
+   flag/check words (which are the divide-by-zero guard's shape, one the
+   generator already walks). A proof-side case for the flag's branch — a new
+   CFG case in BOTH proof generators and a step lemma per branch — is the
+   "project, not a patch" this doc named, and it is the only piece of the
+   design that has not landed.
+2. **The error path skips a pending `finally` flush.** The unbound exit is
+   the same bounded stop the divide-by-zero guard uses, and it does not run
+   a pending `finally` body before it — the same residual that guard
+   carries, not a new one.
+3. **A tuple target is not a word this value model can flag.** A `for a, b
+   in xs` over an iterable whose length is only known at run time still reads
+   the caller's leftover on the empty path, because there is no single name
+   to set the flag from.
+4. **A comprehension target keeps the path's existing local treatment.** Its
+   per-element store DOES set the flag of a name an enclosing `for` flagged,
+   so a comprehension that ran silences the check behind it where CPython
+   scopes the target and raises — the pre-existing comprehension-scope
+   divergence, not a hole the flag opened.
+
+The doc's "Reproducing" block is unchanged and now shows the fixed answers
+in place of `q=9`; the named tests at the bottom still hold, and the four
+new `test_formal_run.py` rows are their pin.
+
 **2026-10-28, re-measured: the residual is unchanged and the fix is still the project, so this stays a recorded divergence.** Re-ran the two prescribed tests on this tree: `test_formal_read_before_store.py` is 176 checks / 0 fail, and `test_formal_run.py`'s four for-range rows all PASS — `both_arch_for_range_restores_a_spilled_counter_too` (the `last(4)` → `3` row that refutes option 1's refusal), `for_range_break`, `both_arch_for_range_continue_advances_before_it_tests_again`, and `both_arch_for_range_else_runs_with_the_counter_already_restored`. The residual program itself (`def main(n): for q in range(0, n): x = 1; printf("q=%d", q)`) still prints the caller's leftover register on both backends for every `n`: `q=9` for `n = 0` AND `n = 3`, where CPython 3.14 raises `UnboundLocalError` (n=0) and answers `q=2` (n=3) — the same wrong word the 2026-10-13 table has, so the parameter-bound remainder is alive and this doc's "What is left" still holds: the only sound answer to "was this target bound" where the emptiness is a run-time fact is a per-loop-target bound FLAG allocated and branched on at the read in BOTH emitters, a new CFG case in BOTH proof generators, and a step lemma per branch — a project, not a patch, and out of scope here. (This session's other two bugs touched only the x86-64 float-print helper and a bug doc, neither of which reaches `read_before_store`/`_build_cfg` or loop-target emission, so the measurement is exactly the tree's before.)
 
 **2026-10-13 (`work/formal406-docs`), the module-level half.** The reader is

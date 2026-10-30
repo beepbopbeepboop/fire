@@ -13,10 +13,11 @@ pat0 = F.CallExpr(func=F.IdentExpr('Point'), args=[])
 kind0 = model.match_pattern_kind(pat0)
 assert kind0 == "class pattern (type test)", f"expected type test, got {kind0}"
 
-# Positional sub-pattern: deconstruction, still refused
+# Positional-capture-only (`Point(x)`): now lowered via isinstance +
+# __match_args__ binding; kind is the same type test.
 pat_cap = F.CallExpr(func=F.IdentExpr('Point'), args=[F.IdentExpr('x')])
 kind_cap = model.match_pattern_kind(pat_cap)
-assert kind_cap == "class pattern", f"expected refused class pattern, got {kind_cap}"
+assert kind_cap == "class pattern (type test)", f"expected type test, got {kind_cap}"
 
 # Keyword sub-pattern: deconstruction, still refused
 pat_kw = F.CallExpr(func=F.IdentExpr('Point'), args=[], kwargs=[('x', F.IntLiteral(0))])

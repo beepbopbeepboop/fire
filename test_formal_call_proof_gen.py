@@ -654,8 +654,10 @@ class TestGeneratorSource(unittest.TestCase):
         import formal.x86_64_proof_gen as X
         for gen, entry in ((X, "generate_x86_64_proof"),
                            (G, "generate_arm64_proof")):
+            # An empty image: the float-repr helper is at the base, so a body
+            # has no bytes before it (the compiler always publishes this key).
             info = {"func_name": "f", "base_addr": 0x1000, "labels": {},
-                    "test_input": 10}
+                    "float_repr_addr": 0x1000, "test_input": 10}
             try:
                 out = getattr(gen, entry)(prog, b"", dict(info))
             except NotImplementedError as e:
@@ -1797,24 +1799,35 @@ class TestTheDivideByZeroGuardIsEmittedOnlyWhenItCanFire(unittest.TestCase):
     """
 
     def _calls(self, source, arch="arm64"):
-        """The number of CALL SITES the emitter recorded for this source.
+        """The number of guard-exit CALL SITES the emitter recorded for this source.
 
         Read from the assembler's own `extern_refs` rather than by scanning
         bytes: an `0xE8`/`0xE9` byte scan also matches a `jmp rel32`, which is
         what a control-flow rewrite of the same block emits, so it counted two
         calls where there is one.
+
+        Only the guard's own exit call is counted, by callee: arm64's
+        `_emit_exit` is exactly one `bl fflush` plus a raw `svc`, and
+        x86-64's `_emit_call_exit` exactly one `call exit`. Since the
+        float-repr helper (commit a2135f390) is emitted unconditionally after
+        every function body and adds its own `snprintf`/`strtod` calls to
+        every image, a whole-image count reads 2 where the guard emitted 0
+        and 3 where it emitted 1 — measured 2026-10-30 on both backends
+        (`1 != 3`, the doc's named smallest method), which is what broke these
+        rows when the helper landed.
         """
         from formal.build import parse_module
         if arch == "arm64":
             import formal.arm64_codegen as AC
             g = AC.ARM64Codegen()
             g.compile(parse_module(source), emit_startup=False)
-            return sum(1 for _s, _p, _l, kind in g.asm.extern_refs
-                       if kind == "bl")
+            return sum(1 for name, _p, _l, kind in g.asm.extern_refs
+                       if kind == "bl" and name == "fflush")
         import formal.x86_64_codegen as XC
         g = XC.X86_64Codegen()
         g.compile(parse_module(source), emit_startup=False)
-        return len(g.asm.extern_refs)
+        return sum(1 for name, _p, _l, kind in g.asm.extern_refs
+                   if kind == "call" and name == "exit")
 
     def _rule(self):
         from formal import model as M
@@ -2039,6 +2052,194 @@ class TestAddSubImmediateShift(unittest.TestCase):
                       f"store: {joined}")
         self.assertNotIn(f"UInt64.ofNat 32)", joined,
                          f"the peel is reading the raw 12-bit field: {joined}")
+
+
+class TestMethodFrameDepthTrackers(unittest.TestCase):
+    """The frame-contract depth and slot trackers read an ADD/SUB immediate
+    as BYTES, with its `sh` bit, and not as `field * 8`.
+
+    The four trackers this class drives feed the METHOD-frame contract in
+    `_frame_section` (the by-reference receiver's `Frame.FrameBelow` premises
+    and the peels that read them): `_frame_stack_depths`'s numbers are the
+    `c`s of `Frame.FrameBelow (sp0 - c)`, `_frame_slot_accesses`'s are the
+    SLOTS a method's field access goes to, and `_frame_store_depths` /
+    `_frame_store_writes` are the same depths per store. Their `ADD`/`SUB
+    (immediate)` arms read the field as `((w >> 10) & 0xfff) * 8` — the `sh`
+    bit of `#imm, lsl #12` dropped, and the `* 8` that belongs to the
+    `STP`/`LDP` `imm7` arms (which ARE 8-byte counts) carried over. So
+    `sub sp, sp, #16` was a 128-byte depth and `sub sp, sp, #32, lsl #12` a
+    256-byte one: a contract whose premises name `sp0 - 144` would peel a
+    store the machine made at `sp0 - 32`, the same stale-address red the
+    class above recorded for the walk's own trackers.
+
+    No corpus example reaches a method contract today (the frame examples are
+    refused before the section is generated), so this is the
+    `_frame_methods`-shaped unit the defect's measurement prescribed in its
+    place: every word is
+    an encoder's own (so the fix cannot drift against the machine), driven
+    through the generator's own readers, and the last case confirms the WHOLE
+    method — the source's `self.x` and the machine's `LDR` through the
+    receiver agreeing — and reads the depth the section's `hsep` premises take
+    off the same word map.
+    """
+
+    def _word(self, fn, *args):
+        import struct as _s
+        return _s.unpack("<I", fn(*args))[0]
+
+    def setUp(self):
+        import formal.arm64 as A
+        self.sub16 = self._word(A.encode_sub_xd_xn_imm_sh, 31, 31, 16, 0)
+        self.add16 = self._word(A.encode_add_xd_xn_imm_sh, 31, 31, 16, 0)
+        self.sub_scratch = self._word(A.encode_sub_xd_xn_imm_sh, 31, 31, 32, 1)
+        self.stp16 = self._word(A.encode_stp_sp_pre, 29, 30, 16)
+        self.ldp16 = self._word(A.encode_ldp_sp_post, 29, 30, 16)
+
+    def test_stack_depths_are_bytes_and_read_the_sh_bit(self):
+        """`sp` through the prologue: the numbers `Frame.FrameBelow` gets."""
+        import formal.arm64_proof_gen as G
+        # `sub sp, sp, #16` then `stp x29, x30, [sp, #-16]!` then the epilogue
+        # `ldp x29, x30, [sp], #16`: the pair sits at 32/24 below the entry sp
+        # and the POST-indexed reload reads it at the same 32/24, before sp
+        # moves back.
+        words = {0x0: self.sub16, 0x4: self.stp16, 0x8: self.ldp16}
+        self.assertEqual(G._frame_stack_depths(words, 0x0, 0xC), [24, 32],
+                         "an ADD/SUB immediate is a BYTE count: the `* 8` the "
+                         "STP/LDP `imm7` arms need is not what it has, so `#16` "
+                         "read as 128 would put the premises 8x too deep")
+        # `add sp, sp, #16` restores sp before the reload: the load then reads
+        # at 16/8, and a tracker that scaled the ADD by 8 would leave sp 112
+        # bytes too low and orphan the reload from the `hsep` premises.
+        words = {0x0: self.sub16, 0x4: self.stp16, 0x8: self.add16,
+                 0xC: self.ldp16}
+        self.assertEqual(G._frame_stack_depths(words, 0x0, 0x10),
+                         [8, 16, 24, 32],
+                         "the epilogue's `add sp, sp, #16` is 16 bytes, not "
+                         "128: a scaled ADD would orphan the reload from the "
+                         "premises it reads")
+        # The 128KB scratch is ONE scaled immediate, `sub sp, sp, #32, lsl #12`:
+        # the pair then sits at (32 << 12) + 16 / + 8 below the entry sp.
+        words = {0x0: self.sub_scratch, 0x4: self.stp16, 0x8: self.ldp16}
+        self.assertEqual(G._frame_stack_depths(words, 0x0, 0xC),
+                         [(32 << 12) + 8, (32 << 12) + 16],
+                         "a `#32, lsl #12` immediate is 32 << 12 bytes; the 12-"
+                         "bit field alone would put the premises 4096x too "
+                         "shallow")
+
+    def test_store_depths_and_writes_track_the_same_way(self):
+        """The peel side: the per-store `K`s of the method's own frame writes."""
+        import formal.arm64_proof_gen as G
+        words = {0x0: self.sub16, 0x4: self.stp16}
+        self.assertEqual(G._frame_store_depths(words, 0x0, 0x8), [32],
+                         "the pair's `K` is 16 (prologue) + 16 (pair) bytes "
+                         "below the entry sp, not 128 + 16")
+        m = {"entry": 0x0, "end": 0x8}
+        self.assertEqual(G._frame_store_writes(words, m), [([24, 32], False)],
+                         "the pair writes two words, outer-first, at the NEW "
+                         "sp: 32 and 24 bytes below the entry sp")
+        # …and the `lsl #12` spelling, which the `sh` bit is what makes 131072.
+        words = {0x0: self.sub_scratch, 0x4: self.stp16}
+        self.assertEqual(G._frame_store_depths(words, 0x0, 0x8),
+                         [(32 << 12) + 16])
+        self.assertEqual(
+            G._frame_store_writes(words, m),
+            [([(32 << 12) + 8, (32 << 12) + 16], False)],
+            "a scaled `sub sp` must deepen the pair by 32 << 12 bytes, not 32")
+
+    def test_slot_accesses_read_the_add_as_a_byte_offset(self):
+        """`ADD` extends the receiver offset in BYTES; the slot is bytes // 8.
+
+        `x0` arrives as the receiver: `add x19, x0, #8` extends it by 8 BYTES
+        (slot 1), and the `LDR`/`STR` arm below adds its own 8-byte access
+        scale.  The old `* 8` on the ADD arm said slot 1 was 8 slots away, so
+        a two-field method's contract would name the wrong slot — and a
+        contract about the wrong slot is a theorem the method does not satisfy.
+        """
+        import formal.arm64 as A
+        import formal.arm64_proof_gen as G
+        # The LDR/STR encoders take the offset in BYTES (`imm12 = imm // 8`),
+        # so `ldr x20, [x19, #16]` is 16 bytes beyond `x19`.
+        add8 = self._word(A.encode_add_xd_xn_imm_sh, 19, 0, 8, 0)
+        ldr16 = self._word(A.encode_ldr_xt_xn_imm, 20, 19, 16)
+        str8 = self._word(A.encode_str_xt_xn_imm, 1, 19, 8)
+        words = {0x0: add8, 0x4: ldr16}
+        self.assertEqual(G._frame_slot_accesses(words, 0x0, 0x8),
+                         [(3, False)],
+                         "`[x0 + 8 + 16]` is byte 24, slot 3; the old scaled "
+                         "ADD put the base at byte 64 and the load at slot 10")
+        words = {0x0: add8, 0x4: str8}
+        self.assertEqual(G._frame_slot_accesses(words, 0x0, 0x8),
+                         [(2, True)],
+                         "the STORE half of the same access: `[x0 + 8 + 8]` "
+                         "is byte 16, slot 2")
+        # The `sh` bit on the receiver-extending ADD: `add x19, x0, #1, lsl #12`
+        # is 4096 BYTES, so the following load is at slot 512.
+        add_scaled = self._word(A.encode_add_xd_xn_imm_sh, 19, 0, 1, 1)
+        ldr0 = self._word(A.encode_ldr_xt_xn_imm, 20, 19, 0)
+        words = {0x0: add_scaled, 0x4: ldr0}
+        self.assertEqual(G._frame_slot_accesses(words, 0x0, 0x8),
+                         [(512, False)],
+                         "a `#1, lsl #12` receiver extension is 4096 bytes; "
+                         "the 12-bit field alone would read the load at slot 1")
+
+    def test_a_confirmed_frame_method_reads_byte_depths(self):
+        """The whole machine, on a hand-assembled leaf method.
+
+        `P.get_x` as the SOURCE, five encoder words as the MACHINE: a prologue
+        the emitter would write (`sub sp`/`stp`), the one receiver-relative
+        `LDR` the source's `self.x` lowers to, and the epilogue.  `_frame_
+        methods` must CONFIRM the method (source and machine agreeing, one
+        slot), and `_frame_stack_depths` — the reader of the `hsep` premises —
+        must give the pair's byte depths.  The emitted section is checked on
+        the same words, so a revert that breaks the confirmation or the depths
+        fails here rather than at a proof no corpus example reaches.
+        """
+        import formal.arm64 as A
+        import formal.arm64_proof_gen as G
+        from formal.build import parse_module, _struct_methods
+        from types import SimpleNamespace
+        src = ("struct P:\n"
+               "    x: Int\n"
+               "    y: Int\n\n"
+               "    fn get_x(self) -> Int:\n"
+               "        return self.x\n")
+        fns = _struct_methods(parse_module(src))
+        self.assertEqual([f.name for f in fns], ["P_get_x"],
+                         "the lifted method name is what the label must carry")
+        code = b"".join([
+            A.encode_sub_xd_xn_imm_sh(31, 31, 16, 0),
+            A.encode_stp_sp_pre(29, 30, 16),
+            A.encode_ldr_xt_xn_imm(0, 0, 0),
+            A.encode_ldp_sp_post(29, 30, 16),
+            A.encode_ret(),
+        ])
+        prog = SimpleNamespace(functions=fns, externs=[])
+        info = {"base_addr": 0x1000, "labels": {"P_get_x": 0x1000}}
+        methods = G._frame_methods(prog, code, info)
+        self.assertIsNotNone(methods,
+                             "the hand-assembled method is the LEAF shape the "
+                             "confirmation exists for: one receiver-relative "
+                             "access, no branch — a None here is a confirmation "
+                             "regression, not a corpus question")
+        m = methods[0]
+        self.assertEqual(m["kind"], "get")
+        self.assertEqual(m["pairs"], [("x", 0)],
+                         "the source's `self.x` and the machine's `LDR` at "
+                         "`[x0, #0]` are the SAME slot; a confirmation that "
+                         "disagrees about it must drop the method, not guess")
+        words = {0x1000 + i: int.from_bytes(code[i:i + 4], "little")
+                 for i in range(0, len(code), 4)}
+        self.assertEqual(G._frame_stack_depths(words, m["entry"], m["end"]),
+                         [24, 32],
+                         "the `hsep` depths are the pair's byte positions: "
+                         "16 (prologue) + 16 (pair) and 8 below that, not the "
+                         "8x-scaled 136/144")
+        section = G._frame_section(prog, code, info, methods, "t_get")
+        self.assertIn("t_get_P_get_x_runs_frame_test", section,
+                      "the concrete run test is what a method that reads the "
+                      "wrong slot fails")
+        self.assertIn('(MF.MFExpr.field "x")', section,
+                      "the source semantics must name the field, not a slot")
 
 
 # Lean's `=` and `\u2260`, spelled once so the pattern and the expectation

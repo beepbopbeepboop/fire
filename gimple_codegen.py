@@ -1079,6 +1079,7 @@ class GimpleGen:
         # own compile attempt so a stale prior generator's value can never
         # leak into this one's registration on any early-exception path.
         self._cpp_last_tuple_slot_ctypes: list | None = None
+        self._cpp_last_mixed_slots: bool = False
         # Side channel from _gen_cpp_generator_unit (same stash pattern
         # as _cpp_last_tuple_slot_ctypes): whether THIS unit's body had
         # an eligible value-carrying `return <expr>` — read back into
@@ -2267,6 +2268,9 @@ class GimpleGen:
         # callee -> {pname}: a list-of-lists param whose call sites disagree on
         # the inner element kind (see module_gen's _record_param_elem).
         self._param_nested_mixed: dict = {}
+        self._param_elem_mixed: dict = {}
+        self._param_int_elem_obs: dict = {}
+        self._value_used_funcs: set = set()
         # The dict-VALUE twin of the row above: callee -> {pname -> the dict
         # value ctype its call sites agree on}. Read at the same place (see
         # emit_funcs.gen_func / _gen_struct_method), into `_dict_val_types`.
@@ -3645,6 +3649,8 @@ class GimpleGen:
         'int64_t_path_splitdrive': ('MojoList *', ['char *']),            # os.path.splitdrive(path) -> [drive, tail]
         'int64_t_path_splitroot':  ('MojoList *', ['char *']),            # os.path.splitroot(path) -> [drive, root, tail]
         'mojo_listdir':          ('MojoList *',  ['char *']),              # os.listdir(path)
+        'mojo_os_walk':          ('MojoList *',  ['char *']),              # os.walk(top)
+        'mojo_glob':             ('MojoList *',  ['char *']),              # glob.glob/iglob(pattern)
         'isatty':                ('int',         ['int']),
         'getpid':                ('int',         []),
         'getppid':               ('int',         []),

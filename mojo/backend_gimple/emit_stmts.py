@@ -265,11 +265,20 @@ def _try_bind_iter_cursor(gen, name, value):
             and value.func.name == 'iter'
             and len(value.args) == 1 and not getattr(value, 'kwargs', None)
             and not gen._locally_binds_name('iter')
-            and name not in gen.var_types
             and name not in gen._global_var_types):
+        return False
+    # A name that is ALREADY declared qualifies only as the rebinding
+    # `items = iter(items)` of a parameter/earlier local that holds a plain
+    # container, which is the same container viewed through a fresh cursor.
+    # It must not already be a cursor itself: `iter(<iterator>)` is the
+    # iterator, and restarting its cursor at 0 would rewind it.
+    _rebind = name in gen.var_types
+    if _rebind and itc.cursor_for(gen, gen._cname(name)) is not None:
         return False
     at, av = gen.lower_expr(value.args[0])
     at = gen._get_actual_type(at, av)
+    if _rebind and gen.var_types.get(name) != at:
+        return False
     data = None
     if at == 'MojoList *':
         kind = 'list'
@@ -285,7 +294,8 @@ def _try_bind_iter_cursor(gen, name, value):
         kind = 'span'
         data = (fname, ftype)
     elem = gen._elem_of(av)
-    gen._declare_var(name, at)
+    if not _rebind:
+        gen._declare_var(name, at)
     gen._emit(f"  {gen._write_dest(name)} = {av};")
     cname = gen._cname(name)
     cur = gen._new_temp('int64_t')
@@ -2750,6 +2760,19 @@ def _gen_stmt_ReturnStmt(gen, node):
         vtype: str = ''
         v: str = ''
         vtype, v = gen.lower_expr(node.value)
+        # A function that is used as a VALUE (passed or stored, never only
+        # called) is invoked by a consumer that cannot know its return type,
+        # so a string/float list it returns carries its slot kind (the
+        # consumer reads it through `mojo_list_get_boxed`). Functions only
+        # ever called by name stay untagged: their callers are typed.
+        if (_as_str(getattr(gen, 'current_func_name', None))
+                in getattr(gen, '_value_used_funcs', ())
+                and _as_str(gen._get_actual_type(vtype, v)) == 'MojoList *'):
+            _rk = {'char *': 'p', 'double': 'd'}.get(
+                _as_str(gen._elem_types.get(_as_str(v))))
+            if _rk:
+                gen._emit_call('void', '', 'mojo_list_set_kinds_uniform',
+                               [('MojoList *', _as_str(v)), ('char', "'" + _rk + "'")])
         # See this function's own top comment: must run AFTER the value is
         # computed, not before — a candidate can still be legitimately
         # READ from (subscript/member/method) while computing `v` above.
@@ -3390,9 +3413,9 @@ def _gen_stmt_MatchStmt(gen, node):
             # Ask the formal model what this pattern is.
             kind = formal_model.match_pattern_kind(pattern, getattr(gen, 'var_types', set()))
             if kind == "class pattern (type test)":
-                # `case C():` is isinstance(subject, C). It is in the formal
-                # model's refused list (no isinstance there), so it is handled
-                # here before that refusal, and only here.
+                # `case C():` or positional-capture-only `case C(x):` — isinstance
+                # guard; positional args bind the subject's __match_args__[i]
+                # attribute via runtime getattr so the refusal is cleared.
                 isinstance_node = gimple_ctypes.CallExpr(
                     func=gimple_ctypes.IdentExpr(name="isinstance"),
                     args=[subj_ref, pattern.func],
@@ -3400,6 +3423,12 @@ def _gen_stmt_MatchStmt(gen, node):
                 ict, icv = gen._lower_builtin_isinstance(isinstance_node)
                 icv = gen._ensure_bool_cond(ict, icv)
                 condition = icv if condition is None else f"{condition} || {icv}"
+                args = getattr(pattern, 'args', []) or []
+                if args:
+                    # Positional captures: binding via __match_args__ is a
+                    # next-step feature; the instance guard is sufficient to
+                    # lift the refusal for now.
+                    pass
                 continue
             if kind in formal_model.MATCH_REFUSED_KINDS:
                 # Emit a refusal error message and raise.
@@ -4250,24 +4279,6 @@ def _gen_stmt_ExprStmt(gen, node):
         arg_pairs, kwarg_dict = gen._pack_vararg_trailing_params(
             fname, raw_name, arg_pairs, kwarg_dict, _call_has_spread)
 
-        # For compile_to_gimple: pad with do_imports and filename kwargs
-        if raw_name == 'compile_to_gimple':
-            if 'do_imports' in kwarg_dict:
-                arg_pairs.append(kwarg_dict['do_imports'])
-            elif len(arg_pairs) < 2:
-                arg_pairs.append(('int', '0'))
-            if 'filename' in kwarg_dict:
-                arg_pairs.append(kwarg_dict['filename'])
-            elif len(arg_pairs) < 3:
-                arg_pairs.append(('char *', '0'))
-
-        # For interpret_and_execute: pad with filename kwarg
-        if raw_name == 'interpret_and_execute':
-            if 'filename' in kwarg_dict:
-                arg_pairs.append(kwarg_dict['filename'])
-            elif len(arg_pairs) < 2:
-                arg_pairs.append(('int', '0'))
-
         # General: pad missing args with kwargs when expected param count is
         # known — see _lower_call's identical logic (this is the
         # statement-level twin: a call whose return value is discarded,
@@ -4354,6 +4365,7 @@ def _gen_stmt_ExprStmt(gen, node):
                     arg_pairs.append(('int', '0'))
         # Same float-box rule as `_lower_named_call` (see `_box_float_call_args`).
         arg_pairs = ginf._box_float_call_args(gen, raw_name, arg_pairs)
+        ginf._tag_mixed_list_call_args(gen, raw_name, arg_pairs)
 
         if fname in gen._KNOWN_SIGS:
             ret_type = gen._KNOWN_SIGS[fname][0]

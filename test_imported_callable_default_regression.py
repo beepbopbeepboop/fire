@@ -1,7 +1,7 @@
 """Regression for CODEGEN_imported_callable_default_answers_zero.
 
 Step 1 (root cause) is fixed in mojo/middle/calls_shared.py: a MemberExpr
-default (os.walk) routes to mojo_unavailable_callable_ptr, raising
+default (os.getloadavg, a callable the runtime does not implement) routes to mojo_unavailable_callable_ptr, raising
 NotImplementedError, rather than padding 0 and returning 0.
 """
 import sys, subprocess, tempfile, os
@@ -28,7 +28,7 @@ def _compile_and_run(src):
 
 def test_imported_callable_default_raises():
     rc, out, err = _compile_and_run("""\
-def probe(x, *, g=os.walk):
+def probe(x, *, g=os.getloadavg):
     return g(x)
 def main():
     print(probe("."))
@@ -40,7 +40,7 @@ main()
 
 def test_uncalled_imported_callable_default_is_silent():
     rc, out, err = _compile_and_run("""\
-def probe(x, *, g=os.walk):
+def probe(x, *, g=os.getloadavg):
     return x
 def main():
     print(probe("hello"))

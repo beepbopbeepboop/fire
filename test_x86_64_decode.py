@@ -19,8 +19,10 @@ put it in. Neither is visible to a round-trip.
 Run: python3 test_x86_64_decode.py
 """
 
+import os
 import struct
 import sys
+import tempfile
 
 import formal.x86_64 as X
 import formal.x86_64_decode as D
@@ -170,6 +172,29 @@ check("movsxd rax, edx", X.encode_movsx_r64_r32(R.RAX, R.RDX),
       "movsxd_r64_r32", mod=3)
 check("mov r11d, [rax]", X.encode_mov_rm32_r32(R.RAX, 0, R.R11),
       "mov_rm32_r32_mem", mem_base=R.RAX.value, mem_disp=0)
+
+# ── the SIB-INDEXED byte forms ────────────────────────────────────────
+#
+# The float-repr helper stores and loads its digit buffer through
+# `[base + index]` (`encode_mov_rm8_r8_idx`, `encode_movzx_r64_rm8_idx`), and the
+# decoder refused every such SIB until `bugs/FORMAL_x86_64_decoder_refuses_sib_
+# indexed_forms.md`.  They are the SAME form as the displacement forms above —
+# `mov_rm8_r8` and `movzx_r64_rm8` — because the opcode is unchanged and only the
+# SIB's index field differs; the decoder records the base register in `mem_base`
+# and the index/scale live in the SIB byte the model reads.  Every (base, index)
+# pair is pinned, not one, because REX.B (base) and REX.X (index) are independent
+# extensions and a single row cannot see either go wrong: `rbp`/`rsp` force no
+# REX at all, `r11`/`r12` force both, and `r13` carries a displacement byte that
+# a fixed-length resume would walk into.
+for _base, _index in ((R.RBX, R.RCX), (R.RBP, R.RSI), (R.RSP, R.R8),
+                      (R.R13, R.R12), (R.R11, R.RCX)):
+    _w = "[%s + %s]" % (_base.name, _index.name)
+    check("mov byte %s, r9b" % _w,
+          X.encode_mov_rm8_r8_idx(_base, _index, R.R9), "mov_rm8_r8",
+          mem_base=_base.value)
+    check("movzx r8, byte %s" % _w,
+          X.encode_movzx_r64_rm8_idx(R.R8, _base, _index), "movzx_r64_rm8",
+          mem_base=_base.value)
 
 # `movq xmm, r64` — the GPR-to-SSE move, and the first instruction this project
 # emits into a formal image that crosses from one register FILE into another.
@@ -394,6 +419,33 @@ try:
 except D.DecodeError:
     pass
 
+# The float-repr helper's own image decodes in full.  It is emitted after every
+# function body and stores/loads its digit buffer through the SIB-INDEXED byte
+# forms above, so a decoder that refused those forms made this whole region
+# undecodable -- which is how `bugs/FORMAL_x86_64_decoder_refuses_sib_indexed_
+# forms.md` was seen.  The region runs from `float_repr_addr` to the first string
+# label (the data pool the decode must NOT walk into).
+import formal.build as _FB
+
+with tempfile.TemporaryDirectory(prefix="decode-helper-") as _td:
+    _src = os.path.join(_td, "prog.mojo")
+    with open(_src, "w") as _f:
+        _f.write("def main(n) -> Int:\n    return n * 2 + 1\n")
+    _r = _FB.compile_formal(_src, prove=False, check=False, arch="x86_64")
+    _code, _info = _r["code"], _r["info"]
+    _base = _info["base_addr"]
+    _start = _info["float_repr_addr"] - _base
+    _strs = [a for n, a in _info.get("labels", {}).items() if n.startswith("str_")]
+    _end = min(_strs) - _base if _strs else len(_code)
+    try:
+        _insns = D.decode_all(_code, _start, _end)
+        _forms = D.forms(_insns)
+        if "mov_rm8_r8" not in _forms or "movzx_r64_rm8" not in _forms:
+            FAILURES.append("float-repr helper image decoded but carried neither "
+                            "indexed byte form: %s" % sorted(_forms))
+    except D.DecodeError as _e:
+        FAILURES.append("float-repr helper image does not decode in full: %s" % _e)
+
 # ── the two DECLARATIONS the formal backend builds this module through ──────
 #
 # `formal/x86_64_decode.py` is itself swept by `tools/formal_sweep.py`, and its
@@ -415,7 +467,6 @@ except D.DecodeError:
 # not be either construct. It is a build and not a source inspection because
 # the two are only related by the backend's reading of the declarations — the
 # whole content of both fixes is what that reading sees.
-import os
 import subprocess
 
 HERE = os.path.dirname(os.path.abspath(__file__))

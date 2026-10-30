@@ -615,7 +615,10 @@ def cmd_refill(a):
         sl = pick_slot(it, busy)
         if sl is None:
             continue                      # every slot is full or banned: the task waits
-        ns = argparse.Namespace(name=it["name"], claim=it["claims"], task=it["task"], task_file=None,
+        # a queued name can collide with a registry entry from an earlier attempt of the same chain (2026-10-30: two fixers
+        # were skipped on every pass as "already exists"); the task starts under a fresh name instead
+        name = it["name"] if it["name"] not in tasks else "%s-%d" % (it["name"][:50], int(time.time() * 1000) % 1000000)
+        ns = argparse.Namespace(name=name, claim=it["claims"], task=it["task"], task_file=None,
                                 file=it["files"], base=it["base"], model=None, pool=sl["name"])
         busy[sl["name"]] = busy.get(sl["name"], 0) + 1
         try:

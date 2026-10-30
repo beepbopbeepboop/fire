@@ -2878,6 +2878,26 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             gen._elem_types[t] = 'char *'
             return 'MojoList *', t
 
+        # os.walk(top) / glob.glob(pat) / glob.iglob(pat): eager runtime
+        # helpers (mojo_os_walk / mojo_glob) returning a list. A walk is a
+        # list of (dirpath, dirnames, filenames) tuples; a glob a list[str].
+        if ((module_name == 'os' and method_name == 'walk')
+                or (module_name == 'glob' and method_name in ('glob', 'iglob'))) \
+                and len(node.args) == 1 and not node.kwargs:
+            arg_type, arg_val = gen.lower_expr(node.args[0])
+            if arg_type not in ('char *', 'void *'):
+                arg_cast = gen._new_temp('char *')
+                gen._emit(f'  {arg_cast} = (char *){arg_val};')
+                arg_val = arg_cast
+            _wsym = 'mojo_os_walk' if method_name == 'walk' else 'mojo_glob'
+            t = gen._call_expr('MojoList *', _wsym, [('char *', arg_val)])
+            if method_name == 'walk':
+                gen._elem_types[t] = 'MojoList *'
+                gen._tuple_slot_types[t] = ['char *', 'MojoList *', 'MojoList *']
+            else:
+                gen._elem_types[t] = 'char *'
+            return 'MojoList *', t
+
         # sysconfig.get_config_var(name) — real Python signature returns
         # `str | None` (the build-config value for `name`, e.g.
         # "BUILD_GNU_TYPE"/"BUILD_DIR"), never int. Not previously

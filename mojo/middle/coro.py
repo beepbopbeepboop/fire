@@ -101,8 +101,14 @@ def _yield_shim(kind: str) -> str:
     # int/bool/pointer all go through the int64_t yield -- _emit_call coerces
     # a char*/pointer arg to int64_t via the registered param types, and a
     # `_Bool` promotes to its own 0/1 losslessly. Only a genuine double needs
-    # the bitcast variant.
-    return '__mojo_coro_yield_d' if kind == 'd' else '__mojo_coro_yield_i'
+    # the bitcast variant; pointer needs the pointer-typed shim so the C
+    # argument is not cast to int64_t (which yields the pointer address as
+    # an integer rather than the pointed-to value).
+    if kind == 'd':
+        return '__mojo_coro_yield_d'
+    if kind == 'p':
+        return '__mojo_coro_yield_p'
+    return '__mojo_coro_yield_i'
 
 
 def enabled() -> bool:
@@ -494,6 +500,10 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
         ek = None
         if isinstance(it, N.IdentExpr):
             v = env.get(it.name)
+            # A star-param (`*ws`) is recorded as `*ws` in env, but the loop
+            # iterates `ws`; try the prefixed spelling too.
+            if v is None:
+                v = env.get('*' + it.name)
             if isinstance(v, tuple) and v[0] == 'list':
                 ek = v[1]
             elif v == 'p':
@@ -607,7 +617,11 @@ def _yield_kind(expr, env: dict | None = None) -> str | None:
         return 'i'
     if isinstance(expr, N.IdentExpr):
         v = env.get(expr.name)
-        return v if isinstance(v, str) else None
+        if isinstance(v, str):
+            return v
+        if isinstance(v, tuple) and v[0] == 'list':
+            return v[1]
+        return None
     if isinstance(expr, N.MemberExpr) and isinstance(expr.obj, N.IdentExpr) \
             and expr.obj.name == 'self':
         return env.get(f'self.{expr.member}')
@@ -3308,10 +3322,14 @@ def _mark_coro_param_elem_kinds(body_fd, real_params, env):
     `emit_funcs.gen_func`), so the loop takes the list path directly.
     See CODEGEN_coro_yield_kind_unresolved_callsite ("Item 8").
 
-    Only LIST params are recorded, and only a scalar element kind: a
-    container-of-container has no single C type either (it needs the nested
-    slot the ordinary lowering carries in `_nested_elem_types`), and an
-    `int64_t` element is the default the loop target assumes anyway.
+    Only LIST params are recorded. A container-of-container has no single C
+    type either (it needs the nested slot the ordinary lowering carries in
+    `_nested_elem_types`), so it is not in `kinds`. An `int64_t` element is
+    NOT a default here: the backend's loop lowering must be told it is a
+    list of ints, because "nothing known" and "known to be ints" take
+    different paths through the dict-or-list dispatch. Those go in
+    `_mojo_coro_param_int_lists` instead of `kinds` (see the comment on
+    `_boxed_list_ptr`), so `_elem_types` keeps its meaning of "not known".
 
     Part of the same contract as `_mark_coro_body` and marked the same way
     (an attribute, not a name-suffix guess) for the same reason: the backend
@@ -3319,6 +3337,7 @@ def _mark_coro_param_elem_kinds(body_fd, real_params, env):
     look like" without a parallel naming convention to keep in sync."""
     kinds: dict = {}
     str_params: list = []
+    int_lists: list = []
     for pname, _pann in real_params:
         v = env.get(_cm_as_str(pname))
         # Keyed by the BODY's local name (`_local_param_name`): a `*args`
@@ -3326,12 +3345,16 @@ def _mark_coro_param_elem_kinds(body_fd, real_params, env):
         if isinstance(v, tuple) and len(v) == 2 and v[0] == 'list' \
                 and isinstance(v[1], str) and v[1] in _KIND_CTYPE:
             ct = _KIND_CTYPE[v[1]]
-            if ct != 'int64_t':
+            if ct == 'int64_t':
+                int_lists.append(_local_param_name(pname))
+            else:
                 kinds[_local_param_name(pname)] = ct
         elif v == 'p':
             str_params.append(_local_param_name(pname))
     if kinds:
         body_fd._mojo_coro_param_elem_kinds = kinds
+    if int_lists:
+        body_fd._mojo_coro_param_int_lists = int_lists
     if str_params:
         body_fd._mojo_coro_param_str_params = str_params
     return body_fd
@@ -3380,6 +3403,11 @@ def _lower_one_async(fn: N.FunctionDef, meta: list, base: str | None = None,
     body_fd.is_generator = False
     body_fd.is_async = False
     body_fd = _mark_coro_body(body_fd)
+    # The same cross-call element contract a generator body gets (see
+    # `_lower_one`): an `async def` reads its list params through the same
+    # untyped int64_t slots, so without it `for x in xs:` over an int list
+    # param declared the loop variable through the dict-or-list dispatch.
+    body_fd = _mark_coro_param_elem_kinds(body_fd, real_params, _static_env(fn, struct_def))
     meta.append({
         'name': _cm_as_str(fn.name), 'struct': struct_name, 'is_method': is_method, 'is_async': True,
         'receiver': _async_receiver_kind(fn, is_method),

@@ -202,6 +202,7 @@ def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
             gen.lower_expr(_ke)
     if _gen_star is not None:
         arg_pairs = _pack_generator_star_args(gen, arg_pairs, _gen_star)
+    ginf._tag_mixed_list_call_args(gen, fname_raw, arg_pairs)
     return _finish_generator_start(gen, api, arg_pairs)
 
 
@@ -8450,20 +8451,6 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     arg_pairs, kwarg_dict = gen._pack_vararg_trailing_params(
         fname, fname_raw, arg_pairs, kwarg_dict, _call_has_spread)
 
-    # Keyword argument padding for known functions
-    if fname_raw == 'compile_to_gimple':
-        if 'do_imports' in kwarg_dict: arg_pairs.append(kwarg_dict['do_imports'])
-        elif len(arg_pairs) < 2:       arg_pairs.append(('int', '0'))
-        if 'filename' in kwarg_dict:   arg_pairs.append(kwarg_dict['filename'])
-        elif len(arg_pairs) < 3:       arg_pairs.append(('char *', '0'))
-        if 'auto_gpu' in kwarg_dict:   arg_pairs.append(kwarg_dict['auto_gpu'])
-        elif len(arg_pairs) < 4:       arg_pairs.append(('int', '1'))
-    if fname_raw == 'interpret_and_execute':
-        if 'filename' in kwarg_dict:   arg_pairs.append(kwarg_dict['filename'])
-        elif len(arg_pairs) < 2:       arg_pairs.append(('int', '0'))
-    if fname_raw == 'format_ast'  and len(arg_pairs) == 1: arg_pairs.append(('int', '0'))
-    if fname_raw == 'emit_module' and len(arg_pairs) == 1: arg_pairs.append(('int', '0'))
-
     # General kwarg padding when expected param count is known. A call
     # compiled in isolation (e.g. monomorphize.py's instantiate(), which
     # builds a brand-new GimpleGen per generic instantiation with none of
@@ -8635,6 +8622,7 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # a box, not its bits (see `_box_float_call_args`). After the padding, so
     # position `i` is parameter `i`, and before the emission below.
     arg_pairs = ginf._box_float_call_args(gen, fname_raw, arg_pairs)
+    ginf._tag_mixed_list_call_args(gen, fname_raw, arg_pairs)
 
     # surplus pairs here — each dropped arg's lower_expr already ran while
     # building arg_pairs, so its side effects still happen exactly once,

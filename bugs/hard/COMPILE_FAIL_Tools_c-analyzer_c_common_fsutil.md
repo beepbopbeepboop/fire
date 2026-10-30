@@ -1,5 +1,99 @@
 # COMPILE_FAIL (hard): Tools/c-analyzer/c_common/fsutil.py
 
+## Status 2026-10-30 (third entry) — `process_filenames` and `iterutil` now compile; the three that remain are genuinely dynamic
+
+Measured on `.tmp/ca/c_common/fsutil.py` (full package copy): the refusal list went from four to three —
+`_walk_tree`, `glob_tree`, `iter_files`. `iterutil.py` builds clean. **Landed this round:**
+`items = iter(items)` cursor in the cpp emitter too; a call through a callable PARAMETER (`onempty(items)`) via
+`mojo_fnptr_call_N` with a local word-converting result type, guarded by a REAL `callable()` for word params
+(`runtime mojo_is_callable_word`: exact `dladdr` symbol match, vararg fn or bound method) instead of the old
+always-true stub; truthiness of a container/word parameter (`not items` was a NULL-pointer test, so an empty list
+was truthy); lists returned from functions used as VALUES carry their str/float slot kind; unsolved list params
+captured by a nested generator read boxed (`chain`), with the capture rule relaxed to allow rebindings that all
+precede the `def`; a `for` over an IMPORTED generator in a cpp body; the `from .sib import gen` relative-import
+home-api key. Tests: `cpp_coroutine_iter_many_callable_param`, `..._mixed_kind_...`, runner 295 pass / the same 8 +
+1 pre-existing failures as at e7bd23c47.
+
+**What remains is not a missing lowering but dynamic Python:** `_walk(root)`/`_glob(...)` iterate whatever an
+arbitrary callable returns (`os.walk`/`glob.iglob`, which do not exist in compiled mode: `can_resolve_module_path('os')`
+is False); `iter_files` compares function VALUES (`get_files in (glob.glob, glob.iglob, glob_tree)`), rebinds a
+parameter to a `lambda *a, **k`, and forwards `*a, **k` through a callable it does not know. Closing them needs
+(a) `os.walk`/`glob.iglob` as runtime or compiled members, (b) an iteration protocol over an unknown returned
+object (list / generator handle / dict / str), (c) function-value equality and star-forwarding through an
+unknown callable. Separately, a PRE-EXISTING link gap found on the way: a compiled (cpp) generator imported through
+a package-relative import by an A3-eligible consumer leaves the producer's C++ unit out of the link
+(repro: `pkg/simple.py` yields from a list param, `pkg/user2.py` iterates it, `main` iterates that; `ld` cannot find
+`_mojogen_simple_gen2_*`) — same on the tree before this round. And a known pre-existing consumer bug: a
+`try/except` around a loop over a generator that RAISES fails to catch once an earlier loop over an empty one of
+the same function returned (setjmp runtime; reproduces with no change of this round's).
+
+## Status 2026-10-30 (later) — the dynamic-value model is the EXISTING per-slot-kind/box model; a kind-mixed list parameter now works end to end, in ordinary functions AND compiled generators
+
+Correction to the Plan below: no new tagged `MojoValue` is needed or wanted. The runtime already has the dynamic
+value model (per-slot kind rows `mojo_list_set_kinds*`, boxes via `mojo_list_get_boxed`/`mojo_box_*`/
+`mojo_repr_boxed`, `_maybe_kinds_vals`/`_boxed_vals`/`_dyn_word_locals`); it was simply never applied to a FLAT
+list parameter whose call sites disagree on the element type (it was a silent miscompile even in ordinary code:
+`show([1,2]); show(["a"])` printed the string's address). **Landed:** `module_gen._param_elem_mixed` (recorded in
+`_record_param_elem`, propagated through `f(xs)` pass-through calls in the existing contract fixpoint); callee
+loops read through `mojo_list_get_boxed` (ordinary `gen_func` seeds `_maybe_kinds_vals`; the cpp generator
+emitter via `_cpp_mixed_list_params`); callers record the string/float kind of a list passed to such a parameter
+(`emit_infra._tag_mixed_list_call_args`, both call-lowering sites); a tuple-yielding generator over such a
+parameter is admitted past the one-C-slot refusal (`cpp_async`, only for params in the mixed set) and its
+consumer marks the unpacked names boxed (`api['mixed_slots']`). Pinned by `gimple_mixed_kind_flat_list_param_loop`
+(test_gimple_runner.py 490/1; the 1 is pre-existing) and `cpp_coroutine_mixed_kind_list_param_tuple_yield`
+(test_gimple_generator_runner.py 293/8; the same 8 fail on the pre-change tree at e7bd23c47).
+
+**What still blocks fsutil, measured:** `iter_many`'s parameter `items` is NOT in the mixed set — its only caller
+passes `process_filenames`' own PUBLIC parameter `filenames`, which no call in the module types, so the kind is
+unknown rather than disagreeing, and the one-slot refusal correctly stays. Closing it needs a decision: either
+(a) every list the compiled code builds records its slot kinds (an allocation per list; today only literals of
+mixed/scalar kinds do), after which an untypable list parameter can be read boxed like a mixed one, or (b) accept
+that an untyped public parameter is int-by-default. Then: the nested generator `chain` (cpp path has no capture
+model), the callable-parameter calls (`_walk`, `_glob`, `onempty`) and `os.walk`/`glob.iglob` as closure members.
+
+## Plan 2026-10-30 — every remaining refusal is the same missing capability: a DYNAMICALLY-TYPED value in the compiled path
+
+Measured by building `iterutil.py` alone (after the cursor fix below): it refuses `chain` (nested generator
+reads enclosing `items`/`peeked`; `cpp_async.py` has no capture model, though the A3 path in
+`emit_calls.py` ~L230 has one) and `iter_many` (`mojo/middle/coro.py::_ambiguous_slot_message`: it yields the
+untyped parameter `items`, whose call sites — `process_filenames(filenames)`, itself a public untyped
+parameter — cannot be typed statically, and a compiled generator has ONE fixed C value slot,
+`_KIND_TO_SLOT_CTYPE`). `fsutil` itself: `_walk(root)`/`_glob(...)`/`onempty(...)` call a callable PARAMETER whose
+return type depends on the caller; `_walk(*a, walk=_files, **k)` forwards through one. The runtime has no
+sound tagged value: `mojo_boxed_is_str` (`fire_runtime.h` ~L641) is a range heuristic, so a boxed slot
+would be a guess, not a type.
+
+Readings (decision needed): (A) add a real tagged value (`MojoValue`: tag+payload; int/bool/float/str/
+list/dict/tuple/callable) used ONLY where inference gives up — generator yield slot, callable-parameter
+return, untyped-parameter forwarding — plus box/unbox at the typed boundary; this is the sound answer and
+closes all five sites (`_walk`, `_glob`, `onempty`, `process`, `_get_reader`) at once. Plan: `fire_runtime.[ch]`
+tag + box/unbox + `mojo_value_call`; `coro.py::_KIND_TO_SLOT_CTYPE` gains kind `'v'` selected where
+`_ambiguous_yielded_params` refuses today; `cpp_core.py` yield/for-target/call lowering reads `'v'`;
+tests: one `cpp_coroutine_value_slot_*` per site in `test_gimple_generator_runner.py`, ending with fsutil
+building and `walk_tree`/`glob_tree` matching CPython on a temp tree. (B) keep refusing and let these
+modules interpret from source (status quo; correct, slow). Independently of A/B, `os.walk`/`glob.iglob`
+must become compileable closure members (`bugs/CODEGEN_generator_function_Lib_os.md`).
+
+## Status 2026-10-30 — `items = iter(items)` on a PARAMETER now gets a cursor; `iterutil.peek_and_iter` no longer refuses
+
+Re-measured (copy `c_common/` to `.tmp/ca/`, `python3 fire.py build -o ../out-fsutil c_common/fsutil.py`):
+the build printed `# ERROR ... iterutil ... next(IdentExpr) (receiver typed MojoList *) in function
+peek_and_iter`, from `_try_bind_iter_cursor` (`emit_stmts.py`) refusing any target already in
+`var_types`, so the rebinding `items = iter(items)` — line 1 of both `peek_and_iter` and `iter_many`
+— never got a cursor and `next(items)` fell to the never-defined `next` extern. **Landed:** an
+already-declared target whose C type equals the argument's (a parameter or earlier plain-container
+local) and that is not already a cursor (`iter(<iterator>)` must not rewind) is now bound to a cursor
+over itself. Pinned by `gimple_iter_rebinds_a_parameter_to_a_cursor` in `test_gimple_runner.py`
+(next, then `for` resuming, 2-arg `next` default; output equals CPython). Runner: 489 pass, 1 fail —
+`gimple_ctor_param_polymorphic_slot_reads_receiver`, which fails identically with this change
+stashed (unrelated; prints pointer bits).
+
+The module-level refusal list is still `_walk_tree, glob_tree, iter_files, process_filenames`, so
+this file does not build yet. `process_filenames`'s tuple `for` target is over `iter_many(...)`, whose
+own yields are `(first, False)` / `(item, True)` tuples and whose `onempty` is a callable parameter;
+that is the remaining next step for it (give a call to a same-closure tuple-yielding generator a
+per-slot tuple `for` target). The other three are unchanged from the entries below.
+
 ## Status 2026-10-26 — the star/kwarg unpack-call capability LANDED; this file's refusal is unchanged, as its own entry predicted
 
 The "new, separate capability" this file's 2026-10-25 entry names as

@@ -113,6 +113,17 @@ def test_bare_zero_division_statement_in_generator():
     assert rc == 0, out
     assert out == '1\n2', repr(out)
 
+def test_bool_true_division_is_float():
+    # A bool operand (`_Bool`) must take the float path too (`True / 2 == 0.5`),
+    # not truncate to 0. See bugs/CODEGEN_int_true_division_truncates.md.
+    src = ('def main():\n'
+           '    t = True\n'
+           '    f = False\n'
+           '    print(t / 2, f / 3)\n')
+    out, rc = run_jit(src)
+    assert rc == 0, out
+    assert out == '0.5 0.0', repr(out)
+
 def test_struct_true_division_builds():
     # A struct operand keeps its own `/` even when the other operand is an int
     # (std/pathlib/path.mojo's `result /= segment`). The Int / Int gate must not
@@ -150,6 +161,7 @@ if __name__ == '__main__':
     test_zero_divisor_raises_in_plain_function()
     test_nonzero_integer_division_unchanged()
     test_int_true_division_is_float()
+    test_bool_true_division_is_float()
     test_struct_true_division_builds()
     test_integer_modulo_floors_toward_divisor_sign()
     test_integer_modulo_floors_in_generator_body()

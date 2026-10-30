@@ -2934,6 +2934,9 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     _pmx = getattr(gen, '_param_nested_mixed', {}).get(node.name, ())
     for _pmx_bare in _pmx:
         gen._nested_mixed_names.add(_as_str(_pmx_bare))
+    _pem = getattr(gen, '_param_elem_mixed', {}).get(node.name, ())
+    for _pem_bare in _pem:
+        gen._maybe_kinds_vals.add(_as_str(_pem_bare))
     _pdv = getattr(gen, '_param_dict_val_types', {}).get(node.name, {})
     for bare in _pdv:
         # '' is the conflicting-call-sites marker (see _record_param_dict_val),
@@ -3939,11 +3942,12 @@ def _abs_module(ref: str, base: str) -> str:
 
 
 def _register_imported_generics(gen, stmts) -> None:
-    """dylib mode: register `from M import gen` where gen is a generic free
-    function (following re-export chains) so its call sites elaborate a
-    concrete CAS-cached instantiation."""
-    if gen.do_imports:
-        return
+    """Register `from M import gen` where gen is a generic free function
+    (following re-export chains) so its call sites elaborate a concrete
+    instantiation. This runs in the inline do_imports=True path too: there a
+    bracketed call `gen[2](x)` to a sibling module's generic otherwise matched
+    no registration and lowered to a zero stub (a silent miscompile; see
+    bugs/CODEGEN_dylib_generic_inline_copies_share_one_symbol.md)."""
     for st in stmts:
         if not (isinstance(st, gimple_ctypes.FromImportStmt) and not getattr(st, 'wildcard', False)):
             continue
@@ -3972,14 +3976,8 @@ def _register_imported_generic_structs(gen, stmts) -> None:
     TYPE ARGUMENT to another generic (_elaborate_generic_call's use of
     _ensure_generic_struct, e.g. `alloc[MoveOnly[Int]]`) can resolve it.
 
-    `MoveOnly` (test_utils.types) is only re-exported through
-    `test_utils/__init__.mojo`, and `test_utils` itself isn't resolvable
-    via imports.py's MOJO_PATH-based search at all (it's a local
-    test-only package, sibling to the test files that import it, not on
-    any search path) — _find_generic_source's _parsed_import call falls
-    back to _resolve_test_relative_module for that case."""
-    if gen.do_imports:
-        return
+    Runs in the inline do_imports=True path too (same guard removal as
+    _register_imported_generics, bugs/CODEGEN_dylib_generic_inline_copies_share_one_symbol.md)."""
     for st in stmts:
         if not (isinstance(st, gimple_ctypes.FromImportStmt) and not getattr(st, 'wildcard', False)):
             continue
