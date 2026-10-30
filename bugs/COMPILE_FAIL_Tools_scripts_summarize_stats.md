@@ -4,7 +4,108 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/scripts/summarize_stats.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (2026-10-29, worker bug-compile-fail-tools-scripts-summarize — list-literal call argument LANDED; real file still NOT verified)
+## Status (2026-10-29, worker bug-compile-fail-tools-scripts-summarize, round 3 — the two shapes named as next step are MEASURED FIXED; the real blocker is the callable VALUE model; planning guide below)
+
+Supersedes the "NOT DONE (next step)" paragraphs further down: the tuple-target
+loop and the list-literal ctor argument both build now (see the list-literal
+entry below), and the factory call itself is no longer the refusal.
+
+### Measurement (this round, light worker, one module each, `MOJO_DEBUG=1 python3 fire.py build`)
+
+Probe shape: `outer()` with a sibling factory `calc_h(key, den)` returning a
+nested `calc`, called from `iter_tables` (a generator) as
+`yield Section("sec", [Table("t", calc_h(name + base, den), 0)])`, where only
+the BODY of `calc` varies:
+
+| `calc` body | result |
+|---|---|
+| `return hist + key` (int in, int out) | compiles (no refusal) |
+| `for x in range(hist): d += x` | compiles |
+| `while s < hist: s += 1` | compiles |
+| `s = f"<= {hist:,d}"; return len(s)` | compiles |
+| `r = [1, 2, 3]; return len(r[hist:key])` | compiles |
+| `return f"<= {hist:,d}"` (str return) | REFUSED: `unresolved callee 'calc_h(...)'` |
+| `r = [1, 2, 3]; return r[hist:key]` (list return) | REFUSED: same |
+
+So the f-string, the `while`, the slice and the `for` are all fine. The refusal
+is the RETURN TYPE of the closure. The real file's `calc` also takes a non-int
+parameter (`calc(stats: Stats) -> Rows`), which the same gate refuses.
+
+Measured on the real file only by reading it, not by a completed build (a whole
+module build is the integrator's job): `RowCalculator: TypeAlias =
+Callable[["Stats"], Rows]` (summarize_stats.py:32), `Rows: TypeAlias = list[tuple]`
+(line 30). The real `calc_histogram_table` (line 1224) therefore has the
+same two gates the probe hits.
+
+### Why (code path)
+
+- `mojo/backend_gimple/cpp_async.py:1568`: `if len(params_C) > 1 or any(ct !=
+  'int64_t' for _, ct in params_C): return False` — a closure parameter must be
+  one int64.
+- `cpp_async.py:1592`: `if _helper_return_ctype(C.body, hC) != 'int64_t': return
+  False` — a closure must return an int64.
+- `cpp_async.py:1602`: `callable_ct = (_CPP_CALLABLE_CTYPE_1ARG if params_C else
+  _CPP_CALLABLE_CTYPE)`, and `mojo/middle/types.py:2445-2446`:
+  `_CPP_CALLABLE_CTYPE = 'std::function<int64_t()>'`,
+  `_CPP_CALLABLE_CTYPE_1ARG = 'std::function<int64_t(int64_t)>'`. Every callable
+  VALUE in the coroutine path has this one signature. There is no slot for a
+  `Callable[[Stats], list]`.
+- The consumer side is also typed-blind: `calc_rows: RowCalculator` is called
+  as `calc_rows(stats)` in a non-generator body, and nothing carries
+  `Rows`/`Stats` from the alias to that call's result. Boxing the return as
+  int64 pointer bits (the convention struct pointers already use in lists)
+  would make the bits, but the caller would not know to unbox them.
+
+### Decision (taken here, not asked)
+
+Typed callable values, scoped to what the real file needs: a callable value
+carries its signature (`(param ctypes) -> return ctype`) in the type system, and
+its slot is `std::function<R(P...)>` for that signature, not the fixed int64
+one. Params and returns that are pointer-shaped (struct, list, dict, str) cross
+the boundary as their own C pointer type. This is a type-model change and
+touches `types.py`, `cpp_async.py`, `cpp_core.py`'s `mojo_fnptr_call_N`
+dispatch, and the alias resolution for `Callable[[...], ...]`. It is feature
+sized and is NOT attempted in this round, because the call-site dispatch and the
+alias resolution each need a measurement first (below).
+
+### Implementation plan (for the next round, exact places)
+
+1. Measure, don't assume: how `Callable[[A], B]` in an annotation reaches the
+   coroutine emitter today. Probe: a module-level `def use(f: Callable[[int], int]) -> int`
+   and a generator calling it; and the same with `-> str`. Record where the
+   alias is erased (`types.py` / `gimple_exprtypes.py`) and what ctype a
+   `Callable` parameter gets.
+2. `types.py`: a `callable_ctype(params, ret)` helper returning
+   `std::function<R(P...)>`, keeping `_CPP_CALLABLE_CTYPE` and
+   `_CPP_CALLABLE_CTYPE_1ARG` as the int64 special case so existing callers are
+   unchanged (no duplicate implementation: the two constants become calls to the
+   one helper).
+3. `cpp_async.py:_try_compile_closure_factory`: drop the two `int64_t` gates
+   (lines 1568, 1592) for params/returns that are pointer-shaped; build
+   `callable_ct` from the closure's own signature instead of lines 1602-1603.
+   Keep the `nonlocal` refusal (line ~1573) and the captures check.
+4. `cpp_core.py` call site (around line 4346 / 4969): a call to a typed callable
+   local uses that signature's dispatch (a typed `std::function` call), not
+   `mojo_fnptr_call_N` with int64 args; `mojo_fnptr_call_N` remains the int64 path.
+5. `test_regress_codegen_generator_closure_factory.py`: the new pin
+   `test_closure_factory_with_non_int64_return_still_refused` (added this round)
+   flips to a compile check when step 3 lands; the `nonlocal` negative stays.
+
+### Tests that prove it (for the next round)
+
+- Flip the pin above into "compiles", and add a value test: a `str`-returning
+  factory called through the generator, printing `<= 5` and matching CPython.
+- The real file: `MOJO_DEBUG=1 python3 fire.py build` on
+  `Tools/scripts/summarize_stats.py` is the acceptance test, and it is a
+  whole-module build, so it is the integrator's to run (not a light worker's).
+
+### NOT claimed
+
+- That the real `summarize_stats.py` compiles after the typed-callable step. It
+  has further shapes (`Section___init__` typing, the `Stats` struct param, the
+  `Rows` list of tuples) that are unmeasured on the real file.
+
+## Status (earlier round) (2026-10-29, worker bug-compile-fail-tools-scripts-summarize — list-literal call argument LANDED; real file still NOT verified)
 
 LANDED (`mojo/backend_gimple/cpp_core.py`):
 
