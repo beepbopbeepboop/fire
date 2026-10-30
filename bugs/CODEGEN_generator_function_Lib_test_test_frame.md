@@ -1,5 +1,31 @@
 # CODEGEN_generator_function: Lib/test/test_frame.py
 
+## Status (2026-10-29, t3 question answered — the module-level/class-method split is two lowerings, one silent; the silent half now refuses)
+
+Question 2 below is answered by measurement. The module-level `async def t3`
+does NOT go through `cpp_async`'s return-type check at all: the stack-switch
+lowering in `mojo/middle/coro.py` (`_lower_one_async`) owns async units and
+hard-codes their result slot as `int64_t`. For the frame shape itself the
+module-level output is a runtime raise, not a silent value: `sys._getframe()`
+lowers to `mojo_module_not_compiled("sys", "_getframe")`, which raises
+`NotImplementedError` before the `return` is reached. So `t3` as written is
+honest at module level and refused at class level, and the class-level
+refusal is not over-broad for this shape.
+
+What WAS silently wrong, and is now refused (`_async_return_refusal` in
+`mojo/middle/coro.py`): an async function whose `return` values disagree on
+kind (`return 1` / `return "s"`) — both were written into the one int64 slot,
+and the string awaited as its pointer printed as a number. Measured, pre-fix:
+`print(await f(0))` printed `4367193456`. A float `return` (`return 1.5`) was
+awaited as `1`; it is refused too, since the slot cannot carry a double.
+Tests: `test_async_void_return.py` (`test_async_mixed_return_kinds_refused`,
+`test_async_float_return_refused`, `test_async_same_kind_returns_still_compile`).
+
+Still open for THIS file: `gen` and `t3` as written still refuse/raise as
+described in the planning entry below. The typed async result slot that would
+make a float or string async return CORRECT (not merely refused) is a separate
+defect: `bugs/CODEGEN_async_result_slot_is_int64_only.md`.
+
 ## Status (2026-10-29, planning round — `gen` and `t3` are both frame-introspection features; pinned, not fixed)
 
 Measured on this branch, by compiling the real file through
