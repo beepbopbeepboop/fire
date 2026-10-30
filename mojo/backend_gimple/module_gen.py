@@ -3040,6 +3040,16 @@ def _gmi_hoist_nested_structs(self, stmts: list) -> list:
     if _nested_names is None:
         _nested_names = {}
         self._nested_struct_names = _nested_names
+    # The FINAL name of every class that was written inside a function body.
+    # A class-level attribute of one of these is per EXECUTION of its `class`
+    # statement (see bugs/CODEGEN_nested_class_attr_reads_enclosing_local_
+    # silently_zero.md), whereas a module-scope class has one value for the
+    # whole program. Recorded here, where the set is known, rather than
+    # inferred later from `_class_attrs`, which both kinds share.
+    _fn_scoped: set = getattr(self, '_fn_scoped_structs', None)
+    if _fn_scoped is None:
+        _fn_scoped = set()
+        self._fn_scoped_structs = _fn_scoped
     out = list(stmts)
     renamed_from: list = []
     renamed_to: list = []
@@ -3051,6 +3061,7 @@ def _gmi_hoist_nested_structs(self, stmts: list) -> list:
             _taken.add(_h_bare)
             renamed_from.append(_h_bare)
             renamed_to.append(_h_bare)
+            _fn_scoped.add(_h_bare)
             out.append(_h_node)
             continue
         _h_base = _h_bare + '__' + _h_encl
@@ -3062,6 +3073,7 @@ def _gmi_hoist_nested_structs(self, stmts: list) -> list:
         _taken.add(_h_new)
         renamed_from.append(_h_bare)
         renamed_to.append(_h_new)
+        _fn_scoped.add(_h_new)
         _h_node.name = _h_new
         out.append(_h_node)
     # The alias keys need the FINAL struct names, because a method's enclosing

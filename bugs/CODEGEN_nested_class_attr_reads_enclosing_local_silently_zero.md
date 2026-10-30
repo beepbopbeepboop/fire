@@ -382,3 +382,77 @@ Tests, each landed with its step and green when it lands:
 Generator path unchanged (`coro.py` `_nested_class_nonliteral_attr` refuses).
 The residual (a class object that escapes its function and is used in a
 later call) is still open, as round 3 wrote.
+
+## Status (2026-10-29, round 5: fact 1 answered, step (b) landed)
+
+Fact 1 (round 4) answered by measurement. `gimple_codegen.compile_to_gimple`
+on the four-call program (`make(5)`, `make(7)`, `make(9).__version__`, then
+`a.__version__`) emits `int64_t _classattr_Tag____version__;` as a FILE-SCOPE
+global, read and written as a plain C name (`_classattr_Tag____version__ =
+version;` in `make`, `_t5 = _classattr_Tag____version__;` in `main`). The
+text contains no `_toplev` at all, so no gname is ever a struct member in this
+shape. The macro shortcut is therefore not blocked by fact 1. It is still
+rejected: a `#define` in generated text is a hidden substitution no reader of
+the emitter would find, so the design below uses explicit loads.
+
+Landed (step (b), infrastructure, no behaviour change):
+
+- `mojo/backend_gimple/module_gen.py` `_gmi_hoist_nested_structs`: records the
+  FINAL name of every class written inside a function body in
+  `self._fn_scoped_structs` (set). Checked: the four-call program gives
+  `['Tag']`; a module with only a top-level class gives `[]`. The two
+  existing regression tests (`5\n7\n`, `3\n`) still pass.
+
+Step (c) grounding, from reading the GIMPLE emitter (not yet implemented):
+
+- Typed pointer deref already has a pattern: `gen._new_val(ctype, f"*{ptr}")`
+  with `ptr` an SSA temp (`emit_exprs.py` ~498, ~5811; `emit_calls.py`
+  ~1469 emits `{val} = *{ptr};` directly). A GLOBAL pointer must first be
+  loaded into a temp, as `emit_funcs.py` ~405-417 does for a boxed global
+  (`raw_ptr = gen._new_val(...)`, `vp = gen._new_val('void *', f'(void *){raw_ptr}')`).
+  So a read of a block-backed attribute is two statements: load the cell
+  pointer into a temp, then `*temp`. Not a bare `*global` in text.
+- Storage choice: ONE HEAP CELL PER ATTRIBUTE, not one struct per class. Each
+  attribute keeps its own C type (`gen._global_var_types[gname]`), so no
+  attribute's type has to be reproduced in a combined struct declaration.
+  Per fn-scoped class C and attribute A with a value:
+  - a current-cell global `_cattrcur_C__A`, `void *`, set by the class
+    statement to a fresh heap cell (`calloc`, freed never: same class as
+    `CODEGEN_closure_env_and_boxed_local_never_freed.md`);
+  - an instance field `void * _cattr_A` in `struct_field_types[C]`, seeded at
+    `_alloc_C` from the current cell, so an instance keeps the cell of the
+    execution that built it;
+  - a class-name read or write uses the current cell; an instance read goes
+    through `obj->_cattr_A`.
+- Why this, and not the round-4 block struct: the block struct needed every
+  attribute's C type at one declaration site; the per-attribute cell reuses
+  `_global_var_types` for every type question.
+- Unknown to measure in step (c): how a `void *` global is declared. The
+  boxing rules at `emit_funcs.py` ~405 and the global emitter decide whether a
+  `void *` global is emitted as `void *` or boxed as `int64_t`. Measure with
+  `compile_to_gimple` on the four-call program after the emitter change, and
+  check that the `_cattrcur_` declaration matches its load cast.
+
+Still to do, in order: (c) cell globals + the set of fn-scoped valued attrs
+(registration at `module_gen.py` ~5876-5926, and skip them in
+`_mojo_classattr_init` and the alloc seed `attr_inits` ~15113-15125); (d)
+`_gen_stmt_StructDef` (`emit_stmts.py` ~3138) calloc + store into the cell;
+(e) `_alloc_C` seed; (f) instance read (`emit_exprs.py` ~2602) and class-name
+reads/writes (`emit_exprs.py` ~1474, ~1824; `emit_methods.py`
+`_resolve_class_attr_write_target` ~183-240; `emit_stmts.py` ~1768, ~2439).
+The four-call test (program above, expected `5\n7\n9\n5\n`) is re-added with
+(f). The cpp readers (`cpp_core.py` ~660, ~1983, ~3152, ~5170; `cpp_async.py`
+~875) stay on the global and are reached only by generator/async bodies, which
+`coro.py` `_nested_class_nonliteral_attr` refuses for this shape.
+
+Residuals, written down, not fixed:
+
+- A class-name read inside the function AFTER a nested call to the same
+  function reads the inner execution's cell (the current-cell global is
+  shared). Closing it needs the cell pointer kept in a frame local at the
+  class statement. Recursion through the same function is the trigger.
+- A class object that escapes its function (`return Tag`) and is used in a
+  later call reads that later call's cell. Closing it needs the class object
+  as a runtime value.
+- Container defaults (`var xs: List[Int]`, no initializer) stay per-class
+  globals, seeded by the allocator. They are not per-execution.
