@@ -5,14 +5,14 @@ none should be filed as one. It exists because the goal — *one runtime, two co
 generators, one proof* — spans `formal/`, `mojo/`, `runtime/` and the proof
 library, and because the honest state of that goal is currently spread across five
 bug documents that each know one piece of it. Per-phase evidence belongs in that
-phase's commit and, where a phase produces a standing fact, in the `bugs/formal/FORMAL_*`
+phase's commit and, where a phase produces a standing fact, in the `bugs/FORMAL_*`
 documents this one defers to. What lives *here* is the thesis, the measured current
 state, the decisions taken, and the order.
 
 Read with: `doc/ABI.md` (the boundary contract this must not contradict),
-`bugs/formal/FORMAL_known_limits.md` (the audited codegen residue),
-`bugs/formal/FORMAL_arm64_known_proof_gaps.md` (the proof census),
-`bugs/mid/CODEGEN_bootstrap_resource_blowup.md` (the upstream cause of the
+`bugs/FORMAL_known_limits.md` (the audited codegen residue),
+`bugs/FORMAL_arm64_known_proof_gaps.md` (the proof census),
+`bugs/CODEGEN_bootstrap_resource_blowup.md` (the upstream cause of the
 self-host divergence), and `bugs/OPEN_WORK.md` A1 (the x86-64 `call_rel32`,
 which [3] needs). **§11 is the operating contract** — the five agents, their
 exclusive write sets, the isolation rules, the interface-request mechanism and
@@ -32,7 +32,7 @@ number that disagrees is stale, not wrong; the name is the claim.
 ## 1. The thesis
 
 `fire.py` has two machine-code backends. The gimple backend emits C, links
-`runtime/fire_runtime.c` (645 KB) plus the other runtime translation units, and
+`runtime/fire_runtime.c` (589 KB) plus the other runtime translation units, and
 hands the result to a system linker. The formal backend emits Mach-O or ELF
 itself, links **libSystem, and — since phase 2 landed — the per-architecture
 runtime dylib when and only when the image names something in it**, and carries
@@ -92,12 +92,12 @@ not just `fire_runtime.h`:
 
 | | count | note |
 |---|---|---|
-| entry points across **11** headers | **846** | `fire_runtime.h` 740, `fire_sqlite3.h` 22, `fire_ncurses.h` 18, `fire_python.h` 15, `fire_async_runtime.h` 16, `fire_ssl.h` 13, `fire_coro.h` 7, `fire_metal.h` 6, `fire_zlib.h` 6, `fire_coro_ctx.h` 3; `fire_wd.h` scans to **zero** |
-| **word in, word out** | **389** | every parameter and the return value is one 64-bit word |
-| not word-shaped | **457** | a box crosses the boundary — in an argument, in the return, or both |
+| entry points across **11** headers | **719** | `fire_runtime.h` 616, `fire_sqlite3.h` 22, `fire_ncurses.h` 18, `fire_python.h` 15, `fire_async_runtime.h` 13, `fire_ssl.h` 13, `fire_coro.h` 7, `fire_metal.h` 6, `fire_zlib.h` 6, `fire_coro_ctx.h` 3; `fire_wd.h` scans to **zero** |
+| **word in, word out** | **297** | every parameter and the return value is one 64-bit word |
+| not word-shaped | **422** | a box crosses the boundary — in an argument, in the return, or both |
 
-So **389 of 846 (44.1%)** is the reachable-surface ceiling. The previous
-revision of this section published 219 of 540 (40.6%), and before that 389 of
+So **297 of 719 (40.8%)** is the reachable-surface ceiling. The previous
+revision of this section published 219 of 540 (40.6%), and before that 352 of
 455 (77%) — the word *share* has been stable near 40% across all three
 censuses, and it is the denominators that moved. Two headers have been added
 since (`fire_coro.h`, `fire_metal.h`), `fire_runtime.h` alone grew by 115
@@ -111,7 +111,7 @@ this paragraph used to carry, below.
 
 **The word/box split is over parameters AND return, and never was only the
 return.** The old table split by return type alone, which is why it read
-389/101; `mojo_list_get_int(MojoList *, int64_t) -> int64_t` returns a single
+352/101; `mojo_list_get_int(MojoList *, int64_t) -> int64_t` returns a single
 word and is in neither column, because the box is in the *parameter*. Phase 2's
 table filters both, and `runtime_abi()`'s per-entry `word` flag is that filter —
 `word: True` means every type crossing the boundary is one word, so an entry
@@ -265,7 +265,7 @@ bounded: arm64 against a scratch region (`_SCRATCH = ARM64_CONTAINER_BUDGET =
 131072`, declared in `formal/model.py` and read by
 `formal/arm64_codegen.py`; over-capacity raises in `_blob_cap`'s callers) and
 x86-64 against `_BLOB_BYTES = X86_64_CONTAINER_BUDGET = 16384` the same way.
-So the **457** non-word entry points of §2.2 are not merely unwired — they have
+So the **422** non-word entry points of §2.2 are not merely unwired — they have
 no representation.
 
 ### 3.3 The gimple premise — ESTABLISHED by phase 0, with one latent failure left
@@ -418,14 +418,14 @@ true.
 
 This is stated separately because it is the load-bearing consequence of decision 3.
 
-Under (c) alone, the formal target's containers stay frame blobs and the 457
+Under (c) alone, the formal target's containers stay frame blobs and the 422
 box-crossing entry points of §2.2 stay gimple-only, permanently. That is a real
 ceiling, and it is why (c) cannot be the destination.
 
 A slab allocator removes the ceiling. Once the formal target has a *proved* bump
 allocator, its `MojoList` can be a real pointer into a region rather than a stack
 blob; `doc/ABI.md`'s `List → MojoList *` becomes literally true on both backends;
-and the 426 become callable **incrementally, one entry point at a time, each with
+and the 422 become callable **incrementally, one entry point at a time, each with
 its own proof** — rather than in one change to the value model that would disturb
 a proof library which is currently **hole-free**: zero `sorry`, zero `axiom` and
 zero vacuous declarations across all five `lib/` modules, measured by
@@ -524,14 +524,14 @@ refused, and the refusal now names the *type* mismatch rather than a prefix.
 
 | | arm64 | x86_64 |
 |---|---|---|
-| word-shaped entry points (`runtime_abi`) | 389 | 389 |
+| word-shaped entry points (`runtime_abi`) | 297 | 297 |
 | …of which the runtime dylib actually **exports** | 241 | 241 |
 | …reachable with no heap handle the formal path cannot obtain | **201** | **201** |
 
 So the honest statement of the surface is **201 word-shaped calls are callable
 from a formal image today**, not the "0" this document published when the phase
-was written, and not the 219 (now 389) of §2.2. The two gaps between the
-389 of the row above (the 2026-10-23 census, below, measured 284) and 201 are
+was written, and not the 219 (now 297) of §2.2. The two gaps between the
+297 of the row above (the 2026-10-23 census, below, measured 284) and 201 are
 both deliberate and both named:
 
 - **40 of the 241** the library exports take a `void *` parameter the
@@ -752,7 +752,7 @@ is how a wrong name becomes a wrong conclusion.
 | 6 | ~~`formal/arm64_proof_gen.py::_gen_extern_test`'s `extern_<sym>_step`~~ | **CLOSED.** Was: every extern call step, as `True := by trivial`. Now a real `arm64_step` equality discharged by the file's own per-instruction step lemma. **What is still trusted is the premise it cannot remove**: `…_post_extern_given_callee_returns` continues from `{pre with pc := bl+4}` because the callee is outside the image — a NAMED hypothesis, which is phase 3's remaining item rather than a hole |
 | 7 | `formal/arm64_proof_gen.py`'s `CFG_LEAF_SITES` | every CFG leaf that admits — **fifteen named sites**, each stamping its name into the generated Lean: the eight `all_goals (first \| done \| sorry)` leaves of the walk, the five `for i in range(…)` obligations, and the two loop-contract closers. Owned by `bugs/CODEGEN_arm64_cmp_flags_and_loop_signedness.md`. Named rather than counted by line number because this row and the trust audit's table had already disagreed about how many there were (seven here, eight there), and `cfg_leaf_census` / `no_admission_fallback` turn "which of them admits" into a measurement |
 | 8 | FORMAL.md §7a | **the ADMITTED HOST CONTRACTS**: one `sorry` per `@admitted(...)` in a `formal/hostmods/` module, counted by the same census as every other hole, named per file by a `trust:` line, and classified by `tools/formal_sweep.py` as `built-with-admitted-contracts`. 19 of them across `concurrent.futures`, `ctypes`, `subprocess` and `threading`. `fcntl` admits nothing and is not among them; the figure was 15 and the list did name `fcntl`, until the audit of 2026-10-04 found both stale. This is the FIRST row here that is about the HOST rather than about this compiler's own code: it is a claim about a second process, a thread and a dynamic loader, declared in the Mojo source and checked for scope AND checked for TRUTH — every contract is probed against CPython or the OS, and fifteen of the nineteen were found asserting something the host does not do. The policy is §7a; the per-contract assumptions are in each module's own `@admitted` text, and `test_formal_admitted.py`'s `truth` group is the probe per contract that corrected them — `PRE_AUDIT_TEXT` is the text the audit found false and `test_the_truth_probes_reject_the_pre_audit_text` puts every one of those sentences back through its own probe, so a probe that has stopped complaining is the failure that row asserts on. The audit's own doc is deleted with the corrections it made |
-| 10 | `lib/ProofLib.lean`, `lib/Contracts.lean`, `lib/X86.lean`, `lib/IEEE754.lean`, `lib/Refine.lean`, `lib/work.lean`, `lib/Peephole.lean` | `native_decide`/`bv_decide` sites, whose proofs reach a GENERATED AXIOM rather than the kernel — the largest admitted assumption in the model, and the one §7's preamble used to leave out of the inventory entirely. Counted as of 2026-10-06: total **1683**, replaced **67**, remaining **1616** (9 of them with `lib/Peephole.lean`, the peephole rules, added later the same day). **The total is a LEDGER, not a running figure, and that is the point**: 751 sites when the pay-down started, **63 replaced** on 2026-10-03, **67 replaced** with the four closed-proposition `bv_decide` lemmas that followed on 2026-10-04, and **856 that ARRIVED** — 19 with `lib/IEEE754.lean` (the binary64 arithmetic theorems), 4 `native_decide` in `lib/X86.lean`, and **846 with arm64's twelve narrower/unscaled memory forms and its two flag-setting compares** (`work/formal28-2`, 2026-10-05), each new `arm64_step` arm carrying a `work_step_*` lemma proved by `bv_decide` over a quantified word. So 1616 sites have been accounted for, 67 of them replaced and therefore no longer in the source, and the identity `total - replaced == remaining` holds against the 1549 the census actually measures, with the arrivals visible as the total RISING — which is the only way a pay-down ledger can record new debt instead of silently absorbing it. **The pay-down moved in nobody's favour in this window**: `NATIVE_DECIDE_REPLACED` is still 67 and `REPLACEABLE_THEOREMS` is still 0, and the 846 are the right tool for the shape they prove — `bv_decide` over a quantified word is not something `decide` can take. The 63 were CLOSED propositions over literals (`¬ (0xd65f03c0 &&& 0xffe00000 = 0x2a00fa00)`, `(1 : UInt64).toNat = 1`), which `decide` discharges in microseconds and the KERNEL checks, and the **4** more that went on 2026-10-04 (`work/formal29-3`) were the same shape (`@[simp] theorem x86_mask_{one,two,four,eight}` — `x86_mask 1 = 0xff` and its three siblings, four lines at `lib/X86.lean:503..506`); what remains is 1518 `bv_decide` over a quantified word in `ProofLib`, 3 more in `X86`, 19 in `IEEE754`, 9 in `Peephole` and none in `Contracts`/`Refine`/`work` — the census's per-module `native_decide`/`bv_decide` figures together, of which 22 `native_decide` evaluate the model at a ground value (`Float.ofBits` arithmetic, `runExport … = none`, `InImage …`). `NATIVE_DECIDE_ALLOWED` in `test_formal_admitted.py` names all 22 of those by declaration, so a `native_decide` added anywhere else fails by name rather than as a module that grew, and the one-site `native_decide` work list `REPLACEABLE_THEOREMS` is at **0**. The plan and the per-shape timings are `test_formal_admitted.py`'s `REPLACEABLE_THEOREMS` / `NATIVE_DECIDE_ALLOWED` / `AXIOM_CLOSURE` and `test_formal_axioms.py`'s per-declaration arithmetic, all pinned in both directions; what they establish is that the remaining sites are the shape `decide` cannot take. **The site census is attributed PER THEOREM and separately, the CLOSURE census (`AXIOM_CLOSURE`) asks Lean what a proof term actually reaches: of `lib/`'s 612 askable declarations, 82 rest on one of these axioms and 516 are kernel-checked** (`formal/admitted.py::theorem_axiom_census`, 6.9 s over all EIGHT modules through `formal/lean.py::run_lean`, re-measured 2026-10-05 on the tree carrying `lib/Peephole.lean` and `lib/Specs.lean`: the +45 asked and +15 reaching are 14 declarations and 14 sites with arm64's step arms, 12/1 with the peephole rules and 11 more specifications, and `Specs`'s row moved 55 to 66 with `reaches` still 0 — which is the shape that says the arrivals are specifications rather than new trusted evaluation). Those 67 were published as 53 of 375 until 2026-10-04, and BOTH instruments were wrong: `AXIOM_SITE_RE`'s declaration group was `[^.]+`, so a namespaced declaration's axiom read as "not one of ours" (`IEEE754` measured `reaches 0 / text_only 19`, the opposite of the truth), and `library_theorems` carried its own declaration-head pattern with no `@[...]` prefix, so 98 attributed declarations were never asked about and were filed as `clean`. One declaration is unanswered by design: `ProofLib.ifUpdate_congr`, the `private theorem` at `lib/ProofLib.lean:7364`, whose name Lean mangles — and it carries no site. And the axiom is PER USE — `t32s_t8s._native.bv_decide.ax_1_5`, named after the declaration that used it — so a census that grepped for one axiom name would call a library that reaches an axiom at every site clean |
+| 10 | `lib/ProofLib.lean`, `lib/Contracts.lean`, `lib/X86.lean`, `lib/IEEE754.lean`, `lib/Refine.lean`, `lib/work.lean`, `lib/Peephole.lean` | `native_decide`/`bv_decide` sites, whose proofs reach a GENERATED AXIOM rather than the kernel — the largest admitted assumption in the model, and the one §7's preamble used to leave out of the inventory entirely. Counted as of 2026-10-06: total **1683**, replaced **67**, remaining **1616** (9 of them with `lib/Peephole.lean`, the peephole rules, added later the same day). **The total is a LEDGER, not a running figure, and that is the point**: 751 sites when the pay-down started, **63 replaced** on 2026-10-03, **67 replaced** with the four closed-proposition `bv_decide` lemmas that followed on 2026-10-04, and **856 that ARRIVED** — 19 with `lib/IEEE754.lean` (the binary64 arithmetic theorems), 4 `native_decide` in `lib/X86.lean`, and **833 with arm64's twelve narrower/unscaled memory forms and its two flag-setting compares** (`work/formal28-2`, 2026-10-05), each new `arm64_step` arm carrying a `work_step_*` lemma proved by `bv_decide` over a quantified word. So 1616 sites have been accounted for, 67 of them replaced and therefore no longer in the source, and the identity `total - replaced == remaining` holds against the 1549 the census actually measures, with the arrivals visible as the total RISING — which is the only way a pay-down ledger can record new debt instead of silently absorbing it. **The pay-down moved in nobody's favour in this window**: `NATIVE_DECIDE_REPLACED` is still 67 and `REPLACEABLE_THEOREMS` is still 0, and the 833 are the right tool for the shape they prove — `bv_decide` over a quantified word is not something `decide` can take. The 63 were CLOSED propositions over literals (`¬ (0xd65f03c0 &&& 0xffe00000 = 0x2a00fa00)`, `(1 : UInt64).toNat = 1`), which `decide` discharges in microseconds and the KERNEL checks, and the **4** more that went on 2026-10-04 (`work/formal29-3`) were the same shape (`@[simp] theorem x86_mask_{one,two,four,eight}` — `x86_mask 1 = 0xff` and its three siblings, four lines at `lib/X86.lean:503..506`); what remains is 1518 `bv_decide` over a quantified word in `ProofLib`, 3 more in `X86`, 19 in `IEEE754`, 9 in `Peephole` and none in `Contracts`/`Refine`/`work` — the census's per-module `native_decide`/`bv_decide` figures together, of which 22 `native_decide` evaluate the model at a ground value (`Float.ofBits` arithmetic, `runExport … = none`, `InImage …`). `NATIVE_DECIDE_ALLOWED` in `test_formal_admitted.py` names all 22 of those by declaration, so a `native_decide` added anywhere else fails by name rather than as a module that grew, and the one-site `native_decide` work list `REPLACEABLE_THEOREMS` is at **0**. The plan and the per-shape timings are `test_formal_admitted.py`'s `REPLACEABLE_THEOREMS` / `NATIVE_DECIDE_ALLOWED` / `AXIOM_CLOSURE` and `test_formal_axioms.py`'s per-declaration arithmetic, all pinned in both directions; what they establish is that the remaining sites are the shape `decide` cannot take. **The site census is attributed PER THEOREM and separately, the CLOSURE census (`AXIOM_CLOSURE`) asks Lean what a proof term actually reaches: of `lib/`'s 612 askable declarations, 82 rest on one of these axioms and 516 are kernel-checked** (`formal/admitted.py::theorem_axiom_census`, 6.9 s over all EIGHT modules through `formal/lean.py::run_lean`, re-measured 2026-10-05 on the tree carrying `lib/Peephole.lean` and `lib/Specs.lean`: the +45 asked and +15 reaching are 14 declarations and 14 sites with arm64's step arms, 12/1 with the peephole rules and 11 more specifications, and `Specs`'s row moved 55 to 66 with `reaches` still 0 — which is the shape that says the arrivals are specifications rather than new trusted evaluation). Those 67 were published as 53 of 375 until 2026-10-04, and BOTH instruments were wrong: `AXIOM_SITE_RE`'s declaration group was `[^.]+`, so a namespaced declaration's axiom read as "not one of ours" (`IEEE754` measured `reaches 0 / text_only 19`, the opposite of the truth), and `library_theorems` carried its own declaration-head pattern with no `@[...]` prefix, so 98 attributed declarations were never asked about and were filed as `clean`. One declaration is unanswered by design: `ProofLib.ifUpdate_congr`, the `private theorem` at `lib/ProofLib.lean:7364`, whose name Lean mangles — and it carries no site. And the axiom is PER USE — `t32s_t8s._native.bv_decide.ax_1_5`, named after the declaration that used it — so a census that grepped for one axiom name would call a library that reaches an axiom at every site clean |
 | 9 | ~~`lib/ProofLib.lean:895`~~ | **REMOVED 2026-09-28.** This row said "All per-node lemmas currently admit". Read, they do not: all seven `evalExpr_*` lemmas are `rfl`, which is the whole content of each statement, and `lib/ProofLib.lean` contains no `sorry` or `admit` at all. The section comment above them said the same false thing and said so in the present tense; both are corrected. The trust that remains is row 4 — `rfl` proves the unfolding of `evalExpr`, not that `evalExpr` is what the machine runs. |
 
 **The two holes in the mechanism that checks this** were both closed in the
@@ -1007,7 +1007,7 @@ Stated so no reader infers otherwise.
   honest answer.
 - **The host-import problem is a repository problem.** Phases 0-6 move repository
   files; the stdlib scope is untouched by them, and its residue is the MLIR /
-  generics / one-word families in `bugs/formal/FORMAL_known_limits.md`.
+  generics / one-word families in `bugs/FORMAL_known_limits.md`.
 - **Stage 5 monomorphization is still the largest lever on the sweep headline**
   and it is **not** in this programme. It is phase 7, and it is weeks, not an
   afternoon. `formal/monomorph.py` now does per-EDGE monomorphization for module
@@ -1021,7 +1021,7 @@ Stated so no reader infers otherwise.
   several hundred files, and `CLAUDE.md`'s own rule is the reason they are gone:
   a tally is not a property of the tree, and a file that states one goes stale
   underneath a change made in none of the files that state it. The current
-  census lives in `bugs/formal/FORMAL_sweep_work_map.md` §1, which supersedes every
+  census lives in `bugs/FORMAL_sweep_work_map.md` §1, which supersedes every
   per-round map this tree grew — and a fresh one is
   `python3 tools/formal_sweep.py`. Read the headline there.
 
@@ -1267,7 +1267,7 @@ site. **Trap:** proving it for a concrete `n` and generalising by hand.
 **[3] per-export contracts.** Phase 4 proper. `export_result_spec` is an
 obligation and `dylib_export_contract_of_spec` is proved, so a caller's theorem
 now consumes a contract instead of asserting one — but no real *spec* exists
-yet for any actual export. **389 of 846** entry points are word-in/word-out
+yet for any actual export. **297 of 719** entry points are word-in/word-out
 (§2.2) and **201** of them are callable from a formal image today (§6 phase 2),
 so there is a callable surface with no contracts on it, which is the state phase
 4 exists to end. Start with the
@@ -1280,7 +1280,7 @@ it typechecks.
 
 **[4] the frame-address design.** The single biggest coverage lever left, and
 not a patch. 45% of every remaining codegen finding is one design defect in five
-costumes (`bugs/formal/FORMAL_wide_receiver_by_reference.md`): the receiver of a
+costumes (`bugs/FORMAL_wide_receiver_by_reference.md`): the receiver of a
 multi-field struct is the address of a frame that dies when the function
 returns, so returning it is a use-after-free and passing it where a value is
 wanted hands the callee a pointer. Measured with the check removed, the same
@@ -1314,7 +1314,7 @@ vacuous theorems.
 `tools/formal_sweep.py`, `fire_compiler.py`, `build_config.py`,
 `build_stdlib_dylib.py`, `driver.py`, `mojo/backend_gimple/*`, `mojo/middle/*`.
 Two known items sit there and are next round, not this one: the `comptime`
-expression evaluator (`bugs/formal/FORMAL_known_limits.md` §7) and the container-kind
+expression evaluator (`bugs/FORMAL_known_limits.md` §7) and the container-kind
 unanimity rule in `mojo/middle/infra_infer.py`
 (`bugs/INTERFACE_REQUEST_1_to_middle_infra_infer.md`, which [2] repointed at
 `module_gen.py` so it is [1]'s own follow-up rather than an orphan).
@@ -1350,7 +1350,7 @@ unanimity rule in `mojo/middle/infra_infer.py`
   named and tracked until a later round closes it.
 - **Take the 80/20 and leave a note.** A precise "this costs weeks, and here is
   why" is a **deliverable**; a half-finished attempt is not.
-  `bugs/formal/FORMAL_known_limits.md` has the table shape for that — measured count,
+  `bugs/FORMAL_known_limits.md` has the table shape for that — measured count,
   whether the refusal is *true*, what closing it takes.
 - **`GMOJO_HOME` is per-agent, always.** One environment variable, and it removes
   every CAS contention, torn cache entry and dylib overwrite question. Set it
@@ -1416,7 +1416,7 @@ is in the tree, the request is not.**
 it made the instruments stricter, then [3], then [5]. It worked, and the
 part that mattered was not the order but the *ownership* — no two agents shared
 a writable file, and the one collision (both [3] and [5] editing
-`bugs/formal/FORMAL_known_limits.md`, because the plan partitioned code files and left
+`bugs/FORMAL_known_limits.md`, because the plan partitioned code files and left
 docs unassigned) auto-merged and cost nothing.
 
 **This round:**
@@ -1458,7 +1458,7 @@ had a **wall** bound (`subprocess.run(timeout=1200)`), three of them had none,
 and `maxHeartbeats` does not meter the thing that spins (`native_decide`, kernel
 reduction, and `simp`'s congruence recursion — three separate budgets measured
 FAILING to fire on the one case ever diagnosed; the numbers are in §12 below and
-in `bugs/formal/FORMAL_dylib_export_loops_and_frame_bounds.md` §1).
+in `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md` §1).
 
 | what | bound | why that size |
 |---|---|---|

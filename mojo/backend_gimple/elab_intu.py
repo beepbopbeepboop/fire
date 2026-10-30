@@ -65,9 +65,9 @@ from mojo.middle.exprtypes import _walk_ast_invalidate
 from mojo.middle.closures import closure_lifted_name
 from mojo.middle.funcs_shared import _scan_from_imports_flat
 from fire_compiler import (
-    _BUILTIN_TRAITS, CallExpr, FloatLiteral, FromImportStmt, FunctionDef,
-    IdentExpr, IntLiteral, MemberExpr, Parser, StringLiteral, StructDef,
-    SubscriptExpr, TupleExpr, VarDecl, py_tokenize,
+    CallExpr, FloatLiteral, FromImportStmt, FunctionDef, IdentExpr,
+    IntLiteral, MemberExpr, Parser, StringLiteral, StructDef, SubscriptExpr,
+    TupleExpr, VarDecl, py_tokenize,
 )
 
 # Literal expression -> the exact Mojo type the elaborator should bind for it.
@@ -339,133 +339,15 @@ def _bracket_args(gen, sub):
     return [gen._type_expr_to_ann(e) for e in elems]
 
 
-def _live_aliases(work):
-    """The alias entries that name a materialized instantiation. `_Work.enqueue`
-    reserves a key with None before its materialization runs, and a refused
-    instantiation keeps that None: a consumer that writes the alias into the
-    AST would write a nameless callee (`_rewrite_ctor_calls` did, for a refused
-    `Pointer[...]`), so every consumer reads through here."""
-    return [(key, mangled) for key, mangled in work.alias.items()
-            if mangled is not None]
+def _concrete_args(work, kind, base, node):
+    """The concrete type arguments a CALL SITE names, or None.
 
-
-def _scope_names(scope) -> frozenset:
-    """Every name the enclosing function binds: its runtime and bracketed
-    parameters, and its locals (`comptime` values included). Empty at module
-    level, where nothing is a parameter."""
-    if scope is None:
-        return frozenset()
-    _name, func_node, locals_map = scope
-    names = set(locals_map)
-    names.update(p[0] for p in (getattr(func_node, 'params', None) or []))
-    names.update(getattr(func_node, 'comptime_params', None) or [])
-    return frozenset(names)
-
-
-def _root_name(expr):
-    """The name an expression is rooted at: `x` for `x`, `x.dtype`, `x[0].y`."""
-    while not isinstance(expr, IdentExpr):
-        nxt = getattr(expr, 'obj', None)
-        if nxt is None:
-            return None
-        expr = nxt
-    return expr.name
-
-
-def _bound_in_scope(node, scope) -> bool:
-    """Whether a bracket argument names a value the enclosing function binds
-    (`instruction`, `x.dtype`, a `comptime` local) rather than a type or a
-    constant. Such an argument is not a concrete instantiation: materializing
-    `inf[x.dtype]` substitutes an unbound symbol into the callee's body, where
-    its `comptime __match dtype:` has no type to dispatch on. The string test
-    in `_is_concrete_type_arg` cannot see this (`instruction` is shaped like a
-    type name), so the scope is the only place the answer lives."""
-    names = _scope_names(scope)
-    if not names:
-        return False
-    elems = node.func.index
-    elems = elems.elements if isinstance(elems, TupleExpr) else [elems]
-    return any(_root_name(e) in names for e in elems)
-
-
-def _fn_is_inline(work, base):
-    module_src = _module_src(work.gen, base, 'fn')
-    if module_src is None:
-        return False
-    import elaborate, monomorphize as mm
-    tmpl = elaborate.extract_fn_source(module_src, base)
-    if tmpl is None:
-        return False
-    # Check lines before the def for @inline
-    lines = module_src.splitlines()
-    # Find the line index where def starts
-    for i, line in enumerate(lines):
-        if line.startswith('def ') and base in line:
-            # Check preceding lines for @inline
-            for j in range(i-1, -1, -1):
-                stripped = lines[j].strip()
-                if stripped == '' or stripped.startswith('#'):
-                    continue
-                if '@inline' in stripped:
-                    return True
-                if stripped.startswith('@') or stripped.startswith('def '):
-                    break
-            return False
-    return False
-
-
-def _fn_bracket_kinds(module_src, base):
-    """`[(name, is_type)]` for a generic function's bracket parameters, in
-    declaration order, or None when the header cannot be read as a plain list
-    (a variadic `*Ts`, or a parameter without an annotation).
-
-    A parameter is a TYPE parameter when its annotation is a trait: a builtin
-    trait (`AnyType`, `Copyable`, ...) or one `trait X:` declares in the
-    template's own module. Every other annotation (`Int`, `Bool`, `DType`,
-    `Origin`) is a VALUE parameter."""
-    import elaborate
-    import monomorphize as mm
-    tmpl = elaborate.extract_fn_source(module_src, base)
-    m = mm.head_match(tmpl) if tmpl else None
-    if not m:
-        return None
-    traits = _BUILTIN_TRAITS | set(re.findall(r'^\s*trait\s+(\w+)', module_src, re.M))
-    kinds = []
-    for part in gimple_exprtypes._split_top_level_commas(m.params):
-        part = part.strip()
-        if not part or part in ('*', '/'):
-            continue
-        name, sep, rest = part.partition(':')
-        if not sep:
-            return None
-        head = rest.split('=')[0].strip().split('[')[0].strip()
-        if head.startswith('*'):
-            return None
-        head_parts = [p.strip() for p in re.split(r'[&,|]', head) if p.strip()]
-        is_trait = any(p in traits for p in head_parts)
-        kinds.append((name.strip(), is_trait))
-    return kinds
-
-
-def _fn_args_are_types(work, base, args) -> bool:
-    """Whether every type argument `args` binds for the generic function `base`
-    lands on a TYPE parameter. A value argument (`check_bounds`' `cpu_default`
-    bound to `'0'`, `_get_buffer_intrinsic_simd_dtype`'s `bytes`) is not an
-    instantiation this pass can materialize: its body still holds a
-    `comptime __match` or `comptime if` over the value, which the lowering
-    cannot fold once the value is substituted, and the `.o` route is the path
-    that has always served it. A mismatch between the binding and the header
-    is refused, not guessed at."""
-    module_src = _module_src(work.gen, base, 'fn')
-    if module_src is None:
-        return False
-    kinds = _fn_bracket_kinds(module_src, base)
-    if kinds is None or len(kinds) != len(args):
-        return False
-    return all(is_type for _name, is_type in kinds)
-
-
-def _concrete_args(work, kind, base, node, scope=None):
+    Two readable sources and nothing else, because nothing here is lowered and
+    so nothing has a C type yet:
+      - the bracket arguments, when written (`Generic[Int64, MutOrigin](…)`);
+      - the arguments themselves, when every one is a literal (the `once(10)`
+        shape) — through the elaborator's OWN unifier, so this pass and the
+        `.o` route cannot disagree about what those args mean."""
     if isinstance(node.func, SubscriptExpr):
         if not isinstance(node.func.obj, IdentExpr):
             return None
@@ -599,7 +481,7 @@ def _d2_ctor_args(work, base, node):
         if not isinstance(node.func.obj, IdentExpr):
             return None
         if not _d2_kwarg_bracket(node.func):
-            return _positional_bracket_ctor_args(work, base, node)
+            return None
         module_src = _module_src(work.gen, base, 'struct')
         if module_src is None:
             work.refuse(f'{base}[...]: no source for its home module')
@@ -620,47 +502,6 @@ def _d2_ctor_args(work, base, node):
     if _literal_args(node) is None:
         return None
     return _infer_struct_args(work, base, _literal_args(node))
-
-
-# Structs this codegen models as an ERASED tagged word everywhere else
-# (`Optional[Int]` is a raw int64 slot, 0 = None; a `Pointer` is a bare
-# pointer), so materializing one as a real struct would disagree with every
-# other site that reads the word. `test_optional`'s `a[]` is the measured
-# casualty (`Optional_..___getitem__` called with the wrong arity).
-_ERASED_WORD_STRUCTS = frozenset(('Optional', 'OptionalReg', 'Pointer',
-                                 'UnsafePointer'))
-
-
-def _positional_bracket_ctor_args(work, base, node):
-    """The type arguments of a POSITIONAL concrete-bracket constructor call
-    (`LinkedList[Int](1, 2, 3)`) of a struct the `.o` route declines to register
-    because a method name is overloaded OUTSIDE the iteration protocol. Without
-    this the call is lowered against no struct at all: the local is typed
-    `int64_t`, `l.__iter__()` is "stubbed" and every construction is a literal 0
-    (the LinkedList[Int] local typed int64_t bug). None for
-    every other shape, so those keep their old path exactly."""
-    f = node.func
-    if not (isinstance(f, SubscriptExpr) and isinstance(f.obj, IdentExpr)):
-        return None
-    if _d2_kwarg_bracket(f):
-        return None
-    # A base this codegen erases to a RUNTIME object (`List`/`Dict`/`Set` ->
-    # `MojoList *`/...; `_IN_TU_LIST_BASES` documents why a formal `List`
-    # layout must never be built) is declined by the `.o` route on the same
-    # ground as here (`_materialize_generic_struct_mentions`), and its
-    # overloaded `__getitem__` is exactly what this branch looks for: pulling
-    # `List[String]()` in-TU lowered its slice lambda's `-> T` as `int64_t`
-    # (`invalid conversion in gimple call`, std/os/os.mojo).
-    if (base in _ERASED_WORD_STRUCTS or base in _IN_TU_LIST_BASES
-            or base in gimple_ctypes._TYPE_MAP):
-        return None
-    dups =_duplicated_method_names(work.gen, base)
-    if not dups or dups <= _ITERATION_PROTOCOL:
-        return None
-    args = _concrete_args(work, 'struct', base, node)
-    if args is None or not all(a in gimple_ctypes._TYPE_MAP for a in args):
-        return None
-    return args
 
 
 def _d2_elem_mangle(work, mm, node):
@@ -769,20 +610,10 @@ def _protocol_only_overloads(gen, base) -> bool:
     cannot satisfy. See
     `the user-iterator next() bug (doc deleted in db724c4d6)` for
     the measurement of what widening this costs."""
-    dups = _duplicated_method_names(gen, base)
-    return bool(dups) and dups <= _ITERATION_PROTOCOL
-
-
-def _duplicated_method_names(gen, base) -> frozenset:
-    """The method names `base`'s template defines more than once (overloads).
-    ONE reading of the template, shared by `_protocol_only_overloads` (the
-    in-TU route's gate) and `_d2_ctor_args`' positional-bracket branch (which
-    must fire exactly for the structs `emit_resolve._register_generic_struct`
-    declines on the same ground), so the two cannot drift."""
     if base in _OVERLOAD_CACHE:
         return _OVERLOAD_CACHE[base]
     module_src = _module_src(gen, base, 'struct')
-    dups: set = set()
+    ok = False
     if module_src:
         import elaborate
         tmpl = elaborate.extract_struct_source(module_src, base)
@@ -794,14 +625,15 @@ def _duplicated_method_names(gen, base) -> frozenset:
             for s in parsed:
                 if isinstance(s, StructDef) and s.name == base:
                     seen: set = set()
+                    dups: set = set()
                     for m in (getattr(s, 'methods', None) or []):
                         if m.name in seen:
                             dups.add(m.name)
                         seen.add(m.name)
+                    ok = bool(dups) and dups <= _ITERATION_PROTOCOL
                     break
-    result = frozenset(dups)
-    _OVERLOAD_CACHE[base] = result
-    return result
+    _OVERLOAD_CACHE[base] = ok
+    return ok
 
 
 _OVERLOAD_CACHE: dict = {}
@@ -2520,7 +2352,7 @@ def _seed_direct_ctor(gen, work, mm, base, node, fsrc, home, scope, stmts,
         pnames = [f'_direct_arg_{i}' for i in range(len(args_nodes))]
     wrapper_mangled = mm.mangle(base, dict(zip(tparams, targs)))
     _register_named(gen, home, [base])
-    rec = {
+    records[iter_factory.factory_call_key(base, node)] = {
         'name': base, 'wrapper': base, 'wrapper_param': None,
         'wrapper_mangled': wrapper_mangled, 'inner_mangled': None,
         'inner_mention': None, 'kind': 'direct', 'elem': None,
@@ -2534,9 +2366,8 @@ def _seed_direct_ctor(gen, work, mm, base, node, fsrc, home, scope, stmts,
         # constructor-based field copy, not the identity aliasing the old
         # gate left in place.
         'local_inner': targs}
-    records[iter_factory.factory_call_key(base, node)] = rec
     work.enqueue(('struct', base, tuple(targs)), 0, queue)
-    return rec
+    return wrapper_mangled
 
 
 # ── PART 6 (2026-10-23, family S — test/collections/string/test_iterators)
@@ -3174,232 +3005,6 @@ _ELEM_COPY_RE = re.compile(
     r'([ \t]*)var elem = self\._inner_a_elem\.unsafe_value\(\)\.copy\(\)')
 
 
-def _erased_pointee_struct(resolved):
-    """`(Struct, scalar args)` when the first argument of an erased-word
-    alias (`Optional[Pointer[Node[Int], o]]`, `Pointer[Node[Int], o]`) is a
-    pointer to a generic struct instantiated at scalar types, else None."""
-    if not resolved:
-        return None
-    arg = resolved[0].strip()
-    m = re.match(r'^(Optional|OptionalReg|Pointer|UnsafePointer)\s*\[(.*)\]$',
-                 arg, re.S)
-    while m:
-        inner = [a.strip() for a in
-                 gimple_exprtypes._split_top_level_commas(m.group(2))
-                 if a.strip()]
-        if not inner:
-            return None
-        arg = inner[0]
-        m = re.match(r'^(Optional|OptionalReg|Pointer|UnsafePointer)\s*\['
-                     r'(.*)\]$', arg, re.S)
-    m = re.match(r'^([A-Za-z_]\w*)\s*\[(.*)\]$', arg, re.S)
-    if not m or m.group(1) in _ERASED_WORD_STRUCTS:
-        return None
-    pargs = [a.strip() for a in
-             gimple_exprtypes._split_top_level_commas(m.group(2))
-             if a.strip()]
-    if not pargs or not all(a in gimple_ctypes._TYPE_MAP for a in pargs):
-        return None
-    return m.group(1), pargs
-
-
-def _erased_pointee_is_self(resolved):
-    """True when the innermost argument of an erased-word alias is `Self`
-    (`Optional[Pointer[Self, o]]`)."""
-    if not resolved:
-        return False
-    arg = resolved[0].strip()
-    m = re.match(r'^(Optional|OptionalReg|Pointer|UnsafePointer)\s*\[(.*)\]$',
-                 arg, re.S)
-    while m:
-        inner = [a.strip() for a in
-                 gimple_exprtypes._split_top_level_commas(m.group(2))
-                 if a.strip()]
-        if not inner:
-            return False
-        arg = inner[0]
-        m = re.match(r'^(Optional|OptionalReg|Pointer|UnsafePointer)\s*\['
-                     r'(.*)\]$', arg, re.S)
-    return arg == 'Self'
-
-
-# `comptime IteratorType[iterable_mut: Bool, //, iterable_origin: Origin[..]]:
-# Iterator = _LinkedListIter[downcast[T, Copyable], iterable_origin]` — a
-# PARAMETRIZED alias whose parameters are all ownership/origin plumbing this
-# codegen erases. Group 1 = alias name, 2 = the parameter list's open bracket.
-_PARAM_ALIAS_HEAD_RE = re.compile(
-    r'comptime\s+(_?[A-Za-z]\w*)\s*\[')
-_ERASED_ORIGIN = 'MutAnyOrigin'
-
-
-def _balanced_end(text, i):
-    """Index just past the `]` closing the bracket opened right before `i`
-    (None when unbalanced)."""
-    depth = 1
-    while i < len(text) and depth:
-        if text[i] == '[':
-            depth += 1
-        elif text[i] == ']':
-            depth -= 1
-        i += 1
-    return None if depth else i
-
-
-def _replace_bracketed_mentions(text, head, repl):
-    """`text` with every `<head>[ ...balanced... ]` replaced by `repl`."""
-    out, i = [], 0
-    pat = re.compile(re.escape(head) + r'\[')
-    while True:
-        m = pat.search(text, i)
-        if not m:
-            out.append(text[i:])
-            return ''.join(out)
-        e = _balanced_end(text, m.end())
-        if e is None:
-            out.append(text[i:])
-            return ''.join(out)
-        out.append(text[i:m.start()])
-        out.append(repl)
-        i = e
-
-
-def _struct_bind_args(tmpl, written, origin_arg):
-    """Positional type arguments for `tmpl`'s bracket head from the arguments
-    `written` after the infer-only `//` group: infer-only `Bool` parameters
-    (`mut: Bool, //`) take `True`, an `Origin[..]` parameter takes
-    `origin_arg` where the alias passed its own origin parameter, and
-    trailing defaulted parameters are left to `bind_type_args`."""
-    import elaborate
-    import monomorphize as mm
-    hm = mm.head_match(tmpl)
-    if not hm:
-        return None
-    plist = [p.strip() for p in
-             gimple_exprtypes._split_top_level_commas(hm.params) if p.strip()]
-    marker = -1
-    for k, p in enumerate(plist):
-        if p.startswith('//'):
-            marker = k
-    infer_only = [p for p in plist[:marker] if marker >= 0]
-    explicit = [p for p in plist[marker + 1:]
-                if not elaborate._is_param_marker(p)]
-    out = ['True' for _p in infer_only]
-    if len(written) > len(explicit):
-        return None
-    for p, a in zip(explicit, written):
-        ann = p.split(':', 1)[1].strip() if ':' in p else ''
-        out.append(origin_arg if ann.startswith('Origin') else a)
-    return out
-
-
-def _eval_parametrized_aliases(work, mm, base, concrete):
-    """Evaluate `comptime <alias>[<origin plumbing>]: Trait = Struct[args]`
-    aliases (LinkedList's `IteratorType`), rewriting every
-    `Self.<alias>[<origin>]` mention to the mangled instantiation and
-    enqueueing it. `downcast[X, Trait]` evaluates to `X`; the alias's own
-    parameters are erased origins. Refusal leaves `concrete` unchanged.
-    Returns (concrete, nested_keys or None)."""
-    import elaborate
-    nested = []
-    for m in list(_PARAM_ALIAS_HEAD_RE.finditer(concrete)):
-        aname = m.group(1)
-        pend = _balanced_end(concrete, m.end())
-        if pend is None:
-            continue
-        hm = re.match(r'\s*:\s*[^=\n]+=\s*([A-Za-z_]\w*)\s*\[',
-                      concrete[pend:])
-        if not hm or hm.group(1) in _ERASED_WORD_STRUCTS:
-            continue
-        abase = hm.group(1)
-        astart = pend + hm.end()
-        aend = _balanced_end(concrete, astart)
-        if aend is None:
-            continue
-        alias_params = {
-            p.split(':')[0].strip() for p in
-            gimple_exprtypes._split_top_level_commas(
-                concrete[m.end():pend - 1])
-            if p.strip() and not elaborate._is_param_marker(p.strip())}
-        written = []
-        origin_arg = _ERASED_ORIGIN
-        for a in gimple_exprtypes._split_top_level_commas(
-                concrete[astart:aend - 1]):
-            a = a.strip()
-            if not a:
-                continue
-            dm = re.match(r'^downcast\s*\[(.*)\]$', a, re.S)
-            if dm:
-                a = gimple_exprtypes._split_top_level_commas(
-                    dm.group(1))[0].strip()
-            written.append(_ERASED_ORIGIN if a in alias_params else a)
-        _register_named(work.gen, work.gen._imported_generic_structs.get(base),
-                        [abase])
-        asrc = _module_src(work.gen, abase, 'struct')
-        atmpl = elaborate.extract_struct_source(asrc, abase) if asrc else None
-        if not atmpl:
-            work.refuse(f'{base}: comptime alias {aname} names {abase} '
-                        'with no struct template')
-            continue
-        bound = _struct_bind_args(atmpl, written, origin_arg)
-        targs = elaborate.bind_type_args(atmpl, bound) if bound else None
-        if targs is None or not all(
-                isinstance(v, str) and v for v in targs.values()):
-            work.refuse(f'{base}: comptime alias {aname} names {abase}[...] '
-                        'whose arguments do not bind')
-            continue
-        # The alias's own `[...] = Struct[...]` text and every
-        # `Self.<alias>[...]` mention name the instantiation.
-        name = mm.mangle(abase, targs)
-        key = ('struct', abase, tuple(
-            targs[p] for p in elaborate.type_param_names(atmpl)))
-        concrete = _replace_bracketed_mentions(
-            concrete, 'Self.' + aname, name)
-        nested.append(key)
-    return concrete, nested or None
-
-
-_PTR_FIELD_HEAD_RE = re.compile(
-    r'^([ \t]*var\s+\w+\s*:\s*)((?:Optional|OptionalReg|Pointer|UnsafePointer)'
-    r'\s*\[)', re.M)
-
-
-def _eval_pointer_fields(work, mm, base, concrete):
-    """A `var f: Optional[UnsafePointer[Node[Int], o]]` / `Pointer[LinkedList[
-    Int], o]` FIELD of a materialized struct names a pointer to a generic
-    struct at scalar types: spell it as that struct's mangled name (the
-    registered-name branch of the field loop types it `<S> *`, NULL = None)
-    and enqueue the pointee — the same reading `_eval_comptime_type_aliases`
-    gives an erased-word ALIAS (`_NodePointer`), here for the annotation
-    written inline (`_LinkedListIter.curr`). Annotation sites only: an
-    expression-position spelling is left alone. Returns (concrete, keys)."""
-    import elaborate
-    out, i, keys = [], 0, []
-    for m in _PTR_FIELD_HEAD_RE.finditer(concrete):
-        if m.start() < i:
-            continue
-        end = _balanced_end(concrete, m.end())
-        if end is None:
-            continue
-        ann = concrete[m.start(2):end].strip()
-        pointee = _erased_pointee_struct([ann])
-        if pointee is None:
-            continue
-        pbase, pargs = pointee
-        _register_named(work.gen, work.gen._imported_generic_structs.get(base),
-                        [pbase])
-        psrc = _module_src(work.gen, pbase, 'struct')
-        ptmpl = elaborate.extract_struct_source(psrc, pbase) if psrc else None
-        pn = elaborate.type_param_names(ptmpl) if ptmpl else None
-        if not pn or len(pn) != len(pargs):
-            continue
-        out.append(concrete[i:m.start(2)])
-        out.append(mm.mangle(pbase, dict(zip(pn, pargs))))
-        i = end
-        keys.append(('struct', pbase, tuple(pargs)))
-    out.append(concrete[i:])
-    return ''.join(out), keys or None
-
-
 def _eval_comptime_type_aliases(work, mm, module_src, base, targs, concrete):
     """Evaluate the `comptime <alias> = <Base>[<concrete args>]` type
     aliases of a spliced generic struct. Returns (concrete, nested_keys):
@@ -3446,37 +3051,6 @@ def _eval_comptime_type_aliases(work, mm, module_src, base, targs, concrete):
         if bad:
             work.refuse(f'{base}: comptime alias {aname} {bad}')
             return concrete, None
-        if abase in _ERASED_WORD_STRUCTS:
-            # An erased-word base (`Optional[Pointer[Node[T], o]]`) is not a
-            # struct this codegen builds: every other site reads it as the
-            # tagged word. The alias therefore names its own spelling, which
-            # the layout/type readers already erase, and nothing is enqueued
-            # (materializing `Optional` is the regression
-            # `_protocol_only_overloads` documents).
-            pointee = _erased_pointee_struct(resolved)
-            if pointee is None and _erased_pointee_is_self(resolved):
-                # `Optional[Pointer[Self, o]]` (a node's own link): the
-                # pointee is the struct being spliced; nothing to enqueue.
-                aliases[aname] = mm.mangle(base, targs)
-                continue
-            if pointee is not None:
-                pbase, pargs = pointee
-                # The pointee usually lives in the SAME module as the struct
-                # being spliced (`Node` beside `LinkedList`), so it is not
-                # registered yet: register it from this struct's own file.
-                _register_named(work.gen,
-                                work.gen._imported_generic_structs.get(base),
-                                [pbase])
-                psrc = _module_src(work.gen, pbase, 'struct')
-                ptmpl = (elaborate.extract_struct_source(psrc, pbase)
-                         if psrc else None)
-                pn = elaborate.type_param_names(ptmpl) if ptmpl else None
-                if pn and len(pn) == len(pargs):
-                    aliases[aname] = mm.mangle(pbase, dict(zip(pn, pargs)))
-                    paired.append((aname, ('struct', pbase, tuple(pargs))))
-                    continue
-            aliases[aname] = f'{abase}[{", ".join(resolved)}]'
-            continue
         tmpl = (elaborate.extract_struct_source(module_src, abase)
                 if module_src else None)
         pnames = elaborate.type_param_names(tmpl) if tmpl else None
@@ -3486,13 +3060,12 @@ def _eval_comptime_type_aliases(work, mm, module_src, base, targs, concrete):
             return concrete, None
         aliases[aname] = mm.mangle(abase, dict(zip(pnames, resolved)))
         paired.append((aname, ('struct', abase, tuple(resolved))))
-    used = [n for n in aliases
+    used = [n for n, _ in paired
             if re.search(r'Self\.' + re.escape(n) + r'\b', concrete)]
     if not used:
         return concrete, None
     for n in used:
-        concrete = re.sub(r'Self\.' + re.escape(n) + r'\b',
-                          lambda _m, _a=aliases[n]: _a, concrete)
+        concrete = concrete.replace(f'Self.{n}', aliases[n])
     return concrete, [k for n, k in paired if n in used] or None
 
 
@@ -3626,13 +3199,6 @@ def _materialize(work, key):
     if kind == 'struct' and targs:
         concrete, _nested = _eval_comptime_type_aliases(
             work, mm, module_src, base, targs, concrete)
-        concrete, _pnested = _eval_parametrized_aliases(
-            work, mm, base, concrete)
-        if _pnested:
-            _nested = (_nested or []) + _pnested
-        concrete, _fnested = _eval_pointer_fields(work, mm, base, concrete)
-        if _fnested:
-            _nested = (_nested or []) + _fnested
         concrete = _rewrite_product_next(base, targs, concrete)
         concrete = _rewrite_product2_elem_copy(base, targs, concrete)
     if kind == 'struct' and base in _IN_TU_ITER_BODIES:
@@ -3671,7 +3237,7 @@ def run(gen, stmts):
     # iterator are materialized in the same closure as everything else.
     _seed_factories(gen, work, stmts, queue)
 
-    def seed(n, scope):
+    def seed(n):
         """ROOTS. A struct root is one the `.o` route provably cannot register
         (a duplicated method name outside the iteration protocol); a function root
         is one whose return annotation names such a struct
@@ -3690,7 +3256,7 @@ def run(gen, stmts):
             return
         if kind == 'struct':
             if _protocol_only_overloads(gen, base):
-                args = _concrete_args(work, kind, base, n, scope)
+                args = _concrete_args(work, kind, base, n)
             else:
                 # PART 6 (2026-10-23, family D piece 2): an imported generic
                 # struct the `.o` route cannot serve as a ROOT (a duplicated
@@ -3705,42 +3271,14 @@ def run(gen, stmts):
                 # and None for everything else, which keeps its old path
                 # exactly.
                 args = _d2_ctor_args(work, base, n)
-            if args is not None:
-                work.enqueue((kind, base, tuple(args)), 0, queue)
-        elif kind == 'fn':
-            # ROOT for generic function instantiation: either the return is
-            # unbuildable (old path) OR the function has type params that
-            # need a per-T body (new path for shared-symbol fix).
-            if _fn_returns_unbuildable_struct(work, base):
-                args = _concrete_args(work, kind, base, n, scope)
-                if args is not None:
-                    work.enqueue((kind, base, tuple(args)), 0, queue)
-                return
-            # NEW (bug-codegen-dylib-generic-inline-copies-370): enqueue
-            # any generic fn with non-empty template whose args are all
-            # type params (value params stay on .o route).
-            import elaborate as el
-            module_src = _module_src(work.gen, base, 'fn')
-            if module_src is None:
-                return
-            tmpl = el.extract_fn_source(module_src, base)
-            if tmpl is None:
-                return
-            params = el.type_param_names(tmpl) if hasattr(el, 'type_param_names') else []
-            if not params:
-                return
-            args = _concrete_args(work, kind, base, n, scope)
-            if args is None:
-                args = _infer_fn_args(work, base, n)
-            if args is None:
-                return
-            if not _fn_args_are_types(work, base, args):
-                return
-            work.enqueue((kind, base, tuple(args)), 0, queue)
+        elif not _fn_returns_unbuildable_struct(work, base):
             return
-        else:
+        if kind == 'fn':
+            args = _concrete_args(work, kind, base, n)
+        if args is None:
             return
-    _walk_scoped(stmts, seed)
+        work.enqueue((kind, base, tuple(args)), 0, queue)
+    _walk(stmts, seed)
     if not queue:
         return []
 
@@ -3954,8 +3492,6 @@ def _rewrite_annotations(work):
     # mention whose argument was never rewritten is untouched.
     mangled_raw = {}
     for (kind, base, args), mangled in work.alias.items():
-        if mangled is None:
-            continue
         if kind == 'struct':
             mangled_raw[mangled] = f"{base}[{', '.join(args)}]"
     for rec in work.records.values():
@@ -4001,22 +3537,6 @@ def _rewrite_callees(work, stmts):
     gen = work.gen
 
     def visit(n):
-        if (isinstance(n, SubscriptExpr) and isinstance(n.obj, IdentExpr)
-                and n.obj.name == 'Layout' and isinstance(n.index, SubscriptExpr)
-                and isinstance(n.index.obj, IdentExpr)):
-            # `Layout[Node[Int]]` (`alloc(Layout[Node[T]].single())`): the
-            # element is a TYPE expression in an expression body, so it is not
-            # one of the annotation sites `_rewrite_annotations` walks. Name
-            # the materialized struct, or the allocation's element type
-            # erases to `int64_t` and `alloc` hands back a scalar word.
-            _b = n.index.obj.name
-            _targs = _bracket_args(gen, n.index)
-            _m = (work.alias.get(('struct', _b, tuple(_targs)))
-                  if _targs else None)
-            if _m:
-                n.index = IdentExpr(name=_m)
-                _walk_ast_invalidate(n)
-            return
         if not isinstance(n, CallExpr):
             return
         base = (n.func.obj.name if isinstance(n.func, SubscriptExpr)
@@ -4070,9 +3590,8 @@ def _rewrite_local_struct_anns(work, stmts):
     """
     by_base = {}
     for (kind, base, args), mangled in work.alias.items():
-        if mangled is None or kind != 'struct':
-            continue
-        by_base.setdefault(base, []).append(mangled)
+        if kind == 'struct':
+            by_base.setdefault(base, []).append(mangled)
     solo = {base: ms[0] for base, ms in by_base.items() if len(ms) == 1}
     if not solo:
         return
@@ -4129,16 +3648,15 @@ def _rewrite_ctor_calls(work, stmts):
     by_base = {}
     mangled_of = {}
     for (kind, base, args), mangled in work.alias.items():
-        if mangled is None or kind != 'struct':
-            continue
-        _akey = _US.join(args)
-        _lst = by_base.get(base)
-        if _lst is None:
-            _lst = []
-            by_base[base] = _lst
-        if _akey not in _lst:
-            _lst.append(_akey)
-        mangled_of[base + _US + _akey] = mangled
+        if kind == 'struct':
+            _akey = _US.join(args)
+            _lst = by_base.get(base)
+            if _lst is None:
+                _lst = []
+                by_base[base] = _lst
+            if _akey not in _lst:
+                _lst.append(_akey)
+            mangled_of[base + _US + _akey] = mangled
     if not by_base:
         return
     for st in stmts or ():
@@ -4234,16 +3752,15 @@ def _rewrite_intu_ctor_calls(work):
     by_base = {}
     mangled_of = {}
     for (kind, base, args), mangled in work.alias.items():
-        if mangled is None or kind != 'struct':
-            continue
-        _akey = _US.join(args)
-        _lst = by_base.get(base)
-        if _lst is None:
-            _lst = []
-            by_base[base] = _lst
-        if _akey not in _lst:
-            _lst.append(_akey)
-        mangled_of[base + _US + _akey] = mangled
+        if kind == 'struct':
+            _akey = _US.join(args)
+            _lst = by_base.get(base)
+            if _lst is None:
+                _lst = []
+                by_base[base] = _lst
+            if _akey not in _lst:
+                _lst.append(_akey)
+            mangled_of[base + _US + _akey] = mangled
     if not by_base:
         return
     for rec in work.records.values():

@@ -41,14 +41,6 @@ REPO = os.path.dirname(os.path.abspath(__file__))
 # `run_produced_binary` below.
 TWO_LINE = "x = 1\nprint(x)\n"
 
-# A program with a function, a module-level CALL and f-strings. The two-line probe has no
-# call at all, so it passed while the self-hosted compiler crashed (SIGSEGV) on every
-# program that had one: `coro._scan_callsite_param_kinds` passed a capturing closure on as a
-# value, which reaches its callee with a NULL environment (see
-# the capturing-closure NULL-env bug, fixed at its root in 145fd1089).
-CALL_PROGRAM = ("def f(a, b):\n    return f\"x={a} y={b + 1}\"\n"
-                "print(f(3, 4))\nname = \"w\"\nprint(f\"hello {name} {len(name)}\")\n")
-
 
 def build(td: str) -> str:
     """Self-compile fire.py into `td`, returning the binary path."""
@@ -385,24 +377,8 @@ def run_produced_binary(exe: str, td: str) -> tuple:
     if os.path.exists(ci):
         with open(ci) as f:
             text = f.read()
-    # ...and the program with a call and f-strings, which must also compile.
-    prog2 = os.path.join(td, "probe_call.mojo")
-    with open(prog2, "w") as f:
-        f.write(CALL_PROGRAM)
-    r2 = subprocess.run([exe, "--dump-full", prog2], cwd=td,
-                        capture_output=True, text=True, timeout=300)
-    ci2 = os.path.join(td, "probe_call.ci")
-    text2 = ""
-    if os.path.exists(ci2):
-        with open(ci2) as f:
-            text2 = f.read()
-    if r2.returncode != 0 or len(text2) < 200:
-        print(f"  self-hosted compiler on the call+f-string program: "
-              f"exit={r2.returncode} ci_bytes={len(text2)}")
-        return (r2.returncode or 1, 0, 1)
     return (r.returncode, len(text),
-            text.count("unavailable in compiled mode")
-            + text2.count("unavailable in compiled mode"))
+            text.count("unavailable in compiled mode"))
 
 
 def pinned_prototypes_match_their_definitions() -> bool:

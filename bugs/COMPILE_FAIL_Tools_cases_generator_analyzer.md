@@ -1,17 +1,3 @@
-## Status (2026-10-29, worktree bug-compile-fail-tools-cases-generator-a — PARTIAL)
-
-Partial fix: `formal/model.py` `match_pattern_kind` now returns
-`"class pattern (type test)"` for positional-capture-only patterns
-(all bare IdentExpr args, no kwargs); `emit_stmts.py` emits the
-`isinstance(subj_ref, C)` guard before refusal, clearing the
-class-pattern blocker for `case parser.InstDef(name):` (line 1136).
-Interpreter `myinterpreter.py` already handles `__match_args__`; compiled
-path binding via `getattr(subj_ref, __match_args__[i])` is the remaining
-step (needs runtime tuple-index emission, not done to avoid silent
-reinterpretation). Regression `test_match_class_pattern_positional.py`
-passes under `fire.py run`; `fire.py build` reaches codegen.
-Family A (`var_decl`, line 723) is unchanged and separate.
-
 # COMPILE_FAIL: Tools/cases_generator/analyzer.py
 
 ## Status 2026-10-29 — the build now stops at a CLASS-PATTERN refusal BEFORE the `var_decl` error; planning guide (round type 3)
@@ -253,7 +239,7 @@ string.
 Link-mode sibling resolution still stubs `parser.*` / `lexer.*` (so
 `analyzer.py` reaches gcc but links against weak stubs), and
 `parsing.py`'s polymorphic `yield from self.<field>.tokens()` generators
-are still refused — see the `parsing.py` compile-fail row (the cases-generator parsing bug),
+are still refused — see `bugs/COMPILE_FAIL_Tools_cases_generator_parsing.md`,
 whose own status changed materially this session.
 
 Doc kept open on the one remaining error.
@@ -303,7 +289,7 @@ reproducing the previous entry's end-to-end state exactly (the
    but never DEFINED, because BlockStmt.tokens is one of parsing.py's
    polymorphic-`yield from self.body.tokens()` generators that the C++
    coroutine emitter refuses/rolls back (the excluded hard-doc cluster
-   documented in the `parsing.py` compile-fail row).
+   documented in bugs/COMPILE_FAIL_Tools_cases_generator_parsing.md).
    So analyzer.py currently has NO working end-to-end path: link mode
    silently stubs siblings; inline mode dies on parsing.py's refused
    generator shapes.

@@ -276,23 +276,6 @@ def _collect_var_names(f: F.FunctionDef) -> list:
 
     walk_members(f.body)
 
-    # Loop-bound flags, one per name `model.loop_bound_flags` flags: a `for`
-    # whose range is a run-time fact binds its target only if it runs, so the
-    # image carries a word per such name — zero at entry, set by every store
-    # of the name, and branched on at a read that may be unbound. Backend-local
-    # like the loop temps: the name is not in the source, so it goes through
-    # the same append-only path rather than the bound-name walk. The ORDER is
-    # `sorted` because `_emit_function` derives the same name from the same
-    # call, and a name whose position depends on set iteration order would be
-    # a different local on the two reads of the same function.
-    flags = M.loop_bound_flags(f)
-    if flags:
-        for i, name in enumerate(sorted(flags)):
-            lb = f"_lb{i}"
-            if lb not in seen:
-                seen.add(lb)
-                names.append(lb)
-
     # for-in (non-range) loop control temps: one index + one blob-pointer
     # register per nesting depth. Backend-local (register allocation only);
     # not middle-end bound names. Depth accounting matches `_emit_for_list`:
@@ -733,16 +716,6 @@ dylib_exports: list = None, globals_base: int = None,
         # instead.  See `_emit_exit` for why the subtraction is the difference
         # between a proof and a `lean-rejected` row.
         self._compiler_trap_addrs: set = set()
-        # The ADDRESSES of the extern calls the float-repr helper made — its
-        # `snprintf` and `strtod`, in the helper's general path.  The helper is
-        # this emitter's own, emitted once per image after every function
-        # body, so its sites are in `extern_calls` at or above `func_offset`
-        # and are NOT calls the program makes:
-        # `formal/arm64_proof_gen.py::_program_extern_calls` subtracts them
-        # for the same reason the traps are subtracted, and not doing so turns
-        # every image on this backend into an opaque-call image.  Published in
-        # `compile()`'s `info` as `float_repr_calls`.
-        self._float_repr_call_addrs: list = []
         self._if_counter = 0
         self._while_counter = 0
         self._assert_counter = 0
@@ -849,28 +822,6 @@ dylib_exports: list = None, globals_base: int = None,
         # Nesting depth of for-in (non-range) loops currently being emitted.
         # Selects _fi{d}/_fb{d} temps; reset per function.
         self._for_list_depth = 0
-        # `{name: "_lb{i}"}` — the loop-bound flag of each name
-        # `model.loop_bound_flags` flags in THIS function: the target of a
-        # `for` whose range is a run-time fact, read where it may be unbound.
-        # Zero at entry, set by every store of the name (the flag SETS are the
-        # stores, through `_store_var`), read as a `CBZ` at a load whose
-        # position `_mub` says may be unbound. Empty unless the function has
-        # one; reset per function.
-        self._lb_flags: dict = {}
-        # The flagged names whose flag may be ZERO at the point of emission:
-        # the "may be unbound" state the `CBZ` check is gated on. One mutable
-        # set with save/restore + OR-at-join discipline, because a branch forks
-        # the paths and a store on one arm is not a store on the other.
-        # `_store_var` clears a name as it stores it, loops and if-arms save
-        # and restore around their bodies, and a join unions the arms. Reset
-        # per function.
-        self._mub: set = set()
-        # The one label every unbound check in the CURRENT function branches
-        # to (keyed on its per-definition label; None when the function has no
-        # flagged name). Set in `_emit_function`; the body's checks emit
-        # `emit_label_rel` references to it before the label is defined, which
-        # is the same forward reference every branch in this file makes.
-        self._lb_unbound_label: str = None
         # Names bound to a string pointer this function (StringLiteral RHS
         # or an alias of one). Subscript on these is a byte load/store, not
         # a list-blob index. Reset per function.
@@ -1205,12 +1156,6 @@ dylib_exports: list = None, globals_base: int = None,
             # `formal/arm64_proof_gen.py::_program_extern_calls`, which is the
             # arm64 twin of x86-64's `_program_externs`.
             "compiler_traps": sorted(self._compiler_trap_addrs),
-            # The float-repr helper's OWN extern calls (`snprintf`, `strtod`),
-            # by address — the helper is emitted once per image after every
-            # function body, so the sites are at or above `func_offset` and
-            # `_program_extern_calls` subtracts them there, the same
-            # subtraction `compiler_traps` is for the guard's `fflush`.
-            "float_repr_calls": sorted(self._float_repr_call_addrs),
             "test_input": self.test_input,
             # EVERY entry argument's value, in order — the proof generator's
             # entry state is built from this list, so a two-parameter entry has
@@ -1236,7 +1181,7 @@ dylib_exports: list = None, globals_base: int = None,
             # in `info` for both proof generators to read, because the word an
             # unwinder writes on one side has to mean the same integer on the
             # other (`model.exception_kind_table`'s docstring). Nothing reads it
-            # yet — see `bugs/formal/FORMAL_a_try_handler_arm_is_still_never_emitted.md`
+            # yet — see `bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md`
             # §5, where this is step 2 of 6. `info` rather than a re-derivation
             # here is the point: x86-64's `info` carries the same table from the
             # same publisher, so a proof that reads one cannot drift from the
@@ -1270,29 +1215,6 @@ dylib_exports: list = None, globals_base: int = None,
 
     def _emit_function(self, f: F.FunctionDef, label: str = None) -> None:
         self._current_function = f.name
-        # The loop-bound flags of this body, BEFORE any store or load can
-        # happen in it: the prologue's own `_store_var` calls (argument homes)
-        # run through the flag hook, and a flag table that is set later would
-        # miss a store of a flagged name that the prologue makes.
-        # `model.loop_bound_flags` is the one reader, shared with x86-64's
-        # `_emit_function` and the allocator's `_collect_var_names`, so the
-        # name, the `_lb{i}` home and the check cannot disagree about which
-        # loops are flagged.
-        self._lb_flags = {name: f"_lb{i}"
-                          for i, name in enumerate(sorted(
-                              M.loop_bound_flags(f)))}
-        self._mub = set(self._lb_flags)
-        # The error label every check in this body branches to, keyed on the
-        # per-DEFINITION label: two overloads of one name are two bodies, and
-        # a shared `{name}_unbound` label would be a second binding the moment
-        # the second flagged body emitted it, which `Assembler.label` refuses
-        # — the same reason every control label in this file carries a
-        # per-site counter or a per-definition prefix.
-        if self._lb_flags:
-            _entry = label if label is not None else f"{f.name}__def1"
-            self._lb_unbound_label = f"{_entry}_unbound"
-        else:
-            self._lb_unbound_label = None
         # The whole image's `{function: struct}` table for the functions that
         # RETURN a frame, published by `formal/build.py`'s fixpoint.  It is
         # read twice and for two different questions: whether THIS function is
@@ -1426,7 +1348,7 @@ dylib_exports: list = None, globals_base: int = None,
         # `SP + k` is INSIDE it and a method that writes its receiver does not
         # satisfy `FrameOk` — which is why the callee contract for a method is
         # `Refine.FrameOk_except`, the predicate
-        # `bugs/formal/FORMAL_wide_receiver_by_reference.md` lands for exactly this.
+        # `bugs/FORMAL_wide_receiver_by_reference.md` lands for exactly this.
         # The layout itself is `formal/model.py`'s, so the x86-64 backend
         # reserves the same bytes in the same order.
         self._frame_sites = M.struct_constructor_sites(f, self._structs)
@@ -1760,7 +1682,7 @@ dylib_exports: list = None, globals_base: int = None,
         # right about the ABI and wrong about the consequence: `pack(fmt, v0..v7)`
         # is nine arguments, and it is `formal/hostmods/struct.mojo`'s OWN
         # documented "a format I cannot serve returns an empty list" contract
-        # that the caller could never reach.  `bugs/formal/FORMAL_struct_pack_over_eight_
+        # that the caller could never reach.  `bugs/FORMAL_struct_pack_over_eight_
         # arguments.md` has the measurement and both halves of the mechanism.
         for i, (pname, ptype) in enumerate(incoming):
             if i >= _ABI_ARG_REGS:
@@ -1846,28 +1768,8 @@ dylib_exports: list = None, globals_base: int = None,
             self._emit_stack_floor_guard()
         _emit_sub_imm(self.asm, 31, 31, _SCRATCH)
 
-        # A loop-bound flag starts UNBOUND, the state the function entry has:
-        # nothing has stored the name yet, so the read after an empty range
-        # must take the error edge. Emitted after the frame is reserved,
-        # because a flag in a spill slot is addressed from the frame pointer.
-        for _lb_name in self._lb_flags.values():
-            self.asm.emit(encode_movz_wd_imm(16, 0))
-            self._store_var(_lb_name, 16)
-
         for stmt in f.body:
             self._emit_stmt(stmt)
-
-        # The one place every unbound check branches to: the image has no way
-        # to mean "unbound", so the read takes an error exit rather than
-        # answering the caller's leftover — the same `CBZ` → exit(1) shape the
-        # divide-by-zero guard emits, which is what keeps the proof generators'
-        # walk from meeting an instruction it has no step for. It sits after
-        # the body so the branch is forward everywhere, and before the
-        # fall-through epilogue so a body that falls off its end still reaches
-        # its own return.
-        if self._lb_flags:
-            self.asm.label(self._lb_unbound_label)
-            self._emit_exit(1)
 
         if not _always_returns(f.body):
             if self._recv_ref_receiver is not None:
@@ -1923,20 +1825,6 @@ dylib_exports: list = None, globals_base: int = None,
         left — measured, the `test_input` 10) and an immediate zero. So it
         refuses, with the name, and the build pass's `check_module_symbols` is
         the check that normally catches it first with a fuller story."""
-        # A loop-bound flag gates the read: `name` is a `for` target whose
-        # range is a run-time fact, the build-time state says the flag may be
-        # ZERO here, so ask at run time — load the flag, branch on zero to the
-        # function's one unbound exit. The same `CBZ` → `exit(1)` shape the
-        # divide-by-zero guard emits. Every read of a local funnels through
-        # here, which is what makes this one branch and the flag SET (in
-        # `_store_var`) the whole discipline. A name not flagged in this body
-        # skips it; a flag home (`_lb{i}`) is never a key of `_lb_flags`, so
-        # the recursion terminates on the first step.
-        lb = self._lb_flags.get(name)
-        if lb is not None and name in self._mub:
-            self._load_var(lb, 16)
-            self.asm.emit(encode_cbz_xn(0, 16))
-            self.asm.emit_label_rel(self._lb_unbound_label, here_offset=-4)
         slot = self._frame_slots.get(name)
         if slot is not None:
             self._emit_frame_load(name, slot, dst)
@@ -2416,38 +2304,6 @@ dylib_exports: list = None, globals_base: int = None,
         return M.module_slot_for(name, self._fn_local_names)
 
 
-    def _lb_note_store(self, name: str) -> None:
-        """The loop-bound flag of `name` goes 0 → 1 the moment `name` is
-        STORED, and only from here, so that a read can never take its `CBZ`
-        error edge on a path that stored it: the flag and the store are two
-        halves of one binding, and the store is the half that always runs.
-
-        Every store of a local is one of the two home branches of
-        `_store_var` (a name bound in this body is a local by
-        `model.module_slot_for`'s rule, so the frame-slot and global branches
-        never see a flagged name), which is why the hook lives there rather
-        than at the assignment sites: a loop's `init:` store, a comprehension's
-        per-element store and a plain assignment all funnel through it, and a
-        store spelling added later is flagged without a second hook.
-
-        The build-time half — `self._mub` — is narrowed the same way, because
-        the state at the NEXT read is what decides whether that read asks. The
-        flag is written 1 with the value's own width in mind: a register home
-        is one `MOVZ W{r}, #1` in place, a spill home parks 1 in X16 and stores
-        it, the spill path's X17 address scratch included (the >256-byte case
-        uses it, the same risk profile every constant spill store here has).
-        `lb` is never a key of `_lb_flags`, so the recursive store does not
-        re-enter the hook."""
-        lb = self._lb_flags.get(name)
-        if lb is None:
-            return
-        self._mub.discard(name)
-        if lb in self._var_regs:
-            self.asm.emit(encode_movz_wd_imm(self._var_regs[lb], 1))
-        else:
-            self.asm.emit(encode_movz_wd_imm(16, 1))
-            self._store_var(lb, 16)
-
     def _store_var(self, name: str, src: int) -> None:
         """local `name` = src. Register homes MOV; spill slots STR via X17.
 
@@ -2487,7 +2343,6 @@ dylib_exports: list = None, globals_base: int = None,
             r = self._var_regs[name]
             if src != r:
                 self.asm.emit(encode_mov_zr_xn(r, src))
-            self._lb_note_store(name)
             return
         if name in self._var_spills:
             off = self._spill_off(name)
@@ -2497,12 +2352,10 @@ dylib_exports: list = None, globals_base: int = None,
             # matters: see the note in `_load_var`.)
             if off <= 256:
                 self.asm.emit(encode_stur_xt_xn_imm(src, 29, -off))
-                self._lb_note_store(name)
                 return
             self.asm.emit(encode_mov_zr_xn(17, 29))
             _emit_sub_imm(self.asm, 17, 17, off)
             self.asm.emit(encode_str_xt_xn_imm(src, 17, 0))
-            self._lb_note_store(name)
             return
         # A store with no home was a store into X19, which the NEXT function
         # reads as its FIRST PARAMETER — wave 5's rule in its most literal
@@ -3697,21 +3550,10 @@ dylib_exports: list = None, globals_base: int = None,
             next_labels.append(f"{self.func_name}_if{if_id}_alt_{i}")
         else_label = f"{self.func_name}_else_{if_id}"
 
-        # The flagged names that may be unbound BEFORE this if: every arm
-        # forks from that state, so each arm — condition first, because an
-        # elif's condition runs in the pre-if state, not in the previous
-        # arm's body state — is walked on a copy of it, and the join after the
-        # if unions the arms' end states. With no else, the fall-through is a
-        # third arm that ends where it started. A store one arm made is not a
-        # store the other arm made, which is the whole reason the sets fork.
-        if_base = set(self._mub) if self._lb_flags else None
-        arm_ends = []
         for i, (cond, body) in enumerate(tests):
             self.asm.label(next_labels[i])
             fail = next_labels[i + 1] if i + 1 < len(tests) else (
                 else_label if has_fallthrough_else else end_label)
-            if if_base is not None:
-                self._mub = set(if_base)
             if not self._emit_branch_unless(cond, fail):
                 self._emit_truthy_word(cond)
                 self.asm.emit(encode_cmp_xn_imm(0, 0))
@@ -3720,27 +3562,14 @@ dylib_exports: list = None, globals_base: int = None,
                 self.asm.emit_label_rel(fail, here_offset=-4)
             for s in body:
                 self._emit_stmt(s)
-            if if_base is not None:
-                arm_ends.append(set(self._mub))
             if i < len(tests) - 1 or stmt.else_body is not None:
                 self._emit_b_to(end_label)
 
         if has_fallthrough_else:
             self.asm.label(else_label)
-            if if_base is not None:
-                self._mub = set(if_base)
             if stmt.else_body:
                 for s in stmt.else_body:
                     self._emit_stmt(s)
-            if if_base is not None:
-                arm_ends.append(set(self._mub))
-        elif if_base is not None:
-            arm_ends.append(set(if_base))
-        if if_base is not None:
-            joined = set()
-            for e in arm_ends:
-                joined |= e
-            self._mub = joined
         self.asm.label(end_label)
 
     def _emit_b_to(self, label: str) -> None:
@@ -3844,19 +3673,6 @@ dylib_exports: list = None, globals_base: int = None,
                     f"time (got {step_val!r})")
             for_conds = ("hi", "gt") if _down else ("cc", "lt")
 
-        # The flagged names that may be unbound BEFORE the loop: the exit path
-        # — and the join after it — arrives where the body never ran, so the
-        # state there is the pre-loop one, and the restore below is what hands
-        # it to the else body and to the code after the loop. Taken AFTER the
-        # prologue store above because with `bind_after_test` false that store
-        # runs on every path, empty range included: the target is bound there
-        # wherever the loop goes, and the flag its hook sets says so, so a
-        # check after such a loop would be dead code in the image. The body
-        # needs no save of its own: the target's `init:` store (or the
-        # prologue's) has already narrowed it out, and a name the body stores
-        # is a name the flag SETS, through the same hook.
-        saved_mub = set(self._mub) if self._lb_flags else None
-
         self._loops.append({"start": start_label, "step": step_label,
                             "break": end_label,
                             "fin_depth": len(self._pending_finally)})
@@ -3906,8 +3722,6 @@ dylib_exports: list = None, globals_base: int = None,
                 self.asm.emit_label_rel(start_label, here_offset=-4)
 
             self.asm.label(false_label)
-            if saved_mub is not None:
-                self._mub = saved_mub
             for s in (else_body or []):
                 self._emit_stmt(s)
             self.asm.label(end_label)
@@ -3992,12 +3806,6 @@ dylib_exports: list = None, globals_base: int = None,
             self.asm.emit(encode_movz_wd_imm(0, 0))
             self._store_var(fi_name, 0)
 
-            # The `_emit_loop` twin: the body runs only past the count test,
-            # where the per-element store has already bound the target (and
-            # set its flag through the same hook), so the pre-loop state is
-            # the one the false path and the join after the loop carry.
-            saved_mub = set(self._mub) if self._lb_flags else None
-
             self._loops.append({"start": start_label, "step": step_label,
                                 "break": end_label,
                                 "fin_depth": len(self._pending_finally)})
@@ -4071,8 +3879,6 @@ dylib_exports: list = None, globals_base: int = None,
                 self._emit_b_to(start_label)
 
                 self.asm.label(false_label)
-                if saved_mub is not None:
-                    self._mub = saved_mub
                 for s in else_body:
                     self._emit_stmt(s)
                 self.asm.label(end_label)
@@ -6100,7 +5906,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         shared text, so x86-64 cannot describe the same construct differently,
         and both backends ask it at BOTH comparison sites (`_emit_binop` for a
         value and `_emit_branch_unless_cmp` for a condition) — the choke-point
-        argument `bugs/formal/FORMAL_string_value_model.md` makes for `if s < t:`
+        argument `bugs/FORMAL_string_value_model.md` makes for `if s < t:`
         bypassing `_emit_binop`, which is exactly how a string comparison came
         to be a diagnostic in one context and a branch in the other.
         """
@@ -7052,7 +6858,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         **Two lines of delegation**, and `M.print_kwargs`'s docstring is where
         the decision and its reasons are: `flush=` is answered there (the
         largest `codegen-refused` family in this repository's own source, per
-        `bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md` §0.2), and the rule
+        `bugs/FORMAL_proof_coverage_census_2026-10-03.md` §0.2), and the rule
         that the keyword is dispatched BEFORE its value is inspected is what
         stops a bool from being refused with a sentence about `sep`."""
         return M.print_kwargs(e, "arm64")
@@ -7112,7 +6918,7 @@ ctor_field_value=self._ctor_field_value_for(name),
     # computes CPython's spelling lives at `M.FLOAT_REPR_SYMBOL` — and this
     # method pair is the ARM half of the branch and the buffer, the machine
     # part only this backend can spell. The algorithm is the validated one
-    # (`bugs/formal/FORMAL_a_float_has_no_print_spelling.md`'s next step): the
+    # (`bugs/FORMAL_a_float_has_no_print_spelling.md`'s next step): the
     # specials from the bits, then `%.*g` at the smallest precision n that
     # parses back to the same 64 bits (a `snprintf`/`strtod` round trip),
     # laid out in CPython's own notation — scientific iff E >= 16 or
@@ -7231,12 +7037,10 @@ ctor_field_value=self._ctor_field_value_for(name),
         a.emit(encode_ldr_xt_xn_imm(11, 31, 136))    # a_bits, frame is +64
         a.emit(encode_str_xt_xn_imm(11, 31, 8))      # [area+8] = a
         a.emit_extern_bl("snprintf")
-        self._float_repr_call_addrs.append(a.extern_refs[-1][1])
         a.emit(encode_add_xd_xn_imm(31, 31, 64))
         a.emit(encode_add_xd_xn_imm(0, 31, 16))      # x0 = buf
         a.emit(encode_add_xd_xn_imm(1, 31, 64))      # x1 = &endptr
         a.emit_extern_bl("strtod")
-        self._float_repr_call_addrs.append(a.extern_refs[-1][1])
         a.emit(encode_fmov_v_to_gpr(14, 0))          # x14 = parsed bits
         a.emit(encode_ldr_xt_xn_imm(11, 31, 72))
         a.emit(encode_cmp_xn_xm(14, 11))
@@ -7905,7 +7709,7 @@ ctor_field_value=self._ctor_field_value_for(name),
     # emitter is allowed to choose, and that is the entire point: the pre-change
     # tree could only have emitted an 8-byte load, which over-reads a `UInt8`
     # pointee by seven bytes and faults at a page edge (see the measurement in
-    # `bugs/formal/FORMAL_pointer_value_model.md`).
+    # `bugs/FORMAL_pointer_value_model.md`).
     #
     # The two answers and the two instructions:
     #
@@ -8757,7 +8561,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         which is another C library call (`__error`) and therefore another
         unfollowable call in a block the proof framework has to cross — so the
         foldable case is refused here, precisely, and the rest is
-        `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`.
+        `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`.
         """
         reason = M.int_parse_overflow_refusal(
             M.fold_literal_expr(text_expr), base)
@@ -9351,7 +9155,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             # a wrapped number or a status code. The run-time half — the same
             # predicate over a value the build cannot know — is emitted by
             # `_emit_int_alu_checked`, which is wired up but not yet reachable;
-            # `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`
+            # `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`
             # says why and what it needs.
             if M.int_overflow_traps(op, result_t, pointer_arith=bool(scale)):
                 reason = M.fold_overflow(op, e.left, e.right, result_t,
@@ -11398,7 +11202,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             # `struct Outer: n: Inner` with `o.n.d.x = 5` built, ran and died of
             # SIGSEGV (exit 139), while the depth-1 and depth-2 reads of the same
             # three structs answered correctly.
-            # `bugs/formal/FORMAL_a_one_field_struct_whose_only_field_is_a_nested_
+            # `bugs/FORMAL_a_one_field_struct_whose_only_field_is_a_nested_
             # frame.md` §2 has the disassembly.
             #
             # AFTER the defaults above, not before: the slot this stores into is
@@ -11635,7 +11439,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             # lives. `value_callee_can_hold_a_function` above reads the
             # DECLARATION; this reads the FLOW, and neither can see the other:
             # a local bound to `17` has no annotation to refuse on, and
-            # `bugs/formal/FORMAL_function_value_calls_are_not_proved_to_be_calls.md`
+            # `bugs/FORMAL_function_value_calls_are_not_proved_to_be_calls.md`
             # is the doc for what is left when neither has an answer.
             holds = M.callee_word_is_not_an_address(
                 self._cur_fn, name, self._vkinds)
@@ -13131,7 +12935,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             #
             # Both are decidable when the AMOUNT is a literal and the BASE is
             # not, and precisely decidable when both are; the variable-base case
-            # is `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`.
+            # is `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`.
             reason = M.shift_overflow_refusal(
                 op, M.fold_literal_expr(e.right), M.fold_literal_expr(e.left),
                 [e.left, e.right])
@@ -13227,7 +13031,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             #
             # All three are decidable here whenever both operands fold, which
             # is the case the corpus and a reader hit first. The variable-base
-            # case is `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_
+            # case is `bugs/FORMAL_integer_overflow_at_run_time_is_still_
             # untrapped.md`.
             reason = M.power_overflow_refusal(
                 M.fold_literal_expr(e.left), M.fold_literal_expr(exp),
@@ -14646,14 +14450,14 @@ ctor_field_value=self._ctor_field_value_for(name),
 
         `base_reg` points at the blob's COUNT word, so the elements start at
         `base_reg + 8` and each element is one 8-byte word -- a set lowers as a
-        list of words on this path (`bugs/formal/FORMAL_set_value_model.md`).  This is
+        list of words on this path (`bugs/FORMAL_set_value_model.md`).  This is
         the linear scan `_emit_set_op` runs per element of the other operand,
         lifted out so `&`, `-`, `^` and `|` share one implementation rather
         than four copies of the same loop.
 
         The comparison is element WORD to element WORD, which for a set of
         strings is a comparison of `char *` ADDRESSES; that is the same limit
-        the union's dedup always had, and `bugs/formal/FORMAL_set_value_model.md`
+        the union's dedup always had, and `bugs/FORMAL_set_value_model.md`
         owns it.
 
         Clobbers X10/X11/X12 and `out_reg`; X0-X9 and the caller's registers
@@ -14730,7 +14534,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         The scan is over `other[0..other_n)`, and the element is read as a whole
         8-byte slot, which is `_emit_set_union`'s dedup compare and the same
         thing CPython means by membership here — a set lowers as a list on this
-        path (`bugs/formal/FORMAL_set_value_model.md`), so the elements are words and
+        path (`bugs/FORMAL_set_value_model.md`), so the elements are words and
         the compare is a word compare."""
         self.asm.emit(encode_movz_wd_imm(5, 0))          # i = 0
         self._while_counter += 1

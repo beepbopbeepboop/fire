@@ -179,29 +179,6 @@ const char *AsyncRT_DeviceContext_enqueueHostFunctionRange(
     const int64_t *coro_handles,
     int64_t count);
 
-/* --- Intrinsic RAII guard for tempfile.TemporaryDirectory() inside async def ---
- * mkdtemp on enter (C init), rmtree on exit (C fini / C++ dtor).  Coexists with
- * plain C API (fopen, write, etc.): all operations use C library calls only,
- * never a C++ exception crosses the C boundary.  The C++ destructor runs when
- * the coroutine frame is destroyed, so cleanup survives an await inside the
- * body. */
-typedef struct mojo_tempdir_guard_s {
-    char *path; /* owned; set by init, freed by fini */
-} mojo_tempdir_guard_t;
-
-/* Create temp directory via mkdtemp(); write path into g->path. Returns 0 on
- * success, non-zero on failure. Never throws across the C boundary. */
-int mojo_tempdir_guard_init(mojo_tempdir_guard_t *g);
-
-/* Recursively remove directory at g->path using only C calls (opendir,
- * readdir, unlink, rmdir), then free g->path and zero it. Safe to call
- * multiple times (idempotent when g->path is NULL). */
-void mojo_tempdir_guard_fini(mojo_tempdir_guard_t *g);
-
-/* Return the bound path (str-valued) for `as d:`. Owned by guard; caller
- * must not free. Returns NULL if init never succeeded. */
-const char *mojo_tempdir_guard_path(const mojo_tempdir_guard_t *g);
-
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

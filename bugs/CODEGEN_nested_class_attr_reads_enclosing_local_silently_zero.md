@@ -86,12 +86,8 @@ Still open:
    `class` statement, never freed (same class as
    `CODEGEN_closure_env_and_boxed_local_never_freed.md`). A `class` statement
    in a hot loop leaks about 8 bytes per attribute per iteration.
-5. **CLOSED in round 9** (2026-11-01). A no-initializer container field
-   (`var xs: List[Int]`) was seeded into every instance from ONE per-class
-   global, so all instances shared a list (`a.xs.append(1)` showed in `b.xs`),
-   at module scope too. `_alloc_S` now builds a fresh `mojo_list_new/dict_new/
-   set_new` per instance (`module_gen.py` `_fresh_field_cattrs`). Tests:
-   `gimple_noinit_container_field_per_instance`, `..._nested_...`.
+5. **Container defaults with no initializer** (`var xs: List[Int]` in a class
+   body) are still per-class globals seeded by the allocator, not per execution.
 6. **Generators** are unchanged: `mojo/middle/coro.py`
    `_nested_class_nonliteral_attr` still refuses a generator whose nested class
    has a non-literal class attribute (`nested_class_local_attr_refused` in

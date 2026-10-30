@@ -58,7 +58,7 @@ from mojo.middle.resolve_shared import (
     _as_assignstmt_node, _as_multiassignstmt_node, _as_str, _as_vardecl_node, _calls_in_stmts, _closure_value_locals,
     _collect_calls_in_stmt, _collect_local_container_elems, _collect_return_elems, _decode_str_literal_text, _dtrace, _eval_const,
     _infer_list_elem_type, _infer_local_var_types, _infer_return_elem_type, _scratch_dict_copy, _is_none_literal, _is_sys_stderr, _lbn_target_names,
-    _lbn_walk, _module_const_int, _operand_is_dict, _parse_fstring_parts, _prepass_callee_key, _quick_type, _module_attr_call_return_type, _record_closure_alias,
+    _lbn_walk, _module_const_int, _operand_is_dict, _parse_fstring_parts, _prepass_callee_key, _quick_type, _record_closure_alias,
     _refine_generic_return_type, _sms_key, _str_literal_to_slit, _subst_idents, _type_expr_to_ann
 )
 from mojo.middle.calls_shared import user_dunder_repr_call
@@ -1022,13 +1022,6 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # _imported_generator_bindings deliberately stays
                 # per-instance: each module's import bindings are its own.
                 temp_gen._generator_home_api = gen._generator_home_api
-                # share: a generator held in a module global (`_coro = _coro()`)
-                # is recorded by its DEFINING module's store and read by an
-                # importer through the accessor; both tables are keyed by
-                # (defining module, name) so sharing them cannot cross-wire two
-                # modules' same-named globals. See `ginf.global_generator_key`.
-                temp_gen._global_generator_api = gen._global_generator_api
-                temp_gen._global_generator_api_poisoned = gen._global_generator_api_poisoned
                 # share: link mode's own link-line accumulators
                 # (dylibs/objects the final `fire.py build` link step
                 # needs — see compile_linked's own docstring) must be
@@ -2323,9 +2316,6 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
         filename = getattr(gen, '_current_filename', '') or '<unknown>'
         line = getattr(gen, '_current_line', None)
         loc = f'{filename}:{line}' if line else filename
-        _fn = getattr(gen, 'current_func_name', None)
-        if _fn:
-            loc = f'{loc} in function `{_fn}`'
         raise TypeError(
             f'cannot coerce {s} to {d} (incompatible container kinds) '
             f'at {loc}: value={v!r} dest={dest!r}')
@@ -3695,9 +3685,9 @@ def _compr_enumerate_loop(gen, node, gen0, res: str, res_type: str, it_val: str,
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
     # The comprehension is over: every name it bound is the enclosing
-    # function's own binding again (see `ginf._restore_binding`).
+    # function's own binding again (see `ginf._compr_restore_target`).
     for _gn in gi:
-        ginf._restore_binding(gen, _gn[0], _gn[1])
+        ginf._compr_restore_target(gen, _gn[0], _gn[1])
 
 
 def _compr_str_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
@@ -3721,7 +3711,7 @@ def _compr_str_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     gen._emit(f"  {idx64} = {st};")
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
-    ginf._restore_binding(gen, _as_str(gen0.target), saved_target)
+    ginf._compr_restore_target(gen, _as_str(gen0.target), saved_target)
 
 
 def _compr_cstr_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
@@ -3775,7 +3765,7 @@ def _compr_cstr_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     gen._emit(f"  {idx64} = {st};")
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
-    ginf._restore_binding(gen, _as_str(gen0.target), saved_target)
+    ginf._compr_restore_target(gen, _as_str(gen0.target), saved_target)
 
 
 def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
@@ -3939,17 +3929,6 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         # single-TU `--dump myinterpreter.py`.
         _lr = gen.lower_expr(node.element)
         et = _as_str(_lr[0]); ev = _lr[1]
-        if et == 'int64_t' and ev in gen._boxed_vals:
-            # the element IS a tagged word taken straight off a tagged-word
-            # generator (`list(g())`, `[v for v in g()]`): append it under the
-            # kind it carries (a float box as a double, a bool as a bool, a
-            # string as a string) instead of truncating it through mojo_box_int,
-            # and let the list render itself from its own kinds row.
-            gen._emit_call('void', '', 'mojo_list_append_word',
-                           [('MojoList *', res), ('int64_t', ev)])
-            gen._struct_slot_kinds[res] = ginf._RuntimeKinded(['int', 'str'])
-            gen._maybe_kinds_vals.add(res)
-            return
         suf = gimple_ctypes.TypeLattice.list_suffix(et)
         ev_cast = gen._cast_for_list(et, ev, suf)
         # GIMPLE: load global string literals into temp before function call
@@ -4094,32 +4073,3 @@ def _eval_const_compare_op(gen, op: str, left, right):
     return None
 
 
-
-
-# ── The C++ side of the container-kind chokepoint ───────────────────────────
-# `_safe_coerce_emit` guards the GIMPLE C backend. The coroutine backend emits
-# C++ TEXT, where a container-kind cast is spelled in the emitted source and
-# there is no temp to route through it. These three helpers are the only place
-# that text is composed, so `test_no_new_container_casts.py` (which exempts this
-# file) still sees every other container-kind cast as a regression.
-
-def cpp_container_cast_prefix(kind: str, via_intptr: bool) -> str:
-    """`(MojoList *)(intptr_t)` or `(MojoList *)`: the cast a C++ coroutine
-    expression applies to the operand text that follows. `kind` is the bare
-    struct name (`MojoList`, `MojoDict`, `MojoSet`, `MojoBytes`)."""
-    if via_intptr:
-        return f"({kind} *)(intptr_t)"
-    return f"({kind} *)"
-
-
-def container_null(kind: str) -> str:
-    """The typed NULL of a container kind, `(MojoDict *)0`."""
-    return f"({kind} *)0"
-
-
-def cpp_word_container_operator(kind: str, via_intptr: bool) -> str:
-    """`operator MojoList *() const { return (MojoList *)w; }`, one conversion
-    of the pointer-sized WORD struct the coroutine backend returns for a call
-    whose C return type is not final yet."""
-    return (f"operator {kind} *() const {{ return "
-            f"{cpp_container_cast_prefix(kind, via_intptr)}w; }}")

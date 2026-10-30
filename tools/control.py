@@ -191,18 +191,6 @@ def questions(t):
     return re.findall(r"^\s*QUESTION:\s*(.+)$", txt, re.M)
 
 
-def holds_claims(t):
-    """Whether task T still holds its bug claims. Only work holds: a live worker, or commits that have not landed. A
-    dead worker that committed nothing holds nothing, so a retry of the same bug is never refused by it (2026-11-01:
-    23 such entries, all with no commits, refused every retry for days)."""
-    st = state_of(t)
-    if st in TERMINAL:
-        return False
-    if st == "running":
-        return True
-    return ahead(t) > 0
-
-
 def ahead(t):
     r = subprocess.run(["git", "rev-list", "--count", "master.." + t["branch"]],
                        cwd=MAIN, capture_output=True, text=True)
@@ -229,13 +217,12 @@ def cmd_spawn(a):
         if a.name in tasks:
             sys.exit("task %s already exists" % a.name)
         for other, t in tasks.items():
-            if not holds_claims(t):
+            if state_of(t) in TERMINAL:
                 continue
             for c in a.claim:
                 for oc in t["claims"]:
                     if conflicts(c, oc):
-                        sys.exit("claim %r conflicts with %r held by task %s (%s, %d commits)" % (
-                            c, oc, other, state_of(t), ahead(t)))
+                        sys.exit("claim %r conflicts with %r held by task %s" % (c, oc, other))
         ext = external_conflicts(a.claim)
         if ext:
             sys.exit("claim %r conflicts with %r held by external session %s" % (ext[0][1], ext[0][2], ext[0][0]))
@@ -259,10 +246,8 @@ def cmd_spawn(a):
             # opencode v2: --model belongs to `run`, there is no --dir (cwd=wt below)
             cmd = ["opencode", "run", "--model", a.model, "--auto", "--title", a.name, instr]
         os.makedirs(os.path.join(wt, ".tmp"), exist_ok=True)
-        # the worker runs under a CPU ceiling (tools/cpu_cap.py): a runaway loop stops itself, and its CPU is recorded
-        capped = [sys.executable, os.path.join(MAIN, "tools", "cpu_cap.py"), "wrap", "--name", a.name, "--"] + cmd
         wrapper = 'export TMPDIR=%s PATH=%s:"$PATH"; ( %s ) >> work.log 2>&1 </dev/null; echo $? > exitcode' % (
-            sh(os.path.join(wt, ".tmp")), sh(git_shim_dir()), " ".join(map(sh, capped)))
+            sh(os.path.join(wt, ".tmp")), sh(git_shim_dir()), " ".join(map(sh, cmd)))
         open(os.path.join(wt, "work.log"), "a").write("=== control: spawned %s on %s at %s ===\n" % (
             a.name, a.model, time.strftime("%F %T")))
         p = subprocess.Popen(["sh", "-c", wrapper], cwd=wt, start_new_session=True,
@@ -270,7 +255,7 @@ def cmd_spawn(a):
         tasks[a.name] = dict(name=a.name, slot=n, worktree=wt, branch=branch, claims=a.claim,
                              model=a.model, pool=a.pool if sl else None, kind=kind, pid=p.pid,
                              started=time.strftime("%F %T"),
-                             base=a.base, files=a.file, task=task, cls=getattr(a, "cls", None),   # what `bounce` needs to put it back on the queue
+                             base=a.base, files=a.file, task=task,   # what `bounce` needs to put it back on the queue
                              state="running", summary=task.strip().splitlines()[0][:200])
     print("spawned %s: %s (pid %d), log %s/work.log" % (a.name, wt, p.pid, wt))
 
@@ -465,14 +450,13 @@ def cmd_enqueue(a):
     task = a.task if a.task is not None else open(a.task_file).read()
     # a task queued without --pool runs on whichever slot is free first (see refill); --pool only prefers one
     item = dict(name=a.name, claims=a.claim, base=a.base, task=task, files=a.file, needs=a.needs or [],
-                added=time.time(), pool=getattr(a, "pool", None), only=bool(getattr(a, "only", False)),
-                cls=getattr(a, "cls", None))
+                added=time.time(), pool=getattr(a, "pool", None))
     json.dump(item, open(os.path.join(qdir(), a.name + ".json"), "w"), indent=1)
     print("queued %s (needs: %s)" % (a.name, ", ".join(item["needs"]) or "nothing"))
 
 
 LIMIT_ERR = re.compile(r"model (is )?(unavailable|not found)|unknown model|usage limit|rate.?limit|quota|\b429\b|too many requests|insufficient (credit|balance)|"
-                       r"limit (exceeded|reached)|resets? (at|in) |hit your (weekly |daily |5-hour )?limit", re.I)
+                       r"limit (exceeded|reached)|resets? (at|in) ", re.I)
 BREAKER_MIN = 30   # after a worker dies on arrival, start nothing new for this long
 
 
@@ -506,64 +490,13 @@ def dead_models():
     return {m: e["until"] for m, e in _ledger().items() if e["until"] > time.time()}
 
 
-RESET_MARGIN_S = 300   # a ban that ends at the printed reset time lifts five minutes after it, so the limit has really cleared
-RESET_RE = re.compile(r"resets (\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(([A-Za-z_/+-]+)\)", re.I)
-
-
-def next_wall_time(hour, minute, tz, now=None):
-    """The epoch time of the next HH:MM in zone TZ strictly after NOW (tomorrow if today's has passed)."""
-    from datetime import datetime, timedelta
-    from zoneinfo import ZoneInfo
-    now = time.time() if now is None else now
-    t = datetime.fromtimestamp(now, ZoneInfo(tz)).replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if t.timestamp() <= now:
-        t += timedelta(days=1)
-    return t.timestamp()
-
-
-def replenish_at(sl, now=None):
-    """When a daily free tier gets its tokens back: the slot's `replenish` time plus its margin, or None when the slot
-    has no daily replenish. pool.json: "replenish": {"tz": "UTC", "at": "00:00", "margin_min": 1}."""
-    r = sl.get("replenish")
-    if not r:
-        return None
-    hh, mm = (int(x) for x in r["at"].split(":"))
-    return next_wall_time(hh, mm, r["tz"], now) + r.get("margin_min", 1) * 60
-
-
-def reset_at(text, now=None):
-    """The epoch time of the NEXT reset the claude CLI printed in a limit line ("resets 11am (America/Los_Angeles)"),
-    or None when the text carries no reset. The next occurrence of that wall-clock time in that zone, strictly after now."""
-    m = RESET_RE.search(text or "")
-    if not m:
-        return None
-    hour, minute = int(m.group(1)) % 12 + (12 if m.group(3).lower() == "pm" else 0), int(m.group(2) or 0)
-    return next_wall_time(hour, minute, m.group(4), now)
-
-
-def limit_reset(t):
-    """The reset time of the limit that stopped worker T, read from its own log; None if its log names none."""
-    lp = os.path.join(t["worktree"], "work.log")
-    if not os.path.exists(lp):
-        return None
-    return reset_at(re.sub(r"\x1b\[[0-9;]*m", "", open(lp, errors="replace").read()[-3000:]))
-
-
-def mark_dead(model, sl, until=None):
-    """Ban MODEL until UNTIL (a limit's printed reset) when given, else for the slot SL's recovery time. Without a reset,
-    the second limit inside a day uses the long window."""
+def mark_dead(model, sl):
+    """Ban MODEL for the slot SL's recovery time; the second limit inside a day uses the long window."""
     d, now = _ledger(), time.time()
     prev = d.get(model, {})
     strikes = prev.get("strikes", 0) + 1 if now - prev.get("last", 0) < 86400 else 1
-    if until and until > now:
-        end = until + RESET_MARGIN_S
-    elif replenish_at(sl, now):
-        end = replenish_at(sl, now)     # a daily free tier: back when its tokens come back, not a fixed block
-    else:
-        hours = sl.get("long_recover_days", 0) * 24 if strikes >= 2 and sl.get("long_recover_days") else sl["recover_hours"]
-        end = now + hours * 3600
-    hours = (end - now) / 3600
-    d[model] = {"until": end, "strikes": strikes, "last": now}
+    hours = sl.get("long_recover_days", 0) * 24 if strikes >= 2 and sl.get("long_recover_days") else sl["recover_hours"]
+    d[model] = {"until": now + hours * 3600, "strikes": strikes, "last": now}
     json.dump(d, open(os.path.join(ctl_dir(), LEDGER), "w"), indent=1)
     return hours
 
@@ -593,8 +526,7 @@ def limit_hit(t):
     if not os.path.exists(lp):
         return False
     lines = re.sub(r"\x1b\[[0-9;]*m", "", open(lp, errors="replace").read()[-3000:]).splitlines()
-    errs = [l for l in lines if re.match(r"\s*Error:", l) or re.search(r"usage limit reached", l, re.I)
-            or re.match(r"\s*You've hit your", l)]   # the claude CLI's own limit line
+    errs = [l for l in lines if re.match(r"\s*Error:", l) or re.search(r"usage limit reached", l, re.I)]
     return any(LIMIT_ERR.search(l) for l in errs)
 
 
@@ -623,14 +555,13 @@ def bounce(name, t):
     if extra:
         return False
     if t.get("pool") and limit_hit(t):
-        mark_dead(t["model"], pool_slot(t["pool"]), limit_reset(t))   # the ban ends at the printed reset, else the recovery time
+        mark_dead(t["model"], pool_slot(t["pool"]))   # the task stays on its slot; refill waits for the ban to lift
     git("worktree", "remove", "--force", wt, check=False)
     git("branch", "-D", t["branch"], check=False)
     with registry() as reg:
         reg.pop(name, None)
     item = dict(name=name, claims=t["claims"], base=t.get("base") or "master", task=t.get("task") or _task_text(t),
-                files=t.get("files", []), needs=[], added=time.time(), model=t.get("model"), pool=t.get("pool"),
-                cls=t.get("cls"))
+                files=t.get("files", []), needs=[], added=time.time(), model=t.get("model"), pool=t.get("pool"))
     json.dump(item, open(os.path.join(qdir(), name + ".json"), "w"), indent=1)
     return True
 
@@ -638,22 +569,8 @@ def bounce(name, t):
 def pick_slot(item, busy):
     """The slot a queued task starts on now: its preferred slot if that is free, else the first free, unbanned slot in
     pool order; None if every slot is full or banned. `busy` is running_by_slot() plus this pass's starts."""
-    if item.get("only"):                       # pinned: its slot or nothing
-        return pool_slot(item["pool"]) if item.get("pool") and slot_free(pool_slot(item["pool"]), busy) else None
-    slots = load_pool()["slots"]
-    if item.get("cls"):                        # a classed task stays in its class: its slots or nothing
-        slots = [x for x in slots if slot_class(x) == item["cls"]]
-    pref = item.get("pool")
-    order = [x for x in slots if x["name"] == pref] + [x for x in slots if x["name"] != pref]
+    order = ([pool_slot(item["pool"])] if item.get("pool") else []) + load_pool()["slots"]
     return next((x for x in order if slot_free(x, busy)), None)
-
-
-FORMAL_LANE = ("formal",)   # task-name prefixes that belong to the owner's FORMAL lane, never dispatched here
-CLASSES = ("easy", "mid", "hard")   # the work classes, weakest model first; a slot without a class is easy
-
-
-def slot_class(sl):
-    return sl.get("class", "easy")
 
 
 def cmd_refill(a):
@@ -688,9 +605,6 @@ def cmd_refill(a):
     items = sorted(items_all, key=lambda i: i["added"])
     started = 0
     items = [i for i in items if i["name"].startswith(tuple(a.prefix.split(",")))]
-    # The FORMAL lane is the owner's: its Qwen runs formal* tasks by hand, and the swarm never starts one, on any slot
-    # (2026-10-31: queued formal tasks were started on haiku, which is paid and not for the formal lane).
-    items = [i for i in items if not i["name"].startswith(FORMAL_LANE)]
     for it in items:
         if live + started >= a.target and not it["name"].startswith("fix-landed"):
             continue                      # a red master is repaired at once, whatever the slot count
@@ -701,11 +615,8 @@ def cmd_refill(a):
         sl = pick_slot(it, busy)
         if sl is None:
             continue                      # every slot is full or banned: the task waits
-        # a queued name can collide with a registry entry from an earlier attempt of the same chain (2026-10-30: two fixers
-        # were skipped on every pass as "already exists"); the task starts under a fresh name instead
-        name = it["name"] if it["name"] not in tasks else "%s-%d" % (it["name"][:50], int(time.time() * 1000) % 1000000)
-        ns = argparse.Namespace(name=name, claim=it["claims"], task=it["task"], task_file=None,
-                                file=it["files"], base=it["base"], model=None, pool=sl["name"], cls=it.get("cls"))
+        ns = argparse.Namespace(name=it["name"], claim=it["claims"], task=it["task"], task_file=None,
+                                file=it["files"], base=it["base"], model=None, pool=sl["name"])
         busy[sl["name"]] = busy.get(sl["name"], 0) + 1
         try:
             cmd_spawn(ns)
@@ -808,7 +719,7 @@ def cmd_guard(a):
     fan-out width, kill the largest such process whenever their SUM passes --total-gb. Says so in the log.
 
     Why: the gate's own jobs run under tools/memcap.py, but a worker's direct `fire.py build` / self-host
-    compile does not, and this compiler has a known 190 GB+ blow-up (bugs/mid/CODEGEN_bootstrap_resource_blowup.md).
+    compile does not, and this compiler has a known 190 GB+ blow-up (bugs/CODEGEN_bootstrap_resource_blowup.md).
     2026-09-29 the user had to kill a 200 GB+ mojo compile by hand. The default limit is above the 55 GB the
     `program` memclass is measured to need, so honest big jobs are not touched. RSS undercounts a process the
     OS has compressed or swapped, so this is a floor on protection, not a guarantee. Never touches a process
@@ -1063,7 +974,7 @@ def restart(name, why, model=None):
             "commit is 'WIP snapshot by controller'); review it, keep what is right, and finish the task. Original task:\n\n%s"
             % (name, why, _task_text(t)))
     ns = argparse.Namespace(name=new, claim=t["claims"], task=task, task_file=None, file=[], base=t["branch"],
-                            model=None, pool=t.get("pool"), cls=t.get("cls"))
+                            model=None, pool=t.get("pool"))
     cmd_spawn(ns)
     return new
 
@@ -1202,9 +1113,7 @@ def main():
     s = sub.add_parser("enqueue"); s.add_argument("name"); s.add_argument("--claim", action="append", required=True)
     g = s.add_mutually_exclusive_group(required=True); g.add_argument("--task"); g.add_argument("--task-file")
     s.add_argument("--file", action="append", default=[]); s.add_argument("--base", default="master")
-    s.add_argument("--needs", nargs="*"); s.add_argument("--pool", default=None, help="the pool slot this task prefers")
-    s.add_argument("--only", action="store_true", help="the task runs ONLY on its --pool slot (waits for it, never moves)")
-    s.add_argument("--cls", choices=CLASSES, default=None, help="the work class: only slots of this class take it")
+    s.add_argument("--needs", nargs="*"); s.add_argument("--pool", default=None, help="the pool slot this task must run on")
     s.set_defaults(f=cmd_enqueue)
     s = sub.add_parser("refill"); s.add_argument("--target", type=int, default=None, help="default: the pool's total slots")
     s.add_argument("--prefix", default="", help="start only queued tasks whose name begins with this"); s.set_defaults(f=cmd_refill)

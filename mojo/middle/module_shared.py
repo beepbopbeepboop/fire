@@ -146,7 +146,7 @@ def _selfhost_parsed_modules(sd: str) -> list:
     tokenized and parsed three times AND all three AST copies stayed live
     for the life of the process. That is both the repeated work and a
     contributor to the never-frees accumulation measured in
-    `bugs/mid/CODEGEN_bootstrap_resource_blowup.md`: one shared parse is ~1/3
+    `bugs/CODEGEN_bootstrap_resource_blowup.md`: one shared parse is ~1/3
     the instructions and ~1/3 the retained AST nodes.
 
     The cache is keyed PER FILE on `(path, mtime)`, not on the whole file
@@ -971,8 +971,7 @@ def _gmi_find_comptime_one(self, _node_list, _target, _out: dict):
             for _h in (_cn.handlers or []):
                 _gmi_find_comptime_one(self, getattr(_h, 'body', None) or [], _target, _out)
 
-def _gmi_phase17_collect_appends(self, _node_list: list, _append_hits: dict,
-                                 _store_hits: dict) -> None:
+def _gmi_phase17_collect_appends(self, _node_list: list, _append_hits: dict) -> None:
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
     comptime`'s docstring. Recursive; `_append_hits` (dict) threaded and
     annotated per the hoist GOTCHA.
@@ -1008,17 +1007,6 @@ def _gmi_phase17_collect_appends(self, _node_list: list, _append_hits: dict,
     argument resolves the same way it does in every other method.
     """
     for _n in _node_list:
-        if (isinstance(_n, AssignStmt)
-                and isinstance(_n.target, SubscriptExpr)
-                and isinstance(_n.target.obj, IdentExpr)):
-            # `d[k] = v` into a bare name: the dict analogue of the append
-            # record below, keyed on the same bare name. A name this
-            # function binds locally (parameter or local) is a different
-            # variable and is not the module global, so it records nothing.
-            _p17_dname = _as_str(_n.target.obj.name)
-            if _p17_dname not in self.var_types:
-                _store_hits.setdefault(_p17_dname, []).append(
-                    self._quick_type(_n.value))
         if (isinstance(_n, ExprStmt)
                 and isinstance(_n.value, CallExpr)
                 and isinstance(_n.value.func, MemberExpr)
@@ -1069,7 +1057,7 @@ def _gmi_phase17_collect_appends(self, _node_list: list, _append_hits: dict,
                     if _p17_pt:
                         self.var_types[_as_str(_p17_pn)] = _mojo_type(_p17_pt)
                 _gmi_phase17_collect_appends(
-                    self, _p17_m.body or [], _append_hits, _store_hits)
+                    self, _p17_m.body or [], _append_hits)
                 self.var_types = _p17_saved
                 self._scan_scratch_top = _p17_mark
             continue
@@ -1083,29 +1071,29 @@ def _gmi_phase17_collect_appends(self, _node_list: list, _append_hits: dict,
             for _lname, _ltype in self._infer_local_var_types(_as_funcdef_node(_n)).items():
                 if _lname not in self.var_types:
                     self.var_types[_lname] = _ltype
-            _gmi_phase17_collect_appends(self, _n.body or [], _append_hits, _store_hits)
+            _gmi_phase17_collect_appends(self, _n.body or [], _append_hits)
             self.var_types = _saved
             self._scan_scratch_top = _scratch_mark_17
         elif isinstance(_n, IfStmt):
-            _gmi_phase17_collect_appends(self, _n.then_body or [], _append_hits, _store_hits)
+            _gmi_phase17_collect_appends(self, _n.then_body or [], _append_hits)
             if _n.else_body:
-                _gmi_phase17_collect_appends(self, _n.else_body, _append_hits, _store_hits)
+                _gmi_phase17_collect_appends(self, _n.else_body, _append_hits)
             for _cond2, _ebody2 in (_n.elifs or []):
-                _gmi_phase17_collect_appends(self, _ebody2 or [], _append_hits, _store_hits)
+                _gmi_phase17_collect_appends(self, _ebody2 or [], _append_hits)
         elif isinstance(_n, (WhileStmt, ForStmt)):
-            _gmi_phase17_collect_appends(self, _n.body or [], _append_hits, _store_hits)
+            _gmi_phase17_collect_appends(self, _n.body or [], _append_hits)
             if getattr(_n, 'else_body', None):
-                _gmi_phase17_collect_appends(self, _n.else_body, _append_hits, _store_hits)
+                _gmi_phase17_collect_appends(self, _n.else_body, _append_hits)
         elif isinstance(_n, TryStmt):
-            _gmi_phase17_collect_appends(self, _n.body or [], _append_hits, _store_hits)
+            _gmi_phase17_collect_appends(self, _n.body or [], _append_hits)
             for _h in (_n.handlers or []):
-                _gmi_phase17_collect_appends(self, getattr(_h, 'body', None) or [], _append_hits, _store_hits)
+                _gmi_phase17_collect_appends(self, getattr(_h, 'body', None) or [], _append_hits)
             if isinstance(_n.else_body, list):
-                _gmi_phase17_collect_appends(self, _n.else_body, _append_hits, _store_hits)
+                _gmi_phase17_collect_appends(self, _n.else_body, _append_hits)
             if isinstance(getattr(_n, 'finally_body', None), list):
-                _gmi_phase17_collect_appends(self, _n.finally_body, _append_hits, _store_hits)
+                _gmi_phase17_collect_appends(self, _n.finally_body, _append_hits)
         elif isinstance(_n, WithStmt):
-            _gmi_phase17_collect_appends(self, _n.body or [], _append_hits, _store_hits)
+            _gmi_phase17_collect_appends(self, _n.body or [], _append_hits)
 
 def _gmi_container_ctype(v):
     """Container C type a container LITERAL expression provably evaluates

@@ -182,8 +182,6 @@ def x86_rex_w (b : UInt8) : Bool := (b.toNat &&& 8) != 0
 
 def x86_rex_r (b : UInt8) : Nat := if (b.toNat &&& 4) != 0 then 8 else 0
 
-def x86_rex_x (b : UInt8) : Nat := if (b.toNat &&& 2) != 0 then 8 else 0
-
 def x86_rex_b (b : UInt8) : Nat := if (b.toNat &&& 1) != 0 then 8 else 0
 
 /-! ### REX bit decoding, as `simp` facts
@@ -202,28 +200,7 @@ one-line `simp` over the bytes it was handed.
 -- The no-prefix case, which every instruction lemma for a plain opcode needs.
 @[simp] theorem x86_rex_w_zero : x86_rex_w (0 : UInt8) = false := rfl
 @[simp] theorem x86_rex_r_zero : x86_rex_r (0 : UInt8) = 0 := rfl
-@[simp] theorem x86_rex_x_zero : x86_rex_x (0 : UInt8) = 0 := rfl
 @[simp] theorem x86_rex_b_zero : x86_rex_b (0 : UInt8) = 0 := rfl
-
--- REX.X extends the SIB index register; the two indexed byte forms the
--- float-repr helper emits read it through this, so the same sixteen-by-one
--- `simp` treatment the other three bits get is what lets their step lemma close.
-@[simp] theorem x86_rex_x_41 : x86_rex_x (0x41 : UInt8) = 0 := by decide
-@[simp] theorem x86_rex_x_42 : x86_rex_x (0x42 : UInt8) = 8 := by decide
-@[simp] theorem x86_rex_x_43 : x86_rex_x (0x43 : UInt8) = 8 := by decide
-@[simp] theorem x86_rex_x_45 : x86_rex_x (0x45 : UInt8) = 0 := by decide
-@[simp] theorem x86_rex_x_46 : x86_rex_x (0x46 : UInt8) = 8 := by decide
-@[simp] theorem x86_rex_x_47 : x86_rex_x (0x47 : UInt8) = 8 := by decide
-@[simp] theorem x86_rex_x_40 : x86_rex_x (0x40 : UInt8) = 0 := by decide
-@[simp] theorem x86_rex_x_44 : x86_rex_x (0x44 : UInt8) = 0 := by decide
-@[simp] theorem x86_rex_x_48 : x86_rex_x (0x48 : UInt8) = 0 := by decide
-@[simp] theorem x86_rex_x_4c : x86_rex_x (0x4c : UInt8) = 0 := by decide
-@[simp] theorem x86_rex_x_49 : x86_rex_x (0x49 : UInt8) = 0 := by decide
-@[simp] theorem x86_rex_x_4a : x86_rex_x (0x4a : UInt8) = 8 := by decide
-@[simp] theorem x86_rex_x_4b : x86_rex_x (0x4b : UInt8) = 8 := by decide
-@[simp] theorem x86_rex_x_4d : x86_rex_x (0x4d : UInt8) = 0 := by decide
-@[simp] theorem x86_rex_x_4e : x86_rex_x (0x4e : UInt8) = 8 := by decide
-@[simp] theorem x86_rex_x_4f : x86_rex_x (0x4f : UInt8) = 8 := by decide
 
 @[simp] theorem x86_rex_w_40 : x86_rex_w (0x40 : UInt8) = false := by decide
 @[simp] theorem x86_rex_r_40 : x86_rex_r (0x40 : UInt8) = 0 := by decide
@@ -344,21 +321,7 @@ def x86_mem_addr (s : X86State) (code : Nat → UInt8) (rex modrm : UInt8)
       if ripRel then endAddr
       else if noSib then (x86_get_reg s (rm + x86_rex_b rex)).toNat
       else (x86_get_reg s ((code (atp + 1) &&& 7).toNat + x86_rex_b rex)).toNat
-    -- The SIB index register, when the SIB carries one, adds `index * 2^scale`
-    -- to the address.  Index field 4 means "no index" — the shape of every
-    -- displacement form this backend emits — so the contribution is 0 there and
-    -- every existing SIB step is unchanged.  The float-repr helper's
-    -- `[base + index]` byte forms (`encode_mov_rm8_r8_idx`,
-    -- `encode_movzx_r64_rm8_idx`) are the ones that read a real index register,
-    -- and `x86_rex_x` extends it, exactly as `x86_rex_b` extends the base.
-    let indexContribution : Nat :=
-      if noSib then 0
-      else
-        let sib := code (atp + 1)
-        let indexField := (sib.toNat >>> 3) &&& 7
-        if indexField = 4 then 0
-        else (x86_get_reg s (indexField + x86_rex_x rex)).toNat * 2 ^ ((sib.toNat >>> 6) &&& 3)
-    some ((Int.ofNat (base + indexContribution) + disp).toNat, sibExtra + dispN)
+    some ((Int.ofNat base + disp).toNat, sibExtra + dispN)
 
 /-- The low `n` bytes as a mask, for `n ≤ 7`; all ones from 8 up.
 
@@ -705,7 +668,7 @@ def x86_shift_post (s : X86State) (i digit : Nat) (a : UInt64) (k : Nat) :
     -- `formal/examples` program caught it (nothing there shifts a negative
     -- value by one) and why the fuzzer did: `formal/x86_64_model_fuzz.py -n 48
     -- --seed 11` minimises to `movsx R10, R15 ; << RCX, 1` with OF differing on
-    -- its own.  See `bugs/formal/FORMAL_x86_64_model_fuzz_hardware_anomalies.md`.
+    -- its own.  See `bugs/FORMAL_x86_64_model_fuzz_hardware_anomalies.md`.
     let ofBit :=
       if k != 1 then false
       else if digit = 4 then (x86_msb a != x86_msb res)
@@ -1031,7 +994,7 @@ def x86_step_rex (s : X86State) (code : Nat → UInt8) (rex op : UInt8) : Option
     -- pointee -- was a step the model could not take.  A run that stops early is
     -- the failure `formal/x86_64_model_coverage_test.py` exists to catch, and
     -- that file's sample list did not include this encoder, which is why it was
-    -- not already failing: see `bugs/formal/FORMAL_x86_64_coverage_test_misses_eight_encoders.md`.
+    -- not already failing: see `bugs/FORMAL_x86_64_coverage_test_misses_eight_encoders.md`.
     let modrm := code modrmPos
     let extra := match x86_mem_addr s code rex modrm modrmPos (rip + 4) with
       | some (_, n) => n | none => 0
@@ -1361,7 +1324,7 @@ their own, rather than inline in the plain one. The reason to keep it separate
 is instruction LENGTH: a `0x66`-prefixed opcode sits one byte further along than
 the same opcode without it, so a decoder that shared the plain path's byte
 positions would compute a successor that lands inside the next instruction.
-That is B6 in `bugs/formal/FORMAL_x86_64_end_to_end_proof.md`, where the `0x0F` escape
+That is B6 in `bugs/FORMAL_x86_64_end_to_end_proof.md`, where the `0x0F` escape
 being dispatched in two places is recorded as the costliest single bug in that
 file precisely because the two disagreed about the length. -/
 
@@ -1392,7 +1355,7 @@ def x86_step_op66 (s : X86State) (code : Nat → UInt8) (rex : UInt8) :
     -- `encode_mov_rm16_r16` always emits, `_rex` being 0x40 at a minimum), the
     -- opcode at `rip + 2` and the ModRM at `rip + 3` -- ONE byte further along
     -- than the same opcode without the prefix, which is B6 in
-    -- `bugs/formal/FORMAL_x86_64_end_to_end_proof.md` and the reason this is not a
+    -- `bugs/FORMAL_x86_64_end_to_end_proof.md` and the reason this is not a
     -- fourth arm of `x86_step_plain`.
     let modrm := code (rip + 3)
     let extra := match x86_mem_addr s code rex modrm (rip + 3) (rip + 4) with
@@ -1726,7 +1689,7 @@ def x86_step_plain (s : X86State) (code : Nat → UInt8) (b0 : UInt8) : Option X
     -- `0x66`, so the plain decoder is what sees it. Adding a third dispatcher
     -- for one instruction would have been a second place that has to agree with
     -- this one about instruction LENGTH, which is B6 in
-    -- `bugs/formal/FORMAL_x86_64_end_to_end_proof.md` — the `0x0F` escape is already
+    -- `bugs/FORMAL_x86_64_end_to_end_proof.md` — the `0x0F` escape is already
     -- dispatched twice and the two dispatches disagreed about it once.
     --
     -- So the two prefixes are read here, in the order they are encoded: `0x66`,
@@ -2401,7 +2364,7 @@ theorem x86_step_imul_r64 (s : X86State) (code : Nat → UInt8) (m : Nat)
     had no row for, so the six corpus examples that use `not` or `neg` had no
     path tree at all and reported `no step lemma wired for` — a REFUSAL, which is
     this file's way of being honest, and also a statement that the form is not
-    wired when the arithmetic is already here.  `bugs/formal/FORMAL_x86_64_instruction_coverage_backlog.md`'s
+    wired when the arithmetic is already here.  `bugs/FORMAL_x86_64_instruction_coverage_backlog.md`'s
     "three shapes" does not include this one, which is the reason it survived:
     the decoder named the form and the ISA census counted it covered, so the
     only thing that could see the gap was asking `_FORMS`.
@@ -3299,58 +3262,6 @@ theorem x86_step_mov_mem_sib_disp32 (s : X86State) (code : Nat → UInt8)
         x86_rm_read, x86_rm_write,
         h_rip, h_b0, h_b1, h_b2, h_b3, h_disp, h_rex, h_w, h_mod, h_rm, h_reg,
         h_rb]
-
--- The two SIB-INDEXED byte forms: the same opcodes as the displacement forms
--- above, but the SIB carries a real index register, so the effective address is
--- `base + index * 2^scale` rather than `base + disp`.  They are the digit
--- store/load of the float-repr helper, and the decoder used to refuse them
--- outright (`bugs/formal/FORMAL_x86_64_decoder_refuses_sib_indexed_forms.md`); the
--- model reads the index through `x86_mem_addr`, which the `indexContribution`
--- term above makes it compute.  Pinned to the helper's SIB `0x0b` (scale 0,
--- index `rcx`, base `r11` — `h_rb`/`h_rx` say which REX bits put the base in
--- r8-r15 and keep the index in r0-r7), general over the rest of the REX byte
--- the way the `rsp`-base siblings are, because the SOURCE/DESTINATION register
--- is the ModRM `reg` field extended by `REX.R` and that varies.
-
-/-- `mov [r11 + rcx], r8b` (REX 88 /r, ModRM mod=00 rm=100, SIB 0b: scale 0,
-    index rcx, base r11) — the byte store half of the pair above. -/
-theorem x86_step_mov_rm8_sib_idx (s : X86State) (code : Nat → UInt8)
-    (m : Nat) (rex modrm : UInt8) (reg : Nat)
-    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x88)
-    (h_b2 : code (m + 2) = modrm) (h_b3 : code (m + 3) = 0x0b)
-    (h_rex : x86_is_rex rex = true)
-    (h_mod : modrm.toNat >>> 6 = 0) (h_rm : (modrm.toNat &&& 7) = 4)
-    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
-    (h_rb : x86_rex_b rex = 8) (h_rx : x86_rex_x rex = 0) :
-    x86_step s code = some { s with
-        mem := mem_write_bytes s.mem
-                (Int.ofNat ((x86_get_reg s 11).toNat + (x86_get_reg s 1).toNat)).toNat
-                (x86_get_reg s (reg + x86_rex_r rex)) 1,
-        rip := m + 4 } := by
-  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
-        x86_rm_read, x86_rm_write,
-        h_rip, h_b0, h_b1, h_b2, h_b3, h_rex, h_mod, h_rm, h_reg, h_rb, h_rx]
-
-/-- `movzx r8, byte [r11 + rcx]` (REX 0F B6 /r, ModRM mod=00 rm=100, SIB 0b) —
-    the byte load half of the pair: one byte read, zero-extended (the identity
-    for a one-byte `x86_narrow_extend`), into the `REX.R`-extended destination. -/
-theorem x86_step_movzx_rm8_sib_idx (s : X86State) (code : Nat → UInt8)
-    (m : Nat) (rex modrm : UInt8) (reg : Nat)
-    (h_rip : s.rip = m) (h_b0 : code m = rex) (h_b1 : code (m + 1) = 0x0f)
-    (h_b2 : code (m + 2) = 0xb6) (h_b3 : code (m + 3) = modrm)
-    (h_b4 : code (m + 4) = 0x0b)
-    (h_rex : x86_is_rex rex = true)
-    (h_mod : modrm.toNat >>> 6 = 0) (h_rm : (modrm.toNat &&& 7) = 4)
-    (h_reg : (modrm.toNat >>> 3) &&& 7 = reg)
-    (h_rb : x86_rex_b rex = 8) (h_rx : x86_rex_x rex = 0) :
-    x86_step s code = some
-      { x86_set_reg s (reg + x86_rex_r rex)
-          (mem_read_bytes s.mem
-               (Int.ofNat ((x86_get_reg s 11).toNat + (x86_get_reg s 1).toNat)).toNat 1)
-        with rip := m + 5 } := by
-  simp [x86_step, x86_step_rex, x86_get_reg, x86_set_reg, x86_mem_addr,
-        x86_rm_read, x86_rm_write, x86_narrow_extend,
-        h_rip, h_b0, h_b1, h_b2, h_b3, h_b4, h_rex, h_mod, h_rm, h_reg, h_rb, h_rx]
 
 /-- `mov r64, qword [rsp + 0]` (REX.W 8B /r, ModRM mod=00 rm=100, SIB 24: scale 0,
     index none, base rsp).
