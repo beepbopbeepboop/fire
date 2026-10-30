@@ -13,7 +13,7 @@ these, which is the open item 3 below.
 the lowering can see.
 - `fire_compiler.desugar_namedtuples` records the class names it lowers in
   `DESUGARED_NAMEDTUPLE_NAMES`, cleared in place (a rebound global is what
-  stranded the genexp list; see bugs/CODEGEN_desugared_genexp_names_stale_import.md).
+  stranded the genexp list; see the desugared-genexp-names stale-import fix).
 - `gimple_codegen.py` hands them to the generator as `_namedtuple_class_names`.
 - `mojo/backend_gimple/emit_calls.py::_refuse_namedtuple_tuple_use` refuses
   with the named message (`has no tuple protocol`) when the operand's static C
