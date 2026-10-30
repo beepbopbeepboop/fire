@@ -200,6 +200,8 @@ def probe(batch):
     r = subprocess.run([sys.executable, os.path.join(HERE, "integrate.py"), "--stdlib", "--probe", "--only"] + batch,
                        capture_output=True, text=True, cwd=C.MAIN)
     out = r.stdout + r.stderr
+    if "another integrator" in out:                  # the lock is held (the post-landing verifier runs under it)
+        return "BUSY", [], [], out
     pm = re.search(r"^PROBE (GREEN|RED): ?(.*)$", out, re.M)
     if not pm:
         return "EMPTY", [], [], out
@@ -247,6 +249,9 @@ def land():
                 log("conflict %s: handing it to a merge fixer" % c)
                 I.enqueue_merge_fix(c, tasks[c], out)
                 batch.remove(c)
+        if verdict == "BUSY":
+            log("integrator busy (the post-landing verifier holds the lock); landing waits for the next pass")
+            break
         if verdict == "EMPTY" or not merged:
             break
         if verdict == "GREEN":
