@@ -53,23 +53,22 @@ repro segfaults at run time.
 
 **Still open (residual):**
 
-- `_Bool` operands are excluded from the gate: `t = True; print(t / 2)` prints
-  `0`; Python gives `0.5`.
-- `uint*` operands are excluded (kept from the original gate, which the
+- `_Bool` operands now included in the gate (2026-10-30): `t = True; print(t / 2)`
+  answers `0.5`; `test_bool_true_division_is_float` pins it.
+- `uint*` operands remain excluded (kept from the original gate, which the
   revert did not change): `UInt(7) / UInt(2)` prints `3`. Whether Mojo's
   `UInt` true division is a Float64 has not been checked against real Mojo
   (`tools/mojo`), so this is not asserted either way.
-- The `cpp_core.py` mirror is not reached by any program in this sweep
-  (`async def` division lowers through GIMPLE, `mojo_div_double (...)`), so it
-  is compile-checked only and has no run-time test.
+- The `cpp_core.py` mirror is reached via `_cpp_is_int_operand`; no
+  coroutine-run-time `/` test exists yet.
 - The stdlib gate (`stdlib-syntax`, `stdlib-dylib`) was not run on this
   branch; the struct-operand regression that caused the revert is the thing
   to watch.
 
 ## Next step
 
-1. Decide whether `_Bool` joins the gate (Python: `True / 2 == 0.5`), and
-   check Mojo's `UInt` true division against `tools/mojo` before touching the
+1. `_Bool` decided (included; `test_bool_true_division_is_float` passes).
+   Check Mojo's `UInt` true division against `tools/mojo` before touching the
    `uint` exclusion.
 2. Run the full stdlib gate once and compare `std/pathlib/path.mojo` and
    `std/simd.mojo`; if either regresses, bisect the struct-operand shape first.
