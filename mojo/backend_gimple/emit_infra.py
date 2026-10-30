@@ -3391,7 +3391,11 @@ def _char_to_cstr(gen, typ: str, val: str, transient: bool = False, word_ok: boo
         iv = gen._new_val('int64_t', f'(int64_t){val}')
         ikey = gen._call_expr('char *', 'mojo_int_str_transient',
                               [('int64_t', iv)])
-        gen._cstr_key_src[ikey] = val
+        # The release's `orig` is the int64_t WORD, not `val`: `val` is a
+        # `char *` here (this is the pointer-typed arm), and passing it as the
+        # release's int64_t argument is the `-Wint-conversion` the self-host
+        # build hit. `iv` is the same word, already typed.
+        gen._cstr_key_src[ikey] = iv
         return 'char *', ikey
     return typ, val
 

@@ -8832,6 +8832,28 @@ def main():
 main()
 """, "7\n9\n3\n1\nFalse\nTrue\n")
 
+    # The NONE side of the same provenance. `None` lowers to the literal '0',
+    # the same spelling an integer 0 has, so once any `0` literal is in the
+    # function `callee = None` looked like an integer assignment and carried
+    # the integer mark onto `callee`, which is a `char *` local on the `name`
+    # branch. Its later `in` key was then bit-cast into an int word and the
+    # release got the pointer as its int64_t `orig` (-Wint-conversion, the
+    # self-host `mojoc` build). The `None` store must discard, and the str key
+    # must still find its entry.
+    test_gimple_stdout("gimple_none_store_does_not_mark_str_local_as_int", """\
+def main():
+    zero = 0
+    known = {"foo": 1}
+    name = "foo"
+    if zero == 0:
+        callee = name
+    else:
+        callee = None
+    print(callee in known)
+    print(callee is None)
+main()
+""", "True\nFalse\n")
+
     # The STORE side of the same fact: a large key that is ASSIGNED to a name,
     # rather than written at the subscript. `gen._int_word_vals` was carried
     # across a plain assignment and a tuple unpack, and NOT across the two
