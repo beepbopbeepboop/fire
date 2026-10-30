@@ -308,7 +308,8 @@ def _cpp_except_handler_body(gen, handler, caught_var: str, declared: dict,
 
 
 def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
-                             struct_name: str | None = None) -> tuple[str, str, str, list]:
+                             struct_name: str | None = None,
+                             struct_def: str | None = None) -> tuple[str, str, str, list]:
     """Translate ONE supported generator FunctionDef into a
     self-contained C++20 coroutine fragment. Returns (cpp_text,
     value_ctype, base_name, param_ctypes). Raises
@@ -402,6 +403,18 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     # actually round-trip correctly, not just type-check.
     param_ctypes: list[tuple[str, str]] = []
     fn_params = list(fn.params or [])
+    # A nested SYNC generator that reads an enclosing def's parameter or
+    # local (see _nested_generator_captures). This emitter has no capture
+    # model for generator frames, so the body would name that variable at
+    # file scope and g++ would reject the .cpp. Refuse honestly instead.
+    _captured = getattr(gen, '_nested_gen_captures', {}).get(id(fn))
+    if _captured:
+        raise gimple_exprtypes._UnsupportedGeneratorShape(
+            "is a nested generator that reads enclosing-scope "
+            f"variable(s) {', '.join(_captured)}; the coroutine path has no "
+            "capture model for a generator defined inside another function "
+            "(threading the enclosing variables into the generator frame is "
+            "the remaining work)")
     # Increment D guard: a nested async GENERATOR that captures enclosing
     # locals in a shape the A3 capture-box threading cannot reach (driven
     # from a further-nested `async def` sibling's `async for`/await loop).
@@ -825,6 +838,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     # is skipped, its call stays unresolved, and the whole generator falls
     # back to the honest refusal exactly as before.
     gen._cpp_nested_helper_syms = {}
+    gen._cpp_closure_factory_names = set()
     nested_helper_lines: list[str] = _cpp_compile_nested_sync_helpers(
         gen, fn, base, declared, self_fields, struct_name)
     gcc_._cpp_reset_unit_state(gen)
@@ -907,11 +921,22 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         gen._cpp_list_local_elem_types = {}
         gen._cpp_module_global_ctypes = None
         gen._cpp_nested_helper_syms = {}
+        gen._cpp_closure_factory_names = set()
         gen._cpp_gen_self_name = None
         gen._cpp_gen_self_base = None
         gen._cpp_gen_self_params = None
         gen._cpp_gen_self_recursed = None
         gen._cpp_fwd_gen_delegates = None
+    # The cpp typer types a yield it cannot resolve as int64_t, and that
+    # silently truncates a float or prints a bool as 1. The stack-switch
+    # kind analysis knows the real kind, so the fallback refuses any yield
+    # whose slot cannot hold it (bugs/CODEGEN_generator_yield_kind_rebound_
+    # name_silent_wrong_value.md, Shape 2). Checked only when a slot was
+    # decided at all: an undecided slot is refused below with its own message.
+    if value_ctype is not None:
+        _slot_why = gimple_gen_coro.cpp_value_slot_refusal(fn, value_ctype, struct_def)
+        if _slot_why is not None:
+            raise gimple_exprtypes._UnsupportedGeneratorShape(f"{fn.name}: {_slot_why}")
     if value_ctype is None:
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             f"{fn.name}: every `yield` must carry a value, and all "
@@ -1060,8 +1085,8 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         f"    co_return;",
         f"}}",
         f'extern "C" MojoGenerator *{base}_start ({cpp_sig}) {{',
-        f"    {task} t = {impl} ({call_args});",
-        f"    return reinterpret_cast<MojoGenerator *>(t.h.address());",
+        f"    {task} __task = {impl} ({call_args});",
+        f"    return reinterpret_cast<MojoGenerator *>(__task.h.address());",
         f"}}",
         f'extern "C" {cpp_bool} {base}_resume (MojoGenerator *g) {{',
         f"    {handle_t} h = {handle_t}::from_address(reinterpret_cast<void *>(g));",
@@ -1178,6 +1203,142 @@ def _helper_bound_names(body: list) -> set:
     return bound
 
 
+_FSTRING_FIELD_RE = re.compile(r"\{([^{}]*)\}")
+_FSTRING_QUOTED_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
+_FSTRING_NAME_RE = re.compile(r"(?<![\w.])([A-Za-z_]\w*)")
+
+
+def _fstring_field_names(node_list) -> set[str]:
+    """Identifiers an f-string in `node_list` reads from its `{...}` fields.
+
+    The parser keeps an f-string as one raw `StringLiteral` (see
+    fire_compiler.is_fstring_literal), so `_used_idents_deep` never sees
+    the names interpolated into it. Those names are real reads: a nested
+    generator that prints `f'{name}:'` reads `name`. Quoted substrings
+    inside a field (`d['key']`) and attribute names after a dot (`x.attr`)
+    are not variable reads and are skipped.
+    """
+    out: set[str] = set()
+    for n in gimple_exprtypes._walk_ast(node_list):
+        if not (isinstance(n, N.StringLiteral) and N.is_fstring_literal(n)):
+            continue
+        for field in _FSTRING_FIELD_RE.findall(str(n.value)):
+            field = _FSTRING_QUOTED_RE.sub('', field)
+            out.update(_FSTRING_NAME_RE.findall(field))
+    return out
+
+
+def _nested_generator_captures(stmts) -> dict[int, list[str]]:
+    """Map `id(g)` -> the sorted enclosing-scope names a NESTED generator
+    `g` reads, for every generator `g` that is defined inside another `def`
+    in `stmts` and reads a parameter or local of that enclosing `def`.
+
+    Such a generator has no capture model on the coroutine path: its body
+    would name the enclosing variable at file scope, which g++ rejects with
+    "'name' was not declared in this scope" blaming the generated .cpp.
+    `g` is lifted into the module's generator set by `_walk_ast`, so the
+    emitter would otherwise see it as an ordinary free generator. Only
+    names that an enclosing `def` binds (its parameters and its own
+    locals, via `_helper_bound_names`) count — a name that is a module
+    global or a builtin is not a capture, and a name the generator rebinds
+    itself is not either.
+    """
+    enclosing: dict[int, set] = {}
+    nested: dict[int, gimple_ctypes.FunctionDef] = {}
+    for f in gimple_exprtypes._walk_ast(stmts):
+        if not isinstance(f, gimple_ctypes.FunctionDef):
+            continue
+        scope = {pn for pn, _ in (f.params or [])} | _helper_bound_names(f.body)
+        for g in gimple_exprtypes._walk_ast(f.body):
+            if (isinstance(g, gimple_ctypes.FunctionDef) and g is not f
+                    and g.is_generator):
+                enclosing.setdefault(id(g), set()).update(scope)
+                nested[id(g)] = g
+    out: dict[int, list[str]] = {}
+    for gid, g in nested.items():
+        own = {pn for pn, _ in (g.params or [])} | _helper_bound_names(g.body)
+        reads = (gimple_exprtypes._used_idents_deep(g.body)
+                 | _fstring_field_names(g.body))
+        # A `nonlocal k` names the enclosing local even though the body
+        # also binds it (`k = k + 1` makes it "own" below). Without this, a
+        # generator that writes its enclosing local compiles with a fresh
+        # local of the same name and the write never reaches the enclosing
+        # frame -- silently wrong output, not a refusal.
+        nonlocal_names = {n for x in gimple_exprtypes._walk_ast(g.body)
+                          if isinstance(x, N.NonlocalStmt) for n in x.names}
+        caps = ((reads & enclosing[gid]) - own) | (nonlocal_names & enclosing[gid])
+        if caps:
+            out[gid] = sorted(caps)
+    return out
+
+
+def _nested_generator_sibling_defs(stmts) -> dict[int, list]:
+    """Map `id(g)` -> the `def`s that sit beside a NESTED generator `g` in
+    the enclosing `def`'s own body (`g`'s siblings, excluding `g` itself),
+    for every generator `g` defined inside another `def` in `stmts`.
+
+    `g` is lifted into the module's generator set by `_walk_ast`, so its
+    coroutine body sees only its own body. A sibling `def` that `g` calls
+    (`def t0(): def nested(): ...; def gen(): yield nested()`) is therefore
+    not in `g.body` and would be refused as an unresolved callee, even
+    though it is exactly the non-capturing sync helper that
+    `_cpp_compile_nested_sync_helpers` already knows how to compile when it
+    is defined inside the generator. `_nested_generator_captures` does not
+    count a called name as a capture (a call's callee is not a value the
+    generator reads), so these siblings are reachable only through this map.
+    """
+    out: dict[int, list] = {}
+    for f in gimple_exprtypes._walk_ast(stmts):
+        if not isinstance(f, gimple_ctypes.FunctionDef):
+            continue
+        defs = [d for d in f.body if isinstance(d, gimple_ctypes.FunctionDef)]
+        for g in gimple_exprtypes._walk_ast(f.body):
+            if (isinstance(g, gimple_ctypes.FunctionDef) and g is not f
+                    and g.is_generator):
+                out[id(g)] = [d for d in defs if d is not g]
+    return out
+
+
+def _helper_kw_renames(params) -> dict:
+    """`{param: _kw_param}` for each helper parameter whose name collides with
+    a C/C++ keyword. Applied in both the helper signature and every body read
+    (via `gen._cpp_kw_param_renames`), exactly as the coroutine `{impl}` does."""
+    return {
+        pn: f"_kw_{pn}" for pn, _ in params
+        if pn in gimple_ctypes._C_KEYWORDS
+        or pn in gimple_ctypes._CPP_KEYWORD_FIELDS
+        or pn in gimple_ctypes._C_PARAM_EXTRA_KEYWORDS
+    }
+
+
+def _closure_factory_parts(d: gimple_ctypes.FunctionDef):
+    """`(closure, pre)` when `d` is a closure FACTORY: a sync `def` whose body
+    is some statements `pre` followed by a final `return C`, where `C` is the
+    one nested `def` in the whole body (and `pre` holds no other `def` and no
+    other `return`). Otherwise None.
+
+    `C` is returned by value, so its captures are `d`'s parameters and locals
+    as they stand when the `return` runs. Nothing can assign them afterwards,
+    which is what makes capturing by value exact (see
+    `_try_compile_closure_factory`)."""
+    if not d.body or not isinstance(d.body[-1], gimple_ctypes.ReturnStmt):
+        return None
+    ret = d.body[-1].value
+    if not isinstance(ret, gimple_ctypes.IdentExpr):
+        return None
+    pre = d.body[:-1]
+    # `_walk_own_body` never yields a FunctionDef (it stops at them), so the
+    # nested defs come from the full walk.
+    nested = [n for n in gimple_exprtypes._walk_ast(pre)
+              if isinstance(n, gimple_ctypes.FunctionDef)]
+    if len(nested) != 1 or nested[0].name != ret.name:
+        return None
+    if any(isinstance(n, gimple_ctypes.ReturnStmt)
+           for n in gimple_exprtypes._walk_own_body(pre)):
+        return None
+    return nested[0], [n for n in pre if n is not nested[0]]
+
+
 def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
                                      base: str, declared: dict,
                                      self_fields, struct_name) -> list:
@@ -1207,7 +1368,13 @@ def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
     Any failure just skips that helper: its call stays unresolved and the
     whole generator falls back to the honest refusal, exactly as before.
     """
-    direct_defs = [n for n in fn.body if isinstance(n, gimple_ctypes.FunctionDef)]
+    own_defs = [n for n in fn.body if isinstance(n, gimple_ctypes.FunctionDef)]
+    # A nested generator's enclosing `def` supplies further candidates: the
+    # sibling `def`s beside it (see `_nested_generator_sibling_defs`). A
+    # sibling the generator's own body also defines is shadowed by it.
+    _own_names = {d.name for d in own_defs}
+    _sibs = getattr(gen, '_nested_gen_sibling_defs', {}).get(id(fn), [])
+    direct_defs = own_defs + [d for d in _sibs if d.name not in _own_names]
     if not direct_defs:
         return []
     def_by_name = {d.name: d for d in direct_defs}
@@ -1296,14 +1463,182 @@ def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
                 return None
         return out
 
+    def _helper_return_ctype(body, hdecl):
+        """The one scalar/string/container ctype every valued `return` in
+        `body` agrees on; `'void'` when there is no valued return; None (refuse)
+        when the returns disagree, mix bare and valued, or are not a supported
+        ctype."""
+        ret_ct = None
+        saw_valued = False
+        saw_bare = False
+        for r in gimple_exprtypes._walk_own_body(body):
+            if not isinstance(r, gimple_ctypes.ReturnStmt):
+                continue
+            if r.value is None:
+                saw_bare = True
+                continue
+            saw_valued = True
+            t = gimple_exprtypes._infer_simple_expr_ctype(
+                r.value, hdecl, self_fields, gen._async_api, None,
+                _known_structs, None, gen.func_return_types, _trusted,
+                self_struct_ctype=_self_ctype)
+            if t == 'int':
+                t = 'int64_t'
+            if t not in _HELPER_SCALAR_CTYPES:
+                return None
+            if ret_ct is None:
+                ret_ct = t
+            elif ret_ct != t:
+                return None
+        if saw_valued and saw_bare:
+            return None
+        return ret_ct or 'void'
+
+    def _emit_helper_body(body, hdecl, kw_renames):
+        """Lower `body` through the ordinary coroutine-body emitter in 'helper'
+        mode (plain `return`, no `co_return`) against the declared-type map
+        `hdecl`. Returns `(hoisted declarations, body lines)`, or None when the
+        body falls outside the emitter's supported shapes."""
+        sv_declared = gen._cpp_declared
+        sv_kind = gen._cpp_emit_kind
+        sv_fsd = gen._cpp_func_scope_decls
+        sv_self_struct = gen._cpp_gen_self_struct
+        sv_self_fields = gen._cpp_gen_self_fields
+        sv_list_elem = gen._cpp_list_local_elem_types
+        sv_mod_globals = getattr(gen, '_cpp_module_global_ctypes', None)
+        sv_kw = dict(gen._cpp_kw_param_renames or {})
+        gen._cpp_declared = hdecl
+        gen._cpp_emit_kind = 'helper'
+        gen._cpp_func_scope_decls = []
+        gen._cpp_gen_self_struct = struct_name
+        gen._cpp_gen_self_fields = self_fields
+        gen._cpp_list_local_elem_types = {}
+        # Rebuilt against this body's own `hdecl`, for the same reason the
+        # helper swaps `declared`: a parameter can shadow a module marker, and
+        # that local must not be resolved through a globals mirror.
+        gen._cpp_module_global_ctypes = gcc_._cpp_module_global_ctypes(gen)
+        gen._cpp_kw_param_renames = dict(kw_renames)
+        try:
+            lines = []
+            for st in body:
+                lines.extend(gen._cpp_stmt(st, hdecl, '    '))
+            hoist = list(gen._cpp_func_scope_decls)
+        except gimple_exprtypes._UnsupportedGeneratorShape:
+            # Covers _UnsupportedAsyncShape too (subclass).
+            return None
+        finally:
+            gen._cpp_declared = sv_declared
+            gen._cpp_emit_kind = sv_kind
+            gen._cpp_func_scope_decls = sv_fsd
+            gen._cpp_gen_self_struct = sv_self_struct
+            gen._cpp_gen_self_fields = sv_self_fields
+            gen._cpp_list_local_elem_types = sv_list_elem
+            gen._cpp_module_global_ctypes = sv_mod_globals
+            gen._cpp_kw_param_renames = sv_kw
+        return hoist, lines
+
+    def _try_compile_closure_factory(F: gimple_ctypes.FunctionDef,
+                                     C: gimple_ctypes.FunctionDef,
+                                     pre: list) -> bool:
+        """Compile closure factory `F` (`pre`; `return C`, see
+        `_closure_factory_parts`) into a `static` C++ function that returns
+        the closure value of `C`, boxed as an int64 `MojoBoundMethod`.
+
+        The closure is a `mutable` C++ lambda with `[=]` capture (held on the
+        heap as a `std::function` over int64 boxes, `_CPP_CALLABLE_CTYPE[_1ARG]`)
+        and is reached through a per-factory trampoline, so it is callable by
+        `mojo_fnptr_call_N` like any other function value. `[=]` copies every factory local `C`
+        reads at the moment `return` runs, which is exact: `return C` is the
+        factory's last statement, so no later assignment can change what `C`
+        would read. A closure that assigns through `nonlocal` would need a
+        shared cell rather than a copy, so it is refused. Like the plain
+        helper path, any shape outside the supported set refuses (returns
+        False) and the caller's honest unresolved-callee refusal stands."""
+        if C.is_generator or C.is_async or F.is_generator or F.is_async:
+            return False
+        if any(pn.startswith('*') for pn, _ in (F.params or []) + (C.params or [])):
+            return False
+        params_F = _infer_helper_param_ctypes(F)
+        if params_F is None or _helper_kw_renames(params_F):
+            return False
+        params_C = _infer_helper_param_ctypes(C)
+        if params_C is None:
+            return False
+        # The callable-value model admits one int64 parameter at most.
+        if len(params_C) > 1 or any(ct != 'int64_t' for _, ct in params_C):
+            return False
+        if any(isinstance(x, gimple_ctypes.NonlocalStmt)
+               for x in gimple_exprtypes._walk_own_body(C.body)):
+            return False
+        used_C = gimple_exprtypes._used_idents_deep(C.body)
+        # A sibling `def` is a call, not a capture, and the factory's own
+        # locals are not siblings: calling one from `C` is out of scope.
+        if used_C & sibling_names:
+            return False
+        c_pnames = {pn for pn, _ in params_C}
+        captures = (used_C - c_pnames - _helper_bound_names(C.body)
+                    - module_names - _HELPER_FREE_BUILTINS - {C.name})
+        f_locals = {pn for pn, _ in params_F} | _helper_bound_names(pre)
+        if captures - f_locals:
+            return False
+        # The factory's own statements land first, in its frame; `C` then
+        # sees them as declared locals.
+        hF = {pn: ct for pn, ct in params_F}
+        f_emit = _emit_helper_body(pre, hF, {})
+        if f_emit is None:
+            return False
+        hC = dict(hF)
+        hC.update({pn: ct for pn, ct in params_C})
+        if _helper_return_ctype(C.body, hC) != 'int64_t':
+            return False
+        c_kw = _helper_kw_renames(params_C)
+        c_emit = _emit_helper_body(C.body, hC, c_kw)
+        if c_emit is None:
+            return False
+        # The returned closure is boxed exactly as a plain function value
+        # already is in this model: an int64 `MojoBoundMethod` (fn = a
+        # trampoline, self = the heap-held lambda), which `mojo_fnptr_call_N`
+        # dispatches on. So the factory's value is an ordinary int64_t slot.
+        callable_ct = (gimple_ctypes._CPP_CALLABLE_CTYPE_1ARG if params_C
+                       else gimple_ctypes._CPP_CALLABLE_CTYPE)
+        csym = f"{base}_h_{gimple_ctypes._safe_name(F.name)}"
+        tramp = f"{csym}_tramp"
+        sig_F = ', '.join(
+            f"{gimple_exprtypes._c_to_cpp_scalar_type(ct)} {pn}"
+            for pn, ct in params_F) or 'void'
+        sig_C = ', '.join(f"int64_t {c_kw.get(pn, pn)}" for pn, _ in params_C)
+        tramp_args = ''.join(f", int64_t _a{k}" for k in range(len(params_C)))
+        call_args = ', '.join(f"_a{k}" for k in range(len(params_C)))
+        fwd.append(f"static int64_t {csym} ({sig_F});")
+        fwd.append(f"static int64_t {tramp} (void *env{tramp_args}) {{ "
+                   f"return (*({callable_ct} *)env)({call_args}); }}")
+        block = [f"static int64_t {csym} ({sig_F}) {{"]
+        block += [f"    {x}" for x in f_emit[0] + f_emit[1]]
+        block.append(f"    {callable_ct} *_clo = new {callable_ct}([=]({sig_C}) mutable -> int64_t {{")
+        block += [f"        {x}" for x in c_emit[0] + c_emit[1]]
+        block.append("        return (int64_t)0;  /* fallthrough guard */")
+        block.append("    });")
+        block.append(f"    return (int64_t)(intptr_t)mojo_bound_method_new((void *){tramp}, (void *)_clo);")
+        block.append("}")
+        defs.extend(block)
+        gen._cpp_nested_helper_syms[F.name] = csym
+        gen._cpp_closure_factory_names.add(F.name)
+        reg_rettypes[F.name] = 'int64_t'
+        return True
+
     def _try_compile(d: gimple_ctypes.FunctionDef) -> bool:
         if d.name in gen._cpp_nested_helper_syms:
             return True
         if d.is_generator or d.is_async:
             return False
+        _factory = _closure_factory_parts(d)
+        if _factory is not None:
+            return _try_compile_closure_factory(d, *_factory)
         # No further nested def (would be a closure / needs capture).
+        # (`_walk_own_body` stops at a FunctionDef and never yields one, so
+        # this must scan the full walk.)
         if any(isinstance(x, gimple_ctypes.FunctionDef)
-               for x in gimple_exprtypes._walk_own_body(d.body)):
+               for x in gimple_exprtypes._walk_ast(d.body)):
             return False
         for pn, _pt in (d.params or []):
             if pn.startswith('*'):
@@ -1330,82 +1665,16 @@ def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
         hdeclared = {pn: ct for pn, ct in params}
         for hn, hrt in reg_rettypes.items():
             hdeclared.setdefault(hn, hrt)
-        known_structs = frozenset(gen.struct_field_types.keys())
-        ret_ct = None
-        saw_valued = False
-        saw_bare = False
-        for r in gimple_exprtypes._walk_own_body(d.body):
-            if not isinstance(r, gimple_ctypes.ReturnStmt):
-                continue
-            if r.value is None:
-                saw_bare = True
-                continue
-            saw_valued = True
-            t = gimple_exprtypes._infer_simple_expr_ctype(
-                r.value, hdeclared, self_fields, gen._async_api, None,
-                known_structs, None, gen.func_return_types,
-                gcc_._cpp_trusted_fn_return_types(gen),
-                self_struct_ctype=(f"{struct_name} *" if struct_name else None))
-            if t == 'int':
-                t = 'int64_t'
-            if t not in _HELPER_SCALAR_CTYPES:
-                return False
-            if ret_ct is None:
-                ret_ct = t
-            elif ret_ct != t:
-                return False
-        if saw_valued and saw_bare:
+        ret_ct = _helper_return_ctype(d.body, hdeclared)
+        if ret_ct is None:
             return False
-        ret_ct = ret_ct or 'void'
-        # A parameter whose name collides with a C/C++ keyword is renamed
-        # in BOTH the signature and every body read (via
-        # `_cpp_kw_param_renames`, the same mechanism the coroutine
-        # `{impl}` signature uses).
-        kw_renames = {
-            pn: f"_kw_{pn}" for pn, _ in params
-            if pn in gimple_ctypes._C_KEYWORDS
-            or pn in gimple_ctypes._CPP_KEYWORD_FIELDS
-            or pn in gimple_ctypes._C_PARAM_EXTRA_KEYWORDS
-        }
-        # Emit the body through the ordinary coroutine-body emitter in
-        # 'helper' mode (plain `return`, no co_return).
-        sv_declared = gen._cpp_declared
-        sv_kind = gen._cpp_emit_kind
-        sv_fsd = gen._cpp_func_scope_decls
-        sv_self_struct = gen._cpp_gen_self_struct
-        sv_self_fields = gen._cpp_gen_self_fields
-        sv_list_elem = gen._cpp_list_local_elem_types
-        sv_mod_globals = getattr(gen, '_cpp_module_global_ctypes', None)
-        sv_kw = dict(gen._cpp_kw_param_renames or {})
-        gen._cpp_declared = hdeclared
-        gen._cpp_emit_kind = 'helper'
-        gen._cpp_func_scope_decls = []
-        gen._cpp_gen_self_struct = struct_name
-        gen._cpp_gen_self_fields = self_fields
-        gen._cpp_list_local_elem_types = {}
-        # Rebuilt against the HELPER's own `hdeclared`, for the same reason
-        # the helper swaps `declared`: a helper parameter can shadow a module
-        # marker, and that local must not be resolved through a globals
-        # mirror.
-        gen._cpp_module_global_ctypes = gcc_._cpp_module_global_ctypes(gen)
-        gen._cpp_kw_param_renames = dict(kw_renames)
-        try:
-            hbody = []
-            for st in d.body:
-                hbody.extend(gen._cpp_stmt(st, hdeclared, '    '))
-            hoist = list(gen._cpp_func_scope_decls)
-        except gimple_exprtypes._UnsupportedGeneratorShape:
-            # Covers _UnsupportedAsyncShape too (subclass).
+        # A parameter whose name collides with a C/C++ keyword is renamed in
+        # BOTH the signature and every body read.
+        kw_renames = _helper_kw_renames(params)
+        emitted = _emit_helper_body(d.body, hdeclared, kw_renames)
+        if emitted is None:
             return False
-        finally:
-            gen._cpp_declared = sv_declared
-            gen._cpp_emit_kind = sv_kind
-            gen._cpp_func_scope_decls = sv_fsd
-            gen._cpp_gen_self_struct = sv_self_struct
-            gen._cpp_gen_self_fields = sv_self_fields
-            gen._cpp_list_local_elem_types = sv_list_elem
-            gen._cpp_module_global_ctypes = sv_mod_globals
-            gen._cpp_kw_param_renames = sv_kw
+        hoist, hbody = emitted
         csym = f"{base}_h_{gimple_ctypes._safe_name(d.name)}"
         cpp_ret = ('void' if ret_ct == 'void'
                    else gimple_exprtypes._c_to_cpp_scalar_type(ret_ct))
@@ -2120,8 +2389,8 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
         f"    co_return ({cpp_value_ctype})0;",
         f"}}",
         f'extern "C" MojoAsync *{base}_start ({cpp_sig}) {{',
-        f"    {task} t = {impl} ({call_args});",
-        f"    return reinterpret_cast<MojoAsync *>(t.h.address());",
+        f"    {task} __task = {impl} ({call_args});",
+        f"    return reinterpret_cast<MojoAsync *>(__task.h.address());",
         f"}}",
         # 'bool' (not '_Bool' -- see _c_to_cpp_scalar_type's docstring:
         # '_Bool' is valid C99 but not a valid C++ type spelling). The

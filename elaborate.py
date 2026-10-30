@@ -47,7 +47,7 @@ class ConformanceError(Exception):
 #: argument `formal/monomorph.py::_derived_from_source` makes for the same
 #: reason. Keyed by the TEXT rather than by `id()`, because a key that is an
 #: address can be handed to a different object once the first is freed
-#: (`the `_walk_ast` re-scan bug (fixed; remainder in bugs/hard/PERF_struct_self_assign_scan_uncached.md)`'s hazard
+#: (`the `_walk_ast` re-scan bug (fixed; the memo and self-assign scan fixes are in the same commit).`'s hazard
 #: 2), and hashing the text costs far less than the scan it stands in for.
 #:
 #: 8 entries, far above one elaboration's working set: the three readers below
@@ -782,6 +782,22 @@ def infer_type_args(template_src: str, arg_ctypes):
         for k, v in _unify_param_ann(ann, params, arg_ctypes[i]).items():
             binding.setdefault(k, v)
     binding = _fill_erased_params(template_src, params, binding)
+    # A parameter no argument binds but the template DEFAULTS
+    # (`def pick[result_type: AnyType = NoneType](x: Int)`, called as
+    # `pick(10)`) takes its default, exactly as Mojo does when the caller
+    # omits it. Left unbound, `pick(10)` declined here, its call site fell
+    # through to a bare `pick` with no definition anywhere, and the program
+    # printed the weak "unavailable in compiled mode" stub. This is the
+    # same provable-default rule `infer_struct_type_args(fill_defaults=True)`
+    # applies to constructors, and `elab_intu`'s in-TU seed reaches this
+    # function too, so the definition and the call site agree on one
+    # instantiation.
+    _defaults = type_param_defaults(template_src)
+    for p in params:
+        if p not in binding:
+            _d = _default_type_arg(_defaults.get(p, ''))
+            if _d is not None:
+                binding[p] = _d
     if any(p not in binding for p in params):
         return None
     return [binding[p] for p in params]

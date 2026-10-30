@@ -2182,12 +2182,8 @@ test('gimple-async-runner', [PY, 'test_gimple_async_runner.py'], mem='tiny',
           'pins MOJO_CORO=cpp the way test_taskgroup.py does)')
 test('coro-future-await', [PY, 'test_coro_future_await.py'], mem='tiny',
      deps=['preflight'],
-     expect='2 failing: async struct-method queue segfaults '
-            '(bugs/RUNTIME_async_struct_method_queue_segfaults.md) and a '
-            'bound-method done-callback never invoked '
-            '(bugs/RUNTIME_future_bound_method_done_callback_not_invoked.md)',
-     desc='2 failing: async struct-method queue segfaults and a bound-method '
-          'done-callback never invoked')
+     desc='Future/Event awaitable protocol, done-callbacks, and awaited '
+          'async struct-method calls (receiver + args)')
 test('async-void-return', [PY, 'test_async_void_return.py'], mem='tiny',
      deps=['preflight'],
      expect='3 failing: an async function with no return value',
@@ -2474,8 +2470,7 @@ test('stdlib-tests', [PY, 'test_stdlib.py'], mem='program',
 # you not to let grow. If the next gate shows this step at a much higher peak,
 # the measurement changed and the class follows it (test_suite.py fails the
 # moment a recorded peak stops fitting its class).
-test('stdlib-dylib', [PY, '-c',
-                      'import build_stdlib_dylib as b; b.build_stdlib()'],
+test('stdlib-dylib', [PY, 'tools/stdlib_dylib_ratchet.py'],
      mem='tiny', excl=True, timeout=3600,
      desc='from-scratch stdlib dylib; reports modules that fell back to source')
 test('runtimedylib', [PY, 'test_runtime_dylib.py'],
@@ -3907,6 +3902,7 @@ test('formal-host-import-shapes', [PY, 'test_formal_host_import_shapes.py'],
      mem='tiny',
      deps=['preflight'],
      extra=['test_formal_host_import_shapes.py', 'tools/formal_host_import_shapes.py',
+            'tools/formal_host_import_wall.py',
             'formal/imports.py', 'tools/formal_sweep_causes.py'] + FORMAL_BUILD_INPUTS,
      desc='the host-import shapes instrument: which shapes each reader maps to')
 # The other file the same estate check named on the same day, registered on

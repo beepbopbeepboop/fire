@@ -869,6 +869,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
         if is_dataclass_fields_loop:
             gen._dataclass_fields_vars.discard(var)
         raise
+    ggc._refuse_namedtuple_tuple_use(gen, it_type, 'iterating over')
 
     # `for x in <fresh container>:` (a display, a comprehension, a slice, a
     # `.split()`/`.keys()` result): nothing else can reference the iterable, so
@@ -1035,7 +1036,8 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                 # class_value.md.
                 destroy_after = isinstance(node.iterable, gimple_ctypes.CallExpr)
                 gen._gen_for_generator_iter(var, it_val, api, node.body,
-                                              destroy_after=destroy_after)
+                                              destroy_after=destroy_after,
+                                              shadow_name=shadow_name)
             else:
                 gimple_ctypes._debug_note('for loop over MojoGenerator* with no known API (unreachable in Milestone B scope)', it_val)
                 gen._emit_unsupported_iter(it_type, node)
@@ -1763,6 +1765,7 @@ def _gen_for_zip(gen, node):
     seq_elems = []
     for _ai in range(len(args)):
         st, sv = gen.lower_expr(args[_ai])
+        ggc._refuse_namedtuple_tuple_use(gen, st, 'zipping')
         st = gen._get_actual_type(st, sv)
         # A zip() argument need not be a statically-known MojoList* — a
         # dict-subscript/`.get()` result (e.g. `zip(d.get('parameters') or
@@ -1933,6 +1936,7 @@ def _gen_for_enumerate(gen, node):
     """Handle: for (idx, val) in enumerate(lst[, start]): ..."""
     lst_arg = node.iterable.args[0]
     lst_type, lst_val = gen.lower_expr(lst_arg)
+    ggc._refuse_namedtuple_tuple_use(gen, lst_type, 'enumerating')
     lst_type = gen._get_actual_type(lst_type, lst_val)
 
     # `enumerate(lst, start)` — the optional 2nd arg was previously
@@ -2334,6 +2338,16 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         # BEFORE the body is generated below, so a loop over `var` INSIDE the
         # body sees the inner element type. The doc's placement note.
         _carry_nested_elem_type(gen, var, it_val, _fl_ctype)
+        # A loop over a kind-MIXED list of lists (`_nested_mixed_names`, seeded
+        # from the call sites that disagree): each inner list may hold a
+        # string or an int, so the target is a kinds-varying value. Marking it
+        # makes the loop over the target read through `mojo_list_get_boxed`
+        # (the `_maybe_kinds_vals` arm above and below), which answers each
+        # slot by the kind the inner list recorded -- where the join used to
+        # answer the int64_t default for all of them.
+        if (not share_var_with_sibling_arm
+                and _as_str(it_val) in gen._nested_mixed_names):
+            gen._maybe_kinds_vals.add(_as_str(var))
     len64 = gen._new_temp('int64_t')
     len_t = gen._new_temp('int64_t')
     idx_t = gen._new_temp('int64_t')
@@ -3688,7 +3702,7 @@ def _emit_generator_tuple_unpack(gen, var_names: list, slot_types: list, list_pt
 
 
 def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
-                            destroy_after: bool = True):
+                            destroy_after: bool = True, shadow_name=None):
     """for x in <supported generator call>(): ... — <base>_resume()/
     <base>_value() deliberately mirror _gen_for_struct_iter's existing
     __has_next__/__next__ convention immediately below (resume both
@@ -3707,7 +3721,17 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
     read again afterward — destroying it unconditionally there is a
     real use-after-free the first time that variable is consumed a
     second time. See the call site in _gen_for_iter for the full
-    rationale."""
+    rationale.
+
+    `shadow_name`: the iterable's own name when it is the loop target too
+    (`for g in g:`) -- see `_gen_for_iter`'s snapshot.
+
+    The loop target is retyped when an earlier sibling loop already declared
+    the same name with a different yield kind (`for v in gen_bool():` then
+    `for v in gen_float():`). `_declare_var` is first-decl-wins, so without
+    `force` the second loop stored a `double` into the first loop's `_Bool`.
+    The list/dict/set loops make the same choice (`force=` on the
+    `var_types` mismatch); this is that rule for generators."""
     base, vct = api['base'], api['value_ctype']
     # `for a, b in <tuple-yielding generator>():` — `var` arrives as
     # the literal string "(a, b)" (see _gen_for_list's identical
@@ -3756,7 +3780,13 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
                 f"{api.get('base')}(...)`): the generator yields one value per "
                 "resume, and unpacking that value needs a runtime iterator "
                 "protocol this scalar generator model does not have")
-        gen._declare_var(var, vct)
+        # Retype a name a sibling loop already declared with another kind
+        # (see the docstring); `force` mints a fresh C name and rebinds every
+        # later read of `var` in this body to it. Same rule as the list arm
+        # of `_gen_for_list`.
+        gen._declare_var(var, vct,
+                         force=(var == shadow_name)
+                         or gen.var_types.get(var) not in (None, vct))
 
     bb_cond  = gen._new_bb(); bb_body  = gen._new_bb()
     bb_post  = gen._new_bb(); bb_after = gen._new_bb()

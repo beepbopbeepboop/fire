@@ -891,6 +891,37 @@ def test_unannotated_param_with_disagreeing_call_sites() -> bool:
         # in both orders.
         ('def f(x):\n    print(x)\n\n\nf("s")\nf([1, 2])\n', 's\n[1, 2]\n'),
         ('def f(x):\n    print(x)\n\n\nf([1, 2])\nf("s")\n', '[1, 2]\ns\n'),
+        # A FLOAT beside an INTEGER at the same parameter. The slot stays an
+        # int64_t (a double and an int have no common C type), so the float
+        # used to be truncated to the integer its bits name: `f(2.5)` printed
+        # `2`. The float is now boxed at its call site and the print asks the
+        # box, while the plain integer beside it still prints as itself. Both
+        # orders, because the slot's answer must not depend on which call
+        # comes first.
+        ('def f(x):\n    print(x)\n\n\nf(2.5)\nf(1)\n', '2.5\n1\n'),
+        ('def f(x):\n    print(x)\n\n\nf(1)\nf(2.5)\n', '1\n2.5\n'),
+        # The same float-possible slot FORWARDED into a second function. `g`
+        # only ever sees an identifier at its one call site, so its own
+        # call-site walk observes no double and nothing marks its parameter;
+        # the float has to reach it through `f`'s parameter, which does carry
+        # the property. Without the forwarding hop `g(x)` printed the box's
+        # address (`4312044272` for `f(2.5)`). Both orders, as above.
+        ('def g(x):\n    print(x)\n\n\ndef f(x):\n    g(x)\n\n\n'
+         'f(2.5)\nf(1)\n', '2.5\n1\n'),
+        ('def g(x):\n    print(x)\n\n\ndef f(x):\n    g(x)\n\n\n'
+         'f(1)\nf(2.5)\n', '1\n2.5\n'),
+        # `/` on the float-possible slot. Python's true division is always a
+        # float for an int or a float operand, so the answer is a double box
+        # whichever the parameter holds: `x / 2` was `1` / `0` (the truncated
+        # integer quotient) where CPython gives `1.25` / `0.5`. Both orders.
+        ('def f(x):\n    print(x / 2)\n\n\nf(2.5)\nf(1)\n', '1.25\n0.5\n'),
+        ('def f(x):\n    print(x / 2)\n\n\nf(1)\nf(2.5)\n', '0.5\n1.25\n'),
+        # The parameter as the RIGHT operand (the divisor).
+        ('def f(x):\n    print(2 / x)\n\n\nf(2.5)\nf(1)\n', '0.8\n2.0\n'),
+        # A zero divisor raises ZeroDivisionError (the runtime's
+        # `mojo_div_double`), not a SIGFPE and not an `inf` answer.
+        ('def f(x):\n    try:\n        print(x / 0)\n    except ZeroDivisionError:\n'
+         '        print("zde")\n\n\nf(2.5)\nf(1)\n', 'zde\nzde\n'),
     ]
     # The two pairs that used to be a HARD GCC ERROR and are now only wrong:
     #
@@ -905,9 +936,9 @@ def test_unannotated_param_with_disagreeing_call_sites() -> bool:
     # two single-kind programs are what prove it did not disturb either.
     #
     # What is asserted is BUILDABILITY, and deliberately so: the values these
-    # two print are still wrong (`2` for `2.5`, a pointer decimal for the
-    # list), which is the separate float-boxing and runtime-tag rows of
-    # bugs/CODEGEN_polymorphic_param_non_str_kinds_print_wrong.md. Asserting
+    # print are still wrong (a pointer decimal for the list), which is the
+    # runtime-tag row of bug CODEGEN_polymorphic_param_non_str_kinds_print_wrong
+    # (the float beside an integer is fixed, in `cases` above). Asserting
     # the wrong text would pin a bug; asserting only that it COMPILES is the
     # whole content of this row, and it was a hard failure before.
     builds_only = [
@@ -939,6 +970,38 @@ def test_unannotated_param_with_disagreeing_call_sites() -> bool:
             ok = False
             print(f"  ✗ unannotated_param_container_does_not_break_the_build"
                   f"[{i}]: compiled but exited {rc}")
+    # ARITHMETIC on the float-possible parameter (bug
+    # CODEGEN_polymorphic_param_non_str_kinds_print_wrong). `x OP n` with
+    # `+`, `-`, `*`, `//`, `%` is answered by `_float_param_arith`: the integer
+    # answer when the argument was an integer, and a double box holding the
+    # answer when it was a float, picked at run time. Each expectation is the
+    # CPython answer, so this pins the real double read, not the old truncation.
+    # `print(x)` is pinned by `cases` above. A DOUBLE operand beside the
+    # parameter (`x * 2.5`) makes the answer a double whatever the parameter
+    # holds, so it is boxed outright: `f(1)` prints `2.5`, not the integer.
+    arithmetic = [
+        ('def f(x):\n    print(x * 2)\n\n\nf(2.5)\nf(1)\n', '5.0\n2\n'),
+        ('def f(x):\n    print(x * 2)\n\n\nf(1)\nf(2.5)\n', '2\n5.0\n'),
+        ('def f(x):\n    print(x + 1)\n\n\nf(2.5)\nf(1)\n', '3.5\n2\n'),
+        ('def f(x):\n    print(x - 1)\n\n\nf(2.5)\nf(1)\n', '1.5\n0\n'),
+        ('def f(x):\n    print(x * 2.5)\n\n\nf(2.5)\nf(1)\n', '6.25\n2.5\n'),
+        ('def f(x):\n    print(x * 2.5)\n\n\nf(1)\nf(2.5)\n', '2.5\n6.25\n'),
+        ('def f(x):\n    print(2.5 * x)\n\n\nf(2.5)\nf(1)\n', '6.25\n2.5\n'),
+        ('def f(x):\n    print(x + 0.5)\n\n\nf(2.5)\nf(1)\n', '3.0\n1.5\n'),
+        # `//` and `%`: floor division and modulo, the two remaining float
+        # arithmetic arms (`_FLOAT_PARAM_OPS`) beside the float-possible param.
+        ('def f(x):\n    print(x // 2)\n\n\nf(2.5)\nf(1)\n', '1.0\n0\n'),
+        ('def f(x):\n    print(x % 2)\n\n\nf(2.5)\nf(1)\n', '0.5\n1\n'),
+    ]
+    for i, (src, want) in enumerate(arithmetic):
+        with tempfile.TemporaryDirectory() as td:
+            rc, stdout = _build_and_run({'prog.py': src}, 'prog.py', td)
+            py_rc, py_stdout = _cpython_run(td, 'prog.py')
+        if not (rc == 0 and py_rc == 0 and stdout == py_stdout == want):
+            ok = False
+            print(f"  ✗ unannotated_param_arithmetic_operand[{i}]: "
+                  f"rc={rc} stdout={stdout!r} "
+                  f"(CPython rc={py_rc} {py_stdout!r}, want {want!r})")
     return ok
 
 
@@ -1601,6 +1664,97 @@ def test_string_argument_to_stringslice_param_is_wrapped_in_a_span() -> bool:
     return ok
 
 
+def test_same_module_call_to_generic_with_default_binds_instantiation() -> bool:
+    """A same-module call to a module-level generic function, in a link-mode
+    build, must bind the instantiation — not the weak "unavailable in compiled
+    mode" extern stub (CODEGEN: cross-module call to a generic binds the stub).
+
+    `use_a` in `gen.mojo` calls its OWN module's generic `pick` with the
+    bracket parameter omitted: `pick(10)`, where `result_type` has the default
+    `NoneType` and no argument can bind it. The link-mode build compiles
+    `gen.mojo` as a module, which strips generic functions out of the emitted
+    text and instantiates them per call site. The inferred elaboration declined
+    (`infer_type_args` left `result_type` unbound although the template defaults
+    it), so the call fell through to a bare `pick (10)` with no definition. The
+    weak extern stub then answered, printing `pick: unavailable in compiled
+    mode` into the program's stdout and returning 0 — a silent wrong answer
+    with exit 0.
+
+    Asserting the exact stdout pins both halves: `use_a()` must be 11 (the
+    instantiated body), and the stub's diagnostic must not appear anywhere.
+    `pick[Int](5)` from `main` already worked and stays pinned at 6.
+    """
+    pkg = {
+        'gen.mojo': (
+            '@inline(.always)\n'
+            'def pick[result_type: AnyType = NoneType](x: Int) -> Int:\n'
+            '    return x + 1\n'
+            '\n'
+            'def use_a() -> Int:\n'
+            '    return pick(10)\n'
+        ),
+        'main.mojo': (
+            'from gen import use_a, pick\n'
+            '\n'
+            'def main():\n'
+            '    print(use_a())\n'
+            '    print(pick[Int](5))\n'
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 'main.mojo', td)
+    ok = (rc == 0 and stdout == '11\n6\n'
+          and 'unavailable in compiled mode' not in stdout)
+    if not ok:
+        print(f"  ✗ same_module_call_to_generic_with_default_binds_instantiation: "
+              f"rc={rc} stdout={stdout!r}")
+    return ok
+
+
+def test_two_modules_specialize_one_generic_differently() -> bool:
+    """Regression test for bugs/CODEGEN_dylib_generic_inline_copies_share_one_symbol.md.
+
+    Two modules instantiate the same generic function with DIFFERENT type
+    arguments (`scale[2]` in `a`, `scale[3]` in `b`). The body depends on the
+    parameter, so each caller must get its own specialization. Today every
+    copy is emitted under the one bare symbol `_scale`, so both calls run the
+    same body and print `0`, a silent miscompile (CPython: 20 and 30). Fails
+    until each specialization gets its own deterministic symbol and body."""
+    pkg = {
+        'pkg/__init__.py': '',
+        'pkg/gen.py': (
+            'def scale[k: Int](x: Int) -> Int:\n'
+            '    return x * k\n'
+        ),
+        'pkg/a.py': (
+            'from pkg.gen import scale\n'
+            '\n'
+            'def fa() -> Int:\n'
+            '    return scale[2](10)\n'
+        ),
+        'pkg/b.py': (
+            'from pkg.gen import scale\n'
+            '\n'
+            'def fb() -> Int:\n'
+            '    return scale[3](10)\n'
+        ),
+        'pkg/main.py': (
+            'from pkg.a import fa\n'
+            'from pkg.b import fb\n'
+            '\n'
+            'print(fa())\n'
+            'print(fb())\n'
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 'pkg/main.py', td)
+    ok = rc == 0 and stdout == '20\n30\n'
+    if not ok:
+        print(f"  ✗ two_modules_specialize_one_generic_differently: rc={rc} "
+              f"stdout={stdout!r} (expected '20\\n30\\n')")
+    return ok
+
+
 CASES = [
     test_nested_def_is_not_a_module_level_fn_export,
     test_set_ctor_walks_boxed_global_container,
@@ -1626,6 +1780,8 @@ CASES = [
     test_unannotated_param_with_disagreeing_call_sites,
     test_failed_import_attempt_does_not_poison_later_spelling,
     test_imported_function_trailing_default_argument_is_padded,
+    test_same_module_call_to_generic_with_default_binds_instantiation,
+    test_two_modules_specialize_one_generic_differently,
 ]
 
 

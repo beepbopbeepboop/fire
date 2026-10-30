@@ -212,6 +212,39 @@ def mutated_free_names(inner: FunctionDef, candidate_names) -> frozenset:
     return frozenset(mutated)
 
 
+def _lambda_free_names(body) -> set:
+    """Names that lambdas lexically inside `body` read from the scope `body`
+    belongs to.
+
+    `_used_idents_node` treats a LambdaExpr as a closure boundary (its names
+    are its own capture analysis, not its host's), so a nested `def` whose
+    only read of an outer local is through a lambda in its body --
+    `def inner(y): g = lambda z: z + n` with `n` owned by `outer` -- did not
+    capture `n`. The lifted lambda then read a slot with no home and came out
+    as `0`, silently (`outer(4)` printed 4 for CPython's 6). The lambda is
+    still a closure of its own, so its OWN params are subtracted; its default
+    values are evaluated in the host scope and are counted.
+
+    An over-approximation (a name the host shadows after the lambda is still
+    counted) only costs a slightly larger env, which `inner_declared`'s
+    subtraction already absorbs -- the same direction `_used_idents_node`
+    takes everywhere else.
+    """
+    out: set = set()
+    for _nd in _walk_ast(body):
+        if not isinstance(_nd, LambdaExpr):
+            continue
+        _bound: set = set()
+        for _pn, _pd in _nd.params:
+            _bound.add(_as_str(_pn))
+            for _dv in _used_idents_node(_pd):
+                out.add(_as_str(_dv))
+        for _v in _used_idents_node(_nd.body):
+            if _as_str(_v) not in _bound:
+                out.add(_as_str(_v))
+    return out
+
+
 def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
     """Discover every nested FunctionDef under `stmts`; fill `ctx._all_closures`.
 
@@ -315,6 +348,11 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
             for body_node in inner_body:
                 for _ui in _used_idents_node(body_node):
                     used.add(_as_str(_ui))
+            # A lambda in this body is a closure boundary to
+            # `_used_idents_node`, so its reads of the enclosing scope are
+            # this def's reads too -- see `_lambda_free_names`.
+            for _lf in _lambda_free_names(inner_body):
+                used.add(_lf)
             # Names this function declares `nonlocal`. They are NOT its own
             # variables: the assignment that follows the declaration rebinds
             # the ENCLOSING function's cell, so they have to come out of

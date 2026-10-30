@@ -1,8 +1,7 @@
 # CODEGEN: unpacking a boxed dict prints its key pointers as decimal integers
 
 Found 2026-10-29 while fixing the `(char)'p'` gcc -fgimple failure in
-`CODEGEN_generator_function_Lib_mailbox.md` (the materialize-as-list dict arm
-in `mojo/backend_gimple/emit_infra.py`).
+`emit_infra.py`'s materialize-as-list dict arm (`mojo_list_set_kinds_uniform`).
 
 ## Symptom
 
