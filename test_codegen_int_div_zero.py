@@ -41,10 +41,8 @@ def test_zero_divisor_raises_in_plain_function():
     assert out == 'caught floordiv\ncaught div\ncaught mod', repr(out)
 
 def test_nonzero_integer_division_unchanged():
-    # Nonzero divisors must still divide as before. `7 / 2` is left out on
-    # purpose: this compiler's int `/` truncates where Python's is a float — a
-    # separate defect (typing, not a sign fix-up), not part of the zero-divisor
-    # check.
+    # Nonzero divisors must still divide as before. `8 / b` is true division,
+    # which answers the Float64 `4.0` (see test_int_true_division_is_float).
     src = ('def main():\n'
            '    a = 7\n'
            '    b = 2\n'
@@ -52,7 +50,19 @@ def test_nonzero_integer_division_unchanged():
            '    print(a // b, a % b, n // b, 8 / b)\n')
     out, rc = run_jit(src)
     assert rc == 0, out
-    assert out == '3 1 -4 4', repr(out)
+    assert out == '3 1 -4 4.0', repr(out)
+
+def test_int_true_division_is_float():
+    # Int / Int is true division, a Float64 in Python and Mojo: `7 / 2` is
+    # 3.5, not the C integer quotient 3. Locals, literals and a computed
+    # operand all take the same path.
+    src = ('def main():\n'
+           '    a = 7\n'
+           '    b = 2\n'
+           '    print(a / b, 8 / 4, a / 4, (a + 1) / b)\n')
+    out, rc = run_jit(src)
+    assert rc == 0, out
+    assert out == '3.5 2.0 1.75 4.0', repr(out)
 
 def test_integer_modulo_floors_toward_divisor_sign():
     # Python's int `%` takes the divisor's sign (floor), where C's truncates.
@@ -106,6 +116,7 @@ def test_bare_zero_division_statement_in_generator():
 if __name__ == '__main__':
     test_zero_divisor_raises_in_plain_function()
     test_nonzero_integer_division_unchanged()
+    test_int_true_division_is_float()
     test_integer_modulo_floors_toward_divisor_sign()
     test_integer_modulo_floors_in_generator_body()
     test_bare_zero_division_statement_in_generator()

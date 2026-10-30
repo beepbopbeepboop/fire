@@ -13,22 +13,46 @@ def main():
 ```
 
 - Python: `3.5`.
-- Compiled path (`python3 fire.py --jit`): `3`.
+- Compiled path (`python3 fire.py --jit`): was `3`, now `3.5`.
 
-## Why it is not a one-line fix
+## Status (2026-10-29)
 
-Mojo's `Int / Int` is a `Float64`, so the correct answer is a float result,
-which is a typing decision (the result type of `/` on two integers in the
-lowering), not a sign correction. The plain `/` in
-`mojo/backend_gimple/emit_exprs.py` (`_lower_binary_tail`'s arithmetic tail)
-emits C's integer division on two `int64_t` operands, and the `int`/`double`
-join there never sees a float result type.
+**Landed: `Int / Int` with plain signed C integer operands is Float64.**
+
+- `mojo/backend_gimple/emit_exprs.py` (`_lower_binary_tail`): `/` becomes a
+  `double` result when BOTH operands are plain signed C integers. The gate is
+  on the operands, not on the joined type. The first attempt (fd7ca5941) gated
+  on the join and broke `std/pathlib/path.mojo` and `std/simd.mojo`, where a
+  struct operand joins with an int; it was reverted in 98043fe81. The operands
+  reach the existing `double` path (`mojo_div_double`, which raises on zero).
+- `mojo/backend_gimple/cpp_core.py` (`_cpp_expr`): the same gate for the
+  coroutine emitter, lowering to `mojo_div_double((double)a, (double)b)`.
+- `test_codegen_int_div_zero.py`: `test_int_true_division_is_float` pins
+  `7 / 2 == 3.5` and related quotients (fails on the pre-fix tree, printing
+  `3 2 1 4`); `test_nonzero_integer_division_unchanged` now expects `8 / b`
+  as `4.0`, not the truncated `4`.
+
+**Still open (residual):**
+
+- `_Bool` operands are excluded from the gate: `t = True; print(t / 2)` prints
+  `0`; Python gives `0.5`.
+- `uint*` operands are excluded (kept from the original gate, which the
+  revert did not change): `UInt(7) / UInt(2)` prints `3`. Whether Mojo's
+  `UInt` true division is a Float64 has not been checked against real Mojo
+  (`tools/mojo`), so this is not asserted either way.
+- The `cpp_core.py` mirror is not reached by any program in this sweep
+  (`async def` division lowers through GIMPLE, `mojo_div_double (...)`), so it
+  is compile-checked only and has no run-time test.
+- The stdlib gate (`stdlib-syntax`, `stdlib-dylib`) was not run on this
+  branch; the struct-operand regression that caused the revert is the thing
+  to watch.
 
 ## Next step
 
-Decide the result type for `/` on two integer operands (Float64, per Mojo),
-then lower it in `_lower_binary_tail` the way the float path already does
-(convert both operands to `double` before dividing, with the zero check via
-`mojo_div_double`). Mirror it in `mojo/backend_gimple/cpp_core.py`'s `/`
-lowering, which has the same integer shape. Pin with a compile-and-run case
-in `test_codegen_int_div_zero.py` for `7 / 2 == 3.5`.
+1. Decide whether `_Bool` joins the gate (Python: `True / 2 == 0.5`), and
+   check Mojo's `UInt` true division against `tools/mojo` before touching the
+   `uint` exclusion.
+2. Run the full stdlib gate once and compare `std/pathlib/path.mojo` and
+   `std/simd.mojo`; if either regresses, bisect the struct-operand shape first.
+3. Write a coroutine run-time test for `/` if the `cpp_core.py` lowering is
+   reachable; otherwise delete the mirror as dead code.

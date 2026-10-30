@@ -109,13 +109,8 @@ def feed():
         if f.endswith(".json") and f.startswith(PREFIXES):
             q = json.load(open(os.path.join(C.qdir(), f))).get("pool")
             queued[q] = queued.get(q, 0) + 1
-    # Tasks are not tied to a slot (refill gives each to a free one), so the feeder keeps the WHOLE queue stocked:
-    # total capacity + 1, less what runs and what waits. A task is queued with no preferred slot.
-    total_need = max(0, C.pool_total() - sum(running.values()) + 1 - sum(queued.values()))
-    need = {sl["name"]: 0 for sl in pool["slots"]}
-    live_slots = [sl["name"] for sl in pool["slots"] if sl["count"] > 0]
-    if live_slots:
-        need[live_slots[0]] = total_need
+    need = {sl["name"]: max(0, sl["count"] - running.get(sl["name"], 0) + 1 - queued.get(sl["name"], 0))
+            for sl in pool["slots"]}
     paths = sorted(set(p for g in pool["feed"] for p in glob.glob(os.path.join(C.MAIN, g))))
     slots = [sl for sl in pool["slots"] if need[sl["name"]] > 0 and sl["count"] > 0]   # count 0: no new runs
     for p in paths:
@@ -151,7 +146,7 @@ def feed():
                 "the stdlib compile after you land. If the bug is fully fixed, git rm its doc in the same commit and run "
                 "python3 tools/dangling_doc_refs.py --ratchet. Commit, end with a clean tree and the CONTROL-STATUS line." % doc_path(doc))
         r = subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "enqueue", name, "--claim", "bug:" + base,
-                            "--task", task], capture_output=True, text=True, cwd=C.MAIN)
+                            "--pool", sl["name"], "--task", task], capture_output=True, text=True, cwd=C.MAIN)
         st["fed"][doc] = st["fed"].get(doc, 0) + 1
         if r.returncode == 0:
             made += 1
@@ -187,16 +182,8 @@ def abandon_empty():
     return n
 
 
-def fresh_first(names, tasks):
-    """Branches that have never been tried to land go before any that already failed integration. A failed branch
-    must not hold a fresh one back: it can conflict, or turn a batch red, and the fresh branches still land."""
-    fresh = [n for n in names if C.state_of(tasks[n]) != "integration-failed"]
-    return fresh if fresh else names
-
-
 def land():
     names = [n for n in I.pick_candidates(quiet=True) if n.startswith(PREFIXES)]
-    names = fresh_first(names, C.load())
     # Master is checked out in the main checkout, where another session may have UNCOMMITTED edits (2026-10-26: a
     # row-25 edit to module_gen.py). The fast-forward would overwrite them, so git refuses, after a whole gate had passed.
     # Never touch them: leave out any branch that changes a file the main checkout has dirty; it lands when they commit.

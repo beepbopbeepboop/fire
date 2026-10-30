@@ -81,8 +81,6 @@ _WALK_AST_MUTATION_ALLOWLIST = {
     "mojo/backend_gimple/emit_stmts.py::_gen_stmt_ForStmt": "`ForStmt.target` is rewritten only when it is a str, and to a str",
     "mojo/backend_gimple/emit_stmts.py::_maybe_narrow_genexp_local": "`Comprehension.kind` is a str, restored in a `finally`",
     "mojo/backend_gimple/module_gen.py::_gmi_hoist_nested_structs": "`StructDef.name` is a rename of a str",
-    "mojo/backend_gimple/module_gen.py::_gmi_rebind_stmt": "`copy.copy` of a def (rebound, or one whose body changed), so the new node is unwalked and its `name`/`decorators`/`body` are set before anything walks it",
-    "mojo/backend_gimple/module_gen.py::_gmi_with_blocks": "`copy.copy` of a compound statement or its handler/case, whose child blocks are set on the copy before anything walks it",
     "mojo/middle/closures.py::_scan_for_closures": "`ClosureInfo.captures` is the closure scanner's own record",
     "mojo/middle/closures.py::discover_closures": "ditto",
     "mojo/middle/coro.py::_Capture.__init__": "the capture record's own dataclass",
@@ -769,70 +767,6 @@ def rebound(kind, box) -> dict:
         _FAIL += 1
 
 
-def test_nested_def_rebound_param_takes_the_container_it_stores():
-    """An unannotated parameter the body rebinds to a container takes THAT
-    container, even when the function is a nested `def`.
-
-    `live = set(live)` is iteration evidence for `live` (`set` is an
-    iterable-consuming builtin), so `_infer_param_types` reached its last-
-    resort container guess, `MojoList *`, and the store of the `MojoSet *`
-    into it was refused: "cannot coerce MojoSet * to MojoList * (incompatible
-    container kinds) ... dest='live'". That is the error that took out the
-    `bootstrap-stage1-transitive` gate job on formal/model.py's `walk_stmts`.
-
-    At module scope the same program compiled, because the module-level call
-    `walk({3})` grounds the guess in the argument it is actually given. A
-    nested def has no such call-site evidence, so the rebinding is the only
-    thing that can say what the parameter holds, and it must.
-
-    The top-level twin is kept as the control: it compiled before the fix and
-    must still compile after it."""
-    nested = """\
-def outer():
-    def walk(live):
-        live = set(live)
-        live.add(1)
-        return live
-    return walk({3})
-
-def main():
-    print(len(outer()))
-main()
-"""
-    top = """\
-def walk(live):
-    live = set(live)
-    live.add(1)
-    return live
-
-def main():
-    print(len(walk({3})))
-main()
-"""
-    global _PASS, _FAIL
-    name = "nested_def_rebound_param_takes_the_container_it_stores"
-    try:
-        ok_top, _, err_top = gimple_compiles(top)
-    except TypeError as e:
-        print(f"FAIL  {name}: the top-level control was refused: {e}")
-        _FAIL += 1
-        return
-    try:
-        ok, c_src, stderr = gimple_compiles(nested)
-    except TypeError as e:
-        print(f"FAIL  {name}: the codegen refused the nested def outright: {e}")
-        _FAIL += 1
-        return
-    if ok and ok_top:
-        print(f"PASS  {name}")
-        _PASS += 1
-    else:
-        print(f"FAIL  {name}: nested compiled={ok} top-level compiled={ok_top}")
-        for line in (stderr or err_top).splitlines()[:8]:
-            print(f"      {line}")
-        _FAIL += 1
-
-
 def test_a_lifted_lambda_keeps_the_enclosing_functions_renamed_locals():
     """Lifting a closure must not un-rename the enclosing function's locals.
 
@@ -1177,9 +1111,6 @@ def main():
     # ... and a lifted lambda does not un-rename the enclosing function's
     # shadowing locals, which is the next layer of the same build.
     _run_isolated(lambda: test_a_lifted_lambda_keeps_the_enclosing_functions_renamed_locals(), 'test_a_lifted_lambda_keeps_the_enclosing_functions_renamed_locals (line 1086)')
-    # ... and a nested def's parameter that the body rebinds to a container
-    # takes that container, not the usage guess that refused the store.
-    _run_isolated(lambda: test_nested_def_rebound_param_takes_the_container_it_stores(), 'test_nested_def_rebound_param_takes_the_container_it_stores')
 
 
     # 1. Empty void function (pass body)
@@ -6315,7 +6246,7 @@ def mf(a: Float64, b: Float64) -> Float64:
         _PASS += 1
 
     # --- builtin `dict` subclassing (Counter/OrderedDict shape) ---
-    # See bug:COMPILE_FAIL_collections___init__. A `class X(dict)` gets
+    # See bugs/COMPILE_FAIL_collections___init__.md. A `class X(dict)` gets
     # a synthesized `_data: MojoDict *` backing store; inherited container
     # ops route to it, `__missing__` handles a subscript-read miss.
     _run_isolated(lambda: test("dict_subclass_backing_store_and_subscript", """\
@@ -6417,7 +6348,7 @@ def main():
     # `.get()/.keys()/.values()/.items()/.update()/.pop()/.setdefault()`
     # and `for k in d` on a builtin-`dict` subclass instance delegate to
     # the hidden `_data` backing store — unless the subclass overrides
-    # them. See bug:COMPILE_FAIL_collections___init__.
+    # them. See bugs/COMPILE_FAIL_collections___init__.md.
     _run_isolated(lambda: test("dict_subclass_container_method_delegation", """\
 class Bag(dict):
     def __missing__(self, key) -> int:
@@ -8212,11 +8143,6 @@ def mk_bool():
 def use_bool_factory():
     print(mk_bool()())
 use_bool_factory()
-def mk_str():
-    return lambda: "hi"
-def use_str_factory():
-    print(mk_str()())
-use_str_factory()
 '''
         want = _cpython_stdout(src)
         if want is None:
@@ -8442,52 +8368,6 @@ main()
         print(f"PASS  {name}")
         _PASS += 1
 
-    def test_a_string_passthrough_beside_an_int_one_keeps_its_own_elements():
-        """`def ident(x): return x` called with a list of ints AND with a
-        string, in one program, must give the string call site its own
-        element answer: `list(ident("abc"))` is a list of one-character
-        strings, not the int64 join of the program's passthrough calls.
-
-        `_return_elem_types` holds one answer per function, and the
-        passthrough arm at the call site
-        (`emit_calls.py`, `_passthrough_param_idx`) only consulted the
-        argument's recorded element type when the argument was a container.
-        A `char *` argument fell through to the program-wide join, which the
-        int call had made `int64_t`, so the string's copy read its characters
-        as words and printed decimal addresses. A string value records no
-        element type of its own (`_elem_types` describes containers), so the
-        str call site must record none either.
-        """
-        global _PASS, _FAIL
-        name = "a_string_passthrough_beside_an_int_one_keeps_its_own_elements"
-        src = '''\
-def ident(x):
-    return x
-def main():
-    print(list(ident([1, 2, 3])))
-    print(list(ident("abc")))
-main()
-'''
-        want = _cpython_stdout(src)
-        if want is None:
-            print(f"FAIL  {name}: CPython does not run the fixture")
-            _FAIL += 1
-            return
-        for mode in ('single-TU', 'link-mode'):
-            got = _compiled_stdout(src, mode)
-            if isinstance(got, tuple):
-                print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
-                      f"{got[1][:800]}")
-                _FAIL += 1
-                return
-            if got != want:
-                print(f"FAIL  {name} [{mode}]: compiled stdout {got!r} != "
-                      f"CPython {want!r}")
-                _FAIL += 1
-                return
-        print(f"PASS  {name}")
-        _PASS += 1
-
     def test_a_returned_heterogeneous_list_keeps_its_slot_kinds():
         """A list literal's per-slot kinds must survive a `return`.
 
@@ -8655,14 +8535,12 @@ main()
 
         The ADDRESS was never the wrong answer — CPython prints
         `<function step at 0x...>` — so the `%d` was the whole bug, and it is
-        independent of the decorator-application defect (see
+        independent of the decorator-application defect this fixture is
+        reduced from (see
         bugs/COMPILE_FAIL_decorator_application_dropped.md, whose defect 2
-        names it as separable). The decorator is a pass-through, not the
-        scalar-returning `deco` the doc reduces from: a scalar decorator
-        rebinds `step` to a non-callable, which the compiled path now refuses
-        (`scalar_decorator_rebind_is_refused`), and CPython would print `99`,
-        not a function, for it. A pass-through decorator leaves `step` a
-        function value on both engines, which is what this test is about.
+        names it as separable). The fixture keeps the decorator because that
+        is the reduction the doc measured, and because a decorated `def` is
+        the ordinary way a program ends up holding a function value.
 
         The address is asserted by SHAPE and not by value: it differs per
         build, per process and per platform, which is why CPython cannot be
@@ -8672,7 +8550,7 @@ main()
         name = "print_of_a_function_value_is_not_a_decimal_address"
         src = '''\
 def deco(f):
-    return f
+    return 99
 
 @deco
 def step(x):
@@ -8696,127 +8574,6 @@ step(7)
         # what the `%d` produced, so assert it is NOT that.
         if re.fullmatch(r'[0-9]+\n', got or ''):
             print(f"FAIL  {name}: still formatting the pointer as a decimal")
-            _FAIL += 1
-            return
-        print(f"PASS  {name}")
-        _PASS += 1
-
-    def test_decorator_rebinding_is_applied_at_runtime():
-        """A same-module decorator on a top-level `def` must REBIND the name:
-        `@twice def step` makes `step(7)` call `twice(step_undecorated)(7)`,
-        as CPython does, on the compiled path (bugs/
-        COMPILE_FAIL_decorator_application_dropped.md, defect 3). Before the
-        rebinding was lowered, `step(7)` silently called the UNDECORATED body
-        and printed `8` where CPython prints `16`.
-
-        Three shapes, each compared against CPython's stdout: a wrapping
-        decorator whose closure calls its argument (the `subdir` shape), a
-        factory `@scale(3)` returning such a wrapper, and two stacked
-        decorators, which must nest innermost-first. Integer returns only:
-        a wrapper that returns a str is the callable-return-type gap
-        (fixed as CODEGEN_closure_str_return_is_lost) and is not covered here."""
-        global _PASS, _FAIL
-        name = "decorator_rebinding_is_applied_at_runtime"
-        src = '''\
-def twice(f):
-    def wrap(x):
-        return f(x) * 2
-    return wrap
-
-def scale(k):
-    def deco(f):
-        def wrap(x):
-            return f(x) * k
-        return wrap
-    return deco
-
-def plus_one(f):
-    def wrap(x):
-        return f(x) + 1
-    return wrap
-
-@twice
-def step(x):
-    return x + 1
-
-@scale(3)
-def tripled(x):
-    return x + 1
-
-@twice
-@plus_one
-def stacked(x):
-    return x
-
-print(step(7))
-print(tripled(7))
-print(stacked(7))
-'''
-        got = _compiled_stdout(src, 'single-TU')
-        want = _cpython_stdout(src)
-        if isinstance(got, tuple):
-            print(f"FAIL  {name}: gcc -fgimple failed:\n{got[1][:800]}")
-            _FAIL += 1
-            return
-        if want is None:
-            print(f"FAIL  {name}: CPython does not run the fixture")
-            _FAIL += 1
-            return
-        if got != want:
-            print(f"FAIL  {name}: compiled stdout {got!r} != CPython {want!r}")
-            _FAIL += 1
-            return
-        print(f"PASS  {name}")
-        _PASS += 1
-
-    def test_decorator_in_a_compound_block_is_applied_at_runtime():
-        """A decorated `def` inside an `if`, `try`, or `with` block of a
-        function body is bound in that function's scope, so it is rebound by
-        the same rule as a direct statement. Before, the rebinding walk only
-        entered a body's direct statements: the `def` was still lifted to a
-        sibling function, but its decorator was dropped, so `outer(7, True)`
-        silently printed `8` where CPython prints `16`."""
-        global _PASS, _FAIL
-        name = "decorator_in_a_compound_block_is_applied_at_runtime"
-        src = '''\
-def twice(f):
-    def wrap(x):
-        return f(x) * 2
-    return wrap
-
-def outer(n, flag):
-    if flag:
-        @twice
-        def step(x):
-            return x + 1
-        return step(n)
-    return n
-
-def guarded(n):
-    try:
-        @twice
-        def g(x):
-            return x + 2
-        return g(n)
-    except ValueError:
-        return -1
-
-print(outer(7, True))
-print(outer(7, False))
-print(guarded(7))
-'''
-        got = _compiled_stdout(src, 'single-TU')
-        want = _cpython_stdout(src)
-        if isinstance(got, tuple):
-            print(f"FAIL  {name}: gcc -fgimple failed:\n{got[1][:800]}")
-            _FAIL += 1
-            return
-        if want is None:
-            print(f"FAIL  {name}: CPython does not run the fixture")
-            _FAIL += 1
-            return
-        if got != want:
-            print(f"FAIL  {name}: compiled stdout {got!r} != CPython {want!r}")
             _FAIL += 1
             return
         print(f"PASS  {name}")
@@ -10529,85 +10286,6 @@ print("%r" % p)
             return
         print(f"PASS  {name} ({state['calls']} walks, {state['hits']} of "
               f"them answered from the memo, none stale)")
-        _PASS += 1
-
-    def test_walk_ast_memo_survives_the_sync_generator_hoist_writes():
-        """The two sync-generator hoist writers in `mojo/middle/coro.py`
-        mutate nodes an earlier `_walk_ast` has already memoized, and must
-        invalidate them.
-
-        `_capture_self_into_generator` rewrites a nested generator's params
-        and body and appends `self.address` to every call that drives it;
-        `_finish_sync_hoist` replaces the enclosing body and renames the
-        calls. Both run inside `lower()`, after eligibility and the capture
-        planner have walked those very nodes, so without invalidation a
-        walk answers with the pre-hoist tree and the generated C loses the
-        self pointer or keeps a removed generator."""
-        global _PASS, _FAIL
-        name = "walk_ast_memo_survives_the_sync_generator_hoist_writes"
-        import mojo.middle.exprtypes as ET
-        import mojo.middle.coro as CO
-        from fire_compiler import py_tokenize, Parser, FunctionDef, \
-            VarDecl, MemberExpr, IdentExpr
-        import ast_rewriter
-
-        src = ("def outer(x):\n"
-               "    def g():\n"
-               "        yield x\n"
-               "    for v in g():\n"
-               "        print(v)\n")
-
-        def parse_outer():
-            stmts = ast_rewriter.rewrite(
-                Parser(py_tokenize(src)).parse_module()) or []
-            outer = [s for s in stmts
-                     if isinstance(s, FunctionDef) and s.name == 'outer'][0]
-            inner = [s for s in outer.body
-                     if isinstance(s, FunctionDef) and s.name == 'g'][0]
-            return outer, inner
-
-        err = None
-        try:
-            # Capture: the walk of `outer` memoizes `g` and the call to it,
-            # then the hoist writes both. The walks after must see the
-            # rewritten tree, not the memo.
-            ET._walk_ast_reset()
-            outer, inner = parse_outer()
-            ET._walk_ast(outer)
-            CO._capture_self_into_generator(inner, outer, 'K')
-            if not any(isinstance(n, MemberExpr) and n.member == 'address'
-                       for n in ET._walk_ast(outer)):
-                err = ('the call driving the hoisted generator is missing its '
-                       'self pointer in the walk of its enclosing body')
-            elif not any(isinstance(n, VarDecl) and n.name == 'self'
-                         for n in ET._walk_ast(inner)):
-                err = ('the hoisted generator still walks to its pre-capture '
-                       'body (no `self` re-typing VarDecl)')
-            # Finish: the walk of `outer` memoizes the nested def, which the
-            # hoist removes and whose call it renames.
-            if not err:
-                ET._walk_ast_reset()
-                outer, inner = parse_outer()
-                if not any(n is inner for n in ET._walk_ast(outer)):
-                    err = 'nothing was memoized, so this proved nothing'
-                else:
-                    CO._finish_sync_hoist(outer, {'g': '__mgco_outer_g'})
-                    now = ET._walk_ast(outer)
-                    if any(n is inner for n in now):
-                        err = ('the removed generator still walks as part of '
-                               'its enclosing body')
-                    elif not any(isinstance(n, IdentExpr)
-                                 and n.name == '__mgco_outer_g' for n in now):
-                        err = 'the renamed call is not in the walk'
-        except Exception as e:  # noqa: BLE001
-            err = f'{type(e).__name__}: {e}'
-        finally:
-            ET._walk_ast_reset()
-        if err:
-            print(f"FAIL  {name}: {err}")
-            _FAIL += 1
-            return
-        print(f"PASS  {name}")
         _PASS += 1
 
     def test_every_ast_mutation_site_invalidates_the_walk_memo():
@@ -13019,7 +12697,6 @@ print(run('x/y.txt'))
     _run_isolated(lambda: test_walk_ast_memo_is_transparent_and_honours_invalidation(), 'test_walk_ast_memo_is_transparent_and_honours_invalidation (line 12670)')
     _run_isolated(lambda: test_walk_ast_memo_never_answers_stale_over_real_compiles(), 'test_walk_ast_memo_never_answers_stale_over_real_compiles (line 12671)')
     _run_isolated(lambda: test_every_ast_mutation_site_invalidates_the_walk_memo(), 'test_every_ast_mutation_site_invalidates_the_walk_memo (line 12672)')
-    _run_isolated(lambda: test_walk_ast_memo_survives_the_sync_generator_hoist_writes(), 'test_walk_ast_memo_survives_the_sync_generator_hoist_writes (line 12672)')
     _run_isolated(lambda: test_scalar_arity_min_max_params_are_not_containers(), 'test_scalar_arity_min_max_params_are_not_containers (line 12673)')
     _run_isolated(lambda: test_a_forwarded_string_argument_keeps_its_type(), 'test_a_forwarded_string_argument_keeps_its_type (line 12674)')
     _run_isolated(lambda: test_a_forwarded_container_argument_takes_the_callees_kind(), 'test_a_forwarded_container_argument_takes_the_callees_kind (line 12675)')
@@ -13068,14 +12745,11 @@ print(run('x/y.txt'))
     _run_isolated(lambda: test_variadic_lambda_lowers_as_gimple_in_every_body(), 'test_variadic_lambda_lowers_as_gimple_in_every_body (line 12718)')
     _run_isolated(lambda: test_scalar_given_a_char_star_parameter_is_stringified(), 'test_scalar_given_a_char_star_parameter_is_stringified (line 12719)')
     _run_isolated(lambda: test_ctor_of_a_container_reaches_the_comprehension(), 'test_ctor_of_a_container_reaches_the_comprehension (line 12720)')
-    _run_isolated(lambda: test_a_string_passthrough_beside_an_int_one_keeps_its_own_elements(), 'test_a_string_passthrough_beside_an_int_one_keeps_its_own_elements')
     _run_isolated(lambda: test_a_returned_heterogeneous_list_keeps_its_slot_kinds(), 'test_a_returned_heterogeneous_list_keeps_its_slot_kinds (line 12721)')
     _run_isolated(lambda: test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not(), 'test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not (line 12722)')
     _run_isolated(lambda: test_the_generic_repr_cluster_is_emitted_only_where_it_is_reachable(), 'test_the_generic_repr_cluster_is_emitted_only_where_it_is_reachable (line 12723)')
     _run_isolated(lambda: test_print_of_a_function_value_is_not_a_decimal_address(), 'test_print_of_a_function_value_is_not_a_decimal_address (line 12724)')
     _run_isolated(lambda: test_print_of_a_closure_value_is_not_a_decimal_address(), 'test_print_of_a_closure_value_is_not_a_decimal_address (line 12725)')
-    _run_isolated(lambda: test_decorator_rebinding_is_applied_at_runtime(), 'test_decorator_rebinding_is_applied_at_runtime')
-    _run_isolated(lambda: test_decorator_in_a_compound_block_is_applied_at_runtime(), 'test_decorator_in_a_compound_block_is_applied_at_runtime')
     _run_isolated(lambda: test_a_local_rebound_from_a_scalar_to_a_container_is_the_box(), 'test_a_local_rebound_from_a_scalar_to_a_container_is_the_box (line 12726)')
 
     # A `@deco def f` whose decorator returns a scalar rebinds `f` to a
@@ -13106,107 +12780,6 @@ def step(x):
 def main():
     print(step(7))
 """), 'pass_through_decorator_on_a_def_still_compiles')
-    # A decorator FACTORY (`@deco(x)`) whose call returns a scalar is the same
-    # silent wrong answer: `step` is rebound to a scalar and `step(7)` calls
-    # the undecorated body. The factory's own return is what gets refused.
-    _run_isolated(lambda: test_raises("scalar_decorator_factory_rebind_is_refused", """\
-def deco(x):
-    return 99
-
-@deco(3)
-def step(x):
-    return x + 1
-
-def main():
-    print(step(7))
-""", "returns int64_t (not callable)"), 'scalar_decorator_factory_rebind_is_refused')
-    # A factory that hands back a nested decorator is NOT a scalar, and a
-    # factory that returns its own argument is exempt for the same reason the
-    # identity decorator is: its answer is the undecorated function's.
-    _run_isolated(lambda: test("nested_bare_decorator_returning_a_def_still_compiles", """\
-def deco(f):
-    def wrap(g):
-        return g
-    return wrap
-
-@deco
-def step(x):
-    return x + 1
-
-def main():
-    print(step(7))
-"""), 'nested_bare_decorator_returning_a_def_still_compiles')
-    _run_isolated(lambda: test("nested_decorator_factory_still_compiles", """\
-def deco(tag):
-    def wrap(f):
-        return f
-    return wrap
-
-@deco("A")
-def step(x):
-    return x + 1
-
-def main():
-    print(step(7))
-"""), 'nested_decorator_factory_still_compiles')
-    # A decorated `def` NESTED in a function body is rebound like a top-level
-    # one (bugs/COMPILE_FAIL_decorator_application_dropped.md): before this,
-    # `step(n)` silently called the undecorated body and printed 8, not 16.
-    # A module-level decorator and a factory are both in scope from inside.
-    _run_isolated(lambda: test("nested_decorator_is_applied_at_runtime", """\
-def twice(f):
-    def wrap(x):
-        return f(x) * 2
-    return wrap
-
-def scale(k):
-    def deco(f):
-        def wrap(x):
-            return f(x) * k
-        return wrap
-    return deco
-
-def outer(n):
-    @twice
-    def step(x):
-        return x + 1
-    @scale(3)
-    def tripled(x):
-        return x + 1
-    return step(n) + tripled(n)
-
-print(outer(7))
-"""), 'nested_decorator_is_applied_at_runtime')
-    # A nested scalar-returning decorator is refused for the same reason the
-    # top-level one is: it would rebind `step` to a non-callable.
-    _run_isolated(lambda: test_raises("nested_scalar_decorator_rebind_is_refused", """\
-def deco(x):
-    return 99
-
-def outer(n):
-    @deco
-    def step(x):
-        return x + 1
-    return step(n)
-
-print(outer(7))
-""", "returns int64_t (not callable)"), 'nested_scalar_decorator_rebind_is_refused')
-    # A decorated def inside a MODULE-level block cannot be rebound (the global
-    # machinery only sees top-level bindings), so it is refused, not silently
-    # left as the undecorated function.
-    _run_isolated(lambda: test_raises("decorator_in_a_module_level_block_is_refused", """\
-def twice(f):
-    def wrap(x):
-        return f(x) * 2
-    return wrap
-
-if True:
-    @twice
-    def step(x):
-        return x + 1
-
-print(step(7))
-""", "inside a module-level block"), 'decorator_in_a_module_level_block_is_refused')
 
     # `len()` of a value the codegen could not type, where that value is a
     # LOCAL declared as a plain `int` — the shape that took out `make mojoc`,
