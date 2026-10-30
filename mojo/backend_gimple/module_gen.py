@@ -3139,6 +3139,62 @@ def _gmi_refuse_nested_class_enclosing_reads(stmts: list) -> None:
                             f"bugs/CODEGEN_nested_class_method_cannot_reach_an_enclosing_local.md)")
 
 
+# Return types a decoration can leave behind that are NOT callable. A
+# `@deco def f` rebinds `f` to whatever `deco(f)` returns, so when that is one
+# of these, every later use of `f` is wrong on the compiled path: the
+# decoration is dropped and `f` stays the undecorated function.
+_GMI_NONCALLABLE_DECORATOR_RET = frozenset({'int64_t', 'double', '_Bool', 'char *'})
+
+
+def _gmi_refuse_scalar_decorator_rebind(self, stmts: list) -> None:
+    """Refuse a top-level `def` rebound by a same-module decorator that
+    returns a scalar: `deco(f) -> 99` with `@deco def step`, then `step(7)`.
+
+    The compiled path never applies a decorator to a `def` (the defect is in
+    bugs/COMPILE_FAIL_decorator_application_dropped.md, and the rebinding
+    model that fixes it is that doc's next step). Without a refusal, `step`
+    compiles, links and runs as the UNDECORATED function, which is silently
+    wrong: CPython raises `TypeError: 'int' object is not callable`. So a
+    scalar-returning decorator is refused here, loudly, until the rebinding
+    lands.
+
+    Scope is deliberately narrow, so this cannot drop real code:
+    - Only a bare-name decorator naming a top-level `def` in this same module
+      is inspected. Its return type comes from the same inference every
+      function uses, so no second notion of "scalar" is introduced.
+    - An identity or pass-through decorator (`return f`) is not refused: it
+      rebinds `f` to the same object, and the undecorated answer is correct.
+    - A decorator that is a factory call (`@deco(x)`) and an imported
+      decorator are not inspected here. Those are unrefused, not proven
+      correct; the doc's remaining work covers them.
+    """
+    _rd_defs = {_rs.name: _rs for _rs in (stmts or []) if isinstance(_rs, FunctionDef)}
+    for _rd_fn in _rd_defs.values():
+        for _rd_dec in (getattr(_rd_fn, 'decorators', None) or []):
+            if not isinstance(_rd_dec, str):
+                continue
+            _rd_target = _rd_defs.get(_rd_dec)
+            if _rd_target is None or _rd_target is _rd_fn:
+                continue
+            _rd_ret = self._infer_return_type(_rd_target.body)
+            if _rd_ret not in _GMI_NONCALLABLE_DECORATOR_RET:
+                continue
+            # An untyped parameter infers as int64_t, so `return f` looks
+            # scalar too. A decorator that hands its own parameter back is
+            # the identity on `f`, and its undecorated answer IS correct.
+            _rd_param = _rd_target.params[0][0] if _rd_target.params else None
+            if not any(isinstance(_rd_n, ReturnStmt)
+                       and isinstance(_rd_n.value, IdentExpr)
+                       and _rd_n.value.name == _rd_param
+                       for _rd_n in _walk_ast(_rd_target)):
+                raise RuntimeError(
+                    f"decorator {_rd_dec!r} on {_rd_fn.name!r} returns {_rd_ret} "
+                    f"(not callable), so {_rd_fn.name!r} is rebound to a scalar; "
+                    f"the compiled path does not apply decorators to a def yet and "
+                    f"would silently call the undecorated function (see "
+                    f"bugs/COMPILE_FAIL_decorator_application_dropped.md)")
+
+
 def gen_module_impl(self, stmts):
 
     # A class written INSIDE a function body is a type declaration like any
@@ -3147,6 +3203,7 @@ def gen_module_impl(self, stmts):
     # `_gmi_hoist_nested_structs` for why it appends rather than moves.
     stmts = _gmi_hoist_nested_structs(self, stmts)
     _gmi_refuse_nested_class_enclosing_reads(stmts)
+    _gmi_refuse_scalar_decorator_rebind(self, stmts)
 
     # ── GPU offload, Seam 1 ──────────────────────────────────────────────
     # Classified ONCE, at the very top, because three different places

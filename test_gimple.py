@@ -12725,6 +12725,35 @@ print(run('x/y.txt'))
     test_print_of_a_closure_value_is_not_a_decimal_address()
     test_a_local_rebound_from_a_scalar_to_a_container_is_the_box()
 
+    # A `@deco def f` whose decorator returns a scalar rebinds `f` to a
+    # non-callable; the compiled path does not apply decorators yet, so it
+    # must refuse loudly rather than call the undecorated `f` (bugs/
+    # COMPILE_FAIL_decorator_application_dropped.md). The pass-through
+    # decorator rebinds `f` to itself, so its undecorated answer is correct
+    # and must still compile.
+    test_raises("scalar_decorator_rebind_is_refused", """\
+def deco(f):
+    return 99
+
+@deco
+def step(x):
+    return x + 1
+
+def main():
+    print(step(7))
+""", "returns int64_t (not callable)")
+    test("pass_through_decorator_on_a_def_still_compiles", """\
+def deco(f):
+    return f
+
+@deco
+def step(x):
+    return x + 1
+
+def main():
+    print(step(7))
+""")
+
     # `len()` of a value the codegen could not type, where that value is a
     # LOCAL declared as a plain `int` — the shape that took out `make mojoc`,
     # `selfhost` and `bootstrap-stage2-cc` together.
