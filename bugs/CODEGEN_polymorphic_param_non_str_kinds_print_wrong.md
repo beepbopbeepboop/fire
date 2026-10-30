@@ -1,5 +1,38 @@
 # An unannotated parameter receiving disagreeing types still prints wrong for every pair except int/str
 
+## Status 2026-10-29 (sixth round) — true division `/` beside the parameter
+
+Landed: the fifth round's first open item, `/`, for a float-possible parameter
+as either operand. Python's true division is a float whatever its operands are,
+so `_float_param_arith` (`mojo/backend_gimple/emit_infra.py`) now answers `/`
+with a double box outright: `mojo_div_double` computes the quotient (it raises
+`ZeroDivisionError` on a zero divisor, and gcc `-fgimple` ICEs on an inline
+double `/`), and `mojo_box_from_double` boxes it. No integer quotient is
+computed, so the integer divide that traps never runs. `_FLOAT_PARAM_OPS`
+(`+`, `-`, `*`, `/`) gates both the operand route and the print route
+(`_is_float_param_arith` → `mojo_repr_boxed`). `//` and `%` are still on the
+truncating path.
+
+Measured before the change (the four new cases, `test_link_mode.py`):
+`x / 2` with `f(2.5)`/`f(1)` printed `1`/`0` (CPython `1.25`/`0.5`), the
+reverse order `0`/`1` (CPython `0.5`/`1.25`), and `2 / x` printed `1`/`2`
+(CPython `0.8`/`2.0`). After: all three match CPython in both call orders.
+`x / 0` inside `try: ... except ZeroDivisionError:` prints `zde` before and
+after (it was already caught; this is a guard, not a fix).
+
+Pinned in `test_link_mode.py`'s `test_unannotated_param_with_disagreeing_call_sites`.
+
+Still NOT covered, and the next step for each:
+
+- `//` and `%`: still on the truncating path. Each needs its own arm
+  (`//` is floor of the double quotient for a double operand; `%` is the
+  floor-based double modulo, as `_lower_binary_tail` already does for doubles).
+- The result bound to a name first (`y = x / 2; print(y)`), nested
+  (`(x / 2) + 1`), or returned: the result is a box word that nothing records
+  as possibly-boxed. Same open item as the fifth round.
+- The plain (non-parameter) integer `/` still truncates (`7 / 2` prints `3`):
+  `bugs/CODEGEN_int_true_division_truncates.md`, a separate defect.
+
 ## Status 2026-10-29 (fifth round) — a double operand beside the parameter
 
 Landed: the fourth round's first open item, the double operand (`x * 2.5`,
