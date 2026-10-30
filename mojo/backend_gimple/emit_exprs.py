@@ -1828,7 +1828,8 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             # bare type name. Without this a `ClassName.CONST` string/int
             # constant stubbed to 0 (or, when the base was an opaque module
             # handle, raised AttributeError at runtime).
-            _cattrs = gen._class_attrs.get(module_name)
+            _cattrs = gen._class_attrs.get(
+                gmp._resolve_fn_scoped_struct_name(gen, module_name))
             if _cattrs and node.member in _cattrs:
                 gname = _cattrs[node.member]
                 gtype = gen._global_var_types.get(gname, 'int64_t')
