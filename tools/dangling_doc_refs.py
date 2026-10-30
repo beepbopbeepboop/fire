@@ -7,7 +7,7 @@ behind with a Status history: a fixed bug still listed is indistinguishable
 from an open one to whoever reads the queue next. That is the right rule and
 it has a cost this tool exists to measure — every citation of a deleted doc
 becomes a reference to nothing, in a file that exists to be believed. The
-first instance found (commit c1494d989)
+first instance found (`bugs/DOCS_deleted_bug_doc_still_cited_in_three_places.md`)
 was a test file's module docstring, which is documentation a reader trusts
 sending them to a file that is not there.
 
@@ -98,7 +98,7 @@ SUFFIXES = ('.md', '.py')
 # requires the `bugs/` prefix, so a comment that wrote
 # `FORMAL_dataclass_partial_construction` with no directory — which is how all
 # eleven sites in `formal/` and its tests were written, and how the survey at
-# `bugs/formal/FORMAL_arm64_instruction_coverage.md` still cites its deleted bit-test
+# `bugs/FORMAL_arm64_instruction_coverage.md` still cites its deleted bit-test
 # doc — was invisible to a census whose entire job is to find those.
 #
 # It is a SEPARATE class rather than a second regex over one list, because the
@@ -848,7 +848,7 @@ def main() -> int:
         total = sum(len(v) for v in by_file.values())
         # The BARE class, in its own ledger and with its own walk, judged by the
         # one `ratchet_verdict` call so the prefixed and bare halves cannot
-        # disagree about what a gain is — `bugs/formal/FORMAL_a_surviving_citation_is_
+        # disagree about what a gain is — `bugs/FORMAL_a_surviving_citation_is_
         # not_checked.md` is the defect that a one-walk verdict left open.
         _bare_by_doc, bare_by_file = bare_find(skip=set(args.skip))
         regressions, bare_regressions = ratchet_verdict(by_file, bare_by_file)
@@ -938,7 +938,7 @@ def main() -> int:
     print('\nThe fix for one of these is to name the BUG rather than the doc — '
           'the\nsymptom, or the commit that fixed it — which is what '
           'test_arm64_encoders.py\nsays at its shift sweep. See '
-          'commit c1494d989.')
+          'bugs/DOCS_deleted_bug_doc_still_cited_in_three_places.md.')
     stale = stale_verdicts(skip=set(args.skip))
     if stale:
         print(f'\n{stale_verdict_heading()} — {len(stale)} row(s), in '

@@ -4,53 +4,6 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/scriptutil.
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status 2026-10-29 (worker round) — Decision 2 PARTIAL: direct-call nested generators now thread their enclosing reads
-
-Landed (real behaviour change, with regression tests in `test_gimple_generator_runner.py`):
-
-* A sync generator defined as a direct statement of a top-level def, which reads
-  that def's parameter or `var` local and is CALLED directly from it, now compiles.
-  The enclosing names become trailing parameters of the coroutine frame
-  (`cpp_async._compile_nested_generator_closures`, the sync analogue of the async
-  closure capture path). Call sites append the captured values
-  (`emit_calls._emit_nested_generator_start_call`). Registered under
-  `(enclosing def, generator name)` in `_nested_generator_api`.
-* Only DIRECT calls are claimed: a generator returned or stored as a value (`return g`)
-  stays refused. Claiming it compiled to a program that printed nothing (measured),
-  because the value form has no call site that supplies the captures.
-* Soundness: the capture is a by-value snapshot, so the discovery pass claims a
-  generator only when no captured name is rebound in the enclosing def (parameter:
-  zero binding sites; local: exactly its one `var`). Otherwise the honest refusal stands.
-* A `nonlocal` WRITE from a nested generator was a silent miscompile (probe:
-  Python `13`/`11`, compiled `3`/`10`: the write landed on a fresh local). It is now
-  an honest refusal (`cpp_async._gen_cpp_generator_unit`).
-* Infrastructure: `resolve_shared._quick_type` and `_infer_local_var_types` learn
-  nested-generator handles (`it = g(2)` is typed as a generator), scoped to the
-  function being typed via `gen._local_inference_func`.
-
-Regression tests: `generator_nested_reads_enclosing_param`, `..._enclosing_local`,
-`..._handle_bound_then_next` (compiled, stdout), `..._rebound_after_def_refused`,
-`..._nonlocal_write_refused`.
-
-NOT done, and why the module-level list is not yet empty:
-
-* `traceback_cm` is still refused. Measured 2026-10-29 with `python3 fire.py build`:
-  its capture `showtb` is bound by a PLAIN assignment (`showtb = ns.pop(...)`,
-  scriptutil.py:215), not a `var`, so `_enclosing_scope_with_locals` does not
-  resolve it. Widening that helper also changes the nested async closure path, so
-  it needs its own round and the gate. Separately, `traceback_cm` is
-  `@contextlib.contextmanager`-decorated and called through the decorator; that
-  shape has no lowering here and is unverified.
-* `_iter_filenames` (Decision 1, the `process(...)` callable parameter) is untouched.
-* Downstream of both: `iterutil.peek_and_iter` (`next()` on a rebound list-iterator
-  local), `iter_many`, `process_filenames`, `_walk_tree`/`glob_tree`, `iter_files`'s
-  `*`/`**` argument. These are separate capabilities.
-
-Next step for this file: (1) extend `_enclosing_scope_with_locals` to first-bound
-plain-assignment locals, behind a check that the lowered C type matches the outer
-body's own declaration; (2) decide how a `@contextlib.contextmanager` generator is
-represented; (3) Decision 1.
-
 ## Status 2026-10-29 — planning round: the module-level list is now TWO names, and both are separate features
 
 Measured on `work/bug-compile-fail-tools-c-analyzer-c-comm-5114` (HEAD `c4297dcfc`):

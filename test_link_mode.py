@@ -37,7 +37,6 @@ the invariant is tested in BOTH locations no matter how the suite is
 invoked.
 """
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -217,521 +216,6 @@ def test_bare_submodule_import_call_inside_source_tree() -> bool:
     if not ok:
         print(f"  ✗ bare_submodule_import_call_inside_source_tree: rc={rc} "
               f"stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
-    return ok
-
-
-def test_bare_submodule_import_keyword_call() -> bool:
-    """A KEYWORD-argument call through a bare `from . import SUBMODULE`
-    marker, against a compiled generator and a plain function
-    (`lib.counter(4, step=10)`, `lib.scale(2, factor=3)`).
-
-    The positional spelling lowered through the module-alias fallback in
-    `_lower_method_call`, which re-dispatches to the bare-name call. That
-    fallback carried a `not node.kwargs` guard, so the keyword spelling
-    fell through to the generic module-marker stub: the generator raised
-    `NotImplementedError: .lib.counter: module '.lib' is not compiled into
-    this binary` at run time, and the plain call answered through the
-    stub. The from-import spelling of the same calls already worked.
-    Found while closing c_common/fsutil.py (`fsutil.walk_tree("runtime",
-    suffix=".h")`); see the dynamic call layer residue bug (after the fsutil closure).
-    """
-    pkg = {
-        'pkg3/__init__.py': '',
-        'pkg3/lib.py': (
-            'def counter(n, *, step=1):\n'
-            '    i = 0\n'
-            '    while i < n:\n'
-            '        yield i * step\n'
-            '        i = i + 1\n'
-            '\n'
-            'def scale(x, *, factor=2):\n'
-            '    return x * factor\n'
-        ),
-        'pkg3/main.py': (
-            'from . import lib\n'
-            'for v in lib.counter(4, step=10):\n'
-            '    print(v)\n'
-            'print(lib.scale(5, factor=3))\n'
-        ),
-    }
-    root = os.path.join(REPO, 'build', 'test_link_mode')
-    os.makedirs(root, exist_ok=True)
-    td = tempfile.mkdtemp(prefix='bare_submodule_kw_', dir=root)
-    try:
-        rc, stdout = _build_and_run(pkg, 'pkg3/main.py', td)
-        py_rc, py_stdout = _cpython_run(td, 'pkg3/main.py', as_module=True)
-    finally:
-        shutil.rmtree(td, ignore_errors=True)
-    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
-          and stdout.strip() == '0\n10\n20\n30\n15')
-    if not ok:
-        print(f"  ✗ bare_submodule_import_keyword_call: rc={rc} "
-              f"stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
-    return ok
-
-
-def test_cross_module_generator_default_is_padded() -> bool:
-    """A generator reached through ANOTHER module (`lib.counter(4)` on a bare
-    `from pkg import lib`, and `from pkg.lib import counter`) with a
-    defaulted parameter omitted must receive the callee's real default.
-
-    `_emit_generator_start_call` padded the omitted slot from the CALLER's
-    `_func_param_defaults`, which never saw the defining module's pass, so
-    `step=1` arrived as a typed 0: `sum(lib.counter(4))` printed 0 and
-    `tuple(...)` was all zeros (CPython 6 / (0, 1, 2)). The defining
-    module's snapshot (`api['defaults']`) is the fallback now. Found while
-    closing c_common/fsutil.py; see
-    the dynamic call layer residue bug (after the fsutil closure).
-    """
-    pkg = {
-        'pkg5/__init__.py': '',
-        'pkg5/lib.py': (
-            'def counter(n, *, step=1):\n'
-            '    i = 0\n'
-            '    while i < n:\n'
-            '        yield i * step\n'
-            '        i = i + 1\n'
-            '\n'
-            'def pick(n, flag=None):\n'
-            '    for k in range(n):\n'
-            '        if flag is None:\n'
-            '            yield k\n'
-        ),
-        'pkg5/main.py': (
-            'from pkg5 import lib\n'
-            'from pkg5.lib import counter\n'
-            'print(sum(lib.counter(4)))\n'
-            'print(tuple(lib.counter(3)))\n'
-            'print(sum(counter(4)))\n'
-            'print(list(lib.pick(3)))\n'
-        ),
-    }
-    root = os.path.join(REPO, 'build', 'test_link_mode')
-    os.makedirs(root, exist_ok=True)
-    td = tempfile.mkdtemp(prefix='xmod_gen_default_', dir=root)
-    try:
-        rc, stdout = _build_and_run(pkg, 'pkg5/main.py', td)
-        py_rc, py_stdout = _cpython_run(td, 'pkg5/main.py', as_module=True)
-    finally:
-        shutil.rmtree(td, ignore_errors=True)
-    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
-          and stdout == '6\n(0, 1, 2)\n6\n[0, 1, 2]\n')
-    if not ok:
-        print(f"  ✗ cross_module_generator_default_is_padded: rc={rc} "
-              f"stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
-    return ok
-
-
-def test_generator_str_param_concat_is_string_concatenation() -> bool:
-    """`root + str(k)` in a generator whose unannotated `root` is only ever
-    passed a string literal is string concatenation, not integer addition.
-
-    The call site's literal is the evidence (`_CALLSITE_PARAM_KINDS` records
-    `root: 'p'`), and the coroutine pass keeps it in `_coro_str_params`, but
-    the `+` lowering only consults `_int64_may_hold_str`, which a generator
-    body never received. `root` stayed a plain int64 word, `str(root)`-style
-    stringification ran on the pointer, and the yielded values printed as
-    pointer decimals (`['43033668960', ...]`, exit 0).
-
-    Pinned here: the same-module spelling. The cross-module spelling is
-    pinned by test_generator_str_param_concat_cross_module, below.
-    """
-    src = (
-        'def walk(root, suffix=None):\n'
-        '    for k in range(3):\n'
-        '        yield root + str(k)\n'
-        '\n'
-        'print(list(walk("r")))\n'
-    )
-    pkg = {'walk.py': src}
-    root = os.path.join(REPO, 'build', 'test_link_mode')
-    os.makedirs(root, exist_ok=True)
-    td = tempfile.mkdtemp(prefix='gen_str_concat_', dir=root)
-    try:
-        rc, stdout = _build_and_run(pkg, 'walk.py', td)
-        py_rc, py_stdout = _cpython_run(td, 'walk.py')
-    finally:
-        shutil.rmtree(td, ignore_errors=True)
-    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
-          and stdout.strip() == "['r0', 'r1', 'r2']")
-    if not ok:
-        print(f"  ✗ generator_str_param_concat_is_string_concatenation: "
-              f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
-    return ok
-
-
-def test_generator_str_param_concat_cross_module() -> bool:
-    """The cross-module spelling of `test_generator_str_param_concat_is_string_concatenation`:
-    `lib.walk("r")` called from another module, through a package
-    attribute (`from pkg import lib`). The defining module is compiled on its
-    own, so its generator body never sees the importer's call site in its own
-    coroutine pass; the importer's string-literal call site reaches it only
-    through the cross-module hint merge (`_xmod_gen_param_hints`), which must
-    feed the BODY's string tables (`_coro_str_params`,
-    `_int64_may_hold_str`) as well as the signature. Before that merge fed
-    them, `root + str(k)` lowered as pointer arithmetic and printed the
-    pointer's decimal (`['43634604000', ...]`, exit 0).
-
-    The from-import spelling (`from walk_lib import walk`) already worked; the
-    module-attribute spelling is the one that did not, because the body's
-    name is module-qualified (`__mgco_pkg_lib_walk_body`) and the hint's key
-    must resolve to exactly that name.
-    """
-    lib = (
-        'def walk(root, suffix=None):\n'
-        '    for k in range(3):\n'
-        '        yield root + str(k)\n'
-    )
-    pkg = {
-        'pkg/__init__.py': '',
-        'pkg/lib.py': lib,
-        'main.py': (
-            'from pkg import lib\n'
-            'print(list(lib.walk("r")))\n'
-        ),
-    }
-    root = os.path.join(REPO, 'build', 'test_link_mode')
-    os.makedirs(root, exist_ok=True)
-    td = tempfile.mkdtemp(prefix='xmod_gen_str_concat_', dir=root)
-    try:
-        rc, stdout = _build_and_run(pkg, 'main.py', td)
-        py_rc, py_stdout = _cpython_run(td, 'main.py')
-    finally:
-        shutil.rmtree(td, ignore_errors=True)
-    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
-          and stdout.strip() == "['r0', 'r1', 'r2']")
-    if not ok:
-        print(f"  ✗ generator_str_param_concat_cross_module: "
-              f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
-    return ok
-
-
-def _xmod_str_var_case(name: str, main_src: str) -> bool:
-    """Shared body for the variable-argument spellings of the cross-module
-    generator string-concat case: the importer passes a NAME bound to a string
-    literal, not the literal itself. `_gmi_literal_ctype` answers None for an
-    identifier, so the literal-only hint recorder never saw it and the
-    generator body's `root + str(k)` lowered as pointer arithmetic (exit 0,
-    decimal pointers printed). The expected output is CPython's, not a literal."""
-    lib = (
-        'def walk(root, suffix=None):\n'
-        '    for k in range(3):\n'
-        '        yield root + str(k)\n'
-    )
-    pkg = {
-        'pkg/__init__.py': '',
-        'pkg/lib.py': lib,
-        'main.py': main_src,
-    }
-    root = os.path.join(REPO, 'build', 'test_link_mode')
-    os.makedirs(root, exist_ok=True)
-    td = tempfile.mkdtemp(prefix=f'{name}_', dir=root)
-    try:
-        rc, stdout = _build_and_run(pkg, 'main.py', td)
-        py_rc, py_stdout = _cpython_run(td, 'main.py')
-    finally:
-        shutil.rmtree(td, ignore_errors=True)
-    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
-          and stdout.strip() == "['r0', 'r1', 'r2']")
-    if not ok:
-        print(f"  ✗ {name}: "
-              f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
-    return ok
-
-
-def test_generator_str_param_concat_cross_module_variable_arg() -> bool:
-    """`s = "r"` at module scope, then `lib.walk(s)`: the importer's argument is
-    a single-binding identifier whose value is a string literal. Before the
-    fix the hint recorder read only literal arguments and dropped this one."""
-    return _xmod_str_var_case(
-        'xmod_gen_str_var_module',
-        'from pkg import lib\n'
-        's = "r"\n'
-        'print(list(lib.walk(s)))\n',
-    )
-
-
-def test_generator_str_param_concat_cross_module_local_var_arg() -> bool:
-    """The same call with `s` a LOCAL of the function that makes the call.
-    The binding is resolved in the enclosing function, not at module scope."""
-    return _xmod_str_var_case(
-        'xmod_gen_str_var_local',
-        'from pkg import lib\n'
-        'def main():\n'
-        '    s = "r"\n'
-        '    print(list(lib.walk(s)))\n'
-        'main()\n',
-    )
-
-
-def test_str_affix_method_on_unsolved_word_is_bool() -> bool:
-    """`.startswith(...)` / `.endswith(...)` on a loop target that is an
-    UNSOLVED word (the element of a registered generator, whose kind the
-    compiled path cannot know statically) printed `1` / `0`. The method
-    lowers to the word-form runtime helper (`mojo_str_startswith_word`),
-    but the lowering declared its result as a plain C `int`, so `print`
-    rendered the int instead of the Python `bool`. The same call on a
-    `char *` receiver is typed `_Bool` by `exprtypes`, and the bytes
-    variant already wraps its result with `!= 0`; the word receiver must
-    agree. Found while closing c_common/fsutil.py (`iter_files` yields
-    words, and `f.startswith("runtime")` printed `1` where CPython prints
-    `True`); see the dynamic call layer residue bug (after the fsutil closure)
-    item 3.
-    """
-    pkg = {
-        'pkg4/__init__.py': '',
-        'pkg4/lib.py': (
-            'def names(n):\n'
-            '    i = 0\n'
-            '    while i < n:\n'
-            '        yield "x" + str(i)\n'
-            '        i = i + 1\n'
-        ),
-        'pkg4/main.py': (
-            'from . import lib\n'
-            'for f in lib.names(2):\n'
-            '    print(f.startswith("x"))\n'
-            '    print(f.endswith("1"))\n'
-            '    print(f.startswith("y"))\n'
-        ),
-    }
-    root = os.path.join(REPO, 'build', 'test_link_mode')
-    os.makedirs(root, exist_ok=True)
-    td = tempfile.mkdtemp(prefix='str_affix_word_', dir=root)
-    try:
-        rc, stdout = _build_and_run(pkg, 'pkg4/main.py', td)
-        py_rc, py_stdout = _cpython_run(td, 'pkg4/main.py', as_module=True)
-    finally:
-        shutil.rmtree(td, ignore_errors=True)
-    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
-          and stdout == 'True\nFalse\nFalse\nTrue\nTrue\nFalse\n')
-    if not ok:
-        print(f"  ✗ str_affix_method_on_unsolved_word_is_bool: rc={rc} "
-              f"stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
-    return ok
-
-
-def test_generator_none_default_reaches_callee_as_null() -> bool:
-    """A generator's own `None` default for a `char *` parameter reached the
-    C++-coroutine body as the string "0" instead of NULL: the generator-start
-    padding site (`emit_calls._lower_generator_start`) called
-    `_default_expr_to_pair` without the callee's declared slot type, so the
-    integer 0 went through `mojo_cstr_or_int_str` and came out non-null.
-    `if onempty is None:` was then False, the generator raised ValueError on
-    its very first resume, and that exception surfaced in the caller's
-    ordinary `for` loop -- which had no try frame, so the program died with
-    "Unhandled exception: empty". Plain functions padded this slot correctly
-    (`_default_expr_to_pair(..., param_ctype=...)`), which is why only the
-    generator path showed it. Found via the dynamic call layer residue bug (after the fsutil closure) (its doc named a try/except after a loop; the
-    real trigger is the None default, reproduced with the loop and try kept).
-    """
-    src = (
-        'def im(items, onempty=None):\n'
-        '    if not items:\n'
-        '        if onempty is None:\n'
-        '            return\n'
-        '        raise ValueError("empty")\n'
-        '    for item in items:\n'
-        '        yield item, True\n'
-        '\n'
-        'for a, b in im([]):\n'
-        '    print(a, b)\n'
-        'try:\n'
-        '    for a, b in im([], "msg"):\n'
-        '        print(a, b)\n'
-        'except ValueError as ex:\n'
-        '    print("caught", ex)\n'
-    )
-    pkg = {'nonedef4/main.py': src}
-    root = os.path.join(REPO, 'build', 'test_link_mode')
-    os.makedirs(root, exist_ok=True)
-    td = tempfile.mkdtemp(prefix='gen_none_default_', dir=root)
-    try:
-        rc, stdout = _build_and_run(pkg, 'nonedef4/main.py', td)
-        py_rc, py_stdout = _cpython_run(td, 'nonedef4/main.py')
-    finally:
-        shutil.rmtree(td, ignore_errors=True)
-    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
-          and stdout == 'caught empty\n')
-    if not ok:
-        print(f"  ✗ generator_none_default_reaches_callee_as_null: rc={rc} "
-              f"stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
-    return ok
-
-
-def _run_single_file_vs_cpython(name: str, src: str, prefix: str) -> tuple:
-    """Build `src` as `<name>/main.py` through the link-mode driver and run it
-    under CPython too; returns (rc, stdout, cpython_rc, cpython_stdout)."""
-    root = os.path.join(REPO, 'build', 'test_link_mode')
-    os.makedirs(root, exist_ok=True)
-    td = tempfile.mkdtemp(prefix=prefix, dir=root)
-    try:
-        rc, stdout = _build_and_run({f'{name}/main.py': src}, f'{name}/main.py', td)
-        py_rc, py_stdout = _cpython_run(td, f'{name}/main.py')
-    finally:
-        shutil.rmtree(td, ignore_errors=True)
-    return rc, stdout, py_rc, py_stdout
-
-
-def test_statement_call_packs_keywords_into_kwargs_slot() -> bool:
-    """A bare, value-discarding `f(1, scale=2.5)` statement to a callee with a
-    `**kw` parameter passed the raw keyword VALUE where the `MojoDict *` goes
-    (`(MojoDict *)2.5`, a gcc error; a wild pointer for an int). Only the
-    expression path (`_lower_named_call`) packed the keywords; the statement
-    twin in `emit_stmts` now shares `_pack_kwargs_slot_call`. A float keyword
-    must also reach the dict as a double (it was truncated to an int); reading
-    the value back is a separate gap (a dict slot read loses its value kind),
-    so this test asserts only that the keyword was packed.
-    Found via the dynamic call layer residue bug (after the fsutil closure)
-    open `**kw` float pack."""
-    src = (
-        'def show(tag, **kw):\n'
-        '    print(tag)\n'
-        '    print(len(kw))\n'
-        '    print("scale" in kw)\n'
-        '\n'
-        'show(1, scale=2)\n'
-        'show(2, scale=2.5)\n'
-    )
-    rc, stdout, py_rc, py_stdout = _run_single_file_vs_cpython(
-        'kwstmt', src, 'kw_stmt_')
-    ok = rc == 0 and py_rc == 0 and stdout == py_stdout
-    if not ok:
-        print(f"  ✗ statement_call_packs_keywords_into_kwargs_slot: rc={rc} "
-              f"stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
-    return ok
-
-
-def test_generator_value_called_with_kwargs_spread_and_float_default() -> bool:
-    """`f(3, **kw)` through a callable PARAMETER lowered as
-    `mojo_fnptr_call_2(f, 3, kw)` -- the dict's address as one positional word
-    -- so the generator's keyword parameter received a pointer and nothing was
-    produced. The call now packs the positional list / keyword dict (spreads
-    merged at run time) and dispatches through `mojo_dyn_call`, as the C++-path
-    twin does. Two more defects sat behind it: an unannotated generator
-    parameter with a float default (`scale=2.0`) was typed int64_t, so its
-    unit could not register a runtime signature; and the `for` over the
-    returned handle read a double-valued drain through the int arm, printing
-    the bit pattern. Found via the dynamic call layer residue bug (after the fsutil closure) open gaps."""
-    src = (
-        'def g(n, scale=2.0):\n'
-        '    for i in range(n):\n'
-        '        yield i * scale\n'
-        '\n'
-        'def run(f, **kw):\n'
-        '    for v in f(3, **kw):\n'
-        '        print(v)\n'
-        '\n'
-        'def main():\n'
-        '    run(g, scale=2.5)\n'
-        '    run(g)\n'
-        'main()\n'
-    )
-    rc, stdout, py_rc, py_stdout = _run_single_file_vs_cpython(
-        'kwspread', src, 'kw_spread_')
-    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
-          and stdout == '0.0\n2.5\n5.0\n0.0\n2.0\n4.0\n')
-    if not ok:
-        print(f"  ✗ generator_value_called_with_kwargs_spread_and_float_default: "
-              f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
-    return ok
-
-
-def test_generator_value_called_with_double_beside_star_spread() -> bool:
-    """A call through a function VALUE that mixes a float argument with a `*`
-    spread (`f(1.5, *a)`) was refused at compile time: the packed argument
-    list's kind string was positional and a spread's length is unknown. A
-    double is now appended with `mojo_list_append_double_kinded`, which records
-    that slot's 'd' kind at run time, so it may sit before or after the
-    spread. Found via the dynamic call layer residue bug (after the fsutil closure)."""
-    src = (
-        'def g(x: float, n: int, y: float = 0.25):\n'
-        '    for i in range(n):\n'
-        '        yield x * i + y\n'
-        '\n'
-        'def h(n: int, y: float):\n'
-        '    for i in range(n):\n'
-        '        yield i + y\n'
-        '\n'
-        'def run(f, a):\n'
-        '    for v in f(1.5, *a):\n'
-        '        print(v)\n'
-        '\n'
-        'def run2(f, a):\n'
-        '    for v in f(*a, 0.5):\n'
-        '        print(v)\n'
-        '\n'
-        'def main():\n'
-        '    run(g, [3])\n'
-        '    run2(h, [2])\n'
-        'main()\n'
-    )
-    rc, stdout, py_rc, py_stdout = _run_single_file_vs_cpython(
-        'dblspread', src, 'dbl_spread_')
-    ok = rc == 0 and py_rc == 0 and stdout == py_stdout and stdout != ''
-    if not ok:
-        print(f"  ✗ generator_value_called_with_double_beside_star_spread: "
-              f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
-    return ok
-
-
-def test_generator_value_called_with_float_element_in_star_spread() -> bool:
-    """A FLOAT ELEMENT inside a `*` spread (`f(*a)` with `a = [1.5, 3]`) lost
-    its 'd' kind: `mojo_args_extend_word` appended each element with
-    `mojo_list_append_int`, so the double box's address reached the callee as
-    an integer word and the registered generator read garbage. Elements are
-    now appended with `mojo_list_append_word`, which records the kind. Found
-    via the dynamic call layer residue bug (after the fsutil closure)."""
-    src = (
-        'def g(x: float, n: int):\n'
-        '    for i in range(n):\n'
-        '        yield x * i\n'
-        '\n'
-        'def run(f, a):\n'
-        '    for v in f(*a):\n'
-        '        print(v)\n'
-        '\n'
-        'def main():\n'
-        '    run(g, [1.5, 3])\n'
-        'main()\n'
-    )
-    rc, stdout, py_rc, py_stdout = _run_single_file_vs_cpython(
-        'dblelem', src, 'dbl_elem_')
-    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
-          and stdout == '0.0\n1.5\n3.0\n')
-    if not ok:
-        print(f"  ✗ generator_value_called_with_float_element_in_star_spread: "
-              f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
-    return ok
-
-
-def test_plain_function_unannotated_float_default_is_a_float() -> bool:
-    """An UNANNOTATED plain-function parameter whose default is a float literal
-    is a float parameter (the rule generators already had in `cpp_async`; now
-    shared in `funcs_shared._param_ctype`). Left as the int64_t box, an omitted
-    `scale=0.5` was padded as the integer 0 / its bits and printed garbage.
-    Found via the dynamic call layer residue bug (after the fsutil closure)."""
-    src = (
-        'def show(tag, scale=0.5):\n'
-        '    print(tag, scale)\n'
-        '\n'
-        'def keep(scale=0.5):\n'
-        '    return scale\n'
-        '\n'
-        'def main():\n'
-        '    show("a")\n'
-        '    show("b", 2.5)\n'
-        '    print(keep())\n'
-        '    print(keep(1.25))\n'
-        'main()\n'
-    )
-    rc, stdout, py_rc, py_stdout = _run_single_file_vs_cpython(
-        'plainfloatdflt', src, 'plain_fd_')
-    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
-          and stdout == 'a 0.5\nb 2.5\n0.5\n1.25\n')
-    if not ok:
-        print(f"  ✗ plain_function_unannotated_float_default_is_a_float: "
-              f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
     return ok
 
 
@@ -935,107 +419,6 @@ def test_bare_import_sibling_function_call_through_module() -> bool:
         print(f"  ✗ bare_import_sibling_function_call_through_module: "
               f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r}) "
               f"| from-import control rc={rc2} stdout={stdout2!r}")
-    return ok
-
-
-def test_cross_module_unannotated_param_takes_the_callers_literal_type() -> bool:
-    """`shutil.which(cmd, ...)` is the shape that broke `ctypes/util.py`:
-    an UNANNOTATED free function in another module whose parameter is only
-    ever forwarded to a return, called with a string literal. The importer's
-    literal call site is the only evidence of `cmd`'s type, and the same
-    module's own call sites have always supplied it (Pass 1.3d); the
-    cross-module path did not, so `cmd` stayed at the `int64_t` default and
-    `return cmd` answered an `int64_t`. The caller then printed the string's
-    POINTER as a decimal integer (`4343434384`), exit 0.
-
-    The two spellings pinned here are the ones the cross-module literal
-    contract reaches: a bare `import SIBLING` attribute call bound to a
-    local inside a function, and a `from SIBLING import fn` call. Each must
-    print what CPython prints. (A module-scope global or a returned local bound from a bare
-    module attribute call is pinned by
-    `test_module_attr_call_result_is_typed_by_the_callee_return`.)"""
-    lib = (
-        'def which(cmd, path=None):\n'
-        '    return cmd\n'
-    )
-    pkg = {
-        '_shm.py': lib,
-        'bimp.py': (
-            'import _shm\n'
-            '\n'
-            'def find(name):\n'
-            "    c = _shm.which('gcc')\n"
-            '    if not c:\n'
-            '        return None\n'
-            '    print(c)\n'
-            '\n'
-            'find(1)\n'
-        ),
-        'bimpf.py': (
-            'from _shm import which\n'
-            '\n'
-            "print(which('gcc'))\n"
-        ),
-    }
-    with tempfile.TemporaryDirectory() as td:
-        rc, stdout = _build_and_run(pkg, 'bimp.py', td)
-        py_rc, py_stdout = _cpython_run(td, 'bimp.py')
-        rc2, stdout2 = _build_and_run(pkg, 'bimpf.py', td)
-        py_rc2, py_stdout2 = _cpython_run(td, 'bimpf.py')
-    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
-          and stdout.strip() == 'gcc'
-          and rc2 == 0 and py_rc2 == 0 and stdout2 == py_stdout2
-          and stdout2.strip() == 'gcc')
-    if not ok:
-        print(f"  ✗ cross_module_unannotated_param_takes_the_callers_literal_type: "
-              f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r}) "
-              f"| from-import rc={rc2} stdout={stdout2!r} "
-              f"(CPython rc={py_rc2} {py_stdout2!r})")
-    return ok
-
-
-def test_module_attr_call_result_is_typed_by_the_callee_return() -> bool:
-    """`import m; m.f(...)` consumed by INFERENCE (a module-scope global, or a
-    local the enclosing function returns) must take the callee's `char *`
-    return, not the `int64_t` default: the string's pointer printed as a
-    decimal integer (`4299312296`), exit 0. Each program is compared to
-    CPython. `obj.which(...)` on a plain struct instance must NOT be typed by
-    the module function of the same name."""
-    pkg = {
-        '_shm.py': 'def which(cmd, path=None):\n    return cmd\n',
-        'mg.py': (
-            'import _shm\n'
-            "x = _shm.which('gcc')\n"
-            'print(x)\n'
-        ),
-        'mr.py': (
-            'import _shm\n'
-            '\n'
-            'def find(n):\n'
-            "    c = _shm.which('gcc')\n"
-            '    if not c:\n'
-            '        return None\n'
-            '    return c\n'
-            '\n'
-            'print(find(1))\n'
-        ),
-        'ma.py': (
-            'import _shm as sh\n'
-            "y = sh.which('gcc')\n"
-            'print(y)\n'
-        ),
-    }
-    ok = True
-    with tempfile.TemporaryDirectory() as td:
-        for entry in ('mg.py', 'mr.py', 'ma.py'):
-            rc, out = _build_and_run(pkg, entry, td)
-            py_rc, py_out = _cpython_run(td, entry)
-            good = (rc == 0 and py_rc == 0 and out == py_out
-                    and out.strip() == 'gcc')
-            if not good:
-                print(f"  ✗ module_attr_call_result {entry}: rc={rc} "
-                      f"stdout={out!r} (CPython rc={py_rc} {py_out!r})")
-            ok = ok and good
     return ok
 
 
@@ -1554,7 +937,7 @@ def test_unannotated_param_with_disagreeing_call_sites() -> bool:
     #
     # What is asserted is BUILDABILITY, and deliberately so: the values these
     # print are still wrong (a pointer decimal for the list), which is the
-    # runtime-tag row of bug CODEGEN_polymorphic_param_non_str_kinds_print_wrong
+    # runtime-tag row of bugs/CODEGEN_polymorphic_param_non_str_kinds_print_wrong.md
     # (the float beside an integer is fixed, in `cases` above). Asserting
     # the wrong text would pin a bug; asserting only that it COMPILES is the
     # whole content of this row, and it was a hard failure before.
@@ -1587,10 +970,10 @@ def test_unannotated_param_with_disagreeing_call_sites() -> bool:
             ok = False
             print(f"  ✗ unannotated_param_container_does_not_break_the_build"
                   f"[{i}]: compiled but exited {rc}")
-    # ARITHMETIC on the float-possible parameter (bug
-    # CODEGEN_polymorphic_param_non_str_kinds_print_wrong). `x OP n` with
-    # `+`, `-`, `*`, `//`, `%` is answered by `_float_param_arith`: the integer
-    # answer when the argument was an integer, and a double box holding the
+    # ARITHMETIC on the float-possible parameter (bugs/
+    # CODEGEN_polymorphic_param_non_str_kinds_print_wrong.md). `x OP n` with
+    # `+`, `-` or `*` is answered by `_float_param_arith`: the integer answer
+    # when the argument was an integer, and a double box holding the double
     # answer when it was a float, picked at run time. Each expectation is the
     # CPython answer, so this pins the real double read, not the old truncation.
     # `print(x)` is pinned by `cases` above. A DOUBLE operand beside the
@@ -1605,10 +988,6 @@ def test_unannotated_param_with_disagreeing_call_sites() -> bool:
         ('def f(x):\n    print(x * 2.5)\n\n\nf(1)\nf(2.5)\n', '2.5\n6.25\n'),
         ('def f(x):\n    print(2.5 * x)\n\n\nf(2.5)\nf(1)\n', '6.25\n2.5\n'),
         ('def f(x):\n    print(x + 0.5)\n\n\nf(2.5)\nf(1)\n', '3.0\n1.5\n'),
-        # `//` and `%`: floor division and modulo, the two remaining float
-        # arithmetic arms (`_FLOAT_PARAM_OPS`) beside the float-possible param.
-        ('def f(x):\n    print(x // 2)\n\n\nf(2.5)\nf(1)\n', '1.0\n0\n'),
-        ('def f(x):\n    print(x % 2)\n\n\nf(2.5)\nf(1)\n', '0.5\n1\n'),
     ]
     for i, (src, want) in enumerate(arithmetic):
         with tempfile.TemporaryDirectory() as td:
@@ -2206,12 +1585,27 @@ def test_nested_def_is_not_a_module_level_fn_export() -> bool:
 
 
 def test_imported_function_trailing_default_argument_is_padded() -> bool:
-    """`from lib import f; f(1)` where `lib.f(a, b=7)` must compile and print `8`.
+    """Regression for `bugs/CODEGEN_imported_function_default_argument_dropped_at_call.md`.
 
-    The single-line-signature case of the imported-function trailing-default
-    drop. The multi-line-signature case, which is the one that blocked `mojoc`,
-    is pinned on the extern path by
-    `test_extern_import_keyword_call_pads_trailing_default`.
+    `from lib import f; f(1)` where `lib.f(a, b=7)` must compile and print `8`,
+    not the pre-fix "too few arguments to function 'lib_f' expected 2 have 1"
+    GCC error. Root cause: `module_loader`'s text scan of the defining module
+    built its `exports[name]` record from the C parameter list only, and the
+    C list strips default values (`'String = ""'` -> `'String'`), so the
+    record carried no defaults at all. The cross-module call padding in
+    `_lower_named_call` consults `gen._func_param_defaults` for trailing
+    defaults, and that table is populated by the DEFINING module's own
+    `gen_module` pass — which never runs for an imported module compiled
+    through the link-mode/inline path, so the pad site saw an empty list and
+    emitted a 3-arg call against a 4-parameter prototype (the exact
+    `compile_to_gimple(src, do_imports=False, filename=filename)` arity
+    error that blocks `mojoc`).
+
+    The fix is to record the defaulted parameter names in the export record
+    at the scan site (the same AST-derived shape `module_spec_gen.py` and
+    `gen_module`'s Pass 10 already use), so the importer's pad site has the
+    defaults to pad from. Asserting CPython's real answer (8) pins the value;
+    pre-fix the build itself fails at gcc, so `rc == 0` is part of the pin.
     """
     pkg = {
         'lib.py': 'def f(a, b=7):\n    return a + b\n',
@@ -2228,56 +1622,6 @@ def test_imported_function_trailing_default_argument_is_padded() -> bool:
     if not ok:
         print(f"  ✗ imported_function_trailing_default_argument_is_padded: "
               f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
-    return ok
-
-
-def test_extern_import_keyword_call_pads_trailing_default() -> bool:
-    """`from lib import g` where `g` is declared over SEVERAL lines, and called
-    with a keyword argument that skips a defaulted parameter, on the EXTERN path
-    (`compile_to_gimple(src, do_imports=False)`: `lib` is not inlined, only
-    declared from its export record). The keyword value must land in the slot of
-    the parameter it names, and the omitted `auto_gpu` must be padded from the
-    defining `def`'s own default, so the call carries all four arguments the
-    extern prototype declares.
-
-    Root cause, measured: `module_loader`'s export scan is line-based and read a
-    `def` only when its `)` was on the same line, so a multi-line signature had
-    no export record at all. Without one there was no prototype, no parameter
-    names for `_kwarg_param_names` and no defaults for the padding loop, so the
-    call lowered to `lib_g_<sfx> (src)`. That is the shape of
-    `fire_compiler.py`'s `compile_to_gimple(src, do_imports=False,
-    filename=filename)` that blocked `mojoc` on master, which had been papered
-    over by a per-name padding branch for `compile_to_gimple`. Asserted on the
-    emitted call's argument count, not on the source text.
-    """
-    import gimple_codegen
-    lib = (
-        'def g(src: String, do_imports: bool = False,\n'
-        '      filename: String = "", auto_gpu: bool = True) -> String:\n'
-        '    return src\n'
-    )
-    main = (
-        'from lib import g\n'
-        '\n'
-        'def h(src: String) -> String:\n'
-        '    return g(src, do_imports=False, filename="f")\n'
-    )
-    with tempfile.TemporaryDirectory() as td:
-        with open(os.path.join(td, 'lib.py'), 'w') as f:
-            f.write(lib)
-        main_path = os.path.join(td, 'main.py')
-        with open(main_path, 'w') as f:
-            f.write(main)
-        c_code = gimple_codegen.compile_to_gimple(main, do_imports=False, filename=main_path)
-    calls = []
-    for line in c_code.splitlines():
-        m = re.match(r'^\s*_t\d+ = (lib_g_\w+) \((.*)\);$', line)
-        if m:
-            calls.append(m.group(2).split(', '))
-    ok = len(calls) == 1 and len(calls[0]) == 4
-    if not ok:
-        print(f"  ✗ extern_import_keyword_call_pads_trailing_default: "
-              f"calls={calls!r}")
     return ok
 
 
@@ -2364,14 +1708,14 @@ def test_same_module_call_to_generic_with_default_binds_instantiation() -> bool:
 
 
 def test_two_modules_specialize_one_generic_differently() -> bool:
-    """Regression test for bug:CODEGEN_dylib_generic_inline_copies_share_one_symbol.
+    """Regression test for bugs/CODEGEN_dylib_generic_inline_copies_share_one_symbol.md.
 
     Two modules instantiate the same generic function with DIFFERENT type
     arguments (`scale[2]` in `a`, `scale[3]` in `b`). The body depends on the
-    parameter, so each caller must get its own specialization. Before the fix
-    the sibling generic was never registered in the inline do_imports=True
-    path, so both bracketed calls lowered to a zero stub and printed `0`, a
-    silent miscompile (CPython: 20 and 30)."""
+    parameter, so each caller must get its own specialization. Today every
+    copy is emitted under the one bare symbol `_scale`, so both calls run the
+    same body and print `0`, a silent miscompile (CPython: 20 and 30). Fails
+    until each specialization gets its own deterministic symbol and body."""
     pkg = {
         'pkg/__init__.py': '',
         'pkg/gen.py': (
@@ -2409,7 +1753,6 @@ def test_two_modules_specialize_one_generic_differently() -> bool:
 
 CASES = [
     test_nested_def_is_not_a_module_level_fn_export,
-    test_extern_import_keyword_call_pads_trailing_default,
     test_set_ctor_walks_boxed_global_container,
     test_byteorder_conditional_toplevel_emits_only_the_host_branch,
     test_class_redefinition_does_not_crash_class_attr_emission,
@@ -2418,17 +1761,6 @@ CASES = [
     test_bare_submodule_import_value_read,
     test_bare_submodule_import_call,
     test_bare_submodule_import_call_inside_source_tree,
-    test_bare_submodule_import_keyword_call,
-    test_cross_module_generator_default_is_padded,
-    test_generator_str_param_concat_is_string_concatenation,
-    test_generator_str_param_concat_cross_module,
-    test_str_affix_method_on_unsolved_word_is_bool,
-    test_generator_none_default_reaches_callee_as_null,
-    test_statement_call_packs_keywords_into_kwargs_slot,
-    test_generator_value_called_with_kwargs_spread_and_float_default,
-    test_generator_value_called_with_double_beside_star_spread,
-    test_generator_value_called_with_float_element_in_star_spread,
-    test_plain_function_unannotated_float_default_is_a_float,
     test_from_submodule_import_symbol_value_read,
     test_sibling_function_import_call_is_inlined,
     test_sibling_class_attribute_function_scoped,
@@ -2437,10 +1769,6 @@ CASES = [
     test_bare_import_sibling_struct_ctor_through_module,
     test_bare_import_sibling_struct_field_through_module,
     test_bare_import_sibling_function_call_through_module,
-    test_cross_module_unannotated_param_takes_the_callers_literal_type,
-    test_module_attr_call_result_is_typed_by_the_callee_return,
-    test_generator_str_param_concat_cross_module_variable_arg,
-    test_generator_str_param_concat_cross_module_local_var_arg,
     test_module_scoped_cross_module_struct_ctor_both_import_spellings,
     test_module_scoped_cross_module_ctor_arg_through_a_param,
     test_dotted_sibling_import_qualifier_agrees,

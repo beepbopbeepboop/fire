@@ -16,83 +16,8 @@ def check(name, cond):
     return cond
 
 
-def test_holds():
-    """Only work holds a claim: a live worker, or commits not yet landed. A dead entry with no commits holds nothing."""
-    ok = True
-    real_ahead = C.ahead
-    try:
-        C.ahead = lambda t: t["_ahead"]
-        live = {"state": "running", "pid": os.getpid(), "_ahead": 0}
-        ok &= check("a live worker holds its claims", C.holds_claims(live))
-        dead0 = {"state": "integration-failed", "pid": 0, "worktree": "/nowhere", "_ahead": 0}
-        ok &= check("an integration-failed entry with no commits holds nothing", not C.holds_claims(dead0))
-        deadw = {"state": "integration-failed", "pid": 0, "worktree": "/nowhere", "_ahead": 2}
-        ok &= check("a dead entry with commits holds until they land", C.holds_claims(deadw))
-        done = {"state": "integrated", "pid": 0, "worktree": "/nowhere", "_ahead": 3}
-        ok &= check("an integrated entry holds nothing", not C.holds_claims(done))
-    finally:
-        C.ahead = real_ahead
-    return ok
-
-
-def test_limit_detection(tmp):
-    def wt(text):
-        d = os.path.join(tmp, "wt%d" % len(os.listdir(tmp)))
-        os.makedirs(d)
-        open(os.path.join(d, "work.log"), "w").write(text)
-        return {"worktree": d}
-    ok = True
-    ok &= check("claude CLI weekly limit line is a limit",
-                C.limit_hit(wt("=== spawned ===\nYou've hit your weekly limit \u00b7 resets 11am\n")))
-    ok &= check("a worker that merely READ a rate-limit text is not limited",
-                not C.limit_hit(wt("> read file\n    if rate limit exceeded: retry\n")))
-    return ok
-
-
-def test_classes():
-    ok = True
-    ok &= check("every doc starts easy, even in bugs/hard/", S.doc_class("hard/CODEGEN_x", {}, "CODEGEN_x") == "easy")
-    ok &= check("an escalated class overrides the directory",
-                S.doc_class("CODEGEN_x", {"cls": {"CODEGEN_x": "mid"}}, "CODEGEN_x") == "mid")
-    ok &= check("the top class has nothing above it", S.escalate("hard") is None)
-    ok &= check("easy escalates to mid, mid to hard", S.escalate("easy") == "mid" and S.escalate("mid") == "hard")
-
-    real_pool = C.load_pool
-    C.load_pool = lambda: {"slots": [
-        {"name": "haiku", "model": "h", "count": 2, "kind": "claude", "class": "easy"},
-        {"name": "sonnet", "model": "s", "count": 1, "kind": "claude", "class": "mid"},
-        {"name": "opus", "model": "o", "count": 1, "kind": "claude", "class": "hard"}]}
-    try:
-        busy = {}
-        ok &= check("a mid task goes to the mid slot, never an easy one",
-                    C.pick_slot({"cls": "mid", "pool": None}, busy)["name"] == "sonnet")
-        busy = {"sonnet": 1}
-        ok &= check("a mid task with its mid slot full waits, even with easy slots free",
-                    C.pick_slot({"cls": "mid", "pool": None}, busy) is None)
-        ok &= check("an unclassed task takes the first free slot in pool order",
-                    C.pick_slot({"pool": None}, {})["name"] == "haiku")
-    finally:
-        C.load_pool = real_pool
-
-    st = {"fails": {}}
-    for _ in range(S.ESCALATE_AFTER):
-        S.reclass_on_failure(st, "CODEGEN_x", "CODEGEN_x")
-    ok &= check("one no-commit attempt at easy boosts the doc to mid", st["cls"]["CODEGEN_x"] == "mid")
-    ok &= check("the failure count restarts after a reclass", st["fails"]["CODEGEN_x"] == 0)
-    st2 = {"fails": {}}
-    st2["cls"] = {"CODEGEN_y": "hard"}
-    for _ in range(S.ESCALATE_AFTER):
-        S.reclass_on_failure(st2, "CODEGEN_y", "hard/CODEGEN_y")
-    ok &= check("a hard doc stays hard", st2["cls"]["CODEGEN_y"] == "hard")
-    return ok
-
-
 def main():
     ok = True
-    ok &= test_holds()
-    ok &= test_classes()
-    with tempfile.TemporaryDirectory() as tmp:
-        ok &= test_limit_detection(tmp)
     with tempfile.TemporaryDirectory() as tmp:
         C.MAIN = tmp
         os.makedirs(os.path.join(tmp, "bugs"))
@@ -106,18 +31,6 @@ def main():
         open(os.path.join(tmp, "bugs", "mention.md"), "w").write(
             "# A bug\n\nThe word STOP: appears mid-line, and the note says do not stop.\n")
         ok &= check("STOP: mid-line is not a stop marker", S.stop_reason("mention") is None)
-    tasks = {"a": {"state": "exited-ok"}, "b": {"state": "integration-failed"}, "c": {"state": "exited-err"}}
-    _state = C.state_of
-    C.state_of = lambda t: t["state"]
-    ok &= check("fresh branches go before failed ones", S.fresh_first(["b", "a", "c"], tasks) == ["a", "c"])
-    ok &= check("with only failed branches left, they are tried", S.fresh_first(["b"], tasks) == ["b"])
-    C.state_of = _state
-    # the culprit search: a fake probe that is red once the culprit is in the prefix
-    _probe = S.probe
-    for bad, seq in [("c", ["a", "b", "c", "d", "e"]), ("a", ["a", "b", "c"]), ("e", ["a", "b", "c", "d", "e"])]:
-        S.probe = lambda s, bad=bad: ("RED", s, ["job-" + bad], "") if bad in s else ("GREEN", s, [], "")
-        ok &= check("the culprit search finds %s in %s" % (bad, seq), S.find_culprit(seq, ["job-" + bad])[0] == bad)
-    S.probe = _probe
     print("all passed" if ok else "FAILED")
     return 0 if ok else 1
 

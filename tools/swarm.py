@@ -44,7 +44,7 @@ def log(msg):
 def held_claims():
     held = set()
     for t in C.load().values():
-        if C.holds_claims(t):                   # the same rule spawn uses: live work, or commits not yet landed
+        if C.state_of(t) not in C.TERMINAL:
             held.update(t.get("claims", []))
     for f in os.listdir(C.qdir()):
         if f.endswith(".json"):
@@ -95,46 +95,6 @@ def doc_path(doc):
     return "bugs/%s.md" % doc
 
 
-ESCALATE_AFTER = C.load_pool().get("classes", {}).get("escalate_after", 1)   # no-commit attempts before a doc moves up a class (pool.json)
-
-
-def dir_class(doc):
-    """Every doc starts at the easy tier, wherever it sits; only failures move it up (reclass_on_failure)."""
-    return "easy"
-
-
-def doc_class(doc, st, base):
-    """The class a doc is queued in: its escalated class if it has been reclassed, else its directory's."""
-    return st.get("cls", {}).get(base) or dir_class(doc)
-
-
-def escalate(c):
-    i = C.CLASSES.index(c)
-    return C.CLASSES[i + 1] if i + 1 < len(C.CLASSES) else None
-
-
-def task_text(doc):
-    """The instruction a worker gets for one bug doc. Every worker, first round or continuation, gets the same text."""
-    return ("Fix the bug in %s at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed "
-            "on master (then delete the doc with a pinning test, or report). QUICK tests only: write a small regression "
-            "test that FAILS before your fix and passes after (next to the existing tests for that area), and run just "
-            "that test plus the one existing test file that covers the code you touched, each wrapped in python3 "
-            "tools/memslot.py --gb 8 --label x --. No gate, no stdlib sweep, no self-host build: an integrator gates on "
-            "the stdlib compile after you land. If the bug is fully fixed, git rm its doc in the same commit and run "
-            "python3 tools/dangling_doc_refs.py --ratchet. Commit, end with a clean tree and the CONTROL-STATUS line."
-            % doc_path(doc))
-
-
-def enqueue_doc(doc, base, cls, name, start=None):
-    """Queue one worker on DOC in class CLS. START names the branch the worker continues from (a continuation); None
-    starts from master. Returns True when the queue took it."""
-    cmd = [sys.executable, os.path.join(HERE, "control.py"), "enqueue", name, "--claim", "bug:" + base,
-           "--task", task_text(doc), "--cls", cls]
-    if start:
-        cmd += ["--base", start]
-    return subprocess.run(cmd, capture_output=True, text=True, cwd=C.MAIN).returncode == 0
-
-
 def feed():
     """Keep every pool slot supplied: each slot gets (its count - running + 1) queued tasks, drawn from the pool's
     `feed` globs (skipping the pool's `skip` prefixes, and any doc a live task or external claim holds). A slot is
@@ -143,21 +103,18 @@ def feed():
     skips = pool.get("skip", [])
     st = load_state()
     held, made = held_claims(), 0
-    slot_cls = {sl["name"]: C.slot_class(sl) for sl in pool["slots"]}
-    # Each class keeps its own queue: capacity of its live slots, plus one, less what runs and what waits in it.
-    cap = {c: sum(sl["count"] for sl in pool["slots"] if C.slot_class(sl) == c) for c in C.CLASSES}
-    busy = {c: 0 for c in C.CLASSES}
-    for slot, n in C.running_by_slot().items():
-        busy[slot_cls.get(slot, "easy")] += n
-    queued = {c: 0 for c in C.CLASSES}
+    running = C.running_by_slot()
+    queued = {}
     for f in os.listdir(C.qdir()):
         if f.endswith(".json") and f.startswith(PREFIXES):
-            item = json.load(open(os.path.join(C.qdir(), f)))
-            queued[item.get("cls") or slot_cls.get(item.get("pool"), "easy")] += 1
-    need = {c: max(0, cap[c] - busy[c] + 1 - queued[c]) if cap[c] > 0 else 0 for c in C.CLASSES}
+            q = json.load(open(os.path.join(C.qdir(), f))).get("pool")
+            queued[q] = queued.get(q, 0) + 1
+    need = {sl["name"]: max(0, sl["count"] - running.get(sl["name"], 0) + 1 - queued.get(sl["name"], 0))
+            for sl in pool["slots"]}
     paths = sorted(set(p for g in pool["feed"] for p in glob.glob(os.path.join(C.MAIN, g))))
+    slots = [sl for sl in pool["slots"] if need[sl["name"]] > 0 and sl["count"] > 0]   # count 0: no new runs
     for p in paths:
-        if not any(need.values()):
+        if not slots:
             break
         rel = os.path.relpath(p, os.path.join(C.MAIN, "bugs"))
         doc = rel[:-3] if rel.endswith(".md") else rel
@@ -170,164 +127,66 @@ def feed():
         if why:
             log("stopped %s: %s" % (doc, why))
             continue
-        cls = doc_class(doc, st, base)
-        if need[cls] <= 0:
-            continue                           # its class is full: the doc waits for a slot of that class
-        name = task_name(doc)
-        if name in C.load():                   # the 40-char name collides with an old task: make it unique
-            name += "-%d" % int(time.time() % 10000)
+        np = st.get("no_progress", {}).get(base)
+        if np and np == doc_hash(doc):
+            log("held %s: its last attempt made no commit and the doc has not changed since" % doc)
+            continue
         prev = last_attempt(base) if st["fed"].get(doc) else None
         if prev:
             log("re-feed %s: previous attempt %s" % (doc, prev))
-        if enqueue_doc(doc, base, cls, name):
-            made += 1
-            need[cls] -= 1
+        sl = slots[0]
+        name = task_name(doc)
+        if name in C.load():                   # the 40-char name collides with an old task: make it unique
+            name += "-%d" % int(time.time() % 10000)
+        task = ("Fix the bug in %s at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed "
+                "on master (then delete the doc with a pinning test, or report). QUICK tests only: write a small regression "
+                "test that FAILS before your fix and passes after (next to the existing tests for that area), and run just "
+                "that test plus the one existing test file that covers the code you touched, each wrapped in python3 "
+                "tools/memslot.py --gb 8 --label x --. No gate, no stdlib sweep, no self-host build: an integrator gates on "
+                "the stdlib compile after you land. If the bug is fully fixed, git rm its doc in the same commit and run "
+                "python3 tools/dangling_doc_refs.py --ratchet. Commit, end with a clean tree and the CONTROL-STATUS line." % doc_path(doc))
+        r = subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "enqueue", name, "--claim", "bug:" + base,
+                            "--pool", sl["name"], "--task", task], capture_output=True, text=True, cwd=C.MAIN)
         st["fed"][doc] = st["fed"].get(doc, 0) + 1
+        if r.returncode == 0:
+            made += 1
+            need[sl["name"]] -= 1
+            if need[sl["name"]] <= 0:
+                slots = [x for x in slots if need[x["name"]] > 0]
     json.dump(st, open(state_path(), "w"), indent=1)
     return made
 
 
 def refill(target):
-    """Run one refill and log every line it prints: each refused start carries its reason (a held claim, a banned slot,
-    a breaker), so a stuck bug is visible in the log rather than silent."""
     r = subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "refill", "--target", str(target),
                         "--prefix", ",".join(PREFIXES)], capture_output=True, text=True, cwd=C.MAIN)
-    lines = [l for l in r.stdout.splitlines() if l.strip()]
-    for l in lines[:-1]:
-        log("refill: " + l)
-    return lines[-1] if lines else ""
+    return (r.stdout.strip().splitlines() or [""])[-1]
 
 
-def reclass_on_failure(st, base, doc):
-    """Count a no-commit attempt at the doc's class; after ESCALATE_AFTER of them the doc moves up one class and its hold
-    is cleared, so the stronger slot can take it at once. The top class keeps its docs (they wait for a hard slot)."""
-    fails = st.setdefault("fails", {})
-    fails[base] = fails.get(base, 0) + 1
-    cur = doc_class(doc, st, base)
-    nxt = escalate(cur)
-    if nxt and fails[base] >= ESCALATE_AFTER:
-        st.setdefault("cls", {})[base] = nxt
-        fails[base] = 0
-        log("reclass %s: %s -> %s after %d no-commit attempts" % (doc, cur, nxt, ESCALATE_AFTER))
-
-
-def branch_head(branch):
-    """The commit a worker's branch points at, or '' when the branch is gone."""
-    r = subprocess.run(["git", "rev-parse", "--verify", "-q", branch], capture_output=True, text=True, cwd=C.MAIN)
-    return r.stdout.strip() if r.returncode == 0 else ""
-
-
-def continue_partial(st):
-    """A worker that exited without DONE has not finished the bug. Its branch is continued by a new worker, on the same
-    doc, from the branch's tip: a round that moved the branch is progress and keeps the doc's class; a round that did
-    not move it is no progress, so the doc moves up a class (reclass_on_failure) and the next worker starts there.
-    The integrator lands only DONE work. Returns how many workers were queued."""
-    track = st.setdefault("track", {})    # doc -> the branch tip its open round started from
+def abandon_empty():
+    """A worker that exited with NO commits did nothing to land: free its claim, and record the doc's content hash so the
+    feeder does not re-feed it until the doc changes (progress is what requeues a doc, not a retry count)."""
+    st = load_state()
     n = 0
     for name, t in C.load().items():
-        if not name.startswith(PREFIXES) or t.get("state") in C.TERMINAL:
-            continue
-        if C.state_of(t) not in ("exited-ok", "exited-err") or C.verdict(t) == "DONE" or not C.ahead(t):
-            continue                       # still running, DONE (the integrator takes it), or no commits (retire_dead)
-        base = next((c[4:] for c in t.get("claims", []) if c.startswith("bug:")), None)
-        docs = bug_docs(base) if base else []
-        if not docs:
-            continue                       # no bug doc left: it is fixed (or not ours), nothing to continue
-        doc = docs[0]
-        head = branch_head(t["branch"])
-        if not head:
-            continue
-        start = track.get(doc, {}).get("head")
-        moved = (head != start) if start is not None else C.ahead(t) > 0
-        if not moved:
-            reclass_on_failure(st, base, doc)
-            log("no progress on %s: its round made no commits; the doc moves up a class" % doc)
-        cls = doc_class(doc, st, base)
-        cont = task_name(doc)
-        if cont in C.load():
-            cont += "-%d" % int(time.time() % 10000)
-        if enqueue_doc(doc, base, cls, cont, start=t["branch"]):
-            track[doc] = {"head": head, "name": cont}
-            subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "mark", name, "abandoned"],
-                           capture_output=True, cwd=C.MAIN)
-            log("continue %s on %s as %s (class %s)" % (doc, t["branch"], cont, cls))
+        if name.startswith(PREFIXES) and C.state_of(t) in ("exited-ok", "exited-err") and not C.ahead(t) \
+                and not C.git("status", "--short", cwd=t["worktree"], check=False) if os.path.isdir(t.get("worktree", "")) else False:
+            subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "mark", name, "abandoned"], capture_output=True)
+            for c in t.get("claims", []):
+                if c.startswith("bug:"):
+                    docs = bug_docs(c[4:])
+                    if docs:
+                        st.setdefault("no_progress", {})[c[4:]] = doc_hash(docs[0])
             n += 1
     json.dump(st, open(state_path(), "w"), indent=1)
     return n
 
 
-def retire_dead():
-    """Retire every worker that is finished and holds nothing: it exited (or failed integration) with NO commits, so
-    there is no work to land or decide. The registry entry is abandoned here, in the same pass, so it can never block a
-    retry of its bug. A limit kill bans its slot until the limit's reset (control.py); any other no-commit exit counts as
-    a failed attempt at its doc's class (reclass_on_failure), and the doc is fed again at once. Nothing is held back."""
-    st = load_state()
-    n = 0
-    # The first pass after this rule existed retires the whole backlog of old no-commit entries. Those attempts were
-    # counted when they happened, so the backlog is retired WITHOUT counting them again (no mass reclass).
-    backfill = not st.get("retire_backfilled")
-    for name, t in C.load().items():
-        if not name.startswith(PREFIXES) or C.state_of(t) == "running" or C.holds_claims(t):
-            continue
-        if C.state_of(t) in C.TERMINAL:
-            continue
-        subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "mark", name, "abandoned"], capture_output=True)
-        n += 1
-        if not backfill and C.limit_hit(t) and t.get("pool"):   # an old log's limit line is history, not a live ban
-            C.mark_dead(t["model"], C.pool_slot(t["pool"]), C.limit_reset(t))
-            log("retired %s: a limit kill, slot %s banned until its reset" % (name, t["pool"]))
-            continue
-        if not backfill:
-            for c in t.get("claims", []):
-                if c.startswith("bug:") and bug_docs(c[4:]):
-                    reclass_on_failure(st, c[4:], bug_docs(c[4:])[0])
-        log("retired %s: %s with no commits%s" % (name, C.state_of(t), " (backlog, not counted)" if backfill else ""))
-    st["retire_backfilled"] = True
-    json.dump(st, open(state_path(), "w"), indent=1)
-    return n
-
-
-def fresh_first(names, tasks):
-    """Branches that have never been tried to land go before any that already failed integration. A failed branch
-    must not hold a fresh one back: it can conflict, or turn a batch red, and the fresh branches still land."""
-    fresh = [n for n in names if C.state_of(tasks[n]) != "integration-failed"]
-    return fresh if fresh else names
-
-
-def probe(batch):
-    """Merge and gate `batch` exactly as a landing would, changing NO state (integrate.py --probe). Returns
-    (verdict, merged, failing, out): verdict GREEN/RED/EMPTY; merged is the set that was merged; failing the jobs."""
-    r = subprocess.run([sys.executable, os.path.join(HERE, "integrate.py"), "--stdlib", "--probe", "--only"] + batch,
-                       capture_output=True, text=True, cwd=C.MAIN)
-    out = r.stdout + r.stderr
-    if "another integrator" in out:                  # the lock is held (the post-landing verifier runs under it)
-        return "BUSY", [], [], out
-    pm = re.search(r"^PROBE (GREEN|RED): ?(.*)$", out, re.M)
-    if not pm:
-        return "EMPTY", [], [], out
-    fm = re.search(r"^FAILED_JOBS: ?(.*)$", out, re.M)
-    ff = re.search(r"^FAILED_FILES: ?(.*)$", out, re.M)
-    failing = (fm.group(1).split() if fm else []) + (ff.group(1).split() if ff else [])
-    return pm.group(1), pm.group(2).split(), failing, out
-
-
-def find_culprit(seq, failing):
-    """The branch that turns the gate red when added to the ones before it: binary search for the smallest red prefix
-    of `seq` (the whole of `seq` is red, with the jobs `failing`; prefixes before the culprit are green)."""
-    lo, hi = 0, len(seq)
-    while hi - lo > 1:
-        mid = (lo + hi) // 2
-        v2, _, f2, _ = probe(seq[:mid])
-        if v2 == "RED":
-            hi, failing = mid, f2
-        else:
-            lo = mid
-    return seq[hi - 1], failing or []
-
-
 def land():
     names = [n for n in I.pick_candidates(quiet=True) if n.startswith(PREFIXES)]
-    names = fresh_first(names, C.load())
+    # Master is checked out in the main checkout, where another session may have UNCOMMITTED edits (2026-10-26: a
+    # row-25 edit to module_gen.py). The fast-forward would overwrite them, so git refuses, after a whole gate had passed.
+    # Never touch them: leave out any branch that changes a file the main checkout has dirty; it lands when they commit.
     dirty = set(C.git("diff", "--name-only", "HEAD", cwd=C.MAIN).split())
     if dirty:
         tasks, keep = C.load(), []
@@ -340,35 +199,39 @@ def land():
         names = keep
     if not names:
         return None
-    tasks = C.load()
-    batch, landed = list(names), False
-    while batch:
-        verdict, merged, failing, out = probe(batch)
-        for c in re.findall(r"^CONFLICT (\S+):", out, re.M):           # a branch that cannot merge: its fixer
-            if c in batch:
-                log("conflict %s: handing it to a merge fixer" % c)
-                I.enqueue_merge_fix(c, tasks[c], out)
-                batch.remove(c)
-        if verdict == "BUSY":
-            log("integrator busy (the post-landing verifier holds the lock); landing waits for the next pass")
-            break
-        if verdict == "EMPTY" or not merged:
-            break
-        if verdict == "GREEN":
-            r = subprocess.run([sys.executable, os.path.join(HERE, "integrate.py"), "--stdlib", "--only"] + merged,
-                               capture_output=True, text=True, cwd=C.MAIN)
-            for line in (r.stdout + r.stderr).splitlines():
-                if line.startswith(("GREEN", "RED", "CONFLICT", "another integrator", "master moved")):
-                    log(line[:200])
-            landed = "GREEN" in (r.stdout + r.stderr)
-            break
-        # RED: the batch as a whole fails the gate. Find the one branch that breaks it; that branch goes to a fixer
-        # with its failing tests named, and the rest of the batch is probed again (and lands when it is green).
-        culprit, failing = find_culprit(merged, failing)
-        log("red: %s breaks the gate (%s); it goes to a fixer, the rest of the batch continues"
-            % (culprit, " ".join(failing) or "jobs unknown"))
-        I.enqueue_red_fix(culprit, tasks[culprit], failing)
-        batch = [n for n in batch if n != culprit]
+    # A red batch must not be retried unchanged (2026-10-26: the same 35-branch batch was gated every 3 minutes all
+    # evening). Key each branch by name@head; a batch whose members were all tried and failed together is not run again,
+    # instead its branches are tried ONE AT A TIME, and the ones that are red alone are set aside until their head moves.
+    heads = {n: C.git("rev-parse", "--short", C.load()[n]["branch"], check=False) for n in names}
+    st = load_state()
+    bad = set(st.get("bad", []))
+    names = [n for n in names if "%s@%s" % (n, heads[n]) not in bad]
+    if not names:
+        return None
+    sig = " ".join(sorted("%s@%s" % (n, heads[n]) for n in names))
+    batches = [names]
+    if len(names) > 1 and sig in st.get("red_batches", []):
+        batches = [[n] for n in names]          # this exact batch already failed: bisect by landing singly
+    landed = False
+    for batch in batches:
+        log("landing %d: %s" % (len(batch), " ".join(batch)))
+        r = subprocess.run([sys.executable, os.path.join(HERE, "integrate.py"), "--stdlib", "--only"] + batch,
+                           capture_output=True, text=True, cwd=C.MAIN)
+        out = r.stdout + r.stderr
+        for line in out.splitlines():
+            if line.startswith(("GREEN", "RED", "CONFLICT", "another integrator", "master moved")):
+                log(line[:200])
+        if "GREEN" in out:
+            landed = True
+        elif "RED" in out:
+            if len(batch) == 1:
+                bad.add("%s@%s" % (batch[0], heads[batch[0]]))
+            else:
+                st.setdefault("red_batches", []).append(" ".join(sorted("%s@%s" % (n, heads[n]) for n in batch)))
+            st["bad"] = sorted(bad)
+            json.dump(st, open(state_path(), "w"), indent=1)
+            if len(batch) > 1:
+                break                              # next pass tries them singly
     return landed
 
 
@@ -386,10 +249,7 @@ def main():
         a.target = C.pool_total()
     while True:
         try:
-            fed = feed()
-            cont = continue_partial(load_state())
-            log("feed +%d, continued %d, abandoned %d; %s" % (fed, cont, retire_dead(), refill(a.target)))
-            subprocess.run([sys.executable, os.path.join(HERE, "cpu_cap.py"), "ratchet"], capture_output=True, cwd=C.MAIN)
+            log("feed +%d, abandoned %d; %s" % (feed(), abandon_empty(), refill(a.target)))
             if land():
                 verify_async()
                 subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "cleanup"], capture_output=True, cwd=C.MAIN)  # landed trees go

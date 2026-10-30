@@ -1,4 +1,4 @@
-# Regression for commit feb5a4b71
+# Regression for bugs/DOCS_two_host_import_rankings_are_two_tools.md
 # The shapes tool's reach/alone must come from the wall tool's own corpus,
 # and the suite registry must include the wall file in the shapes job's
 # extra list so edits to the wall invalidate the shapes cached pass.

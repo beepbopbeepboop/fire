@@ -8,13 +8,13 @@ Compiles the REAL generated C with gcc -fgimple, links this project's own
 runtime, runs the executable, asserts on real stdout. Mirrors
 test_coro_detached_async.py's harness.
 """
+import contextlib
 import os
 import platform
 import subprocess
 import tempfile
 
 import gimple_codegen
-from mojo.middle import coro
 from build_config import find_gcc, find_gxx
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -34,6 +34,31 @@ _RUNTIME_SRCS = [
     os.path.join(RUNTIME_DIR, 'fire_async_sched.c'),
     _CORO_CTX_SRC,
 ]
+
+@contextlib.contextmanager
+def coro_mode(mode):
+    """Select the coroutine backend for one compile, and put the environment
+    back afterwards.
+
+    Module-level `os.environ['MOJO_CORO'] = 'stackswitch'` was the old
+    spelling, and it leaked: `test_async_void_return.py` imports this file's
+    `_build_and_run` for its stack-switch cases, so merely importing it also
+    forced that file's C++20-path cases onto the stack-switch backend — no
+    generated .cpp for a plain void async function, and stack-switch runtime
+    symbols in a harness that links only fire_runtime/fire_async_runtime.
+    Scoping it here keeps each harness on the backend it names regardless of
+    import order or of what the caller's own process already set.
+    """
+    prev = os.environ.get('MOJO_CORO')
+    os.environ['MOJO_CORO'] = mode
+    try:
+        yield
+    finally:
+        if prev is None:
+            os.environ.pop('MOJO_CORO', None)
+        else:
+            os.environ['MOJO_CORO'] = prev
+
 
 _PASS = 0
 _FAIL = 0
@@ -61,10 +86,7 @@ def _build_and_run(mojo_src: str, require=_AWAITABLE_SHIMS) -> str:
     with open(src_path, 'w') as f:
         f.write(mojo_src)
 
-    # Pinned per compile, not at import: a module-level MOJO_CORO assignment
-    # here also rewrote the backend for every test file that imports this
-    # harness (test_async_void_return.py's cpp-path tests among them).
-    with coro.pinned('stackswitch'):
+    with coro_mode('stackswitch'):
         c_code = gimple_codegen.compile_to_gimple(mojo_src, do_imports=False, filename=src_path)
     if not any(s in c_code for s in require):
         raise RuntimeError(f"none of {require!r} in the generated C -- "

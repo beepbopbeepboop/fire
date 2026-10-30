@@ -89,7 +89,7 @@ are all past:
 list-iterator local, which the compiler already supports elsewhere and which
 `bug:CODEGEN_next_on_bound_list_iter_cursor_off_by_one` is about), so it is the one to
 take first, after reading that doc. Both this file and
-commit d469b329a (deleted — fixed) now name the same two, which makes
+`bugs/COMPILE_FAIL_Tools_c-analyzer_c_analyzer_info.md` (deleted — fixed) now name the same two, which makes
 them the shortest path to a smaller closure for three of these files at once.
 
 ## Status 2026-10-02 — the imported-module floor is down to TWO, and `check_all` is still the one own-file blocker
