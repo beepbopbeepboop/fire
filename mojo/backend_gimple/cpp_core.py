@@ -4300,6 +4300,31 @@ def _cpp_expr(gen, e) -> str:
                 "imported function, a same-module struct constructor, or "
                 "a declared callable-value local)")
         if isinstance(e.func, gimple_ctypes.CallExpr):
+            # A call through a closure factory's RESULT — `make(k)(x)`, where
+            # `make` is a nested factory `_cpp_compile_nested_sync_helpers`
+            # compiled. Its result is the closure boxed as an int64
+            # `MojoBoundMethod` (see `_try_compile_closure_factory`), not a
+            # C++ callable, so it is called through the same int64 dispatch a
+            # plain function value uses.
+            _fac = getattr(gen, '_cpp_closure_factory_names', None) or ()
+            if (isinstance(e.func.func, gimple_ctypes.IdentExpr)
+                    and e.func.func.name in _fac
+                    and not getattr(e, 'kwargs', None)
+                    and len(e.args) <= 4):
+                inner = gen._cpp_expr(e.func)
+                arg_exprs = []
+                for a in e.args:
+                    actype = gimple_exprtypes._infer_simple_expr_ctype(
+                        a, gen._cpp_declared or {},
+                        getattr(gen, '_cpp_gen_self_fields', None), gen._async_api)
+                    if actype not in ('int64_t', 'int', '_Bool'):
+                        raise gimple_exprtypes._UnsupportedGeneratorShape(
+                            f"calling the closure returned by '{e.func.func.name}': "
+                            "argument must be an int or bool expression")
+                    ae = gen._cpp_expr(a)
+                    arg_exprs.append(ae if actype != '_Bool' else f"(int64_t)({ae})")
+                return (f"mojo_fnptr_call_{len(arg_exprs)}"
+                        f"((void *)({inner}){''.join(', ' + x for x in arg_exprs)})")
             # Call of a call result: f()(args)  →  (f())(args)
             inner = gen._cpp_expr(e.func)
             args = ', '.join(gen._cpp_expr(a) for a in e.args)
