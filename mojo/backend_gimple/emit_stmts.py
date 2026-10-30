@@ -250,7 +250,7 @@ def _try_bind_iter_cursor(gen, name, value):
     second list of type names. That is what `test/collections/test_span.mojo`'s
     `var it = iter(span); next(it)` needs, and it was refused for exactly the
     reason ROUND 4 (a) of
-    bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md
+    the user-iterator next() bug (doc deleted in db724c4d6)
     records: the cursor mechanism gated on `MojoList *`, so a `Span *` — which
     IS a real sequence with a real length — got no cursor, and `next()` then
     had no receiver to dispatch on.

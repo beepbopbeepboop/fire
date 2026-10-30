@@ -2685,7 +2685,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # unsupported, when the actual question is always "why did the
         # receiver not type as a struct?". `int64_t` there means the value
         # came from an un-elaborated imported generic (see
-        # bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md),
+        # the user-iterator next() bug (doc deleted in db724c4d6)),
         # which is a different bug with a different fix than an unsupported
         # shape. Re-lowering here is safe precisely because every branch
         # above that lowers the receiver has already returned by now.

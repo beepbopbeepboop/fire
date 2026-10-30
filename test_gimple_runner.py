@@ -11298,7 +11298,7 @@ main()
 
     test_qualified_module_struct_construction()
 
-    # bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md,
+    # the user-iterator next() bug (doc deleted in db724c4d6),
     # the part that is fixable without the type-inference project it is
     # parked on: an iterator struct reached through `from mod import Struct`
     # composes its protocol methods' C names with a hand-written
