@@ -217,6 +217,13 @@ _FOREIGN_PKG_FILES = {
                    "    while i < n:\n"
                    "        yield i\n"
                    "        i = i + 1\n"),
+    # A class with a defaulted trailing `__init__` parameter, constructed from
+    # a generator the cpp path lowers (see run_ctor_default_arg_in_generator_
+    # tests). Imported rather than defined alongside so the constructor is a
+    # cross-module struct, the shape `c_parser/parser/__init__.py` hit.
+    'box.py': ("class Box:\n"
+               "    def __init__(self, x, bump=5):\n"
+               "        self.x = x + bump\n"),
 }
 
 
@@ -2113,6 +2120,36 @@ def main():
 """, "unpack call argument is not supported")
 
 
+def run_ctor_default_arg_in_generator_tests():
+    # A struct constructor call inside a generator body (`Box(n)`) lowered
+    # its arguments verbatim, so an omitted defaulted trailing parameter
+    # reached the C++ companion as a call with too few arguments: g++
+    # "too few arguments to function '_..._Box___init__'". The ordinary path
+    # and the generator's own struct-method calls already pad from the
+    # declared defaults; the constructor branch must do the same. The default
+    # must be non-zero (`bump=5`) so an omitted argument that silently became
+    # 0 cannot pass by accident.
+    #
+    # The consumer's `*, start=[]` is what keeps it on the cpp path (the same
+    # reason the foreign-handle fixtures above use it); `Box` lives in a
+    # sibling module, as `SourceInfo` does in the c_parser case.
+    _test_foreign_a3_generator_handle(
+        "generator_struct_ctor_fills_a_trailing_default",
+        "from .box import Box\n"
+        "\n"
+        "def consume(n, *, start=[]):\n"
+        "    b = Box(n)\n"
+        "    yield b.x\n"
+        "    yield Box(2, 10).x\n"
+        "\n"
+        "def main():\n"
+        "    for v in consume(4):\n"
+        "        print(v)\n"
+        "\n"
+        "main()\n",
+        "9\n12\n")
+
+
 def run_nested_generator_capture_tests():
     # A generator defined INSIDE another def that reads one of that def's
     # parameters or locals. The coroutine path has no capture model for a
@@ -2354,6 +2391,7 @@ def run_tests():
     run_lambda_capture_tests()
     run_variadic_lambda_value_tests()
     run_unpack_call_forward_tests()
+    run_ctor_default_arg_in_generator_tests()
     run_mixed_yield_kind_tests()
     run_next_method_tests()
     run_next_return_position_tests()
