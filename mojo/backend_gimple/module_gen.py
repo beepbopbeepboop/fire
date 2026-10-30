@@ -2996,35 +2996,6 @@ def _struct_typedef_fields(gen, sn) -> dict:
     return _fields
 
 
-def _gmi_record_fn_scoped_param_types(gen, cls_name: str, params) -> None:
-    """Record the annotated C type of each parameter of the function a
-    function-scoped class was declared in, keyed by the class's FINAL name and
-    the parameter name (`_pair_key`).
-
-    A class-level attribute whose value is a bare parameter name
-    (`class C(): name = s` inside `def h(s: str)`) has no literal to type it
-    from, so `_class_attr_ctype` answers None and the registration falls back
-    to `int64_t`, which types a `char *` as a pointer-sized integer. The
-    parameter's annotation is the ground truth for what that name holds, and
-    it is what `_mojo_type` resolves the function's own signature with. An
-    unannotated parameter records nothing and keeps the old fallback.
-    """
-    if not params:
-        return
-    _table = getattr(gen, '_fn_scoped_param_types', None)
-    if _table is None:
-        _table = {}
-        gen._fn_scoped_param_types = _table
-    for _p in params:
-        try:
-            _pname, _pann = _p[0], _p[1]
-        except (TypeError, IndexError):
-            continue
-        if not isinstance(_pann, str) or not _pann:
-            continue
-        _table[_pair_key(cls_name, _as_str(_pname))] = _mojo_type(_pann)
-
-
 def _gmi_hoist_nested_structs(self, stmts: list) -> list:
     """Return `stmts` with every class declared inside a function body HOISTED
     to module scope, so the ordinary struct pipeline treats it exactly like a
@@ -3116,7 +3087,6 @@ def _gmi_hoist_nested_structs(self, stmts: list) -> list:
             renamed_to.append(_h_bare)
             _fn_scoped.add(_h_bare)
             out.append(_h_node)
-            _gmi_record_fn_scoped_param_types(self, _h_bare, found[_h_i][2])
             continue
         _h_base = _h_bare + '__' + _h_encl
         _h_new = _h_base
@@ -3130,7 +3100,6 @@ def _gmi_hoist_nested_structs(self, stmts: list) -> list:
         _fn_scoped.add(_h_new)
         _h_node.name = _h_new
         out.append(_h_node)
-        _gmi_record_fn_scoped_param_types(self, _h_new, found[_h_i][2])
     # The alias keys need the FINAL struct names, because a method's enclosing
     # key contains the name of the class it belongs to — so they are computed
     # on a SECOND walk, after the renames above have landed. The two walks
@@ -3265,163 +3234,54 @@ def _gmi_decorator_pass(self, stmts: list, outer_defs: dict, at_module: bool) ->
     this module can see. Decorated methods of a class are not rewritten.
     """
     _rb_scope = dict(outer_defs)
-    _rb_defs = _gmi_scope_defs(stmts)
-    _rb_scope.update({_rs.name: _rs for _rs in _rb_defs})
-    _gmi_refuse_scalar_decorator_rebind(self, _rb_defs, _rb_scope)
-    if at_module:
-        # A module global is bound by a top-level statement, and the global
-        # function-value machinery never sees an assignment inside a
-        # module-level `if`/`for`/`with`/`try` block. So a decorated def there
-        # cannot be rebound yet: refuse it, rather than let the compiled path
-        # call the undecorated body (or a stub for the unbound name).
-        for _rb_s in stmts or []:
-            if isinstance(_rb_s, FunctionDef):
-                continue
-            for _rb_d in _gmi_scope_defs([_rb_s]):
-                for _rb_dec in _rb_d.decorators or []:
-                    if _gmi_is_rebindable(_rb_dec, _rb_scope, _rb_d.name):
-                        raise RuntimeError(
-                            f"decorator {_gmi_decorator_head(_rb_dec)!r} on {_rb_d.name!r} is inside a "
-                            f"module-level block, which the compiled path cannot rebind yet; it would "
-                            f"silently call the undecorated function (see "
-                            f"bugs/COMPILE_FAIL_decorator_application_dropped.md)")
-    return _gmi_rebind_block(self, stmts, _rb_scope, at_module)
-
-
-def _gmi_is_rebindable(dec, scope: dict, def_name: str) -> bool:
-    """True when decorator `dec` on `def_name` names a def in `scope`, so the
-    decoration is applied by rebinding (see `_gmi_decorator_pass`)."""
-    _head = _gmi_decorator_head(dec)
-    return _head is not None and _head in scope and _head != def_name
-
-
-def _gmi_child_blocks(stmt) -> list:
-    """The statement lists a compound statement owns, in source order: every
-    `if`/`elif`/`else` branch, a loop body and its `else`, a `with` body, each
-    `try` part, and each `match` case. Python has no block scope, so a `def`
-    inside any of these is bound in the enclosing function's scope and is a
-    decorator target like a direct statement. A nested `def`'s own body is
-    NOT listed: it is a scope of its own, entered by `_gmi_rebind_stmt`.
-    `_gmi_with_blocks` consumes the lists in this same order."""
-    if isinstance(stmt, IfStmt):
-        return [stmt.then_body, *[_b for _, _b in stmt.elifs], stmt.else_body]
-    if isinstance(stmt, (WhileStmt, ForStmt)):
-        return [stmt.body, stmt.else_body]
-    if isinstance(stmt, WithStmt):
-        return [stmt.body]
-    if isinstance(stmt, TryStmt):
-        return [stmt.body, *[_h.body for _h in stmt.handlers], stmt.else_body, stmt.finally_body]
-    if isinstance(stmt, MatchStmt):
-        return [_c.body for _c in stmt.cases]
-    return []
-
-
-def _gmi_with_blocks(stmt, blocks):
-    """A copy of compound `stmt` whose child blocks are `blocks`, given in the
-    order `_gmi_child_blocks` lists them."""
-    _it = iter(blocks)
-    new = copy.copy(stmt)
-    if isinstance(stmt, IfStmt):
-        new.then_body = next(_it)
-        new.elifs = [(_cond, next(_it)) for _cond, _ in stmt.elifs]
-        new.else_body = next(_it)
-    elif isinstance(stmt, (WhileStmt, ForStmt)):
-        new.body = next(_it)
-        new.else_body = next(_it)
-    elif isinstance(stmt, WithStmt):
-        new.body = next(_it)
-    elif isinstance(stmt, TryStmt):
-        new.body = next(_it)
-        new.handlers = []
-        for _h in stmt.handlers:
-            _nh = copy.copy(_h)
-            _nh.body = next(_it)
-            new.handlers.append(_nh)
-        new.else_body = next(_it)
-        new.finally_body = next(_it)
-    else:
-        new.cases = []
-        for _c in stmt.cases:
-            _nc = copy.copy(_c)
-            _nc.body = next(_it)
-            new.cases.append(_nc)
-    return new
-
-
-def _gmi_scope_defs(stmts) -> list:
-    """Every `def` bound in this scope: a direct statement, or one inside a
-    compound statement's block at any depth (see `_gmi_child_blocks`)."""
-    out = []
-    for _s in stmts or []:
-        if isinstance(_s, FunctionDef):
-            out.append(_s)
-        for _b in _gmi_child_blocks(_s):
-            out.extend(_gmi_scope_defs(_b))
-    return out
-
-
-def _gmi_rebind_block(self, stmts, scope: dict, at_module: bool):
-    """Rebind the decorated defs of one statement list, in the scope `scope`
-    (every name a decorator may resolve to, see `_gmi_decorator_pass`), and
-    recurse into its compound blocks and function bodies. Returns `stmts`
-    itself when nothing in it changed, so only the nodes that change are
-    copied."""
-    _rb_in = stmts or []
+    _rb_scope.update({_rs.name: _rs for _rs in (stmts or []) if isinstance(_rs, FunctionDef)})
+    _gmi_refuse_scalar_decorator_rebind(self, stmts, _rb_scope)
     _rb_out = []
-    _rb_changed = False
-    for _rb_s in _rb_in:
-        _rb_repl = _gmi_rebind_stmt(self, _rb_s, scope, at_module)
-        if len(_rb_repl) != 1 or _rb_repl[0] is not _rb_s:
-            _rb_changed = True
-        _rb_out.extend(_rb_repl)
-    return _rb_out if _rb_changed else stmts
-
-
-def _gmi_rebind_stmt(self, s, scope: dict, at_module: bool) -> list:
-    """The statements `s` becomes: `[s]` itself when nothing under it changed."""
-    if not isinstance(s, FunctionDef):
-        _rb_blocks = _gmi_child_blocks(s)
-        if not _rb_blocks:
-            return [s]
-        _rb_new = [_gmi_rebind_block(self, _b, scope, at_module) if _b else _b for _b in _rb_blocks]
-        if all(_n is _o for _n, _o in zip(_rb_new, _rb_blocks)):
-            return [s]
-        return [_gmi_with_blocks(s, _rb_new)]
-    _rb_head = s
-    _rb_out = []
-    _rb_applied = []
-    _rb_kept = []
-    for _rb_dec in s.decorators or []:
-        if _gmi_is_rebindable(_rb_dec, scope, s.name):
-            _rb_applied.append(_rb_dec)
-        else:
-            _rb_kept.append(_rb_dec)
-    if _rb_applied:
+    for _rb_s in (stmts or []):
+        if not isinstance(_rb_s, FunctionDef) or not _rb_s.decorators:
+            _rb_out.append(_rb_s)
+            continue
+        _rb_applied = []
+        _rb_kept = []
+        for _rb_dec in _rb_s.decorators:
+            _rb_head = _gmi_decorator_head(_rb_dec)
+            if _rb_head is not None and _rb_head in _rb_scope and _rb_head != _rb_s.name:
+                _rb_applied.append(_rb_dec)
+            else:
+                _rb_kept.append(_rb_dec)
+        if not _rb_applied:
+            _rb_out.append(_rb_s)
+            continue
         # The undecorated body keeps the annotation decorators and takes a
         # suffixed name, so it cannot be mistaken for the rebound name.
-        _rb_head = copy.copy(s)
-        _rb_head.name = s.name + '__undecorated'
-        _rb_head.decorators = _rb_kept
-    # A nested function body is a scope of its own, rebound against this one.
-    _rb_body = _gmi_decorator_pass(self, s.body, scope, False)
-    if _rb_body is not s.body:
-        if _rb_head is s:
-            _rb_head = copy.copy(s)
-        _rb_head.body = _rb_body
-    _rb_out.append(_rb_head)
-    if _rb_applied:
+        _rb_undec = _rb_s.name + '__undecorated'
+        _rb_body = copy.copy(_rb_s)
+        _rb_body.name = _rb_undec
+        _rb_body.decorators = _rb_kept
+        _rb_out.append(_rb_body)
         # Innermost-first: `@a @b def f` is `f = a(b(f_undecorated))`.
-        _rb_value = IdentExpr(_rb_head.name, line=s.line, col=s.col)
+        _rb_value = IdentExpr(_rb_undec, line=_rb_s.line, col=_rb_s.col)
         for _rb_dec in reversed(_rb_applied):
-            _rb_callee = IdentExpr(_rb_dec, line=s.line, col=s.col) if isinstance(_rb_dec, str) else _rb_dec
-            _rb_value = CallExpr(func=_rb_callee, args=[_rb_value], line=s.line, col=s.col)
-        _rb_out.append(AssignStmt(target=IdentExpr(s.name, line=s.line, col=s.col),
-                                  value=_rb_value, line=s.line, col=s.col))
+            _rb_callee = IdentExpr(_rb_dec, line=_rb_s.line, col=_rb_s.col) if isinstance(_rb_dec, str) else _rb_dec
+            _rb_value = CallExpr(func=_rb_callee, args=[_rb_value], line=_rb_s.line, col=_rb_s.col)
+        _rb_out.append(AssignStmt(target=IdentExpr(_rb_s.name, line=_rb_s.line, col=_rb_s.col),
+                                  value=_rb_value, line=_rb_s.line, col=_rb_s.col))
         if at_module:
             # The global now holds a function VALUE, so `print(step)` formats
             # it as one (`_global_func_value_names` is the per-global repr name).
-            self._global_func_value_names[s.name] = s.name
-    return _rb_out
+            self._global_func_value_names[_rb_s.name] = _rb_s.name
+    # Recurse into each function body, so a decorated `def` nested in it is
+    # rebound by the same rule against this body's scope. A body with no
+    # nested def is left as it is, so nothing is copied that does not change.
+    _rb_final = []
+    for _rb_s in _rb_out:
+        if isinstance(_rb_s, FunctionDef) and any(isinstance(_rb_n, FunctionDef) for _rb_n in _rb_s.body or []):
+            _rb_nested = copy.copy(_rb_s)
+            _rb_nested.body = _gmi_decorator_pass(self, _rb_s.body, _rb_scope, False)
+            _rb_final.append(_rb_nested)
+        else:
+            _rb_final.append(_rb_s)
+    return _rb_final
 
 
 def _gmi_refuse_scalar_decorator_rebind(self, stmts: list, scope: dict) -> None:
@@ -6231,15 +6091,6 @@ def gen_module_impl(self, stmts):
                         ctype = 'char *'
                     elif isinstance(v, FloatLiteral):
                         ctype = 'double'
-                    elif (isinstance(v, IdentExpr)
-                            and _pair_key(s.name, _as_str(v.name))
-                            in (getattr(self, '_fn_scoped_param_types', None) or {})):
-                        # A bare name that is a parameter of the function
-                        # this class is declared in: its annotation is the
-                        # type of the value (see
-                        # `_gmi_record_fn_scoped_param_types`).
-                        ctype = self._fn_scoped_param_types[
-                            _pair_key(s.name, _as_str(v.name))]
                     elif v is None:
                         # A no-initializer container field: there is no
                         # literal to read the kind from, so the ANNOTATION

@@ -496,34 +496,6 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
                 ek = 'p'          # `for c in 'ab':` -- characters are strings
         if isinstance(ek, str):
             env[tname] = ek
-    # `for i, x in enumerate(<xs>)`: the two-slot target the loop above
-    # skips. Slot 0 is the index, an int by construction, and slot 1 is one
-    # element of `xs`, so it takes `xs`'s element kind exactly as a single
-    # target would. Without this, `yield x` in such a loop had no kind, the
-    # value slot defaulted to int64_t, and a float element was yielded as its
-    # raw bits (`for i, r in enumerate([1.5, 2.5]): yield r` printed
-    # `1` / `2` where CPython prints `1.5` / `2.5`). Both names must be
-    # unbound, the same rule the single-name case uses.
-    for n in _walk(fn):
-        if not isinstance(n, N.ForStmt):
-            continue
-        it = n.iterable
-        if not (isinstance(it, N.CallExpr) and isinstance(it.func, N.IdentExpr)
-                and it.func.name == 'enumerate' and len(it.args) == 1
-                and isinstance(it.args[0], N.IdentExpr)):
-            continue
-        tnames = for_target_names(n.target)
-        if len(tnames) != 2 or any(t in env for t in tnames):
-            continue
-        src = env.get(it.args[0].name)
-        if isinstance(src, tuple) and src[0] == 'list':
-            elem = src[1]
-        elif src == 'p':
-            elem = 'p'
-        else:
-            continue
-        env[tnames[0]] = 'i'
-        env[tnames[1]] = elem
     if struct_def is not None:
         for f in getattr(struct_def, 'fields', []):
             if isinstance(f, N.VarDecl):
@@ -5500,18 +5472,11 @@ def _capture_self_into_generator(inner: N.FunctionDef, outer: N.FunctionDef,
         args=[_c_ident(hidden)])
     inner.body = [N.VarDecl(name='self', type_ann=struct_name, value=_erase)] \
         + list(inner.body)
-    # Both writes above are to nodes the walk memo may already hold (the
-    # capture planner walked `inner` and `outer` before this ran), so each
-    # is invalidated: `inner` for its params and body, each call for the
-    # argument it gained. Invalidation runs up the parent edges, which
-    # drops the enclosing `outer` and everything between it and the call.
-    _walk_ast_invalidate(inner)
     hits: list = []
     for st in outer.body:
         _find_calls_to(st, inner.name, hits)
     for call in hits:
         call.args.append(N.MemberExpr(obj=N.IdentExpr(name='self'), member='address'))
-        _walk_ast_invalidate(call)
 
 
 def _calls_in_nested_defs(outer: N.FunctionDef, inner: N.FunctionDef) -> bool:
@@ -5584,16 +5549,11 @@ def _finish_sync_hoist(s: N.FunctionDef, sync_rename: dict) -> None:
               if not (isinstance(x, N.FunctionDef)
                       and getattr(x, 'is_generator', False)
                       and x.name in sync_rename)]
-    # `s.body` was replaced and each renamed call is rewritten in place, and
-    # the walk memo may hold both (`_hoist_nested_sync_generator` walked
-    # them to decide eligibility). Invalidate each written node.
-    _walk_ast_invalidate(s)
     for _st in s.body:
         for _n in _walk(_st):
             if (isinstance(_n, N.CallExpr) and isinstance(_n.func, N.IdentExpr)
                     and _n.func.name in sync_rename):
                 _n.func.name = sync_rename[_n.func.name]
-                _walk_ast_invalidate(_n)
 
 
 def _hoist_method_nested_generators(m: N.FunctionDef, struct_name: str,

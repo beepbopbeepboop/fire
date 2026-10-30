@@ -1,47 +1,5 @@
 # CODEGEN/INTERP: a plain `@decorator` on a `def` is never applied, on either execution path
 
-## Status (2026-10-29, rebinding reaches a `def` inside an `if`/`for`/`while`/`with`/`try`/`match` block)
-
-- `module_gen.py` `_gmi_decorator_pass` now walks every compound statement's
-  blocks (`_gmi_child_blocks`, `_gmi_with_blocks`), not only a body's direct
-  statements. A `def` in any such block is bound in the enclosing function's
-  scope, so it is a decorator target and is rebound like a direct statement.
-  `_gmi_scope_defs` collects the scope's defs through those blocks.
-- Before: `outer(7, True)` with `@twice def step` inside `if flag:` printed
-  `8` (the `def` was lifted to a sibling and its decorator dropped). After:
-  `16`, matching CPython.
-- **Module-level** blocks are refused, not rebound: a decorated def inside a
-  top-level `if`/`for`/`with`/`try` raises `inside a module-level block`. The
-  global function-value machinery only sees top-level bindings, so the
-  rebinding there would call a stub (`step: unavailable in compiled mode`).
-  Before this change it silently called the undecorated function; both are
-  wrong, so the refusal is the honest answer until that machinery is extended.
-- Tests: `test_gimple.py` `decorator_in_a_compound_block_is_applied_at_runtime`
-  (compiled stdout `8`→`16`, `7`, `9` vs CPython; fails on HEAD) and
-  `decorator_in_a_module_level_block_is_refused`. `test_gimple.py`: 414 passed,
-  2 failed. Both failures also occur on HEAD: the walk-memo census on
-  `mojo/middle/coro.py` (`CODEGEN_walk_ast_memo_census_coro_unallowlisted.md`)
-  and `scalar_arity_min_max_params_are_not_containers` (filed as
-  `bugs/TEST_scalar_arity_min_max_link_mode_prints_nothing.md`).
-
-**Still OPEN:**
-
-- **Decorators from another module** are still silently unapplied (an
-  imported decorator stays on the `def`). This is the `subdir` shape from
-  `Tools/wasm/wasi/__main__.py` if that decorator is imported.
-- **A decorated `def` in a module-level block** is refused (above), not
-  applied. Making it work needs the global machinery to see bindings made
-  inside a module-level block.
-- **Defect 1** (the decorator's own parameter typed `int64_t`) is not
-  addressed; it works because a function pointer is carried as an `int64_t`
-  bit pattern.
-- **The repr of a decorated wrapper** prints the decorated name, not
-  `<function twice.<locals>.wrap at ...>`.
-- **Integrator gate:** the rewrite now reaches defs inside function-body
-  blocks in the stdlib too, and module-level block decorators are refused.
-  The `stdlib-dylib` `skip` count and `stdlib-syntax` `U` count must be
-  compared before and after.
-
 ## Status (2026-10-29, rebinding extended to a `def` nested in a function body)
 
 - `module_gen.py` `_gmi_rebind_decorated_defs` is now `_gmi_decorator_pass`,
@@ -55,11 +13,10 @@
   after `16` (CPython `16`).
 - Tests: `test_gimple.py` `nested_decorator_is_applied_at_runtime` (compiled
   output equals CPython, `40`) and `nested_scalar_decorator_rebind_is_refused`.
-  `test_gimple.py`: 413 passed, 1 failed. The failure was the walk-memo
-  census on `mojo/middle/coro.py` (`_capture_self_into_generator` and
-  `_finish_sync_hoist` mutated memoized AST nodes without invalidating them);
-  it is not this change and is fixed on this branch by invalidating at those
-  two write sites.
+  `test_gimple.py`: 413 passed, 1 failed. The failure is the walk-memo census
+  on `mojo/middle/coro.py`, filed as
+  `bugs/CODEGEN_walk_ast_memo_census_coro_unallowlisted.md`; it is not this
+  change.
 
 **Still OPEN:**
 
