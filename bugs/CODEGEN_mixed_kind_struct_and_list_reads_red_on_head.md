@@ -1,5 +1,25 @@
 # CODEGEN: four gimple runner cases are red on HEAD (not caused by the nested-list fix)
 
+## Status 2026-10-29 — three of four fixed; one remains
+
+Fixed: `list(<a mixed list>)` was a typed walk. The walk read every slot with
+the promoted element type (`double` for `[1, 2.5]`), so the int slot came out
+as the double's bit pattern, and the copy inherited that type as its element
+repr. `_lower_ctor_from_iterable` (`mojo/backend_gimple/emit_calls.py`) now
+copies a source that records its own per-slot kinds with `mojo_list_copy`,
+which copies the raw words and the kinds row. Cases that now pass:
+
+- `gimple_heterogeneous_list_literal_keeps_each_slot` (`[1, 2.5]`, `list(f)`)
+- `gimple_struct_mixed_reads_survive_a_derivation` (`list(t)`, `list(c)`)
+- `gimple_struct_mixed_reads_survive_a_function_boundary` (`list(u)`)
+
+Pinned in `test_gimple_runner.py` by `gimple_list_copy_of_mixed_list_reads_each_slot`
+(index, iterate and copy-again of a copy).
+
+Still red: `gimple_ctor_param_polymorphic_slot_reads_receiver`. It is a method
+call on a polymorphic slot with no static type, a different defect. The plan is
+in `bugs/CODEGEN_unresolved_method_receiver_returns_its_own_pointer.md`.
+
 Found 2026-10-29 while verifying `CODEGEN_nested_list_param_two_kinds_segfaults`
 (fixed; its doc deleted). A full `python3 test_gimple_runner.py` on a pristine
 `git archive HEAD` copy fails these four cases with the same output as on the
