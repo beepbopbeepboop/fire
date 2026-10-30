@@ -29,6 +29,7 @@ from fire_compiler import (
     YieldExpr, YieldFromExpr, AwaitExpr,
     py_tokenize, Parser, _as_str, _as_int, _as_structdef_node, _as_funcdef_node,
     desugar_genexps, DESUGARED_GENEXP_NAMES, desugar_namedtuples,
+    DESUGARED_NAMEDTUPLE_NAMES,
 )
 from module_loader import load_module, get_symbol_type, compiler_source_dir
 import ast_rewriter
@@ -2091,6 +2092,10 @@ class GimpleGen:
         # child generator's yield slot (see coro.lower). Shared down the chain
         # the same way `_compiled_modules` is.
         self._closure_call_stmts: list = []
+        # Class names of this module's literal namedtuple lowerings (see
+        # fire_compiler.desugar_namedtuples); a tuple operation on a value
+        # of one of these is refused where its static type is known.
+        self._namedtuple_class_names: list = []
         # Absolute file paths currently being compiled anywhere in this whole-
         # program flattening (root file plus every transitively-imported
         # module), keyed by PATH rather than module NAME — a real self-
@@ -6105,6 +6110,7 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     # other namedtuple call is refused by name in emit_calls.
     stmts = desugar_namedtuples(stmts)
     _desugared_names = list(DESUGARED_GENEXP_NAMES)
+    _namedtuple_names = list(DESUGARED_NAMEDTUPLE_NAMES)
     # A3 stack-switch coroutine lowering (doc/COROUTINE.html §5.4), gated by
     # MOJO_CORO=stackswitch. Replaces eligible generator FunctionDefs with a
     # plain `__mgco_<g>_body` the ordinary codegen lowers; ineligible ones
@@ -6115,6 +6121,7 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     # The root's own call sites are what an imported module's generators are
     # typed by (see GimpleGen._closure_call_stmts).
     gen._closure_call_stmts = [stmts]
+    gen._namedtuple_class_names = _namedtuple_names
     gimple_gen_coro.register_abi_externs(gen)
     if _coro_meta or gimple_gen_coro._NATIVE_FUTURE_CLASSES:
         gimple_gen_coro.register(gen, _coro_meta)
