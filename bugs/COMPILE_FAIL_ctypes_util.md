@@ -1,51 +1,5 @@
 # COMPILE_FAIL: Lib/ctypes/util.py
 
-## Status (2026-10-29, PARTIAL — the cross-module literal-argument contract for unannotated imported functions is restored; the result-type half is filed)
-
-`ctypes/util.py`'s `find_library` binds `shutil.which('gcc')` (an UNANNOTATED
-stdlib function, reached through a bare `import shutil`) to a local, and the
-call's result was typed `int64_t`, so the string's pointer printed as a
-decimal integer. Measured on this tree with a two-file repro (`_shm.py` /
-`bimp.py`, the `shutil.which` shape: `def which(cmd, path=None): return cmd`):
-the function-scoped `c = _shm.which('gcc'); print(c)` and the `from _shm import
-which` spellings printed `4343434384` / `4369484800`; both print `gcc` after the
-fix, matching CPython.
-
-**Root cause (measured).** The same-module call-site contract (Pass 1.3d,
-`_gmi_apply_call_site_param_evidence`) types an unannotated parameter from its
-unanimous literal call sites. The cross-module pre-pass in `gen_module_impl`
-(`module_gen.py`) recorded such evidence only for GENERATOR callees, through the
-element-contract path, and the scalar writer that once fed
-`_xmod_gen_param_hints` was dropped in `c4c88fa51`. So an imported ordinary
-function's `cmd` stayed at the `int64_t` default and `return cmd` answered
-`int64_t` too.
-
-**Landed.** `mojo/backend_gimple/module_gen.py`: the pre-pass records the
-literal ctype of every argument of every imported top-level function into the
-existing `_xmod_gen_param_hints` (`_xg_record_scalar_args`, using the same
-`_gmi_literal_ctype` rule as the same-module pass); the merge that already
-applies that table to the defining module's `_inferred_param_types` now sees
-it. The element contracts stay generator-only. The plain-`import` binding table
-(`_xg_plain_import_mod`) moved up beside `_xg_module_binding` and is shared with
-the struct-constructor pass, so there is one resolution rule, not two.
-Regression: `test_link_mode.py::test_cross_module_unannotated_param_takes_the_callers_literal_type`
-(fails on HEAD's `module_gen.py`, passes after).
-
-**NOT done (the remaining blocker on this file's `find_library` path, filed in
-`bugs/CODEGEN_module_attr_call_result_type_is_not_inferred.md`).** The call's
-result ctype is now correct, but a function that RETURNS a local bound from the
-module-attribute call still infers `int64_t` for its own return, and a
-MODULE-SCOPE global bound from it is still `int64_t`. Both are result-type
-inference through a `MemberExpr` callee on an imported module, which
-`_infer_simple_expr_ctype` does not consult. This needs the full gate.
-
-**Not measured here.** The memory-kill row (the resource class named below) and
-the downstream `shutil_which_15d274` implicit declaration: this tree's
-`fire.py build` of `util.py` was not re-run (it is a whole-closure build the
-light-worker budget does not cover), so whether `util.py` now reaches gcc
-cleanly is UNKNOWN. The next measurement is the integrator's, on the full
-closure.
-
 ## Status (2026-10-24, post-fsdec — the `os_fsdecode`/`os_fsencode` 0-arg-stub class named in the entry below is GONE as a gcc class; this row's own blocker — the resource kill — is unchanged)
 
 The entry below named three downstream next blockers standing behind the

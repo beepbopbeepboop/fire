@@ -875,22 +875,16 @@ class TestAConditionalExpressionIsAValue(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
     def test_a_spill_is_not_attributed_to_the_conditional_expression(self):
-        """A spill is not attributed to the conditional expression, and the
-        spilling function proves.
+        """The other unmodelled word is a spill, and it says so.
 
         `STUR`/`LDUR` is the 9-bit-displacement form a frame access at a
-        NEGATIVE offset needs, and a function with enough spilled locals to
-        reach below the entry `sp` is the other unmodelled-word case the
-        refusal mechanism names off the encoding. It has nothing to do with a
-        conditional expression, and this row is why the mechanism does not
-        assume the one construct this file is about: a message that blamed the
-        ternary for a spill would send a reader to fix the wrong thing. The
-        step table got arms for the pair on 2026-10-05 (`_STEP_CONDS` rows
-        64/65, `work_step_ldur`/`work_step_stur`), so the spilling function
-        GENERATES an arm64 proof now instead of being refused — the refusal
-        half of this row retired with that; what stays pinned, re-measured
-        2026-10-27, is the name read off the encoding and the absence of a
-        `_ternary_go` blame in the word the mechanism would still name for it.
+        NEGATIVE offset needs, and the step table has arms for the scaled
+        `STR`/`LDR` and not for these — so a function with enough spilled
+        locals to reach below the entry `sp` gets no arm64 proof either, and has
+        nothing to do with a conditional expression. This row is why the refusal
+        names the instruction off its encoding instead of assuming the one
+        construct this file is about: a message that blamed the ternary for a
+        spill would send a reader to fix the wrong thing.
 
         Measured: twelve spilled locals is enough, and the words are
         `stur x0, [x29, #-0x58]` (`0xf81a83a0`) and `ldur` of the same shape.
@@ -904,24 +898,25 @@ class TestAConditionalExpressionIsAValue(unittest.TestCase):
         for enc, want in ((encode_stur_xt_xn_imm, "STUR"),
                           (encode_ldur_xt_xn_imm, "LDUR")):
             word = struct.unpack("<I", enc(0, 29, -0x58))[0]
-            name, why = G._unmodelled_instruction(word)
-            self.assertEqual(name, want,
+            self.assertEqual(G._unmodelled_instruction(word)[0], want,
                              f"{want} is not what the refusal names for "
                              f"{word:#010x}")
-            self.assertNotIn("_ternary_go", why,
-                             f"a {want} would be blamed on the conditional "
-                             f"expression:\n{why}")
 
         tmp = tempfile.mkdtemp(prefix="spill-arm64-")
         try:
             path, err = _generate(tmp, spill, "spill_arm64", arch="arm64")
-            self.assertIsNotNone(path,
-                                 "the spilling function is refused again, so "
-                                 "`_STEP_CONDS` rows 64/65 "
-                                 "(`work_step_ldur`/`work_step_stur`) stopped "
-                                 "stepping:\n" + (err or ""))
-            self.assertIsNone(err,
-                              "the spilling function refused:\n" + (err or ""))
+            self.assertIsNone(path, "a spilling function now generates an arm64 "
+                                    "proof, so `bugs/FORMAL_arm64_instruction_"
+                                    "coverage.md`'s LDUR/STUR row is stale and "
+                                    "this row should be re-measured")
+            self.assertNotIn("_ternary_go", err,
+                             f"a spill is being blamed on the conditional "
+                             f"expression:\n{err}")
+            self.assertIn("STUR", err,
+                          f"the refusal does not name the spill:\n{err}")
+            self.assertIn("NEGATIVE offset", err,
+                          f"the refusal does not say why the emitter reached "
+                          f"for the unscaled form:\n{err}")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

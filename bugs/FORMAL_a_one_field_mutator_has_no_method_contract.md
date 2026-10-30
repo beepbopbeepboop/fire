@@ -1,17 +1,11 @@
 # A one-field struct's mutating method has no Lean contract, and the by-reference receiver changed what one would have to say
 
-**Status: OPEN, re-measured 2026-10-05, and again 2026-10-28 (§4.2), still
-not fixed.** §4.1 records what the first re-measurement added — the smallest
-program that fires the exclusion, the confirmed absence of any x86-64
-counterpart, and the fact that the mutator is UNREACHABLE from the corpus
-because a struct construction has no model (a different document's subject).
-§4.2 records the second round: every claim above re-verified with the current
-line numbers, the §4.1 box reproduced, and one new fact — since the stack-floor
-guard took EVERY prologue of a program image (`e11f066d`, 2026-10-03),
-`_frame_methods`' RET window ends at the guard's own `<fn>_sfN_ok`
-continuation, so the mechanism is inert for every method in a program image
-and the taker needs a step 0 before (1)–(3). Everything here is measured on
-arm64; the x86-64 backend has no analogue of the machinery at all (see §4).
+**Status: OPEN, re-measured 2026-10-05, still not fixed.** §4.1 records what
+the re-measurement added — the smallest program that fires the exclusion, the
+confirmed absence of any x86-64 counterpart, and the fact that the mutator is
+UNREACHABLE from the corpus because a struct construction has no model (a
+different document's subject). Everything here is measured on arm64; the x86-64
+backend has no analogue of the machinery at all (see §4).
 
 **Re-read 2026-10-03 (`work/formal18-1`): §5's step 1 names a function that no
 longer exists under that name, and the part that remains is step 2 — which §3
@@ -197,89 +191,6 @@ together", because a mutator that mutates AND returns is a multi-statement body
 and `_frame_methods` only classifies single-statement bodies — and (2) has no
 answer, which §3 says at length. Landing (1) alone would change a slot map for
 a contract nothing consumes.
-
-## 4.2 Re-measured 2026-10-28: the mechanism the exclusion sits in front of
-##      is now inert for every method in a program image
-
-Same position as §4.1: items (1)–(3) are a `lib/ProofLib.lean` theorem plus a
-model change, and the brief forbids both a `make gate` and a Lean run beyond
-the one test covering a change. **This is the doc re-measured again, not a
-fix**, so the honest thing to record is what this round adds rather than
-restate §1 a third time. It adds one fact that changes the order of §5, and it
-confirms every measurement above against the current tree.
-
-**Every claim above still holds; the file has grown, so the addresses moved.**
-`arm64_proof_gen.py` is roughly four thousand lines longer than the 10-05
-round measured: the exclusion is now at `:12522` (was `:8683`),
-`_frame_slot_accesses` at `:12342` with the seed still `{0: 0}` at `:12346`
-(was `:8503`), and `_frame_store_writes` at `:12573` (was `:8734`); the sole
-call site is `:11620`. The §4.1 box reproduces byte-identical — the corpus
-`wide_recv` as the two-field control: `one_field=False`, every writeback
-`None`; the one-field `Box`: `set_v writeback='self'`, `get_v None`. The
-x86-64 half is still absent: the §4 grep returns nothing and the word "frame"
-still occurs exactly twice, in prose. The §2 shapes still answer `None`. And
-the §4.1 unreachability stands: proving `wide_recv` still refuses at the model
-— "model: a struct field read has no value in the semantic model … refusing
-rather than modelling it as 0" — before `_frame_methods` is ever reached.
-
-**The new fact: `_frame_methods` cannot classify any method in a program
-image, and the corpus's own two-field control is the measurement.** Since
-`e11f066d` (2026-10-03, "every prologue of an image that has an entry carries
-the stack-floor guard") — two days before the 10-05 round, whose probes were
-all the multi-statement shapes of §2, so the split below could not have
-surfaced in them — every function of a program image carries the guard:
-`model.stack_floor_guarded_names(..., every_function=emit_startup)`
-(`arm64_codegen.py:1017`), and the guard (`_emit_stack_floor_guard`, `:2000`)
-emits `ADRP; LDR; ADD SP, #0; CMP; B.HS <fn>_sfN_ok` plus the trap at the
-function's own label, with the frame, the body, and the RET at the
-continuation label. `_frame_methods`'s RET gate takes the window
-`[label(f), next label in address order)`, and the next label in address order
-is the guard's own continuation — so the window holds the preamble and no RET,
-`if not rets: continue` (`:12530`) drops the method, and the length-match
-confirmation never runs:
-
-```
-$ _frame_methods on four built images (arm64, prove=False, one build)
-c1 (ONE field, mutate-and-return, three statements)    None
-pair (TWO fields, mutate-and-return, three statements) None
-box (ONE field, single store, mut self)                None   ← the §4.1 box's shape
-wide_recv.Point_set_x (TWO fields, single store)       None   ← the control
-  window 0x19c..0x1f4: rets=0 branches=1;
-  body at Point_set_x_sf2_ok (0x1f4..0x218): rets=1
-```
-
-The control is the point. `Point` is two fields, so the one-field exclusion
-(`:12522`) does not fire; the body is one statement, so the `set` classifier
-would accept it; it has no branch, so the branch gate would accept it. It is
-the shape §1 says the machinery WOULD classify, and it still answers `None` —
-dropped at the RET gate by the window split, a different cause than the one §1
-records: "the length disagreed" described the pre-`e11f066d` entry sequence,
-where a straight-line mutator's window was unsplit. Before that commit only a
-cycle's or a branch's members were guarded in a program image; after it, the
-preamble is in every window.
-
-**The consequence for the taker: a step 0, before (1)–(3).** Landing (1) —
-model the cell load in `_frame_slot_accesses` — or lifting the one-field
-exclusion, buys nothing the mechanism can consume: the only path into
-`_frame_slot_accesses` is past the RET gate, and no method in a program image
-gets past it — including the one-field mutator itself, whose exclusion fires
-at `:12522` before the gate, so lifting it (as (1)–(3) imply) lands on the
-same drop the two-field control shows. The step 0 is to make `_frame_methods`
-reason about the body at the `<fn>_sfN_ok` continuation instead of the
-preamble: the window has to run from the continuation label (so the guard's
-`B.HS` — one of the branch indices the leaf-shape gate rejects — is not
-counted as "a branch: not the leaf shape"), and the `{0: 0}` seed has to say
-what is true AT the continuation, where `x0` has already moved to its argument
-home. It is checkable Lean-free, the same shape as §5 step 3: build the four
-images above and ask `_frame_methods` directly, where the pass is
-`wide_recv.Point_set_x` classifying (`kind="set"`) instead of answering `None`.
-
-**Neither blocker is this doc's to land alone.** The model refusal that keeps
-`wide_recv`'s proof from ever reaching `_frame_methods` is the other
-document's subject, as §4.1 records; the window split is a codegen/proof-gen
-fact measured here because it fixes the order. So §5's list is now: step 0
-(make the window see the body through the guard preamble), then (1), then
-(2), then (3) — with (2) still the part §3 says has no answer.
 
 ## 5. What to do next, in order
 

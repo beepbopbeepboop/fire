@@ -196,7 +196,7 @@ def mangle(name: str, type_args: dict) -> str:
     the CAS key (`cas.instantiation_key`) folds in `compiler_fingerprint()`,
     which hashes this file — every previously cached object is therefore
     unreachable rather than silently served under the new spelling. See
-    `bugs/imported-generic-elaboration-defect`.
+    `bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md`.
 
     A name with no type arguments is returned unchanged, so a template's
     zero-parameter instantiation keeps its own name (`empty` -> `empty`)."""
@@ -329,54 +329,6 @@ def _sub_outside_spans(pattern: str, repl: str, src: str, spans: list) -> str:
     return ''.join(out)
 
 
-def _stmt_bracket_delta(line: str) -> int:
-    """Net bracket balance of one physical line, ignoring string literals and
-    `#` comments.
-
-    `_sub_variadic`'s statement neutralizer (pass 7) needs to know where a
-    multi-line statement ENDS: a `comptime assert` whose expression or
-    message is parenthesized, or an `__mlir_op` call with a broken argument
-    list, opens brackets on its first line and closes them on a later one —
-    the cumulative balance reaches zero exactly on the statement's last
-    line. Ignoring strings is load-bearing, not hygiene: an assert message
-    may itself carry brackets (`"Length of Coord ("`) and a backtick MLIR-op
-    name may carry a bracketed argument (`__mlir_op.`index.cmp`[pred=...]`)
-    — counting those would end the statement one or two lines past its real
-    end and swallow live code. Triple-quoted docstrings are treated as plain
-    string runs: a neutralized statement never spans one, so an unterminated
-    run just contributes no balance for the rest of the line."""
-    d = 0
-    i, n = 0, len(line)
-    while i < n:
-        c = line[i]
-        if c in '\'"':
-            q = line[i:i + 3] if line[i:i + 3] in ('"""', "'''") else c
-            i += len(q)
-            while i < n:
-                if len(q) == 1 and line[i] == '\\':
-                    i += 2
-                    continue
-                if line[i:i + len(q)] == q:
-                    i += len(q)
-                    break
-                i += 1
-            continue
-        if c == '`':
-            i += 1
-            while i < n and line[i] != '`':
-                i += 1
-            i += 1
-            continue
-        if c == '#':
-            return d
-        if c in '([{':
-            d += 1
-        elif c in ')]}':
-            d -= 1
-        i += 1
-    return d
-
-
 def _sub_variadic(src: str, tp: str, items: list, element_map: dict = None,
                   self_element: str = None) -> str:
     """Substitute a VARIADIC type parameter (`*Ts`, measured 2026-10-21,
@@ -419,36 +371,6 @@ def _sub_variadic(src: str, tp: str, items: list, element_map: dict = None,
     named refusal, the standard discipline for this area."""
     bare = tp[1:]
     join = ', '.join(items)
-    # 1a. the unpack as a VARIADIC PARAMETER ANNOTATION (`*args: *Self.
-    # element_types`): a parameter annotation is ONE type — the parser
-    # reads exactly one `_parse_type_ann()` for it — so the comma-joined
-    # list is wrong there in the one way a list is never wrong inside a
-    # bracket argument list (`Tuple[*Self.element_types]` DOES want every
-    # inner). The join left the SECOND inner as a spurious next-parameter
-    # name, and an inner with its own bracket arguments (`ComptimeInt[3]`)
-    # had its `[3]` skipped as a LIFETIME bracket, dropping the list's
-    # COMMA — or, for the last inner, the parameter list's RPAREN — onto
-    # the parameter-NAME position: `SyntaxError: 147:71: Expected NAME or
-    # KW got COMMA` for `Coord[ComptimeInt[5], Int32, ComptimeInt[3],
-    # Int64]` and `147:53: ... got RPAREN` for `Coord[Int,
-    # ComptimeInt[1]]` (coord.mojo:323's `def __init__(out self, var
-    # *args: *Self.element_types)`, emitted line 147 — the first
-    # MULTI-inner variadic PARAMETER the stdlib has: every measured
-    # wrapper spelled its inners in a bracket list, where the full join
-    # is the right answer, so pass 1's two regexes never saw this
-    # context). The `: *` prefix is the marker: an unpack whose text
-    # immediately precedes a colon-and-star is a parameter annotation,
-    # and the only legal Mojo unpack in an annotation position is the
-    # variadic parameter's own. The annotation's text is otherwise inert
-    # for the artifact — the TU's C signature for the `*args` slot comes
-    # from `_signature_ctypes`' own `startswith('*')` branch (the packing
-    # sentinel / `MojoList *`), never from the annotation — so the FIRST
-    # inner is the honest single-type spelling (the wrapper families'
-    # element convention is `Self.Ts[0]`; a one-inner instantiation
-    # already degenerates `join` to exactly this text, byte for byte).
-    src = re.sub(rf':\s*\*\s*Self\.{re.escape(bare)}\b', f': {items[0]}', src)
-    src = re.sub(rf':\s*\*\s*(?<![\w.])' + re.escape(bare) + r'\b',
-                 f': {items[0]}', src)
     # 1. the unpack
     src = re.sub(rf'\*\s*Self\.{re.escape(bare)}\b', join, src)
     src = re.sub(rf'\*\s*(?<![\w.])' + re.escape(bare) + r'\b', join, src)
@@ -657,62 +579,14 @@ def _sub_variadic(src: str, tp: str, items: list, element_map: dict = None,
     src = re.sub(r'rebind_var\[[^\]]*\]\(((?:[^()]|\([^()]*\))*)\)', r'\1',
                  src)
 
-    # The three statement neutralizers must replace the WHOLE logical
-    # statement, not its first physical line. `[^\n]*$` stops at the end of
-    # the line, so a statement broken across lines (a call with a broken
-    # argument list, a `comptime assert` whose expression or message is
-    # parenthesized) had only its first line turned into `pass`, and its
-    # continuation lines were left in place — indented deeper than the block
-    # the new `pass` closes, so the emitted file died at the first of them
-    # with `SyntaxError: Unexpected INDENT('')`. Measured 2026-10-26 on the
-    # four variadic stdlib generics: `Coord.__eq__`'s
-    # `comptime assert Self.__len__() == Coord[*other_types].__len__(), ( ... )`
-    # (coord.mojo:419 → failed at emitted line 244), `_RegTuple.__init__`'s
-    # `__mlir_op.`lit.ownership.mark_initialized`( ... )` (coord.mojo:1606
-    # → line 25), `UnsafeUnion.__init__`'s `comptime assert Self._is_element[
-    # T ]()` (unsafe_union.mojo:194 → line 111) and `Variant._check`'s
-    # `comptime assert ( ... ), "Type does not exist in Variant."`
-    # (variant.mojo:560 → line 136). The statement ends on the line whose
-    # cumulative bracket balance (strings/comments ignored — see
-    # `_stmt_bracket_delta`) returns to zero; a balance that reaches EOF
-    # without closing is malformed, refused rather than half-neutralized.
-    # Single-line statements keep the old byte-for-byte output (same pad,
-    # same `pass`, same trailing newline).
-    _stmt_res = [
-        re.compile(p)
-        for p in (r'^[ \t]*__mlir_op\.[^\n]*$',
-                  r'^[ \t]*std\.memory\.forget_deinit\([^\n]*$',
-                  r'^[ \t]*comptime assert [^\n]*$')
-    ]
-    lines = src.splitlines(keepends=True)
-    out = []
-    _i = 0
-    while _i < len(lines):
-        _ln = lines[_i]
-        _m = None
-        for _r in _stmt_res:
-            _m = _r.match(_ln)
-            if _m:
-                break
-        if _m is None:
-            out.append(_ln)
-            _i += 1
-            continue
-        _pad = _ln[:len(_ln) - len(_ln.lstrip())]
-        _depth, _j = 0, _i
-        while True:
-            _depth += _stmt_bracket_delta(lines[_j])
-            if _depth <= 0:
-                break
-            _j += 1
-            if _j >= len(lines):
-                raise ValueError(
-                    f'variadic {tp!r}: the statement at line {_i + 1} opens '
-                    'brackets that never close; refusing to neutralize it')
-        _last = lines[_j]
-        out.append(_pad + 'pass' + ('\n' if _last.endswith('\n') else ''))
-        _i = _j + 1
-    src = ''.join(out)
+    def _stmt_pass(m):
+        pad = m.group(0)[:len(m.group(0)) - len(m.group(0).lstrip())]
+        return pad + 'pass'
+
+    for _pat in (r'^[ \t]*__mlir_op\.[^\n]*$',
+                 r'^[ \t]*std\.memory\.forget_deinit\([^\n]*$',
+                 r'^[ \t]*comptime assert [^\n]*$'):
+        src = re.sub(_pat, _stmt_pass, src, flags=re.M)
     return src
 
 
@@ -741,7 +615,7 @@ def monomorphize_source(template_src: str, type_args: dict,
     was boxed `int64_t` instead of `<iterator> *`, the receiver of
     `next(self._inner)` / `next(it)` had no resolvable struct type, and the
     `for`-loop over the same object degraded to `mojo_unsupported_iter`
-    (see the user-iterator next() bug (doc deleted in db724c4d6)).
+    (see bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md).
     Substituting the qualified form first also keeps the bare pass from
     double-substituting it — by then no `Self.<param>` text survives."""
 
@@ -845,50 +719,7 @@ def monomorphize_source(template_src: str, type_args: dict,
             ]
         src = _sub_outside_spans(rf'\bSelf\.{re.escape(tp)}\b', str(concrete),
                                  src, spans)
-        # `(?<!\.)`: a MEMBER NAME of a dotted access is not a reference to
-        # this template's parameter. `struct BitSet[size: Int]` spells
-        # `comptime if resized_from.size < Self.size:` in its cross-size
-        # copy constructor (stdlib/std/collections/bitset.mojo:192/213):
-        # `Self.size` is this instantiation's own size and the unit pass
-        # above already consumed it, but `resized_from.size` is the SOURCE
-        # instance's size — a member read whose name merely happens to be
-        # spelled like the parameter. Rewriting it glued the concrete value
-        # onto the dot (`resized_from.128`), and the lexer's FLOAT
-        # alternative (`\.\d...`) then read `.128` as a single FLOAT token —
-        # so the re-parse of the monomorphized .mojo file died on the first
-        # such line with `Expected COLON got FLOAT('.128')` (measured 2026-
-        # 10-26 on BitSet_4_size_3_128.mojo:86 — EVERY BitSet[N] hit it,
-        # since the constructor is in every instantiation), while the
-        # un-rewritten spelling parses cleanly. The lookbehind only sees a
-        # dot that PRECEDES the parameter, so a dotted TYPE PREFIX
-        # (`var _inner: T.Element` — the `_check_no_value_shadow` annotation
-        # case, where `T` is the parameter and `.Element` follows it) is
-        # still rewritten exactly as before.
-        #
-        # `(?![ \t]*=(?!=))`: a KEYWORD LABEL of a bracket/call argument is
-        # not a reference to this template's parameter, either. The stdlib
-        # SIMD struct spells its reduction entry points
-        # `self.reduce[max[dtype=Self.dtype], size_out]()` (simd.mojo:3106;
-        # `min[dtype=Self.dtype]` at 3146) — the `dtype` before the `=` is
-        # the CALLEE's comptime-parameter name, a label, and the unit pass
-        # above has just rewritten its VALUE (`Self.dtype` -> the concrete
-        # arg) beside it. Rewriting the label too produced
-        # `max[exp.dtype=exp.dtype]` (for the `__pow__` call site's
-        # `SIMD[exp.dtype, self.length]` spelling) — and, identically,
-        # `max[Float32=Float32]` for the fully concrete `SIMD[Float32, 8]`:
-        # EVERY SIMD instantiation hit the same line, and the re-parse died
-        # with `Expected RBRACKET got ASSIGN('=')` where the label's `=`
-        # sat inside the outer `reduce[...]` argument list (measured
-        # 2026-10-27 on SIMD_5_dtype_14_exp_....mojo:2662, the reduce_max
-        # body: template line 3106 is generated line 3106-445+1). A label is
-        # the parameter immediately followed by a single `=` (the `(?!=)`
-        # tail keeps a `==` comparison — where the parameter IS a reference
-        # — substitutable); `[ \t]*` rather than `\s*` so a parameter at
-        # end of line whose NEXT line begins a `=` (an annotation with a
-        # wrapped default) is still a reference and still rewritten.
-        src = _sub_outside_spans(
-            rf'(?<!\.)\b{re.escape(tp)}\b(?![ \t]*=(?!=))', str(concrete),
-            src, spans)
+        src = _sub_outside_spans(rf'\b{re.escape(tp)}\b', str(concrete), src, spans)
     return mangled, src
 
 

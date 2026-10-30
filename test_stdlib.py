@@ -9,7 +9,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from module_loader import STDLIB_PATH as STDLIB  # single source of truth
 MOJO = os.path.join(HERE, "fire.py")
-MAX_WORKERS = int(os.environ.get("TEST_STDLIB_MAX_WORKERS", "20"))
+MAX_WORKERS = 20
 
 
 def find_files():
