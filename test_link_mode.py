@@ -937,7 +937,7 @@ def test_unannotated_param_with_disagreeing_call_sites() -> bool:
     #
     # What is asserted is BUILDABILITY, and deliberately so: the values these
     # print are still wrong (a pointer decimal for the list), which is the
-    # runtime-tag row of bugs/CODEGEN_polymorphic_param_non_str_kinds_print_wrong.md
+    # runtime-tag row of bug CODEGEN_polymorphic_param_non_str_kinds_print_wrong
     # (the float beside an integer is fixed, in `cases` above). Asserting
     # the wrong text would pin a bug; asserting only that it COMPILES is the
     # whole content of this row, and it was a hard failure before.
@@ -970,10 +970,10 @@ def test_unannotated_param_with_disagreeing_call_sites() -> bool:
             ok = False
             print(f"  ✗ unannotated_param_container_does_not_break_the_build"
                   f"[{i}]: compiled but exited {rc}")
-    # ARITHMETIC on the float-possible parameter (bugs/
-    # CODEGEN_polymorphic_param_non_str_kinds_print_wrong.md). `x OP n` with
-    # `+`, `-` or `*` is answered by `_float_param_arith`: the integer answer
-    # when the argument was an integer, and a double box holding the double
+    # ARITHMETIC on the float-possible parameter (bug
+    # CODEGEN_polymorphic_param_non_str_kinds_print_wrong). `x OP n` with
+    # `+`, `-`, `*`, `//`, `%` is answered by `_float_param_arith`: the integer
+    # answer when the argument was an integer, and a double box holding the
     # answer when it was a float, picked at run time. Each expectation is the
     # CPython answer, so this pins the real double read, not the old truncation.
     # `print(x)` is pinned by `cases` above. A DOUBLE operand beside the
@@ -988,6 +988,10 @@ def test_unannotated_param_with_disagreeing_call_sites() -> bool:
         ('def f(x):\n    print(x * 2.5)\n\n\nf(1)\nf(2.5)\n', '2.5\n6.25\n'),
         ('def f(x):\n    print(2.5 * x)\n\n\nf(2.5)\nf(1)\n', '6.25\n2.5\n'),
         ('def f(x):\n    print(x + 0.5)\n\n\nf(2.5)\nf(1)\n', '3.0\n1.5\n'),
+        # `//` and `%`: floor division and modulo, the two remaining float
+        # arithmetic arms (`_FLOAT_PARAM_OPS`) beside the float-possible param.
+        ('def f(x):\n    print(x // 2)\n\n\nf(2.5)\nf(1)\n', '1.0\n0\n'),
+        ('def f(x):\n    print(x % 2)\n\n\nf(2.5)\nf(1)\n', '0.5\n1\n'),
     ]
     for i, (src, want) in enumerate(arithmetic):
         with tempfile.TemporaryDirectory() as td:

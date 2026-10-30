@@ -6370,7 +6370,7 @@ def _unbox_float_param_operand(gen, node, ctype: str, val: str) -> tuple[str, st
 # the integer `/` that traps on a zero divisor. `//` and `%` are left out on
 # purpose: their integer forms can trap and their double forms are not C's
 # `/`/`%`, so they keep the truncating answer until they get their own arm.
-_FLOAT_ARITH_OPS = ('+', '-', '*')
+_FLOAT_ARITH_OPS = ('+', '-', '*', '//', '%')
 _FLOAT_DIV_OP = '/'
 _FLOAT_PARAM_OPS = _FLOAT_ARITH_OPS + (_FLOAT_DIV_OP,)
 
@@ -6428,14 +6428,22 @@ def _float_param_arith(gen, op: str, lnode, lt: str, lv: str, rnode, rt: str, rv
         dres = gen._call_expr('double', 'mojo_div_double',
                               [('double', _as_str(dl)), ('double', _as_str(dr))])
         return gen._call_expr('int64_t', 'mojo_box_from_double', [('double', _as_str(dres))])
-    dres = gen._new_val('double', f'({dl}) {op} ({dr})')
+    if op == '//':
+        dres = gen._new_val('double', f'floor(({_as_str(dl)}) / ({_as_str(dr)}))')
+    elif op == '%':
+        dres = gen._new_val('double', f'({_as_str(dl)} - ({_as_str(dr)}) * floor(({_as_str(dl)}) / ({_as_str(dr)})))')
+    else:
+        dres = gen._new_val('double', f'({dl}) {op} ({dr})')
     if lt == 'double' or rt == 'double':
         return gen._call_expr('int64_t', 'mojo_box_from_double', [('double', _as_str(dres))])
     lp = _is_may_hold_float_param(gen, lnode)
     rp = _is_may_hold_float_param(gen, rnode)
     _, ilv = _unbox_float_param_operand(gen, lnode, 'int64_t', lv)
     _, irv = _unbox_float_param_operand(gen, rnode, 'int64_t', rv)
-    ires = gen._new_val('int64_t', f'({_as_str(ilv)}) {op} ({_as_str(irv)})')
+    if op == '//':
+        ires = gen._new_val('int64_t', f'__mojo_floordiv ({_as_str(ilv)}, {_as_str(irv)})')
+    else:
+        ires = gen._new_val('int64_t', f'({_as_str(ilv)}) {op} ({_as_str(irv)})')
     return gen._call_expr('int64_t', 'mojo_float_arith_select', [
         ('int64_t', _as_str(lv) if lp else '0'),
         ('int64_t', _as_str(rv) if rp else '0'),

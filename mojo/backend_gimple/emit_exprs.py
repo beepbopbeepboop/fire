@@ -5245,6 +5245,15 @@ def _lower_percent_width_args(gen, rhs_exprs, arg_i: int, dyn: int) -> list:
 def _lower_floordiv(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
     lt, lv = gen.lower_expr(node.left)
     rt, rv = gen.lower_expr(node.right)
+    # A float-possible parameter beside an integer argument: the answer
+    # depends on whether the parameter holds an int or a double (in which
+    # case it is a double floor), the same shape as `_float_param_arith`.
+    # `//` is dispatched here before the arithmetic tail, so `//` needs its
+    # own float branch; the generic `__mojo_floordiv` path only sees plain
+    # ints/doubles and does not know how to print a double-side result.
+    from mojo.backend_gimple import emit_infra as ginf
+    if ginf._float_param_arith_applies(gen, '//', node.left, lt, node.right, rt):
+        return 'int64_t', ginf._float_param_arith(gen, '//', node.left, lt, lv, node.right, rt, rv)
     # Boxed-PythonObject floor division (2026-10-21 part 4, further,
     # test_python_object): `a // b` on box locals answers through the
     # runtime's word-class checks (int result, zero-division RAISE, double
