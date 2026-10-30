@@ -11148,7 +11148,7 @@ def gen_module_impl(self, stmts):
                 continue
             try:
                 cpp_text, value_ctype, base, param_ctypes = \
-                    self._gen_cpp_generator_unit(m, struct_name=_sd.name)
+                    self._gen_cpp_generator_unit(m, struct_name=_sd.name, struct_def=_sd)
             except _UnsupportedGeneratorShape as e:
                 self._cpp_refusal_reasons.setdefault(m.name, str(e))
                 _debug_note(f'generator method {_sd.name}.{m.name!r} not '
