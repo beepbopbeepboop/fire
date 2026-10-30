@@ -3427,7 +3427,7 @@ def test_a_message_a_test_pins_is_still_a_message_the_tree_can_say():
     still correct, the words were still in the tree somewhere else, and the
     TEST was asserting a sentence the build could not print —
 
-      * `TEST_formal_specialization_pins_a_message_master_deleted.md`, whose
+      * the doc deleted by commit dabccb808, whose
         needles named a copy of `model.function_value_refusal` that Python's
         rebinding had made DEAD, so the case was red on a tree whose behaviour
         was right;
@@ -5547,8 +5547,7 @@ def test_a_deleted_bug_doc_is_not_still_cited():
     # `FORMAL_known_limits.md`, which is the very document the check above uses
     # as its positive control for the `bugs/`-prefixed class — so the tool
     # reported its own control as broken and every figure quoted from it
-    # (`DOCS_merge_left_citations_of_the_docs_the_branches_deleted.md` quotes
-    # 289) was wrong by 64. The bare class is deliberately outside the ratchet,
+    # (the doc deleted by commit 0702d4087 quotes 289) was wrong by 64. The bare class is deliberately outside the ratchet,
     # so nothing else would have caught it.
     bare_by_doc, bare_by_file = dangling_doc_refs.bare_find()
     live = {n.rsplit('/', 1)[-1]: v for n, v in bare_by_doc.items()
@@ -5561,18 +5560,18 @@ def test_a_deleted_bug_doc_is_not_still_cited():
           f'({sorted(live)[:5]}); `bare_find` must skip a name that resolves, '
           f'and the census it prints is quoted in bugs/ documents')
     # …and it must still find a corpus, or the fix is a walk that matches
-    # nothing. 200+ was the measured floor on this tree after the fix
-    # (847677268, 2026-10-05). The 2026-10-27 batch deleted the fixed bug
-    # docs, and regenerating OPEN_WORK.md's formal-doc-index block (the
-    # stale-block fix in this same gate-triage series) dropped the rows that
-    # still named the deleted ones, so the live corpus is 196 citations of
-    # 117 names — re-measured today, floor re-baselined to it.
+    # nothing. The floor is read off the bare ledger, not hard-coded: every
+    # sweep that retires citations moves the corpus, and a literal floor was
+    # re-baselined by hand after each one (196 on 2026-10-27, then this
+    # sweep's 172). Half the ledger is far below any real corpus and far above
+    # what an over-skipping predicate leaves behind.
+    _bare_floor = sum(_baseline_mod.BARE_BASELINE.values()) // 2
+    _bare_found = sum(len(v) for v in bare_by_doc.values())
     check('dangling refs: the BARE walk is still not vacuous after that fix',
-          sum(len(v) for v in bare_by_doc.values()) >= 196,
-          f'{sum(len(v) for v in bare_by_doc.values())} citations of '
-          f'{len(bare_by_doc)} names that are nowhere; a walk that skips every '
-          f'name because it skips too many is the same defect wearing the '
-          f'opposite sign')
+          _bare_found >= _bare_floor,
+          f'{_bare_found} citations of {len(bare_by_doc)} names that are '
+          f'nowhere, floor {_bare_floor}; a walk that skips every name because '
+          f'it skips too many is the same defect wearing the opposite sign')
     # The ledger's floor is read by TWO mechanisms now — the ratchet below and
     # the strict check above — so the readers that decide what it records are
     # checked against a synthetic corpus rather than against this tree's, whose

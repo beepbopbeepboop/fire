@@ -5586,7 +5586,7 @@ def gen_module_impl(self, stmts):
             # `gimple_codegen._selfhost_register_gimplegen`'s GimpleGen
             # field-dict seed), making this `not in` guard spuriously
             # True and WIPING that entry back to `{}` right here. See
-            # bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md
+            # commit e8a7135b8
             # Finding 4 Bug C.
             _s_name = _as_str(_s.name)
             if _s_name not in self.struct_field_types:
@@ -6956,7 +6956,7 @@ def gen_module_impl(self, stmts):
                 # binary's own (differently-ordered) struct/method
                 # registration passes, whichever run happened to resolve
                 # `target_struct`'s method list before vs after this scan.
-                # See bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md.
+                # See commit e8a7135b8.
                 if target_def is not None and any(
                         m.name == fn for m in target_def.methods):
                     continue

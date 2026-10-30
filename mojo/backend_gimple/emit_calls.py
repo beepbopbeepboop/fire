@@ -3190,7 +3190,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # path (a print-and-return-0 no-op) — exactly the R4 "absence of proof
     # treated as a negative answer" pattern DESIGN.html describes, when a
     # perfectly good runtime answer was available all along (R5). Found by
-    # tracing bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md:
+    # tracing commit e8a7135b8:
     # gimple_gen_coro.py's own AST-walking helpers use `for k, v in
     # vars(node).items():` on a GENERICALLY-typed `node` parameter (by
     # design — it walks many different AST node types uniformly), so

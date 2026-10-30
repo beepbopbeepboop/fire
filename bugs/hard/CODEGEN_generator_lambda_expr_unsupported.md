@@ -23,7 +23,7 @@
 Nothing in its own scope. The two residue rows that remain (a generator whose
 yields rebind one name to a bool then a float, and `r = 2.5` rebinding a local
 first bound to `False`) are the subject of
-`bugs/CODEGEN_generator_yield_kind_rebound_name_silent_wrong_value.md`, which
+commit 71fda43ff, which
 is claimed by another worker (`bug-codegen-generator-yield-kind-rebound`). This
 doc is not deleted yet only because ~20 live citations point at it; the
 disposition rule in the second pass still applies, and whoever closes that
@@ -58,7 +58,7 @@ other doc deletes this one in the same commit as the citation repoint.
 
 | shape | compiled | CPython | where |
 |---|---|---|---|
-| a generator whose yields mix a bool-lambda call and a float-lambda call | `1`, `1` | `True`, `1.5` | **new doc** `bugs/CODEGEN_generator_yield_kind_rebound_name_silent_wrong_value.md` (shape 2). A3 refuses correctly; the legacy C++ fallback then types both yields `int64_t`. Predates this pass. |
+| a generator whose yields mix a bool-lambda call and a float-lambda call | `1`, `1` | `True`, `1.5` | **new doc** commit 71fda43ff (shape 2). A3 refuses correctly; the legacy C++ fallback then types both yields `int64_t`. Predates this pass. |
 | `r = 2.5` rebinding a local first bound to `False`, then `yield r` (no lambdas) | `True` | `2.5` | same new doc (shape 1: `_static_env`'s first-binding `setdefault`). Predates this pass. |
 | two generators in one module, a bool-yielding and a float-yielding one | float one prints `True` | `1.5` | sibling `for` loops reusing one name kept the first loop's type; fixed (pinned by `run_sibling_loop_value_kind_tests`). No lambdas; predates this pass. |
 | `def outer(x): n = 2; def inner(y): g = lambda z: z + n; return g(y)` | `4` | `6` | fixed in `1eacc36f8` (a lambda inside a nested def reads its outer-outer capture). |

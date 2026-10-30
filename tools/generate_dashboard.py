@@ -328,7 +328,7 @@ SNAPSHOT = {
         "20 pre-2026-10-05 archaeology branches await the owner's triage decision.",
     ],
     "open_reds": [
-        "Bootstrap stage2/3 family behind bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md (Opus agent's worktree).",
+        "Bootstrap stage2/3 family behind commit 1c3736c56 (Opus agent's worktree).",
         "Gate-bucket formal reds itemised above (formal-os-backing, formal-monomorph, formal-run).",
     ],
 }
