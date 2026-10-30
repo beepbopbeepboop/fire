@@ -496,34 +496,6 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
                 ek = 'p'          # `for c in 'ab':` -- characters are strings
         if isinstance(ek, str):
             env[tname] = ek
-    # `for i, x in enumerate(<xs>)`: the two-slot target the loop above
-    # skips. Slot 0 is the index, an int by construction, and slot 1 is one
-    # element of `xs`, so it takes `xs`'s element kind exactly as a single
-    # target would. Without this, `yield x` in such a loop had no kind, the
-    # value slot defaulted to int64_t, and a float element was yielded as its
-    # raw bits (`for i, r in enumerate([1.5, 2.5]): yield r` printed
-    # `1` / `2` where CPython prints `1.5` / `2.5`). Both names must be
-    # unbound, the same rule the single-name case uses.
-    for n in _walk(fn):
-        if not isinstance(n, N.ForStmt):
-            continue
-        it = n.iterable
-        if not (isinstance(it, N.CallExpr) and isinstance(it.func, N.IdentExpr)
-                and it.func.name == 'enumerate' and len(it.args) == 1
-                and isinstance(it.args[0], N.IdentExpr)):
-            continue
-        tnames = for_target_names(n.target)
-        if len(tnames) != 2 or any(t in env for t in tnames):
-            continue
-        src = env.get(it.args[0].name)
-        if isinstance(src, tuple) and src[0] == 'list':
-            elem = src[1]
-        elif src == 'p':
-            elem = 'p'
-        else:
-            continue
-        env[tnames[0]] = 'i'
-        env[tnames[1]] = elem
     if struct_def is not None:
         for f in getattr(struct_def, 'fields', []):
             if isinstance(f, N.VarDecl):

@@ -1363,8 +1363,6 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                         # 'binding'", which took `selfhost`, `mojoc` and
                         # `bootstrap-stage2-cc` down together.
                         inferred[pname] = (_returned_param_containers(func)
-                                          .get(pname)
-                                          or _rebound_param_containers(gen, func)
                                           .get(pname) or 'MojoList *')
 
             # If not subscripted, try to infer from function calls
@@ -1489,7 +1487,46 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
             if pname not in inferred and is_string_method and len(_struct_evidence_list) == 0:
                 inferred[pname] = 'char *'
 
+    # A container guess is only as good as the body's own use of the name. A
+    # parameter the body REBINDS to a container of another kind (`live =
+    # set(live)` after a `for x in live`, or after `set(live)` alone) has one
+    # C variable that must hold both, and no single container pointer does:
+    # the store then reaches `_sce_simple_emit`'s container-kind refusal, and
+    # the module falls back to source inclusion after compiling twice
+    # (bugs/CODEGEN_selfhost_closure_set_kind_refusal_double_compiles_the_
+    # module.md). This is the parameter form of the rule
+    # `_prebound_local_ctypes` already applies to LOCALS: a name bound to two
+    # container kinds is the box, not the first kind it happened to see.
+    for pname in list(inferred):
+        if inferred[pname] in gimple_ctypes._CONTAINER_KIND_TYPES and \
+                _rebound_to_other_container(getattr(func, 'body', None) or [],
+                                            pname, inferred[pname]):
+            inferred[pname] = 'int64_t'
+
     return inferred
+
+
+def _rebound_to_other_container(body: list, pname: str, ctype: str) -> bool:
+    """True when a binding in `body` (not inside a nested def) assigns
+    `pname` a container literal or empty constructor whose kind is not
+    `ctype`. A non-container value, or a call whose kind this cannot read,
+    does not count: the answer is only ever narrowed by a binding that
+    provably disagrees."""
+    for n in _each_binding(body):
+        if not isinstance(n, AssignStmt):
+            continue
+        if not isinstance(n.target, IdentExpr) or _as_str(n.target.name) != pname:
+            continue
+        kind = _container_literal_ctype(n.value) or _empty_ctor_ctype(n.value)
+        if kind is None and isinstance(n.value, CallExpr) \
+                and isinstance(n.value.func, IdentExpr):
+            # `set(x)` / `list(x)` / `dict(x)` build their kind whatever they
+            # are handed, so the constructor name is the answer.
+            kind = {'dict': 'MojoDict *', 'list': 'MojoList *',
+                    'set': 'MojoSet *'}.get(_as_str(n.value.func.name))
+        if kind is not None and kind != ctype:
+            return True
+    return False
 
 def _seed_addressed_locals(gen, body: list):
     """Pre-scan `body` (BEFORE any statement in it compiles) for every
@@ -1765,23 +1802,6 @@ def _container_literal_ctype(value) -> str:
     return None
 
 
-def _builtin_container_ctor_ctype(value) -> str | None:
-    """The container C type a BUILTIN constructor call produces -- `set(x)`,
-    `list(x)`, `dict(x)`, `sorted(x)` ... -- read from the same table the
-    codegen lowers those calls by (`types._BUILTIN_RET_CTYPES`), or None.
-
-    `_container_literal_ctype` answers for the displays (`{...}`, `[...]`,
-    comprehensions) only, so a local bound by `s = set(xs)` was invisible to
-    `_prebound_local_ctypes` and a parameter it stores into kept whatever
-    usage guess the function's other statements produced. Only container
-    results are answered: `len(x)` and `int(x)` are scalars, which this
-    overlay does not record (the int64_t default is for them)."""
-    if not (isinstance(value, CallExpr) and isinstance(value.func, IdentExpr)):
-        return None
-    t = gimple_ctypes._BUILTIN_RET_CTYPES.get(_as_str(value.func.name))
-    return t if t in gimple_ctypes._CONTAINER_KIND_TYPES else None
-
-
 def _bare_returned_params(body: list, names: set, out: set) -> None:
     """Add to `out` every name in `names` that some `return <name>` hands back
     VERBATIM — a bare name, not `name[k]` and not `f(name)`.
@@ -1895,42 +1915,6 @@ def _returned_param_containers(func) -> dict:
         if n not in rebound:
             out[n] = ctype
     return out
-
-
-def _rebound_param_containers(gen, func) -> dict:
-    """`{param name: ctype}` for every UNANNOTATED parameter of `func` that the
-    body REBINDS to a container of one definite kind, read from the first
-    binding `_prebound_local_ctypes` already decides for every local.
-
-    The motivating shape is `def walk(stmts, live): live = set(live); ...`.
-    `set(live)` is iteration evidence for `live` (`set` is in
-    `_ITERABLE_CONSUMING_BUILTINS`), so `_infer_param_types` reaches its
-    last-resort container guess, `MojoList *`, for a parameter whose body
-    stores a `MojoSet *` into it. The parameter is then declared a list and
-    the store is refused: "cannot coerce MojoSet * to MojoList * (incompatible
-    container kinds) ... dest='live'". At module scope the call site's
-    `walk({3})` grounds the guess afterwards, which is why the same program
-    compiled there; a nested `def` gets no call-site evidence, so it kept the
-    wrong guess. Pinned by `test_gimple.py`'s
-    `test_nested_def_rebound_param_takes_the_container_it_stores`.
-
-    The same argument as `_returned_param_containers`: the rebinding is a store
-    the codegen already coerces into the parameter's type and refuses on a
-    container-kind mismatch, so reading it here cannot turn a program that
-    compiles today into one that does not. A name whose bindings disagree on
-    the kind is the box (`int64_t` in `_prebound_local_ctypes`) and is not
-    recorded here, because no single container type describes it."""
-    names = set()
-    for pname, ptype in (getattr(func, 'params', None) or []):
-        if ptype is None and not pname.startswith('*') \
-                and _as_str(pname) not in ('self', 'cls'):
-            names.add(_as_str(pname))
-    if not names:
-        return {}
-    bound = _prebound_local_ctypes(gen, getattr(func, 'body', None) or [])
-    return {n: bound[n] for n in names
-            if bound.get(n) in gimple_ctypes._CONTAINER_KIND_TYPES}
-
 
 def _each_binding(body: list, include_defs: bool = False) -> list:
     """Every statement in `body` that can BIND a local, as a LIST, recursing
@@ -2091,8 +2075,7 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
             # conservative answer for a name rebound to two kinds.
             cand = 'double'
         else:
-            t = (_container_literal_ctype(n.value)
-                 or _builtin_container_ctor_ctype(n.value))
+            t = _container_literal_ctype(n.value)
             if t:
                 cand = t
             else:

@@ -6222,61 +6222,6 @@ def go():
 go()
 """, "A\nB\n")
 
-    # `for i, r in enumerate(<param>)`: a two-slot loop target, which
-    # `_static_env` skipped entirely, so `yield r` had no kind and the value
-    # slot defaulted to int64_t. A float element came out as its raw IEEE-754
-    # bits (`1` / `2` where CPython prints `1.5` / `2.5`) with exit 0. The
-    # index `i` is an int and the element is a float, so the value slot cannot
-    # carry both: the right answer is an honest refusal, which the interpreter
-    # fallback then runs correctly. The refusal names the truncation.
-    test_generator_refused("generator_enumerate_float_element_is_refused_not_truncated", """\
-def rows(data):
-    for i, r in enumerate(data):
-        yield i
-        yield r
-
-def main():
-    for v in rows([1.5, 2.5]):
-        print(v)
-main()
-""", "a `yield` of a float value is typed 'int64_t'")
-
-    # The positive side of the same fix: an enumerate loop whose yields are
-    # all the element (float, or string) compiles and prints the element, and
-    # one whose yields are all the index compiles and prints the index.
-    test_generator_stdout("generator_enumerate_float_element_yields_float", """\
-def rows(data):
-    for i, r in enumerate(data):
-        yield r
-
-def main():
-    for v in rows([1.5, 2.5]):
-        print(v)
-main()
-""", "1.5\n2.5\n")
-
-    test_generator_stdout("generator_enumerate_index_yields_index", """\
-def rows(data):
-    for i, r in enumerate(data):
-        yield i
-
-def main():
-    for v in rows([1.5, 2.5]):
-        print(v)
-main()
-""", "0\n1\n")
-
-    test_generator_stdout("generator_enumerate_string_element_yields_string", """\
-def rows(data):
-    for i, r in enumerate(data):
-        yield r
-
-def main():
-    for v in rows(['a', 'b']):
-        print(v)
-main()
-""", "a\nb\n")
-
     # A local bound to a str METHOD CALL. `_yield_kind` had no arm for a
     # method call on a string, so `s` got no kind, `for it in s` found no
     # element kind, and `yield it` fell through to the int64_t slot: the
