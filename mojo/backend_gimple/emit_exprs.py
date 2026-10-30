@@ -3636,7 +3636,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # of a pointer, which gcc rejects. The `%` gate has the same ordering issue
     # in principle, but its operands reach it unchanged, so it is left alone.
     int_true_div = op == '/' and all(
-        t in gimple_ctypes._SCALAR_INT_TYPES and t != '_Bool' and not t.startswith('uint')
+        t in gimple_ctypes._SCALAR_INT_TYPES and not t.startswith('uint')
         for t in (lt, rt))
     # A builtin-`bytes` subclass instance (`class _Extra(bytes)`) carries
     # its payload in a hidden `_data: MojoBytes *` field — an inherited

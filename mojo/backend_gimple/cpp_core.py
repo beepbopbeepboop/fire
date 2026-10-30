@@ -749,7 +749,7 @@ def _cpp_is_int_operand(gen, node) -> bool:
         )
     except Exception:
         return False
-    return _ct in gimple_ctypes._SCALAR_INT_TYPES and _ct != '_Bool'
+    return _ct in gimple_ctypes._SCALAR_INT_TYPES
 
 
 def _cpp_apply_fstring_spec(part_val: str, spec: str) -> str:
