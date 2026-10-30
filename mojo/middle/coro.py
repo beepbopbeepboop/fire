@@ -349,6 +349,7 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
         if len(_kinds) == 1:
             env[_nm] = ('callable', _kinds.pop())
     list_elem: dict = {}   # local name -> {elem kinds seen via `= [...]` / .append(...)}
+    str_kinds: dict = {}   # local name -> {scalar kinds seen via `= <literal or call>`}
     for n in _walk(fn):
         tgt = val = ann = None
         if isinstance(n, N.AssignStmt) and isinstance(n.target, N.IdentExpr):
@@ -395,6 +396,15 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
             if isinstance(k, tuple) and k[0] == 'list':
                 list_elem.setdefault(tgt, set()).add(k[1])
             elif isinstance(k, str):
+                # Record EVERY kind the name is bound to, not just the first
+                # (`env.setdefault` kept the first binding's kind and silently
+                # dropped later rebindings -- bugs/CODEGEN_generator_yield_kind_
+                # rebound_name_silent_wrong_value.md, Shape 1). The `setdefault`
+                # write below still feeds this walk's own reads (an earlier
+                # binding of the same name must answer for later expressions in
+                # the same pass); `_static_env` resolves conflicting names to
+                # NO entry once the walk is done.
+                str_kinds.setdefault(tgt, set()).add(k)
                 env.setdefault(tgt, k)
         # `<name>.append(<literal>)` refines a list-local's element kind
         if (isinstance(n, N.CallExpr) and isinstance(n.func, N.MemberExpr)
@@ -406,6 +416,17 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
     for nm, eks in list_elem.items():
         if len(eks) == 1 and nm not in env:
             env[nm] = ('list', list(eks)[0])
+    # A local rebound to values of DIFFERENT kinds (Shape 1 of
+    # bugs/CODEGEN_generator_yield_kind_rebound_name_silent_wrong_value.md)
+    # must not answer with the FIRST kind any binding gave: a name bound to
+    # `False` and then `2.5` really holds both kinds across its scopes, so
+    # keeping the first was a single kind the generator's value slot could
+    # not render correctly. Drop such names from the env: no entry here reads
+    # as the None hole `_generator_value_kind` already knows how to refuse
+    # beside a concrete non-int kind / type as int64_t beside an int.
+    for nm, eks in str_kinds.items():
+        if len(eks) > 1:
+            env.pop(nm, None)
     # `for <v> in <list-local-or-literal | sibling-generator-call>():` binds
     # <v> to the element kind
     for n in _walk(fn):

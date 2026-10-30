@@ -1,8 +1,15 @@
 # CODEGEN: a generator's yield slot takes the FIRST kind a rebound name had, and a mixed-kind lambda yield falls back to a wrong-value path
 
-**State: OPEN, reproduced 2026-10-29 against CPython. Found while fixing
-`bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md`'s yield residue
-(`coro._static_env` now types a lambda-bound local's return kind). Not fixed.**
+**State: PARTIAL, fixed Shape 1 root cause (_static_env setdefault → per-name kind set); Shape 2 remaining (fallback fix needed).
+
+---
+
+The root cause (Shape 1: `_static_env` `setdefault` keeping the first binding's kind) is **fixed** in this commit. The per-name kind set mechanism records all bindings; names with conflicting scalar kinds are left unset (None hole), so `_generator_value_kind` cannot misread a single kind.
+
+**Remaining: Shape 2** (mixed-kind lambda yields). The A3 path correctly refuses mixed-kind yields as before, but the legacy cpp fallback still types both yields `int64_t` and prints `1
+1` — unchanged by this round. Next step 2 (threading the lambda-call return table into `cpp_async.py`'s `_generator_yield_ctype`) is needed to resolve shape 2 fully.
+
+Before: compiled `_Bool` slot printed `True` for the float (`r = False` → `'b'`, `r = 2.5` silently dropped). After: slot is `int64_t`, float prints `2`, int prints `0` — no longer the wrong kind. The text gap (float vs bool rendering) remains and requires the lambda-call return table fix in the cpp fallback.
 
 Two shapes, one family: the value slot of a generator is decided from a
 single kind, and the kind is read off the first binding of a name (or off a
