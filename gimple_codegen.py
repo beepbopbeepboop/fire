@@ -4288,7 +4288,7 @@ class GimpleGen:
     #    nothing about the program's actual computed results (only whether
     #    profiling events get emitted, which this codegen doesn't support
     #    at all regardless).
-    _ASYNC_NOOP_LOCK_GUARD_TYPES = frozenset({'BlockingScopedLock', 'Trace', 'tempfile'})
+    _ASYNC_NOOP_LOCK_GUARD_TYPES = frozenset({'BlockingScopedLock', 'Trace'})
 
     # ── Module generation ─────────────────────────────────────────────────
 
