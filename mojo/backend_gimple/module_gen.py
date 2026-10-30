@@ -2996,6 +2996,35 @@ def _struct_typedef_fields(gen, sn) -> dict:
     return _fields
 
 
+def _gmi_record_fn_scoped_param_types(gen, cls_name: str, params) -> None:
+    """Record the annotated C type of each parameter of the function a
+    function-scoped class was declared in, keyed by the class's FINAL name and
+    the parameter name (`_pair_key`).
+
+    A class-level attribute whose value is a bare parameter name
+    (`class C(): name = s` inside `def h(s: str)`) has no literal to type it
+    from, so `_class_attr_ctype` answers None and the registration falls back
+    to `int64_t`, which types a `char *` as a pointer-sized integer. The
+    parameter's annotation is the ground truth for what that name holds, and
+    it is what `_mojo_type` resolves the function's own signature with. An
+    unannotated parameter records nothing and keeps the old fallback.
+    """
+    if not params:
+        return
+    _table = getattr(gen, '_fn_scoped_param_types', None)
+    if _table is None:
+        _table = {}
+        gen._fn_scoped_param_types = _table
+    for _p in params:
+        try:
+            _pname, _pann = _p[0], _p[1]
+        except (TypeError, IndexError):
+            continue
+        if not isinstance(_pann, str) or not _pann:
+            continue
+        _table[_pair_key(cls_name, _as_str(_pname))] = _mojo_type(_pann)
+
+
 def _gmi_hoist_nested_structs(self, stmts: list) -> list:
     """Return `stmts` with every class declared inside a function body HOISTED
     to module scope, so the ordinary struct pipeline treats it exactly like a
@@ -3087,6 +3116,7 @@ def _gmi_hoist_nested_structs(self, stmts: list) -> list:
             renamed_to.append(_h_bare)
             _fn_scoped.add(_h_bare)
             out.append(_h_node)
+            _gmi_record_fn_scoped_param_types(self, _h_bare, found[_h_i][2])
             continue
         _h_base = _h_bare + '__' + _h_encl
         _h_new = _h_base
@@ -3100,6 +3130,7 @@ def _gmi_hoist_nested_structs(self, stmts: list) -> list:
         _fn_scoped.add(_h_new)
         _h_node.name = _h_new
         out.append(_h_node)
+        _gmi_record_fn_scoped_param_types(self, _h_new, found[_h_i][2])
     # The alias keys need the FINAL struct names, because a method's enclosing
     # key contains the name of the class it belongs to — so they are computed
     # on a SECOND walk, after the renames above have landed. The two walks
@@ -6070,6 +6101,15 @@ def gen_module_impl(self, stmts):
                         ctype = 'char *'
                     elif isinstance(v, FloatLiteral):
                         ctype = 'double'
+                    elif (isinstance(v, IdentExpr)
+                            and _pair_key(s.name, _as_str(v.name))
+                            in (getattr(self, '_fn_scoped_param_types', None) or {})):
+                        # A bare name that is a parameter of the function
+                        # this class is declared in: its annotation is the
+                        # type of the value (see
+                        # `_gmi_record_fn_scoped_param_types`).
+                        ctype = self._fn_scoped_param_types[
+                            _pair_key(s.name, _as_str(v.name))]
                     elif v is None:
                         # A no-initializer container field: there is no
                         # literal to read the kind from, so the ANNOTATION
