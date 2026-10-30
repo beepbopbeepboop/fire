@@ -3308,10 +3308,14 @@ def _mark_coro_param_elem_kinds(body_fd, real_params, env):
     `emit_funcs.gen_func`), so the loop takes the list path directly.
     See CODEGEN_coro_yield_kind_unresolved_callsite ("Item 8").
 
-    Only LIST params are recorded, and only a scalar element kind: a
-    container-of-container has no single C type either (it needs the nested
-    slot the ordinary lowering carries in `_nested_elem_types`), and an
-    `int64_t` element is the default the loop target assumes anyway.
+    Only LIST params are recorded. A container-of-container has no single C
+    type either (it needs the nested slot the ordinary lowering carries in
+    `_nested_elem_types`), so it is not in `kinds`. An `int64_t` element is
+    NOT a default here: the backend's loop lowering must be told it is a
+    list of ints, because "nothing known" and "known to be ints" take
+    different paths through the dict-or-list dispatch. Those go in
+    `_mojo_coro_param_int_lists` instead of `kinds` (see the comment on
+    `_boxed_list_ptr`), so `_elem_types` keeps its meaning of "not known".
 
     Part of the same contract as `_mark_coro_body` and marked the same way
     (an attribute, not a name-suffix guess) for the same reason: the backend
@@ -3319,6 +3323,7 @@ def _mark_coro_param_elem_kinds(body_fd, real_params, env):
     look like" without a parallel naming convention to keep in sync."""
     kinds: dict = {}
     str_params: list = []
+    int_lists: list = []
     for pname, _pann in real_params:
         v = env.get(_cm_as_str(pname))
         # Keyed by the BODY's local name (`_local_param_name`): a `*args`
@@ -3326,12 +3331,16 @@ def _mark_coro_param_elem_kinds(body_fd, real_params, env):
         if isinstance(v, tuple) and len(v) == 2 and v[0] == 'list' \
                 and isinstance(v[1], str) and v[1] in _KIND_CTYPE:
             ct = _KIND_CTYPE[v[1]]
-            if ct != 'int64_t':
+            if ct == 'int64_t':
+                int_lists.append(_local_param_name(pname))
+            else:
                 kinds[_local_param_name(pname)] = ct
         elif v == 'p':
             str_params.append(_local_param_name(pname))
     if kinds:
         body_fd._mojo_coro_param_elem_kinds = kinds
+    if int_lists:
+        body_fd._mojo_coro_param_int_lists = int_lists
     if str_params:
         body_fd._mojo_coro_param_str_params = str_params
     return body_fd
@@ -3380,6 +3389,11 @@ def _lower_one_async(fn: N.FunctionDef, meta: list, base: str | None = None,
     body_fd.is_generator = False
     body_fd.is_async = False
     body_fd = _mark_coro_body(body_fd)
+    # The same cross-call element contract a generator body gets (see
+    # `_lower_one`): an `async def` reads its list params through the same
+    # untyped int64_t slots, so without it `for x in xs:` over an int list
+    # param declared the loop variable through the dict-or-list dispatch.
+    body_fd = _mark_coro_param_elem_kinds(body_fd, real_params, _static_env(fn, struct_def))
     meta.append({
         'name': _cm_as_str(fn.name), 'struct': struct_name, 'is_method': is_method, 'is_async': True,
         'receiver': _async_receiver_kind(fn, is_method),

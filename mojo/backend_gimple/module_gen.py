@@ -9023,6 +9023,12 @@ def gen_module_impl(self, stmts):
     # are kind-mixed, which the element loop answers with the runtime route.
     self._param_nested_mixed: dict[str, set] = {}
     self._coro_str_params: dict[str, set] = {}
+    # coroutine body name -> {param} whose element type is POSITIVELY int:
+    # the list-of-ints counterpart of `_coro_str_params`. Kept apart from
+    # `_param_elem_types` because `_elem_types[x] == 'int64_t'` means "nothing
+    # known" to nearly every writer, and `_boxed_list_ptr` needs to tell the
+    # two apart (see emit_loops). Consulted by name, per function.
+    self._coro_int_list_params: dict[str, set] = {}
     # The dict-VALUE twin of the table above: callee -> {pname -> the dict
     # value ctype every one of its call sites agrees on}. A dict is stored
     # as one `int64_t` slot per key plus a per-slot `kind` tag, so a callee
@@ -9101,6 +9107,11 @@ def gen_module_impl(self, stmts):
             _pe_d = self._param_elem_types.setdefault(_as_str(_fp_s.name), {})
             for _pe_k in _pe_body:
                 _pe_d[_as_str(_pe_k)] = (_as_str(_pe_body[_pe_k]), None)
+        _pi_body = getattr(_fp_s, '_mojo_coro_param_int_lists', None)
+        if _pi_body:
+            _pi_d = self._coro_int_list_params.setdefault(_as_str(_fp_s.name), set())
+            for _pi_k in _pi_body:
+                _pi_d.add(_as_str(_pi_k))
         _ps_body = getattr(_fp_s, '_mojo_coro_param_str_params', None)
         if _ps_body:
             _ps_d = self._coro_str_params.setdefault(_as_str(_fp_s.name), set())
