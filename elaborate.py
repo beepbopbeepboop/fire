@@ -47,7 +47,7 @@ class ConformanceError(Exception):
 #: argument `formal/monomorph.py::_derived_from_source` makes for the same
 #: reason. Keyed by the TEXT rather than by `id()`, because a key that is an
 #: address can be handed to a different object once the first is freed
-#: (`the `_walk_ast` re-scan bug (fixed; remainder in bugs/hard/PERF_struct_self_assign_scan_uncached.md)`'s hazard
+#: (`the `_walk_ast` re-scan bug (fixed; the memo and self-assign scan fixes are in the same commit).`'s hazard
 #: 2), and hashing the text costs far less than the scan it stands in for.
 #:
 #: 8 entries, far above one elaboration's working set: the three readers below
