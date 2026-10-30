@@ -400,14 +400,33 @@ def _cattr_restore_end(gen) -> None:
 
 def _cattr_instance_read(gen, ov, ot, aname, gname, gtype):
     """Value of class attribute `aname` read through an INSTANCE `ov` of struct
-    type `ot`: the cell this instance was built under (its hidden field), not
-    the current one. That is what keeps `a = make(5); b = make(7); a.attr` at 5.
-    Falls back to the current cell when `ov` is not a struct pointer."""
+    type `ot`, in CPython's lookup order: an attribute the instance itself holds
+    (an instance write `ov.aname = ...` lands in its dynamic storage) shadows the
+    class attribute, so the dynamic storage is probed first, under the nothrow
+    flag, and the class value is the default. The class value is the cell this
+    instance was built under (its hidden field), not the current one, which is
+    what keeps `a = make(5); b = make(7); a.attr` at 5. Falls back to the
+    current cell when `ov` is not a struct pointer, and skips the probe there
+    (no dynamic storage can be reached through a non-pointer word)."""
     if not ot.endswith(' *') or _cattr_cell_type(gen, gname) is None:
-        return _cattr_read(gen, gname, gtype)
-    _field = gimple_ctypes._safe_field(gimple_ctypes.cattr_cell_field(aname))
-    _p = gen._new_val(f'{gtype} *', f'{ov}->{_field}')
-    return gen._new_val(gtype, f'*{_p}')
+        _classval = _cattr_read(gen, gname, gtype)
+    else:
+        _field = gimple_ctypes._safe_field(gimple_ctypes.cattr_cell_field(aname))
+        _p = gen._new_val(f'{gtype} *', f'{ov}->{_field}')
+        _classval = gen._new_val(gtype, f'*{_p}')
+    if not ot.endswith(' *'):
+        return _classval
+    gen._emit("  _mojo_getattr_missed = 0;")
+    gen._emit("  _mojo_getattr_nothrow = 1;")
+    _vp = gen._new_val('void *', f'(void *){ov}')
+    _name = gen._new_val('char *', gen._intern_string(aname))
+    _raw = gen._call_expr('int64_t', '_mojo_dispatch_getattr',
+                          [('void *', _vp), ('char *', _name)])
+    gen._emit("  _mojo_getattr_nothrow = 0;")
+    _missed = gen._new_val('int', '_mojo_getattr_missed')
+    _cond = gen._new_val('_Bool', f'{_missed} != 0')
+    _hit = gen._new_val(gtype, f'({gtype}){_raw}')
+    return gen._new_val(gtype, f'{_cond} ? {_classval} : {_hit}')
 
 
 def _cattr_instance_dyn_read(gen, ov, ot, aname, gname, gtype):

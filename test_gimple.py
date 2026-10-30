@@ -9080,7 +9080,7 @@ print(guarded(7))
         behind: `var iter = peekable(list)` types `iter` as `int64_t` because
         `peekable` returns a `Self.IteratorOwnedType` across a module
         boundary, and an un-inferred receiver has to stay a refusal
-        (bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md).
+        (the user-iterator next() bug (doc deleted in db724c4d6)).
 
         The loop half is the change here. Python's `__next__` signals
         exhaustion by RAISING, and the compiled raise is
