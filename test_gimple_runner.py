@@ -12634,6 +12634,27 @@ def main():
 """, "5\n7\n")
 
 
+def test_nested_class_attr_from_str_param_regression():
+    """Regression for bugs/CODEGEN_nested_class_attr_from_str_param_typed_as_int.md.
+    A function-scoped class attribute whose value is a bare name of the
+    enclosing function's parameter was typed `int64_t` (the fallback for a
+    value with no literal type), so a `str` argument read back as a pointer-
+    sized integer. The attribute takes its C type from the parameter's
+    annotation, so each call must print its own string."""
+    test_gimple_stdout("gimple_nested_class_attr_from_str_param", """\
+def h(s: str):
+    class C():
+        name = s
+    return C()
+
+def main():
+    a = h("x")
+    b = h("y")
+    print(a.name)
+    print(b.name)
+""", "x\ny\n")
+
+
 def test_nested_class_attr_rebind_after_construction_regression():
     """Pins the answer any per-execution fix for
     bugs/CODEGEN_nested_class_attr_reads_enclosing_local_silently_zero.md
