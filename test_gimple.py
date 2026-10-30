@@ -660,16 +660,14 @@ def set_only(n: Int):
 def test_rebound_container_param_is_the_box():
     """A PARAMETER the body rebinds to a container of another kind is the box.
 
-    `read_before_store`'s `walk_stmts(stmts, live)` does `live = set(live)`
-    in a nested def. The `set(live)` call is iteration evidence, so the
-    parameter took the `MojoList *` last-resort guess; the body then stored a
-    `MojoSet *` into that one C variable and `_sce_simple_emit` refused the
-    whole module with "cannot coerce MojoSet * to MojoList *", which made
-    formal/model.py compile twice (the fallback). The same name held two
-    container kinds, which is the case `_prebound_local_ctypes` answers with
-    the box for a LOCAL, and the parameter form of that rule is the same
-    answer. Before the fix this refuses at compile time (TypeError); after it,
-    the parameter is `int64_t` and the module compiles.
+    The parameter form of `_prebound_local_ctypes`'s rule for LOCALS: a name
+    the body binds to two container kinds has no single container type, so
+    the parameter is the box (`int64_t`). `walk` below stores a `MojoSet *`
+    and then a `MojoList *` into `live`; with one C variable typed as either
+    container, the other store is refused by `_sce_simple_emit`, which made
+    formal/model.py compile twice. A name rebound to ONE other container kind
+    is not this case: it takes that kind
+    (`test_nested_def_rebound_param_takes_the_container_it_stores`).
     """
     global _PASS, _FAIL
     name = "rebound_container_param_is_the_box"
@@ -678,12 +676,14 @@ def test_rebound_container_param_is_the_box():
 def outer(fn):
     def inner(stmts, live):
         live = set(live)
+        live = [1, 2]
         return live
     return inner
 
 
 def walk(stmts, live):
     live = set(live)
+    live = [1, 2]
     return live
 
 
@@ -8600,6 +8600,56 @@ main()
             if isinstance(got, tuple):
                 print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
                       f"{got[1][:800]}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_list_of_a_boxed_dict_materializes_keys_as_strings():
+        """`list(<a boxed dict>)` must print the dict's keys, not the decimal
+        addresses of those keys.
+
+        `def ident(x): return x` type-erases its result to a boxed handle, so
+        `list(ident(d))` routes through _materialize_as_list's opaque arm. The
+        merged temp must be marked so the loop accessor reads each slot with
+        mojo_list_get_boxed (which consults the per-slot kinds table) instead of
+        mojo_list_get_int (which reads the char* pointer bits as a bare
+        integer). Fixed by recording mojo_list_set_kinds_uniform(result, 'p')
+        in the bb_dict branch and registering result in _maybe_kinds_vals.
+
+        The other three branches (set / registered-list / boxed) share the temp
+        and must keep their old behaviour: mojo_list_get_boxed with no kinds
+        table entry reads slot kind 'i', which returns the bare word — identical
+        to mojo_list_get_int. The generator suite's
+        `generator_pops_heterogeneous_tagged_stack` and
+        `generator_pops_stack_two_level_tuple_unpack` are the regression guard
+        that an earlier _elem_types attempt broke by retyping every branch.
+        """
+        global _PASS, _FAIL
+        name = "list_of_a_boxed_dict_materializes_keys_as_strings"
+        src = '''\
+def ident(x):
+    return x
+def main():
+    d = {"k": 1, "j": 2}
+    print(list(ident(d)))
+main()
+'''
+        want = _cpython_stdout(src)
+        if want is None:
+            print(f"FAIL  {name}: CPython does not run the fixture")
+            _FAIL += 1
+            return
+        for mode in ('single-TU', 'link-mode'):
+            got = _compiled_stdout(src, mode)
+            if isinstance(got, tuple):
+                print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                      f"{got[1][:800]}")
+                _FAIL += 1
+                return
+            if got != want:
+                print(f"FAIL  {name} [{mode}]: compiled stdout {got!r} != "
+                      f"CPython {want!r}")
                 _FAIL += 1
                 return
         print(f"PASS  {name}")
