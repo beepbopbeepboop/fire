@@ -6363,11 +6363,16 @@ def _unbox_float_param_operand(gen, node, ctype: str, val: str) -> tuple[str, st
     return ctype, val
 
 
-# The operators whose answer is a double when an operand is one. `/` and `//`
-# and `%` are left out on purpose: their integer forms can trap (a zero
-# divisor is SIGFPE before any select runs) and their double forms are not
-# C's `/`/`%`, so they keep the truncating answer until they get their own arm.
+# The operators whose answer is a double when an operand is one. `+`, `-` and
+# `*` select at run time between the integer answer and the double one. `/` is
+# separate (`_FLOAT_DIV_OP`): Python's true division is a float whatever the
+# operands are, so it has no integer answer to select, and it never reaches
+# the integer `/` that traps on a zero divisor. `//` and `%` are left out on
+# purpose: their integer forms can trap and their double forms are not C's
+# `/`/`%`, so they keep the truncating answer until they get their own arm.
 _FLOAT_ARITH_OPS = ('+', '-', '*')
+_FLOAT_DIV_OP = '/'
+_FLOAT_PARAM_OPS = _FLOAT_ARITH_OPS + (_FLOAT_DIV_OP,)
 
 # The C types an operand of `_float_param_arith` may have: an integer (the
 # parameter's word, or a plain int) or a double (a float literal or a double
@@ -6380,7 +6385,7 @@ def _float_param_arith_applies(gen, op: str, lnode, lt: str, rnode, rt: str) -> 
     parameter, so `_float_param_arith` must answer it? The other operand may be
     an integer (the answer is the integer or the double one, by the box) or a
     double (the answer is always a double)."""
-    if op not in _FLOAT_ARITH_OPS:
+    if op not in _FLOAT_PARAM_OPS:
         return False
     if lt not in _FLOAT_ARITH_OPERAND_TYPES or rt not in _FLOAT_ARITH_OPERAND_TYPES:
         return False
@@ -6410,10 +6415,19 @@ def _float_param_arith(gen, op: str, lnode, lt: str, lv: str, rnode, rt: str, rv
     operands, because the unboxing is what destroys the box.
 
     Beside a DOUBLE (`x * 2.5`) the answer is a double whatever the parameter
-    holds, so it is boxed outright. Nothing traps on this path, which is why
-    `/` is not routed here."""
+    holds, so it is boxed outright. Nothing traps on this path.
+
+    `/` is always a double (Python's true division), so it is boxed outright
+    whatever the other operand is, and its double is computed by
+    `mojo_div_double`: gcc -fgimple ICEs on an inline double `/`, and that
+    helper raises ZeroDivisionError on a zero divisor. No integer answer is
+    computed, so the integer divide never runs."""
     dl = _float_operand_as_double(gen, lnode, lt, lv)
     dr = _float_operand_as_double(gen, rnode, rt, rv)
+    if op == _FLOAT_DIV_OP:
+        dres = gen._call_expr('double', 'mojo_div_double',
+                              [('double', _as_str(dl)), ('double', _as_str(dr))])
+        return gen._call_expr('int64_t', 'mojo_box_from_double', [('double', _as_str(dres))])
     dres = gen._new_val('double', f'({dl}) {op} ({dr})')
     if lt == 'double' or rt == 'double':
         return gen._call_expr('int64_t', 'mojo_box_from_double', [('double', _as_str(dres))])
@@ -6436,7 +6450,7 @@ def _is_float_param_arith(gen, node) -> bool:
     the box and so prints `5.0` for a double box and `2` for the plain integer.
     Only the direct operand form is answered: a result bound to a name first
     (`y = x * 2`) loses the answer, as a float-possible parameter's copy does."""
-    if isinstance(node, gimple_ctypes.BinaryOp) and node.op in _FLOAT_ARITH_OPS:
+    if isinstance(node, gimple_ctypes.BinaryOp) and node.op in _FLOAT_PARAM_OPS:
         return (_is_may_hold_float_param(gen, node.left)
                 or _is_may_hold_float_param(gen, node.right))
     return False

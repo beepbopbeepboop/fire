@@ -910,6 +910,18 @@ def test_unannotated_param_with_disagreeing_call_sites() -> bool:
          'f(2.5)\nf(1)\n', '2.5\n1\n'),
         ('def g(x):\n    print(x)\n\n\ndef f(x):\n    g(x)\n\n\n'
          'f(1)\nf(2.5)\n', '1\n2.5\n'),
+        # `/` on the float-possible slot. Python's true division is always a
+        # float for an int or a float operand, so the answer is a double box
+        # whichever the parameter holds: `x / 2` was `1` / `0` (the truncated
+        # integer quotient) where CPython gives `1.25` / `0.5`. Both orders.
+        ('def f(x):\n    print(x / 2)\n\n\nf(2.5)\nf(1)\n', '1.25\n0.5\n'),
+        ('def f(x):\n    print(x / 2)\n\n\nf(1)\nf(2.5)\n', '0.5\n1.25\n'),
+        # The parameter as the RIGHT operand (the divisor).
+        ('def f(x):\n    print(2 / x)\n\n\nf(2.5)\nf(1)\n', '0.8\n2.0\n'),
+        # A zero divisor raises ZeroDivisionError (the runtime's
+        # `mojo_div_double`), not a SIGFPE and not an `inf` answer.
+        ('def f(x):\n    try:\n        print(x / 0)\n    except ZeroDivisionError:\n'
+         '        print("zde")\n\n\nf(2.5)\nf(1)\n', 'zde\nzde\n'),
     ]
     # The two pairs that used to be a HARD GCC ERROR and are now only wrong:
     #
