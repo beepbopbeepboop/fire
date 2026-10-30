@@ -11703,13 +11703,13 @@ main()
 
     #
     # Every parameter here is ANNOTATED, and that is not decoration: an
-    # unannotated parameter of an IMPORTED function is typed from its call
-    # sites, and a call site spelled `mod.f(...)` is invisible to the pass that
-    # collects them, so such a parameter falls back to `int64_t` and `len(x)`
-    # on it reads a list header. Measured, pre-existing, and filed as
-    # bugs/CODEGEN_module_boundary_carries_no_value_types.md — the same reason
-    # this fixture has no cross-module `yield` either. This test is about the
-    # shape of the emitted C; a second defect must not be what makes it red.
+    # unannotated parameter of an IMPORTED function used to be typed from its
+    # call sites, and a module-qualified call site was invisible to the pass
+    # that collects them, so such a parameter fell back to `int64_t` and
+    # `len(x)` on it read a list header. The module-qualified-collector half of
+    # that defect is fixed, so this fixture pins the annotation spelling it
+    # kept as the cross-module shape. This test is about the shape of the
+    # emitted C; a second defect must not be what makes it red.
     _check_string_pool_declared_once("imported_string_pool_declared_once", {
         'slitpool_rows.py': "def keep(line: str) -> str:\n"
                             "    return line.partition('#')[0]\n",
