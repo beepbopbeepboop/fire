@@ -10410,6 +10410,85 @@ print("%r" % p)
               f"them answered from the memo, none stale)")
         _PASS += 1
 
+    def test_walk_ast_memo_survives_the_sync_generator_hoist_writes():
+        """The two sync-generator hoist writers in `mojo/middle/coro.py`
+        mutate nodes an earlier `_walk_ast` has already memoized, and must
+        invalidate them.
+
+        `_capture_self_into_generator` rewrites a nested generator's params
+        and body and appends `self.address` to every call that drives it;
+        `_finish_sync_hoist` replaces the enclosing body and renames the
+        calls. Both run inside `lower()`, after eligibility and the capture
+        planner have walked those very nodes, so without invalidation a
+        walk answers with the pre-hoist tree and the generated C loses the
+        self pointer or keeps a removed generator."""
+        global _PASS, _FAIL
+        name = "walk_ast_memo_survives_the_sync_generator_hoist_writes"
+        import mojo.middle.exprtypes as ET
+        import mojo.middle.coro as CO
+        from fire_compiler import py_tokenize, Parser, FunctionDef, \
+            VarDecl, MemberExpr, IdentExpr
+        import ast_rewriter
+
+        src = ("def outer(x):\n"
+               "    def g():\n"
+               "        yield x\n"
+               "    for v in g():\n"
+               "        print(v)\n")
+
+        def parse_outer():
+            stmts = ast_rewriter.rewrite(
+                Parser(py_tokenize(src)).parse_module()) or []
+            outer = [s for s in stmts
+                     if isinstance(s, FunctionDef) and s.name == 'outer'][0]
+            inner = [s for s in outer.body
+                     if isinstance(s, FunctionDef) and s.name == 'g'][0]
+            return outer, inner
+
+        err = None
+        try:
+            # Capture: the walk of `outer` memoizes `g` and the call to it,
+            # then the hoist writes both. The walks after must see the
+            # rewritten tree, not the memo.
+            ET._walk_ast_reset()
+            outer, inner = parse_outer()
+            ET._walk_ast(outer)
+            CO._capture_self_into_generator(inner, outer, 'K')
+            if not any(isinstance(n, MemberExpr) and n.member == 'address'
+                       for n in ET._walk_ast(outer)):
+                err = ('the call driving the hoisted generator is missing its '
+                       'self pointer in the walk of its enclosing body')
+            elif not any(isinstance(n, VarDecl) and n.name == 'self'
+                         for n in ET._walk_ast(inner)):
+                err = ('the hoisted generator still walks to its pre-capture '
+                       'body (no `self` re-typing VarDecl)')
+            # Finish: the walk of `outer` memoizes the nested def, which the
+            # hoist removes and whose call it renames.
+            if not err:
+                ET._walk_ast_reset()
+                outer, inner = parse_outer()
+                if not any(n is inner for n in ET._walk_ast(outer)):
+                    err = 'nothing was memoized, so this proved nothing'
+                else:
+                    CO._finish_sync_hoist(outer, {'g': '__mgco_outer_g'})
+                    now = ET._walk_ast(outer)
+                    if any(n is inner for n in now):
+                        err = ('the removed generator still walks as part of '
+                               'its enclosing body')
+                    elif not any(isinstance(n, IdentExpr)
+                                 and n.name == '__mgco_outer_g' for n in now):
+                        err = 'the renamed call is not in the walk'
+        except Exception as e:  # noqa: BLE001
+            err = f'{type(e).__name__}: {e}'
+        finally:
+            ET._walk_ast_reset()
+        if err:
+            print(f"FAIL  {name}: {err}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_every_ast_mutation_site_invalidates_the_walk_memo():
         """A function that writes an AST node's field must invalidate the
         `_walk_ast` memo — or say why it need not.
@@ -12819,6 +12898,7 @@ print(run('x/y.txt'))
     _run_isolated(lambda: test_walk_ast_memo_is_transparent_and_honours_invalidation(), 'test_walk_ast_memo_is_transparent_and_honours_invalidation (line 12670)')
     _run_isolated(lambda: test_walk_ast_memo_never_answers_stale_over_real_compiles(), 'test_walk_ast_memo_never_answers_stale_over_real_compiles (line 12671)')
     _run_isolated(lambda: test_every_ast_mutation_site_invalidates_the_walk_memo(), 'test_every_ast_mutation_site_invalidates_the_walk_memo (line 12672)')
+    _run_isolated(lambda: test_walk_ast_memo_survives_the_sync_generator_hoist_writes(), 'test_walk_ast_memo_survives_the_sync_generator_hoist_writes (line 12672)')
     _run_isolated(lambda: test_scalar_arity_min_max_params_are_not_containers(), 'test_scalar_arity_min_max_params_are_not_containers (line 12673)')
     _run_isolated(lambda: test_a_forwarded_string_argument_keeps_its_type(), 'test_a_forwarded_string_argument_keeps_its_type (line 12674)')
     _run_isolated(lambda: test_a_forwarded_container_argument_takes_the_callees_kind(), 'test_a_forwarded_container_argument_takes_the_callees_kind (line 12675)')

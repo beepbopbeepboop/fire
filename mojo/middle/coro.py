@@ -5472,11 +5472,18 @@ def _capture_self_into_generator(inner: N.FunctionDef, outer: N.FunctionDef,
         args=[_c_ident(hidden)])
     inner.body = [N.VarDecl(name='self', type_ann=struct_name, value=_erase)] \
         + list(inner.body)
+    # Both writes above are to nodes the walk memo may already hold (the
+    # capture planner walked `inner` and `outer` before this ran), so each
+    # is invalidated: `inner` for its params and body, each call for the
+    # argument it gained. Invalidation runs up the parent edges, which
+    # drops the enclosing `outer` and everything between it and the call.
+    _walk_ast_invalidate(inner)
     hits: list = []
     for st in outer.body:
         _find_calls_to(st, inner.name, hits)
     for call in hits:
         call.args.append(N.MemberExpr(obj=N.IdentExpr(name='self'), member='address'))
+        _walk_ast_invalidate(call)
 
 
 def _calls_in_nested_defs(outer: N.FunctionDef, inner: N.FunctionDef) -> bool:
@@ -5549,11 +5556,16 @@ def _finish_sync_hoist(s: N.FunctionDef, sync_rename: dict) -> None:
               if not (isinstance(x, N.FunctionDef)
                       and getattr(x, 'is_generator', False)
                       and x.name in sync_rename)]
+    # `s.body` was replaced and each renamed call is rewritten in place, and
+    # the walk memo may hold both (`_hoist_nested_sync_generator` walked
+    # them to decide eligibility). Invalidate each written node.
+    _walk_ast_invalidate(s)
     for _st in s.body:
         for _n in _walk(_st):
             if (isinstance(_n, N.CallExpr) and isinstance(_n.func, N.IdentExpr)
                     and _n.func.name in sync_rename):
                 _n.func.name = sync_rename[_n.func.name]
+                _walk_ast_invalidate(_n)
 
 
 def _hoist_method_nested_generators(m: N.FunctionDef, struct_name: str,

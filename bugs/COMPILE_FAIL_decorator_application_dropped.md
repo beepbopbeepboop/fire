@@ -13,10 +13,11 @@
   after `16` (CPython `16`).
 - Tests: `test_gimple.py` `nested_decorator_is_applied_at_runtime` (compiled
   output equals CPython, `40`) and `nested_scalar_decorator_rebind_is_refused`.
-  `test_gimple.py`: 413 passed, 1 failed. The failure is the walk-memo census
-  on `mojo/middle/coro.py`, filed as
-  `bugs/CODEGEN_walk_ast_memo_census_coro_unallowlisted.md`; it is not this
-  change.
+  `test_gimple.py`: 413 passed, 1 failed. The failure was the walk-memo
+  census on `mojo/middle/coro.py` (`_capture_self_into_generator` and
+  `_finish_sync_hoist` mutated memoized AST nodes without invalidating them);
+  it is not this change and is fixed on this branch by invalidating at those
+  two write sites.
 
 **Still OPEN:**
 
