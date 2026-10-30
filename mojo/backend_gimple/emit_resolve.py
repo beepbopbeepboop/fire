@@ -1460,7 +1460,8 @@ def _module_marker_attribute_reads(stmts) -> dict:
     this module — ONE AST walk for the whole module, so a module with N bare
     imports costs one walk and not N (the walk is the expensive half of
     `_inline_bare_import_struct`; see
-    the `_walk_ast` re-scan bug (fixed; remainder in bugs/hard/PERF_struct_self_assign_scan_uncached.md))."""
+    the `_walk_ast` re-scan bug (fixed; the memo and self-assign scan fixes are
+    in the same commit).)"""
     out: dict = {}
     for _n in gimple_exprtypes._walk_ast(stmts):
         if not isinstance(_n, gimple_ctypes.MemberExpr):

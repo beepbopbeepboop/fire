@@ -9646,7 +9646,7 @@ print("%r" % p)
         every visit — which is what it did before, and what the docstring's
         existing field-name cache already did for `dataclasses.fields`.
 
-        the `_walk_ast` re-scan bug (fixed; remainder in bugs/hard/PERF_struct_self_assign_scan_uncached.md)
+        the `_walk_ast` re-scan bug (fixed; the memo and self-assign scan fixes are in the same commit).
         (Phase 9). The failure mode this guards is a walk that silently
         STOPS descending: the dataclass test runs BEFORE the scalar
         early-return precisely because on the compiled path every AST node is
@@ -9765,7 +9765,7 @@ print("%r" % p)
         """Every call site of the shared `_walk_ast` only READS its result.
 
         **The property that makes the memo in
-        `the `_walk_ast` re-scan bug (fixed; remainder in bugs/hard/PERF_struct_self_assign_scan_uncached.md)` safe
+        `the `_walk_ast` re-scan bug (fixed; the memo and self-assign scan fixes are in the same commit).` safe
         to add, checked rather than believed.** `_walk_ast` returns a fresh
         `list` today, so a memo keyed on the node would hand the SAME list to
         every caller — and a caller that mutated it would corrupt every later
@@ -10013,7 +10013,7 @@ print("%r" % p)
         """The memo must be indistinguishable from walking every time — and
         must STOP being indistinguishable the moment a node is mutated.
 
-        `the `_walk_ast` re-scan bug (fixed; remainder in bugs/hard/PERF_struct_self_assign_scan_uncached.md)`
+        `the `_walk_ast` re-scan bug (fixed; the memo and self-assign scan fixes are in the same commit).`
         (Phase 10). `_walk_ast` is now keyed on node identity, which is what
         makes it stop re-descending the same subtrees once per consumer and
         once per import level, and identity is exactly what cannot see a

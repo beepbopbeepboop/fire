@@ -2603,11 +2603,21 @@ def _ctor_param_evidence(gen, struct_name, param, xf_own) -> str:
 
 def _gmi_collect_self_reads(_method_names: set, body, found: dict) -> None:
     """Hoisted out of `gen_module_impl` — see `_gmi_collect_self_assigns`."""
+    _key = (id(body), str(_method_names) if isinstance(_method_names, set) else str(_method_names))
+    _hit = getattr(__import__('mojo.middle.module_shared', fromlist=['_SELF_ASSIGN_MEMO']), '_SELF_ASSIGN_MEMO', {}).get((_key, 'reads'))
+    if _hit is not None:
+        for fn in _hit:
+            if fn not in found and fn not in _method_names and fn not in _PSEUDO_DUNDER_ATTRS:
+                found[fn] = _UNKNOWN_FIELD_CTYPE
+        return
+    _reads = []
     for node in _walk_ast(body):
         fn = _gmi_self_member(node)
         if (fn is not None and fn not in found and fn not in _method_names
                 and fn not in _PSEUDO_DUNDER_ATTRS):
+            _reads.append(fn)
             found[fn] = _UNKNOWN_FIELD_CTYPE
+    __import__('mojo.middle.module_shared', fromlist=['_SELF_ASSIGN_MEMO'])._SELF_ASSIGN_MEMO[(_key, 'reads')] = _reads
 
 
 
