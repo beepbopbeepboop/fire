@@ -66,6 +66,23 @@ def pool_slot(name):
     sys.exit("no pool slot named %r in %s" % (name, POOL_FILE))
 
 
+GATES_FILE = os.path.join(MAIN, "tools", "gates.json")
+
+
+def gates_cfg():
+    """tools/gates.json: what a landing must pass, how often the full gate runs, and which gates are OFF for a backlog.
+    An OFF gate is a regex over test names; it is skipped by every gate run, and it must name the doc and the worker
+    working the backlog (`control.py gate off`), so no gate is ever dropped silently."""
+    return json.load(open(GATES_FILE))
+
+
+def gate_skip_args():
+    out = []
+    for pat in gates_cfg().get("off", {}):
+        out += ["--skip", pat]
+    return out
+
+
 def pool_total():
     return sum(sl["count"] for sl in load_pool()["slots"])
 TERMINAL = {"integrated", "abandoned", "superseded"}
@@ -349,7 +366,7 @@ def external():
 
 
 def norm_claim(c):
-    """`FORMAL_x`, `FORMAL_x.md` and `bugs/FORMAL_x.md` all mean `bug:FORMAL_x`."""
+    """A bare doc name, a name with the .md suffix, and a bugs/ path all mean the same `bug:<name>` claim."""
     if ":" in c:
         return c
     m = re.fullmatch(r"(?:bugs/(?:hard/)?)?([A-Za-z0-9_]+?)(?:\.md)?", c)
@@ -431,9 +448,9 @@ def cmd_enqueue(a):
     """Queue a task. `refill` starts it when a worker slot is free and every task named in --needs is
     integrated (so work that depends on an unlanded round can be queued now and starts itself)."""
     task = a.task if a.task is not None else open(a.task_file).read()
-    # a task queued without a slot runs on the pool's default slot (the local Qwen pair, which is never banned)
+    # a task queued without --pool runs on whichever slot is free first (see refill); --pool only prefers one
     item = dict(name=a.name, claims=a.claim, base=a.base, task=task, files=a.file, needs=a.needs or [],
-                added=time.time(), pool=getattr(a, "pool", None) or load_pool()["default_slot"])
+                added=time.time(), pool=getattr(a, "pool", None))
     json.dump(item, open(os.path.join(qdir(), a.name + ".json"), "w"), indent=1)
     print("queued %s (needs: %s)" % (a.name, ", ".join(item["needs"]) or "nothing"))
 
@@ -549,6 +566,13 @@ def bounce(name, t):
     return True
 
 
+def pick_slot(item, busy):
+    """The slot a queued task starts on now: its preferred slot if that is free, else the first free, unbanned slot in
+    pool order; None if every slot is full or banned. `busy` is running_by_slot() plus this pass's starts."""
+    order = ([pool_slot(item["pool"])] if item.get("pool") else []) + load_pool()["slots"]
+    return next((x for x in order if slot_free(x, busy)), None)
+
+
 def cmd_refill(a):
     """Fill the pool: each slot in tools/pool.json takes queued tasks, oldest first, up to its own count, and a slot
     whose model is banned takes nothing. --target caps the total across slots (default: the pool's total).
@@ -564,7 +588,7 @@ def cmd_refill(a):
         print("%s refill: %d worker(s) died on arrival (limit/outage), bounced to the queue; no starts for %d min" % (
             time.strftime("%T"), len(bounced), BREAKER_MIN), flush=True)
     items_all = [json.load(open(os.path.join(qdir(), f))) for f in os.listdir(qdir()) if f.endswith(".json")]
-    if items_all and not any(i.get("pool") and slot_free(pool_slot(i["pool"]), {}) for i in items_all):
+    if items_all and not any(slot_free(sl, running_by_slot()) for sl in load_pool()["slots"]):
         print("%s refill: every slot with queued work is full or banned (%s), starting nothing" % (
             time.strftime("%T"), ", ".join("%s until %s" % (m, time.strftime("%F %R", time.localtime(u)))
                                            for m, u in dead_models().items()) or "no bans"), flush=True)
@@ -586,13 +610,13 @@ def cmd_refill(a):
             continue                      # a red master is repaired at once, whatever the slot count
         if any(state_of(tasks[n]) != "integrated" if n in tasks else True for n in it["needs"]):
             continue
-        if not it.get("pool"):
-            print("skip %s: queued without a pool slot" % it["name"]); continue
-        sl = pool_slot(it["pool"])
-        if not slot_free(sl, busy):
-            continue                      # this slot is full or banned; the task waits for ITS slot, never another model
+        # A task is not tied to a model: its enqueue slot (`pool`) is only the PREFERRED one. It takes that slot if it is
+        # free, else the first free, unbanned slot in pool order. Every slot runs the same kind of work.
+        sl = pick_slot(it, busy)
+        if sl is None:
+            continue                      # every slot is full or banned: the task waits
         ns = argparse.Namespace(name=it["name"], claim=it["claims"], task=it["task"], task_file=None,
-                                file=it["files"], base=it["base"], model=None, pool=it["pool"])
+                                file=it["files"], base=it["base"], model=None, pool=sl["name"])
         busy[sl["name"]] = busy.get(sl["name"], 0) + 1
         try:
             cmd_spawn(ns)
@@ -604,6 +628,28 @@ def cmd_refill(a):
     waiting = len(items) - started
     print("%s refill: %d running, started %d, %d still queued (target %d)" % (
         time.strftime("%T"), live, started, waiting, a.target), flush=True)
+
+
+def cmd_gate(a):
+    """gate list | gate off PATTERN --reason R --doc bugs/<name> --worker NAME | gate on PATTERN"""
+    cfg = gates_cfg()
+    if a.action == "list":
+        print("landing:", ", ".join(cfg["landing"]), "| full every", cfg["full_every_minutes"], "min")
+        for pat, e in cfg.get("off", {}).items():
+            print("OFF  %-40s %s  (doc %s, worker %s, since %s)" % (pat, e["reason"], e["doc"], e["worker"], e["since"]))
+        return
+    if a.action == "off":
+        if not (a.reason and a.doc and a.worker):
+            sys.exit("gate off needs --reason, --doc (an existing bugs/ doc) and --worker (who works the backlog)")
+        if not os.path.exists(os.path.join(MAIN, a.doc)):
+            sys.exit("no such doc: %s" % a.doc)
+        cfg.setdefault("off", {})[a.pattern] = dict(reason=a.reason, doc=a.doc, worker=a.worker,
+                                                  since=time.strftime("%F %T"))
+    else:
+        if cfg.get("off", {}).pop(a.pattern, None) is None:
+            sys.exit("no OFF gate %r" % a.pattern)
+    json.dump(cfg, open(GATES_FILE, "w"), indent=2)
+    print("gate %s %s" % (a.action, a.pattern))
 
 
 def priority_list():
@@ -1042,6 +1088,9 @@ def main():
     s.set_defaults(f=cmd_spawn)
     s = sub.add_parser("status"); s.add_argument("-v", "--verbose", action="store_true"); s.add_argument("--all", action="store_true"); s.set_defaults(f=cmd_status)
     sub.add_parser("claims").set_defaults(f=cmd_claims)
+    s = sub.add_parser("gate"); s.add_argument("action", choices=["list", "off", "on"]); s.add_argument("pattern", nargs="?", default="")
+    s.add_argument("--reason", default=""); s.add_argument("--doc", default=""); s.add_argument("--worker", default="")
+    s.set_defaults(f=cmd_gate)
     s = sub.add_parser("claim"); s.add_argument("name"); s.add_argument("--claim", action="append", required=True)
     s.add_argument("--who", default=""); s.add_argument("--pid", type=int, default=0)
     s.add_argument("--hours", type=float, default=12); s.set_defaults(f=cmd_claim)

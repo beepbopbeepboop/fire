@@ -4158,8 +4158,7 @@ _I12 = "(((w >>> 10) &&& 0xfff).toNat)"
 # left DEAD by that merge, still carrying a SECOND spelling of the shift
 # (`&&& 0x3`, where the library reads bit 22 alone because bit 23 is a fixed 0
 # in all three classes).  A dead second reader of one field is exactly what
-# `bugs/MERGE_bulk_resolved_to_master_dropped_branch_definitions.md` is about;
-# it is deleted rather than reconciled, and the model is the one reader.
+# the bulk-merge drop of branch half-definitions (MERGE doc, fixed); the dead reader
 _I16 = "(((w >>> 5) &&& 0xffff).toNat)"
 _HW = "(((w >>> 21) &&& 0x3).toNat)"
 _I7 = "(((w >>> 15) &&& 0x7f).toNat)"
@@ -8048,7 +8047,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     # So the record is NOT the cost, and neither is the file's size or Lean's
     # ceiling: with `maxMemory` lifted the same file crosses 8 GB of RSS and is
     # killed (measured), which is a rejection turned into the memory debt
-    # `bugs/PERF_memory_over_4gb_is_a_bug.md` is about.  `(x - a) - b` and
+    # `doc/POLICY_memory_over_4gb.md` is about.  `(x - a) - b` and
     # `x - (a + b)` are the SAME `Nat` value (`Nat.sub` truncates, so both are
     # `max 0 (x - a - b)`), which is why this is a change to what is emitted and
     # not to what it means: each site's statement is unchanged up to `omega`,

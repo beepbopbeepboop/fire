@@ -217,6 +217,13 @@ _FOREIGN_PKG_FILES = {
                    "    while i < n:\n"
                    "        yield i\n"
                    "        i = i + 1\n"),
+    # A class with a defaulted trailing `__init__` parameter, constructed from
+    # a generator the cpp path lowers (see run_ctor_default_arg_in_generator_
+    # tests). Imported rather than defined alongside so the constructor is a
+    # cross-module struct, the shape `c_parser/parser/__init__.py` hit.
+    'box.py': ("class Box:\n"
+               "    def __init__(self, x, bump=5):\n"
+               "        self.x = x + bump\n"),
 }
 
 
@@ -564,6 +571,85 @@ print("done")
 """, "no known generator API")
 
 
+def run_sibling_loop_value_kind_tests():
+    # Two sibling `for` loops in one function that bind the SAME name to two
+    # generators with different yield kinds. The loop variable was declared by
+    # the first loop (`_Bool v;`) and `_declare_var`'s first-decl-wins guard
+    # kept that type for the second loop too, so `for v in gen_float():` stored
+    # a `double` into a `_Bool` and printed `True`. Each generator alone was
+    # always right, which is why it survived: the defect needs both loops in
+    # one function, and the list/dict/set loops already retype a reused name
+    # (`force=` in emit_loops.py) where the generator loop did not.
+    #
+    # Both orders are covered: the second loop is the one that needs the fresh
+    # declaration, so a fix that only handled one direction would still pass
+    # the other.
+    test_generator_matches_cpython(
+        "sibling_generator_loops_bool_then_float_keep_their_own_value_kind",
+        """\
+def gen_bool(n):
+    yield n > 2
+
+def gen_float():
+    r = 1.5
+    yield r
+
+def main():
+    for v in gen_bool(5):
+        print(v)
+    for v in gen_float():
+        print(v)
+main()
+""",
+        """\
+def gen_bool(n):
+    yield n > 2
+
+def gen_float():
+    r = 1.5
+    yield r
+
+def main():
+    for v in gen_bool(5):
+        print(v)
+    for v in gen_float():
+        print(v)
+main()
+""")
+    test_generator_matches_cpython(
+        "sibling_generator_loops_float_then_bool_keep_their_own_value_kind",
+        """\
+def gen_bool(n):
+    yield n > 2
+
+def gen_float():
+    r = 1.5
+    yield r
+
+def main():
+    for v in gen_float():
+        print(v)
+    for v in gen_bool(1):
+        print(v)
+main()
+""",
+        """\
+def gen_bool(n):
+    yield n > 2
+
+def gen_float():
+    r = 1.5
+    yield r
+
+def main():
+    for v in gen_float():
+        print(v)
+    for v in gen_bool(1):
+        print(v)
+main()
+""")
+
+
 def run_next_return_position_tests():
     # `next(<generator>)` in a function's RETURN position used to be typed as
     # the scalar BOX, so the enclosing function declared `int64_t h(void)` and
@@ -861,6 +947,25 @@ def main():
 """, "12\n")
 
 
+def _regression_read_table_callable_reader():
+    # Root-cause regression for bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md:
+    # `_get_reader` is a callable-valued parameter (default csv.reader); the
+    # loop `for row in _get_reader(lines, ...):` in `read_table` must be
+    # refused honestly (not silently wrong) until callable-local loop typing
+    # lands — this test captures the refusal so a future fix can prove it passes.
+    test_generator_refused(
+        "cpp_for_callable_param_read_table_like", """\
+def read_table(infile, header, *, sep='\\t',
+               _get_reader=__import__('csv').reader):
+    lines = infile.splitlines()
+    for row in _get_reader(lines, delimiter=sep or '\\t'):
+        yield row
+
+def main():
+    pass
+""", "callable-valued local/parameter '_get_reader(...)'")
+
+
 def _cpp_coroutine_builtin_module_constant():
     # A constant read off a module MARKER that is NEVER INLINED — `os` and
     # `signal` bind to an opaque marker with no compiled body in this TU, so
@@ -1149,6 +1254,56 @@ def main():
         print(v)
 main()
 """, "the static scan could not type at all")
+
+    # A parameter's ELEMENTS reach the yield through a for-loop target, not the
+    # parameter itself. The two call sites disagree (a str list and an int
+    # list), so `xs` is in `_CALLSITE_PARAM_CONFLICTS`; `for x in xs: yield x`
+    # yields `x`, which `_ambiguous_yielded_params` did not map back to `xs`,
+    # so the generator was NOT refused, the yield slot took the int64_t
+    # default, and the str printed as its heap address: `4297813824` where
+    # CPython prints `p`, exit 0. Measured before the fix. The honest outcome
+    # is a refusal.
+    test_generator_refused("generator_loop_target_over_conflicted_param_is_ambiguous", """\
+def gen(xs):
+    for x in xs:
+        yield x
+
+def main():
+    for v in gen(["p", "q"]):
+        print(v)
+    for w in gen([1, 2]):
+        print(w)
+main()
+""", "do not all pass the same statically-known type")
+
+    # The `enumerate` sibling, and the control that keeps the fix narrow: only
+    # the ELEMENT slot of `enumerate(xs)` aliases `xs`. Yielding the index
+    # never reads the list, so the same conflicted call sites must still
+    # compile, and must print exactly what CPython prints. Refusing this
+    # would be over-refusal of a correct program.
+    test_generator_matches_cpython("generator_enumerate_index_over_conflicted_param_still_compiles", """\
+def gen(xs):
+    for i, x in enumerate(xs):
+        yield i
+
+def main():
+    for v in gen(["p", "q"]):
+        print(v)
+    for w in gen([1, 2]):
+        print(w)
+main()
+""", """\
+def gen(xs):
+    for i, x in enumerate(xs):
+        yield i
+
+def main():
+    for v in gen(["p", "q"]):
+        print(v)
+    for w in gen([1, 2]):
+        print(w)
+main()
+""")
 
     # The CONTROL for both rows above, and the reason the fix is not "refuse
     # every generator with an unannotated parameter": the same generator
@@ -1509,6 +1664,68 @@ def main():
 
 main()
 """, "/r/a\n")
+
+    # A class defined INSIDE a generator body is hoisted to module scope, but
+    # its class-level attributes are seeded from module-level globals at
+    # allocation time, so one whose value names a local of the generator
+    # (`__version__ = version`, test_ensurepip.py's `fake_pip`) was never
+    # assigned: the stack-switch body lowered the `class` statement to a bare
+    # `/* TODO */` no-op and the attribute read stayed 0 at exit 0. The gate
+    # must refuse that shape honestly (the whole module then falls back to
+    # interpreting the source) rather than compile it.
+    test_generator_a3_ineligible("nested_class_local_attr_refused", """\
+def g(version=5):
+    class FakePip():
+        __version__ = version
+    pip = FakePip()
+    yield pip.__version__
+""", "g", "nested class 'FakePip'")
+    # ...and a LITERAL class attribute IS faithfully lowered (the allocator
+    # seeds `_classattr_FakePip____version__ = 7`), so the refusal above is
+    # about the captured local and not about nested classes in general.
+    test_generator_stdout("nested_class_literal_attr_compiles", """\
+def g():
+    class Tag():
+        __version__ = 7
+    t = Tag()
+    yield t.__version__
+
+def main():
+    for v in g():
+        print(v)
+""", "7\n")
+
+    # The two other halves of test_ensurepip.py's `fake_pip` shape, with a
+    # LITERAL class attribute so the captured-local refusal above does not
+    # fire: a no-`__init__` class constructed from inside a generator body,
+    # and that generator used as a `@contextmanager` in a `with`. Both
+    # already lower correctly; these pin that, so a later change to the
+    # generator-body constructor or the `with` branch cannot silently lose it.
+    test_generator_stdout("nested_class_noinit_ctor_in_generator_compiles", """\
+def g():
+    class FakePip():
+        __version__ = 7
+    p = FakePip()
+    yield p.__version__
+
+def main():
+    for v in g():
+        print(v)
+""", "7\n")
+    test_generator_stdout("nested_class_literal_attr_contextmanager_compiles", """\
+from contextlib import contextmanager
+
+@contextmanager
+def fake_pip():
+    class FakePip():
+        __version__ = 7
+    p = FakePip()
+    yield p.__version__
+
+def main():
+    with fake_pip() as v:
+        print(v)
+""", "7\n")
 
     # The eligibility gate replaced a blanket `kwonly params (v0)` refusal
     # with "is every keyword-only default faithfully lowerable?". These two
@@ -1903,15 +2120,284 @@ def main():
 """, "unpack call argument is not supported")
 
 
+def run_ctor_default_arg_in_generator_tests():
+    # A struct constructor call inside a generator body (`Box(n)`) lowered
+    # its arguments verbatim, so an omitted defaulted trailing parameter
+    # reached the C++ companion as a call with too few arguments: g++
+    # "too few arguments to function '_..._Box___init__'". The ordinary path
+    # and the generator's own struct-method calls already pad from the
+    # declared defaults; the constructor branch must do the same. The default
+    # must be non-zero (`bump=5`) so an omitted argument that silently became
+    # 0 cannot pass by accident.
+    #
+    # The consumer's `*, start=[]` is what keeps it on the cpp path (the same
+    # reason the foreign-handle fixtures above use it); `Box` lives in a
+    # sibling module, as `SourceInfo` does in the c_parser case.
+    _test_foreign_a3_generator_handle(
+        "generator_struct_ctor_fills_a_trailing_default",
+        "from .box import Box\n"
+        "\n"
+        "def consume(n, *, start=[]):\n"
+        "    b = Box(n)\n"
+        "    yield b.x\n"
+        "    yield Box(2, 10).x\n"
+        "\n"
+        "def main():\n"
+        "    for v in consume(4):\n"
+        "        print(v)\n"
+        "\n"
+        "main()\n",
+        "9\n12\n")
+
+
+def run_nested_generator_capture_tests():
+    # A generator defined INSIDE another def that reads one of that def's
+    # parameters or locals. The coroutine path has no capture model for a
+    # generator frame, so the body used to name the enclosing variable at
+    # file scope and g++ failed on the generated .cpp ("'name' was not
+    # declared in this scope"). Now an honest refusal naming the variables.
+    # The f-string case is the one that matters for c-analyzer's
+    # `build_section`: `f'{name}:'` reads `name` even though the parser keeps
+    # the f-string as one raw literal.
+    test_generator_refused("nested_generator_reads_enclosing_param_in_fstring_refused", """\
+def build_section(name: String, n: Int):
+    def render():
+        yield f'{name}:'
+        for i in range(n):
+            yield 'row'
+    return render
+
+
+def main():
+    render = build_section('x', 2)
+    for x in render():
+        print(x)
+""", "variable(s) n, name")
+    # The plain local now boxes (see `..._captures_enclosing_plain_local`);
+    # this generator ESCAPES as a value, which has no frame to hand the box
+    # handle to, so the escape is what stays refused.
+    test_generator_refused("nested_generator_escaping_plain_local_refused", """\
+def outer(n: Int):
+    total = n * 2
+    def g():
+        yield total
+    return g
+""", "variable(s) total")
+    # A nested generator that reads a `var` local or a parameter is hoisted
+    # on the default (stack-switch) path with its enclosing binding boxed,
+    # the same machinery as a nested async generator. The box handle is a
+    # hidden trailing argument at every call site in the enclosing function.
+    test_generator_stdout("nested_generator_captures_enclosing_var_local", """\
+def outer():
+    var k = 5
+    def g():
+        yield k
+        yield k + 1
+    for v in g():
+        print(v)
+
+
+def main():
+    outer()
+""", "5\n6\n")
+    test_generator_stdout("nested_generator_captures_enclosing_param", """\
+def outer(n: Int):
+    def g():
+        yield n * 2
+    for v in g():
+        print(v)
+
+
+def main():
+    outer(4)
+""", "8\n")
+    # A plain assignment (`total = n * 2`, no `var`) binds the enclosing
+    # local just as a `var` does, so a nested generator reading it captures
+    # the same box. Before the fix the box plan only saw VarDecl and refused.
+    test_generator_stdout("nested_generator_captures_enclosing_plain_local", """\
+def outer(n: Int):
+    total = n * 2
+    def g():
+        yield total
+        yield total + 1
+    for v in g():
+        print(v)
+
+
+def main():
+    outer(5)
+""", "10\n11\n")
+    test_generator_matches_cpython("nested_generator_mutates_enclosing_var_via_nonlocal", """\
+def outer():
+    var k = 5
+    def g():
+        nonlocal k
+        yield k
+        k = k + 1
+        yield k
+    for v in g():
+        print(v)
+    print(k)
+
+
+def main():
+    outer()
+""", """\
+def outer():
+    k = 5
+    def g():
+        nonlocal k
+        yield k
+        k = k + 1
+        yield k
+    for v in g():
+        print(v)
+    print(k)
+
+
+outer()
+""")
+    # A nested generator that escapes as a value (returned, so later called
+    # with no enclosing frame to supply its box handle) stays refused.
+    test_generator_refused("nested_generator_escaping_as_value_with_capture_refused", """\
+def outer():
+    var k = 5
+    def g():
+        yield k
+    return g
+""", "variable(s) k")
+    # The same escape, but the generator WRITES the enclosing local through
+    # `nonlocal`. The write has to reach the enclosing frame, which an
+    # escaping generator cannot provide, so it is refused rather than
+    # compiled against a fresh local (which printed nothing, silently).
+    test_generator_refused("nested_generator_escaping_nonlocal_write_refused", """\
+def outer():
+    var k = 5
+    def g():
+        nonlocal k
+        yield k
+        k = k + 1
+        yield k
+    return g
+""", "variable(s) k")
+    # A nested generator defined in a METHOD that reads `self` (test_frame.py's
+    # `g`). `self` is handed over as a hidden pointer, not boxed, so the
+    # generator sees the live receiver: a read, a write that lands on the
+    # object (the write is visible to the method afterwards), and a plain
+    # local read alongside it.
+    test_generator_stdout("nested_generator_method_reads_self", """\
+struct T:
+    var k: Int
+    def __init__(out self, k: Int):
+        self.k = k
+    def run(self):
+        def g():
+            yield self.k
+            yield self.k + 1
+        for v in g():
+            print(v)
+
+def main():
+    var t = T(7)
+    t.run()
+""", "7\n8\n")
+    test_generator_stdout("nested_generator_method_self_write_visible_to_method", """\
+struct T:
+    var k: Int
+    def __init__(out self, k: Int):
+        self.k = k
+    def run(self):
+        def g():
+            self.k = self.k + 1
+            yield self.k
+            yield self.k * 10
+        for v in g():
+            print(v)
+        print(self.k)
+
+def main():
+    var t = T(7)
+    t.run()
+""", "8\n80\n8\n")
+    test_generator_stdout("nested_generator_method_self_and_local", """\
+struct T:
+    var k: Int
+    def __init__(out self, k: Int):
+        self.k = k
+    def run(self):
+        var n = 3
+        def g():
+            yield self.k + n
+            yield n
+        for v in g():
+            print(v)
+
+def main():
+    var t = T(7)
+    t.run()
+""", "10\n3\n")
+    # Two classes each with a nested `g` that captures `self`: the hoisted
+    # bases are struct-qualified, so neither generator is mistaken for the
+    # other.
+    test_generator_stdout("nested_generator_method_same_name_two_classes", """\
+struct A:
+    var k: Int
+    def __init__(out self, k: Int):
+        self.k = k
+    def run(self):
+        def g():
+            yield self.k
+        for v in g():
+            print(v)
+
+struct B:
+    var k: Int
+    def __init__(out self, k: Int):
+        self.k = k
+    def run(self):
+        def g():
+            yield self.k + 100
+        for v in g():
+            print(v)
+
+def main():
+    var a = A(1)
+    a.run()
+    var b = B(2)
+    b.run()
+""", "1\n102\n")
+    # `return g()` hands the generator out of the method, which would outlive
+    # the `self` it holds, so it stays refused.
+    test_generator_refused("nested_generator_method_self_escaping_refused", """\
+struct T:
+    var k: Int
+    def __init__(out self, k: Int):
+        self.k = k
+    def run(self):
+        def g():
+            yield self.k
+        return g()
+
+def main():
+    var t = T(7)
+    var it = t.run()
+    for v in it:
+        print(v)
+""", "variable(s) self")
+
+
 def run_tests():
     run_callable_param_tests()
     run_lambda_capture_tests()
     run_variadic_lambda_value_tests()
     run_unpack_call_forward_tests()
+    run_ctor_default_arg_in_generator_tests()
     run_mixed_yield_kind_tests()
     run_next_method_tests()
     run_next_return_position_tests()
+    run_sibling_loop_value_kind_tests()
     run_module_global_generator_tests()
+    run_nested_generator_capture_tests()
     # Cluster E (bugs/CODEGEN_generator_function_Lib_ipaddress.md): a
     # generator method that CALLS the result of a `@property` getter
     # (`self._address_class(x)` -- `_address_class` is a @property returning
@@ -3848,6 +4334,100 @@ def main():
         print(v)
 """, "7\n7\n7\n")
 
+    # A lambda's RETURN kind reaches the generator's yield slot, not just the
+    # body that calls it: `r = f()` / `yield f()` with `f = lambda: False`
+    # yielded through an int64_t slot and printed `0` (CPython: `False`). The
+    # yield-kind scan (`coro._static_env`) now records a lambda-bound local's
+    # body kind, so the slot is `_Bool`. The parameter-shadowing case pins
+    # that a lambda's own `x` is not read as the enclosing local `x`.
+    test_generator_matches_cpython("generator_lambda_bool_call_result_yields_bool", """\
+def gen():
+    f = lambda: False
+    r = f()
+    yield r
+
+def main():
+    for v in gen():
+        print(v)
+main()
+""", """\
+def gen():
+    f = lambda: False
+    r = f()
+    yield r
+
+def main():
+    for v in gen():
+        print(v)
+main()
+""")
+
+    test_generator_matches_cpython("generator_lambda_call_yielded_directly", """\
+def gen(n):
+    f = lambda: n > 2
+    yield f()
+
+def main():
+    for v in gen(5):
+        print(v)
+main()
+""", """\
+def gen(n):
+    f = lambda: n > 2
+    yield f()
+
+def main():
+    for v in gen(5):
+        print(v)
+main()
+""")
+
+    test_generator_matches_cpython("generator_lambda_float_call_result_yields_float", """\
+def gen():
+    g = lambda: 1.5
+    r = g()
+    yield r
+
+def main():
+    for v in gen():
+        print(v)
+main()
+""", """\
+def gen():
+    g = lambda: 1.5
+    r = g()
+    yield r
+
+def main():
+    for v in gen():
+        print(v)
+main()
+""")
+
+    test_generator_matches_cpython("generator_lambda_param_does_not_read_outer_local_kind", """\
+def gen():
+    x = "hi"
+    f = lambda x: x
+    r = f(3)
+    yield r
+
+def main():
+    for v in gen():
+        print(v)
+main()
+""", """\
+def gen():
+    x = "hi"
+    f = lambda x: x
+    r = f(3)
+    yield r
+
+def main():
+    for v in gen():
+        print(v)
+main()
+""")
+
     test_generator_stdout("generator_one_arg_lambda_over_list", """\
 def g(xs):
     f = lambda m: m + 1
@@ -3887,6 +4467,70 @@ def main():
     for v in g(0):
         print(v)
 """, "42\n99\n")
+
+    # -- Bugs/CODEGEN_generator_yield_kind_rebound_name_silent_wrong_value.md
+    # Shape 1: a REBOUND local (`r = False`, then `r = 2.5`) holds two kinds,
+    # and one yield slot cannot render both (CPython: `2.5` then `False`).
+    # Before this fix the first binding's kind won (`env.setdefault`), so the
+    # slot was `_Bool` and printed `True`; then the drop-the-name fix left a
+    # None hole that `_generator_value_kind` reads as int64_t, which printed
+    # `2` / `0` -- silent truncation. The conflict marker in `_static_env`
+    # now makes the yield a refusal in BOTH backends, the stack-switch one
+    # and the cpp fallback, so no program prints a wrong value for it.
+    test_generator_refused("generator_rebound_local_yield_kind_shape1_refused", """\
+def gen(n):
+    r = False
+    if n > 0:
+        r = 2.5
+    yield r
+
+def main():
+    for v in gen(1):
+        print(v)
+    for v in gen(0):
+        print(v)
+main()
+""", "rebound to values of different kinds")
+
+    # Shape 2: a mixed-kind lambda yield (`f()` a bool, `r = g()` a float).
+    # The stack-switch path refuses it (mixed float / non-float), which hands
+    # it to the cpp fallback. That fallback types a lambda call as
+    # `std::function<int64_t()>`, so both yields were typed int64_t and it
+    # printed `1` / `1`. It now refuses the bool yield, because the slot it
+    # was given cannot hold a bool. CPython: `True` then `1.5`.
+    test_generator_refused("generator_mixed_lambda_yield_shape2_refused", """\
+def gen(n):
+    f = lambda: n > 2
+    yield f()
+    g = lambda: 1.5
+    r = g()
+    yield r
+
+def main():
+    for v in gen(5):
+        print(v)
+main()
+""", "is typed 'int64_t' by the cpp path")
+
+    # Regression test for generator METHOD yielding a float field.
+    # Before this fix, cpp_value_slot_refusal called _static_env(fn, None),
+    # so self.<field> yields were not typed from struct context. After the fix,
+    # the StructDef is threaded through and field types are properly seen.
+    # This test verifies correct compiled output (CPython compatibility).
+    test_generator_stdout("generator_method_float_field_yields_float", """\
+struct Box:
+    var value: Float64
+    fn __init__(out self, v: Float64):
+        self.value = v
+    fn get(self):
+        yield self.value
+
+def main():
+    b = Box(3.5)
+    for v in b.get():
+        print(v)
+main()
+""", "3.5\n")
 
     # ---- Regression tests distilled from the 30 bugs/CODEGEN_generator_
     # function_Lib_*.md stdlib shapes that the doc/COROUTINE.html §5.5 A3
@@ -5606,6 +6250,107 @@ go()
     test_generator_stdout("generator_iterating_a_string_parameter_control", """\
 def gen():
     s = 'AB'
+    for it in s:
+        yield it
+
+def go():
+    for v in gen():
+        print(v)
+
+go()
+""", "A\nB\n")
+
+    # `for i, r in enumerate(<param>)`: a two-slot loop target, which
+    # `_static_env` skipped entirely, so `yield r` had no kind and the value
+    # slot defaulted to int64_t. A float element came out as its raw IEEE-754
+    # bits (`1` / `2` where CPython prints `1.5` / `2.5`) with exit 0. The
+    # index `i` is an int and the element is a float, so the value slot cannot
+    # carry both: the right answer is an honest refusal, which the interpreter
+    # fallback then runs correctly. The refusal names the truncation.
+    test_generator_refused("generator_enumerate_float_element_is_refused_not_truncated", """\
+def rows(data):
+    for i, r in enumerate(data):
+        yield i
+        yield r
+
+def main():
+    for v in rows([1.5, 2.5]):
+        print(v)
+main()
+""", "a `yield` of a float value is typed 'int64_t'")
+
+    # The positive side of the same fix: an enumerate loop whose yields are
+    # all the element (float, or string) compiles and prints the element, and
+    # one whose yields are all the index compiles and prints the index.
+    test_generator_stdout("generator_enumerate_float_element_yields_float", """\
+def rows(data):
+    for i, r in enumerate(data):
+        yield r
+
+def main():
+    for v in rows([1.5, 2.5]):
+        print(v)
+main()
+""", "1.5\n2.5\n")
+
+    test_generator_stdout("generator_enumerate_index_yields_index", """\
+def rows(data):
+    for i, r in enumerate(data):
+        yield i
+
+def main():
+    for v in rows([1.5, 2.5]):
+        print(v)
+main()
+""", "0\n1\n")
+
+    test_generator_stdout("generator_enumerate_string_element_yields_string", """\
+def rows(data):
+    for i, r in enumerate(data):
+        yield r
+
+def main():
+    for v in rows(['a', 'b']):
+        print(v)
+main()
+""", "a\nb\n")
+
+    # A local bound to a str METHOD CALL. `_yield_kind` had no arm for a
+    # method call on a string, so `s` got no kind, `for it in s` found no
+    # element kind, and `yield it` fell through to the int64_t slot: the
+    # consumer printed the char* as an integer address (a generator yielding
+    # an element of a str method call's result). The receiver
+    # is a literal here, then a str PARAMETER (its kind is only known through
+    # the env), then a chained call, which needs the inner call's kind.
+    test_generator_stdout("generator_iterating_a_str_method_call_local_yields_characters", """\
+def gen():
+    s = 'ab'.upper()
+    for it in s:
+        yield it
+
+def go():
+    for v in gen():
+        print(v)
+
+go()
+""", "A\nB\n")
+
+    test_generator_stdout("generator_iterating_a_str_method_on_a_parameter_yields_characters", """\
+def gen(t):
+    s = t.lower()
+    for it in s:
+        yield it
+
+def go():
+    for v in gen('XY'):
+        print(v)
+
+go()
+""", "x\ny\n")
+
+    test_generator_stdout("generator_iterating_a_chained_str_method_call_yields_characters", """\
+def gen():
+    s = 'a-b'.replace('-', '').upper()
     for it in s:
         yield it
 
