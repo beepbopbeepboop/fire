@@ -114,9 +114,16 @@ pays for once — `bugs/DOCS_merge_left_citations_of_the_docs_the_branches_
 deleted.md` records 289 bare citations of documents that were deleted, and 64 of
 the number it quoted were the tool's own inverted existence test reporting LIVE
 documents as dangling.
---- PARTIAL PROGRESS 2026-10-29 ---
-Step 1 (merge columns) started: `tools/formal_host_import_shapes.py` now imports
-`_wall` and outputs `reach`/`alone` per row (verified by regression test
-`test_regression_two_host_import_rankings.py` and existing `test_formal_host_import_shapes.py`).
-Remaining: `suite.py` job merge (other lane), delete `test_formal_host_import_wall.py`,
-document consolidation (steps 4-5 in doc's exact next step).
+--- STATUS 2026-10-29: step 1 landed, corrected ---
+Step 1 (columns merged) is in: `tools/formal_host_import_shapes.py` prints
+`reach`/`alone` per row, and both values are `tools/formal_host_import_wall.py`'s
+`default_rank()` — the wall's own corpus, computed once per process. The first
+cut (d0f0e6e6c) ranked only the sweep's blocked files for each module, so
+`reach`/`alone` silently answered a different question under the same name
+(`copy` 7 vs the wall's 297, `builtins` 3 vs 35). Pinned by
+`test_regression_two_host_import_rankings.py`, which requires exact agreement
+with the wall for every row and fails on the old code.
+
+Remaining, in order: step 2 (move `test_formal_host_import_wall.py`'s
+`reach`/`alone` pins into `test_formal_host_import_shapes.py`), step 3
+(`tools/suite.py` one job — registry owner's), steps 4–5 (the two documents).
