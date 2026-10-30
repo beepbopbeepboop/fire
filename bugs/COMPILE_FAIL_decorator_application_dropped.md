@@ -1,5 +1,39 @@
 # CODEGEN/INTERP: a plain `@decorator` on a `def` is never applied, on either execution path
 
+## Status (2026-10-29, rebinding extended to a `def` nested in a function body)
+
+- `module_gen.py` `_gmi_rebind_decorated_defs` is now `_gmi_decorator_pass`,
+  a scope-aware walker that runs at module scope and recurses into every
+  function body. A decorator resolves against the defs of the enclosing
+  scopes, so a nested `@twice` (module-level def) and a nested sibling both
+  rebind. The nested rebinding is a local `step = twice(step__undecorated)`.
+- The scalar refusal (`_gmi_refuse_scalar_decorator_rebind`) runs at every
+  level against the same scope, so a nested scalar decorator is refused too.
+- Probe before / after on `outer(7)` with a nested `@twice`: before `8`,
+  after `16` (CPython `16`).
+- Tests: `test_gimple.py` `nested_decorator_is_applied_at_runtime` (compiled
+  output equals CPython, `40`) and `nested_scalar_decorator_rebind_is_refused`.
+  `test_gimple.py`: 413 passed, 1 failed. The failure is the walk-memo census
+  on `mojo/middle/coro.py`, filed as
+  `bugs/CODEGEN_walk_ast_memo_census_coro_unallowlisted.md`; it is not this
+  change.
+
+**Still OPEN:**
+
+- **Decorators from another module** are still silently unapplied (an
+  imported decorator stays on the `def`). This is the `subdir` shape from
+  `Tools/wasm/wasi/__main__.py` if that decorator is imported.
+- A decorated `def` inside an `if`/`for`/`with` block in a function body is
+  not reached: the recursion covers a body's direct statements only.
+- **Defect 1** (the decorator's own parameter typed `int64_t`) is not
+  addressed; it works because a function pointer is carried as an `int64_t`
+  bit pattern.
+- **The repr of a decorated wrapper** prints the decorated name, not
+  `<function twice.<locals>.wrap at ...>`.
+- **Integrator gate:** the rewrite now also applies to nested decorated defs
+  in the stdlib. The `stdlib-dylib` `skip` count and `stdlib-syntax` `U`
+  count must be compared before and after.
+
 Found 2026-09-27 while closing
 `COMPILE_FAIL_Tools_wasm_wasi___main__.md`. Not a compile failure — the
 opposite kind of problem, and the reason that file needed a separate
