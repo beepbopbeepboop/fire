@@ -1,5 +1,33 @@
 # CODEGEN_generator_function: Lib/test/test_frame.py
 
+## Status (2026-10-29, partial fix: a nested generator can call a sibling `def` — the `gen` cluster-A shape lowers)
+
+Landed (the doc's recommended next step, the sibling-helper half of `gen`):
+a nested generator's coroutine body could not see the `def`s beside it in
+the enclosing function, so `yield nested()` with `nested` a sibling was
+refused as an unresolved callee even when `nested` captures nothing.
+`_nested_generator_sibling_defs` (`mojo/backend_gimple/cpp_async.py`) maps
+each nested generator to its enclosing def's sibling defs, wired through
+`module_gen.py` as `gen._nested_gen_sibling_defs`, and
+`_cpp_compile_nested_sync_helpers` now considers those as candidates
+alongside the generator's own nested defs. The existing rules are unchanged:
+a sibling that captures an enclosing local is still refused (pinned by
+`test_regression_gen_sibling_capturing_local_still_refused`).
+
+Verified: `GEN_SRC` compiles and its C++ calls `_mojogen_gen_h_nested()`
+(`test_regress_codegen_generator_frame.py`, now a positive pin); the JIT
+run prints `1`. `test_gimple_generator_runner.py`: 273 pass.
+`test_gimple.py`: 407 pass, 1 fail — `test_print_of_a_function_value_is_not_a_decimal_address`
+(decorator `deco` on `step`, `COMPILE_FAIL_decorator_application_dropped`),
+which fails identically with this change reverted.
+
+NOT done — this file still cannot compile as a whole, and the frame part of
+`gen` is unchanged:
+
+- `gen` as written in the file: `nested()` returns `sys._getframe().f_generator`,
+  so the frame-model decision above (option (a), keep refused) still stands.
+- `t3`: unchanged; see the two entries below.
+
 ## Status (2026-10-29, t3 question answered — the module-level/class-method split is two lowerings, one silent; the silent half now refuses)
 
 Question 2 below is answered by measurement. The module-level `async def t3`
@@ -107,7 +135,7 @@ Tests (already landed on this branch):
   is the signal to drop the pin and this doc entry together. They are
   pins, not fixes: neither one turns red->green in this round.
 
-Still open: `gen`, `t3`. `g` is fixed (see below).
+Still open: `gen` (frame part only; sibling-helper part landed — see the 2026-10-29 partial-fix entry above), `t3`. `g` is fixed (see below).
 
 ## Status (2026-10-29 — partial fix: integer division by zero now raises; `g` lowers)
 
