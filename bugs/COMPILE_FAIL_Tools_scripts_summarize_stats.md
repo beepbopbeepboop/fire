@@ -4,12 +4,48 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/scripts/summarize_stats.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (2026-10-29 — PARTIAL: regression test landed; full closure-factory compilation not implemented)
+## Status (2026-10-29 — PARTIAL: closure factories now compile; the real file still refuses)
 
-- Added `test_regress_codegen_generator_closure_factory.py` (pinning the exact refusal for the factory-shape nested def).
-- Existing `test_regress_codegen_generator_frame.py` still passes (no regression to non-capturing helpers).
-- The feature-sized fix remains unimplemented: `_cpp_compile_nested_sync_helpers` still skips any nested def (`any(FunctionDef...)`); `cpp_core.py` has no `MojoBoundMethod*` / env-struct emission for a factory call (`calc_hist(...)` -> `F__C` + `F__env`).
-- Next: implement factory-class in `_try_compile`, emit `F__env` struct and `F__C` static function, emit `mojo_bound_method_new(...)` in CallExpr branch, verify with regression test passing.
+LANDED (`mojo/backend_gimple/cpp_async.py`, `cpp_core.py`):
+
+- A closure FACTORY (`def F(...)` whose body is some statements then `return C`,
+  where `C` is the one nested `def`) called from a compiled generator now
+  compiles to a `static int64_t F(...)` helper. It returns the closure as an int64
+  `MojoBoundMethod` (fn = a per-factory trampoline, self = the heap-held `[=]`
+  lambda), the same box a plain function value already is, so it is passed to an
+  `int64_t` slot and called through `mojo_fnptr_call_N`. See
+  `_closure_factory_parts` and `_try_compile_closure_factory`.
+- `make(k)(x)` (a call through a factory's result) lowers to
+  `mojo_fnptr_call_N((void *)(make(k)), x)`, restricted to factories.
+- Fixed a dead check: `_walk_own_body` never yields a FunctionDef, so the
+  "no further nested def" rule in `_try_compile` never fired. It now scans
+  `_walk_ast`.
+- Still refused: a closure that assigns through `nonlocal` (it needs a shared
+  cell, not a by-value copy).
+- Tests: `test_regress_codegen_generator_closure_factory.py`. Four positive tests
+  fail on HEAD and pass now. The `nonlocal` negative refuses before and after.
+  The value is checked by compiling and running the generated C++ against the
+  runtime: `calc_hist(5,2)(10)` = 52 and `calc_hist(3,4)(10)` = 34, matching CPython.
+
+DEVIATION from the plan below: no `F__env` struct and no `F__C` static function.
+Plain C++ `[=]` capture copies each factory local at the `return`, which is exact
+because `return C` is the last statement. So the "reassigned captured parameter"
+refusal in the plan is unnecessary. The env is heap-allocated and never freed, the
+accepted gap in `bugs/CODEGEN_closure_env_and_boxed_local_never_freed.md`.
+
+NOT DONE: the real `Tools/scripts/summarize_stats.py` still refuses. A reproducer
+(`iter_tables` calling `calc_hist(i + base, 2)`) hits two shapes outside this
+change first. Both are pre-existing and neither is fixed here:
+
+1. A tuple target in a generator's for loop, `for name, den in [(1, 2), (3, 4)]`,
+   emits `for (auto name, den : ...)`, which is invalid C++.
+2. A list literal as a constructor argument, `Section("sec", [Table(...)])`, emits
+   a brace list where the extern signature wants `MojoList *`.
+
+Next step: fix those two in the generator emitter, then re-run the real file with
+`MOJO_DEBUG=1 python3 fire.py build <file>` (a stdlib-sized run, for the integrator)
+and triage what remains. `calc_histogram_table`'s body (a `for`, a `while`,
+`f"<= {k:,d}"`, a slice return) is unverified through this emitter.
 
 ## Status (2026-10-29 — planning round: the remaining blocker is a closure VALUE returned by a nested factory; implementation guide below, nothing landed for this file)
 
