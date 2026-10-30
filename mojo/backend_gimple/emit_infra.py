@@ -1790,11 +1790,22 @@ def carry_callable_ret_from_call(gen, value_node, dst: str) -> None:
     _f = getattr(value_node, 'func', None)
     if not isinstance(_f, gimple_ctypes.IdentExpr):
         return
-    _rt = gen._return_callable_ret_types.get(_as_str(_f.name))
-    if _rt:
-        gen._callable_ret_types[dst] = _rt
+    _fname = _as_str(_f.name)
+    _frt = gen._return_callable_ret_types.get(_fname)
+    if _frt is None:
+        # A nested factory (`def main(): def mk(): ...`) uses the lifted
+        # name `main_mk` for the compiled symbol; the bare lookup misses it,
+        # and `_lower_fnptr_call_value` then has no `char *` to narrow back.
+        if _fname in getattr(gen, '_closure_envs', ()):
+            _frt = gen._return_callable_ret_types.get(
+                f'{getattr(gen, "current_func_name", None) or ""}_{_fname}')
+    if _frt:
+        gen._callable_ret_types[dst] = _frt
 
-    _rn = getattr(gen, '_return_func_value_names', {}).get(_as_str(_f.name))
+    _rn = getattr(gen, '_return_func_value_names', {}).get(_fname)
+    if _rn is None and _fname in getattr(gen, '_closure_envs', ()):
+        _rn = getattr(gen, '_return_func_value_names', {}).get(
+            f'{getattr(gen, "current_func_name", None) or ""}_{_fname}')
     if _rn:
         gen._func_value_names[dst] = _rn
 

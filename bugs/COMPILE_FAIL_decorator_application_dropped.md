@@ -42,7 +42,7 @@ entry for the new `copy.copy`'d node, with its reason.
 - **Decorators from another module** and a decorated `def` nested in a
   function body are still silently unapplied.
 - **A wrapper that returns `str`** prints a decimal address. That is the
-  closure str-return gap, not this rebinding: `bugs/CODEGEN_closure_str_return_is_lost.md`.
+  closure str-return gap (fixed as CODEGEN_closure_str_return_is_lost), not this rebinding.
   The runtime test is integer-only for that reason.
 - **Defect 1** (the decorator's own parameter typed `int64_t`) is not
   addressed. It works today because a function pointer is carried as an
