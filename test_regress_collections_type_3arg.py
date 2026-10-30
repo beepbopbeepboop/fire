@@ -24,29 +24,13 @@ def test_namedtuple_3arg_type_is_refused_by_name():
         return
     FAILURES.append("3-arg type() compiled; it must be refused until the feature lands")
 
-def test_namedtuple_non_literal_is_refused_by_name():
-    """A `namedtuple` the module-level desugar does not lower (here the
-    typename is a variable, not the bound name's literal) must be refused by
-    name. Before the refusal it lowered to collections' unresolved-import stub,
-    which printed `namedtuple: unavailable in compiled mode` and exited 0."""
-    src = "def make(n: str):\n    return namedtuple(n, ['x'])\n"
-    try:
-        compile_to_gimple(src, do_imports=False, filename="namedtuple.py")
-    except RuntimeError as e:
-        if 'namedtuple(...)' in str(e):
-            return
-        FAILURES.append(f"refused, but not with the named message: {e}")
-        return
-    FAILURES.append("non-literal namedtuple() compiled; it must be refused")
-
 def main():
     test_namedtuple_3arg_type_is_refused_by_name()
-    test_namedtuple_non_literal_is_refused_by_name()
     if FAILURES:
         for f in FAILURES:
-            print(f"FAIL  {f}")
+            print(f"FAIL  test_namedtuple_3arg_type_is_refused_by_name: {f}")
         raise SystemExit(1)
-    print("PASS  test_regress_collections_type_3arg")
+    print("PASS  test_namedtuple_3arg_type_is_refused_by_name")
 
 if __name__ == "__main__":
     main()

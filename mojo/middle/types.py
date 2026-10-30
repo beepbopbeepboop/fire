@@ -1614,15 +1614,6 @@ def _module_attr_ctype(module_name, member) -> str:
         return ''
     return _MODULE_ATTR_CTYPES.get((module_name, member), '')
 
-def cattr_cell_field(attr: str) -> str:
-    """Name of the hidden instance field that holds an instance's OWN cell for
-    the function-scoped class attribute `attr` (see module_gen's cell
-    registration and emit_methods' `_cattr_instance_read`). One name, used by
-    the registrar, the allocator seed and the read site, so they cannot drift.
-    """
-    return '_clscell_' + attr
-
-
 def _safe_field(name: str) -> str:
     """Sanitize struct field and parameter names that are C keywords or
     platform-macro names (see _C_MACRO_NAMES's `stdin`/`stdout`/`stderr`

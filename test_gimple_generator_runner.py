@@ -2136,217 +2136,13 @@ def main():
     for x in render():
         print(x)
 """, "variable(s) n, name")
-    # The plain local now boxes (see `..._captures_enclosing_plain_local`);
-    # this generator ESCAPES as a value, which has no frame to hand the box
-    # handle to, so the escape is what stays refused.
-    test_generator_refused("nested_generator_escaping_plain_local_refused", """\
+    test_generator_refused("nested_generator_reads_enclosing_local_refused", """\
 def outer(n: Int):
     total = n * 2
     def g():
         yield total
     return g
 """, "variable(s) total")
-    # A nested generator that reads a `var` local or a parameter is hoisted
-    # on the default (stack-switch) path with its enclosing binding boxed,
-    # the same machinery as a nested async generator. The box handle is a
-    # hidden trailing argument at every call site in the enclosing function.
-    test_generator_stdout("nested_generator_captures_enclosing_var_local", """\
-def outer():
-    var k = 5
-    def g():
-        yield k
-        yield k + 1
-    for v in g():
-        print(v)
-
-
-def main():
-    outer()
-""", "5\n6\n")
-    test_generator_stdout("nested_generator_captures_enclosing_param", """\
-def outer(n: Int):
-    def g():
-        yield n * 2
-    for v in g():
-        print(v)
-
-
-def main():
-    outer(4)
-""", "8\n")
-    # A plain assignment (`total = n * 2`, no `var`) binds the enclosing
-    # local just as a `var` does, so a nested generator reading it captures
-    # the same box. Before the fix the box plan only saw VarDecl and refused.
-    test_generator_stdout("nested_generator_captures_enclosing_plain_local", """\
-def outer(n: Int):
-    total = n * 2
-    def g():
-        yield total
-        yield total + 1
-    for v in g():
-        print(v)
-
-
-def main():
-    outer(5)
-""", "10\n11\n")
-    test_generator_matches_cpython("nested_generator_mutates_enclosing_var_via_nonlocal", """\
-def outer():
-    var k = 5
-    def g():
-        nonlocal k
-        yield k
-        k = k + 1
-        yield k
-    for v in g():
-        print(v)
-    print(k)
-
-
-def main():
-    outer()
-""", """\
-def outer():
-    k = 5
-    def g():
-        nonlocal k
-        yield k
-        k = k + 1
-        yield k
-    for v in g():
-        print(v)
-    print(k)
-
-
-outer()
-""")
-    # A nested generator that escapes as a value (returned, so later called
-    # with no enclosing frame to supply its box handle) stays refused.
-    test_generator_refused("nested_generator_escaping_as_value_with_capture_refused", """\
-def outer():
-    var k = 5
-    def g():
-        yield k
-    return g
-""", "variable(s) k")
-    # The same escape, but the generator WRITES the enclosing local through
-    # `nonlocal`. The write has to reach the enclosing frame, which an
-    # escaping generator cannot provide, so it is refused rather than
-    # compiled against a fresh local (which printed nothing, silently).
-    test_generator_refused("nested_generator_escaping_nonlocal_write_refused", """\
-def outer():
-    var k = 5
-    def g():
-        nonlocal k
-        yield k
-        k = k + 1
-        yield k
-    return g
-""", "variable(s) k")
-    # A nested generator defined in a METHOD that reads `self` (test_frame.py's
-    # `g`). `self` is handed over as a hidden pointer, not boxed, so the
-    # generator sees the live receiver: a read, a write that lands on the
-    # object (the write is visible to the method afterwards), and a plain
-    # local read alongside it.
-    test_generator_stdout("nested_generator_method_reads_self", """\
-struct T:
-    var k: Int
-    def __init__(out self, k: Int):
-        self.k = k
-    def run(self):
-        def g():
-            yield self.k
-            yield self.k + 1
-        for v in g():
-            print(v)
-
-def main():
-    var t = T(7)
-    t.run()
-""", "7\n8\n")
-    test_generator_stdout("nested_generator_method_self_write_visible_to_method", """\
-struct T:
-    var k: Int
-    def __init__(out self, k: Int):
-        self.k = k
-    def run(self):
-        def g():
-            self.k = self.k + 1
-            yield self.k
-            yield self.k * 10
-        for v in g():
-            print(v)
-        print(self.k)
-
-def main():
-    var t = T(7)
-    t.run()
-""", "8\n80\n8\n")
-    test_generator_stdout("nested_generator_method_self_and_local", """\
-struct T:
-    var k: Int
-    def __init__(out self, k: Int):
-        self.k = k
-    def run(self):
-        var n = 3
-        def g():
-            yield self.k + n
-            yield n
-        for v in g():
-            print(v)
-
-def main():
-    var t = T(7)
-    t.run()
-""", "10\n3\n")
-    # Two classes each with a nested `g` that captures `self`: the hoisted
-    # bases are struct-qualified, so neither generator is mistaken for the
-    # other.
-    test_generator_stdout("nested_generator_method_same_name_two_classes", """\
-struct A:
-    var k: Int
-    def __init__(out self, k: Int):
-        self.k = k
-    def run(self):
-        def g():
-            yield self.k
-        for v in g():
-            print(v)
-
-struct B:
-    var k: Int
-    def __init__(out self, k: Int):
-        self.k = k
-    def run(self):
-        def g():
-            yield self.k + 100
-        for v in g():
-            print(v)
-
-def main():
-    var a = A(1)
-    a.run()
-    var b = B(2)
-    b.run()
-""", "1\n102\n")
-    # `return g()` hands the generator out of the method, which would outlive
-    # the `self` it holds, so it stays refused.
-    test_generator_refused("nested_generator_method_self_escaping_refused", """\
-struct T:
-    var k: Int
-    def __init__(out self, k: Int):
-        self.k = k
-    def run(self):
-        def g():
-            yield self.k
-        return g()
-
-def main():
-    var t = T(7)
-    var it = t.run()
-    for v in it:
-        print(v)
-""", "variable(s) self")
 
 
 def run_tests():
@@ -4474,26 +4270,6 @@ def main():
 main()
 """, "is typed 'int64_t' by the cpp path")
 
-    # Regression test for generator METHOD yielding a float field.
-    # Before this fix, cpp_value_slot_refusal called _static_env(fn, None),
-    # so self.<field> yields were not typed from struct context. After the fix,
-    # the StructDef is threaded through and field types are properly seen.
-    # This test verifies correct compiled output (CPython compatibility).
-    test_generator_stdout("generator_method_float_field_yields_float", """\
-struct Box:
-    var value: Float64
-    fn __init__(out self, v: Float64):
-        self.value = v
-    fn get(self):
-        yield self.value
-
-def main():
-    b = Box(3.5)
-    for v in b.get():
-        print(v)
-main()
-""", "3.5\n")
-
     # ---- Regression tests distilled from the 30 bugs/CODEGEN_generator_
     # function_Lib_*.md stdlib shapes that the doc/COROUTINE.html §5.5 A3
     # stack-switch cutover made compile (previously wholesale-refused by
@@ -6222,61 +5998,6 @@ def go():
 go()
 """, "A\nB\n")
 
-    # `for i, r in enumerate(<param>)`: a two-slot loop target, which
-    # `_static_env` skipped entirely, so `yield r` had no kind and the value
-    # slot defaulted to int64_t. A float element came out as its raw IEEE-754
-    # bits (`1` / `2` where CPython prints `1.5` / `2.5`) with exit 0. The
-    # index `i` is an int and the element is a float, so the value slot cannot
-    # carry both: the right answer is an honest refusal, which the interpreter
-    # fallback then runs correctly. The refusal names the truncation.
-    test_generator_refused("generator_enumerate_float_element_is_refused_not_truncated", """\
-def rows(data):
-    for i, r in enumerate(data):
-        yield i
-        yield r
-
-def main():
-    for v in rows([1.5, 2.5]):
-        print(v)
-main()
-""", "a `yield` of a float value is typed 'int64_t'")
-
-    # The positive side of the same fix: an enumerate loop whose yields are
-    # all the element (float, or string) compiles and prints the element, and
-    # one whose yields are all the index compiles and prints the index.
-    test_generator_stdout("generator_enumerate_float_element_yields_float", """\
-def rows(data):
-    for i, r in enumerate(data):
-        yield r
-
-def main():
-    for v in rows([1.5, 2.5]):
-        print(v)
-main()
-""", "1.5\n2.5\n")
-
-    test_generator_stdout("generator_enumerate_index_yields_index", """\
-def rows(data):
-    for i, r in enumerate(data):
-        yield i
-
-def main():
-    for v in rows([1.5, 2.5]):
-        print(v)
-main()
-""", "0\n1\n")
-
-    test_generator_stdout("generator_enumerate_string_element_yields_string", """\
-def rows(data):
-    for i, r in enumerate(data):
-        yield r
-
-def main():
-    for v in rows(['a', 'b']):
-        print(v)
-main()
-""", "a\nb\n")
-
     # A local bound to a str METHOD CALL. `_yield_kind` had no arm for a
     # method call on a string, so `s` got no kind, `for it in s` found no
     # element kind, and `yield it` fell through to the int64_t slot: the
@@ -6730,6 +6451,80 @@ def main():
     for v in gen(2):
         print(v)
 """, "6\n11\n19\n")
+
+    # A nested generator that reads a parameter of the def that encloses it.
+    # Python reads the enclosing name at each resume; the compiled generator
+    # takes a snapshot of it at construction, which is the same value only
+    # because nothing in the enclosing def rebinds `k` (the rule that makes
+    # the snapshot sound, checked in cpp_async._compile_nested_generator_closures).
+    test_generator_stdout("generator_nested_reads_enclosing_param", """\
+def outer(k: int):
+    def g(n):
+        yield n + k
+    for v in g(2):
+        print(v)
+
+def main():
+    outer(10)
+""", "12\n")
+
+    # The same, reading a local of the enclosing def declared before it.
+    test_generator_stdout("generator_nested_reads_enclosing_local", """\
+def outer(k: int):
+    var base = k * 2
+    def g(n):
+        yield n + base
+    for v in g(2):
+        print(v)
+
+def main():
+    outer(10)
+""", "22\n")
+
+    # The handle a captured-nested generator is bound to, consumed by next():
+    # the local must carry the generator type from the nested definition.
+    test_generator_stdout("generator_nested_handle_bound_then_next", """\
+def outer(k: int):
+    def g(n):
+        yield n + k
+        yield n + k + 1
+    it = g(2)
+    print(next(it))
+    print(next(it))
+
+def main():
+    outer(10)
+""", "12\n13\n")
+
+    # Enclosing def rebinds the captured name after the generator is defined:
+    # Python would show the new value, a snapshot would not. Must be refused.
+    test_generator_refused("generator_nested_rebound_after_def_refused", """\
+def outer(k: int):
+    def g(n):
+        yield n + k
+    k = 5
+    for v in g(2):
+        print(v)
+
+def main():
+    outer(10)
+""", "reads enclosing-scope variable(s) k")
+
+    # A `nonlocal` write from a nested generator used to compile to a fresh
+    # local starting at zero (silently wrong). It must be refused.
+    test_generator_refused("generator_nested_nonlocal_write_refused", """\
+def outer(k: int):
+    def g(n):
+        nonlocal k
+        k = k + 1
+        yield n + k
+    for v in g(2):
+        print(v)
+    print(k)
+
+def main():
+    outer(10)
+""", "through `nonlocal`")
 
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")

@@ -119,6 +119,12 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
     # its own honest, already-existing refusal instead.
     if node.is_async and not node.is_generator:
         return
+    # A nested sync generator that reads enclosing names was compiled to its
+    # own coroutine unit by _compile_nested_generator_closures; like the async
+    # case above it has no ordinary closure body here. Its call sites resolve
+    # through _nested_generator_api, keyed (current_func_name, name).
+    if node.is_generator and (gen.current_func_name, node.name) in gen._nested_generator_api:
+        return
     outer_closures = getattr(gen, '_all_closures', {}).get(
         gen.current_func_name, {})
     ci = outer_closures.get(node.name)
@@ -209,14 +215,8 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
                 gen._emit(f"  {env_var}->{gimple_ctypes._c_field_name(vname)} = {tmp};")
             else:
                 # Use _safe_coerce_emit to handle int→int64_t and other conversions.
-                # A heap-boxed local's var_types entry is the BOX's pointer type,
-                # so its source is the value `*box` (see _boxed_capture_source).
-                _boxed = ggc._boxed_capture_source(gen, vname, _fct)
-                if _boxed is not None:
-                    local_type, cname = _boxed
-                else:
-                    local_type = gen.var_types.get(vname, vtype)
-                    cname = gen._write_dest(vname)  # resolve capture path if nested
+                local_type = gen.var_types.get(vname, vtype)
+                cname = gen._write_dest(vname)  # resolve capture path if nested
                 gen._safe_coerce_emit(local_type, _fct, cname, f"{env_var}->{gimple_ctypes._c_field_name(vname)}")
         gen._closure_envs[node.name] = env_var
         # Take ownership of the environment this nested `def` just allocated,
@@ -3133,12 +3133,9 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     gen._emitting_plain_func = True
     try:
         gen._begin_function(node)
-        gmp._cattr_restore_begin(gen, node.body)
         for stmt in node.body:
             gen.gen_stmt(stmt)
         gen._emit_fallthrough_frees(node)
-        gmp._cattr_restore_fallthrough(gen, node)
-        gmp._cattr_restore_end(gen)
     finally:
         gen._emitting_plain_func = False
 
@@ -4387,12 +4384,9 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     # knows. The candidates computed here replace the empty set
     # `reset_no_candidates` left above.
     gen._begin_function(node)
-    gmp._cattr_restore_begin(gen, node.body)
     for stmt in node.body:
         gen.gen_stmt(stmt)
     gen._emit_fallthrough_frees(node)
-    gmp._cattr_restore_fallthrough(gen, node)
-    gmp._cattr_restore_end(gen)
 
     # Store per-overload param types so forward declarations can match definitions exactly
     param_ctypes_only = [s.rsplit(' ', 1)[0].strip() for s in param_strs]

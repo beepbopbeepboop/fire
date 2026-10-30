@@ -309,7 +309,7 @@ def _cpp_except_handler_body(gen, handler, caught_var: str, declared: dict,
 
 def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
                              struct_name: str | None = None,
-                             struct_def: str | None = None) -> tuple[str, str, str, list]:
+                             extra_captures: list | None = None) -> tuple[str, str, str, list]:
     """Translate ONE supported generator FunctionDef into a
     self-contained C++20 coroutine fragment. Returns (cpp_text,
     value_ctype, base_name, param_ctypes). Raises
@@ -408,13 +408,33 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     # model for generator frames, so the body would name that variable at
     # file scope and g++ would reject the .cpp. Refuse honestly instead.
     _captured = getattr(gen, '_nested_gen_captures', {}).get(id(fn))
-    if _captured:
+    # `extra_captures` (see _compile_nested_generator_closures) threads the
+    # enclosing names this generator reads into its frame as trailing
+    # parameters, so a read of them is then an ordinary parameter read. A
+    # read it does NOT cover is still refused, exactly as before.
+    if _captured and not set(_captured) <= {_cn for _cn, _ in (extra_captures or [])}:
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             "is a nested generator that reads enclosing-scope "
             f"variable(s) {', '.join(_captured)}; the coroutine path has no "
             "capture model for a generator defined inside another function "
             "(threading the enclosing variables into the generator frame is "
             "the remaining work)")
+    # A `nonlocal` name this generator ASSIGNS is a write to the enclosing
+    # def's variable, which a by-value capture cannot carry back. Without
+    # this check the write landed on a fresh local of the generator (the
+    # enclosing variable was never read, and the generator's own copy starts
+    # at zero): a wrong answer with exit 0. Refused honestly instead. A
+    # `nonlocal` that is only READ is an ordinary capture (above).
+    _nl_written = sorted({_nm for _nd in gimple_exprtypes._walk_own_body(fn.body)
+                          if isinstance(_nd, gimple_ctypes.NonlocalStmt)
+                          for _nm in _nd.names
+                          if _binding_site_count(fn.body, _nm)})
+    if _nl_written:
+        raise gimple_exprtypes._UnsupportedGeneratorShape(
+            f"{fn.name}: a generator that assigns enclosing-scope variable(s) "
+            f"{', '.join(_nl_written)} through `nonlocal` is not supported (a "
+            "generator frame has no by-reference capture to write them back "
+            "through)")
     # Increment D guard: a nested async GENERATOR that captures enclosing
     # locals in a shape the A3 capture-box threading cannot reach (driven
     # from a further-nested `async def` sibling's `async for`/await loop).
@@ -554,14 +574,29 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
                           and ctype[:-2] in gen.struct_field_types)
         if _is_struct_ptr:
             gen._cpp_param_struct_names.add(ctype[:-2])
-        if ctype not in ('int64_t', 'double', '_Bool', 'char *', 'MojoList *',
-                         'MojoDict *', 'MojoSet *') and not _is_struct_ptr:
+        if ctype not in _GENERATOR_PARAM_CTYPES and not _is_struct_ptr:
             raise gimple_exprtypes._UnsupportedGeneratorShape(
                 f"{fn.name}: generator parameter '{pn}' has unsupported "
                 f"type {ctype!r} (only int64_t/double/_Bool/char*/"
                 "MojoList*/MojoDict*/MojoSet*/<known struct>* parameters "
                 "are supported for compiled generators)")
         param_ctypes.append((pn, ctype))
+    # Captured enclosing names, appended AFTER the real parameters so the
+    # call site (emit_calls._emit_nested_generator_start_call) can keep the
+    # user's arguments in their own positions and append the captured
+    # values. Each is a by-value snapshot: _compile_nested_generator_closures
+    # has already proved the enclosing def never rebinds it. A name the
+    # generator itself assigns is its own local, never a capture, so a
+    # `nonlocal` write cannot reach here.
+    if extra_captures:
+        for _cap_name, _cap_ctype in extra_captures:
+            if _cap_ctype not in _GENERATOR_PARAM_CTYPES:
+                raise gimple_exprtypes._UnsupportedGeneratorShape(
+                    f"{fn.name}: enclosing-scope variable {_cap_name!r} has "
+                    f"type {_cap_ctype!r}, which a nested generator cannot yet "
+                    "capture (only int64_t/double/_Bool/char*/MojoList*/"
+                    "MojoDict*/MojoSet* can be threaded into its frame)")
+            param_ctypes.append((_cap_name, _cap_ctype))
     if struct_name is not None:
         base = f"_mojogen_{gimple_ctypes._safe_name(struct_name)}_{gimple_ctypes._safe_name(fn.name)}"
     else:
@@ -934,7 +969,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     # name_silent_wrong_value.md, Shape 2). Checked only when a slot was
     # decided at all: an undecided slot is refused below with its own message.
     if value_ctype is not None:
-        _slot_why = gimple_gen_coro.cpp_value_slot_refusal(fn, value_ctype, struct_def)
+        _slot_why = gimple_gen_coro.cpp_value_slot_refusal(fn, value_ctype)
         if _slot_why is not None:
             raise gimple_exprtypes._UnsupportedGeneratorShape(f"{fn.name}: {_slot_why}")
     if value_ctype is None:
@@ -1085,8 +1120,8 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         f"    co_return;",
         f"}}",
         f'extern "C" MojoGenerator *{base}_start ({cpp_sig}) {{',
-        f"    {task} __task = {impl} ({call_args});",
-        f"    return reinterpret_cast<MojoGenerator *>(__task.h.address());",
+        f"    {task} t = {impl} ({call_args});",
+        f"    return reinterpret_cast<MojoGenerator *>(t.h.address());",
         f"}}",
         f'extern "C" {cpp_bool} {base}_resume (MojoGenerator *g) {{',
         f"    {handle_t} h = {handle_t}::from_address(reinterpret_cast<void *>(g));",
@@ -1168,6 +1203,37 @@ def _hbn_add_target(bound: set, t) -> None:
             _hbn_add_target(bound, e)
 
 
+def _binding_node_names(n) -> set:
+    """Names that ONE node of a helper's own body binds (see
+    `_helper_bound_names` for the full list of binding forms). Per-node so
+    a caller can count binding SITES, not just the set of names."""
+    bound: set = set()
+    if isinstance(n, gimple_ctypes.AssignStmt):
+        _hbn_add_target(bound, n.target)
+    elif isinstance(n, gimple_ctypes.AugAssignStmt):
+        _hbn_add_target(bound, n.target)
+    elif isinstance(n, gimple_ctypes.MultiAssignStmt):
+        for t in (n.targets or []):
+            _hbn_add_target(bound, t)
+    elif isinstance(n, gimple_ctypes.WalrusExpr):
+        bound.add(n.name)
+    elif isinstance(n, gimple_ctypes.ForStmt):
+        _hbn_add_target(bound, n.target)
+    elif isinstance(n, gimple_ctypes.VarDecl):
+        bound.add(n.name)
+    elif isinstance(n, gimple_ctypes.WithStmt):
+        for it in n.items:
+            if isinstance(it.alias, str):
+                bound.add(it.alias)
+            elif isinstance(it.alias, gimple_ctypes.IdentExpr):
+                bound.add(it.alias.name)
+    elif isinstance(n, gimple_ctypes.TryStmt):
+        for h in (n.handlers or []):
+            if getattr(h, 'name', None):
+                bound.add(h.name)
+    return bound
+
+
 def _helper_bound_names(body: list) -> set:
     """Names locally bound anywhere in `body` (a nested helper's own body,
     not crossing into deeper `def`s) — assignment / augmented-assignment /
@@ -1175,32 +1241,17 @@ def _helper_bound_names(body: list) -> set:
     to tell a helper's own locals apart from genuine enclosing-scope
     captures."""
     bound: set = set()
-
     for n in gimple_exprtypes._walk_own_body(body):
-        if isinstance(n, gimple_ctypes.AssignStmt):
-            _hbn_add_target(bound, n.target)
-        elif isinstance(n, gimple_ctypes.AugAssignStmt):
-            _hbn_add_target(bound, n.target)
-        elif isinstance(n, gimple_ctypes.MultiAssignStmt):
-            for t in (n.targets or []):
-                _hbn_add_target(bound, t)
-        elif isinstance(n, gimple_ctypes.WalrusExpr):
-            bound.add(n.name)
-        elif isinstance(n, gimple_ctypes.ForStmt):
-            _hbn_add_target(bound, n.target)
-        elif isinstance(n, gimple_ctypes.VarDecl):
-            bound.add(n.name)
-        elif isinstance(n, gimple_ctypes.WithStmt):
-            for it in n.items:
-                if isinstance(it.alias, str):
-                    bound.add(it.alias)
-                elif isinstance(it.alias, gimple_ctypes.IdentExpr):
-                    bound.add(it.alias.name)
-        elif isinstance(n, gimple_ctypes.TryStmt):
-            for h in (n.handlers or []):
-                if getattr(h, 'name', None):
-                    bound.add(h.name)
+        bound |= _binding_node_names(n)
     return bound
+
+
+def _binding_site_count(body: list, name: str) -> int:
+    """How many binding SITES in `body` (own scope, as `_helper_bound_names`)
+    bind `name`. A parameter must have none, a local exactly its one `var`
+    declaration; anything else is a rebinding."""
+    return sum(1 for n in gimple_exprtypes._walk_own_body(body)
+               if name in _binding_node_names(n))
 
 
 _FSTRING_FIELD_RE = re.compile(r"\{([^{}]*)\}")
@@ -1259,17 +1310,101 @@ def _nested_generator_captures(stmts) -> dict[int, list[str]]:
         own = {pn for pn, _ in (g.params or [])} | _helper_bound_names(g.body)
         reads = (gimple_exprtypes._used_idents_deep(g.body)
                  | _fstring_field_names(g.body))
-        # A `nonlocal k` names the enclosing local even though the body
-        # also binds it (`k = k + 1` makes it "own" below). Without this, a
-        # generator that writes its enclosing local compiles with a fresh
-        # local of the same name and the write never reaches the enclosing
-        # frame -- silently wrong output, not a refusal.
-        nonlocal_names = {n for x in gimple_exprtypes._walk_ast(g.body)
-                          if isinstance(x, N.NonlocalStmt) for n in x.names}
-        caps = ((reads & enclosing[gid]) - own) | (nonlocal_names & enclosing[gid])
+        caps = (reads & enclosing[gid]) - own
         if caps:
             out[gid] = sorted(caps)
     return out
+
+
+# The C types a compiled generator's parameter (and, since a nested generator
+# threads its captures in as parameters, a captured enclosing name) may have.
+# One list for both: a capture is a parameter of the coroutine frame.
+_GENERATOR_PARAM_CTYPES = ('int64_t', 'double', '_Bool', 'char *', 'MojoList *',
+                           'MojoDict *', 'MojoSet *')
+
+
+def _only_directly_called(body: list, name: str) -> bool:
+    """True when every reference to `name` inside `body` is the callee of a
+    direct call. Only the direct call has a call site that threads the
+    captured values (emit_calls._emit_nested_generator_start_call); a bare
+    reference (`return g`, `h = g`) would hand out a generator whose captures
+    were never supplied, so it must keep the honest refusal."""
+    called: set = set()
+    refs: list = []
+    for nd in gimple_exprtypes._walk_ast(body):
+        if (isinstance(nd, gimple_ctypes.CallExpr)
+                and isinstance(nd.func, gimple_ctypes.IdentExpr)
+                and nd.func.name == name):
+            called.add(id(nd.func))
+        elif isinstance(nd, gimple_ctypes.IdentExpr) and nd.name == name:
+            refs.append(nd)
+    return all(id(r) in called for r in refs)
+
+
+def _compile_nested_generator_closures(gen, outer_fn: gimple_ctypes.FunctionDef,
+                                       generator_fns: dict) -> None:
+    """Compile each NESTED sync generator of `outer_fn` that reads enclosing
+    names, by threading those names into its C++ coroutine frame as
+    trailing parameters (the same by-value capture the nested async closure
+    path uses, `_compute_nested_closure_captures` + `extra_captures`).
+
+    Scope, deliberately narrow -- everything else keeps the honest refusal
+    `_gen_cpp_generator_unit` already gives:
+      * the generator is a DIRECT top-level statement of `outer_fn` (the same
+        scope `_compile_nested_async_functions` walks), not a method, and it
+        is only ever CALLED by name from `outer_fn` (`_only_directly_called`);
+        a generator returned or stored as a value is refused;
+      * every enclosing name it reads is one `_compute_nested_closure_
+        captures` resolves against `outer_fn`'s params and top-level locals
+        (`_enclosing_scope_with_locals`) -- a read of anything else is not
+        claimed;
+      * no captured name is REBOUND in `outer_fn`'s own body: a parameter
+        has no binding site and a local has exactly its one `var`
+        declaration. Python reads an enclosing name at each resume, so a
+        snapshot taken at the call is only equal to that when nothing ever
+        rebinds it.
+    A claimed generator is registered in `gen._nested_generator_api` keyed
+    by (outer_fn.name, generator name) -- the same key shape the call site
+    uses for `_async_closure_api` -- and removed from `generator_fns`, so the
+    module-level generator passes neither refuse nor register it by bare
+    name. Anything not claimed is left in `generator_fns` untouched."""
+    outer_scope = None
+    outer_params = {_pn.lstrip('*') for _pn, _ in (outer_fn.params or [])}
+    for inner in outer_fn.body:
+        if not (isinstance(inner, gimple_ctypes.FunctionDef)
+                and inner.is_generator and not inner.is_async):
+            continue
+        if id(inner) not in generator_fns:
+            continue
+        read = gen._nested_gen_captures.get(id(inner))
+        if not read:
+            continue
+        if not _only_directly_called(outer_fn.body, inner.name):
+            continue
+        if outer_scope is None:
+            outer_scope = gen._enclosing_scope_with_locals(outer_fn)
+        caps = gen._compute_nested_closure_captures(inner, outer_scope)
+        # Every enclosing name the generator reads must be one we can
+        # resolve; a read that the scope does not cover stays refused.
+        if [_cn for _cn, _ in caps] != list(read):
+            continue
+        if any(_binding_site_count(outer_fn.body, _cn)
+               != (0 if _cn in outer_params else 1) for _cn, _ in caps):
+            continue
+        try:
+            cpp_text, value_ctype, base, param_ctypes = gen._gen_cpp_generator_unit(
+                inner, extra_captures=caps)
+        except gimple_exprtypes._UnsupportedGeneratorShape as e:
+            gen._cpp_refusal_reasons.setdefault(inner.name, str(e))
+            continue
+        gen._nested_generator_api[(outer_fn.name, inner.name)] = {
+            'base': base, 'value_ctype': value_ctype,
+            'params': param_ctypes, 'captures': caps,
+            'nested_name': inner.name,
+        }
+        gen.func_param_types[f"{base}_start"] = param_ctypes
+        gen._generator_cpp_units.append(cpp_text)
+        generator_fns.pop(id(inner), None)
 
 
 def _nested_generator_sibling_defs(stmts) -> dict[int, list]:
@@ -2389,8 +2524,8 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
         f"    co_return ({cpp_value_ctype})0;",
         f"}}",
         f'extern "C" MojoAsync *{base}_start ({cpp_sig}) {{',
-        f"    {task} __task = {impl} ({call_args});",
-        f"    return reinterpret_cast<MojoAsync *>(__task.h.address());",
+        f"    {task} t = {impl} ({call_args});",
+        f"    return reinterpret_cast<MojoAsync *>(t.h.address());",
         f"}}",
         # 'bool' (not '_Bool' -- see _c_to_cpp_scalar_type's docstring:
         # '_Bool' is valid C99 but not a valid C++ type spelling). The

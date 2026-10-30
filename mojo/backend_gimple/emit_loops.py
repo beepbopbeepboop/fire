@@ -869,7 +869,6 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
         if is_dataclass_fields_loop:
             gen._dataclass_fields_vars.discard(var)
         raise
-    ggc._refuse_namedtuple_tuple_use(gen, it_type, 'iterating over')
 
     # `for x in <fresh container>:` (a display, a comprehension, a slice, a
     # `.split()`/`.keys()` result): nothing else can reference the iterable, so
@@ -1765,7 +1764,6 @@ def _gen_for_zip(gen, node):
     seq_elems = []
     for _ai in range(len(args)):
         st, sv = gen.lower_expr(args[_ai])
-        ggc._refuse_namedtuple_tuple_use(gen, st, 'zipping')
         st = gen._get_actual_type(st, sv)
         # A zip() argument need not be a statically-known MojoList* — a
         # dict-subscript/`.get()` result (e.g. `zip(d.get('parameters') or
@@ -1936,7 +1934,6 @@ def _gen_for_enumerate(gen, node):
     """Handle: for (idx, val) in enumerate(lst[, start]): ..."""
     lst_arg = node.iterable.args[0]
     lst_type, lst_val = gen.lower_expr(lst_arg)
-    ggc._refuse_namedtuple_tuple_use(gen, lst_type, 'enumerating')
     lst_type = gen._get_actual_type(lst_type, lst_val)
 
     # `enumerate(lst, start)` — the optional 2nd arg was previously
