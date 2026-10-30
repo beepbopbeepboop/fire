@@ -2243,6 +2243,110 @@ def outer():
         yield k
     return g
 """, "variable(s) k")
+    # A nested generator defined in a METHOD that reads `self` (test_frame.py's
+    # `g`). `self` is handed over as a hidden pointer, not boxed, so the
+    # generator sees the live receiver: a read, a write that lands on the
+    # object (the write is visible to the method afterwards), and a plain
+    # local read alongside it.
+    test_generator_stdout("nested_generator_method_reads_self", """\
+struct T:
+    var k: Int
+    def __init__(out self, k: Int):
+        self.k = k
+    def run(self):
+        def g():
+            yield self.k
+            yield self.k + 1
+        for v in g():
+            print(v)
+
+def main():
+    var t = T(7)
+    t.run()
+""", "7\n8\n")
+    test_generator_stdout("nested_generator_method_self_write_visible_to_method", """\
+struct T:
+    var k: Int
+    def __init__(out self, k: Int):
+        self.k = k
+    def run(self):
+        def g():
+            self.k = self.k + 1
+            yield self.k
+            yield self.k * 10
+        for v in g():
+            print(v)
+        print(self.k)
+
+def main():
+    var t = T(7)
+    t.run()
+""", "8\n80\n8\n")
+    test_generator_stdout("nested_generator_method_self_and_local", """\
+struct T:
+    var k: Int
+    def __init__(out self, k: Int):
+        self.k = k
+    def run(self):
+        var n = 3
+        def g():
+            yield self.k + n
+            yield n
+        for v in g():
+            print(v)
+
+def main():
+    var t = T(7)
+    t.run()
+""", "10\n3\n")
+    # Two classes each with a nested `g` that captures `self`: the hoisted
+    # bases are struct-qualified, so neither generator is mistaken for the
+    # other.
+    test_generator_stdout("nested_generator_method_same_name_two_classes", """\
+struct A:
+    var k: Int
+    def __init__(out self, k: Int):
+        self.k = k
+    def run(self):
+        def g():
+            yield self.k
+        for v in g():
+            print(v)
+
+struct B:
+    var k: Int
+    def __init__(out self, k: Int):
+        self.k = k
+    def run(self):
+        def g():
+            yield self.k + 100
+        for v in g():
+            print(v)
+
+def main():
+    var a = A(1)
+    a.run()
+    var b = B(2)
+    b.run()
+""", "1\n102\n")
+    # `return g()` hands the generator out of the method, which would outlive
+    # the `self` it holds, so it stays refused.
+    test_generator_refused("nested_generator_method_self_escaping_refused", """\
+struct T:
+    var k: Int
+    def __init__(out self, k: Int):
+        self.k = k
+    def run(self):
+        def g():
+            yield self.k
+        return g()
+
+def main():
+    var t = T(7)
+    var it = t.run()
+    for v in it:
+        print(v)
+""", "variable(s) self")
 
 
 def run_tests():

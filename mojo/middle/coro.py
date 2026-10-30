@@ -4407,6 +4407,13 @@ def lower(stmts: list, closure_stmts=(),
                         continue
                 _kept.append(m)
             s.methods = _kept
+            # A method that stays a method may still define a nested sync
+            # generator that captures something (its own locals, or `self`);
+            # hoist those out to top-level generators, as for a plain def.
+            for m in _kept:
+                if (isinstance(m, N.FunctionDef) and not getattr(m, 'is_generator', False)
+                        and not getattr(m, 'is_async', False)):
+                    method_bodies.extend(_hoist_method_nested_generators(m, s.name, meta))
         out.append(s)
     out = out + method_bodies
     out, nested_bodies, local_maps = _hoist_nested_async(out, meta)
@@ -4909,13 +4916,18 @@ def _nested_async_drive_unthreadable(inner: N.FunctionDef,
     return True
 
 
-def _nested_async_capture_plan(inner: N.FunctionDef, outer: N.FunctionDef) -> dict | None:
+def _nested_async_capture_plan(inner: N.FunctionDef, outer: N.FunctionDef,
+                               self_struct: str | None = None) -> dict | None:
     """`{}` if `inner` captures nothing from `outer` (the common case --
     proceed exactly as before); a non-empty `{name: _Capture}` are the
     captures to box; `None` when `inner` captures something from `outer`
     that v0 cannot support -- distinct from "no captures at all" so the
     caller can refuse (fall through to the cpp path) instead of silently
-    compiling a body that references an unresolved bare name."""
+    compiling a body that references an unresolved bare name.
+
+    `self_struct` is set when `outer` is a method of that struct: its
+    `self` is then NOT a box -- `_capture_self_into_generator` hands it over
+    as a pointer -- so it is left out of the plan rather than refused."""
     captured_names = _nested_async_free_vars(inner, outer)
     # BEFORE the "captures nothing" early-out below, deliberately. The
     # unthreadable-call-site test is about the CALL SITE, not about what
@@ -4947,6 +4959,8 @@ def _nested_async_capture_plan(inner: N.FunctionDef, outer: N.FunctionDef) -> di
         outer_param_names.add(_pn)
     plan: dict = {}
     for n in captured_names:
+        if n == 'self' and self_struct is not None:
+            continue                    # handed over as a pointer, not boxed
         if n in boxable:
             plan[n] = boxable[n]
             continue
@@ -5386,6 +5400,186 @@ def _only_called_in(outer: N.FunctionDef, name: str) -> bool:
     return True
 
 
+def _generator_result_escapes(outer: N.FunctionDef, name: str) -> bool:
+    """True when a call to the nested generator `name` in `outer` can hand
+    its generator object out of `outer`'s frame. Only a generator that
+    captures `self` cares: its hidden `self` pointer is `outer`'s own
+    receiver, so a generator outliving the method would dereference a
+    struct the caller may already have dropped. Consuming positions are
+    safe: an iteration source, an expression statement, the argument of
+    `next(...)`, and assignment to a plain local -- and a local that holds
+    the generator is safe only while every mention of it is one of the
+    same consuming positions."""
+    def _is_call(n) -> bool:
+        return (isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr)
+                and n.func.name == name)
+
+    def _is_next_of(n):
+        return (isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr)
+                and n.func.name == 'next' and len(n.args) == 1)
+
+    nodes = _walk(outer)
+    safe_calls = set()
+    local_names = set()
+    for n in nodes:
+        if isinstance(n, N.ForStmt) and _is_call(n.iterable):
+            safe_calls.add(id(n.iterable))
+        elif isinstance(n, N.ExprStmt) and _is_call(n.value):
+            safe_calls.add(id(n.value))
+        elif isinstance(n, N.AssignStmt) and isinstance(n.target, N.IdentExpr) \
+                and _is_call(n.value):
+            safe_calls.add(id(n.value))
+            local_names.add(n.target.name)
+        elif _is_next_of(n) and _is_call(n.args[0]):
+            safe_calls.add(id(n.args[0]))
+    for n in nodes:
+        if _is_call(n) and id(n) not in safe_calls:
+            return True
+    if not local_names:
+        return False
+    safe_names = set()
+    for n in nodes:
+        if isinstance(n, N.ForStmt) and isinstance(n.iterable, N.IdentExpr):
+            safe_names.add(id(n.iterable))
+        elif isinstance(n, N.AssignStmt) and isinstance(n.target, N.IdentExpr):
+            safe_names.add(id(n.target))
+        elif _is_next_of(n) and isinstance(n.args[0], N.IdentExpr):
+            safe_names.add(id(n.args[0]))
+    for n in nodes:
+        if isinstance(n, N.IdentExpr) and n.name in local_names and id(n) not in safe_names:
+            return True
+    return False
+
+
+def _capture_self_into_generator(inner: N.FunctionDef, outer: N.FunctionDef,
+                                 struct_name: str):
+    """Hands the enclosing method's `self` to a hoisted nested generator
+    `inner` as a hidden trailing `Int` parameter -- the same pointer-sized
+    transport the box handles use, and deliberately not a struct-typed
+    parameter: the sync-generator eligibility gate is scalar-only, and a
+    struct param would also take the `T *` prologue path nothing sync
+    exercises. The body re-types it on entry (`self: T = UnsafePointer[T]
+    (__cap_self)`, the same int-to-pointer erasure `_async_method_setup`
+    uses for a struct param), so every `self.field` in the body lowers as
+    it does in a method. Each direct call site in `outer` passes `self` as
+    its address. Nothing in `outer` is rewritten: `self` already names the
+    live receiver there."""
+    hidden = _hidden_box_name('self')
+    inner.params = list(inner.params) + [(hidden, 'Int')]
+    _erase = N.CallExpr(
+        func=N.SubscriptExpr(obj=N.IdentExpr(name='UnsafePointer'),
+                             index=N.IdentExpr(name=struct_name)),
+        args=[_c_ident(hidden)])
+    inner.body = [N.VarDecl(name='self', type_ann=struct_name, value=_erase)] \
+        + list(inner.body)
+    hits: list = []
+    for st in outer.body:
+        _find_calls_to(st, inner.name, hits)
+    for call in hits:
+        call.args.append(N.MemberExpr(obj=N.IdentExpr(name='self'), member='address'))
+
+
+def _calls_in_nested_defs(outer: N.FunctionDef, inner: N.FunctionDef) -> bool:
+    """True if a def nested in `outer` (other than `inner` itself) calls
+    `inner`. A sibling def would need the `self` pointer threaded through
+    it, which only the box machinery does, so the self capture refuses
+    rather than miscompile."""
+    for st in outer.body:
+        if isinstance(st, N.FunctionDef) and st is not inner:
+            for n in _walk(st):
+                if (isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr)
+                        and n.func.name == inner.name):
+                    return True
+    return False
+
+
+def _hoist_nested_sync_generator(s: N.FunctionDef, inner: N.FunctionDef,
+                                 meta: list, base: str, struct_name):
+    """Lowers one nested SYNC generator `inner` of enclosing def `s` (a plain
+    function, or a struct method when `struct_name` is set) as a hoisted
+    top-level generator named `base`. Returns the lowered body, or None when
+    it stays in place. The caller renames the call sites and removes `inner`
+    (`_finish_sync_hoist`).
+
+    Only the capturing shape is hoisted: a sync generator that captures
+    nothing already compiles through the C++ companion
+    (`_cpp_compile_nested_sync_helpers`), so moving it would change working
+    output for no gain. The capture rides the same box machinery as a
+    nested async generator -- the enclosing local becomes a heap box, and
+    the generator takes the box handle as a trailing hidden parameter that
+    every call site in the enclosing function forwards. A method's `self`
+    is the one capture that is not boxed: see `_capture_self_into_generator`."""
+    if not _eligible(inner)[0]:
+        return None
+    # The box handle travels as a hidden argument that only the enclosing
+    # function's own CALL sites can supply. A generator that escapes as a
+    # value (`return render`) would be called later with no handle, so it
+    # stays on the C++ path.
+    if not _only_called_in(s, inner.name):
+        return None
+    cap_map = _nested_async_capture_plan(inner, s, self_struct=struct_name)
+    if cap_map is None:
+        return None
+    uses_self = struct_name is not None and 'self' in _nested_async_free_vars(inner, s)
+    if not cap_map and not uses_self:
+        return None
+    if uses_self:
+        # The `self` pointer is only valid while the method's frame is live:
+        # a generator that outlives it, or that a sibling def drives, cannot
+        # be given it honestly.
+        if _generator_result_escapes(s, inner.name) or _calls_in_nested_defs(s, inner):
+            return None
+    if cap_map:
+        _apply_nested_async_capture(inner, s, cap_map)
+    if uses_self:
+        _capture_self_into_generator(inner, s, struct_name)
+    body = _lower_one(inner, meta, base=base)
+    meta[-1]['nested'] = True
+    return body
+
+
+def _finish_sync_hoist(s: N.FunctionDef, sync_rename: dict) -> None:
+    """Removes the hoisted sync generators from `s.body` and renames every
+    call to them to its qualified base. Walks the WHOLE remaining body, nested
+    sibling defs included: a sibling `def` that drives the generator is a
+    call site too, and `_find_calls_to` prunes those."""
+    if not sync_rename:
+        return
+    s.body = [x for x in s.body
+              if not (isinstance(x, N.FunctionDef)
+                      and getattr(x, 'is_generator', False)
+                      and x.name in sync_rename)]
+    for _st in s.body:
+        for _n in _walk(_st):
+            if (isinstance(_n, N.CallExpr) and isinstance(_n.func, N.IdentExpr)
+                    and _n.func.name in sync_rename):
+                _n.func.name = sync_rename[_n.func.name]
+
+
+def _hoist_method_nested_generators(m: N.FunctionDef, struct_name: str,
+                                    meta: list) -> list:
+    """The method analogue of `_hoist_nested_async`'s sync-generator branch:
+    a struct method (not itself a generator or async def) that defines a
+    capturing nested sync generator, which `_hoist_nested_async` never reached
+    because it walks only top-level statements. The base is qualified by the
+    struct AND the method name, so two classes' methods can each define a
+    nested `g` without colliding. Returns the lowered generator bodies; `m`
+    stays in its struct."""
+    hoisted = []
+    sync_rename = {}
+    for inner in list(m.body):
+        if not (isinstance(inner, N.FunctionDef) and getattr(inner, 'is_generator', False)
+                and not getattr(inner, 'is_async', False)):
+            continue
+        base = f'__mgco_{struct_name}_{m.name}_{inner.name}'
+        body = _hoist_nested_sync_generator(m, inner, meta, base, struct_name)
+        if body is not None:
+            hoisted.append(body)
+            sync_rename[inner.name] = base
+    _finish_sync_hoist(m, sync_rename)
+    return hoisted
+
+
 def _hoist_nested_async(stmts: list, meta: list):
     """A `@parameter async def wrapper(): ...` local to an ordinary
     function (the create_task(wrapper()) idiom) is lowered exactly like a
@@ -5428,21 +5622,10 @@ def _hoist_nested_async(stmts: list, meta: list):
             if (isinstance(inner, N.FunctionDef) and getattr(inner, 'is_generator', False)
                     and not getattr(inner, 'is_async', False)):
                 base = f'__mgco_{s.name}_{inner.name}'
-                if not _eligible(inner)[0]:
-                    continue
-                # The box handle travels as a hidden argument that only the
-                # enclosing function's own CALL sites can supply. A generator
-                # that escapes as a value (`return render`) would be called
-                # later with no handle, so it stays on the C++ path.
-                if not _only_called_in(s, inner.name):
-                    continue
-                cap_map = _nested_async_capture_plan(inner, s)
-                if not cap_map:
-                    continue
-                _apply_nested_async_capture(inner, s, cap_map)
-                hoisted.append(_lower_one(inner, meta, base=base))
-                meta[-1]['nested'] = True
-                sync_rename[inner.name] = base
+                body = _hoist_nested_sync_generator(s, inner, meta, base, None)
+                if body is not None:
+                    hoisted.append(body)
+                    sync_rename[inner.name] = base
                 continue
             if isinstance(inner, N.FunctionDef) and getattr(inner, 'is_async', False):
                 base = f'__mgco_{s.name}_{inner.name}'
@@ -5495,20 +5678,7 @@ def _hoist_nested_async(stmts: list, meta: list):
                             meta[-1]['nested'] = True
                             rename[inner.name] = base
                             continue
-        if sync_rename:
-            s.body = [x for x in s.body
-                      if not (isinstance(x, N.FunctionDef)
-                              and getattr(x, 'is_generator', False)
-                              and x.name in sync_rename)]
-            # Every call to the hoisted generator now names its qualified
-            # base. Walk the WHOLE remaining body, nested sibling defs
-            # included: a sibling `def` that drives the generator is a
-            # call site too, and `_find_calls_to` prunes those.
-            for _st in s.body:
-                for _n in _walk(_st):
-                    if (isinstance(_n, N.CallExpr) and isinstance(_n.func, N.IdentExpr)
-                            and _n.func.name in sync_rename):
-                        _n.func.name = sync_rename[_n.func.name]
+        _finish_sync_hoist(s, sync_rename)
         if rename:
             s.body = [x for x in s.body
                       if not (isinstance(x, N.FunctionDef)
