@@ -2750,6 +2750,27 @@ def main():
     print(0)
 """)
 
+    # Star-args string/double loop-target yield (bug CODEGEN_coro_star_args_str_...)
+    test_generator_stdout("coro_star_args_str_yield", """\
+def words(*ws):
+    for w in ws:
+        yield w
+
+def main():
+    for s in words("alpha", "beta"):
+        print(s)
+""", "alpha\nbeta\n")
+
+    test_generator_stdout("coro_star_args_double_yield", """\
+def halves(*xs):
+    for x in xs:
+        yield x
+
+def main():
+    for s in halves(1.5, 2.25):
+        print(s)
+""", "1.5\n2.25\n")
+
     # Milestone C step 2 (yield-from delegation): the exact target shape —
     # `outer` delegates its entire output to `inner` via a bare
     # `yield from inner()`. `inner` must be defined before `outer` (see
