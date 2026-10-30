@@ -217,6 +217,13 @@ _FOREIGN_PKG_FILES = {
                    "    while i < n:\n"
                    "        yield i\n"
                    "        i = i + 1\n"),
+    # A class with a defaulted trailing `__init__` parameter, constructed from
+    # a generator the cpp path lowers (see run_ctor_default_arg_in_generator_
+    # tests). Imported rather than defined alongside so the constructor is a
+    # cross-module struct, the shape `c_parser/parser/__init__.py` hit.
+    'box.py': ("class Box:\n"
+               "    def __init__(self, x, bump=5):\n"
+               "        self.x = x + bump\n"),
 }
 
 
@@ -2113,6 +2120,36 @@ def main():
 """, "unpack call argument is not supported")
 
 
+def run_ctor_default_arg_in_generator_tests():
+    # A struct constructor call inside a generator body (`Box(n)`) lowered
+    # its arguments verbatim, so an omitted defaulted trailing parameter
+    # reached the C++ companion as a call with too few arguments: g++
+    # "too few arguments to function '_..._Box___init__'". The ordinary path
+    # and the generator's own struct-method calls already pad from the
+    # declared defaults; the constructor branch must do the same. The default
+    # must be non-zero (`bump=5`) so an omitted argument that silently became
+    # 0 cannot pass by accident.
+    #
+    # The consumer's `*, start=[]` is what keeps it on the cpp path (the same
+    # reason the foreign-handle fixtures above use it); `Box` lives in a
+    # sibling module, as `SourceInfo` does in the c_parser case.
+    _test_foreign_a3_generator_handle(
+        "generator_struct_ctor_fills_a_trailing_default",
+        "from .box import Box\n"
+        "\n"
+        "def consume(n, *, start=[]):\n"
+        "    b = Box(n)\n"
+        "    yield b.x\n"
+        "    yield Box(2, 10).x\n"
+        "\n"
+        "def main():\n"
+        "    for v in consume(4):\n"
+        "        print(v)\n"
+        "\n"
+        "main()\n",
+        "9\n12\n")
+
+
 def run_nested_generator_capture_tests():
     # A generator defined INSIDE another def that reads one of that def's
     # parameters or locals. The coroutine path has no capture model for a
@@ -2354,6 +2391,7 @@ def run_tests():
     run_lambda_capture_tests()
     run_variadic_lambda_value_tests()
     run_unpack_call_forward_tests()
+    run_ctor_default_arg_in_generator_tests()
     run_mixed_yield_kind_tests()
     run_next_method_tests()
     run_next_return_position_tests()
@@ -6221,6 +6259,61 @@ def go():
 
 go()
 """, "A\nB\n")
+
+    # `for i, r in enumerate(<param>)`: a two-slot loop target, which
+    # `_static_env` skipped entirely, so `yield r` had no kind and the value
+    # slot defaulted to int64_t. A float element came out as its raw IEEE-754
+    # bits (`1` / `2` where CPython prints `1.5` / `2.5`) with exit 0. The
+    # index `i` is an int and the element is a float, so the value slot cannot
+    # carry both: the right answer is an honest refusal, which the interpreter
+    # fallback then runs correctly. The refusal names the truncation.
+    test_generator_refused("generator_enumerate_float_element_is_refused_not_truncated", """\
+def rows(data):
+    for i, r in enumerate(data):
+        yield i
+        yield r
+
+def main():
+    for v in rows([1.5, 2.5]):
+        print(v)
+main()
+""", "a `yield` of a float value is typed 'int64_t'")
+
+    # The positive side of the same fix: an enumerate loop whose yields are
+    # all the element (float, or string) compiles and prints the element, and
+    # one whose yields are all the index compiles and prints the index.
+    test_generator_stdout("generator_enumerate_float_element_yields_float", """\
+def rows(data):
+    for i, r in enumerate(data):
+        yield r
+
+def main():
+    for v in rows([1.5, 2.5]):
+        print(v)
+main()
+""", "1.5\n2.5\n")
+
+    test_generator_stdout("generator_enumerate_index_yields_index", """\
+def rows(data):
+    for i, r in enumerate(data):
+        yield i
+
+def main():
+    for v in rows([1.5, 2.5]):
+        print(v)
+main()
+""", "0\n1\n")
+
+    test_generator_stdout("generator_enumerate_string_element_yields_string", """\
+def rows(data):
+    for i, r in enumerate(data):
+        yield r
+
+def main():
+    for v in rows(['a', 'b']):
+        print(v)
+main()
+""", "a\nb\n")
 
     # A local bound to a str METHOD CALL. `_yield_kind` had no arm for a
     # method call on a string, so `s` got no kind, `for it in s` found no

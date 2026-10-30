@@ -422,6 +422,63 @@ def test_bare_import_sibling_function_call_through_module() -> bool:
     return ok
 
 
+def test_cross_module_unannotated_param_takes_the_callers_literal_type() -> bool:
+    """`shutil.which(cmd, ...)` is the shape that broke `ctypes/util.py`:
+    an UNANNOTATED free function in another module whose parameter is only
+    ever forwarded to a return, called with a string literal. The importer's
+    literal call site is the only evidence of `cmd`'s type, and the same
+    module's own call sites have always supplied it (Pass 1.3d); the
+    cross-module path did not, so `cmd` stayed at the `int64_t` default and
+    `return cmd` answered an `int64_t`. The caller then printed the string's
+    POINTER as a decimal integer (`4343434384`), exit 0.
+
+    The two spellings pinned here are the ones the cross-module literal
+    contract reaches: a bare `import SIBLING` attribute call bound to a
+    local inside a function, and a `from SIBLING import fn` call. Each must
+    print what CPython prints. (A module-scope global bound from a bare
+    module attribute call is a separate gap in result-type inference, filed
+    in bugs/CODEGEN_module_attr_call_result_type_is_not_inferred.md, and is
+    deliberately not pinned here as if it were correct.)"""
+    lib = (
+        'def which(cmd, path=None):\n'
+        '    return cmd\n'
+    )
+    pkg = {
+        '_shm.py': lib,
+        'bimp.py': (
+            'import _shm\n'
+            '\n'
+            'def find(name):\n'
+            "    c = _shm.which('gcc')\n"
+            '    if not c:\n'
+            '        return None\n'
+            '    print(c)\n'
+            '\n'
+            'find(1)\n'
+        ),
+        'bimpf.py': (
+            'from _shm import which\n'
+            '\n'
+            "print(which('gcc'))\n"
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 'bimp.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'bimp.py')
+        rc2, stdout2 = _build_and_run(pkg, 'bimpf.py', td)
+        py_rc2, py_stdout2 = _cpython_run(td, 'bimpf.py')
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and stdout.strip() == 'gcc'
+          and rc2 == 0 and py_rc2 == 0 and stdout2 == py_stdout2
+          and stdout2.strip() == 'gcc')
+    if not ok:
+        print(f"  ✗ cross_module_unannotated_param_takes_the_callers_literal_type: "
+              f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r}) "
+              f"| from-import rc={rc2} stdout={stdout2!r} "
+              f"(CPython rc={py_rc2} {py_stdout2!r})")
+    return ok
+
+
 def test_sibling_class_attribute_function_scoped() -> bool:
     """A CLASS attribute read (`Parameter.VAR_POSITIONAL`) where the import
     is function-scoped. Used to print `0`: with the class never inlined, the
@@ -937,7 +994,7 @@ def test_unannotated_param_with_disagreeing_call_sites() -> bool:
     #
     # What is asserted is BUILDABILITY, and deliberately so: the values these
     # print are still wrong (a pointer decimal for the list), which is the
-    # runtime-tag row of bugs/CODEGEN_polymorphic_param_non_str_kinds_print_wrong.md
+    # runtime-tag row of bug CODEGEN_polymorphic_param_non_str_kinds_print_wrong
     # (the float beside an integer is fixed, in `cases` above). Asserting
     # the wrong text would pin a bug; asserting only that it COMPILES is the
     # whole content of this row, and it was a hard failure before.
@@ -970,10 +1027,10 @@ def test_unannotated_param_with_disagreeing_call_sites() -> bool:
             ok = False
             print(f"  ✗ unannotated_param_container_does_not_break_the_build"
                   f"[{i}]: compiled but exited {rc}")
-    # ARITHMETIC on the float-possible parameter (bugs/
-    # CODEGEN_polymorphic_param_non_str_kinds_print_wrong.md). `x OP n` with
-    # `+`, `-` or `*` is answered by `_float_param_arith`: the integer answer
-    # when the argument was an integer, and a double box holding the double
+    # ARITHMETIC on the float-possible parameter (bug
+    # CODEGEN_polymorphic_param_non_str_kinds_print_wrong). `x OP n` with
+    # `+`, `-`, `*`, `//`, `%` is answered by `_float_param_arith`: the integer
+    # answer when the argument was an integer, and a double box holding the
     # answer when it was a float, picked at run time. Each expectation is the
     # CPython answer, so this pins the real double read, not the old truncation.
     # `print(x)` is pinned by `cases` above. A DOUBLE operand beside the
@@ -988,6 +1045,10 @@ def test_unannotated_param_with_disagreeing_call_sites() -> bool:
         ('def f(x):\n    print(x * 2.5)\n\n\nf(1)\nf(2.5)\n', '2.5\n6.25\n'),
         ('def f(x):\n    print(2.5 * x)\n\n\nf(2.5)\nf(1)\n', '6.25\n2.5\n'),
         ('def f(x):\n    print(x + 0.5)\n\n\nf(2.5)\nf(1)\n', '3.0\n1.5\n'),
+        # `//` and `%`: floor division and modulo, the two remaining float
+        # arithmetic arms (`_FLOAT_PARAM_OPS`) beside the float-possible param.
+        ('def f(x):\n    print(x // 2)\n\n\nf(2.5)\nf(1)\n', '1.0\n0\n'),
+        ('def f(x):\n    print(x % 2)\n\n\nf(2.5)\nf(1)\n', '0.5\n1\n'),
     ]
     for i, (src, want) in enumerate(arithmetic):
         with tempfile.TemporaryDirectory() as td:
@@ -1769,6 +1830,7 @@ CASES = [
     test_bare_import_sibling_struct_ctor_through_module,
     test_bare_import_sibling_struct_field_through_module,
     test_bare_import_sibling_function_call_through_module,
+    test_cross_module_unannotated_param_takes_the_callers_literal_type,
     test_module_scoped_cross_module_struct_ctor_both_import_spellings,
     test_module_scoped_cross_module_ctor_arg_through_a_param,
     test_dotted_sibling_import_qualifier_agrees,

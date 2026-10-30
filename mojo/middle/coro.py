@@ -30,6 +30,7 @@ Anything not eligible is left untouched and falls through to the existing
 gimple_cpp_* C++20-coroutine path -- incremental cutover.
 """
 from __future__ import annotations
+import contextlib
 import dataclasses
 
 import os
@@ -110,6 +111,29 @@ def enabled() -> bool:
     # the old gimple_cpp_*.py C++20-coroutine emitter, kept live for one
     # release as a differential oracle (doc/COROUTINE.html §5.5/§5.6).
     return os.environ.get(_ENV, _MODE) != _OLD_MODE
+
+
+@contextlib.contextmanager
+def pinned(mode: str):
+    """Select the coroutine backend (`'cpp'` or `'stackswitch'`) for the
+    duration of one block, then restore whatever `MOJO_CORO` was before.
+
+    `enabled()` reads the env var at each compile, so a test that needs one
+    backend must say so around its own compile calls. A module-level
+    `os.environ[...] = ...` is process-wide: whichever test file is imported
+    last wins for every other file sharing the process. Scoped, it can't
+    leak into anything else."""
+    if mode not in (_OLD_MODE, _MODE):
+        raise ValueError(f"unknown coroutine backend {mode!r}")
+    _prev = os.environ.get(_ENV)
+    os.environ[_ENV] = mode
+    try:
+        yield
+    finally:
+        if _prev is None:
+            os.environ.pop(_ENV, None)
+        else:
+            os.environ[_ENV] = _prev
 
 
 # ── eligibility ─────────────────────────────────────────────────────────
@@ -496,6 +520,34 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
                 ek = 'p'          # `for c in 'ab':` -- characters are strings
         if isinstance(ek, str):
             env[tname] = ek
+    # `for i, x in enumerate(<xs>)`: the two-slot target the loop above
+    # skips. Slot 0 is the index, an int by construction, and slot 1 is one
+    # element of `xs`, so it takes `xs`'s element kind exactly as a single
+    # target would. Without this, `yield x` in such a loop had no kind, the
+    # value slot defaulted to int64_t, and a float element was yielded as its
+    # raw bits (`for i, r in enumerate([1.5, 2.5]): yield r` printed
+    # `1` / `2` where CPython prints `1.5` / `2.5`). Both names must be
+    # unbound, the same rule the single-name case uses.
+    for n in _walk(fn):
+        if not isinstance(n, N.ForStmt):
+            continue
+        it = n.iterable
+        if not (isinstance(it, N.CallExpr) and isinstance(it.func, N.IdentExpr)
+                and it.func.name == 'enumerate' and len(it.args) == 1
+                and isinstance(it.args[0], N.IdentExpr)):
+            continue
+        tnames = for_target_names(n.target)
+        if len(tnames) != 2 or any(t in env for t in tnames):
+            continue
+        src = env.get(it.args[0].name)
+        if isinstance(src, tuple) and src[0] == 'list':
+            elem = src[1]
+        elif src == 'p':
+            elem = 'p'
+        else:
+            continue
+        env[tnames[0]] = 'i'
+        env[tnames[1]] = elem
     if struct_def is not None:
         for f in getattr(struct_def, 'fields', []):
             if isinstance(f, N.VarDecl):
