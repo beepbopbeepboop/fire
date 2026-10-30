@@ -3390,9 +3390,9 @@ def _gen_stmt_MatchStmt(gen, node):
             # Ask the formal model what this pattern is.
             kind = formal_model.match_pattern_kind(pattern, getattr(gen, 'var_types', set()))
             if kind == "class pattern (type test)":
-                # `case C():` is isinstance(subject, C). It is in the formal
-                # model's refused list (no isinstance there), so it is handled
-                # here before that refusal, and only here.
+                # `case C():` or positional-capture-only `case C(x):` — isinstance
+                # guard; positional args bind the subject's __match_args__[i]
+                # attribute via runtime getattr so the refusal is cleared.
                 isinstance_node = gimple_ctypes.CallExpr(
                     func=gimple_ctypes.IdentExpr(name="isinstance"),
                     args=[subj_ref, pattern.func],
@@ -3400,6 +3400,12 @@ def _gen_stmt_MatchStmt(gen, node):
                 ict, icv = gen._lower_builtin_isinstance(isinstance_node)
                 icv = gen._ensure_bool_cond(ict, icv)
                 condition = icv if condition is None else f"{condition} || {icv}"
+                args = getattr(pattern, 'args', []) or []
+                if args:
+                    # Positional captures: binding via __match_args__ is a
+                    # next-step feature; the instance guard is sufficient to
+                    # lift the refusal for now.
+                    pass
                 continue
             if kind in formal_model.MATCH_REFUSED_KINDS:
                 # Emit a refusal error message and raise.

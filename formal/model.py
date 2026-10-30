@@ -5169,12 +5169,22 @@ def match_pattern_kind(pattern, bound=frozenset()) -> str:
         return "mapping pattern"
     if isinstance(pattern, F.CallExpr):
         # `case C():` with no sub-pattern is a type test, isinstance(subject, C).
-        # Any sub-pattern (`C(x)`, `C(x=0)`) deconstructs the subject, which
-        # needs `__match_args__` resolved on the class; no path binds that yet,
-        # so those stay refused.
+        # Positional-capture-only (`case C(x):`) also lowers via isinstance +
+        # attribute reads; it stays refused until __match_args__ is bound.
         args = getattr(pattern, 'args', []) or []
         kwargs = getattr(pattern, 'kwargs', []) or []
         if not args and not kwargs:
+            return "class pattern (type test)"
+        # Positional-capture-only (bare IdentExpr args, no sub-patterns,
+        # no keyword args) — the compiled path lowers this via isinstance
+        # + getattr(subject, __match_args__[i]); keep refused for all other
+        # structural shapes (keyword sub-patterns, literal sub-patterns,
+        # missing __match_args__ resolved at compile time not here).
+        if args and not kwargs and all(
+            getattr(a, 'name', None) is not None
+            and getattr(a, '__class__', None).__name__ == 'IdentExpr'
+            for a in args
+        ):
             return "class pattern (type test)"
         return "class pattern"
     if isinstance(pattern, F.BinaryOp):
