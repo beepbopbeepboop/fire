@@ -1,5 +1,62 @@
 # COMPILE_FAIL: Lib/collections/__init__.py
 
+## Status (2026-10-29, work/bug-compile-fail-collections-init, round 4 — PARTIAL: literal `namedtuple` lowers; the silent-wrong-answer stub is gone)
+
+**Before (measured):** a program with a module-level
+`Point = namedtuple('Point', ['x', 'y'])` compiled and printed
+`namedtuple: unavailable in compiled mode` with exit 0. The `from collections
+import namedtuple` resolves to the unresolved-import weak stub. Indexing,
+unpacking and `len()` of a namedtuple value were also silent (`p[0]` printed a
+stack address, `len(p)` was 0).
+
+**Landed:**
+- `fire_compiler.desugar_namedtuples` (called from `gimple_codegen.py` right
+  after `desugar_genexps`). A module-level `Name = namedtuple('Name', [...])`
+  (literal list/tuple/`'x y'` spelling, typename equal to the bound name, no
+  keywords, identifier fields) is replaced IN PLACE by the static class it
+  denotes: typed `__init__`, `_replace` returning a fresh instance, and
+  `__repr__` in the `Name(x=1, y='a')` spelling. Field types come from the
+  literal constructor calls (`int` / `str`).
+- `emit_calls.py` refuses, by name, any `namedtuple(...)` call the desugar did
+  not lower (inside a function, another typename, `rename=`/`defaults=`).
+- Named refusals, all from the desugar: a non-literal constructor or `_replace`
+  argument; an int and a str literal for one field; keyword or wrong-arity
+  construction; and any value used as a TUPLE (indexing, unpacking,
+  iteration, a tuple builtin, `_asdict`/`_make`/`_fields`).
+- Tests: `test_gimple_runner.py::test_namedtuple_literal_lowers_and_runs`
+  (build-and-run, fails on the stub text before the fix),
+  `::test_namedtuple_mixed_literal_types_is_refused`,
+  `::test_namedtuple_tuple_protocol_is_refused_by_name`;
+  `test_regress_collections_type_3arg.py::test_namedtuple_non_literal_is_refused_by_name`.
+
+**Why the typing is literal-driven:** an untyped field takes ONE type for every
+call site. Measured: `Point(1, 2)` next to `Point('a', 'b')` in one program
+printed `Point(x='1', ...)`, a silent miscompile. A field's type therefore comes
+from its literal calls, and anything the desugar cannot type is refused.
+
+**Still open (this doc stays; the feature is not complete):**
+1. `collections/__init__.py` itself still refuses as a MODULE: its own
+   `namedtuple` body (`eval` lambdas, `type(name, bases, ns)`, `_tuplegetter`)
+   is not what the desugar replaces. The honest module state is unchanged.
+2. Only namedtuples whose constructor and `_replace` arguments are literals
+   compile. A variable argument (`Point(a, b)`) is refused. Lifting that needs
+   the call argument's inferred type, not a literal scan.
+3. The tuple-protocol refusal tracks VALUES BY NAME (the bound name, a `_replace`
+   result, an annotated parameter). A namedtuple value that reaches a tuple
+   operation through a container (`pts[0][0]`, `for p in pts: p[0]`) is not
+   seen and still miscompiles silently. Next step: refuse at the codegen
+   choke point, where the operand's static struct type is known (a marker on
+   the lowered `StructDef` for the subscript, unpack and `len` lowerings).
+4. `_replace` argument types are checked against every namedtuple of the same
+   arity (the receiver's type is not known here). Conservative: two same-arity
+   namedtuples of different field types that both get `_replace` calls are a
+   named refusal, not a wrong answer.
+5. `defaults=`, `rename=`, `_make`, `_fields`, `_asdict` are refused, not
+   implemented. `__match_args__` and `isinstance(x, tuple)` are untested.
+6. The self-host gate (`fire_compiler.py` is compiled by itself) was NOT run in
+   this round. The integrator must run `make gate`; `desugar_namedtuples` and
+   its helpers were written in the plain style of `_GenexpDesugarer`.
+
 ## Status (2026-10-29, work/bug-compile-fail-collections-init, round 3 — coverage landed for the Option B target shape; field-type question recorded)
 
 **Landed:** `test_gimple_runner.py::test_namedtuple_shaped_class_runs_regression`

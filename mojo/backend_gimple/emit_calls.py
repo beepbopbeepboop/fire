@@ -3428,6 +3428,17 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             'cannot compile module: 3-argument type(name, bases, namespace) '
             'creates a class at run time, which the compiled path does not '
             'model (bug:COMPILE_FAIL_collections___init__)')
+    # A `namedtuple(...)` the module-level desugar (fire_compiler.
+    # desugar_namedtuples) did not lower: a call inside a function, a
+    # different typename, `rename=`/`defaults=`, a computed field list. It
+    # has no static struct to emit, so refuse it here by name. Before this
+    # it lowered to collections' unresolved-import stub, which printed
+    # `namedtuple: unavailable in compiled mode` and exited 0.
+    if fname_raw == 'namedtuple':
+        raise RuntimeError(
+            'cannot compile namedtuple(...) here: the compiled path lowers only '
+            'a module-level `Name = namedtuple("Name", [literal fields])` '
+            '(bug:COMPILE_FAIL_collections___init__)')
     if fname_raw == 'type'    and len(node.args) == 1:
         _, av = gen.lower_expr(node.args[0])
         # Read the struct's real leading __mojo_type_id field (see
