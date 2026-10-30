@@ -1,4 +1,4 @@
-## Status (2026-10-29, branch work/bug-compile-fail-zipfile-init-604 — the mechanism behind the `zipfile/__init__.py:741`/`:752` class is FIXED in codegen, reproduced by a minimal test; the file's own error count is NOT re-measured here)
+## Status (2026-10-29 — the mechanism behind the `zipfile/__init__.py:741`/`:752` class is FIXED on master (`9f1439bf2`, integrated as `62359e565`) and PINNED: `test_nonlocal.py` "sibling reads a cell another closure rebinds" passes in both interpreter and compiled arms (`nonlocal: PASS=18 FAIL=0`, re-run 2026-10-29). The file's own error count is NOT re-measured here; the doc stays open for the 9 `argparse`-downstream errors and the rest of the Status below)
 
 **Mechanism behind the 12-error class** (`_ZipDecrypter`'s `decrypter` closure,
 which reads `key2` and calls `update_keys`, the `nonlocal` writer of the same
