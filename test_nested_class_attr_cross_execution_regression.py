@@ -98,12 +98,58 @@ def main():
     f(5, 1)
 """, "caught\n5\n")
 
+def test_nested_class_attr_unwind_other_function_regression():
+    # The exception is raised in a nested execution of `x`, and it is caught
+    # by a DIFFERENT function (`h`), which defines no class of its own. `x`'s
+    # own restore never runs on that path, so the cell it reads must be put
+    # back during unwinding. Before the unwind-time restore this printed `6`
+    # where CPython prints `5`.
+    test_gimple_stdout("gimple_nested_class_attr_unwind_other_function", """\
+def x(v: int, d: int):
+    class T():
+        __version__ = v
+    if d > 0:
+        h(v + 1, d - 1)
+    if d == 0:
+        raise ValueError("x")
+    print(T.__version__)
+
+def h(v: int, d: int):
+    try:
+        x(v, d)
+    except ValueError:
+        print("caught")
+
+def main():
+    x(5, 1)
+""", "caught\n5\n")
+
+def test_class_attr_instance_read_falls_back_to_class_regression():
+    # An instance read of a class attribute that no instance write has shadowed
+    # reads the class attribute. Before the fallback every such read raised
+    # AttributeError, because an instance read consulted only dynamic storage.
+    # A write on the instance still shadows the class attribute, and the
+    # class-name read is unchanged. CPython prints 9, 4, 9.
+    test_gimple_stdout("gimple_class_attr_instance_read_fallback", """\
+class A():
+    x = 9
+
+def main():
+    a = A()
+    print(a.x)
+    a.x = 4
+    print(a.x)
+    print(A.x)
+""", "9\n4\n9\n")
+
 if __name__ == '__main__':
     test_nested_class_attr_cross_execution_regression()
     test_nested_class_container_attr_cross_execution_regression()
     test_nested_class_attr_recursive_execution_regression()
     test_nested_class_attr_recursive_value_return_regression()
     test_nested_class_attr_exception_unwind_regression()
+    test_nested_class_attr_unwind_other_function_regression()
+    test_class_attr_instance_read_falls_back_to_class_regression()
     print("PASS")
 
 def test_same_named_function_scoped_classes_attr_regression():

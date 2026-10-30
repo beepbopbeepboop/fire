@@ -4981,8 +4981,10 @@ class GimpleGen:
         return gst._annotation_dict_nested_val_type(self, ann)
     def _gen_stmt_VarDecl(self, node):
         return gst._gen_stmt_VarDecl(self, node)
-    def _track_pointer_actual_type(self, tname: str, dst: str, v: str, vtype: str) -> None:
-        return gst._track_pointer_actual_type(self, tname, dst, v, vtype)
+    def _track_pointer_actual_type(self, tname: str, dst: str, v: str, vtype: str,
+                                   rhs_is_none: bool = False) -> None:
+        return gst._track_pointer_actual_type(self, tname, dst, v, vtype,
+                                              rhs_is_none=rhs_is_none)
     def _assign_target(self, tgt, et, ev):
         return gst._assign_target(self, tgt, et, ev)
     def _is_except_as_member_target(self, obj_node) -> bool:

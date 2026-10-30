@@ -130,15 +130,9 @@ def _force_cpp_coro():
     it via MOJO_CORO=cpp, the documented escape hatch — see the test's own
     "_compiles_via_cpp_path" naming. Scoped (not a blanket module-level
     env var) so it can't leak into any other test sharing this process."""
-    _prev = os.environ.get('MOJO_CORO')
-    os.environ['MOJO_CORO'] = 'cpp'
-    try:
+    from mojo.middle import coro as _coro
+    with _coro.pinned('cpp'):
         yield
-    finally:
-        if _prev is None:
-            os.environ.pop('MOJO_CORO', None)
-        else:
-            os.environ['MOJO_CORO'] = _prev
 
 
 def selfhost_emitted_return_type(module: str, struct: str, method: str) -> str:
@@ -663,6 +657,76 @@ def set_only(n: Int):
         _FAIL += 1
 
 
+def test_rebound_container_param_is_the_box():
+    """A PARAMETER the body rebinds to a container of another kind is the box.
+
+    The parameter form of `_prebound_local_ctypes`'s rule for LOCALS: a name
+    the body binds to two container kinds has no single container type, so
+    the parameter is the box (`int64_t`). `walk` below stores a `MojoSet *`
+    and then a `MojoList *` into `live`; with one C variable typed as either
+    container, the other store is refused by `_sce_simple_emit`, which made
+    formal/model.py compile twice. A name rebound to ONE other container kind
+    is not this case: it takes that kind
+    (`test_nested_def_rebound_param_takes_the_container_it_stores`).
+    """
+    global _PASS, _FAIL
+    name = "rebound_container_param_is_the_box"
+    try:
+        ok, c_src, stderr = gimple_compiles("""\
+def outer(fn):
+    def inner(stmts, live):
+        live = set(live)
+        live = [1, 2]
+        return live
+    return inner
+
+
+def walk(stmts, live):
+    live = set(live)
+    live = [1, 2]
+    return live
+
+
+def same_kind(live):
+    for x in live:
+        pass
+    live = [1, 2]
+    return live
+""")
+    except TypeError as e:
+        print(f"FAIL  {name}: the codegen refused the module outright: {e}")
+        _FAIL += 1
+        return
+
+    def param_ctype(fname, pname):
+        """The C type `pname` is DECLARED with in `fname`'s emitted DEFINITION
+        (the occurrence whose parameter list names its parameters, not the
+        bare-typed forward declaration above it)."""
+        m = re.search(r'^\S[^\n;]*\b' + re.escape(fname) + r'_[0-9a-f]+'
+                      r'\s*\(([^;\n]*)\)\s*$', c_src, re.M)
+        if m is None:
+            return ''
+        for part in m.group(1).split(','):
+            part = part.strip()
+            if part.endswith(' ' + pname):
+                return part[:-len(pname) - 1]
+        return ''
+
+    walk_t = param_ctype('walk', 'live')
+    same_t = param_ctype('same_kind', 'live')
+    if ok and walk_t == 'int64_t' and same_t == 'MojoList *':
+        print(f"PASS  {name}  (walk.live={walk_t}, same_kind.live={same_t})")
+        _PASS += 1
+    else:
+        print(f"FAIL  {name}: compiles={ok} walk.live={walk_t!r} "
+              f"same_kind.live={same_t!r} (want 'int64_t' and 'MojoList *': "
+              f"a rebound to ANOTHER kind is the box, to the SAME kind is not)")
+        if not ok:
+            for line in stderr.splitlines()[:8]:
+                print(f"      {line}")
+        _FAIL += 1
+
+
 def test_returned_param_takes_its_declared_container_return_type():
     """An unannotated parameter a `-> container` function hands STRAIGHT back
     is that container.
@@ -766,6 +830,112 @@ def rebound(kind, box) -> dict:
         if not ok:
             for line in stderr.splitlines()[:8]:
                 print(f"      {line}")
+        _FAIL += 1
+
+
+def test_nested_def_rebound_param_takes_the_container_it_stores():
+    """An unannotated parameter the body rebinds to a container takes THAT
+    container, even when the function is a nested `def`.
+
+    `live = set(live)` is iteration evidence for `live` (`set` is an
+    iterable-consuming builtin), so `_infer_param_types` reached its last-
+    resort container guess, `MojoList *`, and the store of the `MojoSet *`
+    into it was refused: "cannot coerce MojoSet * to MojoList * (incompatible
+    container kinds) ... dest='live'". That is the error that took out the
+    `bootstrap-stage1-transitive` gate job on formal/model.py's `walk_stmts`.
+
+    At module scope the same program compiled, because the module-level call
+    `walk({3})` grounds the guess in the argument it is actually given. A
+    nested def has no such call-site evidence, so the rebinding is the only
+    thing that can say what the parameter holds, and it must.
+
+    The top-level twin is kept as the control: it compiled before the fix and
+    must still compile after it."""
+    nested = """\
+def outer():
+    def walk(live):
+        live = set(live)
+        live.add(1)
+        return live
+    return walk({3})
+
+def main():
+    print(len(outer()))
+main()
+"""
+    top = """\
+def walk(live):
+    live = set(live)
+    live.add(1)
+    return live
+
+def main():
+    print(len(walk({3})))
+main()
+"""
+    # The shape the gate actually hit: formal/model.py's `walk_stmts` rebinds
+    # its parameter to a set and then grows it with `|=` / `-=` / `.add()`
+    # across a loop, inside a nested def that calls a nested helper.
+    nested_stmts = """\
+def outer(stmts, seed):
+    def expr_reads(e, live):
+        if e is None:
+            return
+        live.add(e)
+    def walk_expr(e, live):
+        expr_reads(e, live)
+    def walk_stmts(stmts, live):
+        live = set(live)
+        for s in (stmts or []):
+            if s == 1:
+                walk_expr(s, live)
+                live |= set([s])
+                continue
+            if s == 2:
+                live -= set([s])
+                live.add(s)
+                continue
+        return live
+    out = walk_stmts(stmts, set(seed))
+    return len(out)
+
+def main():
+    print(outer([1, 2], {3}))
+main()
+"""
+    global _PASS, _FAIL
+    name = "nested_def_rebound_param_takes_the_container_it_stores"
+    try:
+        ok_top, _, err_top = gimple_compiles(top)
+    except TypeError as e:
+        print(f"FAIL  {name}: the top-level control was refused: {e}")
+        _FAIL += 1
+        return
+    try:
+        ok, c_src, stderr = gimple_compiles(nested)
+    except TypeError as e:
+        print(f"FAIL  {name}: the codegen refused the nested def outright: {e}")
+        _FAIL += 1
+        return
+    try:
+        ok_shaped, _, err_shaped = gimple_compiles(nested_stmts)
+    except TypeError as e:
+        print(f"FAIL  {name}: the codegen refused the walk_stmts-shaped def: {e}")
+        _FAIL += 1
+        return
+    if not ok_shaped:
+        print(f"FAIL  {name}: the walk_stmts-shaped nested def did not compile")
+        for line in err_shaped.splitlines()[:8]:
+            print(f"      {line}")
+        _FAIL += 1
+        return
+    if ok and ok_top:
+        print(f"PASS  {name}")
+        _PASS += 1
+    else:
+        print(f"FAIL  {name}: nested compiled={ok} top-level compiled={ok_top}")
+        for line in (stderr or err_top).splitlines()[:8]:
+            print(f"      {line}")
         _FAIL += 1
 
 
@@ -1110,9 +1280,18 @@ def main():
     # ... and a parameter a `-> container` function hands back is that
     # container, which is what took out selfhost/mojoc/bootstrap-stage2-cc.
     _run_isolated(lambda: test_returned_param_takes_its_declared_container_return_type(), 'test_returned_param_takes_its_declared_container_return_type (line 1083)')
+    # ... and a parameter the body rebinds to a container of ANOTHER kind is
+    # the box too, not the kind the iteration guess gave it: the same one
+    # C variable cannot be both, and the refusal it caused built
+    # formal/model.py twice (bugs/CODEGEN_selfhost_closure_set_kind_refusal_
+    # double_compiles_the_module.md).
+    _run_isolated(lambda: test_rebound_container_param_is_the_box(), 'test_rebound_container_param_is_the_box')
     # ... and a lifted lambda does not un-rename the enclosing function's
     # shadowing locals, which is the next layer of the same build.
     _run_isolated(lambda: test_a_lifted_lambda_keeps_the_enclosing_functions_renamed_locals(), 'test_a_lifted_lambda_keeps_the_enclosing_functions_renamed_locals (line 1086)')
+    # ... and a nested def's parameter that the body rebinds to a container
+    # takes that container, not the usage guess that refused the store.
+    _run_isolated(lambda: test_nested_def_rebound_param_takes_the_container_it_stores(), 'test_nested_def_rebound_param_takes_the_container_it_stores')
 
 
     # 1. Empty void function (pass body)
@@ -8421,6 +8600,103 @@ main()
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_tuple_unpack_of_a_boxed_dict_inside_a_method_builds():
+        """Unpacking an opaque value that turns out to be a dict, from a METHOD
+        body, must pass gcc -fgimple.
+
+        `a, b = ident(self._d)` materializes the value through
+        _materialize_as_list's dict arm, which records the slot kind with
+        `mojo_list_set_kinds_uniform(result, 'p')`. That char argument was
+        emitted as `_new_val('char', "'p'")`, i.e. `_t9 = 'p';` into a `char`
+        temp. A character literal is an `int` in C, and GCC's -fgimple refuses
+        a bare int constant assigned to a char temp ("non-trivial conversion
+        in 'integer_cst'"). Only a method body is GIMPLE-tagged, so a plain
+        top-level `a, b = ident(d)` (the sibling test above) never reached it.
+        The fix is the explicit `(char)` cast every other char constant in
+        the emitters carries.
+
+        This pins the BUILD, not the printed keys: the unpacked slots are
+        still read as raw pointer words, which is a separate, pre-existing
+        defect (the same symptom `list_of_a_boxed_dict_materializes_keys_as_
+        strings` already fails on). Asserting the values here would make this
+        test red for a reason this fix does not touch.
+        """
+        global _PASS, _FAIL
+        name = "tuple_unpack_of_a_boxed_dict_inside_a_method_builds"
+        src = '''\
+def ident(x):
+    return x
+class Box:
+    def __init__(self, d):
+        self._d = d
+    def show(self):
+        a, b = ident(self._d)
+        print(a)
+        print(b)
+def main():
+    Box({"k": 1, "j": 2}).show()
+main()
+'''
+        for mode in ('single-TU', 'link-mode'):
+            got = _compiled_stdout(src, mode)
+            if isinstance(got, tuple):
+                print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                      f"{got[1][:800]}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_list_of_a_boxed_dict_materializes_keys_as_strings():
+        """`list(<a boxed dict>)` must print the dict's keys, not the decimal
+        addresses of those keys.
+
+        `def ident(x): return x` type-erases its result to a boxed handle, so
+        `list(ident(d))` routes through _materialize_as_list's opaque arm. The
+        merged temp must be marked so the loop accessor reads each slot with
+        mojo_list_get_boxed (which consults the per-slot kinds table) instead of
+        mojo_list_get_int (which reads the char* pointer bits as a bare
+        integer). Fixed by recording mojo_list_set_kinds_uniform(result, 'p')
+        in the bb_dict branch and registering result in _maybe_kinds_vals.
+
+        The other three branches (set / registered-list / boxed) share the temp
+        and must keep their old behaviour: mojo_list_get_boxed with no kinds
+        table entry reads slot kind 'i', which returns the bare word — identical
+        to mojo_list_get_int. The generator suite's
+        `generator_pops_heterogeneous_tagged_stack` and
+        `generator_pops_stack_two_level_tuple_unpack` are the regression guard
+        that an earlier _elem_types attempt broke by retyping every branch.
+        """
+        global _PASS, _FAIL
+        name = "list_of_a_boxed_dict_materializes_keys_as_strings"
+        src = '''\
+def ident(x):
+    return x
+def main():
+    d = {"k": 1, "j": 2}
+    print(list(ident(d)))
+main()
+'''
+        want = _cpython_stdout(src)
+        if want is None:
+            print(f"FAIL  {name}: CPython does not run the fixture")
+            _FAIL += 1
+            return
+        for mode in ('single-TU', 'link-mode'):
+            got = _compiled_stdout(src, mode)
+            if isinstance(got, tuple):
+                print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                      f"{got[1][:800]}")
+                _FAIL += 1
+                return
+            if got != want:
+                print(f"FAIL  {name} [{mode}]: compiled stdout {got!r} != "
+                      f"CPython {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_a_returned_heterogeneous_list_keeps_its_slot_kinds():
         """A list literal's per-slot kinds must survive a `return`.
 
@@ -12944,6 +13220,7 @@ print(run('x/y.txt'))
         print(f"PASS  {name}")
         _PASS += 1
 
+
     _run_isolated(lambda: test_cursor_advance_has_no_cast_operand_in_gimple(), 'test_cursor_advance_has_no_cast_operand_in_gimple (line 12665)')
     _run_isolated(lambda: test_next_inside_for_over_same_iterator_advances_once(), 'test_next_inside_for_over_same_iterator_advances_once (line 12666)')
     _run_isolated(lambda: test_paren_name_vs_one_tuple_for_target_differ(), 'test_paren_name_vs_one_tuple_for_target_differ (line 12667)')
@@ -13001,6 +13278,8 @@ print(run('x/y.txt'))
     _run_isolated(lambda: test_variadic_lambda_lowers_as_gimple_in_every_body(), 'test_variadic_lambda_lowers_as_gimple_in_every_body (line 12718)')
     _run_isolated(lambda: test_scalar_given_a_char_star_parameter_is_stringified(), 'test_scalar_given_a_char_star_parameter_is_stringified (line 12719)')
     _run_isolated(lambda: test_ctor_of_a_container_reaches_the_comprehension(), 'test_ctor_of_a_container_reaches_the_comprehension (line 12720)')
+    _run_isolated(lambda: test_list_of_a_boxed_dict_materializes_keys_as_strings(), 'test_list_of_a_boxed_dict_materializes_keys_as_strings (line 12720a)')
+    _run_isolated(lambda: test_tuple_unpack_of_a_boxed_dict_inside_a_method_builds(), 'test_tuple_unpack_of_a_boxed_dict_inside_a_method_builds (line 12720b)')
     _run_isolated(lambda: test_a_string_passthrough_beside_an_int_one_keeps_its_own_elements(), 'test_a_string_passthrough_beside_an_int_one_keeps_its_own_elements')
     _run_isolated(lambda: test_a_returned_heterogeneous_list_keeps_its_slot_kinds(), 'test_a_returned_heterogeneous_list_keeps_its_slot_kinds (line 12721)')
     _run_isolated(lambda: test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not(), 'test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not (line 12722)')
@@ -13140,6 +13419,7 @@ if True:
 
 print(step(7))
 """, "inside a module-level block"), 'decorator_in_a_module_level_block_is_refused')
+
 
     # `len()` of a value the codegen could not type, where that value is a
     # LOCAL declared as a plain `int` — the shape that took out `make mojoc`,

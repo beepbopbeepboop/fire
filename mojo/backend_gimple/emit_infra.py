@@ -3391,7 +3391,11 @@ def _char_to_cstr(gen, typ: str, val: str, transient: bool = False, word_ok: boo
         iv = gen._new_val('int64_t', f'(int64_t){val}')
         ikey = gen._call_expr('char *', 'mojo_int_str_transient',
                               [('int64_t', iv)])
-        gen._cstr_key_src[ikey] = val
+        # The release's `orig` is the int64_t WORD, not `val`: `val` is a
+        # `char *` here (this is the pointer-typed arm), and passing it as the
+        # release's int64_t argument is the `-Wint-conversion` the self-host
+        # build hit. `iv` is the same word, already typed.
+        gen._cstr_key_src[ikey] = iv
         return 'char *', ikey
     return typ, val
 
@@ -4140,8 +4144,8 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         # readers to ask the runtime rather than trust one compile-time
         # element type (the merged temp also carries set/list/box branches).
         gen._emit_call('void', '', 'mojo_list_set_kinds_uniform',
-                       [('MojoList *', result), ('char', "'p'")])
-        gen._maybe_kinds_vals.add(str(result))
+                       [('MojoList *', result), ('char', gen._new_val('char', "(char)'p'"))])
+        gen._maybe_kinds_vals.add(result)
         # NO `gen._elem_types[result]` here, and that is load-bearing rather
         # than an omission. This arm merges FOUR different containers into one
         # temp, and the element type is a property of WHICH ONE, so a record
@@ -4378,6 +4382,14 @@ def _list_repr_fn(gen, rav: str) -> str:
     if _struct_slot_kind_bytes(gen, rav) is not None:
         return 'mojo_repr_list_kinds'
     et = gen._elem_types.get(rav)
+    # A value that MAY hold slots of different kinds, whose kinds the codegen
+    # cannot name statically, is a derived list: `list(t)`, `t[:]`, `t + t` of
+    # a mixed `struct.unpack` result, or a copy of a mixed literal. Its kinds
+    # travel on the value (`mojo_list_set_kinds`), so the kinds-aware helper
+    # reads them from the runtime row (see `_list_repr_call`). The single
+    # list-wide ctype below is exact only for a list that really is uniform.
+    if rav in gen._maybe_kinds_vals and et in ('double', 'int64_t'):
+        return 'mojo_repr_list_kinds'
     if et == 'double':
         return 'mojo_repr_list_doubles'
     if et == 'int64_t':
@@ -4485,9 +4497,17 @@ def _list_repr_call(gen, key: str, lst: str | None = None) -> tuple[str, list]:
     ends up being called with two arguments.
     """
     fn = gen._list_repr_fn(key)
-    args = [('MojoList *', lst if lst is not None else key)]
+    val = lst if lst is not None else key
+    args = [('MojoList *', val)]
     if fn == 'mojo_repr_list_kinds':
-        args.append(('const char *', gen._intern_string(_struct_slot_kind_bytes(gen, key))))
+        kinds = _struct_slot_kind_bytes(gen, key)
+        if kinds is not None:
+            args.append(('const char *', gen._intern_string(kinds)))
+        else:
+            # No static table: the kinds are the value's own row, which is
+            # what `mojo_repr_list_kinds` reads when handed NULL.
+            args.append(('const char *', gen._new_val(
+                'const char *', f'mojo_list_get_kinds ({val})')))
     elif fn == 'mojo_repr_list_slotkinds':
         args.append(('const char *', gen._intern_string(_tuple_slot_kind_bytes(gen, key))))
     return fn, args
@@ -6370,7 +6390,7 @@ def _unbox_float_param_operand(gen, node, ctype: str, val: str) -> tuple[str, st
 # the integer `/` that traps on a zero divisor. `//` and `%` are left out on
 # purpose: their integer forms can trap and their double forms are not C's
 # `/`/`%`, so they keep the truncating answer until they get their own arm.
-_FLOAT_ARITH_OPS = ('+', '-', '*')
+_FLOAT_ARITH_OPS = ('+', '-', '*', '//', '%')
 _FLOAT_DIV_OP = '/'
 _FLOAT_PARAM_OPS = _FLOAT_ARITH_OPS + (_FLOAT_DIV_OP,)
 
@@ -6428,14 +6448,22 @@ def _float_param_arith(gen, op: str, lnode, lt: str, lv: str, rnode, rt: str, rv
         dres = gen._call_expr('double', 'mojo_div_double',
                               [('double', _as_str(dl)), ('double', _as_str(dr))])
         return gen._call_expr('int64_t', 'mojo_box_from_double', [('double', _as_str(dres))])
-    dres = gen._new_val('double', f'({dl}) {op} ({dr})')
+    if op == '//':
+        dres = gen._new_val('double', f'floor(({_as_str(dl)}) / ({_as_str(dr)}))')
+    elif op == '%':
+        dres = gen._new_val('double', f'({_as_str(dl)} - ({_as_str(dr)}) * floor(({_as_str(dl)}) / ({_as_str(dr)})))')
+    else:
+        dres = gen._new_val('double', f'({dl}) {op} ({dr})')
     if lt == 'double' or rt == 'double':
         return gen._call_expr('int64_t', 'mojo_box_from_double', [('double', _as_str(dres))])
     lp = _is_may_hold_float_param(gen, lnode)
     rp = _is_may_hold_float_param(gen, rnode)
     _, ilv = _unbox_float_param_operand(gen, lnode, 'int64_t', lv)
     _, irv = _unbox_float_param_operand(gen, rnode, 'int64_t', rv)
-    ires = gen._new_val('int64_t', f'({_as_str(ilv)}) {op} ({_as_str(irv)})')
+    if op == '//':
+        ires = gen._new_val('int64_t', f'__mojo_floordiv ({_as_str(ilv)}, {_as_str(irv)})')
+    else:
+        ires = gen._new_val('int64_t', f'({_as_str(ilv)}) {op} ({_as_str(irv)})')
     return gen._call_expr('int64_t', 'mojo_float_arith_select', [
         ('int64_t', _as_str(lv) if lp else '0'),
         ('int64_t', _as_str(rv) if rp else '0'),

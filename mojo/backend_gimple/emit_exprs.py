@@ -2621,6 +2621,13 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # Bare class-name read goes to the current per-execution cell.
         t = gmp._cattr_read(gen, gname, gtype)
         return gtype, t
+    elif (struct_name in class_attrs and node.member in class_attrs[struct_name]
+            and ot.endswith(' *')):
+        # Instance read: dynamic storage first (an instance write shadows
+        # the class attribute), then the cell this instance was built under.
+        gname = class_attrs[struct_name][node.member]
+        gtype = gen._global_var_types.get(gname, 'int64_t')
+        return gmp._cattr_instance_dyn_read(gen, ov, ot, node.member, gname, gtype)
     elif struct_name in gen.struct_field_types and ot.endswith(' *'):
         # The struct defines its own `__getattr__` (compiled body ⇒ bare
         # `{Struct}___getattr__` key in func_return_types, or an overload
@@ -5238,6 +5245,15 @@ def _lower_percent_width_args(gen, rhs_exprs, arg_i: int, dyn: int) -> list:
 def _lower_floordiv(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
     lt, lv = gen.lower_expr(node.left)
     rt, rv = gen.lower_expr(node.right)
+    # A float-possible parameter beside an integer argument: the answer
+    # depends on whether the parameter holds an int or a double (in which
+    # case it is a double floor), the same shape as `_float_param_arith`.
+    # `//` is dispatched here before the arithmetic tail, so `//` needs its
+    # own float branch; the generic `__mojo_floordiv` path only sees plain
+    # ints/doubles and does not know how to print a double-side result.
+    from mojo.backend_gimple import emit_infra as ginf
+    if ginf._float_param_arith_applies(gen, '//', node.left, lt, node.right, rt):
+        return 'int64_t', ginf._float_param_arith(gen, '//', node.left, lt, lv, node.right, rt, rv)
     # Boxed-PythonObject floor division (2026-10-21 part 4, further,
     # test_python_object): `a // b` on box locals answers through the
     # runtime's word-class checks (int result, zero-division RAISE, double
@@ -6056,6 +6072,17 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
     # those slots correctly and the row would buy nothing.
     _kinds = _literal_slot_kinds(gen, lowered)
     _has_spread = any(_is_star_spread(_el) for _el, _et, _ev in lowered)
+    # A HETEROGENEOUS scalar literal's per-slot kinds are also a compile-time
+    # fact about THIS value, so they go in `gen._struct_slot_kinds` beside the
+    # `struct.unpack` and returned-literal rows. `_list_repr_fn` and the
+    # literal-index read consult that table before the single list-wide
+    # `_elem_types` ctype, which is `double` for `[1, 2.5]` and so printed
+    # `[1.0, 2.5]` and read the int slot as a double. The runtime row still
+    # travels with the value for every read with no compile-time index. A
+    # spread has no fixed slot count to describe, so it is left to the row.
+    if (not _has_spread and len(set(_kinds)) > 1
+            and set(_kinds) <= set(_LITERAL_SLOT_KIND_LONG)):
+        gen._struct_slot_kinds[t] = [_LITERAL_SLOT_KIND_LONG[_k] for _k in _kinds]
     # A list-of-lists literal whose INNER literal holds strings: the inner list
     # records 'p' (MOJO_KIND_STR) on every slot. A list of strings records no
     # row of its own (see `_literal_needs_kinds`), and with no row a slot reads
@@ -6297,6 +6324,13 @@ def _emit_star_spread(gen, dest: str, et: str, ev: str) -> None:
         ev = gen._coerce_to_type(_as_str(et), 'MojoList *', ev)
     gen._emit_call('void', '', 'mojo_list_extend',
                    [('MojoList *', dest), ('MojoList *', ev)])
+
+
+# The runtime's one-byte kind (`_literal_slot_kinds`) -> `gen._struct_slot_kinds`'
+# long-form spelling. Only the scalar and string kinds are here: a slot that is
+# a container or a None has no long form the static readers understand, so a
+# literal holding one keeps the runtime row alone.
+_LITERAL_SLOT_KIND_LONG = {'i': 'int', 'd': 'double', 's': 'bytes', 'p': 'str'}
 
 
 def _literal_slot_kinds(gen, lowered) -> str:
