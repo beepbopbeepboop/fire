@@ -1631,6 +1631,27 @@ def _reserving_cmd():
     return ok_cmd(RESERVE_JOB.format(tools=os.path.join(HERE, 'tools')))
 
 
+def test_every_job_that_runs_mojoc_depends_on_it():
+    """A job that executes `./mojoc` must declare `deps=['mojoc']`.
+
+    `mojoc` is built by a Makefile target, and nothing starts the job that runs
+    it before that build exists unless the registry says so. `native-dumpfull`
+    had no such dep: it raced `mojoc` at t=0 and died with "mojoc not built",
+    and the failure stayed hidden only because the job was `expect=`-marked.
+    The marker came off, the race was left in place, and the gate went red.
+    The consumers are named here rather than discovered, because the binary
+    is reached through a test file's own path arithmetic.
+    """
+    consumers = ('ab-native', 'native-dumpfull',
+                 'selfhost-memory', 'selfhost-memory-fire')
+    missing = [n for n in consumers
+               if 'mojoc' not in (getattr(suite.REGISTRY[n], 'deps', ()) or ())]
+    check('deps: every job that runs ./mojoc waits for the mojoc build',
+          not missing,
+          f'no deps=[\'mojoc\'] on {missing}: they start at t=0 and race the '
+          f'build, which is "mojoc not built" on a cold tree')
+
+
 def test_every_job_is_reserved_before_it_starts():
     """Every kind of job — cmd, mem, make, and each fanout item — reserves
     before it starts, and the sum of live reservations never exceeds the
@@ -6465,7 +6486,8 @@ def main():
                test_an_expect_marker_points_at_a_doc_that_exists,
                test_an_expect_marker_count_is_checked_against_the_run,
                test_a_doc_that_states_a_tests_status_agrees_with_the_registry,
-               test_a_make_recipe_never_asks_for_more_than_its_job_reserved):
+               test_a_make_recipe_never_asks_for_more_than_its_job_reserved,
+               test_every_job_that_runs_mojoc_depends_on_it):
         fn()
     print()
     print(f'Results: {PASSES} passed, {len(FAILURES)} failed')
