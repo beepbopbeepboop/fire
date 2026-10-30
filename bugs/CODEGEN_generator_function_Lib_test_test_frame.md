@@ -1,5 +1,49 @@
 # CODEGEN_generator_function: Lib/test/test_frame.py
 
+## Status (2026-10-29, partial fix — a nested generator defined in a METHOD that reads `self` now compiles on the default path; `g` lowers)
+
+Landed, following the planning entry below (its Decision (a) taken: a
+generator whose result escapes the method is still refused):
+
+- `mojo/middle/coro.py` `_hoist_method_nested_generators`: a struct method that
+  is neither generator nor async is now scanned for nested sync generators.
+  Before, `_hoist_nested_async` walked only top-level statements, so a method's
+  nested generator never reached the hoist. The sync-generator branch was
+  factored into `_hoist_nested_sync_generator` (shared with the top-level hoist,
+  not duplicated) and its rename tail into `_finish_sync_hoist`. The method's
+  hoisted base is `__mgco_<Struct>_<method>_<inner>`, so two classes can each
+  define a nested `g`.
+- `self` is handed to the hoisted generator as a hidden trailing `Int`
+  (`__cap_self`, the box handle transport), not a struct-typed param: sync
+  generator eligibility is scalar-only, and that path is not exercised for
+  struct params. The body re-types it on entry (`self: T = UnsafePointer[T](...)`,
+  the BUG-2026-030 erasure `_async_method_setup` uses). Each direct call site
+  passes `self.address`. Implemented as `_capture_self_into_generator`.
+- Refusals kept honest: `_generator_result_escapes` refuses a generator whose
+  result leaves the method (`return g()`, `self.f = g()`, a local that is
+  returned); `_calls_in_nested_defs` refuses a self-capturing generator called
+  from a sibling def (the box threading does not carry `self`).
+- `_nested_async_capture_plan(..., self_struct=)`: `self` is left out of the
+  box plan when the outer is a method, instead of refusing.
+
+Tests (`test_gimple_generator_runner.py`, `run_nested_generator_capture_tests`):
+- `nested_generator_method_reads_self` (prints `7 8`, the test_frame shape),
+  `nested_generator_method_self_write_visible_to_method` (a write lands on the
+  object and the method sees it, matches CPython `8 80 8`),
+  `nested_generator_method_self_and_local` (`self` plus a local, `10 3`),
+  `nested_generator_method_same_name_two_classes` (`1 102`), and
+  `nested_generator_method_self_escaping_refused`.
+- `test_regress_codegen_generator_frame.py`: the `g` self-capture refusal pin
+  is deleted (it failed by design once the shape compiles).
+- Full `test_gimple_generator_runner.py`: 287 pass, 0 fail (8 GB memslot).
+  `test_coro_nested_async_capture.py`: 14 pass. The regression pins: 7 pass.
+
+NOT done for this file (unchanged): `gen` (frame introspection, `sys._getframe()`)
+and `t3` (async return of a frame value). Not run: a whole-file build of
+test_frame.py (heavy; the integrator's gate covers it). The method pass touches
+`mojo/middle/coro.py` on the compiled path, so the integrator owes the full
+gate, and `stdlib-syntax`'s `U` count must not rise.
+
 ## Status (2026-10-29, planning round — `g` reads `self`: root cause measured, design decided, implementation guide)
 
 Scope of this entry: the remaining `g` blocker (a nested generator defined
