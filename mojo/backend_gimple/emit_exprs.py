@@ -2605,18 +2605,20 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         val_ast = gen._subst_idents(aliases[node.member],
                                      {'Self': node.obj, struct_name: node.obj})
         return gen.lower_expr(val_ast)
-    # Class-level attribute (not an instance field) — redirect to global variable
+    # Class-level attribute (not an instance field) — redirect to global variable.
+    # Instance reads must consult the instance first (dynamic storage / field
+    # lookup) so an instance write shadows the class attribute; only bare
+    # class-name reads go to the synthesized backing global / per-execution
+    # cell.
     class_attrs = gen._class_attrs
-    if struct_name in class_attrs and node.member in class_attrs[struct_name]:
+    if (struct_name in class_attrs and node.member in class_attrs[struct_name]
+            and isinstance(node.obj, gimple_ctypes.IdentExpr)
+            and node.obj.name == struct_name):
         gname = class_attrs[struct_name][node.member]
         # Use the actual declared type of the global (stored in _global_var_types)
         gtype = gen._global_var_types.get(gname, 'int64_t')
-        # An instance read of a per-execution cell attribute goes to the cell
-        # THIS instance was built under; a class-name read goes to the current one.
-        if isinstance(node.obj, gimple_ctypes.IdentExpr) and node.obj.name == struct_name:
-            t = gmp._cattr_read(gen, gname, gtype)
-        else:
-            t = gmp._cattr_instance_read(gen, ov, ot, node.member, gname, gtype)
+        # Bare class-name read goes to the current per-execution cell.
+        t = gmp._cattr_read(gen, gname, gtype)
         return gtype, t
     elif struct_name in gen.struct_field_types and ot.endswith(' *'):
         # The struct defines its own `__getattr__` (compiled body ⇒ bare
