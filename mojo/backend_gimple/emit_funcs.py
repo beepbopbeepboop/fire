@@ -3939,11 +3939,12 @@ def _abs_module(ref: str, base: str) -> str:
 
 
 def _register_imported_generics(gen, stmts) -> None:
-    """dylib mode: register `from M import gen` where gen is a generic free
-    function (following re-export chains) so its call sites elaborate a
-    concrete CAS-cached instantiation."""
-    if gen.do_imports:
-        return
+    """Register `from M import gen` where gen is a generic free function
+    (following re-export chains) so its call sites elaborate a concrete
+    instantiation. This runs in the inline do_imports=True path too: there a
+    bracketed call `gen[2](x)` to a sibling module's generic otherwise matched
+    no registration and lowered to a zero stub (a silent miscompile; see
+    bugs/CODEGEN_dylib_generic_inline_copies_share_one_symbol.md)."""
     for st in stmts:
         if not (isinstance(st, gimple_ctypes.FromImportStmt) and not getattr(st, 'wildcard', False)):
             continue

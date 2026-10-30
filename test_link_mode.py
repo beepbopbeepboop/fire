@@ -1774,9 +1774,10 @@ def test_two_modules_specialize_one_generic_differently() -> bool:
     Two modules instantiate the same generic function with DIFFERENT type
     arguments (`scale[2]` in `a`, `scale[3]` in `b`). The body depends on the
     parameter, so each caller must get its own specialization. Today every
-    copy is emitted under the one bare symbol `_scale`, so both calls run the
-    same body and print `0`, a silent miscompile (CPython: 20 and 30). Fails
-    until each specialization gets its own deterministic symbol and body."""
+    parameter, so each caller must get its own specialization. Before the fix
+    the sibling generic was never registered in the inline do_imports=True
+    path, so both bracketed calls lowered to a zero stub and printed `0`, a
+    silent miscompile (CPython: 20 and 30)."""
     pkg = {
         'pkg/__init__.py': '',
         'pkg/gen.py': (
