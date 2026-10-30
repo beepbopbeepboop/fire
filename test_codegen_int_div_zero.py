@@ -113,10 +113,44 @@ def test_bare_zero_division_statement_in_generator():
     assert rc == 0, out
     assert out == '1\n2', repr(out)
 
+def test_struct_true_division_builds():
+    # A struct operand keeps its own `/` even when the other operand is an int
+    # (std/pathlib/path.mojo's `result /= segment`). The Int / Int gate must not
+    # see the struct pointer after its int64_t coercion and turn the operation
+    # into a double division of a pointer, which gcc rejects. This asserts the
+    # file lowers to C that gcc accepts, not the run-time value: the int-typed
+    # element of `*parts` is a separate gap, recorded in
+    # bugs/CODEGEN_int_true_division_truncates.md.
+    import compile_stdlib
+    from pathlib import Path
+    src = ('struct P:\n'
+           '    var s: String\n'
+           '    def __init__(out self, s: String):\n'
+           '        self.s = s\n'
+           '    def __truediv__(self, suffix: StringSlice) -> Self:\n'
+           '        return P(self.s + "/" + String(suffix))\n'
+           '    def __itruediv__(mut self, suffix: StringSlice):\n'
+           '        self.s = self.s + "/" + String(suffix)\n'
+           '    def joinpath(self, *parts: StringSlice) -> P:\n'
+           '        var result = self\n'
+           '        for i in range(len(parts)):\n'
+           '            result /= parts[i]\n'
+           '        return result\n'
+           'def main():\n'
+           '    var p = P("a")\n'
+           '    print(len(p.joinpath("b", "c").s) > 0)\n')
+    os.makedirs('.tmp', exist_ok=True)
+    p = '.tmp/_struct_true_div.mojo'
+    with open(p, 'w') as f:
+        f.write(src)
+    ok, msg, _, _ = compile_stdlib.transpile_file(Path(p))
+    assert ok, msg
+
 if __name__ == '__main__':
     test_zero_divisor_raises_in_plain_function()
     test_nonzero_integer_division_unchanged()
     test_int_true_division_is_float()
+    test_struct_true_division_builds()
     test_integer_modulo_floors_toward_divisor_sign()
     test_integer_modulo_floors_in_generator_body()
     test_bare_zero_division_statement_in_generator()

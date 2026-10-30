@@ -32,6 +32,25 @@ def main():
   `3 2 1 4`); `test_nonzero_integer_division_unchanged` now expects `8 / b`
   as `4.0`, not the truncated `4`.
 
+**2026-10-30: gate moved before the struct coercion (gate fix).**
+
+The landed gate was red on the stdlib gate (`stdlib-syntax`:
+`std/pathlib/path.mojo:558`, a gcc "cannot convert to a pointer type"; and
+`std/simd.mojo`). Root cause: `_lower_binary_tail` tested the operand types
+AFTER its `P *` -> `int64_t` struct-pointer coercion, so a struct operand
+looked like an int and `result /= part` became `mojo_div_double` of a pointer.
+The gate is now computed at the top of `_lower_binary_tail`, on the operand
+types as they arrive. Verified: `compile_stdlib.transpile_file` passes on
+`std/pathlib/path.mojo` and `std/simd.mojo`; `test_codegen_int_div_zero.py` is
+green, including the new `test_struct_true_division_builds` (fails on the
+previous commit, passes now). The full stdlib gate was NOT run here.
+
+The `path.mojo` line still lowers to integer arithmetic on the pointer, as it
+did on master. That is a separate, real gap, filed in
+`bugs/CODEGEN_variadic_param_element_type_untyped.md`: the `*parts` element is
+`int64_t`, so the struct `/=` never dispatches to `__itruediv__`, and the
+repro segfaults at run time.
+
 **Still open (residual):**
 
 - `_Bool` operands are excluded from the gate: `t = True; print(t / 2)` prints
