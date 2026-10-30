@@ -1179,6 +1179,12 @@ class X86_64Codegen:
             "func_offset": self.asm.labels.get(first_func_name, 0),
             "labels": {n: a for n, a in self.asm.labels.items()
                        if n not in self._internal_labels},
+            # The float-repr helper's entry, published separately because it is
+            # internal and so absent from `labels`. It is emitted after every
+            # function body, so a consumer that decodes a body linearly from its
+            # entry must stop here or it walks into the helper. Consumer:
+            # `_body` in `formal/x86_64_endtoend_test.py`.
+            "float_repr_addr": self.asm.labels[M.FLOAT_REPR_SYMBOL],
             "func_name": first_func_name,
             "external_syms": external_syms,
             "extern_calls": extern_calls,

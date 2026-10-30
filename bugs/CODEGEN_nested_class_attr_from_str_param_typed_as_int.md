@@ -33,14 +33,30 @@ The per-execution cell (`_cell_cattr_types`) inherits that type, so the bug
 also reaches the new storage. A module-scope class never has this problem:
 its values are literals or module names, whose types are known.
 
-Next step: when a non-constant value of a function-scoped class is a bare
-name that is a PARAMETER of the enclosing function, type the attribute from
-that parameter's annotation (`_mojo_type(annotation)`, the same resolver the
-field-typing pass uses). The enclosing function is known in
-`_gmi_hoist_nested_structs` (`found[i][1]`); record the parameter types there
-(e.g. `self._fn_scoped_param_types[(cls, attr)]`) and consult them in the
-registration at `module_gen.py` (`ctype = _class_attr_ctype(v)`, ~6080) before
-the `int64_t` fallback. Test: the repro above, expected `x\ny\n`, in
-`test_gimple_runner.py` beside `test_nested_class_attr_reads_enclosing_local_regression`.
-A value that is an expression over parameters (`name = s + "!"`) needs the
-same treatment; the repro with the bare name is the minimal case.
+## Status (2026-10-29, partial fix landed)
+
+Landed: the BARE-name case. `mojo/middle/exprtypes.py`'s
+`_gmi_nested_struct_defs` now returns `[node, enclosing_key, params]`
+triples, carrying the nearest enclosing function's (or method's) parameter
+list. `mojo/backend_gimple/module_gen.py`'s hoist records each parameter's
+annotated C type in `_fn_scoped_param_types` keyed by the class's final name
+(`_gmi_record_fn_scoped_param_types`), and the class-attribute registration
+types a bare `IdentExpr` value from that table before the `int64_t` fallback.
+Regression: `test_nested_class_attr_from_str_param_regression`
+(`test_gimple_runner.py`), which failed before the fix with
+`4339705632` / `4339705640` and passes after with `x` / `y`.
+
+Still open: a value that is an EXPRESSION over parameters
+(`name = s + "!"`) still prints a pointer-sized integer. The registration
+has no expression type: `_class_attr_ctype` answers None and
+`_quick_type` reads `gen.var_types`, which is empty during the registration
+pre-pass. Next step: give the registration a typed view of the enclosing
+parameters (the table already holds them) and type the expression from it,
+either by seeding a `var_types` overlay for `_quick_type` or by a small
+expression typer over `BinaryOp`/`IdentExpr` that defers to `_quick_type`
+for the leaves. Test: `name = s + "!"` with `h("x")`/`h("y")`, expected
+`x!\ny!\n`.
+
+The `var name = s` form is a different defect (the attribute is dropped
+before registration, reads `0`): see
+`bugs/CODEGEN_nested_class_var_attr_from_nonliteral_value_is_dropped.md`.

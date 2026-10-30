@@ -277,6 +277,19 @@ def _cpp_container_literal_init(gen, name: str, value_node, indent: str) -> list
     return None
 
 
+def _cpp_is_struct_ctor_call(gen, e) -> bool:
+    """True when `e` is the plain `StructName(args)` constructor call that
+    `_cpp_expr` lowers to a `StructName *` (a calloc'd instance run through
+    its `__init__`): the struct is known, has an `__init__`, and the call
+    carries no keyword arguments. Shared by the constructor lowering and by
+    attribute reads off a constructor result, which must use `->`."""
+    return (isinstance(e, gimple_ctypes.CallExpr)
+            and isinstance(e.func, gimple_ctypes.IdentExpr)
+            and e.func.name in gen.struct_field_types
+            and e.func.name in gen._struct_has_init
+            and len(e.kwargs or []) == 0)
+
+
 def _cpp_pad_struct_method_call_args(gen, sym: str, bare: str,
                                      args: list) -> list:
     """Pad a coroutine-body struct-method call's argument list out to the
@@ -736,7 +749,7 @@ def _cpp_is_int_operand(gen, node) -> bool:
         )
     except Exception:
         return False
-    return _ct in gimple_ctypes._SCALAR_INT_TYPES and _ct != '_Bool'
+    return _ct in gimple_ctypes._SCALAR_INT_TYPES
 
 
 def _cpp_apply_fstring_spec(part_val: str, spec: str) -> str:
@@ -2142,6 +2155,11 @@ def _cpp_expr(gen, e) -> str:
                         f'generator-body attribute read on opaque '
                         f'scalar local {_chain_root.name}.{e.member}')
             return '0'
+        # A struct constructor call lowers to a `Struct *` (see
+        # _cpp_is_struct_ctor_call), so a field read off it is `->`, the same
+        # as a read off a struct-pointer local.
+        if _cpp_is_struct_ctor_call(gen, e.obj):
+            return f"{obj_expr}->{gimple_ctypes._safe_field(e.member)}"
         return f"{obj_expr}.{gimple_ctypes._safe_field(e.member)}"
     if isinstance(e, gimple_ctypes.LambdaExpr):
         # A `lambda` used as a VALUE inside a generator body (e.g.
@@ -2395,6 +2413,12 @@ def _cpp_expr(gen, e) -> str:
         if (op == '%' and _cpp_is_int_operand(gen, e.left)
                 and _cpp_is_int_operand(gen, e.right)):
             return f"__mojo_floormod((int64_t)({_bl}), (int64_t)({_br}))"
+        # Int / Int is true division (Float64), as in emit_exprs.py's tail. It
+        # goes through mojo_div_double, not a bare C `/`, so a zero divisor
+        # still raises ZeroDivisionError instead of answering inf.
+        if (op == '/' and _cpp_is_int_operand(gen, e.left)
+                and _cpp_is_int_operand(gen, e.right)):
+            return f"mojo_div_double((double)({_bl}), (double)({_br}))"
         if op in ('/', '%') and _cpp_is_int_operand(gen, e.right):
             _br = f"mojo_int_divisor((int64_t)({_br}))"
         if op in ('==', '!=', '<', '<=', '>', '>='):
@@ -4039,11 +4063,16 @@ def _cpp_expr(gen, e) -> str:
             # (see `_cpp_struct_method_refs`, already proven to work
             # for `self`/parameter struct pointers), so no analogous
             # linkage problem exists there.
-            if fname in gen.struct_field_types and fname in gen._struct_has_init \
-                    and len(e.kwargs or []) == 0:
+            if _cpp_is_struct_ctor_call(gen, e):
                 gen._cpp_ctor_struct_names.add(fname)
                 init_sym = gen._struct_method_csym(fname, '__init__', '')
                 gen._cpp_struct_method_refs.add((fname, '__init__'))
+                # `SourceInfo(filename)` against `__init__(self, filename,
+                # _current=None)` must carry the trailing default, exactly as
+                # the struct-method call branches above do (g++ "too few
+                # arguments" otherwise).
+                args = _cpp_pad_struct_method_call_args(
+                    gen, init_sym, f"{fname}___init__", args)
                 init_args = ', '.join(['_t'] + args)
                 class_attrs = gen._class_attrs.get(fname, {})
                 field_map = gen.struct_field_types.get(fname, {})

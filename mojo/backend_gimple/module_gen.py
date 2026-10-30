@@ -2996,6 +2996,35 @@ def _struct_typedef_fields(gen, sn) -> dict:
     return _fields
 
 
+def _gmi_record_fn_scoped_param_types(gen, cls_name: str, params) -> None:
+    """Record the annotated C type of each parameter of the function a
+    function-scoped class was declared in, keyed by the class's FINAL name and
+    the parameter name (`_pair_key`).
+
+    A class-level attribute whose value is a bare parameter name
+    (`class C(): name = s` inside `def h(s: str)`) has no literal to type it
+    from, so `_class_attr_ctype` answers None and the registration falls back
+    to `int64_t`, which types a `char *` as a pointer-sized integer. The
+    parameter's annotation is the ground truth for what that name holds, and
+    it is what `_mojo_type` resolves the function's own signature with. An
+    unannotated parameter records nothing and keeps the old fallback.
+    """
+    if not params:
+        return
+    _table = getattr(gen, '_fn_scoped_param_types', None)
+    if _table is None:
+        _table = {}
+        gen._fn_scoped_param_types = _table
+    for _p in params:
+        try:
+            _pname, _pann = _p[0], _p[1]
+        except (TypeError, IndexError):
+            continue
+        if not isinstance(_pann, str) or not _pann:
+            continue
+        _table[_pair_key(cls_name, _as_str(_pname))] = _mojo_type(_pann)
+
+
 def _gmi_hoist_nested_structs(self, stmts: list) -> list:
     """Return `stmts` with every class declared inside a function body HOISTED
     to module scope, so the ordinary struct pipeline treats it exactly like a
@@ -3087,6 +3116,7 @@ def _gmi_hoist_nested_structs(self, stmts: list) -> list:
             renamed_to.append(_h_bare)
             _fn_scoped.add(_h_bare)
             out.append(_h_node)
+            _gmi_record_fn_scoped_param_types(self, _h_bare, found[_h_i][2])
             continue
         _h_base = _h_bare + '__' + _h_encl
         _h_new = _h_base
@@ -3100,6 +3130,7 @@ def _gmi_hoist_nested_structs(self, stmts: list) -> list:
         _fn_scoped.add(_h_new)
         _h_node.name = _h_new
         out.append(_h_node)
+        _gmi_record_fn_scoped_param_types(self, _h_new, found[_h_i][2])
     # The alias keys need the FINAL struct names, because a method's enclosing
     # key contains the name of the class it belongs to — so they are computed
     # on a SECOND walk, after the renames above have landed. The two walks
@@ -3203,74 +3234,205 @@ def _gmi_decorator_head(dec):
     return None
 
 
-def _gmi_rebind_decorated_defs(self, stmts: list) -> list:
-    """Return `stmts` with each top-level `def` decorated by a same-module
-    decorator REBOUND to the decoration's value, in source order.
+def _gmi_decorator_pass(self, stmts: list, outer_defs: dict, at_module: bool) -> list:
+    """Return `stmts` with each `def` decorated by a same-module decorator
+    REBOUND to the decoration's value, in source order, at every depth.
 
     `@deco def step(x): ...` lowers to the pair CPython evaluates:
 
         def step__undecorated(x): ...
         step = deco(step__undecorated)
 
-    so every call to `step` reads the module-scope variable and calls
-    through it, which is exactly the decorated object. A factory `@deco(x)`
-    becomes `step = deco(x)(step__undecorated)`, and stacked decorators nest
-    innermost-first (`@a @b` -> `a(b(...))`). The rebinding is a module
-    global, so the compiled path's existing global function-value machinery
-    (the `_root_globals` field and `mojo_fnptr_call`) carries it; no call site
-    needs to know a decorator was applied.
+    so every call to `step` reads the name and calls through it, which is
+    exactly the decorated object. A factory `@deco(x)` becomes
+    `step = deco(x)(step__undecorated)`, and stacked decorators nest
+    innermost-first (`@a @b` -> `a(b(...))`). At module scope the rebinding is
+    a module global, so the compiled path's existing global function-value
+    machinery (the `_root_globals` field and `mojo_fnptr_call`) carries it; a
+    nested `def` is a local bound the same way (`step = twice(step__undecorated)`
+    lowers through the local closure-value path). No call site needs to know a
+    decorator was applied.
 
-    Scope is the same as `_gmi_refuse_scalar_decorator_rebind`: only a
-    decorator naming a top-level `def` in this module is applied. A decorator
+    `outer_defs` holds the defs of every enclosing scope, so a decorator may
+    name a module-level def from inside a function body, or a sibling def in
+    the same body. The refusal in `_gmi_refuse_scalar_decorator_rebind` runs
+    over each level first, against the same scope.
+
+    Scope: only a decorator naming a def in scope is applied. A decorator
     imported from elsewhere, or a name that is a declaration annotation
     (`staticmethod`, `export`, `doc_hidden`, ...), stays on the `def` as
     before, because the stdlib uses them that way and they are not callables
-    this module can see. A decorated `def` nested in a function body is not
-    rewritten here and is still unapplied.
+    this module can see. Decorated methods of a class are not rewritten.
     """
-    _rb_defs = {_rs.name: _rs for _rs in (stmts or []) if isinstance(_rs, FunctionDef)}
+    _rb_scope = dict(outer_defs)
+    _rb_defs = _gmi_scope_defs(stmts)
+    _rb_scope.update({_rs.name: _rs for _rs in _rb_defs})
+    _gmi_refuse_scalar_decorator_rebind(self, _rb_defs, _rb_scope)
+    if at_module:
+        # A module global is bound by a top-level statement, and the global
+        # function-value machinery never sees an assignment inside a
+        # module-level `if`/`for`/`with`/`try` block. So a decorated def there
+        # cannot be rebound yet: refuse it, rather than let the compiled path
+        # call the undecorated body (or a stub for the unbound name).
+        for _rb_s in stmts or []:
+            if isinstance(_rb_s, FunctionDef):
+                continue
+            for _rb_d in _gmi_scope_defs([_rb_s]):
+                for _rb_dec in _rb_d.decorators or []:
+                    if _gmi_is_rebindable(_rb_dec, _rb_scope, _rb_d.name):
+                        raise RuntimeError(
+                            f"decorator {_gmi_decorator_head(_rb_dec)!r} on {_rb_d.name!r} is inside a "
+                            f"module-level block, which the compiled path cannot rebind yet; it would "
+                            f"silently call the undecorated function (see "
+                            f"bugs/COMPILE_FAIL_decorator_application_dropped.md)")
+    return _gmi_rebind_block(self, stmts, _rb_scope, at_module)
+
+
+def _gmi_is_rebindable(dec, scope: dict, def_name: str) -> bool:
+    """True when decorator `dec` on `def_name` names a def in `scope`, so the
+    decoration is applied by rebinding (see `_gmi_decorator_pass`)."""
+    _head = _gmi_decorator_head(dec)
+    return _head is not None and _head in scope and _head != def_name
+
+
+def _gmi_child_blocks(stmt) -> list:
+    """The statement lists a compound statement owns, in source order: every
+    `if`/`elif`/`else` branch, a loop body and its `else`, a `with` body, each
+    `try` part, and each `match` case. Python has no block scope, so a `def`
+    inside any of these is bound in the enclosing function's scope and is a
+    decorator target like a direct statement. A nested `def`'s own body is
+    NOT listed: it is a scope of its own, entered by `_gmi_rebind_stmt`.
+    `_gmi_with_blocks` consumes the lists in this same order."""
+    if isinstance(stmt, IfStmt):
+        return [stmt.then_body, *[_b for _, _b in stmt.elifs], stmt.else_body]
+    if isinstance(stmt, (WhileStmt, ForStmt)):
+        return [stmt.body, stmt.else_body]
+    if isinstance(stmt, WithStmt):
+        return [stmt.body]
+    if isinstance(stmt, TryStmt):
+        return [stmt.body, *[_h.body for _h in stmt.handlers], stmt.else_body, stmt.finally_body]
+    if isinstance(stmt, MatchStmt):
+        return [_c.body for _c in stmt.cases]
+    return []
+
+
+def _gmi_with_blocks(stmt, blocks):
+    """A copy of compound `stmt` whose child blocks are `blocks`, given in the
+    order `_gmi_child_blocks` lists them."""
+    _it = iter(blocks)
+    new = copy.copy(stmt)
+    if isinstance(stmt, IfStmt):
+        new.then_body = next(_it)
+        new.elifs = [(_cond, next(_it)) for _cond, _ in stmt.elifs]
+        new.else_body = next(_it)
+    elif isinstance(stmt, (WhileStmt, ForStmt)):
+        new.body = next(_it)
+        new.else_body = next(_it)
+    elif isinstance(stmt, WithStmt):
+        new.body = next(_it)
+    elif isinstance(stmt, TryStmt):
+        new.body = next(_it)
+        new.handlers = []
+        for _h in stmt.handlers:
+            _nh = copy.copy(_h)
+            _nh.body = next(_it)
+            new.handlers.append(_nh)
+        new.else_body = next(_it)
+        new.finally_body = next(_it)
+    else:
+        new.cases = []
+        for _c in stmt.cases:
+            _nc = copy.copy(_c)
+            _nc.body = next(_it)
+            new.cases.append(_nc)
+    return new
+
+
+def _gmi_scope_defs(stmts) -> list:
+    """Every `def` bound in this scope: a direct statement, or one inside a
+    compound statement's block at any depth (see `_gmi_child_blocks`)."""
+    out = []
+    for _s in stmts or []:
+        if isinstance(_s, FunctionDef):
+            out.append(_s)
+        for _b in _gmi_child_blocks(_s):
+            out.extend(_gmi_scope_defs(_b))
+    return out
+
+
+def _gmi_rebind_block(self, stmts, scope: dict, at_module: bool):
+    """Rebind the decorated defs of one statement list, in the scope `scope`
+    (every name a decorator may resolve to, see `_gmi_decorator_pass`), and
+    recurse into its compound blocks and function bodies. Returns `stmts`
+    itself when nothing in it changed, so only the nodes that change are
+    copied."""
+    _rb_in = stmts or []
     _rb_out = []
-    for _rb_s in (stmts or []):
-        if not isinstance(_rb_s, FunctionDef) or not _rb_s.decorators:
-            _rb_out.append(_rb_s)
-            continue
-        _rb_applied = []
-        _rb_kept = []
-        for _rb_dec in _rb_s.decorators:
-            _rb_head = _gmi_decorator_head(_rb_dec)
-            if _rb_head is not None and _rb_head in _rb_defs and _rb_head != _rb_s.name:
-                _rb_applied.append(_rb_dec)
-            else:
-                _rb_kept.append(_rb_dec)
-        if not _rb_applied:
-            _rb_out.append(_rb_s)
-            continue
+    _rb_changed = False
+    for _rb_s in _rb_in:
+        _rb_repl = _gmi_rebind_stmt(self, _rb_s, scope, at_module)
+        if len(_rb_repl) != 1 or _rb_repl[0] is not _rb_s:
+            _rb_changed = True
+        _rb_out.extend(_rb_repl)
+    return _rb_out if _rb_changed else stmts
+
+
+def _gmi_rebind_stmt(self, s, scope: dict, at_module: bool) -> list:
+    """The statements `s` becomes: `[s]` itself when nothing under it changed."""
+    if not isinstance(s, FunctionDef):
+        _rb_blocks = _gmi_child_blocks(s)
+        if not _rb_blocks:
+            return [s]
+        _rb_new = [_gmi_rebind_block(self, _b, scope, at_module) if _b else _b for _b in _rb_blocks]
+        if all(_n is _o for _n, _o in zip(_rb_new, _rb_blocks)):
+            return [s]
+        return [_gmi_with_blocks(s, _rb_new)]
+    _rb_head = s
+    _rb_out = []
+    _rb_applied = []
+    _rb_kept = []
+    for _rb_dec in s.decorators or []:
+        if _gmi_is_rebindable(_rb_dec, scope, s.name):
+            _rb_applied.append(_rb_dec)
+        else:
+            _rb_kept.append(_rb_dec)
+    if _rb_applied:
         # The undecorated body keeps the annotation decorators and takes a
-        # suffixed name, so it cannot be mistaken for the rebound global.
-        _rb_undec = _rb_s.name + '__undecorated'
-        _rb_body = copy.copy(_rb_s)
-        _rb_body.name = _rb_undec
-        _rb_body.decorators = _rb_kept
-        _rb_out.append(_rb_body)
+        # suffixed name, so it cannot be mistaken for the rebound name.
+        _rb_head = copy.copy(s)
+        _rb_head.name = s.name + '__undecorated'
+        _rb_head.decorators = _rb_kept
+    # A nested function body is a scope of its own, rebound against this one.
+    _rb_body = _gmi_decorator_pass(self, s.body, scope, False)
+    if _rb_body is not s.body:
+        if _rb_head is s:
+            _rb_head = copy.copy(s)
+        _rb_head.body = _rb_body
+    _rb_out.append(_rb_head)
+    if _rb_applied:
         # Innermost-first: `@a @b def f` is `f = a(b(f_undecorated))`.
-        _rb_value = IdentExpr(_rb_undec, line=_rb_s.line, col=_rb_s.col)
+        _rb_value = IdentExpr(_rb_head.name, line=s.line, col=s.col)
         for _rb_dec in reversed(_rb_applied):
-            _rb_callee = IdentExpr(_rb_dec, line=_rb_s.line, col=_rb_s.col) if isinstance(_rb_dec, str) else _rb_dec
-            _rb_value = CallExpr(func=_rb_callee, args=[_rb_value], line=_rb_s.line, col=_rb_s.col)
-        _rb_out.append(AssignStmt(target=IdentExpr(_rb_s.name, line=_rb_s.line, col=_rb_s.col),
-                                  value=_rb_value, line=_rb_s.line, col=_rb_s.col))
-        # The global now holds a function VALUE, so `print(step)` formats it
-        # as one (`_global_func_value_names` is the per-global repr name).
-        self._global_func_value_names[_rb_s.name] = _rb_s.name
+            _rb_callee = IdentExpr(_rb_dec, line=s.line, col=s.col) if isinstance(_rb_dec, str) else _rb_dec
+            _rb_value = CallExpr(func=_rb_callee, args=[_rb_value], line=s.line, col=s.col)
+        _rb_out.append(AssignStmt(target=IdentExpr(s.name, line=s.line, col=s.col),
+                                  value=_rb_value, line=s.line, col=s.col))
+        if at_module:
+            # The global now holds a function VALUE, so `print(step)` formats
+            # it as one (`_global_func_value_names` is the per-global repr name).
+            self._global_func_value_names[s.name] = s.name
     return _rb_out
 
 
-def _gmi_refuse_scalar_decorator_rebind(self, stmts: list) -> None:
-    """Refuse a top-level `def` rebound by a same-module decorator that
-    returns a scalar: `deco(f) -> 99` with `@deco def step`, then `step(7)`.
+def _gmi_refuse_scalar_decorator_rebind(self, stmts: list, scope: dict) -> None:
+    """Refuse a `def` rebound by a same-module decorator that returns a
+    scalar: `deco(f) -> 99` with `@deco def step`, then `step(7)`.
+
+    `scope` maps each name a decorator may resolve to (the defs of this
+    statement list plus every enclosing scope's defs) to its FunctionDef.
 
     A same-module decorator on a `def` is applied by rebinding the name
-    (`_gmi_rebind_decorated_defs`, the bugs/COMPILE_FAIL_decorator_application_dropped.md
+    (`_gmi_decorator_pass`, the bugs/COMPILE_FAIL_decorator_application_dropped.md
     fix). That rebinding is only meaningful for a CALLABLE decorator result:
     a scalar-returning decorator rebinds `step` to a non-callable, which
     CPython raises on as `TypeError: 'int' object is not callable`. So that
@@ -3278,17 +3440,17 @@ def _gmi_refuse_scalar_decorator_rebind(self, stmts: list) -> None:
     be called.
 
     Scope is deliberately narrow, so this cannot drop real code:
-    - Only a decorator naming a top-level `def` in this same module is
-      inspected: a bare name (`@deco`) or a factory call (`@deco(x)`), whose
-      factory is that def. Its return type comes from the same inference
+    - Only a decorator naming a `def` in scope is inspected: a bare name
+      (`@deco`) or a factory call (`@deco(x)`), whose factory is that def.
+      Scope is this statement list's defs and every enclosing one's. Its return type comes from the same inference
       every function uses, so no second notion of "scalar" is introduced.
     - An identity or pass-through decorator (`return f`) is not refused: it
       rebinds `f` to the same object, and the undecorated answer is correct.
     - An imported decorator is not inspected here. It is unrefused, not
       proven correct; the doc's remaining work covers it.
     """
-    _rd_defs = {_rs.name: _rs for _rs in (stmts or []) if isinstance(_rs, FunctionDef)}
-    for _rd_fn in _rd_defs.values():
+    _rd_defs = scope
+    for _rd_fn in (_rs for _rs in (stmts or []) if isinstance(_rs, FunctionDef)):
         for _rd_dec in (getattr(_rd_fn, 'decorators', None) or []):
             # `@deco` is stored as the bare name; `@deco(x)` as a CallExpr
             # whose callee is the factory. Both name a same-module def, and
@@ -3341,8 +3503,7 @@ def gen_module_impl(self, stmts):
     # `_gmi_hoist_nested_structs` for why it appends rather than moves.
     stmts = _gmi_hoist_nested_structs(self, stmts)
     _gmi_refuse_nested_class_enclosing_reads(stmts)
-    _gmi_refuse_scalar_decorator_rebind(self, stmts)
-    stmts = _gmi_rebind_decorated_defs(self, stmts)
+    stmts = _gmi_decorator_pass(self, stmts, {}, True)
 
     # ── GPU offload, Seam 1 ──────────────────────────────────────────────
     # Classified ONCE, at the very top, because three different places
@@ -3876,7 +4037,7 @@ def gen_module_impl(self, stmts):
     #
     # See mojo/backend_gimple/elab_intu.py for why the `.o` route cannot serve
     # the `std/iter` iterator family at all, and
-    # bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md for
+    # the user-iterator next() bug (doc deleted in db724c4d6) for
     # the experiment this replaces (which narrowed the feature instead of
     # fixing the cause, and so produced `conflicting types` regressions).
     stmts = list(stmts) + _elab_intu.run(self, stmts)
@@ -4058,6 +4219,26 @@ def gen_module_impl(self, stmts):
                         else:
                             _xg_module_binding[_xg_bound] = _xg_n.module
 
+            # Bound name -> the module's own real dotted name, for a PLAIN
+            # `import mod_a [as alias]` (`mod_a.Dialog(...)`). Deliberately
+            # SEPARATE from `_xg_module_binding` above: that dict's value is
+            # the enclosing PACKAGE of a `from PKG import submodule` binding
+            # (its consumer joins package+binding to get the submodule's own
+            # dotted name via `_join_import_member`) — a plain `import`'s
+            # binding already IS the target module's own real name, joining
+            # it again would mangle it (`_join_import_member('mod_a',
+            # 'mod_a')` is not `'mod_a'`).
+            _xg_plain_import_mod: dict = {}
+            for _xf_n in _walk_ast(stmts):
+                if not isinstance(_xf_n, ImportStmt):
+                    continue
+                for _xf_im_mod, _xf_im_alias in [(_xf_n.module, _xf_n.alias)] + list(_xf_n.extra or []):
+                    _xf_im_bound = _xf_im_alias if _xf_im_alias else _as_str(_xf_im_mod).split('.', 1)[0]
+                    if _xg_plain_import_mod.get(_xf_im_bound, _xf_im_mod) != _xf_im_mod:
+                        _xg_plain_import_mod[_xf_im_bound] = None  # ambiguous
+                    else:
+                        _xg_plain_import_mod[_xf_im_bound] = _as_str(_xf_im_mod)
+
             def _xg_homog_elem(_xa):
                 """Unanimous scalar element ctype of a collection LITERAL
                 argument, or None (mixed / empty / non-scalar elements hint
@@ -4104,13 +4285,32 @@ def gen_module_impl(self, stmts):
                         return []
                 return []
 
-            def _xg_gen_fn(_xm, _xorig):
-                """The generator FunctionDef named `_xorig` in module `_xm`'s
-                own source, or None."""
+            def _xg_top_fn(_xm, _xorig):
+                """The top-level FunctionDef named `_xorig` in module `_xm`'s
+                own source (generator or not), or None."""
                 for _xs in _xg_parse_mod(_xm):
                     if isinstance(_xs, FunctionDef) and _xs.name == _xorig:
-                        return _xs if _xs.is_generator else None
+                        return _xs
                 return None
+
+            def _xg_record_scalar_args(_xkey, _xpnames, _xargs):
+                """Record the unanimous literal SCALAR-ish ctype of each
+                argument into _xmod_gen_param_hints (the cross-module twin of
+                Pass 1.3d's same-module literal contract, see
+                `_gmi_apply_call_site_param_evidence`). A parameter whose
+                call sites disagree records None, and the merge below then
+                leaves it at the body-derived type."""
+                for _xi, _xa in enumerate(_xargs):
+                    if _xi >= len(_xpnames):
+                        break
+                    _xct = _gmi_literal_ctype(_xa)
+                    if not _xct or not _xpnames[_xi]:
+                        continue
+                    _xs_map = self._xmod_gen_param_hints.setdefault(_xkey, {})
+                    if _xs_map.get(_xpnames[_xi], _xct) != _xct:
+                        _xs_map[_xpnames[_xi]] = None
+                    else:
+                        _xs_map[_xpnames[_xi]] = _xct
 
             def _xg_record_hint(_xkey, _xpname, _xct):
                 """Record one list-elem contract into _xmod_gen_elem_hints;
@@ -4216,19 +4416,24 @@ def gen_module_impl(self, stmts):
                 elif isinstance(_xg_call.func, gimple_ctypes.MemberExpr) \
                         and isinstance(_xg_call.func.obj, gimple_ctypes.IdentExpr):
                     _xg_bname = _xg_call.func.obj.name
-                    _xg_bmod = _xg_module_binding.get(_xg_bname)
-                    if not _xg_bmod:
-                        continue
-                    # The binding names a SUBMODULE FILE: its own compiled
-                    # module_name is the member-path join of the FROM-IMPORT
-                    # module and the BINDING ('.' + 'strutil_like' ->
-                    # '.strutil_like') — exactly how find_imports synthesized
-                    # that file's compilation candidate, so the temp_gen's
-                    # module_name (and registry qualifier) matches. The called
-                    # FUNCTION lives inside that file.
-                    _xg_mod_joined = gimple_ctypes._join_import_member(
-                        _xg_bmod, _xg_bname)
-                    _xg_fn = _xg_gen_fn(_xg_mod_joined, _xg_call.func.member)
+                    if _xg_plain_import_mod.get(_xg_bname):
+                        # A PLAIN `import mod_a`: the binding already IS the
+                        # module's own dotted name (see the table above).
+                        _xg_mod_joined = _xg_plain_import_mod[_xg_bname]
+                    else:
+                        _xg_bmod = _xg_module_binding.get(_xg_bname)
+                        if not _xg_bmod:
+                            continue
+                        # The binding names a SUBMODULE FILE: its own compiled
+                        # module_name is the member-path join of the FROM-IMPORT
+                        # module and the BINDING ('.' + 'strutil_like' ->
+                        # '.strutil_like') — exactly how find_imports
+                        # synthesized that file's compilation candidate, so
+                        # the temp_gen's module_name (and registry qualifier)
+                        # matches. The called FUNCTION lives inside that file.
+                        _xg_mod_joined = gimple_ctypes._join_import_member(
+                            _xg_bmod, _xg_bname)
+                    _xg_fn = _xg_top_fn(_xg_mod_joined, _xg_call.func.member)
                     if _xg_fn is None:
                         continue
                     # Composite "<qualifier>::<name>" key — same string
@@ -4238,6 +4443,9 @@ def gen_module_impl(self, stmts):
                     _xg_key = (_xg_mod_joined.replace('.', '_').replace('-', '_')
                                + '::' + _xg_call.func.member)
                     _xg_pnames = gimple_ctypes._param_names_stripped(_xg_fn.params)
+                    _xg_record_scalar_args(_xg_key, _xg_pnames, _xg_call.args)
+                    if not _xg_fn.is_generator:
+                        continue  # element contracts are generator-only
                     _xg_enc_map = (_xg_local_param_elems.get(_xg_enclosing.name, {})
                                    if _xg_enclosing is not None else {})
                     for _xi, _xa in enumerate(_xg_call.args):
@@ -4251,15 +4459,19 @@ def gen_module_impl(self, stmts):
                     continue
                 else:
                     continue
-                _xg_fn = _xg_gen_fn(_xg_mod, _xg_orig)
+                _xg_fn = _xg_top_fn(_xg_mod, _xg_orig)
                 if _xg_fn is None:
-                    continue  # ordinary callees keep Pass 1.3d's own ordering
+                    continue
                 # Composite string key ("<qualifier>::<name>"), not a
                 # genuine tuple — see _xmod_gen_param_hints's docstring
                 # (gimple_codegen.py) for why a real tuple key breaks this
                 # dict's self-hosted compilation.
                 _xg_key = _xg_mod.replace('.', '_').replace('-', '_') + '::' + _xg_orig
                 _xg_pnames = gimple_ctypes._param_names_stripped(_xg_fn.params)
+                _xg_record_scalar_args(_xg_key, _xg_pnames, _xg_call.args)
+                if not _xg_fn.is_generator:
+                    continue  # element contracts are generator-only; ordinary
+                    # callees keep Pass 1.3d's own ordering for those
                 # The ENCLOSING function's own param-elem contracts (from the
                 # literal-list call sites recorded above), for identifier
                 # arguments forwarded straight through to the generator.
@@ -4358,26 +4570,6 @@ def gen_module_impl(self, stmts):
                 elif _xfprev != _xfct:
                     self._xmod_ctor_field_conflict[_xfkey] = True
 
-            # Bound name -> the module's own real dotted name, for a PLAIN
-            # `import mod_a [as alias]` (`mod_a.Dialog(...)`). Deliberately
-            # SEPARATE from `_xg_module_binding` above: that dict's value is
-            # the enclosing PACKAGE of a `from PKG import submodule` binding
-            # (its consumer joins package+binding to get the submodule's own
-            # dotted name via `_join_import_member`) — a plain `import`'s
-            # binding already IS the target module's own real name, joining
-            # it again would mangle it (`_join_import_member('mod_a',
-            # 'mod_a')` is not `'mod_a'`).
-            _xf_plain_import_mod: dict = {}
-            for _xf_n in _walk_ast(stmts):
-                if not isinstance(_xf_n, ImportStmt):
-                    continue
-                for _xf_im_mod, _xf_im_alias in [(_xf_n.module, _xf_n.alias)] + list(_xf_n.extra or []):
-                    _xf_im_bound = _xf_im_alias if _xf_im_alias else _as_str(_xf_im_mod).split('.', 1)[0]
-                    if _xf_plain_import_mod.get(_xf_im_bound, _xf_im_mod) != _xf_im_mod:
-                        _xf_plain_import_mod[_xf_im_bound] = None  # ambiguous
-                    else:
-                        _xf_plain_import_mod[_xf_im_bound] = _as_str(_xf_im_mod)
-
             for _xf_call, _xf_enclosing in _xg_calls:
                 _xf_mod = None
                 _xf_orig = None
@@ -4389,7 +4581,7 @@ def gen_module_impl(self, stmts):
                     _xf_orig = _xg_alias_orig.get(_xf_cname)
                 elif (isinstance(_xf_call.func, gimple_ctypes.MemberExpr)
                         and isinstance(_xf_call.func.obj, gimple_ctypes.IdentExpr)):
-                    _xf_plain_mod = _xf_plain_import_mod.get(_xf_call.func.obj.name)
+                    _xf_plain_mod = _xg_plain_import_mod.get(_xf_call.func.obj.name)
                     if _xf_plain_mod:
                         _xf_mod = _xf_plain_mod
                         _xf_orig = _xf_call.func.member
@@ -5425,7 +5617,7 @@ def gen_module_impl(self, stmts):
             # `gimple_codegen._selfhost_register_gimplegen`'s GimpleGen
             # field-dict seed), making this `not in` guard spuriously
             # True and WIPING that entry back to `{}` right here. See
-            # bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md
+            # commit e8a7135b8
             # Finding 4 Bug C.
             _s_name = _as_str(_s.name)
             if _s_name not in self.struct_field_types:
@@ -5441,7 +5633,7 @@ def gen_module_impl(self, stmts):
     # (allocated by `_alloc_<struct>`); inherited container operations
     # (`d[k]`, `d[k] = v`, `k in d`, `len(d)`) route to it unless the
     # subclass overrides the corresponding dunder. See
-    # bugs/COMPILE_FAIL_collections___init__.md.
+    # bug:COMPILE_FAIL_collections___init__ (3-arg type() refusal; feature open).
     _BUILTIN_DICT_BASES = ('dict', 'OrderedDict', 'defaultdict', 'Counter')
     _dict_subclass: set = set()
     _dsc_changed = True
@@ -6070,6 +6262,15 @@ def gen_module_impl(self, stmts):
                         ctype = 'char *'
                     elif isinstance(v, FloatLiteral):
                         ctype = 'double'
+                    elif (isinstance(v, IdentExpr)
+                            and _pair_key(s.name, _as_str(v.name))
+                            in (getattr(self, '_fn_scoped_param_types', None) or {})):
+                        # A bare name that is a parameter of the function
+                        # this class is declared in: its annotation is the
+                        # type of the value (see
+                        # `_gmi_record_fn_scoped_param_types`).
+                        ctype = self._fn_scoped_param_types[
+                            _pair_key(s.name, _as_str(v.name))]
                     elif v is None:
                         # A no-initializer container field: there is no
                         # literal to read the kind from, so the ANNOTATION
@@ -6786,7 +6987,7 @@ def gen_module_impl(self, stmts):
                 # binary's own (differently-ordered) struct/method
                 # registration passes, whichever run happened to resolve
                 # `target_struct`'s method list before vs after this scan.
-                # See bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md.
+                # See commit e8a7135b8.
                 if target_def is not None and any(
                         m.name == fn for m in target_def.methods):
                     continue
@@ -8822,6 +9023,12 @@ def gen_module_impl(self, stmts):
     # are kind-mixed, which the element loop answers with the runtime route.
     self._param_nested_mixed: dict[str, set] = {}
     self._coro_str_params: dict[str, set] = {}
+    # coroutine body name -> {param} whose element type is POSITIVELY int:
+    # the list-of-ints counterpart of `_coro_str_params`. Kept apart from
+    # `_param_elem_types` because `_elem_types[x] == 'int64_t'` means "nothing
+    # known" to nearly every writer, and `_boxed_list_ptr` needs to tell the
+    # two apart (see emit_loops). Consulted by name, per function.
+    self._coro_int_list_params: dict[str, set] = {}
     # The dict-VALUE twin of the table above: callee -> {pname -> the dict
     # value ctype every one of its call sites agrees on}. A dict is stored
     # as one `int64_t` slot per key plus a per-slot `kind` tag, so a callee
@@ -8900,6 +9107,11 @@ def gen_module_impl(self, stmts):
             _pe_d = self._param_elem_types.setdefault(_as_str(_fp_s.name), {})
             for _pe_k in _pe_body:
                 _pe_d[_as_str(_pe_k)] = (_as_str(_pe_body[_pe_k]), None)
+        _pi_body = getattr(_fp_s, '_mojo_coro_param_int_lists', None)
+        if _pi_body:
+            _pi_d = self._coro_int_list_params.setdefault(_as_str(_fp_s.name), set())
+            for _pi_k in _pi_body:
+                _pi_d.add(_as_str(_pi_k))
         _ps_body = getattr(_fp_s, '_mojo_coro_param_str_params', None)
         if _ps_body:
             _ps_d = self._coro_str_params.setdefault(_as_str(_fp_s.name), set())
@@ -11046,6 +11258,14 @@ def gen_module_impl(self, stmts):
             continue
         for _t in _tgts:
             self._global_literal_slot_ctypes[_t] = _slots if _slots is not None else _outer
+
+    # Sync generators nested in an ordinary top-level def that read its
+    # names are claimed here, BEFORE the generic passes below would refuse
+    # them and before the module-level registration could take them by bare
+    # name (see cpp_async._compile_nested_generator_closures).
+    for _od in stmts:
+        if isinstance(_od, FunctionDef):
+            self._compile_nested_generator_closures(_od, _generator_fns)
 
     for s in stmts:
         if not (isinstance(s, FunctionDef) and id(s) in _generator_fns
@@ -15716,7 +15936,8 @@ def gen_module_impl(self, stmts):
     # decls for its own trampolines at all — an implicit-declaration
     # compile failure the moment anything (e.g. `_take_handle()`) used the
     # handle outside the enclosing function's own `{base}_start` call.
-    if self._supported_generators or self._generator_method_api or self._generator_api:
+    if (self._supported_generators or self._generator_method_api or self._generator_api
+            or self._nested_generator_api):
         # The typedef may already have been emitted ahead of the
         # method-prototype pass (declaration-before-typedef cascade fix,
         # see that site) — keep exactly one in the section.
@@ -15734,7 +15955,8 @@ def gen_module_impl(self, stmts):
         # (the dict's own VALUES are a genuinely mixed-type dict —
         # `base`/`value_ctype` are str, `params` is a list — so a single
         # `dict[str, str]` reparameterization wouldn't fit every field).
-        for _api in list(self._generator_api.values()) + list(self._generator_method_api.values()):
+        for _api in (list(self._generator_api.values()) + list(self._generator_method_api.values())
+                     + list(self._nested_generator_api.values())):
             _base, _vct = _as_str(_api['base']), _as_str(_api['value_ctype'])
             # Plain unpack loop, NOT a genexpr — a list of string pieces
             # joined via a genexpr is the established self-hosted trap.

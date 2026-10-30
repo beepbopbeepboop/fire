@@ -31,6 +31,18 @@ def main():
         open(os.path.join(tmp, "bugs", "mention.md"), "w").write(
             "# A bug\n\nThe word STOP: appears mid-line, and the note says do not stop.\n")
         ok &= check("STOP: mid-line is not a stop marker", S.stop_reason("mention") is None)
+    tasks = {"a": {"state": "exited-ok"}, "b": {"state": "integration-failed"}, "c": {"state": "exited-err"}}
+    _state = C.state_of
+    C.state_of = lambda t: t["state"]
+    ok &= check("fresh branches go before failed ones", S.fresh_first(["b", "a", "c"], tasks) == ["a", "c"])
+    ok &= check("with only failed branches left, they are tried", S.fresh_first(["b"], tasks) == ["b"])
+    C.state_of = _state
+    # the culprit search: a fake probe that is red once the culprit is in the prefix
+    _probe = S.probe
+    for bad, seq in [("c", ["a", "b", "c", "d", "e"]), ("a", ["a", "b", "c"]), ("e", ["a", "b", "c", "d", "e"])]:
+        S.probe = lambda s, bad=bad: ("RED", s, ["job-" + bad], "") if bad in s else ("GREEN", s, [], "")
+        ok &= check("the culprit search finds %s in %s" % (bad, seq), S.find_culprit(seq, ["job-" + bad])[0] == bad)
+    S.probe = _probe
     print("all passed" if ok else "FAILED")
     return 0 if ok else 1
 

@@ -10,9 +10,17 @@
       "note": "OpenRouter free router: uses the free tokens. Never falls back."
     },
     {
+      "name": "opencode-free",
+      "model": "opencode/deepseek-v4.1-flash-free",
+      "count": 1,
+      "kind": "opencode",
+      "recover_hours": 2.5,
+      "note": "DeepSeek V4.1 Flash on the free OpenCode tier. One worker. A limit waits 2.5 h."
+    },
+    {
       "name": "qwen-local",
       "model": "omlx/Qwen3.8-27B-oQ4e-mtp",
-      "count": 2,
+      "count": 1,
       "kind": "opencode",
       "recover_hours": 0,
       "note": "Local 4-bit Qwen 3.8 27B, two workers. Never changes model, never banned."
