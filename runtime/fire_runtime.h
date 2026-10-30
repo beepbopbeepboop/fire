@@ -678,6 +678,7 @@ MojoList *mojo_str_chars(char *s);
  * `list(5)` printed `[]` and a loop body silently never ran). CPython names
  * the offending type here and this cannot — see the definition. */
 MojoList *mojo_iter_boxed_list(int64_t v);
+MojoList *mojo_iter_word(int64_t v);   /* list / dict keys / set / str / bytes of a word of unknown kind */
 /* `x in <boxed container>`: resolves list/dict/set at runtime instead of
  * the old hardcoded-false fallback. See mojo_in_dispatch_str's definition. */
 int mojo_in_dispatch_str(int64_t container, char *needle);
@@ -2283,6 +2284,10 @@ int64_t int_join_list(int64_t marker, int64_t path_list);      /* os.path.join(*
 MojoList *int64_t_path_split(char *path);              /* os.path.split(path) -> [head, tail] */
 MojoList *int64_t_path_splitdrive(char *path);         /* os.path.splitdrive(path) -> [drive, tail] */
 MojoList *int64_t_path_splitroot(char *path);          /* os.path.splitroot(path) -> [drive, root, tail] */
+MojoList *mojo_os_walk(char *top);                      /* os.walk(top) -> list[(str, list, list)] */
+int64_t   mojo_os_walk_w(int64_t top);                  /* the same, as a callable VALUE (int64_t ABI) */
+MojoList *mojo_glob(char *pattern);                     /* glob.glob/iglob(pattern) -> list[str] */
+int64_t   mojo_glob_w(int64_t pattern);                 /* the same, as a callable VALUE */
 MojoList *mojo_listdir(char *path);                    /* os.listdir(path) -> list[str] */
 int64_t int_getcwd(int64_t marker);                    /* os.getcwd */
 

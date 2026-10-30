@@ -3649,6 +3649,8 @@ class GimpleGen:
         'int64_t_path_splitdrive': ('MojoList *', ['char *']),            # os.path.splitdrive(path) -> [drive, tail]
         'int64_t_path_splitroot':  ('MojoList *', ['char *']),            # os.path.splitroot(path) -> [drive, root, tail]
         'mojo_listdir':          ('MojoList *',  ['char *']),              # os.listdir(path)
+        'mojo_os_walk':          ('MojoList *',  ['char *']),              # os.walk(top)
+        'mojo_glob':             ('MojoList *',  ['char *']),              # glob.glob/iglob(pattern)
         'isatty':                ('int',         ['int']),
         'getpid':                ('int',         []),
         'getppid':               ('int',         []),

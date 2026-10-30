@@ -9487,6 +9487,18 @@ MojoList *mojo_str_chars(char *s)
  * The empty list after the raise is unreachable (`mojo_raise_type_error`
  * longjmps, or exits when nothing is enclosing) and exists only because the
  * generated branch must have a value of the right C type. */
+/* The MojoList* a `for` over a value of UNKNOWN kind iterates: a list is
+ * itself, a dict its keys, a set its elements in insertion order, and a
+ * string/bytes as `mojo_iter_boxed_list` has it. Anything else (a generator
+ * handle, an int) raises a catchable TypeError rather than iterating garbage. */
+MojoList *mojo_iter_word(int64_t v)
+{
+    if (mojo_is_registered_list(v)) return (MojoList *)(intptr_t)v;
+    if (mojo_is_registered_dict(v)) return mojo_dict_keys((MojoDict *)(intptr_t)v);
+    if (mojo_is_registered_set(v)) return mojo_set_to_list((MojoSet *)(intptr_t)v);
+    return mojo_iter_boxed_list(v);
+}
+
 MojoList *mojo_iter_boxed_list(int64_t v)
 {
     /* A type-erased bytes value iterates its bytes as ints 0-255
@@ -10987,6 +10999,88 @@ MojoList *mojo_listdir(char *path) {
     closedir(d);
     return l;
 }
+
+/* os.walk(top) -> a list of (dirpath, dirnames, filenames) 3-tuples, top-down
+ * (what the caller's `for parent, dirs, files in os.walk(top)` iterates). Eager
+ * rather than a lazy generator: the compiled model has no generator VALUE a
+ * runtime function can hand back, and the tree is read once either way. A tuple
+ * is a MojoList whose slot kinds are recorded ("pll": str, list, list). An
+ * unreadable directory contributes nothing (os.walk's default onerror=None).
+ * The listing is name-sorted so a run is deterministic; CPython documents no
+ * order. */
+static int _mojo_walk_cmp(const void *a, const void *b) {
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+static void _mojo_walk_into(MojoList *out, const char *top) {
+    DIR *d = opendir(top);
+    if (!d) return;
+    char **names = NULL; size_t n = 0, cap = 0;
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL) {
+        const char *nm = ent->d_name;
+        if (nm[0] == '.' && (nm[1] == '\0' || (nm[1] == '.' && nm[2] == '\0'))) continue;
+        if (n == cap) { cap = cap ? cap * 2 : 16; names = (char **)realloc(names, cap * sizeof *names); }
+        names[n++] = strdup(nm);
+    }
+    closedir(d);
+    if (n) qsort(names, n, sizeof *names, _mojo_walk_cmp);
+    MojoList *dirs = mojo_list_new(), *files = mojo_list_new();
+    char **subdirs = (char **)malloc((n ? n : 1) * sizeof *subdirs);
+    size_t nsub = 0;
+    size_t tl = strlen(top);
+    for (size_t i = 0; i < n; i++) {
+        size_t pl = tl + 1 + strlen(names[i]) + 1;
+        char *path = (char *)malloc(pl);
+        snprintf(path, pl, "%s/%s", top, names[i]);
+        struct stat st;
+        if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
+            mojo_list_append_str(dirs, names[i]);
+            subdirs[nsub++] = path;
+        } else {
+            mojo_list_append_str(files, names[i]);
+            free(path);
+        }
+    }
+    mojo_list_set_kinds_uniform(dirs, 'p');
+    mojo_list_set_kinds_uniform(files, 'p');
+    MojoList *tup = mojo_list_new();
+    mojo_list_append_str(tup, strdup(top));
+    mojo_list_append_int(tup, (int64_t)(intptr_t)dirs);
+    mojo_list_append_int(tup, (int64_t)(intptr_t)files);
+    mojo_list_set_kinds(tup, "pll");
+    mojo_list_append_int(out, (int64_t)(intptr_t)tup);
+    for (size_t i = 0; i < nsub; i++) {
+        _mojo_walk_into(out, subdirs[i]);
+        free(subdirs[i]);
+    }
+    free(subdirs);
+    free(names);
+}
+MojoList *mojo_os_walk(char *top) {
+    MojoList *out = mojo_list_new();
+    if (top) _mojo_walk_into(out, top);
+    mojo_list_set_kinds_uniform(out, 'l');
+    return out;
+}
+int64_t mojo_os_walk_w(int64_t top) { return (int64_t)(intptr_t)mojo_os_walk((char *)(intptr_t)top); }
+
+/* glob.glob / glob.iglob(pattern) -> list[str]. POSIX glob(3): `**` matches as
+ * `*` (CPython without recursive=True), a leading '.' is not matched by a
+ * wildcard, and the result is name-sorted. Eager, like mojo_os_walk. */
+#include <glob.h>
+MojoList *mojo_glob(char *pattern) {
+    MojoList *out = mojo_list_new();
+    glob_t g;
+    memset(&g, 0, sizeof g);
+    if (pattern && glob(pattern, 0, NULL, &g) == 0) {
+        for (size_t i = 0; i < g.gl_pathc; i++)
+            mojo_list_append_str(out, strdup(g.gl_pathv[i]));
+    }
+    globfree(&g);
+    mojo_list_set_kinds_uniform(out, 'p');
+    return out;
+}
+int64_t mojo_glob_w(int64_t pattern) { return (int64_t)(intptr_t)mojo_glob((char *)(intptr_t)pattern); }
 
 int int_isfile(int64_t marker, int64_t path) {
     /* os.path.isfile(path) — S_ISREG twin of int_isdir above. The codegen

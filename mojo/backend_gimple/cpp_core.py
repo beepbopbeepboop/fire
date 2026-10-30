@@ -2391,6 +2391,21 @@ def _cpp_expr(gen, e) -> str:
             if _cpp_is_str(e.right) and not _cpp_is_str(e.left):
                 return (f"mojo_cstr_repeat((char *)({gen._cpp_expr(e.right)}), "
                         f"(int64_t)({gen._cpp_expr(e.left)}))")
+        if e.op == 'or' and not isinstance(e.right, gimple_ctypes.BoolLiteral):
+            # Python's `a or b` yields an OPERAND, not a bool: `suffix or ''`
+            # is `suffix` when it is truthy and the string otherwise. Lowered
+            # for a string/word left operand and a string right operand, where
+            # a raw `||` made a bool and g++ rejected the assignment to a
+            # `char *`.
+            _or_lt = _cpp_receiver_ctype(gen, e.left) or _cpp_expr_static_ctype(gen, e.left)
+            _or_rt = ('char *' if isinstance(e.right, gimple_ctypes.StringLiteral)
+                      else (_cpp_receiver_ctype(gen, e.right)
+                            or _cpp_expr_static_ctype(gen, e.right)))
+            if _or_rt == 'char *' and _or_lt in ('char *', 'int64_t'):
+                return (f"[&]() -> char * {{ int64_t _l = (int64_t)(intptr_t)"
+                        f"({gen._cpp_expr(e.left)}); "
+                        f"return mojo_truthy_word(_l) ? (char *)(intptr_t)_l : "
+                        f"(char *)({gen._cpp_expr(e.right)}); }}()")
         if e.op == '%':
             _pf = _cpp_percent_format(gen, e)
             if _pf is not None:
@@ -4291,6 +4306,10 @@ def _cpp_expr(gen, e) -> str:
                 _fp_args = []
                 for _fa in e.args:
                     _fct = _cpp_receiver_ctype(gen, _fa)
+                    if _fct is None:
+                        _fct = _cpp_expr_static_ctype(gen, _fa)
+                    if (_fct is None and isinstance(_fa, gimple_ctypes.StringLiteral)):
+                        _fct = 'char *'
                     if _fct not in ('int64_t', 'char *', 'MojoList *',
                                     'MojoDict *', 'MojoSet *'):
                         raise gimple_exprtypes._UnsupportedGeneratorShape(
@@ -6468,22 +6487,27 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
     Only supports iterable as a simple identifier or call expression."""
     target = s.target
     # A `for` over a call through a PARAMETER that holds a callable as a word
-    # (`for entry in _walk(root)`): the call itself lowers now (see the
-    # `mojo_fnptr_call_N` arm in `_cpp_expr`), but what it RETURNS is
-    # whatever iterator the caller's callable makes, and a loop needs that
-    # value's element type. Refused, naming the callee, as it always was.
+    # (`for entry in _walk(root)`): the call lowers through
+    # `mojo_fnptr_call_N`, and what it returns is whatever the caller's callable
+    # makes. The loop iterates the runtime's view of that word
+    # (`mojo_iter_word`: a list, a dict's keys, a set, a string; a value that
+    # is none of those raises a catchable TypeError), bound to a fresh list
+    # local, and its elements are read by the kind each recorded.
     if (isinstance(s.iterable, gimple_ctypes.CallExpr)
             and isinstance(s.iterable.func, gimple_ctypes.IdentExpr)
             and s.iterable.func.name in getattr(gen, '_cpp_param_names', ())
             and declared.get(s.iterable.func.name) in ('int64_t', 'char *')):
-        raise gimple_exprtypes._UnsupportedGeneratorShape(
-            f"a `for` over a call through the callable-valued local/parameter "
-            f"'{s.iterable.func.name}(...)' is not supported in a compiled "
-            f"generator/coroutine body: what that call RETURNS is not knowable "
-            f"here (it depends on which callable the caller passes), and a "
-            f"`for` target needs the returned ITERATOR's element type. It "
-            f"needs the callable's signature discovered from its call sites "
-            f"first.")
+        _wi = gen._cpp_fresh_name("_mg_witer")
+        declared[_wi] = 'MojoList *'
+        if not hasattr(gen, '_cpp_word_iter_locals'):
+            gen._cpp_word_iter_locals = set()
+        gen._cpp_word_iter_locals.add(_wi)
+        _call_txt = gen._cpp_expr(s.iterable)
+        _pre = [f"{indent}MojoList *{_wi} = mojo_iter_word((int64_t)({_call_txt}));"]
+        _inner_for = gimple_ctypes.ForStmt(
+            target=s.target, iterable=gimple_ctypes.IdentExpr(name=_wi),
+            body=s.body, else_body=s.else_body)
+        return _pre + gen._cpp_for_stmt(_inner_for, declared, indent)
     # `for <var> in <g>:` where `g` is a compiled-generator HANDLE local
     # (bound by `g = <compiled generator>(...)`, tracked in
     # `_cpp_generator_var_api`; same-module, an aliased import, or a
@@ -7348,6 +7372,12 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                         elif _nct == 'double':
                             lines.append(f"{indent}    {_nm} = "
                                          f"mojo_list_get_double({_tupvar}, {_si});")
+                        elif _itname in getattr(gen, '_cpp_word_iter_locals', ()):
+                            # elements of a value whose kind only the runtime
+                            # knew: read by the kind the tuple recorded, bound
+                            # as the box's own word
+                            lines.append(f"{indent}    {_nm} = mojo_box_word("
+                                         f"mojo_list_get_boxed({_tupvar}, {_si}));")
                         else:
                             lines.append(f"{indent}    {_nm} = "
                                          f"mojo_list_get_int({_tupvar}, {_si});")

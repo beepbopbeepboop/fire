@@ -924,15 +924,40 @@ def _cpp_for_over_callable_local_is_named():
     # The default `walk=os.walk` is the real shape: a kw-only parameter
     # defaulting to the function itself, which is also what keeps the
     # generator off the A3 path (see `_foreign_a3_generator_handle_next`).
-    test_generator_refused(
-        "cpp_for_over_callable_param_names_the_callee", """\
-def walk_tree(root, *, walk=len, start=[]):
-    for entry in walk(root):
-        yield entry
+    # (Was a refusal naming the callee. A `for` over a call through a callable
+    # PARAMETER now iterates the runtime's view of what the callable returned
+    # (`mojo_iter_word`), and `os.walk` / `glob.glob` / `glob.iglob` are real
+    # runtime callables, so c_common/fsutil.py's `_walk_tree` and `glob_tree`
+    # shapes compile. CPython is the oracle; counts, not order, are compared.)
+    _walk_src = """\
+import os
+import glob
+
+def walk_tree(root, *, _walk=os.walk):
+    for parent, _, names in _walk(root):
+        for name in names:
+            yield os.path.join(parent, name)
+
+def glob_tree(root, *, suffix=None, _glob=glob.iglob):
+    suffix = suffix or ''
+    for filename in _glob(f'{root}/*{suffix}'):
+        yield filename
 
 def main():
-    print(sum(walk_tree('a')))
-""", "callable-valued local/parameter 'walk(...)'")
+    n = 0
+    for f in walk_tree("runtime"):
+        if f.endswith(".h"):
+            n += 1
+    print(n)
+    m = 0
+    for g in glob_tree("runtime", suffix=".h"):
+        m += 1
+    print(m)
+
+main()
+"""
+    test_generator_matches_cpython(
+        "cpp_for_over_callable_param_walks_and_globs", _walk_src, _walk_src)
     # The negative half: an iterable this emitter DOES support must keep its
     # own path, and a call this emitter CAN resolve must never reach the new
     # branch — both would be silent behaviour changes if the gate were too

@@ -3132,16 +3132,16 @@ main()
     # that only checked the crash could not tell a catchable raise from a
     # hard abort.
     test_gimple_runtime_error("gimple_imported_callable_default_raises", """\
-def probe(x, *, g=os.walk):
+def probe(x, *, g=os.getloadavg):
     return g(x)
 
 def main():
     print(probe("."))
 main()
-""", "NotImplementedError: os.walk is a callable that is not available in compiled mode")
+""", "NotImplementedError: os.getloadavg is a callable that is not available in compiled mode")
 
     test_gimple_stdout("gimple_imported_callable_default_raise_is_catchable", """\
-def probe(x, *, g=os.walk):
+def probe(x, *, g=os.getloadavg):
     return g(x)
 
 def main():
@@ -3149,7 +3149,7 @@ def main():
         r = probe(".")
     except NotImplementedError as e:
         print('NotImplementedError')
-        print('os.walk' in str(e))
+        print('os.getloadavg' in str(e))
     else:
         print('no exception')
 main()
@@ -3161,7 +3161,7 @@ main()
     # spurious exception in every program that merely mentions a callable
     # default.
     test_gimple_stdout("gimple_uncalled_imported_callable_default_is_silent", """\
-def probe(x, *, g=os.walk):
+def probe(x, *, g=os.getloadavg):
     return x
 
 def main():
