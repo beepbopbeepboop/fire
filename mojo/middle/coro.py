@@ -72,14 +72,6 @@ _OLD_MODE = 'cpp'
 
 ARG_SHIM     = '__mojo_gen_arg'
 SETRET_SHIM  = '__mojo_gen_set_return'
-# The async result slot's typed channel (see `_async_result_kind`). Every
-# async `return` writes through the setter for its unit's kind, and the
-# awaiting side reads back through the matching reader. 'i' and 'b' ride the
-# plain int64_t box; 'd' and 'p' bit-cast through it, so the awaiter gets the
-# value the callee returned rather than its truncated integer.
-_ASYNC_SETRET_SHIM = {'i': SETRET_SHIM, 'b': SETRET_SHIM,
-                      'd': '__mojo_gen_set_return_d', 'p': '__mojo_gen_set_return_p'}
-_ASYNC_BITS_SHIM = {'b': '__mojo_bits_b', 'd': '__mojo_bits_d', 'p': '__mojo_bits_p'}
 # The value-slot lattice. 'b' is NOT redundant with 'i': the slot's C type IS
 # the type the consumer's loop target / tuple slot / `next()` result is
 # declared with, and `print` dispatches on it (`emit_infra`'s `_Bool` branch
@@ -318,14 +310,10 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
 
     Values are 'i'/'p'/'d', or ('list', elem_kind) for a list-typed local."""
     env: dict = {}
-    str_kinds: dict = {}   # local name -> {scalar kinds bound to it, every binding}
     for pname, pann in getattr(fn, 'params', []):
         k = _ann_kind(pann)
         if k is not None:
             env[pname] = k
-            # A parameter is a binding too: `def g(x: int): x = 2.5` rebinds
-            # it, and the rebind must be seen by the conflict check below.
-            str_kinds.setdefault(pname, set()).add(k)
     # Fill unannotated params from the unanimous cross-call-site kind
     # contract (bugs/hard/CODEGEN_coro_stackswitch_yield_kind_identifier_
     # inference.md repro 1: `def g(x): yield x` called only `g(3.5)`).
@@ -407,15 +395,6 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
             if isinstance(k, tuple) and k[0] == 'list':
                 list_elem.setdefault(tgt, set()).add(k[1])
             elif isinstance(k, str):
-                # Record EVERY kind the name is bound to, not just the first
-                # (`env.setdefault` kept the first binding's kind and silently
-                # dropped later rebindings -- bugs/CODEGEN_generator_yield_kind_
-                # rebound_name_silent_wrong_value.md, Shape 1). The `setdefault`
-                # write below still feeds this walk's own reads (an earlier
-                # binding of the same name must answer for later expressions in
-                # the same pass); `_static_env` resolves conflicting names to
-                # NO entry once the walk is done.
-                str_kinds.setdefault(tgt, set()).add(k)
                 env.setdefault(tgt, k)
         # `<name>.append(<literal>)` refines a list-local's element kind
         if (isinstance(n, N.CallExpr) and isinstance(n.func, N.MemberExpr)
@@ -427,28 +406,6 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
     for nm, eks in list_elem.items():
         if len(eks) == 1 and nm not in env:
             env[nm] = ('list', list(eks)[0])
-    # A local rebound to values of DIFFERENT kinds (Shape 1 of
-    # bugs/CODEGEN_generator_yield_kind_rebound_name_silent_wrong_value.md)
-    # must not answer with the FIRST kind any binding gave: a name bound to
-    # `False` and then `2.5` really holds both kinds across its scopes, so
-    # keeping the first was a single kind the generator's value slot could
-    # not render correctly.
-    #
-    # Two kinds that share one slot layout are NOT a conflict: `bool` is an
-    # `int` (see `_generator_value_kind`'s mixed bool/int DECISION), so a name
-    # bound to `True` and `2` answers 'i' as that decision already does.
-    # Anything else is recorded as a CONFLICT marker, not dropped. A dropped
-    # name reads as a None hole, and a lone hole is read as int64_t everywhere
-    # -- which is the silent truncation this fix exists to stop. The marker is
-    # a tuple so every consumer that tests `isinstance(v, str)` or `v[0] ==
-    # 'list'` treats it as "not a scalar kind", and
-    # `_conflicting_names_in` is the one reader that acts on it.
-    for nm, eks in str_kinds.items():
-        if len(eks) > 1:
-            if eks <= {'i', 'b'}:
-                env[nm] = 'i'
-            else:
-                env[nm] = ('conflict', frozenset(eks))
     # `for <v> in <list-local-or-literal | sibling-generator-call>():` binds
     # <v> to the element kind
     for n in _walk(fn):
@@ -710,34 +667,6 @@ def _generator_nested_slots(fn: N.FunctionDef, env: dict | None = None):
     return [k == 'tuple' for k in kinds]
 
 
-def _conflicting_names_in(expr, env: dict | None) -> list:
-    """The names in `expr`'s VALUE position that `_static_env` recorded as
-    CONFLICTING (a local rebound to values of incompatible kinds -- see the
-    marker there). A name whose value is read through the expression counts;
-    one that is only consulted for a result that is a bool regardless of its
-    kind does not (`r < 3` is a bool whatever `r` holds), so comparisons are
-    not descended into. Returns the names, empty when there are none."""
-    env = env or {}
-    if expr is None:
-        return []
-    if isinstance(expr, N.IdentExpr):
-        v = env.get(expr.name)
-        if isinstance(v, tuple) and v[0] == 'conflict':
-            return [expr.name]
-        return []
-    if isinstance(expr, N.TernaryExpr):
-        return (_conflicting_names_in(expr.then_val, env)
-                + _conflicting_names_in(expr.else_val, env))
-    if isinstance(expr, N.BinaryOp):
-        if expr.op in _YIELD_CMP_OPS or expr.op in ('in', 'not in'):
-            return []
-        return (_conflicting_names_in(expr.left, env)
-                + _conflicting_names_in(expr.right, env))
-    if isinstance(expr, N.UnaryOp):
-        return _conflicting_names_in(expr.operand, env)
-    return []
-
-
 def _generator_value_kind(fn: N.FunctionDef,
                           env: dict | None = None,
                           delegated=None) -> tuple[str | None, str]:
@@ -745,14 +674,6 @@ def _generator_value_kind(fn: N.FunctionDef,
     has_tuple = has_nontuple = False
     for n in _walk(fn):
         if isinstance(n, N.YieldExpr):
-            _conflicts = _conflicting_names_in(n.value, env)
-            if _conflicts:
-                # The value slot would be read through a kind the name does
-                # not have on every path (see `_static_env`'s marker). Refuse
-                # rather than type it as int64_t, which is what the None hole
-                # below would do for a yield with no other kind beside it.
-                return None, (f'a `yield` of {_conflicts[0]!r}, a local rebound '
-                              f'to values of different kinds (v0)')
             k = _yield_kind(n.value, env)
             kinds.add(k)
             if k == 'tuple':
@@ -1300,210 +1221,6 @@ def _nested_class_nonliteral_attr(fn: N.FunctionDef):
     return None
 
 
-def _async_return_kinds(fn: N.FunctionDef) -> set:
-    """The kind of every value-carrying `return` in `fn`'s own body, as
-    `_yield_kind` reads them ('i' 'b' 'p' 'd'). A `return` whose kind cannot be
-    established contributes nothing: that is a HOLE, and
-    `_generator_value_kind` documents the same convention for one. Nested `def`s
-    are skipped, because their `return`s belong to them, not to `fn`."""
-    env = _static_env(fn, None)
-    kinds: set = set()
-
-    def _visit(node) -> None:
-        if isinstance(node, N.ReturnStmt):
-            if node.value is not None:
-                k = _yield_kind(node.value, env)
-                if k is not None:
-                    kinds.add(k)
-            return
-        d = getattr(node, '__dict__', None)
-        if not d:
-            return
-        for _key, v in vars(node).items():
-            if not (isinstance(v, list) and v and _looks_like_stmt_list(v)):
-                continue
-            for child in v:
-                if not isinstance(child, N.FunctionDef):
-                    _visit(child)
-
-    for st in getattr(fn, 'body', []) or []:
-        if not isinstance(st, N.FunctionDef):
-            _visit(st)
-    return kinds
-
-
-def _async_result_kind(fn: N.FunctionDef) -> str:
-    """The kind of `fn`'s async result slot (`_KIND_CTYPE` key).
-
-    The slot is typed by the one kind every known `return` shares, so an
-    awaited float comes back as a float and a string as a string, instead of
-    their truncated / pointer bits read as an integer. 'b' and 'i' are the same
-    width on the wire, so a mix of the two is 'i'; a function with no
-    value-carrying return, or only holes, is 'i', the historical default. A
-    mix that cannot share one slot is refused by `_async_return_refusal` before
-    this is consulted.
-    """
-    kinds = _async_return_kinds(fn)
-    if kinds == {'b'}:
-        return 'b'
-    folded: set = set()
-    for k in kinds:
-        folded.add('i' if k == 'b' else k)
-    if len(folded) == 1:
-        for k in folded:
-            return k
-    return 'i'
-
-
-def _async_return_refusal(fn: N.FunctionDef) -> str | None:
-    """Why `fn`'s `return` values cannot share its one async result slot, or
-    None.
-
-    `_lower_one_async` types the result slot by `_async_result_kind`, so every
-    `return` in a unit has to write the same kind. Two returns of DIFFERENT
-    known kinds (`return 1` on one path, `return "s"` on another) cannot: the
-    slot has one type, and awaited, the other kind would come back as bits of
-    the wrong type (measured before the typed slot: a string printed as its
-    pointer, `4367193456`). That is a silent wrong answer, so it is refused
-    here, in the one place every async unit passes through, rather than
-    compiled. A bool counts as an int, since both fit the integer channel.
-    """
-    kinds = _async_return_kinds(fn)
-    folded: set = set()
-    for k in kinds:
-        folded.add('i' if k == 'b' else k)
-    if len(folded) > 1:
-        names = sorted(folded)
-        return (f'{fn.name}: its `return` values disagree on one kind '
-                f'({", ".join(names)}), and the async result slot carries '
-                'one kind (v0)')
-    return None
-
-
-def _note_async_kind(table: dict, name: str, kind) -> None:
-    """Record `kind` as `name`'s async result kind. A second, DIFFERENT kind
-    for the same name makes it ambiguous (None), which the reader refuses."""
-    if name in table and table[name] != kind:
-        table[name] = None
-    else:
-        table[name] = kind
-
-
-def _register_async_result_kinds(stmts, closure_stmts=()) -> None:
-    """Fill `_ASYNC_RESULT_KIND` and `_ASYNC_HANDLE_KIND` for this module (see
-    their comments), and also for any imported modules in the closure so
-    awaited handles whose origin is not in this module resolve the right
-    kind. Walks the current module plus `closure_stmts`."""
-    _ASYNC_RESULT_KIND.clear()
-    _ASYNC_HANDLE_KIND.clear()
-    all_stmts = list(stmts)
-    for sub in closure_stmts:
-        if isinstance(sub, (list, tuple)):
-            all_stmts.extend(sub)
-        else:
-            all_stmts.append(sub)
-    for s in all_stmts:
-        for n in _walk(s):
-            if (isinstance(n, N.FunctionDef) and getattr(n, 'is_async', False)
-                    and not any(isinstance(x, N.YieldExpr) for x in _walk(n))):
-                _note_async_kind(_ASYNC_RESULT_KIND, _cm_as_str(n.name),
-                                 _async_result_kind(n))
-    for s in stmts:
-        for n in _walk(s):
-            if not isinstance(n, (N.AssignStmt, N.VarDecl)):
-                continue
-            call = _unwrap_transfer(n.value)
-            if _is_create_task_call(call) and call.args:
-                call = call.args[0]
-            tname = _await_target_name(call)
-            if tname is None or tname not in _ASYNC_RESULT_KIND:
-                continue
-            if isinstance(n, N.VarDecl):
-                var = n.name
-            else:
-                var = n.target.name if isinstance(n.target, N.IdentExpr) else None
-            if var:
-                _note_async_kind(_ASYNC_HANDLE_KIND, _cm_as_str(var),
-                                 _ASYNC_RESULT_KIND[tname])
-
-
-def _async_result_read(kind: str, raw):
-    """`raw` (an int64_t result-slot read) as a value of the unit's `kind`.
-    'i' is the slot's own type, so it is returned unchanged."""
-    if kind == 'i':
-        return raw
-    return _call(_ASYNC_BITS_SHIM[kind], [raw])
-
-
-def _result_kind_of(expr) -> str:
-    """The result kind an awaited or driven async expression carries.
-
-    A fresh `f(args)` is answered by `f`'s kind; a handle (`task^`, or a
-    variable bound from `f(...)` / `create_task(f(...))`) by the kind of the
-    call that bound it. Anything else answers 'i', the int64_t read the slot
-    always had: a handle passed in from elsewhere is not traced here.
-    """
-    u = _unwrap_transfer(expr)
-    name = _await_target_name(u)
-    if name is not None:
-        table, key = _ASYNC_RESULT_KIND, name
-    elif isinstance(u, N.IdentExpr):
-        table, key = _ASYNC_HANDLE_KIND, _cm_as_str(u.name)
-    else:
-        return 'i'
-    if key not in table:
-        return 'i'
-    kind = table[key]
-    if kind is None:
-        raise RuntimeError(
-            f'cannot compile module: {key!r} names async functions whose '
-            'results have different kinds, so this await cannot tell which '
-            'result slot to read (v0)')
-    return kind
-
-
-# The C slot type a yield of each kind needs in the COMPILED (cpp) path's
-# value slot. `d` is a double; `b` is a `_Bool` so it renders `True`. The cpp
-# path types a lambda call as `std::function<int64_t()>`, so a float or bool
-# lambda result never reaches a yield as its own kind -- which is exactly why
-# this is checked against the yield's kind here rather than trusted.
-_CPP_SLOT_FOR_KIND = {'d': 'double', 'b': '_Bool'}
-
-
-def cpp_value_slot_refusal(fn: N.FunctionDef, slot_ctype: str) -> str | None:
-    """Why the COMPILED (cpp) backend's single value slot of `slot_ctype`
-    cannot hold `fn`'s yields faithfully, or None when it can.
-
-    Reached only for a generator the stack-switch path refused, so it is the
-    fallback's own check, not a second copy of `_generator_value_kind`'s
-    verdict: `_generator_value_kind` answers "is there ONE kind for the
-    slot", and `exprtypes._generator_yield_ctype` answers "does the cpp
-    typer agree on one C type". The two disagree for a yield the cpp typer
-    cannot see the kind of -- a lambda-bound callee or a rebound local --
-    which it types int64_t, and int64_t is a silent truncation of a float
-    and a silent `1` for a `True`. So a yield whose kind here is `d` or `b`
-    must find the matching slot type, and a rebound name is a refusal
-    outright (see `_static_env`'s conflict marker).
-
-    Walks the generator's OWN body (`_walk_own_body`), not nested defs, which
-    have their own yields and slot."""
-    env = _static_env(fn, None)
-    for n in gimple_exprtypes._walk_own_body(fn.body):
-        if not (isinstance(n, N.YieldExpr) and n.value is not None):
-            continue
-        _conflicts = _conflicting_names_in(n.value, env)
-        if _conflicts:
-            return (f'a `yield` of {_conflicts[0]!r}, a local rebound to values '
-                    f'of different kinds, cannot be typed for one C value slot')
-        k = _yield_kind(n.value, env)
-        want = _CPP_SLOT_FOR_KIND.get(k)
-        if want is not None and slot_ctype != want:
-            return (f'a `yield` of a {"float" if k == "d" else "bool"} value is '
-                    f'typed {slot_ctype!r} by the cpp path, which would truncate '
-                    f'it (v0)')
-    return None
-
-
 def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
               struct_def=None, prop_names: dict | None = None) -> tuple[bool, str]:
     if fn.is_async:
@@ -1777,21 +1494,6 @@ _CALLSITE_PARAM_CONFLICTS: dict[str, set] = {}
 # handle>` (Awaitable-protocol waiter-list park). Same per-lower() lifetime
 # and single-threaded rationale as _PARAM_NAMES.
 _TASK_VARS: set = set()
-
-# The result kind of the async unit `_rewrite_async_stmts` is lowering right
-# now (a one-cell box, like `_CVAR`'s single-threaded per-unit state; set by
-# `_lower_one_async` before its rewrite). It picks the setter each `return`
-# uses (`_ASYNC_SETRET_SHIM`).
-_ASYNC_RET_KIND: list = ['i']
-
-# Module-wide answer to "what kind does an awaited/driven async call carry?",
-# populated by `_register_async_result_kinds` before any unit is lowered (so a
-# callee defined AFTER its awaiter still answers). Name -> kind; a name that
-# two defs give different kinds maps to None, which the reader refuses rather
-# than guess. `_ASYNC_HANDLE_KIND` is the same for a variable bound from a
-# call (or `create_task(call)`) to such a name.
-_ASYNC_RESULT_KIND: dict = {}
-_ASYNC_HANDLE_KIND: dict = {}
 
 # Bare names of struct `async def` METHODS in the module currently being
 # lowered that passed async-method eligibility -- populated fresh at the
@@ -2907,10 +2609,8 @@ def _await_drive_stmts(cvar: str, inner, forward=_forward_plain) -> tuple[list, 
         _AW_COUNTER[0] += 1
         rv = f'__ar{_AW_COUNTER[0]}'
         stmts = [N.VarDecl(name=rv, type_ann=None,
-                           value=_async_result_read(
-                               _result_kind_of(inner),
-                               _call('__mojo_async_await_task',
-                                     [_c_ident(cvar), _c_ident(_hh.name)])))]
+                           value=_call('__mojo_async_await_task',
+                                       [_c_ident(cvar), _c_ident(_hh.name)]))]
         return stmts, _c_ident(rv)
     name = _await_target_name(inner)
     if name is not None:
@@ -2931,8 +2631,7 @@ def _await_drive_stmts(cvar: str, inner, forward=_forward_plain) -> tuple[list, 
     stmts.append(N.WhileStmt(condition=_call('__mojo_gen_resume', [_c_ident(h), N.IntLiteral(value=0)]),
                              body=loop_body, else_body=None))
     stmts.append(N.VarDecl(name=rv, type_ann=None,
-                           value=_async_result_read(_result_kind_of(inner),
-                                                    _call('__mojo_gen_retval', [_c_ident(h)]))))
+                           value=_call('__mojo_gen_retval', [_c_ident(h)])))
     stmts.append(N.ExprStmt(value=_call('__mojo_gen_destroy', [_c_ident(h)])))
     return stmts, _c_ident(rv)
 
@@ -2971,12 +2670,12 @@ def _rewrite_async_stmts(stmts: list, cvar: str) -> list:
         if isinstance(s, N.ReturnStmt) and isinstance(s.value, N.AwaitExpr):
             drive, rv = _await_drive_stmts(cvar, s.value.value)
             out.extend(drive)
-            out.append(N.ExprStmt(value=_call(_ASYNC_SETRET_SHIM[_ASYNC_RET_KIND[0]], [_c_ident(cvar), rv])))
+            out.append(N.ExprStmt(value=_call(SETRET_SHIM, [_c_ident(cvar), rv])))
             out.append(N.ReturnStmt(value=None))
             continue
         if isinstance(s, N.ReturnStmt):
             if s.value is not None:
-                out.append(N.ExprStmt(value=_call(_ASYNC_SETRET_SHIM[_ASYNC_RET_KIND[0]],
+                out.append(N.ExprStmt(value=_call(SETRET_SHIM,
                                                   [_c_ident(cvar), _rewrite_async_expr(s.value, cvar)])))
             out.append(N.ReturnStmt(value=None))
             continue
@@ -3093,16 +2792,6 @@ def _rewrite_async_gen_stmts(stmts: list, cvar: str) -> list:
                 setattr(s, k, _rewrite_async_expr(v, cvar))
         out.append(s)
     return out
-
-
-def _async_receiver_kind(fn, is_method: bool) -> str:
-    """The receiver slot a compiled `async def` METHOD takes -- 'self', 'cls'
-    or '' -- by the same single rule the generator meta uses
-    (`method_receiver_kind`). Recorded on the meta entry so `register` can
-    put it on the `_generator_method_api` entry, where the await/call site
-    reads it to decide whether to prepend the receiver. A top-level async
-    function has no receiver."""
-    return method_receiver_kind(fn) if is_method else ''
 
 
 def _async_method_setup(fn, base, struct_name):
@@ -3266,7 +2955,7 @@ def _lower_one_async_gen(fn: N.FunctionDef, meta: list, base: str | None = None,
     body_fd = _mark_coro_body(body_fd)
     meta.append({
         'name': _cm_as_str(fn.name), 'struct': struct_name, 'is_method': is_method, 'is_async': True,
-        'is_async_gen': True, 'receiver': _async_receiver_kind(fn, is_method),
+        'is_async_gen': True,
         'base': base, 'body_name': body_name,
         'params': c_params,
         'nargs': len(real_params), 'value_ctype': 'int64_t', 'value_kind': 'i',
@@ -3279,16 +2968,11 @@ def _lower_one_async_gen(fn: N.FunctionDef, meta: list, base: str | None = None,
 
 def _lower_one_async(fn: N.FunctionDef, meta: list, base: str | None = None,
                      struct_name: str | None = None, struct_def=None) -> N.FunctionDef:
-    _refusal = _async_return_refusal(fn)
-    if _refusal is not None:
-        raise RuntimeError(f'cannot compile module: {_refusal}')
-    kind = _async_result_kind(fn)
     base, is_method, real_params, prologue, body_params, c_params = \
         _async_method_setup(fn, base, struct_name)
     body_name = f'{base}_body'
     _TASK_VARS.clear()
     _TASK_VARS.update(_scan_task_vars(fn))
-    _ASYNC_RET_KIND[0] = kind
     new_body = prologue + _rewrite_async_stmts([_deep_copy_stmt(s) for s in fn.body], _CVAR)
     body_fd = N.FunctionDef(name=body_name, params=body_params, return_type=None, body=new_body)
     body_fd.is_generator = False
@@ -3296,10 +2980,9 @@ def _lower_one_async(fn: N.FunctionDef, meta: list, base: str | None = None,
     body_fd = _mark_coro_body(body_fd)
     meta.append({
         'name': _cm_as_str(fn.name), 'struct': struct_name, 'is_method': is_method, 'is_async': True,
-        'receiver': _async_receiver_kind(fn, is_method),
         'base': base, 'body_name': body_name,
         'params': c_params,
-        'nargs': len(real_params), 'value_ctype': _KIND_CTYPE[kind], 'value_kind': kind,
+        'nargs': len(real_params), 'value_ctype': 'int64_t', 'value_kind': 'i',
         'tuple_slot_ctypes': None,
         'no_wd_forward': _base_is_channel_free(base),
         'defaults': list((getattr(fn, 'param_defaults', None) or {}).items()),
@@ -3447,11 +3130,8 @@ def _rewrite_asyncio_run(node, cvar: str | None, task_vars: set, local_map: dict
             task_expr = _unwrap_transfer(node.func.obj)
             pre.append(N.VarDecl(name=h, type_ann=None, value=task_expr))
             pre.append(N.ExprStmt(value=_call('__mojo_async_run_gen', [_c_ident(h)])))
-        _driven = node.args[0] if _is_asyncio_run_call(node) else node.func.obj
         pre.append(N.VarDecl(name=rv, type_ann=None,
-                             value=_async_result_read(
-                                 _result_kind_of(_driven),
-                                 _call('__mojo_gen_retval', [_c_ident(h)]))))
+                             value=_call('__mojo_gen_retval', [_c_ident(h)])))
         return _c_ident(rv), pre
     return node, pre
 
@@ -3966,14 +3646,10 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
         describe themselves in terms of UNANNOTATED params."""
         return pann is None or pann == ''
 
-    def _visit_call(node, caller_env, callee=None):
-        # `callee` is the name the call resolves to in THIS module, given by a
-        # closure caller whose spelling is an alias (`from m import gen as g`
-        # calls `g`, which is `gen` here). Absent, the spelling is the name.
+    def _visit_call(node, caller_env):
         fn = node.func
-        gname = callee if callee is not None else (
-            fn.name if isinstance(fn, N.IdentExpr) else
-            (fn.member if isinstance(fn, N.MemberExpr) else None))
+        gname = fn.name if isinstance(fn, N.IdentExpr) else \
+            (fn.member if isinstance(fn, N.MemberExpr) else None)
         fd = None
         pinfo = None
         if gname in gen_names:
@@ -4065,41 +3741,33 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
             seen[_n] = {}
         _collect()
 
-    # What the closure module currently being walked binds to THIS module's
-    # generators, so that a call spelled in that module can be typed here:
-    #   * `_bound_here`: local name -> generator name, for
-    #     `from <module_name> import g [as local]`. A bare `local(...)` counts
-    #     only when the walk's own module made that import, so a same-named
-    #     `g` from any other module is never mistaken for it.
-    #   * `_alias_here`: local names bound to THIS module by
-    #     `import <module_name> as k`, so `k.g(...)` counts.
-    _bound_here: dict = {}
-    _alias_here: set = set()
+    # The bare names that the closure module currently being walked binds to
+    # THIS module's generators with an un-aliased `from <module_name> import g`.
+    # A bare `g(...)` counts only when the walk's own module made that import,
+    # so a same-named `g` from any other module is never mistaken for it.
+    _bound_here: set = set()
 
     def _visit_closure_call(node, caller_env):
-        # A call from ANOTHER module of the import closure, counted in three
-        # spellings only: `<this module>.<generator>(...)`, `<alias>.<generator>(...)`
-        # for `import <this module> as <alias>`, and a bare `<local>(...)` bound
-        # by `from <this module> import <generator> [as <local>]`. Each names
-        # this module's generator without any other table, so none can collide
-        # with a same-named generator elsewhere. A call through a value is not
-        # counted; it stays a hole, as it always was.
+        # A call from ANOTHER module of the import closure, counted in two
+        # spellings only: `<this module>.<generator>(...)` and a bare
+        # `<generator>(...)` bound by `from <this module> import <generator>`.
+        # Both name this module's generator without any other table, so they
+        # cannot collide with a same-named generator elsewhere. An aliased
+        # import is not counted, and neither is a call through a value; those
+        # stay holes, as they always were.
         fn = node.func
-        _callee = None
         if isinstance(fn, N.MemberExpr):
-            _obj = _dotted_name(fn.obj)
-            if (fn.member in gen_names and module_name is not None
-                    and (_obj == module_name or _obj in _alias_here)):
-                _callee = fn.member
+            _hit = (fn.member in gen_names and module_name is not None
+                    and _dotted_name(fn.obj) == module_name)
         elif isinstance(fn, N.IdentExpr):
-            _local = _cm_as_str(fn.name)
-            if _local in _bound_here:
-                _callee = _bound_here[_local]
-        if _callee is not None:
-            _visit_call(node, caller_env, _callee)
+            _hit = _cm_as_str(fn.name) in _bound_here
+        else:
+            _hit = False
+        if _hit:
+            _visit_call(node, caller_env)
 
     def _from_bound_names(src):
-        names: dict = {}
+        names = set()
         if module_name is None:
             return names
         for s in src:
@@ -4110,22 +3778,9 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
             for _fp in (getattr(s, 'name_alias_strs', None) or []):
                 _rn = gimple_ctypes._fi_name(_fp)
                 _ra = gimple_ctypes._fi_alias(_fp)
-                if _rn in gen_names:
-                    names[_ra or _rn] = _rn
+                if not _ra and _rn in gen_names:
+                    names.add(_rn)
         return names
-
-    def _module_aliases(src):
-        aliases: set = set()
-        if module_name is None:
-            return aliases
-        for s in src:
-            if not isinstance(s, N.ImportStmt):
-                continue
-            _entries = [(s.module, s.alias)] + list(s.extra or [])
-            for _mod, _al in _entries:
-                if _al and _cm_as_str(_mod) == module_name:
-                    aliases.add(_cm_as_str(_al))
-        return aliases
 
     def _collect_from(src, visit):
         for s in src:
@@ -4164,8 +3819,6 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
         for _cs in closure_stmts:
             _bound_here.clear()
             _bound_here.update(_from_bound_names(_cs))
-            _alias_here.clear()
-            _alias_here.update(_module_aliases(_cs))
             _collect_from(_cs, _visit_closure_call)
 
     def _classify():
@@ -4361,7 +4014,6 @@ def lower(stmts: list, closure_stmts=(),
     # to drive it for real rather than bind the descriptor as the loop
     # variable. See `_compute_no_wd_forward`.
     _compute_no_wd_forward(stmts)
-    _register_async_result_kinds(stmts, closure_stmts)
     for s in stmts:
         if isinstance(s, N.FunctionDef) and getattr(s, 'is_generator', False):
             ok, _why = _eligible(s, prop_names=_prop_names)
@@ -5526,7 +5178,6 @@ def _lower_one(fn: N.FunctionDef, meta: list,
         'is_method': is_method,
         'has_self': has_self,
         'is_classmethod': is_classmethod,
-        'receiver': _rcv_kind,
         'base': base,
         'body_name': body_name,
         'params': c_params,
@@ -5816,19 +5467,6 @@ def register(gen, meta: list) -> None:
     gen.func_return_types.setdefault('__mojo_async_await_sock_recv', 'int64_t')
     gen.func_param_types.setdefault('__mojo_gen_retval', ['int64_t'])
     gen.func_return_types.setdefault('__mojo_gen_retval', 'int64_t')
-    # The typed async result channel (see _ASYNC_SETRET_SHIM / _ASYNC_BITS_SHIM):
-    # the setters take the value as its own C type, and the bit-casts hand the
-    # raw int64_t slot back as that type, so the awaiting local is typed by it.
-    gen.func_param_types.setdefault('__mojo_gen_set_return_d', ['int64_t', 'double'])
-    gen.func_return_types.setdefault('__mojo_gen_set_return_d', 'void')
-    gen.func_param_types.setdefault('__mojo_gen_set_return_p', ['int64_t', 'char *'])
-    gen.func_return_types.setdefault('__mojo_gen_set_return_p', 'void')
-    gen.func_param_types.setdefault('__mojo_bits_d', ['int64_t'])
-    gen.func_return_types.setdefault('__mojo_bits_d', 'double')
-    gen.func_param_types.setdefault('__mojo_bits_b', ['int64_t'])
-    gen.func_return_types.setdefault('__mojo_bits_b', '_Bool')
-    gen.func_param_types.setdefault('__mojo_bits_p', ['int64_t'])
-    gen.func_return_types.setdefault('__mojo_bits_p', 'char *')
     gen.func_param_types.setdefault('__mojo_gen_resume', ['int64_t', 'int64_t'])
     gen.func_return_types.setdefault('__mojo_gen_resume', 'int64_t')
     gen.func_param_types.setdefault('__mojo_gen_value', ['int64_t'])
@@ -5942,7 +5580,8 @@ def register(gen, meta: list) -> None:
             # stripped, so a consumer cannot recover this from them --
             # and GimpleGen._cpp_yield_from's `yield from cls.<gen>(...)`
             # branch needs it to get the call arity right.
-            'receiver': m['receiver'],
+            'receiver': ('cls' if m.get('is_classmethod')
+                         else 'self' if m.get('has_self') else ''),
             'tuple_slot_ctypes': m.get('tuple_slot_ctypes'),
             'tuple_slot_nested': m.get('tuple_slot_nested'),
             'has_return_value': True,

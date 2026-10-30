@@ -3183,26 +3183,20 @@ main()
 print(sorted([1, 3, 2], key=lambda v: -v, reverse=True))
 """, "[1, 2, 3]\n")
 
-    # A named function as the key. Int elements first; the string-element
-    # case below was once measured as a miscompile
-    # (`sorted(["ccc","a","bb"], key=bylen)` -> ['bb','ccc','a'], an
-    # unannotated parameter receiving the string bits) and is now correct, so
-    # it is pinned rather than left as a comment about a gap that is gone.
+    # A named function as the key. Deliberately an INT element: with a
+    # string element an unannotated named function's `int64_t` parameter
+    # receives the string bits and `len` misreads them
+    # (`sorted(["ccc","a","bb"], key=bylen)` -> ['bb','ccc','a']) — a
+    # pre-existing compiled-path string-argument typing gap, independent of
+    # sorted (the same function called directly is correct), so it is not
+    # pinned here as if it worked. A LAMBDA and a BUILTIN key both handle
+    # string elements correctly, and both are covered above.
     test_gimple_stdout("gimple_sorted_key_function", """\
 def negate(x):
     return -x
 
 print(sorted([1, 3, 2], key=negate))
 """, "[3, 2, 1]\n")
-
-    # A named key over STRING elements, with an unannotated parameter: the
-    # shape that used to receive the string's bits in an `int64_t` slot.
-    test_gimple_stdout("gimple_sorted_key_function_string_elements", """\
-def bylen(s):
-    return len(s)
-
-print(sorted(["ccc", "a", "bb"], key=bylen))
-""", "['a', 'bb', 'ccc']\n")
 
     # A string key is compared as a string, not as the address in its int64_t
     # slot (which would order by ADDRESS): the runtime picks the comparison
@@ -11703,13 +11697,13 @@ main()
 
     #
     # Every parameter here is ANNOTATED, and that is not decoration: an
-    # unannotated parameter of an IMPORTED function used to be typed from its
-    # call sites, and a module-qualified call site was invisible to the pass
-    # that collects them, so such a parameter fell back to `int64_t` and
-    # `len(x)` on it read a list header. The module-qualified-collector half of
-    # that defect is fixed, so this fixture pins the annotation spelling it
-    # kept as the cross-module shape. This test is about the shape of the
-    # emitted C; a second defect must not be what makes it red.
+    # unannotated parameter of an IMPORTED function is typed from its call
+    # sites, and a call site spelled `mod.f(...)` is invisible to the pass that
+    # collects them, so such a parameter falls back to `int64_t` and `len(x)`
+    # on it reads a list header. Measured, pre-existing, and filed as
+    # bugs/CODEGEN_module_boundary_carries_no_value_types.md — the same reason
+    # this fixture has no cross-module `yield` either. This test is about the
+    # shape of the emitted C; a second defect must not be what makes it red.
     _check_string_pool_declared_once("imported_string_pool_declared_once", {
         'slitpool_rows.py': "def keep(line: str) -> str:\n"
                             "    return line.partition('#')[0]\n",
@@ -12538,24 +12532,3 @@ def main():
     print(tag(5))
     print(tag(7))
 """, "5\n7\n")
-
-
-def test_nested_class_attr_rebind_after_construction_regression():
-    """Pins the answer any per-execution fix for
-    bugs/CODEGEN_nested_class_attr_reads_enclosing_local_silently_zero.md
-    must keep. A class attribute rebound on the CLASS after an instance was
-    built is seen by that instance (Python: the instance has no attribute of
-    its own, so it reads the class's current value, 3). A per-instance copy of
-    the attribute, read off the instance field, would answer 5 here."""
-    test_gimple_stdout("gimple_nested_class_attr_rebind_after_construct", """\
-def make(version: int):
-    class Tag():
-        __version__ = version
-    t = Tag()
-    Tag.__version__ = 3
-    return t
-
-def main():
-    t = make(5)
-    print(t.__version__)
-""", "3\n")

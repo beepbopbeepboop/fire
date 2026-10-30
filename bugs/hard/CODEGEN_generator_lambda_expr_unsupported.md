@@ -1,34 +1,5 @@
 # HARD BUG: some `lambda` shapes unsupported inside a compiled generator body
 
-## Status (2026-10-29, third pass — every row this doc owns is closed; the two open rows are in another worker's doc)
-
-### Re-measured this pass
-
-- **`sorted(key=<named function>)` over strings** (the residue table's
-  `sorted(key=<user function>)` row, which had never been re-measured): the
-  shape the old `test_gimple_runner.py` comment called a miscompile
-  (`sorted(["ccc","a","bb"], key=bylen)` → `['bb','ccc','a']`) prints
-  `['a', 'bb', 'ccc']` on the current tree, matching CPython. Its source doc
-  `CODEGEN_interpreter_user_function_as_builtin_callback_crashes` was already
-  deleted by `4902e31b4`. Pinned now by
-  `gimple_sorted_key_function_string_elements` in `test_gimple_runner.py`,
-  and the stale comment above it is corrected.
-- **The nested-def row** (`def outer(x): ... def inner(y): g = lambda z: z + n`)
-  is closed by `1eacc36f8`, and its doc was deleted by `3bdcff9a0`. The
-  "nested-def row is open" sentence in the second pass below was stale and is
-  struck.
-
-### What this doc still owns
-
-Nothing in its own scope. The two residue rows that remain (a generator whose
-yields rebind one name to a bool then a float, and `r = 2.5` rebinding a local
-first bound to `False`) are the subject of
-`bugs/CODEGEN_generator_yield_kind_rebound_name_silent_wrong_value.md`, which
-is claimed by another worker (`bug-codegen-generator-yield-kind-rebound`). This
-doc is not deleted yet only because ~20 live citations point at it; the
-disposition rule in the second pass still applies, and whoever closes that
-other doc deletes this one in the same commit as the citation repoint.
-
 ## Status (2026-10-29, second pass — the generator-yield residue of a lambda call is FIXED; the rest of the residue is filed in two docs)
 
 ### Landed this pass
@@ -64,8 +35,8 @@ other doc deletes this one in the same commit as the citation repoint.
 | `def outer(x): n = 2; def inner(y): g = lambda z: z + n; return g(y)` | `4` | `6` | fixed in `1eacc36f8` (a lambda inside a nested def reads its outer-outer capture). |
 | `sorted(key=<user function>)` | not re-measured | | `CODEGEN_interpreter_user_function_as_builtin_callback_crashes` |
 
-Because this doc is still cited by ~20 live locations and its two open rows
-(the first two above) are in another worker's doc, it is not deleted. Its disposition is the one the 2026-10-02 entry below
+Because this doc is still cited by ~20 live locations and its nested-def row is
+open, it is not deleted. Its disposition is the one the 2026-10-02 entry below
 states: delete it in the same commit that closes its last row and repoints
 every citation.
 

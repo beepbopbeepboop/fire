@@ -3416,18 +3416,6 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         _gw = gen._call_expr('int64_t', '_mojo_dispatch_getattr', pairs)
         gen._dyn_word_vals.add(_gw)   # see the identical note above
         return 'int64_t', _gw
-    # The 3-argument `type(name, bases, namespace)` builds a NEW class at run
-    # time from a dict of functions (collections.namedtuple's own
-    # `type(typename, (tuple,), class_namespace)`). The compiled path models
-    # classes as static structs, so there is no C to emit for it. Before this
-    # refusal it fell through to the 1-argument `mojo_type` runtime stub and
-    # produced a C call with three arguments, a gcc hard error with no
-    # pointer back to the Mojo construct. Refuse it here, by name.
-    if fname_raw == 'type' and len(node.args) == 3:
-        raise RuntimeError(
-            'cannot compile module: 3-argument type(name, bases, namespace) '
-            'creates a class at run time, which the compiled path does not '
-            'model (bug:COMPILE_FAIL_collections___init__)')
     if fname_raw == 'type'    and len(node.args) == 1:
         _, av = gen.lower_expr(node.args[0])
         # Read the struct's real leading __mojo_type_id field (see
@@ -5988,9 +5976,14 @@ def _lower_outer_closure_call(gen, fname_raw: str, ci, node: gimple_ctypes.CallE
                         tmp = gen._new_val(fct, f'{_cur_env}->{fld}')
                     gen._emit(f'  {new_env}->{fld} = {tmp};')
                 elif vname in gen.var_types:
-                    gen._safe_coerce_emit(gen.var_types.get(vname, vtype), fct,
-                                          gen._write_dest(vname),
-                                          f'{new_env}->{fld}')
+                    _boxed = _boxed_capture_source(gen, vname, fct)
+                    if _boxed is not None:
+                        gen._safe_coerce_emit(_boxed[0], fct, _boxed[1],
+                                              f'{new_env}->{fld}')
+                    else:
+                        gen._safe_coerce_emit(gen.var_types.get(vname, vtype), fct,
+                                              gen._write_dest(vname),
+                                              f'{new_env}->{fld}')
             full_arg_pairs = [(f'{ci.env_struct} *', new_env)] + arg_pairs
         else:
             null_env = gen._new_val(f'{ci.env_struct} *', f'({ci.env_struct} *)0')
@@ -6267,6 +6260,35 @@ def _lambda_site(node) -> str:
     return f"line {_l}" if _l else "an unknown line"
 
 
+def _boxed_capture_source(gen, name: str, field_ctype: str):
+    """(C type, C value) to store for capturing `name`, when `name` is a
+    local of the ENCLOSING function that is heap-boxed because a nested
+    closure captures it by reference (`gen._boxed_mut_locals`), else None.
+
+    Such a local is declared as a POINTER to its box (`int64_t * k`), so its
+    C type in `var_types` is the box's type, not its value's. Reading the
+    value is `*k` (the pointee type); the box itself is `k` (the pointer
+    type). The field's C type decides which one the env needs: a by-VALUE
+    field (`int64_t k`) takes the value, a by-REFERENCE field (`int64_t *
+    k`) takes the box. Callers that took `var_types[name]` as the source
+    type for either one emitted a pointer-typed temp holding a dereferenced
+    integer, which `-fgimple` rejects at the store (`assignment to 'int64_t
+    *' from 'int64_t'`, from `def outer(): k = 5; def inc(c): nonlocal k
+    ...; def get(c): return k + c`, where `get` only reads the cell `inc`
+    mutates).
+
+    The value text is a register temp for the by-value case: a store of
+    `*k` straight into an env field would be a memory-to-memory assignment,
+    which GIMPLE does not allow."""
+    _pointee = gen._boxed_mut_locals.get(name)
+    if _pointee is None or name in gen._captures:
+        return None
+    _box = gen._cname(name)
+    if _as_str(field_ctype).endswith(' *'):
+        return f'{_pointee} *', _box
+    return _pointee, gen._new_val(_pointee, f'*{_box}')
+
+
 def _env_field_value(gen, name: str, field_ctype: str,
                      src_text: str = None, src_ctype: str = None) -> str:
     """The value to STORE into a closure env's `name` field, coerced to the
@@ -6322,6 +6344,9 @@ def _env_field_value(gen, name: str, field_ctype: str,
         if _as_str(_cap_t) == _ft:
             return _cap_v
         return gen._coerce_to_type(_as_str(_cap_t), _ft, _cap_v)
+    _boxed = _boxed_capture_source(gen, name, _ft)
+    if _boxed is not None:
+        return gen._coerce_to_type(_boxed[0], _ft, _boxed[1])
     if _ft.endswith(' *'):
         _local_t = _as_str(gen.var_types.get(name, 'int64_t'))
         if _local_t.endswith(' *'):
@@ -8853,22 +8878,6 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
         _rsk = getattr(gen, '_return_value_slot_kinds', {}).get(fname_raw)
         if _rsk:
             gen._struct_slot_kinds[t] = _rsk
-    # A passthrough (`def ident(x): return x`) whose parameter was joined
-    # with a container at another call site is emitted ONCE with an
-    # `int64_t` parameter and returns that box, so a `str` argument arrives
-    # boxed and the result looks like an opaque handle. The argument's own
-    # static type is the truth for THIS call: record the result as the `char *`
-    # it is, so `list(ident("abc"))` iterates it as a string instead of
-    # through the runtime's boxed-list dispatch (which read the characters as
-    # ints). Last of the `_actual_types` writers above, because the
-    # `_return_elem_types` block sets `MojoList *` on this same temp for a
-    # callee that also returns lists. Same idiom as the boxed container
-    # returns.
-    _pt_idx = getattr(gen, '_passthrough_param_idx', {}).get(fname_raw)
-    if (_pt_idx is not None and _pt_idx < len(arg_pairs)
-            and arg_pairs[_pt_idx][0] == 'char *'
-            and ret_type in ('int', 'int64_t')):
-        gen._actual_types[t] = 'char *'
     return ret_type, t
 
 

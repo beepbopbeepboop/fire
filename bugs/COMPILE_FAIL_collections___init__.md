@@ -697,33 +697,6 @@ related to `Counter.__init__`'s `*args, **kwds` signature or its
 possibly the same general class of gap as `OrderedDict.__new__`'s `dict.
 __new__(cls)` above).
 
-## Status (2026-10-29, work/bug-compile-fail-collections-init — PARTIAL: the 3-arg `type()` gap now fails by name, not by gcc)
-
-Before: the 3-argument `type(name, bases, namespace)` fell through every
-`type` branch in `mojo/backend_gimple/emit_calls.py` to the 1-argument
-`mojo_type` stub and emitted `mojo_type(_t1,_t2,_t7)`, which gcc rejects
-("too many arguments to function 'mojo_type'; expected 1, have 3"). The
-prior pin (`test_regress_collections_type_3arg.py`) swallowed every exception,
-so it could not fail.
-
-Landed: `emit_calls.py` refuses the 3-argument form at lowering with
-`cannot compile module: 3-argument type(name, bases, namespace) creates a
-class at run time, which the compiled path does not model`. The pin now
-asserts that refusal and fails if the form compiles. Verified:
-`python3 test_regress_collections_type_3arg.py` → PASS;
-repro of `result = type(name, (tuple,), ns)` → the named RuntimeError (was: C
-with `mojo_type(_t1,_t2,_t7)`); `python3 test_gimple.py` → 407 pass, 1 fail
-(`test_print_of_a_function_value_is_not_a_decimal_address`, a decorator refusal
-in `bugs/COMPILE_FAIL_decorator_application_dropped.md`; its source has no
-3-arg `type()`).
-
-Still open, and this doc stays open: the feature itself. `namedtuple` also
-needs `eval`-generated `__new__` lambdas, `_tuplegetter` class attributes and
-runtime-created struct types, none of which the static struct model has. The
-next step is a design round for runtime class construction (a struct
-descriptor built from name/bases/namespace, plus per-class method table
-dispatch), not another codegen patch here.
-
 ## Status (2026-10-29 — work/bug-compile-fail-collections-init — PARTIAL, feature gap still open)
 
 Verified fresh: 3-arg `type('T', (tuple,), ns)` lowers to `mojo_type(_t1,_t2,_t7)`

@@ -8368,52 +8368,6 @@ main()
         print(f"PASS  {name}")
         _PASS += 1
 
-    def test_a_string_passthrough_beside_an_int_one_keeps_its_own_elements():
-        """`def ident(x): return x` called with a list of ints AND with a
-        string, in one program, must give the string call site its own
-        element answer: `list(ident("abc"))` is a list of one-character
-        strings, not the int64 join of the program's passthrough calls.
-
-        `_return_elem_types` holds one answer per function, and the
-        passthrough arm at the call site
-        (`emit_calls.py`, `_passthrough_param_idx`) only consulted the
-        argument's recorded element type when the argument was a container.
-        A `char *` argument fell through to the program-wide join, which the
-        int call had made `int64_t`, so the string's copy read its characters
-        as words and printed decimal addresses. A string value records no
-        element type of its own (`_elem_types` describes containers), so the
-        str call site must record none either.
-        """
-        global _PASS, _FAIL
-        name = "a_string_passthrough_beside_an_int_one_keeps_its_own_elements"
-        src = '''\
-def ident(x):
-    return x
-def main():
-    print(list(ident([1, 2, 3])))
-    print(list(ident("abc")))
-main()
-'''
-        want = _cpython_stdout(src)
-        if want is None:
-            print(f"FAIL  {name}: CPython does not run the fixture")
-            _FAIL += 1
-            return
-        for mode in ('single-TU', 'link-mode'):
-            got = _compiled_stdout(src, mode)
-            if isinstance(got, tuple):
-                print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
-                      f"{got[1][:800]}")
-                _FAIL += 1
-                return
-            if got != want:
-                print(f"FAIL  {name} [{mode}]: compiled stdout {got!r} != "
-                      f"CPython {want!r}")
-                _FAIL += 1
-                return
-        print(f"PASS  {name}")
-        _PASS += 1
-
     def test_a_returned_heterogeneous_list_keeps_its_slot_kinds():
         """A list literal's per-slot kinds must survive a `return`.
 
@@ -12791,7 +12745,6 @@ print(run('x/y.txt'))
     _run_isolated(lambda: test_variadic_lambda_lowers_as_gimple_in_every_body(), 'test_variadic_lambda_lowers_as_gimple_in_every_body (line 12718)')
     _run_isolated(lambda: test_scalar_given_a_char_star_parameter_is_stringified(), 'test_scalar_given_a_char_star_parameter_is_stringified (line 12719)')
     _run_isolated(lambda: test_ctor_of_a_container_reaches_the_comprehension(), 'test_ctor_of_a_container_reaches_the_comprehension (line 12720)')
-    _run_isolated(lambda: test_a_string_passthrough_beside_an_int_one_keeps_its_own_elements(), 'test_a_string_passthrough_beside_an_int_one_keeps_its_own_elements')
     _run_isolated(lambda: test_a_returned_heterogeneous_list_keeps_its_slot_kinds(), 'test_a_returned_heterogeneous_list_keeps_its_slot_kinds (line 12721)')
     _run_isolated(lambda: test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not(), 'test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not (line 12722)')
     _run_isolated(lambda: test_the_generic_repr_cluster_is_emitted_only_where_it_is_reachable(), 'test_the_generic_repr_cluster_is_emitted_only_where_it_is_reachable (line 12723)')

@@ -209,8 +209,14 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
                 gen._emit(f"  {env_var}->{gimple_ctypes._c_field_name(vname)} = {tmp};")
             else:
                 # Use _safe_coerce_emit to handle int→int64_t and other conversions.
-                local_type = gen.var_types.get(vname, vtype)
-                cname = gen._write_dest(vname)  # resolve capture path if nested
+                # A heap-boxed local's var_types entry is the BOX's pointer type,
+                # so its source is the value `*box` (see _boxed_capture_source).
+                _boxed = ggc._boxed_capture_source(gen, vname, _fct)
+                if _boxed is not None:
+                    local_type, cname = _boxed
+                else:
+                    local_type = gen.var_types.get(vname, vtype)
+                    cname = gen._write_dest(vname)  # resolve capture path if nested
                 gen._safe_coerce_emit(local_type, _fct, cname, f"{env_var}->{gimple_ctypes._c_field_name(vname)}")
         gen._closure_envs[node.name] = env_var
         # Take ownership of the environment this nested `def` just allocated,

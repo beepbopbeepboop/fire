@@ -7,7 +7,7 @@ The root-cause fix is on this branch: `0e5ddad7c` is an ancestor of HEAD.
 ran 407 tests: `itertools_filterfalse_keeps_the_elements_whose_predicate_is_false`
 PASSES (both single-TU and link-mode). Two other tests fail and are owned
 elsewhere: `ctor_of_a_container_reaches_the_comprehension`
-(`list(ident("abc"))` printing nothing on the compiled path, fixed in the passthrough call-result lowering) and
+(`bugs/CODEGEN_ctor_of_a_passthrough_string_prints_nothing.md`) and
 `test_print_of_a_function_value_is_not_a_decimal_address` (decorator
 application, `bugs/COMPILE_FAIL_decorator_application_dropped.md`).
 

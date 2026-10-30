@@ -3421,9 +3421,6 @@ def gen_module_impl(self, stmts):
     # Nested generators that read an enclosing def's variables: refused by
     # _gen_cpp_generator_unit (see cpp_async._nested_generator_captures).
     self._nested_gen_captures = _gca._nested_generator_captures(stmts)
-    # ...and the enclosing def's sibling defs, which a nested generator may
-    # call as non-capturing helpers (see cpp_async._nested_generator_sibling_defs).
-    self._nested_gen_sibling_defs = _gca._nested_generator_sibling_defs(stmts)
     # The node ids of every FunctionDef that is a STRUCT METHOD. The
     # free-function generator loops below iterate `_generator_fns` (built
     # from `_walk_ast`, so it necessarily includes methods) and must not
@@ -10211,76 +10208,6 @@ def gen_module_impl(self, stmts):
                     break
     self._ret_may_hold_str = _ret_maybe
 
-    # The float twin of the fixed point above, for FORWARDING. Pass 1.3d only
-    # records a slot whose own call sites observed a `double` beside an
-    # integer, so `def g(x): print(x)` reached only as `g(x)` from a
-    # float-possible `f` observes nothing for `x` and `print(x)` read the box
-    # word as an integer (`4312044272` for `f(2.5)`). Property propagates
-    # along an identifier argument, and along a copy, exactly as the str set
-    # does, into a slot that is still a plain `int64_t`: no annotation, no
-    # container observation, and no str-possible ownership (`_int_maybe`, which
-    # is final at this point). Nested defs are not reached: Pass 1.3d never
-    # records them either, so there is no annotation or observation to check
-    # the slot against.
-    _fl_maybe = self._int64_may_hold_float
-
-    def _fl_forwardable(callee: str, pname: str) -> bool:
-        if pname in self._param_container_types.get(callee, {}):
-            return False
-        if pname in _int_maybe.get(callee, ()):
-            return False
-        _cfn = _fn_by_name.get(callee)
-        for _an_pn, _an_pt in (_cfn.params or []):
-            if _as_str(_an_pn) == pname and _an_pt is not None:
-                return False
-        _cur = self._inferred_param_types.get(callee, {}).get(pname)
-        return _cur in (None, 'int', 'int64_t')
-
-    _fl_changed = True
-    while _fl_changed:
-        _fl_changed = False
-        for _fname, _pairs in _copies.items():
-            _fnames = _fl_maybe.get(_fname)
-            if not _fnames:
-                continue
-            for _t, _v in _pairs:
-                if _v in _fnames and _t not in _fnames:
-                    _fnames.add(_t)
-                    _fl_changed = True
-        for _fname, _sites in _calls.items():
-            _fnames = _fl_maybe.get(_fname)
-            if not _fnames:
-                continue
-            for _callee, _args in _sites:
-                _pn = _params.get(_callee)
-                if not _pn or _callee not in _fn_by_name:
-                    continue
-                for _i, _a in enumerate(_args):
-                    if _i >= len(_pn):
-                        break
-                    if not (isinstance(_a, IdentExpr)
-                            and _as_str(_a.name) in _fnames):
-                        continue
-                    if not _fl_forwardable(_callee, _pn[_i]):
-                        continue
-                    _cnames = _fl_maybe.setdefault(_callee, set())
-                    if _pn[_i] not in _cnames:
-                        _cnames.add(_pn[_i])
-                        _fl_changed = True
-
-    # A slot that may hold a str belongs to the str row, which is decided
-    # first at every consumer (`_gen_print` asks `mojo_cstr_or_int_str` before
-    # the float route is ever the answer for a plain int64_t). A float
-    # forwarded into such a slot is not printable by either row, so the
-    # float set yields it: the str row keeps the answer it already had.
-    for _fk, _fset in _fl_maybe.items():
-        _sset = _int_maybe.get(_fk)
-        if not _sset:
-            continue
-        for _fn_name in sorted(_fset):
-            if _fn_name in _sset:
-                _fset.discard(_fn_name)
-
     _STRUCT_FALLBACKS = ('MojoDict *', 'MojoList *', 'MojoSet *', 'MojoBytes *',
                          'MojoStr *', 'char *', 'int', 'int64_t')
     for callee in sorted(_struct_obs):
@@ -13255,11 +13182,6 @@ def gen_module_impl(self, stmts):
             'extern void    __mojo_async_await_sleep (int64_t, double);',
             'extern int64_t __mojo_async_await_sock_recv (int64_t, int64_t);',
             'extern int64_t __mojo_gen_retval (int64_t);',
-            'extern double  __mojo_bits_d (int64_t);',
-            'extern _Bool   __mojo_bits_b (int64_t);',
-            'extern char *  __mojo_bits_p (int64_t);',
-            'extern void    __mojo_gen_set_return_d (int64_t, double);',
-            'extern void    __mojo_gen_set_return_p (int64_t, char *);',
             'extern int64_t __mojo_gen_resume (int64_t, int64_t);',
             'extern int64_t __mojo_gen_value (int64_t);',
             'extern double  __mojo_gen_send_d (int64_t);',

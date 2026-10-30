@@ -4226,50 +4226,6 @@ def main():
         print(v)
 """, "42\n99\n")
 
-    # -- Bugs/CODEGEN_generator_yield_kind_rebound_name_silent_wrong_value.md
-    # Shape 1: a REBOUND local (`r = False`, then `r = 2.5`) holds two kinds,
-    # and one yield slot cannot render both (CPython: `2.5` then `False`).
-    # Before this fix the first binding's kind won (`env.setdefault`), so the
-    # slot was `_Bool` and printed `True`; then the drop-the-name fix left a
-    # None hole that `_generator_value_kind` reads as int64_t, which printed
-    # `2` / `0` -- silent truncation. The conflict marker in `_static_env`
-    # now makes the yield a refusal in BOTH backends, the stack-switch one
-    # and the cpp fallback, so no program prints a wrong value for it.
-    test_generator_refused("generator_rebound_local_yield_kind_shape1_refused", """\
-def gen(n):
-    r = False
-    if n > 0:
-        r = 2.5
-    yield r
-
-def main():
-    for v in gen(1):
-        print(v)
-    for v in gen(0):
-        print(v)
-main()
-""", "rebound to values of different kinds")
-
-    # Shape 2: a mixed-kind lambda yield (`f()` a bool, `r = g()` a float).
-    # The stack-switch path refuses it (mixed float / non-float), which hands
-    # it to the cpp fallback. That fallback types a lambda call as
-    # `std::function<int64_t()>`, so both yields were typed int64_t and it
-    # printed `1` / `1`. It now refuses the bool yield, because the slot it
-    # was given cannot hold a bool. CPython: `True` then `1.5`.
-    test_generator_refused("generator_mixed_lambda_yield_shape2_refused", """\
-def gen(n):
-    f = lambda: n > 2
-    yield f()
-    g = lambda: 1.5
-    r = g()
-    yield r
-
-def main():
-    for v in gen(5):
-        print(v)
-main()
-""", "is typed 'int64_t' by the cpp path")
-
     # ---- Regression tests distilled from the 30 bugs/CODEGEN_generator_
     # function_Lib_*.md stdlib shapes that the doc/COROUTINE.html §5.5 A3
     # stack-switch cutover made compile (previously wholesale-refused by

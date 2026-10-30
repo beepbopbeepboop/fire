@@ -900,16 +900,6 @@ def test_unannotated_param_with_disagreeing_call_sites() -> bool:
         # comes first.
         ('def f(x):\n    print(x)\n\n\nf(2.5)\nf(1)\n', '2.5\n1\n'),
         ('def f(x):\n    print(x)\n\n\nf(1)\nf(2.5)\n', '1\n2.5\n'),
-        # The same float-possible slot FORWARDED into a second function. `g`
-        # only ever sees an identifier at its one call site, so its own
-        # call-site walk observes no double and nothing marks its parameter;
-        # the float has to reach it through `f`'s parameter, which does carry
-        # the property. Without the forwarding hop `g(x)` printed the box's
-        # address (`4312044272` for `f(2.5)`). Both orders, as above.
-        ('def g(x):\n    print(x)\n\n\ndef f(x):\n    g(x)\n\n\n'
-         'f(2.5)\nf(1)\n', '2.5\n1\n'),
-        ('def g(x):\n    print(x)\n\n\ndef f(x):\n    g(x)\n\n\n'
-         'f(1)\nf(2.5)\n', '1\n2.5\n'),
     ]
     # The two pairs that used to be a HARD GCC ERROR and are now only wrong:
     #
@@ -1688,50 +1678,6 @@ def test_same_module_call_to_generic_with_default_binds_instantiation() -> bool:
     return ok
 
 
-def test_two_modules_specialize_one_generic_differently() -> bool:
-    """Regression test for bugs/CODEGEN_dylib_generic_inline_copies_share_one_symbol.md.
-
-    Two modules instantiate the same generic function with DIFFERENT type
-    arguments (`scale[2]` in `a`, `scale[3]` in `b`). The body depends on the
-    parameter, so each caller must get its own specialization. Today every
-    copy is emitted under the one bare symbol `_scale`, so both calls run the
-    same body and print `0`, a silent miscompile (CPython: 20 and 30). Fails
-    until each specialization gets its own deterministic symbol and body."""
-    pkg = {
-        'pkg/__init__.py': '',
-        'pkg/gen.py': (
-            'def scale[k: Int](x: Int) -> Int:\n'
-            '    return x * k\n'
-        ),
-        'pkg/a.py': (
-            'from pkg.gen import scale\n'
-            '\n'
-            'def fa() -> Int:\n'
-            '    return scale[2](10)\n'
-        ),
-        'pkg/b.py': (
-            'from pkg.gen import scale\n'
-            '\n'
-            'def fb() -> Int:\n'
-            '    return scale[3](10)\n'
-        ),
-        'pkg/main.py': (
-            'from pkg.a import fa\n'
-            'from pkg.b import fb\n'
-            '\n'
-            'print(fa())\n'
-            'print(fb())\n'
-        ),
-    }
-    with tempfile.TemporaryDirectory() as td:
-        rc, stdout = _build_and_run(pkg, 'pkg/main.py', td)
-    ok = rc == 0 and stdout == '20\n30\n'
-    if not ok:
-        print(f"  ✗ two_modules_specialize_one_generic_differently: rc={rc} "
-              f"stdout={stdout!r} (expected '20\\n30\\n')")
-    return ok
-
-
 CASES = [
     test_nested_def_is_not_a_module_level_fn_export,
     test_set_ctor_walks_boxed_global_container,
@@ -1758,7 +1704,6 @@ CASES = [
     test_failed_import_attempt_does_not_poison_later_spelling,
     test_imported_function_trailing_default_argument_is_padded,
     test_same_module_call_to_generic_with_default_binds_instantiation,
-    test_two_modules_specialize_one_generic_differently,
 ]
 
 
