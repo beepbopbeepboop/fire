@@ -19,11 +19,8 @@ same commit.
 
 | doc | status as the doc states it | what remains |
 |---|---|---|
-| `CODEGEN_generator_lambda_expr_unsupported.md` | Status 2026-10-29: the lambda-call-result return type is fixed for plain functions and pinned against CPython; the older "nothing is left" entries below it are superseded. | The generator's YIELD value slot is still `0` vs `False`; the nested-def capture miscompile has its own row below; the `sorted(key=)` row is not re-measured. |
-| `CODEGEN_nested_def_lambda_reads_outer_capture_as_zero.md` | State: OPEN. | A lambda in a nested `def` that captures a local of the enclosing function's enclosing scope reads 0 (CPython `6`, compiled `4`); filed 2026-10-29 from the generator-lambda doc above. |
-| `CODEGEN_param_used_only_as_method_receiver.md` | No banner. Status 2026-10-02 records the repro and the forwarding chain as fixed, with two pinned tests. | Read its "Measured" section before treating the doc as done. |
+| `CODEGEN_generator_lambda_expr_unsupported.md` | Status 2026-10-29, third pass: every row this doc owns is closed. | Nothing in its own scope. Two residue rows it lists (a generator whose yields rebind one name to a bool then a float; `r = 2.5` rebinding a local first bound to `False`) are claimed by another worker's doc (commit 71fda43ff). The doc stays only because ~20 live citations point at it. |
 | `COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md` | PARTIAL. 2026-10-26: the star/kwarg-unpack call capability landed; the file's refusal is unchanged, as its own entry predicted. | `_walk_tree`/`glob_tree`/`iter_files` still refuse; `iter_files` waits on the parameter-callee axis — a `*`/`**`-unpack call through the polymorphic `_walk` parameter. |
-| `PERF_struct_self_assign_scan_uncached.md` | Successor to the closed `_walk_ast` re-scan doc (removed below); the AST rescan is fixed and pinned. | `_collect_self_assigns`/`_collect_self_reads` are uncached (7.5% of a profiled run); the per-level generated-C text join is still superlinear (status: NOT attempted). |
 
 ## Removed docs: where their fix or residue went
 
@@ -58,7 +55,10 @@ symptom and then `git log --diff-filter=D -- bugs/hard bugs` for the removal.
 | `5eb26a610` | coro yield kind unresolved at callsite | fixed; residue filed as three docs |
 | `085ba7a72` | user-defined `__repr__` not consulted by `str()` / container spellings | fixed, pinned by a regression test |
 | `658deff0d` | selfhost's dispatch-globals list forced every name to a dict lookup; also the only home of the selfhost error-count measurement recipe | fixed 2026-10-03 (gcc errors 35 → 0); removed 2026-10-29 with a pinning test |
-| `b3b14a597` | `_walk_ast` re-scan blowup for large transitive-import graphs | closed 2026-10-29: the AST rescan is fixed and pinned; its two remaining costs live in `PERF_struct_self_assign_scan_uncached.md` (a row above) |
+| `1eacc36f8` | a lambda inside a nested `def` reads its outer-outer capture (read 0 instead of the captured value) | fixed; pinned by `gimple_lambda_in_nested_def_reads_outer_outer_local` |
+| `bbac2b433` | `CODEGEN_param_used_only_as_method_receiver` | already fixed; deleted with two pinned tests |
+| `316102957` | `PERF_struct_self_assign_scan_uncached` (uncached self-assign and self-read scans) | fixed: both scans memoized; pinned by `test_perf_self_assign_scan.py` |
+| `b3b14a597` | `_walk_ast` re-scan blowup for large transitive-import graphs | closed 2026-10-29: the AST rescan is fixed and pinned. Its uncached self-assign scan was memoized in `316102957`. Its other cost, wall clock's per-level generated-C text join, has no doc in the tree now. |
 
 ## Lessons that outlived their docs
 

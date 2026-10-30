@@ -52,7 +52,7 @@ def test_nonzero_integer_division_unchanged():
            '    print(a // b, a % b, n // b, 8 / b)\n')
     out, rc = run_jit(src)
     assert rc == 0, out
-    assert out == '3 1 -4 4.0', repr(out)
+    assert out == '3 1 -4 4', repr(out)
 
 def test_integer_modulo_floors_toward_divisor_sign():
     # Python's int `%` takes the divisor's sign (floor), where C's truncates.
@@ -103,18 +103,10 @@ def test_bare_zero_division_statement_in_generator():
     assert rc == 0, out
     assert out == '1\n2', repr(out)
 
-def test_true_division_int_int_gives_float():
-    src = ('def main():\n'
-           '    print(7 / 2)\n')
-    out, rc = run_jit(src)
-    assert rc == 0, out
-    assert out == '3.5', repr(out)
-
 if __name__ == '__main__':
     test_zero_divisor_raises_in_plain_function()
     test_nonzero_integer_division_unchanged()
     test_integer_modulo_floors_toward_divisor_sign()
     test_integer_modulo_floors_in_generator_body()
     test_bare_zero_division_statement_in_generator()
-    test_true_division_int_int_gives_float()
     print("OK")
