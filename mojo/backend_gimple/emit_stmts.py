@@ -3387,8 +3387,20 @@ def _gen_stmt_MatchStmt(gen, node):
         condition = None
         pattern_refs = []
         for pattern in match_case.patterns:
-            # Ask the formal model whether this pattern is allowed here.
+            # Ask the formal model what this pattern is.
             kind = formal_model.match_pattern_kind(pattern, getattr(gen, 'var_types', set()))
+            if kind == "class pattern (type test)":
+                # `case C():` is isinstance(subject, C). It is in the formal
+                # model's refused list (no isinstance there), so it is handled
+                # here before that refusal, and only here.
+                isinstance_node = gimple_ctypes.CallExpr(
+                    func=gimple_ctypes.IdentExpr(name="isinstance"),
+                    args=[subj_ref, pattern.func],
+                )
+                ict, icv = gen._lower_builtin_isinstance(isinstance_node)
+                icv = gen._ensure_bool_cond(ict, icv)
+                condition = icv if condition is None else f"{condition} || {icv}"
+                continue
             if kind in formal_model.MATCH_REFUSED_KINDS:
                 # Emit a refusal error message and raise.
                 raise formal_model.CodegenError(formal_model.match_pattern_refusal(
