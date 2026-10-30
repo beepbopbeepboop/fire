@@ -780,6 +780,13 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         # local read returns the variable's own C name, which is the whole
         # difference between the two.
         ginf.carry_callable_ret_types(gen, name, t)
+        # …and "this global holds a function VALUE" (a decorated `def` rebound
+        # to a global, whose repr name the rebinding recorded on the NAME): the
+        # same hop, for the same reason, so `print(step)` formats the read-back
+        # temp as a function and not as the int64_t box it is stored in.
+        _gfrn = gen._global_func_value_names.get(name)
+        if _gfrn is not None:
+            gen._func_value_names[t] = _gfrn
         # …and "this global holds a compiled generator/coroutine": every
         # consumer of the handle (`.close()`, `next()`, `for`) recovers the
         # resume/value/destroy api by looking up the VALUE it was handed, so
@@ -1473,7 +1480,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
                 and node.member in gen._class_attrs.get(_cur_struct, {})):
             _gname = gen._class_attrs[_cur_struct][node.member]
             _gtype = gen._global_var_types.get(_gname, 'int64_t')
-            return _gtype, gen._new_val(_gtype, f'{_gname}')
+            return _gtype, gmp._cattr_read(gen, _gname, _gtype)
 
         # `f.attr` read where `f` is a free function memoizing a value on
         # itself (`f._cached`) — see the `_func_attrs` pre-scan (Phase 1,
@@ -1588,7 +1595,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # (a boxed `_misc.Labeled`) versus `c_common/tables.py`'s unrelated
         # `UNKNOWN = '???'` (`char *`) — a bare `UNKNOWN` and a qualified
         # `tables.UNKNOWN` reading the SAME name as two different things
-        # (bugs/COMPILE_FAIL_Tools_c-analyzer_c_analyzer_info.md). The bare
+        # (c_analyzer info UNKNOWN pair bug). The bare
         # half of that pair is `_own_overlay_global_ctype`; this is the
         # qualified half.
         _field_types = gen._module_global_field_type(_bound_mod, node.member) \
@@ -1821,11 +1828,12 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             # bare type name. Without this a `ClassName.CONST` string/int
             # constant stubbed to 0 (or, when the base was an opaque module
             # handle, raised AttributeError at runtime).
-            _cattrs = gen._class_attrs.get(module_name)
+            _cattrs = gen._class_attrs.get(
+                gmp._resolve_fn_scoped_struct_name(gen, module_name))
             if _cattrs and node.member in _cattrs:
                 gname = _cattrs[node.member]
                 gtype = gen._global_var_types.get(gname, 'int64_t')
-                _gv = gen._new_val(gtype, f'{gname}')
+                _gv = gmp._cattr_read(gen, gname, gtype)
                 # Carry the attribute's recorded ELEMENT type onto the read
                 # value, so iterating or subscripting it downstream uses
                 # the right accessor. A class-level container is stored as
@@ -2598,14 +2606,28 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         val_ast = gen._subst_idents(aliases[node.member],
                                      {'Self': node.obj, struct_name: node.obj})
         return gen.lower_expr(val_ast)
-    # Class-level attribute (not an instance field) — redirect to global variable
+    # Class-level attribute (not an instance field) — redirect to global variable.
+    # Instance reads must consult the instance first (dynamic storage / field
+    # lookup) so an instance write shadows the class attribute; only bare
+    # class-name reads go to the synthesized backing global / per-execution
+    # cell.
     class_attrs = gen._class_attrs
-    if struct_name in class_attrs and node.member in class_attrs[struct_name]:
+    if (struct_name in class_attrs and node.member in class_attrs[struct_name]
+            and isinstance(node.obj, gimple_ctypes.IdentExpr)
+            and node.obj.name == struct_name):
         gname = class_attrs[struct_name][node.member]
         # Use the actual declared type of the global (stored in _global_var_types)
         gtype = gen._global_var_types.get(gname, 'int64_t')
-        t = gen._new_val(gtype, f'{gname}')
+        # Bare class-name read goes to the current per-execution cell.
+        t = gmp._cattr_read(gen, gname, gtype)
         return gtype, t
+    elif (struct_name in class_attrs and node.member in class_attrs[struct_name]
+            and ot.endswith(' *')):
+        # Instance read: dynamic storage first (an instance write shadows
+        # the class attribute), then the cell this instance was built under.
+        gname = class_attrs[struct_name][node.member]
+        gtype = gen._global_var_types.get(gname, 'int64_t')
+        return gmp._cattr_instance_dyn_read(gen, ov, ot, node.member, gname, gtype)
     elif struct_name in gen.struct_field_types and ot.endswith(' *'):
         # The struct defines its own `__getattr__` (compiled body ⇒ bare
         # `{Struct}___getattr__` key in func_return_types, or an overload
@@ -3132,8 +3154,10 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
             return fast
 
     lt, lv = gen.lower_expr(node.left)
-    lt, lv = ginf._unbox_float_param_operand(gen, node.left, lt, lv)
     rt, rv = gen.lower_expr(node.right)
+    if ginf._float_param_arith_applies(gen, node.op, node.left, lt, node.right, rt):
+        return 'int64_t', ginf._float_param_arith(gen, node.op, node.left, lt, lv, node.right, rt, rv)
+    lt, lv = ginf._unbox_float_param_operand(gen, node.left, lt, lv)
     rt, rv = ginf._unbox_float_param_operand(gen, node.right, rt, rv)
 
     # `x.prop OP y` (or `y OP x.prop`) where `prop` is a 0-arg
@@ -4593,9 +4617,6 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         rt, rv = gen._resolve_container_kind(rt, rv)
     c_op      = gimple_ctypes._BIN_OPS.get(op, op)
     res_type  = '_Bool' if op in gimple_ctypes._CMP_OPS else gimple_ctypes.TypeLattice.join(lt, rt)
-    # Int / Int is true division -> Float64
-    if op == '/' and res_type in gimple_ctypes._SCALAR_INT_TYPES and res_type != '_Bool' and not res_type.startswith('uint'):
-        res_type = 'double'
 
     # Type system: Check BIT_WIDTH_PRESERVATION for arithmetic ops
     # `a | b` where either operand is a real MojoDict* is Dict.__or__ (key
@@ -4670,7 +4691,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # casts below rebind `lv`/`rv` to fresh temps, so without a record carried
     # across them the tail would see two unknown operands and mark nothing.
     # Cast operands to result type to satisfy GIMPLE strict type checking
-    arith_type = 'double' if (op == '/' and res_type == 'double') else gimple_ctypes.TypeLattice.join(lt, rt)  # common type for arithmetic
+    arith_type = gimple_ctypes.TypeLattice.join(lt, rt)  # common type for arithmetic
     if lt != arith_type and arith_type not in ('_Bool',) and not arith_type.endswith(' *'):
         ct = gen._new_temp(arith_type)
         gen._safe_coerce_emit(lt, arith_type, lv, ct)
@@ -4707,8 +4728,8 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # TODO(gimple-fp-div): drop this indirection once the gcc -fgimple
     # float/double division ICE is fixed upstream.
     if c_op == '/' and res_type in ('double', 'float'):
-        # Division by zero must still raise ZeroDivisionError (same as int path)
-        gen._emit(f"  if ({rv} == 0.0) mojo_raise_zero_division();")
+        # Division by zero raises ZeroDivisionError inside the helper (a bare
+        # `if (...) call();` statement is not GIMPLE; gcc says "expected goto").
         fn = 'mojo_div_double' if res_type == 'double' else 'mojo_div_float'
         return res_type, gen._call_expr(res_type, fn, [(res_type, lv), (res_type, rv)])
     # Floating-point modulo: plain GIMPLE `%` (trunc_mod_expr) is an
@@ -4757,9 +4778,18 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # (runtime/fire_runtime.h) makes that correction and runs the same
     # zero-divisor check, so it takes the place of the checked-divisor
     # lowering below for this shape. Unsigned `%` is already floored.
+    # Both operands must be plain C integers too: a `Scalar[dtype]` (a struct
+    # value whose result type happens to be int64_t) reaches here as well, and
+    # `__mojo_floormod` on a struct is the "invalid operand" the stdlib sweep
+    # reported (std/utils/index.mojo's apply_fn, 2026-10-29).
     if (c_op == '%' and res_type in gimple_ctypes._SCALAR_INT_TYPES
+            and lt in gimple_ctypes._SCALAR_INT_TYPES and rt in gimple_ctypes._SCALAR_INT_TYPES
             and res_type != '_Bool' and not res_type.startswith('uint')):
-        t = gen._new_val(res_type, f"({res_type}) __mojo_floormod ({lv}, {rv})")
+        # GIMPLE takes a call only as a whole right-hand side, so the call is its
+        # own statement and any narrowing cast is a second one (a cast around a
+        # call is "invalid operand in unary operation" to gcc -fgimple).
+        _fm = gen._call_expr('int64_t', '__mojo_floormod', [('int64_t', lv), ('int64_t', rv)])
+        t = _fm if res_type == 'int64_t' else gen._new_val(res_type, f'({res_type}){_fm}')
     else:
         if c_op in ('/', '%') and res_type in gimple_ctypes._SCALAR_INT_TYPES and res_type != '_Bool':
             _chk = gen._call_expr('int64_t', 'mojo_int_divisor', [('int64_t', rv)])
@@ -5215,6 +5245,15 @@ def _lower_percent_width_args(gen, rhs_exprs, arg_i: int, dyn: int) -> list:
 def _lower_floordiv(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
     lt, lv = gen.lower_expr(node.left)
     rt, rv = gen.lower_expr(node.right)
+    # A float-possible parameter beside an integer argument: the answer
+    # depends on whether the parameter holds an int or a double (in which
+    # case it is a double floor), the same shape as `_float_param_arith`.
+    # `//` is dispatched here before the arithmetic tail, so `//` needs its
+    # own float branch; the generic `__mojo_floordiv` path only sees plain
+    # ints/doubles and does not know how to print a double-side result.
+    from mojo.backend_gimple import emit_infra as ginf
+    if ginf._float_param_arith_applies(gen, '//', node.left, lt, node.right, rt):
+        return 'int64_t', ginf._float_param_arith(gen, '//', node.left, lt, lv, node.right, rt, rv)
     # Boxed-PythonObject floor division (2026-10-21 part 4, further,
     # test_python_object): `a // b` on box locals answers through the
     # runtime's word-class checks (int result, zero-division RAISE, double

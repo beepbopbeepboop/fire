@@ -1168,6 +1168,7 @@ def _gen_stmt_AssignStmt(gen, node):
         else:
             # RHS is a single iterable — lower it, then index each element
             vtype, v = gen.lower_expr(node.value)
+            ggc._refuse_namedtuple_tuple_use(gen, vtype, 'unpacking')
             # A TAGGED nested generator tuple (`args` from
             # `for what, args in scan_opcodes(co):`, see
             # `_emit_generator_tuple_unpack`'s nested-slot path): destructure
@@ -2695,6 +2696,7 @@ def _gen_stmt_ReturnStmt(gen, node):
     # unaffected and unchanged.
     if node.value is None:
         ginf.emit_return_frees(gen)
+        gmp._cattr_leave(gen)
         # If function returns non-void, return default value
         if gen.func_ret_type and gen.func_ret_type != 'void':
             ret = gen.func_ret_type
@@ -2740,6 +2742,7 @@ def _gen_stmt_ReturnStmt(gen, node):
         # computed, not before — a candidate can still be legitimately
         # READ from (subscript/member/method) while computing `v` above.
         ginf.emit_return_frees(gen)
+        gmp._cattr_leave(gen)
         # Record the returned container's element type so CALL SITES can
         # unpack/iterate it with the right accessor. The old condition
         # required vtype == 'MojoList *' (only fired for `return <list
@@ -3155,10 +3158,14 @@ def _gen_stmt_StructDef(gen, node):
     are stored: a no-initializer container field has its default seeded by
     the allocator, and must not be overwritten with a missing value.
 
-    Semantics kept deliberately narrow: one global per class, so an
-    instance built in one call and read after a later call of the same
-    function sees the later call's value. Each call's own reads right after
-    its `class` statement are correct.
+    Per-execution storage: a NON-constant value of a function-scoped class
+    lives in a cell that this execution allocates (`_cattr_cell_type`), and
+    the `_classattr_` global is pointed at it first. An instance keeps the cell
+    it was built under (its hidden `_clscell_` field, seeded by the allocator),
+    so an instance built in one call and read after a later call still sees its
+    own value. Residual, written down in the bug doc: a class object that
+    escapes its function (`return Tag`) and is used in a later call reads that
+    later call's cell.
     """
     cattrs = gen._class_attrs.get(node.name)
     if not cattrs:
@@ -3173,6 +3180,21 @@ def _gen_stmt_StructDef(gen, node):
             continue
         if aname not in cattrs:
             continue
+        # A per-execution cell (module_gen registration): this execution gets its
+        # OWN storage, and the global is pointed at it before the store below, so
+        # the store and every class-name read in this call reach it, and the
+        # instance built next keeps it. A plain global needs no allocation.
+        _cell_t = gmp._cattr_cell_type(gen, cattrs[aname])
+        if _cell_t is not None:
+            _cp = gen._new_temp(f'{_cell_t} *')
+            _cell_h = gen._c_cell_alloc_helper(_cell_t)
+            _cell_hd = gen._c_helper_def(_cell_h)
+            if _cell_hd:
+                # The accessor's definition, once per TU (see `_c_helper_def`).
+                gen._elaborated_externs.append(_cell_hd)
+                gen._elaborated_externs.append('')
+            gen._emit(f'  {_cp} = {_cell_h} ();')
+            gen._emit(f'  {cattrs[aname]} = {_cp};')
         gen._gen_stmt_AssignStmt(gimple_ctypes.AssignStmt(
             target=gimple_ctypes.MemberExpr(
                 obj=gimple_ctypes.IdentExpr(name=node.name, line=node.line),
@@ -4094,7 +4116,10 @@ def _gen_stmt_ExprStmt(gen, node):
         # a callable value, so the indirection is semantics-preserving;
         # see _lower_call's own comment for why a misleading
         # first-decl-wins `char *` decl can't disqualify it.
-        if _var_ctype in ('int', 'int64_t', 'void *', '_Bool') or raw_name in gen.var_types:
+        # The module-global half is the same as _lower_call's (a decorated
+        # `def` rebound to a global is a value, not a C symbol), so both
+        # call paths ask the one predicate.
+        if ggc._callee_is_fnptr_value(gen, raw_name):
             gen._lower_fnptr_call(raw_name, _var_ctype, node.value)
             return
         # Same guard as _lower_CallExpr: don't redirect an *imported*
@@ -4636,6 +4661,9 @@ def _gen_stmt_TryStmt(gen, node):
     # — must happen after the _mojo_exc_top bump above (it indexes the
     # checkpoint table by that level) and before setjmp.
     gen._emit("  mojo_cleanup_checkpoint_save ();")
+    # The cell pointers this region's handler restores (see the bb_exc block
+    # below). Taken before setjmp, so the values survive the longjmp.
+    _cell_snap = gmp._cattr_snapshot(gen)
     # GIMPLE: pass array element directly to setjmp (decays to int*)
     gen._emit(f"  {sj_ret} = setjmp (_mojo_exc_stack[{temp_top2}]);")
     gen._emit(f"  {cond_t} = {sj_ret} != 0;")
@@ -4736,6 +4764,11 @@ def _gen_stmt_TryStmt(gen, node):
 
     gen._emit_label(bb_exc)
     gen._emit("  mojo_exc_pop ();")
+    # An exception that unwound out of a call may have left a nested execution's
+    # cell in a function-scoped class's global (see emit_methods._cattr_restore_
+    # begin). This function's own cells are restored here, before any handler
+    # or re-raise can read them.
+    gmp._cattr_restore_emit(gen, _cell_snap)
 
     handlers = node.handlers
     if not handlers:
@@ -5202,6 +5235,7 @@ def _gen_stmt_WithStmt(gen, node):
             gen._emit(f"  {temp_inc} = {temp_top1} + 1;")
             gen._emit(f"  _mojo_exc_top = {temp_inc};")
             gen._emit(f"  {temp_top2} = _mojo_exc_top;")
+            _ar_cell_snap = gmp._cattr_snapshot(gen)
             # Checkpoint the cleanup-thunk stack exactly like the try/
             # except idiom: on the longjmp the runtime unwinds to it.
             gen._emit("  mojo_cleanup_checkpoint_save ();")
@@ -5244,6 +5278,7 @@ def _gen_stmt_WithStmt(gen, node):
 
             gen._emit_label(bb_exc)
             gen._emit("  mojo_exc_pop ();")
+            gmp._cattr_restore_emit(gen, _ar_cell_snap)
             # The block raised, as required: swallow and continue. The
             # exception state (type tag / message) is left as-is — the
             # marker's driver-side bookkeeping owns it, and the next

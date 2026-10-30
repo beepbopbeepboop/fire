@@ -1,5 +1,74 @@
 # HARD BUG: some `lambda` shapes unsupported inside a compiled generator body
 
+## Status (2026-10-29, third pass — every row this doc owns is closed; the two open rows are in another worker's doc)
+
+### Re-measured this pass
+
+- **`sorted(key=<named function>)` over strings** (the residue table's
+  `sorted(key=<user function>)` row, which had never been re-measured): the
+  shape the old `test_gimple_runner.py` comment called a miscompile
+  (`sorted(["ccc","a","bb"], key=bylen)` → `['bb','ccc','a']`) prints
+  `['a', 'bb', 'ccc']` on the current tree, matching CPython. Its source doc
+  `CODEGEN_interpreter_user_function_as_builtin_callback_crashes` was already
+  deleted by `4902e31b4`. Pinned now by
+  `gimple_sorted_key_function_string_elements` in `test_gimple_runner.py`,
+  and the stale comment above it is corrected.
+- **The nested-def row** (`def outer(x): ... def inner(y): g = lambda z: z + n`)
+  is closed by `1eacc36f8`, and its doc was deleted by `3bdcff9a0`. The
+  "nested-def row is open" sentence in the second pass below was stale and is
+  struck.
+
+### What this doc still owns
+
+Nothing in its own scope. The two residue rows that remain (a generator whose
+yields rebind one name to a bool then a float, and `r = 2.5` rebinding a local
+first bound to `False`) are the subject of
+`bugs/CODEGEN_generator_yield_kind_rebound_name_silent_wrong_value.md`, which
+is claimed by another worker (`bug-codegen-generator-yield-kind-rebound`). This
+doc is not deleted yet only because ~20 live citations point at it; the
+disposition rule in the second pass still applies, and whoever closes that
+other doc deletes this one in the same commit as the citation repoint.
+
+## Status (2026-10-29, second pass — the generator-yield residue of a lambda call is FIXED; the rest of the residue is filed in two docs)
+
+### Landed this pass
+
+- **A lambda-bound local's return kind now reaches a generator's yield slot.**
+  `def gen(): f = lambda: False; r = f(); yield r` yielded through an
+  `int64_t` slot and printed `0`; it now prints `False`, matching CPython.
+  The yield-kind scan that types the value slot is `mojo/middle/coro.py`'s
+  `_static_env` (the A3 path) — **not** `exprtypes.py`'s `known` map, which the
+  residue row below originally named. `_static_env` now records `f = lambda:
+  <body>` as `('callable', body_kind)` before its walk, and
+  `_callee_return_kind` answers a call through that local from it (a local
+  shadows a same-named builtin or `def`). A name is recorded only when every
+  binding of it is a lambda and they all agree; a lambda's own parameters are
+  removed from the env before its body is typed, so `lambda x: x` does not take
+  an outer local `x`'s kind.
+- Pinned in `test_gimple_generator_runner.py`:
+  `generator_lambda_bool_call_result_yields_bool`,
+  `generator_lambda_call_yielded_directly`,
+  `generator_lambda_float_call_result_yields_float` (each fails without the
+  change: `0`/`1`/`1` for `False`/`True`/`1.5`), and
+  `generator_lambda_param_does_not_read_outer_local_kind`, which PASSES
+  without the change too. It guards the parameter-exclusion rule the change
+  introduces, not a defect that existed before.
+
+### Residue, after this pass
+
+| shape | compiled | CPython | where |
+|---|---|---|---|
+| a generator whose yields mix a bool-lambda call and a float-lambda call | `1`, `1` | `True`, `1.5` | **new doc** `bugs/CODEGEN_generator_yield_kind_rebound_name_silent_wrong_value.md` (shape 2). A3 refuses correctly; the legacy C++ fallback then types both yields `int64_t`. Predates this pass. |
+| `r = 2.5` rebinding a local first bound to `False`, then `yield r` (no lambdas) | `True` | `2.5` | same new doc (shape 1: `_static_env`'s first-binding `setdefault`). Predates this pass. |
+| two generators in one module, a bool-yielding and a float-yielding one | float one prints `True` | `1.5` | sibling `for` loops reusing one name kept the first loop's type; fixed (pinned by `run_sibling_loop_value_kind_tests`). No lambdas; predates this pass. |
+| `def outer(x): n = 2; def inner(y): g = lambda z: z + n; return g(y)` | `4` | `6` | fixed in `1eacc36f8` (a lambda inside a nested def reads its outer-outer capture). |
+| `sorted(key=<user function>)` | not re-measured | | `CODEGEN_interpreter_user_function_as_builtin_callback_crashes` |
+
+Because this doc is still cited by ~20 live locations and its two open rows
+(the first two above) are in another worker's doc, it is not deleted. Its disposition is the one the 2026-10-02 entry below
+states: delete it in the same commit that closes its last row and repoints
+every citation.
+
 ## Status (2026-10-29 — the lambda-call-result return type is fixed for plain functions; one generator-yield residue and one nested-def silent miscompile remain)
 
 ### Landed
@@ -18,12 +87,12 @@ Pinned by `gimple_lambda_call_result_bound_to_a_local_keeps_its_type` in
 `test_gimple_runner.py` (CPython-compared). Before the fix the first two rows
 printed `0` and the variadic row printed `0`; after, all three match CPython.
 
-### Residue found this round (all still open)
+### Residue found 2026-10-29, first pass (row 1 is FIXED — see the second pass above; the rest as stated)
 
 | shape | compiled | CPython | where |
 |---|---|---|---|
 | `def gen(): f = lambda: False; r = f(); yield r` — the generator's YIELD value | `0` | `False` | the A3 yield ctype is inferred from `known`, which is built without the lambda-call table. `_Bool r` IS declared correctly in the body lambda, so only the yield's value slot (`int64_t`) is wrong. Next step: give the generator's yield-type scan the same `_lambda_call_ret_table` the pre-pass now uses (`exprtypes._generator_yield_ctype`'s `known`). A plain `r = h()` for a named `def h` already works. |
-| `def outer(x): n = 2; def inner(y): g = lambda z: z + n; return g(y)` | `4` | `6` | **new doc**: `bugs/hard/CODEGEN_nested_def_lambda_reads_outer_capture_as_zero.md`. Not generator-specific. |
+| `def outer(x): n = 2; def inner(y): g = lambda z: z + n; return g(y)` | `4` | `6` | Fixed 2026-10-29: the nested `def` did not capture a name its own lambda read (`_lambda_free_names` in `mojo/middle/closures.py`), and the lambda's env fill read a bare name (`_env_field_value`). Test: `gimple_lambda_in_nested_def_reads_outer_outer_local`. Not generator-specific. |
 | `sorted(key=<user function>)` | not re-measured this round | | |
 
 ### Two corrections to the entries below
