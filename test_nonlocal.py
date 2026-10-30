@@ -285,10 +285,37 @@ def main(n):
     print(outer(0))
 """
 
+# ── 9. a sibling that only READS a cell another closure rebinds ──
+#
+# `add` captures `total` by reference (it rebinds it), so `total` is a heap box
+# and `outer` holds a pointer to it. `read` captures the same name BY VALUE --
+# it never rebinds it -- and its env field must receive the box's VALUE. The
+# store used the box's own pointer type as the source type, so the compiled
+# path emitted a pointer temp holding an integer (`assignment to 'int64_t *'
+# from 'int64_t'`) and failed to build. The same shape is zipfile's
+# `_ZipDecrypter`, whose `decrypter` reads the keys that `update_keys` rebinds.
+_BOXED_READER_SRC = """\
+def outer(seed):
+    total = seed
+    def add(k):
+        nonlocal total
+        total = total + k
+    add(3)
+    def read(extra):
+        return total + extra
+    return read
+
+
+def main(n):
+    f = outer(2)
+    print(f(10))
+"""
+
 _CASES += [
     ("two closure levels deep (local owner)", _TRANSITIVE_LOCAL_SRC, "7\n"),
     ("two closure levels deep (parameter owner)", _TRANSITIVE_PARAM_SRC, "7\n"),
     ("intermediate closure reads the same cell", _TRANSITIVE_MID_READ_SRC, "16\n"),
+    ("sibling reads a cell another closure rebinds", _BOXED_READER_SRC, "15\n"),
 ]
 
 

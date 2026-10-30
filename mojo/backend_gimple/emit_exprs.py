@@ -780,6 +780,13 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         # local read returns the variable's own C name, which is the whole
         # difference between the two.
         ginf.carry_callable_ret_types(gen, name, t)
+        # …and "this global holds a function VALUE" (a decorated `def` rebound
+        # to a global, whose repr name the rebinding recorded on the NAME): the
+        # same hop, for the same reason, so `print(step)` formats the read-back
+        # temp as a function and not as the int64_t box it is stored in.
+        _gfrn = gen._global_func_value_names.get(name)
+        if _gfrn is not None:
+            gen._func_value_names[t] = _gfrn
         # …and "this global holds a compiled generator/coroutine": every
         # consumer of the handle (`.close()`, `next()`, `for`) recovers the
         # resume/value/destroy api by looking up the VALUE it was handed, so
@@ -1473,7 +1480,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
                 and node.member in gen._class_attrs.get(_cur_struct, {})):
             _gname = gen._class_attrs[_cur_struct][node.member]
             _gtype = gen._global_var_types.get(_gname, 'int64_t')
-            return _gtype, gen._new_val(_gtype, f'{_gname}')
+            return _gtype, gmp._cattr_read(gen, _gname, _gtype)
 
         # `f.attr` read where `f` is a free function memoizing a value on
         # itself (`f._cached`) — see the `_func_attrs` pre-scan (Phase 1,
@@ -1821,11 +1828,12 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             # bare type name. Without this a `ClassName.CONST` string/int
             # constant stubbed to 0 (or, when the base was an opaque module
             # handle, raised AttributeError at runtime).
-            _cattrs = gen._class_attrs.get(module_name)
+            _cattrs = gen._class_attrs.get(
+                gmp._resolve_fn_scoped_struct_name(gen, module_name))
             if _cattrs and node.member in _cattrs:
                 gname = _cattrs[node.member]
                 gtype = gen._global_var_types.get(gname, 'int64_t')
-                _gv = gen._new_val(gtype, f'{gname}')
+                _gv = gmp._cattr_read(gen, gname, gtype)
                 # Carry the attribute's recorded ELEMENT type onto the read
                 # value, so iterating or subscripting it downstream uses
                 # the right accessor. A class-level container is stored as
@@ -2598,14 +2606,28 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         val_ast = gen._subst_idents(aliases[node.member],
                                      {'Self': node.obj, struct_name: node.obj})
         return gen.lower_expr(val_ast)
-    # Class-level attribute (not an instance field) — redirect to global variable
+    # Class-level attribute (not an instance field) — redirect to global variable.
+    # Instance reads must consult the instance first (dynamic storage / field
+    # lookup) so an instance write shadows the class attribute; only bare
+    # class-name reads go to the synthesized backing global / per-execution
+    # cell.
     class_attrs = gen._class_attrs
-    if struct_name in class_attrs and node.member in class_attrs[struct_name]:
+    if (struct_name in class_attrs and node.member in class_attrs[struct_name]
+            and isinstance(node.obj, gimple_ctypes.IdentExpr)
+            and node.obj.name == struct_name):
         gname = class_attrs[struct_name][node.member]
         # Use the actual declared type of the global (stored in _global_var_types)
         gtype = gen._global_var_types.get(gname, 'int64_t')
-        t = gen._new_val(gtype, f'{gname}')
+        # Bare class-name read goes to the current per-execution cell.
+        t = gmp._cattr_read(gen, gname, gtype)
         return gtype, t
+    elif (struct_name in class_attrs and node.member in class_attrs[struct_name]
+            and ot.endswith(' *')):
+        # Instance read: dynamic storage first (an instance write shadows
+        # the class attribute), then the cell this instance was built under.
+        gname = class_attrs[struct_name][node.member]
+        gtype = gen._global_var_types.get(gname, 'int64_t')
+        return gmp._cattr_instance_dyn_read(gen, ov, ot, node.member, gname, gtype)
     elif struct_name in gen.struct_field_types and ot.endswith(' *'):
         # The struct defines its own `__getattr__` (compiled body ⇒ bare
         # `{Struct}___getattr__` key in func_return_types, or an overload
@@ -3132,8 +3154,10 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
             return fast
 
     lt, lv = gen.lower_expr(node.left)
-    lt, lv = ginf._unbox_float_param_operand(gen, node.left, lt, lv)
     rt, rv = gen.lower_expr(node.right)
+    if ginf._float_param_arith_applies(gen, node.op, node.left, lt, node.right, rt):
+        return 'int64_t', ginf._float_param_arith(gen, node.op, node.left, lt, lv, node.right, rt, rv)
+    lt, lv = ginf._unbox_float_param_operand(gen, node.left, lt, lv)
     rt, rv = ginf._unbox_float_param_operand(gen, node.right, rt, rv)
 
     # `x.prop OP y` (or `y OP x.prop`) where `prop` is a 0-arg
@@ -5221,6 +5245,15 @@ def _lower_percent_width_args(gen, rhs_exprs, arg_i: int, dyn: int) -> list:
 def _lower_floordiv(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
     lt, lv = gen.lower_expr(node.left)
     rt, rv = gen.lower_expr(node.right)
+    # A float-possible parameter beside an integer argument: the answer
+    # depends on whether the parameter holds an int or a double (in which
+    # case it is a double floor), the same shape as `_float_param_arith`.
+    # `//` is dispatched here before the arithmetic tail, so `//` needs its
+    # own float branch; the generic `__mojo_floordiv` path only sees plain
+    # ints/doubles and does not know how to print a double-side result.
+    from mojo.backend_gimple import emit_infra as ginf
+    if ginf._float_param_arith_applies(gen, '//', node.left, lt, node.right, rt):
+        return 'int64_t', ginf._float_param_arith(gen, '//', node.left, lt, lv, node.right, rt, rv)
     # Boxed-PythonObject floor division (2026-10-21 part 4, further,
     # test_python_object): `a // b` on box locals answers through the
     # runtime's word-class checks (int result, zero-division RAISE, double
@@ -6039,6 +6072,17 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
     # those slots correctly and the row would buy nothing.
     _kinds = _literal_slot_kinds(gen, lowered)
     _has_spread = any(_is_star_spread(_el) for _el, _et, _ev in lowered)
+    # A HETEROGENEOUS scalar literal's per-slot kinds are also a compile-time
+    # fact about THIS value, so they go in `gen._struct_slot_kinds` beside the
+    # `struct.unpack` and returned-literal rows. `_list_repr_fn` and the
+    # literal-index read consult that table before the single list-wide
+    # `_elem_types` ctype, which is `double` for `[1, 2.5]` and so printed
+    # `[1.0, 2.5]` and read the int slot as a double. The runtime row still
+    # travels with the value for every read with no compile-time index. A
+    # spread has no fixed slot count to describe, so it is left to the row.
+    if (not _has_spread and len(set(_kinds)) > 1
+            and set(_kinds) <= set(_LITERAL_SLOT_KIND_LONG)):
+        gen._struct_slot_kinds[t] = [_LITERAL_SLOT_KIND_LONG[_k] for _k in _kinds]
     # A list-of-lists literal whose INNER literal holds strings: the inner list
     # records 'p' (MOJO_KIND_STR) on every slot. A list of strings records no
     # row of its own (see `_literal_needs_kinds`), and with no row a slot reads
@@ -6280,6 +6324,13 @@ def _emit_star_spread(gen, dest: str, et: str, ev: str) -> None:
         ev = gen._coerce_to_type(_as_str(et), 'MojoList *', ev)
     gen._emit_call('void', '', 'mojo_list_extend',
                    [('MojoList *', dest), ('MojoList *', ev)])
+
+
+# The runtime's one-byte kind (`_literal_slot_kinds`) -> `gen._struct_slot_kinds`'
+# long-form spelling. Only the scalar and string kinds are here: a slot that is
+# a container or a None has no long form the static readers understand, so a
+# literal holding one keeps the runtime row alone.
+_LITERAL_SLOT_KIND_LONG = {'i': 'int', 'd': 'double', 's': 'bytes', 'p': 'str'}
 
 
 def _literal_slot_kinds(gen, lowered) -> str:

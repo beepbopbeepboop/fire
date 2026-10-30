@@ -1,3 +1,31 @@
+## Status (2026-10-29 — the mechanism behind the `zipfile/__init__.py:741`/`:752` class is FIXED on master (`9f1439bf2`, integrated as `62359e565`) and PINNED: `test_nonlocal.py` "sibling reads a cell another closure rebinds" passes in both interpreter and compiled arms (`nonlocal: PASS=18 FAIL=0`, re-run 2026-10-29). The file's own error count is NOT re-measured here; the doc stays open for the 9 `argparse`-downstream errors and the rest of the Status below)
+
+**Mechanism behind the 12-error class** (`_ZipDecrypter`'s `decrypter` closure,
+which reads `key2` and calls `update_keys`, the `nonlocal` writer of the same
+key cells; source lines 741-752 of `Lib/zipfile/__init__.py`): `key0..key2`
+are mutated through `nonlocal` by `update_keys`, so each is a heap box and
+`_ZipDecrypter` holds a POINTER to it (`int64_t * key2`). The sibling
+`decrypter` captures `key2` BY VALUE (it only reads it). Its env store took
+the source type from the box's own declaration (`int64_t *`) while reading
+the value `*key2`, so the temp was declared `int64_t *` and held an integer,
+and gcc rejected it as `assignment to 'int64_t *' from 'int64_t'`. The same
+store was emitted from two sites (`mojo/backend_gimple/emit_funcs.py`'s
+nested-`def` env fill and `emit_calls.py`'s call-site env fill, plus
+`_env_field_value` for lambdas). Minimal repro, reproduced and fixed:
+`test_nonlocal.py` case "sibling reads a cell another closure rebinds"
+(`outer` with `nonlocal total` in `add` and a by-value reader `read`).
+
+**Fix:** one helper, `emit_calls._boxed_capture_source`, returns the box's
+pointee type and the value `*box` for a by-value field, and the box pointer
+for a by-reference field. All three store sites use it.
+
+**Not verified:** the full `fire.py build` of `Lib/zipfile/__init__.py` was
+not re-run to completion in this worker (it is over 45 minutes of CPU and was
+SIGKILLed twice on this shared machine), so the 12 errors are expected to
+clear but are not measured clear. The integrator's stdlib compile is the
+check. The 9 `argparse`-downstream errors and the rest of the Status below
+are unchanged.
+
 # COMPILE_FAIL: Lib/zipfile/__init__.py
 
 ## Status (2026-10-01 — the `'open'` ambiguity blocker is FIXED, and this file's own errors are down to 21; three of the six classes below are closed)

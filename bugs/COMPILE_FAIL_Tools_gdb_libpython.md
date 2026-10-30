@@ -1,5 +1,67 @@
 # COMPILE_FAIL: Tools/gdb/libpython.py
 
+## Status (2026-10-29, bug-compile-fail-tools-gdb-libpython, planning round — DEFAULT backend measured; the `.cpp` error list below is opt-in only)
+
+Measurement (the decisive finding of this round):
+
+- The default generator/async backend is now the A3 stack-switch path
+  (`mojo/middle/coro.py`, `MOJO_CORO` unset or `stackswitch`). The
+  `.cpp` C++20-coroutine emitter (`cpp_core.py`, `gimple_cpp_*`) runs ONLY
+  under `MOJO_CORO=cpp`. Every error in the 2026-08-10..08-26 entries
+  below is a `MOJO_CORO=cpp` error. The default build does not reach them.
+- Single-file, default-backend probe (no imports, no gcc):
+  `gimple_codegen.compile_to_gimple(src, do_imports=False)` on
+  `Tools/gdb/libpython.py` raises, and the module falls back to source
+  interpretation:
+  `iteritems: a str-keyed subscript (obj[<str>]) is not supported in a
+  compiled generator/coroutine body (the subject is not a declared str or
+  container ...)`. Peak 0.0 GB, under 1 s. Its `ep['me_key']` is at
+  `libpython.py:801` (`PyDictObject.iteritems`), and the same shape is at
+  `:755` (`items_from_keys_and_values`).
+- The `PyDictObjectPtr._get_entries(keys)` class-qualified call that the
+  2026-08-25 entry lists as open already has a handler in `cpp_core.py`
+  (the `SomeStruct.<method>(...)` branch, around line 2900). That item is
+  stale for the cpp path.
+- Harness probe, default backend: a generator `yield d['k']` with an untyped
+  parameter is refused earlier, by the call-site typing check
+  (`yields ['d'], whose call sites do not all pass the same statically-known type`).
+
+What the blocker actually is: `ep` is a `gdb.Value` pointer, and
+`ep['me_key']` is a gdb FIELD lookup, not a dict lookup. The module imports
+the `gdb` API and only runs inside a gdb session. A standalone compiled
+binary has no `gdb` module, so a successful compile of this file would
+produce nothing runnable. The current refusal + interpreter fallback is
+therefore the honest behaviour, and the real open question is the decision
+below, not a codegen gap.
+
+DECISION NEEDED (the user; this round does not pick it):
+- (A) Keep the refusal, and treat a gdb-runtime module as interpreter-only.
+  Recommended. The quick test would then become "the refusal is the
+  designed result (`fire.py build` reports the fallback, not a g++ error)",
+  and the doc is closed by deleting it with that rationale. Work: a pinning
+  test that `libpython.py` takes the honest fallback on the default backend
+  (`compile_to_gimple(..., do_imports=False)` raises the str-key message),
+  plus the `dangling_doc_refs.py --ratchet` step.
+- (B) Model gdb field access: lower `obj['field']` on a declared
+  `gdb.Value`-shaped subject to a struct field read, in BOTH backends
+  (`myinterpreter.py` cannot run the gdb API either, so the interpreter
+  would still need a gdb stub). Cost: a new value-kind in the type model,
+  plus `gdb` stubs. Larger than this bug.
+
+Implementation plan for (A), if chosen (exact files):
+1. `test_gimple.py` (default backend, no `_force_cpp_coro`): add
+   `libpython_str_key_fallback_default_backend`, asserting that
+   `compile_to_gimple` on `Tools/gdb/libpython.py` raises with
+   `a str-keyed subscript`. Skip the test cleanly if the Python-3.14.6 tree
+   is absent. Doing so keeps the honest-refusal state pinned on the path
+   that actually runs.
+2. Delete this doc in the same commit, then run
+   `python3 tools/dangling_doc_refs.py --ratchet`, and fix any citations it names.
+
+Not changed this round: no code. The cpp-only `.cpp` errors below are
+accurate for `MOJO_CORO=cpp` and irrelevant to the default build.
+
+
 Source file: `/Users/mrs/net/Python-3.14.6/Tools/gdb/libpython.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
