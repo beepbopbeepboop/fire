@@ -130,15 +130,9 @@ def _force_cpp_coro():
     it via MOJO_CORO=cpp, the documented escape hatch — see the test's own
     "_compiles_via_cpp_path" naming. Scoped (not a blanket module-level
     env var) so it can't leak into any other test sharing this process."""
-    _prev = os.environ.get('MOJO_CORO')
-    os.environ['MOJO_CORO'] = 'cpp'
-    try:
+    from mojo.middle import coro as _coro
+    with _coro.pinned('cpp'):
         yield
-    finally:
-        if _prev is None:
-            os.environ.pop('MOJO_CORO', None)
-        else:
-            os.environ['MOJO_CORO'] = _prev
 
 
 def selfhost_emitted_return_type(module: str, struct: str, method: str) -> str:

@@ -2186,8 +2186,7 @@ test('coro-future-await', [PY, 'test_coro_future_await.py'], mem='tiny',
           'async struct-method calls (receiver + args)')
 test('async-void-return', [PY, 'test_async_void_return.py'], mem='tiny',
      deps=['preflight'],
-     expect='3 failing: an async function with no return value',
-     desc='3 failing: an async function with no return value')
+     desc='an async function with no return value')
 test('taskgroup', [PY, 'test_taskgroup.py'], mem='tiny',
      deps=['preflight'],
      desc='TaskGroup')
