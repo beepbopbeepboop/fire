@@ -3212,7 +3212,7 @@ BuildRun = collections.namedtuple(
 # what enforces it.
 #
 # `MEMCAP_GB` is measured against the per-file peaks above and the 3-4 GB
-# standard in bugs/PERF_memory_over_4gb_is_a_bug.md: over 4 GB for one file's
+# standard in doc/POLICY_memory_over_4gb.md: over 4 GB for one file's
 # build is a debt, so 4 GB is both a real bound and a claim worth making.
 MEMCAP_GB = 4.0
 
@@ -4498,7 +4498,7 @@ _CAUSE_BLURB = {
         "other reading",
     CAUSE_MEMORY:
         "killed at this tool's {mem_gb} GB per-file ceiling — a real cost "
-        "finding about that file (see bugs/PERF_memory_over_4gb_is_a_bug.md), "
+        "finding about that file (see doc/POLICY_memory_over_4gb.md), "
         "NOT something a wider run fixes, and not cached, so re-running "
         "re-measures it",
     CAUSE_WRAPPER_DIED:

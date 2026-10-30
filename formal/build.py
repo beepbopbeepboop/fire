@@ -1670,6 +1670,17 @@ def _import_aliases(stmts: list) -> dict:
     return imported_bindings(stmts)
 
 
+def _import_module_bindings(stmts: list) -> dict:
+    """`{local name: module as spelled}` for this file's MODULE bindings.
+
+    The answer the module-reference gate asks that `imported_modules` does
+    not carry: `import m as n` binds `n`, and a recogniser handed only the
+    module names reads `n.f(…)` as a value receiver. See
+    `formal/imports.py`'s `imported_module_bindings`."""
+    from formal.imports import imported_module_bindings
+    return imported_module_bindings(stmts)
+
+
 def _has_try_with_arms(functions: list) -> bool:
     """Does any function in this unit hold a `try` with at least one arm?
 
@@ -2196,7 +2207,9 @@ def compile_formal(source_path: str, output: str = None,
                                 if d["install_name"] not in _have]
         _run_late_checks(stmts, functions, structs, symbols, slots,
                          imported_modules(stmts) if import_dylibs else None,
-                         _line, _own_template_structs(source_path))
+                         _line, _own_template_structs(source_path),
+                         _import_module_bindings(stmts)
+                         if import_dylibs else None)
     except CodegenError as e:
         raise FormalBuildError(str(e))
     if import_dylibs:
@@ -2953,7 +2966,9 @@ def _formal_module_functions(source_path: str, link_dylibs: list = None,
         _run_late_checks(stmts, functions, structs, symbols, slots,
                          imported_modules(stmts) if link_dylibs else None,
                          link_manifests or [],
-                         _own_template_structs(source_path))
+                         _own_template_structs(source_path),
+                         _import_module_bindings(stmts)
+                         if link_dylibs else None)
     except CodegenError as e:
         raise FormalBuildError(str(e))
     module = re.sub(r"[^A-Za-z0-9_]", "_",
@@ -2990,7 +3005,7 @@ def _own_structs(structs) -> list:
 def _run_late_checks(stmts: list, functions: list, structs: list,
                      symbols: dict, slots: dict,
                      imported_module_names, link_line=None,
-                     own_template_structs=None) -> None:
+                     own_template_structs=None, module_bindings=None) -> None:
     """Publish this unit's module-level tables, then run every late check.
 
     ONE function for the two front ends, and the reason is a measured drift
@@ -3141,7 +3156,8 @@ def _run_late_checks(stmts: list, functions: list, structs: list,
                          imported_module_names=imported_module_names,
                          link_line=link_line,
                          import_aliases=_import_aliases(stmts),
-                         own_template_structs=own_template_structs)
+                         own_template_structs=own_template_structs,
+                         module_bindings=module_bindings)
 
 
 def _struct_methods(stmts: list) -> list:
@@ -15366,7 +15382,8 @@ def _bracketed_export_gap(base_name: str, fn_name: str, link_line,
 def check_module_symbols(functions: list, structs_by_name: dict = None,
                          imported_module_names=None, link_line=None,
                          import_aliases: dict = None,
-                         own_template_structs=None) -> None:
+                         own_template_structs=None,
+                         module_bindings: dict = None) -> None:
     """Refuse every name a function reads that no table in the compiler places.
 
     A LATE check, called beside `check_frame_field_blob_premises` and
@@ -15745,6 +15762,17 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         #      callee" is answerable here and nowhere else.
         callees = set()
         imported = imported_module_names or ()
+        # The module-reference gate asks "which NAME in this file is a module",
+        # which is a different answer from the LINK LINE for an aliased binding:
+        # `import lib2 as L` puts `lib2` on the line and binds `L`, and the call
+        # `L.answer(…)` roots at the alias. `module_bindings` is that answer —
+        # {local name: module as spelled} — so the recogniser gets the name the
+        # source spells and the published-table lookup below can translate the
+        # recognised root back to the spelling its manifest is filed under. None
+        # is the old behaviour for a caller without the statements: the link line
+        # itself, which is still right whenever nothing was aliased.
+        module_locals = (tuple(module_bindings.keys()) if module_bindings
+                         else imported)
         # The BARE-NAMED callees, `f(x)`, kept apart from `callees` for the
         # export refusal in the name-placement walk below — which is asked only
         # of this set, because the other three spellings have answers of their
@@ -15793,7 +15821,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 # stops. Only the ROOT's identity is collected, because a
                 # callee is a symbol and the emitter resolves the whole chain
                 # from it (`ARM64Codegen._extern_symbol`).
-                if M.dylib_module_reference(func, imported) is not None:
+                if M.dylib_module_reference(func, module_locals) is not None:
                     root = func
                     while isinstance(root, (F.MemberExpr, F.SubscriptExpr)):
                         root = root.obj
@@ -16348,7 +16376,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 # `os.environ` is not.
                 if id(sub) in dotted_callees:
                     continue
-                root_name = M.dylib_module_reference(sub, imported)
+                root_name = M.dylib_module_reference(sub, module_locals)
                 if root_name is None:
                     continue
                 # A LOCAL of this function shadows an imported module name, and
@@ -16364,11 +16392,19 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
                 if id(root) in bracketed:
                     continue
                 leaf = sub.member
+                # A recognised root spells the ALIAS for an aliased import
+                # (`import lib2 as L` roots at `L`), and the published tables
+                # are filed under the module the alias stands for — so the three
+                # lookups ask about `lib2` while the sentence keeps the spelling
+                # the source wrote. `root_name` is the answer for every import
+                # that was not aliased, which is why the fallback is itself.
+                module_key = (module_bindings.get(root_name, root_name)
+                              if module_bindings else root_name)
                 module_reads[id(root)] = M.module_attribute_refusal(
                     M.member_chain_text(sub), root_name, leaf, fn.name,
-                    _module_published_names(root_name, link_line),
-                    _module_published_variables(root_name, link_line),
-                    _module_published_containers(root_name, link_line))
+                    _module_published_names(module_key, link_line),
+                    _module_published_variables(module_key, link_line),
+                    _module_published_containers(module_key, link_line))
         # A TYPE name in a VALUE position is a compile-time constant whose value
         # is the type's TAG, so it has a home — the same one a folded
         # module-level constant has, which is the fourth of the four this walk
@@ -18244,6 +18280,25 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # the missing buffer.
     M.fold_constant_interpolated_literals(stmts)
     M.refuse_interpolated_literals(stmts)
+    # A default EXPRESSION lives in a FunctionDef's `param_defaults` DICT, and
+    # `iter_nodes` does not descend a dict's values (it recurses through
+    # `list`/`tuple` and dataclass fields and nothing else): the two passes above
+    # never reach it, so a field-less `f"n=7"` default is never folded and a
+    # field-bearing one never reaches the refusal. The emitter then materializes
+    # the whole token the parser kept, so `def f(x=f"n=7")` printed `f"n=7"` and
+    # `def f(x=f"n={5}")` also built, on both backends, where CPython prints
+    # `n=7` and refuses the field. Reach exactly that set here — every
+    # FunctionDef in the tree, including nested ones — with the same
+    # fold-then-refuse order, rather than a second pass the shared walker cannot
+    # see. A wider change teaching `iter_nodes` itself to descend the dict would
+    # also let every other walk (the frame layout, the constant-read census) into
+    # the same values and change what they reserve, which is not this defect.
+    for _node in M.iter_nodes(stmts):
+        _defaults = getattr(_node, "param_defaults", None)
+        if isinstance(_defaults, dict) and _defaults:
+            _values = list(_defaults.values())
+            M.fold_constant_interpolated_literals(_values)
+            M.refuse_interpolated_literals(_values)
     # The unit's STRING TEXT facts, published here for the same reason and in the
     # same place as the two lines above: the consumers are a per-function walk
     # inside a backend and a refusal asked before any emitter runs, and neither
@@ -18860,14 +18915,21 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # method that did not hand one back.
     writebacks = M.one_field_mutating_methods(functions, method_owners,
                                                one_field)
-    # The modules THIS UNIT imports, for `_rewrite_method_calls`' receiver-shape
-    # refusal. Read from the same statements `imported_modules` reads everywhere
-    # else rather than threaded in, because `_prepare_functions` runs BEFORE
-    # `_resolve_imports` — it is the pass that has the statements and not the
-    # link line — and the question the refusal has to exclude is "is this chain
-    # rooted at a MODULE", which is a fact about the source spelling.
-    from formal.imports import imported_modules as _imported_modules
-    _this_unit_modules = tuple(_imported_modules(stmts) or ())
+    # The LOCAL names this unit binds for its module imports, for
+    # `_rewrite_method_calls`' receiver-shape refusal. The recognition the
+    # refusal has to exclude asks "is this chain rooted at a MODULE", and that
+    # is a fact about the spelling the call roots at — which for `import lib2
+    # as L` is the ALIAS, not the module name on the link line. So the answer
+    # is the local name, and it is the SAME answer `check_module_symbols` hands
+    # its own recognition of the same spelling: the two refusals must agree
+    # about where `L.answer(…)` is rooted, and they will only if both are
+    # handed `imported_module_bindings`' keys and neither is handed
+    # `imported_modules`' names. Read from the same statements `imported_modules`
+    # reads everywhere else rather than threaded in, because `_prepare_functions`
+    # runs BEFORE `_resolve_imports` — it is the pass that has the statements and
+    # not the link line — and `_import_module_bindings` reads the statements
+    # directly.
+    _this_unit_modules = tuple(_import_module_bindings(stmts).keys())
     # The image's compiled function names, for `_constructor_bindings`' one
     # name-that-is-both-a-function-and-a-struct guard. Hoisted out of the loop
     # because `functions` is not rebound or extended anywhere inside it — the
@@ -21644,7 +21706,7 @@ def _runtime_library_for(ordered: list, arch: str, fmt: str):
     on the tree that measured it and means nothing to a reader on any other
     one. The tree-level figures live in one place and are checked against the
     live census by `test_runtime_header_scan.py` — `bugs/FORMAL_known_limits.md`
-    §3.1 for the word-shaped surface (718 entry points, 297 of them word-shaped,
+    §3.1 for the word-shaped surface (719 entry points, 297 of them word-shaped,
     measured over every header in `runtime/`).
 
     Checking the intersection rather than linking optimistically is what keeps

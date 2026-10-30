@@ -88,7 +88,7 @@ def _param_names_stripped(params: list) -> list:
     LOOP, not a comprehension: a comprehension's target unpack over a
     `list[tuple[str, str]]` boxes both slots to int64_t self-hosted (see
     `_params_have_vararg`'s sibling note and
-    bugs/CODEGEN_selfhost_actual_types_identifier_field_key.md). Shared
+    identifier-field-key identity). Shared
     here instead of re-deriving the loop at each call site."""
     out = []
     for pn, _pt in params or []:
@@ -1613,6 +1613,15 @@ def _module_attr_ctype(module_name, member) -> str:
     if not module_name or not member:
         return ''
     return _MODULE_ATTR_CTYPES.get((module_name, member), '')
+
+def cattr_cell_field(attr: str) -> str:
+    """Name of the hidden instance field that holds an instance's OWN cell for
+    the function-scoped class attribute `attr` (see module_gen's cell
+    registration and emit_methods' `_cattr_instance_read`). One name, used by
+    the registrar, the allocator seed and the read site, so they cannot drift.
+    """
+    return '_clscell_' + attr
+
 
 def _safe_field(name: str) -> str:
     """Sanitize struct field and parameter names that are C keywords or
