@@ -81,7 +81,8 @@ _WALK_AST_MUTATION_ALLOWLIST = {
     "mojo/backend_gimple/emit_stmts.py::_gen_stmt_ForStmt": "`ForStmt.target` is rewritten only when it is a str, and to a str",
     "mojo/backend_gimple/emit_stmts.py::_maybe_narrow_genexp_local": "`Comprehension.kind` is a str, restored in a `finally`",
     "mojo/backend_gimple/module_gen.py::_gmi_hoist_nested_structs": "`StructDef.name` is a rename of a str",
-    "mojo/backend_gimple/module_gen.py::_gmi_decorator_pass": "`copy.copy` of a def (rebound, or one whose body holds a nested def), so the new node is unwalked and its `name`/`decorators`/`body` are set before anything walks it",
+    "mojo/backend_gimple/module_gen.py::_gmi_rebind_stmt": "`copy.copy` of a def (rebound, or one whose body changed), so the new node is unwalked and its `name`/`decorators`/`body` are set before anything walks it",
+    "mojo/backend_gimple/module_gen.py::_gmi_with_blocks": "`copy.copy` of a compound statement or its handler/case, whose child blocks are set on the copy before anything walks it",
     "mojo/middle/closures.py::_scan_for_closures": "`ClosureInfo.captures` is the closure scanner's own record",
     "mojo/middle/closures.py::discover_closures": "ditto",
     "mojo/middle/coro.py::_Capture.__init__": "the capture record's own dataclass",
@@ -8701,6 +8702,59 @@ print(stacked(7))
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_decorator_in_a_compound_block_is_applied_at_runtime():
+        """A decorated `def` inside an `if`, `try`, or `with` block of a
+        function body is bound in that function's scope, so it is rebound by
+        the same rule as a direct statement. Before, the rebinding walk only
+        entered a body's direct statements: the `def` was still lifted to a
+        sibling function, but its decorator was dropped, so `outer(7, True)`
+        silently printed `8` where CPython prints `16`."""
+        global _PASS, _FAIL
+        name = "decorator_in_a_compound_block_is_applied_at_runtime"
+        src = '''\
+def twice(f):
+    def wrap(x):
+        return f(x) * 2
+    return wrap
+
+def outer(n, flag):
+    if flag:
+        @twice
+        def step(x):
+            return x + 1
+        return step(n)
+    return n
+
+def guarded(n):
+    try:
+        @twice
+        def g(x):
+            return x + 2
+        return g(n)
+    except ValueError:
+        return -1
+
+print(outer(7, True))
+print(outer(7, False))
+print(guarded(7))
+'''
+        got = _compiled_stdout(src, 'single-TU')
+        want = _cpython_stdout(src)
+        if isinstance(got, tuple):
+            print(f"FAIL  {name}: gcc -fgimple failed:\n{got[1][:800]}")
+            _FAIL += 1
+            return
+        if want is None:
+            print(f"FAIL  {name}: CPython does not run the fixture")
+            _FAIL += 1
+            return
+        if got != want:
+            print(f"FAIL  {name}: compiled stdout {got!r} != CPython {want!r}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_print_of_a_closure_value_is_not_a_decimal_address():
         global _PASS, _FAIL
         name = "print_of_a_closure_value_is_not_a_decimal_address"
@@ -12874,6 +12928,7 @@ print(run('x/y.txt'))
     _run_isolated(lambda: test_print_of_a_function_value_is_not_a_decimal_address(), 'test_print_of_a_function_value_is_not_a_decimal_address (line 12724)')
     _run_isolated(lambda: test_print_of_a_closure_value_is_not_a_decimal_address(), 'test_print_of_a_closure_value_is_not_a_decimal_address (line 12725)')
     _run_isolated(lambda: test_decorator_rebinding_is_applied_at_runtime(), 'test_decorator_rebinding_is_applied_at_runtime')
+    _run_isolated(lambda: test_decorator_in_a_compound_block_is_applied_at_runtime(), 'test_decorator_in_a_compound_block_is_applied_at_runtime')
     _run_isolated(lambda: test_a_local_rebound_from_a_scalar_to_a_container_is_the_box(), 'test_a_local_rebound_from_a_scalar_to_a_container_is_the_box (line 12726)')
 
     # A `@deco def f` whose decorator returns a scalar rebinds `f` to a
@@ -12989,6 +13044,22 @@ def outer(n):
 
 print(outer(7))
 """, "returns int64_t (not callable)"), 'nested_scalar_decorator_rebind_is_refused')
+    # A decorated def inside a MODULE-level block cannot be rebound (the global
+    # machinery only sees top-level bindings), so it is refused, not silently
+    # left as the undecorated function.
+    _run_isolated(lambda: test_raises("decorator_in_a_module_level_block_is_refused", """\
+def twice(f):
+    def wrap(x):
+        return f(x) * 2
+    return wrap
+
+if True:
+    @twice
+    def step(x):
+        return x + 1
+
+print(step(7))
+""", "inside a module-level block"), 'decorator_in_a_module_level_block_is_refused')
 
     # `len()` of a value the codegen could not type, where that value is a
     # LOCAL declared as a plain `int` — the shape that took out `make mojoc`,
