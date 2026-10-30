@@ -1246,20 +1246,14 @@ def _compile_link_inline_cpp_unit(gen, cpp_code: str):
         import cas
         import subprocess
         import tempfile
-        from build_config import find_gxx, runtime_dir as _bc_runtime_dir
+        from build_config import find_gxx
     except Exception as e:
         gimple_ctypes._debug_note('cannot compile link-mode inline-module cpp unit '
                     '(import failure)', e)
         return None
     try:
         gxx = find_gxx()
-        # The tree's one answer to "where is runtime/" (build_config), not a path
-        # derived from this file's own location: this code moved under
-        # mojo/backend_gimple/, which made the old `dirname(__file__)/runtime`
-        # a directory that does not exist, and every sibling module's C++
-        # generator unit then failed to compile SILENTLY (-> an undefined
-        # `_mojogen_*` symbol at link).
-        runtime_dir = _bc_runtime_dir()
+        runtime_dir = gimple_ctypes.os.path.join(gimple_ctypes.os.path.dirname(gimple_ctypes.os.path.abspath(__file__)), 'runtime')
         cpp_flags = ('-std=c++20', '-fPIC', f'-I{runtime_dir}')
         key = cas.module_key(cpp_code, [], gxx, cpp_flags)
 
@@ -1796,22 +1790,11 @@ def carry_callable_ret_from_call(gen, value_node, dst: str) -> None:
     _f = getattr(value_node, 'func', None)
     if not isinstance(_f, gimple_ctypes.IdentExpr):
         return
-    _fname = _as_str(_f.name)
-    _frt = gen._return_callable_ret_types.get(_fname)
-    if _frt is None:
-        # A nested factory (`def main(): def mk(): ...`) uses the lifted
-        # name `main_mk` for the compiled symbol; the bare lookup misses it,
-        # and `_lower_fnptr_call_value` then has no `char *` to narrow back.
-        if _fname in getattr(gen, '_closure_envs', ()):
-            _frt = gen._return_callable_ret_types.get(
-                f'{getattr(gen, "current_func_name", None) or ""}_{_fname}')
-    if _frt:
-        gen._callable_ret_types[dst] = _frt
+    _rt = gen._return_callable_ret_types.get(_as_str(_f.name))
+    if _rt:
+        gen._callable_ret_types[dst] = _rt
 
-    _rn = getattr(gen, '_return_func_value_names', {}).get(_fname)
-    if _rn is None and _fname in getattr(gen, '_closure_envs', ()):
-        _rn = getattr(gen, '_return_func_value_names', {}).get(
-            f'{getattr(gen, "current_func_name", None) or ""}_{_fname}')
+    _rn = getattr(gen, '_return_func_value_names', {}).get(_as_str(_f.name))
     if _rn:
         gen._func_value_names[dst] = _rn
 
@@ -3397,11 +3380,7 @@ def _char_to_cstr(gen, typ: str, val: str, transient: bool = False, word_ok: boo
         iv = gen._new_val('int64_t', f'(int64_t){val}')
         ikey = gen._call_expr('char *', 'mojo_int_str_transient',
                               [('int64_t', iv)])
-        # The release's `orig` is the int64_t WORD, not `val`: `val` is a
-        # `char *` here (this is the pointer-typed arm), and passing it as the
-        # release's int64_t argument is the `-Wint-conversion` the self-host
-        # build hit. `iv` is the same word, already typed.
-        gen._cstr_key_src[ikey] = iv
+        gen._cstr_key_src[ikey] = val
         return 'char *', ikey
     return typ, val
 
@@ -4150,8 +4129,8 @@ def _materialize_as_list(gen, src_type: str, value: str) -> str:
         # readers to ask the runtime rather than trust one compile-time
         # element type (the merged temp also carries set/list/box branches).
         gen._emit_call('void', '', 'mojo_list_set_kinds_uniform',
-                       [('MojoList *', result), ('char', gen._new_val('char', "(char)'p'"))])
-        gen._maybe_kinds_vals.add(result)
+                       [('MojoList *', result), ('char', "'p'")])
+        gen._maybe_kinds_vals.add(str(result))
         # NO `gen._elem_types[result]` here, and that is load-bearing rather
         # than an omission. This arm merges FOUR different containers into one
         # temp, and the element type is a property of WHICH ONE, so a record
@@ -6373,107 +6352,6 @@ def _unbox_float_param_operand(gen, node, ctype: str, val: str) -> tuple[str, st
     return ctype, val
 
 
-# The operators whose answer is a double when an operand is one. `+`, `-` and
-# `*` select at run time between the integer answer and the double one. `/` is
-# separate (`_FLOAT_DIV_OP`): Python's true division is a float whatever the
-# operands are, so it has no integer answer to select, and it never reaches
-# the integer `/` that traps on a zero divisor. `//` and `%` are left out on
-# purpose: their integer forms can trap and their double forms are not C's
-# `/`/`%`, so they keep the truncating answer until they get their own arm.
-_FLOAT_ARITH_OPS = ('+', '-', '*', '//', '%')
-_FLOAT_DIV_OP = '/'
-_FLOAT_PARAM_OPS = _FLOAT_ARITH_OPS + (_FLOAT_DIV_OP,)
-
-# The C types an operand of `_float_param_arith` may have: an integer (the
-# parameter's word, or a plain int) or a double (a float literal or a double
-# expression beside the parameter).
-_FLOAT_ARITH_OPERAND_TYPES = ('int', 'int64_t', 'double')
-
-
-def _float_param_arith_applies(gen, op: str, lnode, lt: str, rnode, rt: str) -> bool:
-    """Is `lnode op rnode` an arithmetic operation on a float-possible
-    parameter, so `_float_param_arith` must answer it? The other operand may be
-    an integer (the answer is the integer or the double one, by the box) or a
-    double (the answer is always a double)."""
-    if op not in _FLOAT_PARAM_OPS:
-        return False
-    if lt not in _FLOAT_ARITH_OPERAND_TYPES or rt not in _FLOAT_ARITH_OPERAND_TYPES:
-        return False
-    return _is_may_hold_float_param(gen, lnode) or _is_may_hold_float_param(gen, rnode)
-
-
-def _float_operand_as_double(gen, node, ctype: str, val: str) -> str:
-    """An operand of a float-aware arithmetic operator, as a C double. A
-    float-possible parameter's word is read with `mojo_box_double` (a double
-    box's double, or a plain integer promoted); a `double` operand is already
-    one; any other integer is converted."""
-    if _is_may_hold_float_param(gen, node):
-        return _as_str(gen._call_expr('double', 'mojo_box_double', [('int64_t', val)]))
-    if ctype == 'double':
-        return _as_str(val)
-    return _as_str(gen._new_val('double', f'(double) ({_as_str(val)})'))
-
-
-def _float_param_arith(gen, op: str, lnode, lt: str, lv: str, rnode, rt: str, rv: str) -> str:
-    """`lnode op rnode` where an operand is a float-possible parameter.
-
-    Beside an INTEGER the answer is the integer one every operator gave before
-    the box existed, or a double box holding the DOUBLE answer when either
-    operand is a double box (`f(2.5)` → `x * 2` is 5.0, `f(1)` → `x * 2` is 2).
-    Which of the two is the answer is a runtime fact, so both are computed and
-    `mojo_float_arith_select` picks. The raw words go to it, not the unboxed
-    operands, because the unboxing is what destroys the box.
-
-    Beside a DOUBLE (`x * 2.5`) the answer is a double whatever the parameter
-    holds, so it is boxed outright. Nothing traps on this path.
-
-    `/` is always a double (Python's true division), so it is boxed outright
-    whatever the other operand is, and its double is computed by
-    `mojo_div_double`: gcc -fgimple ICEs on an inline double `/`, and that
-    helper raises ZeroDivisionError on a zero divisor. No integer answer is
-    computed, so the integer divide never runs."""
-    dl = _float_operand_as_double(gen, lnode, lt, lv)
-    dr = _float_operand_as_double(gen, rnode, rt, rv)
-    if op == _FLOAT_DIV_OP:
-        dres = gen._call_expr('double', 'mojo_div_double',
-                              [('double', _as_str(dl)), ('double', _as_str(dr))])
-        return gen._call_expr('int64_t', 'mojo_box_from_double', [('double', _as_str(dres))])
-    if op == '//':
-        dres = gen._new_val('double', f'floor(({_as_str(dl)}) / ({_as_str(dr)}))')
-    elif op == '%':
-        dres = gen._new_val('double', f'({_as_str(dl)} - ({_as_str(dr)}) * floor(({_as_str(dl)}) / ({_as_str(dr)})))')
-    else:
-        dres = gen._new_val('double', f'({dl}) {op} ({dr})')
-    if lt == 'double' or rt == 'double':
-        return gen._call_expr('int64_t', 'mojo_box_from_double', [('double', _as_str(dres))])
-    lp = _is_may_hold_float_param(gen, lnode)
-    rp = _is_may_hold_float_param(gen, rnode)
-    _, ilv = _unbox_float_param_operand(gen, lnode, 'int64_t', lv)
-    _, irv = _unbox_float_param_operand(gen, rnode, 'int64_t', rv)
-    if op == '//':
-        ires = gen._new_val('int64_t', f'__mojo_floordiv ({_as_str(ilv)}, {_as_str(irv)})')
-    else:
-        ires = gen._new_val('int64_t', f'({_as_str(ilv)}) {op} ({_as_str(irv)})')
-    return gen._call_expr('int64_t', 'mojo_float_arith_select', [
-        ('int64_t', _as_str(lv) if lp else '0'),
-        ('int64_t', _as_str(rv) if rp else '0'),
-        ('int64_t', _as_str(ires)),
-        ('double', _as_str(dres)),
-    ])
-
-
-def _is_float_param_arith(gen, node) -> bool:
-    """Is `node` an arithmetic result that `_float_param_arith` may have made a
-    double box? Such a value is printed through `mojo_repr_boxed`, which asks
-    the box and so prints `5.0` for a double box and `2` for the plain integer.
-    Only the direct operand form is answered: a result bound to a name first
-    (`y = x * 2`) loses the answer, as a float-possible parameter's copy does."""
-    if isinstance(node, gimple_ctypes.BinaryOp) and node.op in _FLOAT_PARAM_OPS:
-        return (_is_may_hold_float_param(gen, node.left)
-                or _is_may_hold_float_param(gen, node.right))
-    return False
-
-
 def _box_float_call_args(gen, callee: str, arg_pairs: list) -> list:
     """Box each `double` argument bound for a float-possible parameter of
     `callee` (`_int64_may_hold_float`), so the int64_t slot receives a box
@@ -6497,35 +6375,6 @@ def _box_float_call_args(gen, callee: str, arg_pairs: list) -> list:
         else:
             out.append((_at, _av))
     return out
-
-
-def _tag_mixed_list_call_args(gen, callee: str, arg_pairs: list) -> None:
-    """Record the slot kind of a list argument bound for a parameter whose
-    call sites disagree on its element C type (`module_gen._param_elem_mixed`).
-
-    The callee loops over such a parameter through `mojo_list_get_boxed`, which
-    answers by the kind the LIST recorded: a list of strings or of doubles
-    built by anything but a literal's `mojo_list_set_kinds` has no row, an
-    unrecorded slot reads as 'i', and a `char *` then printed as its address.
-    The caller is the only place the element type is statically known, so it
-    records it here, as the uniform kind of the whole list. Only the two kinds
-    that have no int64_t spelling are recorded; an int list's unrecorded
-    slots already read correctly. Emission only — `arg_pairs` is unchanged."""
-    _names = getattr(gen, '_param_elem_mixed', {}).get(_as_str(callee))
-    if not _names:
-        return
-    _pnames = getattr(gen, '_func_param_names', {}).get(_as_str(callee)) or []
-    for _i, (_at, _av) in enumerate(arg_pairs):
-        _pn = _as_str(_pnames[_i]) if _i < len(_pnames) else None
-        if _pn is None or _pn not in _names:
-            continue
-        if _as_str(gen._get_actual_type(_at, _av)) != 'MojoList *':
-            continue
-        _et = _as_str(gen._elem_types.get(_as_str(_av)))
-        _kind = {'char *': 'p', 'double': 'd'}.get(_et)
-        if _kind:
-            gen._emit_call('void', '', 'mojo_list_set_kinds_uniform',
-                           [('MojoList *', _as_str(_av)), ('char', "'" + _kind + "'")])
 
 
 def _note_global_callable_store(gen, gname: str, value_text: str) -> None:
@@ -6814,8 +6663,7 @@ def _gen_print(gen, args: list, kwargs: list = None):
             # same answer the `_boxed_vals` arm below gives a heterogeneous
             # list slot. Routed through `_own_repr` because the box's
             # `mojo_repr_boxed` result is a fresh buffer on every path.
-            if _pi < len(args) and (_is_may_hold_float_param(gen, args[_pi])
-                                    or _is_float_param_arith(gen, args[_pi])):
+            if _pi < len(args) and _is_may_hold_float_param(gen, args[_pi]):
                 _rv = _own_repr(gen, 'mojo_repr_boxed',
                                 gen._call_expr('char *', 'mojo_repr_boxed',
                                                [('int64_t', aval)]), _owned_reprs)

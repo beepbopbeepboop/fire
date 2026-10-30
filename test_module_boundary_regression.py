@@ -1,4 +1,4 @@
-# Regression tests for cross-module generator/value-typing (bug:CODEGEN_module_boundary_carries_no_value_types, fixed).
+# Regression tests for bugs/CODEGEN_module_boundary_carries_no_value_types.md
 #
 # Each case is a two-module program compiled through the real import closure
 # (`compile_to_gimple(..., do_imports=True)`), linked with `gcc -fgimple`, run,

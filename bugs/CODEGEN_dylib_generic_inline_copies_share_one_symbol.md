@@ -56,30 +56,6 @@ Next round can start on step 1 once A is confirmed.
 Separately found while scoping: a bare call to a generic function binds the weak stub in link mode (fixed by
 `test_same_module_call_to_generic_with_default_binds_instantiation`, the defaulted-bracket-parameter inference).
 
-### 2026-10-30 partial fix (landed; the dylib part is still open)
-
-**What landed.** The repro `test_two_modules_specialize_one_generic_differently` was not a shared-symbol
-bug. In the inline `do_imports=True` path, `_register_imported_generics` returned early, so a sibling
-module's generic (`scale` from `pkg/gen.py`) was never registered. The bracketed call `scale[2](10)`
-then matched nothing and lowered to `(int64_t)0 /* indirect call via SubscriptExpr */`, a silent zero
-stub. The guard is removed (`mojo/backend_gimple/emit_funcs.py`), so the call elaborates a concrete
-instantiation in both modes. The repro now prints `20`/`30`, and `test_link_mode.py` is 26 passed,
-0 failed on this tree.
-
-**What did not change, and is still open.** The dylib still excludes 130 modules as "symbol already
-defined" (`_dlsym` in `dedup.log`). The shared-name copies are still emitted with bare names, so the
-Option A design above (per-specialization `mangle` names and bodies, dedup removed) is the next step.
-Two expectations to re-measure at the integrator's gate:
-- `build_stdlib_dylib.py`: the exclusion count should move, and the `skip` count must not increase.
-- `_register_imported_generic_structs` has the same `do_imports` guard. It was NOT changed here;
-  check whether it hides the same silent-zero shape for generic structs before touching it.
-
-**Not verified here.** No stdlib sweep, self-host build, or `make gate` was run. The integrator owns that.
-
-**A rejected experiment.** Widening the elaboration seed to every generic function (`_fn_has_type_params`
-in `elab_intu.py`) did not fix the repro, because the call never reached the seed in the do_imports path.
-It also changed dylib skip and exclude counts. Not landed.
-
 ### 2026-10-29 repro round (regression test landed, red)
 
 Landed: `test_link_mode.py::test_two_modules_specialize_one_generic_differently` (in `CASES`). Two modules call one
