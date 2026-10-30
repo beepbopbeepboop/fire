@@ -13,6 +13,7 @@ with a stub `measure`, because running Lean per row is a manual campaign,
 not a unit test.
 """
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -97,6 +98,33 @@ class StaleVerdictRows(unittest.TestCase):
         self.assertEqual(still, [],
                          f'still cited by deleted doc path: {still}; '
                          'rewrite by symptom (commit or doc name)')
+
+
+# The hard-bug index is hand-maintained prose, so nothing but these two checks
+# ever compares it with the directory it indexes. Both were false at once on
+# 2026-10-29: nine of the names it cited were deleted docs, and three live docs
+# had no row at all.
+HARD = os.path.join(HERE, 'bugs', 'hard')
+HARD_INDEX = os.path.join(HARD, 'README.md')
+DOC_NAME = re.compile(r'(?<![\w.-])([A-Za-z0-9_][A-Za-z0-9_.-]*\.md)(?![\w-])')
+
+
+def _index_names():
+    with open(HARD_INDEX) as f:
+        return set(DOC_NAME.findall(f.read()))
+
+
+class HardIndexIsTrue(unittest.TestCase):
+    def test_every_doc_the_index_names_exists(self):
+        homes = (HARD, os.path.join(HERE, 'bugs'), HERE)
+        missing = sorted(n for n in _index_names()
+                         if not any(os.path.exists(os.path.join(h, n)) for h in homes))
+        self.assertEqual(missing, [])
+
+    def test_every_hard_doc_is_indexed(self):
+        on_disk = {f for f in os.listdir(HARD)
+                   if f.endswith('.md') and f != 'README.md'}
+        self.assertEqual(sorted(on_disk - _index_names()), [])
 
 
 if __name__ == '__main__':
