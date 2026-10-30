@@ -2676,6 +2676,10 @@ class GimpleGen:
         # and the next read (`emit_fallthrough_frees`) crashed on garbage/
         # near-null memory (confirmed via lldb: EXC_BAD_ACCESS in
         # `mojo_set_len`, called via `gen._owned_free_candidates`).
+        # The per-execution cell pointers the function being emitted must
+        # write back on exit: `[gname, saved temp]` pairs, set by
+        # emit_methods._cattr_restore_begin and cleared by _cattr_restore_end.
+        self._cattr_restores: list = []
         self._owned_free_candidates: set = set()
         self._owned_free_pushed: set = set()
         self._owned_stack_allocated: set = set()

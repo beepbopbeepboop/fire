@@ -38,7 +38,70 @@ def main():
     print(d.items[0])
 """, "1\n2\n")
 
+def test_nested_class_attr_recursive_execution_regression():
+    # A recursive call runs the same `class` statement, repointing the shared
+    # cell global. The caller's class-name read after the call must still see
+    # ITS OWN cell. Before the save/restore this printed `6 6 6 6`.
+    test_gimple_stdout("gimple_nested_class_attr_recursive", """\
+def f(v: int, d: int):
+    class T():
+        __version__ = v
+    if d > 0:
+        f(v + 1, d - 1)
+        print(T.__version__)
+        return
+    print(T.__version__)
+
+def main():
+    f(5, 1)
+    f(7, 0)
+""", "6\n5\n7\n")
+
+def test_nested_class_attr_recursive_value_return_regression():
+    # The same restore must run before a `return <value>`, and the value must
+    # be the caller's own cell, not the callee's. Expected `5`, and a second
+    # call from a fresh frame reads its own `9`.
+    test_gimple_stdout("gimple_nested_class_attr_recursive_return", """\
+def g(v: int, d: int) -> int:
+    class T():
+        __version__ = v
+    if d > 0:
+        g(v + 1, d - 1)
+        return T.__version__
+    return T.__version__
+
+def main():
+    print(g(5, 1))
+    print(g(9, 0))
+""", "5\n9\n")
+
+def test_nested_class_attr_exception_unwind_regression():
+    # An exception raised in a nested execution of the same function unwinds
+    # past that execution without reaching its own restore. The catching
+    # execution's handler must put its OWN cell back, or its class-name read
+    # reaches the nested execution's cell. Before this fix this printed `6`
+    # where CPython prints `5`.
+    test_gimple_stdout("gimple_nested_class_attr_exception_unwind", """\
+def f(v: int, d: int):
+    class T():
+        __version__ = v
+    if d > 0:
+        try:
+            f(v + 1, d - 1)
+        except ValueError:
+            print("caught")
+        print(T.__version__)
+    if d == 0:
+        raise ValueError("x")
+
+def main():
+    f(5, 1)
+""", "caught\n5\n")
+
 if __name__ == '__main__':
     test_nested_class_attr_cross_execution_regression()
     test_nested_class_container_attr_cross_execution_regression()
+    test_nested_class_attr_recursive_execution_regression()
+    test_nested_class_attr_recursive_value_return_regression()
+    test_nested_class_attr_exception_unwind_regression()
     print("PASS")
