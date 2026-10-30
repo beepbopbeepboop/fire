@@ -2996,35 +2996,6 @@ def _struct_typedef_fields(gen, sn) -> dict:
     return _fields
 
 
-def _gmi_record_fn_scoped_param_types(gen, cls_name: str, params) -> None:
-    """Record the annotated C type of each parameter of the function a
-    function-scoped class was declared in, keyed by the class's FINAL name and
-    the parameter name (`_pair_key`).
-
-    A class-level attribute whose value is a bare parameter name
-    (`class C(): name = s` inside `def h(s: str)`) has no literal to type it
-    from, so `_class_attr_ctype` answers None and the registration falls back
-    to `int64_t`, which types a `char *` as a pointer-sized integer. The
-    parameter's annotation is the ground truth for what that name holds, and
-    it is what `_mojo_type` resolves the function's own signature with. An
-    unannotated parameter records nothing and keeps the old fallback.
-    """
-    if not params:
-        return
-    _table = getattr(gen, '_fn_scoped_param_types', None)
-    if _table is None:
-        _table = {}
-        gen._fn_scoped_param_types = _table
-    for _p in params:
-        try:
-            _pname, _pann = _p[0], _p[1]
-        except (TypeError, IndexError):
-            continue
-        if not isinstance(_pann, str) or not _pann:
-            continue
-        _table[_pair_key(cls_name, _as_str(_pname))] = _mojo_type(_pann)
-
-
 def _gmi_hoist_nested_structs(self, stmts: list) -> list:
     """Return `stmts` with every class declared inside a function body HOISTED
     to module scope, so the ordinary struct pipeline treats it exactly like a
@@ -3116,7 +3087,6 @@ def _gmi_hoist_nested_structs(self, stmts: list) -> list:
             renamed_to.append(_h_bare)
             _fn_scoped.add(_h_bare)
             out.append(_h_node)
-            _gmi_record_fn_scoped_param_types(self, _h_bare, found[_h_i][2])
             continue
         _h_base = _h_bare + '__' + _h_encl
         _h_new = _h_base
@@ -3130,7 +3100,6 @@ def _gmi_hoist_nested_structs(self, stmts: list) -> list:
         _fn_scoped.add(_h_new)
         _h_node.name = _h_new
         out.append(_h_node)
-        _gmi_record_fn_scoped_param_types(self, _h_new, found[_h_i][2])
     # The alias keys need the FINAL struct names, because a method's enclosing
     # key contains the name of the class it belongs to — so they are computed
     # on a SECOND walk, after the renames above have landed. The two walks
@@ -4037,7 +4006,7 @@ def gen_module_impl(self, stmts):
     #
     # See mojo/backend_gimple/elab_intu.py for why the `.o` route cannot serve
     # the `std/iter` iterator family at all, and
-    # the user-iterator next() bug (doc deleted in db724c4d6) for
+    # bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md for
     # the experiment this replaces (which narrowed the feature instead of
     # fixing the cause, and so produced `conflicting types` regressions).
     stmts = list(stmts) + _elab_intu.run(self, stmts)
@@ -4219,26 +4188,6 @@ def gen_module_impl(self, stmts):
                         else:
                             _xg_module_binding[_xg_bound] = _xg_n.module
 
-            # Bound name -> the module's own real dotted name, for a PLAIN
-            # `import mod_a [as alias]` (`mod_a.Dialog(...)`). Deliberately
-            # SEPARATE from `_xg_module_binding` above: that dict's value is
-            # the enclosing PACKAGE of a `from PKG import submodule` binding
-            # (its consumer joins package+binding to get the submodule's own
-            # dotted name via `_join_import_member`) — a plain `import`'s
-            # binding already IS the target module's own real name, joining
-            # it again would mangle it (`_join_import_member('mod_a',
-            # 'mod_a')` is not `'mod_a'`).
-            _xg_plain_import_mod: dict = {}
-            for _xf_n in _walk_ast(stmts):
-                if not isinstance(_xf_n, ImportStmt):
-                    continue
-                for _xf_im_mod, _xf_im_alias in [(_xf_n.module, _xf_n.alias)] + list(_xf_n.extra or []):
-                    _xf_im_bound = _xf_im_alias if _xf_im_alias else _as_str(_xf_im_mod).split('.', 1)[0]
-                    if _xg_plain_import_mod.get(_xf_im_bound, _xf_im_mod) != _xf_im_mod:
-                        _xg_plain_import_mod[_xf_im_bound] = None  # ambiguous
-                    else:
-                        _xg_plain_import_mod[_xf_im_bound] = _as_str(_xf_im_mod)
-
             def _xg_homog_elem(_xa):
                 """Unanimous scalar element ctype of a collection LITERAL
                 argument, or None (mixed / empty / non-scalar elements hint
@@ -4285,32 +4234,13 @@ def gen_module_impl(self, stmts):
                         return []
                 return []
 
-            def _xg_top_fn(_xm, _xorig):
-                """The top-level FunctionDef named `_xorig` in module `_xm`'s
-                own source (generator or not), or None."""
+            def _xg_gen_fn(_xm, _xorig):
+                """The generator FunctionDef named `_xorig` in module `_xm`'s
+                own source, or None."""
                 for _xs in _xg_parse_mod(_xm):
                     if isinstance(_xs, FunctionDef) and _xs.name == _xorig:
-                        return _xs
+                        return _xs if _xs.is_generator else None
                 return None
-
-            def _xg_record_scalar_args(_xkey, _xpnames, _xargs):
-                """Record the unanimous literal SCALAR-ish ctype of each
-                argument into _xmod_gen_param_hints (the cross-module twin of
-                Pass 1.3d's same-module literal contract, see
-                `_gmi_apply_call_site_param_evidence`). A parameter whose
-                call sites disagree records None, and the merge below then
-                leaves it at the body-derived type."""
-                for _xi, _xa in enumerate(_xargs):
-                    if _xi >= len(_xpnames):
-                        break
-                    _xct = _gmi_literal_ctype(_xa)
-                    if not _xct or not _xpnames[_xi]:
-                        continue
-                    _xs_map = self._xmod_gen_param_hints.setdefault(_xkey, {})
-                    if _xs_map.get(_xpnames[_xi], _xct) != _xct:
-                        _xs_map[_xpnames[_xi]] = None
-                    else:
-                        _xs_map[_xpnames[_xi]] = _xct
 
             def _xg_record_hint(_xkey, _xpname, _xct):
                 """Record one list-elem contract into _xmod_gen_elem_hints;
@@ -4416,24 +4346,19 @@ def gen_module_impl(self, stmts):
                 elif isinstance(_xg_call.func, gimple_ctypes.MemberExpr) \
                         and isinstance(_xg_call.func.obj, gimple_ctypes.IdentExpr):
                     _xg_bname = _xg_call.func.obj.name
-                    if _xg_plain_import_mod.get(_xg_bname):
-                        # A PLAIN `import mod_a`: the binding already IS the
-                        # module's own dotted name (see the table above).
-                        _xg_mod_joined = _xg_plain_import_mod[_xg_bname]
-                    else:
-                        _xg_bmod = _xg_module_binding.get(_xg_bname)
-                        if not _xg_bmod:
-                            continue
-                        # The binding names a SUBMODULE FILE: its own compiled
-                        # module_name is the member-path join of the FROM-IMPORT
-                        # module and the BINDING ('.' + 'strutil_like' ->
-                        # '.strutil_like') — exactly how find_imports
-                        # synthesized that file's compilation candidate, so
-                        # the temp_gen's module_name (and registry qualifier)
-                        # matches. The called FUNCTION lives inside that file.
-                        _xg_mod_joined = gimple_ctypes._join_import_member(
-                            _xg_bmod, _xg_bname)
-                    _xg_fn = _xg_top_fn(_xg_mod_joined, _xg_call.func.member)
+                    _xg_bmod = _xg_module_binding.get(_xg_bname)
+                    if not _xg_bmod:
+                        continue
+                    # The binding names a SUBMODULE FILE: its own compiled
+                    # module_name is the member-path join of the FROM-IMPORT
+                    # module and the BINDING ('.' + 'strutil_like' ->
+                    # '.strutil_like') — exactly how find_imports synthesized
+                    # that file's compilation candidate, so the temp_gen's
+                    # module_name (and registry qualifier) matches. The called
+                    # FUNCTION lives inside that file.
+                    _xg_mod_joined = gimple_ctypes._join_import_member(
+                        _xg_bmod, _xg_bname)
+                    _xg_fn = _xg_gen_fn(_xg_mod_joined, _xg_call.func.member)
                     if _xg_fn is None:
                         continue
                     # Composite "<qualifier>::<name>" key — same string
@@ -4443,9 +4368,6 @@ def gen_module_impl(self, stmts):
                     _xg_key = (_xg_mod_joined.replace('.', '_').replace('-', '_')
                                + '::' + _xg_call.func.member)
                     _xg_pnames = gimple_ctypes._param_names_stripped(_xg_fn.params)
-                    _xg_record_scalar_args(_xg_key, _xg_pnames, _xg_call.args)
-                    if not _xg_fn.is_generator:
-                        continue  # element contracts are generator-only
                     _xg_enc_map = (_xg_local_param_elems.get(_xg_enclosing.name, {})
                                    if _xg_enclosing is not None else {})
                     for _xi, _xa in enumerate(_xg_call.args):
@@ -4459,19 +4381,15 @@ def gen_module_impl(self, stmts):
                     continue
                 else:
                     continue
-                _xg_fn = _xg_top_fn(_xg_mod, _xg_orig)
+                _xg_fn = _xg_gen_fn(_xg_mod, _xg_orig)
                 if _xg_fn is None:
-                    continue
+                    continue  # ordinary callees keep Pass 1.3d's own ordering
                 # Composite string key ("<qualifier>::<name>"), not a
                 # genuine tuple — see _xmod_gen_param_hints's docstring
                 # (gimple_codegen.py) for why a real tuple key breaks this
                 # dict's self-hosted compilation.
                 _xg_key = _xg_mod.replace('.', '_').replace('-', '_') + '::' + _xg_orig
                 _xg_pnames = gimple_ctypes._param_names_stripped(_xg_fn.params)
-                _xg_record_scalar_args(_xg_key, _xg_pnames, _xg_call.args)
-                if not _xg_fn.is_generator:
-                    continue  # element contracts are generator-only; ordinary
-                    # callees keep Pass 1.3d's own ordering for those
                 # The ENCLOSING function's own param-elem contracts (from the
                 # literal-list call sites recorded above), for identifier
                 # arguments forwarded straight through to the generator.
@@ -4570,6 +4488,26 @@ def gen_module_impl(self, stmts):
                 elif _xfprev != _xfct:
                     self._xmod_ctor_field_conflict[_xfkey] = True
 
+            # Bound name -> the module's own real dotted name, for a PLAIN
+            # `import mod_a [as alias]` (`mod_a.Dialog(...)`). Deliberately
+            # SEPARATE from `_xg_module_binding` above: that dict's value is
+            # the enclosing PACKAGE of a `from PKG import submodule` binding
+            # (its consumer joins package+binding to get the submodule's own
+            # dotted name via `_join_import_member`) — a plain `import`'s
+            # binding already IS the target module's own real name, joining
+            # it again would mangle it (`_join_import_member('mod_a',
+            # 'mod_a')` is not `'mod_a'`).
+            _xf_plain_import_mod: dict = {}
+            for _xf_n in _walk_ast(stmts):
+                if not isinstance(_xf_n, ImportStmt):
+                    continue
+                for _xf_im_mod, _xf_im_alias in [(_xf_n.module, _xf_n.alias)] + list(_xf_n.extra or []):
+                    _xf_im_bound = _xf_im_alias if _xf_im_alias else _as_str(_xf_im_mod).split('.', 1)[0]
+                    if _xf_plain_import_mod.get(_xf_im_bound, _xf_im_mod) != _xf_im_mod:
+                        _xf_plain_import_mod[_xf_im_bound] = None  # ambiguous
+                    else:
+                        _xf_plain_import_mod[_xf_im_bound] = _as_str(_xf_im_mod)
+
             for _xf_call, _xf_enclosing in _xg_calls:
                 _xf_mod = None
                 _xf_orig = None
@@ -4581,7 +4519,7 @@ def gen_module_impl(self, stmts):
                     _xf_orig = _xg_alias_orig.get(_xf_cname)
                 elif (isinstance(_xf_call.func, gimple_ctypes.MemberExpr)
                         and isinstance(_xf_call.func.obj, gimple_ctypes.IdentExpr)):
-                    _xf_plain_mod = _xg_plain_import_mod.get(_xf_call.func.obj.name)
+                    _xf_plain_mod = _xf_plain_import_mod.get(_xf_call.func.obj.name)
                     if _xf_plain_mod:
                         _xf_mod = _xf_plain_mod
                         _xf_orig = _xf_call.func.member
@@ -5617,7 +5555,7 @@ def gen_module_impl(self, stmts):
             # `gimple_codegen._selfhost_register_gimplegen`'s GimpleGen
             # field-dict seed), making this `not in` guard spuriously
             # True and WIPING that entry back to `{}` right here. See
-            # commit e8a7135b8
+            # bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md
             # Finding 4 Bug C.
             _s_name = _as_str(_s.name)
             if _s_name not in self.struct_field_types:
@@ -6262,15 +6200,6 @@ def gen_module_impl(self, stmts):
                         ctype = 'char *'
                     elif isinstance(v, FloatLiteral):
                         ctype = 'double'
-                    elif (isinstance(v, IdentExpr)
-                            and _pair_key(s.name, _as_str(v.name))
-                            in (getattr(self, '_fn_scoped_param_types', None) or {})):
-                        # A bare name that is a parameter of the function
-                        # this class is declared in: its annotation is the
-                        # type of the value (see
-                        # `_gmi_record_fn_scoped_param_types`).
-                        ctype = self._fn_scoped_param_types[
-                            _pair_key(s.name, _as_str(v.name))]
                     elif v is None:
                         # A no-initializer container field: there is no
                         # literal to read the kind from, so the ANNOTATION
@@ -6987,7 +6916,7 @@ def gen_module_impl(self, stmts):
                 # binary's own (differently-ordered) struct/method
                 # registration passes, whichever run happened to resolve
                 # `target_struct`'s method list before vs after this scan.
-                # See commit e8a7135b8.
+                # See bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md.
                 if target_def is not None and any(
                         m.name == fn for m in target_def.methods):
                     continue
@@ -11247,14 +11176,6 @@ def gen_module_impl(self, stmts):
             continue
         for _t in _tgts:
             self._global_literal_slot_ctypes[_t] = _slots if _slots is not None else _outer
-
-    # Sync generators nested in an ordinary top-level def that read its
-    # names are claimed here, BEFORE the generic passes below would refuse
-    # them and before the module-level registration could take them by bare
-    # name (see cpp_async._compile_nested_generator_closures).
-    for _od in stmts:
-        if isinstance(_od, FunctionDef):
-            self._compile_nested_generator_closures(_od, _generator_fns)
 
     for s in stmts:
         if not (isinstance(s, FunctionDef) and id(s) in _generator_fns
@@ -15925,8 +15846,7 @@ def gen_module_impl(self, stmts):
     # decls for its own trampolines at all — an implicit-declaration
     # compile failure the moment anything (e.g. `_take_handle()`) used the
     # handle outside the enclosing function's own `{base}_start` call.
-    if (self._supported_generators or self._generator_method_api or self._generator_api
-            or self._nested_generator_api):
+    if self._supported_generators or self._generator_method_api or self._generator_api:
         # The typedef may already have been emitted ahead of the
         # method-prototype pass (declaration-before-typedef cascade fix,
         # see that site) — keep exactly one in the section.
@@ -15944,8 +15864,7 @@ def gen_module_impl(self, stmts):
         # (the dict's own VALUES are a genuinely mixed-type dict —
         # `base`/`value_ctype` are str, `params` is a list — so a single
         # `dict[str, str]` reparameterization wouldn't fit every field).
-        for _api in (list(self._generator_api.values()) + list(self._generator_method_api.values())
-                     + list(self._nested_generator_api.values())):
+        for _api in list(self._generator_api.values()) + list(self._generator_method_api.values()):
             _base, _vct = _as_str(_api['base']), _as_str(_api['value_ctype'])
             # Plain unpack loop, NOT a genexpr — a list of string pieces
             # joined via a genexpr is the established self-hosted trap.

@@ -30,7 +30,6 @@ Anything not eligible is left untouched and falls through to the existing
 gimple_cpp_* C++20-coroutine path -- incremental cutover.
 """
 from __future__ import annotations
-import contextlib
 import dataclasses
 
 import os
@@ -111,29 +110,6 @@ def enabled() -> bool:
     # the old gimple_cpp_*.py C++20-coroutine emitter, kept live for one
     # release as a differential oracle (doc/COROUTINE.html §5.5/§5.6).
     return os.environ.get(_ENV, _MODE) != _OLD_MODE
-
-
-@contextlib.contextmanager
-def pinned(mode: str):
-    """Select the coroutine backend (`'cpp'` or `'stackswitch'`) for the
-    duration of one block, then restore whatever `MOJO_CORO` was before.
-
-    `enabled()` reads the env var at each compile, so a test that needs one
-    backend must say so around its own compile calls. A module-level
-    `os.environ[...] = ...` is process-wide: whichever test file is imported
-    last wins for every other file sharing the process. Scoped, it can't
-    leak into anything else."""
-    if mode not in (_OLD_MODE, _MODE):
-        raise ValueError(f"unknown coroutine backend {mode!r}")
-    _prev = os.environ.get(_ENV)
-    os.environ[_ENV] = mode
-    try:
-        yield
-    finally:
-        if _prev is None:
-            os.environ.pop(_ENV, None)
-        else:
-            os.environ[_ENV] = _prev
 
 
 # ── eligibility ─────────────────────────────────────────────────────────
@@ -520,34 +496,6 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
                 ek = 'p'          # `for c in 'ab':` -- characters are strings
         if isinstance(ek, str):
             env[tname] = ek
-    # `for i, x in enumerate(<xs>)`: the two-slot target the loop above
-    # skips. Slot 0 is the index, an int by construction, and slot 1 is one
-    # element of `xs`, so it takes `xs`'s element kind exactly as a single
-    # target would. Without this, `yield x` in such a loop had no kind, the
-    # value slot defaulted to int64_t, and a float element was yielded as its
-    # raw bits (`for i, r in enumerate([1.5, 2.5]): yield r` printed
-    # `1` / `2` where CPython prints `1.5` / `2.5`). Both names must be
-    # unbound, the same rule the single-name case uses.
-    for n in _walk(fn):
-        if not isinstance(n, N.ForStmt):
-            continue
-        it = n.iterable
-        if not (isinstance(it, N.CallExpr) and isinstance(it.func, N.IdentExpr)
-                and it.func.name == 'enumerate' and len(it.args) == 1
-                and isinstance(it.args[0], N.IdentExpr)):
-            continue
-        tnames = for_target_names(n.target)
-        if len(tnames) != 2 or any(t in env for t in tnames):
-            continue
-        src = env.get(it.args[0].name)
-        if isinstance(src, tuple) and src[0] == 'list':
-            elem = src[1]
-        elif src == 'p':
-            elem = 'p'
-        else:
-            continue
-        env[tnames[0]] = 'i'
-        env[tnames[1]] = elem
     if struct_def is not None:
         for f in getattr(struct_def, 'fields', []):
             if isinstance(f, N.VarDecl):
@@ -3148,36 +3096,6 @@ def _rewrite_async_gen_stmts(stmts: list, cvar: str) -> list:
     return out
 
 
-def _local_param_name(pname) -> str:
-    """The body-local name a coroutine prologue binds a parameter to.
-
-    The parser keeps a `*args` / `**kwargs` parameter's star in its name. Left
-    in place, the C emitter reads a leading `*` as a dereference and declares
-    `int64_t *xs; *xs = ...`, a write through an uninitialised pointer that
-    the body then never reads back (the packed list is lost). The body refers
-    to the parameter by its bare name, so the local takes the bare name too."""
-    return _cm_as_str(pname).lstrip('*')
-
-
-def _star_slot(real_params, lead: int) -> int | None:
-    """C-signature slot of a coroutine's `*args` parameter, or None.
-
-    `real_params` is the `(name, annotation)` list the `_start` trampoline
-    takes after its `lead` receiver slots (`self`/`cls`; 0 for a plain
-    function), so the returned index is the one a CALLER's argument list
-    must line up with. The `*args` parameter reaches the frame as ONE
-    `MojoList *` slot holding every positional argument from there on, so
-    the call site packs the trailing positionals into it (see
-    `_emit_generator_start_call`) and needs this index to know where that
-    packing starts. `**kwargs` is not a star slot: its packing is keyed by
-    `_func_kwargs_slot`."""
-    for _i, (_pn, _pa) in enumerate(real_params):
-        _pn = _cm_as_str(_pn)
-        if _pn.startswith('*') and not _pn.startswith('**'):
-            return lead + _i
-    return None
-
-
 def _async_receiver_kind(fn, is_method: bool) -> str:
     """The receiver slot a compiled `async def` METHOD takes -- 'self', 'cls'
     or '' -- by the same single rule the generator meta uses
@@ -3213,9 +3131,9 @@ def _async_method_setup(fn, base, struct_name):
                 func=N.SubscriptExpr(obj=N.IdentExpr(name='UnsafePointer'),
                                      index=N.IdentExpr(name=pann)),
                 args=[slot])
-            prologue.append(N.VarDecl(name=_local_param_name(pname), type_ann=pann, value=val))
+            prologue.append(N.VarDecl(name=pname, type_ann=pann, value=val))
         else:
-            prologue.append(N.VarDecl(name=_local_param_name(pname), type_ann=None, value=slot))
+            prologue.append(N.VarDecl(name=pname, type_ann=None, value=slot))
     body_params = [(_CVAR, 'Int')]
     if is_method:
         body_params.append(('self', struct_name))
@@ -3321,15 +3239,13 @@ def _mark_coro_param_elem_kinds(body_fd, real_params, env):
     str_params: list = []
     for pname, _pann in real_params:
         v = env.get(_cm_as_str(pname))
-        # Keyed by the BODY's local name (`_local_param_name`): a `*args`
-        # parameter's raw name carries its star, and the body never does.
         if isinstance(v, tuple) and len(v) == 2 and v[0] == 'list' \
                 and isinstance(v[1], str) and v[1] in _KIND_CTYPE:
             ct = _KIND_CTYPE[v[1]]
             if ct != 'int64_t':
-                kinds[_local_param_name(pname)] = ct
+                kinds[_cm_as_str(pname)] = ct
         elif v == 'p':
-            str_params.append(_local_param_name(pname))
+            str_params.append(_cm_as_str(pname))
     if kinds:
         body_fd._mojo_coro_param_elem_kinds = kinds
     if str_params:
@@ -3354,7 +3270,6 @@ def _lower_one_async_gen(fn: N.FunctionDef, meta: list, base: str | None = None,
         'is_async_gen': True, 'receiver': _async_receiver_kind(fn, is_method),
         'base': base, 'body_name': body_name,
         'params': c_params,
-        'star_slot': _star_slot(real_params, len(c_params) - len(real_params)),
         'nargs': len(real_params), 'value_ctype': 'int64_t', 'value_kind': 'i',
         'tuple_slot_ctypes': None,
         'no_wd_forward': _base_is_channel_free(base),
@@ -3385,7 +3300,6 @@ def _lower_one_async(fn: N.FunctionDef, meta: list, base: str | None = None,
         'receiver': _async_receiver_kind(fn, is_method),
         'base': base, 'body_name': body_name,
         'params': c_params,
-        'star_slot': _star_slot(real_params, len(c_params) - len(real_params)),
         'nargs': len(real_params), 'value_ctype': _KIND_CTYPE[kind], 'value_kind': kind,
         'tuple_slot_ctypes': None,
         'no_wd_forward': _base_is_channel_free(base),
@@ -4105,29 +4019,7 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
             _kw_names.add(_p)
         _star_i = None
         _has_kwargs_spread = False
-        # The `*args` parameter's index, if any. Every positional argument
-        # from there on is one ELEMENT of that list, not a parameter of its
-        # own, so it constrains the list's element kind. Recorded as
-        # ('list', kind) -- the same entry a list literal argument records --
-        # so the body's loop target and yield slot are typed from the
-        # unanimous element kind. A container element, or one whose kind is
-        # not statically known, poisons the slot (a refusal, not a guess).
-        _star_pi = _star_slot(pinfo, 0)
         for i, a in enumerate(node.args):
-            if _star_pi is not None and i >= _star_pi:
-                pname, pann = pinfo[_star_pi]
-                if not _unannotated(pann):
-                    break
-                if isinstance(a, N.UnaryOp) and a.op in ('*', '**'):
-                    if a.op == '*':
-                        _star_i = i
-                    else:
-                        _has_kwargs_spread = True
-                    continue
-                _ek = _argkind(a, cenv)
-                slot.setdefault(pname, set()).add(
-                    ('list', _ek) if isinstance(_ek, str) else None)
-                continue
             if i >= len(pinfo):
                 break
             pname, pann = pinfo[i]
@@ -5873,12 +5765,12 @@ def _lower_one(fn: N.FunctionDef, meta: list,
     prologue = []
     for i, (pname, _pann) in enumerate(real_params):
         if param_kinds[i] == 'd':
-            prologue.append(N.VarDecl(name=_local_param_name(pname), type_ann='Float64',
+            prologue.append(N.VarDecl(name=pname, type_ann='Float64',
                                       value=_call('__mojo_gen_arg_d',
                                                   [_c_ident(_CVAR),
                                                    N.IntLiteral(value=arg_base + i)])))
         else:
-            prologue.append(N.VarDecl(name=_local_param_name(pname), type_ann=None,
+            prologue.append(N.VarDecl(name=pname, type_ann=None,
                                       value=_call(ARG_SHIM, [_c_ident(_CVAR),
                                                              N.IntLiteral(value=arg_base + i)])))
 
@@ -5917,7 +5809,6 @@ def _lower_one(fn: N.FunctionDef, meta: list,
         'base': base,
         'body_name': body_name,
         'params': c_params,
-        'star_slot': _star_slot(real_params, len(_lead)),
         'nargs': len(real_params),
         'value_ctype': _KIND_CTYPE[kind],
         'value_kind': kind,
@@ -6331,10 +6222,6 @@ def register(gen, meta: list) -> None:
             # and GimpleGen._cpp_yield_from's `yield from cls.<gen>(...)`
             # branch needs it to get the call arity right.
             'receiver': m['receiver'],
-            # C-signature slot of the `*args` parameter (None if none): the
-            # call site packs the positional arguments from there on into one
-            # MojoList * -- see _star_slot.
-            'star_slot': m.get('star_slot'),
             'tuple_slot_ctypes': m.get('tuple_slot_ctypes'),
             'tuple_slot_nested': m.get('tuple_slot_nested'),
             'has_return_value': True,

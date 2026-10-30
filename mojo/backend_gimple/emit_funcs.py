@@ -119,12 +119,6 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
     # its own honest, already-existing refusal instead.
     if node.is_async and not node.is_generator:
         return
-    # A nested sync generator that reads enclosing names was compiled to its
-    # own coroutine unit by _compile_nested_generator_closures; like the async
-    # case above it has no ordinary closure body here. Its call sites resolve
-    # through _nested_generator_api, keyed (current_func_name, name).
-    if node.is_generator and (gen.current_func_name, node.name) in gen._nested_generator_api:
-        return
     outer_closures = getattr(gen, '_all_closures', {}).get(
         gen.current_func_name, {})
     ci = outer_closures.get(node.name)
@@ -907,7 +901,7 @@ def _gen_stmt_ComptimeForStmt(gen, node):
             # chokepoint every other store uses (`_sce_simple_emit`'s
             # literal-to-int64_t branch), so the emitted form is decided by
             # the destination type rather than re-derived per call site.
-            # See bug:CODEGEN_imported_generic_never_elaborated_calls_
+            # See bugs/CODEGEN_imported_generic_never_elaborated_calls_
             # nothing_defines.md.
             dst = gen.var_types.get(node.target) or 'int64_t'
             i = start

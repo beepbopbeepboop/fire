@@ -1,59 +1,5 @@
 # COMPILE_FAIL: Lib/contextlib.py — blocked on the async/coroutine codegen (title STALE)
 
-## Status 2026-10-29 (third session) — the call-arity defect landed; the doc stays open
-
-Landed (partial, real behaviour change): a call to a coroutine or generator
-with a `*args` parameter now packs its positional arguments into the `*args`
-list. Before, the packing was missing at every call site:
-
-- `gen(1, 2, 3)` against `def gen(*xs)` passed the arguments flat, a C "too
-  many arguments" error. Now packed (`_pack_generator_star_args`,
-  `_generator_star_slot` in `mojo/backend_gimple/emit_calls.py`; the method
-  site in `emit_methods.py`).
-- `await f(1, 2, 3)` / `async for x in f(...)` lowers to `__mgco_<f>_start`,
-  which the api registry (keyed by source name) did not find, so it fell
-  through to an ordinary call and passed `1` alone, silently. Now resolved by
-  the api's `base` (`_generator_api_for_start_symbol`).
-- The `*args` local was declared `int64_t *xs` (the raw parameter name keeps
-  its star, which the C emitter reads as a dereference), so the packed list
-  was never read. Fixed in the coroutine prologue (`_local_param_name`,
-  `mojo/middle/coro.py`).
-- The `*args` element kind now comes from the call-site contract (a
-  `('list', kind)` per trailing positional, `_visit_call`), so `str` and
-  `double` elements are stored and read with their own accessors.
-
-Regression cases: `run_star_args_call_tests` in
-`test_gimple_generator_runner.py` (7 cases). On a clean HEAD export all 7
-fail; on this tree all pass. `test_gimple_generator_runner.py` 280/280 and
-`test_gimple_async_runner.py` 39/39.
-
-The doc's own step-0 shape now gives the right answer under the default
-A3 backend: `async def __aexit__(self, *exc_details)` awaited with three
-arguments returns `len(exc_details) + self.n` (`103`, pinned by
-`star_args_async_method_aexit_shape`). The arity defect this session filed is
-therefore fixed for generators, methods and the await/async-for paths.
-
-NOT verified and NOT done:
-
-- `Lib/contextlib.py` itself was NOT re-built. That is a `fire.py build` through
-  the stdlib dylib, which the light-worker budget excludes. Its current
-  refusal text (`cannot compile module: ... *args/**kwargs parameters not
-  supported for compiled async functions`, from `cpp_async.py`) is the LEGACY
-  cpp path's gate; the default A3 backend accepts that shape in-process
-  (probed). Whether the whole-module refusal still fires on the default path is
-  for the integrator's gate to say.
-- Element typing for the `*args` body is still wrong in two ways, both
-  separate defects, filed:
-  `bugs/CODEGEN_coro_list_param_int_element_loop_target_is_char_pointer.md`
-  (arithmetic on an int element reads a pointer), and
-  `bugs/CODEGEN_coro_star_args_str_double_elements_yield_as_int.md` (a `str`
-  or `double` element is yielded as an int). Neither blocks the packing, but
-  any `contextlib` body that does arithmetic or yields a loop element over a
-  `*args` parameter will hit them. The contextlib bodies have not been probed
-  for that.
-- `__aenter__` returning a non-scalar value (the other half of the 2026-10-29
-  plan below) is untouched.
-
 ## Status 2026-10-01 — re-measured, unchanged, and the two causes are now bounded separately
 
 Fresh `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/contextlib.py`

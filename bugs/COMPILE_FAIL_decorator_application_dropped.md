@@ -20,7 +20,7 @@
   (compiled stdout `8`→`16`, `7`, `9` vs CPython; fails on HEAD) and
   `decorator_in_a_module_level_block_is_refused`. `test_gimple.py`: 414 passed,
   2 failed. Both failures also occur on HEAD: the walk-memo census on
-  `mojo/middle/coro.py` (commit fd64d710e)
+  `mojo/middle/coro.py` (`CODEGEN_walk_ast_memo_census_coro_unallowlisted.md`)
   and `scalar_arity_min_max_params_are_not_containers` (filed as
   `bugs/TEST_scalar_arity_min_max_link_mode_prints_nothing.md`).
 
@@ -78,7 +78,7 @@
   count must be compared before and after.
 
 Found 2026-09-27 while closing
-commit 19bc0dd8a. Not a compile failure — the
+`COMPILE_FAIL_Tools_wasm_wasi___main__.md`. Not a compile failure — the
 opposite kind of problem, and the reason that file needed a separate
 correctness caveat even after it started building.
 
@@ -239,7 +239,7 @@ treat that number as inherited and re-check it when the fix lands.
    because the decoration is never a call site. Once step 1 emits
    `deco(f)` as a call, the scalar observation pass sees a `FunctionDef` as
    argument. **Measure before choosing:** the ordering hazard in
-   commit bac12a364 says the
+   `CODEGEN_string_arg_type_lost_across_forwarding_hop.md` says the
    observation pass runs before parameter refinement, so the decorator's
    parameter may need the function-value type passed in explicitly, not
    inferred.
@@ -386,7 +386,7 @@ static void * _funcptr_step_9f63a2 = (void *)step_9f63a2;
    call site of `deco` and it is never emitted, so the call-site observation
    that types an unannotated parameter has nothing to observe and the default
    stands. This is the ordering hazard the 2026-10-01 entry below already names
-   (commit bac12a364): the free-function
+   (`CODEGEN_string_arg_type_lost_across_forwarding_hop.md`): the free-function
    scalar-observation pass runs BEFORE any body's parameters are refined, so
    whatever makes the decoration visible has to survive that.
 2. **`sprintf("%d", (void *)ptr)`.** `print(step)` reads the function value as
@@ -465,7 +465,7 @@ recording before anyone attempts it:
 - The free-function scalar-observation pass runs BEFORE any function's
   parameters are refined, so a parameter forwarded straight through a hop
   is recorded as no-evidence and never re-examined — measured, with the
-  evidence, in commit bac12a364.
+  evidence, in `CODEGEN_string_arg_type_lost_across_forwarding_hop.md`.
   A decorated `def` is exactly a module-level rebinding feeding calls that
   resolve through those same tables, so whatever makes the decoration
   visible has to survive that ordering.

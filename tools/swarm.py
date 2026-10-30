@@ -187,47 +187,11 @@ def abandon_empty():
     return n
 
 
-def fresh_first(names, tasks):
-    """Branches that have never been tried to land go before any that already failed integration. A failed branch
-    must not hold a fresh one back: it can conflict, or turn a batch red, and the fresh branches still land."""
-    fresh = [n for n in names if C.state_of(tasks[n]) != "integration-failed"]
-    return fresh if fresh else names
-
-
-def probe(batch):
-    """Merge and gate `batch` exactly as a landing would, changing NO state (integrate.py --probe). Returns
-    (verdict, merged, failing, out): verdict GREEN/RED/EMPTY; merged is the set that was merged; failing the jobs."""
-    r = subprocess.run([sys.executable, os.path.join(HERE, "integrate.py"), "--stdlib", "--probe", "--only"] + batch,
-                       capture_output=True, text=True, cwd=C.MAIN)
-    out = r.stdout + r.stderr
-    if "another integrator" in out:                  # the lock is held (the post-landing verifier runs under it)
-        return "BUSY", [], [], out
-    pm = re.search(r"^PROBE (GREEN|RED): ?(.*)$", out, re.M)
-    if not pm:
-        return "EMPTY", [], [], out
-    fm = re.search(r"^FAILED_JOBS: ?(.*)$", out, re.M)
-    ff = re.search(r"^FAILED_FILES: ?(.*)$", out, re.M)
-    failing = (fm.group(1).split() if fm else []) + (ff.group(1).split() if ff else [])
-    return pm.group(1), pm.group(2).split(), failing, out
-
-
-def find_culprit(seq, failing):
-    """The branch that turns the gate red when added to the ones before it: binary search for the smallest red prefix
-    of `seq` (the whole of `seq` is red, with the jobs `failing`; prefixes before the culprit are green)."""
-    lo, hi = 0, len(seq)
-    while hi - lo > 1:
-        mid = (lo + hi) // 2
-        v2, _, f2, _ = probe(seq[:mid])
-        if v2 == "RED":
-            hi, failing = mid, f2
-        else:
-            lo = mid
-    return seq[hi - 1], failing or []
-
-
 def land():
     names = [n for n in I.pick_candidates(quiet=True) if n.startswith(PREFIXES)]
-    names = fresh_first(names, C.load())
+    # Master is checked out in the main checkout, where another session may have UNCOMMITTED edits (2026-10-26: a
+    # row-25 edit to module_gen.py). The fast-forward would overwrite them, so git refuses, after a whole gate had passed.
+    # Never touch them: leave out any branch that changes a file the main checkout has dirty; it lands when they commit.
     dirty = set(C.git("diff", "--name-only", "HEAD", cwd=C.MAIN).split())
     if dirty:
         tasks, keep = C.load(), []
@@ -240,35 +204,39 @@ def land():
         names = keep
     if not names:
         return None
-    tasks = C.load()
-    batch, landed = list(names), False
-    while batch:
-        verdict, merged, failing, out = probe(batch)
-        for c in re.findall(r"^CONFLICT (\S+):", out, re.M):           # a branch that cannot merge: its fixer
-            if c in batch:
-                log("conflict %s: handing it to a merge fixer" % c)
-                I.enqueue_merge_fix(c, tasks[c], out)
-                batch.remove(c)
-        if verdict == "BUSY":
-            log("integrator busy (the post-landing verifier holds the lock); landing waits for the next pass")
-            break
-        if verdict == "EMPTY" or not merged:
-            break
-        if verdict == "GREEN":
-            r = subprocess.run([sys.executable, os.path.join(HERE, "integrate.py"), "--stdlib", "--only"] + merged,
-                               capture_output=True, text=True, cwd=C.MAIN)
-            for line in (r.stdout + r.stderr).splitlines():
-                if line.startswith(("GREEN", "RED", "CONFLICT", "another integrator", "master moved")):
-                    log(line[:200])
-            landed = "GREEN" in (r.stdout + r.stderr)
-            break
-        # RED: the batch as a whole fails the gate. Find the one branch that breaks it; that branch goes to a fixer
-        # with its failing tests named, and the rest of the batch is probed again (and lands when it is green).
-        culprit, failing = find_culprit(merged, failing)
-        log("red: %s breaks the gate (%s); it goes to a fixer, the rest of the batch continues"
-            % (culprit, " ".join(failing) or "jobs unknown"))
-        I.enqueue_red_fix(culprit, tasks[culprit], failing)
-        batch = [n for n in batch if n != culprit]
+    # A red batch must not be retried unchanged (2026-10-26: the same 35-branch batch was gated every 3 minutes all
+    # evening). Key each branch by name@head; a batch whose members were all tried and failed together is not run again,
+    # instead its branches are tried ONE AT A TIME, and the ones that are red alone are set aside until their head moves.
+    heads = {n: C.git("rev-parse", "--short", C.load()[n]["branch"], check=False) for n in names}
+    st = load_state()
+    bad = set(st.get("bad", []))
+    names = [n for n in names if "%s@%s" % (n, heads[n]) not in bad]
+    if not names:
+        return None
+    sig = " ".join(sorted("%s@%s" % (n, heads[n]) for n in names))
+    batches = [names]
+    if len(names) > 1 and sig in st.get("red_batches", []):
+        batches = [[n] for n in names]          # this exact batch already failed: bisect by landing singly
+    landed = False
+    for batch in batches:
+        log("landing %d: %s" % (len(batch), " ".join(batch)))
+        r = subprocess.run([sys.executable, os.path.join(HERE, "integrate.py"), "--stdlib", "--only"] + batch,
+                           capture_output=True, text=True, cwd=C.MAIN)
+        out = r.stdout + r.stderr
+        for line in out.splitlines():
+            if line.startswith(("GREEN", "RED", "CONFLICT", "another integrator", "master moved")):
+                log(line[:200])
+        if "GREEN" in out:
+            landed = True
+        elif "RED" in out:
+            if len(batch) == 1:
+                bad.add("%s@%s" % (batch[0], heads[batch[0]]))
+            else:
+                st.setdefault("red_batches", []).append(" ".join(sorted("%s@%s" % (n, heads[n]) for n in batch)))
+            st["bad"] = sorted(bad)
+            json.dump(st, open(state_path(), "w"), indent=1)
+            if len(batch) > 1:
+                break                              # next pass tries them singly
     return landed
 
 
