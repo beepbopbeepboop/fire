@@ -2696,6 +2696,7 @@ def _gen_stmt_ReturnStmt(gen, node):
     # unaffected and unchanged.
     if node.value is None:
         ginf.emit_return_frees(gen)
+        gmp._cattr_restore_emit(gen)
         # If function returns non-void, return default value
         if gen.func_ret_type and gen.func_ret_type != 'void':
             ret = gen.func_ret_type
@@ -2741,6 +2742,7 @@ def _gen_stmt_ReturnStmt(gen, node):
         # computed, not before — a candidate can still be legitimately
         # READ from (subscript/member/method) while computing `v` above.
         ginf.emit_return_frees(gen)
+        gmp._cattr_restore_emit(gen)
         # Record the returned container's element type so CALL SITES can
         # unpack/iterate it with the right accessor. The old condition
         # required vtype == 'MojoList *' (only fired for `return <list
@@ -4659,6 +4661,9 @@ def _gen_stmt_TryStmt(gen, node):
     # — must happen after the _mojo_exc_top bump above (it indexes the
     # checkpoint table by that level) and before setjmp.
     gen._emit("  mojo_cleanup_checkpoint_save ();")
+    # The cell pointers this region's handler restores (see the bb_exc block
+    # below). Taken before setjmp, so the values survive the longjmp.
+    _cell_snap = gmp._cattr_snapshot(gen)
     # GIMPLE: pass array element directly to setjmp (decays to int*)
     gen._emit(f"  {sj_ret} = setjmp (_mojo_exc_stack[{temp_top2}]);")
     gen._emit(f"  {cond_t} = {sj_ret} != 0;")
@@ -4759,6 +4764,11 @@ def _gen_stmt_TryStmt(gen, node):
 
     gen._emit_label(bb_exc)
     gen._emit("  mojo_exc_pop ();")
+    # An exception that unwound out of a call may have left a nested execution's
+    # cell in a function-scoped class's global (see emit_methods._cattr_restore_
+    # begin). This function's own cells are restored here, before any handler
+    # or re-raise can read them.
+    gmp._cattr_restore_emit(gen, _cell_snap)
 
     handlers = node.handlers
     if not handlers:
@@ -5225,6 +5235,7 @@ def _gen_stmt_WithStmt(gen, node):
             gen._emit(f"  {temp_inc} = {temp_top1} + 1;")
             gen._emit(f"  _mojo_exc_top = {temp_inc};")
             gen._emit(f"  {temp_top2} = _mojo_exc_top;")
+            _ar_cell_snap = gmp._cattr_snapshot(gen)
             # Checkpoint the cleanup-thunk stack exactly like the try/
             # except idiom: on the longjmp the runtime unwinds to it.
             gen._emit("  mojo_cleanup_checkpoint_save ();")
@@ -5267,6 +5278,7 @@ def _gen_stmt_WithStmt(gen, node):
 
             gen._emit_label(bb_exc)
             gen._emit("  mojo_exc_pop ();")
+            gmp._cattr_restore_emit(gen, _ar_cell_snap)
             # The block raised, as required: swallow and continue. The
             # exception state (type tag / message) is left as-is — the
             # marker's driver-side bookkeeping owns it, and the next

@@ -270,6 +270,93 @@ def _cattr_cell_lvalue(gen, gname, gtype):
     return f'*{_p}'
 
 
+def _cattr_restore_begin(gen, body) -> None:
+    """Save, on entry to a function body, the CURRENT cell pointer of every
+    per-execution cell that a `class` statement in `body` will repoint, and
+    record them on `gen._cattr_restores` for `_cattr_restore_fallthrough` and
+    `_cattr_restore_emit` to write back.
+
+    Why: a cell global is shared by every execution of its function, so a
+    nested or recursive call that runs the same `class` statement repoints it.
+    Without a restore, the caller's class-name reads and instance seeds reach
+    the callee's cell: `def f(v, d): class T: __version__ = v; if d > 0:
+    f(v + 1, d - 1); print(T.__version__)` printed `6` where CPython prints `5`.
+    Writing the saved pointer back on every exit makes the global follow the
+    execution that set it.
+
+    A body with no such class records nothing and emits nothing, so its C is
+    unchanged. Residual, not covered here: a `try` restores only the cells of
+    ITS OWN function. An exception that unwinds through a nested execution of
+    the defining function and is caught by a different function, between the
+    two, leaves the defining function's cell pointing at the nested execution's
+    (see bugs/CODEGEN_nested_class_attr_reads_enclosing_local_silently_zero.md).
+    """
+    _found: list = []
+    gimple_exprtypes._gmi_nested_struct_defs(body, '', _found, False)
+    gen._cattr_restores = []
+    _seen: set = set()
+    for _i in range(len(_found)):
+        _sd = _found[_i][0]
+        _cattrs = gen._class_attrs.get(_sd.name)
+        if not _cattrs:
+            continue
+        for _f in (_sd.fields or []):
+            if isinstance(_f, gimple_ctypes.AssignStmt) \
+                    and isinstance(_f.target, gimple_ctypes.IdentExpr):
+                _aname = _f.target.name
+            elif isinstance(_f, gimple_ctypes.VarDecl) and _f.value is not None:
+                _aname = _f.name
+            else:
+                continue
+            if _aname not in _cattrs:
+                continue
+            _gname = _cattrs[_aname]
+            _ctype = _cattr_cell_type(gen, _gname)
+            if _ctype is None or _gname in _seen:
+                continue
+            _seen.add(_gname)
+            _saved = gen._new_val(f'{_ctype} *', f'{_gname}')
+            gen._cattr_restores.append([_gname, _saved])
+
+
+def _cattr_snapshot(gen) -> list:
+    """`[gname, temp]` pairs holding the CURRENT pointer of every cell global
+    this function restores, taken where a `try` region begins. An exception
+    handler in that region writes these back: the function's own cell is the
+    one its `class` statement set, which is not the entry value (that is the
+    CALLER's cell, and is what a `return` restores)."""
+    _snap: list = []
+    for _i in range(len(gen._cattr_restores)):
+        _gname = gen._cattr_restores[_i][0]
+        _snap.append([_gname, gen._new_val(f'{_cattr_cell_type(gen, _gname)} *', _gname)])
+    return _snap
+
+
+def _cattr_restore_emit(gen, pairs=None) -> None:
+    """Write cell pointers back to their globals. `pairs` is a `_cattr_snapshot`
+    (an exception handler's region) or, by default, the entry values a `return`
+    restores. Called immediately before each `return`, after the returned value
+    is computed: a class-name read in the return expression has already been
+    loaded into a temp, so the restore cannot change what is returned."""
+    if pairs is None:
+        pairs = gen._cattr_restores
+    for _i in range(len(pairs)):
+        gen._emit(f'  {pairs[_i][0]} = {pairs[_i][1]};')
+
+
+def _cattr_restore_fallthrough(gen, fn) -> None:
+    """`_cattr_restore_emit` for a body that can fall off its end. Mirrors
+    `ginf.emit_fallthrough_frees`: an unreachable restore after a final
+    `return` would be dead C, so it is emitted only when the end is reachable."""
+    if ginf._function_has_reachable_fallthrough(fn):
+        _cattr_restore_emit(gen)
+
+
+def _cattr_restore_end(gen) -> None:
+    """Forget the saved pointers once the function's body is fully emitted."""
+    gen._cattr_restores = []
+
+
 def _cattr_instance_read(gen, ov, ot, aname, gname, gtype):
     """Value of class attribute `aname` read through an INSTANCE `ov` of struct
     type `ot`: the cell this instance was built under (its hidden field), not
