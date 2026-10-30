@@ -4,6 +4,48 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/scripts/summarize_stats.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (2026-10-29, worker bug-compile-fail-tools-scripts-summarize — list-literal call argument LANDED; real file still NOT verified)
+
+LANDED (`mojo/backend_gimple/cpp_core.py`):
+
+- A struct-instance element in a list-literal ARGUMENT of a struct constructor
+  (`Section("sec", [Table("t", ...)])`) used to lower to a raw C++ brace list
+  `{[&]() -> Table * {...}()}` at a `MojoList *` extern parameter, which g++
+  rejects. It now lowers to a real `MojoList*` through the boxed-element builder
+  (`_cpp_boxed_list_literal_expr`), the same pointer-bits-in-an-int64 convention
+  every struct pointer in a list already uses.
+- The argument lowering is one helper, `_cpp_call_arg_expr`, used by both the
+  generic CallExpr argument list and `_cpp_emit_generator_start_expr` (which had
+  its own inline copy of the same ListExpr branch).
+- `_cpp_is_struct_pointer_elem` recognises a struct constructor call (honouring
+  the same local-shadowing rule as the constructor branch) and struct-typed
+  expressions.
+- Test: `test_generator_list_literal_of_structs_ctor_arg_is_valid_cpp` in
+  `test_regress_codegen_generator_closure_factory.py`. It FAILS before the fix
+  (brace-list text present) and PASSES after (g++ `-fsyntax-only` clean).
+
+MEASURED, NOT A BLOCKER: the tuple-target loop named in NOT DONE below
+(`for name, den in [(1, 2), (3, 4)]` inside a generator) does NOT reproduce on
+this tree. It lowers to an indexed loop (`for (int64_t _mg_i_1 ...)`) and
+syntax-checks. The doc's full reproducer (factory + tuple target + struct-list
+argument, `calc_hist(name, den)` inside `Table(...)` inside `Section(...)`) now
+passes `g++ -std=c++20 -fsyntax-only` (rc 0; only pre-existing
+`-Wwrite-strings` warnings remain).
+
+Scope and verification: quick tests only. `test_regress_codegen_generator_closure_factory.py`
+6/6 and `test_regress_codegen_generator_frame.py` 8/8 pass. `test_gimple.py`'s
+real test cases pass; its three `test_c_shape`/`test_gimple_body`/`test_raises`
+are helper functions with required args, not tests. NOT run: the gate, and the
+real `Tools/scripts/summarize_stats.py` build. The generic call-argument change
+affects every compiled-body call with a list literal argument, so the integrator
+gate (stdlib-dylib skip count, stdlib-syntax U count) is what decides it.
+
+NOT DONE (next step): build the real file once, for the integrator, with
+`MOJO_DEBUG=1 python3 fire.py build <Tools/scripts/summarize_stats.py>`, and
+triage what it still refuses. The first thing to measure is
+`calc_histogram_table`'s body (a `for`, a `while`, `f"<= {k:,d}"`, a slice return),
+which has not been through the coroutine-body emitter.
+
 ## Status (2026-10-29 — PARTIAL: closure factories now compile; the real file still refuses)
 
 LANDED (`mojo/backend_gimple/cpp_async.py`, `cpp_core.py`):

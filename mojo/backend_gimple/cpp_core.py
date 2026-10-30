@@ -1475,23 +1475,12 @@ def _cpp_emit_generator_start_expr(gen, call, api):
               or [])
     arg_exprs = []
     for _aa in call.args:
-        # A collection LITERAL argument has no valid C++ text at an argument
-        # position (`_cpp_expr` lowers it to a braced-init-list, and casting
-        # `(MojoList *)({...})` is invalid C++). Build a REAL MojoList*
-        # instead, as an immediately-invoked lambda (the same one-expression
-        # convention `_cpp_expr`'s own struct-constructor case uses): an
-        # empty literal is just `mojo_list_new ()`; a non-empty one appends
-        # each element through its scalar accessor. A literal mixing
-        # element types has no single accessor — refuse honestly.
-        if isinstance(_aa, gimple_ctypes.ListExpr):
-            arg_exprs.append(_cpp_list_literal_arg_expr(gen, _aa))
-            continue
         if isinstance(_aa, (gimple_ctypes.TupleExpr,
                             gimple_ctypes.DictExpr, gimple_ctypes.SetExpr)):
             raise gimple_exprtypes._UnsupportedGeneratorShape(
                 "a tuple/dict/set literal as a compiled-generator call "
                 "argument is not supported in a coroutine body")
-        arg_exprs.append(gen._cpp_expr(_aa))
+        arg_exprs.append(_cpp_call_arg_expr(gen, _aa))
     arg_exprs.extend(gen._cpp_expr(_kv) for _kn, _kv in (call.kwargs or []))
     while len(arg_exprs) < len(sub_params):
         _dv = gimple_exprtypes._trailing_default_at(_dflts, len(sub_params), len(arg_exprs))
@@ -1555,6 +1544,34 @@ def _cpp_boxed_list_literal_expr(gen, lit):
             + f" return {tmp}; }}()")
 
 
+def _cpp_is_struct_pointer_elem(gen, el) -> bool:
+    """True when list-literal element `el` is a value of a compiled struct
+    type, i.e. a `<Struct> *` pointer: a struct CONSTRUCTOR call
+    (`Table(...)`, unless a local shadows the name, the same rule the
+    constructor branch of `_cpp_expr` applies), or an expression whose
+    inferred ctype is a struct pointer (a struct-typed local)."""
+    if isinstance(el, gimple_ctypes.CallExpr) \
+            and isinstance(el.func, gimple_ctypes.IdentExpr) \
+            and el.func.name in gen.struct_field_types \
+            and el.func.name not in (gen._cpp_declared or ()):
+        return True
+    ct = gimple_exprtypes._infer_simple_expr_ctype(
+        el, gen._cpp_declared, getattr(gen, '_cpp_gen_self_fields', None),
+        gen._async_api, known_structs=frozenset(gen.struct_field_types.keys()))
+    return bool(ct) and ct.endswith(' *') and ct[:-2] in gen.struct_field_types
+
+
+def _cpp_call_arg_expr(gen, a):
+    """One call-argument expression for a compiled-generator/coroutine call.
+    A list LITERAL has no valid C++ text at an argument position (`_cpp_expr`
+    lowers it to a braced-init-list, and `(MojoList *)({...})` is invalid
+    C++), so it becomes a real MojoList* via `_cpp_list_literal_arg_expr`.
+    Everything else is `_cpp_expr` unchanged."""
+    if isinstance(a, gimple_ctypes.ListExpr):
+        return _cpp_list_literal_arg_expr(gen, a)
+    return gen._cpp_expr(a)
+
+
 def _cpp_list_literal_arg_expr(gen, lit):
     """A list/tuple LITERAL at a call-argument position, as ONE MojoList*-
     valued C++ expression: `mojo_list_new ()` for the empty literal,
@@ -1574,8 +1591,11 @@ def _cpp_list_literal_arg_expr(gen, lit):
     if not elems:
         return 'mojo_list_new ()'
     # A nested container literal as an element -> flat boxed representation
-    # (see _cpp_boxed_list_literal_expr).
+    # (see _cpp_boxed_list_literal_expr). So does a struct instance element
+    # (`[Table(...)]`): it has no scalar accessor, and is stored as its boxed
+    # pointer bits, the same convention every struct pointer in a list uses.
     if any(isinstance(el, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr))
+           or _cpp_is_struct_pointer_elem(gen, el)
            for el in elems):
         return _cpp_boxed_list_literal_expr(gen, lit)
     kinds = []
@@ -3250,7 +3270,7 @@ def _cpp_expr(gen, e) -> str:
                 _gc_api = _cpp_resolve_generator_call_api(gen, e.func)
                 if _gc_api is not None:
                     return _cpp_emit_generator_start_expr(gen, e, _gc_api)
-            args = [gen._cpp_expr(a) for a in e.args]
+            args = [_cpp_call_arg_expr(gen, a) for a in e.args]
             # Python builtins that map directly onto runtime helpers —
             # mirrors the GIMPLE path's own builtin lowering (len/range/
             # str/repr/hasattr), since the generator-body emitter shares
