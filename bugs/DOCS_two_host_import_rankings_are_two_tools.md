@@ -124,6 +124,15 @@ cut (d0f0e6e6c) ranked only the sweep's blocked files for each module, so
 `test_regression_two_host_import_rankings.py`, which requires exact agreement
 with the wall for every row and fails on the old code.
 
-Remaining, in order: step 2 (move `test_formal_host_import_wall.py`'s
-`reach`/`alone` pins into `test_formal_host_import_shapes.py`), step 3
-(`tools/suite.py` one job — registry owner's), steps 4–5 (the two documents).
+Step 2 landed 2026-10-29: the regression pins moved out of the standalone
+`test_regression_two_host_import_rankings.py` (in no bucket, so it gated nothing)
+into `TestTheWallsColumns` in `test_formal_host_import_shapes.py`, which is the
+registered `formal-host-import-shapes` job. The pins now run in `check`.
+
+Still open:
+* **Step 3, `tools/suite.py` (registry owner's, not this lane):** one job instead
+  of two. Also needed NOW, separately: the `formal-host-import-shapes` job's
+  `extra` list does not name `tools/formal_host_import_wall.py`, and its
+  `reach`/`alone` columns now come from that file. Editing the wall tool does not
+  invalidate the shapes job's cached PASS until `extra` names it.
+* **Steps 4–5 (the two documents).** Not started.
