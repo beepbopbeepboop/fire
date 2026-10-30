@@ -1464,7 +1464,7 @@ def _uncompiled_module_marker(gen, node) -> str:
     with a parser that is not a parser, silently, until the first attribute
     read off the result died with an `AttributeError` naming an attribute of a
     class the program never built
-    (DELETED bugs/RUNTIME_argparse_is_stubbed_so_parse_args_consumers_crash.md).
+    (DELETED commit 319ab932c).
 
     Keyed on `_module_alias_names`, NOT `imported_symbols`, for the reason that
     set's own docstring gives at length (an unresolved `from X import name`
@@ -4185,7 +4185,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # DESIGN.html R2's chokepoint refusal ("incompatible container
     # kinds"). Runtime-dispatch via the kind registries instead, exactly
     # like the 'clear'/'remove' ambiguity fix above (DESIGN.html R5). See
-    # bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md Finding 4.
+    # commit e8a7135b8 Finding 4.
     if ot in ('int', 'int64_t') and not _get_float_timeout and method == 'update' and node.args:
         ip = gen._new_temp('int64_t')
         ov_local = gen._ensure_local(ot, ov)

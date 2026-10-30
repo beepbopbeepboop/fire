@@ -1664,7 +1664,7 @@ def test_self_qualified_type_param_substitution(wd):
     `_PeekableIterator[InnerIterator]`'s `var _inner: Self.InnerIterator` (and
     every other generic iterator's `_inner`), leaving `next(self._inner)` with
     no receiver type to dispatch the iterator protocol through — the declared
-    red in CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.
+    red in the user-iterator next() bug (doc deleted in db724c4d6).
     See monomorphize_source's own docstring."""
     import monomorphize as mm
 
@@ -1816,8 +1816,7 @@ def test_generic_instantiation_symbol_agreement(wd):
     `'int64_t'`), so the `next(<struct>)` struct-protocol branch's
     `if _struct_name_of(ret):` guard was true for the scalar `int64_t` too, and
     it dispatched `__next__` on `int64_t` — a symbol nothing defines. That is
-    the family `bug:CODEGEN_next_on_a_user_defined_iterator_struct_is_
-    unlowered.md` is about, and the guard has to consult the registry."""
+    the family `the user-iterator next() bug (db724c4d6)` is about, and the guard has to consult the registry."""
     import elaborate as el
     from module_loader import STDLIB_PATH
     import os as _os

@@ -250,7 +250,7 @@ def _try_bind_iter_cursor(gen, name, value):
     second list of type names. That is what `test/collections/test_span.mojo`'s
     `var it = iter(span); next(it)` needs, and it was refused for exactly the
     reason ROUND 4 (a) of
-    CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered
+    the user-iterator next() bug (doc deleted in db724c4d6)
     records: the cursor mechanism gated on `MojoList *`, so a `Span *` — which
     IS a real sequence with a real length — got no cursor, and `next()` then
     had no receiver to dispatch on.
@@ -619,7 +619,8 @@ def _gen_stmt_VarDecl(gen, node):
         # `var` whose initializer the codegen cannot vouch for clears the
         # record instead of leaving a stale one. See
         # bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md.
-        gen._track_pointer_actual_type(node.name, actual_dst, v, vtype)
+        gen._track_pointer_actual_type(node.name, actual_dst, v, vtype,
+                                       rhs_is_none=gen._is_none_literal(node.value))
         gen._safe_coerce_emit(vtype, actual_dst, v, gen._write_dest(node.name))
     else:
         ctype = gen._resolve_type(node.type_ann)
@@ -697,7 +698,8 @@ def _gen_stmt_VarDecl(gen, node):
     gen._layout_hint = gimple_solvers.LayoutSolver.HEAP
 
 
-def _track_pointer_actual_type(gen, tname: str, dst: str, v: str, vtype: str) -> None:
+def _track_pointer_actual_type(gen, tname: str, dst: str, v: str, vtype: str,
+                               rhs_is_none: bool = False) -> None:
     """When storing a pointer value into an int64_t-declared local (either
     because the local's own type was widened joining another assignment
     site in the same function, or it's simply this codegen's
@@ -739,7 +741,16 @@ def _track_pointer_actual_type(gen, tname: str, dst: str, v: str, vtype: str) ->
     # other branch is what keeps this sound rather than optimistic — `k = "s"`
     # later must NOT leave `k` marked, and every RHS this codegen cannot
     # vouch for takes that branch.
-    if v in gen._int_word_vals:
+    #
+    # `rhs_is_none`: `None` lowers to the literal `'0'`, which is the SAME
+    # spelling an integer `0` has, so `v in _int_word_vals` is true for it
+    # whenever any `0` literal was seen earlier in the function. A `None` is
+    # a null pointer, not an integer, so it must take the discard branch —
+    # otherwise `callee = None` after `callee = name` marks a `char *` local
+    # as an integer, and its later `in` key is bit-cast into an int word and
+    # released with the pointer as its `orig` (`mojo_cstr_or_int_release`
+    # `-Wint-conversion`, compiling mojo/backend_gimple/cpp_core.py).
+    if v in gen._int_word_vals and not rhs_is_none:
         gen._int_word_vals.add(tname)
     else:
         gen._int_word_vals.discard(tname)
@@ -1727,7 +1738,8 @@ def _gen_stmt_AssignStmt(gen, node):
                 gen._maybe_kinds_vals.add(tname)
             if v in gen._struct_formats:
                 gen._struct_formats[tname] = gen._struct_formats[v]
-        gen._track_pointer_actual_type(tname, dst, v, vtype)
+        gen._track_pointer_actual_type(tname, dst, v, vtype,
+                                       rhs_is_none=gen._is_none_literal(node.value))
         gen._safe_coerce_emit(vtype, dst, v, gen._write_dest(tname))
     elif isinstance(node.target, gimple_ctypes.MemberExpr):
         # `sys.argv = [...]` — a whole-list rebind. Reads lower to
@@ -3375,8 +3387,20 @@ def _gen_stmt_MatchStmt(gen, node):
         condition = None
         pattern_refs = []
         for pattern in match_case.patterns:
-            # Ask the formal model whether this pattern is allowed here.
+            # Ask the formal model what this pattern is.
             kind = formal_model.match_pattern_kind(pattern, getattr(gen, 'var_types', set()))
+            if kind == "class pattern (type test)":
+                # `case C():` is isinstance(subject, C). It is in the formal
+                # model's refused list (no isinstance there), so it is handled
+                # here before that refusal, and only here.
+                isinstance_node = gimple_ctypes.CallExpr(
+                    func=gimple_ctypes.IdentExpr(name="isinstance"),
+                    args=[subj_ref, pattern.func],
+                )
+                ict, icv = gen._lower_builtin_isinstance(isinstance_node)
+                icv = gen._ensure_bool_cond(ict, icv)
+                condition = icv if condition is None else f"{condition} || {icv}"
+                continue
             if kind in formal_model.MATCH_REFUSED_KINDS:
                 # Emit a refusal error message and raise.
                 raise formal_model.CodegenError(formal_model.match_pattern_refusal(
@@ -3442,7 +3466,8 @@ def _gen_stmt_MultiAssignStmt(gen, node):
     for target in node.targets:
         if isinstance(target, gimple_ctypes.IdentExpr):
             tname = target.name
-            _track_pointer_actual_type(gen, tname, 'int64_t', v, vtype)
+            _track_pointer_actual_type(gen, tname, 'int64_t', v, vtype,
+                                       rhs_is_none=gen._is_none_literal(node.value))
             # A chained assignment's IdentExpr target(s) can be a real
             # GLOBAL exactly like _gen_stmt_AssignStmt's single-target
             # case (either via an explicit `global x` inside a real

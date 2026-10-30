@@ -9,7 +9,7 @@ informational and not counted). Re-run via `python3 tools/memslot.py --gb 8 --la
 (uses existing `mojoc`; no self-host build). Results: 29 passed, 1 failed (`match_stmt`).
 Peak: 0.1 GB (far below 4 GB line). `test_scratch_isolation`: 26 passed.
 Remaining divergence is the `match_stmt` case; root cause is the gimple lowering
-`_gen_stmt_MatchStmt` (see `bugs/CODEGEN_the_gimple_match_lowering_drops_the_capture_and_reads_every_pattern.md`).
+`_gen_stmt_MatchStmt` (see commit 787ef5621).
 
 | | |
 |---|---|
@@ -70,7 +70,7 @@ matters for what to do next:
   12.1 MB / 94.6 M instructions. The marker that used to say "segfaults on any
   input" was measured false and corrected; what is left is the dump
   comparison.
-- **It used to pass.** `bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md`
+- **It used to pass.** commit e8a7135b8
   records `check-ab-native` at **30 passed / 0 failed** on 2026-09-21, after
   nine rounds of self-hosted-only fixes. The `expect=` marker first appeared
   2026-09-26. So the current redness is a **regression in that window**, not a
@@ -117,7 +117,7 @@ Two independent conditions, and the cheap one is worth doing first:
 2. **Fix the divergence class**, which is the real work and is tracked
    elsewhere: the compiled backend's emitted `.ci` must be byte-identical to
    the python reference's. Every instance found so far is documented in
-   `bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md` (its per-class
+   commit e8a7135b8 (its per-class
    list, "A/B divergence list" and the dated entries) — that doc, plus
    `bugs/CODEGEN_bootstrap_resource_blowup.md` for the cost that makes the
    corpus expensive, is where the next step belongs.
@@ -161,7 +161,7 @@ investigation. Read it with the threshold from CLAUDE.md: over ~4 GB (the
 
 | job | measured peak | reserved | in a bucket? | wall time | recommendation |
 |---|---|---|---|---|---|
-| `native-dumpfull` | **31.3 GB** (largest job in the registry that completes) | `program` 55 GB | `gate`, `native` | ~126 s (BLOW.md §0, 2026-09-27) | **disable it too**, pointing at `bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md`. Same reasoning as `ab-native` and a worse ratio: 31.3 GB and 55 GB reserved for a known red. It is the one job whose run is also how the blowup's numbers get re-measured, so pair the disable with a standing instruction to re-run it by hand (`make check-native-dumpfull` / `python3 tools/suite.py native-dumpfull`) when that work moves — or, better, land the blowup fix first and decide again. |
+| `native-dumpfull` | **31.3 GB** (largest job in the registry that completes) | `program` 55 GB | `gate`, `native` | ~126 s (BLOW.md §0, 2026-09-27) | **disable it too**, pointing at commit e8a7135b8. Same reasoning as `ab-native` and a worse ratio: 31.3 GB and 55 GB reserved for a known red. It is the one job whose run is also how the blowup's numbers get re-measured, so pair the disable with a standing instruction to re-run it by hand (`make check-native-dumpfull` / `python3 tools/suite.py native-dumpfull`) when that work moves — or, better, land the blowup fix first and decide again. |
 | `bootstrap-stage2-dumps` | 0.5 GB **per item**, 47 items | `tiny` 4 GB each (24 at a time under the ledger) | `gate`, `bootstrap` | not recorded; a fanout, so bounded by the slowest item | **leave it as `expect=`.** 4 GB per item is at the floor class, and the fanout is 47 cheap jobs rather than one expensive one — under the 4 GB line, so by the stated threshold it belongs to the cheap side. Note what it costs in *time*: it is on the critical path of the whole `bootstrap` chain, and 47 recorded FAILs would buy nothing. If disabling it, note what a disabled dep does to its dependents: since DISABLED satisfies a dep, the 5 jobs downstream of it (`bootstrap-stage2-transitive`, `bootstrap-stage3-dumps`, `bootstrap-stage3-transitive`, `bootstrap-verify`, `bootstrap-validate`) would each have to be disabled as well, or `verify` would compare a fresh stage1 against a stage2 that was never dumped. |
 | `x86-containers` | unmeasured | `small` 8 GB | **no bucket** | not recorded | none needed — leave it. It runs in nothing today. |
 | `mutable-async-capture` | unmeasured | `small` 8 GB | **no bucket** | not recorded | none needed — leave it. |

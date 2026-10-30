@@ -1,4 +1,4 @@
-"""Regression pin for CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.
+"""Regression pin for the user-iterator next() bug (doc deleted in db724c4d6).
 The `next(<user-defined iterator struct>)` lowering and the `for` loop's
 named refusal are pinned by test_gimple.py; this file keeps the claim
 honest after the bug doc was removed."""

@@ -91,7 +91,7 @@ def discover_roots(base: Path) -> list:
 # reason (emitting function, measured receiver type, the shape the current
 # machinery cannot lower) — which the one-size description no longer said.
 # The class's history lives in
-# CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.
+# the user-iterator next() bug (doc deleted in db724c4d6).
 
 # 2026-10-21 — the `_FACTORY_DATA_PATH` constant (the dependent-return
 # factory mechanism's measured REFUSAL for List containers) is removed
@@ -193,7 +193,7 @@ EXPECTED_FAILURES = {
     # these same objects was already a `mojo_unsupported_iter` no-op for
     # the identical reason. Full analysis, the 3-undefined-`next` +
     # 23-`mojo_unsupported_iter` measurement, and the next step:
-    # CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered
+    # the user-iterator next() bug (doc deleted in db724c4d6)
     #
     # A dict, not a set: the summary at the bottom prints each entry's
     # REASON beside its path, and a bare set could only ever satisfy the
@@ -230,7 +230,7 @@ EXPECTED_FAILURES = {
     # dependent return type through `Self.IteratorOwnedType`, or an overload
     # OUTSIDE the iteration protocol (`_TakeWhileIterator.__init__`,
     # `List.__getitem__`), which in-TU provably cannot yet carry. See
-    # CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.
+    # the user-iterator next() bug (doc deleted in db724c4d6).
     #
     # `test/collections/test_span.mojo` is out of this list as of 2026-10-03,
     # and it is the one removal in this family that needed no inference at
@@ -369,7 +369,7 @@ EXPECTED_FAILURES = {
     # rc=134). The remaining declared remainder is the rest of the
     # StringSpan method family (the ladder's two discover_tests/run
     # scaffolding stubs are driver-bypassed, expected). See
-    # CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered
+    # the user-iterator next() bug (doc deleted in db724c4d6)
     # (family-S section).
     # 2026-10-21 (further) — REMOVED from this dict: test/collections/
     # test_set.mojo no longer FAILS THE SWEEP — the Part 2 blocker
@@ -409,7 +409,7 @@ EXPECTED_FAILURES = {
      # (Set[T](x, y, ...) previously evaluated its args and DROPPED them —
      # silent empty set; bare Set(<MojoSet *>) now mojo_set_copy) is a
      # genuine improvement kept in the codegen. Full measurement record:
-     # CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered,
+     # the user-iterator next() bug (doc deleted in db724c4d6),
      # "2026-10-21 (further)".
     # 2026-10-22 (part 5) — REMOVED from this dict: the last remaining
     # blocker (test_map_function_can_take_owned_value) is closed. The

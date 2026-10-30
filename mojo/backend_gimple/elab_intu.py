@@ -608,7 +608,7 @@ def _protocol_only_overloads(gen, base) -> bool:
     Those are REFUSED here — the `.o` route runs for them exactly as before —
     rather than materialized with a second definition or an arity the call site
     cannot satisfy. See
-    `CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered` for
+    `the user-iterator next() bug (doc deleted in db724c4d6)` for
     the measurement of what widening this costs."""
     if base in _OVERLOAD_CACHE:
         return _OVERLOAD_CACHE[base]
@@ -1386,7 +1386,7 @@ def _seed_one_factory(gen, work, mm, base, node, scope, stmts, import_map,
     # lowerable, so the record is filed and the wrapper/inner below are
     # materialized. 2026-10-20 (further) — LIFTED. The refusal this block
     # used to be (keep its measured evidence in
-    # bug:CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered
+    # the user-iterator next() bug (doc deleted in db724c4d6)
     # .md, "2026-10-20 (continued)") is gone because the in-TU iterator
     # protocol now has a lowerable data path, in RUNTIME-LIST terms:
     #   * `List` is deliberately NOT registered in

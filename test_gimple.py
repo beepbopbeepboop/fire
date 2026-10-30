@@ -130,15 +130,9 @@ def _force_cpp_coro():
     it via MOJO_CORO=cpp, the documented escape hatch — see the test's own
     "_compiles_via_cpp_path" naming. Scoped (not a blanket module-level
     env var) so it can't leak into any other test sharing this process."""
-    _prev = os.environ.get('MOJO_CORO')
-    os.environ['MOJO_CORO'] = 'cpp'
-    try:
+    from mojo.middle import coro as _coro
+    with _coro.pinned('cpp'):
         yield
-    finally:
-        if _prev is None:
-            os.environ.pop('MOJO_CORO', None)
-        else:
-            os.environ['MOJO_CORO'] = _prev
 
 
 def selfhost_emitted_return_type(module: str, struct: str, method: str) -> str:
@@ -8564,6 +8558,53 @@ main()
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_tuple_unpack_of_a_boxed_dict_inside_a_method_builds():
+        """Unpacking an opaque value that turns out to be a dict, from a METHOD
+        body, must pass gcc -fgimple.
+
+        `a, b = ident(self._d)` materializes the value through
+        _materialize_as_list's dict arm, which records the slot kind with
+        `mojo_list_set_kinds_uniform(result, 'p')`. That char argument was
+        emitted as `_new_val('char', "'p'")`, i.e. `_t9 = 'p';` into a `char`
+        temp. A character literal is an `int` in C, and GCC's -fgimple refuses
+        a bare int constant assigned to a char temp ("non-trivial conversion
+        in 'integer_cst'"). Only a method body is GIMPLE-tagged, so a plain
+        top-level `a, b = ident(d)` (the sibling test above) never reached it.
+        The fix is the explicit `(char)` cast every other char constant in
+        the emitters carries.
+
+        This pins the BUILD, not the printed keys: the unpacked slots are
+        still read as raw pointer words, which is a separate, pre-existing
+        defect (the same symptom `list_of_a_boxed_dict_materializes_keys_as_
+        strings` already fails on). Asserting the values here would make this
+        test red for a reason this fix does not touch.
+        """
+        global _PASS, _FAIL
+        name = "tuple_unpack_of_a_boxed_dict_inside_a_method_builds"
+        src = '''\
+def ident(x):
+    return x
+class Box:
+    def __init__(self, d):
+        self._d = d
+    def show(self):
+        a, b = ident(self._d)
+        print(a)
+        print(b)
+def main():
+    Box({"k": 1, "j": 2}).show()
+main()
+'''
+        for mode in ('single-TU', 'link-mode'):
+            got = _compiled_stdout(src, mode)
+            if isinstance(got, tuple):
+                print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                      f"{got[1][:800]}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_a_returned_heterogeneous_list_keeps_its_slot_kinds():
         """A list literal's per-slot kinds must survive a `return`.
 
@@ -8947,7 +8988,7 @@ print(guarded(7))
         behind: `var iter = peekable(list)` types `iter` as `int64_t` because
         `peekable` returns a `Self.IteratorOwnedType` across a module
         boundary, and an un-inferred receiver has to stay a refusal
-        (CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered).
+        (the user-iterator next() bug (doc deleted in db724c4d6)).
 
         The loop half is the change here. Python's `__next__` signals
         exhaustion by RAISING, and the compiled raise is
@@ -13087,6 +13128,7 @@ print(run('x/y.txt'))
         print(f"PASS  {name}")
         _PASS += 1
 
+
     _run_isolated(lambda: test_cursor_advance_has_no_cast_operand_in_gimple(), 'test_cursor_advance_has_no_cast_operand_in_gimple (line 12665)')
     _run_isolated(lambda: test_next_inside_for_over_same_iterator_advances_once(), 'test_next_inside_for_over_same_iterator_advances_once (line 12666)')
     _run_isolated(lambda: test_paren_name_vs_one_tuple_for_target_differ(), 'test_paren_name_vs_one_tuple_for_target_differ (line 12667)')
@@ -13144,6 +13186,8 @@ print(run('x/y.txt'))
     _run_isolated(lambda: test_variadic_lambda_lowers_as_gimple_in_every_body(), 'test_variadic_lambda_lowers_as_gimple_in_every_body (line 12718)')
     _run_isolated(lambda: test_scalar_given_a_char_star_parameter_is_stringified(), 'test_scalar_given_a_char_star_parameter_is_stringified (line 12719)')
     _run_isolated(lambda: test_ctor_of_a_container_reaches_the_comprehension(), 'test_ctor_of_a_container_reaches_the_comprehension (line 12720)')
+    _run_isolated(lambda: test_list_of_a_boxed_dict_materializes_keys_as_strings(), 'test_list_of_a_boxed_dict_materializes_keys_as_strings (line 12720a)')
+    _run_isolated(lambda: test_tuple_unpack_of_a_boxed_dict_inside_a_method_builds(), 'test_tuple_unpack_of_a_boxed_dict_inside_a_method_builds (line 12720b)')
     _run_isolated(lambda: test_a_string_passthrough_beside_an_int_one_keeps_its_own_elements(), 'test_a_string_passthrough_beside_an_int_one_keeps_its_own_elements')
     _run_isolated(lambda: test_a_returned_heterogeneous_list_keeps_its_slot_kinds(), 'test_a_returned_heterogeneous_list_keeps_its_slot_kinds (line 12721)')
     _run_isolated(lambda: test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not(), 'test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not (line 12722)')
@@ -13283,6 +13327,7 @@ if True:
 
 print(step(7))
 """, "inside a module-level block"), 'decorator_in_a_module_level_block_is_refused')
+
 
     # `len()` of a value the codegen could not type, where that value is a
     # LOCAL declared as a plain `int` — the shape that took out `make mojoc`,

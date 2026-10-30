@@ -6629,7 +6629,7 @@ fn main():
     # built: CPython's own `Apple/__main__.py --help` printed usage and exited
     # 0, and this printed `Unhandled exception: AttributeError:
     # cross_build_dir` and exited 0 too
-    # (DELETED bugs/RUNTIME_argparse_is_stubbed_so_parse_args_consumers_crash.md; module-marker stub now loud)
+    # (DELETED commit 319ab932c; module-marker stub now loud)
     #
     # The raise happens at the CALL, which is where it becomes true, and it is
     # catchable — which is the second half of the assertion: a program that
@@ -6665,7 +6665,7 @@ def main():
         print("fell back")
 """, "fell back\n")
 
-    # Pinning regression — DELETED bugs/RUNTIME_argparse_is_stubbed_so_parse_args_consumers_crash.md
+    # Pinning regression — DELETED commit 319ab932c
     # (already fixed: stub raises NotImplementedError at call site, not silent 0)
     test_gimple_stdout("gimple_argparse_parse_args_pin", """\
 import argparse
@@ -8627,7 +8627,7 @@ main()
     # range test, so it calls every positive int64 in [2^31, 2^47) a pointer.
     # They are here because the codegen PROVABLY knows an integer literal is
     # an integer, and supplies the answer rather than asking (see
-    # bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md, whose
+    # commit f7343ee40, whose
     # dict-key spelling has its own test below).
     test_gimple_stdout("gimple_annotated_str_param_given_a_non_str", """\
 class Dialog:
@@ -8831,6 +8831,28 @@ def main():
     print(-1 in e)
 main()
 """, "7\n9\n3\n1\nFalse\nTrue\n")
+
+    # The NONE side of the same provenance. `None` lowers to the literal '0',
+    # the same spelling an integer 0 has, so once any `0` literal is in the
+    # function `callee = None` looked like an integer assignment and carried
+    # the integer mark onto `callee`, which is a `char *` local on the `name`
+    # branch. Its later `in` key was then bit-cast into an int word and the
+    # release got the pointer as its int64_t `orig` (-Wint-conversion, the
+    # self-host `mojoc` build). The `None` store must discard, and the str key
+    # must still find its entry.
+    test_gimple_stdout("gimple_none_store_does_not_mark_str_local_as_int", """\
+def main():
+    zero = 0
+    known = {"foo": 1}
+    name = "foo"
+    if zero == 0:
+        callee = name
+    else:
+        callee = None
+    print(callee in known)
+    print(callee is None)
+main()
+""", "True\nFalse\n")
 
     # The STORE side of the same fact: a large key that is ASSIGNED to a name,
     # rather than written at the subscript. `gen._int_word_vals` was carried
@@ -9586,7 +9608,7 @@ print({"a": 1})
     # parser treated `*` as the conversion character, so the template's
     # operand count never matched its spec count and the WHOLE template
     # degraded to its literal text — `'0x%0*X' % (precision, t)` printed
-    # `0x%0*X` (bugs/COMPILE_FAIL_Tools_unicode_gencodec.md's reported
+    # `0x%0*X` (commit e186f9737's reported
     # `    (): (0x%0*X, 0x%0*X),` entry lines).
     #
     # Every conversion is exercised, not just the hex one, because the
@@ -11259,7 +11281,7 @@ main()
 
     test_qualified_module_struct_construction()
 
-    # CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered,
+    # the user-iterator next() bug (doc deleted in db724c4d6),
     # the part that is fixable without the type-inference project it is
     # parked on: an iterator struct reached through `from mod import Struct`
     # composes its protocol methods' C names with a hand-written
