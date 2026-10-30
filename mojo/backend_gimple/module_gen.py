@@ -8,6 +8,7 @@ statements); returns the generated C source string.
 """
 from __future__ import annotations
 
+import copy
 import os
 import re
 import sys
@@ -3168,17 +3169,90 @@ def _gmi_refuse_nested_class_enclosing_reads(stmts: list) -> None:
 _GMI_NONCALLABLE_DECORATOR_RET = frozenset({'int64_t', 'double', '_Bool', 'char *'})
 
 
+def _gmi_decorator_head(dec):
+    """The name a decorator resolves to, or None when it is not a bare-name or
+    factory-call spelling. `@deco` is stored as the bare string `"deco"`;
+    `@deco(x)` as a CallExpr whose callee is the IdentExpr `deco`."""
+    if isinstance(dec, str):
+        return dec
+    if isinstance(dec, CallExpr) and isinstance(dec.func, IdentExpr):
+        return dec.func.name
+    return None
+
+
+def _gmi_rebind_decorated_defs(self, stmts: list) -> list:
+    """Return `stmts` with each top-level `def` decorated by a same-module
+    decorator REBOUND to the decoration's value, in source order.
+
+    `@deco def step(x): ...` lowers to the pair CPython evaluates:
+
+        def step__undecorated(x): ...
+        step = deco(step__undecorated)
+
+    so every call to `step` reads the module-scope variable and calls
+    through it, which is exactly the decorated object. A factory `@deco(x)`
+    becomes `step = deco(x)(step__undecorated)`, and stacked decorators nest
+    innermost-first (`@a @b` -> `a(b(...))`). The rebinding is a module
+    global, so the compiled path's existing global function-value machinery
+    (the `_root_globals` field and `mojo_fnptr_call`) carries it; no call site
+    needs to know a decorator was applied.
+
+    Scope is the same as `_gmi_refuse_scalar_decorator_rebind`: only a
+    decorator naming a top-level `def` in this module is applied. A decorator
+    imported from elsewhere, or a name that is a declaration annotation
+    (`staticmethod`, `export`, `doc_hidden`, ...), stays on the `def` as
+    before, because the stdlib uses them that way and they are not callables
+    this module can see. A decorated `def` nested in a function body is not
+    rewritten here and is still unapplied.
+    """
+    _rb_defs = {_rs.name: _rs for _rs in (stmts or []) if isinstance(_rs, FunctionDef)}
+    _rb_out = []
+    for _rb_s in (stmts or []):
+        if not isinstance(_rb_s, FunctionDef) or not _rb_s.decorators:
+            _rb_out.append(_rb_s)
+            continue
+        _rb_applied = []
+        _rb_kept = []
+        for _rb_dec in _rb_s.decorators:
+            _rb_head = _gmi_decorator_head(_rb_dec)
+            if _rb_head is not None and _rb_head in _rb_defs and _rb_head != _rb_s.name:
+                _rb_applied.append(_rb_dec)
+            else:
+                _rb_kept.append(_rb_dec)
+        if not _rb_applied:
+            _rb_out.append(_rb_s)
+            continue
+        # The undecorated body keeps the annotation decorators and takes a
+        # suffixed name, so it cannot be mistaken for the rebound global.
+        _rb_undec = _rb_s.name + '__undecorated'
+        _rb_body = copy.copy(_rb_s)
+        _rb_body.name = _rb_undec
+        _rb_body.decorators = _rb_kept
+        _rb_out.append(_rb_body)
+        # Innermost-first: `@a @b def f` is `f = a(b(f_undecorated))`.
+        _rb_value = IdentExpr(_rb_undec, line=_rb_s.line, col=_rb_s.col)
+        for _rb_dec in reversed(_rb_applied):
+            _rb_callee = IdentExpr(_rb_dec, line=_rb_s.line, col=_rb_s.col) if isinstance(_rb_dec, str) else _rb_dec
+            _rb_value = CallExpr(func=_rb_callee, args=[_rb_value], line=_rb_s.line, col=_rb_s.col)
+        _rb_out.append(AssignStmt(target=IdentExpr(_rb_s.name, line=_rb_s.line, col=_rb_s.col),
+                                  value=_rb_value, line=_rb_s.line, col=_rb_s.col))
+        # The global now holds a function VALUE, so `print(step)` formats it
+        # as one (`_global_func_value_names` is the per-global repr name).
+        self._global_func_value_names[_rb_s.name] = _rb_s.name
+    return _rb_out
+
+
 def _gmi_refuse_scalar_decorator_rebind(self, stmts: list) -> None:
     """Refuse a top-level `def` rebound by a same-module decorator that
     returns a scalar: `deco(f) -> 99` with `@deco def step`, then `step(7)`.
 
-    The compiled path never applies a decorator to a `def` (the defect is in
-    bugs/COMPILE_FAIL_decorator_application_dropped.md, and the rebinding
-    model that fixes it is that doc's next step). Without a refusal, `step`
-    compiles, links and runs as the UNDECORATED function, which is silently
-    wrong: CPython raises `TypeError: 'int' object is not callable`. So a
-    scalar-returning decorator is refused here, loudly, until the rebinding
-    lands.
+    A same-module decorator on a `def` is applied by rebinding the name
+    (`_gmi_rebind_decorated_defs`, the bugs/COMPILE_FAIL_decorator_application_dropped.md
+    fix). That rebinding is only meaningful for a CALLABLE decorator result:
+    a scalar-returning decorator rebinds `step` to a non-callable, which
+    CPython raises on as `TypeError: 'int' object is not callable`. So that
+    case is refused here, loudly, rather than rebound to a value that cannot
+    be called.
 
     Scope is deliberately narrow, so this cannot drop real code:
     - Only a decorator naming a top-level `def` in this same module is
@@ -3197,14 +3271,10 @@ def _gmi_refuse_scalar_decorator_rebind(self, stmts: list) -> None:
             # whose callee is the factory. Both name a same-module def, and
             # both are refused on the same test: what `deco` returns is what
             # `step` is rebound to.
-            if isinstance(_rd_dec, str):
-                _rd_name = _rd_dec
-                _rd_shown = _rd_dec
-            elif isinstance(_rd_dec, CallExpr) and isinstance(_rd_dec.func, IdentExpr):
-                _rd_name = _rd_dec.func.name
-                _rd_shown = f"{_rd_name}(...)"
-            else:
+            _rd_name = _gmi_decorator_head(_rd_dec)
+            if _rd_name is None:
                 continue
+            _rd_shown = _rd_dec if isinstance(_rd_dec, str) else f"{_rd_name}(...)"
             _rd_target = _rd_defs.get(_rd_name)
             if _rd_target is None or _rd_target is _rd_fn:
                 continue
@@ -3249,6 +3319,7 @@ def gen_module_impl(self, stmts):
     stmts = _gmi_hoist_nested_structs(self, stmts)
     _gmi_refuse_nested_class_enclosing_reads(stmts)
     _gmi_refuse_scalar_decorator_rebind(self, stmts)
+    stmts = _gmi_rebind_decorated_defs(self, stmts)
 
     # ── GPU offload, Seam 1 ──────────────────────────────────────────────
     # Classified ONCE, at the very top, because three different places

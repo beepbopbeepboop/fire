@@ -81,6 +81,7 @@ _WALK_AST_MUTATION_ALLOWLIST = {
     "mojo/backend_gimple/emit_stmts.py::_gen_stmt_ForStmt": "`ForStmt.target` is rewritten only when it is a str, and to a str",
     "mojo/backend_gimple/emit_stmts.py::_maybe_narrow_genexp_local": "`Comprehension.kind` is a str, restored in a `finally`",
     "mojo/backend_gimple/module_gen.py::_gmi_hoist_nested_structs": "`StructDef.name` is a rename of a str",
+    "mojo/backend_gimple/module_gen.py::_gmi_rebind_decorated_defs": "`copy.copy` of a top-level def, so the new node is unwalked and its `name`/`decorators` are set before anything walks it",
     "mojo/middle/closures.py::_scan_for_closures": "`ClosureInfo.captures` is the closure scanner's own record",
     "mojo/middle/closures.py::discover_closures": "ditto",
     "mojo/middle/coro.py::_Capture.__init__": "the capture record's own dataclass",
@@ -8627,6 +8628,74 @@ step(7)
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_decorator_rebinding_is_applied_at_runtime():
+        """A same-module decorator on a top-level `def` must REBIND the name:
+        `@twice def step` makes `step(7)` call `twice(step_undecorated)(7)`,
+        as CPython does, on the compiled path (bugs/
+        COMPILE_FAIL_decorator_application_dropped.md, defect 3). Before the
+        rebinding was lowered, `step(7)` silently called the UNDECORATED body
+        and printed `8` where CPython prints `16`.
+
+        Three shapes, each compared against CPython's stdout: a wrapping
+        decorator whose closure calls its argument (the `subdir` shape), a
+        factory `@scale(3)` returning such a wrapper, and two stacked
+        decorators, which must nest innermost-first. Integer returns only:
+        a wrapper that returns a str is the callable-return-type gap in
+        bugs/CODEGEN_closure_str_return_is_lost.md and is not covered here."""
+        global _PASS, _FAIL
+        name = "decorator_rebinding_is_applied_at_runtime"
+        src = '''\
+def twice(f):
+    def wrap(x):
+        return f(x) * 2
+    return wrap
+
+def scale(k):
+    def deco(f):
+        def wrap(x):
+            return f(x) * k
+        return wrap
+    return deco
+
+def plus_one(f):
+    def wrap(x):
+        return f(x) + 1
+    return wrap
+
+@twice
+def step(x):
+    return x + 1
+
+@scale(3)
+def tripled(x):
+    return x + 1
+
+@twice
+@plus_one
+def stacked(x):
+    return x
+
+print(step(7))
+print(tripled(7))
+print(stacked(7))
+'''
+        got = _compiled_stdout(src, 'single-TU')
+        want = _cpython_stdout(src)
+        if isinstance(got, tuple):
+            print(f"FAIL  {name}: gcc -fgimple failed:\n{got[1][:800]}")
+            _FAIL += 1
+            return
+        if want is None:
+            print(f"FAIL  {name}: CPython does not run the fixture")
+            _FAIL += 1
+            return
+        if got != want:
+            print(f"FAIL  {name}: compiled stdout {got!r} != CPython {want!r}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_print_of_a_closure_value_is_not_a_decimal_address():
         global _PASS, _FAIL
         name = "print_of_a_closure_value_is_not_a_decimal_address"
@@ -12799,6 +12868,7 @@ print(run('x/y.txt'))
     _run_isolated(lambda: test_the_generic_repr_cluster_is_emitted_only_where_it_is_reachable(), 'test_the_generic_repr_cluster_is_emitted_only_where_it_is_reachable (line 12723)')
     _run_isolated(lambda: test_print_of_a_function_value_is_not_a_decimal_address(), 'test_print_of_a_function_value_is_not_a_decimal_address (line 12724)')
     _run_isolated(lambda: test_print_of_a_closure_value_is_not_a_decimal_address(), 'test_print_of_a_closure_value_is_not_a_decimal_address (line 12725)')
+    _run_isolated(lambda: test_decorator_rebinding_is_applied_at_runtime(), 'test_decorator_rebinding_is_applied_at_runtime')
     _run_isolated(lambda: test_a_local_rebound_from_a_scalar_to_a_container_is_the_box(), 'test_a_local_rebound_from_a_scalar_to_a_container_is_the_box (line 12726)')
 
     # A `@deco def f` whose decorator returns a scalar rebinds `f` to a
