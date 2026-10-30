@@ -15583,6 +15583,66 @@ WAVE6_TRUTHY_CASES = [
      "    printf(\"i=%d\", i)\n"
      "    return 0\n", 0, "i=3"),
 
+    # ── a `for` target whose range is a RUN-TIME fact ──────────────────────
+    #
+    # The residual of
+    # `bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`:
+    # the target of a `for` whose range is empty at run time is not bound, and
+    # the image has no word for "unbound", so the emitter allocates a bound
+    # flag per such target — zero at entry, set by every store of the name,
+    # branched on at a read the build-time state says may be unbound — and the
+    # read takes the error exit where CPython raises `UnboundLocalError`.
+    # `model.loop_bound_flags` is the one reader both backends ask, so the
+    # group is a two-architecture one: the flag and its check are emitted by
+    # two machines, and a machine that missed the flag answers the caller's
+    # leftover, the same word for a different number.
+    # The entry argument is the default 10, so `n - n` is 0 in every row.
+    # The error rows assert the exit only: the error exit prints nothing, and
+    # CPython's counterpart is a raise, which the form of an answered case
+    # cannot express.
+    # The doc's residual with a bound that is empty: nothing stores `q`, so
+    # the read after the loop takes the error edge on both architectures
+    # (was: the caller's leftover, a word that changed with the build).
+    ("both_arch_for_range_empty_target_read_after_loop_exits",
+     "def main(n):\n"
+     "    for q in range(0, n - n):\n"
+     "        x = 1\n"
+     "    return q\n", 1, None),
+    # …and the same emptiness through a local, where the loop here runs and
+    # the flag must NOT fire: `k` is 3, the range yields, `q` is bound, and
+    # the answer is the last value the loop held. A flag that fired on a
+    # loop that ran would exit 1 where the source says 2.
+    ("both_arch_for_range_runtime_bound_target_holds_the_last_value",
+     "def main(n):\n"
+     "    k = n - n + 3\n"
+     "    for q in range(0, k):\n"
+     "        x = 1\n"
+     "    return q\n", 2, None),
+    # The doc's residual, parameter-bound and non-empty: the loop runs `n`
+    # times, so the read after it is the LAST value the loop bound, not an
+    # unbound name. This is the false-positive guard for the flag — with the
+    # default entry argument it runs ten times and answers 9 — and the row
+    # the 2026-10-28 re-measurement of the doc recorded as the divergence
+    # (`q=9` where CPython said `q=2`, for a different reason: the flag
+    # existed nowhere, so the `n = 0` half printed the same leftover the
+    # `n = 3` half did).
+    ("both_arch_for_range_nonempty_target_prints_the_last_value",
+     "def main(n):\n"
+     "    for q in range(0, n):\n"
+     "        x = 1\n"
+     "    printf(\"q=%d\", q)\n"
+     "    return 0\n", 0, "q=9"),
+    # The read inside an arm: the branch forks the paths, and the arm that
+    # stores is not the arm that reads, so the join keeps the flag and the
+    # reading arm's read takes the error edge when the range was empty.
+    ("both_arch_for_range_empty_target_read_in_a_branch_exits",
+     "def main(n):\n"
+     "    for q in range(0, n - n):\n"
+     "        x = 1\n"
+     "    if n:\n"
+     "        return q\n"
+     "    return 0\n", 1, None),
+
     # ── a FLEXIBLE type is not an UNSIGNED one ─────────────────────────────
     #
     # Found by `tools/formal_fuzz.py` (its seed 206 reduces to the last row
