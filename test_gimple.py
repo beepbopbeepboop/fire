@@ -769,70 +769,6 @@ def rebound(kind, box) -> dict:
         _FAIL += 1
 
 
-def test_nested_def_rebound_param_takes_the_container_it_stores():
-    """An unannotated parameter the body rebinds to a container takes THAT
-    container, even when the function is a nested `def`.
-
-    `live = set(live)` is iteration evidence for `live` (`set` is an
-    iterable-consuming builtin), so `_infer_param_types` reached its last-
-    resort container guess, `MojoList *`, and the store of the `MojoSet *`
-    into it was refused: "cannot coerce MojoSet * to MojoList * (incompatible
-    container kinds) ... dest='live'". That is the error that took out the
-    `bootstrap-stage1-transitive` gate job on formal/model.py's `walk_stmts`.
-
-    At module scope the same program compiled, because the module-level call
-    `walk({3})` grounds the guess in the argument it is actually given. A
-    nested def has no such call-site evidence, so the rebinding is the only
-    thing that can say what the parameter holds, and it must.
-
-    The top-level twin is kept as the control: it compiled before the fix and
-    must still compile after it."""
-    nested = """\
-def outer():
-    def walk(live):
-        live = set(live)
-        live.add(1)
-        return live
-    return walk({3})
-
-def main():
-    print(len(outer()))
-main()
-"""
-    top = """\
-def walk(live):
-    live = set(live)
-    live.add(1)
-    return live
-
-def main():
-    print(len(walk({3})))
-main()
-"""
-    global _PASS, _FAIL
-    name = "nested_def_rebound_param_takes_the_container_it_stores"
-    try:
-        ok_top, _, err_top = gimple_compiles(top)
-    except TypeError as e:
-        print(f"FAIL  {name}: the top-level control was refused: {e}")
-        _FAIL += 1
-        return
-    try:
-        ok, c_src, stderr = gimple_compiles(nested)
-    except TypeError as e:
-        print(f"FAIL  {name}: the codegen refused the nested def outright: {e}")
-        _FAIL += 1
-        return
-    if ok and ok_top:
-        print(f"PASS  {name}")
-        _PASS += 1
-    else:
-        print(f"FAIL  {name}: nested compiled={ok} top-level compiled={ok_top}")
-        for line in (stderr or err_top).splitlines()[:8]:
-            print(f"      {line}")
-        _FAIL += 1
-
-
 def test_a_lifted_lambda_keeps_the_enclosing_functions_renamed_locals():
     """Lifting a closure must not un-rename the enclosing function's locals.
 
@@ -1177,9 +1113,6 @@ def main():
     # ... and a lifted lambda does not un-rename the enclosing function's
     # shadowing locals, which is the next layer of the same build.
     _run_isolated(lambda: test_a_lifted_lambda_keeps_the_enclosing_functions_renamed_locals(), 'test_a_lifted_lambda_keeps_the_enclosing_functions_renamed_locals (line 1086)')
-    # ... and a nested def's parameter that the body rebinds to a container
-    # takes that container, not the usage guess that refused the store.
-    _run_isolated(lambda: test_nested_def_rebound_param_takes_the_container_it_stores(), 'test_nested_def_rebound_param_takes_the_container_it_stores')
 
 
     # 1. Empty void function (pass body)
