@@ -18,12 +18,20 @@
       "note": "Local 4-bit Qwen 3.8 27B, two workers. Never changes model, never banned."
     },
     {
+      "name": "llama-work",
+      "model": "llama-local/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS",
+      "count": 1,
+      "kind": "opencode",
+      "recover_hours": 0,
+      "note": "Qwen3.6-35B-A3B-262k-turbo (unsloth UD-IQ4_XS) on the work machine, 10.0.0.240:8080 (opencode provider llama-local). One worker. Never changes model, never banned."
+    },
+    {
       "name": "haiku",
       "model": "claude-haiku-5-5",
-      "count": 2,
+      "count": 4,
       "kind": "claude",
       "recover_hours": 4.23,
-      "note": "Paid Claude tokens (headless claude -p). Two workers. Goal: the 5-hour block from 10% to 100% before 13:49 local; a limit bans it until the 13:50 reset. (Weekly reset Friday 11:00 is the next wall after that.)"
+      "note": "Paid Claude tokens (headless claude -p). Four workers (2026-10-29 17:16: 21% of the 5-hour block with the reset at 18:50 local). Goal: the block to 100% before that reset; a limit bans it until the reset. (Weekly reset Friday 11:00 is the next wall after that.)"
     },
     {
       "name": "opencode-paid",
