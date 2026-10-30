@@ -149,6 +149,27 @@ def enqueue_merge_fix(name, t, conflict_text):
         reg[name]["state"] = "superseded"
 
 
+def enqueue_red_fix(name, t, failing):
+    """A branch that merges clean but turns the landing gate red is handed back to a worker with the failing tests
+    named: queue a fixer that starts from the branch, and supersede the original (registry `needs` keeps the list)."""
+    import argparse as _ap
+    tests = ", ".join(failing) or "the failing gate jobs (see the gate log)"
+    task = ("Branch %s (a finished worker branch; original task: %s) merges onto master but turns the landing gate RED. "
+            "The failing gate jobs with it are: %s. You start on that branch. Make those tests pass by fixing the ROOT CAUSE "
+            "in the branch's own change (not by skipping, marking expect= or disabling a test). Verify with the narrow tests "
+            "for each failing job, each wrapped in python3 tools/memslot.py --gb 8 --label x --. You are a light worker: no "
+            "gate, no self-host build. Never use git stash. Commit, then finish with the REPORT block and a CONTROL-STATUS line."
+            % (t["branch"], t["summary"][:150], tests))
+    mname = "fix-red-" + name
+    if mname in C.load():
+        mname += "-%d" % int(time.time() % 100000)
+    C.cmd_enqueue(_ap.Namespace(name=mname[:60], claim=t["claims"] or ["task:" + mname], task=task, task_file=None,
+                                file=[], base=t["branch"], needs=[], model=None))
+    with C.registry() as reg:
+        reg[name]["state"] = "superseded"
+        reg[name]["needs"] = list(failing)
+
+
 def main():
     sys.stdout.reconfigure(line_buffering=True)  # progress must be visible in a redirected log
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -163,6 +184,10 @@ def main():
                     help="LIGHT GATE (owner's swarm policy): the gate is just the stdlib compile (`suite.py stdlib-syntax`); "
                          "green lands on master. The wider checks (`make check`, stdlib-dylib) run AFTER landing, in "
                          "tools/verify_landed.py, which files a fixer if they go red")
+    ap.add_argument("--probe", action="store_true",
+                    help="PROBE: merge and gate the named branches exactly as a landing would, then report PROBE GREEN or "
+                         "PROBE RED with the failing jobs. It changes NO registry state and never lands. The swarm uses it to "
+                         "find which branch breaks the gate (a binary search over the batch)")
     ap.add_argument("--no-fixers", action="store_true",
                     help="a conflicting branch is merely left out: no merge fixer is queued and nothing is superseded "
                          "(used by the bisect probes, which re-merge the same branches many times)")
@@ -204,7 +229,7 @@ def main():
         if r.returncode:
             subprocess.run(["git", "merge", "--abort"], cwd=INTEG)
             print("CONFLICT %s:\n%s" % (name, r.stdout[-600:]))
-            if a.no_fixers:                          # a bisect probe: just leave it out, no side effects
+            if a.no_fixers or a.probe:               # a probe: just leave it out, no side effects
                 print("(probe) %s conflicts: left out" % name)
             else:
                 enqueue_merge_fix(name, tasks[name], r.stdout)   # marks the task superseded, queues its fixer
@@ -297,6 +322,25 @@ def main():
     if rc == 0 and bad:
         print("gate exited 0 but suite.log records:\n" + bad + "\ntreating the round as RED")
         rc = 1
+    if a.probe:
+        jobs = failed_job_names(os.path.join(INTEG, "gate.log")) if rc else []
+        files = []                                   # the stdlib sweep names each failing file under this heading
+        gl = os.path.join(INTEG, "build", "suite.log")   # the sweep's own section; gate.log has only the tally
+        if rc and os.path.exists(gl):
+            inside = False
+            for line in open(gl, encoding="utf-8", errors="replace"):
+                if line.startswith("UNEXPECTED failed files:"):
+                    inside = True
+                elif inside and line.startswith("  ") and not line.startswith("    "):
+                    files.append(line.strip())
+                elif inside and line.startswith("    "):
+                    continue                         # the error line under a file
+                elif inside and line.strip():
+                    break                            # the next section starts
+        print("PROBE %s: %s" % ("GREEN" if rc == 0 else "RED", " ".join(merged)))
+        print("FAILED_JOBS: %s" % " ".join(jobs))
+        print("FAILED_FILES: %s" % " ".join(files))
+        sys.exit(rc)
     if rc == 0:
         land_on_master()
         with C.registry() as reg:

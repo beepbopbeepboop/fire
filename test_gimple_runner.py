@@ -6195,7 +6195,7 @@ main()
 """, "5\n")
 
     # 21. Builtin `dict` subclassing (Counter/OrderedDict shape) -- see
-    # bugs/COMPILE_FAIL_collections___init__.md. `class X(dict)` gets a
+    # bug:COMPILE_FAIL_collections___init__ (dict-subclass backing store). `class X(dict)` gets a
     # synthesized `_data: MojoDict *` backing store allocated by
     # `_alloc_X`; inherited `d[k]`, `d[k] = v`, `d[k] += n`, `k in d`,
     # `len(d)` route to it, and `__missing__` handles a subscript-read
@@ -6629,7 +6629,7 @@ fn main():
     # built: CPython's own `Apple/__main__.py --help` printed usage and exited
     # 0, and this printed `Unhandled exception: AttributeError:
     # cross_build_dir` and exited 0 too
-    # (DELETED bugs/RUNTIME_argparse_is_stubbed_so_parse_args_consumers_crash.md; module-marker stub now loud)
+    # (DELETED commit 319ab932c; module-marker stub now loud)
     #
     # The raise happens at the CALL, which is where it becomes true, and it is
     # catchable — which is the second half of the assertion: a program that
@@ -6665,7 +6665,7 @@ def main():
         print("fell back")
 """, "fell back\n")
 
-    # Pinning regression — DELETED bugs/RUNTIME_argparse_is_stubbed_so_parse_args_consumers_crash.md
+    # Pinning regression — DELETED commit 319ab932c
     # (already fixed: stub raises NotImplementedError at call site, not silent 0)
     test_gimple_stdout("gimple_argparse_parse_args_pin", """\
 import argparse
@@ -8627,7 +8627,7 @@ main()
     # range test, so it calls every positive int64 in [2^31, 2^47) a pointer.
     # They are here because the codegen PROVABLY knows an integer literal is
     # an integer, and supplies the answer rather than asking (see
-    # bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md, whose
+    # commit f7343ee40, whose
     # dict-key spelling has its own test below).
     test_gimple_stdout("gimple_annotated_str_param_given_a_non_str", """\
 class Dialog:
@@ -8831,6 +8831,28 @@ def main():
     print(-1 in e)
 main()
 """, "7\n9\n3\n1\nFalse\nTrue\n")
+
+    # The NONE side of the same provenance. `None` lowers to the literal '0',
+    # the same spelling an integer 0 has, so once any `0` literal is in the
+    # function `callee = None` looked like an integer assignment and carried
+    # the integer mark onto `callee`, which is a `char *` local on the `name`
+    # branch. Its later `in` key was then bit-cast into an int word and the
+    # release got the pointer as its int64_t `orig` (-Wint-conversion, the
+    # self-host `mojoc` build). The `None` store must discard, and the str key
+    # must still find its entry.
+    test_gimple_stdout("gimple_none_store_does_not_mark_str_local_as_int", """\
+def main():
+    zero = 0
+    known = {"foo": 1}
+    name = "foo"
+    if zero == 0:
+        callee = name
+    else:
+        callee = None
+    print(callee in known)
+    print(callee is None)
+main()
+""", "True\nFalse\n")
 
     # The STORE side of the same fact: a large key that is ASSIGNED to a name,
     # rather than written at the subscript. `gen._int_word_vals` was carried
@@ -9586,7 +9608,7 @@ print({"a": 1})
     # parser treated `*` as the conversion character, so the template's
     # operand count never matched its spec count and the WHOLE template
     # degraded to its literal text — `'0x%0*X' % (precision, t)` printed
-    # `0x%0*X` (bugs/COMPILE_FAIL_Tools_unicode_gencodec.md's reported
+    # `0x%0*X` (commit e186f9737's reported
     # `    (): (0x%0*X, 0x%0*X),` entry lines).
     #
     # Every conversion is exercised, not just the hex one, because the
@@ -12517,6 +12539,100 @@ def main():
     sys.exit(0 if _FAIL == 0 else 1)
 
 
+def test_namedtuple_literal_lowers_and_runs():
+    """A module-level `Name = namedtuple('Name', [...])` with literal fields
+    lowers to the static class it denotes (fire_compiler.desugar_namedtuples)
+    instead of the unresolved-import stub that printed `namedtuple: unavailable
+    in compiled mode` and exited 0. Each field takes its type from the literal
+    constructor calls, so an int field and a str field are two namedtuples
+    here, as they must be (one untyped field would print its ints as strings).
+    The two have different arities, so Point's `_replace(3, 4)` is not
+    attributed to Triple.
+    Covers `_replace` returning a new instance and the original unchanged."""
+    test_gimple_stdout("gimple_namedtuple_literal_runs", """\
+from collections import namedtuple
+
+Point = namedtuple('Point', ['x', 'y'])
+Triple = namedtuple('Triple', 'a, b, c')
+
+def main():
+    p = Point(1, -2)
+    q = p._replace(3, 4)
+    print(repr(p))
+    print(q.x)
+    print(q.y)
+    s = Triple('a', 'b', 'c')
+    print(repr(s))
+    print(s.a)
+""", "Point(x=1, y=-2)\n3\n4\nTriple(a='a', b='b', c='c')\na\n")
+
+
+def test_namedtuple_mixed_literal_types_is_refused():
+    """One namedtuple field fed an int and a str literal must be refused by
+    name. Before the typed lowering an untyped field took one type for every
+    call, so `Point(1, 2)` next to `Point('a', 'b')` printed `Point(x='1', ...)`
+    and exited 0."""
+    src = """from collections import namedtuple
+
+Point = namedtuple('Point', ['x', 'y'])
+
+def main():
+    p = Point(1, 2)
+    q = Point('a', 'b')
+    print(repr(p))
+"""
+    try:
+        compile_mojo_to_gimple_exe(src)
+    except RuntimeError as e:
+        if 'namedtuple Point field' in str(e) and 'both int and str' in str(e):
+            return
+        raise AssertionError(f"refused, but not with the named message: {e}")
+    raise AssertionError("mixed int/str namedtuple fields compiled; they must be refused")
+
+
+def test_namedtuple_tuple_protocol_is_refused_by_name():
+    """A namedtuple value used as a TUPLE (indexed, unpacked, passed to `len`,
+    read through `_asdict`) must be refused by name. The lowered class has named
+    fields only, and before this refusal each of these compiled and exited 0:
+    `p[0]` printed a stack address, `a, b = p` bound nothing, `len(p)` was 0."""
+    head = "from collections import namedtuple\n\nPoint = namedtuple('Point', ['x', 'y'])\n\n"
+    bodies = {
+        "indexing": "def main():\n    p = Point(1, 2)\n    print(p[0])\n",
+        "unpacking": "def main():\n    p = Point(1, 2)\n    a, b = p\n    print(a)\n",
+        "len": "def main():\n    p = Point(1, 2)\n    print(len(p))\n",
+        "_asdict": "def main():\n    p = Point(1, 2)\n    print(p._asdict())\n",
+        # Reached through a container: the desugar's name tracking never sees
+        # `p` or `pts[0]` as a namedtuple, so these are refused by the static
+        # struct type at the subscript (emit_calls._refuse_namedtuple_tuple_use).
+        # Before that check each compiled and printed a stack address, exit 0.
+        "container_index": "def main():\n    pts = [Point(1, 2)]\n    print(pts[0][0])\n",
+        "for_index": "def main():\n    pts = [Point(1, 2)]\n    for q in pts:\n        print(q[0])\n",
+        "container_unpack": "def main():\n    pts = [Point(1, 2)]\n    for q in pts:\n        a, b = q\n        print(a)\n",
+        "container_len": "def main():\n    pts = [Point(1, 2)]\n    print(len(pts[0]))\n",
+        # The tuple BUILTINS, each on a container element. Before the
+        # builtin-site checks each compiled and failed at runtime (exit 1,
+        # "object is not iterable"), printed nothing (`reversed`), or crashed
+        # (`max`, SIGSEGV). Each is refused at its own lowering site, where
+        # the operand's static C type is known.
+        "container_list": "def main():\n    pts = [Point(1, 2)]\n    print(len(list(pts[0])))\n",
+        "container_sum": "def main():\n    pts = [Point(1, 2)]\n    print(sum(pts[0]))\n",
+        "container_max": "def main():\n    pts = [Point(1, 2)]\n    print(max(pts[0]))\n",
+        "container_any": "def main():\n    pts = [Point(1, 2)]\n    print(any(pts[0]))\n",
+        "container_sorted": "def main():\n    pts = [Point(1, 2)]\n    print(sorted(pts[0]))\n",
+        "container_reversed": "def main():\n    pts = [Point(1, 2)]\n    for v in reversed(pts[0]):\n        print(v)\n",
+        "container_enumerate": "def main():\n    pts = [Point(1, 2)]\n    for i, v in enumerate(pts[0]):\n        print(i)\n",
+        "container_zip": "def main():\n    pts = [Point(1, 2)]\n    for a, b in zip(pts[0], pts[0]):\n        print(a)\n",
+        "container_for_iter": "def main():\n    pts = [Point(1, 2)]\n    for v in pts[0]:\n        print(v)\n",
+    }
+    for kind, body in bodies.items():
+        try:
+            compile_mojo_to_gimple_exe(head + body)
+        except RuntimeError as e:
+            if 'has no tuple protocol' in str(e):
+                continue
+            raise AssertionError(f"{kind}: refused, but not with the named message: {e}")
+        raise AssertionError(f"{kind}: a namedtuple used as a tuple compiled; it must be refused")
+
 if __name__ == '__main__':
     main()
 
@@ -12540,6 +12656,27 @@ def main():
 """, "5\n7\n")
 
 
+def test_nested_class_attr_from_str_param_regression():
+    """Regression for bugs/CODEGEN_nested_class_attr_from_str_param_typed_as_int.md.
+    A function-scoped class attribute whose value is a bare name of the
+    enclosing function's parameter was typed `int64_t` (the fallback for a
+    value with no literal type), so a `str` argument read back as a pointer-
+    sized integer. The attribute takes its C type from the parameter's
+    annotation, so each call must print its own string."""
+    test_gimple_stdout("gimple_nested_class_attr_from_str_param", """\
+def h(s: str):
+    class C():
+        name = s
+    return C()
+
+def main():
+    a = h("x")
+    b = h("y")
+    print(a.name)
+    print(b.name)
+""", "x\ny\n")
+
+
 def test_nested_class_attr_rebind_after_construction_regression():
     """Pins the answer any per-execution fix for
     bugs/CODEGEN_nested_class_attr_reads_enclosing_local_silently_zero.md
@@ -12559,3 +12696,28 @@ def main():
     t = make(5)
     print(t.__version__)
 """, "3\n")
+
+
+def test_namedtuple_shaped_class_runs_regression():
+    """Pins the compiled-path target for `collections.namedtuple` (bug:COMPILE_FAIL_collections___init__, Option B): a static struct with
+    `__init__`, the `_replace` method and a `__repr__` that the synthesized
+    class would have to emit. The namedtuple lowering is not built yet; this
+    proves the struct shape it will produce compiles and runs with the
+    right values, so the next step can build on a verified target."""
+    test_gimple_stdout("gimple_namedtuple_shaped_class", """\
+class Point:
+    def __init__(self, x: int, y: int):
+        self.x = x
+        self.y = y
+    def _replace(self, x: int, y: int) -> Point:
+        return Point(x, y)
+    def __repr__(self) -> str:
+        return "Point(x=" + str(self.x) + ", y=" + str(self.y) + ")"
+
+def main():
+    p = Point(1, 2)
+    q = p._replace(3, 4)
+    print(repr(p))
+    print(q.x)
+    print(q.y)
+""", "Point(x=1, y=2)\n3\n4\n")

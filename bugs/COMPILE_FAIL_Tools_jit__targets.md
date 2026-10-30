@@ -4,7 +4,7 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/jit/_targets.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (2026-10-29, work/bug-compile-fail-tools-jit-targets @ master `c4297dcfc`): PLANNING ROUND — trigger NOT yet pinned; the `tempfile` stub is a second, different finding
+## Status (2026-10-29, superseded by the entry below): PLANNING ROUND — trigger NOT yet pinned at the time
 
 This round did real measurement, not a re-verify. The earlier "structural,
 not attempted" entries below assumed the refusal is what the target
@@ -224,25 +224,72 @@ and so is gracefully skipped/stubbed rather than hard-failing; they
 are not part of this file's own refusal.)
 
 
-## Status (2026-10-29, work/bug-compile-fail-tools-jit-targets): PARTIAL — regression test landed, root cause unchanged
+## Status (2026-10-29, work/bug-compile-fail-tools-jit-targets): TRIGGER PINNED, reduced repro in seconds; the tempfile allowlist entry was dead code and is reverted
 
-Added `test_regress_compile_fail_tools_jit_targets.py` (next to existing
-async tests) that pins the exact refusal (`_build_stencils`/`_compile`/\n`_parse`, `not CallExpr` on `tempfile.TemporaryDirectory()`) against the
-external `/Users/mrs/net/Python-3.14.6/Tools/jit/_targets.py`. The test
-confirms the refusal is still present and structural; no silent regression
-to an incorrect compile can go unnoticed.
+Correction to the earlier PARTIAL entry: adding `tempfile` to
+`_ASYNC_NOOP_LOCK_GUARD_TYPES` (commit dc03880) changed nothing and could not
+have. `_cpp_with_guard_type_name` (`mojo/backend_gimple/cpp_async.py:192`) only
+resolves an `IdentExpr` or `SubscriptExpr` callee; `tempfile.TemporaryDirectory()`
+is a `MemberExpr`, so the name is `None` and never matches the allowlist. The
+refusal was still raised. The entry is removed, and `test_regress_compile_fail_tools_jit_guard.py`
+(renamed from `..._fixed.py`) now pins the refusal instead of asserting a fix.
+It would also have been unsound: the guard creates a real directory and binds a
+real path to `as tempdir`, so it is not a no-op like a lock or a trace span.
 
-Root cause remains genuinely structural (needs `mkdtemp`/`rmtree` runtime
-plumbing + new path-value representation through `declared`/`_cpp_expr`,
-plus downstream async-method gaps in the same 3 methods). Part of the
-separate compiled-generator/async-codegen project (tasks #95-135). No code
-change to the compiler itself attempted — that work belongs to the broader
-async-codegen lane, not this focused fix.
+**Reduced repro (seconds, in-process, `python3 tools/memslot.py --gb 8 -- ...`):**
 
-## Status (2026-10-29, work/bug-compile-fail-tools-jit-targets): PARTIAL — regression test present, refusal still structural
+    MOJO_CORO=cpp MOJO_DEBUG=1 python3 -c "<source below>"
 
-Verified today: `test_regress_compile_fail_tools_jit_targets.py` is present and pins the exact refusal (`_build_stencils`/`_compile`/`_parse`, `not CallExpr` on `tempfile.TemporaryDirectory()`). The external source `/Users/mrs/net/Python-3.14.6/Tools/jit/_targets.py` is unchanged; the build refusal remains identical to the 2026-08-09 root-cause analysis. Root cause remains genuinely structural (needs `mkdtemp`/`rmtree` runtime plumbing + new path-value representation through `declared`/`_cpp_expr`, plus downstream async-method gaps in the same 3 methods). Part of the separate compiled-generator/async-codegen project (tasks #95-135). No compiler code change attempted — outside the scope of this focused fix.
+```
+import asyncio
+import tempfile
+struct Target:
+    var name: String
+    def __init__(out self, name: String):
+        self.name = name
+    async def build(self) -> Int:
+        with tempfile.TemporaryDirectory() as tempdir:
+            await asyncio.sleep(0)
+        return 1
+def main() raises:
+    var t = Target("x")
+    print("ok")
+```
 
-NOT DONE (needs separate async-codegen branch): real `mkdtemp`/`rmtree` backed runtime plumbing + path-value category + full `_build_stencils`/`_compile`/`_parse` method lowering.
+Output: `[gimple_codegen] async function 'build' not eligible (pass 2): ...
+not CallExpr` followed by `RuntimeError: cannot compile module: function(s) build
+(async function(s), declared async def) ...`. This is the trigger in
+`_targets.py`'s `_build_stencils`/`_compile`/`_parse`.
+
+**Two findings that change the picture:**
+
+1. Under the DEFAULT stack-switch backend (no `MOJO_CORO=cpp`) the same shapes do
+   NOT refuse. They compile, with `tempfile.TemporaryDirectory()` emitted as a
+   runtime stub (`/* tempfile.TemporaryDirectory() — raises: module not compiled */`)
+   and `tempdir` bound to that stub's value. So the default backend silently
+   binds a stub handle as `tempdir`. It fails loudly only when the stub runs.
+   Not yet root-caused; the next step is to decide whether the default backend
+   should refuse this shape the way the cpp backend does.
+2. The refusal is the `_cpp_with_stmt` gate in `mojo/backend_gimple/cpp_core.py`
+   (~5978). The gate is only reached through the cpp async eligibility pass.
+
+**Next step (decision (a) from the earlier plan, still the recommended one):**
+recognise `tempfile.TemporaryDirectory()` as an intrinsic guard, backed by an RAII
+guard in `runtime/fire_async_runtime.cpp` (mkdtemp on enter, rmtree in the
+destructor; coroutine frames run destructors on normal exit, exception, and frame
+destruction, so cleanup survives an `await`). Needs a str-valued path binding for
+`as tempdir`. Files: `runtime/fire_async_runtime.{cpp,h}`,
+`mojo/backend_gimple/cpp_core.py` (`_cpp_with_stmt` intrinsic branch),
+`mojo/backend_gimple/cpp_async.py` (`_cpp_with_guard_type_name`: resolve
+`module.Type(...)` as a `MemberExpr` callee), `gimple_codegen.py` (allowlist
+mirror). The downstream `_build_stencils`/`_compile`/`_parse` gaps (`TaskGroup`
+named tasks, `pathlib.Path` ops, `task.get_name()`/`task.result()`, the `_llvm.run`
+subprocess helpers) are still unmeasured and must be reproduced after the guard lands.
+
+Verified this round: `test_regress_compile_fail_tools_jit_guard.py` (the reduced
+refusal pin, passes) and `test_async_with_lock_guard.py` (3 passed, 0 failed,
+covering the `BlockingScopedLock` allowlist this change touches). Not run: the
+full `_targets.py` build (`test_regress_compile_fail_tools_jit_targets.py`), which
+is a whole-closure compile too expensive for a light round.
 
 (Older status entries preserved below for history.)

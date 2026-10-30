@@ -309,7 +309,8 @@ def _cpp_except_handler_body(gen, handler, caught_var: str, declared: dict,
 
 def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
                              struct_name: str | None = None,
-                             extra_captures: list | None = None) -> tuple[str, str, str, list]:
+                             extra_captures: list | None = None,
+                             struct_def: str | None = None) -> tuple[str, str, str, list]:
     """Translate ONE supported generator FunctionDef into a
     self-contained C++20 coroutine fragment. Returns (cpp_text,
     value_ctype, base_name, param_ctypes). Raises
@@ -969,7 +970,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     # name_silent_wrong_value.md, Shape 2). Checked only when a slot was
     # decided at all: an undecided slot is refused below with its own message.
     if value_ctype is not None:
-        _slot_why = gimple_gen_coro.cpp_value_slot_refusal(fn, value_ctype)
+        _slot_why = gimple_gen_coro.cpp_value_slot_refusal(fn, value_ctype, struct_def)
         if _slot_why is not None:
             raise gimple_exprtypes._UnsupportedGeneratorShape(f"{fn.name}: {_slot_why}")
     if value_ctype is None:
@@ -1120,8 +1121,8 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         f"    co_return;",
         f"}}",
         f'extern "C" MojoGenerator *{base}_start ({cpp_sig}) {{',
-        f"    {task} t = {impl} ({call_args});",
-        f"    return reinterpret_cast<MojoGenerator *>(t.h.address());",
+        f"    {task} __task = {impl} ({call_args});",
+        f"    return reinterpret_cast<MojoGenerator *>(__task.h.address());",
         f"}}",
         f'extern "C" {cpp_bool} {base}_resume (MojoGenerator *g) {{',
         f"    {handle_t} h = {handle_t}::from_address(reinterpret_cast<void *>(g));",
@@ -1310,7 +1311,14 @@ def _nested_generator_captures(stmts) -> dict[int, list[str]]:
         own = {pn for pn, _ in (g.params or [])} | _helper_bound_names(g.body)
         reads = (gimple_exprtypes._used_idents_deep(g.body)
                  | _fstring_field_names(g.body))
-        caps = (reads & enclosing[gid]) - own
+        # A `nonlocal k` names the enclosing local even though the body
+        # also binds it (`k = k + 1` makes it "own" below). Without this, a
+        # generator that writes its enclosing local compiles with a fresh
+        # local of the same name and the write never reaches the enclosing
+        # frame -- silently wrong output, not a refusal.
+        nonlocal_names = {n for x in gimple_exprtypes._walk_ast(g.body)
+                          if isinstance(x, N.NonlocalStmt) for n in x.names}
+        caps = ((reads & enclosing[gid]) - own) | (nonlocal_names & enclosing[gid])
         if caps:
             out[gid] = sorted(caps)
     return out
@@ -2524,8 +2532,8 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
         f"    co_return ({cpp_value_ctype})0;",
         f"}}",
         f'extern "C" MojoAsync *{base}_start ({cpp_sig}) {{',
-        f"    {task} t = {impl} ({call_args});",
-        f"    return reinterpret_cast<MojoAsync *>(t.h.address());",
+        f"    {task} __task = {impl} ({call_args});",
+        f"    return reinterpret_cast<MojoAsync *>(__task.h.address());",
         f"}}",
         # 'bool' (not '_Bool' -- see _c_to_cpp_scalar_type's docstring:
         # '_Bool' is valid C99 but not a valid C++ type spelling). The
