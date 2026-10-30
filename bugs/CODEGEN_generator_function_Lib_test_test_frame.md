@@ -1,5 +1,140 @@
 # CODEGEN_generator_function: Lib/test/test_frame.py
 
+## Status (2026-10-29, planning round — `g` reads `self`: root cause measured, design decided, implementation guide)
+
+Scope of this entry: the remaining `g` blocker (a nested generator defined
+inside a METHOD that reads `self`). Nothing in the compiler changed in this
+round; the pin `test_regression_g_nested_generator_capturing_self_refused`
+still asserts the refusal and still holds.
+
+### Measurement (default path, `gimple_codegen.compile_to_gimple`, 8 GB memslot)
+
+Repro (`.tmp/probe_self.py`, a struct method with a nested generator
+reading `self.k`):
+
+    struct T:
+        var k: Int
+        def __init__(out self, k: Int):
+            self.k = k
+        def run(self):
+            def g():
+                yield self.k
+                yield self.k + 1
+            for v in g():
+                print(v)
+
+    def main():
+        var t = T(7)
+        t.run()
+
+Result: `cannot compile module: function(s) g ... Unsupported shape(s): g:
+is a nested generator that reads enclosing-scope variable(s) self; the
+coroutine path has no capture model for a generator defined inside another
+function`. The module falls back to source. The refusal text comes from
+`mojo/backend_gimple/cpp_async.py` (`_nested_generator_captures`, wired by
+`module_gen.py:3423`), i.e. the C++ companion, because the default
+stack-switch path never picks `g` up. Two independent gaps:
+
+1. **Hoist scope.** `mojo/middle/coro.py` `_hoist_nested_async(out, meta)`
+   (called once at `coro.py:4412`) walks only the TOP-LEVEL statements.
+   A struct method that is not itself a generator or async def is kept in
+   `s.methods` (`_kept`, `coro.py` ~4399-4409), so its nested generator
+   never reaches the hoist. Measured with `.tmp/probe_params.py`: the parsed
+   `run` method has body `[FunctionDef g, AssignStmt, ReturnStmt]` and
+   `g.is_generator == True`. Only `method_bodies` (generator/async methods)
+   are appended to `out` before the hoist runs.
+2. **Capture model.** `_nested_async_capture_plan` (`coro.py` ~4912) sees
+   `self` as a PARAMETER of the enclosing method (`m.params == [('self', ...)]`,
+   confirmed in the probe). The parameter branch accepts only kinds
+   `i`/`d`/`p` via `penv.get(n)`, and `self` has a struct kind, so it hits
+   the final `return None` (refuse). The box machinery (`_BOX_STRUCT_OF`,
+   `_box_get_call`, `_box_set_args`, Increment E) only models struct
+   LOCALS, not `self`.
+
+### Decision (taken here, one open question for the user)
+
+Model `self` as a HIDDEN STRUCT-POINTER PARAMETER of the hoisted generator,
+not as a box. Reasons, from the measurements above:
+
+- Mojo does not allow rebinding `self`, so no write ever needs to reach the
+  enclosing frame; a box (cell + round trip) buys nothing. `self.k` reads
+  need only the pointer.
+- Method generators already pass `self` as `T *` through
+  `_async_method_setup` / `_lower_one(m, meta, struct_name=...)`
+  (`coro.py` ~3109-3140, ~5535-5622), so the struct-pointer prologue exists.
+- `_only_called_in` (already required for hoisting) guarantees every
+  call site is in the enclosing body, where `self` is live.
+
+Open question for the user (I did not decide it): the generator OBJECT can
+outlive the method. `return g()` (or `self.field = g()`) in the method leaves
+the generator holding a `T *` into a caller's object that may be gone.
+- Option (a, recommended): refuse when the result of a call to the hoisted
+  generator escapes the method (any use other than iteration / `next()` /
+  assignment to a local in the same body). Honest refusal, no dangling pointer.
+- Option (b): also hoist the object's lifetime (copy the struct, or retain
+  it), which is a much larger change to the runtime's struct model.
+If the answer is (b), stop and file it separately; the rest of this plan is
+unchanged.
+
+### Implementation plan (exact files, ordering)
+
+1. `mojo/middle/coro.py` — `_hoist_nested_async`: add a method pass.
+   For each struct method `m` that is neither generator nor async and
+   contains a nested sync generator, call the hoist on `[m]` with a
+   struct-qualified base `__mgco_<Struct>_<m>_<inner>` (the current
+   `__mgco_{s.name}_{inner.name}` would collide across classes; the qualified
+   form is the same one `_async_method_setup` uses). Call it from the `_kept`
+   loop in the StructDef branch (~4399) and append the hoisted bodies to
+   `method_bodies`; `m` stays in `s.methods`. The hoist already removes the
+   hoisted defs from the body and renames call sites.
+2. `mojo/middle/coro.py` — `_nested_async_capture_plan`: accept the
+   enclosing method's `self` when the inner body reads it. Return a
+   `_Capture` of a new kind `'s'` (struct pointer), not a box:
+   `_apply_nested_async_capture` must NOT rename the enclosing `self` or
+   prepend a box-init for this kind. Instead it appends `('self', '<Struct> *')`
+   to `inner.params` (a hidden pointer parameter), rewrites nothing in
+   the enclosing body, and appends `self` as the trailing argument at every
+   call site in the method body (`_append_cap_args` with the name `self`).
+   `_cap_rewrite_stmts` is not used for `self`: the body already spells it
+   `self`, which now names the hidden parameter.
+3. `mojo/middle/coro.py` — the escape refusal from Decision (a): in
+   `_hoist_nested_async`'s method branch, require that every use of the
+   generator's name in the method is a CallExpr callee whose result is
+   iterated or assigned to a local (reuse `_only_called_in` plus a new
+   `_result_stays_local` check, same walk).
+4. `mojo/backend_gimple/cpp_async.py` `_nested_generator_captures` (~1240):
+   no change needed for the hoisted path (it is only reached by the C++
+   companion for generators the hoist did NOT take). Keep the refusal for
+   every other shape. Verify with `module_gen.py:3423`'s
+   `gen._nested_gen_captures` that the hoisted method generator is no longer
+   in that list.
+5. Ordering for the pass: run it on the method BEFORE `_lower_one(m, ...)`
+   for the method itself, so the rename of `g()` -> `__mgco_T_run_g(self)`
+   is already in the body the method lowers.
+
+### Tests (flip the pin, add the cases)
+
+- `test_regress_codegen_generator_frame.py::test_regression_g_nested_generator_capturing_self_refused`:
+  delete it (it FAILS once the shape compiles, by design) and replace with
+  a run check in `test_gimple_generator_runner.py`
+  (`run_nested_generator_capture_tests`), via `test_generator_stdout`:
+  - `nested_generator_method_reads_self` — the `T(7)` program above, expects
+    `7\n8\n`.
+  - `nested_generator_method_self_field_write_refused` — a generator that
+    writes `self.k = ...`: must match the honest refusal, not silently
+    write a copy (Mojo `self` is a reference; the hidden pointer makes the
+    write land on the real object, so this should COMPILE and match CPython;
+    pin whichever the measured behaviour shows, do not assume).
+  - `nested_generator_method_escaping_refused` — `return g()` from the
+    method must refuse (Decision (a)).
+- `test_coro_nested_async_capture.py`: unchanged; must stay 14/14.
+- Gate note for the integrator: this touches `mojo/middle/coro.py`, which
+  is on the compiled path. It owes the full `make gate` per CLAUDE.md, and
+  `stdlib-syntax`'s `U` count must not rise.
+
+Not in this plan: `gen` (frame introspection, `sys._getframe()`), `t3`
+(async return of a frame value). Those remain as in the entries below.
+
 ## Status (2026-10-29, partial fix — a nested generator that captures a PLAIN-assigned enclosing local now compiles on the default path)
 
 Landed: `nested_generator_captures_enclosing_plain_local` (`total = n * 2`
