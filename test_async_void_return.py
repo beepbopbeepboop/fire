@@ -240,6 +240,60 @@ def main() raises:
           out == "idx 0\nidx 1\nidx 2\n", detail=repr(out))
 
 
+def _async_refusal(src: str) -> str | None:
+    # Compile-only: the refusal is raised by the async lowering itself, so
+    # no gcc/link is needed to observe it. None means the module compiled.
+    try:
+        gimple_codegen.compile_to_gimple_with_cpp(src, do_imports=False)
+    except RuntimeError as e:
+        return str(e)
+    return None
+
+
+def test_async_mixed_return_kinds_refused():
+    # `return 1` and `return "s"` share the one int64_t result slot: awaited,
+    # the string came back as its pointer printed as a number (measured
+    # 4367193456). Must refuse, not compile.
+    src = ('async def f(x: Int):\n'
+           '    if x > 0:\n'
+           '        return 1\n'
+           '    return "s"\n'
+           '\n'
+           'def main():\n'
+           '    print(0)\n')
+    msg = _async_refusal(src)
+    check('async mixed return kinds refused',
+          msg is not None and 'disagree on one kind' in msg, detail=repr(msg))
+
+
+def test_async_float_return_refused():
+    # `return 1.5` was awaited as its truncated integer (1). Must refuse.
+    src = ('async def f() -> Float64:\n'
+           '    return 1.5\n'
+           '\n'
+           'def main():\n'
+           '    print(0)\n')
+    msg = _async_refusal(src)
+    check('async float return refused',
+          msg is not None and 'float `return` value' in msg, detail=repr(msg))
+
+
+def test_async_same_kind_returns_still_compile():
+    # Two int returns agree, and a nested def's own mixed returns belong to
+    # the nested def, not to the async function. Both must keep compiling.
+    src = ('async def f(x: Int):\n'
+           '    def helper():\n'
+           '        return "s"\n'
+           '    if x > 0:\n'
+           '        return 1\n'
+           '    return 2\n'
+           '\n'
+           'def main():\n'
+           '    print(0)\n')
+    msg = _async_refusal(src)
+    check('async same-kind returns still compile', msg is None, detail=repr(msg))
+
+
 def run_all():
     for name, fn in list(globals().items()):
         if name.startswith('test_') and callable(fn):

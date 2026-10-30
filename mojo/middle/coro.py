@@ -1221,6 +1221,62 @@ def _nested_class_nonliteral_attr(fn: N.FunctionDef):
     return None
 
 
+def _async_return_refusal(fn: N.FunctionDef) -> str | None:
+    """Why `fn`'s async result cannot ride its int64_t value slot, or None.
+
+    `_lower_one_async` declares the result slot `int64_t` and writes every
+    `return <value>` into it with `__mojo_gen_set_return`, so the awaiting
+    side reads the slot's bits back as an integer. That is exact for an int
+    and for nothing else:
+
+      * two returns of DIFFERENT known kinds (`return 1` on one path,
+        `return "s"` on another) put a `char *` and an int into one slot;
+        awaited, the string comes back as its pointer printed as a number
+        (measured: `4367193456`), and
+      * a float return is stored truncated (`return 1.5` awaited as `1`).
+
+    Both are silent wrong answers, so both are refused here, in the one place
+    every async unit passes through, rather than compiled. A return whose
+    kind cannot be established is NOT refused: that is the same convention
+    `_generator_value_kind` documents for a HOLE (an unresolved expression is
+    read as an int64_t). A bool counts as an int, since both fit the slot.
+    `_yield_kind` supplies the kinds, and nested `def`s are skipped because
+    their `return`s belong to them, not to `fn`.
+    """
+    env = _static_env(fn, None)
+    kinds: set = set()
+
+    def _visit(node) -> None:
+        if isinstance(node, N.ReturnStmt):
+            if node.value is not None:
+                k = _yield_kind(node.value, env)
+                if k is not None:
+                    kinds.add('i' if k == 'b' else k)
+            return
+        d = getattr(node, '__dict__', None)
+        if not d:
+            return
+        for _key, v in vars(node).items():
+            if not (isinstance(v, list) and v and _looks_like_stmt_list(v)):
+                continue
+            for child in v:
+                if not isinstance(child, N.FunctionDef):
+                    _visit(child)
+
+    for st in getattr(fn, 'body', []) or []:
+        if not isinstance(st, N.FunctionDef):
+            _visit(st)
+    if 'd' in kinds:
+        return (f'{fn.name}: a float `return` value cannot be carried by the '
+                'async result slot, which is one int64_t (v0): it would be '
+                'awaited as its truncated integer')
+    if len(kinds) > 1:
+        return (f'{fn.name}: its `return` values disagree on one kind '
+                f'({", ".join(sorted(kinds))}), and the async result slot is '
+                'one int64_t (v0)')
+    return None
+
+
 def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
               struct_def=None, prop_names: dict | None = None) -> tuple[bool, str]:
     if fn.is_async:
@@ -2978,6 +3034,9 @@ def _lower_one_async_gen(fn: N.FunctionDef, meta: list, base: str | None = None,
 
 def _lower_one_async(fn: N.FunctionDef, meta: list, base: str | None = None,
                      struct_name: str | None = None, struct_def=None) -> N.FunctionDef:
+    _refusal = _async_return_refusal(fn)
+    if _refusal is not None:
+        raise RuntimeError(f'cannot compile module: {_refusal}')
     base, is_method, real_params, prologue, body_params, c_params = \
         _async_method_setup(fn, base, struct_name)
     body_name = f'{base}_body'
