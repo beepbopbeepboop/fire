@@ -9540,7 +9540,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
     # `d[k]` on a builtin-`dict` subclass with no `__getitem__` override:
     # read from the backing MojoDict. On a miss, if the class defines
     # `__missing__`, `d[k]` is `type(d).__missing__(d, k)` (Counter uses
-    # this to yield 0). See bugs/COMPILE_FAIL_collections___init__.md.
+    # this to yield 0). See bug:COMPILE_FAIL_collections___init__.
     _dsub_r = gen._dict_subclass_of(ot)
     if _dsub_r:
         dp = gen._new_val('MojoDict *', f"{ov}->_data")

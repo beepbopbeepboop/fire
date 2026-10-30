@@ -3652,7 +3652,7 @@ def _namedtuple_tuple_use(nodes: list, name: str):
     is checked everywhere: a false refusal, never a silent one. A value that
     reaches a tuple operation WITHOUT passing through one of those names (an
     element of a container, a field of another struct) is not seen here; that
-    gap is recorded in bugs/COMPILE_FAIL_collections___init__.md."""
+    gap is recorded in bug:COMPILE_FAIL_collections___init__."""
     tracked: set = set()
 
     def is_value(e):
