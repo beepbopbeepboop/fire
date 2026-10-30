@@ -959,26 +959,27 @@ def test_unannotated_param_with_disagreeing_call_sites() -> bool:
             print(f"  ✗ unannotated_param_container_does_not_break_the_build"
                   f"[{i}]: compiled but exited {rc}")
     # ARITHMETIC on the float-possible parameter (bugs/
-    # CODEGEN_polymorphic_param_non_str_kinds_print_wrong.md, Status 2026-10-29,
-    # next step 1). `x * 2` used to read the box's ADDRESS: with `f(2.5)` it
-    # printed 8647255520. The operand now goes through `mojo_box_int`, so the
-    # integer side is exact and the float side is the truncated answer every
-    # operator gave before the box existed (2 * 2 = 4). CPython says 5.0 and
-    # 3.5 for these, which is the answer the real double read must produce; the
-    # expectations below change with it. Only the operator operand changes:
-    # `print(x)` keeps the raw word and is pinned by `cases` above.
-    arithmetic_partial = [
-        ('def f(x):\n    print(x * 2)\n\n\nf(2.5)\nf(1)\n', '4\n2\n'),
-        ('def f(x):\n    print(x * 2)\n\n\nf(1)\nf(2.5)\n', '2\n4\n'),
-        ('def f(x):\n    print(x + 1)\n\n\nf(2.5)\nf(1)\n', '3\n2\n'),
+    # CODEGEN_polymorphic_param_non_str_kinds_print_wrong.md). `x OP n` with
+    # `+`, `-` or `*` is answered by `_float_param_arith`: the integer answer
+    # when the argument was an integer, and a double box holding the double
+    # answer when it was a float, picked at run time. Each expectation is the
+    # CPython answer, so this pins the real double read, not the old truncation.
+    # `print(x)` is pinned by `cases` above.
+    arithmetic = [
+        ('def f(x):\n    print(x * 2)\n\n\nf(2.5)\nf(1)\n', '5.0\n2\n'),
+        ('def f(x):\n    print(x * 2)\n\n\nf(1)\nf(2.5)\n', '2\n5.0\n'),
+        ('def f(x):\n    print(x + 1)\n\n\nf(2.5)\nf(1)\n', '3.5\n2\n'),
+        ('def f(x):\n    print(x - 1)\n\n\nf(2.5)\nf(1)\n', '1.5\n0\n'),
     ]
-    for i, (src, want) in enumerate(arithmetic_partial):
+    for i, (src, want) in enumerate(arithmetic):
         with tempfile.TemporaryDirectory() as td:
             rc, stdout = _build_and_run({'prog.py': src}, 'prog.py', td)
-        if not (rc == 0 and stdout == want):
+            py_rc, py_stdout = _cpython_run(td, 'prog.py')
+        if not (rc == 0 and py_rc == 0 and stdout == py_stdout == want):
             ok = False
             print(f"  ✗ unannotated_param_arithmetic_operand[{i}]: "
-                  f"rc={rc} stdout={stdout!r} (want {want!r})")
+                  f"rc={rc} stdout={stdout!r} "
+                  f"(CPython rc={py_rc} {py_stdout!r}, want {want!r})")
     return ok
 
 

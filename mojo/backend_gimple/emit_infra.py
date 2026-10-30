@@ -6352,6 +6352,64 @@ def _unbox_float_param_operand(gen, node, ctype: str, val: str) -> tuple[str, st
     return ctype, val
 
 
+# The operators whose answer is a double when an operand is one. `/` and `//`
+# and `%` are left out on purpose: their integer forms can trap (a zero
+# divisor is SIGFPE before any select runs) and their double forms are not
+# C's `/`/`%`, so they keep the truncating answer until they get their own arm.
+_FLOAT_ARITH_OPS = ('+', '-', '*')
+
+
+def _float_param_arith_applies(gen, op: str, lnode, lt: str, rnode, rt: str) -> bool:
+    """Is `lnode op rnode` an arithmetic operation on a float-possible
+    parameter whose other operand is an integer, so `_float_param_arith` must
+    answer it? A `double` operand (`x * 2.5`) is not covered: its C type has
+    no `mojo_box_double` spelling, so that pair keeps the old answer."""
+    if op not in _FLOAT_ARITH_OPS:
+        return False
+    if lt not in ('int', 'int64_t') or rt not in ('int', 'int64_t'):
+        return False
+    return _is_may_hold_float_param(gen, lnode) or _is_may_hold_float_param(gen, rnode)
+
+
+def _float_param_arith(gen, op: str, lnode, lv: str, rnode, rv: str) -> str:
+    """`lnode op rnode` where an operand is a float-possible parameter: the
+    answer is the INTEGER one every operator gave before the box existed, or
+    a double box holding the DOUBLE answer when either operand is a double box
+    (`f(2.5)` → `x * 2` is 5.0, `f(1)` → `x * 2` is 2). Which of the two is
+    the answer is a runtime fact, so both are computed and
+    `mojo_float_arith_select` picks. The raw words go to it, not the unboxed
+    operands, because the unboxing is what destroys the box. Nothing traps on
+    this path, which is why `/` is not routed here."""
+    lp = _is_may_hold_float_param(gen, lnode)
+    rp = _is_may_hold_float_param(gen, rnode)
+    _, ilv = _unbox_float_param_operand(gen, lnode, 'int64_t', lv)
+    _, irv = _unbox_float_param_operand(gen, rnode, 'int64_t', rv)
+    ires = gen._new_val('int64_t', f'({_as_str(ilv)}) {op} ({_as_str(irv)})')
+    dl = (gen._call_expr('double', 'mojo_box_double', [('int64_t', lv)]) if lp
+          else gen._new_val('double', f'(double) ({_as_str(lv)})'))
+    dr = (gen._call_expr('double', 'mojo_box_double', [('int64_t', rv)]) if rp
+          else gen._new_val('double', f'(double) ({_as_str(rv)})'))
+    dres = gen._new_val('double', f'({_as_str(dl)}) {op} ({_as_str(dr)})')
+    return gen._call_expr('int64_t', 'mojo_float_arith_select', [
+        ('int64_t', _as_str(lv) if lp else '0'),
+        ('int64_t', _as_str(rv) if rp else '0'),
+        ('int64_t', _as_str(ires)),
+        ('double', _as_str(dres)),
+    ])
+
+
+def _is_float_param_arith(gen, node) -> bool:
+    """Is `node` an arithmetic result that `_float_param_arith` may have made a
+    double box? Such a value is printed through `mojo_repr_boxed`, which asks
+    the box and so prints `5.0` for a double box and `2` for the plain integer.
+    Only the direct operand form is answered: a result bound to a name first
+    (`y = x * 2`) loses the answer, as a float-possible parameter's copy does."""
+    if isinstance(node, gimple_ctypes.BinaryOp) and node.op in _FLOAT_ARITH_OPS:
+        return (_is_may_hold_float_param(gen, node.left)
+                or _is_may_hold_float_param(gen, node.right))
+    return False
+
+
 def _box_float_call_args(gen, callee: str, arg_pairs: list) -> list:
     """Box each `double` argument bound for a float-possible parameter of
     `callee` (`_int64_may_hold_float`), so the int64_t slot receives a box
@@ -6663,7 +6721,8 @@ def _gen_print(gen, args: list, kwargs: list = None):
             # same answer the `_boxed_vals` arm below gives a heterogeneous
             # list slot. Routed through `_own_repr` because the box's
             # `mojo_repr_boxed` result is a fresh buffer on every path.
-            if _pi < len(args) and _is_may_hold_float_param(gen, args[_pi]):
+            if _pi < len(args) and (_is_may_hold_float_param(gen, args[_pi])
+                                    or _is_float_param_arith(gen, args[_pi])):
                 _rv = _own_repr(gen, 'mojo_repr_boxed',
                                 gen._call_expr('char *', 'mojo_repr_boxed',
                                                [('int64_t', aval)]), _owned_reprs)

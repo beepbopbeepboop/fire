@@ -20,10 +20,10 @@
     {
       "name": "llama-work",
       "model": "llama-local/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS",
-      "count": 0,
+      "count": 1,
       "kind": "opencode",
       "recover_hours": 0,
-      "note": "Spun down to 0 by the user's instruction: no new llama-work runs. Was one worker on 10.0.0.240:8080."
+      "note": "Qwen3.6-35B-A3B-262k-turbo (unsloth UD-IQ4_XS) on the work machine, 10.0.0.240:8080 (opencode provider llama-local). One worker. Never changes model, never banned."
     },
     {
       "name": "haiku",
