@@ -3973,14 +3973,8 @@ def _register_imported_generic_structs(gen, stmts) -> None:
     TYPE ARGUMENT to another generic (_elaborate_generic_call's use of
     _ensure_generic_struct, e.g. `alloc[MoveOnly[Int]]`) can resolve it.
 
-    `MoveOnly` (test_utils.types) is only re-exported through
-    `test_utils/__init__.mojo`, and `test_utils` itself isn't resolvable
-    via imports.py's MOJO_PATH-based search at all (it's a local
-    test-only package, sibling to the test files that import it, not on
-    any search path) — _find_generic_source's _parsed_import call falls
-    back to _resolve_test_relative_module for that case."""
-    if gen.do_imports:
-        return
+    Runs in the inline do_imports=True path too (same guard removal as
+    _register_imported_generics, bugs/CODEGEN_dylib_generic_inline_copies_share_one_symbol.md)."""
     for st in stmts:
         if not (isinstance(st, gimple_ctypes.FromImportStmt) and not getattr(st, 'wildcard', False)):
             continue
