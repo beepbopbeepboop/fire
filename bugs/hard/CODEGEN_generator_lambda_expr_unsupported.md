@@ -31,8 +31,8 @@
 |---|---|---|---|
 | a generator whose yields mix a bool-lambda call and a float-lambda call | `1`, `1` | `True`, `1.5` | **new doc** `bugs/CODEGEN_generator_yield_kind_rebound_name_silent_wrong_value.md` (shape 2). A3 refuses correctly; the legacy C++ fallback then types both yields `int64_t`. Predates this pass. |
 | `r = 2.5` rebinding a local first bound to `False`, then `yield r` (no lambdas) | `True` | `2.5` | same new doc (shape 1: `_static_env`'s first-binding `setdefault`). Predates this pass. |
-| two generators in one module, a bool-yielding and a float-yielding one | float one prints `True` | `1.5` | **new doc** `bugs/CODEGEN_two_generators_bool_float_value_kind_bleed.md`. No lambdas; predates this pass. |
-| `def outer(x): n = 2; def inner(y): g = lambda z: z + n; return g(y)` | `4` | `6` | `bugs/hard/CODEGEN_nested_def_lambda_reads_outer_capture_as_zero.md` (existing doc). |
+| two generators in one module, a bool-yielding and a float-yielding one | float one prints `True` | `1.5` | sibling `for` loops reusing one name kept the first loop's type; fixed (pinned by `run_sibling_loop_value_kind_tests`). No lambdas; predates this pass. |
+| `def outer(x): n = 2; def inner(y): g = lambda z: z + n; return g(y)` | `4` | `6` | fixed in `1eacc36f8` (a lambda inside a nested def reads its outer-outer capture). |
 | `sorted(key=<user function>)` | not re-measured | | `CODEGEN_interpreter_user_function_as_builtin_callback_crashes` |
 
 Because this doc is still cited by ~20 live locations and its nested-def row is

@@ -1035,7 +1035,8 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                 # class_value.md.
                 destroy_after = isinstance(node.iterable, gimple_ctypes.CallExpr)
                 gen._gen_for_generator_iter(var, it_val, api, node.body,
-                                              destroy_after=destroy_after)
+                                              destroy_after=destroy_after,
+                                              shadow_name=shadow_name)
             else:
                 gimple_ctypes._debug_note('for loop over MojoGenerator* with no known API (unreachable in Milestone B scope)', it_val)
                 gen._emit_unsupported_iter(it_type, node)
@@ -3698,7 +3699,7 @@ def _emit_generator_tuple_unpack(gen, var_names: list, slot_types: list, list_pt
 
 
 def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
-                            destroy_after: bool = True):
+                            destroy_after: bool = True, shadow_name=None):
     """for x in <supported generator call>(): ... — <base>_resume()/
     <base>_value() deliberately mirror _gen_for_struct_iter's existing
     __has_next__/__next__ convention immediately below (resume both
@@ -3717,7 +3718,17 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
     read again afterward — destroying it unconditionally there is a
     real use-after-free the first time that variable is consumed a
     second time. See the call site in _gen_for_iter for the full
-    rationale."""
+    rationale.
+
+    `shadow_name`: the iterable's own name when it is the loop target too
+    (`for g in g:`) -- see `_gen_for_iter`'s snapshot.
+
+    The loop target is retyped when an earlier sibling loop already declared
+    the same name with a different yield kind (`for v in gen_bool():` then
+    `for v in gen_float():`). `_declare_var` is first-decl-wins, so without
+    `force` the second loop stored a `double` into the first loop's `_Bool`.
+    The list/dict/set loops make the same choice (`force=` on the
+    `var_types` mismatch); this is that rule for generators."""
     base, vct = api['base'], api['value_ctype']
     # `for a, b in <tuple-yielding generator>():` — `var` arrives as
     # the literal string "(a, b)" (see _gen_for_list's identical
@@ -3766,7 +3777,13 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
                 f"{api.get('base')}(...)`): the generator yields one value per "
                 "resume, and unpacking that value needs a runtime iterator "
                 "protocol this scalar generator model does not have")
-        gen._declare_var(var, vct)
+        # Retype a name a sibling loop already declared with another kind
+        # (see the docstring); `force` mints a fresh C name and rebinds every
+        # later read of `var` in this body to it. Same rule as the list arm
+        # of `_gen_for_list`.
+        gen._declare_var(var, vct,
+                         force=(var == shadow_name)
+                         or gen.var_types.get(var) not in (None, vct))
 
     bb_cond  = gen._new_bb(); bb_body  = gen._new_bb()
     bb_post  = gen._new_bb(); bb_after = gen._new_bb()
