@@ -2,8 +2,8 @@
 
 ## Status (2026-10-29)
 
-Found while fixing `CODEGEN_generator_function_Lib_test_test_ensurepip.md`.
-The generator form of this is now refused honestly (see that doc). The
+Found while fixing `CODEGEN_generator_function_Lib_test_test_ensurepip` (bug:CODEGEN_generator_function_Lib_test_test_ensurepip).
+The generator form of this is now refused honestly (the ensurepip doc was deleted with its fix). The
 PLAIN-FUNCTION form is still silent and is open here.
 
 Repro (`compile_to_gimple_with_cpp(src, do_imports=False)`):
