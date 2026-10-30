@@ -2143,6 +2143,87 @@ def outer(n: Int):
         yield total
     return g
 """, "variable(s) total")
+    # A nested generator that reads a `var` local or a parameter is hoisted
+    # on the default (stack-switch) path with its enclosing binding boxed,
+    # the same machinery as a nested async generator. The box handle is a
+    # hidden trailing argument at every call site in the enclosing function.
+    test_generator_stdout("nested_generator_captures_enclosing_var_local", """\
+def outer():
+    var k = 5
+    def g():
+        yield k
+        yield k + 1
+    for v in g():
+        print(v)
+
+
+def main():
+    outer()
+""", "5\n6\n")
+    test_generator_stdout("nested_generator_captures_enclosing_param", """\
+def outer(n: Int):
+    def g():
+        yield n * 2
+    for v in g():
+        print(v)
+
+
+def main():
+    outer(4)
+""", "8\n")
+    test_generator_matches_cpython("nested_generator_mutates_enclosing_var_via_nonlocal", """\
+def outer():
+    var k = 5
+    def g():
+        nonlocal k
+        yield k
+        k = k + 1
+        yield k
+    for v in g():
+        print(v)
+    print(k)
+
+
+def main():
+    outer()
+""", """\
+def outer():
+    k = 5
+    def g():
+        nonlocal k
+        yield k
+        k = k + 1
+        yield k
+    for v in g():
+        print(v)
+    print(k)
+
+
+outer()
+""")
+    # A nested generator that escapes as a value (returned, so later called
+    # with no enclosing frame to supply its box handle) stays refused.
+    test_generator_refused("nested_generator_escaping_as_value_with_capture_refused", """\
+def outer():
+    var k = 5
+    def g():
+        yield k
+    return g
+""", "variable(s) k")
+    # The same escape, but the generator WRITES the enclosing local through
+    # `nonlocal`. The write has to reach the enclosing frame, which an
+    # escaping generator cannot provide, so it is refused rather than
+    # compiled against a fresh local (which printed nothing, silently).
+    test_generator_refused("nested_generator_escaping_nonlocal_write_refused", """\
+def outer():
+    var k = 5
+    def g():
+        nonlocal k
+        yield k
+        k = k + 1
+        yield k
+    return g
+""", "variable(s) k")
 
 
 def run_tests():

@@ -1258,7 +1258,14 @@ def _nested_generator_captures(stmts) -> dict[int, list[str]]:
         own = {pn for pn, _ in (g.params or [])} | _helper_bound_names(g.body)
         reads = (gimple_exprtypes._used_idents_deep(g.body)
                  | _fstring_field_names(g.body))
-        caps = (reads & enclosing[gid]) - own
+        # A `nonlocal k` names the enclosing local even though the body
+        # also binds it (`k = k + 1` makes it "own" below). Without this, a
+        # generator that writes its enclosing local compiles with a fresh
+        # local of the same name and the write never reaches the enclosing
+        # frame -- silently wrong output, not a refusal.
+        nonlocal_names = {n for x in gimple_exprtypes._walk_ast(g.body)
+                          if isinstance(x, N.NonlocalStmt) for n in x.names}
+        caps = ((reads & enclosing[gid]) - own) | (nonlocal_names & enclosing[gid])
         if caps:
             out[gid] = sorted(caps)
     return out
