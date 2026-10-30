@@ -640,6 +640,36 @@ def main():
           out == "bound-method callback\n0\n", detail=repr(out))
 
 
+def test_await_async_bound_method_passes_receiver_and_args():
+    """`await obj.method(a)` on a compiled struct `async def` must hand the
+    callee its receiver AND its argument. The awaited call is lowered via the
+    generator-method start path, which prepends the receiver only when the
+    method's api entry records receiver='self'; async methods used to record
+    '' and so dropped `self`, shifting every argument down one slot."""
+    src = """\
+import asyncio
+
+struct Box:
+    var base: Int
+
+    fn __init__(out self):
+        self.base = 100
+
+    async def add(self, x: Int) -> Int:
+        return self.base + x
+
+async def main_co() -> Int:
+    var b = Box()
+    return await b.add(5)
+
+def main():
+    print(asyncio.run(main_co()))
+"""
+    out = _build_and_run(src)
+    check("await of a bound async method receives self and its argument",
+          out == "105\n", detail=repr(out))
+
+
 def test_future_done_callback_closure():
     """(3) a capturing closure registered via add_done_callback lowers to a
     MojoBoundMethod* (env as self) and must fire through the same tag-1
