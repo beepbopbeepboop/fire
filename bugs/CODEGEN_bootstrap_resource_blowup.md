@@ -16,7 +16,7 @@ much the compiled compiler allocates, which is why the two jobs keep the
 `program` class (55 GB) rather than the 1.5x-of-one-run class. Next step:
 bisect the spread (`MOJO_` allocation counters per phase on a low and a high
 run) before trying to bring the mean down, against the 3-4 GB standard of
-`bugs/PERF_memory_over_4gb_is_a_bug.md`. The historical text below (45 GB /
+`doc/POLICY_memory_over_4gb.md`. The historical text below (45 GB /
 32 min) is the pre-fix measurement.
 
 ## Status (2026-09-25 — OPEN, measured; print/comptime fixes landed, native Stage 2 remains unstable)

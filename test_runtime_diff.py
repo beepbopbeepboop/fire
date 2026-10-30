@@ -815,7 +815,7 @@ BUILTIN_PROGRAMS = {
     # `list(d.items())` is deliberately NOT here: that spelling reads each pair
     # pointer as an integer and segfaults, which is the element-type half of
     # `list(<a boxed container>)` and is already filed as
-    # `bugs/CODEGEN_materialized_container_has_no_element_type.md`. Adding it
+    # `CODEGEN_materialized_container_has_no_element_type (fixed)`. Adding it
     # here would make this case a place where an unrelated red lives.
     "dict_items_reads_each_slot_kind": textwrap.dedent("""\
         def main():
@@ -897,7 +897,7 @@ BUILTIN_PROGRAMS = {
     """),
     # Dynamic `getattr(obj, "method")` must agree with the static spelling
     # `obj.method` and return a callable bound method, not raise AttributeError.
-    "dynamic_getattr_of_a_method": textwrap.dedent("""\\
+    "dynamic_getattr_of_a_method": textwrap.dedent("""\
         class C:
             def __init__(self):
                 self.k = 9
@@ -1505,6 +1505,23 @@ BUILTIN_PROGRAMS = {
             # coroutine at exit -- which would make this case's interpreter
             # side fail on a warning rather than on the predicate.
             print(asyncio.run(c))
+    """),
+    # Regression for bug:COMPILE_FAIL_Android_android — the guard
+    # `if asyncio.iscoroutine(result): asyncio.run(result)` where `result`
+    # comes from a dynamic callee (dict subscript) must compile: inside the
+    # then-branch the predicate proves `result` is a live handle.
+    "asyncio_iscoroutine_guard_run": textwrap.dedent("""\
+        import asyncio
+
+        async def work(n):
+            await asyncio.sleep(0)
+            return n
+
+        def main():
+            dispatch = {"a": work}
+            result = dispatch["a"](5)
+            if asyncio.iscoroutine(result):
+                print(asyncio.run(result))
     """),
     "sibling_closure_kwargs": textwrap.dedent("""\
         def outer(flag):

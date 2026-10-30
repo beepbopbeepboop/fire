@@ -1,5 +1,20 @@
 # COMPILE_FAIL: Lib/ctypes/macholib/dyld.py
 
+## Status (2026-10-29, this session — re-verified: unchanged, feature-sized, blocked)
+
+Quick regression test `test_regress_dyld_default_search_yield.py` (already
+in tree) fails: `_generator_yield_ctype(node)` returns `None` instead of
+`'char *'`, confirming the refusal is still active. The root cause —
+`framework['name']`'s subscript element type (from foreign `framework_info`
+return) not threaded into generator yield-slot inference — is the same
+cross-module struct-typed-subscript gap documented in
+`bugs/COMPILE_FAIL_importlib_metadata___init__.md`. That gap is
+explicitly feature-sized (needs subscript-return typing through module
+boundaries into coroutine-body inference) and deliberately not attempted
+there; this file is not a tighter reproduction. No narrow fix possible
+without that shared machinery addition. Doc kept open; no tree change
+beyond this status entry.
+
 ## Status (2026-10-01 — re-measured: the entry below still holds exactly, ONE refused generator, dyld.py's own compile unit still clean)
 
 `python3 fire.py build -o .tmp/out/dyld/dyld

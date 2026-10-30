@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Regression for bug:CODEGEN_selfhost_closure_compiles_and_the_binary_segfaults.
+"""Regression for the self-hosted binary segfaulting in _canon_int: a heap
+string's bytes read back as a struct type tag (type(node) on a str node, then a
+dict-key lookup on it).
 
 Verifies that mojo_read_type_tag_safe rejects a boxed string (returns 0)
 so the self-hosted binary does not segfault on dict-key lookup.

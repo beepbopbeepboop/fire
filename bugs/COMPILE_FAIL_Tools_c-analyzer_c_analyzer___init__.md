@@ -4,6 +4,60 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__init__.
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status 2026-10-29 (planning round) — design guide for the callable-param for-loop; not yet implemented
+
+Measured this round (no code change): `test_regress_check_all.test_check_all_refusal_named`
+and `test_gimple_generator_runner._cpp_for_over_callable_local_is_named` /
+`_regression_read_table_callable_reader` all PASS on this tree. The refusal is raised at
+`mojo/backend_gimple/cpp_core.py` (the `for` branch, ~line 7350) when `s.iterable` is a
+`CallExpr` whose `func` is an `IdentExpr` in `declared`.
+
+**What the blocker actually needs.** `check_all` (`c_analyzer/__init__.py:92`) is
+`for check in checks or (): for data, failure in check(analysis): ...`. The return type of
+`check(...)` is the element type of the inner loop, and the compiler has no entry for it:
+`checks` is a parameter, so `gen._callable_ret_types` (keyed by name, carried through the
+hops in `emit_infra.carry_callable_ret_types`) has nothing under `check`. The real callers
+are in a DIFFERENT compilation unit — `c_analyzer/__main__.py:331` calls `_check_all(decls,
+checks, ...)` with `checks` built from the module's own check functions.
+
+**Decision needed (the only open one):** where does the callable's return type come from?
+- (A) Call-site evidence, whole-program: for each callable parameter, collect every value
+  passed into it across the import closure; if all resolve to one function `f`, seed
+  `_callable_ret_types[param]` from `f`'s return type. Recommended — it is the only option
+  that needs no source change and matches the refusal's own wording ("depends on which
+  callable the caller passes").
+- (B) Require an annotation (`checks: Callable[..., Iterator[...]]`). Rejected: the source
+  is CPython's and has none, and it would make the compiler accept something the
+  reference Python does not require.
+- (C) Keep the refusal. Honest but leaves five files blocked on one shape.
+
+**Plan for (A), next round:**
+1. Measure first: does the module loader (`module_loader.py`) expose the importing modules'
+   ASTs to a pre-pass of the callee's unit? If not, the evidence pass must run over the
+   import closure before emission (same place `_callable_ret_types` is seeded in
+   `emit_infra.py` ~line 677). Read both before writing anything.
+2. Add the evidence pass beside the existing callable side tables; restrict to bare-name
+   callees resolved to a top-level `def` (the same gate the refusal uses). Two call sites
+   with different callees → keep the refusal, unchanged.
+3. In `cpp_core.py`'s `for` branch, when the callee is a declared callable parameter with a
+   seeded entry, lower as an ordinary `for` over the call with that element type; otherwise
+   the existing refusal.
+4. Tests in `test_gimple_generator_runner.py`: (i) one same-module call site → compiles and
+   prints correctly; (ii) two different callees → still refused with the same message;
+   (iii) `read_table`'s default `_get_reader=csv.reader` stays refused (a default is not
+   call-site evidence) unless the evidence rule is deliberately widened — decide and pin it.
+   Existing `test_regress_check_all` must keep passing.
+5. Gate owed by the integrator: this touches `mojo/backend_gimple/*` (full `make gate`).
+
+**Honest scope.** Even with (A) landed, THIS file does not build: its imported-module floor
+(`c_common/iterutil.py` `next(...)` on a rebound list iterator; `c_parser/info.py`
+`next(...)` on a call) is still there, owned by other lanes. So this round's deliverable is
+the guide; the check_all fix alone closes no file end-to-end.
+
+## Status 2026-10-29 — refusal naming verified; structural blockers remain (worker's scope)
+
+Quick verification run (`python3 -c "import test_regress_check_all; test_regress_check_all.test_check_all_refusal_named()"` — PASS). The `check_all` refusal is now correctly named (`callable-valued local/parameter 'check(...)'`) rather than a flat `CallExpr`; that naming was landed by `c89f69f3c`. The file's own blocker (`for data, failure in check(analysis)`) is a structural gap — the callable's return type depends on which callable the caller passes — which requires shared callable-return-type-inference machinery (see `bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md`'s "Next step"). The imported-module floor (`c_common/iterutil.py` `next(...)` and `c_parser/info.py` `next(...)` on CallExpr) is owned by other workers (`bug:CODEGEN_next_on_bound_list_iter_cursor_off_by_one` / `c_parser_parser___init__`). No change to compiler code is possible without affecting those shared paths; tree stays clean with existing regression test.
+
 ## Status 2026-10-04 — same blocker (`check_all`), and the imported-module floor is the two `next(...)` shapes
 
 Re-measured on this tree (`python3 fire.py build -o .tmp/out .tmp/ca/c_analyzer/__init__.py`,
@@ -35,7 +89,7 @@ are all past:
 list-iterator local, which the compiler already supports elsewhere and which
 `bug:CODEGEN_next_on_bound_list_iter_cursor_off_by_one` is about), so it is the one to
 take first, after reading that doc. Both this file and
-`bugs/COMPILE_FAIL_Tools_c-analyzer_c_analyzer_info.md` now name the same two, which makes
+`bugs/COMPILE_FAIL_Tools_c-analyzer_c_analyzer_info.md` (deleted — fixed) now name the same two, which makes
 them the shortest path to a smaller closure for three of these files at once.
 
 ## Status 2026-10-02 — the imported-module floor is down to TWO, and `check_all` is still the one own-file blocker

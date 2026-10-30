@@ -373,7 +373,7 @@ def test_elaboration_generic_call(wd):
         # `len(objects) == 1` and the call names a concrete instantiation.
         # NOTE (2026-10-02): an in-TU instantiation route was built and
         # measured for this shape — see
-        # bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md
+        # bugs/imported-generic-elaboration-defect
         # — which would make `objects` 0 and the definition in-TU. It is NOT
         # landed: it regressed five currently-compiling files, because
         # `monomorphize.mangle` keys only on the sorted bracket-parameter
@@ -1725,7 +1725,7 @@ def test_type_param_markers_and_simd_unification(wd):
     defines it. Measured over the stdlib sweep, the `//` marker alone accounted
     for 383 of 1254 elaborator declines — every template in the numeric library
     is written with it (`def ceildiv[T: CeilDivable, //](...)`). See
-    bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md."""
+    bugs/imported-generic-elaboration-defect."""
     import elaborate as el
 
     check("marker#1: `//` is a separator, not a type param",
@@ -1773,6 +1773,22 @@ def test_type_param_markers_and_simd_unification(wd):
     check("unify#5: too few arguments still declines",
           el.infer_type_args('def f[T, U](a: T, b: U) -> T:\n    return a\n',
                              ['int64_t']) is None)
+    check("unify#6: a param no argument binds takes its provable default",
+          el.infer_type_args(
+              'def pick[result_type: AnyType = NoneType](x: Int) -> Int:\n'
+              '    return x + 1\n',
+              ['int64_t']) == ['NoneType'])
+    check("unify#7: a default is used only for a param the arguments left unbound",
+          el.infer_type_args(
+              'def f[T, U: AnyType = NoneType](a: T) -> T:\n    return a\n',
+              ['int64_t']) == ['Int64', 'NoneType']
+          and el.infer_type_args(
+              'def f[U: AnyType = NoneType](a: U) -> U:\n    return a\n',
+              ['char *']) == ['String'])
+    check("unify#8: an unbound param with no provable default still declines",
+          el.infer_type_args(
+              'def f[T, U: AnyType = make_default()](a: T) -> T:\n    return a\n',
+              ['int64_t']) is None)
 
 
 def test_generic_instantiation_symbol_agreement(wd):

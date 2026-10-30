@@ -1,8 +1,8 @@
 # A method receiver whose type could not be resolved returns the receiver's own pointer bits
 
 **State: OPEN. Found 2026-10-01 while fixing
-`bugs/hard/CODEGEN_param_used_only_as_method_receiver.md`'s constructor
-direction (doc deleted, same commit). Not caused by that fix — a genuinely
+the constructor direction of the method-receiver struct-pointer fix
+(commit ddf415104, doc deleted in the same commit). Not caused by that fix — a genuinely
 polymorphic slot was never resolvable and still is not; what changed is only
 that the UNanimous case now resolves, which makes the unresolvable case
 visible as what it is.**
@@ -52,7 +52,7 @@ The two numbers are the two different heap addresses the `T *` / `U *` had.
 `L.__init__`'s `w` is passed a struct pointer at both call sites, and the
 observation is NOT unanimous (`T *` at one, `U *` at the other), so the
 documented rule leaves the slot at the `int64_t` default —
-`bugs/hard/CODEGEN_param_used_only_as_method_receiver.md`'s fix and the
+the method-receiver struct-pointer fix (commits ddf415104, 6379400b1) and the
 `Pass 1.3d-struct` loop above it both refuse on disagreement. That part is
 correct.
 
@@ -107,7 +107,7 @@ observation set:
 
 - empty set → keep today's stub (genuinely opaque);
 - a single `<Struct> *` → this can no longer happen after
-  `CODEGEN_param_used_only_as_method_receiver`'s fix, and is worth an
+  the method-receiver struct-pointer fix (ddf415104), and is worth an
   assertion rather than code;
 - two or more `<Struct> *`s → emit a polymorphic receiver: pass the boxed
   receiver and the method name to a runtime helper that reads

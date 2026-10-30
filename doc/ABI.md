@@ -704,7 +704,7 @@ The mangling is `monomorphize.mangle`, and `Pair[Int]` is `Pair_1_T_3_Int` — n
 argument emitted as `{len(name)}_{name}_{len(value)}_{value}` under the base
 name, so a name cannot be read back ambiguously and two instantiations cannot
 collide (`monomorphize.py`'s `mangle` and `_fields` state both, and
-`bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md` is why
+`bugs/imported-generic-elaboration-defect` is why
 the flat spelling was replaced). It is what the compiled path's `Elaborator`
 computes and what its objects are named.
 

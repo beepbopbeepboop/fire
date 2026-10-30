@@ -169,6 +169,89 @@ class TestTheInstrument(unittest.TestCase):
                          % still)
 
 
+class TestTheExColumnIsKeyedByShape(unittest.TestCase):
+    """The EX column's key is (mnemonic, operand shape), not the mnemonic.
+
+    The instrument defect the key existed to close: the two `imul` spellings
+    (`6B /r ib`, three operands with an immediate, and `0F AF`, two
+    operands) disassemble to the SAME mnemonic, so a mnemonic-only key
+    credited an image that contained only the two-operand form to the
+    three-operand encoder, and the census claimed a corpus the images did
+    not contain. `bugs/FORMAL_isa_census_examples_column_matches_by_
+    mnemonic.md` and its two siblings are the filings of this one defect.
+    """
+
+    def test_two_spellings_of_one_mnemonic_are_not_interchangeable(self):
+        """An image containing only one spelling is credited to one encoder.
+
+        The measured case: eight images held `imulq %rax, %r11` only and
+        were credited to `encode_imul_r64_r64_imm`, whose form is the
+        immediate spelling. A register is part of the key as its CLASS, not
+        its number or name — `%rax` and `%r11` are the same shape, `%eax`
+        is not.
+        """
+        table = {"enc_imm": ("imulq", "$0x7, %r, %r"),
+                 "enc_reg": ("imulq", "%r, %r")}
+        image = {("imulq", "%r, %r")}
+        self.assertEqual(
+            [e for _k, e in C._match_forms(image, table)],
+            ["enc_reg"],
+            "the immediate spelling is credited for an image that contains "
+            "only the two-operand imul, so the EX key is back to the "
+            "mnemonic alone")
+
+    def test_a_shared_shape_reads_ambiguous_rather_than_one_of_the_two(self):
+        """Two encoders whose words disassemble to the same (mnemonic, shape)
+        cannot be told apart by any image: the cell says the form is there
+        and the attribution is the column's, not the image's."""
+        table = {"enc_a": ("addq", "%r, %r"),
+                 "enc_b": ("addq", "%r, %r")}
+        self.assertEqual(C._shape_collisions(table),
+                         {"enc_a", "enc_b"},
+                         "a shape shared by two encoders does not read "
+                         "ambiguous, so one of the pair is credited on a "
+                         "tie the disassembly cannot break")
+        self.assertEqual(C._shape_collisions(
+            {"enc_a": ("addq", "%r, %r"), "enc_b": ("addq", "$0x1, %r, %r")}),
+            set(),
+            "different shapes are not a collision: the column separates "
+            "them and may credit one or the other")
+
+    def test_the_shape_erases_register_numbers_and_keeps_immediates(self):
+        """The half that makes the key a FORM rather than a WORD.
+
+        `addsd %xmm1, %xmm0` and `addsd %xmm2, %xmm1` are one form (same
+        shape); a standard register and an extended one are one form too,
+        so `imulq %rax, %r11` and `imulq %r12, %r13` share a shape and
+        `imull $1, %eax, %eax` does not; an immediate IS the form, so
+        `add x0, x1, #0` is not `add x0, x1, #8`, and the `sh` field
+        (`lsl #12`) is the form too.
+        """
+        self.assertEqual(C._operand_shape("addsd %xmm1, %xmm0"),
+                         C._operand_shape("addsd %xmm2, %xmm1"))
+        self.assertEqual(C._operand_shape("imulq $0x7, %rbx, %rax"),
+                         C._operand_shape("imulq $0x7, %r12, %r13"))
+        self.assertEqual(C._operand_shape("imulq %rax, %r11"),
+                         C._operand_shape("imulq %r12, %r13"))
+        self.assertNotEqual(C._operand_shape("imulq $0x7, %rbx, %rax"),
+                            C._operand_shape("imulq %rax, %r11"))
+        self.assertNotEqual(C._operand_shape("%eax"), C._operand_shape("%rax"),
+                            "a 32-bit and a 64-bit register read as one "
+                            "class: the shape merges two forms")
+        self.assertEqual(C._operand_shape("%fs:0x28"), "%f:0x28",
+                         "the arm64 reader reached into an x86 immediate: "
+                         "the lookbehind that keeps `0x28` out of the "
+                         "register match is gone")
+        self.assertEqual(C._operand_shape("add x0, x1, #0"),
+                         C._operand_shape("add x30, x5, #0"))
+        self.assertNotEqual(C._operand_shape("add x0, x1, #0"),
+                            C._operand_shape("add x0, x1, #8"))
+        self.assertEqual(C._operand_shape("add x0, x1, #0x20, lsl #12"),
+                         C._operand_shape("add x30, x5, #0x20, lsl #12"))
+        self.assertNotEqual(C._operand_shape("sub x0, x1, #32, lsl #12"),
+                            C._operand_shape("sub x0, x1, #32, lsl #0"))
+
+
 class TestExemptions(unittest.TestCase):
     """Every exemption is honest, and an exemption cannot outlive its reason."""
 

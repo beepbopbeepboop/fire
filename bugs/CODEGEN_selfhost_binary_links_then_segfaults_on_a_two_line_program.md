@@ -17,8 +17,8 @@ links…` is this one, `CODEGEN_selfhost_closure_compiles_and_the_binary_
 segfaults`, `CODEGEN_selfhost_actual_types_identifier_field_key`,
 `CODEGEN_selfhost_dumpfull_ends_in_attributeerror_platform`,
 `CODEGEN_selfhost_tokenize_region_eq_quadratic`, and the module-level
-`CODEGEN_cas_py_never_compiles…` / `CODEGEN_module_toplevel_undefined_in_selfhost`
-— read off `ls bugs/CODEGEN_selfhost*` rather than from a list carried in
+self-host link failure with undefined toplevel symbols (its doc was deleted with
+its fix) — read off `ls bugs/CODEGEN_selfhost*` rather than from a list carried in
 prose, so it is a census and not an inventory. There is no doc anywhere in
 `bugs/` whose subject is the state the job is in NOW, which is that the
 generated C compiles, links, and produces a binary that **crashes on the first
@@ -103,8 +103,8 @@ the crash is in.
    a 522-second job.
 2. ~~Reconcile the `CODEGEN_selfhost_*` docs.~~ DONE in `2e9349ed` ("Six
    selfhost docs -> one"): the GCC-error docs are deleted with their fixes and
-   `bugs/CODEGEN_selfhost_closure_compiles_and_the_binary_segfaults.md` carries
-   the state. What is left is the count in this doc's own heading, which says
+   the closure-compiles-and-the-binary-segfaults state was carried by a doc that
+   its fix (runtime type-tag validation, 49dbaeda7) deleted. What is left is the count in this doc's own heading, which says
    "eight ... already do" where the census in the paragraph above now lists
    five — so that sentence is re-measured from `ls bugs/CODEGEN_selfhost*`, not
    from a list carried in prose, and the only doc-level work remaining is
