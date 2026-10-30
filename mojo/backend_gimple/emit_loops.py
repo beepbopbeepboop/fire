@@ -719,28 +719,14 @@ def _boxed_list_ptr(gen, lst_type: str, lst_val: str) -> str | None:
     `double` element against a `char *` dict key, "pointer value used where a
     floating-point was expected").
 
-    A list of INTS needs a second, separate source of evidence: an `int64_t`
-    in `_elem_types` is the "nothing known" default, so a list whose element
-    type is int is not distinguishable there. A coroutine body's list param
-    whose unanimous call-site contract is int (`_coro_int_list_params`, the
-    same per-body table `_coro_str_params` is) is that evidence, and it
-    takes the same skip with `int64_t` as the element type. Without it the
-    dict arm declared the loop variable `char *` and `t += x` printed a
-    pointer's bits (`async def total(*xs)`, `gen_add([4, 5])`).
-
     Returns None for the untyped case, and the caller falls back to emitting
     the dispatch exactly as before.
     """
     if lst_type not in ('int', 'int64_t', 'void *'):
         return None
-    _int_lists = getattr(gen, '_coro_int_list_params', {}).get(
-        getattr(gen, 'current_func_name', None), ())
-    if _as_str(lst_val) in _int_lists:
-        elem = 'int64_t'
-    else:
-        elem = gen._elem_of(lst_val)
-        if not elem or elem == 'int64_t':
-            return None
+    elem = gen._elem_of(lst_val)
+    if not elem or elem == 'int64_t':
+        return None
     lp = gen._coerce_to_type('int64_t', 'MojoList *', gen._to_int64(lst_type, lst_val))
     gen._elem_types[lp] = elem
     return lp

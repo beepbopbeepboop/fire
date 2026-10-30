@@ -592,24 +592,6 @@ def decode_all(code: bytes, start: int = 0, end: int = None) -> list:
     return out
 
 
-def body_end(info: dict) -> int:
-    """The offset into `code` at which a linear sweep of a body must stop.
-
-    Every function body comes before the string pool and before the float-repr
-    helper, and the helper follows the bodies. Neither is an instruction a
-    body's chain reaches (a body calls the helper, and the chain does not follow
-    a `call`), and the helper's SIB-indexed byte stores are not a form this
-    decoder reads. So the sweep ends at the first of them. Both consumers of a
-    body's decode, `x86_64_proof_gen._decode_function_body` and the end-to-end
-    emitter's `_body`, take their end from here.
-    """
-    base = info["base_addr"]
-    ends = [a for name, a in (info.get("labels") or {}).items()
-            if name.startswith("str_")]
-    ends.append(info["float_repr_addr"])
-    return min(ends) - base
-
-
 def forms(insns: list) -> set:
     """The set of distinct `form` values — the model's implementation checklist."""
     return {i.form for i in insns}

@@ -447,7 +447,7 @@ jobs that can see a compiled-codegen divergence: `bootstrap-stage2-dumps`
 passing is not evidence the binary dumps correctly, because `reject=` is a
 regex over a child's output and a child that writes a wrong artifact prints
 nothing. Residual divergence class, if one reappears:
-commit e8a7135b8; the whole-closure
+`bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md`; the whole-closure
 compile costs 12-15 GB and ~7.5 min per stage
 (`bugs/CODEGEN_bootstrap_resource_blowup.md`).
 

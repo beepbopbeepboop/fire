@@ -5116,11 +5116,6 @@ MATCH_REFUSED_KINDS = (
     "sequence pattern",
     "mapping pattern",
     "class pattern",
-    # `case C():` is refused by the FORMAL path, which has no isinstance in its
-    # model. The compiled path lowers it before its refusal check
-    # (`mojo/backend_gimple/emit_stmts.py`), so this tuple is the formal layer's
-    # refusal list, not the compiled path's.
-    "class pattern (type test)",
     "as-binding",
     "enum pattern",
 )
@@ -5142,9 +5137,6 @@ def match_pattern_kind(pattern, bound=frozenset()) -> str:
     * `"value"` — anything else that is an ordinary expression: a literal, a
       unary minus, a dotted `mod.CONST` value pattern, a subscript. Compared
       with `==`, which is CPython's own reading of a literal or dotted pattern.
-    * `"class pattern (type test)"` — `case C():`, which is `isinstance(subject,
-      C)`. Listed in `MATCH_REFUSED_KINDS` for the formal path; the compiled
-      path lowers it (see `mojo/backend_gimple/emit_stmts.py`).
     * one of `MATCH_REFUSED_KINDS` — a PEP 634 structural pattern, refused by
       name.
 
@@ -5168,24 +5160,6 @@ def match_pattern_kind(pattern, bound=frozenset()) -> str:
     if isinstance(pattern, F.DictExpr):
         return "mapping pattern"
     if isinstance(pattern, F.CallExpr):
-        # `case C():` with no sub-pattern is a type test, isinstance(subject, C).
-        # Positional-capture-only (`case C(x):`) also lowers via isinstance +
-        # attribute reads; it stays refused until __match_args__ is bound.
-        args = getattr(pattern, 'args', []) or []
-        kwargs = getattr(pattern, 'kwargs', []) or []
-        if not args and not kwargs:
-            return "class pattern (type test)"
-        # Positional-capture-only (bare IdentExpr args, no sub-patterns,
-        # no keyword args) — the compiled path lowers this via isinstance
-        # + getattr(subject, __match_args__[i]); keep refused for all other
-        # structural shapes (keyword sub-patterns, literal sub-patterns,
-        # missing __match_args__ resolved at compile time not here).
-        if args and not kwargs and all(
-            getattr(a, 'name', None) is not None
-            and getattr(a, '__class__', None).__name__ == 'IdentExpr'
-            for a in args
-        ):
-            return "class pattern (type test)"
         return "class pattern"
     if isinstance(pattern, F.BinaryOp):
         if pattern.op == "as":
@@ -5257,13 +5231,6 @@ def match_pattern_refusal(kind: str, spelling: str, fn_name: str,
             "a working feature, and answers a question about the subject with "
             "an answer about a fresh object. Dispatch on a field "
             "(`match p.x:` then `case 0:`) is the spelling that lowers here"),
-        "class pattern (type test)": (
-            "a CLASS TYPE TEST (`case Point():`), which is `isinstance(subject, "
-            "Point)` and binds nothing. The formal model has no isinstance, so "
-            "it cannot state what the test answers; lowering it as an "
-            "expression would CONSTRUCT `Point()` and compare with `==`, which "
-            "answers a different question. Test the type with an explicit "
-            "field or value (`match p.kind:` then `case 0:`) instead"),
         "as-binding": (
             "an `as`-BINDING (`case P as w:`), which matches the whole "
             "subject and ALSO binds it to `w`. This path parses `as` as a "
@@ -13176,12 +13143,6 @@ def integer_text_width(bits: int) -> int:
 # `Int` alias or a `SIMD[UInt8, 4]` element is the same question asked of a
 # different spelling.
 INTEGER_TEXT_WIDTHS = {8: 4, 16: 6, 32: 11, 64: 20}
-
-#: Export-rule answers `_export_rule_for` in `build.py` returns when the
-#: defining module declares a name but no exclusion applies (DECLARED), or
-#: never names it at all (ABSENT). Both are `reflect.EXCL_*`-shaped strings.
-EXPORT_RULE_DECLARED = "declared"
-EXPORT_RULE_ABSENT = "absent"
 
 # What an f-string's FIELD has to be for a buffer's bound to be known before
 # the program runs. Read out of the corpus by
@@ -24400,7 +24361,7 @@ GIMPLE_RUNTIME_PREFIX = "mojo_"
 #
 # This is the generalisation of the `GIMPLE_LIST_PREFIX` special case that
 # stood here before, and that constant is gone: a hand-kept list of prefixes is
-# a list that rots, and the shape answers the same question for all 719 entry
+# a list that rots, and the shape answers the same question for all 725 entry
 # points the headers declare rather than for the 40-odd names one prefix
 # happened to cover.
 
@@ -24570,7 +24531,7 @@ def _parse_ctype(decl: str, is_param: bool = False) -> tuple:
     because it does in a parameter list and does not in a return type:
     `void *db` is a `void *` with a name, `void *` is not. Getting that backwards
     makes every parameter a type called `void db`, which nothing recognises as a
-    scalar — and a rule that refuses all 719 entry points for that reason looks
+    scalar — and a rule that refuses all 725 entry points for that reason looks
     exactly like a rule that has measured them all and found none reachable.
 
     The result is the RESOLVED type, which is what every reader of it wants:

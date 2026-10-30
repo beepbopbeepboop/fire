@@ -491,7 +491,44 @@ def test_every_declaration_is_seen():
     # got exactly one of them.
     # `gimple_len_of_param_called_with_list_and_str` is the row that is run
     # REPEATED, because the old answer was heap-dependent.
-    for header, want in (('fire_runtime.h', 616),   # --fix writes the live figure
+    for header, want in (('fire_runtime.h', 622),   # --fix writes the live figure
+    # 616 -> 622 (2026-10-30, gate fixup; rthdrscan red on 616 vs 622 at the
+    # 4a845151 gate): SIX names, all read off the call at 9b1fa9066, and the
+    # whole delta — the last --fix sync (80cb5cb62) carries none of them:
+    #   +1  `mojo_list_set_kinds_uniform` (47e56285b, "CODEGEN_
+    #       materialized_container_has_no_element_type: fix opaque arm") — the
+    #       uniform-kind store the opaque-arm bb_dict branch emits once a
+    #       container's element type is known; it landed, was REVERTED
+    #       (4668f0d5e) with its first fix, and came back with the re-fix, so
+    #       the header carries the name from the re-land, not the original.
+    #   +2  `mojo_cstr_slice_n` / `mojo_cstr_region_eq_n` (d86e43269, "runtime:
+    #       add length-aware ...", root-cause fix for the quadratic tokenizer
+    #       scan) — the length-aware twins of `mojo_cstr_slice` / region-eq for
+    #       a caller that already holds the string length, so the scan does not
+    #       re-walk from byte 0; the emission side (emit_calls.py) still owes
+    #       the `_n` call sites, so this is a partial fix's census again.
+    #   +1  `mojo_raise_zero_division` (0bb162ea6, "Integer division by zero
+    #       raises ZeroDivisionError on the compiled path") — the raiser
+    #       `mojo_int_divisor()` routes its divisor through, so `x // 0`,
+    #       `x / 0` and `x % 0` raise a real, catchable ZeroDivisionError
+    #       instead of the bare C division that answered 0 on arm64.
+    #   +1  `mojo_box_from_double` (d18e106c6, "codegen: box a float passed to
+    #       an int64_t parameter beside integers") — the double -> box bridge
+    #       the argument coercion emits when a possibly-double actual meets an
+    #       int64_t parameter.
+    #   +1  `mojo_float_arith_select` (9b1fa9066, "a float-possible parameter's
+    #       + - * answers a double when it is one") — the run-time picker
+    #       between the precomputed integer and double answers of + - * whose
+    #       one operand is a float-possible parameter: a double box when either
+    #       raw operand word is a double box, the integer otherwise.
+    # Three of the six are word-shaped (the two `_n` string readers and the
+    # raiser) and three box-shaped (the two double bridges and the uniform-kind
+    # store), which is the whole 297 -> 300 word and 422 -> 425 box movement in
+    # the quoted figures — a pure renumbering `--fix` wrote from this scan, not
+    # an addition. `mojo_int_divisor` is NOT in the count: it is `static
+    # inline` in fire_runtime.h (its body is the inline that every integer
+    # `/`, `%` and `//` routes its divisor through), so it has no external
+    # symbol and is exactly like the other inline helpers this scan excludes.
     # 610 -> 615 (2026-10-27, gate fixup on the integ batch 08e9229bf):
     # TWO names, both read off the call at 2cf8a3358 ("Partial fix for dict
     # slot read root cause") — `mojo_dict_slot_kind` (the MOJO_KIND byte of

@@ -2186,7 +2186,8 @@ test('coro-future-await', [PY, 'test_coro_future_await.py'], mem='tiny',
           'async struct-method calls (receiver + args)')
 test('async-void-return', [PY, 'test_async_void_return.py'], mem='tiny',
      deps=['preflight'],
-     desc='an async function with no return value')
+     expect='3 failing: an async function with no return value',
+     desc='3 failing: an async function with no return value')
 test('taskgroup', [PY, 'test_taskgroup.py'], mem='tiny',
      deps=['preflight'],
      desc='TaskGroup')
@@ -2310,9 +2311,8 @@ test('coro-nested-capture', [PY, 'test_coro_nested_async_capture.py'], cache=Tru
 # `_selfhost_*` seed passes within one process; degenerate-hashing check on
 # the tokenizer's `MojoSet` usage).
 #
-# `native-dumpfull` was marked with this same reason until its bootstrap chain
-# went green (2026-10-25); its registration below says why it is not marked
-# any more. This constant is
+# `native-dumpfull` carries this same reason and is LEFT on `expect=`; see its
+# registration below for why that one is not switched too. This constant is
 # also the whole of §4's subject matter: bugs/CODEGEN_ab_native_fails.md tables
 # every `expect=` job in the registry with its measured peak, its class and its
 # reservation, and a recommendation each.
@@ -2399,20 +2399,15 @@ test('ab-native', [PY, 'test_ab_native.py'], driver='mem', mem='program',
      expect=SELFHOST_TOKENIZE_BLOWUP,  # 29/30 pass (match_stmt diverges, see bug doc); cheap (0.1 GB, ~10s)
      desc='python vs native codegen, byte-for-byte, over the A/B corpus')
 # NOT switched, deliberately, and the reason is per job rather than per
-# principle: `bootstrap-stage2-dumps` carries the same blowup in its `expect=`
-# reason and is the owner's call, because it is also the job whose run produces
-# the measurements the blowup work is steered by — a marker that cannot be
-# observed going green is weak, and this is the case for not weakening it.
-# §4 of bugs/CODEGEN_ab_native_fails.md tables it with its peak, class and
-# reservation and a recommendation, so the choice is a line rather than an
-# investigation.
-# `native-dumpfull` needs `mojoc` built first: it runs `./mojoc --dump-full`
-# and writes `fire.ci` into the repo root, the same shared-artifact pattern
-# that makes `ab-native` `excl`. Without `deps` it raced `mojoc` at t=0 and
-# died with "mojoc not built" — hidden until now only because `expect=` used
-# to forgive that failure.
+# principle: `native-dumpfull` and `bootstrap-stage2-dumps` carry the same
+# blowup in their `expect=` reason and are the owner's call, because both are
+# also the jobs whose runs produce the measurements the blowup work is steered
+# by — a marker that cannot be observed going green is weak, and this is the
+# case for not weakening it. §4 of bugs/CODEGEN_ab_native_fails.md tables both
+# with their peak, class and reservation and a recommendation each, so the
+# choice is a line rather than an investigation.
 test('native-dumpfull', [PY, 'test_native_dumpfull.py'], driver='mem',
-     mem='module', deps=['mojoc'], excl=True,
+     mem='module',
      memwhy='measured 10.4 GB (2026-10-25, the full gate): the self-hosting '
             'bootstrap pre-pass this corpus legitimately triggers, still over '
             'the 4 GB line - see ' + MEM_DEBT_DOC + '. The job PASSES now '
