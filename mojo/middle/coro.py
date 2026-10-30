@@ -3646,10 +3646,14 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
         describe themselves in terms of UNANNOTATED params."""
         return pann is None or pann == ''
 
-    def _visit_call(node, caller_env):
+    def _visit_call(node, caller_env, callee=None):
+        # `callee` is the name the call resolves to in THIS module, given by a
+        # closure caller whose spelling is an alias (`from m import gen as g`
+        # calls `g`, which is `gen` here). Absent, the spelling is the name.
         fn = node.func
-        gname = fn.name if isinstance(fn, N.IdentExpr) else \
-            (fn.member if isinstance(fn, N.MemberExpr) else None)
+        gname = callee if callee is not None else (
+            fn.name if isinstance(fn, N.IdentExpr) else
+            (fn.member if isinstance(fn, N.MemberExpr) else None))
         fd = None
         pinfo = None
         if gname in gen_names:
@@ -3741,33 +3745,41 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
             seen[_n] = {}
         _collect()
 
-    # The bare names that the closure module currently being walked binds to
-    # THIS module's generators with an un-aliased `from <module_name> import g`.
-    # A bare `g(...)` counts only when the walk's own module made that import,
-    # so a same-named `g` from any other module is never mistaken for it.
-    _bound_here: set = set()
+    # What the closure module currently being walked binds to THIS module's
+    # generators, so that a call spelled in that module can be typed here:
+    #   * `_bound_here`: local name -> generator name, for
+    #     `from <module_name> import g [as local]`. A bare `local(...)` counts
+    #     only when the walk's own module made that import, so a same-named
+    #     `g` from any other module is never mistaken for it.
+    #   * `_alias_here`: local names bound to THIS module by
+    #     `import <module_name> as k`, so `k.g(...)` counts.
+    _bound_here: dict = {}
+    _alias_here: set = set()
 
     def _visit_closure_call(node, caller_env):
-        # A call from ANOTHER module of the import closure, counted in two
-        # spellings only: `<this module>.<generator>(...)` and a bare
-        # `<generator>(...)` bound by `from <this module> import <generator>`.
-        # Both name this module's generator without any other table, so they
-        # cannot collide with a same-named generator elsewhere. An aliased
-        # import is not counted, and neither is a call through a value; those
-        # stay holes, as they always were.
+        # A call from ANOTHER module of the import closure, counted in three
+        # spellings only: `<this module>.<generator>(...)`, `<alias>.<generator>(...)`
+        # for `import <this module> as <alias>`, and a bare `<local>(...)` bound
+        # by `from <this module> import <generator> [as <local>]`. Each names
+        # this module's generator without any other table, so none can collide
+        # with a same-named generator elsewhere. A call through a value is not
+        # counted; it stays a hole, as it always was.
         fn = node.func
+        _callee = None
         if isinstance(fn, N.MemberExpr):
-            _hit = (fn.member in gen_names and module_name is not None
-                    and _dotted_name(fn.obj) == module_name)
+            _obj = _dotted_name(fn.obj)
+            if (fn.member in gen_names and module_name is not None
+                    and (_obj == module_name or _obj in _alias_here)):
+                _callee = fn.member
         elif isinstance(fn, N.IdentExpr):
-            _hit = _cm_as_str(fn.name) in _bound_here
-        else:
-            _hit = False
-        if _hit:
-            _visit_call(node, caller_env)
+            _local = _cm_as_str(fn.name)
+            if _local in _bound_here:
+                _callee = _bound_here[_local]
+        if _callee is not None:
+            _visit_call(node, caller_env, _callee)
 
     def _from_bound_names(src):
-        names = set()
+        names: dict = {}
         if module_name is None:
             return names
         for s in src:
@@ -3778,9 +3790,22 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
             for _fp in (getattr(s, 'name_alias_strs', None) or []):
                 _rn = gimple_ctypes._fi_name(_fp)
                 _ra = gimple_ctypes._fi_alias(_fp)
-                if not _ra and _rn in gen_names:
-                    names.add(_rn)
+                if _rn in gen_names:
+                    names[_ra or _rn] = _rn
         return names
+
+    def _module_aliases(src):
+        aliases: set = set()
+        if module_name is None:
+            return aliases
+        for s in src:
+            if not isinstance(s, N.ImportStmt):
+                continue
+            _entries = [(s.module, s.alias)] + list(s.extra or [])
+            for _mod, _al in _entries:
+                if _al and _cm_as_str(_mod) == module_name:
+                    aliases.add(_cm_as_str(_al))
+        return aliases
 
     def _collect_from(src, visit):
         for s in src:
@@ -3819,6 +3844,8 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
         for _cs in closure_stmts:
             _bound_here.clear()
             _bound_here.update(_from_bound_names(_cs))
+            _alias_here.clear()
+            _alias_here.update(_module_aliases(_cs))
             _collect_from(_cs, _visit_closure_call)
 
     def _classify():
