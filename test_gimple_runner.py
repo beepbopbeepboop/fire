@@ -3183,20 +3183,26 @@ main()
 print(sorted([1, 3, 2], key=lambda v: -v, reverse=True))
 """, "[1, 2, 3]\n")
 
-    # A named function as the key. Deliberately an INT element: with a
-    # string element an unannotated named function's `int64_t` parameter
-    # receives the string bits and `len` misreads them
-    # (`sorted(["ccc","a","bb"], key=bylen)` -> ['bb','ccc','a']) — a
-    # pre-existing compiled-path string-argument typing gap, independent of
-    # sorted (the same function called directly is correct), so it is not
-    # pinned here as if it worked. A LAMBDA and a BUILTIN key both handle
-    # string elements correctly, and both are covered above.
+    # A named function as the key. Int elements first; the string-element
+    # case below was once measured as a miscompile
+    # (`sorted(["ccc","a","bb"], key=bylen)` -> ['bb','ccc','a'], an
+    # unannotated parameter receiving the string bits) and is now correct, so
+    # it is pinned rather than left as a comment about a gap that is gone.
     test_gimple_stdout("gimple_sorted_key_function", """\
 def negate(x):
     return -x
 
 print(sorted([1, 3, 2], key=negate))
 """, "[3, 2, 1]\n")
+
+    # A named key over STRING elements, with an unannotated parameter: the
+    # shape that used to receive the string's bits in an `int64_t` slot.
+    test_gimple_stdout("gimple_sorted_key_function_string_elements", """\
+def bylen(s):
+    return len(s)
+
+print(sorted(["ccc", "a", "bb"], key=bylen))
+""", "['a', 'bb', 'ccc']\n")
 
     # A string key is compared as a string, not as the address in its int64_t
     # slot (which would order by ADDRESS): the runtime picks the comparison
