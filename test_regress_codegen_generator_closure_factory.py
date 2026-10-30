@@ -215,3 +215,37 @@ def test_generator_list_literal_of_structs_ctor_arg_is_valid_cpp():
     finally:
         os.unlink(f.name)
     assert r.returncode == 0, r.stderr
+
+
+# The closure's RETURN type is a str here. A closure value is modeled as a
+# `std::function<int64_t(...)>` (`_CPP_CALLABLE_CTYPE`), so a non-int64 return
+# (or a non-int64 parameter, e.g. summarize_stats.py's `calc(stats: Stats) ->
+# Rows`) has no typed slot to live in. Until typed callable values land, the
+# factory must stay refused with the honest unresolved-callee message. Measured:
+# the same body returning `len(...)` (an int) compiles; only the str return
+# refuses. When typed callables land, this test flips to a compile check.
+STR_RETURN_SRC = (
+    'class Table:\n'
+    '    def __init__(self, title: str, calc, mode: int):\n'
+    '        self.title = title; self.calc = calc; self.mode = mode\n'
+    '\n'
+    'def outer():\n'
+    '    def calc_hist(key: int):\n'
+    '        def calc(hist: int) -> str:\n'
+    '            return f"<= {hist:,d}"\n'
+    '        return calc\n'
+    '\n'
+    '    def iter_tables(base: int):\n'
+    '        for i in range(2):\n'
+    '            yield Table("t", calc_hist(i + base), i)\n'
+    '\n'
+    '    for t in iter_tables(5):\n'
+    '        print(t.title, t.mode)\n'
+    '\n'
+    'outer()\n')
+
+
+def test_closure_factory_with_non_int64_return_still_refused():
+    msg = _refusal(STR_RETURN_SRC)
+    assert msg is not None, 'str-returning closure factory compiled: no typed callable slot exists for it'
+    assert "unresolved callee 'calc_hist(...)'" in msg, f"unexpected msg: {msg!r}"
