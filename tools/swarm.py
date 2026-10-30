@@ -187,8 +187,16 @@ def abandon_empty():
     return n
 
 
+def fresh_first(names, tasks):
+    """Branches that have never been tried to land go before any that already failed integration. A failed branch
+    must not hold a fresh one back: it can conflict, or turn a batch red, and the fresh branches still land."""
+    fresh = [n for n in names if C.state_of(tasks[n]) != "integration-failed"]
+    return fresh if fresh else names
+
+
 def land():
     names = [n for n in I.pick_candidates(quiet=True) if n.startswith(PREFIXES)]
+    names = fresh_first(names, C.load())
     # Master is checked out in the main checkout, where another session may have UNCOMMITTED edits (2026-10-26: a
     # row-25 edit to module_gen.py). The fast-forward would overwrite them, so git refuses, after a whole gate had passed.
     # Never touch them: leave out any branch that changes a file the main checkout has dirty; it lands when they commit.

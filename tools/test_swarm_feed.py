@@ -31,6 +31,12 @@ def main():
         open(os.path.join(tmp, "bugs", "mention.md"), "w").write(
             "# A bug\n\nThe word STOP: appears mid-line, and the note says do not stop.\n")
         ok &= check("STOP: mid-line is not a stop marker", S.stop_reason("mention") is None)
+    tasks = {"a": {"state": "exited-ok"}, "b": {"state": "integration-failed"}, "c": {"state": "exited-err"}}
+    _state = C.state_of
+    C.state_of = lambda t: t["state"]
+    ok &= check("fresh branches go before failed ones", S.fresh_first(["b", "a", "c"], tasks) == ["a", "c"])
+    ok &= check("with only failed branches left, they are tried", S.fresh_first(["b"], tasks) == ["b"])
+    C.state_of = _state
     print("all passed" if ok else "FAILED")
     return 0 if ok else 1
 
