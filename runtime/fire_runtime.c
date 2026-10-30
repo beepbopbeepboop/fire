@@ -56,22 +56,18 @@ typedef enum { MOJO_CLEANUP_DICT, MOJO_CLEANUP_LIST, MOJO_CLEANUP_SET,
                MOJO_CLEANUP_DICT_STACK, MOJO_CLEANUP_LIST_STACK, MOJO_CLEANUP_SET_STACK,
                MOJO_CLEANUP_PTR,   /* a plain malloc/calloc block: a struct instance */
                MOJO_CLEANUP_LIST_STRS, /* a list that owns its string elements */
-               MOJO_CLEANUP_CLOSURE,  /* a bound method plus the env it owns */
-               MOJO_CLEANUP_CATTR     /* a class-attribute cell global: unwinding writes its saved value back */
+               MOJO_CLEANUP_CLOSURE   /* a bound method plus the env it owns */
              } mojo_cleanup_kind_t;
 #define MOJO_CLEANUP_STACK_MAX 8192
 static mojo_cleanup_kind_t _mojo_cleanup_kind[MOJO_CLEANUP_STACK_MAX];
 static void                *_mojo_cleanup_ptr[MOJO_CLEANUP_STACK_MAX];
-/* Second word of an entry, used only by MOJO_CLEANUP_CATTR (the value to
- * restore into the slot `ptr` names). Every other kind leaves it unread. */
-static void                *_mojo_cleanup_aux[MOJO_CLEANUP_STACK_MAX];
 int _mojo_cleanup_top = -1;
 /* Indexed by _mojo_exc_top (the try/except LEVEL, not a stack of its own):
  * the cleanup-stack depth that level's own exception path should unwind
  * back down to. */
 static int _mojo_cleanup_checkpoint[MOJO_EXC_STACK_MAX];
 
-static int _mojo_cleanup_push(mojo_cleanup_kind_t kind, void *ptr)
+static void _mojo_cleanup_push(mojo_cleanup_kind_t kind, void *ptr)
 {
     if (_mojo_cleanup_top + 1 >= MOJO_CLEANUP_STACK_MAX) {
         /* Degrade to today's pre-existing "leaks on an exception path"
@@ -80,12 +76,11 @@ static int _mojo_cleanup_push(mojo_cleanup_kind_t kind, void *ptr)
          * correctness requirement for programs that never raise. */
         fprintf(stderr, "mojo_cleanup_push: cleanup stack overflow (>%d live owned locals)\n",
                 MOJO_CLEANUP_STACK_MAX);
-        return 0;
+        return;
     }
     ++_mojo_cleanup_top;
     _mojo_cleanup_kind[_mojo_cleanup_top] = kind;
     _mojo_cleanup_ptr[_mojo_cleanup_top] = ptr;
-    return 1;
 }
 
 void mojo_cleanup_push_dict(void *p) { _mojo_cleanup_push(MOJO_CLEANUP_DICT, p); }
@@ -97,12 +92,6 @@ void mojo_cleanup_push_set_stack(void *p)  { _mojo_cleanup_push(MOJO_CLEANUP_SET
 void mojo_cleanup_push_ptr(void *p)        { _mojo_cleanup_push(MOJO_CLEANUP_PTR, p); }
 void mojo_cleanup_push_list_strs(void *p)  { _mojo_cleanup_push(MOJO_CLEANUP_LIST_STRS, p); }
 void mojo_cleanup_push_closure(void *p)    { _mojo_cleanup_push(MOJO_CLEANUP_CLOSURE, p); }
-
-void mojo_cleanup_push_cattr(void **slot, void *saved)
-{
-    if (_mojo_cleanup_push(MOJO_CLEANUP_CATTR, slot))
-        _mojo_cleanup_aux[_mojo_cleanup_top] = saved;
-}
 
 void mojo_cleanup_cancel_n(int64_t n)
 {
@@ -139,7 +128,6 @@ static void _mojo_cleanup_unwind_to(int chk)
     while (_mojo_cleanup_top > chk) {
         mojo_cleanup_kind_t kind = _mojo_cleanup_kind[_mojo_cleanup_top];
         void *ptr = _mojo_cleanup_ptr[_mojo_cleanup_top];
-        void *aux = _mojo_cleanup_aux[_mojo_cleanup_top];
         --_mojo_cleanup_top;
         switch (kind) {
             case MOJO_CLEANUP_DICT: mojo_dict_free((MojoDict *)ptr); break;
@@ -151,7 +139,6 @@ static void _mojo_cleanup_unwind_to(int chk)
             case MOJO_CLEANUP_PTR:        free(ptr);                         break;
             case MOJO_CLEANUP_LIST_STRS:  mojo_list_free_owned_strs((MojoList *)ptr); break;
             case MOJO_CLEANUP_CLOSURE:    mojo_closure_free(ptr);            break;
-            case MOJO_CLEANUP_CATTR:      *(void **)ptr = aux;               break;
         }
     }
 }
@@ -1154,18 +1141,6 @@ int64_t mojo_box_from_double(double v)
     bx->kind = 'd';
     _pr_add(&_reg_box, (uint64_t)(uintptr_t)bx);
     return (int64_t)(uintptr_t)bx;
-}
-
-/* The answer of `a OP b` for an arithmetic operator whose operands may be
- * float boxes: the double answer as a fresh box when either operand IS a
- * double box, else the integer answer. Both answers are computed by the
- * caller, so this only chooses — and a choice that never reaches
- * mojo_box_from_double allocates nothing. */
-int64_t mojo_float_arith_select(int64_t a, int64_t b, int64_t ires, double dres)
-{
-    if (mojo_is_boxed(a) && ((MojoBox *)(intptr_t)a)->kind == 'd') return mojo_box_from_double(dres);
-    if (mojo_is_boxed(b) && ((MojoBox *)(intptr_t)b)->kind == 'd') return mojo_box_from_double(dres);
-    return ires;
 }
 
 /* The box read as an integer: Python's own conversion (truncation toward
