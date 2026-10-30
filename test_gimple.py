@@ -8581,12 +8581,14 @@ main()
 
         The ADDRESS was never the wrong answer — CPython prints
         `<function step at 0x...>` — so the `%d` was the whole bug, and it is
-        independent of the decorator-application defect this fixture is
-        reduced from (see
+        independent of the decorator-application defect (see
         bugs/COMPILE_FAIL_decorator_application_dropped.md, whose defect 2
-        names it as separable). The fixture keeps the decorator because that
-        is the reduction the doc measured, and because a decorated `def` is
-        the ordinary way a program ends up holding a function value.
+        names it as separable). The decorator is a pass-through, not the
+        scalar-returning `deco` the doc reduces from: a scalar decorator
+        rebinds `step` to a non-callable, which the compiled path now refuses
+        (`scalar_decorator_rebind_is_refused`), and CPython would print `99`,
+        not a function, for it. A pass-through decorator leaves `step` a
+        function value on both engines, which is what this test is about.
 
         The address is asserted by SHAPE and not by value: it differs per
         build, per process and per platform, which is why CPython cannot be
@@ -8596,7 +8598,7 @@ main()
         name = "print_of_a_function_value_is_not_a_decimal_address"
         src = '''\
 def deco(f):
-    return 99
+    return f
 
 @deco
 def step(x):
@@ -12827,6 +12829,49 @@ def step(x):
 def main():
     print(step(7))
 """), 'pass_through_decorator_on_a_def_still_compiles')
+    # A decorator FACTORY (`@deco(x)`) whose call returns a scalar is the same
+    # silent wrong answer: `step` is rebound to a scalar and `step(7)` calls
+    # the undecorated body. The factory's own return is what gets refused.
+    _run_isolated(lambda: test_raises("scalar_decorator_factory_rebind_is_refused", """\
+def deco(x):
+    return 99
+
+@deco(3)
+def step(x):
+    return x + 1
+
+def main():
+    print(step(7))
+""", "returns int64_t (not callable)"), 'scalar_decorator_factory_rebind_is_refused')
+    # A factory that hands back a nested decorator is NOT a scalar, and a
+    # factory that returns its own argument is exempt for the same reason the
+    # identity decorator is: its answer is the undecorated function's.
+    _run_isolated(lambda: test("nested_bare_decorator_returning_a_def_still_compiles", """\
+def deco(f):
+    def wrap(g):
+        return g
+    return wrap
+
+@deco
+def step(x):
+    return x + 1
+
+def main():
+    print(step(7))
+"""), 'nested_bare_decorator_returning_a_def_still_compiles')
+    _run_isolated(lambda: test("nested_decorator_factory_still_compiles", """\
+def deco(tag):
+    def wrap(f):
+        return f
+    return wrap
+
+@deco("A")
+def step(x):
+    return x + 1
+
+def main():
+    print(step(7))
+"""), 'nested_decorator_factory_still_compiles')
 
     # `len()` of a value the codegen could not type, where that value is a
     # LOCAL declared as a plain `int` — the shape that took out `make mojoc`,

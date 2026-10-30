@@ -5,6 +5,33 @@ Found 2026-09-27 while closing
 opposite kind of problem, and the reason that file needed a separate
 correctness caveat even after it started building.
 
+## Status (2026-10-29, worker round — refusal extended to factories; a false refusal in (a) fixed; defects 1-3 still open)
+
+- **Factory decorators are now refused too.** `@deco(x) def step` where
+  same-module `deco` returns a scalar (`return 99`) stops the compile with
+  `decorator 'deco(...)' on 'step' returns int64_t (not callable)`. Test:
+  `test_gimple.py` `scalar_decorator_factory_rebind_is_refused` (fails
+  before this change: the CallExpr decorator was skipped).
+- **A false refusal in the (a) refusal below is fixed.** `_infer_return_type`
+  types a bare `def` name as `int64_t`, so `def deco(f): def wrap(g): ...;
+  return wrap` (and `return some_module_def`) was refused although it returns
+  a function. A return of any `def` name is now exempt, as a return of a
+  parameter already was. Test: `nested_bare_decorator_returning_a_def_still_compiles`
+  (fails at the previous HEAD, passes after); `nested_decorator_factory_still_compiles`
+  guards the factory spelling of the same shape.
+- **`test_print_of_a_function_value_is_not_a_decimal_address` fixture
+  corrected.** It was red on the tree because its `deco` returned `99`, which
+  the (a) refusal correctly rejects. Its fixture is now a pass-through
+  decorator, so `step` is a function value on both engines.
+- Still NOT covered: an imported decorator, and a factory whose argument is
+  returned (`@wrap(helper)` with `return g`), which is exempt and so unrefused,
+  not proven correct.
+- `test_gimple.py`: 411 passed, 0 failed (`memslot --gb 8`); the two new
+  shape tests fail against the previous HEAD `module_gen.py`.
+
+Defects 1-3 and the rebinding model are unchanged; the next step is still
+step (b) of the plan below.
+
 ## Status (2026-10-29 — partial fix (a) landed: the scalar-decorator refusal; defects 1-3 still open)
 
 Landed the refusal from the plan below, step (a). It changes behaviour: a

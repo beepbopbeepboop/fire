@@ -3169,21 +3169,31 @@ def _gmi_refuse_scalar_decorator_rebind(self, stmts: list) -> None:
     lands.
 
     Scope is deliberately narrow, so this cannot drop real code:
-    - Only a bare-name decorator naming a top-level `def` in this same module
-      is inspected. Its return type comes from the same inference every
-      function uses, so no second notion of "scalar" is introduced.
+    - Only a decorator naming a top-level `def` in this same module is
+      inspected: a bare name (`@deco`) or a factory call (`@deco(x)`), whose
+      factory is that def. Its return type comes from the same inference
+      every function uses, so no second notion of "scalar" is introduced.
     - An identity or pass-through decorator (`return f`) is not refused: it
       rebinds `f` to the same object, and the undecorated answer is correct.
-    - A decorator that is a factory call (`@deco(x)`) and an imported
-      decorator are not inspected here. Those are unrefused, not proven
-      correct; the doc's remaining work covers them.
+    - An imported decorator is not inspected here. It is unrefused, not
+      proven correct; the doc's remaining work covers it.
     """
     _rd_defs = {_rs.name: _rs for _rs in (stmts or []) if isinstance(_rs, FunctionDef)}
     for _rd_fn in _rd_defs.values():
         for _rd_dec in (getattr(_rd_fn, 'decorators', None) or []):
-            if not isinstance(_rd_dec, str):
+            # `@deco` is stored as the bare name; `@deco(x)` as a CallExpr
+            # whose callee is the factory. Both name a same-module def, and
+            # both are refused on the same test: what `deco` returns is what
+            # `step` is rebound to.
+            if isinstance(_rd_dec, str):
+                _rd_name = _rd_dec
+                _rd_shown = _rd_dec
+            elif isinstance(_rd_dec, CallExpr) and isinstance(_rd_dec.func, IdentExpr):
+                _rd_name = _rd_dec.func.name
+                _rd_shown = f"{_rd_name}(...)"
+            else:
                 continue
-            _rd_target = _rd_defs.get(_rd_dec)
+            _rd_target = _rd_defs.get(_rd_name)
             if _rd_target is None or _rd_target is _rd_fn:
                 continue
             _rd_ret = self._infer_return_type(_rd_target.body)
@@ -3191,14 +3201,27 @@ def _gmi_refuse_scalar_decorator_rebind(self, stmts: list) -> None:
                 continue
             # An untyped parameter infers as int64_t, so `return f` looks
             # scalar too. A decorator that hands its own parameter back is
-            # the identity on `f`, and its undecorated answer IS correct.
-            _rd_param = _rd_target.params[0][0] if _rd_target.params else None
+            # the identity on `f`, and its undecorated answer IS correct. A
+            # factory's argument is not the decorated function, so for a
+            # factory any of its parameters may be the callable that comes
+            # back (`@wrap(helper)` with `return g`): it is exempt for all of
+            # them, and that case is unrefused rather than proven correct.
+            # A decorator that returns a `def` (its own nested `wrap`, or a
+            # module-level one) is a callable, so `_infer_return_type` (which
+            # types a bare def name as int64_t) must not be taken at its word.
+            if isinstance(_rd_dec, CallExpr):
+                _rd_params = {_rp[0] for _rp in (_rd_target.params or [])}
+            else:
+                _rd_params = {_rd_target.params[0][0]} if _rd_target.params else set()
+            _rd_callables = _rd_params | set(_rd_defs) | {
+                _rn.name for _rn in _walk_ast(_rd_target)
+                if isinstance(_rn, FunctionDef)}
             if not any(isinstance(_rd_n, ReturnStmt)
                        and isinstance(_rd_n.value, IdentExpr)
-                       and _rd_n.value.name == _rd_param
+                       and _rd_n.value.name in _rd_callables
                        for _rd_n in _walk_ast(_rd_target)):
                 raise RuntimeError(
-                    f"decorator {_rd_dec!r} on {_rd_fn.name!r} returns {_rd_ret} "
+                    f"decorator {_rd_shown!r} on {_rd_fn.name!r} returns {_rd_ret} "
                     f"(not callable), so {_rd_fn.name!r} is rebound to a scalar; "
                     f"the compiled path does not apply decorators to a def yet and "
                     f"would silently call the undecorated function (see "
