@@ -789,7 +789,7 @@ _DISPATCH_TABLE_GLOBAL_CTYPES = {
 # nothing reads it.
 #
 # `_uncompiled_module_marker`'s raise (see
-# commit 319ab932c (DELETED)) therefore
+# bugs/RUNTIME_argparse_is_stubbed_so_parse_args_consumers_crash.md (DELETED)) therefore
 # has to exclude these modules: it answers “is this a marker for a module this
 # compile never compiled”, which is true for `re` and irrelevant, because the
 # compile-time recogniser already holds the answer. Raising there turned
@@ -1666,7 +1666,7 @@ def _replace_first_ident(text: str, old: str, new: str) -> str:
     bare `extern void assert_equal (...)` in the self-hosted output against
     the defining module's real `std_testing___init___assert_equal` — the
     largest single shim-vs-noshim `--dump` divergence class (see
-    commit e8a7135b8).
+    bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md).
 
     Plain `str.find`/slicing is identical on both sides, so callers no
     longer depend on the regex engine at all."""

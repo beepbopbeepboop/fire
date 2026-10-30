@@ -930,12 +930,6 @@ void mojo_list_inherit_kinds(MojoList *dst, MojoList *src)
     if (k) mojo_list_set_kinds(dst, k);
     _KindRow *sr = _kinds_row((uint64_t)(uintptr_t)src);
     if (sr && sr->repr_fn) mojo_list_set_elem_repr(dst, (void *)sr->repr_fn);
-    /* A source with a kinds row describes each slot itself, so the element
-     * repr the destination was built with must not stand in for it. That repr
-     * came from the comprehension's one list-wide element type, which is only
-     * a summary: a mixed `struct.unpack` / `[1, 2.5]` copy was summarised as
-     * int64_t and printed its double slot as a raw integer. */
-    else if (k) mojo_list_set_elem_repr(dst, NULL);
 }
 
 /* ── The per-list ELEMENT REPR ────────────────────────────────────────────

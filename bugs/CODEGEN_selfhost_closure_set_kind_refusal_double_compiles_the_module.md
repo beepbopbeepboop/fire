@@ -8,38 +8,6 @@ inclusion), which stretches the cold bootstrap to ~8 min quiet and makes
 cold-worktree gate runs exceed registered job budgets. Compiler
 type-resolution machinery; owner domain.
 
-## Status (2026-10-29, partial fix — root cause of the `formal/model.py` instance)
-
-**Landed:** `mojo/middle/infra_infer.py`'s `_infer_param_types` no longer leaves
-a container parameter typed by the guess when the body rebinds that name to a
-container of ANOTHER kind. The guess comes from usage (`set(p)`, `for x in p`
-and the like are all "iterable" evidence), the rebinding is `p = set(p)`, and
-one C variable cannot hold both. The parameter is now the box (`int64_t`),
-the same rule `_prebound_local_ctypes` already applies to locals.
-
-**Reproduced and closed:** `formal/model.py::read_before_store` compiled
-standalone refused with `cannot coerce MojoSet * to MojoList * ... value='_t2'
-dest='live'`, from `walk_stmts(stmts, live)`'s `live = set(live)` in a nested
-def. Minimal shape: `def outer(fn): def inner(stmts, live): live = set(live)`.
-Quick test: `test_gimple.py::test_rebound_container_param_is_the_box` (fails
-before, passes after; the same-kind negative control stays `MojoList *`).
-`test_gimple.py` 417 pass / 1 fail; the one failure,
-`scalar_arity_min_max_params_are_not_containers` (link-mode prints nothing),
-produces byte-identical C with and without this change, so it is not caused
-by it. Per-function scan of `formal/model.py` and `emit_infra.py` standalone
-after the fix: no container-kind refusals remain.
-
-**Still open:**
-1. The `emit_infra.py` instance (`_t34` -> `_t35`) did not reproduce per
-   function standalone; its trigger may need the closure context. Next step:
-   under the integrator's gate, count `cannot coerce` lines in the closure
-   build log; any survivor should be extracted with the function-scan approach
-   (`ast.get_source_segment` per FunctionDef, `compile_to_gimple`).
-2. The double compile itself is the sanctioned fallback and is unchanged. It
-   only stops happening for the shapes above.
-
-Doc is kept (not deleted) because the bug is only partly closed.
-
 ## Status (2026-10-28, master 8c19a643f — recorded from the closing-gate adjudication; no action taken)
 
 ### The refusals (reproduced byte-identically in a PASSING cold run)
