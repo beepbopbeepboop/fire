@@ -6358,38 +6358,59 @@ def _unbox_float_param_operand(gen, node, ctype: str, val: str) -> tuple[str, st
 # C's `/`/`%`, so they keep the truncating answer until they get their own arm.
 _FLOAT_ARITH_OPS = ('+', '-', '*')
 
+# The C types an operand of `_float_param_arith` may have: an integer (the
+# parameter's word, or a plain int) or a double (a float literal or a double
+# expression beside the parameter).
+_FLOAT_ARITH_OPERAND_TYPES = ('int', 'int64_t', 'double')
+
 
 def _float_param_arith_applies(gen, op: str, lnode, lt: str, rnode, rt: str) -> bool:
     """Is `lnode op rnode` an arithmetic operation on a float-possible
-    parameter whose other operand is an integer, so `_float_param_arith` must
-    answer it? A `double` operand (`x * 2.5`) is not covered: its C type has
-    no `mojo_box_double` spelling, so that pair keeps the old answer."""
+    parameter, so `_float_param_arith` must answer it? The other operand may be
+    an integer (the answer is the integer or the double one, by the box) or a
+    double (the answer is always a double)."""
     if op not in _FLOAT_ARITH_OPS:
         return False
-    if lt not in ('int', 'int64_t') or rt not in ('int', 'int64_t'):
+    if lt not in _FLOAT_ARITH_OPERAND_TYPES or rt not in _FLOAT_ARITH_OPERAND_TYPES:
         return False
     return _is_may_hold_float_param(gen, lnode) or _is_may_hold_float_param(gen, rnode)
 
 
-def _float_param_arith(gen, op: str, lnode, lv: str, rnode, rv: str) -> str:
-    """`lnode op rnode` where an operand is a float-possible parameter: the
-    answer is the INTEGER one every operator gave before the box existed, or
-    a double box holding the DOUBLE answer when either operand is a double box
-    (`f(2.5)` → `x * 2` is 5.0, `f(1)` → `x * 2` is 2). Which of the two is
-    the answer is a runtime fact, so both are computed and
+def _float_operand_as_double(gen, node, ctype: str, val: str) -> str:
+    """An operand of a float-aware arithmetic operator, as a C double. A
+    float-possible parameter's word is read with `mojo_box_double` (a double
+    box's double, or a plain integer promoted); a `double` operand is already
+    one; any other integer is converted."""
+    if _is_may_hold_float_param(gen, node):
+        return _as_str(gen._call_expr('double', 'mojo_box_double', [('int64_t', val)]))
+    if ctype == 'double':
+        return _as_str(val)
+    return _as_str(gen._new_val('double', f'(double) ({_as_str(val)})'))
+
+
+def _float_param_arith(gen, op: str, lnode, lt: str, lv: str, rnode, rt: str, rv: str) -> str:
+    """`lnode op rnode` where an operand is a float-possible parameter.
+
+    Beside an INTEGER the answer is the integer one every operator gave before
+    the box existed, or a double box holding the DOUBLE answer when either
+    operand is a double box (`f(2.5)` → `x * 2` is 5.0, `f(1)` → `x * 2` is 2).
+    Which of the two is the answer is a runtime fact, so both are computed and
     `mojo_float_arith_select` picks. The raw words go to it, not the unboxed
-    operands, because the unboxing is what destroys the box. Nothing traps on
-    this path, which is why `/` is not routed here."""
+    operands, because the unboxing is what destroys the box.
+
+    Beside a DOUBLE (`x * 2.5`) the answer is a double whatever the parameter
+    holds, so it is boxed outright. Nothing traps on this path, which is why
+    `/` is not routed here."""
+    dl = _float_operand_as_double(gen, lnode, lt, lv)
+    dr = _float_operand_as_double(gen, rnode, rt, rv)
+    dres = gen._new_val('double', f'({dl}) {op} ({dr})')
+    if lt == 'double' or rt == 'double':
+        return gen._call_expr('int64_t', 'mojo_box_from_double', [('double', _as_str(dres))])
     lp = _is_may_hold_float_param(gen, lnode)
     rp = _is_may_hold_float_param(gen, rnode)
     _, ilv = _unbox_float_param_operand(gen, lnode, 'int64_t', lv)
     _, irv = _unbox_float_param_operand(gen, rnode, 'int64_t', rv)
     ires = gen._new_val('int64_t', f'({_as_str(ilv)}) {op} ({_as_str(irv)})')
-    dl = (gen._call_expr('double', 'mojo_box_double', [('int64_t', lv)]) if lp
-          else gen._new_val('double', f'(double) ({_as_str(lv)})'))
-    dr = (gen._call_expr('double', 'mojo_box_double', [('int64_t', rv)]) if rp
-          else gen._new_val('double', f'(double) ({_as_str(rv)})'))
-    dres = gen._new_val('double', f'({_as_str(dl)}) {op} ({_as_str(dr)})')
     return gen._call_expr('int64_t', 'mojo_float_arith_select', [
         ('int64_t', _as_str(lv) if lp else '0'),
         ('int64_t', _as_str(rv) if rp else '0'),
