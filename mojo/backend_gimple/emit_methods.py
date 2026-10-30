@@ -307,11 +307,15 @@ def _cattr_restore_begin(gen, body) -> None:
     execution that set it.
 
     A body with no such class records nothing and emits nothing, so its C is
-    unchanged. Residual, not covered here: a `try` restores only the cells of
-    ITS OWN function. An exception that unwinds through a nested execution of
-    the defining function and is caught by a different function, between the
-    two, leaves the defining function's cell pointing at the nested execution's
-    (see bugs/CODEGEN_nested_class_attr_reads_enclosing_local_silently_zero.md).
+    unchanged.
+
+    An exception that leaves the body without reaching a `return` is covered
+    by an unwind record: each saved cell is also pushed on the cleanup stack
+    (`mojo_cleanup_push_cattr`), and `mojo_raise`'s unwind writes it back when
+    the body is unwound, whichever function catches. `_cattr_leave` pops those
+    records on every normal exit. A `try` still restores its OWN function's
+    cells from its snapshot (`_cattr_snapshot`), since its handler does not
+    leave the function.
     """
     _found: list = []
     gimple_exprtypes._gmi_nested_struct_defs(body, '', _found, False)
@@ -339,6 +343,11 @@ def _cattr_restore_begin(gen, body) -> None:
             _seen.add(_gname)
             _saved = gen._new_val(f'{_ctype} *', f'{_gname}')
             gen._cattr_restores.append([_gname, _saved])
+            # The unwind record: an exception that leaves this function
+            # without reaching a `return` writes `_saved` back during
+            # `mojo_raise`'s unwind (see fire_runtime.c's MOJO_CLEANUP_CATTR).
+            # Popped by `_cattr_leave` on every normal exit.
+            gen._emit(f"  mojo_cleanup_push_cattr ((void **) &{_gname}, (void *) {_saved});")
 
 
 def _cattr_snapshot(gen) -> list:
@@ -366,12 +375,22 @@ def _cattr_restore_emit(gen, pairs=None) -> None:
         gen._emit(f'  {pairs[_i][0]} = {pairs[_i][1]};')
 
 
+def _cattr_leave(gen) -> None:
+    """Leave the function body by a `return`: write the entry cells back and
+    pop this body's unwind records (one per restored cell, pushed at entry by
+    `_cattr_restore_begin`). Called after the owned-local frees, which pop the
+    newer records above these."""
+    _cattr_restore_emit(gen)
+    if gen._cattr_restores:
+        gen._emit(f"  mojo_cleanup_cancel_n ({len(gen._cattr_restores)});")
+
+
 def _cattr_restore_fallthrough(gen, fn) -> None:
-    """`_cattr_restore_emit` for a body that can fall off its end. Mirrors
+    """`_cattr_leave` for a body that can fall off its end. Mirrors
     `ginf.emit_fallthrough_frees`: an unreachable restore after a final
     `return` would be dead C, so it is emitted only when the end is reachable."""
     if ginf._function_has_reachable_fallthrough(fn):
-        _cattr_restore_emit(gen)
+        _cattr_leave(gen)
 
 
 def _cattr_restore_end(gen) -> None:
@@ -389,6 +408,40 @@ def _cattr_instance_read(gen, ov, ot, aname, gname, gtype):
     _field = gimple_ctypes._safe_field(gimple_ctypes.cattr_cell_field(aname))
     _p = gen._new_val(f'{gtype} *', f'{ov}->{_field}')
     return gen._new_val(gtype, f'*{_p}')
+
+
+def _cattr_instance_dyn_read(gen, ov, ot, aname, gname, gtype):
+    """Value of class attribute `aname` read through an INSTANCE `ov`. An
+    instance attribute written on that object (`a.x = 9`) lives in the
+    dynamic storage and SHADOWS the class attribute, so the dynamic lookup
+    is consulted first; only a miss falls back to `_cattr_instance_read`.
+
+    The lookup runs under the `_mojo_getattr_nothrow` probe the 3-arg
+    `getattr` lowering uses, so a miss sets `_mojo_getattr_missed` and
+    selects the fallback instead of raising AttributeError (the bug this
+    replaces: `class A: x = 9` followed by `a.x` raised on every read).
+    The hit value comes back as the runtime's int64 word and is cast to the
+    class attribute's C type."""
+    _vp = gen._new_val('void *', f'(void *){ov}')
+    gen._emit("  _mojo_getattr_missed = 0;")
+    gen._emit("  _mojo_getattr_nothrow = 1;")
+    _r = gen._call_expr('int64_t', '_mojo_dispatch_getattr',
+                        [('void *', _vp), ('char *', gen._intern_string(aname))])
+    gen._emit("  _mojo_getattr_nothrow = 0;")
+    _missed = gen._new_val('int', '_mojo_getattr_missed')
+    _hit = gen._new_val('_Bool', f'{_missed} == 0')
+    t = gen._new_temp(gtype)
+    _bb_h = gen._new_bb(); _bb_m = gen._new_bb(); _bb_e = gen._new_bb()
+    gen._emit(f"  if ({_hit}) goto {_bb_h}; else goto {_bb_m};")
+    gen._emit_label(_bb_h)
+    gen._emit(f"  {t} = ({gtype}){_r};")
+    gen._emit(f"  goto {_bb_e};")
+    gen._emit_label(_bb_m)
+    _fb = _cattr_instance_read(gen, ov, ot, aname, gname, gtype)
+    gen._emit(f"  {t} = {_fb};")
+    gen._emit(f"  goto {_bb_e};")
+    gen._emit_label(_bb_e)
+    return gtype, t
 
 
 def _selfhost_sibling_member_kind(gen, module_name: str, method_name: str):

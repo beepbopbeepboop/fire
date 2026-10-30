@@ -2621,6 +2621,13 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # Bare class-name read goes to the current per-execution cell.
         t = gmp._cattr_read(gen, gname, gtype)
         return gtype, t
+    elif (struct_name in class_attrs and node.member in class_attrs[struct_name]
+            and ot.endswith(' *')):
+        # Instance read: dynamic storage first (an instance write shadows
+        # the class attribute), then the cell this instance was built under.
+        gname = class_attrs[struct_name][node.member]
+        gtype = gen._global_var_types.get(gname, 'int64_t')
+        return gmp._cattr_instance_dyn_read(gen, ov, ot, node.member, gname, gtype)
     elif struct_name in gen.struct_field_types and ot.endswith(' *'):
         # The struct defines its own `__getattr__` (compiled body ⇒ bare
         # `{Struct}___getattr__` key in func_return_types, or an overload

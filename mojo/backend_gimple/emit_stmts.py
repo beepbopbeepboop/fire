@@ -2696,7 +2696,7 @@ def _gen_stmt_ReturnStmt(gen, node):
     # unaffected and unchanged.
     if node.value is None:
         ginf.emit_return_frees(gen)
-        gmp._cattr_restore_emit(gen)
+        gmp._cattr_leave(gen)
         # If function returns non-void, return default value
         if gen.func_ret_type and gen.func_ret_type != 'void':
             ret = gen.func_ret_type
@@ -2742,7 +2742,7 @@ def _gen_stmt_ReturnStmt(gen, node):
         # computed, not before — a candidate can still be legitimately
         # READ from (subscript/member/method) while computing `v` above.
         ginf.emit_return_frees(gen)
-        gmp._cattr_restore_emit(gen)
+        gmp._cattr_leave(gen)
         # Record the returned container's element type so CALL SITES can
         # unpack/iterate it with the right accessor. The old condition
         # required vtype == 'MojoList *' (only fired for `return <list
