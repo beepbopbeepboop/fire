@@ -482,9 +482,10 @@ def rows_for(sweep, min_files=1):
             for name, shapes in found.items():
                 names.setdefault(name, set()).update(shapes)
         shapes = sorted({s for v in names.values() for s in v})
-        # Merge the wall tool's reach / alone columns (step 1 of consolidation)
-        wall_rank = _wall.rank(files)
-        info = wall_rank.get(module, {"reach": [], "alone": []})
+        # The wall tool's reach / alone, over the wall's OWN corpus. Ranking
+        # `files` here instead would count only the sweep's blocked files and
+        # answer a different question under the same column name.
+        info = _wall.default_rank().get(module, {"reach": [], "alone": []})
         out.append({
             "name": module,
             "files": len(files),
