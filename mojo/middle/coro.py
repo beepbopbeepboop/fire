@@ -318,10 +318,14 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
 
     Values are 'i'/'p'/'d', or ('list', elem_kind) for a list-typed local."""
     env: dict = {}
+    str_kinds: dict = {}   # local name -> {scalar kinds bound to it, every binding}
     for pname, pann in getattr(fn, 'params', []):
         k = _ann_kind(pann)
         if k is not None:
             env[pname] = k
+            # A parameter is a binding too: `def g(x: int): x = 2.5` rebinds
+            # it, and the rebind must be seen by the conflict check below.
+            str_kinds.setdefault(pname, set()).add(k)
     # Fill unannotated params from the unanimous cross-call-site kind
     # contract (bugs/hard/CODEGEN_coro_stackswitch_yield_kind_identifier_
     # inference.md repro 1: `def g(x): yield x` called only `g(3.5)`).
@@ -357,7 +361,6 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
         if len(_kinds) == 1:
             env[_nm] = ('callable', _kinds.pop())
     list_elem: dict = {}   # local name -> {elem kinds seen via `= [...]` / .append(...)}
-    str_kinds: dict = {}   # local name -> {scalar kinds seen via `= <literal or call>`}
     for n in _walk(fn):
         tgt = val = ann = None
         if isinstance(n, N.AssignStmt) and isinstance(n.target, N.IdentExpr):
@@ -429,12 +432,23 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
     # must not answer with the FIRST kind any binding gave: a name bound to
     # `False` and then `2.5` really holds both kinds across its scopes, so
     # keeping the first was a single kind the generator's value slot could
-    # not render correctly. Drop such names from the env: no entry here reads
-    # as the None hole `_generator_value_kind` already knows how to refuse
-    # beside a concrete non-int kind / type as int64_t beside an int.
+    # not render correctly.
+    #
+    # Two kinds that share one slot layout are NOT a conflict: `bool` is an
+    # `int` (see `_generator_value_kind`'s mixed bool/int DECISION), so a name
+    # bound to `True` and `2` answers 'i' as that decision already does.
+    # Anything else is recorded as a CONFLICT marker, not dropped. A dropped
+    # name reads as a None hole, and a lone hole is read as int64_t everywhere
+    # -- which is the silent truncation this fix exists to stop. The marker is
+    # a tuple so every consumer that tests `isinstance(v, str)` or `v[0] ==
+    # 'list'` treats it as "not a scalar kind", and
+    # `_conflicting_names_in` is the one reader that acts on it.
     for nm, eks in str_kinds.items():
         if len(eks) > 1:
-            env.pop(nm, None)
+            if eks <= {'i', 'b'}:
+                env[nm] = 'i'
+            else:
+                env[nm] = ('conflict', frozenset(eks))
     # `for <v> in <list-local-or-literal | sibling-generator-call>():` binds
     # <v> to the element kind
     for n in _walk(fn):
@@ -696,6 +710,34 @@ def _generator_nested_slots(fn: N.FunctionDef, env: dict | None = None):
     return [k == 'tuple' for k in kinds]
 
 
+def _conflicting_names_in(expr, env: dict | None) -> list:
+    """The names in `expr`'s VALUE position that `_static_env` recorded as
+    CONFLICTING (a local rebound to values of incompatible kinds -- see the
+    marker there). A name whose value is read through the expression counts;
+    one that is only consulted for a result that is a bool regardless of its
+    kind does not (`r < 3` is a bool whatever `r` holds), so comparisons are
+    not descended into. Returns the names, empty when there are none."""
+    env = env or {}
+    if expr is None:
+        return []
+    if isinstance(expr, N.IdentExpr):
+        v = env.get(expr.name)
+        if isinstance(v, tuple) and v[0] == 'conflict':
+            return [expr.name]
+        return []
+    if isinstance(expr, N.TernaryExpr):
+        return (_conflicting_names_in(expr.then_val, env)
+                + _conflicting_names_in(expr.else_val, env))
+    if isinstance(expr, N.BinaryOp):
+        if expr.op in _YIELD_CMP_OPS or expr.op in ('in', 'not in'):
+            return []
+        return (_conflicting_names_in(expr.left, env)
+                + _conflicting_names_in(expr.right, env))
+    if isinstance(expr, N.UnaryOp):
+        return _conflicting_names_in(expr.operand, env)
+    return []
+
+
 def _generator_value_kind(fn: N.FunctionDef,
                           env: dict | None = None,
                           delegated=None) -> tuple[str | None, str]:
@@ -703,6 +745,14 @@ def _generator_value_kind(fn: N.FunctionDef,
     has_tuple = has_nontuple = False
     for n in _walk(fn):
         if isinstance(n, N.YieldExpr):
+            _conflicts = _conflicting_names_in(n.value, env)
+            if _conflicts:
+                # The value slot would be read through a kind the name does
+                # not have on every path (see `_static_env`'s marker). Refuse
+                # rather than type it as int64_t, which is what the None hole
+                # below would do for a yield with no other kind beside it.
+                return None, (f'a `yield` of {_conflicts[0]!r}, a local rebound '
+                              f'to values of different kinds (v0)')
             k = _yield_kind(n.value, env)
             kinds.add(k)
             if k == 'tuple':
@@ -1403,6 +1453,48 @@ def _result_kind_of(expr) -> str:
             'results have different kinds, so this await cannot tell which '
             'result slot to read (v0)')
     return kind
+
+
+# The C slot type a yield of each kind needs in the COMPILED (cpp) path's
+# value slot. `d` is a double; `b` is a `_Bool` so it renders `True`. The cpp
+# path types a lambda call as `std::function<int64_t()>`, so a float or bool
+# lambda result never reaches a yield as its own kind -- which is exactly why
+# this is checked against the yield's kind here rather than trusted.
+_CPP_SLOT_FOR_KIND = {'d': 'double', 'b': '_Bool'}
+
+
+def cpp_value_slot_refusal(fn: N.FunctionDef, slot_ctype: str) -> str | None:
+    """Why the COMPILED (cpp) backend's single value slot of `slot_ctype`
+    cannot hold `fn`'s yields faithfully, or None when it can.
+
+    Reached only for a generator the stack-switch path refused, so it is the
+    fallback's own check, not a second copy of `_generator_value_kind`'s
+    verdict: `_generator_value_kind` answers "is there ONE kind for the
+    slot", and `exprtypes._generator_yield_ctype` answers "does the cpp
+    typer agree on one C type". The two disagree for a yield the cpp typer
+    cannot see the kind of -- a lambda-bound callee or a rebound local --
+    which it types int64_t, and int64_t is a silent truncation of a float
+    and a silent `1` for a `True`. So a yield whose kind here is `d` or `b`
+    must find the matching slot type, and a rebound name is a refusal
+    outright (see `_static_env`'s conflict marker).
+
+    Walks the generator's OWN body (`_walk_own_body`), not nested defs, which
+    have their own yields and slot."""
+    env = _static_env(fn, None)
+    for n in gimple_exprtypes._walk_own_body(fn.body):
+        if not (isinstance(n, N.YieldExpr) and n.value is not None):
+            continue
+        _conflicts = _conflicting_names_in(n.value, env)
+        if _conflicts:
+            return (f'a `yield` of {_conflicts[0]!r}, a local rebound to values '
+                    f'of different kinds, cannot be typed for one C value slot')
+        k = _yield_kind(n.value, env)
+        want = _CPP_SLOT_FOR_KIND.get(k)
+        if want is not None and slot_ctype != want:
+            return (f'a `yield` of a {"float" if k == "d" else "bool"} value is '
+                    f'typed {slot_ctype!r} by the cpp path, which would truncate '
+                    f'it (v0)')
+    return None
 
 
 def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
