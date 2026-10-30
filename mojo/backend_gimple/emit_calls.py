@@ -3416,18 +3416,6 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         _gw = gen._call_expr('int64_t', '_mojo_dispatch_getattr', pairs)
         gen._dyn_word_vals.add(_gw)   # see the identical note above
         return 'int64_t', _gw
-    # The 3-argument `type(name, bases, namespace)` builds a NEW class at run
-    # time from a dict of functions (collections.namedtuple's own
-    # `type(typename, (tuple,), class_namespace)`). The compiled path models
-    # classes as static structs, so there is no C to emit for it. Before this
-    # refusal it fell through to the 1-argument `mojo_type` runtime stub and
-    # produced a C call with three arguments, a gcc hard error with no
-    # pointer back to the Mojo construct. Refuse it here, by name.
-    if fname_raw == 'type' and len(node.args) == 3:
-        raise RuntimeError(
-            'cannot compile module: 3-argument type(name, bases, namespace) '
-            'creates a class at run time, which the compiled path does not '
-            'model (bug:COMPILE_FAIL_collections___init__)')
     if fname_raw == 'type'    and len(node.args) == 1:
         _, av = gen.lower_expr(node.args[0])
         # Read the struct's real leading __mojo_type_id field (see

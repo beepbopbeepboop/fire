@@ -4,25 +4,6 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__main__.
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status 2026-10-29 (round 3) — D3 measured: the coroutine path is the live emitter
-
-Step 0 of the planning round 2 guide, run on this branch with a 6-line repro
-(`.tmp/d3/repro.mojo`: `build_section(name, n)` defining `render` that yields
-`f'{name}:{i}'`, consumed by `for x in render()`), via
-`MOJO_DEBUG=1 python3 tools/memslot.py --gb 8 --label d3 -- python3 fire.py build -o .tmp/d3/out .tmp/d3/repro.mojo`
-(exit 1, ~8 s):
-
-    [gimple_codegen] generator 'render' not eligible for C++ coroutine path (retry pass 2),
-      falling back: is a nested generator that reads enclosing-scope variable(s) n, name;
-      the coroutine path has no capture model for a generator defined inside another function
-
-So a nested sync generator is routed to the C++ coroutine path (the cpp_async lane), and
-the capture refusal is what stops it there. No second emitter is involved, and nothing
-on this tree routes the case to A3 `gimple_gen_coro.py`. D3 is answered: implement the
-capture model in `cpp_async.py`, as the plan below says. The module still refuses with
-the same "Unsupported shape(s)" text, so this round changed no behaviour and touched
-no code. The capture model stays blocked on the nested-generator claim, as described below.
-
 ## Status 2026-10-29 (planning round 2) — capture-model design guide; no code landed this round
 
 **Why no code.** The capture model lives in `cpp_async._gen_cpp_generator_unit`

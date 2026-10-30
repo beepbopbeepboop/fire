@@ -4270,6 +4270,26 @@ def main():
 main()
 """, "is typed 'int64_t' by the cpp path")
 
+    # Regression test for generator METHOD yielding a float field.
+    # Before this fix, cpp_value_slot_refusal called _static_env(fn, None),
+    # so self.<field> yields were not typed from struct context. After the fix,
+    # the StructDef is threaded through and field types are properly seen.
+    # This test verifies correct compiled output (CPython compatibility).
+    test_generator_stdout("generator_method_float_field_yields_float", """\
+struct Box:
+    var value: Float64
+    fn __init__(out self, v: Float64):
+        self.value = v
+    fn get(self):
+        yield self.value
+
+def main():
+    b = Box(3.5)
+    for v in b.get():
+        print(v)
+main()
+""", "3.5\n")
+
     # ---- Regression tests distilled from the 30 bugs/CODEGEN_generator_
     # function_Lib_*.md stdlib shapes that the doc/COROUTINE.html §5.5 A3
     # stack-switch cutover made compile (previously wholesale-refused by

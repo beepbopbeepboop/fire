@@ -6301,39 +6301,6 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
     return lines
 
 
-def _cpp_literal_slot_ctype(node) -> str | None:
-    """The C type a literal tuple slot binds as in a compiled coroutine body:
-    an int (or bool, or a negated int) is int64_t, a float (or negated
-    float) is double, a plain str literal is char *. Anything else —
-    a name, a call, a nested tuple, bytes — is None: its type is not
-    knowable from the literal alone, so the caller refuses the loop
-    instead of guessing."""
-    if isinstance(node, gimple_ctypes.UnaryOp) and node.op == '-':
-        node = node.operand
-    if isinstance(node, (gimple_ctypes.IntLiteral, gimple_ctypes.BoolLiteral)):
-        return 'int64_t'
-    if isinstance(node, gimple_ctypes.FloatLiteral):
-        return 'double'
-    if isinstance(node, gimple_ctypes.StringLiteral) and not node.is_bytes:
-        return 'char *'
-    return None
-
-
-def _cpp_refuse_unpacking_target(target) -> None:
-    """Refuse a tuple `for` target that reached a generic emitter. The tuple
-    branches of `_cpp_for_stmt` unpack per slot; `target` reaching one of the
-    single-name emitters below is still the paren-stripped slot list (`name,
-    den`), and `for (auto name, den : ...)` / `name, den = ...` cannot compile.
-    Called AFTER the body is lowered, so a body-level refusal (an unresolvable
-    yield kind, say) keeps its more specific diagnosis."""
-    if isinstance(target, str) and ',' in target:
-        raise gimple_exprtypes._UnsupportedGeneratorShape(
-            f"a tuple `for` target ({target}) over this iterable is not "
-            "supported in a compiled generator/coroutine body: only a "
-            "`for` over enumerate(), a literal list of tuples, a "
-            "dict .items(), or a container global unpacks per slot")
-
-
 def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
     """Plain `for <var> in <iterable>:` inside a generator body.
     Lowers to a C++ range-for or indexed loop over the iterable.
@@ -6591,60 +6558,6 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
         if not s.else_body and gen._cpp_iterable_is_delegatable_generator_call(s.iterable):
             return gen._cpp_for_generator_delegate(_names, s.iterable, s.body,
                                                       declared, indent)
-        # `for a, b in [(1, 2), (3, 4)]:` — a tuple target over a LITERAL list
-        # of tuples. Each slot is bound from its own C array built from the
-        # literal elements (`int64_t _mg_s0[2] = {1, 3};`), read per iteration
-        # through an indexed loop. Before this, the literal fell to the
-        # generic range-for below, which emitted the comma-joined target as ONE
-        # bogus identifier (`for (auto a, b : {{1, 2}, {3, 4}})`: g++ "declaration
-        # of 'auto a' has no initializer"). Each slot's C type comes from its
-        # literal kind (`_cpp_literal_slot_ctype`) and must agree across every
-        # element; an element that is not a same-arity tuple of literals, or a
-        # slot whose kind is mixed or unknown, is refused rather than guessed.
-        if (len(_names) >= 2
-                and not s.else_body
-                and isinstance(s.iterable, gimple_ctypes.ListExpr)
-                and s.iterable.elements
-                and all(isinstance(el, gimple_ctypes.TupleExpr)
-                        and len(el.elements) == len(_names)
-                        for el in s.iterable.elements)):
-            _slot_ctypes = []
-            for _si, _nm in enumerate(_names):
-                _kinds = {_cpp_literal_slot_ctype(el.elements[_si])
-                          for el in s.iterable.elements}
-                if len(_kinds) != 1 or None in _kinds:
-                    raise gimple_exprtypes._UnsupportedGeneratorShape(
-                        f"a tuple `for` target over a literal list needs every "
-                        f"slot to be one literal kind (int, float or str) across "
-                        f"all elements; slot {_si} of '{_nm}' is not")
-                _sct = _kinds.pop()
-                if _nm in declared and declared[_nm] != _sct:
-                    raise gimple_exprtypes._UnsupportedGeneratorShape(
-                        f"tuple `for` target '{_nm}' is already a '{declared[_nm]}' "
-                        f"local and the literal list binds it as '{_sct}'")
-                _slot_ctypes.append(_sct)
-            _ctr = gen._cpp_fresh_name("_mg_i")
-            _n = len(s.iterable.elements)
-            lines = []
-            _arrs = []
-            for _si, (_nm, _sct) in enumerate(zip(_names, _slot_ctypes)):
-                _arr = gen._cpp_fresh_name("_mg_s")
-                _arrs.append(_arr)
-                _vals = ', '.join(gen._cpp_expr(el.elements[_si])
-                                  for el in s.iterable.elements)
-                _cty = gimple_exprtypes._c_to_cpp_scalar_type(_sct)
-                lines.append(f"{indent}{_cty} {_arr}[{_n}] = {{{_vals}}};")
-            for _nm, _sct in zip(_names, _slot_ctypes):
-                if _nm not in declared:
-                    declared[_nm] = _sct
-                    lines.append(f"{indent}{gimple_exprtypes._c_to_cpp_scalar_type(_sct)} {_nm};")
-            lines.append(f"{indent}for (int64_t {_ctr} = 0; {_ctr} < {_n}; {_ctr}++) {{")
-            for _nm, _arr in zip(_names, _arrs):
-                lines.append(f"{indent}    {_nm} = {_arr}[{_ctr}];")
-            for inner in s.body:
-                lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-            lines.append(f"{indent}}}")
-            return lines
         # `for k, v in <dict-typed expr>.items():` — a plain (non-generator)
         # dict iteration with a 2-name tuple target, inside a coroutine body.
         # Lowered through the SAME runtime protocol the ordinary GIMPLE
@@ -7297,7 +7210,6 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 # ZERO iterations: bind the target to 0 and skip the
                 # body, mirroring how every other stubbed operation in
                 # this body model behaves.
-                _cpp_refuse_unpacking_target(target)
                 lines = []
                 if not target_was_declared:
                     lines.append(f"{indent}int64_t {target} = 0;")
@@ -7410,7 +7322,6 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                     lines.append(f"{indent}    {target} = mojo_list_get_int({_cached}, {_ctr});")
                 for inner in s.body:
                     lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-                _cpp_refuse_unpacking_target(target)
                 lines.append(f"{indent}}}")
                 return lines
             if s.else_body:
@@ -7427,7 +7338,6 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 lines.append(f"{indent}for (auto {target} : {iter_expr}) {{")
                 for inner in s.body:
                     lines.extend(gen._cpp_stmt_with_break_flag(inner, declared, indent + '    ', brk_var))
-                _cpp_refuse_unpacking_target(target)
                 lines.append(f"{indent}}}")
                 lines.append(f"{indent}if (!{brk_var}) {{")
                 for inner in s.else_body:
@@ -7449,7 +7359,6 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             lines = [f"{indent}for (auto {target} : {iter_expr}) {{"]
             for inner in s.body:
                 lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-            _cpp_refuse_unpacking_target(target)
             lines.append(f"{indent}}}")
             return lines
         # An iterable that is a CALL is almost always one shape here — a callable

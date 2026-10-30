@@ -427,8 +427,9 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
     for nm, eks in list_elem.items():
         if len(eks) == 1 and nm not in env:
             env[nm] = ('list', list(eks)[0])
-    # A local rebound to values of DIFFERENT kinds (Shape 1 of
-    # bugs/CODEGEN_generator_yield_kind_rebound_name_silent_wrong_value.md)
+    # A local rebound to values of DIFFERENT kinds (bug fix: threading StructDef
+    # into _gen_cpp_generator_unit and cpp_value_slot_refusal to handle
+    # generator METHOD self.<field> yields.
     # must not answer with the FIRST kind any binding gave: a name bound to
     # `False` and then `2.5` really holds both kinds across its scopes, so
     # keeping the first was a single kind the generator's value slot could
@@ -1470,7 +1471,7 @@ def _result_kind_of(expr) -> str:
 _CPP_SLOT_FOR_KIND = {'d': 'double', 'b': '_Bool'}
 
 
-def cpp_value_slot_refusal(fn: N.FunctionDef, slot_ctype: str) -> str | None:
+def cpp_value_slot_refusal(fn: N.FunctionDef, slot_ctype: str, struct_def: str | None = None) -> str | None:
     """Why the COMPILED (cpp) backend's single value slot of `slot_ctype`
     cannot hold `fn`'s yields faithfully, or None when it can.
 
@@ -1487,7 +1488,7 @@ def cpp_value_slot_refusal(fn: N.FunctionDef, slot_ctype: str) -> str | None:
 
     Walks the generator's OWN body (`_walk_own_body`), not nested defs, which
     have their own yields and slot."""
-    env = _static_env(fn, None)
+    env = _static_env(fn, struct_def)
     for n in gimple_exprtypes._walk_own_body(fn.body):
         if not (isinstance(n, N.YieldExpr) and n.value is not None):
             continue
