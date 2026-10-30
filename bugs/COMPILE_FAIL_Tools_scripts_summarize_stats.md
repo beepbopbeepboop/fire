@@ -4,6 +4,23 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/scripts/summarize_stats.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (2026-10-29, round 5 — STOPPED at a claim boundary; no code change)
+
+Next step is plan step 2 onward (`types.py` `callable_ctype`, `cpp_async.py`
+closure-factory gates, `cpp_core.py` typed call dispatch). Steps 2-4 are one
+change: a `str`/pointer-returning closure needs its typed `std::function` slot
+AND its call-site dispatch together, or the value is read back as int64.
+Landing step 2 alone changes no behaviour.
+
+Stopped because that mechanism is the same one another worker holds:
+`bug:CODEGEN_closure_str_return_is_lost` (`bugs/CODEGEN_closure_str_return_is_lost.md`,
+"a closure that returns a `str` prints a decimal address"). Its return-type
+carry-through at the call site is steps 3-4 here. Editing `cpp_async.py`'s
+closure-factory gates or `cpp_core.py`'s callable dispatch from this worker
+would collide with that claim. Next round needs the controller to either hand
+the typed-callable model to this bug (and let the closure-str owner land the
+call-site return type first) or to the closure-str owner. The choice is theirs.
+
 ## Status (2026-10-29, round 4 — plan step 1 MEASURED; no code change this round)
 
 Plan step 1 from round 3 (how a `Callable[...]` annotation reaches the emitter)
@@ -551,7 +568,8 @@ yield Section(
 
 Two `lambda *_: <captured list>` literals passed as plain call
 arguments inside the generator body — the exact same, already-
-diagnosed gap as `the (since-fixed) compiled-generator lambda-expression bug`: `_cpp_expr` (the coroutine `.cpp` emission path) has no
+diagnosed gap as `bugs/hard/CODEGEN_generator_lambda_expr_unsupported.
+md`: `_cpp_expr` (the coroutine `.cpp` emission path) has no
 `LambdaExpr` case at all, and that doc's own investigation already
 established this needs a new "callable value" declared-type category
 (not a narrow widening — see that doc's "Why this is feature-sized,

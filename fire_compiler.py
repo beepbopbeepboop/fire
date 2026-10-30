@@ -3475,10 +3475,7 @@ def desugar_genexps(stmts: list) -> list:
     d.walk_list(stmts, None)
     if d.hoisted:
         stmts[0:0] = d.hoisted
-    # Cleared in place, not rebound: gimple_codegen imports this list by name,
-    # so a rebound global would leave its copy pointing at the previous call's.
-    del DESUGARED_GENEXP_NAMES[:]
-    DESUGARED_GENEXP_NAMES.extend(fn.name for fn in d.hoisted)
+    DESUGARED_GENEXP_NAMES = [fn.name for fn in d.hoisted]
     return stmts
 
 
@@ -3652,7 +3649,7 @@ def _namedtuple_tuple_use(nodes: list, name: str):
     is checked everywhere: a false refusal, never a silent one. A value that
     reaches a tuple operation WITHOUT passing through one of those names (an
     element of a container, a field of another struct) is not seen here; that
-    gap is recorded in bug:COMPILE_FAIL_collections___init__."""
+    gap is recorded in bugs/COMPILE_FAIL_collections___init__.md."""
     tracked: set = set()
 
     def is_value(e):
@@ -5202,7 +5199,7 @@ class Parser:
                 # The compiled path no longer requires the rename — a
                 # comprehension's target gets its own binding and the enclosing
                 # one is restored afterwards, in `emit_infra.py`'s
-                # `_compr_bind_target` / `_restore_binding`, regression
+                # `_compr_bind_target` / `_compr_restore_target`, regression
                 # `comprehension_target_shadows_struct_local` in
                 # `test_gimple_runner.py`. The rename stays: it is free, and it
                 # keeps this function's own C output identical to what the

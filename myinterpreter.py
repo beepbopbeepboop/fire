@@ -2215,14 +2215,7 @@ class _MojoBoundArgCall:
     def __call__(self, *args, **kwargs):
         fn = self._fn
         wrapped_func = self._wrapped_func
-        # `map`/`filter` take the callable as their FIRST positional and the
-        # iterable as their SECOND (or, for `map`, further ones). The first-arg
-        # rule in `_mojo_builtin_args` does not reach these calls because they
-        # arrive here as a `_MojoBoundArgCall`, not through `invoke` — so a
-        # Mojo iterable struct passed to `map[f](c)` fell through to
-        # `__getitem__` and died with `KeyError: 0`. Apply the same
-        # `_mojo_iterable` treatment to every argument after the callable.
-        return fn(wrapped_func, *(_mojo_iterable(a) for a in args), **kwargs)
+        return fn(wrapped_func, *args, **kwargs)
 
 
 class _MojoParametricFn:
@@ -2241,12 +2234,7 @@ class _MojoParametricFn:
 
     def __call__(self, *args, **kwargs):
         fn = self._fn
-        if not args:
-            return fn(**kwargs)
-        # `map`/`filter` take the callable as FIRST positional and iterables
-        # after that. Convert Mojo iterable structs so Python's own builtin
-        # sees them as generators rather than falling through to `__getitem__`.
-        return fn(args[0], *(_mojo_iterable(a) for a in args[1:]), **kwargs)
+        return fn(*args, **kwargs)
 
 
 class _MojoScalarType:
@@ -2496,117 +2484,6 @@ def _mojo_max(*args, **kwargs):
 
 def _mojo_min(*args, **kwargs):
     return _mojo_minmax(False, *args, **kwargs)
-
-
-def _mojo_iter(value):
-    """`iter(value)` for a struct that defines its own `__iter__`.
-
-    Python's `iter()` and `next()` look the protocol method up on the TYPE,
-    and `MojoInstance` only forwards attribute reads (`__getattr__`) to the
-    Mojo method table, so a Mojo struct with `__iter__`/`__next__` was not an
-    iterator here: `next(c)` raised "'MojoInstance' object is not an
-    iterator", and `for x in c` fell through to `__getitem__` and died with
-    `KeyError: 0`. The fix is to drive the Mojo protocol explicitly, the way
-    `__len__`/`__getitem__` already forward. A struct WITHOUT `__iter__`
-    keeps the old `iter()` behaviour (its `__getitem__` sequence fallback is
-    unchanged). Exhaustion is the Mojo `__next__` raising `StopIteration`,
-    which is a real Python exception, so it propagates unchanged."""
-    if isinstance(value, MojoInstance):
-        cls = value._mojo_class
-        method = cls.methods.get('__iter__')
-        if method is not None:
-            return _mojo_struct_iter_steps(cls, method(cls.interpreter, value))
-    return iter(value)
-
-
-def _mojo_struct_iter_steps(cls, iterator):
-    """Yield the values of a Mojo iterator object by calling its `__next__`
-    until that raises `StopIteration`. `iterator` is whatever the struct's
-    `__iter__` returned (usually `self`)."""
-    while True:
-        try:
-            yield _mojo_next(iterator)
-        except StopIteration:
-            return
-
-
-def _mojo_next(iterator, *default):
-    """`next(iterator[, default])` that also drives a Mojo struct's own
-    `__next__`. Anything that is not a `MojoInstance` goes to the builtin
-    unchanged. A struct without `__next__` is refused with CPython's own
-    message for a non-iterator."""
-    if not isinstance(iterator, MojoInstance):
-        return next(iterator, *default)
-    cls = iterator._mojo_class
-    method = cls.methods.get('__next__')
-    if method is None:
-        raise TypeError(f"'{cls.name}' object is not an iterator")
-    if default:
-        try:
-            return method(cls.interpreter, iterator)
-        except StopIteration:
-            return default[0]
-    return method(cls.interpreter, iterator)
-
-def _mojo_reversed(value):
-    """CPython's `reversed()` only accepts objects with `__reversed__` or a
-    sequence protocol. A MojoInstance without either is refused with the
-    matching message instead of falling through to `__getitem__` and dying
-    with `KeyError: 0`."""
-    if isinstance(value, MojoInstance):
-        cls = value._mojo_class
-        if '__reversed__' in cls.methods:
-            # Call the reversed method and wrap result as an iterator
-            rev_method = cls.methods['__reversed__']
-            rev_result = rev_method(cls.interpreter, value)
-            return _mojo_iter(rev_result)
-        # Check for sequence protocol (has __len__ and __getitem__)
-        if '__len__' in cls.methods and '__getitem__' in cls.methods:
-            # CPython reversed works directly on sequences
-            return value
-        # Not reversible - raise proper TypeError matching CPython
-        raise TypeError(f"'{cls.name}' object is not reversible")
-    # For non-MojoInstance values, let CPython handle it
-    return reversed(value)
-
-
-def _mojo_iterable(value):
-    """A value handed to one of Python's own iterable-consuming builtins.
-
-    Those builtins call `iter()` on the argument, which looks `__iter__` up
-    on the TYPE, so a `MojoInstance` with a Mojo `__iter__` was not iterable
-    to them (`list(c)` fell through to `__getitem__` and died with
-    `KeyError: 0`). Such a struct is handed over as the `_mojo_iter` generator
-    instead. Anything else is returned untouched, so builtins keep their
-    exact argument semantics for every other value."""
-    if isinstance(value, MojoInstance) and '__iter__' in value._mojo_class.methods:
-        return _mojo_iter(value)
-    return value
-
-
-# Builtins that iterate their first positional argument, identified by
-# `id()` because builtins live for the whole process and an `id` test never
-# hashes the callee (a Mojo value may be unhashable). `zip` iterates every
-# positional argument; `min`/`max` iterate only when given ONE argument —
-# `max(a, b)` compares values and must not turn a struct into a generator.
-_MOJO_ITER_FIRST_ARG = {id(list), id(tuple), id(set), id(frozenset), id(sum),
-                        id(sorted), id(enumerate), id(any), id(all), id(dict)}
-_MOJO_ITER_ALL_ARGS = id(zip)
-_MOJO_ITER_ONE_ARG = {id(_mojo_min), id(_mojo_max)}
-
-
-def _mojo_builtin_args(func, args):
-    """`args` with any Mojo iterable struct passed to `func` replaced by its
-    `_mojo_iterable` form. Only the calls `invoke` routes here are touched."""
-    key = id(func)
-    if key == _MOJO_ITER_ALL_ARGS:
-        return tuple(_mojo_iterable(a) for a in args)
-    if key in _MOJO_ITER_ONE_ARG:
-        if len(args) != 1:
-            return args
-    elif key not in _MOJO_ITER_FIRST_ARG or not args:
-        return args
-    return (_mojo_iterable(args[0]),) + tuple(args[1:])
 
 
 class _MojoSIMD:
@@ -3543,7 +3420,7 @@ class Interpreter:
         self.scope.define('SIMD', _MojoSIMDType())
         self.scope.define('sum', sum)
         self.scope.define('sorted', sorted)
-        self.scope.define('reversed', _mojo_reversed)
+        self.scope.define('reversed', reversed)
         self.scope.define('map', _MojoParametricFn(map, self))
         self.scope.define('filter', _MojoParametricFn(filter, self))
         self.scope.define('repr', repr)
@@ -3556,7 +3433,7 @@ class Interpreter:
         self.scope.define('chr', chr)
         self.scope.define('ord', ord)
         self.scope.define('divmod', divmod)
-        self.scope.define('next', _mojo_next)
+        self.scope.define('next', next)
         self.scope.define('index', _mojo_operator_index)
         self.scope.define('isnan', _mojo_isnan)
         self.scope.define('isinf', _mojo_isinf)
@@ -3636,7 +3513,7 @@ class Interpreter:
         self.scope.define('complex', complex)
         self.scope.define('slice', slice)
         self.scope.define('callable', callable)
-        self.scope.define('iter', _mojo_iter)
+        self.scope.define('iter', iter)
         self.scope.define('format', format)
         self.scope.define('hex', hex)
         self.scope.define('oct', oct)
@@ -4861,7 +4738,7 @@ class Interpreter:
             if isinstance(iterable, MojoInstance):
                 kind = iterable._mojo_class.name
             raise TypeError(f"{self._loc(node)}'{kind}' object is not iterable")
-        for value in _mojo_iter(iterable):
+        for value in iterable:
             # node.target is always a plain string from fire_compiler.py's
             # _parse_for (possibly comma-joined for tuple unpacking, e.g.
             # "op, i" or "(op, i)"), never an Expr node or list — was
@@ -4889,7 +4766,7 @@ class Interpreter:
             if isinstance(iterable, MojoInstance):
                 kind = iterable._mojo_class.name
             raise TypeError(f"{self._loc(node)}'{kind}' object is not iterable")
-        for value in _mojo_iter(iterable):
+        for value in iterable:
             self._bind_comprehension_target(node.target, value)
             try:
                 for stmt in node.body:
@@ -5059,12 +4936,7 @@ class Interpreter:
         if node.value is None:
             raise
         value = self.eval_expr(node.value)
-        # A real exception CLASS (`raise StopIteration`) is raised the way
-        # Python raises it — instantiated and propagated — not stashed as a
-        # Mojo value, which left `raise StopIteration` unable to end a
-        # user-defined `__next__` (the iterator protocol's exhaustion signal).
-        if isinstance(value, BaseException) or (
-                isinstance(value, type) and issubclass(value, BaseException)):
+        if isinstance(value, BaseException):
             raise value
         self._raised_mojo_value = value
         raise MojoRaisedException()
@@ -5851,14 +5723,7 @@ class Interpreter:
         elif op == '/':
             if isinstance(left, (str, MojoString)) and isinstance(right, (str, MojoString)):
                 return MojoString(os.path.join(str(left), str(right)))
-            # `_wrap_int` like every other arithmetic op above: a bare
-            # `return left / right` emits `mojo_div_double` (double) into a
-            # return slot the str branch types as `MojoString *` — gcc:
-            # "makes pointer from ... double" (no double->pointer cast under
-            # -fgimple). `_wrap_int` is a @staticmethod identity for non-int
-            # (a `/` result is a float), so Python semantics are unchanged —
-            # it only gives codegen a call whose result it can type as a word.
-            return self._wrap_int(left / right)
+            return left / right
         elif op == '//': return left // right
         elif op == '%': return left % right
         elif op == '**': return self._wrap_int(left ** right)
@@ -5980,7 +5845,6 @@ class Interpreter:
         (MojoCoroutine only) so plain generators are entirely unaffected."""
         if isinstance(func, (MojoFunction, MojoOverloadSet, _MojoBoundComptimeFunction)):
             return func(self, *args, **kwargs)
-        args = _mojo_builtin_args(func, args)
         tls = self._gen_tls
         if getattr(tls, 'is_coroutine', False):
             yield_fn = getattr(tls, 'yield_fn', None)
@@ -6546,7 +6410,7 @@ class Interpreter:
                     return
                 gen = generators[0]
                 rest = generators[1:]
-                for item in _mojo_iter(self.eval_expr(gen.iterable)):
+                for item in self.eval_expr(gen.iterable):
                     self._bind_comprehension_target(gen.target, item)
                     if all(self.eval_expr(cond) for cond in gen.conditions):
                         run(rest)

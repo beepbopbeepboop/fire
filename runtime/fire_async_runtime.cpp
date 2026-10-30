@@ -15,7 +15,6 @@
 #include <vector>
 #include <unordered_map>
 
-#include <stdio.h>
 #include <time.h>
 #include <unistd.h>
 #include <sys/types.h>
@@ -204,74 +203,6 @@ void mojo_async_run_until_complete(void) {
         drain_due_timers();
     }
 }
-
-/* --- Intrinsic RAII guard --- */
-#include <stdlib.h>
-#include <string.h>
-#include <dirent.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
-/* Recursive rmtree using only C calls (no C++ exceptions). */
-static int _rmtree_recursive(const char *path) {
-    DIR *d = opendir(path);
-    if (!d) return -1;
-    struct dirent *entry;
-    while ((entry = readdir(d)) != NULL) {
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
-            continue;
-        char sub[4096];
-        int n = snprintf(sub, sizeof(sub), "%s/%s", path, entry->d_name);
-        if (n < 0 || (size_t)n >= sizeof(sub)) { closedir(d); return -1; }
-        struct stat st;
-        if (stat(sub, &st) != 0) { closedir(d); return -1; }
-        if (S_ISDIR(st.st_mode)) {
-            if (_rmtree_recursive(sub) != 0) { closedir(d); return -1; }
-        } else {
-            if (unlink(sub) != 0) { closedir(d); return -1; }
-        }
-    }
-    closedir(d);
-    return rmdir(path);
-}
-
-int mojo_tempdir_guard_init(mojo_tempdir_guard_t *g) {
-    if (!g) return -1;
-    g->path = NULL;
-    char tmpl[] = "/tmp/mojo_tmp_XXXXXX";
-    char *res = mkdtemp(tmpl);
-    if (!res) return -1;
-    g->path = strdup(res);
-    return (g->path != NULL) ? 0 : -1;
-}
-
-void mojo_tempdir_guard_fini(mojo_tempdir_guard_t *g) {
-    if (!g) return;
-    if (g->path) {
-        _rmtree_recursive(g->path);
-        free(g->path);
-        g->path = NULL;
-    }
-}
-
-const char *mojo_tempdir_guard_path(const mojo_tempdir_guard_t *g) {
-    return (g && g->path) ? g->path : NULL;
-}
-
-/* --- C++ RAII wrapper (destructor runs on frame destroy) --- */
-namespace {
-class TempDirGuardCpp {
-    mojo_tempdir_guard_t g_;
-public:
-    TempDirGuardCpp() { mojo_tempdir_guard_init(&g_); }
-    ~TempDirGuardCpp() { mojo_tempdir_guard_fini(&g_); }
-    const char* path() const { return mojo_tempdir_guard_path(&g_); }
-    TempDirGuardCpp(const TempDirGuardCpp&) = delete;
-    TempDirGuardCpp& operator=(const TempDirGuardCpp&) = delete;
-};
-}
-
-/* --- End intrinsic guard --- */
 
 /* --- Generic (promise-type-erased) resume/destroy — see the doc comment
  * on these two in mojo_async_runtime.h. */

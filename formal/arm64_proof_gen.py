@@ -10187,10 +10187,10 @@ def _frame_stack_depths(words: dict, entry: int, end: int) -> list:
             sp += (imm7 - 128 if imm7 >= 64 else imm7) * 8
         elif idx in (11, 12):           # SUB Xd, Xn, #imm
             if (w >> 5) & 0x1f == 31:
-                sp -= _imm12_scaled(w)
+                sp -= ((w >> 10) & 0xfff) * 8
         elif idx in (9, 10):            # ADD Xd, Xn, #imm
             if (w >> 5) & 0x1f == 31 and (w & 0x1f) == 31:
-                sp += _imm12_scaled(w)
+                sp += ((w >> 10) & 0xfff) * 8
     return sorted(out)
 
 
@@ -12355,10 +12355,7 @@ def _frame_slot_accesses(words: dict, entry: int, end: int):
         rd, rn = w & 0x1f, (w >> 5) & 0x1f
         if idx in (9, 10):              # ADD Xd, Xn, #imm (32- and 64-bit)
             if rn in recv:
-                # The immediate is a BYTE offset from the receiver: `_imm12_
-                # scaled` (the `sh` bit, no `* 8` — that scale belongs to the
-                # LDR/STR access size in the arm below, not to an ADD).
-                recv[rd] = recv[rn] + _imm12_scaled(w)
+                recv[rd] = recv[rn] + ((w >> 10) & 0xfff) * 8
         elif idx == 1:                  # MOV Xd, Xn
             if rn in recv:
                 recv[rd] = recv[rn]
@@ -12394,10 +12391,10 @@ def _frame_store_depths(words: dict, entry: int, end: int) -> list:
                 out.append(-sp)
         elif idx in (11, 12):           # SUB Xd, Xn, #imm
             if (w >> 5) & 0x1f == 31:
-                sp -= _imm12_scaled(w)
+                sp -= ((w >> 10) & 0xfff) * 8
         elif idx in (9, 10):             # ADD Xd, Xn, #imm
             if (w >> 5) & 0x1f == 31 and (w & 0x1f) == 31:
-                sp += _imm12_scaled(w)
+                sp += ((w >> 10) & 0xfff) * 8
     return sorted(set(out))
 
 
@@ -12597,10 +12594,10 @@ def _frame_store_writes(words: dict, m: dict) -> list:
             sp += (imm7 - 128 if imm7 >= 64 else imm7) * 8
         elif idx in (11, 12):               # SUB Xd, Xn, #imm
             if (w >> 5) & 0x1f == 31:
-                sp -= _imm12_scaled(w)
+                sp -= ((w >> 10) & 0xfff) * 8
         elif idx in (9, 10):                # ADD Xd, Xn, #imm
             if (w >> 5) & 0x1f == 31 and (w & 0x1f) == 31:
-                sp += _imm12_scaled(w)
+                sp += ((w >> 10) & 0xfff) * 8
         elif idx == 31:                     # STR [Xn, #imm]: the receiver frame
             out.append((None, True))
     return out

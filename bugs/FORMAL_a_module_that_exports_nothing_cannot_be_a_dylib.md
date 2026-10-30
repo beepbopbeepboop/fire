@@ -46,7 +46,7 @@ module is still a library whose two folded values (int and string) reach the
 importer on both architectures against CPython, the unfoldable shape is still
 refused by name, and the container-constant refusal and its accessor repair
 (`10 30`, CPython-agreeing) are unchanged.
-commit 358f305c7 measured the
+`bugs/FORMAL_no_public_api_reason_lost_the_backend_rule_clause.md` measured the
 same red from the other side (the `BACKEND` clause) and its recorded next step
 — re-run the file and require the one failure to clear — is now satisfied: the
 clause has been in the sentence since `aa284e65`, and the guard now pins the
