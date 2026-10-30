@@ -2136,7 +2136,10 @@ def main():
     for x in render():
         print(x)
 """, "variable(s) n, name")
-    test_generator_refused("nested_generator_reads_enclosing_local_refused", """\
+    # The plain local now boxes (see `..._captures_enclosing_plain_local`);
+    # this generator ESCAPES as a value, which has no frame to hand the box
+    # handle to, so the escape is what stays refused.
+    test_generator_refused("nested_generator_escaping_plain_local_refused", """\
 def outer(n: Int):
     total = n * 2
     def g():
@@ -2171,6 +2174,22 @@ def outer(n: Int):
 def main():
     outer(4)
 """, "8\n")
+    # A plain assignment (`total = n * 2`, no `var`) binds the enclosing
+    # local just as a `var` does, so a nested generator reading it captures
+    # the same box. Before the fix the box plan only saw VarDecl and refused.
+    test_generator_stdout("nested_generator_captures_enclosing_plain_local", """\
+def outer(n: Int):
+    total = n * 2
+    def g():
+        yield total
+        yield total + 1
+    for v in g():
+        print(v)
+
+
+def main():
+    outer(5)
+""", "10\n11\n")
     test_generator_matches_cpython("nested_generator_mutates_enclosing_var_via_nonlocal", """\
 def outer():
     var k = 5

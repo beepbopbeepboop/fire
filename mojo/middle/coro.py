@@ -4680,10 +4680,12 @@ class _Capture:
     named fields a missing one is a missing attribute at the producer, and
     the two producers below cannot disagree about the shape at all.
 
-      decl        -- the `VarDecl` to wrap in a box-init IN PLACE, or None
-                     for a captured PARAMETER: there is no declaration to
-                     mutate, so `_apply_nested_async_capture` renames the raw
-                     param (`_capsrc_name`) and prepends the box-init instead.
+      decl        -- the declaring statement: a `VarDecl` to wrap in a box-init
+                     IN PLACE; a plain first-binding `AssignStmt`, which
+                     `_apply_nested_async_capture` replaces with the equivalent
+                     box-init `VarDecl`; or None for a captured PARAMETER, where
+                     there is no declaration to mutate, so the raw param is
+                     renamed (`_capsrc_name`) and a box-init is prepended.
       kind        -- the box cell's element kind, a `_BOX_SHIMS` key. NOT
                      `_KIND_CTYPE` (which is the slot's C type): this is
                      which `__mojo_box_new_*`/`_get_*`/`_set_*` trio runs.
@@ -4716,15 +4718,32 @@ def _outer_boxable_locals(outer: N.FunctionDef) -> dict:
     too rather than degrading to a raw int64_t cell."""
     env = _static_env(outer)
     out = {}
+    # Every name bound so far at the top of `outer`'s body (params first). A
+    # plain `name = <init>` is a boxable declaration only when it is the
+    # FIRST binding of `name`: a later plain reassignment is an ordinary
+    # write to the box `_cap_rewrite_stmts` already routes, and a name that
+    # is a parameter is the captured-PARAMETER path's job, not this one.
+    bound = {pn for pn, _pa in outer.params}
     for s in outer.body:
-        if not isinstance(s, N.VarDecl):
+        if isinstance(s, N.VarDecl):
+            name = s.name
+        elif isinstance(s, N.AssignStmt) and isinstance(s.target, N.IdentExpr):
+            # A plain assignment is a declaration only as the FIRST binding of
+            # its name. A later one is an ordinary write, which
+            # `_cap_rewrite_stmts` already routes through the box, and a name
+            # that is a parameter belongs to the captured-PARAMETER path.
+            if s.target.name in bound:
+                continue
+            name = s.target.name
+        else:
             continue
+        bound.add(name)
         boxed = _boxed_init_kind(s.value)
         k = _ann_kind(s.type_ann)
         sname = None
         if boxed is not None:
             k = boxed
-            sname = _BOX_STRUCT_OF.get(s.name)
+            sname = _BOX_STRUCT_OF.get(name)
         else:
             if k is None:
                 k = _strict_init_kind(s.value, env)
@@ -4739,7 +4758,7 @@ def _outer_boxable_locals(outer: N.FunctionDef) -> dict:
                 if _cs in _STRUCT_NAMES:
                     sname = _cs
         if k in ('i', 'd', 'p'):
-            out[s.name] = _Capture(s, k, sname)
+            out[name] = _Capture(s, k, sname)
     return out
 
 
@@ -4769,8 +4788,16 @@ def _outer_all_locals(outer: N.FunctionDef) -> set:
     _outer_pnames = set()
     for _pn, _pa in outer.params:
         _outer_pnames.add(_pn)
+    # `_declared_vars_body` counts only `VarDecl`, so a plain top-level
+    # `name = <init>` (the first binding of a local, Python-style) would be
+    # invisible here and a nested def reading it would look capture-free.
+    # Those names are added explicitly; `_outer_boxable_locals` decides which
+    # of them can actually be boxed.
+    _plain = {s.target.name for s in outer.body
+              if isinstance(s, N.AssignStmt) and isinstance(s.target, N.IdentExpr)}
     return (_outer_pnames
-            | gimple_ctypes._declared_vars_body(outer.body))
+            | gimple_ctypes._declared_vars_body(outer.body)
+            | _plain)
 
 
 def _capture_scan_body(stmts: list) -> list:
@@ -5220,8 +5247,17 @@ def _apply_nested_async_capture(inner: N.FunctionDef, outer: N.FunctionDef, cap_
     prepend: list = []
     for name, c in fresh.items():
         newshim = _BOX_SHIMS[c.kind][0]
-        if c.decl is not None:
+        if isinstance(c.decl, N.VarDecl):
             c.decl.value = _call(newshim, [c.decl.value])
+        elif c.decl is not None:
+            # A plain `name = <init>` first binding: the statement becomes the
+            # box-init declaration. Swapped by identity, so the object the
+            # capture recorded is the one replaced; a later sibling capture
+            # then sees a VarDecl with a boxed initializer (`_boxed_init_kind`).
+            _decl = N.VarDecl(name=name, type_ann=c.decl.type_ann,
+                              value=_call(newshim, [c.decl.value]),
+                              line=c.decl.line, col=c.decl.col)
+            outer.body = [_decl if st is c.decl else st for st in outer.body]
         else:
             # Increment B: a captured PARAMETER has no declaring VarDecl --
             # rename the raw param and prepend a box-init reading it, so the
