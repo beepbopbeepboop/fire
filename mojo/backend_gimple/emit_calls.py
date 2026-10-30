@@ -202,6 +202,7 @@ def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
             gen.lower_expr(_ke)
     if _gen_star is not None:
         arg_pairs = _pack_generator_star_args(gen, arg_pairs, _gen_star)
+    ginf._tag_mixed_list_call_args(gen, fname_raw, arg_pairs)
     return _finish_generator_start(gen, api, arg_pairs)
 
 

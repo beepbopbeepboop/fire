@@ -2269,6 +2269,7 @@ class GimpleGen:
         # the inner element kind (see module_gen's _record_param_elem).
         self._param_nested_mixed: dict = {}
         self._param_elem_mixed: dict = {}
+        self._param_int_elem_obs: dict = {}
         # The dict-VALUE twin of the row above: callee -> {pname -> the dict
         # value ctype its call sites agree on}. Read at the same place (see
         # emit_funcs.gen_func / _gen_struct_method), into `_dict_val_types`.

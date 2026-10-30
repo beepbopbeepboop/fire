@@ -1080,6 +1080,27 @@ main()
 """
     test_generator_matches_cpython(
         "cpp_coroutine_mixed_kind_list_param_tuple_yield", _mixed_src, _mixed_src)
+    # The same, through a parameter the solver cannot type at all and with the
+    # STRING site first: an int list is the default and records no contract,
+    # so it used to be invisible as a disagreeing call site (the parameter
+    # was typed `char *` and the int site read as strings).
+    _mixed_src2 = """\
+def pairs(items):
+    for it in items:
+        yield it, True
+
+def handle_all(filenames):
+    for a, b in pairs(filenames):
+        print(a, b)
+
+def main():
+    handle_all(["x", "y"])
+    handle_all([1, 2])
+
+main()
+"""
+    test_generator_matches_cpython(
+        "cpp_coroutine_mixed_kind_list_param_str_site_first", _mixed_src2, _mixed_src2)
     # The no-argument form: `TypeError()` is legal Python and the message is
     # the empty string, which is what the emitted `char *` empty literal
     # carries. Kept because it is the shape whose typing needs no argument to
@@ -1280,13 +1301,12 @@ main()
 
     # A parameter's ELEMENTS reach the yield through a for-loop target, not the
     # parameter itself. The two call sites disagree (a str list and an int
-    # list), so `xs` is in `_CALLSITE_PARAM_CONFLICTS`; `for x in xs: yield x`
-    # yields `x`, which `_ambiguous_yielded_params` did not map back to `xs`,
-    # so the generator was NOT refused, the yield slot took the int64_t
-    # default, and the str printed as its heap address: `4297813824` where
-    # CPython prints `p`, exit 0. Measured before the fix. The honest outcome
-    # is a refusal.
-    test_generator_refused("generator_loop_target_over_conflicted_param_is_ambiguous", """\
+    # list). This was once a silent miscompile (the str printed as its heap
+    # address) and then an honest refusal; it is now compiled for real: the
+    # list parameter is kind-MIXED, the loop reads each slot by the kind the
+    # list recorded (the caller tags the str list), and the consumer resolves
+    # the boxed slot. CPython is the oracle.
+    _conf_src = """\
 def gen(xs):
     for x in xs:
         yield x
@@ -1297,7 +1317,9 @@ def main():
     for w in gen([1, 2]):
         print(w)
 main()
-""", "do not all pass the same statically-known type")
+"""
+    test_generator_matches_cpython(
+        "generator_loop_target_over_conflicted_list_param_is_boxed", _conf_src, _conf_src)
 
     # The `enumerate` sibling, and the control that keeps the fix narrow: only
     # the ELEMENT slot of `enumerate(xs)` aliases `xs`. Yielding the index

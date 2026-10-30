@@ -867,7 +867,8 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     _fn_elem_hints = _pl_elem_hints.get(fn.name) or {}
     if _fn_elem_hints:
         for _spn, _sct in param_ctypes:
-            if _sct == 'MojoList *' and _fn_elem_hints.get(_spn):
+            if (_sct == 'MojoList *' and _fn_elem_hints.get(_spn)
+                    and _spn not in gen._cpp_mixed_list_params):
                 gen._cpp_list_local_elem_types[_spn] = _fn_elem_hints[_spn]
     # Nested non-capturing sync helper `def`s referenced as callees inside
     # this generator's body (summarize_stats.py's `calc_*` helpers,

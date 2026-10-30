@@ -9027,6 +9027,7 @@ def gen_module_impl(self, stmts):
     # contract is unknown, so a loop over it must ask each slot's recorded kind
     # at run time (`mojo_list_get_boxed`) rather than trust one typed accessor.
     self._param_elem_mixed: dict[str, set] = {}
+    self._param_int_elem_obs: dict[str, set] = {}
     self._coro_str_params: dict[str, set] = {}
     # coroutine body name -> {param} whose element type is POSITIVELY int:
     # the list-of-ints counterpart of `_coro_str_params`. Kept apart from
@@ -9458,12 +9459,19 @@ def gen_module_impl(self, stmts):
         e = pair[0]
         ne = pair[1]
         if not _informative_elem_ctype(e):
+            # An int list is the default and records no CONTRACT, but it is
+            # still a call site: a sibling site that passes strings makes the
+            # parameter kind-MIXED, not str.
+            if e == 'int64_t':
+                self._param_int_elem_obs.setdefault(_as_str(callee), set()).add(
+                    _as_str(pname))
             return
         import os as _os
         if _os.environ.get('MOJO_TRACE_PARAM_ELEM'):
             print('TRACE', _as_str(callee), _as_str(pname), e, ne, file=sys.stderr)
         _record_param_elem(callee, pname, e, ne)
 
+    _static_arg_int = [False]
     _fn_by_name: dict = {}
     for _fbn_s in all_functions:
         if isinstance(_fbn_s, FunctionDef):
@@ -9558,6 +9566,7 @@ def gen_module_impl(self, stmts):
                 # SwiGLU -- joined to (None, None), and every `g[i]` in it
                 # read back as raw int64 bits).
                 if _e == 'int64_t':
+                    _static_arg_int[0] = True
                     return None, None
                 return _e, _gmi_as_str(nested.get(_n))
             return None, None
@@ -9581,6 +9590,7 @@ def gen_module_impl(self, stmts):
             # it iterates the hash table through the list accessors.
             _e = self._infer_list_elem_type(a.elements)
             if _e == 'int64_t':
+                _static_arg_int[0] = True
                 return None, None
             if not self._literal_elements_include_none(a.elements):
                 if a.elements and isinstance(a.elements[0], gimple_ctypes.ListExpr):
@@ -9625,9 +9635,15 @@ def gen_module_impl(self, stmts):
             for i, a in enumerate(call.args):
                 if i >= len(pnames):
                     break
+                _static_arg_int[0] = False
                 _fe, _fne = _static_arg_elems(a, elem, nested)
                 if _fe is not None:
                     _record_param_elem(callee, pnames[i], _fe, _fne)
+                elif _static_arg_int[0]:
+                    # An int list records no contract (it is the default) but
+                    # it IS a call site; see `_param_int_elem_obs`.
+                    self._param_int_elem_obs.setdefault(callee, set()).add(
+                        _as_str(pnames[i]))
 
                 _dv = _static_arg_dict_val(a, dval, caller_name)
                 if _dv is not None:
@@ -9915,6 +9931,35 @@ def gen_module_impl(self, stmts):
     # as soon as a round settles nothing.
     _contract_rounds = 0
     _contract_limit = len(_caller_bodies) + 1
+    # A generator's list parameter that its call sites leave UNSOLVED (a call
+    # site the static scan could not type at all, which `coro` records beside
+    # the provable disagreements in `_CALLSITE_PARAM_CONFLICTS`) has no
+    # element type for the solver to trust, so it is read like a kind-mixed
+    # one: per slot, by the kind the list recorded. A parameter the solver
+    # DID type never reaches here and stays an untagged typed read.
+    for _uc_fn in all_functions:
+        if not isinstance(_uc_fn, FunctionDef):
+            continue
+        _uc_bad = gimple_gen_coro._CALLSITE_PARAM_CONFLICTS.get(_as_str(_uc_fn.name))
+        if not _uc_bad:
+            continue
+        _uc_params = set(_as_str(_p[0]) for _p in (_uc_fn.params or []))
+        for _uc_n in _walk_ast(_uc_fn):
+            if (isinstance(_uc_n, ForStmt) and isinstance(_uc_n.iterable, IdentExpr)
+                    and _as_str(_uc_n.iterable.name) in _uc_bad
+                    and _as_str(_uc_n.iterable.name) in _uc_params):
+                self._param_elem_mixed.setdefault(
+                    _as_str(_uc_fn.name), set()).add(_as_str(_uc_n.iterable.name))
+    for _ie_callee in self._param_int_elem_obs:
+        _ie_pe = self._param_elem_types.get(_ie_callee, {})
+        for _ie_p in self._param_int_elem_obs[_ie_callee]:
+            _ie_ct = _ie_pe.get(_ie_p)
+            if _ie_ct is not None and _ie_ct[0] is not None and _ie_ct[0] != 'MojoList *':
+                self._param_elem_mixed.setdefault(_ie_callee, set()).add(_ie_p)
+                # Mixed means the element type is UNKNOWN, as any other
+                # disagreement records it; leaving the one non-int site's
+                # type as the contract types the int site's list wrongly.
+                _ie_pe[_ie_p] = (None, None)
     _em_before = sum(len(_v) for _v in self._param_elem_mixed.values())
     _resolve_param_dict_vals()
     _resolve_param_containers()

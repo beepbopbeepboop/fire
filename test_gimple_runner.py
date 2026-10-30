@@ -3254,6 +3254,17 @@ show([2.5])
 go()
 """, "1\n2\na\nb\n2.5\np\nq\n1.5\n2.5\n")
 
+    # String site FIRST, int site second (an int list records no contract, so
+    # it used to be invisible as a disagreeing call site).
+    test_gimple_stdout("gimple_mixed_kind_flat_list_param_str_first", """\
+def show(items):
+    for it in items:
+        print(it)
+
+show(["a", "b"])
+show([1, 2])
+""", "a\nb\n1\n2\n")
+
     # A string key is compared as a string, not as the address in its int64_t
     # slot (which would order by ADDRESS): the runtime picks the comparison
     # with mojo_boxed_is_str, since a lambda's declared return type is
