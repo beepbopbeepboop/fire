@@ -3203,32 +3203,39 @@ def _gmi_decorator_head(dec):
     return None
 
 
-def _gmi_rebind_decorated_defs(self, stmts: list) -> list:
-    """Return `stmts` with each top-level `def` decorated by a same-module
-    decorator REBOUND to the decoration's value, in source order.
+def _gmi_decorator_pass(self, stmts: list, outer_defs: dict, at_module: bool) -> list:
+    """Return `stmts` with each `def` decorated by a same-module decorator
+    REBOUND to the decoration's value, in source order, at every depth.
 
     `@deco def step(x): ...` lowers to the pair CPython evaluates:
 
         def step__undecorated(x): ...
         step = deco(step__undecorated)
 
-    so every call to `step` reads the module-scope variable and calls
-    through it, which is exactly the decorated object. A factory `@deco(x)`
-    becomes `step = deco(x)(step__undecorated)`, and stacked decorators nest
-    innermost-first (`@a @b` -> `a(b(...))`). The rebinding is a module
-    global, so the compiled path's existing global function-value machinery
-    (the `_root_globals` field and `mojo_fnptr_call`) carries it; no call site
-    needs to know a decorator was applied.
+    so every call to `step` reads the name and calls through it, which is
+    exactly the decorated object. A factory `@deco(x)` becomes
+    `step = deco(x)(step__undecorated)`, and stacked decorators nest
+    innermost-first (`@a @b` -> `a(b(...))`). At module scope the rebinding is
+    a module global, so the compiled path's existing global function-value
+    machinery (the `_root_globals` field and `mojo_fnptr_call`) carries it; a
+    nested `def` is a local bound the same way (`step = twice(step__undecorated)`
+    lowers through the local closure-value path). No call site needs to know a
+    decorator was applied.
 
-    Scope is the same as `_gmi_refuse_scalar_decorator_rebind`: only a
-    decorator naming a top-level `def` in this module is applied. A decorator
+    `outer_defs` holds the defs of every enclosing scope, so a decorator may
+    name a module-level def from inside a function body, or a sibling def in
+    the same body. The refusal in `_gmi_refuse_scalar_decorator_rebind` runs
+    over each level first, against the same scope.
+
+    Scope: only a decorator naming a def in scope is applied. A decorator
     imported from elsewhere, or a name that is a declaration annotation
     (`staticmethod`, `export`, `doc_hidden`, ...), stays on the `def` as
     before, because the stdlib uses them that way and they are not callables
-    this module can see. A decorated `def` nested in a function body is not
-    rewritten here and is still unapplied.
+    this module can see. Decorated methods of a class are not rewritten.
     """
-    _rb_defs = {_rs.name: _rs for _rs in (stmts or []) if isinstance(_rs, FunctionDef)}
+    _rb_scope = dict(outer_defs)
+    _rb_scope.update({_rs.name: _rs for _rs in (stmts or []) if isinstance(_rs, FunctionDef)})
+    _gmi_refuse_scalar_decorator_rebind(self, stmts, _rb_scope)
     _rb_out = []
     for _rb_s in (stmts or []):
         if not isinstance(_rb_s, FunctionDef) or not _rb_s.decorators:
@@ -3238,7 +3245,7 @@ def _gmi_rebind_decorated_defs(self, stmts: list) -> list:
         _rb_kept = []
         for _rb_dec in _rb_s.decorators:
             _rb_head = _gmi_decorator_head(_rb_dec)
-            if _rb_head is not None and _rb_head in _rb_defs and _rb_head != _rb_s.name:
+            if _rb_head is not None and _rb_head in _rb_scope and _rb_head != _rb_s.name:
                 _rb_applied.append(_rb_dec)
             else:
                 _rb_kept.append(_rb_dec)
@@ -3246,7 +3253,7 @@ def _gmi_rebind_decorated_defs(self, stmts: list) -> list:
             _rb_out.append(_rb_s)
             continue
         # The undecorated body keeps the annotation decorators and takes a
-        # suffixed name, so it cannot be mistaken for the rebound global.
+        # suffixed name, so it cannot be mistaken for the rebound name.
         _rb_undec = _rb_s.name + '__undecorated'
         _rb_body = copy.copy(_rb_s)
         _rb_body.name = _rb_undec
@@ -3259,18 +3266,33 @@ def _gmi_rebind_decorated_defs(self, stmts: list) -> list:
             _rb_value = CallExpr(func=_rb_callee, args=[_rb_value], line=_rb_s.line, col=_rb_s.col)
         _rb_out.append(AssignStmt(target=IdentExpr(_rb_s.name, line=_rb_s.line, col=_rb_s.col),
                                   value=_rb_value, line=_rb_s.line, col=_rb_s.col))
-        # The global now holds a function VALUE, so `print(step)` formats it
-        # as one (`_global_func_value_names` is the per-global repr name).
-        self._global_func_value_names[_rb_s.name] = _rb_s.name
-    return _rb_out
+        if at_module:
+            # The global now holds a function VALUE, so `print(step)` formats
+            # it as one (`_global_func_value_names` is the per-global repr name).
+            self._global_func_value_names[_rb_s.name] = _rb_s.name
+    # Recurse into each function body, so a decorated `def` nested in it is
+    # rebound by the same rule against this body's scope. A body with no
+    # nested def is left as it is, so nothing is copied that does not change.
+    _rb_final = []
+    for _rb_s in _rb_out:
+        if isinstance(_rb_s, FunctionDef) and any(isinstance(_rb_n, FunctionDef) for _rb_n in _rb_s.body or []):
+            _rb_nested = copy.copy(_rb_s)
+            _rb_nested.body = _gmi_decorator_pass(self, _rb_s.body, _rb_scope, False)
+            _rb_final.append(_rb_nested)
+        else:
+            _rb_final.append(_rb_s)
+    return _rb_final
 
 
-def _gmi_refuse_scalar_decorator_rebind(self, stmts: list) -> None:
-    """Refuse a top-level `def` rebound by a same-module decorator that
-    returns a scalar: `deco(f) -> 99` with `@deco def step`, then `step(7)`.
+def _gmi_refuse_scalar_decorator_rebind(self, stmts: list, scope: dict) -> None:
+    """Refuse a `def` rebound by a same-module decorator that returns a
+    scalar: `deco(f) -> 99` with `@deco def step`, then `step(7)`.
+
+    `scope` maps each name a decorator may resolve to (the defs of this
+    statement list plus every enclosing scope's defs) to its FunctionDef.
 
     A same-module decorator on a `def` is applied by rebinding the name
-    (`_gmi_rebind_decorated_defs`, the bugs/COMPILE_FAIL_decorator_application_dropped.md
+    (`_gmi_decorator_pass`, the bugs/COMPILE_FAIL_decorator_application_dropped.md
     fix). That rebinding is only meaningful for a CALLABLE decorator result:
     a scalar-returning decorator rebinds `step` to a non-callable, which
     CPython raises on as `TypeError: 'int' object is not callable`. So that
@@ -3278,17 +3300,17 @@ def _gmi_refuse_scalar_decorator_rebind(self, stmts: list) -> None:
     be called.
 
     Scope is deliberately narrow, so this cannot drop real code:
-    - Only a decorator naming a top-level `def` in this same module is
-      inspected: a bare name (`@deco`) or a factory call (`@deco(x)`), whose
-      factory is that def. Its return type comes from the same inference
+    - Only a decorator naming a `def` in scope is inspected: a bare name
+      (`@deco`) or a factory call (`@deco(x)`), whose factory is that def.
+      Scope is this statement list's defs and every enclosing one's. Its return type comes from the same inference
       every function uses, so no second notion of "scalar" is introduced.
     - An identity or pass-through decorator (`return f`) is not refused: it
       rebinds `f` to the same object, and the undecorated answer is correct.
     - An imported decorator is not inspected here. It is unrefused, not
       proven correct; the doc's remaining work covers it.
     """
-    _rd_defs = {_rs.name: _rs for _rs in (stmts or []) if isinstance(_rs, FunctionDef)}
-    for _rd_fn in _rd_defs.values():
+    _rd_defs = scope
+    for _rd_fn in (_rs for _rs in (stmts or []) if isinstance(_rs, FunctionDef)):
         for _rd_dec in (getattr(_rd_fn, 'decorators', None) or []):
             # `@deco` is stored as the bare name; `@deco(x)` as a CallExpr
             # whose callee is the factory. Both name a same-module def, and
@@ -3341,8 +3363,7 @@ def gen_module_impl(self, stmts):
     # `_gmi_hoist_nested_structs` for why it appends rather than moves.
     stmts = _gmi_hoist_nested_structs(self, stmts)
     _gmi_refuse_nested_class_enclosing_reads(stmts)
-    _gmi_refuse_scalar_decorator_rebind(self, stmts)
-    stmts = _gmi_rebind_decorated_defs(self, stmts)
+    stmts = _gmi_decorator_pass(self, stmts, {}, True)
 
     # ── GPU offload, Seam 1 ──────────────────────────────────────────────
     # Classified ONCE, at the very top, because three different places

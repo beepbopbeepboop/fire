@@ -81,7 +81,7 @@ _WALK_AST_MUTATION_ALLOWLIST = {
     "mojo/backend_gimple/emit_stmts.py::_gen_stmt_ForStmt": "`ForStmt.target` is rewritten only when it is a str, and to a str",
     "mojo/backend_gimple/emit_stmts.py::_maybe_narrow_genexp_local": "`Comprehension.kind` is a str, restored in a `finally`",
     "mojo/backend_gimple/module_gen.py::_gmi_hoist_nested_structs": "`StructDef.name` is a rename of a str",
-    "mojo/backend_gimple/module_gen.py::_gmi_rebind_decorated_defs": "`copy.copy` of a top-level def, so the new node is unwalked and its `name`/`decorators` are set before anything walks it",
+    "mojo/backend_gimple/module_gen.py::_gmi_decorator_pass": "`copy.copy` of a def (rebound, or one whose body holds a nested def), so the new node is unwalked and its `name`/`decorators`/`body` are set before anything walks it",
     "mojo/middle/closures.py::_scan_for_closures": "`ClosureInfo.captures` is the closure scanner's own record",
     "mojo/middle/closures.py::discover_closures": "ditto",
     "mojo/middle/coro.py::_Capture.__init__": "the capture record's own dataclass",
@@ -12947,6 +12947,48 @@ def step(x):
 def main():
     print(step(7))
 """), 'nested_decorator_factory_still_compiles')
+    # A decorated `def` NESTED in a function body is rebound like a top-level
+    # one (bugs/COMPILE_FAIL_decorator_application_dropped.md): before this,
+    # `step(n)` silently called the undecorated body and printed 8, not 16.
+    # A module-level decorator and a factory are both in scope from inside.
+    _run_isolated(lambda: test("nested_decorator_is_applied_at_runtime", """\
+def twice(f):
+    def wrap(x):
+        return f(x) * 2
+    return wrap
+
+def scale(k):
+    def deco(f):
+        def wrap(x):
+            return f(x) * k
+        return wrap
+    return deco
+
+def outer(n):
+    @twice
+    def step(x):
+        return x + 1
+    @scale(3)
+    def tripled(x):
+        return x + 1
+    return step(n) + tripled(n)
+
+print(outer(7))
+"""), 'nested_decorator_is_applied_at_runtime')
+    # A nested scalar-returning decorator is refused for the same reason the
+    # top-level one is: it would rebind `step` to a non-callable.
+    _run_isolated(lambda: test_raises("nested_scalar_decorator_rebind_is_refused", """\
+def deco(x):
+    return 99
+
+def outer(n):
+    @deco
+    def step(x):
+        return x + 1
+    return step(n)
+
+print(outer(7))
+""", "returns int64_t (not callable)"), 'nested_scalar_decorator_rebind_is_refused')
 
     # `len()` of a value the codegen could not type, where that value is a
     # LOCAL declared as a plain `int` — the shape that took out `make mojoc`,
