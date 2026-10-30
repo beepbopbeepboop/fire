@@ -7319,8 +7319,14 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                     lines.append(f"{indent}for (int64_t {_ctr} = 0; "
                                  f"{_ctr} < mojo_list_len({_cpp_as('MojoList *', _itname)}); "
                                  f"{_ctr}++) {{")
+                    # A list parameter whose call sites disagree on the element
+                    # type (`module_gen._param_elem_mixed`): the slot is read
+                    # by the kind the list recorded, so the target holds a BOX
+                    # for a string/float slot, not a bare word.
+                    _mixed_read = (_itname in getattr(gen, '_cpp_mixed_list_params', ()))
                     lines.append(f"{indent}    {target} = "
-                                 f"mojo_list_get_int({_cpp_as('MojoList *', _itname)}, {_ctr});")
+                                 + ("mojo_list_get_boxed" if _mixed_read else "mojo_list_get_int")
+                                 + f"({_cpp_as('MojoList *', _itname)}, {_ctr});")
                 if _eff_elem == 'char *':
                     declared[target] = 'char *'
                 elif _eff_elem == 'double':

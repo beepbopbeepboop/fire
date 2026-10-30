@@ -1079,6 +1079,7 @@ class GimpleGen:
         # own compile attempt so a stale prior generator's value can never
         # leak into this one's registration on any early-exception path.
         self._cpp_last_tuple_slot_ctypes: list | None = None
+        self._cpp_last_mixed_slots: bool = False
         # Side channel from _gen_cpp_generator_unit (same stash pattern
         # as _cpp_last_tuple_slot_ctypes): whether THIS unit's body had
         # an eligible value-carrying `return <expr>` — read back into

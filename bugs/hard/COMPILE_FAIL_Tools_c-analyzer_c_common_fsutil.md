@@ -1,5 +1,29 @@
 # COMPILE_FAIL (hard): Tools/c-analyzer/c_common/fsutil.py
 
+## Status 2026-10-30 (later) — the dynamic-value model is the EXISTING per-slot-kind/box model; a kind-mixed list parameter now works end to end, in ordinary functions AND compiled generators
+
+Correction to the Plan below: no new tagged `MojoValue` is needed or wanted. The runtime already has the dynamic
+value model (per-slot kind rows `mojo_list_set_kinds*`, boxes via `mojo_list_get_boxed`/`mojo_box_*`/
+`mojo_repr_boxed`, `_maybe_kinds_vals`/`_boxed_vals`/`_dyn_word_locals`); it was simply never applied to a FLAT
+list parameter whose call sites disagree on the element type (it was a silent miscompile even in ordinary code:
+`show([1,2]); show(["a"])` printed the string's address). **Landed:** `module_gen._param_elem_mixed` (recorded in
+`_record_param_elem`, propagated through `f(xs)` pass-through calls in the existing contract fixpoint); callee
+loops read through `mojo_list_get_boxed` (ordinary `gen_func` seeds `_maybe_kinds_vals`; the cpp generator
+emitter via `_cpp_mixed_list_params`); callers record the string/float kind of a list passed to such a parameter
+(`emit_infra._tag_mixed_list_call_args`, both call-lowering sites); a tuple-yielding generator over such a
+parameter is admitted past the one-C-slot refusal (`cpp_async`, only for params in the mixed set) and its
+consumer marks the unpacked names boxed (`api['mixed_slots']`). Pinned by `gimple_mixed_kind_flat_list_param_loop`
+(test_gimple_runner.py 490/1; the 1 is pre-existing) and `cpp_coroutine_mixed_kind_list_param_tuple_yield`
+(test_gimple_generator_runner.py 293/8; the same 8 fail on the pre-change tree at e7bd23c47).
+
+**What still blocks fsutil, measured:** `iter_many`'s parameter `items` is NOT in the mixed set — its only caller
+passes `process_filenames`' own PUBLIC parameter `filenames`, which no call in the module types, so the kind is
+unknown rather than disagreeing, and the one-slot refusal correctly stays. Closing it needs a decision: either
+(a) every list the compiled code builds records its slot kinds (an allocation per list; today only literals of
+mixed/scalar kinds do), after which an untypable list parameter can be read boxed like a mixed one, or (b) accept
+that an untyped public parameter is int-by-default. Then: the nested generator `chain` (cpp path has no capture
+model), the callable-parameter calls (`_walk`, `_glob`, `onempty`) and `os.walk`/`glob.iglob` as closure members.
+
 ## Plan 2026-10-30 — every remaining refusal is the same missing capability: a DYNAMICALLY-TYPED value in the compiled path
 
 Measured by building `iterutil.py` alone (after the cursor fix below): it refuses `chain` (nested generator

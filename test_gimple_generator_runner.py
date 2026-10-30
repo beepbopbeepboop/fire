@@ -1057,6 +1057,29 @@ def main():
     except ValueError as err:
         print('caught', err)
 """, "caught boom\n")
+    # A generator over a LIST parameter whose call sites disagree on the
+    # element type (ints, strings, floats). The slot is a box and the
+    # tuple-target consumer resolves it; before, the strings and floats came
+    # out as their addresses/bits and the build refused with "ONE fixed C
+    # value-slot". CPython is the oracle.
+    _mixed_src = """\
+def pairs(items):
+    for it in items:
+        yield it, True
+
+def run(xs):
+    for a, b in pairs(xs):
+        print(a, b)
+
+def main():
+    run([1, 2])
+    run(["x", "y"])
+    run([1.5])
+
+main()
+"""
+    test_generator_matches_cpython(
+        "cpp_coroutine_mixed_kind_list_param_tuple_yield", _mixed_src, _mixed_src)
     # The no-argument form: `TypeError()` is legal Python and the message is
     # the empty string, which is what the emitted `char *` empty literal
     # carries. Kept because it is the shape whose typing needs no argument to
