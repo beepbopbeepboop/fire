@@ -4,6 +4,29 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/scripts/summarize_stats.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (2026-10-29, round 4 — plan step 1 MEASURED; no code change this round)
+
+Plan step 1 from round 3 (how a `Callable[...]` annotation reaches the emitter)
+was run with `MOJO_DEBUG=1 python3 tools/memslot.py --gb 8 -- python3 fire.py build`
+on two probes (saved under the worker's `.tmp/p1/`, not committed):
+
+- `def use(f: Callable[[int], int], n: int) -> int` called from a generator
+  (`yield use(dbl, n)`, `dbl` a module-level `int -> int`): **builds**
+  (memcap peak 0.5 GB, child exit 0). So a `Callable` PARAMETER with an int64
+  signature is already accepted by the coroutine path. The output was not
+  executed against CPython in this round.
+- The sibling-nested factory `calc_h(key)` returning `calc(stats: int) -> str`,
+  called from a generator (`yield calc_h(name)(5)`): **refused** with the same
+  `unresolved callee 'calc_h(...)'` message as round 3. The refusal is the
+  factory-returns-str gate in `cpp_async.py:_try_compile_closure_factory`
+  (lines ~1568/1592), as the round-3 analysis said.
+
+Consequence for the plan: step 1 confirms the int64 callable-parameter path is
+live, so the typed-callable work only has to widen the RETURN/PARAM gates and
+the factory's value slot. Steps 2-5 are unchanged and not started. Next round
+starts at step 2 (`types.py` `callable_ctype` helper). Note that each
+single-module probe here costs minutes of CPU, so batch the probes.
+
 ## Status (2026-10-29, worker bug-compile-fail-tools-scripts-summarize, round 3 — the two shapes named as next step are MEASURED FIXED; the real blocker is the callable VALUE model; planning guide below)
 
 Supersedes the "NOT DONE (next step)" paragraphs further down: the tuple-target
