@@ -654,8 +654,10 @@ class TestGeneratorSource(unittest.TestCase):
         import formal.x86_64_proof_gen as X
         for gen, entry in ((X, "generate_x86_64_proof"),
                            (G, "generate_arm64_proof")):
+            # An empty image: the float-repr helper is at the base, so a body
+            # has no bytes before it (the compiler always publishes this key).
             info = {"func_name": "f", "base_addr": 0x1000, "labels": {},
-                    "test_input": 10}
+                    "float_repr_addr": 0x1000, "test_input": 10}
             try:
                 out = getattr(gen, entry)(prog, b"", dict(info))
             except NotImplementedError as e:

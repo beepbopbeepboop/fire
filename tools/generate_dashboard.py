@@ -904,7 +904,12 @@ def main():
 </body>
 </html>"""
 
-    out_path = os.path.join("/tmp", "dashboard.html")
+    # Under the repo's gitignored build/ rather than a shared /tmp name, so two
+    # runs (or two worktrees) never write the same file.
+    out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir,
+                           "build")
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.normpath(os.path.join(out_dir, "dashboard.html"))
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(html)
     print(f"Dashboard written to: {out_path}")
