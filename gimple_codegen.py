@@ -28,7 +28,7 @@ from fire_compiler import (
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
     py_tokenize, Parser, _as_str, _as_int, _as_structdef_node, _as_funcdef_node,
-    desugar_genexps, DESUGARED_GENEXP_NAMES,
+    desugar_genexps, DESUGARED_GENEXP_NAMES, desugar_namedtuples,
 )
 from module_loader import load_module, get_symbol_type, compiler_source_dir
 import ast_rewriter
@@ -6100,6 +6100,10 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     # (a name rebound later in the enclosing function, or `self`) it
     # deliberately leaves alone.
     stmts = desugar_genexps(stmts)
+    # Literal `Name = namedtuple('Name', [...])` at module level becomes the
+    # static class it denotes (see fire_compiler.desugar_namedtuples); every
+    # other namedtuple call is refused by name in emit_calls.
+    stmts = desugar_namedtuples(stmts)
     _desugared_names = list(DESUGARED_GENEXP_NAMES)
     # A3 stack-switch coroutine lowering (doc/COROUTINE.html §5.4), gated by
     # MOJO_CORO=stackswitch. Replaces eligible generator FunctionDefs with a

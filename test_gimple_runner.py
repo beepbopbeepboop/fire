@@ -12517,6 +12517,78 @@ def main():
     sys.exit(0 if _FAIL == 0 else 1)
 
 
+def test_namedtuple_literal_lowers_and_runs():
+    """A module-level `Name = namedtuple('Name', [...])` with literal fields
+    lowers to the static class it denotes (fire_compiler.desugar_namedtuples)
+    instead of the unresolved-import stub that printed `namedtuple: unavailable
+    in compiled mode` and exited 0. Each field takes its type from the literal
+    constructor calls, so an int field and a str field are two namedtuples
+    here, as they must be (one untyped field would print its ints as strings).
+    The two have different arities, so Point's `_replace(3, 4)` is not
+    attributed to Triple.
+    Covers `_replace` returning a new instance and the original unchanged."""
+    test_gimple_stdout("gimple_namedtuple_literal_runs", """\
+from collections import namedtuple
+
+Point = namedtuple('Point', ['x', 'y'])
+Triple = namedtuple('Triple', 'a, b, c')
+
+def main():
+    p = Point(1, -2)
+    q = p._replace(3, 4)
+    print(repr(p))
+    print(q.x)
+    print(q.y)
+    s = Triple('a', 'b', 'c')
+    print(repr(s))
+    print(s.a)
+""", "Point(x=1, y=-2)\n3\n4\nTriple(a='a', b='b', c='c')\na\n")
+
+
+def test_namedtuple_mixed_literal_types_is_refused():
+    """One namedtuple field fed an int and a str literal must be refused by
+    name. Before the typed lowering an untyped field took one type for every
+    call, so `Point(1, 2)` next to `Point('a', 'b')` printed `Point(x='1', ...)`
+    and exited 0."""
+    src = """from collections import namedtuple
+
+Point = namedtuple('Point', ['x', 'y'])
+
+def main():
+    p = Point(1, 2)
+    q = Point('a', 'b')
+    print(repr(p))
+"""
+    try:
+        compile_mojo_to_gimple_exe(src)
+    except RuntimeError as e:
+        if 'namedtuple Point field' in str(e) and 'both int and str' in str(e):
+            return
+        raise AssertionError(f"refused, but not with the named message: {e}")
+    raise AssertionError("mixed int/str namedtuple fields compiled; they must be refused")
+
+
+def test_namedtuple_tuple_protocol_is_refused_by_name():
+    """A namedtuple value used as a TUPLE (indexed, unpacked, passed to `len`,
+    read through `_asdict`) must be refused by name. The lowered class has named
+    fields only, and before this refusal each of these compiled and exited 0:
+    `p[0]` printed a stack address, `a, b = p` bound nothing, `len(p)` was 0."""
+    head = "from collections import namedtuple\n\nPoint = namedtuple('Point', ['x', 'y'])\n\n"
+    bodies = {
+        "indexing": "def main():\n    p = Point(1, 2)\n    print(p[0])\n",
+        "unpacking": "def main():\n    p = Point(1, 2)\n    a, b = p\n    print(a)\n",
+        "len": "def main():\n    p = Point(1, 2)\n    print(len(p))\n",
+        "_asdict": "def main():\n    p = Point(1, 2)\n    print(p._asdict())\n",
+    }
+    for kind, body in bodies.items():
+        try:
+            compile_mojo_to_gimple_exe(head + body)
+        except RuntimeError as e:
+            if 'has no tuple protocol' in str(e):
+                continue
+            raise AssertionError(f"{kind}: refused, but not with the named message: {e}")
+        raise AssertionError(f"{kind}: a namedtuple used as a tuple compiled; it must be refused")
+
 if __name__ == '__main__':
     main()
 
