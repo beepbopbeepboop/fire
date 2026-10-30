@@ -12587,6 +12587,20 @@ def test_namedtuple_tuple_protocol_is_refused_by_name():
         "for_index": "def main():\n    pts = [Point(1, 2)]\n    for q in pts:\n        print(q[0])\n",
         "container_unpack": "def main():\n    pts = [Point(1, 2)]\n    for q in pts:\n        a, b = q\n        print(a)\n",
         "container_len": "def main():\n    pts = [Point(1, 2)]\n    print(len(pts[0]))\n",
+        # The tuple BUILTINS, each on a container element. Before the
+        # builtin-site checks each compiled and failed at runtime (exit 1,
+        # "object is not iterable"), printed nothing (`reversed`), or crashed
+        # (`max`, SIGSEGV). Each is refused at its own lowering site, where
+        # the operand's static C type is known.
+        "container_list": "def main():\n    pts = [Point(1, 2)]\n    print(len(list(pts[0])))\n",
+        "container_sum": "def main():\n    pts = [Point(1, 2)]\n    print(sum(pts[0]))\n",
+        "container_max": "def main():\n    pts = [Point(1, 2)]\n    print(max(pts[0]))\n",
+        "container_any": "def main():\n    pts = [Point(1, 2)]\n    print(any(pts[0]))\n",
+        "container_sorted": "def main():\n    pts = [Point(1, 2)]\n    print(sorted(pts[0]))\n",
+        "container_reversed": "def main():\n    pts = [Point(1, 2)]\n    for v in reversed(pts[0]):\n        print(v)\n",
+        "container_enumerate": "def main():\n    pts = [Point(1, 2)]\n    for i, v in enumerate(pts[0]):\n        print(i)\n",
+        "container_zip": "def main():\n    pts = [Point(1, 2)]\n    for a, b in zip(pts[0], pts[0]):\n        print(a)\n",
+        "container_for_iter": "def main():\n    pts = [Point(1, 2)]\n    for v in pts[0]:\n        print(v)\n",
     }
     for kind, body in bodies.items():
         try:
