@@ -924,6 +924,16 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         gen._cpp_gen_self_params = None
         gen._cpp_gen_self_recursed = None
         gen._cpp_fwd_gen_delegates = None
+    # The cpp typer types a yield it cannot resolve as int64_t, and that
+    # silently truncates a float or prints a bool as 1. The stack-switch
+    # kind analysis knows the real kind, so the fallback refuses any yield
+    # whose slot cannot hold it (bugs/CODEGEN_generator_yield_kind_rebound_
+    # name_silent_wrong_value.md, Shape 2). Checked only when a slot was
+    # decided at all: an undecided slot is refused below with its own message.
+    if value_ctype is not None:
+        _slot_why = gimple_gen_coro.cpp_value_slot_refusal(fn, value_ctype)
+        if _slot_why is not None:
+            raise gimple_exprtypes._UnsupportedGeneratorShape(f"{fn.name}: {_slot_why}")
     if value_ctype is None:
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             f"{fn.name}: every `yield` must carry a value, and all "

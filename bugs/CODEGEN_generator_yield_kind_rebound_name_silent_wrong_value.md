@@ -1,15 +1,46 @@
 # CODEGEN: a generator's yield slot takes the FIRST kind a rebound name had, and a mixed-kind lambda yield falls back to a wrong-value path
 
-**State: PARTIAL, fixed Shape 1 root cause (_static_env setdefault → per-name kind set); Shape 2 remaining (fallback fix needed).
+**State: PARTIAL (2026-10-29). No silent wrong value remains for either shape:
+both now REFUSE at compile time, in both backends. Compiled output that
+matches CPython is still missing, and needs the feature described under
+"Remaining" below.**
 
----
+## Status
 
-The root cause (Shape 1: `_static_env` `setdefault` keeping the first binding's kind) is **fixed** in this commit. The per-name kind set mechanism records all bindings; names with conflicting scalar kinds are left unset (None hole), so `_generator_value_kind` cannot misread a single kind.
+- **Shape 1 (rebound local), landed.** `mojo/middle/coro.py`'s `_static_env`
+  records EVERY kind a name is bound to. Two kinds that share a slot layout
+  (`bool` and `int`) widen to `'i'`, as the mixed bool/int decision already
+  does. Any other disagreement is a `('conflict', kinds)` marker, and a yield
+  of that name is refused by `_generator_value_kind`. Before this, a dropped
+  name read as a None hole, and a lone hole is int64_t: `2` / `0`, silently.
+- **Shape 2 (mixed-kind lambda), landed as a refusal.** The cpp fallback
+  types a lambda call as `std::function<int64_t()>`, so a float or bool result
+  reached its yield as int64_t. `coro.cpp_value_slot_refusal` runs in
+  `cpp_async._gen_cpp_generator_unit` and refuses any yield whose kind is `d`
+  (needs `double`) or `b` (needs `_Bool`) that the cpp typer put in a
+  different slot, and any yield of a conflicting name.
+- **Tests:** `test_gimple_generator_runner.py`'s `generator_rebound_local_
+  yield_kind_shape1_refused` and `generator_mixed_lambda_yield_shape2_refused`
+  pin the refusals. Their old pins (`2\n0\n`, `1\n1\n`) were wrong against
+  CPython and are gone.
 
-**Remaining: Shape 2** (mixed-kind lambda yields). The A3 path correctly refuses mixed-kind yields as before, but the legacy cpp fallback still types both yields `int64_t` and prints `1
-1` — unchanged by this round. Next step 2 (threading the lambda-call return table into `cpp_async.py`'s `_generator_yield_ctype`) is needed to resolve shape 2 fully.
+## Remaining
 
-Before: compiled `_Bool` slot printed `True` for the float (`r = False` → `'b'`, `r = 2.5` silently dropped). After: slot is `int64_t`, float prints `2`, int prints `0` — no longer the wrong kind. The text gap (float vs bool rendering) remains and requires the lambda-call return table fix in the cpp fallback.
+1. **Compiled output that matches CPython for these programs.** Shape 1 needs
+   a value slot that holds BOTH a bool and a float (a tagged or boxed slot).
+   The stack-switch slot is one scalar, so this is a feature, not a fix to
+   `_static_env`. Shape 2 needs a lambda callable whose return kind is not
+   always int64 in the cpp path (`_CPP_CALLABLE_CTYPE` is int64-only).
+2. **Methods in the cpp check.** `cpp_value_slot_refusal` calls
+   `_static_env(fn, None)`, so a generator METHOD's `self.<field>` yields
+   are not typed there. Those yields are not refused by the cpp check even
+   when a field is float. Fix: thread the enclosing `StructDef` into the cpp
+   unit (it has only the struct NAME today).
+3. **Stdlib gate impact, for the integrator.** A generator that yields a
+   rebound name, or a float/bool lambda result on the cpp path, is now a
+   refusal. Check `compile_stdlib.py`'s `U` count and `stdlib-dylib`'s
+   `skip` count against the pre-change run. A new refusal there is the
+   correct answer, but it must be seen.
 
 Two shapes, one family: the value slot of a generator is decided from a
 single kind, and the kind is read off the first binding of a name (or off a
@@ -84,16 +115,7 @@ lambda-bound callee the way `_static_env` now does).
 
 ## Next step
 
-1. In `_static_env` (`mojo/middle/coro.py`), replace `env.setdefault(tgt, k)`
-   with a per-name set of every kind bound to the name. If the set has more
-   than one scalar kind, record the name as conflicting (no entry), so
-   `_generator_value_kind` sees a `None` hole and refuses beside a non-int
-   kind, or types it `int64_t` beside an int. Check the `None`-hole rule
-   against `test_gimple_generator_runner.py`'s existing shapes before landing.
-2. For shape 2, make the cpp fallback's `_generator_yield_ctype` call receive
-   the lambda-call return table (the same `known`-map gap the bug's
-   parent doc describes), or refuse a mixed-kind yield set there the way the
-   A3 path does.
-3. Tests: both programs above, CPython-compared, in
-   `test_gimple_generator_runner.py` next to the lambda-yield tests
-   (`generator_lambda_*`).
+Remaining item 1 above is the feature (a slot that holds bool and float, and a
+lambda callable with a non-int return in the cpp path). Item 2 is the one
+small, self-contained follow-up: thread the enclosing `StructDef` into
+`_gen_cpp_generator_unit` and pass it to `cpp_value_slot_refusal`.
