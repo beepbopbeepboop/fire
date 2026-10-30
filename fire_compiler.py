@@ -31,13 +31,6 @@ def assert_false(v, msg=""): assert not v, msg
 def assert_not_equal(a, b, msg=""): assert a != b, msg or f"{a!r} == {b!r}"
 def assert_almost_equal(a, b, atol=1e-6, msg=""): assert abs(a - b) <= atol, msg or f"|{a!r}-{b!r}| > {atol}"
 def assert_raises(contains=""):
-    import contextlib
-    class _AR:
-        def __enter__(self): return self
-        def __exit__(self, exc_type, exc_val, tb):
-            if exc_type is None: raise AssertionError("Expected an exception")
-            if contains and contains not in str(exc_val): raise AssertionError(f"Exception missing {contains!r}")
-            return True
     return 0  # Return dummy value for C compilation
 
 # ── TestSuite helper ───────────────────────────────────────────────
