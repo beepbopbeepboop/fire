@@ -1,5 +1,56 @@
 # CODEGEN_generator_function: Lib/test/test_ensurepip.py
 
+## Status (2026-10-29, planning round: instance-read path for the captured-local class attribute)
+
+Still the same single blocker: this file's `fake_pip` needs
+`class FakePip: __version__ = version` to read the enclosing local, which is
+`bugs/CODEGEN_nested_class_attr_reads_enclosing_local_silently_zero.md` (plan B
+there). This round did not change code; it located the lever for that plan's
+step 3 so the next round can start editing directly.
+
+Measured (`python3 tools/memslot.py --gb 8 --label measure -- python3
+.tmp/measure_classattr.py`, `compile_to_gimple_with_cpp(src, do_imports=False)`,
+the `make(version)` / `Tag()` program from the nested-class doc):
+
+- `make()` emits `_classattr_Tag____version__ = version;` in the body (the
+  single-call fix is present), and `_alloc_Tag` does not seed it.
+- Each instance read `a.__version__` lowers to `_t = _classattr_Tag____version__;`,
+  i.e. the GLOBAL, not a field of `a`. That is why `a` prints the latest call's value.
+
+Why the read goes to the global: `mojo/backend_gimple/emit_exprs.py`
+`_lower_MemberExpr` (~2472-2610) checks the instance field map
+(`if node.member in field_map`) BEFORE the class-attribute branch
+(`class_attrs[struct_name]`, ~2602). The class-attr branch wins only because
+`Tag` has no `__version__` entry in `gen.struct_field_types['Tag']`. So the
+lever is to register that entry for function-hoisted classes, not to change the
+read branch.
+
+Next round (plan B, concrete):
+
+1. Confirm `struct_field_types['Tag']` lacks `__version__` (dump it right after
+   `module_gen`'s field-typing pass, ~module_gen.py:5950-5990: the "UPGRADE an
+   already-registered instance field" block only upgrades, it never creates).
+   For a hoisted class, create the field there, keyed on
+   `_gmi_nested_struct_defs` membership, with the type from `_class_attr_ctype`.
+2. Seed it at allocation: the `_alloc_<Cls>` emitter's class-attr loop
+   (module_gen.py ~15012-15030 `for _aname in sorted(class_attrs)`) writes
+   `_p-><attr> = <global>` only when the field type and global type agree, so
+   the field created in step 1 gets the seed for free if the types match.
+3. Verify the instance read now emits `_p->__version__`
+   (`_lower_MemberExpr` field branch) and rerun the measure script. Expected
+   `7 7 9 9` becomes `5 7 9 5`. Note the residual: `Tag.__version__` on the
+   class object still reads the last global (the nested-class doc's residual).
+4. Rebinding check before committing: `t = Tag(); Tag.__version__ = 3;
+   print(t.__version__)` with no instance-level assignment. CPython prints 3
+   (the instance has no own value, so the class value wins). Match the
+   module-scope class's answer for the same program, and pin it.
+5. Tests, in `test_gimple_runner.py` next to
+   `test_nested_class_attr_reads_enclosing_local_regression`: the `make`/`Tag`
+   program expecting `"5\n7\n9\n5\n"`, which fails today with `7 7 9 9`.
+
+Until steps 1-3 land, `coro.py` `_nested_class_nonliteral_attr` keeps refusing
+the generator form, so this file stays on the honest interpreted path.
+
 ## Status (2026-10-29 — the silent miscompile is now an honest refusal; the file still does not compile)
 
 The nested-class shape in `fake_pip` no longer refuses on `StructDef`. It was
