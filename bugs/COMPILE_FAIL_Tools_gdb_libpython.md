@@ -1,5 +1,29 @@
 # COMPILE_FAIL: Tools/gdb/libpython.py
 
+## Status (2026-10-29, bug-compile-fail-tools-gdb-libpython, second worker round — planned pinning test CORRECTED, still blocked on the A/B decision)
+
+Re-measured the planned pinning assertion before writing it. Probe:
+`gimple_codegen.compile_to_gimple(src, do_imports=False)` on
+`Tools/gdb/libpython.py`, default backend, under `memslot --gb 8`
+(peak 0.1 GB, under 1 s). It RAISES `RuntimeError`, but the exception text
+is the generic generator refusal, NOT the str-key message:
+`cannot compile module: function(s) iteritems (generator function(s),
+contain a \`yield\`/\`yield from\`) ... falling back to interpreting this module`.
+The str-key reason (`a str-keyed subscript (\`obj[<str>]\`) ...`) appears only
+in the `MOJO_DEBUG=1` trace (`generator method PyDictObjectPtr.'iteritems'
+not eligible for C++ coroutine path, falling back to honest refusal: ...`).
+So the `test_raises(..., "a str-keyed subscript")` assertion in the plan
+above would FAIL on the default backend as written. The
+`generator_str_key_subscript_honest_refusal` test that exists in
+`test_gimple.py` is under `_force_cpp_coro()` (the opt-in backend), so it
+does not pin the default path.
+
+No code or test change this round. The A/B decision is still the user's.
+Under (A), the pinning test must assert the actual default-path message
+(`cannot compile module: function(s) iteritems`), or check the `MOJO_DEBUG`
+reason, not the str-key text. Under (B), this default-path refusal is the
+thing to be removed.
+
 ## Status (2026-10-29, bug-compile-fail-tools-gdb-libpython, planning round — DEFAULT backend measured; the `.cpp` error list below is opt-in only)
 
 Measurement (the decisive finding of this round):

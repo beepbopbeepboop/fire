@@ -244,9 +244,9 @@ __mojo_coro_yield_i(int64_t coro, int64_t v)
 }
 
 int64_t
-__mojo_coro_yield_p(int64_t coro, int64_t v)
+__mojo_coro_yield_p(int64_t coro, void *v)
 {
-    return __mojo_coro_yield((MojoCoro *)(uintptr_t)coro, v);
+    return __mojo_coro_yield((MojoCoro *)(uintptr_t)coro, (int64_t)(uintptr_t)v);
 }
 
 int64_t

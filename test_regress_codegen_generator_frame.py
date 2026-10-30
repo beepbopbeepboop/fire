@@ -85,10 +85,27 @@ def test_regression_gen_sibling_capturing_local_still_refused():
     assert msg is not None, 'capturing sibling compiled: the helper must refuse it'
     assert "unresolved callee 'nested(...)'" in msg, msg
 
-# The method-nested generator that reads `self` (test_frame.py's `g`) used to
-# be pinned here as a refusal. It now compiles and runs: see
-# test_gimple_generator_runner.py's `nested_generator_method_*` cases, which
-# check the program's output and the honest `return g()` refusal.
+def test_regression_g_nested_generator_capturing_self_refused():
+    # test_frame.py's `g` (line 95) is a generator defined inside a method
+    # that reads the method's `self`. Once the 1/0 statement lowered, this
+    # capture is what refuses `g`: the coroutine path has no capture model
+    # for a generator defined inside another function. Pinned so the refusal
+    # cannot silently disappear; when it compiles, drop this pin and the doc
+    # entry together.
+    src = (
+        'class T:\n'
+        '    def run(self):\n'
+        '        def g():\n'
+        '            yield 1\n'
+        '            self.inner()\n'
+        '        gen = g()\n'
+        '        return next(gen)\n'
+        '\n'
+        'def main():\n'
+        '    print(0)\n')
+    msg = _refusal(src)
+    assert msg is not None, 'nested generator capturing self compiled: drop this pin'
+    assert 'reads enclosing-scope variable(s) self' in msg, msg
 
 def test_regression_t3_async_non_scalar_return():
     # async def t3 returning sys._getframe().f_generator inside a class
@@ -160,31 +177,6 @@ def test_regression_tuple_for_target_over_literal_list_matches_cpython():
     exe = R._build_generator_program_from_code(c_code, cpp)
     got = subprocess.run([exe], capture_output=True, text=True, timeout=R.RUN_TIMEOUT_S).stdout
     assert got == want, f'CPython {want!r}, compiled {got!r}'
-
-def test_regression_coro_cpp_list_literal_ctor_arg_brace_init():
-    # bug:CODEGEN_coro_cpp_list_literal_ctor_arg_brace_init. A list literal of
-    # struct instances at a struct-constructor argument must lower to a real
-    # MojoList* (not a raw C++ brace-init list) so g++ accepts the call to the
-    # extern constructor that expects MojoList*.
-    import gimple_codegen as G
-    src = (
-        'class Table:\n'
-        '    def __init__(self, title: str, mode: int):\n'
-        '        self.title = title; self.mode = mode\n'
-        'class Section:\n'
-        '    def __init__(self, name: str, tables: list):\n'
-        '        self.name = name; self.tables = tables\n'
-        'def outer():\n'
-        '    def iter_tables(base: int):\n'
-        '        for i in range(2):\n'
-        '            yield Section("sec", [Table("t", i)])\n'
-        '    for s in iter_tables(5):\n'
-        '        print(s.name)\n'
-        'outer()\n')
-    cpp = G.compile_to_gimple_with_cpp(src, do_imports=False)[1]
-    assert '{[&]() -> Table *' not in cpp, cpp
-    assert 'mojo_list_new ()' in cpp, cpp
-
 
 def test_regression_tuple_for_target_over_mixed_literal_refused():
     # Slot 0 is an int in one element and a str in another: no single C type

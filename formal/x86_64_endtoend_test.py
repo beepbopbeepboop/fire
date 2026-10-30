@@ -940,7 +940,9 @@ def _body(code, info):
     `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`.
     """
     base, entry = info["base_addr"], info["func_offset"]
-    end = D.body_end(info)
+    strs = [a for n, a in (info.get("labels") or {}).items()
+            if n.startswith("str_")]
+    end = (min(strs) - base) if strs else len(code)
     if end <= entry - base:
         return None
     try:

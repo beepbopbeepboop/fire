@@ -789,7 +789,7 @@ _DISPATCH_TABLE_GLOBAL_CTYPES = {
 # nothing reads it.
 #
 # `_uncompiled_module_marker`'s raise (see
-# commit 319ab932c (DELETED)) therefore
+# bugs/RUNTIME_argparse_is_stubbed_so_parse_args_consumers_crash.md (DELETED)) therefore
 # has to exclude these modules: it answers “is this a marker for a module this
 # compile never compiled”, which is true for `re` and irrelevant, because the
 # compile-time recogniser already holds the answer. Raising there turned
@@ -1614,15 +1614,6 @@ def _module_attr_ctype(module_name, member) -> str:
         return ''
     return _MODULE_ATTR_CTYPES.get((module_name, member), '')
 
-def cattr_cell_field(attr: str) -> str:
-    """Name of the hidden instance field that holds an instance's OWN cell for
-    the function-scoped class attribute `attr` (see module_gen's cell
-    registration and emit_methods' `_cattr_instance_read`). One name, used by
-    the registrar, the allocator seed and the read site, so they cannot drift.
-    """
-    return '_clscell_' + attr
-
-
 def _safe_field(name: str) -> str:
     """Sanitize struct field and parameter names that are C keywords or
     platform-macro names (see _C_MACRO_NAMES's `stdin`/`stdout`/`stderr`
@@ -1666,7 +1657,7 @@ def _replace_first_ident(text: str, old: str, new: str) -> str:
     bare `extern void assert_equal (...)` in the self-hosted output against
     the defining module's real `std_testing___init___assert_equal` — the
     largest single shim-vs-noshim `--dump` divergence class (see
-    commit e8a7135b8).
+    bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md).
 
     Plain `str.find`/slicing is identical on both sides, so callers no
     longer depend on the regex engine at all."""
@@ -2463,7 +2454,7 @@ _CPP_CALLABLE_CTYPE_1ARG = 'std::function<int64_t(int64_t)>'
 # cpp_core's CallExpr declared-callable-local case. `Tools/c-analyzer/
 # c_common/fsutil.py`'s `get_files = lambda *a, **k: ...` is the motivating
 # occurrence; see bugs/hard/
-# the (since-fixed) c_common/fsutil.py compile failure.
+# COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md.
 _CPP_CALLABLE_CTYPE_STARARGS = 'std::function<int64_t(MojoList *)>'
 _CPP_CALLABLE_CTYPE_KWARGS = 'std::function<int64_t(MojoDict *)>'
 _CPP_CALLABLE_CTYPE_STAR_KW = 'std::function<int64_t(MojoList *, MojoDict *)>'

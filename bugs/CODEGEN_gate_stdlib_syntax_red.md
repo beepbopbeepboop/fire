@@ -1,104 +1,25 @@
-# Gate job `stdlib-syntax` red on the master merge: status and remaining latent `iter()` defect
+# Gate job `stdlib-syntax` is red: stdlib compile: enum-case `case` patterns rejected
 
 ## Status
 
-Re-measured 2026-10-30 (narrow only, `compile_stdlib.transpile_file` on the five files the gate names,
-each under `python3 tools/memslot.py --gb 8`, cold `GMOJO_HOME` per tree):
+OPEN. Found in the full `make gate` run on the `get_sign` String-argument fix (`974d0e538`, landed 2026-10-28 with the gate red). The failure is not confirmed to come from that fix: `mojoc` is red on master as well (see `bugs/CODEGEN_imported_function_default_argument_dropped_at_call.md`), and the other jobs are not compared against master yet.
 
-| tree | dtype | logger | address_space | testing/suite | test_linked_list |
-|---|---|---|---|---|---|
-| branch HEAD `9023f0c5d` | PASS | PASS | PASS | PASS | PASS |
-| merge tree `710624a56` (`git merge-tree --write-tree master HEAD`) | PASS | PASS | PASS | PASS | PASS |
-| master `154444590` (`git archive`) | FAIL | FAIL | FAIL | FAIL | PASS |
+## Gate output (first lines)
 
-So the red this doc was opened for is not the `iter()` gcc error any more. On current master the four
-failing files are refused by codegen with `a case pattern is an ENUM CASE (case .PASS:) ...`, and
-this branch's enum-case commits (`86f908c22`, `1e6a34e01`, `8e2b8f227`) are what closes it. The merge
-result is green on all five narrow files. **The full `stdlib-syntax` job (664 files, `U` count) has
-NOT been run here; that is the integrator's.**
-
-The earlier `iter()` symptom (gcc `passing argument 1 of 'mojo_list_get_int'` in
-`test/collections/test_linked_list.mojo`) no longer reproduces: that file passes on master
-`154444590`, so the Status below no longer describes a live gate failure.
-
-Remaining, latent (NOT fixed, NOT on this branch): master's `mojo/backend_gimple/emit_stmts.py:285`
-still reads `if _rebind and gen.var_types.get(name) != at:` (from master `b3814dbfd`). It lets an
-already-declared scalar target gain a list cursor when `iter()`'s argument lowers to `int64_t`. The
-root-cause analysis below is still correct for that line. Next step, which must land on master (this
-branch does not contain the `_rebind` block, so a change here would only conflict with it):
-1. Replace the line with `if _rebind and (gen.var_types.get(name) != 'MojoList *' or at != 'MojoList *'):`.
-2. Add a test next to `gimple_iter_rebinds_a_parameter_to_a_cursor` (`test_gimple_runner.py`) that
-   `var ll = LinkedList[Int](); var it = iter(ll)` does not gain a list cursor when `ll` is `int64_t`.
-3. Re-run the five narrow files above and `test_gimple_runner.py` for the new test, then delete this doc.
-
-Earlier measurements (kept for the history of the reasoning): on master `d1e59974f` the defect did
-reproduce on `test_linked_list.mojo`, and the one-line fix made the generated C byte-identical to the
-branch's. Master has since moved past that state.
-
-## What was run
-
-- Narrow syntax check of the five files the gate named, per `compile_stdlib.transpile_file`, with a
-  cold `GMOJO_HOME` cache, each under `tools/memslot.py --gb 8`:
-  - on this branch HEAD: `std/builtin/dtype.mojo`, `std/logger/logger.mojo`, `std/memory/address_space.mojo`,
-    `std/testing/suite.mojo`, `test/collections/test_linked_list.mojo`: all PASS.
-  - on the materialised merge tree (`git archive 84636db6c`): the first four PASS;
-    `test/collections/test_linked_list.mojo` FAILS with 2 gcc errors:
-    - `test_collections_test_linked_list_test_iter`: `it = ll` / `it = (MojoList *)…`, then
-      `mojo_list_get_int(it, …)` with `it` an `int64_t` (`passing argument 1 of 'mojo_list_get_int'
-      makes pointer from integer`), and `_t149 = (MojoList *)_t150` assignment from an int.
-
-## Root cause
-
-In `mojo/backend_gimple/emit_stmts.py::_try_bind_iter_cursor` (master):
-
-1. `b3814dbfd` replaced the guard `name not in gen.var_types` with a rebind path: an already-declared
-   target `_rebind` now proceeds when the argument's C type equals the target's.
-2. The argument in `test_iter` is `ll`, from `var ll = LinkedList[Int]()`. That constructor does not
-   resolve in this compiler and lowers to `ll = (int64_t)0  /* indirect call via SubscriptExpr */`, so
-   `at == 'int64_t'`.
-3. The `elif at in ('int', 'int64_t', 'void *')` branch (kind `'list'`, `av` coerced to `MojoList *`)
-   then binds a list cursor over that scalar. `it` happens to be in `var_types` by then, so the
-   rebind check (`var_types['it'] == 'int64_t' == at`) passes.
-
-The rebind path was written for "a parameter/earlier local that holds a plain container" (its own
-comment), so it must require a real `MojoList *` on both sides. Accepting an `int64_t` there is the
-bug.
-
-## The fix (verified in a scratch copy of master, not committed)
-
-`mojo/backend_gimple/emit_stmts.py`, `_try_bind_iter_cursor`, replace
-
-```python
-    if _rebind and gen.var_types.get(name) != at:
-        return False
+```
+  Progress: 50 passed, 0 failed  std/builtin/dtype.mojo...FAIL
+  Progress: 149 passed, 1 failed  std/logger/logger.mojo...FAIL
+  std/memory/address_space.mojo...FAIL
+  Progress: 247 passed, 3 failed  std/testing/suite.mojo...FAIL
+FAILED: 4 (0 expected, 4 unexpected)
 ```
 
-with
+## What to check first
 
-```python
-    if _rebind and (gen.var_types.get(name) != 'MojoList *' or at != 'MojoList *'):
-        return False
-```
-
-Verified:
-- `GMOJO_HOME=.tmp/cas-fix python3 -I .tmp/gen_c.py <master-copy> .tmp/fix.c`: the generated C for
-  `test/collections/test_linked_list.mojo` is **byte-identical** (`cmp`) to the one from this branch's
-  HEAD, and `gcc-mp-15 -fgimple -fsyntax-only -D__MOJO_STDLIB_MODE__` reports 0 errors (master
-  unfixed: 2).
-- The master commit's own test `gimple_iter_rebinds_a_parameter_to_a_cursor` (the `rest`/`twice`/`dflt`
-  program, expected `(1, [20, 30]) 9 -1 9`) still PASSES with the fix (run through
-  `test_gimple_stdout` directly).
+`case .PASS:` (an ENUM CASE) rejected at dtype.mojo:432, logger.mojo:176, address_space.mojo:140, testing/suite.mojo:116 (4 UNEXPECTED).
 
 ## Next step
 
-1. Land the fix on master (or on a branch made from master) in the same commit as, or immediately after,
-   `b3814dbfd`'s owner: the one-line change above plus a test next to
-   `gimple_iter_rebinds_a_parameter_to_a_cursor` that `iter()` on a constructor stub
-   (`var ll = LinkedList[Int](); var it = iter(ll)`) does not gain a list cursor.
-2. Then run the full `make gate` once, as the integrator. `stdlib-syntax` must show `U` unchanged
-   (0 unexpected) and `test/collections/test_linked_list.mojo` must compile.
-3. Delete this doc in that commit.
-
-Also not yet checked: whether the `(int64_t)0` constructor stub is itself a bug (`LinkedList[Int]()` in
-`test/collections/test_linked_list.mojo` should construct a real list, not 0). It is a separate gap
-and the fix above does not depend on it.
+1. Run `python3 tools/suite.py stdlib-syntax` alone on master (the gate ran 218 jobs at once, ~93 processes; some reds may be load or timeouts, so rerun alone before fixing).
+2. If it reproduces alone on master, fix the root cause and add the test; delete this doc when it is fixed.
+3. If it passes alone on master, record that here and find which concurrent job it shares state with.
