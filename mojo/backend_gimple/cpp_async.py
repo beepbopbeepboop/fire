@@ -386,6 +386,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     # compile attempt can never leave a PRIOR generator's leftover
     # slot-types list around for some later, unrelated read to pick up.
     gen._cpp_last_tuple_slot_ctypes = None
+    gen._cpp_last_mixed_slots = False
     # Same reset convention for the value-carrying-return side channel
     # (see the eligibility computation below).
     gen._cpp_last_has_return_value = False
@@ -472,6 +473,14 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     # message is built by the same helper so the two cannot drift. See
     # CODEGEN_coro_yield_kind_unresolved_callsite.
     _bad = gimple_gen_coro._ambiguous_yielded_params(fn, struct_name)
+    # A LIST parameter whose call sites disagree on the element type is not
+    # ambiguous to this backend: the loop over it reads each slot by the kind
+    # the list recorded (`_cpp_mixed_list_params`), so the int64_t value slot
+    # carries a box, not a bare word. Every other ambiguous parameter (a
+    # scalar, or a call site the static scan could not type at all) still has
+    # no sound single slot and is refused below.
+    _mixed_ok = set(getattr(gen, '_param_elem_mixed', {}).get(fn.name, ()))
+    _bad = set(_b for _b in _bad if _b not in _mixed_ok)
     if _bad:
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             gimple_gen_coro._ambiguous_slot_message(_bad, 'compiled'))
@@ -832,6 +841,8 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         gen._cpp_pending_return_store = (_ret_base, _ret_ct)
     gen._cpp_last_has_return_value = _has_return_value
     gen._cpp_list_local_elem_types = {}
+    gen._cpp_mixed_list_params = set(
+        getattr(gen, '_param_elem_mixed', {}).get(fn.name, ()))
     # `<module marker>.<name>` -> ctype for the module-level constants this
     # unit's body can read as values (see `gcc_._cpp_module_global_ctypes`).
     # Seeded HERE, before the body-emission loop below, because that loop is
@@ -943,6 +954,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         if has_tuple_yield and tuple_slot_ctypes is None:
             value_ctype = None
         gen._cpp_last_tuple_slot_ctypes = tuple_slot_ctypes if has_tuple_yield else None
+        gen._cpp_last_mixed_slots = bool(getattr(gen, '_cpp_mixed_list_params', None))
         func_decls = list(gen._cpp_func_scope_decls)
         self_recursed = gen._cpp_gen_self_recursed
         fwd_delegates = list(gen._cpp_fwd_gen_delegates)
@@ -3296,6 +3308,7 @@ def _gen_cpp_async_generator_unit(gen, fn: gimple_ctypes.FunctionDef) -> tuple[s
     # See _gen_cpp_generator_unit's identical reset for why this must
     # happen up front, before any early exception/refusal.
     gen._cpp_last_tuple_slot_ctypes = None
+    gen._cpp_last_mixed_slots = False
     param_ctypes: list[tuple[str, str]] = []
     for pn, pt in (fn.params or []):
         if pn.startswith('*'):
@@ -3369,6 +3382,7 @@ def _gen_cpp_async_generator_unit(gen, fn: gimple_ctypes.FunctionDef) -> tuple[s
         if has_tuple_yield and tuple_slot_ctypes is None:
             value_ctype = None
         gen._cpp_last_tuple_slot_ctypes = tuple_slot_ctypes if has_tuple_yield else None
+        gen._cpp_last_mixed_slots = bool(getattr(gen, '_cpp_mixed_list_params', None))
     finally:
         gen._cpp_emit_kind = 'generator'
         gen._cpp_gen_self_struct = None

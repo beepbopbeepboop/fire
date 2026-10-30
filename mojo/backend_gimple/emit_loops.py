@@ -3818,8 +3818,17 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
         gen._boxed_container_vals.add(val)
     if is_tuple_target:
         gen._emit_generator_tuple_unpack(var_names, tuple_slot_ctypes, val, tuple_slot_nested)
+        # A generator that iterates a kind-mixed list parameter yields BOXES in
+        # its int64_t slots (see cpp_core's `_cpp_mixed_list_params` read), so
+        # the unpacked names must resolve them at each use.
+        if api.get('mixed_slots'):
+            for _mvn in var_names:
+                if gen.var_types.get(_mvn) == 'int64_t':
+                    gen._boxed_vals.add(gen._cname(_mvn))
     else:
         gen._emit(f"  {gen._cname(var)} = {val};")
+        if api.get('mixed_slots') and gen.var_types.get(var) == 'int64_t':
+            gen._boxed_vals.add(gen._cname(var))
     gen.loop_stack.append((bb_post, bb_after))
     gen._gen_loop_body(body)
     gen.loop_stack.pop()

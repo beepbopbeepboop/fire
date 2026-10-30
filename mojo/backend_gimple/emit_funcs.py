@@ -2934,6 +2934,9 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     _pmx = getattr(gen, '_param_nested_mixed', {}).get(node.name, ())
     for _pmx_bare in _pmx:
         gen._nested_mixed_names.add(_as_str(_pmx_bare))
+    _pem = getattr(gen, '_param_elem_mixed', {}).get(node.name, ())
+    for _pem_bare in _pem:
+        gen._maybe_kinds_vals.add(_as_str(_pem_bare))
     _pdv = getattr(gen, '_param_dict_val_types', {}).get(node.name, {})
     for bare in _pdv:
         # '' is the conflicting-call-sites marker (see _record_param_dict_val),

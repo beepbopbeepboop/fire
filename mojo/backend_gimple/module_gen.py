@@ -9022,6 +9022,11 @@ def gen_module_impl(self, stmts):
     # unknown reads as the int64_t default; this set says the inner lists
     # are kind-mixed, which the element loop answers with the runtime route.
     self._param_nested_mixed: dict[str, set] = {}
+    # callee -> {pname} for a FLAT list parameter whose call sites disagree on
+    # the element C type (`show([1, 2])`, `show(['a'])`, `show([2.5])`): the
+    # contract is unknown, so a loop over it must ask each slot's recorded kind
+    # at run time (`mojo_list_get_boxed`) rather than trust one typed accessor.
+    self._param_elem_mixed: dict[str, set] = {}
     self._coro_str_params: dict[str, set] = {}
     # coroutine body name -> {param} whose element type is POSITIVELY int:
     # the list-of-ints counterpart of `_coro_str_params`. Kept apart from
@@ -9146,6 +9151,10 @@ def gen_module_impl(self, stmts):
                     _mx_inner = self._param_nested_mixed.setdefault(callee, set())
                     _mx_inner.add(pname)
             else:
+                if (old_e is not None and e is not None and old_e != e
+                        and old_e != 'MojoList *' and e != 'MojoList *'):
+                    _em = self._param_elem_mixed.setdefault(callee, set())
+                    _em.add(pname)
                 d[pname] = (None, None)   # conflicting call sites → unknown
         else:
             d[pname] = (e, ne)
@@ -9906,6 +9915,7 @@ def gen_module_impl(self, stmts):
     # as soon as a round settles nothing.
     _contract_rounds = 0
     _contract_limit = len(_caller_bodies) + 1
+    _em_before = sum(len(_v) for _v in self._param_elem_mixed.values())
     _resolve_param_dict_vals()
     _resolve_param_containers()
     while _contract_rounds < _contract_limit:
@@ -9932,8 +9942,18 @@ def gen_module_impl(self, stmts):
                     _pc = _static_arg_container(a, caller_name)
                     if _pc is not None:
                         _record_param_container(callee, pnames[i], _pc)
+                    # A parameter handed straight on to another function's
+                    # parameter carries its kind-mixing with it: `pairs(xs)`
+                    # inside `run(xs)`, where `run`'s call sites disagree.
+                    if (isinstance(a, IdentExpr)
+                            and _as_str(a.name) in self._param_elem_mixed.get(caller_name, ())):
+                        self._param_elem_mixed.setdefault(callee, set()).add(pnames[i])
         _resolve_param_dict_vals()
         _resolve_param_containers()
+        _em_now = sum(len(_v) for _v in self._param_elem_mixed.values())
+        if _em_now != _em_before:
+            _em_before = _em_now
+            continue
         if (len(self._param_dict_val_obs) == _dv_before
                 and len(self._param_container_obs) == _pc_before):
             # No new (callee, param) slot was reached this round, in EITHER
@@ -11155,6 +11175,7 @@ def gen_module_impl(self, stmts):
         self._generator_api[s.name] = {
             'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
             'tuple_slot_ctypes': self._cpp_last_tuple_slot_ctypes,
+            'mixed_slots': self._cpp_last_mixed_slots,
             # Value-carrying `return` support (asyncio/futures.py's
             # `__await__`): True when this unit stored its return value
             # into the promise slot before co_return, so a `yield from`
@@ -11359,6 +11380,7 @@ def gen_module_impl(self, stmts):
         self._async_gen_api[s.name] = {
             'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
             'tuple_slot_ctypes': self._cpp_last_tuple_slot_ctypes,
+            'mixed_slots': self._cpp_last_mixed_slots,
         }
         self.func_param_types[f"{base}_start"] = param_ctypes
         self._generator_cpp_units.append(cpp_text)
@@ -11383,6 +11405,7 @@ def gen_module_impl(self, stmts):
             self._async_gen_api[s.name] = {
                 'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
                 'tuple_slot_ctypes': self._cpp_last_tuple_slot_ctypes,
+                'mixed_slots': self._cpp_last_mixed_slots,
             }
             self.func_param_types[f"{base}_start"] = param_ctypes
             self._generator_cpp_units.append(cpp_text)
@@ -11539,6 +11562,7 @@ def gen_module_impl(self, stmts):
                 # name survives, so it is read here, at registration.
                 'receiver': (_cpp_method_receiver_name(m)),
                 'tuple_slot_ctypes': self._cpp_last_tuple_slot_ctypes,
+                'mixed_slots': self._cpp_last_mixed_slots,
             }
             self.func_param_types[f"{base}_start"] = param_ctypes
             _gen_dflts = getattr(m, 'param_defaults', None) or {}
