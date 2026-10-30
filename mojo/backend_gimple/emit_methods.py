@@ -27,7 +27,7 @@ from fire_compiler import (
     GlobalStmt, NonlocalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    _sms_key, _as_str,
+    _sms_key, _pair_key, _as_str,
 )
 import regex_compile
 import mlir
@@ -224,7 +224,8 @@ def _resolve_class_attr_write_target(gen, target):
     class_name = _as_str(obj.name)
     if class_name not in gen.struct_field_types or class_name in gen.var_types:
         return None
-    cattrs = gen._class_attrs.get(_gmm_as_str(class_name))
+    cattrs = gen._class_attrs.get(
+        _gmm_as_str(_resolve_fn_scoped_struct_name(gen, class_name)))
     # `_as_str(target.member)` for the KEY: `target.member` is a boxed AST
     # field read, and a boxed pointer used as a dict key misses the
     # `_class_attrs` entry whose key is a real string — so this returned None
@@ -251,6 +252,27 @@ def _cattr_cell_type(gen, gname):
     if not _cells:
         return None
     return _cells.get(_gmm_as_str(gname))
+
+
+def _resolve_fn_scoped_struct_name(gen, bare_name):
+    """The struct a class NAME written in the current function refers to.
+
+    A class declared inside a function body is hoisted to module scope, and a
+    hoisted class whose bare name collided is renamed to `<Name>__<enclosing>`
+    with the mapping recorded in `_nested_struct_names` (see
+    `_gmi_hoist_nested_structs`). Two functions can each declare a `T`, so the
+    rename is keyed by the function the name is written in. Every site that
+    resolves a class NAME to its struct (constructor call, `ClassName.attr`
+    read, `ClassName.attr` write) goes through here, so they agree on which
+    class a name means. Without it the class-attribute reads consulted the
+    FIRST `T`'s attributes and returned them for the second, silently.
+
+    A name with no recorded rename is returned unchanged.
+    """
+    _renamed = getattr(gen, '_nested_struct_names', None) or {}
+    return _renamed.get(
+        _pair_key(_as_str(getattr(gen, 'current_func_name', '') or ''), bare_name),
+        bare_name)
 
 
 def _cattr_read(gen, gname, gtype):

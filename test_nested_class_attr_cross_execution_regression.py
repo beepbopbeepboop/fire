@@ -105,3 +105,25 @@ if __name__ == '__main__':
     test_nested_class_attr_recursive_value_return_regression()
     test_nested_class_attr_exception_unwind_regression()
     print("PASS")
+
+def test_same_named_function_scoped_classes_attr_regression():
+    # Two function-scoped classes with the same bare name: the second is hoisted
+    # under a renamed struct (`T__g`), so its class-name read must resolve
+    # through the same enclosing-function rename the constructor uses. Before
+    # that, `T.x` inside `g` read the first class's `x`: `1 1` where CPython
+    # prints `1 2`.
+    test_gimple_stdout("gimple_same_named_scoped_class_attr", """\
+def f():
+    class T():
+        x = 1
+    return T.x
+
+def g():
+    class T():
+        x = 2
+    return T.x
+
+def main():
+    print(f())
+    print(g())
+""", "1\n2\n")

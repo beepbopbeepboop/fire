@@ -61,8 +61,9 @@ Still open:
    change, so it is deliberately not done in this round.
 2. **Same name in two functions.** Two classes both called `T`, in different
    functions, make class-name attribute reads resolve to the first one. That
-   is separate from the cell work and reproduces with literal attributes:
-   `CODEGEN_same_named_function_scoped_classes_share_class_attrs.md`.
+   is separate from the cell work and reproduces with literal attributes
+   (fixed: the class-name read and write now resolve through the enclosing
+   function's rename, `emit_methods._resolve_fn_scoped_struct_name`).
 3. **A class OBJECT that escapes its function** (`return Tag`, then used
    later). Measured: `def mk(v): class Tag: __version__ = v; return Tag`,
    `A = mk(5); B = mk(7); print(A.__version__)`, and `A().__version__` both
