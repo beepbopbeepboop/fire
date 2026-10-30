@@ -1,5 +1,71 @@
 # COMPILE_FAIL: Lib/collections/__init__.py
 
+## Status (2026-10-29, work/bug-compile-fail-collections-init, round 2 — PLANNING GUIDE for the namedtuple feature; measured, decision needed)
+
+**Measured now (fresh, memslot 8 GB):**
+- `test_regress_collections_type_3arg.py` → PASS (refusal pinned by name).
+- Isolated `compile_to_gimple(collections/__init__.py, do_imports=False)` →
+  `RuntimeError: cannot compile module: 3-argument type(name, bases,
+  namespace) creates a class at run time ...`. This is the module's ONLY
+  refusal. Not a gcc error any more. The module falls back to source, which
+  is the honest state, and it is the sole remaining blocker for this file.
+- Refusal site: `mojo/backend_gimple/emit_calls.py:3419-3434`.
+- The runtime still has the 1-arg `int mojo_type(int obj)` stub at
+  `runtime/fire_runtime.c:8601`; nothing constructs a class at run time.
+
+**Why `namedtuple` is not a narrow fix.** `collections.namedtuple`
+(`collections/__init__.py:~440-530`) needs three things the static struct
+model does not have:
+1. `eval(f'lambda _cls, {arg_list}: ...')` to build `__new__` (line ~470s).
+   Compile time cannot evaluate this; it is the hard constraint.
+2. `type(typename, (tuple,), class_namespace)` with a non-literal
+   `typename` (a parameter) and a method table built at run time.
+3. `_tuplegetter(index, doc)` class attributes (the `_collections`
+   C-builtin, which already has its own stub gap).
+
+**Decision needed (NEEDS-INFO-level, the controller should pick):**
+- **Option A — runtime class construction.** A runtime struct descriptor
+  built from name/bases/namespace, plus a per-class method-table dispatch
+  and an `eval`-compatible `__new__`. Real, general, and feature-sized:
+  it touches the static struct layout (every `obj.field` and method call
+  would need a dynamic path). Highest regression risk. Not recommended
+  for this worker.
+- **Option B — compiler-provided `namedtuple` intrinsic for the compiled
+  path.** Lower `namedtuple(<literal name>, <literal field list>)` to a
+  synthesized static struct (fields, `__new__`, `_replace`, `_asdict`,
+  `__repr__`, `__match_args__` generated as ordinary C functions), and keep
+  a loud, named refusal for any non-literal argument. This avoids `eval`
+  and runtime class construction entirely. It also lands in the existing
+  struct-synthesis path that `_dict_subclass_structs` already uses.
+  **Recommended.** Its cost is that `collections/__init__.py` still
+  refuses as a MODULE unless the intrinsic replaces the stdlib definition
+  at the call site. The honest output is a shim that overrides
+  `namedtuple` for the compiled path, not an edit to the stdlib source.
+
+**Recommended plan (Option B), for the next round to execute:**
+1. Confirm how a static struct is synthesized for a user class in
+   `gimple_codegen.py` (grep `_dict_subclass_structs` to find the synthesis
+   site); the new step is a sibling of it for namedtuple-shaped classes.
+2. In `emit_calls.py`, route a call to `namedtuple` with literal args to
+   that synthesis instead of the generic call path. Keep the 3-arg
+   `type()` refusal for every other shape.
+3. Tests: extend `test_regress_collections_type_3arg.py` so the refusal
+   still fires for a NON-literal `type()`, and add a
+   `test_gimple.py` case for a literal `namedtuple('P', ['x', 'y'])` that
+   compiles and checks `.x`/`.y`/`_replace`/`repr` through
+   `test_gimple_runner.py` build-and-run.
+4. Only when both land: delete this doc and run
+   `python3 tools/dangling_doc_refs.py --ratchet` in the same commit.
+
+**Not verified this round** (the next round must confirm before coding):
+the exact struct-synthesis function name in `gimple_codegen.py`; whether
+the shim should sit in `std/` or `mojo/middle/`; whether `collections`
+imports reach `namedtuple` through `from collections import namedtuple`
+or the module itself.
+
+Doc stays open. Output of this round: the planning guide above (valid
+round output 3). No code change.
+
 ## Status (2026-10-01 — this file is down to ONE own error, and it is the 3-argument `type()` feature gap)
 
 `python3 fire.py build -o .tmp/out/collections/collections
