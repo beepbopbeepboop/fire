@@ -3421,6 +3421,9 @@ def gen_module_impl(self, stmts):
     # Nested generators that read an enclosing def's variables: refused by
     # _gen_cpp_generator_unit (see cpp_async._nested_generator_captures).
     self._nested_gen_captures = _gca._nested_generator_captures(stmts)
+    # ...and the enclosing def's sibling defs, which a nested generator may
+    # call as non-capturing helpers (see cpp_async._nested_generator_sibling_defs).
+    self._nested_gen_sibling_defs = _gca._nested_generator_sibling_defs(stmts)
     # The node ids of every FunctionDef that is a STRUCT METHOD. The
     # free-function generator loops below iterate `_generator_fns` (built
     # from `_walk_ast`, so it necessarily includes methods) and must not

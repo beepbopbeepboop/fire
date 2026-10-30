@@ -1252,6 +1252,33 @@ def _nested_generator_captures(stmts) -> dict[int, list[str]]:
     return out
 
 
+def _nested_generator_sibling_defs(stmts) -> dict[int, list]:
+    """Map `id(g)` -> the `def`s that sit beside a NESTED generator `g` in
+    the enclosing `def`'s own body (`g`'s siblings, excluding `g` itself),
+    for every generator `g` defined inside another `def` in `stmts`.
+
+    `g` is lifted into the module's generator set by `_walk_ast`, so its
+    coroutine body sees only its own body. A sibling `def` that `g` calls
+    (`def t0(): def nested(): ...; def gen(): yield nested()`) is therefore
+    not in `g.body` and would be refused as an unresolved callee, even
+    though it is exactly the non-capturing sync helper that
+    `_cpp_compile_nested_sync_helpers` already knows how to compile when it
+    is defined inside the generator. `_nested_generator_captures` does not
+    count a called name as a capture (a call's callee is not a value the
+    generator reads), so these siblings are reachable only through this map.
+    """
+    out: dict[int, list] = {}
+    for f in gimple_exprtypes._walk_ast(stmts):
+        if not isinstance(f, gimple_ctypes.FunctionDef):
+            continue
+        defs = [d for d in f.body if isinstance(d, gimple_ctypes.FunctionDef)]
+        for g in gimple_exprtypes._walk_ast(f.body):
+            if (isinstance(g, gimple_ctypes.FunctionDef) and g is not f
+                    and g.is_generator):
+                out[id(g)] = [d for d in defs if d is not g]
+    return out
+
+
 def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
                                      base: str, declared: dict,
                                      self_fields, struct_name) -> list:
@@ -1281,7 +1308,13 @@ def _cpp_compile_nested_sync_helpers(gen, fn: gimple_ctypes.FunctionDef,
     Any failure just skips that helper: its call stays unresolved and the
     whole generator falls back to the honest refusal, exactly as before.
     """
-    direct_defs = [n for n in fn.body if isinstance(n, gimple_ctypes.FunctionDef)]
+    own_defs = [n for n in fn.body if isinstance(n, gimple_ctypes.FunctionDef)]
+    # A nested generator's enclosing `def` supplies further candidates: the
+    # sibling `def`s beside it (see `_nested_generator_sibling_defs`). A
+    # sibling the generator's own body also defines is shadowed by it.
+    _own_names = {d.name for d in own_defs}
+    _sibs = getattr(gen, '_nested_gen_sibling_defs', {}).get(id(fn), [])
+    direct_defs = own_defs + [d for d in _sibs if d.name not in _own_names]
     if not direct_defs:
         return []
     def_by_name = {d.name: d for d in direct_defs}

@@ -1,7 +1,8 @@
 """Regression test for bug:CODEGEN_generator_function_Lib_test_test_frame.
 Reproduces the three sub-issues documented in bugs/CODEGEN_generator_function_Lib_test_test_frame.md:
 - g: bare BinaryOp (1/0) in generator body -> unsupported expression statement
-- gen: yield nested() with sibling nested def -> unresolved callee
+- gen: yield nested() with sibling nested def -> unresolved callee (fixed:
+  a non-capturing sibling is compiled as a helper)
 - t3: async return of non-scalar (frame.f_generator) -> cross-path return unification
 Current master (work/bug-codegen-generator-function-lib-test-362, HEAD 7cbacac97)
 still refuses all three per the 2026-09-07 doc verification.
@@ -55,10 +56,33 @@ T3_SRC = (
 
 def test_regression_gen_nested_def_yield():
     # yield nested() where nested is a sibling nested def inside t0. The
-    # callee is a callable-value local (cluster A in the doc); the refusal
-    # must name it, not fall through to a generic whole-module message.
-    msg = _refusal(GEN_SRC)
-    assert msg is not None, 'gen now compiles: drop this pin and the doc entry'
+    # sibling is a non-capturing sync helper, so the generator must compile
+    # it as a static C++ function and call it (not refuse it as an unresolved
+    # callee), and the program must run to the helper's value.
+    import gimple_codegen as G
+    cpp = G.compile_to_gimple_with_cpp(GEN_SRC, do_imports=False)[1]
+    assert 'co_yield _mojogen_gen_h_nested();' in cpp, cpp
+    assert 'static int64_t _mojogen_gen_h_nested (void) {' in cpp, cpp
+
+def test_regression_gen_sibling_capturing_local_still_refused():
+    # The same sibling call, but `nested` reads a local of t0. That is a
+    # capture, which the coroutine path has no model for: it must stay
+    # refused with the unresolved-callee message, not compile to a helper
+    # that names a variable which does not exist in its scope.
+    src = (
+        'def t0():\n'
+        '    k = 5\n'
+        '    def nested():\n'
+        '        return k\n'
+        '    def gen():\n'
+        '        yield nested()\n'
+        '    g = gen()\n'
+        '    return next(g)\n'
+        '\n'
+        'def main():\n'
+        '    print(t0())\n')
+    msg = _refusal(src)
+    assert msg is not None, 'capturing sibling compiled: the helper must refuse it'
     assert "unresolved callee 'nested(...)'" in msg, msg
 
 def test_regression_t3_async_non_scalar_return():
