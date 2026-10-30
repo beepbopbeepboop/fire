@@ -456,3 +456,8 @@ Residuals, written down, not fixed:
   as a runtime value.
 - Container defaults (`var xs: List[Int]`, no initializer) stay per-class
   globals, seeded by the allocator. They are not per-execution.
+
+## Status (2026-10-29, regression pinned)
+- New regression test committed (`test_nested_class_attr_cross_execution_regression.py`) showing the cross-execution residual: `7 7 9 9` vs expected `5 7 9 5`. Keeps failing until steps (c)-(f) of the per-execution block plan land.
+- Existing single-call tests (`test_nested_class_attr_reads_enclosing_local_regression`, `test_nested_class_attr_rebind_after_construction_regression`) stay green.
+- Root-cause partial fix (step b + store in `_gen_stmt_StructDef`) remains in place. Full fix (per-execution cell storage, instance block pointer, instance/class-name read rerouting) is still open per planning rounds 3-5.
