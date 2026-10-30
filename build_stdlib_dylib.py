@@ -170,8 +170,7 @@ _PROBE_SRC = 'int mojo_probe(void) { return 0; }\n'
 _driver_probe: dict = {}
 
 
-@contextlib.contextmanager
-def _staging_dir(prefix: str):
+class _StagingDir:
     """A `tempfile.mkdtemp` directory removed on the way out, success or raise.
 
     `ignore_errors=True` is deliberate: the failure worth raising is the
@@ -182,11 +181,16 @@ def _staging_dir(prefix: str):
     missing, which leaked a `mojostdlib_*` directory. One reader of the shape
     is what keeps the next staging site from being the one that forgets.
     `formal/build.py::_publish_signed_image` is the same shape."""
-    d = tempfile.mkdtemp(prefix=prefix)
-    try:
-        yield d
-    finally:
-        shutil.rmtree(d, ignore_errors=True)
+
+    def __init__(self, prefix: str) -> None:
+        self.d = tempfile.mkdtemp(prefix=prefix)
+
+    def __enter__(self) -> str:
+        return self.d
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+        shutil.rmtree(self.d, ignore_errors=True)
+        return False
 
 
 def _driver_targets(driver: str, arch: str) -> tuple:
@@ -200,7 +204,7 @@ def _driver_targets(driver: str, arch: str) -> tuple:
         # is read and then nothing needs the directory, so it is removed here or
         # it leaks one dir per probed (driver, arch) — the same class of leak
         # `runtime_dylib` had, in the same file.
-        with _staging_dir('mojo_archprobe_') as wd:
+        with _StagingDir('mojo_archprobe_') as wd:
             src = os.path.join(wd, 'probe.c')
             out = os.path.join(wd, 'probe.o')
             with open(src, 'w') as f:
@@ -982,7 +986,7 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
     # 664 modules plus the runtime and the reflection table, so tens to hundreds
     # of MB), created unconditionally even on a cache hit, and leaked per cold
     # CAS before this.
-    with _staging_dir('mojostdlib_') as workdir:
+    with _StagingDir('mojostdlib_') as workdir:
         objs = []
 
         # BUG-2026-029 cross-file follow-up: a cheap, source-text-only pre-pass
@@ -1450,7 +1454,7 @@ def runtime_dylib(gcc: str = None, flags: tuple = (), arch: str = None) -> str:
     # `_staging_dir` is the model `formal/build.py::_publish_signed_image` uses:
     # stage, publish, and remove the staging DIRECTORY so a killed build leaves
     # no debris for a later glob to mistake for a library.
-    with _staging_dir('mojo_rt_') as wd:
+    with _StagingDir('mojo_rt_') as wd:
         objs = []
         for src, lang, unit_flags in units:
             stem = os.path.splitext(os.path.basename(src))[0]
