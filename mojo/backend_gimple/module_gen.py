@@ -5462,7 +5462,7 @@ def gen_module_impl(self, stmts):
     # (allocated by `_alloc_<struct>`); inherited container operations
     # (`d[k]`, `d[k] = v`, `k in d`, `len(d)`) route to it unless the
     # subclass overrides the corresponding dunder. See
-    # bugs/COMPILE_FAIL_collections___init__.md.
+    # bug:COMPILE_FAIL_collections___init__ (3-arg type() refusal; feature open).
     _BUILTIN_DICT_BASES = ('dict', 'OrderedDict', 'defaultdict', 'Counter')
     _dict_subclass: set = set()
     _dsc_changed = True

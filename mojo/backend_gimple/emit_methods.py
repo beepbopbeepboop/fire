@@ -3637,7 +3637,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # struct (or a local base up its MRO) defines its own override, in
     # which case ordinary struct-method dispatch below wins. Counter /
     # OrderedDict / defaultdict use these heavily. See
-    # bugs/COMPILE_FAIL_collections___init__.md. Checked here, right after
+    # bug:COMPILE_FAIL_collections___init__ (3-arg type() refusal; feature open). Checked here, right after
     # `ot` has been resolved to the receiver's real struct-pointer type
     # and BEFORE every generic fallback (opaque-int coerce, the
     # `_sn not in func_return_types` mojo_obj_call1 stub, struct-method

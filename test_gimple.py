@@ -6247,7 +6247,7 @@ def mf(a: Float64, b: Float64) -> Float64:
         _PASS += 1
 
     # --- builtin `dict` subclassing (Counter/OrderedDict shape) ---
-    # See bugs/COMPILE_FAIL_collections___init__.md. A `class X(dict)` gets
+    # See bug:COMPILE_FAIL_collections___init__. A `class X(dict)` gets
     # a synthesized `_data: MojoDict *` backing store; inherited container
     # ops route to it, `__missing__` handles a subscript-read miss.
     _run_isolated(lambda: test("dict_subclass_backing_store_and_subscript", """\
@@ -6349,7 +6349,7 @@ def main():
     # `.get()/.keys()/.values()/.items()/.update()/.pop()/.setdefault()`
     # and `for k in d` on a builtin-`dict` subclass instance delegate to
     # the hidden `_data` backing store — unless the subclass overrides
-    # them. See bugs/COMPILE_FAIL_collections___init__.md.
+    # them. See bug:COMPILE_FAIL_collections___init__.
     _run_isolated(lambda: test("dict_subclass_container_method_delegation", """\
 class Bag(dict):
     def __missing__(self, key) -> int:

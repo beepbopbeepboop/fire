@@ -6195,7 +6195,7 @@ main()
 """, "5\n")
 
     # 21. Builtin `dict` subclassing (Counter/OrderedDict shape) -- see
-    # bugs/COMPILE_FAIL_collections___init__.md. `class X(dict)` gets a
+    # bug:COMPILE_FAIL_collections___init__ (dict-subclass backing store). `class X(dict)` gets a
     # synthesized `_data: MojoDict *` backing store allocated by
     # `_alloc_X`; inherited `d[k]`, `d[k] = v`, `d[k] += n`, `k in d`,
     # `len(d)` route to it, and `__missing__` handles a subscript-read
@@ -12656,8 +12656,7 @@ def main():
 
 
 def test_namedtuple_shaped_class_runs_regression():
-    """Pins the compiled-path target for `collections.namedtuple` (bugs/
-    COMPILE_FAIL_collections___init__.md, Option B): a static struct with
+    """Pins the compiled-path target for `collections.namedtuple` (bug:COMPILE_FAIL_collections___init__, Option B): a static struct with
     `__init__`, the `_replace` method and a `__repr__` that the synthesized
     class would have to emit. The namedtuple lowering is not built yet; this
     proves the struct shape it will produce compiles and runs with the
