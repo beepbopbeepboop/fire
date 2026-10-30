@@ -4791,6 +4791,24 @@ class GimpleGen:
                 f'static int64_t {hname} (void) '
                 f'{{ return (int64_t)sizeof({struct_name}); }}')
         return hname
+    def _c_cell_alloc_helper(self, ctype: str) -> str:
+        """Name of a `static` accessor that heap-allocates one zeroed cell of C
+        type `ctype` and returns a pointer to it, registered for emission into
+        the non-GIMPLE prelude.
+
+        The `_c_sizeof_helper` reason, with one more: that helper takes a struct
+        NAME, and a pointer type (`int64_t *`) is neither a name nor a valid
+        `sizeof` operand inside a `__GIMPLE` body. The accessor takes the whole
+        allocation, and its plain-C body does the `sizeof`. Used for the
+        per-execution storage of a function-scoped class attribute (see
+        `_gen_stmt_StructDef`).
+        """
+        hname = '_mojo_cellnew_' + ctype.replace('*', 'P').replace(' ', '_')
+        if hname not in self._c_helpers_needed:
+            self._c_helpers_needed[hname] = (
+                f'static {ctype} * {hname} (void) '
+                f'{{ return ({ctype} *) calloc (1, sizeof ({ctype})); }}')
+        return hname
     def _c_fnaddr_helper(self, func_name: str) -> str:
         """Name of a `static void *` accessor returning `(void *)func_name`,
         registering it for emission into the non-GIMPLE prelude.

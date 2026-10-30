@@ -461,3 +461,80 @@ Residuals, written down, not fixed:
 - New regression test committed (`test_nested_class_attr_cross_execution_regression.py`) showing the cross-execution residual: `7 7 9 9` vs expected `5 7 9 5`. Keeps failing until steps (c)-(f) of the per-execution block plan land.
 - Existing single-call tests (`test_nested_class_attr_reads_enclosing_local_regression`, `test_nested_class_attr_rebind_after_construction_regression`) stay green.
 - Root-cause partial fix (step b + store in `_gen_stmt_StructDef`) remains in place. Full fix (per-execution cell storage, instance block pointer, instance/class-name read rerouting) is still open per planning rounds 3-5.
+
+## Status (2026-10-29, round 6: per-execution cells LANDED)
+
+The cell design (round 5's steps c-f) is in, with the round-5 deviation noted
+below. The cross-execution case prints CPython's answer: `5 7 9 5`.
+
+What landed, by site:
+
+- `mojo/middle/types.py` `cattr_cell_field`: the one name of the hidden
+  instance field, `_clscell_<attr>`.
+- `module_gen.py` `_cattr_value_is_constant`: a constant is a scalar literal or
+  `None`, exactly the set `coro._nested_class_nonliteral_attr` admits, so the
+  generator and plain-function paths agree.
+- `module_gen.py` registration (after `_global_var_types[mangled] = ctype`): a
+  NON-constant value of a function-scoped class (`_fn_scoped_structs`) becomes a
+  cell (`_cell_cattr_types`), and its hidden field goes in
+  `_cell_struct_fields`, NOT `struct_field_types`.
+- `module_gen.py` `_struct_typedef_fields`: the typedef sees the hidden field;
+  every runtime reflection reader (repr, getattr, fieldnames, asdict) keeps
+  seeing only `struct_field_types`. Without this `repr` printed the cell.
+- `module_gen.py` decl loop: the global is declared `T *` and seeded with a
+  zeroed cell (`calloc`), so a read before its class statement cannot
+  dereference NULL.
+- `module_gen.py` alloc seed: `_p-><cell field> = <global>`, the instance keeps
+  its building execution's cell.
+- `gimple_codegen.py` `_c_cell_alloc_helper`: the per-type allocation accessor
+  (`sizeof` takes no pointer type inside `__GIMPLE`).
+- `emit_methods.py`: `_cattr_cell_type`, `_cattr_read` (class name / `cls.`),
+  `_cattr_cell_lvalue` (writes), `_cattr_instance_read` (the instance's own
+  cell). `_resolve_class_attr_write_target` returns the cell lvalue for cells.
+- `emit_exprs.py`: the `cls.` read, the bare `ClassName.attr` read, and the
+  instance read in `_lower_MemberExpr` route through the helpers. A bare
+  class-name reference takes the current cell, not the instance's.
+- `emit_stmts.py` `_gen_stmt_StructDef`: each execution of the `class`
+  statement allocates a fresh cell, points the global at it, then stores
+  through the ordinary write path.
+
+Tests:
+
+- `test_nested_class_attr_cross_execution_regression.py`: the four-call program
+  (`5\n7\n9\n5\n`, red on base as `7 7 9 9`) and a container case (`1\n2\n`,
+  red on base as `2 2`). Both PASS.
+- `test_gimple_runner.py` nested-class regressions
+  (`test_nested_class_attr_reads_enclosing_local_regression`, `5\n7\n`, and
+  `test_nested_class_attr_rebind_after_construction_regression`, `3\n`): PASS.
+- The whole `test_gimple_runner.py`: 477 passed, 4 failed, identical to the
+  unmodified base tree (the same four names, pre-existing, none nested-class).
+- Probed against CPython on both trees: class-name write, augmented class-name
+  write, `cls.` read in a classmethod, method reading `self.attr`, a literal
+  attribute kept as a plain global. All match CPython, and match base where base
+  was already right.
+
+Deviation from round 5: the cells are one heap cell per attribute per execution,
+with the global holding the cell pointer, not a `void *` current-cell array. Each
+attribute keeps its own C type (`_global_var_types`), so no type question is
+re-derived.
+
+Still open, written down (not hidden):
+
+- **Escape.** A class OBJECT that escapes its function (`return Tag`, or stored)
+  and is used in a later call reads that later call's cell. Silent. Closing it
+  needs the class object as a runtime value, or a compile-time refusal keyed on
+  a function-scoped class name that is referenced other than as a call's callee
+  or a member base. The refusal was deliberately NOT landed: it would reject any
+  stdlib module with that shape, and the integrator's `stdlib-dylib` skip count
+  is the place to measure that. Next step: add the refusal in
+  `_gmi_hoist_nested_structs` (the function body is in `stmts`), then read the
+  `skip` count before and after.
+- **Leak.** One cell per attribute per execution of the `class` statement,
+  never freed (same class as `CODEGEN_closure_env_and_boxed_local_never_freed.md`).
+  A class statement inside a hot loop leaks 8-16 bytes per iteration.
+- **Generators unchanged.** `coro._nested_class_nonliteral_attr` still refuses
+  them, so the `cpp_*` readers that still use the global never see a cell.
+- **Filed separately:** a `str` parameter as the attribute value is typed
+  `int64_t` (`CODEGEN_nested_class_attr_from_str_param_typed_as_int.md`); a
+  write to an instance attribute of a class attribute's name is ignored on read,
+  on module-scope classes too (`CODEGEN_class_attr_instance_write_is_ignored_on_read.md`).

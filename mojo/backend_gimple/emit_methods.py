@@ -237,7 +237,49 @@ def _resolve_class_attr_write_target(gen, target):
         return None
     gname = cattrs[_member_s]
     gtype = gen._global_var_types.get(_gmm_as_str(gname), 'int64_t')
+    if _cattr_cell_type(gen, gname) is not None:
+        # A per-execution cell: the store goes to the CURRENT cell, so the
+        # lvalue is the dereferenced pointer, not the global itself.
+        return gtype, _cattr_cell_lvalue(gen, gname, gtype)
     return gtype, gname
+
+
+def _cattr_cell_type(gen, gname):
+    """The value C type of `gname` when it is a function-scoped class attribute
+    kept in a per-execution cell (module_gen registration), else None."""
+    _cells = getattr(gen, '_cell_cattr_types', None)
+    if not _cells:
+        return None
+    return _cells.get(_gmm_as_str(gname))
+
+
+def _cattr_read(gen, gname, gtype):
+    """Value of the class attribute `gname` as seen through its class NAME (or a
+    `cls.` read): the plain global, or the CURRENT execution's cell. A cell is
+    loaded into a temp first, because GIMPLE takes no `*global`."""
+    if _cattr_cell_type(gen, gname) is None:
+        return gen._new_val(gtype, f'{gname}')
+    _p = gen._new_val(f'{gtype} *', f'{gname}')
+    return gen._new_val(gtype, f'*{_p}')
+
+
+def _cattr_cell_lvalue(gen, gname, gtype):
+    """C lvalue text for the CURRENT execution's cell of `gname`: `*<temp>`,
+    where the temp holds the cell pointer loaded from the global."""
+    _p = gen._new_val(f'{gtype} *', f'{gname}')
+    return f'*{_p}'
+
+
+def _cattr_instance_read(gen, ov, ot, aname, gname, gtype):
+    """Value of class attribute `aname` read through an INSTANCE `ov` of struct
+    type `ot`: the cell this instance was built under (its hidden field), not
+    the current one. That is what keeps `a = make(5); b = make(7); a.attr` at 5.
+    Falls back to the current cell when `ov` is not a struct pointer."""
+    if not ot.endswith(' *') or _cattr_cell_type(gen, gname) is None:
+        return _cattr_read(gen, gname, gtype)
+    _field = gimple_ctypes._safe_field(gimple_ctypes.cattr_cell_field(aname))
+    _p = gen._new_val(f'{gtype} *', f'{ov}->{_field}')
+    return gen._new_val(gtype, f'*{_p}')
 
 
 def _selfhost_sibling_member_kind(gen, module_name: str, method_name: str):
