@@ -873,6 +873,36 @@ def main():
     print(len(walk({3})))
 main()
 """
+    # The shape the gate actually hit: formal/model.py's `walk_stmts` rebinds
+    # its parameter to a set and then grows it with `|=` / `-=` / `.add()`
+    # across a loop, inside a nested def that calls a nested helper.
+    nested_stmts = """\
+def outer(stmts, seed):
+    def expr_reads(e, live):
+        if e is None:
+            return
+        live.add(e)
+    def walk_expr(e, live):
+        expr_reads(e, live)
+    def walk_stmts(stmts, live):
+        live = set(live)
+        for s in (stmts or []):
+            if s == 1:
+                walk_expr(s, live)
+                live |= set([s])
+                continue
+            if s == 2:
+                live -= set([s])
+                live.add(s)
+                continue
+        return live
+    out = walk_stmts(stmts, set(seed))
+    return len(out)
+
+def main():
+    print(outer([1, 2], {3}))
+main()
+"""
     global _PASS, _FAIL
     name = "nested_def_rebound_param_takes_the_container_it_stores"
     try:
@@ -885,6 +915,18 @@ main()
         ok, c_src, stderr = gimple_compiles(nested)
     except TypeError as e:
         print(f"FAIL  {name}: the codegen refused the nested def outright: {e}")
+        _FAIL += 1
+        return
+    try:
+        ok_shaped, _, err_shaped = gimple_compiles(nested_stmts)
+    except TypeError as e:
+        print(f"FAIL  {name}: the codegen refused the walk_stmts-shaped def: {e}")
+        _FAIL += 1
+        return
+    if not ok_shaped:
+        print(f"FAIL  {name}: the walk_stmts-shaped nested def did not compile")
+        for line in err_shaped.splitlines()[:8]:
+            print(f"      {line}")
         _FAIL += 1
         return
     if ok and ok_top:
