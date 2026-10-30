@@ -51,8 +51,8 @@ Tests: `test_async_void_return.py` (`test_async_mixed_return_kinds_refused`,
 
 Still open for THIS file: `gen` and `t3` as written still refuse/raise as
 described in the planning entry below. The typed async result slot that would
-make a float or string async return CORRECT (not merely refused) is a separate
-defect: `bugs/CODEGEN_async_result_slot_is_int64_only.md`.
+make a float or string async return CORRECT (not merely refused) was a separate
+defect (fixed in `aa94466f`, cross-module async result kinds registered via `closure_stmts`).
 
 ## Status (2026-10-29, planning round — `gen` and `t3` are both frame-introspection features; pinned, not fixed)
 
