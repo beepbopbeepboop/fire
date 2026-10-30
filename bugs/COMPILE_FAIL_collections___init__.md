@@ -1,5 +1,30 @@
 # COMPILE_FAIL: Lib/collections/__init__.py
 
+## Status (2026-10-29, work/bug-compile-fail-collections-init, round 3 — coverage landed for the Option B target shape; field-type question recorded)
+
+**Landed:** `test_gimple_runner.py::test_namedtuple_shaped_class_runs_regression`
+(build-and-run). It pins the struct shape the synthesized `namedtuple` class
+must produce: `__init__`, `_replace` returning a new instance, and a
+`__repr__`. The probe compiles and prints `Point(x=1, y=2)`, `3`, `4`,
+matching CPython. This is coverage, not a behaviour change. It passed on the
+first run, so it does not fail before any fix.
+
+**Measured this round:**
+- A namedtuple-shaped class with untyped `__init__(self, x, y)` and string
+  arguments compiles. The field types are inferred from the call site
+  (`char *`), so Option B does not need field annotations from the
+  `namedtuple(...)` call, which has none.
+- `test_regress_collections_type_3arg.py` still PASSes (refusal unchanged).
+
+**Still open (next step, unchanged):** the literal-argument lowering from
+Option B. That means a synthesis site that turns `namedtuple('P', [...])`
+into the class above (exact site still unconfirmed: the struct synthesis
+sits near `_dict_subclass_structs` in `module_gen.py`), a call-site route in
+`emit_calls.py`, and deleting this doc once `collections` imports through it.
+Known risk: the inferred types are only as sound as the constructor's call
+sites. A field fed both an int and a str would be a silent miscompile, which
+the synthesis must refuse or type-check.
+
 ## Status (2026-10-29, work/bug-compile-fail-collections-init, round 2 — PLANNING GUIDE for the namedtuple feature; measured, decision needed)
 
 **Measured now (fresh, memslot 8 GB):**
