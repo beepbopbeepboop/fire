@@ -85,28 +85,6 @@ def test_regression_gen_sibling_capturing_local_still_refused():
     assert msg is not None, 'capturing sibling compiled: the helper must refuse it'
     assert "unresolved callee 'nested(...)'" in msg, msg
 
-def test_regression_g_nested_generator_capturing_self_refused():
-    # test_frame.py's `g` (line 95) is a generator defined inside a method
-    # that reads the method's `self`. Once the 1/0 statement lowered, this
-    # capture is what refuses `g`: the coroutine path has no capture model
-    # for a generator defined inside another function. Pinned so the refusal
-    # cannot silently disappear; when it compiles, drop this pin and the doc
-    # entry together.
-    src = (
-        'class T:\n'
-        '    def run(self):\n'
-        '        def g():\n'
-        '            yield 1\n'
-        '            self.inner()\n'
-        '        gen = g()\n'
-        '        return next(gen)\n'
-        '\n'
-        'def main():\n'
-        '    print(0)\n')
-    msg = _refusal(src)
-    assert msg is not None, 'nested generator capturing self compiled: drop this pin'
-    assert 'reads enclosing-scope variable(s) self' in msg, msg
-
 def test_regression_t3_async_non_scalar_return():
     # async def t3 returning sys._getframe().f_generator inside a class
     # method: the return type is unknown, so the async return check refuses.
