@@ -1480,7 +1480,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
                 and node.member in gen._class_attrs.get(_cur_struct, {})):
             _gname = gen._class_attrs[_cur_struct][node.member]
             _gtype = gen._global_var_types.get(_gname, 'int64_t')
-            return _gtype, gen._new_val(_gtype, f'{_gname}')
+            return _gtype, gmp._cattr_read(gen, _gname, _gtype)
 
         # `f.attr` read where `f` is a free function memoizing a value on
         # itself (`f._cached`) — see the `_func_attrs` pre-scan (Phase 1,
@@ -1832,7 +1832,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             if _cattrs and node.member in _cattrs:
                 gname = _cattrs[node.member]
                 gtype = gen._global_var_types.get(gname, 'int64_t')
-                _gv = gen._new_val(gtype, f'{gname}')
+                _gv = gmp._cattr_read(gen, gname, gtype)
                 # Carry the attribute's recorded ELEMENT type onto the read
                 # value, so iterating or subscripting it downstream uses
                 # the right accessor. A class-level container is stored as
@@ -2611,7 +2611,12 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         gname = class_attrs[struct_name][node.member]
         # Use the actual declared type of the global (stored in _global_var_types)
         gtype = gen._global_var_types.get(gname, 'int64_t')
-        t = gen._new_val(gtype, f'{gname}')
+        # An instance read of a per-execution cell attribute goes to the cell
+        # THIS instance was built under; a class-name read goes to the current one.
+        if isinstance(node.obj, gimple_ctypes.IdentExpr) and node.obj.name == struct_name:
+            t = gmp._cattr_read(gen, gname, gtype)
+        else:
+            t = gmp._cattr_instance_read(gen, ov, ot, node.member, gname, gtype)
         return gtype, t
     elif struct_name in gen.struct_field_types and ot.endswith(' *'):
         # The struct defines its own `__getattr__` (compiled body ⇒ bare

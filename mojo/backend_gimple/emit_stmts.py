@@ -3156,10 +3156,14 @@ def _gen_stmt_StructDef(gen, node):
     are stored: a no-initializer container field has its default seeded by
     the allocator, and must not be overwritten with a missing value.
 
-    Semantics kept deliberately narrow: one global per class, so an
-    instance built in one call and read after a later call of the same
-    function sees the later call's value. Each call's own reads right after
-    its `class` statement are correct.
+    Per-execution storage: a NON-constant value of a function-scoped class
+    lives in a cell that this execution allocates (`_cattr_cell_type`), and
+    the `_classattr_` global is pointed at it first. An instance keeps the cell
+    it was built under (its hidden `_clscell_` field, seeded by the allocator),
+    so an instance built in one call and read after a later call still sees its
+    own value. Residual, written down in the bug doc: a class object that
+    escapes its function (`return Tag`) and is used in a later call reads that
+    later call's cell.
     """
     cattrs = gen._class_attrs.get(node.name)
     if not cattrs:
@@ -3174,6 +3178,21 @@ def _gen_stmt_StructDef(gen, node):
             continue
         if aname not in cattrs:
             continue
+        # A per-execution cell (module_gen registration): this execution gets its
+        # OWN storage, and the global is pointed at it before the store below, so
+        # the store and every class-name read in this call reach it, and the
+        # instance built next keeps it. A plain global needs no allocation.
+        _cell_t = gmp._cattr_cell_type(gen, cattrs[aname])
+        if _cell_t is not None:
+            _cp = gen._new_temp(f'{_cell_t} *')
+            _cell_h = gen._c_cell_alloc_helper(_cell_t)
+            _cell_hd = gen._c_helper_def(_cell_h)
+            if _cell_hd:
+                # The accessor's definition, once per TU (see `_c_helper_def`).
+                gen._elaborated_externs.append(_cell_hd)
+                gen._elaborated_externs.append('')
+            gen._emit(f'  {_cp} = {_cell_h} ();')
+            gen._emit(f'  {cattrs[aname]} = {_cp};')
         gen._gen_stmt_AssignStmt(gimple_ctypes.AssignStmt(
             target=gimple_ctypes.MemberExpr(
                 obj=gimple_ctypes.IdentExpr(name=node.name, line=node.line),

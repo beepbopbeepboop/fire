@@ -2973,6 +2973,29 @@ def _gmi_comprehension_targets(comp, out: set) -> None:
     _gmi_target_leaf_names(getattr(comp, 'key', None), out)
 
 
+def _cattr_value_is_constant(v) -> bool:
+    """True when a class-level attribute's value is a scalar literal (or None):
+    the same in every execution of its `class` statement, so it may live in a
+    plain module global. This is exactly the set `coro._nested_class_nonliteral_attr`
+    admits, so the generator path and the plain-function path agree on which
+    attributes are constants. Anything else (`__version__ = version`, a container)
+    may read the enclosing function's locals and is stored per execution."""
+    return isinstance(v, (IntLiteral, FloatLiteral, StringLiteral, BoolLiteral,
+                          NoneLiteral))
+
+
+def _struct_typedef_fields(gen, sn) -> dict:
+    """The `{field: ctype}` map a struct's `typedef` body is rendered from: its
+    Python-visible fields (`struct_field_types`) plus the hidden per-execution
+    cell pointers of its function-scoped class attributes (`_cell_struct_fields`).
+    Only the typedef sees the hidden ones. Every runtime reflection reader
+    (repr, getattr, fieldnames, asdict) reads `struct_field_types` alone, so an
+    instance never lists or prints its cell."""
+    _fields = dict(gen.struct_field_types.get(sn, {}))
+    _fields.update((getattr(gen, '_cell_struct_fields', None) or {}).get(sn, {}))
+    return _fields
+
+
 def _gmi_hoist_nested_structs(self, stmts: list) -> list:
     """Return `stmts` with every class declared inside a function body HOISTED
     to module scope, so the ordinary struct pipeline treats it exactly like a
@@ -6060,6 +6083,29 @@ def gen_module_impl(self, stmts):
                     else:
                         ctype = 'int64_t'
                 self._global_var_types[mangled] = ctype
+                # A NON-constant value of a FUNCTION-SCOPED class is per
+                # EXECUTION of its `class` statement (Python builds a new class
+                # object each time it runs). The `_classattr_` global then holds
+                # the CURRENT execution's cell pointer, and each instance keeps
+                # its own in a hidden field, so `a = make(5); b = make(7);
+                # a.attr` reads 5, not the later call's 7. See
+                # bugs/CODEGEN_nested_class_attr_reads_enclosing_local_silently_zero.md.
+                # Module-scope classes and constants keep the plain global.
+                if (s.name in getattr(self, '_fn_scoped_structs', ())
+                        and v is not None and not _cattr_value_is_constant(v)):
+                    _cells = getattr(self, '_cell_cattr_types', None)
+                    if _cells is None:
+                        _cells = {}
+                        self._cell_cattr_types = _cells
+                    _cells[mangled] = ctype
+                    # Typedef-only (see `_struct_typedef_fields`): NOT a Python
+                    # field, so the runtime reflection never lists or prints it.
+                    _cell_fields = getattr(self, '_cell_struct_fields', None)
+                    if _cell_fields is None:
+                        _cell_fields = {}
+                        self._cell_struct_fields = _cell_fields
+                    _cell_fields.setdefault(s.name, {})[
+                        gimple_ctypes.cattr_cell_field(aname)] = f'{ctype} *'
                 # A container-valued class attribute keeps its ELEMENT
                 # type on the `_classattr_...` global, the same side-table
                 # a local list uses. Without it a class-level registry of
@@ -13752,7 +13798,7 @@ def gen_module_impl(self, stmts):
             for struct_name in sorted(self.struct_field_types.keys()):
                 if struct_name in emitted:
                     continue
-                fields = self.struct_field_types[struct_name]
+                fields = _struct_typedef_fields(self, struct_name)
                 dependencies_met = True
                 for field_type in fields.values():
                     base_type = re.sub(r'\[\d+\]$', '', ('' + field_type).rstrip(' *'))
@@ -14920,6 +14966,17 @@ def gen_module_impl(self, stmts):
                     _cfd = _class_field_decl(field)
                     if _cfd is not None and _cfd[0] == aname:
                         v = _cfd[1]
+                        _cell_t = (getattr(self, '_cell_cattr_types', None) or {}).get(mangled)
+                        if _cell_t is not None:
+                            # Per-execution cell (see the registration above):
+                            # the global is a POINTER to the current execution's
+                            # storage. It starts on a zeroed cell so a read
+                            # before the class statement runs cannot dereference
+                            # NULL; the class statement installs the real one.
+                            class_attr_decls.append(f"{_cell_t} * {mangled};")
+                            class_attr_inits.append(
+                                f"  {mangled} = ({_cell_t} *) calloc (1, sizeof ({_cell_t}));")
+                            break
                         ctype = _class_attr_ctype(v)
                         if ctype is None and v is None:
                             # A no-initializer container field (`var xs:
@@ -15202,10 +15259,16 @@ def gen_module_impl(self, stmts):
         # `mojo_str_cat` (crash-report bt: `mojo_str_cat` ← `gen_module_impl`
         # on a shimless `--dump-full`).
         _ai_parts = []
+        _cell_gnames = getattr(self, '_cell_cattr_types', None) or {}
         for _aname in sorted(class_attrs):
             _aname = _as_str(_aname)
             _gname = _as_str(class_attrs[_aname])
-            if (_aname in field_map
+            if _gname in _cell_gnames:
+                # A per-execution cell attribute (see the registration): this
+                # instance keeps the cell of the execution that builds it.
+                _ai_parts.append(
+                    f"  _p->{_safe_field(gimple_ctypes.cattr_cell_field(_aname))} = {_gname};\n")
+            elif (_aname in field_map
                     and field_map[_aname] == self._global_var_types.get(_gname, field_map[_aname])):
                 _ai_parts.append(f"  _p->{_safe_field(_aname)} = {_gname};\n")
         attr_inits = ''.join(_ai_parts)
@@ -16253,9 +16316,9 @@ def gen_module_impl(self, stmts):
                 _cached = self._struct_typedef_texts.get(_sn)
                 if _cached:
                     return _cached
-                _flds = self.struct_field_types.get(_sn)
-                if _flds is None:
+                if _sn not in self.struct_field_types:
                     return None
+                _flds = _struct_typedef_fields(self, _sn)
                 return '\n'.join(_render_struct_typedef_body(
                     _sn, _flds,
                     optional_tags=self._tagged_optional_fields.get(_sn)))
@@ -16352,7 +16415,7 @@ def gen_module_impl(self, stmts):
                         cpp_parts.append(f'struct {_me_sn};')
                     cpp_parts.append('')
                     for _me_sn in sorted(_mirror_extra_structs):
-                        _me_flds = self.struct_field_types.get(_me_sn, {})
+                        _me_flds = _struct_typedef_fields(self, _me_sn)
                         _me_td = '\n'.join(
                             _render_struct_typedef_body(
                                 _me_sn, _me_flds,
