@@ -1,5 +1,60 @@
 # CODEGEN_generator_function: Lib/test/test_frame.py
 
+## Status (2026-10-29, partial fix — a nested generator that captures an enclosing `var` local or parameter now compiles on the default path)
+
+Decision 1 below is answered by measurement: the DEFAULT backend is the
+stack-switch lowering in `mojo/middle/coro.py` (`enabled()`, unset =
+stackswitch). It had no path for a nested SYNC generator at all — only
+`_hoist_nested_async` hoisted nested generators, and only `async` ones — so
+the module fell through to `cpp_async`, whose refusal was the message the
+user saw. The capture model already existed for nested ASYNC generators
+(`_nested_async_capture_plan` / `_apply_nested_async_capture`, box handles
+threaded as trailing hidden params). Option (a) was taken, on the default path.
+
+Landed:
+- `mojo/middle/coro.py` `_hoist_nested_async`: a nested sync generator is
+  hoisted when it is eligible, its captures are boxable (`var` locals and
+  parameters of scalar kind), and it is only ever CALLED in the enclosing
+  body (`_only_called_in` — a generator returned as a value has no frame to
+  supply its box handle, so it stays on the C++ path and is refused). Call
+  sites in the enclosing body, sibling defs included, are renamed to the
+  qualified base `__mgco_<outer>_<inner>`. Non-capturing nested sync
+  generators are deliberately NOT moved: they already compile through the
+  C++ companion, and moving them would change working output.
+  `_lower_one` gained a `base=` override for this.
+- `mojo/backend_gimple/cpp_async.py` `_nested_generator_captures`: a name
+  the generator declares `nonlocal` is a capture even though the body also
+  binds it. Before this, an escaping generator (`return g`) that wrote
+  `nonlocal k` compiled against a fresh local and printed nothing — silent
+  wrong output. It is now refused with the capture message.
+
+Tests (`test_gimple_generator_runner.py`, `run_nested_generator_capture_tests`):
+- `nested_generator_captures_enclosing_var_local` (prints 5, 6),
+  `nested_generator_captures_enclosing_param` (prints 8) — FAIL before the fix.
+- `nested_generator_mutates_enclosing_var_via_nonlocal` — matches CPython;
+  before the fix it printed `0 1 5` (silently wrong).
+- `nested_generator_escaping_as_value_with_capture_refused`,
+  `nested_generator_escaping_nonlocal_write_refused`,
+  `nested_generator_reads_enclosing_param_in_fstring_refused` (the
+  f-string/returned-`render` shape stays refused) — refusals kept honest.
+- Full `test_gimple_generator_runner.py`: 280 pass, 0 fail (8 GB memslot).
+  `test_coro_nested_async_capture.py`: 14 pass. `test_regress_codegen_generator_frame.py`:
+  all 8 pass; its `g` pin is the METHOD-nested self-capture and is still refused.
+
+NOT done — this file still cannot compile as a whole:
+- `g` as written (test_frame.py:95) reads `self`. A struct/`self` capture is
+  not modelled: `_nested_async_capture_plan` returns None for a non-scalar
+  kind, so it stays refused. Next step: a struct-kind box (`_Capture.struct_name`
+  / `_BOX_STRUCT_OF` already exist for nested async, Increment E) applied to
+  the generator's `self` parameter.
+- A plain-assignment local (`total = n * 2`, no `var`) is not boxable: the
+  box plan only sees `VarDecl` (`_outer_boxable_locals`). Still refused
+  (pinned by `nested_generator_reads_enclosing_local_refused`). Next step:
+  treat a function-scope plain assignment that is first bound before the
+  nested def as a `var` for box purposes, if the scalar kind is confident.
+- `gen` (frame introspection) and `t3`: unchanged; see the entries below.
+- Not run: a whole-file build of test_frame.py (heavy; left for the integrator).
+
 ## Status (2026-10-29, measured round — `g` is NOT through: the 1/0 fix exposed a capture refusal; planning guide)
 
 Re-measured the real file on this branch (8 GB memslot, `do_imports=False`,

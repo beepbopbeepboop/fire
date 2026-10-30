@@ -5336,6 +5336,20 @@ def _thread_box_through_siblings(inner_name: str, outer: N.FunctionDef,
             _append_cap_args(call, cap_map)
 
 
+def _only_called_in(outer: N.FunctionDef, name: str) -> bool:
+    """True when every mention of `name` inside `outer` is the callee of a
+    CallExpr -- i.e. the nested def is never passed around as a value."""
+    callee_ids = set()
+    nodes = _walk(outer)
+    for n in nodes:
+        if isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr) and n.func.name == name:
+            callee_ids.add(id(n.func))
+    for n in nodes:
+        if isinstance(n, N.IdentExpr) and n.name == name and id(n) not in callee_ids:
+            return False
+    return True
+
+
 def _hoist_nested_async(stmts: list, meta: list):
     """A `@parameter async def wrapper(): ...` local to an ordinary
     function (the create_task(wrapper()) idiom) is lowered exactly like a
@@ -5354,6 +5368,7 @@ def _hoist_nested_async(stmts: list, meta: list):
                 and not getattr(s, 'is_async', False)):
             continue
         rename = {}
+        sync_rename = {}
         # `_apply_nested_async_capture` rewrites (and may reassign) `s.body`
         # in place -- capture reads/writes in the enclosing body, the box
         # init prepend. Iterate a stable snapshot of the ORIGINAL nested
@@ -5363,6 +5378,36 @@ def _hoist_nested_async(stmts: list, meta: list):
         # captured local becomes a new __mojo_box_set_* ExprStmt node).
         original_body = list(s.body)
         for inner in original_body:
+            # A nested SYNC generator that reads an enclosing local or
+            # parameter. Only the capturing shape is hoisted here: a sync
+            # generator that captures nothing already compiles through the
+            # C++ companion (`_cpp_compile_nested_sync_helpers`), so moving
+            # it would change working output for no gain. The capture rides
+            # the same box machinery as a nested async generator -- the
+            # enclosing local becomes a heap box, and the generator takes
+            # the box handle as a trailing hidden parameter that every call
+            # site in the enclosing function forwards. Calls are renamed to
+            # the qualified base below, so two enclosing functions can each
+            # define a nested `g` without colliding.
+            if (isinstance(inner, N.FunctionDef) and getattr(inner, 'is_generator', False)
+                    and not getattr(inner, 'is_async', False)):
+                base = f'__mgco_{s.name}_{inner.name}'
+                if not _eligible(inner)[0]:
+                    continue
+                # The box handle travels as a hidden argument that only the
+                # enclosing function's own CALL sites can supply. A generator
+                # that escapes as a value (`return render`) would be called
+                # later with no handle, so it stays on the C++ path.
+                if not _only_called_in(s, inner.name):
+                    continue
+                cap_map = _nested_async_capture_plan(inner, s)
+                if not cap_map:
+                    continue
+                _apply_nested_async_capture(inner, s, cap_map)
+                hoisted.append(_lower_one(inner, meta, base=base))
+                meta[-1]['nested'] = True
+                sync_rename[inner.name] = base
+                continue
             if isinstance(inner, N.FunctionDef) and getattr(inner, 'is_async', False):
                 base = f'__mgco_{s.name}_{inner.name}'
                 # A capture reached only through a sibling nested async's
@@ -5414,6 +5459,20 @@ def _hoist_nested_async(stmts: list, meta: list):
                             meta[-1]['nested'] = True
                             rename[inner.name] = base
                             continue
+        if sync_rename:
+            s.body = [x for x in s.body
+                      if not (isinstance(x, N.FunctionDef)
+                              and getattr(x, 'is_generator', False)
+                              and x.name in sync_rename)]
+            # Every call to the hoisted generator now names its qualified
+            # base. Walk the WHOLE remaining body, nested sibling defs
+            # included: a sibling `def` that drives the generator is a
+            # call site too, and `_find_calls_to` prunes those.
+            for _st in s.body:
+                for _n in _walk(_st):
+                    if (isinstance(_n, N.CallExpr) and isinstance(_n.func, N.IdentExpr)
+                            and _n.func.name in sync_rename):
+                        _n.func.name = sync_rename[_n.func.name]
         if rename:
             s.body = [x for x in s.body
                       if not (isinstance(x, N.FunctionDef)
@@ -5438,7 +5497,7 @@ def _mojo_to_c_type(ann: str) -> str:
 
 def _lower_one(fn: N.FunctionDef, meta: list,
                struct_name: str | None = None,
-               struct_def=None) -> N.FunctionDef:
+               struct_def=None, base: str | None = None) -> N.FunctionDef:
     is_method = struct_name is not None
     # A @classmethod generator method: `cls` is NOT a real typed receiver
     # (verified in _eligible to be unreferenced in the body). Its start
@@ -5459,8 +5518,9 @@ def _lower_one(fn: N.FunctionDef, meta: list,
     _rcv_kind = method_receiver_kind(fn) if is_method else ''
     is_classmethod = is_method and _rcv_kind == 'cls'
     has_self = is_method and _rcv_kind == 'self'
-    base = (f'__mgco_{_cm_as_str(struct_name)}_{_cm_as_str(fn.name)}' if is_method
-            else f'__mgco_{_cm_as_str(fn.name)}')
+    if base is None:
+        base = (f'__mgco_{_cm_as_str(struct_name)}_{_cm_as_str(fn.name)}' if is_method
+                else f'__mgco_{_cm_as_str(fn.name)}')
     body_name = f'{base}_body'
     env = _static_env(fn, struct_def)
     kind, _ = _generator_value_kind(fn, env, _delegated_yield_kind)
