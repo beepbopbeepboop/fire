@@ -1,30 +1,36 @@
-"""Regression pin for the 3-arg type() feature gap (bug:COMPILE_FAIL_collections___init__).
+"""Regression pin for the 3-arg type() gap (bug:COMPILE_FAIL_collections___init__).
 
 `namedtuple` lowers at collections/__init__.py:515 to `type(typename,
-(tuple,), class_namespace)` — dynamic class construction through the 3-argument
-form, which this codegen lowers to a 1-argument `mojo_type`. Until that feature
-is implemented, the 3-argument form is the documented COMPILE_FAIL root cause.
+(tuple,), class_namespace)`: a class built at run time. The compiled path has
+no static struct to emit for that, so the 3-argument form is now refused by
+name in the lowering (mojo/backend_gimple/emit_calls.py) instead of falling
+through to the 1-argument `mojo_type` stub and producing a three-argument C
+call that gcc rejects.
 
-This file pins that form does not yet compile; once the feature lands, swap the
-bottom of `test_namedtuple_compile_now_passes` to assert it does compile.
+The feature (dynamic class construction) is still open; this pins the refusal.
 """
 from gimple_codegen import compile_to_gimple
 
 FAILURES = []
 
-def test_namedtuple_3arg_type_is_the_documented_gap():
+def test_namedtuple_3arg_type_is_refused_by_name():
     src = "result = type('T', (tuple,), {'x': 1})\n"
     try:
         compile_to_gimple(src, do_imports=False, filename="namedtuple.py")
-        # If the feature landed, uncomment next line.
-        # raise AssertionError("3-arg type() compiled but should have failed")
+    except RuntimeError as e:
+        if 'cannot compile module' in str(e) and 'type(name, bases, namespace)' in str(e):
+            return
+        FAILURES.append(f"refused, but not with the named message: {e}")
         return
-    except Exception as e:  # expected until the feature lands
-        pass
+    FAILURES.append("3-arg type() compiled; it must be refused until the feature lands")
 
 def main():
-    test_namedtuple_3arg_type_is_the_documented_gap()
-    print("test_namedtuple_3arg_type_is_the_documented_gap ran without surfacing a fresh failure")
+    test_namedtuple_3arg_type_is_refused_by_name()
+    if FAILURES:
+        for f in FAILURES:
+            print(f"FAIL  test_namedtuple_3arg_type_is_refused_by_name: {f}")
+        raise SystemExit(1)
+    print("PASS  test_namedtuple_3arg_type_is_refused_by_name")
 
 if __name__ == "__main__":
     main()
