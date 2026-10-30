@@ -51,3 +51,26 @@ that has drifted from the tree it describes.
 
 Not checked here: whether the individual remedies would re-trip the other
 checks.
+
+## Status (2026-10-30, merge of master into work/fix-merge-fix-gate-suite-self-test)
+
+Landed: `bugs/OPEN_WORK.md`'s generated block regenerated with
+`python3 tools/formal_doc_index.py --write` (the 'Next step' above, items 4-6).
+`python3 tools/formal_doc_index.py --check` now PASSes (111 documents, block
+current), and `test_suite.py` has no formal-doc-index failure left.
+
+Measured after the merge (`python3 test_suite.py`, 360 passed, 6 failed):
+- items 1-2 (budgets: residue census / residue may not grow): still red. Census
+  0 vs walk 1-3 on several `test_regress*` files; 55 literal files vs census 48.
+- item 3 (estate): still red, 50 unregistered `test_*.py` files and
+  `tools/test_control_pool.py`, `tools/test_swarm_feed.py`.
+- dangling refs, BARE class: red on master's new citation
+  `bugs/COMPILE_FAIL_Tools_cases_generator_analyzer.md` (3 vs ceiling 2). Needs
+  `python3 tools/dangling_doc_refs.py --write-baseline` only after the citation
+  is checked, not as a bulk bump.
+- item 7 (expect count): still red, the reader sees
+  `{'x86-containers': 1, 'ab-native': 1, 'formal-x86-endtoend': 1}`.
+- item 8 (doc status): still red, only `ab-native` is stated in a table row.
+
+Next step: items 1-3 and 7-8 as above. This is the one place the suite-self-test
+red is tracked; a parallel note was deleted as a duplicate.
