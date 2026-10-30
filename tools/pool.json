@@ -36,7 +36,7 @@
     {
       "name": "haiku",
       "model": "claude-haiku-5-5",
-      "count": 2,
+      "count": 4,
       "kind": "claude",
       "recover_hours": 4.23,
       "note": "Paid Claude tokens (headless claude -p). Four workers (2026-10-29 17:16: 21% of the 5-hour block with the reset at 18:50 local). Goal: the block to 100% before that reset; a limit bans it until the reset. (Weekly reset Friday 11:00 is the next wall after that.)"
