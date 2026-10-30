@@ -9022,6 +9022,11 @@ def gen_module_impl(self, stmts):
     # unknown reads as the int64_t default; this set says the inner lists
     # are kind-mixed, which the element loop answers with the runtime route.
     self._param_nested_mixed: dict[str, set] = {}
+    # callee -> {pname} for a FLAT list parameter whose call sites disagree on
+    # the element C type (`show([1, 2])`, `show(['a'])`, `show([2.5])`): the
+    # contract is unknown, so a loop over it must ask each slot's recorded kind
+    # at run time (`mojo_list_get_boxed`) rather than trust one typed accessor.
+    self._param_elem_mixed: dict[str, set] = {}
     self._coro_str_params: dict[str, set] = {}
     # coroutine body name -> {param} whose element type is POSITIVELY int:
     # the list-of-ints counterpart of `_coro_str_params`. Kept apart from
@@ -9146,6 +9151,10 @@ def gen_module_impl(self, stmts):
                     _mx_inner = self._param_nested_mixed.setdefault(callee, set())
                     _mx_inner.add(pname)
             else:
+                if (old_e is not None and e is not None and old_e != e
+                        and old_e != 'MojoList *' and e != 'MojoList *'):
+                    _em = self._param_elem_mixed.setdefault(callee, set())
+                    _em.add(pname)
                 d[pname] = (None, None)   # conflicting call sites → unknown
         else:
             d[pname] = (e, ne)

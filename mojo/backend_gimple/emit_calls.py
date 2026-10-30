@@ -8621,6 +8621,7 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # a box, not its bits (see `_box_float_call_args`). After the padding, so
     # position `i` is parameter `i`, and before the emission below.
     arg_pairs = ginf._box_float_call_args(gen, fname_raw, arg_pairs)
+    ginf._tag_mixed_list_call_args(gen, fname_raw, arg_pairs)
 
     # surplus pairs here — each dropped arg's lower_expr already ran while
     # building arg_pairs, so its side effects still happen exactly once,

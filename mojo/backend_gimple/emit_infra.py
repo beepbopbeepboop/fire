@@ -6493,6 +6493,35 @@ def _box_float_call_args(gen, callee: str, arg_pairs: list) -> list:
     return out
 
 
+def _tag_mixed_list_call_args(gen, callee: str, arg_pairs: list) -> None:
+    """Record the slot kind of a list argument bound for a parameter whose
+    call sites disagree on its element C type (`module_gen._param_elem_mixed`).
+
+    The callee loops over such a parameter through `mojo_list_get_boxed`, which
+    answers by the kind the LIST recorded: a list of strings or of doubles
+    built by anything but a literal's `mojo_list_set_kinds` has no row, an
+    unrecorded slot reads as 'i', and a `char *` then printed as its address.
+    The caller is the only place the element type is statically known, so it
+    records it here, as the uniform kind of the whole list. Only the two kinds
+    that have no int64_t spelling are recorded; an int list's unrecorded
+    slots already read correctly. Emission only — `arg_pairs` is unchanged."""
+    _names = getattr(gen, '_param_elem_mixed', {}).get(_as_str(callee))
+    if not _names:
+        return
+    _pnames = getattr(gen, '_func_param_names', {}).get(_as_str(callee)) or []
+    for _i, (_at, _av) in enumerate(arg_pairs):
+        _pn = _as_str(_pnames[_i]) if _i < len(_pnames) else None
+        if _pn is None or _pn not in _names:
+            continue
+        if _as_str(gen._get_actual_type(_at, _av)) != 'MojoList *':
+            continue
+        _et = _as_str(gen._elem_types.get(_as_str(_av)))
+        _kind = {'char *': 'p', 'double': 'd'}.get(_et)
+        if _kind:
+            gen._emit_call('void', '', 'mojo_list_set_kinds_uniform',
+                           [('MojoList *', _as_str(_av)), ('char', "'" + _kind + "'")])
+
+
 def _note_global_callable_store(gen, gname: str, value_text: str) -> None:
     """A callable (or a dict of callables) stored into a MODULE GLOBAL keeps
     its return type for a later call through that global's name.
