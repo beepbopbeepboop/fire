@@ -16,6 +16,31 @@ All measured with the gimple backend (compile -> `gcc -fgimple` -> link
 `fire_runtime.c` + the A3 coroutine objects -> run) against `exec`-ing the
 identical text as Python. Every one of the three exits 0 with wrong output.
 
+## Status (2026-10-29, `work-3049`) — shape 1 is now an honest refusal; shapes 2 and 3 still open
+
+Measured on this tree, against CPython:
+
+- **Shape 1** (`for i, r in enumerate(data): yield r`): was `0 1 1 2` with
+  exit 0. Now **refused** at compile time, and the program runs correctly via
+  interpreter fallback. Landed: `coro._static_env` gained an `enumerate(<x>)`
+  two-slot arm (slot 0 `'i'`, slot 1 the element kind of `<x>`), so the A3
+  yield-kind check sees the float element and refuses it, which the cpp path
+  then also refuses ("a `yield` of a float value is typed 'int64_t'"). A
+  positive all-float and all-string variant compile and match CPython; an
+  all-index variant is unchanged. Pinned by
+  `generator_enumerate_float_element_is_refused_not_truncated` and the two
+  positive cases in `test_gimple_generator_runner.py`.
+- **Shape 2** (dict argument, yields the key): **already refused** on this
+  tree. The compiled path reports the one-C-type-per-slot refusal, so it no
+  longer prints the key's address. Nothing to change.
+- **Shape 3** (list of lists, `for cell in row`): **still wrong**, prints heap
+  addresses / garbage with exit 0. Not touched. Next step is the nested-element
+  half in the Shape 3 section below.
+
+The cpp-path half of the loop-target problem (its `_generator_yield_ctype`
+`known` map does not carry loop targets) is not fixed; the refusal above is
+what that path already produces for shape 1, so it is not wrong output today.
+
 ## Status (2026-10-02, `work/bugs4-2`) — item 1's proposed next step is INSUFFICIENT, and the reason is now located: the two passes that answer "what does this generator yield" never see each other, and only ONE of them has a refusal
 
 Re-measured on this tree; all three shapes reproduce exactly as below (item 1
