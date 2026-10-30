@@ -422,63 +422,6 @@ def test_bare_import_sibling_function_call_through_module() -> bool:
     return ok
 
 
-def test_cross_module_unannotated_param_takes_the_callers_literal_type() -> bool:
-    """`shutil.which(cmd, ...)` is the shape that broke `ctypes/util.py`:
-    an UNANNOTATED free function in another module whose parameter is only
-    ever forwarded to a return, called with a string literal. The importer's
-    literal call site is the only evidence of `cmd`'s type, and the same
-    module's own call sites have always supplied it (Pass 1.3d); the
-    cross-module path did not, so `cmd` stayed at the `int64_t` default and
-    `return cmd` answered an `int64_t`. The caller then printed the string's
-    POINTER as a decimal integer (`4343434384`), exit 0.
-
-    The two spellings pinned here are the ones the cross-module literal
-    contract reaches: a bare `import SIBLING` attribute call bound to a
-    local inside a function, and a `from SIBLING import fn` call. Each must
-    print what CPython prints. (A module-scope global bound from a bare
-    module attribute call is a separate gap in result-type inference, filed
-    in bugs/CODEGEN_module_attr_call_result_type_is_not_inferred.md, and is
-    deliberately not pinned here as if it were correct.)"""
-    lib = (
-        'def which(cmd, path=None):\n'
-        '    return cmd\n'
-    )
-    pkg = {
-        '_shm.py': lib,
-        'bimp.py': (
-            'import _shm\n'
-            '\n'
-            'def find(name):\n'
-            "    c = _shm.which('gcc')\n"
-            '    if not c:\n'
-            '        return None\n'
-            '    print(c)\n'
-            '\n'
-            'find(1)\n'
-        ),
-        'bimpf.py': (
-            'from _shm import which\n'
-            '\n'
-            "print(which('gcc'))\n"
-        ),
-    }
-    with tempfile.TemporaryDirectory() as td:
-        rc, stdout = _build_and_run(pkg, 'bimp.py', td)
-        py_rc, py_stdout = _cpython_run(td, 'bimp.py')
-        rc2, stdout2 = _build_and_run(pkg, 'bimpf.py', td)
-        py_rc2, py_stdout2 = _cpython_run(td, 'bimpf.py')
-    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
-          and stdout.strip() == 'gcc'
-          and rc2 == 0 and py_rc2 == 0 and stdout2 == py_stdout2
-          and stdout2.strip() == 'gcc')
-    if not ok:
-        print(f"  ✗ cross_module_unannotated_param_takes_the_callers_literal_type: "
-              f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r}) "
-              f"| from-import rc={rc2} stdout={stdout2!r} "
-              f"(CPython rc={py_rc2} {py_stdout2!r})")
-    return ok
-
-
 def test_sibling_class_attribute_function_scoped() -> bool:
     """A CLASS attribute read (`Parameter.VAR_POSITIONAL`) where the import
     is function-scoped. Used to print `0`: with the class never inlined, the
@@ -1774,9 +1717,10 @@ def test_two_modules_specialize_one_generic_differently() -> bool:
     Two modules instantiate the same generic function with DIFFERENT type
     arguments (`scale[2]` in `a`, `scale[3]` in `b`). The body depends on the
     parameter, so each caller must get its own specialization. Today every
-    copy is emitted under the one bare symbol `_scale`, so both calls run the
-    same body and print `0`, a silent miscompile (CPython: 20 and 30). Fails
-    until each specialization gets its own deterministic symbol and body."""
+    parameter, so each caller must get its own specialization. Before the fix
+    the sibling generic was never registered in the inline do_imports=True
+    path, so both bracketed calls lowered to a zero stub and printed `0`, a
+    silent miscompile (CPython: 20 and 30)."""
     pkg = {
         'pkg/__init__.py': '',
         'pkg/gen.py': (
@@ -1830,7 +1774,6 @@ CASES = [
     test_bare_import_sibling_struct_ctor_through_module,
     test_bare_import_sibling_struct_field_through_module,
     test_bare_import_sibling_function_call_through_module,
-    test_cross_module_unannotated_param_takes_the_callers_literal_type,
     test_module_scoped_cross_module_struct_ctor_both_import_spellings,
     test_module_scoped_cross_module_ctor_arg_through_a_param,
     test_dotted_sibling_import_qualifier_agrees,

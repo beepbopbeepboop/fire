@@ -7,7 +7,7 @@ produce a tag, which then crashed inside mojo_dict_key_for.
 The fix is in runtime/fire_runtime.c; this test verifies the
 layer1-shim that links the real runtime passes cleanly.
 """
-import sys, os
+import subprocess, sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_coro_runtime import TESTS, _run, BACKENDS
 

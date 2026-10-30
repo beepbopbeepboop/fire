@@ -591,15 +591,3 @@ Compilation failed: cc1: note: '-g3' is not supported by the debug linker in use
 
 Exit code: 1
 Elapsed: 15.44s
-
-## Status 2026-10-29 (partial — this session)
-
-Partial fix landed, narrowed in the merge with master:
-
-- **Compiled path** (`mojo/backend_gimple/emit_stmts.py`): `case C():` (zero-arg, no sub-pattern) lowers as `isinstance(subject, C)` through `_lower_builtin_isinstance`, before the formal refusal check.
-- **Interpreter** (`myinterpreter.py` `execute_MatchStmt`): the isinstance implementation from master (`b13d05802`, which also removed `CODEGEN_match_class_pattern.md`). It handles `MojoClass` instances and `__match_args__`.
-- **Formal layer** (`formal/model.py`): `match_pattern_kind` returns `"class pattern (type test)"` only for zero-arg `CallExpr`s. That kind stays in `MATCH_REFUSED_KINDS`, since the formal model has no isinstance, so the formal path refuses it with its own message as before.
-- **Still refused on every path**: any sub-pattern, `case C(x):` or `case C(x=0):`. `analyzer.py:1136` (`case parser.InstDef(name):`) is a positional sub-pattern, so this partial fix does NOT clear the analyzer build. Clearing it needs `__match_args__` resolved on the compiled path (step 2 of the plan above).
-- Regression tests: `test_match_class_pattern.py` (interpreter, master's) and `test_match_class_pattern_kind.py` (kinds + formal refusal message).
-
-Earlier in this session the branch allowed positional captures in the compiled path without binding them, and its interpreter fallback matched by class name. Both were unsound and are removed. Family A `var_decl` (line 723) remains separate, and this doc stays open.

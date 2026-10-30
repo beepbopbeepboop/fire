@@ -119,12 +119,6 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
     # its own honest, already-existing refusal instead.
     if node.is_async and not node.is_generator:
         return
-    # A nested sync generator that reads enclosing names was compiled to its
-    # own coroutine unit by _compile_nested_generator_closures; like the async
-    # case above it has no ordinary closure body here. Its call sites resolve
-    # through _nested_generator_api, keyed (current_func_name, name).
-    if node.is_generator and (gen.current_func_name, node.name) in gen._nested_generator_api:
-        return
     outer_closures = getattr(gen, '_all_closures', {}).get(
         gen.current_func_name, {})
     ci = outer_closures.get(node.name)
@@ -907,7 +901,7 @@ def _gen_stmt_ComptimeForStmt(gen, node):
             # chokepoint every other store uses (`_sce_simple_emit`'s
             # literal-to-int64_t branch), so the emitted form is decided by
             # the destination type rather than re-derived per call site.
-            # See bug:CODEGEN_imported_generic_never_elaborated_calls_
+            # See bugs/CODEGEN_imported_generic_never_elaborated_calls_
             # nothing_defines.md.
             dst = gen.var_types.get(node.target) or 'int64_t'
             i = start
@@ -3939,11 +3933,12 @@ def _abs_module(ref: str, base: str) -> str:
 
 
 def _register_imported_generics(gen, stmts) -> None:
-    """dylib mode: register `from M import gen` where gen is a generic free
-    function (following re-export chains) so its call sites elaborate a
-    concrete CAS-cached instantiation."""
-    if gen.do_imports:
-        return
+    """Register `from M import gen` where gen is a generic free function
+    (following re-export chains) so its call sites elaborate a concrete
+    instantiation. This runs in the inline do_imports=True path too: there a
+    bracketed call `gen[2](x)` to a sibling module's generic otherwise matched
+    no registration and lowered to a zero stub (a silent miscompile; see
+    bugs/CODEGEN_dylib_generic_inline_copies_share_one_symbol.md)."""
     for st in stmts:
         if not (isinstance(st, gimple_ctypes.FromImportStmt) and not getattr(st, 'wildcard', False)):
             continue
