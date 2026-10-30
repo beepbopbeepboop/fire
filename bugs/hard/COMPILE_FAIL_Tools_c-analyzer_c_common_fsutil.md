@@ -1,5 +1,28 @@
 # COMPILE_FAIL (hard): Tools/c-analyzer/c_common/fsutil.py
 
+## Plan 2026-10-30 — every remaining refusal is the same missing capability: a DYNAMICALLY-TYPED value in the compiled path
+
+Measured by building `iterutil.py` alone (after the cursor fix below): it refuses `chain` (nested generator
+reads enclosing `items`/`peeked`; `cpp_async.py` has no capture model, though the A3 path in
+`emit_calls.py` ~L230 has one) and `iter_many` (`mojo/middle/coro.py::_ambiguous_slot_message`: it yields the
+untyped parameter `items`, whose call sites — `process_filenames(filenames)`, itself a public untyped
+parameter — cannot be typed statically, and a compiled generator has ONE fixed C value slot,
+`_KIND_TO_SLOT_CTYPE`). `fsutil` itself: `_walk(root)`/`_glob(...)`/`onempty(...)` call a callable PARAMETER whose
+return type depends on the caller; `_walk(*a, walk=_files, **k)` forwards through one. The runtime has no
+sound tagged value: `mojo_boxed_is_str` (`fire_runtime.h` ~L641) is a range heuristic, so a boxed slot
+would be a guess, not a type.
+
+Readings (decision needed): (A) add a real tagged value (`MojoValue`: tag+payload; int/bool/float/str/
+list/dict/tuple/callable) used ONLY where inference gives up — generator yield slot, callable-parameter
+return, untyped-parameter forwarding — plus box/unbox at the typed boundary; this is the sound answer and
+closes all five sites (`_walk`, `_glob`, `onempty`, `process`, `_get_reader`) at once. Plan: `fire_runtime.[ch]`
+tag + box/unbox + `mojo_value_call`; `coro.py::_KIND_TO_SLOT_CTYPE` gains kind `'v'` selected where
+`_ambiguous_yielded_params` refuses today; `cpp_core.py` yield/for-target/call lowering reads `'v'`;
+tests: one `cpp_coroutine_value_slot_*` per site in `test_gimple_generator_runner.py`, ending with fsutil
+building and `walk_tree`/`glob_tree` matching CPython on a temp tree. (B) keep refusing and let these
+modules interpret from source (status quo; correct, slow). Independently of A/B, `os.walk`/`glob.iglob`
+must become compileable closure members (`bugs/CODEGEN_generator_function_Lib_os.md`).
+
 ## Status 2026-10-30 — `items = iter(items)` on a PARAMETER now gets a cursor; `iterutil.peek_and_iter` no longer refuses
 
 Re-measured (copy `c_common/` to `.tmp/ca/`, `python3 fire.py build -o ../out-fsutil c_common/fsutil.py`):
