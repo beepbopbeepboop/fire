@@ -2119,7 +2119,7 @@ def _refine_generic_return_type(gen, info: dict, module_src: str, g: str,
     `int64_t`, `var it = empty[Int]()` types `it` as a boxed integer, and
     `next(it)` has no receiver type to dispatch the iterator protocol
     through — the refusal in `emit_calls.py::_lower_call` (see
-    bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md).
+    the user-iterator next() bug (doc deleted in db724c4d6)).
 
     Nothing here INFER anything new: it is the already-shipped materializer
     applied at the one further site that needed it, and an annotation naming

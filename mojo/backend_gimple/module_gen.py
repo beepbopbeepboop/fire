@@ -4037,7 +4037,7 @@ def gen_module_impl(self, stmts):
     #
     # See mojo/backend_gimple/elab_intu.py for why the `.o` route cannot serve
     # the `std/iter` iterator family at all, and
-    # bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md for
+    # the user-iterator next() bug (doc deleted in db724c4d6) for
     # the experiment this replaces (which narrowed the feature instead of
     # fixing the cause, and so produced `conflicting types` regressions).
     stmts = list(stmts) + _elab_intu.run(self, stmts)

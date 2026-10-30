@@ -400,14 +400,33 @@ def _cattr_restore_end(gen) -> None:
 
 def _cattr_instance_read(gen, ov, ot, aname, gname, gtype):
     """Value of class attribute `aname` read through an INSTANCE `ov` of struct
-    type `ot`: the cell this instance was built under (its hidden field), not
-    the current one. That is what keeps `a = make(5); b = make(7); a.attr` at 5.
-    Falls back to the current cell when `ov` is not a struct pointer."""
+    type `ot`, in CPython's lookup order: an attribute the instance itself holds
+    (an instance write `ov.aname = ...` lands in its dynamic storage) shadows the
+    class attribute, so the dynamic storage is probed first, under the nothrow
+    flag, and the class value is the default. The class value is the cell this
+    instance was built under (its hidden field), not the current one, which is
+    what keeps `a = make(5); b = make(7); a.attr` at 5. Falls back to the
+    current cell when `ov` is not a struct pointer, and skips the probe there
+    (no dynamic storage can be reached through a non-pointer word)."""
     if not ot.endswith(' *') or _cattr_cell_type(gen, gname) is None:
-        return _cattr_read(gen, gname, gtype)
-    _field = gimple_ctypes._safe_field(gimple_ctypes.cattr_cell_field(aname))
-    _p = gen._new_val(f'{gtype} *', f'{ov}->{_field}')
-    return gen._new_val(gtype, f'*{_p}')
+        _classval = _cattr_read(gen, gname, gtype)
+    else:
+        _field = gimple_ctypes._safe_field(gimple_ctypes.cattr_cell_field(aname))
+        _p = gen._new_val(f'{gtype} *', f'{ov}->{_field}')
+        _classval = gen._new_val(gtype, f'*{_p}')
+    if not ot.endswith(' *'):
+        return _classval
+    gen._emit("  _mojo_getattr_missed = 0;")
+    gen._emit("  _mojo_getattr_nothrow = 1;")
+    _vp = gen._new_val('void *', f'(void *){ov}')
+    _name = gen._new_val('char *', gen._intern_string(aname))
+    _raw = gen._call_expr('int64_t', '_mojo_dispatch_getattr',
+                          [('void *', _vp), ('char *', _name)])
+    gen._emit("  _mojo_getattr_nothrow = 0;")
+    _missed = gen._new_val('int', '_mojo_getattr_missed')
+    _cond = gen._new_val('_Bool', f'{_missed} != 0')
+    _hit = gen._new_val(gtype, f'({gtype}){_raw}')
+    return gen._new_val(gtype, f'{_cond} ? {_classval} : {_hit}')
 
 
 def _cattr_instance_dyn_read(gen, ov, ot, aname, gname, gtype):
@@ -3752,7 +3771,12 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # `arg_pairs`.
         _gm_kwargs = getattr(node, 'kwargs', []) or []
         _gm_expected = gen.func_param_types.get(f"{_gm_api['base']}_start", [])
-        if _gm_expected and len(all_args) < len(_gm_expected):
+        # `*args` callee: pad the fixed slots (self included) up to its slot,
+        # then pack the positionals from there on -- see
+        # ggc._emit_generator_start_call, which this mirrors.
+        _gm_star = ggc._generator_star_slot(_gm_api, node)
+        _gm_nfixed = _gm_star if _gm_star is not None else len(_gm_expected)
+        if _gm_expected and len(all_args) < _gm_nfixed:
             # Explicit loop, NOT `{kn: gen.lower_expr(ke) for kn, ke in
             # _gm_kwargs}` — the comprehension's tuple-unpacked key `kn`
             # erases to int64_t (the pointer-decimal key trap) and the
@@ -3762,7 +3786,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 _gm_kwarg_dict[_gmm_as_str(_gm_kn)] = gen.lower_expr(_gm_ke)
             _gm_kwarg_values = list(_gm_kwarg_dict.values())
             _gm_dflts = gen._func_param_defaults.get(f"{_gm_api['base']}_start", [])
-            while len(all_args) < len(_gm_expected):
+            while len(all_args) < _gm_nfixed:
                 if _gm_kwarg_values:
                     all_args.append(_gm_kwarg_values.pop(0))
                     continue
@@ -3777,7 +3801,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 # step with 0 instead of 2).
                 _pos = len(all_args) - 1
                 _dv = gimple_exprtypes._trailing_default_at(
-                    _gm_dflts, len(_gm_expected) - 1, _pos)
+                    _gm_dflts, _gm_nfixed - 1, _pos)
                 if _dv is not None:
                     all_args.append(ggc._default_expr_to_pair(gen, _dv))
                 else:
@@ -3785,6 +3809,8 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         else:
             for _, _ke in _gm_kwargs:
                 gen.lower_expr(_ke)
+        if _gm_star is not None:
+            all_args = ggc._pack_generator_star_args(gen, all_args, _gm_star)
         t = gen._call_expr('MojoGenerator *', f"{_gm_api['base']}_start", all_args)
         gen._generator_var_api[t] = _gm_api
         return 'MojoGenerator *', t
