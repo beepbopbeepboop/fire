@@ -224,3 +224,83 @@ Lifting that refusal needs the same store in the stack-switch body, after B.
 
 See also `CODEGEN_nested_class_method_cannot_reach_an_enclosing_local.md`: the
 same family (a nested class cannot see the enclosing function's locals).
+
+## Status (2026-10-29, planning round 3: Reading C sites measured)
+
+Re-measured on this branch. The four-call program still prints `7 7 9 9`
+(Python `5 7 9 5`). Test is NOT committed: it is red and the rule is that a
+test lands with its fix. The exact test is kept at
+re-create it from the program below when the fix lands:
+
+```python
+def make(version: int):
+    class Tag():
+        __version__ = version
+    return Tag()
+
+def main():
+    a = make(5)
+    b = make(7)
+    print(a.__version__)
+    print(b.__version__)
+    print(make(9).__version__)
+    print(a.__version__)
+```
+expected stdout `"5\n7\n9\n5\n"`, via `test_gimple_stdout`.
+
+Generated C for it (`gimple_codegen.compile_to_gimple(src)` on the program):
+
+- `int64_t _classattr_Tag____version__;` is a PLAIN file-scope C global
+  (not a boxed struct field) in this shape.
+- `make` emits `_classattr_Tag____version__ = version;` then
+  `_alloc_Tag()`: the landed `_gen_stmt_StructDef` store is working.
+- Reads are `_t5 = _classattr_Tag____version__;`, through the instance
+  path (`emit_exprs.py` ~2602, `class_attrs` branch) and the class-name path.
+
+Corrections to the round-2 plan, from reading the code:
+
+1. The globals are NOT always plain. `module_gen.py` ~13818-14140 is a
+   multi-path emitter (`global_decls`, `_gmi_declare_table_global` ~2731,
+   container boxing as `int64_t` with a comment, `_own_overlay_global_ctype`
+   ~12459). A block-pointer global must go through the same path or it will
+   be typed differently from every other module global. Do not add it as a
+   bare declaration beside them.
+2. Minimal-touch design, preferred over the round-2 plan. Keep
+   `gen._class_attrs[C][A]` returning the mangled name for every
+   consumer that keys on it (`_global_var_types`, `_elem_types`, the alloc
+   loop at `module_gen.py` ~15020, `_mojo_classattr_init`). Change only the
+   sites that turn the name into C text, and make them emit
+   `(*_classattr_C__block).A` (or `_classattr_C__block->A`) for a
+   FUNCTION-SCOPED class. Those sites are: `emit_exprs.py` ~1473 (`cls.`),
+   ~1824 (`ClassName.attr`), ~2602 (instance read, which should read
+   `((_cattrs_C *) obj->_cls_block)->A`), and the write targets used by
+   `emit_stmts.py` ~1768 and ~2439 via `_resolve_class_attr_write_target`
+   (`emit_methods.py` ~183). A write site uses the returned gname as C
+   lvalue text through `_safe_coerce_emit`; confirm that before relying on it.
+3. Which classes are function-scoped: `_gmi_hoist_nested_structs`
+   (`module_gen.py` ~3028-3085) has `found` (every nested class, with its
+   enclosing function) and renames each into `renamed_to`. Record those
+   final names on the generator (e.g. `self._fn_scoped_structs`) there. Do
+   not infer it from `_class_attrs` alone: module-scope classes share the
+   same registration and must keep the global.
+4. Block type: `_cattrs_C` with one field per attribute, typed as the
+   attribute's declared C type (`_global_c_decl_types[gname]` if present,
+   else `_global_var_types[gname]`), so every read and write keeps the type
+   it has today. The instance hidden field `_cls_block` is typed `void *`
+   and cast at the one read site, so the struct C definition does not need
+   the block's full type ordered before it.
+5. Dead-global cleanup: after the switch, the old `_classattr_C__A` global
+   of a function-scoped class is unused. Either skip its declaration in the
+   emitter loop above or leave it and say so. Do not leave it unexplained.
+
+Residual to write down, not fix: a class object that escapes its function
+and is used in a later call (`return Tag` then `T = make(9); T.__version__`)
+still reads the block of the most recent execution. Closing it needs the
+class object as a runtime value.
+
+Next round, in order: (1) fn-scoped set in the hoist; (2) block struct and
+block global through the existing global emitter; (3) `_cls_block` seed in
+`_init_C`; (4) the instance read site; (5) class-name read and write
+sites. Land (1)-(5) together, because the four-call program needs all of
+them, and run `test_gimple_runner.py` for the three nested-class tests
+(`5\n7\n`, `3\n`, and the four-call case once re-added).
