@@ -525,7 +525,8 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
             #       "__mojo_middle_offload_toplevel", ...
             #
             # Four modules blamed for one module's bug, which is also how
-            # bugs/CODEGEN_module_toplevel_undefined_in_selfhost.md read
+            # the self-host link failure (undefined toplevel symbols from a
+            # module-level _lens name collision) read
             # ("57 declarations, 0 bodies", "the blast radius is 57 modules;
             # the visible symptom is 5") before its own counts came off an
             # artifact that never finished generating.
@@ -872,8 +873,8 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 temp_gen._emitted_c_helpers = gen._emitted_c_helpers
                 temp_gen._module_stmts = gen._module_stmts  # share: track all transitive stmts
                 # share: incrementally-maintained flat mirror of
-                # _module_stmts' union (see PERF_nested_module_compile_
-                # walk_ast_quadratic_rescan.md Phase 1) — same sharing
+                # _module_stmts' union (see the `_walk_ast` re-scan bug,
+                # Phase 1) — same sharing
                 # pattern as _module_stmts itself, just above.
                 temp_gen._all_transitive_stmts_ordered = gen._all_transitive_stmts_ordered
                 temp_gen._all_transitive_stmts_ids = gen._all_transitive_stmts_ids
@@ -1094,7 +1095,14 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # the gimple_cpp_* path while the root module's went through
                 # gimple_gen_coro -- a split that leaves the client .c
                 # referencing symbols nobody defines.
-                stmts, _ss_meta = gimple_codegen.gimple_gen_coro.lower(stmts)
+                # The importers' call sites (`gen._closure_call_stmts`) are
+                # handed in so `<module_name>.<gen>(...)` types this module's
+                # generator slots; the module's own statements are appended
+                # for ITS imports, so a generator reached through a chain of
+                # imports sees every call site compiled before it.
+                stmts, _ss_meta = gimple_codegen.gimple_gen_coro.lower(
+                    stmts, gen._closure_call_stmts, module_name)
+                temp_gen._closure_call_stmts = gen._closure_call_stmts + [stmts]
                 if _ss_meta:
                     gimple_codegen.gimple_gen_coro.register(temp_gen, _ss_meta)
                     publish_a3_generators(temp_gen, _ss_meta)
@@ -1176,7 +1184,7 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # Store parsed stmts for this module so parent gens can access them
                 gen._module_stmts[module_name] = stmts
                 # Incrementally extend the flat, pre-deduped mirror (see
-                # PERF_nested_module_compile_walk_ast_quadratic_rescan.md
+                # the `_walk_ast` re-scan bug
                 # Phase 1) — O(this module's own stmt count), done once
                 # per module ever, instead of leaving every ancestor
                 # level to re-flatten the whole (growing) _module_stmts
@@ -1444,7 +1452,7 @@ def _module_marker_attribute_reads(stmts) -> dict:
     this module — ONE AST walk for the whole module, so a module with N bare
     imports costs one walk and not N (the walk is the expensive half of
     `_inline_bare_import_struct`; see
-    bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md)."""
+    the `_walk_ast` re-scan bug (fixed; remainder in bugs/hard/PERF_struct_self_assign_scan_uncached.md))."""
     out: dict = {}
     for _n in gimple_exprtypes._walk_ast(stmts):
         if not isinstance(_n, gimple_ctypes.MemberExpr):

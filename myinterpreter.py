@@ -1405,8 +1405,7 @@ class BoundMethod:
                 # An overloaded method taken as a value (and then bound to
                 # an instance) has no single `_invoke` to delegate to; route
                 # through the overload set's own dispatch instead, with `self`
-                # prepended as the receiver. See
-                # bugs/CODEGEN_method_with_overloads_is_unresolvable_as_a_value.md.
+                # prepended as the receiver.
                 #
                 # The receiver is folded into the `*`-unpack (`invoke(f,
                 # *_merged, **kwargs)`) rather than written as an explicit

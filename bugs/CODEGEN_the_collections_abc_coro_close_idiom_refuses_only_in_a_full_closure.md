@@ -82,3 +82,106 @@ moved module's value behavior checked against CPython. Pointers: the row docs
 (`COMPILE_FAIL_Lib_socket_...`, `COMPILE_FAIL_Tools_cases_generator_parsing.md`,
 `COMPILE_FAIL_zipfile___init__.md`, `CODEGEN_generator_function_Lib_mailbox.md`)
 carry the per-row censuses.
+
+### Round 2026-10-29 — planning round (light worker; no full-closure run)
+
+**Measured, not chased to a fix.** Small-closure repro does NOT refuse, so
+the mechanism is still unnamed. Each experiment below compiled with
+`compile_to_gimple_with_cpp(src, do_imports=True)` under `memslot --gb 8`:
+
+- `helper.py: def set_it(): global _coro; _coro = 5` imported by a file with
+  the idiom → compiles (helper's C IS emitted; `_coro` read not refused).
+- `helper2.py: def _coro(): yield 1; _coro = _coro()` imported → compiles.
+- `helper3.py` with the same async idiom imported → compiles; the store trace
+  shows two `_note_global_generator_store` calls for `_coro`, both `tracked`.
+- `helper5.py: def _coro(): return 1` imported, then `async def _coro` +
+  idiom in the entry → compiles.
+- Entry `from _collections_abc import Sized` → compiles at 24 KB of C, so the
+  stdlib import did not pull the module's body (the file alone is 856 KB).
+  Not usable as a closure stand-in.
+
+**Ruled out by reading (not by a run):** imports share ONE root gen
+(`emit_resolve._compile_imported_module` passes `gen`), so the gen-wide
+tables (`_global_generator_api`, `_global_generator_api_poisoned`,
+`_async_api`) do span modules. `_async_fns`/`_generator_fns` are `id()`-keyed
+but local to one `gen_module` call (module_gen.py:3363), so id reuse across
+modules does not reach them.
+
+**Code map (where the api can be lost — the candidates for the probe):**
+
+1. Refusal: `mojo/backend_gimple/emit_methods.py:1419-1428` — raised when the
+   receiver's actual type is `MojoGenerator *` and `_generator_var_api[av]`
+   is absent. `av` is the READ temp.
+2. Read arm that carries the api: `mojo/backend_gimple/emit_exprs.py:774-776`
+   (end of the global-read arm). **Early returns BEFORE it skip the carry**:
+   `_tagged_dyn_src` (:478), `_narrowed_exprs` (:500), `_boxed_mut_locals`
+   (:505), `_captures` (:520), `_imported_global_accessors` (:538),
+   `_BUILTIN_TYPE_NAMES`/`struct_field_types` (:560). A closure can make
+   `_coro` hit one of these (e.g. a `from X import _coro` that registers an
+   accessor, which `_emit_imported_global_accessors`, emit_infra.py:1518,
+   does for any module that exports a `global_var` of that name). That
+   would be the closure-only shape.
+3. Store that records the api: `emit_stmts.py:969` →
+   `_note_global_generator_store` (emit_stmts.py:972-1017). Recorded only
+   when `_in_toplevel_gen` and `v` has an api in `_generator_var_api`.
+   Poison sites: emit_stmts.py:1000-1015, and emit_infra.py:3689 (any
+   `_write_dest` global write, unconditionally, for a name in
+   `_global_var_types`).
+4. Relaxed gating for imported modules: `module_gen.py:11103-11127` skips an
+   unsupported `async def` with a weak stub and adds it to
+   `_unsupported_generator_names` (module_gen.py:12590, :15470). A skipped
+   `_coro` in the closure would make `_coro()` untracked.
+
+**Decision the next round needs (one heavy probe, owed to the integrator):**
+run ONE row (mailbox, `do_imports=True`, cold store) with a wrapper around
+`emit_exprs._lower_IdentExpr` that, for `name == '_coro'` only, dumps:
+`name in gen._global_generator_api`, `in gen._global_generator_api_poisoned`,
+`in gen._imported_global_accessors`, `in gen._captures`,
+`in gen._narrowed_exprs`, `in gen._boxed_mut_locals`, `gen._in_toplevel_gen`,
+`gen._async_api.get('_coro')`, and `gen._unsupported_generator_names`,
+plus `gen.module_name` at the time. The first read with a dump showing
+`in _global_generator_api == False` and poisoned `False` selects which of
+items 2-4 is the cause. Then:
+
+- If item 2 (an early-return arm): the carry moves to just after the
+  global-read branch is entered, so every arm that reads a generator-holding
+  global keeps its api. Test: a sibling module with `from X import _coro`
+  registering an accessor, then `_coro.close()`.
+- If item 3 (poison): the poison source is the named writer; decide between
+  scoping the table per module and keeping the poison. Test: the same
+  two-module shape as above, with the second module's write.
+- If item 4 (skip): the idiom is in a skipped `async def`; the fix is to
+  keep the coroutine compiled in the relaxed context when it is eligible.
+
+**Tests that will prove it:** `test_gimple_generator_runner.py`, in
+`run_module_global_generator_tests`, a two-module fixture (write the sibling
+with `_build_foreign_package_run`'s helper) and the `_coro.close()` idiom in
+the entry; it must compile and run with output matching CPython. Then the
+four row reject censuses (56/48/62/66) must drop or stay equal, and every
+moved module's value behaviour is checked against CPython.
+
+### Round 2026-10-29b — light-worker narrowing (no fix; no heavy run)
+
+Measured with `compile_to_gimple_with_cpp(src, do_imports=True, filename=entry)`
+under `tools/memslot.py --gb 8`, each entry in a fresh temp dir. **Every shape
+compiled; none refuses `_coro.close()`:**
+
+- Idiom in the entry with a sibling `a.py` holding the idiom, and a sibling
+  `b.py` writing `_coro` three ways: top-level `_coro = 5`, a `global _coro`
+  store in a function, and `_coro = _g()` from a generator. Both import orders
+  (`import b; import a` and the reverse) — 6 cases, all OK. This RULES OUT
+  the cross-module poison shape (item 3) for a plain second-module write to
+  the same name.
+- `from sib import _coro` where `sib.py` exports `_coro = 5`, with the idiom
+  in the entry. OK. This does not exercise the item-2 early return on its own
+  (the read is shadowed by the local rebind), so item 2 stays open.
+- The REAL `Lib/_collections_abc.py` (Python 3.14 copy, 32 KB) copied beside
+  the entry and `import _collections_abc` plus the idiom in the entry. OK
+  (792 KB of C). The file itself does not reproduce; the refusal needs the
+  other closure members.
+
+Scratch scripts were in the worker's `.tmp/repro/` (git-ignored, not
+committed). The mechanism is still unnamed. The owed step is unchanged: the
+mailbox full-closure probe with the `_lower_IdentExpr` dump (see the
+2026-10-29 round above). Nothing in this round changes behaviour, so no code
+or test lands.

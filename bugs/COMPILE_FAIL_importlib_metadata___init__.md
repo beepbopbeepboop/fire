@@ -22,7 +22,7 @@ Two things this measurement DOES establish, both of them new:
 - **The runaway is still here and is still growing past 20 GB**, so the
   `ctypes/util.py` entry's "that one is gone" does not generalise — it was
   that closure, not this one. `bugs/CODEGEN_bootstrap_resource_blowup.md` /
-  `bugs/PERF_memory_over_4gb_is_a_bug.md` remain the right places; this is
+  `doc/POLICY_memory_over_4gb.md` remain the right places; this is
   the same shape, not a new finding.
 - **23 sibling modules are compiled (as soft fallbacks) before the kill**,
   and the last diagnostic is `glob.py` refusing on
@@ -66,7 +66,7 @@ describe for `ctypes/util.py`, except that `ctypes/util.py` — a bigger
 closure — now completes in 1.7 GB on this tree (see that doc's 2026-09-30
 entry). So the growth is specific to something in THIS closure, and
 `bugs/CODEGEN_bootstrap_resource_blowup.md` /
-`bugs/PERF_memory_over_4gb_is_a_bug.md` are the right places for it.
+`doc/POLICY_memory_over_4gb.md` are the right places for it.
 
 **Next step for whoever picks this up**: re-run with the ceiling raised
 (`MEMLIMIT_GB=96` for the suite runner, or `--gb 24` for a direct

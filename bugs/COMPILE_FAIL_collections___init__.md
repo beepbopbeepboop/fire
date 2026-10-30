@@ -134,7 +134,7 @@ A whole-program `python3 fire.py build Lib/asyncio/queues.py` — which
 compiles the full asyncio + collections + inspect + _collections_abc
 transitive closure from scratch — was observed running >34 min at 100%
 CPU / 1.7 GB without completing: this is the separately-tracked
-`bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md`
+`the `_walk_ast` re-scan bug (fixed; remainder in bugs/hard/PERF_struct_self_assign_scan_uncached.md)`
 quadratic `_walk_ast` re-scan on a large import graph, NOT a codegen
 refusal. The codegen side of the asyncio/collections chain is done; the
 remaining barrier to an end-to-end binary is compile-time perf.

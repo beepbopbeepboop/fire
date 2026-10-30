@@ -1,5 +1,73 @@
 # An unannotated parameter receiving disagreeing types still prints wrong for every pair except int/str
 
+## Status 2026-10-29 — float beside an integer at one parameter is FIXED
+
+Landed (partial, the doc's own "next step 2", float first):
+
+- Pass 1.3d (`mojo/backend_gimple/module_gen.py`) records a parameter whose
+  call sites observed a `double` AND an integer, and whose slot stays at the
+  `int64_t` default, in `_int64_may_hold_float`. It excludes any slot that also
+  observed a `char *` or a container (`void *`), because those rows own it.
+- A `double` argument bound for such a slot is passed as a fresh box
+  (`mojo_box_from_double`, kind `'d'`, `runtime/fire_runtime.c`) instead of
+  being truncated to the integer its bits name. Applied in
+  `emit_infra._box_float_call_args`, called from both free-function lowerings
+  (`emit_calls.py`'s call path and `emit_stmts.py`'s statement-level twin,
+  which duplicates the padding logic).
+- A `print` of such a parameter routes through `mojo_repr_boxed` (the same
+  answer the `_boxed_vals` arm gives a heterogeneous list slot), so `2.5`
+  prints `2.5` and the plain integer beside it prints `1`.
+
+Verified: `test_link_mode.py`'s `test_unannotated_param_with_disagreeing_call_sites`
+gained two cases (`f(2.5)`+`f(1)` and `f(1)`+`f(2.5)`, both `driver.compile_program`).
+The pre-fix output was `2` for `2.5` and the test failed; post-fix the whole
+function passes. The generated C was checked by hand: the call site emits
+`mojo_box_from_double (2.5)`, and the print emits `mojo_repr_boxed (x)`.
+
+### Status 2026-10-29 (second round) — arithmetic operands no longer read the address
+
+Landed: the doc's own next step 1, for the operand positions of a binary
+operator only. `_lower_binary` (`mojo/backend_gimple/emit_exprs.py`) passes
+each operand through `emit_infra._unbox_float_param_operand`, which wraps a
+float-possible parameter's `int64_t` word in `mojo_box_int`. A double box
+yields the truncated integer and a plain integer its own word, so the answer
+is the one every operator gave before the box existed.
+
+Measured before the change, compiled through `driver.compile_program`:
+`def f(x): print(x * 2)` with `f(2.5)` + `f(1)` printed `8647255520` / `2` (the
+box's address times 2). `x + 1` printed `4389196529`. After the change the
+regression case in `test_link_mode.py` (`unannotated_param_arithmetic_operand`)
+pins `4` / `2`, i.e. the float side is still the truncated answer, not 5.0.
+
+Still open, and NOT measured on this change:
+
+1. **The real double read.** `x * 2` with `f(2.5)` must print `5.0`, and
+   `x + 1` must print `3.5`. That needs the operand read as a double when its
+   box is a double, and an answer whose type depends on the runtime tag
+   (int for an int box, double for a double box). Until that lands, the
+   pinned `4` / `3` in `test_link_mode.py` are the known-wrong truncation, and
+   the test must change with the fix.
+2. **Forwarding a float-possible parameter into another call.** `def g(x):
+   print(x)` called as `g(x)` from a `f` whose parameter is float-possible
+   prints a box address (`fwd` probe: `4312044272` for `f(2.5)`, where
+   `f(1)` prints `1`). `g`'s slot never observed a double (its only call site
+   passes an IdentExpr), so `_int64_may_hold_float` never names it, and the
+   raw box word reaches a print that asks no box. The fix is in Pass 1.3d
+   (`mojo/backend_gimple/module_gen.py`): propagate float-possibility through
+   a call argument that is a float-possible parameter of the caller, the same
+   way `_int64_may_hold_str` propagates a string. Not done here.
+2. **Float beside `str` / `list` / `bytes` / `None`.** Excluded from the float
+   set on purpose: a `char *` or container observation keeps the existing rows
+   in charge. These pairs are not re-measured here.
+3. **bytes / list tags** and **None** — as the sections below describe.
+4. **Box lifetime.** `mojo_box_from_double` is not cached and never freed, one
+   16-byte box per call site execution. A loop calling such a function leaks
+   a box per call. A per-call-site cache, or a box owned by the caller, is the
+   fix; the list-box cache in `mojo_list_get_boxed` is the model.
+
+The 36-pair matrix below is the 2026-10-02 baseline and is stale for this
+tree; re-measure before quoting it.
+
 ## Status 2026-10-02 — the 2 hard GCC errors are GONE and 2 more pairs are
 ## right; 29 of 36 remain wrong, and they are the three rows below
 

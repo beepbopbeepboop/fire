@@ -76,7 +76,7 @@ def feed(tries):
     need = {sl["name"]: max(0, sl["count"] - running.get(sl["name"], 0) + 1 - queued.get(sl["name"], 0))
             for sl in pool["slots"]}
     paths = sorted(set(p for g in pool["feed"] for p in glob.glob(os.path.join(C.MAIN, g))))
-    slots = [sl for sl in pool["slots"] if need[sl["name"]] > 0]
+    slots = [sl for sl in pool["slots"] if need[sl["name"]] > 0 and sl["count"] > 0]   # count 0: no new runs
     for p in paths:
         if not slots:
             break

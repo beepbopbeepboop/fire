@@ -4,6 +4,40 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_analyzer/__main__.
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status 2026-10-29 — partial: a nested generator that reads an enclosing variable is now an honest refusal, not a g++ error
+
+**Root cause, measured.** `render` is defined INSIDE `build_section(name, n)` and reads
+`name` and `n` (`yield f'{name}:'`, `range(n)`). The generator set is built with
+`_walk_ast`, which walks into nested defs, so `render` was lifted as a free top-level
+generator with no capture model. Its coroutine body then named `name`/`n` at file scope
+and g++ rejected the generated .cpp ("'name' was not declared in this scope"), blaming
+generated code. The f-string reads were invisible to the free-name walk, because the
+parser keeps an f-string as one raw `StringLiteral`.
+
+**What landed.** `cpp_async._nested_generator_captures` finds every generator defined
+inside another `def` that reads a parameter or local of an enclosing `def` (f-string
+fields included). `_gen_cpp_generator_unit` refuses such a generator with
+`_UnsupportedGeneratorShape`, so the module gets the normal "Unsupported shape(s)"
+refusal naming the variables instead of a g++ failure. Regression tests:
+`run_nested_generator_capture_tests` in `test_gimple_generator_runner.py` (fail before,
+pass after; the file runs 265/0).
+
+**What did NOT change.** `render` still does not compile. The real fix is a capture
+model for a generator frame: thread the enclosing variables into the coroutine (as the
+A3 capture box does for nested async defs in `mojo/middle/coro.py`) and make the
+generator read them through that box. That is the one remaining piece for this file,
+and the `section`/`render` refusals stay until it lands.
+
+**Re-measured and not the cause.** A minimal `for line in table(n): yield line` inside a
+nested generator, consumed by a top-level one, compiles and matches the interpreter byte
+for byte, so the "for-loop target is never typed" diagnosis does not reproduce on a
+module-level generator. The nested-generator yield-type CODEGEN entry that the 2026-10-01 diagnosis cited
+is no longer in the tree.
+
+**Next step.** Capture model for nested sync generators (see above), then re-run this
+file; `_fix_write_default`/`_parse_*` yield-agreement refusals are separate and unexamined
+on this tree.
+
 ## Status 2026-10-04 — the two blockers are still the two, but the refusal LIST behind them is longer than this entry records, and one shape in it is new
 
 Re-measured on this tree (`python3 fire.py build -o .tmp/out .tmp/ca/c_analyzer/__main__.py`,

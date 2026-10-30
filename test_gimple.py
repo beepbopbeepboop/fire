@@ -3330,8 +3330,8 @@ def f():
     # 'char*'" (a hard, unreadable .cpp compile failure) instead of an
     # honest refusal. Real instance: randdec.py's un_incr_digits_tuple
     # (scalar from_triple(...) yields mixed with 3-tuple yields). See
-    # bugs/COMPILE_FAIL_Modules__decimal_tests_randdec.md's 2026-08-25
-    # entry for the full mechanism and repros.
+    # generator tuple-yield honesty fix (see randdec root cause: scalar/tuple
+    # mixed yields must refuse honestly rather than emit broken C++).
     test_raises("generator_mixed_str_and_tuple_yield_honest_fallback", """\
 def f():
     yield 'abc'
@@ -8279,17 +8279,14 @@ main()
         first (a SIGSEGV until this same change's fail-closed arm —
         the `list(<an int>)` arm), and a
         boxed dict's keys come back as their own addresses for the second
-        (`bugs/CODEGEN_materialized_container_has_no_element_type.md`).
+        (`CODEGEN_materialized_container_has_no_element_type (fixed)`).
 
-        A STRING argument is not asserted either, and that is a real defect
-        rather than a fixture convenience: `list(ident([1, 2, 3]))` in the
-        same function as `list(ident("abc"))` reads the first list's slots
-        with `mojo_list_get_str`, because one function's return ELEMENT type
-        is inferred once for the whole program and the string call site wins.
-        Measured, both pipelines: `["\\x18", "\\x1a", "�", "\\x02",
-        "\\x01"]` where CPython printed `[1, 2, 3]` — a five-element list of
-        bytes read out of a three-element int list. Recorded in
-        bugs/CODEGEN_return_element_type_is_unified_across_call_sites.md.
+        The STRING argument is also asserted: `list(ident("abc"))` beside
+        `list(ident([1, 2, 3]))` must read the int list with `int64_t`
+        access and the string list with `char *` access, not a single
+        program-wide answer.  The fix is `gen._passthrough_param_idx`
+        (its parameter's position), giving each call site the parameter's
+        OWN recorded element type (`_passthrough_param_idx`, per-call-site).
         """
         global _PASS, _FAIL
         name = "ctor_of_a_container_reaches_the_comprehension"
@@ -8304,6 +8301,7 @@ def main():
     print(all(ident([1, 2, 3])))
     print(",".join(ident(["a", "b"])))
     print(len(list(enumerate(ident(["x", "y"])))))
+    print(list(ident("abc")))
 main()
 '''
         want = _cpython_stdout(src)
@@ -9604,7 +9602,7 @@ print("%r" % p)
         every visit — which is what it did before, and what the docstring's
         existing field-name cache already did for `dataclasses.fields`.
 
-        bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md
+        the `_walk_ast` re-scan bug (fixed; remainder in bugs/hard/PERF_struct_self_assign_scan_uncached.md)
         (Phase 9). The failure mode this guards is a walk that silently
         STOPS descending: the dataclass test runs BEFORE the scalar
         early-return precisely because on the compiled path every AST node is
@@ -9723,7 +9721,7 @@ print("%r" % p)
         """Every call site of the shared `_walk_ast` only READS its result.
 
         **The property that makes the memo in
-        `bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md` safe
+        `the `_walk_ast` re-scan bug (fixed; remainder in bugs/hard/PERF_struct_self_assign_scan_uncached.md)` safe
         to add, checked rather than believed.** `_walk_ast` returns a fresh
         `list` today, so a memo keyed on the node would hand the SAME list to
         every caller — and a caller that mutated it would corrupt every later
@@ -9971,7 +9969,7 @@ print("%r" % p)
         """The memo must be indistinguishable from walking every time — and
         must STOP being indistinguishable the moment a node is mutated.
 
-        `bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md`
+        `the `_walk_ast` re-scan bug (fixed; remainder in bugs/hard/PERF_struct_self_assign_scan_uncached.md)`
         (Phase 10). `_walk_ast` is now keyed on node identity, which is what
         makes it stop re-descending the same subtrees once per consumer and
         once per import level, and identity is exactly what cannot see a

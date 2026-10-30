@@ -891,6 +891,15 @@ def test_unannotated_param_with_disagreeing_call_sites() -> bool:
         # in both orders.
         ('def f(x):\n    print(x)\n\n\nf("s")\nf([1, 2])\n', 's\n[1, 2]\n'),
         ('def f(x):\n    print(x)\n\n\nf([1, 2])\nf("s")\n', '[1, 2]\ns\n'),
+        # A FLOAT beside an INTEGER at the same parameter. The slot stays an
+        # int64_t (a double and an int have no common C type), so the float
+        # used to be truncated to the integer its bits name: `f(2.5)` printed
+        # `2`. The float is now boxed at its call site and the print asks the
+        # box, while the plain integer beside it still prints as itself. Both
+        # orders, because the slot's answer must not depend on which call
+        # comes first.
+        ('def f(x):\n    print(x)\n\n\nf(2.5)\nf(1)\n', '2.5\n1\n'),
+        ('def f(x):\n    print(x)\n\n\nf(1)\nf(2.5)\n', '1\n2.5\n'),
     ]
     # The two pairs that used to be a HARD GCC ERROR and are now only wrong:
     #
@@ -905,9 +914,9 @@ def test_unannotated_param_with_disagreeing_call_sites() -> bool:
     # two single-kind programs are what prove it did not disturb either.
     #
     # What is asserted is BUILDABILITY, and deliberately so: the values these
-    # two print are still wrong (`2` for `2.5`, a pointer decimal for the
-    # list), which is the separate float-boxing and runtime-tag rows of
-    # bugs/CODEGEN_polymorphic_param_non_str_kinds_print_wrong.md. Asserting
+    # print are still wrong (a pointer decimal for the list), which is the
+    # runtime-tag row of bugs/CODEGEN_polymorphic_param_non_str_kinds_print_wrong.md
+    # (the float beside an integer is fixed, in `cases` above). Asserting
     # the wrong text would pin a bug; asserting only that it COMPILES is the
     # whole content of this row, and it was a hard failure before.
     builds_only = [
@@ -939,6 +948,27 @@ def test_unannotated_param_with_disagreeing_call_sites() -> bool:
             ok = False
             print(f"  ✗ unannotated_param_container_does_not_break_the_build"
                   f"[{i}]: compiled but exited {rc}")
+    # ARITHMETIC on the float-possible parameter (bugs/
+    # CODEGEN_polymorphic_param_non_str_kinds_print_wrong.md, Status 2026-10-29,
+    # next step 1). `x * 2` used to read the box's ADDRESS: with `f(2.5)` it
+    # printed 8647255520. The operand now goes through `mojo_box_int`, so the
+    # integer side is exact and the float side is the truncated answer every
+    # operator gave before the box existed (2 * 2 = 4). CPython says 5.0 and
+    # 3.5 for these, which is the answer the real double read must produce; the
+    # expectations below change with it. Only the operator operand changes:
+    # `print(x)` keeps the raw word and is pinned by `cases` above.
+    arithmetic_partial = [
+        ('def f(x):\n    print(x * 2)\n\n\nf(2.5)\nf(1)\n', '4\n2\n'),
+        ('def f(x):\n    print(x * 2)\n\n\nf(1)\nf(2.5)\n', '2\n4\n'),
+        ('def f(x):\n    print(x + 1)\n\n\nf(2.5)\nf(1)\n', '3\n2\n'),
+    ]
+    for i, (src, want) in enumerate(arithmetic_partial):
+        with tempfile.TemporaryDirectory() as td:
+            rc, stdout = _build_and_run({'prog.py': src}, 'prog.py', td)
+        if not (rc == 0 and stdout == want):
+            ok = False
+            print(f"  ✗ unannotated_param_arithmetic_operand[{i}]: "
+                  f"rc={rc} stdout={stdout!r} (want {want!r})")
     return ok
 
 
@@ -1525,6 +1555,47 @@ def test_nested_def_is_not_a_module_level_fn_export() -> bool:
     return ok
 
 
+def test_imported_function_trailing_default_argument_is_padded() -> bool:
+    """Regression for `bugs/CODEGEN_imported_function_default_argument_dropped_at_call.md`.
+
+    `from lib import f; f(1)` where `lib.f(a, b=7)` must compile and print `8`,
+    not the pre-fix "too few arguments to function 'lib_f' expected 2 have 1"
+    GCC error. Root cause: `module_loader`'s text scan of the defining module
+    built its `exports[name]` record from the C parameter list only, and the
+    C list strips default values (`'String = ""'` -> `'String'`), so the
+    record carried no defaults at all. The cross-module call padding in
+    `_lower_named_call` consults `gen._func_param_defaults` for trailing
+    defaults, and that table is populated by the DEFINING module's own
+    `gen_module` pass — which never runs for an imported module compiled
+    through the link-mode/inline path, so the pad site saw an empty list and
+    emitted a 3-arg call against a 4-parameter prototype (the exact
+    `compile_to_gimple(src, do_imports=False, filename=filename)` arity
+    error that blocks `mojoc`).
+
+    The fix is to record the defaulted parameter names in the export record
+    at the scan site (the same AST-derived shape `module_spec_gen.py` and
+    `gen_module`'s Pass 10 already use), so the importer's pad site has the
+    defaults to pad from. Asserting CPython's real answer (8) pins the value;
+    pre-fix the build itself fails at gcc, so `rc == 0` is part of the pin.
+    """
+    pkg = {
+        'lib.py': 'def f(a, b=7):\n    return a + b\n',
+        'main.py': (
+            'from lib import f\n'
+            'print(f(1))\n'
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 'main.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'main.py')
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and stdout.strip() == '8')
+    if not ok:
+        print(f"  ✗ imported_function_trailing_default_argument_is_padded: "
+              f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
+    return ok
+
+
 def test_string_argument_to_stringslice_param_is_wrapped_in_a_span() -> bool:
     """A String passed to a `StringSlice` parameter must reach the callee as a Span
     (the {_data, _len} fat pointer the callee reads), not as the bare char * that
@@ -1560,6 +1631,53 @@ def test_string_argument_to_stringslice_param_is_wrapped_in_a_span() -> bool:
     return ok
 
 
+def test_same_module_call_to_generic_with_default_binds_instantiation() -> bool:
+    """A same-module call to a module-level generic function, in a link-mode
+    build, must bind the instantiation — not the weak "unavailable in compiled
+    mode" extern stub (CODEGEN: cross-module call to a generic binds the stub).
+
+    `use_a` in `gen.mojo` calls its OWN module's generic `pick` with the
+    bracket parameter omitted: `pick(10)`, where `result_type` has the default
+    `NoneType` and no argument can bind it. The link-mode build compiles
+    `gen.mojo` as a module, which strips generic functions out of the emitted
+    text and instantiates them per call site. The inferred elaboration declined
+    (`infer_type_args` left `result_type` unbound although the template defaults
+    it), so the call fell through to a bare `pick (10)` with no definition. The
+    weak extern stub then answered, printing `pick: unavailable in compiled
+    mode` into the program's stdout and returning 0 — a silent wrong answer
+    with exit 0.
+
+    Asserting the exact stdout pins both halves: `use_a()` must be 11 (the
+    instantiated body), and the stub's diagnostic must not appear anywhere.
+    `pick[Int](5)` from `main` already worked and stays pinned at 6.
+    """
+    pkg = {
+        'gen.mojo': (
+            '@inline(.always)\n'
+            'def pick[result_type: AnyType = NoneType](x: Int) -> Int:\n'
+            '    return x + 1\n'
+            '\n'
+            'def use_a() -> Int:\n'
+            '    return pick(10)\n'
+        ),
+        'main.mojo': (
+            'from gen import use_a, pick\n'
+            '\n'
+            'def main():\n'
+            '    print(use_a())\n'
+            '    print(pick[Int](5))\n'
+        ),
+    }
+    with tempfile.TemporaryDirectory() as td:
+        rc, stdout = _build_and_run(pkg, 'main.mojo', td)
+    ok = (rc == 0 and stdout == '11\n6\n'
+          and 'unavailable in compiled mode' not in stdout)
+    if not ok:
+        print(f"  ✗ same_module_call_to_generic_with_default_binds_instantiation: "
+              f"rc={rc} stdout={stdout!r}")
+    return ok
+
+
 CASES = [
     test_nested_def_is_not_a_module_level_fn_export,
     test_set_ctor_walks_boxed_global_container,
@@ -1584,6 +1702,8 @@ CASES = [
     test_builtin_open_is_not_ambiguous_from_transitive_siblings,
     test_unannotated_param_with_disagreeing_call_sites,
     test_failed_import_attempt_does_not_poison_later_spelling,
+    test_imported_function_trailing_default_argument_is_padded,
+    test_same_module_call_to_generic_with_default_binds_instantiation,
 ]
 
 

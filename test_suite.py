@@ -1000,7 +1000,7 @@ def test_every_job_over_the_debt_line_says_why():
     in `needs_memwhy`: a job MEASURED above 4 GB (`native-dumpfull` at 31.3),
     and a job handed a class above the default with nothing measured behind it
     (`prooflib`, the A/B sweep). Either way the reason goes in the registry next
-    to the number and points at `bugs/PERF_memory_over_4gb_is_a_bug.md`, which
+    to the number and points at `doc/POLICY_memory_over_4gb.md`, which
     is where the next step for each one is written down.
     """
     over = {n: s for n, s in sorted(suite.REGISTRY.items())
@@ -1210,7 +1210,6 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     check('expect count: the counts the registry states are the ones the '
           'reader sees',
           stated == {'async-void-return': 3,
-                     'coro-detached-async': 2,
     # bugs4-10's entry, MINUS the two it still listed and master has since
     # dropped: `formal-external-call` and `formal-module-attr` no longer carry
     # an `expect=` (both markers were removed on 2026-10-02, once the failures
@@ -1275,7 +1274,7 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     # `formal-x86-64-parity` registration was likewise not taken in the
     # 2026-10-12 merge, and master's `formal-x86-parity` is out of this census
     # too, since 4ceb7603 removed its marker (see above).
-                     'coro-future-await': 17,
+                     'coro-future-await': 2,
     # `gimple-async-runner` is a TENTH drop, and the one this fix landed:
     # the 2026-10-28 gate ran it red with 36 of 38 cases failing "expected
     # a non-empty generated .cpp" — the §5.5 cutover's default stack-switch

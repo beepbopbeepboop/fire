@@ -88,7 +88,7 @@ def _param_names_stripped(params: list) -> list:
     LOOP, not a comprehension: a comprehension's target unpack over a
     `list[tuple[str, str]]` boxes both slots to int64_t self-hosted (see
     `_params_have_vararg`'s sibling note and
-    bugs/CODEGEN_selfhost_actual_types_identifier_field_key.md). Shared
+    identifier-field-key identity). Shared
     here instead of re-deriving the loop at each call site."""
     out = []
     for pn, _pt in params or []:

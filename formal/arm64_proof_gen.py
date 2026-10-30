@@ -8048,7 +8048,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     # So the record is NOT the cost, and neither is the file's size or Lean's
     # ceiling: with `maxMemory` lifted the same file crosses 8 GB of RSS and is
     # killed (measured), which is a rejection turned into the memory debt
-    # `bugs/PERF_memory_over_4gb_is_a_bug.md` is about.  `(x - a) - b` and
+    # `doc/POLICY_memory_over_4gb.md` is about.  `(x - a) - b` and
     # `x - (a + b)` are the SAME `Nat` value (`Nat.sub` truncates, so both are
     # `max 0 (x - a - b)`), which is why this is a change to what is emitted and
     # not to what it means: each site's statement is unchanged up to `omega`,

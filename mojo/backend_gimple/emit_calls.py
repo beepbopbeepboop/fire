@@ -1561,7 +1561,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # ordinary call path and emitted a bare call to a symbol nothing
         # defines; `elaborate_generic_struct_inferred` recovers the type args
         # from the `__init__` annotations. See
-        # bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md.
+        # bugs/imported-generic-elaboration-defect.
         res = gen._elaborate_generic_struct_call(node)
         if res is not None:
             return res
@@ -3703,7 +3703,7 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         return 'int64_t', gen._new_val(
             'int64_t', f'mojo_list_get_int ({_tupl}, {_i1})')
     _LEN_FNS = {
-        'MojoStr *':  f'mojo_str_len ({av})',
+        'MojoStr *':  f'mojo_str_codepoint_len ({av}->data)',
         'MojoBytes *': f'mojo_bytes_len ({av})',
         'MojoMemoryView *': f'mojo_memoryview_len ({av})',
         'MojoList *': f'mojo_list_len ({av})',
@@ -3741,7 +3741,7 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 and not getattr(_lit, 'is_bytes', False)):
             _cp = len(gimple_ctypes.decode_c_escapes(_lit.value))
             return 'int64_t', gen._new_val('int64_t', str(_cp))
-        _len_t = gen._call_expr('int64_t', 'mojo_strlen', [('char *', av)])
+        _len_t = gen._call_expr('int64_t', 'mojo_str_codepoint_len', [('char *', av)])
         if gen._is_fresh_container_operand(node.args[0], av):
             gen._free_fresh_container(av, at)
         return 'int64_t', _len_t
@@ -6969,6 +6969,11 @@ def _lower_LambdaExpr(gen, node) -> tuple:
         # NOT in `_funcptr_builtins_needed`: the bare static function-pointer
         # form has the wrong signature for this shape, same as the env case.
         _vft = gen._new_val('void *', f'(void *){_vf}')
+        # The same return-type record the static and closing arms make just
+        # below: the variadic value is a different carrier, not a different
+        # callee, so a call through it must narrow its box back the same way
+        # (`e = lambda *a: False; print(e())` printed `0`).
+        gen._callable_ret_types[_vft] = ret_type
         gen._func_value_names[_vft] = '<lambda>'
         return 'void *', _vft
 
@@ -8216,6 +8221,8 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
         elif len(arg_pairs) < 2:       arg_pairs.append(('int', '0'))
         if 'filename' in kwarg_dict:   arg_pairs.append(kwarg_dict['filename'])
         elif len(arg_pairs) < 3:       arg_pairs.append(('char *', '0'))
+        if 'auto_gpu' in kwarg_dict:   arg_pairs.append(kwarg_dict['auto_gpu'])
+        elif len(arg_pairs) < 4:       arg_pairs.append(('int', '1'))
     if fname_raw == 'interpret_and_execute':
         if 'filename' in kwarg_dict:   arg_pairs.append(kwarg_dict['filename'])
         elif len(arg_pairs) < 2:       arg_pairs.append(('int', '0'))
@@ -8388,6 +8395,11 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
         scaled = gen._new_val('double', f'{xd} * {p}')
         r = gen._new_val('double', f'round ({scaled})')
         return 'double', gen._new_val('double', f'{r} / {p}')
+
+    # A double bound for a parameter whose call sites also passed integers is
+    # a box, not its bits (see `_box_float_call_args`). After the padding, so
+    # position `i` is parameter `i`, and before the emission below.
+    arg_pairs = ginf._box_float_call_args(gen, fname_raw, arg_pairs)
 
     # surplus pairs here — each dropped arg's lower_expr already ran while
     # building arg_pairs, so its side effects still happen exactly once,

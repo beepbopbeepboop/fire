@@ -5701,7 +5701,7 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
     else:
         cstr_ov = ov
     if method == '__len__':
-        return 'int64_t', gen._new_val('int64_t', f'mojo_strlen ({cstr_ov})')
+        return 'int64_t', gen._new_val('int64_t', f'mojo_str_codepoint_len ({cstr_ov})')
     if method == 'hex':
         # `str` has NO `hex` in Python — `'abc'.hex()` is an AttributeError.
         # This compiler had a `mojo_hex` for it (an INTEGER formatter, used

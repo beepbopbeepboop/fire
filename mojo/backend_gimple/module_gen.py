@@ -64,6 +64,7 @@ import mojo.middle.coro as gimple_gen_coro
 # `emit_funcs._struct_method_qualifier`'s function-local
 # `from mojo.middle.module_shared import module_qualifier`.
 from mojo.middle.exprtypes import _walk_ast, _walk_ast_invalidate, expr_provably_str as _gmi_expr_provably_str
+from mojo.middle.exprtypes import _gmi_nested_struct_defs
 import gimple_codegen
 import mojo.backend_gimple.emit_funcs as _ggf_dup
 from mojo.middle.closures import discover_closures, closure_lifted_name
@@ -72,6 +73,7 @@ import mojo.middle.offload as _gmi_offload
 import mojo.backend_gimple.device_glue as _gmi_device_glue
 import mojo.backend_gimple.elab_intu as _elab_intu
 import mojo.backend_gimple.emit_calls as _gmi_emit_calls
+import mojo.backend_gimple.cpp_async as _gca
 import mojo.backend_gimple.emit_metal as _gmi_emit_metal
 import mojo.middle.funcs_shared as funcs_shared
 from mojo.middle.funcs_shared import param_default_pairs
@@ -2847,87 +2849,6 @@ def _gmi_has_unresolved_base(_struct_bases_map: dict, _all_struct_names: set,
     return result
 
 
-# The statement-lists a `class` statement can be nested inside. A tuple of
-# names, not a dict of attribute name -> is-a-list: the walk has to try EVERY
-# slot on every node type (only the statement types that carry one of them
-# actually have it, and `getattr(..., None)` answers the rest), so the test is
-# "does this attribute hold a statement list", not "is this node a kind that
-# does". Written out rather than reusing the shared `_walk_ast`, for the
-# reason `_gmi_collect_self_assigns`'s own nested-def descent documents:
-# `_walk_ast` does not reliably recurse into a nested `StructDef`/`FunctionDef`
-# self-hosted (the node is misclassified as a scalar leaf), so a walker built
-# on it would find nested classes in the CPython shim and miss them under
-# `mojoc`. Every consumer of "is there a class declared in here" has to be
-# written out, so it is written out once here.
-_NESTED_CLASS_BODY_SLOTS = (
-    'body', 'then_body', 'else_body', 'finally_body', 'items',
-)
-
-
-def _gmi_nested_struct_defs(body, enclosing, out: list, top: bool = False) -> None:
-    """Every `StructDef` written INSIDE `body`, in source order, as
-    `[node, enclosing_key]` PAIRS rather than 2-tuples.
-
-    The pairs are index-addressed by the one caller for the reason the rest of
-    this file writes index loops instead of `zip()`: the self-hosted backend
-    has no `zip()` lowering, and a 2-tuple unpack in a `for` header boxes both
-    slots to `int64_t` — which here would box the `StructDef` POINTER (losing
-    the node) and the string (losing the name). A list element read by index
-    keeps each slot's own type.
-
-    Recursive over the statement-lists a class can hide in: a plain function
-    body, an `if`/`else`/`while`/`for`/`try`/`with`/`match` body, and a nested
-    `def` or `class` body. `enclosing` is the `current_func_name`-shaped key of
-    the innermost enclosing function — which is exactly the value
-    `current_func_name` holds while that function's body is lowered, so the
-    rename map the caller builds is keyed the same way the constructor call
-    site reads it. `top` is True only for the module-level statement list,
-    whose classes are already module scope and must not be collected again.
-    """
-    for _nc in (body or []):
-        if isinstance(_nc, StructDef):
-            if not top:
-                out.append([_nc, enclosing])
-            # A struct METHOD's enclosing key is `current_func_name`, which the
-            # method emitter sets to `<struct>_<method>` — the class's own name
-            # with no enclosing-function prefix (`closures.discover_closures`
-            # composes it the same way).
-            _cname = _as_str(_nc.name)
-            for _ncm in (_nc.methods or []):
-                if isinstance(_ncm, FunctionDef):
-                    _gmi_nested_struct_defs(
-                        _ncm.body, _cname + '_' + _as_str(_ncm.name), out)
-            continue
-        if isinstance(_nc, FunctionDef):
-            # A nested `def` is LIFTED as `<outer>_<name>`, and `current_func_name`
-            # is the lifted name while its body is lowered — so the key
-            # composes rather than replacing. `closures.discover_closures`'s
-            # `lifted = f"{outer_name}_{inner.name}"` is the other half of
-            # that fact.
-            _gmi_nested_struct_defs(
-                _nc.body,
-                enclosing + '_' + _as_str(_nc.name) if enclosing else _as_str(_nc.name),
-                out)
-            continue
-        if isinstance(_nc, IfStmt):
-            _gmi_nested_struct_defs(_nc.then_body, enclosing, out)
-            # `elifs` is a list of (condition, body) PAIRS, so the body is an
-            # indexed slot read and not another statement list — the same
-            # shape `_gmi_collect_self_assigns` walks.
-            for _nce in range(len(_nc.elifs or [])):
-                _gmi_nested_struct_defs(_nc.elifs[_nce][1], enclosing, out)
-            _gmi_nested_struct_defs(_nc.else_body, enclosing, out)
-            continue
-        if isinstance(_nc, MatchStmt):
-            for _ncmc in (_nc.cases or []):
-                _gmi_nested_struct_defs(
-                    getattr(_ncmc, 'body', None), enclosing, out)
-            continue
-        for _slot in _NESTED_CLASS_BODY_SLOTS:
-            _gmi_nested_struct_defs(
-                getattr(_nc, _slot, None), enclosing, out)
-
-
 def _gmi_target_leaf_names(target, out: set) -> None:
     """Add every NAME a binding target introduces to `out`. Handles the three
     shapes a target has: a bare `IdentExpr`, a `TupleExpr`/`ListExpr` of them
@@ -3156,6 +3077,68 @@ def _gmi_hoist_nested_structs(self, stmts: list) -> list:
 
 
 
+def _gmi_refuse_nested_class_enclosing_reads(stmts: list) -> None:
+    """Refuse a class declared inside a function body when one of its methods
+    reads a name that belongs to that function's scope: a parameter, or a name
+    the function binds.
+
+    The hoist lifts such a class to module scope (`_gmi_hoist_nested_structs`),
+    and the lifted method is an ordinary module-level C function with no
+    environment threaded through from the enclosing frame. A read of an
+    enclosing local there falls through `emit_exprs`' unknown-identifier arm and
+    answers `(int64_t)0` with exit 0 and no diagnostic: `functools.cmp_to_key`'s
+    comparator is the real-world shape. Threading the environment is the full
+    fix, tracked in bugs/CODEGEN_nested_class_method_cannot_reach_an_enclosing_local.md.
+    Until it lands this stops the build and names the read, instead of answering
+    0.
+
+    Only the method's free reads count: its own parameters, its own bindings and
+    `self` are its scope, and a module-level name it reads is not refused. The
+    enclosing scope is over-approximated the way `_gmi_local_binding_names` is
+    (it includes bindings inside nested defs), so a name bound only in a nested
+    def can be refused. That is a loud refusal of a read that was already wrong,
+    never a silent change of a correct answer.
+    """
+    _encl_fns: list = []
+    for _rf_i in range(len(stmts or [])):
+        _rf = stmts[_rf_i]
+        if isinstance(_rf, FunctionDef):
+            _encl_fns.append(_rf)
+        elif isinstance(_rf, StructDef):
+            for _rfm in (_rf.methods or []):
+                if isinstance(_rfm, FunctionDef):
+                    _encl_fns.append(_rfm)
+    for _ef_i in range(len(_encl_fns)):
+        _ef = _encl_fns[_ef_i]
+        _ef_bound: set = set()
+        for _efp in range(len(_ef.params or [])):
+            _gmi_target_leaf_names(_ef.params[_efp][0], _ef_bound)
+        _gmi_local_binding_names(_ef.body, _ef_bound)
+        _ef_classes: list = []
+        _gmi_nested_struct_defs(_ef.body, '', _ef_classes, False)
+        for _ec_i in range(len(_ef_classes)):
+            _ec = _ef_classes[_ec_i][0]
+            for _ecm in (_ec.methods or []):
+                if not isinstance(_ecm, FunctionDef):
+                    continue
+                _ecm_own: set = set()
+                _ecm_own.add('self')
+                for _ecp in range(len(_ecm.params or [])):
+                    _gmi_target_leaf_names(_ecm.params[_ecp][0], _ecm_own)
+                _gmi_local_binding_names(_ecm.body, _ecm_own)
+                for _er in _used_idents_node(_ecm.body):
+                    _ern = _as_str(_er)
+                    if _ern in _ef_bound and _ern not in _ecm_own:
+                        raise ValueError(
+                            f"method `{_as_str(_ecm.name)}` of class "
+                            f"`{_as_str(_ec.name)}` reads `{_ern}`, a parameter "
+                            f"or local of `{_as_str(_ef.name)}`, which declares "
+                            f"the class; a class declared inside a function "
+                            f"cannot reach its enclosing function's frame yet, "
+                            f"so the read would silently answer 0 (see "
+                            f"bugs/CODEGEN_nested_class_method_cannot_reach_an_enclosing_local.md)")
+
+
 def gen_module_impl(self, stmts):
 
     # A class written INSIDE a function body is a type declaration like any
@@ -3163,6 +3146,7 @@ def gen_module_impl(self, stmts):
     # it is hoisted there before anything consumes the list. See
     # `_gmi_hoist_nested_structs` for why it appends rather than moves.
     stmts = _gmi_hoist_nested_structs(self, stmts)
+    _gmi_refuse_nested_class_enclosing_reads(stmts)
 
     # ── GPU offload, Seam 1 ──────────────────────────────────────────────
     # Classified ONCE, at the very top, because three different places
@@ -3195,8 +3179,9 @@ def gen_module_impl(self, stmts):
     # them. The kernel alone is unreachable, which would make the whole
     # feature dead code that compiles and never runs.
     # The self-hosted binary has no auto-offload: `mojo/middle/offload.py` is
-    # not part of the closure `stage2/mojo` is built from (see
-    # bugs/CODEGEN_module_toplevel_undefined_in_selfhost.md), so
+    # not part of the closure `stage2/mojo` is built from (see the
+    # `CODEGEN_module_toplevel_undefined_in_selfhost` self-host link failure,
+    # fixed by renaming the colliding `_lens` locals in module_gen.py), so
     # `offload_module` there is a weak "unavailable in compiled mode" stub that
     # returns a bare 0 -- and the tuple-unpack below then walked that 0 and
     # raised "object is not iterable". `__file__` is the uniform `<bootstrap>`
@@ -3271,9 +3256,9 @@ def gen_module_impl(self, stmts):
             # kernel. A NamedTuple._replace keeps every other field, so this
             # cannot silently drop `writable` -- which is the field whose loss
             # would skip a copy-back and leave the output list untouched.
-            _lens = self._device_launch_lengths.get(_nm) or {}
-            if _lens:
-                _tys = [_a._replace(length=_lens[_a.name]) if _a.name in _lens
+            _len_dict = self._device_launch_lengths.get(_nm) or {}
+            if _len_dict:
+                _tys = [_a._replace(length=_len_dict[_a.name]) if _a.name in _len_dict
                         else _a for _a in _tys]
             # Fail here, at the classification pass, rather than at the first
             # call site: an un-marshallable kernel is a build error either
@@ -3366,6 +3351,9 @@ def gen_module_impl(self, stmts):
         if isinstance(n, FunctionDef):
             if n.is_generator: _generator_fns[id(n)] = n
             if n.is_async: _async_fns[id(n)] = n
+    # Nested generators that read an enclosing def's variables: refused by
+    # _gen_cpp_generator_unit (see cpp_async._nested_generator_captures).
+    self._nested_gen_captures = _gca._nested_generator_captures(stmts)
     # The node ids of every FunctionDef that is a STRUCT METHOD. The
     # free-function generator loops below iterate `_generator_fns` (built
     # from `_walk_ast`, so it necessarily includes methods) and must not
@@ -5358,7 +5346,7 @@ def gen_module_impl(self, stmts):
         _bsc_idx = 0
         if _bsc_new is not None:
             # Plain unpack loop, NOT a comprehension — see
-            # bugs/CODEGEN_selfhost_actual_types_identifier_field_key.md.
+            # identifier-field-key identity.
             _bsc_pnames = []
             for _bpn, _bpt in (_bsc_new.params or []):
                 _bsc_pnames.append(_as_str(_bpn))
@@ -5404,7 +5392,7 @@ def gen_module_impl(self, stmts):
                 # 21577).
                 _cs_key = _as_str(_s.name)
                 # Plain unpack loop, NOT a comprehension — see
-                # bugs/CODEGEN_selfhost_actual_types_identifier_field_key.md.
+                # identifier-field-key identity.
                 _cip_list = []
                 for _cipn, _cipt in (_init.params or []):
                     if _cipn != 'self' and not _cipn.startswith('*'):
@@ -6197,8 +6185,8 @@ def gen_module_impl(self, stmts):
                 # is the only place that knows which FIELD a parameter feeds,
                 # and re-walking the body here to recover that is exactly the
                 # quadratic-rescan cost
-                # bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_
-                # rescan.md is about. Rebuilt per method, so one method's
+                # the `_walk_ast` re-scan bug
+                # is about. Rebuilt per method, so one method's
                 # answer can never leak into the next one's fields.
                 self._gmi_bool_params = set()
                 _defaults = getattr(method, 'param_defaults', {}) or {}
@@ -7277,7 +7265,7 @@ def gen_module_impl(self, stmts):
                     if m.name == '__init__':
                         self._struct_has_init.add(s.name)
                         # Plain unpack loops, NOT comprehensions — see
-                        # bugs/CODEGEN_selfhost_actual_types_identifier_field_key.md.
+                        # identifier-field-key identity.
                         _sip_list = []
                         for _sipn, _sipt in m.params:
                             if _sipn != 'self':
@@ -7503,7 +7491,7 @@ def gen_module_impl(self, stmts):
                 # unambiguous for an index under both evaluators.
                 # Plain loops throughout this block, NOT comprehensions/
                 # genexprs with tuple-unpack targets — see
-                # bugs/CODEGEN_selfhost_actual_types_identifier_field_key.md.
+                # identifier-field-key identity.
                 _star_idx = -1
                 for _psi in range(len(_params_no_self)):
                     _psn = _params_no_self[_psi][0]
@@ -7709,6 +7697,17 @@ def gen_module_impl(self, stmts):
     # function name for the same reason `_container_param_kinds` is — a
     # forwarding chain's second hop is a DIFFERENT slot with the same shape.
     self._int64_may_hold_str: dict[str, set] = {}
+    # Function name -> the NAMES of its parameters left at the `int64_t`
+    # default whose call sites observed a `double` AND an integer. The float
+    # twin of the set above, with the same provenance rule: a slot is in it
+    # only because a float literal was really observed at one of its call
+    # sites. Its arguments are passed as a `MojoBox` (see
+    # `mojo_box_from_double`) rather than truncated to the integer their bits
+    # happen to name, and a print of the slot asks `mojo_repr_boxed`, which
+    # answers `2.5` for the box and `1` for the plain integer beside it.
+    # Excluded: a slot that also observed a `char *` or a container, which
+    # the string and pointer rows own.
+    self._int64_may_hold_float: dict[str, set] = {}
     # Functions whose RETURN VALUE may hold a string, by the same route (a
     # `return` of a name in `_int64_may_hold_str`, or of another such
     # function's result). The other half of the same property: the sets above
@@ -8594,6 +8593,12 @@ def gen_module_impl(self, stmts):
         _apply_gimplegen_frozen_sigs(self, _gg_sigs, False)
 
     self._param_elem_types: dict[str, dict[str, tuple]] = {}
+    # callee -> {pname} for a list-of-lists parameter whose call sites hold
+    # DIFFERENT inner element kinds (`show([[1, 2]])` and `show([['a']])`).
+    # `_param_elem_types` can only say "nested kind unknown" for those, and
+    # unknown reads as the int64_t default; this set says the inner lists
+    # are kind-mixed, which the element loop answers with the runtime route.
+    self._param_nested_mixed: dict[str, set] = {}
     self._coro_str_params: dict[str, set] = {}
     # The dict-VALUE twin of the table above: callee -> {pname -> the dict
     # value ctype every one of its call sites agrees on}. A dict is stored
@@ -8693,7 +8698,21 @@ def gen_module_impl(self, stmts):
         pname = _as_str(pname)
         d = self._param_elem_types.setdefault(callee, {})
         if pname in d and d[pname] != (e, ne):
-            d[pname] = (None, None)   # conflicting call sites → unknown
+            old_e, old_ne = d[pname]
+            if old_e == e and old_e is not None and e is not None and old_ne != ne:
+                # Same container element type but nested kind disagrees:
+                # keep the container (honest) and drop the nested kind (ambiguous).
+                # The nested kind is NOT then "int64_t, no evidence": the
+                # callee's inner lists genuinely hold different kinds per call
+                # site, so the param is recorded as KIND-MIXED. The loop over
+                # it routes each inner list through the runtime boxed reader
+                # (see `_nested_mixed_names`) instead of the int64_t default.
+                d[pname] = (e, None)
+                if e == 'MojoList *':
+                    _mx_inner = self._param_nested_mixed.setdefault(callee, set())
+                    _mx_inner.add(pname)
+            else:
+                d[pname] = (None, None)   # conflicting call sites → unknown
         else:
             d[pname] = (e, ne)
 
@@ -9139,9 +9158,24 @@ def gen_module_impl(self, stmts):
         calls = []
         self._calls_in_stmts(body, calls)
         for call in calls:
-            if not isinstance(call.func, IdentExpr):
+            callee = None
+            if isinstance(call.func, IdentExpr):
+                callee = _as_str(call.func.name)
+            elif isinstance(call.func, gimple_ctypes.MemberExpr) \
+                    and isinstance(call.func.obj, IdentExpr):
+                base_name = _as_str(call.func.obj.name)
+                # Module-qualified free function: base resolves to an imported
+                # module (see _global_to_module) and member is a known free
+                # function in the closure.
+                _g2m = getattr(self, '_global_to_module', None) or {}
+                _mod_of_base = _g2m.get(base_name)
+                if (_mod_of_base is not None or
+                        base_name in getattr(self, '_compiled_modules', ())):
+                    member_name = _as_str(call.func.member)
+                    if member_name in _free_params:
+                        callee = member_name
+            if callee is None:
                 continue
-            callee = _as_str(call.func.name)
             pnames = _free_params.get(callee)
             if not pnames:
                 continue
@@ -9722,6 +9756,14 @@ def gen_module_impl(self, stmts):
                 # actually left at `int64_t` is recorded.
                 if _has_cs and ann.get(pname) is None:
                     self._int64_may_hold_str.setdefault(callee, set()).add(pname)
+                # The float twin: a double was observed beside an integer, so
+                # the slot holds a float at one site and an int at another.
+                # `_has_cs` and a container (`void *`) are excluded here
+                # because those rows own the slot, and a box would hand the
+                # string or list a MojoBox where it expects its own pointer.
+                if (_has_dbl and len(types) > 1 and not _has_cs
+                        and 'void *' not in types and ann.get(pname) is None):
+                    self._int64_may_hold_float.setdefault(callee, set()).add(pname)
                 continue                         # not unanimous double / char *
             if ann.get(pname) is not None:
                 continue                         # respect explicit annotation
@@ -10160,6 +10202,21 @@ def gen_module_impl(self, stmts):
             # Not unanimous -> the parameter is genuinely polymorphic here and
             # nothing about it is provable; same refusal the scalar loop makes.
             if len(types) != 1:
+                # Non-unanimous receiver with all-struct-pointer observations is
+                # a polymorphic struct parameter — no single C signature exists.
+                # Refuse loudly rather than silently degrading to a boxed pointer.
+                _all_struct_ptr = True
+                for _t in types:
+                    _t_str = _gmi_as_str(_t)
+                    if not (_t_str.endswith(' *') and _t_str[:-2] in self.struct_field_types):
+                        _all_struct_ptr = False
+                        break
+                if _all_struct_ptr:
+                    _names = ', '.join(sorted(str(_t) for _t in types))
+                    raise RuntimeError(
+                        f"polymorphic struct parameter {pname!r} in {callee!r} "
+                        f"used as method receiver: types {_names} have no single "
+                        f"C signature; fall back to interpreted execution")
                 continue
             # `sorted(...)` + index, NOT `next(iter(...))`: iterating a
             # str-SET lowers to mojo_set_iter_val_int (0 for every string

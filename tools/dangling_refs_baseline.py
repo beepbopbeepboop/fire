@@ -147,7 +147,7 @@ BARE_BASELINE = {
     'bugs/FORMAL_the_host_import_wall_is_at_its_honest_floor.md': 1,
     'bugs/FORMAL_time_struct_shaped_answers.md': 1,
     'bugs/OPEN_WORK.md': 3,
-    'bugs/PERF_memory_over_4gb_is_a_bug.md': 1,
+    'doc/POLICY_memory_over_4gb.md': 1,
     'bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md': 7,
     'bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md': 4,
     'fire.py': 1,

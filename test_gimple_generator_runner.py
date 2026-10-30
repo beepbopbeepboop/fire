@@ -861,6 +861,25 @@ def main():
 """, "12\n")
 
 
+def _regression_read_table_callable_reader():
+    # Root-cause regression for bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md:
+    # `_get_reader` is a callable-valued parameter (default csv.reader); the
+    # loop `for row in _get_reader(lines, ...):` in `read_table` must be
+    # refused honestly (not silently wrong) until callable-local loop typing
+    # lands — this test captures the refusal so a future fix can prove it passes.
+    test_generator_refused(
+        "cpp_for_callable_param_read_table_like", """\
+def read_table(infile, header, *, sep='\\t',
+               _get_reader=__import__('csv').reader):
+    lines = infile.splitlines()
+    for row in _get_reader(lines, delimiter=sep or '\\t'):
+        yield row
+
+def main():
+    pass
+""", "callable-valued local/parameter '_get_reader(...)'")
+
+
 def _cpp_coroutine_builtin_module_constant():
     # A constant read off a module MARKER that is NEVER INLINED — `os` and
     # `signal` bind to an opaque marker with no compiled body in this TU, so
@@ -1149,6 +1168,56 @@ def main():
         print(v)
 main()
 """, "the static scan could not type at all")
+
+    # A parameter's ELEMENTS reach the yield through a for-loop target, not the
+    # parameter itself. The two call sites disagree (a str list and an int
+    # list), so `xs` is in `_CALLSITE_PARAM_CONFLICTS`; `for x in xs: yield x`
+    # yields `x`, which `_ambiguous_yielded_params` did not map back to `xs`,
+    # so the generator was NOT refused, the yield slot took the int64_t
+    # default, and the str printed as its heap address: `4297813824` where
+    # CPython prints `p`, exit 0. Measured before the fix. The honest outcome
+    # is a refusal.
+    test_generator_refused("generator_loop_target_over_conflicted_param_is_ambiguous", """\
+def gen(xs):
+    for x in xs:
+        yield x
+
+def main():
+    for v in gen(["p", "q"]):
+        print(v)
+    for w in gen([1, 2]):
+        print(w)
+main()
+""", "do not all pass the same statically-known type")
+
+    # The `enumerate` sibling, and the control that keeps the fix narrow: only
+    # the ELEMENT slot of `enumerate(xs)` aliases `xs`. Yielding the index
+    # never reads the list, so the same conflicted call sites must still
+    # compile, and must print exactly what CPython prints. Refusing this
+    # would be over-refusal of a correct program.
+    test_generator_matches_cpython("generator_enumerate_index_over_conflicted_param_still_compiles", """\
+def gen(xs):
+    for i, x in enumerate(xs):
+        yield i
+
+def main():
+    for v in gen(["p", "q"]):
+        print(v)
+    for w in gen([1, 2]):
+        print(w)
+main()
+""", """\
+def gen(xs):
+    for i, x in enumerate(xs):
+        yield i
+
+def main():
+    for v in gen(["p", "q"]):
+        print(v)
+    for w in gen([1, 2]):
+        print(w)
+main()
+""")
 
     # The CONTROL for both rows above, and the reason the fix is not "refuse
     # every generator with an unannotated parameter": the same generator
@@ -1509,6 +1578,68 @@ def main():
 
 main()
 """, "/r/a\n")
+
+    # A class defined INSIDE a generator body is hoisted to module scope, but
+    # its class-level attributes are seeded from module-level globals at
+    # allocation time, so one whose value names a local of the generator
+    # (`__version__ = version`, test_ensurepip.py's `fake_pip`) was never
+    # assigned: the stack-switch body lowered the `class` statement to a bare
+    # `/* TODO */` no-op and the attribute read stayed 0 at exit 0. The gate
+    # must refuse that shape honestly (the whole module then falls back to
+    # interpreting the source) rather than compile it.
+    test_generator_a3_ineligible("nested_class_local_attr_refused", """\
+def g(version=5):
+    class FakePip():
+        __version__ = version
+    pip = FakePip()
+    yield pip.__version__
+""", "g", "nested class 'FakePip'")
+    # ...and a LITERAL class attribute IS faithfully lowered (the allocator
+    # seeds `_classattr_FakePip____version__ = 7`), so the refusal above is
+    # about the captured local and not about nested classes in general.
+    test_generator_stdout("nested_class_literal_attr_compiles", """\
+def g():
+    class Tag():
+        __version__ = 7
+    t = Tag()
+    yield t.__version__
+
+def main():
+    for v in g():
+        print(v)
+""", "7\n")
+
+    # The two other halves of test_ensurepip.py's `fake_pip` shape, with a
+    # LITERAL class attribute so the captured-local refusal above does not
+    # fire: a no-`__init__` class constructed from inside a generator body,
+    # and that generator used as a `@contextmanager` in a `with`. Both
+    # already lower correctly; these pin that, so a later change to the
+    # generator-body constructor or the `with` branch cannot silently lose it.
+    test_generator_stdout("nested_class_noinit_ctor_in_generator_compiles", """\
+def g():
+    class FakePip():
+        __version__ = 7
+    p = FakePip()
+    yield p.__version__
+
+def main():
+    for v in g():
+        print(v)
+""", "7\n")
+    test_generator_stdout("nested_class_literal_attr_contextmanager_compiles", """\
+from contextlib import contextmanager
+
+@contextmanager
+def fake_pip():
+    class FakePip():
+        __version__ = 7
+    p = FakePip()
+    yield p.__version__
+
+def main():
+    with fake_pip() as v:
+        print(v)
+""", "7\n")
 
     # The eligibility gate replaced a blanket `kwonly params (v0)` refusal
     # with "is every keyword-only default faithfully lowerable?". These two
@@ -1903,6 +2034,38 @@ def main():
 """, "unpack call argument is not supported")
 
 
+def run_nested_generator_capture_tests():
+    # A generator defined INSIDE another def that reads one of that def's
+    # parameters or locals. The coroutine path has no capture model for a
+    # generator frame, so the body used to name the enclosing variable at
+    # file scope and g++ failed on the generated .cpp ("'name' was not
+    # declared in this scope"). Now an honest refusal naming the variables.
+    # The f-string case is the one that matters for c-analyzer's
+    # `build_section`: `f'{name}:'` reads `name` even though the parser keeps
+    # the f-string as one raw literal.
+    test_generator_refused("nested_generator_reads_enclosing_param_in_fstring_refused", """\
+def build_section(name: String, n: Int):
+    def render():
+        yield f'{name}:'
+        for i in range(n):
+            yield 'row'
+    return render
+
+
+def main():
+    render = build_section('x', 2)
+    for x in render():
+        print(x)
+""", "variable(s) n, name")
+    test_generator_refused("nested_generator_reads_enclosing_local_refused", """\
+def outer(n: Int):
+    total = n * 2
+    def g():
+        yield total
+    return g
+""", "variable(s) total")
+
+
 def run_tests():
     run_callable_param_tests()
     run_lambda_capture_tests()
@@ -1912,6 +2075,7 @@ def run_tests():
     run_next_method_tests()
     run_next_return_position_tests()
     run_module_global_generator_tests()
+    run_nested_generator_capture_tests()
     # Cluster E (bugs/CODEGEN_generator_function_Lib_ipaddress.md): a
     # generator method that CALLS the result of a `@property` getter
     # (`self._address_class(x)` -- `_address_class` is a @property returning
@@ -5606,6 +5770,52 @@ go()
     test_generator_stdout("generator_iterating_a_string_parameter_control", """\
 def gen():
     s = 'AB'
+    for it in s:
+        yield it
+
+def go():
+    for v in gen():
+        print(v)
+
+go()
+""", "A\nB\n")
+
+    # A local bound to a str METHOD CALL. `_yield_kind` had no arm for a
+    # method call on a string, so `s` got no kind, `for it in s` found no
+    # element kind, and `yield it` fell through to the int64_t slot: the
+    # consumer printed the char* as an integer address (a generator yielding
+    # an element of a str method call's result). The receiver
+    # is a literal here, then a str PARAMETER (its kind is only known through
+    # the env), then a chained call, which needs the inner call's kind.
+    test_generator_stdout("generator_iterating_a_str_method_call_local_yields_characters", """\
+def gen():
+    s = 'ab'.upper()
+    for it in s:
+        yield it
+
+def go():
+    for v in gen():
+        print(v)
+
+go()
+""", "A\nB\n")
+
+    test_generator_stdout("generator_iterating_a_str_method_on_a_parameter_yields_characters", """\
+def gen(t):
+    s = t.lower()
+    for it in s:
+        yield it
+
+def go():
+    for v in gen('XY'):
+        print(v)
+
+go()
+""", "x\ny\n")
+
+    test_generator_stdout("generator_iterating_a_chained_str_method_call_yields_characters", """\
+def gen():
+    s = 'a-b'.replace('-', '').upper()
     for it in s:
         yield it
 
