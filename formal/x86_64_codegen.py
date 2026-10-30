@@ -271,6 +271,25 @@ def _collect_var_names(f: F.FunctionDef) -> list:
         names = [n for n in names if n not in module_globals]
     seen = set(names)
 
+    # Loop-bound flags, one per name `model.loop_bound_flags` flags: a `for`
+    # whose range is a run-time fact binds its target only if it runs, so the
+    # image carries a word per such name — zero at entry, set by every store
+    # of the name, and branched on at a read that may be unbound. Backend-local
+    # like the loop temps: the name is not in the source, so it goes through
+    # the same append-only path rather than the bound-name walk. The ORDER is
+    # `sorted` because `_emit_function` derives the same name from the same
+    # call, and a name whose position depends on set iteration order would be
+    # a different local on the two reads of the same function. The arm64
+    # allocator appends the same names after its own locals, so the two
+    # architectures flag the same loops from the same shared reader.
+    flags = M.loop_bound_flags(f)
+    if flags:
+        for i, name in enumerate(sorted(flags)):
+            lb = f"_lb{i}"
+            if lb not in seen:
+                seen.add(lb)
+                names.append(lb)
+
     def walk(stmts, depth: int, acc: list) -> None:
         """Track the deepest loop nesting, whatever kind.
 
@@ -792,6 +811,29 @@ class X86_64Codegen:
         self._var_spills = {}
         self._spill_bytes = 0
         self._frame_bytes = 0
+        # `{name: "_lb{i}"}` — the loop-bound flag of each name
+        # `model.loop_bound_flags` flags in THIS function: the target of a
+        # `for` whose range is a run-time fact, read where it may be unbound.
+        # Zero at entry, set by every store of the name (the flag SETS are the
+        # stores, through `_store_var`), read as a `TEST`/`JZ` at a load whose
+        # position `_mub` says may be unbound. Empty unless the function has
+        # one; reset per function. The x86-64 twin of arm64's, reading the
+        # same shared model function, so the two flag the same loops.
+        self._lb_flags: dict = {}
+        # The flagged names whose flag may be ZERO at the point of emission:
+        # the "may be unbound" state the `JZ` check is gated on. One mutable
+        # set with save/restore + OR-at-join discipline, because a branch forks
+        # the paths and a store on one arm is not a store on the other.
+        # `_store_var` clears a name as it stores it, loops and if-arms save
+        # and restore around their bodies, and a join unions the arms. Reset
+        # per function.
+        self._mub: set = set()
+        # The one label every unbound check in the CURRENT function branches
+        # to (keyed on its per-definition label; None when the function has no
+        # flagged name). Set in `_emit_function`; the body's checks emit
+        # forward `JZ` references to it before the label is defined, the same
+        # forward reference every branch in this file makes.
+        self._lb_unbound_label: str = None
         # PCs of the conditional branches that test an `if`/`elif`/`while`/
         # ternary condition, so a later proof generator can tell an `if`'s own
         # branch from a short-circuit `and`/`or`'s (same reason, and the same
@@ -1240,6 +1282,29 @@ class X86_64Codegen:
     def _emit_function(self, f: F.FunctionDef, label: str = None) -> None:
         self._current_function = f.name
         self._cur_fn = f
+        # The loop-bound flags of this body, BEFORE any store or load can
+        # happen in it: the prologue's own `_store_var` calls (argument homes)
+        # run through the flag hook, and a flag table that is set later would
+        # miss a store of a flagged name that the prologue makes.
+        # `model.loop_bound_flags` is the one reader, shared with arm64's
+        # `_emit_function` and the allocator's `_collect_var_names`, so the
+        # name, the `_lb{i}` home and the check cannot disagree about which
+        # loops are flagged.
+        self._lb_flags = {name: f"_lb{i}"
+                          for i, name in enumerate(sorted(
+                              M.loop_bound_flags(f)))}
+        self._mub = set(self._lb_flags)
+        # The error label every check in this body branches to, keyed on the
+        # per-DEFINITION label: two overloads of one name are two bodies, and
+        # a shared `{name}_unbound` label would be a second binding the moment
+        # the second flagged body emitted it, which `Assembler.label` refuses
+        # — the same reason every control label in this file carries a
+        # per-site counter or a per-definition prefix.
+        if self._lb_flags:
+            _entry = label if label is not None else f"{f.name}__def1"
+            self._lb_unbound_label = f"{_entry}_unbound"
+        else:
+            self._lb_unbound_label = None
         # The by-reference RECEIVER locals and the statement-call ids, BEFORE the
         # allocation: `_allocation_split` reads `f._address_taken` to decide which
         # names get a register, and `_address_taken_for` asks
@@ -1621,8 +1686,29 @@ class X86_64Codegen:
             self.asm.emit(encode_mov_r64_r64(Reg.R11, ARG_REGS[sret_arg]))
             self._store_var(_SRET_LOCAL, Reg.R11)
 
+        # A loop-bound flag starts UNBOUND, the state the function entry has:
+        # nothing has stored the name yet, so the read after an empty range
+        # must take the error edge. Emitted after the frame is reserved,
+        # because a flag in a spill slot is addressed from the frame pointer,
+        # and after the argument stores above, which R11 moves through.
+        for _lb_name in self._lb_flags.values():
+            self._emit_mov_imm(Reg.R11, 0)
+            self._store_var(_lb_name, Reg.R11)
+
         for stmt in f.body:
             self._emit_stmt(stmt)
+
+        # The one place every unbound check branches to: the image has no way
+        # to mean "unbound", so the read takes an error exit rather than
+        # answering the caller's leftover — the same `TEST`/`JZ` → exit(1)
+        # shape the divide-by-zero guard emits, which is what keeps the proof
+        # generators' walk from meeting an instruction it has no step for. It
+        # sits after the body so the branch is forward everywhere, and before
+        # the fall-through epilogue so a body that falls off its end still
+        # reaches its own return.
+        if self._lb_flags:
+            self.asm.label(self._lb_unbound_label)
+            self._emit_call_exit(1)
 
         if not _always_returns(f.body):
             if self._recv_ref_receiver is not None:
@@ -1757,6 +1843,22 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         intercepted here, and not at the read sites, because every read of a
         field on this path already funnels through this one function — the
         same interception, and the same reason for it, as arm64's."""
+        # A loop-bound flag gates the read: `name` is a `for` target whose
+        # range is a run-time fact, the build-time state says the flag may be
+        # ZERO here, so ask at run time — load the flag, test it, branch on
+        # zero to the function's one unbound exit. The same `TEST`/`JZ` →
+        # `exit(1)` shape the divide-by-zero guard emits, recorded as a
+        # cond-branch for it. Every read of a local funnels through here,
+        # which is what makes this one branch and the flag SET (in
+        # `_store_var`) the whole discipline. A name not flagged in this body
+        # skips it; a flag home (`_lb{i}`) is never a key of `_lb_flags`, so
+        # the recursion terminates on the first step.
+        lb = self._lb_flags.get(name)
+        if lb is not None and name in self._mub:
+            self._load_var(lb, Reg.R11)
+            self.asm.emit(encode_test_r64_r64(Reg.R11, Reg.R11))
+            self._record_cond_branch()
+            self._emit_jcc(COND_E, self._lb_unbound_label)
         slot = self._frame_slots.get(name)
         if slot is not None:
             self._load_var(name.rsplit(".", 1)[0], Reg.R11)
@@ -2202,6 +2304,36 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         return M.module_slot_for(name, self._fn_local_names)
 
 
+    def _lb_note_store(self, name: str) -> None:
+        """The loop-bound flag of `name` goes 0 → 1 the moment `name` is
+        STORED, and only from here, so that a read can never take its `JZ`
+        error edge on a path that stored it: the flag and the store are two
+        halves of one binding, and the store is the half that always runs.
+
+        Every store of a local is one of the two home branches of
+        `_store_var` (a name bound in this body is a local by
+        `model.module_slot_for`'s rule, so the frame-slot and global branches
+        never see a flagged name), which is why the hook lives there rather
+        than at the assignment sites: a loop's `init:` store, a comprehension's
+        per-element store and a plain assignment all funnel through it, and a
+        store spelling added later is flagged without a second hook.
+
+        The build-time half — `self._mub` — is narrowed the same way, because
+        the state at the NEXT read is what decides whether that read asks. A
+        register home is one materializer in place; a spill home parks 1 in
+        R11 and stores it, R11 being the address scratch this backend
+        reserves for exactly such writes. `lb` is never a key of
+        `_lb_flags`, so the recursive store does not re-enter the hook."""
+        lb = self._lb_flags.get(name)
+        if lb is None:
+            return
+        self._mub.discard(name)
+        if lb in self._var_regs:
+            self._emit_mov_imm(self._var_regs[lb], 1)
+        else:
+            self._emit_mov_imm(Reg.R11, 1)
+            self._store_var(lb, Reg.R11)
+
     def _store_var(self, name: str, src: Reg) -> None:
         """local `name` = src. Register homes MOV; spill slots store to
         [RBP + off]. A frame slot is a store into the receiver's frame, and
@@ -2241,10 +2373,12 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             r = self._var_regs[name]
             if src != r:
                 self.asm.emit(encode_mov_r64_r64(r, src))
+            self._lb_note_store(name)
             return
         if name in self._var_spills:
             self.asm.emit(encode_mov_rm64_r64(Reg.RBP, self._spill_off(name),
                                               src))
+            self._lb_note_store(name)
             return
         raise CodegenError(self._no_home(name))
 
@@ -3446,21 +3580,46 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         has_else = stmt.else_body is not None or bool(stmt.elifs)
         else_label = f"{fn}_else_{if_id}"
 
+        # The flagged names that may be unbound BEFORE this if: every arm
+        # forks from that state, so each arm — condition first, because an
+        # elif's condition runs in the pre-if state, not in the previous
+        # arm's body state — is walked on a copy of it, and the join after the
+        # if unions the arms' end states. With no else, the fall-through is a
+        # third arm that ends where it started. A store one arm made is not a
+        # store the other arm made, which is the whole reason the sets fork.
+        # The x86-64 twin of arm64's, over the same `self._mub` state.
+        if_base = set(self._mub) if self._lb_flags else None
+        arm_ends = []
         for i, (cond, body) in enumerate(tests):
             self.asm.label(f"{fn}_if{if_id}_alt_{i}")
+            if if_base is not None:
+                self._mub = set(if_base)
             self._emit_truthy_word(cond)
             fail = f"{fn}_if{if_id}_alt_{i + 1}" if i + 1 < len(tests) else (
                 else_label if has_else else end_label)
             self._emit_branch_if_false(fail)
             for s in body:
                 self._emit_stmt(s)
+            if if_base is not None:
+                arm_ends.append(set(self._mub))
             if i < len(tests) - 1 or stmt.else_body is not None:
                 self._emit_jmp(end_label)
 
         if has_else:
             self.asm.label(else_label)
+            if if_base is not None:
+                self._mub = set(if_base)
             for s in (stmt.else_body or []):
                 self._emit_stmt(s)
+            if if_base is not None:
+                arm_ends.append(set(self._mub))
+        elif if_base is not None:
+            arm_ends.append(set(if_base))
+        if if_base is not None:
+            joined = set()
+            for e in arm_ends:
+                joined |= e
+            self._mub = joined
         self.asm.label(end_label)
 
     def _emit_loop(self, cond, body, else_body, for_info) -> None:
@@ -3556,6 +3715,20 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 self._store_var(target, Reg.RAX)
             self._for_depth += 1
 
+        # The flagged names that may be unbound BEFORE the loop: the exit path
+        # — and the join after it — arrives where the body never ran, so the
+        # state there is the pre-loop one, and the restore below is what hands
+        # it to the else body and to the code after the loop. Taken AFTER the
+        # prologue store above because with `bind_after_test` false that store
+        # runs on every path, empty range included: the target is bound there
+        # wherever the loop goes, and the flag its hook sets says so, so a
+        # check after such a loop would be dead code in the image. The body
+        # needs no save of its own: the target's `init:` store (or the
+        # prologue's) has already narrowed it out, and a name the body stores
+        # is a name the flag SETS, through the same hook. The x86-64 twin of
+        # arm64's, over the same `self._mub` state.
+        saved_mub = set(self._mub) if self._lb_flags else None
+
         self._loops.append({"start": start_label, "step": step_label,
                             "break": end_label,
                             "fin_depth": len(self._pending_finally)})
@@ -3593,6 +3766,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 self._emit_jmp(start_label)
 
             self.asm.label(false_label)
+            if saved_mub is not None:
+                self._mub = saved_mub
             for s in (else_body or []):
                 self._emit_stmt(s)
             self.asm.label(end_label)
@@ -7621,6 +7796,12 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._emit_mov_imm(Reg.RAX, 0)
             self._store_var(fi_name, Reg.RAX)
 
+            # The `_emit_loop` twin: the body runs only past the count test,
+            # where the per-element store has already bound the target (and
+            # set its flag through the same hook), so the pre-loop state is
+            # the one the false path and the join after the loop carry.
+            saved_mub = set(self._mub) if self._lb_flags else None
+
             self._loops.append({"start": start_label, "step": step_label,
                                 "break": end_label,
                                 "fin_depth": len(self._pending_finally)})
@@ -7682,6 +7863,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 self._emit_jmp(start_label)
 
                 self.asm.label(false_label)
+                if saved_mub is not None:
+                    self._mub = saved_mub
                 for s in (else_body or []):
                     self._emit_stmt(s)
                 self.asm.label(end_label)
