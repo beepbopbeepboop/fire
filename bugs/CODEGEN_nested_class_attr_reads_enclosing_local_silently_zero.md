@@ -1,27 +1,6 @@
 # CODEGEN: a class-level attribute that reads an enclosing local is silently 0
 
-## Status (2026-10-29, round 8: the catch-in-another-function residual is fixed; the rest remain)
-
-Round 8 (this commit series):
-
-- **Instance reads of class attributes were broken on master** (regressed by
-  3accbab0f, the instance-write fix). That fix made every instance read go to
-  dynamic storage only, so `class A: x = 9; a = A(); a.x` raised
-  AttributeError, and so did every cell-backed read (`a.__version__`). Now
-  `emit_methods._cattr_instance_dyn_read` probes dynamic storage under the
-  `_mojo_getattr_nothrow` protocol (the 3-arg getattr's), and only a miss falls
-  back to the instance's own cell (`_cattr_instance_read`). An instance write
-  still shadows the class attribute. Test:
-  `gimple_class_attr_instance_read_fallback` (9 4 9).
-- **Residual 1 closed (unwind-time restore).** `_cattr_restore_begin` pushes
-  one unwind record per saved cell at body entry
-  (`mojo_cleanup_push_cattr`, fire_runtime.c's `MOJO_CLEANUP_CATTR`); `mojo_raise`'s
-  unwind writes the saved value back, whichever function catches. Every normal
-  exit (`return`, the reachable fall-through end) pops the records through
-  `_cattr_leave`. Test: `gimple_nested_class_attr_unwind_other_function`
-  (`caught 5`; was `caught 6` before the change).
-
-Round 7 status (2026-10-29: the silent cases are fixed; the residuals below remain)
+## Status (2026-10-29, round 7: the silent cases are fixed; two residuals remain)
 
 The original symptom: a `class` statement inside a function body whose
 non-literal class attribute names a local (`__version__ = version`) lowered
@@ -68,8 +47,18 @@ all PASS; each of the three new ones fails with its fix disabled):
 
 Still open:
 
-1. **CLOSED in round 8** (was: a catch in a different function left the cell
-   wrong; see the round 8 entry above).
+1. **A catch in a DIFFERENT function still leaves the cell wrong** (SILENT,
+   reproduced, `.tmp/resid.py` shape). `x(v, d)` defines `T`, and calls
+   `h(v + 1, d - 1)`, which calls `x(v, d)` inside a `try`. The inner `x`
+   raises, `h` catches it, and `x` then reads `T.__version__`. `h` restores
+   only its own cells (it defines none), so `x` reads the inner cell: `6`,
+   CPython `5`. Closing it needs the restore to run during UNWINDING, not at a
+   catch site. Next step: a new cleanup-stack kind in `runtime/fire_runtime.c`
+   (`_mojo_cleanup_push` with a saved-value record that writes back the global
+   on pop and on longjmp unwind), pushed at the save in
+   `emit_methods._cattr_restore_begin` and popped where `emit_return_frees`
+   and the fall-through frees run. That is a runtime and ownership-machinery
+   change, so it is deliberately not done in this round.
 2. **Same name in two functions.** Two classes both called `T`, in different
    functions, make class-name attribute reads resolve to the first one. That
    is separate from the cell work and reproduces with literal attributes

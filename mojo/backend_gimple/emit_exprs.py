@@ -2607,27 +2607,20 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
                                      {'Self': node.obj, struct_name: node.obj})
         return gen.lower_expr(val_ast)
     # Class-level attribute (not an instance field) — redirect to global variable.
-    # Instance reads must consult the instance first (dynamic storage / field
-    # lookup) so an instance write shadows the class attribute; only bare
-    # class-name reads go to the synthesized backing global / per-execution
-    # cell.
+    # A bare class-name read goes to the synthesized backing global / the
+    # current per-execution cell; an instance read goes through the instance
+    # first (its dynamic storage shadows the class attribute), see
+    # `_cattr_instance_read`.
     class_attrs = gen._class_attrs
-    if (struct_name in class_attrs and node.member in class_attrs[struct_name]
-            and isinstance(node.obj, gimple_ctypes.IdentExpr)
-            and node.obj.name == struct_name):
+    if struct_name in class_attrs and node.member in class_attrs[struct_name]:
         gname = class_attrs[struct_name][node.member]
         # Use the actual declared type of the global (stored in _global_var_types)
         gtype = gen._global_var_types.get(gname, 'int64_t')
-        # Bare class-name read goes to the current per-execution cell.
-        t = gmp._cattr_read(gen, gname, gtype)
+        if isinstance(node.obj, gimple_ctypes.IdentExpr) and node.obj.name == struct_name:
+            t = gmp._cattr_read(gen, gname, gtype)
+        else:
+            t = gmp._cattr_instance_read(gen, ov, ot, node.member, gname, gtype)
         return gtype, t
-    elif (struct_name in class_attrs and node.member in class_attrs[struct_name]
-            and ot.endswith(' *')):
-        # Instance read: dynamic storage first (an instance write shadows
-        # the class attribute), then the cell this instance was built under.
-        gname = class_attrs[struct_name][node.member]
-        gtype = gen._global_var_types.get(gname, 'int64_t')
-        return gmp._cattr_instance_dyn_read(gen, ov, ot, node.member, gname, gtype)
     elif struct_name in gen.struct_field_types and ot.endswith(' *'):
         # The struct defines its own `__getattr__` (compiled body ⇒ bare
         # `{Struct}___getattr__` key in func_return_types, or an overload
