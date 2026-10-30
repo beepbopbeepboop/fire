@@ -304,3 +304,81 @@ block global through the existing global emitter; (3) `_cls_block` seed in
 sites. Land (1)-(5) together, because the four-call program needs all of
 them, and run `test_gimple_runner.py` for the three nested-class tests
 (`5\n7\n`, `3\n`, and the four-call case once re-added).
+
+## Status (2026-10-29, planning round 4: sites re-read, macro shortcut and its risk)
+
+No code change this round. Re-read the sites round 3 named and found three
+things that change the plan. Nothing here is measured on a run; each is a
+reading of the code, with the check that settles it stated.
+
+1. **Where the class-attribute globals are declared.** `module_gen.py`
+   5853-5956 registers `_class_attrs[C][A] = _classattr_C__A` and sets
+   `_global_var_types[gname]`. The C declarations come from the global
+   emitter at `module_gen.py` ~14089-14350 (`_gscan_declare_global`, which
+   also calls `_gmi_declare_table_global` at 2731). `global_decls` is
+   "kept for compatibility, but won't be emitted" (13888), so the EMITTED
+   declarations are produced elsewhere. Before any block-backed design,
+   confirm which emitter writes `int64_t _classattr_Tag____version__;` (the
+   measured C has it as a plain file-scope global) and whether a
+   class-attr gname can ever be emitted as a member of a `_<mod>_toplev`
+   struct (`_global_to_module` at 12373-12479 is Phase 1.7 and is not
+   known to cover `_classattr_` names). Check with
+   `gimple_codegen.compile_to_gimple(src)` on the four-call program and
+   grep the output for `_toplev`.
+
+2. **Initialisation of the globals.** `_mojo_classattr_init` is emitted by
+   `emit_funcs.py` 3094 / 3334-3350 and runs at program start. It writes
+   every class-attr global, including the no-initializer container
+   defaults that `_class_field_decl` registers (`module_gen.py` ~5884). A
+   block-backed global must not be written there, or the write dereferences
+   a NULL block. The alloc seed at `module_gen.py` ~15090-15105
+   (`attr_inits`, `_p->F = _gname`) also reads the global. So for a
+   function-hoisted class, both sites must skip (or redirect) the block-backed
+   names, and the container default must be produced by the class statement
+   (`_gen_stmt_StructDef`, `emit_stmts.py` 3138), not dropped.
+
+3. **A shortcut, and why it is not yet safe.** Every text site
+   (`emit_exprs.py` 1473, 1824; `emit_methods.py` `_resolve_class_attr_write_target`
+   ~183-240; `emit_stmts.py` write sites) returns the gname as C TEXT. So one
+   object-like macro per fn-scoped attribute, `#define _classattr_Tag____version__
+   (*(int64_t *)_cattrs_Tag_cur[0])`, would route every class-name read,
+   class-name write and `cls.` read to the current block with no edits at
+   those sites. It is UNSAFE until fact 1 is checked: if any emitter writes the
+   gname as a struct member (`_toplev.<gname>`), the macro expands inside a
+   member access and does not compile. Only the instance read (`emit_exprs.py`
+   2602) must change: it must read the instance's own block, through the
+   hidden `_cls_block` field, not the current one, or the four-call answer
+   stays `7 7 9 9`.
+
+Revised next round, in order:
+
+(a) Check fact 1 (the `_toplev` question) and write the answer here.
+(b) Add the fn-scoped set: `_gmi_hoist_nested_structs` (`module_gen.py`
+    ~3036-3090) records each `renamed_to` into `self._fn_scoped_structs`.
+    Infrastructure only; pinned by nothing yet.
+(c) Block: for each fn-scoped class with a non-literal attribute, emit
+    `void *_cattrs_<C>_cur[N];` (the current block array, slot i per attribute
+    in `_class_attrs` order) and a `#define` per attribute as in fact 3 (or,
+    if fact 1 says the gname is ever a member, the block-struct form in round
+    3's plan).
+(d) `_gen_stmt_StructDef` (`emit_stmts.py` 3138): calloc each slot's cell
+    with `sizeof(<attr ctype>)` and store the value into the new block, and
+    set `_cattrs_<C>_cur` to that block. This is also where the container
+    default goes.
+(e) Skip the fn-scoped gnames in `_mojo_classattr_init` (emit_funcs 3094/3350)
+    and in the alloc seed (`module_gen.py` ~15090-15105); set the instance's
+    `_cls_block` in `_alloc_<C>` (`attr_inits`), adding `void * _cls_block;`
+    to the struct for fn-scoped classes that have a non-literal attribute.
+(f) Instance read (`emit_exprs.py` 2602): for a fn-scoped class read
+    `((void **)obj->_cls_block)[i]` cast to the attribute's type.
+
+Tests, each landed with its step and green when it lands:
+- `test_gimple_runner.py` four-call program (see round 3), expected
+  `5\n7\n9\n5\n`: red now, lands with (f).
+- `test_nested_class_attr_reads_enclosing_local_regression` (`5\n7\n`) and
+  `test_nested_class_attr_rebind_after_construction_regression` (`3\n`) must
+  stay green throughout.
+
+Generator path unchanged (`coro.py` `_nested_class_nonliteral_attr` refuses).
+The residual (a class object that escapes its function and is used in a
+later call) is still open, as round 3 wrote.
