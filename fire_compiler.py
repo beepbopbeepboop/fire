@@ -3475,7 +3475,10 @@ def desugar_genexps(stmts: list) -> list:
     d.walk_list(stmts, None)
     if d.hoisted:
         stmts[0:0] = d.hoisted
-    DESUGARED_GENEXP_NAMES = [fn.name for fn in d.hoisted]
+    # Cleared in place, not rebound: gimple_codegen imports this list by name,
+    # so a rebound global would leave its copy pointing at the previous call's.
+    del DESUGARED_GENEXP_NAMES[:]
+    DESUGARED_GENEXP_NAMES.extend(fn.name for fn in d.hoisted)
     return stmts
 
 
