@@ -1,5 +1,42 @@
 # An unannotated parameter receiving disagreeing types still prints wrong for every pair except int/str
 
+## Status 2026-10-29 (fifth round) — a double operand beside the parameter
+
+Landed: the fourth round's first open item, the double operand (`x * 2.5`,
+`2.5 * x`, `x + 0.5`) for `+`, `-` and `*`. Before this, a double operand
+fell outside `_float_param_arith_applies`, so the parameter's word was
+truncated by `mojo_box_int` and `f(2.5)` printed `5.0` for `x * 2.5`
+(CPython `6.25`) and `2.5` for `x + 0.5` (CPython `3.0`).
+
+Now `_float_param_arith` (`mojo/backend_gimple/emit_infra.py`) reads each
+operand as a double through `_float_operand_as_double` (a float-possible
+parameter via `mojo_box_double`, a `double` operand as itself, any other
+integer converted), and because the answer beside a double is always a double,
+it boxes that result outright with `mojo_box_from_double`. No select is needed
+on that path. The integer-beside-parameter path is unchanged apart from sharing
+the same per-operand conversion. `_lower_binary` (`mojo/backend_gimple/emit_exprs.py`)
+passes the operand C types through. The print of the result already goes through
+`mojo_repr_boxed` (`_is_float_param_arith`).
+
+Pinned in `test_link_mode.py`'s `test_unannotated_param_with_disagreeing_call_sites`
+(the `arithmetic` list, four new cases, both call orders, against CPython):
+`x * 2.5` gives `6.25`/`2.5`, `2.5 * x` gives `6.25`/`2.5`, `x + 0.5` gives
+`3.0`/`1.5`. The pre-fix output for the same programs was `5.0`/`2.5` and `2.5`/`1.5`.
+
+Still NOT covered, and the next step for each:
+
+- `/`, `//`, `%`, `**`: still on the truncating path (see `_FLOAT_ARITH_OPS`).
+  Measured: `x / 2` prints `1` / `0` for `f(2.5)`/`f(1)` where CPython gives
+  `1.25` / `0.5`. The integer-divide side is `CODEGEN_int_true_division_truncates`'s
+  territory too; `/` needs its own arm (a zero divisor traps before any select).
+- A result bound to a name first (`y = x * 2; print(y)`), or nested
+  (`(x * 2) + 1`), or returned: the result is an int64_t word, and nothing
+  records that it may be a box. Needs the same float-possible set extended to
+  locals and return values (`_ret_may_hold_str`'s analogue).
+- Float beside `str`/`list`/`bytes`/`None`, the bytes/list tags, `None`, and box
+  lifetime (a box is still never freed; `mojo_float_arith_select` and
+  `mojo_box_from_double` allocate one per double-valued operation).
+
 ## Status 2026-10-29 (fourth round) — the real double read for `+`, `-`, `*`
 
 Landed: the second round's open item 1, for `+`, `-` and `*` whose one operand

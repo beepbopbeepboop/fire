@@ -964,12 +964,18 @@ def test_unannotated_param_with_disagreeing_call_sites() -> bool:
     # when the argument was an integer, and a double box holding the double
     # answer when it was a float, picked at run time. Each expectation is the
     # CPython answer, so this pins the real double read, not the old truncation.
-    # `print(x)` is pinned by `cases` above.
+    # `print(x)` is pinned by `cases` above. A DOUBLE operand beside the
+    # parameter (`x * 2.5`) makes the answer a double whatever the parameter
+    # holds, so it is boxed outright: `f(1)` prints `2.5`, not the integer.
     arithmetic = [
         ('def f(x):\n    print(x * 2)\n\n\nf(2.5)\nf(1)\n', '5.0\n2\n'),
         ('def f(x):\n    print(x * 2)\n\n\nf(1)\nf(2.5)\n', '2\n5.0\n'),
         ('def f(x):\n    print(x + 1)\n\n\nf(2.5)\nf(1)\n', '3.5\n2\n'),
         ('def f(x):\n    print(x - 1)\n\n\nf(2.5)\nf(1)\n', '1.5\n0\n'),
+        ('def f(x):\n    print(x * 2.5)\n\n\nf(2.5)\nf(1)\n', '6.25\n2.5\n'),
+        ('def f(x):\n    print(x * 2.5)\n\n\nf(1)\nf(2.5)\n', '2.5\n6.25\n'),
+        ('def f(x):\n    print(2.5 * x)\n\n\nf(2.5)\nf(1)\n', '6.25\n2.5\n'),
+        ('def f(x):\n    print(x + 0.5)\n\n\nf(2.5)\nf(1)\n', '3.0\n1.5\n'),
     ]
     for i, (src, want) in enumerate(arithmetic):
         with tempfile.TemporaryDirectory() as td:

@@ -3134,7 +3134,7 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
     lt, lv = gen.lower_expr(node.left)
     rt, rv = gen.lower_expr(node.right)
     if ginf._float_param_arith_applies(gen, node.op, node.left, lt, node.right, rt):
-        return 'int64_t', ginf._float_param_arith(gen, node.op, node.left, lv, node.right, rv)
+        return 'int64_t', ginf._float_param_arith(gen, node.op, node.left, lt, lv, node.right, rt, rv)
     lt, lv = ginf._unbox_float_param_operand(gen, node.left, lt, lv)
     rt, rv = ginf._unbox_float_param_operand(gen, node.right, rt, rv)
 
