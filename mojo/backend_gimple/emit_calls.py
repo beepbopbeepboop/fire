@@ -3084,6 +3084,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if (fname_raw == 'sum' and len(node.args) == 1
             and not gen._locally_binds_name('sum')):
         at, av = gen.lower_expr(node.args[0])
+        _refuse_namedtuple_tuple_use(gen, at, 'calling sum on')
         # `sum(a_dict)`/`sum(a_set)` of numbers is real Python, and even a
         # genuinely-untyped boxed handle deserves the same runtime guard —
         # DESIGN.html R1/R5, shares _materialize_as_list. mojo_sum/_double
@@ -4372,6 +4373,7 @@ def _lower_builtin_all_any(gen, fname_raw: str, node: gimple_ctypes.CallExpr) ->
     runtime_fn = 'mojo_list_all' if fname_raw == 'all' else 'mojo_list_any'
     stub_val   = '1'             if fname_raw == 'all' else '0'
     at, av = gen.lower_expr(node.args[0])
+    _refuse_namedtuple_tuple_use(gen, at, f'calling {fname_raw} on')
     t = gen._new_temp('int')
     if at == 'MojoBytes *':
         # Checked BEFORE the pointer branch below, which `at.endswith(' *')`
@@ -4887,6 +4889,7 @@ def _lower_builtin_sorted_keyed(gen, node, arg0, key_expr, reverse: bool):
         (`key=bylen` where `def bylen(s): return len(s)`).
     A lambda key and a builtin key both handle string elements correctly."""
     at, av = gen.lower_expr(arg0)
+    _refuse_namedtuple_tuple_use(gen, at, 'sorting')
     at, av = _resolve_container_kind(gen, at, av)
     if at != 'MojoList *':
         av = gen._materialize_as_list(at, av)
@@ -4985,6 +4988,7 @@ def _lower_builtin_sorted(gen, node: gimple_ctypes.CallExpr,
         return 'MojoList *', t
 
     at, av = gen.lower_expr(arg0)
+    _refuse_namedtuple_tuple_use(gen, at, 'sorting')
     for a in node.args[1:]: gen.lower_expr(a)
     # A module-level container's C type is a box at the read (see
     # `_resolve_container_kind`), and every dispatch below asks about the
@@ -5052,6 +5056,7 @@ def _lower_builtin_zip_n(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     arg_pairs = []
     for a in node.args:
         at, av = gen.lower_expr(a)
+        _refuse_namedtuple_tuple_use(gen, at, 'zipping')
         if at != 'MojoList *':
             # mojo_zip walks MojoList*; a generator argument (or any other
             # non-list iterable) was reinterpreted as a list header and
@@ -5092,6 +5097,7 @@ def _lower_builtin_reversed(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str
     honest refusal, not a silent drop.
     """
     at, av = gen.lower_expr(node.args[0])
+    _refuse_namedtuple_tuple_use(gen, at, 'reversing')
     if at == 'MojoList *':
         cp = gen._call_expr('MojoList *', 'mojo_list_copy', [('MojoList *', av)])
         gen._emit_call('void', '', 'mojo_list_reverse', [('MojoList *', cp)])
@@ -5188,6 +5194,7 @@ def _lower_builtin_enumerate_value(gen, node: gimple_ctypes.CallExpr) -> tuple[s
     if not node.args:
         raise RuntimeError("enumerate() requires an argument")
     at, av = gen.lower_expr(node.args[0])
+    _refuse_namedtuple_tuple_use(gen, at, 'enumerating')
     # Start value: enumerate(x, start) counts from there.
     start = '0'
     if len(node.args) > 1:
@@ -5585,6 +5592,7 @@ def _lower_builtin_list(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # actual type first (mirrors _lower_builtin_len's identical handling).
     if _kind == 'list' and len(node.args) == 1:
         _lat, _lav = gen.lower_expr(node.args[0])
+        _refuse_namedtuple_tuple_use(gen, _lat, 'calling list on')
         _wct = None
         if isinstance(_lat, str) and _lat.endswith(' *') \
                 and _lat[:-2] in getattr(gen, '_intu_prereg_structs', ()):
@@ -8130,6 +8138,9 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
         return 'int64_t', gen._new_val('int64_t', '0')
 
     arg_pairs = lower_call_args(gen, node.args)
+    if fname_raw in ('min', 'max', 'iter') and not gen._locally_binds_name(fname_raw):
+        for _at, _ in arg_pairs:
+            _refuse_namedtuple_tuple_use(gen, _at, f'calling {fname_raw} on')
     # `PythonObject(<int literal>)` (2026-10-21 part 4, further,
     # test_python_object): the constructor's C extern is VARIADIC
     # (`int64_t PythonObject (int64_t, ...)` — a named dummy before the

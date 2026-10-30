@@ -1,5 +1,60 @@
 # COMPILE_FAIL: Lib/collections/__init__.py
 
+## Status (2026-10-29, work/bug-compile-fail-collections-init, round 6 — PARTIAL: the tuple builtins and for-loops on a container-held namedtuple are refused by name)
+
+**Measured before (fresh compile, memslot 8 GB, a namedtuple element of a
+list, `pts = [Point(1, 2)]`):** `list(pts[0])`, `sum(pts[0])`, `any(pts[0])`,
+`sorted(pts[0])` and `enumerate(pts[0])` / `zip(pts[0], pts[0])` in value
+form each compiled and exited 1 at run time with `object is not iterable`;
+`max(pts[0])` compiled and segfaulted (SIGSEGV); `reversed(pts[0])` in a `for`
+compiled and exited 0 with no stdout. The `for` forms of `enumerate`, `zip`
+and plain iteration over `pts[0]` compiled; they were not run before the change.
+
+**Landed:** each consumer's lowering site now calls
+`emit_calls._refuse_namedtuple_tuple_use` on the operand's static C type, the
+same check `len`, indexing and unpacking already use, so the refusal names the
+operation (`calling sum on`, `reversing`, `iterating over`, ...) and the message
+still carries `has no tuple protocol`.
+- `emit_calls.py`: `sum`, `all`/`any`, `reversed`, `list(x)` (one-argument
+  form), `sorted` (both forms), `enumerate` as a value, and the generic
+  `min`/`max`/`iter` path after `lower_call_args`.
+- `emit_loops.py`: the general `for x in <expr>` iterable, `zip` arguments,
+  and `enumerate` in a `for`.
+- Test: `test_gimple_runner.py::test_namedtuple_tuple_protocol_is_refused_by_name`
+  gained nine `container_*` cases (list, sum, max, any, sorted, reversed,
+  enumerate, zip, for_iter). Each compiled or misbehaved before this round and
+  is refused now.
+
+**Still open (item 3 narrowed further):**
+- `iter(pts[0])` is not named. Its own branch lowers the value without the
+  check, and a following `next(it)` refuses with an unrelated message.
+- `tuple(pts[0])` takes the constructor path, which is not checked. Only
+  `list(x)` is.
+- `pts[0]._fields` compiles and fails at run time (`AttributeError: _fields`,
+  exit 1, loud, not silent). `pts[0]._asdict()` fails at link time (undefined
+  `_Point__asdict`, loud). Neither is named yet. Both need the receiver's
+  static type at the method/member lowering, which the desugar's name check does
+  not give.
+- A namedtuple defined in one module and used as a tuple in another is still
+  not refused (the cross-module gap below).
+
+**Cross-module gap:** the refusal reads the class names of the module being
+compiled. A namedtuple defined in one module and used as a tuple in another is
+not refused by this check. Next step: carry the names through the closure
+(the same route `_closure_call_stmts` takes), then measure.
+
+**Verified this round:** `test_namedtuple_tuple_protocol_is_refused_by_name`
+and the other three namedtuple tests pass. `python3 test_gimple_runner.py`
+is 477 pass, 4 fail (`gimple_struct_mixed_reads_survive_a_derivation`,
+`gimple_heterogeneous_list_literal_keeps_each_slot`,
+`gimple_struct_mixed_reads_survive_a_function_boundary`,
+`gimple_ctor_param_polymorphic_slot_reads_receiver`). The same 4 fail on the
+pre-change tree, so they predate this round and are not namedtuple cases.
+
+**Not run this round:** the self-host gate. The changed files are
+`mojo/backend_gimple/emit_calls.py` and `emit_loops.py`, which the quality gate
+covers. The integrator must run `make gate`.
+
 ## Status (2026-10-29, work/bug-compile-fail-collections-init, round 5 — PARTIAL: the container-held tuple miscompile is refused by static type for subscript, unpack and len)
 
 **Measured before (exit 0 or wrong, fresh build):** a namedtuple value
