@@ -205,7 +205,7 @@ GATE = {
         "Two verdicts need judgement: stdlib-dylib (skip count must not rise) and stdlib-syntax (U must not rise).",
         "Fanout jobs print many FAIL job:item lines absorbed by expect= counts — look at the FAILED section.",
         "If log prints PEAK DRIFT: run tools/suite.py --apply-peaks build/suite.log and re-class the jobs.",
-        "Flake: x86-examples 'toplevel_const has no home' under parallel load; passes alone.",
+        "x86-examples used to flake ('toplevel_const has no home', 93/93 SKIP) because it built examples on THREADS and formal/build.py is not reentrant; it now runs one process per build.",
     ],
 }
 
