@@ -6072,6 +6072,17 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
     # those slots correctly and the row would buy nothing.
     _kinds = _literal_slot_kinds(gen, lowered)
     _has_spread = any(_is_star_spread(_el) for _el, _et, _ev in lowered)
+    # A HETEROGENEOUS scalar literal's per-slot kinds are also a compile-time
+    # fact about THIS value, so they go in `gen._struct_slot_kinds` beside the
+    # `struct.unpack` and returned-literal rows. `_list_repr_fn` and the
+    # literal-index read consult that table before the single list-wide
+    # `_elem_types` ctype, which is `double` for `[1, 2.5]` and so printed
+    # `[1.0, 2.5]` and read the int slot as a double. The runtime row still
+    # travels with the value for every read with no compile-time index. A
+    # spread has no fixed slot count to describe, so it is left to the row.
+    if (not _has_spread and len(set(_kinds)) > 1
+            and set(_kinds) <= set(_LITERAL_SLOT_KIND_LONG)):
+        gen._struct_slot_kinds[t] = [_LITERAL_SLOT_KIND_LONG[_k] for _k in _kinds]
     # A list-of-lists literal whose INNER literal holds strings: the inner list
     # records 'p' (MOJO_KIND_STR) on every slot. A list of strings records no
     # row of its own (see `_literal_needs_kinds`), and with no row a slot reads
@@ -6313,6 +6324,13 @@ def _emit_star_spread(gen, dest: str, et: str, ev: str) -> None:
         ev = gen._coerce_to_type(_as_str(et), 'MojoList *', ev)
     gen._emit_call('void', '', 'mojo_list_extend',
                    [('MojoList *', dest), ('MojoList *', ev)])
+
+
+# The runtime's one-byte kind (`_literal_slot_kinds`) -> `gen._struct_slot_kinds`'
+# long-form spelling. Only the scalar and string kinds are here: a slot that is
+# a container or a None has no long form the static readers understand, so a
+# literal holding one keeps the runtime row alone.
+_LITERAL_SLOT_KIND_LONG = {'i': 'int', 'd': 'double', 's': 'bytes', 'p': 'str'}
 
 
 def _literal_slot_kinds(gen, lowered) -> str:
