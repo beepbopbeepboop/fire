@@ -5461,6 +5461,20 @@ def _lower_ctor_from_iterable(gen, kind: str, node: gimple_ctypes.CallExpr) -> t
             _arg0 = gimple_ctypes.IdentExpr(_ml, node.line, node.col)
             if kind == 'list':
                 _copy_src = _ml
+    # A source that records its OWN per-slot kinds (a heterogeneous literal,
+    # a `struct.unpack` of a mixed format) is copied as RAW WORDS, with its
+    # kinds: `mojo_list_copy` is exactly that. The typed walk below cannot
+    # copy such a list: its element type is the promoted one ('double' for
+    # `[1, 2.5]`), so `mojo_list_get_double` reads the int slot's bits as a
+    # double (`list(f)` printed `[5e-324, 2.5]`), and the result would inherit
+    # that promoted type as its element repr, which then wins over the kinds
+    # row at print time. Nothing is lost by skipping the walk: a copy holds
+    # the same words, and the copy's kinds row is the same row.
+    if _copy_src is not None and _copy_src in gen._maybe_kinds_vals:
+        _cp = gen._call_expr('MojoList *', 'mojo_list_copy',
+                             [('MojoList *', _copy_src)])
+        gen._maybe_kinds_vals.add(_cp)
+        return 'MojoList *', _cp
     gen.temp_counter += 1
     var = f"_ctor_elem{gen.temp_counter}"
     synth_gen = gimple_ctypes.Generator(target=var, iterable=_arg0, conditions=[],
@@ -5487,8 +5501,6 @@ def _lower_ctor_from_iterable(gen, kind: str, node: gimple_ctypes.CallExpr) -> t
     if _copy_src is not None and _copy_src != res:
         gen._emit_call('void', '', 'mojo_list_inherit_kinds',
                        [('MojoList *', res), ('MojoList *', _copy_src)])
-        if _copy_src in gen._maybe_kinds_vals:
-            gen._maybe_kinds_vals.add(res)
         # Carry the compile-time element / nested-element typing across the
         # copy too: `mojo_list_inherit_kinds` only copies the RUNTIME kinds
         # string, and `_list_repr_fn` consults these compile-time tables to
