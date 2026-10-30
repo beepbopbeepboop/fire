@@ -749,7 +749,7 @@ def _cpp_is_int_operand(gen, node) -> bool:
         )
     except Exception:
         return False
-    return _ct in gimple_ctypes._SCALAR_INT_TYPES and _ct != '_Bool'
+    return _ct in gimple_ctypes._SCALAR_INT_TYPES
 
 
 def _cpp_apply_fstring_spec(part_val: str, spec: str) -> str:
@@ -2413,6 +2413,12 @@ def _cpp_expr(gen, e) -> str:
         if (op == '%' and _cpp_is_int_operand(gen, e.left)
                 and _cpp_is_int_operand(gen, e.right)):
             return f"__mojo_floormod((int64_t)({_bl}), (int64_t)({_br}))"
+        # Int / Int is true division (Float64), as in emit_exprs.py's tail. It
+        # goes through mojo_div_double, not a bare C `/`, so a zero divisor
+        # still raises ZeroDivisionError instead of answering inf.
+        if (op == '/' and _cpp_is_int_operand(gen, e.left)
+                and _cpp_is_int_operand(gen, e.right)):
+            return f"mojo_div_double((double)({_bl}), (double)({_br}))"
         if op in ('/', '%') and _cpp_is_int_operand(gen, e.right):
             _br = f"mojo_int_divisor((int64_t)({_br}))"
         if op in ('==', '!=', '<', '<=', '>', '>='):

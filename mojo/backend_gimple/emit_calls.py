@@ -59,6 +59,61 @@ from mojo.middle.calls_shared import (
 )
 from mojo.middle.methods_shared import _is_selfhost_source_file
 
+def _generator_star_slot(api: dict, node) -> int | None:
+    """The C-signature slot of a generator's `*args` parameter, when this
+    call packs its positional arguments into it, else None.
+
+    A `*args` coroutine takes ONE `MojoList *` slot (see `_star_slot` in
+    mojo/middle/coro.py), so the caller must build that list from the
+    trailing positional arguments. A call that spreads an iterable into the
+    argument list (`gen(*xs)`) is NOT packed here: its element count is not
+    known at compile time, so it keeps the spread's own lowering and this
+    returns None."""
+    _star = api.get('star_slot')
+    if _star is None:
+        return None
+    for _a in getattr(node, 'args', None) or []:
+        if isinstance(_a, gimple_ctypes.UnaryOp) and _as_str(_a.op) == '*':
+            return None
+    return _star
+
+
+def _pack_generator_star_args(gen, arg_pairs: list, star: int) -> list:
+    """Replace the trailing positional arguments from slot `star` on with
+    one `MojoList *` built from them. Each element is appended with the
+    accessor its own C type needs -- `mojo_list_append_str` for a `char *`,
+    `mojo_list_append_double` for a `double`, and `mojo_list_append_int`
+    otherwise (the int64_t default, as `_pack_vararg_trailing_params` uses)
+    -- so the body's element reads (`mojo_list_get_str` / `_get_double` /
+    `_get_int`, chosen from the call-site element kind) see the same bits
+    they were stored as. The scanner refuses a call whose trailing arguments
+    disagree in kind, so one list never mixes accessors. Expects every fixed
+    slot before `star` to be filled already."""
+    _fixed = arg_pairs[:star]
+    _lst = gen._new_val('MojoList *', "mojo_list_new ()")
+    for _at, _av in arg_pairs[star:]:
+        _ct = _as_str(_at)
+        if _ct == 'char *':
+            gen._emit(f"  mojo_list_append_str ({_lst}, {_av});")
+        elif _ct == 'double':
+            gen._emit(f"  mojo_list_append_double ({_lst}, {_av});")
+        else:
+            _av = gen._coerce_to_type(_at, 'int64_t', _av)
+            gen._emit(f"  mojo_list_append_int ({_lst}, {_av});")
+    return _fixed + [('MojoList *', _lst)]
+
+
+def _generator_api_for_start_symbol(gen, start_name: str):
+    """The registered coroutine api whose `_start` symbol is `start_name`
+    (`<api base>_start`), or None. The api registry is keyed by source name,
+    which a `__mgco_<name>_start` symbol does not carry, so the lookup goes
+    through the api's own `base`."""
+    for _api in gen._generator_api.values():
+        if f"{_api.get('base')}_start" == start_name:
+            return _api
+    return None
+
+
 def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
                                fname_raw: str) -> str:
     """Shared lowering for every bare-call CONSTRUCTION of a compiled
@@ -74,12 +129,7 @@ def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
     copies of this block (local-definition vs imported-binding branches
     of _lower_call) so the padding/kwslot/registration logic can't drift.
     """
-    # Record the container kind the value slot will carry
-    if api.get('value_ctype') and api['value_ctype'].endswith(' *'):
-        # Container pointer type (MojoList *, MojoDict *, MojoSet *, etc.)
-        api['boxed_container'] = api['value_ctype'][:-2]
-    else:
-        api['boxed_container'] = None
+    _record_generator_value_kind(api)
     # Argument lowering reuses the exact same gen.lower_expr(a)-per-
     # arg + _call_expr/_emit_call path every ordinary function call
     # in this file uses — func_param_types[f"{base}_start"] (registered in
@@ -117,11 +167,17 @@ def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
     # the moment the generator body reads its own `**kwargs`.
     _gen_kwslot = gen._func_kwargs_slot.get(
         fname_raw, gen._func_kwargs_slot.get(f"{api['base']}_start", -1))
-    if _gen_expected and len(arg_pairs) < len(_gen_expected):
+    # A `*args` callee: the fixed slots before it are padded here, and the
+    # positional arguments from its own slot on are packed into one list
+    # below. `_gen_nfixed` is therefore the count of FIXED slots, which is
+    # `len(_gen_expected)` only when there is no `*args` slot.
+    _gen_star = _generator_star_slot(api, node)
+    _gen_nfixed = _gen_star if _gen_star is not None else len(_gen_expected)
+    if _gen_expected and len(arg_pairs) < _gen_nfixed:
         _gen_kwarg_dict = {kn: gen.lower_expr(ke) for kn, ke in _gen_kwargs}
         _gen_kwarg_values = list(_gen_kwarg_dict.values())
         _gen_dflts = gen._func_param_defaults.get(f"{api['base']}_start", [])
-        while len(arg_pairs) < len(_gen_expected):
+        while len(arg_pairs) < _gen_nfixed:
             _pos = len(arg_pairs)
             if _gen_kwslot >= 0 and _pos == _gen_kwslot:
                 arg_pairs.append(('MojoDict *', gen._pack_kwargs_dict(_gen_kwarg_dict)))
@@ -136,7 +192,7 @@ def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
             # `_gen_dflts[_pos]` indexing missed every time here, silently
             # miscompiling the omitted arg to a typed zero).
             _dv = gimple_exprtypes._trailing_default_at(
-                _gen_dflts, len(_gen_expected), _pos)
+                _gen_dflts, _gen_nfixed, _pos)
             if _dv is not None:
                 arg_pairs.append(gen._default_expr_to_pair(_dv))
             else:
@@ -144,9 +200,52 @@ def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
     else:
         for _, _ke in _gen_kwargs:
             gen.lower_expr(_ke)
+    if _gen_star is not None:
+        arg_pairs = _pack_generator_star_args(gen, arg_pairs, _gen_star)
+    return _finish_generator_start(gen, api, arg_pairs)
+
+
+def _record_generator_value_kind(api: dict) -> None:
+    """Record the container kind a generator's value slot carries, on the
+    api entry every consumer of the handle reads (`boxed_container`)."""
+    if api.get('value_ctype') and api['value_ctype'].endswith(' *'):
+        # Container pointer type (MojoList *, MojoDict *, MojoSet *, etc.)
+        api['boxed_container'] = api['value_ctype'][:-2]
+    else:
+        api['boxed_container'] = None
+
+
+def _finish_generator_start(gen, api: dict, arg_pairs: list) -> str:
+    """Emit `<base>_start(arg_pairs...)` and bind its handle to `api`, so
+    every later consumer of the handle recovers the right resume/value/
+    destroy API. Shared by the free-function and the captured-nested
+    construction paths."""
     t = gen._call_expr('MojoGenerator *', f"{api['base']}_start", arg_pairs)
     gen._generator_var_api[t] = api
     return t
+
+
+def _emit_nested_generator_start_call(gen, node: gimple_ctypes.CallExpr,
+                                      api: dict) -> str:
+    """Construction of a nested generator that reads enclosing names
+    (`_compile_nested_generator_closures`): the user's positional arguments
+    first, then the captured enclosing values read HERE, at the call site,
+    as ordinary identifiers in scope -- the same construct convention
+    `_lower_async_closure_construct` uses for a nested async closure. Only
+    the plain positional form is threaded; a keyword or defaulted argument
+    is refused rather than silently mis-slotted into a capture's position."""
+    user_n = len(api['params']) - len(api['captures'])
+    if getattr(node, 'kwargs', None) or len(node.args) != user_n:
+        raise RuntimeError(
+            "cannot compile module: call to nested generator "
+            f"{api['nested_name']!r} with keyword or defaulted arguments is "
+            "not supported (only the plain positional form is threaded, "
+            "together with its enclosing-scope captures)")
+    arg_pairs = [gen.lower_expr(a) for a in node.args]
+    arg_pairs += [gen.lower_expr(gimple_ctypes.IdentExpr(_cn))
+                  for _cn, _ in api['captures']]
+    _record_generator_value_kind(api)
+    return _finish_generator_start(gen, api, arg_pairs)
 
 
 def _lower_generator_next(gen, av: str, api: dict) -> tuple[str, str]:
@@ -2292,6 +2391,14 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # never fall through to the ordinary function-call lowering (there is
     # no ordinary C function with this name to call — see gen_module's
     # Phase 2a skip for _supported_generators).
+    # A nested generator that reads enclosing names (see
+    # _compile_nested_generator_closures), called from the def that encloses
+    # it. Keyed like the nested async closure below, so it cannot collide
+    # with a same-named generator elsewhere.
+    _ng_key = (gen.current_func_name, fname_raw)
+    if _ng_key in gen._nested_generator_api:
+        return 'MojoGenerator *', _emit_nested_generator_start_call(
+            gen, node, gen._nested_generator_api[_ng_key])
     if fname_raw in gen._generator_api:
         return 'MojoGenerator *', _emit_generator_start_call(
             gen, node, gen._generator_api[fname_raw], fname_raw)
@@ -2325,6 +2432,20 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             and gen.func_return_types.get(fname_raw) == 'MojoGenerator *'):
         return 'MojoGenerator *', _emit_generator_start_call(
             gen, node, gen._generator_api[_ss_base], _ss_base)
+    # The same construction under its SYMBOL name, `__mgco_<name>_start`:
+    # coro.py's `await f(args)` / `async for x in f(args)` lowering emits that
+    # spelling, and a top-level coroutine is registered under its bare name,
+    # so neither lookup above finds it. Without this the call fell through to
+    # an ordinary call that passed the arguments flat -- `await total(1, 2,
+    # 3)` against a `*xs` coroutine became `__mgco_total_start(1)`, silently
+    # dropping 2 and 3. Matched on the api's own `base`, the one the
+    # coroutine's `_start` symbol was emitted under.
+    if (fname_raw.endswith('_start')
+            and gen.func_return_types.get(fname_raw) == 'MojoGenerator *'):
+        _sym_api = _generator_api_for_start_symbol(gen, fname_raw)
+        if _sym_api is not None:
+            return 'MojoGenerator *', _emit_generator_start_call(
+                gen, node, _sym_api, _sym_api['base'])
     # Same construction, but the callee is a generator this module only
     # knows through an (optionally aliased) cross-module import (`from a
     # import walk as walk_a`): _imported_generator_bindings — populated at
@@ -2608,7 +2729,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # unsupported, when the actual question is always "why did the
         # receiver not type as a struct?". `int64_t` there means the value
         # came from an un-elaborated imported generic (see
-        # bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md),
+        # the user-iterator next() bug (doc deleted in db724c4d6)),
         # which is a different bug with a different fix than an unsupported
         # shape. Re-lowering here is safe precisely because every branch
         # above that lowers the receiver has already returned by now.
@@ -5461,6 +5582,20 @@ def _lower_ctor_from_iterable(gen, kind: str, node: gimple_ctypes.CallExpr) -> t
             _arg0 = gimple_ctypes.IdentExpr(_ml, node.line, node.col)
             if kind == 'list':
                 _copy_src = _ml
+    # A source that records its OWN per-slot kinds (a heterogeneous literal,
+    # a `struct.unpack` of a mixed format) is copied as RAW WORDS, with its
+    # kinds: `mojo_list_copy` is exactly that. The typed walk below cannot
+    # copy such a list: its element type is the promoted one ('double' for
+    # `[1, 2.5]`), so `mojo_list_get_double` reads the int slot's bits as a
+    # double (`list(f)` printed `[5e-324, 2.5]`), and the result would inherit
+    # that promoted type as its element repr, which then wins over the kinds
+    # row at print time. Nothing is lost by skipping the walk: a copy holds
+    # the same words, and the copy's kinds row is the same row.
+    if _copy_src is not None and _copy_src in gen._maybe_kinds_vals:
+        _cp = gen._call_expr('MojoList *', 'mojo_list_copy',
+                             [('MojoList *', _copy_src)])
+        gen._maybe_kinds_vals.add(_cp)
+        return 'MojoList *', _cp
     gen.temp_counter += 1
     var = f"_ctor_elem{gen.temp_counter}"
     synth_gen = gimple_ctypes.Generator(target=var, iterable=_arg0, conditions=[],
@@ -5487,24 +5622,29 @@ def _lower_ctor_from_iterable(gen, kind: str, node: gimple_ctypes.CallExpr) -> t
     if _copy_src is not None and _copy_src != res:
         gen._emit_call('void', '', 'mojo_list_inherit_kinds',
                        [('MojoList *', res), ('MojoList *', _copy_src)])
-        if _copy_src in gen._maybe_kinds_vals:
-            gen._maybe_kinds_vals.add(res)
         # Carry the compile-time element / nested-element typing across the
         # copy too: `mojo_list_inherit_kinds` only copies the RUNTIME kinds
         # string, and `_list_repr_fn` consults these compile-time tables to
         # route to the pair-aware helpers. Without this, a runtime-built pair
         # list copied through `list(...)` loses its 2-slot spec and prints
         # indices as `None` / pair pointers as decimals.
+        # The element type and the static per-slot kinds are the source's own
+        # facts and carry over whenever the source has them. The source's
+        # NESTED spec does not carry over when it has none: an opaque/boxed
+        # source (e.g. a zip handle) yields tuple-pairs at runtime, so do not
+        # let a stray int64 record route the copy's repr through the int helper.
+        # (This used to pop the element type under that same `else`, which
+        # made `list(t)` of a mixed `struct.unpack` result print its slots as
+        # raw IEEE-754 bits, since the copy's repr then had no element type.)
         if _copy_src in gen._elem_types:
             gen._elem_types[res] = gen._elem_types[_copy_src]
+        else:
+            gen._elem_types.pop(res, None)
+        if _copy_src in gen._struct_slot_kinds:
+            gen._struct_slot_kinds[res] = gen._struct_slot_kinds[_copy_src]
         if _copy_src in gen._nested_elem_types:
             gen._nested_elem_types[res] = gen._nested_elem_types[_copy_src]
         else:
-            # An opaque/boxed source (e.g. a zip handle) carries no compile-time
-            # nested spec; the copy's elements are whatever the source yields at
-            # runtime (often marked tuple-pairs), so do not let a stray int64
-            # record route the copy's repr through the int helper.
-            gen._elem_types.pop(res, None)
             gen._nested_elem_types.pop(res, None)
     # `tuple(x)` builds a TUPLE, and the marker is the only thing that makes
     # a value one (see mojo_mark_as_tuple's doc comment). Applied AFTER the
@@ -8309,20 +8449,6 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # twin call path below).
     arg_pairs, kwarg_dict = gen._pack_vararg_trailing_params(
         fname, fname_raw, arg_pairs, kwarg_dict, _call_has_spread)
-
-    # Keyword argument padding for known functions
-    if fname_raw == 'compile_to_gimple':
-        if 'do_imports' in kwarg_dict: arg_pairs.append(kwarg_dict['do_imports'])
-        elif len(arg_pairs) < 2:       arg_pairs.append(('int', '0'))
-        if 'filename' in kwarg_dict:   arg_pairs.append(kwarg_dict['filename'])
-        elif len(arg_pairs) < 3:       arg_pairs.append(('char *', '0'))
-        if 'auto_gpu' in kwarg_dict:   arg_pairs.append(kwarg_dict['auto_gpu'])
-        elif len(arg_pairs) < 4:       arg_pairs.append(('int', '1'))
-    if fname_raw == 'interpret_and_execute':
-        if 'filename' in kwarg_dict:   arg_pairs.append(kwarg_dict['filename'])
-        elif len(arg_pairs) < 2:       arg_pairs.append(('int', '0'))
-    if fname_raw == 'format_ast'  and len(arg_pairs) == 1: arg_pairs.append(('int', '0'))
-    if fname_raw == 'emit_module' and len(arg_pairs) == 1: arg_pairs.append(('int', '0'))
 
     # General kwarg padding when expected param count is known. A call
     # compiled in isolation (e.g. monomorphize.py's instantiate(), which

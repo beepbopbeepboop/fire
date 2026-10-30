@@ -2613,19 +2613,19 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
                                      {'Self': node.obj, struct_name: node.obj})
         return gen.lower_expr(val_ast)
     # Class-level attribute (not an instance field) — redirect to global variable.
-    # Instance reads must consult the instance first (dynamic storage / field
-    # lookup) so an instance write shadows the class attribute; only bare
-    # class-name reads go to the synthesized backing global / per-execution
-    # cell.
+    # A bare class-name read goes to the synthesized backing global / the
+    # current per-execution cell; an instance read goes through the instance
+    # first (its dynamic storage shadows the class attribute), see
+    # `_cattr_instance_read`.
     class_attrs = gen._class_attrs
-    if (struct_name in class_attrs and node.member in class_attrs[struct_name]
-            and isinstance(node.obj, gimple_ctypes.IdentExpr)
-            and node.obj.name == struct_name):
+    if struct_name in class_attrs and node.member in class_attrs[struct_name]:
         gname = class_attrs[struct_name][node.member]
         # Use the actual declared type of the global (stored in _global_var_types)
         gtype = gen._global_var_types.get(gname, 'int64_t')
-        # Bare class-name read goes to the current per-execution cell.
-        t = gmp._cattr_read(gen, gname, gtype)
+        if isinstance(node.obj, gimple_ctypes.IdentExpr) and node.obj.name == struct_name:
+            t = gmp._cattr_read(gen, gname, gtype)
+        else:
+            t = gmp._cattr_instance_read(gen, ov, ot, node.member, gname, gtype)
         return gtype, t
     elif (struct_name in class_attrs and node.member in class_attrs[struct_name]
             and ot.endswith(' *')):
@@ -3638,6 +3638,23 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     still guaranteeing each shared operand is evaluated exactly once —
     re-lowering left_node/right_node here would break that guarantee
     for a side-effecting comparand shared between two links."""
+    # Int / Int is true division: Python and Mojo answer a Float64, never an
+    # integer. The gate is on BOTH operands being plain signed C integers, not
+    # on the joined type: a struct operand (`Scalar[dtype]`, `Path`) whose join
+    # with an int is an integer must keep its own `/`. The first attempt gated
+    # on the join alone, broke std/pathlib/path.mojo and std/simd.mojo, and was
+    # reverted (98043fe81). The `%` floor gate further down uses the same test.
+    #
+    # It is decided HERE, on the operand types as they arrive, and not after the
+    # struct-pointer coercion below: that coercion rewrites a `P *` operand to
+    # `int64_t` (so the struct's `/` is lowered as integer arithmetic on its
+    # pointer), and a gate read after it cannot tell a struct from an int. That
+    # is how `result /= part` in std/pathlib/path.mojo became a double division
+    # of a pointer, which gcc rejects. The `%` gate has the same ordering issue
+    # in principle, but its operands reach it unchanged, so it is left alone.
+    int_true_div = op == '/' and all(
+        t in gimple_ctypes._SCALAR_INT_TYPES and not t.startswith('uint')
+        for t in (lt, rt))
     # A builtin-`bytes` subclass instance (`class _Extra(bytes)`) carries
     # its payload in a hidden `_data: MojoBytes *` field — an inherited
     # binary op (`x == y`, `x + y`, `x % y`, `x * n`) operates on that
@@ -4657,6 +4674,8 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         rt, rv = gen._resolve_container_kind(rt, rv)
     c_op      = gimple_ctypes._BIN_OPS.get(op, op)
     res_type  = '_Bool' if op in gimple_ctypes._CMP_OPS else gimple_ctypes.TypeLattice.join(lt, rt)
+    if int_true_div:
+        res_type = 'double'
 
     # Type system: Check BIT_WIDTH_PRESERVATION for arithmetic ops
     # `a | b` where either operand is a real MojoDict* is Dict.__or__ (key
@@ -4731,7 +4750,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # casts below rebind `lv`/`rv` to fresh temps, so without a record carried
     # across them the tail would see two unknown operands and mark nothing.
     # Cast operands to result type to satisfy GIMPLE strict type checking
-    arith_type = gimple_ctypes.TypeLattice.join(lt, rt)  # common type for arithmetic
+    arith_type = 'double' if int_true_div else gimple_ctypes.TypeLattice.join(lt, rt)  # common type for arithmetic
     if lt != arith_type and arith_type not in ('_Bool',) and not arith_type.endswith(' *'):
         ct = gen._new_temp(arith_type)
         gen._safe_coerce_emit(lt, arith_type, lv, ct)

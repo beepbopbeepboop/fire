@@ -1433,6 +1433,10 @@ class GimpleGen:
         # this up via `(self.current_func_name, name)`.
         self._supported_async_closures: dict[tuple, FunctionDef] = {}
         self._async_closure_api: dict[tuple, dict] = {}
+        # Sync generators nested in an ordinary top-level def that read
+        # enclosing names, compiled by cpp_async._compile_nested_generator_
+        # closures; keyed (enclosing def, generator name) like the async dict.
+        self._nested_generator_api: dict[tuple, dict] = {}
         # Step I (create_task/Task/TaskGroup/RaisingTask project): async
         # functions nested INSIDE an ordinary top-level function's own body
         # (e.g. a local `@parameter async def wrapper(): ...` helper
@@ -4981,8 +4985,10 @@ class GimpleGen:
         return gst._annotation_dict_nested_val_type(self, ann)
     def _gen_stmt_VarDecl(self, node):
         return gst._gen_stmt_VarDecl(self, node)
-    def _track_pointer_actual_type(self, tname: str, dst: str, v: str, vtype: str) -> None:
-        return gst._track_pointer_actual_type(self, tname, dst, v, vtype)
+    def _track_pointer_actual_type(self, tname: str, dst: str, v: str, vtype: str,
+                                   rhs_is_none: bool = False) -> None:
+        return gst._track_pointer_actual_type(self, tname, dst, v, vtype,
+                                              rhs_is_none=rhs_is_none)
     def _assign_target(self, tgt, et, ev):
         return gst._assign_target(self, tgt, et, ev)
     def _is_except_as_member_target(self, obj_node) -> bool:
@@ -5218,8 +5224,10 @@ class GimpleGen:
         return gca._cpp_match_stmt(self, s, declared, indent)
     def _cpp_except_handler_body(self, handler, caught_var: str, declared: dict, indent: str) -> list[str]:
         return gca._cpp_except_handler_body(self, handler, caught_var, declared, indent)
-    def _gen_cpp_generator_unit(self, fn: FunctionDef, struct_name: str | None=None, struct_def: str | None=None) -> tuple[str, str, str, list]:
-        return gca._gen_cpp_generator_unit(self, fn, struct_name, struct_def)
+    def _gen_cpp_generator_unit(self, fn: FunctionDef, struct_name: str | None=None,
+                                extra_captures: list | None=None,
+                                struct_def: str | None=None) -> tuple[str, str, str, list]:
+        return gca._gen_cpp_generator_unit(self, fn, struct_name, extra_captures, struct_def)
     def _compute_nested_closure_captures(self, inner: FunctionDef, outer_scope: dict) -> list:
         return gca._compute_nested_closure_captures(self, inner, outer_scope)
     def _enclosing_scope_with_locals(self, outer_fn: FunctionDef) -> dict:
@@ -5238,6 +5246,8 @@ class GimpleGen:
         return gca._inline_single_use_task_composition(self, body)
     def _compile_nested_async_functions(self, outer_fn: FunctionDef, async_fns: dict) -> None:
         return gca._compile_nested_async_functions(self, outer_fn, async_fns)
+    def _compile_nested_generator_closures(self, outer_fn: FunctionDef, generator_fns: dict) -> None:
+        return gca._compile_nested_generator_closures(self, outer_fn, generator_fns)
     def _gen_cpp_async_generator_unit(self, fn: FunctionDef) -> tuple[str, str, str, list]:
         return gca._gen_cpp_async_generator_unit(self, fn)
 
