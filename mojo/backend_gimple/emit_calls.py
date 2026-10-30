@@ -3190,7 +3190,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # path (a print-and-return-0 no-op) — exactly the R4 "absence of proof
     # treated as a negative answer" pattern DESIGN.html describes, when a
     # perfectly good runtime answer was available all along (R5). Found by
-    # tracing bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md:
+    # tracing commit e8a7135b8:
     # gimple_gen_coro.py's own AST-walking helpers use `for k, v in
     # vars(node).items():` on a GENERICALLY-typed `node` parameter (by
     # design — it walks many different AST node types uniformly), so
@@ -5495,16 +5495,23 @@ def _lower_ctor_from_iterable(gen, kind: str, node: gimple_ctypes.CallExpr) -> t
         # route to the pair-aware helpers. Without this, a runtime-built pair
         # list copied through `list(...)` loses its 2-slot spec and prints
         # indices as `None` / pair pointers as decimals.
+        # The element type and the static per-slot kinds are the source's own
+        # facts and carry over whenever the source has them. The source's
+        # NESTED spec does not carry over when it has none: an opaque/boxed
+        # source (e.g. a zip handle) yields tuple-pairs at runtime, so do not
+        # let a stray int64 record route the copy's repr through the int helper.
+        # (This used to pop the element type under that same `else`, which
+        # made `list(t)` of a mixed `struct.unpack` result print its slots as
+        # raw IEEE-754 bits, since the copy's repr then had no element type.)
         if _copy_src in gen._elem_types:
             gen._elem_types[res] = gen._elem_types[_copy_src]
+        else:
+            gen._elem_types.pop(res, None)
+        if _copy_src in gen._struct_slot_kinds:
+            gen._struct_slot_kinds[res] = gen._struct_slot_kinds[_copy_src]
         if _copy_src in gen._nested_elem_types:
             gen._nested_elem_types[res] = gen._nested_elem_types[_copy_src]
         else:
-            # An opaque/boxed source (e.g. a zip handle) carries no compile-time
-            # nested spec; the copy's elements are whatever the source yields at
-            # runtime (often marked tuple-pairs), so do not let a stray int64
-            # record route the copy's repr through the int helper.
-            gen._elem_types.pop(res, None)
             gen._nested_elem_types.pop(res, None)
     # `tuple(x)` builds a TUPLE, and the marker is the only thing that makes
     # a value one (see mojo_mark_as_tuple's doc comment). Applied AFTER the

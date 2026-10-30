@@ -1,6 +1,6 @@
 # CODEGEN: integer `/` truncates where Python's true division gives a float
 
-Split out of `CODEGEN_int_mod_negative_truncates.md` (its `%` sign defect is
+Split out of commit cc01733ce (its `%` sign defect is
 fixed; this part was never in that fix).
 
 ## Repro
