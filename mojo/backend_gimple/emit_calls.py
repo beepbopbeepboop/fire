@@ -3609,10 +3609,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if _red_lambda is not None:
         return _lower_inlined_lambda_call(gen, _red_lambda, node)
 
-    if (fname_raw in gen.var_types) or (
-            _fname_var_ctype in ('int', 'int64_t', 'void *', '_Bool')
-            and fname_raw not in gen._mangled_funcs
-            and fname_raw not in gen.func_return_types):
+    if _callee_is_fnptr_value(gen, fname_raw):
         return gen._lower_fnptr_call(fname_raw, _fname_var_ctype, node)
 
     # PART 6 (2026-10-23, closing piece): the system stat() C-ABI FFI — see
@@ -7164,6 +7161,23 @@ def _lower_inlined_lambda_call(gen, lam, node) -> tuple[str, str]:
         return gen.lower_expr(lam.body)
     finally:
         gen.var_types = saved
+
+
+def _callee_is_fnptr_value(gen, fname_raw: str) -> bool:
+    """True when a bare-name callee is a function VALUE to call through
+    `mojo_fnptr_call_N`, not a C function to call by name.
+
+    A local variable always is. A module-global holding a scalar box is too,
+    unless the name is a known C function: a decorated `def` is rebound to a
+    module global (`step = deco(step_undecorated)`), and calling it by bare
+    name is a call to a symbol that does not exist. Both the expression and
+    the statement call paths ask this, so a discarded `step(7)` at module
+    scope and `print(step(7))` lower the same way."""
+    _ctype = gen.var_types.get(fname_raw) or gen._global_var_types.get(fname_raw, '')
+    return (fname_raw in gen.var_types) or (
+        _ctype in ('int', 'int64_t', 'void *', '_Bool')
+        and fname_raw not in gen._mangled_funcs
+        and fname_raw not in gen.func_return_types)
 
 
 def _lower_fnptr_call(gen, fname_raw: str, var_ctype: str,

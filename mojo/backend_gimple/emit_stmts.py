@@ -4094,7 +4094,10 @@ def _gen_stmt_ExprStmt(gen, node):
         # a callable value, so the indirection is semantics-preserving;
         # see _lower_call's own comment for why a misleading
         # first-decl-wins `char *` decl can't disqualify it.
-        if _var_ctype in ('int', 'int64_t', 'void *', '_Bool') or raw_name in gen.var_types:
+        # The module-global half is the same as _lower_call's (a decorated
+        # `def` rebound to a global is a value, not a C symbol), so both
+        # call paths ask the one predicate.
+        if ggc._callee_is_fnptr_value(gen, raw_name):
             gen._lower_fnptr_call(raw_name, _var_ctype, node.value)
             return
         # Same guard as _lower_CallExpr: don't redirect an *imported*

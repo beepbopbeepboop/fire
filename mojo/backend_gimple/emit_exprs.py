@@ -780,6 +780,13 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         # local read returns the variable's own C name, which is the whole
         # difference between the two.
         ginf.carry_callable_ret_types(gen, name, t)
+        # …and "this global holds a function VALUE" (a decorated `def` rebound
+        # to a global, whose repr name the rebinding recorded on the NAME): the
+        # same hop, for the same reason, so `print(step)` formats the read-back
+        # temp as a function and not as the int64_t box it is stored in.
+        _gfrn = gen._global_func_value_names.get(name)
+        if _gfrn is not None:
+            gen._func_value_names[t] = _gfrn
         # …and "this global holds a compiled generator/coroutine": every
         # consumer of the handle (`.close()`, `next()`, `for`) recovers the
         # resume/value/destroy api by looking up the VALUE it was handed, so
