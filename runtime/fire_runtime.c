@@ -1608,6 +1608,21 @@ MojoVarargFn *mojo_vararg_fn_new(void *fn, void *self, int64_t n_fixed, int64_t 
     return vf;
 }
 
+/* `callable(x)` for a word of unknown kind: a function value is the exact
+ * address of a symbol in a loaded image (dladdr's dli_saddr), a vararg-wrapped
+ * function or a bound method. A string, a container, a box, an int and a
+ * heap pointer are none of those. */
+#include <dlfcn.h>
+int mojo_is_callable_word(int64_t v) {
+    if (v < 65536) return 0;
+    if (mojo_is_vararg_fn((void *)(intptr_t)v) || mojo_is_bound_method((void *)(intptr_t)v))
+        return 1;
+    Dl_info info;
+    if (dladdr((void *)(intptr_t)v, &info) && info.dli_saddr == (void *)(intptr_t)v)
+        return 1;
+    return 0;
+}
+
 int mojo_is_vararg_fn(void *p) {
     int64_t v = (int64_t)(intptr_t)p;
     if (v < 65536) return 0;

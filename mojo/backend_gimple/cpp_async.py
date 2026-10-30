@@ -841,8 +841,11 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         gen._cpp_pending_return_store = (_ret_base, _ret_ct)
     gen._cpp_last_has_return_value = _has_return_value
     gen._cpp_list_local_elem_types = {}
+    gen._cpp_param_names = set(gimple_ctypes._as_str(_p[0]) for _p in (fn.params or []))
     gen._cpp_mixed_list_params = set(
         getattr(gen, '_param_elem_mixed', {}).get(fn.name, ()))
+    gen._cpp_mixed_list_params |= set(getattr(gen, '_cpp_inherited_mixed', ()))
+    gen._cpp_inherited_mixed = set()
     # `<module marker>.<name>` -> ctype for the module-level constants this
     # unit's body can read as values (see `gcc_._cpp_module_global_ctypes`).
     # Seeded HERE, before the body-emission loop below, because that loop is
@@ -863,6 +866,8 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     # next()/for consumption. Same registry the AssignStmt/list-literal
     # tracking below already populates for LOCAL lists; params just had no
     # seeding site before.
+    for _mxn in gen._cpp_mixed_list_params:
+        gen._cpp_list_local_elem_types[_mxn] = 'int64_t'
     _pl_elem_hints = getattr(gen, '_param_list_elem_types', None) or {}
     _fn_elem_hints = _pl_elem_hints.get(fn.name) or {}
     if _fn_elem_hints:
@@ -1409,9 +1414,28 @@ def _compile_nested_generator_closures(gen, outer_fn: gimple_ctypes.FunctionDef,
         # resolve; a read that the scope does not cover stays refused.
         if [_cn for _cn, _ in caps] != list(read):
             continue
+        # A captured name is snapshotted when the generator is CALLED, which
+        # equals Python's read-at-each-resume when nothing rebinds it after.
+        # Exactly one site (a parameter: none) is the original rule; further
+        # rebindings are fine too provided every one of them precedes the
+        # `def` in the enclosing body, so the name is final by then
+        # (iterutil's `items = iter(items)` before `def chain()`).
+        _inner_ix = next(_ix for _ix, _st in enumerate(outer_fn.body)
+                         if _st is inner)
+        _before = outer_fn.body[:_inner_ix]
+        _after = outer_fn.body[_inner_ix + 1:]
         if any(_binding_site_count(outer_fn.body, _cn)
-               != (0 if _cn in outer_params else 1) for _cn, _ in caps):
+               != (0 if _cn in outer_params else 1)
+               and (_binding_site_count(_after, _cn) != 0
+                    or (_cn not in outer_params
+                        and _binding_site_count(_before, _cn) == 0))
+               for _cn, _ in caps):
             continue
+        # Captured names the enclosing function's contract marks kind-mixed
+        # stay kind-mixed inside the generator frame.
+        gen._cpp_inherited_mixed = set(
+            _cn for _cn, _ in caps
+            if _cn in getattr(gen, '_param_elem_mixed', {}).get(outer_fn.name, ()))
         try:
             cpp_text, value_ctype, base, param_ctypes = gen._gen_cpp_generator_unit(
                 inner, extra_captures=caps)

@@ -7255,7 +7255,13 @@ def gen_module_impl(self, stmts):
                                         s.module.replace('.', '_').replace('-', '_') + '::' + _rs_nm)
                                     or self._generator_home_api.get(
                                         gimple_ctypes._join_import_member(s.module, _rs_nm)
-                                        .replace('.', '_').replace('-', '_') + '::' + _rs_nm))
+                                        .replace('.', '_').replace('-', '_') + '::' + _rs_nm)
+                                    # a sibling's RELATIVE spelling
+                                    # (`from .iterutil import f`): its home
+                                    # registers under the bare module name
+                                    or self._generator_home_api.get(
+                                        s.module.lstrip('.').replace('.', '_').replace('-', '_')
+                                        + '::' + _rs_nm))
                                 if _gmh_api is not None:
                                     self._imported_generator_bindings[sym_name] = _gmh_api
                                     continue
@@ -7284,7 +7290,10 @@ def gen_module_impl(self, stmts):
                                     s.module.replace('.', '_').replace('-', '_') + '::' + _fb_name)
                                 or self._generator_home_api.get(
                                     gimple_ctypes._join_import_member(s.module, _fb_name)
-                                    .replace('.', '_').replace('-', '_') + '::' + _fb_name))
+                                    .replace('.', '_').replace('-', '_') + '::' + _fb_name)
+                                or self._generator_home_api.get(
+                                    s.module.lstrip('.').replace('.', '_').replace('-', '_')
+                                    + '::' + _fb_name))
                             if _fb_gmh is not None:
                                 self._imported_generator_bindings[_fb_sym] = _fb_gmh
                                 continue
@@ -9950,6 +9959,26 @@ def gen_module_impl(self, stmts):
                     and _as_str(_uc_n.iterable.name) in _uc_params):
                 self._param_elem_mixed.setdefault(
                     _as_str(_uc_fn.name), set()).add(_as_str(_uc_n.iterable.name))
+    # An UNSOLVED list parameter (no call site typed it) that a NESTED
+    # generator captures: the generator frame receives it as a word and
+    # yields its elements, so it is read per slot like a kind-mixed one.
+    for _nc_fn in all_functions:
+        if not isinstance(_nc_fn, FunctionDef):
+            continue
+        _nc_params = set(_as_str(_p[0]) for _p in (_nc_fn.params or []))
+        _nc_solved = self._param_elem_types.get(_as_str(_nc_fn.name), {})
+        for _nc_in in _nc_fn.body:
+            if not (isinstance(_nc_in, FunctionDef) and _nc_in.is_generator):
+                continue
+            for _nc_n in _walk_ast(_nc_in):
+                if (isinstance(_nc_n, YieldFromExpr)
+                        and isinstance(_nc_n.value, IdentExpr)):
+                    _nc_nm = _as_str(_nc_n.value.name)
+                    _nc_ct = _nc_solved.get(_nc_nm)
+                    if (_nc_nm in _nc_params
+                            and (_nc_ct is None or _nc_ct[0] is None)):
+                        self._param_elem_mixed.setdefault(
+                            _as_str(_nc_fn.name), set()).add(_nc_nm)
     for _ie_callee in self._param_int_elem_obs:
         _ie_pe = self._param_elem_types.get(_ie_callee, {})
         for _ie_p in self._param_int_elem_obs[_ie_callee]:
@@ -9960,6 +9989,21 @@ def gen_module_impl(self, stmts):
                 # disagreement records it; leaving the one non-int site's
                 # type as the contract types the int site's list wrongly.
                 _ie_pe[_ie_p] = (None, None)
+    # Module functions referenced as VALUES (an identifier that is not the
+    # callee of a call): see `_gen_stmt_ReturnStmt`.
+    _vu_fn_names = set(_as_str(_f.name) for _f in all_functions
+                       if isinstance(_f, FunctionDef))
+    _vu_callees = set()
+    _vu_refs = set()
+    for _vu_f in all_functions:
+        if not isinstance(_vu_f, FunctionDef):
+            continue
+        for _vu_n in _walk_ast(_vu_f):
+            if isinstance(_vu_n, CallExpr) and isinstance(_vu_n.func, IdentExpr):
+                _vu_callees.add(id(_vu_n.func))
+            elif isinstance(_vu_n, IdentExpr) and _as_str(_vu_n.name) in _vu_fn_names:
+                _vu_refs.add((id(_vu_n), _as_str(_vu_n.name)))
+    self._value_used_funcs = set(_nm for (_i, _nm) in _vu_refs if _i not in _vu_callees)
     _em_before = sum(len(_v) for _v in self._param_elem_mixed.values())
     _resolve_param_dict_vals()
     _resolve_param_containers()

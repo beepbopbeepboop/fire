@@ -2270,6 +2270,7 @@ class GimpleGen:
         self._param_nested_mixed: dict = {}
         self._param_elem_mixed: dict = {}
         self._param_int_elem_obs: dict = {}
+        self._value_used_funcs: set = set()
         # The dict-VALUE twin of the row above: callee -> {pname -> the dict
         # value ctype its call sites agree on}. Read at the same place (see
         # emit_funcs.gen_func / _gen_struct_method), into `_dict_val_types`.

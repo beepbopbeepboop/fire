@@ -2760,6 +2760,19 @@ def _gen_stmt_ReturnStmt(gen, node):
         vtype: str = ''
         v: str = ''
         vtype, v = gen.lower_expr(node.value)
+        # A function that is used as a VALUE (passed or stored, never only
+        # called) is invoked by a consumer that cannot know its return type,
+        # so a string/float list it returns carries its slot kind (the
+        # consumer reads it through `mojo_list_get_boxed`). Functions only
+        # ever called by name stay untagged: their callers are typed.
+        if (_as_str(getattr(gen, 'current_func_name', None))
+                in getattr(gen, '_value_used_funcs', ())
+                and _as_str(gen._get_actual_type(vtype, v)) == 'MojoList *'):
+            _rk = {'char *': 'p', 'double': 'd'}.get(
+                _as_str(gen._elem_types.get(_as_str(v))))
+            if _rk:
+                gen._emit_call('void', '', 'mojo_list_set_kinds_uniform',
+                               [('MojoList *', _as_str(v)), ('char', "'" + _rk + "'")])
         # See this function's own top comment: must run AFTER the value is
         # computed, not before — a candidate can still be legitimately
         # READ from (subscript/member/method) while computing `v` above.

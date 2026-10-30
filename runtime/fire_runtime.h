@@ -133,6 +133,7 @@ typedef struct { void *fn; void *self; int64_t n_fixed; int64_t kind; int64_t ha
 MojoVarargFn *mojo_vararg_fn_new(void *fn, void *self, int64_t n_fixed, int64_t kind,
                                  int64_t has_env);
 int mojo_is_vararg_fn(void *p);
+int mojo_is_callable_word(int64_t v);
 /* Packing entry points. `kw` is the call site's keyword arguments already
  * packed into a MojoDict (NULL when the call site passed none); it is
  * IGNORED unless the callee declares `**kwargs`, so an ordinary call site

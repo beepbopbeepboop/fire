@@ -1101,6 +1101,52 @@ main()
 """
     test_generator_matches_cpython(
         "cpp_coroutine_mixed_kind_list_param_str_site_first", _mixed_src2, _mixed_src2)
+    # c_common/iterutil.py's `iter_many` shape: `items = iter(items)` on a
+    # parameter, `next()` on it, a callable PARAMETER called through the
+    # runtime's arity dispatch (`onempty(items)`), whose function value
+    # returns a string list, plus `yield from` self-recursion. CPython is the
+    # oracle.
+    _iter_many_src = """\
+def iter_many(items, onempty=None):
+    if not items:
+        if onempty is None:
+            return
+        items = onempty(items)
+        yield from iter_many(items, onempty=None)
+        return
+    items = iter(items)
+    try:
+        first = next(items)
+    except StopIteration:
+        return
+    else:
+        try:
+            second = next(items)
+        except StopIteration:
+            yield first, False
+            return
+        else:
+            yield first, True
+            yield second, True
+        for item in items:
+            yield item, True
+
+def fallback(x):
+    return ["dflt"]
+
+def main():
+    for a, b in iter_many(["a", "b", "c"]):
+        print(a, b)
+    for a, b in iter_many(["only"]):
+        print(a, b)
+    for a, b in iter_many([], fallback):
+        print(a, b)
+    for a, b in iter_many([]):
+        print(a, b)
+main()
+"""
+    test_generator_matches_cpython(
+        "cpp_coroutine_iter_many_callable_param", _iter_many_src, _iter_many_src)
     # The no-argument form: `TypeError()` is legal Python and the message is
     # the empty string, which is what the emitted `char *` empty literal
     # carries. Kept because it is the shape whose typing needs no argument to

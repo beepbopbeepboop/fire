@@ -1,5 +1,32 @@
 # COMPILE_FAIL (hard): Tools/c-analyzer/c_common/fsutil.py
 
+## Status 2026-10-30 (third entry) — `process_filenames` and `iterutil` now compile; the three that remain are genuinely dynamic
+
+Measured on `.tmp/ca/c_common/fsutil.py` (full package copy): the refusal list went from four to three —
+`_walk_tree`, `glob_tree`, `iter_files`. `iterutil.py` builds clean. **Landed this round:**
+`items = iter(items)` cursor in the cpp emitter too; a call through a callable PARAMETER (`onempty(items)`) via
+`mojo_fnptr_call_N` with a local word-converting result type, guarded by a REAL `callable()` for word params
+(`runtime mojo_is_callable_word`: exact `dladdr` symbol match, vararg fn or bound method) instead of the old
+always-true stub; truthiness of a container/word parameter (`not items` was a NULL-pointer test, so an empty list
+was truthy); lists returned from functions used as VALUES carry their str/float slot kind; unsolved list params
+captured by a nested generator read boxed (`chain`), with the capture rule relaxed to allow rebindings that all
+precede the `def`; a `for` over an IMPORTED generator in a cpp body; the `from .sib import gen` relative-import
+home-api key. Tests: `cpp_coroutine_iter_many_callable_param`, `..._mixed_kind_...`, runner 295 pass / the same 8 +
+1 pre-existing failures as at e7bd23c47.
+
+**What remains is not a missing lowering but dynamic Python:** `_walk(root)`/`_glob(...)` iterate whatever an
+arbitrary callable returns (`os.walk`/`glob.iglob`, which do not exist in compiled mode: `can_resolve_module_path('os')`
+is False); `iter_files` compares function VALUES (`get_files in (glob.glob, glob.iglob, glob_tree)`), rebinds a
+parameter to a `lambda *a, **k`, and forwards `*a, **k` through a callable it does not know. Closing them needs
+(a) `os.walk`/`glob.iglob` as runtime or compiled members, (b) an iteration protocol over an unknown returned
+object (list / generator handle / dict / str), (c) function-value equality and star-forwarding through an
+unknown callable. Separately, a PRE-EXISTING link gap found on the way: a compiled (cpp) generator imported through
+a package-relative import by an A3-eligible consumer leaves the producer's C++ unit out of the link
+(repro: `pkg/simple.py` yields from a list param, `pkg/user2.py` iterates it, `main` iterates that; `ld` cannot find
+`_mojogen_simple_gen2_*`) — same on the tree before this round. And a known pre-existing consumer bug: a
+`try/except` around a loop over a generator that RAISES fails to catch once an earlier loop over an empty one of
+the same function returned (setjmp runtime; reproduces with no change of this round's).
+
 ## Status 2026-10-30 (later) — the dynamic-value model is the EXISTING per-slot-kind/box model; a kind-mixed list parameter now works end to end, in ordinary functions AND compiled generators
 
 Correction to the Plan below: no new tagged `MojoValue` is needed or wanted. The runtime already has the dynamic
