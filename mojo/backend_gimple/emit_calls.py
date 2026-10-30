@@ -129,12 +129,7 @@ def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
     copies of this block (local-definition vs imported-binding branches
     of _lower_call) so the padding/kwslot/registration logic can't drift.
     """
-    # Record the container kind the value slot will carry
-    if api.get('value_ctype') and api['value_ctype'].endswith(' *'):
-        # Container pointer type (MojoList *, MojoDict *, MojoSet *, etc.)
-        api['boxed_container'] = api['value_ctype'][:-2]
-    else:
-        api['boxed_container'] = None
+    _record_generator_value_kind(api)
     # Argument lowering reuses the exact same gen.lower_expr(a)-per-
     # arg + _call_expr/_emit_call path every ordinary function call
     # in this file uses — func_param_types[f"{base}_start"] (registered in
@@ -207,9 +202,50 @@ def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
             gen.lower_expr(_ke)
     if _gen_star is not None:
         arg_pairs = _pack_generator_star_args(gen, arg_pairs, _gen_star)
+    return _finish_generator_start(gen, api, arg_pairs)
+
+
+def _record_generator_value_kind(api: dict) -> None:
+    """Record the container kind a generator's value slot carries, on the
+    api entry every consumer of the handle reads (`boxed_container`)."""
+    if api.get('value_ctype') and api['value_ctype'].endswith(' *'):
+        # Container pointer type (MojoList *, MojoDict *, MojoSet *, etc.)
+        api['boxed_container'] = api['value_ctype'][:-2]
+    else:
+        api['boxed_container'] = None
+
+
+def _finish_generator_start(gen, api: dict, arg_pairs: list) -> str:
+    """Emit `<base>_start(arg_pairs...)` and bind its handle to `api`, so
+    every later consumer of the handle recovers the right resume/value/
+    destroy API. Shared by the free-function and the captured-nested
+    construction paths."""
     t = gen._call_expr('MojoGenerator *', f"{api['base']}_start", arg_pairs)
     gen._generator_var_api[t] = api
     return t
+
+
+def _emit_nested_generator_start_call(gen, node: gimple_ctypes.CallExpr,
+                                      api: dict) -> str:
+    """Construction of a nested generator that reads enclosing names
+    (`_compile_nested_generator_closures`): the user's positional arguments
+    first, then the captured enclosing values read HERE, at the call site,
+    as ordinary identifiers in scope -- the same construct convention
+    `_lower_async_closure_construct` uses for a nested async closure. Only
+    the plain positional form is threaded; a keyword or defaulted argument
+    is refused rather than silently mis-slotted into a capture's position."""
+    user_n = len(api['params']) - len(api['captures'])
+    if getattr(node, 'kwargs', None) or len(node.args) != user_n:
+        raise RuntimeError(
+            "cannot compile module: call to nested generator "
+            f"{api['nested_name']!r} with keyword or defaulted arguments is "
+            "not supported (only the plain positional form is threaded, "
+            "together with its enclosing-scope captures)")
+    arg_pairs = [gen.lower_expr(a) for a in node.args]
+    arg_pairs += [gen.lower_expr(gimple_ctypes.IdentExpr(_cn))
+                  for _cn, _ in api['captures']]
+    _record_generator_value_kind(api)
+    return _finish_generator_start(gen, api, arg_pairs)
 
 
 def _lower_generator_next(gen, av: str, api: dict) -> tuple[str, str]:
@@ -2355,6 +2391,14 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # never fall through to the ordinary function-call lowering (there is
     # no ordinary C function with this name to call — see gen_module's
     # Phase 2a skip for _supported_generators).
+    # A nested generator that reads enclosing names (see
+    # _compile_nested_generator_closures), called from the def that encloses
+    # it. Keyed like the nested async closure below, so it cannot collide
+    # with a same-named generator elsewhere.
+    _ng_key = (gen.current_func_name, fname_raw)
+    if _ng_key in gen._nested_generator_api:
+        return 'MojoGenerator *', _emit_nested_generator_start_call(
+            gen, node, gen._nested_generator_api[_ng_key])
     if fname_raw in gen._generator_api:
         return 'MojoGenerator *', _emit_generator_start_call(
             gen, node, gen._generator_api[fname_raw], fname_raw)

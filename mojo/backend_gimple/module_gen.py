@@ -11248,6 +11248,14 @@ def gen_module_impl(self, stmts):
         for _t in _tgts:
             self._global_literal_slot_ctypes[_t] = _slots if _slots is not None else _outer
 
+    # Sync generators nested in an ordinary top-level def that read its
+    # names are claimed here, BEFORE the generic passes below would refuse
+    # them and before the module-level registration could take them by bare
+    # name (see cpp_async._compile_nested_generator_closures).
+    for _od in stmts:
+        if isinstance(_od, FunctionDef):
+            self._compile_nested_generator_closures(_od, _generator_fns)
+
     for s in stmts:
         if not (isinstance(s, FunctionDef) and id(s) in _generator_fns
                 and id(s) not in _async_fns):
@@ -15917,7 +15925,8 @@ def gen_module_impl(self, stmts):
     # decls for its own trampolines at all — an implicit-declaration
     # compile failure the moment anything (e.g. `_take_handle()`) used the
     # handle outside the enclosing function's own `{base}_start` call.
-    if self._supported_generators or self._generator_method_api or self._generator_api:
+    if (self._supported_generators or self._generator_method_api or self._generator_api
+            or self._nested_generator_api):
         # The typedef may already have been emitted ahead of the
         # method-prototype pass (declaration-before-typedef cascade fix,
         # see that site) — keep exactly one in the section.
@@ -15935,7 +15944,8 @@ def gen_module_impl(self, stmts):
         # (the dict's own VALUES are a genuinely mixed-type dict —
         # `base`/`value_ctype` are str, `params` is a list — so a single
         # `dict[str, str]` reparameterization wouldn't fit every field).
-        for _api in list(self._generator_api.values()) + list(self._generator_method_api.values()):
+        for _api in (list(self._generator_api.values()) + list(self._generator_method_api.values())
+                     + list(self._nested_generator_api.values())):
             _base, _vct = _as_str(_api['base']), _as_str(_api['value_ctype'])
             # Plain unpack loop, NOT a genexpr — a list of string pieces
             # joined via a genexpr is the established self-hosted trap.
