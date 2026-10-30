@@ -369,3 +369,39 @@ considering a compiled-path change done"). Watch `stdlib-dylib` `skip` count and
 `stdlib-syntax` `U`, and `bootstrap` because `coro.py` is itself compiled by the
 self-host (the new code uses only plain loops and set membership, like its
 neighbours, but has not been self-compiled).
+
+## Status (2026-10-29, bug-codegen-module-boundary-carries-no-v, round 2) — PARTIAL FIX (aliased imports)
+
+Landed: `coro.lower`'s closure call-site scan (`_scan_callsite_param_kinds` in
+`mojo/middle/coro.py`) now resolves the two aliased spellings of a call to an
+imported module's generator, which previously stayed holes:
+
+* `from m import gen as g` then `g([...])`: `_from_bound_names` maps the local
+  name `g` back to the generator's own name `gen`.
+* `import m as k` then `k.gen([...])`: `_module_aliases` collects the local
+  alias `k` and `_visit_closure_call` accepts `k.gen(...)`.
+
+`_visit_call` takes the resolved callee name explicitly, so the unanimity rule
+sees the call under the generator's real name. Both cases were measured to
+print heap addresses before the change and to print `p q` after it.
+
+Test: `test_module_boundary_regression.py` — 7/7 (was 5/7 before this change;
+the two new cases are `imported_generator_yields_str_via_aliased_from_import`
+and `imported_generator_yields_str_via_module_alias`). Covering file
+`test_gimple_generator_runner.py` — 273/273.
+
+Still open, unchanged from the round above:
+
+* **A value passed on through a parameter** (`import k; k.pass_through(["p","q"])`
+  where `pass_through` does `for v in m.gen(xs)`): needs the transitive form of
+  the same scan. Next step: propagate the param-kind evidence of `pass_through`
+  into the argument of its inner `m.gen(...)` call.
+* **Ordering**: a call site in a module compiled after the child is not visible
+  to it. The closure is accumulated in compile order. Next step: the A-full
+  plan's step 1 (pre-parse the whole closure before the import loop in
+  `module_gen.py`).
+* **Shape 1** still has no mechanism note verified; it stays pinned by
+  `module_qualified_str_param`, which passes.
+
+Gate, for the integrator (NOT run here): `coro.py` changed, and it is compiled
+by the self-host, so `bootstrap` and the compiled-path gate are owed.
