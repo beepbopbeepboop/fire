@@ -1,5 +1,42 @@
 # COMPILE_FAIL: Lib/importlib/resources/readers.py
 
+## Status (2026-10-29 — the `_common.py:105` refusal below is GONE on master; the file's closure now shows only sibling-module fallbacks; exit code NOT measured)
+
+The blocker this doc was left open on is fixed. Commit `0e5ddad7c`
+(`itertools.filterfalse` builds a list) lowers both spellings
+(`itertools.filterfalse(...)` and the bare name), and it is pinned by
+`test_itertools_filterfalse_keeps_the_elements_whose_predicate_is_false` in
+`test_gimple.py`. Re-measured on this branch (`work/bug-compile-fail-importlib-resources-rea`,
+HEAD `a6afa609b`):
+
+```
+python3 tools/memslot.py --gb 8 --label readers -- \
+  python3 fire.py build -o .tmp/out/readers/readers \
+  /Users/mrs/net/Python-3.14.6/Lib/importlib/resources/readers.py
+→ 25 `# ERROR:` lines, all in OTHER modules; none names readers.py,
+  _common.py, _functional.py or _itertools.py
+```
+
+The other modules that fall back to source in the closure: `_bootstrap`,
+`functools`, `dis` (`next(...)` on `MojoList *` in `_parse_varint`),
+`weakref` (`d.pop(key, default)` with a list default), `inspect` and
+`traceback` (`next(...)` on an `int64_t` call in `_get_code_position`),
+`enum` (overloaded `Enum.value` referenced as a plain value), `annotationlib`
+and `dataclasses` (`case` class / or-patterns), `_win_cp_codecs` (nested class
+reading an enclosing local). Those are the owners' problems, not this file's.
+
+**Not measured:** the build's exit code. The run exceeded this worker's
+budget (killed at ~51 minutes under the 8 GB memcap, no exit line written),
+so this entry does NOT establish that `fire.py build readers.py` exits 0.
+
+**Next step (integrator):** run the one build above with no wall-clock cap
+and record the exit code. If it exits 0, delete this doc (`git rm`) in the
+same commit and run `python3 tools/dangling_doc_refs.py --ratchet`. If it
+exits 1, the reason is in the sibling-module list above and the doc should
+keep only that list.
+
+---
+
 ## Status (2026-10-01 — this file contributes ZERO `error:` lines; all five of the 2026-09-30 errors below are gone, and a simpler refusal replaced them)
 
 ```
