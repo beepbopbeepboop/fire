@@ -2794,6 +2794,16 @@ def _rewrite_async_gen_stmts(stmts: list, cvar: str) -> list:
     return out
 
 
+def _async_receiver_kind(fn, is_method: bool) -> str:
+    """The receiver slot a compiled `async def` METHOD takes -- 'self', 'cls'
+    or '' -- by the same single rule the generator meta uses
+    (`method_receiver_kind`). Recorded on the meta entry so `register` can
+    put it on the `_generator_method_api` entry, where the await/call site
+    reads it to decide whether to prepend the receiver. A top-level async
+    function has no receiver."""
+    return method_receiver_kind(fn) if is_method else ''
+
+
 def _async_method_setup(fn, base, struct_name):
     """Shared prologue/param plumbing for a plain `async def` and an async
     generator, top-level OR a struct method. For a method: arg 0 is the
@@ -2955,7 +2965,7 @@ def _lower_one_async_gen(fn: N.FunctionDef, meta: list, base: str | None = None,
     body_fd = _mark_coro_body(body_fd)
     meta.append({
         'name': _cm_as_str(fn.name), 'struct': struct_name, 'is_method': is_method, 'is_async': True,
-        'is_async_gen': True,
+        'is_async_gen': True, 'receiver': _async_receiver_kind(fn, is_method),
         'base': base, 'body_name': body_name,
         'params': c_params,
         'nargs': len(real_params), 'value_ctype': 'int64_t', 'value_kind': 'i',
@@ -2980,6 +2990,7 @@ def _lower_one_async(fn: N.FunctionDef, meta: list, base: str | None = None,
     body_fd = _mark_coro_body(body_fd)
     meta.append({
         'name': _cm_as_str(fn.name), 'struct': struct_name, 'is_method': is_method, 'is_async': True,
+        'receiver': _async_receiver_kind(fn, is_method),
         'base': base, 'body_name': body_name,
         'params': c_params,
         'nargs': len(real_params), 'value_ctype': 'int64_t', 'value_kind': 'i',
@@ -5178,6 +5189,7 @@ def _lower_one(fn: N.FunctionDef, meta: list,
         'is_method': is_method,
         'has_self': has_self,
         'is_classmethod': is_classmethod,
+        'receiver': _rcv_kind,
         'base': base,
         'body_name': body_name,
         'params': c_params,
@@ -5580,8 +5592,7 @@ def register(gen, meta: list) -> None:
             # stripped, so a consumer cannot recover this from them --
             # and GimpleGen._cpp_yield_from's `yield from cls.<gen>(...)`
             # branch needs it to get the call arity right.
-            'receiver': ('cls' if m.get('is_classmethod')
-                         else 'self' if m.get('has_self') else ''),
+            'receiver': m['receiver'],
             'tuple_slot_ctypes': m.get('tuple_slot_ctypes'),
             'tuple_slot_nested': m.get('tuple_slot_nested'),
             'has_return_value': True,

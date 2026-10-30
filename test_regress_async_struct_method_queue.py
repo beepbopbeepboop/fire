@@ -1,6 +1,6 @@
-"""Regression pin for bugs/RUNTIME_async_struct_method_queue_segfaults.md.
-The case: async def method on a compiled struct (self receiver) segfaults
-at runtime (SIGSEGV -11). Confirms failure before fix; must pass after.
+"""Regression pin: an awaited `async def` method on a compiled struct
+(self receiver) segfaulted at runtime (SIGSEGV -11) because the call site
+dropped the receiver. Confirms failure before fix; must pass after.
 """
 from test_coro_future_await import _build_and_run
 
