@@ -22,8 +22,9 @@ instead of building a binary that silently calls the undecorated function.
 - Tests: `test_gimple.py` `scalar_decorator_rebind_is_refused` (raises,
   message `returns int64_t (not callable)`) and
   `pass_through_decorator_on_a_def_still_compiles`. Both were run in
-  isolation and pass. The full `test_gimple.py` run cannot reach them: it
-  aborts earlier, see `bugs/CODEGEN_test_gimple_halts_on_fire_compiler_assert_raises.md`.
+  isolation and pass. The full `test_gimple.py` run used to abort before
+  reaching them (a refusal on `fire_compiler.py`'s `assert_raises` helper); that
+  is fixed, and the full run now reaches and passes both.
 - NOT covered by the refusal, so still silently wrong: a factory decorator
   (`@deco(x)`), a decorator imported from another module, and a decorator
   whose scalar return is hidden behind a nested call.
