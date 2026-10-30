@@ -194,9 +194,11 @@ regression test file in no `tools/suite.py` bucket, so nothing runs it; and
 
 The `_walk_ast` re-scan doc was closed 2026-10-29: its AST-node rescan is
 fixed and pinned by four
-`test_gimple.py` tests, and the two costs it still carried (the uncached
-`_collect_self_assigns`/`_collect_self_reads` scan, and wall clock's per-level
-generated-C text join) are carried in `PERF_struct_self_assign_scan_uncached.md`.
+`test_gimple.py` tests. The uncached `_collect_self_assigns`/`_collect_self_reads`
+scan that doc also carried was memoized in commit 316102957, which deleted its
+own doc. The one cost b3b14a597 still named
+as open, wall clock's per-level generated-C text join, has no doc in the tree
+now.
 
 ### A ninth removal, and what it cost (2026-09-29)
 

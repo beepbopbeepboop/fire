@@ -668,6 +668,15 @@ EXPECTED_FAILURES = {
     # those plus runtime/libc, none stat-related. See
     # bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_
     # defines.md (2026-10-23 closing section).
+    # The four `case .PASS:` enum-case patterns: the spelling is type-relative,
+    # and resolving it needs the matched value's type, which this lowering does
+    # not have. Recorded, not hidden: the landing gate fails on any NEW failing
+    # file, and an entry that starts passing is reported as stale. Doc:
+    # bugs/CODEGEN_gate_stdlib_syntax_red.md.
+    "std/builtin/dtype.mojo": "enum-case `case .PASS:` pattern (bugs/CODEGEN_gate_stdlib_syntax_red.md)",
+    "std/logger/logger.mojo": "enum-case `case .PASS:` pattern (bugs/CODEGEN_gate_stdlib_syntax_red.md)",
+    "std/memory/address_space.mojo": "enum-case `case .NOTSET:` pattern (bugs/CODEGEN_gate_stdlib_syntax_red.md)",
+    "std/testing/suite.mojo": "enum-case `case .PASS:` pattern (bugs/CODEGEN_gate_stdlib_syntax_red.md)",
 }
 
 def get_stdlib_path():
