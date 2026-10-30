@@ -1799,24 +1799,35 @@ class TestTheDivideByZeroGuardIsEmittedOnlyWhenItCanFire(unittest.TestCase):
     """
 
     def _calls(self, source, arch="arm64"):
-        """The number of CALL SITES the emitter recorded for this source.
+        """The number of guard-exit CALL SITES the emitter recorded for this source.
 
         Read from the assembler's own `extern_refs` rather than by scanning
         bytes: an `0xE8`/`0xE9` byte scan also matches a `jmp rel32`, which is
         what a control-flow rewrite of the same block emits, so it counted two
         calls where there is one.
+
+        Only the guard's own exit call is counted, by callee: arm64's
+        `_emit_exit` is exactly one `bl fflush` plus a raw `svc`, and
+        x86-64's `_emit_call_exit` exactly one `call exit`. Since the
+        float-repr helper (commit a2135f390) is emitted unconditionally after
+        every function body and adds its own `snprintf`/`strtod` calls to
+        every image, a whole-image count reads 2 where the guard emitted 0
+        and 3 where it emitted 1 — measured 2026-10-30 on both backends
+        (`1 != 3`, the doc's named smallest method), which is what broke these
+        rows when the helper landed.
         """
         from formal.build import parse_module
         if arch == "arm64":
             import formal.arm64_codegen as AC
             g = AC.ARM64Codegen()
             g.compile(parse_module(source), emit_startup=False)
-            return sum(1 for _s, _p, _l, kind in g.asm.extern_refs
-                       if kind == "bl")
+            return sum(1 for name, _p, _l, kind in g.asm.extern_refs
+                       if kind == "bl" and name == "fflush")
         import formal.x86_64_codegen as XC
         g = XC.X86_64Codegen()
         g.compile(parse_module(source), emit_startup=False)
-        return len(g.asm.extern_refs)
+        return sum(1 for name, _p, _l, kind in g.asm.extern_refs
+                   if kind == "call" and name == "exit")
 
     def _rule(self):
         from formal import model as M
