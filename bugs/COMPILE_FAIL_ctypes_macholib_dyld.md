@@ -1,19 +1,56 @@
 # COMPILE_FAIL: Lib/ctypes/macholib/dyld.py
 
-## Status (2026-10-29, this session — re-verified: unchanged, feature-sized, blocked)
+## Status (2026-10-30, branch work/bug-compile-fail-ctypes-macholib-dyld — PARTIAL FIX landed; the earlier root-cause claim was WRONG and is retracted)
 
-Quick regression test `test_regress_dyld_default_search_yield.py` (already
-in tree) fails: `_generator_yield_ctype(node)` returns `None` instead of
-`'char *'`, confirming the refusal is still active. The root cause —
-`framework['name']`'s subscript element type (from foreign `framework_info`
-return) not threaded into generator yield-slot inference — is the same
-cross-module struct-typed-subscript gap documented in
-commit 7bc328108. That gap is
-explicitly feature-sized (needs subscript-return typing through module
-boundaries into coroutine-body inference) and deliberately not attempted
-there; this file is not a tighter reproduction. No narrow fix possible
-without that shared machinery addition. Doc kept open; no tree change
-beyond this status entry.
+**Retracted:** the 2026-10-29 entry (and the earlier "framework['name']
+subscript typing" theory) is false. Measured on this tree: every
+`os.path.join(...)` yield in `dyld_default_search` already infers `char *`,
+and `framework['name']` is never the blocker. The earlier unit-test probe
+failed only because it called `_generator_yield_ctype` WITHOUT the
+parameter types the production path supplies.
+
+**Real mechanism (measured with `.tmp`-style single-unit repros, no
+whole-closure build):** `dyld_default_search`'s unannotated `name` param
+was declared as the generic `int64_t` box in the generator's C signature
+(`funcs_shared._param_ctype`), because usage inference left it untyped and
+that function never consulted the call-site kind registry
+(`coro._CALLSITE_PARAM_KINDS`). Yet `_static_env` / the yield-slot check read
+that same registry. So `declared['name'] == 'int64_t'` against `char *`
+joins, and `_generator_yield_ctype` refuses the module.
+
+**Landed (partial fix, behaviour-changing):** `mojo/middle/funcs_shared.py`
+`_param_ctype` now types an UNANNOTATED param that usage inference left
+untyped with its unanimous scalar call-site kind (`'p'`/`'d'`/`'b'`/`'i'`
+via `coro._KIND_TO_SLOT_CTYPE`); holes and conflicts are absent from the
+registry and keep the box. `test_regress_dyld_default_search_yield.py` is
+rewritten as a self-contained compile-level test (no `/Users/mrs` path): it
+FAILS before the fix (`RuntimeError: cannot compile module ... dyld_default_search`)
+and PASSES after. `test_gimple_generator_runner.py`: 289 pass, 2 fail —
+`genexp_over_annotated_param_with_capture` and `..._with_condition`, which
+ALSO fail on the baseline (fix reverted), so they are pre-existing, not
+caused by this change.
+
+**What remains — the real dyld.py is still refused.** Single-unit compile
+(`do_imports=False`) after the fix still reports, for
+`dyld_default_search`, `dyld_executable_path_search` and
+`dyld_override_search`: "yields ['name'] ... call sites do not all pass the
+same statically-known type (... one of them the static scan could not type
+at all)". The hole is `dyld_find(name, executable_path=None, env=None)`'s
+own UNANNOTATED `name`: `dyld_find` has no in-module caller (its callers are
+in `Lib/ctypes/util.py`, another module), so no call-site kind exists for it.
+This refusal is the protective one — the value could be a str or an int, and
+a single fixed yield slot cannot represent both.
+
+**Exact next step (feature-sized, not started):** type a function's
+unannotated param from its CROSS-MODULE call sites (the `Lib/ctypes/util.py`
+callers of `dyld_find` pass `find_library`'s `str`), i.e. feed the call-site
+scan from the importing modules' call sites through the import closure, or
+honour a caller-side annotation. A minimized repro of the same chain (`dyld_find` with a `main()` calling
+`dyld_find('x')`) compiles after the fix; the real file with such a caller
+added was NOT built, so that is unverified for `dyld.py` itself. Decide with the user whether cross-module
+call-site typing is the intended route before building it.
+
+Doc kept open: the real file is not built end-to-end.
 
 ## Status (2026-10-01 — re-measured: the entry below still holds exactly, ONE refused generator, dyld.py's own compile unit still clean)
 
