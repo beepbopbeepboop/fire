@@ -30,7 +30,6 @@ Anything not eligible is left untouched and falls through to the existing
 gimple_cpp_* C++20-coroutine path -- incremental cutover.
 """
 from __future__ import annotations
-import contextlib
 import dataclasses
 
 import os
@@ -98,19 +97,11 @@ _KIND_CTYPE  = {'i': 'int64_t', 'b': '_Bool', 'p': 'char *', 'd': 'double',
 
 
 def _yield_shim(kind: str) -> str:
-    # int/bool/pointer all go through an int64_t-box yield -- _emit_call
-    # coerces a char*/pointer arg to int64_t via the registered param types
-    # (see `func_param_types` in lower()), and a `_Bool` promotes to its own
-    # 0/1 losslessly. A string's box word IS its pointer bits, so the `_p`
-    # shim takes the same int64_t as `_i`: a generator's String local is
-    # declared int64_t (it is read back from `__mojo_gen_arg`), and a
-    # `void *` parameter there is an int->pointer conversion GIMPLE rejects.
-    # Only a genuine double needs the bitcast variant.
-    if kind == 'd':
-        return '__mojo_coro_yield_d'
-    if kind == 'p':
-        return '__mojo_coro_yield_p'
-    return '__mojo_coro_yield_i'
+    # int/bool/pointer all go through the int64_t yield -- _emit_call coerces
+    # a char*/pointer arg to int64_t via the registered param types, and a
+    # `_Bool` promotes to its own 0/1 losslessly. Only a genuine double needs
+    # the bitcast variant.
+    return '__mojo_coro_yield_d' if kind == 'd' else '__mojo_coro_yield_i'
 
 
 def enabled() -> bool:
@@ -119,29 +110,6 @@ def enabled() -> bool:
     # the old gimple_cpp_*.py C++20-coroutine emitter, kept live for one
     # release as a differential oracle (doc/COROUTINE.html §5.5/§5.6).
     return os.environ.get(_ENV, _MODE) != _OLD_MODE
-
-
-@contextlib.contextmanager
-def pinned(mode: str):
-    """Select the coroutine backend (`'cpp'` or `'stackswitch'`) for the
-    duration of one block, then restore whatever `MOJO_CORO` was before.
-
-    `enabled()` reads the env var at each compile, so a test that needs one
-    backend must say so around its own compile calls. A module-level
-    `os.environ[...] = ...` is process-wide: whichever test file is imported
-    last wins for every other file sharing the process. Scoped, it can't
-    leak into anything else."""
-    if mode not in (_OLD_MODE, _MODE):
-        raise ValueError(f"unknown coroutine backend {mode!r}")
-    _prev = os.environ.get(_ENV)
-    os.environ[_ENV] = mode
-    try:
-        yield
-    finally:
-        if _prev is None:
-            os.environ.pop(_ENV, None)
-        else:
-            os.environ[_ENV] = _prev
 
 
 # ── eligibility ─────────────────────────────────────────────────────────
@@ -333,12 +301,6 @@ def _literal_kind(expr) -> str | None:
             k = list(eks)[0]
             if isinstance(k, str):
                 return ('list', k)
-            # A list of lists whose inner lists all hold ONE scalar kind
-            # (`[[1, 2], [3, 4]]`): ('list', ('list', 'i')). One level only;
-            # the backend's `_nested_elem_types` slot carries exactly one.
-            if (isinstance(k, tuple) and len(k) == 2 and k[0] == 'list'
-                    and isinstance(k[1], str)):
-                return ('list', k)
     return None
 
 
@@ -508,10 +470,6 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
         ek = None
         if isinstance(it, N.IdentExpr):
             v = env.get(it.name)
-            # A star-param (`*ws`) is recorded as `*ws` in env, but the loop
-            # iterates `ws`; try the prefixed spelling too.
-            if v is None:
-                v = env.get('*' + it.name)
             if isinstance(v, tuple) and v[0] == 'list':
                 ek = v[1]
             elif v == 'p':
@@ -538,40 +496,6 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
                 ek = 'p'          # `for c in 'ab':` -- characters are strings
         if isinstance(ek, str):
             env[tname] = ek
-        elif (isinstance(ek, tuple) and len(ek) == 2 and ek[0] == 'list'
-                and isinstance(ek[1], str)):
-            # An element of a list of lists IS a list: `for row in rows:`
-            # binds `row` to ('list', <inner kind>), so the inner
-            # `for cell in row:` (visited after this one) is typed too.
-            env[tname] = ek
-    # `for i, x in enumerate(<xs>)`: the two-slot target the loop above
-    # skips. Slot 0 is the index, an int by construction, and slot 1 is one
-    # element of `xs`, so it takes `xs`'s element kind exactly as a single
-    # target would. Without this, `yield x` in such a loop had no kind, the
-    # value slot defaulted to int64_t, and a float element was yielded as its
-    # raw bits (`for i, r in enumerate([1.5, 2.5]): yield r` printed
-    # `1` / `2` where CPython prints `1.5` / `2.5`). Both names must be
-    # unbound, the same rule the single-name case uses.
-    for n in _walk(fn):
-        if not isinstance(n, N.ForStmt):
-            continue
-        it = n.iterable
-        if not (isinstance(it, N.CallExpr) and isinstance(it.func, N.IdentExpr)
-                and it.func.name == 'enumerate' and len(it.args) == 1
-                and isinstance(it.args[0], N.IdentExpr)):
-            continue
-        tnames = for_target_names(n.target)
-        if len(tnames) != 2 or any(t in env for t in tnames):
-            continue
-        src = env.get(it.args[0].name)
-        if isinstance(src, tuple) and src[0] == 'list':
-            elem = src[1]
-        elif src == 'p':
-            elem = 'p'
-        else:
-            continue
-        env[tnames[0]] = 'i'
-        env[tnames[1]] = elem
     if struct_def is not None:
         for f in getattr(struct_def, 'fields', []):
             if isinstance(f, N.VarDecl):
@@ -631,11 +555,7 @@ def _yield_kind(expr, env: dict | None = None) -> str | None:
         return 'i'
     if isinstance(expr, N.IdentExpr):
         v = env.get(expr.name)
-        if isinstance(v, str):
-            return v
-        if isinstance(v, tuple) and v[0] == 'list':
-            return v[1]
-        return None
+        return v if isinstance(v, str) else None
     if isinstance(expr, N.MemberExpr) and isinstance(expr.obj, N.IdentExpr) \
             and expr.obj.name == 'self':
         return env.get(f'self.{expr.member}')
@@ -717,21 +637,6 @@ _KIND_TO_SLOT_CTYPE = {'i': 'int64_t', 'b': '_Bool', 'p': 'char *', 'd': 'double
                        None: 'int64_t'}
 
 
-def _tuple_slot_kind(expr, env: dict | None = None) -> str | None:
-    """The slot kind of one element of a tuple yield. A bare list-local
-    (`yield "root", dirs`) is a 'list:<elem>' slot -- a `MojoList *` boxed by
-    pointer bits, whose ELEMENT kind rides along so the consumer can read the
-    list's elements. `_yield_kind` answers a bare list name with its ELEMENT
-    kind (the `yield xs[i]` case), which typed the slot `char *` and made the
-    consumer read the list pointer back with `mojo_list_get_str`."""
-    env = env or {}
-    if isinstance(expr, N.IdentExpr):
-        v = env.get(expr.name)
-        if isinstance(v, tuple) and v[0] == 'list':
-            return f'list:{v[1] or ""}'
-    return _yield_kind(expr, env)
-
-
 def _generator_tuple_shapes(fn: N.FunctionDef, env: dict | None = None):
     """Per-yield-site slot-KIND tuples, or None for a non-tuple yield."""
     shapes = []
@@ -739,7 +644,7 @@ def _generator_tuple_shapes(fn: N.FunctionDef, env: dict | None = None):
         if isinstance(n, N.YieldExpr):
             if not isinstance(n.value, N.TupleExpr):
                 return None
-            shapes.append(tuple(_tuple_slot_kind(e, env) for e in n.value.elements))
+            shapes.append(tuple(_yield_kind(e, env) for e in n.value.elements))
     return shapes or None
 
 
@@ -774,11 +679,6 @@ def _generator_tuple_slots(fn: N.FunctionDef, env: dict | None = None):
         return None
     slots = []
     for k in kinds:
-        if isinstance(k, str) and k.startswith('list:'):
-            # A list-valued element: its MojoList * pointer bits, read back
-            # as the list itself (`_emit_generator_tuple_unpack`).
-            slots.append('MojoList *')
-            continue
         if k == 'tuple':
             # A nested tuple literal in a slot (Lib/modulefinder.py's
             # `yield "store", (name,)` / `yield "relative_import", (level,
@@ -795,22 +695,6 @@ def _generator_tuple_slots(fn: N.FunctionDef, env: dict | None = None):
             continue
         slots.append(_KIND_TO_SLOT_CTYPE[k])
     return slots
-
-
-def _generator_tuple_slot_elems(fn: N.FunctionDef, env: dict | None = None):
-    """Per-slot element C type for a list-valued slot (`'list:<elem>'`, see
-    `_tuple_slot_kind`), aligned with `_generator_tuple_slots`'s result; None
-    for every other slot. None when the tuple shape is inconsistent (same
-    refusal conditions as `_generator_tuple_slots`)."""
-    shapes = _generator_tuple_shapes(fn, env)
-    if shapes is None:
-        return None
-    kinds = _generator_tuple_unify(shapes)
-    if kinds is None:
-        return None
-    return [_KIND_TO_SLOT_CTYPE.get(k[len('list:'):] or None, 'int64_t')
-            if isinstance(k, str) and k.startswith('list:') else None
-            for k in kinds]
 
 
 def _generator_nested_slots(fn: N.FunctionDef, env: dict | None = None):
@@ -891,7 +775,7 @@ def _generator_value_kind(fn: N.FunctionDef,
             # `yield from _iter_files(root, suffix, relparent)`) resolves
             # exactly as a direct sibling delegation does -- fsutil's
             # `iter_files_by_suffix`, see
-            # the (since-fixed) c_common/fsutil.py compile failure.
+            # bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md.
             dk = delegated(n.value, fn) if delegated is not None else None
             kinds.add(dk)
             if dk == 'tuple':
@@ -1042,7 +926,7 @@ def _lambdas_ok(fn: N.FunctionDef) -> bool:
     `_lambda_shape_ok` above now admits all of them. The walk stays as the
     chokepoint that measurement is attached to: the next shape to be measured
     belongs in that table, and this is where a refusal for it would live.
-    (the (since-fixed) compiled-generator lambda-expression bug)"""
+    (bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md)"""
     for n in _walk(fn):
         if isinstance(n, N.LambdaExpr):
             if not _lambda_shape_ok(n):
@@ -1217,7 +1101,7 @@ def _sibling_gen_kind(iterable, fn: N.FunctionDef = None):
     more CALL form: a HIGHER-ORDER PARAMETER whose declared default names
     one of this module's generators — `def walk_tree(root, *, walk=
     _walk_tree)` doing `for filename in walk(root):`, the shape
-    `the (since-fixed) c_common/fsutil.py compile failure` records as
+    `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md` records as
     fsutil's real blocker. The default is resolved to its generator and the
     kind read from THAT, exactly as for a direct sibling call; a parameter
     whose default is not a module generator (or is not a default at all —
@@ -1321,7 +1205,7 @@ def _default_is_faithful_literal(node) -> bool:
     would compile the generator and then pad a NULL function pointer into
     the call — trading a refusal for a crash. The ordinary (non-generator)
     path has no such gate and does resolve those defaults correctly; see
-    `the (since-fixed) c_common/fsutil.py compile failure`.
+    `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md`.
     """
     if node is None:
         return False
@@ -1360,7 +1244,7 @@ def _unrepresentable_kwonly(fn: N.FunctionDef) -> list:
     `iter_files_by_suffix(root, suffixes, relparent=None, *, walk=
     walk_tree, _iter_files=iter_files)` were all rejected before the real
     blocker (CALLING the parameter) was ever reached — see
-    `the (since-fixed) c_common/fsutil.py compile failure`.
+    `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md`.
 
     The gate that replaces it asks the question that actually matters: can
     each omitted argument be filled with the RIGHT value? A keyword-only
@@ -1690,21 +1574,6 @@ def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
         return False, 'lambda with *args/**kwargs or a default parameter'
     if not _property_call_ok(fn, struct_name, struct_def, prop_names):
         return False, 'calls the result of a @property getter (v0)'
-    if struct_name is None and getattr(fn, 'name', None) in _VALUE_USED_FUNCS:
-        return False, ('used as a function value (a by-value call binds '
-                       'keywords through the runtime signature only the C++ '
-                       'unit registers)')
-    # A generator that CALLS one of its own parameters consumes a function value
-    # whose backend it cannot know; the handle layouts of the two backends
-    # differ, so every generator that flows as a value and every generator that
-    # consumes one are on the C++ path, which drives the handle dynamically.
-    if struct_name is None:
-        _pnames = {p[0] for p in fn.params}
-        for _n in _walk(fn):
-            if (isinstance(_n, N.CallExpr) and isinstance(_n.func, N.IdentExpr)
-                    and _n.func.name in _pnames):
-                return False, ('calls a parameter (a function value: driven '
-                               'dynamically by the C++ path)')
     params = fn.params
     _is_cm = False
     _is_static = False
@@ -3227,36 +3096,6 @@ def _rewrite_async_gen_stmts(stmts: list, cvar: str) -> list:
     return out
 
 
-def _local_param_name(pname) -> str:
-    """The body-local name a coroutine prologue binds a parameter to.
-
-    The parser keeps a `*args` / `**kwargs` parameter's star in its name. Left
-    in place, the C emitter reads a leading `*` as a dereference and declares
-    `int64_t *xs; *xs = ...`, a write through an uninitialised pointer that
-    the body then never reads back (the packed list is lost). The body refers
-    to the parameter by its bare name, so the local takes the bare name too."""
-    return _cm_as_str(pname).lstrip('*')
-
-
-def _star_slot(real_params, lead: int) -> int | None:
-    """C-signature slot of a coroutine's `*args` parameter, or None.
-
-    `real_params` is the `(name, annotation)` list the `_start` trampoline
-    takes after its `lead` receiver slots (`self`/`cls`; 0 for a plain
-    function), so the returned index is the one a CALLER's argument list
-    must line up with. The `*args` parameter reaches the frame as ONE
-    `MojoList *` slot holding every positional argument from there on, so
-    the call site packs the trailing positionals into it (see
-    `_emit_generator_start_call`) and needs this index to know where that
-    packing starts. `**kwargs` is not a star slot: its packing is keyed by
-    `_func_kwargs_slot`."""
-    for _i, (_pn, _pa) in enumerate(real_params):
-        _pn = _cm_as_str(_pn)
-        if _pn.startswith('*') and not _pn.startswith('**'):
-            return lead + _i
-    return None
-
-
 def _async_receiver_kind(fn, is_method: bool) -> str:
     """The receiver slot a compiled `async def` METHOD takes -- 'self', 'cls'
     or '' -- by the same single rule the generator meta uses
@@ -3292,9 +3131,9 @@ def _async_method_setup(fn, base, struct_name):
                 func=N.SubscriptExpr(obj=N.IdentExpr(name='UnsafePointer'),
                                      index=N.IdentExpr(name=pann)),
                 args=[slot])
-            prologue.append(N.VarDecl(name=_local_param_name(pname), type_ann=pann, value=val))
+            prologue.append(N.VarDecl(name=pname, type_ann=pann, value=val))
         else:
-            prologue.append(N.VarDecl(name=_local_param_name(pname), type_ann=None, value=slot))
+            prologue.append(N.VarDecl(name=pname, type_ann=None, value=slot))
     body_params = [(_CVAR, 'Int')]
     if is_method:
         body_params.append(('self', struct_name))
@@ -3325,7 +3164,7 @@ def _mark_coro_body(body_fd):
     body there loses the captured value's real type: `lambda: some_string`
     yielded from a generator came out as the pointer's bit pattern, and
     under -Werror=int-conversion that took the whole self-host build down
-    (see the (since-fixed) compiled-generator lambda-expression bug).
+    (see bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md).
 
     Defined once here and called from all three body-synthesis sites,
     rather than being spelled out at each: the reasoning is long enough
@@ -3387,51 +3226,28 @@ def _mark_coro_param_elem_kinds(body_fd, real_params, env):
     `emit_funcs.gen_func`), so the loop takes the list path directly.
     See CODEGEN_coro_yield_kind_unresolved_callsite ("Item 8").
 
-    Only LIST params are recorded. A container-of-container has no single C
-    type either (it needs the nested slot the ordinary lowering carries in
-    `_nested_elem_types`), so it is not in `kinds`. An `int64_t` element is
-    NOT a default here: the backend's loop lowering must be told it is a
-    list of ints, because "nothing known" and "known to be ints" take
-    different paths through the dict-or-list dispatch. Those go in
-    `_mojo_coro_param_int_lists` instead of `kinds` (see the comment on
-    `_boxed_list_ptr`), so `_elem_types` keeps its meaning of "not known".
+    Only LIST params are recorded, and only a scalar element kind: a
+    container-of-container has no single C type either (it needs the nested
+    slot the ordinary lowering carries in `_nested_elem_types`), and an
+    `int64_t` element is the default the loop target assumes anyway.
 
     Part of the same contract as `_mark_coro_body` and marked the same way
     (an attribute, not a name-suffix guess) for the same reason: the backend
     must be able to ask "is this a coroutine body, and what did its params
     look like" without a parallel naming convention to keep in sync."""
     kinds: dict = {}
-    nested: dict = {}
     str_params: list = []
-    int_lists: list = []
     for pname, _pann in real_params:
         v = env.get(_cm_as_str(pname))
-        # Keyed by the BODY's local name (`_local_param_name`): a `*args`
-        # parameter's raw name carries its star, and the body never does.
         if isinstance(v, tuple) and len(v) == 2 and v[0] == 'list' \
                 and isinstance(v[1], str) and v[1] in _KIND_CTYPE:
             ct = _KIND_CTYPE[v[1]]
-            if ct == 'int64_t':
-                int_lists.append(_local_param_name(pname))
-            else:
-                kinds[_local_param_name(pname)] = ct
-        elif (isinstance(v, tuple) and len(v) == 2 and v[0] == 'list'
-                and isinstance(v[1], tuple) and len(v[1]) == 2
-                and v[1][0] == 'list' and v[1][1] in _KIND_CTYPE):
-            # A list of lists: the outer element is a `MojoList *` and the
-            # inner element kind rides in the nested slot (the same
-            # (elem, nested) pair `_param_elem_types` carries for an
-            # ordinary function's list-of-lists parameter).
-            kinds[_local_param_name(pname)] = 'MojoList *'
-            nested[_local_param_name(pname)] = _KIND_CTYPE[v[1][1]]
+            if ct != 'int64_t':
+                kinds[_cm_as_str(pname)] = ct
         elif v == 'p':
-            str_params.append(_local_param_name(pname))
-    if nested:
-        body_fd._mojo_coro_param_nested_kinds = nested
+            str_params.append(_cm_as_str(pname))
     if kinds:
         body_fd._mojo_coro_param_elem_kinds = kinds
-    if int_lists:
-        body_fd._mojo_coro_param_int_lists = int_lists
     if str_params:
         body_fd._mojo_coro_param_str_params = str_params
     return body_fd
@@ -3454,7 +3270,6 @@ def _lower_one_async_gen(fn: N.FunctionDef, meta: list, base: str | None = None,
         'is_async_gen': True, 'receiver': _async_receiver_kind(fn, is_method),
         'base': base, 'body_name': body_name,
         'params': c_params,
-        'star_slot': _star_slot(real_params, len(c_params) - len(real_params)),
         'nargs': len(real_params), 'value_ctype': 'int64_t', 'value_kind': 'i',
         'tuple_slot_ctypes': None,
         'no_wd_forward': _base_is_channel_free(base),
@@ -3480,17 +3295,11 @@ def _lower_one_async(fn: N.FunctionDef, meta: list, base: str | None = None,
     body_fd.is_generator = False
     body_fd.is_async = False
     body_fd = _mark_coro_body(body_fd)
-    # The same cross-call element contract a generator body gets (see
-    # `_lower_one`): an `async def` reads its list params through the same
-    # untyped int64_t slots, so without it `for x in xs:` over an int list
-    # param declared the loop variable through the dict-or-list dispatch.
-    body_fd = _mark_coro_param_elem_kinds(body_fd, real_params, _static_env(fn, struct_def))
     meta.append({
         'name': _cm_as_str(fn.name), 'struct': struct_name, 'is_method': is_method, 'is_async': True,
         'receiver': _async_receiver_kind(fn, is_method),
         'base': base, 'body_name': body_name,
         'params': c_params,
-        'star_slot': _star_slot(real_params, len(c_params) - len(real_params)),
         'nargs': len(real_params), 'value_ctype': _KIND_CTYPE[kind], 'value_kind': kind,
         'tuple_slot_ctypes': None,
         'no_wd_forward': _base_is_channel_free(base),
@@ -4210,29 +4019,7 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
             _kw_names.add(_p)
         _star_i = None
         _has_kwargs_spread = False
-        # The `*args` parameter's index, if any. Every positional argument
-        # from there on is one ELEMENT of that list, not a parameter of its
-        # own, so it constrains the list's element kind. Recorded as
-        # ('list', kind) -- the same entry a list literal argument records --
-        # so the body's loop target and yield slot are typed from the
-        # unanimous element kind. A container element, or one whose kind is
-        # not statically known, poisons the slot (a refusal, not a guess).
-        _star_pi = _star_slot(pinfo, 0)
         for i, a in enumerate(node.args):
-            if _star_pi is not None and i >= _star_pi:
-                pname, pann = pinfo[_star_pi]
-                if not _unannotated(pann):
-                    break
-                if isinstance(a, N.UnaryOp) and a.op in ('*', '**'):
-                    if a.op == '*':
-                        _star_i = i
-                    else:
-                        _has_kwargs_spread = True
-                    continue
-                _ek = _argkind(a, cenv)
-                slot.setdefault(pname, set()).add(
-                    ('list', _ek) if isinstance(_ek, str) else None)
-                continue
             if i >= len(pinfo):
                 break
             pname, pann = pinfo[i]
@@ -4467,39 +4254,6 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
     _classify()
 
 
-# Names of this module's top-level functions referenced as VALUES (an
-# identifier that is not the callee of a call): passed, stored, compared, used
-# as a parameter default. A generator among them is dispatched through its
-# `<base>_start` address by code that does not know its signature, which the
-# C++ unit alone registers with the runtime (`mojo_gen_sig_register`), so the
-# stack-switch backend declines it. Per-lower() lifetime, like `_PARAM_NAMES`.
-_VALUE_USED_FUNCS: set = set()
-
-
-def _scan_value_used_functions(stmts) -> None:
-    _VALUE_USED_FUNCS.clear()
-    fn_names = {s.name for s in stmts if isinstance(s, N.FunctionDef)}
-    if not fn_names:
-        return
-    callee_ids = set()
-    refs = []
-    for n in gimple_exprtypes._walk_ast(stmts):
-        if isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr):
-            callee_ids.add(id(n.func))
-        elif isinstance(n, N.IdentExpr) and n.name in fn_names:
-            refs.append(n)
-    for n in refs:
-        if id(n) not in callee_ids:
-            _VALUE_USED_FUNCS.add(n.name)
-    # ...and a function named as a parameter DEFAULT (`def f(x, *, walk=leaf)`),
-    # which is a value the callee dispatches through without ever naming it.
-    for n in gimple_exprtypes._walk_ast(stmts):
-        if isinstance(n, N.FunctionDef):
-            for dv in (getattr(n, 'param_defaults', None) or {}).values():
-                if isinstance(dv, N.IdentExpr) and dv.name in fn_names:
-                    _VALUE_USED_FUNCS.add(dv.name)
-
-
 def lower(stmts: list, closure_stmts=(),
           module_name: str | None = None) -> tuple[list, list]:
     """Returns (new_stmts, coro_meta). coro_meta entries are dicts:
@@ -4519,7 +4273,6 @@ def lower(stmts: list, closure_stmts=(),
     _STRUCT_NAMES.clear()
     _UNTHREADABLE_NESTED_ASYNC_GENS.clear()
     _STRUCT_NAMES.update(s.name for s in stmts if isinstance(s, N.StructDef))
-    _scan_value_used_functions(stmts)
     if not enabled():
         # The C++ backend (`MOJO_CORO=cpp`, the escape hatch) lowers nested
         # async defs itself and never asks this module to hoist anything --
@@ -5719,18 +5472,11 @@ def _capture_self_into_generator(inner: N.FunctionDef, outer: N.FunctionDef,
         args=[_c_ident(hidden)])
     inner.body = [N.VarDecl(name='self', type_ann=struct_name, value=_erase)] \
         + list(inner.body)
-    # Both writes above are to nodes the walk memo may already hold (the
-    # capture planner walked `inner` and `outer` before this ran), so each
-    # is invalidated: `inner` for its params and body, each call for the
-    # argument it gained. Invalidation runs up the parent edges, which
-    # drops the enclosing `outer` and everything between it and the call.
-    _walk_ast_invalidate(inner)
     hits: list = []
     for st in outer.body:
         _find_calls_to(st, inner.name, hits)
     for call in hits:
         call.args.append(N.MemberExpr(obj=N.IdentExpr(name='self'), member='address'))
-        _walk_ast_invalidate(call)
 
 
 def _calls_in_nested_defs(outer: N.FunctionDef, inner: N.FunctionDef) -> bool:
@@ -5803,16 +5549,11 @@ def _finish_sync_hoist(s: N.FunctionDef, sync_rename: dict) -> None:
               if not (isinstance(x, N.FunctionDef)
                       and getattr(x, 'is_generator', False)
                       and x.name in sync_rename)]
-    # `s.body` was replaced and each renamed call is rewritten in place, and
-    # the walk memo may hold both (`_hoist_nested_sync_generator` walked
-    # them to decide eligibility). Invalidate each written node.
-    _walk_ast_invalidate(s)
     for _st in s.body:
         for _n in _walk(_st):
             if (isinstance(_n, N.CallExpr) and isinstance(_n.func, N.IdentExpr)
                     and _n.func.name in sync_rename):
                 _n.func.name = sync_rename[_n.func.name]
-                _walk_ast_invalidate(_n)
 
 
 def _hoist_method_nested_generators(m: N.FunctionDef, struct_name: str,
@@ -6012,12 +5753,12 @@ def _lower_one(fn: N.FunctionDef, meta: list,
     prologue = []
     for i, (pname, _pann) in enumerate(real_params):
         if param_kinds[i] == 'd':
-            prologue.append(N.VarDecl(name=_local_param_name(pname), type_ann='Float64',
+            prologue.append(N.VarDecl(name=pname, type_ann='Float64',
                                       value=_call('__mojo_gen_arg_d',
                                                   [_c_ident(_CVAR),
                                                    N.IntLiteral(value=arg_base + i)])))
         else:
-            prologue.append(N.VarDecl(name=_local_param_name(pname), type_ann=None,
+            prologue.append(N.VarDecl(name=pname, type_ann=None,
                                       value=_call(ARG_SHIM, [_c_ident(_CVAR),
                                                              N.IntLiteral(value=arg_base + i)])))
 
@@ -6056,13 +5797,11 @@ def _lower_one(fn: N.FunctionDef, meta: list,
         'base': base,
         'body_name': body_name,
         'params': c_params,
-        'star_slot': _star_slot(real_params, len(_lead)),
         'nargs': len(real_params),
         'value_ctype': _KIND_CTYPE[kind],
         'value_kind': kind,
         'tuple_slot_ctypes': _generator_tuple_slots(fn, env) if kind == 'tuple' else None,
         'tuple_slot_nested': _generator_nested_slots(fn, env) if kind == 'tuple' else None,
-        'tuple_slot_elems': _generator_tuple_slot_elems(fn, env) if kind == 'tuple' else None,
         'defaults': list((getattr(fn, 'param_defaults', None) or {}).items()),
         # Parameters whose declared DEFAULT names one of this module's own
         # generators (`def walk_tree(root, *, walk=_walk_tree)`), as
@@ -6328,7 +6067,6 @@ def register(gen, meta: list) -> None:
     # char*/pointer/double yield value to the int64_t the shim takes,
     # instead of emitting a raw "makes integer from pointer" call.
     gen.func_param_types.setdefault('__mojo_coro_yield_i', ['int64_t', 'int64_t'])
-    gen.func_param_types.setdefault('__mojo_coro_yield_p', ['int64_t', 'int64_t'])
     gen.func_param_types.setdefault('__mojo_coro_yield_d', ['int64_t', 'double'])
     gen.func_param_types.setdefault('__mojo_gen_arg', ['int64_t', 'int64_t'])
     gen.func_param_types.setdefault('__mojo_gen_arg_d', ['int64_t', 'int64_t'])
@@ -6472,13 +6210,8 @@ def register(gen, meta: list) -> None:
             # and GimpleGen._cpp_yield_from's `yield from cls.<gen>(...)`
             # branch needs it to get the call arity right.
             'receiver': m['receiver'],
-            # C-signature slot of the `*args` parameter (None if none): the
-            # call site packs the positional arguments from there on into one
-            # MojoList * -- see _star_slot.
-            'star_slot': m.get('star_slot'),
             'tuple_slot_ctypes': m.get('tuple_slot_ctypes'),
             'tuple_slot_nested': m.get('tuple_slot_nested'),
-            'tuple_slot_elems': m.get('tuple_slot_elems'),
             'has_return_value': True,
             'is_async_gen': m.get('is_async_gen', False),
             # Whether this coroutine's body can EVER put a wait-descriptor

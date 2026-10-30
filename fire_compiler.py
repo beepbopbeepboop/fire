@@ -3475,10 +3475,7 @@ def desugar_genexps(stmts: list) -> list:
     d.walk_list(stmts, None)
     if d.hoisted:
         stmts[0:0] = d.hoisted
-    # Cleared in place, not rebound: gimple_codegen imports this list by name,
-    # so a rebound global would leave its copy pointing at the previous call's.
-    del DESUGARED_GENEXP_NAMES[:]
-    DESUGARED_GENEXP_NAMES.extend(fn.name for fn in d.hoisted)
+    DESUGARED_GENEXP_NAMES = [fn.name for fn in d.hoisted]
     return stmts
 
 
@@ -3652,7 +3649,7 @@ def _namedtuple_tuple_use(nodes: list, name: str):
     is checked everywhere: a false refusal, never a silent one. A value that
     reaches a tuple operation WITHOUT passing through one of those names (an
     element of a container, a field of another struct) is not seen here; that
-    gap is recorded in bug:COMPILE_FAIL_collections___init__."""
+    gap is recorded in bugs/COMPILE_FAIL_collections___init__.md."""
     tracked: set = set()
 
     def is_value(e):
@@ -3705,15 +3702,7 @@ def desugar_namedtuples(stmts: list) -> list:
     does NOT match stays an ordinary call, which the compiled path refuses by
     name (mojo/backend_gimple/emit_calls.py) rather than lowering to the
     unresolved-import stub that returned the text `unavailable in compiled
-    mode`.
-
-    The class names it lowered are recorded in `DESUGARED_NAMEDTUPLE_NAMES`
-    (cleared and repopulated on every call), so the codegen can refuse a
-    tuple operation on a value of one of those classes wherever its static
-    type is known, including one reached through a container."""
-    # Cleared in place, not rebound: gimple_codegen imports this list by name,
-    # so a rebound global would leave its copy pointing at the previous call's.
-    del DESUGARED_NAMEDTUPLE_NAMES[:]
+    mode`."""
     nodes = _all_nodes(stmts)
     for i, st in enumerate(stmts):
         if not (isinstance(st, AssignStmt) and isinstance(st.target, IdentExpr)
@@ -3735,14 +3724,7 @@ def desugar_namedtuples(stmts: list) -> list:
             raise RuntimeError('namedtuple lowering did not produce a class: ' + name)
         cls[0].line = st.line
         stmts[i] = cls[0]
-        DESUGARED_NAMEDTUPLE_NAMES.append(name)
     return stmts
-
-
-# Class names lowered by the most recent `desugar_namedtuples` call. Read by
-# gimple_codegen's compile choke point, which hands them to the subscript
-# lowering; a module-level list for the same reason as DESUGARED_GENEXP_NAMES.
-DESUGARED_NAMEDTUPLE_NAMES: list = []
 
 
 def _rebound_names(stmts: list) -> set:
@@ -5202,7 +5184,7 @@ class Parser:
                 # The compiled path no longer requires the rename — a
                 # comprehension's target gets its own binding and the enclosing
                 # one is restored afterwards, in `emit_infra.py`'s
-                # `_compr_bind_target` / `_restore_binding`, regression
+                # `_compr_bind_target` / `_compr_restore_target`, regression
                 # `comprehension_target_shadows_struct_local` in
                 # `test_gimple_runner.py`. The rename stays: it is free, and it
                 # keeps this function's own C output identical to what the

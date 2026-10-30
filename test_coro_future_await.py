@@ -13,8 +13,9 @@ import platform
 import subprocess
 import tempfile
 
+os.environ['MOJO_CORO'] = 'stackswitch'
+
 import gimple_codegen
-from mojo.middle import coro
 from build_config import find_gcc, find_gxx
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -61,11 +62,7 @@ def _build_and_run(mojo_src: str, require=_AWAITABLE_SHIMS) -> str:
     with open(src_path, 'w') as f:
         f.write(mojo_src)
 
-    # Pinned per compile, not at import: a module-level MOJO_CORO assignment
-    # here also rewrote the backend for every test file that imports this
-    # harness (test_async_void_return.py's cpp-path tests among them).
-    with coro.pinned('stackswitch'):
-        c_code = gimple_codegen.compile_to_gimple(mojo_src, do_imports=False, filename=src_path)
+    c_code = gimple_codegen.compile_to_gimple(mojo_src, do_imports=False, filename=src_path)
     if not any(s in c_code for s in require):
         raise RuntimeError(f"none of {require!r} in the generated C -- "
                            "this test isn't exercising the path it claims to:\n" + c_code)

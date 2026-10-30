@@ -1,46 +1,62 @@
 # A dict literal's container key now renders by value; three gaps remain on the VALUE side
 
-## Status (2026-10-30, branch `work/fix-leftover-bug-codegen-dict-literal-container-key-v-8985`): PARTIAL
+## Status (2026-10-04, `work/bugs6-1`): (2) is FIXED and it was not a mis-typed
+## `vt`; (1) and (3) are re-diagnosed below and neither is where this doc's
+## "Exact next step" said
 
-Landed, measured against the compiled path and CPython:
+The doc's next step guessed "print `vt` and `actual_atype` at
+`_emit_dict_int_value_store`; (1) and (2) are almost certainly the same
+mis-typed `vt`". **Neither is.** Measured on the tree this branch started from,
+with the generated C in hand:
 
-* **(3) FIXED for a tuple whose string slot is built by a CALL.**
-  `_literal_needs_kinds` (`mojo/backend_gimple/emit_exprs.py`) now records a
-  `mojo_list_set_kinds` row for a homogeneous `char *` TUPLE literal, so
-  `mojo_dict_key_for` renders the slot by content, not by address. Narrowed to
-  tuple literals on purpose: a list is never a dict key, and the docstring's
-  rule that a list of strings keeps no row (no runtime allocation) still holds.
-  Regression: `test_gimple_runner.py` `gimple_runtime_string_tuple_key_is_content_keyed`
-  (`d[(k("a"),)] = "R"` prints `R 1`; reverting the one line prints `None 1`).
-  **Not yet measured:** every homogeneous string tuple literal now costs one
-  `mojo_list_set_kinds` allocation, and that row is never pruned except on
-  `mojo_list_destroy`. The integrator's gate must check the self-host memory
-  ceiling against the selfhost memory-leak bug (fixed 2026-10-27, doc deleted).
+* **(2) was a KEY-DOMAIN mismatch, not a value type.** The store emitted
+  `mojo_dict_set_bool(d, _t14, 1)` where `_t14 = mojo_cstr_or_int_str(...)` —
+  the *materialised decimal string* — while the matching read emitted
+  `mojo_dict_get_int_kw(d, _t20)` with the raw container word. One
+  source-level assignment, two key DOMAINS, and the read saw neither entry.
+  The cause is `_apply_kw_keys`' membership test: it asks whether the setter
+  NAME is in `_KW_DICT_FNS`, so a setter with no `_kw` twin is not refused —
+  it silently takes the "build the string now" arm. `_KW_DICT_FNS` listed
+  `int`/`double`/`str` and not `bool`/`none`/`struct`/`other_struct`.
+  **FIXED**: the four missing twins are in the runtime and the four names are
+  in the set. `d[("a",)] = True; print(d[("a",)], len(d))` was `0 1`, is `1 1`;
+  `d[("a",)] = None` is now reachable from `in` (`("a",) in n`), which it was
+  not. Pinned by `test_gimple_runner.py`'s
+  `gimple_container_keyed_store_reaches_its_own_read`.
+* **(1) is a MODULE-GLOBAL receiver problem, and the LOCAL spelling is
+  already right.** The same program inside a function prints `9.5`:
 
-Re-diagnosed, NOT fixed:
+      def run():
+          d = {}
+          d[(1, 2)] = 3.5
+          print(d[(1, 2)], len(d))       ->  3.5 1     (correct)
 
-* **(2) is not a container-key defect.** The bool read prints `1` for a plain
-  string key too (`d["a"] = True; print(d["a"])` -> `1`, CPython `True`). The
-  store is right (`mojo_dict_set_bool_kw` exists). The read drops the bool kind
-  for every dict. That is `bugs/CODEGEN_dict_slot_read_loses_its_value_kind.md`,
-  which another worker holds. The existing `gimple_container_keyed_store_reaches_its_own_read`
-  pins the `1` on purpose, with a comment saying so.
-* **(1) is still open, with new evidence.** Module scope only; a local
-  `d` is correct. At module scope a double prints its IEEE-754 bits
-  (`d[(1, 2)] = 9.5` -> `4621537642612260864`, CPython `9.5`) and a string
-  prints its address (`d[("a",)] = "R"` -> `4372406328`, CPython `R`). The
-  string case is new: it is the same loss of the value type through a fresh
-  module-global temp, not a float-only effect.
-
-The leftover patch (`.git/control/leftover/...8985.patch`) was malformed: its
-new-file section had no hunk header and no `+` prefixes, so `git apply` rejected
-it. Its `emit_exprs.py` hunk was applied by hand and narrowed as above. Its
-separate `test_dict_tuple_key_string.py` was NOT added; the regression lives in
-`test_gimple_runner.py` beside its siblings.
+  and at module scope prints the double's IEEE-754 bits. The difference is
+  `_dict_val_types`, which is keyed by the C TEMP the dict arrives in, and
+  every reference to a module-scope `d` loads a FRESH one (`_t5`, `_t14`,
+  `_t23`, `_t27` in the measured C). The store records its own temp and the
+  read asks about its own, so the value-type record can never connect them
+  across two references to the same global — while a local's temp is the same
+  one on both sides. The store itself is correct in both cases
+  (`mojo_dict_set_double_kw`), which is why the doc's `_emit_dict_int_value_store`
+  step found nothing there.
+* **(3) is a MISSING per-slot kind on the key tuple, and the fix is NOT a
+  pointer-shape test.** The key is built `mojo_list_append_str(pair, ...)`
+  with **no** `mojo_list_set_kinds` beside it — `_lower_list_literal` records
+  kinds only when they are heterogeneous, and a one-element tuple of strings is
+  homogeneous. So `mojo_dict_key_for`'s `_tuple_key_elem` asks
+  `mojo_list_slot_kind(pair, 0)`, gets `'i'`, and renders the slot's ADDRESS as
+  an integer; two calls to `k("a")` are two addresses, so the read misses.
+  `mojo_boxed_is_str` is **not** the answer, and this doc's own next step
+  gestures at it: its range test passes for any integer in `[2^31, 2^47)`,
+  which is the interval the registered `ptrreg-boxed-str` row is about
+  (`RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md`), so using it
+  to DECIDE that a slot is a string turns a wrong key into a `strlen` of an
+  integer. The tag has to come from the build, not from the word.
 
 ## Exact next step, for what is left
 
-1. **(3) is landed for call-built string tuples (see Status). The original, more general plan follows; it is still the right fix for an int-valued or mixed slot that `_literal_needs_kinds` does not cover.** For (3): record the per-slot kinds on a tuple the codegen builds, always,
+1. **For (3): record the per-slot kinds on a tuple the codegen builds, always,
    not only when they are heterogeneous.** The information is known at every
    `mojo_list_append_*`; what is missing is that it is dropped when the kinds
    are uniform. Two shapes, and the second is the one to check first because
@@ -107,8 +123,8 @@ compiled `0`, CPython `True`. Identical on `d0796643`. This is the per-slot
 bool kind (`mojo_dict_set_bool`, `_DictSlot.kind == 3`) not reaching the
 container-keyed store: the container key takes the `_kw` twin route, and there
 is no `mojo_dict_set_bool_kw`, so the store that actually runs is the `int` one.
-(Re-measured 2026-10-30: this is NOT specific to the container-key path. The
-plain spelling `d["a"] = True; print(d["a"])` also prints `1`. See Status (2).)
+Note the non-container spelling is right — `d["a"] = True` prints `True` — so
+this is specific to the container-key path, not to the bool store.
 
 **3. A runtime-BUILT string inside a tuple key is still address-keyed.**
 

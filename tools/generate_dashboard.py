@@ -205,7 +205,7 @@ GATE = {
         "Two verdicts need judgement: stdlib-dylib (skip count must not rise) and stdlib-syntax (U must not rise).",
         "Fanout jobs print many FAIL job:item lines absorbed by expect= counts — look at the FAILED section.",
         "If log prints PEAK DRIFT: run tools/suite.py --apply-peaks build/suite.log and re-class the jobs.",
-        "x86-examples used to flake ('toplevel_const has no home', 93/93 SKIP) because it built examples on THREADS and formal/build.py is not reentrant; it now runs one process per build.",
+        "Flake: x86-examples 'toplevel_const has no home' under parallel load; passes alone.",
     ],
 }
 
@@ -328,7 +328,7 @@ SNAPSHOT = {
         "20 pre-2026-10-05 archaeology branches await the owner's triage decision.",
     ],
     "open_reds": [
-        "Bootstrap stage2/3 family behind commit 1c3736c56 (Opus agent's worktree).",
+        "Bootstrap stage2/3 family behind bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md (Opus agent's worktree).",
         "Gate-bucket formal reds itemised above (formal-os-backing, formal-monomorph, formal-run).",
     ],
 }
@@ -904,12 +904,7 @@ def main():
 </body>
 </html>"""
 
-    # Under the repo's gitignored build/ rather than a shared /tmp name, so two
-    # runs (or two worktrees) never write the same file.
-    out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir,
-                           "build")
-    os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.normpath(os.path.join(out_dir, "dashboard.html"))
+    out_path = os.path.join("/tmp", "dashboard.html")
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(html)
     print(f"Dashboard written to: {out_path}")

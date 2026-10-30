@@ -26,10 +26,6 @@ with tempfile.TemporaryDirectory() as td:
     s = B._defined_symbols('gcc', strong[:-2] + '.o')
     check('a weak definition is not a clash', '_gpu_stub' not in w and '__gpu_stub' not in w)
     check('a strong definition is counted', any('strong_fn' in x for x in s))
-    # The surface questions (export table, header-orphan check) need the weak
-    # definition too: it is callable from the dylib whether or not it clashes.
-    wa = B._defined_symbols('gcc', weak[:-2] + '.o', include_weak=True)
-    check('include_weak counts a weak definition', any('gpu_stub' in x for x in wa))
 
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)
