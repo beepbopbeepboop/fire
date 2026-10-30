@@ -149,7 +149,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
-| `FORMAL_macho_dylib_stub_and_segment_fields_violate_the_spec.md` | **unclaimed** | FORMAL Mach-O: the dylib's `__stubs` section fields, mach_header flags and `__DATA_CONST` protection all differ from what `ld` emits |
+| commit 709425c61 | **unclaimed** | FORMAL Mach-O: the dylib's `__stubs` section fields, mach_header flags and `__DATA_CONST` protection all differ from what `ld` emits |
 
 ### `formal/model` — 31 documents, 8 claimed
 
@@ -170,7 +170,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md` | **unclaimed** | FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None |
 | `FORMAL_a_print_of_a_container_needs_a_text_loop.md` | **unclaimed** | `print(<a container>)` is refused: rendering one is a loop emitting text, and `_print_call` builds ONE format |
 | `FORMAL_a_try_handler_arm_is_still_never_emitted.md` | **unclaimed** | A `try` handler arm is still never emitted, and the reason it is not worth fixing in one function is that EVERY arm in this repository calls something |
-| `FORMAL_int_of_an_out_of_range_double_saturates_the_other_way_on_each_backend.md` | **unclaimed** | `Int(<a double too large for Int64>)` saturates in OPPOSITE directions on the two backends, and CPython raises |
+| commit a537b1095 | **unclaimed** | `Int(<a double too large for Int64>)` saturates in OPPOSITE directions on the two backends, and CPython raises |
 | `FORMAL_known_limits.md` | **unclaimed** | the sweep residue, audited — which refusals are true |
 | `FORMAL_len_of_a_readdir_name_is_refused_and_needs_a_bytes_kind.md` | **unclaimed** | the ELEMENT half of the foreign-bytes question is closed, and the `len` half is not |
 | `FORMAL_listdir_no_run_time_sequence.md` | **unclaimed** | a run-time-length blob is answerable; a run-time-length LIST is not |
@@ -185,7 +185,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_string_constructor_refuses_a_pointer_typed_value.md` | **unclaimed** | `String(unsafe_from_utf8_ptr=p)` is refused because the value-kind reader calls a pointer `'int'` |
 | `FORMAL_sweep_singles_second_half.md` | **unclaimed** | four of §3.2's eight remaining single-file causes are not patches, measured |
 | `FORMAL_sweep_work_map.md` | **unclaimed** | the formal sweep series — the current census, the measurements that outlived their round, and the index of the twenty-one rounds it replaces |
-| `FORMAL_the_external_call_suite_has_a_red_env_round_trip.md` | **unclaimed** | a raw pointer local bound from a C call is classified 'int', so `String(ptr)` is refused |
+| commit c0a2ce3da | **unclaimed** | a raw pointer local bound from a C call is classified 'int', so `String(ptr)` is refused |
 
 ### `formal/monomorph` — 3 documents, 2 claimed
 
@@ -255,7 +255,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
-| `FORMAL_os_stat_dev_is_sign_extended_in_cpython_and_unsigned_here.md` | **unclaimed** | `stat_dev` answers the low 32 bits unsigned; CPython answers them sign-extended, and `test_formal_os_backing.py`'s `stat_null` compares the two with `%d` |
+| commit 9ffffb382 | **unclaimed** | `stat_dev` answers the low 32 bits unsigned; CPython answers them sign-extended, and `test_formal_os_backing.py`'s `stat_null` compares the two with `%d` |
 
 ---
 
@@ -273,7 +273,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_ast_bridge_carries_one_argument_per_call.md` | **the VALUE of a call is unprovable for two arguments and up.** `MojoExpr.call` carries ONE argument and the bridge's `callFunc` stub answers 0 for a user function's name, so a five-line program (`return f(1, 2)`) generates an AST that is false and fails with `⊢ False`; on arm64 the same program is refused earlier, for a different reason (the CFG walk is per-function). A sibling of the `MojoFunc` arity row above and NOT on its list of steps, so closing that one does not close this one — a seven-argument function is unprovable until both are |
 | `FORMAL_dylib_export_loops_and_frame_bounds.md` | **`OPUS-4` only: the loop-fuel obligation, and it is the one piece left.** `OPUS-6` (x86) is closed — and the measurement found a defect rather than a number: `--backend` is a GLOBAL flag the `dylib` command never read, so `dylib --formal --backend=x86_64` built an **arm64** image, and `compile_formal_dylib(arch="x86_64", prove=True)` raised `KeyError` out of the arm64 generator. Both are now refused by name (`compile_formal_dylib` refuses, `fire.py` checks first with a better message), so there is no x86-64 dylib **contract** to classify. `OPUS-5`'s premise was wrong and is corrected in the document: `FrameBound` is already depth-indexed (`stride * (arg.toNat + 1) <= sp`, `contract_sound` inducts on `k` with `arg.toNat = k`, `frameBound_succ` is the step, `stride` comes from the emitter's frame layout), so the `bl` case is missing the recursion contract's per-level base/step walks and nothing in the library. What is left is `OPUS-4`: a ranking function or a fuel invariant for a looped export, a scheme extension scoped in the document §6 |
 | `CODEGEN_bootstrap_resource_blowup.md` | the ~192 GB runaway, the 55 GB ceiling, attribution |
-| `CODEGEN_noshim_dumpfull_preexisting_divergence.md` | native-vs-reference `.ci` divergence |
+| commit e8a7135b8 | native-vs-reference `.ci` divergence |
 | *(deleted 2026-09-30)* | the nested-comprehension cluster is CLOSED on both the compiled and the formal backends: a 2+ clause comprehension no longer drops clauses (`_compr_pending_inner`), and the formal backends no longer exit 58/SIGSEGV at random — `_emit_range_list` gave every `range()` in a function one shared `_rabs` label, so the first range branched into the second's block and left through the second's `jmp div_label`. See the two commits on `work/codegen-old-divergences` and the cases in `test_x86_64_containers.py` |
 | `DOCS_merge_left_citations_of_the_docs_the_branches_deleted.md` | merging eight formal branches deleted 14 bug docs and left 12 citations of them, one of them a stale `precondition` assertion in `test_formal_sweep.py` that is RED on `master` today; the inventory, the split between the historical `was X, deleted` convention and the eleven that mislead, and the walk that finds them |
 | `FORMAL_sweep_work_map_2026-10-01_b3.md` | the b3 tree swept on BOTH architectures (630 files each, one tree): ranked causes, the first same-tree arm64-vs-x86-64 comparison (56 files, one ABI constant), the instrument's two splits of the `other refusal` bucket, and which cause is owned by which claim. **Read this before planning any formal work — it is the only map whose architecture comparison is real** |
@@ -284,7 +284,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_sweep_work_map_2026-10-02_std-b.md` | sweep slice `std-b` (40 stdlib files, arm64): the class counts before and after three landed fixes, and a gate probe that measures what is behind `binary_heap.mojo` — **0 files move**, so the export rule is NOT this slice's constraint and what is behind it is a documented MLIR limit (17 files) plus monomorphisation. Read §5 before working §4 |
 | *(deleted 2026-10-01)* | the multi-clause comprehension cluster is CLOSED for all four kinds: `set`/`dict` no longer drop every clause after the first (each merges with the runtime call its semantics need — `mojo_set_update` per element, `mojo_dict_update` per pair — and both now walk the source in INSERTION order, which a merged result's iteration order and repr both report), and a comprehension whose element is a container now carries `_nested_elem_types` / `_tuple_slot_types` across, so a 0 in a non-first slot reads as an int instead of NULL printing `None`. A heterogeneous list RETURNED BY A CALL reads its slots boxed, so a float slot is no longer handed to `strlen` (SIGSEGV). Regressions in `test_runtime_diff.py`; the adjacent shapes still open are in `CODEGEN_nested_container_as_dict_key_or_tuple_slot.md` |
 | *(deleted 2026-10-02)* | the cross-module frame hand-off did not work for a free function's struct parameter, and the contract it needed — a per-parameter `frame_params` table on every export entry — was not published for a module that declared no framed struct. **Both fixed**: `_export_frame_contract` publishes for EVERY function, and `test_formal_cross_module.py` pins the published table, a layout disagreement refused by name, and a plain-parameter disagreement. No longer open; the row stayed because the sweep map cites it |
-| *(deleted 2026-10-02)* | the two x86-64 backend gaps (both fixed): a bracketed callee this unit does not compile is now an EXPORT gap asked before it is a specialization gap (`formal/build.py`'s `_bracketed_export_gap`), and a bare call to a name the link line does not publish says so instead of reaching the assembler. Both landed with `work/formal3-2-r2-r2` and `work/formal3-5`; the row stayed because `formal/model.py` and `test_formal_x86_64_parity.py` still cite the doc in their comments (see `bugs/DOCS_merge_left_citations_of_the_docs_the_branches_deleted.md`) |
+| *(deleted 2026-10-02)* | the two x86-64 backend gaps (both fixed): a bracketed callee this unit does not compile is now an EXPORT gap asked before it is a specialization gap (`formal/build.py`'s `_bracketed_export_gap`), and a bare call to a name the link line does not publish says so instead of reaching the assembler. Both landed with `work/formal3-2-r2-r2` and `work/formal3-5`; the row stayed because `formal/model.py` and `test_formal_x86_64_parity.py` still cite the doc in their comments (see commit 0702d4087) |
 | *(optional, not a bug)* | **`struct.mojo`'s `pack` still has five value slots and could have eight.** `formal/hostmods/struct.mojo` declares that "a format naming more than five values cannot be packed here" and declines by returning an empty list; with both conventions landed (above) a `pack(fmt, v0..v7)` call is expressible on both backends, so widening the slots changes what the module can ANSWER rather than what it can reach. `<HHHHHH` (6 bytes) and `<4sBBBBBBB5x` (16 bytes) are both already in its buffer-size ladder and would become PACKED; `<IIQQQQQQ` (56 bytes) has no ladder entry and would still decline. The value slots would have to be DEFAULTED, since a slot past `_nvalues(fmt)` is never read. — DONE in `work/formal4-sweep-repo-c-r2` (`pack`'s five slots are now `=0`); only the WIDENING is left. This lived in `FORMAL_struct_pack_over_eight_arguments.md`, which is deleted because its BUG — the decline being unreachable — is fixed |
 | `FORMAL_string_value_model.md` | what a string IS on the formal path, `len`/`==`/`+` on it, and the `String`-struct collision behind the 16 "a String receiver" refusals |
 | `FORMAL_a_try_handler_arm_is_still_never_emitted.md` | **the exception machinery, and the only row here whose plan is settled by a measurement rather than an estimate.** The UNCAUGHT half landed on `work/formal33-exceptions` (2026-10-05: `raise` of a class leaves with CPython's own status including all five `SystemExit` forms; a float `/` by a zero divisor leaves instead of answering `inf`; a failing `assert` runs its message and its enclosing `finally` — 198/198 checks in the new `test_formal_exceptions.py`, CPython as the oracle on both backends). What is left is a `try` arm with a body, which is the last big refusal class in the sweeps. **§3 sizes it: `unemitted_handler_arm` finds 5 functions in 3 files in this whole tree, and exactly ONE has a call-free `try` body** — so emitting the arms and routing a same-function `raise` (the obvious slice) moves **0 files**, because every arm whose body could be dispatched wraps a CALL, and a call's raise is the callee's to decide. The sweep maps' "25–30 files" for this class is a count of refused corpus files, not of `try` statements; do not size the work from it. §4 is the status-word design and names the two questions with no answer in the code (superclass matching, and what `except A as e` binds). §5's step 6 is why steps 1–5 are worth landing without it: `formal/arm64_proof_gen.py`'s semantic model has **no translation for a `TryStmt`**, so every program with a `try` is refused by `--formal` today and an unwinder here would ship with no proof behind it. Successor to the deleted `FORMAL_except_arm_is_never_emitted.md` |
@@ -461,7 +461,7 @@ monitor; never under `(…&)`.
 ### C3. Four stage1-vs-stage2 `.ci` divergences — **medium**
 
 `fire_compiler.ci`, `fire.ci`, `module_loader.ci`, `myinterpreter.ci`. Tracked
-in `CODEGEN_noshim_dumpfull_preexisting_divergence.md`; deliberately **not**
+in commit e8a7135b8; deliberately **not**
 assumed to share a root cause — each must be compared independently. The set is
 not stable, because that doc records `PYTHONHASHSEED`-dependent nondeterminism
 in the python3-interpreted reference path itself.
@@ -496,7 +496,7 @@ is wrong on its own terms. Deferred repeatedly; it is genuinely a one-liner.
 Two accounts of `check-native-dumpfull` disagree, and they imply different
 bugs:
 
-- `CODEGEN_noshim_dumpfull_preexisting_divergence.md` (2026-09-25): *"still
+- commit e8a7135b8 (2026-09-25): *"still
   the known pre-existing SIGSEGV (NO fire.ci, exit 139)"*.
 - Reported 2026-09-26: reaches ~192 GB, `exit -9`, killed **by hand**.
 

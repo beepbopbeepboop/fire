@@ -5116,6 +5116,11 @@ MATCH_REFUSED_KINDS = (
     "sequence pattern",
     "mapping pattern",
     "class pattern",
+    # `case C():` is refused by the FORMAL path, which has no isinstance in its
+    # model. The compiled path lowers it before its refusal check
+    # (`mojo/backend_gimple/emit_stmts.py`), so this tuple is the formal layer's
+    # refusal list, not the compiled path's.
+    "class pattern (type test)",
     "as-binding",
     "enum pattern",
 )
@@ -5137,6 +5142,9 @@ def match_pattern_kind(pattern, bound=frozenset()) -> str:
     * `"value"` — anything else that is an ordinary expression: a literal, a
       unary minus, a dotted `mod.CONST` value pattern, a subscript. Compared
       with `==`, which is CPython's own reading of a literal or dotted pattern.
+    * `"class pattern (type test)"` — `case C():`, which is `isinstance(subject,
+      C)`. Listed in `MATCH_REFUSED_KINDS` for the formal path; the compiled
+      path lowers it (see `mojo/backend_gimple/emit_stmts.py`).
     * one of `MATCH_REFUSED_KINDS` — a PEP 634 structural pattern, refused by
       name.
 
@@ -5160,14 +5168,13 @@ def match_pattern_kind(pattern, bound=frozenset()) -> str:
     if isinstance(pattern, F.DictExpr):
         return "mapping pattern"
     if isinstance(pattern, F.CallExpr):
-        # Class-pattern type test: C(), C(x) with positional captures.
-        # Keyword sub-patterns (C(x=0)) stay refused.
+        # `case C():` with no sub-pattern is a type test, isinstance(subject, C).
+        # Any sub-pattern (`C(x)`, `C(x=0)`) deconstructs the subject, which
+        # needs `__match_args__` resolved on the class; no path binds that yet,
+        # so those stay refused.
         args = getattr(pattern, 'args', []) or []
-        keywords = getattr(pattern, 'keywords', []) or []
-        if keywords:
-            return "class pattern"  # refusal kept for keywords
-        # Zero-arg or all positional captures -> new kind
-        if all(isinstance(a, F.IdentExpr) for a in args):
+        kwargs = getattr(pattern, 'kwargs', []) or []
+        if not args and not kwargs:
             return "class pattern (type test)"
         return "class pattern"
     if isinstance(pattern, F.BinaryOp):
@@ -5240,6 +5247,13 @@ def match_pattern_refusal(kind: str, spelling: str, fn_name: str,
             "a working feature, and answers a question about the subject with "
             "an answer about a fresh object. Dispatch on a field "
             "(`match p.x:` then `case 0:`) is the spelling that lowers here"),
+        "class pattern (type test)": (
+            "a CLASS TYPE TEST (`case Point():`), which is `isinstance(subject, "
+            "Point)` and binds nothing. The formal model has no isinstance, so "
+            "it cannot state what the test answers; lowering it as an "
+            "expression would CONSTRUCT `Point()` and compare with `==`, which "
+            "answers a different question. Test the type with an explicit "
+            "field or value (`match p.kind:` then `case 0:`) instead"),
         "as-binding": (
             "an `as`-BINDING (`case P as w:`), which matches the whole "
             "subject and ALSO binds it to `w`. This path parses `as` as a "

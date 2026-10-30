@@ -39,7 +39,7 @@ blocker, and it is what must go first.
 expression and compares with `==`, so `case Op():` CONSTRUCTS `Op()` rather than testing
 the subject's type. A zero-arg class silently matches the wrong thing; a class with a
 required `__init__` argument raises `TypeError: __init__() missing required argument`.
-Filed separately as `bugs/CODEGEN_match_class_pattern.md`.
+The interpreter evaluates `case C()` as a constructor and compares by `==`; the compiled path refuses class patterns by name — the two front ends disagree about what the pattern means.
 
 ### Decision (taken; no reader input needed)
 
@@ -594,4 +594,12 @@ Elapsed: 15.44s
 
 ## Status 2026-10-29 (partial — this session)
 
-Partial fix committed: formal/model.py `match_pattern_kind` now returns `"class pattern (type test)"` for `CallExpr` patterns with positional captures / zero args, removing the refusal that blocked `analyzer.py`. `mojo/backend_gimple/emit_stmts.py` handles the new kind with `isinstance` emission. `myinterpreter.py` updated for interpreter path (name-based fallback). Regression test `test_match_class_pattern.py` passes. `test_formal_match.py` reflects the changed refusal. Full end-to-end build verification on unmodified `analyzer.py` not completed (long compile); Family A `var_decl` (line 723) remains separate. Doc NOT deleted — bug not fully closed.
+Partial fix landed, narrowed in the merge with master:
+
+- **Compiled path** (`mojo/backend_gimple/emit_stmts.py`): `case C():` (zero-arg, no sub-pattern) lowers as `isinstance(subject, C)` through `_lower_builtin_isinstance`, before the formal refusal check.
+- **Interpreter** (`myinterpreter.py` `execute_MatchStmt`): the isinstance implementation from master (`b13d05802`, which also removed `CODEGEN_match_class_pattern.md`). It handles `MojoClass` instances and `__match_args__`.
+- **Formal layer** (`formal/model.py`): `match_pattern_kind` returns `"class pattern (type test)"` only for zero-arg `CallExpr`s. That kind stays in `MATCH_REFUSED_KINDS`, since the formal model has no isinstance, so the formal path refuses it with its own message as before.
+- **Still refused on every path**: any sub-pattern, `case C(x):` or `case C(x=0):`. `analyzer.py:1136` (`case parser.InstDef(name):`) is a positional sub-pattern, so this partial fix does NOT clear the analyzer build. Clearing it needs `__match_args__` resolved on the compiled path (step 2 of the plan above).
+- Regression tests: `test_match_class_pattern.py` (interpreter, master's) and `test_match_class_pattern_kind.py` (kinds + formal refusal message).
+
+Earlier in this session the branch allowed positional captures in the compiled path without binding them, and its interpreter fallback matched by class name. Both were unsound and are removed. Family A `var_decl` (line 723) remains separate, and this doc stays open.

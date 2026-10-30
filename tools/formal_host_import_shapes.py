@@ -131,6 +131,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import formal.imports as _imports  # noqa: E402
+import tools.formal_host_import_wall as _wall  # noqa: E402
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -481,6 +482,10 @@ def rows_for(sweep, min_files=1):
             for name, shapes in found.items():
                 names.setdefault(name, set()).update(shapes)
         shapes = sorted({s for v in names.values() for s in v})
+        # The wall tool's reach / alone, over the wall's OWN corpus. Ranking
+        # `files` here instead would count only the sweep's blocked files and
+        # answer a different question under the same column name.
+        info = _wall.default_rank().get(module, {"reach": [], "alone": []})
         out.append({
             "name": module,
             "files": len(files),
@@ -490,6 +495,8 @@ def rows_for(sweep, min_files=1):
             "names": {k: sorted(v) for k, v in sorted(names.items())},
             "tier": _tier(module),
             "model": _model(module),
+            "reach": len(info.get("reach", [])),
+            "alone": len(info.get("alone", [])),
         })
     return out, missed, len(parsed)
 
@@ -569,13 +576,13 @@ def main(argv=None):
     print(f"host-import shapes from {sweep}: {total} line(s), "
           f"{missed} with no terminal module in them")
     print()
-    print("module            tier           model  files live  needs"
+    print("module            tier           model  files live reach alone  needs"
           "          what the files spell")
     for r in rows:
         spells = "; ".join(f"{k}[{_fmt(v)}]" for k, v in r["names"].items())
         model = "written" if r["model"] != "-" else "-"
         print(f"{r['name']:<16} {r['tier']:<14} {model:<7} {r['files']:>5} "
-              f"{r['live']:>4}  {_fmt(r['needs']):<18} {spells[:110]}")
+              f"{r['live']:>4} {r.get('reach',0):>5} {r.get('alone',0):>5}  {_fmt(r['needs']):<18} {spells[:110]}")
     return 0
 
 

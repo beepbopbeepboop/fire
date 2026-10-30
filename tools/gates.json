@@ -3,12 +3,5 @@
     "stdlib-syntax"
   ],
   "full_every_minutes": 30,
-  "off": {
-    "stdlib-syntax": {
-      "reason": "enum-case gap: case .PASS: rejected on 4 stdlib modules; backlog being worked by haiku",
-      "doc": "bugs/CODEGEN_gate_stdlib_syntax_red.md",
-      "worker": "bug-codegen-gate-stdlib-syntax-enum-case",
-      "since": "2026-10-29 10:43:55"
-    }
-  }
+  "off": {}
 }
