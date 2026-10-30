@@ -4250,24 +4250,6 @@ def _gen_stmt_ExprStmt(gen, node):
         arg_pairs, kwarg_dict = gen._pack_vararg_trailing_params(
             fname, raw_name, arg_pairs, kwarg_dict, _call_has_spread)
 
-        # For compile_to_gimple: pad with do_imports and filename kwargs
-        if raw_name == 'compile_to_gimple':
-            if 'do_imports' in kwarg_dict:
-                arg_pairs.append(kwarg_dict['do_imports'])
-            elif len(arg_pairs) < 2:
-                arg_pairs.append(('int', '0'))
-            if 'filename' in kwarg_dict:
-                arg_pairs.append(kwarg_dict['filename'])
-            elif len(arg_pairs) < 3:
-                arg_pairs.append(('char *', '0'))
-
-        # For interpret_and_execute: pad with filename kwarg
-        if raw_name == 'interpret_and_execute':
-            if 'filename' in kwarg_dict:
-                arg_pairs.append(kwarg_dict['filename'])
-            elif len(arg_pairs) < 2:
-                arg_pairs.append(('int', '0'))
-
         # General: pad missing args with kwargs when expected param count is
         # known — see _lower_call's identical logic (this is the
         # statement-level twin: a call whose return value is discarded,
