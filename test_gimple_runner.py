@@ -12559,3 +12559,29 @@ def main():
     t = make(5)
     print(t.__version__)
 """, "3\n")
+
+
+def test_namedtuple_shaped_class_runs_regression():
+    """Pins the compiled-path target for `collections.namedtuple` (bugs/
+    COMPILE_FAIL_collections___init__.md, Option B): a static struct with
+    `__init__`, the `_replace` method and a `__repr__` that the synthesized
+    class would have to emit. The namedtuple lowering is not built yet; this
+    proves the struct shape it will produce compiles and runs with the
+    right values, so the next step can build on a verified target."""
+    test_gimple_stdout("gimple_namedtuple_shaped_class", """\
+class Point:
+    def __init__(self, x: int, y: int):
+        self.x = x
+        self.y = y
+    def _replace(self, x: int, y: int) -> Point:
+        return Point(x, y)
+    def __repr__(self) -> str:
+        return "Point(x=" + str(self.x) + ", y=" + str(self.y) + ")"
+
+def main():
+    p = Point(1, 2)
+    q = p._replace(3, 4)
+    print(repr(p))
+    print(q.x)
+    print(q.y)
+""", "Point(x=1, y=2)\n3\n4\n")
