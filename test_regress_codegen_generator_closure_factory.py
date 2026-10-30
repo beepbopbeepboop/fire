@@ -172,3 +172,46 @@ def test_closure_factory_call_of_call_compiles():
     finally:
         os.unlink(f.name)
     assert r.returncode == 0, r.stderr
+
+
+# The real summarize_stats.py shape after the closure-factory fix: a generator
+# yields a struct whose list field is a LITERAL of struct instances,
+# `Section("sec", [Table(...)])`. The struct constructor's extern signature takes
+# a `MojoList *` for that parameter, but the argument used to be lowered as a raw
+# C++ brace list `{...}`, which is invalid at a pointer-typed argument position.
+LIST_OF_STRUCTS_SRC = (
+    'class Table:\n'
+    '    def __init__(self, title: str, mode: int):\n'
+    '        self.title = title; self.mode = mode\n'
+    '\n'
+    'class Section:\n'
+    '    def __init__(self, name: str, tables: list):\n'
+    '        self.name = name; self.tables = tables\n'
+    '\n'
+    'def outer():\n'
+    '    def iter_sections(base: int):\n'
+    '        for i in range(2):\n'
+    '            yield Section("sec", [Table("t", i + base)])\n'
+    '\n'
+    '    for s in iter_sections(5):\n'
+    '        print(s.name)\n'
+    '\n'
+    'outer()\n')
+
+
+def test_generator_list_literal_of_structs_ctor_arg_is_valid_cpp():
+    # A list literal of struct instances at a struct-constructor argument must
+    # lower to a real MojoList* (the same arg convention a compiled-generator
+    # call uses), never a raw brace-init list.
+    from build_config import find_gxx
+    cpp = _compile_cpp(LIST_OF_STRUCTS_SRC)
+    assert '{[&]() -> Table *' not in cpp, cpp
+    with tempfile.NamedTemporaryFile('w', suffix='.cpp', delete=False) as f:
+        f.write(cpp)
+    try:
+        r = subprocess.run([find_gxx(), '-std=c++20', '-fsyntax-only',
+                            f'-I{_RUNTIME_INC}', f.name],
+                           capture_output=True, text=True)
+    finally:
+        os.unlink(f.name)
+    assert r.returncode == 0, r.stderr
