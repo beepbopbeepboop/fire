@@ -4923,8 +4923,8 @@ class GimpleGen:
         return glo._gen_lifted_closure(self, ci, outer_name)
     def _emit_generator_tuple_unpack(self, var_names: list, slot_types: list, list_ptr: str, nested_flags: list | None=None) -> None:
         return glo._emit_generator_tuple_unpack(self, var_names, slot_types, list_ptr, nested_flags)
-    def _gen_for_generator_iter(self, var: str, gen_val: str, api: dict, body: list, destroy_after: bool=True):
-        return glo._gen_for_generator_iter(self, var, gen_val, api, body, destroy_after)
+    def _gen_for_generator_iter(self, var: str, gen_val: str, api: dict, body: list, destroy_after: bool=True, shadow_name: str | None=None):
+        return glo._gen_for_generator_iter(self, var, gen_val, api, body, destroy_after, shadow_name)
     def _emit_generator_pending_exc_check(self, gen_val: str, base: str, destroy_after: bool, bb_not_pending: str):
         return glo._emit_generator_pending_exc_check(self, gen_val, base, destroy_after, bb_not_pending)
     def _gen_for_struct_iter(self, var: str, struct_type: str, obj_val: str, body: list, shadow_name: str | None=None, node=None):

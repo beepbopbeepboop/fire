@@ -564,6 +564,85 @@ print("done")
 """, "no known generator API")
 
 
+def run_sibling_loop_value_kind_tests():
+    # Two sibling `for` loops in one function that bind the SAME name to two
+    # generators with different yield kinds. The loop variable was declared by
+    # the first loop (`_Bool v;`) and `_declare_var`'s first-decl-wins guard
+    # kept that type for the second loop too, so `for v in gen_float():` stored
+    # a `double` into a `_Bool` and printed `True`. Each generator alone was
+    # always right, which is why it survived: the defect needs both loops in
+    # one function, and the list/dict/set loops already retype a reused name
+    # (`force=` in emit_loops.py) where the generator loop did not.
+    #
+    # Both orders are covered: the second loop is the one that needs the fresh
+    # declaration, so a fix that only handled one direction would still pass
+    # the other.
+    test_generator_matches_cpython(
+        "sibling_generator_loops_bool_then_float_keep_their_own_value_kind",
+        """\
+def gen_bool(n):
+    yield n > 2
+
+def gen_float():
+    r = 1.5
+    yield r
+
+def main():
+    for v in gen_bool(5):
+        print(v)
+    for v in gen_float():
+        print(v)
+main()
+""",
+        """\
+def gen_bool(n):
+    yield n > 2
+
+def gen_float():
+    r = 1.5
+    yield r
+
+def main():
+    for v in gen_bool(5):
+        print(v)
+    for v in gen_float():
+        print(v)
+main()
+""")
+    test_generator_matches_cpython(
+        "sibling_generator_loops_float_then_bool_keep_their_own_value_kind",
+        """\
+def gen_bool(n):
+    yield n > 2
+
+def gen_float():
+    r = 1.5
+    yield r
+
+def main():
+    for v in gen_float():
+        print(v)
+    for v in gen_bool(1):
+        print(v)
+main()
+""",
+        """\
+def gen_bool(n):
+    yield n > 2
+
+def gen_float():
+    r = 1.5
+    yield r
+
+def main():
+    for v in gen_float():
+        print(v)
+    for v in gen_bool(1):
+        print(v)
+main()
+""")
+
+
 def run_next_return_position_tests():
     # `next(<generator>)` in a function's RETURN position used to be typed as
     # the scalar BOX, so the enclosing function declared `int64_t h(void)` and
@@ -2074,6 +2153,7 @@ def run_tests():
     run_mixed_yield_kind_tests()
     run_next_method_tests()
     run_next_return_position_tests()
+    run_sibling_loop_value_kind_tests()
     run_module_global_generator_tests()
     run_nested_generator_capture_tests()
     # Cluster E (bugs/CODEGEN_generator_function_Lib_ipaddress.md): a
