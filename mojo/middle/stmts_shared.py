@@ -167,7 +167,7 @@ def _iter_ast(n):
     suspended onto its own separate fiber stack, so a `mojo_raise()`
     firing while this walk is mid-iteration can longjmp across that fiber
     boundary — undefined behavior. Found via bugs/
-    CODEGEN_noshim_dumpfull_preexisting_divergence.md: a zip()-nested-
+    commit e8a7135b8: a zip()-nested-
     tuple ValueError (gimple_gen_loops.py's `_gen_for_zip`, meant to be
     caught locally by `_gen_stmt_ForStmt`'s try/except and fall back
     gracefully) instead escaped to the module-level handler ONLY when
@@ -393,7 +393,7 @@ def _is_except_as_member_target(gen, obj_node) -> bool:
     accidentally match an ordinary string variable that merely happens
     to share a name — an ordinary string is never added to
     `_except_as_names` in the first place. See bugs/hard/
-    CODEGEN_dynamic_attribute_on_generic_object.md's "Residual gap"
+    commit 272f268b2's "Residual gap"
     section for why the type-keyed alternative was rejected."""
     return (isinstance(obj_node, gimple_ctypes.IdentExpr)
             and obj_node.name in gen._except_as_names)

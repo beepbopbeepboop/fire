@@ -1,38 +1,40 @@
-# CODEGEN: four gimple runner cases are red on HEAD (not caused by the nested-list fix)
+# CODEGEN: one gimple runner case is still red (mixed-kind struct/list reads)
 
-Found 2026-10-29 while verifying `CODEGEN_nested_list_param_two_kinds_segfaults`
-(fixed; its doc deleted). A full `python3 test_gimple_runner.py` on a pristine
-`git archive HEAD` copy fails these four cases with the same output as on the
-fixed tree, so they predate that change.
+Found 2026-10-29 while verifying `CODEGEN_nested_list_param_two_kinds_segfaults`.
+Four `test_gimple_runner.py` cases were red on HEAD.
 
-## What I ran
+## Status
 
-`python3 test_gimple_runner.py` (whole file) in a `git archive HEAD` copy:
-`470 passed, 5 failed` (the fifth is the nested-list case the fix addresses).
+**PARTIAL (2026-10-29, branch work/fix-gate-gimplerunner).** Three of the four
+cases are fixed and pass alone; the fourth is still red and its root cause is
+the open method-receiver bug below.
 
-## What I saw (expected vs got)
+Landed:
 
-- `gimple_struct_mixed_reads_survive_a_derivation`: `[1, 1.0]` expected,
-  got `[1, 4607182418800017408]` (the float's raw IEEE-754 bits).
-- `gimple_struct_mixed_reads_survive_a_function_boundary`: `[7, 0.5]` expected,
-  got `[7, 4602678819172646912]`.
-- `gimple_heterogeneous_list_literal_keeps_each_slot`: `[1, 2.5]` expected
-  (the line after `1\n2.5\n`), got `[5e-324, 2.5]` (the double's bits).
-- `gimple_ctor_param_polymorphic_slot_reads_receiver`: `2` expected, got
-  `4348269312` (a pointer decimal).
+- `gimple_heterogeneous_list_literal_keeps_each_slot`: a heterogeneous scalar
+  literal (`[1, 2.5]`) now records its per-slot kinds in
+  `gen._struct_slot_kinds` (emit_exprs `_lower_list_literal`), so `print(a)`
+  routes through `mojo_repr_list_kinds` instead of the single `double` ctype.
+- `gimple_struct_mixed_reads_survive_a_derivation`: a copy of a mixed value
+  carries the source's static kinds and element type (emit_calls `list()`
+  copy hand-off, which used to pop the element type for every source without a
+  nested spec); a derived mixed list with no static table reads its own
+  runtime row (emit_infra `_list_repr_fn` / `_list_repr_call`); and
+  `mojo_list_inherit_kinds` (runtime/fire_runtime.c) replaces the destination's
+  summary-derived element repr with NULL when the source has a kinds row, since
+  the element repr otherwise overrides every per-slot kind.
+- `gimple_struct_mixed_reads_survive_a_function_boundary`: the same
+  `mojo_list_inherit_kinds` / copy path.
 
-## Why this is a doc, not a fix
+Still red:
 
-Each is a float or pointer read through the int accessor on a struct field or a
-mixed-kind list slot: the same family as the boxed-read route. The nested-list
-fix does not touch these paths (it only changes list-of-lists parameter kinds
-and inner string-list kinds). Not investigated further this round.
+- `gimple_ctor_param_polymorphic_slot_reads_receiver` (test_gimple_runner.py):
+  `L(T(2)).numel()` prints a heap address. Root cause and next step are in
+  `bugs/CODEGEN_unresolved_method_receiver_returns_its_own_pointer.md`. That
+  doc's area is claimed by another worker, so it was not touched here.
 
 ## Next step
 
-Start from `gimple_heterogeneous_list_literal_keeps_each_slot`: it is the
-smallest (a single heterogeneous literal, no call boundary). Check whether its
-`[1, 2.5]` slot is read via `mojo_list_get_int` instead of `mojo_list_get_boxed`,
-using `gimple_codegen`'s `_maybe_kinds_vals` gate in `_lower_list_literal`. Then
-the struct-field cases, which go through `_field_nested_elem_types` /
-`_actual_types`.
+Once `CODEGEN_unresolved_method_receiver_returns_its_own_pointer` lands, re-run
+`test_gimple_runner.py`; if the remaining case is green, delete this doc in the
+same commit.

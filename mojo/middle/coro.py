@@ -30,6 +30,7 @@ Anything not eligible is left untouched and falls through to the existing
 gimple_cpp_* C++20-coroutine path -- incremental cutover.
 """
 from __future__ import annotations
+import contextlib
 import dataclasses
 
 import os
@@ -110,6 +111,29 @@ def enabled() -> bool:
     # the old gimple_cpp_*.py C++20-coroutine emitter, kept live for one
     # release as a differential oracle (doc/COROUTINE.html §5.5/§5.6).
     return os.environ.get(_ENV, _MODE) != _OLD_MODE
+
+
+@contextlib.contextmanager
+def pinned(mode: str):
+    """Select the coroutine backend (`'cpp'` or `'stackswitch'`) for the
+    duration of one block, then restore whatever `MOJO_CORO` was before.
+
+    `enabled()` reads the env var at each compile, so a test that needs one
+    backend must say so around its own compile calls. A module-level
+    `os.environ[...] = ...` is process-wide: whichever test file is imported
+    last wins for every other file sharing the process. Scoped, it can't
+    leak into anything else."""
+    if mode not in (_OLD_MODE, _MODE):
+        raise ValueError(f"unknown coroutine backend {mode!r}")
+    _prev = os.environ.get(_ENV)
+    os.environ[_ENV] = mode
+    try:
+        yield
+    finally:
+        if _prev is None:
+            os.environ.pop(_ENV, None)
+        else:
+            os.environ[_ENV] = _prev
 
 
 # ── eligibility ─────────────────────────────────────────────────────────
