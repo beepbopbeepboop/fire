@@ -1850,6 +1850,51 @@ def imported_bindings(stmts) -> dict:
     return out
 
 
+def imported_module_bindings(stmts) -> dict:
+    """`{local name: module as spelled}` for every MODULE binding in this file.
+
+    The answer the module-reference gate asks that `imported_modules` cannot
+    carry. `imported_modules` answers "which modules have to be on the link
+    line", and for `import lib2 as L` it is `['lib2']` — the alias is
+    deliberately not in that answer. The gate's question
+    (`model.dylib_module_reference`) is "which NAME in this file is a module",
+    and for that statement the answer is `L`: the call `L.answer(…)` roots at
+    the alias, and a recogniser that only knows `lib2` reads the chain as a
+    value receiver, so the name walk refuses `L` as "has no home" — false
+    about an import one line above. The `from m import f as g` half is not
+    this one: its local name binds a FUNCTION, not a module, and an
+    `ImportStmt` is the only statement that binds a module, so this folds
+    `model.import_bindings` over just those, and the local→module half is
+    what a published-table lookup needs to translate the recognised root
+    back to the spelling its manifest is filed under.
+
+    A local name a `FunctionDef`/`StructDef` by the same name defines loses,
+    the same precedence `imported_bindings` states for a re-export, and a
+    function-LOCAL import is collected for the same reason `imported_modules`
+    collects one: the binding is unconditional within its block, and a call
+    through it is on the link line either way.
+    """
+    defined = {st.name for st in (stmts or [])
+               if isinstance(st, (F.FunctionDef, F.StructDef))}
+    out: dict = {}
+
+    def _fold(block):
+        for st in block or []:
+            if isinstance(st, F.ImportStmt):
+                for bound, module, _name in _model.import_bindings(st):
+                    if (not bound or bound in defined or bound in out
+                            or not isinstance(module, str) or not module
+                            or _is_inert_module(module)
+                            or is_frontend_provided(module)):
+                        continue
+                    out[bound] = module
+            elif isinstance(st, F.FunctionDef):
+                _fold(getattr(st, "body", None) or [])
+
+    _fold(stmts)
+    return out
+
+
 def module_statements(path: str) -> list:
     """The parsed top-level statements of the module at `path`, or [].
 

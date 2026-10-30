@@ -113,7 +113,7 @@ BARE_BASELINE = {
     'bugs/CODEGEN_dict_literal_container_key_value_spellings.md': 1,
     'bugs/CODEGEN_generator_function_Lib_mailbox.md': 2,
     'bugs/CODEGEN_generator_function_Lib_modulefinder.md': 2,
-    'bugs/CODEGEN_generator_function_Lib_test_test_ensurepip.md': 1,
+    # 'bugs/CODEGEN_generator_function_Lib_test_test_ensurepip.md': 1,  # deleted with fix
     'bugs/CODEGEN_module_boundary_carries_no_value_types.md': 2,
     'bugs/CODEGEN_nested_container_as_dict_key_or_tuple_slot.md': 3,
     'bugs/CODEGEN_selfhost_dumpfull_ends_in_attributeerror_platform.md': 1,
@@ -148,7 +148,7 @@ BARE_BASELINE = {
     'bugs/FORMAL_the_host_import_wall_is_at_its_honest_floor.md': 1,
     'bugs/FORMAL_time_struct_shaped_answers.md': 1,
     'bugs/OPEN_WORK.md': 3,
-    'bugs/PERF_memory_over_4gb_is_a_bug.md': 1,
+    'doc/POLICY_memory_over_4gb.md': 1,
     'bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md': 7,
     'bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md': 4,
     'bugs/hard/README.md': 40,

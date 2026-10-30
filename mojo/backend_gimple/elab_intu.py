@@ -1386,7 +1386,7 @@ def _seed_one_factory(gen, work, mm, base, node, scope, stmts, import_map,
     # lowerable, so the record is filed and the wrapper/inner below are
     # materialized. 2026-10-20 (further) — LIFTED. The refusal this block
     # used to be (keep its measured evidence in
-    # bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered
+    # bug:CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered
     # .md, "2026-10-20 (continued)") is gone because the in-TU iterator
     # protocol now has a lowerable data path, in RUNTIME-LIST terms:
     #   * `List` is deliberately NOT registered in

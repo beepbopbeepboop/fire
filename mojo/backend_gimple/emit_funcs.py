@@ -209,8 +209,14 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
                 gen._emit(f"  {env_var}->{gimple_ctypes._c_field_name(vname)} = {tmp};")
             else:
                 # Use _safe_coerce_emit to handle int→int64_t and other conversions.
-                local_type = gen.var_types.get(vname, vtype)
-                cname = gen._write_dest(vname)  # resolve capture path if nested
+                # A heap-boxed local's var_types entry is the BOX's pointer type,
+                # so its source is the value `*box` (see _boxed_capture_source).
+                _boxed = ggc._boxed_capture_source(gen, vname, _fct)
+                if _boxed is not None:
+                    local_type, cname = _boxed
+                else:
+                    local_type = gen.var_types.get(vname, vtype)
+                    cname = gen._write_dest(vname)  # resolve capture path if nested
                 gen._safe_coerce_emit(local_type, _fct, cname, f"{env_var}->{gimple_ctypes._c_field_name(vname)}")
         gen._closure_envs[node.name] = env_var
         # Take ownership of the environment this nested `def` just allocated,
@@ -895,7 +901,7 @@ def _gen_stmt_ComptimeForStmt(gen, node):
             # chokepoint every other store uses (`_sce_simple_emit`'s
             # literal-to-int64_t branch), so the emitted form is decided by
             # the destination type rather than re-derived per call site.
-            # See bugs/CODEGEN_imported_generic_never_elaborated_calls_
+            # See bug:CODEGEN_imported_generic_never_elaborated_calls_
             # nothing_defines.md.
             dst = gen.var_types.get(node.target) or 'int64_t'
             i = start
@@ -1114,8 +1120,8 @@ def _selfhost_walk_stmts_for_assign_targets(stmts, p0, fields):
     `gimple_exprtypes._walk_ast` (a full generic-dataclass-reflection
     walker used ~48 places across the compiler, and the documented
     subject of a well-known, actively-tracked O(N^2) whole-program
-    rescan cost — see bugs/hard/PERF_nested_module_compile_walk_ast_
-    quadratic_rescan.md). `self.x = <literal>` assignments are always
+    rescan cost — see the `_walk_ast` re-scan bug,
+    closed). `self.x = <literal>` assignments are always
     direct statements, never nested inside an expression, so this only
     needs to recurse into STATEMENT-level body-bearing fields (if/while/
     for/try/with/match/comptime blocks) — far cheaper and, critically,
@@ -2916,6 +2922,12 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # the stored pointer's own bits, printed as a decimal, exit 0 (measured:
     # `f({"x": "1"})` printed an address where CPython prints `1`, while the
     # same call with the literal bound to a local first was already correct).
+    # ...and the kind-MIXED list-of-lists params: their inner lists disagree
+    # on kind across call sites, so the loops over them must not trust the
+    # joined (int64_t) answer. See module_gen's _record_param_elem.
+    _pmx = getattr(gen, '_param_nested_mixed', {}).get(node.name, ())
+    for _pmx_bare in _pmx:
+        gen._nested_mixed_names.add(_as_str(_pmx_bare))
     _pdv = getattr(gen, '_param_dict_val_types', {}).get(node.name, {})
     for bare in _pdv:
         # '' is the conflicting-call-sites marker (see _record_param_dict_val),
@@ -3121,9 +3133,12 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     gen._emitting_plain_func = True
     try:
         gen._begin_function(node)
+        gmp._cattr_restore_begin(gen, node.body)
         for stmt in node.body:
             gen.gen_stmt(stmt)
         gen._emit_fallthrough_frees(node)
+        gmp._cattr_restore_fallthrough(gen, node)
+        gmp._cattr_restore_end(gen)
     finally:
         gen._emitting_plain_func = False
 
@@ -4064,6 +4079,9 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
                 gen._nested_elem_types[_mbare] = _mne
     # ...and the dict-VALUE half, same reason, same qualified key. Without it a
     # method handed a `{'k': 'v'}` reads that slot back as an integer.
+    _mpmx = getattr(gen, '_param_nested_mixed', {}).get(_mkey, ())
+    for _mpmx_bare in _mpmx:
+        gen._nested_mixed_names.add(_as_str(_mpmx_bare))
     _mpdv = getattr(gen, '_param_dict_val_types', {}).get(_mkey, {})
     for _mbare2 in _mpdv:
         _mpdv_v = _as_str(_mpdv[_mbare2])
@@ -4369,9 +4387,12 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     # knows. The candidates computed here replace the empty set
     # `reset_no_candidates` left above.
     gen._begin_function(node)
+    gmp._cattr_restore_begin(gen, node.body)
     for stmt in node.body:
         gen.gen_stmt(stmt)
     gen._emit_fallthrough_frees(node)
+    gmp._cattr_restore_fallthrough(gen, node)
+    gmp._cattr_restore_end(gen)
 
     # Store per-overload param types so forward declarations can match definitions exactly
     param_ctypes_only = [s.rsplit(' ', 1)[0].strip() for s in param_strs]
