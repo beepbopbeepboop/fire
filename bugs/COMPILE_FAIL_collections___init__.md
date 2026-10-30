@@ -1,5 +1,48 @@
 # COMPILE_FAIL: Lib/collections/__init__.py
 
+## Status (2026-10-29, work/bug-compile-fail-collections-init, round 5 — PARTIAL: the container-held tuple miscompile is refused by static type for subscript, unpack and len)
+
+**Measured before (exit 0 or wrong, fresh build):** a namedtuple value
+reached through a container, `pts = [Point(1, 2)]`, printed a stack address
+for `print(pts[0][0])` (`84464368`), a stack address for
+`for q in pts: print(q[0])`, `0` for `print(len(pts[0]))`, and exited 1 with no
+output for `for q in pts: a, b = q`. The desugar's name tracking cannot see
+these, which is the open item 3 below.
+
+**Landed:** the codegen choke point item 3 asked for, for the three operations
+the lowering can see.
+- `fire_compiler.desugar_namedtuples` records the class names it lowers in
+  `DESUGARED_NAMEDTUPLE_NAMES`, cleared in place (a rebound global is what
+  stranded the genexp list; see bugs/CODEGEN_desugared_genexp_names_stale_import.md).
+- `gimple_codegen.py` hands them to the generator as `_namedtuple_class_names`.
+- `mojo/backend_gimple/emit_calls.py::_refuse_namedtuple_tuple_use` refuses
+  with the named message (`has no tuple protocol`) when the operand's static C
+  type is one of those classes. Called from `_lower_subscript`,
+  `_lower_builtin_len`, and (`emit_stmts.py`, the non-literal RHS unpack) the
+  tuple-target assignment.
+- Tests: `test_gimple_runner.py::test_namedtuple_tuple_protocol_is_refused_by_name`
+  gained `container_index`, `for_index`, `container_unpack`, `container_len`.
+  Each compiled before this round and is refused now.
+
+**Still open (item 3 narrowed):** tuple operations through a container that
+the codegen does not yet choke on: the tuple builtins (`iter`, `list`, `sum`,
+`enumerate`, `zip`, `min`/`max`, `any`/`all`, `reversed`, `sorted`) and the
+tuple-only members (`_asdict`, `_make`, `_fields`) applied to a container
+element, and a namedtuple reached through a struct field. Each needs the same
+static-type check at its own lowering site. Not measured this round.
+
+**Cross-module gap:** the refusal reads the class names of the module being
+compiled. A namedtuple defined in one module and used as a tuple in another is
+not refused by this check. Next step: carry the names through the closure
+(the same route `_closure_call_stmts` takes), then measure.
+
+**Not run this round:** the self-host gate. The changed files are
+`fire_compiler.py`, `gimple_codegen.py`, `mojo/backend_gimple/emit_calls.py`
+and `emit_stmts.py`, which the quality gate covers; the integrator must run
+`make gate`. `_refuse_namedtuple_tuple_use` uses an `isinstance(str)` guard that
+the self-hosted path needs, and `desugar_namedtuples` is in the plain style of
+`_GenexpDesugarer`.
+
 ## Status (2026-10-29, work/bug-compile-fail-collections-init, round 4 — PARTIAL: literal `namedtuple` lowers; the silent-wrong-answer stub is gone)
 
 **Before (measured):** a program with a module-level

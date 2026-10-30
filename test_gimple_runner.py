@@ -12579,6 +12579,14 @@ def test_namedtuple_tuple_protocol_is_refused_by_name():
         "unpacking": "def main():\n    p = Point(1, 2)\n    a, b = p\n    print(a)\n",
         "len": "def main():\n    p = Point(1, 2)\n    print(len(p))\n",
         "_asdict": "def main():\n    p = Point(1, 2)\n    print(p._asdict())\n",
+        # Reached through a container: the desugar's name tracking never sees
+        # `p` or `pts[0]` as a namedtuple, so these are refused by the static
+        # struct type at the subscript (emit_calls._refuse_namedtuple_tuple_use).
+        # Before that check each compiled and printed a stack address, exit 0.
+        "container_index": "def main():\n    pts = [Point(1, 2)]\n    print(pts[0][0])\n",
+        "for_index": "def main():\n    pts = [Point(1, 2)]\n    for q in pts:\n        print(q[0])\n",
+        "container_unpack": "def main():\n    pts = [Point(1, 2)]\n    for q in pts:\n        a, b = q\n        print(a)\n",
+        "container_len": "def main():\n    pts = [Point(1, 2)]\n    print(len(pts[0]))\n",
     }
     for kind, body in bodies.items():
         try:

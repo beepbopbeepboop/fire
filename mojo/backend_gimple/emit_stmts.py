@@ -1168,6 +1168,7 @@ def _gen_stmt_AssignStmt(gen, node):
         else:
             # RHS is a single iterable — lower it, then index each element
             vtype, v = gen.lower_expr(node.value)
+            ggc._refuse_namedtuple_tuple_use(gen, vtype, 'unpacking')
             # A TAGGED nested generator tuple (`args` from
             # `for what, args in scan_opcodes(co):`, see
             # `_emit_generator_tuple_unpack`'s nested-slot path): destructure

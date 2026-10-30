@@ -3674,6 +3674,7 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if _cur is not None:
         return 'int64_t', itc.remaining(gen, _cur)
     at, av = gen.lower_expr(node.args[0])
+    _refuse_namedtuple_tuple_use(gen, at, 'calling len on')
     # An in-TU iterator-factory wrapper (`z = enumerate(x)` / `take(x, n)`
     # / ... after the lift — the pre-pass's builtin table still types the
     # binding `MojoList *`, but the emitted value is a lazy
@@ -9358,6 +9359,24 @@ def _mark_unknown_dict_value(gen, dict_val: str, t: str) -> None:
         gen._dyn_word_vals.add(t)
 
 
+def _refuse_namedtuple_tuple_use(gen, ot: str, use: str) -> None:
+    """Refuse a tuple operation (`use`: "indexing", ...) on a value whose
+    static C type `ot` is a namedtuple class lowered by fire_compiler.
+    desugar_namedtuples. The lowered class has named fields only, so the
+    operation would read struct storage as a tuple: `pts[0][0]` printed a
+    stack address with exit 0. Keyed on the static type, so it also catches a
+    namedtuple reached through a container, which the desugar's name tracking
+    cannot see."""
+    if not isinstance(ot, str):
+        return
+    _base = ot.rstrip(' *')
+    if _base in gen._namedtuple_class_names:
+        raise RuntimeError(
+            f'cannot compile module: {use} a namedtuple {_base} value; the compiled '
+            'path lowers it as a class with named fields and has no tuple protocol '
+            '(bug:COMPILE_FAIL_collections___init__)')
+
+
 def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
     # Keyword-parametrized slice, e.g. `x[byte=:-1]` (slice by byte offset).
     # The parser stashes the real SliceExpr in node.attrs (obj=None, since
@@ -9434,6 +9453,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             return 'int64_t', t
 
     ot, ov = gen.lower_expr(node.obj)
+    _refuse_namedtuple_tuple_use(gen, ot, 'indexing')
 
     # `self.prop[key]` where `prop` is a 0-arg property/method accessed
     # without call syntax lowers `self.prop` alone to a deferred,
