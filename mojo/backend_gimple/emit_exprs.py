@@ -4182,9 +4182,17 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     if op in ('==', '!=') and lt == rt:
         _eq_struct = _user_eq_struct(gen, lt)
         if _eq_struct is not None:
-            _eq_val = gen._call_expr('_Bool', f'{_eq_struct}___eq__',
+            # `!=` is the struct's own `__ne__` when it defines one, as Python
+            # and Mojo both dispatch it. Negating `__eq__` instead would recurse
+            # for a `__eq__` written as `~(self != rhs)`, which is Bool's own.
+            # The symbol is the home-module-qualified one `_struct_method_csym`
+            # composes: a bare `{Struct}___eq__` is never defined in the
+            # translation unit of a struct from another module.
+            _negate = op == '!=' and '__ne__' not in gen._struct_method_names.get(_eq_struct, ())
+            _dunder = '__eq__' if _negate or op == '==' else '__ne__'
+            _eq_val = gen._call_expr('_Bool', gen._struct_method_csym(_eq_struct, _dunder, ''),
                                      [(lt, lv), (rt, rv)])
-            if op == '!=':
+            if _negate:
                 _eq_val = gen._bool_not('_Bool', _eq_val)
             return '_Bool', _eq_val
 

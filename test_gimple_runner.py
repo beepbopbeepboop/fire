@@ -12515,6 +12515,27 @@ def main():
     Color(7).write_name()
 """, "red\ngreen\nother\n")
 
+    # `!=` on a struct with its own `__ne__` calls `__ne__`, and a `__eq__`
+    # written as `~(self != rhs)` (stdlib Bool's shape) must not recurse into
+    # itself: negating `__eq__` for `!=` would loop forever here. The stdlib's
+    # bool.mojo is the cross-module-qualified case this shape broke.
+    test_gimple_stdout("gimple_struct_ne_dispatches_to_ne_not_negated_eq", """\
+@fieldwise_init
+struct Tag:
+    var _v: Int
+
+    def __eq__(self, rhs: Self) -> Bool:
+        return ~(self != rhs)
+
+    def __ne__(self, rhs: Self) -> Bool:
+        return self._v != rhs._v
+
+def main():
+    print(Tag(1) == Tag(1))
+    print(Tag(1) != Tag(2))
+    print(Tag(1) == Tag(2))
+""", "True\nTrue\nFalse\n")
+
     # The same spelling against a struct with no `__eq__` to compare by stays
     # refused: `case .NAME:` is `subject == S.NAME`, and there is no `==` to
     # call, so the refusal is the honest answer rather than a pointer compare.
