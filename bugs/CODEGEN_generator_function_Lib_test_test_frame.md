@@ -1,5 +1,38 @@
 # CODEGEN_generator_function: Lib/test/test_frame.py
 
+## Status (2026-10-29, partial fix — a nested generator that captures a PLAIN-assigned enclosing local now compiles on the default path)
+
+Landed: `nested_generator_captures_enclosing_plain_local` (`total = n * 2`
+with no `var`, read by a nested generator) now compiles and prints `10 11`,
+was refused before. Two causes, both in `mojo/middle/coro.py`:
+
+- `_outer_all_locals` used `_declared_vars_body`, which counts only `VarDecl`,
+  so a top-level plain `name = <init>` was invisible to the free-variable pass
+  and a nested def reading it looked capture-free. Plain top-level assignment
+  targets are now added explicitly (`_declared_vars_body` in `types.py` is
+  shared and was NOT changed).
+- `_outer_boxable_locals` iterates a plain assignment as a declaration when it
+  is the FIRST binding of its name (params count as bound; a later plain
+  reassignment is an ordinary write). The capture's `decl` is the original
+  `AssignStmt`; `_apply_nested_async_capture` swaps that statement, by
+  identity, for the equivalent box-init `VarDecl`. A sibling capture then sees
+  a VarDecl with a boxed initializer, as before.
+
+Pinned: `test_gimple_generator_runner.py` nested-capture block 8/8
+(`nested_generator_captures_enclosing_plain_local` is the fail-before/pass-after
+case; the escaping variant is refused). `test_coro_nested_async_capture.py`:
+14 pass. Ad-hoc: a plain local whose kind is unknown (`total = helper2()`
+defined later) is still refused, not mis-boxed.
+
+NOT verified: an `async def` capturing a plain local links to a
+`_mojo_async_schedule_ready` undefined symbol under `_build_generator_program`.
+The IDENTICAL shape with `var total` fails the same way, so this is a
+pre-existing harness/runtime link gap for async, not this change; the
+integrator's stdlib/async gate should be the real check.
+
+NOT done for this file (unchanged): `g` reads `self` (struct capture, see the
+2026-10-29 measured round below); `gen` and `t3` (frame introspection).
+
 ## Status (2026-10-29, partial fix — a nested generator that captures an enclosing `var` local or parameter now compiles on the default path)
 
 Decision 1 below is answered by measurement: the DEFAULT backend is the
@@ -47,11 +80,9 @@ NOT done — this file still cannot compile as a whole:
   kind, so it stays refused. Next step: a struct-kind box (`_Capture.struct_name`
   / `_BOX_STRUCT_OF` already exist for nested async, Increment E) applied to
   the generator's `self` parameter.
-- A plain-assignment local (`total = n * 2`, no `var`) is not boxable: the
-  box plan only sees `VarDecl` (`_outer_boxable_locals`). Still refused
-  (pinned by `nested_generator_reads_enclosing_local_refused`). Next step:
-  treat a function-scope plain assignment that is first bound before the
-  nested def as a `var` for box purposes, if the scalar kind is confident.
+- A plain-assignment local (`total = n * 2`, no `var`) — LANDED 2026-10-29
+  (see the entry directly below). Its escaping variant stays refused
+  (`nested_generator_escaping_plain_local_refused`).
 - `gen` (frame introspection) and `t3`: unchanged; see the entries below.
 - Not run: a whole-file build of test_frame.py (heavy; left for the integrator).
 
