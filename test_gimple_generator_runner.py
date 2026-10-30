@@ -4226,6 +4226,57 @@ def main():
         print(v)
 """, "42\n99\n")
 
+    # -- Bugs/CODEGEN_generator_yield_kind_rebound_name_silent_wrong_value.md
+    # Shape 1: a REBOUND local (scalar -> scalar of a different kind) must
+    # not keep its first kind. Before the `_static_env` fix, the value slot
+    # was decided from `env.setdefault`, so the first binding won and the
+    # later `r = 2.5` was dropped; the generator then typed the yield as the
+    # first kind (`_Bool`) and printed True for the float, where CPython
+    # prints 2.5 / False. After the fix the conflicting name is a None hole,
+    # so the slot is int64_t (the documented default for an unresolved yield)
+    # and the float prints `2` / `0` -- still not CPython's `2.5`/`False`,
+    # but no longer the wrong KIND, which is what this round fixes. The
+    # float-vs-bool text gap is the next step (the value slot's own
+    # accessor choice), pinned here so the kind regression cannot come back.
+    test_generator_stdout("generator_rebound_local_yield_kind_shape1", """\
+def gen(n):
+    r = False
+    if n > 0:
+        r = 2.5
+    yield r
+
+def main():
+    for v in gen(1):
+        print(v)
+    for v in gen(0):
+        print(v)
+main()
+""", "2\n0\n")
+
+    # Shape 2: a mixed-kind lambda yield (bool yield + float yield) -- the A3
+    # path now refuses this (None hole beside a non-int kind) rather than
+    # typing it as a single slot. That refusal hands it to the legacy cpp
+    # fallback (`cpp_async.py`/`gimple_exprtypes._generator_yield_ctype`),
+    # whose yield typing does not know a lambda-bound callee's return kind and
+    # types both yields `int64_t` -- so it still prints `1\n1`, same as before
+    # the fix; see next step 2 of the bug doc for the remaining fallback
+    # refinement (threading the lambda-call return table into the cpp path's
+    # `_generator_yield_ctype` call). Pinned here so the refusal doesn't
+    # silently regress back to a wrong compiled slot.
+    test_generator_stdout("generator_mixed_lambda_yield_shape2", """\
+def gen(n):
+    f = lambda: n > 2
+    yield f()
+    g = lambda: 1.5
+    r = g()
+    yield r
+
+def main():
+    for v in gen(5):
+        print(v)
+main()
+""", "1\n1\n")
+
     # ---- Regression tests distilled from the 30 bugs/CODEGEN_generator_
     # function_Lib_*.md stdlib shapes that the doc/COROUTINE.html §5.5 A3
     # stack-switch cutover made compile (previously wholesale-refused by
