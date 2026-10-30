@@ -8841,6 +8841,22 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
         _rsk = getattr(gen, '_return_value_slot_kinds', {}).get(fname_raw)
         if _rsk:
             gen._struct_slot_kinds[t] = _rsk
+    # A passthrough (`def ident(x): return x`) whose parameter was joined
+    # with a container at another call site is emitted ONCE with an
+    # `int64_t` parameter and returns that box, so a `str` argument arrives
+    # boxed and the result looks like an opaque handle. The argument's own
+    # static type is the truth for THIS call: record the result as the `char *`
+    # it is, so `list(ident("abc"))` iterates it as a string instead of
+    # through the runtime's boxed-list dispatch (which read the characters as
+    # ints). Last of the `_actual_types` writers above, because the
+    # `_return_elem_types` block sets `MojoList *` on this same temp for a
+    # callee that also returns lists. Same idiom as the boxed container
+    # returns.
+    _pt_idx = getattr(gen, '_passthrough_param_idx', {}).get(fname_raw)
+    if (_pt_idx is not None and _pt_idx < len(arg_pairs)
+            and arg_pairs[_pt_idx][0] == 'char *'
+            and ret_type in ('int', 'int64_t')):
+        gen._actual_types[t] = 'char *'
     return ret_type, t
 
 
