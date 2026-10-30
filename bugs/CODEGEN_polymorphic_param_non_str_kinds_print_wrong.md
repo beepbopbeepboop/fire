@@ -1,5 +1,37 @@
 # An unannotated parameter receiving disagreeing types still prints wrong for every pair except int/str
 
+## Status 2026-10-29 (fourth round) — the real double read for `+`, `-`, `*`
+
+Landed: the second round's open item 1, for `+`, `-` and `*` whose one operand
+is a float-possible parameter and whose other operand is an integer. `_lower_binary`
+(`mojo/backend_gimple/emit_exprs.py`) hands that pair to
+`emit_infra._float_param_arith`, which computes the integer answer (as before)
+AND the double answer, and `mojo_float_arith_select` (`runtime/fire_runtime.c`)
+picks at run time: a fresh double box when either raw operand word is a double
+box, the integer otherwise. The result is printed through `mojo_repr_boxed`
+(`_is_float_param_arith` in the `print` arm), so `x * 2` with `f(2.5)` prints
+`5.0` and with `f(1)` prints `2`.
+
+Pinned in `test_link_mode.py`'s `test_unannotated_param_with_disagreeing_call_sites`
+(the `arithmetic` list), against CPython's own output: `x * 2` gives `5.0`/`2`
+and `x + 1` gives `3.5`/`2`, in both call orders, and `x - 1` gives `1.5`/`0`.
+The previous pinned values (`4`, `3`) were the known-wrong truncation and are gone.
+
+Still NOT covered by this arm, and the next step for each:
+
+- `/`, `//`, `%`, `**`: left on the truncating path on purpose (see
+  `_FLOAT_ARITH_OPS`). `/` needs its own arm because its integer form can trap
+  on a zero divisor before the select runs.
+- A double operand beside the parameter (`x * 2.5`): the other operand has no
+  `mojo_box_double` spelling. Needs a double-typed branch of the same select.
+- A result bound to a name first (`y = x * 2; print(y)`), or nested
+  (`(x * 2) + 1`), or returned: the result is an int64_t word, and nothing
+  records that it may be a box. Needs the same float-possible set extended to
+  locals and return values (`_ret_may_hold_float`, the analogue of `_ret_may_hold_str`).
+- Float beside `str`/`list`/`bytes`/`None`, the bytes/list tags, `None`, and box
+  lifetime (a box is still never freed; `mojo_float_arith_select` allocates one
+  per double-valued operation).
+
 ## Status 2026-10-29 — float beside an integer at one parameter is FIXED
 
 Landed (partial, the doc's own "next step 2", float first):

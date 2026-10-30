@@ -1143,6 +1143,18 @@ int64_t mojo_box_from_double(double v)
     return (int64_t)(uintptr_t)bx;
 }
 
+/* The answer of `a OP b` for an arithmetic operator whose operands may be
+ * float boxes: the double answer as a fresh box when either operand IS a
+ * double box, else the integer answer. Both answers are computed by the
+ * caller, so this only chooses — and a choice that never reaches
+ * mojo_box_from_double allocates nothing. */
+int64_t mojo_float_arith_select(int64_t a, int64_t b, int64_t ires, double dres)
+{
+    if (mojo_is_boxed(a) && ((MojoBox *)(intptr_t)a)->kind == 'd') return mojo_box_from_double(dres);
+    if (mojo_is_boxed(b) && ((MojoBox *)(intptr_t)b)->kind == 'd') return mojo_box_from_double(dres);
+    return ires;
+}
+
 /* The box read as an integer: Python's own conversion (truncation toward
  * zero) of a DOUBLE box, and the raw word for anything else — including a
  * non-double box, whose slot is not a number at all and whose word is what
