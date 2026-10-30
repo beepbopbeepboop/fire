@@ -63,6 +63,16 @@ first compile attempt succeeds (removing the double-compile), or document the
 residue as a known limit. Owner domain (type-resolution machinery); do not
 ship a coercion hack that trades the refusal for a silent kind mismatch.
 
+### Dependency / partial fix (2026-10-29)
+
+The rollback-recompile memo fix (`_failed_modules` in `gimple_codegen` /
+`emit_resolve`, commit `work/bug-runtime-gate-sqliteruntime-red`) fixed
+cost that made the timeout exceed 600 s (`_failed_modules` memo in
+`gimple_codegen` / `emit_resolve`). The container-kind inference bugs
+(`_t34`→`_t35` in `emit_infra`, `_t3`→`live` in `formal/model`) remain open —
+see "What a fix requires" above. Same commit deletes this doc, which cites the
+fix's predecessor doc; the citation is replaced in-place by this header.
+
 ### Gate-calibration consequence (recorded, orchestrator/owner lever)
 
 Either warm the gate worktree's build cache before gating (run the
