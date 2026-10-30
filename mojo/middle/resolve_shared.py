@@ -479,10 +479,6 @@ def _quick_type(gen, node) -> str:
         # callee return-type correction.
         if fname in gen._generator_api:
             return 'MojoGenerator *'
-        # A nested generator reading enclosing names (keyed by its enclosing
-        # def, like the nested async closure -- see _nested_generator_api).
-        if (getattr(gen, '_local_inference_func', None), fname) in gen._nested_generator_api:
-            return 'MojoGenerator *'
         # Same construction-shape rule for a generator reached through an
         # ALIASED/qualified cross-module import (`from a import walk as
         # walk_a`): the binding table records exactly the names THIS module
@@ -1450,16 +1446,10 @@ def _infer_local_var_types(gen, func: gimple_ctypes.FunctionDef) -> dict[str, st
     _scratch_mark: int = gen._scan_scratch_top
     _saved_lr = getattr(gen, '_lambda_call_ret_types', None)
     gen._lambda_call_ret_types = _lambda_call_ret_table(gen, func.body or [])
-    # The def whose locals are being typed: a call to one of its nested
-    # generators (`it = g(2)`, `_nested_generator_api`) is a generator handle
-    # only in that scope. Scoped to this body, like the table above.
-    _saved_lif = getattr(gen, '_local_inference_func', None)
-    gen._local_inference_func = _as_str(func.name)
     try:
         return _infer_local_var_types_core(gen, func)
     finally:
         gen._lambda_call_ret_types = _saved_lr
-        gen._local_inference_func = _saved_lif
         gen._scan_scratch_top = _scratch_mark
 
 

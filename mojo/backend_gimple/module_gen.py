@@ -9023,6 +9023,12 @@ def gen_module_impl(self, stmts):
     # are kind-mixed, which the element loop answers with the runtime route.
     self._param_nested_mixed: dict[str, set] = {}
     self._coro_str_params: dict[str, set] = {}
+    # coroutine body name -> {param} whose element type is POSITIVELY int:
+    # the list-of-ints counterpart of `_coro_str_params`. Kept apart from
+    # `_param_elem_types` because `_elem_types[x] == 'int64_t'` means "nothing
+    # known" to nearly every writer, and `_boxed_list_ptr` needs to tell the
+    # two apart (see emit_loops). Consulted by name, per function.
+    self._coro_int_list_params: dict[str, set] = {}
     # The dict-VALUE twin of the table above: callee -> {pname -> the dict
     # value ctype every one of its call sites agrees on}. A dict is stored
     # as one `int64_t` slot per key plus a per-slot `kind` tag, so a callee
@@ -9101,6 +9107,11 @@ def gen_module_impl(self, stmts):
             _pe_d = self._param_elem_types.setdefault(_as_str(_fp_s.name), {})
             for _pe_k in _pe_body:
                 _pe_d[_as_str(_pe_k)] = (_as_str(_pe_body[_pe_k]), None)
+        _pi_body = getattr(_fp_s, '_mojo_coro_param_int_lists', None)
+        if _pi_body:
+            _pi_d = self._coro_int_list_params.setdefault(_as_str(_fp_s.name), set())
+            for _pi_k in _pi_body:
+                _pi_d.add(_as_str(_pi_k))
         _ps_body = getattr(_fp_s, '_mojo_coro_param_str_params', None)
         if _ps_body:
             _ps_d = self._coro_str_params.setdefault(_as_str(_fp_s.name), set())
@@ -11247,14 +11258,6 @@ def gen_module_impl(self, stmts):
             continue
         for _t in _tgts:
             self._global_literal_slot_ctypes[_t] = _slots if _slots is not None else _outer
-
-    # Sync generators nested in an ordinary top-level def that read its
-    # names are claimed here, BEFORE the generic passes below would refuse
-    # them and before the module-level registration could take them by bare
-    # name (see cpp_async._compile_nested_generator_closures).
-    for _od in stmts:
-        if isinstance(_od, FunctionDef):
-            self._compile_nested_generator_closures(_od, _generator_fns)
 
     for s in stmts:
         if not (isinstance(s, FunctionDef) and id(s) in _generator_fns
@@ -15925,8 +15928,7 @@ def gen_module_impl(self, stmts):
     # decls for its own trampolines at all — an implicit-declaration
     # compile failure the moment anything (e.g. `_take_handle()`) used the
     # handle outside the enclosing function's own `{base}_start` call.
-    if (self._supported_generators or self._generator_method_api or self._generator_api
-            or self._nested_generator_api):
+    if self._supported_generators or self._generator_method_api or self._generator_api:
         # The typedef may already have been emitted ahead of the
         # method-prototype pass (declaration-before-typedef cascade fix,
         # see that site) — keep exactly one in the section.
@@ -15944,8 +15946,7 @@ def gen_module_impl(self, stmts):
         # (the dict's own VALUES are a genuinely mixed-type dict —
         # `base`/`value_ctype` are str, `params` is a list — so a single
         # `dict[str, str]` reparameterization wouldn't fit every field).
-        for _api in (list(self._generator_api.values()) + list(self._generator_method_api.values())
-                     + list(self._nested_generator_api.values())):
+        for _api in list(self._generator_api.values()) + list(self._generator_method_api.values()):
             _base, _vct = _as_str(_api['base']), _as_str(_api['value_ctype'])
             # Plain unpack loop, NOT a genexpr — a list of string pieces
             # joined via a genexpr is the established self-hosted trap.
