@@ -12538,3 +12538,24 @@ def main():
     print(tag(5))
     print(tag(7))
 """, "5\n7\n")
+
+
+def test_nested_class_attr_rebind_after_construction_regression():
+    """Pins the answer any per-execution fix for
+    bugs/CODEGEN_nested_class_attr_reads_enclosing_local_silently_zero.md
+    must keep. A class attribute rebound on the CLASS after an instance was
+    built is seen by that instance (Python: the instance has no attribute of
+    its own, so it reads the class's current value, 3). A per-instance copy of
+    the attribute, read off the instance field, would answer 5 here."""
+    test_gimple_stdout("gimple_nested_class_attr_rebind_after_construct", """\
+def make(version: int):
+    class Tag():
+        __version__ = version
+    t = Tag()
+    Tag.__version__ = 3
+    return t
+
+def main():
+    t = make(5)
+    print(t.__version__)
+""", "3\n")

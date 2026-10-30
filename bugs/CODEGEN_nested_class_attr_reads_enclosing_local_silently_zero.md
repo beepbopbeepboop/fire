@@ -99,9 +99,10 @@ Decision, with the readings:
   read after a later call. Refusing every function-hoisted class with a
   non-literal class attribute would also revoke the working single-call fix
   landed above. Honest, but it trades a silent error for a regression.
-- **Reading B (recommended): per-instance seeding for function-hoisted
-  classes.** Each instance carries its own copy of the non-literal class
-  attribute, seeded at allocation from the execution that built it.
+- **Reading B: per-instance seeding for function-hoisted classes.** SUPERSEDED
+  by the 2026-10-29 round-2 analysis below: a per-instance copy read off the
+  instance field fails the rebind-after-construction requirement (a test now
+  pins it), so B is not the fix.
 
 Plan for B, exact sites:
 
@@ -134,6 +135,80 @@ Check before implementing B: a rebound class attribute on an existing instance
 Python's answer (3). Module-scope classes already seed per-instance
 (`module_gen.py` ~14878), so first confirm what THEIR read path does and make
 hoisted classes match it, not diverge from it.
+
+## Status (2026-10-29, planning round 2: B refuted, per-execution storage)
+
+Measured (`python3 tools/memslot.py --gb 8 -- python3 .tmp/measure_rebind.py`):
+
+- Module-scope class, `t = Tag(); Tag.__version__ = 3; print(t.__version__)`:
+  prints `3` (Python: `3`). Instance reads of a class attribute redirect to the
+  `_classattr_` global: `mojo/backend_gimple/emit_exprs.py` ~2602, the
+  `_lower_MemberExpr` branch `struct_name in class_attrs`. That is why the
+  rebind is seen.
+- The SAME rebind on a function-hoisted class (`make(version)` builds `t`,
+  rebinds `Tag.__version__ = 3`, returns `t`): prints `3`. Correct today.
+
+So plan B, which reads the instance field, would print `5` here and break a
+working answer. B is withdrawn. The bug is only the cross-execution case
+(`a = make(5); b = make(7); a.__version__` gives `7`, Python `5`).
+
+Pinned now: `test_gimple_runner.py`
+`test_nested_class_attr_rebind_after_construction_regression` (passes on this
+tree; a per-instance design must keep it green).
+
+Decision: **Reading C, per-execution attribute storage.** Each execution of a
+function-hoisted class's `class` statement creates its own attribute block;
+instances and the class name both reach the block of the execution they belong
+to. This is the only shape that gives the 5/7/9/5 answer and keeps the rebind
+answer, because rebinding writes the shared block that the instance also reads.
+
+Implementation guide, in order:
+
+1. Block type and storage. For each class in `_gmi_nested_struct_defs` with at
+   least one non-literal class attribute (`module_gen.py` ~5899 registration),
+   emit a struct `_cattrs_<Cls>` with one field per such attribute, plus a
+   current-block global `_classattr_<Cls>__block` (`void *`, or typed
+   `_cattrs_<Cls> *`). Declare both where the `_classattr_` globals are
+   declared (`module_gen.py`, the `_global_var_types` registration near
+   5899-5976).
+2. Per-execution allocation. `_gen_stmt_StructDef` (`emit_stmts.py` ~3138):
+   before the stores it currently emits, `calloc` a fresh
+   `_cattrs_<Cls>` and assign it to `_classattr_<Cls>__block`; then store
+   each value into `block->attr` (not the global). Heap is deliberate: the
+   block outlives the frame, and the leak is the same class as
+   `CODEGEN_closure_env_and_boxed_local_never_freed.md`.
+3. Instance hidden pointer. The hoisted struct gets a `_cls_block` field
+   (`struct_field_types`, `module_gen.py` ~5840s). `_alloc_<Cls>` /
+   `_init_<Cls>` (`module_gen.py` ~15012-15060, `attr_inits`) seeds
+   `_p->_cls_block = _classattr_<Cls>__block` (the execution building it).
+4. Instance reads. `emit_exprs.py` ~2602: for a hoisted class, read
+   `obj->_cls_block-><attr>` instead of the global. Module-scope classes keep
+   the global unchanged.
+5. Class-name reads and writes. `Tag.attr` (`emit_exprs.py` ~1824,
+   `emit_methods.py` `_resolve_class_attr_write_target` ~183, and the
+   `emit_stmts.py` write sites ~1768/2439) resolve to
+   `_classattr_<Cls>__block-><attr>`: the most recent execution, which is the
+   right answer while the class name is in scope.
+6. C++ readers. `cpp_core.py` ~660/1963/3132 and `cpp_async.py` ~873 still
+   read the global. They are on the legacy path; confirm whether they can
+   reach a hoisted class before routing them. Generators stay refused
+   (`coro.py` `_nested_class_nonliteral_attr`), so no stack-switch store is
+   needed for this round.
+
+Tests, in the order they land (each must be green when it lands):
+
+- `test_nested_class_attr_rebind_after_construction_regression` (landed now).
+- `test_nested_class_attr_reads_enclosing_local_regression` (landed earlier,
+  `5\n7\n`, must stay green).
+- New: the four-call program `make(5)`, `make(7)`, `make(9).__version__`, then
+  `a.__version__`, expected `5\n7\n9\n5\n`. Currently prints `7 7 9 9`; lands
+  with step 4.
+- Residual, not fixed by C and to be written down, not hidden: a class object
+  that escapes its function (`return Tag`) and is used in a LATER call reads
+  that later call's block. Closing it needs the class object itself as a
+  runtime value. Until then refuse the escape the way
+  `coro.py` `_nested_class_nonliteral_attr` refuses generators, keyed on the
+  class name being returned or stored.
 
 Tests (land each with its fix, never red on the tree):
 
