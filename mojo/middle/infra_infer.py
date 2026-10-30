@@ -1489,7 +1489,46 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
             if pname not in inferred and is_string_method and len(_struct_evidence_list) == 0:
                 inferred[pname] = 'char *'
 
+    # A container guess is only as good as the body's own use of the name. A
+    # parameter the body REBINDS to a container of another kind (`live =
+    # set(live)` after a `for x in live`, or after `set(live)` alone) has one
+    # C variable that must hold both, and no single container pointer does:
+    # the store then reaches `_sce_simple_emit`'s container-kind refusal, and
+    # the module falls back to source inclusion after compiling twice
+    # (bugs/CODEGEN_selfhost_closure_set_kind_refusal_double_compiles_the_
+    # module.md). This is the parameter form of the rule
+    # `_prebound_local_ctypes` already applies to LOCALS: a name bound to two
+    # container kinds is the box, not the first kind it happened to see.
+    for pname in list(inferred):
+        if inferred[pname] in gimple_ctypes._CONTAINER_KIND_TYPES and \
+                _rebound_to_other_container(getattr(func, 'body', None) or [],
+                                            pname, inferred[pname]):
+            inferred[pname] = 'int64_t'
+
     return inferred
+
+
+def _rebound_to_other_container(body: list, pname: str, ctype: str) -> bool:
+    """True when a binding in `body` (not inside a nested def) assigns
+    `pname` a container literal or empty constructor whose kind is not
+    `ctype`. A non-container value, or a call whose kind this cannot read,
+    does not count: the answer is only ever narrowed by a binding that
+    provably disagrees."""
+    for n in _each_binding(body):
+        if not isinstance(n, AssignStmt):
+            continue
+        if not isinstance(n.target, IdentExpr) or _as_str(n.target.name) != pname:
+            continue
+        kind = _container_literal_ctype(n.value) or _empty_ctor_ctype(n.value)
+        if kind is None and isinstance(n.value, CallExpr) \
+                and isinstance(n.value.func, IdentExpr):
+            # `set(x)` / `list(x)` / `dict(x)` build their kind whatever they
+            # are handed, so the constructor name is the answer.
+            kind = {'dict': 'MojoDict *', 'list': 'MojoList *',
+                    'set': 'MojoSet *'}.get(_as_str(n.value.func.name))
+        if kind is not None and kind != ctype:
+            return True
+    return False
 
 def _seed_addressed_locals(gen, body: list):
     """Pre-scan `body` (BEFORE any statement in it compiles) for every

@@ -663,6 +663,76 @@ def set_only(n: Int):
         _FAIL += 1
 
 
+def test_rebound_container_param_is_the_box():
+    """A PARAMETER the body rebinds to a container of another kind is the box.
+
+    `read_before_store`'s `walk_stmts(stmts, live)` does `live = set(live)`
+    in a nested def. The `set(live)` call is iteration evidence, so the
+    parameter took the `MojoList *` last-resort guess; the body then stored a
+    `MojoSet *` into that one C variable and `_sce_simple_emit` refused the
+    whole module with "cannot coerce MojoSet * to MojoList *", which made
+    formal/model.py compile twice (the fallback). The same name held two
+    container kinds, which is the case `_prebound_local_ctypes` answers with
+    the box for a LOCAL, and the parameter form of that rule is the same
+    answer. Before the fix this refuses at compile time (TypeError); after it,
+    the parameter is `int64_t` and the module compiles.
+    """
+    global _PASS, _FAIL
+    name = "rebound_container_param_is_the_box"
+    try:
+        ok, c_src, stderr = gimple_compiles("""\
+def outer(fn):
+    def inner(stmts, live):
+        live = set(live)
+        return live
+    return inner
+
+
+def walk(stmts, live):
+    live = set(live)
+    return live
+
+
+def same_kind(live):
+    for x in live:
+        pass
+    live = [1, 2]
+    return live
+""")
+    except TypeError as e:
+        print(f"FAIL  {name}: the codegen refused the module outright: {e}")
+        _FAIL += 1
+        return
+
+    def param_ctype(fname, pname):
+        """The C type `pname` is DECLARED with in `fname`'s emitted DEFINITION
+        (the occurrence whose parameter list names its parameters, not the
+        bare-typed forward declaration above it)."""
+        m = re.search(r'^\S[^\n;]*\b' + re.escape(fname) + r'_[0-9a-f]+'
+                      r'\s*\(([^;\n]*)\)\s*$', c_src, re.M)
+        if m is None:
+            return ''
+        for part in m.group(1).split(','):
+            part = part.strip()
+            if part.endswith(' ' + pname):
+                return part[:-len(pname) - 1]
+        return ''
+
+    walk_t = param_ctype('walk', 'live')
+    same_t = param_ctype('same_kind', 'live')
+    if ok and walk_t == 'int64_t' and same_t == 'MojoList *':
+        print(f"PASS  {name}  (walk.live={walk_t}, same_kind.live={same_t})")
+        _PASS += 1
+    else:
+        print(f"FAIL  {name}: compiles={ok} walk.live={walk_t!r} "
+              f"same_kind.live={same_t!r} (want 'int64_t' and 'MojoList *': "
+              f"a rebound to ANOTHER kind is the box, to the SAME kind is not)")
+        if not ok:
+            for line in stderr.splitlines()[:8]:
+                print(f"      {line}")
+        _FAIL += 1
+
+
 def test_returned_param_takes_its_declared_container_return_type():
     """An unannotated parameter a `-> container` function hands STRAIGHT back
     is that container.
@@ -1174,6 +1244,12 @@ def main():
     # ... and a parameter a `-> container` function hands back is that
     # container, which is what took out selfhost/mojoc/bootstrap-stage2-cc.
     _run_isolated(lambda: test_returned_param_takes_its_declared_container_return_type(), 'test_returned_param_takes_its_declared_container_return_type (line 1083)')
+    # ... and a parameter the body rebinds to a container of ANOTHER kind is
+    # the box too, not the kind the iteration guess gave it: the same one
+    # C variable cannot be both, and the refusal it caused built
+    # formal/model.py twice (bugs/CODEGEN_selfhost_closure_set_kind_refusal_
+    # double_compiles_the_module.md).
+    _run_isolated(lambda: test_rebound_container_param_is_the_box(), 'test_rebound_container_param_is_the_box')
     # ... and a lifted lambda does not un-rename the enclosing function's
     # shadowing locals, which is the next layer of the same build.
     _run_isolated(lambda: test_a_lifted_lambda_keeps_the_enclosing_functions_renamed_locals(), 'test_a_lifted_lambda_keeps_the_enclosing_functions_renamed_locals (line 1086)')
