@@ -748,7 +748,19 @@ def _yield_kind(expr, env: dict | None = None) -> str | None:
     if isinstance(expr, N.SliceExpr) and isinstance(expr.obj, N.IdentExpr):
         if env.get(expr.obj.name) == 'p':
             return 'p'
+        # A slice of a name whose kind is unknown is a sequence the SAME KIND as
+        # the name (a str, a bytes, a list): a pointer word, never a float, so it
+        # can travel as a tagged word without boxing.
+        if env.get(expr.obj.name) is None:
+            return 'w'
         return None
+    # `os.fspath(x)` / `fsencode(x)`: a str or bytes -- a pointer word.
+    if (isinstance(expr, N.CallExpr)
+            and ((isinstance(expr.func, N.IdentExpr) and expr.func.name in ('fspath', 'fsencode', 'fsdecode'))
+                 or (isinstance(expr.func, N.MemberExpr)
+                     and isinstance(expr.func.obj, N.IdentExpr) and expr.func.obj.name == 'os'
+                     and expr.func.member in ('fspath', 'fsencode', 'fsdecode')))):
+        return 'w'
     # `next(it)` / `next(it, default)` where `it` was bound by
     # `it = iter(<list-local>)` — the element kind carried onto `it` in
     # `_static_env` (as a ('list', kind) entry) is this expression's kind.

@@ -1,5 +1,37 @@
 # CODEGEN_generator_function: Lib/glob.py
 
+## Status (2026-10-31, round 3 — list-draining and `yield from` of a tagged generator landed; the exact consumer shapes glob still needs)
+
+Landed (pinned by `generator_mixed_kind_yields_drained_into_a_list` and
+`generator_yield_from_a_tagged_word_generator`): a tagged-word generator can be
+consumed by `list(g())` and comprehensions (the drained list carries its own
+per-slot kinds — `mojo_list_append_word`, a growable private kinds row, and the
+`_RuntimeKinded` `_struct_slot_kinds` row routing `print`/index/iterate through
+the list's own kinds), and `yield from` of one forwards its words, so the
+delegating generator is tagged too. A slice of a name of unknown kind
+(`pattern[:0]`) and `os.fspath/fsencode(...)` are pointer-word yield sites
+(`'w'`, never a float, so no boxing).
+
+`glob.py` still refuses, and each reason is now a CONSUMER or PARAMETER shape,
+not a yield-kind one:
+
+1. `_iterdir` (`yield fsencode(entry.name)` beside `yield entry.name`, str vs
+   bytes) is tagged-capable but is consumed through `with contextlib.closing(
+   _iterdir(...)) as it: return list(it)` — a generator handle passed to a
+   function and read through its `__enter__` value. The tag is only chosen for
+   `for` / `list` / comprehension / `yield from` consumers, so it falls back to
+   the cpp path (`bytes(...)` unresolved). Next: lower `with contextlib.closing(E)
+   as v: BODY` to `v = E; BODY; v.close()`, and let the consumer whitelist follow
+   a handle bound once to a call (`v` is only `list(v)`ed / iterated / closed).
+2. `_iglob`: `yield pathname` where `pathname` is a parameter whose call sites
+   are `os.fspath(...)`-rebound public-API parameters (a rebound PARAMETER is a
+   hole: the env sees the param and the assignment). Next: a name bound only
+   from pointer-word calls after its parameter binding is a pointer word.
+   `glob_in_dir = _glob2 / _glob1 / _glob0` then `for name in glob_in_dir(...)` is
+   a call through a callable-valued local that is one of three compiled
+   generators.
+3. The three selector closures — escaping nested generators; unchanged.
+
 ## Status (2026-10-31, round 2 — the tagged yield now exists on BOTH paths; glob needs the tag on PARAMETERS and on delegation)
 
 Landed since the entry below: the tagged-word yield on the C++20-coroutine path
