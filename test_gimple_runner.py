@@ -5329,6 +5329,32 @@ def main():
 main()
 """, "R 1\nnone 1\n")
 
+    # The module-scope half of the value-type seam: `d = {}` at module level
+    # is boxed as int64_t, so its subscript store comes through the untyped
+    # dict arm and every bare read of `d` loads a FRESH temp. The store's value
+    # type was recorded only on its own temp, so the read answered as int64_t:
+    # a double printed its IEEE-754 bits and a string printed its address
+    # (`4621537642612260864`, `4372406328` on the same tree). The record is
+    # now also keyed by the source name (`_note_global_dict_store`), which
+    # `_lower_IdentExpr` carries onto each read. Both halves are read in the
+    # same scope as the store, which is the case this covers; a READ from a
+    # different function is a separate gap (empty-literal module dicts are
+    # not seeded from their stores in the Phase 1.7 pre-scan).
+    test_gimple_stdout("gimple_module_scope_dict_value_type_survives_read", """\
+d = {}
+d[(1, 2)] = 9.5
+print(d[(1, 2)], len(d))
+s = {}
+s[("a",)] = "R"
+print(s[("a",)], len(s))
+p = {}
+p["k"] = 2.5
+print(p["k"], len(p))
+def main():
+    pass
+main()
+""", "9.5 1\nR 1\n2.5 1\n")
+
     # The other half of that doc, and the expensive one: a MISSING tuple key
     # grew the dict by one entry per lookup, which is where ~16 GB of the live
     # set on `mojoc --dump-full fire.py` went (a cache keyed by
