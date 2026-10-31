@@ -1479,6 +1479,13 @@ def _cpp_exc_ctor_value(gen, node) -> bool:
             and len(node.args) <= 1 and not (node.kwargs or []))
 
 
+_CPP_RT_RETURN_CTYPE = {
+    'mojo_path_join': 'char *', 'mojo_str_cat': 'char *', 'mojo_cstr_slice': 'char *',
+    'mojo_dirent_name': 'char *', 'mojo_dirent_path': 'char *',
+    'mojo_list_new': 'MojoList *', 'mojo_list_slice_word': 'MojoList *',
+}
+
+
 def _cpp_assign_cast_type(gen, val):
     """The C type an assigned value expression is KNOWN to have, read off its
     emitted text: a typed lambda (`[&]() -> T {`) or a call to a module function
@@ -1490,6 +1497,10 @@ def _cpp_assign_cast_type(gen, val):
         _t = _m.group(1).strip()
         _t = _t.replace('MojoSet*', 'MojoSet *')
         return _t if _t in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *', 'int64_t') else None
+    # runtime string / list producers, by the name the emitted text starts with
+    _m = re.match(r'(mojo_[a-z0-9_]+)\(', val)
+    if _m and _m.group(1) in _CPP_RT_RETURN_CTYPE:
+        return _CPP_RT_RETURN_CTYPE[_m.group(1)]
     _m = re.match(r'@@CSYM:([A-Za-z0-9_]+)@@\(', val)
     if _m:
         _t = (gen.func_return_types.get(_m.group(1))
@@ -2480,6 +2491,16 @@ def _cpp_expr(gen, e) -> str:
                         f"({gen._cpp_expr(e.operand)})))")
         return f"({op}{gen._cpp_expr(e.operand)})"
     if isinstance(e, gimple_ctypes.TernaryExpr):
+        # `None if c else []` (Lib/os.py `_fwalk`'s `entries`): a list display
+        # branch is a real `MojoList *` (a bare `{}` is not an expression), and
+        # beside the other branch's word both travel as int64_t.
+        if any(isinstance(b, gimple_ctypes.ListExpr) and not b.elements
+               for b in (e.then_val, e.else_val)):
+            def _tb(b):
+                if isinstance(b, gimple_ctypes.ListExpr) and not b.elements:
+                    return "(int64_t)(intptr_t)mojo_list_new()"
+                return f"(int64_t)({gen._cpp_expr(b)})"
+            return f"({gen._cpp_expr(e.condition)} ? {_tb(e.then_val)} : {_tb(e.else_val)})"
         return f"({gen._cpp_expr(e.condition)} ? {gen._cpp_expr(e.then_val)} : {gen._cpp_expr(e.else_val)})"
     if isinstance(e, gimple_ctypes.BinaryOp):
         if e.op == '//':
@@ -2532,6 +2553,14 @@ def _cpp_expr(gen, e) -> str:
                 return (isinstance(node, gimple_ctypes.IdentExpr)
                         and gen._cpp_declared is not None
                         and gen._cpp_declared.get(node.name) == 'int64_t')
+            _sev = getattr(gen, '_cpp_str_evidence_names', None) or ()
+            if (_is_word_ident(e.left) and _is_word_ident(e.right)
+                    and (e.left.name in _sev or e.right.name in _sev)):
+                # two unsolved words, one of which the body uses as a string
+                # (sliced / str-method receiver): `int + str` is a TypeError, so
+                # this `+` is a concatenation (`toppath + name`, os.fwalk).
+                return (f"mojo_str_cat((char *)(intptr_t)({gen._cpp_expr(e.left)}), "
+                        f"(char *)(intptr_t)({gen._cpp_expr(e.right)}))")
             if ((isinstance(e.right, gimple_ctypes.StringLiteral) and _is_word_ident(e.left))
                     or (isinstance(e.left, gimple_ctypes.StringLiteral) and _is_word_ident(e.right))):
                 return (f"mojo_str_cat((char *)(intptr_t)({gen._cpp_expr(e.left)}), "
@@ -2978,6 +3007,14 @@ def _cpp_expr(gen, e) -> str:
                     and e.func.obj.name in gen._cpp_declared):
                 _cont_name = e.func.obj.name
                 _cont_ct = gen._cpp_declared.get(_cont_name)
+                _cont_ref = _cont_name
+                if (_cont_ct == 'int64_t' and e.func.member in ('append', 'extend', 'pop')
+                        and _cont_name in (getattr(gen, '_cpp_list_word_names', None) or ())):
+                    # a WORD the body uses as a list (`entries = None if .. else []`,
+                    # then `entries.append(entry)`): the list methods apply to the
+                    # pointer behind it
+                    _cont_ct = 'MojoList *'
+                    _cont_ref = f"((MojoList *)(intptr_t){_cont_name})"
                 if (_cont_ct == 'MojoList *' and e.func.member == 'pop'
                         and len(e.args) <= 1):
                     # `<list-local>.pop()` / `.pop(i)` -- returns the raw
@@ -2989,8 +3026,8 @@ def _cpp_expr(gen, e) -> str:
                     # runtime `mojo_is_registered_list` discrimination and
                     # the AssignStmt tuple-unpack branch respectively.
                     if e.args:
-                        return f"mojo_list_pop_at({_cont_name}, (int64_t)({gen._cpp_expr(e.args[0])}))"
-                    return f"mojo_list_pop({_cont_name})"
+                        return f"mojo_list_pop_at({_cont_ref}, (int64_t)({gen._cpp_expr(e.args[0])}))"
+                    return f"mojo_list_pop({_cont_ref})"
                 if (_cont_ct == 'MojoList *' and e.func.member == 'append'
                         and len(e.args) == 1
                         and isinstance(e.args[0], (gimple_ctypes.ListExpr,
@@ -3006,7 +3043,7 @@ def _cpp_expr(gen, e) -> str:
                     _reg = getattr(gen, '_cpp_list_local_elem_types', None)
                     if _reg is not None and _reg.get(_cont_name) is None:
                         _reg[_cont_name] = 'int64_t'
-                    return f"(mojo_list_append_int({_cont_name}, (int64_t)({_bl})), 0)"
+                    return f"(mojo_list_append_int({_cont_ref}, (int64_t)({_bl})), 0)"
                 if (_cont_ct == 'MojoList *' and e.func.member == 'append'
                         and len(e.args) == 1):
                     _avct = gimple_exprtypes._infer_simple_expr_ctype(
@@ -3021,10 +3058,10 @@ def _cpp_expr(gen, e) -> str:
                     _a = gen._cpp_expr(e.args[0])
                     _eff = (_reg or {}).get(_cont_name, _avct)
                     if _eff == 'char *':
-                        return f"(mojo_list_append_str({_cont_name}, (char *)({_a})), 0)"
+                        return f"(mojo_list_append_str({_cont_ref}, (char *)({_a})), 0)"
                     if _eff == 'double':
-                        return f"(mojo_list_append_double({_cont_name}, (double)({_a})), 0)"
-                    return f"(mojo_list_append_int({_cont_name}, (int64_t)({_a})), 0)"
+                        return f"(mojo_list_append_double({_cont_ref}, (double)({_a})), 0)"
+                    return f"(mojo_list_append_int({_cont_ref}, (int64_t)({_a})), 0)"
                 if (_cont_ct == 'MojoSet *' and e.func.member == 'add'
                         and len(e.args) == 1):
                     _avct = gimple_exprtypes._infer_simple_expr_ctype(
@@ -4624,15 +4661,25 @@ def _cpp_expr(gen, e) -> str:
             # rewrites to `not not mojo_c_getenv("GITHUB_ACTIONS")` and
             # hit this function's generic refusal below before this case
             # was added.
-            if fname == 'mojo_os_scandir' and len(args) == 1:
-                # reports failure via the pending flag (a coroutine body must
-                # not longjmp): rethrow it as a real C++ exception here so the
-                # enclosing `except OSError` matches.
-                return ("[&]() -> MojoList * { MojoList *_sd = mojo_os_scandir("
-                        f"(char *)(intptr_t)({args[0]})); "
+            _PENDING_RAISERS = {
+                'mojo_os_scandir': ('MojoList *', 1), 'mojo_os_stat': ('int64_t', 3),
+                'mojo_os_openat': ('int64_t', 3), 'mojo_dirent_stat': ('int64_t', 2)}
+            if fname in _PENDING_RAISERS and len(args) == _PENDING_RAISERS[fname][1]:
+                # these report failure via the pending flag (a coroutine body
+                # must not longjmp): rethrow it as a real C++ exception here so
+                # the enclosing `except OSError` matches.
+                _rt = _PENDING_RAISERS[fname][0]
+                _cargs = ', '.join(
+                    f"(char *)(intptr_t)({a})" if (fname in ('mojo_os_scandir',) or
+                                                  (fname == 'mojo_os_openat' and i == 0))
+                    else f"(int64_t)({a})" for i, a in enumerate(args))
+                return (f"[&]() -> {_rt} {{ {_rt} _pr = {fname}({_cargs}); "
                         "if (mojo_exc_pending_get()) { mojo_exc_pending_set(0); "
                         "throw _MojoCppExc{ mojo_exc_type_get(), mojo_exc_msg_get(), "
-                        "mojo_exc_obj_get() }; } return _sd; }()")
+                        "mojo_exc_obj_get() }; } return _pr; }()")
+            if fname == 'mojo_list_slice_word' and len(args) == 6:
+                return (f"mojo_list_slice_word((int64_t)(intptr_t)({args[0]}), "
+                        + ', '.join(f"(int64_t)({a})" for a in args[1:]) + ")")
             if fname in (
                     'mojo_c_getenv', 'mojo_platform_system',
                     'mojo_platform_machine', 'mojo_stdin_read',
@@ -4640,7 +4687,9 @@ def _cpp_expr(gen, e) -> str:
                     'mojo_subprocess_stdout', 'mojo_subprocess_stderr',
                     'mojo_dirent_name', 'mojo_dirent_path',
                     'mojo_dirent_is_dir', 'mojo_dirent_is_file',
-                    'mojo_dirent_is_symlink'):
+                    'mojo_dirent_is_symlink', 'mojo_stat_mode', 'mojo_stat_dev',
+                    'mojo_stat_ino', 'mojo_os_samestat', 'mojo_s_isdir',
+                    'mojo_os_close', 'mojo_list_slice_word', 'mojo_bytes_from_cstr'):
                 return f"{fname}({', '.join(args)})"
             # A call to a C-stdlib / POSIX function with a curated, known
             # signature (`_LIBC_SIGS`) — e.g. `close(fd)` inside a compiled
@@ -4743,6 +4792,22 @@ def _cpp_expr(gen, e) -> str:
         stop = gen._cpp_expr(e.stop) if e.stop is not None else 'MOJO_SLICE_STOP_OMITTED'
         step = gen._cpp_expr(e.step) if e.step is not None else ''
         if step:
+            # `x[a:b:c]` on a list local (or a WORD that is a list or a string
+            # at run time): an extended slice. The bare `(a, b, c)` tuple this
+            # used to answer is not an expression a loop or a call can use.
+            _sx = e.obj
+            _sct = (gen._cpp_declared.get(_sx.name)
+                    if isinstance(_sx, gimple_ctypes.IdentExpr) and gen._cpp_declared else None)
+            _hs = '1' if e.start is not None else '0'
+            _he = '1' if e.stop is not None else '0'
+            _st0 = start if e.start is not None else '0'
+            _sp0 = stop if e.stop is not None else '0'
+            if _sct == 'MojoList *':
+                return (f"mojo_list_slice_step((MojoList *)({gen._cpp_expr(_sx)}), {_hs}, "
+                        f"(int64_t)({_st0}), {_he}, (int64_t)({_sp0}), (int64_t)({step}))")
+            if _sct == 'int64_t':
+                return (f"(MojoList *)(intptr_t)mojo_word_slice_step((int64_t)({gen._cpp_expr(_sx)}), "
+                        f"{_hs}, (int64_t)({_st0}), {_he}, (int64_t)({_sp0}), (int64_t)({step}))")
             return f"({start}, {stop}, {step})"
         # Python `s[i:j]` on a string (this emitter's `char *`) → the
         # substring, via the same mojo_cstr_slice helper the GIMPLE path's
@@ -6543,6 +6608,184 @@ def _cpp_lower_os_path_aliases(node, aliases: dict):
     return new
 
 
+_POSIX_STAT_ATTRS = {'st_mode': 'mojo_stat_mode', 'st_dev': 'mojo_stat_dev',
+                     'st_ino': 'mojo_stat_ino'}
+
+
+def _cpp_needs_posix_idioms(gen, fn) -> bool:
+    """Does `fn` contain a construct `_cpp_lower_posix_idioms` rewrites? The pass
+    COPIES the function, and an AST copy changes node identity (several earlier
+    passes key on it), so every generator without such a construct is left
+    exactly as it was."""
+    import os as _os
+    G = gimple_ctypes
+    for n in gimple_exprtypes._walk_ast(fn):
+        if isinstance(n, G.AssertStmt) and not n.is_comptime:
+            return True
+        if isinstance(n, G.IdentExpr) and n.name.startswith('O_') \
+                and hasattr(_os, n.name):
+            return True
+        if isinstance(n, G.MemberExpr) and n.member in _POSIX_STAT_ATTRS:
+            return True
+        if isinstance(n, G.ForStmt) and isinstance(n.iterable, G.SliceExpr) \
+                and n.iterable.step is not None:
+            return True
+        if isinstance(n, G.CallExpr):
+            f = n.func
+            if isinstance(f, G.IdentExpr) and f.name in ('stat', 'close', 'scandir', 'fsencode') \
+                    and not gen._locally_binds_name(f.name):
+                return True
+            if isinstance(f, G.IdentExpr) and f.name == 'open' \
+                    and any(k == 'dir_fd' for k, _v in (n.kwargs or [])):
+                return True
+            if isinstance(f, G.MemberExpr) and f.member == 'extend' and len(n.args) == 1 \
+                    and isinstance(n.args[0], G.Comprehension):
+                return True
+            if isinstance(f, G.MemberExpr) and isinstance(f.obj, G.IdentExpr):
+                if f.member in ('samestat', 'S_ISDIR') or f.member == 'stat':
+                    return True
+                _m = gen.imported_symbols.get(f.obj.name)
+                if _m and _as_str(_m.get('module') or '') == 'posixpath':
+                    return True
+    return False
+
+
+def _cpp_lower_posix_idioms(gen, node, handles=None):
+    """A copy of `node` with the fd-relative posix idioms `os.fwalk` is built
+    from spelled as runtime calls (see runtime `mojo_os_stat` & co): `stat(x,
+    follow_symlinks=, dir_fd=)`, `open(name, flags, dir_fd=)`, `close(fd)`, a
+    bare `scandir(x)` call, `entry.stat(...)`, `<name>.st_mode/.st_dev/.st_ino`,
+    `path.samestat(a, b)`, `st.S_ISDIR(m)`, the `O_*` constants, `assert` as a
+    real check. `handles` is the set of `DirEntry` loop targets (for
+    `entry.stat`). Names the body binds itself are left alone."""
+    import dataclasses
+    import os as _os
+    G = gimple_ctypes
+    if handles is None:
+        handles = set()
+        scan_names = set()
+        for n in gimple_exprtypes._walk_ast(node):
+            if isinstance(n, G.AssignStmt) and isinstance(n.target, G.IdentExpr) \
+                    and isinstance(n.value, G.CallExpr) \
+                    and isinstance(n.value.func, G.IdentExpr) \
+                    and n.value.func.name == 'scandir':
+                scan_names.add(n.target.name)
+        for n in gimple_exprtypes._walk_ast(node):
+            if (isinstance(n, G.ForStmt) and isinstance(n.iterable, G.IdentExpr)
+                    and n.iterable.name in scan_names and isinstance(n.target, str)):
+                handles.add(n.target)
+        if handles:
+            # a plain `it = scandir(x)` / `for entry in it:` (no `with`): the
+            # same DirEntry handle uses as the `with` form
+            node = _cpp_dirent_rewrite(node, handles)
+    if isinstance(node, list):
+        return [_cpp_lower_posix_idioms(gen, x, handles) for x in node]
+    if isinstance(node, tuple):
+        return tuple(_cpp_lower_posix_idioms(gen, x, handles) for x in node)
+    if not dataclasses.is_dataclass(node) or isinstance(node, type):
+        return node
+    new = _cpp_copy_keep_attrs(node, {
+        f.name: _cpp_lower_posix_idioms(gen, getattr(node, f.name), handles)
+        for f in dataclasses.fields(node)})
+    if (isinstance(new, G.ForStmt) and isinstance(new.iterable, G.SliceExpr)
+            and new.iterable.step is not None
+            and isinstance(new.iterable.obj, G.IdentExpr)):
+        # `for x in xs[::-1]:` -- the slice is a list (or a string) VALUE the
+        # loop iterates; spelled as the runtime call that makes it.
+        sl = new.iterable
+        new = _cpp_copy_keep_attrs(new, {'iterable': G.CallExpr(
+            func=G.IdentExpr(name='mojo_list_slice_word'),
+            args=[sl.obj,
+                  G.IntLiteral(value=1 if sl.start is not None else 0),
+                  sl.start if sl.start is not None else G.IntLiteral(value=0),
+                  G.IntLiteral(value=1 if sl.stop is not None else 0),
+                  sl.stop if sl.stop is not None else G.IntLiteral(value=0),
+                  sl.step], line=sl.line, col=sl.col)})
+    if isinstance(new, G.AssertStmt) and new.value is not None and not new.is_comptime:
+        return G.IfStmt(
+            condition=G.UnaryOp(op='not', operand=new.value),
+            then_body=[G.RaiseStmt(value=G.CallExpr(
+                func=G.IdentExpr(name='AssertionError'), args=[]))],
+            elifs=[], else_body=None, line=new.line, col=new.col)
+    if (isinstance(new, G.IdentExpr) and new.name.startswith('O_')
+            and hasattr(_os, new.name) and isinstance(getattr(_os, new.name), int)
+            and not gen._locally_binds_name(new.name)):
+        return G.IntLiteral(value=getattr(_os, new.name))
+    if (isinstance(new, G.MemberExpr) and isinstance(new.obj, G.IdentExpr)
+            and new.member in _POSIX_STAT_ATTRS):
+        return G.CallExpr(func=G.IdentExpr(name=_POSIX_STAT_ATTRS[new.member]),
+                          args=[new.obj], line=new.line, col=new.col)
+    if isinstance(new, G.ExprStmt) and isinstance(new.value, G.CallExpr) \
+            and isinstance(new.value.func, G.MemberExpr) \
+            and new.value.func.member == 'extend' and len(new.value.args) == 1 \
+            and isinstance(new.value.args[0], G.Comprehension) \
+            and new.value.args[0].kind == 'generator' \
+            and len(new.value.args[0].generators) == 1:
+        # `stack.extend(<elt> for t in it [if c])`: the loop it is, with an
+        # `append` per element (no generator object, no temporary list).
+        comp = new.value.args[0]
+        gen0 = comp.generators[0]
+        body = [G.ExprStmt(value=G.CallExpr(
+            func=G.MemberExpr(obj=new.value.func.obj, member='append'),
+            args=[comp.element], line=new.line, col=new.col),
+            line=new.line, col=new.col)]
+        for c in reversed(gen0.conditions or []):
+            body = [G.IfStmt(condition=c, then_body=body, elifs=[],
+                             else_body=None, line=new.line, col=new.col)]
+        _tg = gen0.target
+        if isinstance(_tg, str) and ',' in _tg and not _tg.startswith('('):
+            _tg = '(' + _tg + ')'          # the loop forms expect a parenthesised tuple target
+        return _cpp_lower_posix_idioms(gen, G.ForStmt(
+            target=_tg, iterable=gen0.iterable, body=body,
+            else_body=None, is_async=False, line=new.line, col=new.col), handles)
+    if isinstance(new, G.CallExpr):
+        f = new.func
+        kw = dict(new.kwargs or [])
+        if isinstance(f, G.IdentExpr) and not gen._locally_binds_name(f.name):
+            if f.name == 'stat' and len(new.args) == 1:
+                return G.CallExpr(func=G.IdentExpr(name='mojo_os_stat'), args=[
+                    new.args[0], kw.get('follow_symlinks', G.IntLiteral(value=1)),
+                    kw.get('dir_fd', G.IntLiteral(value=-1))], line=new.line, col=new.col)
+            if f.name == 'open' and len(new.args) == 2 and 'dir_fd' in kw:
+                return G.CallExpr(func=G.IdentExpr(name='mojo_os_openat'),
+                                  args=[new.args[0], new.args[1], kw['dir_fd']],
+                                  line=new.line, col=new.col)
+            if f.name == 'fsencode' and len(new.args) == 1 and not kw \
+                    and 'fsencode' not in getattr(gen, 'func_return_types', {}):
+                # os.fsencode on a UTF-8 POSIX filesystem: the string's bytes
+                return G.CallExpr(func=G.IdentExpr(name='mojo_bytes_from_cstr'),
+                                  args=[new.args[0]], line=new.line, col=new.col)
+            if f.name == 'close' and len(new.args) == 1 and not kw:
+                return G.CallExpr(func=G.IdentExpr(name='mojo_os_close'),
+                                  args=list(new.args), line=new.line, col=new.col)
+            if f.name == 'scandir' and len(new.args) == 1 and not kw:
+                return G.CallExpr(func=G.IdentExpr(name='mojo_os_scandir'),
+                                  args=list(new.args), line=new.line, col=new.col)
+        if (isinstance(f, G.MemberExpr) and isinstance(f.obj, G.IdentExpr)
+                and f.member in _CPP_OS_PATH_ALIASABLE + ('split', 'splitext', 'abspath', 'normpath', 'relpath')):
+            _pm = gen.imported_symbols.get(f.obj.name)
+            if _pm and _as_str(_pm.get('module') or '') == 'posixpath':
+                # `import posixpath as path` -> `path.join(..)` is `os.path.join(..)`
+                return G.CallExpr(
+                    func=G.MemberExpr(obj=G.MemberExpr(obj=G.IdentExpr(name='os'),
+                                                       member='path'), member=f.member),
+                    args=new.args, kwargs=new.kwargs, line=new.line, col=new.col)
+        if isinstance(f, G.MemberExpr) and isinstance(f.obj, G.IdentExpr):
+            if f.obj.name in handles and f.member == 'stat':
+                fol = kw.get('follow_symlinks', G.IntLiteral(value=1))
+                return G.CallExpr(func=G.IdentExpr(name='mojo_dirent_stat'),
+                                  args=[f.obj, fol], line=new.line, col=new.col)
+            _m = gen.imported_symbols.get(f.obj.name)
+            _mod = _as_str(_m.get('module')) if _m and _m.get('module') else f.obj.name
+            if _mod == 'posixpath' and f.member == 'samestat' and len(new.args) == 2:
+                return G.CallExpr(func=G.IdentExpr(name='mojo_os_samestat'),
+                                  args=list(new.args), line=new.line, col=new.col)
+            if _mod == 'stat' and f.member == 'S_ISDIR' and len(new.args) == 1:
+                return G.CallExpr(func=G.IdentExpr(name='mojo_s_isdir'),
+                                  args=list(new.args), line=new.line, col=new.col)
+    return new
+
+
 def _cpp_lower_scandir_withs(gen, node):
     """A copy of `node` in which every `with scandir(top) as entries: BODY`
     is the straight-line `entries = mojo_os_scandir(top); BODY'` (enter is the
@@ -7344,6 +7587,44 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             lines.append(f"{indent}    {_names[0]} = {_idx_expr};")
             lines.append(f"{indent}    {_names[1]} = "
                          f"mojo_list_get_int({_cpp_as('MojoList *', _src)}, {_ctr});")
+            for inner in s.body:
+                lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+            lines.append(f"{indent}}}")
+            return lines
+        # `for a, b in zip(X, Y):` -- an indexed loop over the SHORTER of the two
+        # lists (Lib/os.py's `_fwalk`: `zip(dirs[::-1], entries[::-1])`). Each
+        # operand is evaluated once into a `MojoList *`; every target is the
+        # int64_t word of its list's slot (a string element is its pointer,
+        # which the body's string uses cast, as for any word local).
+        if (len(_names) >= 2 and _nested_inner is None
+                and isinstance(s.iterable, gimple_ctypes.CallExpr)
+                and isinstance(s.iterable.func, gimple_ctypes.IdentExpr)
+                and s.iterable.func.name == 'zip'
+                and not gen._locally_binds_name('zip')
+                and len(s.iterable.args) == len(_names) and not s.iterable.kwargs
+                and not s.else_body):
+            lines = []
+            _zl = []
+            for _a in s.iterable.args:
+                _zn = gen._cpp_fresh_name("_mg_zip")
+                lines.append(f"{indent}MojoList * {_zn} = "
+                             + _cpp_as('MojoList *', gen._cpp_expr(_a)) + ";")
+                _zl.append(_zn)
+            _ctr = gen._cpp_fresh_name("_mg_i")
+            _len = ' && '.join(f"{_ctr} < mojo_list_len({z})" for z in _zl)
+            for _nm in _names:
+                if _nm not in declared:
+                    _zct = ('char *' if _nm in (getattr(gen, '_cpp_str_evidence_names', None) or ())
+                            else 'int64_t')
+                    declared[_nm] = _zct
+                    lines.append(f"{indent}{_zct} {_nm};")
+            lines.append(f"{indent}for (int64_t {_ctr} = 0; {_len}; {_ctr}++) {{")
+            for _nm, _z in zip(_names, _zl):
+                _get = ('mojo_list_get_str'
+                        if (declared.get(_nm) == 'char *'
+                            or _nm in (getattr(gen, '_cpp_str_evidence_names', None) or ()))
+                        else 'mojo_list_get_int')
+                lines.append(f"{indent}    {_nm} = {_get}({_z}, {_ctr});")
             for inner in s.body:
                 lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
             lines.append(f"{indent}}}")
@@ -8213,6 +8494,14 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             if _iter_list_expr is not None and not isinstance(target, str):
                 raise gimple_exprtypes._UnsupportedGeneratorShape(
                     "unsupported for-loop target over a list-typed iterable")
+            if (_iter_list_expr is not None and _iter_elem in (None, 'int64_t')
+                    and isinstance(target, str)
+                    and (declared.get(target) == 'char *'
+                         or target in (getattr(gen, '_cpp_str_evidence_names', None) or ()))):
+                # the element type is unknown, but the target already holds a
+                # string in this body (`name = entry.name`, then `for name in
+                # xs[::-1]`): read the slots as strings.
+                _iter_elem = 'char *'
             if _iter_list_expr is not None:
                 _cached = gen._cpp_fresh_name("_mg_iter")
                 _ctr = gen._cpp_fresh_name("_mg_i")

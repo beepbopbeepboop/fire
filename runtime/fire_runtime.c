@@ -8,6 +8,7 @@
 #include <stdarg.h>
 #include <ctype.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <errno.h>
@@ -11357,9 +11358,45 @@ int64_t mojo_os_path_dirname_w(int64_t p) { return int_dirname(0, p); }
  * Fails like CPython: a missing directory is FileNotFoundError, anything else
  * OSError (reported through the pending-exception flag; the coroutine body
  * rethrows it as a C++ exception, so `except OSError` catches both). Order is the directory's own. */
-typedef struct { char *name; char *path; int is_dir_nofollow; int is_symlink; } MojoDirEntry;
+typedef struct { char *name; char *path; int is_dir_nofollow; int is_symlink; int dirfd; } MojoDirEntry;
+
+/* `w[a:b:c]` on a WORD whose kind only the runtime knows (a list or a string):
+ * a registered list slices as a list, anything else as a string. */
+int64_t mojo_word_slice_step(int64_t w, int has_start, int64_t start,
+                             int has_stop, int64_t stop, int64_t step) {
+    if (mojo_is_registered_list(w))
+        return (int64_t)(intptr_t)mojo_list_slice_step((MojoList *)(intptr_t)w, has_start,
+                                                       start, has_stop, stop, step);
+    char *str = (char *)(intptr_t)w;
+    if (!str || step == 0) return (int64_t)(intptr_t)"";
+    int64_t n = (int64_t)strlen(str);
+    int64_t lo, hi;
+    if (step > 0) {
+        lo = has_start ? start : 0;  hi = has_stop ? stop : n;
+        if (lo < 0) { lo += n; if (lo < 0) lo = 0; } else if (lo > n) lo = n;
+        if (hi < 0) { hi += n; if (hi < 0) hi = 0; } else if (hi > n) hi = n;
+    } else {
+        lo = has_start ? start : n - 1;  hi = has_stop ? stop : -n - 1;
+        if (lo < 0) { lo += n; if (lo < -1) lo = -1; } else if (lo >= n) lo = n - 1;
+        if (has_stop) { if (hi < 0) { hi += n; if (hi < -1) hi = -1; } else if (hi >= n) hi = n - 1; }
+        else hi = -1;
+    }
+    char *out = (char *)malloc((size_t)n + 1);
+    int64_t k = 0;
+    if (step > 0) for (int64_t i = lo; i < hi; i += step) out[k++] = str[i];
+    else          for (int64_t i = lo; i > hi; i += step) out[k++] = str[i];
+    out[k] = '\0';
+    return (int64_t)(intptr_t)out;
+}
+
+MojoList *mojo_list_slice_word(int64_t w, int has_start, int64_t start,
+                               int has_stop, int64_t stop, int64_t step) {
+    return (MojoList *)(intptr_t)mojo_word_slice_step(w, has_start, start, has_stop, stop, step);
+}
 
 MojoList *mojo_os_scandir(char *top) {
+    /* `scandir(fd)`: a word below the pointer range is an open directory fd */
+    if ((intptr_t)top > 0 && (intptr_t)top < 65536) return mojo_os_scandir_fd((int64_t)(intptr_t)top);
     DIR *d = top ? opendir(top) : NULL;
     if (!d) {
         mojo_exc_type_set(top && errno == ENOENT ? _MOJO_EXC_TAG_FILENOTFOUND
@@ -11387,6 +11424,7 @@ MojoList *mojo_os_scandir(char *top) {
         e->path = (char *)malloc(n);
         snprintf(e->path, n, "%s%s%s", top, (tl && top[tl - 1] != '/') ? "/" : "", de->d_name);
         struct stat st;
+        e->dirfd = -1;
         e->is_symlink = lstat(e->path, &st) == 0 && S_ISLNK(st.st_mode);
         e->is_dir_nofollow = (e->is_symlink ? 0 : (S_ISDIR(st.st_mode) ? 1 : 0));
         mojo_list_append_int(out, (int64_t)(intptr_t)e);
@@ -11401,13 +11439,95 @@ int64_t mojo_dirent_is_dir(int64_t h, int64_t follow) {
     MojoDirEntry *e = (MojoDirEntry *)(intptr_t)h;
     if (!e->is_symlink || !follow) return e->is_dir_nofollow;
     struct stat st;
-    return stat(e->path, &st) == 0 && S_ISDIR(st.st_mode);
+    int rc = e->dirfd >= 0 ? fstatat(e->dirfd, e->name, &st, 0) : stat(e->path, &st);
+    return rc == 0 && S_ISDIR(st.st_mode);
 }
+/* ── stat_result as a handle, the fd-relative calls os.fwalk is built from ──
+ * Failures go through the PENDING flag (a coroutine body must not longjmp), the
+ * same convention as mojo_os_scandir; the compiled body rethrows. */
+typedef struct { int64_t mode; int64_t dev; int64_t ino; } MojoStat;
+
+static void _mojo_oserror_pending(const char *what) {
+    mojo_exc_type_set(errno == ENOENT ? _MOJO_EXC_TAG_FILENOTFOUND : _MOJO_EXC_TAG_OSERROR);
+    char msg[512];
+    snprintf(msg, sizeof msg, "[Errno %d] %s: '%s'", errno, strerror(errno), what ? what : "?");
+    char *heap_msg = strdup(msg);
+    mojo_exc_msg_set(heap_msg);
+    mojo_exc_obj_set(heap_msg);
+    mojo_exc_pending_set(1);
+}
+
+static int64_t _mojo_stat_box(const struct stat *st) {
+    MojoStat *r = (MojoStat *)malloc(sizeof *r);
+    r->mode = st->st_mode; r->dev = st->st_dev; r->ino = st->st_ino;
+    return (int64_t)(intptr_t)r;
+}
+
+/* os.stat(target, follow_symlinks=, dir_fd=): `target` is a path string or an
+ * fd (a word below the pointer range is an fd); dir_fd < 0 means none. */
+int64_t mojo_os_stat(int64_t target, int64_t follow, int64_t dir_fd) {
+    struct stat st;
+    int rc;
+    if (target >= 0 && target < 65536) rc = fstat((int)target, &st);
+    else if (dir_fd >= 0) rc = fstatat((int)dir_fd, (char *)(intptr_t)target, &st,
+                                       follow ? 0 : AT_SYMLINK_NOFOLLOW);
+    else rc = follow ? stat((char *)(intptr_t)target, &st) : lstat((char *)(intptr_t)target, &st);
+    if (rc != 0) { _mojo_oserror_pending((target >= 65536) ? (char *)(intptr_t)target : "fd"); return 0; }
+    return _mojo_stat_box(&st);
+}
+int64_t mojo_stat_mode(int64_t h) { return ((MojoStat *)(intptr_t)h)->mode; }
+int64_t mojo_stat_dev(int64_t h)  { return ((MojoStat *)(intptr_t)h)->dev; }
+int64_t mojo_stat_ino(int64_t h)  { return ((MojoStat *)(intptr_t)h)->ino; }
+int64_t mojo_os_samestat(int64_t a, int64_t b) {
+    MojoStat *x = (MojoStat *)(intptr_t)a, *y = (MojoStat *)(intptr_t)b;
+    return x && y && x->ino == y->ino && x->dev == y->dev;
+}
+int64_t mojo_s_isdir(int64_t mode) { return (mode & 0170000) == 0040000; }
+int64_t mojo_dirent_stat(int64_t h, int64_t follow) {
+    MojoDirEntry *e = (MojoDirEntry *)(intptr_t)h;
+    struct stat st;
+    int rc;
+    if (e->dirfd >= 0) rc = fstatat(e->dirfd, e->name, &st, follow ? 0 : AT_SYMLINK_NOFOLLOW);
+    else rc = follow ? stat(e->path, &st) : lstat(e->path, &st);
+    if (rc != 0) { _mojo_oserror_pending(e->path); return 0; }
+    return _mojo_stat_box(&st);
+}
+/* os.open(name, flags, dir_fd=) -> fd; os.close(fd) */
+int64_t mojo_os_openat(char *name, int64_t flags, int64_t dir_fd) {
+    int fd = dir_fd >= 0 ? openat((int)dir_fd, name, (int)flags) : open(name, (int)flags);
+    if (fd < 0) { _mojo_oserror_pending(name); return -1; }
+    return fd;
+}
+void mojo_os_close(int64_t fd) { close((int)fd); }
+/* scandir over an open directory fd: like mojo_os_scandir, entries' paths are
+ * just their names (CPython's DirEntry.path for an fd scandir is the name). */
+MojoList *mojo_os_scandir_fd(int64_t fd) {
+    int d2 = dup((int)fd);
+    DIR *d = d2 >= 0 ? fdopendir(d2) : NULL;
+    if (!d) { _mojo_oserror_pending("fd"); if (d2 >= 0) close(d2); return mojo_list_new(); }
+    MojoList *out = mojo_list_new();
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) continue;
+        MojoDirEntry *e = (MojoDirEntry *)malloc(sizeof *e);
+        e->name = strdup(de->d_name);
+        e->path = strdup(de->d_name);
+        struct stat st;
+        e->dirfd = (int)fd;
+        e->is_symlink = fstatat((int)fd, de->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0 && S_ISLNK(st.st_mode);
+        e->is_dir_nofollow = (e->is_symlink ? 0 : (S_ISDIR(st.st_mode) ? 1 : 0));
+        mojo_list_append_int(out, (int64_t)(intptr_t)e);
+    }
+    closedir(d);
+    return out;
+}
+
 int64_t mojo_dirent_is_file(int64_t h, int64_t follow) {
     MojoDirEntry *e = (MojoDirEntry *)(intptr_t)h;
     struct stat st;
     if (e->is_symlink && !follow) return 0;
-    return stat(e->path, &st) == 0 && S_ISREG(st.st_mode);
+    int rc = e->dirfd >= 0 ? fstatat(e->dirfd, e->name, &st, 0) : stat(e->path, &st);
+    return rc == 0 && S_ISREG(st.st_mode);
 }
 
 int int_isfile(int64_t marker, int64_t path) {

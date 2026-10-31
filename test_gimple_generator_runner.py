@@ -916,7 +916,7 @@ def _cpp_for_over_callable_local_is_named():
     # gaps (c_common/tables.py `read_table`, c_analyzer/__init__.py
     # `check_all`, c_common/fsutil.py `glob_tree`/`_walk_tree`,
     # bugs/CODEGEN_generator_function_Lib_glob.md's `_iglob`,
-    # bugs/CODEGEN_generator_function_Lib_os.md's `walk`) and each doc had to
+    # the (since-fixed) Lib/os.py generator refusal's `walk`) and each doc had to
     # re-derive what to do about it. It stays a refusal — the callee's
     # return type genuinely is not knowable in this body model — but now says
     # which call and what would unblock it.
@@ -4402,7 +4402,7 @@ def main():
 
     # Second-level unpack: `marker, payload = stack.pop()` where `payload`
     # is itself a boxed tuple needing its own unpack (the exact `_fwalk`
-    # shape from bugs/CODEGEN_generator_function_Lib_os.md — `action,
+    # shape from the (since-fixed) Lib/os.py generator refusal — `action,
     # value = stack.pop()` then `isroot, ... = value`).
     test_generator_stdout("generator_pops_stack_two_level_tuple_unpack", """\
 def walker():
@@ -7056,6 +7056,165 @@ def main():
 
 main()
 """, "all values must agree on one scalar type")
+
+    # CPython's `os.fwalk` / `_fwalk` (fd-relative walk) compiled whole: stat /
+    # open(dir_fd=) / close / scandir(fd) / DirEntry.stat / samestat / S_ISDIR,
+    # the heterogeneous (action, args) stack, `stack.extend(<genexp over zip>)`,
+    # `assert`, `entries = None if .. else []` and the `yield value` that is a
+    # 4-tuple popped off that stack. Top-down and bottom-up.
+    test_generator_stdout("generator_os_fwalk_fd_relative_walk", """\
+import os
+import stat as st
+from os import scandir, stat, open, close, O_RDONLY, O_NONBLOCK
+
+def fspath(p):
+    return p
+
+def fsencode(p):
+    return p
+
+import posixpath as path
+import sys
+
+_fwalk_walk = 0
+_fwalk_yield = 1
+_fwalk_close = 2
+
+def fwalk(top=".", topdown=True, onerror=None, *, follow_symlinks=False, dir_fd=None):
+    \"\"\"Directory tree generator.
+
+    This behaves exactly like walk(), except that it yields a 4-tuple
+
+        dirpath, dirnames, filenames, dirfd
+
+    `dirpath`, `dirnames` and `filenames` are identical to walk() output,
+    and `dirfd` is a file descriptor referring to the directory `dirpath`.
+
+    The advantage of fwalk() over walk() is that it's safe against symlink
+    races (when follow_symlinks is False).
+
+    If dir_fd is not None, it should be a file descriptor open to
+    a directory, and top should be relative; top will then be relative to
+    that directory.  (dir_fd is always supported for fwalk.)
+
+    Caution:
+    Since fwalk() yields file descriptors, those are only valid until the
+    next iteration step, so you should dup() them if you want to keep them
+    for a longer period.
+
+    Example:
+
+    import os
+    for root, dirs, files, rootfd in os.fwalk('python/Lib/xml'):
+        print(root, "consumes", end="")
+        print(sum(os.stat(name, dir_fd=rootfd).st_size for name in files),
+              end="")
+        print("bytes in", len(files), "non-directory files")
+        if '__pycache__' in dirs:
+            dirs.remove('__pycache__')  # don't visit __pycache__ directories
+    \"\"\"
+    sys.audit("os.fwalk", top, topdown, onerror, follow_symlinks, dir_fd)
+    top = fspath(top)
+    stack = [(_fwalk_walk, (True, dir_fd, top, top, None))]
+    isbytes = isinstance(top, bytes)
+    try:
+        while stack:
+            yield from _fwalk(stack, isbytes, topdown, onerror, follow_symlinks)
+    finally:
+        # Close any file descriptors still on the stack.
+        while stack:
+            action, value = stack.pop()
+            if action == _fwalk_close:
+                close(value)
+
+# Each item in the _fwalk() stack is a pair (action, args).
+_fwalk_walk = 0  # args: (isroot, dirfd, toppath, topname, entry)
+_fwalk_yield = 1  # args: (toppath, dirnames, filenames, topfd)
+_fwalk_close = 2  # args: dirfd
+
+def _fwalk(stack, isbytes, topdown, onerror, follow_symlinks):
+    # Note: This uses O(depth of the directory tree) file descriptors: if
+    # necessary, it can be adapted to only require O(1) FDs, see issue
+    # #13734.
+
+    action, value = stack.pop()
+    if action == _fwalk_close:
+        close(value)
+        return
+    elif action == _fwalk_yield:
+        yield value
+        return
+    assert action == _fwalk_walk
+    isroot, dirfd, toppath, topname, entry = value
+    try:
+        if not follow_symlinks:
+            # Note: To guard against symlink races, we use the standard
+            # lstat()/open()/fstat() trick.
+            if entry is None:
+                orig_st = stat(topname, follow_symlinks=False, dir_fd=dirfd)
+            else:
+                orig_st = entry.stat(follow_symlinks=False)
+        topfd = open(topname, O_RDONLY | O_NONBLOCK, dir_fd=dirfd)
+    except OSError as err:
+        if isroot:
+            raise
+        if onerror is not None:
+            onerror(err)
+        return
+    stack.append((_fwalk_close, topfd))
+    if not follow_symlinks:
+        if isroot and not st.S_ISDIR(orig_st.st_mode):
+            return
+        if not path.samestat(orig_st, stat(topfd)):
+            return
+
+    scandir_it = scandir(topfd)
+    dirs = []
+    nondirs = []
+    entries = None if topdown or follow_symlinks else []
+    for entry in scandir_it:
+        name = entry.name
+        if isbytes:
+            name = fsencode(name)
+        try:
+            if entry.is_dir():
+                dirs.append(name)
+                if entries is not None:
+                    entries.append(entry)
+            else:
+                nondirs.append(name)
+        except OSError:
+            try:
+                # Add dangling symlinks, ignore disappeared files
+                if entry.is_symlink():
+                    nondirs.append(name)
+            except OSError:
+                pass
+
+    if topdown:
+        yield toppath, dirs, nondirs, topfd
+    else:
+        stack.append((_fwalk_yield, (toppath, dirs, nondirs, topfd)))
+
+    toppath = path.join(toppath, toppath[:0])  # Add trailing slash.
+    if entries is None:
+        stack.extend(
+            (_fwalk_walk, (False, topfd, toppath + name, name, None))
+            for name in dirs[::-1])
+    else:
+        stack.extend(
+            (_fwalk_walk, (False, topfd, toppath + name, name, entry))
+            for name, entry in zip(dirs[::-1], entries[::-1]))
+
+
+def main():
+    for r, d, f, fd in fwalk("/tmp/_gen_scandir_fixture"):
+        print(r, d, f)
+    for r, d, f, fd in fwalk("/tmp/_gen_scandir_fixture", topdown=False):
+        print(r, d, f)
+
+main()
+""", "/tmp/_gen_scandir_fixture ['sub'] ['file.txt']\n/tmp/_gen_scandir_fixture/sub [] []\n/tmp/_gen_scandir_fixture/sub [] []\n/tmp/_gen_scandir_fixture ['sub'] ['file.txt']\n")
 
     test_generator_stdout("generator_enumerate_index_yields_index", """\
 def rows(data):

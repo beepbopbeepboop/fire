@@ -1001,7 +1001,7 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
             return 'char *'
         if e.func.name in ('len', 'ord'):
             return 'int64_t'
-        if e.func.name == 'mojo_os_scandir':
+        if e.func.name in ('mojo_os_scandir', 'mojo_list_slice_word'):
             return 'MojoList *'
         if e.func.name == 'sorted' and e.args:
             return 'MojoList *'
@@ -1316,7 +1316,6 @@ def _generator_tuple_yield_slot_ctypes(fn: FunctionDef, known: dict | None=None,
             # in the non-tuple case this yield sits in.
             for _si, _el in enumerate(n.value.elements):
                 if (site[_si] == 'int64_t' and isinstance(_el, IdentExpr)
-                        and _el.name in _tuple_tested_names(fn)
                         and _name_has_str_evidence(_el.name, fn)):
                     site[_si] = 'char *'
         elif isinstance(n, YieldFromExpr) and generator_api is not None and isinstance(n.value, CallExpr) and isinstance(n.value.func, IdentExpr) and (n.value.func.name != fn.name):
@@ -1360,6 +1359,27 @@ def _tuple_tested_names(fn) -> set:
     return out
 
 
+def _str_evidence_names(fn) -> set:
+    """Every identifier of `fn` the body uses as a string, to a FIXPOINT: a name
+    with direct evidence (`_name_has_str_evidence`), plus the other operand of a
+    `+` whose one side is already known to be a string (`toppath + name` where
+    `toppath` is sliced makes `name` a string too -- `int + str` is a
+    TypeError)."""
+    names = set(n.name for n in _walk_own_body(fn.body) if isinstance(n, IdentExpr))
+    known = set(nm for nm in names if _name_has_str_evidence(nm, fn))
+    changed = True
+    while changed:
+        changed = False
+        for n in _walk_own_body(fn.body):
+            if isinstance(n, BinaryOp) and n.op == '+':
+                for a, b in ((n.left, n.right), (n.right, n.left)):
+                    if (isinstance(a, IdentExpr) and a.name in known
+                            and isinstance(b, IdentExpr) and b.name not in known):
+                        known.add(b.name)
+                        changed = True
+    return known
+
+
 def _name_has_str_evidence(name: str, fn) -> bool:
     """True when `fn`'s body uses `name` in a way only a string supports:
     subscripted / sliced, a str-method receiver, or the left/right operand of
@@ -1380,6 +1400,36 @@ def _name_has_str_evidence(name: str, fn) -> bool:
                         and isinstance(b, StringLiteral):
                     return True
     return False
+
+
+def _list_method_names(fn) -> set:
+    """Identifiers `fn`'s body uses as a LIST through a list-only method: an
+    `append(x)` / `extend(x)` with one argument or a zero-argument `pop()`."""
+    out: set = set()
+    for n in _walk_own_body(fn.body):
+        if (isinstance(n, CallExpr) and isinstance(n.func, MemberExpr)
+                and isinstance(n.func.obj, IdentExpr)):
+            m = n.func.member
+            if m in ('append', 'extend') and len(n.args) == 1 or m == 'pop' and not n.args:
+                out.add(n.func.obj.name)
+    return out
+
+
+def _list_method_params(fn) -> set:
+    """Unannotated parameters of `fn` the body uses as a LIST: `p.append(x)`,
+    `p.extend(x)` or a zero-argument `p.pop()`. A parameter whose call sites
+    could not be typed (a forward call, `_fwalk(stack, ...)` before `stack` is
+    known) is an `int64_t` word otherwise, and `stack.pop()` then lowers to a
+    stub; these methods are lists' (a dict's `pop` takes a key, a set's `add`)."""
+    names = set(p[0] if isinstance(p, (tuple, list)) else p for p in (fn.params or []))
+    out: set = set()
+    for n in _walk_own_body(fn.body):
+        if (isinstance(n, CallExpr) and isinstance(n.func, MemberExpr)
+                and isinstance(n.func.obj, IdentExpr) and n.func.obj.name in names):
+            m = n.func.member
+            if m in ('append', 'extend') and len(n.args) == 1 or m == 'pop' and not n.args:
+                out.add(n.func.obj.name)
+    return out
 
 
 def _tagged_word_params(fn) -> set:
@@ -1423,6 +1473,17 @@ def _tuple_guarded_bare_yields(fn) -> set:
             if (isinstance(sub, YieldExpr) and isinstance(sub.value, IdentExpr)
                     and sub.value.name == name):
                 out.add(id(sub))
+    # A generator whose EVERY yield is either a tuple display or a bare name
+    # (`yield value` beside `yield toppath, dirs, nondirs, topfd` -- Lib/os.py's
+    # `_fwalk`, whose `value` is a 4-tuple popped off its own stack): the bare
+    # names are those tuples. A bare name that was anything else could not be
+    # unpacked by the consumers of the tuple yields in the first place.
+    sites = [n for n in _walk_own_body(fn.body) if isinstance(n, YieldExpr)]
+    if (sites and all(isinstance(x.value, (TupleExpr, IdentExpr)) for x in sites)
+            and any(isinstance(x.value, TupleExpr) for x in sites)):
+        for x in sites:
+            if isinstance(x.value, IdentExpr):
+                out.add(id(x))
     return out
 
 

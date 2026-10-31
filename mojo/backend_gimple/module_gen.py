@@ -11417,7 +11417,7 @@ def gen_module_impl(self, stmts):
         if isinstance(_od, FunctionDef):
             self._compile_nested_generator_closures(_od, _generator_fns)
 
-    for s in stmts:
+    for s in _gca._delegates_first(stmts, _generator_fns):
         if not (isinstance(s, FunctionDef) and id(s) in _generator_fns
                 and id(s) not in _async_fns):
             continue

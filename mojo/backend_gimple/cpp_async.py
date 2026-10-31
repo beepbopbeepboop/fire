@@ -352,6 +352,46 @@ def _cpp_tag_yield_sites(body_lines: list):
     return out
 
 
+def _delegates_first(stmts: list, generator_ids) -> list:
+    """`stmts` reordered so a generator that `yield from`s a SIBLING generator of
+    the same module comes after it (stable otherwise). The consumer-visible shape
+    of a delegating generator (its tuple slots) is the delegate's, and it is only
+    known once the delegate has been compiled: Lib/os.py defines `fwalk` BEFORE
+    the `_fwalk` it delegates to. Plain loops: this module is self-compiled."""
+    by_name = {}
+    for st in stmts:
+        if isinstance(st, FunctionDef) and id(st) in generator_ids:
+            by_name[st.name] = st
+    out = []
+    placed = set()
+    visiting = set()
+
+    def place(st):
+        if id(st) in placed or id(st) in visiting:
+            return
+        visiting.add(id(st))
+        for n in gimple_exprtypes._walk_own_body(st.body):
+            if (isinstance(n, gimple_ctypes.YieldFromExpr)
+                    and isinstance(n.value, gimple_ctypes.CallExpr)
+                    and isinstance(n.value.func, gimple_ctypes.IdentExpr)
+                    and n.value.func.name in by_name
+                    and n.value.func.name != st.name):
+                place(by_name[n.value.func.name])
+        visiting.discard(id(st))
+        if id(st) not in placed:
+            placed.add(id(st))
+            out.append(st)
+
+    for st in stmts:
+        if isinstance(st, FunctionDef) and id(st) in generator_ids:
+            place(st)
+        else:
+            if id(st) not in placed:
+                placed.add(id(st))
+                out.append(st)
+    return out
+
+
 def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
                              struct_name: str | None = None,
                              extra_captures: list | None = None,
@@ -432,6 +472,11 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
             _has_sd = True
     if _has_sd:
         fn = gcc_._cpp_lower_scandir_withs(gen, fn)   # `with scandir(..) as e` -> a real list of DirEntry handles
+    gen.func_return_types.setdefault('mojo_list_slice_word', 'MojoList *')
+    if gcc_._cpp_needs_posix_idioms(gen, fn):
+        fn = gcc_._cpp_lower_posix_idioms(gen, fn)   # fd-relative posix calls -> runtime calls
+    gen._cpp_str_evidence_names = gimple_exprtypes._str_evidence_names(fn)
+    gen._cpp_list_word_names = gimple_exprtypes._list_method_names(fn)
     _opa = gcc_._cpp_collect_os_path_aliases(fn)
     if _opa:
         fn = gcc_._cpp_lower_os_path_aliases(fn, _opa)   # `join(a, b)` -> `os.path.join(a, b)`
@@ -626,6 +671,9 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
             param_ctypes.append((pn[1:], 'MojoList *'))
             continue
         ctype = gen._param_ctype(pn, pt, fn)
+        if (ctype == 'int64_t' and (pt is None or pt == '')
+                and pn in gimple_exprtypes._list_method_params(fn)):
+            ctype = 'MojoList *'     # used as a list: its call sites just were not typed yet
         if ctype == 'char *' and pn in gimple_exprtypes._tagged_word_params(fn):
             # rebound from a heterogeneous `pop()`: the boxed word, not the
             # call sites' string (see `_tagged_word_params`).
@@ -1070,6 +1118,8 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         gen._cpp_gen_self_base = None
         gen._cpp_gen_self_params = None
         gen._cpp_os_path_aliases = None
+        gen._cpp_str_evidence_names = None
+        gen._cpp_list_word_names = None
         gen._cpp_tuple_guarded_yields = None
         gen._cpp_gen_self_recursed = None
         gen._cpp_fwd_gen_delegates = None
