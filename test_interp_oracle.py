@@ -390,6 +390,44 @@ def main():
     print(len("\101"), "\101", "\0" == "\x00")
     print("a\u00e9b")
 ''',
+    # A user struct with `__iter__`/`__next__` is an iterator to BOTH
+    # `next(c)` and `for x in c`. The interpreter's `next` builtin is
+    # CPython's, which looks `__next__` up on the TYPE, and MojoInstance only
+    # forwards attribute reads, so `next(c)` raised "'MojoInstance' object is
+    # not an iterator" and `for x in c` fell through to `__getitem__` and died
+    # with KeyError: 0. The exhaustion signal is `raise StopIteration`, a
+    # bare exception CLASS, which the interpreter used to stash as a Mojo
+    # value instead of raising. The factory case pins that the receiver's
+    # value is the same whether it came from a constructor or a call.
+    "user_iterator_struct_next_and_for": '''\
+class Counter:
+    def __init__(self, start, stop):
+        self.i = start
+        self.stop = stop
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self.i >= self.stop:
+            raise StopIteration
+        v = self.i
+        self.i = v + 1
+        return v
+
+def make(a, b):
+    return Counter(a, b)
+
+def main():
+    c = Counter(5, 8)
+    print(next(c))
+    print(next(c))
+    print(next(Counter(9, 10)))
+    print(next(make(1, 1), "done"))
+    for x in Counter(1, 4):
+        print(x)
+    print([x * 2 for x in Counter(1, 4)])
+''',
 }
 
 # Shapes CPython CANNOT EXPRESS, so the corpus above cannot hold them: a
