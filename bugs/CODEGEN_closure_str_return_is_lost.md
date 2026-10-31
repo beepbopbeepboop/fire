@@ -54,7 +54,8 @@ Three hops did not carry it:
 - `g = mk(...)`: `emit_infra.carry_callable_ret_from_call` now copies that
   entry into `_bound_method_ret_types[g]`, which `g(...)` reads.
 - `mk(...)(...)`: `GimpleGen.lower_expr` stamps the callee's return type on
-  the CallExpr through the new `_return_callable_ret_for`, and emit_calls'
+  the CallExpr through `_return_ret_for` (which also covers the nested-factory
+  lifted name that master's 235f50283 added), and emit_calls'
   chained-call arm passes it to `_lower_bound_method_call_value`.
 
 Measured (`.tmp` driver, `test_gimple`'s pipeline, both `single-TU` and
@@ -62,6 +63,12 @@ Measured (`.tmp` driver, `test_gimple`'s pipeline, both `single-TU` and
 `<>`, `[]`, and the `bool` factory gives `True`/`False`, matching CPython.
 Regression: `test_callable_return_type_survives_its_carrier` now includes
 `mk_str` (named and chained).
+
+Merged with master (2026-10-30): master's 235f50283 had removed this doc,
+having landed the nested-factory lifted-name lookup for NON-capturing closures
+(`test_regress_closure_str_return.py`). That fix does not cover the untyped
+repro below, which was re-measured on the merged tree and still prints a
+decimal (`8623131688`), while the typed form prints `<>` — so the doc stays.
 
 STILL OPEN: the doc's own repro is UNTYPED (`def outer(p)` / `def inner(x)`).
 That still prints a decimal, for a different reason: an un-annotated `x` is

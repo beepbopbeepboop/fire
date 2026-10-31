@@ -1,5 +1,43 @@
 # CODEGEN_generator_function: Lib/os.py
 
+## Status (2026-10-30 — `work/gen-lib-os`: `os.path` function values + aliases landed; `walk` now stops at scandir, `_fwalk` at `stat`)
+
+Landed (measured on `Lib/os.py` of CPython 3.15, `python3 fire.py build`):
+
+- **`os.path.<fn>` / `posixpath.<fn>` read as a VALUE** (`islink, join =
+  path.islink, path.join`, the first line of `walk`) used to lower to
+  `_mojo_dispatch_getattr(<module marker 0>, "islink")` — a fatal runtime
+  `AttributeError: islink`. Now: `emit_exprs._lower_MemberExpr` returns the
+  runtime wrapper's address (`mojo_os_path_{join,islink,isdir,isfile,exists,
+  basename,dirname}_w`, new in `runtime/fire_runtime.c`), a call through it is
+  `mojo_fnptr_call_N`, and `coro._static_env` types the call's result
+  (`_os_path_fn_kind`: join/basename/dirname str, the predicates bool) for a
+  single-name AND a tuple-bound local. Pinned by
+  `generator_os_path_function_values_tuple_bound`.
+- **The C++20 coroutine emitter** (the path `walk`/`_fwalk` take) resolves such a
+  local as a compile-time ALIAS (`cpp_core._cpp_collect_os_path_aliases`, set
+  per body in `cpp_async`), so `join(top, ...)` lowers through the existing
+  `os.path.*` call table (which gained `islink`). `walk` no longer stops at
+  `unresolved callee 'join(...)'`.
+
+Measured state after this round:
+
+- `walk`: `unsupported for-loop iterable type: CallExpr` — the
+  `with scandir(top) as entries:` / `for entry in entries` shape (`scandir`
+  returns a `DirEntry` iterator; `entry.name/.path/.is_dir()/.is_symlink()`).
+- `_fwalk`: `a call to unresolved callee 'stat(...)'` (`from posix import *`;
+  `stat` returns a `stat_result` structseq that is then unpacked).
+- Still true, and the real size of the remainder: the mixed tuple / non-tuple
+  `stack` value model in `walk` (`stack.append((top, dirs, nondirs))` beside a
+  bare str entry, discriminated by `isinstance(top, tuple)`).
+
+Next steps, in order: (1) a runtime `DirEntry` value + `scandir` returning an
+iterable of them (`mojo_os_scandir`, entries as a struct with name/path and
+lazily-stat'd `is_dir/is_symlink`), lowered like `os.walk` already is; (2)
+`posix.stat`/`lstat` returning a fixed-layout `stat_result` the generator body
+can unpack; (3) the tagged `stack` element (tuple vs str) via the existing
+`mojo_list_pop` + `isinstance(x, tuple)` discrimination.
+
 ## Status (2026-10-29 — worktree agent-4796: verified refusal unchanged, regression test committed, root cause remains feature-sized tagged-union redesign)
 
 Verified: `python3 fire.py build Lib/os.py` still fails with the same generator refusal (`mixed tuple / non-tuple yields` / heterogeneous stack value model), unchanged from 2026-09-07. Added `test_regress_lib_os_generator_refusal.py` (passes, pins refusal + open doc). The concrete remaining prerequisites (per 2026-09-07 entry) are: `os.stat_result` structseq modeling, `os.scandir`/`DirEntry` iterator type, and a runtime-tagged container value model for `walk`/`_fwalk`'s mixed `str`/`tuple` `stack`. Genuinely out of scope for a narrow fix; doc stays open.

@@ -43,6 +43,7 @@ import mojo.middle.exprtypes as gimple_exprtypes
 import mojo.middle.itcursor as itc
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
+import mojo.backend_gimple.emit_infra as ginf
 import mojo.backend_gimple.emit_calls as ggc
 
 # Re-export shared helpers from mojo.middle.loops_shared via explicit imports.
@@ -719,16 +720,38 @@ def _boxed_list_ptr(gen, lst_type: str, lst_val: str) -> str | None:
     `double` element against a `char *` dict key, "pointer value used where a
     floating-point was expected").
 
+    A list of INTS needs a second, separate source of evidence: an `int64_t`
+    in `_elem_types` is the "nothing known" default, so a list whose element
+    type is int is not distinguishable there. A coroutine body's list param
+    whose unanimous call-site contract is int (`_coro_int_list_params`, the
+    same per-body table `_coro_str_params` is) is that evidence, and it
+    takes the same skip with `int64_t` as the element type. Without it the
+    dict arm declared the loop variable `char *` and `t += x` printed a
+    pointer's bits (`async def total(*xs)`, `gen_add([4, 5])`).
+
     Returns None for the untyped case, and the caller falls back to emitting
     the dispatch exactly as before.
     """
     if lst_type not in ('int', 'int64_t', 'void *'):
         return None
-    elem = gen._elem_of(lst_val)
-    if not elem or elem == 'int64_t':
-        return None
+    _int_lists = getattr(gen, '_coro_int_list_params', {}).get(
+        getattr(gen, 'current_func_name', None), ())
+    if _as_str(lst_val) in _int_lists:
+        elem = 'int64_t'
+    else:
+        elem = gen._elem_of(lst_val)
+        if not elem or elem == 'int64_t':
+            return None
     lp = gen._coerce_to_type('int64_t', 'MojoList *', gen._to_int64(lst_type, lst_val))
     gen._elem_types[lp] = elem
+    # The nested half rides along: the loop reads the iterable's nested
+    # element ctype from the pointer it is HANDED (`_carry_nested_elem`), which
+    # is this fresh temp, not the parameter name the contract was recorded
+    # under -- so a list of lists lost its inner type here and `for cell in
+    # row:` read the inner elements as int64_t.
+    _lp_nested = gen._nested_elem_types.get(_as_str(lst_val))
+    if _lp_nested is not None:
+        gen._nested_elem_types[lp] = _lp_nested
     return lp
 
 
@@ -814,8 +837,10 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                     gen._emit(f"  {cvn} = {av};")
                 else:
                     gen._safe_coerce_emit(at, gen.var_types[vn], av, cvn)
+            _bscope = ginf._open_block_scope(gen)
             for s in node.body:
                 gen.gen_stmt(s)
+            ginf._close_block_scope(gen, _bscope)
         return
 
     var = node.target
@@ -869,6 +894,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
         if is_dataclass_fields_loop:
             gen._dataclass_fields_vars.discard(var)
         raise
+    ggc._refuse_namedtuple_tuple_use(gen, it_type, 'iterating over')
 
     # `for x in <fresh container>:` (a display, a comprehension, a slice, a
     # `.split()`/`.keys()` result): nothing else can reference the iterable, so
@@ -1764,6 +1790,7 @@ def _gen_for_zip(gen, node):
     seq_elems = []
     for _ai in range(len(args)):
         st, sv = gen.lower_expr(args[_ai])
+        ggc._refuse_namedtuple_tuple_use(gen, st, 'zipping')
         st = gen._get_actual_type(st, sv)
         # A zip() argument need not be a statically-known MojoList* — a
         # dict-subscript/`.get()` result (e.g. `zip(d.get('parameters') or
@@ -1934,6 +1961,7 @@ def _gen_for_enumerate(gen, node):
     """Handle: for (idx, val) in enumerate(lst[, start]): ..."""
     lst_arg = node.iterable.args[0]
     lst_type, lst_val = gen.lower_expr(lst_arg)
+    ggc._refuse_namedtuple_tuple_use(gen, lst_type, 'enumerating')
     lst_type = gen._get_actual_type(lst_type, lst_val)
 
     # `enumerate(lst, start)` — the optional 2nd arg was previously
@@ -3328,6 +3356,7 @@ def _gen_lifted_closure(gen, ci, outer_name: str = None) -> str:
     _sv_strelem_vals = gen._owned_str_elem_vals
     _sv_closure_names = gen._owned_closure_names
     _sv_env_names = gen._owned_env_names
+    _sv_box_names = gen._owned_box_names
     gen._reset_no_candidates()
     _code = _gen_lifted_closure_body(gen, ci, outer_name)
     gen._owned_free_candidates = _sv_cands
@@ -3345,6 +3374,7 @@ def _gen_lifted_closure(gen, ci, outer_name: str = None) -> str:
     gen._owned_str_elem_vals = _sv_strelem_vals
     gen._owned_closure_names = _sv_closure_names
     gen._owned_env_names = _sv_env_names
+    gen._owned_box_names = _sv_box_names
     return _code
 
 
@@ -3570,7 +3600,7 @@ def _gen_lifted_closure_body(gen, ci, outer_name: str) -> str:
     # allocate each box once in the prologue.
     gen._seed_mut_captured_local_types(ci.lifted_name)
     gen._seed_addressed_locals(node.body)
-    gen._emit_mut_local_box_allocs()
+    gen._emit_mut_local_box_allocs(node)
 
     # A lifted closure is an ordinary function and owes the same per-function
     # local-type pre-pass a top-level `def` gets (`gen_module`'s Pass 1.3b,
@@ -3629,7 +3659,8 @@ def _gen_lifted_closure_body(gen, ci, outer_name: str) -> str:
 
 
 def _emit_generator_tuple_unpack(gen, var_names: list, slot_types: list, list_ptr: str,
-                                 nested_flags: list | None = None) -> None:
+                                 nested_flags: list | None = None,
+                                 slot_elems: list | None = None) -> None:
     """Unpacks a boxed-tuple `MojoList *` (produced by a tuple-yielding
     compiled generator's `_cpp_yield_tuple` boxing — see that method's
     docstring for the producer side) into `var_names`, one runtime
@@ -3667,6 +3698,20 @@ def _emit_generator_tuple_unpack(gen, var_names: list, slot_types: list, list_pt
             if not hasattr(gen, '_tagged_gen_tuple_locals'):
                 gen._tagged_gen_tuple_locals = set()
             gen._tagged_gen_tuple_locals.add(vn)
+            continue
+        if slot_elem == 'MojoList *':
+            # A list-valued slot (`coro._tuple_slot_kind`'s 'list:<elem>'):
+            # read the pointer bits back as the list, and record its element
+            # type so `for x in <vn>` reads the elements with the right
+            # accessor (`_elem_of`), not as int64_t words.
+            gen._declare_var(vn, 'MojoList *')
+            cvn = gen._cname(vn)
+            pv = gen._coerce_to_type(
+                'int64_t', 'MojoList *',
+                gen._new_val('int64_t', f"mojo_list_get_int ({list_ptr}, {i})"))
+            gen._emit(f"  {cvn} = {pv};")
+            if slot_elems and i < len(slot_elems) and slot_elems[i]:
+                gen._elem_types[vn] = slot_elems[i]
             continue
         gen._declare_var(vn, slot_elem)
         cvn = gen._cname(vn)
@@ -3742,6 +3787,7 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
     # single-name declare below, unchanged prior behavior).
     tuple_slot_ctypes = api.get('tuple_slot_ctypes')
     tuple_slot_nested = api.get('tuple_slot_nested')
+    tuple_slot_elems = api.get('tuple_slot_elems')
     is_tuple_target = (for_target_is_tuple(var)
                        and tuple_slot_ctypes is not None)
     if is_tuple_target:
@@ -3800,9 +3846,19 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
     if api.get('boxed_container'):
         gen._boxed_container_vals.add(val)
     if is_tuple_target:
-        gen._emit_generator_tuple_unpack(var_names, tuple_slot_ctypes, val, tuple_slot_nested)
+        gen._emit_generator_tuple_unpack(var_names, tuple_slot_ctypes, val, tuple_slot_nested,
+                                         tuple_slot_elems)
+        # A generator that iterates a kind-mixed list parameter yields BOXES in
+        # its int64_t slots (see cpp_core's `_cpp_mixed_list_params` read), so
+        # the unpacked names must resolve them at each use.
+        if api.get('mixed_slots'):
+            for _mvn in var_names:
+                if gen.var_types.get(_mvn) == 'int64_t':
+                    gen._boxed_vals.add(gen._cname(_mvn))
     else:
         gen._emit(f"  {gen._cname(var)} = {val};")
+        if api.get('mixed_slots') and gen.var_types.get(var) == 'int64_t':
+            gen._boxed_vals.add(gen._cname(var))
     gen.loop_stack.append((bb_post, bb_after))
     gen._gen_loop_body(body)
     gen.loop_stack.pop()
@@ -4003,7 +4059,14 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
             if (_frec is not None and _frec.get('multi_args')
                     and len(_frec['multi_args']) == len(_tnames)):
                 _slot_ctypes = []
+                # `_ainfs` mirrors `_slot_ctypes`: the loop below reads the
+                # per-slot factory-record dict by SUBSCRIPT (`_ainfs[_i]`),
+                # NOT through the `zip(...)` tuple unpack — see that loop's
+                # comment. Subscript reads cast to the target's declared kind;
+                # the unpack's typed getters did not.
+                _ainfs = []
                 for _ainf in _frec['multi_args']:
+                    _ainfs.append(_ainf)
                     _tc = _ainf['elem_ctype']
                     # PART 6 (2026-10-23, family D piece 2): a STRUCT slot
                     # (a bare-ctor list literal feeding the product —
@@ -4181,8 +4244,20 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
                          'int64_t': 'mojo_list_get_int',
                          '_Bool': 'mojo_list_get_bool',
                          'double': 'mojo_list_get_double'}
-            for _i, (_tn, _tc, _ainf) in enumerate(
-                    zip(_tnames, _slot_ctypes, _frec['multi_args'])):
+            # Index, don't unpack: `zip(_tnames, _slot_ctypes, _frec['multi_args'])`
+            # emits a typed `mojo_list_get_*` per row element with NO cast to
+            # the target's declared kind — the `_tc`/`_ainf` targets (char*,
+            # hoisted from the loop above's dict-key use) then receive a raw
+            # int64 word and gcc rejects "assignment to 'char *' makes pointer
+            # from integer without a cast". Reading each of the three parallel
+            # lists by SUBSCRIPT instead emits a word read + cast to the
+            # target's declared kind (the proven shape `_slot_ctypes` already
+            # relies on), and the values are identical (slot i of each list =
+            # argument i of the factory record).
+            for _i in range(len(_tnames)):
+                _tn = _tnames[_i]
+                _tc = _slot_ctypes[_i]
+                _ainf = _ainfs[_i]
                 _acc = _slot_acc.get(_tc)
                 if _acc is None and isinstance(_tc, str) \
                         and _tc.endswith(' *'):

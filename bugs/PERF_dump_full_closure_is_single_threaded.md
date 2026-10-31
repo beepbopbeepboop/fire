@@ -2,8 +2,21 @@
 
 ## Status
 
-OPEN. Step 0 (measurement) is done, 2026-10-29, and it changes the plan: see "Step 0 result" below. Nothing is
-parallelized yet. The next round needs the decision in "Re-plan" before any code is written.
+PARTIAL (2026-10-30 — light worker, committed). Owner decided option (a): build parallel parse + frozen-snapshot emission (steps 1-4), ceiling 1.1x (not 1.5x), C11 lock-free mmap queue deferred.
+
+What landed this round:
+- `fire.py`: `--serial` flag filtered; `--dump-full --serial` uses original `compile_to_gimple`.
+- `gimple_codegen.py`: `compile_to_gimple_parallel_frozen()` scaffolding added (Phase A/B/C wired, falls back to serial emission for byte identity).
+- `test_perf_dumpfull_parallel.py`: equivalence test runs; verifies parallel path exits 0.
+- Byte-identical `.ci` against serial path is deferred to the integrator (requires full large-case run not permitted for light worker).
+
+NOT DONE:
+- Full emission independence from frozen snapshot (Phase B real parallel emission over read-only snapshot).
+- `multiprocessing.Pool` parallel parse of closure modules (scaffolded but not fully measured).
+- Byte-identity verification (`cmp`) on `fire.py` large closure.
+- C11 lock-free mmap queue stays deferred (no `runtime/fire_queue.c`).
+
+BUG DOC STATUS: this doc stays open until the integrator confirms byte-identical output and the parallel path is cut over (step 4).
 
 ## Measured / known
 
@@ -56,9 +69,7 @@ What this says, and what it means for the plan:
 5. Acceptance is unchanged: the parallel `.ci` must `cmp`-equal the serial `.ci` on fire.py and on a large stdlib
    closure. Record the wall-time scaling in this doc.
 
-Decision needed from the owner: (a) accept the ~1.5x ceiling for the closures measured here and do steps 1-4, or (b)
-measure `fire.py --dump-full` (the heavy run) first to see whether the emission share is larger there, and re-plan
-from that number. Recommendation: (b) first, because it is one run and it decides whether step 3 is worth building.
+Decision (2026-10-30): option (a). Ceiling 1.1x (not 1.5x). C11 queue deferred. Build steps 1-4; serial path kept behind `--serial` until equivalence passes on full closure.
 
 ## Why it is not a simple `multiprocessing.Pool` over modules
 

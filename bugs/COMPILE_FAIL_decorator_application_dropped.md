@@ -1,7 +1,84 @@
 # CODEGEN/INTERP: a plain `@decorator` on a `def` is never applied, on either execution path
 
+## Status (2026-10-29, rebinding reaches a `def` inside an `if`/`for`/`while`/`with`/`try`/`match` block)
+
+- `module_gen.py` `_gmi_decorator_pass` now walks every compound statement's
+  blocks (`_gmi_child_blocks`, `_gmi_with_blocks`), not only a body's direct
+  statements. A `def` in any such block is bound in the enclosing function's
+  scope, so it is a decorator target and is rebound like a direct statement.
+  `_gmi_scope_defs` collects the scope's defs through those blocks.
+- Before: `outer(7, True)` with `@twice def step` inside `if flag:` printed
+  `8` (the `def` was lifted to a sibling and its decorator dropped). After:
+  `16`, matching CPython.
+- **Module-level** blocks are refused, not rebound: a decorated def inside a
+  top-level `if`/`for`/`with`/`try` raises `inside a module-level block`. The
+  global function-value machinery only sees top-level bindings, so the
+  rebinding there would call a stub (`step: unavailable in compiled mode`).
+  Before this change it silently called the undecorated function; both are
+  wrong, so the refusal is the honest answer until that machinery is extended.
+- Tests: `test_gimple.py` `decorator_in_a_compound_block_is_applied_at_runtime`
+  (compiled stdout `8`→`16`, `7`, `9` vs CPython; fails on HEAD) and
+  `decorator_in_a_module_level_block_is_refused`. `test_gimple.py`: 414 passed,
+  2 failed. Both failures also occur on HEAD: the walk-memo census on
+  `mojo/middle/coro.py` (commit fd64d710e)
+  and `scalar_arity_min_max_params_are_not_containers` (filed as
+  `bugs/TEST_scalar_arity_min_max_link_mode_prints_nothing.md`).
+
+**Still OPEN:**
+
+- **Decorators from another module** are still silently unapplied (an
+  imported decorator stays on the `def`). This is the `subdir` shape from
+  `Tools/wasm/wasi/__main__.py` if that decorator is imported.
+- **A decorated `def` in a module-level block** is refused (above), not
+  applied. Making it work needs the global machinery to see bindings made
+  inside a module-level block.
+- **Defect 1** (the decorator's own parameter typed `int64_t`) is not
+  addressed; it works because a function pointer is carried as an `int64_t`
+  bit pattern.
+- **The repr of a decorated wrapper** prints the decorated name, not
+  `<function twice.<locals>.wrap at ...>`.
+- **Integrator gate:** the rewrite now reaches defs inside function-body
+  blocks in the stdlib too, and module-level block decorators are refused.
+  The `stdlib-dylib` `skip` count and `stdlib-syntax` `U` count must be
+  compared before and after.
+
+## Status (2026-10-29, rebinding extended to a `def` nested in a function body)
+
+- `module_gen.py` `_gmi_rebind_decorated_defs` is now `_gmi_decorator_pass`,
+  a scope-aware walker that runs at module scope and recurses into every
+  function body. A decorator resolves against the defs of the enclosing
+  scopes, so a nested `@twice` (module-level def) and a nested sibling both
+  rebind. The nested rebinding is a local `step = twice(step__undecorated)`.
+- The scalar refusal (`_gmi_refuse_scalar_decorator_rebind`) runs at every
+  level against the same scope, so a nested scalar decorator is refused too.
+- Probe before / after on `outer(7)` with a nested `@twice`: before `8`,
+  after `16` (CPython `16`).
+- Tests: `test_gimple.py` `nested_decorator_is_applied_at_runtime` (compiled
+  output equals CPython, `40`) and `nested_scalar_decorator_rebind_is_refused`.
+  `test_gimple.py`: 413 passed, 1 failed. The failure was the walk-memo
+  census on `mojo/middle/coro.py` (`_capture_self_into_generator` and
+  `_finish_sync_hoist` mutated memoized AST nodes without invalidating them);
+  it is not this change and is fixed on this branch by invalidating at those
+  two write sites.
+
+**Still OPEN:**
+
+- **Decorators from another module** are still silently unapplied (an
+  imported decorator stays on the `def`). This is the `subdir` shape from
+  `Tools/wasm/wasi/__main__.py` if that decorator is imported.
+- A decorated `def` inside an `if`/`for`/`with` block in a function body is
+  not reached: the recursion covers a body's direct statements only.
+- **Defect 1** (the decorator's own parameter typed `int64_t`) is not
+  addressed; it works because a function pointer is carried as an `int64_t`
+  bit pattern.
+- **The repr of a decorated wrapper** prints the decorated name, not
+  `<function twice.<locals>.wrap at ...>`.
+- **Integrator gate:** the rewrite now also applies to nested decorated defs
+  in the stdlib. The `stdlib-dylib` `skip` count and `stdlib-syntax` `U`
+  count must be compared before and after.
+
 Found 2026-09-27 while closing
-`COMPILE_FAIL_Tools_wasm_wasi___main__.md`. Not a compile failure — the
+commit 19bc0dd8a. Not a compile failure — the
 opposite kind of problem, and the reason that file needed a separate
 correctness caveat even after it started building.
 
@@ -42,7 +119,7 @@ entry for the new `copy.copy`'d node, with its reason.
 - **Decorators from another module** and a decorated `def` nested in a
   function body are still silently unapplied.
 - **A wrapper that returns `str`** prints a decimal address. That is the
-  closure str-return gap, not this rebinding: `bugs/CODEGEN_closure_str_return_is_lost.md`.
+  closure str-return gap (fixed as CODEGEN_closure_str_return_is_lost), not this rebinding.
   The runtime test is integer-only for that reason.
 - **Defect 1** (the decorator's own parameter typed `int64_t`) is not
   addressed. It works today because a function pointer is carried as an
@@ -162,7 +239,7 @@ treat that number as inherited and re-check it when the fix lands.
    because the decoration is never a call site. Once step 1 emits
    `deco(f)` as a call, the scalar observation pass sees a `FunctionDef` as
    argument. **Measure before choosing:** the ordering hazard in
-   `CODEGEN_string_arg_type_lost_across_forwarding_hop.md` says the
+   commit bac12a364 says the
    observation pass runs before parameter refinement, so the decorator's
    parameter may need the function-value type passed in explicitly, not
    inferred.
@@ -309,7 +386,7 @@ static void * _funcptr_step_9f63a2 = (void *)step_9f63a2;
    call site of `deco` and it is never emitted, so the call-site observation
    that types an unannotated parameter has nothing to observe and the default
    stands. This is the ordering hazard the 2026-10-01 entry below already names
-   (`CODEGEN_string_arg_type_lost_across_forwarding_hop.md`): the free-function
+   (commit bac12a364): the free-function
    scalar-observation pass runs BEFORE any body's parameters are refined, so
    whatever makes the decoration visible has to survive that.
 2. **`sprintf("%d", (void *)ptr)`.** `print(step)` reads the function value as
@@ -388,7 +465,7 @@ recording before anyone attempts it:
 - The free-function scalar-observation pass runs BEFORE any function's
   parameters are refined, so a parameter forwarded straight through a hop
   is recorded as no-evidence and never re-examined — measured, with the
-  evidence, in `CODEGEN_string_arg_type_lost_across_forwarding_hop.md`.
+  evidence, in commit bac12a364.
   A decorated `def` is exactly a module-level rebinding feeding calls that
   resolve through those same tables, so whatever makes the decoration
   visible has to survive that ordering.

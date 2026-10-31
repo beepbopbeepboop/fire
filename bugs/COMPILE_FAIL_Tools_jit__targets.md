@@ -4,6 +4,51 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/jit/_targets.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status (2026-10-29, work/bug-compile-fail-tools-jit-targets, round 2): the refusal is cpp-only; the shipped default backend ACCEPTS the reduced shape
+
+Measured this round (`python3 tools/memslot.py --gb 8 -- ...`, repro in
+`.tmp/jit/repro.mojo`, the same source as the reduced repro below):
+
+1. **Default backend (`MOJO_CORO` unset = `stackswitch`, `mojo/middle/coro.py`
+   §5.5 cutover): `python3 fire.py build repro.mojo` SUCCEEDS**, exit 0,
+   peak 0.1 GB, ~2 min wall. `./repro` prints `ok`. `main()` never calls
+   `build()`, so the runtime stub was not exercised by this run. The earlier
+   planning round's observation (`tempfile.TemporaryDirectory()` emitted as
+   `/* ... raises: module not compiled */` with `tempdir` bound to it) is
+   consistent with this, but was not re-run here.
+2. **`MOJO_CORO=cpp`: the refusal reproduces** (`test_regress_compile_fail_tools_jit_guard.py`
+   passes: `refused, names 'build': True`, exit 0).
+
+So the `not CallExpr` COMPILE_FAIL in this doc is an escape-hatch (cpp)
+refusal. It is NOT what the shipped backend does with the reduced shape.
+
+**Consequence for the existing test:** `test_regress_compile_fail_tools_jit_targets.py`
+runs `fire.py build` on the full `_targets.py` with the DEFAULT backend and
+asserts `not CallExpr` in its output. On the default backend that string is
+produced only if something else in the target still refuses. NOT measured
+(whole-closure, >10 CPU-min for a light worker). Treat that test as unverified
+on the default path until someone runs it on the integrator.
+
+**Decision needed (owner), before any code change:** the defect that matters
+for the shipped backend is that `with tempfile.TemporaryDirectory() as d:` in an
+`async def` compiles silently to a runtime stub, with `d` bound to that stub.
+Options:
+- (i) Make the stackswitch backend refuse a non-lock `with` in an async body,
+  the way cpp does. Cheap, honest, turns a silent stub into a COMPILE_FAIL. Risk:
+  `coro.py`'s `_lock_withs_ok` / eligibility is shared with plain `with open(...)`
+  in async bodies across the stdlib, so this moves the `stdlib-syntax` /
+  `stdlib-dylib` `U`/`skip` counts. Needs the integrator's gate to judge.
+- (ii) Implement the intrinsic RAII guard (the recommended decision (a) below),
+  in BOTH backends. Real feature; larger.
+- Either way the cpp refusal stays as is.
+
+**Next steps once the owner picks:** for (i), in `mojo/middle/coro.py`
+eligibility, add a refusal for any `WithStmt` in an async body whose guard is
+not in the allowlist, mirrored in `cpp_core.py`'s `_cpp_with_stmt` (already
+refuses), then pin with a test under the default backend (fire.py build of the
+reduced repro must exit non-zero and name `build`). Verify the `stdlib-syntax`
+`U` count does not increase.
+
 ## Status (2026-10-29, superseded by the entry below): PLANNING ROUND — trigger NOT yet pinned at the time
 
 This round did real measurement, not a re-verify. The earlier "structural,

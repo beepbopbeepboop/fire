@@ -35,20 +35,11 @@ from typing import NamedTuple
 import fire_compiler as F
 from formal.types import (BOOL_TYPE_NAMES, DTYPE_TYPE_NAMES,
                           FLOAT_TYPE_NAMES, STRING_TYPE_NAMES, TYPE_NAMES)
+from formal.diagnostics import (CodegenError, MATCH_REFUSED_KINDS, spelled,  # noqa: F401
+                                    match_pattern_kind, match_pattern_refusal,
+                                    _flat_callee)
 
 
-class CodegenError(Exception):
-    """A construct this formal path refuses to lower, in the user's words.
-
-    ONE class for both backends, defined here rather than in either codegen:
-    every consumer of a refusal catches it by name (build.py around the
-    function pipeline and around each codegen pass, comptime_runner and
-    imports.py around a nested build), and a backend that defined its own
-    would be a class nobody catches — so its refusals escaped as raw
-    tracebacks out of `fire.py` instead of becoming the one-line diagnostic
-    they are written to be. It is a shared *decision* (what counts as a
-    refusal, and that both backends raise the same thing), which is what this
-    module is for."""
 
 
 # The value types a key element can have and still compare equal as a raw
@@ -5067,191 +5058,10 @@ def _facts_merge(left: dict, right) -> dict:
     return out
 
 
-# ── `match`: the pattern language this path lowers, decided ONCE ─────────────
-#
-# `fire_compiler.py` parses a `case` pattern as an ordinary EXPRESSION
-# (`_parse_match_case`: "Patterns are parsed at min_prec=1 … parsing it as a
-# plain expression pattern keeps this parser simple"), so every PEP 634
-# structural pattern arrives here as the expression that spells it: `case [a,
-# b]:` is a `ListExpr`, `case {"k": v}:` a `DictExpr`, `case Point(x=0):` a
-# `CallExpr`, `case 1 | 2:` and `case [a] as w:` both a `BinaryOp`.
-#
-# That is fine for a PARSER and fatal for a lowering that keeps the frontend's
-# own switch-style rule — "evaluate each pattern and compare it with `==`"
-# (`MatchStmt`'s docstring) — because under that rule those five shapes are not
-# patterns at all, they are VALUES:
-#
-#     case 1 | 2:        evaluates 1 | 2 and matches the subject against 3
-#     case [a, b]:       evaluates a list literal and compares it
-#     case {"k": v}:     evaluates a dict literal and compares it
-#     case Point(x=0):   CONSTRUCTS a Point and compares it
-#     case [a] as w:     evaluates `… as w`, which is not an operator
-#
-# and every one of them binds nothing, which is the opposite of what this
-# compiler's OWN free-variable analysis already says the first five do
-# (`test_new_syntax_parsing.py::test_match`: `match_seq_pattern_binds`,
-# `match_dict_pattern_binds`, `match_or_of_literals_has_no_names`,
-# `match_as_binds_both_and_guard_is_a_use` — "In `match` semantics a bare name
-# in a pattern is an irrefutable capture"). So the two front ends of this
-# compiler already disagree about these five unless something refuses them, and
-# a wrong-but-exit-0 answer is the outcome this tree treats as worse than a
-# refusal.
-#
-# THE DECISION IS HERE AND NOT IN EITHER EMITTER because it has to be the same
-# decision on both machines: `formal/build.py::_rewrite_match_statements` asks
-# it once, for the whole pipeline, and lowers what it accepts — so an arm64
-# image and an x86-64 image of one file cannot come to disagree about what a
-# pattern means, and the Lean model each of them carries is a model of the SAME
-# compares and branches (`formal/build.py` emits an `if`/`==` chain and the
-# existing conditional proof applies to it unchanged).
-#
-# The kinds `match_pattern_kind` returns that this path will NOT lower. A tuple
-# and not a set because nothing iterates it yet and a reader looking for "what
-# is refused" should find the whole list in one place; the refusal sentence for
-# each is in `match_pattern_refusal`, which is keyed by the same strings and
-# raises `KeyError` on one that is not here — so a kind added to one and not the
-# other fails at the first pattern that carries it.
-MATCH_REFUSED_KINDS = (
-    "or-pattern",
-    "sequence pattern",
-    "mapping pattern",
-    "class pattern",
-    "as-binding",
-    "enum pattern",
-)
 
 
-def match_pattern_kind(pattern, bound=frozenset()) -> str:
-    """What one `case` pattern IS, for this path's lowering.
-
-    Returns one of:
-
-    * `"wildcard"` — `case _:`. Irrefutable, binds nothing.
-    * `"capture"` — a bare name that is NOT already bound. Irrefutable, and it
-      binds the subject (this is the one PEP 634 behaviour the switch-style
-      rule keeps, because `fire_compiler.py`'s `MatchStmt` docstring keeps it
-      for exactly the guard clause that needs something to test).
-    * `"name"` — a bare name that IS bound: an ordinary read, compared with
-      `==`. `bound` is the caller's answer to "is it bound"; see
-      `formal/build.py::_match_scope_names`.
-    * `"value"` — anything else that is an ordinary expression: a literal, a
-      unary minus, a dotted `mod.CONST` value pattern, a subscript. Compared
-      with `==`, which is CPython's own reading of a literal or dotted pattern.
-    * one of `MATCH_REFUSED_KINDS` — a PEP 634 structural pattern, refused by
-      name.
-
-    `bound` defaults to empty, so an unbound-looking name reads as a CAPTURE:
-    that is the answer which refuses nothing, and the caller
-    (`formal/build.py`) supplies the real binding set because only it knows what
-    this unit folded, imported or declared.
-    """
-    if isinstance(pattern, F.IdentExpr):
-        if pattern.name == "_":
-            return "wildcard"
-        return "capture" if pattern.name not in bound else "name"
-    if isinstance(pattern, F.DottedLiteral):
-        # `case .PASS:` — Mojo's enum dispatch. It is not a PEP 634 shape; it
-        # is a type-relative NAME, and nothing on this path can resolve which
-        # type the surrounding matched value has (`myinterpreter.py` refuses it
-        # with "cannot resolve the dot-relative value '.PASS'").
-        return "enum pattern"
-    if isinstance(pattern, (F.ListExpr, F.TupleExpr, F.SetExpr)):
-        return "sequence pattern"
-    if isinstance(pattern, F.DictExpr):
-        return "mapping pattern"
-    if isinstance(pattern, F.CallExpr):
-        return "class pattern"
-    if isinstance(pattern, F.BinaryOp):
-        if pattern.op == "as":
-            return "as-binding"
-        if pattern.op == "|":
-            return "or-pattern"
-        # Every other operator is an arithmetic expression, and the switch-style
-        # rule really does compare its value — `case SHIFT + 1:` is a
-        # comparison against `SHIFT + 1` in both this compiler and CPython.
-        return "value"
-    return "value"
 
 
-def match_pattern_refusal(kind: str, spelling: str, fn_name: str,
-                          line: int = 0) -> str:
-    """The refusal for one PEP 634 pattern, naming the CONSTRUCT.
-
-    A refusal that says only `MatchStmt` leaves the reader to work out which of
-    the pattern languages they wrote, and it is the same sentence on both
-    architectures with the machine's name swapped in — which is the pair of
-    defects `FORMAL_the_two_backends_refuse_different_constructs_in_the_same_
-    function.md` is about. So the message names the construct, says what the
-    pattern MEANS (the part that is not obvious and is the reason it cannot be
-    an expression), and says what this path would otherwise do, which for all
-    five is the thing a reader must not be left to discover by running it.
-
-    `spelling` is the source text of the pattern, read off the node, and it is
-    what makes the message locatable: a reader with five `case` arms in a file
-    needs to know which one.
-    """
-    where = f"line {line}: " if line else ""
-    what = {
-        "or-pattern": (
-            "an or-PATTERN (`case A | B:`), which PEP 634 and this "
-            "compiler's own free-variable analysis both read as \"match A or "
-            "match B\" and which binds nothing. This path parses it as the "
-            "`|` operator, so lowering it as an expression would compare the "
-            "subject against `A | B` — for two integers that is a NUMBER "
-            "(`case 1 | 2:` matches the subject 3) — and the arm would run "
-            "for a value no `case` in the source names. Write the "
-            "or-pattern as separate cases, or as this compiler's own "
-            "comma spelling `case A, B:`, which is the one both the "
-            "interpreter and this lowering read as \"A or B\""),
-        "sequence pattern": (
-            "a SEQUENCE PATTERN (`case [a, b]:`, `case (a, b):`, `case [a, "
-            "*rest]:`), which decomposes the subject: it binds `a` and `b` and "
-            "matches only a subject of exactly that length. This path parses "
-            "it as a list/tuple literal, so lowering it as an expression would "
-            "compare the subject against `[a, b]` — a VALUE comparison that "
-            "binds nothing, matches a longer sequence of the same elements, "
-            "and reads `a` and `b` as ordinary names rather than as bindings. "
-            "Read the elements out before the `match` (`n = len(s)` then "
-            "`if n == 2: a = s[0]; b = s[1]`)"),
-        "mapping pattern": (
-            "a MAPPING PATTERN (`case {\"k\": v}:`), which looks a KEY up in "
-            "the subject and binds its value; it matches a mapping that has "
-            "that key and is not an equality comparison against a dict "
-            "literal. This path parses it as a `dict` display, so lowering it "
-            "as an expression would compare the subject against "
-            "`{\"k\": v}` — which binds nothing and requires the whole "
-            "mapping to be equal. Read the value out before the `match` (`v = "
-            "d.get(\"k\")`) and match on `v`"),
-        "class pattern": (
-            "a CLASS PATTERN (`case Point(x=0, y=1):`), which matches on a "
-            "subject's TYPE and then deconstructs it, binding the keyword "
-            "names. This path parses it as a construction, so lowering it as "
-            "an expression would CALL `Point` and compare the result — a "
-            "program that constructs a value to decide what to match, reads as "
-            "a working feature, and answers a question about the subject with "
-            "an answer about a fresh object. Dispatch on a field "
-            "(`match p.x:` then `case 0:`) is the spelling that lowers here"),
-        "as-binding": (
-            "an `as`-BINDING (`case P as w:`), which matches the whole "
-            "subject and ALSO binds it to `w`. This path parses `as` as a "
-            "binary operator, which is not one: `P as w` has no value to "
-            "compare with `==`, so the pattern cannot be lowered at all. A "
-            "bare capture is the same binding without the pattern — `case w:` "
-            "binds the subject to `w` and always matches, and that is what "
-            "lowers here"),
-        "enum pattern": (
-            "an ENUM CASE (`case .PASS:`), which names a variant of the "
-            "matched value's type. The spelling is deliberately type-relative "
-            "(`.PASS` rather than `Token.PASS`), and resolving it needs the "
-            "type of the matched value, which is a question about the type "
-            "system rather than about a pattern; nothing on this path has it "
-            "(the interpreter refuses the same spelling with \"cannot resolve "
-            "the dot-relative value\"). Spell the variant with its type, "
-            "`case Token.PASS:`, which lowers as a value comparison"),
-    }[kind]
-    return (f"{where}{fn_name}: a `case` pattern is {what}. The pattern "
-            f"spelled `{spelling}` is not a value this path can compare the "
-            f"subject against.")
 
 
 def _case_is_wildcard(case) -> bool:
@@ -5585,7 +5395,10 @@ def _loop_target_defs(stmt, consts=None) -> set:
     return _store_names(getattr(stmt, "target", None))
 
 
-_CMP_OPS = {
+# Not `_CMP_OPS`: generated_dispatch.py declares that bare name as a SET, and the
+# self-host closure keys module globals by bare name, so a dict of the same name
+# here is refused ("cannot coerce MojoDict * to MojoSet *") in this module's toplevel.
+_FOLDABLE_CMP_OPS = {
     "<": lambda a, b: a < b,
     "<=": lambda a, b: a <= b,
     ">": lambda a, b: a > b,
@@ -5653,19 +5466,19 @@ def _literal_truth(e, consts=None) -> object:
         inner = _literal_truth(getattr(e, "operand", None) or
                                getattr(e, "expr", None), consts)
         return None if inner is None else (not inner)
-    if isinstance(e, F.BinaryOp) and getattr(e, "op", None) in _CMP_OPS:
+    if isinstance(e, F.BinaryOp) and getattr(e, "op", None) in _FOLDABLE_CMP_OPS:
         left = _cfg_int_value(getattr(e, "left", None), consts)
         right = _cfg_int_value(getattr(e, "right", None), consts)
         if left is None or right is None:
             return None
-        return bool(_CMP_OPS[e.op](int(left), int(right)))
+        return bool(_FOLDABLE_CMP_OPS[e.op](int(left), int(right)))
     if isinstance(e, F.CompareChain) and (getattr(e, "ops", None) or []):
         vals = [_cfg_int_value(o, consts)
                 for o in (getattr(e, "operands", None) or [])]
         if any(v is None for v in vals):
             return None
         for op, a, b in zip(e.ops, vals, vals[1:]):
-            fn = _CMP_OPS.get(op)
+            fn = _FOLDABLE_CMP_OPS.get(op)
             if fn is None or not fn(int(a), int(b)):
                 return False
         return True
@@ -7311,6 +7124,248 @@ def read_before_store(fn, params: set = None, placed: set = None,
         if found:
             break
     return found[0] if found else None
+
+
+def _block_stmt_exprs(s) -> list:
+    """The read-position expressions of a statement that is a BLOCK'S OWN
+    statement, as opposed to a statement in one of its arms.
+
+    A block's `stmts` are the straight-line statements it holds plus, for a
+    control-flow block, the control statement ITSELF — whose arms are separate
+    blocks, each visited on their own. So this answers "what does this block's
+    own text read" and deliberately does not descend into arm bodies: a reader
+    that did would attribute a nested arm's read to the enclosing block, and
+    the enclosing block's entry facts are not the arm's.
+
+    The per-kind list mirrors `read_before_store`'s `walk_stmts` read rules —
+    an `AssignStmt`'s TARGET is a store, not a read, and a `VarDecl` without an
+    initialiser reads nothing — because the two must count the same reads: this
+    list decides where a loop target is read in a possibly-unbound state, and
+    `read_before_store` decides whether that read is accepted at all. A graph
+    and a walk that disagree about one read is a check that appears and
+    disappears with which of them ran."""
+    kind = type(s).__name__
+    if kind == "AssignStmt":
+        return [getattr(s, "value", None)]
+    if kind == "AugAssignStmt":
+        return [getattr(s, "target", None), getattr(s, "value", None)]
+    if kind == "VarDecl":
+        return [getattr(s, "value", None)]
+    if kind == "MultiAssignStmt":
+        return [getattr(s, "value", None)]
+    if kind in ("ForStmt", "ComptimeForStmt"):
+        return [getattr(s, "iterable", None)]
+    if kind == "WhileStmt":
+        return [getattr(s, "condition", None)]
+    if kind == "IfStmt":
+        return [getattr(s, "condition", None)]
+    if kind == "MatchStmt":
+        return [getattr(s, "subject", None)]
+    if kind in ("ReturnStmt", "ExprStmt", "RaiseStmt"):
+        return [getattr(s, "value", None)]
+    if kind == "AssertStmt":
+        return [getattr(s, "value", None), getattr(s, "msg", None)]
+    if kind == "DelStmt":
+        return list(getattr(s, "targets", None) or [])
+    return []
+
+
+def _stmt_store_names(s) -> set:
+    """The names one statement STORES — `_cfg_block_defs`'s rules, one
+    statement at a time, so a block's per-statement walk and the block's `defs`
+    cannot disagree about a `VarDecl`'s missing initialiser or a `WithStmt`'s
+    alias. A `del` stores nothing: on this path a bare `del` is a no-op at run
+    time (the image keeps the name's value), which is the same reason the
+    possibly-unbound dataflow above lets a `kills` set contribute nothing."""
+    kind = type(s).__name__
+    if kind in ("AssignStmt", "AugAssignStmt"):
+        return _store_names(getattr(s, "target", None))
+    if kind == "VarDecl":
+        n = getattr(s, "name", None)
+        if isinstance(n, str) and getattr(s, "value", None) is not None:
+            return {n}
+        return set()
+    if kind == "MultiAssignStmt":
+        out: set = set()
+        for t in (getattr(s, "targets", None) or []):
+            out |= _store_names(t)
+        return out
+    if kind == "WithStmt":
+        out = set()
+        for it in (getattr(s, "items", None) or []):
+            a = getattr(it, "alias", None)
+            if isinstance(a, str):
+                out.add(a)
+        return out
+    if kind == "TryStmt":
+        out = set()
+        for h in (getattr(s, "handlers", None) or []):
+            n = getattr(h, "name", None)
+            if isinstance(n, str):
+                out.add(n)
+        return out
+    if kind == "ComptimeVarStmt":
+        return _store_names(getattr(s, "target", None))
+    return set()
+
+
+def loop_bound_flags(fn, params: set = None) -> dict:
+    """`{name: (id(ForStmt), …)}` for the loop targets this function must
+    guard with a runtime bound flag, or `{}`.
+
+    **The question.** `read_before_store` accepts a read of a `for` target
+    after a loop whose emptiness is a run-time fact (`'maybe'`), because
+    refusing would drop `last(4)`-shaped programs CPython runs. The accepted
+    read is still the defect when the range turns out empty: nothing stores
+    the target, so the read answers the caller's leftover. The build cannot
+    decide which way a given call goes, so the EMITTED image has to ask at
+    run time — one flag per flagged name, zero at entry, set by every store of
+    the name (a loop's `init:` is a store, a comprehension's per-element
+    store is a store), and branched on at a read that may be unbound. This
+    reader decides which names that is; the two backends read the same answer
+    from it, so the two architectures flag the same loops.
+
+    **A name is flagged only when all three of these hold of one of its
+    `'maybe'` loops, and the safe direction is the one that says so:**
+
+    1. the target is a single name — a tuple target is not a word this value
+       model can flag, and a `global` target is not this frame's storage at
+       all;
+    2. **every path does NOT store the name before the loop** — the
+       `_definitely_stored` dataflow, the same one `read_before_store` runs,
+       is the reader, so the two cannot answer "is this name bound here"
+       differently. A name every path stored before the loop holds a value on
+       the zero-iteration edge too, so its check would never fire and the
+       flag stays out of the image (which is where the idiomatic
+       `i = 0; for i in range(…)` stays). A name stored on SOME path is
+       flagged, not excluded: the store that path makes is the store that
+       SETS the flag, and the other path is the one the check fires for.
+       The parameters are the dataflow's seed, and that is what keeps a
+       parameter target out for the sharper reason the emitter states — the
+       prologue's argument store is the one store that does not run the flag
+       hook, so a flag there would fire on a path that holds the caller's
+       word;
+    3. the name is read in a block where it may be unbound. Without it a loop
+       whose target is never read in that state would allocate a flag nothing
+       branches on — dead code in an image whose every word is walked by the
+       proof generators.
+
+    The read test uses the "possibly unbound" dataflow, the dual of
+    `_definitely_stored`: a name is possibly unbound at a block's entry when
+    some path to it left it so. It is initialised from the TOP and narrowed,
+    because the answer being computed is "may be unbound" and a name the
+    analysis failed to track as unbound must not be assumed bound — the
+    opposite of `_definitely_stored`'s question, which is why it is a second
+    array rather than the negation of the first. The header block of a tracked
+    loop contributes its defs WITHOUT the loop target, because on the
+    zero-iteration edge the header does not bind it — that binding happens on
+    the edge into the body (the body's first block `seed`), and a header that
+    bound it would silence exactly the path this flag exists for. `del`
+    contributes nothing, because a bare `del` on this path is a no-op at run
+    time and the image keeps the name's value.
+
+    Module-level entry facts are deliberately NOT passed to the preheader
+    walk: a fact the walk cannot see makes a loop `'maybe'` rather than
+    decided, which flags MORE loops, and a flagged loop whose range turns out
+    non-empty never takes its check — the dead-check direction is the safe
+    one, while a module fact the emitter sees and `read_before_store` does not
+    (or vice versa) would be two machines answering one loop differently.
+    See `bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`
+    for the residual this reader closes and the cases it deliberately leaves.
+    """
+    params = set(params if params is not None
+                 else (getattr(fn, "params", None) or ()))
+    params = {p[0] if isinstance(p, (tuple, list)) and p else p for p in params}
+    body = getattr(fn, "body", None) or []
+    declared_global: set = set()
+    for node in iter_nodes(body):
+        if type(node).__name__ in ("GlobalStmt", "NonlocalStmt"):
+            declared_global |= {n for n in (getattr(node, "names", None) or ())}
+
+    blocks, entry, _cond_names = _build_cfg(body, None)
+    candidates: list = []
+    hdr_target: dict = {}
+    for s in (n for n in iter_nodes(body) if isinstance(n, F.ForStmt)):
+        t = getattr(s, "target", None)
+        if not (isinstance(t, str) and t.isidentifier()):
+            continue
+        if t in declared_global:
+            continue
+        header = None
+        for b in blocks:
+            if len(b.stmts) == 1 and b.stmts[0] is s:
+                header = b
+                break
+        if header is None:
+            continue
+        consts, seqs = _preheader_facts(blocks, header.index, entry, None)
+        if _for_emptiness(s, consts, seqs) != _MAYBE_RUNS:
+            continue
+        candidates.append((s, t, header))
+        hdr_target[header.index] = {t}
+    if not candidates:
+        return {}
+    tracked = {t for _s, t, _h in candidates}
+
+    # Definitively stored on EVERY path to the header: `_definitely_stored`,
+    # the same dataflow `read_before_store` runs, asked over the same CFG, so
+    # the two answers to "is this name bound here" cannot drift. A name every
+    # path stored before the loop holds a value on the zero-iteration edge too,
+    # so its check would never fire and the flag stays out of the image — which
+    # is also where the idiomatic `i = 0; for i in range(…)` stays flag-free.
+    # The seed is the parameters, and it is what keeps a parameter target
+    # unflagged for the sharper reason the emitter states: the prologue's
+    # argument store is the one store that does not run the flag hook. A name
+    # stored on SOME path is NOT excluded — the store that path makes is the
+    # store that SETS the flag, and the other path is the one the check fires
+    # for, which is the mixed shape the "possibly stored" draft used to leave
+    # as garbage.
+    stored_in, _facts_in, _guarded_in = _definitely_stored(
+        blocks, entry, params, _cond_names)
+
+    # Possibly unbound at entry, the dual: top-initialised and narrowed.
+    mu: dict = {b.index: set(tracked) for b in blocks}
+    changed = True
+    while changed:
+        changed = False
+        for b in blocks:
+            merged = None
+            for p in b.preds:
+                b_p = blocks[p]
+                stored = b_p.defs - hdr_target.get(p, set())
+                e = mu[p] - stored
+                merged = set(e) if merged is None else (merged | e)
+            merged = set(tracked) if merged is None else merged
+            merged -= b.seed
+            if merged != mu[b.index]:
+                mu[b.index] = merged
+                changed = True
+
+    # A read in a MAYBE state, per NAME. The walk is per STATEMENT within a
+    # block rather than per block, because a block's entry state and the state
+    # at its last read differ: `q = 7` and `print(q)` are one block whose entry
+    # says `q` may be unbound (the zero-iteration edge) but whose read is after
+    # the store, so the statement order is what decides. The store rules are
+    # `_cfg_block_defs`'s, one statement at a time, so the two cannot count a
+    # `VarDecl`'s missing initialiser differently.
+    maybe_reads: set = set()
+    for b in blocks:
+        cur = set(mu[b.index])
+        for s in b.stmts:
+            for e in _block_stmt_exprs(s):
+                for n in _expr_reads(e, set()):
+                    if n in tracked and n in cur:
+                        maybe_reads.add(n)
+            cur -= _stmt_store_names(s)
+
+    out: dict = {}
+    for s, t, header in candidates:
+        if t in stored_in.get(header.index, set()):
+            continue
+        if t not in maybe_reads:
+            continue
+        out.setdefault(t, []).append(id(s))
+    return {t: tuple(ids) for t, ids in out.items()}
 
 
 def read_before_store_refusal(name: str, fn_name: str, line) -> str:
@@ -13144,6 +13199,12 @@ def integer_text_width(bits: int) -> int:
 # different spelling.
 INTEGER_TEXT_WIDTHS = {8: 4, 16: 6, 32: 11, 64: 20}
 
+#: Export-rule answers `_export_rule_for` in `build.py` returns when the
+#: defining module declares a name but no exclusion applies (DECLARED), or
+#: never names it at all (ABSENT). Both are `reflect.EXCL_*`-shaped strings.
+EXPORT_RULE_DECLARED = "declared"
+EXPORT_RULE_ABSENT = "absent"
+
 # What an f-string's FIELD has to be for a buffer's bound to be known before
 # the program runs. Read out of the corpus by
 # `test_formal_run.py::check_interpolated_literal_bound_census`, which is where
@@ -17578,130 +17639,6 @@ def string_index_refusal(base_kind, index_kind,
         f"does have")
 
 
-def spelled(expr) -> str:
-    """`expr` as the source spells it, for a diagnostic that quotes it.
-
-    Lives here rather than in either backend because a refusal has to be able
-    to say WHICH operand it is about — `len(m)` and `len(k)` are different
-    problems and a message that names neither sends the reader to look at the
-    whole function — and the two backends would otherwise spell it two ways
-    and a diagnostic would match on one architecture and not the other.
-
-    Deliberately an approximation: a chain is spelled out, and anything this
-    does not have a shape for is named by its node type, which is the same
-    fallback `_dotted` uses for a callee it cannot flatten.
-    """
-    if isinstance(expr, F.StringLiteral):
-        return repr(expr.value)
-    if isinstance(expr, F.IdentExpr):
-        return expr.name
-    if isinstance(expr, F.MemberExpr):
-        parts = []
-        node = expr
-        while isinstance(node, F.MemberExpr):
-            parts.append(node.member)
-            node = node.obj
-        parts.append(spelled(node))
-        return ".".join(reversed(parts))
-    if isinstance(expr, F.CallExpr):
-        callee = _flat_callee(expr)
-        # **A call whose callee is a DOT — `cat().startswith("q")` — is spelled
-        # through `spelled(node)` rather than named by its node type.** The
-        # recursion above hands this arm a `CallExpr` for `cat()` when the chain
-        # rooted here, and the fallback printed `CallExpr(...)`, so a refusal
-        # about `cat().startswith("q")` quoted `CallExpr(...)` — which names no
-        # construct the author wrote, and is the same complaint
-        # `_emit_expr`'s own `Ellipsis` refusal makes ("a node the author never
-        # wrote"). A reader sent to look for `CallExpr` finds nothing.
-        #
-        # The dotted callee goes through the SAME `spelled` recursion, so
-        # `a.b().c` prints `a.b().c` rather than being flattened by
-        # `_flat_callee`'s own rule (which would give `b` for a package path).
-        func = getattr(expr, "func", None)
-        if isinstance(func, F.MemberExpr):
-            return f"{spelled(func)}(...)"
-        # …and a call whose arguments are ALL KEYWORD is spelled with them.
-        # `P(x=0, y=1)` is the shape a `case` class pattern arrives in
-        # (`fire_compiler.py` parses `case Point(x=0, y=1):` as a plain call),
-        # and the keywords are the whole of what the reader wrote — `(...)`
-        # hides the only part that says which pattern it is. A call with
-        # positional arguments keeps `(...)`, which is the shape the argument
-        # arm above was written for and where the values are usually not what
-        # the message is about.
-        if callee and not (getattr(expr, "args", None) or []) \
-                and (getattr(expr, "kwargs", None) or []):
-            return "%s(%s)" % (callee, ", ".join(
-                "%s=%s" % (k, spelled(v)) for k, v in expr.kwargs))
-        return f"{callee}(...)" if callee else f"{type(expr).__name__}(...)"
-    if isinstance(expr, F.IntLiteral):
-        # The literal's VALUE, which is its spelling. Same reason as the
-        # subscript arm below: a message that quotes `IntLiteral` instead of
-        # `46` names the node's type rather than the thing the reader is
-        # looking at.
-        return str(expr.value)
-    if isinstance(expr, F.SliceExpr):
-        # `a[1:3]`, not `SliceExpr`. A `del a[1:3]` target PARSES as a bare
-        # `SliceExpr` (the subscript is the target's own shape, not a
-        # `SubscriptExpr` with a slice index), so a refusal that quotes this
-        # node without spelling it named the parser's type and not the line —
-        # and a stepped-slice `del` is exactly the case that needs the bounds
-        # in the message.
-        bounds = [getattr(expr, part, None) for part in ("start", "stop")]
-        step = getattr(expr, "step", None)
-        if step is not None:
-            bounds.append(step)
-        return (f"{spelled(expr.obj)}[{':'.join(spelled(b) for b in bounds)}]")
-    if isinstance(expr, F.SubscriptExpr):
-        # `p[0]`, not `SubscriptExpr`. A subscript is the one non-name shape
-        # whose spelling is both short and exact, and it is the shape a byte
-        # read arrives as — so the diagnostic that explains `p[0] != "."` was
-        # quoting `SubscriptExpr != '.'`, which names neither the expression
-        # nor the byte.
-        if isinstance(expr.index, F.SliceExpr):
-            return f"{spelled(expr.obj)}[...]"
-        return f"{spelled(expr.obj)}[{spelled(expr.index)}]"
-    if isinstance(expr, (F.TupleExpr, F.ListExpr)):
-        # `(a, b)` / `[a, b]`, element by element.  Same reason as the two arms
-        # above and the same defect it fixes: a message about a tuple target
-        # that quotes `TupleExpr` names the parser's node type and not the line
-        # the reader is looking at, and a target list is the one thing a refusal
-        # about a tuple store most needs to show.
-        open_c, close_c = ("(", ")") if isinstance(expr, F.TupleExpr) else ("[", "]")
-        return (f"{open_c}{', '.join(spelled(e) for e in (getattr(expr, 'elements', None) or []))}"
-                f"{close_c}")
-    if isinstance(expr, F.DictExpr):
-        # `{"k": v}`, pair by pair.  A `case` mapping pattern arrives as a dict
-        # display (`fire_compiler.py` parses `case {"k": v}:` as a plain
-        # expression), so the refusal that names it has to be able to quote it;
-        # `DictExpr` would name the parser's node type and not the line.
-        pairs = getattr(expr, "pairs", None) or []
-        return "{%s}" % ", ".join(
-            "%s: %s" % (spelled(pair[0]), spelled(pair[1]))
-            for pair in pairs
-            if isinstance(pair, (tuple, list)) and len(pair) == 2)
-    if isinstance(expr, F.SetExpr):
-        return "{%s}" % ", ".join(
-            spelled(e) for e in (getattr(expr, "elements", None) or []))
-    if isinstance(expr, F.DottedLiteral):
-        # `.PASS`, not `DottedLiteral`.  Same reason as the arms above and the
-        # same reader: a refusal about a `case .PASS:` that quotes the node's
-        # type names nothing the author wrote — the leading dot IS the spelling
-        # that makes it type-relative, so dropping it makes the message read as
-        # a plain name.
-        return "." + str(getattr(expr, "path", "") or "")
-    if isinstance(expr, F.UnaryOp):
-        # `*rest`, not `UnaryOp`.  A starred element of an assignment target is
-        # a shape `__init__`'s inline refuses by name, so the refusal quotes it,
-        # and `UnaryOp` tells the reader nothing they can act on.
-        return f"{expr.op}{spelled(getattr(expr, 'operand', None))}"
-    if isinstance(expr, F.BinaryOp):
-        # `a + b`, not `BinaryOp`.  The same defect as the arm above and for the
-        # same reason: an arithmetic expression is the shape a `%s` conversion is
-        # most often handed by accident (`printf("[%s]", 2 + 4)`), so the
-        # diagnostic that refuses it has to show the expression.
-        return (f"{spelled(getattr(expr, 'left', None))} {expr.op} "
-                f"{spelled(getattr(expr, 'right', None))}")
-    return type(expr).__name__
 
 
 def del_refusal(target, base_is_string: bool = False,
@@ -24361,7 +24298,7 @@ GIMPLE_RUNTIME_PREFIX = "mojo_"
 #
 # This is the generalisation of the `GIMPLE_LIST_PREFIX` special case that
 # stood here before, and that constant is gone: a hand-kept list of prefixes is
-# a list that rots, and the shape answers the same question for all 719 entry
+# a list that rots, and the shape answers the same question for all 726 entry
 # points the headers declare rather than for the 40-odd names one prefix
 # happened to cover.
 
@@ -24531,7 +24468,7 @@ def _parse_ctype(decl: str, is_param: bool = False) -> tuple:
     because it does in a parameter list and does not in a return type:
     `void *db` is a `void *` with a name, `void *` is not. Getting that backwards
     makes every parameter a type called `void db`, which nothing recognises as a
-    scalar — and a rule that refuses all 719 entry points for that reason looks
+    scalar — and a rule that refuses all 726 entry points for that reason looks
     exactly like a rule that has measured them all and found none reachable.
 
     The result is the RESOLVED type, which is what every reader of it wants:
@@ -29164,24 +29101,6 @@ _COMPARISON_OPS = ("<", ">", "<=", ">=", "==", "!=", "is", "is not", "in",
                    "not in")
 
 
-def _flat_callee(call) -> str | None:
-    """The dotted name a call's callee spells, or None if it is not a name.
-
-    A module call (`os.path.join`) and a value's method (`items.append`) both
-    arrive as a dotted name; the backends tell them apart by asking whether the
-    receiver is a local, not by looking at the spelling."""
-    func = call.func if isinstance(call, F.CallExpr) else call
-    if isinstance(func, F.IdentExpr):
-        return func.name
-    parts = []
-    node = func
-    while isinstance(node, F.MemberExpr):
-        parts.append(node.member)
-        node = node.obj
-    if parts and isinstance(node, F.IdentExpr):
-        parts.append(node.name)
-        return ".".join(reversed(parts))
-    return None
 
 
 def subscript_callee_name(call) -> str | None:
@@ -29681,7 +29600,8 @@ def parameter_kinds_by_call_site(functions, rets=None) -> dict:
             # initializer is not a type: `ValueKinds._bind_value` takes the
             # annotation for exactly this reason.
             if len(anns) == 1:
-                seen.add(_declared_value_shape(next(iter(anns))))
+                for only in anns:    # exactly one: `len(anns) == 1` above
+                    seen.add(_declared_value_shape(only))
             else:
                 seen.add(None)    # two declarations of one name: nothing
         else:
