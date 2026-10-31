@@ -1,5 +1,34 @@
 # CODEGEN_generator_function: Lib/glob.py
 
+## Status (2026-10-31 — the TAGGED yield landed on the stack-switch path; glob's refusals are unchanged, and the list of what still stands between them and it is exact)
+
+Landed (pinned by `generator_mixed_kind_yields_are_a_tagged_word`): yields of KNOWN,
+different scalar kinds (str / int / float / bool) are no longer refused. The value
+slot is a boxed word (`coro._generator_value_kind` kind `'w'`): a float yield is
+`mojo_box_from_double(v)`, a bool `mojo_box_from_bool(v)`, a string its pointer, an
+int itself, and a `for v in g():` consumer binds `v` as a boxed word
+(`api['mixed_slots']` -> `gen._boxed_vals`) rendered by `mojo_repr_boxed`. Output
+equals CPython for `yield "a"; yield 1; yield 2.5; yield True`.
+
+It is deliberately NARROW, because every other consumer reads the word as an
+int64_t and prints the box's address (measured: `next(it)`, `list(g())`, a list
+comprehension): the tag is chosen only when every use of the generator in the module
+is a direct `for` iterable, and not when the body has a `yield from`. Anything else
+keeps today's refusal.
+
+`glob.py` still refuses on exactly:
+1. `_glob2` / `_iglob` — they are CPP-path generators (the C++20 emitter), whose
+   own yield typing (`exprtypes._generator_yield_ctype`) has no tagged mode, and
+   they use `yield from` delegation and are consumed by `list(...)` / by other
+   generators. To reach them: (a) the same tagged rule in the C++ path
+   (`co_yield` of a boxed word; promise value type `int64_t`), (b) `yield from`
+   of a tagged sub-generator, (c) the other consumers — `next`, `list()`,
+   comprehensions, `sum`/`any` — reading a tagged word through
+   `mojo_list_append_word` (box-aware append; not written yet) instead of
+   `append_int`.
+2. `select_recursive`, `select_recursive_step`, `select_wildcard` — escaping
+   closure generators, as planned above.
+
 ## Status (2026-10-30 — planning: what is left is the TAGGED YIELD, and the nested-selector closures)
 
 Measured on CPython 3.15's `glob.py` after the generator work of this week

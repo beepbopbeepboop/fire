@@ -1,5 +1,22 @@
 # CODEGEN_generator_function: Lib/enum.py
 
+## Status (2026-10-31 — measured again: unchanged by the tagged yield; the blocker is `cls` as a class OBJECT)
+
+`_iter_member_`, `_iter_member_by_def_`, `_iter_member_by_value_` still refuse on
+"a @classmethod generator that references `cls` in its body in an unsupported
+way". Their `cls._flag_mask_` / `cls._value2member_map_` / `cls._member_map_` are
+attributes `EnumType.__new__` populates at class-creation time, so the compiled
+codegen has nothing to read them from (and stubbing them miscompiles: every Flag
+iteration would yield nothing). The tagged yield does not touch this.
+
+The real prerequisite is a RUNTIME CLASS OBJECT for a class whose attributes are
+set dynamically: a `MojoDict *` of attribute -> word hung off the class, with
+`cls` bound to it, `cls.<attr>` a dict read (a missing attribute an
+AttributeError, not a 0), and `EnumType.__new__`'s `classdict[...] = ...` /
+`setattr(cls, ...)` writes going to the same dict. That is the dynamic-metaclass
+modelling `bugs/CODEGEN_*` has called feature-sized since 2026-09; it is also
+what `test_frame`'s `gi_frame` and any `cls`-attribute generator need.
+
 ## Status (2026-09-05 — cluster C re-examined under A3; no safe incremental step, unchanged)
 
 Re-examined during the C/D/E cluster pass. Confirmed via fresh isolated
