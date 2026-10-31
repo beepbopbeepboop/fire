@@ -1345,6 +1345,21 @@ def _stat_module_constant(gen, node):
     return None
 
 
+# `os.path.<name>` functions the runtime implements, as function VALUES in the
+# int64_t-in/int64_t-out ABI `mojo_fnptr_call_N` dispatches through (the
+# `_w` wrappers in runtime/fire_runtime.c). Same idea as
+# calls_shared._RUNTIME_CALLABLE_VALUES, for the three-part `os.path.X` spelling.
+_OS_PATH_RUNTIME_CALLABLE_VALUES = {
+    'join': 'mojo_os_path_join_w',
+    'islink': 'mojo_os_path_islink_w',
+    'isdir': 'mojo_os_path_isdir_w',
+    'isfile': 'mojo_os_path_isfile_w',
+    'exists': 'mojo_os_path_exists_w',
+    'basename': 'mojo_os_path_basename_w',
+    'dirname': 'mojo_os_path_dirname_w',
+}
+
+
 def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     _sc = _stat_module_constant(gen, node)
     if _sc is not None:
@@ -1493,6 +1508,31 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
                 _opk_ctype, _opk_val = _opk
                 _opk_text = gen._intern_string(gimple_ctypes._c_escape(_opk_val))
                 return _opk_ctype, gen._new_val(_opk_ctype, _opk_text)
+    # `os.path.<fn>` read as a VALUE (`islink, join = path.islink, path.join`,
+    # Lib/os.py's `walk`; `f = os.path.isdir`): the runtime implements these as
+    # int64_t-ABI functions, so the value is the wrapper's ADDRESS and a call
+    # through it is an ordinary `mojo_fnptr_call_N`. Without this the read fell
+    # to `_mojo_dispatch_getattr(<module marker 0>, "islink")` -- a fatal
+    # runtime `AttributeError: islink`. A direct call `os.path.isdir(p)` never
+    # reaches here (the call site lowers it); only the value read does.
+    _pv_mod = None
+    if (isinstance(node.obj, gimple_ctypes.MemberExpr)
+            and _as_str(node.obj.member) == 'path'
+            and isinstance(node.obj.obj, gimple_ctypes.IdentExpr)):
+        _pv_name = node.obj.obj.name          # `os.path.<fn>`
+        _pv_bound = gen.imported_symbols.get(_pv_name)
+        _pv_mod = _as_str(_pv_bound.get('module')) if _pv_bound and _pv_bound.get('module') else _pv_name
+        if _pv_mod != 'os':
+            _pv_mod = None
+    elif isinstance(node.obj, gimple_ctypes.IdentExpr):
+        # `import posixpath as path` -> `path.<fn>` (Lib/os.py's spelling)
+        _pv_bound = gen.imported_symbols.get(node.obj.name)
+        if _pv_bound and _as_str(_pv_bound.get('module') or '') == 'posixpath':
+            _pv_mod = 'posixpath'
+    if _pv_mod is not None:
+        _pv_fn = _OS_PATH_RUNTIME_CALLABLE_VALUES.get(_as_str(node.member))
+        if _pv_fn is not None:
+            return 'void *', gen._new_val('void *', f'(void *){_pv_fn}')
     if isinstance(node.obj, gimple_ctypes.IdentExpr):
         module_name = node.obj.name
         # The REAL module this identifier is bound to, for `import X as Y`.

@@ -779,6 +779,62 @@ def _cpp_apply_fstring_spec(part_val: str, spec: str) -> str:
     return f'{fn}((char *)({part_val}), (int64_t){width}, "{fill}")'
 
 
+# `os.path.<fn>` names a body may alias to a local -- the ones the `os.path.*`
+# call table in `_cpp_expr` lowers.
+_CPP_OS_PATH_ALIASABLE = ('join', 'islink', 'isdir', 'isfile', 'exists',
+                          'basename', 'dirname')
+
+
+def _cpp_collect_os_path_aliases(fn) -> dict:
+    """{local name: os.path function} for every local of `fn` whose EVERY
+    binding is `os.path.<fn>` / `posixpath.<fn>` / `path.<fn>` naming one of
+    `_CPP_OS_PATH_ALIASABLE` (and the same function): `islink, join =
+    path.islink, path.join`. A name bound anything else too, or two different
+    ones, is left out (it is a real runtime value this model cannot alias)."""
+    binds: dict = {}
+
+    def _note(name, val):
+        binds.setdefault(name, []).append(val)
+
+    for n in gimple_exprtypes._walk_ast(fn):
+        if isinstance(n, gimple_ctypes.AssignStmt):
+            t, v = n.target, n.value
+            if isinstance(t, gimple_ctypes.IdentExpr):
+                _note(t.name, v)
+            elif (isinstance(t, gimple_ctypes.TupleExpr)
+                    and isinstance(v, gimple_ctypes.TupleExpr)
+                    and len(t.elements) == len(v.elements)):
+                for _t, _v in zip(t.elements, v.elements):
+                    if isinstance(_t, gimple_ctypes.IdentExpr):
+                        _note(_t.name, _v)
+            elif isinstance(t, gimple_ctypes.TupleExpr):
+                for _t in t.elements:
+                    if isinstance(_t, gimple_ctypes.IdentExpr):
+                        _note(_t.name, None)
+        elif isinstance(n, gimple_ctypes.VarDecl):
+            _note(n.name, n.value)
+    out: dict = {}
+    for name in binds:
+        picks = set()
+        for v in binds[name]:
+            pick = None
+            if (isinstance(v, gimple_ctypes.MemberExpr)
+                    and v.member in _CPP_OS_PATH_ALIASABLE):
+                o = v.obj
+                if (isinstance(o, gimple_ctypes.MemberExpr)
+                        and o.member == 'path'
+                        and isinstance(o.obj, gimple_ctypes.IdentExpr)
+                        and o.obj.name == 'os'):
+                    pick = v.member
+                elif (isinstance(o, gimple_ctypes.IdentExpr)
+                        and o.name in ('path', 'posixpath')):
+                    pick = v.member
+            picks.add(pick)
+        if len(picks) == 1 and None not in picks:
+            out[name] = picks.pop()
+    return out
+
+
 def _cpp_string_literal_expr(gen, val: str, is_interp: str) -> str:
     """`_cpp_expr`'s counterpart of the ordinary GIMPLE path's
     `_lower_StringLiteral` (gimple_gen_exprs.py) — decodes an f-string
@@ -2685,6 +2741,23 @@ def _cpp_expr(gen, e) -> str:
         val = gen._cpp_expr(e.value)
         return f"({name} = {val})"
     if isinstance(e, gimple_ctypes.CallExpr):
+        # A call through a local that is a compile-time ALIAS of an
+        # `os.path.<fn>` (`islink, join = path.islink, path.join` at the head
+        # of Lib/os.py's `walk`): spelled out, so the `os.path.*` call table
+        # below lowers it. A runtime function VALUE would need a callable-value
+        # local this body model has no category for; the alias is exact because
+        # `_cpp_collect_os_path_aliases` only records a name EVERY binding of
+        # which names the same function.
+        _opa = getattr(gen, '_cpp_os_path_aliases', None)
+        if (_opa and isinstance(e.func, gimple_ctypes.IdentExpr)
+                and e.func.name in _opa):
+            return gen._cpp_expr(gimple_ctypes.CallExpr(
+                func=gimple_ctypes.MemberExpr(
+                    obj=gimple_ctypes.MemberExpr(
+                        obj=gimple_ctypes.IdentExpr(name='os'), member='path'),
+                    member=_opa[e.func.name]),
+                args=e.args, kwargs=e.kwargs,
+                line=e.line, col=e.col))
         # A `*`/`**`-unpack call ARGUMENT (this project's parser wraps
         # a spread argument in UnaryOp(op='*'/'**', operand=...) — see
         # this repo's own CLAUDE.md) has no case anywhere in this
@@ -2812,6 +2885,8 @@ def _cpp_expr(gen, e) -> str:
                 # this scalar body model) — "'os' was not declared in
                 # this scope". Found via Tools/build/update_file.py's
                 # own `os.path.isdir(tmpfile)`.
+                if e.func.member == 'islink' and len(a) == 1:
+                    return f"mojo_os_path_islink_w((int64_t)(char *)({a[0]}))"
                 if e.func.member == 'isdir' and len(a) == 1:
                     return f"int_isdir(0, (int64_t)(char *)({a[0]}))"
                 if e.func.member == 'exists' and len(a) == 1:

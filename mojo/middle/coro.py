@@ -279,6 +279,27 @@ def _callee_return_kind(expr, env: dict | None = None) -> str | None:
     return _NUMERIC_CTORS.get(expr.func.name) or _FUNC_RET_KIND.get(expr.func.name)
 
 
+# Result kind of each `os.path.<fn>` the runtime implements as a function
+# VALUE (`_OS_PATH_RUNTIME_CALLABLE_VALUES` in emit_exprs.py), so a local bound
+# to one (`join = os.path.join`) types its call results.
+_OS_PATH_FN_KINDS = {'join': 'p', 'basename': 'p', 'dirname': 'p',
+                     'islink': 'b', 'isdir': 'b', 'isfile': 'b', 'exists': 'b'}
+
+
+def _os_path_fn_kind(v) -> str | None:
+    """The result kind of `v` when it is `os.path.<fn>` / `posixpath.<fn>` /
+    `path.<fn>` naming a runtime-implemented function, else None."""
+    if not isinstance(v, N.MemberExpr) or v.member not in _OS_PATH_FN_KINDS:
+        return None
+    o = v.obj
+    if isinstance(o, N.MemberExpr) and o.member == 'path' \
+            and isinstance(o.obj, N.IdentExpr) and o.obj.name == 'os':
+        return _OS_PATH_FN_KINDS[v.member]
+    if isinstance(o, N.IdentExpr) and o.name in ('path', 'posixpath'):
+        return _OS_PATH_FN_KINDS[v.member]
+    return None
+
+
 def _lambda_ret_kind(lam: N.LambdaExpr, env: dict) -> str | None:
     """Scalar kind of the value `lam` returns, read off its body. The lambda's
     OWN parameters are removed from `env` first: `lambda x: x` must not take
@@ -389,11 +410,28 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
     for n in _walk(fn):
         if isinstance(n, N.AssignStmt) and isinstance(n.target, N.IdentExpr):
             _lam_binds.setdefault(n.target.name, []).append(n.value)
+        elif (isinstance(n, N.AssignStmt) and isinstance(n.target, N.TupleExpr)
+                and isinstance(n.value, N.TupleExpr)
+                and len(n.target.elements) == len(n.value.elements)):
+            # `islink, join = path.islink, path.join` binds each name to ITS
+            # element, not to the whole tuple.
+            for _t, _v in zip(n.target.elements, n.value.elements):
+                if isinstance(_t, N.IdentExpr):
+                    _lam_binds.setdefault(_t.name, []).append(_v)
         elif isinstance(n, N.VarDecl):
             _lam_binds.setdefault(n.name, []).append(n.value)
     _param_names = {_pn for _pn, _pa in getattr(fn, 'params', [])}
     for _nm, _vals in _lam_binds.items():
-        if _nm in _param_names or not all(isinstance(_v, N.LambdaExpr) for _v in _vals):
+        if _nm in _param_names:
+            continue
+        if all(_os_path_fn_kind(_v) is not None for _v in _vals):
+            # A local bound to a runtime-implemented `os.path.<fn>` value: a
+            # call through it answers that function's result kind.
+            _pk = {_os_path_fn_kind(_v) for _v in _vals}
+            if len(_pk) == 1:
+                env[_nm] = ('callable', _pk.pop())
+            continue
+        if not all(isinstance(_v, N.LambdaExpr) for _v in _vals):
             continue
         _kinds = {_lambda_ret_kind(_v, env) for _v in _vals}
         if len(_kinds) == 1:

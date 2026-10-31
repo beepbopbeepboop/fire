@@ -6766,6 +6766,33 @@ def main():
 main()
 """, "a\nb\nc\n")
 
+    # `os.path.<fn>` read as a function VALUE (Lib/os.py's `walk` opens with
+    # `islink, join = path.islink, path.join`): the read is the runtime
+    # wrapper's address, a call through it is `mojo_fnptr_call_N`, and the
+    # result kind follows the function (`join` a string, `islink` a bool).
+    # Before this the read was `_mojo_dispatch_getattr(<module marker>, ...)`,
+    # a fatal runtime `AttributeError: islink`.
+    test_generator_stdout("generator_os_path_function_values_tuple_bound", """\
+import os
+
+def g(top):
+    islink, join = os.path.islink, os.path.join
+    yield join(top, "x")
+    yield join(top, "y")
+
+def h(top):
+    islink = os.path.islink
+    yield islink(top)
+    yield islink("/")
+
+def main():
+    for v in g("/tmp"):
+        print(v)
+    for v in h("/tmp"):
+        print(v)
+main()
+""", "/tmp/x\n/tmp/y\nTrue\nFalse\n")
+
     test_generator_stdout("generator_enumerate_index_yields_index", """\
 def rows(data):
     for i, r in enumerate(data):
