@@ -927,25 +927,29 @@ def codegen_case(name):
     return deco
 
 
-@codegen_case('findall_flags_refused_by_name')
+@case('findall_flags_are_honoured')
 def _():
-    """`re.findall(pat, s, re.MULTILINE)` must be REFUSED, not silently
-    evaluated without the flag.
+    """`re.findall(pat, s, re.MULTILINE)` must apply the flag.
 
-    A flags argument changes what `^`/`$`/`.` mean, and this backend's
-    regex engine takes no flags at all. Lowering the call and dropping the
-    flag would return the single-line answer to a question that was asked in
-    multi-line terms — a wrong answer with nothing to distinguish it from a
-    right one, which is the whole defect class. So the findall lowering
-    raises on a third positional argument, the caller rolls back, and the
-    loop's own `mojo_unsupported_iter` is what remains in the emitted C.
+    A flags argument changes what `^`/`$`/`.` mean. The compile-time scan
+    engine takes no flags and refuses a third argument, but the call then
+    falls through to the runtime `re` (`mojo_re_compile(pat, flags)`), which
+    does honour them, so the compiled answer must equal CPython's multi-line
+    answer (three matches), not the single-line one (none). This used to be
+    pinned as "refused by name" (`mojo_unsupported_iter`), which stopped
+    being true when the runtime `re` path landed; the property worth pinning
+    is the one that matters, the answer.
     """
-    return ("""import re
+    return """import re
 
 def f(src):
     for a, b in re.findall(r'^([a-z]+)=([0-9]+)$', src, re.MULTILINE):
         print("p", a, b)
-""", 'mojo_unsupported_iter')
+
+def main():
+    f("x=1\\ny=2\\nzz=33\\n")
+    print("done")
+"""
 
 
 @codegen_case('findall_two_groups_lowered')
