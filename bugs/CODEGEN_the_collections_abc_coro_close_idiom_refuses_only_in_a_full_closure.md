@@ -185,3 +185,53 @@ committed). The mechanism is still unnamed. The owed step is unchanged: the
 mailbox full-closure probe with the `_lower_IdentExpr` dump (see the
 2026-10-29 round above). Nothing in this round changes behaviour, so no code
 or test lands.
+
+### Round 2026-10-30 — partial fix: accessor-read api carry (light worker; no full-closure run)
+
+**Landed (commit 5161214e9):** `_lower_IdentExpr`'s `_imported_global_accessors`
+early-return arm (`mojo/backend_gimple/emit_exprs.py:538-548`) now copies
+`_global_generator_api[name]` onto the accessor read-back temp, unless the name
+is poisoned. This is the same carry the global-read arm already does at
+emit_exprs.py:797-799, so the two arms agree.
+
+**Test:** `test_regress_coro_close_closure.py` drives the arm directly on a
+`GimpleGen` with an accessor and a recorded api. Run under
+`python3 tools/memslot.py --gb 8 --label unit -- python3 test_regress_coro_close_closure.py`:
+- with the fix: `PASS` (both cases).
+- with the pre-fix `emit_exprs.py` (`git show 5161214e9^:...`): fails with
+  `accessor read _t1 lost the api: None`.
+- poisoned name: no carry, as the trust model requires.
+
+The earlier version of this test, a `from sib import _coro` + idiom
+compile, passed on the pre-fix code too, so it was replaced.
+
+**NOT established:** that this arm is the cause of the full-closure refusal.
+Probes, all with `compile_to_gimple_with_cpp(do_imports=True)` in fresh temp
+dirs under `memslot --gb 8`, COMPILE on both the fixed and the pre-fix code:
+- idiom in a sibling, `from sib import _coro` in an importer (accessor
+  registered, the read is not shadowed) — the accessor is registered but the
+  read has no api to lose;
+- sibling exporting `_coro = 5` plus a generator store in another module
+  (accessor read, api recorded) — COMPILES; the accessor ctype is `int64_t`;
+- sibling exporting `_coro = _g()` (a generator global) and an importer that
+  does `next(_coro)` — refused for a different reason: "`next(...)` on
+  next(IdentExpr) (receiver typed `int64_t`)".
+
+The last one is the finding that matters. For a generator-held global exported
+by a sibling, the accessor's C type is `int64_t`, not `MojoGenerator *`, so
+the refusal in `emit_methods.py:1419-1428` (which needs a `MojoGenerator *`
+receiver) cannot fire through this arm at all. The carry is therefore only
+reachable when the export's `c_return_type` is `MojoGenerator *`, and no
+small-closure probe produced that. The `c_return_type` default
+(`emit_infra.py:1603`, `info.get('c_return_type', 'int64_t')`) and the local
+sibling export typing (`_local_sibling_module_exports`) are the next things to
+read. If a generator-held global is exported as `int64_t`, that export typing
+is the real defect, and the carry above is a correct but unexercised change.
+
+**Still owed (heavy, integrator):** the four rows' full-closure reject
+censuses (socket 56 / parsing 48 / zipfile 62 / mailbox 66) have not been
+re-run, so it is unknown whether this commit moves any of them. The mailbox
+full-closure probe with the `_lower_IdentExpr` dump from the 2026-10-29 round
+is still the step that decides it; add `gen._imported_global_accessors.get('_coro')`
+and its C type to that dump, since that is the one value this round showed
+matters.
