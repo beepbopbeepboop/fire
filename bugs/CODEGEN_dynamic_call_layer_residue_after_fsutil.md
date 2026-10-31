@@ -21,12 +21,14 @@ as values, or that call one of their own parameters, are kept on the C++ path
   fallback already forwards kwargs into the bare-name call, so the guard was
   the defect; removed. Measured before/after: test FAIL (rc=1, no output) ->
   PASS (`0 10 20 30 15`, CPython-identical).
-- **Item 2 NOT REPRODUCED in minimal form** on this tree:
-  `print(len(list(lib.counter(4))))` in a package prints `4` (CPython `4`).
-  Next step: reproduce with the real `c_common/fsutil.py` shape
-  (`len(list(fsutil.walk_tree("runtime")))`, a generator whose defaulted
-  parameters the call omits) before writing a fix.
-- Items 3, 4, 5: not yet started.
+- **Item 2 NOT REPRODUCED in minimal form** on this tree (verified 2026-10-30):
+  `len(list(lib.counter(4, step=10)))` in a package prints `4` (CPython `4`).
+  Full `c_common/fsutil.py` link-mode reproduction exceeds quick-test budget
+  (compile >2 min). Next step unchanged: reproduce with real shape before fix.
+- Items 3, 4, 5: not yet started. Quick regression added:
+  `test_regress_dynamic_call_layer_residue.py` (item 1 verified via
+  `test_link_mode.py::test_bare_submodule_import_keyword_call`; item 2
+  minimal form passes).
 
 ## 1. (FIXED — see Status) `mod.gen(..., kw=...)` through a module attribute
 
