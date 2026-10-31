@@ -848,6 +848,14 @@ class X86_64Codegen:
         # run test, and `test_formal_call_proof_gen.py::
         # TestCompilerTrapIsNotAProgramCall` for what is asserted about it.
         self._compiler_trap_addrs: list = []
+        # ADDRESSES of the calls the float-repr helper made — its `snprintf`
+        # and `strtod`.  The helper is this emitter's own (every image carries
+        # it, after the function bodies), so its call sites are not calls the
+        # PROGRAM makes: `formal/x86_64_proof_gen.py::_program_externs`
+        # subtracts them for the same reason it subtracts the traps, and not
+        # doing so suppresses the run tests of every image on this backend.
+        # Published in `compile()`'s `info` as `float_repr_calls`.
+        self._float_repr_call_addrs: list = []
         # The functions whose prologue carries the stack-floor guard, filled by
         # `compile()` once the whole image's call graph is known — see
         # `model.stack_floor_guarded_names`. The x86-64 twin of arm64's, from the
@@ -1238,6 +1246,12 @@ class X86_64Codegen:
             # the unreachability argument this is worth) is on
             # `_emit_stack_floor_guard`.
             "compiler_traps": sorted(self._compiler_trap_addrs),
+            # The float-repr helper's OWN extern calls (`snprintf`, `strtod`),
+            # by address — it is emitted once per image after every function
+            # body, so the sites are in `extern_calls` at or above the entry
+            # and `_program_externs` subtracts them there, the same subtraction
+            # `compiler_traps` is for the guard's `exit`.
+            "float_repr_calls": sorted(self._float_repr_call_addrs),
             "test_input": self.test_input,
             # EVERY entry argument's value, in order — the proof generator's
             # entry state is built from this list, so a two-parameter entry has
@@ -5030,10 +5044,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         lea_rip(RDX, self._intern_string("%.*g"))
         m64(RCX, R12)           # n → RCX (4th int arg)
         mi(RAX, 1)              # 1 XMM register used
-        self._emit_extern_call("snprintf")
+        self._float_repr_call_addrs.append(self._emit_extern_call("snprintf"))
         lea64(RDI, RBP, -96)
         lea64(RSI, RBP, -48)
-        self._emit_extern_call("strtod")
+        self._float_repr_call_addrs.append(self._emit_extern_call("strtod"))
         a.emit(encode_movq_r64_xmm(RAX, 0))
         mm64(RCX, RBP, -40)
         cpr(RAX, RCX)
