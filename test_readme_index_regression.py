@@ -2,7 +2,7 @@
 """Regression test: bugs/hard/README.md must not index completed/deleted docs."""
 import os, sys
 
-worktree = "/Users/mrs/net/chatgpt/claude/work-3333"
+worktree = "/Users/mrs/net/chatgpt/claude/work-3344"
 readme_path = os.path.join(worktree, "bugs", "hard", "README.md")
 
 def test_index_has_only_existing_docs():
