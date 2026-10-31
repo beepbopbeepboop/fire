@@ -14424,6 +14424,32 @@ int64_t mojo_re_exec(int64_t h, char *s, int64_t pos, int64_t endpos, int64_t mo
     return (int64_t)(intptr_t)m;
 }
 
+int64_t mojo_re_compile_bytes(void *pat, int64_t len, int64_t flags)
+{
+    if (!pat || len < 0) return 0;
+    FreProg *pg = fre_compile_bytes((char *)pat, (int)len, (int)flags);
+    if (pg->ncode < 0) { fre_free(pg); return 0; }
+    MojoRePat *r = (MojoRePat *)malloc(sizeof *r);
+    r->pg = pg; r->pattern = (char *)malloc((size_t)len + 1); memcpy(r->pattern, pat, (size_t)len); r->pattern[len] = 0; r->flags = flags;
+    _pr_add(&_reg_re_pat, (uint64_t)(uintptr_t)r);
+    return (int64_t)(intptr_t)r;
+}
+
+int64_t mojo_re_exec_bytes(int64_t h, void *s, int64_t len, int64_t pos, int64_t endpos, int64_t mode)
+{
+    if (!mojo_is_re_pattern(h) || !s || len < 0) return 0;
+    MojoRePat *r = (MojoRePat *)(intptr_t)h;
+    int64_t n = len;
+    if (endpos < 0 || endpos > n) endpos = n;
+    int nc = 2 * (r->pg->ngroups + 1);
+    int64_t *caps = (int64_t *)malloc((size_t)nc * sizeof(int64_t));
+    if (!fre_exec_bytes(r->pg, (char *)s, n, pos, endpos, (int)mode, caps)) { free(caps); return 0; }
+    MojoReMatch *m = (MojoReMatch *)malloc(sizeof *m);
+    m->re = r; m->text = (char *)malloc((size_t)len + 1); memcpy(m->text, s, (size_t)len); m->text[len] = 0; m->n = n; m->caps = caps; m->pos = pos; m->endpos = endpos;
+    _pr_add(&_reg_re_match, (uint64_t)(uintptr_t)m);
+    return (int64_t)(intptr_t)m;
+}
+
 static int _re_group_index(MojoReMatch *m, int64_t w, int *out)
 {
     if (mojo_boxed_is_str(w)) {

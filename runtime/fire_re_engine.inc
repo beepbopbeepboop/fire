@@ -564,3 +564,42 @@ static int fre_exec(const FreProg *pg, const char *s, int64_t n, int64_t pos, in
     }
     return fre_exec_at(pg, s, n, pos, endpos, mode == 2, caps);
 }
+
+/* ---------- bytes variants ---------- */
+static int fre_byte_dec(const char *s, const char *end, int *len) {
+    (void)end;
+    *len = 1;
+    return (unsigned char)*s;
+}
+
+static FreProg *fre_compile_bytes(const char *pat, int len, int flags) {
+    FreProg *pg = (FreProg *)calloc(1, sizeof *pg);
+    pg->flags = flags;
+    pg->gnames = (char **)calloc(1, sizeof(char *));
+    FreParser ps; memset(&ps, 0, sizeof ps);
+    ps.p = pat; ps.end = pat + len; ps.flags = flags; ps.pg = pg;
+    FreNode *root = fre_parse_alt(&ps);
+    if (!ps.err && ps.p < ps.end) fre_fail(&ps, "unbalanced parenthesis");
+    if (!ps.err) {
+        fre_emit(pg, FO_SAVE, 0, 0, 0);
+        fre_gen(&ps, root);
+        fre_emit(pg, FO_SAVE, 1, 0, 0);
+        fre_emit(pg, FO_MATCH, 0, 0, 0);
+    }
+    fre_free_node(root);
+    if (ps.err) { pg->ncode = -1; }
+    return pg;
+}
+
+static int fre_exec_bytes(const FreProg *pg, const char *s, int64_t n, int64_t pos, int64_t endpos, int mode, int64_t *caps) {
+    if (pos < 0) pos = 0;
+    if (endpos > n) endpos = n;
+    if (mode == 1) {
+        for (int64_t st = pos; st <= endpos; st++) {
+            if (fre_exec_at(pg, s, n, st, endpos, 0, caps)) return 1;
+            if (st < endpos) { int len; fre_byte_dec(s + st, s + endpos, &len); st += len - 1; }
+        }
+        return 0;
+    }
+    return fre_exec_at(pg, s, n, pos, endpos, mode == 2, caps);
+}

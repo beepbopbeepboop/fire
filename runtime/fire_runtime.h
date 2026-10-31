@@ -683,7 +683,9 @@ int64_t mojo_split_dyn(int64_t recv, int64_t arg);   /* pattern.split(s) or str.
 int     mojo_is_re_pattern(int64_t w);
 int     mojo_is_re_match(int64_t w);
 int64_t mojo_re_compile(char *pat, int64_t flags);                      /* handle, 0 if unsupported */
+int64_t mojo_re_compile_bytes(void *pat, int64_t len, int64_t flags);     /* handle, 0 if unsupported */
 int64_t mojo_re_exec(int64_t h, char *s, int64_t pos, int64_t endpos, int64_t mode);  /* 0 match 1 search 2 fullmatch */
+int64_t mojo_re_exec_bytes(int64_t h, void *s, int64_t len, int64_t pos, int64_t endpos, int64_t mode);
 int64_t mojo_re_m_group(int64_t m, int64_t g);
 int64_t mojo_re_m_start(int64_t m, int64_t g);
 int64_t mojo_re_m_end(int64_t m, int64_t g);

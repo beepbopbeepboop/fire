@@ -1650,23 +1650,34 @@ def _lower_re_module_call(gen, node, method):
     args = node.args
     flags_expr = args[1] if method == 'compile' and len(args) > 1 else (
         args[2] if method != 'compile' and len(args) > 2 else None)
-    pat = _re_word_arg(gen, args[0])
+    # Lower pattern once, saving value and type
+    if args:
+        pat_t, pat_v = gen.lower_expr(args[0])
+    else:
+        pat_t, pat_v = 'char *', '0'
+    pat_word = gen._to_int64(pat_t, pat_v)
     if flags_expr is not None:
         fl = _re_word_arg(gen, flags_expr)
     else:
         fl = gen._new_val('int64_t', '0')
-    pat_s = gen._new_val('char *', f'(char *){pat}')
-    h = gen._call_expr('int64_t', 'mojo_re_compile', [('char *', pat_s), ('int64_t', fl)])
+    # Select bytes vs str compile based on argument static type
+    if pat_t == 'MojoBytes *':
+        len_v = gen._call_expr('int64_t', 'mojo_bytes_len', [(pat_t, pat_v)])
+        h = gen._call_expr('int64_t', 'mojo_re_compile_bytes',
+                           [('void *', pat_v), ('int64_t', len_v), ('int64_t', fl)])
+    else:
+        pat_s = gen._new_val('char *', f'(char *){pat_word}')
+        h = gen._call_expr('int64_t', 'mojo_re_compile', [('char *', pat_s), ('int64_t', fl)])
     gen._dyn_word_vals.add(h)
     if method == 'compile':
         return 'int64_t', h
     if len(args) < 2:
         return 'int64_t', h
-    sw = _re_word_arg(gen, args[1])
-    s_s = gen._new_val('char *', f'(char *){sw}')
+    sw_t, sw_v = gen.lower_expr(args[1])
+    sw_word = gen._to_int64(sw_t, sw_v)
     if method == 'findall':
         lst = gen._call_expr('MojoList *', 'mojo_list_new', [])
-        gen._void_call('mojo_list_append_int', [('MojoList *', lst), ('int64_t', sw)])
+        gen._void_call('mojo_list_append_int', [('MojoList *', lst), ('int64_t', sw_word)])
         kw = gen._new_val('MojoDict *', '(MojoDict *)0')
         r = gen._call_expr('int64_t', 'mojo_re_call',
                            [('int64_t', h), ('char *', gen._intern_string('findall')),
@@ -1676,9 +1687,16 @@ def _lower_re_module_call(gen, node, method):
         zero = gen._new_val('int64_t', '0')
         neg1 = gen._new_val('int64_t', '-1')
         md = gen._new_val('int64_t', str(mode))
-        r = gen._call_expr('int64_t', 'mojo_re_exec',
-                           [('int64_t', h), ('char *', s_s), ('int64_t', zero),
-                            ('int64_t', neg1), ('int64_t', md)])
+        if sw_t == 'MojoBytes *':
+            len_v = gen._call_expr('int64_t', 'mojo_bytes_len', [(sw_t, sw_v)])
+            r = gen._call_expr('int64_t', 'mojo_re_exec_bytes',
+                               [('int64_t', h), ('void *', sw_v), ('int64_t', len_v),
+                                ('int64_t', zero), ('int64_t', neg1), ('int64_t', md)])
+        else:
+            s_s = gen._new_val('char *', f'(char *){sw_word}')
+            r = gen._call_expr('int64_t', 'mojo_re_exec',
+                               [('int64_t', h), ('char *', s_s), ('int64_t', zero),
+                                ('int64_t', neg1), ('int64_t', md)])
     if method == 'findall':
         lt = gen._coerce_to_type('int64_t', 'MojoList *', r)
         gen._elem_types[lt] = 'char *'
