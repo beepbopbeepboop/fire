@@ -1805,9 +1805,11 @@ def carry_callable_ret_from_call(gen, value_node, dst: str) -> None:
     `return` wrote. This reads the callee name straight off the CallExpr, which
     is the one spelling that has it.
 
-    Only `_callable_ret_types`, because that is where a non-capturing closure or
-    a lifted free function lands; a callee returning a `MojoBoundMethod *` is
-    the `_bound_method_ret_types` family and is not claimed here.
+    Two tables, one per representation a returned callable can have: a
+    non-capturing closure or a lifted free function lands in
+    `_callable_ret_types`, a capturing closure (a `MojoBoundMethod *`) in
+    `_bound_method_ret_types`. The callee's `return` records each under its
+    own table, and this hop copies each to the destination.
 
     A bound method bound through a call is NOT covered, and deliberately so:
     `f = m.truthy` is an AssignStmt whose RHS is a MemberExpr, not a call,
@@ -1823,16 +1825,18 @@ def carry_callable_ret_from_call(gen, value_node, dst: str) -> None:
     if not isinstance(_f, gimple_ctypes.IdentExpr):
         return
     _fname = _as_str(_f.name)
-    _frt = gen._return_callable_ret_types.get(_fname)
-    if _frt is None:
-        # A nested factory (`def main(): def mk(): ...`) uses the lifted
-        # name `main_mk` for the compiled symbol; the bare lookup misses it,
-        # and `_lower_fnptr_call_value` then has no `char *` to narrow back.
-        if _fname in getattr(gen, '_closure_envs', ()):
-            _frt = gen._return_callable_ret_types.get(
-                f'{getattr(gen, "current_func_name", None) or ""}_{_fname}')
+    # A lifted function returns through `_callable_ret_types`; a capturing
+    # closure's `MojoBoundMethod *` through `_bound_method_ret_types`, which
+    # `g(...)` dispatches via `mojo_bound_method_call_N`. The lookup also
+    # covers a nested factory (`def main(): def mk(): ...`), whose compiled
+    # symbol is the lifted `main_mk`: a bare-name miss there leaves
+    # `_lower_fnptr_call_value` no `char *` to narrow back.
+    _frt = gen._return_ret_for(_fname, (gen._return_callable_ret_types,))
     if _frt:
         gen._callable_ret_types[dst] = _frt
+    _brt = gen._return_ret_for(_fname, (gen._return_bound_method_ret_types,))
+    if _brt:
+        gen._bound_method_ret_types[dst] = _brt
 
     _rn = getattr(gen, '_return_func_value_names', {}).get(_fname)
     if _rn is None and _fname in getattr(gen, '_closure_envs', ()):
