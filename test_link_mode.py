@@ -220,6 +220,56 @@ def test_bare_submodule_import_call_inside_source_tree() -> bool:
     return ok
 
 
+def test_bare_submodule_import_keyword_call() -> bool:
+    """A KEYWORD-argument call through a bare `from . import SUBMODULE`
+    marker, against a compiled generator and a plain function
+    (`lib.counter(4, step=10)`, `lib.scale(2, factor=3)`).
+
+    The positional spelling lowered through the module-alias fallback in
+    `_lower_method_call`, which re-dispatches to the bare-name call. That
+    fallback carried a `not node.kwargs` guard, so the keyword spelling
+    fell through to the generic module-marker stub: the generator raised
+    `NotImplementedError: .lib.counter: module '.lib' is not compiled into
+    this binary` at run time, and the plain call answered through the
+    stub. The from-import spelling of the same calls already worked.
+    Found while closing c_common/fsutil.py (`fsutil.walk_tree("runtime",
+    suffix=".h")`); see bugs/CODEGEN_dynamic_call_layer_residue_after_fsutil.md.
+    """
+    pkg = {
+        'pkg3/__init__.py': '',
+        'pkg3/lib.py': (
+            'def counter(n, *, step=1):\n'
+            '    i = 0\n'
+            '    while i < n:\n'
+            '        yield i * step\n'
+            '        i = i + 1\n'
+            '\n'
+            'def scale(x, *, factor=2):\n'
+            '    return x * factor\n'
+        ),
+        'pkg3/main.py': (
+            'from . import lib\n'
+            'for v in lib.counter(4, step=10):\n'
+            '    print(v)\n'
+            'print(lib.scale(5, factor=3))\n'
+        ),
+    }
+    root = os.path.join(REPO, 'build', 'test_link_mode')
+    os.makedirs(root, exist_ok=True)
+    td = tempfile.mkdtemp(prefix='bare_submodule_kw_', dir=root)
+    try:
+        rc, stdout = _build_and_run(pkg, 'pkg3/main.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'pkg3/main.py', as_module=True)
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and stdout.strip() == '0\n10\n20\n30\n15')
+    if not ok:
+        print(f"  ✗ bare_submodule_import_keyword_call: rc={rc} "
+              f"stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
+    return ok
+
+
 def test_from_submodule_import_symbol_value_read() -> bool:
     """`from SUBMODULE import SYMBOL` (not a bare submodule marker), the
     symbol bound to a new local, then called through that local
@@ -1860,6 +1910,7 @@ CASES = [
     test_bare_submodule_import_value_read,
     test_bare_submodule_import_call,
     test_bare_submodule_import_call_inside_source_tree,
+    test_bare_submodule_import_keyword_call,
     test_from_submodule_import_symbol_value_read,
     test_sibling_function_import_call_is_inlined,
     test_sibling_class_attribute_function_scoped,
