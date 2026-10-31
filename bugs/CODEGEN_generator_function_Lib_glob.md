@@ -1,5 +1,77 @@
 # CODEGEN_generator_function: Lib/glob.py
 
+## Status (2026-10-31, round 7 — the ESCAPING-CLOSURE-GENERATOR mechanism landed (round 5's feature 1); glob.py's remaining gate is the run-time regex compiler, plus method-nested selectors)
+
+REAL PARTIAL FIX committed on this branch: the escaping-closure-generator
+feature from the round-5 design (item 1 below) now exists end to end, with
+the doc's own verification program pinned by regression tests.
+
+Landed (gimple_codegen.py, mojo/backend_gimple/{cpp_async,emit_funcs,
+emit_loops,module_gen}.py, runtime/fire_runtime.{c,h},
+test_gimple_generator_runner.py):
+
+- A nested sync generator that is only CALLED or RETURNED from a TOP-LEVEL
+  factory `def` (`_called_or_returned_only`) is an ESCAPING generator: at the
+  nested `def`, the factory materializes a CLOSURE RECORD — a heap `void **`
+  env of the captured values plus the generator's start — wrapped as a
+  registered `MojoVarargFn` (kind 0, has_env 1, n_fixed = user param count).
+  NO new runtime call-path code was needed: `mojo_fnptr_call_N` /
+  `mojo_maybe_bound_call_N` already dispatch `mojo_is_vararg_fn` first, so a
+  call through the registered word works as-is.
+- A per-unit static C thunk (`_closure_thunk_{base}`, emitted in
+  module_gen.py's preamble) receives the caller's positional args + env,
+  appends the captured values AFTER the user params (the
+  `_gen_cpp_generator_unit` order), starts the generator DIRECTLY through
+  `<base>_start(...)` and records the handle with the one new runtime helper
+  this round added: `mojo_gen_handle_put(start, h)` (a directly-started
+  handle, so a later `for` drains it).
+- The caller's `for v in make(3)(4)` (chained-call form) takes a static arm
+  in `_gen_for_iter` that dispatches the call and drains the recorded handle
+  via the existing `mojo_iter_gen_handle`.
+
+Scope is deliberately narrow — everything else keeps the honest refusal:
+top-level `def` factories only, NOT struct methods (the round-5 design step,
+and the whole point of it: glob.py's three selectors sit inside methods);
+SCALAR-ONLY captures (int64_t/double/_Bool — a char * capture would reach the
+caller through the drained list's dict-key-typed loop variable, a silent
+misread, until char * capture and drained-list element typing land together);
+only the CHAINED-CALL consumer form gets the dedicated for-iter arm (the
+local-bound form `h = make(3)(4); for v in h:` falls to the generic
+dispatch); a generator that WRITES an enclosing `var` through `nonlocal` is
+still refused (the write must reach the enclosing frame, an escaping
+generator cannot provide one).
+
+Verified: the doc's round-5 verification program itself — `def make(k):
+def gen(n): ... yield i*k ...; return gen`, consumed as `for v in
+make(3)(4)` — compiles and prints `0 3 6 9`, matching CPython. Regression
+tests in test_gimple_generator_runner.py: the two former refusal tests
+flipped positive (`nested_generator_escaping_plain_local` now matches
+CPython; `nested_generator_escaping_as_value_with_capture_compiles` compiles)
+and a new `run_escaping_nested_generator_tests()` section pins the shape
+(`nested_generator_escaping_closure_factory`, `_two_captures`,
+`_and_called_in_place`, `_var_local_factory_runs`) and the boundaries
+(`nested_generator_escaping_str_capture_refused` — a call-site-typed char *
+capture refuses with "variable(s) ..."; the pre-existing nonlocal-write
+refusal still passes unchanged). Full suite: 338 passed, 0 failed.
+
+What remains to close glob.py, in order of what unblocks what:
+1. **The run-time regex compiler** (round-5 feature 2) — the REAL gate:
+   `self.compile(part)` is `re.compile(translate(pat), flags).match` on a
+   pattern built AT RUN TIME; the runtime has matchers (`mojo_regex_search`
+   over compiled `ReNode` programs) but no pattern-string compiler. Without
+   it the selectors would compile and then fail at run time. Next step
+   unchanged: port `regex_compile`'s parser to the runtime (emit the same
+   `ReNode` arrays at run time).
+2. **Method-nested selector support**: extend this round's top-level-factory
+   scope to struct methods (the claim site walks top-level statements; the
+   selectors capture `self`, a bound-method `match` value, `select_next`,
+   `dir_only`, `follow_symlinks` — callable/box captures beyond the scalar-
+   only env).
+3. **char * capture** (with drained-list element typing) and the **local-
+   bound consumer form** — both documented refusals above.
+
+The doc stays open: glob.py itself still does not compile.
+
 ## Status (2026-10-31, round 6 — worker verification: refusal set unchanged, feature gap confirmed, no code change attempted)
 
 Re-verified against branch work/bug-codegen-generator-function-lib-glob.

@@ -2421,13 +2421,37 @@ def main():
     # The plain local now boxes (see `..._captures_enclosing_plain_local`);
     # this generator ESCAPES as a value, which has no frame to hand the box
     # handle to, so the escape is what stays refused.
-    test_generator_refused("nested_generator_escaping_plain_local_refused", """\
+        # The former `nested_generator_escaping_plain_local_refused`: a nested
+    # generator that reads a PLAIN (non-`var`) local and escapes as a value
+    # used to stay refused ("no frame to hand the box handle to"). The
+    # escaping-closure mechanism now compiles it — the captured local's
+    # value is snapshotted into the closure record at the `def`, and the
+    # caller's loop drains the generator it returns.
+    test_generator_matches_cpython("nested_generator_escaping_plain_local", """\
 def outer(n: Int):
     total = n * 2
     def g():
         yield total
     return g
-""", "variable(s) total")
+
+
+def main():
+    for v in outer(5)():
+        print(v)
+
+
+main()
+""", """\
+def outer(n):
+    total = n * 2
+    def g():
+        yield total
+    return g
+
+
+for v in outer(5)():
+    print(v)
+""")
     # A nested generator that reads a `var` local or a parameter is hoisted
     # on the default (stack-switch) path with its enclosing binding boxed,
     # the same machinery as a nested async generator. The box handle is a
@@ -2503,14 +2527,17 @@ def outer():
 outer()
 """)
     # A nested generator that escapes as a value (returned, so later called
-    # with no enclosing frame to supply its box handle) stays refused.
-    test_generator_refused("nested_generator_escaping_as_value_with_capture_refused", """\
+    # with no enclosing frame to supply its box handle) used to stay
+    # refused; the escaping-closure mechanism (run_escaping_nested_
+    # generator_tests) now compiles it — the generated C must be valid, and
+    # the consumer shape is pinned behaviorally there.
+    test_generator_c_compiles("nested_generator_escaping_as_value_with_capture_compiles", """\
 def outer():
     var k = 5
     def g():
         yield k
     return g
-""", "variable(s) k")
+""")
     # The same escape, but the generator WRITES the enclosing local through
     # `nonlocal`. The write has to reach the enclosing frame, which an
     # escaping generator cannot provide, so it is refused rather than
@@ -2779,6 +2806,144 @@ def main():
 """, "100\n4\n5\n")
 
 
+def run_escaping_nested_generator_tests():
+    """The ESCAPING-closure generator: a nested generator that reads
+    enclosing names AND escapes its enclosing def as a value (`return g` —
+    the glob.py selector factories, bugs/CODEGEN_generator_function_
+    Lib_glob.md's round-5 verification program). At the `def`, the enclosing
+    function materializes a closure record (the captured values + the
+    generator's start, wrapped as a registered variadic callable); the
+    caller drives it through the ordinary function-value dispatch and
+    iterates the returned handle through the runtime's drained list. Before
+    this landed, the module refused to compile ("is a nested generator that
+    reads enclosing-scope variable(s)")."""
+    test_generator_matches_cpython("nested_generator_escaping_closure_factory", """\
+def make(k):
+    def gen(n):
+        for i in range(n):
+            yield i * k
+    return gen
+
+
+def main():
+    for v in make(3)(4):
+        print(v)
+
+
+main()
+""", """\
+def make(k):
+    def gen(n):
+        for i in range(n):
+            yield i * k
+    return gen
+
+
+for v in make(3)(4):
+    print(v)
+""")
+    # Every enclosing value the body reads rides the closure record: two
+    # captures, and the caller's loop drains the generator through the
+    # runtime handle table the thunk records.
+    test_generator_matches_cpython("nested_generator_escaping_two_captures", """\
+def make(a, b):
+    def gen(n):
+        for i in range(n):
+            yield a * i + b
+    return gen
+
+
+def main():
+    for v in make(2, 10)(3):
+        print(v)
+
+
+main()
+""", """\
+def make(a, b):
+    def gen(n):
+        for i in range(n):
+            yield a * i + b
+    return gen
+
+
+for v in make(2, 10)(3):
+    print(v)
+""")
+    # Boundary: a STRING capture is not threaded yet. The enclosing scope
+    # a nested generator may read from is scalar-only (int64_t/double/
+    # _Bool — the same limit the in-place drive form has: a char * capture
+    # would make the caller's `for` bind the drained elements through the
+    # generic dispatch, whose loop variable is dict-key-typed — a silent
+    # misread of str elements). The module keeps the honest refusal until
+    # the char * capture + drained-list element typing land together.
+    test_generator_refused("nested_generator_escaping_str_capture_refused", """\
+def make(tag):
+    def gen(n):
+        for i in range(n):
+            yield tag
+    return gen
+
+
+def main():
+    for v in make('row')(3):
+        print(v)
+
+
+main()
+""", "variable(s) tag")
+    # In-place drive AND escape of the same nested generator: the direct
+    # call threads the captures as before (_emit_nested_generator_start_
+    # call) and the returned closure records them for the caller.
+    test_generator_matches_cpython("nested_generator_escaping_and_called_in_place", """\
+def make(k):
+    def gen(n):
+        for i in range(n):
+            yield i * k
+    for v in gen(2):
+        print(v)
+    return gen
+
+
+def main():
+    for v in make(3)(4):
+        print(v)
+
+
+main()
+""", """\
+def make(k):
+    def gen(n):
+        for i in range(n):
+            yield i * k
+    for v in gen(2):
+        print(v)
+    return gen
+
+
+for v in make(3)(4):
+    print(v)
+""")
+    # The former honest refusal (2026-10-31 round 6), now a factory the
+    # module compiles: a `var` local captured by an escaping generator. No
+    # consumer exists, so the program is a factory definition and a call
+    # whose returned word is dropped — it must still RUN clean.
+    test_generator_stdout("nested_generator_escaping_var_local_factory_runs", """\
+def outer():
+    var k = 5
+    def g():
+        yield k
+    return g
+
+
+def main():
+    outer()
+
+
+main()
+""", "")
+
+
 def run_tests():
     run_star_args_call_tests()
     run_callable_param_tests()
@@ -2792,6 +2957,7 @@ def run_tests():
     run_sibling_loop_value_kind_tests()
     run_module_global_generator_tests()
     run_nested_generator_capture_tests()
+    run_escaping_nested_generator_tests()
     # Cluster E (bugs/CODEGEN_generator_function_Lib_ipaddress.md): a
     # generator method that CALLS the result of a `@property` getter
     # (`self._address_class(x)` -- `_address_class` is a @property returning
