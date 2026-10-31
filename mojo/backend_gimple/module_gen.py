@@ -3501,6 +3501,46 @@ def _gmi_refuse_scalar_decorator_rebind(self, stmts: list, scope: dict) -> None:
                     f"bugs/COMPILE_FAIL_decorator_application_dropped.md)")
 
 
+def _declare_posthoc_class_attrs(stmts) -> None:
+    """`A.extra = 7` (anywhere in the module: at top level or inside a function)
+    on a class `A` the module defines declares the class attribute `extra`, just
+    as a class-body `extra = 7` would. Without the declaration a READ of
+    `A.extra` / `cls.extra` has no class global to resolve to and silently
+    answered an empty container (`print(A.extra)` printed `[]`). The class body
+    gets `extra = <the literal>`; the assignment statement itself stays and
+    writes the same class global. Only a literal right side (int / float / str /
+    bool) is declared (its type is then known), and never a name the class
+    already has as a field or method."""
+    structs = {}
+    for st in stmts:
+        if isinstance(st, StructDef):
+            structs[st.name] = st
+    if not structs:
+        return
+    for n in gimple_exprtypes._walk_ast(stmts):
+        if not (isinstance(n, AssignStmt) and isinstance(n.target, MemberExpr)
+                and isinstance(n.target.obj, IdentExpr)
+                and n.target.obj.name in structs
+                and isinstance(n.value, (IntLiteral, FloatLiteral, StringLiteral, BoolLiteral))):
+            continue
+        sd = structs[n.target.obj.name]
+        attr = n.target.member
+        have = set()
+        for f in sd.fields:
+            if isinstance(f, AssignStmt) and isinstance(f.target, IdentExpr):
+                have.add(f.target.name)
+            elif isinstance(f, VarDecl):
+                have.add(f.name)
+            elif isinstance(getattr(f, 'name', None), str):
+                have.add(f.name)
+        for m in sd.methods:
+            have.add(m.name)
+        if attr in have:
+            continue
+        sd.fields.append(AssignStmt(target=IdentExpr(name=attr, line=n.line, col=n.col),
+                                    value=n.value, line=n.line, col=n.col))
+
+
 def gen_module_impl(self, stmts):
 
     # A class written INSIDE a function body is a type declaration like any
@@ -3508,6 +3548,7 @@ def gen_module_impl(self, stmts):
     # it is hoisted there before anything consumes the list. See
     # `_gmi_hoist_nested_structs` for why it appends rather than moves.
     stmts = _gmi_hoist_nested_structs(self, stmts)
+    _declare_posthoc_class_attrs(stmts)
     _gmi_refuse_nested_class_enclosing_reads(stmts)
     stmts = _gmi_decorator_pass(self, stmts, {}, True)
 

@@ -7188,6 +7188,38 @@ def main():
 main()
 """, "['n1', 'n1/n11', 'n1/n12', 'n2', 'n2/n21', 'n2/n22']\n")
 
+    # A class attribute that is only ASSIGNED outside the class body
+    # (`A.zmask = 7`, as Lib/enum.py's metaclass does for `_flag_mask_`) is a
+    # class attribute: reading it back used to answer an empty container.
+    # Inherited class-body attributes in `@classmethod` generators still resolve
+    # per class (`B.gen` sees B's `base`).
+    test_generator_stdout("generator_classmethod_reads_class_attributes_incl_posthoc", """\
+class A:
+    base = 10
+
+    @classmethod
+    def gen(cls, n):
+        for i in range(n):
+            yield cls.base + i
+
+    @classmethod
+    def total(cls, n):
+        return cls.base * n
+
+class B(A):
+    base = 100
+
+A.zmask = 7
+
+def main():
+    print(list(A.gen(3)))
+    print(list(B.gen(3)))
+    print(A.total(2), B.total(2))
+    print(A.zmask)
+
+main()
+""", "[10, 11, 12]\n[100, 101, 102]\n20 200\n7\n")
+
     # ...but any consumer that is NOT a for / list / comprehension (here `next`
     # of a bound handle) would read the box's address as an int, so the
     # generator keeps its refusal.

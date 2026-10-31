@@ -1,5 +1,41 @@
 # CODEGEN_generator_function: Lib/enum.py
 
+## Status (2026-10-31, round 2 — measured the class-attribute model; one silent bug fixed, the dynamic-metaclass part is still the blocker)
+
+Measured with a user program shaped like `Flag`'s generators:
+
+```python
+class A:
+    base = 10
+    @classmethod
+    def gen(cls, n): ...yield cls.base + i...
+class B(A): base = 100
+A.zmask = 7
+```
+
+- **Already right:** a `@classmethod` generator reading a class-BODY attribute
+  resolves it per class (`B.gen` sees `base = 100`), and `cls` is not a bare
+  placeholder.
+- **Fixed (silent wrong value):** an attribute that is only ASSIGNED outside the
+  body (`A.zmask = 7`, which is how `EnumType.__new__` leaves `_flag_mask_` on a
+  class) was not a class attribute at all: `print(A.zmask)` printed an empty
+  container (`[]`). `module_gen._declare_posthoc_class_attrs` now declares it
+  from the literal on the right. Pinned by
+  `generator_classmethod_reads_class_attributes_incl_posthoc`.
+- **Still the blocker:** `Flag`'s `_flag_mask_` / `_value2member_map_` /
+  `_member_map_` are NOT assigned by a literal anywhere the compiler can see:
+  `EnumType.__new__` builds them from `classdict` and installs them with
+  `type.__new__` / `setattr`. The `_iter_member_*` generators would therefore
+  compile into reads of attributes nothing ever writes, and a program iterating
+  a Flag would fail at run time where today the whole module is (correctly)
+  interpreted. Closing it needs the metaclass machinery compiled — a run-time
+  class object (`MojoClass`: attribute dict + bases) that `type.__new__` creates,
+  `setattr(cls, ...)` and `cls.x = v` write, and `cls.x` reads with MRO lookup.
+  Separately noticed: a class-attribute read can collide with an unrelated
+  struct field of the same name elsewhere in the program (`extra`, the compiler's
+  own `ImportStmt.extra`), because the element-type tables are keyed by the bare
+  attribute name.
+
 ## Status (2026-10-31 — measured again: unchanged by the tagged yield; the blocker is `cls` as a class OBJECT)
 
 `_iter_member_`, `_iter_member_by_def_`, `_iter_member_by_value_` still refuse on
