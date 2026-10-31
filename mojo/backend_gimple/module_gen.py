@@ -372,6 +372,128 @@ def _gmi_apply_call_site_param_evidence(gen, stmts):
         ipt.setdefault(fname, {})[pname] = call_type
 
 
+def _gmi_closure_call_site_param_evidence(gen, stmts) -> None:
+    """Ground an UNANNOTATED parameter of a nested `def` in what its callers
+    pass, the closure counterpart of `_gmi_apply_call_site_param_evidence`.
+
+    That pass only sees free-function callees (`IdentExpr` naming a
+    top-level def), so a closure's parameters never got a call-site answer
+    and defaulted to `int64_t`:
+
+        def outer(p):
+            def inner(x):
+                return p + x
+            return inner
+        g = outer("<")
+        print(g(">"))          # CPython `<>`; compiled: a decimal address
+
+    `x` is a `str`, the `+` was lowered as integer addition, and the result
+    printed as a pointer. The callers of a closure are:
+      - `inner(...)` inside the enclosing function, and
+      - when the enclosing function `return`s `inner`: `outer(...)(...)`
+        and `g(...)` for a name `g` whose EVERY assignment in the module is
+        `g = outer(...)`.
+    Anything else (a rebinding, a closure passed as an argument, a call the
+    pass cannot attribute) is simply not evidence, and the closure is left
+    exactly as it was. Same narrow rules as the free-function pass: equal
+    arity, unanimous literal `char *`/`double` evidence only.
+
+    Result: `gen._closure_call_site_types[<lifted name>][<param>] = ctype`,
+    read by `discover_closures` into `ClosureInfo.call_site_param_types`."""
+    gen._closure_call_site_types = {}
+    # The only names that can carry a closure out of its factory.
+    for fn in stmts:
+        if not isinstance(fn, gimple_ctypes.FunctionDef):
+            continue
+        outer = _as_str(fn.name)
+        inners: list = []
+        for st in _gmi_all_stmts_nonfunc(fn.body):
+            if isinstance(st, gimple_ctypes.FunctionDef):
+                inners.append(st)
+        if not inners:
+            continue
+        returned: list = []
+        for st in _gmi_all_stmts_nonfunc(fn.body):
+            if (isinstance(st, gimple_ctypes.ReturnStmt)
+                    and isinstance(st.value, gimple_ctypes.IdentExpr)):
+                returned.append(_as_str(st.value.name))
+        # Names bound ONLY to `outer(...)` anywhere in the module. `bad`
+        # records any other binding of the same name (a rebinding makes the
+        # callee unknowable).
+        bound: dict = {}
+        bad: dict = {}
+        for nd in _walk_ast(stmts):
+            if not isinstance(nd, gimple_ctypes.AssignStmt):
+                continue
+            if not isinstance(nd.target, gimple_ctypes.IdentExpr):
+                continue
+            tname = _as_str(nd.target.name)
+            val = nd.value
+            if (isinstance(val, gimple_ctypes.CallExpr)
+                    and isinstance(val.func, gimple_ctypes.IdentExpr)
+                    and _as_str(val.func.name) == outer):
+                bound[tname] = True
+            else:
+                bad[tname] = True
+        calls = _gmi_iter_calls(stmts)
+        for inner in inners:
+            iname = _as_str(inner.name)
+            params: list = []
+            skip = False
+            for pn, pt in inner.params:
+                if _as_str(pn).startswith('*'):
+                    skip = True
+                params.append(_as_str(pn))
+            if skip or not params:
+                continue
+            ann: dict = {}
+            for pn, pt in inner.params:
+                if pt is not None:
+                    ann[_as_str(pn)] = True
+            escapes = iname in returned
+            seen: dict = {}
+            keys: list = []
+            for call in calls:
+                f = call.func
+                hit = False
+                if isinstance(f, gimple_ctypes.IdentExpr):
+                    fnm = _as_str(f.name)
+                    if fnm == iname:
+                        hit = True
+                    elif (escapes and fnm in bound and fnm not in bad):
+                        hit = True
+                elif (escapes and isinstance(f, gimple_ctypes.CallExpr)
+                      and isinstance(f.func, gimple_ctypes.IdentExpr)
+                      and _as_str(f.func.name) == outer):
+                    hit = True
+                if not hit:
+                    continue
+                args = call.args or []
+                if len(args) != len(params):
+                    continue
+                for pname, arg in zip(params, args):
+                    ctype = _gmi_literal_ctype(arg)
+                    if ctype is None:
+                        continue
+                    if pname not in seen:
+                        seen[pname] = ''
+                        keys.append(pname)
+                    cur = _as_str(seen[pname])
+                    if ('\x1f' + _as_str(ctype) + '\x1f') not in ('\x1f' + cur + '\x1f'):
+                        if cur:
+                            seen[pname] = cur + '\x1f' + _as_str(ctype)
+                        else:
+                            seen[pname] = _as_str(ctype)
+            for pname in keys:
+                cts = _as_str(seen[pname]).split('\x1f')
+                if len(cts) != 1 or pname in ann:
+                    continue
+                if _as_str(cts[0]) not in ('char *', 'double'):
+                    continue
+                lifted = closure_lifted_name(outer, iname)
+                gen._closure_call_site_types.setdefault(lifted, {})[pname] = _as_str(cts[0])
+
+
 # The container KIND a `_container_param_kinds` entry carries for each ctype.
 # One table because `_gmi_apply_call_site_param_evidence` and
 # `_gmi_apply_forwarded_param_evidence` are the two writers and a second copy
@@ -8283,6 +8405,7 @@ def gen_module_impl(self, stmts):
     # two disagree and a call site is unambiguous. See
     # `_gmi_apply_call_site_param_evidence`.
     _gmi_apply_call_site_param_evidence(self, stmts)
+    _gmi_closure_call_site_param_evidence(self, stmts)
     # ...and then in what a FORWARDED parameter's callee concluded, which
     # `_infer_param_types` cannot see (the body of a pure forwarder says
     # nothing) and the literal call sites cannot see either (the argument IS

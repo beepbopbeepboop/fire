@@ -3505,7 +3505,7 @@ def _gen_lifted_closure_body(gen, ci, outer_name: str) -> str:
     # case that used to default to `int64_t` and turn a real string argument
     # into a decimal address (`sorted(names, key=lambda s: k3(s))` — see
     # `ci.call_site_param_types`'s own comment).
-    _call_site_types = dict(ci.call_site_param_types) if not ci.env_struct else {}
+    _call_site_types = dict(ci.call_site_param_types)
     for pname, ptype in node.params:
         if pname in _lambda_capture_types:
             gen.var_types[pname] = _lambda_capture_types[pname]
