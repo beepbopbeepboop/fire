@@ -201,6 +201,10 @@ def _cpp_with_guard_type_name(gen, expr) -> str | None:
     if (isinstance(expr.func, gimple_ctypes.SubscriptExpr)
             and isinstance(expr.func.obj, gimple_ctypes.IdentExpr)):
         return expr.func.obj.name
+    # Intrinsic RAII guard: tempfile.TemporaryDirectory()
+    if isinstance(expr.func, gimple_ctypes.MemberExpr):
+        if isinstance(expr.func.obj, gimple_ctypes.IdentExpr):
+            return expr.func.obj.name + '.' + expr.func.member
     return None
 
 
@@ -761,6 +765,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     for _spn0, _sct0 in param_ctypes:
         _self_cts.append(_sct0)
     gen._cpp_gen_self_params = _self_cts
+    gen._cpp_os_path_aliases = gcc_._cpp_collect_os_path_aliases(fn)
     # Set True by _cpp_yield_from the moment it actually emits a
     # self-recursive delegation call — read back (into a local,
     # BEFORE `finally` below) to decide whether `{base}_start`/
@@ -990,6 +995,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         gen._cpp_gen_self_name = None
         gen._cpp_gen_self_base = None
         gen._cpp_gen_self_params = None
+        gen._cpp_os_path_aliases = None
         gen._cpp_gen_self_recursed = None
         gen._cpp_fwd_gen_delegates = None
     # The cpp typer types a yield it cannot resolve as int64_t, and that

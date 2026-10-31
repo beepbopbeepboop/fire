@@ -1,5 +1,107 @@
 # CODEGEN_generator_function: Lib/os.py
 
+## Status (2026-10-30, round 3 — measured: the mixed-tuple yield is a TYPE-MODEL problem, not a yield-kind one; a naive yield-kind fix is worse than the refusal)
+
+Experiment (not landed, because it makes things worse): teach
+`exprtypes._generator_yield_ctype` that a bare `yield <name>` inside
+`if isinstance(<name>, tuple):` yields `MojoList *`
+(`_tuple_guarded_bare_yields`). With it `walk` stops being refused and the
+module build proceeds to the C++ compiler — and fails there. Reproduced on a
+five-line model of `walk` (`stack = [top]; top = stack.pop(); if
+isinstance(top, tuple): yield top; ...; stack.append((top, dirs, nondirs))`):
+
+```
+top = mojo_list_pop(stack);          // top is the PARAM's type, char *: g++ "invalid conversion from int64_t to char*"
+if ((0)) { co_yield top; continue; } // isinstance(top, tuple) lowered to the constant 0
+```
+
+So the refusal was protecting a real hole: the local `top` is both the string
+parameter and each popped stack element, which at run time is EITHER a path
+string or a pushed `(top, dirs, nondirs)` tuple, and the compiled body gives it
+ONE C type (`char *`), constant-folds `isinstance(top, tuple)` to false, and
+cannot return a popped tuple through a `char *`. Making the yield kinds agree
+without fixing that yields invalid C++, which is a hard build error where the
+refusal was a clean interpreter fallback. The 33-line experiment is preserved
+at `git stash` message "WIP on work/gen-lib-os" in the round-3 worktree and was
+the content of `_tuple_guarded_bare_yields` + 3 lines in `_generator_yield_ctype`;
+re-create it as the LAST step, not the first.
+
+The real next step is the tagged local, in this order:
+1. A local assigned from `<list>.pop()` / `<list>[i]` where the list holds BOTH
+   a scalar kind and a pushed tuple (`stack.append(top)` string kind beside
+   `stack.append((top, dirs, nondirs))`) is declared as the boxed WORD
+   (`int64_t`), not the first-binding's `char *`; every string use of it casts
+   `(char *)` and every tuple use `(MojoList *)` (`_cpp_word_iter_locals` is the
+   existing registry for a "value whose kind only the runtime knew").
+2. `isinstance(<word>, tuple)` lowers to a runtime test instead of the constant
+   0: the pop-time discrimination is half there (`mojo_list_pop`, and a tuple is
+   a `mojo_mark_as_tuple`d `MojoList *`), so `mojo_is_tuple_word(word)` =
+   registered list AND marked tuple.
+3. Only then the yield-kind rule above.
+Tests that prove it: the five-line `walk` model in
+`test_gimple_generator_runner.py` against CPython in both `topdown` modes
+(CPython output: `r ['d0'] ['f0']` / `r/x ['d1'] ['f1']` / `r/x/x ['d2'] ['f2']`
+top-down, and the reverse order bottom-up), then `fire.py build` of
+`Lib/os.py` leaving only `_fwalk`'s `stat(...)`.
+
+## Status (2026-10-30, round 2 — `reversed(<list>)` loops and the silent wrong-value on `append(os.path.join(...))`; `walk` is now down to the mixed-tuple yield)
+
+- **Landed:** `for x in reversed(<list local>)` in a C++20 coroutine body
+  (`cpp_core`, the `walk` loops `for dirname in reversed(dirs)` and `for
+  new_path in reversed(walk_dirs)`); lowered via a cached `mojo_list_reversed`.
+  `walk` no longer stops at `unsupported for-loop iterable type: CallExpr`.
+- **Landed (a silent wrong value, found on the way):** on the stack-switch
+  path, `names.append(os.path.join(top, d))` then `for n in reversed(names):
+  yield n` printed heap ADDRESSES with exit 0, because neither the appended
+  call's kind nor `reversed`/`sorted`/`list`'s element-kind passthrough was
+  known to `coro._static_env`. Both now are; pinned by
+  `generator_reversed_list_of_os_path_join_results`.
+- **`walk` now refuses on exactly one thing:** `every yield must carry a value,
+  and all values must agree on one scalar type` — the bottom-up path's bare
+  `yield top` (a tuple popped from the heterogeneous `stack`) beside the
+  top-down `yield top, dirs, nondirs`. Next step: narrow `top` to 'tuple' under
+  `isinstance(top, tuple)` and take the tuple slot ctypes from the
+  `yield top, dirs, nondirs` site (`exprtypes._generator_tuple_yield_slot_ctypes`
+  / `_generator_yield_ctype`). `_fwalk` is unchanged (`stat(...)`).
+
+## Status (2026-10-30 — `work/gen-lib-os`: `os.path` function values + aliases landed; `walk` now stops at scandir, `_fwalk` at `stat`)
+
+Landed (measured on `Lib/os.py` of CPython 3.15, `python3 fire.py build`):
+
+- **`os.path.<fn>` / `posixpath.<fn>` read as a VALUE** (`islink, join =
+  path.islink, path.join`, the first line of `walk`) used to lower to
+  `_mojo_dispatch_getattr(<module marker 0>, "islink")` — a fatal runtime
+  `AttributeError: islink`. Now: `emit_exprs._lower_MemberExpr` returns the
+  runtime wrapper's address (`mojo_os_path_{join,islink,isdir,isfile,exists,
+  basename,dirname}_w`, new in `runtime/fire_runtime.c`), a call through it is
+  `mojo_fnptr_call_N`, and `coro._static_env` types the call's result
+  (`_os_path_fn_kind`: join/basename/dirname str, the predicates bool) for a
+  single-name AND a tuple-bound local. Pinned by
+  `generator_os_path_function_values_tuple_bound`.
+- **The C++20 coroutine emitter** (the path `walk`/`_fwalk` take) resolves such a
+  local as a compile-time ALIAS (`cpp_core._cpp_collect_os_path_aliases`, set
+  per body in `cpp_async`), so `join(top, ...)` lowers through the existing
+  `os.path.*` call table (which gained `islink`). `walk` no longer stops at
+  `unresolved callee 'join(...)'`.
+
+Measured state after this round:
+
+- `walk`: `unsupported for-loop iterable type: CallExpr` — the
+  `with scandir(top) as entries:` / `for entry in entries` shape (`scandir`
+  returns a `DirEntry` iterator; `entry.name/.path/.is_dir()/.is_symlink()`).
+- `_fwalk`: `a call to unresolved callee 'stat(...)'` (`from posix import *`;
+  `stat` returns a `stat_result` structseq that is then unpacked).
+- Still true, and the real size of the remainder: the mixed tuple / non-tuple
+  `stack` value model in `walk` (`stack.append((top, dirs, nondirs))` beside a
+  bare str entry, discriminated by `isinstance(top, tuple)`).
+
+Next steps, in order: (1) a runtime `DirEntry` value + `scandir` returning an
+iterable of them (`mojo_os_scandir`, entries as a struct with name/path and
+lazily-stat'd `is_dir/is_symlink`), lowered like `os.walk` already is; (2)
+`posix.stat`/`lstat` returning a fixed-layout `stat_result` the generator body
+can unpack; (3) the tagged `stack` element (tuple vs str) via the existing
+`mojo_list_pop` + `isinstance(x, tuple)` discrimination.
+
 ## Status (2026-10-29 — worktree agent-4796: verified refusal unchanged, regression test committed, root cause remains feature-sized tagged-union redesign)
 
 Verified: `python3 fire.py build Lib/os.py` still fails with the same generator refusal (`mixed tuple / non-tuple yields` / heterogeneous stack value model), unchanged from 2026-09-07. Added `test_regress_lib_os_generator_refusal.py` (passes, pins refusal + open doc). The concrete remaining prerequisites (per 2026-09-07 entry) are: `os.stat_result` structseq modeling, `os.scandir`/`DirEntry` iterator type, and a runtime-tagged container value model for `walk`/`_fwalk`'s mixed `str`/`tuple` `stack`. Genuinely out of scope for a narrow fix; doc stays open.

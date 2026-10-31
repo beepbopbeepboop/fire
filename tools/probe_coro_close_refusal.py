@@ -32,6 +32,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import gimple_codegen
 from mojo.backend_gimple import emit_exprs
+from mojo.backend_gimple.emit_infra import global_generator_key
+import mojo.middle.types as gimple_ctypes
 
 
 def _base_of(api):
@@ -48,11 +50,16 @@ def _install(name: str) -> None:
         ctype, temp = real(gen, node)
         if node.name == name:
             api = gen._generator_var_api.get(temp)
+            # The key the read consults: the defining module's, for an
+            # imported name, else this module's own (see ginf.global_generator_key).
+            home = gen._imported_global_home.get(name) or (
+                gimple_ctypes._c_field_name(gen._current_module_ctx or "root"))
+            key = global_generator_key(home, name)
             print(
                 f"PROBE module={gen.module_name!r} name={name} "
                 f"ctype={ctype} temp={temp} "
-                f"api_table={name in gen._global_generator_api} "
-                f"poisoned={name in gen._global_generator_api_poisoned} "
+                f"api_table={key in gen._global_generator_api} "
+                f"poisoned={key in gen._global_generator_api_poisoned} "
                 f"accessor={name in gen._imported_global_accessors} "
                 f"captured={name in gen._captures} "
                 f"narrowed={f'i:{name}' in gen._narrowed_exprs} "

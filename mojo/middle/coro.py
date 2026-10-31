@@ -98,12 +98,14 @@ _KIND_CTYPE  = {'i': 'int64_t', 'b': '_Bool', 'p': 'char *', 'd': 'double',
 
 
 def _yield_shim(kind: str) -> str:
-    # int/bool/pointer all go through the int64_t yield -- _emit_call coerces
-    # a char*/pointer arg to int64_t via the registered param types, and a
-    # `_Bool` promotes to its own 0/1 losslessly. Only a genuine double needs
-    # the bitcast variant; pointer needs the pointer-typed shim so the C
-    # argument is not cast to int64_t (which yields the pointer address as
-    # an integer rather than the pointed-to value).
+    # int/bool/pointer all go through an int64_t-box yield -- _emit_call
+    # coerces a char*/pointer arg to int64_t via the registered param types
+    # (see `func_param_types` in lower()), and a `_Bool` promotes to its own
+    # 0/1 losslessly. A string's box word IS its pointer bits, so the `_p`
+    # shim takes the same int64_t as `_i`: a generator's String local is
+    # declared int64_t (it is read back from `__mojo_gen_arg`), and a
+    # `void *` parameter there is an int->pointer conversion GIMPLE rejects.
+    # Only a genuine double needs the bitcast variant.
     if kind == 'd':
         return '__mojo_coro_yield_d'
     if kind == 'p':
@@ -277,6 +279,55 @@ def _callee_return_kind(expr, env: dict | None = None) -> str | None:
     return _NUMERIC_CTORS.get(expr.func.name) or _FUNC_RET_KIND.get(expr.func.name)
 
 
+# Result kind of each `os.path.<fn>` the runtime implements as a function
+# VALUE (`_OS_PATH_RUNTIME_CALLABLE_VALUES` in emit_exprs.py), so a local bound
+# to one (`join = os.path.join`) types its call results.
+_OS_PATH_FN_KINDS = {'join': 'p', 'basename': 'p', 'dirname': 'p',
+                     'islink': 'b', 'isdir': 'b', 'isfile': 'b', 'exists': 'b'}
+
+
+# `os.path.<fn>` runtime functions whose result is a PAIR of strings for a str
+# argument (`d, b = os.path.split(p)`). Their unpacked elements are str-kinded.
+_OS_PATH_PAIR_FNS = ('split', 'splitext')
+
+
+def _os_path_pair_call(v) -> bool:
+    """True when `v` is a direct call to one of `_OS_PATH_PAIR_FNS` through
+    `os.path` / `posixpath` / `path`, i.e. a 2-tuple-of-str result."""
+    if not isinstance(v, N.CallExpr):
+        return False
+    fn = v.func
+    if not isinstance(fn, N.MemberExpr) or fn.member not in _OS_PATH_PAIR_FNS:
+        return False
+    o = fn.obj
+    if isinstance(o, N.MemberExpr) and o.member == 'path' \
+            and isinstance(o.obj, N.IdentExpr) and o.obj.name == 'os':
+        return True
+    return isinstance(o, N.IdentExpr) and o.name in ('path', 'posixpath')
+
+
+def _os_path_call_kind(v) -> str | None:
+    """The result kind of a DIRECT call `os.path.<fn>(...)` (or `path.<fn>` /
+    `posixpath.<fn>`) to a runtime-implemented function, else None."""
+    if isinstance(v, N.CallExpr):
+        return _os_path_fn_kind(v.func)
+    return None
+
+
+def _os_path_fn_kind(v) -> str | None:
+    """The result kind of `v` when it is `os.path.<fn>` / `posixpath.<fn>` /
+    `path.<fn>` naming a runtime-implemented function, else None."""
+    if not isinstance(v, N.MemberExpr) or v.member not in _OS_PATH_FN_KINDS:
+        return None
+    o = v.obj
+    if isinstance(o, N.MemberExpr) and o.member == 'path' \
+            and isinstance(o.obj, N.IdentExpr) and o.obj.name == 'os':
+        return _OS_PATH_FN_KINDS[v.member]
+    if isinstance(o, N.IdentExpr) and o.name in ('path', 'posixpath'):
+        return _OS_PATH_FN_KINDS[v.member]
+    return None
+
+
 def _lambda_ret_kind(lam: N.LambdaExpr, env: dict) -> str | None:
     """Scalar kind of the value `lam` returns, read off its body. The lambda's
     OWN parameters are removed from `env` first: `lambda x: x` must not take
@@ -331,6 +382,12 @@ def _literal_kind(expr) -> str | None:
             k = list(eks)[0]
             if isinstance(k, str):
                 return ('list', k)
+            # A list of lists whose inner lists all hold ONE scalar kind
+            # (`[[1, 2], [3, 4]]`): ('list', ('list', 'i')). One level only;
+            # the backend's `_nested_elem_types` slot carries exactly one.
+            if (isinstance(k, tuple) and len(k) == 2 and k[0] == 'list'
+                    and isinstance(k[1], str)):
+                return ('list', k)
     return None
 
 
@@ -381,11 +438,28 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
     for n in _walk(fn):
         if isinstance(n, N.AssignStmt) and isinstance(n.target, N.IdentExpr):
             _lam_binds.setdefault(n.target.name, []).append(n.value)
+        elif (isinstance(n, N.AssignStmt) and isinstance(n.target, N.TupleExpr)
+                and isinstance(n.value, N.TupleExpr)
+                and len(n.target.elements) == len(n.value.elements)):
+            # `islink, join = path.islink, path.join` binds each name to ITS
+            # element, not to the whole tuple.
+            for _t, _v in zip(n.target.elements, n.value.elements):
+                if isinstance(_t, N.IdentExpr):
+                    _lam_binds.setdefault(_t.name, []).append(_v)
         elif isinstance(n, N.VarDecl):
             _lam_binds.setdefault(n.name, []).append(n.value)
     _param_names = {_pn for _pn, _pa in getattr(fn, 'params', [])}
     for _nm, _vals in _lam_binds.items():
-        if _nm in _param_names or not all(isinstance(_v, N.LambdaExpr) for _v in _vals):
+        if _nm in _param_names:
+            continue
+        if all(_os_path_fn_kind(_v) is not None for _v in _vals):
+            # A local bound to a runtime-implemented `os.path.<fn>` value: a
+            # call through it answers that function's result kind.
+            _pk = {_os_path_fn_kind(_v) for _v in _vals}
+            if len(_pk) == 1:
+                env[_nm] = ('callable', _pk.pop())
+            continue
+        if not all(isinstance(_v, N.LambdaExpr) for _v in _vals):
             continue
         _kinds = {_lambda_ret_kind(_v, env) for _v in _vals}
         if len(_kinds) == 1:
@@ -397,6 +471,16 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
             tgt, val, ann = n.target.name, n.value, getattr(n, 'type_ann', None)
         elif isinstance(n, N.VarDecl):
             tgt, val, ann = n.name, n.value, n.type_ann
+        # `dirname, basename = os.path.split(p)`: each unpacked element is a
+        # str. Without this, `basename` is an untypable local, so passing it to
+        # a generator is a call-site HOLE and the generator is refused (the
+        # `_iglob`/`_glob2` refusal in Lib/glob.py).
+        if (isinstance(n, N.AssignStmt) and isinstance(n.target, N.TupleExpr)
+                and _os_path_pair_call(n.value)):
+            for _t in n.target.elements:
+                if isinstance(_t, N.IdentExpr):
+                    str_kinds.setdefault(_t.name, set()).add('p')
+                    env.setdefault(_t.name, 'p')
         if tgt is not None:
             k = _ann_kind(ann)
             if k is None:
@@ -452,6 +536,10 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
                 and n.func.member in ('append', 'insert')
                 and isinstance(n.func.obj, N.IdentExpr) and n.args):
             ek = _literal_kind(n.args[-1])
+            if ek is None:
+                # `names.append(os.path.join(top, d))`: not a literal, but its
+                # kind is as certain (a runtime-implemented `os.path` call).
+                ek = _os_path_call_kind(n.args[-1])
             if isinstance(ek, str):
                 list_elem.setdefault(n.func.obj.name, set()).add(ek)
     for nm, eks in list_elem.items():
@@ -514,6 +602,15 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
                 # address (test: generator_iterating_a_string_parameter_
                 # yields_nothing).
                 ek = 'p'
+        elif (isinstance(it, N.CallExpr) and isinstance(it.func, N.IdentExpr)
+                and it.func.name in ('reversed', 'sorted', 'list')
+                and len(it.args) == 1 and not it.kwargs
+                and isinstance(it.args[0], N.IdentExpr)
+                and isinstance(env.get(it.args[0].name), tuple)
+                and env[it.args[0].name][0] == 'list'):
+            # `reversed(xs)` / `sorted(xs)` / `list(xs)` reorder or copy a
+            # list and never change its element kind.
+            ek = env[it.args[0].name][1]
         elif isinstance(it, N.CallExpr):
             # A sibling generator's call — the consuming twin of `yield
             # from`. See `_sibling_gen_kind`, which is where the recursion
@@ -529,6 +626,12 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
             elif lk == 'p':
                 ek = 'p'          # `for c in 'ab':` -- characters are strings
         if isinstance(ek, str):
+            env[tname] = ek
+        elif (isinstance(ek, tuple) and len(ek) == 2 and ek[0] == 'list'
+                and isinstance(ek[1], str)):
+            # An element of a list of lists IS a list: `for row in rows:`
+            # binds `row` to ('list', <inner kind>), so the inner
+            # `for cell in row:` (visited after this one) is typed too.
             env[tname] = ek
     # `for i, x in enumerate(<xs>)`: the two-slot target the loop above
     # skips. Slot 0 is the index, an int by construction, and slot 1 is one
@@ -630,6 +733,13 @@ def _yield_kind(expr, env: dict | None = None) -> str | None:
         if isinstance(v, tuple) and v[0] == 'list':
             return v[1]
         return None
+    # `pattern[:0]` on a str-kinded local is a str (Lib/glob.py's `_glob2`
+    # yields exactly that). A slice of a list-local is a list, not a scalar,
+    # so only the 'p' kind is answered here.
+    if isinstance(expr, N.SliceExpr) and isinstance(expr.obj, N.IdentExpr):
+        if env.get(expr.obj.name) == 'p':
+            return 'p'
+        return None
     # `next(it)` / `next(it, default)` where `it` was bound by
     # `it = iter(<list-local>)` — the element kind carried onto `it` in
     # `_static_env` (as a ('list', kind) entry) is this expression's kind.
@@ -703,6 +813,21 @@ _KIND_TO_SLOT_CTYPE = {'i': 'int64_t', 'b': '_Bool', 'p': 'char *', 'd': 'double
                        None: 'int64_t'}
 
 
+def _tuple_slot_kind(expr, env: dict | None = None) -> str | None:
+    """The slot kind of one element of a tuple yield. A bare list-local
+    (`yield "root", dirs`) is a 'list:<elem>' slot -- a `MojoList *` boxed by
+    pointer bits, whose ELEMENT kind rides along so the consumer can read the
+    list's elements. `_yield_kind` answers a bare list name with its ELEMENT
+    kind (the `yield xs[i]` case), which typed the slot `char *` and made the
+    consumer read the list pointer back with `mojo_list_get_str`."""
+    env = env or {}
+    if isinstance(expr, N.IdentExpr):
+        v = env.get(expr.name)
+        if isinstance(v, tuple) and v[0] == 'list':
+            return f'list:{v[1] or ""}'
+    return _yield_kind(expr, env)
+
+
 def _generator_tuple_shapes(fn: N.FunctionDef, env: dict | None = None):
     """Per-yield-site slot-KIND tuples, or None for a non-tuple yield."""
     shapes = []
@@ -710,7 +835,7 @@ def _generator_tuple_shapes(fn: N.FunctionDef, env: dict | None = None):
         if isinstance(n, N.YieldExpr):
             if not isinstance(n.value, N.TupleExpr):
                 return None
-            shapes.append(tuple(_yield_kind(e, env) for e in n.value.elements))
+            shapes.append(tuple(_tuple_slot_kind(e, env) for e in n.value.elements))
     return shapes or None
 
 
@@ -745,6 +870,11 @@ def _generator_tuple_slots(fn: N.FunctionDef, env: dict | None = None):
         return None
     slots = []
     for k in kinds:
+        if isinstance(k, str) and k.startswith('list:'):
+            # A list-valued element: its MojoList * pointer bits, read back
+            # as the list itself (`_emit_generator_tuple_unpack`).
+            slots.append('MojoList *')
+            continue
         if k == 'tuple':
             # A nested tuple literal in a slot (Lib/modulefinder.py's
             # `yield "store", (name,)` / `yield "relative_import", (level,
@@ -761,6 +891,22 @@ def _generator_tuple_slots(fn: N.FunctionDef, env: dict | None = None):
             continue
         slots.append(_KIND_TO_SLOT_CTYPE[k])
     return slots
+
+
+def _generator_tuple_slot_elems(fn: N.FunctionDef, env: dict | None = None):
+    """Per-slot element C type for a list-valued slot (`'list:<elem>'`, see
+    `_tuple_slot_kind`), aligned with `_generator_tuple_slots`'s result; None
+    for every other slot. None when the tuple shape is inconsistent (same
+    refusal conditions as `_generator_tuple_slots`)."""
+    shapes = _generator_tuple_shapes(fn, env)
+    if shapes is None:
+        return None
+    kinds = _generator_tuple_unify(shapes)
+    if kinds is None:
+        return None
+    return [_KIND_TO_SLOT_CTYPE.get(k[len('list:'):] or None, 'int64_t')
+            if isinstance(k, str) and k.startswith('list:') else None
+            for k in kinds]
 
 
 def _generator_nested_slots(fn: N.FunctionDef, env: dict | None = None):
@@ -3351,6 +3497,7 @@ def _mark_coro_param_elem_kinds(body_fd, real_params, env):
     must be able to ask "is this a coroutine body, and what did its params
     look like" without a parallel naming convention to keep in sync."""
     kinds: dict = {}
+    nested: dict = {}
     str_params: list = []
     int_lists: list = []
     for pname, _pann in real_params:
@@ -3364,8 +3511,19 @@ def _mark_coro_param_elem_kinds(body_fd, real_params, env):
                 int_lists.append(_local_param_name(pname))
             else:
                 kinds[_local_param_name(pname)] = ct
+        elif (isinstance(v, tuple) and len(v) == 2 and v[0] == 'list'
+                and isinstance(v[1], tuple) and len(v[1]) == 2
+                and v[1][0] == 'list' and v[1][1] in _KIND_CTYPE):
+            # A list of lists: the outer element is a `MojoList *` and the
+            # inner element kind rides in the nested slot (the same
+            # (elem, nested) pair `_param_elem_types` carries for an
+            # ordinary function's list-of-lists parameter).
+            kinds[_local_param_name(pname)] = 'MojoList *'
+            nested[_local_param_name(pname)] = _KIND_CTYPE[v[1][1]]
         elif v == 'p':
             str_params.append(_local_param_name(pname))
+    if nested:
+        body_fd._mojo_coro_param_nested_kinds = nested
     if kinds:
         body_fd._mojo_coro_param_elem_kinds = kinds
     if int_lists:
@@ -4327,6 +4485,16 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
         _CALLSITE_PARAM_KINDS.clear()
         _CALLSITE_PARAM_CONFLICTS.clear()
         _PLAIN_CALLSITE_PARAM_KINDS.clear()
+        # The generator-kind memo (`_GEN_VALUE_KINDS`) is a function of these
+        # tables: a generator's kind reads its unannotated params' call-site
+        # kinds through `_static_env`. The scan itself reaches the memo
+        # (`_argkind` -> `_yield_kind` -> `_resolve_gen_kind`) BEFORE these
+        # tables are filled, so an answer memoized there is stale by the time
+        # classification finishes. Measured: `def _g(p): yield p` called only
+        # as `_g("abc")` memoized as 'i' and read back through `yield from _g(...)`
+        # as an int64_t, printing the string's address at exit 0. Drop it here.
+        _GEN_VALUE_KINDS.clear()
+        _GEN_RESOLVING.clear()
         for gname, slot in seen.items():
             resolved = {}
             conflicted = set()
@@ -5630,6 +5798,11 @@ def _generator_result_escapes(outer: N.FunctionDef, name: str) -> bool:
             safe_names.add(id(n.target))
         elif _is_next_of(n) and isinstance(n.args[0], N.IdentExpr):
             safe_names.add(id(n.args[0]))
+        elif (isinstance(n, N.MemberExpr) and isinstance(n.obj, N.IdentExpr)
+                and n.member in ('close', 'send', 'throw')):
+            # `gen.close()` / `gen.send(v)` / `gen.throw(e)` drive the
+            # generator in place; the object does not leave the frame.
+            safe_names.add(id(n.obj))
     for n in nodes:
         if isinstance(n, N.IdentExpr) and n.name in local_names and id(n) not in safe_names:
             return True
@@ -6000,6 +6173,7 @@ def _lower_one(fn: N.FunctionDef, meta: list,
         'value_kind': kind,
         'tuple_slot_ctypes': _generator_tuple_slots(fn, env) if kind == 'tuple' else None,
         'tuple_slot_nested': _generator_nested_slots(fn, env) if kind == 'tuple' else None,
+        'tuple_slot_elems': _generator_tuple_slot_elems(fn, env) if kind == 'tuple' else None,
         'defaults': list((getattr(fn, 'param_defaults', None) or {}).items()),
         # Parameters whose declared DEFAULT names one of this module's own
         # generators (`def walk_tree(root, *, walk=_walk_tree)`), as
@@ -6265,6 +6439,7 @@ def register(gen, meta: list) -> None:
     # char*/pointer/double yield value to the int64_t the shim takes,
     # instead of emitting a raw "makes integer from pointer" call.
     gen.func_param_types.setdefault('__mojo_coro_yield_i', ['int64_t', 'int64_t'])
+    gen.func_param_types.setdefault('__mojo_coro_yield_p', ['int64_t', 'int64_t'])
     gen.func_param_types.setdefault('__mojo_coro_yield_d', ['int64_t', 'double'])
     gen.func_param_types.setdefault('__mojo_gen_arg', ['int64_t', 'int64_t'])
     gen.func_param_types.setdefault('__mojo_gen_arg_d', ['int64_t', 'int64_t'])
@@ -6414,6 +6589,7 @@ def register(gen, meta: list) -> None:
             'star_slot': m.get('star_slot'),
             'tuple_slot_ctypes': m.get('tuple_slot_ctypes'),
             'tuple_slot_nested': m.get('tuple_slot_nested'),
+            'tuple_slot_elems': m.get('tuple_slot_elems'),
             'has_return_value': True,
             'is_async_gen': m.get('is_async_gen', False),
             # Whether this coroutine's body can EVER put a wait-descriptor

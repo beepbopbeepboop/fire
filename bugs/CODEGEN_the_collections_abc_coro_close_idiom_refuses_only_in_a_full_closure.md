@@ -248,9 +248,10 @@ refused with "receiver typed `void *`" even though the api had been carried.
 Test: `test_regress_coro_close_closure.py::test_accessor_read_of_generator_is_typed_as_generator`
 (FAILS on HEAD with `accessor read _t1 typed void *`, PASSES with the fix).
 `test_gimple_generator_runner.py`: 297 pass / 8 fail, the SAME 8 on HEAD
-(`generator_explicit_call_arguments_still_resolve`, ... see
-`CODEGEN_genexp_over_annotated_param_refused.md`,
-`CODEGEN_generator_function_Lib_os.md`), so none is caused by this change.
+(`generator_explicit_call_arguments_still_resolve`, ... the genexp-over-annotated-
+param pair, and `CODEGEN_generator_function_Lib_os.md`), so none is caused by this
+change. (The 8 were fixed on the generator-runner branch: the `__mojo_coro_yield_p`
+ABI, the list-valued tuple slot kind, and the genexp verifier's `_mojogen_` prefix.)
 
 **Measured this round (not a fix):**
 - The defining module's OWN accessor for a generator-held global is
@@ -441,3 +442,51 @@ landed accessor-arm fix (`emit_exprs.py:538-560`) needs in order to fire.
 2026-10-31b. Its result decides whether the closure refusal is THIS gap (the
 reading gen then lacks `_global_generator_api['_coro']` while the defining
 gen had it) or the unnamed own-read path.
+
+### Round 2026-10-30c — partial fix: a generator global's api is per-module and does not reach the importer (light worker; no full-closure run)
+
+**Measured, cheap (0.0-0.3 GB), `sib.py` = `_coro = _g()`, entry = `from sib import _coro; _coro.close()`:**
+the importer emitted `_t4 = 0; /* int64_t.close() — stubbed */`. It was NOT a
+refusal: the two-module shape compiled and silently returned 0 for `.close()`
+(and would for `next()`). The read was `_sib_globals._coro` directly (a
+from-import reads the owner's globals struct, not the accessor), typed
+`int64_t`, with no api. Cause, located in code: `emit_resolve.py` shared only
+`_generator_api`/`_generator_method_api`/`_generator_home_api` into each
+imported module's `temp_gen`, not `_global_generator_api`, so the store recorded
+in `sib`'s compile was invisible to the importer's gen.
+
+**Landed (option (a) of the 10-31c round, with the key made module-qualified
+instead of a bare name, because the tables are shared across the whole compile):**
+- `emit_infra.global_generator_key(module_safe, name)` -> `"<mod>.<name>"`, the
+  defining module's C-mangled name, the same mangling `_<mod>_globals` and the
+  accessor symbol use.
+- `emit_resolve.py`: `_global_generator_api` and `_global_generator_api_poisoned`
+  are shared by reference into every `temp_gen`.
+- `emit_stmts._note_global_generator_store`, `emit_infra`'s `_write_dest`
+  poison, and both read arms in `emit_exprs._lower_IdentExpr` key by the module
+  the read LOADS (`_read_mod`, the owner for a from-import); the accessor arm
+  keys by the new `gen._imported_global_home[name]` (set in
+  `_emit_imported_global_accessors` from the same `_home_qual` as the accessor
+  symbol).
+- `_lower_IdentExpr`'s global-read typing: when the read's key carries a known
+  api, the temp is typed `MojoGenerator *` (it was `int64_t`, and `.close()` /
+  `next()` dispatch on the receiver's type, so the carry alone did not reach
+  `_lower_generator_close`).
+
+**Verified:**
+- `python3 tools/memslot.py --gb 8 --label coro-close -- python3 test_regress_coro_close_closure.py`
+  -> PASS (incl. new `test_same_bare_name_in_another_module_does_not_carry` and
+  `test_cross_module_generator_global_close_compiles`, which asserts no `stubbed`
+  and a `__mojo_gen_close (` in the importer's C).
+- The same two-module program built with `fire.py build` and run prints `1` /
+  `ok`, matching CPython (`next(_coro)` then `_coro.close()`).
+- `test_gimple_generator_runner.py`: 297 passed, 8 failed, both WITH and WITHOUT
+  this change (the same 8 at HEAD; fixed on the generator-runner branch, see the note above).
+
+**Not verified, owed to the integrator (heavy):** whether this removes the
+four row closures' `_collections_abc` refusal (socket 56 / parsing 48 / zipfile
+62 / mailbox 66). The refusal's exact closure path is still unnamed; this round
+closes a silent-wrong cross-module gap that the same idiom reaches through a
+from-import, which the closure's `from X import` edges can contain. The
+integrator's next step is the 2026-10-31b probe on mailbox plus the four
+censuses. Doc stays open until those re-measure.

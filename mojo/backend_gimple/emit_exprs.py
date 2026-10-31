@@ -542,8 +542,11 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         # through an imported accessor (full-closure case where another
         # module registered the accessor) must still carry its API onto
         # the fresh read-back temp, else .close() / next() refuse.
-        _gen_api_known = (name in gen._global_generator_api
-                          and name not in gen._global_generator_api_poisoned)
+        _gen_key = ginf.global_generator_key(
+            gen._imported_global_home.get(name, ''), name)
+        _gen_api_known = (name in gen._imported_global_home
+                          and _gen_key in gen._global_generator_api
+                          and _gen_key not in gen._global_generator_api_poisoned)
         if _gen_api_known and _acc_ctype != 'MojoGenerator *':
             # The export's declared type is the export scan's guess (a
             # `var NAME = call()` line is typed `void *`), not the handle's
@@ -559,7 +562,7 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         else:
             t = gen._call_expr(_acc_ctype, _acc_csym, [])
         if _gen_api_known:
-            gen._generator_var_api[t] = gen._global_generator_api[name]
+            gen._generator_var_api[t] = gen._global_generator_api[_gen_key]
         return _acc_ctype, t
     # Struct/class type name used as a value (e.g. cls arg) — return zero placeholder
     _BUILTIN_TYPE_NAMES = frozenset({
@@ -743,6 +746,16 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
             ctype = 'int64_t'
         else:
             ctype = gtype
+        # A global whose generator api is known (recorded by the store in the
+        # module that LOADS from here, see `_read_key` below) holds a generator
+        # handle, boxed as an int64_t field. The read must be typed as the
+        # generator it is: `.close()` / `next()` dispatch on the receiver's
+        # type, and an importer's gen would otherwise see a bare int64_t.
+        _read_key = ginf.global_generator_key(
+            gimple_ctypes._c_field_name(_read_mod), name)
+        if (ctype == 'int64_t' and _read_key in gen._global_generator_api
+                and _read_key not in gen._global_generator_api_poisoned):
+            ctype = 'MojoGenerator *'
         t = gen._new_temp(ctype)
         # Use the overridden actual type (set during global store, e.g.
         # a MojoDict* stored in an int64_t global field) if available,
@@ -816,9 +829,9 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         # NAME. A poisoned name (rebound, or stored from a function) has no
         # single api, so it gets none and keeps the honest refusal. See
         # `emit_stmts._note_global_generator_store`.
-        if (name in gen._global_generator_api
-                and name not in gen._global_generator_api_poisoned):
-            gen._generator_var_api[t] = gen._global_generator_api[name]
+        if (_read_key in gen._global_generator_api
+                and _read_key not in gen._global_generator_api_poisoned):
+            gen._generator_var_api[t] = gen._global_generator_api[_read_key]
         # …and "this global holds a plain integer" (`gen._int_word_vals`), the
         # same hop and the same reason for the same reason-as-the-three-above:
         # reading a global mints a FRESH temp, and the dict-key decision is
@@ -1332,6 +1345,21 @@ def _stat_module_constant(gen, node):
     return None
 
 
+# `os.path.<name>` functions the runtime implements, as function VALUES in the
+# int64_t-in/int64_t-out ABI `mojo_fnptr_call_N` dispatches through (the
+# `_w` wrappers in runtime/fire_runtime.c). Same idea as
+# calls_shared._RUNTIME_CALLABLE_VALUES, for the three-part `os.path.X` spelling.
+_OS_PATH_RUNTIME_CALLABLE_VALUES = {
+    'join': 'mojo_os_path_join_w',
+    'islink': 'mojo_os_path_islink_w',
+    'isdir': 'mojo_os_path_isdir_w',
+    'isfile': 'mojo_os_path_isfile_w',
+    'exists': 'mojo_os_path_exists_w',
+    'basename': 'mojo_os_path_basename_w',
+    'dirname': 'mojo_os_path_dirname_w',
+}
+
+
 def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     _sc = _stat_module_constant(gen, node)
     if _sc is not None:
@@ -1480,6 +1508,31 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
                 _opk_ctype, _opk_val = _opk
                 _opk_text = gen._intern_string(gimple_ctypes._c_escape(_opk_val))
                 return _opk_ctype, gen._new_val(_opk_ctype, _opk_text)
+    # `os.path.<fn>` read as a VALUE (`islink, join = path.islink, path.join`,
+    # Lib/os.py's `walk`; `f = os.path.isdir`): the runtime implements these as
+    # int64_t-ABI functions, so the value is the wrapper's ADDRESS and a call
+    # through it is an ordinary `mojo_fnptr_call_N`. Without this the read fell
+    # to `_mojo_dispatch_getattr(<module marker 0>, "islink")` -- a fatal
+    # runtime `AttributeError: islink`. A direct call `os.path.isdir(p)` never
+    # reaches here (the call site lowers it); only the value read does.
+    _pv_mod = None
+    if (isinstance(node.obj, gimple_ctypes.MemberExpr)
+            and _as_str(node.obj.member) == 'path'
+            and isinstance(node.obj.obj, gimple_ctypes.IdentExpr)):
+        _pv_name = node.obj.obj.name          # `os.path.<fn>`
+        _pv_bound = gen.imported_symbols.get(_pv_name)
+        _pv_mod = _as_str(_pv_bound.get('module')) if _pv_bound and _pv_bound.get('module') else _pv_name
+        if _pv_mod != 'os':
+            _pv_mod = None
+    elif isinstance(node.obj, gimple_ctypes.IdentExpr):
+        # `import posixpath as path` -> `path.<fn>` (Lib/os.py's spelling)
+        _pv_bound = gen.imported_symbols.get(node.obj.name)
+        if _pv_bound and _as_str(_pv_bound.get('module') or '') == 'posixpath':
+            _pv_mod = 'posixpath'
+    if _pv_mod is not None:
+        _pv_fn = _OS_PATH_RUNTIME_CALLABLE_VALUES.get(_as_str(node.member))
+        if _pv_fn is not None:
+            return 'void *', gen._new_val('void *', f'(void *){_pv_fn}')
     if isinstance(node.obj, gimple_ctypes.IdentExpr):
         module_name = node.obj.name
         # The REAL module this identifier is bound to, for `import X as Y`.
@@ -1872,7 +1925,13 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             # instead of its declared value under `fire run`.
             aliases = gen._struct_comptime_aliases.get(module_name)
             if aliases and node.member in aliases:
-                return gen.lower_expr(aliases[node.member])
+                # `Self` in the alias is this type, so a constructor-valued
+                # alias (`comptime RED = Self(0)`) is a construction of
+                # `module_name`, spelled as one. Left as `Self(0)` it lowered
+                # to a call of a `<Struct>___new` that is never defined.
+                val_ast = gen._subst_idents(aliases[node.member],
+                                            {'Self': gimple_ctypes.IdentExpr(name=module_name)})
+                return gen.lower_expr(val_ast)
             # A plain class-level attribute (`LayoutSolver.HEAP = 'heap'`)
             # backed by a synthesized module global — the same redirect the
             # instance-typed path below applies, but reached here via the
@@ -2655,7 +2714,8 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     aliases = gen._struct_comptime_aliases.get(struct_name)
     if aliases and node.member in aliases:
         val_ast = gen._subst_idents(aliases[node.member],
-                                     {'Self': node.obj, struct_name: node.obj})
+                                     {'Self': gimple_ctypes.IdentExpr(name=struct_name),
+                                      struct_name: node.obj})
         return gen.lower_expr(val_ast)
     # Class-level attribute (not an instance field) — redirect to global variable.
     # A bare class-name read goes to the synthesized backing global / the
@@ -3386,6 +3446,17 @@ _EQ_CTOR_KIND = {
     'frozenset': 'set',
     'dict': 'dict',
 }
+
+
+def _user_eq_struct(gen, ctype: str) -> str | None:
+    """The struct's name when `ctype` is a pointer to a struct that defines
+    `__eq__` (its own method, in `_struct_method_names`), else None."""
+    if not ctype.endswith(' *'):
+        return None
+    sname = gimple_exprtypes._struct_name_of(ctype)
+    if '__eq__' in gen._struct_method_names.get(sname, ()):
+        return sname
+    return None
 
 
 def _eq_operand_kind(gen, node, ctype: str, val: str) -> str | None:
@@ -4224,6 +4295,29 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # address comparison `==` used to do, so the answer was decided by heap
     # addresses. For `==` that was a False where Python says True; for `<` it
     # is a stable, plausible and wrong verdict, exit 0, no diagnostic.
+    # `a == b` / `a != b` between two values of a user struct that defines
+    # `__eq__` is that method, not the C pointer comparison the generic tail
+    # would emit: two structs with equal fields are two heap objects, so the
+    # pointer answer is False where Mojo's answer is True. `is` / `is not` keep
+    # pointer identity. Both operands must be the same struct pointer, so a
+    # `None` or a scalar on the other side falls through to its own lowering.
+    if op in ('==', '!=') and lt == rt:
+        _eq_struct = _user_eq_struct(gen, lt)
+        if _eq_struct is not None:
+            # `!=` is the struct's own `__ne__` when it defines one, as Python
+            # and Mojo both dispatch it. Negating `__eq__` instead would recurse
+            # for a `__eq__` written as `~(self != rhs)`, which is Bool's own.
+            # The symbol is the home-module-qualified one `_struct_method_csym`
+            # composes: a bare `{Struct}___eq__` is never defined in the
+            # translation unit of a struct from another module.
+            _negate = op == '!=' and '__ne__' not in gen._struct_method_names.get(_eq_struct, ())
+            _dunder = '__eq__' if _negate or op == '==' else '__ne__'
+            _eq_val = gen._call_expr('_Bool', gen._struct_method_csym(_eq_struct, _dunder, ''),
+                                     [(lt, lv), (rt, rv)])
+            if _negate:
+                _eq_val = gen._bool_not('_Bool', _eq_val)
+            return '_Bool', _eq_val
+
     if op in _CONTAINER_CMP_OPS:
         _lk = _eq_operand_kind(gen, left_node, lt, lv)
         _rk = _eq_operand_kind(gen, right_node, rt, rv)
@@ -6300,7 +6394,7 @@ def _provably_int_word(gen, el, ev: str) -> bool:
     return ev in gen._int_word_vals
 
 
-def _literal_needs_kinds(gen, elem: str, kinds: str, lowered=None) -> bool:
+def _literal_needs_kinds(gen, elem: str, kinds: str, lowered=None, is_tuple=False) -> bool:
     """Whether a list/tuple LITERAL must record `mojo_list_set_kinds`.
 
     Two independent reasons, both of which the runtime already supports:
@@ -6324,7 +6418,10 @@ def _literal_needs_kinds(gen, elem: str, kinds: str, lowered=None) -> bool:
     ks = set(kinds)
     if len(ks) > 1 or 'n' in ks:
         return True
-    if not _is_scalar_elem_kind(elem):
+    # A STRING row is recorded only for a tuple: a tuple is the one display that
+    # becomes a dict KEY (`mojo_dict_key_for` renders its slots by kind), and a
+    # list of strings never is, so a list keeps no row and no allocation.
+    if not _is_scalar_elem_kind(elem) and not (is_tuple and elem == 'char *'):
         return False
     # A homogeneous INTEGER row is only true of integers: an `int64_t`
     # element that is a boxed node or string would be rendered as its address
@@ -6872,7 +6969,7 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
             if _as_str(_pl[1]) == 'int64_t' and not _provably_int_word(gen, _pl[0], _as_str(_pl[2])):
                 _force_record_t = False
                 break
-    if (not _has_spread) and (_literal_needs_kinds(gen, elem, _tkinds, lowered) or _force_record_t):
+    if (not _has_spread) and (_literal_needs_kinds(gen, elem, _tkinds, lowered, is_tuple=True) or _force_record_t):
         gen._emit_call('void', '', 'mojo_list_set_kinds',
                        [('MojoList *', t),
                         ('const char *', gen._intern_string(_tkinds))])

@@ -55,11 +55,11 @@ def main():
         gimple_codegen.compile_to_gimple_with_cpp(SRC, filename='t.mojo')
     except Exception as e:
         msg = str(e)
-        ok = 'function(s) build' in msg and 'async function' in msg
-        print("refused, names 'build':", ok)
-        return 0 if ok else 1
-    print("FAIL: compiled; the tempfile guard was silently accepted")
-    return 1
+        # After option (ii) intrinsic guard, refusal is gone.
+        print("FAIL: still refused:", msg[:120])
+        return 1
+    print("ok: tempfile.TemporaryDirectory guard accepted (intrinsic RAII)")
+    return 0
 
 
 if __name__ == '__main__':

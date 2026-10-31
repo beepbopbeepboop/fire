@@ -33,8 +33,27 @@ as values, or that call one of their own parameters, are kept on the C++ path
   rendered the int. All four runtime forms now return `_Bool` via `!= 0`.
   Measured before/after: stdout `1 0 0 1 1 0` -> `True False False True True
   False` (CPython-identical).
-- Items 4, 5: not yet started. Quick regression added:
-  `test_regress_dynamic_call_layer_residue.py` (item 1 verified via
+- **Item 4 FIXED** (`test_link_mode.py::test_generator_none_default_reaches_callee_as_null`).
+  The item's own repro was misattributed: the failure is not the
+  try/except after the loop. The first `for a, b in im([])` already raises.
+  `im`'s `onempty=None` default is padded at the generator-start call site
+  (`emit_calls._lower_generator_start`) without the callee's declared slot
+  type, so the integer 0 is coerced through `mojo_cstr_or_int_str` into the
+  non-NULL string `"0"`. `if onempty is None:` is then False, the coroutine
+  throws `ValueError("empty")` on its first resume, and the pending exception
+  reaches a `mojo_raise` with no try frame (`_mojo_exc_top == -1`, hence
+  "Unhandled exception: empty"). Plain functions were already correct
+  (`_default_expr_to_pair(..., param_ctype=...)`); the generator padding sites
+  now pass the same declared slot type, and the no-default fallback uses
+  `_null_default_pair`. Measured: test FAIL (rc=1, stdout empty) -> PASS
+  (`caught empty`, CPython-identical). Generated C for the repro changes only
+  in `_mojogen_im_start (_t1, _t4)` with `_t4 = mojo_cstr_or_int_str(0)` ->
+  `_mojogen_im_start (_t1, 0)`. Variants measured while isolating: loop over an
+  empty generator + explicit-arg try (no default) passes; a plain-function
+  default passes; the failure needs the defaulted `None` on a generator.
+- Item 5: not yet started. Quick regression added:
+  `test_link_mode.py::test_generator_none_default_reaches_callee_as_null`
+  (item 4); `test_regress_dynamic_call_layer_residue.py` (item 1 verified via
   `test_link_mode.py::test_bare_submodule_import_keyword_call`; item 2
   minimal form passes).
 
@@ -60,7 +79,7 @@ generator construction.
 `f` is the unsolved word a registered generator yielded; the method call on a
 word returns an int and loses the bool kind.
 
-## 4. try/except after an earlier loop over an empty generator
+## 4. (FIXED — see Status) try/except after an earlier loop over an empty generator
 
     def im(items, onempty=None):
         if not items:

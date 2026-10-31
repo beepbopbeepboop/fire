@@ -3231,6 +3231,18 @@ def dflt(items):
 print(rest([1, 2, 3]), twice([4, 5, 6]), dflt([]), dflt([9]))
 """, "(1, [20, 30]) 9 -1 9\n")
 
+    # A constructor stub lowers to int64_t 0. The iter() rebind guard must
+    # not treat that scalar as a MojoList * cursor. See
+    # bugs/CODEGEN_gate_stdlib_syntax_red.md.
+    test_gimple_execution("gimple_iter_does_not_rebind_scalar_to_cursor", """\
+from collections import LinkedList
+def go():
+    var ll = LinkedList[Int]()
+    var it = iter(ll)
+    return 0
+print(go())
+""")
+
     # A FLAT list parameter whose call sites disagree on the element type
     # (ints, strings, floats; literal and bound-to-a-name). The contract is
     # unknown, so the loop reads each slot through mojo_list_get_boxed and the
@@ -4508,6 +4520,209 @@ def main():
     print(hits)
 """, "11\n12\n23\n23\n18\n60000000\n20000\n", 40)
 
+    # ── A {mut}-captured local's BOX (`nonlocal x`), which is malloc'd once per
+    # CALL in the prologue and was never freed (bugs/CODEGEN_closure_env_and_
+    # boxed_local_never_freed.md's OPEN 2). Its lifetime is the call's when no
+    # closure built in `counter` can outlive it, so `counter`'s exit frees it.
+    # The 4M calls are the tripwire: the leaked box is 16 B/call (64 MB) against
+    # a 40 MB ceiling, and it is measured flat with the rule in place.
+    test_gimple_bounded_memory("gimple_boxed_mut_local_is_freed", """\
+def counter(n: Int) -> Int:
+    var x = n
+    def bump() -> Int:
+        nonlocal x
+        x = x + 1
+        return x
+    return bump() + bump()
+
+def main():
+    var total = 0
+    for r in range(4000000):
+        total += counter(r) % 1000
+    print(total)
+""", "2000000000\n", 40)
+
+    # ── The same box for a PARAMETER captured by `nonlocal`: its box is filled
+    # from the incoming argument in the prologue (`_mut_boxed_param_c`), and it
+    # must be freed on the same terms as a `var`'s box.
+    test_gimple_bounded_memory("gimple_boxed_mut_param_is_freed", """\
+def bumped(n: Int) -> Int:
+    def bump() -> Int:
+        nonlocal n
+        n = n + 1
+        return n
+    return bump() + bump()
+
+def main():
+    var total = 0
+    for r in range(4000000):
+        total += bumped(r) % 1000
+    print(total)
+""", "2000000000\n", 40)
+
+    # ── The same box inside a STRUCT METHOD, whose prologue and body are lowered
+    # by `_gen_struct_method` (not `gen_func`), with `self.v` read by the closure.
+    test_gimple_bounded_memory("gimple_boxed_mut_local_in_a_struct_method_is_freed", """\
+struct Acc:
+    var v: Int
+
+    def run(self, n: Int) -> Int:
+        var x = n
+        def bump() -> Int:
+            nonlocal x
+            x = x + self.v
+            return x
+        return bump() + bump()
+
+def main():
+    var a = Acc(2)
+    var total = 0
+    for r in range(4000000):
+        total += a.run(r) % 1000
+    print(total)
+""", "1996000000\n", 40)
+
+    # ── The parent's box must survive LIFTING a child that has a box of its own:
+    # `mid` is lowered in the middle of `outer`'s body, and its body resets the
+    # per-function box set. If that set were not saved and restored around the
+    # lift, `outer`'s own `x` would be dropped from its exit frees and leak.
+    test_gimple_bounded_memory("gimple_boxed_mut_local_survives_a_lifted_child", """\
+def outer(n: Int) -> Int:
+    var x = n
+    def bump() -> Int:
+        nonlocal x
+        x = x + 1
+        return x
+    def mid(k: Int) -> Int:
+        var y = k
+        def inner() -> Int:
+            nonlocal y
+            y = y + 1
+            return y
+        return inner() + inner()
+    return bump() + mid(n)
+
+def main():
+    var total = 0
+    for r in range(4000000):
+        total += outer(r) % 1000
+    print(total)
+""", "1998000000\n", 40)
+
+    # ── The per-owner half of the box rule: `inner` is nested two levels deep,
+    # and `mid` RETURNS it, so `outer` returns it too. `inner` captures `outer`'s
+    # box `x`, and it is CALLED after `outer` has returned, so that box must
+    # survive `outer`'s exit even though `outer`'s own body never names `inner`.
+    # Freed at the exit, the calls below read a dead cell.
+    test_gimple_stdout("gimple_boxed_mut_local_held_by_a_returned_inner_is_kept", """\
+def outer(n: Int):
+    var x = n
+    def mid():
+        def inner() -> Int:
+            nonlocal x
+            x = x + 1
+            return x
+        return inner
+    return mid()
+
+def main():
+    var g = outer(5)
+    print(g())
+    print(g())
+    var h = outer(10)
+    print(h())
+""", "6\n7\n11\n")
+
+    # ── A box in a function whose body has a try/except that RAISES past its own
+    # return: the box's cleanup thunk sits on the same stack the try unwinds, and
+    # the return-path cancel counts on that stack. A miscount here is a double
+    # free or a dropped thunk, and the 100k calls make either one a crash.
+    test_gimple_stdout("gimple_boxed_mut_local_survives_try_and_raise", """\
+def guarded(n: Int) -> Int:
+    var x = n
+    def bump() -> Int:
+        nonlocal x
+        x = x + 1
+        return x
+    try:
+        if n > 2:
+            raise ValueError("big")
+        return bump()
+    except ValueError as e:
+        return bump() + 100
+
+def main():
+    var total = 0
+    for r in range(100000):
+        total += guarded(r)
+    print(total)
+    print(guarded(1))
+    print(guarded(5))
+""", "5010049700\n2\n106\n")
+
+    # ── The escape half of the box rule: a closure that RETURNS its
+    # `nonlocal` box must keep it alive. `make_counter`'s `bump` outlives the
+    # call, so the box must not be freed at `make_counter`'s exit; calling it
+    # afterwards is a use-after-free if the rule is not fail-closed.
+    test_gimple_stdout("gimple_boxed_mut_local_escapes_is_kept", """\
+def make_counter(n: Int):
+    var x = n
+    def bump() -> Int:
+        nonlocal x
+        x = x + 1
+        return x
+    return bump
+
+def main():
+    var f = make_counter(5)
+    print(f())
+    print(f())
+""", "6\n7\n")
+
+    # ── The box of a `{mut}` local whose nested `def` is OWNED (called here,
+    # never escaping) may be freed at the outer function's exit, even when that
+    # nested `def` binds a capturing lambda of its own. Before the per-owner
+    # rule, `_no_closure_escapes` asked one whole-tree question and refused the
+    # outer function outright, because a lambda anywhere in it disqualified it,
+    # so this box leaked (63 MB at 4M iterations). The lambda is owned by
+    # `inner`'s body and freed there; only the box is outer's.
+    test_gimple_bounded_memory("gimple_boxed_mut_local_with_owned_inner_lambda_is_freed", """\
+def helper(n: Int) -> Int:
+    var x = n
+    def inner(k: Int) -> Int:
+        nonlocal x
+        x = x + 1
+        var g = lambda j: j + x
+        return g(k)
+    return inner(1) + inner(2)
+
+def main():
+    var total = 0
+    for r in range(4000000):
+        total += helper(r) % 1000
+    print(total)
+""", "1996000000\n", 40)
+
+    # ── The other side of the same rule: a lambda bound inside a nested `def`
+    # that RETURNS it is the closure's escape, so `maker`'s box must be kept.
+    # The per-owner walk refuses `inner` (a returned def is not owned) and must
+    # not let the lambda's binding be judged by some other body.
+    test_gimple_stdout("gimple_boxed_mut_local_held_by_a_lambda_returned_from_inner_is_kept", """\
+def maker(n: Int):
+    var x = n
+    def inner(k: Int):
+        nonlocal x
+        x = x + 1
+        var g = lambda j: j + x
+        return g
+    return inner(0)
+
+def main():
+    var f = maker(5)
+    print(f(1))
+    print(f(2))
+""", "7\n8\n")
+
     # ── A callee that provably returns a FRESH STRING hands ownership to its
     # caller, exactly as one returning a fresh container always has
     # (analyze_returns_fresh, which until now accepted only a container
@@ -5085,6 +5300,13 @@ main()
     # assertion for the same reason: `in` asks the key domain and nothing else,
     # so it is the one spelling of the read that cannot be answered by the
     # value's own accessor (a kind-4 slot's word IS 0).
+    #
+    # KNOWN WRONG, pinned on purpose so the row stays about reachability: the
+    # first line's `1` is the bool VALUE read as an int. CPython prints
+    # `True 1`. The read drops the bool kind for every dict, string keys too
+    # (`d["a"] = True; print(d["a"])` also prints `1`), so it is the value-kind
+    # read gap in CODEGEN_dict_slot_read_loses_its_value_kind, not a container-
+    # key defect. Update this expectation when that read lands.
     test_gimple_stdout("gimple_container_keyed_store_reaches_its_own_read", """\
 def main():
     b = {}
@@ -5101,6 +5323,49 @@ def main():
     print(s[(1, 2)], len(s))
 main()
 """, "1 1\nTrue 1\n3.5 1\nR 1\n")
+
+    # The string half of the same seam: a string slot built by a CALL, not a
+    # literal. A homogeneous string tuple used to record no kinds, so the key
+    # renderer read the slot's word as an int and keyed the dict by the slot's
+    # ADDRESS -- two calls to `k("a")` are two addresses, so the read missed.
+    # Recording the kinds for a homogeneous string row (`_literal_needs_kinds`)
+    # is what lets `mojo_dict_key_for` render the slot by content.
+    test_gimple_stdout("gimple_runtime_string_tuple_key_is_content_keyed", """\
+def k(s):
+    return s + "!"
+def main():
+    d = {}
+    d[(k("a"),)] = "R"
+    print(d[(k("a"),)], len(d))
+    print(d.get((k("b"),), "none"), len(d))
+main()
+""", "R 1\nnone 1\n")
+
+    # The module-scope half of the value-type seam: `d = {}` at module level
+    # is boxed as int64_t, so its subscript store comes through the untyped
+    # dict arm and every bare read of `d` loads a FRESH temp. The store's value
+    # type was recorded only on its own temp, so the read answered as int64_t:
+    # a double printed its IEEE-754 bits and a string printed its address
+    # (`4621537642612260864`, `4372406328` on the same tree). The record is
+    # now also keyed by the source name (`_note_global_dict_store`), which
+    # `_lower_IdentExpr` carries onto each read. Both halves are read in the
+    # same scope as the store, which is the case this covers; a READ from a
+    # different function is a separate gap (empty-literal module dicts are
+    # not seeded from their stores in the Phase 1.7 pre-scan).
+    test_gimple_stdout("gimple_module_scope_dict_value_type_survives_read", """\
+d = {}
+d[(1, 2)] = 9.5
+print(d[(1, 2)], len(d))
+s = {}
+s[("a",)] = "R"
+print(s[("a",)], len(s))
+p = {}
+p["k"] = 2.5
+print(p["k"], len(p))
+def main():
+    pass
+main()
+""", "9.5 1\nR 1\n2.5 1\n")
 
     # The other half of that doc, and the expensive one: a MISSING tuple key
     # grew the dict by one entry per lookup, which is where ~16 GB of the live
@@ -12583,6 +12848,75 @@ print(tup_str('ab'))
 print(list_str('ab'))
 print([*'ab'])
 """, "(0, 'a', 'b')\n[0, 'a', 'b']\n['a', 'b']\n")
+
+    # `case .NAME:` in a `__match` on a struct-typed subject is the variant of
+    # that struct: the stdlib's enum-like structs (`TestResult`, `Level`,
+    # `AddressSpace`, `DType`) match `self` against their own `comptime`
+    # variants, and the compiled answer is `==`, which is `__eq__`. The pointer
+    # comparison this used to reach never matches a freshly constructed variant,
+    # so every arm but the fallthrough would print `other`.
+    test_gimple_stdout("gimple_enum_case_pattern_matches_through_eq", """\
+@fieldwise_init
+struct Color:
+    var _v: Int
+    comptime RED = Self(0)
+    comptime GREEN = Self(1)
+
+    def __eq__(self, rhs: Self) -> Bool:
+        return self._v == rhs._v
+
+    def write_name(self):
+        __match self:
+        case .RED:
+            print('red')
+        case .GREEN:
+            print('green')
+        case _:
+            print('other')
+
+def main():
+    Color(0).write_name()
+    Color(1).write_name()
+    Color(7).write_name()
+""", "red\ngreen\nother\n")
+
+    # `!=` on a struct with its own `__ne__` calls `__ne__`, and a `__eq__`
+    # written as `~(self != rhs)` (stdlib Bool's shape) must not recurse into
+    # itself: negating `__eq__` for `!=` would loop forever here. The stdlib's
+    # bool.mojo is the cross-module-qualified case this shape broke.
+    test_gimple_stdout("gimple_struct_ne_dispatches_to_ne_not_negated_eq", """\
+@fieldwise_init
+struct Tag:
+    var _v: Int
+
+    def __eq__(self, rhs: Self) -> Bool:
+        return ~(self != rhs)
+
+    def __ne__(self, rhs: Self) -> Bool:
+        return self._v != rhs._v
+
+def main():
+    print(Tag(1) == Tag(1))
+    print(Tag(1) != Tag(2))
+    print(Tag(1) == Tag(2))
+""", "True\nTrue\nFalse\n")
+
+    # The same spelling against a struct with no `__eq__` to compare by stays
+    # refused: `case .NAME:` is `subject == S.NAME`, and there is no `==` to
+    # call, so the refusal is the honest answer rather than a pointer compare.
+    test_gimple_build_refusal("gimple_enum_case_without_eq_is_refused", """\
+@fieldwise_init
+struct Color:
+    var _v: Int
+    comptime RED = Self(0)
+
+    def write_name(self):
+        __match self:
+        case .RED:
+            print('red')
+        case _:
+            print('other')
+""", "ENUM CASE")
 
     test_gimple_stdout("gimple_module_attribute_value_and_alias", """\
 import sys

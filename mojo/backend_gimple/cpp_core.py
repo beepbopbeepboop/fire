@@ -779,6 +779,62 @@ def _cpp_apply_fstring_spec(part_val: str, spec: str) -> str:
     return f'{fn}((char *)({part_val}), (int64_t){width}, "{fill}")'
 
 
+# `os.path.<fn>` names a body may alias to a local -- the ones the `os.path.*`
+# call table in `_cpp_expr` lowers.
+_CPP_OS_PATH_ALIASABLE = ('join', 'islink', 'isdir', 'isfile', 'exists',
+                          'basename', 'dirname')
+
+
+def _cpp_collect_os_path_aliases(fn) -> dict:
+    """{local name: os.path function} for every local of `fn` whose EVERY
+    binding is `os.path.<fn>` / `posixpath.<fn>` / `path.<fn>` naming one of
+    `_CPP_OS_PATH_ALIASABLE` (and the same function): `islink, join =
+    path.islink, path.join`. A name bound anything else too, or two different
+    ones, is left out (it is a real runtime value this model cannot alias)."""
+    binds: dict = {}
+
+    def _note(name, val):
+        binds.setdefault(name, []).append(val)
+
+    for n in gimple_exprtypes._walk_ast(fn):
+        if isinstance(n, gimple_ctypes.AssignStmt):
+            t, v = n.target, n.value
+            if isinstance(t, gimple_ctypes.IdentExpr):
+                _note(t.name, v)
+            elif (isinstance(t, gimple_ctypes.TupleExpr)
+                    and isinstance(v, gimple_ctypes.TupleExpr)
+                    and len(t.elements) == len(v.elements)):
+                for _t, _v in zip(t.elements, v.elements):
+                    if isinstance(_t, gimple_ctypes.IdentExpr):
+                        _note(_t.name, _v)
+            elif isinstance(t, gimple_ctypes.TupleExpr):
+                for _t in t.elements:
+                    if isinstance(_t, gimple_ctypes.IdentExpr):
+                        _note(_t.name, None)
+        elif isinstance(n, gimple_ctypes.VarDecl):
+            _note(n.name, n.value)
+    out: dict = {}
+    for name in binds:
+        picks = set()
+        for v in binds[name]:
+            pick = None
+            if (isinstance(v, gimple_ctypes.MemberExpr)
+                    and v.member in _CPP_OS_PATH_ALIASABLE):
+                o = v.obj
+                if (isinstance(o, gimple_ctypes.MemberExpr)
+                        and o.member == 'path'
+                        and isinstance(o.obj, gimple_ctypes.IdentExpr)
+                        and o.obj.name == 'os'):
+                    pick = v.member
+                elif (isinstance(o, gimple_ctypes.IdentExpr)
+                        and o.name in ('path', 'posixpath')):
+                    pick = v.member
+            picks.add(pick)
+        if len(picks) == 1 and None not in picks:
+            out[name] = picks.pop()
+    return out
+
+
 def _cpp_string_literal_expr(gen, val: str, is_interp: str) -> str:
     """`_cpp_expr`'s counterpart of the ordinary GIMPLE path's
     `_lower_StringLiteral` (gimple_gen_exprs.py) — decodes an f-string
@@ -2685,6 +2741,23 @@ def _cpp_expr(gen, e) -> str:
         val = gen._cpp_expr(e.value)
         return f"({name} = {val})"
     if isinstance(e, gimple_ctypes.CallExpr):
+        # A call through a local that is a compile-time ALIAS of an
+        # `os.path.<fn>` (`islink, join = path.islink, path.join` at the head
+        # of Lib/os.py's `walk`): spelled out, so the `os.path.*` call table
+        # below lowers it. A runtime function VALUE would need a callable-value
+        # local this body model has no category for; the alias is exact because
+        # `_cpp_collect_os_path_aliases` only records a name EVERY binding of
+        # which names the same function.
+        _opa = getattr(gen, '_cpp_os_path_aliases', None)
+        if (_opa and isinstance(e.func, gimple_ctypes.IdentExpr)
+                and e.func.name in _opa):
+            return gen._cpp_expr(gimple_ctypes.CallExpr(
+                func=gimple_ctypes.MemberExpr(
+                    obj=gimple_ctypes.MemberExpr(
+                        obj=gimple_ctypes.IdentExpr(name='os'), member='path'),
+                    member=_opa[e.func.name]),
+                args=e.args, kwargs=e.kwargs,
+                line=e.line, col=e.col))
         # A `*`/`**`-unpack call ARGUMENT (this project's parser wraps
         # a spread argument in UnaryOp(op='*'/'**', operand=...) — see
         # this repo's own CLAUDE.md) has no case anywhere in this
@@ -2812,6 +2885,8 @@ def _cpp_expr(gen, e) -> str:
                 # this scalar body model) — "'os' was not declared in
                 # this scope". Found via Tools/build/update_file.py's
                 # own `os.path.isdir(tmpfile)`.
+                if e.func.member == 'islink' and len(a) == 1:
+                    return f"mojo_os_path_islink_w((int64_t)(char *)({a[0]}))"
                 if e.func.member == 'isdir' and len(a) == 1:
                     return f"int_isdir(0, (int64_t)(char *)({a[0]}))"
                 if e.func.member == 'exists' and len(a) == 1:
@@ -4667,6 +4742,25 @@ def _cpp_expr(gen, e) -> str:
     if isinstance(e, gimple_ctypes.SubscriptExpr):
         obj = gen._cpp_expr(e.obj)
         idx = gen._cpp_expr(e.index)
+        # `obj[key]` on a local whose declared type is a USER STRUCT pointer
+        # that defines `__getitem__` is the dunder protocol, not a string or
+        # container read: call the struct's own `__getitem__` C method, as the
+        # ordinary GIMPLE path does (emit_methods.py's
+        # `_lower_struct_subscript_dunder`). This is the shape a gdb-style
+        # `gdb.Value` subject takes (`ep['me_key']` in Tools/gdb/libpython.py),
+        # and it must be taken BEFORE the str-key refusal below, which would
+        # otherwise reject it as an unmodelled mapping lookup.
+        if isinstance(e.obj, gimple_ctypes.IdentExpr):
+            _getitem_struct = gen._cpp_struct_ptr_local(e.obj.name)
+            if _getitem_struct and gen._struct_defines_method(
+                    _getitem_struct, '__getitem__'):
+                _sym = gen._struct_method_csym(_getitem_struct, '__getitem__', '')
+                gen._cpp_struct_method_refs.add((_getitem_struct, '__getitem__'))
+                _gi_args = _cpp_pad_struct_method_call_args(
+                    gen, _sym,
+                    f"{_getitem_struct}_{gimple_ctypes._safe_name('__getitem__')}",
+                    [idx])
+                return f"{_sym}({obj}, {', '.join(_gi_args)})"
         # Python `s[i]` on a string → a 1-char string (not a C++ char).
         # Subscripting a char* expression (a local, another subscript's
         # result, or a string literal) is the common generator-body
@@ -6322,7 +6416,10 @@ def _cpp_with_stmt(gen, s, declared: dict, indent: str) -> list[str]:
     for item in s.items:
         expr = item.expr
         gname = gen._cpp_with_guard_type_name(expr)
-        if gname not in gen._ASYNC_NOOP_LOCK_GUARD_TYPES:
+        _intrinsic = False
+        if gname == 'tempfile.TemporaryDirectory':
+            _intrinsic = True
+        elif gname not in gen._ASYNC_NOOP_LOCK_GUARD_TYPES:
             if gen._cpp_emit_kind in ('async', 'async_gen'):
                 raise gimple_exprtypes._UnsupportedAsyncShape(
                     "`with` inside an async function body is only "
@@ -6347,7 +6444,12 @@ def _cpp_with_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     declared[_al.name] = 'int64_t'
                     _alias_decl_lines.append(f"{indent}int64_t {_al.name};")
                 break
-        if item.alias is not None and gen._cpp_emit_kind in ('async', 'async_gen'):
+        if _intrinsic and item.alias is not None:
+            if isinstance(item.alias, str) and item.alias not in declared:
+                declared[item.alias] = 'const char *'
+            elif isinstance(item.alias, gimple_ctypes.IdentExpr) and item.alias.name not in declared:
+                declared[item.alias.name] = 'const char *'
+        elif item.alias is not None and gen._cpp_emit_kind in ('async', 'async_gen'):
             raise gimple_exprtypes._UnsupportedAsyncShape(
                 "`with ... as name:` is not supported for an async "
                 f"no-op guard `with` ({gname} has no usable return "
@@ -6356,7 +6458,8 @@ def _cpp_with_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             declared[item.alias] = 'int64_t'
         elif item.alias is not None and isinstance(item.alias, gimple_ctypes.IdentExpr):
             declared[item.alias.name] = 'int64_t'
-    if any(isinstance(n, gimple_ctypes.AwaitExpr) for st in s.body for n in gimple_exprtypes._walk_ast(st)):
+    # Intrinsic guard (Real RAII): cleanup survives await inside body.
+    if not _intrinsic and any(isinstance(n, gimple_ctypes.AwaitExpr) for st in s.body for n in gimple_exprtypes._walk_ast(st)):
         raise gimple_exprtypes._UnsupportedAsyncShape(
             "`await` inside a `with`-guarded body is not supported "
             "-- eliding the guard (this codegen's own no-op "
@@ -6366,8 +6469,44 @@ def _cpp_with_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             "across a real suspension point, where another coroutine "
             "genuinely could run")
     lines: list[str] = list(_alias_decl_lines)
+    guard_var = ''
+    bind_line = ''
+    if _intrinsic:
+        for item in s.items:
+            alias = item.alias
+            if alias is None:
+                continue
+        declared_local = None
+        # pick the binding alias of the single with item
+        target_alias = None
+        target_alias_name = None
+        for item in s.items:
+            alias = item.alias
+            if isinstance(alias, str) and alias not in declared:
+                declared[alias] = 'const char *'
+                target_alias_name = alias
+                break
+            elif (isinstance(alias, gimple_ctypes.IdentExpr)
+                  and alias.name not in declared):
+                declared[alias.name] = 'const char *'
+                target_alias_name = alias.name
+                break
+        for it in s.items:
+            pass
+        guard_var = gen._cpp_fresh_name('mojo_td')
+        declare = [
+            f"{indent}mojo_tempdir_guard_t {guard_var};",
+            f"{indent}int __init_ok_ = mojo_tempdir_guard_init(&{guard_var});",
+        ]
+        if target_alias_name is not None:
+            declare.append(
+                f"{indent}const char* {target_alias_name} = "
+                f"mojo_tempdir_guard_path(&{guard_var});")
+        lines.extend(declare)
     for st in s.body:
         lines.extend(gen._cpp_stmt(st, declared, indent))
+    if _intrinsic and guard_var:
+        lines.append(f"{indent}mojo_tempdir_guard_fini(&{guard_var});")
     return lines
 
 
@@ -7386,6 +7525,43 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
             lines.append(f"{indent}}}")
             lines.append(f"{indent}mojo_set_iter_free({_sit});")
+            return lines
+        # `for x in reversed(<list local>):` -- Lib/os.py's `walk`
+        # (`for dirname in reversed(dirs)`). The list is reversed ONCE into a
+        # cached local (`mojo_list_reversed`, a fresh `MojoList *`), then
+        # walked with the same indexed loop every list iteration here uses, the
+        # element type being the wrapped list's own (reversing never changes
+        # it). Single-name target only; a tuple target falls through.
+        if (isinstance(s.iterable, gimple_ctypes.CallExpr)
+                and isinstance(s.iterable.func, gimple_ctypes.IdentExpr)
+                and s.iterable.func.name == 'reversed'
+                and not gen._locally_binds_name('reversed')
+                and len(s.iterable.args) == 1 and not s.iterable.kwargs
+                and isinstance(s.iterable.args[0], gimple_ctypes.IdentExpr)
+                and gen._cpp_declared is not None
+                and gen._cpp_declared.get(s.iterable.args[0].name)
+                in ('int64_t', 'MojoList *')
+                and isinstance(target, str) and not for_target_is_tuple(target)):
+            _rv_src = s.iterable.args[0].name
+            _rv_elem = getattr(gen, '_cpp_list_local_elem_types', {}).get(_rv_src)
+            if _rv_elem is None and _cpp_body_str_evidence(target, s.body):
+                _rv_elem = 'char *'
+            _rv_list = gen._cpp_fresh_name("_mg_rev")
+            _rv_ctr = gen._cpp_fresh_name("_mg_i")
+            lines = [f"{indent}MojoList *{_rv_list} = mojo_list_reversed("
+                     + _cpp_as('MojoList *', _rv_src) + ");"]
+            _rv_ct = _rv_elem if _rv_elem in ('char *', 'double') else 'int64_t'
+            _rv_get = {'char *': 'mojo_list_get_str',
+                       'double': 'mojo_list_get_double'}.get(_rv_ct, 'mojo_list_get_int')
+            if not target_was_declared:
+                declared[target] = _rv_ct
+                lines.append(f"{indent}{_rv_ct} {target};")
+            lines.append(f"{indent}for (int64_t {_rv_ctr} = 0; "
+                         f"{_rv_ctr} < mojo_list_len({_rv_list}); {_rv_ctr}++) {{")
+            lines.append(f"{indent}    {target} = {_rv_get}({_rv_list}, {_rv_ctr});")
+            for inner in s.body:
+                lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+            lines.append(f"{indent}}}")
             return lines
         try:
             iter_expr = gen._cpp_expr(s.iterable)

@@ -246,8 +246,10 @@ def cmd_spawn(a):
             # opencode v2: --model belongs to `run`, there is no --dir (cwd=wt below)
             cmd = ["opencode", "run", "--model", a.model, "--auto", "--title", a.name, instr]
         os.makedirs(os.path.join(wt, ".tmp"), exist_ok=True)
+        # the worker runs under a CPU ceiling (tools/cpu_cap.py): a runaway loop stops itself, and its CPU is recorded
+        capped = [sys.executable, os.path.join(MAIN, "tools", "cpu_cap.py"), "wrap", "--name", a.name, "--"] + cmd
         wrapper = 'export TMPDIR=%s PATH=%s:"$PATH"; ( %s ) >> work.log 2>&1 </dev/null; echo $? > exitcode' % (
-            sh(os.path.join(wt, ".tmp")), sh(git_shim_dir()), " ".join(map(sh, cmd)))
+            sh(os.path.join(wt, ".tmp")), sh(git_shim_dir()), " ".join(map(sh, capped)))
         open(os.path.join(wt, "work.log"), "a").write("=== control: spawned %s on %s at %s ===\n" % (
             a.name, a.model, time.strftime("%F %T")))
         p = subprocess.Popen(["sh", "-c", wrapper], cwd=wt, start_new_session=True,

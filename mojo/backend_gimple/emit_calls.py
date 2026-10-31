@@ -51,7 +51,7 @@ import mojo.backend_gimple.emit_calls as ggc
 from mojo.middle.calls_shared import *  # noqa: F401,F403
 from mojo.middle.types import _SCALAR_INT_TYPES, _SCALAR_FLOAT_TYPES  # underscore: `import *` won't carry them
 from mojo.middle.calls_shared import (
-    _is_pointer_ctype,
+    _is_pointer_ctype, _null_default_pair,
     _as_str, _build_call_args_for_candidate, _callable_default_generator,
     _callable_param_generator_apis, _callable_param_ret_types, _callable_value_symbol, _default_expr_to_pair,
     _ident_call_name, _isinstance_type_name, _pack_kwargs_dict,
@@ -223,7 +223,13 @@ def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
                                              [('void *', _gsv[1]), ('int64_t', str(_pos))])
                         arg_pairs.append(('int64_t', _gw))
                         continue
-                arg_pairs.append(gen._default_expr_to_pair(_dv))
+                # `_gen_expected` is the callee's declared C type per slot: a
+                # `None` default for a POINTER slot must pad as a typed NULL,
+                # not the integer 0 that `mojo_cstr_or_int_str` would render as
+                # the non-null string "0" (see `_default_expr_to_pair`'s
+                # `param_ctype`). Same fix as `_lower_named_call`'s padding.
+                _pct = _gen_expected[_pos] if _pos < len(_gen_expected) else None
+                arg_pairs.append(gen._default_expr_to_pair(_dv, param_ctype=_pct))
             else:
                 # No default is known HERE (a generator reached through a
                 # module whose parameter defaults this scope never recorded):
@@ -237,7 +243,10 @@ def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
                                           [('void *', _gsv0[1]), ('int64_t', str(_pos))])
                     arg_pairs.append(('int64_t', _gw0))
                 else:
-                    arg_pairs.append(('int', '0'))
+                    # Same typed-NULL rule as the default branch above: a
+                    # POINTER slot padded with a bare int 0 becomes "0".
+                    _pct0 = _gen_expected[_pos] if _pos < len(_gen_expected) else None
+                    arg_pairs.append(_null_default_pair(_pct0))
     else:
         for _, _ke in _gen_kwargs:
             gen.lower_expr(_ke)
@@ -450,9 +459,14 @@ def _lower_generator_close(gen, node, av: str, api: dict):
     Consuming a generator does not free it, so this deliberately does not
     destroy the handle either."""
     handle = gen._to_int64('MojoGenerator *', av)
-    ignored = gen._new_val(
-        '_Bool',
+    # `__mojo_gen_close` returns int64_t: assigning that call straight into a
+    # `_Bool` temp is a hard `-fgimple` "invalid conversion in gimple call", so
+    # compare the word against zero (same-type operands, `_Bool` target).
+    closed_word = gen._new_val(
+        'int64_t',
         f"__mojo_gen_close ({handle}, {gen._exc_type_id('GeneratorExit')})")
+    zero_word = gen._new_val('int64_t', '0')
+    ignored = gen._new_val('_Bool', f"{closed_word} != {zero_word}")
     bb_ok = gen._new_bb(); bb_ignored = gen._new_bb()
     gen._emit(f"  if ({ignored}) goto {bb_ignored}; else goto {bb_ok};")
     gen._emit_label(bb_ignored)
@@ -2169,7 +2183,11 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         if isinstance(node.func, (gimple_ctypes.CallExpr, gimple_ctypes.LambdaExpr)):
             _callee_t, _callee_v = gen.lower_expr(node.func)
             if _callee_t == 'MojoBoundMethod *':
-                return gen._lower_bound_method_call_value(_callee_v, node)
+                # `factory()(...)` where the factory returns a capturing
+                # closure: its return type rides on the CallExpr node, the
+                # same way the bare-pointer arm below reads it.
+                return gen._lower_bound_method_call_value(
+                    _callee_v, node, getattr(node.func, '_callable_ret', 'int64_t'))
             if _callee_t == 'void *' or _callee_t in ('int', 'int64_t', '_Bool'):
                 # `factory()(...)`, where the factory returns a callable: the
                 # callee's own return type rides on its CallExpr node (see

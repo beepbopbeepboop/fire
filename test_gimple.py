@@ -4025,6 +4025,49 @@ def main():
         print(x)
         """, "Unsupported shape(s): gen: a str-keyed subscript")
 
+    # A str-keyed subscript on a local whose type is a USER STRUCT that defines
+    # `__getitem__` is the dunder protocol, not a mapping this model refuses:
+    # the coroutine emitter must call the struct's own `__getitem__` C method
+    # (the same dispatch the ordinary path makes). Real shape: libpython.py's
+    # `ep['me_key']`, where `ep` is a gdb.Value-shaped struct entry.
+    def test_generator_struct_getitem_dispatch_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+struct Value:
+    var _k: String
+    def __init__(out self, k: String):
+        self._k = k
+    def __getitem__(self, name: String) -> Int:
+        return 7
+
+def gen():
+    v = Value("a")
+    yield v["me_key"]
+
+def main():
+    for x in gen():
+        print(x)
+"""
+        try:
+            with _force_cpp_coro():
+                _c_code, cpp_code = gimple_codegen.compile_to_gimple_with_cpp(
+                    src, do_imports=False, filename="gen_struct_getitem.py")
+        except Exception as e:
+            print(f"FAIL  generator_struct_getitem_dispatch_via_cpp_path: "
+                  f"raised {type(e).__name__}: {e}")
+            _FAIL += 1
+            return
+        if "Value___getitem__(v, " not in cpp_code or "mojo_char_at_str" in cpp_code:
+            print("FAIL  generator_struct_getitem_dispatch_via_cpp_path: expected a "
+                  "direct `Value___getitem__(v, ...)` call, not a string-index read")
+            _FAIL += 1
+            return
+        print("PASS  generator_struct_getitem_dispatch_via_cpp_path")
+        _PASS += 1
+    _run_isolated(lambda: test_generator_struct_getitem_dispatch_via_cpp_path(),
+                  'test_generator_struct_getitem_dispatch_via_cpp_path')
+
     # A nested NON-capturing sync `def` referenced as a callee inside a
     # generator body IS compiled — as a standalone `static` C++ function
     # emitted ahead of the coroutine `{impl}` — and the whole module
@@ -8324,11 +8367,20 @@ def mk_bool():
 def use_bool_factory():
     print(mk_bool()())
 use_bool_factory()
-def mk_str():
-    return lambda: "hi"
+def mk_str(p: str):
+    def inner(x: str) -> str:
+        return p + x
+    return inner
 def use_str_factory():
-    print(mk_str()())
+    g = mk_str("<")
+    print(g(">"))
+    print(mk_str("[")("]"))
 use_str_factory()
+def mk_str_lambda():
+    return lambda: "hi"
+def use_str_lambda_factory():
+    print(mk_str_lambda()())
+use_str_lambda_factory()
 '''
         want = _cpython_stdout(src)
         if want is None:

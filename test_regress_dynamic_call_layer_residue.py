@@ -14,7 +14,14 @@ which exceeds quick-test budget.
 Item 3 (FIXED): `.startswith`/`.endswith` on an unsolved word typed `_Bool`;
 verified by test_link_mode.py::test_str_affix_method_on_unsolved_word_is_bool.
 
-Items 4-5: not yet started.
+Item 3 (FIXED): `.startswith`/`.endswith` on an unsolved word typed `_Bool`;
+verified by test_link_mode.py::test_str_affix_method_on_unsolved_word_is_bool.
+
+Item 4 (FIXED): the generator-start padding passed a `None` default for a
+`char *` parameter as the int 0 (-> "0", non-null); verified by
+test_link_mode.py::test_generator_none_default_reaches_callee_as_null.
+
+Item 5: not yet started.
 """
 
 # No executable assertion beyond the existing test_link_mode coverage;

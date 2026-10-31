@@ -1,5 +1,197 @@
 # CODEGEN: closure environments and boxed mutable locals are never freed
 
+## Status (2026-10-30, planning round — the ESCAPING half: design and implementation guide)
+
+Nothing in this round changes behaviour. It establishes the current state of
+the escaping case, decides the one open design question, and lays out the
+implementation so the next round can execute without re-investigating.
+
+### 1. Measurement (the current state)
+
+The escaping shape: a returned `{mut}`-capturing closure, created and called
+once per iteration, so every iteration's env, box and bound-method registry
+entry escape with the closure and are never freed.
+
+```mojo
+def make_counter(n: Int):
+    var x = n
+    def bump() -> Int:
+        nonlocal x
+        x = x + 1
+        return x
+    return bump
+
+def main():
+    var total = 0
+    for r in range(400000):        # and range(100000)
+        var f = make_counter(r)
+        total += f() % 1000
+    print(total)
+```
+
+Measured with `tools/memslot.py --gb 8` around a probe that compiles the
+program with `test_gimple_runner.compile_mojo_to_gimple_exe` and reads
+`ru_maxrss` from `os.wait4` on the EXECUTABLE ONLY. (Reading
+`RUSAGE_CHILDREN` instead reports the gcc compile's peak, 91 MB at both sizes,
+which is measurement noise and must not be used.) macOS reports `ru_maxrss`
+in bytes.
+
+| iterations | exe peak RSS | output |
+|---|---|---|
+| 100,000 | 11.08 MB | 49950000 |
+| 400,000 | 38.26 MB | 199800000 |
+
+Slope **≈ 91 B/iter**, consistent with the ~90 B/iter in the original finding.
+Per iteration this is the env struct, the `{mut}` box it points at, the
+`MojoBoundMethod` from `mojo_bound_method_new`, and its `_reg_bound_method`
+entry. None is freed, because the returned value is not an owned binding.
+
+The existing `gimple_boxed_mut_local_escapes_is_kept` (stdout) and
+`gimple_boxed_mut_local_held_by_a_lambda_returned_from_inner_is_kept` pin
+the fail-closed side and must keep passing.
+
+### 2. Where the code is today
+
+- **Closure construction** — `mojo/backend_gimple/emit_calls.py` ~7280–7320
+  (the capturing-lambda site): `malloc` the env, fill `_envp->field`, then
+  `mojo_bound_method_new(fn, env)`, and `_closure_vals.add(_val)`. The nested
+  `def` site is `emit_infra.py` `register_nested_env_free` (~8497), which
+  frees a DIRECT-call env (no bound method) at the enclosing function's exit.
+- **Escape decision for a local** — `ownership_destruct.lambda_value_owned`
+  (~1733): free only if the sole mention after the binding is a call. Any
+  return, store, pass, or capture rejects it. This is correct and stays.
+- **Fresh-return analysis for containers** — `ownership_destruct.analyze_returns_fresh`
+  (~1384) and `infra_infer._build_fresh_returning` (~3025). The caller uses
+  this to own a call result whose callee returns a fresh container. A closure
+  return has no such analysis yet.
+- **Box storage** — the box is a separate `malloc` made in
+  `emit_infra._emit_mut_local_box_allocs` (~3869). The env holds the pointer
+  in a field, so freeing the env does NOT free the box.
+- **Runtime** — `runtime/fire_runtime.c` `mojo_closure_free` (~2000) frees
+  `self` (the env) and drops the registry entry. It does not know about boxes.
+
+### 3. The decision: single-owner boxes
+
+A box can be captured by several closures built in one call (for example a
+returned `bump` and a sibling `peek`), and the creator's own uses may still
+touch it after a return. Two options:
+
+- (a) **Single owner.** A box is freed with the closure that holds it ONLY
+  when exactly one closure built in its creating call captures it, that
+  closure is the value returned, and the creator makes no use of the box
+  after the return. Otherwise the box stays fail-closed (kept, today's leak).
+- (b) **Refcount** the box across env copies. Rejected for this round: it
+  adds a runtime shape every `{mut}` read and close path must respect, and
+  nothing in the current codebase needs it to remove the leak in the common
+  case.
+
+**Recommendation: (a).** It is provable with the existing per-owner walk
+(`infra_infer._body_closures_owned`), it covers the shape that leaks
+(`make_counter`), and its failure mode is the status quo.
+
+### 4. Implementation plan (ordered; each step is one committable piece)
+
+1. **Per-closure box list in the env (runtime + emit).** When a capturing
+   closure is built, record which box pointers its env holds. Simplest:
+   a `void **boxes` tail in the env, or a generated `_free_<name>_env` that
+   frees the env and its boxes. Interface: the closure free takes the env and
+   knows its boxes. Test: none yet, this is groundwork; leak unchanged.
+2. **Escape classifier for a returned closure (middle tier).** Add
+   `ownership_destruct.returned_closure_owned(fn_body, owner_name_of_return)`:
+   true when the function's only return of a closure is a `return <name>` of
+   a closure built in its own body, that closure is the only one capturing
+   each of its boxes, and no other statement mentions the box after the
+   return. Fail-closed on any doubt. Unit tests in
+   `test_ownership_destruct.py` next to `lambda_value_owned`'s.
+3. **Caller side: own a call result that is a fresh closure.** Extend the
+   fresh-return analysis (`analyze_returns_fresh`/`_build_fresh_returning`) to
+   a closure return the step 2 classifier accepts, and extend
+   `lambda_value_owned`-style binding ownership so `var f = make_counter(r)`
+   with `f` only called is freed by `mojo_closure_free` (plus step 1's box
+   free) at the caller's scope exit, through the existing
+   `_scope_register`/`mojo_cleanup_push_closure` machinery. Only the CALLEE
+   form `f(...)` is accepted, same as a local lambda.
+4. **Creator side.** When step 2 accepts the function, its box is freed by the
+   escaping closure, NOT at its own exit. So `_emit_mut_local_box_allocs` must
+   NOT add the box to `_owned_box_names` for that box (the `_no_closure_escapes`
+   gate already excludes the whole function today; the change is to exclude
+   only the escaping function's boxes, not to free them early).
+5. **Tests.** Bounded memory: the `make_counter` loop at 400,000 iterations,
+   with a `tools/mem_slope.py`-style two-size check, must go from ~91 B/iter to
+   flat. The `gimple_boxed_mut_local_escapes_is_kept` stdout test must still
+   pass, and a new stdout case must cover a closure that is returned and
+   called after being stored in a container (must keep, must print the right
+   value). Each freeing case must fail with the free disabled (the escape
+   classifier stubbed to False), so it is a real tripwire.
+6. **Trap 2, first bullet, re-check.** The old note warned that
+   `lambda k: d[k]` would not keep `d` alive. That path is only reachable once
+   `_is_free_eligible_function` (`infra_infer.py` ~2918) stops excluding
+   functions with a nested `def`/`lambda`. It is still excluded today, so the
+   trap is latent. Verify with a one-line probe before any step touches that
+   exclusion; do NOT lift it in the same round as steps 1–5.
+
+### 5. Measured baseline the next round must beat
+
+Exe peak RSS, `make_counter` loop: **11.08 MB at 100k, 38.26 MB at 400k**. The
+target is flat (within noise) between the two sizes, with output unchanged
+(`49950000`, `199800000`).
+
+## Status (2026-10-30 — OPEN 2 is PARTLY CLOSED: a `{mut}` box is now freed at
+## its function's exit when no closure built there can outlive the call)
+
+Landed: `_emit_mut_local_box_allocs(gen, fn)` registers each heap box the way
+`register_nested_env_free` registers an env — the box is a plain `malloc`
+block, a `mojo_cleanup_push_ptr` thunk covers the unwind, and a bare `free`
+runs at `emit_return_frees`/`emit_fallthrough_frees` — when
+`infra_infer._no_closure_escapes(fn)` holds. That predicate is per owner:
+every nested `def` must be a direct statement of the body it sits in and be
+owned by it (`nested_def_env_owned`), and so on recursively, so a closure
+inside an owned closure is judged by the closure that holds it. Lambda
+bindings are judged by the existing whole-tree rule, which is conservative.
+
+Box names live in `gen._owned_box_names`. It is reset in `_reset_func`, not
+in `_reset_scope_state`, because `begin_function` and `reset_no_candidates`
+run AFTER the prologue allocates the boxes; the lifted-closure path saves and
+restores it around the lifted body, as it does the env set.
+
+Measured, 4,000,000 calls of a function whose `nonlocal` box is only called
+inside it: peak RSS **63.2 MB → 1.9 MB**. Regression tests in
+`test_gimple_runner.py` (the `gimple_boxed_mut_*` cases): bounded memory for a
+`var` box, a `{mut}` parameter, a struct method, a box in a lifted child, and a
+box under `try`/`raise`; stdout for a box whose closure escapes (returned) and
+for a box held by an inner closure that its middle function returns. Each
+freeing case fails with the rule forced off (63 MB). Each escape case fails
+with the rule wrongly forced on — the returned-closure probe prints `3`/`4`
+instead of `6`/`7`, and the held-by-returned-inner probe, with the per-owner
+recursion blinded, prints `4`/`5` instead of `6`/`7`/`11`.
+
+**Still open (the escaping half):** a box that a closure which ESCAPES its
+call can reach — returned, stored in a container, passed on — is still never
+freed, because its lifetime is the closure's, and nothing frees a closure's
+environment once it escapes. Next step: give an escaping closure's environment
+and the boxes it holds a single owner (the closure value's own lifetime — the
+same owner-of-the-value question `lambda_value_owned` answers for a local
+callable, asked of the value that leaves the function). That is a design
+change, not a missing check, and it is the only remaining path to a flat
+profile for a function that returns a closure. Secondary: `_no_closure_escapes`
+refuses a function outright when any lambda in it is not a plain owned binding,
+including a lambda mentioned inside a nested `def`, so such a function keeps its
+boxes.
+
+**Landed 2026-10-30 (the secondary item): the lambda rule is now per owner.**
+`infra_infer._no_closure_escapes` no longer refuses a function because of a
+lambda anywhere in it. `_body_closures_owned(body)` judges each body by the
+closures IT creates (`_own_body_nodes` walks a body without entering a nested
+`def`'s statements): a bound lambda must be an owned binding of that body
+(`lambda_value_owned`), an unbound lambda still refuses, and every nested `def`
+must be `nested_def_env_owned` and recurse. A lambda bound inside an owned
+nested `def` is therefore judged by that `def`'s body. The whole-function
+"one binding per name" check is unchanged. Regression:
+`gimple_boxed_mut_local_with_owned_inner_lambda_is_freed` (peak RSS **63.2 MB →
+1.9 MB** at 4M iterations; it failed before the change) and
+`gimple_boxed_mut_local_held_by_a_lambda_returned_from_inner_is_kept` (stdout,
+the escaping side, passes before and after).
+
 ## Status (2026-10-02 — OPEN 1 is CLOSED. OPEN 2, the mutable-capture box, is
 ## still open and is the only thing left in this document)
 
@@ -187,28 +379,16 @@ there was never a local to key anything on — and the piece of work was not a
 new mechanism but the ownership machinery's own scope exits, applied to the env
 var. See the 2026-10-02 Status at the top of this file.
 
-### OPEN 2: the box for a mutable captured local — `malloc(8)` per call, per variable
+### OPEN 2 (partly closed 2026-10-30; the escaping half is still open): the box for a mutable captured local
 
-`_emit_mut_local_box_allocs` (runtime `fire_runtime.c`'s
-`mojo_cleanup_*` aside, `mojo/backend_gimple/emit_infra.py`) mallocs one cell
-per `{mut}`-captured local in the function PROLOGUE, so the cost is per call
-rather than per closure creation.
-
-NOT attempted, and the reason is the same one that keeps the escape rules
-narrow above: the box is what the closure's environment holds — the env field
-IS the box pointer — so the box's lifetime is the CLOSURE's, not the
-function's. Freeing it at the function's return requires proving no closure
-built here outlives the call, which is the escape analysis
-`ownership_destruct.lambda_value_owned` does not do (it answers the opposite
-question: whether a closure can be freed at ITS scope's exit). The two would
-have to be answered together, and a `{mut}` box reachable from a returned
-closure is a use-after-free.
-
-Next step: extend `lambda_value_owned` to the reverse direction — "no closure
-built in this function escapes it" — and free the box at the same exit where
-the env is. The same analysis would then let the env itself be freed at
-FUNCTION level for a closure stored in a local that never escapes, which is
-OPEN 1's other half.
+The box is malloc'd once per call in the prologue (`_emit_mut_local_box_allocs`),
+so the cost is per call, not per closure creation. Its lifetime is the call's
+when no closure built in the function can outlive it, and that case is now
+freed at the function's exit — see the 2026-10-30 Status at the top of this
+file. What is still open is the case where a closure escapes: its box then
+lives as long as that closure, and a free at the function's exit would be a
+use-after-free (the `escapes_is_kept` probes in `test_gimple_runner.py` pin
+that). The design question is in the top Status's "Still open" paragraph.
 
 ## The original finding (2026-09-28) follows
 
@@ -315,8 +495,8 @@ unchanged, each with a runner test that fails when its rule is disabled
 `d` a local container still needs to demonstrably keep `d` alive. `make gate`
 green.
 
-**Remaining after all that: OPEN 2, the mutable-capture box, and trap 2's first
-bullet.** Both are the same unfinished analysis — `_is_free_eligible_function`
+**Remaining after all that: the escaping half of OPEN 2 (a `{mut}` box reachable
+from a returned or stored closure), and trap 2's first bullet.** Both are the same unfinished analysis — `_is_free_eligible_function`
 still refuses to look at a function containing a nested `def`/`lambda`, so such
 a function still gets no container freeing, and a `{mut}` box's lifetime is the
 CLOSURE's, which means it cannot be freed until "does any closure built here
