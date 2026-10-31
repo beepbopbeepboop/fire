@@ -304,54 +304,35 @@ EXPECTED_FAILURES = {
     # `tools/formal_proof_census.py` records all of them, and the six FAMILIES
     # below are six gaps, not nineteen.
 
-    # (1) The loop contract, re-measured 2026-10-28: seven programs, now two
-    # causes. The shared fold's `while` arm (both backends share it through
-    # `_go_defs_for`) states a loop's state as at most TWO words -- the
-    # induction variable, the word the condition counts down, and, when the
-    # body changes a second word, that word, the accumulator -- threaded as the
-    # helper's arguments the way the one-word helper threaded `n_0`.
-    # `_dec_while_pattern` (a counter that IS the parameter: `wdiff`) and
-    # `_range_loop_pattern` (a range loop with one accumulator: `sum_range`)
-    # remain the special cases. `while_ne_zero` and `digits` are now STATED:
-    # their arm64 refusal moved off the fold to the `eval_eq_mojo` bridge gate,
-    # which has no proof for a recursive/while body with AST eval, so arm64
-    # writes no proof file; on x86-64 both stems state the model in their proof
-    # file (no placeholder) and typecheck -- the `native_decide` run tests the
-    # generator would write for them are suppressed tree-wide by the image's
-    # runtime stubs, so the x86-64 measurement is the stated model plus the
-    # typecheck. The five below are refused by name at generation rather than
-    # modelled as something that is not the program.
+    # (1) The loop contract: seven programs, one cause. The model's loop state is
+    # ONE word -- `_stmts_go`'s helper takes a single argument -- so a `while`
+    # whose body changes anything else is a loop the model cannot state.
+    # `_dec_while_pattern` (a counter that IS the parameter: `wdiff`,
+    # `countdown`, `wge`) and `_range_loop_pattern` (a range loop with one
+    # accumulator: `sum_range`) are the only two shapes it can.
     # `bugs/FORMAL_a_loop_that_is_neither_a_decrement_nor_a_range_loop_has_no_
-    # contract.md` records the round, and it also records the half that was
-    # FIXED in the 2026-10-05 commit: this fold used to emit a `partial def`
-    # that DIVERGES for exactly these programs, which on x86-64 reached a proof
-    # file as a false `result n = mojo n` obligation.
-    "accum_max": "the loop's body is not a straight-line run of bindings (the "
-                 "`best = i` sits inside an `if`), so the fold cannot compute "
-                 "the next value of the loop's state and refuses at generation "
-                 "(the loop-contract doc above names the shape)",
-    "while_ne_zero": "the model now states this loop (accumulator plus "
-                     "induction variable, a two-word helper); the arm64 refusal "
-                     "is the `eval_eq_mojo` bridge gate, which has no proof for "
-                     "a recursive/while body with AST eval, so arm64 writes no "
-                     "proof file -- on x86-64 the proof states the model and "
-                     "typechecks",
-    "var_typed_loop": "the loop's state is three words (`step`, `total`, `i`) "
-                      "and the loop helper's two arguments carry at most the "
-                      "induction variable plus one accumulator, so the fold "
-                      "refuses by name rather than drop an update",
-    "ret_in_loop": "a `return` out of the loop body: the body is not a "
-                   "straight-line run of bindings, so the fold cannot compute "
-                   "the next value of the loop's state and refuses",
-    "loop_break": "a `break` out of the loop body: the same straight-line "
-                  "refusal as `ret_in_loop`",
-    "nested_loop": "a second `while` inside the first: the inner loop is a "
-                   "`WhileStmt` in the body, so the same straight-line "
-                   "refusal as `ret_in_loop`",
-    "digits": "the model now states this loop (the counter and the digit "
-              "count, a two-word helper); the arm64 refusal is the same "
-              "`eval_eq_mojo` bridge gate as `while_ne_zero` -- on x86-64 the "
-              "proof states the model and typechecks",
+    # contract.md` has the measurement and the next step, and it also records
+    # the half that was FIXED in the same commit: this fold used to emit a
+    # `partial def` that DIVERGES for exactly these programs, which on x86-64
+    # reached a proof file as a false `result n = mojo n` obligation.
+    "accum_max": "the model's loop state is one word and this loop keeps a "
+                 "running maximum as well as a counter, so the fold refuses "
+                 "rather than emit a model that is not this program's "
+                 "arithmetic (the loop-contract doc above)",
+    "while_ne_zero": "the same loop contract, for the shape every accumulator "
+                     "loop is written in: `total += i` inside the body",
+    "var_typed_loop": "the same loop contract, on a `var` declared and read "
+                      "inside the body -- which is also how the fold's "
+                      "incomplete binder was found, since the refusal it used "
+                      "to give (\"`step` ... binds it to nothing\") was false "
+                      "about the source",
+    "ret_in_loop": "the same loop contract, with a `return` out of the body: "
+                   "the model's loop state cannot also carry an early exit",
+    "loop_break": "the same loop contract, with a `break` out of the body",
+    "nested_loop": "the same loop contract, with a second loop inside the "
+                   "first: two induction variables and one word",
+    "digits": "the same loop contract, on a divide-and-modify pair per "
+              "iteration",
 
     # (2) The generic loop contract for a `for` loop, which is a refusal of its
     # own: `ForStmt needs the generic loop contract`. `sum_range` is the one

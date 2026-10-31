@@ -1294,26 +1294,6 @@ class MojoInstance:
     def __init__(self, mojo_class):
         self._mojo_class = mojo_class
 
-    def __getattr__(self, name):
-        # Python's built-in `getattr(obj, name)` only consults real instance
-        # attributes and class attributes, never the Mojo method table, so a
-        # method fetched dynamically (`getattr(c, "tag")`) raised
-        # AttributeError even though `c.tag` worked. Mirror `_eval_member_of`
-        # so the two spellings agree.
-        if name in self.__dict__:
-            return self.__dict__[name]
-        cls = self._mojo_class
-        method = cls.methods.get(name)
-        if method is not None:
-            if name in cls.static_methods:
-                return method
-            if name in cls.class_methods:
-                return BoundClassMethod(method, cls, cls.interpreter)
-            return BoundMethod(method, self, cls.interpreter)
-        if name in cls.comptime_aliases:
-            return cls.comptime_aliases[name]
-        raise AttributeError(f"'{cls.name}' object has no attribute '{name}'")
-
     def _write_via(self, method_name):
         """Call a user-defined `write_to`/`write_repr_to(self, mut writer)`
         method, if the struct defines one, and return the accumulated text —
@@ -1405,24 +1385,9 @@ class BoundMethod:
                 # An overloaded method taken as a value (and then bound to
                 # an instance) has no single `_invoke` to delegate to; route
                 # through the overload set's own dispatch instead, with `self`
-                # prepended as the receiver.
-                #
-                # The receiver is folded into the `*`-unpack (`invoke(f,
-                # *_merged, **kwargs)`) rather than written as an explicit
-                # positional before it (`invoke(f, self.instance, *args,
-                # **kwargs)`): the codegen cannot lower an explicit positional
-                # that PRECEDES a `*`-unpack in the same call — it emits the
-                # positional as a separate C argument (casting it to the
-                # `*args` MojoList*) instead of folding it into the unpacked
-                # list, so the call comes out with one argument too many and
-                # the self-host's `gcc -fgimple` refuses it ("too many
-                # arguments to 'myinterpreter_Interpreter_invoke'"). The
-                # `func, *args, **kwargs` shape below (no leading positional
-                # before the unpack) is the one it lowers. Semantics are
-                # unchanged: both pass func=f, the receiver prepended to the
-                # `*args`, and `**kwargs`.
-                _merged = [self.instance] + list(args)
-                return self.interpreter.invoke(f, *_merged, **kwargs)
+                # prepended as the receiver. See
+                # bugs/CODEGEN_method_with_overloads_is_unresolvable_as_a_value.md.
+                return self.interpreter.invoke(f, self.instance, *args, **kwargs)
             interp, rest = _split_invoker(f._interp, (self.instance,) + tuple(args))
             return f._invoke(interp, comptime_bindings, rest, kwargs)
         finally:
@@ -4620,46 +4585,6 @@ class Interpreter:
                     self.scope.define(pattern.name, subject)
                     matched = True
                     break
-                # Class pattern: `case C():` or `case C(x):` — isinstance
-                # check, not a constructor call (CPython 3.14 semantics).
-                if self._is_instance(pattern, 'CallExpr'):
-                    class_obj = self.eval_expr(pattern.func)
-                    # Check instance status, handling both real Python types
-                    # and interpreter MojoClass objects.
-                    is_mojo_class = isinstance(class_obj, MojoClass)
-                    is_instance = False
-                    if is_mojo_class:
-                        is_instance = isinstance(subject, MojoInstance) and subject._mojo_class is class_obj
-                    else:
-                        try:
-                            is_instance = isinstance(subject, class_obj)
-                        except TypeError:
-                            is_instance = False
-                    if not is_instance:
-                        matched = False
-                        break
-                    args = getattr(pattern, 'args', []) or []
-                    matched = True
-                    if args:
-                        match_args = getattr(class_obj, '__match_args__', None)
-                        if match_args is None:
-                            raise TypeError(
-                                f"class '{getattr(class_obj, '__name__', class_obj)}' "
-                                f"does not define __match_args__")
-                        for i, subpat in enumerate(args):
-                            attr_name = match_args[i] if i < len(match_args) else None
-                            if attr_name is None:
-                                raise TypeError("not enough arguments for __match_args__")
-                            attr_val = getattr(subject, attr_name)
-                            if self._is_instance(subpat, 'IdentExpr') and subpat.name != '_' and not self.scope.has(subpat.name):
-                                self.scope.define(subpat.name, attr_val)
-                            elif self.eval_expr(subpat) != attr_val:
-                                matched = False
-                                break
-                        if not matched:
-                            break
-                    matched = True
-                    break
                 if self.eval_expr(pattern) == subject:
                     matched = True
                     break
@@ -5084,13 +5009,6 @@ class Interpreter:
             raise NotImplementedError(f"{self._loc(expr)}No handler for {type(expr).__name__}")
 
         return method(expr)
-
-    def eval_FunctionType(self, expr: N.FunctionType):
-        """A comptime function-type alias survives as a signature node.
-        At runtime it cannot be evaluated, but that's okay for the regression
-        test which only needs the alias to be something other than _comptime_expr.
-        """
-        return expr  # Return the node itself as a value
 
     def eval_WalrusExpr(self, expr: N.WalrusExpr):
         """Walrus `(name := value)`: evaluate value, bind name in the current

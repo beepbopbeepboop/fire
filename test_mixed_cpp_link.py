@@ -137,21 +137,21 @@ def test_link_executable_default_still_gcc():
     """cxx=False (the default) must still pick gcc — build_executable's
     existing all-C link behavior must be completely unaffected by this
     milestone's plumbing addition."""
-    check("fire._GCC_BIN / fire._GXX_BIN are both resolved to strings",
-          isinstance(fire._GCC_BIN, str) and isinstance(fire._GXX_BIN, str))
+    check("mojo._GCC_BIN / mojo._GXX_BIN are both resolved to strings",
+          isinstance(mojo._GCC_BIN, str) and isinstance(mojo._GXX_BIN, str))
     # Directly probe link_executable's driver selection without actually
     # linking anything (empty obj list -> gcc/g++ just report a "no input
     # files" style error, which is fine; we only care which binary ran).
     import unittest.mock as mock
-    with mock.patch('fire.subprocess.run') as m:
+    with mock.patch('mojo.subprocess.run') as m:
         fire.link_executable(['a.o'], 'out', cxx=False)
         cmd = m.call_args[0][0]
-        check("link_executable(cxx=False) uses gcc as driver", cmd[0] == fire._GCC_BIN,
+        check("link_executable(cxx=False) uses gcc as driver", cmd[0] == mojo._GCC_BIN,
               detail=str(cmd))
-    with mock.patch('fire.subprocess.run') as m:
+    with mock.patch('mojo.subprocess.run') as m:
         fire.link_executable(['a.o'], 'out', cxx=True)
         cmd = m.call_args[0][0]
-        check("link_executable(cxx=True) uses g++ as driver", cmd[0] == fire._GXX_BIN,
+        check("link_executable(cxx=True) uses g++ as driver", cmd[0] == mojo._GXX_BIN,
               detail=str(cmd))
 
 

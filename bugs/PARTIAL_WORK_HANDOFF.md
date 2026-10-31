@@ -39,8 +39,8 @@ re-checked against the tree rather than against its own prose. What moved:
   at it, and a check that fails on an INCREASE is the only thing that keeps
   the next set from arriving.
 * Not re-measured, and why: §2.2 and §2.3 name live docs owned by other
-  workers (`the (since-fixed) compiled-generator lambda-expression bug`,
-  `the (since-fixed) c_common/fsutil.py compile failure`), so their
+  workers (`bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md`,
+  `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md`), so their
   bodies are current by construction and re-deriving them here would only
   produce a second copy to disagree with. §2.5's first entry's claim that the
   `async for`-over-a-generator gap now "drives the generator for real" is one
@@ -98,14 +98,19 @@ key type wins a list-of-ints loop and `print(i)` calls `mojo_print((char *)10)`
 doc records why the obvious one-line default for the shared variable is a
 regression for the other arm.
 
-**The root cause (inference gap) is still open**: `_field_elem_types['Reader']` is empty, meaning the field's element type is never threaded when a container-typed ctor argument reaches a local or `self.<field>`.
-
-This gap is owned by another claim (`bug-codegen-container-constructor-argume-r2`), and it is distinct from the codegen dispatch arm (owned by `bug-codegen-dispatched-for-loop-shares-o-8985`).
-
-The stale advice to reorder passes in `module_gen.py` has been removed; the correct inference fix would populate `_ctor_lit_param_types` with container element types, analogous to how literal observers thread them.
+**The next step recorded below is stale advice**: move the context observation
+after `_inferred_var_types` is populated (`module_gen.py:3808`, `:3813`,
+`:5394`) and before the `pm`/field pass (`:2807`-`:2843`), writing
+`_ctor_lit_param_types` exactly as the literal observer does. It is a
+reordering of two delicate passes, and the original prescribed fix (a
+`ListExpr` case in `_arg_scalar_type`) broke selfhost — do not use it. What
+today's measurement adds is that the ordering is no longer the whole answer:
+the field's ELEMENT type is still never threaded at all
+(`_field_elem_types['Reader']` is empty), which is why the loop falls to
+runtime dispatch in the first place.
 
 ### 2.2 Variadic lambda call sites are not packed
-Doc: `the (since-fixed) compiled-generator lambda-expression bug`
+Doc: `bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md`
 
 The lifted **definition** is correct — `int64_t main_lambda_1 (MojoList * a)`,
 and the code's own comment says "callers pack the loose args into it". The
@@ -123,7 +128,7 @@ call-site lowering keyed on a signature; the doc records the existing packing
 precedent.
 
 ### 2.3 Invoking a keyword-only parameter as a callee
-Doc: `the (since-fixed) c_common/fsutil.py compile failure`
+Doc: `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md`
 
 4 of the 6 recorded shapes are still refused, all for this one reason. A
 kw-only param that is merely *not called* compiles and runs fine; calling it
@@ -304,12 +309,13 @@ to COMPILE as a side effect of this session's fixes — not independently
 chased down further, since COMPILE is already a clean outcome). The
 `ipaddress` CFAIL (77 `__mgco_` refs, then `gcc -fgimple -fsyntax-only`
 fails with `expected expression before 'sizeof'` at
-`Lib/ipaddress.py:1548`, `self.hosts = self.__iter__`) is attributed: the
-callable-value gap (requiring a dynamic-class-object-as-callable-value
-model, "genuinely feature-sized, not attempted") is already known as
-the SAME missing first-class-callable-value representation §2.2 (variadic lambda
-call sites) and §2.3 (kw-only param invoked as callee) — a third symptom of it.
-Not a fresh mystery; no new doc needed.
+`Lib/ipaddress.py:1548`, `self.hosts = self.__iter__`) is attributed: its
+own doc, `bugs/CODEGEN_generator_function_Lib_ipaddress.md`, already scopes
+the remaining blocker as needing "a dynamic-class-object-as-callable-value
+model", explicitly "genuinely feature-sized, not attempted" — the SAME
+missing first-class-callable-value representation §2.2 (variadic lambda
+call sites) and §2.3 (kw-only param invoked as callee) are blocked on, just
+a third symptom of it. Not a fresh mystery; no new doc needed.
 
 Generator value cycles (`q1`↔`q2`) bus-error (138) on unbounded mutual
 recursion. A recursion-depth gap, not a value-typing gap; out of scope, and

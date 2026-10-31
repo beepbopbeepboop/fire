@@ -458,10 +458,6 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
 
     Returns (code: str, stmts: list) where stmts are parsed statements from the module.
     """
-    # If this module already failed in this root compile, skip re-compile
-    # (rollback-recompile path is the root cause of the quadratic walk).
-    if module_name in getattr(gen, '_failed_modules', set()):
-        return (None, [])
     mojo_paths = gen._module_candidate_paths(module_name)
     for path in mojo_paths:
         if gimple_ctypes.os.path.exists(path):
@@ -529,8 +525,7 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
             #       "__mojo_middle_offload_toplevel", ...
             #
             # Four modules blamed for one module's bug, which is also how
-            # the self-host link failure (undefined toplevel symbols from a
-            # module-level _lens name collision) read
+            # bugs/CODEGEN_module_toplevel_undefined_in_selfhost.md read
             # ("57 declarations, 0 bodies", "the blast radius is 57 modules;
             # the visible symptom is 5") before its own counts came off an
             # artifact that never finished generating.
@@ -877,8 +872,8 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 temp_gen._emitted_c_helpers = gen._emitted_c_helpers
                 temp_gen._module_stmts = gen._module_stmts  # share: track all transitive stmts
                 # share: incrementally-maintained flat mirror of
-                # _module_stmts' union (see the `_walk_ast` re-scan bug,
-                # Phase 1) — same sharing
+                # _module_stmts' union (see PERF_nested_module_compile_
+                # walk_ast_quadratic_rescan.md Phase 1) — same sharing
                 # pattern as _module_stmts itself, just above.
                 temp_gen._all_transitive_stmts_ordered = gen._all_transitive_stmts_ordered
                 temp_gen._all_transitive_stmts_ids = gen._all_transitive_stmts_ids
@@ -1099,14 +1094,7 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # the gimple_cpp_* path while the root module's went through
                 # gimple_gen_coro -- a split that leaves the client .c
                 # referencing symbols nobody defines.
-                # The importers' call sites (`gen._closure_call_stmts`) are
-                # handed in so `<module_name>.<gen>(...)` types this module's
-                # generator slots; the module's own statements are appended
-                # for ITS imports, so a generator reached through a chain of
-                # imports sees every call site compiled before it.
-                stmts, _ss_meta = gimple_codegen.gimple_gen_coro.lower(
-                    stmts, gen._closure_call_stmts, module_name)
-                temp_gen._closure_call_stmts = gen._closure_call_stmts + [stmts]
+                stmts, _ss_meta = gimple_codegen.gimple_gen_coro.lower(stmts)
                 if _ss_meta:
                     gimple_codegen.gimple_gen_coro.register(temp_gen, _ss_meta)
                     publish_a3_generators(temp_gen, _ss_meta)
@@ -1188,7 +1176,7 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # Store parsed stmts for this module so parent gens can access them
                 gen._module_stmts[module_name] = stmts
                 # Incrementally extend the flat, pre-deduped mirror (see
-                # the `_walk_ast` re-scan bug
+                # PERF_nested_module_compile_walk_ast_quadratic_rescan.md
                 # Phase 1) — O(this module's own stmt count), done once
                 # per module ever, instead of leaving every ancestor
                 # level to re-flatten the whole (growing) _module_stmts
@@ -1312,10 +1300,6 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 gen._scope_live = []
                 gen._scope_live_depth = []
                 gen._scope_live_fn = []
-                # Remember this module failed for this root compile so the
-                # next parent that imports it doesn't redo the failed compile.
-                if hasattr(gen, '_failed_modules'):
-                    gen._failed_modules.add(module_name)
                 # Note: _module_globals / _module_global_inits are intentionally NOT
                 # rolled back. Partial data from a failed compilation (e.g. build_stdlib_dylib
                 # failing but having populated its globals) is still needed so that the
@@ -1460,8 +1444,7 @@ def _module_marker_attribute_reads(stmts) -> dict:
     this module — ONE AST walk for the whole module, so a module with N bare
     imports costs one walk and not N (the walk is the expensive half of
     `_inline_bare_import_struct`; see
-    the `_walk_ast` re-scan bug (fixed; the memo and self-assign scan fixes are
-    in the same commit).)"""
+    bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md)."""
     out: dict = {}
     for _n in gimple_exprtypes._walk_ast(stmts):
         if not isinstance(_n, gimple_ctypes.MemberExpr):
@@ -2937,33 +2920,7 @@ def _elaborate_generic_call(gen, node: gimple_ctypes.CallExpr):
             for ta in type_args:
                 base = ta.split('[', 1)[0].strip()
                 if '[' in ta and base in gen._imported_generic_structs:
-                    # Strip EXACTLY ONE trailing `]` — the annotation's own
-                    # closing bracket — not EVERY trailing one. `.rstrip(']')`
-                    # tore `Variant[NicheableType, EmptyAndTrivial[0]]` (a
-                    # `size_of[...]` type arg whose LAST argument is itself a
-                    # nested type application) apart as
-                    # `NicheableType, EmptyAndTrivial[0`, dropping the last
-                    # argument's own bracket. The corrupted arg monomorphized
-                    # into the Variant body as the unbalanced
-                    # `_VariantStorageFor[NicheableType, EmptyAndTrivial[0]`,
-                    # and the re-parse of the instantiated .mojo died with
-                    # `Expected RBRACKET got KW('comptime')` at the following
-                    # `comptime __del__is_trivial = ...` line, so EVERY niche-
-                    # variant instantiation was refused (measured 2026-10-27
-                    # on test/utils/test_variant.mojo's
-                    # `test_variant_niche_optimization_size`: the three
-                    # `size_of[Variant[...]]` sites, the last arg `EmptyAnd-
-                    # Trivial[0]`/`[1]` in each). The same hazard
-                    # stmts_shared._bracket_inner's docstring records for
-                    # `dict[str, dict[str, tuple[str, int]]]`. `ta` here is
-                    # always the balanced rendering `_type_expr_to_ann` built
-                    # (`base[inner]`), so its final char is its own `]`; the
-                    # guard keeps a malformed, unterminated arg degrading the
-                    # way the old rstrip left it (unbalanced -> refused
-                    # downstream), never worse.
-                    inner = ta.split('[', 1)[1]
-                    if inner.endswith(']'):
-                        inner = inner[:-1]
+                    inner = ta.split('[', 1)[1].rstrip(']')
                     sub_args = [a.strip() for a in gimple_ctypes._split_top_level_commas(inner)]
                     # _is_concrete_type_arg only inspects the OUTER base
                     # name — "DictEntry[Self.K, Self.V, Self.H]" (inside
@@ -3205,7 +3162,8 @@ def _generic_struct_field_types(gen, info: dict) -> dict:
     stdlib's `_PeekableIterator[InnerIterator]`'s `var _inner:
     Self.InnerIterator` ended up an integer, and how `next(self._inner)` /
     `next(it)` then had no receiver type to dispatch the iterator protocol
-    through (`the user-iterator next() bug (db724c4d6)`).
+    through (`bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_
+    unlowered.md`).
 
     So: materialize the instantiation to its mangled name, then resolve with
     `gen._resolve_type`, which is the one resolver that consults
@@ -3243,7 +3201,7 @@ def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
     # '<name>'` — a definition with this codegen's real parameter types next
     # to a declaration with the elaborator's erased ones — which is the
     # regression that made the first in-TU attempt be reverted
-    # (the user-iterator next() bug (doc deleted in db724c4d6)).
+    # (bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md).
     # Keyed on `(base, args)` and NOT on "is this name already a struct here":
     # the second test would also fire for a struct this module defines itself,
     # which is a different situation with a different (unrelated) answer.
@@ -3422,7 +3380,7 @@ def _register_generic_struct(gen, base_name, info):
         # same erasure that destroys the function `overload_suffix_for` is
         # computed from, so this cannot be resolved by composing harder — it
         # needs the CALLER's real argument types, which is the in-TU route
-        # (see bug:CODEGEN_imported_generic_never_elaborated_calls_nothing_
+        # (see bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_
         # defines.md).
         _ambiguous: set = set()
         for mname, _ret, _ps in info['methods']:
