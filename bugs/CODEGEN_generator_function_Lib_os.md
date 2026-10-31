@@ -1,5 +1,39 @@
 # CODEGEN_generator_function: Lib/os.py
 
+## Status (2026-10-30, round 5 — planning: the exact inventory standing between `walk` and a compiled, CORRECT build)
+
+Read straight off CPython 3.15's `walk` after rounds 1-4. Everything the yield /
+stack typing needed is landed; what is left is the DIRECTORY-ITERATION runtime,
+and each item below is a real piece, not wiring:
+
+1. `with scandir(top) as entries:` — refused today (honestly). Needs a runtime
+   `DirEntry` value (name, path, d_type, lazily-stat'd mode) and `scandir`
+   returning an iterator over them whose `with` binds a REAL handle
+   (`mojo_os_scandir(char *)` -> `MojoList *` of entry handles is enough; enter
+   is the identity, exit frees). Register `DirEntry` as a struct the C++ body
+   emitter can field-read (`entry.name`, `entry.path`) and method-call
+   (`entry.is_dir()`, `entry.is_dir(follow_symlinks=False)`, `entry.is_symlink()`,
+   `entry.is_junction()` — always False on POSIX) through runtime symbols.
+2. `except OSError:` around those calls must catch a runtime-raised error. The
+   runtime raises through `mojo_raise` with a type tag; `scandir` on an
+   unreadable directory must raise the OSError tag (`PermissionError` /
+   `FileNotFoundError` are subclasses) and `except OSError as error:` must bind
+   a value `onerror(error)` can take.
+3. `onerror(error)` — a call through a CALLABLE-VALUED PARAMETER (default `None`,
+   guarded by `if onerror is not None`). The body refuses this today ("what that
+   call RETURNS is not knowable"): here the result is discarded, so the call can
+   lower as `mojo_fnptr_call_1` when the call is an expression STATEMENT.
+4. `fspath(top)` (module-level `_fspath`, already compiled) and `sys.audit(...)`
+   (a no-op) must resolve in a generator body.
+5. `_fwalk`: `stat(...)` returning a `stat_result` structseq that is unpacked
+   (`st.st_mode`, `st.st_dev`) — a fixed-layout runtime struct, same shape of
+   work as `DirEntry`.
+
+Tests that will prove it: compile `Lib/os.py`, then drive `walk` over a
+directory built in `/tmp` in both `topdown` modes and with an unreadable
+subdirectory + `onerror`, against CPython (the `wk.py` harness from this round:
+`walk` copied beside `main()`).
+
 ## Status (2026-10-30, round 4 — the mixed-stack typing LANDED (solver-first, tagged only when forced); `walk` is refused honestly on `with scandir(top) as entries:`)
 
 Landed, pinned by `generator_heterogeneous_stack_param_rebound_from_pop` (a
