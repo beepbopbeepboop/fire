@@ -1,5 +1,34 @@
 # CODEGEN_generator_function: Lib/glob.py
 
+## Status (2026-10-31, round 4 — `_glob2`, `_iterdir`, `_listdir` and the `glob_in_dir` dispatch now compile; `_iglob`/`_rlistdir` stop at a RECURSIVE kind fixpoint, then the selector closures)
+
+Measured on CPython 3.15's `glob.py` (`compile_to_gimple_with_cpp`):
+
+- **Landed:** `with contextlib.closing(E) as v` (bind + `try/finally v.close()`),
+  generator handles followed through `list()` / `for` / `close()`, a returned
+  runtime-kinded list keeping its kinds at the call site, comprehensions over a
+  kinded list, bytes as a pointer word, `bytes(text, enc)`, a local choosing
+  between module generators lowered to a dispatch index (`_lower_callable_choices`),
+  a sliced parameter / `os.fspath` / `a or b` of path words as pointer words,
+  `p`+`w` call-site kinds unifying, and return-kind inference for a plain function
+  returning `list(<tagged generator>)` / `fnmatch.filter` / a pointer word
+  (`_list_return_elem_kind`, `_pointer_return_kind`).
+- **Still refusing**, in order of what unblocks what:
+  1. `_rlistdir` (and so `_glob2`'s delegation and `_iglob`): it is RECURSIVE —
+     `for y in _rlistdir(path, ...): yield _join(x, y)` — so `y`'s kind is the
+     generator's own kind, which the resolver gives as None for a cycle
+     (`_GEN_RESOLVING`). Next: resolve a self-recursive generator by assuming
+     the join of its non-recursive yield sites (`x`: 'p') for the recursive call's
+     target, then checking the recursive site agrees (`_join(x, y)` is a pointer
+     word if its arguments are). With that, `_join` (`return dirname or basename`
+     / `os.path.join`) types as a pointer word.
+  2. `select_recursive`, `select_recursive_step`, `select_wildcard` — nested
+     generators capturing `self`, `match`, `select_next`, `dir_only`,
+     `follow_symlinks` that ESCAPE their enclosing method as values
+     (`return select_wildcard`), which the hidden-parameter capture model
+     refuses by design. Needs a closure record (captured words + the generator's
+     `_start`) as the callable value, called through `mojo_dyn_call`.
+
 ## Status (2026-10-31, round 3 — list-draining and `yield from` of a tagged generator landed; the exact consumer shapes glob still needs)
 
 Landed (pinned by `generator_mixed_kind_yields_drained_into_a_list` and

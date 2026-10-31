@@ -250,6 +250,101 @@ _NUMERIC_CTORS = {'Float64': 'd', 'Float32': 'd', 'Float': 'd', 'float': 'd',
                   'String': 'p', 'StringSlice': 'p', 'str': 'p'}
 
 
+_LIST_RET_KINDS: dict = {}
+
+
+def _list_return_elem_kind(name: str):
+    """Element kind of the list a same-module PLAIN function returns, when every
+    `return` of it says so: `list(<tagged generator call>)` (directly, or through
+    a handle bound once to the call), `fnmatch.filter(..)` (a list of path
+    words), a one-element list display of a typed name; `[]` agrees with
+    anything. None when any return is something else. Memoised per module
+    (cleared with `_register_generator_defs`)."""
+    if name in _LIST_RET_KINDS:
+        return _LIST_RET_KINDS[name]
+    _LIST_RET_KINDS[name] = None            # recursion guard
+    fd = None
+    for st in _MODULE_STMTS:
+        if isinstance(st, N.FunctionDef) and st.name == name \
+                and not getattr(st, 'is_generator', False) \
+                and not getattr(st, 'is_async', False):
+            fd = st
+    if fd is None:
+        return None
+    handle_calls = {}
+    for n in _walk(fd):
+        if (isinstance(n, N.AssignStmt) and isinstance(n.target, N.IdentExpr)
+                and isinstance(n.value, N.CallExpr) and isinstance(n.value.func, N.IdentExpr)
+                and n.value.func.name in _GEN_DEFS):
+            handle_calls.setdefault(n.target.name, []).append(n.value.func.name)
+    kinds = set()
+    for n in _walk(fd):
+        if not isinstance(n, N.ReturnStmt) or n.value is None:
+            continue
+        v = n.value
+        k = None
+        if isinstance(v, N.ListExpr) and not v.elements:
+            continue
+        if (isinstance(v, N.CallExpr) and isinstance(v.func, N.IdentExpr)
+                and v.func.name == 'list' and len(v.args) == 1):
+            a = v.args[0]
+            g = None
+            if isinstance(a, N.CallExpr) and isinstance(a.func, N.IdentExpr) \
+                    and a.func.name in _GEN_DEFS:
+                g = a.func.name
+            elif isinstance(a, N.IdentExpr) and len(handle_calls.get(a.name, [])) == 1:
+                g = handle_calls[a.name][0]
+            if g is not None:
+                k = _GEN_VALUE_KINDS.get(g, (None, ''))[0]
+                if k is None and g in _GEN_DEFS and g not in _GEN_RESOLVING:
+                    k = _resolve_gen_kind(g)[0]
+        elif (isinstance(v, N.CallExpr) and isinstance(v.func, N.MemberExpr)
+                and v.func.member == 'filter' and isinstance(v.func.obj, N.IdentExpr)
+                and v.func.obj.name == 'fnmatch'):
+            k = 'w'
+        elif isinstance(v, N.ListExpr) and len(v.elements) == 1:
+            k = _yield_kind(v.elements[0], _static_env(fd))
+        if k is None:
+            return None
+        kinds.add(k)
+    r = list(kinds)[0] if len(kinds) == 1 else None
+    _LIST_RET_KINDS[name] = r
+    return r
+
+
+_PTR_RET_KINDS: dict = {}
+
+
+def _pointer_return_kind(name: str):
+    """'w' when a same-module plain function returns ONLY path words (every
+    `return` is a 'p'/'w' kind: `return dirname or basename`, `return
+    os.path.join(..)`), else None. Lib/glob.py's `_join`. Memoised per module."""
+    if name in _PTR_RET_KINDS:
+        return _PTR_RET_KINDS[name]
+    _PTR_RET_KINDS[name] = None
+    fd = None
+    for st in _MODULE_STMTS:
+        if isinstance(st, N.FunctionDef) and st.name == name \
+                and not getattr(st, 'is_generator', False) \
+                and not getattr(st, 'is_async', False):
+            fd = st
+    if fd is None:
+        return None
+    env = _static_env(fd)
+    kinds = set()
+    for n in _walk(fd):
+        if isinstance(n, N.ReturnStmt) and n.value is not None:
+            k = _yield_kind(n.value, env)
+            if k not in ('p', 'w'):
+                return None
+            kinds.add(k)
+    r = None
+    if kinds:
+        r = 'w' if 'w' in kinds or len(kinds) > 1 else 'p'
+    _PTR_RET_KINDS[name] = r
+    return r
+
+
 def _callee_return_kind(expr, env: dict | None = None) -> str | None:
     """Scalar kind of `expr`'s value when `expr` is a call to a BARE name whose
     return type this module knows: a lambda-bound local of the enclosing
@@ -276,7 +371,13 @@ def _callee_return_kind(expr, env: dict | None = None) -> str | None:
         _cv = env.get(expr.func.name)
         if isinstance(_cv, tuple) and _cv[0] == 'callable':
             return _cv[1]
-    return _NUMERIC_CTORS.get(expr.func.name) or _FUNC_RET_KIND.get(expr.func.name)
+    _sk = _NUMERIC_CTORS.get(expr.func.name) or _FUNC_RET_KIND.get(expr.func.name)
+    if _sk is not None:
+        return _sk
+    _lk = _list_return_elem_kind(expr.func.name)
+    if _lk is not None:
+        return ('list', _lk)
+    return _pointer_return_kind(expr.func.name)
 
 
 # Result kind of each `os.path.<fn>` the runtime implements as a function
@@ -850,6 +951,9 @@ def _yield_kind(expr, env: dict | None = None) -> str | None:
         if expr.op in _YIELD_CMP_OPS or expr.op in ('in', 'not in'):
             return 'b'
         lk, rk = _yield_kind(expr.left, env), _yield_kind(expr.right, env)
+        if expr.op in ('or', 'and') and lk in ('p', 'w') and rk in ('p', 'w'):
+            # `dirname or basename`: the selected OPERAND, a path word
+            return 'w' if 'w' in (lk, rk) else 'p'
         if 'p' in (lk, rk):
             return 'p'
         if 'd' in (lk, rk):
@@ -1411,6 +1515,8 @@ def _register_generator_defs(stmts) -> None:
     _GEN_DEFS.clear()
     _GEN_VALUE_KINDS.clear()
     _GEN_RESOLVING.clear()
+    _LIST_RET_KINDS.clear()
+    _PTR_RET_KINDS.clear()
     for s in stmts:
         if isinstance(s, N.FunctionDef) and getattr(s, 'is_generator', False):
             _GEN_DEFS[s.name] = s
@@ -1556,6 +1662,10 @@ def _delegated_yield_kind(value, fn: N.FunctionDef = None):
     if not isinstance(target, N.IdentExpr):
         return None
     name = _cm_as_str(target.name)
+    if name not in _GEN_DEFS:
+        _lk = _list_return_elem_kind(name)       # `yield from <plain fn returning a list>`
+        if _lk is not None:
+            return _lk
     if name not in _GEN_DEFS and fn is not None:
         name = (_callable_param_generator_names(fn) or {}).get(name, '')
     if not name:
