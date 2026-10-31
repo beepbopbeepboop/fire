@@ -10444,7 +10444,12 @@ def gen_module_impl(self, stmts):
             if ann.get(pname) is not None:
                 continue                         # respect explicit annotation
             cur = self._inferred_param_types.get(callee, {}).get(pname)
-            if cur in (None, 'int', 'int64_t'):
+            # A `MojoList *` guess (the parameter is sliced / indexed and nothing else
+            # said what it is) yields to a UNANIMOUS string observation: a string
+            # literal at every call site is proof, and a real list there would be a
+            # TypeError in Python (the method contract in `_apply_method_scalar_obs`
+            # makes the same call).
+            if cur in (None, 'int', 'int64_t') or (cur == 'MojoList *' and _has_cs):
                 resolved_type = 'double' if _has_dbl else 'char *'
                 self._inferred_param_types.setdefault(callee, {})[pname] = resolved_type
 
