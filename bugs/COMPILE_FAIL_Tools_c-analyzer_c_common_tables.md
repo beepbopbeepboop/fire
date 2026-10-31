@@ -4,6 +4,34 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status 2026-10-30 (round 3) — planning correction: step 1's site is wrong
+
+No code change this round; this corrects the round-2 plan before anyone executes it.
+
+Round 2's step 1 says to change `mojo/middle/types.py` `_cpp_lambda_ctype`
+to admit a foreign-callable default. That is the wrong site. `_cpp_lambda_ctype`
+(types.py:2472) only classifies LAMBDA literals (its docstring: "for a
+coroutine-body `lambda` literal"). `_get_reader=csv.reader` is a default on a
+`def` parameter of `read_table`, which is typed by
+`mojo/middle/infra_infer.py` `_infer_param_types` (infra_infer.py:~265), and
+that function never consults `_cpp_lambda_ctype`. So a default on a `def`
+parameter gets no callable ctype from either function.
+
+**Corrected step 1:** in `_infer_param_types`, when a parameter has a default
+whose value is a name in the foreign-callable table (decision (A)), bind the
+parameter to that callable's ctype (`_CPP_CALLABLE_CTYPE`-family for the
+signature the table gives) instead of the `int64_t` fallback. The lambda path
+(`_cpp_lambda_ctype`) stays as it is. Test: a `def f(x, _g=csv.reader)` whose
+body iterates `_g(...)` gets a callable-typed parameter in the declared-param
+dump (the existing `declared` measurement from the 2026-10-02 entry).
+
+**Still needed before step 1 can land:** the decision (A)/(B)/(C) above is
+unchanged and has not been made. Step 1 under (A) also requires the table
+itself, which does not exist. Nothing in this round landed code; the next
+round either (i) gets the (A)/(C) decision from the user, or (ii) under (A),
+builds the table entry for `csv.reader` plus the step 1 change above, then
+measures `read_table`'s `coro.py` `_eligible` status before step 3.
+
 ## Status 2026-10-30 — PARTIAL, refusal pinned, full fix deferred (no make gate)
 
 Verified with `python3 tools/memslot.py --gb 8 --label read-table-refusal -- ...`:
