@@ -86,6 +86,20 @@ count and whether `_dlsym` copies now get unique names were not measured), `make
 Still open: the dylib dedup, Option A steps 2-4 above. Only type-parameter instantiations are materialized
 by this change; value-parameter generics stay on the `.o` route, which is what made the gate red.
 
+### 2026-10-31 worker round (partial; root cause still open)
+
+**Verified on this branch.** `test_link_mode.py`'s `test_two_modules_specialize_one_generic_differently` passes (`26 passed, 0 failed` per the doc); the inline `do_imports=True` guard that caused the silent-zero stub is removed (commits `3c23586c0`, `8222d38d6`). The repro no longer prints `0/0`; both callers receive their specialization (`20`/`30`).
+
+**Not fixed: the claimed root cause.** The seed in `elab_intu.py` still restricts `kind == 'fn'` to `_fn_returns_unbuildable_struct`; generic function instantiations with concrete type args (e.g. `dlsym[NoneType]`) are NOT materialized through `monomorphize_source`, so each module's inline copy is still emitted under the bare symbol `_dlsym`. `build_stdlib_dylib.py` was NOT run (needs integrator gate); `dedup.log` is expected to still show 130 `exclude: _dlsym` lines; module count is expected to stay at 249, not 379.
+
+**What is missing (Option A steps 2-4, per doc §Next step):**
+1. Extend seed (`seed` ~3358) to enqueue `fn` roots whose `elaborate.type_param_names` is non-empty, with args from `_concrete_args` (bracketed) or `_infer_fn_args` (inferred), using `_fn_args_are_types` to refuse value-parameter bindings. Keep `_MAX_INSTANTIATIONS`.
+2. Confirm `_rewrite_callees` (~3650) rewrites bare calls to the `mangled` alias, and the `.o` route skips emitting the bare-name copy via `_intu_func_args`.
+3. Emit: file-local copies become `static`; cross-module copies export the unique `mangle` name.
+4. Confirm `build_stdlib_dylib.py`: `dedup.log` has 0 `exclude`; module count reaches 379.
+
+This needs the full gate (`make gate` / `compile_stdlib.py` / `build_stdlib_dylib.py`) because it touches every generic-function call site; not done here per rules §2 (no whole-closure compile, no self-host build).
+
 ### 2026-10-30 partial fix (landed; the dylib part is still open)
 
 **What landed.** The repro `test_two_modules_specialize_one_generic_differently` was not a shared-symbol
