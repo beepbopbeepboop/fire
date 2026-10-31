@@ -5488,6 +5488,12 @@ class GimpleGen:
         return ginf._collect_return_types(self, stmts, acc)
     def _coerce_to_type(self, src_type: str, dst_type: str, value: str) -> str:
         return ginf._coerce_to_type(self, src_type, dst_type, value)
+    def _cpp_container_cast_prefix(self, kind: str, via_intptr: bool) -> str:
+        return grsl.cpp_container_cast_prefix(kind, via_intptr)
+    def _container_null(self, kind: str) -> str:
+        return grsl.container_null(kind)
+    def _cpp_word_container_operator(self, kind: str, via_intptr: bool) -> str:
+        return grsl.cpp_word_container_operator(kind, via_intptr)
     def _materialize_as_list(self, src_type: str, value: str) -> str:
         return ginf._materialize_as_list(self, src_type, value)
     def _infer_return_type(self, body: list) -> str:
