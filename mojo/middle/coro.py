@@ -725,6 +725,11 @@ def _yield_kind(expr, env: dict | None = None) -> str | None:
         if isinstance(v, tuple) and v[0] == 'list':
             return v[1]
         return None
+    # `entry.name` / `entry.path` after the DirEntry lowering
+    # (`cpp_core._cpp_dirent_rewrite`) are these runtime calls: strings.
+    if (isinstance(expr, N.CallExpr) and isinstance(expr.func, N.IdentExpr)
+            and expr.func.name in ('mojo_dirent_name', 'mojo_dirent_path')):
+        return 'p'
     # A DIRECT `os.path.<fn>(...)` call to a runtime-implemented function.
     _opk = _os_path_call_kind(expr)
     if _opk is not None:

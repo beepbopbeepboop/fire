@@ -7015,6 +7015,34 @@ def main():
 main()
 """, "a\n1\n2.5\nTrue\nz\n<a>\n<1>\n<2.5>\n<True>\n")
 
+    # The same TAGGED word on the C++20-coroutine path (a generator with a
+    # `try` / `with os.scandir` the stack-switch path hands to it): a string,
+    # an int and a float yield from one body.
+    test_generator_stdout("generator_mixed_kind_yields_tagged_word_cpp_path", """\
+import os
+
+def g(top):
+    try:
+        with os.scandir(top) as entries:
+            for entry in entries:
+                if entry.is_dir():
+                    yield entry.name
+                else:
+                    yield 1
+    except OSError:
+        yield 2.5
+
+def main():
+    for v in g("/nonexistent_dir_for_scandir"):
+        print(v)
+    for v in g("/tmp/_gen_scandir_fixture"):
+        if v == 1:
+            print("file")
+        else:
+            print(v)
+main()
+""", "2.5\nfile\nsub\n")
+
     # ...and a tagged-word generator consumed any OTHER way (next, list,
     # comprehension) would read the box's address as an int, so it keeps its
     # refusal instead.

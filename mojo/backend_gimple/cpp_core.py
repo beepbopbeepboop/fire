@@ -5200,7 +5200,16 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 # word a heterogeneous `pop()` produced: the promise slot is
                 # a `MojoList *` (the tuple), so narrow the word to it.
                 return [f"{indent}co_yield (MojoList *)(intptr_t)({gen._cpp_expr(s.value.value)});"]
-            return [f"{indent}co_yield {gen._cpp_expr(s.value.value)};"]
+            # Mark the site with its static ctype: if the generator's yields turn
+            # out to be of different known scalar kinds, `_gen_cpp_generator_unit`
+            # boxes each site by this marker (a TAGGED-word value slot);
+            # otherwise it is just a comment.
+            _ysite = gimple_exprtypes._infer_simple_expr_ctype(
+                s.value.value, declared, getattr(gen, '_cpp_gen_self_fields', None),
+                gen._async_api) or 'unresolved'
+            _ytag = {'char *': 'str', 'double': 'dbl', '_Bool': 'bool',
+                     'int64_t': 'int'}.get(_ysite, 'other')   # no raw `*` in a comment
+            return [f"{indent}co_yield /*Y:{_ytag}*/ ({gen._cpp_expr(s.value.value)});"]
         if isinstance(s.value, gimple_ctypes.YieldFromExpr):
             if gen._cpp_emit_kind in ('async', 'async_gen'):
                 raise gimple_exprtypes._UnsupportedAsyncShape(

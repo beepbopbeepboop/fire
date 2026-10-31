@@ -40,6 +40,7 @@ from fire_compiler import for_target_names
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
+import mojo.middle.coro as coro_mod
 from mojo.middle.exprtypes import _walk_ast_invalidate
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
@@ -309,6 +310,46 @@ def _cpp_except_handler_body(gen, handler, caught_var: str, declared: dict,
     finally:
         gen._cpp_reraise_stack.pop()
     return lines
+
+
+_Y_SITE = re.compile(r'co_yield /\*Y:([^*]*)\*/ \((.*)\);$')
+
+
+def _cpp_tag_yield_sites(body_lines: list):
+    """The body lines with every `co_yield /*Y:<ctype>*/ (<expr>);` site boxed
+    into one int64_t word by its marked ctype (a double as `mojo_box_from_double`,
+    a bool as `mojo_box_from_bool`, a string by its pointer, an int as itself),
+    or None when the sites do not form a TAGGED value slot: fewer than two
+    different ctypes, a ctype that is not one of the four scalar kinds, or a
+    yield with no marker (a tuple / delegated / bare yield)."""
+    kinds = set()
+    out = []
+    for ln in body_lines:
+        if 'co_yield' not in ln:
+            out.append(ln)
+            continue
+        m = _Y_SITE.search(ln.strip())
+        if m is None:
+            return None
+        ct = {'int': 'int64_t', 'dbl': 'double', 'str': 'char *',
+              'bool': '_Bool'}.get(m.group(1).strip())
+        if ct is None:
+            return None
+        kinds.add(ct)
+        indent = ln[:len(ln) - len(ln.lstrip())]
+        expr = m.group(2)
+        if ct == 'double':
+            w = f"mojo_box_from_double((double)({expr}))"
+        elif ct == '_Bool':
+            w = f"mojo_box_from_bool((int64_t)({expr}))"
+        elif ct == 'char *':
+            w = f"(int64_t)(intptr_t)((char *)({expr}))"
+        else:
+            w = f"(int64_t)({expr})"
+        out.append(f"{indent}co_yield {w};")
+    if len(kinds) < 2 or kinds == {'int64_t', '_Bool'}:
+        return None
+    return out
 
 
 def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
@@ -926,6 +967,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     nested_helper_lines: list[str] = _cpp_compile_nested_sync_helpers(
         gen, fn, base, declared, self_fields, struct_name)
     gcc_._cpp_reset_unit_state(gen)
+    _tagged_yield = False
     try:
         body_lines: list[str] = []
         for s in fn.body:
@@ -992,6 +1034,23 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
             value_ctype = None
         gen._cpp_last_tuple_slot_ctypes = tuple_slot_ctypes if has_tuple_yield else None
         gen._cpp_last_mixed_slots = bool(getattr(gen, '_cpp_mixed_list_params', None) or getattr(gen, '_cpp_word_iter_locals', None))
+        # TAGGED-word value slot: the yields' kinds are all KNOWN but not one
+        # type (the solver cannot keep it tight), and the module only ever
+        # consumes this generator through `for` loops, which bind the value as a
+        # boxed word. Box each site by its marked ctype.
+        _tagged_yield = False
+        if (value_ctype is None and not has_tuple_yield
+                and coro_mod._generator_value_kind(
+                    fn, coro_mod._static_env(fn, struct_def))[0] == 'w'):
+            # the stack-switch kind analysis (which also checks the consumers)
+            # must agree: every yield has a KNOWN kind -- the cpp typer alone
+            # reads an unresolved name as int64_t, which would tag a hole.
+            _tag_body = _cpp_tag_yield_sites(body_lines)
+            if _tag_body is not None:
+                body_lines = _tag_body
+                value_ctype = 'int64_t'
+                gen._cpp_last_mixed_slots = True
+                _tagged_yield = True
         func_decls = list(gen._cpp_func_scope_decls)
         self_recursed = gen._cpp_gen_self_recursed
         fwd_delegates = list(gen._cpp_fwd_gen_delegates)
@@ -1020,7 +1079,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     # whose slot cannot hold it (bugs/CODEGEN_generator_yield_kind_rebound_
     # name_silent_wrong_value.md, Shape 2). Checked only when a slot was
     # decided at all: an undecided slot is refused below with its own message.
-    if value_ctype is not None:
+    if value_ctype is not None and not _tagged_yield:
         _slot_why = gimple_gen_coro.cpp_value_slot_refusal(fn, value_ctype, struct_def)
         if _slot_why is not None:
             raise gimple_exprtypes._UnsupportedGeneratorShape(f"{fn.name}: {_slot_why}")
