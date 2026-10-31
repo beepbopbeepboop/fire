@@ -235,3 +235,56 @@ full-closure probe with the `_lower_IdentExpr` dump from the 2026-10-29 round
 is still the step that decides it; add `gen._imported_global_accessors.get('_coro')`
 and its C type to that dump, since that is the one value this round showed
 matters.
+
+### Round 2026-10-30b — partial fix: accessor read is typed as a generator (light worker)
+
+**Landed:** the `_imported_global_accessors` arm of `_lower_IdentExpr`
+(`mojo/backend_gimple/emit_exprs.py`, ~538-560) now, when the name has a
+recorded, unpoisoned generator api, unboxes the accessor word through
+`void *` into a `MojoGenerator *` read temp (the same unboxing the own-global
+read arm does at emit_exprs.py ~921-928) and returns ctype `MojoGenerator *`.
+Before, it returned the export's declared type (`void *`), so `.close()`/`next()`
+refused with "receiver typed `void *`" even though the api had been carried.
+Test: `test_regress_coro_close_closure.py::test_accessor_read_of_generator_is_typed_as_generator`
+(FAILS on HEAD with `accessor read _t1 typed void *`, PASSES with the fix).
+`test_gimple_generator_runner.py`: 297 pass / 8 fail, the SAME 8 on HEAD
+(`generator_explicit_call_arguments_still_resolve`, ... see
+`CODEGEN_genexp_over_annotated_param_refused.md`,
+`CODEGEN_generator_function_Lib_os.md`), so none is caused by this change.
+
+**Measured this round (not a fix):**
+- The defining module's OWN accessor for a generator-held global is
+  `int64_t root__mojo_global_get__coro(void)` (`var _coro = _g()` in a sibling,
+  compiled alone, `do_imports=True`). The boxed-word convention holds there.
+- The export scan (`module_loader.load_module_from_path`) types a
+  `var NAME = <call>` line as `void *` (module_loader.py ~1262-1270), so an
+  importer declares the accessor `void *`, not the real handle type. The scan
+  reads ONLY `var` lines: a plain `NAME = _g()` in a `.py`/`.mojo` sibling is
+  not exported at all (no accessor), and the importer reads it typed `int64_t`.
+- **Cross-module api transport is absent in the small closure.** For both
+  sibling shapes (`var _coro = _g()` and plain `_coro = _g()`), the importer's
+  gen does NOT record `_global_generator_api['_coro']` (checked at each
+  `_lower_IdentExpr('_coro')`: `api_in=False`). So the importer never learns the
+  global is a generator, and the refusal stays `void *` / `int64_t`
+  ("`next(...)` on next(IdentExpr) (receiver typed ...)"). The accessor arm
+  fix therefore does not fire for these shapes; it fires only when the api is
+  already in the importer's gen-wide table (a defining module compiled into
+  the same gen, plus an accessor registered for the name).
+- **Stdlib name poisoning is ruled out by grep.** In the Python 3.14.6 stdlib
+  (`/Users/mrs/net/Python-3.14.6/Lib`), `_coro` is bound at module scope ONLY in
+  `_collections_abc.py:94-95` (`async def _coro(): pass` / `_coro = _coro()`);
+  every other hit is a local or an attribute. So no other stdlib module can
+  poison the name through `_write_dest`/emit_infra.py:3689 in the rows'
+  closures. (Grep of the closure's import graph, not a closure run.)
+
+**Next step (unchanged in shape, now narrower):** the closure refusal is still
+unnamed, and the owed heavy probe (mailbox, `do_imports=True`, cold store, the
+`_lower_IdentExpr` dump of `_global_generator_api`, `_global_generator_api_poisoned`,
+`_imported_global_accessors`, `_captures`, `_narrowed_exprs`, `_boxed_mut_locals`,
+`_in_toplevel_gen`, `_async_api`, `_unsupported_generator_names`) is still the
+decider. Before running it, the designable gap is the cross-module transport:
+if the closure probe shows `_global_generator_api` lacks `_coro` in the reading
+gen, the fix is to carry generator-ness through the export (module_loader's
+`var` export, plus the defining accessor's C type kept consistent with the
+export's declared type), not in the read arm. Full-gate verdict needed on the
+four rows' reject censuses (56/48/62/66) before this lands as a closure fix.

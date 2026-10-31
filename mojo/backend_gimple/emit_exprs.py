@@ -538,13 +538,27 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
     # every other special-case branch in this method.
     if name in gen._imported_global_accessors and name not in gen.var_types:
         _acc_ctype, _acc_csym = gen._imported_global_accessors[name]
-        t = gen._call_expr(_acc_ctype, _acc_csym, [])
         # A module-level generator/coroutine held in a global that is read
         # through an imported accessor (full-closure case where another
         # module registered the accessor) must still carry its API onto
         # the fresh read-back temp, else .close() / next() refuse.
-        if (name in gen._global_generator_api
-                and name not in gen._global_generator_api_poisoned):
+        _gen_api_known = (name in gen._global_generator_api
+                          and name not in gen._global_generator_api_poisoned)
+        if _gen_api_known and _acc_ctype != 'MojoGenerator *':
+            # The export's declared type is the export scan's guess (a
+            # `var NAME = call()` line is typed `void *`), not the handle's
+            # real type, so the read must unbox to `MojoGenerator *` itself.
+            # Same unboxing the own-global read arm below does for a boxed
+            # generator global: the word goes through `void *`, never a
+            # direct int64_t -> pointer assignment.
+            _raw = gen._call_expr(_acc_ctype, _acc_csym, [])
+            _vp = gen._new_val('void *', f'(void *){_raw}')
+            t = gen._new_temp('MojoGenerator *')
+            gen._emit(f'  {t} = (MojoGenerator *){_vp};')
+            _acc_ctype = 'MojoGenerator *'
+        else:
+            t = gen._call_expr(_acc_ctype, _acc_csym, [])
+        if _gen_api_known:
             gen._generator_var_api[t] = gen._global_generator_api[name]
         return _acc_ctype, t
     # Struct/class type name used as a value (e.g. cls arg) — return zero placeholder
