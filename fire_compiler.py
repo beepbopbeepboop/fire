@@ -6206,7 +6206,22 @@ class Parser:
             return StringLiteral(_val, line=line, col=col, is_raw=_all_raw)
         _merged = ''
         for _r in raws:
-            _merged += self._string_literal_inner(_r)
+            _inner = self._string_literal_inner(_r)
+            if not self._raw_string_is_ftstring(_r):
+                # A plain piece is LITERAL text, but the merged body is an
+                # f-string, where `{...}` is an interpolation and a backslash
+                # is decoded. Without escaping, `f"[{a}]" "{ q }"` interpolated
+                # `q` (CPython: `[A]{ q }`), and the compiled path lowered the
+                # `{ mojo_exc_pending_set(0); ` in cpp_core's C-text emitter as
+                # a call. Double the braces, except a `\N{NAME}` escape, which
+                # is one token; a raw piece's backslashes are doubled too.
+                if self._raw_string_is_raw(_r):
+                    _inner = _inner.replace('\\', '\\\\')
+                _inner = re.sub(r'(\\N\{[^{}]*\})|([{}])',
+                                lambda _m: _m.group(1) if _m.group(1)
+                                else _m.group(2) * 2,
+                                _inner)
+            _merged += _inner
         _dq3 = '"' * 3
         _sq3 = "'" * 3
         # `is_interpolated=True` on all three returns, and the evidence is the

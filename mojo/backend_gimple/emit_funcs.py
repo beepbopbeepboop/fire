@@ -2811,6 +2811,13 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # Set module context for global field access
     gen._current_module_ctx = gen.module_name if len(gen.module_name) > 0 else "root"
     gen.current_func_name = node.name
+    # A module-level function is not a method: clear the struct a previous
+    # METHOD body left behind (the method path sets it and never resets it).
+    # A stale name made a local called `cls` here take the classmethod arm of
+    # `_lower_MemberExpr`, lowering `cls.methods` to a dynamic
+    # `mojo_class_getattr` word, which then reached `mojo_dict_get_int` as an
+    # int ("makes pointer from integer") in myinterpreter's `__iter__` lookup.
+    gen._current_struct_name = ""
     # Which of THIS function's parameters are annotated `bool` — see
     # `gimple_exprtypes.record_bool_params`. Recorded here because this is the
     # one place the annotation text and the emitted function name are both in
@@ -3303,6 +3310,7 @@ def _gen_toplevel(gen, toplevel_stmts: list) -> str:
     else:
         fn_name = gimple_ctypes._module_toplevel_name(gen.module_name)
     gen.current_func_name = fn_name
+    gen._current_struct_name = ""   # top-level code is outside any method body
     gen.func_ret_type = 'void'
     gen.func_return_types[fn_name] = 'void'
 

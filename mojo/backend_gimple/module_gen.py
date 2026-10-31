@@ -10135,7 +10135,12 @@ def gen_module_impl(self, stmts):
     _vu_fn_names = set(_as_str(_f.name) for _f in all_functions
                        if isinstance(_f, FunctionDef))
     _vu_callees = set()
-    _vu_refs = set()
+    # id(IdentExpr) -> the function name it references. A dict keyed by the
+    # node's id, not a set of (id, name) pairs: each node is visited once, the
+    # id is the identity, and a set of tuples has no element representation in
+    # the runtime (its iterator yields a word), so the compiled path could not
+    # unpack `for (_i, _nm) in <set of pairs>`.
+    _vu_refs = {}
     for _vu_f in all_functions:
         if not isinstance(_vu_f, FunctionDef):
             continue
@@ -10143,8 +10148,8 @@ def gen_module_impl(self, stmts):
             if isinstance(_vu_n, CallExpr) and isinstance(_vu_n.func, IdentExpr):
                 _vu_callees.add(id(_vu_n.func))
             elif isinstance(_vu_n, IdentExpr) and _as_str(_vu_n.name) in _vu_fn_names:
-                _vu_refs.add((id(_vu_n), _as_str(_vu_n.name)))
-    self._value_used_funcs = set(_nm for (_i, _nm) in _vu_refs if _i not in _vu_callees)
+                _vu_refs[id(_vu_n)] = _as_str(_vu_n.name)
+    self._value_used_funcs = set(_vu_refs[_i] for _i in _vu_refs if _i not in _vu_callees)
     _em_before = sum(len(_v) for _v in self._param_elem_mixed.values())
     _resolve_param_dict_vals()
     _resolve_param_containers()
@@ -16380,7 +16385,13 @@ def gen_module_impl(self, stmts):
                     # (which goes through _param_ctype's own bytes-default
                     # hook). Mismatch → "conflicting types for 'size'".
                     param_ctypes.append('MojoBytes *')
-                elif pn in inferred_params:
+                elif pt is None and pn in inferred_params:
+                    # Usage inference only for an UNANNOTATED parameter: an
+                    # annotation outranks it, and `_param_ctype` (what the
+                    # definition uses) is the authority for an annotated one.
+                    # Taking the inferred type here declared
+                    # `_debug_note(where, detail: object='')` as `char *` while
+                    # the definition typed it `int64_t` ("conflicting types").
                     param_ctypes.append(inferred_params[pn])
                 else:
                     param_ctypes.append(self._param_ctype(pn, pt, fdef))

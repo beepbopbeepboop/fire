@@ -44,6 +44,7 @@ import mojo.middle.comptime as comptime_eval
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 import gimple_codegen
+from build_config import find_gxx, runtime_dir as _bc_runtime_dir
 import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
 import ownership_destruct
@@ -1252,7 +1253,6 @@ def _compile_link_inline_cpp_unit(gen, cpp_code: str):
         import cas
         import subprocess
         import tempfile
-        from build_config import find_gxx, runtime_dir as _bc_runtime_dir
     except Exception as e:
         gimple_ctypes._debug_note('cannot compile link-mode inline-module cpp unit '
                     '(import failure)', e)
