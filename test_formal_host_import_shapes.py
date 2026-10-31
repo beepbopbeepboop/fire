@@ -40,6 +40,7 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, "tools"))
 
 import formal_host_import_shapes as S     # noqa: E402
+import tools.formal_host_import_wall as _wall  # noqa: E402
 
 # Every shape the tool can print. A shape that is not in this set is a bug in
 # the tool or in this table, and the corpus test below fails on either — the
@@ -442,6 +443,86 @@ class TestAgainstTheRealCorpus(unittest.TestCase):
             f"substitution was undone — put it back and say why — or the row "
             f"needs a module after all, which is a bigger claim than this "
             f"ratchet can make on its own")
+
+
+class TestTheDocRatchet(unittest.TestCase):
+    """Regression pins for TEST_formal_host_import_shapes_is_red_and_in_no_bucket.
+
+    Both rows were red before 2026-10-08. This class pins the correct state
+    so a later regression lands here rather than surfacing only as a red ratchet."""
+    
+    def setUp(self):
+        self.dir = os.path.dirname(os.path.abspath(__file__))
+    
+    def test_no_dead_import_in_formal_doc_index(self):
+        """Row 1: dead host import in tools/formal_doc_index.py should be absent.
+
+        Before 2026-10-08 the file carried an unused `import subprocess` that
+        the dead‑import ratchet counted as blocking the file — exactly as if the
+        module were absent. It was removed in commit 73e03459a."""
+        found = S.dead_host_imports(self.dir)
+        doc_index = {p: n for p, n in found if p == "tools/formal_doc_index.py"}
+        self.assertEqual(doc_index, {},
+                         "a dead host import blocks its file for exactly the reason "
+                         "an absent module does; this is an unused `import subprocess`")
+    
+    def test_importlib_util_row_names_include_find_spec(self):
+        """Row 2: importlib.util row should be pinned to three names including find_spec.
+
+        Before 2026-10-08 the row only listed two names (`module_from_spec`,
+        `spec_from_file_location`). The `find_spec` name was added and pinned
+        because it asks an embedded CPython to resolve a module at build time,
+        which differs from the runtime‑by‑path capability the row actually cares
+        about. The test was updated in commit 73e03459a."""
+        sweep = S.default_sweep()
+        if not sweep or not os.path.isfile(sweep):
+            self.skipTest("no sweep log in this checkout")
+        rows = S.rows_for(sweep)[0]  # S.rows_for returns (rows_list, missed, total)
+        row = next((r for r in rows if r["name"] == "importlib.util"), None)
+        if row is None:
+            self.skipTest("the importlib.util row has left the corpus")
+        self.assertTrue(row["live"] > 0,
+                        "importlib.util has left the corpus; delete this case")
+        self.assertEqual(sorted(row["names"]),
+                         ["importlib.util.find_spec",
+                          "importlib.util.module_from_spec",
+                          "importlib.util.spec_from_file_location"],
+                         "the importlib.util row is blocked on the names that ask the "
+                         "embedded CPython to place a module — by search, by path, or "
+                         "from a spec — which is why the row is tiered unreachable and "
+                         "not modelled")
+
+
+class TestTheWallsColumns(unittest.TestCase):
+    """`reach` / `alone` here are `tools/formal_host_import_wall.py`'s, computed
+    over the WALL's own corpus. They were once computed over the sweep's blocked
+    files for each module — the same column name answering a different question
+    (measured before this was pinned: `copy` 7 vs the wall's 297, `builtins` 3
+    vs 35). Pinned against the real sweep, because the disagreement only exists
+    at corpus scale."""
+
+    def setUp(self):
+        sweep = S.default_sweep()
+        if not sweep or not os.path.isfile(sweep):
+            self.skipTest("no sweep log in this checkout")
+        self.rows, _, _ = S.rows_for(sweep, min_files=1)
+        self.assertTrue(self.rows, "no host-import rows")
+
+    def test_reach_and_alone_are_the_wall_tools(self):
+        wall = _wall.default_rank()
+        for r in self.rows:
+            info = wall.get(r["name"], {"reach": [], "alone": []})
+            self.assertEqual(r["reach"], len(info["reach"]),
+                             f"{r['name']}: shapes reach != wall reach")
+            self.assertEqual(r["alone"], len(info["alone"]),
+                             f"{r['name']}: shapes alone != wall alone")
+
+    def test_reach_is_over_the_corpus_not_the_sweep_files(self):
+        # A closure reaches files the sweep never blocked on, so for some row
+        # `reach` must exceed `files`. If every row is bounded by its sweep
+        # files, the columns were computed over the subset again.
+        self.assertTrue(any(r["reach"] > r["files"] for r in self.rows),
+                        "every row's reach is bounded by its sweep files")
 
 
 if __name__ == "__main__":

@@ -1,8 +1,70 @@
 # A method receiver whose type could not be resolved returns the receiver's own pointer bits
 
+## Status 2026-10-29 — planning round (the guide; no code landed here)
+
+Measured on the tree after the list-copy and class-attribute fixes: this is
+the one red case left in `test_gimple_runner.py` (the gate's `gimplerunner`
+job). It prints `4374860544` / `4374860208` where CPython prints `2` / `2`.
+The generated C for `L.numel` is still `_t1 = self->w; _t2 = _t1;
+/* int64_t.numel() stubbed */`.
+
+Decision (recommended, no further input needed): dispatch by a GENERATED
+switch on `__mojo_type_id`, not by a runtime table in `fire_runtime.c`. The
+type ids are compile-time constants already (`_struct_type_id(sn)`), and
+`_emit_reflection_dispatch` (`mojo/backend_gimple/module_gen.py`, starts at
+line 1693) already emits exactly that comparison for `_mojo_dispatch_getattr`
+and its siblings. A runtime registry would add state that ASLR and the
+allocator can disturb, for no gain.
+
+Plan, in the order it has to land:
+
+1. `mojo/backend_gimple/module_gen.py`, the constructor observation pass
+   (around lines 10789-10945). `_ctor_scalar_obs` keeps only the FIRST type seen
+   for `<Struct>::<param>`, and a second, different one only sets
+   `_ctor_scalar_conflict[_skey] = True`, discarding the candidate. Keep the set
+   instead: add every observed `<Struct> *` to `_ctor_struct_cands[_skey]` in
+   both observation loops (the `__init__`-call loop and the caller-body loop).
+   A scalar conflict keeps its current `True` behaviour.
+2. Same file, where a slot is left at `int64_t` because of a struct-pointer
+   conflict (the `_ctor_lit_param_types` writer, around line 10940): record
+   `self._poly_slot_cands[_skey] = sorted(cands)`. The field `w` of `L` has the
+   same key (`L::w`), because the param is stored under its own name.
+3. Same file, beside `_emit_reflection_dispatch`: for each method name `m` that
+   ≥2 candidates define, emit `static int64_t _mojo_poly_<m>(void *o, ...)` that
+   switches on `_struct_type_id(S)` and calls `S_<m>((S *)o, ...)` for each
+   candidate, with a forward declaration next to the struct prototypes. REFUSE
+   with a named compile error when the candidates disagree on the method's
+   return type or arity. A silent wrong answer is the failure this removes.
+4. `mojo/backend_gimple/emit_methods.py`, `_lower_struct_method_call` (line
+   ~6894). When `ot` is `int64_t` and the receiver is `self.<f>` or an
+   IdentExpr whose slot is in `_poly_slot_cands`, and every candidate has
+   `{S}_{m}` in `func_return_types`, lower to `_mojo_poly_<m>(recv, args...)`.
+   Before editing, confirm which of the two stub emitters fires for this
+   shape: `emit_calls.py:4419` (`{fname}() stubbed`) or `emit_methods.py:2564`
+   (`int64_t.<m>() stubbed`). The C above says the second.
+5. Runtime: nothing. A tag that matches no candidate must raise through
+   `mojo_raise_attribute_error(m)`, the same real AttributeError a missing
+   dynamic attribute raises, so `except AttributeError:` still catches it.
+
+Tests, in `test_gimple_runner.py` beside
+`gimple_ctor_param_polymorphic_slot_stays_unresolved`:
+
+- `gimple_ctor_param_polymorphic_slot_reads_receiver` (already there, `2`/`2`)
+  must pass.
+- A three-candidate variant whose method takes an argument (`return self.n * k`),
+  checked against CPython.
+- A refusal: two candidates whose `numel` return types differ must fail with
+  the named compile error, not compile.
+- A unanimous slot still resolves statically: the generated C for it must not
+  contain `_mojo_poly_`.
+
+Risk: `module_gen.py` and `emit_methods.py` are on the compiled path, so this
+owes the full `make gate` (the integrator runs it) and not only the runner file.
+Nothing known blocks it.
+
 **State: OPEN. Found 2026-10-01 while fixing
-`bugs/hard/CODEGEN_param_used_only_as_method_receiver.md`'s constructor
-direction (doc deleted, same commit). Not caused by that fix — a genuinely
+the constructor direction of the method-receiver struct-pointer fix
+(commit ddf415104, doc deleted in the same commit). Not caused by that fix — a genuinely
 polymorphic slot was never resolvable and still is not; what changed is only
 that the UNanimous case now resolves, which makes the unresolvable case
 visible as what it is.**
@@ -52,7 +114,7 @@ The two numbers are the two different heap addresses the `T *` / `U *` had.
 `L.__init__`'s `w` is passed a struct pointer at both call sites, and the
 observation is NOT unanimous (`T *` at one, `U *` at the other), so the
 documented rule leaves the slot at the `int64_t` default —
-`bugs/hard/CODEGEN_param_used_only_as_method_receiver.md`'s fix and the
+the method-receiver struct-pointer fix (commits ddf415104, 6379400b1) and the
 `Pass 1.3d-struct` loop above it both refuse on disagreement. That part is
 correct.
 
@@ -107,7 +169,7 @@ observation set:
 
 - empty set → keep today's stub (genuinely opaque);
 - a single `<Struct> *` → this can no longer happen after
-  `CODEGEN_param_used_only_as_method_receiver`'s fix, and is worth an
+  the method-receiver struct-pointer fix (ddf415104), and is worth an
   assertion rather than code;
 - two or more `<Struct> *`s → emit a polymorphic receiver: pass the boxed
   receiver and the method name to a runtime helper that reads

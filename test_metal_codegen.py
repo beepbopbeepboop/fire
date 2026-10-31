@@ -2304,3 +2304,23 @@ class TestReadOnlyBuffersAreNotWrittenBack(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class TestTileCollapseRegression(unittest.TestCase):
+    """PERF_tensor_core_tile_collapse_cause: 16x16 emission and grid arithmetic.
+    Before b2407f34b the synthesiser emitted 32x32 (acc[4][4]) and the fused
+    grid was sized to reps only (wrote 1/256th of outputs behind a periodic
+    checksum). After: 2x2 / 16x16 body and tiles-expr grid."""
+
+    def test_16x16_tile_emitted_not_32x32(self):
+        info = ofl.GemmInfo('A', 'B', 'C', 'm', 'k', 'n', 'acc', 'float',
+                           {'A':'m*k', 'B':'k*n', 'C':'m*n'})
+        msl = ofl.gemm_tensor_core_msl(info)
+        self.assertIn('simdgroup_matrix<float, 8, 8> acc[2][2]', msl)
+        self.assertNotIn('acc[4][4]', msl)
+
+    def test_fused_grid_states_tile_count(self):
+        info = ofl.GemmInfo('A', 'B', 'C', 'm', 'k', 'n', 'acc', 'float',
+                           {'A':'m*k', 'B':'k*n', 'C':'m*n'})
+        grid = ofl.gemm_fused_tensor_core_grid(info, 2)
+        self.assertIn('m', str(grid[1]))
+        self.assertIn('n', str(grid[1]))

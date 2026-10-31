@@ -17,7 +17,30 @@ which also carries the certificate-bound blocker) and the cross-check half is a
 changed and §"What is left" is the residue. **The arm64 refusal COUNT is
 unchanged** (41 of 60), because on arm64 a conditional expression is one
 `CSEL`; what changed is that the refusal names the instruction it cannot step
-instead of naming a construct the model now handles.
+instead of naming a construct the model now handles. **Re-verified 2026-10-27 on
+this tree, and the one stale row in the class is re-measured**: the minimal
+reproducer still refuses on arm64 naming `CSEL (0x9a801020)` and this doc's
+machine-half measurement, `TestAConditionalExpressionIsAValue` is 8/8 and
+`TestTheConditionalExpressionModelTypechecks` typechecks the generated file
+with exactly the two designed trust boundaries as holes — and the row §0 said
+would be re-measured IS re-measured: `STUR`/`LDUR` having `_STEP_CONDS` rows
+64/65, `test_a_spill_is_not_attributed_to_the_conditional_expression` now
+asserts the spilling function GENERATES an arm64 proof (measured: it does) and
+pins the name read off the encoding plus the absence of a `_ternary_go` blame
+instead of the retired refusal asserts. The corpus, same command as
+§"Reproducing": arm64 6 of 60 reach a proof (not-checked), of 52
+proof-refusals 13 name `CSEL` and 39 name a DIFFERENT universal-theorem shape
+(the halt address behind a `CONDITIONAL`), and none name `STUR`/`LDUR`; 2 more
+are codegen-refused (`getrlimit` binds nothing) — the generator's mix has moved
+past §0's 19/38/3 split; x86-64 60 of 60 reach a proof. Neither remaining half
+has moved: `arm64_step` still has no `CSEL` branch
+(`FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`) and
+`MojoExpr`'s constructors still carry no conditional form, so this doc stays
+open for both. The test file's one other red row —
+`TestTheNestedExprRoutes.test_the_COMBINED_recursor_takes_a_motive_for_the_
+LIST_too` — is pre-existing and not this construct's: its `RECURSE_ROUTE`
+snippet references `ev`/`evArgs` it never defines, red since its WIP-snapshot
+landing `a552e99e`.
 
 ## 0. What landed, measured, and the one family in §"What was seen" that was
 ## never this bug

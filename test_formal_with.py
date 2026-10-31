@@ -271,6 +271,46 @@ ALIAS_TYPED_PY = ALIAS_TYPED_MOJO.replace(
     "        print('exit')")
 
 
+# `*args` is CPython's three exception words caught by a VARIADIC parameter —
+# the other spelling of the shape `THREE_ARGS` is.  CPython calls
+# `__exit__(type, value, tb)` POSITIONALLY, so the triple lands in `args`; this
+# path calls with the receiver alone, binding `args` to the empty tuple.  A body
+# that never reads `args` cannot tell the two apart, so the shape lowers
+# (`model.context_exit_variadic_ignores`).  It used to be refused because the
+# star was read from a `vararg` ATTRIBUTE no node on this front end has (the
+# parser keeps the star in the parameter NAME), which made it look like arity 2.
+# Defined up here rather than beside `THREE_ARGS_READS` because the DECLARED
+# table below, which is the ANSWERED half, names it.
+VARIADIC_EXIT = """class Variadic:
+    def __init__(self):
+        self.tag = 7
+        self.log = 0
+
+    def __enter__(self):
+        print('enter')
+        return self.tag
+
+    def __exit__(self, *args):
+        print('exit')
+"""
+
+# …and the same catch-all when the body READS it.  There is no exception value to
+# put in the empty tuple, so this is the variadic spelling of the refusal
+# `THREE_ARGS_READS` gets, and it names the reads rather than the arity.
+VARIADIC_EXIT_READS = """class VariadicReads:
+    def __init__(self):
+        self.tag = 7
+        self.log = 0
+
+    def __enter__(self):
+        print('enter')
+        return self.tag
+
+    def __exit__(self, *args):
+        print('exit', args)
+"""
+
+
 def mojo(body):
     return CTX_MOJO + "def main(n):\n" + body
 
@@ -994,6 +1034,39 @@ DECLARED = [
      "        raise ValueError('m')\n"
      "    print('after')\n"
      "    return 0\n", 3),
+    # ── `__exit__(self, *args)` — the variadic spelling of the ignoring shape ─
+    # The catch-all form of the same signature, and the SAME text on both
+    # engines: CPython binds the triple into `args`, this path binds the empty
+    # tuple, and a body that never reads `args` sees no difference.  Before
+    # `context_exit_variadic_ignores` the star was read from an attribute no node
+    # carries, so this was refused as an arity-2 `__exit__`.
+    ("an_exit_that_ignores_a_variadic_catch_all_runs_the_protocol",
+     VARIADIC_EXIT + "def main(n):\n"
+     "    with Variadic() as v:\n"
+     "        print('body', v)\n"
+     "    print('after')\n"
+     "    return 0\n",
+     VARIADIC_EXIT + "def main(n):\n"
+     "    with Variadic() as v:\n"
+     "        print('body', v)\n"
+     "    print('after')\n"
+     "    return 0\n", 3),
+    # …and on the way out of a raise, where CPython passes the REAL words in the
+    # catch-all: the method ignores them and the exception still leaves, so the
+    # exit runs first and the status is 1 on both engines.
+    ("an_ignoring_variadic_exit_still_runs_before_an_exception_leaves",
+     VARIADIC_EXIT + "def main(n):\n"
+     "    with Variadic() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n",
+     VARIADIC_EXIT + "def main(n):\n"
+     "    with Variadic() as v:\n"
+     "        print('body', v)\n"
+     "        raise ValueError('m')\n"
+     "    print('after')\n"
+     "    return 0\n", 3),
     # ── a method through the alias, whose NAME a second struct declares ──────
     # `Box.__enter__` returns the RECEIVER, so the alias `b` holds a `Box` — and
     # the `with` wrote that down, which is the fact `_alias_receiver_target`
@@ -1087,19 +1160,6 @@ THREE_ARGS_READS = """class ReadsArgs:
         print('exit', exc_val)
 """
 
-VARIADIC_EXIT = """class Variadic:
-    def __init__(self):
-        self.tag = 7
-        self.log = 0
-
-    def __enter__(self):
-        print('enter')
-        return self.tag
-
-    def __exit__(self, *args):
-        print('exit')
-"""
-
 REFUSALS = [
     # ── the ALIAS is not somewhere one word goes ───────────────────────────
     # `with EXPR as (a, b)` — CPython unpacks `__enter__`'s result, and raises
@@ -1181,15 +1241,17 @@ REFUSALS = [
      "        print('body')\n"
      "    return 0\n",
      "READS them", "it declares no __enter__"),
-    # `*args` is the variadic form of the same question, and it cannot even be
-    # COUNTED from the tree, so it is refused rather than assumed — the same rule
-    # a variadic call is refused by.
-    ("a_variadic_exit_is_refused_by_name",
-     VARIADIC_EXIT + "def main(n):\n"
-     "    with Variadic() as v:\n"
+    # `*args` that the body READS is the variadic form of the same refusal: the
+    # words cannot be supplied, so a method that acts on them stays refused, and
+    # the message names the reads (the ignore ITSELF is an ANSWERED row below —
+    # the star is counted from the parameter NAME rather than from an attribute
+    # no node carries, which is what used to refuse the ignoring shape too).
+    ("a_variadic_exit_that_reads_its_catch_all_is_refused_by_name",
+     VARIADIC_EXIT_READS + "def main(n):\n"
+     "    with VariadicReads() as v:\n"
      "        print('body')\n"
      "    return 0\n",
-     "CONTEXT-MANAGER PROTOCOL", "it declares no __enter__"),
+     "READS it", "it declares no __enter__"),
     # ── `__exit__` that would SUPPRESS ─────────────────────────────────────
     # **This is the one wrong ANSWER this family had, and it is measured, not
     # argued.**  CPython suppresses the exception in flight when `__exit__`
@@ -1522,7 +1584,7 @@ def check_the_exit_word_gate_is_about_reading_not_arity(tmpdir):
         tree = Parser(list(py_tokenize(src))).parse_module()
         return [n for n in tree if isinstance(n, B.F.StructDef)][0]
 
-    def body(exit_body):
+    def body(exit_body, sig="self, exc_type, exc_val, tb"):
         return ("class C:\n"
                 "    var tag: Int\n"
                 "    var name: String\n"
@@ -1530,7 +1592,7 @@ def check_the_exit_word_gate_is_about_reading_not_arity(tmpdir):
                 "        self.tag = 1\n"
                 "        self.name = 'c'\n"
                 "    def __enter__(self):\n        return self.tag\n"
-                f"    def __exit__(self, exc_type, exc_val, tb):\n{exit_body}")
+                f"    def __exit__({sig}):\n{exit_body}")
 
     ignoring = ctx(body("        pass\n"))
     reading = ctx(body("        print(exc_val)\n"))
@@ -1547,6 +1609,34 @@ def check_the_exit_word_gate_is_about_reading_not_arity(tmpdir):
           "an `__exit__` that READS one of the three words is refused")
     check(not M.struct_is_context_manager(reading_nested),
           "a read in a NESTED def is still a read")
+    # The variadic spelling of the SAME predicate, asked the same way.  A
+    # positional catch-all the body never reads is the shape every redirect and
+    # TemporaryDirectory-like class in the wild writes, and it is called with the
+    # receiver alone; a read of the catch-all is the same lie as a read of the
+    # three fixed words.  `**kw` alone and `(self, exc_type, *rest)` are refused
+    # for a STRUCTURAL reason rather than about reading — CPython never calls
+    # either with the receiver alone — and they are pinned here so a future edit
+    # that widens the predicate cannot let them through.
+    v_ignoring = ctx(body("        pass\n", "self, *exc"))
+    v_reading = ctx(body("        print(exc)\n", "self, *exc"))
+    v_kwonly = ctx(body("        pass\n", "self, **kw"))
+    v_partial = ctx(body("        pass\n", "self, exc_type, *rest"))
+    check(M.struct_is_context_manager(v_ignoring),
+          "an `__exit__(self, *exc)` that ignores `exc` is a context manager "
+          "this path lowers")
+    check(M.context_exit_arity(v_ignoring) == 1,
+          "the variadic ignoring `__exit__` is called with the receiver alone",
+          f"arity {M.context_exit_arity(v_ignoring)}")
+    check(not M.struct_is_context_manager(v_reading),
+          "an `__exit__` that READS its `*exc` is refused")
+    check(not M.struct_is_context_manager(v_kwonly),
+          "`__exit__(self, **kw)` alone is refused: CPython calls `__exit__` "
+          "with three POSITIONAL words, so it is not a manager in CPython "
+          "either")
+    check(not M.struct_is_context_manager(v_partial),
+          "`__exit__(self, exc_type, *rest)` is refused: the receiver-only call "
+          "would leave `exc_type` unbound, which is the failure this family "
+          "refuses")
 
 
 def check_an_annotated_enter_publishes_the_alias_struct(tmpdir, verbose=False):

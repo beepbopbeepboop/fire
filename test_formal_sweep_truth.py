@@ -2087,8 +2087,15 @@ def _launch_sites(source: str, path: str = "<snippet>"):
                 return True
             if isinstance(sub, ast.Attribute) and "lean" in sub.attr.lower():
                 return True
+            # A string literal names Lean as a WORD — a `.lean` file, a path
+            # segment, the bare word — not as a substring of an English word:
+            # `clean`/`cleanup` contain "lean" but name nothing Lean, and
+            # tools/swarm.py's `control.py cleanup` call read as a launch of the
+            # toolchain under a substring match. Identifiers above keep the
+            # substring: a name or attribute `lean_*`/`*_lean` is a genuine
+            # signal, and no common English identifier is a `lean` substring.
             if isinstance(sub, ast.Constant) and isinstance(sub.value, str) \
-                    and "lean" in sub.value.lower():
+                    and re.search(r"\blean\b", sub.value.lower()):
                 return True
         return False
 
@@ -4438,6 +4445,21 @@ class TestX86EndToEndEmitter(unittest.TestCase):
                                 "…while the guard's own two branches on the same "
                                 "path are settled")
 
+    def test_the_body_stops_before_the_float_repr_helper(self):
+        """The float-repr helper is emitted after every body and is not part of
+        the chain, so `_body` must end where it starts. Before this bound, every
+        program's body decoded straight into the helper's SIB-indexed byte
+        stores, which the decoder refuses, and the whole sweep failed on it."""
+        import formal.x86_64_endtoend_test as E
+        code, info, insns, _shapes = E._plan(
+            os.path.join(E.HERE, "examples", "ret42.mojo"))
+        base = info["base_addr"]
+        self.assertTrue(insns, "ret42's body decoded to nothing")
+        last = insns[-1]
+        self.assertLessEqual(last.offset + last.length,
+                             info["float_repr_addr"] - base,
+                             "the body runs into the float-repr helper")
+
     def test_no_arm_of_the_theorem_proves_a_disjunct_no_leaf_names(self):
         """Each arm selects ONE disjunct, and it is the leaf's own.
 
@@ -5272,6 +5294,23 @@ class TestLabelUniqueness(unittest.TestCase):
                 # bound and still points into the image: an alias that forgot
                 # the single-definition case would show up here as a KeyError.
                 self.assertEqual(info["labels"]["main"], info["func_offset"])
+
+
+class TestTwoUnownedFormalRedsAreNotStale(unittest.TestCase):
+    """Regression for bugs/TEST_two_unowned_formal_reds_that_are_stale_expectations.md.
+
+    The doc described a stale AXIOM_CLOSURE table (Contracts/ProofLib/Refine/X86/
+    work) after `native_decide` moved 61 sites; the table has since been re-measured
+    and the doc is deleted. This test pins that the five modules the doc named are
+    present in AXIOM_CLOSURE, so a future table drift fails rather than hiding
+    behind a skip.
+    """
+
+    def test_the_five_doc_modules_are_not_stale(self):
+        from test_formal_admitted import AXIOM_CLOSURE
+        for mod in ("Contracts", "ProofLib", "Refine", "X86", "work"):
+            self.assertIn(mod, AXIOM_CLOSURE,
+                          f"{mod} missing from AXIOM_CLOSURE - table regressed")
 
 
 if __name__ == "__main__":

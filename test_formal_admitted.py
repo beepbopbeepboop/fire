@@ -70,6 +70,12 @@ from test_formal_json import Failure  # noqa: E402  (one failure type, not two)
 
 from formal import admitted as A  # noqa: E402
 from formal import imports as I  # noqa: E402
+from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S
+
+# Non-child windows: the pool's result() is the callable's reporting window, not
+# a child budget; lock.acquire(...=0) is threading.validate_timeout(0)'s SUBJECT.
+POOL_RESULT_TIMEOUT_S = 60
+LOCK_TIMEOUT_SUBJECT_S = 0
 
 BACKENDS = ("arm64", "x86_64")
 
@@ -224,7 +230,7 @@ def _module_source(programs, name, body, tmpdir, cas_root, backend="arm64"):
           f"{name}: the image did not build.\n    "
           f"{(r.stderr or r.stdout or '').strip()[:400]}")
     check(os.path.isfile(out), f"{name}: the build reported success and wrote no image")
-    p = subprocess.run([out], capture_output=True, text=True, timeout=60)
+    p = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
     return [ln for ln in p.stdout.split("\n") if ln != ""]
 
 
@@ -870,7 +876,7 @@ def _truth_submit(c):
     bad = []
     try:
         with CF.ProcessPoolExecutor(max_workers=1) as pool:
-            where = pool.submit(os.getpid).result(timeout=60)
+            where = pool.submit(os.getpid).result(timeout=POOL_RESULT_TIMEOUT_S)
     except Exception as e:                                 # noqa: BLE001
         return [f"{c.qualified}: a ProcessPoolExecutor could not be measured "
                 f"({type(e).__name__}: {e}), so this row is not checking the "
@@ -908,7 +914,7 @@ def _truth_shutdown(c):
         return th
 
     with CF.ThreadPoolExecutor(max_workers=2) as pool:
-        pool.submit(_outer).result(timeout=60)
+        pool.submit(_outer).result(timeout=POOL_RESULT_TIMEOUT_S)
     bad = []
     if not started.is_set():
         bad.append(f"{c.qualified}: the callable's own thread never started, so "
@@ -995,7 +1001,7 @@ def _truth_lock(c, tmpdir=None):
              "fd = open(sys.argv[1], 'r+')\n"
              "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
              "print('taken')\n", path],
-            capture_output=True, text=True, timeout=60)
+            capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
     finally:
         lk.release()
     if "taken" not in child.stdout:
@@ -1448,7 +1454,7 @@ AXIOM_CLOSURE = {
     # says the ARRIVAL is specifications and not new trusted evaluation.
     # Measured on the merged tree, and it was the only row of the eight that
     # disagreed; the other seven were re-measured in the same run and are
-    # unchanged.  See `bugs/TEST_the_axiom_closure_table_is_stale_for_five_of_its_six_modules.md`.
+    # unchanged.  See bug: stale AXIOM_CLOSURE (re-pinned 2026-10-05 / 2026-10-18).
     # **Re-pinned 2026-10-18 from 66 to 67 with the `bunny-merge26-r2` merge, and
     # back to 66 the same day.**  The merge brought in `lib/Specs.lean`'s copy
     # of `u64_ofNat_mul` -- one askable name, MEASURED `clean` (it is
@@ -3217,7 +3223,7 @@ def group_subprocess_surface(tmpdir, cas_root, verbose):
                 continue
             aout = os.path.join(tmpdir, f"t_{abs(hash(name))}.aout")
             check(os.path.isfile(aout), f"{name}: no image to run")
-            p = subprocess.run([aout], capture_output=True, text=True, timeout=60)
+            p = subprocess.run([aout], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
             check("ADMITTED contract" in p.stdout,
                   f"{name}: an admitted call must name its contract on stdout; "
                   f"stdout was {p.stdout[:200]!r}")
@@ -3552,7 +3558,7 @@ def group_threading(tmpdir, cas_root, verbose):
         try:
             lock = T.Lock()
             if v == 0:
-                lock.acquire(timeout=0)
+                lock.acquire(timeout=LOCK_TIMEOUT_SUBJECT_S)
                 lock.release()
             else:
                 lock.acquire(timeout=v)
@@ -3597,7 +3603,7 @@ def group_runtime(tmpdir, cas_root, verbose):
                   "-o", out, src], env={"GMOJO_HOME": home})
     check(r.returncode == 0, "the admitted-call image did not build:\n    "
           f"{(r.stderr or r.stdout or '').strip()[:300]}")
-    p = subprocess.run([out], capture_output=True, text=True, timeout=60)
+    p = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
     check(p.returncode == A_ADMITTED_EXIT_STATUS,
           f"subprocess.run exited {p.returncode}; it must exit "
           f"{A_ADMITTED_EXIT_STATUS}, this tree's reserved refusal status. It is "

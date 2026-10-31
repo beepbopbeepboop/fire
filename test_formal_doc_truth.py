@@ -572,9 +572,9 @@ CITATION_LINES = [
      'void mojo_raise'),
     ('doc/ABI.md', 'runtime/fire_runtime.h:532-534', 'runtime/fire_runtime.h',
      'mojo_exc_type_get'),
-    ('doc/ABI.md', 'runtime/fire_runtime.h:606-608', 'runtime/fire_runtime.h',
+    ('doc/ABI.md', 'runtime/fire_runtime.h:612-614', 'runtime/fire_runtime.h',
      'mojo_exc_pending_get'),
-    ('doc/ABI.md', 'runtime/fire_runtime.h:579-604', 'runtime/fire_runtime.h',
+    ('doc/ABI.md', 'runtime/fire_runtime.h:585-610', 'runtime/fire_runtime.h',
      '_mojo_exc_pending'),
 ]
 
@@ -678,6 +678,7 @@ ABI_ENTRY_POINTS = {
     'mojo_cleanup_push_ptr': 'void',
     'mojo_cleanup_push_list_strs': 'void',
     'mojo_cleanup_push_closure': 'void',
+    'mojo_cleanup_push_cattr': 'void',
     'mojo_cleanup_cancel_n': 'void',
     'mojo_cleanup_checkpoint_save': 'void',
     'mojo_exc_pending_set': 'void',

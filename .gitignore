@@ -58,6 +58,13 @@ abt*_*.tok
 abt*_*.ast
 abt*_*.pyi
 
+# .tmp/ scratch: test/agent runs leave .mojo working files here and it is
+# regenerated each run, so the whole directory stays untracked. Committed
+# test fixtures live in test_fixtures/ (see test_cyclic_closure_regression.py,
+# whose fixture was lost once when it sat in this scratch dir and never got
+# committed, breaking the test in clean checkouts).
+.tmp/
+
 # tools/codeindex.py derived artifact -- rebuild with `python3 tools/codeindex.py build`
 .codeindex.sqlite3
 

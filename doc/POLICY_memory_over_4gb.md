@@ -1,0 +1,171 @@
+# PERF: any process of ours that takes more than 3-4 GB is a bug
+
+**Standard, set by the project owner 2026-09-29:** nothing we run should need more than
+3-4 GB. The 30-51 GB that the self-host chain uses today is far beyond that. It was
+tolerated because it worked and delivered results, and the ceilings in `tools/suite.py`
+(`MEMCLASS`: small 8, module 24, program 55, stage 96) describe what the code *does*
+today, not what is acceptable. Read every number in that table as a debt, not a budget.
+
+The ceilings and `tools/memslot.py`'s reservations exist to keep a runaway from taking the
+machine down while these are being paid off. They are not a licence.
+
+## Progress against this standard, 2026-10-02 (`work/bugs4-9`)
+
+Four measurements on this branch, all of them narrow and reproducible, none of
+them the self-hosted subject:
+
+| what | before | after | where |
+|---|---|---|---|
+| `print` of a container in a loop (`gimple_printed_container_does_not_grow`, seven shapes x 60000) | 87.2 MB | **12.8 MB** | the `mojo_str_cat` chain's left operand, per element (doc deleted with its fix) |
+| `print` of a struct in a loop (`gimple_printed_struct_repr_does_not_grow`, 100000 lines) | 18.6 MB | **9.4 MB** | one leaked string per FIELD of `_mojo_repr_{sn}`; the residual 80 B/print is the unfreed top-level repr result, filed separately |
+| a per-character string scan (`gimple_char_scan_allocates_nothing_per_character`, 16M characters) | 246.7 MB | **1.6 MB** | one `malloc(2)` per character: `s[i]` was `mojo_cstr_slice(s, i, i+1)` |
+| a printed container's own report (`print(xs)` x 200000) | 99.7 MB | — | same family |
+| an integer that reached a dict key as a computed address | SIGSEGV | correct | `bug:RUNTIME_int64_key_above_2gb_dereferenced_as_pointer` |
+
+Two are orders of magnitude under the 3-4 GB line and always were; what they
+were is *unbounded*, which is the same defect at a scale this standard does not
+name. Both are per-character and per-element, so they scale with the INPUT, and
+the input this project cares about is `fire.py` — which is why they show up in
+the self-hosted column below as a rounding error next to the 28-34 GB that is
+actually there, and why fixing them is not a move against this standard. They
+are recorded because a leak whose slope is 16 B per character is 4.8 million
+`malloc(2)`s over one pass of the compiler's own tokenizer, and a standard that
+only counts the big numbers is a standard that cannot see the shape.
+
+**Nothing on this branch moves the 27.6-33.8 GB below.** That number is set by
+item 2 (the leak hunt on `mojoc --dump-full fire.py`) and item 3 (free what a
+pass has finished with), both of which need the whole-closure run the
+integrator owns. the content-keyed tuple key fix's site list was re-checked
+item by item on 2026-10-02: three of its six entries are already fixed or
+mis-attributed, and the one that is genuinely open (the container-kind registry)
+is not fixable at its own site — its size IS the leak count.
+
+## What was measured (this session's gates, `native-dumpfull` peak RSS)
+
+| gate | peak | note |
+|---|---|---|
+| master, 02:58 | 33.8 GB | baseline |
+| round 1 | 30.8 GB | |
+| round 4 (landed, master a0c0969) | **27.6 GB** | the state on master now |
+| round 3 (rejected) | 44.9 GB | root-level `os/` shadowed CPython's `os` |
+| round 5 (aborted) | 51.2 GB | `mojo/middle/coro.py` `_compute_no_wd_forward` |
+
+### The 2026-10-07 gate: a smaller number that is NOT a smaller footprint
+
+The full gate on master 8df5b273 (61 passed) measured `native-dumpfull` at **1.4 GB** and
+`selfhost-memory-fire` at **0.5 GB**, against 31.3 and 12.2 GB recorded. Neither is a saving.
+Running the binary directly (`./mojoc fire.py --dump-full`, 0.5 GB, exit 1) prints
+`Error generating --dump-full: TypeError: object is not iterable` and writes no `fire.ci`: the
+self-hosted compiler dies early, so the peak is how far it got, not what it needs.
+`native-dumpfull` fails ("produced NO fire.ci") for that reason, and `selfhost-memory-fire`
+PASSES because `test_selfhost_memory.py` asserts only the peak against its budget and never the
+exit code or the artifact, so it cannot see a binary that stopped early. Both keep their
+recorded class (`program`, `module`) and the 31.3 / 12.2 GB figures until a run in which
+`--dump-full` completes measures them again. `tools/suite.py --apply-peaks` refuses to believe
+a job that failed or ran under 2 s for exactly this reason. The next step for
+`selfhost-memory-fire` is to make it fail on a non-zero exit (blocked on the dump-full bug).
+
+The same gate re-measured the rest of the table; the classes that moved are in
+`tools/suite.py`'s `MEASURED_PEAK_GB`/`MEASURED_RUN`. Two jobs now measure OVER the 4 GB line
+and carry a `memwhy` pointing here: `mojoc` (4.9 GB, was 3.7) and `selfhost` (4.4 GB, was
+3.7), both `small`; the whole-closure self-compile grew about 20% between the two gates.
+To refresh the table after any gate: `python3 tools/suite.py --apply-peaks build/suite.log
+[--dry-run]`, then re-class what it names.
+
+So the landed state is ~28-34 GB and the excursions to 45-51 GB were regressions the gate
+caught. The regressions matter less than the baseline: a healthy 28 GB is 7-9x the standard.
+
+Other measured footprints (same gates):
+
+- `ab-native`, one snippet-sized `mojoc --dump`: **5.7-9.4 GB** each (8.0 and 8.2 GB hit the
+  8 GB `small` ceiling and were reported RESOURCE). A snippet compile that needs 8 GB has a
+  fixed cost, not a proportional one: the suite's own marker text blames "the self-hosting
+  bootstrap pre-pass this corpus legitimately triggers, ~15-30 GB / ~15-25 s per call".
+- `stage2/mojo --dump <file>` per source file: **1.2-2.4 GB** resident when healthy (7-65 s);
+  **30-43 GB** and not terminating in round 5's coroutine-lowering regression.
+- `lean` proof checks: ~1.1-1.7 GB each, but several run at once and they can outlive their
+  test for hours.
+- The two corpus sweeps, measured one at a time on 2026-10-09 (`memcap`, and both of
+  them were RESOURCE-capped before that, so the number understates how broken the class
+  was rather than overstating the cost):
+  - `formal` (`test_formal.py`, the 93-proof arm64 corpus, up to 32 Lean processes at
+    once): **46.2 GB over 1129 s**, at `small` (8 GB) it was killed in 2.4 s. It exits 1
+    on a stale expected-failure row of its own report, having finished all 93 proofs, so
+    the peak is what it needs rather than how far it got.
+  - `formal-x86` (the same corpus on the x86-64 backend): **24.8 GB over 80 s**, likewise
+    capped at `small`.
+  - `stdlib-tests` (`test_stdlib.py`, all 321 stdlib test/benchmark files through the
+    interpreter and the JIT): **34.9 GB and 52.2 GB on two runs of the identical corpus**
+    at the same 2163 s wall, also capped at `small`. A 1.5x spread between two
+    deterministic runs is the scheduler, not the workload — see
+    `PERF_stdlib_tests_peaks_35_to_52gb_on_the_same_run.md`.
+  The 46.2 and 52.2 are memcap's SUMMED tree RSS, which `procrun.tree_usage` documents
+  as an over-count when many processes share pages, so they are upper bounds and the
+  unique-pages measurement that would settle both classes is written down in
+  'PERF_formal_job_peaks_at_46gb_against_an_8gb_class`. What is NOT in doubt is the
+  shape: a per-file compile summed over a corpus, which is the same arithmetic as
+  `ab-native` below at 779 files.
+- `formal-x86-endtoend` (`formal/x86_64_endtoend_test.py`, 93 generated proofs, one after
+  another): **6.1 GB peak across the process tree** (memcap, 2026-10-05), which is
+  4x the next largest row here. It is one `lean` plus the python driver, and
+  Lean's own `-M 6144` is the ceiling actually reached — so the 6.1 is the
+  generated proof, not concurrency. **The cause is `mem_read_bytes`'s `ite` chain
+  over a 113-equation successor nest**, which `formal/x86_64_endtoend_test.py`'s
+  `_concrete_read` rebuilds to evaluate one closing read;
+  `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md` measures
+  where it crosses (`const2` 19 equations / 1.4 GB, an 8-argument call 113 / 6.5 GB
+  and an ABORT). It is a per-step-invariant problem and not a size problem, so
+  raising `-M` would move the ceiling and not the curve. Registered as `module`
+  because that is `PEAK_HEADROOM`'s arithmetic on 6.1 and carries a `memwhy`.
+
+## Why this is one bug and not many
+
+`bugs/CODEGEN_bootstrap_resource_blowup.md` records the ~192 GB runaway and its attribution.
+The self-hosted binary allocates boxed values and never frees them (no garbage collector, no
+regions), so any algorithm that re-derives a working set per iteration, per function or per
+pass turns into gigabytes: the round-5 regression is exactly that shape, one loop in one
+pass, and the pre-pass cost above is the same thing at the whole-closure scale. Fixes that
+shrink one allocation site help by the amount of that site; the durable fix is that the
+compiler's passes free what they finish with (arena per pass or per function, or a collector).
+
+## Next steps, in order
+
+"1. **Record peak RSS for every job** (`tools/suite.py`), so a regression shows up as a number
+   in the tally and not as a collapsed machine. In progress (`memcap-coverage-3`). Every
+   registry job now has a measured peak or a written reason it does not: 26 of the 36 that
+   had never been measured were measured on 2026-10-09, and the ten that were not are
+   named in `MEASURED_PEAK_GB`'s own comments — the four `ab-*` and three `bootstrap-*`
+   rows (the integrator's), and the two `selfhost-memory*` rows, whose `deps=['mojoc']`
+   means measuring them requires first building the whole-closure self-compile they exist
+   to measure. Two of the measurements turned out to be jobs that could never have passed:
+   `formal`, `formal-x86` and `stdlib-tests` were all registered at `small` (8 GB) against
+   24.8-52.2 GB peaks, so every run of them was a guaranteed RESOURCE.
+2. **Leak-hunt on the WORST CASE: the self-hosted compiler compiling the compiler's own source.**
+   That is `./mojoc --dump-full fire.py` (or the stage2 binary doing the same; the file the
+   project's docs still call `mojo.py` is `fire.py` since the rename). It is the largest input
+   we have, the one that peaks at 28-51 GB, and the one every other case is a subset of; a
+   snippet or a two-line program is the wrong target because its footprint is dominated by
+   fixed cost and hides what grows with the input. Method, proven on another project: run the
+   real tool under macOS `leaks` (`leaks --atExit -- ./mojoc --dump-full fire.py`, with
+   `MallocStackLogging=1` so each leak carries its allocation stack), then fix everything it
+   reports, not only the largest item. Do NOT use mojo (or fire) as the program that hunts
+   for leaks; the hunter is `leaks`, the subject is mojo compiling `fire.py`.
+   Two cautions specific to this subject:
+   - `leaks` reports only *unreachable* memory. A compiler that keeps every intermediate
+     value reachable (a global table, a list that is appended to and never cleared, an
+     AST/`.ci` cache that outlives its pass) will show few leaks and 30 GB of growth. If the
+     leak report is small against the peak, hunt the retention instead: `heap <pid>` /
+     `vmmap` at a few points during the run, and `MallocStackLogging` with `malloc_history`
+     to see which sites the live bytes came from.
+   - This is a whole-closure run: slow under stack logging and a 55 GB-class job today. It is
+     the integrator's job to run (one at a time, through `tools/memslot.py`), never a
+     worker's; a worker's part is to read the report and fix sites.
+3. **Free what a pass has finished with** at the sites found, per pass or per function.
+4. **Ratchet the ceilings down** as each drops (55 -> 30 -> ...), and register a regression
+   check so it cannot creep back up without a red result. The end state is `small` = 4 GB for
+   everything, with any exception carrying its own bug doc.
+
+Verification of any fix here is heavy by nature (it rebuilds the self-host chain), so it is
+the integrator's job: `python3 tools/integrate.py --only <task> --jobs mojoc ab-native
+native-dumpfull`, with the before/after peaks reported, and the `leaks` report on
+`fire.py` attached to the fix.

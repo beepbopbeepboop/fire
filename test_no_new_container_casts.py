@@ -371,7 +371,19 @@ def strip_prose(src: str) -> str:
 # defeats CAST_RE, so two of three near-identical lines count and one does
 # not. That asymmetry is the metric's text-scan limit, not a reason to
 # respell the counted pair to hide it.
-BASELINE_COUNT = 26
+#
+# 26 -> 27 (2026-10-27, gate fixup): the bytes arm of the generated
+# `_mojo_generic_elem_repr` -- `mojo_bytes_repr((MojoBytes *)(intptr_t)val)`,
+# guarded by its own `mojo_is_registered_bytes(val)` predicate exactly like
+# the list/dict arms beside it (a0790e16f, the runtime-type-erased-bytes
+# fix; it entered this line of master through the 768dea0e1 merge, which is
+# why the 24 -> 26 entry above never saw it). Same class as the baseline's
+# existing module_gen repr-template sites: C the GENERATED program executes,
+# in a template string, with no `gen` in scope and the kind proven by the
+# measured registry dispatch -- the "kind proven by a measured dispatch"
+# class this ledger records, not a static guess, and the chokepoint cannot
+# serve a template string.
+BASELINE_COUNT = 27
 
 
 def count_casts() -> int:

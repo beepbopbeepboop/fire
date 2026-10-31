@@ -202,6 +202,21 @@ def main():
           out == "1\n70\n", detail=repr(out))
 
 
+def test_paramless_function_bracket_refused_in_single_tu():
+    """Regression for bug CODEGEN_bracket_call_to_a_runtime_paramless_
+    function_is_a_zero: a bracket call to a callee with zero runtime
+    params must not silently compile to 0 on the single-TU path."""
+    import gimple_codegen
+    src = "def a[T: Int]():\n    return T\n\ndef main():\n    print(a[7]())\n"
+    try:
+        gimple_codegen.compile_to_gimple_cached(src)
+        check("paramless bracket refused (not 0)", False,
+              detail="compile succeeded silently — expected refusal")
+    except RuntimeError as e:
+        check("paramless bracket refused (not 0)",
+              "link-mode specialisation" in str(e), detail=str(e))
+
+
 def run_all():
     for name, fn in list(globals().items()):
         if name.startswith('test_') and callable(fn):

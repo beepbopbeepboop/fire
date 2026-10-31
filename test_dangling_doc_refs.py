@@ -13,6 +13,7 @@ with a stub `measure`, because running Lean per row is a manual campaign,
 not a unit test.
 """
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -70,6 +71,60 @@ class StaleVerdictRows(unittest.TestCase):
             sorted((s, c) for _n, s, c in claims),
             [('flips', 'proved'), ('flips2', 'lean-rejected'),
              ('keeps', 'lean-rejected'), ('varies', 'proved')])
+
+
+    def test_stale_baseline_entries_reports_file_with_zero_citations(self):
+        """Regression for MERGE_formal58: stale_baseline_entries must see
+        a file whose citations were all fixed (absent from by_file)."""
+        synth = {'a.py': [('X.md', 1)], 'b.py': [('Y.md', 1), ('Z.md', 2)],
+                 'c.py': [], 'd.py': [('W.md', 3)]}
+        synth = {rel: cites for rel, cites in synth.items() if cites}
+        led = {'a.py': 1, 'b.py': 1, 'c.py': 2, 'd.py': 4}
+        result = d.stale_baseline_entries(synth, led)
+        self.assertEqual(result, {'c.py': (0, 2), 'd.py': (1, 4)})
+        self.assertIn('c.py', result)
+        self.assertEqual(result['c.py'], (0, 2))
+
+    def test_deleted_bug_doc_specific_citations_rewritten(self):
+        _, by_doc, by_file = d.find()
+        # The two citations this bug named must be rewritten by symptom,
+        # not by deleted doc path (see the deleted bug doc for context).
+        gone = {('test_formal_hashlib.py', 'FORMAL_arm64_lsl_imm_is_wrong_for_'
+                 'every_amount_above_8.md'),
+                ('test_formal_run.py', 'FORMAL_arm64_lsl_imm_is_wrong_for_every_'
+                 'amount_above_8.md')}
+        still = [f'{f}: {n}' for f, n in sorted(gone)
+                 if any(n == d for _, d in by_file.get(f, ()))]
+        self.assertEqual(still, [],
+                         f'still cited by deleted doc path: {still}; '
+                         'rewrite by symptom (commit or doc name)')
+
+
+# The hard-bug index is hand-maintained prose, so nothing but these two checks
+# ever compares it with the directory it indexes. Both were false at once on
+# 2026-10-29: nine of the names it cited were deleted docs, and three live docs
+# had no row at all.
+HARD = os.path.join(HERE, 'bugs', 'hard')
+HARD_INDEX = os.path.join(HARD, 'README.md')
+DOC_NAME = re.compile(r'(?<![\w.-])([A-Za-z0-9_][A-Za-z0-9_.-]*\.md)(?![\w-])')
+
+
+def _index_names():
+    with open(HARD_INDEX) as f:
+        return set(DOC_NAME.findall(f.read()))
+
+
+class HardIndexIsTrue(unittest.TestCase):
+    def test_every_doc_the_index_names_exists(self):
+        homes = (HARD, os.path.join(HERE, 'bugs'), HERE)
+        missing = sorted(n for n in _index_names()
+                         if not any(os.path.exists(os.path.join(h, n)) for h in homes))
+        self.assertEqual(missing, [])
+
+    def test_every_hard_doc_is_indexed(self):
+        on_disk = {f for f in os.listdir(HARD)
+                   if f.endswith('.md') and f != 'README.md'}
+        self.assertEqual(sorted(on_disk - _index_names()), [])
 
 
 if __name__ == '__main__':

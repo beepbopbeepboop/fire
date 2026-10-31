@@ -346,7 +346,8 @@ GIMPLE_SOURCES = (
 #            ledger for one job and make it unadmittable on a 64 GB budget.
 #            That exception is `CLASS_ABOVE_PEAK`, with its reason, and the
 #            measurement that would settle it is
-#            bugs/PERF_formal_job_peaks_at_46gb_against_an_8gb_class.md. The
+#            measurement that would settle it is the unique-memory instrument
+#            (procrun.tree_usage_unique, fixed by the work on formal's peak).
 #            rung stays because MEMLIMIT_GB=96 has to mean something.
 #
 # `program` and `stage` used to be justified by "55.8 GB healthy / 192 GB
@@ -384,7 +385,7 @@ MEMCLASS = {
 # comment is a promise nobody checks, and this one is the difference between a
 # reservation and a wish.
 MEM_DEBT_GB = 4.0
-MEM_DEBT_DOC = 'bugs/PERF_memory_over_4gb_is_a_bug.md'
+MEM_DEBT_DOC = 'doc/POLICY_memory_over_4gb.md'
 
 
 def needs_memwhy(spec) -> bool:
@@ -1107,7 +1108,7 @@ CLASS_ABOVE_PEAK = {
     # never be admitted AT ALL — which is what test_suite.py's own admission
     # check exists to catch. `program` (55 GB) still covers the measurement at
     # 1.19x. Settling it properly means measuring unique pages instead of the
-    # sum; that is bugs/PERF_formal_job_peaks_at_46gb_against_an_8gb_class.md.
+    # sum; settled by the unique-memory instrument (procrun.tree_usage_unique).
     'stdlib-tests': 'the peak is UNSTABLE across runs (34.9 and 52.2 GB for '
                     'the same 321 items) and 52.2 is the worst; `program` (55) '
                     'covers it at 1.05x where class_for_peak wants `stage` '
@@ -2177,17 +2178,15 @@ test('transitive-closure-capture', [PY, 'test_transitive_closure_capture.py'],
      desc='closure capture through a transitive import')
 test('gimple-async-runner', [PY, 'test_gimple_async_runner.py'], mem='tiny',
      deps=['preflight'],
-     expect='36 failing: the gimple async runner, an area with no gate '
-            'coverage until now',
-     desc='36 failing: the gimple async runner, an area with no gate coverage until now')
+     desc='compiled-path async/await runner (C++20 escape hatch; the file '
+          'pins MOJO_CORO=cpp the way test_taskgroup.py does)')
 test('coro-future-await', [PY, 'test_coro_future_await.py'], mem='tiny',
      deps=['preflight'],
-     expect='17 failing: `await` on a Future in the coroutine runtime',
-     desc='17 failing: `await` on a Future in the coroutine runtime')
+     desc='Future/Event awaitable protocol, done-callbacks, and awaited '
+          'async struct-method calls (receiver + args)')
 test('async-void-return', [PY, 'test_async_void_return.py'], mem='tiny',
      deps=['preflight'],
-     expect='3 failing: an async function with no return value',
-     desc='3 failing: an async function with no return value')
+     desc='an async function with no return value')
 test('taskgroup', [PY, 'test_taskgroup.py'], mem='tiny',
      deps=['preflight'],
      desc='TaskGroup')
@@ -2199,8 +2198,7 @@ test('nested-async-generic', [PY, 'test_nested_async_generic.py'], mem='tiny',
      desc='a generic inside a nested async')
 test('coro-detached-async', [PY, 'test_coro_detached_async.py'], mem='tiny',
      deps=['preflight'],
-     expect='2 failing: a detached coroutine task',
-     desc='2 failing: a detached coroutine task')
+     desc='a detached coroutine task')
 test('async-runtime-scaffold', [PY, 'test_async_runtime_scaffold.py'], mem='tiny',
      deps=['preflight'],
      desc='toolchain/runtime proof for step A of compiled-path async/await')
@@ -2312,8 +2310,9 @@ test('coro-nested-capture', [PY, 'test_coro_nested_async_capture.py'], cache=Tru
 # `_selfhost_*` seed passes within one process; degenerate-hashing check on
 # the tokenizer's `MojoSet` usage).
 #
-# `native-dumpfull` carries this same reason and is LEFT on `expect=`; see its
-# registration below for why that one is not switched too. This constant is
+# `native-dumpfull` was marked with this same reason until its bootstrap chain
+# went green (2026-10-25); its registration below says why it is not marked
+# any more. This constant is
 # also the whole of §4's subject matter: bugs/CODEGEN_ab_native_fails.md tables
 # every `expect=` job in the registry with its measured peak, its class and its
 # reservation, and a recommendation each.
@@ -2341,6 +2340,19 @@ test('mojoc', ['mojoc'], driver='make', mem='small', excl=True,
             'a fact — see ' + MEM_DEBT_DOC,
      artifact='mojoc', inputs=[MOJO_MAIN] + PY_FILES + [RUNTIME_SRC, RUNTIME_HDR],
      desc='build the one managed native compiler (-O2 -g0)')
+# ab-native's expect= reason. Named for the 15-30 GB self-host pre-pass
+# blowup it used to describe; the blowup is closed (bugs/CODEGEN_ab_native_fails.md,
+# 2026-10-26: 0.1 GB / ~10s), so the text now states the current 1-of-30
+# divergence. `2f75609d` turned the job back from disabled= to expect=
+# referencing the constant `58192261` had removed, so every import of this
+# module (i.e. every `make gate`) died with a NameError before any test ran.
+# The "1 failing" is load-bearing, not decoration: _expect_count_drift
+# re-counts the run's "Results: N passed, M failed" line against it, so a
+# second divergence cannot be absorbed silently by the marker.
+SELFHOST_TOKENIZE_BLOWUP = (
+    'bugs/CODEGEN_ab_native_fails.md — 1 failing: match_stmt diverges '
+    '(29/30 byte-identical; the blowup this constant was named for is '
+    'closed, the run is now 0.1 GB / ~10s)')
 # `program` (55 GB), UP from `module` (24) — the one job the ratchet moves up,
 # and the measurement is why: registered at `small` (8 GB) it was killed by its
 # own ceiling on 2026-09-29 at a peak of 9.4 GB (a RESOURCE verdict, which is
@@ -2384,18 +2396,23 @@ test('ab-native', [PY, 'test_ab_native.py'], driver='mem', mem='program',
             'turned back on, and it reserves 0 meanwhile. Over the 4 GB line '
             'because the workload is — see ' + MEM_DEBT_DOC,
      deps=['mojoc'], excl=True, cache=True, extra=['test_ab_native.py'],
-     disabled='bugs/CODEGEN_ab_native_fails.md',
+     expect=SELFHOST_TOKENIZE_BLOWUP,  # 29/30 pass (match_stmt diverges, see bug doc); cheap (0.1 GB, ~10s)
      desc='python vs native codegen, byte-for-byte, over the A/B corpus')
 # NOT switched, deliberately, and the reason is per job rather than per
-# principle: `native-dumpfull` and `bootstrap-stage2-dumps` carry the same
-# blowup in their `expect=` reason and are the owner's call, because both are
-# also the jobs whose runs produce the measurements the blowup work is steered
-# by — a marker that cannot be observed going green is weak, and this is the
-# case for not weakening it. §4 of bugs/CODEGEN_ab_native_fails.md tables both
-# with their peak, class and reservation and a recommendation each, so the
-# choice is a line rather than an investigation.
+# principle: `bootstrap-stage2-dumps` carries the same blowup in its `expect=`
+# reason and is the owner's call, because it is also the job whose run produces
+# the measurements the blowup work is steered by — a marker that cannot be
+# observed going green is weak, and this is the case for not weakening it.
+# §4 of bugs/CODEGEN_ab_native_fails.md tables it with its peak, class and
+# reservation and a recommendation, so the choice is a line rather than an
+# investigation.
+# `native-dumpfull` needs `mojoc` built first: it runs `./mojoc --dump-full`
+# and writes `fire.ci` into the repo root, the same shared-artifact pattern
+# that makes `ab-native` `excl`. Without `deps` it raced `mojoc` at t=0 and
+# died with "mojoc not built" — hidden until now only because `expect=` used
+# to forgive that failure.
 test('native-dumpfull', [PY, 'test_native_dumpfull.py'], driver='mem',
-     mem='module',
+     mem='module', deps=['mojoc'], excl=True,
      memwhy='measured 10.4 GB (2026-10-25, the full gate): the self-hosting '
             'bootstrap pre-pass this corpus legitimately triggers, still over '
             'the 4 GB line - see ' + MEM_DEBT_DOC + '. The job PASSES now '
@@ -2416,7 +2433,7 @@ test('selfhost-memory-fire', [PY, 'test_selfhost_memory.py', 'fire'], driver='me
             'took the self-hosted compiler compiling fire.py from 34-47 GB to '
             '12.2 GB), so `module` (24) is the smallest class that covers it and '
             '1.5x is 36 GB. Over the 4 GB line and therefore a debt rather than '
-            'a fact — see bugs/PERF_memory_over_4gb_is_a_bug.md. It is `excl` '
+            'a fact — see doc/POLICY_memory_over_4gb.md. It is `excl` '
             'because at this size it is alone on the machine by arithmetic, not '
             'by choice. The 2026-10-07 gate measured 0.5 GB, but only because '
             '`mojoc --dump-full` died early (TypeError, no .ci) and this test '
@@ -2458,8 +2475,7 @@ test('stdlib-tests', [PY, 'test_stdlib.py'], mem='program',
 # you not to let grow. If the next gate shows this step at a much higher peak,
 # the measurement changed and the class follows it (test_suite.py fails the
 # moment a recorded peak stops fitting its class).
-test('stdlib-dylib', [PY, '-c',
-                      'import build_stdlib_dylib as b; b.build_stdlib()'],
+test('stdlib-dylib', [PY, 'tools/stdlib_dylib_ratchet.py'],
      mem='tiny', excl=True, timeout=3600,
      desc='from-scratch stdlib dylib; reports modules that fell back to source')
 test('runtimedylib', [PY, 'test_runtime_dylib.py'],
@@ -2603,7 +2619,7 @@ fanout('bootstrap-stage2-dumps',
 # `verify` compares a full closure against a skeleton.
 test('bootstrap-stage2-transitive',
      ['./mojo', '--dump-full', '../' + MOJO_MAIN],
-     driver='mem', mem='program', memwhy='bugs/PERF_memory_over_4gb_is_a_bug.md', cwd='stage2',
+     driver='mem', mem='program', memwhy='doc/POLICY_memory_over_4gb.md', cwd='stage2',
      env={'MOJO_HOME': '..', 'PYTHONPATH': '..'},
      deps=['bootstrap-stage2-dumps'], reject=CLOSURE_INCOMPLETE,
      desc='stage2: the compiled binary compiles itself, transitively')
@@ -2617,7 +2633,7 @@ fanout('bootstrap-stage3-dumps',
        desc='stage3: same binary, fresh dir (idempotency)')
 test('bootstrap-stage3-transitive',
      ['../stage2/mojo', '--dump-full', '../' + MOJO_MAIN],
-     driver='mem', mem='program', memwhy='bugs/PERF_memory_over_4gb_is_a_bug.md', cwd='stage3',
+     driver='mem', mem='program', memwhy='doc/POLICY_memory_over_4gb.md', cwd='stage3',
      env={'MOJO_HOME': '..', 'PYTHONPATH': '..'},
      deps=['bootstrap-stage3-dumps'], reject=CLOSURE_INCOMPLETE,
      desc='stage3: same binary again (idempotency of the closure)')
@@ -2682,7 +2698,7 @@ test('prooflib', [PY, '-c',
             "Lean's own -M is 12 GB for a library build (6144 for a generated "
             'proof) and a 4 GB ceiling is not a tighter policy but a red suite, '
             'measured: see formal/lean.py and '
-            'bugs/PERF_the_cold_lean_library_build_is_9gb.md. `module` (24) is '
+            'measured (see MEASURED_PEAK_GB["prooflib"]). `module` (24) is '
             'the smallest class covering 1.5x of 9.0 = 13.5 GB; `small` (8) is '
             'not, and a RESOURCE verdict here takes down every proof job that '
             'deps on it. See ' + MEM_DEBT_DOC,
@@ -2746,9 +2762,8 @@ test('formal', [PY, 'test_formal.py'], j=True,
             'share, so it reads HIGH; `program` covers the measurement at '
             '1.19x, and `stage` would reserve the entire machine-wide ledger '
             'for one job — which also makes it unadmittable outright on a '
-            '64 GB budget. The unique-pages measurement that would settle it '
-            'is the open question in '
-            'bugs/PERF_formal_job_peaks_at_46gb_against_an_8gb_class.md. Over '
+            '64 GB budget. The unique-pages measurement (procrun.tree_usage_unique)'
+            ' fixes the double-counting that made the sum read HIGH. Over '
             'the 4 GB line and therefore a debt, not a fact. See ' + MEM_DEBT_DOC,
      desc='every formal/examples/*.mojo typechecks its generated Lean proof')
 test('formal-run', [PY, 'test_formal_run.py'], deps=['preflight'], mem='tiny',
@@ -2911,7 +2926,7 @@ test('formal-sweep-truth', [PY, 'test_formal_sweep_truth.py'],
             'whose work it can now do itself rather than like the pure-python '
             'check it mostly is. The 1.5 GB warm peak is its table row and is '
             'NOT what may size this class; see '
-            'bugs/PERF_the_cold_lean_library_build_is_9gb.md. See ' + MEM_DEBT_DOC,
+            'a cold store (MEASURED_PEAK_GB["prooflib"]). See ' + MEM_DEBT_DOC,
      desc='the sweep, measured against the interpreter: no invented coverage')
 test('formal-link-accounting', [PY, 'test_formal_link_accounting.py'],
      deps=['preflight'], mem='tiny',
@@ -3013,8 +3028,21 @@ test('formal-x86-model', [PY, 'formal/x86_64_model_coverage_test.py'],
 # GB), which is a machine-wide reservation for a job whose measured peak is
 # under a third of the cheapest rung.
 #
-# It is RED, and deliberately `expect=`-marked rather than left unregistered:
-# `udivmod` disagrees with the hardware (real 4, model 7905747460161236410).
+# It is RED, and deliberately `expect=`-marked rather than left unregistered.
+# The marker this comment used to carry — `udivmod` disagrees with the
+# hardware (real 4, model 7905747460161236410) — is no longer true, and the
+# marker it described was never attached: a comment that says a job is
+# `expect=`-marked beside a registration that has no marker is a claim about
+# the tree that is not true, and the first thing a reader does with it is
+# trust it. Measured 2026-10-29, the run is `agree 91  WRONG 0  NO-RUN 3
+# (of 93)` with exit 1: `udivmod` is among the 91 that agree, and the red is
+# three runs the model stops before returning — `accum_max` (the plan builds,
+# so the model stops at a byte it accepted), `printf_int` (a `movsxd_r64_r32`
+# step is not wired) and `str_len` (the nine SSE2 scalar binary64 forms have
+# no decoder arm). That is the x86-64 instruction-coverage backlog, and it is
+# zero WRONG rows. The marker states the condition rather than a count,
+# because the harness prints no summary line the runner's drift check can
+# read, and a count here would fail as UNCHECKED on every run (`marker_failures`).
 # A model bug on a file that has been running by nobody for as long as it has
 # existed is exactly what an `expect=` marker is for — it says WHAT is red
 # instead of leaving the file invisible. Fix the model and the marker flips
@@ -3022,6 +3050,14 @@ test('formal-x86-model', [PY, 'formal/x86_64_model_coverage_test.py'],
 test('formal-x86-machine-model', [PY, 'formal/x86_64_model_test.py'],
      deps=['preflight', 'prooflib'], mem='tiny',
      extra=['formal/x86_64_model_test.py', 'formal/x86_64.py', 'lib/X86.lean'],
+     expect='red with zero WRONG rows (measured 2026-10-29): agree 91, and 3 '
+            'runs the model stops before returning (NO-RUN) — `accum_max` '
+            '(the plan builds, so the model stops at a byte it accepted), '
+            '`printf_int` (a `movsxd_r64_r32` step is not wired) and '
+            '`str_len` (the nine SSE2 scalar binary64 forms have no decoder '
+            'arm). The former `udivmod` disagreement is gone: it is among the '
+            '91 that agree. The three NO-RUNs are the x86-64 '
+            'instruction-coverage backlog, not a wrong step.',
      desc='lib/X86.lean EXECUTED against the hardware it models, every example')
 
 # ── the formal host modules: built, EXECUTED, diffed against CPython ────────
@@ -3863,6 +3899,17 @@ test('formal-host-import-wall', [PY, 'test_formal_host_import_wall.py'],
             'tools/formal_host_import_wall.py',
             'tools/formal_sweep_causes.py'] + FORMAL_BUILD_INPUTS,
      desc='the host-import wall tool: which readers it asks, not its numbers')
+# The measurement behind `formal-host-import-wall`: the shape that separates
+# each reader, pinned on synthetic sources rather than on the live sweep.
+# 10 s, 0.2 GB peak, `tiny`; in `check` because it is the same area and a
+# red here was the root cause of the dead-import / importlib.util row bugs.
+test('formal-host-import-shapes', [PY, 'test_formal_host_import_shapes.py'],
+     mem='tiny',
+     deps=['preflight'],
+     extra=['test_formal_host_import_shapes.py', 'tools/formal_host_import_shapes.py',
+            'tools/formal_host_import_wall.py',
+            'formal/imports.py', 'tools/formal_sweep_causes.py'] + FORMAL_BUILD_INPUTS,
+     desc='the host-import shapes instrument: which shapes each reader maps to')
 # The other file the same estate check named on the same day, registered on
 # the same reasoning rather than excused: seven assertions that a per-STRUCT
 # predicate (`struct_is_framed`, `struct_is_one_field`, `struct_field_names`) is
@@ -4047,6 +4094,17 @@ BUCKETS = {
               # loop; it arrived with `work/formal27-6` in NO bucket and NO
               # `UNREGISTERED`, which is what the estate check named.
               'formal-host-import-wall',
+              # …and `formal-host-import-shapes`, the measurement behind the
+              # wall: its registration says "in `check` because it is the same
+              # area and a red here was the root cause of the dead-import /
+              # importlib.util row bugs", but the batch added the registration
+              # and not the row, which is what the bucket check named. 10 s,
+              # 0.2 GB peak, no Lean; 15.9 s wall through the runner, measured
+              # green 2026-10-28, gate triage. Its one red on the tree (a dead
+              # `types` import in a batch regression record the tree-wide
+              # ratchet named) is fixed in this series, so the everyday loop
+              # runs it green from day one.
+              'formal-host-import-shapes',
               # …and `formal-per-struct-asks`, named by the estate check on the
               # same day for the same reason: in NO bucket and NO
               # `UNREGISTERED`. 7 checks, 0.96 s, no build, no Lean.
@@ -4269,6 +4327,12 @@ BUCKETS = {
                # prints, and it is in `check` rather than only here for the
                # `formal-field-walk` reason: no build, no Lean, 0.36 s.
                'formal-host-import-wall',
+               # …and `formal-host-import-shapes`, the wall's measurement, in
+               # both buckets for the same reason the wall is in both: `proofs`
+               # is the whole formal picture in one bucket, and the wall's row
+               # above is its sibling. Named 2026-10-28, gate triage, with the
+               # row in `check` beside it.
+               'formal-host-import-shapes',
                # …and `formal-per-struct-asks`, in both buckets for the
                # `formal-field-walk` reason — the estate check named it in NO
                # bucket and NO `UNREGISTERED`, and at 0.96 s with no build an
@@ -4439,10 +4503,20 @@ BUCKETS = {
     # async-with-lock-guard, nested-async-generic and async-runtime-scaffold are
     # green and their `expect=` markers are gone (a marked-but-passing test is
     # reported as a FAILURE, so leaving them would have been the anti-rot firing).
-    # The remaining four keep their markers, and their counts were re-measured
+    # The remaining three keep their markers, and their counts were re-measured
     # against the run on the same day.
     #
-    # The four `expect=`-marked ones stay in `coroutine` rather than `check` for
+    # A fourth, `gimple-async-runner`, dropped its marker on 2026-10-28: the
+    # §5.5 cutover's red was the file's own, not the backend's — its C++20
+    # build helper asked `compile_to_gimple_with_cpp` for a companion .cpp
+    # that the now-default stack-switch backend never emits, so all 36
+    # buildable cases died at build ("expected a non-empty generated .cpp").
+    # It now pins `MOJO_CORO=cpp` the way its same-harness sibling
+    # test_taskgroup.py already does, its two stale bool expectations `1`
+    # were the fixed `mojo_repr_bool` spelling `True` all along, and all 39
+    # cases pass (re-measured 41 s / 0.1 GB, below).
+    #
+    # The three `expect=`-marked ones stay in `coroutine` rather than `check` for
     # the reason stated once: an `expect` in `check` puts a permanently-EXPECTED
     # line in the tally a developer reads to know their tree is fine (the same
     # reasoning that keeps `formal-module-attr`, `formal-external-call` and
@@ -4452,10 +4526,10 @@ BUCKETS = {
     #
     # Measured one at a time under `tools/memslot.py --gb 8`; `mem` is `tiny`
     # (0.0-0.2 GB each, against the `small`/8 GB they carried while ungated):
-    #   gimple-async-runner  1.2 s  0.0 GB   2 passed, 36 failing  (expect=)
-    #   coro-detached-async  2.2 s  0.1 GB   2 failing             (expect=)
+    #   gimple-async-runner  41.4 s  0.1 GB  39 passed   (green since 2026-10-28)
+    #   coro-detached-async  2.2 s  0.1 GB   2 passed   (was red: stale mojo_coro.c paths)
     #   async-void-return    3.3 s  0.1 GB   3 failing             (expect=)
-    #   coro-future-await   11.6 s  0.1 GB  17 failing             (expect=)
+    #   coro-future-await   11.6 s  0.1 GB  2 failing              (expect=)
     #   async-with-lock-guard 2.7 s 0.1 GB   3 passed
     #   mutable-async-capture 2.7 s 0.1 GB   2 passed
     #   transitive-closure-capture 2.7 s 0.1 GB  2 passed
@@ -5130,6 +5204,8 @@ def select(names, opts):
             if not kept:
                 raise SystemExit(f"suite.py: --only {pat!r} matched nothing")
             chosen = kept
+    for pat in getattr(opts, 'skip', None) or []:
+        chosen = [n for n in chosen if not re.search(pat, n)]
     if not chosen:
         raise SystemExit("suite.py: nothing selected")
     return chosen
@@ -6038,6 +6114,8 @@ def main(argv=None):
     ap.add_argument('--no-cache', action='store_true',
                     help='re-run cached tests instead of replaying them '
                          '(fresh results are still published)')
+    ap.add_argument('--skip', action='append', metavar='RE', default=[],
+                    help='drop tests whose name matches RE (repeatable): a gate turned OFF for a backlog, see tools/gates.json')
     ap.add_argument('--only', action='append', metavar='RE',
                     help='within the selected buckets, keep only tests whose '
                          'name matches RE (repeatable)')

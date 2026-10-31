@@ -1000,7 +1000,7 @@ def test_every_job_over_the_debt_line_says_why():
     in `needs_memwhy`: a job MEASURED above 4 GB (`native-dumpfull` at 31.3),
     and a job handed a class above the default with nothing measured behind it
     (`prooflib`, the A/B sweep). Either way the reason goes in the registry next
-    to the number and points at `bugs/PERF_memory_over_4gb_is_a_bug.md`, which
+    to the number and points at `doc/POLICY_memory_over_4gb.md`, which
     is where the next step for each one is written down.
     """
     over = {n: s for n, s in sorted(suite.REGISTRY.items())
@@ -1210,7 +1210,6 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     check('expect count: the counts the registry states are the ones the '
           'reader sees',
           stated == {'async-void-return': 3,
-                     'coro-detached-async': 2,
     # bugs4-10's entry, MINUS the two it still listed and master has since
     # dropped: `formal-external-call` and `formal-module-attr` no longer carry
     # an `expect=` (both markers were removed on 2026-10-02, once the failures
@@ -1275,8 +1274,16 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     # `formal-x86-64-parity` registration was likewise not taken in the
     # 2026-10-12 merge, and master's `formal-x86-parity` is out of this census
     # too, since 4ceb7603 removed its marker (see above).
-                     'coro-future-await': 17,
-                     'gimple-async-runner': 36,
+                     'coro-future-await': 2,
+    # `gimple-async-runner` is a TENTH drop, and the one this fix landed:
+    # the 2026-10-28 gate ran it red with 36 of 38 cases failing "expected
+    # a non-empty generated .cpp" — the §5.5 cutover's default stack-switch
+    # backend emits no companion .cpp, and the file (a C++20-path test) was
+    # never updated to pin MOJO_CORO=cpp the way test_taskgroup.py already
+    # did. With the pin (plus its two stale bool expectations `1` -> `True`,
+    # the fixed mojo_repr_bool spelling) all 39 cases pass and the marker is
+    # gone, so a census still stating it would fail on the registry's own
+    # state.
                      'formal-x86-endtoend': 1,
 # NEITHER `formal-os-backing` (2) NOR `formal-x86-parity` (1)
                      # is in this census any more, and that is the union of the two
@@ -1295,13 +1302,23 @@ def test_an_expect_marker_count_is_checked_against_the_run():
                      #     backends again and the marker came back with it, a
                      #     half-applied fix of the same class as the dropped
                      #     definitions in
-                     #     `bugs/MERGE_bulk_resolved_to_master_dropped_branch_definitions.md`
+                     #     definitions from the bulk-merge drop (fixed; doc deleted);
                      #     — and then master's `5e45d0b5` restored the test half for
                      #     real, so the marker is gone a second time and the count
                      #     with it.  The registry is the authority for both: a
                      #     census entry for a job that no longer carries an
                      #     `expect=` fails this very check.
-                     'x86-containers': 1},
+                     'x86-containers': 1,
+     # `ab-native` JOINS on 2026-10-28, gate triage: it was out of this census
+     # while it was DISABLED (a disabled job never runs, so it states no count
+     # and the check has nothing to read from its output) and `2f75609d` turned
+     # it back to `expect=SELFHOST_TOKENIZE_BLOWUP` once the blowup the marker
+     # was named for closed (bugs/CODEGEN_ab_native_fails.md, 2026-10-26: the
+     # run is 0.1 GB / ~10 s). The marker states "1 failing: match_stmt
+     # diverges (29/30 byte-identical)", so the count is 1, read the same way
+     # as the other entries — against the run's "Results: N passed, M failed"
+     # line — which is the marker's own anti-rot for a second divergence.
+                     'ab-native': 1},
           f'the reader sees {stated}; a marker whose prose shape has drifted '
           f'stops being checked, which is the failure this whole mechanism '
           f'is for. A FANOUT states its count the same way — checked against '
@@ -1612,6 +1629,27 @@ RESERVE_JOB = ('import sys, time;'
 
 def _reserving_cmd():
     return ok_cmd(RESERVE_JOB.format(tools=os.path.join(HERE, 'tools')))
+
+
+def test_every_job_that_runs_mojoc_depends_on_it():
+    """A job that executes `./mojoc` must declare `deps=['mojoc']`.
+
+    `mojoc` is built by a Makefile target, and nothing starts the job that runs
+    it before that build exists unless the registry says so. `native-dumpfull`
+    had no such dep: it raced `mojoc` at t=0 and died with "mojoc not built",
+    and the failure stayed hidden only because the job was `expect=`-marked.
+    The marker came off, the race was left in place, and the gate went red.
+    The consumers are named here rather than discovered, because the binary
+    is reached through a test file's own path arithmetic.
+    """
+    consumers = ('ab-native', 'native-dumpfull',
+                 'selfhost-memory', 'selfhost-memory-fire')
+    missing = [n for n in consumers
+               if 'mojoc' not in (getattr(suite.REGISTRY[n], 'deps', ()) or ())]
+    check('deps: every job that runs ./mojoc waits for the mojoc build',
+          not missing,
+          f'no deps=[\'mojoc\'] on {missing}: they start at t=0 and race the '
+          f'build, which is "mojoc not built" on a cold tree')
 
 
 def test_every_job_is_reserved_before_it_starts():
@@ -2100,6 +2138,11 @@ STALE_PER_CHILD_BUDGETS = {
     'test_async_runtime_scaffold.py': 1,
             'test_closure_capture_comptime_func_params.py': 2,
     'test_comptime_bracket_params.py': 1,
+    'test_container_constructor_arg_um.py': 1,  # +1 2026-10-27: the pinning
+        # file's own `fire.py run` of the .mojo it writes (3e4501a42, the
+        # container-constructor pin) — a per-child wall on a run of a program
+        # the case wrote itself, which is what a residue row is for; the file
+        # does not import exec_budget, so it is residue, not subject.
     'test_container_equality.py': 3,
     'test_container_membership.py': 3,
     'test_container_ordering.py': 3,
@@ -2108,7 +2151,11 @@ STALE_PER_CHILD_BUDGETS = {
         'test_coro_runtime.py': 1,
     'test_coro_scoreboard.py': 2,
     'test_dict_tuple_key.py': 3,
-    'test_formal_admitted.py': 7,
+    # `test_formal_admitted.py`'s row (5, 2026-10-26's c20bdf09e "5 remain as
+    # data-table examples") is dropped 2026-10-27: the conversion landed, and
+    # the walk now finds 0 real literals — the "data-table examples" are
+    # string contents (the driver-text table at the file's bottom), which the
+    # ast walk correctly does not count as call sites.
     # +1 on 2026-10-05: `work/formal40-4-r2`'s
     # `TestTheDivisionExamplesHaveNoProofToCheck::test_the_image_itself_is_fine_`
     # `without_the_prove` — a `subprocess.run` of the `floordiv`/`udivmod`
@@ -2651,38 +2698,52 @@ def test_a_disabled_test_is_registered_but_never_runs():
           'the run log must say the job was skipped on purpose, and that its '
           f'class is a record: {[l for l in text.splitlines() if "plan: off" in l]}')
 
-    # The same property on the real registry entry rather than a synthetic one,
-    # where the class is the one the job will actually be given back.
-    real = suite.REGISTRY['ab-native']
-    check('disabled: the registry\'s own disabled job reserves 0, not its class',
-          suite.is_disabled(real) and suite.reserved_gb(real) == 0
-          and suite.memlimit(suite.memclass_for(real)) > 0,
-          f'reserved {suite.reserved_gb(real)} GB; its class is '
-          f'{suite.memclass_for(real)} '
-          f'({suite.memlimit(suite.memclass_for(real)):g} GB) — a class that is '
-          f'only a record must not be a claim on the machine')
+    # The real-registry half, re-baselined 2026-10-28, gate triage. It used to
+    # run on `ab-native`, the live case: DISABLED since 2026-09-30, 20.5 GB,
+    # the `program` class (55), `excl` — the shape the synthetic half above
+    # reproduces at the same class ceiling, which is why the reserves-0
+    # property is still covered with no live case. `2f75609d` (2026-10-26)
+    # turned it back to `expect=` once the blowup its marker waited on closed
+    # (bugs/CODEGEN_ab_native_fails.md: the run is 0.1 GB / ~10 s now), and the
+    # reason `disabled=` existed in the first place — a known outcome bought
+    # at a machine-sized price — is gone with it. So the state this half pins
+    # is the ABSENCE, stated rather than assumed: a disabled job that appears
+    # in the registry must be named here and its properties re-asserted on it,
+    # or the section above would stop saying anything about the live registry.
+    real = [n for n, s in suite.REGISTRY.items() if suite.is_disabled(s)]
+    check('disabled: the real registry has no job that is not run',
+          real == [],
+          f'{sorted(real)} — a disabled job in the registry must be named in '
+          f'this section and its reserves-0 / --list / --dry-run properties '
+          f're-asserted on it, the way ab-native was until 2f75609d')
 
     # --list and --dry-run, because a decision a reader cannot see is not a
     # decision: both have to say DISABLED, and the plan has to say the
     # reservation is 0 rather than leaving the reader to infer it from a
-    # missing line.
-    buf = io.StringIO()
-    with redirect_stdout(buf):
-        suite.print_list()
-    listing = buf.getvalue()
-    check('disabled: --list shows it, with the doc',
-          re.search(r'^  ab-native\b.*DISABLED', listing, re.M) is not None
-          and suite.MEM_DEBT_DOC in listing
-          and 'bugs/CODEGEN_ab_native_fails.md' in listing,
-          'ab-native is not marked DISABLED in --list, or its doc is not shown')
-    buf = io.StringIO()
-    with redirect_stdout(buf):
-        suite.print_plan(['ab-native'], _FakeOpts())
-    plan = buf.getvalue()
-    check('disabled: --dry-run plans it as disabled and reserves 0',
-          'DISABLED: not run' in plan and 'reserves 0 GB' in plan
-          and '0 jobs' in plan,
-          f'expected a disabled line with no jobs and no reservation: {plan!r}')
+    # missing line. On the real registry those paths have nothing to print
+    # right now, which is the state check above; on the synthetic spec the
+    # section is built from, they print the whole decision, so the display
+    # code is exercised every run rather than only while a case is live.
+    with Sandbox(off=dict(cmd=ok_cmd('pass'), mem='program',
+                          disabled=suite.MEM_DEBT_DOC)):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            suite.print_list()
+        listing = buf.getvalue()
+        check('disabled: --list shows it, with the doc',
+              re.search(r'^  off\b.*DISABLED', listing, re.M) is not None
+              and suite.MEM_DEBT_DOC in listing,
+              f'off is not marked DISABLED in --list, or its doc is not shown: '
+              f'{[l for l in listing.splitlines() if l.startswith("  off")]}')
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            suite.print_plan(['off'], _FakeOpts())
+        plan = buf.getvalue()
+        check('disabled: --dry-run plans it as disabled and reserves 0',
+              'DISABLED: not run' in plan and 'reserves 0 GB' in plan
+              and '0 jobs' in plan,
+              f'expected a disabled line with no jobs and no reservation: '
+              f'{plan!r}')
 
 
 def test_the_disabled_markers_in_the_registry_are_honest():
@@ -2767,8 +2828,23 @@ def test_the_disabled_markers_in_the_registry_are_honest():
     check('disabled markers: the real registry has no stale or wrong marker',
           not suite.disabled_problems(),
           f'{suite.disabled_problems()}')
-    check('disabled markers: ...and it is not vacuous: a job is disabled',
-          len(real) >= 1, f'no registered job is disabled: {sorted(real)}')
+    # The vacuity this used to take from the real registry — at least one job
+    # is disabled, so the section above is saying something about the live
+    # tree — ended with the last disabled job: `ab-native` was the case until
+    # `2f75609d` turned it back to `expect=` on 2026-10-26 (the run is cheap
+    # now, which is the whole reason for the switch). The mechanism is not
+    # vacuous for that: the synthetic cases above run every time against the
+    # real runner code, the per-name loop below re-checks each marker against
+    # the tree the moment a job is disabled, and the guarded exec below
+    # proves the import-time refusal fires on a marker. What this check now
+    # pins is the STATE the section is written for, stated rather than
+    # assumed — the same re-baseline the sibling section above does.
+    check('disabled markers: the state the section is written for is stated, '
+          'not assumed: no registered job is disabled',
+          real == [],
+          f'{sorted(real)} — a disabled job must be named in this section and '
+          f'its marker re-checked against the tree, the way ab-native was '
+          f'until 2f75609d')
     for name in real:
         spec = suite.REGISTRY[name]
         check(f'disabled markers: {name} names a doc that is in the tree',
@@ -2783,22 +2859,32 @@ def test_the_disabled_markers_in_the_registry_are_honest():
     # The bug-doc check is the one place in this mechanism where "loudly" is
     # the whole requirement — a warning in a log nobody reads is how a disabled
     # test stays off for years — so the guard is executed, not inspected.
+    #
+    # Self-contained since 2026-10-28, gate triage: the registry no longer
+    # carries a disabled job, so there is no live marker to rewrite. Instead
+    # the guard INJECTS its own registration — spliced in immediately before
+    # the import-time check itself, because the check reads the registry at
+    # one fixed line and a registration appended after it would land past the
+    # subject — and the rewrite then targets the injected line by job name.
+    # The pre-rewrite state names a doc that EXISTS, so a rewrite that silently
+    # fails (n == 0) leaves a registry the import accepts, and the check below
+    # goes red on an unpatched file — the same failure mode the version
+    # anchored on the live ab-native line had, with nothing left to anchor on.
     path = os.path.join(HERE, 'tools', 'suite.py')
     with open(path) as f:
         src = f.read()
-    # Line-anchored on purpose: the module docstring and the section comment
-    # both spell `disabled='bugs/<doc>.md'` as PROSE, and a pattern that
-    # matched those would rewrite a comment and leave the registry alone — the
-    # guard below would then pass on a file whose marker is perfectly fine.
-    # `(?m)^\s*disabled='` matches the registration line and nothing else.
+    anchor = '_disabled_problems = disabled_problems()'
+    injected = ("test('zz_guard_disabled', [PY, 'test_ab_native.py'], "
+                "disabled='bugs/CODEGEN_ab_native_fails.md')\n")
+    spliced = src.replace(anchor, injected + anchor, 1)
     doctored, n = re.subn(
-        r"(?m)^(\s*)disabled='bugs/[A-Za-z0-9_./-]+\.md'",
-        r"\1disabled='bugs/NO_SUCH_DOC_ANYWHERE.md'", src, count=1)
+        r"(?m)^(\s*test\('zz_guard_disabled'.*?)disabled='bugs/[A-Za-z0-9_./-]+\.md'",
+        r"\1disabled='bugs/NO_SUCH_DOC_ANYWHERE.md'", spliced, count=1)
     check('disabled markers: the guard test still recognises the marker it '
-          'rewrites', n == 1
-          and 'disabled=\'bugs/CODEGEN_ab_native_fails.md\'' in src,
-          'tools/suite.py no longer spells the ab-native disabled= the way this '
-          'test rewrites it, so the guard below would pass on an unpatched file')
+          'rewrites', spliced != src and n == 1,
+          f'the import-time anchor is gone (spliced==src: {spliced == src}) '
+          f'or the rewrite hit {n} line(s) — the guard below would pass on an '
+          f'unpatched file, which is the failure this half exists to end')
     ns = {'__name__': 'suite_doctored_disabled', '__file__': path}
     try:
         exec(compile(doctored, 'suite.py(doctored)', 'exec'), ns)
@@ -2807,7 +2893,7 @@ def test_the_disabled_markers_in_the_registry_are_honest():
         rc, msg = 1, str(e)
     check('disabled markers: a stale marker stops the runner at import',
           rc == 1 and 'NO_SUCH_DOC_ANYWHERE.md' in msg
-          and 'ab-native' in msg,
+          and 'zz_guard_disabled' in msg,
           f'rc={rc} msg={msg!r}')
 
 
@@ -3362,7 +3448,7 @@ def test_a_message_a_test_pins_is_still_a_message_the_tree_can_say():
     still correct, the words were still in the tree somewhere else, and the
     TEST was asserting a sentence the build could not print —
 
-      * `TEST_formal_specialization_pins_a_message_master_deleted.md`, whose
+      * the doc deleted by commit dabccb808, whose
         needles named a copy of `model.function_value_refusal` that Python's
         rebinding had made DEAD, so the case was red on a tree whose behaviour
         was right;
@@ -3933,6 +4019,23 @@ _FORMAL_SUITE_REASON = (
     'entry per construct; run directly rather than from a gate because a run '
     'of one is minutes of real compilation. The construct and its bug doc are '
     'named in the file\'s own docstring.')
+
+# The batch's 46 standalone regression records, one reason for the group on
+# the same footing as the sentence above: a per-file reason would be 46 copies
+# of the same sentence, and the per-file truth (which bug, which fix) lives in
+# each file's own docstring, which this sentence points at.
+_BATCH_REGRESSION_REASON = (
+    'A standalone regression record for one named bug, landed with the '
+    '74-commit batch (08e9229bf): the bug and its fix are named in the '
+    'file\'s own docstring, and the file asserts the fixed behaviour when run '
+    'directly — `python3 <file>` in-process, or the same source through the '
+    'compiled path where the bug lives in codegen — with CPython as the '
+    'oracle where the answer is CPython\'s. Declared as a group on 2026-10-27, '
+    'gate triage: the batch registered none of the 46 and the estate check '
+    'named them at once. Registering is the batch\'s follow-up, not a gate '
+    'triage: CLAUDE.md\'s cost rule wants the cheap ones registered, and a '
+    'registration supersedes its entry here — the estate check\'s `resolved` '
+    'assertion enforces the removal.')
 
 
 UNREGISTERED = {
@@ -4569,6 +4672,76 @@ UNREGISTERED = {
         "own author's list of what it should reject.",
     'test_type_system_integration.py': 'The type system catching violations '
         'during a real compile, which is the half the fixture list above is not.',
+
+    # ── the batch's 46 standalone regression records, declared as a group ──
+    # 2026-10-27, gate triage of the 53-job gate on 08e9229bf: the batch landed
+    # these with no registration, in no declared family, and the estate check
+    # named all 46 at once. One shared reason for the group; the per-file truth
+    # (which bug, which fix) is in each file's own docstring.
+    'test_ab_native_regression.py': _BATCH_REGRESSION_REASON,
+    'test_budget_census_regression.py': _BATCH_REGRESSION_REASON,
+    'test_char_star_local_regress.py': _BATCH_REGRESSION_REASON,
+    'test_codegen_a_typed_container_local_no_init.py': _BATCH_REGRESSION_REASON,
+    'test_codegen_bootstrap_resource_regression.py': _BATCH_REGRESSION_REASON,
+    'test_codegen_callable_return_type_pinned.py': _BATCH_REGRESSION_REASON,
+    'test_codegen_len_nonascii.py': _BATCH_REGRESSION_REASON,
+    'test_comptime_function_alias_r2.py': _BATCH_REGRESSION_REASON,
+    'test_container_constructor_arg_um.py': _BATCH_REGRESSION_REASON,
+    'test_cyclic_closure_regression.py': _BATCH_REGRESSION_REASON,
+    'test_dict_comprehension_repr_regress.py': _BATCH_REGRESSION_REASON,
+    'test_dict_comprehension_repr_regress_pinned.py': _BATCH_REGRESSION_REASON,
+    'test_dict_slot_read_regression.py': _BATCH_REGRESSION_REASON,
+    'test_dunder_repr_pinned.py': _BATCH_REGRESSION_REASON,
+    'test_dylib_generated_cpp_refusal.py': _BATCH_REGRESSION_REASON,
+    'test_dynamic_getattr.py': _BATCH_REGRESSION_REASON,
+    'test_getattr_default_miss_reg.py': _BATCH_REGRESSION_REASON,
+    'test_gimple_match_regression.py': _BATCH_REGRESSION_REASON,
+    'test_imported_callable_default_regression.py': _BATCH_REGRESSION_REASON,
+    'test_infra_py_version_fallback.py': _BATCH_REGRESSION_REASON,
+    'test_lean_proof_verdict_regression.py': _BATCH_REGRESSION_REASON,
+    'test_method_overload_value.py': _BATCH_REGRESSION_REASON,
+    'test_perf_lean_lib_memory_regression.py': _BATCH_REGRESSION_REASON,
+    'test_perf_memory_leak_pin.py': _BATCH_REGRESSION_REASON,
+    'test_pin_dict_content_key_aliases.py': _BATCH_REGRESSION_REASON,
+    'test_procrun_regression.py': _BATCH_REGRESSION_REASON,
+    'test_reg_dispatched_for_loop.py': _BATCH_REGRESSION_REASON,
+    'test_regress_bytes_erased.py': _BATCH_REGRESSION_REASON,
+    'test_regress_interface_request_1.py': _BATCH_REGRESSION_REASON,
+    'test_regress_nested_gen_yield.py': _BATCH_REGRESSION_REASON,
+    'test_regress_nested_gen_yield_direct.py': _BATCH_REGRESSION_REASON,
+    'test_regress_stat_comptime.py': _BATCH_REGRESSION_REASON,
+    'test_regression_bool_isinstance.py': _BATCH_REGRESSION_REASON,
+    'test_regression_ctor_temp_field_read_loses_element_type.py': _BATCH_REGRESSION_REASON,
+    'test_regression_cursor_nested.py': _BATCH_REGRESSION_REASON,
+    'test_regression_enum_cls_refusal.py': _BATCH_REGRESSION_REASON,
+    'test_regression_needle_drift.py': _BATCH_REGRESSION_REASON,
+    'test_regression_partial_work_handoff.py': _BATCH_REGRESSION_REASON,
+    'test_regression_round2_gap.py': _BATCH_REGRESSION_REASON,
+    'test_regression_signed_loop.py': _BATCH_REGRESSION_REASON,
+    'test_regression_smulh.py': _BATCH_REGRESSION_REASON,
+    'test_regression_stale_budget_admitted.py': _BATCH_REGRESSION_REASON,
+    'test_regression_stdlib_concurrency_pinned.py': _BATCH_REGRESSION_REASON,
+    'test_regression_subscript_nested.py': _BATCH_REGRESSION_REASON,
+    'test_regression_unpack_spread.py': _BATCH_REGRESSION_REASON,
+    'test_spread_string_regression.py': _BATCH_REGRESSION_REASON,
+    'test_untested_regression.py': _BATCH_REGRESSION_REASON,
+    'test_zip_loop_target_rebind_regress.py': _BATCH_REGRESSION_REASON,
+
+    # Landed with 313513c45 (2026-10-28, while this gate triage was running —
+    # the estate re-baseline of the 46 above now has to account for it too):
+    # `control.py`'s own test for the status/prune half, a throwaway-repo unit
+    # test run directly (`python3 tools/test_control_status.py`, 8 registry
+    # cases over one temporary git repo, no compiler). Registered by nobody:
+    # it is the owner's mechanism test and the owner's follow-up to register
+    # it if wanted; a registration supersedes this entry.
+    'tools/test_control_status.py':
+        'control.py\'s status/prune mechanism, tested against a throwaway git '
+        'repo: which registry entries are done-and-gone, that the hidden count '
+        'in `status` matches, that `--all` shows everything, and that prune '
+        'drops exactly the done-and-gone set and never more (dry-run writes '
+        'nothing). Run directly with `python3 tools/test_control_status.py`. '
+        'Declared 2026-10-28, gate triage: it landed mid-triage (313513c45) '
+        'unregistered, which the estate check names.',
 }
 
 
@@ -5275,9 +5448,9 @@ def test_a_deleted_bug_doc_is_not_still_cited():
     listed is indistinguishable from an open one to whoever reads the queue
     next. It has a cost nobody was measuring, though, and the first instance
     found was a test file's module docstring sending a reader to a file that is
-    not there. `bugs/DOCS_deleted_bug_doc_still_cited_in_three_places.md` is
-    the write-up, rewritten after the walk turned out to be a hundred times
-    bigger than the two places it named.
+    not there. A deleted bug doc (rewritten after the walk turned out
+    to be a hundred times bigger than the two places it named) is the
+    write-up for this check.
 
     So the WALK is `tools/dangling_doc_refs.py`, and these checks are about
     the walk rather than about the corpus, which is the only shape that can
@@ -5395,8 +5568,7 @@ def test_a_deleted_bug_doc_is_not_still_cited():
     # `FORMAL_known_limits.md`, which is the very document the check above uses
     # as its positive control for the `bugs/`-prefixed class — so the tool
     # reported its own control as broken and every figure quoted from it
-    # (`DOCS_merge_left_citations_of_the_docs_the_branches_deleted.md` quotes
-    # 289) was wrong by 64. The bare class is deliberately outside the ratchet,
+    # (the doc deleted by commit 0702d4087 quotes 289) was wrong by 64. The bare class is deliberately outside the ratchet,
     # so nothing else would have caught it.
     bare_by_doc, bare_by_file = dangling_doc_refs.bare_find()
     live = {n.rsplit('/', 1)[-1]: v for n, v in bare_by_doc.items()
@@ -5409,13 +5581,18 @@ def test_a_deleted_bug_doc_is_not_still_cited():
           f'({sorted(live)[:5]}); `bare_find` must skip a name that resolves, '
           f'and the census it prints is quoted in bugs/ documents')
     # …and it must still find a corpus, or the fix is a walk that matches
-    # nothing. 200+ is the measured floor on this tree after the fix.
+    # nothing. The floor is read off the bare ledger, not hard-coded: every
+    # sweep that retires citations moves the corpus, and a literal floor was
+    # re-baselined by hand after each one (196 on 2026-10-27, then this
+    # sweep's 172). Half the ledger is far below any real corpus and far above
+    # what an over-skipping predicate leaves behind.
+    _bare_floor = sum(_baseline_mod.BARE_BASELINE.values()) // 2
+    _bare_found = sum(len(v) for v in bare_by_doc.values())
     check('dangling refs: the BARE walk is still not vacuous after that fix',
-          sum(len(v) for v in bare_by_doc.values()) >= 200,
-          f'{sum(len(v) for v in bare_by_doc.values())} citations of '
-          f'{len(bare_by_doc)} names that are nowhere; a walk that skips every '
-          f'name because it skips too many is the same defect wearing the '
-          f'opposite sign')
+          _bare_found >= _bare_floor,
+          f'{_bare_found} citations of {len(bare_by_doc)} names that are '
+          f'nowhere, floor {_bare_floor}; a walk that skips every name because '
+          f'it skips too many is the same defect wearing the opposite sign')
     # The ledger's floor is read by TWO mechanisms now — the ratchet below and
     # the strict check above — so the readers that decide what it records are
     # checked against a synthetic corpus rather than against this tree's, whose
@@ -6309,7 +6486,8 @@ def main():
                test_an_expect_marker_points_at_a_doc_that_exists,
                test_an_expect_marker_count_is_checked_against_the_run,
                test_a_doc_that_states_a_tests_status_agrees_with_the_registry,
-               test_a_make_recipe_never_asks_for_more_than_its_job_reserved):
+               test_a_make_recipe_never_asks_for_more_than_its_job_reserved,
+               test_every_job_that_runs_mojoc_depends_on_it):
         fn()
     print()
     print(f'Results: {PASSES} passed, {len(FAILURES)} failed')

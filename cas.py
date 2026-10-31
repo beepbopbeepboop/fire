@@ -282,6 +282,15 @@ _SELFHOST_EXTRA = [
     'cas.py',
     'determinism_trace.py',
     'jit/arm64.py',
+    # The `formal` package's __init__, reached because
+    # mojo/backend_gimple/emit_stmts.py does a function-local
+    # `from formal import model as formal_model` (delayed inside the function
+    # to dodge a circular import). The walk is deliberately syntactic, so a
+    # function-local import still counts, and `from formal import ...` resolves
+    # through the package's __init__.py. Added 2026-10-27 (gate triage): the
+    # closure check reported it as the one file the walk reaches that the key
+    # does not hash.
+    'formal/__init__.py',
 ]
 
 _selfhost_fp_cache = None
