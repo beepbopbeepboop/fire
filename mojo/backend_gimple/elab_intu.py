@@ -388,6 +388,32 @@ def _bound_in_scope(node, scope) -> bool:
     return any(_root_name(e) in names for e in elems)
 
 
+def _fn_is_inline(work, base):
+    module_src = _module_src(work.gen, base, 'fn')
+    if module_src is None:
+        return False
+    import elaborate, monomorphize as mm
+    tmpl = elaborate.extract_fn_source(module_src, base)
+    if tmpl is None:
+        return False
+    # Check lines before the def for @inline
+    lines = module_src.splitlines()
+    # Find the line index where def starts
+    for i, line in enumerate(lines):
+        if line.startswith('def ') and base in line:
+            # Check preceding lines for @inline
+            for j in range(i-1, -1, -1):
+                stripped = lines[j].strip()
+                if stripped == '' or stripped.startswith('#'):
+                    continue
+                if '@inline' in stripped:
+                    return True
+                if stripped.startswith('@') or stripped.startswith('def '):
+                    break
+            return False
+    return False
+
+
 def _fn_bracket_kinds(module_src, base):
     """`[(name, is_type)]` for a generic function's bracket parameters, in
     declaration order, or None when the header cannot be read as a plain list
@@ -440,35 +466,17 @@ def _fn_args_are_types(work, base, args) -> bool:
 
 
 def _concrete_args(work, kind, base, node, scope=None):
-    """The concrete type arguments a CALL SITE names, or None.
-
-    Two readable sources and nothing else, because nothing here is lowered and
-    so nothing has a C type yet:
-      - the bracket arguments, when written (`Generic[Int64, MutOrigin](…)`);
-      - the arguments themselves, when every one is a literal (the `once(10)`
-        shape) — through the elaborator's OWN unifier, so this pass and the
-        `.o` route cannot disagree about what those args mean.
-    `scope` is the enclosing function's `_walk_scoped` scope: a bracket
-    argument bound there is refused (see `_bound_in_scope`)."""
     if isinstance(node.func, SubscriptExpr):
         if not isinstance(node.func.obj, IdentExpr):
-            return None
-        if _bound_in_scope(node, scope):
             return None
         args = _bracket_args(work.gen, node.func)
         if not args or not all(_is_concrete(a) for a in args):
             return None
-        if kind == 'fn' and not _fn_args_are_types(work, base, args):
-            return None
         return args
     if _literal_args(node) is None:
         return None
-    if kind == 'struct':
-        return _infer_struct_args(work, base, _literal_args(node))
-    args = _infer_fn_args(work, base, node)
-    if args is None or not _fn_args_are_types(work, base, args):
-        return None
-    return args
+    return (_infer_struct_args(work, base, _literal_args(node)) if kind == 'struct'
+            else _infer_fn_args(work, base, node))
 
 
 def _is_concrete(a) -> bool:
@@ -3382,10 +3390,8 @@ def run(gen, stmts):
                 # exactly.
                 args = _d2_ctor_args(work, base, n)
         elif kind == 'fn':
-            # Materialize EVERY generic function instantiation with concrete
-            # type arguments (Option A: unique mangled names per spec).
-            # Inline functions stay on the .o route unless they need a
-            # unique symbol (the dylib fix targets dlsym specifically).
+            if not _fn_returns_unbuildable_struct(work, base):
+                return
             args = _concrete_args(work, kind, base, n, scope)
             if args is None:
                 return
@@ -3607,7 +3613,7 @@ def _rewrite_annotations(work):
     # single-argument gate mean this fires exactly on that shape — a
     # mention whose argument was never rewritten is untouched.
     mangled_raw = {}
-    for (kind, base, args), mangled in _live_aliases(work):
+    for (kind, base, args), mangled in work.alias.items():
         if kind == 'struct':
             mangled_raw[mangled] = f"{base}[{', '.join(args)}]"
     for rec in work.records.values():
@@ -3705,7 +3711,7 @@ def _rewrite_local_struct_anns(work, stmts):
         carries such a mention in the measured tree (fields only).
     """
     by_base = {}
-    for (kind, base, args), mangled in _live_aliases(work):
+    for (kind, base, args), mangled in work.alias.items():
         if kind == 'struct':
             by_base.setdefault(base, []).append(mangled)
     solo = {base: ms[0] for base, ms in by_base.items() if len(ms) == 1}
@@ -3763,7 +3769,7 @@ def _rewrite_ctor_calls(work, stmts):
     _US = '\x1f'
     by_base = {}
     mangled_of = {}
-    for (kind, base, args), mangled in _live_aliases(work):
+    for (kind, base, args), mangled in work.alias.items():
         if kind == 'struct':
             _akey = _US.join(args)
             _lst = by_base.get(base)
@@ -3867,7 +3873,7 @@ def _rewrite_intu_ctor_calls(work):
     _US = '\x1f'
     by_base = {}
     mangled_of = {}
-    for (kind, base, args), mangled in _live_aliases(work):
+    for (kind, base, args), mangled in work.alias.items():
         if kind == 'struct':
             _akey = _US.join(args)
             _lst = by_base.get(base)
