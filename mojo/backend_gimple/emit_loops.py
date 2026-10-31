@@ -4032,14 +4032,7 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
             if (_frec is not None and _frec.get('multi_args')
                     and len(_frec['multi_args']) == len(_tnames)):
                 _slot_ctypes = []
-                # `_ainfs` mirrors `_slot_ctypes`: the loop below reads the
-                # per-slot factory-record dict by SUBSCRIPT (`_ainfs[_i]`),
-                # NOT through the `zip(...)` tuple unpack — see that loop's
-                # comment. Subscript reads cast to the target's declared kind;
-                # the unpack's typed getters did not.
-                _ainfs = []
                 for _ainf in _frec['multi_args']:
-                    _ainfs.append(_ainf)
                     _tc = _ainf['elem_ctype']
                     # PART 6 (2026-10-23, family D piece 2): a STRUCT slot
                     # (a bare-ctor list literal feeding the product —
@@ -4217,20 +4210,8 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
                          'int64_t': 'mojo_list_get_int',
                          '_Bool': 'mojo_list_get_bool',
                          'double': 'mojo_list_get_double'}
-            # Index, don't unpack: `zip(_tnames, _slot_ctypes, _frec['multi_args'])`
-            # emits a typed `mojo_list_get_*` per row element with NO cast to
-            # the target's declared kind — the `_tc`/`_ainf` targets (char*,
-            # hoisted from the loop above's dict-key use) then receive a raw
-            # int64 word and gcc rejects "assignment to 'char *' makes pointer
-            # from integer without a cast". Reading each of the three parallel
-            # lists by SUBSCRIPT instead emits a word read + cast to the
-            # target's declared kind (the proven shape `_slot_ctypes` already
-            # relies on), and the values are identical (slot i of each list =
-            # argument i of the factory record).
-            for _i in range(len(_tnames)):
-                _tn = _tnames[_i]
-                _tc = _slot_ctypes[_i]
-                _ainf = _ainfs[_i]
+            for _i, (_tn, _tc, _ainf) in enumerate(
+                    zip(_tnames, _slot_ctypes, _frec['multi_args'])):
                 _acc = _slot_acc.get(_tc)
                 if _acc is None and isinstance(_tc, str) \
                         and _tc.endswith(' *'):
