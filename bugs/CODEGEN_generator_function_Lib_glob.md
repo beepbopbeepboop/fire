@@ -1,5 +1,35 @@
 # CODEGEN_generator_function: Lib/glob.py
 
+## Status (2026-10-31, round 8 — the selector SHAPE now compiles and runs; blockers 1 and the call/keyword half of 2 are gone, `a + b` on dynamic words and the regex compiler remain)
+
+Landed (pinned by `generator_escaping_closure_chain_keyword_call_dynamic_path`,
+which diffs against CPython): the closure that starts an escaping generator is now
+VARIADIC (`def gen(*a, **kw)` -> `mojo_gen_call_with(start, captured, a, kw)`), so a
+call through the value binds positional AND keyword arguments and defaults by the
+generator's registered parameter names (`nxt(path, exists=True)`), and the closure
+is a `MojoVarargFn` value (`ClosureInfo.value_ctype()`; a variadic nested def used
+to be a plain bound method and crashed). The moved generator's caller-supplied
+parameters that nothing proves integer are declared `object` (dynamic words); a
+generator yielding one registers value kind 5, and a drain classifies each word
+string-or-int at run time. `_cpp_dyn_call_expr` types a method call on a
+struct-pointer receiver by the method's registered return type and accepts
+bool/int literals as arguments.
+
+Measured: a reduced two-level selector chain (method returns closure generator;
+closure `yield from`s the closure the same method built for the tail, with a
+keyword argument) prints `root/` and `x` for string paths.
+
+What is left for `glob.py`, in order:
+1. `a + b` on dynamic words: `concat_path(self, a, b): return a + b` with `a`/`b`
+   words whose call sites are all dynamic is compiled as INTEGER addition (the
+   result prints as a decimal pointer sum). Needs a run-time `+` on words
+   (`mojo_add_words`: str+str concat, bytes+bytes, int+int) used when neither operand
+   has static type evidence; `_StringGlobber.concat_path = operator.add` is the same
+   operation as a class attribute function value.
+2. class-attribute function values (`concat_path = operator.add`, `lstat =
+   os.lstat`) called as `self.<attr>(...)` on a polymorphic `self`.
+3. the run-time regex compiler (`self.compile(part)`).
+
 ## Status (2026-10-31, round 7 — ESCAPING closure generators landed (feature 1 of 2); what stands between this and `glob.py` is dynamic objects + the regex compiler)
 
 Landed (pinned by `generator_escaping_closure_returned_and_iterated`,

@@ -1362,6 +1362,7 @@ void        mojo_dict_destroy(MojoDict *d);
 void        mojo_dict_clear(MojoDict *d);
 
 void        mojo_dict_set_int(MojoDict *d, char *key, int64_t v);
+int64_t mojo_gen_call_with(void *start, MojoList *pre, MojoList *a, MojoDict *kw);
 /* `_kw` variants: the key arrives as a raw machine WORD that is either a boxed
  * string pointer or an integer, and the same decision mojo_cstr_or_int_str
  * makes (mojo_boxed_is_str) is made here — but an integer is looked up directly,

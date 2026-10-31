@@ -1420,6 +1420,20 @@ def _cpp_generator_sig_lines(gen, fn, base, param_ctypes, cpp_value_ctype,
         else:
             return []
     _names = [gimple_ctypes._as_str(_pn) for _pn, _ in param_ctypes]
+    # A generator that yields a parameter declared `object` (a dynamic word:
+    # an escaping closure generator's caller-supplied argument) yields words
+    # whose kind - string or integer - only the run time knows.
+    _obj_params = set()
+    for _pn0, _pa0 in (fn.params or []):
+        if _pa0 == 'object':
+            _obj_params.add(gimple_ctypes._as_str(_pn0))
+    if _vk == 0 and _obj_params:
+        for _yn in gimple_exprtypes._walk_ast(fn.body):
+            if (isinstance(_yn, gimple_ctypes.YieldExpr)
+                    and isinstance(_yn.value, gimple_ctypes.IdentExpr)
+                    and _yn.value.name in _obj_params):
+                _vk = 5
+                break
     # A struct pointer travels in an integer register like any word (an
     # escaping method generator takes its receiver this way).
     for _pn, _ct in param_ctypes:

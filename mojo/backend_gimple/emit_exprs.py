@@ -1014,6 +1014,31 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         if _ci.env_struct:
             env_void = gen._new_val(
                 'void *', f'(void *){gen._closure_envs.get(name) or "0"}')
+            # A VARIADIC nested def (`def gen(*a, **kw)`) is a MojoVarargFn
+            # exactly as a variadic lambda is: a call through the value packs
+            # its arguments into the list / dict the callee wants.
+            _vk = -1
+            _vfix = 0
+            for _vpn, _vpa in _ci.inner_def.params:
+                if _vpn.startswith('**'):
+                    _vk = 1 if _vk == 0 else 2
+                elif _vpn.startswith('*'):
+                    if _vk < 0:
+                        _vk = 0
+                elif _vk < 0:
+                    _vfix += 1
+            if _vk >= 0 and _vfix <= 4:
+                _vnf = gen._new_val('int64_t', str(_vfix))
+                _vkd = gen._new_val('int64_t', str(_vk))
+                _vhs = gen._new_val('int64_t', '1')
+                _vf = gen._call_expr('MojoVarargFn *', 'mojo_vararg_fn_new',
+                                     [('void *', fp), ('void *', env_void),
+                                      ('int64_t', _vnf), ('int64_t', _vkd),
+                                      ('int64_t', _vhs)])
+                _vft = gen._new_val('void *', f'(void *){_vf}')
+                gen._callable_ret_types[_vft] = gen.func_return_types.get(lifted, 'int64_t')
+                gen._func_value_names[_vft] = _repr_name
+                return 'void *', _vft
             t = gen._call_expr('MojoBoundMethod *', 'mojo_bound_method_new',
                                 [('void *', fp), ('void *', env_void)])
             gen._bound_method_ret_types[t] = gen.func_return_types.get(lifted, 'int64_t')

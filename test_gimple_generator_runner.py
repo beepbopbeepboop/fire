@@ -7275,6 +7275,63 @@ def main():
 main()
 """, "0\n6\n12\n18\n[0, 2, 4]\n")
 
+    # The glob-selector shape: a method returns a closure generator that delegates
+    # to the closure the SAME method built for the rest of the pattern, called
+    # with a keyword argument; the path is a dynamic word (str here).
+    test_generator_matches_cpython("generator_escaping_closure_chain_keyword_call_dynamic_path", """\
+class Base:
+    def __init__(self, sep):
+        self.sep = sep
+
+    def sel(self, parts):
+        dir_only = bool(parts)
+        if dir_only:
+            nxt = self.sel(parts[1:])
+
+        def gen(path, exists=False):
+            if dir_only:
+                yield from nxt(path, exists=True)
+            else:
+                yield path
+        return gen
+
+def main():
+    g = Base("/")
+    s = g.sel(["a/", "b/"])
+    for v in s("root/"):
+        print(v)
+    for v in s("x"):
+        print(v)
+
+main()
+""", """\
+class Base:
+    def __init__(self, sep):
+        self.sep = sep
+
+    def sel(self, parts):
+        dir_only = bool(parts)
+        if dir_only:
+            nxt = self.sel(parts[1:])
+
+        def gen(path, exists=False):
+            if dir_only:
+                yield from nxt(path, exists=True)
+            else:
+                yield path
+        return gen
+
+def main():
+    g = Base("/")
+    s = g.sel(["a/", "b/"])
+    for v in s("root/"):
+        print(v)
+    for v in s("x"):
+        print(v)
+
+main()
+""")
+
     # ...but any consumer that is NOT a for / list / comprehension (here `next`
     # of a bound handle) would read the box's address as an int, so the
     # generator keeps its refusal.

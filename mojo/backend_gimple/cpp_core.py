@@ -1275,6 +1275,18 @@ def _cpp_expr_static_ctype(gen, e):
                     return 'double'
                 return 'int64_t'
         return 'char *'
+    if (isinstance(e, gimple_ctypes.CallExpr) and isinstance(e.func, gimple_ctypes.MemberExpr)
+            and isinstance(e.func.obj, gimple_ctypes.IdentExpr)):
+        # A method call on a struct-pointer receiver (`self.concat_path(a, b)`
+        # in an escaping generator whose `self` is a typed parameter, or the
+        # method generator's own receiver): its static type is the method's
+        # registered return type, when that is a word this emitter represents.
+        _rs = (getattr(gen, '_cpp_gen_self_struct', None) if e.func.obj.name == 'self' else None) \
+            or gen._cpp_struct_ptr_local(e.func.obj.name)
+        if _rs and e.func.member in gen._struct_method_names.get(_rs, ()):
+            _rt = gen.func_return_types.get(gen._struct_method_csym(_rs, e.func.member, ''))
+            if _rt in ('char *', 'int64_t', '_Bool', 'MojoList *', 'MojoDict *', 'MojoSet *'):
+                return _rt
     if isinstance(e, gimple_ctypes.CallExpr) and isinstance(e.func, gimple_ctypes.MemberExpr):
         if e.func.member in ('strip', 'lstrip', 'rstrip', 'lower', 'upper',
                              'replace', 'partition', 'rpartition'):
@@ -1544,6 +1556,8 @@ def _cpp_dyn_call_expr(gen, e):
             _fct = _cpp_expr_static_ctype(gen, _op)
         if _fct is None and isinstance(_op, gimple_ctypes.StringLiteral):
             _fct = 'char *'
+        if _fct is None and isinstance(_op, (gimple_ctypes.BoolLiteral, gimple_ctypes.IntLiteral)):
+            _fct = 'int64_t'
         if _fct not in ('int64_t', 'char *', 'MojoList *', 'MojoDict *', 'MojoSet *'):
             raise gimple_exprtypes._UnsupportedGeneratorShape(
                 "a call through the callable-valued parameter "
@@ -1562,6 +1576,8 @@ def _cpp_dyn_call_expr(gen, e):
             _kct = _cpp_expr_static_ctype(gen, _kv)
         if _kct is None and isinstance(_kv, gimple_ctypes.StringLiteral):
             _kct = 'char *'
+        if _kct is None and isinstance(_kv, (gimple_ctypes.BoolLiteral, gimple_ctypes.IntLiteral)):
+            _kct = 'int64_t'
         if _kct not in ('int64_t', 'char *', 'MojoList *', 'MojoDict *', 'MojoSet *'):
             raise gimple_exprtypes._UnsupportedGeneratorShape(
                 "a call through the callable-valued parameter "

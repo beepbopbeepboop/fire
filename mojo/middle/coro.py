@@ -5209,6 +5209,28 @@ def _lower_callable_choices(stmts: list) -> None:
                 _rewrite_fn(m)
 
 
+def _evidently_int_name(name: str, body: list) -> bool:
+    """Does `body` use `name` in a way only an integer supports: a `range(...)`
+    argument, an operand of arithmetic / comparison with an integer literal, or
+    a subscript index? Such a parameter is left for the ordinary solver (tight
+    int64_t); any other parameter of an escaping generator is supplied by
+    callers the compiler cannot see and is declared a dynamic word."""
+    for n in _walk(body) if not isinstance(body, list) else [x for b in body for x in _walk(b)]:
+        if (isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr) and n.func.name == 'range'):
+            for a in n.args:
+                if isinstance(a, N.IdentExpr) and a.name == name:
+                    return True
+        elif isinstance(n, N.BinaryOp):
+            for x, y in ((n.left, n.right), (n.right, n.left)):
+                if (isinstance(x, N.IdentExpr) and x.name == name
+                        and isinstance(y, N.IntLiteral)):
+                    return True
+        elif isinstance(n, N.SubscriptExpr):
+            if isinstance(n.index, N.IdentExpr) and n.index.name == name:
+                return True
+    return False
+
+
 def _lower_escaping_generators(stmts: list) -> None:
     """A SYNC generator defined inside a plain function that reads the
     function's parameters / locals AND escapes it as a value
@@ -5296,6 +5318,13 @@ def _lower_escaping_generators(stmts: list) -> None:
             gen_def = inner
             gen_def.name = base
             tramp_params = list(inner.params)
+            _dyn = []
+            for _pn, _pa in tramp_params:
+                if _pa is None and not _pn.startswith('*') and not _evidently_int_name(_pn, inner.body):
+                    _dyn.append((_pn, 'object'))
+                else:
+                    _dyn.append((_pn, _pa))
+            tramp_params_typed = _dyn
             if owner_struct and 'self' in caps:
                 # A free generator's parameter named `self` is read as the
                 # receiver of a METHOD by the emitters; give it an ordinary name.
@@ -5311,26 +5340,30 @@ def _lower_escaping_generators(stmts: list) -> None:
                     gen_def.params.append(('__esc_self', owner_struct))
                 else:
                     gen_def.params.append((c, None))
-            gen_def.params.extend(tramp_params)
-            args = [N.IdentExpr(name=c, line=ln, col=col) for c in caps]
-            for pn, _pa in tramp_params:
-                args.append(N.IdentExpr(name=pn, line=ln, col=col))
-            call = N.CallExpr(func=N.IdentExpr(name=base, line=ln, col=col), args=args,
-                              line=ln, col=col)
-            note = N.CallExpr(func=N.IdentExpr(name='mojo_gen_note', line=ln, col=col),
-                              args=[call, N.IdentExpr(name='__esc_start', line=ln, col=col)],
-                              line=ln, col=col)
+            gen_def.params.extend(tramp_params_typed)
+            def _id(nm):
+                return N.IdentExpr(name=nm, line=ln, col=col)
+
+            def _call(fn, *cargs):
+                return N.CallExpr(func=_id(fn), args=list(cargs), line=ln, col=col)
+
+            # `def gen(*a, **kw)`: the caller's positional and keyword
+            # arguments are bound by the moved generator's registered signature
+            # (names, defaults), with the captured words ahead of them.
+            body = [N.AssignStmt(target=_id('__esc_pre'), value=_call('mojo_list_new'),
+                                 line=ln, col=col)]
+            for c in caps:
+                body.append(N.ExprStmt(value=_call('mojo_list_append_int', _id('__esc_pre'), _id(c)),
+                                       line=ln, col=col))
+            body.append(N.AssignStmt(target=_id('__esc_start'), value=_id(base), line=ln, col=col))
+            body.append(N.ReturnStmt(value=_call('mojo_gen_call_with', _id('__esc_start'),
+                                                 _id('__esc_pre'), _id('__esc_a'), _id('__esc_kw')),
+                                     line=ln, col=col))
             tramp = N.FunctionDef(
                 name=orig,
-                params=tramp_params,
+                params=[('*__esc_a', None), ('**__esc_kw', None)],
                 return_type=None,
-                body=[N.AssignStmt(target=N.IdentExpr(name='__esc_start', line=ln, col=col),
-                                   value=N.IdentExpr(name=base, line=ln, col=col),
-                                   line=ln, col=col),
-                      N.ReturnStmt(value=note, line=ln, col=col)],
-                param_convs=dict(gen_def.param_convs),
-                param_has_default=dict(gen_def.param_has_default),
-                param_defaults=dict(gen_def.param_defaults),
+                body=body,
                 line=ln, col=col)
             outer.body[ix] = tramp
             moved.append(gen_def)

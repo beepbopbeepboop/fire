@@ -1883,13 +1883,22 @@ static MojoList *_gen_drain(void *h, MojoGenSig *sg)
         case 1: mojo_list_append_int(out, ((bool (*)(void *))sg->value)(h) ? 1 : 0); break;
         case 2: mojo_list_append_double(out, ((double (*)(void *))sg->value)(h)); break;
         case 3: mojo_list_append_str(out, ((char *(*)(void *))sg->value)(h)); break;
+        case 5: {   /* a dynamic word: a string pointer or an integer, told apart now */
+            int64_t w = ((int64_t (*)(void *))sg->value)(h);
+            if (mojo_boxed_is_str(w)) mojo_list_append_str(out, (char *)(intptr_t)w);
+            else mojo_list_append_int(out, w);
+            break; }
         default: mojo_list_append_int(out, ((int64_t (*)(void *))sg->value)(h)); break;
         }
     }
     int pending = mojo_exc_pending_get();
     ((void (*)(void *))sg->destroy)(h);
     if (pending) { mojo_exc_pending_set(0); mojo_raise(); }
-    if (sg->vkind == 3) mojo_list_set_kinds_uniform(out, 'p');
+    if (sg->vkind == 5) {
+        if (out->len > 0 && mojo_boxed_is_str(out->data[0])) mojo_list_set_kinds_uniform(out, 'p');
+        else mojo_list_set_kinds_uniform(out, 'i');
+    }
+    else if (sg->vkind == 3) mojo_list_set_kinds_uniform(out, 'p');
     else if (sg->vkind == 0) mojo_list_set_kinds_uniform(out, 'i');
     else if (sg->vkind == 2) mojo_list_set_kinds_uniform(out, 'd');
     else if (sg->vkind == 4) mojo_list_set_kinds_uniform(out, 'l');
@@ -1948,6 +1957,19 @@ static int64_t _gen_sig_call(MojoGenSig *sg, MojoList *args, MojoDict *kw)
     return h;
 }
 
+/* Start the generator registered for `start` with the captured words `pre`
+ * followed by the caller's own positional list and keyword dict, binding by the
+ * registered parameter names and defaults. The trampoline of an escaping nested
+ * generator (`def gen(*a, **kw)`) is exactly this call. */
+int64_t mojo_gen_call_with(void *start, MojoList *pre, MojoList *a, MojoDict *kw)
+{
+    MojoGenSig *sg = _gen_sig_lookup(start);
+    if (!sg) { mojo_raise_type_error((char *)"generator has no registered signature"); return 0; }
+    MojoList *all = mojo_list_new();
+    for (int64_t i = 0; pre && i < mojo_list_len(pre); i++) mojo_list_append_int(all, mojo_list_get_int(pre, i));
+    for (int64_t i = 0; a && i < mojo_list_len(a); i++) mojo_list_append_int(all, mojo_list_get_int(a, i));
+    return _gen_sig_call(sg, all, kw);
+}
 /* Call a function VALUE with an already-packed argument list and keyword dict:
  * the one entry for a call whose callee is only known at run time and whose
  * call site has `*args` / `**kwargs` / keywords (`_walk(*a, walk=_files, **k)`).
