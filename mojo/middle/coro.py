@@ -5338,8 +5338,10 @@ def _lower_escaping_generators(stmts: list) -> None:
                 # reads the object's fields through it.
                 if c == 'self' and owner_struct:
                     gen_def.params.append(('__esc_self', owner_struct))
-                else:
+                elif _evidently_int_name(c, inner.body):
                     gen_def.params.append((c, None))
+                else:
+                    gen_def.params.append((c, 'object'))
             gen_def.params.extend(tramp_params_typed)
             def _id(nm):
                 return N.IdentExpr(name=nm, line=ln, col=col)

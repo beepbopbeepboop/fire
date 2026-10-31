@@ -4180,6 +4180,14 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
             gen._actual_types[bare] = 'MojoList *'
         else:
             ctype = gen._resolve_type(ptype)
+            if ptype is None:
+                # The cross-call refinement (Pass 1.3e: every call site passes a
+                # string / float) is what the definition's signature declares, so
+                # the return-type inference below must read the parameter as it.
+                _refined = gen._inferred_param_types.get(
+                    f"{struct_name}_{node.name}", {}).get(pname)
+                if _refined in ('char *', 'double'):
+                    ctype = _refined
             gen.var_types[bare] = ctype
             if ctype != 'int64_t':
                 gen._actual_types[bare] = ctype

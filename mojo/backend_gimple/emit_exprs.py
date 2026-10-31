@@ -3997,6 +3997,18 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             gen._emit(f"  {cp} = (char *){ip};")
             return 'char *', cp
         return typ, val
+    if (op == '+' and lt in ('int', 'int64_t') and rt in ('int', 'int64_t')
+            and (ginf._is_may_hold_str_param(gen, left_node)
+                 or ginf._is_may_hold_str_param(gen, right_node))):
+        # Operands that are words of unknown kind, one of them a PARAMETER some call
+        # site passed a string for: `+` is string concatenation or integer
+        # addition depending on what the words are, which only the run time
+        # knows. The result is a word of the same unknown kind.
+        _aw = gen._call_expr('int64_t', 'mojo_add_words',
+                             [('int64_t', gen._to_int64(lt, lv)),
+                              ('int64_t', gen._to_int64(rt, rv))])
+        gen._dyn_word_vals.add(_aw)
+        return 'int64_t', _aw
     if op == '+':
         # Check if the OTHER operand is a string literal - helps identify string concatenation
         right_is_lit = isinstance(right_node, gimple_ctypes.StringLiteral)

@@ -9817,6 +9817,29 @@ MojoList *mojo_iter_word(int64_t v)
     return mojo_iter_boxed_list(v);
 }
 
+/* `w[i]` where `w` is a word of unknown kind: a list gives its element (a string
+ * element as its pointer), a string its one-character string. */
+int64_t mojo_getitem_word(int64_t w, int64_t i)
+{
+    if (mojo_is_registered_list(w)) {
+        MojoList *l = (MojoList *)(intptr_t)w;
+        if (i < 0) i += mojo_list_len(l);
+        return mojo_box_word(mojo_list_get_boxed(l, i));
+    }
+    if (mojo_boxed_is_str(w)) return (int64_t)(intptr_t)mojo_char_at_str((char *)(intptr_t)w, i);
+    mojo_raise_type_error((char *)"object is not subscriptable");
+    return 0;
+}
+
+/* `a + b` where both are words of unknown kind: two strings concatenate, anything
+ * else adds as integers (the word is its own value). */
+int64_t mojo_add_words(int64_t a, int64_t b)
+{
+    if (mojo_boxed_is_str(a) && mojo_boxed_is_str(b))
+        return (int64_t)(intptr_t)mojo_str_cat((char *)(intptr_t)a, (char *)(intptr_t)b);
+    return a + b;
+}
+
 MojoList *mojo_iter_boxed_list(int64_t v)
 {
     /* A live generator handle returned by a call through a function value

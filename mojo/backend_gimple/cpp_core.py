@@ -1524,6 +1524,26 @@ def _cpp_assign_cast_type(gen, val):
     return None
 
 
+def _cpp_note_dynamic_word_args(gen, struct_name, member, call_args) -> None:
+    """A struct method called from a generator body with a dynamic word (a
+    parameter declared `object`) for one of its unannotated parameters: that
+    parameter may hold a string, so `a + b` over it must ask the run time
+    (`mojo_add_words`) instead of adding the pointers. Recorded in the same table
+    the ordinary call-site scan feeds (`_int64_may_hold_str`)."""
+    _objs = getattr(gen, '_cpp_object_params', None)
+    if not _objs:
+        return
+    _pnames = gen._method_param_names.get(f"{struct_name}_{member}")
+    if not _pnames:
+        return
+    _off = 1 if _pnames and _pnames[0] in ('self', 'cls') else 0
+    for _i, _a in enumerate(call_args):
+        if isinstance(_a, gimple_ctypes.IdentExpr) and _a.name in _objs \
+                and _i + _off < len(_pnames):
+            gen._int64_may_hold_str.setdefault(f"{struct_name}_{member}", set()).add(
+                _pnames[_i + _off])
+
+
 def _cpp_dyn_call_expr(gen, e):
     """A call through a PARAMETER that holds a callable as a bare word
     (`onempty(items)`, `_walk(root)`, `get_files(root, suffix=suffix)`,
@@ -3212,6 +3232,7 @@ def _cpp_expr(gen, e) -> str:
                     args = [gen._cpp_expr(a) for a in e.args]
                     _sym = gen._struct_method_csym(_obj_struct, e.func.member, '')
                     gen._cpp_struct_method_refs.add((_obj_struct, e.func.member))
+                    _cpp_note_dynamic_word_args(gen, _obj_struct, e.func.member, e.args)
                     args = _cpp_pad_struct_method_call_args(
                         gen, _sym,
                         f"{_obj_struct}_{gimple_ctypes._safe_name(e.func.member)}",
@@ -4935,6 +4956,13 @@ def _cpp_expr(gen, e) -> str:
                     "generator/coroutine body (subscript base resolves "
                     "to a function/special-form value, not a string or "
                     "container)")
+            if (isinstance(e.obj, gimple_ctypes.IdentExpr) and gen._cpp_declared is not None
+                    and gen._cpp_declared.get(e.obj.name) == 'int64_t'
+                    and e.obj.name in getattr(gen, '_cpp_object_params', ())
+                    and not isinstance(e.index, gimple_ctypes.SliceExpr)):
+                # A dynamic word (a parameter declared `object`) is a list or a
+                # string; which one is only known now.
+                return f"mojo_getitem_word((int64_t)({obj}), (int64_t)({idx}))"
             _cpp_refuse_str_key_subscript(gen, e)
             return f"mojo_char_at_str((char *)({obj}), {idx})"
         # Subscripting a CALL RESULT whose declared return type is a

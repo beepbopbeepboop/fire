@@ -1,5 +1,38 @@
 # CODEGEN_generator_function: Lib/glob.py
 
+## Status (2026-10-31, round 9 — the reduced selector chain with a method-built path now matches CPython; remaining: class-attribute function values and the regex compiler)
+
+Landed (pinned by `generator_escaping_closure_chain_method_concat_dynamic_words`,
+diffed against CPython, and `method_returning_concat_of_string_params`):
+- a method's RETURN type is read with its call-site-refined parameter types (Pass
+  1.3e): `def cat(self, a, b): return a + b` called only with strings used to answer
+  `int64_t` and print a pointer decimal; it now returns the string. (Both the
+  pass-2b return inference and the definition-time one seed unannotated params from
+  `_inferred_param_types`.)
+- `a + b` over words of unknown kind, one of them a parameter some caller passes a
+  string for, is `mojo_add_words` (strings concatenate, else integer add). A struct
+  method called from an escaping generator with a dynamic word records that
+  parameter as may-hold-string (`_cpp_note_dynamic_word_args`,
+  `_method_param_names`).
+- `w[i]` on a dynamic word (a parameter declared `object`) is `mojo_getitem_word`
+  (list element or one-character string); the moved generator's captured names are
+  dynamic words too unless the body proves them integers.
+
+Still open for `glob.py`:
+1. class-attribute function values called as `self.<attr>(...)`
+   (`concat_path = operator.add`, `lexists = staticmethod(os.path.lexists)`,
+   `scandir`/`stringify_path` staticmethods) on a polymorphic `self`;
+2. the run-time regex compiler (`self.compile(part)`), and `self.scandir` returning
+   a generator of `(entry, name, path)` tuples consumed by `for entry, name, path in
+   entries`;
+3. whole-module measurement: `compile_to_gimple_with_cpp(glob.py)` has not been
+   re-run since round 5, so the exact refusal list now is unknown - the first step of
+   the next round.
+Known unrelated gap seen on the way: `def cat(a, b): return a + b` called with a
+string pair AND an int pair returns `12` for `cat(1, 2)` (the mixed-site parameter
+is typed `char *`), i.e. the call-site unification should have kept the
+may-hold-string word and used `mojo_add_words`.
+
 ## Status (2026-10-31, round 8 — the selector SHAPE now compiles and runs; blockers 1 and the call/keyword half of 2 are gone, `a + b` on dynamic words and the regex compiler remain)
 
 Landed (pinned by `generator_escaping_closure_chain_keyword_call_dynamic_path`,

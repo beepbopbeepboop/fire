@@ -478,6 +478,10 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     if gcc_._cpp_needs_posix_idioms(gen, fn):
         fn = gcc_._cpp_lower_posix_idioms(gen, fn)   # fd-relative posix calls -> runtime calls
     gen._cpp_str_evidence_names = gimple_exprtypes._str_evidence_names(fn)
+    gen._cpp_object_params = set()   # parameters declared `object`: dynamic words
+    for _opn, _opa in (fn.params or []):
+        if _opa == 'object':
+            gen._cpp_object_params.add(gimple_ctypes._as_str(_opn))
     gen._cpp_list_word_names = gimple_exprtypes._list_method_names(fn)
     _opa = gcc_._cpp_collect_os_path_aliases(fn)
     if _opa:

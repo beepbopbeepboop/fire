@@ -7332,6 +7332,85 @@ def main():
 main()
 """)
 
+    # The selector chain with a path built by a METHOD over dynamic words: the
+    # method's `a + b` must concatenate (its parameters are strings at run time),
+    # and `parts[0]` of the captured word is a list element.
+    test_generator_matches_cpython("generator_escaping_closure_chain_method_concat_dynamic_words", """\
+class Base:
+    def __init__(self, sep):
+        self.sep = sep
+
+    def concat_path(self, a, b):
+        return a + b
+
+    def sel(self, parts):
+        dir_only = bool(parts)
+        if dir_only:
+            nxt = self.sel(parts[1:])
+
+        def gen(path, exists=False):
+            if dir_only:
+                yield from nxt(self.concat_path(path, parts[0]), exists=True)
+            else:
+                yield path
+        return gen
+
+def main():
+    g = Base("/")
+    s = g.sel(["a/", "b/"])
+    for v in s("root/"):
+        print(v)
+
+main()
+""", """\
+class Base:
+    def __init__(self, sep):
+        self.sep = sep
+
+    def concat_path(self, a, b):
+        return a + b
+
+    def sel(self, parts):
+        dir_only = bool(parts)
+        if dir_only:
+            nxt = self.sel(parts[1:])
+
+        def gen(path, exists=False):
+            if dir_only:
+                yield from nxt(self.concat_path(path, parts[0]), exists=True)
+            else:
+                yield path
+        return gen
+
+def main():
+    g = Base("/")
+    s = g.sel(["a/", "b/"])
+    for v in s("root/"):
+        print(v)
+
+main()
+""")
+    # A method whose parameters every call site passes strings for returns the
+    # string it builds (its return type was inferred before the parameters were).
+    test_generator_stdout("method_returning_concat_of_string_params", """\
+class B:
+    def cat(self, a, b):
+        return a + b
+
+def gen():
+    yield 1
+
+def main():
+    b = B()
+    print(b.cat("ab", "cd"))
+    w = "x"
+    print(b.cat(w, "y"))
+    for v in gen():
+        print(v)
+
+main()
+""", "abcd\nxy\n1\n")
+
     # ...but any consumer that is NOT a for / list / comprehension (here `next`
     # of a bound handle) would read the box's address as an int, so the
     # generator keeps its refusal.

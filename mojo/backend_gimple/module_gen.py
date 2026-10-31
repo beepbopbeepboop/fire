@@ -7561,6 +7561,8 @@ def gen_module_impl(self, stmts):
     if _own_top_level_func_names:
         _scan_module_level_for_func_attrs(stmts)
 
+    # `Struct_method` -> its parameter names in order (receiver included).
+    self._method_param_names: dict = {}
     all_structs_for_methods = (stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])
                                 + self._imported_typedef_structs)
     for s in all_structs_for_methods:
@@ -7610,6 +7612,11 @@ def gen_module_impl(self, stmts):
                 self._ambiguous_struct_methods.add((_as_str(s.name), _dn))
             for m in s.methods:
                 mangled = f"{s.name}_{m.name}"
+                _mpn_names = []
+                for _mpn, _mpt in (m.params or []):
+                    if not _as_str(_mpn).startswith('*'):
+                        _mpn_names.append(_as_str(_mpn))
+                self._method_param_names[_as_str(mangled)] = _mpn_names
                 if m.return_type is not None:
                     funcs_shared.record_annotated_tuple_slots(self, mangled, m.return_type)
                     _ret_ct = self._resolve_type(m.return_type)
@@ -7796,6 +7803,12 @@ def gen_module_impl(self, stmts):
                                 # missing. See CODEGEN_generator_function_
                                 # Lib_tarfile.md.
                                 self.var_types[pname] = f"{s.name} *"
+                            elif (ptype is None and self._inferred_param_types.get(
+                                    _mangled_key, {}).get(pname) in ('char *', 'double')):
+                                # A parameter every call site passes a string
+                                # (or float) for: the refinement Pass 1.3e made.
+                                self.var_types[pname] = self._inferred_param_types[
+                                    _mangled_key][pname]
                             else:
                                 self.var_types[pname] = self._resolve_type(ptype)
                         # Seed inferred LOCAL var types (see
@@ -8882,6 +8895,48 @@ def gen_module_impl(self, stmts):
         _collect_method_scalar_obs()
         if not _apply_method_scalar_obs():
             break
+
+    # A method's RETURN type was inferred (the pass-2b loop above) while its
+    # unannotated parameters were still the int64_t default, so `return a + b`
+    # over two parameters every call site passes strings for answered int64_t
+    # and the string it built printed as a pointer decimal. Re-infer it now
+    # that the parameters are refined (only a method whose return stayed at
+    # the default and whose parameters actually changed).
+    for _rs in all_structs_for_methods:
+        if not isinstance(_rs, StructDef):
+            continue
+        _rs = _as_structdef_node(_rs)
+        for _rm in _rs.methods:
+            _rm = _as_funcdef_node(_rm)
+            _rkey = f"{_as_str(_rs.name)}_{_as_str(_rm.name)}"
+            _rref = self._inferred_param_types.get(_rkey)
+            if (not _rref or _rm.return_type is not None
+                    or self.func_return_types.get(_rkey) not in (None, 'int64_t')):
+                continue
+            _saved_vt = dict(self.var_types)
+            _saved_fn = self.current_func_name
+            self.var_types.clear()
+            self.current_func_name = _rkey
+            _rpar = _rm.params
+            for _ri in range(len(_rpar)):
+                _rpn = _as_str(_rpar[_ri][0])
+                _rpt = _rpar[_ri][1]
+                if _rpn.startswith('**'):
+                    self.var_types[_rpn[2:]] = 'MojoDict *'
+                elif _rpn.startswith('*'):
+                    self.var_types[_rpn[1:]] = 'MojoList *'
+                elif _ri == 0 and _rpn in ('self', 'cls'):
+                    self.var_types[_rpn] = f"{_as_str(_rs.name)} *"
+                elif _rpt is None and _rpn in _rref:
+                    self.var_types[_rpn] = _rref[_rpn]
+                else:
+                    self.var_types[_rpn] = self._resolve_type(_rpt)
+            _rinf = self._infer_return_type(_rm.body)
+            if _rinf in ('char *', 'double'):
+                self.func_return_types[_rkey] = _rinf
+            self.var_types.clear()
+            self.var_types.update(_saved_vt)
+            self.current_func_name = _saved_fn
 
     # Refresh Pass 2b-bis's precomputed per-overload signature ctypes for
     # methods whose parameters the pass above just resolved. Pass 2b-bis

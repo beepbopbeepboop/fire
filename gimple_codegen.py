@@ -3244,6 +3244,8 @@ class GimpleGen:
         # from a bare function pointer at a dynamically-dispatched call.
         'mojo_vararg_fn_new':  ('MojoVarargFn *', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t']),
         'mojo_gen_note':       ('int64_t', ['int64_t', 'void *']),
+        'mojo_add_words':      ('int64_t', ['int64_t', 'int64_t']),
+        'mojo_getitem_word':   ('int64_t', ['int64_t', 'int64_t']),
         'mojo_gen_call_with':  ('int64_t', ['void *', 'MojoList *', 'MojoList *', 'MojoDict *']),
         'mojo_is_vararg_fn':   ('int', ['void *']),
         'mojo_vararg_call_0':  ('int64_t', ['void *', 'void *']),
