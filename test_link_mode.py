@@ -270,6 +270,53 @@ def test_bare_submodule_import_keyword_call() -> bool:
     return ok
 
 
+def test_str_affix_method_on_unsolved_word_is_bool() -> bool:
+    """`.startswith(...)` / `.endswith(...)` on a loop target that is an
+    UNSOLVED word (the element of a registered generator, whose kind the
+    compiled path cannot know statically) printed `1` / `0`. The method
+    lowers to the word-form runtime helper (`mojo_str_startswith_word`),
+    but the lowering declared its result as a plain C `int`, so `print`
+    rendered the int instead of the Python `bool`. The same call on a
+    `char *` receiver is typed `_Bool` by `exprtypes`, and the bytes
+    variant already wraps its result with `!= 0`; the word receiver must
+    agree. Found while closing c_common/fsutil.py (`iter_files` yields
+    words, and `f.startswith("runtime")` printed `1` where CPython prints
+    `True`); see bugs/CODEGEN_dynamic_call_layer_residue_after_fsutil.md
+    item 3.
+    """
+    pkg = {
+        'pkg4/__init__.py': '',
+        'pkg4/lib.py': (
+            'def names(n):\n'
+            '    i = 0\n'
+            '    while i < n:\n'
+            '        yield "x" + str(i)\n'
+            '        i = i + 1\n'
+        ),
+        'pkg4/main.py': (
+            'from . import lib\n'
+            'for f in lib.names(2):\n'
+            '    print(f.startswith("x"))\n'
+            '    print(f.endswith("1"))\n'
+            '    print(f.startswith("y"))\n'
+        ),
+    }
+    root = os.path.join(REPO, 'build', 'test_link_mode')
+    os.makedirs(root, exist_ok=True)
+    td = tempfile.mkdtemp(prefix='str_affix_word_', dir=root)
+    try:
+        rc, stdout = _build_and_run(pkg, 'pkg4/main.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'pkg4/main.py', as_module=True)
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and stdout == 'True\nFalse\nFalse\nTrue\nTrue\nFalse\n')
+    if not ok:
+        print(f"  ✗ str_affix_method_on_unsolved_word_is_bool: rc={rc} "
+              f"stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
+    return ok
+
+
 def test_from_submodule_import_symbol_value_read() -> bool:
     """`from SUBMODULE import SYMBOL` (not a bare submodule marker), the
     symbol bound to a new local, then called through that local
@@ -1911,6 +1958,7 @@ CASES = [
     test_bare_submodule_import_call,
     test_bare_submodule_import_call_inside_source_tree,
     test_bare_submodule_import_keyword_call,
+    test_str_affix_method_on_unsolved_word_is_bool,
     test_from_submodule_import_symbol_value_read,
     test_sibling_function_import_call_is_inlined,
     test_sibling_class_attribute_function_scoped,

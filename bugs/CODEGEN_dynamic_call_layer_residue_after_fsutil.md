@@ -25,7 +25,15 @@ as values, or that call one of their own parameters, are kept on the C++ path
   `len(list(lib.counter(4, step=10)))` in a package prints `4` (CPython `4`).
   Full `c_common/fsutil.py` link-mode reproduction exceeds quick-test budget
   (compile >2 min). Next step unchanged: reproduce with real shape before fix.
-- Items 3, 4, 5: not yet started. Quick regression added:
+- **Item 3 FIXED** (`test_link_mode.py::test_str_affix_method_on_unsolved_word_is_bool`).
+  The word-receiver branch of `emit_methods._lower_str_method`'s
+  `startswith`/`endswith` arm declared its runtime result as a plain C `int`
+  (`mojo_str_startswith_word` returns an int), while `exprtypes` types the
+  same call `_Bool` and the bytes arm wraps with `!= 0`. `print` therefore
+  rendered the int. All four runtime forms now return `_Bool` via `!= 0`.
+  Measured before/after: stdout `1 0 0 1 1 0` -> `True False False True True
+  False` (CPython-identical).
+- Items 4, 5: not yet started. Quick regression added:
   `test_regress_dynamic_call_layer_residue.py` (item 1 verified via
   `test_link_mode.py::test_bare_submodule_import_keyword_call`; item 2
   minimal form passes).

@@ -11,7 +11,10 @@ tree in the minimal package form; doc's next step (reproduce with real
 c_common/fsutil.py shape) requires the full link-mode build of fsutil
 which exceeds quick-test budget.
 
-Items 3-5: not yet started.
+Item 3 (FIXED): `.startswith`/`.endswith` on an unsolved word typed `_Bool`;
+verified by test_link_mode.py::test_str_affix_method_on_unsolved_word_is_bool.
+
+Items 4-5: not yet started.
 """
 
 # No executable assertion beyond the existing test_link_mode coverage;
