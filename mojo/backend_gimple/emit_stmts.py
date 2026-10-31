@@ -3386,6 +3386,31 @@ def _gen_stmt_DelStmt(gen, node):
             gen._emit(f"  /* TODO: del on {ot} not supported */")
 
 
+def _resolve_dotted_case_pattern(gen, subj_type: str, pattern):
+    """`case .NAME:` as `S.NAME` against a struct-typed subject, or None.
+
+    `.NAME` is Mojo's type-relative spelling of `S.NAME`, where `S` is the type
+    of the matched value. This path knows that type: `subj_type` is the
+    subject's C pointer type (`S *`, e.g. `self` in a method of `S`), and when
+    `S` declares `NAME` as a struct-level comptime alias (`comptime NAME =
+    Self(0)`), the spelled-out reading is the one the source means, and the
+    arm is the ordinary `subject == S.NAME` that the value path lowers. That
+    `==` is `S.__eq__` (see `_user_eq_struct` in emit_exprs.py), which is the
+    comparison Mojo's `case` makes.
+
+    None when the subject is not a struct with that alias, or the struct has no
+    `__eq__` to compare by. The caller then keeps the refusal, because a `==`
+    with nothing to call would be the pointer comparison.
+    """
+    sname = gimple_exprtypes._struct_name_of(subj_type) if subj_type.endswith(' *') else None
+    if not sname or pattern.path not in gen._struct_comptime_aliases.get(sname, {}):
+        return None
+    if '__eq__' not in gen._struct_method_names.get(sname, ()):
+        return None
+    return gimple_ctypes.MemberExpr(obj=gimple_ctypes.IdentExpr(name=sname),
+                                    member=pattern.path)
+
+
 def _gen_stmt_MatchStmt(gen, node):
     """`match subject: case p1: ... case p2, p3: ... case _: ...`
 
@@ -3428,7 +3453,11 @@ def _gen_stmt_MatchStmt(gen, node):
         condition = None
         pattern_refs = []
         for pattern in match_case.patterns:
-            # Ask the formal model what this pattern is.
+            # `.NAME` against a struct-typed subject resolves against that type
+            # here, before the formal model's refusal below, which has no type.
+            if isinstance(pattern, gimple_ctypes.DottedLiteral):
+                pattern = _resolve_dotted_case_pattern(gen, subj_type, pattern) or pattern
+            # Ask the formal model whether this pattern is allowed here.
             kind = formal_model.match_pattern_kind(pattern, getattr(gen, 'var_types', set()))
             if kind == "class pattern (type test)":
                 # `case C():` or positional-capture-only `case C(x):` — isinstance

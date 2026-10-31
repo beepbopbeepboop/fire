@@ -1885,7 +1885,13 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             # instead of its declared value under `fire run`.
             aliases = gen._struct_comptime_aliases.get(module_name)
             if aliases and node.member in aliases:
-                return gen.lower_expr(aliases[node.member])
+                # `Self` in the alias is this type, so a constructor-valued
+                # alias (`comptime RED = Self(0)`) is a construction of
+                # `module_name`, spelled as one. Left as `Self(0)` it lowered
+                # to a call of a `<Struct>___new` that is never defined.
+                val_ast = gen._subst_idents(aliases[node.member],
+                                            {'Self': gimple_ctypes.IdentExpr(name=module_name)})
+                return gen.lower_expr(val_ast)
             # A plain class-level attribute (`LayoutSolver.HEAP = 'heap'`)
             # backed by a synthesized module global — the same redirect the
             # instance-typed path below applies, but reached here via the
@@ -3401,6 +3407,17 @@ _EQ_CTOR_KIND = {
 }
 
 
+def _user_eq_struct(gen, ctype: str) -> str | None:
+    """The struct's name when `ctype` is a pointer to a struct that defines
+    `__eq__` (its own method, in `_struct_method_names`), else None."""
+    if not ctype.endswith(' *'):
+        return None
+    sname = gimple_exprtypes._struct_name_of(ctype)
+    if '__eq__' in gen._struct_method_names.get(sname, ()):
+        return sname
+    return None
+
+
 def _eq_operand_kind(gen, node, ctype: str, val: str) -> str | None:
     """'list' / 'dict' / 'set' when this operand statically IS a container of
     that kind, else None -- meaning "no evidence", which leaves the comparison
@@ -4237,6 +4254,29 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # address comparison `==` used to do, so the answer was decided by heap
     # addresses. For `==` that was a False where Python says True; for `<` it
     # is a stable, plausible and wrong verdict, exit 0, no diagnostic.
+    # `a == b` / `a != b` between two values of a user struct that defines
+    # `__eq__` is that method, not the C pointer comparison the generic tail
+    # would emit: two structs with equal fields are two heap objects, so the
+    # pointer answer is False where Mojo's answer is True. `is` / `is not` keep
+    # pointer identity. Both operands must be the same struct pointer, so a
+    # `None` or a scalar on the other side falls through to its own lowering.
+    if op in ('==', '!=') and lt == rt:
+        _eq_struct = _user_eq_struct(gen, lt)
+        if _eq_struct is not None:
+            # `!=` is the struct's own `__ne__` when it defines one, as Python
+            # and Mojo both dispatch it. Negating `__eq__` instead would recurse
+            # for a `__eq__` written as `~(self != rhs)`, which is Bool's own.
+            # The symbol is the home-module-qualified one `_struct_method_csym`
+            # composes: a bare `{Struct}___eq__` is never defined in the
+            # translation unit of a struct from another module.
+            _negate = op == '!=' and '__ne__' not in gen._struct_method_names.get(_eq_struct, ())
+            _dunder = '__eq__' if _negate or op == '==' else '__ne__'
+            _eq_val = gen._call_expr('_Bool', gen._struct_method_csym(_eq_struct, _dunder, ''),
+                                     [(lt, lv), (rt, rv)])
+            if _negate:
+                _eq_val = gen._bool_not('_Bool', _eq_val)
+            return '_Bool', _eq_val
+
     if op in _CONTAINER_CMP_OPS:
         _lk = _eq_operand_kind(gen, left_node, lt, lv)
         _rk = _eq_operand_kind(gen, right_node, rt, rv)
