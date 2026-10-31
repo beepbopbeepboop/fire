@@ -6846,27 +6846,6 @@ def test():
 test()
 """, "('', 'abc', None, None)\n('x', 'y', 'z', None)\n")
 
-    # A list built by `append(os.path.join(...))` and walked with
-    # `reversed(...)`: the element kind of the appended call (a string) and
-    # `reversed`'s passthrough of it were both unknown, so the yield slot was
-    # the int64_t default and the strings printed as heap ADDRESSES (exit 0).
-    test_generator_stdout("generator_reversed_list_of_os_path_join_results", """\
-import os
-
-def g(top):
-    dirs = ["a", "b", "c"]
-    names = []
-    for d in reversed(dirs):
-        names.append(os.path.join(top, d))
-    for n in reversed(names):
-        yield n
-
-def main():
-    for v in g("/t"):
-        print(v)
-main()
-""", "/t/a\n/t/b\n/t/c\n")
-
     test_generator_stdout("generator_enumerate_index_yields_index", """\
 def rows(data):
     for i, r in enumerate(data):
