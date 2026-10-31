@@ -65,7 +65,7 @@ from mojo.middle.infra_infer import *  # noqa: F401,F403
 from mojo.middle.infra_infer import (
     opaque_container_locals,
     _FC_SEP, _POINTER_CTOR_NAMES, _as_ident_node, _as_int, _as_member_node, _as_set,
-    _as_str, _block_terminates, _closure_info_for_ident, _generator_value_ctype_for_next, _collect_return_types, _build_analysis_funcs, _build_analysis_structs, _build_fresh_returning, _string_uses_ok, _key_views_ok, _list_elements_ok, _lambda_owned, _no_closure_escapes, _compute_closure_candidates, _compute_scoped_closure_candidates, _compute_owned_free_candidates, _compute_scoped_free_candidates, _compute_int_keyed_dicts, _scope_decl_name, _is_ctor_display, _empty_ctor_ctype,
+    _as_str, _block_terminates, _closure_info_for_ident, _generator_value_ctype_for_next, _collect_return_types, _build_analysis_funcs, _build_analysis_structs, _build_fresh_returning, _string_uses_ok, _key_views_ok, _list_elements_ok, _lambda_owned, _compute_closure_candidates, _compute_scoped_closure_candidates, _compute_owned_free_candidates, _compute_scoped_free_candidates, _compute_int_keyed_dicts, _scope_decl_name, _is_ctor_display, _empty_ctor_ctype,
     _function_has_reachable_fallthrough, _infer_param_types, _infer_return_type, _is_free_eligible_function, _is_known_field, _known_field_type,
     _pair_key, _prepass_list_elem, _ptr_slot_in_range, _resolve_member_expr_type, _resolve_type, _scan_container_elems,
     _seed_addressed_locals, _type_of
@@ -381,9 +381,6 @@ def _reset_func(gen, body: list = None, params: list = None,
     # `_reg_bound_method` entry to drop, so `mojo_closure_free` would be
     # wrong here). See `register_nested_env_free`.
     gen._owned_env_names: set = set()
-    # Box pointers for {mut}-captured locals: freed at function exit when
-    # _no_closure_escapes proves no closure built here can outlive the call.
-    gen._owned_box_names: set = set()
     # Temps holding the raw word an UNTYPED `_mojo_dispatch_getattr` returned
     # (`_lower_MemberExpr` on a boxed receiver whose member no struct types
     # unambiguously): the value is a string, an int, or any handle, and only
@@ -881,7 +878,6 @@ class FuncState:
         self.fs_closure_vals: set = set()
         self.fs_owned_closure_names: set = set()
         self.fs_owned_env_names: set = set()
-        self.fs_owned_box_names: set = set()
         self.fs_emit_frames: list = []
         self.fs_dyn_word_vals: set = set()
         self.fs_dyn_word_locals: set = set()
@@ -979,7 +975,6 @@ def save_func_state(gen) -> FuncState:
     st.fs_closure_vals = gen._closure_vals
     st.fs_owned_closure_names = gen._owned_closure_names
     st.fs_owned_env_names = gen._owned_env_names
-    st.fs_owned_box_names = gen._owned_box_names
     st.fs_emit_frames = gen._emit_frames
     st.fs_dyn_word_vals = gen._dyn_word_vals
     st.fs_dyn_word_locals = gen._dyn_word_locals
@@ -1086,7 +1081,6 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._closure_vals = st.fs_closure_vals
     gen._owned_closure_names = st.fs_owned_closure_names
     gen._owned_env_names = st.fs_owned_env_names
-    gen._owned_box_names = st.fs_owned_box_names
     gen._emit_frames = st.fs_emit_frames
     gen._dyn_word_vals = st.fs_dyn_word_vals
     gen._dyn_word_locals = st.fs_dyn_word_locals
@@ -1535,23 +1529,6 @@ def _emit_stdlib_import_externs(gen, stmts) -> None:
             seen.add(sym)
 
 
-def global_generator_key(module_safe: str, name: str) -> tuple:
-    """Key of a module-scope global in the generator-api tables
-    (`_global_generator_api`, `_global_generator_api_poisoned`).
-
-    The tables are SHARED by reference across every module of one whole-
-    program compile (emit_resolve.py), so a bare name would let module B's
-    unrelated `foo` inherit module A's generator api, or let B's write poison
-    A's `foo`. The key is therefore the DEFINING module's C-mangled name plus
-    the bare name — the same mangling the globals struct (`_<mod>_globals`)
-    and the accessor symbol (`<mod>__mojo_global_get__<name>`) already use, so
-    a store, a same-module read and an imported read all compute one key.
-    `module_safe` is `_c_field_name(_current_module_ctx or "root")` for the
-    defining module, or the importer's `gen._imported_global_home[name]`.
-    """
-    return f"{module_safe}.{name}"
-
-
 def _emit_imported_global_accessors(gen, stmts) -> None:
     """Bare `from X import <module_scope_var>` — BUG-2026-009. See
     `_imported_global_accessors`'s own docstring and module_loader.py's
@@ -1673,9 +1650,6 @@ def _emit_imported_global_accessors(gen, stmts) -> None:
             accessor_csym = (f'{gimple_ctypes._c_field_name(_home_qual)}__mojo_global_get_'
                               f'{gimple_ctypes._c_field_name(name)}')
             gen._imported_global_accessors[sym] = (ctype, accessor_csym)
-            # The defining module's mangled name, the same one its own
-            # `global_generator_key` uses: `accessor_csym` is built from it.
-            gen._imported_global_home[sym] = gimple_ctypes._c_field_name(_home_qual or 'root')
             guard = gimple_ctypes._stub_guard_name(accessor_csym)
             decl = (f'#ifndef {guard}\n#define {guard}\n'
                     f'extern {ctype} {accessor_csym} (void);\n#endif')
@@ -3741,7 +3715,7 @@ def _write_dest(gen, name: str) -> str:
         # `var` declarations, range-loop targets, ...) bypasses
         # `_note_global_store_types`, so it cannot be vouched for as the one
         # binding `_global_generator_api` recorded: poison it.
-        gen._global_generator_api_poisoned.add(global_generator_key(safe_module, name))
+        gen._global_generator_api_poisoned.add(name)
         return f"_{safe_module}_globals.{gimple_ctypes._c_field_name(name)}"
     return gen._cname(name)
 
@@ -3866,7 +3840,7 @@ def _seed_mut_captured_local_types(gen, func_name: str):
                 gen._declare_var(mn, f"{ctype} *")
 
 
-def _emit_mut_local_box_allocs(gen, fn=None):
+def _emit_mut_local_box_allocs(gen):
     """Allocate the heap box for every heap-boxed mutable local (see
     _seed_mut_captured_local_types) ONCE, in the function's prologue.
 
@@ -3895,27 +3869,12 @@ def _emit_mut_local_box_allocs(gen, fn=None):
     the env-struct allocator's pattern (`-fgimple` rejects a direct
     `name = ({ctype} *) malloc (...)` single statement, and needs a
     literal byte count rather than `sizeof(scalar)` -- see
-    _SCALAR_CTYPE_SIZE's docstring).
-
-    `fn` is the FunctionDef whose prologue this is. When every closure built
-    in it provably dies with the call (`_no_closure_escapes`), each box is
-    also freed at the function's exits: its lifetime is the call's, not the
-    closure's, once nothing built here can outlive the call. Each box is
-    registered exactly the way `register_nested_env_free` registers an env --
-    a plain malloc block, a `mojo_cleanup_push_ptr` thunk for the unwind, and
-    a bare `free` at `emit_return_frees`/`emit_fallthrough_frees`. Fail-closed:
-    an unprovable function keeps its boxes, which is today's leak."""
-    if not gen._boxed_mut_locals:
-        return
-    owned = fn is not None and _no_closure_escapes(fn)
+    _SCALAR_CTYPE_SIZE's docstring)."""
     for mn in sorted(gen._boxed_mut_locals):
         ctype = gen._boxed_mut_locals[mn]
         cname = gen._cname(mn)
         vp = gen._new_val('void *', f"malloc ({gen._scalar_ctype_size(ctype, 8)})")
         gen._emit(f"  {cname} = ({ctype} *) {vp};")
-        if owned:
-            gen._owned_box_names.add(mn)
-            gen._emit(f"  mojo_cleanup_push_ptr ({cname});")
         _box_param_c = gen._mut_boxed_param_c.get(mn)
         if _box_param_c:
             # A mut-captured PARAMETER: the box is fresh, so copy the
@@ -5627,7 +5586,6 @@ def _compr_generator_loop(gen, node, gen0, res: str, res_type: str, it_val: str)
     # tuple unpacking target" comment) instead of reinventing a
     # narrower check.
     tuple_slot_ctypes = api.get('tuple_slot_ctypes')
-    tuple_slot_elems = api.get('tuple_slot_elems')
     _target_str = gen0.target.strip()
     _inner_str = (_target_str[1:-1].strip()
                   if (_target_str.startswith('(') and _target_str.endswith(')'))
@@ -5677,7 +5635,7 @@ def _compr_generator_loop(gen, node, gen0, res: str, res_type: str, it_val: str)
     gen._emit_label(bb_body)
     val = gen._new_val(vct, f"{base}_value ({_iv})")
     if is_tuple_target:
-        gen._emit_generator_tuple_unpack(var_names, tuple_slot_ctypes, val, None, tuple_slot_elems)
+        gen._emit_generator_tuple_unpack(var_names, tuple_slot_ctypes, val)
     else:
         # _cname, not the raw Python name: see _compr_range_loop's
         # reserved-identifier comment (`index` et al. are renamed by
@@ -7945,10 +7903,7 @@ def _emit_owned_local_frees(gen):
     # used here.
     stack_allocated = gen._owned_stack_allocated
     freed = 0
-    # Box names are not candidates: they are malloc'd in the prologue, before
-    # `begin_function` rebuilds the candidate sets, so they are registered in
-    # their own set and read here alongside them (see `_emit_mut_local_box_allocs`).
-    for name in sorted(gen._owned_free_candidates | gen._owned_box_names):
+    for name in sorted(gen._owned_free_candidates):
         ctype = gen.var_types.get(name)
         # A stack-allocated candidate (Phase 6) must be torn down via
         # `_destroy` (buffer-only), never `_free` — the struct itself
@@ -7962,11 +7917,6 @@ def _emit_owned_local_frees(gen):
         elif name in gen._owned_env_names:
             # A nested `def`'s environment: a plain malloc block and NO bound
             # method, so a bare `free` -- see `register_nested_env_free`.
-            runtime_fn = 'free'
-        elif name in gen._owned_box_names:
-            # A {mut}-captured local's heap box: a plain malloc block, freed
-            # when `_no_closure_escapes` proved nothing built here outlives
-            # the call -- see `_emit_mut_local_box_allocs`.
             runtime_fn = 'free'
         elif name in gen._owned_str_elem_names and ctype == 'MojoList *':
             # Decided at the DECLARATION, where the value was still the temp a
@@ -8543,7 +8493,7 @@ def emit_return_frees(gen) -> None:
     why it's safe to run unconditionally before evaluating the returned
     expression)."""
     # Direct attribute access — see `maybe_push_owned_local`'s note.
-    if gen._owned_free_candidates or gen._owned_box_names or gen._scope_live:
+    if gen._owned_free_candidates or gen._scope_live:
         _emit_owned_local_frees(gen)
 
 
@@ -8566,8 +8516,7 @@ def emit_fallthrough_frees(gen, fn) -> None:
     # combines mixed-type `and` operands.
     # Direct attribute access — see `maybe_push_owned_local`'s note.
     if not gen._owned_free_candidates:
-        if not gen._owned_box_names:
-            return
+        return
     if not _function_has_reachable_fallthrough(fn):
         return
     _emit_owned_local_frees(gen)

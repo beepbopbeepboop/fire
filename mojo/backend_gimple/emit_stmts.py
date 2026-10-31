@@ -39,7 +39,6 @@ from fire_compiler import for_target_is_tuple, for_target_single_name
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
-import mojo.middle.module_shared as msh
 import mojo.middle.itcursor as itc
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
@@ -877,22 +876,6 @@ def _emit_dynattr_setattr_dispatch(gen, member: str, vtype: str, v: str,
                     [('void *', vp_tmp), ('char *', key_tmp), ('int64_t', v64)])
 
 
-def _note_global_dict_store(gen, target_obj, vtype: str) -> None:
-    """Record a dict store's value type under the SOURCE name of a module-scope
-    dict receiver.
-
-    A bare read of a module global loads its field into a FRESH temp
-    (`_lower_IdentExpr`), so a record keyed by the store's lowered temp is
-    never seen by the next `d[k]` read. `_lower_IdentExpr` copies
-    `_dict_val_types[<source name>]` onto every such temp, which is the
-    channel a later read uses. Keyed by name only when the bare name really
-    reads a global (`bare_global_read_plan`), so a local dict is untouched.
-    """
-    if (isinstance(target_obj, IdentExpr)
-            and msh.bare_global_read_plan(gen, target_obj.name)[0]):
-        gen._dict_val_types[target_obj.name] = vtype
-
-
 def _note_global_store_types(gen, tname: str, vtype: str, v: str,
                              value_node=None) -> None:
     """Carry a value stored into a module global's type knowledge forward to
@@ -1043,29 +1026,24 @@ def _note_global_generator_store(gen, tname: str, vtype: str, v: str) -> None:
     PRECEDES a later toplevel rebinding to a different generator in a loop
     body; it is the same trade the local path already makes.
     """
-    # Keyed by the DEFINING module, so a same-bare-name global of another
-    # module (the tables are shared across the whole compile) is a different
-    # fact. See `ginf.global_generator_key`.
-    key = ginf.global_generator_key(
-        gimple_ctypes._c_field_name(gen._current_module_ctx or "root"), tname)
-    if key in gen._global_generator_api_poisoned:
+    if tname in gen._global_generator_api_poisoned:
         return
     if not gen._in_toplevel_gen:
-        gen._global_generator_api_poisoned.add(key)
+        gen._global_generator_api_poisoned.add(tname)
         return
     api = None
     if vtype == 'MojoGenerator *' and v in gen._generator_var_api:
         api = gen._generator_var_api[v]
     if api is None:
-        if key in gen._global_generator_api:
-            gen._global_generator_api_poisoned.add(key)
+        if tname in gen._global_generator_api:
+            gen._global_generator_api_poisoned.add(tname)
         return
-    if key in gen._global_generator_api:
-        known = gen._global_generator_api[key]
+    if tname in gen._global_generator_api:
+        known = gen._global_generator_api[tname]
         if known['base'] != api['base']:
-            gen._global_generator_api_poisoned.add(key)
+            gen._global_generator_api_poisoned.add(tname)
         return
-    gen._global_generator_api[key] = api
+    gen._global_generator_api[tname] = api
 
 
 def _tagged_opt_is_some_expr(gen, value_node, target_node, ot, ov, op,
@@ -2079,7 +2057,6 @@ def _gen_stmt_AssignStmt(gen, node):
                     or vtype.endswith(' *'))
                     and obj_v not in getattr(gen, '_opaque_container_locals', ())):
                 gen._dict_val_types[obj_v] = vtype
-                _note_global_dict_store(gen, node.target.obj, vtype)
             # dict[key] = val → mojo_dict_set_str_* (key coerced via
             # _char_to_cstr, the single dict-key-to-string conversion
             # used by both read and write sides — see its docstring).
@@ -2171,11 +2148,6 @@ def _gen_stmt_AssignStmt(gen, node):
                     # only the dict handle is a coerced int here.
                     gen._emit_dict_int_value_store(dp, 'char *', key_tmp2,
                                                   vtype, v, node.value)
-                    # A module-scope dict is boxed as int64_t, so its store
-                    # comes through THIS arm and not the typed one above:
-                    # without the record here the read of the same global
-                    # has no value type and prints the stored double's bits.
-                    _note_global_dict_store(gen, node.target.obj, vtype)
             elif _dsw_sn and not gen._struct_defines_method(_dsw_sn, '__setitem__'):
                 # `d[k] = v` on a builtin-`dict` subclass with no
                 # `__setitem__` override: store into the backing MojoDict.
@@ -3409,31 +3381,6 @@ def _gen_stmt_DelStmt(gen, node):
             gen._emit(f"  /* TODO: del on {ot} not supported */")
 
 
-def _resolve_dotted_case_pattern(gen, subj_type: str, pattern):
-    """`case .NAME:` as `S.NAME` against a struct-typed subject, or None.
-
-    `.NAME` is Mojo's type-relative spelling of `S.NAME`, where `S` is the type
-    of the matched value. This path knows that type: `subj_type` is the
-    subject's C pointer type (`S *`, e.g. `self` in a method of `S`), and when
-    `S` declares `NAME` as a struct-level comptime alias (`comptime NAME =
-    Self(0)`), the spelled-out reading is the one the source means, and the
-    arm is the ordinary `subject == S.NAME` that the value path lowers. That
-    `==` is `S.__eq__` (see `_user_eq_struct` in emit_exprs.py), which is the
-    comparison Mojo's `case` makes.
-
-    None when the subject is not a struct with that alias, or the struct has no
-    `__eq__` to compare by. The caller then keeps the refusal, because a `==`
-    with nothing to call would be the pointer comparison.
-    """
-    sname = gimple_exprtypes._struct_name_of(subj_type) if subj_type.endswith(' *') else None
-    if not sname or pattern.path not in gen._struct_comptime_aliases.get(sname, {}):
-        return None
-    if '__eq__' not in gen._struct_method_names.get(sname, ()):
-        return None
-    return gimple_ctypes.MemberExpr(obj=gimple_ctypes.IdentExpr(name=sname),
-                                    member=pattern.path)
-
-
 def _gen_stmt_MatchStmt(gen, node):
     """`match subject: case p1: ... case p2, p3: ... case _: ...`
 
@@ -3476,11 +3423,7 @@ def _gen_stmt_MatchStmt(gen, node):
         condition = None
         pattern_refs = []
         for pattern in match_case.patterns:
-            # `.NAME` against a struct-typed subject resolves against that type
-            # here, before the formal model's refusal below, which has no type.
-            if isinstance(pattern, gimple_ctypes.DottedLiteral):
-                pattern = _resolve_dotted_case_pattern(gen, subj_type, pattern) or pattern
-            # Ask the formal model whether this pattern is allowed here.
+            # Ask the formal model what this pattern is.
             kind = formal_model.match_pattern_kind(pattern, getattr(gen, 'var_types', set()))
             if kind == "class pattern (type test)":
                 # `case C():` or positional-capture-only `case C(x):` — isinstance

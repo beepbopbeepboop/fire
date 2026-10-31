@@ -436,12 +436,6 @@ def main():
     print(max(Counter(1, 4)), min(Counter(1, 4)))
     print(any(Counter(0, 3)), all(Counter(1, 4)))
     print(max(3, 7))
-    print(list(map(lambda x: x * 10, Counter(1, 4))))
-    print(list(filter(lambda x: x > 1, Counter(1, 4))))
-    try:
-        list(reversed(Counter(1, 4)))
-    except TypeError as e:
-        print(e)
 ''',
 }
 

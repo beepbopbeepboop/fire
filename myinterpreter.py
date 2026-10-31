@@ -2215,14 +2215,7 @@ class _MojoBoundArgCall:
     def __call__(self, *args, **kwargs):
         fn = self._fn
         wrapped_func = self._wrapped_func
-        # `map`/`filter` take the callable as their FIRST positional and the
-        # iterable as their SECOND (or, for `map`, further ones). The first-arg
-        # rule in `_mojo_builtin_args` does not reach these calls because they
-        # arrive here as a `_MojoBoundArgCall`, not through `invoke` — so a
-        # Mojo iterable struct passed to `map[f](c)` fell through to
-        # `__getitem__` and died with `KeyError: 0`. Apply the same
-        # `_mojo_iterable` treatment to every argument after the callable.
-        return fn(wrapped_func, *(_mojo_iterable(a) for a in args), **kwargs)
+        return fn(wrapped_func, *args, **kwargs)
 
 
 class _MojoParametricFn:
@@ -2241,12 +2234,7 @@ class _MojoParametricFn:
 
     def __call__(self, *args, **kwargs):
         fn = self._fn
-        if not args:
-            return fn(**kwargs)
-        # `map`/`filter` take the callable as FIRST positional and iterables
-        # after that. Convert Mojo iterable structs so Python's own builtin
-        # sees them as generators rather than falling through to `__getitem__`.
-        return fn(args[0], *(_mojo_iterable(a) for a in args[1:]), **kwargs)
+        return fn(*args, **kwargs)
 
 
 class _MojoScalarType:
@@ -2548,27 +2536,6 @@ def _mojo_next(iterator, *default):
             return default[0]
     return method(cls.interpreter, iterator)
 
-def _mojo_reversed(value):
-    """CPython's `reversed()` only accepts objects with `__reversed__` or a
-    sequence protocol. A MojoInstance without either is refused with the
-    matching message instead of falling through to `__getitem__` and dying
-    with `KeyError: 0`."""
-    if isinstance(value, MojoInstance):
-        cls = value._mojo_class
-        if '__reversed__' in cls.methods:
-            # Call the reversed method and wrap result as an iterator
-            rev_method = cls.methods['__reversed__']
-            rev_result = rev_method(cls.interpreter, value)
-            return _mojo_iter(rev_result)
-        # Check for sequence protocol (has __len__ and __getitem__)
-        if '__len__' in cls.methods and '__getitem__' in cls.methods:
-            # CPython reversed works directly on sequences
-            return value
-        # Not reversible - raise proper TypeError matching CPython
-        raise TypeError(f"'{cls.name}' object is not reversible")
-    # For non-MojoInstance values, let CPython handle it
-    return reversed(value)
-
 
 def _mojo_iterable(value):
     """A value handed to one of Python's own iterable-consuming builtins.
@@ -2590,7 +2557,7 @@ def _mojo_iterable(value):
 # positional argument; `min`/`max` iterate only when given ONE argument —
 # `max(a, b)` compares values and must not turn a struct into a generator.
 _MOJO_ITER_FIRST_ARG = {id(list), id(tuple), id(set), id(frozenset), id(sum),
-                        id(sorted), id(enumerate), id(any), id(all), id(dict)}
+                        id(sorted), id(enumerate), id(any), id(all)}
 _MOJO_ITER_ALL_ARGS = id(zip)
 _MOJO_ITER_ONE_ARG = {id(_mojo_min), id(_mojo_max)}
 
@@ -3543,7 +3510,7 @@ class Interpreter:
         self.scope.define('SIMD', _MojoSIMDType())
         self.scope.define('sum', sum)
         self.scope.define('sorted', sorted)
-        self.scope.define('reversed', _mojo_reversed)
+        self.scope.define('reversed', reversed)
         self.scope.define('map', _MojoParametricFn(map, self))
         self.scope.define('filter', _MojoParametricFn(filter, self))
         self.scope.define('repr', repr)

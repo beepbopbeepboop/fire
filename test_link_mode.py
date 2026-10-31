@@ -317,55 +317,6 @@ def test_str_affix_method_on_unsolved_word_is_bool() -> bool:
     return ok
 
 
-def test_generator_none_default_reaches_callee_as_null() -> bool:
-    """A generator's own `None` default for a `char *` parameter reached the
-    C++-coroutine body as the string "0" instead of NULL: the generator-start
-    padding site (`emit_calls._lower_generator_start`) called
-    `_default_expr_to_pair` without the callee's declared slot type, so the
-    integer 0 went through `mojo_cstr_or_int_str` and came out non-null.
-    `if onempty is None:` was then False, the generator raised ValueError on
-    its very first resume, and that exception surfaced in the caller's
-    ordinary `for` loop -- which had no try frame, so the program died with
-    "Unhandled exception: empty". Plain functions padded this slot correctly
-    (`_default_expr_to_pair(..., param_ctype=...)`), which is why only the
-    generator path showed it. Found via bugs/CODEGEN_dynamic_call_layer_residue_
-    after_fsutil.md item 4 (its doc named a try/except after a loop; the
-    real trigger is the None default, reproduced with the loop and try kept).
-    """
-    src = (
-        'def im(items, onempty=None):\n'
-        '    if not items:\n'
-        '        if onempty is None:\n'
-        '            return\n'
-        '        raise ValueError("empty")\n'
-        '    for item in items:\n'
-        '        yield item, True\n'
-        '\n'
-        'for a, b in im([]):\n'
-        '    print(a, b)\n'
-        'try:\n'
-        '    for a, b in im([], "msg"):\n'
-        '        print(a, b)\n'
-        'except ValueError as ex:\n'
-        '    print("caught", ex)\n'
-    )
-    pkg = {'nonedef4/main.py': src}
-    root = os.path.join(REPO, 'build', 'test_link_mode')
-    os.makedirs(root, exist_ok=True)
-    td = tempfile.mkdtemp(prefix='gen_none_default_', dir=root)
-    try:
-        rc, stdout = _build_and_run(pkg, 'nonedef4/main.py', td)
-        py_rc, py_stdout = _cpython_run(td, 'nonedef4/main.py')
-    finally:
-        shutil.rmtree(td, ignore_errors=True)
-    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
-          and stdout == 'caught empty\n')
-    if not ok:
-        print(f"  ✗ generator_none_default_reaches_callee_as_null: rc={rc} "
-              f"stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
-    return ok
-
-
 def test_from_submodule_import_symbol_value_read() -> bool:
     """`from SUBMODULE import SYMBOL` (not a bare submodule marker), the
     symbol bound to a new local, then called through that local
@@ -2008,7 +1959,6 @@ CASES = [
     test_bare_submodule_import_call_inside_source_tree,
     test_bare_submodule_import_keyword_call,
     test_str_affix_method_on_unsolved_word_is_bool,
-    test_generator_none_default_reaches_callee_as_null,
     test_from_submodule_import_symbol_value_read,
     test_sibling_function_import_call_is_inlined,
     test_sibling_class_attribute_function_scoped,

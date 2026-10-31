@@ -2299,13 +2299,6 @@ MojoList *int64_t_path_splitdrive(char *path);         /* os.path.splitdrive(pat
 MojoList *int64_t_path_splitroot(char *path);          /* os.path.splitroot(path) -> [drive, root, tail] */
 MojoList *mojo_os_walk(char *top);                      /* os.walk(top) -> list[(str, list, list)] */
 int64_t   mojo_os_walk_w(int64_t top);                  /* the same, as a callable VALUE (int64_t ABI) */
-int64_t   mojo_os_path_join_w(int64_t a, int64_t b);  /* os.path.<fn> as callable VALUES (int64_t ABI) */
-int64_t   mojo_os_path_islink_w(int64_t p);
-int64_t   mojo_os_path_isdir_w(int64_t p);
-int64_t   mojo_os_path_isfile_w(int64_t p);
-int64_t   mojo_os_path_exists_w(int64_t p);
-int64_t   mojo_os_path_basename_w(int64_t p);
-int64_t   mojo_os_path_dirname_w(int64_t p);
 MojoList *mojo_glob(char *pattern);                     /* glob.glob/iglob(pattern) -> list[str] */
 int64_t   mojo_glob_w(int64_t pattern);                 /* the same, as a callable VALUE */
 MojoList *mojo_listdir(char *path);                    /* os.listdir(path) -> list[str] */

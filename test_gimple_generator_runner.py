@@ -2559,40 +2559,6 @@ def main():
     # Two classes each with a nested `g` that captures `self`: the hoisted
     # bases are struct-qualified, so neither generator is mistaken for the
     # other.
-    # test_frame.py's `test_clear_generator` shape: a nested generator that
-    # reads `self`, WRITES an enclosing local through `nonlocal` in a
-    # `finally`, and is driven by `next(gen)` then `gen.close()`. `.close()`
-    # drives the generator in place (it does not hand the object out of the
-    # method, so `self` capture is still sound), and its lowering had assigned
-    # the int64_t `__mojo_gen_close` result into a `_Bool` temp -- a hard
-    # `-fgimple` "invalid conversion in gimple call".
-    test_generator_stdout("nested_generator_method_self_nonlocal_write_then_close", """\
-class T:
-    def __init__(self, n):
-        self.n = n
-
-    def inner(self):
-        return self.n
-
-    def run(self):
-        endly = 0
-        def g():
-            nonlocal endly
-            try:
-                yield 1
-                self.inner()
-            finally:
-                endly = 5
-        gen = g()
-        print(next(gen))
-        print(endly)
-        gen.close()
-        print(endly)
-
-t = T(3)
-t.run()
-""", "1\n0\n5\n")
-
     test_generator_stdout("nested_generator_method_same_name_two_classes", """\
 struct A:
     var k: Int
@@ -5184,21 +5150,6 @@ def main():
             print(x)
 """, "root\nsub\na\nb\nroot/sub\nx\ny\nc\n")
 
-    # The same list-valued slot with INTEGER elements: the consumer must read
-    # the list's elements with the int accessor (the slot's recorded element
-    # kind), not as the words of a string or a pointer.
-    test_generator_stdout("gen_tuple_slot_list_of_ints", """\
-def pairs(n: Int):
-    var a = [1, 2]
-    yield "x", a
-
-def main():
-    for tag, vals in pairs(1):
-        print(tag)
-        for v in vals:
-            print(v + 10)
-""", "x\n11\n12\n")
-
     test_generator_stdout("gen_tuple_mixed_arity_preserves_length", """\
 def pairs(wide):
     if wide:
@@ -6752,121 +6703,6 @@ def main():
 main()
 """, "1.5\n2.5\n")
 
-    # A list of lists through a generator parameter: the outer loop target
-    # inherits the NESTED element ctype (`_mojo_coro_param_nested_kinds` ->
-    # `_param_elem_types` -> `_boxed_list_ptr`), so the inner loop reads it
-    # with the right accessor instead of printing heap addresses.
-    test_generator_stdout("generator_list_of_lists_param_yields_inner_ints", """\
-def rows(data):
-    for row in data:
-        for cell in row:
-            yield cell
-
-def main():
-    for v in rows([[1, 2], [3, 4]]):
-        print(v)
-main()
-""", "1\n2\n3\n4\n")
-
-    # A list of lists through a generator parameter: the outer loop target
-    # inherits the NESTED element ctype (`_mojo_coro_param_nested_kinds` ->
-    # `_param_elem_types` -> `_boxed_list_ptr`), so the inner loop reads it
-    # with the right accessor instead of printing heap addresses.
-    test_generator_stdout("generator_list_of_lists_param_yields_inner_floats", """\
-def rows(data):
-    for row in data:
-        for cell in row:
-            yield cell
-
-def main():
-    for v in rows([[1.5, 2.5], [3.5]]):
-        print(v)
-main()
-""", "1.5\n2.5\n3.5\n")
-
-    # A list of lists through a generator parameter: the outer loop target
-    # inherits the NESTED element ctype (`_mojo_coro_param_nested_kinds` ->
-    # `_param_elem_types` -> `_boxed_list_ptr`), so the inner loop reads it
-    # with the right accessor instead of printing heap addresses.
-    test_generator_stdout("generator_list_of_lists_param_yields_inner_strings", """\
-def rows(data):
-    for row in data:
-        for cell in row:
-            yield cell
-
-def main():
-    for v in rows([["a", "b"], ["c"]]):
-        print(v)
-main()
-""", "a\nb\nc\n")
-
-    # `os.path.<fn>` read as a function VALUE (Lib/os.py's `walk` opens with
-    # `islink, join = path.islink, path.join`): the read is the runtime
-    # wrapper's address, a call through it is `mojo_fnptr_call_N`, and the
-    # result kind follows the function (`join` a string, `islink` a bool).
-    # Before this the read was `_mojo_dispatch_getattr(<module marker>, ...)`,
-    # a fatal runtime `AttributeError: islink`.
-    test_generator_stdout("generator_os_path_function_values_tuple_bound", """\
-import os
-
-def g(top):
-    islink, join = os.path.islink, os.path.join
-    yield join(top, "x")
-    yield join(top, "y")
-
-def h(top):
-    islink = os.path.islink
-    yield islink(top)
-    yield islink("/")
-
-def main():
-    for v in g("/tmp"):
-        print(v)
-    for v in h("/tmp"):
-        print(v)
-main()
-""", "/tmp/x\n/tmp/y\nTrue\nFalse\n")
-
-    # A generator METHOD of a class defined INSIDE a function, yielding the
-    # str / str|None / None 4-tuples `string.Formatter.parse` yields
-    # (Lib/test/test_string/test_string.py's `BarFormatter` in
-    # `test_override_parse`). The class never reaches top-level struct
-    # registration, and this used to refuse the whole module.
-    test_generator_stdout("generator_method_of_function_nested_class_yields_str_none_tuples", """\
-def test():
-    class BarFormatter:
-        def parse(self, format_string):
-            yield ('', format_string, None, None)
-            yield ('x', 'y', 'z', None)
-
-    f = BarFormatter()
-    for t in f.parse("abc"):
-        print(t)
-
-test()
-""", "('', 'abc', None, None)\n('x', 'y', 'z', None)\n")
-
-    # A list built by `append(os.path.join(...))` and walked with
-    # `reversed(...)`: the element kind of the appended call (a string) and
-    # `reversed`'s passthrough of it were both unknown, so the yield slot was
-    # the int64_t default and the strings printed as heap ADDRESSES (exit 0).
-    test_generator_stdout("generator_reversed_list_of_os_path_join_results", """\
-import os
-
-def g(top):
-    dirs = ["a", "b", "c"]
-    names = []
-    for d in reversed(dirs):
-        names.append(os.path.join(top, d))
-    for n in reversed(names):
-        yield n
-
-def main():
-    for v in g("/t"):
-        print(v)
-main()
-""", "/t/a\n/t/b\n/t/c\n")
-
     test_generator_stdout("generator_enumerate_index_yields_index", """\
 def rows(data):
     for i, r in enumerate(data):
@@ -7388,10 +7224,8 @@ def main():
 """, "12\n13\n")
 
     # Enclosing def rebinds the captured name after the generator is defined:
-    # Python shows the NEW value (a snapshot would show 10). The enclosing
-    # parameter is threaded into the generator frame (`extra_captures`), so
-    # this now compiles and must match CPython: g(2) yields 2 + 5 = 7.
-    test_generator_stdout("generator_nested_rebound_after_def_sees_new_value", """\
+    # Python would show the new value, a snapshot would not. Must be refused.
+    test_generator_refused("generator_nested_rebound_after_def_refused", """\
 def outer(k: int):
     def g(n):
         yield n + k
@@ -7401,13 +7235,11 @@ def outer(k: int):
 
 def main():
     outer(10)
-""", "7\n")
+""", "reads enclosing-scope variable(s) k")
 
     # A `nonlocal` write from a nested generator used to compile to a fresh
-    # local starting at zero (silently wrong). The write must reach the
-    # enclosing def's variable: outer(10) -> k = 11, yield 2 + 11 = 13, then
-    # the enclosing print sees k == 11.
-    test_generator_stdout("generator_nested_nonlocal_write_reaches_enclosing", """\
+    # local starting at zero (silently wrong). It must be refused.
+    test_generator_refused("generator_nested_nonlocal_write_refused", """\
 def outer(k: int):
     def g(n):
         nonlocal k
@@ -7419,7 +7251,7 @@ def outer(k: int):
 
 def main():
     outer(10)
-""", "13\n11\n")
+""", "through `nonlocal`")
 
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")

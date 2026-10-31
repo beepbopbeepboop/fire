@@ -3135,7 +3135,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # unallocated while every access dereferenced the pointer (a
     # mid-function segfault on Tools/cases_generator/analyzer.py's
     # `nonlocal next_opcode` closure). See _emit_mut_local_box_allocs.
-    gen._emit_mut_local_box_allocs(node)
+    gen._emit_mut_local_box_allocs()
 
     # Don't emit bb_2 label at function start - let statements flow directly
     gen._genexp_narrow_names = set()
@@ -4397,7 +4397,7 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     gen._seed_addressed_locals(node.body)
     # Same prologue box-allocation contract as the plain-function path
     # above (see _emit_mut_local_box_allocs's docstring).
-    gen._emit_mut_local_box_allocs(node)
+    gen._emit_mut_local_box_allocs()
 
     gen._emit_label("bb_2")
     gen._genexp_narrow_names = set()

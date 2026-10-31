@@ -1019,6 +1019,119 @@ def test_libsystem_provider():
           'a memoised negative answer is still correct')
 
 
+def test_libsystem_handle_racing_callers_read_the_settled_answer():
+    """The sentinel regression, in its measured shape.
+
+    The first load attempt used to publish `False` as an in-flight marker, and
+    a caller that entered during the load read that marker as the ANSWER —
+    "not a C library symbol" — and memoised it for the whole process. `snprintf`
+    and `strtod` (the float-repr helper's externs, bound by every image) dropped
+    out of the provided set, and every later build in the process refused with
+    "the image would bind 2 symbol(s) that nothing provides": the 93/93 SKIP
+    run. Eight threads on one cold state, and the settled answer is what every
+    one of them must get.
+    """
+    import threading
+
+    def race():
+        M._LIBSYSTEM_HANDLE = None
+        M._LIBSYSTEM_MEMO.clear()
+        answers = [None] * 8
+
+        def worker(i):
+            answers[i] = M._is_libsystem('snprintf')
+
+        ts = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        return answers, M._is_libsystem('snprintf')
+
+    # MEASURED, the reason for the rounds: on this host the load window is a
+    # few milliseconds, and a single round caught the pre-fix marker once in
+    # twenty — one round would pass the old code most of the time. Twenty-five
+    # rounds is the same test with the window re-opened, and it is under a
+    # second.
+    bad = []
+    for _ in range(25):
+        answers, settled = race()
+        if B._libsystem_handle() is False:
+            good = all(a == settled for a in answers)
+            want = f'every racing caller reads the settled fallback, got {answers}'
+        else:
+            good = settled is True and all(a is True for a in answers)
+            want = f'every racing caller reads the settled True, got {answers}'
+        if not good:
+            bad.append(want)
+    if B._libsystem_handle() is False:
+        check(not bad,
+              'every racing caller reads the settled fallback in every round'
+              + (f'; first: {bad[0]}' if bad else ''))
+    else:
+        check(not bad,
+              'every racing caller reads the settled True in every round'
+              + (f'; first: {bad[0]}' if bad else ''))
+
+
+def test_concurrent_compile_formal_calls_agree_with_the_serial_answer():
+    """The reentrancy contract, direct: `compile_formal` returns the same
+    result running once, or running concurrently with another `compile_formal`
+    in the same process.
+
+    Two sources, one of them a module-constant program, because the measured
+    leak ran across exactly that pair: a process that had just built a program
+    defining `LIMIT` at module level reported `'LIMIT' has no home` for the
+    next program in it. The reference builds run serially first; the
+    concurrent round resets the libsystem state to cold, so the first audit in
+    the round re-loads the C library — the window the old in-flight marker was
+    read from — and the round's images must be the serial bytes.
+    """
+    import concurrent.futures
+    import hashlib
+
+    d = tempfile.mkdtemp(prefix='reentrant_')
+    a = os.path.join(d, 'a.mojo')
+    open(a, 'w').write('LIMIT = 12\n\n'
+                       'def main(n):\n'
+                       '    if n > LIMIT:\n'
+                       '        print(n - LIMIT)\n'
+                       '    return 0\n')
+    b = os.path.join(d, 'b.mojo')
+    open(b, 'w').write('SEED = 3\n'
+                       'LIMIT = SEED + 4\n\n'
+                       'def main(n):\n'
+                       '    if n > LIMIT:\n'
+                       '        print(LIMIT)\n'
+                       '    return 0\n')
+
+    def build(src, out):
+        return B.compile_formal(src, output=out, prove=False, arch='arm64')
+
+    ref_a = build(a, os.path.join(d, 'a_serial.aout'))
+    ref_b = build(b, os.path.join(d, 'b_serial.aout'))
+    M._LIBSYSTEM_HANDLE = None
+    M._LIBSYSTEM_MEMO.clear()
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            fa = pool.submit(build, a, os.path.join(d, 'a_conc.aout'))
+            fb = pool.submit(build, b, os.path.join(d, 'b_conc.aout'))
+            got_a, got_b = fa.result(), fb.result()
+    except Exception as e:                                  # noqa: BLE001
+        check(False, f'concurrent builds raised: {type(e).__name__}: {e}')
+        return
+    check(hashlib.sha256(got_a['code']).hexdigest()
+          == hashlib.sha256(ref_a['code']).hexdigest(),
+          'a concurrent build answers the same image as the serial one')
+    check(hashlib.sha256(got_b['code']).hexdigest()
+          == hashlib.sha256(ref_b['code']).hexdigest(),
+          'the other concurrent build agrees too')
+    check(got_a['linked_dylibs'] == ref_a['linked_dylibs'],
+          'the link line of the concurrent build is the serial one')
+    check(got_b['linked_dylibs'] == ref_b['linked_dylibs'],
+          'the other concurrent build keeps the serial link line')
+
+
 # ── 4. one bind audit, both paths ───────────────────────────────────────────
 
 def test_bind_audit():

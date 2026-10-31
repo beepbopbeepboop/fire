@@ -11290,23 +11290,6 @@ MojoList *mojo_glob(char *pattern) {
 }
 int64_t mojo_glob_w(int64_t pattern) { return (int64_t)(intptr_t)mojo_glob((char *)(intptr_t)pattern); }
 
-/* os.path.<fn> as function VALUES (int64_t ABI, see mojo_fnptr_call_N): the
- * addresses `x = os.path.islink` / `join = path.join` evaluate to. */
-int64_t mojo_os_path_join_w(int64_t a, int64_t b) {
-    return (int64_t)(intptr_t)mojo_path_join((char *)(intptr_t)a, (char *)(intptr_t)b);
-}
-int64_t mojo_os_path_islink_w(int64_t p) {
-    struct stat st;
-    return p && lstat((char *)(intptr_t)p, &st) == 0 && S_ISLNK(st.st_mode);
-}
-int64_t mojo_os_path_isdir_w(int64_t p) { return int_isdir(0, p); }
-int64_t mojo_os_path_isfile_w(int64_t p) { return int_isfile(0, p); }
-int64_t mojo_os_path_exists_w(int64_t p) { return int_exists(0, p); }
-int64_t mojo_os_path_basename_w(int64_t p) {
-    return (int64_t)(intptr_t)int64_t_basename((char *)(intptr_t)p);
-}
-int64_t mojo_os_path_dirname_w(int64_t p) { return int_dirname(0, p); }
-
 int int_isfile(int64_t marker, int64_t path) {
     /* os.path.isfile(path) — S_ISREG twin of int_isdir above. The codegen
      * previously stubbed this call shape to a literal 0 ("not a file"),

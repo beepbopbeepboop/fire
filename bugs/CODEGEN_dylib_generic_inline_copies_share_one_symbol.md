@@ -101,7 +101,7 @@ would hide the miscompile.
 - The 130 excluded modules are `std/gpu/*` and their importers; their symbols are lost from the dylib (clients fall
   back to compiling source, so the failure is silent and slow).
 - The 4 `case .PASS:` skips (dtype, logger, address_space, testing/suite) are a separate bug, already on file as
-  the `stdlib-syntax` gate failure (fixed by the enum-case / .NAME resolution).
+  `bugs/CODEGEN_gate_stdlib_syntax_red.md`.
 
 ## Why
 
