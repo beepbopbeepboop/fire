@@ -1,6 +1,6 @@
 # GATE: `make bootstrap` fails `bootstrap-stage1-dumps:myinterpreter.py` (exit 1, 5 s)
 
-## Status (2026-10-31, OPEN, not yet diagnosed)
+## Status (2026-10-31, OPEN, cause found, fix not started)
 
 Reported from a run of `make bootstrap` on `up-laptop:mojo-reference2`. The run
 printed the memslot queue for the stage1 dump items, then:
@@ -22,13 +22,34 @@ What the report shows:
 - 5 s is short for a whole-file dump, so the job probably died early (a
   compile or import error), not during the compile itself.
 
-Not known yet: the exit reason, whether it reproduces on master, and whether it
+Exit reason, from `../mojo-reference2/build/suite.log` (the job's own output):
+
+```
+compile_to_gimple failed: cannot compile module: function(s)
+_mojo_struct_iter_steps (generator function(s), contain a `yield`/`yield from`)
+— this codegen compiles every function into a single straight-line C function
+and has no suspend/resume state-machine ...
+RuntimeError: cannot compile module ... (module_gen.py gen_module_impl)
+```
+
+Cause: `myinterpreter.py` line 2522 defines `_mojo_struct_iter_steps`, a
+generator (`yield` values from `__next__`). It was added by 422ab8a9
+(2026-10-30, "interpreter: next()/iter()/for/comprehension drive a user iterator
+struct"). The stage1 `--dump` of `myinterpreter.py` then goes through the
+straight-line codegen, which refuses any module containing a generator. So the
+job is not a runner or memory problem: the source introduced a generator that
+the dump path cannot compile. It passed before 422ab8a9.
+
+Not known yet: whether the stage1 dump should compile generators (the
+coroutine backend) or the source should avoid one, whether it reproduces on
+master, and whether it
 is caused by the memslot wait (a timeout that counts the queue, which the
 runner is supposed to avoid: a job's TIMEOUT starts after admission).
 
 ## Next step
 
-1. Reproduce: `make bootstrap` (or `python3 tools/suite.py bootstrap`) on a
+1. Decide: the dump must compile `myinterpreter.py`'s generator through the coroutine path, or the source must stop using one in a module the dump compiles (422ab8a9 is the change to look at).
+   Reproduce: `make bootstrap` (or `python3 tools/suite.py bootstrap`) on a
    clean master tree.
 2. Read the failing job's full output in `build/suite.log` (the FAIL block
    names the job's argv and its complete output). Record the first error line
