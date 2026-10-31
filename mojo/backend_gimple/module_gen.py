@@ -4043,7 +4043,7 @@ def gen_module_impl(self, stmts):
     #
     # See mojo/backend_gimple/elab_intu.py for why the `.o` route cannot serve
     # the `std/iter` iterator family at all, and
-    # bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md for
+    # the user-iterator next() bug (doc deleted in db724c4d6) for
     # the experiment this replaces (which narrowed the feature instead of
     # fixing the cause, and so produced `conflicting types` regressions).
     stmts = list(stmts) + _elab_intu.run(self, stmts)
@@ -7261,7 +7261,13 @@ def gen_module_impl(self, stmts):
                                         s.module.replace('.', '_').replace('-', '_') + '::' + _rs_nm)
                                     or self._generator_home_api.get(
                                         gimple_ctypes._join_import_member(s.module, _rs_nm)
-                                        .replace('.', '_').replace('-', '_') + '::' + _rs_nm))
+                                        .replace('.', '_').replace('-', '_') + '::' + _rs_nm)
+                                    # a sibling's RELATIVE spelling
+                                    # (`from .iterutil import f`): its home
+                                    # registers under the bare module name
+                                    or self._generator_home_api.get(
+                                        s.module.lstrip('.').replace('.', '_').replace('-', '_')
+                                        + '::' + _rs_nm))
                                 if _gmh_api is not None:
                                     self._imported_generator_bindings[sym_name] = _gmh_api
                                     continue
@@ -7290,7 +7296,10 @@ def gen_module_impl(self, stmts):
                                     s.module.replace('.', '_').replace('-', '_') + '::' + _fb_name)
                                 or self._generator_home_api.get(
                                     gimple_ctypes._join_import_member(s.module, _fb_name)
-                                    .replace('.', '_').replace('-', '_') + '::' + _fb_name))
+                                    .replace('.', '_').replace('-', '_') + '::' + _fb_name)
+                                or self._generator_home_api.get(
+                                    s.module.lstrip('.').replace('.', '_').replace('-', '_')
+                                    + '::' + _fb_name))
                             if _fb_gmh is not None:
                                 self._imported_generator_bindings[_fb_sym] = _fb_gmh
                                 continue
@@ -9050,7 +9059,19 @@ def gen_module_impl(self, stmts):
     # unknown reads as the int64_t default; this set says the inner lists
     # are kind-mixed, which the element loop answers with the runtime route.
     self._param_nested_mixed: dict[str, set] = {}
+    # callee -> {pname} for a FLAT list parameter whose call sites disagree on
+    # the element C type (`show([1, 2])`, `show(['a'])`, `show([2.5])`): the
+    # contract is unknown, so a loop over it must ask each slot's recorded kind
+    # at run time (`mojo_list_get_boxed`) rather than trust one typed accessor.
+    self._param_elem_mixed: dict[str, set] = {}
+    self._param_int_elem_obs: dict[str, set] = {}
     self._coro_str_params: dict[str, set] = {}
+    # coroutine body name -> {param} whose element type is POSITIVELY int:
+    # the list-of-ints counterpart of `_coro_str_params`. Kept apart from
+    # `_param_elem_types` because `_elem_types[x] == 'int64_t'` means "nothing
+    # known" to nearly every writer, and `_boxed_list_ptr` needs to tell the
+    # two apart (see emit_loops). Consulted by name, per function.
+    self._coro_int_list_params: dict[str, set] = {}
     # The dict-VALUE twin of the table above: callee -> {pname -> the dict
     # value ctype every one of its call sites agrees on}. A dict is stored
     # as one `int64_t` slot per key plus a per-slot `kind` tag, so a callee
@@ -9129,6 +9150,11 @@ def gen_module_impl(self, stmts):
             _pe_d = self._param_elem_types.setdefault(_as_str(_fp_s.name), {})
             for _pe_k in _pe_body:
                 _pe_d[_as_str(_pe_k)] = (_as_str(_pe_body[_pe_k]), None)
+        _pi_body = getattr(_fp_s, '_mojo_coro_param_int_lists', None)
+        if _pi_body:
+            _pi_d = self._coro_int_list_params.setdefault(_as_str(_fp_s.name), set())
+            for _pi_k in _pi_body:
+                _pi_d.add(_as_str(_pi_k))
         _ps_body = getattr(_fp_s, '_mojo_coro_param_str_params', None)
         if _ps_body:
             _ps_d = self._coro_str_params.setdefault(_as_str(_fp_s.name), set())
@@ -9163,6 +9189,10 @@ def gen_module_impl(self, stmts):
                     _mx_inner = self._param_nested_mixed.setdefault(callee, set())
                     _mx_inner.add(pname)
             else:
+                if (old_e is not None and e is not None and old_e != e
+                        and old_e != 'MojoList *' and e != 'MojoList *'):
+                    _em = self._param_elem_mixed.setdefault(callee, set())
+                    _em.add(pname)
                 d[pname] = (None, None)   # conflicting call sites → unknown
         else:
             d[pname] = (e, ne)
@@ -9466,12 +9496,19 @@ def gen_module_impl(self, stmts):
         e = pair[0]
         ne = pair[1]
         if not _informative_elem_ctype(e):
+            # An int list is the default and records no CONTRACT, but it is
+            # still a call site: a sibling site that passes strings makes the
+            # parameter kind-MIXED, not str.
+            if e == 'int64_t':
+                self._param_int_elem_obs.setdefault(_as_str(callee), set()).add(
+                    _as_str(pname))
             return
         import os as _os
         if _os.environ.get('MOJO_TRACE_PARAM_ELEM'):
             print('TRACE', _as_str(callee), _as_str(pname), e, ne, file=sys.stderr)
         _record_param_elem(callee, pname, e, ne)
 
+    _static_arg_int = [False]
     _fn_by_name: dict = {}
     for _fbn_s in all_functions:
         if isinstance(_fbn_s, FunctionDef):
@@ -9566,6 +9603,7 @@ def gen_module_impl(self, stmts):
                 # SwiGLU -- joined to (None, None), and every `g[i]` in it
                 # read back as raw int64 bits).
                 if _e == 'int64_t':
+                    _static_arg_int[0] = True
                     return None, None
                 return _e, _gmi_as_str(nested.get(_n))
             return None, None
@@ -9589,6 +9627,7 @@ def gen_module_impl(self, stmts):
             # it iterates the hash table through the list accessors.
             _e = self._infer_list_elem_type(a.elements)
             if _e == 'int64_t':
+                _static_arg_int[0] = True
                 return None, None
             if not self._literal_elements_include_none(a.elements):
                 if a.elements and isinstance(a.elements[0], gimple_ctypes.ListExpr):
@@ -9633,9 +9672,15 @@ def gen_module_impl(self, stmts):
             for i, a in enumerate(call.args):
                 if i >= len(pnames):
                     break
+                _static_arg_int[0] = False
                 _fe, _fne = _static_arg_elems(a, elem, nested)
                 if _fe is not None:
                     _record_param_elem(callee, pnames[i], _fe, _fne)
+                elif _static_arg_int[0]:
+                    # An int list records no contract (it is the default) but
+                    # it IS a call site; see `_param_int_elem_obs`.
+                    self._param_int_elem_obs.setdefault(callee, set()).add(
+                        _as_str(pnames[i]))
 
                 _dv = _static_arg_dict_val(a, dval, caller_name)
                 if _dv is not None:
@@ -9923,6 +9968,71 @@ def gen_module_impl(self, stmts):
     # as soon as a round settles nothing.
     _contract_rounds = 0
     _contract_limit = len(_caller_bodies) + 1
+    # A generator's list parameter that its call sites leave UNSOLVED (a call
+    # site the static scan could not type at all, which `coro` records beside
+    # the provable disagreements in `_CALLSITE_PARAM_CONFLICTS`) has no
+    # element type for the solver to trust, so it is read like a kind-mixed
+    # one: per slot, by the kind the list recorded. A parameter the solver
+    # DID type never reaches here and stays an untagged typed read.
+    for _uc_fn in all_functions:
+        if not isinstance(_uc_fn, FunctionDef):
+            continue
+        _uc_bad = gimple_gen_coro._CALLSITE_PARAM_CONFLICTS.get(_as_str(_uc_fn.name))
+        if not _uc_bad:
+            continue
+        _uc_params = set(_as_str(_p[0]) for _p in (_uc_fn.params or []))
+        for _uc_n in _walk_ast(_uc_fn):
+            if (isinstance(_uc_n, ForStmt) and isinstance(_uc_n.iterable, IdentExpr)
+                    and _as_str(_uc_n.iterable.name) in _uc_bad
+                    and _as_str(_uc_n.iterable.name) in _uc_params):
+                self._param_elem_mixed.setdefault(
+                    _as_str(_uc_fn.name), set()).add(_as_str(_uc_n.iterable.name))
+    # An UNSOLVED list parameter (no call site typed it) that a NESTED
+    # generator captures: the generator frame receives it as a word and
+    # yields its elements, so it is read per slot like a kind-mixed one.
+    for _nc_fn in all_functions:
+        if not isinstance(_nc_fn, FunctionDef):
+            continue
+        _nc_params = set(_as_str(_p[0]) for _p in (_nc_fn.params or []))
+        _nc_solved = self._param_elem_types.get(_as_str(_nc_fn.name), {})
+        for _nc_in in _nc_fn.body:
+            if not (isinstance(_nc_in, FunctionDef) and _nc_in.is_generator):
+                continue
+            for _nc_n in _walk_ast(_nc_in):
+                if (isinstance(_nc_n, YieldFromExpr)
+                        and isinstance(_nc_n.value, IdentExpr)):
+                    _nc_nm = _as_str(_nc_n.value.name)
+                    _nc_ct = _nc_solved.get(_nc_nm)
+                    if (_nc_nm in _nc_params
+                            and (_nc_ct is None or _nc_ct[0] is None)):
+                        self._param_elem_mixed.setdefault(
+                            _as_str(_nc_fn.name), set()).add(_nc_nm)
+    for _ie_callee in self._param_int_elem_obs:
+        _ie_pe = self._param_elem_types.get(_ie_callee, {})
+        for _ie_p in self._param_int_elem_obs[_ie_callee]:
+            _ie_ct = _ie_pe.get(_ie_p)
+            if _ie_ct is not None and _ie_ct[0] is not None and _ie_ct[0] != 'MojoList *':
+                self._param_elem_mixed.setdefault(_ie_callee, set()).add(_ie_p)
+                # Mixed means the element type is UNKNOWN, as any other
+                # disagreement records it; leaving the one non-int site's
+                # type as the contract types the int site's list wrongly.
+                _ie_pe[_ie_p] = (None, None)
+    # Module functions referenced as VALUES (an identifier that is not the
+    # callee of a call): see `_gen_stmt_ReturnStmt`.
+    _vu_fn_names = set(_as_str(_f.name) for _f in all_functions
+                       if isinstance(_f, FunctionDef))
+    _vu_callees = set()
+    _vu_refs = set()
+    for _vu_f in all_functions:
+        if not isinstance(_vu_f, FunctionDef):
+            continue
+        for _vu_n in _walk_ast(_vu_f):
+            if isinstance(_vu_n, CallExpr) and isinstance(_vu_n.func, IdentExpr):
+                _vu_callees.add(id(_vu_n.func))
+            elif isinstance(_vu_n, IdentExpr) and _as_str(_vu_n.name) in _vu_fn_names:
+                _vu_refs.add((id(_vu_n), _as_str(_vu_n.name)))
+    self._value_used_funcs = set(_nm for (_i, _nm) in _vu_refs if _i not in _vu_callees)
+    _em_before = sum(len(_v) for _v in self._param_elem_mixed.values())
     _resolve_param_dict_vals()
     _resolve_param_containers()
     while _contract_rounds < _contract_limit:
@@ -9949,8 +10059,18 @@ def gen_module_impl(self, stmts):
                     _pc = _static_arg_container(a, caller_name)
                     if _pc is not None:
                         _record_param_container(callee, pnames[i], _pc)
+                    # A parameter handed straight on to another function's
+                    # parameter carries its kind-mixing with it: `pairs(xs)`
+                    # inside `run(xs)`, where `run`'s call sites disagree.
+                    if (isinstance(a, IdentExpr)
+                            and _as_str(a.name) in self._param_elem_mixed.get(caller_name, ())):
+                        self._param_elem_mixed.setdefault(callee, set()).add(pnames[i])
         _resolve_param_dict_vals()
         _resolve_param_containers()
+        _em_now = sum(len(_v) for _v in self._param_elem_mixed.values())
+        if _em_now != _em_before:
+            _em_before = _em_now
+            continue
         if (len(self._param_dict_val_obs) == _dv_before
                 and len(self._param_container_obs) == _pc_before):
             # No new (callee, param) slot was reached this round, in EITHER
@@ -11180,6 +11300,7 @@ def gen_module_impl(self, stmts):
         self._generator_api[s.name] = {
             'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
             'tuple_slot_ctypes': self._cpp_last_tuple_slot_ctypes,
+            'mixed_slots': self._cpp_last_mixed_slots,
             # Value-carrying `return` support (asyncio/futures.py's
             # `__await__`): True when this unit stored its return value
             # into the promise slot before co_return, so a `yield from`
@@ -11284,6 +11405,14 @@ def gen_module_impl(self, stmts):
         for _t in _tgts:
             self._global_literal_slot_ctypes[_t] = _slots if _slots is not None else _outer
 
+    # Sync generators nested in an ordinary top-level def that read its
+    # names are claimed here, BEFORE the generic passes below would refuse
+    # them and before the module-level registration could take them by bare
+    # name (see cpp_async._compile_nested_generator_closures).
+    for _od in stmts:
+        if isinstance(_od, FunctionDef):
+            self._compile_nested_generator_closures(_od, _generator_fns)
+
     for s in stmts:
         if not (isinstance(s, FunctionDef) and id(s) in _generator_fns
                 and id(s) not in _async_fns):
@@ -11376,6 +11505,7 @@ def gen_module_impl(self, stmts):
         self._async_gen_api[s.name] = {
             'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
             'tuple_slot_ctypes': self._cpp_last_tuple_slot_ctypes,
+            'mixed_slots': self._cpp_last_mixed_slots,
         }
         self.func_param_types[f"{base}_start"] = param_ctypes
         self._generator_cpp_units.append(cpp_text)
@@ -11400,6 +11530,7 @@ def gen_module_impl(self, stmts):
             self._async_gen_api[s.name] = {
                 'base': base, 'value_ctype': value_ctype, 'params': param_ctypes,
                 'tuple_slot_ctypes': self._cpp_last_tuple_slot_ctypes,
+                'mixed_slots': self._cpp_last_mixed_slots,
             }
             self.func_param_types[f"{base}_start"] = param_ctypes
             self._generator_cpp_units.append(cpp_text)
@@ -11556,6 +11687,7 @@ def gen_module_impl(self, stmts):
                 # name survives, so it is read here, at registration.
                 'receiver': (_cpp_method_receiver_name(m)),
                 'tuple_slot_ctypes': self._cpp_last_tuple_slot_ctypes,
+                'mixed_slots': self._cpp_last_mixed_slots,
             }
             self.func_param_types[f"{base}_start"] = param_ctypes
             _gen_dflts = getattr(m, 'param_defaults', None) or {}
@@ -15953,7 +16085,8 @@ def gen_module_impl(self, stmts):
     # decls for its own trampolines at all — an implicit-declaration
     # compile failure the moment anything (e.g. `_take_handle()`) used the
     # handle outside the enclosing function's own `{base}_start` call.
-    if self._supported_generators or self._generator_method_api or self._generator_api:
+    if (self._supported_generators or self._generator_method_api or self._generator_api
+            or self._nested_generator_api):
         # The typedef may already have been emitted ahead of the
         # method-prototype pass (declaration-before-typedef cascade fix,
         # see that site) — keep exactly one in the section.
@@ -15971,7 +16104,8 @@ def gen_module_impl(self, stmts):
         # (the dict's own VALUES are a genuinely mixed-type dict —
         # `base`/`value_ctype` are str, `params` is a list — so a single
         # `dict[str, str]` reparameterization wouldn't fit every field).
-        for _api in list(self._generator_api.values()) + list(self._generator_method_api.values()):
+        for _api in (list(self._generator_api.values()) + list(self._generator_method_api.values())
+                     + list(self._nested_generator_api.values())):
             _base, _vct = _as_str(_api['base']), _as_str(_api['value_ctype'])
             # Plain unpack loop, NOT a genexpr — a list of string pieces
             # joined via a genexpr is the established self-hosted trap.
@@ -16442,6 +16576,22 @@ def gen_module_impl(self, stmts):
             'extern "C" { typedef struct MojoGenerator MojoGenerator; }',
             'extern "C" { typedef struct MojoAsync MojoAsync; }',
             '',
+            '#include <type_traits>',
+            '/* The result of a call whose C return type is only final once the',
+            '   whole module is lowered: one pointer-sized WORD that converts to',
+            '   whichever of int64_t / string / container pointer the variable it',
+            '   is assigned to is declared as (see `_mj_w` in cpp_core). */',
+            'struct _MjWord { int64_t w;',
+            '    operator int64_t() const { return w; }',
+            '    operator bool() const { return w != 0; }',
+            '    operator char *() const { return (char *)(intptr_t)w; }',
+            '    operator MojoList *() const { return (MojoList *)(intptr_t)w; }',
+            '    operator MojoDict *() const { return (MojoDict *)(intptr_t)w; }',
+            '    operator MojoSet *() const { return (MojoSet *)(intptr_t)w; } };',
+            'template <class T> static inline _MjWord _mj_w(T v) {',
+            '    if constexpr (std::is_pointer_v<T>) return _MjWord{(int64_t)(intptr_t)v};',
+            '    else return _MjWord{(int64_t)v}; }',
+            '',
             '/* Milestone D: RAII `finally:` translation (see',
             '   GimpleGen._cpp_try_stmt) -- runs an arbitrary capturing',
             '   lambda from its destructor, so it fires on every way its',
@@ -16831,6 +16981,13 @@ def gen_module_impl(self, stmts):
             cpp_parts.append(unit)
             cpp_parts.append('')
         self.generated_cpp = '\n'.join(cpp_parts)
+        # Resolve the callee-symbol placeholders a generator body emitted
+        # (`@@CSYM:name@@`) now that every function's parameter types, and so
+        # its overload suffix, are final.
+        if '@@CSYM:' in self.generated_cpp:
+            self.generated_cpp = re.sub(
+                r'@@CSYM:([A-Za-z0-9_]+)@@',
+                lambda _m: self._func_csym(_m.group(1)), self.generated_cpp)
 
     # A3 stack-switch coroutine trampolines (gimple_gen_coro.register): plain
     # C, emitted straight into this module's .c/.ci output — the generator

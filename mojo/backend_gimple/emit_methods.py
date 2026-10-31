@@ -400,14 +400,33 @@ def _cattr_restore_end(gen) -> None:
 
 def _cattr_instance_read(gen, ov, ot, aname, gname, gtype):
     """Value of class attribute `aname` read through an INSTANCE `ov` of struct
-    type `ot`: the cell this instance was built under (its hidden field), not
-    the current one. That is what keeps `a = make(5); b = make(7); a.attr` at 5.
-    Falls back to the current cell when `ov` is not a struct pointer."""
+    type `ot`, in CPython's lookup order: an attribute the instance itself holds
+    (an instance write `ov.aname = ...` lands in its dynamic storage) shadows the
+    class attribute, so the dynamic storage is probed first, under the nothrow
+    flag, and the class value is the default. The class value is the cell this
+    instance was built under (its hidden field), not the current one, which is
+    what keeps `a = make(5); b = make(7); a.attr` at 5. Falls back to the
+    current cell when `ov` is not a struct pointer, and skips the probe there
+    (no dynamic storage can be reached through a non-pointer word)."""
     if not ot.endswith(' *') or _cattr_cell_type(gen, gname) is None:
-        return _cattr_read(gen, gname, gtype)
-    _field = gimple_ctypes._safe_field(gimple_ctypes.cattr_cell_field(aname))
-    _p = gen._new_val(f'{gtype} *', f'{ov}->{_field}')
-    return gen._new_val(gtype, f'*{_p}')
+        _classval = _cattr_read(gen, gname, gtype)
+    else:
+        _field = gimple_ctypes._safe_field(gimple_ctypes.cattr_cell_field(aname))
+        _p = gen._new_val(f'{gtype} *', f'{ov}->{_field}')
+        _classval = gen._new_val(gtype, f'*{_p}')
+    if not ot.endswith(' *'):
+        return _classval
+    gen._emit("  _mojo_getattr_missed = 0;")
+    gen._emit("  _mojo_getattr_nothrow = 1;")
+    _vp = gen._new_val('void *', f'(void *){ov}')
+    _name = gen._new_val('char *', gen._intern_string(aname))
+    _raw = gen._call_expr('int64_t', '_mojo_dispatch_getattr',
+                          [('void *', _vp), ('char *', _name)])
+    gen._emit("  _mojo_getattr_nothrow = 0;")
+    _missed = gen._new_val('int', '_mojo_getattr_missed')
+    _cond = gen._new_val('_Bool', f'{_missed} != 0')
+    _hit = gen._new_val(gtype, f'({gtype}){_raw}')
+    return gen._new_val(gtype, f'{_cond} ? {_classval} : {_hit}')
 
 
 def _cattr_instance_dyn_read(gen, ov, ot, aname, gname, gtype):
@@ -2859,6 +2878,26 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             gen._elem_types[t] = 'char *'
             return 'MojoList *', t
 
+        # os.walk(top) / glob.glob(pat) / glob.iglob(pat): eager runtime
+        # helpers (mojo_os_walk / mojo_glob) returning a list. A walk is a
+        # list of (dirpath, dirnames, filenames) tuples; a glob a list[str].
+        if ((module_name == 'os' and method_name == 'walk')
+                or (module_name == 'glob' and method_name in ('glob', 'iglob'))) \
+                and len(node.args) == 1 and not node.kwargs:
+            arg_type, arg_val = gen.lower_expr(node.args[0])
+            if arg_type not in ('char *', 'void *'):
+                arg_cast = gen._new_temp('char *')
+                gen._emit(f'  {arg_cast} = (char *){arg_val};')
+                arg_val = arg_cast
+            _wsym = 'mojo_os_walk' if method_name == 'walk' else 'mojo_glob'
+            t = gen._call_expr('MojoList *', _wsym, [('char *', arg_val)])
+            if method_name == 'walk':
+                gen._elem_types[t] = 'MojoList *'
+                gen._tuple_slot_types[t] = ['char *', 'MojoList *', 'MojoList *']
+            else:
+                gen._elem_types[t] = 'char *'
+            return 'MojoList *', t
+
         # sysconfig.get_config_var(name) — real Python signature returns
         # `str | None` (the build-config value for `name`, e.g.
         # "BUILD_GNU_TYPE"/"BUILD_DIR"), never int. Not previously
@@ -3122,11 +3161,11 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # Narrow guard, deliberately conservative: `module_name` must be
         # a REGISTERED import alias/marker (`_module_alias_names` —
         # covers both a bare `from . import SUBMODULE` marker and a
-        # plain `import SUBMODULE as alias`), no keyword arguments (this
-        # fallback, like the ast_rewriter/mlir/regex_compile cases
-        # above, forwards only positional args), and `method_name` must
-        # be independently confirmed — by actually reading and
-        # regex-scanning the target module's OWN source, never guessed
+        # plain `import SUBMODULE as alias`), any argument shape (keyword
+        # arguments included: they are forwarded to the bare-name call,
+        # which binds them exactly as the `from X import f` spelling does),
+        # and `method_name` must be independently confirmed — by actually
+        # reading and regex-scanning the target module's OWN source, never guessed
         # — to be a plain (non-generic, non-overloaded, no sibling
         # struct of the same name) top-level `def`/`fn`, so this never
         # misfires on a name meant for a completely different
@@ -3181,8 +3220,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         _mgc_is_selfhost = _is_selfhost_source_file(
             getattr(gen, '_current_filename', None))
         if (not _mgc_is_selfhost
-                and module_name in getattr(gen, '_module_alias_names', ())
-                and not getattr(node, 'kwargs', None)):
+                and module_name in getattr(gen, '_module_alias_names', ())):
             _mgc_info = gen.imported_symbols.get(module_name)
             _mgc_sub_ref = (_mgc_info.get('module')
                             if isinstance(_mgc_info, dict) else None) or module_name
@@ -3752,7 +3790,12 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # `arg_pairs`.
         _gm_kwargs = getattr(node, 'kwargs', []) or []
         _gm_expected = gen.func_param_types.get(f"{_gm_api['base']}_start", [])
-        if _gm_expected and len(all_args) < len(_gm_expected):
+        # `*args` callee: pad the fixed slots (self included) up to its slot,
+        # then pack the positionals from there on -- see
+        # ggc._emit_generator_start_call, which this mirrors.
+        _gm_star = ggc._generator_star_slot(_gm_api, node)
+        _gm_nfixed = _gm_star if _gm_star is not None else len(_gm_expected)
+        if _gm_expected and len(all_args) < _gm_nfixed:
             # Explicit loop, NOT `{kn: gen.lower_expr(ke) for kn, ke in
             # _gm_kwargs}` — the comprehension's tuple-unpacked key `kn`
             # erases to int64_t (the pointer-decimal key trap) and the
@@ -3762,7 +3805,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 _gm_kwarg_dict[_gmm_as_str(_gm_kn)] = gen.lower_expr(_gm_ke)
             _gm_kwarg_values = list(_gm_kwarg_dict.values())
             _gm_dflts = gen._func_param_defaults.get(f"{_gm_api['base']}_start", [])
-            while len(all_args) < len(_gm_expected):
+            while len(all_args) < _gm_nfixed:
                 if _gm_kwarg_values:
                     all_args.append(_gm_kwarg_values.pop(0))
                     continue
@@ -3777,7 +3820,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 # step with 0 instead of 2).
                 _pos = len(all_args) - 1
                 _dv = gimple_exprtypes._trailing_default_at(
-                    _gm_dflts, len(_gm_expected) - 1, _pos)
+                    _gm_dflts, _gm_nfixed - 1, _pos)
                 if _dv is not None:
                     all_args.append(ggc._default_expr_to_pair(gen, _dv))
                 else:
@@ -3785,6 +3828,8 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         else:
             for _, _ke in _gm_kwargs:
                 gen.lower_expr(_ke)
+        if _gm_star is not None:
+            all_args = ggc._pack_generator_star_args(gen, all_args, _gm_star)
         t = gen._call_expr('MojoGenerator *', f"{_gm_api['base']}_start", all_args)
         gen._generator_var_api[t] = _gm_api
         return 'MojoGenerator *', t
@@ -6001,6 +6046,9 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
     # window call site still gets the 2-argument helper, so nothing that does
     # not pass a window changes shape.
     if method in ('startswith', 'endswith') and arg_vals:
+        # The runtime answers an int; Python answers a bool, and so does
+        # `exprtypes` for this call. Declaring the raw int here made
+        # `print(f.startswith("x"))` on a word receiver print `1`.
         is_start = method == 'startswith'
         arg0_type = arg_pairs[0][0] if arg_pairs else 'char *'
         arg0_val = arg_vals[0]
@@ -6010,21 +6058,21 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
             # mojo_str_startswith_word.
             fn = 'mojo_str_startswith_word' if is_start else 'mojo_str_endswith_word'
             _pw = gen._to_int64(arg0_type, arg0_val)
-            return 'int', gen._call_expr('int', fn, [('char *', cstr_ov), ('int64_t', _pw)])
-        if full_window:
-            if arg0_type == 'char':
-                fn = 'mojo_str_startswith_char' if is_start else 'mojo_str_endswith_char'
-                t = gen._new_temp('int')
-                gen._emit_call('int', t, fn, [('char *', cstr_ov), ('char', arg0_val)])
-                return 'int', t
+            t = gen._call_expr('int', fn, [('char *', cstr_ov), ('int64_t', _pw)])
+        elif full_window and arg0_type == 'char':
+            fn = 'mojo_str_startswith_char' if is_start else 'mojo_str_endswith_char'
+            t = gen._new_temp('int')
+            gen._emit_call('int', t, fn, [('char *', cstr_ov), ('char', arg0_val)])
+        elif full_window:
             fn = 'mojo_str_startswith' if is_start else 'mojo_str_endswith'
-            return 'int', gen._call_expr('int', fn,
-                                         [('char *', cstr_ov), (arg0_type, arg0_val)])
-        fn = 'mojo_str_startswith_from' if is_start else 'mojo_str_endswith_from'
-        ntype, nval = _cstr_needle(gen, arg0_type, arg0_val)
-        return 'int', gen._call_expr('int', fn, [
-            ('char *', cstr_ov), (ntype, nval),
-            ('int64_t', st), ('int64_t', sp)])
+            t = gen._call_expr('int', fn, [('char *', cstr_ov), (arg0_type, arg0_val)])
+        else:
+            fn = 'mojo_str_startswith_from' if is_start else 'mojo_str_endswith_from'
+            ntype, nval = _cstr_needle(gen, arg0_type, arg0_val)
+            t = gen._call_expr('int', fn, [
+                ('char *', cstr_ov), (ntype, nval),
+                ('int64_t', st), ('int64_t', sp)])
+        return '_Bool', gen._new_val('_Bool', f'{t} != 0')
     if method in ('find', 'index', 'rfind', 'rindex', 'count') and arg_vals:
         # index/rindex are find/rfind with ValueError instead of -1 on a miss,
         # which nothing in this tree relies on (see rindex's note below), so

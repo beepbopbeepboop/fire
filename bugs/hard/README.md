@@ -19,8 +19,6 @@ same commit.
 
 | doc | status as the doc states it | what remains |
 |---|---|---|
-| `CODEGEN_generator_lambda_expr_unsupported.md` | Status 2026-10-29, third pass: every row this doc owns is closed. | Nothing in its own scope. Two residue rows it lists (a generator whose yields rebind one name to a bool then a float; `r = 2.5` rebinding a local first bound to `False`) are claimed by another worker's doc (commit 71fda43ff). The doc stays only because ~20 live citations point at it. |
-| `COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md` | PARTIAL. 2026-10-26: the star/kwarg-unpack call capability landed; the file's refusal is unchanged, as its own entry predicted. | `_walk_tree`/`glob_tree`/`iter_files` still refuse; `iter_files` waits on the parameter-callee axis — a `*`/`**`-unpack call through the polymorphic `_walk` parameter. |
 
 ## Removed docs: where their fix or residue went
 
@@ -58,6 +56,7 @@ symptom and then `git log --diff-filter=D -- bugs/hard bugs` for the removal.
 | `1eacc36f8` | a lambda inside a nested `def` reads its outer-outer capture (read 0 instead of the captured value) | fixed; pinned by `gimple_lambda_in_nested_def_reads_outer_outer_local` |
 | `bbac2b433` | `CODEGEN_param_used_only_as_method_receiver` | already fixed; deleted with two pinned tests |
 | `316102957` | `PERF_struct_self_assign_scan_uncached` (uncached self-assign and self-read scans) | fixed: both scans memoized; pinned by `test_perf_self_assign_scan.py` |
+| 2026-10-30 | `CODEGEN_generator_lambda_expr_unsupported` (lambda shapes in a compiled generator; every row closed, last two residue rows verified: a bool-then-float rebound yield is an honest refusal, `r = 2.5` after `False` is correct) and `COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil` (`fsutil.py` now builds, links and runs; `iter_files`/`walk_tree`/`glob_tree`/`process_filenames` match CPython) | fixed; the dynamic call/iteration layer for compiled generators landed with it |
 | `b3b14a597` | `_walk_ast` re-scan blowup for large transitive-import graphs | closed 2026-10-29: the AST rescan is fixed and pinned. Its uncached self-assign scan was memoized in `316102957`. Its other cost, wall clock's per-level generated-C text join, has no doc in the tree now. |
 
 ## Lessons that outlived their docs

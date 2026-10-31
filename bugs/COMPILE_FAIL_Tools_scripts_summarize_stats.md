@@ -551,8 +551,7 @@ yield Section(
 
 Two `lambda *_: <captured list>` literals passed as plain call
 arguments inside the generator body — the exact same, already-
-diagnosed gap as `bugs/hard/CODEGEN_generator_lambda_expr_unsupported.
-md`: `_cpp_expr` (the coroutine `.cpp` emission path) has no
+diagnosed gap as `the (since-fixed) compiled-generator lambda-expression bug`: `_cpp_expr` (the coroutine `.cpp` emission path) has no
 `LambdaExpr` case at all, and that doc's own investigation already
 established this needs a new "callable value" declared-type category
 (not a narrow widening — see that doc's "Why this is feature-sized,

@@ -43,6 +43,7 @@ import mojo.middle.exprtypes as gimple_exprtypes
 import mojo.middle.itcursor as itc
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
+import mojo.backend_gimple.emit_infra as ginf
 import mojo.backend_gimple.emit_calls as ggc
 
 # Re-export shared helpers from mojo.middle.loops_shared via explicit imports.
@@ -719,14 +720,28 @@ def _boxed_list_ptr(gen, lst_type: str, lst_val: str) -> str | None:
     `double` element against a `char *` dict key, "pointer value used where a
     floating-point was expected").
 
+    A list of INTS needs a second, separate source of evidence: an `int64_t`
+    in `_elem_types` is the "nothing known" default, so a list whose element
+    type is int is not distinguishable there. A coroutine body's list param
+    whose unanimous call-site contract is int (`_coro_int_list_params`, the
+    same per-body table `_coro_str_params` is) is that evidence, and it
+    takes the same skip with `int64_t` as the element type. Without it the
+    dict arm declared the loop variable `char *` and `t += x` printed a
+    pointer's bits (`async def total(*xs)`, `gen_add([4, 5])`).
+
     Returns None for the untyped case, and the caller falls back to emitting
     the dispatch exactly as before.
     """
     if lst_type not in ('int', 'int64_t', 'void *'):
         return None
-    elem = gen._elem_of(lst_val)
-    if not elem or elem == 'int64_t':
-        return None
+    _int_lists = getattr(gen, '_coro_int_list_params', {}).get(
+        getattr(gen, 'current_func_name', None), ())
+    if _as_str(lst_val) in _int_lists:
+        elem = 'int64_t'
+    else:
+        elem = gen._elem_of(lst_val)
+        if not elem or elem == 'int64_t':
+            return None
     lp = gen._coerce_to_type('int64_t', 'MojoList *', gen._to_int64(lst_type, lst_val))
     gen._elem_types[lp] = elem
     return lp
@@ -814,8 +829,10 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                     gen._emit(f"  {cvn} = {av};")
                 else:
                     gen._safe_coerce_emit(at, gen.var_types[vn], av, cvn)
+            _bscope = ginf._open_block_scope(gen)
             for s in node.body:
                 gen.gen_stmt(s)
+            ginf._close_block_scope(gen, _bscope)
         return
 
     var = node.target
@@ -3804,8 +3821,17 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
         gen._boxed_container_vals.add(val)
     if is_tuple_target:
         gen._emit_generator_tuple_unpack(var_names, tuple_slot_ctypes, val, tuple_slot_nested)
+        # A generator that iterates a kind-mixed list parameter yields BOXES in
+        # its int64_t slots (see cpp_core's `_cpp_mixed_list_params` read), so
+        # the unpacked names must resolve them at each use.
+        if api.get('mixed_slots'):
+            for _mvn in var_names:
+                if gen.var_types.get(_mvn) == 'int64_t':
+                    gen._boxed_vals.add(gen._cname(_mvn))
     else:
         gen._emit(f"  {gen._cname(var)} = {val};")
+        if api.get('mixed_slots') and gen.var_types.get(var) == 'int64_t':
+            gen._boxed_vals.add(gen._cname(var))
     gen.loop_stack.append((bb_post, bb_after))
     gen._gen_loop_body(body)
     gen.loop_stack.pop()

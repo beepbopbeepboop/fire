@@ -185,3 +185,185 @@ committed). The mechanism is still unnamed. The owed step is unchanged: the
 mailbox full-closure probe with the `_lower_IdentExpr` dump (see the
 2026-10-29 round above). Nothing in this round changes behaviour, so no code
 or test lands.
+
+### Round 2026-10-30 — partial fix: accessor-read api carry (light worker; no full-closure run)
+
+**Landed (commit 5161214e9):** `_lower_IdentExpr`'s `_imported_global_accessors`
+early-return arm (`mojo/backend_gimple/emit_exprs.py:538-548`) now copies
+`_global_generator_api[name]` onto the accessor read-back temp, unless the name
+is poisoned. This is the same carry the global-read arm already does at
+emit_exprs.py:797-799, so the two arms agree.
+
+**Test:** `test_regress_coro_close_closure.py` drives the arm directly on a
+`GimpleGen` with an accessor and a recorded api. Run under
+`python3 tools/memslot.py --gb 8 --label unit -- python3 test_regress_coro_close_closure.py`:
+- with the fix: `PASS` (both cases).
+- with the pre-fix `emit_exprs.py` (`git show 5161214e9^:...`): fails with
+  `accessor read _t1 lost the api: None`.
+- poisoned name: no carry, as the trust model requires.
+
+The earlier version of this test, a `from sib import _coro` + idiom
+compile, passed on the pre-fix code too, so it was replaced.
+
+**NOT established:** that this arm is the cause of the full-closure refusal.
+Probes, all with `compile_to_gimple_with_cpp(do_imports=True)` in fresh temp
+dirs under `memslot --gb 8`, COMPILE on both the fixed and the pre-fix code:
+- idiom in a sibling, `from sib import _coro` in an importer (accessor
+  registered, the read is not shadowed) — the accessor is registered but the
+  read has no api to lose;
+- sibling exporting `_coro = 5` plus a generator store in another module
+  (accessor read, api recorded) — COMPILES; the accessor ctype is `int64_t`;
+- sibling exporting `_coro = _g()` (a generator global) and an importer that
+  does `next(_coro)` — refused for a different reason: "`next(...)` on
+  next(IdentExpr) (receiver typed `int64_t`)".
+
+The last one is the finding that matters. For a generator-held global exported
+by a sibling, the accessor's C type is `int64_t`, not `MojoGenerator *`, so
+the refusal in `emit_methods.py:1419-1428` (which needs a `MojoGenerator *`
+receiver) cannot fire through this arm at all. The carry is therefore only
+reachable when the export's `c_return_type` is `MojoGenerator *`, and no
+small-closure probe produced that. The `c_return_type` default
+(`emit_infra.py:1603`, `info.get('c_return_type', 'int64_t')`) and the local
+sibling export typing (`_local_sibling_module_exports`) are the next things to
+read. If a generator-held global is exported as `int64_t`, that export typing
+is the real defect, and the carry above is a correct but unexercised change.
+
+**Still owed (heavy, integrator):** the four rows' full-closure reject
+censuses (socket 56 / parsing 48 / zipfile 62 / mailbox 66) have not been
+re-run, so it is unknown whether this commit moves any of them. The mailbox
+full-closure probe with the `_lower_IdentExpr` dump from the 2026-10-29 round
+is still the step that decides it; add `gen._imported_global_accessors.get('_coro')`
+and its C type to that dump, since that is the one value this round showed
+matters.
+
+### Round 2026-10-30b — partial fix: accessor read is typed as a generator (light worker)
+
+**Landed:** the `_imported_global_accessors` arm of `_lower_IdentExpr`
+(`mojo/backend_gimple/emit_exprs.py`, ~538-560) now, when the name has a
+recorded, unpoisoned generator api, unboxes the accessor word through
+`void *` into a `MojoGenerator *` read temp (the same unboxing the own-global
+read arm does at emit_exprs.py ~921-928) and returns ctype `MojoGenerator *`.
+Before, it returned the export's declared type (`void *`), so `.close()`/`next()`
+refused with "receiver typed `void *`" even though the api had been carried.
+Test: `test_regress_coro_close_closure.py::test_accessor_read_of_generator_is_typed_as_generator`
+(FAILS on HEAD with `accessor read _t1 typed void *`, PASSES with the fix).
+`test_gimple_generator_runner.py`: 297 pass / 8 fail, the SAME 8 on HEAD
+(`generator_explicit_call_arguments_still_resolve`, ... see
+`CODEGEN_genexp_over_annotated_param_refused.md`,
+`CODEGEN_generator_function_Lib_os.md`), so none is caused by this change.
+
+**Measured this round (not a fix):**
+- The defining module's OWN accessor for a generator-held global is
+  `int64_t root__mojo_global_get__coro(void)` (`var _coro = _g()` in a sibling,
+  compiled alone, `do_imports=True`). The boxed-word convention holds there.
+- The export scan (`module_loader.load_module_from_path`) types a
+  `var NAME = <call>` line as `void *` (module_loader.py ~1262-1270), so an
+  importer declares the accessor `void *`, not the real handle type. The scan
+  reads ONLY `var` lines: a plain `NAME = _g()` in a `.py`/`.mojo` sibling is
+  not exported at all (no accessor), and the importer reads it typed `int64_t`.
+- **Cross-module api transport is absent in the small closure.** For both
+  sibling shapes (`var _coro = _g()` and plain `_coro = _g()`), the importer's
+  gen does NOT record `_global_generator_api['_coro']` (checked at each
+  `_lower_IdentExpr('_coro')`: `api_in=False`). So the importer never learns the
+  global is a generator, and the refusal stays `void *` / `int64_t`
+  ("`next(...)` on next(IdentExpr) (receiver typed ...)"). The accessor arm
+  fix therefore does not fire for these shapes; it fires only when the api is
+  already in the importer's gen-wide table (a defining module compiled into
+  the same gen, plus an accessor registered for the name).
+- **Stdlib name poisoning is ruled out by grep.** In the Python 3.14.6 stdlib
+  (`/Users/mrs/net/Python-3.14.6/Lib`), `_coro` is bound at module scope ONLY in
+  `_collections_abc.py:94-95` (`async def _coro(): pass` / `_coro = _coro()`);
+  every other hit is a local or an attribute. So no other stdlib module can
+  poison the name through `_write_dest`/emit_infra.py:3689 in the rows'
+  closures. (Grep of the closure's import graph, not a closure run.)
+
+**Next step (unchanged in shape, now narrower):** the closure refusal is still
+unnamed, and the owed heavy probe (mailbox, `do_imports=True`, cold store, the
+`_lower_IdentExpr` dump of `_global_generator_api`, `_global_generator_api_poisoned`,
+`_imported_global_accessors`, `_captures`, `_narrowed_exprs`, `_boxed_mut_locals`,
+`_in_toplevel_gen`, `_async_api`, `_unsupported_generator_names`) is still the
+decider. Before running it, the designable gap is the cross-module transport:
+if the closure probe shows `_global_generator_api` lacks `_coro` in the reading
+gen, the fix is to carry generator-ness through the export (module_loader's
+`var` export, plus the defining accessor's C type kept consistent with the
+export's declared type), not in the read arm. Full-gate verdict needed on the
+four rows' reject censuses (56/48/62/66) before this lands as a closure fix.
+
+### Round 2026-10-31 — planning round (light worker; no full-closure run; no code change)
+
+**State of the landed partials.** `5161214e9`, `7c2224ee9` and `76672d9e0` are
+on master. `test_regress_coro_close_closure.py` passes on HEAD
+(`python3 tools/memslot.py --gb 8 --label coro-close -- python3 test_regress_coro_close_closure.py`
+→ `PASS: accessor-read generator api carry`, peak 0.1 GB). Those commits fix
+the accessor-read arm but are NOT established as the closure cause (see the
+2026-10-30 rounds).
+
+**What the api record is (read, not run).** `_note_global_generator_store`
+(emit_stmts.py:1001) stores `gen._generator_var_api[v]`, whose `'base'` key is
+the C symbol family of one compiled generator. The consumers build calls from
+it: `cpp_core.py:1590-1605` / `:1752` / `:7986` (`{base}_start`, resume
+dispatch), and `cpp_async.py:1209-1210` (`{base}_start` as a function address).
+So an api is only meaningful in a translation unit that can see
+`{base}_start` and its resume symbols. A cross-module carry is therefore not
+just a type/table fix: the importer also needs those symbols declared, and the
+defining module must emit them with external linkage.
+
+**Decision the next round needs (still the owed heavy probe, integrator).**
+Run ONE row (mailbox, `do_imports=True`, cold store) with the
+`_lower_IdentExpr('_coro')` dump from the 2026-10-29 round. Add
+`gen._generator_var_api` keys and the `base` of any hit, and record WHICH gen
+(`gen.module_name`) performs each `_coro` read. Then:
+
+- If the reading gen has no `_global_generator_api['_coro']` and the defining
+  module's gen is a different object: the cross-module transport is the cause.
+  Next round lands it as: (a) the defining module's `_note_global_generator_store`
+  result is exported in its module_loader entry (`kind: 'global_var'` gains a
+  `generator_base` / `value_ctype` field, filled from the compiled gen, not
+  the text scan); (b) the importer's `_emit_imported_global_accessors` seeds
+  `_global_generator_api` from that field and declares the `{base}_start` /
+  resume symbols extern (the same `#ifndef` guard pattern as the
+  `std`-import extern block in `emit_infra.py` ~1520-1535); (c) poisoning
+  still applies to any second writer. Test: two-module fixture in
+  `test_gimple_generator_runner.py::run_module_global_generator_tests`, the
+  idiom in the entry, compile + run, output matched to CPython.
+- If the reading gen HAS the api and the refusal still fires: the loss is
+  inside the closure's read path, not the transport. The dump names which of
+  `_captures` / `_narrowed_exprs` / `_boxed_mut_locals` / `_tagged_dyn_src`
+  returned early; that arm then carries the api (the 2026-10-30 fix is the
+  template).
+- If `_unsupported_generator_names` holds `_coro`: the defining `async def` was
+  skipped by relaxed gating (module_gen.py:11103-11127); the fix is to keep it
+  compiled when eligible, not to carry anything.
+
+**Gate verdict owed.** The four rows' reject censuses (socket 56 / parsing 48 /
+zipfile 62 / mailbox 66) must be re-measured after whichever branch lands; a
+fix is progress only if the census drops or the moved modules' values match
+CPython.
+
+### Round 2026-10-31b — the owed probe lands as a tool (light worker; no full-closure run)
+
+**Landed:** `tools/probe_coro_close_refusal.py`. It wraps
+`emit_exprs._lower_IdentExpr` for one name (default `_coro`) and prints one
+`PROBE` line per read with every table the 2026-10-29 decision list names
+(`_global_generator_api`, `_global_generator_api_poisoned`,
+`_imported_global_accessors`, `_captures`, `_narrowed_exprs`,
+`_boxed_mut_locals`, `_in_toplevel_gen`, `_async_api`,
+`_unsupported_generator_names`), plus `gen.module_name`, the returned ctype/temp
+and the carried api's base. The wrapper only observes; the compile is unchanged.
+`test_regress_coro_close_closure.py::test_probe_observes_read_without_changing_it`
+pins that the wrapped read returns the real arm's result.
+
+**Verified:** `test_regress_coro_close_closure.py` PASS (direct run, peak 0.0 GB);
+a two-module smoke (`import sib` + idiom in the entry) compiles OK under the
+probe and prints the expected `PROBE` line (`api_table=True`, carried base
+`__mgco__c2`).
+
+**The owed run (integrator, heavy — one row only):**
+
+    python3 tools/memslot.py --gb 8 --label probe-coro -- \
+        python3 tools/probe_coro_close_refusal.py <row entry .py> --do-imports
+
+Use the mailbox row's entry (cold store). The last `PROBE` line before
+`COMPILE: REFUSED` is the read that lost the api; read its flags against the
+2026-10-31 decision list. This round does not move the reject census and changes
+no codegen behaviour.

@@ -101,8 +101,14 @@ def _yield_shim(kind: str) -> str:
     # int/bool/pointer all go through the int64_t yield -- _emit_call coerces
     # a char*/pointer arg to int64_t via the registered param types, and a
     # `_Bool` promotes to its own 0/1 losslessly. Only a genuine double needs
-    # the bitcast variant.
-    return '__mojo_coro_yield_d' if kind == 'd' else '__mojo_coro_yield_i'
+    # the bitcast variant; pointer needs the pointer-typed shim so the C
+    # argument is not cast to int64_t (which yields the pointer address as
+    # an integer rather than the pointed-to value).
+    if kind == 'd':
+        return '__mojo_coro_yield_d'
+    if kind == 'p':
+        return '__mojo_coro_yield_p'
+    return '__mojo_coro_yield_i'
 
 
 def enabled() -> bool:
@@ -494,6 +500,10 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
         ek = None
         if isinstance(it, N.IdentExpr):
             v = env.get(it.name)
+            # A star-param (`*ws`) is recorded as `*ws` in env, but the loop
+            # iterates `ws`; try the prefixed spelling too.
+            if v is None:
+                v = env.get('*' + it.name)
             if isinstance(v, tuple) and v[0] == 'list':
                 ek = v[1]
             elif v == 'p':
@@ -607,7 +617,11 @@ def _yield_kind(expr, env: dict | None = None) -> str | None:
         return 'i'
     if isinstance(expr, N.IdentExpr):
         v = env.get(expr.name)
-        return v if isinstance(v, str) else None
+        if isinstance(v, str):
+            return v
+        if isinstance(v, tuple) and v[0] == 'list':
+            return v[1]
+        return None
     if isinstance(expr, N.MemberExpr) and isinstance(expr.obj, N.IdentExpr) \
             and expr.obj.name == 'self':
         return env.get(f'self.{expr.member}')
@@ -827,7 +841,7 @@ def _generator_value_kind(fn: N.FunctionDef,
             # `yield from _iter_files(root, suffix, relparent)`) resolves
             # exactly as a direct sibling delegation does -- fsutil's
             # `iter_files_by_suffix`, see
-            # bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md.
+            # the (since-fixed) c_common/fsutil.py compile failure.
             dk = delegated(n.value, fn) if delegated is not None else None
             kinds.add(dk)
             if dk == 'tuple':
@@ -978,7 +992,7 @@ def _lambdas_ok(fn: N.FunctionDef) -> bool:
     `_lambda_shape_ok` above now admits all of them. The walk stays as the
     chokepoint that measurement is attached to: the next shape to be measured
     belongs in that table, and this is where a refusal for it would live.
-    (bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md)"""
+    (the (since-fixed) compiled-generator lambda-expression bug)"""
     for n in _walk(fn):
         if isinstance(n, N.LambdaExpr):
             if not _lambda_shape_ok(n):
@@ -1153,7 +1167,7 @@ def _sibling_gen_kind(iterable, fn: N.FunctionDef = None):
     more CALL form: a HIGHER-ORDER PARAMETER whose declared default names
     one of this module's generators — `def walk_tree(root, *, walk=
     _walk_tree)` doing `for filename in walk(root):`, the shape
-    `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md` records as
+    `the (since-fixed) c_common/fsutil.py compile failure` records as
     fsutil's real blocker. The default is resolved to its generator and the
     kind read from THAT, exactly as for a direct sibling call; a parameter
     whose default is not a module generator (or is not a default at all —
@@ -1257,7 +1271,7 @@ def _default_is_faithful_literal(node) -> bool:
     would compile the generator and then pad a NULL function pointer into
     the call — trading a refusal for a crash. The ordinary (non-generator)
     path has no such gate and does resolve those defaults correctly; see
-    `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md`.
+    `the (since-fixed) c_common/fsutil.py compile failure`.
     """
     if node is None:
         return False
@@ -1296,7 +1310,7 @@ def _unrepresentable_kwonly(fn: N.FunctionDef) -> list:
     `iter_files_by_suffix(root, suffixes, relparent=None, *, walk=
     walk_tree, _iter_files=iter_files)` were all rejected before the real
     blocker (CALLING the parameter) was ever reached — see
-    `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md`.
+    `the (since-fixed) c_common/fsutil.py compile failure`.
 
     The gate that replaces it asks the question that actually matters: can
     each omitted argument be filled with the RIGHT value? A keyword-only
@@ -1626,6 +1640,21 @@ def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
         return False, 'lambda with *args/**kwargs or a default parameter'
     if not _property_call_ok(fn, struct_name, struct_def, prop_names):
         return False, 'calls the result of a @property getter (v0)'
+    if struct_name is None and getattr(fn, 'name', None) in _VALUE_USED_FUNCS:
+        return False, ('used as a function value (a by-value call binds '
+                       'keywords through the runtime signature only the C++ '
+                       'unit registers)')
+    # A generator that CALLS one of its own parameters consumes a function value
+    # whose backend it cannot know; the handle layouts of the two backends
+    # differ, so every generator that flows as a value and every generator that
+    # consumes one are on the C++ path, which drives the handle dynamically.
+    if struct_name is None:
+        _pnames = {p[0] for p in fn.params}
+        for _n in _walk(fn):
+            if (isinstance(_n, N.CallExpr) and isinstance(_n.func, N.IdentExpr)
+                    and _n.func.name in _pnames):
+                return False, ('calls a parameter (a function value: driven '
+                               'dynamically by the C++ path)')
     params = fn.params
     _is_cm = False
     _is_static = False
@@ -3148,6 +3177,36 @@ def _rewrite_async_gen_stmts(stmts: list, cvar: str) -> list:
     return out
 
 
+def _local_param_name(pname) -> str:
+    """The body-local name a coroutine prologue binds a parameter to.
+
+    The parser keeps a `*args` / `**kwargs` parameter's star in its name. Left
+    in place, the C emitter reads a leading `*` as a dereference and declares
+    `int64_t *xs; *xs = ...`, a write through an uninitialised pointer that
+    the body then never reads back (the packed list is lost). The body refers
+    to the parameter by its bare name, so the local takes the bare name too."""
+    return _cm_as_str(pname).lstrip('*')
+
+
+def _star_slot(real_params, lead: int) -> int | None:
+    """C-signature slot of a coroutine's `*args` parameter, or None.
+
+    `real_params` is the `(name, annotation)` list the `_start` trampoline
+    takes after its `lead` receiver slots (`self`/`cls`; 0 for a plain
+    function), so the returned index is the one a CALLER's argument list
+    must line up with. The `*args` parameter reaches the frame as ONE
+    `MojoList *` slot holding every positional argument from there on, so
+    the call site packs the trailing positionals into it (see
+    `_emit_generator_start_call`) and needs this index to know where that
+    packing starts. `**kwargs` is not a star slot: its packing is keyed by
+    `_func_kwargs_slot`."""
+    for _i, (_pn, _pa) in enumerate(real_params):
+        _pn = _cm_as_str(_pn)
+        if _pn.startswith('*') and not _pn.startswith('**'):
+            return lead + _i
+    return None
+
+
 def _async_receiver_kind(fn, is_method: bool) -> str:
     """The receiver slot a compiled `async def` METHOD takes -- 'self', 'cls'
     or '' -- by the same single rule the generator meta uses
@@ -3183,9 +3242,9 @@ def _async_method_setup(fn, base, struct_name):
                 func=N.SubscriptExpr(obj=N.IdentExpr(name='UnsafePointer'),
                                      index=N.IdentExpr(name=pann)),
                 args=[slot])
-            prologue.append(N.VarDecl(name=pname, type_ann=pann, value=val))
+            prologue.append(N.VarDecl(name=_local_param_name(pname), type_ann=pann, value=val))
         else:
-            prologue.append(N.VarDecl(name=pname, type_ann=None, value=slot))
+            prologue.append(N.VarDecl(name=_local_param_name(pname), type_ann=None, value=slot))
     body_params = [(_CVAR, 'Int')]
     if is_method:
         body_params.append(('self', struct_name))
@@ -3216,7 +3275,7 @@ def _mark_coro_body(body_fd):
     body there loses the captured value's real type: `lambda: some_string`
     yielded from a generator came out as the pointer's bit pattern, and
     under -Werror=int-conversion that took the whole self-host build down
-    (see bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md).
+    (see the (since-fixed) compiled-generator lambda-expression bug).
 
     Defined once here and called from all three body-synthesis sites,
     rather than being spelled out at each: the reasoning is long enough
@@ -3278,10 +3337,14 @@ def _mark_coro_param_elem_kinds(body_fd, real_params, env):
     `emit_funcs.gen_func`), so the loop takes the list path directly.
     See CODEGEN_coro_yield_kind_unresolved_callsite ("Item 8").
 
-    Only LIST params are recorded, and only a scalar element kind: a
-    container-of-container has no single C type either (it needs the nested
-    slot the ordinary lowering carries in `_nested_elem_types`), and an
-    `int64_t` element is the default the loop target assumes anyway.
+    Only LIST params are recorded. A container-of-container has no single C
+    type either (it needs the nested slot the ordinary lowering carries in
+    `_nested_elem_types`), so it is not in `kinds`. An `int64_t` element is
+    NOT a default here: the backend's loop lowering must be told it is a
+    list of ints, because "nothing known" and "known to be ints" take
+    different paths through the dict-or-list dispatch. Those go in
+    `_mojo_coro_param_int_lists` instead of `kinds` (see the comment on
+    `_boxed_list_ptr`), so `_elem_types` keeps its meaning of "not known".
 
     Part of the same contract as `_mark_coro_body` and marked the same way
     (an attribute, not a name-suffix guess) for the same reason: the backend
@@ -3289,17 +3352,24 @@ def _mark_coro_param_elem_kinds(body_fd, real_params, env):
     look like" without a parallel naming convention to keep in sync."""
     kinds: dict = {}
     str_params: list = []
+    int_lists: list = []
     for pname, _pann in real_params:
         v = env.get(_cm_as_str(pname))
+        # Keyed by the BODY's local name (`_local_param_name`): a `*args`
+        # parameter's raw name carries its star, and the body never does.
         if isinstance(v, tuple) and len(v) == 2 and v[0] == 'list' \
                 and isinstance(v[1], str) and v[1] in _KIND_CTYPE:
             ct = _KIND_CTYPE[v[1]]
-            if ct != 'int64_t':
-                kinds[_cm_as_str(pname)] = ct
+            if ct == 'int64_t':
+                int_lists.append(_local_param_name(pname))
+            else:
+                kinds[_local_param_name(pname)] = ct
         elif v == 'p':
-            str_params.append(_cm_as_str(pname))
+            str_params.append(_local_param_name(pname))
     if kinds:
         body_fd._mojo_coro_param_elem_kinds = kinds
+    if int_lists:
+        body_fd._mojo_coro_param_int_lists = int_lists
     if str_params:
         body_fd._mojo_coro_param_str_params = str_params
     return body_fd
@@ -3322,6 +3392,7 @@ def _lower_one_async_gen(fn: N.FunctionDef, meta: list, base: str | None = None,
         'is_async_gen': True, 'receiver': _async_receiver_kind(fn, is_method),
         'base': base, 'body_name': body_name,
         'params': c_params,
+        'star_slot': _star_slot(real_params, len(c_params) - len(real_params)),
         'nargs': len(real_params), 'value_ctype': 'int64_t', 'value_kind': 'i',
         'tuple_slot_ctypes': None,
         'no_wd_forward': _base_is_channel_free(base),
@@ -3347,11 +3418,17 @@ def _lower_one_async(fn: N.FunctionDef, meta: list, base: str | None = None,
     body_fd.is_generator = False
     body_fd.is_async = False
     body_fd = _mark_coro_body(body_fd)
+    # The same cross-call element contract a generator body gets (see
+    # `_lower_one`): an `async def` reads its list params through the same
+    # untyped int64_t slots, so without it `for x in xs:` over an int list
+    # param declared the loop variable through the dict-or-list dispatch.
+    body_fd = _mark_coro_param_elem_kinds(body_fd, real_params, _static_env(fn, struct_def))
     meta.append({
         'name': _cm_as_str(fn.name), 'struct': struct_name, 'is_method': is_method, 'is_async': True,
         'receiver': _async_receiver_kind(fn, is_method),
         'base': base, 'body_name': body_name,
         'params': c_params,
+        'star_slot': _star_slot(real_params, len(c_params) - len(real_params)),
         'nargs': len(real_params), 'value_ctype': _KIND_CTYPE[kind], 'value_kind': kind,
         'tuple_slot_ctypes': None,
         'no_wd_forward': _base_is_channel_free(base),
@@ -4071,7 +4148,29 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
             _kw_names.add(_p)
         _star_i = None
         _has_kwargs_spread = False
+        # The `*args` parameter's index, if any. Every positional argument
+        # from there on is one ELEMENT of that list, not a parameter of its
+        # own, so it constrains the list's element kind. Recorded as
+        # ('list', kind) -- the same entry a list literal argument records --
+        # so the body's loop target and yield slot are typed from the
+        # unanimous element kind. A container element, or one whose kind is
+        # not statically known, poisons the slot (a refusal, not a guess).
+        _star_pi = _star_slot(pinfo, 0)
         for i, a in enumerate(node.args):
+            if _star_pi is not None and i >= _star_pi:
+                pname, pann = pinfo[_star_pi]
+                if not _unannotated(pann):
+                    break
+                if isinstance(a, N.UnaryOp) and a.op in ('*', '**'):
+                    if a.op == '*':
+                        _star_i = i
+                    else:
+                        _has_kwargs_spread = True
+                    continue
+                _ek = _argkind(a, cenv)
+                slot.setdefault(pname, set()).add(
+                    ('list', _ek) if isinstance(_ek, str) else None)
+                continue
             if i >= len(pinfo):
                 break
             pname, pann = pinfo[i]
@@ -4306,6 +4405,39 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
     _classify()
 
 
+# Names of this module's top-level functions referenced as VALUES (an
+# identifier that is not the callee of a call): passed, stored, compared, used
+# as a parameter default. A generator among them is dispatched through its
+# `<base>_start` address by code that does not know its signature, which the
+# C++ unit alone registers with the runtime (`mojo_gen_sig_register`), so the
+# stack-switch backend declines it. Per-lower() lifetime, like `_PARAM_NAMES`.
+_VALUE_USED_FUNCS: set = set()
+
+
+def _scan_value_used_functions(stmts) -> None:
+    _VALUE_USED_FUNCS.clear()
+    fn_names = {s.name for s in stmts if isinstance(s, N.FunctionDef)}
+    if not fn_names:
+        return
+    callee_ids = set()
+    refs = []
+    for n in gimple_exprtypes._walk_ast(stmts):
+        if isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr):
+            callee_ids.add(id(n.func))
+        elif isinstance(n, N.IdentExpr) and n.name in fn_names:
+            refs.append(n)
+    for n in refs:
+        if id(n) not in callee_ids:
+            _VALUE_USED_FUNCS.add(n.name)
+    # ...and a function named as a parameter DEFAULT (`def f(x, *, walk=leaf)`),
+    # which is a value the callee dispatches through without ever naming it.
+    for n in gimple_exprtypes._walk_ast(stmts):
+        if isinstance(n, N.FunctionDef):
+            for dv in (getattr(n, 'param_defaults', None) or {}).values():
+                if isinstance(dv, N.IdentExpr) and dv.name in fn_names:
+                    _VALUE_USED_FUNCS.add(dv.name)
+
+
 def lower(stmts: list, closure_stmts=(),
           module_name: str | None = None) -> tuple[list, list]:
     """Returns (new_stmts, coro_meta). coro_meta entries are dicts:
@@ -4325,6 +4457,7 @@ def lower(stmts: list, closure_stmts=(),
     _STRUCT_NAMES.clear()
     _UNTHREADABLE_NESTED_ASYNC_GENS.clear()
     _STRUCT_NAMES.update(s.name for s in stmts if isinstance(s, N.StructDef))
+    _scan_value_used_functions(stmts)
     if not enabled():
         # The C++ backend (`MOJO_CORO=cpp`, the escape hatch) lowers nested
         # async defs itself and never asks this module to hoist anything --
@@ -5817,12 +5950,12 @@ def _lower_one(fn: N.FunctionDef, meta: list,
     prologue = []
     for i, (pname, _pann) in enumerate(real_params):
         if param_kinds[i] == 'd':
-            prologue.append(N.VarDecl(name=pname, type_ann='Float64',
+            prologue.append(N.VarDecl(name=_local_param_name(pname), type_ann='Float64',
                                       value=_call('__mojo_gen_arg_d',
                                                   [_c_ident(_CVAR),
                                                    N.IntLiteral(value=arg_base + i)])))
         else:
-            prologue.append(N.VarDecl(name=pname, type_ann=None,
+            prologue.append(N.VarDecl(name=_local_param_name(pname), type_ann=None,
                                       value=_call(ARG_SHIM, [_c_ident(_CVAR),
                                                              N.IntLiteral(value=arg_base + i)])))
 
@@ -5861,6 +5994,7 @@ def _lower_one(fn: N.FunctionDef, meta: list,
         'base': base,
         'body_name': body_name,
         'params': c_params,
+        'star_slot': _star_slot(real_params, len(_lead)),
         'nargs': len(real_params),
         'value_ctype': _KIND_CTYPE[kind],
         'value_kind': kind,
@@ -6274,6 +6408,10 @@ def register(gen, meta: list) -> None:
             # and GimpleGen._cpp_yield_from's `yield from cls.<gen>(...)`
             # branch needs it to get the call arity right.
             'receiver': m['receiver'],
+            # C-signature slot of the `*args` parameter (None if none): the
+            # call site packs the positional arguments from there on into one
+            # MojoList * -- see _star_slot.
+            'star_slot': m.get('star_slot'),
             'tuple_slot_ctypes': m.get('tuple_slot_ctypes'),
             'tuple_slot_nested': m.get('tuple_slot_nested'),
             'has_return_value': True,

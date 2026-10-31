@@ -56,6 +56,7 @@ from mojo.middle.types import _BOXED_CONTAINER_CTYPES
 # emit_calls the way its other callers reach it, rather than imported here, so
 # there is exactly one spelling of it in the tree.
 from mojo.middle.calls_shared import _callable_value_symbol
+from mojo.middle.calls_shared import _RUNTIME_CALLABLE_VALUES as _RUNTIME_CALLABLE_VALUES_NAMES
 from mojo.middle.calls_shared import _py_box_expr
 
 def _lower_strided(gen, node, store: bool):
@@ -537,7 +538,28 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
     # every other special-case branch in this method.
     if name in gen._imported_global_accessors and name not in gen.var_types:
         _acc_ctype, _acc_csym = gen._imported_global_accessors[name]
-        t = gen._call_expr(_acc_ctype, _acc_csym, [])
+        # A module-level generator/coroutine held in a global that is read
+        # through an imported accessor (full-closure case where another
+        # module registered the accessor) must still carry its API onto
+        # the fresh read-back temp, else .close() / next() refuse.
+        _gen_api_known = (name in gen._global_generator_api
+                          and name not in gen._global_generator_api_poisoned)
+        if _gen_api_known and _acc_ctype != 'MojoGenerator *':
+            # The export's declared type is the export scan's guess (a
+            # `var NAME = call()` line is typed `void *`), not the handle's
+            # real type, so the read must unbox to `MojoGenerator *` itself.
+            # Same unboxing the own-global read arm below does for a boxed
+            # generator global: the word goes through `void *`, never a
+            # direct int64_t -> pointer assignment.
+            _raw = gen._call_expr(_acc_ctype, _acc_csym, [])
+            _vp = gen._new_val('void *', f'(void *){_raw}')
+            t = gen._new_temp('MojoGenerator *')
+            gen._emit(f'  {t} = (MojoGenerator *){_vp};')
+            _acc_ctype = 'MojoGenerator *'
+        else:
+            t = gen._call_expr(_acc_ctype, _acc_csym, [])
+        if _gen_api_known:
+            gen._generator_var_api[t] = gen._global_generator_api[name]
         return _acc_ctype, t
     # Struct/class type name used as a value (e.g. cls arg) — return zero placeholder
     _BUILTIN_TYPE_NAMES = frozenset({
@@ -1292,7 +1314,36 @@ def _mark_boxed_field_read(gen, struct_name, member, field_type, t) -> None:
         gen._dyn_word_vals.add(t)
 
 
+def _stat_module_constant(gen, node):
+    """`stat.S_IRUSR` & co: the `stat` module's integer constants, resolved at
+    compile time from the host's own `stat` (values are platform ABI, fixed for
+    the build). None unless `node` is `<stat module name>.<UPPER_CASE int>`."""
+    if not (isinstance(node.obj, gimple_ctypes.IdentExpr)
+            and node.obj.name not in gen.var_types
+            and node.member.isupper() and node.member.startswith('S_')):
+        return None
+    _imp = getattr(gen, 'imported_symbols', {}).get(node.obj.name) or {}
+    if node.obj.name != 'stat' and _imp.get('module') != 'stat':
+        return None
+    import stat as _stat_mod
+    _v = getattr(_stat_mod, node.member, None)
+    if isinstance(_v, int) and not isinstance(_v, bool):
+        return _v
+    return None
+
+
 def _lower_MemberExpr(gen, node) -> tuple[str, str]:
+    _sc = _stat_module_constant(gen, node)
+    if _sc is not None:
+        return 'int64_t', gen._new_val('int64_t', f'(int64_t){_sc}')
+    # `os.walk` / `glob.glob` / `glob.iglob` as a VALUE (passed, stored): the
+    # runtime's own function, by address (see calls_shared._callable_value_symbol).
+    if (isinstance(node.obj, gimple_ctypes.IdentExpr)
+            and node.obj.name not in gen.var_types
+            and f'{node.obj.name}.{node.member}' in _RUNTIME_CALLABLE_VALUES_NAMES):
+        _rcv = _callable_value_symbol(gen, node)
+        if _rcv is not None:
+            return _rcv
     # Flow-sensitive `isinstance` narrowing for a MemberExpr receiver
     # (`if isinstance(node.target, IdentExpr): ... node.target.name`). The
     # guarded expression's cast temp was materialised at the `if` — return
@@ -2607,19 +2658,19 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
                                      {'Self': node.obj, struct_name: node.obj})
         return gen.lower_expr(val_ast)
     # Class-level attribute (not an instance field) — redirect to global variable.
-    # Instance reads must consult the instance first (dynamic storage / field
-    # lookup) so an instance write shadows the class attribute; only bare
-    # class-name reads go to the synthesized backing global / per-execution
-    # cell.
+    # A bare class-name read goes to the synthesized backing global / the
+    # current per-execution cell; an instance read goes through the instance
+    # first (its dynamic storage shadows the class attribute), see
+    # `_cattr_instance_read`.
     class_attrs = gen._class_attrs
-    if (struct_name in class_attrs and node.member in class_attrs[struct_name]
-            and isinstance(node.obj, gimple_ctypes.IdentExpr)
-            and node.obj.name == struct_name):
+    if struct_name in class_attrs and node.member in class_attrs[struct_name]:
         gname = class_attrs[struct_name][node.member]
         # Use the actual declared type of the global (stored in _global_var_types)
         gtype = gen._global_var_types.get(gname, 'int64_t')
-        # Bare class-name read goes to the current per-execution cell.
-        t = gmp._cattr_read(gen, gname, gtype)
+        if isinstance(node.obj, gimple_ctypes.IdentExpr) and node.obj.name == struct_name:
+            t = gmp._cattr_read(gen, gname, gtype)
+        else:
+            t = gmp._cattr_instance_read(gen, ov, ot, node.member, gname, gtype)
         return gtype, t
     elif (struct_name in class_attrs and node.member in class_attrs[struct_name]
             and ot.endswith(' *')):
@@ -3621,6 +3672,23 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     still guaranteeing each shared operand is evaluated exactly once —
     re-lowering left_node/right_node here would break that guarantee
     for a side-effecting comparand shared between two links."""
+    # Int / Int is true division: Python and Mojo answer a Float64, never an
+    # integer. The gate is on BOTH operands being plain signed C integers, not
+    # on the joined type: a struct operand (`Scalar[dtype]`, `Path`) whose join
+    # with an int is an integer must keep its own `/`. The first attempt gated
+    # on the join alone, broke std/pathlib/path.mojo and std/simd.mojo, and was
+    # reverted (98043fe81). The `%` floor gate further down uses the same test.
+    #
+    # It is decided HERE, on the operand types as they arrive, and not after the
+    # struct-pointer coercion below: that coercion rewrites a `P *` operand to
+    # `int64_t` (so the struct's `/` is lowered as integer arithmetic on its
+    # pointer), and a gate read after it cannot tell a struct from an int. That
+    # is how `result /= part` in std/pathlib/path.mojo became a double division
+    # of a pointer, which gcc rejects. The `%` gate has the same ordering issue
+    # in principle, but its operands reach it unchanged, so it is left alone.
+    int_true_div = op == '/' and all(
+        t in gimple_ctypes._SCALAR_INT_TYPES and not t.startswith('uint')
+        for t in (lt, rt))
     # A builtin-`bytes` subclass instance (`class _Extra(bytes)`) carries
     # its payload in a hidden `_data: MojoBytes *` field — an inherited
     # binary op (`x == y`, `x + y`, `x % y`, `x * n`) operates on that
@@ -4617,6 +4685,8 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         rt, rv = gen._resolve_container_kind(rt, rv)
     c_op      = gimple_ctypes._BIN_OPS.get(op, op)
     res_type  = '_Bool' if op in gimple_ctypes._CMP_OPS else gimple_ctypes.TypeLattice.join(lt, rt)
+    if int_true_div:
+        res_type = 'double'
 
     # Type system: Check BIT_WIDTH_PRESERVATION for arithmetic ops
     # `a | b` where either operand is a real MojoDict* is Dict.__or__ (key
@@ -4691,7 +4761,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # casts below rebind `lv`/`rv` to fresh temps, so without a record carried
     # across them the tail would see two unknown operands and mark nothing.
     # Cast operands to result type to satisfy GIMPLE strict type checking
-    arith_type = gimple_ctypes.TypeLattice.join(lt, rt)  # common type for arithmetic
+    arith_type = 'double' if int_true_div else gimple_ctypes.TypeLattice.join(lt, rt)  # common type for arithmetic
     if lt != arith_type and arith_type not in ('_Bool',) and not arith_type.endswith(' *'):
         ct = gen._new_temp(arith_type)
         gen._safe_coerce_emit(lt, arith_type, lv, ct)
@@ -6072,17 +6142,6 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
     # those slots correctly and the row would buy nothing.
     _kinds = _literal_slot_kinds(gen, lowered)
     _has_spread = any(_is_star_spread(_el) for _el, _et, _ev in lowered)
-    # A HETEROGENEOUS scalar literal's per-slot kinds are also a compile-time
-    # fact about THIS value, so they go in `gen._struct_slot_kinds` beside the
-    # `struct.unpack` and returned-literal rows. `_list_repr_fn` and the
-    # literal-index read consult that table before the single list-wide
-    # `_elem_types` ctype, which is `double` for `[1, 2.5]` and so printed
-    # `[1.0, 2.5]` and read the int slot as a double. The runtime row still
-    # travels with the value for every read with no compile-time index. A
-    # spread has no fixed slot count to describe, so it is left to the row.
-    if (not _has_spread and len(set(_kinds)) > 1
-            and set(_kinds) <= set(_LITERAL_SLOT_KIND_LONG)):
-        gen._struct_slot_kinds[t] = [_LITERAL_SLOT_KIND_LONG[_k] for _k in _kinds]
     # A list-of-lists literal whose INNER literal holds strings: the inner list
     # records 'p' (MOJO_KIND_STR) on every slot. A list of strings records no
     # row of its own (see `_literal_needs_kinds`), and with no row a slot reads
@@ -6324,13 +6383,6 @@ def _emit_star_spread(gen, dest: str, et: str, ev: str) -> None:
         ev = gen._coerce_to_type(_as_str(et), 'MojoList *', ev)
     gen._emit_call('void', '', 'mojo_list_extend',
                    [('MojoList *', dest), ('MojoList *', ev)])
-
-
-# The runtime's one-byte kind (`_literal_slot_kinds`) -> `gen._struct_slot_kinds`'
-# long-form spelling. Only the scalar and string kinds are here: a slot that is
-# a container or a None has no long form the static readers understand, so a
-# literal holding one keeps the runtime row alone.
-_LITERAL_SLOT_KIND_LONG = {'i': 'int', 'd': 'double', 's': 'bytes', 'p': 'str'}
 
 
 def _literal_slot_kinds(gen, lowered) -> str:

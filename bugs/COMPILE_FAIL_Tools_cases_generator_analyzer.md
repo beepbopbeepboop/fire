@@ -1,3 +1,17 @@
+## Status (2026-10-29, worktree bug-compile-fail-tools-cases-generator-a — PARTIAL)
+
+Partial fix: `formal/model.py` `match_pattern_kind` now returns
+`"class pattern (type test)"` for positional-capture-only patterns
+(all bare IdentExpr args, no kwargs); `emit_stmts.py` emits the
+`isinstance(subj_ref, C)` guard before refusal, clearing the
+class-pattern blocker for `case parser.InstDef(name):` (line 1136).
+Interpreter `myinterpreter.py` already handles `__match_args__`; compiled
+path binding via `getattr(subj_ref, __match_args__[i])` is the remaining
+step (needs runtime tuple-index emission, not done to avoid silent
+reinterpretation). Regression `test_match_class_pattern_positional.py`
+passes under `fire.py run`; `fire.py build` reaches codegen.
+Family A (`var_decl`, line 723) is unchanged and separate.
+
 # COMPILE_FAIL: Tools/cases_generator/analyzer.py
 
 ## Status 2026-10-29 — the build now stops at a CLASS-PATTERN refusal BEFORE the `var_decl` error; planning guide (round type 3)

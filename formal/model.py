@@ -7126,6 +7126,248 @@ def read_before_store(fn, params: set = None, placed: set = None,
     return found[0] if found else None
 
 
+def _block_stmt_exprs(s) -> list:
+    """The read-position expressions of a statement that is a BLOCK'S OWN
+    statement, as opposed to a statement in one of its arms.
+
+    A block's `stmts` are the straight-line statements it holds plus, for a
+    control-flow block, the control statement ITSELF — whose arms are separate
+    blocks, each visited on their own. So this answers "what does this block's
+    own text read" and deliberately does not descend into arm bodies: a reader
+    that did would attribute a nested arm's read to the enclosing block, and
+    the enclosing block's entry facts are not the arm's.
+
+    The per-kind list mirrors `read_before_store`'s `walk_stmts` read rules —
+    an `AssignStmt`'s TARGET is a store, not a read, and a `VarDecl` without an
+    initialiser reads nothing — because the two must count the same reads: this
+    list decides where a loop target is read in a possibly-unbound state, and
+    `read_before_store` decides whether that read is accepted at all. A graph
+    and a walk that disagree about one read is a check that appears and
+    disappears with which of them ran."""
+    kind = type(s).__name__
+    if kind == "AssignStmt":
+        return [getattr(s, "value", None)]
+    if kind == "AugAssignStmt":
+        return [getattr(s, "target", None), getattr(s, "value", None)]
+    if kind == "VarDecl":
+        return [getattr(s, "value", None)]
+    if kind == "MultiAssignStmt":
+        return [getattr(s, "value", None)]
+    if kind in ("ForStmt", "ComptimeForStmt"):
+        return [getattr(s, "iterable", None)]
+    if kind == "WhileStmt":
+        return [getattr(s, "condition", None)]
+    if kind == "IfStmt":
+        return [getattr(s, "condition", None)]
+    if kind == "MatchStmt":
+        return [getattr(s, "subject", None)]
+    if kind in ("ReturnStmt", "ExprStmt", "RaiseStmt"):
+        return [getattr(s, "value", None)]
+    if kind == "AssertStmt":
+        return [getattr(s, "value", None), getattr(s, "msg", None)]
+    if kind == "DelStmt":
+        return list(getattr(s, "targets", None) or [])
+    return []
+
+
+def _stmt_store_names(s) -> set:
+    """The names one statement STORES — `_cfg_block_defs`'s rules, one
+    statement at a time, so a block's per-statement walk and the block's `defs`
+    cannot disagree about a `VarDecl`'s missing initialiser or a `WithStmt`'s
+    alias. A `del` stores nothing: on this path a bare `del` is a no-op at run
+    time (the image keeps the name's value), which is the same reason the
+    possibly-unbound dataflow above lets a `kills` set contribute nothing."""
+    kind = type(s).__name__
+    if kind in ("AssignStmt", "AugAssignStmt"):
+        return _store_names(getattr(s, "target", None))
+    if kind == "VarDecl":
+        n = getattr(s, "name", None)
+        if isinstance(n, str) and getattr(s, "value", None) is not None:
+            return {n}
+        return set()
+    if kind == "MultiAssignStmt":
+        out: set = set()
+        for t in (getattr(s, "targets", None) or []):
+            out |= _store_names(t)
+        return out
+    if kind == "WithStmt":
+        out = set()
+        for it in (getattr(s, "items", None) or []):
+            a = getattr(it, "alias", None)
+            if isinstance(a, str):
+                out.add(a)
+        return out
+    if kind == "TryStmt":
+        out = set()
+        for h in (getattr(s, "handlers", None) or []):
+            n = getattr(h, "name", None)
+            if isinstance(n, str):
+                out.add(n)
+        return out
+    if kind == "ComptimeVarStmt":
+        return _store_names(getattr(s, "target", None))
+    return set()
+
+
+def loop_bound_flags(fn, params: set = None) -> dict:
+    """`{name: (id(ForStmt), …)}` for the loop targets this function must
+    guard with a runtime bound flag, or `{}`.
+
+    **The question.** `read_before_store` accepts a read of a `for` target
+    after a loop whose emptiness is a run-time fact (`'maybe'`), because
+    refusing would drop `last(4)`-shaped programs CPython runs. The accepted
+    read is still the defect when the range turns out empty: nothing stores
+    the target, so the read answers the caller's leftover. The build cannot
+    decide which way a given call goes, so the EMITTED image has to ask at
+    run time — one flag per flagged name, zero at entry, set by every store of
+    the name (a loop's `init:` is a store, a comprehension's per-element
+    store is a store), and branched on at a read that may be unbound. This
+    reader decides which names that is; the two backends read the same answer
+    from it, so the two architectures flag the same loops.
+
+    **A name is flagged only when all three of these hold of one of its
+    `'maybe'` loops, and the safe direction is the one that says so:**
+
+    1. the target is a single name — a tuple target is not a word this value
+       model can flag, and a `global` target is not this frame's storage at
+       all;
+    2. **every path does NOT store the name before the loop** — the
+       `_definitely_stored` dataflow, the same one `read_before_store` runs,
+       is the reader, so the two cannot answer "is this name bound here"
+       differently. A name every path stored before the loop holds a value on
+       the zero-iteration edge too, so its check would never fire and the
+       flag stays out of the image (which is where the idiomatic
+       `i = 0; for i in range(…)` stays). A name stored on SOME path is
+       flagged, not excluded: the store that path makes is the store that
+       SETS the flag, and the other path is the one the check fires for.
+       The parameters are the dataflow's seed, and that is what keeps a
+       parameter target out for the sharper reason the emitter states — the
+       prologue's argument store is the one store that does not run the flag
+       hook, so a flag there would fire on a path that holds the caller's
+       word;
+    3. the name is read in a block where it may be unbound. Without it a loop
+       whose target is never read in that state would allocate a flag nothing
+       branches on — dead code in an image whose every word is walked by the
+       proof generators.
+
+    The read test uses the "possibly unbound" dataflow, the dual of
+    `_definitely_stored`: a name is possibly unbound at a block's entry when
+    some path to it left it so. It is initialised from the TOP and narrowed,
+    because the answer being computed is "may be unbound" and a name the
+    analysis failed to track as unbound must not be assumed bound — the
+    opposite of `_definitely_stored`'s question, which is why it is a second
+    array rather than the negation of the first. The header block of a tracked
+    loop contributes its defs WITHOUT the loop target, because on the
+    zero-iteration edge the header does not bind it — that binding happens on
+    the edge into the body (the body's first block `seed`), and a header that
+    bound it would silence exactly the path this flag exists for. `del`
+    contributes nothing, because a bare `del` on this path is a no-op at run
+    time and the image keeps the name's value.
+
+    Module-level entry facts are deliberately NOT passed to the preheader
+    walk: a fact the walk cannot see makes a loop `'maybe'` rather than
+    decided, which flags MORE loops, and a flagged loop whose range turns out
+    non-empty never takes its check — the dead-check direction is the safe
+    one, while a module fact the emitter sees and `read_before_store` does not
+    (or vice versa) would be two machines answering one loop differently.
+    See `bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`
+    for the residual this reader closes and the cases it deliberately leaves.
+    """
+    params = set(params if params is not None
+                 else (getattr(fn, "params", None) or ()))
+    params = {p[0] if isinstance(p, (tuple, list)) and p else p for p in params}
+    body = getattr(fn, "body", None) or []
+    declared_global: set = set()
+    for node in iter_nodes(body):
+        if type(node).__name__ in ("GlobalStmt", "NonlocalStmt"):
+            declared_global |= {n for n in (getattr(node, "names", None) or ())}
+
+    blocks, entry, _cond_names = _build_cfg(body, None)
+    candidates: list = []
+    hdr_target: dict = {}
+    for s in (n for n in iter_nodes(body) if isinstance(n, F.ForStmt)):
+        t = getattr(s, "target", None)
+        if not (isinstance(t, str) and t.isidentifier()):
+            continue
+        if t in declared_global:
+            continue
+        header = None
+        for b in blocks:
+            if len(b.stmts) == 1 and b.stmts[0] is s:
+                header = b
+                break
+        if header is None:
+            continue
+        consts, seqs = _preheader_facts(blocks, header.index, entry, None)
+        if _for_emptiness(s, consts, seqs) != _MAYBE_RUNS:
+            continue
+        candidates.append((s, t, header))
+        hdr_target[header.index] = {t}
+    if not candidates:
+        return {}
+    tracked = {t for _s, t, _h in candidates}
+
+    # Definitively stored on EVERY path to the header: `_definitely_stored`,
+    # the same dataflow `read_before_store` runs, asked over the same CFG, so
+    # the two answers to "is this name bound here" cannot drift. A name every
+    # path stored before the loop holds a value on the zero-iteration edge too,
+    # so its check would never fire and the flag stays out of the image — which
+    # is also where the idiomatic `i = 0; for i in range(…)` stays flag-free.
+    # The seed is the parameters, and it is what keeps a parameter target
+    # unflagged for the sharper reason the emitter states: the prologue's
+    # argument store is the one store that does not run the flag hook. A name
+    # stored on SOME path is NOT excluded — the store that path makes is the
+    # store that SETS the flag, and the other path is the one the check fires
+    # for, which is the mixed shape the "possibly stored" draft used to leave
+    # as garbage.
+    stored_in, _facts_in, _guarded_in = _definitely_stored(
+        blocks, entry, params, _cond_names)
+
+    # Possibly unbound at entry, the dual: top-initialised and narrowed.
+    mu: dict = {b.index: set(tracked) for b in blocks}
+    changed = True
+    while changed:
+        changed = False
+        for b in blocks:
+            merged = None
+            for p in b.preds:
+                b_p = blocks[p]
+                stored = b_p.defs - hdr_target.get(p, set())
+                e = mu[p] - stored
+                merged = set(e) if merged is None else (merged | e)
+            merged = set(tracked) if merged is None else merged
+            merged -= b.seed
+            if merged != mu[b.index]:
+                mu[b.index] = merged
+                changed = True
+
+    # A read in a MAYBE state, per NAME. The walk is per STATEMENT within a
+    # block rather than per block, because a block's entry state and the state
+    # at its last read differ: `q = 7` and `print(q)` are one block whose entry
+    # says `q` may be unbound (the zero-iteration edge) but whose read is after
+    # the store, so the statement order is what decides. The store rules are
+    # `_cfg_block_defs`'s, one statement at a time, so the two cannot count a
+    # `VarDecl`'s missing initialiser differently.
+    maybe_reads: set = set()
+    for b in blocks:
+        cur = set(mu[b.index])
+        for s in b.stmts:
+            for e in _block_stmt_exprs(s):
+                for n in _expr_reads(e, set()):
+                    if n in tracked and n in cur:
+                        maybe_reads.add(n)
+            cur -= _stmt_store_names(s)
+
+    out: dict = {}
+    for s, t, header in candidates:
+        if t in stored_in.get(header.index, set()):
+            continue
+        if t not in maybe_reads:
+            continue
+        out.setdefault(t, []).append(id(s))
+    return {t: tuple(ids) for t, ids in out.items()}
+
+
 def read_before_store_refusal(name: str, fn_name: str, line) -> str:
     """The one-line diagnostic for a name read before anything stores it.
 
@@ -24056,7 +24298,7 @@ GIMPLE_RUNTIME_PREFIX = "mojo_"
 #
 # This is the generalisation of the `GIMPLE_LIST_PREFIX` special case that
 # stood here before, and that constant is gone: a hand-kept list of prefixes is
-# a list that rots, and the shape answers the same question for all 719 entry
+# a list that rots, and the shape answers the same question for all 726 entry
 # points the headers declare rather than for the 40-odd names one prefix
 # happened to cover.
 
@@ -24226,7 +24468,7 @@ def _parse_ctype(decl: str, is_param: bool = False) -> tuple:
     because it does in a parameter list and does not in a return type:
     `void *db` is a `void *` with a name, `void *` is not. Getting that backwards
     makes every parameter a type called `void db`, which nothing recognises as a
-    scalar — and a rule that refuses all 719 entry points for that reason looks
+    scalar — and a rule that refuses all 726 entry points for that reason looks
     exactly like a rule that has measured them all and found none reachable.
 
     The result is the RESOLVED type, which is what every reader of it wants:

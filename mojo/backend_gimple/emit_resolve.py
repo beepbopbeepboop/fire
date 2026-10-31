@@ -3208,8 +3208,7 @@ def _generic_struct_field_types(gen, info: dict) -> dict:
     stdlib's `_PeekableIterator[InnerIterator]`'s `var _inner:
     Self.InnerIterator` ended up an integer, and how `next(self._inner)` /
     `next(it)` then had no receiver type to dispatch the iterator protocol
-    through (`bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_
-    unlowered.md`).
+    through (`the user-iterator next() bug (db724c4d6)`).
 
     So: materialize the instantiation to its mangled name, then resolve with
     `gen._resolve_type`, which is the one resolver that consults
@@ -3247,7 +3246,7 @@ def _ensure_generic_struct(gen, base_name: str, type_args: list) -> str | None:
     # '<name>'` — a definition with this codegen's real parameter types next
     # to a declaration with the elaborator's erased ones — which is the
     # regression that made the first in-TU attempt be reverted
-    # (bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md).
+    # (the user-iterator next() bug (doc deleted in db724c4d6)).
     # Keyed on `(base, args)` and NOT on "is this name already a struct here":
     # the second test would also fire for a struct this module defines itself,
     # which is a different situation with a different (unrelated) answer.
@@ -3426,7 +3425,7 @@ def _register_generic_struct(gen, base_name, info):
         # same erasure that destroys the function `overload_suffix_for` is
         # computed from, so this cannot be resolved by composing harder — it
         # needs the CALLER's real argument types, which is the in-TU route
-        # (see bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_
+        # (see bug:CODEGEN_imported_generic_never_elaborated_calls_nothing_
         # defines.md).
         _ambiguous: set = set()
         for mname, _ret, _ps in info['methods']:
@@ -3689,9 +3688,9 @@ def _compr_enumerate_loop(gen, node, gen0, res: str, res_type: str, it_val: str,
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
     # The comprehension is over: every name it bound is the enclosing
-    # function's own binding again (see `ginf._compr_restore_target`).
+    # function's own binding again (see `ginf._restore_binding`).
     for _gn in gi:
-        ginf._compr_restore_target(gen, _gn[0], _gn[1])
+        ginf._restore_binding(gen, _gn[0], _gn[1])
 
 
 def _compr_str_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
@@ -3715,7 +3714,7 @@ def _compr_str_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     gen._emit(f"  {idx64} = {st};")
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
-    ginf._compr_restore_target(gen, _as_str(gen0.target), saved_target)
+    ginf._restore_binding(gen, _as_str(gen0.target), saved_target)
 
 
 def _compr_cstr_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
@@ -3769,7 +3768,7 @@ def _compr_cstr_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     gen._emit(f"  {idx64} = {st};")
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
-    ginf._compr_restore_target(gen, _as_str(gen0.target), saved_target)
+    ginf._restore_binding(gen, _as_str(gen0.target), saved_target)
 
 
 def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,

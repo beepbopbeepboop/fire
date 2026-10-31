@@ -450,7 +450,7 @@ def cmd_enqueue(a):
     task = a.task if a.task is not None else open(a.task_file).read()
     # a task queued without --pool runs on whichever slot is free first (see refill); --pool only prefers one
     item = dict(name=a.name, claims=a.claim, base=a.base, task=task, files=a.file, needs=a.needs or [],
-                added=time.time(), pool=getattr(a, "pool", None))
+                added=time.time(), pool=getattr(a, "pool", None), only=bool(getattr(a, "only", False)))
     json.dump(item, open(os.path.join(qdir(), a.name + ".json"), "w"), indent=1)
     print("queued %s (needs: %s)" % (a.name, ", ".join(item["needs"]) or "nothing"))
 
@@ -569,6 +569,8 @@ def bounce(name, t):
 def pick_slot(item, busy):
     """The slot a queued task starts on now: its preferred slot if that is free, else the first free, unbanned slot in
     pool order; None if every slot is full or banned. `busy` is running_by_slot() plus this pass's starts."""
+    if item.get("only"):                       # pinned: its slot or nothing
+        return pool_slot(item["pool"]) if item.get("pool") and slot_free(pool_slot(item["pool"]), busy) else None
     order = ([pool_slot(item["pool"])] if item.get("pool") else []) + load_pool()["slots"]
     return next((x for x in order if slot_free(x, busy)), None)
 
@@ -615,7 +617,10 @@ def cmd_refill(a):
         sl = pick_slot(it, busy)
         if sl is None:
             continue                      # every slot is full or banned: the task waits
-        ns = argparse.Namespace(name=it["name"], claim=it["claims"], task=it["task"], task_file=None,
+        # a queued name can collide with a registry entry from an earlier attempt of the same chain (2026-10-30: two fixers
+        # were skipped on every pass as "already exists"); the task starts under a fresh name instead
+        name = it["name"] if it["name"] not in tasks else "%s-%d" % (it["name"][:50], int(time.time() * 1000) % 1000000)
+        ns = argparse.Namespace(name=name, claim=it["claims"], task=it["task"], task_file=None,
                                 file=it["files"], base=it["base"], model=None, pool=sl["name"])
         busy[sl["name"]] = busy.get(sl["name"], 0) + 1
         try:
@@ -1113,7 +1118,8 @@ def main():
     s = sub.add_parser("enqueue"); s.add_argument("name"); s.add_argument("--claim", action="append", required=True)
     g = s.add_mutually_exclusive_group(required=True); g.add_argument("--task"); g.add_argument("--task-file")
     s.add_argument("--file", action="append", default=[]); s.add_argument("--base", default="master")
-    s.add_argument("--needs", nargs="*"); s.add_argument("--pool", default=None, help="the pool slot this task must run on")
+    s.add_argument("--needs", nargs="*"); s.add_argument("--pool", default=None, help="the pool slot this task prefers")
+    s.add_argument("--only", action="store_true", help="the task runs ONLY on its --pool slot (waits for it, never moves)")
     s.set_defaults(f=cmd_enqueue)
     s = sub.add_parser("refill"); s.add_argument("--target", type=int, default=None, help="default: the pool's total slots")
     s.add_argument("--prefix", default="", help="start only queued tasks whose name begins with this"); s.set_defaults(f=cmd_refill)

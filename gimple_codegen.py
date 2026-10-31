@@ -1079,6 +1079,7 @@ class GimpleGen:
         # own compile attempt so a stale prior generator's value can never
         # leak into this one's registration on any early-exception path.
         self._cpp_last_tuple_slot_ctypes: list | None = None
+        self._cpp_last_mixed_slots: bool = False
         # Side channel from _gen_cpp_generator_unit (same stash pattern
         # as _cpp_last_tuple_slot_ctypes): whether THIS unit's body had
         # an eligible value-carrying `return <expr>` — read back into
@@ -1235,7 +1236,7 @@ class GimpleGen:
         # LambdaExpr argument, consumed (and cleared) by the LambdaExpr case
         # itself; None everywhere else, giving every other 1-arg lambda
         # (parameter type genuinely unknown/scalar) the safe `int64_t`
-        # default. See bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md.
+        # default. See the (since-fixed) compiled-generator lambda-expression bug.
         self._cpp_pending_lambda_param_ctype: str | None = None
         # Per-coroutine (generator/async) list of declarations hoisted to that
         # unit's function scope. Filled by the AssignStmt handler in
@@ -1433,6 +1434,10 @@ class GimpleGen:
         # this up via `(self.current_func_name, name)`.
         self._supported_async_closures: dict[tuple, FunctionDef] = {}
         self._async_closure_api: dict[tuple, dict] = {}
+        # Sync generators nested in an ordinary top-level def that read
+        # enclosing names, compiled by cpp_async._compile_nested_generator_
+        # closures; keyed (enclosing def, generator name) like the async dict.
+        self._nested_generator_api: dict[tuple, dict] = {}
         # Step I (create_task/Task/TaskGroup/RaisingTask project): async
         # functions nested INSIDE an ordinary top-level function's own body
         # (e.g. a local `@parameter async def wrapper(): ...` helper
@@ -1661,6 +1666,10 @@ class GimpleGen:
         # a bare int would restart at 0 in each throwaway GimpleGen and
         # reproduce the very collision this fixes. See emit_infra's mint site.
         self._shadow_seq_box = [0]
+        # The open block bodies, innermost last; each frame lists the `var`
+        # shadows made inside it (emit_infra._bind_local_decl), undone when the
+        # block closes (emit_infra._close_block_scope).
+        self._block_scope_frames: list[list] = []
         self._device_kernels: dict[str, bool] = {}
         self._device_parts: list[str] = []
         self._device_launch_args: dict = {}
@@ -2263,6 +2272,9 @@ class GimpleGen:
         # callee -> {pname}: a list-of-lists param whose call sites disagree on
         # the inner element kind (see module_gen's _record_param_elem).
         self._param_nested_mixed: dict = {}
+        self._param_elem_mixed: dict = {}
+        self._param_int_elem_obs: dict = {}
+        self._value_used_funcs: set = set()
         # The dict-VALUE twin of the row above: callee -> {pname -> the dict
         # value ctype its call sites agree on}. Read at the same place (see
         # emit_funcs.gen_func / _gen_struct_method), into `_dict_val_types`.
@@ -3641,6 +3653,8 @@ class GimpleGen:
         'int64_t_path_splitdrive': ('MojoList *', ['char *']),            # os.path.splitdrive(path) -> [drive, tail]
         'int64_t_path_splitroot':  ('MojoList *', ['char *']),            # os.path.splitroot(path) -> [drive, root, tail]
         'mojo_listdir':          ('MojoList *',  ['char *']),              # os.listdir(path)
+        'mojo_os_walk':          ('MojoList *',  ['char *']),              # os.walk(top)
+        'mojo_glob':             ('MojoList *',  ['char *']),              # glob.glob/iglob(pattern)
         'isatty':                ('int',         ['int']),
         'getpid':                ('int',         []),
         'getppid':               ('int',         []),
@@ -5220,8 +5234,10 @@ class GimpleGen:
         return gca._cpp_match_stmt(self, s, declared, indent)
     def _cpp_except_handler_body(self, handler, caught_var: str, declared: dict, indent: str) -> list[str]:
         return gca._cpp_except_handler_body(self, handler, caught_var, declared, indent)
-    def _gen_cpp_generator_unit(self, fn: FunctionDef, struct_name: str | None=None, struct_def: str | None=None) -> tuple[str, str, str, list]:
-        return gca._gen_cpp_generator_unit(self, fn, struct_name, struct_def)
+    def _gen_cpp_generator_unit(self, fn: FunctionDef, struct_name: str | None=None,
+                                extra_captures: list | None=None,
+                                struct_def: str | None=None) -> tuple[str, str, str, list]:
+        return gca._gen_cpp_generator_unit(self, fn, struct_name, extra_captures, struct_def)
     def _compute_nested_closure_captures(self, inner: FunctionDef, outer_scope: dict) -> list:
         return gca._compute_nested_closure_captures(self, inner, outer_scope)
     def _enclosing_scope_with_locals(self, outer_fn: FunctionDef) -> dict:
@@ -5240,6 +5256,8 @@ class GimpleGen:
         return gca._inline_single_use_task_composition(self, body)
     def _compile_nested_async_functions(self, outer_fn: FunctionDef, async_fns: dict) -> None:
         return gca._compile_nested_async_functions(self, outer_fn, async_fns)
+    def _compile_nested_generator_closures(self, outer_fn: FunctionDef, generator_fns: dict) -> None:
+        return gca._compile_nested_generator_closures(self, outer_fn, generator_fns)
     def _gen_cpp_async_generator_unit(self, fn: FunctionDef) -> tuple[str, str, str, list]:
         return gca._gen_cpp_async_generator_unit(self, fn)
 

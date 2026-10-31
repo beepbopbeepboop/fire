@@ -119,6 +119,12 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
     # its own honest, already-existing refusal instead.
     if node.is_async and not node.is_generator:
         return
+    # A nested sync generator that reads enclosing names was compiled to its
+    # own coroutine unit by _compile_nested_generator_closures; like the async
+    # case above it has no ordinary closure body here. Its call sites resolve
+    # through _nested_generator_api, keyed (current_func_name, name).
+    if node.is_generator and (gen.current_func_name, node.name) in gen._nested_generator_api:
+        return
     outer_closures = getattr(gen, '_all_closures', {}).get(
         gen.current_func_name, {})
     ci = outer_closures.get(node.name)
@@ -748,16 +754,20 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
     # latter cannot tell "unknown" from "false" (comptime.CONST_UNKNOWN).
     val = gen._eval_const_bool_state(node.condition)
     if val == 1:
+        _bscope = ginf._open_block_scope(gen)
         for s in node.then_body:
             gen.gen_stmt(s)
+        ginf._close_block_scope(gen, _bscope)
         return
     if val == 0:
         # Try each elif branch before falling to else
         for elif_cond, elif_body in (getattr(node, 'elifs', None) or []):
             elif_val = gen._eval_const_bool_state(elif_cond)
             if elif_val == 1:
+                _bscope = ginf._open_block_scope(gen)
                 for s in elif_body:
                     gen.gen_stmt(s)
+                ginf._close_block_scope(gen, _bscope)
                 return
             if elif_val == 0:
                 continue
@@ -766,14 +776,18 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
             bb_t = gen._new_bb(); bb_m = gen._new_bb()
             gen._emit(f"  if ({cv}) goto {bb_t}; else goto {bb_m};")
             gen._emit_label(bb_t)
+            _bscope = ginf._open_block_scope(gen)
             for s in elif_body:
                 gen.gen_stmt(s)
+            ginf._close_block_scope(gen, _bscope)
             gen._emit(f"  goto {bb_m};")
             gen._emit_label(bb_m)
             return
         if node.else_body:
+            _bscope = ginf._open_block_scope(gen)
             for s in node.else_body:
                 gen.gen_stmt(s)
+            ginf._close_block_scope(gen, _bscope)
         return
     # Condition unknown at compile time: emit full runtime if-elif-else chain
     _, cond_v = gen.lower_expr(node.condition)
@@ -788,8 +802,10 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
     bb_true = gen._new_bb()
     gen._emit(f"  if ({cond_v}) goto {bb_true}; else goto {bb_false};")
     gen._emit_label(bb_true)
+    _bscope = ginf._open_block_scope(gen)
     for s in node.then_body:
         gen.gen_stmt(s)
+    ginf._close_block_scope(gen, _bscope)
     gen._emit(f"  goto {bb_merge};")
     # elif chains
     for _elif_idx, (elif_cond, elif_body) in enumerate(elifs):
@@ -803,13 +819,17 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
             bb_false = bb_merge
         gen._emit(f"  if ({elif_cv}) goto {bb_elif_true}; else goto {bb_false};")
         gen._emit_label(bb_elif_true)
+        _bscope = ginf._open_block_scope(gen)
         for _elif_stmt in elif_body:
             gen.gen_stmt(_elif_stmt)
+        ginf._close_block_scope(gen, _bscope)
         gen._emit(f"  goto {bb_merge};")
     if has_else:
         gen._emit_label(bb_false)
+        _bscope = ginf._open_block_scope(gen)
         for s in node.else_body:
             gen.gen_stmt(s)
+        ginf._close_block_scope(gen, _bscope)
         gen._emit(f"  goto {bb_merge};")
     gen._emit_label(bb_merge)
 
@@ -901,14 +921,16 @@ def _gen_stmt_ComptimeForStmt(gen, node):
             # chokepoint every other store uses (`_sce_simple_emit`'s
             # literal-to-int64_t branch), so the emitted form is decided by
             # the destination type rather than re-derived per call site.
-            # See bugs/CODEGEN_imported_generic_never_elaborated_calls_
+            # See bug:CODEGEN_imported_generic_never_elaborated_calls_
             # nothing_defines.md.
             dst = gen.var_types.get(node.target) or 'int64_t'
             i = start
             while (step > 0 and i < stop) or (step < 0 and i > stop):
                 gen._safe_coerce_emit('int', dst, str(i), node.target)
+                _bscope = ginf._open_block_scope(gen)
                 for s in node.body:
                     gen.gen_stmt(s)
+                ginf._close_block_scope(gen, _bscope)
                 i += step
             return
     elif (isinstance(node.iterable, gimple_ctypes.CallExpr)
@@ -987,8 +1009,10 @@ def _gen_stmt_ComptimeForStmt(gen, node):
                             _dst = gen.var_types.get(_t) or 'int64_t'
                             gen._safe_coerce_emit(
                                 'int', _dst, str(_v), _t)
+                        _bscope = ginf._open_block_scope(gen)
                         for s in node.body:
                             gen.gen_stmt(s)
+                        ginf._close_block_scope(gen, _bscope)
                     return
     if not unrolled:
         pass
@@ -2928,6 +2952,9 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     _pmx = getattr(gen, '_param_nested_mixed', {}).get(node.name, ())
     for _pmx_bare in _pmx:
         gen._nested_mixed_names.add(_as_str(_pmx_bare))
+    _pem = getattr(gen, '_param_elem_mixed', {}).get(node.name, ())
+    for _pem_bare in _pem:
+        gen._maybe_kinds_vals.add(_as_str(_pem_bare))
     _pdv = getattr(gen, '_param_dict_val_types', {}).get(node.name, {})
     for bare in _pdv:
         # '' is the conflicting-call-sites marker (see _record_param_dict_val),
@@ -3933,11 +3960,12 @@ def _abs_module(ref: str, base: str) -> str:
 
 
 def _register_imported_generics(gen, stmts) -> None:
-    """dylib mode: register `from M import gen` where gen is a generic free
-    function (following re-export chains) so its call sites elaborate a
-    concrete CAS-cached instantiation."""
-    if gen.do_imports:
-        return
+    """Register `from M import gen` where gen is a generic free function
+    (following re-export chains) so its call sites elaborate a concrete
+    instantiation. This runs in the inline do_imports=True path too: there a
+    bracketed call `gen[2](x)` to a sibling module's generic otherwise matched
+    no registration and lowered to a zero stub (a silent miscompile; see
+    bugs/CODEGEN_dylib_generic_inline_copies_share_one_symbol.md)."""
     for st in stmts:
         if not (isinstance(st, gimple_ctypes.FromImportStmt) and not getattr(st, 'wildcard', False)):
             continue
@@ -3966,14 +3994,8 @@ def _register_imported_generic_structs(gen, stmts) -> None:
     TYPE ARGUMENT to another generic (_elaborate_generic_call's use of
     _ensure_generic_struct, e.g. `alloc[MoveOnly[Int]]`) can resolve it.
 
-    `MoveOnly` (test_utils.types) is only re-exported through
-    `test_utils/__init__.mojo`, and `test_utils` itself isn't resolvable
-    via imports.py's MOJO_PATH-based search at all (it's a local
-    test-only package, sibling to the test files that import it, not on
-    any search path) — _find_generic_source's _parsed_import call falls
-    back to _resolve_test_relative_module for that case."""
-    if gen.do_imports:
-        return
+    Runs in the inline do_imports=True path too (same guard removal as
+    _register_imported_generics, bugs/CODEGEN_dylib_generic_inline_copies_share_one_symbol.md)."""
     for st in stmts:
         if not (isinstance(st, gimple_ctypes.FromImportStmt) and not getattr(st, 'wildcard', False)):
             continue

@@ -63,7 +63,7 @@ only its low byte survives, and `sys.exit` agrees modulo 256.
 The x86-64 binaries are Mach-O and run under Rosetta 2 on Apple Silicon;
 `--arch arm64` is native. Invocation:
 
-    python3 test_x86_64_examples.py [-n INPUT] [-j N] [-v]
+    python3 test_x86_64_examples.py [-n INPUT] [-j N] [-v] [--examples DIR]
 """
 
 import argparse
@@ -83,8 +83,36 @@ EXAMPLES = os.path.join(HERE, "formal", "examples")
 DEFAULT_INPUT = 10
 
 
-def examples():
-    return sorted(f for f in os.listdir(EXAMPLES) if f.endswith(".mojo"))
+def examples(dir_=None):
+    d = dir_ or EXAMPLES
+    return sorted(f for f in os.listdir(d) if f.endswith(".mojo"))
+
+
+# A SKIP is correct for ONE example whose arm64 reference genuinely cannot be
+# built. It is NOT a green result for the corpus: the healthy run (2026-10-30:
+# 91 PASS, 2 NO-ORACLE, 0 SKIP) SKIPs nothing, so a batch of SKIPs means the
+# arm64 reference is unavailable for the whole run — a broken toolchain or a
+# compiler regression — and the run must fail rather than pass silently.
+# Three leaves room for a few genuinely-unbuildable examples without masking a
+# broken reference. It is stated here (not buried in the return) so a reader of
+# a red gate sees the bound and the reason together.
+MAX_SKIP = 3
+
+
+def _exit_status(counts: dict) -> int:
+    """The run's exit code, as a function of the tally.
+
+    1 on any FAIL, or when SKIP exceeds MAX_SKIP. A SKIP means the arm64
+    reference for that example could not be built, so the example was NOT
+    compared: a handful is tolerable (a genuinely unbuildable example), but a
+    batch means the reference is unavailable for the run, and a green exit over
+    it is the silent failure this harness exists to prevent.
+    """
+    if counts.get("FAIL"):
+        return 1
+    if counts.get("SKIP", 0) > MAX_SKIP:
+        return 1
+    return 0
 
 
 def build_and_run(path: str, arch: str, test_input: int, keep: str = None):
@@ -281,9 +309,12 @@ def main() -> int:
     ap.add_argument("-j", type=int, default=0,
                     help="parallel workers (default: min(cpu_count, 8))")
     ap.add_argument("-v", action="store_true", help="print every example")
+    ap.add_argument("--examples", default=EXAMPLES,
+                    help="directory of .mojo examples to run (default: "
+                         + EXAMPLES + ")")
     args = ap.parse_args()
     verbose = args.v
-    files = [os.path.join(EXAMPLES, f) for f in examples()]
+    files = [os.path.join(args.examples, f) for f in examples(args.examples)]
     workers = args.j or max(2, min(os.cpu_count() or 4, 8))
     results = []
     # PROCESSES, not threads. `formal/build.py` and `formal/model.py` keep
@@ -312,7 +343,12 @@ def main() -> int:
         counts[status] = counts.get(status, 0) + 1
     print(" ".join(f"{k}={counts[k]}" for k in sorted(counts))
           + f" of {len(results)} examples (n={args.n})")
-    return 1 if counts.get("FAIL") else 0
+    if counts.get("SKIP", 0) > MAX_SKIP:
+        # The bound and its reason live in _exit_status; the gate's reader
+        # gets them on the same line it sees the red.
+        print(f"SKIP={counts['SKIP']} exceeds the bound of {MAX_SKIP}: "
+              f"the arm64 reference is unavailable for the run")
+    return _exit_status(counts)
 
 
 if __name__ == "__main__":

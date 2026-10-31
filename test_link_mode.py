@@ -37,6 +37,7 @@ the invariant is tested in BOTH locations no matter how the suite is
 invoked.
 """
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -215,6 +216,103 @@ def test_bare_submodule_import_call_inside_source_tree() -> bool:
           and stdout.strip() == '42')
     if not ok:
         print(f"  ✗ bare_submodule_import_call_inside_source_tree: rc={rc} "
+              f"stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
+    return ok
+
+
+def test_bare_submodule_import_keyword_call() -> bool:
+    """A KEYWORD-argument call through a bare `from . import SUBMODULE`
+    marker, against a compiled generator and a plain function
+    (`lib.counter(4, step=10)`, `lib.scale(2, factor=3)`).
+
+    The positional spelling lowered through the module-alias fallback in
+    `_lower_method_call`, which re-dispatches to the bare-name call. That
+    fallback carried a `not node.kwargs` guard, so the keyword spelling
+    fell through to the generic module-marker stub: the generator raised
+    `NotImplementedError: .lib.counter: module '.lib' is not compiled into
+    this binary` at run time, and the plain call answered through the
+    stub. The from-import spelling of the same calls already worked.
+    Found while closing c_common/fsutil.py (`fsutil.walk_tree("runtime",
+    suffix=".h")`); see bugs/CODEGEN_dynamic_call_layer_residue_after_fsutil.md.
+    """
+    pkg = {
+        'pkg3/__init__.py': '',
+        'pkg3/lib.py': (
+            'def counter(n, *, step=1):\n'
+            '    i = 0\n'
+            '    while i < n:\n'
+            '        yield i * step\n'
+            '        i = i + 1\n'
+            '\n'
+            'def scale(x, *, factor=2):\n'
+            '    return x * factor\n'
+        ),
+        'pkg3/main.py': (
+            'from . import lib\n'
+            'for v in lib.counter(4, step=10):\n'
+            '    print(v)\n'
+            'print(lib.scale(5, factor=3))\n'
+        ),
+    }
+    root = os.path.join(REPO, 'build', 'test_link_mode')
+    os.makedirs(root, exist_ok=True)
+    td = tempfile.mkdtemp(prefix='bare_submodule_kw_', dir=root)
+    try:
+        rc, stdout = _build_and_run(pkg, 'pkg3/main.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'pkg3/main.py', as_module=True)
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and stdout.strip() == '0\n10\n20\n30\n15')
+    if not ok:
+        print(f"  ✗ bare_submodule_import_keyword_call: rc={rc} "
+              f"stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
+    return ok
+
+
+def test_str_affix_method_on_unsolved_word_is_bool() -> bool:
+    """`.startswith(...)` / `.endswith(...)` on a loop target that is an
+    UNSOLVED word (the element of a registered generator, whose kind the
+    compiled path cannot know statically) printed `1` / `0`. The method
+    lowers to the word-form runtime helper (`mojo_str_startswith_word`),
+    but the lowering declared its result as a plain C `int`, so `print`
+    rendered the int instead of the Python `bool`. The same call on a
+    `char *` receiver is typed `_Bool` by `exprtypes`, and the bytes
+    variant already wraps its result with `!= 0`; the word receiver must
+    agree. Found while closing c_common/fsutil.py (`iter_files` yields
+    words, and `f.startswith("runtime")` printed `1` where CPython prints
+    `True`); see bugs/CODEGEN_dynamic_call_layer_residue_after_fsutil.md
+    item 3.
+    """
+    pkg = {
+        'pkg4/__init__.py': '',
+        'pkg4/lib.py': (
+            'def names(n):\n'
+            '    i = 0\n'
+            '    while i < n:\n'
+            '        yield "x" + str(i)\n'
+            '        i = i + 1\n'
+        ),
+        'pkg4/main.py': (
+            'from . import lib\n'
+            'for f in lib.names(2):\n'
+            '    print(f.startswith("x"))\n'
+            '    print(f.endswith("1"))\n'
+            '    print(f.startswith("y"))\n'
+        ),
+    }
+    root = os.path.join(REPO, 'build', 'test_link_mode')
+    os.makedirs(root, exist_ok=True)
+    td = tempfile.mkdtemp(prefix='str_affix_word_', dir=root)
+    try:
+        rc, stdout = _build_and_run(pkg, 'pkg4/main.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'pkg4/main.py', as_module=True)
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and stdout == 'True\nFalse\nFalse\nTrue\nTrue\nFalse\n')
+    if not ok:
+        print(f"  ✗ str_affix_method_on_unsolved_word_is_bool: rc={rc} "
               f"stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
     return ok
 
@@ -1646,27 +1744,12 @@ def test_nested_def_is_not_a_module_level_fn_export() -> bool:
 
 
 def test_imported_function_trailing_default_argument_is_padded() -> bool:
-    """Regression for `bugs/CODEGEN_imported_function_default_argument_dropped_at_call.md`.
+    """`from lib import f; f(1)` where `lib.f(a, b=7)` must compile and print `8`.
 
-    `from lib import f; f(1)` where `lib.f(a, b=7)` must compile and print `8`,
-    not the pre-fix "too few arguments to function 'lib_f' expected 2 have 1"
-    GCC error. Root cause: `module_loader`'s text scan of the defining module
-    built its `exports[name]` record from the C parameter list only, and the
-    C list strips default values (`'String = ""'` -> `'String'`), so the
-    record carried no defaults at all. The cross-module call padding in
-    `_lower_named_call` consults `gen._func_param_defaults` for trailing
-    defaults, and that table is populated by the DEFINING module's own
-    `gen_module` pass — which never runs for an imported module compiled
-    through the link-mode/inline path, so the pad site saw an empty list and
-    emitted a 3-arg call against a 4-parameter prototype (the exact
-    `compile_to_gimple(src, do_imports=False, filename=filename)` arity
-    error that blocks `mojoc`).
-
-    The fix is to record the defaulted parameter names in the export record
-    at the scan site (the same AST-derived shape `module_spec_gen.py` and
-    `gen_module`'s Pass 10 already use), so the importer's pad site has the
-    defaults to pad from. Asserting CPython's real answer (8) pins the value;
-    pre-fix the build itself fails at gcc, so `rc == 0` is part of the pin.
+    The single-line-signature case of the imported-function trailing-default
+    drop. The multi-line-signature case, which is the one that blocked `mojoc`,
+    is pinned on the extern path by
+    `test_extern_import_keyword_call_pads_trailing_default`.
     """
     pkg = {
         'lib.py': 'def f(a, b=7):\n    return a + b\n',
@@ -1683,6 +1766,56 @@ def test_imported_function_trailing_default_argument_is_padded() -> bool:
     if not ok:
         print(f"  ✗ imported_function_trailing_default_argument_is_padded: "
               f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
+    return ok
+
+
+def test_extern_import_keyword_call_pads_trailing_default() -> bool:
+    """`from lib import g` where `g` is declared over SEVERAL lines, and called
+    with a keyword argument that skips a defaulted parameter, on the EXTERN path
+    (`compile_to_gimple(src, do_imports=False)`: `lib` is not inlined, only
+    declared from its export record). The keyword value must land in the slot of
+    the parameter it names, and the omitted `auto_gpu` must be padded from the
+    defining `def`'s own default, so the call carries all four arguments the
+    extern prototype declares.
+
+    Root cause, measured: `module_loader`'s export scan is line-based and read a
+    `def` only when its `)` was on the same line, so a multi-line signature had
+    no export record at all. Without one there was no prototype, no parameter
+    names for `_kwarg_param_names` and no defaults for the padding loop, so the
+    call lowered to `lib_g_<sfx> (src)`. That is the shape of
+    `fire_compiler.py`'s `compile_to_gimple(src, do_imports=False,
+    filename=filename)` that blocked `mojoc` on master, which had been papered
+    over by a per-name padding branch for `compile_to_gimple`. Asserted on the
+    emitted call's argument count, not on the source text.
+    """
+    import gimple_codegen
+    lib = (
+        'def g(src: String, do_imports: bool = False,\n'
+        '      filename: String = "", auto_gpu: bool = True) -> String:\n'
+        '    return src\n'
+    )
+    main = (
+        'from lib import g\n'
+        '\n'
+        'def h(src: String) -> String:\n'
+        '    return g(src, do_imports=False, filename="f")\n'
+    )
+    with tempfile.TemporaryDirectory() as td:
+        with open(os.path.join(td, 'lib.py'), 'w') as f:
+            f.write(lib)
+        main_path = os.path.join(td, 'main.py')
+        with open(main_path, 'w') as f:
+            f.write(main)
+        c_code = gimple_codegen.compile_to_gimple(main, do_imports=False, filename=main_path)
+    calls = []
+    for line in c_code.splitlines():
+        m = re.match(r'^\s*_t\d+ = (lib_g_\w+) \((.*)\);$', line)
+        if m:
+            calls.append(m.group(2).split(', '))
+    ok = len(calls) == 1 and len(calls[0]) == 4
+    if not ok:
+        print(f"  ✗ extern_import_keyword_call_pads_trailing_default: "
+              f"calls={calls!r}")
     return ok
 
 
@@ -1774,9 +1907,10 @@ def test_two_modules_specialize_one_generic_differently() -> bool:
     Two modules instantiate the same generic function with DIFFERENT type
     arguments (`scale[2]` in `a`, `scale[3]` in `b`). The body depends on the
     parameter, so each caller must get its own specialization. Today every
-    copy is emitted under the one bare symbol `_scale`, so both calls run the
-    same body and print `0`, a silent miscompile (CPython: 20 and 30). Fails
-    until each specialization gets its own deterministic symbol and body."""
+    parameter, so each caller must get its own specialization. Before the fix
+    the sibling generic was never registered in the inline do_imports=True
+    path, so both bracketed calls lowered to a zero stub and printed `0`, a
+    silent miscompile (CPython: 20 and 30)."""
     pkg = {
         'pkg/__init__.py': '',
         'pkg/gen.py': (
@@ -1814,6 +1948,7 @@ def test_two_modules_specialize_one_generic_differently() -> bool:
 
 CASES = [
     test_nested_def_is_not_a_module_level_fn_export,
+    test_extern_import_keyword_call_pads_trailing_default,
     test_set_ctor_walks_boxed_global_container,
     test_byteorder_conditional_toplevel_emits_only_the_host_branch,
     test_class_redefinition_does_not_crash_class_attr_emission,
@@ -1822,6 +1957,8 @@ CASES = [
     test_bare_submodule_import_value_read,
     test_bare_submodule_import_call,
     test_bare_submodule_import_call_inside_source_tree,
+    test_bare_submodule_import_keyword_call,
+    test_str_affix_method_on_unsolved_word_is_bool,
     test_from_submodule_import_symbol_value_read,
     test_sibling_function_import_call_is_inlined,
     test_sibling_class_attribute_function_scoped,
