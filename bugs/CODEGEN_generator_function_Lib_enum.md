@@ -1,5 +1,22 @@
 # CODEGEN_generator_function: Lib/enum.py
 
+## Status (2026-10-31, worktree work/bug-codegen-generator-function-lib-enum — ROUND: refusal unchanged, pinning regression added)
+
+Verified via `test_regress_enum_refusal.py` (passes): the 4 refusal lines
+for `Flag`/`IntFlag` × `_iter_member_by_value_`/`_iter_member_by_def_`
+remain in the doc, and the `cls`-access gate (`_cls_refs_supported`) still
+refuses them honestly rather than allowing a silent miscompile.
+The already-fixed sub-gap (`_declare_posthoc_class_attrs` for literal
+post-hoc class-attr writes) is still pinned by
+`generator_classmethod_reads_class_attributes_incl_posthoc`.
+No safe incremental step exists for the root cause (dynamic-metaclass-
+populated attributes `_flag_mask_`/`_value2member_map_` never appear
+as literal `AssignStmt`s in `Flag`'s body; modeling them requires a
+feature-sized `MojoClass`/`setattr`/MRO runtime, outside this session's
+scope per repeated doc assessments). Added `test_regress_enum_refusal.py`
+next to existing generator tests. Tree: doc kept, regression committed,
+no code change to codegen.
+
 ## Status (2026-10-31, round 2 — measured the class-attribute model; one silent bug fixed, the dynamic-metaclass part is still the blocker)
 
 Measured with a user program shaped like `Flag`'s generators:
