@@ -691,7 +691,7 @@ fn main():
     # stdout). The generator instance of the same shape is
     # `Tools/c-analyzer/c_common/fsutil.py`'s `walk_tree(root, *,
     # walk=_walk_tree)`, tracked in
-    # the (since-fixed) c_common/fsutil.py compile failure; this is the
+    # bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md; this is the
     # ordinary-path twin, which that doc did not mention. Expected text is
     # CPython's for the same source.
     test_gimple_stdout("gimple_callable_valued_parameter_default", """\
@@ -737,7 +737,7 @@ main()
     # directly in the same function and never escapes, the body is inlined at
     # the call site instead, where the name resolves. Covers an int capture, a
     # capture used through a builtin, and a second lambda in the same
-    # function. See the (since-fixed) compiled-generator lambda-expression bug.
+    # function. See bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md.
     test_gimple_stdout("gimple_capturing_lambda_inlined_at_call", """\
 fn outer():
     var n = 7
@@ -763,7 +763,7 @@ fn main():
     # gives a capturing lambda a heap env (a `MojoBoundMethod`, env as its
     # first parameter), so it is correct whether or not it escapes. Expected
     # output is now CPython's answer. See
-    # the (since-fixed) compiled-generator lambda-expression bug.
+    # bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md.
     test_gimple_stdout("gimple_escaping_capturing_lambda_still_lifted", """\
 fn apply(f, v):
     return f(v)
@@ -785,7 +785,7 @@ fn main():
     # `_lower_LambdaExpr` now materializes a `MojoVarargFn` (callee, env,
     # leading-parameter count, and which of the three shapes it has), and the
     # runtime dispatch helpers pack. See
-    # the (since-fixed) compiled-generator lambda-expression bug.
+    # bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md.
     test_gimple_stdout("gimple_variadic_lambda_positional_args_packed", """\
 def add(a, b):
     return a + b
@@ -1856,7 +1856,7 @@ main()
     # here rather than assumed to follow from the single-level case.
     # (`*args` is deliberately NOT here: a variadic lambda segfaults on this
     # tree at every nesting depth including top level, which is
-    # the (since-fixed) compiled-generator lambda-expression bug's already-fixed
+    # bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md's already-fixed
     # variadic work sitting in an unlanded branch, not this path.)
     test_gimple_stdout("gimple_lambda_two_deep_nested_def", """\
 def a():

@@ -122,7 +122,7 @@ building `tables.py`** — `_walk_tree` and `glob_tree` refused on the same
 callable-valued-parameter `for`, plus `iter_files`' variadic lambda, plus a fourth,
 `iter_many`, refused on `a call to unresolved callee 'onempty(...)'`. So the three-file
 grouping in the entry below ("one fix, three files") is really four, and
-`the (since-fixed) c_common/fsutil.py compile failure`'s own status says its blocker list
+`bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md`'s own status says its blocker list
 has shrunk from four to three — `process_filenames`' `Exception(...)` is no longer among
 them, so `onempty(...)` is the same shape reached from another module and both should be
 counted once.
@@ -222,7 +222,7 @@ iterator (it needs the loop-variable types, which come from the iterator's
 element type). This is the same family as the `check_all` blocker in
 `bugs/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___init__.md` and the
 `unsupported for-loop iterable type: CallExpr` family in
-`the (since-fixed) c_common/fsutil.py compile failure` — i.e. three of
+`bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md` — i.e. three of
 my files now share ONE remaining blocker, which is the right grouping for a
 follow-up.
 

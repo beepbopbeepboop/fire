@@ -1236,7 +1236,7 @@ class GimpleGen:
         # LambdaExpr argument, consumed (and cleared) by the LambdaExpr case
         # itself; None everywhere else, giving every other 1-arg lambda
         # (parameter type genuinely unknown/scalar) the safe `int64_t`
-        # default. See the (since-fixed) compiled-generator lambda-expression bug.
+        # default. See bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md.
         self._cpp_pending_lambda_param_ctype: str | None = None
         # Per-coroutine (generator/async) list of declarations hoisted to that
         # unit's function scope. Filled by the AssignStmt handler in

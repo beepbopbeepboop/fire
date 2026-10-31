@@ -1457,18 +1457,10 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
         elif isinstance(n, YieldFromExpr):
             if isinstance(n.value, CallExpr) and isinstance(n.value.func, IdentExpr) and (n.value.func.name == fn.name):
                 continue
-            # `yield from walk(root)` where `walk` is a PARAMETER holding a
-            # callable as a word: what the call yields is an unsolved word.
-            if (isinstance(n.value, CallExpr) and isinstance(n.value.func, IdentExpr)
-                    and known is not None
-                    and known.get(n.value.func.name) in ('int64_t', 'char *')
-                    and n.value.func.name in {_p[0] for _p in (fn.params or [])}):
-                t = 'int64_t'
-            else:
-                t = _yield_from_delegate_ctype(n, generator_api, field_elem_types,
-                                               local_elem_types,
-                                               generator_method_api,
-                                               self_struct_name)
+            t = _yield_from_delegate_ctype(n, generator_api, field_elem_types,
+                                           local_elem_types,
+                                           generator_method_api,
+                                           self_struct_name)
             if t is None:
                 return None
             if ctype is None:

@@ -841,7 +841,7 @@ def _generator_value_kind(fn: N.FunctionDef,
             # `yield from _iter_files(root, suffix, relparent)`) resolves
             # exactly as a direct sibling delegation does -- fsutil's
             # `iter_files_by_suffix`, see
-            # the (since-fixed) c_common/fsutil.py compile failure.
+            # bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md.
             dk = delegated(n.value, fn) if delegated is not None else None
             kinds.add(dk)
             if dk == 'tuple':
@@ -992,7 +992,7 @@ def _lambdas_ok(fn: N.FunctionDef) -> bool:
     `_lambda_shape_ok` above now admits all of them. The walk stays as the
     chokepoint that measurement is attached to: the next shape to be measured
     belongs in that table, and this is where a refusal for it would live.
-    (the (since-fixed) compiled-generator lambda-expression bug)"""
+    (bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md)"""
     for n in _walk(fn):
         if isinstance(n, N.LambdaExpr):
             if not _lambda_shape_ok(n):
@@ -1167,7 +1167,7 @@ def _sibling_gen_kind(iterable, fn: N.FunctionDef = None):
     more CALL form: a HIGHER-ORDER PARAMETER whose declared default names
     one of this module's generators — `def walk_tree(root, *, walk=
     _walk_tree)` doing `for filename in walk(root):`, the shape
-    `the (since-fixed) c_common/fsutil.py compile failure` records as
+    `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md` records as
     fsutil's real blocker. The default is resolved to its generator and the
     kind read from THAT, exactly as for a direct sibling call; a parameter
     whose default is not a module generator (or is not a default at all —
@@ -1271,7 +1271,7 @@ def _default_is_faithful_literal(node) -> bool:
     would compile the generator and then pad a NULL function pointer into
     the call — trading a refusal for a crash. The ordinary (non-generator)
     path has no such gate and does resolve those defaults correctly; see
-    `the (since-fixed) c_common/fsutil.py compile failure`.
+    `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md`.
     """
     if node is None:
         return False
@@ -1310,7 +1310,7 @@ def _unrepresentable_kwonly(fn: N.FunctionDef) -> list:
     `iter_files_by_suffix(root, suffixes, relparent=None, *, walk=
     walk_tree, _iter_files=iter_files)` were all rejected before the real
     blocker (CALLING the parameter) was ever reached — see
-    `the (since-fixed) c_common/fsutil.py compile failure`.
+    `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md`.
 
     The gate that replaces it asks the question that actually matters: can
     each omitted argument be filled with the RIGHT value? A keyword-only
@@ -1640,21 +1640,6 @@ def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
         return False, 'lambda with *args/**kwargs or a default parameter'
     if not _property_call_ok(fn, struct_name, struct_def, prop_names):
         return False, 'calls the result of a @property getter (v0)'
-    if struct_name is None and getattr(fn, 'name', None) in _VALUE_USED_FUNCS:
-        return False, ('used as a function value (a by-value call binds '
-                       'keywords through the runtime signature only the C++ '
-                       'unit registers)')
-    # A generator that CALLS one of its own parameters consumes a function value
-    # whose backend it cannot know; the handle layouts of the two backends
-    # differ, so every generator that flows as a value and every generator that
-    # consumes one are on the C++ path, which drives the handle dynamically.
-    if struct_name is None:
-        _pnames = {p[0] for p in fn.params}
-        for _n in _walk(fn):
-            if (isinstance(_n, N.CallExpr) and isinstance(_n.func, N.IdentExpr)
-                    and _n.func.name in _pnames):
-                return False, ('calls a parameter (a function value: driven '
-                               'dynamically by the C++ path)')
     params = fn.params
     _is_cm = False
     _is_static = False
@@ -3275,7 +3260,7 @@ def _mark_coro_body(body_fd):
     body there loses the captured value's real type: `lambda: some_string`
     yielded from a generator came out as the pointer's bit pattern, and
     under -Werror=int-conversion that took the whole self-host build down
-    (see the (since-fixed) compiled-generator lambda-expression bug).
+    (see bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md).
 
     Defined once here and called from all three body-synthesis sites,
     rather than being spelled out at each: the reasoning is long enough
@@ -4405,39 +4390,6 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
     _classify()
 
 
-# Names of this module's top-level functions referenced as VALUES (an
-# identifier that is not the callee of a call): passed, stored, compared, used
-# as a parameter default. A generator among them is dispatched through its
-# `<base>_start` address by code that does not know its signature, which the
-# C++ unit alone registers with the runtime (`mojo_gen_sig_register`), so the
-# stack-switch backend declines it. Per-lower() lifetime, like `_PARAM_NAMES`.
-_VALUE_USED_FUNCS: set = set()
-
-
-def _scan_value_used_functions(stmts) -> None:
-    _VALUE_USED_FUNCS.clear()
-    fn_names = {s.name for s in stmts if isinstance(s, N.FunctionDef)}
-    if not fn_names:
-        return
-    callee_ids = set()
-    refs = []
-    for n in gimple_exprtypes._walk_ast(stmts):
-        if isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr):
-            callee_ids.add(id(n.func))
-        elif isinstance(n, N.IdentExpr) and n.name in fn_names:
-            refs.append(n)
-    for n in refs:
-        if id(n) not in callee_ids:
-            _VALUE_USED_FUNCS.add(n.name)
-    # ...and a function named as a parameter DEFAULT (`def f(x, *, walk=leaf)`),
-    # which is a value the callee dispatches through without ever naming it.
-    for n in gimple_exprtypes._walk_ast(stmts):
-        if isinstance(n, N.FunctionDef):
-            for dv in (getattr(n, 'param_defaults', None) or {}).values():
-                if isinstance(dv, N.IdentExpr) and dv.name in fn_names:
-                    _VALUE_USED_FUNCS.add(dv.name)
-
-
 def lower(stmts: list, closure_stmts=(),
           module_name: str | None = None) -> tuple[list, list]:
     """Returns (new_stmts, coro_meta). coro_meta entries are dicts:
@@ -4457,7 +4409,6 @@ def lower(stmts: list, closure_stmts=(),
     _STRUCT_NAMES.clear()
     _UNTHREADABLE_NESTED_ASYNC_GENS.clear()
     _STRUCT_NAMES.update(s.name for s in stmts if isinstance(s, N.StructDef))
-    _scan_value_used_functions(stmts)
     if not enabled():
         # The C++ backend (`MOJO_CORO=cpp`, the escape hatch) lowers nested
         # async defs itself and never asks this module to hoist anything --

@@ -1172,110 +1172,6 @@ main()
 """
     test_generator_matches_cpython(
         "cpp_coroutine_iter_many_callable_param", _iter_many_src, _iter_many_src)
-    # c_common/fsutil.py's iter_files / walk_tree / glob_tree, verbatim: kw-only
-    # callable parameters defaulting to os.walk / glob.iglob / compiled
-    # generator functions, `get_files in (glob.glob, glob.iglob, glob_tree)`,
-    # `lambda *a, **k: _walk(*a, walk=_files, **k)` rebound into a parameter,
-    # keyword calls through unknown callables, `tuple(suffix)` +
-    # `endswith(<tuple>)`, and `yield from` recursion. Directory is an absolute
-    # path so the run does not depend on the child's cwd; counts, not order, are
-    # compared (CPython is the oracle).
-    _fsutil_src = """\
-import os
-import glob
-
-def _walk_tree(root, *,
-               _walk=os.walk,
-               ):
-    for parent, _, names in _walk(root):
-        for name in names:
-            yield os.path.join(parent, name)
-
-
-def walk_tree(root, *,
-              suffix=None,
-              walk=_walk_tree,
-              ):
-    if suffix and not isinstance(suffix, str):
-        raise ValueError('suffix must be a string')
-
-    for filename in walk(root):
-        if suffix and not filename.endswith(suffix):
-            continue
-        yield filename
-
-
-def glob_tree(root, *,
-              suffix=None,
-              _glob=glob.iglob,
-              ):
-    suffix = suffix or ''
-    if not isinstance(suffix, str):
-        raise ValueError('suffix must be a string')
-
-    for filename in _glob(f'{root}/*{suffix}'):
-        yield filename
-    for filename in _glob(f'{root}/**/*{suffix}'):
-        yield filename
-
-
-def iter_files(root, suffix=None, relparent=None, *,
-               get_files=os.walk,
-               _glob=glob_tree,
-               _walk=walk_tree,
-               ):
-    if not isinstance(root, str):
-        roots = root
-        for root in roots:
-            yield from iter_files(root, suffix, relparent,
-                                  get_files=get_files,
-                                  _glob=_glob, _walk=_walk)
-        return
-
-    # Use the right "walk" function.
-    if get_files in (glob.glob, glob.iglob, glob_tree):
-        get_files = _glob
-    else:
-        _files = _walk_tree if get_files in (os.walk, walk_tree) else get_files
-        get_files = (lambda *a, **k: _walk(*a, walk=_files, **k))
-
-    # Handle a single suffix.
-    if suffix and not isinstance(suffix, str):
-        filenames = get_files(root)
-        suffix = tuple(suffix)
-    else:
-        filenames = get_files(root, suffix=suffix)
-        suffix = None
-
-    for filename in filenames:
-        if suffix and not isinstance(suffix, str):  # multiple suffixes
-            if not filename.endswith(suffix):
-                continue
-        if relparent:
-            filename = os.path.relpath(filename, relparent)
-        yield filename
-
-def main():
-    a = 0
-    for f in iter_files("@RUNTIME@", ".h"):
-        a += 1
-    print(a)
-    b = 0
-    for f in iter_files("@RUNTIME@", [".h", ".c"]):
-        b += 1
-    print(b)
-    c = 0
-    for f in iter_files(["@RUNTIME@", "tools"], ".py", get_files=glob.glob):
-        c += 1
-    print(c > 0)
-    for f in iter_files("@RUNTIME@", ".h", "."):
-        print(1 if f.startswith("@RUNTIME@") else 0)
-        break
-main()
-"""
-    _fsutil_src = _fsutil_src.replace("@RUNTIME@", os.path.abspath("runtime"))
-    test_generator_matches_cpython(
-        "cpp_fsutil_iter_files_walk_tree_glob_tree", _fsutil_src, _fsutil_src)
     # The no-argument form: `TypeError()` is legal Python and the message is
     # the empty string, which is what the emitted `char *` empty literal
     # carries. Kept because it is the shape whose typing needs no argument to
@@ -1796,7 +1692,7 @@ def test_generator_a3_ineligible(name: str, mojo_src: str, gen_name: str,
 
 
 def run_callable_param_tests():
-    # Cluster: the (since-fixed) c_common/fsutil.py compile failure --
+    # Cluster: bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md --
     # "the real blocker is INVOKING a kw-only parameter as a callee", the
     # shape `Tools/c-analyzer/c_common/fsutil.py`'s `walk_tree(root, *,
     # walk=_walk_tree)` / `iter_files_by_suffix(..., *, _iter_files=
@@ -3762,7 +3658,7 @@ def main():
 """, "0\n-1\n2\n")
 
     # LambdaExpr-as-value / bound-method-as-value in a compiled generator
-    # body (see the (since-fixed) compiled-generator lambda-expression bug) —
+    # body (see bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md) —
     # mirrors pickletools.py's `_genops` shape EXACTLY: the same local
     # (`getpos`) is assigned a zero-arg `lambda` on one branch and a
     # bound-method VALUE (`self.tell`, not immediately called) on the
@@ -4049,7 +3945,7 @@ main()
     # method_as_value` above). Real target: Lib/enum.py's
     # `Flag._iter_member_by_def_`: `yield from sorted(cls._iter_member_
     # by_value_(value), key=lambda m: m._sort_order_)` — see
-    # the (since-fixed) compiled-generator lambda-expression bug's
+    # bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md's
     # "single-parameter lambda" follow-up. This is also the regression
     # test for a real, confirmed SEGFAULT this same session found and
     # fixed: the promise/consumer-side type inference for `yield from
@@ -4673,7 +4569,7 @@ def main():
 """, "5\n3\n1\n")
 
     # ── lambda literals inside a generator body ───────────────────────
-    # (the (since-fixed) compiled-generator lambda-expression bug) -- 0-, 1-
+    # (bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md) -- 0-, 1-
     # and 2-parameter lambdas, a lambda re-bound on each branch of an
     # if/else, and a lambda passed as a call argument all work via the
     # ordinary codegen path's lambda lifting.

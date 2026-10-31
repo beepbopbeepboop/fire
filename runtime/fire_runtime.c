@@ -1249,11 +1249,6 @@ char *mojo_repr_boxed(int64_t v)
             default:  return mojo_repr_int(bx->bits);
         }
     }
-    /* Not a box: a word of unknown kind. A live heap string (or a registered
-     * literal) is a string, not the integer its address spells; every other
-     * word keeps its integer rendering. The caller strdup'd the box arms
-     * above, so this arm hands back its own copy too. */
-    if (mojo_boxed_is_str(v)) return strdup((char *)(intptr_t)v);
     return mojo_str_from_int(v);
 }
 
@@ -1716,208 +1711,6 @@ static int64_t _mojo_vararg_invoke(MojoVarargFn *vf, const int64_t *a, int64_t n
         if (vf->kind == 1) return ((int64_t (*)(void *, int64_t, int64_t, int64_t, int64_t, MojoList *, MojoDict *))vf->fn)(vf->self, a[0], a[1], a[2], a[3], packed, k);
         return ((int64_t (*)(void *, int64_t, int64_t, int64_t, int64_t, MojoDict *))vf->fn)(vf->self, a[0], a[1], a[2], a[3], k);
     }
-}
-
-/* ── Compiled-generator signatures and live handles ──────────────────────
- * A generator FUNCTION used as a value is its `<base>_start` address (see
- * calls_shared._callable_value_symbol). To call that value with keywords, and
- * to iterate the handle it returns without knowing which generator made it,
- * the runtime needs two small tables:
- *   - sig:    start address -> parameter names, where the keyword-only ones
- *             begin, the default of each (as an int64_t word), and how to
- *             read the yielded value (vkind);
- *   - handle: a handle returned by a dynamic call -> its sig, so a `for` over
- *             the unknown word can drive resume/value/destroy.
- * Both are open-addressed; the sig table is filled by each unit's constructor,
- * the handle table by mojo_dyn_call and emptied when a handle is drained. */
-typedef struct MojoGenSig {
-    void *start, *resume, *value, *destroy;
-    int vkind;                 /* 0 int64, 1 bool, 2 double, 3 str, 4 container */
-    int np;                    /* parameter count */
-    const char *const *names;
-    int first_kwonly;          /* index of the first keyword-only parameter */
-    const int64_t *defaults;
-    const unsigned char *has_default;
-} MojoGenSig;
-static MojoGenSig **_gsig_tab = 0; static size_t _gsig_cap = 0, _gsig_n = 0;
-static void **_ghnd_key = 0; static MojoGenSig **_ghnd_val = 0; static size_t _ghnd_cap = 0, _ghnd_n = 0;
-static size_t _gh(void *p, size_t cap) { return (((uintptr_t)p >> 4) * 11400714819323198485ull) & (cap - 1); }
-void mojo_gen_sig_register(void *start, void *resume, void *value, void *destroy, int vkind, int np,
-                           const char *const *names, int first_kwonly, const int64_t *defaults,
-                           const unsigned char *has_default)
-{
-    if (_gsig_n * 2 >= _gsig_cap) {
-        size_t nc = _gsig_cap ? _gsig_cap * 2 : 64;
-        MojoGenSig **nt = (MojoGenSig **)calloc(nc, sizeof *nt);
-        for (size_t i = 0; i < _gsig_cap; i++) if (_gsig_tab[i]) {
-            size_t j = _gh(_gsig_tab[i]->start, nc);
-            while (nt[j]) j = (j + 1) & (nc - 1);
-            nt[j] = _gsig_tab[i];
-        }
-        free(_gsig_tab); _gsig_tab = nt; _gsig_cap = nc;
-    }
-    MojoGenSig *g = (MojoGenSig *)malloc(sizeof *g);
-    g->start = start; g->resume = resume; g->value = value; g->destroy = destroy;
-    g->vkind = vkind; g->np = np; g->names = names; g->first_kwonly = first_kwonly;
-    g->defaults = defaults; g->has_default = has_default;
-    size_t j = _gh(start, _gsig_cap);
-    while (_gsig_tab[j]) j = (j + 1) & (_gsig_cap - 1);
-    _gsig_tab[j] = g; _gsig_n++;
-}
-static MojoGenSig *_gen_sig_lookup(void *start)
-{
-    if (!_gsig_cap) return 0;
-    size_t j = _gh(start, _gsig_cap);
-    while (_gsig_tab[j]) { if (_gsig_tab[j]->start == start) return _gsig_tab[j]; j = (j + 1) & (_gsig_cap - 1); }
-    return 0;
-}
-static void _gen_handle_put(void *h, MojoGenSig *sg)
-{
-    if (_ghnd_n * 2 >= _ghnd_cap) {
-        size_t nc = _ghnd_cap ? _ghnd_cap * 2 : 64;
-        void **nk = (void **)calloc(nc, sizeof *nk); MojoGenSig **nv = (MojoGenSig **)calloc(nc, sizeof *nv);
-        for (size_t i = 0; i < _ghnd_cap; i++) if (_ghnd_key[i] && _ghnd_key[i] != (void *)1) {
-            size_t j = _gh(_ghnd_key[i], nc);
-            while (nk[j]) j = (j + 1) & (nc - 1);
-            nk[j] = _ghnd_key[i]; nv[j] = _ghnd_val[i];
-        }
-        free(_ghnd_key); free(_ghnd_val); _ghnd_key = nk; _ghnd_val = nv; _ghnd_cap = nc; _ghnd_n = 0;
-        for (size_t i = 0; i < nc; i++) if (nk[i]) _ghnd_n++;
-    }
-    size_t j = _gh(h, _ghnd_cap);
-    while (_ghnd_key[j] && _ghnd_key[j] != (void *)1 && _ghnd_key[j] != h) j = (j + 1) & (_ghnd_cap - 1);
-    if (!_ghnd_key[j] || _ghnd_key[j] == (void *)1) _ghnd_n++;
-    _ghnd_key[j] = h; _ghnd_val[j] = sg;
-}
-static MojoGenSig *_gen_handle_take(int64_t w)
-{
-    if (!_ghnd_cap) return 0;
-    void *h = (void *)(intptr_t)w;
-    size_t j = _gh(h, _ghnd_cap);
-    while (_ghnd_key[j]) {
-        if (_ghnd_key[j] == h) { MojoGenSig *sg = _ghnd_val[j]; _ghnd_key[j] = (void *)1; return sg; }
-        j = (j + 1) & (_ghnd_cap - 1);
-    }
-    return 0;
-}
-/* Drain a registered handle into a list of what it yields. */
-static MojoList *_gen_drain(void *h, MojoGenSig *sg)
-{
-    MojoList *out = mojo_list_new();
-    bool (*res)(void *) = (bool (*)(void *))sg->resume;
-    while (res(h)) {
-        switch (sg->vkind) {
-        case 1: mojo_list_append_int(out, ((bool (*)(void *))sg->value)(h) ? 1 : 0); break;
-        case 2: mojo_list_append_double(out, ((double (*)(void *))sg->value)(h)); break;
-        case 3: mojo_list_append_str(out, ((char *(*)(void *))sg->value)(h)); break;
-        default: mojo_list_append_int(out, ((int64_t (*)(void *))sg->value)(h)); break;
-        }
-    }
-    int pending = mojo_exc_pending_get();
-    ((void (*)(void *))sg->destroy)(h);
-    if (pending) { mojo_exc_pending_set(0); mojo_raise(); }
-    if (sg->vkind == 3) mojo_list_set_kinds_uniform(out, 'p');
-    else if (sg->vkind == 2) mojo_list_set_kinds_uniform(out, 'd');
-    else if (sg->vkind == 4) mojo_list_set_kinds_uniform(out, 'l');
-    return out;
-}
-/* The default (as a word) a generator registered for parameter `idx`: what a
- * call site pads for an omitted function-valued default it cannot name. */
-int64_t mojo_gen_default_word(void *start, int64_t idx)
-{
-    MojoGenSig *sg = _gen_sig_lookup(start);
-    if (!sg || idx < 0 || idx >= sg->np) return 0;
-    return sg->defaults[idx];
-}
-MojoList *mojo_iter_gen_handle(int64_t w)
-{
-    MojoGenSig *sg = _gen_handle_take(w);
-    return sg ? _gen_drain((void *)(intptr_t)w, sg) : 0;
-}
-/* Bind positional + keyword arguments to a registered generator's parameters
- * and start it; the handle is recorded so an iteration over the returned word
- * can drain it. */
-static int64_t _gen_sig_call(MojoGenSig *sg, MojoList *args, MojoDict *kw)
-{
-    int64_t w[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-    int np = sg->np > 8 ? 8 : sg->np;
-    int64_t n = args ? mojo_list_len(args) : 0;
-    int nposmax = sg->first_kwonly < np ? sg->first_kwonly : np;
-    if (n > nposmax) { mojo_raise_type_error((char *)"too many positional arguments"); return 0; }
-    for (int i = 0; i < np; i++) {
-        if (i < n) w[i] = mojo_list_get_int(args, i);
-        else if (kw && mojo_dict_contains(kw, (char *)sg->names[i])) w[i] = mojo_dict_get_int(kw, (char *)sg->names[i]);
-        else if (sg->has_default[i]) w[i] = sg->defaults[i];
-        else { mojo_raise_type_error((char *)"missing a required argument"); return 0; }
-    }
-    if (kw) {
-        MojoList *keys = mojo_dict_keys(kw);
-        for (int64_t i = 0; i < mojo_list_len(keys); i++) {
-            char *k = mojo_list_get_str(keys, i); int ok = 0;
-            for (int j = 0; j < np; j++) if (!strcmp(k, sg->names[j])) { ok = 1; break; }
-            if (!ok) { { char _m[200]; snprintf(_m, sizeof _m, "got an unexpected keyword argument '%s'", k); mojo_raise_type_error(_m); } return 0; }
-        }
-    }
-    typedef int64_t (*F)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
-    int64_t h = ((F)sg->start)(w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
-    _gen_handle_put((void *)(intptr_t)h, sg);
-    return h;
-}
-
-/* Call a function VALUE with an already-packed argument list and keyword dict:
- * the one entry for a call whose callee is only known at run time and whose
- * call site has `*args` / `**kwargs` / keywords (`_walk(*a, walk=_files, **k)`).
- * A variadic callable (a `lambda *a, **k`, or a thunk for a compiled function,
- * see MojoVarargFn) binds the pair itself; a plain function pointer or bound
- * method takes the arguments positionally, and a keyword it cannot bind is a
- * TypeError rather than silently dropped. Arities 0..5. */
-int64_t mojo_dyn_call(int64_t fn, MojoList *args, MojoDict *kw)
-{
-    void *fp = (void *)(intptr_t)fn;
-    int64_t n = args ? mojo_list_len(args) : 0;
-    { MojoGenSig *_sg = _gen_sig_lookup(fp); if (_sg) return _gen_sig_call(_sg, args, kw); }
-    if (mojo_is_vararg_fn(fp)) {
-        int64_t v[16];
-        if (n > 16) n = 16;
-        for (int64_t i = 0; i < n; i++) v[i] = mojo_list_get_int(args, i);
-        return _mojo_vararg_invoke((MojoVarargFn *)fp, v, n, kw);
-    }
-    if (kw && mojo_dict_len(kw) > 0) {
-        mojo_raise_type_error((char *)"got an unexpected keyword argument");
-        return 0;
-    }
-    int64_t a[5] = {0, 0, 0, 0, 0};
-    if (n > 5) n = 5;
-    for (int64_t i = 0; i < n; i++) a[i] = mojo_list_get_int(args, i);
-    switch (n) {
-    case 0: return mojo_fnptr_call_0(fp);
-    case 1: return mojo_fnptr_call_1(fp, a[0]);
-    case 2: return mojo_fnptr_call_2(fp, a[0], a[1]);
-    case 3: return mojo_fnptr_call_3(fp, a[0], a[1], a[2]);
-    case 4: return mojo_fnptr_call_4(fp, a[0], a[1], a[2], a[3]);
-    default: return mojo_fnptr_call_5(fp, a[0], a[1], a[2], a[3], a[4]);
-    }
-}
-
-/* `*args` / `**kwargs` call-site helpers: append every element of a list (or
- * every entry of a dict) of unknown kind to the packed argument list / dict. */
-MojoList *mojo_args_extend_word(MojoList *dst, int64_t src)
-{
-    MojoList *l = mojo_iter_word(src);
-    for (int64_t i = 0; i < mojo_list_len(l); i++)
-        mojo_list_append_int(dst, mojo_box_word(mojo_list_get_boxed(l, i)));
-    return dst;
-}
-MojoDict *mojo_kwargs_merge_word(MojoDict *dst, int64_t src)
-{
-    if (!mojo_is_registered_dict(src)) return dst;
-    MojoDict *d = (MojoDict *)(intptr_t)src;
-    MojoList *keys = mojo_dict_keys(d);
-    for (int64_t i = 0; i < mojo_list_len(keys); i++) {
-        char *key = mojo_list_get_str(keys, i);
-        mojo_dict_set_int(dst, key, mojo_dict_get_int(d, key));
-    }
-    return dst;
 }
 
 int64_t mojo_vararg_call_0(void *fp, void *kw) {
@@ -9703,7 +9496,6 @@ MojoList *mojo_iter_word(int64_t v)
     if (mojo_is_registered_list(v)) return (MojoList *)(intptr_t)v;
     if (mojo_is_registered_dict(v)) return mojo_dict_keys((MojoDict *)(intptr_t)v);
     if (mojo_is_registered_set(v)) return mojo_set_to_list((MojoSet *)(intptr_t)v);
-    { MojoList *g = mojo_iter_gen_handle(v); if (g) return g; }
     return mojo_iter_boxed_list(v);
 }
 
@@ -12952,20 +12744,6 @@ void *mojo_make_tuple(void) { return mojo_list_new(); }
 /* ── Stubs for interpreter dispatch (only used as function-pointer targets) ── */
 int MojoParser() { return 0; }
 int64_t mojo_len(int obj) { (void)obj; return 0; }
-
-/* `len(x)` of a word whose kind only the runtime knows: a list, dict, set,
- * bytes or string answers its length; anything else is a TypeError (what
- * CPython says for an int), not a quiet 0. */
-int64_t mojo_len_word(int64_t v)
-{
-    if (mojo_is_registered_list(v)) return mojo_list_len((MojoList *)(intptr_t)v);
-    if (mojo_is_registered_dict(v)) return mojo_dict_len((MojoDict *)(intptr_t)v);
-    if (mojo_is_registered_set(v)) return mojo_set_len((MojoSet *)(intptr_t)v);
-    if (mojo_is_registered_bytes(v)) return mojo_bytes_len((MojoBytes *)(intptr_t)v);
-    if (mojo_boxed_is_str(v)) return (int64_t)strlen((char *)(intptr_t)v);
-    mojo_raise_type_error((char *)"object has no len()");
-    return 0;
-}
 int mojo_getattr(int obj, char *attr) { (void)obj; (void)attr; return 0; }
 void *mojo_enumerate(void *iterable) { return iterable; }
 void *mojo_filter(void *func, void *iterable) { (void)func; return iterable; }

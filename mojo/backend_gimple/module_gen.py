@@ -16523,22 +16523,6 @@ def gen_module_impl(self, stmts):
             'extern "C" { typedef struct MojoGenerator MojoGenerator; }',
             'extern "C" { typedef struct MojoAsync MojoAsync; }',
             '',
-            '#include <type_traits>',
-            '/* The result of a call whose C return type is only final once the',
-            '   whole module is lowered: one pointer-sized WORD that converts to',
-            '   whichever of int64_t / string / container pointer the variable it',
-            '   is assigned to is declared as (see `_mj_w` in cpp_core). */',
-            'struct _MjWord { int64_t w;',
-            '    operator int64_t() const { return w; }',
-            '    operator bool() const { return w != 0; }',
-            '    operator char *() const { return (char *)(intptr_t)w; }',
-            '    operator MojoList *() const { return (MojoList *)(intptr_t)w; }',
-            '    operator MojoDict *() const { return (MojoDict *)(intptr_t)w; }',
-            '    operator MojoSet *() const { return (MojoSet *)(intptr_t)w; } };',
-            'template <class T> static inline _MjWord _mj_w(T v) {',
-            '    if constexpr (std::is_pointer_v<T>) return _MjWord{(int64_t)(intptr_t)v};',
-            '    else return _MjWord{(int64_t)v}; }',
-            '',
             '/* Milestone D: RAII `finally:` translation (see',
             '   GimpleGen._cpp_try_stmt) -- runs an arbitrary capturing',
             '   lambda from its destructor, so it fires on every way its',
@@ -16928,13 +16912,6 @@ def gen_module_impl(self, stmts):
             cpp_parts.append(unit)
             cpp_parts.append('')
         self.generated_cpp = '\n'.join(cpp_parts)
-        # Resolve the callee-symbol placeholders a generator body emitted
-        # (`@@CSYM:name@@`) now that every function's parameter types, and so
-        # its overload suffix, are final.
-        if '@@CSYM:' in self.generated_cpp:
-            self.generated_cpp = re.sub(
-                r'@@CSYM:([A-Za-z0-9_]+)@@',
-                lambda _m: self._func_csym(_m.group(1)), self.generated_cpp)
 
     # A3 stack-switch coroutine trampolines (gimple_gen_coro.register): plain
     # C, emitted straight into this module's .c/.ci output — the generator
