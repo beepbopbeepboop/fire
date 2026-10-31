@@ -415,7 +415,9 @@ def _fn_bracket_kinds(module_src, base):
         head = rest.split('=')[0].strip().split('[')[0].strip()
         if head.startswith('*'):
             return None
-        kinds.append((name.strip(), head in traits))
+        head_parts = [p.strip() for p in re.split(r'[&,|]', head) if p.strip()]
+        is_trait = any(p in traits for p in head_parts)
+        kinds.append((name.strip(), is_trait))
     return kinds
 
 
@@ -3382,6 +3384,8 @@ def run(gen, stmts):
         elif kind == 'fn':
             # Materialize EVERY generic function instantiation with concrete
             # type arguments (Option A: unique mangled names per spec).
+            # Inline functions stay on the .o route unless they need a
+            # unique symbol (the dylib fix targets dlsym specifically).
             args = _concrete_args(work, kind, base, n, scope)
             if args is None:
                 return
