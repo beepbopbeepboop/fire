@@ -331,6 +331,12 @@ def _literal_kind(expr) -> str | None:
             k = list(eks)[0]
             if isinstance(k, str):
                 return ('list', k)
+            # A list of lists whose inner lists all hold ONE scalar kind
+            # (`[[1, 2], [3, 4]]`): ('list', ('list', 'i')). One level only;
+            # the backend's `_nested_elem_types` slot carries exactly one.
+            if (isinstance(k, tuple) and len(k) == 2 and k[0] == 'list'
+                    and isinstance(k[1], str)):
+                return ('list', k)
     return None
 
 
@@ -529,6 +535,12 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
             elif lk == 'p':
                 ek = 'p'          # `for c in 'ab':` -- characters are strings
         if isinstance(ek, str):
+            env[tname] = ek
+        elif (isinstance(ek, tuple) and len(ek) == 2 and ek[0] == 'list'
+                and isinstance(ek[1], str)):
+            # An element of a list of lists IS a list: `for row in rows:`
+            # binds `row` to ('list', <inner kind>), so the inner
+            # `for cell in row:` (visited after this one) is typed too.
             env[tname] = ek
     # `for i, x in enumerate(<xs>)`: the two-slot target the loop above
     # skips. Slot 0 is the index, an int by construction, and slot 1 is one
@@ -3351,6 +3363,7 @@ def _mark_coro_param_elem_kinds(body_fd, real_params, env):
     must be able to ask "is this a coroutine body, and what did its params
     look like" without a parallel naming convention to keep in sync."""
     kinds: dict = {}
+    nested: dict = {}
     str_params: list = []
     int_lists: list = []
     for pname, _pann in real_params:
@@ -3364,8 +3377,19 @@ def _mark_coro_param_elem_kinds(body_fd, real_params, env):
                 int_lists.append(_local_param_name(pname))
             else:
                 kinds[_local_param_name(pname)] = ct
+        elif (isinstance(v, tuple) and len(v) == 2 and v[0] == 'list'
+                and isinstance(v[1], tuple) and len(v[1]) == 2
+                and v[1][0] == 'list' and v[1][1] in _KIND_CTYPE):
+            # A list of lists: the outer element is a `MojoList *` and the
+            # inner element kind rides in the nested slot (the same
+            # (elem, nested) pair `_param_elem_types` carries for an
+            # ordinary function's list-of-lists parameter).
+            kinds[_local_param_name(pname)] = 'MojoList *'
+            nested[_local_param_name(pname)] = _KIND_CTYPE[v[1][1]]
         elif v == 'p':
             str_params.append(_local_param_name(pname))
+    if nested:
+        body_fd._mojo_coro_param_nested_kinds = nested
     if kinds:
         body_fd._mojo_coro_param_elem_kinds = kinds
     if int_lists:

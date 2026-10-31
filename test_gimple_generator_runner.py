@@ -6703,6 +6703,54 @@ def main():
 main()
 """, "1.5\n2.5\n")
 
+    # A list of lists through a generator parameter: the outer loop target
+    # inherits the NESTED element ctype (`_mojo_coro_param_nested_kinds` ->
+    # `_param_elem_types` -> `_boxed_list_ptr`), so the inner loop reads it
+    # with the right accessor instead of printing heap addresses.
+    test_generator_stdout("generator_list_of_lists_param_yields_inner_ints", """\
+def rows(data):
+    for row in data:
+        for cell in row:
+            yield cell
+
+def main():
+    for v in rows([[1, 2], [3, 4]]):
+        print(v)
+main()
+""", "1\n2\n3\n4\n")
+
+    # A list of lists through a generator parameter: the outer loop target
+    # inherits the NESTED element ctype (`_mojo_coro_param_nested_kinds` ->
+    # `_param_elem_types` -> `_boxed_list_ptr`), so the inner loop reads it
+    # with the right accessor instead of printing heap addresses.
+    test_generator_stdout("generator_list_of_lists_param_yields_inner_floats", """\
+def rows(data):
+    for row in data:
+        for cell in row:
+            yield cell
+
+def main():
+    for v in rows([[1.5, 2.5], [3.5]]):
+        print(v)
+main()
+""", "1.5\n2.5\n3.5\n")
+
+    # A list of lists through a generator parameter: the outer loop target
+    # inherits the NESTED element ctype (`_mojo_coro_param_nested_kinds` ->
+    # `_param_elem_types` -> `_boxed_list_ptr`), so the inner loop reads it
+    # with the right accessor instead of printing heap addresses.
+    test_generator_stdout("generator_list_of_lists_param_yields_inner_strings", """\
+def rows(data):
+    for row in data:
+        for cell in row:
+            yield cell
+
+def main():
+    for v in rows([["a", "b"], ["c"]]):
+        print(v)
+main()
+""", "a\nb\nc\n")
+
     test_generator_stdout("generator_enumerate_index_yields_index", """\
 def rows(data):
     for i, r in enumerate(data):

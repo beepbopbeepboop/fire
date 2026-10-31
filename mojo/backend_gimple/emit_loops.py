@@ -744,6 +744,14 @@ def _boxed_list_ptr(gen, lst_type: str, lst_val: str) -> str | None:
             return None
     lp = gen._coerce_to_type('int64_t', 'MojoList *', gen._to_int64(lst_type, lst_val))
     gen._elem_types[lp] = elem
+    # The nested half rides along: the loop reads the iterable's nested
+    # element ctype from the pointer it is HANDED (`_carry_nested_elem`), which
+    # is this fresh temp, not the parameter name the contract was recorded
+    # under -- so a list of lists lost its inner type here and `for cell in
+    # row:` read the inner elements as int64_t.
+    _lp_nested = gen._nested_elem_types.get(_as_str(lst_val))
+    if _lp_nested is not None:
+        gen._nested_elem_types[lp] = _lp_nested
     return lp
 
 

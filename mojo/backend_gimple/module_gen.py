@@ -9148,8 +9148,12 @@ def gen_module_impl(self, stmts):
         _pe_body = getattr(_fp_s, '_mojo_coro_param_elem_kinds', None)
         if _pe_body:
             _pe_d = self._param_elem_types.setdefault(_as_str(_fp_s.name), {})
+            _pe_nested = getattr(_fp_s, '_mojo_coro_param_nested_kinds', None) or {}
             for _pe_k in _pe_body:
-                _pe_d[_as_str(_pe_k)] = (_as_str(_pe_body[_pe_k]), None)
+                _pe_ne = None
+                if _pe_k in _pe_nested:
+                    _pe_ne = _as_str(_pe_nested[_pe_k])
+                _pe_d[_as_str(_pe_k)] = (_as_str(_pe_body[_pe_k]), _pe_ne)
         _pi_body = getattr(_fp_s, '_mojo_coro_param_int_lists', None)
         if _pi_body:
             _pi_d = self._coro_int_list_params.setdefault(_as_str(_fp_s.name), set())
