@@ -6690,7 +6690,7 @@ fn main():
     # built: CPython's own `Apple/__main__.py --help` printed usage and exited
     # 0, and this printed `Unhandled exception: AttributeError:
     # cross_build_dir` and exited 0 too
-    # (DELETED bugs/RUNTIME_argparse_is_stubbed_so_parse_args_consumers_crash.md; module-marker stub now loud)
+    # (DELETED commit 319ab932c; module-marker stub now loud)
     #
     # The raise happens at the CALL, which is where it becomes true, and it is
     # catchable — which is the second half of the assertion: a program that
@@ -6726,7 +6726,7 @@ def main():
         print("fell back")
 """, "fell back\n")
 
-    # Pinning regression — DELETED bugs/RUNTIME_argparse_is_stubbed_so_parse_args_consumers_crash.md
+    # Pinning regression — DELETED commit 319ab932c
     # (already fixed: stub raises NotImplementedError at call site, not silent 0)
     test_gimple_stdout("gimple_argparse_parse_args_pin", """\
 import argparse
@@ -8705,7 +8705,7 @@ main()
     # range test, so it calls every positive int64 in [2^31, 2^47) a pointer.
     # They are here because the codegen PROVABLY knows an integer literal is
     # an integer, and supplies the answer rather than asking (see
-    # bugs/RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md, whose
+    # commit f7343ee40, whose
     # dict-key spelling has its own test below).
     test_gimple_stdout("gimple_annotated_str_param_given_a_non_str", """\
 class Dialog:
@@ -9686,7 +9686,7 @@ print({"a": 1})
     # parser treated `*` as the conversion character, so the template's
     # operand count never matched its spec count and the WHOLE template
     # degraded to its literal text — `'0x%0*X' % (precision, t)` printed
-    # `0x%0*X` (bugs/COMPILE_FAIL_Tools_unicode_gencodec.md's reported
+    # `0x%0*X` (commit e186f9737's reported
     # `    (): (0x%0*X, 0x%0*X),` entry lines).
     #
     # Every conversion is exercised, not just the hex one, because the

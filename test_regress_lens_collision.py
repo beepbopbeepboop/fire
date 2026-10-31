@@ -1,5 +1,5 @@
-"""Regression for the self-host link failure with undefined toplevel symbols
-(fixed by removing the colliding `_lens` locals in module_gen.py).
+"""Regression for the `CODEGEN_module_toplevel_undefined_in_selfhost` self-host
+link failure (fixed by removing the colliding `_lens` locals in module_gen.py).
 The compiled path froze the NAME as the set, so the dict assignment
 raised "cannot coerce MojoSet * to MojoDict *", which silently rolled
 back module_gen.py's own compile and left four GPU siblings without
