@@ -4,7 +4,7 @@ shape (`next_opcode = 1` before a nested `def` that reassigns it), as
 opposed to the Mojo-source shape (`var counter = 0`) every earlier test in
 test_general_mutable_closure_capture.py exercises.
 
-Root cause fixed (bugs/hard/COMPILE_FAIL_Tools_cases_generator_analyzer.md's
+Root cause fixed (bugs/COMPILE_FAIL_Tools_cases_generator_analyzer.md's
 exit-time/mid-run segfault residual, analyzer.py:1066): the box for a
 by-reference-captured local used to be allocated by _gen_stmt_VarDecl at
 the local's `var x = ...` statement. Real Python source's first binding is
@@ -32,7 +32,6 @@ import sys
 import tempfile
 
 import driver
-from exec_budget import RUN_TIMEOUT_S
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -59,7 +58,7 @@ def _build_and_run_compiled(src: str, filename: str = 'prog.py') -> str:
     rc = driver.compile_program(src_path, src, output=exe, run=False)
     if rc is None:
         raise RuntimeError("driver.compile_program failed to build (returned None)")
-    r = subprocess.run([exe], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
+    r = subprocess.run([exe], capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
         raise RuntimeError(f"program exited {r.returncode}, stderr={r.stderr}")
     return r.stdout
