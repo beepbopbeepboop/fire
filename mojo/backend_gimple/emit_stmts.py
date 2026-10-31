@@ -283,7 +283,7 @@ def _try_bind_iter_cursor(gen, name, value, is_decl=False):
         return False
     at, av = gen.lower_expr(value.args[0])
     at = gen._get_actual_type(at, av)
-    if _rebind and gen.var_types.get(name) != at:
+    if _rebind and (gen.var_types.get(name) != 'MojoList *' or at != 'MojoList *'):
         return False
     data = None
     if at == 'MojoList *':

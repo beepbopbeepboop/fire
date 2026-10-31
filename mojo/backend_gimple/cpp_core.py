@@ -7526,43 +7526,6 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             lines.append(f"{indent}}}")
             lines.append(f"{indent}mojo_set_iter_free({_sit});")
             return lines
-        # `for x in reversed(<list local>):` -- Lib/os.py's `walk`
-        # (`for dirname in reversed(dirs)`). The list is reversed ONCE into a
-        # cached local (`mojo_list_reversed`, a fresh `MojoList *`), then
-        # walked with the same indexed loop every list iteration here uses, the
-        # element type being the wrapped list's own (reversing never changes
-        # it). Single-name target only; a tuple target falls through.
-        if (isinstance(s.iterable, gimple_ctypes.CallExpr)
-                and isinstance(s.iterable.func, gimple_ctypes.IdentExpr)
-                and s.iterable.func.name == 'reversed'
-                and not gen._locally_binds_name('reversed')
-                and len(s.iterable.args) == 1 and not s.iterable.kwargs
-                and isinstance(s.iterable.args[0], gimple_ctypes.IdentExpr)
-                and gen._cpp_declared is not None
-                and gen._cpp_declared.get(s.iterable.args[0].name)
-                in ('int64_t', 'MojoList *')
-                and isinstance(target, str) and not for_target_is_tuple(target)):
-            _rv_src = s.iterable.args[0].name
-            _rv_elem = getattr(gen, '_cpp_list_local_elem_types', {}).get(_rv_src)
-            if _rv_elem is None and _cpp_body_str_evidence(target, s.body):
-                _rv_elem = 'char *'
-            _rv_list = gen._cpp_fresh_name("_mg_rev")
-            _rv_ctr = gen._cpp_fresh_name("_mg_i")
-            lines = [f"{indent}MojoList *{_rv_list} = mojo_list_reversed("
-                     + _cpp_as('MojoList *', _rv_src) + ");"]
-            _rv_ct = _rv_elem if _rv_elem in ('char *', 'double') else 'int64_t'
-            _rv_get = {'char *': 'mojo_list_get_str',
-                       'double': 'mojo_list_get_double'}.get(_rv_ct, 'mojo_list_get_int')
-            if not target_was_declared:
-                declared[target] = _rv_ct
-                lines.append(f"{indent}{_rv_ct} {target};")
-            lines.append(f"{indent}for (int64_t {_rv_ctr} = 0; "
-                         f"{_rv_ctr} < mojo_list_len({_rv_list}); {_rv_ctr}++) {{")
-            lines.append(f"{indent}    {target} = {_rv_get}({_rv_list}, {_rv_ctr});")
-            for inner in s.body:
-                lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
-            lines.append(f"{indent}}}")
-            return lines
         try:
             iter_expr = gen._cpp_expr(s.iterable)
         except gimple_exprtypes._UnsupportedGeneratorShape:

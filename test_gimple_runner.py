@@ -3231,6 +3231,18 @@ def dflt(items):
 print(rest([1, 2, 3]), twice([4, 5, 6]), dflt([]), dflt([9]))
 """, "(1, [20, 30]) 9 -1 9\n")
 
+    # A constructor stub lowers to int64_t 0. The iter() rebind guard must
+    # not treat that scalar as a MojoList * cursor. See
+    # bugs/CODEGEN_gate_stdlib_syntax_red.md.
+    test_gimple_execution("gimple_iter_does_not_rebind_scalar_to_cursor", """\
+from collections import LinkedList
+def go():
+    var ll = LinkedList[Int]()
+    var it = iter(ll)
+    return 0
+print(go())
+""")
+
     # A FLAT list parameter whose call sites disagree on the element type
     # (ints, strings, floats; literal and bound-to-a-name). The contract is
     # unknown, so the loop reads each slot through mojo_list_get_boxed and the
