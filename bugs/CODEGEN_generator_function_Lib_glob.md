@@ -1,5 +1,40 @@
 # CODEGEN_generator_function: Lib/glob.py
 
+## Status (2026-10-30 — planning: what is left is the TAGGED YIELD, and the nested-selector closures)
+
+Measured on CPython 3.15's `glob.py` after the generator work of this week
+(`self`-capturing nested generators in methods, `nonlocal` writes, `close()`,
+`os.path` function values, `scandir`): the refusals are exactly
+
+- `_iglob` / `_glob2`: "yields ['pathname'], whose call sites do not all pass
+  the same statically-known type" / "every yield must carry a value, and all
+  values must agree on one scalar type". The code is str/bytes polymorphic
+  (`isinstance(dirname, bytes)`, `fsencode`) and yields `pathname`, `pattern[:0]`,
+  `os.path.join(dirname, name)` and delegated values from callable-valued locals
+  (`glob_in_dir = _glob2 / _glob1 / _glob0`). No single C value slot exists, so
+  the solver cannot keep it tight; this is the case the project rule assigns to
+  the TAGGED type: when yield kinds do not unify, the value slot is a boxed word
+  (`MojoBox`: str / bytes / int / float / bool, the runtime already has the box
+  and `mojo_repr_boxed` / `mojo_box_word` readers), every yield site boxes its
+  value with its STATIC kind, and the consumer reads by tag instead of refusing.
+- `select_recursive`, `select_recursive_step`, `select_wildcard`: nested
+  generators that read `match`, `select_next`, `self`, `dir_only`,
+  `follow_symlinks` and ESCAPE their enclosing method as values
+  (`return select_wildcard`), which the capture model refuses by design (the
+  hidden `self`/box handles can only be supplied by the enclosing function's own
+  call sites). They need escaping closure generators: a closure record (the
+  captured words + the generator's `_start`) as the callable value, called
+  through `mojo_dyn_call` (the dynamic-call layer `fsutil.py` added), with
+  `match` (a bound `re.Pattern.match`) as a registered bound-method value.
+
+Order: (a) the tagged yield (also the answer for `Lib_enum` and `Lib_os`'s
+`_fwalk` slots): the promise's `value_ctype` becomes `int64_t` + a "tagged"
+flag on the generator API entry, `co_yield` sites box, consumer loops declare
+the target as a tagged word and `print`/arithmetic/`str` dispatch on the tag;
+(b) escaping closure generators on `mojo_dyn_call`. Tests: the three `_glob*`
+functions' real call shapes against CPython, `glob.glob('**/*.py',
+recursive=True, root_dir=...)` over a `/tmp` tree.
+
 ## Status (2026-10-30 — partial fix landed: the os.path.split unpack / str-slice / stale-memo holes are closed; module still refuses)
 
 Measured with `compile_to_gimple_with_cpp(open(Lib/glob.py).read(), do_imports=False)`

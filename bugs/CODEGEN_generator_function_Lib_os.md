@@ -1,5 +1,35 @@
 # CODEGEN_generator_function: Lib/os.py
 
+## Status (2026-10-30, round 7 — planning: `_fwalk` is not one `stat()` — the exact inventory)
+
+`walk` is done (round 6). What stands between `Lib/os.py` and a full compile is
+`_fwalk` (fd-based `fwalk()`), and it is a different animal from `walk`: after
+`stat(...)` is resolved the refusals continue down the body. Read off the 3.15
+source, in order of first use:
+
+1. `action, value = stack.pop()` where `value` is `int` (a close fd), a 4-tuple
+   `(toppath, dirs, nondirs, topfd)` or a 5-tuple `(isroot, dirfd, toppath,
+   topname, entry)` — a HETEROGENEOUS-SLOT tuple, not just string-or-tuple:
+   slot kinds bool/int/str/None/DirEntry vary by action. This is the tagged
+   tuple-slot model (a runtime-kinded list read per slot, `mojo_list_get_boxed`,
+   already exists; the generator side must keep the slots boxed instead of
+   unifying them to one C type).
+2. `stat(name, follow_symlinks=False, dir_fd=fd)`, `stat(fd)`, `entry.stat(...)`
+   returning a `stat_result` (`st_mode`, `st_dev`, `st_ino`) — a fixed-layout
+   runtime struct like `DirEntry`; `path.samestat(a, b)`; `st.S_ISDIR(mode)`.
+3. `open(name, O_RDONLY | O_NONBLOCK, dir_fd=fd)`, `close(fd)`, `scandir(fd)`
+   (an fd, not a path) — `openat`/`fdopendir` wrappers.
+4. `raise` (bare re-raise inside `except OSError as err`), `assert action ==
+   _fwalk_walk` (an `assert` is a silent NO-OP in a coroutine body today — it
+   should be a real check), `stack.extend(<generator expression of tuples>)`,
+   `zip(dirs[::-1], entries[::-1])`, `fsencode(name)`.
+
+Order of work: (1) first — it is the same machinery `walk` used (tagged word,
+`isinstance` discrimination) generalised to per-slot kinds; (2)-(3) are runtime
+structs/wrappers in the `DirEntry` mould; (4) are independent small lowerings.
+Test: compile `Lib/os.py` whole, then `os.fwalk` over a `/tmp` tree in both
+`topdown` modes and with `follow_symlinks=True` against CPython.
+
 ## Status (2026-10-30, round 6 — `walk` COMPILES AND RUNS CORRECTLY; `Lib/os.py` now refuses only on `_fwalk`'s `stat(...)`)
 
 `with scandir(top) as entries:` is real now, and the CPython 3.15 `walk` source,
