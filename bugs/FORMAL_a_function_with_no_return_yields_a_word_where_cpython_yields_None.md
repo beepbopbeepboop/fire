@@ -958,3 +958,4 @@ That leaves direction (b) as the full answer (item 6 of `The exact next step`),
 but it is no longer the answer *because* the four positions are unaffordable —
 they are affordable; it is because (b) makes every use correct rather than only
 the refused ones.
+
