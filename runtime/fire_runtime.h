@@ -699,7 +699,7 @@ MojoList *mojo_iter_word(int64_t v);   /* list / dict keys / set / str / bytes o
  * live-handle table behind a dynamic call; see the definitions. */
 void mojo_gen_sig_register(void *start, void *resume, void *value, void *destroy, int vkind, int np,
                            const char *const *names, int first_kwonly, const int64_t *defaults,
-                           const unsigned char *has_default);
+                           const unsigned char *has_default, const unsigned char *is_double);
 MojoList *mojo_iter_gen_handle(int64_t w);
 int64_t mojo_gen_note(int64_t h, void *start);
 int64_t mojo_gen_note_a3(int64_t h, int64_t vkind);   /* 0 int, 1 bool, 2 double, 3 str */

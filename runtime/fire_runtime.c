@@ -1811,13 +1811,14 @@ typedef struct MojoGenSig {
     int first_kwonly;          /* index of the first keyword-only parameter */
     const int64_t *defaults;
     const unsigned char *has_default;
+    const unsigned char *is_double;   /* per parameter: 1 = a double (travels in a float register) */
 } MojoGenSig;
 static MojoGenSig **_gsig_tab = 0; static size_t _gsig_cap = 0, _gsig_n = 0;
 static void **_ghnd_key = 0; static MojoGenSig **_ghnd_val = 0; static size_t _ghnd_cap = 0, _ghnd_n = 0;
 static size_t _gh(void *p, size_t cap) { return (((uintptr_t)p >> 4) * 11400714819323198485ull) & (cap - 1); }
 void mojo_gen_sig_register(void *start, void *resume, void *value, void *destroy, int vkind, int np,
                            const char *const *names, int first_kwonly, const int64_t *defaults,
-                           const unsigned char *has_default)
+                           const unsigned char *has_default, const unsigned char *is_double)
 {
     if (_gsig_n * 2 >= _gsig_cap) {
         size_t nc = _gsig_cap ? _gsig_cap * 2 : 64;
@@ -1832,7 +1833,7 @@ void mojo_gen_sig_register(void *start, void *resume, void *value, void *destroy
     MojoGenSig *g = (MojoGenSig *)malloc(sizeof *g);
     g->start = start; g->resume = resume; g->value = value; g->destroy = destroy;
     g->vkind = vkind; g->np = np; g->names = names; g->first_kwonly = first_kwonly;
-    g->defaults = defaults; g->has_default = has_default;
+    g->defaults = defaults; g->has_default = has_default; g->is_double = is_double;
     size_t j = _gh(start, _gsig_cap);
     while (_gsig_tab[j]) j = (j + 1) & (_gsig_cap - 1);
     _gsig_tab[j] = g; _gsig_n++;
@@ -1986,8 +1987,21 @@ static int64_t _gen_sig_call(MojoGenSig *sg, MojoList *args, MojoDict *kw)
             if (!ok) { { char _m[200]; snprintf(_m, sizeof _m, "got an unexpected keyword argument '%s'", k); mojo_raise_type_error(_m); } return 0; }
         }
     }
-    typedef int64_t (*F)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
-    int64_t h = ((F)sg->start)(w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
+    /* The integer and floating-point argument registers are assigned
+     * independently (AAPCS64 and SysV x86-64 alike), so the words are split
+     * by kind, each kind keeping its own order, and the callee finds every
+     * parameter where its own signature puts it. The emitter registers at
+     * most 6 integer and 8 double parameters, which fit both ABIs. */
+    int64_t iw[8] = {0, 0, 0, 0, 0, 0, 0, 0}; double dw[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    int ni = 0, nd = 0;
+    for (int i = 0; i < np; i++) {
+        if (sg->is_double && sg->is_double[i]) dw[nd++] = mojo_double_from_bits(w[i]);
+        else iw[ni++] = w[i];
+    }
+    typedef int64_t (*F)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t,
+                         double, double, double, double, double, double, double, double);
+    int64_t h = ((F)sg->start)(iw[0], iw[1], iw[2], iw[3], iw[4], iw[5], iw[6], iw[7],
+                               dw[0], dw[1], dw[2], dw[3], dw[4], dw[5], dw[6], dw[7]);
     _gen_handle_put((void *)(intptr_t)h, sg);
     return h;
 }
@@ -2017,6 +2031,23 @@ int64_t mojo_dyn_call(int64_t fn, MojoList *args, MojoDict *kw)
     void *fp = (void *)(intptr_t)fn;
     int64_t n = args ? mojo_list_len(args) : 0;
     { MojoGenSig *_sg = _gen_sig_lookup(fp); if (_sg) return _gen_sig_call(_sg, args, kw); }
+    /* Past a registered generator (which routes a double to a float register)
+     * every callee takes its arguments as integer words: a plain function
+     * pointer in integer registers, a variadic thunk as packed words. A double
+     * (tagged by the call site: the list's kind string, a double dict slot)
+     * cannot reach either intact, so it is refused rather than read as bits. */
+    {   const char *_k = args ? mojo_list_get_kinds(args) : 0;
+        int dbl = _k && strchr(_k, 'd') != 0;
+        if (!dbl && kw) {
+            MojoList *_ks = mojo_dict_keys(kw);
+            for (int64_t i = 0; i < mojo_list_len(_ks); i++)
+                if (mojo_dict_slot_kind(kw, mojo_list_get_str(_ks, i)) == 1) { dbl = 1; break; }
+        }
+        if (dbl) {
+            mojo_raise_type_error((char *)"a float argument cannot be passed through a dynamic call to a function value that is not a compiled generator");
+            return 0;
+        }
+    }
     if (mojo_is_vararg_fn(fp)) {
         int64_t v[16];
         if (n > 16) n = 16;

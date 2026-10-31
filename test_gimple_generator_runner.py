@@ -1276,6 +1276,48 @@ main()
     _fsutil_src = _fsutil_src.replace("@RUNTIME@", os.path.abspath("runtime"))
     test_generator_matches_cpython(
         "cpp_fsutil_iter_files_walk_tree_glob_tree", _fsutil_src, _fsutil_src)
+    # A compiled generator with a `float` parameter, held as a kw-only callable
+    # default and called with KEYWORDS, goes through the runtime signature
+    # (`mojo_gen_sig_register` / `mojo_dyn_call`). A `double` travels in a float
+    # register, which the word-typed `_gen_sig_call` could not reproduce, so the
+    # unit used to be left unregistered and the call raised a TypeError. The
+    # signature now carries a per-parameter double mask. Item 5 of the
+    # dynamic-call-layer residue bug (the fsutil `walk_tree` family). The mixed
+    # int/float parameter order checks the integer and float registers are
+    # filled independently, in order.
+    _dbl_src = """\
+def ramp(n: int, *, scale: float = 0.5, base: float = 1.0, tag: int = 7):
+    i = 0
+    while i < n:
+        yield int((base + i * scale) * 100) + tag
+        i = i + 1
+
+def mid(m: int, f: float, k: int):
+    yield int(f * 100) * m + k
+
+def total(n, *, _ramp=ramp):
+    for v in _ramp(n, scale=2.5, base=10.0):
+        yield v
+    for v in _ramp(n, tag=0):
+        yield v
+    for v in _ramp(n, base=3.0, scale=0.25, tag=1):
+        yield v
+
+def via(*, _mid=mid):
+    for v in _mid(1, 2.5, 3):
+        yield v
+    for v in _mid(f=0.5, m=4, k=5):
+        yield v
+
+def main():
+    for v in total(3):
+        print(v)
+    for v in via():
+        print(v)
+main()
+"""
+    test_generator_matches_cpython(
+        "cpp_generator_double_param_called_by_keywords", _dbl_src, _dbl_src)
     # The no-argument form: `TypeError()` is legal Python and the message is
     # the empty string, which is what the emitted `char *` empty literal
     # carries. Kept because it is the shape whose typing needs no argument to
