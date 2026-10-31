@@ -39,7 +39,6 @@ import platform
 import subprocess
 import sys
 import tempfile
-from exec_budget import COMPILE_TIMEOUT_S  # per-child budgets
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIRE = os.path.join(HERE, "fire.py")
@@ -142,7 +141,7 @@ CASES = [
     # a pointer says yes. As a value a MOJO function built, an `Optional`'s tag
     # lives a second frame away from its one-word payload, so `if not ptr:` is
     # not answerable from the word and `Some(null)` is not `None` —
-    # `bugs/formal/FORMAL_stdlib_optional_needs_a_representation.md`, and the reason
+    # `bugs/FORMAL_stdlib_optional_needs_a_representation.md`, and the reason
     # reading through one stays refused. That OTHER question has its own table,
     # `model.NULLABLE_POINTER_UNWRAP_ALIASES`, named for it; the two were one
     # name until `“`NULLABLE_POINTER_ALIASES` is defined twice, and the first definition is dead”` was
@@ -694,7 +693,7 @@ def _header_variadic_map():
         with open(src, "w") as f:
             f.write(HEADERS)
         r = subprocess.run([clang, "-E", "-P", src], capture_output=True,
-                           text=True, timeout=COMPILE_TIMEOUT_S)
+                           text=True, timeout=120)
         if r.returncode != 0:
             return None
         text = r.stdout

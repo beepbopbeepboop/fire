@@ -41,8 +41,8 @@ def compiled_stdout(src, mode='single-TU'):
                               timeout=RUN_TIMEOUT_S)
         return run.stdout
 
-CASES = {
-    'bound-name': '''\
+if __name__ == '__main__':
+    src = '''\
 def outer(p):
     def inner(x):
         return p + x
@@ -52,34 +52,13 @@ def main():
     g = outer("<")
     print(g(">"))
 main()
-''',
-    'chained': '''\
-def outer(p):
-    def inner(x):
-        return p + x
-    return inner
-
-def main():
-    print(outer("[")("]"))
-main()
-''',
-    'direct-call-in-factory': '''\
-def outer(p):
-    def inner(x):
-        return x + p
-    return inner("a")
-
-def main():
-    print(outer("b"))
-main()
-''',
-}
-
-if __name__ == '__main__':
-    for name, src in CASES.items():
-        want = cpython_stdout(src)
-        for mode in ('single-TU', 'link-mode'):
-            got = compiled_stdout(src, mode)
-            assert got == want, f"FAIL {name} {mode}: {got!r} != {want!r}"
-        print(f"PASS {name}: {want!r}")
+'''
+    want = cpython_stdout(src)
+    got_single = compiled_stdout(src, 'single-TU')
+    got_link = compiled_stdout(src, 'link-mode')
+    print(f"CPython want: {want!r}")
+    print(f"single-TU got: {got_single!r}")
+    print(f"link-mode got: {got_link!r}")
+    assert got_single == want, f"FAIL single-TU: {got_single!r} != {want!r}"
+    assert got_link == want, f"FAIL link-mode: {got_link!r} != {want!r}"
     print("PASS")

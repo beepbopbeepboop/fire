@@ -564,19 +564,6 @@ def _resolve_overload(gen, candidates: list, args: list, kwargs: list | None) ->
         if _score(_c2) == best_score:
             ties.append(_c2)
     if len(ties) > 1:
-        # Type erasure cannot tell `def __iter__(var self)` from `def
-        # __iter__(ref self)` (both are `(Struct *)`), but a call on a
-        # receiver that is not consumed (`l.__iter__()`, no `^`) can only mean
-        # the non-consuming overload: real Mojo prefers it, and picking the
-        # owning one typed `LinkedList.__iter__()`'s result as the
-        # `IteratorOwnedType` stub. Explicit loop (self-host: no comprehension).
-        _kept = []
-        for _c4 in ties:
-            if not _c4.get('self_owned'):
-                _kept.append(_c4)
-        if _kept:
-            ties = _kept
-    if len(ties) > 1:
         gimple_ctypes._debug_note('ambiguous or type-indistinguishable overload, picking first in declaration order',
                     f"candidates={[c['overload_id'] for c in ties]}")
     return ties[0]
@@ -592,8 +579,8 @@ def _pack_kwargs_dict(gen, kwarg_pairs) -> str:
 
     String values go through mojo_dict_set_str so the dict's own value
     type is right (mojo_dict_set_int would store the char* as an integer
-    and later read it back as one), doubles through mojo_dict_set_double.
-    Everything else — ints, pointers — goes through mojo_dict_set_int, which _emit_call coerces,
+    and later read it back as one). Everything else — ints, doubles,
+    pointers — goes through mojo_dict_set_int, which _emit_call coerces,
     matching how `d[k] = v` already lowers a subscript store."""
     d = gen._new_val('MojoDict *', 'mojo_dict_new ()')
     _val_ty = ''
@@ -613,14 +600,6 @@ def _pack_kwargs_dict(gen, kwarg_pairs) -> str:
             gen._emit_call('void', '', 'mojo_dict_set_str',
                             [('MojoDict *', d), ('char *', f'"{gimple_ctypes._c_escape(kname)}"'),
                              ('char *', kv)])
-        elif kt == 'double':
-            # Not `mojo_dict_set_int`: `_emit_call` would coerce the double to
-            # an integer and `run(g, scale=2.5)` would arrive as 2. The slot
-            # carries the double kind, which `mojo_dyn_call` also reads to
-            # route it to a float register (or refuse it for a plain pointer).
-            gen._emit_call('void', '', 'mojo_dict_set_double',
-                            [('MojoDict *', d), ('char *', f'"{gimple_ctypes._c_escape(kname)}"'),
-                             ('double', kv)])
         else:
             gen._emit_call('void', '', 'mojo_dict_set_int',
                             [('MojoDict *', d), ('char *', f'"{gimple_ctypes._c_escape(kname)}"'),
@@ -883,12 +862,6 @@ def user_dunder_repr_call(gen, struct_name: str, ctype: str, cval: str, prefer):
         _none = gen._intern_string('None')
         return gen._new_val('char *', f'({_local} ? {_call} : {_none})')
     return None
-
-
-# Frame attributes that are plain stored words on the frame record, and their runtime ids
-# (fire_runtime.c mojo_frame_get_attr / mojo_frame_set_attr / mojo_frame_del_attr). One table
-# for the read, store and `del` lowerings, so the three cannot disagree about an id.
-FRAME_SETTABLE_IDS = {'f_trace': 0, 'f_trace_lines': 1, 'f_trace_opcodes': 2}
 
 
 def _py_box_expr(gen, node):

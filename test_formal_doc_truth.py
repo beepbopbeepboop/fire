@@ -272,7 +272,7 @@ def group_constants():
     # document that publishes a stale bound is worse than one that publishes
     # none -- an operator sizing a decision against it reads the wrong number.
     for name, want in (('PROOF_WALL_S', 1500), ('PROOF_CPU_S', 1500),
-                       ('LIBRARY_WALL_S', 3600), ('LIBRARY_CPU_S', 3600)):
+                       ('LIBRARY_WALL_S', 1800), ('LIBRARY_CPU_S', 1800)):
         got = getattr(L, name)
         check(got == want,
               f'formal/lean.py::{name} is {got}, FORMAL.md §12 publishes {want}')
@@ -564,17 +564,17 @@ CITATION_LINES = [
     ('FORMAL.md', 'runtime/fire_python.c:7', 'runtime/fire_python.c', 'USE_PYTHON'),
     ('FORMAL.md', 'runtime/fire_sqlite3.c:156-157', 'runtime/fire_sqlite3.c',
      'int64_t'),
-    ('doc/ABI.md', 'runtime/fire_runtime.h:544', 'runtime/fire_runtime.h',
+    ('doc/ABI.md', 'runtime/fire_runtime.h:512', 'runtime/fire_runtime.h',
      'setjmp is emitted directly'),
-    ('doc/ABI.md', 'runtime/fire_runtime.h:545', 'runtime/fire_runtime.h',
+    ('doc/ABI.md', 'runtime/fire_runtime.h:513', 'runtime/fire_runtime.h',
      'no setjmp, safe to wrap'),
-    ('doc/ABI.md', 'runtime/fire_runtime.h:552', 'runtime/fire_runtime.h',
+    ('doc/ABI.md', 'runtime/fire_runtime.h:520', 'runtime/fire_runtime.h',
      'void mojo_raise'),
-    ('doc/ABI.md', 'runtime/fire_runtime.h:566', 'runtime/fire_runtime.h',
+    ('doc/ABI.md', 'runtime/fire_runtime.h:532-534', 'runtime/fire_runtime.h',
      'mojo_exc_type_get'),
-    ('doc/ABI.md', 'runtime/fire_runtime.h:661-663', 'runtime/fire_runtime.h',
+    ('doc/ABI.md', 'runtime/fire_runtime.h:612-614', 'runtime/fire_runtime.h',
      'mojo_exc_pending_get'),
-    ('doc/ABI.md', 'runtime/fire_runtime.h:661-663', 'runtime/fire_runtime.h',
+    ('doc/ABI.md', 'runtime/fire_runtime.h:585-610', 'runtime/fire_runtime.h',
      '_mojo_exc_pending'),
 ]
 

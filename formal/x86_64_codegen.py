@@ -848,14 +848,6 @@ class X86_64Codegen:
         # run test, and `test_formal_call_proof_gen.py::
         # TestCompilerTrapIsNotAProgramCall` for what is asserted about it.
         self._compiler_trap_addrs: list = []
-        # ADDRESSES of the calls the float-repr helper made — its `snprintf`
-        # and `strtod`.  The helper is this emitter's own (every image carries
-        # it, after the function bodies), so its call sites are not calls the
-        # PROGRAM makes: `formal/x86_64_proof_gen.py::_program_externs`
-        # subtracts them for the same reason it subtracts the traps, and not
-        # doing so suppresses the run tests of every image on this backend.
-        # Published in `compile()`'s `info` as `float_repr_calls`.
-        self._float_repr_call_addrs: list = []
         # The functions whose prologue carries the stack-floor guard, filled by
         # `compile()` once the whole image's call graph is known — see
         # `model.stack_floor_guarded_names`. The x86-64 twin of arm64's, from the
@@ -1029,7 +1021,7 @@ class X86_64Codegen:
         both backends through one `_codegen_and_link` and hands both the same
         list). Accepting it here is what keeps `--backend=x86_64` from dying
         with a TypeError on a keyword meant for the other backend (see
-        bugs/formal/FORMAL_arm64_instruction_coverage.md, "Landed alongside: dylib_syms"),
+        bugs/FORMAL_arm64_instruction_coverage.md, "Landed alongside: dylib_syms"),
         and USING it is what keeps the two backends from disagreeing about
         which callee names are types: without it a struct constructor fell
         through to the extern path and became a `call _Point` against a symbol
@@ -1246,12 +1238,6 @@ class X86_64Codegen:
             # the unreachability argument this is worth) is on
             # `_emit_stack_floor_guard`.
             "compiler_traps": sorted(self._compiler_trap_addrs),
-            # The float-repr helper's OWN extern calls (`snprintf`, `strtod`),
-            # by address — it is emitted once per image after every function
-            # body, so the sites are in `extern_calls` at or above the entry
-            # and `_program_externs` subtracts them there, the same subtraction
-            # `compiler_traps` is for the guard's `exit`.
-            "float_repr_calls": sorted(self._float_repr_call_addrs),
             "test_input": self.test_input,
             # EVERY entry argument's value, in order — the proof generator's
             # entry state is built from this list, so a two-parameter entry has
@@ -1273,7 +1259,7 @@ class X86_64Codegen:
             # side has to mean the same integer on the other, and `info` is how
             # both proof generators are handed one list instead of each
             # recomputing it. Nothing reads it yet
-            # (`bugs/formal/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §5).
+            # (`bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §5).
             "exception_kinds": M.exception_kinds(),
             # The INTERN TABLE, keyed by DECODED text — the same map, from the
             # same `_intern_string`, for the same reason as on arm64: a string
@@ -1817,7 +1803,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         `formal/x86_64_model_coverage_test.py`); what the disp32 form is NOT is
         reachable by a generated end-to-end proof yet, because the path through
         a call this wide does not close —
-        `bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`.
+        `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`.
         """
         self.asm.emit(encode_mov_r64_rm64(
             Reg.R11, Reg.RBP, _STACK_ARG_OFF + 8 * (index - len(ARG_REGS))))
@@ -2425,9 +2411,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                     self._emit_receiver_writeback()
                 self._emit_mov_imm(Reg.RAX, 0)
             else:
-                callee = self._vkinds.no_value_callee_of(stmt.value)
-                if callee is not None:
-                    raise CodegenError(M.returnless_value_refusal(callee))
                 # A double returned under an INTEGER annotation. Asked before
                 # the value is emitted, because the answer is about the
                 # FUNCTION's declaration rather than about the return
@@ -2831,7 +2814,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         rather than a runtime local, because a runtime local would give the
         program different behaviour than the source declares.
 
-        This is the refusal `bugs/formal/FORMAL_known_limits.md` §3 records as ARCH
+        This is the refusal `bugs/FORMAL_known_limits.md` §3 records as ARCH
         DRIFT. x86-64 used to refuse every `comptime` binding one layer up, at
         the statement dispatch, with "unsupported statement ComptimeVarStmt" —
         a different limit for the same construct on the two architectures, and
@@ -3293,7 +3276,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # premise is the BINDING OF THE BASE — and the same program written
             # `gen.temp_counter = 1` or `gen.temp_counter, x = 1, 2` already
             # produced arm64's sentence on BOTH machines. Filed as
-            # `bugs/formal/FORMAL_the_two_backends_refuse_different_constructs_in_the_
+            # `bugs/FORMAL_the_two_backends_refuse_different_constructs_in_the_
             # same_function.md`.
             key = self._frame_member_slot(stmt.target)
             if key is None:
@@ -5047,10 +5030,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         lea_rip(RDX, self._intern_string("%.*g"))
         m64(RCX, R12)           # n → RCX (4th int arg)
         mi(RAX, 1)              # 1 XMM register used
-        self._float_repr_call_addrs.append(self._emit_extern_call("snprintf"))
+        self._emit_extern_call("snprintf")
         lea64(RDI, RBP, -96)
         lea64(RSI, RBP, -48)
-        self._float_repr_call_addrs.append(self._emit_extern_call("strtod"))
+        self._emit_extern_call("strtod")
         a.emit(encode_movq_r64_xmm(RAX, 0))
         mm64(RCX, RBP, -40)
         cpr(RAX, RCX)
@@ -5150,18 +5133,17 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         a.label("L_chk")
         mvz(RAX, RDI, 0)
         t64(RAX, RAX)
-        jc("jz", "L_add_dot0")
+        jc("jz", "L_nul")
         cpi(RAX, 0x2E)
-        jc("je", "fr_ret")
+        jc("je", "L_nul")
         cpi(RAX, 0x65)
-        jc("je", "fr_ret")
+        jc("je", "L_nul")
         cpi(RAX, 0x2D)
         jc("je", "L_chk")  # '-' might be in "1e-04"
         ai(RDI, 1)
         jp("L_chk")
-        a.label("L_add_dot0")
-        # No '.' or 'e' found: add ".0" (overwrite the NUL terminator from the copy)
-        ai(RSI, -1)
+        a.label("L_nul")
+        # No '.' or 'e' found: add ".0"
         mi(RDX, 0x2E)
         mvb(RSI, 0, RDX)
         ai(RSI, 1)
@@ -7368,7 +7350,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         a symmetric difference append into one result.
 
         The elements are read as whole 8-byte slots, which is what a set means
-        on this path (`bugs/formal/FORMAL_set_value_model.md`: a set lowers as a
+        on this path (`bugs/FORMAL_set_value_model.md`: a set lowers as a
         LIST), so an element is a word and `1 in {1, 2}` is a word compare.
 
         REGISTER PLAN.  src/other/src_n/other_n are the caller's; R10 is the
@@ -8667,7 +8649,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # value, x86-64 raised `unsupported unary operator '^' on the formal
             # x86-64 path`) for a construct with one meaning. It refused correct
             # stdlib Mojo: `std/builtin/swap.mojo` builds on arm64 and is refused
-            # here, and `bugs/formal/FORMAL_known_limits.md` §6.5 has carried it as
+            # here, and `bugs/FORMAL_known_limits.md` §6.5 has carried it as
             # "x86-64-side work of a sitting" since. It is the same shape as the
             # `~` case above, and for the same reason: the ARM side names both
             # operators it lowers rather than falling through to a refusal.
@@ -8849,47 +8831,21 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # program is byte-identical to what it was.
             scale = (M.pointer_offset_scale(self._cur_fn, e)
                      if op in ("+", "-") else None)
-            # `model.int_overflow_traps`'s two halves, asked in the order the
-            # value exists, with the same shared predicate arm64's ALU arm asks
-            # it with: the build-time half — a `+`, `-` or `*` whose operands
-            # the build can FOLD is decided now, and a refusal carrying the
-            # exact CPython value is a better answer than a wrapped number or
-            # a status code — and the run-time half, the same predicate over a
-            # value the build CANNOT know, which a plain `ADD`/`SUB`/`IMUL`
-            # used to answer with the hardware's modulo-2^64 wrap (on `//`'s
-            # neighbour the two machines did not even fail the same way —
-            # `bugs/formal/
-            # FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
-            # `VARIABLE_ROWS` table is the measurement that pinned it). That
-            # half is the flag the ALU leaves plus `_emit_int_overflow_trap`,
-            # the branch into the trap block. The build-decidable case that
-            # FITS stays on the plain instruction for the reason arm64's arm
-            # gives: the branch the run can never take is a bigger proof for
-            # the same theorem. "The build knows" is the SAME test
-            # `fold_overflow` applies to its own tuple — both operands fold to
-            # a NON-BOOL int — because a folded `True` is unknown to IT, and a
-            # `True + n` that the build does not refuse must be the one the
-            # run checks.
+            # The build-time half of `model.int_overflow_traps`, asked here for
+            # the same reason and with the same shared predicate arm64's ALU arm
+            # asks it with: a `+`, `-` or `*` whose operands the build can FOLD
+            # is decided now, and a refusal carrying the exact CPython value is
+            # a better answer than a wrapped number or a status code. The
+            # run-time half over a value the build cannot know is
+            # `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`.
             result_t = common_type(self._ttype(e.left), self._ttype(e.right))
-            checked = False
             if M.int_overflow_traps(op, result_t, pointer_arith=bool(scale)):
                 reason = M.fold_overflow(op, e.left, e.right, result_t,
                                          pointer_arith=bool(scale))
                 if reason:
                     raise CodegenError(reason)
-                decided = all(isinstance(v, int) and not isinstance(v, bool)
-                              for v in (M.fold_literal_expr(e.left),
-                                        M.fold_literal_expr(e.right)))
-                checked = not decided
             self._emit_two_sided(e.left, e.right, _ALU_RR[op], Reg.R11,
                                  scale=scale)
-            if checked:
-                # `scale` is None here by construction: a pointer offset scales
-                # its right operand with its own `IMUL`, and
-                # `int_overflow_traps` answers False for `pointer_arith`, so
-                # the OF the `JO` below reads is the ALU's and not the scaling
-                # multiply's.
-                self._emit_int_overflow_trap(op)
             if op in ("+", "-", "*"):
                 self._emit_trunc(result_t)
             return
@@ -8931,46 +8887,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self.asm.emit(encode_imul_r64_r64_imm(scratch, scratch, scale))
         self._pop_slot(Reg.RAX)
         self.asm.emit(alu(Reg.RAX, scratch))
-
-    def _emit_int_overflow_trap(self, op: str) -> None:
-        """The `JO` into an inline overflow trap, and the trap itself.
-
-        The instruction-level twin of arm64's `_emit_int_overflow_trap`, and
-        one `JO` where arm64's check is a `B.vs` or a `CBNZ`, because here the
-        flag IS the test: `ADD` and `SUB` set OF on a signed overflow, and the
-        two-operand `IMUL` sets OF and CF when the 64-bit product does not
-        fit — the fact `lib/X86.lean`'s flag models carry, and the reason
-        arm64 (whose `MUL` writes no flag at all) has to compute the high
-        half with `SMULH` and compare it where this reads one flag. The
-        caller has just emitted the ALU into RAX with the right operand in
-        the scratch, and nothing here preserves a register: the block ends
-        in an exit, so the value the operation was computing is not live on
-        the far side.
-
-        Not `_record_cond_branch`: no AST condition is behind the branch, and
-        recording it would claim a source-level `if` the program never wrote
-        — the reading arm64 applies to its own guards, and the one this
-        branch's proof consumer needs before it maps recorded branches to
-        source conditions.
-
-        Both calls in the block are recorded as compiler traps, the way
-        `_emit_stack_floor_guard` records its own: an unrecorded `write` or
-        `exit` reads as a call the PROGRAM makes and suppresses every run
-        test in the image.
-        """
-        self._if_counter += 1
-        tid = self._if_counter
-        fn = self.func_name
-        trap = f"{fn}_ovf{tid}_t"
-        ok = f"{fn}_ovf{tid}_k"
-        self._emit_jcc(COND_O, trap)
-        self._emit_jmp(ok)
-        self.asm.label(trap)
-        self._compiler_trap_addrs.append(
-            self._emit_overflow_diagnostic_call(M.int_overflow_trap_message(op)))
-        self._compiler_trap_addrs.append(
-            self._emit_call_exit(M.INT_OVERFLOW_TRAP_STATUS))
-        self.asm.label(ok)
 
     def _emit_strcmp(self, l, r, op: str) -> bool:
         """`l == r` / `l != r` on two STRINGS as `strcmp(l, r) == 0`.
@@ -9557,7 +9473,7 @@ preference.
         # (`8 >> 64` is 0; `1 << 64` is 18446744073709551616 and the saturating
         # arm answered 0), and an amount in range can still overflow the RESULT
         # (`1 << 63`), so the `0..63` test is not a safety test. The variable
-        # base is `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.
+        # base is `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.
         # md`.
         reason = M.shift_overflow_refusal(
             op, M.fold_literal_expr(e.right), M.fold_literal_expr(e.left),
@@ -11989,7 +11905,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             # carried a `SubscriptExpr` arm for a long time and this copy has
             # not, so a bracketed call target reaches the refusal below on this
             # architecture alone — a pre-existing x86-64 gap, listed in
-            # `bugs/formal/FORMAL_wide_receiver_by_reference.md` §5.1 among the
+            # `bugs/FORMAL_wide_receiver_by_reference.md` §5.1 among the
             # architecture gaps, and NOT closed here: closing it means teaching
             # this backend a comptime-specialization call convention it does not
             # have, which is a change of far more than this construct.
@@ -13487,7 +13403,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             # `struct Outer: n: Inner` with `o.n.d.x = 5` built, ran and died of
             # SIGSEGV (exit 139), while the depth-1 and depth-2 reads of the same
             # three structs answered correctly.
-            # `bugs/formal/FORMAL_a_one_field_struct_whose_only_field_is_a_nested_
+            # `bugs/FORMAL_a_one_field_struct_whose_only_field_is_a_nested_
             # frame.md` §2 has the disassembly.
             #
             # AFTER the defaults above and for the framed path's reason

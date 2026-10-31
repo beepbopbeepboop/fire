@@ -10,12 +10,13 @@ from test_gimple import _force_cpp_coro, test_raises
 
 def test_str_key_subscript_refused_not_emitted():
     with _force_cpp_coro():
-        # No call site, for the reason test_gimple.py's
-        # generator_str_key_subscript_honest_refusal gives: a call with an
-        # untypable argument is refused by the call-site contract first.
         test_raises("str_key_subscript_refused_not_emitted", """\
 def gen(d):
     yield d['k']
+
+def main():
+    for x in gen({}):
+        print(x)
 """, "Unsupported shape(s): gen: a str-keyed subscript")
 
 if __name__ == "__main__":

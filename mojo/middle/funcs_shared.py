@@ -344,6 +344,8 @@ def param_binding_ctype(gen, func_name: str, pname: str, ctype: str) -> str:
     `resolve_shared._infer_local_var_types`'s `_multi_kind_locals` and
     `_gen_stmt_AssignStmt`'s `_pin_to_ground_truth`).
     """
+    if ctype not in ('MojoDict *', 'MojoList *', 'MojoSet *'):
+        return ctype
     _bound = (getattr(gen, '_inferred_var_types', None) or {}).get(
         func_name, {}).get(pname)
     if _bound in ('MojoDict *', 'MojoList *', 'MojoSet *') and _bound != ctype:
@@ -372,14 +374,7 @@ def param_binding_ctype(gen, func_name: str, pname: str, ctype: str) -> str:
     if _xcf is not None:
         _xc = _xcf.get(pname)
     if _xc in ('MojoDict *', 'MojoList *', 'MojoSet *') and _xc != ctype:
-        # Apply unanimous container evidence when usage left the slot at the
-        # int64_t default, but preserve scalar (char* / double) or struct
-        # conclusions.
-        if ctype in ('int64_t', 'int', ''):
-            return _xc
         return _xc
-    if ctype not in ('MojoDict *', 'MojoList *', 'MojoSet *'):
-        return ctype
     return ctype
 
 
@@ -427,8 +422,6 @@ def _param_ctype(gen, pname: str, ptype, node: gimple_ctypes.FunctionDef,
         _ck = _coro._CALLSITE_PARAM_KINDS.get(node.name, {}).get(pname)
         if isinstance(_ck, str) and _ck in _coro._KIND_TO_SLOT_CTYPE:
             ctype = _coro._KIND_TO_SLOT_CTYPE[_ck]
-        elif isinstance(_ck, str) and _ck == 'w':
-            ctype = 'int64_t'
     if ctype is None:
         ctype = gen._resolve_type(ptype)
     # An UNANNOTATED parameter whose declared default value is a string
@@ -463,13 +456,6 @@ def _param_ctype(gen, pname: str, ptype, node: gimple_ctypes.FunctionDef,
         # `strlen()` the struct (non-deterministic length). An explicit
         # annotation still takes precedence (ptype is not None there).
         ctype = 'MojoBytes *'
-    elif (ptype is None and ctype == 'int64_t'
-          and isinstance(_pdflt, FloatLiteral)):
-        # The float half of the same rule: `scale=0.5` is a float parameter.
-        # Left as the int64_t box, an omitted argument was padded with the
-        # literal's bits as an integer. Generator parameters follow the same
-        # rule (cpp_async's parameter loop reaches it through this resolver).
-        ctype = 'double'
     elif (ptype is None and ctype == 'int64_t'
           and isinstance(_pdflt, (DictExpr, TupleExpr, ListExpr, SetExpr))):
         # The CONTAINER-literal half of the rule the two branches above
