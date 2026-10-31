@@ -91,13 +91,13 @@ def discover_roots(base: Path) -> list:
 # reason (emitting function, measured receiver type, the shape the current
 # machinery cannot lower) — which the one-size description no longer said.
 # The class's history lives in
-# bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md.
+# the user-iterator next() bug (doc deleted in db724c4d6).
 
 # 2026-10-21 — the `_FACTORY_DATA_PATH` constant (the dependent-return
 # factory mechanism's measured REFUSAL for List containers) is removed
 # with the refusal it described: the lift landed (in-TU iterator
 # protocol in runtime-MojoList terms — see the comment block in
-# EXPECTED_FAILURES and bugs/CODEGEN_next_on_a_user_defined_iterator_
+# EXPECTED_FAILURES and bug:CODEGEN_next_on_a_user_defined_iterator_
 # struct_is_unlowered.md, "2026-10-20 (further)"). test_peek/
 # test_enumerate/test_take/test_drop left this dict. 2026-10-22 (part 5):
 # test_cycle, test_product and test/iter/test_map also left it (the
@@ -193,7 +193,7 @@ EXPECTED_FAILURES = {
     # these same objects was already a `mojo_unsupported_iter` no-op for
     # the identical reason. Full analysis, the 3-undefined-`next` +
     # 23-`mojo_unsupported_iter` measurement, and the next step:
-    # bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md
+    # the user-iterator next() bug (doc deleted in db724c4d6)
     #
     # A dict, not a set: the summary at the bottom prints each entry's
     # REASON beside its path, and a bare set could only ever satisfy the
@@ -230,7 +230,7 @@ EXPECTED_FAILURES = {
     # dependent return type through `Self.IteratorOwnedType`, or an overload
     # OUTSIDE the iteration protocol (`_TakeWhileIterator.__init__`,
     # `List.__getitem__`), which in-TU provably cannot yet carry. See
-    # bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md.
+    # the user-iterator next() bug (doc deleted in db724c4d6).
     #
     # `test/collections/test_span.mojo` is out of this list as of 2026-10-03,
     # and it is the one removal in this family that needed no inference at
@@ -369,7 +369,7 @@ EXPECTED_FAILURES = {
     # rc=134). The remaining declared remainder is the rest of the
     # StringSpan method family (the ladder's two discover_tests/run
     # scaffolding stubs are driver-bypassed, expected). See
-    # bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md
+    # the user-iterator next() bug (doc deleted in db724c4d6)
     # (family-S section).
     # 2026-10-21 (further) — REMOVED from this dict: test/collections/
     # test_set.mojo no longer FAILS THE SWEEP — the Part 2 blocker
@@ -409,7 +409,7 @@ EXPECTED_FAILURES = {
      # (Set[T](x, y, ...) previously evaluated its args and DROPPED them —
      # silent empty set; bare Set(<MojoSet *>) now mojo_set_copy) is a
      # genuine improvement kept in the codegen. Full measurement record:
-     # bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md,
+     # the user-iterator next() bug (doc deleted in db724c4d6),
      # "2026-10-21 (further)".
     # 2026-10-22 (part 5) — REMOVED from this dict: the last remaining
     # blocker (test_map_function_can_take_owned_value) is closed. The
@@ -435,7 +435,7 @@ EXPECTED_FAILURES = {
     # gcc -c rc=0) and the full-file ladder is 3/3 PASS with real values
     # (Int output 2,3,4; owned CopyCounter copy_counts; owned output 2,4,6;
     # the StopIteration paths raise through the assert_raises setjmp
-    # frames). See bugs/CODEGEN_next_on_a_user_defined_iterator_struct_
+    # frames). See bug:CODEGEN_next_on_a_user_defined_iterator_struct_
     # is_unlowered.md, "2026-10-22 (part 5)".
     # 2026-10-22 (part 4) — REMOVED from this dict: all three now pass the
     # syntax gate (the pre-shape-fix part-4 sweep reported each as STALE;
@@ -487,7 +487,7 @@ EXPECTED_FAILURES = {
     # bare-iter factory, assert_raises setjmp frame, setjmp raise-
     # exhaustion for-loops, wrapper bounds slot semantics, .copy()
     # protocol copies, comptime-assert no-op, function-level import
-    # factory homes): bugs/CODEGEN_next_on_a_user_defined_iterator_
+    # factory homes): bug:CODEGEN_next_on_a_user_defined_iterator_
     # struct_is_unlowered.md, "2026-10-20 (further)".
     # The Part 3 lift (2026-10-21 (further)) for the two take_while/
     # drop_while files: the thin-FUNCTION type argument — iter_factory's
@@ -527,7 +527,7 @@ EXPECTED_FAILURES = {
     # (269812 bytes, gcc -c rc=0) and the full-file ladder is 17/17 PASS
     # with real values — the 15 list/range forms plus test_cycle_owned
     # (next(it) = 1,2,3,1,2,3,1,2 — the reset path) and test_cycle_owned_
-    # single. See bugs/CODEGEN_next_on_a_user_defined_iterator_struct_
+    # single. See bug:CODEGEN_next_on_a_user_defined_iterator_struct_
     # is_unlowered.md, "2026-10-22 (part 5)".
     # 2026-10-22 (part 5) — REMOVED from this dict: the part-5 struct-fn
     # container kind (shared with test_cycle) lifts the OWNED family —
@@ -584,7 +584,7 @@ EXPECTED_FAILURES = {
     #       `_ProductN(args)` whose local struct rvalue arguments supply
     #       the type mentions; the emit rides the existing concrete-ctor
     #       dispatch). See
-    #       bugs/CODEGEN_next_on_a_user_defined_iterator_struct_
+    #       bug:CODEGEN_next_on_a_user_defined_iterator_struct_
     #       is_unlowered.md, "2026-10-22 (part 5)".
     # 2026-10-01 — added by the merge of the formal5 batch, and the class is the
     # `explicit-failed` half of the census, not the `next(...)` half above.
@@ -666,8 +666,17 @@ EXPECTED_FAILURES = {
     # named in monomorphize.build's docstring), and `assert_equal`/
     # `main` the same — measured: the link's undefined list is exactly
     # those plus runtime/libc, none stat-related. See
-    # bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_
+    # bug:CODEGEN_imported_generic_never_elaborated_calls_nothing_
     # defines.md (2026-10-23 closing section).
+    # The four `case .PASS:` enum-case patterns: the spelling is type-relative,
+    # and resolving it needs the matched value's type, which this lowering does
+    # not have. Recorded, not hidden: the landing gate fails on any NEW failing
+    # file, and an entry that starts passing is reported as stale. Doc:
+    # bugs/CODEGEN_gate_stdlib_syntax_red.md.
+    "std/builtin/dtype.mojo": "enum-case `case .PASS:` pattern (bugs/CODEGEN_gate_stdlib_syntax_red.md)",
+    "std/logger/logger.mojo": "enum-case `case .PASS:` pattern (bugs/CODEGEN_gate_stdlib_syntax_red.md)",
+    "std/memory/address_space.mojo": "enum-case `case .NOTSET:` pattern (bugs/CODEGEN_gate_stdlib_syntax_red.md)",
+    "std/testing/suite.mojo": "enum-case `case .PASS:` pattern (bugs/CODEGEN_gate_stdlib_syntax_red.md)",
 }
 
 def get_stdlib_path():

@@ -116,7 +116,7 @@ an unsupported way".
 What changed since that entry, checked directly:
 
 1. **Upstream progress, currently unreachable**: the
-   `bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md` mechanism
+   `the (since-fixed) compiled-generator lambda-expression bug` mechanism
    now covers single-parameter lambdas plus real
    `sorted(..., key=lambda m: ...)` support in the coroutine emitter,
    explicitly motivated by this file's `_iter_member_by_def_`. That
@@ -294,7 +294,7 @@ closed the yield-type gap that previously made landing (1)+(2) alone unsafe.
    eligibility gate (`_cls_refs_supported`) and `_cpp_expr`'s call
    lowering — `_iter_member_by_def_` is refused again, for the correct,
    pre-existing reason (a `LambdaExpr` used as a call argument — see
-   `bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md`), not silently
+   `the (since-fixed) compiled-generator lambda-expression bug`), not silently
    accepted. The kwargs-dropped-entirely gap in the generic call fallback
    itself is real and NOT fixed here (still `e.args`-only) — it's simply
    no longer reachable through this specific `cls`-based path, since the
@@ -392,7 +392,7 @@ Error building: cannot compile module: function(s) _iter_member_by_def_, _iter_m
   above explicitly excludes (needs coroutine-construction handling this
   fix does not add); (b) even setting (a) aside, `key=lambda m: m._sort_
   order_` is a `LambdaExpr` used as a call argument
-  (`bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md`, closed only
+  (`the (since-fixed) compiled-generator lambda-expression bug`, closed only
   for the "lambda assigned to a local" shape, not "lambda passed as a
   call argument"). Point 4's fix above specifically closed the SILENT
   version of this refusal (where it would have compiled with the sort key
@@ -519,7 +519,7 @@ passed eligibility). This fix closes the SEPARATE, real gap the
 never going to, touch the `cls`-access gate itself; that remains exactly
 as out-of-scope as the 2026-08-09 note below already assessed it to be.
 `_iter_member_by_def_`'s independent `LambdaExpr`-as-call-argument
-refusal (`bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md`) is
+refusal (`the (since-fixed) compiled-generator lambda-expression bug`) is
 likewise unaffected. So: the specific silent-miscompile risk this
 session's earlier real-fix-attempt correctly declined to ship (landing
 `cls`-access without ALSO closing the yield-type gap) is now closed, but
@@ -608,7 +608,7 @@ Independently, `_iter_member_by_def_`'s `yield from sorted(cls.
 _iter_member_by_value_(value), key=lambda m: m._sort_order_)` would
 ALSO still be refused even if all of the above were fixed — the
 `key=lambda ...` argument hits the separate, already-documented
-`bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md` refusal
+`the (since-fixed) compiled-generator lambda-expression bug` refusal
 (a `LambdaExpr` used as a call argument inside a generator body). So
 even a fully-correct fix for `_iter_member_by_value_` would not, by
 itself, make `enum.py` build — `_iter_member_by_def_` needs that
@@ -648,7 +648,7 @@ really 2 distinct method BODIES.
 
 `_iter_member_by_def_`'s `yield from sorted(cls._iter_member_by_value_
 (value), key=lambda m: m._sort_order_)` is ALSO independently refusable
-on `bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md`'s grounds
+on `the (since-fixed) compiled-generator lambda-expression bug`'s grounds
 (a `LambdaExpr` used as a call argument inside a generator body) — a
 second, independent reason this exact generator would be refused even
 if class-level `cls` access were supported. Not cross-verified which

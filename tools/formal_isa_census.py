@@ -81,8 +81,10 @@ import ast
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -675,7 +677,8 @@ class Row(object):
     """One emitted form and its four columns."""
 
     __slots__ = ("arch", "encoder", "emitted_in", "sample", "sample_error",
-                 "lean", "lean_detail", "fuzz", "as_check", "example")
+                 "lean", "lean_detail", "fuzz", "as_check", "example",
+                 "example_ambiguous")
 
     def __init__(self, arch, encoder, emitted_in):
         self.arch = arch
@@ -688,6 +691,7 @@ class Row(object):
         self.fuzz = False
         self.as_check = False
         self.example = None
+        self.example_ambiguous = False
 
     @property
     def excluded(self):
@@ -706,7 +710,8 @@ class Row(object):
                 "emitted_in": [f for f, _n in self.emitted_in],
                 "lean": self.lean, "lean_detail": self.lean_detail,
                 "fuzz": self.fuzz, "as_check": self.as_check,
-                "example": self.example, "excluded": self.excluded}
+                "example": self.example, "example_ambiguous":
+                self.example_ambiguous, "excluded": self.excluded}
 
 
 def census(arch, examples_cache=None):
@@ -742,6 +747,17 @@ def census(arch, examples_cache=None):
                                  if deps & fuzz_refs}
     sites = call_sites(arch)
     ex_forms = (examples_cache or {}).get(arch, {})
+    # The ambiguity of an EX cell is a property of the encoder table — two
+    # encoders whose canonical words disassemble to the same (mnemonic, shape)
+    # — so it is computed from the same batch `measure_examples` assembles,
+    # and only when there is a cache for the column to read.
+    collisions = set()
+    if examples_cache:
+        work = tempfile.mkdtemp(prefix="isa-census-ex-")
+        try:
+            collisions = _shape_collisions(_encoder_mnemonics(arch, work))
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
 
     rows = []
     for name in encoder_names(arch):
@@ -773,6 +789,7 @@ def census(arch, examples_cache=None):
         row.fuzz = name in fuzz_refs
         row.as_check = name in as_refs
         row.example = ex_forms.get(name)
+        row.example_ambiguous = name in collisions
         rows.append(row)
     return rows
 
@@ -831,35 +848,86 @@ def _load_examples(path=EXAMPLES_CACHE):
         return json.load(f)
 
 
+def _operand_shape(text):
+    """An operand spelling with every register reduced to its CLASS.
+
+    The key half of the EX column's `(mnemonic, shape)` key. The register's
+    number and its specific name are not part of a form — `addsd %xmm1,
+    %xmm0` and `addsd %xmm2, %xmm1` are the same form, and `imulq %rax,
+    %r11` (a standard register) is the same form as `imulq %r12, %r13` —
+    so a register reads as its class: the bit-width letter on x86-64
+    (`%rax`/`%r11` are both `%r`, `%eax` is `%e`, `%xmm0` is `%xmm`) and
+    the single letter on arm64 (`x3`/`w30` are `x`/`w`). What stays is what
+    distinguishes one form from another: the operand COUNT, the immediates
+    and the `lsl` amounts — `imulq $0x7, %r, %r` (three operands with an
+    immediate) and `imulq %r, %r` (two operands) keep different shapes,
+    which is what the mnemonic alone could not separate, and `add x0, x1,
+    #0` is not `add x0, x1, #8`.
+
+    The arm64 reader must not touch an immediate: a `#12` or a `0x20` has
+    no register letter in front of its digits, and the lookbehind is what
+    keeps `0x28` in a `%fs`-style memory operand out of the match.
+    """
+    text = re.sub(
+        r"%([A-Za-z][A-Za-z0-9]*)",
+        lambda m: "%" + (m.group(1)[:3] if m.group(1)[0] in "xm"
+                         else m.group(1)[:1]),
+        text)
+    text = re.sub(r"(?<![A-Za-z0-9])([wxsdvqhbz])(\d+)", r"\1", text)
+    return text
+
+
+def _line_key(line):
+    """`((mnemonic, shape),)` for one `otool -tv` instruction line, or None.
+
+    The mnemonic is the first token, the shape the OPERANDS with their
+    registers reduced to their class, so the image side and the encoder side
+    reduce the same disassembly line the same way. The `## imm = …` trailer
+    otool appends to immediate instructions is stripped: it is a comment on
+    the operand, and the encoder side's canonical batch does not carry it.
+    """
+    m = re.match(r"^[0-9a-f]{8,16}\s+(\S+)(.*)$", line)
+    if not m:
+        return None
+    return (m.group(1), _operand_shape(m.group(2).split("##", 1)[0].strip()))
+
+
 def _image_mnemonics(path):
-    """`{mnemonic}` for every instruction `otool` finds in an image.
+    """`{(mnemonic, shape)}` for every instruction `otool` finds in an image.
 
     The platform's own disassembler, for the same reason `tools/
     arm64_insn_audit.py` uses one: it names the INSTRUCTION, where an encoder
     comparison names the WORD, and the two are not the same thing on this
-    backend (`encode_mov_zr_xn` emits `add x0, x1, #0` for a `mov`). Reading the
-    mnemonic out of the disassembly is also the only way to answer "is this form
-    in this image" without a mask per encoder: a mask would have to be derived
-    from the very bit layout under test, so an encoder with a field in the wrong
-    place would produce a mask describing the wrong place and agree with itself.
+    backend (`encode_mov_zr_xn` emits `add x0, x1, #0` for a `mov`). Reading
+    the mnemonic out of the disassembly is also the only way to answer "is
+    this form in this image" without a mask per encoder: a mask would have to
+    be derived from the very bit layout under test, so an encoder with a field
+    in the wrong place would produce a mask describing the wrong place and
+    agree with itself. The key is the (mnemonic, shape) pair, not the
+    mnemonic alone, because two encodings of one mnemonic — the two `imul`
+    spellings — are different forms and the mnemonic cannot tell them apart.
     """
     out = subprocess.run(["otool", "-tv", path], capture_output=True,
                          text=True).stdout
     found = set()
     for line in out.splitlines():
-        m = re.match(r"^[0-9a-f]{8,16}\s+(\S+)", line)
-        if m:
-            found.add(m.group(1))
+        key = _line_key(line)
+        if key is not None:
+            found.add(key)
     return found
 
 
 def _encoder_mnemonics(arch, workdir):
-    """`{encoder: mnemonic}`, from the assembler, one batch for every encoder.
+    """`{encoder: (mnemonic, shape)}`, from the assembler, one batch for every
+    encoder.
 
     The mnemonic is the FIRST TOKEN of the disassembly, with the condition code
     kept (`b.eq` stays `b.eq`, because `cset`/`b.cond` are different forms of one
     mnemonic and merging them would make the census claim a `CSET` image covers
-    a `B.cond` gap).
+    a `B.cond` gap). The shape is the operand spelling with register numbers
+    erased (`_operand_shape`), which is what separates two encodings that print
+    the same mnemonic — the key is the pair, and the image side keys its lines
+    the same way.
     """
     import formal.arm64 as A
     import formal.x86_64 as X
@@ -898,22 +966,50 @@ def _encoder_mnemonics(arch, workdir):
         return {}
     got = subprocess.run(["otool", "-tv", obj], capture_output=True,
                          text=True).stdout
-    mnemonics = re.findall(r"^[0-9a-f]{8,16}\s+(\S+)", got, re.M)
-    if len(mnemonics) != len(words):
+    keys = []
+    for line in got.splitlines():
+        key = _line_key(line)
+        if key is None:
+            continue
+        keys.append(key)
+    if len(keys) != len(words):
         return {}
-    return dict(zip(names, mnemonics))
+    return dict(zip(names, keys))
+
+
+def _match_forms(have, table):
+    """`[(key, encoder)]` for every encoder whose (mnemonic, shape) is in
+    `have`, the image's own key set. The pure half of `_forms_in_image`, so
+    the matching rule is testable without an image to disassemble."""
+    return [(key, name) for name, key in sorted(table.items()) if key in have]
+
+
+def _shape_collisions(table):
+    """The encoders whose (mnemonic, shape) ANOTHER encoder shares.
+
+    For one of these an image's key cannot be attributed to one encoder or
+    the other — the disassembly says "the form is here" and not "this
+    encoder's form" — so the EX cell reads `ambiguous` rather than crediting
+    one of the pair.
+    """
+    by_key = {}
+    for name, key in table.items():
+        by_key.setdefault(key, []).append(name)
+    return {name for key, names in by_key.items() if len(names) > 1
+            for name in names}
 
 
 def _forms_in_image(arch, image_path, workdir, table):
-    """`[(mnemonic, encoder)]` for every encoder whose instruction is in `image`.
+    """`[(key, encoder)]` for every encoder whose instruction is in `image`.
 
-    The image's own mnemonic set is intersected with the encoders', so the
-    answer is "this form occurs in this image" — which is what (d) asks — and
-    not "some word of this image has these bits", which a pool-load or a string
-    would also satisfy.
+    The image's own key set is intersected with the encoders' — the key being
+    the (mnemonic, shape) pair, so the answer is "THIS form occurs in this
+    image" — which is what (d) asks — and not "some word of this image has
+    these bits" (which a pool-load or a string would also satisfy) nor "an
+    instruction with this mnemonic is here" (which the two `imul` spellings
+    showed credits the wrong encoder).
     """
-    have = _image_mnemonics(image_path)
-    return [(mn, name) for name, mn in sorted(table.items()) if mn in have]
+    return _match_forms(_image_mnemonics(image_path), table)
 
 
 # ── the report ─────────────────────────────────────────────────────────────
@@ -950,9 +1046,18 @@ def report(arch, rows):
         elif row.excluded:
             reason, kind = row.exclusion
             note = (note + "  |  %s: %s" % (kind.upper(), reason)).strip()
+        ex = row.example
+        if ex and row.example_ambiguous:
+            # Two encoders disassemble to this one (mnemonic, shape), so the
+            # image's instruction cannot be attributed to one of them: the
+            # cell says the image HAS the form and the attribution is the
+            # column's, not the image's.
+            ex_cell = "ambiguous: %d ex" % len(ex)
+        else:
+            ex_cell = _cell(ex)
         print("   %-30s %-4s %-4s %-4s %-4s  %s"
               % (row.encoder, _cell(row.lean), _cell(row.fuzz),
-                 _cell(row.as_check), _cell(row.example), note))
+                 _cell(row.as_check), ex_cell, note))
         if row.lean_detail:
             print("   %-30s      %s" % ("", row.lean_detail))
     gaps = [r for r in rows if r.missing() and not r.excluded]

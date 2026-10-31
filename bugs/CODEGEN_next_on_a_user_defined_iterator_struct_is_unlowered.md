@@ -859,7 +859,7 @@ symbol.
 spelling (`safe_suffix('_'.join(ptypes))`); it now uses the same
 length-prefixed encoder (`monomorphize.mangle_signature`). Everything this
 invalidates is enumerated and measured in
-`bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md`'s
+`bugs/imported-generic-elaboration-defect`'s
 "Landed 2026-10-03" section: 21 lines of `std/math/math.mojo`'s generated C
 change, every one a single symbol rename, and renaming those 8 symbols back
 reproduces the old file byte for byte.
@@ -1244,7 +1244,7 @@ and it did NOT move in this session — expected, and worth stating rather than
 hiding: the census only counts files that COMPILE, and these 22 do not, so the
 two populations are disjoint. `FormatStruct` (15), `alloc` (10) and
 `ThinAllocation` (8) remain the census's largest names and are untouched by
-this work; see `bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md`.
+this work; see `bugs/imported-generic-elaboration-defect`.
 
 ## 2026-10-20 (continued): the call-site mechanism was built and measured,
 then refused itself — a false green averted, a regression caught, a net-zero
@@ -3134,7 +3134,7 @@ and the whole blast radius is measured and classified
   entries in `EXPECTED_FAILURES`) this section closes. Sweep state
   moved **608/2 → 609/1**: the remaining red is `test_getsize`
   (the C-ABI-FFI sub-campaign, tracked in
-  `CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md`).
+  `imported-generic-elaboration-defect`).
   The `EXPECTED_FAILURES` entry is REMOVED from compile_stdlib.py
   (measured-removal comment in its place); the clean re-sweep after the
   dict edit reports 609/1, 0 unexpected, and no stale entries.
@@ -3425,3 +3425,42 @@ one, so the evidence carries over without re-derivation:
   <sys/stat.h>` stays closed (conflicting types with fire_runtime.h /
   _macos.mojo:137). Bar: the mangled stat path defined in-TU + a real
   run returning the right st_size for a real scratch file.
+
+### 2026-10-30 — `test/collections/test_linked_list.mojo` stdlib-syntax red (cause and partial state)
+
+**What was red:** `stdlib-syntax` (`compile_stdlib.py`), file
+`test/collections/test_linked_list.mojo`: gcc `assignment to 'int64_t' from
+'MojoList *' makes integer from pointer` at `test_iter`. It was caused by
+`test_iter`'s `var it = iter(ll)` inside a `with` block redeclaring the outer
+`var it = l.__iter__()`. Codegen types a Python-style local once per function
+(`_declare_var` is first-decl-wins), so the inner `it` reused the outer
+`int64_t` storage.
+
+**Why the base passed:** the base (`c4297dcfc`, before master's
+`b3814dbfd`) compiled the same file as `it = ll; _t10 = it; ...
+/* int64_t.__next__() stubbed */`. That is a silent miscompile: the gcc gate
+passed and `__next__` was a stub. `b3814dbfd` removed the gate that let it
+through, so the loud gcc error appeared.
+
+**Landed (this commit):** a `var` that redeclares a name already bound in the
+function now gets its own C variable (`emit_infra._bind_local_decl`), and the
+outer binding comes back when its block closes (`_open_block_scope` /
+`_close_block_scope`, applied to every block-body loop in `emit_funcs`,
+`emit_stmts`, `emit_loops`, `emit_infra`). The comprehension shadow helpers
+share the save/restore (`_save_binding` / `_restore_binding`). Test:
+`test_gimple_block_shadow.py` (fails on unfixed master, passes here, gcc
+clean). `test_linked_list.mojo` now passes gcc on the merged tree.
+
+**Still open (this bug's own remainder):** `LinkedList[Int]` is modelled as an
+`int64_t` handle, so `LinkedList.__iter__` / `__next__` / `__reversed__` are
+still `int64_t.__iter__() stubbed` / `int64_t.__next__() stubbed`. The
+gcc-clean file therefore is not a runtime-correct one. The fix for that is the
+generic-struct / iterator-family work described above, not this change.
+
+**Not run by the light worker (owed to the integrator):** the full
+`make gate` for this compiled-path change (`fire_compiler.py` comment only,
+`gimple_codegen.py`, `mojo/backend_gimple/emit_*`). In particular
+`stdlib-syntax` (`U` must not increase), `stdlib-dylib` (skip count must not
+increase), and the byte-identity comparison of generated C on a large
+succeeding module, since the change renames shadowing locals in any module
+that redeclares a name across blocks.

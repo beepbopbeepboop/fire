@@ -316,7 +316,7 @@ builds. **Machine:** 18 cores, load 13-40.
 the 8 GB reservation; a re-run with nothing changed is **17 s** for all 120
 verdicts, because every Lean verdict is content-addressed
 (`formal/lean.py`'s CAS). **7.8 GB is 2x the 3-4 GB line
-`bugs/PERF_memory_over_4gb_is_a_bug.md` sets**, and it is entirely Lean's own
+`doc/POLICY_memory_over_4gb.md` sets**, and it is entirely Lean's own
 6 GB ceiling for one generated proof rather than anything in the census: the
 first attempt at `-j 2` with two *heavy* proofs at once BREACHED the 8 GB
 reservation (`memcap: BREACH 8.0 GB > 8.0 GB ceiling (100%), 3 procs`) and the
@@ -963,7 +963,7 @@ them.
   a gate that fired on that would be fired at every step of it.
 * **It has no memory gate**, and the peak is recorded per example and printed as
   the corpus maximum because `>3-4 GB` is a project debt standard
-  (`bugs/PERF_memory_over_4gb_is_a_bug.md`) and a ratchet watching it would be
+  (`doc/POLICY_memory_over_4gb.md`) and a ratchet watching it would be
   useful. An unrequested fourth gate on a number measured on one machine is not
   this change's business; the data is there for whoever wants it.
 

@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from mojo.middle.types import _C_RESERVED_FUNCS, _FORCE_RENAME_RESERVED, _split_top_level_commas, _used_idents_node, _CPP_CALLABLE_CTYPE, _CPP_CALLABLE_CTYPE_1ARG, _CPP_CALLABLE_CTYPE_STARARGS, _CPP_CALLABLE_CTYPE_KWARGS, _CPP_CALLABLE_CTYPE_STAR_KW, _FLOAT_TYPES
 import dataclasses
-from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _as_set, _signed_int64, ForStmt
+from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _as_set, _signed_int64, ForStmt, IfStmt, MatchStmt, StructDef
 _WALK_FIELD_NAMES_CACHE: dict[type, tuple] = {}
 # Whether a node's CLASS is a dataclass, cached beside the field names for
 # the same reason and on the same key. `dataclasses.is_dataclass` is a pure
@@ -125,8 +125,8 @@ def _walk_ast_into(node, out, _depth=0, _from=0):
     intermediate per-subtree lists (`result.extend(_walk_ast(child))`
     copied every node once per ancestor level before being discarded).
 
-    Phase 5 (bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_
-    rescan.md): this is the whole-program walk utility itself, called by
+    Phase 5 (the `_walk_ast` re-scan bug, closed
+    ): this is the whole-program walk utility itself, called by
     the struct-field scans, Pass 1.2's self-assign/self-read collectors,
     gen_func, closure/async pre-passes — every consumer of the flat
     node list. A fresh cProfile of Lib/contextlib.py showed ~29s of its
@@ -1457,10 +1457,18 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
         elif isinstance(n, YieldFromExpr):
             if isinstance(n.value, CallExpr) and isinstance(n.value.func, IdentExpr) and (n.value.func.name == fn.name):
                 continue
-            t = _yield_from_delegate_ctype(n, generator_api, field_elem_types,
-                                           local_elem_types,
-                                           generator_method_api,
-                                           self_struct_name)
+            # `yield from walk(root)` where `walk` is a PARAMETER holding a
+            # callable as a word: what the call yields is an unsolved word.
+            if (isinstance(n.value, CallExpr) and isinstance(n.value.func, IdentExpr)
+                    and known is not None
+                    and known.get(n.value.func.name) in ('int64_t', 'char *')
+                    and n.value.func.name in {_p[0] for _p in (fn.params or [])}):
+                t = 'int64_t'
+            else:
+                t = _yield_from_delegate_ctype(n, generator_api, field_elem_types,
+                                               local_elem_types,
+                                               generator_method_api,
+                                               self_struct_name)
             if t is None:
                 return None
             if ctype is None:
@@ -1847,3 +1855,92 @@ def expr_provably_str(e) -> bool:
             return (expr_provably_str(e.left)
                     or expr_provably_str(e.right))
     return False
+
+
+# The statement-lists a `class` statement can be nested inside. A tuple of
+# names, not a dict of attribute name -> is-a-list: the walk has to try EVERY
+# slot on every node type (only the statement types that carry one of them
+# actually have it, and `getattr(..., None)` answers the rest), so the test is
+# "does this attribute hold a statement list", not "is this node a kind that
+# does". Written out rather than reusing the shared `_walk_ast`, for the
+# reason `_gmi_collect_self_assigns`'s own nested-def descent documents:
+# `_walk_ast` does not reliably recurse into a nested `StructDef`/`FunctionDef`
+# self-hosted (the node is misclassified as a scalar leaf), so a walker built
+# on it would find nested classes in the CPython shim and miss them under
+# `mojoc`. Every consumer of "is there a class declared in here" has to be
+# written out, so it is written out once here.
+_NESTED_CLASS_BODY_SLOTS = (
+    'body', 'then_body', 'else_body', 'finally_body', 'items',
+)
+
+
+def _gmi_nested_struct_defs(body, enclosing, out: list, top: bool = False,
+                            params=None) -> None:
+    """Every `StructDef` written INSIDE `body`, in source order, as
+    `[node, enclosing_key, params]` TRIPLES rather than 2-tuples.
+
+    The pairs are index-addressed by the one caller for the reason the rest of
+    this file writes index loops instead of `zip()`: the self-hosted backend
+    has no `zip()` lowering, and a 2-tuple unpack in a `for` header boxes both
+    slots to `int64_t` — which here would box the `StructDef` POINTER (losing
+    the node) and the string (losing the name). A list element read by index
+    keeps each slot's own type.
+
+    Recursive over the statement-lists a class can hide in: a plain function
+    body, an `if`/`else`/`while`/`for`/`try`/`with`/`match` body, and a nested
+    `def` or `class` body. `enclosing` is the `current_func_name`-shaped key of
+    the innermost enclosing function — which is exactly the value
+    `current_func_name` holds while that function's body is lowered, so the
+    rename map the caller builds is keyed the same way the constructor call
+    site reads it. `top` is True only for the module-level statement list,
+    whose classes are already module scope and must not be collected again.
+
+    `params` is the parameter list (`(name, annotation)` slots) of the
+    innermost enclosing function or method, or None at module level. It is
+    carried so a class-level attribute whose value is a bare parameter name
+    can take its C type from that parameter's annotation
+    (bugs/CODEGEN_nested_class_attr_from_str_param_typed_as_int.md).
+    """
+    for _nc in (body or []):
+        if isinstance(_nc, StructDef):
+            if not top:
+                out.append([_nc, enclosing, params])
+            # A struct METHOD's enclosing key is `current_func_name`, which the
+            # method emitter sets to `<struct>_<method>` — the class's own name
+            # with no enclosing-function prefix (`closures.discover_closures`
+            # composes it the same way).
+            _cname = _as_str(_nc.name)
+            for _ncm in (_nc.methods or []):
+                if isinstance(_ncm, FunctionDef):
+                    _gmi_nested_struct_defs(
+                        _ncm.body, _cname + '_' + _as_str(_ncm.name), out,
+                        False, _ncm.params)
+            continue
+        if isinstance(_nc, FunctionDef):
+            # A nested `def` is LIFTED as `<outer>_<name>`, and `current_func_name`
+            # is the lifted name while its body is lowered — so the key
+            # composes rather than replacing. `closures.discover_closures`'s
+            # `lifted = f"{outer_name}_{inner.name}"` is the other half of
+            # that fact.
+            _gmi_nested_struct_defs(
+                _nc.body,
+                enclosing + '_' + _as_str(_nc.name) if enclosing else _as_str(_nc.name),
+                out, False, _nc.params)
+            continue
+        if isinstance(_nc, IfStmt):
+            _gmi_nested_struct_defs(_nc.then_body, enclosing, out, False, params)
+            # `elifs` is a list of (condition, body) PAIRS, so the body is an
+            # indexed slot read and not another statement list — the same
+            # shape `_gmi_collect_self_assigns` walks.
+            for _nce in range(len(_nc.elifs or [])):
+                _gmi_nested_struct_defs(_nc.elifs[_nce][1], enclosing, out, False, params)
+            _gmi_nested_struct_defs(_nc.else_body, enclosing, out, False, params)
+            continue
+        if isinstance(_nc, MatchStmt):
+            for _ncmc in (_nc.cases or []):
+                _gmi_nested_struct_defs(
+                    getattr(_ncmc, 'body', None), enclosing, out, False, params)
+            continue
+        for _slot in _NESTED_CLASS_BODY_SLOTS:
+            _gmi_nested_struct_defs(
+                getattr(_nc, _slot, None), enclosing, out, False, params)

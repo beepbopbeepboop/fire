@@ -9127,6 +9127,112 @@ BOTH_ARCH_CASES = [
      "    var q = Two(4, 9)\n"
      "    printf(\"%d\", p.v * 100 + q.a * 10 + q.b)\n"
      "    return 0\n", 0, "349"),
+    # ── a default EXPRESSION, and the f-string the walker never reached it ──
+    #
+    # A parameter default sits in a FunctionDef's `param_defaults` DICT, which the
+    # shared walker `iter_nodes` does not descend: the two interpolated-literal
+    # passes the module statements get (fold the field-less one to its text,
+    # refuse the field-bearing one with the buffer sentence) never reached a
+    # default, so the emitter materialized the whole token the parser kept and
+    # `def f(x=f"n=7")` printed `f"n=7"` where CPython prints `n=7`, on both
+    # backends. The corpus writes none (`= f"` in a parameter list finds no row
+    # in this repository or the stdlib), which is why these are a correctness
+    # pair and not a sweep row. Both ride this group: the answered one must agree
+    # on the architecture it runs on and `run_case` refuses on both backends
+    # by construction.
+    ("both_arch_a_fieldless_fstring_parameter_default_folds_to_its_text",
+     "def f(x=f\"n=7\"):\n"
+     "    return x\n"
+     "\n"
+     "def main():\n"
+     "    printf(\"[%s]\", f())\n"
+     "    return 0\n", 0, "[n=7]"),
+    ("fstring_parameter_default_with_a_field_is_refused_like_a_statement_site",
+     "def f(x=f\"n={5}\"):\n"
+     "    return x\n"
+     "\n"
+     "def main():\n"
+     "    print(f())\n"
+     "    return 0\n",
+     "refuse:is refused on this path: its value is its INTERPOLATED text, and "
+     "this path has no buffer to compose one in", None),
+    # ── a double at the `Int` conversion, where the two machines once
+    #    answered with two different programs ──────────────────────────────────
+    #
+    # The run-time half of the double→int decision the literal rows in
+    # `FLOAT_REFUSALS` state: a double the build cannot read (bound to a name
+    # rather than spelled at the conversion) is checked against the same two
+    # constants at run time and stops with the integer overflow's status —
+    # `model.float_to_int_refusal` and `model.float_to_int_trap_message` are
+    # the two halves of one decision, and these rows are the two machines'
+    # agreement about it. The marker before the conversion keeps each trap row
+    # about the conversion rather than about startup. Measured on both
+    # architectures before the fix, exit 0: `Int(1e300)` bound to a name
+    # printed `9223372036854775807` on arm64 and `-9223372036854775808` on
+    # x86-64 — the two saturations, one each, and the divergence the trap
+    # takes off the table.
+    ("both_arch_a_double_past_the_int64_range_traps",
+     "def main() -> Int:\n"
+     "    var x = 1e300\n"
+     "    printf(\"converting\\n\")\n"
+     "    printf(\"%d\\n\", Int(x))\n"
+     "    return 0\n", 1, "converting"),
+    # …and the LOWER direction, the same trap from the side whose boundary is
+    # not the range's own minimum: `-1e300` is a double the build can read
+    # (`model.float_literal_value` reads the `UnaryOp`), but bound to a name it
+    # is a value only the run-time test can see, and past `FLOAT_TO_INT_LO`
+    # (`-2**63 - 2048`, the largest double whose truncation does not fit
+    # below the range) it stops.
+    ("both_arch_a_double_below_the_int64_range_traps",
+     "def main() -> Int:\n"
+     "    var y = -1e300\n"
+     "    printf(\"converting\\n\")\n"
+     "    printf(\"%d\\n\", Int(y))\n"
+     "    return 0\n", 1, "converting"),
+    # An INFINITY is the other double CPython's `int()` refuses with an
+    # `OverflowError`, and the same trap takes it: it is past
+    # `FLOAT_TO_INT_HI` in exactly the way `2**63` is. Reached by overflow
+    # rather than a literal, because `1.0 / 0.0` is a program CPython does not
+    # run (a `ZeroDivisionError`), and this path now agrees.
+    ("both_arch_an_infinity_does_not_fit_in_an_int64_either",
+     "def main() -> Int:\n"
+     "    var w = 1e308 * 1e308\n"
+     "    printf(\"converting\\n\")\n"
+     "    printf(\"%d\\n\", Int(w))\n"
+     "    return 0\n", 1, "converting"),
+    # THE BOUNDARIES the trap must NOT take: the largest double below `2**63`
+    # is `2**63 - 2048` (binary64's spacing there is 2048) and it is IN range,
+    # and `-2**63`'s truncation IS `INT64_MIN`, which fits. A range test one
+    # step too wide traps these; the in-range `B`/`JMP` skip in the helper is
+    # what keeps them out, and a test that missed it answered `OverflowError`
+    # for 3.9 on the first measurement. `Int(3.9)` is the truncation-toward-
+    # zero row: 3, not 4, and not `-1`.
+    ("both_arch_the_int64_edges_of_a_double_convert_exactly",
+     "def main() -> Int:\n"
+     "    var x = 9223372036854774784.0\n"
+     "    printf(\"a=%d \", Int(x))\n"
+     "    var b = -9223372036854775808.0\n"
+     "    printf(\"b=%d \", Int(b))\n"
+     "    printf(\"c=%d\", Int(3.9))\n"
+     "    return 0\n", 0, "a=9223372036854774784 b=-9223372036854775808 c=3"),
+    # …and a NaN is NOT a range trap, on either machine: both comparisons the
+    # range test is built from are unordered for one, and CPython's `ValueError`
+    # for `int(nan)` is a different error than the `OverflowError` this trap is,
+    # so the trap the range test states must not fire for it. The assertion is
+    # the one both machines can make — it does not stop — and the answer each
+    # prints is its OWN hardware's saturation (measured: `FCVTZS` converts a
+    # NaN to 0, `CVTTSD2SI` to `INT64_MIN`), which `model.float_int_
+    # conversion_note` records rather than a row that would have to carry two
+    # answers in one. Before the arm64 NaN pre-check this row was red: an
+    # unordered FCMP on this machine leaves `C = 1, V = 0` — the "greater"
+    # pattern — so the `B.ge` of the upper test was taken for a NaN and the
+    # program stopped with an OverflowError.
+    ("both_arch_a_nan_is_not_a_range_trap",
+     "def main() -> Int:\n"
+     "    var w = 1e308 * 1e308\n"
+     "    var z = w * 0.0\n"
+     "    printf(\"n=%d\", Int(z))\n"
+     "    return 0\n", 0, "n="),
 ]
 
 # `print`'s KEYWORDS, and the rule that a keyword is dispatched BY NAME before
@@ -12283,6 +12389,56 @@ SPREAD_CONSTRUCTION_CASES = [
      "import sys\n"
      "def main():\n"
      "    sys.stdout.write(\"%d\" % f(a=1, **{'b': 2, 'b': 3}))\n"),
+    # The LOCAL half of the capability, the clause of the doc's "The exact
+    # next step" that landed 2026-10-12: the operand is a NAME whose only
+    # binding is a dict literal, so the keys are as knowable as a literal's.
+    # The evidence is `ValueKinds.dict_inits` — "the local whose every binding
+    # is this same dict literal" — and `_unspread_keyword_mappings` resolves
+    # the name through it before `literal_dict_items` sees it. A name bound
+    # twice, or to a non-dict, is absent from that table and keeps the refusal
+    # pinned in `SPREAD_REFUSALS` below. These rows were dropped when the two
+    # 2026-10-12 lanes merged — with the CALL path's `mappings` plumbing, which
+    # is the half that silently regressed with them — and are restored here
+    # 2026-10-28 under the names the doc carries.
+    ("a_spread_through_a_local_dict_literal_is_answered",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var d = {'b': 2}\n"
+     "    var p = P(a=1, **d)\n"
+     "    printf(\"%d %d\", p.a, p.b)\n"
+     "    return 0\n",
+     "import sys\n"
+     "class P:\n"
+     "    def __init__(self, a, b):\n"
+     "        self.a = a\n"
+     "        self.b = b\n"
+     "def main():\n"
+     "    d = {'b': 2}\n"
+     "    p = P(a=1, **d)\n"
+     "    sys.stdout.write(\"%d %d\" % (p.a, p.b))\n"),
+    # …and on the ordinary CALL, which is the other reader of `args`
+    # (`bind_call_arguments`). It is a separate row because it is the half
+    # that regressed when its `mappings` argument was lost from that reader:
+    # a fix that only taught the construction path leaves the call refusing a
+    # program CPython runs, with the same false sentence the literal rows above
+    # exist to keep out.
+    ("a_spread_through_a_local_dict_literal_is_answered_at_a_call",
+     "def f(a: Int, b: Int) -> Int:\n"
+     "    return a * 10 + b\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var d = {'b': 2}\n"
+     "    printf(\"%d\", f(a=1, **d))\n"
+     "    return 0\n",
+     "def f(a, b):\n"
+     "    return a * 10 + b\n"
+     "import sys\n"
+     "def main():\n"
+     "    d = {'b': 2}\n"
+     "    sys.stdout.write(\"%d\" % f(a=1, **d))\n"),
 ]
 
 SPREAD_REFUSALS = [
@@ -15426,6 +15582,66 @@ WAVE6_TRUTHY_CASES = [
      "        i = i + 1\n"
      "    printf(\"i=%d\", i)\n"
      "    return 0\n", 0, "i=3"),
+
+    # ── a `for` target whose range is a RUN-TIME fact ──────────────────────
+    #
+    # The residual of
+    # `bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`:
+    # the target of a `for` whose range is empty at run time is not bound, and
+    # the image has no word for "unbound", so the emitter allocates a bound
+    # flag per such target — zero at entry, set by every store of the name,
+    # branched on at a read the build-time state says may be unbound — and the
+    # read takes the error exit where CPython raises `UnboundLocalError`.
+    # `model.loop_bound_flags` is the one reader both backends ask, so the
+    # group is a two-architecture one: the flag and its check are emitted by
+    # two machines, and a machine that missed the flag answers the caller's
+    # leftover, the same word for a different number.
+    # The entry argument is the default 10, so `n - n` is 0 in every row.
+    # The error rows assert the exit only: the error exit prints nothing, and
+    # CPython's counterpart is a raise, which the form of an answered case
+    # cannot express.
+    # The doc's residual with a bound that is empty: nothing stores `q`, so
+    # the read after the loop takes the error edge on both architectures
+    # (was: the caller's leftover, a word that changed with the build).
+    ("both_arch_for_range_empty_target_read_after_loop_exits",
+     "def main(n):\n"
+     "    for q in range(0, n - n):\n"
+     "        x = 1\n"
+     "    return q\n", 1, None),
+    # …and the same emptiness through a local, where the loop here runs and
+    # the flag must NOT fire: `k` is 3, the range yields, `q` is bound, and
+    # the answer is the last value the loop held. A flag that fired on a
+    # loop that ran would exit 1 where the source says 2.
+    ("both_arch_for_range_runtime_bound_target_holds_the_last_value",
+     "def main(n):\n"
+     "    k = n - n + 3\n"
+     "    for q in range(0, k):\n"
+     "        x = 1\n"
+     "    return q\n", 2, None),
+    # The doc's residual, parameter-bound and non-empty: the loop runs `n`
+    # times, so the read after it is the LAST value the loop bound, not an
+    # unbound name. This is the false-positive guard for the flag — with the
+    # default entry argument it runs ten times and answers 9 — and the row
+    # the 2026-10-28 re-measurement of the doc recorded as the divergence
+    # (`q=9` where CPython said `q=2`, for a different reason: the flag
+    # existed nowhere, so the `n = 0` half printed the same leftover the
+    # `n = 3` half did).
+    ("both_arch_for_range_nonempty_target_prints_the_last_value",
+     "def main(n):\n"
+     "    for q in range(0, n):\n"
+     "        x = 1\n"
+     "    printf(\"q=%d\", q)\n"
+     "    return 0\n", 0, "q=9"),
+    # The read inside an arm: the branch forks the paths, and the arm that
+    # stores is not the arm that reads, so the join keeps the flag and the
+    # reading arm's read takes the error edge when the range was empty.
+    ("both_arch_for_range_empty_target_read_in_a_branch_exits",
+     "def main(n):\n"
+     "    for q in range(0, n - n):\n"
+     "        x = 1\n"
+     "    if n:\n"
+     "        return q\n"
+     "    return 0\n", 1, None),
 
     # ── a FLEXIBLE type is not an UNSIGNED one ─────────────────────────────
     #
@@ -19774,355 +19990,37 @@ FLOAT_REFUSALS = [
     # from `PRINTF_NUMBER_CONVERSIONS` — a blob does have an address, and
     # Darwin's `%p` renders it. Neither is asserted to build here because a
     # `%s` of a container is a different (unfixed) shape and `%p`'s output is an
-    # address that is not stable to compare; the row above is the control.
-]
-
-# The CONTAINER family, the other half of the same "the conversion and the
-# operand have to agree" rule `FLOAT_REFUSALS` is about. A container is neither
-# a double nor an integer: its one word is the address of its blob, so a NUMBER
-# conversion renders the heap address rather than a value. Measured on BOTH
-# architectures from a green build, `var xs = [1, 2, 3]; printf("v=%d", xs)`
-# printed `v=1809329920` on arm64 and `v=1870638832` on x86-64 — the address is
-# a property of the run, the defect is not — where CPython raises
-# `TypeError: %d format: a number is required, not list`. The fix is
-# `model.printf_container_conversion_refusal`, asked of the operand's KIND
-# (`ValueKinds.kind_of`) rather than of a name's `own_shape`, so a literal, a
-# construction and a name bound to either are one answer.
-PRINTF_CONTAINER_REFUSALS = [
-    # The filed shape: a LIST local at `%d`.
-    ("container_refuse_a_number_conversion_of_a_list",
+    # ── A double past the `Int64` range, at the `Int` conversion ─────────────
+    #
+    # The other half of the double value model, one row per direction, on BOTH
+    # machines: the build can read a literal, and a literal whose truncated
+    # value does not fit in an `Int64` is a program CPython raises
+    # `OverflowError` for, while the hardware would answer the same source with
+    # two different programs — `FCVTZS` clamping at `9223372036854775807` and
+    # `CVTTSD2SI` at `-9223372036854775808` — which is the divergence this
+    # refusal closes at the place it is decidable. Measured on both
+    # architectures before `model.float_to_int_refusal`: `Int(1e300)` printed
+    # `9223372036854775807` on arm64 and `-9223372036854775808` on x86-64,
+    # exit 0 (the bug doc that recorded it,
+    # `FORMAL_int_of_an_out_of_range_double_saturates_the_other_way_on_each_
+    # backend`, is deleted with its fix; these rows are the record).
+    #
+    # The needle is the FIT clause rather than a value, because the value the
+    # message states is the spelled operand and a value needle would assert a
+    # spelling rather than a decision.
+    ("float_to_int_a_double_literal_past_the_range_is_refused",
      "def main() -> Int:\n"
-     "    var xs = [1, 2, 3]\n"
-     "    printf(\"v=%d\", xs)\n"
-     "    return 0\n",
-     "refuse:the `%d` conversion in printf's format string reads `xs` as a "
-     "number, and `xs` is a CONTAINER", None),
-    # A `%f` is the other number class, and it is the same defect read the other
-    # way: the blob's address as a double is a denormal, not a list. A separate
-    # row because a fix that only understood the integer conversions would leave
-    # this one printing a number nobody wrote.
-    ("container_refuse_a_floating_conversion_of_a_list",
+     "    return Int(1e300)\n",
+     "refuse:does not fit in an Int64", None),
+    # …and the LOWER edge, which is a different double, not a sign flip: a
+    # double cannot name a value between `-2**63` and `-2**63 - 2048` (binary64's
+    # spacing there is 2048), and `-2**63` itself FITS — its truncation is
+    # `INT64_MIN`. A rule that tested the sign rather than the value would take
+    # one of the two rows and miss the other's arithmetic.
+    ("float_to_int_a_negative_double_literal_past_the_range_is_refused",
      "def main() -> Int:\n"
-     "    var xs = [1, 2, 3]\n"
-     "    printf(\"v=%.17g\", xs)\n"
-     "    return 0\n",
-     "refuse:the `%g` conversion in printf's format string reads `xs` as a "
-     "number, and `xs` is a CONTAINER", None),
-    # A DICT is the same shape and gets the same answer, which is why the row is
-    # asked of the KIND (`is_list_kind`, which a dict's `list:*` kind satisfies)
-    # and not of the constructor's name — a dict and a list are the same word on
-    # this path (`ValueKinds.is_dict_value`'s docstring is the measurement).
-    ("container_refuse_a_number_conversion_of_a_dict",
-     "def main() -> Int:\n"
-     "    var d = {\"a\": 1}\n"
-     "    printf(\"v=%d\", d)\n"
-     "    return 0\n",
-     "refuse:the `%d` conversion in printf's format string reads `d` as a "
-     "number, and `d` is a CONTAINER", None),
-    # A `bytearray` is a blob too, and `printf("%d", b)` is the same defect as
-    # the list's. A third spelling so the kind predicate cannot be narrowed to
-    # the list-literal constructor and stay green on the other two.
-    ("container_refuse_a_number_conversion_of_a_bytearray",
-     "def main() -> Int:\n"
-     "    var b = bytearray()\n"
-     "    printf(\"v=%d\", b)\n"
-     "    return 0\n",
-     "refuse:the `%d` conversion in printf's format string reads `b` as a "
-     "number, and `b` is a CONTAINER", None),
-    # A `%s` is the TEXT conversion and is refused by
-    # `printf_text_conversion_refusal`, which now takes a container as positive
-    # evidence of "not text" — the same defect one step further out, because a
-    # container's one word is its blob's address and `%s` walks the count header
-    # as a C string. The needle is the `%s` sentence, so this row pins that the
-    # TEXT function owns that conversion rather than the number one.
-    ("container_a_text_conversion_is_the_text_refusal",
-     "def main() -> Int:\n"
-     "    var xs = [1, 2, 3]\n"
-     "    printf(\"v=%s\", xs)\n"
-     "    return 0\n",
-     "refuse:the `%s` conversion in printf's format string reads", None),
-    # The CONTROL, and the one that keeps the rule from over-refusing: an
-    # UNANNOTATED parameter is a word this build cannot classify, and `kind_of`
-    # answers `INT_KIND` (not a container) for it. `def show(xs):
-    # printf("%d", xs)` called `show(5)` must keep building — reading "not known
-    # to be a container" as "not a container" would refuse it.
-    ("container_an_unannotated_parameter_at_a_number_conversion_still_builds",
-     "def show(xs):\n"
-     "    printf(\"v=%d\", xs)\n"
-     "    return 0\n"
-     "\n"
-     "def main() -> Int:\n"
-     "    return show(5)\n", 0, None),
-    # The `%p` boundary: the one conversion that RENDERS an address, and a
-    # container's word IS an address — CPython answers `"%p" % [1, 2, 3]`.
-    # The container hook still refuses it: it covers every non-`s` conversion,
-    # and the message answers "pass an element or the count" rather than
-    # emitting the pointer. The row pins that the boundary is DECLARED by a
-    # refusal with the container's kind, not by an allow that a reader has to
-    # find in a table comment.
-    ("container_a_pointer_conversion_is_the_container_refusal",
-     "def main() -> Int:\n"
-     "    var xs = [1, 2, 3]\n"
-     "    printf(\"v=%p\", xs)\n"
-     "    return 0\n",
-     "refuse:the `%p` conversion in printf's format string reads `xs` as a "
-     "number, and `xs` is a CONTAINER", None),
-]
-
-
-# The CONTAINER family refusals, the mirror of `FLOAT_REFUSALS`: a `printf`
-# conversion states what the C library will do with the word it is handed, and
-# a container's word is the ADDRESS of a blob. **There was a refusal for the
-# TEXT direction (`printf("%s", 42)`, `PRINTF_TEXT_CASES`) and none for this
-# one**, so `printf("%d", xs)` placed the vararg from the format, rendered the
-# address as a decimal, and printed a different number on each architecture and
-# each run — green build, exit 0.
-#
-# `model.printf_container_conversion_refusal` is the row, and the evidence is
-# `ValueKinds.kind_of` read through `model.is_list_kind`, which is why the three
-# rows below are ONE rule rather than three: a `List`, a `Dict` and a
-# `bytearray` all classify as `list:…`, so the fix cannot be asked of a
-# constructor's name. The two controls at the end are the two halves the
-# exclusion rests on — a STRING is not a container (the text path is untouched)
-# and a container's COUNT or ELEMENT is an ordinary integer.
-CONTAINER_REFUSALS = [
-    # THE reproducer. Measured on BOTH architectures before the refusal: arm64
-    # printed `v=1809329920` and x86-64 printed `v=1870638832` — a heap address,
-    # where CPython raises `TypeError: %d format: a list is required, not int`.
-    ("printf_d_of_a_list_is_refused",
-     "def main() -> Int:\n"
-     "    var xs = [1, 2, 3]\n"
-     "    printf(\"v=%d\\n\", xs)\n"
-     "    return 0\n",
-     "refuse:as a number, and `xs` is a CONTAINER (`list:int`)", None),
-    # A DICT is the same rule and NOT the same constructor: its kind is
-    # `list:int` (the VALUES are what a subscript yields), so a fix keyed on
-    # `ListExpr` would leave this row printing the pair blob's address.
-    ("printf_d_of_a_dict_is_refused",
-     "def main() -> Int:\n"
-     "    var d = {\"a\": 1, \"b\": 2}\n"
-     "    printf(\"v=%d\\n\", d)\n"
-     "    return 0\n",
-     "refuse:as a number, and `d` is a CONTAINER (`list:int`)", None),
-    # A BYTE blob, and the reason the exclusion is the CONVERSION rather than
-    # the kind: `list:byte` is a container for `%d` (its word is the block's
-    # base) and is NOT one for `%s` (its elements ARE bytes). A rule that
-    # refused the kind would refuse a `%s` of a bytearray that is correct.
-    ("printf_d_of_a_bytearray_is_refused",
-     "def main() -> Int:\n"
-     "    var b = bytearray(3)\n"
-     "    printf(\"v=%d\\n\", b)\n"
-     "    return 0\n",
-     "refuse:as a number, and `b` is a CONTAINER (`list:byte`)", None),
-    # CONTROL: a container's COUNT is an integer and must keep printing. If the
-    # refusal were asked of the expression's SHAPE rather than of its kind it
-    # would catch `len(xs)` too.
-    ("printf_a_containers_count_still_prints",
-     "def main() -> Int:\n"
-     "    var xs = [1, 2, 3]\n"
-     "    printf(\"[%d]\", len(xs))\n"
-     "    return 0\n", 0, "[3]"),
-    # CONTROL: a container's ELEMENT is an integer and must keep printing, which
-    # is the other spelling the refusal message hands the reader.
-    ("printf_a_containers_element_still_prints",
-     "def main() -> Int:\n"
-     "    var xs = [1, 2, 3]\n"
-     "    printf(\"[%d]\", xs[0])\n"
-     "    return 0\n", 0, "[1]"),
-    # CONTROL: a STRING is not a container — `str` is `STR_KIND`, not `list:…`
-    # — so the container hook must leave the text path exactly as it was.
-    ("printf_s_of_a_string_is_unaffected_by_the_container_rule",
-     "def main() -> Int:\n"
-     "    printf(\"[%s]\", \"hi\")\n"
-     "    return 0\n", 0, "[hi]"),
-]
-
-
-
-
-# A CONTAINER at a NUMBER conversion, which is the one direction of
-# `printf_kind_conversion_refusal`'s table that had no row: that function
-# compares a FLOAT against an INTEGER, and a blob is neither — on this path a
-# container is the ADDRESS of a `[count][element…]` region, so `%d` renders
-# where it lives and reads nothing out of it.
-#
-# Measured before `model.printf_container_conversion_refusal`, both
-# architectures, exit 0 and nothing on stderr: `var xs = [1, 2, 3];
-# printf("v=%d", xs)` printed `v=6137343680` on arm64 and `v=13051747960` on
-# x86-64. **The two numbers differ**, which is why this group is not a nicety:
-# it was not one wrong answer reached two ways, it was two wrong answers, and
-# CPython raises `TypeError: %d format: a real number is required, not list`
-# on the same text. The needle is the CONVERSION and the operand's kind rather
-# than the arithmetic, because the arithmetic is the part that changes (a heap
-# address is not reproducible) and the part that is the defect.
-#
-# The EVIDENCE polarity is the reason this is its own group and not more rows
-# in `FLOAT_REFUSALS`: a container kind is never this model's DEFAULT — an
-# unclassified word is `int` — so `printf_arg_container_evidence` can read
-# `kind_of` directly, where `printf_arg_float_evidence` has to reach for
-# `own_shape_kind` because `INT_KIND` IS the default there. A rule that reached
-# for the default the way the float axis must would be reading the wrong thing,
-# and the last two rows below are what keep that honest.
-PRINTF_CONTAINER_REFUSALS = [
-    # The doc's own reproducer, and the LOCAL case: a name this function bound
-    # to a container literal. Both architectures must print the same sentence,
-    # which `run_case`'s `refuse:` path already requires.
-    ("printf_container_refuse_an_integer_conversion_of_a_list",
-     "def main() -> Int32:\n"
-     "    var xs = [1, 2, 3]\n"
-     "    printf(\"v=%d\\n\", xs)\n"
-     "    return 0\n",
-     "refuse:reads its argument as a NUMBER, and `xs` is a container", None),
-    # The doc's SECOND row, and the one that says the refusal is about the
-    # OPERAND and not about how the name got its kind: the operand is a list
-    # PARAMETER, so nothing in `main` binds `xs` at all and the evidence comes
-    # from the callee's own annotation (`List[Int]` -> `list:int`).
-    ("printf_container_refuse_an_integer_conversion_of_a_list_parameter",
-     "def show(xs: List[Int]):\n"
-     "    printf(\"v=%d\\n\", xs)\n"
-     "\n"
-     "def main() -> Int32:\n"
-     "    show([1, 2, 3])\n"
-     "    return 0\n",
-     "refuse:reads its argument as a NUMBER, and `xs` is a container", None),
-    # …and the UNANNOTATED parameter, which is the shape the doc measured
-    # separately and which reaches the same answer by a different reader:
-    # `parameter_kinds_by_call_site`'s unanimity over every call site, not a
-    # declaration. This is the case that makes "asked of the KIND" testable —
-    # a rule that read the annotation only would let this one through, and a
-    # rule that read the call sites only would let the row above through.
-    ("printf_container_refuse_an_unannotated_parameter_holding_a_list",
-     "def show(xs):\n"
-     "    printf(\"v=%d\\n\", xs)\n"
-     "\n"
-     "def main() -> Int32:\n"
-     "    show([1, 2, 3])\n"
-     "    return 0\n",
-     "refuse:reads its argument as a NUMBER, and `xs` is a container", None),
-    # The doc's decision (1), in the other two shapes: `printf("%d", b)` for a
-    # `bytearray` and `printf("%d", d)` for a `Dict` are the same shape and
-    # must give the same ANSWER, which is what asking `is_list_kind` rather
-    # than the constructor's name buys. Three constructors, three different
-    # `_kind_of_simple` arms, one kind.
-    ("printf_container_refuse_an_integer_conversion_of_a_bytearray",
-     "def main() -> Int32:\n"
-     "    var b = bytearray(3)\n"
-     "    printf(\"v=%d\\n\", b)\n"
-     "    return 0\n",
-     "refuse:reads its argument as a NUMBER, and `b` is a container", None),
-    ("printf_container_refuse_an_integer_conversion_of_a_dict",
-     "def main() -> Int32:\n"
-     "    var d = {\"a\": 1}\n"
-     "    printf(\"v=%d\\n\", d)\n"
-     "    return 0\n",
-     "refuse:reads its argument as a NUMBER, and `d` is a container", None),
-    # A container LITERAL as the operand, which is the shape with no name in it
-    # at all — so it is the row that says the rule reads the KIND rather than
-    # a name's `own_shape`, which is the wording the doc asks for.
-    ("printf_container_refuse_an_integer_conversion_of_a_list_literal",
-     "def main() -> Int32:\n"
-     "    printf(\"v=%d\\n\", [1, 2, 3])\n"
-     "    return 0\n",
-     "refuse:reads its argument as a NUMBER, and `[1, 2, 3]` is a container", None),
-    # A LOOP TARGET over a list of lists, which is the shape no CONSTRUCTOR can
-    # reach: `row` is bound by `for row in rows` and its kind is the element
-    # kind of `rows`, so a rule that asked "what did this expression construct"
-    # would have nothing to ask. It printed `row`'s address before this row.
-    ("printf_container_refuse_a_loop_target_that_is_a_container",
-     "def main() -> Int32:\n"
-     "    var rows = [[1, 2], [3, 4]]\n"
-     "    for row in rows:\n"
-     "        printf(\"v=%d\\n\", row)\n"
-     "    return 0\n",
-     "refuse:reads its argument as a NUMBER, and `row` is a container", None),
-    # The OTHER conversions that read their operand as a number, one row each,
-    # because they are separate code paths in any libc and a fix that repaired
-    # only the `%d` reader would pass every row above. `%f` printed
-    # `0.000000` (the blob's count word read as a double), `%c` printed the low
-    # byte of the address, `%x` printed the address in hex, and `%*d` printed a
-    # field of thousands of spaces — the address read as a field width, which is
-    # C's own rule that a `*` reads an `int`.
-    ("printf_container_refuse_a_floating_conversion_of_a_list",
-     "def main() -> Int32:\n"
-     "    var xs = [1, 2, 3]\n"
-     "    printf(\"v=%f\\n\", xs)\n"
-     "    return 0\n",
-     "refuse:the `%f` conversion in printf's format string reads its argument "
-     "as a NUMBER", None),
-    ("printf_container_refuse_a_character_conversion_of_a_list",
-     "def main() -> Int32:\n"
-     "    var xs = [1, 2, 3]\n"
-     "    printf(\"v=%c\\n\", xs)\n"
-     "    return 0\n",
-     "refuse:the `%c` conversion in printf's format string reads its argument "
-     "as a NUMBER", None),
-    ("printf_container_refuse_a_hexadecimal_conversion_of_a_list",
-     "def main() -> Int32:\n"
-     "    var xs = [1, 2, 3]\n"
-     "    printf(\"v=%x\\n\", xs)\n"
-     "    return 0\n",
-     "refuse:the `%x` conversion in printf's format string reads its argument "
-     "as a NUMBER", None),
-    ("printf_container_refuse_a_star_width_of_a_list",
-     "def main() -> Int32:\n"
-     "    var xs = [1, 2, 3]\n"
-     "    printf(\"v=%*d|\\n\", xs, 3)\n"
-     "    return 0\n",
-     "refuse:the `%*` conversion in printf's format string reads its argument "
-     "as a NUMBER", None),
-    # ── THE CONTROLS, and each is a different boundary of the rule ──────────
-    # `%p` is the conversion that PRINTS AN ADDRESS, so a blob's address is
-    # what it asks for. Measured on both architectures: `0x16fb02ec0` and
-    # `0x3089d3e98`, i.e. different addresses and the same shape. This row is
-    # why refusing "every conversion of a container" would have been wrong, and
-    # it is the row that would fail first if `PRINTF_NUMBER_CONVERSIONS` grew a
-    # `p`.
-    ("printf_container_a_pointer_conversion_of_a_list_still_prints_its_address",
-     "def main() -> Int32:\n"
-     "    var xs = [1, 2, 3]\n"
-     "    printf(\"v=%p\\n\", xs)\n"
-     "    return 0\n", 0, "v=0x"),
-    # An ELEMENT and the COUNT, which are the two things the refusal message
-    # tells the reader to write instead. If either stopped working the message
-    # would be sending a reader to a construct this path cannot answer, which is
-    # the failure every "write it as … instead" clause in this file is written
-    # against.
-    ("printf_container_an_element_of_a_list_still_prints",
-     "def main() -> Int32:\n"
-     "    var xs = [1, 2, 3]\n"
-     "    printf(\"v=%d\\n\", xs[0])\n"
-     "    return 0\n", 0, "v=1"),
-    ("printf_container_the_count_of_a_list_still_prints",
-     "def main() -> Int32:\n"
-     "    var xs = [1, 2, 3]\n"
-     "    printf(\"v=%d\\n\", len(xs))\n"
-     "    return 0\n", 0, "v=3"),
-    # The PERMISSIVE direction, and it is the one the float axis had to be
-    # careful about: an operand this build cannot classify is silence, because
-    # both backends place the vararg from the FORMAT and an unclassified
-    # operand is correct there. An unannotated parameter holding a NUMBER is the
-    # control that a rule reaching for `kind_of`'s `int` default would refuse —
-    # and the refusal would be wrong, because there is no disagreement to report.
-    ("printf_container_an_unclassified_operand_at_a_number_conversion_still_prints",
-     "def show(x):\n"
-     "    printf(\"v=%d\\n\", x)\n"
-     "\n"
-     "def main() -> Int32:\n"
-     "    show(7)\n"
-     "    return 0\n", 0, "v=7"),
-    # `%a` in CPython is `repr()`, so `"%a" % [1, 2, 3]` is `'[1, 2, 3]'` and a
-    # program that writes it is CORRECT — which is why `%a`/`%A` are absent from
-    # `PRINTF_NUMBER_CONVERSIONS` even though they are hexadecimal-float
-    # conversions in C and sit in `PRINTF_FLOAT_CONVERSIONS` for the placement.
-    # The row's claim is only that this refusal does not fire there: what this
-    # path PRINTS for a `%a` of a container is a different bug (the container's
-    # missing `repr`, `bugs/FORMAL_printf_s_of_a_container_walks_the_blob_
-    # header.md`) and pinning its output here would pin a wrong answer.
-    ("printf_container_a_repr_conversion_of_a_list_is_not_this_rows_subject",
-     "def main() -> Int32:\n"
-     "    var xs = [1, 2, 3]\n"
-     "    printf(\"v=%a\\n\", xs)\n"
-     "    return 0\n", 0, None),
+     "    return Int(-1e300)\n",
+     "refuse:does not fit in an Int64", None),
 ]
 
 
@@ -23947,33 +23845,6 @@ REFUSAL_CASES = [
      "def main(n: Int) -> Int:\n"
      "    return f(n)\n",
      "refuse:does not fold to a compile-time constant", None),
-
-    # ── A NUMBER CONVERSION OF A CONTAINER ─────────────────────────────────────
-    #
-    # `printf("%d", xs)` for a list built GREEN, linked, ran, and printed the
-    # blob's heap ADDRESS — measured `v=1809329920` on arm64 and `v=1870638832`
-    # on x86-64 from the same source on two machines — exit 0 and nothing on
-    # stderr, where CPython raises `TypeError`. It is the mirror of the `%s`-of-
-    # an-integer rows in `PRINTF_TEXT_CASES`: that one is the conversion that
-    # DEREFERENCES, this one is the operand whose VALUE is a pointer. The rule
-    # and the words are `model.printf_container_conversion_refusal`, asked by
-    # both emitters through `model.printf_format_refusal`, so a `refuse:` row
-    # asserts the two architectures produce the SAME sentence. The LOCAL
-    # spelling of this construct is pinned by `CONTAINER_REFUSALS` (list, dict,
-    # bytearray); the row that the merged tree took from this group is the
-    # PARAMETER shape, which that group does not cover:
-    # The same construct where the container arrives through a PARAMETER, so a
-    # rule that only looked at a constructor binding would pass the local rows
-    # and fail this one. `show([1, 2, 3])` keeps the call site's kind through
-    # `param_kind`, which `ValueKinds` already reads for `len`/`if`, and the
-    # refusal does not care how the name got its kind.
-    ("printf_d_of_a_list_parameter_is_refused",
-     "def show(xs):\n"
-     "    printf(\"v=%d\", xs)\n"
-     "    return 0\n"
-     "def main() -> Int:\n"
-     "    return show([1, 2, 3])\n",
-     "refuse:reads `xs` as a number, and `xs` is a CONTAINER", None),
 ]
 
 
@@ -27308,7 +27179,6 @@ def main():
                   + ORIGIN_OF_REFUSALS
                   + EQ_DISPATCH_CASES + FRAME_ORDER_CASES
                   + FLOAT_REFUSALS
-                  + PRINTF_CONTAINER_REFUSALS
                   + TYPE_ARGUMENT_LIST_CASES
                   + TYPE_ARGUMENT_LIST_ABSENT_CASES
                   + MUTATING_RECEIVER_REFUSALS + SOLE_FIELD_CALLEE_REFUSALS

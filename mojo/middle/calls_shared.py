@@ -70,7 +70,7 @@ def _callable_value_symbol(gen, node, cxx: bool = False):
     f=leaf): return f(x)` invoked as `apply_it("q")` compiled, linked,
     and died with SIGSEGV on `mojo_fnptr_call_1(NULL, ...)` — exit 139,
     no diagnostic, and the doc that recorded the *generator* instance of
-    this shape (`bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md`)
+    this shape (`the (since-fixed) c_common/fsutil.py compile failure`)
     never saw it, because it is reachable from an ordinary `def` too.
 
     Two spellings, matching the two the corpus actually uses:
@@ -111,6 +111,17 @@ def _callable_value_symbol(gen, node, cxx: bool = False):
     REDIRECTED symbol, because `_funcptr_`'s statics live in the .c
     translation unit and are not visible from the separately-compiled .cpp.
     """
+    # A callable the RUNTIME implements (`os.walk`, `glob.glob`, ...) used as a
+    # value: its address, through the same `_funcptr_` static every other
+    # "function as a value" site uses.
+    if (isinstance(node, gimple_ctypes.MemberExpr)
+            and isinstance(node.obj, gimple_ctypes.IdentExpr)):
+        _rtf = _RUNTIME_CALLABLE_VALUES.get(f'{node.obj.name}.{node.member}')
+        if _rtf is not None and node.obj.name not in getattr(gen, 'var_types', ()):
+            if cxx:
+                return ('void *', f'(void *){_rtf}')
+            gen._funcptr_builtins_needed.add(_rtf)
+            return ('void *', f'_funcptr_{_rtf}')
     _fname = None
     if isinstance(node, gimple_ctypes.IdentExpr):
         _fname = _as_str(node.name)
@@ -413,11 +424,26 @@ def _default_expr_to_pair(gen, _dflt, cxx: bool = False,
     if (isinstance(_dflt, gimple_ctypes.MemberExpr)
             and isinstance(_dflt.obj, gimple_ctypes.IdentExpr)):
         _nm = f'{_dflt.obj.name}.{_dflt.member}'
+        # A callable the RUNTIME implements (`os.walk`, `glob.glob`,
+        # `glob.iglob`) is a real function value: its address, in the
+        # int64_t-in/int64_t-out ABI `mojo_fnptr_call_N` dispatches through.
+        _rt_fn = _RUNTIME_CALLABLE_VALUES.get(_nm)
+        if _rt_fn is not None:
+            return ('void *', gen._new_val('void *', f'(void *){_rt_fn}'))
         _slit = gen._new_val('char *',
                              gen._intern_string(gimple_ctypes._c_escape(_nm)))
         gen._emit(f'  mojo_set_unavailable_callable_name ({_slit});')
         return ('void *', gen._new_val('void *', 'mojo_unavailable_callable_ptr ()'))
     return _null_default_pair(param_ctype)
+
+# `module.attr` callables the runtime implements, as function VALUES (the
+# `_w` wrappers take and return int64_t words). `glob.glob` and `glob.iglob`
+# are the same function here: both answer an eager list.
+_RUNTIME_CALLABLE_VALUES = {
+    'os.walk': 'mojo_os_walk_w',
+    'glob.glob': 'mojo_glob_w',
+    'glob.iglob': 'mojo_glob_w',
+}
 
 def _resolve_overload(gen, candidates: list, args: list, kwargs: list | None) -> dict | None:
     """Pick the candidate overload matching a call site's argument count/

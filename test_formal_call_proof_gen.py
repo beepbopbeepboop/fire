@@ -654,8 +654,10 @@ class TestGeneratorSource(unittest.TestCase):
         import formal.x86_64_proof_gen as X
         for gen, entry in ((X, "generate_x86_64_proof"),
                            (G, "generate_arm64_proof")):
+            # An empty image: the float-repr helper is at the base, so a body
+            # has no bytes before it (the compiler always publishes this key).
             info = {"func_name": "f", "base_addr": 0x1000, "labels": {},
-                    "test_input": 10}
+                    "float_repr_addr": 0x1000, "test_input": 10}
             try:
                 out = getattr(gen, entry)(prog, b"", dict(info))
             except NotImplementedError as e:
@@ -1797,24 +1799,35 @@ class TestTheDivideByZeroGuardIsEmittedOnlyWhenItCanFire(unittest.TestCase):
     """
 
     def _calls(self, source, arch="arm64"):
-        """The number of CALL SITES the emitter recorded for this source.
+        """The number of guard-exit CALL SITES the emitter recorded for this source.
 
         Read from the assembler's own `extern_refs` rather than by scanning
         bytes: an `0xE8`/`0xE9` byte scan also matches a `jmp rel32`, which is
         what a control-flow rewrite of the same block emits, so it counted two
         calls where there is one.
+
+        Only the guard's own exit call is counted, by callee: arm64's
+        `_emit_exit` is exactly one `bl fflush` plus a raw `svc`, and
+        x86-64's `_emit_call_exit` exactly one `call exit`. Since the
+        float-repr helper (commit a2135f390) is emitted unconditionally after
+        every function body and adds its own `snprintf`/`strtod` calls to
+        every image, a whole-image count reads 2 where the guard emitted 0
+        and 3 where it emitted 1 — measured 2026-10-30 on both backends
+        (`1 != 3`, the doc's named smallest method), which is what broke these
+        rows when the helper landed.
         """
         from formal.build import parse_module
         if arch == "arm64":
             import formal.arm64_codegen as AC
             g = AC.ARM64Codegen()
             g.compile(parse_module(source), emit_startup=False)
-            return sum(1 for _s, _p, _l, kind in g.asm.extern_refs
-                       if kind == "bl")
+            return sum(1 for name, _p, _l, kind in g.asm.extern_refs
+                       if kind == "bl" and name == "fflush")
         import formal.x86_64_codegen as XC
         g = XC.X86_64Codegen()
         g.compile(parse_module(source), emit_startup=False)
-        return len(g.asm.extern_refs)
+        return sum(1 for name, _p, _l, kind in g.asm.extern_refs
+                   if kind == "call" and name == "exit")
 
     def _rule(self):
         from formal import model as M
@@ -2039,6 +2052,194 @@ class TestAddSubImmediateShift(unittest.TestCase):
                       f"store: {joined}")
         self.assertNotIn(f"UInt64.ofNat 32)", joined,
                          f"the peel is reading the raw 12-bit field: {joined}")
+
+
+class TestMethodFrameDepthTrackers(unittest.TestCase):
+    """The frame-contract depth and slot trackers read an ADD/SUB immediate
+    as BYTES, with its `sh` bit, and not as `field * 8`.
+
+    The four trackers this class drives feed the METHOD-frame contract in
+    `_frame_section` (the by-reference receiver's `Frame.FrameBelow` premises
+    and the peels that read them): `_frame_stack_depths`'s numbers are the
+    `c`s of `Frame.FrameBelow (sp0 - c)`, `_frame_slot_accesses`'s are the
+    SLOTS a method's field access goes to, and `_frame_store_depths` /
+    `_frame_store_writes` are the same depths per store. Their `ADD`/`SUB
+    (immediate)` arms read the field as `((w >> 10) & 0xfff) * 8` — the `sh`
+    bit of `#imm, lsl #12` dropped, and the `* 8` that belongs to the
+    `STP`/`LDP` `imm7` arms (which ARE 8-byte counts) carried over. So
+    `sub sp, sp, #16` was a 128-byte depth and `sub sp, sp, #32, lsl #12` a
+    256-byte one: a contract whose premises name `sp0 - 144` would peel a
+    store the machine made at `sp0 - 32`, the same stale-address red the
+    class above recorded for the walk's own trackers.
+
+    No corpus example reaches a method contract today (the frame examples are
+    refused before the section is generated), so this is the
+    `_frame_methods`-shaped unit the defect's measurement prescribed in its
+    place: every word is
+    an encoder's own (so the fix cannot drift against the machine), driven
+    through the generator's own readers, and the last case confirms the WHOLE
+    method — the source's `self.x` and the machine's `LDR` through the
+    receiver agreeing — and reads the depth the section's `hsep` premises take
+    off the same word map.
+    """
+
+    def _word(self, fn, *args):
+        import struct as _s
+        return _s.unpack("<I", fn(*args))[0]
+
+    def setUp(self):
+        import formal.arm64 as A
+        self.sub16 = self._word(A.encode_sub_xd_xn_imm_sh, 31, 31, 16, 0)
+        self.add16 = self._word(A.encode_add_xd_xn_imm_sh, 31, 31, 16, 0)
+        self.sub_scratch = self._word(A.encode_sub_xd_xn_imm_sh, 31, 31, 32, 1)
+        self.stp16 = self._word(A.encode_stp_sp_pre, 29, 30, 16)
+        self.ldp16 = self._word(A.encode_ldp_sp_post, 29, 30, 16)
+
+    def test_stack_depths_are_bytes_and_read_the_sh_bit(self):
+        """`sp` through the prologue: the numbers `Frame.FrameBelow` gets."""
+        import formal.arm64_proof_gen as G
+        # `sub sp, sp, #16` then `stp x29, x30, [sp, #-16]!` then the epilogue
+        # `ldp x29, x30, [sp], #16`: the pair sits at 32/24 below the entry sp
+        # and the POST-indexed reload reads it at the same 32/24, before sp
+        # moves back.
+        words = {0x0: self.sub16, 0x4: self.stp16, 0x8: self.ldp16}
+        self.assertEqual(G._frame_stack_depths(words, 0x0, 0xC), [24, 32],
+                         "an ADD/SUB immediate is a BYTE count: the `* 8` the "
+                         "STP/LDP `imm7` arms need is not what it has, so `#16` "
+                         "read as 128 would put the premises 8x too deep")
+        # `add sp, sp, #16` restores sp before the reload: the load then reads
+        # at 16/8, and a tracker that scaled the ADD by 8 would leave sp 112
+        # bytes too low and orphan the reload from the `hsep` premises.
+        words = {0x0: self.sub16, 0x4: self.stp16, 0x8: self.add16,
+                 0xC: self.ldp16}
+        self.assertEqual(G._frame_stack_depths(words, 0x0, 0x10),
+                         [8, 16, 24, 32],
+                         "the epilogue's `add sp, sp, #16` is 16 bytes, not "
+                         "128: a scaled ADD would orphan the reload from the "
+                         "premises it reads")
+        # The 128KB scratch is ONE scaled immediate, `sub sp, sp, #32, lsl #12`:
+        # the pair then sits at (32 << 12) + 16 / + 8 below the entry sp.
+        words = {0x0: self.sub_scratch, 0x4: self.stp16, 0x8: self.ldp16}
+        self.assertEqual(G._frame_stack_depths(words, 0x0, 0xC),
+                         [(32 << 12) + 8, (32 << 12) + 16],
+                         "a `#32, lsl #12` immediate is 32 << 12 bytes; the 12-"
+                         "bit field alone would put the premises 4096x too "
+                         "shallow")
+
+    def test_store_depths_and_writes_track_the_same_way(self):
+        """The peel side: the per-store `K`s of the method's own frame writes."""
+        import formal.arm64_proof_gen as G
+        words = {0x0: self.sub16, 0x4: self.stp16}
+        self.assertEqual(G._frame_store_depths(words, 0x0, 0x8), [32],
+                         "the pair's `K` is 16 (prologue) + 16 (pair) bytes "
+                         "below the entry sp, not 128 + 16")
+        m = {"entry": 0x0, "end": 0x8}
+        self.assertEqual(G._frame_store_writes(words, m), [([24, 32], False)],
+                         "the pair writes two words, outer-first, at the NEW "
+                         "sp: 32 and 24 bytes below the entry sp")
+        # …and the `lsl #12` spelling, which the `sh` bit is what makes 131072.
+        words = {0x0: self.sub_scratch, 0x4: self.stp16}
+        self.assertEqual(G._frame_store_depths(words, 0x0, 0x8),
+                         [(32 << 12) + 16])
+        self.assertEqual(
+            G._frame_store_writes(words, m),
+            [([(32 << 12) + 8, (32 << 12) + 16], False)],
+            "a scaled `sub sp` must deepen the pair by 32 << 12 bytes, not 32")
+
+    def test_slot_accesses_read_the_add_as_a_byte_offset(self):
+        """`ADD` extends the receiver offset in BYTES; the slot is bytes // 8.
+
+        `x0` arrives as the receiver: `add x19, x0, #8` extends it by 8 BYTES
+        (slot 1), and the `LDR`/`STR` arm below adds its own 8-byte access
+        scale.  The old `* 8` on the ADD arm said slot 1 was 8 slots away, so
+        a two-field method's contract would name the wrong slot — and a
+        contract about the wrong slot is a theorem the method does not satisfy.
+        """
+        import formal.arm64 as A
+        import formal.arm64_proof_gen as G
+        # The LDR/STR encoders take the offset in BYTES (`imm12 = imm // 8`),
+        # so `ldr x20, [x19, #16]` is 16 bytes beyond `x19`.
+        add8 = self._word(A.encode_add_xd_xn_imm_sh, 19, 0, 8, 0)
+        ldr16 = self._word(A.encode_ldr_xt_xn_imm, 20, 19, 16)
+        str8 = self._word(A.encode_str_xt_xn_imm, 1, 19, 8)
+        words = {0x0: add8, 0x4: ldr16}
+        self.assertEqual(G._frame_slot_accesses(words, 0x0, 0x8),
+                         [(3, False)],
+                         "`[x0 + 8 + 16]` is byte 24, slot 3; the old scaled "
+                         "ADD put the base at byte 64 and the load at slot 10")
+        words = {0x0: add8, 0x4: str8}
+        self.assertEqual(G._frame_slot_accesses(words, 0x0, 0x8),
+                         [(2, True)],
+                         "the STORE half of the same access: `[x0 + 8 + 8]` "
+                         "is byte 16, slot 2")
+        # The `sh` bit on the receiver-extending ADD: `add x19, x0, #1, lsl #12`
+        # is 4096 BYTES, so the following load is at slot 512.
+        add_scaled = self._word(A.encode_add_xd_xn_imm_sh, 19, 0, 1, 1)
+        ldr0 = self._word(A.encode_ldr_xt_xn_imm, 20, 19, 0)
+        words = {0x0: add_scaled, 0x4: ldr0}
+        self.assertEqual(G._frame_slot_accesses(words, 0x0, 0x8),
+                         [(512, False)],
+                         "a `#1, lsl #12` receiver extension is 4096 bytes; "
+                         "the 12-bit field alone would read the load at slot 1")
+
+    def test_a_confirmed_frame_method_reads_byte_depths(self):
+        """The whole machine, on a hand-assembled leaf method.
+
+        `P.get_x` as the SOURCE, five encoder words as the MACHINE: a prologue
+        the emitter would write (`sub sp`/`stp`), the one receiver-relative
+        `LDR` the source's `self.x` lowers to, and the epilogue.  `_frame_
+        methods` must CONFIRM the method (source and machine agreeing, one
+        slot), and `_frame_stack_depths` — the reader of the `hsep` premises —
+        must give the pair's byte depths.  The emitted section is checked on
+        the same words, so a revert that breaks the confirmation or the depths
+        fails here rather than at a proof no corpus example reaches.
+        """
+        import formal.arm64 as A
+        import formal.arm64_proof_gen as G
+        from formal.build import parse_module, _struct_methods
+        from types import SimpleNamespace
+        src = ("struct P:\n"
+               "    x: Int\n"
+               "    y: Int\n\n"
+               "    fn get_x(self) -> Int:\n"
+               "        return self.x\n")
+        fns = _struct_methods(parse_module(src))
+        self.assertEqual([f.name for f in fns], ["P_get_x"],
+                         "the lifted method name is what the label must carry")
+        code = b"".join([
+            A.encode_sub_xd_xn_imm_sh(31, 31, 16, 0),
+            A.encode_stp_sp_pre(29, 30, 16),
+            A.encode_ldr_xt_xn_imm(0, 0, 0),
+            A.encode_ldp_sp_post(29, 30, 16),
+            A.encode_ret(),
+        ])
+        prog = SimpleNamespace(functions=fns, externs=[])
+        info = {"base_addr": 0x1000, "labels": {"P_get_x": 0x1000}}
+        methods = G._frame_methods(prog, code, info)
+        self.assertIsNotNone(methods,
+                             "the hand-assembled method is the LEAF shape the "
+                             "confirmation exists for: one receiver-relative "
+                             "access, no branch — a None here is a confirmation "
+                             "regression, not a corpus question")
+        m = methods[0]
+        self.assertEqual(m["kind"], "get")
+        self.assertEqual(m["pairs"], [("x", 0)],
+                         "the source's `self.x` and the machine's `LDR` at "
+                         "`[x0, #0]` are the SAME slot; a confirmation that "
+                         "disagrees about it must drop the method, not guess")
+        words = {0x1000 + i: int.from_bytes(code[i:i + 4], "little")
+                 for i in range(0, len(code), 4)}
+        self.assertEqual(G._frame_stack_depths(words, m["entry"], m["end"]),
+                         [24, 32],
+                         "the `hsep` depths are the pair's byte positions: "
+                         "16 (prologue) + 16 (pair) and 8 below that, not the "
+                         "8x-scaled 136/144")
+        section = G._frame_section(prog, code, info, methods, "t_get")
+        self.assertIn("t_get_P_get_x_runs_frame_test", section,
+                      "the concrete run test is what a method that reads the "
+                      "wrong slot fails")
+        self.assertIn('(MF.MFExpr.field "x")', section,
+                      "the source semantics must name the field, not a slot")
 
 
 # Lean's `=` and `\u2260`, spelled once so the pattern and the expectation
@@ -3671,6 +3872,13 @@ class TestCallProofs(unittest.TestCase):
         and the row asserts the decline and the ABSENCE of the recursion error,
         which is what it was written for. A third outcome would be the failure:
         a proof.
+
+        The fold now states `i`-driven loops (the induction variable plus at
+        most one accumulator), but THIS one's condition reads `n`, which the
+        loop does not change, and the helper is a function of the loop's state
+        alone — so a THIRD sentence can be the decline on a tree where the
+        contract landed: the read would carry the entry's name into the
+        helper's body, where it is not in scope.
         """
         tmp = tempfile.mkdtemp(prefix="a2-loopcallee-")
         try:
@@ -3690,9 +3898,10 @@ class TestCallProofs(unittest.TestCase):
                          "describes a program with no recursion in it")
         self.assertTrue(
             "loop back-edge" in err
-            or "state is more than the one word the model carries" in err,
+            or "state is more than the one word the model carries" in err
+            or "which the loop does not change, inside the loop" in err,
             "the refusal must name the loop, since the return address map "
-            "is not what declined, and neither of the tree's two loop "
+            "is not what declined, and none of the tree's loop "
             f"sentences is in it: {err}")
 
     def test_two_calls_out_of_the_image_are_refused_by_name(self):
@@ -8140,53 +8349,39 @@ class TestALoopTheModelCannotStateIsRefusedNotModelled(unittest.TestCase):
         partial def {fn}_go_loop_0 (n_0 : UInt64) : UInt64 :=
           (if <cond> then {fn}_go_loop_0 (<updated>) else <rest>)
 
-    and `<updated>` is the entry PARAMETER's value after the body. So the loop's
-    state is one word — the induction variable, when the induction variable IS
-    the parameter — and every other name the body changes is silently dropped.
-    `wdiff` (`while n != 0: n = n - 1`) is that shape and is right.
-    `formal/examples/accum_max.mojo` is not:
-
-        i = 0
-        best = 0
-        while i != n:
-            if i > best:
-                best = i
-            i = i + 1
-        return best
-
-    Its induction variable is `i`, which is not the parameter, so `<updated>`
-    was the parameter unchanged and the emitted helper DIVERGES on every input
-    that enters the loop:
+    and the helper's argument(s) ARE the loop's state — the values that cross
+    an iteration are the values the argument(s) carry. The one-word half of
+    that rule used to state the state by the entry PARAMETER's value, so a
+    loop whose body changed anything else got a helper that recursed on a
+    word it never updated:
 
         partial def accum_max_go_loop_0 (n_0 : UInt64) : UInt64 :=
           (if ((UInt64.ofNat 1) ≠ n_0) then accum_max_go_loop_0 (n_0)
            else (UInt64.ofNat 0))
 
+    — a `partial def` that DIVERGES on every input that enters the loop.
     **On arm64 that never reached a proof file** — the `eval_eq_mojo` gate
     refuses the shape first. On x86-64 it did, because
-    `formal/x86_64_proof_gen.py` shares this fold, and the generator then wrote
-    its run test over the diverging model:
+    `formal/x86_64_proof_gen.py` shares this fold, and the generator then
+    wrote its run test over the diverging model:
 
         theorem accum_max_runs_10 : accum_max_result 10 = mojo 10 := by
           native_decide
 
-    `accum_max_result 10` is 9 and `mojo 10` diverges, so that obligation is
-    FALSE; `native_decide` does not report a false obligation, it runs the
-    interpreter until `formal/lean.py`'s bound kills it. Measured on this tree
-    before the fix: **7+ minutes with no verdict**, and the proof would have
-    been `bound-exceeded` — not a verdict on the proof, an absence of one,
-    produced by a model the generator had already decided it could not state.
+    Measured on this tree before the fix: **7+ minutes with no verdict** —
+    `native_decide` does not report a false obligation, it runs the
+    interpreter until the launcher's bound kills it.
 
-    The fix refuses a loop whose state is more than that one word (or whose
-    body is not a straight-line run of bindings), which on x86-64 reaches the
-    generator's own `_placeholder_model` path: the gap is emitted as a gap and
-    the run tests are omitted rather than stated falsely. Measured after:
-    **3 s**, and the file says PLACEHOLDER.
-
-    Pinned in both directions: the three loops that ARE one word still generate
-    their real model (and are still byte-identical — the whole 97-example
-    corpus's generated proofs are unchanged by this), and a loop that is not
-    gets a refusal rather than a diverging term.
+    The contract now WIDENS the state to the shape the census's seven
+    `while` programs all write — the induction variable, the word the
+    condition counts down, plus at most one accumulator, the other word the
+    body changes — threaded the way `n_0` was: the entry's value at the call,
+    the body's updated value at the recursion. This class pins both
+    directions: the stated shape gets its real helper (two arguments when
+    there is an accumulator) rather than a placeholder, and the shapes that
+    are still outside the contract — a body that is not a straight-line run
+    of bindings, a state of more than the two words, a read of a constant
+    the loop does not change — get a refusal that names the reason.
     """
 
     ACCUM = ("def accum_max(n):\n"
@@ -8198,14 +8393,51 @@ class TestALoopTheModelCannotStateIsRefusedNotModelled(unittest.TestCase):
              "        i = i + 1\n"
              "    return best\n")
 
-    #: The one-word shape, which is `_dec_while_pattern`'s subject and the only
-    #: loop the fold can state today.
-    COUNTER = ("def wdiff(n):\n"
-               "    while n != 0:\n"
-               "        n = n - 1\n"
-               "    return n\n")
+    #: The one-word shape, which is `_dec_while_pattern`'s subject and the
+    #: loop the fold states in one argument (the counter here is a local the
+    #: body drives to zero, so it does not go through the pattern at all —
+    #: the body has three statements, not two).
+    COUNTER = ("def local_count(n):\n"
+               "    i = n\n"
+               "    while i != 0:\n"
+               "        i = i - 1\n"
+               "    return i\n")
 
-    NEEDLE = "state is more than the one word the model carries"
+    #: The two-word shape, which is the census's `while_ne_zero`: the
+    #: induction variable and one accumulator, the shape every real
+    #: accumulator loop is written in.
+    WHILE_NE_ZERO = ("def while_ne_zero(n):\n"
+                     "    i = n\n"
+                     "    total = 0\n"
+                     "    while i != 0:\n"
+                     "        total = total + i\n"
+                     "        i = i - 1\n"
+                     "    return total & 255\n")
+
+    #: A loop whose condition reads the entry PARAMETER, which the loop does
+    #: not change: the helper is a function of the loop's state alone, so the
+    #: read would carry the entry's name into the helper's body, where it is
+    #: not in scope.
+    TWO_ACCUM = ("def two_accum(n):\n"
+                 "    i = 0\n"
+                 "    total = 0\n"
+                 "    while i != n:\n"
+                 "        total += i\n"
+                 "        i = i + 1\n"
+                 "    return total\n")
+
+    #: Three words the two arguments cannot carry: `var_typed_loop`'s body
+    #: changes `step`, `total` and `i`.
+    THREE_WORDS = ("def var_typed_loop(n):\n"
+                   "    i = 0\n"
+                   "    total = 0\n"
+                   "    while i != n:\n"
+                   "        var step: Int = i + 1\n"
+                   "        total = total + step\n"
+                   "        i = step\n"
+                   "    return total\n")
+
+    NEEDLE = "state is more than the two words the model carries"
 
     def _proof(self, source, name, arch):
         """`(text, error)` for one backend, with NO Lean run (`check=False`)."""
@@ -8226,36 +8458,78 @@ class TestALoopTheModelCannotStateIsRefusedNotModelled(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
     def test_a_loop_the_model_can_state_still_gets_its_real_model(self):
-        """The control, and the reason the fix is allowed to be a refusal.
-
-        `wdiff` is the one-word shape, and it does not go through the fold at
-        all: `_dec_while_pattern` matches it and the model is emitted as a `Nat`
-        recursion (`wdiff_go : Nat → UInt64 | 0 => 0 | k + 1 => wdiff_go k`).
-        So this row is the one that would break if the refusal were written
-        too wide — it is what says "refuse what the fold cannot state", not
-        "refuse loops".
-        """
-        text, err = self._proof(self.COUNTER, "wdiff", "x86_64")
+        """The control, and the reason the fix is allowed to widen: the
+        one-word loop still generates its real helper, byte-for-byte the
+        shape this arm has always emitted (the argument tracks the counter,
+        the recursion passes the body's updated value)."""
+        text, err = self._proof(self.COUNTER, "local_count", "x86_64")
         self.assertIsNone(err, "the counter loop stopped generating: %s" % err)
-        self.assertIn("def wdiff_go", text)
+        self.assertIn(
+            "partial def local_count_go_loop_0 (n_0 : UInt64) : UInt64 :=\n"
+            "  (if (n_0 ≠ (UInt64.ofNat 0)) then local_count_go_loop_0 "
+            "((n_0 - (UInt64.ofNat 1))) else n_0)",
+            text, "the one-word helper changed shape: %s"
+            % text[:text.find("local_count_go") if "local_count_go" in text
+                  else 0])
         self.assertNotIn("PLACEHOLDER", text,
                          "the one-word loop fell back to the placeholder, so "
                          "a shape the model CAN state is now reported as one "
                          "it cannot")
+
+    def test_the_fold_states_a_loop_with_one_accumulator(self):
+        """The contract's new half, in both directions.
+
+        x86-64: the two-word loop gets its REAL model — the helper with the
+        accumulator and the induction variable, the recursion passing the
+        body's folded values — and not the placeholder this loop used to get.
+        arm64: the MODEL states the loop (the fold no longer refuses it), and
+        the refusal that stays is the `eval_eq_mojo` gate, which does not
+        close a `while` — a refusal for a better reason than the fold's, and
+        the one the EXPECTED_FAILURES entries carry.
+        """
+        text, err = self._proof(self.WHILE_NE_ZERO, "while_ne_zero", "x86_64")
+        self.assertIsNone(err, "the two-word loop stopped generating: %s" % err)
+        self.assertIn(
+            "partial def while_ne_zero_go_loop_0 (a_0 : UInt64) "
+            "(n_0 : UInt64) : UInt64 :=\n"
+            "  (if (n_0 ≠ (UInt64.ofNat 0)) then while_ne_zero_go_loop_0 "
+            "((a_0 + n_0)) ((n_0 - (UInt64.ofNat 1))) "
+            "else (a_0 &&& (UInt64.ofNat 255)))",
+            text, "the two-word helper is not the contract's shape (accumulator "
+            "and induction variable, the body's folded values at the "
+            "recursion): %s" % err)
+        self.assertIn("(while_ne_zero_go_loop_0 (UInt64.ofNat 0) n)", text,
+                      "the loop's entry is not the state's values at entry "
+                      "(accumulator 0, counter n)")
+        self.assertNotIn("PLACEHOLDER", text,
+                         "the two-word loop fell back to the placeholder, so "
+                         "a shape the model CAN state is now reported as one "
+                         "it cannot")
+        _text, err = self._proof(self.WHILE_NE_ZERO, "while_ne_zero", "arm64")
+        self.assertIsNotNone(
+            err, "arm64 now closes the loop's bridge, so the EXPECTED_"
+            "FAILURES entry for `while_ne_zero` is stale")
+        self.assertIn(
+            "eval_eq_mojo: function shape (recursive/while with AST eval) "
+            "unsupported", err,
+            "arm64's refusal is not the bridge gate, so the fold either "
+            "refused a loop it can state or closed one it cannot: %s"
+            % (err or "")[:400])
 
     def test_a_loop_the_fold_cannot_state_gets_the_gap_not_a_false_run_test(self):
         """The x86-64 half, which is where the diverging model used to land.
 
         Either the fold refuses (the model is unreachable) or the generator's
         own placeholder path took it. What must NOT happen is a
-        `partial def` that recurses on its own argument, or a run test over a
-        model the fold could not state.
+        `partial def` that recurses on a word the body never updates, or a
+        run test over a model the fold could not state.
         """
         text, err = self._proof(self.ACCUM, "accum_max", "x86_64")
         if text is None:
-            self.assertIn(self.NEEDLE, err,
-                          "the refusal is not the one the census rows name: "
-                          "%s" % err[:400])
+            self.assertIn(
+                "not a straight-line run of bindings", err,
+                "the refusal is not the one the census rows name: "
+                "%s" % err[:400])
             return
         self.assertIn("PLACEHOLDER", text,
                       "the x86-64 file carries a model for this loop without "
@@ -8265,45 +8539,48 @@ class TestALoopTheModelCannotStateIsRefusedNotModelled(unittest.TestCase):
                          "exactly the false obligation this refusal exists to "
                          "prevent")
 
-    #: Two TOP-LEVEL bindings the one-word helper cannot carry, which is the
-    #: case where "too much state" can be made actionable: both names are in
-    #: the refusal.
-    TWO_ACCUM = ("def two_accum(n):\n"
-                 "    i = 0\n"
-                 "    total = 0\n"
-                 "    while i != n:\n"
-                 "        total += i\n"
-                 "        i = i + 1\n"
-                 "    return total\n")
-
-    def test_the_refusal_names_the_bindings_the_model_cannot_carry(self):
+    def test_the_refusal_names_the_constant_the_loop_cannot_carry(self):
         """arm64, where the fold's own refusal is what a reader sees.
 
-        A refusal that says "too much state" without saying WHICH binding is
-        the state is a refusal nobody can act on: the next reader has to
-        re-derive which of the loop's names the one-word helper drops.
+        `TWO_ACCUM`'s condition reads the parameter `n`, which the loop does
+        not change: the helper is a function of the loop's state alone, so the
+        read would carry `n` into the helper's body, where the entry's binder
+        is not in scope — a file Lean rejects at a line that does not name
+        the loop. The refusal has to name the constant.
         """
         _text, err = self._proof(self.TWO_ACCUM, "two_accum", "arm64")
         self.assertIsNotNone(err, "the loop now generates a proof on arm64, so "
                                   "this class's reason for existing is gone")
+        self.assertIn("reads `n`, which the loop does not change", err,
+                      "the refusal does not name the constant the helper "
+                      "cannot carry: %s" % (err or "")[:400])
+
+    def test_the_three_word_state_is_refused_by_name(self):
+        """`THREE_WORDS` changes three names in the body; the two arguments
+        carry the induction variable and one accumulator, and the refusal has
+        to say so — and name the word it cannot carry."""
+        _text, err = self._proof(self.THREE_WORDS, "var_typed_loop", "arm64")
+        self.assertIsNotNone(err, "the loop now generates a proof on arm64, so "
+                                  "this class's reason for existing is gone")
         self.assertIn(self.NEEDLE, err)
-        for name in ("total", "i"):
+        for name in ("step", "total", "i"):
             self.assertIn(name, err,
                           "the refusal does not name `%s`, so a reader cannot "
                           "tell which binding the model dropped: %s"
-                          % (name, err[:400]))
+                          % (name, (err or "")[:400]))
 
     def test_a_body_that_is_not_a_straight_line_of_bindings_is_named_too(self):
         """`best` in `ACCUM` is assigned INSIDE an `if`, so the fold cannot
-        even see it as a binding — the refusal has to say the body is not a
-        straight-line run of bindings, which is the OTHER half of the rule and
-        the only half that catches this program.
-        """
+        compute a next value of the state for a branch it does not follow —
+        the refusal has to say the body is not a straight-line run of
+        bindings, which is the half of the rule that catches this program."""
         _text, err = self._proof(self.ACCUM, "accum_max", "arm64")
-        self.assertIn(self.NEEDLE, err)
+        self.assertIn("not a straight-line run of bindings", err,
+                      "the refusal does not name the statement shape that hid "
+                      "the body's assignment: %s" % (err or "")[:400])
         self.assertIn("IfStmt", err,
-                      "the refusal does not name the statement shape that "
-                      "hid the body's assignment: %s" % err[:400])
+                      "the refusal does not name the statement shape that hid "
+                      "the body's assignment: %s" % (err or "")[:400])
 
 
 class TestTheDivisionExamplesHaveNoProofToCheck(unittest.TestCase):
