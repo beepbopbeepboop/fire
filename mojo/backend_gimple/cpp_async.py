@@ -751,7 +751,16 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     # `_cpp_gen_self_struct`'s exact same scoped-context convention.
     gen._cpp_gen_self_name = fn.name
     gen._cpp_gen_self_base = base
-    gen._cpp_gen_self_params = param_ctypes
+    # The C type of each parameter, NOT the `(name, ctype)` pairs: every reader
+    # of `_cpp_gen_self_params` builds a `_generator_api` entry, whose `params`
+    # are bare ctype strings (the extern "C" `{base}_start (...)` declaration
+    # joins them). Pairs here made a self-recursive generator's declaration
+    # `', '.join` a tuple. Plain loop, not a comprehension: see the unpack
+    # note at this function's return.
+    _self_cts = []
+    for _spn0, _sct0 in param_ctypes:
+        _self_cts.append(_sct0)
+    gen._cpp_gen_self_params = _self_cts
     # Set True by _cpp_yield_from the moment it actually emits a
     # self-recursive delegation call — read back (into a local,
     # BEFORE `finally` below) to decide whether `{base}_start`/

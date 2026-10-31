@@ -1022,6 +1022,13 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # _imported_generator_bindings deliberately stays
                 # per-instance: each module's import bindings are its own.
                 temp_gen._generator_home_api = gen._generator_home_api
+                # share: a generator held in a module global (`_coro = _coro()`)
+                # is recorded by its DEFINING module's store and read by an
+                # importer through the accessor; both tables are keyed by
+                # (defining module, name) so sharing them cannot cross-wire two
+                # modules' same-named globals. See `ginf.global_generator_key`.
+                temp_gen._global_generator_api = gen._global_generator_api
+                temp_gen._global_generator_api_poisoned = gen._global_generator_api_poisoned
                 # share: link mode's own link-line accumulators
                 # (dylibs/objects the final `fire.py build` link step
                 # needs — see compile_linked's own docstring) must be
@@ -2316,6 +2323,9 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
         filename = getattr(gen, '_current_filename', '') or '<unknown>'
         line = getattr(gen, '_current_line', None)
         loc = f'{filename}:{line}' if line else filename
+        _fn = getattr(gen, 'current_func_name', None)
+        if _fn:
+            loc = f'{loc} in function `{_fn}`'
         raise TypeError(
             f'cannot coerce {s} to {d} (incompatible container kinds) '
             f'at {loc}: value={v!r} dest={dest!r}')

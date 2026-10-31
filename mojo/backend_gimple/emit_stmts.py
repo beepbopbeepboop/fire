@@ -1026,24 +1026,29 @@ def _note_global_generator_store(gen, tname: str, vtype: str, v: str) -> None:
     PRECEDES a later toplevel rebinding to a different generator in a loop
     body; it is the same trade the local path already makes.
     """
-    if tname in gen._global_generator_api_poisoned:
+    # Keyed by the DEFINING module, so a same-bare-name global of another
+    # module (the tables are shared across the whole compile) is a different
+    # fact. See `ginf.global_generator_key`.
+    key = ginf.global_generator_key(
+        gimple_ctypes._c_field_name(gen._current_module_ctx or "root"), tname)
+    if key in gen._global_generator_api_poisoned:
         return
     if not gen._in_toplevel_gen:
-        gen._global_generator_api_poisoned.add(tname)
+        gen._global_generator_api_poisoned.add(key)
         return
     api = None
     if vtype == 'MojoGenerator *' and v in gen._generator_var_api:
         api = gen._generator_var_api[v]
     if api is None:
-        if tname in gen._global_generator_api:
-            gen._global_generator_api_poisoned.add(tname)
+        if key in gen._global_generator_api:
+            gen._global_generator_api_poisoned.add(key)
         return
-    if tname in gen._global_generator_api:
-        known = gen._global_generator_api[tname]
+    if key in gen._global_generator_api:
+        known = gen._global_generator_api[key]
         if known['base'] != api['base']:
-            gen._global_generator_api_poisoned.add(tname)
+            gen._global_generator_api_poisoned.add(key)
         return
-    gen._global_generator_api[tname] = api
+    gen._global_generator_api[key] = api
 
 
 def _tagged_opt_is_some_expr(gen, value_node, target_node, ot, ov, op,
@@ -3395,10 +3400,11 @@ def _gen_stmt_MatchStmt(gen, node):
     references that temp via a synthetic IdentExpr rather than re-lowering
     `node.subject`, since re-lowering would re-evaluate it (with side
     effects) once per pattern."""
-    # Formal model support for structural pattern refusal.
-    # This function has to import formal.model here, not at the top, to avoid
-    # circular imports:
-    from formal import model as formal_model
+    # The pattern classifier and its refusal sentences come from
+    # `formal.diagnostics`, NOT `formal.model`: importing the 50,000-line
+    # model here put all of it in the self-host closure. Imported here, not at
+    # the top, to avoid circular imports.
+    from formal import diagnostics as formal_model
 
     subj_type, subj_v = gen.lower_expr(node.subject)
     subj_ref = gimple_ctypes.IdentExpr(name=subj_v)
