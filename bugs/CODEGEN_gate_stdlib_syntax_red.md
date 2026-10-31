@@ -4,9 +4,17 @@
 
 OPEN. Root cause found; the fix is verified in a scratch copy but is NOT on this branch, because the
 faulty lines were added to master by `b3814dbfd` ("iter() on an already-declared container parameter
-binds a cursor"), which this branch does not contain. This branch (`work/fix-red-…-9`, HEAD `46a1d6106`)
-passes every named file on its own; the red appears only in the merge with current master
-(`git merge-tree --write-tree HEAD master` is clean, tree `84636db6c`).
+binds a cursor"), which this branch does not contain.
+
+Correction (2026-10-30): the red is NOT caused by this branch's merge. Current master (`d1e59974f`)
+itself fails `test/collections/test_linked_list.mojo`, while this branch's HEAD passes it. Measured with
+`python3 tools/memslot.py --gb 8 -- python3 .tmp/run_one.py <tree> <abs path to test_linked_list.mojo>`
+(`compile_stdlib.transpile_file`, file at `new-modular/Mojo/stdlib/test/collections/`):
+- this branch HEAD `22405d677`: `RESULT True`
+- `git archive master` copy: `RESULT False`, gcc `test_linked_list.mojo:657:6: error: assignment to ...`
+- same master copy with the one-line fix below: `RESULT True`
+The merge is only the carrier: the defect is master's own, and the integrator will see it on any branch
+merged onto master.
 
 ## What was run
 
