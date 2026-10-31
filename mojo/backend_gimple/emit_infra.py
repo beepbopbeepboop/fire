@@ -7930,7 +7930,7 @@ def _dedup_variadic_externs(parts: list) -> str:
         return True
 
     def _record_output_parse(out: str, out_parts: list,
-                             exact_concrete, variadic_by_out_part: list) -> None:
+                             variadic_by_out_part: list) -> None:
         """Publish `_DEDUP_EXTERN_PARTS_CACHE[out]` for the text JUST
         returned, with the parse its parts' own entries imply.
 
@@ -7944,34 +7944,59 @@ def _dedup_variadic_externs(parts: list) -> str:
         nothing is published (the parent level then parses the text itself,
         exactly as it did before this existed).
 
-        `exact_concrete` is the caller's already-computed set when it is
-        provably the exact name set of `out` (nothing was dropped) — passed
-        BY REFERENCE, so the common case allocates nothing; `None` asks for
-        it to be rebuilt from the parts. Every part of `out_parts` is already
-        in the cache by the time this runs (the caller read or filled its
-        entry in the main pass), so `entry` below is never absent; a missing
-        one would be a programming error here, not a case to paper over.
+        Every part of `out_parts` is already in the cache by the time this
+        runs (the caller read or filled its entry in the main pass), so
+        `entry` below is never absent; a missing one would be a programming
+        error here, not a case to paper over.
+
+        **Both components of the published value are LISTS, always** — the
+        same shape `_parse_part` returns, so the memo has exactly one value
+        shape however an entry got there. That is not cosmetic: the two
+        consumers iterate these components with a `for` loop, and the
+        compiled backend's `for x in <boxed>` lowering dispatches on the
+        RUNTIME type of the iterable and handles only a registered dict or
+        list (emit_loops.py:984-995). Anything else — a `set` included —
+        takes the `mojo_unsupported_iter` arm, which PRINTS and then runs
+        the body ZERO times (`runtime/fire_runtime.c:6331`). A derived
+        entry holding the caller's `concrete` set therefore made the first
+        level that read it fold nothing into its own `concrete`, take the
+        `if not concrete:` arm, and drop NOTHING for the rest of the compile:
+        in the self-hosted `mojoc` that is a silent no-op of the entire
+        function, so conflicting variadic/concrete `extern` declarations
+        survived into every artifact the binary produced (this is what broke
+        the `selfhost` step). So the union is built here, from the parts'
+        own entries, rather than handed over from the caller: one producer,
+        one shape, and the by-reference "provably exact" contract that
+        carried the wrong type is gone rather than patched.
+
+        The names go in first-seen order (part order, then order within a
+        part), deduplicated through a local set. Order is not observable —
+        every consumer only adds to a set or tests membership — but a
+        fixed one keeps the memo's contents reproducible run to run.
         """
         if not _boundaries_preserve_parse(out_parts):
             return
-        if exact_concrete is None:
-            exact_concrete = set()
-            for p in out_parts:
-                entry = _DEDUP_EXTERN_PARTS_CACHE.get(p)
-                for name in _as_list(entry[0]):
-                    exact_concrete.add(_as_str(name))
+        # Index, then `_as_list`, as the main pass does: a cached pair unpacked
+        # by `a, b = entry` (or iterated directly) boxes its slots on the
+        # self-hosted path. The published name collection is a LIST, as
+        # `_parse_part`'s entries are: the reader iterates `entry[0]`, and the
+        # self-hosted path cannot iterate a value that is sometimes a list and
+        # sometimes a set -- it read a published SET's slot words (0xffffffff)
+        # as string pointers.
+        out_concrete = []
+        seen = set()
+        for p in out_parts:
+            entry = _DEDUP_EXTERN_PARTS_CACHE.get(p)
+            for name in _as_list(entry[0]):
+                name = _as_str(name)
+                if name not in seen:
+                    seen.add(name)
+                    out_concrete.append(name)
         out_variadic = []
         for vl in variadic_by_out_part:
             for name in vl:
                 out_variadic.append(name)
-        # The cached name collection is a LIST here, as `_parse_part`'s entries
-        # are: the reader iterates `entry[0]` and the self-hosted path cannot
-        # iterate a value that is sometimes a list and sometimes a set -- it read
-        # a published SET's slot words (0xffffffff) as string pointers.
-        _out_concrete = []
-        for _cn in _as_set(exact_concrete):
-            _out_concrete.append(_as_str(_cn))
-        _DEDUP_EXTERN_PARTS_CACHE[out] = (_out_concrete, out_variadic)
+        _DEDUP_EXTERN_PARTS_CACHE[out] = (out_concrete, out_variadic)
 
 
     # ONE pass over `parts`, not two. The old shape scanned every fragment
@@ -8013,11 +8038,10 @@ def _dedup_variadic_externs(parts: list) -> str:
         variadic_by_part.append(part_variadic)
     if not concrete:
         out = '\n'.join(parts)
-        _record_output_parse(out, parts, concrete, variadic_by_part)
+        _record_output_parse(out, parts, variadic_by_part)
         return out
     kept = []
     kept_variadic = []
-    dropped = False
     for i in range(len(parts)):
         drop = False
         for name in variadic_by_part[i]:
@@ -8027,12 +8051,8 @@ def _dedup_variadic_externs(parts: list) -> str:
         if not drop:
             kept.append(parts[i])
             kept_variadic.append(variadic_by_part[i])
-        else:
-            dropped = True
     out = '\n'.join(kept)
-    # Nothing dropped ⇒ the set just built IS the output's exact name set,
-    # so hand the same object over rather than rebuilding it.
-    _record_output_parse(out, kept, None if dropped else concrete, kept_variadic)
+    _record_output_parse(out, kept, kept_variadic)
     return out
 
 

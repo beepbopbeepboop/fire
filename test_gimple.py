@@ -10175,6 +10175,17 @@ print("%r" % p)
                     return
                 blobs.append(got)
             for key, entry in ginf._DEDUP_EXTERN_PARTS_CACHE.items():
+                # both components must be LISTS: the consumers iterate them
+                # with a `for`, and the compiled backend's lowering runs a
+                # set's body zero times (silently), so a set here is a wrong
+                # artifact even though `set(...)` comparisons below agree
+                if not isinstance(entry[0], list) \
+                        or not isinstance(entry[1], list):
+                    print(f"FAIL  {name} [trial {trial}]: published entry "
+                          f"is not two lists\n  text={key[:300]!r}\n"
+                          f"  actual={entry!r}")
+                    _FAIL += 1
+                    return
                 ref_entry = _ref_parse(key)
                 if set(ref_entry[0]) != set(entry[0]) \
                         or list(ref_entry[1]) != list(entry[1]):
