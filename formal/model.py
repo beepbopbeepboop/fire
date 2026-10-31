@@ -30,6 +30,7 @@ from contextvars import ContextVar
 import keyword
 import os
 import re
+import threading
 from typing import NamedTuple
 
 import fire_compiler as F
@@ -3118,8 +3119,12 @@ BARE_C_RETURN_KINDS = {
 def _libsystem_handle():
     """A dlopen-able handle on the C library this image's load command names.
 
-    `None` until the first call, then either a handle or `False` for "this host
-    will not let us ask". Deliberately NOT `ctypes.CDLL(None)`: the global
+    `None` until the first attempt settles, then either a handle or `False`
+    for "this host will not let us ask". A caller that races the first attempt
+    does not read the in-between state: it blocks on `_LIBSYSTEM_LOAD_LOCK`
+    until the attempt has settled, and then reads the settled answer — the
+    in-between used to be a `False` marker, and a second thread read it as the
+    answer instead of the state. Deliberately NOT `ctypes.CDLL(None)`: the global
     namespace contains everything the *building* process has loaded, so it
     answers questions about the compiler rather than about the target.
     Measured on this machine, same symbol, two handles:
@@ -3135,22 +3140,39 @@ def _libsystem_handle():
     """
     global _LIBSYSTEM_HANDLE
     if _LIBSYSTEM_HANDLE is None:
-        _LIBSYSTEM_HANDLE = False
-        try:
-            import ctypes
-            import platform
-            if platform.system() == "Darwin":
-                from formal.macho_linker import LIBSYSTEM_PATH
-                name = LIBSYSTEM_PATH.decode().rstrip("\0")
-            else:
-                from formal.elf import DEFAULT_LIBC
-                name = DEFAULT_LIBC
-            _LIBSYSTEM_HANDLE = ctypes.CDLL(name)
-        except Exception:
-            _LIBSYSTEM_HANDLE = False
+        with _LIBSYSTEM_LOAD_LOCK:
+            # Re-check under the lock: a caller that raced the first attempt
+            # is BLOCKED on this lock until it settles, and then reads the
+            # settled answer. Before this, the in-flight marker was `False`,
+            # and a second thread entering during the load read that marker as
+            # "not a C library symbol" and memoised the answer for the whole
+            # process — `snprintf` and `strtod` dropped out of the provided
+            # set, and every later build in it refused with "the image would
+            # bind 2 symbol(s) that nothing provides".
+            if _LIBSYSTEM_HANDLE is None:
+                try:
+                    import ctypes
+                    import platform
+                    if platform.system() == "Darwin":
+                        from formal.macho_linker import LIBSYSTEM_PATH
+                        name = LIBSYSTEM_PATH.decode().rstrip("\0")
+                    else:
+                        from formal.elf import DEFAULT_LIBC
+                        name = DEFAULT_LIBC
+                    _LIBSYSTEM_HANDLE = ctypes.CDLL(name)
+                except Exception:
+                    _LIBSYSTEM_HANDLE = False
     return _LIBSYSTEM_HANDLE
 
 
+# The first attempt is the only thread that may be mid-load: it holds this
+# lock, and a caller racing it blocks on the lock instead of reading the
+# in-between state (double-checked locking, sound here because the GIL orders
+# the fully-constructed handle before any other thread can read the global).
+_LIBSYSTEM_LOAD_LOCK = threading.Lock()
+# `None` until the first attempt settles, then a handle or `False` for "this
+# host will not let us ask". The in-flight state is no longer a value a
+# concurrent caller can observe: it is the lock, not a word in the global.
 _LIBSYSTEM_HANDLE = None
 
 # The 19 names this function used to hardcode, kept ONLY as the fallback for a
