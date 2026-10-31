@@ -4667,6 +4667,50 @@ def main():
     print(f())
 """, "6\n7\n")
 
+    # ── The box of a `{mut}` local whose nested `def` is OWNED (called here,
+    # never escaping) may be freed at the outer function's exit, even when that
+    # nested `def` binds a capturing lambda of its own. Before the per-owner
+    # rule, `_no_closure_escapes` asked one whole-tree question and refused the
+    # outer function outright, because a lambda anywhere in it disqualified it,
+    # so this box leaked (63 MB at 4M iterations). The lambda is owned by
+    # `inner`'s body and freed there; only the box is outer's.
+    test_gimple_bounded_memory("gimple_boxed_mut_local_with_owned_inner_lambda_is_freed", """\
+def helper(n: Int) -> Int:
+    var x = n
+    def inner(k: Int) -> Int:
+        nonlocal x
+        x = x + 1
+        var g = lambda j: j + x
+        return g(k)
+    return inner(1) + inner(2)
+
+def main():
+    var total = 0
+    for r in range(4000000):
+        total += helper(r) % 1000
+    print(total)
+""", "1996000000\n", 40)
+
+    # ── The other side of the same rule: a lambda bound inside a nested `def`
+    # that RETURNS it is the closure's escape, so `maker`'s box must be kept.
+    # The per-owner walk refuses `inner` (a returned def is not owned) and must
+    # not let the lambda's binding be judged by some other body.
+    test_gimple_stdout("gimple_boxed_mut_local_held_by_a_lambda_returned_from_inner_is_kept", """\
+def maker(n: Int):
+    var x = n
+    def inner(k: Int):
+        nonlocal x
+        x = x + 1
+        var g = lambda j: j + x
+        return g
+    return inner(0)
+
+def main():
+    var f = maker(5)
+    print(f(1))
+    print(f(2))
+""", "7\n8\n")
+
     # ── A callee that provably returns a FRESH STRING hands ownership to its
     # caller, exactly as one returning a fresh container always has
     # (analyze_returns_fresh, which until now accepted only a container
