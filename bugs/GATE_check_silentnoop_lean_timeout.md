@@ -9,7 +9,7 @@ Observed, from the job's output in the suite log:
 ```
 Traceback: RuntimeError: lean exceeded 1800s wall (limit 1800s) — killed, and this is NOT a verdict on the proof
 
-The Lean step hit its 1800 s wall, and the job exits 1 with no verdict. Also shows `findall_flags_refused_by_name` in the same block, which may be the selfhost job's output (check the block header).
+The Lean step hit its 1800 s wall, and the job exits 1 with no verdict. (A `findall_flags_refused_by_name` failure seen in the same block is fixed: the case is now `findall_flags_are_honoured`.)
 ```
 
 Next step: reproduce the job on master (`python3 tools/suite.py silentnoop` or the

@@ -12289,7 +12289,28 @@ static char *_container_key_str(int64_t v) {
    decimal of the address) and returned 0. mojo_boxed_is_str is the model's
    own discriminator — pointer-shaped and not a live registered list — so
    ask it here rather than guessing a direction. */
+/* Only the two kinds mojo_list_get_boxed makes for a list slot ('d' double,
+   'p' str) are spelled by kind. The other box, kind 'i', is an id() TOKEN: an
+   integer that happens to be pointer-shaped and registered, and it must keep
+   being an integer (a dict key, `int(id(a))`). */
+static int _box_spelled_by_kind(int64_t v) {
+    if (!mojo_is_boxed(v)) return 0;
+    char k = ((MojoBox *)(intptr_t)v)->kind;
+    return k == 'd' || k == 'p';
+}
+
 char *mojo_cstr_or_int_str(int64_t v) {
+    /* A BOX (what mojo_list_get_boxed hands back for every non-int slot of a
+       kind-mixed list) is pointer-shaped and not a string, so it fell through
+       to the integer arm and printed as the box's own address. Spell it by its
+       kind. The result is always a fresh heap string (never `v`, never
+       mojo_repr_float's shared buffer), and the release entry points free it
+       when `orig` is a box. */
+    if (_box_spelled_by_kind(v)) {
+        MojoBox *bx = (MojoBox *)(intptr_t)v;
+        if (bx->kind == 'd') return strdup(mojo_repr_float(mojo_double_from_bits(bx->bits)));
+        return strdup((char *)(intptr_t)bx->bits);
+    }
     if (mojo_boxed_is_str(v)) return (char *)(intptr_t)v;
     if (mojo_is_registered_bytes(v))
         return mojo_bytes_repr((MojoBytes *)(intptr_t)v);
@@ -12340,6 +12361,7 @@ char *mojo_int_str_transient(int64_t v) {
    the unreleased conversion. See doc/MEMORY.html, "Transient keys". */
 void mojo_cstr_or_int_release(int64_t orig, char *s) {
     if ((int64_t)(intptr_t)s == orig) return;     /* a borrowed boxed string */
+    if (_box_spelled_by_kind(orig)) { free(s); return; } /* a BOX spelled by kind: fresh heap string */
     /* A content key is an ordinary heap string from the repr walker, NOT a
      pool block, and pooling one would hand it out later as an Int key's
      scratch -- so it is freed outright. `orig` is the discriminator because
@@ -12373,6 +12395,7 @@ void mojo_cstr_or_int_release(int64_t orig, char *s) {
 void mojo_dict_key_release(MojoDict *d, int64_t orig, char *s)
 {
     if ((int64_t)(intptr_t)s == orig) return;     /* a borrowed boxed string */
+    if (_box_spelled_by_kind(orig)) { free(s); return; } /* a BOX spelled by kind */
     if (mojo_is_registered_list(orig) || mojo_is_registered_bytes(orig)) { free(s); return; }
     if (d) {
         int64_t iv;
