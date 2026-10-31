@@ -286,6 +286,14 @@ _OS_PATH_FN_KINDS = {'join': 'p', 'basename': 'p', 'dirname': 'p',
                      'islink': 'b', 'isdir': 'b', 'isfile': 'b', 'exists': 'b'}
 
 
+def _os_path_call_kind(v) -> str | None:
+    """The result kind of a DIRECT call `os.path.<fn>(...)` (or `path.<fn>` /
+    `posixpath.<fn>`) to a runtime-implemented function, else None."""
+    if isinstance(v, N.CallExpr):
+        return _os_path_fn_kind(v.func)
+    return None
+
+
 def _os_path_fn_kind(v) -> str | None:
     """The result kind of `v` when it is `os.path.<fn>` / `posixpath.<fn>` /
     `path.<fn>` naming a runtime-implemented function, else None."""
@@ -498,6 +506,10 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
                 and n.func.member in ('append', 'insert')
                 and isinstance(n.func.obj, N.IdentExpr) and n.args):
             ek = _literal_kind(n.args[-1])
+            if ek is None:
+                # `names.append(os.path.join(top, d))`: not a literal, but its
+                # kind is as certain (a runtime-implemented `os.path` call).
+                ek = _os_path_call_kind(n.args[-1])
             if isinstance(ek, str):
                 list_elem.setdefault(n.func.obj.name, set()).add(ek)
     for nm, eks in list_elem.items():
@@ -560,6 +572,15 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
                 # address (test: generator_iterating_a_string_parameter_
                 # yields_nothing).
                 ek = 'p'
+        elif (isinstance(it, N.CallExpr) and isinstance(it.func, N.IdentExpr)
+                and it.func.name in ('reversed', 'sorted', 'list')
+                and len(it.args) == 1 and not it.kwargs
+                and isinstance(it.args[0], N.IdentExpr)
+                and isinstance(env.get(it.args[0].name), tuple)
+                and env[it.args[0].name][0] == 'list'):
+            # `reversed(xs)` / `sorted(xs)` / `list(xs)` reorder or copy a
+            # list and never change its element kind.
+            ek = env[it.args[0].name][1]
         elif isinstance(it, N.CallExpr):
             # A sibling generator's call — the consuming twin of `yield
             # from`. See `_sibling_gen_kind`, which is where the recursion

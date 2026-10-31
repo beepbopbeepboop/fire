@@ -1,5 +1,25 @@
 # CODEGEN_generator_function: Lib/os.py
 
+## Status (2026-10-30, round 2 — `reversed(<list>)` loops and the silent wrong-value on `append(os.path.join(...))`; `walk` is now down to the mixed-tuple yield)
+
+- **Landed:** `for x in reversed(<list local>)` in a C++20 coroutine body
+  (`cpp_core`, the `walk` loops `for dirname in reversed(dirs)` and `for
+  new_path in reversed(walk_dirs)`); lowered via a cached `mojo_list_reversed`.
+  `walk` no longer stops at `unsupported for-loop iterable type: CallExpr`.
+- **Landed (a silent wrong value, found on the way):** on the stack-switch
+  path, `names.append(os.path.join(top, d))` then `for n in reversed(names):
+  yield n` printed heap ADDRESSES with exit 0, because neither the appended
+  call's kind nor `reversed`/`sorted`/`list`'s element-kind passthrough was
+  known to `coro._static_env`. Both now are; pinned by
+  `generator_reversed_list_of_os_path_join_results`.
+- **`walk` now refuses on exactly one thing:** `every yield must carry a value,
+  and all values must agree on one scalar type` — the bottom-up path's bare
+  `yield top` (a tuple popped from the heterogeneous `stack`) beside the
+  top-down `yield top, dirs, nondirs`. Next step: narrow `top` to 'tuple' under
+  `isinstance(top, tuple)` and take the tuple slot ctypes from the
+  `yield top, dirs, nondirs` site (`exprtypes._generator_tuple_yield_slot_ctypes`
+  / `_generator_yield_ctype`). `_fwalk` is unchanged (`stat(...)`).
+
 ## Status (2026-10-30 — `work/gen-lib-os`: `os.path` function values + aliases landed; `walk` now stops at scandir, `_fwalk` at `stat`)
 
 Landed (measured on `Lib/os.py` of CPython 3.15, `python3 fire.py build`):
