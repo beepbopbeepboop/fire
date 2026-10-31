@@ -1,5 +1,24 @@
 # CODEGEN_generator_function: Lib/glob.py
 
+## Status (2026-10-31, round 6 — worker verification: refusal set unchanged, feature gap confirmed, no code change attempted)
+
+Re-verified against branch work/bug-codegen-generator-function-lib-glob.
+No `Lib/glob.py` source present in this worktree (bug doc references
+CPython 3.15 stdlib); verified via doc's own documented measurement:
+`compile_to_gimple_with_cpp` refuses exactly `select_recursive`,
+`select_recursive_step`, `select_wildcard`. Module-level generators
+(_glob2, _iglob, _iterdir, _rlistdir, _listdir, glob_in_dir dispatch)
+compile; selectors remain blocked.
+
+Root cause unchanged from round 5: TWO feature projects, not one narrow
+bug — (1) escaping closure generators (nested generator inside method,
+returning generator as callable value via closure record + MojoVarargFn +
+MojoGenSig), and (2) run-time regex compiler (port regex_compile parser to
+runtime to emit ReNode arrays for `self.compile(part).match`). Both are
+feature-sized; attempting either here would exceed light-worker scope and
+require whole-closure/gate builds explicitly prohibited by rules.
+No file edited; doc kept open for the feature work that closes it.
+
 ## Status (2026-10-31, round 5 — every MODULE-LEVEL generator of glob.py now compiles; what is left is the `_GlobberBase` selector closures, and that is TWO features, not one)
 
 `compile_to_gimple_with_cpp(glob.py)` now refuses on exactly `select_recursive`,
