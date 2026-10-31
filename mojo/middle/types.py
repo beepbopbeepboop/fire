@@ -2395,51 +2395,7 @@ def _compute_exc_descendants(all_struct_defs):
             if base_name in by_name:
                 descendants.setdefault(base_name, {base_name}).add(name)
                 stack.extend(getattr(by_name[base_name], 'bases', None) or [])
-    # The BUILTIN exception hierarchy: `except OSError:` must catch a raised
-    # `FileNotFoundError` (the runtime raises one for a missing path), and
-    # `except LookupError:` a `KeyError`. Static tags are compared by
-    # equality, so each builtin ancestor's descendant set has to be listed
-    # here -- and a user class deriving from a builtin joins its base's set
-    # and every ancestor's. Plain loops, not comprehensions: this function is
-    # self-compiled.
-    for child in _BUILTIN_EXC_PARENT:
-        anc = _BUILTIN_EXC_PARENT[child]
-        while anc is not None:
-            if anc not in by_name:
-                descendants.setdefault(anc, {anc}).add(child)
-            anc = _BUILTIN_EXC_PARENT.get(anc)
-    for name, s in by_name.items():
-        stack = list(getattr(s, 'bases', None) or [])
-        seen = set()
-        while stack:
-            base_name = stack.pop()
-            if base_name in seen:
-                continue
-            seen.add(base_name)
-            anc = base_name
-            while anc is not None and anc in _BUILTIN_EXC_PARENT_OR_ROOT:
-                if anc not in by_name:
-                    descendants.setdefault(anc, {anc}).add(name)
-                anc = _BUILTIN_EXC_PARENT.get(anc)
     return descendants
-
-# child -> parent for the builtin exceptions whose parent a compiled `except`
-# is likely to name.
-_BUILTIN_EXC_PARENT = {
-    'FileNotFoundError': 'OSError', 'PermissionError': 'OSError',
-    'FileExistsError': 'OSError', 'NotADirectoryError': 'OSError',
-    'IsADirectoryError': 'OSError', 'TimeoutError': 'OSError',
-    'BlockingIOError': 'OSError', 'InterruptedError': 'OSError',
-    'ChildProcessError': 'OSError', 'ProcessLookupError': 'OSError',
-    'ConnectionError': 'OSError', 'BrokenPipeError': 'ConnectionError',
-    'ConnectionAbortedError': 'ConnectionError',
-    'ConnectionRefusedError': 'ConnectionError',
-    'ConnectionResetError': 'ConnectionError',
-    'KeyError': 'LookupError', 'IndexError': 'LookupError',
-    'ZeroDivisionError': 'ArithmeticError', 'OverflowError': 'ArithmeticError',
-    'FloatingPointError': 'ArithmeticError',
-}
-_BUILTIN_EXC_PARENT_OR_ROOT = set(_BUILTIN_EXC_PARENT) | {'OSError', 'LookupError', 'ArithmeticError'}
 
 def _unpack_target_leaf_names(target: str) -> list:
     """Flatten a tuple-unpack target string (`'(a, b)'`,

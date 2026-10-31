@@ -1,10 +1,12 @@
 # CODEGEN: closure environments and boxed mutable locals are never freed
 
-## Status (2026-10-30, planning round — the ESCAPING half: design and implementation guide)
+## Status (2026-10-31 — tripwire added, escaping half still open)
 
-Nothing in this round changes behaviour. It establishes the current state of
-the escaping case, decides the one open design question, and lays out the
-implementation so the next round can execute without re-investigating.
+Regression `test_regression_closure_env_boxed_local.py` measures slope at
+~90 B/iter (10.55 MB at 100k, 36.39 MB at 400k) and fails (>20 B/iter).
+Non-escaping half (`_no_closure_escapes` / box free) landed; escaping half
+requires `returned_closure_owned` + per-closure box tracking (steps 1–2).
+Next step: implement step 1 (env box list) then step 2 (escape classifier).
 
 ### 1. Measurement (the current state)
 
