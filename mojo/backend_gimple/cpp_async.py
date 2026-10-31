@@ -237,8 +237,12 @@ def _cpp_iterable_is_delegatable_generator_call(gen, iterable) -> bool:
         _self_struct = getattr(gen, '_cpp_gen_self_struct', None)
         return bool(_self_struct
                     and isinstance(iterable.func.obj, gimple_ctypes.IdentExpr)
-                    and iterable.func.obj.name == 'self'
-                    and iterable.func.member in gen._all_generator_names)
+                    and iterable.func.obj.name in ('self', 'cls')
+                    and (iterable.func.member in gen._all_generator_names
+                         # a method the stack-switch path already compiled
+                         # (`__mgco_<S>_<m>_start/_resume/_value/_destroy`: the same four
+                         # entry points) is driven exactly like a coroutine one
+                         or (_self_struct, iterable.func.member) in gen._generator_method_api))
     return False
 
 
@@ -475,6 +479,12 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     if _has_sd:
         fn = gcc_._cpp_lower_scandir_withs(gen, fn)   # `with scandir(..) as e` -> a real list of DirEntry handles
     gen.func_return_types.setdefault('mojo_list_slice_word', 'MojoList *')
+    _saved_self_struct = getattr(gen, '_cpp_gen_self_struct', None)
+    gen._cpp_gen_self_struct = struct_name   # the delegatable-call test reads it
+    try:
+        fn = gcc_._cpp_drain_generator_args(gen, fn)   # `yield from sorted(G(..))` -> drain G first
+    finally:
+        gen._cpp_gen_self_struct = _saved_self_struct
     if gcc_._cpp_needs_posix_idioms(gen, fn):
         fn = gcc_._cpp_lower_posix_idioms(gen, fn)   # fd-relative posix calls -> runtime calls
     gen._cpp_str_evidence_names = gimple_exprtypes._str_evidence_names(fn)
@@ -629,7 +639,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
             # shape, so nothing can reach _cpp_expr's MemberExpr
             # "non-self member access" fallback (invalid C++ on a
             # scalar) or silently read the placeholder as a real value.
-            # See bugs/CODEGEN_generator_function_Lib_enum.md's
+            # See bugs/CODEGEN_enum_runtime_class_creation.md's
             # 2026-08-21 update for the motivating Lib/enum.py
             # `Flag._iter_member_by_value_` shape (previously refused
             # unconditionally here — see the

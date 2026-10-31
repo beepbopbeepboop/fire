@@ -2208,7 +2208,7 @@ def _cpp_expr(gen, e) -> str:
         # which `cls` structurally cannot have; an unrecognized name)
         # must refuse rather than silently emit `cls->member` (invalid
         # C++ on a scalar int64_t) or `cls.member` (equally invalid).
-        # See bugs/CODEGEN_generator_function_Lib_enum.md's 2026-08-21
+        # See bugs/CODEGEN_enum_runtime_class_creation.md's 2026-08-21
         # update for the motivating `cls._flag_mask_`/`cls.
         # _value2member_map_` shapes (Flag._iter_member_by_value_).
         if struct_name and isinstance(e.obj, gimple_ctypes.IdentExpr) and e.obj.name == 'cls':
@@ -2377,10 +2377,13 @@ def _cpp_expr(gen, e) -> str:
                 and gen._cpp_declared is not None \
                 and gen._cpp_declared.get(_chain_root.name) in (
                     'int', 'int64_t', 'double', '_Bool'):
-            gimple_ctypes._debug_note('stubbed operation',
-                        f'generator-body attribute read on opaque '
-                        f'scalar local {_chain_root.name}.{e.member}')
-            return '0'
+            # A member read off a WORD (an object whose class the body cannot name: an
+            # element drained from another generator, a dynamic-class instance): ask the run
+            # time - every module registers its struct reflection with `mojo_getattr_any`.
+            _inner = (e.obj.name if isinstance(e.obj, gimple_ctypes.IdentExpr)
+                      else gen._cpp_expr(e.obj))
+            return (f'mojo_getattr_any((void *)(intptr_t)({_inner}), '
+                    f'(char *)"{gimple_ctypes._safe_field(e.member)}")')
         # A struct constructor call lowers to a `Struct *` (see
         # _cpp_is_struct_ctor_call), so a field read off it is `->`, the same
         # as a read off a struct-pointer local.
@@ -3509,7 +3512,7 @@ def _cpp_expr(gen, e) -> str:
             # cast back to the real pointer type. Real: Lib/enum.py's
             # `Flag._iter_member_by_value_`: `cls._value2member_map_.
             # get(val)` returns a `Flag *`. See
-            # CODEGEN_generator_function_Lib_enum.md's 2026-08-20
+            # CODEGEN_enum_runtime_class_creation.md's 2026-08-20
             # update.
             if (_str_obj_ctype == 'MojoDict *' and e.func.member == 'get'
                     and len(e.args) in (1, 2)):
@@ -6872,6 +6875,58 @@ def _cpp_lower_posix_idioms(gen, node, handles=None):
     return new
 
 
+def _cpp_drain_generator_args(gen, fn):
+    """`yield from sorted(G(..), key=..)` / `for x in sorted(G(..))` (also `list` / `tuple`)
+    where `G(..)` is a call to another compiled generator: the generator is drained into a
+    list first (`acc = []; for x in G(..): acc.append(x)`) and the builtin then runs over the
+    list, so the generator-consuming `for` loop (which this emitter knows how to drive) is the
+    only place a generator call appears. Lib/enum.py's `Flag._iter_member_by_def_` is exactly
+    `yield from sorted(cls._iter_member_by_value_(value), key=lambda m: m._sort_order_)`.
+    Returns `fn` (rewritten in place)."""
+    G = gimple_ctypes
+    counter = [0]
+
+    def is_wrapped_gen_call(e):
+        return (isinstance(e, G.CallExpr) and isinstance(e.func, G.IdentExpr)
+                and e.func.name in ('sorted', 'list', 'tuple') and e.args
+                and gen._cpp_iterable_is_delegatable_generator_call(e.args[0]))
+
+    def drain(call, line):
+        counter[0] += 1
+        acc = f'__dg_acc{counter[0]}'
+        x = f'__dg_x{counter[0]}'
+        src = call.args[0]
+        pre = [
+            G.AssignStmt(target=G.IdentExpr(name=acc, line=line), value=G.ListExpr(elements=[], line=line), line=line),
+            G.ForStmt(target=x, iterable=src,
+                      body=[G.ExprStmt(value=G.CallExpr(
+                          func=G.MemberExpr(obj=G.IdentExpr(name=acc, line=line), member='append', line=line),
+                          args=[G.IdentExpr(name=x, line=line)], line=line), line=line)],
+                      line=line),
+        ]
+        call.args = [G.IdentExpr(name=acc, line=line)] + list(call.args[1:])
+        return pre
+
+    def walk(body):
+        out = []
+        for st in body:
+            for fld in ('body', 'then_body', 'else_body', 'finally_body'):
+                sub = getattr(st, fld, None)
+                if isinstance(sub, list):
+                    setattr(st, fld, walk(sub))
+            if (isinstance(st, G.ExprStmt) and isinstance(st.value, G.YieldFromExpr)
+                    and is_wrapped_gen_call(st.value.value)):
+                out.extend(drain(st.value.value, st.line))
+            elif isinstance(st, G.ForStmt) and is_wrapped_gen_call(st.iterable):
+                out.extend(drain(st.iterable, st.line))
+            out.append(st)
+        return out
+
+    fn.body = walk(fn.body)
+    _walk_ast_invalidate(fn)
+    return fn
+
+
 def _cpp_lower_scandir_withs(gen, node):
     """A copy of `node` in which every `with scandir(top) as entries: BODY`
     is the straight-line `entries = mojo_os_scandir(top); BODY'` (enter is the
@@ -7149,10 +7204,10 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
     if isinstance(call.func, gimple_ctypes.MemberExpr):
         _self_struct = getattr(gen, '_cpp_gen_self_struct', None)
         if not (isinstance(call.func.obj, gimple_ctypes.IdentExpr)
-                and call.func.obj.name == 'self' and _self_struct):
+                and call.func.obj.name in ('self', 'cls') and _self_struct):
             raise gimple_exprtypes._UnsupportedGeneratorShape(
                 "`for ... in <expr>.<method>(...)` is only supported "
-                "when <expr> is literally `self` inside a generator "
+                "when <expr> is literally `self` (or `cls`) inside a generator "
                 "method on the same struct")
         sub_name = f"{_self_struct}.{call.func.member}"
         api = gen._generator_method_api.get((_self_struct, call.func.member))
@@ -7165,7 +7220,9 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
                 "(either it's not a generator this codegen supports, or "
                 "it's defined LATER among this struct's methods — the "
                 "consumed generator method must be defined earlier)")
-        receiver_exprs = ['self']
+        receiver_exprs = [call.func.obj.name]
+        if call.func.obj.name == 'cls' and api.get('receiver') not in ('cls', 'self'):
+            receiver_exprs = []   # a @staticmethod generator takes no receiver slot
     else:
         sub_name = call.func.name
         # Self-recursion: `for <target> in <this-same-function>(...):`

@@ -930,7 +930,7 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
     like every other compiled struct-method call site already resolves it)
     is one. Reuses this codegen's ALREADY-established per-struct dict-value-
     type/method-return-type registries rather than inventing new tracking —
-    see CODEGEN_generator_function_Lib_enum.md's 2026-08-20 update.
+    see CODEGEN_enum_runtime_class_creation.md's 2026-08-20 update.
 
     `module_global_types` (optional, default None — every existing caller
     that doesn't pass it keeps this function's original behaviour) is a
@@ -1519,7 +1519,7 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
     function body (a generator can't `await`, an async function can't
     `yield` — see gen_module's combined-refusal category). `known_structs`/
     `dict_val_types`/`method_return_types` (struct-pointer-yield support —
-    see CODEGEN_generator_function_Lib_enum.md's 2026-08-20 update) are
+    see CODEGEN_enum_runtime_class_creation.md's 2026-08-20 update) are
     threaded straight through to every `_infer_simple_expr_ctype` call
     below unchanged — see that function's own docstring for what each
     widens. `field_elem_types`/`local_elem_types` (struct_name-scoped

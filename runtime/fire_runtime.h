@@ -1380,6 +1380,8 @@ void        mojo_dict_clear(MojoDict *d);
 void        mojo_dict_set_int(MojoDict *d, char *key, int64_t v);
 int64_t mojo_gen_call_with(void *start, MojoList *pre, MojoList *a, MojoDict *kw);
 /* run-time class attributes (see the definitions): a class is its type tag */
+void    mojo_register_getattr_dispatch(int64_t (*fn)(void *, char *));
+int64_t mojo_getattr_any(void *obj, char *attr);   /* obj.attr on a word: struct reflection of any module */
 void    mojo_class_register(int64_t tag, int64_t base_tag, char *name);
 void    mojo_class_setattr(int64_t tag, char *name, int64_t word);
 int     mojo_class_hasattr(int64_t tag, char *name);

@@ -14796,3 +14796,32 @@ void mojo_class_delattr(int64_t tag, char *name)
     if (!c || !mojo_dict_contains(c->attrs, name)) { mojo_raise_attribute_error(name); return; }
     (void)mojo_dict_pop_int(c->attrs, name, 0);
 }
+
+/* Struct reflection across modules: every translation unit registers its own
+ * `_mojo_dispatch_getattr` (it knows only that unit's structs); `mojo_getattr_any` asks them
+ * in turn, then the dynamic-attribute table, and raises AttributeError when none has it. */
+static int64_t (**_getattr_dispatchers)(void *, char *) = 0;
+static int _n_getattr_dispatchers = 0, _cap_getattr_dispatchers = 0;
+void mojo_register_getattr_dispatch(int64_t (*fn)(void *, char *))
+{
+    for (int i = 0; i < _n_getattr_dispatchers; i++) if (_getattr_dispatchers[i] == fn) return;
+    if (_n_getattr_dispatchers == _cap_getattr_dispatchers) {
+        _cap_getattr_dispatchers = _cap_getattr_dispatchers ? _cap_getattr_dispatchers * 2 : 64;
+        _getattr_dispatchers = (int64_t (**)(void *, char *))realloc(
+            (void *)_getattr_dispatchers, (size_t)_cap_getattr_dispatchers * sizeof *_getattr_dispatchers);
+    }
+    _getattr_dispatchers[_n_getattr_dispatchers++] = fn;
+}
+int64_t mojo_getattr_any(void *obj, char *attr)
+{
+    int saved = _mojo_getattr_nothrow;
+    _mojo_getattr_nothrow = 1;
+    for (int i = 0; i < _n_getattr_dispatchers; i++) {
+        _mojo_getattr_missed = 0;
+        int64_t r = _getattr_dispatchers[i](obj, attr);
+        if (!_mojo_getattr_missed) { _mojo_getattr_nothrow = saved; return r; }
+    }
+    _mojo_getattr_nothrow = saved;
+    mojo_raise_attribute_error(attr);
+    return 0;
+}

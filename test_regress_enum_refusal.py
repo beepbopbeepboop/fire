@@ -1,45 +1,41 @@
-"""Regression/pinning: the 3 generator-method refusal on enum must stay honest.
-Refs bugs/CODEGEN_generator_function_Lib_enum.md — feature-sized dynamic-
-metaclass gap; this prevents a future change from turning the refusal into a
-silent miscompile (e.g. compiling with _flag_mask_ = 0 -> zero yields)."""
-import subprocess, sys, os
+"""Pins the honest state of `enum.py` after its generators were fixed.
 
-# Minimal isolated repro: just the 3 generator functions from Lib/enum.py
-# We don't compile fully (feature-sized), but we verify that the eligibility
-# gate still logs the exact refusal message for each.
-SNIPPET = '''
-from enum import Enum, Flag
+Every generator of CPython's `Lib/enum.py` (`Flag._iter_member_`, `_iter_member_by_value_`,
+`_iter_member_by_def_`, for `Flag` and `IntFlag`) now compiles. The module must STILL be refused
+as a whole - it builds its classes with the 3-argument `type(name, bases, namespace)` at run
+time, which the compiled path does not model yet (bugs/CODEGEN_enum_runtime_class_creation.md) -
+and the refusal must name THAT, not a generator: compiling `enum` with its metaclass-created
+attributes missing would iterate every Flag as empty. When run-time class creation lands this
+test is the one to turn around (compile succeeds, program output equals CPython's).
+"""
+import os
+import sys
+import sysconfig
 
-class Flag(Flag):
-    A = 1
-    B = 2
+import gimple_codegen
 
-# The 3 generator methods that must remain refused:
-# Flag._iter_member_by_value_, _iter_member_by_def_, _iter_member_
-# Their bodies reference cls in unsupported ways; see doc.
-'''
 
 def main():
-    # We can't compile the full stdlib quickly, so we verify the doc's
-    # refusal message is still referenced in the source code (prevents
-    # accidental removal of the gate).
-    doc_path = 'bugs/CODEGEN_generator_function_Lib_enum.md'
-    if not os.path.exists(doc_path):
-        print("FAIL: bug doc removed unexpectedly")
-        sys.exit(1)
-    with open(doc_path) as f:
-        content = f.read()
-    required = [
-        "_iter_member_by_value_",
-        "_iter_member_by_def_",
-        "_iter_member_",
-        "a @classmethod generator that references `cls`",
-    ]
-    missing = [r for r in required if r not in content]
-    if missing:
-        print("FAIL: doc missing references:", missing)
-        sys.exit(1)
-    print("PASS: refusal references pinned in doc, feature gap unchanged")
+    path = os.path.join(sysconfig.get_paths()['stdlib'], 'enum.py')
+    if not os.path.exists(path):
+        print('SKIP  enum refusal: the host Python has no enum.py')
+        return 0
+    src = open(path).read()
+    try:
+        gimple_codegen.compile_to_gimple_with_cpp(src, do_imports=False, filename=path)
+    except RuntimeError as e:
+        msg = str(e)
+        if 'type(name, bases, namespace)' not in msg:
+            print('FAIL  enum is refused, but not for run-time class creation:\n' + msg[-700:])
+            return 1
+        if 'references `cls` in its body' in msg or 'generator function' in msg.split('Unsupported shape')[-1]:
+            print('FAIL  a generator of enum.py is refused again:\n' + msg[-700:])
+            return 1
+        print('PASS  enum.py: generators compile; refused only for run-time class creation')
+        return 0
+    print('FAIL  enum.py compiled: the metaclass-created attributes are not modelled (silent miscompile?)')
+    return 1
+
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

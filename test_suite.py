@@ -4713,7 +4713,6 @@ UNREGISTERED = {
     'test_regression_bool_isinstance.py': _BATCH_REGRESSION_REASON,
     'test_regression_ctor_temp_field_read_loses_element_type.py': _BATCH_REGRESSION_REASON,
     'test_regression_cursor_nested.py': _BATCH_REGRESSION_REASON,
-    'test_regression_enum_cls_refusal.py': _BATCH_REGRESSION_REASON,
     'test_regression_needle_drift.py': _BATCH_REGRESSION_REASON,
     'test_regression_partial_work_handoff.py': _BATCH_REGRESSION_REASON,
     'test_regression_round2_gap.py': _BATCH_REGRESSION_REASON,

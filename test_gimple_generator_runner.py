@@ -3917,7 +3917,7 @@ def main():
     # `cls._value2member_map_.get(val)`, a `Flag *`), reduced to a `self`-
     # based (non-classmethod) generator method here since the `cls`-access
     # gap itself is a separate, still out-of-scope limitation (see
-    # CODEGEN_generator_function_Lib_enum.md). Exercises: struct-pointer
+    # CODEGEN_enum_runtime_class_creation.md). Exercises: struct-pointer
     # yield-type inference via `_field_dict_val_types` (seeded early, from
     # the field's own `var map: dict[Int, Flag]` declaration, so it's
     # available in time for generator-method translation), the promise/
@@ -4025,7 +4025,7 @@ def main():
     # `cls.method(...)` call inside a compiled @classmethod generator —
     # resolved purely by NAME (the enclosing struct's own real compiled
     # classmethod), mirroring the `self.method(...)` call case's own
-    # mechanism. See bugs/CODEGEN_generator_function_Lib_enum.md's
+    # mechanism. See bugs/CODEGEN_enum_runtime_class_creation.md's
     # 2026-08-21 update, point (2). Also called via an instance, for the
     # same call-site-gap reason noted above.
     test_generator_stdout("cls_classmethod_call_in_generator", """\
@@ -7515,7 +7515,7 @@ def main():
 main()
 """)
 
-    # Stage 1 of run-time class objects (bugs/CODEGEN_generator_function_Lib_enum.md): an attribute
+    # Stage 1 of run-time class objects (bugs/CODEGEN_enum_runtime_class_creation.md): an attribute
     # the class body never declares - `setattr(cls, ..)`, `Cls.x = v`, what a metaclass installs -
     # lives in a run-time class table found through the bases, and a @classmethod generator (or
     # method) reads it as `cls.x`; getattr / hasattr on a class use the same table.
@@ -7566,6 +7566,57 @@ def main():
     print(list(B.gen(2)))
     print(A.total(), B.total())
     print(getattr(A, 'extra'), B.extra, hasattr(A, 'nope'), hasattr(A, 'extra'))
+main()
+""")
+
+    # Lib/enum.py's `Flag._iter_member_by_def_`: `yield from sorted(cls.<generator method>(..),
+    # key=lambda m: m.<attr>)` - a generator call drained into a list, sorted by a key that reads
+    # an attribute of objects whose class the body cannot name (run-time struct reflection).
+    test_generator_matches_cpython("generator_yield_from_sorted_generator_call_with_attr_key", """\
+class M:
+    def __init__(self, v):
+        self.v = v
+        self._sort_order_ = 10 - v
+
+class F:
+    @classmethod
+    def by_value(cls, value):
+        for v in range(value):
+            yield M(v)
+
+    @classmethod
+    def by_def(cls, value):
+        yield from sorted(
+            cls.by_value(value),
+            key=lambda m: m._sort_order_,
+        )
+
+def main():
+    for m in F.by_def(4):
+        print(m.v)
+main()
+""", """\
+class M:
+    def __init__(self, v):
+        self.v = v
+        self._sort_order_ = 10 - v
+
+class F:
+    @classmethod
+    def by_value(cls, value):
+        for v in range(value):
+            yield M(v)
+
+    @classmethod
+    def by_def(cls, value):
+        yield from sorted(
+            cls.by_value(value),
+            key=lambda m: m._sort_order_,
+        )
+
+def main():
+    for m in F.by_def(4):
+        print(m.v)
 main()
 """)
 

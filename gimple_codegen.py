@@ -1335,7 +1335,7 @@ class GimpleGen:
         # `_cpp_param_struct_names`/`_cpp_ctor_struct_names`, just triggered
         # by the YIELDED value's type instead of a parameter/constructor —
         # merged into the same typedef-emission loop (gen_module) rather
-        # than a separate one. See CODEGEN_generator_function_Lib_enum.md's
+        # than a separate one. See CODEGEN_enum_runtime_class_creation.md's
         # 2026-08-20 update.
         self._cpp_value_struct_names: set[str] = set()
         # Module-level function names (for variadic-unmangled calls like os.py's
@@ -3250,6 +3250,7 @@ class GimpleGen:
         'mojo_re_compile_bytes': ('int64_t', ['void *', 'int64_t', 'int64_t']),
         'mojo_split_dyn':      ('int64_t', ['int64_t', 'int64_t']),
         'mojo_class_getattr':  ('int64_t', ['int64_t', 'char *']),
+        'mojo_getattr_any':    ('int64_t', ['void *', 'char *']),
         'mojo_class_setattr':  ('void', ['int64_t', 'char *', 'int64_t']),
         'mojo_class_hasattr':  ('int', ['int64_t', 'char *']),
         'mojo_class_getattr_default': ('int64_t', ['int64_t', 'char *', 'int64_t']),

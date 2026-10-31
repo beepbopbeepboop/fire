@@ -2137,6 +2137,9 @@ def _emit_reflection_dispatch(self, parts):
             + ("  return mojo_list_new();\n"
                "}\n")
             + asdict_dispatch_part
+            + ("static void __attribute__((constructor)) _mojo_register_getattr (void) {\n"
+               "  mojo_register_getattr_dispatch(_mojo_dispatch_getattr);\n"
+               "}\n")
             + ("static int _mojo_dispatch_is_dataclass (void *obj) {\n"
                "  int64_t _tag = mojo_read_type_tag_safe((int64_t)(intptr_t)obj);\n")
             + f"  static const int64_t _known[] = {{{tag_set_literal}}};\n"
