@@ -568,6 +568,27 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
                 env[nm] = 'i'
             else:
                 env[nm] = ('conflict', frozenset(eks))
+    # `with os.scandir(top) as entries:` ... `for entry in entries:` -- `entry`
+    # is a DirEntry (marked as the tuple ('dirent',), which no list/conflict
+    # reader mistakes for a scalar kind); `entry.name` / `entry.path` are strings.
+    _sd_aliases = set()
+    for n in _walk(fn):
+        if isinstance(n, N.WithStmt):
+            for _it in n.items:
+                _c = _it.expr
+                if (isinstance(_c, N.CallExpr) and len(_c.args) == 1
+                        and ((isinstance(_c.func, N.IdentExpr) and _c.func.name == 'scandir')
+                             or (isinstance(_c.func, N.MemberExpr) and _c.func.member == 'scandir'
+                                 and isinstance(_c.func.obj, N.IdentExpr)
+                                 and _c.func.obj.name in ('os', 'posix')))):
+                    _al = _it.alias.name if isinstance(_it.alias, N.IdentExpr) else _it.alias
+                    if isinstance(_al, str):
+                        _sd_aliases.add(_al)
+    for n in _walk(fn):
+        if (isinstance(n, N.ForStmt) and isinstance(n.iterable, N.IdentExpr)
+                and n.iterable.name in _sd_aliases and isinstance(n.target, str)
+                and n.target not in env):
+            env[n.target] = ('dirent',)
     # `for <v> in <list-local-or-literal | sibling-generator-call>():` binds
     # <v> to the element kind
     for n in _walk(fn):
@@ -730,10 +751,17 @@ def _yield_kind(expr, env: dict | None = None) -> str | None:
     if (isinstance(expr, N.CallExpr) and isinstance(expr.func, N.IdentExpr)
             and expr.func.name in ('mojo_dirent_name', 'mojo_dirent_path')):
         return 'p'
+    if (isinstance(expr, N.CallExpr) and isinstance(expr.func, N.IdentExpr)
+            and expr.func.name == 'mojo_bytes_from_cstr'):
+        return 'w'          # bytes: a pointer word
     # A DIRECT `os.path.<fn>(...)` call to a runtime-implemented function.
     _opk = _os_path_call_kind(expr)
     if _opk is not None:
         return _opk
+    if (isinstance(expr, N.MemberExpr) and isinstance(expr.obj, N.IdentExpr)
+            and expr.member in ('name', 'path')
+            and env.get(expr.obj.name) == ('dirent',)):
+        return 'p'
     if isinstance(expr, N.MemberExpr) and isinstance(expr.obj, N.IdentExpr) \
             and expr.obj.name == 'self':
         return env.get(f'self.{expr.member}')
@@ -985,6 +1013,54 @@ def _tagged_consumers_ok(name: str) -> bool:
     def _is_gcall(x):
         return (isinstance(x, N.CallExpr) and isinstance(x.func, N.IdentExpr)
                 and x.func.name == name)
+    # a handle bound ONCE to the generator call (`it = g(..)`), every other use
+    # of which is `list(it)`, `for x in it`, a comprehension over it, or
+    # `it.close()`: followed as if it were the call.
+    handles = {}
+    for st in _MODULE_STMTS:
+        for n in _walk(st):
+            if (isinstance(n, N.AssignStmt) and isinstance(n.target, N.IdentExpr)
+                    and _is_gcall(n.value)):
+                handles.setdefault(n.target.name, []).append(id(n.value))
+    ok_handle_uses = set()
+    for st in _MODULE_STMTS:
+        for n in _walk(st):
+            if isinstance(n, N.ForStmt) and isinstance(n.iterable, N.IdentExpr) \
+                    and n.iterable.name in handles:
+                ok_handle_uses.add(id(n.iterable))
+            elif (isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr)
+                    and n.func.name == 'list' and len(n.args) == 1
+                    and isinstance(n.args[0], N.IdentExpr) and n.args[0].name in handles):
+                ok_handle_uses.add(id(n.args[0]))
+            elif isinstance(n, N.Generator) and isinstance(n.iterable, N.IdentExpr) \
+                    and n.iterable.name in handles:
+                ok_handle_uses.add(id(n.iterable))
+            elif (isinstance(n, N.CallExpr) and isinstance(n.func, N.MemberExpr)
+                    and n.func.member == 'close' and isinstance(n.func.obj, N.IdentExpr)
+                    and n.func.obj.name in handles):
+                ok_handle_uses.add(id(n.func.obj))
+    handle_names = set()
+    for hn in handles:
+        if len(handles[hn]) != 1:
+            continue
+        bad = False
+        for st in _MODULE_STMTS:
+            for n in _walk(st):
+                if (isinstance(n, N.IdentExpr) and n.name == hn
+                        and id(n) not in ok_handle_uses):
+                    # the binding target itself is an IdentExpr too: skip it
+                    bad = True
+        # the target of `hn = g()` is one IdentExpr we cannot tell from a use by
+        # id; account for it
+        n_targets = sum(1 for st in _MODULE_STMTS for n in _walk(st)
+                        if isinstance(n, N.AssignStmt) and isinstance(n.target, N.IdentExpr)
+                        and n.target.name == hn)
+        n_bad = sum(1 for st in _MODULE_STMTS for n in _walk(st)
+                    if isinstance(n, N.IdentExpr) and n.name == hn and id(n) not in ok_handle_uses)
+        if n_bad == n_targets:
+            handle_names.add(hn)
+            for cid in handles[hn]:
+                for_iters.add(cid)
     for st in _MODULE_STMTS:
         for n in _walk(st):
             if isinstance(n, N.ForStmt) and _is_gcall(n.iterable):
@@ -1935,6 +2011,12 @@ def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
                        f'attribute {_nc_attr[1]!r} (v0: only literal class '
                        f'attributes are seeded; a value naming a generator '
                        f'local is never assigned)')
+    if _uses_cpp_only_runtime(fn):
+        # `os.scandir` & co. are lowered by the C++20-coroutine path
+        # (cpp_core's DirEntry / fd-relative posix idiom passes); this path's
+        # ordinary codegen would call the uncompiled `os` module at run time.
+        return False, ('uses os.scandir / fd-relative posix calls, which only the '
+                       'C++20-coroutine path lowers')
     kind, why = _generator_value_kind(fn, _static_env(fn, struct_def),
                                    _delegated_yield_kind)
     if kind is None:
@@ -1943,6 +2025,26 @@ def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
     if _amb:
         return False, _ambiguous_slot_message(_amb, 'stack-switch')
     return True, ''
+
+
+def _uses_cpp_only_runtime(fn: N.FunctionDef) -> bool:
+    """Does `fn`'s body call `scandir` / `os.scandir`, or the fd-relative
+    `stat(..)` / `close(..)` / `open(.., dir_fd=)`, which only the C++20
+    coroutine emitter knows how to lower?"""
+    for n in _walk(fn):
+        if not isinstance(n, N.CallExpr):
+            continue
+        f = n.func
+        if isinstance(f, N.IdentExpr) and f.name in ('scandir', 'fsencode'):
+            return True
+        if (isinstance(f, N.MemberExpr) and isinstance(f.obj, N.IdentExpr)
+                and f.obj.name in ('os', 'posix')
+                and f.member in ('scandir', 'fsencode', 'stat', 'lstat', 'close', 'open')):
+            return True
+        if isinstance(f, N.IdentExpr) and f.name == 'open' \
+                and any(k == 'dir_fd' for k, _v in (n.kwargs or [])):
+            return True
+    return False
 
 
 def _ambiguous_slot_message(names: set, slot_noun: str) -> str:
@@ -4701,6 +4803,54 @@ def _scan_value_used_functions(stmts) -> None:
                     _VALUE_USED_FUNCS.add(dv.name)
 
 
+def _is_closing_item(item) -> bool:
+    e = item.expr
+    return (isinstance(e, N.CallExpr) and len(e.args) == 1 and not e.kwargs
+            and ((isinstance(e.func, N.MemberExpr) and e.func.member == 'closing'
+                  and isinstance(e.func.obj, N.IdentExpr) and e.func.obj.name == 'contextlib')
+                 or (isinstance(e.func, N.IdentExpr) and e.func.name == 'closing'))
+            and isinstance(item.alias, (str, N.IdentExpr)))
+
+
+def _lower_closing_withs(stmts: list) -> None:
+    """`with contextlib.closing(E) as v: BODY` -> `v = E` then `try: BODY
+    finally: v.close()` (what the context manager does), in every statement
+    list of `stmts`, recursively, IN PLACE. A generator handle read through
+    `closing(...)`'s `__enter__` value is otherwise an opaque call result no
+    consumer can follow (Lib/glob.py's `_listdir`)."""
+    i = 0
+    while i < len(stmts):
+        st = stmts[i]
+        if (isinstance(st, N.WithStmt) and len(st.items) == 1
+                and not getattr(st, 'is_async', False) and _is_closing_item(st.items[0])):
+            it = st.items[0]
+            name = it.alias.name if isinstance(it.alias, N.IdentExpr) else it.alias
+            _lower_closing_withs(st.body)
+            bind = N.AssignStmt(target=N.IdentExpr(name=name), value=it.expr.args[0],
+                                line=st.line, col=st.col)
+            fin = [N.ExprStmt(value=N.CallExpr(
+                func=N.MemberExpr(obj=N.IdentExpr(name=name), member='close'),
+                args=[], line=st.line, col=st.col), line=st.line, col=st.col)]
+            stmts[i:i + 1] = [bind, N.TryStmt(body=st.body, handlers=[], else_body=None,
+                                              finally_body=fin, line=st.line, col=st.col)]
+            i += 2
+            continue
+        for fld in ('body', 'then_body', 'else_body', 'finally_body'):
+            sub = getattr(st, fld, None)
+            if isinstance(sub, list):
+                _lower_closing_withs(sub)
+        for el in (getattr(st, 'elifs', None) or []):
+            if isinstance(el, (list, tuple)) and len(el) > 1 and isinstance(el[1], list):
+                _lower_closing_withs(el[1])
+        for h in (getattr(st, 'handlers', None) or []):
+            if isinstance(getattr(h, 'body', None), list):
+                _lower_closing_withs(h.body)
+        for m in (getattr(st, 'methods', None) or []):
+            if isinstance(getattr(m, 'body', None), list):
+                _lower_closing_withs(m.body)
+        i += 1
+
+
 def lower(stmts: list, closure_stmts=(),
           module_name: str | None = None) -> tuple[list, list]:
     """Returns (new_stmts, coro_meta). coro_meta entries are dicts:
@@ -4720,6 +4870,7 @@ def lower(stmts: list, closure_stmts=(),
     _STRUCT_NAMES.clear()
     _UNTHREADABLE_NESTED_ASYNC_GENS.clear()
     _STRUCT_NAMES.update(s.name for s in stmts if isinstance(s, N.StructDef))
+    _lower_closing_withs(stmts)
     _scan_value_used_functions(stmts)
     if not enabled():
         # The C++ backend (`MOJO_CORO=cpp`, the escape hatch) lowers nested

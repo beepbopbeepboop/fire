@@ -5273,7 +5273,7 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 s.value.value, declared, getattr(gen, '_cpp_gen_self_fields', None),
                 gen._async_api) or 'unresolved'
             _ytag = {'char *': 'str', 'double': 'dbl', '_Bool': 'bool',
-                     'int64_t': 'int'}.get(_ysite, 'other')   # no raw `*` in a comment
+                     'int64_t': 'int', 'MojoBytes *': 'bytes'}.get(_ysite, 'other')   # no raw `*` in a comment
             return [f"{indent}co_yield /*Y:{_ytag}*/ ({gen._cpp_expr(s.value.value)});"]
         if isinstance(s.value, gimple_ctypes.YieldFromExpr):
             if gen._cpp_emit_kind in ('async', 'async_gen'):

@@ -7098,6 +7098,44 @@ def main():
 main()
 """, "True\na\n1\n2.5\nz\n[True, 'a', 1, 2.5, 'z']\n")
 
+    # Lib/glob.py's `_iterdir` / `_listdir`: a generator yielding str names beside
+    # bytes (`fsencode(name)`), consumed through `with contextlib.closing(g) as
+    # it: return list(it)` (lowered to `it = g; try: ... finally: it.close()`),
+    # whose returned list carries its own kinds into the caller's comprehension.
+    test_generator_stdout("generator_closing_a_tagged_dir_iterator_then_list", """\
+import contextlib
+import os
+
+def _iterdir(dirname, dironly):
+    try:
+        fsencode = None
+        if isinstance(dirname, bytes):
+            fsencode = os.fsencode
+        with os.scandir(dirname) as it:
+            for entry in it:
+                try:
+                    if not dironly or entry.is_dir():
+                        if fsencode is not None:
+                            yield fsencode(entry.name)
+                        else:
+                            yield entry.name
+                except OSError:
+                    pass
+    except OSError:
+        return
+
+def _listdir(dirname, dironly):
+    with contextlib.closing(_iterdir(dirname, dironly)) as it:
+        return list(it)
+
+def main():
+    xs = _listdir("/tmp/_gen_scandir_fixture", False)
+    print(sorted([str(x) for x in xs]))
+    print(len(xs))
+
+main()
+""", "['file.txt', 'sub']\n2\n")
+
     # ...but any consumer that is NOT a for / list / comprehension (here `next`
     # of a bound handle) would read the box's address as an int, so the
     # generator keeps its refusal.

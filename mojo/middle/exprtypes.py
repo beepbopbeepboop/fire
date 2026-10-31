@@ -1003,6 +1003,8 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
             return 'int64_t'
         if e.func.name in ('mojo_os_scandir', 'mojo_list_slice_word'):
             return 'MojoList *'
+        if e.func.name == 'mojo_bytes_from_cstr':
+            return 'MojoBytes *'
         if e.func.name == 'sorted' and e.args:
             return 'MojoList *'
         if e.func.name in ('list', 'set') and len(e.args) == 1 and (len(e.kwargs or []) == 0):

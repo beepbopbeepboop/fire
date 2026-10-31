@@ -332,7 +332,7 @@ def _cpp_tag_yield_sites(body_lines: list):
         if m is None:
             return None
         ct = {'int': 'int64_t', 'dbl': 'double', 'str': 'char *',
-              'bool': '_Bool'}.get(m.group(1).strip())
+              'bool': '_Bool', 'bytes': 'MojoBytes *'}.get(m.group(1).strip())
         if ct is None:
             return None
         kinds.add(ct)
@@ -344,6 +344,8 @@ def _cpp_tag_yield_sites(body_lines: list):
             w = f"mojo_box_from_bool((int64_t)({expr}))"
         elif ct == 'char *':
             w = f"(int64_t)(intptr_t)((char *)({expr}))"
+        elif ct == 'MojoBytes *':
+            w = f"(int64_t)(intptr_t)({expr})"
         else:
             w = f"(int64_t)({expr})"
         out.append(f"{indent}co_yield {w};")
@@ -1087,7 +1089,10 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         # consumes this generator through `for` loops, which bind the value as a
         # boxed word. Box each site by its marked ctype.
         _tagged_yield = False
-        if (value_ctype is None and not has_tuple_yield
+        if ((value_ctype is None
+                or (value_ctype == 'char *'
+                    and any('/*Y:bytes*/' in _bl for _bl in body_lines)))
+                and not has_tuple_yield
                 and coro_mod._generator_value_kind(
                     fn, coro_mod._static_env(fn, struct_def))[0] == 'w'):
             # the stack-switch kind analysis (which also checks the consumers)

@@ -2853,6 +2853,13 @@ def _gen_stmt_ReturnStmt(gen, node):
         # where nothing else seeds the table — reads it there, and removing it
         # regressed `test_gimple_runner.py`'s
         # `gimple_genexp_struct_receiver_still_correct`.
+        # A list drained from a tagged-word generator carries its own per-slot
+        # kinds at run time: record that THIS FUNCTION returns such a list, so
+        # a call site marks its result runtime-kinded too (`ginf._RuntimeKinded`).
+        if isinstance(gen._struct_slot_kinds.get(v), ginf._RuntimeKinded):
+            if not hasattr(gen, '_return_runtime_kinded'):
+                gen._return_runtime_kinded = set()
+            gen._return_runtime_kinded.add(gen.current_func_name)
         if v in gen._elem_types and not _is_empty_container_literal(node.value):
             gen._return_elem_types[gen.current_func_name] = gen._elem_types[v]
         # A `return` whose value is a container of a DIFFERENT kind than an

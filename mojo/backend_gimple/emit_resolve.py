@@ -3939,7 +3939,7 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         # single-TU `--dump myinterpreter.py`.
         _lr = gen.lower_expr(node.element)
         et = _as_str(_lr[0]); ev = _lr[1]
-        if et == 'int64_t' and ev in gen._boxed_vals and ev in getattr(gen, '_tagged_gen_vals', ()):
+        if et == 'int64_t' and ev in gen._boxed_vals:
             # the element IS a tagged word taken straight off a tagged-word
             # generator (`list(g())`, `[v for v in g()]`): append it under the
             # kind it carries (a float box as a double, a bool as a bool, a

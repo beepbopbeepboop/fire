@@ -5591,7 +5591,15 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
     gen._emit_label(bb_body)
     suf = gimple_ctypes.TypeLattice.list_suffix(elem)
-    if suf == 'double':
+    if _iv in getattr(gen, '_maybe_kinds_vals', ()) and gen._type_of(_as_str(gen0.target)) == 'int64_t':
+        # a list that carries its own per-slot kinds: read each slot as the box
+        # the runtime hands back (a float / str slot is boxed), exactly as the
+        # `for` statement over such a list does, so the target IS the element
+        # and a comprehension over it keeps each element's kind.
+        elem64 = gen._new_val('int64_t', f"mojo_list_get_boxed ({_iv}, {idx64})")
+        gen._boxed_vals.add(_tgt)
+        gen._emit(f"  {_tgt} = (int64_t) {elem64};")
+    elif suf == 'double':
         gen._emit(f"  {_tgt} = mojo_list_get_double ({_iv}, {idx64});")
     elif suf == 'str':
         # mojo_list_get_str returns char*, handle type mismatch with target variable
