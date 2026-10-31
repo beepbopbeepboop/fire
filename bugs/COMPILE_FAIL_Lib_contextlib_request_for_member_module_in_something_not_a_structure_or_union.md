@@ -44,8 +44,8 @@ NOT verified and NOT done:
   for the integrator's gate to say.
 - Element typing for the `*args` body is still wrong in two ways, both
   separate defects, filed:
-  the int-element list-param loop target typed `char *` (arithmetic on an int
-  element read a pointer; now fixed, doc deleted), and
+  `bugs/CODEGEN_coro_list_param_int_element_loop_target_is_char_pointer.md`
+  (arithmetic on an int element reads a pointer), and
   `bugs/CODEGEN_coro_star_args_str_double_elements_yield_as_int.md` (a `str`
   or `double` element is yielded as an int). Neither blocks the packing, but
   any `contextlib` body that does arithmetic or yields a loop element over a

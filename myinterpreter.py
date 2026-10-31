@@ -1291,7 +1291,7 @@ class _MojoWriter:
 
 class MojoInstance:
     """An instance of a Mojo-defined struct/class."""
-    def __init__(self, mojo_class: 'MojoClass'):
+    def __init__(self, mojo_class):
         self._mojo_class = mojo_class
 
     def __getattr__(self, name):
@@ -1499,7 +1499,7 @@ class MojoClass:
         'Float16': 0.0, 'Float32': 0.0, 'Float64': 0.0,
     }
 
-    def __init__(self, name, fields, methods: dict, interpreter, bases=None,
+    def __init__(self, name, fields, methods, interpreter, bases=None,
                  comptime_aliases=None, static_methods=None, class_methods=None,
                  def_scope=None):
         self.name = name
@@ -2512,10 +2512,7 @@ def _mojo_iter(value):
     unchanged). Exhaustion is the Mojo `__next__` raising `StopIteration`,
     which is a real Python exception, so it propagates unchanged."""
     if isinstance(value, MojoInstance):
-        # Annotated: `value` is unannotated, so `value._mojo_class` is typed as a
-        # word unless the local says what it is; `cls.methods.get` then lowered
-        # to `mojo_dict_get_int(<int64>, ...)` (gcc: "makes pointer from integer").
-        cls: 'MojoClass' = value._mojo_class
+        cls = value._mojo_class
         method = cls.methods.get('__iter__')
         if method is not None:
             return _mojo_struct_iter_steps(cls, method(cls.interpreter, value))
@@ -2540,7 +2537,7 @@ def _mojo_next(iterator, *default):
     message for a non-iterator."""
     if not isinstance(iterator, MojoInstance):
         return next(iterator, *default)
-    cls: 'MojoClass' = iterator._mojo_class
+    cls = iterator._mojo_class
     method = cls.methods.get('__next__')
     if method is None:
         raise TypeError(f"'{cls.name}' object is not an iterator")

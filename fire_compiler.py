@@ -872,18 +872,6 @@ class StructDef:
     # `BytesIter[origin]` refused compilation on precisely these bodies
     # (2026-10-21).
     type_param_names: list = field(default_factory=list)  # all bracket names
-    # Fields the COMPILER minted (a member read or assigned on an instance
-    # but declared by no annotation, class-body default or `__init__`
-    # self-assignment: `p.b = 5` in `main` for `class P: def __init__(self):
-    # self.a = 1`). Every instance of the struct carries the storage, so
-    # `hasattr(q, 'b')` on an instance that never had `b` set would otherwise
-    # answer True. Each name here gets a bit in the hidden
-    # `__mojo_present[]` word array of the C struct (see
-    # mojo/middle/types.py `presence_set_stmt`), set by every codegen store
-    # and read by the generated getattr dispatch. Order is the bit index, so
-    # it is append-only and lives on the SHARED StructDef: every generator
-    # that lays out or stores into this struct must agree on it.
-    presence_fields: list = field(default_factory=list)
 
 @dataclass
 class TraitDef:
@@ -1329,7 +1317,7 @@ def _prefix_is_interpolated(prefix: str) -> bool:
     field spans **lines**, which `test_formal_libc_symbol.py` was the one
     file in the 2026-10-04 sweep to meet (its refusal read `unterminated
     string literal`). It is fixed — at `cca2a17f`, recorded at
-    `bugs/formal/FORMAL_sweep_work_map.md` §3.1's `b13` row and §1.13's `#### 1.5` —
+    `bugs/FORMAL_sweep_work_map.md` §3.1's `b13` row and §1.13's `#### 1.5` —
     and `test_string_literal_lexing.py`'s `LITERALS` block is what holds it
     there. With no shared predicate the scanner asked "is there a line end
     here?" without ever asking "am I inside code?", and CPython's rule for
@@ -2510,7 +2498,7 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
                     # depth; without that this branch is dead code, which is the
                     # shape the bug had — the first of the two halves was
                     # missing and this is the second. Fixed at `cca2a17f` (the
-                    # `b13` round's §5, now `bugs/formal/FORMAL_sweep_work_map.md`
+                    # `b13` round's §5, now `bugs/FORMAL_sweep_work_map.md`
                     # §3.1's `b13` row), and held by
                     # `test_string_literal_lexing.py`.
                     interpolated = _prefix_is_interpolated(src[start:i])
@@ -6218,22 +6206,7 @@ class Parser:
             return StringLiteral(_val, line=line, col=col, is_raw=_all_raw)
         _merged = ''
         for _r in raws:
-            _inner = self._string_literal_inner(_r)
-            if not self._raw_string_is_ftstring(_r):
-                # A plain piece is LITERAL text, but the merged body is an
-                # f-string, where `{...}` is an interpolation and a backslash
-                # is decoded. Without escaping, `f"[{a}]" "{ q }"` interpolated
-                # `q` (CPython: `[A]{ q }`), and the compiled path lowered the
-                # `{ mojo_exc_pending_set(0); ` in cpp_core's C-text emitter as
-                # a call. Double the braces, except a `\N{NAME}` escape, which
-                # is one token; a raw piece's backslashes are doubled too.
-                if self._raw_string_is_raw(_r):
-                    _inner = _inner.replace('\\', '\\\\')
-                _inner = re.sub(r'(\\N\{[^{}]*\})|([{}])',
-                                lambda _m: _m.group(1) if _m.group(1)
-                                else _m.group(2) * 2,
-                                _inner)
-            _merged += _inner
+            _merged += self._string_literal_inner(_r)
         _dq3 = '"' * 3
         _sq3 = "'" * 3
         # `is_interpolated=True` on all three returns, and the evidence is the
@@ -7969,25 +7942,13 @@ class Parser:
         that collect statements, keeps every `_parse_stmt` branch free to return
         either without each caller having to know which it got.
         """
-        _stmt_line = self._peek().line
         produced = self._parse_stmt()
         if produced is None:
             return
         if isinstance(produced, list):
-            for _pn in produced:
-                self._stamp_stmt_line(_pn, _stmt_line)
             stmts.extend(produced)
         else:
-            self._stamp_stmt_line(produced, _stmt_line)
             stmts.append(produced)
-
-    def _stamp_stmt_line(self, node, line):
-        """Give a statement the source line it STARTS on when its own parse did not (`if`,
-        `while`, `raise`, `def`, ... were built with `line` left 0). `f_lineno` and a
-        traceback's `tb_lineno` are statement lines, and the `#line` directives of the
-        generated C were missing for these statements."""
-        if getattr(node, 'line', 1) == 0 and line > 0:
-            node.line = line
 
     def _parse_block(self) -> list:
         # Support inline single-statement body: "def foo(): return x" on one line

@@ -303,18 +303,12 @@ __mojo_gen_send_d(int64_t bits)
    bits to the yield as one int64_t. */
 extern void   *mojo_list_new(void);
 extern void    mojo_list_append_int(void *, int64_t);
-extern void    mojo_list_append_word(void *, int64_t);
 
-/* Each slot goes in through `mojo_list_append_word`: the stored word is the same raw bits
-   `mojo_list_append_int` stored, but the slot's KIND is recorded as well (a string pointer, a
-   None / bool / float box), so a consumer that reads the yielded tuple dynamically -- a loop over the
-   result of a call through a function value, or a generator that re-yields what it was given --
-   spells a None as None and a string as a string instead of as an integer. */
 static int64_t
 tuple_box(const int64_t *slots, int n)
 {
     void *l = mojo_list_new();
-    for (int i = 0; i < n; i++) mojo_list_append_word(l, slots[i]);
+    for (int i = 0; i < n; i++) mojo_list_append_int(l, slots[i]);
     return (int64_t)(uintptr_t)l;
 }
 

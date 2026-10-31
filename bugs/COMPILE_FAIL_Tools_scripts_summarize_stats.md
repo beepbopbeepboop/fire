@@ -9,7 +9,7 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/scripts/summarize_stats.py`
 Round 5 stopped because the typed-callable change overlapped
 `bug:CODEGEN_closure_str_return_is_lost`. The owner handed that bug to this
 worker (2026-10-30), so this round did the closure-str fix first. It is
-landed and fixed (the closure str-return bug; its doc was deleted with the fix).
+landed and documented in `bugs/CODEGEN_closure_str_return_is_lost.md`.
 
 What it does and does NOT do for this file:
 
@@ -39,7 +39,7 @@ AND its call-site dispatch together, or the value is read back as int64.
 Landing step 2 alone changes no behaviour.
 
 Stopped because that mechanism is the same one another worker holds:
-`bug:CODEGEN_closure_str_return_is_lost` (doc deleted with the fix;
+`bug:CODEGEN_closure_str_return_is_lost` (`bugs/CODEGEN_closure_str_return_is_lost.md`,
 "a closure that returns a `str` prints a decimal address"). Its return-type
 carry-through at the call site is steps 3-4 here. Editing `cpp_async.py`'s
 closure-factory gates or `cpp_core.py`'s callable dispatch from this worker
