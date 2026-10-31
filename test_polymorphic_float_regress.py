@@ -3,7 +3,6 @@
 import os, sys, tempfile, subprocess
 sys.path.insert(0, '.')
 import driver
-from exec_budget import RUN_TIMEOUT_S
 
 def run(src):
     with tempfile.TemporaryDirectory() as td:
@@ -14,7 +13,7 @@ def run(src):
         rc = driver.compile_program(path, src, output=out, run=False)
         if rc != 0 or not os.path.exists(out):
             return None, f"compile failed rc={rc}"
-        result = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
+        result = subprocess.run([out], capture_output=True, text=True, timeout=30)
         return result.returncode, result.stdout
 
 # Float pair — currently prints '2' (bits of 2.5 as int), should print '2.5'

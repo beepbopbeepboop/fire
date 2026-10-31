@@ -1,0 +1,800 @@
+# CODEGEN_generator_function: Lib/os.py
+
+## Status (2026-10-30, round 7 — planning: `_fwalk` is not one `stat()` — the exact inventory)
+
+`walk` is done (round 6). What stands between `Lib/os.py` and a full compile is
+`_fwalk` (fd-based `fwalk()`), and it is a different animal from `walk`: after
+`stat(...)` is resolved the refusals continue down the body. Read off the 3.15
+source, in order of first use:
+
+1. `action, value = stack.pop()` where `value` is `int` (a close fd), a 4-tuple
+   `(toppath, dirs, nondirs, topfd)` or a 5-tuple `(isroot, dirfd, toppath,
+   topname, entry)` — a HETEROGENEOUS-SLOT tuple, not just string-or-tuple:
+   slot kinds bool/int/str/None/DirEntry vary by action. This is the tagged
+   tuple-slot model (a runtime-kinded list read per slot, `mojo_list_get_boxed`,
+   already exists; the generator side must keep the slots boxed instead of
+   unifying them to one C type).
+2. `stat(name, follow_symlinks=False, dir_fd=fd)`, `stat(fd)`, `entry.stat(...)`
+   returning a `stat_result` (`st_mode`, `st_dev`, `st_ino`) — a fixed-layout
+   runtime struct like `DirEntry`; `path.samestat(a, b)`; `st.S_ISDIR(mode)`.
+3. `open(name, O_RDONLY | O_NONBLOCK, dir_fd=fd)`, `close(fd)`, `scandir(fd)`
+   (an fd, not a path) — `openat`/`fdopendir` wrappers.
+4. `raise` (bare re-raise inside `except OSError as err`), `assert action ==
+   _fwalk_walk` (an `assert` is a silent NO-OP in a coroutine body today — it
+   should be a real check), `stack.extend(<generator expression of tuples>)`,
+   `zip(dirs[::-1], entries[::-1])`, `fsencode(name)`.
+
+Order of work: (1) first — it is the same machinery `walk` used (tagged word,
+`isinstance` discrimination) generalised to per-slot kinds; (2)-(3) are runtime
+structs/wrappers in the `DirEntry` mould; (4) are independent small lowerings.
+Test: compile `Lib/os.py` whole, then `os.fwalk` over a `/tmp` tree in both
+`topdown` modes and with `follow_symlinks=True` against CPython.
+
+## Status (2026-10-30, round 6 — `walk` COMPILES AND RUNS CORRECTLY; `Lib/os.py` now refuses only on `_fwalk`'s `stat(...)`)
+
+`with scandir(top) as entries:` is real now, and the CPython 3.15 `walk` source,
+compiled beside a `main()`, matches CPython in both `topdown` modes and for a
+missing directory (`onerror`/`except OSError` path):
+
+- `mojo_os_scandir` (runtime): an eager list of `DirEntry` handles with
+  `mojo_dirent_name/path/is_dir/is_file/is_symlink`; a failure goes through the
+  pending flag and the coroutine body rethrows a C++ exception. The `with` is
+  lowered on the AST BEFORE the yield kinds are solved
+  (`cpp_core._cpp_lower_scandir_withs`): `entries = mojo_os_scandir(top)` plus
+  the body with every `for entry in entries` target's `.name/.path/.is_dir()...`
+  spelled as those calls, so `yield entry.name` is a string yield. The same pass
+  spells calls through an `os.path` alias local (`join(a, b)`) as the direct call.
+- The compiled `except OSError:` now matches a raised `FileNotFoundError`
+  (`types._compute_exc_descendants` knows the builtin OSError / LookupError /
+  ArithmeticError families).
+- `a, b = x, y` in a coroutine body is element-wise (it lowered to the invalid
+  C++ `({x, y})[0]`).
+- `posixpath.join`: an empty second part adds the trailing `/`, an absolute one
+  replaces the first (`mojo_path_join`; `int_join` was a second copy and now
+  delegates to it).
+- `Lib/os.py`'s `fspath(top)` and `sys.audit(...)` resolve in the body.
+
+Left for this doc: `_fwalk` — `stat(...)` returning a `stat_result` that the body
+unpacks (`st.st_mode`, `st.st_dev`): a fixed-layout runtime struct of the same
+shape as `DirEntry`. Verified by building `Lib/os.py` (only `_fwalk` is named).
+Generator runner 318 pass / 0 fail.
+
+## Status (2026-10-30, round 5 — planning: the exact inventory standing between `walk` and a compiled, CORRECT build)
+
+Read straight off CPython 3.15's `walk` after rounds 1-4. Everything the yield /
+stack typing needed is landed; what is left is the DIRECTORY-ITERATION runtime,
+and each item below is a real piece, not wiring:
+
+1. `with scandir(top) as entries:` — refused today (honestly). Needs a runtime
+   `DirEntry` value (name, path, d_type, lazily-stat'd mode) and `scandir`
+   returning an iterator over them whose `with` binds a REAL handle
+   (`mojo_os_scandir(char *)` -> `MojoList *` of entry handles is enough; enter
+   is the identity, exit frees). Register `DirEntry` as a struct the C++ body
+   emitter can field-read (`entry.name`, `entry.path`) and method-call
+   (`entry.is_dir()`, `entry.is_dir(follow_symlinks=False)`, `entry.is_symlink()`,
+   `entry.is_junction()` — always False on POSIX) through runtime symbols.
+2. `except OSError:` around those calls must catch a runtime-raised error. The
+   runtime raises through `mojo_raise` with a type tag; `scandir` on an
+   unreadable directory must raise the OSError tag (`PermissionError` /
+   `FileNotFoundError` are subclasses) and `except OSError as error:` must bind
+   a value `onerror(error)` can take.
+3. `onerror(error)` — a call through a CALLABLE-VALUED PARAMETER (default `None`,
+   guarded by `if onerror is not None`). The body refuses this today ("what that
+   call RETURNS is not knowable"): here the result is discarded, so the call can
+   lower as `mojo_fnptr_call_1` when the call is an expression STATEMENT.
+4. `fspath(top)` (module-level `_fspath`, already compiled) and `sys.audit(...)`
+   (a no-op) must resolve in a generator body.
+5. `_fwalk`: `stat(...)` returning a `stat_result` structseq that is unpacked
+   (`st.st_mode`, `st.st_dev`) — a fixed-layout runtime struct, same shape of
+   work as `DirEntry`.
+
+Tests that will prove it: compile `Lib/os.py`, then drive `walk` over a
+directory built in `/tmp` in both `topdown` modes and with an unreadable
+subdirectory + `onerror`, against CPython (the `wk.py` harness from this round:
+`walk` copied beside `main()`).
+
+## Status (2026-10-30, round 4 — the mixed-stack typing LANDED (solver-first, tagged only when forced); `walk` is refused honestly on `with scandir(top) as entries:`)
+
+Landed, pinned by `generator_heterogeneous_stack_param_rebound_from_pop` (a
+five-line model of `walk`'s stack, byte-identical to CPython in both `topdown`
+modes) and `generator_with_unmodelled_manager_alias_refused`:
+
+- **Tagged only when the solver cannot type it** (the project's rule: tight
+  untagged generators wherever types solve): a parameter that the body REBINDS
+  from `<list>.pop()` AND tests with `isinstance(<name>, tuple)` is the boxed
+  WORD (`exprtypes._tagged_word_params`, used by `cpp_async`); every other
+  parameter keeps its solved C type. A bare `yield <name>` under that guard is a
+  `MojoList *` (`_tuple_guarded_bare_yields`, cast in `cpp_core`), and a tuple
+  slot holding such a name is a string when the body uses it as one
+  (`_tuple_tested_names` / `_name_has_str_evidence`). `word + "lit"` now
+  concatenates for any `int64_t` local, not only a parameter.
+- **A silent miscompile the old refusal was hiding, now an honest refusal:** with
+  `walk`'s yield kinds unified it compiled — to garbage. `with scandir(top) as
+  entries:` in a SYNC generator body dropped the manager expression and left
+  `entries` UNINITIALISED, so the loop read garbage, and `is_dir` / `islink`
+  were stubbed `0`. A `with <unmodelled manager> as name:` now refuses (an
+  alias-less `with` still elides as before). `Lib/os.py` therefore still falls
+  back to interpretation, for two reasons that are both real features.
+
+`Lib/os.py` now refuses on exactly: (1) `with scandir(top) as entries:` and
+(2) `_fwalk`'s `stat(...)`. Next steps: a runtime `DirEntry` + `scandir`
+(`mojo_os_scandir`, entry name/path and lazily stat'd `is_dir()/is_symlink()`),
+modelled as a context manager so `with` binds a real handle; then `stat` /
+`stat_result` for `_fwalk`. The generator runner is 319 pass / 0 fail with all of
+this.
+
+## Status (2026-10-30, round 3 — measured: the mixed-tuple yield is a TYPE-MODEL problem, not a yield-kind one; a naive yield-kind fix is worse than the refusal)
+
+Experiment (not landed, because it makes things worse): teach
+`exprtypes._generator_yield_ctype` that a bare `yield <name>` inside
+`if isinstance(<name>, tuple):` yields `MojoList *`
+(`_tuple_guarded_bare_yields`). With it `walk` stops being refused and the
+module build proceeds to the C++ compiler — and fails there. Reproduced on a
+five-line model of `walk` (`stack = [top]; top = stack.pop(); if
+isinstance(top, tuple): yield top; ...; stack.append((top, dirs, nondirs))`):
+
+```
+top = mojo_list_pop(stack);          // top is the PARAM's type, char *: g++ "invalid conversion from int64_t to char*"
+if ((0)) { co_yield top; continue; } // isinstance(top, tuple) lowered to the constant 0
+```
+
+So the refusal was protecting a real hole: the local `top` is both the string
+parameter and each popped stack element, which at run time is EITHER a path
+string or a pushed `(top, dirs, nondirs)` tuple, and the compiled body gives it
+ONE C type (`char *`), constant-folds `isinstance(top, tuple)` to false, and
+cannot return a popped tuple through a `char *`. Making the yield kinds agree
+without fixing that yields invalid C++, which is a hard build error where the
+refusal was a clean interpreter fallback. The 33-line experiment is preserved
+at `git stash` message "WIP on work/gen-lib-os" in the round-3 worktree and was
+the content of `_tuple_guarded_bare_yields` + 3 lines in `_generator_yield_ctype`;
+re-create it as the LAST step, not the first.
+
+The real next step is the tagged local, in this order:
+1. A local assigned from `<list>.pop()` / `<list>[i]` where the list holds BOTH
+   a scalar kind and a pushed tuple (`stack.append(top)` string kind beside
+   `stack.append((top, dirs, nondirs))`) is declared as the boxed WORD
+   (`int64_t`), not the first-binding's `char *`; every string use of it casts
+   `(char *)` and every tuple use `(MojoList *)` (`_cpp_word_iter_locals` is the
+   existing registry for a "value whose kind only the runtime knew").
+2. `isinstance(<word>, tuple)` lowers to a runtime test instead of the constant
+   0: the pop-time discrimination is half there (`mojo_list_pop`, and a tuple is
+   a `mojo_mark_as_tuple`d `MojoList *`), so `mojo_is_tuple_word(word)` =
+   registered list AND marked tuple.
+3. Only then the yield-kind rule above.
+Tests that prove it: the five-line `walk` model in
+`test_gimple_generator_runner.py` against CPython in both `topdown` modes
+(CPython output: `r ['d0'] ['f0']` / `r/x ['d1'] ['f1']` / `r/x/x ['d2'] ['f2']`
+top-down, and the reverse order bottom-up), then `fire.py build` of
+`Lib/os.py` leaving only `_fwalk`'s `stat(...)`.
+
+## Status (2026-10-30, round 2 — `reversed(<list>)` loops and the silent wrong-value on `append(os.path.join(...))`; `walk` is now down to the mixed-tuple yield)
+
+- **Landed:** `for x in reversed(<list local>)` in a C++20 coroutine body
+  (`cpp_core`, the `walk` loops `for dirname in reversed(dirs)` and `for
+  new_path in reversed(walk_dirs)`); lowered via a cached `mojo_list_reversed`.
+  `walk` no longer stops at `unsupported for-loop iterable type: CallExpr`.
+- **Landed (a silent wrong value, found on the way):** on the stack-switch
+  path, `names.append(os.path.join(top, d))` then `for n in reversed(names):
+  yield n` printed heap ADDRESSES with exit 0, because neither the appended
+  call's kind nor `reversed`/`sorted`/`list`'s element-kind passthrough was
+  known to `coro._static_env`. Both now are; pinned by
+  `generator_reversed_list_of_os_path_join_results`.
+- **`walk` now refuses on exactly one thing:** `every yield must carry a value,
+  and all values must agree on one scalar type` — the bottom-up path's bare
+  `yield top` (a tuple popped from the heterogeneous `stack`) beside the
+  top-down `yield top, dirs, nondirs`. Next step: narrow `top` to 'tuple' under
+  `isinstance(top, tuple)` and take the tuple slot ctypes from the
+  `yield top, dirs, nondirs` site (`exprtypes._generator_tuple_yield_slot_ctypes`
+  / `_generator_yield_ctype`). `_fwalk` is unchanged (`stat(...)`).
+
+## Status (2026-10-30 — `work/gen-lib-os`: `os.path` function values + aliases landed; `walk` now stops at scandir, `_fwalk` at `stat`)
+
+Landed (measured on `Lib/os.py` of CPython 3.15, `python3 fire.py build`):
+
+- **`os.path.<fn>` / `posixpath.<fn>` read as a VALUE** (`islink, join =
+  path.islink, path.join`, the first line of `walk`) used to lower to
+  `_mojo_dispatch_getattr(<module marker 0>, "islink")` — a fatal runtime
+  `AttributeError: islink`. Now: `emit_exprs._lower_MemberExpr` returns the
+  runtime wrapper's address (`mojo_os_path_{join,islink,isdir,isfile,exists,
+  basename,dirname}_w`, new in `runtime/fire_runtime.c`), a call through it is
+  `mojo_fnptr_call_N`, and `coro._static_env` types the call's result
+  (`_os_path_fn_kind`: join/basename/dirname str, the predicates bool) for a
+  single-name AND a tuple-bound local. Pinned by
+  `generator_os_path_function_values_tuple_bound`.
+- **The C++20 coroutine emitter** (the path `walk`/`_fwalk` take) resolves such a
+  local as a compile-time ALIAS (`cpp_core._cpp_collect_os_path_aliases`, set
+  per body in `cpp_async`), so `join(top, ...)` lowers through the existing
+  `os.path.*` call table (which gained `islink`). `walk` no longer stops at
+  `unresolved callee 'join(...)'`.
+
+Measured state after this round:
+
+- `walk`: `unsupported for-loop iterable type: CallExpr` — the
+  `with scandir(top) as entries:` / `for entry in entries` shape (`scandir`
+  returns a `DirEntry` iterator; `entry.name/.path/.is_dir()/.is_symlink()`).
+- `_fwalk`: `a call to unresolved callee 'stat(...)'` (`from posix import *`;
+  `stat` returns a `stat_result` structseq that is then unpacked).
+- Still true, and the real size of the remainder: the mixed tuple / non-tuple
+  `stack` value model in `walk` (`stack.append((top, dirs, nondirs))` beside a
+  bare str entry, discriminated by `isinstance(top, tuple)`).
+
+Next steps, in order: (1) a runtime `DirEntry` value + `scandir` returning an
+iterable of them (`mojo_os_scandir`, entries as a struct with name/path and
+lazily-stat'd `is_dir/is_symlink`), lowered like `os.walk` already is; (2)
+`posix.stat`/`lstat` returning a fixed-layout `stat_result` the generator body
+can unpack; (3) the tagged `stack` element (tuple vs str) via the existing
+`mojo_list_pop` + `isinstance(x, tuple)` discrimination.
+
+## Status (2026-10-29 — worktree agent-4796: verified refusal unchanged, regression test committed, root cause remains feature-sized tagged-union redesign)
+
+Verified: `python3 fire.py build Lib/os.py` still fails with the same generator refusal (`mixed tuple / non-tuple yields` / heterogeneous stack value model), unchanged from 2026-09-07. Added `test_regress_lib_os_generator_refusal.py` (passes, pins refusal + open doc). The concrete remaining prerequisites (per 2026-09-07 entry) are: `os.stat_result` structseq modeling, `os.scandir`/`DirEntry` iterator type, and a runtime-tagged container value model for `walk`/`_fwalk`'s mixed `str`/`tuple` `stack`. Genuinely out of scope for a narrow fix; doc stays open.
+
+## Status (2026-09-07 — "cluster B" feature session: `walk`'s blocker is mixed tuple / non-tuple yield, not slot types)
+
+Feature-build pass on cluster B. The `(dirpath, dirnames, filenames)`
+slot shape itself (str, list, list) is already supported — list-valued
+tuple slots round-trip today (new regression:
+`gen_tuple_slot_list_valued` in `test_gimple_generator_runner.py`).
+
+`walk`'s real blocker is that it **mixes a tuple yield and a non-tuple
+yield in one body**: the bottom-up path does `stack.append((top, dirs,
+nondirs))` and later, after `top = stack.pop()`, `if isinstance(top,
+tuple): yield top; continue` — a bare `yield <var>` — while the
+top-down path does `yield top, dirs, nondirs`. `_generator_value_kind`
+refuses `mixed tuple / non-tuple yields`. Handling this needs the
+generator value model to treat a bare yielded value as a possibly-boxed
+tuple discriminated at runtime (`isinstance(top, tuple)`), i.e. the
+same tagged-union direction as `modulefinder`. Plus `scandir()` as a
+for-loop iterable is unresolved. `_fwalk` remains cluster A
+(star-imported `stat`) + defined inside `if _exists("openat")`. No code
+change for this file.
+
+## Status (2026-09-07 — `stat` is not a callable-value-local; also cluster B gates `_fwalk`)
+
+Batch investigation of "cluster A = callable-value-local dispatch": `stat`
+in `_fwalk` comes from `from posix import *` (a star-imported module-level
+function), not a local/closure callable, so `mojo_maybe_bound_call_N` does
+not apply. Its real obstacle is that `stat(...)` returns a `stat_result`
+structseq that the coroutine body then unpacks — an opaque-value modelling
+gap. `_fwalk` is additionally cluster B (heterogeneous `yield`/`yield
+from` tuple shapes) and is defined inside an `if _exists("openat")` block,
+so the A3 pre-pass never even sees it as a top-level def. `walk` remains
+cluster B. No code change.
+
+## Status (2026-09-05 — A3 stack-switch cutover: still REFUSED, clusters A + B)
+
+`_Environ.__iter__` now compiles through the A3 path. **Still refused:**
+
+- `_fwalk`: `a call to unresolved callee 'stat(...)' ... in a compiled
+  generator/coroutine body`. `stat` reaches `os` via `from posix import *`
+  (a star import) so it is not a statically-known callee. **Cluster A**
+  (callable-value / unresolved-callee dispatch), shared with
+  `glob` (`match`), `pickletools` (`getpos`), `test/test_frame` (`nested`).
+- `walk`: `unsupported for-loop iterable type: CallExpr`, and its body
+  mixes tuple and non-tuple `yield`s (**cluster B**, the tagged tuple
+  yield value model — see `modulefinder`).
+
+## Status (2026-09-03, worktree agent-aabd2cf376c9f0f42 — infrastructure increment: pop-time shape discrimination for a heterogeneous / tagged-union `stack` value model)
+
+Landed (`gimple_cpp_core.py`), the piece the older entries kept naming
+as the core blocker — recovering a *popped* element's shape:
+
+- **`<list-local>.pop()` / `.pop(i)`** in a coroutine body now lowers to
+  `mojo_list_pop` / `mojo_list_pop_at` (returns the raw `int64_t`-boxed
+  slot) instead of falling through to invalid C++ member-call syntax.
+- **`isinstance(top, tuple)`** — `tuple` was previously absent from the
+  isinstance type table, so the check folded to a constant `0` (silently
+  wrong: `walk`'s `if isinstance(top, tuple):` branch was dead). Added
+  `'tuple' -> ('MojoList *',)` (a tuple is boxed as a `MojoList *` in the
+  flat model) and a runtime `mojo_is_registered_list((int64_t)(top))`
+  discriminator for the genuinely-dynamic popped-box case, matching the
+  existing `list` handling.
+- **Tuple-unpack of a popped/boxed value** — `a, b = stack.pop()` and a
+  second-level `x, y, z = payload` (the exact `_fwalk` idiom: `action,
+  value = stack.pop()` then `isroot, dirfd, toppath, topname, entry =
+  value`). The value is cached once into a fresh local (a raw `.pop()`
+  mutates the stack, so it must not be re-evaluated per slot) and each
+  slot is read via `mojo_list_get_int((MojoList *)(box), i)`. Names bound
+  this way, plus a single-target `top = stack.pop()` / `t = other_boxed`,
+  are recorded in a new per-unit `_cpp_boxed_tuple_names` set so a later
+  unpack of them decomposes through the runtime getters rather than an
+  invalid raw `(v)[i]` subscript.
+- **`while <list>:`** now tests emptiness (`mojo_list_len(...) != 0`), not
+  pointer non-nullness — a `MojoList *` is essentially never NULL, so the
+  old raw `while (stack)` spun forever once drained. Same for
+  `while <dict>:` / `while <set>:`.
+- **Nested container literal appended** (`stack.append((a, b))`) now boxes
+  recursively via `_cpp_boxed_list_literal_expr`, like a nested element of
+  a list *literal* already did — previously emitted `(char *)({a, b})`.
+
+New end-to-end regression tests in `test_gimple_generator_runner.py`
+(`generator_pops_heterogeneous_tagged_stack`,
+`generator_pops_stack_two_level_tuple_unpack`) compile+link+run real
+binaries exercising all of the above.
+
+Effect on this file: `fwalk` (the driver generator) is no longer in the
+refusal list — it went from refused to accepted, because its body is
+exactly the pop/tag-dispatch/tuple-unpack shape this increment covers
+(`stack = [(_fwalk_walk, (...))]`, `while stack: yield from _fwalk(...)`,
+`finally: while stack: action, value = stack.pop(); if action ==
+_fwalk_close: close(value)`). Fresh isolated
+`compile_to_gimple_with_cpp(do_imports=False)` now refuses on only
+`_fwalk` and `walk` (was `_fwalk, fwalk, walk`).
+
+**Still open, and genuinely separate large features — the concrete
+blockers for a full close:**
+- `_fwalk`: `stat(topname, ...)` returns a `stat_result` *structseq*
+  (`os.stat_result` — a named-tuple-ish C type with `.st_mode` etc.);
+  this codegen has no structseq value model. Also `scandir(topfd)`
+  yielding `DirEntry` objects with `.is_dir()` / `.stat()` / `.name` /
+  `.path` methods — an iterator-of-opaque-objects type with no
+  representation here.
+- `walk`: `for entry in scandir(top):` — same `DirEntry` iterator gap.
+
+Closing os.py needs real `os.scandir`/`DirEntry`/`os.stat_result`
+modeling (structseq + a directory-entry iterator type), which is a
+distinct project from the tagged-union stack work done here. Not
+attempted this session; that is the honest remaining scope.
+
+Gate clean on this increment: test_gimple 266/0, test_gimple_generator_
+runner 55/0, test_gimple_async_runner 38/0, module_cache 76/0,
+link_mode 3/0, check-selfhost pass, compile_stdlib 664 PASSED / 0
+unexpected, dylib 0 skips, bootstrap 180/180 byte-identical.
+
+## Status (2026-09-03, worktree agent-a63a153b32e83eb46 — infrastructure increment: nested container literals now have a flat boxed representation in coroutine bodies)
+
+Landed (`gimple_cpp_core.py`): a nested list/tuple literal used as an
+element of a list/tuple literal in a compiled generator/coroutine body
+now lowers to a flat, real runtime value instead of raising
+`_UnsupportedGeneratorShape`. New helper `_cpp_boxed_list_literal_expr`
+builds a `MojoList *` in which every element is stored `int64_t`-boxed:
+a nested container recurses to its own `MojoList *` and is boxed as
+`(int64_t)` of that pointer (the same boxed-pointer convention every
+container-typed local in this emitter already uses); scalars box
+directly; strings box through `mojo_str`. Wired into both
+`_cpp_list_literal_arg_expr` (call-argument position) and
+`_cpp_container_literal_init` (`x = [...]` assignment RHS). Nested
+dict/set literals still refuse (no flat model).
+
+Effect on this file: `fwalk`'s generator now compiles — its
+`stack = [(_fwalk_walk, (True, dir_fd, top, top, None))]` (a list
+literal whose one element is a `(int, tuple)` pair) was `fwalk`'s first
+blocker. Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)`
+now refuses on only `_fwalk` and `walk` (was `_fwalk, fwalk, walk`).
+
+This is the flat *substrate* for the tagged-union / heterogeneous
+`stack` value model the wider `_fwalk`/`walk` blockers need — it gives
+nested literals a representation. Still missing: discriminating a
+*popped* element back into its shape (`isinstance(top, tuple)` /
+tuple-unpack at pop) — so a generator that only CONSTRUCTS such a
+literal now compiles past this point, while `_fwalk` (which pops and
+destructures the stack) still refuses later, now on `stat(...)`
+(needs structseq modeling) and its own pop-time destructuring.
+
+Gate clean on this increment: test_gimple 265/0, test_generators 17/0,
+gimple_generator_runner 53/0, module_cache 76/0, link_mode 3/0,
+check-selfhost pass, compile_stdlib 664 PASSED / 0 unexpected, dylib
+0 skips, bootstrap byte-identical.
+
+## Status (2026-09-03, worktree agent-aa666b3e6a5da3cf2 — infrastructure increment: `_LIBC_SIGS` callee resolution threaded into coroutine bodies)
+
+Landed: the coroutine-body `CallExpr` resolver in `gimple_cpp_core.py`
+now consults `GimpleGen._LIBC_SIGS` before the honest
+"unresolved callee" refusal. A bare call to a C-stdlib / POSIX name with
+a curated signature (e.g. `close(fd)` inside `_fwalk`, reached via
+`from posix import *`) now emits the real call plus a self-emitted
+`extern "C"` prototype in the .cpp preamble (new
+`GimpleGen._cpp_libc_sig_refs` set, consumed by `gen_module`), exactly
+as `_ensure_libc_self_extern`/`_NEEDS_SELF_EXTERN` already do for the
+ordinary GIMPLE path — the signature is the curated one, not inferred
+from lowered args, so it is as safe as the ordinary path calling the
+same name. `close` was added to `_LIBC_SIGS`/`_LIBC_DECLARED`/
+`_NEEDS_SELF_EXTERN` (`int close(int)`, `<unistd.h>` not in prelude).
+General fix — any compiled generator calling a known libc function
+benefits.
+
+Effect on this file: `_fwalk`'s `close(...)` refusal is gone. Fresh
+isolated `compile_to_gimple_with_cpp(do_imports=False)` now refuses on:
+- `_fwalk`: `stat(...)` (another `from posix import *` name — but
+  `os.stat` returns a `stat_result` structseq, NOT an int/pointer, so
+  it has no honest `_LIBC_SIGS` entry; needs real structseq modeling,
+  not the libc-sig shortcut) AND still the nested-container-literal
+  blocker (`stack.append((_fwalk_yield, (toppath, dirs, nondirs,
+  topfd)))`).
+- `walk`: `for entry in scandir(top):` — `scandir` yields `DirEntry`
+  objects, an iterator type with no representation here.
+- `fwalk`: same as `_fwalk`.
+
+Remaining blockers unchanged from below: (1) `scandir`/`stat` need real
+iterator / structseq value modeling (not a plain libc call), (2)
+nested-container list elements, (3) the tagged-union / heterogeneous-
+`stack` representation. Gate clean on this increment: test_gimple 265/0,
+module_cache 76/0, link_mode 3/0, check-selfhost pass, compile_stdlib
+664 PASSED / 0 unexpected, dylib 0 skips, bootstrap 180/180 byte-identical.
+
+## Status (2026-09-03, worktree agent-a3653091edce795d4 — real partial forward progress landed; first refusal layer removed, tagged-union layer now the exposed blocker)
+
+Landed: **module-level function-alias resolution in compiled
+generator/coroutine bodies.** A module-level `X = Y` rebinding where `Y`
+is itself a plain-`def` module function (Lib/os.py's `if not
+_exists('fspath'): fspath = _fspath`) is now recorded into
+`GimpleGen._cpp_module_fn_aliases` by `gimple_module_gen.py`'s module
+scan (both the top-level pass and the nested if/try-guarded
+`_scan_cpp_nested_imports` pass — os.py's alias is inside an `if`), and
+`gimple_cpp_core.py`'s coroutine-body `CallExpr` resolver rewrites
+`fname` through that map before its module-function branches run, so
+`fspath(top)` resolves to `_fspath`'s real symbol instead of raising the
+honest "unresolved callee 'fspath(...)'" refusal. General fix — any
+compiled generator calling an aliased module function benefits.
+
+Effect on this file: `walk`/`_fwalk`/`fwalk`'s refusal reason has moved
+past the `fspath` symptom. Fresh isolated
+`compile_to_gimple_with_cpp(do_imports=False)` now refuses on:
+- `walk`: `unsupported for-loop iterable type: CallExpr` (`for entry in
+  scandir(top):` — `scandir` is a `from posix import *` name with no
+  module-level `def`, plus its result is an iterator of `DirEntry`)
+- `_fwalk`: `a nested container literal has no representation as a list
+  element in this coroutine-body model`
+  (`stack.append((_fwalk_yield, (toppath, dirs, nondirs, topfd)))` — a
+  tuple whose 2nd slot is itself a 4-tuple) and still `close(...)`
+  (another `from posix import *` name).
+
+This is the genuine tagged-union / heterogeneous-`stack` layer the
+older entries below diagnosed — still open, still feature-sized. Two
+concrete prerequisites now clearly separated from it: (1)
+`from posix import *` callee resolution for coroutine bodies (`scandir`,
+`close`, `open`, `stat`, ... — the ordinary GIMPLE path's `_LIBC_SIGS`
+/`_KNOWN_SIGS`/star-import machinery is not consulted by the coroutine
+emitter), (2) nested-container list elements. Gate run clean on the
+landed increment (test_gimple 265/0, module_cache/link_mode 76/0,
+link-mode 3/0, check-selfhost pass, compile_stdlib 664 PASSED / 0
+unexpected, dylib 0 skips, bootstrap <pending/‑>). No regression.
+
+## Status (re-verified 2026-08-26, worktree agent-aac0d33be914873b5 — independent re-verify, byte-identical, no change)
+
+Independent fresh isolated `compile_to_gimple_with_cpp(do_imports=False,
+MOJO_DEBUG=1)` repro on the real file: byte-identical 4-function
+refusal — `__iter__, _fwalk, fwalk, walk` (generator function(s),
+contain a yield/yield from). Confirms the wtOpencode_genlib3 entry
+immediately below. Root cause unchanged: the tagged-union/variant
+value-representation gap (`stack`'s runtime-heterogeneous str/tuple
+elements + `isinstance(top, tuple)` discrimination) — no
+representation in this codegen's statically-typed container model.
+Feature-sized (tagged-union redesign); not attempted. No code change;
+doc stays open.
+
+## Status (re-verified 2026-08-26, wtOpencode_genlib3): identical refusal, tagged-union diagnosis stands
+
+Fresh full `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/os.py`
+against current master (f0f6e78): dies with the byte-identical
+`RuntimeError: cannot compile module: function(s) __iter__, _fwalk,
+fwalk, walk (generator function(s), contain a yield/yield from)...`
+(gimple_module_gen.py's honest-refusal path; zero GCC `error:` lines —
+the refusal is raised at module-lowering time). Note the refusal now
+surfaces only after the closure pass soft-fallbacks collections/inspect
+(rather than at os.py's own first compile as in the 2026-08-09 entry) —
+cosmetic ordering only, same four functions, same reason. The
+heterogeneous-stack + `isinstance(top, tuple)` runtime-discrimination
+diagnosis (2026-08-11 entry below) remains the precise root cause;
+tagged-union/variant value representation remains the prerequisite.
+Not attempted, out of scope. No code change; doc stays open.
+
+## Status (updated 2026-08-26, worktree fix/rest-remainder19d — checked against today's super()/self.__class__ fix (bdfb825) and generator-value-return-slot fix (326db78); neither applies)
+
+Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)` repro:
+byte-identical verbatim refusal — `__iter__, _fwalk, fwalk, walk`. This
+is the tagged-union/variant value-representation gap (`stack`'s runtime-
+heterogeneous str/tuple elements + `isinstance(top, tuple)`
+discrimination) — neither of today's two landed fixes touches runtime
+type discrimination or heterogeneous-container representation; both are
+about static call-target resolution (`super()`/`self.__class__`) or a
+generator's own value-carrying `return`, unrelated mechanisms. Not
+attempted, genuinely out of scope (tagged-union redesign). No code
+change; doc stays open.
+
+## Status (updated 2026-08-26, worktree fix/rest-remainder17 — re-verified unchanged)
+
+Fresh isolated `compile_to_gimple_with_cpp(do_imports=False)` re-run
+against this worktree (branched from master `1e0f3f2`): identical
+verbatim refusal — `function(s) __iter__, _fwalk, fwalk, walk (generator
+function(s)...)`. This session's other fixes (dynamic exception-value
+re-raise for `raise cls.errors[0]`-shaped `SubscriptExpr` values) don't
+touch runtime type discrimination or heterogeneous-container
+representation. The tagged-union/variant-value-representation diagnosis
+stands unchanged (`stack`'s runtime-heterogeneous str/tuple elements +
+`isinstance(top, tuple)` discrimination). Not attempted, genuinely out
+of scope. No change; doc stays open.
+
+## Status (updated 2026-08-25, worktree fix/rest-remainder14 — re-verified unchanged)
+
+Fresh re-verify against this worktree (branched from master `f65502d`).
+Isolated `compile_to_gimple_with_cpp(..., do_imports=False)` on the real
+file still refuses `__iter__`/`_fwalk`/`fwalk`/`walk` — same shallower
+symptom set the 2026-08-24 entry already noted (unresolved-callee
+refusals for `list`/`close`/`fspath`, artifacts of the narrow isolated
+harness not wiring up those module-level functions under
+`do_imports=False`), which doesn't change the underlying diagnosis: this
+is squarely the "tagged-union/variant value representation" category the
+current session's own mandate explicitly flags as out of scope (`stack`'s
+runtime-heterogeneous str/tuple elements + `isinstance(top, tuple)`
+discrimination has no representation in this codegen's statically-typed
+container model, root-caused precisely in the 2026-08-11 entry below).
+No new mechanism landed since touches runtime type discrimination or
+heterogeneous-container representation. Not attempted. No change; doc
+stays open, honestly triaged as out of scope.
+
+## Status (updated 2026-08-25, worktree fix/rest-remainder11 — re-verified unchanged)
+
+Re-verified fresh against this worktree. `walk`/`_fwalk`/`fwalk` still
+refuse for the already-nailed-down reason: their control flow depends on
+runtime type discrimination over a heterogeneously-typed `stack` list
+(`isinstance(top, tuple)` on elements that are sometimes `str`, sometimes
+3-tuples) — this codegen's statically-typed container/value model has no
+representation for that at all. A tagged-union/variant redesign, not a
+narrow fix; genuinely out of scope for this cluster, confirmed again.
+None of the recently landed shared mechanisms bear on runtime type
+discrimination. No change; doc stays open, honestly triaged as out of
+scope.
+
+## Status (updated 2026-08-24 — re-verified; tagged-union conclusion stands, out of scope for this cluster)
+
+Fresh isolated compile (`GimpleGen(do_imports=False, relaxed_imports=
+True)`) surfaces `walk`/`fwalk` refused on an EARLIER, shallower symptom
+now (`fspath(...)`/`close(...)`/`list(...)` unresolved-callee refusals —
+builtins this narrow relaxed-import isolated harness doesn't wire up),
+but this doesn't change the underlying diagnosis: per the 2026-08-11/
+2026-08-23 entries below, `walk`'s control flow fundamentally depends on
+runtime type discrimination over a heterogeneously-typed stack
+(`isinstance(top, tuple)` on elements that are sometimes `str`, sometimes
+3-tuples), which this codegen's statically-typed value model has no
+representation for at all — a tagged-union redesign, not a narrow fix.
+Per this session's assignment, deliberately NOT attempted (disproportionate
+scope for this cluster). Doc stays open, honestly triaged as out of scope.
+
+
+## Status (updated 2026-08-23 — re-verified; walk/_fwalk/fwalk refusal unchanged, tagged-union conclusion stands)
+
+Isolated compile reproduces the identical refusal (now naming `walk`,
+`_fwalk` AND `fwalk` — the third sibling surfaces now that earlier passes
+get further, same shape). This session's three generic generator-codegen
+fixes don't approach the core obstacle the 2026-08-11 entry nailed down:
+`walk`'s control flow depends on runtime type discrimination over a
+heterogeneously-typed stack (`isinstance(top, tuple)` on elements that are
+sometimes strings, sometimes 3-tuples), which this codegen's statically-
+typed container/value model cannot represent regardless of how much
+fixed-shape tuple-yield machinery exists. Tagged-union redesign remains
+the prerequisite; documented-not-fixed stands; doc kept open.
+
+
+## Status (updated 2026-08-11 — re-verified still refused; deepened root cause, confirms (not reverses) prior "needs tagged-union redesign" conclusion)
+
+Re-verified against current master: `python3 fire.py build
+/Users/mrs/net/Python-3.14.6/Lib/os.py` still fails with the identical
+`RuntimeError: cannot compile module: function(s) _fwalk, walk ...`,
+unchanged from 2026-08-10.
+
+Looked for a possible narrower fix than the "tagged-union promise, much
+larger redesign" the previous session concluded was required, since the
+2026-08-10 framing ("mixes SCALAR and TUPLE yields") looked, on a closer
+read of `walk()`'s actual source, potentially too pessimistic:
+
+`walk()`'s `yield top` (os.py:364) is NOT really a scalar yield in the
+way `_generator_yield_ctype` treats it (an unresolvable identifier,
+defaulted to `int64_t`). It's reached only inside
+`if isinstance(top, tuple): yield top; continue` — and `top` really is
+a 3-tuple there at runtime: bottom-up traversal earlier pushes
+`stack.append((top, dirs, nondirs))` (os.py:429), and `top =
+stack.pop()` (os.py:359) pops it back off. So `yield top` and the
+other site's literal `yield top, dirs, nondirs` (os.py:418) are, in
+real Python semantics, THE SAME 3-tuple shape — not two genuinely
+different yield shapes. `_fwalk` follows the identical idiom (`stack.
+append((_fwalk_yield, (toppath, dirs, nondirs, topfd)))` then later
+`yield value`). This looked promising: if the codegen could special-case
+"a bare-identifier yield inside an `isinstance(x, tuple)`-guarded branch
+should adopt the SAME tuple slot ctypes already established by this
+function's real tuple-literal yield site(s)," the type-unification
+refusal might go away without touching the yield-tuple machinery's core
+model.
+
+**But this doesn't actually solve the real problem, it only relocates
+it** — traced one level further: `stack` itself (`stack = [fspath(top)]`,
+then both `stack.append(new_path)` — a plain string — and `stack.append
+((top, dirs, nondirs))` — a 3-tuple — at different points in the same
+function) is a genuinely, dynamically HETEROGENEOUSLY-typed Python list
+(str elements AND tuple elements in the same list), and `isinstance(top,
+tuple)` is a real runtime type-discrimination check on a value popped
+from it. This codegen's container/value model has no runtime type tag
+for a `MojoList *` element at all — every list's element representation
+is a single static C type decided at compile time (`_elem_types`/
+`_nested_elem_types`), and every "boxed pointer stored as int64_t"
+convention this codebase uses elsewhere (see mailbox.py's/ipaddress.py's
+tuple-yield boxing) relies on the STATIC type already being known at
+each use site, not on a runtime discriminator recoverable via
+`isinstance()`. So even if the yield-type-unification layer were taught
+to special-case this idiom, `stack`'s own mixed-element-type list and
+the `isinstance(top, tuple)` runtime check one level below it would
+still need real tagged/dynamically-typed value representation to
+compile correctly — without that, "fixing" just the yield-type mismatch
+would most likely just move the failure to a different, less legible
+GCC-stage error (or, worse, silently miscompile `isinstance(top,
+tuple)` into something that's always true/false, corrupting `walk()`'s
+actual traversal order).
+
+**Conclusion: refines but does not reverse** the 2026-08-10 assessment
+— `walk`/`_fwalk` don't fail because two *independent, disjoint* yield
+shapes coexist by coincidence; they fail because `walk`/`_fwalk`
+legitimately need a dynamically/heterogeneously-typed value
+representation (the `stack` list's own elements) that this codegen does
+not have anywhere in its container or coroutine-promise model. A real
+fix is still the same larger tagged-union/variant redesign the prior
+session identified, now with the underlying reason nailed down more
+precisely (not just "yield shapes disagree" but "the whole function's
+control flow depends on runtime type discrimination this codegen's
+value model can't represent"). Not attempted — genuinely out of narrow-
+fix scope. Doc kept open.
+
+## Status (updated 2026-08-10 — general tuple-valued yield now FIXED; `walk`/`_fwalk` remain refused for a distinct, in-scope reason: they mix SCALAR and TUPLE yields in one function)
+
+Implemented real tuple-valued-`yield` support this session (see
+`gimple_codegen.py`'s `_cpp_yield_tuple`/`_generator_tuple_yield_slot_
+ctypes`). Re-verified: `walk`/`_fwalk` are STILL refused, unchanged,
+with the exact same message as before
+(`walk`/`_fwalk`: "every yield must carry a value, and all values must
+agree on one scalar type") — this fix does not help them, correctly.
+
+Root cause, unchanged from the analysis below: `walk()` has `yield top`
+(a bare scalar, the `topdown=False` branch) AND `yield top, dirs,
+nondirs` (a 3-tuple, the `topdown=True` branch) — TWO yield sites in
+the SAME function that don't even agree on arity, let alone type.
+`_fwalk()` similarly mixes a bare-identifier `yield value` with a direct
+`yield toppath, dirs, nondirs, topfd` 4-tuple. `_generator_yield_ctype`
+unifies a scalar contribution (`int64_t`, `top`'s inferred default) and
+a tuple contribution (`MojoList *`, from the tuple sites) exactly the
+same way it unifies any two disagreeing scalar types — since neither
+is `char *` (the one type the merge rule tolerates), it correctly
+refuses the whole function. This is NOT a case a fixed-arity tuple
+design could ever unify, regardless of how much tuple-yield support is
+added — `walk`/`_fwalk` fundamentally yield DIFFERENT SHAPES on
+different code paths, which no single C++20 coroutine promise value
+type can represent. Not attempted here (would need a tagged-union/
+variant promise, a much larger redesign). Doc kept open (not deleted).
+
+## Status (updated 2026-08-09 — RECLASSIFIED: real tuple-valued-yield refusal, now the blocking error)
+
+Re-verified against current master (`c79a013`) via a real
+`python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/os.py`. The
+build now fails IMMEDIATELY, on `os.py`'s OWN top-level module compile
+(`gen_module`, before any transitive-closure/GCC-stage work is even
+reached), with a hard Python-level `RuntimeError`:
+
+```
+Error building: cannot compile module: function(s) _fwalk, walk
+(generator function(s), contain a `yield`/`yield from`) — this codegen
+compiles every function into a single straight-line C function and has
+no suspend/resume state-machine transform for generators, ...
+```
+
+`MOJO_DEBUG=1` confirms the precise refusal reason for both:
+
+```
+[gimple_codegen] generator 'walk' not eligible for C++ coroutine path,
+  falling back to honest refusal: walk: every `yield` must carry a
+  value, and all values must agree on one scalar type
+  (int64_t/double/_Bool)
+[gimple_codegen] generator '_fwalk' not eligible for C++ coroutine path,
+  falling back to honest refusal: _fwalk: every `yield` must carry a
+  value, and all values must agree on one scalar type
+  (int64_t/double/_Bool)
+```
+
+Root cause, confirmed by reading the source: `walk()` (os.py:364-418)
+has `yield top` (a scalar, line 364, the `topdown=False` post-order
+case) AND `yield top, dirs, nondirs` (a real 3-element **tuple-valued
+yield**, line 418, the `topdown=True` case) — two yield statements in
+the same generator that don't even agree on arity, let alone type.
+`_fwalk()` (os.py:465-551) similarly has `yield value` (line 501,
+where `value` is itself a 4-tuple assigned earlier via
+`stack.append((_fwalk_yield, (toppath, dirs, nondirs, topfd)))`) and
+`yield toppath, dirs, nondirs, topfd` directly (line 551, a real
+4-element tuple yield).
+
+This is the well-known, already-tracked structural gap for this
+generator-codegen family: the coroutine promise only supports a single
+scalar `int64_t`/`double`/`_Bool`/`char *` yield type — see
+`_infer_generator_yield_ctype`'s explicit `TupleExpr` handling at
+`gimple_codegen.py:2699-2724`, which deliberately returns `None`
+(refuse) rather than let a tuple yield sail through to broken C++
+emission. **Classification: matches the tracked "tuple-valued yield"
+structural generator-codegen gap** — out of scope for a narrow fix per
+this task's guidance. Not attempted here.
+
+This refusal happens strictly BEFORE the module-qualification fix
+(`_gen_cpp_generator_unit`'s `_func_qualifier`-based symbol naming) and
+the `relpath`-ambiguity issue documented below ever get exercised for
+this file — `os.py`'s own top-level compile now aborts on its own two
+generators before any transitive-closure linking is attempted, so
+those two previously-documented issues are currently unreachable/moot
+for `os.py` specifically (they may still be real for other files, not
+re-verified here). The below status entries are kept for history but
+no longer describe the current blocking error.
+
+## Status (updated 2026-08-07)
+
+**Classification bug FIXED** (`bugs/hard/CODEGEN_generator_function_
+symbol_not_module_qualified.md`, task #146) — `_gen_cpp_generator_unit`'s
+free-function base-name computation now module-qualifies via
+`_func_qualifier` (the same SB-1 machinery ordinary free functions use).
+Confirmed: `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/os.py`
+no longer produces ANY `conflicting types for '_mojogen_walk_start'`
+error — the specific collision this doc documents is gone.
+
+**File STILL FAILS to build overall**, for a completely different,
+unrelated reason: `RuntimeError: cannot compile module: 'relpath' is
+ambiguous — this program transitively imports two different sibling
+modules that both define a free function named 'relpath' ...` — an
+ORDINARY (non-generator) function ambiguity, hit via `_func_qualifier`'s
+own pre-existing `_AMBIGUOUS_FUNC_HOME` honest-refusal path (unrelated
+machinery, not touched by the generator-symbol fix). Not investigated
+further here — out of scope for the generator/coroutine codegen cluster
+this file was originally classified under.
+
+## Status (updated 2026-08-06, superseded above)
+
+**STILL FAILING**, but re-diagnosed from scratch against current master
+(`2b0c4c5`) — the 2026-07-31 `_DeprecatedGenericAlias`/`_CallableType`/
+`_PlaceholderType` errors no longer reproduce (fixed by unrelated later
+work). `python3 fire.py build /Users/mrs/net/Python-3.14.6/Lib/os.py`'s
+whole-program transitive-closure compile now fails with hundreds of
+errors from many different files; the ones that actually implicate
+`os.py`'s OWN generator (`os.walk`) are:
+
+```
+/Users/mrs/net/Python-3.14.6/Lib/os.py:1553:23: error: conflicting types for '_mojogen_walk_start'; have 'MojoGenerator *(int64_t,  int64_t,  int64_t,  int64_t)' {aka 'MojoGenerator *(long long int,  long long int,  long long int,  long long int)'}
+/Users/mrs/net/Python-3.14.6/Lib/threading.py:2160:23: note: previous declaration of '_mojogen_walk_start' with type 'MojoGenerator *(int64_t)' {aka 'MojoGenerator *(long long int)'}
+```
+
+(also hit, identically, via `Lib/subprocess.py`, `Lib/genericpath.py`,
+`Lib/ntpath.py` — every module in the transitive closure that reaches
+BOTH `os.py`'s own `walk` generator and an unrelated, differently-shaped
+`walk` generator reachable through `Lib/threading.py`.)
+
+**Classification: this is `bugs/hard/CODEGEN_generator_function_symbol_
+not_module_qualified.md`** — `os.py`'s `walk(top, topdown=True,
+onerror=None, followlinks=False)` (4 params) is a perfectly ordinary,
+independently-compilable generator; it collides purely on the emitted C++
+coroutine API's SYMBOL NAME (`_mojogen_walk_start`/`_resume`/`_value`/
+`_destroy`) with a completely unrelated generator, also bare-named
+`walk`, that some other stdlib module transitively pulls in from
+`threading.py`. `_gen_cpp_generator_unit`'s free-function base-name
+computation (`f"_mojogen_{_safe_name(fn.name)}"`) never got the SB-1-
+style module-qualification treatment ordinary free functions received in
+`bf96f55`/`13e6a5c` — see the hard-bug doc for the full root cause,
+why the two same-named `walk`s are otherwise unrelated (different
+arities, different bodies), and why a fix needs the same care as the
+original SB-1 project (two rounds of real regressions there).
+
+Older, likely stale note (session before this re-diagnosis; not
+independently re-verified here): the `mkdir`/`rmdir`/`execv`/`execve`/
+`fork` "implicit declaration" warnings-turned-errors visible deep in the
+current transitive-closure build output appear to be UNRELATED libc-
+declaration issues in `os.py`'s own non-generator code, not part of this
+generator-codegen cluster; not investigated further as part of this
+pass (out of scope — this task is specifically about the generator/
+coroutine codegen gaps).
+
+## Build error
+
+```
+error: '_DeprecatedGenericAlias' does not name a type
+error: '_CallableType' does not name a type
+error: '_PlaceholderType' does not name a type
+```
+
+## Fixed errors (this session)
+- `fork` implicit-decl → fixed (`_NEEDS_SELF_EXTERN` + `_LIBC_SIGS`)
+- `execv` incompatible-args → fixed (`_KNOWN_SIGS` arg-padding)
+- `waitpid` arg-count → fixed (`_KNOWN_SIGS` arg-padding)
+- `execve` conflicting-types → fixed (`_KNOWN_SIGS`)
+- `sys` not declared → fixed (package import scan)
+
+Source file: `/Users/mrs/net/Python-3.14.6/Lib/os.py`

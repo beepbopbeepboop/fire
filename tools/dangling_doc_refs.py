@@ -98,7 +98,7 @@ SUFFIXES = ('.md', '.py')
 # requires the `bugs/` prefix, so a comment that wrote
 # `FORMAL_dataclass_partial_construction` with no directory — which is how all
 # eleven sites in `formal/` and its tests were written, and how the survey at
-# `bugs/formal/FORMAL_arm64_instruction_coverage.md` still cites its deleted bit-test
+# `bugs/FORMAL_arm64_instruction_coverage.md` still cites its deleted bit-test
 # doc — was invisible to a census whose entire job is to find those.
 #
 # It is a SEPARATE class rather than a second regex over one list, because the
@@ -464,7 +464,7 @@ def stale_baseline_entries(by_file, baseline=None):
     were the same observation.
 
     That is not hypothetical, and the entry it hid is this tree's
-    `bugs/mid/CODEGEN_arm64_cmp_flags_and_loop_signedness.md: 1`, raised on purpose
+    `bugs/CODEGEN_arm64_cmp_flags_and_loop_signedness.md: 1`, raised on purpose
     by `--write-baseline` for a citation that was since rewritten to name the
     symptom instead of the doc. It has been dead weight in the ledger since, and
     it inflated the corpus by one citation for every reader counting the baseline.
@@ -848,7 +848,7 @@ def main() -> int:
         total = sum(len(v) for v in by_file.values())
         # The BARE class, in its own ledger and with its own walk, judged by the
         # one `ratchet_verdict` call so the prefixed and bare halves cannot
-        # disagree about what a gain is — `bugs/formal/FORMAL_a_surviving_citation_is_
+        # disagree about what a gain is — `bugs/FORMAL_a_surviving_citation_is_
         # not_checked.md` is the defect that a one-walk verdict left open.
         _bare_by_doc, bare_by_file = bare_find(skip=set(args.skip))
         regressions, bare_regressions = ratchet_verdict(by_file, bare_by_file)

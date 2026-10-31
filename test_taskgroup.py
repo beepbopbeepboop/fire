@@ -37,7 +37,6 @@ os.environ.setdefault('MOJO_CORO', 'cpp')
 import gimple_codegen
 import fire
 from build_config import find_gcc, find_gxx
-from exec_budget import COMPILE_TIMEOUT_S
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUNTIME_DIR = os.path.join(HERE, 'runtime')
@@ -82,14 +81,12 @@ def _build_and_run(mojo_src: str, timeout: int = 30) -> str:
     objs = [c_o, runtime_o]
 
     r = subprocess.run([GCC, '-fgimple', f'-I{RUNTIME_DIR}', '-c', '-o', c_o, c_path],
-                        capture_output=True, text=True,
-                        timeout=COMPILE_TIMEOUT_S)
+                        capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
         raise RuntimeError(f"gcc -fgimple compile of .c failed: {r.stderr}\n---\n{c_code}")
 
     r = subprocess.run([GCC, f'-I{RUNTIME_DIR}', '-c', '-o', runtime_o, RUNTIME_C],
-                        capture_output=True, text=True,
-                        timeout=COMPILE_TIMEOUT_S)
+                        capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
         raise RuntimeError(f"gcc compile of fire_runtime.c failed: {r.stderr}")
 
@@ -106,14 +103,12 @@ def _build_and_run(mojo_src: str, timeout: int = 30) -> str:
         async_runtime_o = os.path.join(wd, 'fire_async_runtime.o')
 
         r = subprocess.run([GXX, '-std=c++20', f'-I{RUNTIME_DIR}', '-c', '-o', async_o, cpp_path],
-                            capture_output=True, text=True,
-                            timeout=COMPILE_TIMEOUT_S)
+                            capture_output=True, text=True, timeout=30)
         if r.returncode != 0:
             raise RuntimeError(f"g++ compile of .cpp failed: {r.stderr}\n---\n{cpp_code}")
 
         r = subprocess.run([GXX, '-std=c++20', f'-I{RUNTIME_DIR}', '-c', '-o', async_runtime_o,
-                            ASYNC_RUNTIME_CPP], capture_output=True, text=True,
-                            timeout=COMPILE_TIMEOUT_S)
+                            ASYNC_RUNTIME_CPP], capture_output=True, text=True, timeout=30)
         if r.returncode != 0:
             raise RuntimeError(f"g++ compile of fire_async_runtime.cpp failed: {r.stderr}")
         objs += [async_o, async_runtime_o]
