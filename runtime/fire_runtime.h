@@ -1389,6 +1389,14 @@ int     mojo_class_hasattr(int64_t tag, char *name);
 int64_t mojo_class_getattr(int64_t tag, char *name);                       /* AttributeError when absent */
 int64_t mojo_class_getattr_default(int64_t tag, char *name, int64_t dflt);
 void    mojo_class_delattr(int64_t tag, char *name);
+/* a class made at run time (`type(name, bases, ns)`): a handle word, see mojo_type_new */
+#define MOJO_CLASSOBJ_MAGIC 0x4d434f31LL   /* inside the 31-bit range mojo_read_type_tag_safe accepts */
+int64_t mojo_type_new(char *name);
+void    mojo_type_add_base(int64_t cls, int64_t base);
+int     mojo_is_classobj(int64_t w);
+int64_t mojo_classobj_tag(int64_t w);
+void    mojo_classobj_setattr(int64_t cls, char *name, int64_t word);
+int     mojo_classobj_lookup(void *obj, char *attr, int64_t *out);
 int64_t mojo_re_call(int64_t obj, char *name, MojoList *args, MojoDict *kw);
 /* `_kw` variants: the key arrives as a raw machine WORD that is either a boxed
  * string pointer or an integer, and the same decision mojo_cstr_or_int_str

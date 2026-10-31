@@ -10003,6 +10003,7 @@ int _mojo_getattr_nothrow = 0;
 int _mojo_getattr_missed = 0;
 
 int64_t mojo_obj_getattr(void *obj, char *attr) {
+    { int64_t _cw; if (mojo_classobj_lookup(obj, attr, &_cw)) return _cw; }
     { int64_t _rw = mojo_re_getattr((int64_t)(intptr_t)obj, attr); if (_rw) return _rw; }
     if (_mojo_dynattr_objects) {
         char key[32];
@@ -13208,6 +13209,7 @@ void *mojo_zip(void *a, void *b) {
  * `cls.__slot_names__ = []`-shaped code compiled but the assignment never
  * actually stuck anywhere, so a later read saw nothing. */
 void mojo_setattr(void *obj, char *attr, int64_t val) {
+    if (mojo_is_classobj((int64_t)(intptr_t)obj)) { mojo_classobj_setattr((int64_t)(intptr_t)obj, attr, val); return; }
     if (!_mojo_dynattr_objects) _mojo_dynattr_objects = mojo_dict_new();
     char key[32];
     _mojo_dynattr_key(obj, key, sizeof key);
@@ -14820,6 +14822,53 @@ void mojo_class_delattr(int64_t tag, char *name)
     (void)mojo_dict_pop_int(c->attrs, name, 0);
 }
 
+/* Run-time class OBJECTS: what the 3-argument `type(name, bases, namespace)` returns. A static
+ * class is its type tag; a class made at run time is a small heap handle whose first word is
+ * `MOJO_CLASSOBJ_MAGIC` (the slot `mojo_read_type_tag_safe` reads), followed by the tag its
+ * class-table entry is filed under. `Foo.x`, `Foo.x = v`, `getattr(Foo, ..)` on the handle
+ * reach the class table through `mojo_classobj_getattr / mojo_classobj_setattr`. */
+typedef struct { int64_t magic; int64_t tag; } MojoClassObj;
+static int64_t _classobj_serial = 0;
+int64_t mojo_type_new(char *name)
+{
+    /* the tag is the name's hash with a per-creation salt: two classes of one name are two
+     * classes. Bit 62 set keeps it out of the range `_struct_type_id` hands static structs. */
+    uint64_t h = 1469598103934665603ULL;
+    for (const char *p = name ? name : ""; *p; p++) h = (h ^ (uint8_t)*p) * 1099511628211ULL;
+    h ^= (uint64_t)(++_classobj_serial) * 0x9E3779B97F4A7C15ULL;
+    int64_t tag = (int64_t)(h | (1ULL << 62));
+    mojo_class_register(tag, 0, name);
+    MojoClassObj *o = (MojoClassObj *)malloc(sizeof *o);
+    o->magic = MOJO_CLASSOBJ_MAGIC; o->tag = tag;
+    return (int64_t)(intptr_t)o;
+}
+int mojo_is_classobj(int64_t w)
+{
+    return w && mojo_read_type_tag_safe(w) == MOJO_CLASSOBJ_MAGIC;
+}
+/* the class-table tag of a class word: a handle's own tag, anything else is already a tag */
+int64_t mojo_classobj_tag(int64_t w)
+{
+    return mojo_is_classobj(w) ? ((MojoClassObj *)(intptr_t)w)->tag : w;
+}
+void mojo_type_add_base(int64_t cls, int64_t base)
+{
+    mojo_class_register(mojo_classobj_tag(cls), mojo_classobj_tag(base), 0);
+}
+void mojo_classobj_setattr(int64_t cls, char *name, int64_t word)
+{
+    mojo_class_setattr(mojo_classobj_tag(cls), name, word);
+}
+/* 1 and *out set when `obj` is a class handle that has `attr`; AttributeError (or the soft
+ * miss) is the caller's, so a non-class falls through to its own lookup. */
+int mojo_classobj_lookup(void *obj, char *attr, int64_t *out)
+{
+    if (!mojo_is_classobj((int64_t)(intptr_t)obj)) return 0;
+    MojoClassRec *c = _class_find(((MojoClassObj *)obj)->tag);
+    if (c && c->name && !strcmp(attr, "__name__")) { *out = (int64_t)(intptr_t)c->name; return 1; }
+    return _class_lookup(((MojoClassObj *)obj)->tag, attr, out, 0);
+}
+
 /* Struct reflection across modules: every translation unit registers its own
  * `_mojo_dispatch_getattr` (it knows only that unit's structs); `mojo_getattr_any` asks them
  * in turn, then the dynamic-attribute table, and raises AttributeError when none has it. */
@@ -14837,6 +14886,7 @@ void mojo_register_getattr_dispatch(int64_t (*fn)(void *, char *))
 }
 int64_t mojo_getattr_any(void *obj, char *attr)
 {
+    { int64_t _cw; if (mojo_classobj_lookup(obj, attr, &_cw)) return _cw; }
     int saved = _mojo_getattr_nothrow;
     _mojo_getattr_nothrow = 1;
     for (int i = 0; i < _n_getattr_dispatchers; i++) {
