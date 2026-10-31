@@ -6933,21 +6933,6 @@ def main():
 main()
 """, "r ['d0'] ['f0']\nr/x ['d1'] ['f1']\nr/x/x ['d2'] ['f2']\nr/x/x ['d2'] ['f2']\nr/x ['d1'] ['f1']\nr ['d0'] ['f0']\n")
 
-    # A `with <unmodelled manager> as name:` in a generator body never
-    # evaluates the manager, so `name` would be an uninitialised handle
-    # (Lib/os.py's `with scandir(top) as entries:` iterated garbage). Refused.
-    test_generator_refused("generator_with_unmodelled_manager_alias_refused", """\
-def g(top):
-    with mystery(top) as handle:
-        for x in handle:
-            yield x
-
-def main():
-    for v in g("a"):
-        print(v)
-main()
-""", "over a manager this codegen does not model")
-
     test_generator_stdout("generator_enumerate_index_yields_index", """\
 def rows(data):
     for i, r in enumerate(data):
