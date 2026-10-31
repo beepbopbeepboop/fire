@@ -2764,6 +2764,20 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             # char* to void* conversion
             vp = gen._new_val('void *', f'(void *){aval}')
             coerced_args.append(vp)
+        elif ptype == 'Span *' and atype == 'char *':
+            # A `StringSlice[_]` parameter is the fat-pointer Span, so a C
+            # string handed to it (a literal, or any `char *` value) must
+            # become a real {_data, _len} Span. The generic arm below cast
+            # the pointer straight through, and the callee then read its
+            # first 8 bytes as `_data` -- `get_sign("-abc")` dereferenced
+            # `x->_data` on a bogus Span and segfaulted (see
+            # test_str_slice_tuple_regression.mojo).
+            gen._struct_allocs_needed.add('Span')
+            sp = gen._new_temp('Span *')
+            gen._emit(f'  {sp} = _alloc_Span ();')
+            gen._emit(f'  {sp}->_data = {gen._new_val("char *", aval)};')
+            gen._emit(f'  {sp}->_len = {gen._new_val("int64_t", f"mojo_strlen ({aval})")};')
+            coerced_args.append(sp)
         elif ptype.endswith(' *') and atype == 'char *':
             # char* passed where other pointer type expected
             ip = gen._new_temp('int64_t')
