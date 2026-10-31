@@ -196,29 +196,6 @@ def tree_usage(root, ppid=None, rss=None, cpu=None):
     return (spent, total * 1024, count)
 
 
-def tree_usage_unique(root, ppid=None, rss=None, cpu=None):
-    """`(cpu_seconds, max_bytes, n_procs)` for `root`'s whole subtree.
-
-    Instead of summing RSS (which double-counts shared pages, chiefly the COW
-    runtime image across concurrent Lean processes), return the maximum RSS of
-    any single process in the tree — the instrument needed to measure formal's
-    actual unique memory (not the summed tree RSS that gave 46.2 GB for
-    ~15 GB of shared COW pages).
-    """
-    if ppid is None or rss is None:
-        ppid, rss, cpu, _pgid = ps_snapshot()
-    if root not in ppid:
-        return (0.0, 0, 0)
-    kids = _children(ppid)
-    spent, max_total, count, stack = 0.0, 0, 0, [root]
-    while stack:
-        pid = stack.pop()
-        count += 1
-        max_total = max(max_total, rss.get(pid, 0))
-        stack.extend(kids.get(pid, ()))
-    return (spent, max_total * 1024, count)
-
-
 def group_pids(pgid, skip=(), tables=None):
     """Live pids in one process GROUP, minus `skip`.
 

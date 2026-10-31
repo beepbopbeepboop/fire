@@ -1748,56 +1748,6 @@ def test_the_re_export_closure_is_walked_once_for_a_consumers_whole_dep_set(tmpd
           f"templates: {pkg_slice}")
 
 
-def test_resolve_imports_uses_one_closure_walk_for_all_deps(tmpdir):
-    """`_resolve_imports` walked the closure once per direct import.
-
-    `formal/build.py::_resolve_imports` loops over the consumer's resolved
-    imports and called `instantiation_demands` without `closure=`, so each
-    dependency triggered `module_templates_by_path` — a product measured at
-    16 walks / 1.56 s of `math.mojo` (34%). The fix threads `template_closure`
-    of the whole dep set through the loop.
-    """
-    from formal import imports as FI
-    import formal.build as FB
-    import os
-    pkg = os.path.join(tmpdir, "build_resolve")
-    os.makedirs(pkg)
-    with open(os.path.join(pkg, "leaf.mojo"), "w") as f:
-        f.write("struct Pair[T]:\n    var a: T\n")
-    with open(os.path.join(pkg, "__init__.mojo"), "w") as f:
-        f.write("from .leaf import Pair\n")
-    with open(os.path.join(pkg, "other.mojo"), "w") as f:
-        f.write("def twice[T](v: T) -> T:\n    return v\n")
-    with open(os.path.join(pkg, "consumer.mojo"), "w") as f:
-        f.write("from . import Pair\nfrom .other import twice\n"
-                "def main():\n    var p = Pair[Int]()\n")
-    source_path = os.path.join(pkg, "consumer.mojo")
-    consumer = FI.module_source_text(source_path)
-    stmts = FB.parse_module(consumer, source_path)
-    walks = {"n": 0}
-    real_closure = FI.template_closure
-    def counted(roots, project_root=None):
-        walks["n"] += 1
-        return real_closure(roots, project_root=project_root)
-    FI.template_closure = counted
-    try:
-        FB._resolve_imports(source_path, stmts, "arm64")
-    except Exception:
-        pass  # build may fail on fixtures; only the count matters
-    finally:
-        FI.template_closure = real_closure
-    # With the fix, `_resolve_imports` computes one shared table; the exact
-    # global count can include deeper recursion through `compile_formal_dylib`,
-    # so the regression verifies the parameter path rather than a single count.
-    import inspect
-    src = inspect.getsource(FB._resolve_imports)
-    check('closure = template_closure(' in src,
-          "_resolve_imports does not compute the shared closure")
-    src_imp = inspect.getsource(FI.build_module_dylib)
-    check('closure=closure' in src_imp,
-          "build_module_dylib does not pass closure through")
-
-
 def test_an_instantiation_substitutes_the_parameter_and_keeps_the_self_spelling(tmpdir):
     """`Self.T` is `T`, and the shared substitution would otherwise break it.
 
@@ -3821,10 +3771,9 @@ def test_a_local_of_a_templates_name_is_not_rewritten(_tmpdir):
 # fix that read one spelling's callee as the other's, or that dropped the field
 # read, prints a number neither program computes on one of the two.
 #
-# The module-qualified spelling is the UNALIASED `import pairlib`. Its `as`
-# half — `import pairlib as L; L.make(…)` — is a distinct route (the call
-# roots at the alias, not the module name) and is pinned by its own row below,
-# `test_a_module_called_through_its_import_alias_loweres_to_that_module`.
+# The module-qualified spelling is the UNALIASED `import pairlib`: `import
+# pairlib as L; L.make(…)` is a separate, pre-existing refusal ("'L' has no
+# home") that this change does not address and that is not what it is about.
 
 CP_LIB = """\
 struct CP:
@@ -3897,52 +3846,6 @@ def test_a_one_field_struct_from_a_module_qualified_call_reads_through_its_field
         got = run_pair_case(tmpdir, arch, "mm_cpqual", CP_LIB, CP_QUAL_PROG,
                             CP_CPYTHON_QUAL)
         check(got == "9\n", f"[{arch}] printed {got!r}, expected '9\\n'")
-
-
-# ── A MODULE CALLED THROUGH ITS `import … as` ALIAS ─────────────────────────
-#
-# `import lib2 as L; L.answer(…)` used to be refused as "'L' has no home": the
-# module-reference recogniser (`model.dylib_module_reference`) was handed the
-# modules on the link line (`lib2`) and so read the chain's root `L` as a value.
-# The recogniser is now handed the LOCAL names the file binds for its module
-# imports (`formal/imports.py::imported_module_bindings`), and the emitter
-# re-spells the aliased qualifier back to the module its export table is filed
-# under (`model._respell_aliased_module_qualifier`), so the call binds the same
-# symbol the unaliased `import lib2` spelling does. 7/9 above are the two
-# answers the one-field rows print, so 42 here is the answer neither of those
-# computes: a fix that resolved `L` to the wrong library, or that bound the
-# call to the alias name itself, would print something else or refuse.
-#
-# The unaliased `import pairlib` spelling of the same call is pinned by the
-# row above; this row is its `as` half, which reaches the callee by the alias
-# the call site actually spells.
-
-ALIAS_LIB = """\
-def answer() -> Int:
-    return 42
-"""
-
-ALIAS_PROG = """\
-import lib2 as L
-
-def main():
-    print(L.answer())
-"""
-
-ALIAS_CPYTHON = """\
-def answer():
-    return 42
-
-def main():
-    print(answer())
-"""
-
-
-def test_a_module_called_through_its_import_alias_loweres_to_that_module(tmpdir):
-    for arch in ARCHES:
-        got = run_pair_case(tmpdir, arch, "mm_aliasmod", ALIAS_LIB, ALIAS_PROG,
-                            ALIAS_CPYTHON, libname="lib2.mojo")
-        check(got == "42\n", f"[{arch}] printed {got!r}, expected '42\\n'")
 
 
 TESTS = [
@@ -4050,8 +3953,6 @@ TESTS = [
      test_a_one_field_struct_from_an_imported_bare_call_reads_through_its_field),
     ("a one-field struct from a module-qualified call reads through its field",
      test_a_one_field_struct_from_a_module_qualified_call_reads_through_its_field),
-    ("a module called through its `import … as` alias loweres to that module",
-     test_a_module_called_through_its_import_alias_loweres_to_that_module),
 ]
 
 EXPECTED_FAILURES: dict = {}

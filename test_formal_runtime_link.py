@@ -465,7 +465,7 @@ def test_link_line_is_the_dylibs_exports():
         check(len(extra) >= 4,
               f'{arch}: the dylib exports names no header declares',
               str(sorted(extra)))
-        # …and the seven that are LEFT are named rather than counted, because
+        # …and the four that are LEFT are named rather than counted, because
         # this is the ceiling-2 remainder and it used to be six: `mojo_open` and
         # `mojo_close` were exported by the library and declared by no header,
         # so nothing could put them on a formal link line, and they are declared
@@ -473,18 +473,10 @@ def test_link_line_is_the_dylibs_exports():
         # `note_list_literal` and `compile_to_gimple` are not in the
         # `mojo_*` namespace, so `is_gimple_runtime_builtin` answers False for
         # them and they take the ordinary extern path — they are listed only
-        # because the map carries them. `Python`, `PythonObject` and
-        # `int64_t_as_unsafe_any_origin` are the 2026-10-21 CPython-interop box
-        # primitives (`runtime/fire_runtime.c`'s "PythonObject box
-        # primitives"): the codegen emits them as bare externs and the
-        # definitions are the runtime answer, but no header declares them — the
-        # CPython-bound call sites are stubbed at the codegen level
-        # (`int64_t.cpython() stubbed`), so nothing on this path dereferences
-        # them, and they are listed for the same reason the four above are.
-        check(extra == ['MojoParser', 'Python', 'PythonObject',
-                        'compile_to_gimple', 'int64_t_as_unsafe_any_origin',
-                        'note_list_literal', 'scan_expr'],
-              f'{arch}: …and the seven that remain are the whole of ceiling 2, '
+        # because the map carries them.
+        check(extra == ['MojoParser', 'compile_to_gimple', 'note_list_literal',
+                        'scan_expr'],
+              f'{arch}: …and the four that remain are the whole of ceiling 2, '
               'not a count that can drift', str(extra))
         check(all(n in amap for n in extra),
               f'{arch}: and the link line offers them anyway — it is the '

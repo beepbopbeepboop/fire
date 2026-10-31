@@ -575,7 +575,7 @@ def main() -> Int32:
 # `std/algorithm/backend/tile.mojo`'s own declaration with the function type
 # written out instead of behind its `comptime Static1DTileUnitFunc` alias,
 # because that is the spelling this repository's INTERPRETER can execute (see
-# `CODEGEN_comptime_function_type_alias (fixed in af167139)`) — and a
+# `bugs/CODEGEN_comptime_function_type_alias_is_erased_by_the_parser.md`) — and a
 # differential test needs an oracle, so the alias comes off and nothing else
 # changes: the brackets still bind a comptime parameter of the callee's type,
 # and the callee is still a word.

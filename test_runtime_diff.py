@@ -815,7 +815,7 @@ BUILTIN_PROGRAMS = {
     # `list(d.items())` is deliberately NOT here: that spelling reads each pair
     # pointer as an integer and segfaults, which is the element-type half of
     # `list(<a boxed container>)` and is already filed as
-    # `CODEGEN_materialized_container_has_no_element_type (fixed)`. Adding it
+    # `bugs/CODEGEN_materialized_container_has_no_element_type.md`. Adding it
     # here would make this case a place where an unrelated red lives.
     "dict_items_reads_each_slot_kind": textwrap.dedent("""\
         def main():
@@ -850,7 +850,7 @@ BUILTIN_PROGRAMS = {
     # the result is presented there; a `char *` default makes the expression a
     # `char *`. The int default and the `hasattr` probe beside it are the
     # controls: neither involves the cast. See
-    # the dynamic-attribute string-read miss fix.
+    # bugs/CODEGEN_dynamic_attribute_string_reads_as_pointer.md.
     "getattr_default_on_a_miss": textwrap.dedent("""\
         class C:
             pass
@@ -894,21 +894,6 @@ BUILTIN_PROGRAMS = {
             f = e.add
             print(f(10, 20))                # 39
             print(e.add(1, 2))              # 12, a direct call on the erased receiver
-    """),
-    # Dynamic `getattr(obj, "method")` must agree with the static spelling
-    # `obj.method` and return a callable bound method, not raise AttributeError.
-    "dynamic_getattr_of_a_method": textwrap.dedent("""\
-        class C:
-            def __init__(self):
-                self.k = 9
-            def add(self, a, b):
-                return self.k + a + b
-
-        def main():
-            c = C()
-            t = getattr(c, "add")
-            print(t(1, 2))                  # 12
-            print(getattr(c, "add")(10, 20))  # 39
     """),
     # An EMPTY container literal asserts no element type, and one place
     # believed otherwise: `_lower_list_literal` /
@@ -1506,23 +1491,6 @@ BUILTIN_PROGRAMS = {
             # side fail on a warning rather than on the predicate.
             print(asyncio.run(c))
     """),
-    # Regression for bug:COMPILE_FAIL_Android_android — the guard
-    # `if asyncio.iscoroutine(result): asyncio.run(result)` where `result`
-    # comes from a dynamic callee (dict subscript) must compile: inside the
-    # then-branch the predicate proves `result` is a live handle.
-    "asyncio_iscoroutine_guard_run": textwrap.dedent("""\
-        import asyncio
-
-        async def work(n):
-            await asyncio.sleep(0)
-            return n
-
-        def main():
-            dispatch = {"a": work}
-            result = dispatch["a"](5)
-            if asyncio.iscoroutine(result):
-                print(asyncio.run(result))
-    """),
     "sibling_closure_kwargs": textwrap.dedent("""\
         def outer(flag):
             def probe(a, deep=False, refine=False):
@@ -1673,7 +1641,6 @@ CPYTHON_COMPARABLE = {
     # dispatch hands back is a callable and not a raw int is CPython's own run
     # of the same text.
     "bound_method_value_on_an_untyped_receiver",
-    "dynamic_getattr_of_a_method",
     "dict_update_preserves_insertion_order",
     "string_body_that_starts_with_a_prefix",
     # The interpreter yielded characters where the compiled path yielded ints;

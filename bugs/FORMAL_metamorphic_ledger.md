@@ -166,7 +166,7 @@ The anti-rot is the per-transform table the tool prints on every run, which is w
 
 ## 2. Sweeps
 
-Machine: 18-core arm64 macOS, `python3` 3.14.7. Every sweep `-j 6` and BOTH backends. Peak memory across every sweep in this file: **0.2 GB** (`tools/memslot.py --gb 8`, which kills at 8), so nothing here is within an order of magnitude of the 3-4 GB line in `doc/POLICY_memory_over_4gb.md`.
+Machine: 18-core arm64 macOS, `python3` 3.14.7. Every sweep `-j 6` and BOTH backends. Peak memory across every sweep in this file: **0.2 GB** (`tools/memslot.py --gb 8`, which kills at 8), so nothing here is within an order of magnitude of the 3-4 GB line in `bugs/PERF_memory_over_4gb_is_a_bug.md`.
 
 **Sweep 1** — `calls`, seed `metamorph`, indexes 0-59, `--stmts 8 14`, **600 pairs**, 265.6 s. 60 match, 0 findings. Peak 0.2 GB.
 **Sweep 2** — `formal/examples`, **41 programs / 410 pairs**, 153.2 s. 41 match, 0 findings, 1 program carrying a pre-existing `DIVERGENCE` (`udivmod`, §4). Peak 0.1 GB.
@@ -655,7 +655,7 @@ The anti-rot is the per-transform table the tool prints on every run, which is w
 
 ## 2. Sweeps
 
-Machine: 18-core arm64 macOS, `python3` 3.14.7. Every sweep `-j 6` and BOTH backends. Peak memory across every sweep in this file: **0.2 GB** (`tools/memslot.py --gb 8`, which kills at 8), so nothing here is within an order of magnitude of the 3-4 GB line in `doc/POLICY_memory_over_4gb.md`.
+Machine: 18-core arm64 macOS, `python3` 3.14.7. Every sweep `-j 6` and BOTH backends. Peak memory across every sweep in this file: **0.2 GB** (`tools/memslot.py --gb 8`, which kills at 8), so nothing here is within an order of magnitude of the 3-4 GB line in `bugs/PERF_memory_over_4gb_is_a_bug.md`.
 
 **Sweep 1** — `calls`, seed `metamorph`, indexes 0-59, `--stmts 8 14`, **600 pairs**, 265.6 s. 60 match, 0 findings. Peak 0.2 GB.
 **Sweep 2** — `formal/examples`, **41 programs / 410 pairs**, 153.2 s. 41 match, 0 findings, 1 program carrying a pre-existing `DIVERGENCE` (`udivmod`, §4). Peak 0.1 GB.

@@ -492,7 +492,7 @@ emits `Pair_Int`; it emits `Pair_1_T_3_Int`, and it has emitted that since the
 encoding was made injective — 1512 collisions over 1752 generated
 `(name, type_args)` pairs under the flat scheme, measured in
 `monomorphize.py::safe_suffix`'s docstring, and
-`bugs/imported-generic-elaboration-defect` is the
+`bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md` is the
 defect that motivated the change. Every spelling in `doc/ABI.md` §Generics and in
 this document now states the injective one and names `monomorphize.mangle` as
 where it is stated, and `test_formal_monomorph.py::a_stated_mangled_spelling_is_the_one_the_mangler_produces`

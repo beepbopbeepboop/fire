@@ -32,20 +32,6 @@ from build_config import find_gcc, find_gxx
 # row's own elapsed assertion is what bounds the timing, so nothing is lost and
 # a slow machine stops being a crash.
 from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S
-
-# This file exercises the gimple_cpp_* C++20-coroutine backend end to end
-# (its build helper links fire_async_runtime.cpp, the cpp scheduler). Since
-# doc/COROUTINE.html §5.5's cutover made the A3 stack-switch backend the
-# default, pin the escape hatch explicitly -- the equivalent stack-switch
-# coverage for these async shapes lives in test_coro_nested_async_capture.py,
-# whose harness links the A3 runtime. Without this pin the default backend
-# compiles every async function into the C output as a `__mgco_*` trampoline,
-# the companion .cpp comes back EMPTY, and every buildable case below fails
-# at build with "expected a non-empty generated .cpp" instead of proving any
-# async semantics -- exactly the 36-of-38 red state this job sat in on the
-# 2026-10-28 gate (the gate red this file was filed under).
-os.environ.setdefault('MOJO_CORO', 'cpp')
-
 import gimple_codegen
 import fire
 
@@ -237,28 +223,6 @@ def test_async_stdout_timed(name: str, mojo_src: str, expected_stdout: str,
         _PASS += 1
     except Exception as e:
         print(f"FAIL  {name}: {e}")
-        _FAIL += 1
-
-
-def test_backend_pin(name: str):
-    """THE root-cause pin for the 2026-10-28 gate red: after the A3 cutover
-    made the stack-switch backend the process default, this file's C++20
-    build helper produced NO companion .cpp at all (the default backend
-    lowers every async function into the C output as a `__mgco_*`
-    trampoline), so all 36 buildable cases died at build with "expected a
-    non-empty generated .cpp" before proving any async semantics. This case
-    asserts the import-time pin itself (the module-level `os.environ
-    .setdefault('MOJO_CORO', 'cpp')`, rationale in the header comment) so a
-    deletion of that one line shows up here instantly, with a message naming
-    the mechanism, instead of as 36 downstream build failures an hour later."""
-    global _PASS, _FAIL
-    if os.environ.get('MOJO_CORO') == 'cpp':
-        print(f"PASS  {name}")
-        _PASS += 1
-    else:
-        print(f"FAIL  {name}: MOJO_CORO is {os.environ.get('MOJO_CORO')!r}, not "
-              "'cpp' -- the C++20-path build helper would compile no companion "
-              ".cpp and every case in this file would fail at build")
         _FAIL += 1
 
 
@@ -468,8 +432,6 @@ def run_tests():
     # compiled+linked+run Mojo source (not just a hand-verified .cpp
     # detail or a compile-time-only refusal check), where this step's
     # laziness requirement is independently observable.
-    test_backend_pin("build_helper_compiles_via_the_cpp20_backend")
-
     test_async_stdout("bare_async_call_never_runs_body", """\
 async def f():
     print(1)
@@ -1256,10 +1218,6 @@ def main() raises:
     # `String`'s stub extern declaration in gen_module's preamble
     # emission), out of this project's scope; `print(e)` is what actually
     # exercises this project's own exception-message plumbing correctly.
-    # `print(caught)` is spelled `True`, not the old int64 `1` this
-    # expectation originally had: the fixed bool-print semantics route a
-    # bool through mojo_repr_bool, and the default stack-switch backend on
-    # this same source agrees on the `True` spelling.
     test_async_stdout("raising_task_wait_success_and_error", """\
 from std.runtime.asyncrt import create_task, create_raising_task
 
@@ -1286,7 +1244,7 @@ def test_error() raises:
 def main() raises:
     test_success()
     test_error()
-""", "30\nintentional error from async task\nTrue\n")
+""", "30\nintentional error from async task\n1\n")
 
     # 3. A keyword-argument await composition (`await
     # conditional_raise(should_fail=False)`) AND a keyword-argument
@@ -1297,8 +1255,7 @@ def main() raises:
     # is the one bridge from a real keyword-argument call site onto that
     # positional-only async-composition machinery) in BOTH of the two
     # places it's needed: a direct `await` target, and create_raising_task's
-    # own inner call. The trailing `print(caught)` is the same fixed bool
-    # spelling case 2 pins (see its note), `True` rather than the old `1`.
+    # own inner call.
     test_async_stdout("kwarg_composition_both_shapes", """\
 from std.runtime.asyncrt import create_task, create_raising_task
 
@@ -1332,7 +1289,7 @@ def test_create_raising_task_kwarg() raises:
 def main() raises:
     test_direct_await()
     test_create_raising_task_kwarg()
-""", "42\n42\nTrue\n")
+""", "42\n42\n1\n")
 
     # 4. A held RaisingTask AWAITED from INSIDE another coroutine's own body
     # (`var task = create_raising_task(f()); ...; return await task^`) —

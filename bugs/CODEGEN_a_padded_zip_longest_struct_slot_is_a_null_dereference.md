@@ -103,19 +103,6 @@ When this is fixed, the assertion is that the program above prints
 `analyzer.py`'s shape must keep compiling (its member WRITE is the reason the
 slot is typed `StackItem *`).
 
-## Status / next step (updated 2026-10-26, work-2633)
-
-Partial: approach (1) — nullability flag per local (`gen._nullable_ptrs`) —
-implemented in both `emit_exprs.py` (None-aware `_lower_MemberExpr` dispatch) and
-`emit_loops.py` (record pointer-typed loop targets). Regression test added
-(`test_gimple_runner.py`: `gimple_zip_longest_struct_padded_slot_member_read_is_none_aware`)
-but still fails (SIGSEGV, rc=-11); the loop variable is not entering `_nullable_ptrs`
-because `_elem_of` reports `int64_t` rather than `StackItem *`, so the
-"`*` in str(elem)" guard misses. Next step: make the nullability recording
-work when the element type is not explicitly tracked (either by deriving it
-from the struct declaration or from the variable declaration). Do NOT delete
-this doc until the regression passes.
-
 ## Reproducing
 
 ```sh
