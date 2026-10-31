@@ -1529,6 +1529,23 @@ def _emit_stdlib_import_externs(gen, stmts) -> None:
             seen.add(sym)
 
 
+def global_generator_key(module_safe: str, name: str) -> tuple:
+    """Key of a module-scope global in the generator-api tables
+    (`_global_generator_api`, `_global_generator_api_poisoned`).
+
+    The tables are SHARED by reference across every module of one whole-
+    program compile (emit_resolve.py), so a bare name would let module B's
+    unrelated `foo` inherit module A's generator api, or let B's write poison
+    A's `foo`. The key is therefore the DEFINING module's C-mangled name plus
+    the bare name — the same mangling the globals struct (`_<mod>_globals`)
+    and the accessor symbol (`<mod>__mojo_global_get__<name>`) already use, so
+    a store, a same-module read and an imported read all compute one key.
+    `module_safe` is `_c_field_name(_current_module_ctx or "root")` for the
+    defining module, or the importer's `gen._imported_global_home[name]`.
+    """
+    return f"{module_safe}.{name}"
+
+
 def _emit_imported_global_accessors(gen, stmts) -> None:
     """Bare `from X import <module_scope_var>` — BUG-2026-009. See
     `_imported_global_accessors`'s own docstring and module_loader.py's
@@ -1650,6 +1667,9 @@ def _emit_imported_global_accessors(gen, stmts) -> None:
             accessor_csym = (f'{gimple_ctypes._c_field_name(_home_qual)}__mojo_global_get_'
                               f'{gimple_ctypes._c_field_name(name)}')
             gen._imported_global_accessors[sym] = (ctype, accessor_csym)
+            # The defining module's mangled name, the same one its own
+            # `global_generator_key` uses: `accessor_csym` is built from it.
+            gen._imported_global_home[sym] = gimple_ctypes._c_field_name(_home_qual or 'root')
             guard = gimple_ctypes._stub_guard_name(accessor_csym)
             decl = (f'#ifndef {guard}\n#define {guard}\n'
                     f'extern {ctype} {accessor_csym} (void);\n#endif')
@@ -3715,7 +3735,7 @@ def _write_dest(gen, name: str) -> str:
         # `var` declarations, range-loop targets, ...) bypasses
         # `_note_global_store_types`, so it cannot be vouched for as the one
         # binding `_global_generator_api` recorded: poison it.
-        gen._global_generator_api_poisoned.add(name)
+        gen._global_generator_api_poisoned.add(global_generator_key(safe_module, name))
         return f"_{safe_module}_globals.{gimple_ctypes._c_field_name(name)}"
     return gen._cname(name)
 

@@ -1129,6 +1129,8 @@ class GimpleGen:
         # Written by `_note_global_generator_store`, read by `_lower_IdentExpr`'s
         # global-read arm. An entry is a fact only while the name is not in
         # `_global_generator_api_poisoned`.
+        # Keyed by `ginf.global_generator_key(defining module, name)`, not the
+        # bare name: the table is shared across modules of one compile.
         self._global_generator_api: dict[str, dict] = {}
         # Globals whose generator API is not ONE known fact: rebound to a
         # different generator or to a non-generator, stored from inside a
@@ -2893,6 +2895,11 @@ class GimpleGen:
         # placeholder a per-module-independent `fire dylib` compile
         # previously fell through to for this shape.
         self._imported_global_accessors: dict = {}
+        # Imported global name -> the DEFINING module's mangled name (the one
+        # its accessor symbol and its `global_generator_key` both use). The
+        # importer needs it to find the defining module's generator api for a
+        # read through the accessor. Set beside `_imported_global_accessors`.
+        self._imported_global_home: dict = {}
         # Concrete imported structs used as parameter types here: their StructDefs
         # (so the layout typedef is emitted in dylib mode) and their names (so only
         # these — not local structs — get the authoritative struct-pointer param
