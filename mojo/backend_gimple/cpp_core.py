@@ -6341,7 +6341,10 @@ def _cpp_with_stmt(gen, s, declared: dict, indent: str) -> list[str]:
     for item in s.items:
         expr = item.expr
         gname = gen._cpp_with_guard_type_name(expr)
-        if gname not in gen._ASYNC_NOOP_LOCK_GUARD_TYPES:
+        _intrinsic = False
+        if gname == 'tempfile.TemporaryDirectory':
+            _intrinsic = True
+        elif gname not in gen._ASYNC_NOOP_LOCK_GUARD_TYPES:
             if gen._cpp_emit_kind in ('async', 'async_gen'):
                 raise gimple_exprtypes._UnsupportedAsyncShape(
                     "`with` inside an async function body is only "
@@ -6366,7 +6369,12 @@ def _cpp_with_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     declared[_al.name] = 'int64_t'
                     _alias_decl_lines.append(f"{indent}int64_t {_al.name};")
                 break
-        if item.alias is not None and gen._cpp_emit_kind in ('async', 'async_gen'):
+        if _intrinsic and item.alias is not None:
+            if isinstance(item.alias, str) and item.alias not in declared:
+                declared[item.alias] = 'const char *'
+            elif isinstance(item.alias, gimple_ctypes.IdentExpr) and item.alias.name not in declared:
+                declared[item.alias.name] = 'const char *'
+        elif item.alias is not None and gen._cpp_emit_kind in ('async', 'async_gen'):
             raise gimple_exprtypes._UnsupportedAsyncShape(
                 "`with ... as name:` is not supported for an async "
                 f"no-op guard `with` ({gname} has no usable return "
@@ -6375,7 +6383,8 @@ def _cpp_with_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             declared[item.alias] = 'int64_t'
         elif item.alias is not None and isinstance(item.alias, gimple_ctypes.IdentExpr):
             declared[item.alias.name] = 'int64_t'
-    if any(isinstance(n, gimple_ctypes.AwaitExpr) for st in s.body for n in gimple_exprtypes._walk_ast(st)):
+    # Intrinsic guard (Real RAII): cleanup survives await inside body.
+    if not _intrinsic and any(isinstance(n, gimple_ctypes.AwaitExpr) for st in s.body for n in gimple_exprtypes._walk_ast(st)):
         raise gimple_exprtypes._UnsupportedAsyncShape(
             "`await` inside a `with`-guarded body is not supported "
             "-- eliding the guard (this codegen's own no-op "
@@ -6385,8 +6394,44 @@ def _cpp_with_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             "across a real suspension point, where another coroutine "
             "genuinely could run")
     lines: list[str] = list(_alias_decl_lines)
+    guard_var = ''
+    bind_line = ''
+    if _intrinsic:
+        for item in s.items:
+            alias = item.alias
+            if alias is None:
+                continue
+        declared_local = None
+        # pick the binding alias of the single with item
+        target_alias = None
+        target_alias_name = None
+        for item in s.items:
+            alias = item.alias
+            if isinstance(alias, str) and alias not in declared:
+                declared[alias] = 'const char *'
+                target_alias_name = alias
+                break
+            elif (isinstance(alias, gimple_ctypes.IdentExpr)
+                  and alias.name not in declared):
+                declared[alias.name] = 'const char *'
+                target_alias_name = alias.name
+                break
+        for it in s.items:
+            pass
+        guard_var = gen._cpp_fresh_name('mojo_td')
+        declare = [
+            f"{indent}mojo_tempdir_guard_t {guard_var};",
+            f"{indent}int __init_ok_ = mojo_tempdir_guard_init(&{guard_var});",
+        ]
+        if target_alias_name is not None:
+            declare.append(
+                f"{indent}const char* {target_alias_name} = "
+                f"mojo_tempdir_guard_path(&{guard_var});")
+        lines.extend(declare)
     for st in s.body:
         lines.extend(gen._cpp_stmt(st, declared, indent))
+    if _intrinsic and guard_var:
+        lines.append(f"{indent}mojo_tempdir_guard_fini(&{guard_var});")
     return lines
 
 

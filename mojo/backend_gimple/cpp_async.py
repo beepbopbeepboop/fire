@@ -201,6 +201,10 @@ def _cpp_with_guard_type_name(gen, expr) -> str | None:
     if (isinstance(expr.func, gimple_ctypes.SubscriptExpr)
             and isinstance(expr.func.obj, gimple_ctypes.IdentExpr)):
         return expr.func.obj.name
+    # Intrinsic RAII guard: tempfile.TemporaryDirectory()
+    if isinstance(expr.func, gimple_ctypes.MemberExpr):
+        if isinstance(expr.func.obj, gimple_ctypes.IdentExpr):
+            return expr.func.obj.name + '.' + expr.func.member
     return None
 
 
