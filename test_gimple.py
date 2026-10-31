@@ -7981,6 +7981,32 @@ def main():
             print(f"PASS  {name}")
             _PASS += 1
 
+    def test_set_field_read_off_a_boxed_receiver_is_a_set_not_a_list():
+        """`st.fs_x = gen._fresh_vals` (a `set` field read off an untyped
+        `gen`) was lowered as a `MojoList *` -- the boxed-field fallback took
+        "has a recorded element type" to mean "list" -- and refused with
+        `cannot coerce MojoList * to MojoSet *`, so the self-host closure
+        compiled emit_infra.py twice (the refused attempt, then source
+        inclusion)."""
+        global _PASS, _FAIL
+        name = "set_field_read_off_a_boxed_receiver_is_a_set_not_a_list"
+        import gimple_codegen as _g
+        src = ("class FS:\n"
+               "    def __init__(self):\n"
+               "        self.a: set = set()\n"
+               "\n"
+               "def save(gen):\n"
+               "    st = FS()\n"
+               "    st.a = gen._fresh_vals\n"
+               "    return st\n")
+        try:
+            _g.compile_to_gimple(src)
+            print(f"PASS  {name}")
+            _PASS += 1
+        except Exception as e:
+            print(f"FAIL  {name}: {e}")
+            _FAIL += 1
+
     def test_bracket_mentions_matches_the_regex_it_replaced():
         """`elab_intu._bracket_mentions` is the run-time-regex-free form of
         `\\bNAME\\s*\\[\\s*([^\\]]+)\\s*\\]` (a pattern built around a name
@@ -13343,6 +13369,7 @@ print(run('x/y.txt'))
     _run_isolated(lambda: test_no_compiler_module_defines_a_function_twice(), 'test_no_compiler_module_defines_a_function_twice (line 12710)')
     _run_isolated(lambda: test_import_line_modules_matches_the_regex_it_replaced(), 'test_import_line_modules_matches_the_regex_it_replaced (line 12711)')
     _run_isolated(lambda: test_flagged_re_compile_is_not_lowered_as_the_bare_pattern(), 'test_flagged_re_compile_is_not_lowered_as_the_bare_pattern (line 12712)')
+    _run_isolated(lambda: test_set_field_read_off_a_boxed_receiver_is_a_set_not_a_list(), 'test_set_field_read_off_a_boxed_receiver_is_a_set_not_a_list')
     _run_isolated(lambda: test_bracket_mentions_matches_the_regex_it_replaced(), 'test_bracket_mentions_matches_the_regex_it_replaced (line 12713)')
     _run_isolated(lambda: test_func_state_snapshot_covers_reset_func(), 'test_func_state_snapshot_covers_reset_func (line 12714)')
     _run_isolated(lambda: test_every_funcptr_initializer_has_a_definition(), 'test_every_funcptr_initializer_has_a_definition (line 12715)')

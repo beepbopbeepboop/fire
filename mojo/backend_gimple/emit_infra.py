@@ -8136,6 +8136,11 @@ def _reset_scope_state(gen) -> None:
     _fet['_fresh_vals'] = 'char *'
     _fet['_fresh_str_tmps'] = 'char *'
     _fet['_boxed_vals'] = 'char *'
+    # Which of the above are SETS (the rest are lists): see `_set_elem_fields`.
+    for _sf in ('_scoped_free_candidates', '_scope_armed', '_owned_str_elem_names',
+                '_owned_str_elem_vals', '_owned_closure_names', '_owned_env_names',
+                '_fresh_vals', '_fresh_str_tmps', '_boxed_vals'):
+        gen._set_elem_fields.add(_sf)
 
 
 def _scope_register(gen, name: str, fn: str) -> None:

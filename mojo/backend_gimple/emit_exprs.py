@@ -2895,7 +2895,8 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # two arms bind the SAME loop variable to a `char *` key and to a
         # real element — one variable, two incompatible declared types.
         if _boxed_ft is None and gen._known_field_elem_type(node.member):
-            _boxed_ft = 'MojoList *'
+            _boxed_ft = ('MojoSet *' if node.member in gen._set_elem_fields
+                         else 'MojoList *')
         raw = gen._call_expr('int64_t', '_mojo_dispatch_getattr',
                               [('void *', vp), ('char *', f'"{node.member}"')])
         if _boxed_ft is not None and _boxed_ft != 'int64_t':
@@ -2958,7 +2959,8 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # two arms bind the SAME loop variable to a `char *` key and to a
         # real element — one variable, two incompatible declared types.
         if _boxed_ft is None and gen._known_field_elem_type(node.member):
-            _boxed_ft = 'MojoList *'
+            _boxed_ft = ('MojoSet *' if node.member in gen._set_elem_fields
+                         else 'MojoList *')
         if (_boxed_ft is None and gen._is_except_as_member_target(node.obj)
                 and node.member in gen._except_attr_str_fields):
             # `err.filename` (a caught exception object's dynamically-set

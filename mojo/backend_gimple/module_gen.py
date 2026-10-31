@@ -111,6 +111,11 @@ import mojo.middle.funcs_shared as _ggfs
 from mojo.middle.funcs_shared import _resolve_struct_cname, _sanitize_cname_qualifier
 
 
+# Builtins that look at a value without forwarding its static type anywhere.
+_NON_FORWARDING_BUILTINS = frozenset((
+    'isinstance', 'issubclass', 'type', 'id', 'hasattr', 'getattr', 'callable',
+    'len', 'repr', 'str', 'bool', 'print'))
+
 def _gmi_literal_ctype(node):
     """The ctype of an UNAMBIGUOUS container/string literal, else None.
 
@@ -10946,6 +10951,16 @@ def gen_module_impl(self, stmts):
                 if isinstance(_rc.func.obj, IdentExpr):
                     struct_evidence_params.add(_as_str(_rc.func.obj.name))
             elif isinstance(_rc.func, IdentExpr):
+                # A Python BUILTIN that inspects its argument
+                # (`isinstance(node, IdentExpr)`) is not a forward to a
+                # function whose parameter type could be learned: counting it
+                # made a parameter that is correctly tested for several node
+                # classes a "polymorphic struct parameter used as method
+                # receiver" and refused the whole module (every
+                # `_callable_value_symbol(gen, node)` importer fell back to
+                # source inclusion).
+                if _as_str(_rc.func.name) in _NON_FORWARDING_BUILTINS:
+                    continue
                 for _rc_a in _rc.args:
                     if isinstance(_rc_a, IdentExpr):
                         struct_evidence_params.add(_as_str(_rc_a.name))

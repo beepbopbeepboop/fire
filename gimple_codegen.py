@@ -2721,6 +2721,13 @@ class GimpleGen:
         self._int_word_vals: set = set()
         self._fresh_str_tmps: set = set()  # see emit_infra._emit_str_cat
         self._fresh_vals: set = set()  # see emit_infra.is_fresh_container_operand
+        # Field names whose recorded element type (`_field_elem_types`) belongs to
+        # a SET rather than a list. An element type says "this field is a
+        # container of X", not which container, so `_lower_MemberExpr`'s boxed
+        # fallback used to call every such field a `MojoList *` and
+        # `st.fs_x = gen._fresh_vals` refused with "cannot coerce MojoList * to
+        # MojoSet *" (the self-host closure then compiled emit_infra twice).
+        self._set_elem_fields: set = set()
         # Names bound to a bool, keyed by NAME across functions (see
         # emit_stmts._record_bool_valued). Declared HERE, not created lazily
         # behind `if not hasattr(gen, '_bool_valued')`: self-hosted, the field
