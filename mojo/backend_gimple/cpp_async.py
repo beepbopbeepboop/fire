@@ -113,7 +113,7 @@ def _cpp_is_callable_value_expr(gen, node) -> bool:
     in sync with) `_cpp_expr`'s own LambdaExpr/MemberExpr cases, the
     single source of truth for the actual VALUE emission this type just
     needs to agree with. See
-    bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md."""
+    the (since-fixed) compiled-generator lambda-expression bug."""
     if isinstance(node, gimple_ctypes.LambdaExpr):
         return gimple_ctypes._cpp_lambda_ctype(node) is not None
     if isinstance(node, gimple_ctypes.MemberExpr):

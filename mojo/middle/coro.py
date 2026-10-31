@@ -841,7 +841,7 @@ def _generator_value_kind(fn: N.FunctionDef,
             # `yield from _iter_files(root, suffix, relparent)`) resolves
             # exactly as a direct sibling delegation does -- fsutil's
             # `iter_files_by_suffix`, see
-            # bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md.
+            # the (since-fixed) c_common/fsutil.py compile failure.
             dk = delegated(n.value, fn) if delegated is not None else None
             kinds.add(dk)
             if dk == 'tuple':
@@ -992,7 +992,7 @@ def _lambdas_ok(fn: N.FunctionDef) -> bool:
     `_lambda_shape_ok` above now admits all of them. The walk stays as the
     chokepoint that measurement is attached to: the next shape to be measured
     belongs in that table, and this is where a refusal for it would live.
-    (bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md)"""
+    (the (since-fixed) compiled-generator lambda-expression bug)"""
     for n in _walk(fn):
         if isinstance(n, N.LambdaExpr):
             if not _lambda_shape_ok(n):
@@ -1167,7 +1167,7 @@ def _sibling_gen_kind(iterable, fn: N.FunctionDef = None):
     more CALL form: a HIGHER-ORDER PARAMETER whose declared default names
     one of this module's generators — `def walk_tree(root, *, walk=
     _walk_tree)` doing `for filename in walk(root):`, the shape
-    `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md` records as
+    `the (since-fixed) c_common/fsutil.py compile failure` records as
     fsutil's real blocker. The default is resolved to its generator and the
     kind read from THAT, exactly as for a direct sibling call; a parameter
     whose default is not a module generator (or is not a default at all —
@@ -1271,7 +1271,7 @@ def _default_is_faithful_literal(node) -> bool:
     would compile the generator and then pad a NULL function pointer into
     the call — trading a refusal for a crash. The ordinary (non-generator)
     path has no such gate and does resolve those defaults correctly; see
-    `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md`.
+    `the (since-fixed) c_common/fsutil.py compile failure`.
     """
     if node is None:
         return False
@@ -1310,7 +1310,7 @@ def _unrepresentable_kwonly(fn: N.FunctionDef) -> list:
     `iter_files_by_suffix(root, suffixes, relparent=None, *, walk=
     walk_tree, _iter_files=iter_files)` were all rejected before the real
     blocker (CALLING the parameter) was ever reached — see
-    `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md`.
+    `the (since-fixed) c_common/fsutil.py compile failure`.
 
     The gate that replaces it asks the question that actually matters: can
     each omitted argument be filled with the RIGHT value? A keyword-only
@@ -3275,7 +3275,7 @@ def _mark_coro_body(body_fd):
     body there loses the captured value's real type: `lambda: some_string`
     yielded from a generator came out as the pointer's bit pattern, and
     under -Werror=int-conversion that took the whole self-host build down
-    (see bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md).
+    (see the (since-fixed) compiled-generator lambda-expression bug).
 
     Defined once here and called from all three body-synthesis sites,
     rather than being spelled out at each: the reasoning is long enough

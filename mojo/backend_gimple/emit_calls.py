@@ -6622,7 +6622,7 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     # record the rest as the remaining work, with the corpus instances named
     # so whoever extends this to the env-struct path starts from evidence
     # rather than a search. See
-    # bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md.
+    # the (since-fixed) compiled-generator lambda-expression bug.
 
     outer_ctx = gen.current_func_name or 'root'
     gen._lambda_counter += 1
@@ -7625,7 +7625,7 @@ def _lower_fnptr_call_value(gen, fp_type: str, fp_raw: str, node: gimple_ctypes.
     # Calling a HIGHER-ORDER PARAMETER whose declared default is a compiled
     # generator of this compile (`def walk_tree(root, *, walk=_walk_tree)`
     # — Tools/c-analyzer/c_common/fsutil.py's whole idiom, and the shape
-    # `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md` names as
+    # `the (since-fixed) c_common/fsutil.py compile failure` names as
     # "the real blocker is invoking a kw-only parameter as a callee"). The
     # returned box IS a `MojoGenerator *`; recording that, plus the default
     # generator's api on this temp, is exactly what a DIRECT generator

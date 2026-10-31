@@ -70,7 +70,7 @@ def _callable_value_symbol(gen, node, cxx: bool = False):
     f=leaf): return f(x)` invoked as `apply_it("q")` compiled, linked,
     and died with SIGSEGV on `mojo_fnptr_call_1(NULL, ...)` — exit 139,
     no diagnostic, and the doc that recorded the *generator* instance of
-    this shape (`bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md`)
+    this shape (`the (since-fixed) c_common/fsutil.py compile failure`)
     never saw it, because it is reachable from an ordinary `def` too.
 
     Two spellings, matching the two the corpus actually uses:

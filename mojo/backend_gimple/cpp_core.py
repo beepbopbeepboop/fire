@@ -2025,8 +2025,7 @@ def _cpp_expr(gen, e) -> str:
             # `self.<method>` read WITHOUT an immediate call -- a
             # bound-method-as-VALUE reference (pickletools.py's
             # `getpos = data.tell` idiom, `self.<method>` variant --
-            # see bugs/hard/CODEGEN_generator_lambda_expr_unsupported.
-            # md). Checked FIRST, ahead of the field lookup just below:
+            # see the (since-fixed) compiled-generator lambda-expression bug). Checked FIRST, ahead of the field lookup just below:
             # `struct_field_types[struct_name]` can't be trusted to
             # prove "not a method" on its own —
             # `_scan_body_for_local_field_access` (this file's dynamic-
@@ -2272,7 +2271,7 @@ def _cpp_expr(gen, e) -> str:
         # A `lambda` used as a VALUE inside a generator body (e.g.
         # pickletools.py's `_genops`: `getpos = lambda: None`, the
         # sibling branch of `getpos = data.tell` above) — see
-        # bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md.
+        # the (since-fixed) compiled-generator lambda-expression bug.
         # Lowered as a genuine, capturing native C++ lambda (this
         # coroutine codegen targets real C++20, unlike the plain
         # GIMPLE path's `_lower_LambdaExpr`, whose much heavier
@@ -4069,7 +4068,7 @@ def _cpp_expr(gen, e) -> str:
                 # CTYPE_1ARG`) for enum.py's `Flag._iter_member_by_
                 # def_`: `sorted(cls._iter_member_by_value_(value),
                 # key=lambda m: m._sort_order_)` -- see bugs/hard/
-                # CODEGEN_generator_lambda_expr_unsupported.md.
+                # the (since-fixed) compiled-generator lambda-expression bug.
                 #
                 # Only a `MojoList *`-typed iterable is supported here
                 # (the confirmed real shape); a `MojoSet *`/`MojoDict *`
@@ -7509,7 +7508,7 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             # `for x in self.<field>:` case just above already uses,
             # since a `self.<field>` iterable is the one real corpus
             # shape (`Lib/enum.py`-style `key=lambda m: m.<field>`, see
-            # bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md).
+            # the (since-fixed) compiled-generator lambda-expression bug).
             if (isinstance(s.iterable, gimple_ctypes.CallExpr)
                     and isinstance(s.iterable.func, gimple_ctypes.IdentExpr)
                     and s.iterable.func.name == 'sorted' and s.iterable.args
@@ -8509,7 +8508,7 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
     # back as int64_t here too. Without this case, `mojo_list_get_str`
     # dereferenced the int64_t payload bits as a `char *` — a real,
     # confirmed segfault, not just a wrong-value bug. See
-    # bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md.
+    # the (since-fixed) compiled-generator lambda-expression bug.
     if (isinstance(call, gimple_ctypes.CallExpr) and isinstance(call.func, gimple_ctypes.IdentExpr)
             and call.func.name == 'sorted' and call.args
             and not gen._locally_binds_name('sorted')):

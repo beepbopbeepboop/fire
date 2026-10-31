@@ -1796,7 +1796,7 @@ def test_generator_a3_ineligible(name: str, mojo_src: str, gen_name: str,
 
 
 def run_callable_param_tests():
-    # Cluster: bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md --
+    # Cluster: the (since-fixed) c_common/fsutil.py compile failure --
     # "the real blocker is INVOKING a kw-only parameter as a callee", the
     # shape `Tools/c-analyzer/c_common/fsutil.py`'s `walk_tree(root, *,
     # walk=_walk_tree)` / `iter_files_by_suffix(..., *, _iter_files=
@@ -3762,7 +3762,7 @@ def main():
 """, "0\n-1\n2\n")
 
     # LambdaExpr-as-value / bound-method-as-value in a compiled generator
-    # body (see bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md) —
+    # body (see the (since-fixed) compiled-generator lambda-expression bug) —
     # mirrors pickletools.py's `_genops` shape EXACTLY: the same local
     # (`getpos`) is assigned a zero-arg `lambda` on one branch and a
     # bound-method VALUE (`self.tell`, not immediately called) on the
@@ -4049,7 +4049,7 @@ main()
     # method_as_value` above). Real target: Lib/enum.py's
     # `Flag._iter_member_by_def_`: `yield from sorted(cls._iter_member_
     # by_value_(value), key=lambda m: m._sort_order_)` — see
-    # bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md's
+    # the (since-fixed) compiled-generator lambda-expression bug's
     # "single-parameter lambda" follow-up. This is also the regression
     # test for a real, confirmed SEGFAULT this same session found and
     # fixed: the promise/consumer-side type inference for `yield from
@@ -4673,7 +4673,7 @@ def main():
 """, "5\n3\n1\n")
 
     # ── lambda literals inside a generator body ───────────────────────
-    # (bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md) -- 0-, 1-
+    # (the (since-fixed) compiled-generator lambda-expression bug) -- 0-, 1-
     # and 2-parameter lambdas, a lambda re-bound on each branch of an
     # if/else, and a lambda passed as a call argument all work via the
     # ordinary codegen path's lambda lifting.
