@@ -542,8 +542,11 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         # through an imported accessor (full-closure case where another
         # module registered the accessor) must still carry its API onto
         # the fresh read-back temp, else .close() / next() refuse.
-        _gen_api_known = (name in gen._global_generator_api
-                          and name not in gen._global_generator_api_poisoned)
+        _gen_key = ginf.global_generator_key(
+            gen._imported_global_home.get(name, ''), name)
+        _gen_api_known = (name in gen._imported_global_home
+                          and _gen_key in gen._global_generator_api
+                          and _gen_key not in gen._global_generator_api_poisoned)
         if _gen_api_known and _acc_ctype != 'MojoGenerator *':
             # The export's declared type is the export scan's guess (a
             # `var NAME = call()` line is typed `void *`), not the handle's
@@ -559,7 +562,7 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         else:
             t = gen._call_expr(_acc_ctype, _acc_csym, [])
         if _gen_api_known:
-            gen._generator_var_api[t] = gen._global_generator_api[name]
+            gen._generator_var_api[t] = gen._global_generator_api[_gen_key]
         return _acc_ctype, t
     # Struct/class type name used as a value (e.g. cls arg) — return zero placeholder
     _BUILTIN_TYPE_NAMES = frozenset({
@@ -743,6 +746,16 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
             ctype = 'int64_t'
         else:
             ctype = gtype
+        # A global whose generator api is known (recorded by the store in the
+        # module that LOADS from here, see `_read_key` below) holds a generator
+        # handle, boxed as an int64_t field. The read must be typed as the
+        # generator it is: `.close()` / `next()` dispatch on the receiver's
+        # type, and an importer's gen would otherwise see a bare int64_t.
+        _read_key = ginf.global_generator_key(
+            gimple_ctypes._c_field_name(_read_mod), name)
+        if (ctype == 'int64_t' and _read_key in gen._global_generator_api
+                and _read_key not in gen._global_generator_api_poisoned):
+            ctype = 'MojoGenerator *'
         t = gen._new_temp(ctype)
         # Use the overridden actual type (set during global store, e.g.
         # a MojoDict* stored in an int64_t global field) if available,
@@ -816,9 +829,9 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         # NAME. A poisoned name (rebound, or stored from a function) has no
         # single api, so it gets none and keeps the honest refusal. See
         # `emit_stmts._note_global_generator_store`.
-        if (name in gen._global_generator_api
-                and name not in gen._global_generator_api_poisoned):
-            gen._generator_var_api[t] = gen._global_generator_api[name]
+        if (_read_key in gen._global_generator_api
+                and _read_key not in gen._global_generator_api_poisoned):
+            gen._generator_var_api[t] = gen._global_generator_api[_read_key]
         # …and "this global holds a plain integer" (`gen._int_word_vals`), the
         # same hop and the same reason for the same reason-as-the-three-above:
         # reading a global mints a FRESH temp, and the dict-key decision is
