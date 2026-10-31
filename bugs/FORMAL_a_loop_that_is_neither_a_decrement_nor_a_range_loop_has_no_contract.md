@@ -370,3 +370,4 @@ bindings (`accum_max`, `ret_in_loop`, `loop_break`), a loop inside a loop
 (`nested_loop`), a three-word state (`var_typed_loop`), the generic `for`
 contract (`for_two_bounds`), and arm64's `eval_eq_mojo` bridge over a stated
 loop.
+
