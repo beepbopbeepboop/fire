@@ -2463,7 +2463,7 @@ _CPP_CALLABLE_CTYPE_1ARG = 'std::function<int64_t(int64_t)>'
 # cpp_core's CallExpr declared-callable-local case. `Tools/c-analyzer/
 # c_common/fsutil.py`'s `get_files = lambda *a, **k: ...` is the motivating
 # occurrence; see bugs/hard/
-# COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md.
+# the (since-fixed) c_common/fsutil.py compile failure.
 _CPP_CALLABLE_CTYPE_STARARGS = 'std::function<int64_t(MojoList *)>'
 _CPP_CALLABLE_CTYPE_KWARGS = 'std::function<int64_t(MojoDict *)>'
 _CPP_CALLABLE_CTYPE_STAR_KW = 'std::function<int64_t(MojoList *, MojoDict *)>'

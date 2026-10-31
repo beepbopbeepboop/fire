@@ -113,7 +113,7 @@ def _cpp_is_callable_value_expr(gen, node) -> bool:
     in sync with) `_cpp_expr`'s own LambdaExpr/MemberExpr cases, the
     single source of truth for the actual VALUE emission this type just
     needs to agree with. See
-    bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md."""
+    the (since-fixed) compiled-generator lambda-expression bug."""
     if isinstance(node, gimple_ctypes.LambdaExpr):
         return gimple_ctypes._cpp_lambda_ctype(node) is not None
     if isinstance(node, gimple_ctypes.MemberExpr):
@@ -841,6 +841,8 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         gen._cpp_pending_return_store = (_ret_base, _ret_ct)
     gen._cpp_last_has_return_value = _has_return_value
     gen._cpp_list_local_elem_types = {}
+    gen._cpp_word_locals = set()
+    gen._cpp_word_iter_locals = set()
     gen._cpp_param_names = set(gimple_ctypes._as_str(_p[0]) for _p in (fn.params or []))
     gen._cpp_mixed_list_params = set(
         getattr(gen, '_param_elem_mixed', {}).get(fn.name, ()))
@@ -960,7 +962,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         if has_tuple_yield and tuple_slot_ctypes is None:
             value_ctype = None
         gen._cpp_last_tuple_slot_ctypes = tuple_slot_ctypes if has_tuple_yield else None
-        gen._cpp_last_mixed_slots = bool(getattr(gen, '_cpp_mixed_list_params', None))
+        gen._cpp_last_mixed_slots = bool(getattr(gen, '_cpp_mixed_list_params', None) or getattr(gen, '_cpp_word_iter_locals', None))
         func_decls = list(gen._cpp_func_scope_decls)
         self_recursed = gen._cpp_gen_self_recursed
         fwd_delegates = list(gen._cpp_fwd_gen_delegates)
@@ -1173,12 +1175,123 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         f"    if (h) h.destroy();",
         f"}}",
     ]
+    lines.extend(_cpp_generator_sig_lines(gen, fn, base, param_ctypes, cpp_value_ctype,
+                                          extra_captures, struct_name))
     # Plain unpack loop, NOT `[ct for _, ct in param_ctypes]` — a
     # comprehension's tuple-unpack target boxes to int64_t self-hosted.
     _ret_cts = []
     for _rpn, _rct in param_ctypes:
         _ret_cts.append(_rct)
     return '\n'.join(lines), value_ctype, base, _ret_cts
+
+
+_SIG_WORD_CTYPES = frozenset({'int64_t', '_Bool', 'int', 'char *',
+                              'MojoList *', 'MojoDict *', 'MojoSet *'})
+
+
+def _cpp_sig_default_word(gen, dv) -> str | None:
+    """C++ text of a parameter DEFAULT as an int64_t word, for a generator's
+    runtime signature (`mojo_gen_sig_register`); None when the default is not
+    one this can spell, which leaves the generator unregistered (calling it by
+    value with keywords then raises a catchable TypeError rather than guessing).
+    """
+    if dv is None:
+        return '0'
+    if isinstance(dv, gimple_ctypes.BoolLiteral):
+        return '1' if dv.value else '0'
+    if isinstance(dv, gimple_ctypes.IdentExpr):
+        if dv.name in ('None', 'False'):
+            return '0'
+        if dv.name == 'True':
+            return '1'
+        _api = (getattr(gen, '_generator_api', None) or {}).get(dv.name)
+        if (_api is not None and dv.name in getattr(gen, '_supported_generators', ())
+                and not gimple_ctypes._as_str(_api['base']).startswith('__mgco_')):
+            return f"(int64_t)(intptr_t)(void *){_api['base']}_start"
+        # An ORDINARY module function named as a default (`_f=upper`): its C
+        # symbol, resolved at assembly (the overload suffix is final only
+        # then), with the extern declaration registered for the preamble.
+        if (_api is None and dv.name in getattr(gen, 'func_param_types', {})
+                and dv.name not in getattr(gen, '_global_var_types', {})
+                and dv.name not in getattr(gen, 'struct_field_types', {})):
+            gen._cpp_module_func_refs.add(dv.name)
+            return f"(int64_t)(intptr_t)(void *)@@CSYM:{dv.name}@@"
+        return None
+    if isinstance(dv, gimple_ctypes.IntLiteral):
+        return str(dv.value)
+    if isinstance(dv, gimple_ctypes.StringLiteral) and not getattr(dv, 'is_bytes', False):
+        return f'(int64_t)(intptr_t)"{gimple_ctypes._c_escape(dv.value)}"'
+    if (isinstance(dv, gimple_ctypes.MemberExpr)
+            and isinstance(dv.obj, gimple_ctypes.IdentExpr)):
+        _fv = _RUNTIME_CALLABLE_WORDS.get(f'{dv.obj.name}.{dv.member}')
+        if _fv:
+            return f'(int64_t)(intptr_t)(void *){_fv}'
+    return None
+
+
+_RUNTIME_CALLABLE_WORDS = {
+    'os.walk': 'mojo_os_walk_w',
+    'glob.glob': 'mojo_glob_w',
+    'glob.iglob': 'mojo_glob_w',
+}
+
+
+def _cpp_generator_sig_lines(gen, fn, base, param_ctypes, cpp_value_ctype,
+                             extra_captures, struct_name) -> list:
+    """The constructor that registers a free generator's runtime signature
+    (parameter names, where the keyword-only ones start, defaults as words, how
+    its yielded value is read) with `mojo_gen_sig_register`, so a call through
+    the generator's `_start` ADDRESS used as a value (`mojo_dyn_call`) can bind
+    keywords by name and a `for` over the returned handle can drain it.
+    Emitted only for a plain free generator whose parameters are all words
+    (a double would travel in a float register, which a word-typed call cannot
+    reproduce) and whose every default is spellable."""
+    if extra_captures or struct_name is not None or len(param_ctypes) > 8:
+        return []
+    _vk = {'int64_t': 0, '_Bool': 1, 'double': 2, 'char *': 3}.get(cpp_value_ctype)
+    if _vk is None:
+        if cpp_value_ctype in ('MojoList *', 'MojoDict *', 'MojoSet *'):
+            _vk = 4
+        else:
+            return []
+    _names = [gimple_ctypes._as_str(_pn) for _pn, _ in param_ctypes]
+    if any(_ct not in _SIG_WORD_CTYPES for _, _ct in param_ctypes):
+        return []
+    if any(_n.startswith('*') for _n in _names):
+        return []
+    _defs = getattr(fn, 'param_defaults', None) or {}
+    _kwonly = [gimple_ctypes._as_str(_k) for _k in (getattr(fn, 'kwonly', None) or [])]
+    _fk = len(_names)
+    for _i, _n in enumerate(_names):
+        if _n in _kwonly:
+            _fk = _i
+            break
+    _words = []
+    _has = []
+    for _n in _names:
+        _has_def = bool(fn.param_has_default.get(_n)) if getattr(fn, 'param_has_default', None) else (_n in _defs)
+        if _has_def:
+            _w = _cpp_sig_default_word(gen, _defs.get(_n))
+            if _w is None:
+                return []
+        else:
+            _w = '0'
+        _words.append(_w)
+        _has.append('1' if _has_def else '0')
+    _np = len(_names)
+    _namelist = ', '.join('"%s"' % _n for _n in _names) or '""'
+    out = [
+        f"__attribute__((constructor)) static void {base}_sig_reg () {{",
+        f"    static const char *const _nm[] = {{ {_namelist} }};",
+        f"    static int64_t _df[{max(_np, 1)}];",
+        f"    static const unsigned char _hd[{max(_np, 1)}] = {{ {', '.join(_has) or '0'} }};",
+    ]
+    for _i, _w in enumerate(_words):
+        out.append(f"    _df[{_i}] = {_w};")
+    out.append(f"    mojo_gen_sig_register((void *){base}_start, (void *){base}_resume, "
+               f"(void *){base}_value, (void *){base}_destroy, {_vk}, {_np}, _nm, {_fk}, _df, _hd);")
+    out.append("}")
+    return out
 
 
 _HELPER_SCALAR_CTYPES = frozenset({
@@ -3407,7 +3520,7 @@ def _gen_cpp_async_generator_unit(gen, fn: gimple_ctypes.FunctionDef) -> tuple[s
         if has_tuple_yield and tuple_slot_ctypes is None:
             value_ctype = None
         gen._cpp_last_tuple_slot_ctypes = tuple_slot_ctypes if has_tuple_yield else None
-        gen._cpp_last_mixed_slots = bool(getattr(gen, '_cpp_mixed_list_params', None))
+        gen._cpp_last_mixed_slots = bool(getattr(gen, '_cpp_mixed_list_params', None) or getattr(gen, '_cpp_word_iter_locals', None))
     finally:
         gen._cpp_emit_kind = 'generator'
         gen._cpp_gen_self_struct = None

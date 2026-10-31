@@ -56,6 +56,7 @@ from mojo.middle.types import _BOXED_CONTAINER_CTYPES
 # emit_calls the way its other callers reach it, rather than imported here, so
 # there is exactly one spelling of it in the tree.
 from mojo.middle.calls_shared import _callable_value_symbol
+from mojo.middle.calls_shared import _RUNTIME_CALLABLE_VALUES as _RUNTIME_CALLABLE_VALUES_NAMES
 from mojo.middle.calls_shared import _py_box_expr
 
 def _lower_strided(gen, node, store: bool):
@@ -1292,7 +1293,36 @@ def _mark_boxed_field_read(gen, struct_name, member, field_type, t) -> None:
         gen._dyn_word_vals.add(t)
 
 
+def _stat_module_constant(gen, node):
+    """`stat.S_IRUSR` & co: the `stat` module's integer constants, resolved at
+    compile time from the host's own `stat` (values are platform ABI, fixed for
+    the build). None unless `node` is `<stat module name>.<UPPER_CASE int>`."""
+    if not (isinstance(node.obj, gimple_ctypes.IdentExpr)
+            and node.obj.name not in gen.var_types
+            and node.member.isupper() and node.member.startswith('S_')):
+        return None
+    _imp = getattr(gen, 'imported_symbols', {}).get(node.obj.name) or {}
+    if node.obj.name != 'stat' and _imp.get('module') != 'stat':
+        return None
+    import stat as _stat_mod
+    _v = getattr(_stat_mod, node.member, None)
+    if isinstance(_v, int) and not isinstance(_v, bool):
+        return _v
+    return None
+
+
 def _lower_MemberExpr(gen, node) -> tuple[str, str]:
+    _sc = _stat_module_constant(gen, node)
+    if _sc is not None:
+        return 'int64_t', gen._new_val('int64_t', f'(int64_t){_sc}')
+    # `os.walk` / `glob.glob` / `glob.iglob` as a VALUE (passed, stored): the
+    # runtime's own function, by address (see calls_shared._callable_value_symbol).
+    if (isinstance(node.obj, gimple_ctypes.IdentExpr)
+            and node.obj.name not in gen.var_types
+            and f'{node.obj.name}.{node.member}' in _RUNTIME_CALLABLE_VALUES_NAMES):
+        _rcv = _callable_value_symbol(gen, node)
+        if _rcv is not None:
+            return _rcv
     # Flow-sensitive `isinstance` narrowing for a MemberExpr receiver
     # (`if isinstance(node.target, IdentExpr): ... node.target.name`). The
     # guarded expression's cast temp was materialised at the `if` — return
