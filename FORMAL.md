@@ -12,7 +12,7 @@ state, the decisions taken, and the order.
 Read with: `doc/ABI.md` (the boundary contract this must not contradict),
 `bugs/FORMAL_known_limits.md` (the audited codegen residue),
 `bugs/FORMAL_arm64_known_proof_gaps.md` (the proof census),
-`bugs/CODEGEN_bootstrap_resource_blowup.md` (the upstream cause of the
+`bugs/mid/CODEGEN_bootstrap_resource_blowup.md` (the upstream cause of the
 self-host divergence), and `bugs/OPEN_WORK.md` A1 (the x86-64 `call_rel32`,
 which [3] needs). **§11 is the operating contract** — the five agents, their
 exclusive write sets, the isolation rules, the interface-request mechanism and

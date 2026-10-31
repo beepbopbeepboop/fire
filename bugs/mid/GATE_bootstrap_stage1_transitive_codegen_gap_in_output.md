@@ -29,4 +29,4 @@ The job is a whole-closure `fire.py --dump-full` (about 20 minutes). It does not
 
 ## Related
 
-- `bugs/CODEGEN_gate_bootstrap_stage1_transitive_red.md`: an earlier, different red of the same job.
+- `bugs/mid/CODEGEN_gate_bootstrap_stage1_transitive_red.md`: an earlier, different red of the same job.

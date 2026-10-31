@@ -73,7 +73,7 @@ runner is supposed to avoid: a job's TIMEOUT starts after admission).
 
 ## Related
 
-- `bugs/CODEGEN_bootstrap_resource_blowup.md`: the bootstrap memory/time cost
+- `bugs/mid/CODEGEN_bootstrap_resource_blowup.md`: the bootstrap memory/time cost
   (the stage2/stage3 whole-closure compiles), a different job.
-- `bugs/CODEGEN_gate_bootstrap_stage1_transitive_red.md`: the
+- `bugs/mid/CODEGEN_gate_bootstrap_stage1_transitive_red.md`: the
   `bootstrap-stage1-transitive` job going red, a different job.

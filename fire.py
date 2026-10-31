@@ -1578,7 +1578,7 @@ def main():
         else:
             # Phase A/B: frozen-snapshot emission (parallel parse, frozen snapshot emission)
             # The C11 lock-free mmap queue is deferred; multiprocessing.Pool is used instead.
-            # See bugs/PERF_dump_full_closure_is_single_threaded.md steps 1-4.
+            # See bugs/mid/PERF_dump_full_closure_is_single_threaded.md steps 1-4.
             c_code = gimple_codegen.compile_to_gimple_parallel_frozen(
                 src, do_imports=True, filename=input_file, auto_gpu=auto_gpu)
             f_out = open(basename + ".ci", "w")

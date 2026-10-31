@@ -4,7 +4,7 @@ Branch `crash`. **This document previously carried a wrong headline. It
 was wrong, it misled a session, and the correction is the most important
 thing here — read §1 before anything else.**
 
-`bugs/CODEGEN_bootstrap_resource_blowup.md` is the long history (incl.
+`bugs/mid/CODEGEN_bootstrap_resource_blowup.md` is the long history (incl.
 the ~192 GB `fire.py` run and the useful "a SIGKILL here is evidence of
 nothing" rule). This document supersedes its framing, not its history.
 

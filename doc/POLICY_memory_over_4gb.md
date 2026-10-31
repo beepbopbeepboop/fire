@@ -120,7 +120,7 @@ Other measured footprints (same gates):
 
 ## Why this is one bug and not many
 
-`bugs/CODEGEN_bootstrap_resource_blowup.md` records the ~192 GB runaway and its attribution.
+`bugs/mid/CODEGEN_bootstrap_resource_blowup.md` records the ~192 GB runaway and its attribution.
 The self-hosted binary allocates boxed values and never frees them (no garbage collector, no
 regions), so any algorithm that re-derives a working set per iteration, per function or per
 pass turns into gigabytes: the round-5 regression is exactly that shape, one loop in one

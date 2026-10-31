@@ -740,7 +740,7 @@ def cmd_guard(a):
     fan-out width, kill the largest such process whenever their SUM passes --total-gb. Says so in the log.
 
     Why: the gate's own jobs run under tools/memcap.py, but a worker's direct `fire.py build` / self-host
-    compile does not, and this compiler has a known 190 GB+ blow-up (bugs/CODEGEN_bootstrap_resource_blowup.md).
+    compile does not, and this compiler has a known 190 GB+ blow-up (bugs/mid/CODEGEN_bootstrap_resource_blowup.md).
     2026-09-29 the user had to kill a 200 GB+ mojo compile by hand. The default limit is above the 55 GB the
     `program` memclass is measured to need, so honest big jobs are not touched. RSS undercounts a process the
     OS has compressed or swapped, so this is a floor on protection, not a guarantee. Never touches a process

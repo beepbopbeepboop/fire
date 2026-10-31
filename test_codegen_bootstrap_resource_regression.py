@@ -1,4 +1,4 @@
-# Pinning regression for bugs/CODEGEN_bootstrap_resource_blowup.md
+# Pinning regression for bugs/mid/CODEGEN_bootstrap_resource_blowup.md
 # The doc's 2026-10-25 Status records bootstrap green (0 stage1-vs-stage2
 # diffs, 0 stage2-vs-stage3 diffs, 184 files identical). This test asserts
 # the bootstrap-verify script exits 0 when stage trees exist.

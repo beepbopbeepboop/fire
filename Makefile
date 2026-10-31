@@ -182,7 +182,7 @@ demo:
 suite-help:
 	@$(SUITE) --list
 
-# Kept because bugs/CODEGEN_bootstrap_resource_blowup.md points here for the
+# Kept because bugs/mid/CODEGEN_bootstrap_resource_blowup.md points here for the
 # memory-containment story. The numbers now live in one place — MEMCLASS in
 # tools/suite.py, printed by `make check-list` — instead of in a macro here
 # that only one target used.
