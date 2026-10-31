@@ -3395,11 +3395,10 @@ def _gen_stmt_MatchStmt(gen, node):
     references that temp via a synthetic IdentExpr rather than re-lowering
     `node.subject`, since re-lowering would re-evaluate it (with side
     effects) once per pattern."""
-    # The pattern classifier and its refusal sentences come from
-    # `formal.diagnostics`, NOT `formal.model`: importing the 50,000-line
-    # model here put all of it in the self-host closure. Imported here, not at
-    # the top, to avoid circular imports.
-    from formal import diagnostics as formal_model
+    # Formal model support for structural pattern refusal.
+    # This function has to import formal.model here, not at the top, to avoid
+    # circular imports:
+    from formal import model as formal_model
 
     subj_type, subj_v = gen.lower_expr(node.subject)
     subj_ref = gimple_ctypes.IdentExpr(name=subj_v)
