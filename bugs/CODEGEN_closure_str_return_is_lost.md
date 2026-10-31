@@ -77,5 +77,10 @@ and `g(">")` passes a `str` into an `int64_t` slot. Fix is parameter inference
 for un-annotated closure parameters from their call sites (or refusing
 honestly). That is its own change; not started here.
 
+Status update 2026-10-30 (work/bug-codegen-closure-str-return-is-lost):
+- Measured untyped repro: single-TU `8602094632`, link-mode `8753417256`; CPython `<>\n`. Confirmed still broken (typed form passes: `<>`).
+- Added regression `test_untyped_closure_str_return.py` (documents gap); `test_regress_closure_str_return.py` (typed) passes.
+- Root cause: unannotated closure param lacks call-site inference (`_gmi_apply_call_site_param_evidence` only handles `IdentExpr` free-function calls, not bound-method closure calls).
+
 Adjacent, not this bug: a capturing nested `def` with `-> float` truncates its
 result on the call path. See `bugs/CODEGEN_capturing_closure_float_return_truncated.md`.
