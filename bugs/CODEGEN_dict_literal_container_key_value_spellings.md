@@ -1,6 +1,24 @@
 # A dict literal's container key now renders by value; three gaps remain on the VALUE side
 
-## Status (2026-10-30, branch `work/fix-leftover-bug-codegen-dict-literal-container-key-v-8985`): PARTIAL
+## Status (2026-10-30, branch `work/bug-codegen-dict-literal-container-key-v`): PARTIAL
+
+Landed this round, (1) same-scope half:
+
+* **(1) FIXED for a module-scope dict read in the scope that stores it.**
+  A module-level `d = {}` is boxed as int64_t, so its subscript store takes the
+  untyped dict arm in `emit_stmts.py` and the value type was recorded only on
+  that arm's temp. Every bare read loads a fresh temp, so the read had no
+  value type. `_note_global_dict_store` now also records it under the source
+  name, which `_lower_IdentExpr` carries onto each read. Measured before:
+  `4621537642612260864` / `4335978832`; after: `9.5` / `R`, matching CPython.
+  Regression: `test_gimple_runner.py`
+  `gimple_module_scope_dict_value_type_survives_read`.
+* **Still open, filed separately:** a READ of such a dict from a DIFFERENT
+  function. Root cause is that Phase 1.7 seeds the global's value type only
+  from a literal with pairs. See
+  `bugs/CODEGEN_module_dict_value_type_unknown_in_other_functions.md`.
+
+Earlier status, kept as written:
 
 Landed, measured against the compiled path and CPython:
 
