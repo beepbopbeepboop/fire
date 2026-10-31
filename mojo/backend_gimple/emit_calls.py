@@ -336,6 +336,8 @@ def _lower_generator_next(gen, av: str, api: dict) -> tuple[str, str]:
     result = gen._new_val(vct, f"{base}_value ({av})")
     if api.get('boxed_container'):
         gen._boxed_container_vals.add(result)
+    if api.get('mixed_slots') and vct == 'int64_t':
+        gen._boxed_vals.add(result)       # a tagged word: rendered by kind
     gen._emit(f"  goto {bb_merge};")
     gen._emit_label(bb_merge)
     return vct, result
@@ -458,6 +460,12 @@ def _lower_generator_close(gen, node, av: str, api: dict):
     exiting (which is what `__mojo_gen_close`'s return value reports).
     Consuming a generator does not free it, so this deliberately does not
     destroy the handle either."""
+    if _as_str(api.get('base', '')).startswith('_mojogen_'):
+        # a C++20-coroutine generator: `close()` destroys the frame (its
+        # destructors run as it unwinds) -- there is no stack-switch runtime
+        # (`__mojo_gen_close`) in a module whose generators are all C++20.
+        gen._void_call(f"{api['base']}_destroy", [('MojoGenerator *', av)])
+        return 'void', None
     handle = gen._to_int64('MojoGenerator *', av)
     # `__mojo_gen_close` returns int64_t: assigning that call straight into a
     # `_Bool` temp is a hard `-fgimple` "invalid conversion in gimple call", so
@@ -1373,6 +1381,69 @@ def _lower_factory_call(gen, node: gimple_ctypes.CallExpr, rec: dict) -> tuple[s
 
 
 def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    # `itertools.chain(a, b, ...)`: the elements of each argument in turn. Built eagerly
+    # into one list that records its own slot kinds; a generator handle argument is
+    # registered first so the run time can drain it.
+    if (isinstance(node.func, gimple_ctypes.MemberExpr)
+            and _as_str(node.func.member) == 'chain'
+            and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
+            and _as_str(gen.imported_symbols.get(node.func.obj.name, {}).get('module')
+                        or node.func.obj.name) == 'itertools'
+            and not getattr(node, 'kwargs', None)):
+        _ch = gen._call_expr('MojoList *', 'mojo_list_new', [])
+        for _ca in node.args:
+            _cat, _cav = gen.lower_expr(_ca)
+            if _cat == 'MojoGenerator *' and _cav in gen._generator_var_api:
+                _capi = gen._generator_var_api[_cav]
+                _cvk = {'int64_t': 0, '_Bool': 1, 'double': 2, 'char *': 3}.get(
+                    _as_str(_capi.get('value_ctype') or 'int64_t'))
+                _cw = gen._to_int64(_cat, _cav)
+                if _as_str(_capi.get('base') or '').startswith('__mgco_') and _cvk is not None:
+                    _cw = gen._call_expr('int64_t', 'mojo_gen_note_a3',
+                                         [('int64_t', _cw), ('int64_t', gen._new_val('int64_t', str(_cvk)))])
+            else:
+                _cw = gen._to_int64(_cat, _cav)
+            gen._void_call('mojo_chain_extend', [('MojoList *', _ch), ('int64_t', _cw)])
+        gen._struct_slot_kinds[_ch] = ginf._RuntimeKinded(['int', 'str'])
+        gen._maybe_kinds_vals.add(_ch)
+        return 'MojoList *', _ch
+    # `functools.lru_cache(maxsize=N)(f)` / `functools.cache(f)`: memoization is an
+    # optimization with no observable effect here, so the decorated value IS `f`.
+    _lc = node.func
+    if (isinstance(_lc, gimple_ctypes.CallExpr) and len(node.args) == 1
+            and ((isinstance(_lc.func, gimple_ctypes.MemberExpr)
+                  and _as_str(_lc.func.member) in ('lru_cache', 'cache')
+                  and isinstance(_lc.func.obj, gimple_ctypes.IdentExpr)
+                  and _as_str(gen.imported_symbols.get(_lc.func.obj.name, {}).get('module')
+                              or _lc.func.obj.name) == 'functools')
+                 or (isinstance(_lc.func, gimple_ctypes.IdentExpr)
+                     and _as_str(_lc.func.name) in ('lru_cache', 'cache')))):
+        return gen.lower_expr(node.args[0])
+    # `sys.audit(event, *args)`: this runtime installs no audit hooks, so raising
+    # an audit event has no observable effect. Its arguments are still
+    # evaluated (side effects, errors) and the call yields None.
+    if (isinstance(node.func, gimple_ctypes.MemberExpr)
+            and _as_str(node.func.member) == 'audit'
+            and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
+            and (_as_str(gen.imported_symbols.get(node.func.obj.name, {}).get('module') or node.func.obj.name) == 'sys')):
+        for _a in node.args:
+            gen.lower_expr(_a)
+        return 'int64_t', gen._new_val('int64_t', '0')
+    # `fnmatch.filter(names, pat)` (POSIX): the runtime's fnmatch(3) filter.
+    if (isinstance(node.func, gimple_ctypes.MemberExpr)
+            and _as_str(node.func.member) == 'filter'
+            and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
+            and _as_str(gen.imported_symbols.get(node.func.obj.name, {}).get('module')
+                        or node.func.obj.name) == 'fnmatch'
+            and len(node.args) == 2 and not node.kwargs):
+        _nt, _nv = gen.lower_expr(node.args[0])
+        _pt, _pv = gen.lower_expr(node.args[1])
+        _nl = _nv if _nt == 'MojoList *' else gen._materialize_as_list(_nt, _nv)
+        _res = gen._call_expr('MojoList *', 'mojo_fnmatch_filter',
+                              [('MojoList *', _nl), ('int64_t', gen._to_int64(_pt, _pv))])
+        gen._struct_slot_kinds[_res] = ginf._RuntimeKinded(['int', 'str'])
+        gen._maybe_kinds_vals.add(_res)
+        return 'MojoList *', _res
     _dev = _lower_device_launch(gen, node)
     if _dev is not None:
         return _dev
@@ -5550,7 +5621,8 @@ def _lower_ctor_from_iterable(gen, kind: str, node: gimple_ctypes.CallExpr) -> t
             # the comprehension's cast block neither needs nor fires.
             gen.var_types[_av] = _st
             _arg0 = gimple_ctypes.IdentExpr(_av, node.line, node.col)
-        elif _at in _COMPREHENSION_ITER_TYPES:
+        elif (_at in _COMPREHENSION_ITER_TYPES
+              and not isinstance(_arg0, gimple_ctypes.CallExpr)):
             # A BOXED word (static int64_t, real type a known iterable): this
             # is exactly how a module-GLOBAL list/dict reads back. Stay with
             # the ORIGINAL expression — _lower_comprehension re-lowers it into
@@ -7640,6 +7712,8 @@ def _lower_fnptr_call_value(gen, fp_type: str, fp_raw: str, node: gimple_ctypes.
                            [('void *', fp_void)] + [('int64_t', w) for w in widened[:4]])
         return 'double', t
     raw_t = gen._new_val('int64_t', f'{helper} ({call_args})')
+    if ret_type == 'int64_t':
+        gen._dyn_word_vals.add(raw_t)   # nothing says what the callee returns: a word of unknown kind
     # Calling a HIGHER-ORDER PARAMETER whose declared default is a compiled
     # generator of this compile (`def walk_tree(root, *, walk=_walk_tree)`
     # — Tools/c-analyzer/c_common/fsutil.py's whole idiom, and the shape
@@ -9002,6 +9076,10 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # result for `a, b = f()` to read slot 0 with slot 0's type.
     if fname_raw in gen._return_slot_types:
         gen._tuple_slot_types[t] = gen._return_slot_types[fname_raw]
+    if fname_raw in getattr(gen, '_return_runtime_kinded', ()):
+        # the callee returns a list that carries its own per-slot kinds
+        gen._struct_slot_kinds[t] = ginf._RuntimeKinded(['int', 'str'])
+        gen._maybe_kinds_vals.add(t)
     if fname_raw in gen._return_elem_types:
         # Annotated `-> tuple[...]` functions resolve to boxed int64_t (see
         # _mojo_type), so unlike the MojoList*-typed case above the elem
@@ -9810,6 +9888,8 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
         # index genuinely has no static answer, so it keeps the uniform
         # fallback rather than guessing.
         _sk = gen._struct_slot_kinds.get(ov)
+        if isinstance(_sk, ginf._RuntimeKinded):
+            _sk = None      # kinds only known at run time: the boxed read below
         if _sk and isinstance(node.index, gimple_ctypes.IntLiteral):
             _si = node.index.value
             if 0 <= _si < len(_sk):

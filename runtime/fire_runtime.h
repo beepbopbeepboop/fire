@@ -678,6 +678,21 @@ MojoList *mojo_str_chars(char *s);
  * `list(5)` printed `[]` and a loop body silently never ran). CPython names
  * the offending type here and this cannot — see the definition. */
 MojoList *mojo_iter_boxed_list(int64_t v);
+int64_t mojo_re_escape_w(int64_t s);
+int64_t mojo_split_dyn(int64_t recv, int64_t arg);   /* pattern.split(s) or str.split(sep) on a word of unknown kind */
+int     mojo_is_re_pattern(int64_t w);
+int     mojo_is_re_match(int64_t w);
+int64_t mojo_re_compile(char *pat, int64_t flags);                      /* handle, 0 if unsupported */
+int64_t mojo_re_compile_bytes(void *pat, int64_t len, int64_t flags);     /* handle, 0 if unsupported */
+int64_t mojo_re_exec(int64_t h, char *s, int64_t pos, int64_t endpos, int64_t mode);  /* 0 match 1 search 2 fullmatch */
+int64_t mojo_re_exec_bytes(int64_t h, void *s, int64_t len, int64_t pos, int64_t endpos, int64_t mode);
+int64_t mojo_re_m_group(int64_t m, int64_t g);
+int64_t mojo_re_m_start(int64_t m, int64_t g);
+int64_t mojo_re_m_end(int64_t m, int64_t g);
+int64_t mojo_re_getattr(int64_t obj, char *name);
+int64_t mojo_getitem_word(int64_t w, int64_t i);   /* list element / string character of an unknown-kind word */
+void    mojo_chain_extend(MojoList *dst, int64_t src);   /* itertools.chain, one argument */
+int64_t mojo_add_words(int64_t a, int64_t b);   /* str+str concatenates, else integer add */
 MojoList *mojo_iter_word(int64_t v);   /* list / dict keys / set / str / bytes of a word of unknown kind */
 /* Compiled-generator signatures (filled by each unit's constructor) and the
  * live-handle table behind a dynamic call; see the definitions. */
@@ -685,6 +700,8 @@ void mojo_gen_sig_register(void *start, void *resume, void *value, void *destroy
                            const char *const *names, int first_kwonly, const int64_t *defaults,
                            const unsigned char *has_default);
 MojoList *mojo_iter_gen_handle(int64_t w);
+int64_t mojo_gen_note(int64_t h, void *start);
+int64_t mojo_gen_note_a3(int64_t h, int64_t vkind);   /* 0 int, 1 bool, 2 double, 3 str */
 int64_t mojo_gen_default_word(void *start, int64_t idx);
 /* `x in <boxed container>`: resolves list/dict/set at runtime instead of
  * the old hardcoded-false fallback. See mojo_in_dispatch_str's definition. */
@@ -776,6 +793,8 @@ int64_t     mojo_box_int(int64_t v);
  * `_int64_may_hold_float`): a fresh kind-'d' box, never freed, whose address
  * is the word. mojo_repr_boxed / mojo_box_double read it back. */
 int64_t     mojo_box_from_double(double v);
+int64_t     mojo_box_from_bool(int64_t v);   /* a bool in a tagged word: renders True/False */
+void        mojo_list_append_word(MojoList *l, int64_t w);   /* append a tagged word under the kind it carries */
 /* The result of `+`, `-` or `*` where one operand is a float-possible
  * parameter (see `_float_param_arith` in emit_infra.py): `ires` is the integer
  * answer and `dres` the double answer, both already computed. Returns a fresh
@@ -1359,6 +1378,8 @@ void        mojo_dict_destroy(MojoDict *d);
 void        mojo_dict_clear(MojoDict *d);
 
 void        mojo_dict_set_int(MojoDict *d, char *key, int64_t v);
+int64_t mojo_gen_call_with(void *start, MojoList *pre, MojoList *a, MojoDict *kw);
+int64_t mojo_re_call(int64_t obj, char *name, MojoList *args, MojoDict *kw);
 /* `_kw` variants: the key arrives as a raw machine WORD that is either a boxed
  * string pointer or an integer, and the same decision mojo_cstr_or_int_str
  * makes (mojo_boxed_is_str) is made here — but an integer is looked up directly,
@@ -2306,12 +2327,25 @@ int64_t   mojo_os_path_isfile_w(int64_t p);
 int64_t   mojo_os_path_exists_w(int64_t p);
 int64_t   mojo_os_path_basename_w(int64_t p);
 int64_t   mojo_os_path_dirname_w(int64_t p);
+int64_t   mojo_word_slice_step(int64_t w, int has_start, int64_t start, int has_stop, int64_t stop, int64_t step);
+MojoList *mojo_list_slice_word(int64_t w, int has_start, int64_t start, int has_stop, int64_t stop, int64_t step);
+MojoList *mojo_fnmatch_filter(MojoList *names, int64_t pat);
 MojoList *mojo_os_scandir(char *top);            /* os.scandir(top): eager list of DirEntry handles */
 char     *mojo_dirent_name(int64_t h);            /* DirEntry.name */
 char     *mojo_dirent_path(int64_t h);            /* DirEntry.path */
 int64_t   mojo_dirent_is_symlink(int64_t h);      /* DirEntry.is_symlink() */
 int64_t   mojo_dirent_is_dir(int64_t h, int64_t follow);   /* DirEntry.is_dir(follow_symlinks=) */
 int64_t   mojo_dirent_is_file(int64_t h, int64_t follow);  /* DirEntry.is_file(follow_symlinks=) */
+int64_t   mojo_os_stat(int64_t target, int64_t follow, int64_t dir_fd);  /* os.stat -> stat_result handle (failure: pending OSError) */
+int64_t   mojo_stat_mode(int64_t h);
+int64_t   mojo_stat_dev(int64_t h);
+int64_t   mojo_stat_ino(int64_t h);
+int64_t   mojo_os_samestat(int64_t a, int64_t b);
+int64_t   mojo_s_isdir(int64_t mode);
+int64_t   mojo_dirent_stat(int64_t h, int64_t follow);
+int64_t   mojo_os_openat(char *name, int64_t flags, int64_t dir_fd);
+void      mojo_os_close(int64_t fd);
+MojoList *mojo_os_scandir_fd(int64_t fd);
 MojoList *mojo_glob(char *pattern);                     /* glob.glob/iglob(pattern) -> list[str] */
 int64_t   mojo_glob_w(int64_t pattern);                 /* the same, as a callable VALUE */
 MojoList *mojo_listdir(char *path);                    /* os.listdir(path) -> list[str] */

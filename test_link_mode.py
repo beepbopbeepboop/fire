@@ -1951,11 +1951,10 @@ def test_same_module_call_to_generic_with_default_binds_instantiation() -> bool:
 
 
 def test_two_modules_specialize_one_generic_differently() -> bool:
-    """Regression test for bugs/CODEGEN_dylib_generic_inline_copies_share_one_symbol.md.
+    """Regression test for bug:CODEGEN_dylib_generic_inline_copies_share_one_symbol.
 
     Two modules instantiate the same generic function with DIFFERENT type
     arguments (`scale[2]` in `a`, `scale[3]` in `b`). The body depends on the
-    parameter, so each caller must get its own specialization. Today every
     parameter, so each caller must get its own specialization. Before the fix
     the sibling generic was never registered in the inline do_imports=True
     path, so both bracketed calls lowered to a zero stub and printed `0`, a

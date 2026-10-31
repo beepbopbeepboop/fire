@@ -1014,6 +1014,31 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         if _ci.env_struct:
             env_void = gen._new_val(
                 'void *', f'(void *){gen._closure_envs.get(name) or "0"}')
+            # A VARIADIC nested def (`def gen(*a, **kw)`) is a MojoVarargFn
+            # exactly as a variadic lambda is: a call through the value packs
+            # its arguments into the list / dict the callee wants.
+            _vk = -1
+            _vfix = 0
+            for _vpn, _vpa in _ci.inner_def.params:
+                if _vpn.startswith('**'):
+                    _vk = 1 if _vk == 0 else 2
+                elif _vpn.startswith('*'):
+                    if _vk < 0:
+                        _vk = 0
+                elif _vk < 0:
+                    _vfix += 1
+            if _vk >= 0 and _vfix <= 4:
+                _vnf = gen._new_val('int64_t', str(_vfix))
+                _vkd = gen._new_val('int64_t', str(_vk))
+                _vhs = gen._new_val('int64_t', '1')
+                _vf = gen._call_expr('MojoVarargFn *', 'mojo_vararg_fn_new',
+                                     [('void *', fp), ('void *', env_void),
+                                      ('int64_t', _vnf), ('int64_t', _vkd),
+                                      ('int64_t', _vhs)])
+                _vft = gen._new_val('void *', f'(void *){_vf}')
+                gen._callable_ret_types[_vft] = gen.func_return_types.get(lifted, 'int64_t')
+                gen._func_value_names[_vft] = _repr_name
+                return 'void *', _vft
             t = gen._call_expr('MojoBoundMethod *', 'mojo_bound_method_new',
                                 [('void *', fp), ('void *', env_void)])
             gen._bound_method_ret_types[t] = gen.func_return_types.get(lifted, 'int64_t')
@@ -1844,6 +1869,27 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             fd = '0' if _stream == 'stdin' else ('1' if _stream == 'stdout' else '2')
             t = gen._new_val('int64_t', fd)
             return 'int64_t', t
+
+        # `os.O_RDONLY` & co.: integer constants of the host platform, read as
+        # the literals they are (otherwise a dynamic getattr on the `os` module
+        # marker, a fatal runtime AttributeError).
+        if _canon == 'os':
+            import os as _host_os
+            _mem = _as_str(node.member)
+            if ((_mem.startswith('O_') or _mem.startswith('SEEK_')
+                    or _mem in ('F_OK', 'R_OK', 'W_OK', 'X_OK'))
+                    and isinstance(getattr(_host_os, _mem, None), int)):
+                return 'int64_t', gen._new_val('int64_t', str(getattr(_host_os, _mem)))
+
+        # `re.IGNORECASE` & co.: the flag values the run-time regex engine reads.
+        if _canon == 're':
+            if _as_str(node.member) == 'escape':
+                return 'void *', gen._new_val('void *', '(void *)mojo_re_escape_w')
+            _re_flags = {'NOFLAG': 0, 'I': 2, 'IGNORECASE': 2, 'M': 8, 'MULTILINE': 8,
+                         'S': 16, 'DOTALL': 16, 'U': 32, 'UNICODE': 32, 'X': 64,
+                         'VERBOSE': 64, 'A': 256, 'ASCII': 256}
+            if _as_str(node.member) in _re_flags:
+                return 'int64_t', gen._new_val('int64_t', str(_re_flags[_as_str(node.member)]))
 
         # Special handling for os.path attribute access
         if _canon == 'os' and node.member == 'path':
@@ -3961,6 +4007,18 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             gen._emit(f"  {cp} = (char *){ip};")
             return 'char *', cp
         return typ, val
+    if (op == '+' and lt in ('int', 'int64_t') and rt in ('int', 'int64_t')
+            and (ginf._is_may_hold_str_param(gen, left_node)
+                 or ginf._is_may_hold_str_param(gen, right_node))):
+        # Operands that are words of unknown kind, one of them a PARAMETER some call
+        # site passed a string for: `+` is string concatenation or integer
+        # addition depending on what the words are, which only the run time
+        # knows. The result is a word of the same unknown kind.
+        _aw = gen._call_expr('int64_t', 'mojo_add_words',
+                             [('int64_t', gen._to_int64(lt, lv)),
+                              ('int64_t', gen._to_int64(rt, rv))])
+        gen._dyn_word_vals.add(_aw)
+        return 'int64_t', _aw
     if op == '+':
         # Check if the OTHER operand is a string literal - helps identify string concatenation
         right_is_lit = isinstance(right_node, gimple_ctypes.StringLiteral)
@@ -6236,6 +6294,17 @@ def _lower_list_literal(gen, node: gimple_ctypes.ListExpr) -> tuple[str, str]:
     # those slots correctly and the row would buy nothing.
     _kinds = _literal_slot_kinds(gen, lowered)
     _has_spread = any(_is_star_spread(_el) for _el, _et, _ev in lowered)
+    # A HETEROGENEOUS scalar literal's per-slot kinds are also a compile-time
+    # fact about THIS value, so they go in `gen._struct_slot_kinds` beside the
+    # `struct.unpack` and returned-literal rows. `_list_repr_fn` and the
+    # literal-index read consult that table before the single list-wide
+    # `_elem_types` ctype, which is `double` for `[1, 2.5]` and so printed
+    # `[1.0, 2.5]` and read the int slot as a double. The runtime row still
+    # travels with the value for every read with no compile-time index. A
+    # spread has no fixed slot count to describe, so it is left to the row.
+    if (not _has_spread and len(set(_kinds)) > 1
+            and set(_kinds) <= set(_LITERAL_SLOT_KIND_LONG)):
+        gen._struct_slot_kinds[t] = [_LITERAL_SLOT_KIND_LONG[_k] for _k in _kinds]
     # A list-of-lists literal whose INNER literal holds strings: the inner list
     # records 'p' (MOJO_KIND_STR) on every slot. A list of strings records no
     # row of its own (see `_literal_needs_kinds`), and with no row a slot reads
@@ -6480,6 +6549,13 @@ def _emit_star_spread(gen, dest: str, et: str, ev: str) -> None:
         ev = gen._coerce_to_type(_as_str(et), 'MojoList *', ev)
     gen._emit_call('void', '', 'mojo_list_extend',
                    [('MojoList *', dest), ('MojoList *', ev)])
+
+
+# The runtime's one-byte kind (`_literal_slot_kinds`) -> `gen._struct_slot_kinds`'
+# long-form spelling. Only the scalar and string kinds are here: a slot that is
+# a container or a None has no long form the static readers understand, so a
+# literal holding one keeps the runtime row alone.
+_LITERAL_SLOT_KIND_LONG = {'i': 'int', 'd': 'double', 's': 'bytes', 'p': 'str'}
 
 
 def _literal_slot_kinds(gen, lowered) -> str:

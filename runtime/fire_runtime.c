@@ -8,6 +8,8 @@
 #include <stdarg.h>
 #include <ctype.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <fnmatch.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <errno.h>
@@ -1162,6 +1164,76 @@ int64_t mojo_box_from_double(double v)
     return (int64_t)(uintptr_t)bx;
 }
 
+/* A bool travelling in a TAGGED word (a generator whose yields are not all one
+ * kind): a fresh kind-'b' box, so the consumer still renders True / False and
+ * not 1 / 0. mojo_box_int / mojo_box_word read the 0/1 back. */
+int64_t mojo_box_from_bool(int64_t v)
+{
+    MojoBox *bx = (MojoBox *)malloc(sizeof(MojoBox));
+    if (!bx) return v ? 1 : 0;
+    bx->magic = MOJO_BOX_MAGIC;
+    bx->bits = v ? 1 : 0;
+    bx->kind = 'b';
+    _pr_add(&_reg_box, (uint64_t)(uintptr_t)bx);
+    return (int64_t)(uintptr_t)bx;
+}
+
+/* Append a TAGGED word (see mojo_box_from_bool / mojo_box_from_double) to a list
+ * under the kind it carries, so the list's per-slot kinds render it right: a
+ * float box appends a double, a bool box a bool, a str box or a live heap
+ * string a string, anything else an int. */
+static void _list_word_push(MojoList *l, char kind, int64_t raw)
+{
+    /* Append `raw` and extend the list's per-slot kinds string by `kind`
+     * (slots before this one that the string does not describe are ints).
+     * The kinds string is a PRIVATE growable buffer (`mojo_list_set_kinds`
+     * stores the pointer it is given, it never copies): an 8-byte header
+     * holds its capacity so the append is amortised O(1), and a row whose
+     * kinds are not such a buffer (shared/pooled) is copied first. */
+    int64_t n = l->len;
+    _KindRow *r = _kinds_row((uint64_t)(uintptr_t)l);
+    char *buf = NULL;
+    if (r && r->kinds && r->owned == 2) {
+        buf = r->kinds;
+        int64_t cap = *(int64_t *)(buf - 8);
+        if (n + 2 > cap) {
+            int64_t ncap = cap * 2 + 8;
+            char *nb = (char *)malloc((size_t)ncap + 8);
+            memcpy(nb + 8, buf, (size_t)n);
+            *(int64_t *)nb = ncap;
+            buf = nb + 8;
+        }
+    } else {
+        int64_t ncap = n * 2 + 16;
+        char *nb = (char *)malloc((size_t)ncap + 8);
+        *(int64_t *)nb = ncap;
+        buf = nb + 8;
+        const char *old = (r && r->kinds) ? r->kinds : NULL;
+        for (int64_t i = 0; i < n; i++) buf[i] = (old && old[i]) ? old[i] : 'i';
+    }
+    buf[n] = kind;
+    buf[n + 1] = '\0';
+    mojo_list_append_int(l, raw);
+    mojo_list_set_kinds(l, buf);
+    r = _kinds_row((uint64_t)(uintptr_t)l);
+    if (r) r->owned = 2;
+}
+
+void mojo_list_append_word(MojoList *l, int64_t w)
+{
+    if (mojo_is_boxed(w)) {
+        MojoBox *bx = (MojoBox *)(intptr_t)w;
+        switch (bx->kind) {
+            case 'd': _list_word_push(l, 'd', bx->bits); return;
+            case 'p': _list_word_push(l, 'p', bx->bits); return;
+            case 'b': _list_word_push(l, MOJO_KIND_BOOL, bx->bits); return;
+            default:  _list_word_push(l, 'i', bx->bits); return;
+        }
+    }
+    if (mojo_boxed_is_str(w)) { _list_word_push(l, 'p', w); return; }
+    _list_word_push(l, 'i', w);
+}
+
 /* The answer of `a OP b` for an arithmetic operator whose operands may be
  * float boxes: the double answer as a fresh box when either operand IS a
  * double box, else the integer answer. Both answers are computed by the
@@ -1246,6 +1318,7 @@ char *mojo_repr_boxed(int64_t v)
             case 'l': return mojo_repr_list_kinds(
                 (MojoList *)(intptr_t)bx->bits, NULL);
             case 'n': return strdup("None");
+            case 'b': return strdup(bx->bits ? "True" : "False");
             default:  return mojo_repr_int(bx->bits);
         }
     }
@@ -1810,13 +1883,23 @@ static MojoList *_gen_drain(void *h, MojoGenSig *sg)
         case 1: mojo_list_append_int(out, ((bool (*)(void *))sg->value)(h) ? 1 : 0); break;
         case 2: mojo_list_append_double(out, ((double (*)(void *))sg->value)(h)); break;
         case 3: mojo_list_append_str(out, ((char *(*)(void *))sg->value)(h)); break;
+        case 5: {   /* a dynamic word: a string pointer or an integer, told apart now */
+            int64_t w = ((int64_t (*)(void *))sg->value)(h);
+            if (mojo_boxed_is_str(w)) mojo_list_append_str(out, (char *)(intptr_t)w);
+            else mojo_list_append_int(out, w);
+            break; }
         default: mojo_list_append_int(out, ((int64_t (*)(void *))sg->value)(h)); break;
         }
     }
     int pending = mojo_exc_pending_get();
     ((void (*)(void *))sg->destroy)(h);
     if (pending) { mojo_exc_pending_set(0); mojo_raise(); }
-    if (sg->vkind == 3) mojo_list_set_kinds_uniform(out, 'p');
+    if (sg->vkind == 5) {
+        if (out->len > 0 && mojo_boxed_is_str(out->data[0])) mojo_list_set_kinds_uniform(out, 'p');
+        else mojo_list_set_kinds_uniform(out, 'i');
+    }
+    else if (sg->vkind == 3) mojo_list_set_kinds_uniform(out, 'p');
+    else if (sg->vkind == 0) mojo_list_set_kinds_uniform(out, 'i');
     else if (sg->vkind == 2) mojo_list_set_kinds_uniform(out, 'd');
     else if (sg->vkind == 4) mojo_list_set_kinds_uniform(out, 'l');
     return out;
@@ -1828,6 +1911,51 @@ int64_t mojo_gen_default_word(void *start, int64_t idx)
     MojoGenSig *sg = _gen_sig_lookup(start);
     if (!sg || idx < 0 || idx >= sg->np) return 0;
     return sg->defaults[idx];
+}
+/* A stack-switch (A3) generator handle returned out of a function as a word: the
+ * generic coroutine entry points (`__mojo_gen_resume` / `_value` / `_destroy`,
+ * fire_coro_gen.c) drive it, found by name so this file does not depend on them. */
+#include <dlfcn.h>
+static void *_a3_sym(const char *n) { return dlsym(RTLD_DEFAULT, n); }
+static bool _a3_resume(void *h) {
+    int64_t (*f)(int64_t, int64_t) = (int64_t (*)(int64_t, int64_t))_a3_sym("__mojo_gen_resume");
+    return f && f((int64_t)(intptr_t)h, 0) != 0;
+}
+static int64_t _a3_value(void *h) {
+    int64_t (*f)(int64_t) = (int64_t (*)(int64_t))_a3_sym("__mojo_gen_value");
+    return f ? f((int64_t)(intptr_t)h) : 0;
+}
+static double _a3_value_d(void *h) { int64_t w = _a3_value(h); double d; memcpy(&d, &w, sizeof d); return d; }
+static void _a3_destroy(void *h) {
+    int64_t (*f)(int64_t) = (int64_t (*)(int64_t))_a3_sym("__mojo_gen_destroy");
+    if (f) f((int64_t)(intptr_t)h);
+}
+int64_t mojo_gen_note_a3(int64_t h, int64_t vkind)
+{
+    static MojoGenSig sigs[4]; static int init = 0;
+    if (!init) {
+        for (int k = 0; k < 4; k++) {
+            sigs[k].resume = (void *)_a3_resume; sigs[k].destroy = (void *)_a3_destroy;
+            sigs[k].value = (k == 2) ? (void *)_a3_value_d : (void *)_a3_value;
+            /* an int-valued generator may be yielding string pointers the kind
+             * analysis could not prove (a tagged word): classify per element */
+            sigs[k].vkind = (k == 0) ? 5 : k;
+        }
+        init = 1;
+    }
+    if (h && vkind >= 0 && vkind < 4) _gen_handle_put((void *)(intptr_t)h, &sigs[vkind]);
+    return h;
+}
+
+/* Record `h` (a live handle from calling a compiled generator's `_start`
+ * directly) against the signature registered for `start`, so a `for` over the
+ * word it travels as can drain it (`mojo_iter_gen_handle`). The trampoline of
+ * an ESCAPING nested generator returns its handle through this. */
+int64_t mojo_gen_note(int64_t h, void *start)
+{
+    MojoGenSig *sg = _gen_sig_lookup(start);
+    if (sg && h) _gen_handle_put((void *)(intptr_t)h, sg);
+    return h;
 }
 MojoList *mojo_iter_gen_handle(int64_t w)
 {
@@ -1864,6 +1992,19 @@ static int64_t _gen_sig_call(MojoGenSig *sg, MojoList *args, MojoDict *kw)
     return h;
 }
 
+/* Start the generator registered for `start` with the captured words `pre`
+ * followed by the caller's own positional list and keyword dict, binding by the
+ * registered parameter names and defaults. The trampoline of an escaping nested
+ * generator (`def gen(*a, **kw)`) is exactly this call. */
+int64_t mojo_gen_call_with(void *start, MojoList *pre, MojoList *a, MojoDict *kw)
+{
+    MojoGenSig *sg = _gen_sig_lookup(start);
+    if (!sg) { mojo_raise_type_error((char *)"generator has no registered signature"); return 0; }
+    MojoList *all = mojo_list_new();
+    for (int64_t i = 0; pre && i < mojo_list_len(pre); i++) mojo_list_append_int(all, mojo_list_get_int(pre, i));
+    for (int64_t i = 0; a && i < mojo_list_len(a); i++) mojo_list_append_int(all, mojo_list_get_int(a, i));
+    return _gen_sig_call(sg, all, kw);
+}
 /* Call a function VALUE with an already-packed argument list and keyword dict:
  * the one entry for a call whose callee is only known at run time and whose
  * call site has `*args` / `**kwargs` / keywords (`_walk(*a, walk=_files, **k)`).
@@ -2156,6 +2297,12 @@ int mojo_list_contains_str(MojoList *l, char *v)
 {
     for (int64_t i = 0; i < l->len; i++) {
         char *s = (char *)(uintptr_t)l->data[i];
+        /* A slot the list's own kinds say is not a string (a tuple like
+         * `('.', b'.'[0])` mixes a str and an int) can never equal a string. */
+        if (l->len > 0 && v != NULL) {
+            char _k = mojo_list_slot_kind(l, i);
+            if (_k == 'i' || _k == 'd') continue;
+        }
         /* A NULL needle is a real `None`/NULL value, not an error: a tuple
          * literal like `(None, '<conflict>')` stores None as a NULL element,
          * and `rt_prov not in (None, '<conflict>')` (gimple_codegen.py's
@@ -9711,8 +9858,34 @@ MojoList *mojo_iter_word(int64_t v)
     return mojo_iter_boxed_list(v);
 }
 
+/* `w[i]` where `w` is a word of unknown kind: a list gives its element (a string
+ * element as its pointer), a string its one-character string. */
+int64_t mojo_getitem_word(int64_t w, int64_t i)
+{
+    if (mojo_is_registered_list(w)) {
+        MojoList *l = (MojoList *)(intptr_t)w;
+        if (i < 0) i += mojo_list_len(l);
+        return mojo_box_word(mojo_list_get_boxed(l, i));
+    }
+    if (mojo_boxed_is_str(w)) return (int64_t)(intptr_t)mojo_char_at_str((char *)(intptr_t)w, i);
+    mojo_raise_type_error((char *)"object is not subscriptable");
+    return 0;
+}
+
+/* `a + b` where both are words of unknown kind: two strings concatenate, anything
+ * else adds as integers (the word is its own value). */
+int64_t mojo_add_words(int64_t a, int64_t b)
+{
+    if (mojo_boxed_is_str(a) && mojo_boxed_is_str(b))
+        return (int64_t)(intptr_t)mojo_str_cat((char *)(intptr_t)a, (char *)(intptr_t)b);
+    return a + b;
+}
+
 MojoList *mojo_iter_boxed_list(int64_t v)
 {
+    /* A live generator handle returned by a call through a function value
+     * (`mojo_gen_note`) drains into the list its signature reads. */
+    { MojoList *g = mojo_iter_gen_handle(v); if (g) return g; }
     /* A type-erased bytes value iterates its bytes as ints 0-255
      * (CPython), the same element source the statically-typed
      * `MojoBytes *` arm of `_materialize_as_list` uses. Before this arm,
@@ -9830,6 +10003,7 @@ int _mojo_getattr_nothrow = 0;
 int _mojo_getattr_missed = 0;
 
 int64_t mojo_obj_getattr(void *obj, char *attr) {
+    { int64_t _rw = mojo_re_getattr((int64_t)(intptr_t)obj, attr); if (_rw) return _rw; }
     if (_mojo_dynattr_objects) {
         char key[32];
         _mojo_dynattr_key(obj, key, sizeof key);
@@ -11306,9 +11480,81 @@ int64_t mojo_os_path_dirname_w(int64_t p) { return int_dirname(0, p); }
  * Fails like CPython: a missing directory is FileNotFoundError, anything else
  * OSError (reported through the pending-exception flag; the coroutine body
  * rethrows it as a C++ exception, so `except OSError` catches both). Order is the directory's own. */
-typedef struct { char *name; char *path; int is_dir_nofollow; int is_symlink; } MojoDirEntry;
+typedef struct { char *name; char *path; int is_dir_nofollow; int is_symlink; int dirfd; } MojoDirEntry;
+
+/* `w[a:b:c]` on a WORD whose kind only the runtime knows (a list or a string):
+ * a registered list slices as a list, anything else as a string. */
+int64_t mojo_word_slice_step(int64_t w, int has_start, int64_t start,
+                             int has_stop, int64_t stop, int64_t step) {
+    if (mojo_is_registered_list(w))
+        return (int64_t)(intptr_t)mojo_list_slice_step((MojoList *)(intptr_t)w, has_start,
+                                                       start, has_stop, stop, step);
+    char *str = (char *)(intptr_t)w;
+    if (!str || step == 0) return (int64_t)(intptr_t)"";
+    int64_t n = (int64_t)strlen(str);
+    int64_t lo, hi;
+    if (step > 0) {
+        lo = has_start ? start : 0;  hi = has_stop ? stop : n;
+        if (lo < 0) { lo += n; if (lo < 0) lo = 0; } else if (lo > n) lo = n;
+        if (hi < 0) { hi += n; if (hi < 0) hi = 0; } else if (hi > n) hi = n;
+    } else {
+        lo = has_start ? start : n - 1;  hi = has_stop ? stop : -n - 1;
+        if (lo < 0) { lo += n; if (lo < -1) lo = -1; } else if (lo >= n) lo = n - 1;
+        if (has_stop) { if (hi < 0) { hi += n; if (hi < -1) hi = -1; } else if (hi >= n) hi = n - 1; }
+        else hi = -1;
+    }
+    char *out = (char *)malloc((size_t)n + 1);
+    int64_t k = 0;
+    if (step > 0) for (int64_t i = lo; i < hi; i += step) out[k++] = str[i];
+    else          for (int64_t i = lo; i > hi; i += step) out[k++] = str[i];
+    out[k] = '\0';
+    return (int64_t)(intptr_t)out;
+}
+
+MojoList *mojo_list_slice_word(int64_t w, int has_start, int64_t start,
+                               int has_stop, int64_t stop, int64_t step) {
+    return (MojoList *)(intptr_t)mojo_word_slice_step(w, has_start, start, has_stop, stop, step);
+}
+
+/* fnmatch.filter(names, pat) on POSIX: the names that match the shell-style
+ * pattern, in order, each appended under the kind it carries (a str stays a str,
+ * a bytes stays a bytes). `names` and `pat` may each be str or bytes words. */
+static const char *_mojo_word_cstr(int64_t w, char **tmp) {
+    if (mojo_is_boxed(w)) {
+        MojoBox *bx = (MojoBox *)(intptr_t)w;
+        w = bx->bits;
+    }
+    if (mojo_boxed_is_str(w)) return (const char *)(intptr_t)w;
+    /* a bytes object: NUL-terminate a copy of its data */
+    MojoBytes *b = (MojoBytes *)(intptr_t)w;
+    if (b && b->data) {
+        *tmp = (char *)malloc((size_t)b->len + 1);
+        memcpy(*tmp, b->data, (size_t)b->len);
+        (*tmp)[b->len] = '\0';
+        return *tmp;
+    }
+    return "";
+}
+
+MojoList *mojo_fnmatch_filter(MojoList *names, int64_t pat) {
+    MojoList *out = mojo_list_new();
+    if (!names) return out;
+    char *ptmp = NULL;
+    const char *p = _mojo_word_cstr(pat, &ptmp);
+    for (int64_t i = 0; i < names->len; i++) {
+        int64_t w = mojo_list_get_boxed(names, i);
+        char *ntmp = NULL;
+        const char *n = _mojo_word_cstr(w, &ntmp);
+        if (fnmatch(p, n, 0) == 0) mojo_list_append_word(out, w);
+        free(ntmp);
+    }
+    free(ptmp);
+    return out;
+}
 
 MojoList *mojo_os_scandir(char *top) {
+    /* `scandir(fd)`: a word below the pointer range is an open directory fd */
+    if ((intptr_t)top > 0 && (intptr_t)top < 65536) return mojo_os_scandir_fd((int64_t)(intptr_t)top);
     DIR *d = top ? opendir(top) : NULL;
     if (!d) {
         mojo_exc_type_set(top && errno == ENOENT ? _MOJO_EXC_TAG_FILENOTFOUND
@@ -11336,6 +11582,7 @@ MojoList *mojo_os_scandir(char *top) {
         e->path = (char *)malloc(n);
         snprintf(e->path, n, "%s%s%s", top, (tl && top[tl - 1] != '/') ? "/" : "", de->d_name);
         struct stat st;
+        e->dirfd = -1;
         e->is_symlink = lstat(e->path, &st) == 0 && S_ISLNK(st.st_mode);
         e->is_dir_nofollow = (e->is_symlink ? 0 : (S_ISDIR(st.st_mode) ? 1 : 0));
         mojo_list_append_int(out, (int64_t)(intptr_t)e);
@@ -11350,13 +11597,95 @@ int64_t mojo_dirent_is_dir(int64_t h, int64_t follow) {
     MojoDirEntry *e = (MojoDirEntry *)(intptr_t)h;
     if (!e->is_symlink || !follow) return e->is_dir_nofollow;
     struct stat st;
-    return stat(e->path, &st) == 0 && S_ISDIR(st.st_mode);
+    int rc = e->dirfd >= 0 ? fstatat(e->dirfd, e->name, &st, 0) : stat(e->path, &st);
+    return rc == 0 && S_ISDIR(st.st_mode);
 }
+/* ── stat_result as a handle, the fd-relative calls os.fwalk is built from ──
+ * Failures go through the PENDING flag (a coroutine body must not longjmp), the
+ * same convention as mojo_os_scandir; the compiled body rethrows. */
+typedef struct { int64_t mode; int64_t dev; int64_t ino; } MojoStat;
+
+static void _mojo_oserror_pending(const char *what) {
+    mojo_exc_type_set(errno == ENOENT ? _MOJO_EXC_TAG_FILENOTFOUND : _MOJO_EXC_TAG_OSERROR);
+    char msg[512];
+    snprintf(msg, sizeof msg, "[Errno %d] %s: '%s'", errno, strerror(errno), what ? what : "?");
+    char *heap_msg = strdup(msg);
+    mojo_exc_msg_set(heap_msg);
+    mojo_exc_obj_set(heap_msg);
+    mojo_exc_pending_set(1);
+}
+
+static int64_t _mojo_stat_box(const struct stat *st) {
+    MojoStat *r = (MojoStat *)malloc(sizeof *r);
+    r->mode = st->st_mode; r->dev = st->st_dev; r->ino = st->st_ino;
+    return (int64_t)(intptr_t)r;
+}
+
+/* os.stat(target, follow_symlinks=, dir_fd=): `target` is a path string or an
+ * fd (a word below the pointer range is an fd); dir_fd < 0 means none. */
+int64_t mojo_os_stat(int64_t target, int64_t follow, int64_t dir_fd) {
+    struct stat st;
+    int rc;
+    if (target >= 0 && target < 65536) rc = fstat((int)target, &st);
+    else if (dir_fd >= 0) rc = fstatat((int)dir_fd, (char *)(intptr_t)target, &st,
+                                       follow ? 0 : AT_SYMLINK_NOFOLLOW);
+    else rc = follow ? stat((char *)(intptr_t)target, &st) : lstat((char *)(intptr_t)target, &st);
+    if (rc != 0) { _mojo_oserror_pending((target >= 65536) ? (char *)(intptr_t)target : "fd"); return 0; }
+    return _mojo_stat_box(&st);
+}
+int64_t mojo_stat_mode(int64_t h) { return ((MojoStat *)(intptr_t)h)->mode; }
+int64_t mojo_stat_dev(int64_t h)  { return ((MojoStat *)(intptr_t)h)->dev; }
+int64_t mojo_stat_ino(int64_t h)  { return ((MojoStat *)(intptr_t)h)->ino; }
+int64_t mojo_os_samestat(int64_t a, int64_t b) {
+    MojoStat *x = (MojoStat *)(intptr_t)a, *y = (MojoStat *)(intptr_t)b;
+    return x && y && x->ino == y->ino && x->dev == y->dev;
+}
+int64_t mojo_s_isdir(int64_t mode) { return (mode & 0170000) == 0040000; }
+int64_t mojo_dirent_stat(int64_t h, int64_t follow) {
+    MojoDirEntry *e = (MojoDirEntry *)(intptr_t)h;
+    struct stat st;
+    int rc;
+    if (e->dirfd >= 0) rc = fstatat(e->dirfd, e->name, &st, follow ? 0 : AT_SYMLINK_NOFOLLOW);
+    else rc = follow ? stat(e->path, &st) : lstat(e->path, &st);
+    if (rc != 0) { _mojo_oserror_pending(e->path); return 0; }
+    return _mojo_stat_box(&st);
+}
+/* os.open(name, flags, dir_fd=) -> fd; os.close(fd) */
+int64_t mojo_os_openat(char *name, int64_t flags, int64_t dir_fd) {
+    int fd = dir_fd >= 0 ? openat((int)dir_fd, name, (int)flags) : open(name, (int)flags);
+    if (fd < 0) { _mojo_oserror_pending(name); return -1; }
+    return fd;
+}
+void mojo_os_close(int64_t fd) { close((int)fd); }
+/* scandir over an open directory fd: like mojo_os_scandir, entries' paths are
+ * just their names (CPython's DirEntry.path for an fd scandir is the name). */
+MojoList *mojo_os_scandir_fd(int64_t fd) {
+    int d2 = dup((int)fd);
+    DIR *d = d2 >= 0 ? fdopendir(d2) : NULL;
+    if (!d) { _mojo_oserror_pending("fd"); if (d2 >= 0) close(d2); return mojo_list_new(); }
+    MojoList *out = mojo_list_new();
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) continue;
+        MojoDirEntry *e = (MojoDirEntry *)malloc(sizeof *e);
+        e->name = strdup(de->d_name);
+        e->path = strdup(de->d_name);
+        struct stat st;
+        e->dirfd = (int)fd;
+        e->is_symlink = fstatat((int)fd, de->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0 && S_ISLNK(st.st_mode);
+        e->is_dir_nofollow = (e->is_symlink ? 0 : (S_ISDIR(st.st_mode) ? 1 : 0));
+        mojo_list_append_int(out, (int64_t)(intptr_t)e);
+    }
+    closedir(d);
+    return out;
+}
+
 int64_t mojo_dirent_is_file(int64_t h, int64_t follow) {
     MojoDirEntry *e = (MojoDirEntry *)(intptr_t)h;
     struct stat st;
     if (e->is_symlink && !follow) return 0;
-    return stat(e->path, &st) == 0 && S_ISREG(st.st_mode);
+    int rc = e->dirfd >= 0 ? fstatat(e->dirfd, e->name, &st, 0) : stat(e->path, &st);
+    return rc == 0 && S_ISREG(st.st_mode);
 }
 
 int int_isfile(int64_t marker, int64_t path) {
@@ -12698,6 +13027,18 @@ void *mojo_sorted(void *iterable) {
     /* The generic int64-payload sort. Correct for int lists, and wrong for a
      * list whose elements are char* — see mojo_list_sorted_str below for why
      * the codegen dispatches around this one. */
+    /* A list that records its OWN slot kinds says when every element is a string
+     * (a drained generator, `os.listdir`-style results): sort those as strings. */
+    if (src && src->len > 0) {
+        int all_str = 1;
+        for (int64_t i = 0; i < src->len && all_str; i++)
+            if (mojo_list_slot_kind(src, i) != 'p') all_str = 0;
+        if (all_str) {
+            MojoList *sd = mojo_list_sorted_str(src);
+            mojo_list_set_kinds_uniform(sd, 'p');
+            return (void *)sd;
+        }
+    }
     MojoList *dst = mojo_list_copy(src);
     _mojo_permute_by(dst, NULL, MOJO_KIND_INT, 0);
     return (void *)dst;
@@ -14039,4 +14380,346 @@ int mojo_cstr_region_eq_n(char *s, int64_t slen, int64_t start, int64_t stop,
     size_t needle_len = strlen(needle);
     if ((size_t)region_len != needle_len) return 0;
     return memcmp(s + start, needle, needle_len) == 0;
+}
+
+
+/* ───────── run-time regular expressions (re.compile of a pattern built at run time) ─────────
+ * The engine is runtime/fire_re_engine.inc; this is its object model: a compiled
+ * pattern and a match are heap objects whose address travels as a word and is
+ * recognised by registry membership. */
+#include "fire_re_engine.inc"
+
+typedef struct { FreProg *pg; char *pattern; int64_t flags; } MojoRePat;
+typedef struct { MojoRePat *re; char *text; int64_t n; int64_t *caps; int64_t pos, endpos; } MojoReMatch;
+static _PtrReg _reg_re_pat, _reg_re_match;
+
+int mojo_is_re_pattern(int64_t w) { return _mojo_ptr_shaped(w) && _pr_has(&_reg_re_pat, (uint64_t)w); }
+int mojo_is_re_match(int64_t w) { return _mojo_ptr_shaped(w) && _pr_has(&_reg_re_match, (uint64_t)w); }
+
+/* re.compile(pattern, flags): a handle, or 0 when the pattern is outside the supported syntax. */
+int64_t mojo_re_compile(char *pat, int64_t flags)
+{
+    if (!pat) return 0;
+    FreProg *pg = fre_compile(pat, (int)flags);
+    if (pg->ncode < 0) { fre_free(pg); return 0; }
+    MojoRePat *r = (MojoRePat *)malloc(sizeof *r);
+    r->pg = pg; r->pattern = strdup(pat); r->flags = flags;
+    _pr_add(&_reg_re_pat, (uint64_t)(uintptr_t)r);
+    return (int64_t)(intptr_t)r;
+}
+
+/* mode 0 match / 1 search / 2 fullmatch.  A match handle or 0 (None). */
+int64_t mojo_re_exec(int64_t h, char *s, int64_t pos, int64_t endpos, int64_t mode)
+{
+    if (!mojo_is_re_pattern(h) || !s) return 0;
+    MojoRePat *r = (MojoRePat *)(intptr_t)h;
+    int64_t n = (int64_t)strlen(s);
+    if (endpos < 0 || endpos > n) endpos = n;
+    int nc = 2 * (r->pg->ngroups + 1);
+    int64_t *caps = (int64_t *)malloc((size_t)nc * sizeof(int64_t));
+    if (!fre_exec(r->pg, s, n, pos, endpos, (int)mode, caps)) { free(caps); return 0; }
+    MojoReMatch *m = (MojoReMatch *)malloc(sizeof *m);
+    m->re = r; m->text = strdup(s); m->n = n; m->caps = caps; m->pos = pos; m->endpos = endpos;
+    _pr_add(&_reg_re_match, (uint64_t)(uintptr_t)m);
+    return (int64_t)(intptr_t)m;
+}
+
+int64_t mojo_re_compile_bytes(void *pat, int64_t len, int64_t flags)
+{
+    if (!pat || len < 0) return 0;
+    FreProg *pg = fre_compile_bytes((char *)pat, (int)len, (int)flags);
+    if (pg->ncode < 0) { fre_free(pg); return 0; }
+    MojoRePat *r = (MojoRePat *)malloc(sizeof *r);
+    r->pg = pg; r->pattern = (char *)malloc((size_t)len + 1); memcpy(r->pattern, pat, (size_t)len); r->pattern[len] = 0; r->flags = flags;
+    _pr_add(&_reg_re_pat, (uint64_t)(uintptr_t)r);
+    return (int64_t)(intptr_t)r;
+}
+
+int64_t mojo_re_exec_bytes(int64_t h, void *s, int64_t len, int64_t pos, int64_t endpos, int64_t mode)
+{
+    if (!mojo_is_re_pattern(h) || !s || len < 0) return 0;
+    MojoRePat *r = (MojoRePat *)(intptr_t)h;
+    int64_t n = len;
+    if (endpos < 0 || endpos > n) endpos = n;
+    int nc = 2 * (r->pg->ngroups + 1);
+    int64_t *caps = (int64_t *)malloc((size_t)nc * sizeof(int64_t));
+    if (!fre_exec_bytes(r->pg, (char *)s, n, pos, endpos, (int)mode, caps)) { free(caps); return 0; }
+    MojoReMatch *m = (MojoReMatch *)malloc(sizeof *m);
+    m->re = r; m->text = (char *)malloc((size_t)len + 1); memcpy(m->text, s, (size_t)len); m->text[len] = 0; m->n = n; m->caps = caps; m->pos = pos; m->endpos = endpos;
+    _pr_add(&_reg_re_match, (uint64_t)(uintptr_t)m);
+    return (int64_t)(intptr_t)m;
+}
+
+static int _re_group_index(MojoReMatch *m, int64_t w, int *out)
+{
+    if (mojo_boxed_is_str(w)) {
+        const char *nm = (const char *)(intptr_t)w;
+        for (int i = 1; i <= m->re->pg->ngroups; i++)
+            if (m->re->pg->gnames[i] && !strcmp(m->re->pg->gnames[i], nm)) { *out = i; return 1; }
+        mojo_raise_value_error((char *)"no such group");
+        return 0;
+    }
+    if (w < 0 || w > m->re->pg->ngroups) { mojo_raise_value_error((char *)"no such group"); return 0; }
+    *out = (int)w; return 1;
+}
+
+/* m.group(n): the text of a group, or 0 (None) when it did not participate. */
+int64_t mojo_re_m_group(int64_t mh, int64_t g)
+{
+    if (!mojo_is_re_match(mh)) return 0;
+    MojoReMatch *m = (MojoReMatch *)(intptr_t)mh; int i;
+    if (!_re_group_index(m, g, &i)) return 0;
+    int64_t a = m->caps[2 * i], b = m->caps[2 * i + 1];
+    if (a < 0 || b < 0) return 0;
+    char *out = (char *)malloc((size_t)(b - a) + 1);
+    memcpy(out, m->text + a, (size_t)(b - a)); out[b - a] = 0;
+    return (int64_t)(intptr_t)out;
+}
+int64_t mojo_re_m_start(int64_t mh, int64_t g)
+{
+    if (!mojo_is_re_match(mh)) return -1;
+    MojoReMatch *m = (MojoReMatch *)(intptr_t)mh; int i;
+    return _re_group_index(m, g, &i) ? m->caps[2 * i] : -1;
+}
+int64_t mojo_re_m_end(int64_t mh, int64_t g)
+{
+    if (!mojo_is_re_match(mh)) return -1;
+    MojoReMatch *m = (MojoReMatch *)(intptr_t)mh; int i;
+    return _re_group_index(m, g, &i) ? m->caps[2 * i + 1] : -1;
+}
+
+/* A word-valued result list: [item0, ...] as plain words (strings as pointers). */
+static MojoList *_re_groups_list(MojoReMatch *m, int64_t dflt)
+{
+    MojoList *l = mojo_list_new();
+    for (int i = 1; i <= m->re->pg->ngroups; i++) {
+        int64_t g = mojo_re_m_group((int64_t)(intptr_t)m, i);
+        mojo_list_append_int(l, g ? g : dflt);
+    }
+    return l;
+}
+
+static int64_t _re_findall(MojoRePat *r, char *s)
+{
+    MojoList *out = mojo_list_new();
+    int64_t n = (int64_t)strlen(s), pos = 0;
+    int nc = 2 * (r->pg->ngroups + 1);
+    int64_t *caps = (int64_t *)malloc((size_t)nc * sizeof(int64_t));
+    while (pos <= n && fre_exec(r->pg, s, n, pos, n, 1, caps)) {
+        int64_t a = caps[0], b = caps[1];
+        char *piece;
+        if (r->pg->ngroups == 0) { piece = (char *)malloc((size_t)(b - a) + 1); memcpy(piece, s + a, (size_t)(b - a)); piece[b - a] = 0; mojo_list_append_int(out, (int64_t)(intptr_t)piece); }
+        else if (r->pg->ngroups == 1) {
+            int64_t ga = caps[2], gb = caps[3]; int64_t ln = (ga >= 0 && gb >= 0) ? gb - ga : 0;
+            piece = (char *)malloc((size_t)ln + 1); if (ln) memcpy(piece, s + ga, (size_t)ln); piece[ln] = 0;
+            mojo_list_append_int(out, (int64_t)(intptr_t)piece);
+        } else {
+            MojoList *tup = mojo_list_new();
+            for (int i = 1; i <= r->pg->ngroups; i++) {
+                int64_t ga = caps[2 * i], gb = caps[2 * i + 1]; int64_t ln = (ga >= 0 && gb >= 0) ? gb - ga : 0;
+                piece = (char *)malloc((size_t)ln + 1); if (ln) memcpy(piece, s + ga, (size_t)ln); piece[ln] = 0;
+                mojo_list_append_int(tup, (int64_t)(intptr_t)piece);
+            }
+            mojo_mark_as_tuple(tup);
+            mojo_list_append_int(out, (int64_t)(intptr_t)tup);
+        }
+        pos = b > a ? b : b + 1;
+    }
+    free(caps);
+    return (int64_t)(intptr_t)out;
+}
+
+/* Expand a replacement template (\1, \g<1>, \g<name>, \n, \\) for one match. */
+static char *_re_expand(MojoReMatch *m, const char *tpl)
+{
+    size_t cap = strlen(tpl) + 64, len = 0; char *out = (char *)malloc(cap);
+    #define PUTS(str, ln) do { size_t _l = (ln); while (len + _l + 1 > cap) { cap *= 2; out = (char *)realloc(out, cap); } memcpy(out + len, (str), _l); len += _l; } while (0)
+    for (const char *p = tpl; *p; p++) {
+        if (*p != '\\' || !p[1]) { PUTS(p, 1); continue; }
+        p++;
+        if (*p >= '0' && *p <= '9') {
+            int g = *p - '0'; int64_t a = m->caps[2 * g], b = m->caps[2 * g + 1];
+            if (g <= m->re->pg->ngroups && a >= 0 && b >= 0) PUTS(m->text + a, (size_t)(b - a));
+        } else if (*p == 'g' && p[1] == '<') {
+            const char *e = strchr(p + 2, '>'); if (!e) { PUTS("\\g", 2); continue; }
+            char nm[64]; size_t nl = (size_t)(e - (p + 2)); if (nl >= sizeof nm) nl = sizeof nm - 1;
+            memcpy(nm, p + 2, nl); nm[nl] = 0;
+            int g = -1;
+            if (nm[0] >= '0' && nm[0] <= '9') g = atoi(nm);
+            else for (int i = 1; i <= m->re->pg->ngroups; i++) if (m->re->pg->gnames[i] && !strcmp(m->re->pg->gnames[i], nm)) g = i;
+            if (g >= 0 && g <= m->re->pg->ngroups) { int64_t a = m->caps[2 * g], b = m->caps[2 * g + 1]; if (a >= 0 && b >= 0) PUTS(m->text + a, (size_t)(b - a)); }
+            p = e;
+        } else if (*p == 'n') PUTS("\n", 1);
+        else if (*p == 't') PUTS("\t", 1);
+        else if (*p == '\\') PUTS("\\", 1);
+        else { PUTS("\\", 1); PUTS(p, 1); }
+    }
+    out[len] = 0;
+    #undef PUTS
+    return out;
+}
+
+/* pattern.sub(repl, string, count): repl is a template string or a callable taking the match. */
+static int64_t _re_sub(MojoRePat *r, int64_t repl, char *s, int64_t count, int64_t *nsubs)
+{
+    int64_t n = (int64_t)strlen(s), pos = 0, last = 0, done = 0;
+    size_t cap = (size_t)n + 64, len = 0; char *out = (char *)malloc(cap);
+    #define APPEND(str, ln) do { size_t _l = (ln); while (len + _l + 1 > cap) { cap *= 2; out = (char *)realloc(out, cap); } memcpy(out + len, (str), _l); len += _l; } while (0)
+    int is_call = mojo_is_callable_word(repl);
+    while (pos <= n && (count <= 0 || done < count)) {
+        int64_t mh = mojo_re_exec((int64_t)(intptr_t)r, s, pos, -1, 1);
+        if (!mh) break;
+        MojoReMatch *m = (MojoReMatch *)(intptr_t)mh;
+        int64_t a = m->caps[0], b = m->caps[1];
+        APPEND(s + last, (size_t)(a - last));
+        if (is_call) {
+            int64_t res = mojo_fnptr_call_1((void *)(intptr_t)repl, mh);
+            if (res) APPEND((char *)(intptr_t)res, strlen((char *)(intptr_t)res));
+        } else {
+            char *ex = _re_expand(m, (const char *)(intptr_t)repl);
+            APPEND(ex, strlen(ex)); free(ex);
+        }
+        done++; last = b;
+        pos = b > a ? b : b + 1;
+        if (b == a && a < n) { APPEND(s + a, 1); last = a + 1; }
+    }
+    if (last < n) APPEND(s + last, (size_t)(n - last));
+    out[len] = 0;
+    #undef APPEND
+    if (nsubs) *nsubs = done;
+    return (int64_t)(intptr_t)out;
+}
+
+static int64_t _re_split(MojoRePat *r, char *s, int64_t maxsplit)
+{
+    MojoList *out = mojo_list_new();
+    int64_t n = (int64_t)strlen(s), pos = 0, last = 0, done = 0;
+    while (pos <= n && (maxsplit <= 0 || done < maxsplit)) {
+        int64_t mh = mojo_re_exec((int64_t)(intptr_t)r, s, pos, -1, 1);
+        if (!mh) break;
+        MojoReMatch *m = (MojoReMatch *)(intptr_t)mh;
+        int64_t a = m->caps[0], b = m->caps[1];
+        if (b == a) { pos = a + 1; if (a >= n) break; continue; }
+        char *piece = (char *)malloc((size_t)(a - last) + 1); memcpy(piece, s + last, (size_t)(a - last)); piece[a - last] = 0;
+        mojo_list_append_int(out, (int64_t)(intptr_t)piece);
+        for (int i = 1; i <= r->pg->ngroups; i++) mojo_list_append_int(out, mojo_re_m_group(mh, i));
+        done++; last = b; pos = b;
+    }
+    char *tail = strdup(s + last);
+    mojo_list_append_int(out, (int64_t)(intptr_t)tail);
+    return (int64_t)(intptr_t)out;
+}
+
+static int64_t _re_finditer(MojoRePat *r, char *s)
+{
+    MojoList *out = mojo_list_new();
+    int64_t n = (int64_t)strlen(s), pos = 0;
+    while (pos <= n) {
+        int64_t mh = mojo_re_exec((int64_t)(intptr_t)r, s, pos, -1, 1);
+        if (!mh) break;
+        MojoReMatch *m = (MojoReMatch *)(intptr_t)mh;
+        mojo_list_append_int(out, mh);
+        pos = m->caps[1] > m->caps[0] ? m->caps[1] : m->caps[1] + 1;
+    }
+    return (int64_t)(intptr_t)out;
+}
+
+/* One entry point for every method call on a pattern or a match whose receiver is
+ * a word of unknown kind: `obj.name(*args)`.  Returns a word; 0 is None. */
+int64_t mojo_re_call(int64_t obj, char *name, MojoList *args, MojoDict *kw)
+{
+    int64_t n = args ? mojo_list_len(args) : 0;
+    int64_t a0 = n > 0 ? mojo_list_get_int(args, 0) : 0, a1 = n > 1 ? mojo_list_get_int(args, 1) : 0, a2 = n > 2 ? mojo_list_get_int(args, 2) : 0;
+    if (mojo_is_re_pattern(obj)) {
+        MojoRePat *r = (MojoRePat *)(intptr_t)obj;
+        int mode = !strcmp(name, "match") ? 0 : !strcmp(name, "search") ? 1 : !strcmp(name, "fullmatch") ? 2 : -1;
+        if (mode >= 0) return mojo_re_exec(obj, (char *)(intptr_t)a0, n > 1 ? a1 : 0, n > 2 ? a2 : -1, mode);
+        if (!strcmp(name, "findall")) return _re_findall(r, (char *)(intptr_t)a0);
+        if (!strcmp(name, "sub")) return _re_sub(r, a0, (char *)(intptr_t)a1, n > 2 ? a2 : 0, 0);
+        if (!strcmp(name, "split")) return _re_split(r, (char *)(intptr_t)a0, n > 1 ? a1 : 0);
+        if (!strcmp(name, "finditer")) return _re_finditer(r, (char *)(intptr_t)a0);
+    } else if (mojo_is_re_match(obj)) {
+        MojoReMatch *m = (MojoReMatch *)(intptr_t)obj;
+        if (!strcmp(name, "group")) return mojo_re_m_group(obj, n > 0 ? a0 : 0);
+        if (!strcmp(name, "start")) return mojo_re_m_start(obj, n > 0 ? a0 : 0);
+        if (!strcmp(name, "end")) return mojo_re_m_end(obj, n > 0 ? a0 : 0);
+        if (!strcmp(name, "groups")) { MojoList *gl = _re_groups_list(m, n > 0 ? a0 : 0); mojo_mark_as_tuple(gl); return (int64_t)(intptr_t)gl; }
+        if (!strcmp(name, "span")) {
+            MojoList *l = mojo_list_new();
+            mojo_list_append_int(l, mojo_re_m_start(obj, n > 0 ? a0 : 0));
+            mojo_list_append_int(l, mojo_re_m_end(obj, n > 0 ? a0 : 0));
+            mojo_mark_as_tuple(l);
+            return (int64_t)(intptr_t)l;
+        }
+    }
+    (void)kw;
+    mojo_raise_attribute_error(name);
+    return 0;
+}
+
+/* `pattern.match` read as a VALUE (not called): a variadic callable bound to the pattern. */
+static int64_t _re_bound_thunk(void *self, MojoList *args, const char *name)
+{
+    MojoList *a = args ? args : mojo_list_new();
+    return mojo_re_call((int64_t)(intptr_t)self, (char *)name, a, 0);
+}
+static int64_t _re_bt_match(void *self, MojoList *a) { return _re_bound_thunk(self, a, "match"); }
+static int64_t _re_bt_search(void *self, MojoList *a) { return _re_bound_thunk(self, a, "search"); }
+static int64_t _re_bt_fullmatch(void *self, MojoList *a) { return _re_bound_thunk(self, a, "fullmatch"); }
+static int64_t _re_bt_findall(void *self, MojoList *a) { return _re_bound_thunk(self, a, "findall"); }
+static int64_t _re_bt_sub(void *self, MojoList *a) { return _re_bound_thunk(self, a, "sub"); }
+static int64_t _re_bt_split(void *self, MojoList *a) { return _re_bound_thunk(self, a, "split"); }
+static int64_t _re_bt_finditer(void *self, MojoList *a) { return _re_bound_thunk(self, a, "finditer"); }
+static int64_t _re_bt_group(void *self, MojoList *a) { return _re_bound_thunk(self, a, "group"); }
+static int64_t _re_bt_groups(void *self, MojoList *a) { return _re_bound_thunk(self, a, "groups"); }
+static int64_t _re_bt_start(void *self, MojoList *a) { return _re_bound_thunk(self, a, "start"); }
+static int64_t _re_bt_end(void *self, MojoList *a) { return _re_bound_thunk(self, a, "end"); }
+static int64_t _re_bt_span(void *self, MojoList *a) { return _re_bound_thunk(self, a, "span"); }
+
+/* The attribute `name` of a pattern / match word, or 0 when the word is neither. */
+int64_t mojo_re_getattr(int64_t obj, char *name)
+{
+    void *fn = 0;
+    if (mojo_is_re_pattern(obj)) {
+        if (!strcmp(name, "match")) fn = (void *)_re_bt_match;
+        else if (!strcmp(name, "search")) fn = (void *)_re_bt_search;
+        else if (!strcmp(name, "fullmatch")) fn = (void *)_re_bt_fullmatch;
+        else if (!strcmp(name, "findall")) fn = (void *)_re_bt_findall;
+        else if (!strcmp(name, "sub")) fn = (void *)_re_bt_sub;
+        else if (!strcmp(name, "split")) fn = (void *)_re_bt_split;
+        else if (!strcmp(name, "finditer")) fn = (void *)_re_bt_finditer;
+        else if (!strcmp(name, "pattern")) return (int64_t)(intptr_t)((MojoRePat *)(intptr_t)obj)->pattern;
+        else if (!strcmp(name, "flags")) return ((MojoRePat *)(intptr_t)obj)->flags;
+        else if (!strcmp(name, "groups")) return ((MojoRePat *)(intptr_t)obj)->pg->ngroups;
+    } else if (mojo_is_re_match(obj)) {
+        if (!strcmp(name, "group")) fn = (void *)_re_bt_group;
+        else if (!strcmp(name, "groups")) fn = (void *)_re_bt_groups;
+        else if (!strcmp(name, "start")) fn = (void *)_re_bt_start;
+        else if (!strcmp(name, "end")) fn = (void *)_re_bt_end;
+        else if (!strcmp(name, "span")) fn = (void *)_re_bt_span;
+    }
+    if (!fn) return 0;
+    return (int64_t)(intptr_t)mojo_vararg_fn_new(fn, (void *)(intptr_t)obj, 0, 0, 1);
+}
+
+/* `re.escape` read as a function VALUE: the word-ABI wrapper. */
+int64_t mojo_re_escape_w(int64_t s) { return (int64_t)(intptr_t)mojo_re_escape((char *)(intptr_t)s); }
+
+/* `x.split(arg)` where `x` is a word of unknown kind: a compiled pattern splits,
+ * a string splits on `arg` (whitespace when `arg` is 0). */
+int64_t mojo_split_dyn(int64_t recv, int64_t arg)
+{
+    if (mojo_is_re_pattern(recv)) return _re_split((MojoRePat *)(intptr_t)recv, (char *)(intptr_t)arg, 0);
+    return (int64_t)(intptr_t)mojo_str_split((char *)(intptr_t)recv, (char *)(intptr_t)arg);
+}
+
+/* `itertools.chain(a, b, ...)` argument by argument: append every element of the
+ * iterable word `src` to `dst` under the kind it carries (eager; the sources are
+ * finite iterables here). */
+void mojo_chain_extend(MojoList *dst, int64_t src)
+{
+    MojoList *l = mojo_iter_word(src);
+    if (!l) return;
+    for (int64_t i = 0; i < mojo_list_len(l); i++)
+        mojo_list_append_word(dst, mojo_list_get_boxed(l, i));
 }

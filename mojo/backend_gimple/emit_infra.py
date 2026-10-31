@@ -2723,6 +2723,10 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                 else:
                     _iv = (aval if atype == 'int64_t'
                            else gen._new_val('int64_t', f'(int64_t){aval}'))
+                    if aval in getattr(gen, '_boxed_vals', ()):
+                        # a runtime-kinded list element read as a BOX: the string
+                        # is the word inside it (a box's own address is not one)
+                        _iv = gen._call_expr('int64_t', 'mojo_box_word', [('int64_t', _iv)])
                     coerced_args.append(gen._call_expr(
                         'char *', 'mojo_cstr_or_int_str', [('int64_t', _iv)]))
 
@@ -4049,7 +4053,15 @@ def _generator_to_list(gen, value: str) -> str:
     gen._emit(f"  if ({more}) goto {bb_body}; else goto {bb_after};")
     gen._emit_label(bb_body)
     val = gen._new_val(vct, f"{base}_value ({_iv})")
-    if vct in ('char *', 'MojoStr *'):
+    if api.get('mixed_slots') and vct == 'int64_t':
+        # a TAGGED-word generator: each value is appended under the kind it
+        # carries (a float box as a double, a bool box as a bool, a string as a
+        # string), so the list renders and iterates right.
+        gen._void_call('mojo_list_append_word',
+                       [('MojoList *', res), ('int64_t', val)])
+        gen._struct_slot_kinds[res] = _RuntimeKinded(['int', 'str'])
+        gen._maybe_kinds_vals.add(res)
+    elif vct in ('char *', 'MojoStr *'):
         gen._void_call('mojo_list_append_str',
                        [('MojoList *', res), ('const char *', val)])
         gen._elem_types[res] = 'char *'
@@ -4391,6 +4403,9 @@ def _list_repr_fn(gen, rav: str) -> str:
     no None-sentinel check) whenever the element type is known to be
     int64_t.
     """
+    # A list drained from a tagged-word generator carries its own per-slot kinds.
+    if isinstance(gen._struct_slot_kinds.get(rav), _RuntimeKinded):
+        return 'mojo_repr_list_kinds'
     # A list of 2-element PAIR lists (what `enumerate(x)` and `zip(a, b)`
     # build): the generic repr reads each inner slot through the
     # None-sentinel heuristic, so the index 0 of the first pair printed as
@@ -4433,6 +4448,14 @@ def _list_repr_fn(gen, rav: str) -> str:
     if _struct_slot_kind_bytes(gen, rav) is not None:
         return 'mojo_repr_list_kinds'
     et = gen._elem_types.get(rav)
+    # A value that MAY hold slots of different kinds, whose kinds the codegen
+    # cannot name statically, is a derived list: `list(t)`, `t[:]`, `t + t` of
+    # a mixed `struct.unpack` result, or a copy of a mixed literal. Its kinds
+    # travel on the value (`mojo_list_set_kinds`), so the kinds-aware helper
+    # reads them from the runtime row (see `_list_repr_call`). The single
+    # list-wide ctype below is exact only for a list that really is uniform.
+    if rav in gen._maybe_kinds_vals and et in ('double', 'int64_t'):
+        return 'mojo_repr_list_kinds'
     if et == 'double':
         return 'mojo_repr_list_doubles'
     if et == 'int64_t':
@@ -4493,10 +4516,21 @@ _TUPLE_SLOT_KIND_BYTE = {'int': 'i', 'int64_t': 'i', 'char': 'i', '_Bool': 'i',
                          'MojoDict *': 'l', 'MojoSet *': 'l'}
 
 
+class _RuntimeKinded(list):
+    """The `_struct_slot_kinds` row of a list whose slot kinds are only known at
+    RUN time (a list drained from a tagged-word generator): the list carries its
+    own per-slot kinds string (`mojo_list_append_word`), so the repr reads THAT
+    (`mojo_repr_list_kinds` handed the value's own row) instead of a static kinds
+    string. Two distinct entries, so every `len(set(kinds)) > 1` "this list is
+    mixed" test classifies it as mixed."""
+
+
 def _struct_slot_kind_bytes(gen, rav: str) -> str | None:
     kinds = gen._struct_slot_kinds.get(rav)
     if not kinds or len(set(kinds)) == 1:
         return None
+    if isinstance(kinds, _RuntimeKinded):
+        return None          # no static table: the value's own row (see the args builder)
     return ''.join(_STRUCT_KIND_BYTE[k] for k in kinds)
 
 
@@ -4540,9 +4574,17 @@ def _list_repr_call(gen, key: str, lst: str | None = None) -> tuple[str, list]:
     ends up being called with two arguments.
     """
     fn = gen._list_repr_fn(key)
-    args = [('MojoList *', lst if lst is not None else key)]
+    val = lst if lst is not None else key
+    args = [('MojoList *', val)]
     if fn == 'mojo_repr_list_kinds':
-        args.append(('const char *', gen._intern_string(_struct_slot_kind_bytes(gen, key))))
+        kinds = _struct_slot_kind_bytes(gen, key)
+        if kinds is not None:
+            args.append(('const char *', gen._intern_string(kinds)))
+        else:
+            # No static table: the kinds are the value's own row, which is
+            # what `mojo_repr_list_kinds` reads when handed NULL.
+            args.append(('const char *', gen._new_val(
+                'const char *', f'mojo_list_get_kinds ({val})')))
     elif fn == 'mojo_repr_list_slotkinds':
         args.append(('const char *', gen._intern_string(_tuple_slot_kind_bytes(gen, key))))
     return fn, args
@@ -5553,7 +5595,15 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
     gen._emit_label(bb_body)
     suf = gimple_ctypes.TypeLattice.list_suffix(elem)
-    if suf == 'double':
+    if _iv in getattr(gen, '_maybe_kinds_vals', ()) and gen._type_of(_as_str(gen0.target)) == 'int64_t':
+        # a list that carries its own per-slot kinds: read each slot as the box
+        # the runtime hands back (a float / str slot is boxed), exactly as the
+        # `for` statement over such a list does, so the target IS the element
+        # and a comprehension over it keeps each element's kind.
+        elem64 = gen._new_val('int64_t', f"mojo_list_get_boxed ({_iv}, {idx64})")
+        gen._boxed_vals.add(_tgt)
+        gen._emit(f"  {_tgt} = (int64_t) {elem64};")
+    elif suf == 'double':
         gen._emit(f"  {_tgt} = mojo_list_get_double ({_iv}, {idx64});")
     elif suf == 'str':
         # mojo_list_get_str returns char*, handle type mismatch with target variable
@@ -5687,6 +5737,11 @@ def _compr_generator_loop(gen, node, gen0, res: str, res_type: str, it_val: str)
         # reserved-identifier comment (`index` et al. are renamed by
         # _declare_var; body reads resolve through _c_names).
         gen._emit(f"  {gen._cname(_tgt)} = {val};")
+        if api.get('mixed_slots') and vct == 'int64_t':
+            gen._boxed_vals.add(gen._cname(_tgt))
+            if not hasattr(gen, '_tagged_gen_vals'):
+                gen._tagged_gen_vals = set()
+            gen._tagged_gen_vals.add(gen._cname(_tgt))
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
     gen._emit(f"  goto {bb_post};")
     gen._emit_label(bb_post)
@@ -6922,7 +6977,9 @@ def _gen_print(gen, args: list, kwargs: list = None):
                                                [('int64_t', aval)]), _owned_reprs)
                 resolved_parts.append(('char *', _rv))
                 continue
-            if _pi < len(args) and _is_may_hold_str_param(gen, args[_pi]):
+            if (_pi < len(args) and _is_may_hold_str_param(gen, args[_pi])) or aval in gen._dyn_word_vals \
+                    or (_pi < len(args) and isinstance(args[_pi], IdentExpr)
+                        and _as_str(args[_pi].name) in gen._dyn_word_locals):
                 _rv = gen._call_expr('char *', 'mojo_cstr_or_int_str',
                                      [('int64_t', aval)])
                 # CONVERT, do not print. This branch used to emit

@@ -1,5 +1,75 @@
 # CODEGEN_generator_function: Lib/enum.py
 
+## Status (2026-10-31, worktree work/bug-codegen-generator-function-lib-enum — ROUND: refusal unchanged, pinning regression added)
+
+Verified via `test_regress_enum_refusal.py` (passes): the 4 refusal lines
+for `Flag`/`IntFlag` × `_iter_member_by_value_`/`_iter_member_by_def_`
+remain in the doc, and the `cls`-access gate (`_cls_refs_supported`) still
+refuses them honestly rather than allowing a silent miscompile.
+The already-fixed sub-gap (`_declare_posthoc_class_attrs` for literal
+post-hoc class-attr writes) is still pinned by
+`generator_classmethod_reads_class_attributes_incl_posthoc`.
+No safe incremental step exists for the root cause (dynamic-metaclass-
+populated attributes `_flag_mask_`/`_value2member_map_` never appear
+as literal `AssignStmt`s in `Flag`'s body; modeling them requires a
+feature-sized `MojoClass`/`setattr`/MRO runtime, outside this session's
+scope per repeated doc assessments). Added `test_regress_enum_refusal.py`
+next to existing generator tests. Tree: doc kept, regression committed,
+no code change to codegen.
+
+## Status (2026-10-31, round 2 — measured the class-attribute model; one silent bug fixed, the dynamic-metaclass part is still the blocker)
+
+Measured with a user program shaped like `Flag`'s generators:
+
+```python
+class A:
+    base = 10
+    @classmethod
+    def gen(cls, n): ...yield cls.base + i...
+class B(A): base = 100
+A.zmask = 7
+```
+
+- **Already right:** a `@classmethod` generator reading a class-BODY attribute
+  resolves it per class (`B.gen` sees `base = 100`), and `cls` is not a bare
+  placeholder.
+- **Fixed (silent wrong value):** an attribute that is only ASSIGNED outside the
+  body (`A.zmask = 7`, which is how `EnumType.__new__` leaves `_flag_mask_` on a
+  class) was not a class attribute at all: `print(A.zmask)` printed an empty
+  container (`[]`). `module_gen._declare_posthoc_class_attrs` now declares it
+  from the literal on the right. Pinned by
+  `generator_classmethod_reads_class_attributes_incl_posthoc`.
+- **Still the blocker:** `Flag`'s `_flag_mask_` / `_value2member_map_` /
+  `_member_map_` are NOT assigned by a literal anywhere the compiler can see:
+  `EnumType.__new__` builds them from `classdict` and installs them with
+  `type.__new__` / `setattr`. The `_iter_member_*` generators would therefore
+  compile into reads of attributes nothing ever writes, and a program iterating
+  a Flag would fail at run time where today the whole module is (correctly)
+  interpreted. Closing it needs the metaclass machinery compiled — a run-time
+  class object (`MojoClass`: attribute dict + bases) that `type.__new__` creates,
+  `setattr(cls, ...)` and `cls.x = v` write, and `cls.x` reads with MRO lookup.
+  Separately noticed: a class-attribute read can collide with an unrelated
+  struct field of the same name elsewhere in the program (`extra`, the compiler's
+  own `ImportStmt.extra`), because the element-type tables are keyed by the bare
+  attribute name.
+
+## Status (2026-10-31 — measured again: unchanged by the tagged yield; the blocker is `cls` as a class OBJECT)
+
+`_iter_member_`, `_iter_member_by_def_`, `_iter_member_by_value_` still refuse on
+"a @classmethod generator that references `cls` in its body in an unsupported
+way". Their `cls._flag_mask_` / `cls._value2member_map_` / `cls._member_map_` are
+attributes `EnumType.__new__` populates at class-creation time, so the compiled
+codegen has nothing to read them from (and stubbing them miscompiles: every Flag
+iteration would yield nothing). The tagged yield does not touch this.
+
+The real prerequisite is a RUNTIME CLASS OBJECT for a class whose attributes are
+set dynamically: a `MojoDict *` of attribute -> word hung off the class, with
+`cls` bound to it, `cls.<attr>` a dict read (a missing attribute an
+AttributeError, not a 0), and `EnumType.__new__`'s `classdict[...] = ...` /
+`setattr(cls, ...)` writes going to the same dict. That is the dynamic-metaclass
+modelling `bugs/CODEGEN_*` has called feature-sized since 2026-09; it is also
+what `test_frame`'s `gi_frame` and any `cls`-attribute generator need.
+
 ## Status (2026-09-05 — cluster C re-examined under A3; no safe incremental step, unchanged)
 
 Re-examined during the C/D/E cluster pass. Confirmed via fresh isolated
