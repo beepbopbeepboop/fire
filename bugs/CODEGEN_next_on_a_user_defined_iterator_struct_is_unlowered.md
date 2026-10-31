@@ -3501,8 +3501,8 @@ Regression: the `user_iterator_struct_next_and_for` oracle program, which
 fails on the unfixed interpreter with `KeyError: 0` and passes now.
 
 The interpreter's builtin gap for the common builtins is closed by this change.
-`map`/`filter`/`reversed` still fail and are tracked, with the exact next step,
-in `bugs/RUN_builtins_over_a_user_iterator_struct_still_fail.md` (PARTIAL).
+`map`/`filter`/`reversed` are fixed by the same `_mojo_iterable` mechanism
+(`_MojoBoundArgCall.__call__`, `_MojoParametricFn.__call__`, `_mojo_reversed`);\n`dict` is added to `_MOJO_ITER_FIRST_ARG` (2026-10-30).
 
 **Still open (this bug's own remainder):** the compiled type-inference / in-TU
 iterator work described above is untouched by this change, and so is the
