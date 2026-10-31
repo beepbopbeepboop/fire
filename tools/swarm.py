@@ -95,6 +95,14 @@ def doc_path(doc):
     return "bugs/%s.md" % doc
 
 
+def hold_active(np, h, retry_s, now=None):
+    """A no-progress record holds its doc while the doc is unchanged AND the retry window has not passed."""
+    if not np:
+        return False
+    now = time.time() if now is None else now
+    return np["hash"] == h and now - np["at"] < retry_s
+
+
 def feed():
     """Keep every pool slot supplied: each slot gets (its count - running + 1) queued tasks, drawn from the pool's
     `feed` globs (skipping the pool's `skip` prefixes, and any doc a live task or external claim holds). A slot is
@@ -103,6 +111,7 @@ def feed():
     skips = pool.get("skip", [])
     st = load_state()
     held, made = held_claims(), 0
+    retry_s = pool.get("retry_hours", 12) * 3600.0
     running = C.running_by_slot()
     queued = {}
     for f in os.listdir(C.qdir()):
@@ -133,8 +142,11 @@ def feed():
             log("stopped %s: %s" % (doc, why))
             continue
         np = st.get("no_progress", {}).get(base)
-        if np and np == doc_hash(doc):
-            log("held %s: its last attempt made no commit and the doc has not changed since" % doc)
+        if isinstance(np, str):                # written before holds expired: start its clock now
+            np = {"hash": np, "at": time.time()}
+        if hold_active(np, doc_hash(doc), retry_s):
+            log("held %s: its last attempt made no commit; retried after %.1f h, or sooner if the doc changes"
+                % (doc, retry_s / 3600.0 - (time.time() - np["at"]) / 3600.0))
             continue
         prev = last_attempt(base) if st["fed"].get(doc) else None
         if prev:
@@ -169,19 +181,22 @@ def refill(target):
 
 
 def abandon_empty():
-    """A worker that exited with NO commits did nothing to land: free its claim, and record the doc's content hash so the
-    feeder does not re-feed it until the doc changes (progress is what requeues a doc, not a retry count)."""
+    """A worker that exited with NO commits did nothing to land: free its claim, and record the doc's content hash and
+    time so the feeder holds it for pool.json's retry_hours, or until the doc changes, whichever is first. A limit or
+    quota kill is not recorded: it bans the slot (control.py), it says nothing about the doc."""
     st = load_state()
     n = 0
     for name, t in C.load().items():
         if name.startswith(PREFIXES) and C.state_of(t) in ("exited-ok", "exited-err") and not C.ahead(t) \
                 and not C.git("status", "--short", cwd=t["worktree"], check=False) if os.path.isdir(t.get("worktree", "")) else False:
             subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "mark", name, "abandoned"], capture_output=True)
-            for c in t.get("claims", []):
-                if c.startswith("bug:"):
-                    docs = bug_docs(c[4:])
-                    if docs:
-                        st.setdefault("no_progress", {})[c[4:]] = doc_hash(docs[0])
+            # A limit or quota kill says nothing about the doc: the slot is banned for that, the doc is not held.
+            if not C.limit_hit(t):
+                for c in t.get("claims", []):
+                    if c.startswith("bug:"):
+                        docs = bug_docs(c[4:])
+                        if docs:
+                            st.setdefault("no_progress", {})[c[4:]] = {"hash": doc_hash(docs[0]), "at": time.time()}
             n += 1
     json.dump(st, open(state_path(), "w"), indent=1)
     return n

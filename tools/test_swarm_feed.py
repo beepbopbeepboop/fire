@@ -16,8 +16,38 @@ def check(name, cond):
     return cond
 
 
+def test_hold():
+    ok = True
+    H = "a" * 40
+    ok &= check("no record: not held", not S.hold_active(None, H, 3600))
+    ok &= check("same doc inside the retry window: held",
+                S.hold_active({"hash": H, "at": 1000.0}, H, 3600, now=2000.0))
+    ok &= check("same doc after the retry window: released",
+                not S.hold_active({"hash": H, "at": 1000.0}, H, 3600, now=1000.0 + 3600))
+    ok &= check("doc changed inside the window: released",
+                not S.hold_active({"hash": H, "at": 1000.0}, "b" * 40, 3600, now=2000.0))
+    return ok
+
+
+def test_limit_detection(tmp):
+    def wt(text):
+        d = os.path.join(tmp, "wt%d" % len(os.listdir(tmp)))
+        os.makedirs(d)
+        open(os.path.join(d, "work.log"), "w").write(text)
+        return {"worktree": d}
+    ok = True
+    ok &= check("claude CLI weekly limit line is a limit",
+                C.limit_hit(wt("=== spawned ===\nYou've hit your weekly limit \u00b7 resets 11am\n")))
+    ok &= check("a worker that merely READ a rate-limit text is not limited",
+                not C.limit_hit(wt("> read file\n    if rate limit exceeded: retry\n")))
+    return ok
+
+
 def main():
     ok = True
+    ok &= test_hold()
+    with tempfile.TemporaryDirectory() as tmp:
+        ok &= test_limit_detection(tmp)
     with tempfile.TemporaryDirectory() as tmp:
         C.MAIN = tmp
         os.makedirs(os.path.join(tmp, "bugs"))

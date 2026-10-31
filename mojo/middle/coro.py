@@ -67,6 +67,7 @@ def _cm_as_str(x) -> str:
 from mojo.middle.exprtypes import _is_asyncio_sleep_call, _is_asyncio_sock_recv_call, _walk_ast_invalidate, _gmi_nested_struct_defs
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.exprtypes as gimple_exprtypes
+from mojo.middle.module_shared import module_qualifier
 _ENV = 'MOJO_CORO'
 _MODE = 'stackswitch'
 _OLD_MODE = 'cpp'
@@ -1501,6 +1502,7 @@ _PTR_EVIDENCE: dict = {}      # function name -> set of its parameters used as p
 _PTR_FORWARDED: dict = {}     # function name -> parameters handed on to another function's path-word parameter
 _GEN_REC_ASSUME: dict = {}   # self-recursive generator -> assumed kind of its recursive loop target
 _MODULE_STMTS: list = []     # the module being lowered (for whole-module reference scans)
+_MODULE_QUALIFIER: str = ''  # sanitized module qualifier for generator base symbols
 # Names whose kind is being computed RIGHT NOW, module-level so that the
 # recursion guard covers `_static_env` -> `_sibling_gen_kind` -> resolve ->
 # `_static_env` re-entry as well as the direct `resolve` -> `resolve` case.
@@ -3809,6 +3811,7 @@ def _async_method_setup(fn, base, struct_name):
     the ordinary params start at 1 and `self` gets no prologue entry."""
     is_method = struct_name is not None
     base = base or (f'__mgco_{_cm_as_str(struct_name)}_{_cm_as_str(fn.name)}' if is_method
+                    else f'__mgco_{_MODULE_QUALIFIER}_{_cm_as_str(fn.name)}' if _MODULE_QUALIFIER
                     else f'__mgco_{_cm_as_str(fn.name)}')
     real_params = fn.params[1:] if is_method else fn.params
     arg_base = 1 if is_method else 0
@@ -5592,6 +5595,15 @@ def lower(stmts: list, closure_stmts=(),
     parameters, and so its yield slot -- see `_scan_callsite_param_kinds`.
     Without them an imported generator only ever sees its own module's calls.
     """
+    # Cache the sanitized module qualifier for free-function generator bases so
+    # two modules sharing a bare generator name (`def tokenize` common in
+    # stdlib) each emit its own distinct `__mgco_<mod>_<name>_*` symbol — the
+    # SB-1 analog for A3 generator trampolines. cf. cpp_async.py's matching
+    # `_func_qualifier(fn.name)` for `_mojogen_<qualifier>_<name>`;
+    # `module_qualifier` strips leading dots per-compile via the gen instance
+    # normally, here straight from the literal module_name arg.
+    global _MODULE_QUALIFIER
+    _MODULE_QUALIFIER = module_qualifier(module_name or '')
     _PARAM_NAMES.clear()
     _ASYNC_METHOD_NAMES.clear()
     _ASYNC_FN_NAMES.clear()
@@ -7073,6 +7085,7 @@ def _lower_one(fn: N.FunctionDef, meta: list,
     has_self = is_method and _rcv_kind == 'self'
     if base is None:
         base = (f'__mgco_{_cm_as_str(struct_name)}_{_cm_as_str(fn.name)}' if is_method
+                else f'__mgco_{_MODULE_QUALIFIER}_{_cm_as_str(fn.name)}' if _MODULE_QUALIFIER
                 else f'__mgco_{_cm_as_str(fn.name)}')
     body_name = f'{base}_body'
     env = _static_env(fn, struct_def)

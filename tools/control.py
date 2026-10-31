@@ -458,7 +458,7 @@ def cmd_enqueue(a):
 
 
 LIMIT_ERR = re.compile(r"model (is )?(unavailable|not found)|unknown model|usage limit|rate.?limit|quota|\b429\b|too many requests|insufficient (credit|balance)|"
-                       r"limit (exceeded|reached)|resets? (at|in) ", re.I)
+                       r"limit (exceeded|reached)|resets? (at|in) |hit your (weekly |daily |5-hour )?limit", re.I)
 BREAKER_MIN = 30   # after a worker dies on arrival, start nothing new for this long
 
 
@@ -528,7 +528,8 @@ def limit_hit(t):
     if not os.path.exists(lp):
         return False
     lines = re.sub(r"\x1b\[[0-9;]*m", "", open(lp, errors="replace").read()[-3000:]).splitlines()
-    errs = [l for l in lines if re.match(r"\s*Error:", l) or re.search(r"usage limit reached", l, re.I)]
+    errs = [l for l in lines if re.match(r"\s*Error:", l) or re.search(r"usage limit reached", l, re.I)
+            or re.match(r"\s*You've hit your", l)]   # the claude CLI's own limit line
     return any(LIMIT_ERR.search(l) for l in errs)
 
 
