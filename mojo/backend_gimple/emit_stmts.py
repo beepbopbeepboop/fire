@@ -1267,6 +1267,30 @@ def _gen_stmt_AssignStmt(gen, node):
     vtype, v = gen.lower_expr(node.value)
     if isinstance(node.target, gimple_ctypes.IdentExpr):
         tname = node.target.name
+        # A generator handle bound to a local whose slot is a plain word (it also
+        # holds a list on another path: `dirs = _iglob(...)` / `dirs = [dirname]`,
+        # then `for d in dirs`): the run time has to be told which generator it is
+        # for the `for` over the word to drain it.
+        _tdecl = gen.var_types.get(tname)
+        if _tdecl is None and vtype == 'MojoGenerator *':
+            # first assignment: the slot is declared from the pre-pass verdict
+            if tname in ginf.mixed_container_locals(gen):
+                _tdecl = 'int64_t'
+            else:
+                _fk = gen.current_func_name
+                _tdecl = (getattr(gen, '_inferred_var_types', {}).get(_fk, {}) or {}).get(tname)
+        if (vtype == 'MojoGenerator *' and v in gen._generator_var_api
+                and _tdecl is not None and _tdecl != 'MojoGenerator *'):
+            _gapi2 = gen._generator_var_api[v]
+            if _as_str(_gapi2.get('base') or '').startswith('__mgco_'):
+                _vk2 = {'int64_t': 0, '_Bool': 1, 'double': 2, 'char *': 3}.get(
+                    _as_str(_gapi2.get('value_ctype') or 'int64_t'))
+                if _vk2 is not None:
+                    _hw2 = gen._to_int64(vtype, v)
+                    _kv2 = gen._new_val('int64_t', str(_vk2))
+                    v = gen._call_expr('int64_t', 'mojo_gen_note_a3',
+                                       [('int64_t', _hw2), ('int64_t', _kv2)])
+                    vtype = 'int64_t'
         # A slot read that may be a BOX (`mojo_list_get_boxed`: `v = t[1]` off
         # a tuple whose kinds are only known at run time) is unwrapped when it
         # is bound to a name. The temp is tracked in `_boxed_vals`; the local
@@ -2794,6 +2818,21 @@ def _gen_stmt_ReturnStmt(gen, node):
         vtype: str = ''
         v: str = ''
         vtype, v = gen.lower_expr(node.value)
+        # A generator handle leaving a function whose return slot is a plain word
+        # (`def iglob(...): it = _iglob(...); return it`, consumed as `list(iglob(...))`):
+        # the consumer can only drain it if the run time knows which generator it is.
+        if (vtype == 'MojoGenerator *' and v in gen._generator_var_api
+                and _as_str(gen.func_ret_type) != 'MojoGenerator *'):
+            _gapi = gen._generator_var_api[v]
+            if _as_str(_gapi.get('base') or '').startswith('__mgco_'):
+                _vk = {'int64_t': 0, '_Bool': 1, 'double': 2, 'char *': 3}.get(
+                    _as_str(_gapi.get('value_ctype') or 'int64_t'))
+                if _vk is not None:
+                    _hw = gen._to_int64(vtype, v)
+                    _kv = gen._new_val('int64_t', str(_vk))
+                    v = gen._call_expr('int64_t', 'mojo_gen_note_a3',
+                                       [('int64_t', _hw), ('int64_t', _kv)])
+                    vtype = 'int64_t'
         # A function that is used as a VALUE (passed or stored, never only
         # called) is invoked by a consumer that cannot know its return type,
         # so a string/float list it returns carries its slot kind (the

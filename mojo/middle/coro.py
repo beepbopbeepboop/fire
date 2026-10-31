@@ -1594,6 +1594,10 @@ def _compute_pointer_evidence(stmts) -> None:
                                 and v.name not in _PTR_EVIDENCE[nm]):
                             _PTR_EVIDENCE[nm].add(v.name)
                             changed = True
+    # Carried on the node as well: the table is per lower() call, and an imported
+    # module's functions are inferred after the importing module's lower() has run.
+    for nm, fd in fds.items():
+        fd._ptr_forwarded = frozenset(_PTR_FORWARDED.get(nm, ()))
 
 
 def _register_generator_defs(stmts) -> None:
@@ -5238,6 +5242,53 @@ def _evidently_int_name(name: str, body: list) -> bool:
     return False
 
 
+def _desugar_attr_tuple_assign(stmts: list) -> None:
+    """`append, extend = buf.append, buf.extend` -> two plain assignments.
+
+    A parallel assignment whose targets are plain names and whose right side is a
+    same-length tuple of expressions that mention none of those names is exactly
+    its sequential spelling. Done only when an element is an attribute read: that
+    is the bound-method-value shape (`fnmatch._join_translated_parts`), which the
+    tuple-assignment lowering types as a word and then calls through a data
+    address, while a plain `x = obj.method` assignment gets the right carrier."""
+    def _names(e):
+        out = set()
+        for n in _walk(e):
+            if isinstance(n, N.IdentExpr):
+                out.add(n.name)
+        return out
+
+    def _fix(body):
+        out = []
+        for st in body:
+            if (isinstance(st, N.AssignStmt)
+                    and isinstance(st.target, N.TupleExpr)
+                    and isinstance(st.value, (N.TupleExpr, N.ListExpr))
+                    and getattr(st, 'type_ann', None) is None
+                    and len(st.target.elements) == len(st.value.elements)
+                    and all(isinstance(t, N.IdentExpr) for t in st.target.elements)
+                    and len({t.name for t in st.target.elements}) == len(st.target.elements)
+                    and any(isinstance(e, N.MemberExpr) for e in st.value.elements)):
+                tnames = {t.name for t in st.target.elements}
+                if all(not (_names(e) & tnames) for e in st.value.elements):
+                    for t, e in zip(st.target.elements, st.value.elements):
+                        out.append(N.AssignStmt(target=t, value=e, line=st.line,
+                                                col=getattr(st, 'col', 0)))
+                    continue
+            out.append(st)
+        return out
+
+    for root in stmts:
+        for n in _walk(root):
+            for fld in ('body', 'then_body', 'else_body', 'finally_body'):
+                sub = getattr(n, fld, None)
+                if isinstance(sub, list) and sub and any(isinstance(x, N.AssignStmt) and isinstance(x.target, N.TupleExpr) for x in sub):
+                    new = _fix(sub)
+                    if len(new) != len(sub):
+                        setattr(n, fld, new)
+                        _walk_ast_invalidate(n)
+
+
 def _lower_escaping_generators(stmts: list) -> None:
     """A SYNC generator defined inside a plain function or method that reads the
     enclosing scope and cannot stay nested -- it ESCAPES as a value
@@ -5547,6 +5598,7 @@ def lower(stmts: list, closure_stmts=(),
     _STRUCT_NAMES.clear()
     _UNTHREADABLE_NESTED_ASYNC_GENS.clear()
     _STRUCT_NAMES.update(s.name for s in stmts if isinstance(s, N.StructDef))
+    _desugar_attr_tuple_assign(stmts)
     _lower_closing_withs(stmts)
     _lower_callable_choices(stmts)
     _lower_escaping_generators(stmts)

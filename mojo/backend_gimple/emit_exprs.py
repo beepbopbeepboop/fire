@@ -1881,6 +1881,16 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
                     and isinstance(getattr(_host_os, _mem, None), int)):
                 return 'int64_t', gen._new_val('int64_t', str(getattr(_host_os, _mem)))
 
+        # `re.IGNORECASE` & co.: the flag values the run-time regex engine reads.
+        if _canon == 're':
+            if _as_str(node.member) == 'escape':
+                return 'void *', gen._new_val('void *', '(void *)mojo_re_escape_w')
+            _re_flags = {'NOFLAG': 0, 'I': 2, 'IGNORECASE': 2, 'M': 8, 'MULTILINE': 8,
+                         'S': 16, 'DOTALL': 16, 'U': 32, 'UNICODE': 32, 'X': 64,
+                         'VERBOSE': 64, 'A': 256, 'ASCII': 256}
+            if _as_str(node.member) in _re_flags:
+                return 'int64_t', gen._new_val('int64_t', str(_re_flags[_as_str(node.member)]))
+
         # Special handling for os.path attribute access
         if _canon == 'os' and node.member == 'path':
             # The actual function call will be handled at the call site

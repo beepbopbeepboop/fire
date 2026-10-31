@@ -1588,6 +1588,105 @@ def _is_callable_field_name(gen, member: str) -> bool:
     return True
 
 
+# Methods of a run-time compiled pattern / its match objects, called on a word whose
+# static kind nothing recorded (`magic_check.search(s)`, `m.group(1)`).
+_RE_DYN_METHODS = frozenset(('match', 'search', 'fullmatch', 'findall', 'group', 'groups',
+                             'start', 'end', 'span', 'sub', 'split', 'finditer'))
+
+
+def _re_word_arg(gen, expr):
+    """Lower `expr` to an int64_t word (a string as its pointer)."""
+    t, v = gen.lower_expr(expr)
+    if t == 'double':
+        v = gen._call_expr('int64_t', 'mojo_box_from_double', [('double', v)])
+        return v
+    return gen._to_int64(t, v)
+
+
+def _lower_re_dynamic_call(gen, node, recv, method):
+    """`obj.method(*args, **kw)` on a word of unknown kind: the run time decides
+    whether it is a pattern / match (`mojo_re_call`)."""
+    if method == 'split' and len(node.args) <= 1 and not getattr(node, 'kwargs', None):
+        # str.split and pattern.split share a name: the run time tells them apart.
+        a0 = _re_word_arg(gen, node.args[0]) if node.args else gen._new_val('int64_t', '0')
+        r = gen._call_expr('int64_t', 'mojo_split_dyn',
+                           [('int64_t', gen._to_int64('int64_t', recv)), ('int64_t', a0)])
+        lt = gen._coerce_to_type('int64_t', 'MojoList *', r)
+        gen._elem_types[lt] = 'char *'
+        return 'MojoList *', lt
+    lst = gen._call_expr('MojoList *', 'mojo_list_new', [])
+    for a in node.args:
+        w = _re_word_arg(gen, a)
+        gen._void_call('mojo_list_append_int', [('MojoList *', lst), ('int64_t', w)])
+    for _kn, _kv in (getattr(node, 'kwargs', None) or []):
+        gen.lower_expr(_kv)
+    kw = gen._new_val('MojoDict *', '(MojoDict *)0')
+    r = gen._call_expr('int64_t', 'mojo_re_call',
+                       [('int64_t', gen._to_int64('int64_t', recv)),
+                        ('char *', gen._intern_string(_as_str(method))),
+                        ('MojoList *', lst), ('MojoDict *', kw)])
+    # The result kinds the methods have, so a consumer (a list of groups, a print)
+    # reads them as what they are rather than as an unknown word.
+    if method == 'group':
+        return 'char *', gen._coerce_to_type('int64_t', 'char *', r)
+    if method in ('groups', 'findall', 'split', 'sub'):
+        if method == 'sub':
+            return 'char *', gen._coerce_to_type('int64_t', 'char *', r)
+        lt = gen._coerce_to_type('int64_t', 'MojoList *', r)
+        gen._elem_types[lt] = 'char *'
+        return 'MojoList *', lt
+    if method == 'span':
+        lt = gen._coerce_to_type('int64_t', 'MojoList *', r)
+        gen._elem_types[lt] = 'int64_t'
+        return 'MojoList *', lt
+    gen._dyn_word_vals.add(r)
+    return 'int64_t', r
+
+
+def _lower_re_module_call(gen, node, method):
+    """`re.compile(p, flags)` / `re.match|search|fullmatch(p, s, flags)` /
+    `re.findall(p, s)` with a pattern known only at run time: a compiled pattern
+    handle, or the match."""
+    args = node.args
+    flags_expr = args[1] if method == 'compile' and len(args) > 1 else (
+        args[2] if method != 'compile' and len(args) > 2 else None)
+    pat = _re_word_arg(gen, args[0])
+    if flags_expr is not None:
+        fl = _re_word_arg(gen, flags_expr)
+    else:
+        fl = gen._new_val('int64_t', '0')
+    pat_s = gen._new_val('char *', f'(char *){pat}')
+    h = gen._call_expr('int64_t', 'mojo_re_compile', [('char *', pat_s), ('int64_t', fl)])
+    gen._dyn_word_vals.add(h)
+    if method == 'compile':
+        return 'int64_t', h
+    if len(args) < 2:
+        return 'int64_t', h
+    sw = _re_word_arg(gen, args[1])
+    s_s = gen._new_val('char *', f'(char *){sw}')
+    if method == 'findall':
+        lst = gen._call_expr('MojoList *', 'mojo_list_new', [])
+        gen._void_call('mojo_list_append_int', [('MojoList *', lst), ('int64_t', sw)])
+        kw = gen._new_val('MojoDict *', '(MojoDict *)0')
+        r = gen._call_expr('int64_t', 'mojo_re_call',
+                           [('int64_t', h), ('char *', gen._intern_string('findall')),
+                            ('MojoList *', lst), ('MojoDict *', kw)])
+    else:
+        mode = {'match': 0, 'search': 1, 'fullmatch': 2}[method]
+        zero = gen._new_val('int64_t', '0')
+        neg1 = gen._new_val('int64_t', '-1')
+        md = gen._new_val('int64_t', str(mode))
+        r = gen._call_expr('int64_t', 'mojo_re_exec',
+                           [('int64_t', h), ('char *', s_s), ('int64_t', zero),
+                            ('int64_t', neg1), ('int64_t', md)])
+    if method == 'findall':
+        lt = gen._coerce_to_type('int64_t', 'MojoList *', r)
+        gen._elem_types[lt] = 'char *'
+        return 'MojoList *', lt
+    gen._dyn_word_vals.add(r)
+    return 'int64_t', r
+
+
 def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """Lower obj.method(args) — handles module calls, raw C pointers (UnsafePointer) and structs."""
     func = node.func  # MemberExpr
@@ -2384,6 +2483,12 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                                     [(arg_type, arg_val)])
                 gen._elem_types[t] = 'char *'
                 return 'MojoList *', t
+            elif outer_member == 'normcase' and len(node.args) == 1:
+                # POSIX `normcase` is `os.fspath`: the path itself.
+                arg_type, arg_val = gen.lower_expr(node.args[0])
+                if arg_type in ('char *', 'void *'):
+                    return 'char *', gen._coerce_to_type(arg_type, 'char *', arg_val)
+                return arg_type, arg_val
             elif outer_member == 'expanduser' and len(node.args) == 1:
                 arg_type, arg_val = gen.lower_expr(node.args[0])
                 t = gen._call_expr('char *', 'int64_t_expanduser', [(arg_type, arg_val)])
@@ -2712,6 +2817,9 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 arg_type, arg_val = 'char *', arg_cast
             t = gen._call_expr('char *', 'mojo_re_escape', [(arg_type, arg_val)])
             return 'char *', t
+        if module_name == 're' and method_name in ('compile', 'match', 'search', 'fullmatch', 'findall') \
+                and not getattr(node, 'kwargs', None) and node.args:
+            return _lower_re_module_call(gen, node, method_name)
         if module_name == 're' and method_name == 'sub':
             # re.sub(pattern, callback, src) → mojo_re_sub_fn(pattern, callback, env, src)
             if len(node.args) >= 3:
@@ -3410,6 +3518,15 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # `cls` placeholder in its receiver slot, so the raw int64_t pair is
     # what must be passed for it (see the branch's own comment).
     _recv_ot_raw, _recv_ov_raw = ot, ov
+    # `split` is both a string method and a pattern method: on a word of UNKNOWN kind
+    # (a compiled pattern held in a local, `re.compile(...)`'s result) the run time
+    # picks (`mojo_split_dyn`).
+    if (_as_str(func.member) == 'split' and ot in ('int64_t', 'int')
+            and (ov in gen._dyn_word_vals
+                 or (isinstance(func.obj, gimple_ctypes.IdentExpr)
+                     and _as_str(func.obj.name) in gen._dyn_word_locals))
+            and len(node.args) <= 1 and not getattr(node, 'kwargs', None)):
+        return _lower_re_dynamic_call(gen, node, ov, 'split')
     # A receiver that lowers to a DEFERRED, uncalled bound-method value
     # (`self.name.rfind('.')` where `name` is a bare @property read —
     # pathlib/__init__.py's `PurePath.stem`) must be AUTO-INVOKED before
@@ -4583,6 +4700,8 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             return gen._stub_result(ot, ov_local,
                                     f'{_marker_mod}.{method}() — raises: module '
                                     f'not compiled')
+        if ot in ('int64_t', 'int') and method in _RE_DYN_METHODS:
+            return _lower_re_dynamic_call(gen, node, ov_local, method)
         if node.args:
             at, av = gen.lower_expr(node.args[0])
             # Coerce argument to the same type; GIMPLE requires separate cast stmt.

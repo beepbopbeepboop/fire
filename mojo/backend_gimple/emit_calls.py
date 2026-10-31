@@ -1381,6 +1381,18 @@ def _lower_factory_call(gen, node: gimple_ctypes.CallExpr, rec: dict) -> tuple[s
 
 
 def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    # `functools.lru_cache(maxsize=N)(f)` / `functools.cache(f)`: memoization is an
+    # optimization with no observable effect here, so the decorated value IS `f`.
+    _lc = node.func
+    if (isinstance(_lc, gimple_ctypes.CallExpr) and len(node.args) == 1
+            and ((isinstance(_lc.func, gimple_ctypes.MemberExpr)
+                  and _as_str(_lc.func.member) in ('lru_cache', 'cache')
+                  and isinstance(_lc.func.obj, gimple_ctypes.IdentExpr)
+                  and _as_str(gen.imported_symbols.get(_lc.func.obj.name, {}).get('module')
+                              or _lc.func.obj.name) == 'functools')
+                 or (isinstance(_lc.func, gimple_ctypes.IdentExpr)
+                     and _as_str(_lc.func.name) in ('lru_cache', 'cache')))):
+        return gen.lower_expr(node.args[0])
     # `sys.audit(event, *args)`: this runtime installs no audit hooks, so raising
     # an audit event has no observable effect. Its arguments are still
     # evaluated (side effects, errors) and the call yields None.
@@ -5583,7 +5595,8 @@ def _lower_ctor_from_iterable(gen, kind: str, node: gimple_ctypes.CallExpr) -> t
             # the comprehension's cast block neither needs nor fires.
             gen.var_types[_av] = _st
             _arg0 = gimple_ctypes.IdentExpr(_av, node.line, node.col)
-        elif _at in _COMPREHENSION_ITER_TYPES:
+        elif (_at in _COMPREHENSION_ITER_TYPES
+              and not isinstance(_arg0, gimple_ctypes.CallExpr)):
             # A BOXED word (static int64_t, real type a known iterable): this
             # is exactly how a module-GLOBAL list/dict reads back. Stay with
             # the ORIGINAL expression — _lower_comprehension re-lowers it into
@@ -7673,6 +7686,8 @@ def _lower_fnptr_call_value(gen, fp_type: str, fp_raw: str, node: gimple_ctypes.
                            [('void *', fp_void)] + [('int64_t', w) for w in widened[:4]])
         return 'double', t
     raw_t = gen._new_val('int64_t', f'{helper} ({call_args})')
+    if ret_type == 'int64_t':
+        gen._dyn_word_vals.add(raw_t)   # nothing says what the callee returns: a word of unknown kind
     # Calling a HIGHER-ORDER PARAMETER whose declared default is a compiled
     # generator of this compile (`def walk_tree(root, *, walk=_walk_tree)`
     # — Tools/c-analyzer/c_common/fsutil.py's whole idiom, and the shape

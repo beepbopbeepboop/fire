@@ -1,5 +1,35 @@
 # CODEGEN_generator_function: Lib/glob.py
 
+## Status (2026-10-31, round 11 — a RUN-TIME `re` exists; `fnmatch` + `glob` give CPython's answers for literal and wildcard patterns, `has_magic`, `escape`; `**`, `root_dir` and bytes patterns are what is left)
+
+Landed (`test_runtime_re.py`, registered as `runtimere` in `check`/`gate`: 48 engine cases
+and a compiled program, both diffed against CPython's `re`):
+- `runtime/fire_re_engine.inc`: a backtracking regex engine that compiles a pattern STRING
+  at run time (Python syntax: classes, groups, named groups, alternation, greedy / lazy /
+  possessive repeats, counted repeats, `\b \B \A \Z \z`, lookahead / lookbehind, atomic groups,
+  backreferences, inline flag groups, UTF-8 code points). Object model in fire_runtime.c:
+  `mojo_re_compile / mojo_re_exec / mojo_re_call / mojo_re_getattr` (pattern + match
+  objects are registered heap words; `.match` read as a value is a variadic callable).
+- compiler: `re.compile / match / search / fullmatch / findall` with a run-time pattern,
+  methods on a word of unknown kind (`magic_check.search(s)`, `m.group(1)`, `.span()`,
+  `.groups()`, `.sub`, `.split` - run time picks pattern vs str for `split`), `re.I/S/M/...`
+  constants, `re.escape` as a value, `functools.lru_cache(...)(f)` as identity,
+  `os.path.normcase`, `a, b = x.m1, x.m2` desugared to two assignments (the tuple form
+  jumped through a data address), `list(<call returning a handle>)` no longer evaluates
+  the call twice, a generator handle leaving a function / bound to a word local is
+  registered (`mojo_gen_note_a3`) so a `for` / `list()` over the word drains it, abstract
+  methods return a word, a mixed tuple (`('.', b'.'[0])`) no longer crashes `in`.
+- measured against CPython 3.15's own `fnmatch.py` + `glob.py` compiled as siblings:
+  `fnmatch.translate/fnmatch/fnmatchcase`, `glob.has_magic`, `glob.escape`,
+  `glob.glob('/p/*.py')`, `glob.glob('/p/s*/*')`, `_rlistdir`, `_glob2` match CPython.
+
+Still wrong (measured, in this order): `glob.glob('/p/**', recursive=True)` returns the right
+NUMBER of entries but three of the strings are freed memory (names yielded out of a
+generator frame whose list was released); `glob.glob('*.py', root_dir=...)` ignores
+`root_dir` (the keyword-only argument of the public entry is not reaching `_join`);
+`glob.glob('/p/**/*.py', recursive=True)` crashes; `glob.glob(b'...')` has not been
+re-measured. Also seen: `sorted(<list of tagged strings>)` orders by pointer.
+
 ## Status (2026-10-31, round 10 — `glob.py` NOW COMPILES (`compile_to_gimple_with_cpp` accepts the whole module, links and runs); what stands between it and CPython's answers is the `re` module at run time)
 
 Measured with CPython 3.15's `glob.py` as a sibling module (a driver importing it):

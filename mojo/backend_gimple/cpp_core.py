@@ -6193,6 +6193,12 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 and _decl_t in ('int64_t', 'char *', 'MojoList *', 'MojoDict *', 'MojoSet *')):
             return [f"{indent}{cpp_name} = _mj_w({val});"]
         _acast = _cpp_assign_cast_type(gen, val)
+        if (_acast is None and isinstance(s.value, gimple_ctypes.IdentExpr)
+                and gen._cpp_declared is not None):
+            # a pointer-typed local / parameter assigned into a word-typed local
+            _vt0 = gen._cpp_declared.get(s.value.name)
+            if _vt0 in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *'):
+                _acast = _vt0
         if (_acast is not None and _decl_t in ('int64_t', 'char *', 'MojoList *',
                                                'MojoDict *', 'MojoSet *')
                 and _acast != _decl_t):

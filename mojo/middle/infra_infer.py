@@ -733,6 +733,19 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                         is_indirect = isinstance(a, gimple_ctypes.IdentExpr) and a.name in single_char_vars
                         if (is_direct or is_indirect) and _is_single_char_literal(b):
                             _F['is_char_compared'] = True
+                if expr.op == 'in' and isinstance(expr.right, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
+                    # `path[0] in ('.', ...)`: an element of the parameter tested
+                    # against single-character string literals is a character of a
+                    # string, exactly as `path[0] == '.'` is (Lib/glob.py's
+                    # `_ishidden`).
+                    _a_in = expr.left
+                    if (isinstance(_a_in, gimple_ctypes.SubscriptExpr)
+                            and not isinstance(_a_in.index, gimple_ctypes.SliceExpr)
+                            and isinstance(_a_in.obj, gimple_ctypes.IdentExpr)
+                            and _a_in.obj.name in derived_from_param):
+                        for _el in expr.right.elements:
+                            if _is_single_char_literal(_el):
+                                _F['is_char_compared'] = True
                 if expr.op == '+':
                     # `param + <string literal>` / `<string literal> +
                     # param` (directly, or through a local already known
@@ -1386,7 +1399,8 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                         # parameter (`iglob` -> `_iglob`, a generator this
                         # inference never sees).
                         import mojo.middle.coro as _coro
-                        if pname in _coro._PTR_FORWARDED.get(_as_str(func.name), ()):
+                        if (pname in _coro._PTR_FORWARDED.get(_as_str(func.name), ())
+                                or pname in getattr(func, '_ptr_forwarded', ())):
                             _os_path_arg = True
                         _fallback = 'MojoList *'
                         inferred[pname] = (_returned_param_containers(func)
