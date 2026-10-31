@@ -6,8 +6,7 @@
 (the arm64 data-word bug, whose ordinary and DYLIB halves are fixed; the frame
 half is unreachable because of THIS).
 
-**Status: OPEN, and it is a regression from the stack-floor guard rework, not a
-documented limit.**
+**Status: PARTIAL FIX, 2026-10-31 (`work/formal2064-docs`).** `formal/arm64_proof_gen.py::_frame_methods` now detects the guard's conditional branch (`B.cond` at idx 51/52/53) in the first 32 words after the function label, resolves its target label, and scans from `body_entry = guard_target` rather than the guard's start. The `rets`, `end`, branch-check and `_frame_slot_accesses` ranges all use `body_entry`. Committed as partial progress; the full by-reference receiver proof path (`_generate_frame_proof`) is still unreachable until the method finder actually produces methods, which this change enables but which is not yet verified green over the example corpus. Not a documented limit.
 
 ## What I ran
 

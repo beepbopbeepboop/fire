@@ -12527,15 +12527,39 @@ def _frame_methods(prog, code: bytes, info: dict):
         if not src:
             continue
         nxt = ordered[i + 1][1] if i + 1 < len(ordered) else None
+
+        # The stack-floor guard (STP/ADRP/LDR/CMP/B.cond to body) lives in the
+        # prologue since bfeec991; skip it when scanning for frame methods.
+        # See bugs/FORMAL_arm64_the_frame_method_finder_scans_the_guard_prologue_and_finds_no_method.md
+        body_entry = entry
+        guard_target = None
+        for pc in range(entry, min(entry + 32, nxt or len(code))):
+            w = words.get(pc)
+            if w is None:
+                continue
+            idx = _step_branch_index(w)
+            if idx in (51, 52, 53):  # B.cond / B / BL — guard branch
+                imm26 = (w >> 6) & 0x3ffffff
+                if imm26 & 0x02000000:
+                    imm26 |= ~0x3ffffff
+                target_pc = pc + 4 + imm26 * 4
+                for lbl, lbl_addr in labels.items():
+                    if lbl_addr == target_pc and lbl_addr >= entry:
+                        guard_target = lbl_addr
+                        break
+                if guard_target is not None:
+                    break
+        if guard_target is not None and guard_target < (nxt or float('inf')):
+            body_entry = guard_target
         rets = [pc for pc, w in words.items()
-                if w == 0xd65f03c0 and pc >= entry and (nxt is None or pc < nxt)]
+                if w == 0xd65f03c0 and pc >= body_entry and (nxt is None or pc < nxt)]
         if not rets:
             continue
         end = max(rets) + 4
         if any(_step_branch_index(words[pc]) in (14, 15, 16, 17, 51, 52, 53)
-               for pc in words if entry <= pc < end):
+               for pc in words if body_entry <= pc < end):
             continue                      # a branch: not the leaf shape
-        mach = _frame_slot_accesses(words, entry, end)
+        mach = _frame_slot_accesses(words, body_entry, end)
         if mach is None or len(mach) != len(src):
             continue
         pairs, stores = [], []
