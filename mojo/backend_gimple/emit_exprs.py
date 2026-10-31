@@ -2714,7 +2714,8 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     aliases = gen._struct_comptime_aliases.get(struct_name)
     if aliases and node.member in aliases:
         val_ast = gen._subst_idents(aliases[node.member],
-                                     {'Self': node.obj, struct_name: node.obj})
+                                     {'Self': gimple_ctypes.IdentExpr(name=struct_name),
+                                      struct_name: node.obj})
         return gen.lower_expr(val_ast)
     # Class-level attribute (not an instance field) — redirect to global variable.
     # A bare class-name read goes to the synthesized backing global / the
