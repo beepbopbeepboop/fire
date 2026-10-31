@@ -4703,6 +4703,27 @@ def main():
     print(total)
 """, "1996000000\n", 40)
 
+    # Regression for bug:CODEGEN_closure_env_and_boxed_local_never_freed —
+    # the escaping half (a returned closure's box stays alive with it).
+    # Before the single-owner design this leaks ~91 B/iter (38 MB at 400k);
+    # after it must stay flat (within 40 MB ceiling) with stdout unchanged.
+    test_gimple_bounded_memory("gimple_boxed_mut_local_escapes_is_flat", """\
+def make_counter(n: Int):
+    var x = n
+    def bump() -> Int:
+        nonlocal x
+        x = x + 1
+        return x
+    return bump
+
+def main():
+    var total = 0
+    for r in range(400000):
+        var f = make_counter(r)
+        total += f() % 1000
+    print(total)
+""", "199800000\n", 40)
+
     # ── The other side of the same rule: a lambda bound inside a nested `def`
     # that RETURNS it is the closure's escape, so `maker`'s box must be kept.
     # The per-owner walk refuses `inner` (a returned def is not owned) and must
