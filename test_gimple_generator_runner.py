@@ -2559,6 +2559,40 @@ def main():
     # Two classes each with a nested `g` that captures `self`: the hoisted
     # bases are struct-qualified, so neither generator is mistaken for the
     # other.
+    # test_frame.py's `test_clear_generator` shape: a nested generator that
+    # reads `self`, WRITES an enclosing local through `nonlocal` in a
+    # `finally`, and is driven by `next(gen)` then `gen.close()`. `.close()`
+    # drives the generator in place (it does not hand the object out of the
+    # method, so `self` capture is still sound), and its lowering had assigned
+    # the int64_t `__mojo_gen_close` result into a `_Bool` temp -- a hard
+    # `-fgimple` "invalid conversion in gimple call".
+    test_generator_stdout("nested_generator_method_self_nonlocal_write_then_close", """\
+class T:
+    def __init__(self, n):
+        self.n = n
+
+    def inner(self):
+        return self.n
+
+    def run(self):
+        endly = 0
+        def g():
+            nonlocal endly
+            try:
+                yield 1
+                self.inner()
+            finally:
+                endly = 5
+        gen = g()
+        print(next(gen))
+        print(endly)
+        gen.close()
+        print(endly)
+
+t = T(3)
+t.run()
+""", "1\n0\n5\n")
+
     test_generator_stdout("nested_generator_method_same_name_two_classes", """\
 struct A:
     var k: Int

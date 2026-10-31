@@ -5730,6 +5730,11 @@ def _generator_result_escapes(outer: N.FunctionDef, name: str) -> bool:
             safe_names.add(id(n.target))
         elif _is_next_of(n) and isinstance(n.args[0], N.IdentExpr):
             safe_names.add(id(n.args[0]))
+        elif (isinstance(n, N.MemberExpr) and isinstance(n.obj, N.IdentExpr)
+                and n.member in ('close', 'send', 'throw')):
+            # `gen.close()` / `gen.send(v)` / `gen.throw(e)` drive the
+            # generator in place; the object does not leave the frame.
+            safe_names.add(id(n.obj))
     for n in nodes:
         if isinstance(n, N.IdentExpr) and n.name in local_names and id(n) not in safe_names:
             return True

@@ -1,5 +1,39 @@
 # CODEGEN_generator_function: Lib/test/test_frame.py
 
+## Status (2026-10-30, `work/gen-test-frame` — `gen.close()` no longer defeats the `self` capture; the three remaining refusals are all Python FRAME OBJECTS)
+
+Landed (pinned by `nested_generator_method_self_nonlocal_write_then_close`):
+
+- `_generator_result_escapes` treated `gen.close()` / `.send()` / `.throw()` on
+  the local that holds a `self`-capturing nested generator as the object
+  escaping the method, so `test_clear_generator`'s shape was refused. Those
+  three drive the generator in place; they are now consuming positions.
+- `_lower_generator_close` assigned `__mojo_gen_close`'s `int64_t` result into
+  a `_Bool` temp: a hard `-fgimple` "invalid conversion in gimple call" for
+  EVERY compiled `g.close()` as a statement. It now compares the word to 0.
+- `runtime/fire_async_runtime.cpp` did not include `<stdio.h>` (`snprintf` in
+  `_rmtree_recursive`), so any program that linked the C++ async runtime failed
+  to build.
+
+Measured on CPython 3.15's real `Lib/test/test_frame.py`, the refusal set is
+unchanged and is now ENTIRELY frame introspection:
+
+- `g` (two defs): `gen.gi_frame.clear()` / `f.clear()` / `e.__traceback__.tb_frame`
+  — a `gen.gi_frame` read is a generator escaping to a frame object.
+- `gen` / `t3`: `sys._getframe().f_generator`.
+
+None of these is a generator-lowering gap: they ask for Python frame objects
+(`sys._getframe`, `gi_frame`, `tb_frame`, `f_generator`, `f_back`, `f_locals`),
+which this compiler has no model of, and the module correctly falls back to
+interpretation. Closing the doc needs the frame model of "Decision 1(b)" in the
+planning entry below (a typed frame handle + generator self-identity), a
+feature project rather than a bug fix; until it is chosen the refusals are the
+honest answer and the pins in `test_regress_codegen_generator_frame.py` stand.
+
+Residual noticed, not fixed: a captured `bool` local is boxed as `i64`, so
+`print(endly)` after the generator writes it prints `1`, where CPython prints
+`True` (`_BOX_SHIMS` has no bool kind).
+
 ## Status (2026-10-29, partial fix — a nested generator defined in a METHOD that reads `self` now compiles on the default path; `g` lowers)
 
 Landed, following the planning entry below (its Decision (a) taken: a
