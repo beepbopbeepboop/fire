@@ -4689,7 +4689,8 @@ def _cpp_expr(gen, e) -> str:
                     'mojo_dirent_is_dir', 'mojo_dirent_is_file',
                     'mojo_dirent_is_symlink', 'mojo_stat_mode', 'mojo_stat_dev',
                     'mojo_stat_ino', 'mojo_os_samestat', 'mojo_s_isdir',
-                    'mojo_os_close', 'mojo_list_slice_word', 'mojo_bytes_from_cstr'):
+                    'mojo_os_close', 'mojo_list_slice_word', 'mojo_bytes_from_cstr',
+                    'mojo_bytes_from_str'):
                 return f"{fname}({', '.join(args)})"
             # A call to a C-stdlib / POSIX function with a curated, known
             # signature (`_LIBC_SIGS`) — e.g. `close(fd)` inside a compiled
@@ -6632,7 +6633,7 @@ def _cpp_needs_posix_idioms(gen, fn) -> bool:
             return True
         if isinstance(n, G.CallExpr):
             f = n.func
-            if isinstance(f, G.IdentExpr) and f.name in ('stat', 'close', 'scandir', 'fsencode') \
+            if isinstance(f, G.IdentExpr) and f.name in ('stat', 'close', 'scandir', 'fsencode', 'bytes') \
                     and not gen._locally_binds_name(f.name):
                 return True
             if isinstance(f, G.IdentExpr) and f.name == 'open' \
@@ -6755,6 +6756,10 @@ def _cpp_lower_posix_idioms(gen, node, handles=None):
                 # os.fsencode on a UTF-8 POSIX filesystem: the string's bytes
                 return G.CallExpr(func=G.IdentExpr(name='mojo_bytes_from_cstr'),
                                   args=[new.args[0]], line=new.line, col=new.col)
+            if f.name == 'bytes' and len(new.args) == 2 and not kw:
+                # `bytes(text, 'ASCII')`: the string's bytes
+                return G.CallExpr(func=G.IdentExpr(name='mojo_bytes_from_str'),
+                                  args=list(new.args), line=new.line, col=new.col)
             if f.name == 'close' and len(new.args) == 1 and not kw:
                 return G.CallExpr(func=G.IdentExpr(name='mojo_os_close'),
                                   args=list(new.args), line=new.line, col=new.col)

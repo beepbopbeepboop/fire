@@ -413,6 +413,15 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
             # A parameter is a binding too: `def g(x: int): x = 2.5` rebinds
             # it, and the rebind must be seen by the conflict check below.
             str_kinds.setdefault(pname, set()).add(k)
+    # An unannotated parameter the body SLICES (`pathname[:0]`, `s[:2]`) is a
+    # sequence -- a str, a bytes, a list: a pointer word, never a number. Only a
+    # fallback: the call-site contract below (`setdefault`) and annotations win.
+    _pnames = set(pp[0] if isinstance(pp, (tuple, list)) else pp
+                  for pp in getattr(fn, 'params', []))
+    for _n in _walk(fn):
+        if (isinstance(_n, N.SliceExpr) and isinstance(_n.obj, N.IdentExpr)
+                and _n.obj.name in _pnames and _n.obj.name not in env):
+            env[_n.obj.name] = 'w'
     # Fill unannotated params from the unanimous cross-call-site kind
     # contract (bugs/hard/CODEGEN_coro_stackswitch_yield_kind_identifier_
     # inference.md repro 1: `def g(x): yield x` called only `g(3.5)`).
@@ -752,7 +761,7 @@ def _yield_kind(expr, env: dict | None = None) -> str | None:
             and expr.func.name in ('mojo_dirent_name', 'mojo_dirent_path')):
         return 'p'
     if (isinstance(expr, N.CallExpr) and isinstance(expr.func, N.IdentExpr)
-            and expr.func.name == 'mojo_bytes_from_cstr'):
+            and expr.func.name in ('mojo_bytes_from_cstr', 'mojo_bytes_from_str')):
         return 'w'          # bytes: a pointer word
     # A DIRECT `os.path.<fn>(...)` call to a runtime-implemented function.
     _opk = _os_path_call_kind(expr)
@@ -4725,6 +4734,11 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
                 # undefined-symbol regression")
                 if len(kinds) == 1:
                     resolved[pname] = list(kinds)[0]
+                elif kinds == {'p', 'w'}:
+                    # a string at one call site and a pointer word (a str OR a
+                    # bytes -- `os.fspath(x)`) at another: both are pointers, so
+                    # the parameter is a pointer word
+                    resolved[pname] = 'w'
                 elif len(kinds) > 1:
                     # Genuinely ambiguous: two call sites pass provably
                     # different kinds for the same slot. Record it so
@@ -4851,6 +4865,108 @@ def _lower_closing_withs(stmts: list) -> None:
         i += 1
 
 
+def _lower_callable_choices(stmts: list) -> None:
+    """A local that is bound to one of several MODULE-LEVEL functions
+    (`glob_in_dir = _glob2` / `_glob1` / `_glob0`, Lib/glob.py's `_iglob`) and
+    only ever CALLED as the iterable of a `for` loop is a dispatch index:
+    `glob_in_dir = <i>` and the loop is copied once per candidate under an
+    `if glob_in_dir == <i>:` chain. Every candidate is then a direct call to a
+    known function, which the generator machinery can type. Anything else the
+    local is used for leaves the function untouched. IN PLACE, per function."""
+    import copy as _copy
+    fn_names = set(st.name for st in stmts if isinstance(st, N.FunctionDef))
+
+    def _rewrite_fn(fd):
+        binds: dict = {}
+        for n in _walk(fd):
+            if isinstance(n, N.AssignStmt) and isinstance(n.target, N.IdentExpr):
+                binds.setdefault(n.target.name, []).append(n)
+        params = set(pp[0] if isinstance(pp, (tuple, list)) else pp for pp in fd.params)
+        cands = {}
+        for nm, assigns in binds.items():
+            if nm in params or len(assigns) < 2:
+                continue
+            fs = []
+            ok = True
+            for a in assigns:
+                if isinstance(a.value, N.IdentExpr) and a.value.name in fn_names:
+                    if a.value.name not in fs:
+                        fs.append(a.value.name)
+                else:
+                    ok = False
+            if ok and len(fs) >= 2:
+                cands[nm] = fs
+        if not cands:
+            return
+        # every other use must be the callee of a `for` iterable
+        good = {}
+        for nm, fs in cands.items():
+            loops = []
+            bad = False
+            total = sum(1 for n in _walk(fd) if isinstance(n, N.IdentExpr) and n.name == nm)
+            n_assign = len(binds[nm])
+            n_loop = 0
+            for n in _walk(fd):
+                if (isinstance(n, N.ForStmt) and isinstance(n.iterable, N.CallExpr)
+                        and isinstance(n.iterable.func, N.IdentExpr)
+                        and n.iterable.func.name == nm):
+                    n_loop += 1
+            # identifier occurrences: one per assignment target + one per loop callee
+            if total == n_assign + n_loop and n_loop >= 1:
+                good[nm] = fs
+        if not good:
+            return
+
+        def _walk_lists(body):
+            for i, st in enumerate(list(body)):
+                yield body, i
+                for fld in ('body', 'then_body', 'else_body', 'finally_body'):
+                    sub = getattr(st, fld, None)
+                    if isinstance(sub, list):
+                        yield from _walk_lists(sub)
+                for el in (getattr(st, 'elifs', None) or []):
+                    if isinstance(el, (list, tuple)) and len(el) > 1 and isinstance(el[1], list):
+                        yield from _walk_lists(el[1])
+                for h in (getattr(st, 'handlers', None) or []):
+                    if isinstance(getattr(h, 'body', None), list):
+                        yield from _walk_lists(h.body)
+
+        for body, i in list(_walk_lists(fd.body)):
+            st = body[i]
+            if (isinstance(st, N.AssignStmt) and isinstance(st.target, N.IdentExpr)
+                    and st.target.name in good and isinstance(st.value, N.IdentExpr)):
+                fs = good[st.target.name]
+                st.value = N.IntLiteral(value=fs.index(st.value.name),
+                                        line=st.line, col=st.col)
+        for body, i in list(_walk_lists(fd.body)):
+            st = body[i]
+            if (isinstance(st, N.ForStmt) and isinstance(st.iterable, N.CallExpr)
+                    and isinstance(st.iterable.func, N.IdentExpr)
+                    and st.iterable.func.name in good):
+                nm = st.iterable.func.name
+                fs = good[nm]
+                branches = []
+                for k, fname in enumerate(fs):
+                    loop = _copy.deepcopy(st)
+                    loop.iterable.func = N.IdentExpr(name=fname, line=st.line, col=st.col)
+                    branches.append(loop)
+                chain = branches[-1:]
+                for k in range(len(fs) - 2, -1, -1):
+                    chain = [N.IfStmt(
+                        condition=N.BinaryOp(op='==', left=N.IdentExpr(name=nm),
+                                             right=N.IntLiteral(value=k)),
+                        then_body=[branches[k]], elifs=[], else_body=chain,
+                        line=st.line, col=st.col)]
+                body[i] = chain[0]
+
+    for st in stmts:
+        if isinstance(st, N.FunctionDef):
+            _rewrite_fn(st)
+        elif isinstance(st, N.StructDef):
+            for m in (getattr(st, 'methods', None) or []):
+                _rewrite_fn(m)
+
+
 def lower(stmts: list, closure_stmts=(),
           module_name: str | None = None) -> tuple[list, list]:
     """Returns (new_stmts, coro_meta). coro_meta entries are dicts:
@@ -4871,6 +4987,7 @@ def lower(stmts: list, closure_stmts=(),
     _UNTHREADABLE_NESTED_ASYNC_GENS.clear()
     _STRUCT_NAMES.update(s.name for s in stmts if isinstance(s, N.StructDef))
     _lower_closing_withs(stmts)
+    _lower_callable_choices(stmts)
     _scan_value_used_functions(stmts)
     if not enabled():
         # The C++ backend (`MOJO_CORO=cpp`, the escape hatch) lowers nested

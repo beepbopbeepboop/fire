@@ -7136,6 +7136,34 @@ def main():
 main()
 """, "['file.txt', 'sub']\n2\n")
 
+    # A local bound to one of several MODULE-LEVEL generators and only called as
+    # a `for` iterable (Lib/glob.py's `glob_in_dir = _glob2 / _glob1 / _glob0`) is
+    # a dispatch index: the loop is copied once per candidate, each a direct call.
+    test_generator_stdout("generator_callable_local_choosing_between_module_generators", """\
+def a(x):
+    yield x
+    yield x + 1
+
+def b(x):
+    yield x * 10
+
+def pick(flag, n):
+    if flag:
+        f = a
+    else:
+        f = b
+    out = []
+    for v in f(n):
+        out.append(v)
+    return out
+
+def main():
+    print(pick(True, 3))
+    print(pick(False, 3))
+
+main()
+""", "[3, 4]\n[30]\n")
+
     # ...but any consumer that is NOT a for / list / comprehension (here `next`
     # of a bound handle) would read the box's address as an int, so the
     # generator keeps its refusal.
