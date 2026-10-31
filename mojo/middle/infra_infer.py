@@ -7,6 +7,7 @@ imports this module for the shared pieces.
 from __future__ import annotations
 
 from __future__ import annotations
+import dataclasses
 import os
 import re
 from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, Parser, py_tokenize, _as_str, _as_set, _as_dict, _as_int, _pair_key, _ptr_slot_in_range, _as_ident_node, _as_member_node, _as_callexpr_node, _sms_key
@@ -3277,32 +3278,65 @@ def _lambda_owned(body, name: str) -> bool:
         return False
 
 
-def _direct_nested_defs(body) -> list:
-    """The `def`s `body` owns: every FunctionDef in it that is not inside
-    another FunctionDef's body. A def nested in a def belongs to THAT def's
-    body, and is asked about there, not here."""
-    all_defs = []
-    inside = set()
-    for n in gimple_exprtypes._walk_ast(body):
-        if isinstance(n, FunctionDef):
-            all_defs.append(n)
-    for d in all_defs:
-        for m in gimple_exprtypes._walk_ast(d.body):
-            inside.add(id(m))
-    return [d for d in all_defs if id(d) not in inside]
+def _own_body_nodes(body) -> list:
+    """Every AST node that belongs to `body` itself. The walk enters all of a
+    nested `def`'s fields EXCEPT its statement body: that def is yielded (it is
+    a closure this body creates), but the statements inside it belong to the
+    def's own body, which `_body_closures_owned` asks about on its own. Lambda
+    bodies are entered, since a lambda inside a lambda is this body's too."""
+    out = []
+    stack = [body]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (list, tuple)):
+            stack.extend(node)
+            continue
+        if not ownership_destruct._is_node(node):
+            continue
+        out.append(node)
+        for f in dataclasses.fields(node):
+            if isinstance(node, FunctionDef) and f.name == 'body':
+                continue
+            stack.append(getattr(node, f.name))
+    return out
 
-def _nested_defs_owned(body) -> bool:
-    """Every nested `def` at every depth is owned by the body it is a statement
-    of (`nested_def_env_owned`, asked of ITS OWN owner). A def that is returned,
-    stored, or sits inside an if/loop/try is not owned, and so is refused.
+def _body_closures_owned(body) -> bool:
+    """True iff every closure CREATED BY `body` itself cannot outlive the call
+    that runs `body`: each lambda `body` builds is an owned binding
+    (`lambda_value_owned`, asked of `body`), no lambda `body` builds is a bare
+    value, and each nested `def` `body` holds is owned by `body`
+    (`nested_def_env_owned`), with the same rule applied to that def's own body.
+    A closure is judged by the body it is lowered in, so a lambda inside an
+    owned nested `def` is not a reason to refuse `body`. A def that is
+    returned, stored, or sits inside an if/loop/try is not owned, and refuses.
     Sound for a `{mut}` box of the outermost body: a closure inside an owned
-    closure dies when that closure's call returns, which is when the outer
-    call returns at the latest."""
-    for d in _direct_nested_defs(body):
-        if not ownership_destruct.nested_def_env_owned(body, _as_str(d.name)):
+    closure dies when that closure's call returns, which is when the outer call
+    returns at the latest."""
+    nodes = _own_body_nodes(body)
+    bound_ids = set()
+    bound_names = []
+    for n in nodes:
+        if isinstance(n, (VarDecl, AssignStmt)) and isinstance(n.value, LambdaExpr):
+            bound_ids.add(id(n.value))
+            if isinstance(n, VarDecl):
+                bound_names.append(ownership_destruct._as_str(n.name))
+            elif isinstance(n.target, IdentExpr):
+                bound_names.append(ownership_destruct._as_str(n.target.name))
+            else:
+                return False        # `obj.f = lambda`: a stored value, not a local
+    for n in nodes:
+        if isinstance(n, LambdaExpr) and id(n) not in bound_ids:
+            # An unbound lambda may be passed on and kept; be conservative.
             return False
-        if not _nested_defs_owned(d.body):
+    for nm in bound_names:
+        if not _lambda_owned(body, nm):
             return False
+    for n in nodes:
+        if isinstance(n, FunctionDef):
+            if not ownership_destruct.nested_def_env_owned(body, _as_str(n.name)):
+                return False
+            if not _body_closures_owned(n.body):
+                return False
     return True
 
 def _no_closure_escapes(fn) -> bool:
@@ -3316,27 +3350,13 @@ def _no_closure_escapes(fn) -> bool:
     if getattr(fn, 'is_async', False) or getattr(fn, 'is_generator', False):
         return False
     try:
+        # A name bound to a lambda twice anywhere in `fn` (in two bodies, say)
+        # is two values with independent lifetimes; refuse rather than reason
+        # about which binding a mention refers to.
         for nm in _lambda_bindings(fn):
             if _lambda_binding_count(fn, nm) != 1:
                 return False
-            if not _lambda_owned(fn.body, nm):
-                return False
-        if not _nested_defs_owned(fn.body):
-            return False
-        # Count unbound lambdas: if any lambda node is not the value of a
-        # VarDecl/AssignStmt binding, be conservative.
-        bound_lambda_ids = set()
-        for n in gimple_exprtypes._walk_ast(fn.body):
-            if isinstance(n, (VarDecl, AssignStmt)):
-                v = getattr(n, 'value', None)
-                if isinstance(v, LambdaExpr):
-                    bound_lambda_ids.add(id(v))
-        for n in gimple_exprtypes._walk_ast(fn.body):
-            if isinstance(n, LambdaExpr) and id(n) not in bound_lambda_ids:
-                # immediate call `lambda(...)` is allowed
-                # detect by parent? We don't have parent; be conservative.
-                return False
-        return True
+        return _body_closures_owned(fn.body)
     except Exception:
         return False
 

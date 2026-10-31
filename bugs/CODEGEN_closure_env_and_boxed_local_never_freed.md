@@ -40,8 +40,21 @@ change, not a missing check, and it is the only remaining path to a flat
 profile for a function that returns a closure. Secondary: `_no_closure_escapes`
 refuses a function outright when any lambda in it is not a plain owned binding,
 including a lambda mentioned inside a nested `def`, so such a function keeps its
-boxes. That is conservative and could be tightened by applying the lambda rule
-per owner as the nested-`def` rule now is.
+boxes.
+
+**Landed 2026-10-30 (the secondary item): the lambda rule is now per owner.**
+`infra_infer._no_closure_escapes` no longer refuses a function because of a
+lambda anywhere in it. `_body_closures_owned(body)` judges each body by the
+closures IT creates (`_own_body_nodes` walks a body without entering a nested
+`def`'s statements): a bound lambda must be an owned binding of that body
+(`lambda_value_owned`), an unbound lambda still refuses, and every nested `def`
+must be `nested_def_env_owned` and recurse. A lambda bound inside an owned
+nested `def` is therefore judged by that `def`'s body. The whole-function
+"one binding per name" check is unchanged. Regression:
+`gimple_boxed_mut_local_with_owned_inner_lambda_is_freed` (peak RSS **63.2 MB →
+1.9 MB** at 4M iterations; it failed before the change) and
+`gimple_boxed_mut_local_held_by_a_lambda_returned_from_inner_is_kept` (stdout,
+the escaping side, passes before and after).
 
 ## Status (2026-10-02 — OPEN 1 is CLOSED. OPEN 2, the mutable-capture box, is
 ## still open and is the only thing left in this document)
