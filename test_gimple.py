@@ -8376,6 +8376,14 @@ def use_str_factory():
     print(g(">"))
     print(mk_str("[")("]"))
 use_str_factory()
+# Capturing nested def with float return (CODEGEN fix regression)
+def use_capturing_float():
+    n = 2
+    def inner(x: int) -> float:
+        return n + 0.5
+    h = inner
+    print(h(0))
+use_capturing_float()
 def mk_str_lambda():
     return lambda: "hi"
 def use_str_lambda_factory():
