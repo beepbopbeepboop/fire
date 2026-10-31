@@ -202,7 +202,7 @@ sits entirely above `sp`, the old predicate is *recovered*, not replaced.
 
 Nothing here is reachable yet.  No emitter produces a by-reference receiver and
 no generated proof mentions these names; they are the callee-contract half of
-`bugs/FORMAL_wide_receiver_by_reference.md`, landed first because they are the
+`bugs/formal/FORMAL_wide_receiver_by_reference.md`, landed first because they are the
 part that has to be right before any codegen can be. -/
 
 /-- **Frame preservation, modulo the receiver frame.**  Everything `FrameOk`

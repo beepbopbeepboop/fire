@@ -242,7 +242,7 @@ def _extract_formal_flags(args: list):
     but a proved rewrite is only as good as the pass's ability to decide the
     rewrite's side conditions, and the flag is how the corpus and the
     differential fuzzer are run both ways so the OUTPUT can be compared.
-    `bugs/FORMAL_peephole_rules_without_proofs.md` has what is enabled and what
+    `bugs/formal/FORMAL_peephole_rules_without_proofs.md` has what is enabled and what
     is not.
     """
     formal = False
@@ -1382,7 +1382,7 @@ def main():
         # linked shared library arm64`.  That is the silent-wrong-answer shape,
         # and it is worse on this command than elsewhere because the whole
         # subject is a PER-EXPORT contract: a reader measuring the x86-64
-        # boundary (bugs/FORMAL_dylib_export_loops_and_frame_bounds.md §OPUS-6)
+        # boundary (bugs/formal/FORMAL_dylib_export_loops_and_frame_bounds.md §OPUS-6)
         # would get an arm64 answer and conclude "the same argument applies",
         # which is precisely the hypothesis the document says must not be
         # assumed.  So refuse it, and name what is missing.

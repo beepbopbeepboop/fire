@@ -2066,7 +2066,7 @@ typedef void* MojoFileHandle;
    They were left undeclared for the whole of FORMAL.md phase 2's ceiling 2,
    on the belief that the symbol the dylib exports is a DIFFERENT function from
    one `fire_runtime.c` declares — which is why declaring them needed a decision
-   rather than a line. Measured (`bugs/FORMAL_runtime_library_on_the_link_line.md`
+   rather than a line. Measured (`bugs/formal/FORMAL_runtime_library_on_the_link_line.md`
    §0.2, and re-measured on this tree): `fire_runtime.c` has `#define USE_PYTHON
    0`, so the definition behind the symbol is the `#else` arm at :452, and BOTH
    arms of that `#if` carry the same C signature. `MojoFileHandle` is

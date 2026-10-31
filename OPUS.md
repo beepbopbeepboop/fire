@@ -226,7 +226,7 @@ forward in a scratch tree, not committed:
 > other side. Its problem statement is **resolved by `e0af987`**, which landed
 > the arithmetic-form fuel this section calls for. Two accounts of one bug; fold
 > them when convenient. §4.1's remaining fuel obligation is `OPUS-4` below and in
-> `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md`; §3's `hreg` landed with
+> `bugs/formal/FORMAL_dylib_export_loops_and_frame_bounds.md`; §3's `hreg` landed with
 > `lib/Contracts.lean`, which compiles clean with 0 holes.
 
 #### 4.1a RESOLVED as a diagnosis: the `sorry` is on a false statement, and that is now CHECKED
@@ -464,7 +464,7 @@ runner's own `if pc = pc then .. else ..`, one per step, which is what
 `bv_decide` cannot be configured out of normalising. Fixed in
 `formal/arm64_proof_gen.py`; `formal-dylib` is green and the generated proof
 checks in 9 s. `FORMAL.md` §12 and
-`bugs/FORMAL_dylib_export_loops_and_frame_bounds.md` §1 have the numbers and
+`bugs/formal/FORMAL_dylib_export_loops_and_frame_bounds.md` §1 have the numbers and
 what is still open (`OPUS-4`, `OPUS-5`, `OPUS-6`).
 
 ### 5.7 MEASURED: the `fuel_lean` change broke the walk — RESOLVED by `e0af987`

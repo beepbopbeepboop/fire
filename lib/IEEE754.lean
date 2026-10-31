@@ -40,7 +40,7 @@ step functions have something to be `rfl` about.
   **The consequence for the proof budget is stated, not hidden**: a theorem
   about the arithmetic reaches a generated axiom, exactly as the 688 existing
   `bv_decide`/`native_decide` sites in this library do
-  (`bugs/FORMAL_native_decide_axiom.md`, and `NATIVE_DECIDE_ALLOWED` in
+  (`bugs/formal/FORMAL_native_decide_axiom.md`, and `NATIVE_DECIDE_ALLOWED` in
   `test_formal_admitted.py`, which is where a new `native_decide` has to be
   named).  Nothing here is proved with `native_decide` YET, so this module
   adds zero axiom-reaching sites today.
@@ -333,7 +333,7 @@ reflexivity, and the asymmetry/transitivity of `<`.
 `omega` handles `Nat` and `Int` and not `<` on a 64-bit word, and `decide`
 cannot decide a universally quantified `UInt64` comparison at this width, so
 `ltBits a b = true -> ltBits b a = false` is out of reach of both.  This is the same ceiling
-`bugs/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound` is about, and
+`bugs/formal/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound` is about, and
 the honest position is that the model's ORDER is not yet proved to be an order —
 which is a statement about the model's completeness, not about its soundness:
 nothing above depends on it, and every reading above is what the two machines'
@@ -349,7 +349,7 @@ reflexivity, and the asymmetry/transitivity of `<`.
 `omega` handles `Nat` and `Int` and not `<` on a 64-bit word, and `decide`
 cannot decide a universally quantified `UInt64` comparison at this width, so
 `ltBits a b = true -> ltBits b a = false` is out of reach of both.  This is the same ceiling
-`bugs/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound` is about, and
+`bugs/formal/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound` is about, and
 the honest position is that the model's ORDER is not yet proved to be an order —
 which is a statement about the model's completeness, not about its soundness:
 nothing above depends on it, and every reading above is what the two machines'
@@ -382,7 +382,7 @@ Every statement below is ONE ground value, proved by `native_decide`, and they
 are here so that a caller has them — NOT as a claim that the arithmetic is
 verified.  A ground value is what `ProofLib.lean`'s `u64_add_zero_r` and its
 siblings are too, and the difference between that and a proof is
-`bugs/FORMAL_native_decide_axiom.md`.  Nothing is stated here about a general
+`bugs/formal/FORMAL_native_decide_axiom.md`.  Nothing is stated here about a general
 `a`, because a universal statement over the finite patterns is what this
 library's Lean time ceiling does not take. -/
 

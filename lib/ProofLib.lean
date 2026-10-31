@@ -762,7 +762,7 @@ theorem u64_ofNat_sub (a b : Nat) (h : b ≤ a) (hM : a < 2^64) :
 
     The analogue of `u64_ofNat_add`/`u64_ofNat_sub` for a product, and the
     library fact the ALL-INPUTS refinement of
-    `bugs/FORMAL_a_specification_layer_that_stops_at_a_finite_range.md` is
+    `bugs/formal/FORMAL_a_specification_layer_that_stops_at_a_finite_range.md` is
     waiting on: an induction over the emitted model's own recursion has a
     `UInt64` multiplication as its arithmetic goal, and this is what reduces it
     to the specification's `Nat` form.  Unconditional, exactly as
@@ -1494,7 +1494,7 @@ theorem u64_le_iff_false_of_lt {a b : UInt64} (h : b < a) : (a ≤ b) ↔ False 
     Measured on `formal/contracts/bounds_index.mojo` (`@requires(i >= 0)
     @requires(i < n) @ensures(result <= n)`), whose goal is
     `sKey i ≤ sKey n` from `sKey i < sKey n` and nothing else: exit 1 without
-    them, exit 0 with.  See `bugs/FORMAL_contract_ladder_reach.md`. -/
+    them, exit 0 with.  See `bugs/formal/FORMAL_contract_ladder_reach.md`. -/
 theorem u64_lt_iff_toNat_lt (a b : UInt64) : a < b ↔ a.toNat < b.toNat := by
   show a.toBitVec < b.toBitVec ↔ _
   constructor <;> intro h <;> exact h
@@ -1782,7 +1782,7 @@ word, which is why reading `Rn` as SP there modelled `-x` as `sp - x`.
 model**: nothing in `arm64_step` decodes the extended-register class, so
 `add x0, sp, x16` assembles to a word this function answers nothing about.  That
 is a coverage gap rather than a wrong answer (the generator refuses such a word
-rather than mis-reading it), and `bugs/FORMAL_arm64_instruction_coverage.md` is
+rather than mis-reading it), and `bugs/formal/FORMAL_arm64_instruction_coverage.md` is
 where the census of it belongs.
 
 The 7 spellings this replaces were `if rn = 31 then s.sp else arm64_reg rn s`
@@ -2343,7 +2343,7 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
   -- Nothing in `formal/examples/*.mojo` contains this encoding, which is why
   -- the 40-example suite stayed green throughout: the mis-modelled form is
   -- reachable only from a program that touches memory through a non-SP base,
-  -- and the examples are register-only.  `bugs/FORMAL_wide_receiver_by_reference.md`
+  -- and the examples are register-only.  `bugs/formal/FORMAL_wide_receiver_by_reference.md`
   -- records the measurement and what it gates.
   else if (insn &&& 0xffe00000) = 0xF9400000 then
     let rt := (insn &&& 0x1f).toNat
@@ -2848,7 +2848,7 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     -- MUL's words as well, and whichever arm came first in this chain would
     -- answer for both — a proof about a different instruction, which is the
     -- failure `check_step_conds` exists to make loud and what
-    -- `bugs/FORMAL_arm64_smulh_has_no_model_arm.md` was filed about.
+    -- `bugs/formal/FORMAL_arm64_smulh_has_no_model_arm.md` was filed about.
     --
     -- APPENDED at the end of the chain for the reason every arm after the
     -- twelve access forms is: `_STEP_CONDS` and `_step_rhs` hard-code indices,
@@ -4424,7 +4424,7 @@ theorem arm64_flag_le_s (a b : UInt64) :
     `arm64_flag_lt_s` (flag → flipped order); a loop contract whose flag lemma
     produced the flipped order states its hypothesis in that order, and this
     turns it back into the plain `UInt64` order.  The reusable library fact
-    `bugs/FORMAL_a_range_loop_contract_states_the_unsigned_order_against_a_
+    `bugs/formal/FORMAL_a_range_loop_contract_states_the_unsigned_order_against_a_
     signed_flag.md` names as step 1. -/
 theorem arm64_slt_iff_lt (a b : UInt64)
     (hr : a < 0x8000000000000000) (hb : b < 0x8000000000000000) :
@@ -7976,7 +7976,7 @@ evaluator, not a change to `evalExpr`) and on the *callee contract* side
 `FrameOk`'s "caller's slots preserved" clause by construction).  Both are
 additions beside the existing definitions.
 
-`bugs/FORMAL_wide_receiver_by_reference.md` has the full design, the cost, and
+`bugs/formal/FORMAL_wide_receiver_by_reference.md` has the full design, the cost, and
 what is not done.
 -/
 
@@ -8545,7 +8545,7 @@ theorem frameRead_in_range (b : UInt64) (n k : Nat)
 
 /-! ### A NESTED receiver: a field whose agreed declared type is a framed struct
 
-`bugs/FORMAL_wide_receiver_by_reference.md`'s next step is a field's DECLARED
+`bugs/formal/FORMAL_wide_receiver_by_reference.md`'s next step is a field's DECLARED
 type, used only when every binding of the name agrees on it
 (`formal/model.py`'s `frame_field_type_candidates`).  When the agreed type is a
 framed struct of the same module, the slot holds the ADDRESS of that struct's

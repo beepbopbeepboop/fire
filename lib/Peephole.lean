@@ -65,7 +65,7 @@ and the pass checks it:
 
 The arm64 rules that need the `STR`/`LDR`/`MOVZ` arms of `arm64_step`, and the
 x86-64 rules the pass's table names but does not enable. Both are written down
-in `bugs/FORMAL_peephole_rules_without_proofs.md` with the exact lemma each one
+in `bugs/formal/FORMAL_peephole_rules_without_proofs.md` with the exact lemma each one
 is waiting on. Nothing in this file is a placeholder: every theorem below is
 proved, and there is no `sorry`.
 -/
@@ -145,7 +145,7 @@ is not a rewrite of `arm64_step`'s `if`-chain: the chain is 70 arms deep and
 this one is the tenth, and a rule that needs the `STR` arm would have to
 discharge sixty negations to reach it. That cost is why the rule table stops
 here, and it is written down rather than guessed at in
-`bugs/FORMAL_peephole_rules_without_proofs.md`.
+`bugs/formal/FORMAL_peephole_rules_without_proofs.md`.
 
 Its shape in the model, which the side conditions are read off: `rd = 31` takes
 an `sp` branch and is refused; `Rn` is read through `arm64_reg_or_sp`, which is

@@ -5,13 +5,13 @@ none should be filed as one. It exists because the goal — *one runtime, two co
 generators, one proof* — spans `formal/`, `mojo/`, `runtime/` and the proof
 library, and because the honest state of that goal is currently spread across five
 bug documents that each know one piece of it. Per-phase evidence belongs in that
-phase's commit and, where a phase produces a standing fact, in the `bugs/FORMAL_*`
+phase's commit and, where a phase produces a standing fact, in the `bugs/formal/FORMAL_*`
 documents this one defers to. What lives *here* is the thesis, the measured current
 state, the decisions taken, and the order.
 
 Read with: `doc/ABI.md` (the boundary contract this must not contradict),
-`bugs/FORMAL_known_limits.md` (the audited codegen residue),
-`bugs/FORMAL_arm64_known_proof_gaps.md` (the proof census),
+`bugs/formal/FORMAL_known_limits.md` (the audited codegen residue),
+`bugs/formal/FORMAL_arm64_known_proof_gaps.md` (the proof census),
 `bugs/mid/CODEGEN_bootstrap_resource_blowup.md` (the upstream cause of the
 self-host divergence), and `bugs/OPEN_WORK.md` A1 (the x86-64 `call_rel32`,
 which [3] needs). **§11 is the operating contract** — the five agents, their
@@ -1007,7 +1007,7 @@ Stated so no reader infers otherwise.
   honest answer.
 - **The host-import problem is a repository problem.** Phases 0-6 move repository
   files; the stdlib scope is untouched by them, and its residue is the MLIR /
-  generics / one-word families in `bugs/FORMAL_known_limits.md`.
+  generics / one-word families in `bugs/formal/FORMAL_known_limits.md`.
 - **Stage 5 monomorphization is still the largest lever on the sweep headline**
   and it is **not** in this programme. It is phase 7, and it is weeks, not an
   afternoon. `formal/monomorph.py` now does per-EDGE monomorphization for module
@@ -1021,7 +1021,7 @@ Stated so no reader infers otherwise.
   several hundred files, and `CLAUDE.md`'s own rule is the reason they are gone:
   a tally is not a property of the tree, and a file that states one goes stale
   underneath a change made in none of the files that state it. The current
-  census lives in `bugs/FORMAL_sweep_work_map.md` §1, which supersedes every
+  census lives in `bugs/formal/FORMAL_sweep_work_map.md` §1, which supersedes every
   per-round map this tree grew — and a fresh one is
   `python3 tools/formal_sweep.py`. Read the headline there.
 
@@ -1280,7 +1280,7 @@ it typechecks.
 
 **[4] the frame-address design.** The single biggest coverage lever left, and
 not a patch. 45% of every remaining codegen finding is one design defect in five
-costumes (`bugs/FORMAL_wide_receiver_by_reference.md`): the receiver of a
+costumes (`bugs/formal/FORMAL_wide_receiver_by_reference.md`): the receiver of a
 multi-field struct is the address of a frame that dies when the function
 returns, so returning it is a use-after-free and passing it where a value is
 wanted hands the callee a pointer. Measured with the check removed, the same
@@ -1314,7 +1314,7 @@ vacuous theorems.
 `tools/formal_sweep.py`, `fire_compiler.py`, `build_config.py`,
 `build_stdlib_dylib.py`, `driver.py`, `mojo/backend_gimple/*`, `mojo/middle/*`.
 Two known items sit there and are next round, not this one: the `comptime`
-expression evaluator (`bugs/FORMAL_known_limits.md` §7) and the container-kind
+expression evaluator (`bugs/formal/FORMAL_known_limits.md` §7) and the container-kind
 unanimity rule in `mojo/middle/infra_infer.py`
 (`bugs/INTERFACE_REQUEST_1_to_middle_infra_infer.md`, which [2] repointed at
 `module_gen.py` so it is [1]'s own follow-up rather than an orphan).
@@ -1350,7 +1350,7 @@ unanimity rule in `mojo/middle/infra_infer.py`
   named and tracked until a later round closes it.
 - **Take the 80/20 and leave a note.** A precise "this costs weeks, and here is
   why" is a **deliverable**; a half-finished attempt is not.
-  `bugs/FORMAL_known_limits.md` has the table shape for that — measured count,
+  `bugs/formal/FORMAL_known_limits.md` has the table shape for that — measured count,
   whether the refusal is *true*, what closing it takes.
 - **`GMOJO_HOME` is per-agent, always.** One environment variable, and it removes
   every CAS contention, torn cache entry and dylib overwrite question. Set it
@@ -1416,7 +1416,7 @@ is in the tree, the request is not.**
 it made the instruments stricter, then [3], then [5]. It worked, and the
 part that mattered was not the order but the *ownership* — no two agents shared
 a writable file, and the one collision (both [3] and [5] editing
-`bugs/FORMAL_known_limits.md`, because the plan partitioned code files and left
+`bugs/formal/FORMAL_known_limits.md`, because the plan partitioned code files and left
 docs unassigned) auto-merged and cost nothing.
 
 **This round:**
@@ -1458,7 +1458,7 @@ had a **wall** bound (`subprocess.run(timeout=1200)`), three of them had none,
 and `maxHeartbeats` does not meter the thing that spins (`native_decide`, kernel
 reduction, and `simp`'s congruence recursion — three separate budgets measured
 FAILING to fire on the one case ever diagnosed; the numbers are in §12 below and
-in `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md` §1).
+in `bugs/formal/FORMAL_dylib_export_loops_and_frame_bounds.md` §1).
 
 | what | bound | why that size |
 |---|---|---|

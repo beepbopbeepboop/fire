@@ -705,7 +705,7 @@ def x86_shift_post (s : X86State) (i digit : Nat) (a : UInt64) (k : Nat) :
     -- `formal/examples` program caught it (nothing there shifts a negative
     -- value by one) and why the fuzzer did: `formal/x86_64_model_fuzz.py -n 48
     -- --seed 11` minimises to `movsx R10, R15 ; << RCX, 1` with OF differing on
-    -- its own.  See `bugs/FORMAL_x86_64_model_fuzz_hardware_anomalies.md`.
+    -- its own.  See `bugs/formal/FORMAL_x86_64_model_fuzz_hardware_anomalies.md`.
     let ofBit :=
       if k != 1 then false
       else if digit = 4 then (x86_msb a != x86_msb res)
@@ -1031,7 +1031,7 @@ def x86_step_rex (s : X86State) (code : Nat → UInt8) (rex op : UInt8) : Option
     -- pointee -- was a step the model could not take.  A run that stops early is
     -- the failure `formal/x86_64_model_coverage_test.py` exists to catch, and
     -- that file's sample list did not include this encoder, which is why it was
-    -- not already failing: see `bugs/FORMAL_x86_64_coverage_test_misses_eight_encoders.md`.
+    -- not already failing: see `bugs/formal/FORMAL_x86_64_coverage_test_misses_eight_encoders.md`.
     let modrm := code modrmPos
     let extra := match x86_mem_addr s code rex modrm modrmPos (rip + 4) with
       | some (_, n) => n | none => 0
@@ -1361,7 +1361,7 @@ their own, rather than inline in the plain one. The reason to keep it separate
 is instruction LENGTH: a `0x66`-prefixed opcode sits one byte further along than
 the same opcode without it, so a decoder that shared the plain path's byte
 positions would compute a successor that lands inside the next instruction.
-That is B6 in `bugs/FORMAL_x86_64_end_to_end_proof.md`, where the `0x0F` escape
+That is B6 in `bugs/formal/FORMAL_x86_64_end_to_end_proof.md`, where the `0x0F` escape
 being dispatched in two places is recorded as the costliest single bug in that
 file precisely because the two disagreed about the length. -/
 
@@ -1392,7 +1392,7 @@ def x86_step_op66 (s : X86State) (code : Nat → UInt8) (rex : UInt8) :
     -- `encode_mov_rm16_r16` always emits, `_rex` being 0x40 at a minimum), the
     -- opcode at `rip + 2` and the ModRM at `rip + 3` -- ONE byte further along
     -- than the same opcode without the prefix, which is B6 in
-    -- `bugs/FORMAL_x86_64_end_to_end_proof.md` and the reason this is not a
+    -- `bugs/formal/FORMAL_x86_64_end_to_end_proof.md` and the reason this is not a
     -- fourth arm of `x86_step_plain`.
     let modrm := code (rip + 3)
     let extra := match x86_mem_addr s code rex modrm (rip + 3) (rip + 4) with
@@ -1726,7 +1726,7 @@ def x86_step_plain (s : X86State) (code : Nat → UInt8) (b0 : UInt8) : Option X
     -- `0x66`, so the plain decoder is what sees it. Adding a third dispatcher
     -- for one instruction would have been a second place that has to agree with
     -- this one about instruction LENGTH, which is B6 in
-    -- `bugs/FORMAL_x86_64_end_to_end_proof.md` — the `0x0F` escape is already
+    -- `bugs/formal/FORMAL_x86_64_end_to_end_proof.md` — the `0x0F` escape is already
     -- dispatched twice and the two dispatches disagreed about it once.
     --
     -- So the two prefixes are read here, in the order they are encoded: `0x66`,
@@ -2401,7 +2401,7 @@ theorem x86_step_imul_r64 (s : X86State) (code : Nat → UInt8) (m : Nat)
     had no row for, so the six corpus examples that use `not` or `neg` had no
     path tree at all and reported `no step lemma wired for` — a REFUSAL, which is
     this file's way of being honest, and also a statement that the form is not
-    wired when the arithmetic is already here.  `bugs/FORMAL_x86_64_instruction_coverage_backlog.md`'s
+    wired when the arithmetic is already here.  `bugs/formal/FORMAL_x86_64_instruction_coverage_backlog.md`'s
     "three shapes" does not include this one, which is the reason it survived:
     the decoder named the form and the ISA census counted it covered, so the
     only thing that could see the gap was asking `_FORMS`.
@@ -3304,7 +3304,7 @@ theorem x86_step_mov_mem_sib_disp32 (s : X86State) (code : Nat → UInt8)
 -- above, but the SIB carries a real index register, so the effective address is
 -- `base + index * 2^scale` rather than `base + disp`.  They are the digit
 -- store/load of the float-repr helper, and the decoder used to refuse them
--- outright (`bugs/FORMAL_x86_64_decoder_refuses_sib_indexed_forms.md`); the
+-- outright (`bugs/formal/FORMAL_x86_64_decoder_refuses_sib_indexed_forms.md`); the
 -- model reads the index through `x86_mem_addr`, which the `indexContribution`
 -- term above makes it compute.  Pinned to the helper's SIB `0x0b` (scale 0,
 -- index `rcx`, base `r11` — `h_rb`/`h_rx` say which REX bits put the base in
