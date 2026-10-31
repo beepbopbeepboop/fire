@@ -3627,6 +3627,31 @@ def test_named_test_brings_its_deps():
               names == ['prereq', 'needs'], f'got {names}')
 
 
+def test_dependent_waits_for_the_whole_fanout():
+    """A dependent of a fanout starts after EVERY item, not after the first.
+
+    `state` gets an entry when the first job of a test settles, so a bare
+    `dep in state` released the dependents of a 46-item fanout after one item
+    (and a stuck plan then reported `dependency not selected:` with the name
+    empty). The slow item finishes last; the dependent must see both markers.
+    """
+    import tempfile
+    d = tempfile.mkdtemp(prefix='suite-fanout-')
+    body = ('import sys,time,os\n'
+            'n=sys.argv[1]\n'
+            'time.sleep(1.5 if n=="slow" else 0)\n'
+            'open(os.path.join(%r,n),"w").close()' % d)
+    after = ('import os,sys\n'
+             'sys.exit(0 if os.path.exists(%r) and os.path.exists(%r) else 1)'
+             % (os.path.join(d, 'fast'), os.path.join(d, 'slow')))
+    with Sandbox(fan=suite.Fanout(name='fan', cmd=[PY, '-c', body, '{file}'],
+                                  items=['fast', 'slow'], mem='small'),
+                 after=dict(cmd=ok_cmd(after), deps=['fan'])):
+        rc, out = run(['after'], jobs=4)
+    check('fanout deps: the dependent ran only after the last item',
+          rc == 0, f'rc={rc} out={out!r}')
+
+
 def test_log_has_passes_screen_does_not():
     """The contract the screen/log split rests on."""
     log = os.path.join(HERE, 'build', 'test-suite-logsplit.log')
@@ -6437,6 +6462,7 @@ def main():
                test_the_disabled_markers_in_the_registry_are_honest,
                test_bucket_dedup, test_missing_dep_is_reported,
                test_named_test_brings_its_deps,
+               test_dependent_waits_for_the_whole_fanout,
                test_log_has_passes_screen_does_not,
                test_checked_run_key_covers_what_it_names,
                test_checked_run_replays_a_pass_and_reruns_a_failure,

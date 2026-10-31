@@ -5316,6 +5316,16 @@ def execute(jobs, per_test, opts, log: Log):
         state[name] = max([s for s in (prev, status) if s],
                           key=lambda s: _RANK.get(s, 0))
 
+    def pending(name):
+        """True while a dependency has no verdict yet. `state` gets an entry
+        when the FIRST job of a fanout settles, so `name in state` alone would
+        release a dependent after one of 46 items; a passing dep is only done
+        when every one of its jobs has settled (`resolved` counts them). A
+        failing one is final already: the dependent is skipped at once."""
+        if name not in state:
+            return True
+        return state[name] in DEP_SATISFIED and resolved[name] < per_test[name]
+
     with ThreadPoolExecutor(max_workers=opts.jobs,
                             thread_name_prefix='suite') as pool:
         running: dict[object, Job] = {}
@@ -5337,7 +5347,7 @@ def execute(jobs, per_test, opts, log: Log):
             ready, blocked = [], []
             for key in sorted(waiting, key=lambda k: order[k]):
                 job = waiting[key]
-                if any(d not in state for d in job.spec.deps):
+                if any(pending(d) for d in job.spec.deps):
                     continue                     # a dep is still running
                 if all(state[d] in DEP_SATISFIED for d in job.spec.deps):
                     ready.append(job)
@@ -5366,7 +5376,7 @@ def execute(jobs, per_test, opts, log: Log):
                 # plan can ever satisfy (a test whose dep was not selected).
                 # Say so instead of spinning.
                 job = sorted(waiting.values(), key=lambda j: order[j.key])[0]
-                missing = [d for d in job.spec.deps if d not in state]
+                missing = [d for d in job.spec.deps if pending(d)]
                 res = Result(ERROR, detail='dependency not selected: '
                              + ', '.join(missing))
                 del waiting[job.key]
