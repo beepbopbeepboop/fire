@@ -95,32 +95,6 @@ def doc_path(doc):
     return "bugs/%s.md" % doc
 
 
-def hold_active(np, h, retry_s, now=None):
-    """A no-progress record holds its doc while the doc is unchanged AND the retry window has not passed."""
-    if not np:
-        return False
-    now = time.time() if now is None else now
-    return np["hash"] == h and now - np["at"] < retry_s
-
-
-ESCALATE_AFTER = 1   # a no-commit attempt boosts the doc one class: a work tree that does not finish moves up
-
-
-def dir_class(doc):
-    """Every doc starts at the easy tier, wherever it sits; only failures move it up (reclass_on_failure)."""
-    return "easy"
-
-
-def doc_class(doc, st, base):
-    """The class a doc is queued in: its escalated class if it has been reclassed, else its directory's."""
-    return st.get("cls", {}).get(base) or dir_class(doc)
-
-
-def escalate(c):
-    i = C.CLASSES.index(c)
-    return C.CLASSES[i + 1] if i + 1 < len(C.CLASSES) else None
-
-
 def feed():
     """Keep every pool slot supplied: each slot gets (its count - running + 1) queued tasks, drawn from the pool's
     `feed` globs (skipping the pool's `skip` prefixes, and any doc a live task or external claim holds). A slot is
@@ -129,22 +103,23 @@ def feed():
     skips = pool.get("skip", [])
     st = load_state()
     held, made = held_claims(), 0
-    retry_s = pool.get("retry_hours", 12) * 3600.0
-    slot_cls = {sl["name"]: C.slot_class(sl) for sl in pool["slots"]}
-    # Each class keeps its own queue: capacity of its live slots, plus one, less what runs and what waits in it.
-    cap = {c: sum(sl["count"] for sl in pool["slots"] if C.slot_class(sl) == c) for c in C.CLASSES}
-    busy = {c: 0 for c in C.CLASSES}
-    for slot, n in C.running_by_slot().items():
-        busy[slot_cls.get(slot, "easy")] += n
-    queued = {c: 0 for c in C.CLASSES}
+    running = C.running_by_slot()
+    queued = {}
     for f in os.listdir(C.qdir()):
         if f.endswith(".json") and f.startswith(PREFIXES):
-            item = json.load(open(os.path.join(C.qdir(), f)))
-            queued[item.get("cls") or slot_cls.get(item.get("pool"), "easy")] += 1
-    need = {c: max(0, cap[c] - busy[c] + 1 - queued[c]) if cap[c] > 0 else 0 for c in C.CLASSES}
+            q = json.load(open(os.path.join(C.qdir(), f))).get("pool")
+            queued[q] = queued.get(q, 0) + 1
+    # Tasks are not tied to a slot (refill gives each to a free one), so the feeder keeps the WHOLE queue stocked:
+    # total capacity + 1, less what runs and what waits. A task is queued with no preferred slot.
+    total_need = max(0, C.pool_total() - sum(running.values()) + 1 - sum(queued.values()))
+    need = {sl["name"]: 0 for sl in pool["slots"]}
+    live_slots = [sl["name"] for sl in pool["slots"] if sl["count"] > 0]
+    if live_slots:
+        need[live_slots[0]] = total_need
     paths = sorted(set(p for g in pool["feed"] for p in glob.glob(os.path.join(C.MAIN, g))))
+    slots = [sl for sl in pool["slots"] if need[sl["name"]] > 0 and sl["count"] > 0]   # count 0: no new runs
     for p in paths:
-        if not any(need.values()):
+        if not slots:
             break
         rel = os.path.relpath(p, os.path.join(C.MAIN, "bugs"))
         doc = rel[:-3] if rel.endswith(".md") else rel
@@ -157,19 +132,14 @@ def feed():
         if why:
             log("stopped %s: %s" % (doc, why))
             continue
-        cls = doc_class(doc, st, base)
-        if need[cls] <= 0:
-            continue                           # its class is full: the doc waits for a slot of that class
         np = st.get("no_progress", {}).get(base)
-        if isinstance(np, str):                # written before holds expired: start its clock now
-            np = {"hash": np, "at": time.time()}
-        if hold_active(np, doc_hash(doc), retry_s):
-            log("held %s: its last attempt made no commit; retried after %.1f h, or sooner if the doc changes"
-                % (doc, retry_s / 3600.0 - (time.time() - np["at"]) / 3600.0))
+        if np and np == doc_hash(doc):
+            log("held %s: its last attempt made no commit and the doc has not changed since" % doc)
             continue
         prev = last_attempt(base) if st["fed"].get(doc) else None
         if prev:
             log("re-feed %s: previous attempt %s" % (doc, prev))
+        sl = slots[0]
         name = task_name(doc)
         if name in C.load():                   # the 40-char name collides with an old task: make it unique
             name += "-%d" % int(time.time() % 10000)
@@ -181,11 +151,13 @@ def feed():
                 "the stdlib compile after you land. If the bug is fully fixed, git rm its doc in the same commit and run "
                 "python3 tools/dangling_doc_refs.py --ratchet. Commit, end with a clean tree and the CONTROL-STATUS line." % doc_path(doc))
         r = subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "enqueue", name, "--claim", "bug:" + base,
-                            "--task", task, "--cls", cls], capture_output=True, text=True, cwd=C.MAIN)
+                            "--task", task], capture_output=True, text=True, cwd=C.MAIN)
         st["fed"][doc] = st["fed"].get(doc, 0) + 1
         if r.returncode == 0:
             made += 1
-            need[cls] -= 1
+            need[sl["name"]] -= 1
+            if need[sl["name"]] <= 0:
+                slots = [x for x in slots if need[x["name"]] > 0]
     json.dump(st, open(state_path(), "w"), indent=1)
     return made
 
@@ -196,38 +168,20 @@ def refill(target):
     return (r.stdout.strip().splitlines() or [""])[-1]
 
 
-def reclass_on_failure(st, base, doc):
-    """Count a no-commit attempt at the doc's class; after ESCALATE_AFTER of them the doc moves up one class and its hold
-    is cleared, so the stronger slot can take it at once. The top class keeps its docs (they wait for a hard slot)."""
-    fails = st.setdefault("fails", {})
-    fails[base] = fails.get(base, 0) + 1
-    cur = doc_class(doc, st, base)
-    nxt = escalate(cur)
-    if nxt and fails[base] >= ESCALATE_AFTER:
-        st.setdefault("cls", {})[base] = nxt
-        fails[base] = 0
-        st.setdefault("no_progress", {}).pop(base, None)
-        log("reclass %s: %s -> %s after %d no-commit attempts" % (doc, cur, nxt, ESCALATE_AFTER))
-
-
 def abandon_empty():
-    """A worker that exited with NO commits did nothing to land: free its claim, and record the doc's content hash and
-    time so the feeder holds it for pool.json's retry_hours, or until the doc changes, whichever is first. A limit or
-    quota kill is not recorded: it bans the slot (control.py), it says nothing about the doc."""
+    """A worker that exited with NO commits did nothing to land: free its claim, and record the doc's content hash so the
+    feeder does not re-feed it until the doc changes (progress is what requeues a doc, not a retry count)."""
     st = load_state()
     n = 0
     for name, t in C.load().items():
         if name.startswith(PREFIXES) and C.state_of(t) in ("exited-ok", "exited-err") and not C.ahead(t) \
                 and not C.git("status", "--short", cwd=t["worktree"], check=False) if os.path.isdir(t.get("worktree", "")) else False:
             subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "mark", name, "abandoned"], capture_output=True)
-            # A limit or quota kill says nothing about the doc: the slot is banned for that, the doc is not held.
-            if not C.limit_hit(t):
-                for c in t.get("claims", []):
-                    if c.startswith("bug:"):
-                        docs = bug_docs(c[4:])
-                        if docs:
-                            st.setdefault("no_progress", {})[c[4:]] = {"hash": doc_hash(docs[0]), "at": time.time()}
-                            reclass_on_failure(st, c[4:], docs[0])
+            for c in t.get("claims", []):
+                if c.startswith("bug:"):
+                    docs = bug_docs(c[4:])
+                    if docs:
+                        st.setdefault("no_progress", {})[c[4:]] = doc_hash(docs[0])
             n += 1
     json.dump(st, open(state_path(), "w"), indent=1)
     return n

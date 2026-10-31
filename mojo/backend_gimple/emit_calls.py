@@ -35,7 +35,6 @@ import mojo.backend_gimple.device_glue as _gmi_glue
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
-import fire_compiler as N
 from mojo.middle.exprtypes import _walk_ast_invalidate
 import mojo.middle.itcursor as itc
 import mojo.middle.lambdareduce as _gld
@@ -1381,111 +1380,7 @@ def _lower_factory_call(gen, node: gimple_ctypes.CallExpr, rec: dict) -> tuple[s
     return _wt, wv
 
 
-def _class_struct_of_arg(gen, a):
-    """The struct a class-valued argument names: `Cls` (a known struct, not shadowed by a local)
-    or `cls` inside a classmethod; None otherwise."""
-    if not isinstance(a, gimple_ctypes.IdentExpr):
-        return None
-    nm = _as_str(a.name)
-    if nm == 'cls':
-        cur = getattr(gen, '_current_struct_name', None)
-        return _as_str(cur) if cur and _as_str(cur) in gen._struct_bases and 'cls' in gen.var_types else None
-    if nm in gen._struct_bases and nm not in gen.var_types and nm not in gen._global_var_types:
-        return nm
-    return None
-
-
-def _lower_class_attr_builtin(gen, node, fn):
-    """The four attribute builtins on a class. A name the class body declares (a class-level
-    attribute, a method) keeps its static meaning; anything else is the run-time class table."""
-    struct = _class_struct_of_arg(gen, node.args[0])
-    name_node = node.args[1] if len(node.args) > 1 else None
-    lit = (_as_str(name_node.value) if isinstance(name_node, gimple_ctypes.StringLiteral)
-           and not N.is_fstring_literal(name_node) else None)
-    if lit is not None and (lit in gen._class_attrs.get(struct, {})
-                            or lit in gen._struct_method_names.get(struct, ())):
-        return None   # static: the ordinary lowering owns it
-    tag = gen._new_val('int64_t', f'{gimple_exprtypes._struct_type_id(struct)}LL')
-    nt, nv = gen.lower_expr(name_node)
-    nm = nv if nt == 'char *' else gen._new_val('char *', f'(char *){gen._to_int64(nt, nv)}')
-    if fn == 'hasattr':
-        if len(node.args) != 2:
-            return None
-        r = gen._call_expr('int', 'mojo_class_hasattr', [('int64_t', tag), ('char *', nm)])
-        return '_Bool', gen._new_val('_Bool', f'{r} != 0')
-    if fn == 'getattr':
-        if len(node.args) == 2:
-            r = gen._call_expr('int64_t', 'mojo_class_getattr', [('int64_t', tag), ('char *', nm)])
-        else:
-            dt, dv = gen.lower_expr(node.args[2])
-            dw = gen._call_expr('int64_t', 'mojo_box_from_double', [('double', dv)]) if dt == 'double' \
-                else gen._to_int64(dt, dv)
-            r = gen._call_expr('int64_t', 'mojo_class_getattr_default',
-                               [('int64_t', tag), ('char *', nm), ('int64_t', dw)])
-        gen._dyn_word_vals.add(r)
-        return 'int64_t', r
-    if fn == 'setattr' and len(node.args) == 3:
-        vt, vv = gen.lower_expr(node.args[2])
-        vw = gen._call_expr('int64_t', 'mojo_box_from_double', [('double', vv)]) if vt == 'double' \
-            else gen._to_int64(vt, vv)
-        gen._void_call('mojo_class_setattr', [('int64_t', tag), ('char *', nm), ('int64_t', vw)])
-        return 'int64_t', gen._new_val('int64_t', '0')
-    if fn == 'delattr' and len(node.args) == 2:
-        gen._void_call('mojo_class_delattr', [('int64_t', tag), ('char *', nm)])
-        return 'int64_t', gen._new_val('int64_t', '0')
-    return None
-
-
 def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
-    # `itertools.chain(a, b, ...)`: the elements of each argument in turn. Built eagerly
-    # into one list that records its own slot kinds; a generator handle argument is
-    # registered first so the run time can drain it.
-    if (isinstance(node.func, gimple_ctypes.MemberExpr)
-            and _as_str(node.func.member) == 'chain'
-            and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
-            and _as_str(gen.imported_symbols.get(node.func.obj.name, {}).get('module')
-                        or node.func.obj.name) == 'itertools'
-            and not getattr(node, 'kwargs', None)):
-        _ch = gen._call_expr('MojoList *', 'mojo_list_new', [])
-        for _ca in node.args:
-            _cat, _cav = gen.lower_expr(_ca)
-            if _cat == 'MojoGenerator *' and _cav in gen._generator_var_api:
-                _capi = gen._generator_var_api[_cav]
-                _cvk = {'int64_t': 0, '_Bool': 1, 'double': 2, 'char *': 3}.get(
-                    _as_str(_capi.get('value_ctype') or 'int64_t'))
-                _cw = gen._to_int64(_cat, _cav)
-                if _as_str(_capi.get('base') or '').startswith('__mgco_') and _cvk is not None:
-                    _cw = gen._call_expr('int64_t', 'mojo_gen_note_a3',
-                                         [('int64_t', _cw), ('int64_t', gen._new_val('int64_t', str(_cvk)))])
-            else:
-                _cw = gen._to_int64(_cat, _cav)
-            gen._void_call('mojo_chain_extend', [('MojoList *', _ch), ('int64_t', _cw)])
-        gen._struct_slot_kinds[_ch] = ginf._RuntimeKinded(['int', 'str'])
-        gen._maybe_kinds_vals.add(_ch)
-        return 'MojoList *', _ch
-    # `setattr(Cls, name, v)` / `getattr(Cls, name[, d])` / `hasattr(Cls, name)` / `delattr(Cls, name)`
-    # where the first argument is a CLASS (a struct name, or `cls` in a classmethod): attributes
-    # the class body never declared live in the run-time class table.
-    if (isinstance(node.func, gimple_ctypes.IdentExpr)
-            and _as_str(node.func.name) in ('setattr', 'getattr', 'hasattr', 'delattr')
-            and not gen._locally_binds_name(_as_str(node.func.name))
-            and not getattr(node, 'kwargs', None) and node.args
-            and _class_struct_of_arg(gen, node.args[0]) is not None):
-        _kcls = _lower_class_attr_builtin(gen, node, _as_str(node.func.name))
-        if _kcls is not None:
-            return _kcls
-    # `functools.lru_cache(maxsize=N)(f)` / `functools.cache(f)`: memoization is an
-    # optimization with no observable effect here, so the decorated value IS `f`.
-    _lc = node.func
-    if (isinstance(_lc, gimple_ctypes.CallExpr) and len(node.args) == 1
-            and ((isinstance(_lc.func, gimple_ctypes.MemberExpr)
-                  and _as_str(_lc.func.member) in ('lru_cache', 'cache')
-                  and isinstance(_lc.func.obj, gimple_ctypes.IdentExpr)
-                  and _as_str(gen.imported_symbols.get(_lc.func.obj.name, {}).get('module')
-                              or _lc.func.obj.name) == 'functools')
-                 or (isinstance(_lc.func, gimple_ctypes.IdentExpr)
-                     and _as_str(_lc.func.name) in ('lru_cache', 'cache')))):
-        return gen.lower_expr(node.args[0])
     # `sys.audit(event, *args)`: this runtime installs no audit hooks, so raising
     # an audit event has no observable effect. Its arguments are still
     # evaluated (side effects, errors) and the call yields None.
@@ -2918,35 +2813,6 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # struct-protocol branch above is what makes them honest.
     if (fname_raw == 'next' and 1 <= len(node.args) <= 2
             and _next_is_builtin):
-        # A WORD receiver (`next(iterator, *default)` in the interpreter's own `_mojo_next`):
-        # stepped at run time when the word is a generator handle the run time knows.
-        _w_t, _w_v = gen.lower_expr(node.args[0])
-        if _w_t in ('int64_t', 'int') and not isinstance(
-                node.args[0], (gimple_ctypes.ListExpr, gimple_ctypes.DictExpr)):
-            _hasd = gen._new_val('int', '0')
-            _dw = gen._new_val('int64_t', '0')
-            if len(node.args) == 2:
-                _a1 = node.args[1]
-                if isinstance(_a1, gimple_ctypes.UnaryOp) and _a1.op == '*':
-                    # `*default`: a (possibly empty) tuple holding the default
-                    _dt, _dv = gen.lower_expr(_a1.operand)
-                    _dl = gen._coerce_to_type(_dt, 'MojoList *', _dv) if _dt != 'MojoList *' else _dv
-                    _n = gen._call_expr('int64_t', 'mojo_list_len', [('MojoList *', _dl)])
-                    _zero = gen._new_val('int64_t', '0')
-                    _nz = gen._new_val('_Bool', f'{_n} > {_zero}')
-                    _hasd = gen._new_val('int', f'(int){_nz}')
-                    _first = gen._call_expr('int64_t', 'mojo_list_get_int',
-                                            [('MojoList *', _dl), ('int64_t', _zero)])
-                    _dw = _first
-                else:
-                    _hasd = gen._new_val('int', '1')
-                    _dt2, _dv2 = gen.lower_expr(_a1)
-                    _dw = gen._to_int64(_dt2, _dv2)
-            _nr = gen._call_expr('int64_t', 'mojo_next_word',
-                                 [('int64_t', gen._to_int64(_w_t, _w_v)), ('int', _hasd),
-                                  ('int64_t', _dw)])
-            gen._dyn_word_vals.add(_nr)
-            return 'int64_t', _nr
         _shape = 'next(%s)' % (
             type(node.args[0]).__name__
             if len(node.args) == 1
@@ -5717,8 +5583,7 @@ def _lower_ctor_from_iterable(gen, kind: str, node: gimple_ctypes.CallExpr) -> t
             # the comprehension's cast block neither needs nor fires.
             gen.var_types[_av] = _st
             _arg0 = gimple_ctypes.IdentExpr(_av, node.line, node.col)
-        elif (_at in _COMPREHENSION_ITER_TYPES
-              and not isinstance(_arg0, gimple_ctypes.CallExpr)):
+        elif _at in _COMPREHENSION_ITER_TYPES:
             # A BOXED word (static int64_t, real type a known iterable): this
             # is exactly how a module-GLOBAL list/dict reads back. Stay with
             # the ORIGINAL expression — _lower_comprehension re-lowers it into
@@ -7808,8 +7673,6 @@ def _lower_fnptr_call_value(gen, fp_type: str, fp_raw: str, node: gimple_ctypes.
                            [('void *', fp_void)] + [('int64_t', w) for w in widened[:4]])
         return 'double', t
     raw_t = gen._new_val('int64_t', f'{helper} ({call_args})')
-    if ret_type == 'int64_t':
-        gen._dyn_word_vals.add(raw_t)   # nothing says what the callee returns: a word of unknown kind
     # Calling a HIGHER-ORDER PARAMETER whose declared default is a compiled
     # generator of this compile (`def walk_tree(root, *, walk=_walk_tree)`
     # — Tools/c-analyzer/c_common/fsutil.py's whole idiom, and the shape

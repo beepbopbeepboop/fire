@@ -237,12 +237,8 @@ def _cpp_iterable_is_delegatable_generator_call(gen, iterable) -> bool:
         _self_struct = getattr(gen, '_cpp_gen_self_struct', None)
         return bool(_self_struct
                     and isinstance(iterable.func.obj, gimple_ctypes.IdentExpr)
-                    and iterable.func.obj.name in ('self', 'cls')
-                    and (iterable.func.member in gen._all_generator_names
-                         # a method the stack-switch path already compiled
-                         # (`__mgco_<S>_<m>_start/_resume/_value/_destroy`: the same four
-                         # entry points) is driven exactly like a coroutine one
-                         or (_self_struct, iterable.func.member) in gen._generator_method_api))
+                    and iterable.func.obj.name == 'self'
+                    and iterable.func.member in gen._all_generator_names)
     return False
 
 
@@ -479,19 +475,9 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     if _has_sd:
         fn = gcc_._cpp_lower_scandir_withs(gen, fn)   # `with scandir(..) as e` -> a real list of DirEntry handles
     gen.func_return_types.setdefault('mojo_list_slice_word', 'MojoList *')
-    _saved_self_struct = getattr(gen, '_cpp_gen_self_struct', None)
-    gen._cpp_gen_self_struct = struct_name   # the delegatable-call test reads it
-    try:
-        fn = gcc_._cpp_drain_generator_args(gen, fn)   # `yield from sorted(G(..))` -> drain G first
-    finally:
-        gen._cpp_gen_self_struct = _saved_self_struct
     if gcc_._cpp_needs_posix_idioms(gen, fn):
         fn = gcc_._cpp_lower_posix_idioms(gen, fn)   # fd-relative posix calls -> runtime calls
     gen._cpp_str_evidence_names = gimple_exprtypes._str_evidence_names(fn)
-    gen._cpp_object_params = set()   # parameters declared `object`: dynamic words
-    for _opn, _opa in (fn.params or []):
-        if _opa == 'object':
-            gen._cpp_object_params.add(gimple_ctypes._as_str(_opn))
     gen._cpp_list_word_names = gimple_exprtypes._list_method_names(fn)
     _opa = gcc_._cpp_collect_os_path_aliases(fn)
     if _opa:
@@ -639,7 +625,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
             # shape, so nothing can reach _cpp_expr's MemberExpr
             # "non-self member access" fallback (invalid C++ on a
             # scalar) or silently read the placeholder as a real value.
-            # See bugs/CODEGEN_enum_runtime_class_creation.md's
+            # See bugs/CODEGEN_generator_function_Lib_enum.md's
             # 2026-08-21 update for the motivating Lib/enum.py
             # `Flag._iter_member_by_value_` shape (previously refused
             # unconditionally here — see the
@@ -1354,8 +1340,17 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         f"    if (h) h.destroy();",
         f"}}",
     ]
-    lines.extend(_cpp_generator_sig_lines(gen, fn, base, param_ctypes, cpp_value_ctype,
-                                          extra_captures, struct_name))
+    # The registration lines, captured on the generator before they are
+    # spliced in: the escaping-closure claim (see _compile_nested_generator_
+    # closures) must know whether the unit REGISTERED a runtime signature —
+    # the caller's `for` drains the returned handle through that entry, and
+    # a generator whose signature could not be spelled must keep the honest
+    # refusal instead of iterating nothing at run time. Reset+set per unit,
+    # the same side-channel convention as _cpp_last_tuple_slot_ctypes.
+    _sig_lines = _cpp_generator_sig_lines(gen, fn, base, param_ctypes, cpp_value_ctype,
+                                          extra_captures, struct_name)
+    gen._cpp_last_sig_lines = _sig_lines
+    lines.extend(_sig_lines)
     # Plain unpack loop, NOT `[ct for _, ct in param_ctypes]` — a
     # comprehension's tuple-unpack target boxes to int64_t self-hosted.
     _ret_cts = []
@@ -1424,8 +1419,16 @@ def _cpp_generator_sig_lines(gen, fn, base, param_ctypes, cpp_value_ctype,
     keywords by name and a `for` over the returned handle can drain it.
     Emitted only for a plain free generator whose parameters are all words
     (a double would travel in a float register, which a word-typed call cannot
-    reproduce) and whose every default is spellable."""
-    if extra_captures or struct_name is not None or len(param_ctypes) > 8:
+    reproduce) and whose every default is spellable.
+    A NESTED generator's trailing capture parameters (extra_captures,
+    appended to param_ctypes before this runs) ride the registration too:
+    its escaping-closure thunk starts the generator DIRECTLY (the captures
+    come from the closure record, no keyword binding can name them) and
+    records the handle through mojo_gen_handle_put, which needs exactly this
+    signature entry to drain the handle later — a registered-generator call
+    that omits the captures binds them as missing and raises, an honest
+    error rather than a mis-slotted start."""
+    if struct_name is not None or len(param_ctypes) > 8:
         return []
     _vk = {'int64_t': 0, '_Bool': 1, 'double': 2, 'char *': 3}.get(cpp_value_ctype)
     if _vk is None:
@@ -1434,26 +1437,8 @@ def _cpp_generator_sig_lines(gen, fn, base, param_ctypes, cpp_value_ctype,
         else:
             return []
     _names = [gimple_ctypes._as_str(_pn) for _pn, _ in param_ctypes]
-    # A generator that yields a parameter declared `object` (a dynamic word:
-    # an escaping closure generator's caller-supplied argument) yields words
-    # whose kind - string or integer - only the run time knows.
-    _obj_params = set()
-    for _pn0, _pa0 in (fn.params or []):
-        if _pa0 == 'object':
-            _obj_params.add(gimple_ctypes._as_str(_pn0))
-    if _vk == 0 and _obj_params:
-        for _yn in gimple_exprtypes._walk_ast(fn.body):
-            if (isinstance(_yn, gimple_ctypes.YieldExpr)
-                    and isinstance(_yn.value, gimple_ctypes.IdentExpr)
-                    and _yn.value.name in _obj_params):
-                _vk = 5
-                break
-    # A struct pointer travels in an integer register like any word (an
-    # escaping method generator takes its receiver this way).
-    for _pn, _ct in param_ctypes:
-        if _ct not in _SIG_WORD_CTYPES and not (
-                _ct.endswith(' *') and _ct[:-2] in gen.struct_field_types):
-            return []
+    if any(_ct not in _SIG_WORD_CTYPES for _, _ct in param_ctypes):
+        return []
     if any(_n.startswith('*') for _n in _names):
         return []
     _defs = getattr(fn, 'param_defaults', None) or {}
@@ -1677,6 +1662,38 @@ def _only_directly_called(body: list, name: str) -> bool:
     return all(id(r) in called for r in refs)
 
 
+def _called_or_returned_only(body: list, name: str) -> bool:
+    """True when every reference to `name` inside `body` is the callee of a
+    direct call OR the value of a `return` statement — the ESCAPING-closure
+    shape of a nested generator: driven in place (the direct call, threaded
+    by emit_calls._emit_nested_generator_start_call as before) and/or handed
+    out as a value for the CALLER to drive later (`return g`, the glob.py
+    selector factories). The return reference is lowered at the `def` by
+    _gen_stmt_FunctionDef's closure record: the captured values plus the
+    generator's start, wrapped as a registered variadic callable. Any OTHER
+    value use (an assignment, a yield, a call argument) has no lowering and
+    keeps the honest refusal. The walker yields BOTH such nodes AGAIN as
+    bare IdentExprs (a call's callee, a return's value), so the reference
+    nodes are collected by id first and whitelisted on the second pass
+    rather than matched on their parent statements alone."""
+    called_ids = set()
+    ret_ids = set()
+    for nd in gimple_exprtypes._walk_ast(body):
+        if (isinstance(nd, gimple_ctypes.CallExpr)
+                and isinstance(nd.func, gimple_ctypes.IdentExpr)
+                and nd.func.name == name):
+            called_ids.add(id(nd.func))
+        if (isinstance(nd, gimple_ctypes.ReturnStmt)
+                and isinstance(nd.value, gimple_ctypes.IdentExpr)
+                and nd.value.name == name):
+            ret_ids.add(id(nd.value))
+    for nd in gimple_exprtypes._walk_ast(body):
+        if isinstance(nd, gimple_ctypes.IdentExpr) and nd.name == name:
+            if id(nd) not in called_ids and id(nd) not in ret_ids:
+                return False
+    return True
+
+
 def _compile_nested_generator_closures(gen, outer_fn: gimple_ctypes.FunctionDef,
                                        generator_fns: dict) -> None:
     """Compile each NESTED sync generator of `outer_fn` that reads enclosing
@@ -1686,14 +1703,26 @@ def _compile_nested_generator_closures(gen, outer_fn: gimple_ctypes.FunctionDef,
 
     Scope, deliberately narrow -- everything else keeps the honest refusal
     `_gen_cpp_generator_unit` already gives:
-      * the generator is a DIRECT top-level statement of `outer_fn` (the same
-        scope `_compile_nested_async_functions` walks), not a method, and it
-        is only ever CALLED by name from `outer_fn` (`_only_directly_called`);
-        a generator returned or stored as a value is refused;
+      * `outer_fn` is a TOP-LEVEL `def` (the claim site walks the module's
+        top-level statements), and the generator is a DIRECT statement of it:
+        a nested generator inside a struct method (the Lib/glob.py selectors)
+        is never claimed;
+      * it is either only CALLED by name from `outer_fn` (`_only_directly_
+        called`, driven in place with the captures threaded as trailing
+        arguments) or only CALLED or RETURNED (`_called_or_returned_only`):
+        the ESCAPING shape, in which the enclosing factory materializes a
+        closure record (a heap env of the captured values plus the generator's
+        start, registered as a MojoVarargFn whose static thunk appends the
+        captures and starts the generator directly) and the caller's
+        `for v in factory(...)()` drains it; any other value reference (a
+        list element, a dict entry, a branch the call/return scan cannot see)
+        stays refused;
       * every enclosing name it reads is one `_compute_nested_closure_
         captures` resolves against `outer_fn`'s params and top-level locals
         (`_enclosing_scope_with_locals`) -- a read of anything else is not
-        claimed;
+        claimed; that resolver seeds only scalar parameters and locals
+        (int64_t/double/_Bool), so a char * capture is not threaded yet and
+        keeps the honest refusal;
       * no captured name is REBOUND in `outer_fn`'s own body: a parameter
         has no binding site and a local has exactly its one `var`
         declaration. Python reads an enclosing name at each resume, so a
@@ -1715,8 +1744,14 @@ def _compile_nested_generator_closures(gen, outer_fn: gimple_ctypes.FunctionDef,
         read = gen._nested_gen_captures.get(id(inner))
         if not read:
             continue
+        _escaping = False
         if not _only_directly_called(outer_fn.body, inner.name):
-            continue
+            # A value reference besides the direct call: the escaping
+            # closure shape (`return g`, driven by the caller) when every
+            # other reference is a return, refused otherwise.
+            if not _called_or_returned_only(outer_fn.body, inner.name):
+                continue
+            _escaping = True
         if outer_scope is None:
             outer_scope = gen._enclosing_scope_with_locals(outer_fn)
         caps = gen._compute_nested_closure_captures(inner, outer_scope)
@@ -1752,14 +1787,39 @@ def _compile_nested_generator_closures(gen, outer_fn: gimple_ctypes.FunctionDef,
         except gimple_exprtypes._UnsupportedGeneratorShape as e:
             gen._cpp_refusal_reasons.setdefault(inner.name, str(e))
             continue
+        if _escaping and not gen._cpp_last_sig_lines:
+            # The caller's `for` drains the handle through the signature
+            # table; a signature the unit could not register (a default it
+            # cannot spell, a value kind it cannot read) would make the
+            # loop iterate nothing at run time — a silent wrong answer.
+            # Refuse the claim so the module keeps the honest refusal.
+            gen._cpp_refusal_reasons.setdefault(
+                inner.name,
+                f"{inner.name}: an escaping nested generator needs its "
+                "runtime signature registered for the caller's iteration, "
+                "which this unit could not spell")
+            continue
         gen._nested_generator_api[(outer_fn.name, inner.name)] = {
             'base': base, 'value_ctype': value_ctype,
             'params': param_ctypes, 'captures': caps,
             'nested_name': inner.name,
+            'escaping': _escaping,
+            # The closure's THUNK symbol, derived from `base` (unique per
+            # unit: the same-name ordinal _gen_cpp_generator_unit appends is
+            # already in it) so a whole-program do_imports compile can never
+            # emit two identical statics.
+            'thunk': (f"_closure_thunk_{base}" if _escaping else None),
         }
         gen.func_param_types[f"{base}_start"] = param_ctypes
         gen._generator_cpp_units.append(cpp_text)
         generator_fns.pop(id(inner), None)
+        if _escaping:
+            # The enclosing factory's value returns are the closure word;
+            # a `for` over a chained call through it drains the handle the
+            # thunk recorded (see _gen_for_iter's closing over this table).
+            gen._gen_closure_return_fns.setdefault(
+                outer_fn.name, {})[inner.name] = (
+                base, gimple_ctypes._as_str(value_ctype))
 
 
 def _nested_generator_sibling_defs(stmts) -> dict[int, list]:
@@ -2296,7 +2356,18 @@ def _enclosing_scope_with_locals(gen, outer_fn: gimple_ctypes.FunctionDef) -> di
     scope: dict = {}
     for pname, ptype in (outer_fn.params or []):
         pname = pname.lstrip('*')
-        ctype = gen._resolve_type(ptype) if ptype is not None else None
+        # THE SAME resolver the enclosing function's own C signature uses
+        # (_gen_cpp_generator_unit's own param loop calls it per param):
+        # an annotated param resolves through _resolve_type, an
+        # unannotated one through the usage inference and then the
+        # whole-module call-site-kind scan. Using it here keeps the
+        # capture's declared ctype and the enclosing param's real C ctype
+        # in agreement by construction — a second, independent guess is
+        # exactly how this method's earlier drafts disagreed with the real
+        # declaration. `_param_ctype` is a module function
+        # (mojo/middle/funcs_shared.py) exposed on the generator, so call
+        # it as a method.
+        ctype = gen._param_ctype(pname, ptype, outer_fn)
         if ctype in ('int64_t', 'int', 'double', '_Bool'):
             scope[pname] = ctype
     widened = gen._inferred_var_types.get(outer_fn.name, {})

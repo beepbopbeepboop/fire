@@ -124,6 +124,45 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
     # case above it has no ordinary closure body here. Its call sites resolve
     # through _nested_generator_api, keyed (current_func_name, name).
     if node.is_generator and (gen.current_func_name, node.name) in gen._nested_generator_api:
+        _api = gen._nested_generator_api[(gen.current_func_name, node.name)]
+        if _api.get('escaping'):
+            # An ESCAPING nested generator: the `def` materializes the
+            # CLOSURE RECORD at the statement site — the captured enclosing
+            # values in a heap word array plus the generator's start, wrapped
+            # as a registered variadic callable (mojo_vararg_fn_new, the thunk
+            # defined in module_gen's preamble off this api entry). The local
+            # the `def` binds holds that word: `return g` hands it to the
+            # caller, whose call drives it through the ordinary function-
+            # value dispatch (mojo_fnptr_call_N checks the vararg registry
+            # first), and the caller's `for` drains the handle the thunk
+            # recorded in the runtime's table.
+            _caps = _api.get('captures') or []
+            _n_fixed = len(_api.get('params') or []) - len(_caps)
+            gen._declare_var(node.name, 'int64_t')
+            if _caps:
+                _env = gen._new_val(
+                    'void **',
+                    f'(void **)malloc (sizeof (void *) * {len(_caps)})')
+                for _ix, _cap in enumerate(_caps):
+                    _cap_name, _cap_ctype = _cap
+                    _ct2, _cv = gen.lower_expr(
+                        gimple_ctypes.IdentExpr(_cap_name))
+                    if gimple_ctypes._as_str(_ct2) in ('int64_t', 'int', '_Bool'):
+                        # A scalar capture travels as its OWN bits in the
+                        # word slot; a pointer capture as its pointer.
+                        _slot = f'(void *) (intptr_t) ({_cv})'
+                    else:
+                        _slot = f'(void *) ({_cv})'
+                    gen._emit(f'  {_env} [{_ix}] = {_slot};')
+                gen._emit(
+                    f'  {gen._cname(node.name)} = (int64_t) (intptr_t) '
+                    f'mojo_vararg_fn_new ((void *) {_api["thunk"]}, '
+                    f'(void *) {_env}, {_n_fixed}, 0, 1);')
+            else:
+                gen._emit(
+                    f'  {gen._cname(node.name)} = (int64_t) (intptr_t) '
+                    f'mojo_vararg_fn_new ((void *) {_api["thunk"]}, 0, '
+                    f'{_n_fixed}, 0, 1);')
         return
     outer_closures = getattr(gen, '_all_closures', {}).get(
         gen.current_func_name, {})
@@ -2732,89 +2771,6 @@ def _func_csym(gen, bare_name: str) -> str:
     return mangled
 
 
-def _seed_annotated_param_elem_types(gen, node) -> None:
-    """Seed what a param's own declared annotation says about its contents.
-
-    Shared by gen_func and _gen_struct_method, so a method's params get the
-    same seed a free function's do. Two things are seeded, both straight from
-    the annotation (the same static-truth seed struct fields already get; see
-    gimple_module_gen.py's `list[tuple[T, T]]` field block):
-
-    * the element type of a container param (`list[tuple[str, str]]`,
-      `dict[str, list[str]]`, `Span[Tuple[A, B], _]`), so loop/unpack vars and
-      `xs[i]` are not boxed int64_t inside the body;
-    * a `Tuple[...]` param's by-value struct, registered in struct_field_types.
-      The param pass resolves the ctype but does not register the struct, so
-      `t[0]` on a Tuple param missed the member-access fast path and
-      dereferenced the struct value (`invalid type argument of unary '*'`).
-    """
-    for pname, ptype in node.params:
-        if ptype is None or pname.startswith('*') or not isinstance(ptype, str):
-            continue
-        bare = pname.lstrip('*')
-        _pa = ptype.strip()
-        _pbase = _pa.split('[', 1)[0].strip()
-        if _pbase in ('Tuple', 'tuple') and '[' in _pa:
-            gen._ensure_tuple_struct(_pa)
-        if _pbase not in ('list', 'List', 'set', 'Set', 'frozenset', 'dict', 'Dict', 'Span') or '[' not in _pa:
-            continue
-        _pin = gimple_ctypes._split_top_level_commas(
-            _pa[_pa.index('[') + 1:_pa.rindex(']')].strip())
-        if _pbase in ('dict', 'Dict'):
-            if len(_pin) != 2:
-                continue
-            _vann = _pin[1].strip()
-            _vc = gen._resolve_type(_vann)
-            if _vc and _vc != 'int64_t':
-                gen._dict_val_types.setdefault(bare, _vc)
-            _vbase = _vann.split('[', 1)[0].strip()
-            if _vbase in ('list', 'List', 'set', 'Set', 'frozenset') and '[' in _vann:
-                _ei = gimple_ctypes._split_top_level_commas(
-                    _vann[_vann.index('[') + 1:_vann.rindex(']')].strip())
-                if len(_ei) == 1 and _ei[0].strip():
-                    _ec = gen._resolve_type(_ei[0].strip())
-                    if _ec and _ec != 'int64_t':
-                        gen._dict_nested_val_types.setdefault(bare, _ec)
-            continue
-        # `Span[T, origin]` carries an origin parameter after the element
-        # type, so its element is the FIRST bracket argument; List/Set take
-        # exactly one. Without this a `Span[Tuple[A, B], _]` parameter had no
-        # element type seeded, and `tuples[i][0]` read the element as a raw
-        # char* (the `_mojo_at_int64_t` / `*` errors in python.mojo's
-        # Python.dict(tuples: Span[Tuple[...], _]) body, which only became
-        # visible once that overload's signature was correct).
-        if _pbase == 'Span':
-            if not _pin or not _pin[0].strip():
-                continue
-            _pin = [_pin[0]]
-        if len(_pin) != 1 or not _pin[0].strip():
-            continue
-        _eann = _pin[0].strip()
-        _ebase = _eann.split('[', 1)[0].strip()
-        if _ebase in ('tuple', 'Tuple') and '[' in _eann:
-            _slots = gimple_ctypes._split_top_level_commas(
-                _eann[_eann.index('[') + 1:_eann.rindex(']')].strip())
-            _sc = None
-            _same = True
-            for _sl in _slots:
-                _sl = _sl.strip()
-                if not _sl:
-                    continue
-                _t = gen._resolve_type(_sl)
-                if _sc is None:
-                    _sc = _t
-                elif _t != _sc:
-                    _same = False
-                    break
-            if _same and _sc and _sc != 'int64_t':
-                gen._elem_types.setdefault(bare, 'MojoList *')
-                gen._nested_elem_types.setdefault(bare, _sc)
-        else:
-            _ec = gen._resolve_type(_eann)
-            if _ec and _ec != 'int64_t':
-                gen._elem_types.setdefault(bare, _ec)
-
-
 def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # A COROUTINE BODY is lowered by a dedicated pass whose body model is
     # scalar-only, so the lambda beta-reduction must not inline a capturing
@@ -2894,13 +2850,6 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # Set module context for global field access
     gen._current_module_ctx = gen.module_name if len(gen.module_name) > 0 else "root"
     gen.current_func_name = node.name
-    # A module-level function is not a method: clear the struct a previous
-    # METHOD body left behind (the method path sets it and never resets it).
-    # A stale name made a local called `cls` here take the classmethod arm of
-    # `_lower_MemberExpr`, lowering `cls.methods` to a dynamic
-    # `mojo_class_getattr` word, which then reached `mojo_dict_get_int` as an
-    # int ("makes pointer from integer") in myinterpreter's `__iter__` lookup.
-    gen._current_struct_name = ""
     # Which of THIS function's parameters are annotated `bool` — see
     # `gimple_exprtypes.record_bool_params`. Recorded here because this is the
     # one place the annotation text and the emitted function name are both in
@@ -2949,7 +2898,67 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         if pst:
             gen._param_struct_types[bare] = pst
 
-    _seed_annotated_param_elem_types(gen, node)
+    # Seed container element types straight from a param's own declared
+    # annotation — the same static-truth seed struct fields already get
+    # (see gimple_module_gen.py's `list[tuple[T, T]]` field block). A param
+    # annotated `list[tuple[str, str]]` / `list[str]` / `dict[str, list[str]]`
+    # otherwise binds its loop/unpack vars as boxed int64_t inside the body
+    # even though the caller's shape is fully known here (concretely:
+    # `_emit_call(arg_pairs: list[tuple[str, str]])` unpacked `(atype, aval)`
+    # as int64_t, so once a callee's `func_param_types` entry became readable
+    # the `ptype != atype` compare fired a bogus `(char *)` reinterpret cast).
+    for pname, ptype in node.params:
+        if ptype is None or pname.startswith('*') or not isinstance(ptype, str):
+            continue
+        bare = pname.lstrip('*')
+        _pa = ptype.strip()
+        _pbase = _pa.split('[', 1)[0].strip()
+        if _pbase not in ('list', 'List', 'set', 'Set', 'frozenset', 'dict', 'Dict') or '[' not in _pa:
+            continue
+        _pin = gimple_ctypes._split_top_level_commas(
+            _pa[_pa.index('[') + 1:_pa.rindex(']')].strip())
+        if _pbase in ('dict', 'Dict'):
+            if len(_pin) != 2:
+                continue
+            _vann = _pin[1].strip()
+            _vc = gen._resolve_type(_vann)
+            if _vc and _vc != 'int64_t':
+                gen._dict_val_types.setdefault(bare, _vc)
+            _vbase = _vann.split('[', 1)[0].strip()
+            if _vbase in ('list', 'List', 'set', 'Set', 'frozenset') and '[' in _vann:
+                _ei = gimple_ctypes._split_top_level_commas(
+                    _vann[_vann.index('[') + 1:_vann.rindex(']')].strip())
+                if len(_ei) == 1 and _ei[0].strip():
+                    _ec = gen._resolve_type(_ei[0].strip())
+                    if _ec and _ec != 'int64_t':
+                        gen._dict_nested_val_types.setdefault(bare, _ec)
+            continue
+        if len(_pin) != 1 or not _pin[0].strip():
+            continue
+        _eann = _pin[0].strip()
+        _ebase = _eann.split('[', 1)[0].strip()
+        if _ebase in ('tuple', 'Tuple') and '[' in _eann:
+            _slots = gimple_ctypes._split_top_level_commas(
+                _eann[_eann.index('[') + 1:_eann.rindex(']')].strip())
+            _sc = None
+            _same = True
+            for _sl in _slots:
+                _sl = _sl.strip()
+                if not _sl:
+                    continue
+                _t = gen._resolve_type(_sl)
+                if _sc is None:
+                    _sc = _t
+                elif _t != _sc:
+                    _same = False
+                    break
+            if _same and _sc and _sc != 'int64_t':
+                gen._elem_types.setdefault(bare, 'MojoList *')
+                gen._nested_elem_types.setdefault(bare, _sc)
+        else:
+            _ec = gen._resolve_type(_eann)
+            if _ec and _ec != 'int64_t':
+                gen._elem_types.setdefault(bare, _ec)
 
     # Seed the cross-call element-type contract for container params, so
     # param[i][j] reads the inner element with the right getter and return
@@ -3333,7 +3342,6 @@ def _gen_toplevel(gen, toplevel_stmts: list) -> str:
     else:
         fn_name = gimple_ctypes._module_toplevel_name(gen.module_name)
     gen.current_func_name = fn_name
-    gen._current_struct_name = ""   # top-level code is outside any method body
     gen.func_ret_type = 'void'
     gen.func_return_types[fn_name] = 'void'
 
@@ -3996,7 +4004,7 @@ def _register_imported_generics(gen, stmts) -> None:
     instantiation. This runs in the inline do_imports=True path too: there a
     bracketed call `gen[2](x)` to a sibling module's generic otherwise matched
     no registration and lowered to a zero stub (a silent miscompile; see
-    bug:CODEGEN_dylib_generic_inline_copies_share_one_symbol (generic fn shared symbol)."""
+    bugs/CODEGEN_dylib_generic_inline_copies_share_one_symbol.md)."""
     for st in stmts:
         if not (isinstance(st, gimple_ctypes.FromImportStmt) and not getattr(st, 'wildcard', False)):
             continue
@@ -4026,7 +4034,7 @@ def _register_imported_generic_structs(gen, stmts) -> None:
     _ensure_generic_struct, e.g. `alloc[MoveOnly[Int]]`) can resolve it.
 
     Runs in the inline do_imports=True path too (same guard removal as
-    _register_imported_generics, bug:CODEGEN_dylib_generic_inline_copies_share_one_symbol)."""
+    _register_imported_generics, bugs/CODEGEN_dylib_generic_inline_copies_share_one_symbol.md)."""
     for st in stmts:
         if not (isinstance(st, gimple_ctypes.FromImportStmt) and not getattr(st, 'wildcard', False)):
             continue
@@ -4120,7 +4128,6 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     # IEEE-754 bit pattern flowing on as an ordinary int64_t — silently
     # wrong, exit 0. Keyed by the QUALIFIED `Struct_method` name the
     # call-site pre-pass records under.
-    _seed_annotated_param_elem_types(gen, node)
     _mkey = f"{_as_str(struct_name)}_{_as_str(node.name)}"
     _mpe = getattr(gen, '_param_elem_types', {}).get(_mkey, {})
     for _mbare in _mpe:
@@ -4212,14 +4219,6 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
             gen._actual_types[bare] = 'MojoList *'
         else:
             ctype = gen._resolve_type(ptype)
-            if ptype is None:
-                # The cross-call refinement (Pass 1.3e: every call site passes a
-                # string / float) is what the definition's signature declares, so
-                # the return-type inference below must read the parameter as it.
-                _refined = gen._inferred_param_types.get(
-                    f"{struct_name}_{node.name}", {}).get(pname)
-                if _refined in ('char *', 'double'):
-                    ctype = _refined
             gen.var_types[bare] = ctype
             if ctype != 'int64_t':
                 gen._actual_types[bare] = ctype

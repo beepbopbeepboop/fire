@@ -1317,7 +1317,7 @@ def _prefix_is_interpolated(prefix: str) -> bool:
     field spans **lines**, which `test_formal_libc_symbol.py` was the one
     file in the 2026-10-04 sweep to meet (its refusal read `unterminated
     string literal`). It is fixed — at `cca2a17f`, recorded at
-    `bugs/formal/FORMAL_sweep_work_map.md` §3.1's `b13` row and §1.13's `#### 1.5` —
+    `bugs/FORMAL_sweep_work_map.md` §3.1's `b13` row and §1.13's `#### 1.5` —
     and `test_string_literal_lexing.py`'s `LITERALS` block is what holds it
     there. With no shared predicate the scanner asked "is there a line end
     here?" without ever asking "am I inside code?", and CPython's rule for
@@ -2498,7 +2498,7 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
                     # depth; without that this branch is dead code, which is the
                     # shape the bug had — the first of the two halves was
                     # missing and this is the second. Fixed at `cca2a17f` (the
-                    # `b13` round's §5, now `bugs/formal/FORMAL_sweep_work_map.md`
+                    # `b13` round's §5, now `bugs/FORMAL_sweep_work_map.md`
                     # §3.1's `b13` row), and held by
                     # `test_string_literal_lexing.py`.
                     interpolated = _prefix_is_interpolated(src[start:i])
@@ -6206,22 +6206,7 @@ class Parser:
             return StringLiteral(_val, line=line, col=col, is_raw=_all_raw)
         _merged = ''
         for _r in raws:
-            _inner = self._string_literal_inner(_r)
-            if not self._raw_string_is_ftstring(_r):
-                # A plain piece is LITERAL text, but the merged body is an
-                # f-string, where `{...}` is an interpolation and a backslash
-                # is decoded. Without escaping, `f"[{a}]" "{ q }"` interpolated
-                # `q` (CPython: `[A]{ q }`), and the compiled path lowered the
-                # `{ mojo_exc_pending_set(0); ` in cpp_core's C-text emitter as
-                # a call. Double the braces, except a `\N{NAME}` escape, which
-                # is one token; a raw piece's backslashes are doubled too.
-                if self._raw_string_is_raw(_r):
-                    _inner = _inner.replace('\\', '\\\\')
-                _inner = re.sub(r'(\\N\{[^{}]*\})|([{}])',
-                                lambda _m: _m.group(1) if _m.group(1)
-                                else _m.group(2) * 2,
-                                _inner)
-            _merged += _inner
+            _merged += self._string_literal_inner(_r)
         _dq3 = '"' * 3
         _sq3 = "'" * 3
         # `is_interpolated=True` on all three returns, and the evidence is the

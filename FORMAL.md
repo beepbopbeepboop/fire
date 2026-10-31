@@ -5,14 +5,14 @@ none should be filed as one. It exists because the goal — *one runtime, two co
 generators, one proof* — spans `formal/`, `mojo/`, `runtime/` and the proof
 library, and because the honest state of that goal is currently spread across five
 bug documents that each know one piece of it. Per-phase evidence belongs in that
-phase's commit and, where a phase produces a standing fact, in the `bugs/formal/FORMAL_*`
+phase's commit and, where a phase produces a standing fact, in the `bugs/FORMAL_*`
 documents this one defers to. What lives *here* is the thesis, the measured current
 state, the decisions taken, and the order.
 
 Read with: `doc/ABI.md` (the boundary contract this must not contradict),
-`bugs/formal/FORMAL_known_limits.md` (the audited codegen residue),
-`bugs/formal/FORMAL_arm64_known_proof_gaps.md` (the proof census),
-`bugs/mid/CODEGEN_bootstrap_resource_blowup.md` (the upstream cause of the
+`bugs/FORMAL_known_limits.md` (the audited codegen residue),
+`bugs/FORMAL_arm64_known_proof_gaps.md` (the proof census),
+`bugs/CODEGEN_bootstrap_resource_blowup.md` (the upstream cause of the
 self-host divergence), and `bugs/OPEN_WORK.md` A1 (the x86-64 `call_rel32`,
 which [3] needs). **§11 is the operating contract** — the five agents, their
 exclusive write sets, the isolation rules, the interface-request mechanism and
@@ -32,7 +32,7 @@ number that disagrees is stale, not wrong; the name is the claim.
 ## 1. The thesis
 
 `fire.py` has two machine-code backends. The gimple backend emits C, links
-`runtime/fire_runtime.c` (645 KB) plus the other runtime translation units, and
+`runtime/fire_runtime.c` (589 KB) plus the other runtime translation units, and
 hands the result to a system linker. The formal backend emits Mach-O or ELF
 itself, links **libSystem, and — since phase 2 landed — the per-architecture
 runtime dylib when and only when the image names something in it**, and carries
@@ -92,11 +92,11 @@ not just `fire_runtime.h`:
 
 | | count | note |
 |---|---|---|
-| entry points across **11** headers | **798** | `fire_runtime.h` 692, `fire_sqlite3.h` 22, `fire_ncurses.h` 18, `fire_python.h` 15, `fire_async_runtime.h` 16, `fire_ssl.h` 13, `fire_coro.h` 7, `fire_metal.h` 6, `fire_zlib.h` 6, `fire_coro_ctx.h` 3; `fire_wd.h` scans to **zero** |
-| **word in, word out** | **352** | every parameter and the return value is one 64-bit word |
-| not word-shaped | **446** | a box crosses the boundary — in an argument, in the return, or both |
+| entry points across **11** headers | **726** | `fire_runtime.h` 623, `fire_sqlite3.h` 22, `fire_ncurses.h` 18, `fire_python.h` 15, `fire_async_runtime.h` 13, `fire_ssl.h` 13, `fire_coro.h` 7, `fire_metal.h` 6, `fire_zlib.h` 6, `fire_coro_ctx.h` 3; `fire_wd.h` scans to **zero** |
+| **word in, word out** | **300** | every parameter and the return value is one 64-bit word |
+| not word-shaped | **426** | a box crosses the boundary — in an argument, in the return, or both |
 
-So **352 of 798 (44.1%)** is the reachable-surface ceiling. The previous
+So **300 of 726 (41.3%)** is the reachable-surface ceiling. The previous
 revision of this section published 219 of 540 (40.6%), and before that 352 of
 455 (77%) — the word *share* has been stable near 40% across all three
 censuses, and it is the denominators that moved. Two headers have been added
@@ -265,7 +265,7 @@ bounded: arm64 against a scratch region (`_SCRATCH = ARM64_CONTAINER_BUDGET =
 131072`, declared in `formal/model.py` and read by
 `formal/arm64_codegen.py`; over-capacity raises in `_blob_cap`'s callers) and
 x86-64 against `_BLOB_BYTES = X86_64_CONTAINER_BUDGET = 16384` the same way.
-So the **446** non-word entry points of §2.2 are not merely unwired — they have
+So the **426** non-word entry points of §2.2 are not merely unwired — they have
 no representation.
 
 ### 3.3 The gimple premise — ESTABLISHED by phase 0, with one latent failure left
@@ -418,7 +418,7 @@ true.
 
 This is stated separately because it is the load-bearing consequence of decision 3.
 
-Under (c) alone, the formal target's containers stay frame blobs and the 446
+Under (c) alone, the formal target's containers stay frame blobs and the 426
 box-crossing entry points of §2.2 stay gimple-only, permanently. That is a real
 ceiling, and it is why (c) cannot be the destination.
 
@@ -524,14 +524,14 @@ refused, and the refusal now names the *type* mismatch rather than a prefix.
 
 | | arm64 | x86_64 |
 |---|---|---|
-| word-shaped entry points (`runtime_abi`) | 352 | 352 |
+| word-shaped entry points (`runtime_abi`) | 300 | 300 |
 | …of which the runtime dylib actually **exports** | 241 | 241 |
 | …reachable with no heap handle the formal path cannot obtain | **201** | **201** |
 
 So the honest statement of the surface is **201 word-shaped calls are callable
 from a formal image today**, not the "0" this document published when the phase
-was written, and not the 219 (now 352) of §2.2. The two gaps between the
-352 of the row above (the 2026-10-23 census, below, measured 284) and 201 are
+was written, and not the 219 (now 300) of §2.2. The two gaps between the
+300 of the row above (the 2026-10-23 census, below, measured 284) and 201 are
 both deliberate and both named:
 
 - **40 of the 241** the library exports take a `void *` parameter the
@@ -1007,7 +1007,7 @@ Stated so no reader infers otherwise.
   honest answer.
 - **The host-import problem is a repository problem.** Phases 0-6 move repository
   files; the stdlib scope is untouched by them, and its residue is the MLIR /
-  generics / one-word families in `bugs/formal/FORMAL_known_limits.md`.
+  generics / one-word families in `bugs/FORMAL_known_limits.md`.
 - **Stage 5 monomorphization is still the largest lever on the sweep headline**
   and it is **not** in this programme. It is phase 7, and it is weeks, not an
   afternoon. `formal/monomorph.py` now does per-EDGE monomorphization for module
@@ -1021,7 +1021,7 @@ Stated so no reader infers otherwise.
   several hundred files, and `CLAUDE.md`'s own rule is the reason they are gone:
   a tally is not a property of the tree, and a file that states one goes stale
   underneath a change made in none of the files that state it. The current
-  census lives in `bugs/formal/FORMAL_sweep_work_map.md` §1, which supersedes every
+  census lives in `bugs/FORMAL_sweep_work_map.md` §1, which supersedes every
   per-round map this tree grew — and a fresh one is
   `python3 tools/formal_sweep.py`. Read the headline there.
 
@@ -1267,7 +1267,7 @@ site. **Trap:** proving it for a concrete `n` and generalising by hand.
 **[3] per-export contracts.** Phase 4 proper. `export_result_spec` is an
 obligation and `dylib_export_contract_of_spec` is proved, so a caller's theorem
 now consumes a contract instead of asserting one — but no real *spec* exists
-yet for any actual export. **352 of 798** entry points are word-in/word-out
+yet for any actual export. **300 of 726** entry points are word-in/word-out
 (§2.2) and **201** of them are callable from a formal image today (§6 phase 2),
 so there is a callable surface with no contracts on it, which is the state phase
 4 exists to end. Start with the
@@ -1280,7 +1280,7 @@ it typechecks.
 
 **[4] the frame-address design.** The single biggest coverage lever left, and
 not a patch. 45% of every remaining codegen finding is one design defect in five
-costumes (`bugs/formal/FORMAL_wide_receiver_by_reference.md`): the receiver of a
+costumes (`bugs/FORMAL_wide_receiver_by_reference.md`): the receiver of a
 multi-field struct is the address of a frame that dies when the function
 returns, so returning it is a use-after-free and passing it where a value is
 wanted hands the callee a pointer. Measured with the check removed, the same
@@ -1314,7 +1314,7 @@ vacuous theorems.
 `tools/formal_sweep.py`, `fire_compiler.py`, `build_config.py`,
 `build_stdlib_dylib.py`, `driver.py`, `mojo/backend_gimple/*`, `mojo/middle/*`.
 Two known items sit there and are next round, not this one: the `comptime`
-expression evaluator (`bugs/formal/FORMAL_known_limits.md` §7) and the container-kind
+expression evaluator (`bugs/FORMAL_known_limits.md` §7) and the container-kind
 unanimity rule in `mojo/middle/infra_infer.py`
 (`bugs/INTERFACE_REQUEST_1_to_middle_infra_infer.md`, which [2] repointed at
 `module_gen.py` so it is [1]'s own follow-up rather than an orphan).
@@ -1350,7 +1350,7 @@ unanimity rule in `mojo/middle/infra_infer.py`
   named and tracked until a later round closes it.
 - **Take the 80/20 and leave a note.** A precise "this costs weeks, and here is
   why" is a **deliverable**; a half-finished attempt is not.
-  `bugs/formal/FORMAL_known_limits.md` has the table shape for that — measured count,
+  `bugs/FORMAL_known_limits.md` has the table shape for that — measured count,
   whether the refusal is *true*, what closing it takes.
 - **`GMOJO_HOME` is per-agent, always.** One environment variable, and it removes
   every CAS contention, torn cache entry and dylib overwrite question. Set it
@@ -1416,7 +1416,7 @@ is in the tree, the request is not.**
 it made the instruments stricter, then [3], then [5]. It worked, and the
 part that mattered was not the order but the *ownership* — no two agents shared
 a writable file, and the one collision (both [3] and [5] editing
-`bugs/formal/FORMAL_known_limits.md`, because the plan partitioned code files and left
+`bugs/FORMAL_known_limits.md`, because the plan partitioned code files and left
 docs unassigned) auto-merged and cost nothing.
 
 **This round:**
@@ -1458,7 +1458,7 @@ had a **wall** bound (`subprocess.run(timeout=1200)`), three of them had none,
 and `maxHeartbeats` does not meter the thing that spins (`native_decide`, kernel
 reduction, and `simp`'s congruence recursion — three separate budgets measured
 FAILING to fire on the one case ever diagnosed; the numbers are in §12 below and
-in `bugs/formal/FORMAL_dylib_export_loops_and_frame_bounds.md` §1).
+in `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md` §1).
 
 | what | bound | why that size |
 |---|---|---|

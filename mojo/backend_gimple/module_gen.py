@@ -111,11 +111,6 @@ import mojo.middle.funcs_shared as _ggfs
 from mojo.middle.funcs_shared import _resolve_struct_cname, _sanitize_cname_qualifier
 
 
-# Builtins that look at a value without forwarding its static type anywhere.
-_NON_FORWARDING_BUILTINS = frozenset((
-    'isinstance', 'issubclass', 'type', 'id', 'hasattr', 'getattr', 'callable',
-    'len', 'repr', 'str', 'bool', 'print'))
-
 def _gmi_literal_ctype(node):
     """The ctype of an UNAMBIGUOUS container/string literal, else None.
 
@@ -2142,9 +2137,6 @@ def _emit_reflection_dispatch(self, parts):
             + ("  return mojo_list_new();\n"
                "}\n")
             + asdict_dispatch_part
-            + ("static void __attribute__((constructor)) _mojo_register_getattr (void) {\n"
-               "  mojo_register_getattr_dispatch(_mojo_dispatch_getattr);\n"
-               "}\n")
             + ("static int _mojo_dispatch_is_dataclass (void *obj) {\n"
                "  int64_t _tag = mojo_read_type_tag_safe((int64_t)(intptr_t)obj);\n")
             + f"  static const int64_t _known[] = {{{tag_set_literal}}};\n"
@@ -3509,46 +3501,6 @@ def _gmi_refuse_scalar_decorator_rebind(self, stmts: list, scope: dict) -> None:
                     f"bugs/COMPILE_FAIL_decorator_application_dropped.md)")
 
 
-def _declare_posthoc_class_attrs(stmts) -> None:
-    """`A.extra = 7` (anywhere in the module: at top level or inside a function)
-    on a class `A` the module defines declares the class attribute `extra`, just
-    as a class-body `extra = 7` would. Without the declaration a READ of
-    `A.extra` / `cls.extra` has no class global to resolve to and silently
-    answered an empty container (`print(A.extra)` printed `[]`). The class body
-    gets `extra = <the literal>`; the assignment statement itself stays and
-    writes the same class global. Only a literal right side (int / float / str /
-    bool) is declared (its type is then known), and never a name the class
-    already has as a field or method."""
-    structs = {}
-    for st in stmts:
-        if isinstance(st, StructDef):
-            structs[st.name] = st
-    if not structs:
-        return
-    for n in gimple_exprtypes._walk_ast(stmts):
-        if not (isinstance(n, AssignStmt) and isinstance(n.target, MemberExpr)
-                and isinstance(n.target.obj, IdentExpr)
-                and n.target.obj.name in structs
-                and isinstance(n.value, (IntLiteral, FloatLiteral, StringLiteral, BoolLiteral))):
-            continue
-        sd = structs[n.target.obj.name]
-        attr = n.target.member
-        have = set()
-        for f in sd.fields:
-            if isinstance(f, AssignStmt) and isinstance(f.target, IdentExpr):
-                have.add(f.target.name)
-            elif isinstance(f, VarDecl):
-                have.add(f.name)
-            elif isinstance(getattr(f, 'name', None), str):
-                have.add(f.name)
-        for m in sd.methods:
-            have.add(m.name)
-        if attr in have:
-            continue
-        sd.fields.append(AssignStmt(target=IdentExpr(name=attr, line=n.line, col=n.col),
-                                    value=n.value, line=n.line, col=n.col))
-
-
 def gen_module_impl(self, stmts):
 
     # A class written INSIDE a function body is a type declaration like any
@@ -3556,7 +3508,6 @@ def gen_module_impl(self, stmts):
     # it is hoisted there before anything consumes the list. See
     # `_gmi_hoist_nested_structs` for why it appends rather than moves.
     stmts = _gmi_hoist_nested_structs(self, stmts)
-    _declare_posthoc_class_attrs(stmts)
     _gmi_refuse_nested_class_enclosing_reads(stmts)
     stmts = _gmi_decorator_pass(self, stmts, {}, True)
 
@@ -7569,8 +7520,6 @@ def gen_module_impl(self, stmts):
     if _own_top_level_func_names:
         _scan_module_level_for_func_attrs(stmts)
 
-    # `Struct_method` -> its parameter names in order (receiver included).
-    self._method_param_names: dict = {}
     all_structs_for_methods = (stmts + (imported_stmts if (self.do_imports or self.link_imports) else [])
                                 + self._imported_typedef_structs)
     for s in all_structs_for_methods:
@@ -7620,11 +7569,6 @@ def gen_module_impl(self, stmts):
                 self._ambiguous_struct_methods.add((_as_str(s.name), _dn))
             for m in s.methods:
                 mangled = f"{s.name}_{m.name}"
-                _mpn_names = []
-                for _mpn, _mpt in (m.params or []):
-                    if not _as_str(_mpn).startswith('*'):
-                        _mpn_names.append(_as_str(_mpn))
-                self._method_param_names[_as_str(mangled)] = _mpn_names
                 if m.return_type is not None:
                     funcs_shared.record_annotated_tuple_slots(self, mangled, m.return_type)
                     _ret_ct = self._resolve_type(m.return_type)
@@ -7811,12 +7755,6 @@ def gen_module_impl(self, stmts):
                                 # missing. See CODEGEN_generator_function_
                                 # Lib_tarfile.md.
                                 self.var_types[pname] = f"{s.name} *"
-                            elif (ptype is None and self._inferred_param_types.get(
-                                    _mangled_key, {}).get(pname) in ('char *', 'double')):
-                                # A parameter every call site passes a string
-                                # (or float) for: the refinement Pass 1.3e made.
-                                self.var_types[pname] = self._inferred_param_types[
-                                    _mangled_key][pname]
                             else:
                                 self.var_types[pname] = self._resolve_type(ptype)
                         # Seed inferred LOCAL var types (see
@@ -8271,11 +8209,6 @@ def gen_module_impl(self, stmts):
                         _ann_for = {}
                         self._annotated_params[_sfn] = _ann_for
                     _ann_for[_as_str(_spn)] = True
-    for s in all_functions:
-        if isinstance(s, FunctionDef):
-            self._inferred_param_types[s.name] = self._infer_param_types(s)
-    # A call to a function defined LATER in the module (`iglob` forwarding to
-    # `_iglob`) read a callee that had no inference yet; a second pass sees it.
     for s in all_functions:
         if isinstance(s, FunctionDef):
             self._inferred_param_types[s.name] = self._infer_param_types(s)
@@ -8909,48 +8842,6 @@ def gen_module_impl(self, stmts):
         if not _apply_method_scalar_obs():
             break
 
-    # A method's RETURN type was inferred (the pass-2b loop above) while its
-    # unannotated parameters were still the int64_t default, so `return a + b`
-    # over two parameters every call site passes strings for answered int64_t
-    # and the string it built printed as a pointer decimal. Re-infer it now
-    # that the parameters are refined (only a method whose return stayed at
-    # the default and whose parameters actually changed).
-    for _rs in all_structs_for_methods:
-        if not isinstance(_rs, StructDef):
-            continue
-        _rs = _as_structdef_node(_rs)
-        for _rm in _rs.methods:
-            _rm = _as_funcdef_node(_rm)
-            _rkey = f"{_as_str(_rs.name)}_{_as_str(_rm.name)}"
-            _rref = self._inferred_param_types.get(_rkey)
-            if (not _rref or _rm.return_type is not None
-                    or self.func_return_types.get(_rkey) not in (None, 'int64_t')):
-                continue
-            _saved_vt = dict(self.var_types)
-            _saved_fn = self.current_func_name
-            self.var_types.clear()
-            self.current_func_name = _rkey
-            _rpar = _rm.params
-            for _ri in range(len(_rpar)):
-                _rpn = _as_str(_rpar[_ri][0])
-                _rpt = _rpar[_ri][1]
-                if _rpn.startswith('**'):
-                    self.var_types[_rpn[2:]] = 'MojoDict *'
-                elif _rpn.startswith('*'):
-                    self.var_types[_rpn[1:]] = 'MojoList *'
-                elif _ri == 0 and _rpn in ('self', 'cls'):
-                    self.var_types[_rpn] = f"{_as_str(_rs.name)} *"
-                elif _rpt is None and _rpn in _rref:
-                    self.var_types[_rpn] = _rref[_rpn]
-                else:
-                    self.var_types[_rpn] = self._resolve_type(_rpt)
-            _rinf = self._infer_return_type(_rm.body)
-            if _rinf in ('char *', 'double'):
-                self.func_return_types[_rkey] = _rinf
-            self.var_types.clear()
-            self.var_types.update(_saved_vt)
-            self.current_func_name = _saved_fn
-
     # Refresh Pass 2b-bis's precomputed per-overload signature ctypes for
     # methods whose parameters the pass above just resolved. Pass 2b-bis
     # runs BEFORE any inference exists, so its _mangled_signature_ctypes
@@ -8990,17 +8881,11 @@ def gen_module_impl(self, stmts):
             # struct pointer — the "makes integer from pointer without a
             # cast" the pre-registration above was written to stop. Write
             # the refined per-overload signature here, where inference is
-            # final. Every OVERLOADED method needs it, not only the structs
-            # THIS compile materialized in-TU (gen._intu_structs): the bare
-            # key is last-overload-wins, so an overloaded constructor that
-            # missed the slot had its definition's param types read off a
-            # sibling. Measured in std/collections/string/codepoint.mojo:
-            # `Codepoint.__init__(out self, *, unsafe_unchecked_codepoint:
-            # UInt32)` was defined as `char *` (the `lit: StringLiteral`
-            # overload's type), so every caller cast its UInt32 through a
-            # pointer (-Wint-to-pointer-cast). A non-overloaded method's
-            # suffix is empty, so its slot IS the bare key and is untouched.
-            if _oid or s.name in getattr(self, '_intu_structs', {}):
+            # final, for the structs THIS compile materialized in-TU
+            # (gen._intu_structs — the elab factory closure and the generic
+            # seed); every other struct keeps the bare-key fallback exactly
+            # as it always did.
+            if s.name in getattr(self, '_intu_structs', {}):
                 self.func_param_types[_sigkey] = _new_ct
 
     for s in all_functions:
@@ -10141,12 +10026,7 @@ def gen_module_impl(self, stmts):
     _vu_fn_names = set(_as_str(_f.name) for _f in all_functions
                        if isinstance(_f, FunctionDef))
     _vu_callees = set()
-    # id(IdentExpr) -> the function name it references. A dict keyed by the
-    # node's id, not a set of (id, name) pairs: each node is visited once, the
-    # id is the identity, and a set of tuples has no element representation in
-    # the runtime (its iterator yields a word), so the compiled path could not
-    # unpack `for (_i, _nm) in <set of pairs>`.
-    _vu_refs = {}
+    _vu_refs = set()
     for _vu_f in all_functions:
         if not isinstance(_vu_f, FunctionDef):
             continue
@@ -10154,8 +10034,8 @@ def gen_module_impl(self, stmts):
             if isinstance(_vu_n, CallExpr) and isinstance(_vu_n.func, IdentExpr):
                 _vu_callees.add(id(_vu_n.func))
             elif isinstance(_vu_n, IdentExpr) and _as_str(_vu_n.name) in _vu_fn_names:
-                _vu_refs[id(_vu_n)] = _as_str(_vu_n.name)
-    self._value_used_funcs = set(_vu_refs[_i] for _i in _vu_refs if _i not in _vu_callees)
+                _vu_refs.add((id(_vu_n), _as_str(_vu_n.name)))
+    self._value_used_funcs = set(_nm for (_i, _nm) in _vu_refs if _i not in _vu_callees)
     _em_before = sum(len(_v) for _v in self._param_elem_mixed.values())
     _resolve_param_dict_vals()
     _resolve_param_containers()
@@ -10463,12 +10343,7 @@ def gen_module_impl(self, stmts):
             if ann.get(pname) is not None:
                 continue                         # respect explicit annotation
             cur = self._inferred_param_types.get(callee, {}).get(pname)
-            # A `MojoList *` guess (the parameter is sliced / indexed and nothing else
-            # said what it is) yields to a UNANIMOUS string observation: a string
-            # literal at every call site is proof, and a real list there would be a
-            # TypeError in Python (the method contract in `_apply_method_scalar_obs`
-            # makes the same call).
-            if cur in (None, 'int', 'int64_t') or (cur == 'MojoList *' and _has_cs):
+            if cur in (None, 'int', 'int64_t'):
                 resolved_type = 'double' if _has_dbl else 'char *'
                 self._inferred_param_types.setdefault(callee, {})[pname] = resolved_type
 
@@ -10962,16 +10837,6 @@ def gen_module_impl(self, stmts):
                 if isinstance(_rc.func.obj, IdentExpr):
                     struct_evidence_params.add(_as_str(_rc.func.obj.name))
             elif isinstance(_rc.func, IdentExpr):
-                # A Python BUILTIN that inspects its argument
-                # (`isinstance(node, IdentExpr)`) is not a forward to a
-                # function whose parameter type could be learned: counting it
-                # made a parameter that is correctly tested for several node
-                # classes a "polymorphic struct parameter used as method
-                # receiver" and refused the whole module (every
-                # `_callable_value_symbol(gen, node)` importer fell back to
-                # source inclusion).
-                if _as_str(_rc.func.name) in _NON_FORWARDING_BUILTINS:
-                    continue
                 for _rc_a in _rc.args:
                     if isinstance(_rc_a, IdentExpr):
                         struct_evidence_params.add(_as_str(_rc_a.name))
@@ -16258,6 +16123,35 @@ def gen_module_impl(self, stmts):
             parts.append(f"extern void {_base}_destroy (MojoGenerator *);")
             if _api.get('is_async_gen'):
                 parts.append(f"extern _Bool {_base}_last_yield_was_wd (MojoGenerator *);")
+            if _api.get('escaping') and _api.get('thunk'):
+                # The closure's THUNK: the registered variadic callable the
+                # `def` wraps around the captured values + start address
+                # (see _gen_stmt_FunctionDef's escaping branch). It receives
+                # the caller's positional arguments (n_fixed of them,
+                # scalars — _mojo_vararg_invoke's (env, a0..an, MojoList*)
+                # call form) and the closure record, appends the captured
+                # values in the order the coroutine frame takes them (user
+                # params, then trailing captures — the _gen_cpp_generator_
+                # unit convention), starts the generator DIRECTLY (the
+                # captures no keyword binding can name), and records the
+                # handle in the runtime's table for the caller's `for` to
+                # drain. `n_fixed` bounded to 8: _mojo_vararg_invoke's
+                # wrappers cap the arity there too.
+                _nc = len(_api.get('captures') or [])
+                _nf = len(_api.get('params') or []) - _nc
+                _args = ', '.join(f'int64_t _a{i}' for i in range(_nf))
+                _sig = f'void * _env, {_args + ", " if _args else ""}MojoList * _packed'
+                _start_args = (
+                    [f'_a{i}' for i in range(_nf)]
+                    + [f'(int64_t)(intptr_t)_caps [{i}]' for i in range(_nc)])
+                parts.extend([
+                    f'static int64_t {_api["thunk"]} ({_sig}) {{',
+                    f'    void ** _caps = (void **) _env;',
+                    f'    int64_t _h = (int64_t) (intptr_t) {_base}_start ({", ".join(_start_args)});',
+                    f'    mojo_gen_handle_put ((void *) {_base}_start, (void *) _h);',
+                    '    return _h;',
+                    '}',
+                ])
         parts.append('')
     if '__mojo_gen_resume_once' in self._funcptr_builtins_needed:
         # "Detached async"'s resume_fn half (bugs/hard/CODEGEN_coro_
@@ -16391,13 +16285,7 @@ def gen_module_impl(self, stmts):
                     # (which goes through _param_ctype's own bytes-default
                     # hook). Mismatch → "conflicting types for 'size'".
                     param_ctypes.append('MojoBytes *')
-                elif pt is None and pn in inferred_params:
-                    # Usage inference only for an UNANNOTATED parameter: an
-                    # annotation outranks it, and `_param_ctype` (what the
-                    # definition uses) is the authority for an annotated one.
-                    # Taking the inferred type here declared
-                    # `_debug_note(where, detail: object='')` as `char *` while
-                    # the definition typed it `int64_t` ("conflicting types").
+                elif pn in inferred_params:
                     param_ctypes.append(inferred_params[pn])
                 else:
                     param_ctypes.append(self._param_ctype(pn, pt, fdef))
@@ -16688,20 +16576,6 @@ def gen_module_impl(self, stmts):
         parts.append('}')
         parts.append('')
 
-    if self.emit_struct_defs and self._struct_bases:
-        # Every class announces itself (type tag, bases) to the run-time class table, so
-        # `setattr(cls, ...)` / `cls.attr` reads of attributes the class body never
-        # declared find them through the bases (`mojo_class_getattr`).
-        parts.append('static void __attribute__((constructor)) _mojo_register_classes(void) {')
-        for _cn in sorted(self._struct_bases):
-            _ctag = gimple_exprtypes._struct_type_id(_as_str(_cn))
-            parts.append(f'    mojo_class_register({_ctag}LL, 0, "{_as_str(_cn)}");')
-            for _bn in self._struct_bases[_cn]:
-                parts.append(f'    mojo_class_register({_ctag}LL, '
-                             f'{gimple_exprtypes._struct_type_id(_as_str(_bn))}LL, 0);')
-        parts.append('}')
-        parts.append('')
-
     if self.emit_struct_defs:
         class_attr_inits = getattr(self, '_class_attr_inits', [])
         parts.append("static void _mojo_classattr_init (void)")
@@ -16744,9 +16618,9 @@ def gen_module_impl(self, stmts):
             '    operator int64_t() const { return w; }',
             '    operator bool() const { return w != 0; }',
             '    operator char *() const { return (char *)(intptr_t)w; }',
-            '    ' + self._cpp_word_container_operator('MojoList', True),
-            '    ' + self._cpp_word_container_operator('MojoDict', True),
-            '    ' + self._cpp_word_container_operator('MojoSet', True) + ' };',
+            '    operator MojoList *() const { return (MojoList *)(intptr_t)w; }',
+            '    operator MojoDict *() const { return (MojoDict *)(intptr_t)w; }',
+            '    operator MojoSet *() const { return (MojoSet *)(intptr_t)w; } };',
             'template <class T> static inline _MjWord _mj_w(T v) {',
             '    if constexpr (std::is_pointer_v<T>) return _MjWord{(int64_t)(intptr_t)v};',
             '    else return _MjWord{(int64_t)v}; }',
