@@ -41,6 +41,7 @@ import gimple_codegen
 from gimple_codegen import _selfhost_impl_py_files
 import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
+import mojo.backend_gimple.emit_exprs as gex
 import mojo.backend_gimple.emit_infra as ginf
 # NOT `from mojo.middle.module_shared import module_qualifier` at module
 # scope: this file is reached FROM `gimple_codegen`, which the middle
@@ -232,6 +233,16 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
         gen._register_nested_env_free(node.name, env_var, owner_body)
     else:
         gen._closure_envs[node.name] = ''
+    # `def f(...)` is a BINDING of `f` in the enclosing scope. When `f` is also an
+    # ordinary local there -- `if c: f = other  else: def f(...)`, the join of two
+    # branches -- the name is a declared word variable, and a bare read of it loads
+    # that variable (`_lower_IdentExpr` prefers a local over a closure name). The
+    # `def` has to store its value into it, or the branch that only `def`s it
+    # returns the variable uninitialised (the caller's first call through it was a
+    # SIGBUS).
+    if node.name in gen.var_types:
+        _vt, _vv = gex._closure_value(gen, node.name, ci)
+        gen._safe_coerce_emit(_vt, gen.var_types[node.name], _vv, gen._write_dest(node.name))
 
 
 def _gen_stmt_ImportStmt(gen, node):
