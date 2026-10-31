@@ -4433,6 +4433,14 @@ def _list_repr_fn(gen, rav: str) -> str:
     if _struct_slot_kind_bytes(gen, rav) is not None:
         return 'mojo_repr_list_kinds'
     et = gen._elem_types.get(rav)
+    # A value that MAY hold slots of different kinds, whose kinds the codegen
+    # cannot name statically, is a derived list: `list(t)`, `t[:]`, `t + t` of
+    # a mixed `struct.unpack` result, or a copy of a mixed literal. Its kinds
+    # travel on the value (`mojo_list_set_kinds`), so the kinds-aware helper
+    # reads them from the runtime row (see `_list_repr_call`). The single
+    # list-wide ctype below is exact only for a list that really is uniform.
+    if rav in gen._maybe_kinds_vals and et in ('double', 'int64_t'):
+        return 'mojo_repr_list_kinds'
     if et == 'double':
         return 'mojo_repr_list_doubles'
     if et == 'int64_t':
@@ -4540,9 +4548,17 @@ def _list_repr_call(gen, key: str, lst: str | None = None) -> tuple[str, list]:
     ends up being called with two arguments.
     """
     fn = gen._list_repr_fn(key)
-    args = [('MojoList *', lst if lst is not None else key)]
+    val = lst if lst is not None else key
+    args = [('MojoList *', val)]
     if fn == 'mojo_repr_list_kinds':
-        args.append(('const char *', gen._intern_string(_struct_slot_kind_bytes(gen, key))))
+        kinds = _struct_slot_kind_bytes(gen, key)
+        if kinds is not None:
+            args.append(('const char *', gen._intern_string(kinds)))
+        else:
+            # No static table: the kinds are the value's own row, which is
+            # what `mojo_repr_list_kinds` reads when handed NULL.
+            args.append(('const char *', gen._new_val(
+                'const char *', f'mojo_list_get_kinds ({val})')))
     elif fn == 'mojo_repr_list_slotkinds':
         args.append(('const char *', gen._intern_string(_tuple_slot_kind_bytes(gen, key))))
     return fn, args
