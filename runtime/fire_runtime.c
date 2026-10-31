@@ -13027,6 +13027,18 @@ void *mojo_sorted(void *iterable) {
     /* The generic int64-payload sort. Correct for int lists, and wrong for a
      * list whose elements are char* — see mojo_list_sorted_str below for why
      * the codegen dispatches around this one. */
+    /* A list that records its OWN slot kinds says when every element is a string
+     * (a drained generator, `os.listdir`-style results): sort those as strings. */
+    if (src && src->len > 0) {
+        int all_str = 1;
+        for (int64_t i = 0; i < src->len && all_str; i++)
+            if (mojo_list_slot_kind(src, i) != 'p') all_str = 0;
+        if (all_str) {
+            MojoList *sd = mojo_list_sorted_str(src);
+            mojo_list_set_kinds_uniform(sd, 'p');
+            return (void *)sd;
+        }
+    }
     MojoList *dst = mojo_list_copy(src);
     _mojo_permute_by(dst, NULL, MOJO_KIND_INT, 0);
     return (void *)dst;
@@ -14673,4 +14685,15 @@ int64_t mojo_split_dyn(int64_t recv, int64_t arg)
 {
     if (mojo_is_re_pattern(recv)) return _re_split((MojoRePat *)(intptr_t)recv, (char *)(intptr_t)arg, 0);
     return (int64_t)(intptr_t)mojo_str_split((char *)(intptr_t)recv, (char *)(intptr_t)arg);
+}
+
+/* `itertools.chain(a, b, ...)` argument by argument: append every element of the
+ * iterable word `src` to `dst` under the kind it carries (eager; the sources are
+ * finite iterables here). */
+void mojo_chain_extend(MojoList *dst, int64_t src)
+{
+    MojoList *l = mojo_iter_word(src);
+    if (!l) return;
+    for (int64_t i = 0; i < mojo_list_len(l); i++)
+        mojo_list_append_word(dst, mojo_list_get_boxed(l, i));
 }

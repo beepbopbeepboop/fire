@@ -1381,6 +1381,32 @@ def _lower_factory_call(gen, node: gimple_ctypes.CallExpr, rec: dict) -> tuple[s
 
 
 def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    # `itertools.chain(a, b, ...)`: the elements of each argument in turn. Built eagerly
+    # into one list that records its own slot kinds; a generator handle argument is
+    # registered first so the run time can drain it.
+    if (isinstance(node.func, gimple_ctypes.MemberExpr)
+            and _as_str(node.func.member) == 'chain'
+            and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
+            and _as_str(gen.imported_symbols.get(node.func.obj.name, {}).get('module')
+                        or node.func.obj.name) == 'itertools'
+            and not getattr(node, 'kwargs', None)):
+        _ch = gen._call_expr('MojoList *', 'mojo_list_new', [])
+        for _ca in node.args:
+            _cat, _cav = gen.lower_expr(_ca)
+            if _cat == 'MojoGenerator *' and _cav in gen._generator_var_api:
+                _capi = gen._generator_var_api[_cav]
+                _cvk = {'int64_t': 0, '_Bool': 1, 'double': 2, 'char *': 3}.get(
+                    _as_str(_capi.get('value_ctype') or 'int64_t'))
+                _cw = gen._to_int64(_cat, _cav)
+                if _as_str(_capi.get('base') or '').startswith('__mgco_') and _cvk is not None:
+                    _cw = gen._call_expr('int64_t', 'mojo_gen_note_a3',
+                                         [('int64_t', _cw), ('int64_t', gen._new_val('int64_t', str(_cvk)))])
+            else:
+                _cw = gen._to_int64(_cat, _cav)
+            gen._void_call('mojo_chain_extend', [('MojoList *', _ch), ('int64_t', _cw)])
+        gen._struct_slot_kinds[_ch] = ginf._RuntimeKinded(['int', 'str'])
+        gen._maybe_kinds_vals.add(_ch)
+        return 'MojoList *', _ch
     # `functools.lru_cache(maxsize=N)(f)` / `functools.cache(f)`: memoization is an
     # optimization with no observable effect here, so the decorated value IS `f`.
     _lc = node.func

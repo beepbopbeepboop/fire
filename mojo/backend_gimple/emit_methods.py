@@ -523,7 +523,7 @@ def _lower_bound_method_value(gen, struct_name: str, method: str,
     `return self.select_exists` (glob.py:399), a bare reference to
     the generator method `select_exists` (glob.py:534, itself `yield`s
     directly) as a plain VALUE, not a call — see
-    bugs/CODEGEN_generator_function_Lib_glob.md. Even setting the
+    Lib/glob.py's `iglob` (fixed 2026-10-31). Even setting the
     undeclared-symbol crash aside, a `MojoBoundMethod*`'s own calling
     convention (`mojo_bound_method_call_N`, ONE call returning a
     single `int64_t`) has no way to represent "returns an iterable
@@ -2797,6 +2797,11 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             return gen._lower_call(_bare_node)
 
         # Check if this is a known module method
+        if (module_name == 'os' and method_name in ('fspath', 'fsdecode') and len(node.args) == 1
+                and not getattr(node, 'kwargs', None)):
+            # `os.fspath(p)` of a str / bytes path is the path itself (a path-like object's
+            # `__fspath__` is not modelled); evaluated once, type kept.
+            return gen.lower_expr(node.args[0])
         if module_name == 're' and method_name == 'escape' and len(node.args) == 1:
             # re.escape(p) — escape regex metacharacters so `p` can be embedded
             # as a literal in a larger pattern. Previously there was NO

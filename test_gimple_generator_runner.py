@@ -915,7 +915,7 @@ def _cpp_for_over_callable_local_is_named():
     # the call nor the reason — so the SAME blocker read as five unrelated
     # gaps (c_common/tables.py `read_table`, c_analyzer/__init__.py
     # `check_all`, c_common/fsutil.py `glob_tree`/`_walk_tree`,
-    # bugs/CODEGEN_generator_function_Lib_glob.md's `_iglob`,
+    # Lib/glob.py's `_iglob` (the generator-compile bug, fixed 2026-10-31),
     # the (since-fixed) Lib/os.py generator refusal's `walk`) and each doc had to
     # re-derive what to do about it. It stays a refusal — the callee's
     # return type genuinely is not knowable in this body model — but now says
@@ -7477,6 +7477,41 @@ def main():
     s = Sub(10)
     for x in s.sel(4)(0):
         print(x)
+main()
+""")
+
+    # A generator yielding the elements of a list that records its own slot kinds
+    # (a drained tagged generator): the words are unwrapped from their boxes, and the
+    # consumer's loop variable is a word of unknown kind, so strings and ints print right.
+    test_generator_matches_cpython("generator_relays_elements_of_a_runtime_kinded_list", """\
+def tagged():
+    yield 'x'
+    yield 1
+    yield 'z'
+
+def relay():
+    for v in list(tagged()):
+        yield v
+
+def main():
+    for v in relay():
+        print(v)
+
+main()
+""", """\
+def tagged():
+    yield 'x'
+    yield 1
+    yield 'z'
+
+def relay():
+    for v in list(tagged()):
+        yield v
+
+def main():
+    for v in relay():
+        print(v)
+
 main()
 """)
 

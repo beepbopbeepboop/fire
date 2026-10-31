@@ -196,6 +196,8 @@ def _gen_for_range(gen, node: gimple_ctypes.ForStmt):
 
 def _get_actual_type(gen, ctype: str, val: str) -> str:
     """Get actual type, checking _actual_types for int64_t-stored pointers."""
+    if _as_str(val) in getattr(gen, '_gen_handle_word_locals', ()):
+        return ctype   # also bound to a generator handle: no single container kind
     if ctype == 'int64_t' and val in gen._actual_types:
         return gen._actual_types[val]
     if val in gen.var_types and gen.var_types[val] == 'int64_t' and val in gen._actual_types:
@@ -734,6 +736,10 @@ def _boxed_list_ptr(gen, lst_type: str, lst_val: str) -> str | None:
     """
     if lst_type not in ('int', 'int64_t', 'void *'):
         return None
+    # A local that is ALSO bound to a generator handle somewhere (`dirs = _iglob(..)` /
+    # `dirs = [d]`): the list evidence of one binding says nothing about the other.
+    if _as_str(lst_val) in getattr(gen, '_gen_handle_word_locals', ()):
+        return None
     _int_lists = getattr(gen, '_coro_int_list_params', {}).get(
         getattr(gen, 'current_func_name', None), ())
     if _as_str(lst_val) in _int_lists:
@@ -1141,6 +1147,10 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             # `_param_elem_types` -> `gen_func`. See
             # CODEGEN_coro_yield_kind_unresolved_callsite.
             _lp_known = _boxed_list_ptr(gen, it_type, it_val)
+            if (isinstance(node.iterable, gimple_ctypes.IdentExpr)
+                    and _as_str(node.iterable.name) in getattr(gen, '_gen_handle_word_locals', ())):
+                # also bound to a generator handle: the list evidence is one binding's
+                _lp_known = None
             if _lp_known is not None:
                 gen._gen_for_list(var, _lp_known, node.body)
             elif it_type in ('int', 'int64_t', 'void *'):
@@ -3898,6 +3908,11 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
         gen._emit(f"  {gen._cname(var)} = {val};")
         if api.get('mixed_slots') and gen.var_types.get(var) == 'int64_t':
             gen._boxed_vals.add(gen._cname(var))
+        elif vct == 'int64_t' and gen.var_types.get(var) == 'int64_t':
+            # An int64_t value slot may carry a string pointer the kind analysis could
+            # not prove (a word read out of a runtime-kinded list): the loop variable
+            # is a word of unknown kind, so print / str / ==  ask the run time.
+            gen._dyn_word_locals.add(_as_str(var))
     gen.loop_stack.append((bb_post, bb_after))
     gen._gen_loop_body(body)
     gen.loop_stack.pop()

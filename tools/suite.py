@@ -731,6 +731,7 @@ MEASURED_PEAK_GB = {
     'gimple':                                 (0.4, 'measured'),
     'gimplegenerators':                       (0.2, 'measured'),
     'runtimere':                              (0.2, 'estimated'),
+    'globcompiled':                           (0.2, 'estimated'),
     'gimplerunner':                           (0.2, 'measured'),
     'interporacle':                           (0.1, 'measured'),
     'linkmode':                               (0.1, 'measured'),
@@ -1991,6 +1992,11 @@ test('runtimere', [PY, 'test_runtime_re.py'], cache=True, mem='tiny',
                              RUNTIME_SRC, RUNTIME_HDR, 'runtime/fire_re_engine.inc',
                              'runtime/test_fire_re_engine.c'],
      desc='run-time re: the engine against CPython, and a compiled program using it')
+
+test('globcompiled', [PY, 'test_glob_compiled.py'], cache=True, mem='tiny',
+     extra=GIMPLE_SOURCES + ['test_glob_compiled.py', 'build_config.py', 'exec_budget.py',
+                             RUNTIME_SRC, RUNTIME_HDR, 'runtime/fire_re_engine.inc'],
+     desc="CPython's glob.py + fnmatch.py compiled as siblings and run on a tree, vs CPython")
 
 # [1]'s round was "the silent no-op class", and this is the test that pins it.
 # It is in `check` and not in a heavyweight bucket because it needs no Lean and
@@ -4085,7 +4091,7 @@ BUCKETS = {
     'check': ['gimple', 'runner', 'modcache', 'selfhost', 'runtimediff',
               'interp-tokenizer-oracle',
               'linkmode', 'no-new-casts', 'nonlocal', 'gimplerunner',
-              'gimplegenerators', 'runtimere', 'interporacle', 'examples-parse',
+              'gimplegenerators', 'runtimere', 'globcompiled', 'interporacle', 'examples-parse',
 # `ptrreg-boxed-str` is master's split-out dedicated group of the
               # pointer-registry harness and `formal-ast` is the batch's
               # hostmod claim for `ast`; each was added to this bucket on its
