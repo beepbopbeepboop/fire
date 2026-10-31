@@ -5056,11 +5056,65 @@ def main():
     # slot, and/or a list-valued slot. The A3 backend unifies each slot's
     # type across every yield site (`_generator_tuple_slots`) and the
     # consumer unpacks per-slot through the runtime list getters
-    # (`_emit_generator_tuple_unpack`). Regression coverage for
-    # bugs/CODEGEN_generator_function_Lib_{modulefinder,pickletools,os,
-    # test_test_string_test_string}.md — the outer-tuple-slot half of that
-    # cluster. (Nested-tuple slots with heterogeneous inner elements remain
-    # honestly refused — see the modulefinder doc.)
+    # (`_emit_generator_tuple_unpack`). Regression coverage for the
+    # outer-tuple-slot half of the generator cluster (pickletools, os,
+    # test_string, and modulefinder, fixed now so its doc is gone). The
+    # nested-tuple half (slot 1 is itself a tuple whose arity and inner
+    # types vary by yield site) is covered by
+    # `scan_opcodes_nested_tuple_slot` below.
+
+    # `modulefinder.scan_opcodes`' shape: slot 1 is a NESTED tuple whose
+    # arity (1, 2, 3) and inner element kinds (str, int) vary per site. The
+    # producer boxes each nested tuple with per-element runtime tags
+    # (`__mojo_tuple_box_tag_K`) and the consumer dispatches each destructured
+    # name on its tag. Oracle is CPython on the same source.
+    test_generator_matches_cpython("scan_opcodes_nested_tuple_slot", """\
+def scan(n: Int):
+    var name = "mod"
+    var level = 2
+    yield "store", (name,)
+    yield "absolute_import", (name, name)
+    yield "relative_import", (level, name, name)
+
+def main():
+    for what, args in scan(1):
+        if what == "store":
+            nm, = args
+            print(nm)
+        elif what == "absolute_import":
+            a, b = args
+            print(a)
+            print(b)
+        else:
+            lv, x, y = args
+            print(lv)
+            print(x)
+            print(y)
+""", """\
+def scan(n):
+    name = "mod"
+    level = 2
+    yield "store", (name,)
+    yield "absolute_import", (name, name)
+    yield "relative_import", (level, name, name)
+
+def main():
+    for what, args in scan(1):
+        if what == "store":
+            nm, = args
+            print(nm)
+        elif what == "absolute_import":
+            a, b = args
+            print(a)
+            print(b)
+        else:
+            lv, x, y = args
+            print(lv)
+            print(x)
+            print(y)
+
+main()
+""")
 
     # str | None slot: `is None` on the nil slot must test true.
     test_generator_stdout("gen_tuple_slot_str_or_none", """\
