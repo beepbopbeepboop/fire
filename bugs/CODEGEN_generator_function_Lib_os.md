@@ -1,5 +1,49 @@
 # CODEGEN_generator_function: Lib/os.py
 
+## Status (2026-10-30, round 3 — measured: the mixed-tuple yield is a TYPE-MODEL problem, not a yield-kind one; a naive yield-kind fix is worse than the refusal)
+
+Experiment (not landed, because it makes things worse): teach
+`exprtypes._generator_yield_ctype` that a bare `yield <name>` inside
+`if isinstance(<name>, tuple):` yields `MojoList *`
+(`_tuple_guarded_bare_yields`). With it `walk` stops being refused and the
+module build proceeds to the C++ compiler — and fails there. Reproduced on a
+five-line model of `walk` (`stack = [top]; top = stack.pop(); if
+isinstance(top, tuple): yield top; ...; stack.append((top, dirs, nondirs))`):
+
+```
+top = mojo_list_pop(stack);          // top is the PARAM's type, char *: g++ "invalid conversion from int64_t to char*"
+if ((0)) { co_yield top; continue; } // isinstance(top, tuple) lowered to the constant 0
+```
+
+So the refusal was protecting a real hole: the local `top` is both the string
+parameter and each popped stack element, which at run time is EITHER a path
+string or a pushed `(top, dirs, nondirs)` tuple, and the compiled body gives it
+ONE C type (`char *`), constant-folds `isinstance(top, tuple)` to false, and
+cannot return a popped tuple through a `char *`. Making the yield kinds agree
+without fixing that yields invalid C++, which is a hard build error where the
+refusal was a clean interpreter fallback. The 33-line experiment is preserved
+at `git stash` message "WIP on work/gen-lib-os" in the round-3 worktree and was
+the content of `_tuple_guarded_bare_yields` + 3 lines in `_generator_yield_ctype`;
+re-create it as the LAST step, not the first.
+
+The real next step is the tagged local, in this order:
+1. A local assigned from `<list>.pop()` / `<list>[i]` where the list holds BOTH
+   a scalar kind and a pushed tuple (`stack.append(top)` string kind beside
+   `stack.append((top, dirs, nondirs))`) is declared as the boxed WORD
+   (`int64_t`), not the first-binding's `char *`; every string use of it casts
+   `(char *)` and every tuple use `(MojoList *)` (`_cpp_word_iter_locals` is the
+   existing registry for a "value whose kind only the runtime knew").
+2. `isinstance(<word>, tuple)` lowers to a runtime test instead of the constant
+   0: the pop-time discrimination is half there (`mojo_list_pop`, and a tuple is
+   a `mojo_mark_as_tuple`d `MojoList *`), so `mojo_is_tuple_word(word)` =
+   registered list AND marked tuple.
+3. Only then the yield-kind rule above.
+Tests that prove it: the five-line `walk` model in
+`test_gimple_generator_runner.py` against CPython in both `topdown` modes
+(CPython output: `r ['d0'] ['f0']` / `r/x ['d1'] ['f1']` / `r/x/x ['d2'] ['f2']`
+top-down, and the reverse order bottom-up), then `fire.py build` of
+`Lib/os.py` leaving only `_fwalk`'s `stat(...)`.
+
 ## Status (2026-10-30, round 2 — `reversed(<list>)` loops and the silent wrong-value on `append(os.path.join(...))`; `walk` is now down to the mixed-tuple yield)
 
 - **Landed:** `for x in reversed(<list local>)` in a C++20 coroutine body
