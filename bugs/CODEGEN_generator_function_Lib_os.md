@@ -1,5 +1,34 @@
 # CODEGEN_generator_function: Lib/os.py
 
+## Status (2026-10-30, round 6 — `walk` COMPILES AND RUNS CORRECTLY; `Lib/os.py` now refuses only on `_fwalk`'s `stat(...)`)
+
+`with scandir(top) as entries:` is real now, and the CPython 3.15 `walk` source,
+compiled beside a `main()`, matches CPython in both `topdown` modes and for a
+missing directory (`onerror`/`except OSError` path):
+
+- `mojo_os_scandir` (runtime): an eager list of `DirEntry` handles with
+  `mojo_dirent_name/path/is_dir/is_file/is_symlink`; a failure goes through the
+  pending flag and the coroutine body rethrows a C++ exception. The `with` is
+  lowered on the AST BEFORE the yield kinds are solved
+  (`cpp_core._cpp_lower_scandir_withs`): `entries = mojo_os_scandir(top)` plus
+  the body with every `for entry in entries` target's `.name/.path/.is_dir()...`
+  spelled as those calls, so `yield entry.name` is a string yield. The same pass
+  spells calls through an `os.path` alias local (`join(a, b)`) as the direct call.
+- The compiled `except OSError:` now matches a raised `FileNotFoundError`
+  (`types._compute_exc_descendants` knows the builtin OSError / LookupError /
+  ArithmeticError families).
+- `a, b = x, y` in a coroutine body is element-wise (it lowered to the invalid
+  C++ `({x, y})[0]`).
+- `posixpath.join`: an empty second part adds the trailing `/`, an absolute one
+  replaces the first (`mojo_path_join`; `int_join` was a second copy and now
+  delegates to it).
+- `Lib/os.py`'s `fspath(top)` and `sys.audit(...)` resolve in the body.
+
+Left for this doc: `_fwalk` — `stat(...)` returning a `stat_result` that the body
+unpacks (`st.st_mode`, `st.st_dev`): a fixed-layout runtime struct of the same
+shape as `DirEntry`. Verified by building `Lib/os.py` (only `_fwalk` is named).
+Generator runner 318 pass / 0 fail.
+
 ## Status (2026-10-30, round 5 — planning: the exact inventory standing between `walk` and a compiled, CORRECT build)
 
 Read straight off CPython 3.15's `walk` after rounds 1-4. Everything the yield /

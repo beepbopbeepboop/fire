@@ -2306,6 +2306,12 @@ int64_t   mojo_os_path_isfile_w(int64_t p);
 int64_t   mojo_os_path_exists_w(int64_t p);
 int64_t   mojo_os_path_basename_w(int64_t p);
 int64_t   mojo_os_path_dirname_w(int64_t p);
+MojoList *mojo_os_scandir(char *top);            /* os.scandir(top): eager list of DirEntry handles */
+char     *mojo_dirent_name(int64_t h);            /* DirEntry.name */
+char     *mojo_dirent_path(int64_t h);            /* DirEntry.path */
+int64_t   mojo_dirent_is_symlink(int64_t h);      /* DirEntry.is_symlink() */
+int64_t   mojo_dirent_is_dir(int64_t h, int64_t follow);   /* DirEntry.is_dir(follow_symlinks=) */
+int64_t   mojo_dirent_is_file(int64_t h, int64_t follow);  /* DirEntry.is_file(follow_symlinks=) */
 MojoList *mojo_glob(char *pattern);                     /* glob.glob/iglob(pattern) -> list[str] */
 int64_t   mojo_glob_w(int64_t pattern);                 /* the same, as a callable VALUE */
 MojoList *mojo_listdir(char *path);                    /* os.listdir(path) -> list[str] */

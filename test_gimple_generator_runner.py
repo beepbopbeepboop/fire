@@ -6933,6 +6933,50 @@ def main():
 main()
 """, "r ['d0'] ['f0']\nr/x ['d1'] ['f1']\nr/x/x ['d2'] ['f2']\nr/x/x ['d2'] ['f2']\nr/x ['d1'] ['f1']\nr ['d0'] ['f0']\n")
 
+    # `with os.scandir(top) as entries:` in a generator: a real list of DirEntry
+    # handles (entry.name / .path / .is_dir() are runtime calls), and a missing
+    # directory raises FileNotFoundError, which `except OSError` catches (the
+    # builtin exception hierarchy is part of the compiled `except` match).
+    import os as _os_fx
+    _os_fx.makedirs("/tmp/_gen_scandir_fixture/sub", exist_ok=True)
+    open("/tmp/_gen_scandir_fixture/file.txt", "w").close()
+    test_generator_stdout("generator_scandir_context_manager_dirs_and_oserror", """\
+import os
+
+def g(top):
+    try:
+        with os.scandir(top) as entries:
+            for entry in entries:
+                if entry.is_dir():
+                    yield entry.name
+    except OSError:
+        yield "ERR"
+
+def main():
+    for v in g("/tmp/_gen_scandir_fixture"):
+        print(v)
+    for v in g("/nonexistent_dir_for_scandir"):
+        print(v)
+main()
+""", "sub\nERR\n")
+
+    # posixpath.join: an empty second part still adds the separator, and an
+    # absolute second part replaces the first (os.walk's child prefix is
+    # `join(top, top[:0])`).
+    test_generator_stdout("generator_os_path_join_empty_and_absolute", """\
+import os
+
+def g(top):
+    yield os.path.join(top, "")
+    yield os.path.join(top, "/abs")
+    yield os.path.join(top, "c")
+
+def main():
+    for v in g("/tmp/x"):
+        print(v)
+main()
+""", "/tmp/x/\n/abs\n/tmp/x/c\n")
+
     test_generator_stdout("generator_enumerate_index_yields_index", """\
 def rows(data):
     for i, r in enumerate(data):

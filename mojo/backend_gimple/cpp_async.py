@@ -385,6 +385,16 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
                                       same existing convention)
       <base>_destroy(MojoGenerator*) -> void  (coroutine_handle::destroy())
     """
+    _has_sd = False
+    for _n in gimple_exprtypes._walk_ast(fn):
+        if gcc_._cpp_scandir_item(gen, _n) is not None:
+            _has_sd = True
+    if _has_sd:
+        fn = gcc_._cpp_lower_scandir_withs(gen, fn)   # `with scandir(..) as e` -> a real list of DirEntry handles
+    _opa = gcc_._cpp_collect_os_path_aliases(fn)
+    if _opa:
+        fn = gcc_._cpp_lower_os_path_aliases(fn, _opa)   # `join(a, b)` -> `os.path.join(a, b)`
+
     # Reset the tuple-yield side channel up front (see its own
     # docstring at __init__) so an early exception/refusal in THIS
     # compile attempt can never leave a PRIOR generator's leftover

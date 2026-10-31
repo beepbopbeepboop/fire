@@ -8905,16 +8905,20 @@ char *mojo_str_cat(char *a, char *b) {
 }
 
 char *mojo_path_join(char *base, char *name) {
+    /* posixpath.join(a, b): an absolute `b` replaces `a`; otherwise `a` and `b`
+     * are joined with exactly one '/', and an EMPTY `b` still adds the trailing
+     * separator (`join('/tmp/x', '')` == '/tmp/x/' -- os.walk builds its child
+     * prefix with exactly that). */
     if (!base || base[0] == '\0') return name ? name : "";
-    if (!name || name[0] == '\0') return base;
+    if (name && name[0] == '/') return name;
     size_t blen = strlen(base);
     int need_sep = (base[blen - 1] != '/');
-    size_t nlen = strlen(name);
+    size_t nlen = name ? strlen(name) : 0;
     char *result = malloc(blen + need_sep + nlen + 1);
     if (!result) return NULL;
     strcpy(result, base);
     if (need_sep) result[blen++] = '/';
-    strcpy(result + blen, name);
+    strcpy(result + blen, name ? name : "");
     return result;
 }
 
@@ -11158,21 +11162,9 @@ int64_t int_join_list(int64_t marker, int64_t path_list) {
 
 int64_t int_join(int64_t marker, int64_t base, int64_t part) {
     (void)marker;
-    char *b = (char *)base;
-    char *p = (char *)part;
-    if (!b || !*b) return part;
-    if (!p || !*p) return base;
-    /* If part is absolute, return it directly */
-    if (*p == '/') return part;
-    size_t blen = strlen(b);
-    size_t plen = strlen(p);
-    int need_sep = (b[blen - 1] != '/');
-    char *result = malloc(blen + need_sep + plen + 1);
-    if (!result) return part;
-    memcpy(result, b, blen);
-    if (need_sep) result[blen++] = '/';
-    memcpy(result + blen, p, plen + 1);
-    return (int64_t)result;
+    /* One implementation of posixpath.join: `mojo_path_join` (an empty part
+     * still adds the trailing '/', an absolute part replaces the base). */
+    return (int64_t)(intptr_t)mojo_path_join((char *)(intptr_t)base, (char *)(intptr_t)part);
 }
 
 int64_t int_getcwd(int64_t marker) {
@@ -11306,6 +11298,66 @@ int64_t mojo_os_path_basename_w(int64_t p) {
     return (int64_t)(intptr_t)int64_t_basename((char *)(intptr_t)p);
 }
 int64_t mojo_os_path_dirname_w(int64_t p) { return int_dirname(0, p); }
+
+/* os.scandir(path) as an eager list of DirEntry HANDLES (the int64_t words are
+ * `MojoDirEntry *`). `with scandir(top) as entries:` is lowered to one call of
+ * this, the enter being the identity and the exit a no-op (the entries are
+ * heap-owned and live as long as the run, like every other runtime list).
+ * Fails like CPython: a missing directory is FileNotFoundError, anything else
+ * OSError (reported through the pending-exception flag; the coroutine body
+ * rethrows it as a C++ exception, so `except OSError` catches both). Order is the directory's own. */
+typedef struct { char *name; char *path; int is_dir_nofollow; int is_symlink; } MojoDirEntry;
+
+MojoList *mojo_os_scandir(char *top) {
+    DIR *d = top ? opendir(top) : NULL;
+    if (!d) {
+        mojo_exc_type_set(top && errno == ENOENT ? _MOJO_EXC_TAG_FILENOTFOUND
+                                                 : _MOJO_EXC_TAG_OSERROR);
+        char msg[512];
+        snprintf(msg, sizeof msg, "[Errno %d] %s: '%s'", errno, strerror(errno),
+                 top ? top : "?");
+        char *heap_msg = strdup(msg);
+        mojo_exc_msg_set(heap_msg);
+        mojo_exc_obj_set(heap_msg);
+        /* Signalled through the PENDING flag, not mojo_raise(): the one caller
+         * is a C++20 coroutine body, which must never longjmp out of its
+         * frame; it rethrows a real C++ exception when it sees the flag. */
+        mojo_exc_pending_set(1);
+        return mojo_list_new();
+    }
+    MojoList *out = mojo_list_new();
+    size_t tl = strlen(top);
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) continue;
+        MojoDirEntry *e = (MojoDirEntry *)malloc(sizeof *e);
+        e->name = strdup(de->d_name);
+        size_t n = tl + strlen(de->d_name) + 2;
+        e->path = (char *)malloc(n);
+        snprintf(e->path, n, "%s%s%s", top, (tl && top[tl - 1] != '/') ? "/" : "", de->d_name);
+        struct stat st;
+        e->is_symlink = lstat(e->path, &st) == 0 && S_ISLNK(st.st_mode);
+        e->is_dir_nofollow = (e->is_symlink ? 0 : (S_ISDIR(st.st_mode) ? 1 : 0));
+        mojo_list_append_int(out, (int64_t)(intptr_t)e);
+    }
+    closedir(d);
+    return out;
+}
+char *mojo_dirent_name(int64_t h) { return ((MojoDirEntry *)(intptr_t)h)->name; }
+char *mojo_dirent_path(int64_t h) { return ((MojoDirEntry *)(intptr_t)h)->path; }
+int64_t mojo_dirent_is_symlink(int64_t h) { return ((MojoDirEntry *)(intptr_t)h)->is_symlink; }
+int64_t mojo_dirent_is_dir(int64_t h, int64_t follow) {
+    MojoDirEntry *e = (MojoDirEntry *)(intptr_t)h;
+    if (!e->is_symlink || !follow) return e->is_dir_nofollow;
+    struct stat st;
+    return stat(e->path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+int64_t mojo_dirent_is_file(int64_t h, int64_t follow) {
+    MojoDirEntry *e = (MojoDirEntry *)(intptr_t)h;
+    struct stat st;
+    if (e->is_symlink && !follow) return 0;
+    return stat(e->path, &st) == 0 && S_ISREG(st.st_mode);
+}
 
 int int_isfile(int64_t marker, int64_t path) {
     /* os.path.isfile(path) — S_ISREG twin of int_isdir above. The codegen

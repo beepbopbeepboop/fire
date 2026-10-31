@@ -725,6 +725,10 @@ def _yield_kind(expr, env: dict | None = None) -> str | None:
         if isinstance(v, tuple) and v[0] == 'list':
             return v[1]
         return None
+    # A DIRECT `os.path.<fn>(...)` call to a runtime-implemented function.
+    _opk = _os_path_call_kind(expr)
+    if _opk is not None:
+        return _opk
     if isinstance(expr, N.MemberExpr) and isinstance(expr.obj, N.IdentExpr) \
             and expr.obj.name == 'self':
         return env.get(f'self.{expr.member}')
