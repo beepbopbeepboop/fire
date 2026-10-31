@@ -1381,6 +1381,31 @@ def _lower_factory_call(gen, node: gimple_ctypes.CallExpr, rec: dict) -> tuple[s
 
 
 def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    # `sys.audit(event, *args)`: this runtime installs no audit hooks, so raising
+    # an audit event has no observable effect. Its arguments are still
+    # evaluated (side effects, errors) and the call yields None.
+    if (isinstance(node.func, gimple_ctypes.MemberExpr)
+            and _as_str(node.func.member) == 'audit'
+            and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
+            and (_as_str(gen.imported_symbols.get(node.func.obj.name, {}).get('module') or node.func.obj.name) == 'sys')):
+        for _a in node.args:
+            gen.lower_expr(_a)
+        return 'int64_t', gen._new_val('int64_t', '0')
+    # `fnmatch.filter(names, pat)` (POSIX): the runtime's fnmatch(3) filter.
+    if (isinstance(node.func, gimple_ctypes.MemberExpr)
+            and _as_str(node.func.member) == 'filter'
+            and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
+            and _as_str(gen.imported_symbols.get(node.func.obj.name, {}).get('module')
+                        or node.func.obj.name) == 'fnmatch'
+            and len(node.args) == 2 and not node.kwargs):
+        _nt, _nv = gen.lower_expr(node.args[0])
+        _pt, _pv = gen.lower_expr(node.args[1])
+        _nl = _nv if _nt == 'MojoList *' else gen._materialize_as_list(_nt, _nv)
+        _res = gen._call_expr('MojoList *', 'mojo_fnmatch_filter',
+                              [('MojoList *', _nl), ('int64_t', gen._to_int64(_pt, _pv))])
+        gen._struct_slot_kinds[_res] = ginf._RuntimeKinded(['int', 'str'])
+        gen._maybe_kinds_vals.add(_res)
+        return 'MojoList *', _res
     _dev = _lower_device_launch(gen, node)
     if _dev is not None:
         return _dev

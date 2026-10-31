@@ -2310,6 +2310,7 @@ int64_t   mojo_os_path_basename_w(int64_t p);
 int64_t   mojo_os_path_dirname_w(int64_t p);
 int64_t   mojo_word_slice_step(int64_t w, int has_start, int64_t start, int has_stop, int64_t stop, int64_t step);
 MojoList *mojo_list_slice_word(int64_t w, int has_start, int64_t start, int has_stop, int64_t stop, int64_t step);
+MojoList *mojo_fnmatch_filter(MojoList *names, int64_t pat);
 MojoList *mojo_os_scandir(char *top);            /* os.scandir(top): eager list of DirEntry handles */
 char     *mojo_dirent_name(int64_t h);            /* DirEntry.name */
 char     *mojo_dirent_path(int64_t h);            /* DirEntry.path */

@@ -673,6 +673,19 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
             param_ctypes.append((pn[1:], 'MojoList *'))
             continue
         ctype = gen._param_ctype(pn, pt, fn)
+        if (ctype == 'char *' and (pt is None or pt == '')
+                and pn in coro_mod._PTR_EVIDENCE.get(fn.name, ())
+                and any(isinstance(_n, gimple_ctypes.CallExpr)
+                        and isinstance(_n.func, gimple_ctypes.IdentExpr)
+                        and _n.func.name == 'isinstance' and len(_n.args) == 2
+                        and isinstance(_n.args[0], gimple_ctypes.IdentExpr)
+                        and _n.args[0].name == pn
+                        and isinstance(_n.args[1], gimple_ctypes.IdentExpr)
+                        and _n.args[1].name in ('str', 'bytes')
+                        for _n in gimple_exprtypes._walk_ast(fn))):
+            # a path word the body asks `isinstance(p, bytes)` of: it may be a
+            # str OR a bytes at run time, so it is the word, not a `char *`
+            ctype = 'int64_t'
         if (ctype == 'int64_t' and (pt is None or pt == '')
                 and pn in gimple_exprtypes._list_method_params(fn)):
             ctype = 'MojoList *'     # used as a list: its call sites just were not typed yet
@@ -1138,6 +1151,13 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         _slot_why = gimple_gen_coro.cpp_value_slot_refusal(fn, value_ctype, struct_def)
         if _slot_why is not None:
             raise gimple_exprtypes._UnsupportedGeneratorShape(f"{fn.name}: {_slot_why}")
+    if value_ctype is not None:
+        # A SELF-recursive generator's own extern declaration was registered while
+        # its value type was still unknown (the placeholder int64_t); now that it
+        # is decided, make the module-level declaration agree with the definition.
+        _xr = getattr(gen, '_cpp_xmod_generator_refs', None)
+        if _xr is not None and base in _xr:
+            _xr[base]['value_ctype'] = value_ctype
     if value_ctype is None:
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             f"{fn.name}: every `yield` must carry a value, and all "

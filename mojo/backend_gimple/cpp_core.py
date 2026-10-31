@@ -1483,6 +1483,7 @@ _CPP_RT_RETURN_CTYPE = {
     'mojo_path_join': 'char *', 'mojo_str_cat': 'char *', 'mojo_cstr_slice': 'char *',
     'mojo_dirent_name': 'char *', 'mojo_dirent_path': 'char *',
     'mojo_list_new': 'MojoList *', 'mojo_list_slice_word': 'MojoList *',
+    'mojo_bytes_from_str': 'MojoBytes *', 'mojo_bytes_from_cstr': 'MojoBytes *',
 }
 
 
@@ -1492,6 +1493,8 @@ def _cpp_assign_cast_type(gen, val):
     (`@@CSYM:name@@(`) with a registered return type; None otherwise."""
     if not isinstance(val, str):
         return None
+    if len(val) >= 2 and val[0] == '"' and val[-1] == '"':
+        return 'char *'                      # a string literal
     _m = re.match(r'\[&\]\(\) -> ([A-Za-z_ ]+\*?) \{', val)
     if _m:
         _t = _m.group(1).strip()

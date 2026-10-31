@@ -7164,6 +7164,30 @@ def main():
 main()
 """, "[3, 4]\n[30]\n")
 
+    # A SELF-recursive generator whose recursive loop target is re-yielded through
+    # a path join (Lib/glob.py's `_rlistdir`): the recursion target's kind is a
+    # fixpoint (assumed a path word, verified against the generator's own kind),
+    # and the module-level extern declaration of the generator agrees with its
+    # definition's value type.
+    test_generator_stdout("generator_self_recursive_through_a_path_join", """\
+import os
+
+def names_of(d):
+    return [d + "1", d + "2"]
+
+def rec(d, depth):
+    for x in names_of(d):
+        yield x
+        if depth > 0:
+            for y in rec(x, depth - 1):
+                yield os.path.join(x, y)
+
+def main():
+    print(list(rec("n", 1)))
+
+main()
+""", "['n1', 'n1/n11', 'n1/n12', 'n2', 'n2/n21', 'n2/n22']\n")
+
     # ...but any consumer that is NOT a for / list / comprehension (here `next`
     # of a bound handle) would read the box's address as an int, so the
     # generator keeps its refusal.

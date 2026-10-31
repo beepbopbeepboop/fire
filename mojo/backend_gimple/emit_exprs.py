@@ -1845,6 +1845,17 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             t = gen._new_val('int64_t', fd)
             return 'int64_t', t
 
+        # `os.O_RDONLY` & co.: integer constants of the host platform, read as
+        # the literals they are (otherwise a dynamic getattr on the `os` module
+        # marker, a fatal runtime AttributeError).
+        if _canon == 'os':
+            import os as _host_os
+            _mem = _as_str(node.member)
+            if ((_mem.startswith('O_') or _mem.startswith('SEEK_')
+                    or _mem in ('F_OK', 'R_OK', 'W_OK', 'X_OK'))
+                    and isinstance(getattr(_host_os, _mem, None), int)):
+                return 'int64_t', gen._new_val('int64_t', str(getattr(_host_os, _mem)))
+
         # Special handling for os.path attribute access
         if _canon == 'os' and node.member == 'path':
             # The actual function call will be handled at the call site

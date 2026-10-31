@@ -750,6 +750,14 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
             # and literal paths keep their exact previous reach: a call can
             # never be a list literal, so the two cannot both apply.
             ek = _sibling_gen_kind(it, fn)
+            if (ek is None and isinstance(it.func, N.IdentExpr)
+                    and it.func.name == getattr(fn, 'name', None)
+                    and it.func.name in _GEN_REC_ASSUME):
+                # a SELF-recursive loop (`for y in _rlistdir(..): yield f(x, y)`):
+                # the target has the generator's own kind, which is a fixpoint --
+                # assumed here (see `_register_generator_defs`) and verified when
+                # the generator's kind is resolved against it.
+                ek = _GEN_REC_ASSUME[it.func.name]
         else:
             lk = _literal_kind(it)
             if isinstance(lk, tuple) and lk[0] == 'list':
@@ -889,7 +897,7 @@ def _yield_kind(expr, env: dict | None = None) -> str | None:
         # A slice of a name whose kind is unknown is a sequence the SAME KIND as
         # the name (a str, a bytes, a list): a pointer word, never a float, so it
         # can travel as a tagged word without boxing.
-        if env.get(expr.obj.name) is None:
+        if env.get(expr.obj.name) in (None, 'w'):
             return 'w'
         return None
     # `os.fspath(x)` / `fsencode(x)`: a str or bytes -- a pointer word.
@@ -1126,54 +1134,53 @@ def _tagged_consumers_ok(name: str) -> bool:
     def _is_gcall(x):
         return (isinstance(x, N.CallExpr) and isinstance(x.func, N.IdentExpr)
                 and x.func.name == name)
-    # a handle bound ONCE to the generator call (`it = g(..)`), every other use
-    # of which is `list(it)`, `for x in it`, a comprehension over it, or
-    # `it.close()`: followed as if it were the call.
-    handles = {}
+    # a handle bound ONCE to the generator call (`it = g(..)`) INSIDE one
+    # function, every other use of that name in the same function being
+    # `list(it)`, `for x in it`, a comprehension over it, or `it.close()`:
+    # followed as if it were the call. Scoped per function -- an unrelated `it`
+    # in another function must not poison (or be mistaken for) this one.
+    scopes = []
     for st in _MODULE_STMTS:
-        for n in _walk(st):
+        if isinstance(st, N.FunctionDef):
+            scopes.append(st)
+        elif isinstance(st, N.StructDef):
+            for m in (getattr(st, 'methods', None) or []):
+                scopes.append(m)
+    for fd in scopes:
+        handles = {}
+        for n in _walk(fd):
             if (isinstance(n, N.AssignStmt) and isinstance(n.target, N.IdentExpr)
                     and _is_gcall(n.value)):
                 handles.setdefault(n.target.name, []).append(id(n.value))
-    ok_handle_uses = set()
-    for st in _MODULE_STMTS:
-        for n in _walk(st):
+        if not handles:
+            continue
+        ok_uses = set()
+        for n in _walk(fd):
             if isinstance(n, N.ForStmt) and isinstance(n.iterable, N.IdentExpr) \
                     and n.iterable.name in handles:
-                ok_handle_uses.add(id(n.iterable))
+                ok_uses.add(id(n.iterable))
             elif (isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr)
                     and n.func.name == 'list' and len(n.args) == 1
                     and isinstance(n.args[0], N.IdentExpr) and n.args[0].name in handles):
-                ok_handle_uses.add(id(n.args[0]))
+                ok_uses.add(id(n.args[0]))
             elif isinstance(n, N.Generator) and isinstance(n.iterable, N.IdentExpr) \
                     and n.iterable.name in handles:
-                ok_handle_uses.add(id(n.iterable))
+                ok_uses.add(id(n.iterable))
             elif (isinstance(n, N.CallExpr) and isinstance(n.func, N.MemberExpr)
                     and n.func.member == 'close' and isinstance(n.func.obj, N.IdentExpr)
                     and n.func.obj.name in handles):
-                ok_handle_uses.add(id(n.func.obj))
-    handle_names = set()
-    for hn in handles:
-        if len(handles[hn]) != 1:
-            continue
-        bad = False
-        for st in _MODULE_STMTS:
-            for n in _walk(st):
-                if (isinstance(n, N.IdentExpr) and n.name == hn
-                        and id(n) not in ok_handle_uses):
-                    # the binding target itself is an IdentExpr too: skip it
-                    bad = True
-        # the target of `hn = g()` is one IdentExpr we cannot tell from a use by
-        # id; account for it
-        n_targets = sum(1 for st in _MODULE_STMTS for n in _walk(st)
-                        if isinstance(n, N.AssignStmt) and isinstance(n.target, N.IdentExpr)
-                        and n.target.name == hn)
-        n_bad = sum(1 for st in _MODULE_STMTS for n in _walk(st)
-                    if isinstance(n, N.IdentExpr) and n.name == hn and id(n) not in ok_handle_uses)
-        if n_bad == n_targets:
-            handle_names.add(hn)
-            for cid in handles[hn]:
-                for_iters.add(cid)
+                ok_uses.add(id(n.func.obj))
+        for hn in handles:
+            if len(handles[hn]) != 1:
+                continue
+            n_targets = sum(1 for n in _walk(fd)
+                            if isinstance(n, N.AssignStmt) and isinstance(n.target, N.IdentExpr)
+                            and n.target.name == hn)
+            n_bad = sum(1 for n in _walk(fd)
+                        if isinstance(n, N.IdentExpr) and n.name == hn and id(n) not in ok_uses)
+            if n_bad == n_targets:
+                for cid in handles[hn]:
+                    for_iters.add(cid)
     for st in _MODULE_STMTS:
         for n in _walk(st):
             if isinstance(n, N.ForStmt) and _is_gcall(n.iterable):
@@ -1490,11 +1497,96 @@ _GEN_VALUE_KINDS: dict[str, tuple[str | None, str]] = {}
 # `_scan_callsite_param_kinds`, which calls `_static_env` too — so that
 # every `_static_env` caller in the pipeline sees the same sibling set.
 _GEN_DEFS: dict[str, object] = {}
+_PTR_EVIDENCE: dict = {}      # function name -> set of its parameters used as path words
+_GEN_REC_ASSUME: dict = {}   # self-recursive generator -> assumed kind of its recursive loop target
 _MODULE_STMTS: list = []     # the module being lowered (for whole-module reference scans)
 # Names whose kind is being computed RIGHT NOW, module-level so that the
 # recursion guard covers `_static_env` -> `_sibling_gen_kind` -> resolve ->
 # `_static_env` re-entry as well as the direct `resolve` -> `resolve` case.
 _GEN_RESOLVING: set = set()
+
+
+_PATH_FUNCS = ('scandir', 'fspath', 'fsencode', 'fsdecode', 'listdir', 'lstat', 'stat')
+_PATH_OS_PATH = ('join', 'split', 'splitext', 'splitdrive', 'basename', 'dirname',
+                 'exists', 'lexists', 'isdir', 'isfile', 'islink', 'normpath', 'abspath')
+_STR_EVIDENCE_METHODS = ('startswith', 'endswith', 'strip', 'lstrip', 'rstrip', 'lower',
+                         'upper', 'split', 'rsplit', 'replace', 'find', 'rfind', 'encode',
+                         'decode', 'join')
+
+
+def _compute_pointer_evidence(stmts) -> None:
+    """For every same-module function (generator or plain): the unannotated
+    parameters its body uses as a PATH / SEQUENCE WORD -- sliced, tested
+    `isinstance(p, str|bytes)`, a str-method receiver, passed to `os.scandir` /
+    `os.fspath` / `os.path.*`, or passed on to another module function's
+    parameter that is itself such a word (a fixpoint). A float cannot be a valid
+    argument for any of those uses (CPython raises TypeError), so whatever the
+    call sites pass, such a parameter IS a pointer word; the call-site scan uses
+    this to stop reading an untypable call site as a possible float."""
+    _PTR_EVIDENCE.clear()
+    fds = {}
+    for st in stmts:
+        if isinstance(st, N.FunctionDef):
+            fds[st.name] = st
+
+    def _params(fd):
+        return [pp[0] if isinstance(pp, (tuple, list)) else pp for pp in fd.params]
+
+    for nm, fd in fds.items():
+        names = set(_params(fd))
+        ev = set()
+        for n in _walk(fd):
+            if isinstance(n, N.SliceExpr) and isinstance(n.obj, N.IdentExpr) \
+                    and n.obj.name in names:
+                ev.add(n.obj.name)
+            elif isinstance(n, N.CallExpr):
+                f = n.func
+                if isinstance(f, N.IdentExpr) and f.name == 'isinstance' and len(n.args) == 2 \
+                        and isinstance(n.args[0], N.IdentExpr) and n.args[0].name in names \
+                        and isinstance(n.args[1], N.IdentExpr) \
+                        and n.args[1].name in ('str', 'bytes'):
+                    ev.add(n.args[0].name)
+                elif isinstance(f, N.MemberExpr) and isinstance(f.obj, N.IdentExpr) \
+                        and f.obj.name in names and f.member in _STR_EVIDENCE_METHODS:
+                    ev.add(f.obj.name)
+                else:
+                    pathfn = False
+                    if isinstance(f, N.IdentExpr) and f.name in _PATH_FUNCS:
+                        pathfn = True
+                    elif isinstance(f, N.MemberExpr):
+                        o_ = f.obj
+                        if isinstance(o_, N.IdentExpr) and o_.name in ('os', 'posix') \
+                                and f.member in _PATH_FUNCS:
+                            pathfn = True
+                        elif (isinstance(o_, N.MemberExpr) and o_.member == 'path'
+                                and f.member in _PATH_OS_PATH):
+                            pathfn = True
+                    if pathfn:
+                        for a in n.args:
+                            if isinstance(a, N.IdentExpr) and a.name in names:
+                                ev.add(a.name)
+        _PTR_EVIDENCE[nm] = ev
+    changed = True
+    while changed:
+        changed = False
+        for nm, fd in fds.items():
+            names = set(_params(fd))
+            for n in _walk(fd):
+                if (isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr)
+                        and n.func.name in fds and n.func.name != nm):
+                    gp = _params(fds[n.func.name])
+                    for i, a in enumerate(n.args):
+                        if (isinstance(a, N.IdentExpr) and a.name in names
+                                and i < len(gp) and gp[i] in _PTR_EVIDENCE[n.func.name]
+                                and a.name not in _PTR_EVIDENCE[nm]):
+                            _PTR_EVIDENCE[nm].add(a.name)
+                            changed = True
+                    for k, v in (n.kwargs or []):
+                        if (isinstance(v, N.IdentExpr) and v.name in names
+                                and k in _PTR_EVIDENCE[n.func.name]
+                                and v.name not in _PTR_EVIDENCE[nm]):
+                            _PTR_EVIDENCE[nm].add(v.name)
+                            changed = True
 
 
 def _register_generator_defs(stmts) -> None:
@@ -1521,6 +1613,33 @@ def _register_generator_defs(stmts) -> None:
         if isinstance(s, N.FunctionDef) and getattr(s, 'is_generator', False):
             _GEN_DEFS[s.name] = s
     _MODULE_STMTS[:] = list(stmts)
+    _compute_pointer_evidence(stmts)
+    _GEN_REC_ASSUME.clear()
+    _LIST_RET_KINDS.clear()
+    _PTR_RET_KINDS.clear()
+    for name, fd in list(_GEN_DEFS.items()):
+        # `for T in name(...)` inside `name` itself, with T yielded through an
+        # expression: assume pointer words for T iff every OTHER yield site of
+        # the generator (the ones not built from T) is a path word. The
+        # assumption is a guess that `_resolve_gen_kind` then verifies.
+        targets = set()
+        for n in _walk(fd):
+            if (isinstance(n, N.ForStmt) and isinstance(n.target, str)
+                    and isinstance(n.iterable, N.CallExpr)
+                    and isinstance(n.iterable.func, N.IdentExpr)
+                    and n.iterable.func.name == name):
+                targets.add(n.target)
+        if not targets:
+            continue
+        env0 = _static_env(fd)
+        others = []
+        for n in _walk(fd):
+            if isinstance(n, N.YieldExpr) and n.value is not None:
+                refs = set(x.name for x in _walk(n.value) if isinstance(x, N.IdentExpr))
+                if not (refs & targets):
+                    others.append(_yield_kind(n.value, env0))
+        if others and all(k in ('p', 'w') for k in others):
+            _GEN_REC_ASSUME[name] = 'w'
 
 
 def _resolve_gen_kind(name):
@@ -4835,6 +4954,13 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
                 # `_CALLSITE_PARAM_CONFLICTS`' own docstring, which was
                 # specified there and never implemented; see
                 # CODEGEN_coro_yield_kind_unresolved_callsite.
+                if (pname in _PTR_EVIDENCE.get(gname, ())
+                        and (None in kinds or len(kinds - {None}) > 1)
+                        and (kinds - {None}) <= {'p', 'w'}):
+                    # used as a path / sequence word: a pointer word, whatever
+                    # an untypable call site passes (see _compute_pointer_evidence)
+                    resolved[pname] = 'w'
+                    continue
                 if None in kinds:
                     conflicted.add(pname)
                     continue
@@ -4890,8 +5016,14 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
     # direction to be wrong in.
     _one_pass()
     _classify()
+    # the return-kind memos were computed against the kinds known BEFORE this
+    # classification; recompute them against what it resolved
+    _PTR_RET_KINDS.clear()
+    _LIST_RET_KINDS.clear()
     _one_pass()
     _classify()
+    _PTR_RET_KINDS.clear()
+    _LIST_RET_KINDS.clear()
 
 
 # Names of this module's top-level functions referenced as VALUES (an

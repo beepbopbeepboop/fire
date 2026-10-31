@@ -9,6 +9,7 @@
 #include <ctype.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <fnmatch.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <errno.h>
@@ -11412,6 +11413,42 @@ int64_t mojo_word_slice_step(int64_t w, int has_start, int64_t start,
 MojoList *mojo_list_slice_word(int64_t w, int has_start, int64_t start,
                                int has_stop, int64_t stop, int64_t step) {
     return (MojoList *)(intptr_t)mojo_word_slice_step(w, has_start, start, has_stop, stop, step);
+}
+
+/* fnmatch.filter(names, pat) on POSIX: the names that match the shell-style
+ * pattern, in order, each appended under the kind it carries (a str stays a str,
+ * a bytes stays a bytes). `names` and `pat` may each be str or bytes words. */
+static const char *_mojo_word_cstr(int64_t w, char **tmp) {
+    if (mojo_is_boxed(w)) {
+        MojoBox *bx = (MojoBox *)(intptr_t)w;
+        w = bx->bits;
+    }
+    if (mojo_boxed_is_str(w)) return (const char *)(intptr_t)w;
+    /* a bytes object: NUL-terminate a copy of its data */
+    MojoBytes *b = (MojoBytes *)(intptr_t)w;
+    if (b && b->data) {
+        *tmp = (char *)malloc((size_t)b->len + 1);
+        memcpy(*tmp, b->data, (size_t)b->len);
+        (*tmp)[b->len] = '\0';
+        return *tmp;
+    }
+    return "";
+}
+
+MojoList *mojo_fnmatch_filter(MojoList *names, int64_t pat) {
+    MojoList *out = mojo_list_new();
+    if (!names) return out;
+    char *ptmp = NULL;
+    const char *p = _mojo_word_cstr(pat, &ptmp);
+    for (int64_t i = 0; i < names->len; i++) {
+        int64_t w = mojo_list_get_boxed(names, i);
+        char *ntmp = NULL;
+        const char *n = _mojo_word_cstr(w, &ntmp);
+        if (fnmatch(p, n, 0) == 0) mojo_list_append_word(out, w);
+        free(ntmp);
+    }
+    free(ptmp);
+    return out;
 }
 
 MojoList *mojo_os_scandir(char *top) {
