@@ -733,16 +733,6 @@ dylib_exports: list = None, globals_base: int = None,
         # instead.  See `_emit_exit` for why the subtraction is the difference
         # between a proof and a `lean-rejected` row.
         self._compiler_trap_addrs: set = set()
-        # The ADDRESSES of the extern calls the float-repr helper made — its
-        # `snprintf` and `strtod`, in the helper's general path.  The helper is
-        # this emitter's own, emitted once per image after every function
-        # body, so its sites are in `extern_calls` at or above `func_offset`
-        # and are NOT calls the program makes:
-        # `formal/arm64_proof_gen.py::_program_extern_calls` subtracts them
-        # for the same reason the traps are subtracted, and not doing so turns
-        # every image on this backend into an opaque-call image.  Published in
-        # `compile()`'s `info` as `float_repr_calls`.
-        self._float_repr_call_addrs: list = []
         self._if_counter = 0
         self._while_counter = 0
         self._assert_counter = 0
@@ -1205,12 +1195,6 @@ dylib_exports: list = None, globals_base: int = None,
             # `formal/arm64_proof_gen.py::_program_extern_calls`, which is the
             # arm64 twin of x86-64's `_program_externs`.
             "compiler_traps": sorted(self._compiler_trap_addrs),
-            # The float-repr helper's OWN extern calls (`snprintf`, `strtod`),
-            # by address — the helper is emitted once per image after every
-            # function body, so the sites are at or above `func_offset` and
-            # `_program_extern_calls` subtracts them there, the same
-            # subtraction `compiler_traps` is for the guard's `fflush`.
-            "float_repr_calls": sorted(self._float_repr_call_addrs),
             "test_input": self.test_input,
             # EVERY entry argument's value, in order — the proof generator's
             # entry state is built from this list, so a two-parameter entry has
@@ -7231,12 +7215,10 @@ ctor_field_value=self._ctor_field_value_for(name),
         a.emit(encode_ldr_xt_xn_imm(11, 31, 136))    # a_bits, frame is +64
         a.emit(encode_str_xt_xn_imm(11, 31, 8))      # [area+8] = a
         a.emit_extern_bl("snprintf")
-        self._float_repr_call_addrs.append(a.extern_refs[-1][1])
         a.emit(encode_add_xd_xn_imm(31, 31, 64))
         a.emit(encode_add_xd_xn_imm(0, 31, 16))      # x0 = buf
         a.emit(encode_add_xd_xn_imm(1, 31, 64))      # x1 = &endptr
         a.emit_extern_bl("strtod")
-        self._float_repr_call_addrs.append(a.extern_refs[-1][1])
         a.emit(encode_fmov_v_to_gpr(14, 0))          # x14 = parsed bits
         a.emit(encode_ldr_xt_xn_imm(11, 31, 72))
         a.emit(encode_cmp_xn_xm(14, 11))

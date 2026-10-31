@@ -733,19 +733,6 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                         is_indirect = isinstance(a, gimple_ctypes.IdentExpr) and a.name in single_char_vars
                         if (is_direct or is_indirect) and _is_single_char_literal(b):
                             _F['is_char_compared'] = True
-                if expr.op == 'in' and isinstance(expr.right, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
-                    # `path[0] in ('.', ...)`: an element of the parameter tested
-                    # against single-character string literals is a character of a
-                    # string, exactly as `path[0] == '.'` is (Lib/glob.py's
-                    # `_ishidden`).
-                    _a_in = expr.left
-                    if (isinstance(_a_in, gimple_ctypes.SubscriptExpr)
-                            and not isinstance(_a_in.index, gimple_ctypes.SliceExpr)
-                            and isinstance(_a_in.obj, gimple_ctypes.IdentExpr)
-                            and _a_in.obj.name in derived_from_param):
-                        for _el in expr.right.elements:
-                            if _is_single_char_literal(_el):
-                                _F['is_char_compared'] = True
                 if expr.op == '+':
                     # `param + <string literal>` / `<string literal> +
                     # param` (directly, or through a local already known
@@ -1376,38 +1363,10 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                         # "cannot coerce MojoList * to MojoDict * ... value=
                         # 'binding'", which took `selfhost`, `mojoc` and
                         # `bootstrap-stage2-cc` down together.
-                        # A parameter handed to `os.path.*(...)` is a path (a
-                        # string or bytes pointer in this model): slicing it
-                        # (`pathname[:0]`) is a string slice, not a list's.
-                        _os_path_arg = False
-                        for _fcx in function_calls:
-                            _fcxp = _as_str(_fcx).split(_FC_SEP)
-                            if _fcxp[0] == '__os_path_arg':
-                                _os_path_arg = True
-                                continue
-                            # ...or forwarded to a function whose own parameter
-                            # was inferred a string.
-                            _fnames = getattr(gen, '_func_param_names', {}).get(_fcxp[0])
-                            if _fnames and len(_fcxp) > 1:
-                                try:
-                                    _fpn = _fnames[int(_fcxp[1])]
-                                except (ValueError, IndexError):
-                                    continue
-                                if gen._inferred_param_types.get(_fcxp[0], {}).get(_fpn) == 'char *':
-                                    _os_path_arg = True
-                        # ...or one handed on to another function's path-word
-                        # parameter (`iglob` -> `_iglob`, a generator this
-                        # inference never sees).
-                        import mojo.middle.coro as _coro
-                        if (pname in _coro._PTR_FORWARDED.get(_as_str(func.name), ())
-                                or pname in getattr(func, '_ptr_forwarded', ())):
-                            _os_path_arg = True
-                        _fallback = 'MojoList *'
                         inferred[pname] = (_returned_param_containers(func)
                                           .get(pname)
                                           or _rebound_param_containers(gen, func)
-                                          .get(pname)
-                                          or ('char *' if _os_path_arg else _fallback))
+                                          .get(pname) or 'MojoList *')
 
             # If not subscripted, try to infer from function calls
             elif function_calls:
@@ -1791,15 +1750,7 @@ def _infer_return_type_core(gen, body: list) -> str:
     """Infer return type by scanning body for ReturnStmt nodes."""
     acc: list[str] = []
     gen._collect_return_types(body, acc)
-    if acc:
-        return gimple_ctypes.TypeLattice.join_all(acc)
-    # A function that can only RAISE (an abstract method: `raise
-    # NotImplementedError`) never produces a value, but a subclass overrides it
-    # and every call through the base reads one: a word, not `void`.
-    if (body and isinstance(body[-1], gimple_ctypes.RaiseStmt)
-            and not _as_str(gen.current_func_name or '').startswith('__mgco')):
-        return 'int64_t'
-    return 'void'
+    return gimple_ctypes.TypeLattice.join_all(acc) if acc else 'void'
 
 # A local bound to a CONTAINER LITERAL, and the ctype that literal is.
 # Deliberately only these four node types: a container is a real pointer,

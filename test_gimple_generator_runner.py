@@ -915,8 +915,8 @@ def _cpp_for_over_callable_local_is_named():
     # the call nor the reason — so the SAME blocker read as five unrelated
     # gaps (c_common/tables.py `read_table`, c_analyzer/__init__.py
     # `check_all`, c_common/fsutil.py `glob_tree`/`_walk_tree`,
-    # Lib/glob.py's `_iglob` (the generator-compile bug, fixed 2026-10-31),
-    # the (since-fixed) Lib/os.py generator refusal's `walk`) and each doc had to
+    # bugs/CODEGEN_generator_function_Lib_glob.md's `_iglob`,
+    # bugs/CODEGEN_generator_function_Lib_os.md's `walk`) and each doc had to
     # re-derive what to do about it. It stays a refusal — the callee's
     # return type genuinely is not knowable in this body model — but now says
     # which call and what would unblock it.
@@ -1683,33 +1683,23 @@ def gen():
     # (`_register_generator_value_kinds`) and folded into the agreement check:
     # without it, `yield from <int sub>` + `yield "a"` SEGFAULTED and
     # `yield from <str sub>` + `yield 1` printed a raw address.
-    test_generator_stdout("generator_mixed_yield_kinds_yield_from_int_str", """\
+    test_generator_refused("generator_mixed_yield_kinds_yield_from_int_str", """\
 def sub():
     yield 1
 
 def gen():
     yield from sub()
     yield "a"
+""", "all values must agree on one scalar type")
 
-def main():
-    for v in gen():
-        print(v)
-main()
-""", "1\na\n")
-
-    test_generator_stdout("generator_mixed_yield_kinds_yield_from_str_int", """\
+    test_generator_refused("generator_mixed_yield_kinds_yield_from_str_int", """\
 def sub():
     yield "s"
 
 def gen():
     yield from sub()
     yield 1
-
-def main():
-    for v in gen():
-        print(v)
-main()
-""", "s\n1\n")
+""", "all values must agree on one scalar type")
 
     # …and a delegation whose kind AGREES must still compile in both
     # directions, so the check cannot be satisfied by refusing every
@@ -2404,7 +2394,7 @@ def run_nested_generator_capture_tests():
     # The f-string case is the one that matters for c-analyzer's
     # `build_section`: `f'{name}:'` reads `name` even though the parser keeps
     # the f-string as one raw literal.
-    test_generator_stdout("nested_generator_reads_enclosing_param_in_fstring_escaping", """\
+    test_generator_refused("nested_generator_reads_enclosing_param_in_fstring_refused", """\
 def build_section(name: String, n: Int):
     def render():
         yield f'{name}:'
@@ -2417,22 +2407,17 @@ def main():
     render = build_section('x', 2)
     for x in render():
         print(x)
-""", "x:\nrow\nrow\n")
+""", "variable(s) n, name")
     # The plain local now boxes (see `..._captures_enclosing_plain_local`);
     # this generator ESCAPES as a value, which has no frame to hand the box
     # handle to, so the escape is what stays refused.
-    test_generator_stdout("nested_generator_escaping_plain_local", """\
+    test_generator_refused("nested_generator_escaping_plain_local_refused", """\
 def outer(n: Int):
     total = n * 2
     def g():
         yield total
     return g
-
-def main():
-    for v in outer(4)():
-        print(v)
-main()
-""", "8\n")
+""", "variable(s) total")
     # A nested generator that reads a `var` local or a parameter is hoisted
     # on the default (stack-switch) path with its enclosing binding boxed,
     # the same machinery as a nested async generator. The box handle is a
@@ -2509,18 +2494,13 @@ outer()
 """)
     # A nested generator that escapes as a value (returned, so later called
     # with no enclosing frame to supply its box handle) stays refused.
-    test_generator_stdout("nested_generator_escaping_as_value_with_capture", """\
+    test_generator_refused("nested_generator_escaping_as_value_with_capture_refused", """\
 def outer():
     var k = 5
     def g():
         yield k
     return g
-
-def main():
-    for v in outer()():
-        print(v)
-main()
-""", "5\n")
+""", "variable(s) k")
     # The same escape, but the generator WRITES the enclosing local through
     # `nonlocal`. The write has to reach the enclosing frame, which an
     # escaping generator cannot provide, so it is refused rather than
@@ -4422,7 +4402,7 @@ def main():
 
     # Second-level unpack: `marker, payload = stack.pop()` where `payload`
     # is itself a boxed tuple needing its own unpack (the exact `_fwalk`
-    # shape from the (since-fixed) Lib/os.py generator refusal — `action,
+    # shape from bugs/CODEGEN_generator_function_Lib_os.md — `action,
     # value = stack.pop()` then `isroot, ... = value`).
     test_generator_stdout("generator_pops_stack_two_level_tuple_unpack", """\
 def walker():
@@ -7063,631 +7043,19 @@ def main():
 main()
 """, "2.5\nfile\nsub\n")
 
-    # `list(g())` and a comprehension drain a tagged-word generator into a list
-    # that carries its OWN per-slot kinds, so it prints, iterates, indexes and
-    # takes len() by what each element is.
-    test_generator_stdout("generator_mixed_kind_yields_drained_into_a_list", """\
-def g():
-    yield "a"
-    yield 1
-    yield 2.5
-    yield True
-
-def main():
-    xs = list(g())
-    print(xs)
-    print(len(xs))
-    for v in xs:
-        print(f"<{v}>")
-    print(xs[0])
-    print(xs[2])
-    print([v for v in g()])
-
-main()
-""", "['a', 1, 2.5, True]\n4\n<a>\n<1>\n<2.5>\n<True>\na\n2.5\n['a', 1, 2.5, True]\n")
-
-    # `yield from` of a tagged-word generator forwards its words: the delegating
-    # generator is tagged too (a bool of its own, the delegate's str / int /
-    # float, a str), and `list(outer())` carries each element's kind.
-    test_generator_stdout("generator_yield_from_a_tagged_word_generator", """\
-def inner():
-    yield "a"
-    yield 1
-    yield 2.5
-
-def outer():
-    yield True
-    yield from inner()
-    yield "z"
-
-def main():
-    for v in outer():
-        print(v)
-    print(list(outer()))
-
-main()
-""", "True\na\n1\n2.5\nz\n[True, 'a', 1, 2.5, 'z']\n")
-
-    # Lib/glob.py's `_iterdir` / `_listdir`: a generator yielding str names beside
-    # bytes (`fsencode(name)`), consumed through `with contextlib.closing(g) as
-    # it: return list(it)` (lowered to `it = g; try: ... finally: it.close()`),
-    # whose returned list carries its own kinds into the caller's comprehension.
-    test_generator_stdout("generator_closing_a_tagged_dir_iterator_then_list", """\
-import contextlib
-import os
-
-def _iterdir(dirname, dironly):
-    try:
-        fsencode = None
-        if isinstance(dirname, bytes):
-            fsencode = os.fsencode
-        with os.scandir(dirname) as it:
-            for entry in it:
-                try:
-                    if not dironly or entry.is_dir():
-                        if fsencode is not None:
-                            yield fsencode(entry.name)
-                        else:
-                            yield entry.name
-                except OSError:
-                    pass
-    except OSError:
-        return
-
-def _listdir(dirname, dironly):
-    with contextlib.closing(_iterdir(dirname, dironly)) as it:
-        return list(it)
-
-def main():
-    xs = _listdir("/tmp/_gen_scandir_fixture", False)
-    print(sorted([str(x) for x in xs]))
-    print(len(xs))
-
-main()
-""", "['file.txt', 'sub']\n2\n")
-
-    # A local bound to one of several MODULE-LEVEL generators and only called as
-    # a `for` iterable (Lib/glob.py's `glob_in_dir = _glob2 / _glob1 / _glob0`) is
-    # a dispatch index: the loop is copied once per candidate, each a direct call.
-    test_generator_stdout("generator_callable_local_choosing_between_module_generators", """\
-def a(x):
-    yield x
-    yield x + 1
-
-def b(x):
-    yield x * 10
-
-def pick(flag, n):
-    if flag:
-        f = a
-    else:
-        f = b
-    out = []
-    for v in f(n):
-        out.append(v)
-    return out
-
-def main():
-    print(pick(True, 3))
-    print(pick(False, 3))
-
-main()
-""", "[3, 4]\n[30]\n")
-
-    # A SELF-recursive generator whose recursive loop target is re-yielded through
-    # a path join (Lib/glob.py's `_rlistdir`): the recursion target's kind is a
-    # fixpoint (assumed a path word, verified against the generator's own kind),
-    # and the module-level extern declaration of the generator agrees with its
-    # definition's value type.
-    test_generator_stdout("generator_self_recursive_through_a_path_join", """\
-import os
-
-def names_of(d):
-    return [d + "1", d + "2"]
-
-def rec(d, depth):
-    for x in names_of(d):
-        yield x
-        if depth > 0:
-            for y in rec(x, depth - 1):
-                yield os.path.join(x, y)
-
-def main():
-    print(list(rec("n", 1)))
-
-main()
-""", "['n1', 'n1/n11', 'n1/n12', 'n2', 'n2/n21', 'n2/n22']\n")
-
-    # A class attribute that is only ASSIGNED outside the class body
-    # (`A.zmask = 7`, as Lib/enum.py's metaclass does for `_flag_mask_`) is a
-    # class attribute: reading it back used to answer an empty container.
-    # Inherited class-body attributes in `@classmethod` generators still resolve
-    # per class (`B.gen` sees B's `base`).
-    test_generator_stdout("generator_classmethod_reads_class_attributes_incl_posthoc", """\
-class A:
-    base = 10
-
-    @classmethod
-    def gen(cls, n):
-        for i in range(n):
-            yield cls.base + i
-
-    @classmethod
-    def total(cls, n):
-        return cls.base * n
-
-class B(A):
-    base = 100
-
-A.zmask = 7
-
-def main():
-    print(list(A.gen(3)))
-    print(list(B.gen(3)))
-    print(A.total(2), B.total(2))
-    print(A.zmask)
-
-main()
-""", "[10, 11, 12]\n[100, 101, 102]\n20 200\n7\n")
-
-    # A generator defined inside a function, reading its parameter, that ESCAPES as
-    # a value (`return gen`): split into a module generator taking the capture plus
-    # a closure that starts it, and consumed through the returned callable.
-    test_generator_stdout("generator_escaping_closure_returned_and_iterated", """\
-def make(k):
-    def gen(n):
-        for i in range(n):
-            yield i * k
-    return gen
-
-def main():
-    for v in make(3)(4):
-        print(v)
-    g = make(5)
-    print(list(g(3)))
-    for v in g(2):
-        print(v)
-
-main()
-""", "0\n3\n6\n9\n[0, 5, 10]\n0\n5\n")
-
-    # The same split for a METHOD's nested generator: `self` is captured as the
-    # moved generator's receiver parameter, so it reads the live object's fields,
-    # and the method returns the closure as a value.
-    test_generator_stdout("generator_escaping_closure_in_method_reads_self", """\
-class G:
-    def __init__(self, k):
-        self.k = k
-
-    def sel(self, m):
-        def gen(n):
-            for i in range(n):
-                yield i * self.k * m
-        return gen
-
-def main():
-    g = G(2)
-    s = g.sel(3)
-    for v in s(4):
-        print(v)
-    print(list(g.sel(1)(3)))
-
-main()
-""", "0\n6\n12\n18\n[0, 2, 4]\n")
-
-    # The glob-selector shape: a method returns a closure generator that delegates
-    # to the closure the SAME method built for the rest of the pattern, called
-    # with a keyword argument; the path is a dynamic word (str here).
-    test_generator_matches_cpython("generator_escaping_closure_chain_keyword_call_dynamic_path", """\
-class Base:
-    def __init__(self, sep):
-        self.sep = sep
-
-    def sel(self, parts):
-        dir_only = bool(parts)
-        if dir_only:
-            nxt = self.sel(parts[1:])
-
-        def gen(path, exists=False):
-            if dir_only:
-                yield from nxt(path, exists=True)
-            else:
-                yield path
-        return gen
-
-def main():
-    g = Base("/")
-    s = g.sel(["a/", "b/"])
-    for v in s("root/"):
-        print(v)
-    for v in s("x"):
-        print(v)
-
-main()
-""", """\
-class Base:
-    def __init__(self, sep):
-        self.sep = sep
-
-    def sel(self, parts):
-        dir_only = bool(parts)
-        if dir_only:
-            nxt = self.sel(parts[1:])
-
-        def gen(path, exists=False):
-            if dir_only:
-                yield from nxt(path, exists=True)
-            else:
-                yield path
-        return gen
-
-def main():
-    g = Base("/")
-    s = g.sel(["a/", "b/"])
-    for v in s("root/"):
-        print(v)
-    for v in s("x"):
-        print(v)
-
-main()
-""")
-
-    # The selector chain with a path built by a METHOD over dynamic words: the
-    # method's `a + b` must concatenate (its parameters are strings at run time),
-    # and `parts[0]` of the captured word is a list element.
-    test_generator_matches_cpython("generator_escaping_closure_chain_method_concat_dynamic_words", """\
-class Base:
-    def __init__(self, sep):
-        self.sep = sep
-
-    def concat_path(self, a, b):
-        return a + b
-
-    def sel(self, parts):
-        dir_only = bool(parts)
-        if dir_only:
-            nxt = self.sel(parts[1:])
-
-        def gen(path, exists=False):
-            if dir_only:
-                yield from nxt(self.concat_path(path, parts[0]), exists=True)
-            else:
-                yield path
-        return gen
-
-def main():
-    g = Base("/")
-    s = g.sel(["a/", "b/"])
-    for v in s("root/"):
-        print(v)
-
-main()
-""", """\
-class Base:
-    def __init__(self, sep):
-        self.sep = sep
-
-    def concat_path(self, a, b):
-        return a + b
-
-    def sel(self, parts):
-        dir_only = bool(parts)
-        if dir_only:
-            nxt = self.sel(parts[1:])
-
-        def gen(path, exists=False):
-            if dir_only:
-                yield from nxt(self.concat_path(path, parts[0]), exists=True)
-            else:
-                yield path
-        return gen
-
-def main():
-    g = Base("/")
-    s = g.sel(["a/", "b/"])
-    for v in s("root/"):
-        print(v)
-
-main()
-""")
-    # A method whose parameters every call site passes strings for returns the
-    # string it builds (its return type was inferred before the parameters were).
-    test_generator_stdout("method_returning_concat_of_string_params", """\
-class B:
-    def cat(self, a, b):
-        return a + b
-
-def gen():
-    yield 1
-
-def main():
-    b = B()
-    print(b.cat("ab", "cd"))
-    w = "x"
-    print(b.cat(w, "y"))
-    for v in gen():
-        print(v)
-
-main()
-""", "abcd\nxy\n1\n")
-
-    # glob's recursive selector: an escaping closure generator drives a sibling
-    # (non-escaping) generator that both read `self` and the method's locals; the
-    # abstract base method is overridden by the receiver's class.
-    test_generator_matches_cpython("generator_escaping_closure_drives_capturing_sibling_virtual_self", """\
-class Base:
-    def __init__(self, k):
-        self.k = k
-
-    def step_val(self, v):
-        raise NotImplementedError
-
-    def sel(self, n):
-        limit = n
-
-        def outer_gen(start):
-            stack = [start]
-            while stack:
-                yield from step(stack)
-
-        def step(stack):
-            v = stack.pop()
-            if v < limit:
-                yield self.step_val(v)
-                stack.append(v + 1)
-        return outer_gen
-
-class Sub(Base):
-    def step_val(self, v):
-        return v * self.k
-
-def main():
-    s = Sub(10)
-    for x in s.sel(4)(0):
-        print(x)
-main()
-""", """\
-class Base:
-    def __init__(self, k):
-        self.k = k
-
-    def step_val(self, v):
-        raise NotImplementedError
-
-    def sel(self, n):
-        limit = n
-
-        def outer_gen(start):
-            stack = [start]
-            while stack:
-                yield from step(stack)
-
-        def step(stack):
-            v = stack.pop()
-            if v < limit:
-                yield self.step_val(v)
-                stack.append(v + 1)
-        return outer_gen
-
-class Sub(Base):
-    def step_val(self, v):
-        return v * self.k
-
-def main():
-    s = Sub(10)
-    for x in s.sel(4)(0):
-        print(x)
-main()
-""")
-
-    # A generator yielding the elements of a list that records its own slot kinds
-    # (a drained tagged generator): the words are unwrapped from their boxes, and the
-    # consumer's loop variable is a word of unknown kind, so strings and ints print right.
-    test_generator_matches_cpython("generator_relays_elements_of_a_runtime_kinded_list", """\
-def tagged():
-    yield 'x'
-    yield 1
-    yield 'z'
-
-def relay():
-    for v in list(tagged()):
-        yield v
-
-def main():
-    for v in relay():
-        print(v)
-
-main()
-""", """\
-def tagged():
-    yield 'x'
-    yield 1
-    yield 'z'
-
-def relay():
-    for v in list(tagged()):
-        yield v
-
-def main():
-    for v in relay():
-        print(v)
-
-main()
-""")
-
-    # ...but any consumer that is NOT a for / list / comprehension (here `next`
-    # of a bound handle) would read the box's address as an int, so the
-    # generator keeps its refusal.
-    test_generator_refused("generator_mixed_kind_yields_consumed_by_next_refused", """\
+    # ...and a tagged-word generator consumed any OTHER way (next, list,
+    # comprehension) would read the box's address as an int, so it keeps its
+    # refusal instead.
+    test_generator_refused("generator_mixed_kind_yields_consumed_by_list_refused", """\
 def g():
     yield "a"
     yield 1
 
 def main():
-    it = g()
-    print(next(it))
+    print(list(g()))
 
 main()
 """, "all values must agree on one scalar type")
-
-    # CPython's `os.fwalk` / `_fwalk` (fd-relative walk) compiled whole: stat /
-    # open(dir_fd=) / close / scandir(fd) / DirEntry.stat / samestat / S_ISDIR,
-    # the heterogeneous (action, args) stack, `stack.extend(<genexp over zip>)`,
-    # `assert`, `entries = None if .. else []` and the `yield value` that is a
-    # 4-tuple popped off that stack. Top-down and bottom-up.
-    test_generator_stdout("generator_os_fwalk_fd_relative_walk", """\
-import os
-import stat as st
-from os import scandir, stat, open, close, O_RDONLY, O_NONBLOCK
-
-def fspath(p):
-    return p
-
-def fsencode(p):
-    return p
-
-import posixpath as path
-import sys
-
-_fwalk_walk = 0
-_fwalk_yield = 1
-_fwalk_close = 2
-
-def fwalk(top=".", topdown=True, onerror=None, *, follow_symlinks=False, dir_fd=None):
-    \"\"\"Directory tree generator.
-
-    This behaves exactly like walk(), except that it yields a 4-tuple
-
-        dirpath, dirnames, filenames, dirfd
-
-    `dirpath`, `dirnames` and `filenames` are identical to walk() output,
-    and `dirfd` is a file descriptor referring to the directory `dirpath`.
-
-    The advantage of fwalk() over walk() is that it's safe against symlink
-    races (when follow_symlinks is False).
-
-    If dir_fd is not None, it should be a file descriptor open to
-    a directory, and top should be relative; top will then be relative to
-    that directory.  (dir_fd is always supported for fwalk.)
-
-    Caution:
-    Since fwalk() yields file descriptors, those are only valid until the
-    next iteration step, so you should dup() them if you want to keep them
-    for a longer period.
-
-    Example:
-
-    import os
-    for root, dirs, files, rootfd in os.fwalk('python/Lib/xml'):
-        print(root, "consumes", end="")
-        print(sum(os.stat(name, dir_fd=rootfd).st_size for name in files),
-              end="")
-        print("bytes in", len(files), "non-directory files")
-        if '__pycache__' in dirs:
-            dirs.remove('__pycache__')  # don't visit __pycache__ directories
-    \"\"\"
-    sys.audit("os.fwalk", top, topdown, onerror, follow_symlinks, dir_fd)
-    top = fspath(top)
-    stack = [(_fwalk_walk, (True, dir_fd, top, top, None))]
-    isbytes = isinstance(top, bytes)
-    try:
-        while stack:
-            yield from _fwalk(stack, isbytes, topdown, onerror, follow_symlinks)
-    finally:
-        # Close any file descriptors still on the stack.
-        while stack:
-            action, value = stack.pop()
-            if action == _fwalk_close:
-                close(value)
-
-# Each item in the _fwalk() stack is a pair (action, args).
-_fwalk_walk = 0  # args: (isroot, dirfd, toppath, topname, entry)
-_fwalk_yield = 1  # args: (toppath, dirnames, filenames, topfd)
-_fwalk_close = 2  # args: dirfd
-
-def _fwalk(stack, isbytes, topdown, onerror, follow_symlinks):
-    # Note: This uses O(depth of the directory tree) file descriptors: if
-    # necessary, it can be adapted to only require O(1) FDs, see issue
-    # #13734.
-
-    action, value = stack.pop()
-    if action == _fwalk_close:
-        close(value)
-        return
-    elif action == _fwalk_yield:
-        yield value
-        return
-    assert action == _fwalk_walk
-    isroot, dirfd, toppath, topname, entry = value
-    try:
-        if not follow_symlinks:
-            # Note: To guard against symlink races, we use the standard
-            # lstat()/open()/fstat() trick.
-            if entry is None:
-                orig_st = stat(topname, follow_symlinks=False, dir_fd=dirfd)
-            else:
-                orig_st = entry.stat(follow_symlinks=False)
-        topfd = open(topname, O_RDONLY | O_NONBLOCK, dir_fd=dirfd)
-    except OSError as err:
-        if isroot:
-            raise
-        if onerror is not None:
-            onerror(err)
-        return
-    stack.append((_fwalk_close, topfd))
-    if not follow_symlinks:
-        if isroot and not st.S_ISDIR(orig_st.st_mode):
-            return
-        if not path.samestat(orig_st, stat(topfd)):
-            return
-
-    scandir_it = scandir(topfd)
-    dirs = []
-    nondirs = []
-    entries = None if topdown or follow_symlinks else []
-    for entry in scandir_it:
-        name = entry.name
-        if isbytes:
-            name = fsencode(name)
-        try:
-            if entry.is_dir():
-                dirs.append(name)
-                if entries is not None:
-                    entries.append(entry)
-            else:
-                nondirs.append(name)
-        except OSError:
-            try:
-                # Add dangling symlinks, ignore disappeared files
-                if entry.is_symlink():
-                    nondirs.append(name)
-            except OSError:
-                pass
-
-    if topdown:
-        yield toppath, dirs, nondirs, topfd
-    else:
-        stack.append((_fwalk_yield, (toppath, dirs, nondirs, topfd)))
-
-    toppath = path.join(toppath, toppath[:0])  # Add trailing slash.
-    if entries is None:
-        stack.extend(
-            (_fwalk_walk, (False, topfd, toppath + name, name, None))
-            for name in dirs[::-1])
-    else:
-        stack.extend(
-            (_fwalk_walk, (False, topfd, toppath + name, name, entry))
-            for name, entry in zip(dirs[::-1], entries[::-1]))
-
-
-def main():
-    for r, d, f, fd in fwalk("/tmp/_gen_scandir_fixture"):
-        print(r, d, f)
-    for r, d, f, fd in fwalk("/tmp/_gen_scandir_fixture", topdown=False):
-        print(r, d, f)
-
-main()
-""", "/tmp/_gen_scandir_fixture ['sub'] ['file.txt']\n/tmp/_gen_scandir_fixture/sub [] []\n/tmp/_gen_scandir_fixture/sub [] []\n/tmp/_gen_scandir_fixture ['sub'] ['file.txt']\n")
 
     test_generator_stdout("generator_enumerate_index_yields_index", """\
 def rows(data):

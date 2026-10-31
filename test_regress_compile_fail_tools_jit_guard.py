@@ -3,7 +3,7 @@
 is refused, not silently compiled.
 
 This is the reduced form of the `Tools/jit/_targets.py` refusal
-(bug:COMPILE_FAIL_Tools_jit__targets). Under the cpp coroutine backend the
+(bugs/COMPILE_FAIL_Tools_jit__targets.md). Under the cpp coroutine backend the
 method is marked not eligible with
 
     `with` inside an async function body is only supported for a recognized

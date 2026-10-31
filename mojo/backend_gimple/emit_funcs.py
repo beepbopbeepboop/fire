@@ -3965,7 +3965,7 @@ def _register_imported_generics(gen, stmts) -> None:
     instantiation. This runs in the inline do_imports=True path too: there a
     bracketed call `gen[2](x)` to a sibling module's generic otherwise matched
     no registration and lowered to a zero stub (a silent miscompile; see
-    bug:CODEGEN_dylib_generic_inline_copies_share_one_symbol (generic fn shared symbol)."""
+    bugs/CODEGEN_dylib_generic_inline_copies_share_one_symbol.md)."""
     for st in stmts:
         if not (isinstance(st, gimple_ctypes.FromImportStmt) and not getattr(st, 'wildcard', False)):
             continue
@@ -3995,7 +3995,7 @@ def _register_imported_generic_structs(gen, stmts) -> None:
     _ensure_generic_struct, e.g. `alloc[MoveOnly[Int]]`) can resolve it.
 
     Runs in the inline do_imports=True path too (same guard removal as
-    _register_imported_generics, bug:CODEGEN_dylib_generic_inline_copies_share_one_symbol)."""
+    _register_imported_generics, bugs/CODEGEN_dylib_generic_inline_copies_share_one_symbol.md)."""
     for st in stmts:
         if not (isinstance(st, gimple_ctypes.FromImportStmt) and not getattr(st, 'wildcard', False)):
             continue
@@ -4180,14 +4180,6 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
             gen._actual_types[bare] = 'MojoList *'
         else:
             ctype = gen._resolve_type(ptype)
-            if ptype is None:
-                # The cross-call refinement (Pass 1.3e: every call site passes a
-                # string / float) is what the definition's signature declares, so
-                # the return-type inference below must read the parameter as it.
-                _refined = gen._inferred_param_types.get(
-                    f"{struct_name}_{node.name}", {}).get(pname)
-                if _refined in ('char *', 'double'):
-                    ctype = _refined
             gen.var_types[bare] = ctype
             if ctype != 'int64_t':
                 gen._actual_types[bare] = ctype

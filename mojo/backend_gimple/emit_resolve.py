@@ -3939,17 +3939,6 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         # single-TU `--dump myinterpreter.py`.
         _lr = gen.lower_expr(node.element)
         et = _as_str(_lr[0]); ev = _lr[1]
-        if et == 'int64_t' and ev in gen._boxed_vals:
-            # the element IS a tagged word taken straight off a tagged-word
-            # generator (`list(g())`, `[v for v in g()]`): append it under the
-            # kind it carries (a float box as a double, a bool as a bool, a
-            # string as a string) instead of truncating it through mojo_box_int,
-            # and let the list render itself from its own kinds row.
-            gen._emit_call('void', '', 'mojo_list_append_word',
-                           [('MojoList *', res), ('int64_t', ev)])
-            gen._struct_slot_kinds[res] = ginf._RuntimeKinded(['int', 'str'])
-            gen._maybe_kinds_vals.add(res)
-            return
         suf = gimple_ctypes.TypeLattice.list_suffix(et)
         ev_cast = gen._cast_for_list(et, ev, suf)
         # GIMPLE: load global string literals into temp before function call

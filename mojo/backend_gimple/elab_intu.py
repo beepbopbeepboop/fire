@@ -65,9 +65,9 @@ from mojo.middle.exprtypes import _walk_ast_invalidate
 from mojo.middle.closures import closure_lifted_name
 from mojo.middle.funcs_shared import _scan_from_imports_flat
 from fire_compiler import (
-    _BUILTIN_TRAITS, CallExpr, FloatLiteral, FromImportStmt, FunctionDef,
-    IdentExpr, IntLiteral, MemberExpr, Parser, StringLiteral, StructDef,
-    SubscriptExpr, TupleExpr, VarDecl, py_tokenize,
+    CallExpr, FloatLiteral, FromImportStmt, FunctionDef, IdentExpr,
+    IntLiteral, MemberExpr, Parser, StringLiteral, StructDef, SubscriptExpr,
+    TupleExpr, VarDecl, py_tokenize,
 )
 
 # Literal expression -> the exact Mojo type the elaborator should bind for it.
@@ -339,133 +339,15 @@ def _bracket_args(gen, sub):
     return [gen._type_expr_to_ann(e) for e in elems]
 
 
-def _live_aliases(work):
-    """The alias entries that name a materialized instantiation. `_Work.enqueue`
-    reserves a key with None before its materialization runs, and a refused
-    instantiation keeps that None: a consumer that writes the alias into the
-    AST would write a nameless callee (`_rewrite_ctor_calls` did, for a refused
-    `Pointer[...]`), so every consumer reads through here."""
-    return [(key, mangled) for key, mangled in work.alias.items()
-            if mangled is not None]
+def _concrete_args(work, kind, base, node):
+    """The concrete type arguments a CALL SITE names, or None.
 
-
-def _scope_names(scope) -> frozenset:
-    """Every name the enclosing function binds: its runtime and bracketed
-    parameters, and its locals (`comptime` values included). Empty at module
-    level, where nothing is a parameter."""
-    if scope is None:
-        return frozenset()
-    _name, func_node, locals_map = scope
-    names = set(locals_map)
-    names.update(p[0] for p in (getattr(func_node, 'params', None) or []))
-    names.update(getattr(func_node, 'comptime_params', None) or [])
-    return frozenset(names)
-
-
-def _root_name(expr):
-    """The name an expression is rooted at: `x` for `x`, `x.dtype`, `x[0].y`."""
-    while not isinstance(expr, IdentExpr):
-        nxt = getattr(expr, 'obj', None)
-        if nxt is None:
-            return None
-        expr = nxt
-    return expr.name
-
-
-def _bound_in_scope(node, scope) -> bool:
-    """Whether a bracket argument names a value the enclosing function binds
-    (`instruction`, `x.dtype`, a `comptime` local) rather than a type or a
-    constant. Such an argument is not a concrete instantiation: materializing
-    `inf[x.dtype]` substitutes an unbound symbol into the callee's body, where
-    its `comptime __match dtype:` has no type to dispatch on. The string test
-    in `_is_concrete_type_arg` cannot see this (`instruction` is shaped like a
-    type name), so the scope is the only place the answer lives."""
-    names = _scope_names(scope)
-    if not names:
-        return False
-    elems = node.func.index
-    elems = elems.elements if isinstance(elems, TupleExpr) else [elems]
-    return any(_root_name(e) in names for e in elems)
-
-
-def _fn_is_inline(work, base):
-    module_src = _module_src(work.gen, base, 'fn')
-    if module_src is None:
-        return False
-    import elaborate, monomorphize as mm
-    tmpl = elaborate.extract_fn_source(module_src, base)
-    if tmpl is None:
-        return False
-    # Check lines before the def for @inline
-    lines = module_src.splitlines()
-    # Find the line index where def starts
-    for i, line in enumerate(lines):
-        if line.startswith('def ') and base in line:
-            # Check preceding lines for @inline
-            for j in range(i-1, -1, -1):
-                stripped = lines[j].strip()
-                if stripped == '' or stripped.startswith('#'):
-                    continue
-                if '@inline' in stripped:
-                    return True
-                if stripped.startswith('@') or stripped.startswith('def '):
-                    break
-            return False
-    return False
-
-
-def _fn_bracket_kinds(module_src, base):
-    """`[(name, is_type)]` for a generic function's bracket parameters, in
-    declaration order, or None when the header cannot be read as a plain list
-    (a variadic `*Ts`, or a parameter without an annotation).
-
-    A parameter is a TYPE parameter when its annotation is a trait: a builtin
-    trait (`AnyType`, `Copyable`, ...) or one `trait X:` declares in the
-    template's own module. Every other annotation (`Int`, `Bool`, `DType`,
-    `Origin`) is a VALUE parameter."""
-    import elaborate
-    import monomorphize as mm
-    tmpl = elaborate.extract_fn_source(module_src, base)
-    m = mm.head_match(tmpl) if tmpl else None
-    if not m:
-        return None
-    traits = _BUILTIN_TRAITS | set(re.findall(r'^\s*trait\s+(\w+)', module_src, re.M))
-    kinds = []
-    for part in gimple_exprtypes._split_top_level_commas(m.params):
-        part = part.strip()
-        if not part or part in ('*', '/'):
-            continue
-        name, sep, rest = part.partition(':')
-        if not sep:
-            return None
-        head = rest.split('=')[0].strip().split('[')[0].strip()
-        if head.startswith('*'):
-            return None
-        head_parts = [p.strip() for p in re.split(r'[&,|]', head) if p.strip()]
-        is_trait = any(p in traits for p in head_parts)
-        kinds.append((name.strip(), is_trait))
-    return kinds
-
-
-def _fn_args_are_types(work, base, args) -> bool:
-    """Whether every type argument `args` binds for the generic function `base`
-    lands on a TYPE parameter. A value argument (`check_bounds`' `cpu_default`
-    bound to `'0'`, `_get_buffer_intrinsic_simd_dtype`'s `bytes`) is not an
-    instantiation this pass can materialize: its body still holds a
-    `comptime __match` or `comptime if` over the value, which the lowering
-    cannot fold once the value is substituted, and the `.o` route is the path
-    that has always served it. A mismatch between the binding and the header
-    is refused, not guessed at."""
-    module_src = _module_src(work.gen, base, 'fn')
-    if module_src is None:
-        return False
-    kinds = _fn_bracket_kinds(module_src, base)
-    if kinds is None or len(kinds) != len(args):
-        return False
-    return all(is_type for _name, is_type in kinds)
-
-
-def _concrete_args(work, kind, base, node, scope=None):
+    Two readable sources and nothing else, because nothing here is lowered and
+    so nothing has a C type yet:
+      - the bracket arguments, when written (`Generic[Int64, MutOrigin](…)`);
+      - the arguments themselves, when every one is a literal (the `once(10)`
+        shape) — through the elaborator's OWN unifier, so this pass and the
+        `.o` route cannot disagree about what those args mean."""
     if isinstance(node.func, SubscriptExpr):
         if not isinstance(node.func.obj, IdentExpr):
             return None
@@ -3355,7 +3237,7 @@ def run(gen, stmts):
     # iterator are materialized in the same closure as everything else.
     _seed_factories(gen, work, stmts, queue)
 
-    def seed(n, scope):
+    def seed(n):
         """ROOTS. A struct root is one the `.o` route provably cannot register
         (a duplicated method name outside the iteration protocol); a function root
         is one whose return annotation names such a struct
@@ -3374,7 +3256,7 @@ def run(gen, stmts):
             return
         if kind == 'struct':
             if _protocol_only_overloads(gen, base):
-                args = _concrete_args(work, kind, base, n, scope)
+                args = _concrete_args(work, kind, base, n)
             else:
                 # PART 6 (2026-10-23, family D piece 2): an imported generic
                 # struct the `.o` route cannot serve as a ROOT (a duplicated
@@ -3389,42 +3271,14 @@ def run(gen, stmts):
                 # and None for everything else, which keeps its old path
                 # exactly.
                 args = _d2_ctor_args(work, base, n)
-            if args is not None:
-                work.enqueue((kind, base, tuple(args)), 0, queue)
-        elif kind == 'fn':
-            # ROOT for generic function instantiation: either the return is
-            # unbuildable (old path) OR the function has type params that
-            # need a per-T body (new path for shared-symbol fix).
-            if _fn_returns_unbuildable_struct(work, base):
-                args = _concrete_args(work, kind, base, n, scope)
-                if args is not None:
-                    work.enqueue((kind, base, tuple(args)), 0, queue)
-                return
-            # NEW (bug-codegen-dylib-generic-inline-copies-370): enqueue
-            # any generic fn with non-empty template whose args are all
-            # type params (value params stay on .o route).
-            import elaborate as el
-            module_src = _module_src(work.gen, base, 'fn')
-            if module_src is None:
-                return
-            tmpl = el.extract_fn_source(module_src, base)
-            if tmpl is None:
-                return
-            params = el.type_param_names(tmpl) if hasattr(el, 'type_param_names') else []
-            if not params:
-                return
-            args = _concrete_args(work, kind, base, n, scope)
-            if args is None:
-                args = _infer_fn_args(work, base, n)
-            if args is None:
-                return
-            if not _fn_args_are_types(work, base, args):
-                return
-            work.enqueue((kind, base, tuple(args)), 0, queue)
+        elif not _fn_returns_unbuildable_struct(work, base):
             return
-        else:
+        if kind == 'fn':
+            args = _concrete_args(work, kind, base, n)
+        if args is None:
             return
-    _walk_scoped(stmts, seed)
+        work.enqueue((kind, base, tuple(args)), 0, queue)
+    _walk(stmts, seed)
     if not queue:
         return []
 
@@ -3638,8 +3492,6 @@ def _rewrite_annotations(work):
     # mention whose argument was never rewritten is untouched.
     mangled_raw = {}
     for (kind, base, args), mangled in work.alias.items():
-        if mangled is None:
-            continue
         if kind == 'struct':
             mangled_raw[mangled] = f"{base}[{', '.join(args)}]"
     for rec in work.records.values():
@@ -3738,9 +3590,8 @@ def _rewrite_local_struct_anns(work, stmts):
     """
     by_base = {}
     for (kind, base, args), mangled in work.alias.items():
-        if mangled is None or kind != 'struct':
-            continue
-        by_base.setdefault(base, []).append(mangled)
+        if kind == 'struct':
+            by_base.setdefault(base, []).append(mangled)
     solo = {base: ms[0] for base, ms in by_base.items() if len(ms) == 1}
     if not solo:
         return
@@ -3797,16 +3648,15 @@ def _rewrite_ctor_calls(work, stmts):
     by_base = {}
     mangled_of = {}
     for (kind, base, args), mangled in work.alias.items():
-        if mangled is None or kind != 'struct':
-            continue
-        _akey = _US.join(args)
-        _lst = by_base.get(base)
-        if _lst is None:
-            _lst = []
-            by_base[base] = _lst
-        if _akey not in _lst:
-            _lst.append(_akey)
-        mangled_of[base + _US + _akey] = mangled
+        if kind == 'struct':
+            _akey = _US.join(args)
+            _lst = by_base.get(base)
+            if _lst is None:
+                _lst = []
+                by_base[base] = _lst
+            if _akey not in _lst:
+                _lst.append(_akey)
+            mangled_of[base + _US + _akey] = mangled
     if not by_base:
         return
     for st in stmts or ():
@@ -3902,16 +3752,15 @@ def _rewrite_intu_ctor_calls(work):
     by_base = {}
     mangled_of = {}
     for (kind, base, args), mangled in work.alias.items():
-        if mangled is None or kind != 'struct':
-            continue
-        _akey = _US.join(args)
-        _lst = by_base.get(base)
-        if _lst is None:
-            _lst = []
-            by_base[base] = _lst
-        if _akey not in _lst:
-            _lst.append(_akey)
-        mangled_of[base + _US + _akey] = mangled
+        if kind == 'struct':
+            _akey = _US.join(args)
+            _lst = by_base.get(base)
+            if _lst is None:
+                _lst = []
+                by_base[base] = _lst
+            if _akey not in _lst:
+                _lst.append(_akey)
+            mangled_of[base + _US + _akey] = mangled
     if not by_base:
         return
     for rec in work.records.values():

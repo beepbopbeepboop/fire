@@ -249,7 +249,7 @@ Test: `test_regress_coro_close_closure.py::test_accessor_read_of_generator_is_ty
 (FAILS on HEAD with `accessor read _t1 typed void *`, PASSES with the fix).
 `test_gimple_generator_runner.py`: 297 pass / 8 fail, the SAME 8 on HEAD
 (`generator_explicit_call_arguments_still_resolve`, ... the genexp-over-annotated-
-param pair, and the (since-fixed) Lib/os.py generator refusal), so none is caused by this
+param pair, and `CODEGEN_generator_function_Lib_os.md`), so none is caused by this
 change. (The 8 were fixed on the generator-runner branch: the `__mojo_coro_yield_p`
 ABI, the list-valued tuple slot kind, and the genexp verifier's `_mojogen_` prefix.)
 

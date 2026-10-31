@@ -208,7 +208,7 @@ def _quick_type(gen, node) -> str:
         # of the int64_t default (which made `return add` return NULL).
         _ci = gen._closure_info_for_ident(node.name)
         if _ci is not None:
-            return _ci.value_ctype()
+            return 'MojoBoundMethod *' if _ci.env_struct else 'void *'
         # A MODULE-LEVEL global, read by bare name. `var_types` holds only
         # locals and parameters, so a name that is not one fell to the
         # int64_t default even though the global's own SEMANTIC type is
@@ -2268,7 +2268,7 @@ def _record_closure_alias(gen, result: dict, tgt: str, val):
         return
     _ci = gen._closure_info_for_ident(val.name)
     if _ci is not None:
-        result[tgt] = _ci.value_ctype()
+        result[tgt] = 'MojoBoundMethod *' if _ci.env_struct else 'void *'
 
 # --- dependency KNOWN_LEAF_RETS (from gimple_gen_resolve.py) ---
 KNOWN_LEAF_RETS = {'_mojo_type': 'char *'}

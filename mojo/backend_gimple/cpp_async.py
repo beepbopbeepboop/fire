@@ -332,7 +332,7 @@ def _cpp_tag_yield_sites(body_lines: list):
         if m is None:
             return None
         ct = {'int': 'int64_t', 'dbl': 'double', 'str': 'char *',
-              'bool': '_Bool', 'bytes': 'MojoBytes *'}.get(m.group(1).strip())
+              'bool': '_Bool'}.get(m.group(1).strip())
         if ct is None:
             return None
         kinds.add(ct)
@@ -344,53 +344,11 @@ def _cpp_tag_yield_sites(body_lines: list):
             w = f"mojo_box_from_bool((int64_t)({expr}))"
         elif ct == 'char *':
             w = f"(int64_t)(intptr_t)((char *)({expr}))"
-        elif ct == 'MojoBytes *':
-            w = f"(int64_t)(intptr_t)({expr})"
         else:
             w = f"(int64_t)({expr})"
         out.append(f"{indent}co_yield {w};")
     if len(kinds) < 2 or kinds == {'int64_t', '_Bool'}:
         return None
-    return out
-
-
-def _delegates_first(stmts: list, generator_ids) -> list:
-    """`stmts` reordered so a generator that `yield from`s a SIBLING generator of
-    the same module comes after it (stable otherwise). The consumer-visible shape
-    of a delegating generator (its tuple slots) is the delegate's, and it is only
-    known once the delegate has been compiled: Lib/os.py defines `fwalk` BEFORE
-    the `_fwalk` it delegates to. Plain loops: this module is self-compiled."""
-    by_name = {}
-    for st in stmts:
-        if isinstance(st, FunctionDef) and id(st) in generator_ids:
-            by_name[st.name] = st
-    out = []
-    placed = set()
-    visiting = set()
-
-    def place(st):
-        if id(st) in placed or id(st) in visiting:
-            return
-        visiting.add(id(st))
-        for n in gimple_exprtypes._walk_own_body(st.body):
-            if (isinstance(n, gimple_ctypes.YieldFromExpr)
-                    and isinstance(n.value, gimple_ctypes.CallExpr)
-                    and isinstance(n.value.func, gimple_ctypes.IdentExpr)
-                    and n.value.func.name in by_name
-                    and n.value.func.name != st.name):
-                place(by_name[n.value.func.name])
-        visiting.discard(id(st))
-        if id(st) not in placed:
-            placed.add(id(st))
-            out.append(st)
-
-    for st in stmts:
-        if isinstance(st, FunctionDef) and id(st) in generator_ids:
-            place(st)
-        else:
-            if id(st) not in placed:
-                placed.add(id(st))
-                out.append(st)
     return out
 
 
@@ -474,15 +432,6 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
             _has_sd = True
     if _has_sd:
         fn = gcc_._cpp_lower_scandir_withs(gen, fn)   # `with scandir(..) as e` -> a real list of DirEntry handles
-    gen.func_return_types.setdefault('mojo_list_slice_word', 'MojoList *')
-    if gcc_._cpp_needs_posix_idioms(gen, fn):
-        fn = gcc_._cpp_lower_posix_idioms(gen, fn)   # fd-relative posix calls -> runtime calls
-    gen._cpp_str_evidence_names = gimple_exprtypes._str_evidence_names(fn)
-    gen._cpp_object_params = set()   # parameters declared `object`: dynamic words
-    for _opn, _opa in (fn.params or []):
-        if _opa == 'object':
-            gen._cpp_object_params.add(gimple_ctypes._as_str(_opn))
-    gen._cpp_list_word_names = gimple_exprtypes._list_method_names(fn)
     _opa = gcc_._cpp_collect_os_path_aliases(fn)
     if _opa:
         fn = gcc_._cpp_lower_os_path_aliases(fn, _opa)   # `join(a, b)` -> `os.path.join(a, b)`
@@ -677,22 +626,6 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
             param_ctypes.append((pn[1:], 'MojoList *'))
             continue
         ctype = gen._param_ctype(pn, pt, fn)
-        if (ctype == 'char *' and (pt is None or pt == '')
-                and pn in coro_mod._PTR_EVIDENCE.get(fn.name, ())
-                and any(isinstance(_n, gimple_ctypes.CallExpr)
-                        and isinstance(_n.func, gimple_ctypes.IdentExpr)
-                        and _n.func.name == 'isinstance' and len(_n.args) == 2
-                        and isinstance(_n.args[0], gimple_ctypes.IdentExpr)
-                        and _n.args[0].name == pn
-                        and isinstance(_n.args[1], gimple_ctypes.IdentExpr)
-                        and _n.args[1].name in ('str', 'bytes')
-                        for _n in gimple_exprtypes._walk_ast(fn))):
-            # a path word the body asks `isinstance(p, bytes)` of: it may be a
-            # str OR a bytes at run time, so it is the word, not a `char *`
-            ctype = 'int64_t'
-        if (ctype == 'int64_t' and (pt is None or pt == '')
-                and pn in gimple_exprtypes._list_method_params(fn)):
-            ctype = 'MojoList *'     # used as a list: its call sites just were not typed yet
         if ctype == 'char *' and pn in gimple_exprtypes._tagged_word_params(fn):
             # rebound from a heterogeneous `pop()`: the boxed word, not the
             # call sites' string (see `_tagged_word_params`).
@@ -1106,10 +1039,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         # consumes this generator through `for` loops, which bind the value as a
         # boxed word. Box each site by its marked ctype.
         _tagged_yield = False
-        if ((value_ctype is None
-                or (value_ctype == 'char *'
-                    and any('/*Y:bytes*/' in _bl for _bl in body_lines)))
-                and not has_tuple_yield
+        if (value_ctype is None and not has_tuple_yield
                 and coro_mod._generator_value_kind(
                     fn, coro_mod._static_env(fn, struct_def))[0] == 'w'):
             # the stack-switch kind analysis (which also checks the consumers)
@@ -1140,8 +1070,6 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         gen._cpp_gen_self_base = None
         gen._cpp_gen_self_params = None
         gen._cpp_os_path_aliases = None
-        gen._cpp_str_evidence_names = None
-        gen._cpp_list_word_names = None
         gen._cpp_tuple_guarded_yields = None
         gen._cpp_gen_self_recursed = None
         gen._cpp_fwd_gen_delegates = None
@@ -1155,13 +1083,6 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         _slot_why = gimple_gen_coro.cpp_value_slot_refusal(fn, value_ctype, struct_def)
         if _slot_why is not None:
             raise gimple_exprtypes._UnsupportedGeneratorShape(f"{fn.name}: {_slot_why}")
-    if value_ctype is not None:
-        # A SELF-recursive generator's own extern declaration was registered while
-        # its value type was still unknown (the placeholder int64_t); now that it
-        # is decided, make the module-level declaration agree with the definition.
-        _xr = getattr(gen, '_cpp_xmod_generator_refs', None)
-        if _xr is not None and base in _xr:
-            _xr[base]['value_ctype'] = value_ctype
     if value_ctype is None:
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             f"{fn.name}: every `yield` must carry a value, and all "
@@ -1424,26 +1345,8 @@ def _cpp_generator_sig_lines(gen, fn, base, param_ctypes, cpp_value_ctype,
         else:
             return []
     _names = [gimple_ctypes._as_str(_pn) for _pn, _ in param_ctypes]
-    # A generator that yields a parameter declared `object` (a dynamic word:
-    # an escaping closure generator's caller-supplied argument) yields words
-    # whose kind - string or integer - only the run time knows.
-    _obj_params = set()
-    for _pn0, _pa0 in (fn.params or []):
-        if _pa0 == 'object':
-            _obj_params.add(gimple_ctypes._as_str(_pn0))
-    if _vk == 0 and _obj_params:
-        for _yn in gimple_exprtypes._walk_ast(fn.body):
-            if (isinstance(_yn, gimple_ctypes.YieldExpr)
-                    and isinstance(_yn.value, gimple_ctypes.IdentExpr)
-                    and _yn.value.name in _obj_params):
-                _vk = 5
-                break
-    # A struct pointer travels in an integer register like any word (an
-    # escaping method generator takes its receiver this way).
-    for _pn, _ct in param_ctypes:
-        if _ct not in _SIG_WORD_CTYPES and not (
-                _ct.endswith(' *') and _ct[:-2] in gen.struct_field_types):
-            return []
+    if any(_ct not in _SIG_WORD_CTYPES for _, _ct in param_ctypes):
+        return []
     if any(_n.startswith('*') for _n in _names):
         return []
     _defs = getattr(fn, 'param_defaults', None) or {}
