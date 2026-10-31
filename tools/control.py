@@ -257,7 +257,7 @@ def cmd_spawn(a):
         tasks[a.name] = dict(name=a.name, slot=n, worktree=wt, branch=branch, claims=a.claim,
                              model=a.model, pool=a.pool if sl else None, kind=kind, pid=p.pid,
                              started=time.strftime("%F %T"),
-                             base=a.base, files=a.file, task=task,   # what `bounce` needs to put it back on the queue
+                             base=a.base, files=a.file, task=task, cls=getattr(a, "cls", None),   # what `bounce` needs to put it back on the queue
                              state="running", summary=task.strip().splitlines()[0][:200])
     print("spawned %s: %s (pid %d), log %s/work.log" % (a.name, wt, p.pid, wt))
 
@@ -452,7 +452,8 @@ def cmd_enqueue(a):
     task = a.task if a.task is not None else open(a.task_file).read()
     # a task queued without --pool runs on whichever slot is free first (see refill); --pool only prefers one
     item = dict(name=a.name, claims=a.claim, base=a.base, task=task, files=a.file, needs=a.needs or [],
-                added=time.time(), pool=getattr(a, "pool", None), only=bool(getattr(a, "only", False)))
+                added=time.time(), pool=getattr(a, "pool", None), only=bool(getattr(a, "only", False)),
+                cls=getattr(a, "cls", None))
     json.dump(item, open(os.path.join(qdir(), a.name + ".json"), "w"), indent=1)
     print("queued %s (needs: %s)" % (a.name, ", ".join(item["needs"]) or "nothing"))
 
@@ -564,7 +565,8 @@ def bounce(name, t):
     with registry() as reg:
         reg.pop(name, None)
     item = dict(name=name, claims=t["claims"], base=t.get("base") or "master", task=t.get("task") or _task_text(t),
-                files=t.get("files", []), needs=[], added=time.time(), model=t.get("model"), pool=t.get("pool"))
+                files=t.get("files", []), needs=[], added=time.time(), model=t.get("model"), pool=t.get("pool"),
+                cls=t.get("cls"))
     json.dump(item, open(os.path.join(qdir(), name + ".json"), "w"), indent=1)
     return True
 
@@ -574,8 +576,19 @@ def pick_slot(item, busy):
     pool order; None if every slot is full or banned. `busy` is running_by_slot() plus this pass's starts."""
     if item.get("only"):                       # pinned: its slot or nothing
         return pool_slot(item["pool"]) if item.get("pool") and slot_free(pool_slot(item["pool"]), busy) else None
-    order = ([pool_slot(item["pool"])] if item.get("pool") else []) + load_pool()["slots"]
+    slots = load_pool()["slots"]
+    if item.get("cls"):                        # a classed task stays in its class: its slots or nothing
+        slots = [x for x in slots if slot_class(x) == item["cls"]]
+    pref = item.get("pool")
+    order = [x for x in slots if x["name"] == pref] + [x for x in slots if x["name"] != pref]
     return next((x for x in order if slot_free(x, busy)), None)
+
+
+CLASSES = ("easy", "mid", "hard")   # the work classes, weakest model first; a slot without a class is easy
+
+
+def slot_class(sl):
+    return sl.get("class", "easy")
 
 
 def cmd_refill(a):
@@ -624,7 +637,7 @@ def cmd_refill(a):
         # were skipped on every pass as "already exists"); the task starts under a fresh name instead
         name = it["name"] if it["name"] not in tasks else "%s-%d" % (it["name"][:50], int(time.time() * 1000) % 1000000)
         ns = argparse.Namespace(name=name, claim=it["claims"], task=it["task"], task_file=None,
-                                file=it["files"], base=it["base"], model=None, pool=sl["name"])
+                                file=it["files"], base=it["base"], model=None, pool=sl["name"], cls=it.get("cls"))
         busy[sl["name"]] = busy.get(sl["name"], 0) + 1
         try:
             cmd_spawn(ns)
@@ -982,7 +995,7 @@ def restart(name, why, model=None):
             "commit is 'WIP snapshot by controller'); review it, keep what is right, and finish the task. Original task:\n\n%s"
             % (name, why, _task_text(t)))
     ns = argparse.Namespace(name=new, claim=t["claims"], task=task, task_file=None, file=[], base=t["branch"],
-                            model=None, pool=t.get("pool"))
+                            model=None, pool=t.get("pool"), cls=t.get("cls"))
     cmd_spawn(ns)
     return new
 
@@ -1123,6 +1136,7 @@ def main():
     s.add_argument("--file", action="append", default=[]); s.add_argument("--base", default="master")
     s.add_argument("--needs", nargs="*"); s.add_argument("--pool", default=None, help="the pool slot this task prefers")
     s.add_argument("--only", action="store_true", help="the task runs ONLY on its --pool slot (waits for it, never moves)")
+    s.add_argument("--cls", choices=CLASSES, default=None, help="the work class: only slots of this class take it")
     s.set_defaults(f=cmd_enqueue)
     s = sub.add_parser("refill"); s.add_argument("--target", type=int, default=None, help="default: the pool's total slots")
     s.add_argument("--prefix", default="", help="start only queued tasks whose name begins with this"); s.set_defaults(f=cmd_refill)

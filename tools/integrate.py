@@ -144,7 +144,7 @@ def enqueue_merge_fix(name, t, conflict_text):
     if mname in C.load():
         mname += "-%d" % int(time.time() % 100000)
     C.cmd_enqueue(_ap.Namespace(name=mname[:60], claim=t["claims"] or ["task:" + mname], task=task, task_file=None,
-                                file=[], base=t["branch"], needs=[], model=None))
+                                file=[], base=t["branch"], needs=[], model=None, cls=t.get("cls")))
     with C.registry() as reg:
         reg[name]["state"] = "superseded"
 
@@ -164,7 +164,7 @@ def enqueue_red_fix(name, t, failing):
     if mname in C.load():
         mname += "-%d" % int(time.time() % 100000)
     C.cmd_enqueue(_ap.Namespace(name=mname[:60], claim=t["claims"] or ["task:" + mname], task=task, task_file=None,
-                                file=[], base=t["branch"], needs=[], model=None))
+                                file=[], base=t["branch"], needs=[], model=None, cls=t.get("cls")))
     with C.registry() as reg:
         reg[name]["state"] = "superseded"
         reg[name]["needs"] = list(failing)
