@@ -65,7 +65,7 @@ from mojo.middle.infra_infer import *  # noqa: F401,F403
 from mojo.middle.infra_infer import (
     opaque_container_locals,
     _FC_SEP, _POINTER_CTOR_NAMES, _as_ident_node, _as_int, _as_member_node, _as_set,
-    _as_str, _block_terminates, _closure_info_for_ident, _generator_value_ctype_for_next, _collect_return_types, _build_analysis_funcs, _build_analysis_structs, _build_fresh_returning, _string_uses_ok, _key_views_ok, _list_elements_ok, _lambda_owned, _compute_closure_candidates, _compute_scoped_closure_candidates, _compute_owned_free_candidates, _compute_scoped_free_candidates, _compute_int_keyed_dicts, _scope_decl_name, _is_ctor_display, _empty_ctor_ctype,
+    _as_str, _block_terminates, _closure_info_for_ident, _generator_value_ctype_for_next, _collect_return_types, _build_analysis_funcs, _build_analysis_structs, _build_fresh_returning, _string_uses_ok, _key_views_ok, _list_elements_ok, _lambda_owned, _no_closure_escapes, _compute_closure_candidates, _compute_scoped_closure_candidates, _compute_owned_free_candidates, _compute_scoped_free_candidates, _compute_int_keyed_dicts, _scope_decl_name, _is_ctor_display, _empty_ctor_ctype,
     _function_has_reachable_fallthrough, _infer_param_types, _infer_return_type, _is_free_eligible_function, _is_known_field, _known_field_type,
     _pair_key, _prepass_list_elem, _ptr_slot_in_range, _resolve_member_expr_type, _resolve_type, _scan_container_elems,
     _seed_addressed_locals, _type_of
@@ -381,6 +381,9 @@ def _reset_func(gen, body: list = None, params: list = None,
     # `_reg_bound_method` entry to drop, so `mojo_closure_free` would be
     # wrong here). See `register_nested_env_free`.
     gen._owned_env_names: set = set()
+    # Box pointers for {mut}-captured locals: freed at function exit when
+    # _no_closure_escapes proves no closure built here can outlive the call.
+    gen._owned_box_names: set = set()
     # Temps holding the raw word an UNTYPED `_mojo_dispatch_getattr` returned
     # (`_lower_MemberExpr` on a boxed receiver whose member no struct types
     # unambiguously): the value is a string, an int, or any handle, and only
@@ -878,6 +881,7 @@ class FuncState:
         self.fs_closure_vals: set = set()
         self.fs_owned_closure_names: set = set()
         self.fs_owned_env_names: set = set()
+        self.fs_owned_box_names: set = set()
         self.fs_emit_frames: list = []
         self.fs_dyn_word_vals: set = set()
         self.fs_dyn_word_locals: set = set()
@@ -975,6 +979,7 @@ def save_func_state(gen) -> FuncState:
     st.fs_closure_vals = gen._closure_vals
     st.fs_owned_closure_names = gen._owned_closure_names
     st.fs_owned_env_names = gen._owned_env_names
+    st.fs_owned_box_names = gen._owned_box_names
     st.fs_emit_frames = gen._emit_frames
     st.fs_dyn_word_vals = gen._dyn_word_vals
     st.fs_dyn_word_locals = gen._dyn_word_locals
@@ -1081,6 +1086,7 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._closure_vals = st.fs_closure_vals
     gen._owned_closure_names = st.fs_owned_closure_names
     gen._owned_env_names = st.fs_owned_env_names
+    gen._owned_box_names = st.fs_owned_box_names
     gen._emit_frames = st.fs_emit_frames
     gen._dyn_word_vals = st.fs_dyn_word_vals
     gen._dyn_word_locals = st.fs_dyn_word_locals
@@ -3860,7 +3866,7 @@ def _seed_mut_captured_local_types(gen, func_name: str):
                 gen._declare_var(mn, f"{ctype} *")
 
 
-def _emit_mut_local_box_allocs(gen):
+def _emit_mut_local_box_allocs(gen, fn=None):
     """Allocate the heap box for every heap-boxed mutable local (see
     _seed_mut_captured_local_types) ONCE, in the function's prologue.
 
@@ -3889,12 +3895,27 @@ def _emit_mut_local_box_allocs(gen):
     the env-struct allocator's pattern (`-fgimple` rejects a direct
     `name = ({ctype} *) malloc (...)` single statement, and needs a
     literal byte count rather than `sizeof(scalar)` -- see
-    _SCALAR_CTYPE_SIZE's docstring)."""
+    _SCALAR_CTYPE_SIZE's docstring).
+
+    `fn` is the FunctionDef whose prologue this is. When every closure built
+    in it provably dies with the call (`_no_closure_escapes`), each box is
+    also freed at the function's exits: its lifetime is the call's, not the
+    closure's, once nothing built here can outlive the call. Each box is
+    registered exactly the way `register_nested_env_free` registers an env --
+    a plain malloc block, a `mojo_cleanup_push_ptr` thunk for the unwind, and
+    a bare `free` at `emit_return_frees`/`emit_fallthrough_frees`. Fail-closed:
+    an unprovable function keeps its boxes, which is today's leak."""
+    if not gen._boxed_mut_locals:
+        return
+    owned = fn is not None and _no_closure_escapes(fn)
     for mn in sorted(gen._boxed_mut_locals):
         ctype = gen._boxed_mut_locals[mn]
         cname = gen._cname(mn)
         vp = gen._new_val('void *', f"malloc ({gen._scalar_ctype_size(ctype, 8)})")
         gen._emit(f"  {cname} = ({ctype} *) {vp};")
+        if owned:
+            gen._owned_box_names.add(mn)
+            gen._emit(f"  mojo_cleanup_push_ptr ({cname});")
         _box_param_c = gen._mut_boxed_param_c.get(mn)
         if _box_param_c:
             # A mut-captured PARAMETER: the box is fresh, so copy the
@@ -7923,7 +7944,10 @@ def _emit_owned_local_frees(gen):
     # used here.
     stack_allocated = gen._owned_stack_allocated
     freed = 0
-    for name in sorted(gen._owned_free_candidates):
+    # Box names are not candidates: they are malloc'd in the prologue, before
+    # `begin_function` rebuilds the candidate sets, so they are registered in
+    # their own set and read here alongside them (see `_emit_mut_local_box_allocs`).
+    for name in sorted(gen._owned_free_candidates | gen._owned_box_names):
         ctype = gen.var_types.get(name)
         # A stack-allocated candidate (Phase 6) must be torn down via
         # `_destroy` (buffer-only), never `_free` — the struct itself
@@ -7937,6 +7961,11 @@ def _emit_owned_local_frees(gen):
         elif name in gen._owned_env_names:
             # A nested `def`'s environment: a plain malloc block and NO bound
             # method, so a bare `free` -- see `register_nested_env_free`.
+            runtime_fn = 'free'
+        elif name in gen._owned_box_names:
+            # A {mut}-captured local's heap box: a plain malloc block, freed
+            # when `_no_closure_escapes` proved nothing built here outlives
+            # the call -- see `_emit_mut_local_box_allocs`.
             runtime_fn = 'free'
         elif name in gen._owned_str_elem_names and ctype == 'MojoList *':
             # Decided at the DECLARATION, where the value was still the temp a
@@ -8513,7 +8542,7 @@ def emit_return_frees(gen) -> None:
     why it's safe to run unconditionally before evaluating the returned
     expression)."""
     # Direct attribute access — see `maybe_push_owned_local`'s note.
-    if gen._owned_free_candidates or gen._scope_live:
+    if gen._owned_free_candidates or gen._owned_box_names or gen._scope_live:
         _emit_owned_local_frees(gen)
 
 
@@ -8536,7 +8565,8 @@ def emit_fallthrough_frees(gen, fn) -> None:
     # combines mixed-type `and` operands.
     # Direct attribute access — see `maybe_push_owned_local`'s note.
     if not gen._owned_free_candidates:
-        return
+        if not gen._owned_box_names:
+            return
     if not _function_has_reachable_fallthrough(fn):
         return
     _emit_owned_local_frees(gen)

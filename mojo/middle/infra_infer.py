@@ -3277,6 +3277,34 @@ def _lambda_owned(body, name: str) -> bool:
         return False
 
 
+def _direct_nested_defs(body) -> list:
+    """The `def`s `body` owns: every FunctionDef in it that is not inside
+    another FunctionDef's body. A def nested in a def belongs to THAT def's
+    body, and is asked about there, not here."""
+    all_defs = []
+    inside = set()
+    for n in gimple_exprtypes._walk_ast(body):
+        if isinstance(n, FunctionDef):
+            all_defs.append(n)
+    for d in all_defs:
+        for m in gimple_exprtypes._walk_ast(d.body):
+            inside.add(id(m))
+    return [d for d in all_defs if id(d) not in inside]
+
+def _nested_defs_owned(body) -> bool:
+    """Every nested `def` at every depth is owned by the body it is a statement
+    of (`nested_def_env_owned`, asked of ITS OWN owner). A def that is returned,
+    stored, or sits inside an if/loop/try is not owned, and so is refused.
+    Sound for a `{mut}` box of the outermost body: a closure inside an owned
+    closure dies when that closure's call returns, which is when the outer
+    call returns at the latest."""
+    for d in _direct_nested_defs(body):
+        if not ownership_destruct.nested_def_env_owned(body, _as_str(d.name)):
+            return False
+        if not _nested_defs_owned(d.body):
+            return False
+    return True
+
 def _no_closure_escapes(fn) -> bool:
     """True iff no closure created in `fn` can outlive the call, i.e. every
     lambda binding is owned (`lambda_value_owned`) and every nested `def`'s
@@ -3293,23 +3321,8 @@ def _no_closure_escapes(fn) -> bool:
                 return False
             if not _lambda_owned(fn.body, nm):
                 return False
-        # Nested defs: every one's environment must be owned. A nested def
-        # that is returned/stored/captured is not owned -> boxes must stay.
-        nd_names = set()
-        for n in gimple_exprtypes._walk_ast(fn.body):
-            if isinstance(n, FunctionDef) and isinstance(getattr(n, 'name', None), str):
-                nd_names.add(n.name)
-        for nm in nd_names:
-            if not ownership_destruct.nested_def_env_owned(fn.body, nm):
-                return False
-        # Any lambda that is not a binding (e.g. returned directly or stored
-        # in a container) is an escape we cannot prove safe.
-        for n in gimple_exprtypes._walk_ast(fn.body):
-            if isinstance(n, LambdaExpr):
-                # Allow only lambdas that are the RHS of an owned binding or an
-                # immediate call's callee. A conservative check: if it is not a
-                # binding, treat as escape.
-                pass
+        if not _nested_defs_owned(fn.body):
+            return False
         # Count unbound lambdas: if any lambda node is not the value of a
         # VarDecl/AssignStmt binding, be conservative.
         bound_lambda_ids = set()

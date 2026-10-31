@@ -3356,6 +3356,7 @@ def _gen_lifted_closure(gen, ci, outer_name: str = None) -> str:
     _sv_strelem_vals = gen._owned_str_elem_vals
     _sv_closure_names = gen._owned_closure_names
     _sv_env_names = gen._owned_env_names
+    _sv_box_names = gen._owned_box_names
     gen._reset_no_candidates()
     _code = _gen_lifted_closure_body(gen, ci, outer_name)
     gen._owned_free_candidates = _sv_cands
@@ -3373,6 +3374,7 @@ def _gen_lifted_closure(gen, ci, outer_name: str = None) -> str:
     gen._owned_str_elem_vals = _sv_strelem_vals
     gen._owned_closure_names = _sv_closure_names
     gen._owned_env_names = _sv_env_names
+    gen._owned_box_names = _sv_box_names
     return _code
 
 
@@ -3598,7 +3600,7 @@ def _gen_lifted_closure_body(gen, ci, outer_name: str) -> str:
     # allocate each box once in the prologue.
     gen._seed_mut_captured_local_types(ci.lifted_name)
     gen._seed_addressed_locals(node.body)
-    gen._emit_mut_local_box_allocs()
+    gen._emit_mut_local_box_allocs(node)
 
     # A lifted closure is an ordinary function and owes the same per-function
     # local-type pre-pass a top-level `def` gets (`gen_module`'s Pass 1.3b,

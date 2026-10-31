@@ -4508,6 +4508,165 @@ def main():
     print(hits)
 """, "11\n12\n23\n23\n18\n60000000\n20000\n", 40)
 
+    # ── A {mut}-captured local's BOX (`nonlocal x`), which is malloc'd once per
+    # CALL in the prologue and was never freed (bugs/CODEGEN_closure_env_and_
+    # boxed_local_never_freed.md's OPEN 2). Its lifetime is the call's when no
+    # closure built in `counter` can outlive it, so `counter`'s exit frees it.
+    # The 4M calls are the tripwire: the leaked box is 16 B/call (64 MB) against
+    # a 40 MB ceiling, and it is measured flat with the rule in place.
+    test_gimple_bounded_memory("gimple_boxed_mut_local_is_freed", """\
+def counter(n: Int) -> Int:
+    var x = n
+    def bump() -> Int:
+        nonlocal x
+        x = x + 1
+        return x
+    return bump() + bump()
+
+def main():
+    var total = 0
+    for r in range(4000000):
+        total += counter(r) % 1000
+    print(total)
+""", "2000000000\n", 40)
+
+    # ── The same box for a PARAMETER captured by `nonlocal`: its box is filled
+    # from the incoming argument in the prologue (`_mut_boxed_param_c`), and it
+    # must be freed on the same terms as a `var`'s box.
+    test_gimple_bounded_memory("gimple_boxed_mut_param_is_freed", """\
+def bumped(n: Int) -> Int:
+    def bump() -> Int:
+        nonlocal n
+        n = n + 1
+        return n
+    return bump() + bump()
+
+def main():
+    var total = 0
+    for r in range(4000000):
+        total += bumped(r) % 1000
+    print(total)
+""", "2000000000\n", 40)
+
+    # ── The same box inside a STRUCT METHOD, whose prologue and body are lowered
+    # by `_gen_struct_method` (not `gen_func`), with `self.v` read by the closure.
+    test_gimple_bounded_memory("gimple_boxed_mut_local_in_a_struct_method_is_freed", """\
+struct Acc:
+    var v: Int
+
+    def run(self, n: Int) -> Int:
+        var x = n
+        def bump() -> Int:
+            nonlocal x
+            x = x + self.v
+            return x
+        return bump() + bump()
+
+def main():
+    var a = Acc(2)
+    var total = 0
+    for r in range(4000000):
+        total += a.run(r) % 1000
+    print(total)
+""", "1996000000\n", 40)
+
+    # ── The parent's box must survive LIFTING a child that has a box of its own:
+    # `mid` is lowered in the middle of `outer`'s body, and its body resets the
+    # per-function box set. If that set were not saved and restored around the
+    # lift, `outer`'s own `x` would be dropped from its exit frees and leak.
+    test_gimple_bounded_memory("gimple_boxed_mut_local_survives_a_lifted_child", """\
+def outer(n: Int) -> Int:
+    var x = n
+    def bump() -> Int:
+        nonlocal x
+        x = x + 1
+        return x
+    def mid(k: Int) -> Int:
+        var y = k
+        def inner() -> Int:
+            nonlocal y
+            y = y + 1
+            return y
+        return inner() + inner()
+    return bump() + mid(n)
+
+def main():
+    var total = 0
+    for r in range(4000000):
+        total += outer(r) % 1000
+    print(total)
+""", "1998000000\n", 40)
+
+    # ── The per-owner half of the box rule: `inner` is nested two levels deep,
+    # and `mid` RETURNS it, so `outer` returns it too. `inner` captures `outer`'s
+    # box `x`, and it is CALLED after `outer` has returned, so that box must
+    # survive `outer`'s exit even though `outer`'s own body never names `inner`.
+    # Freed at the exit, the calls below read a dead cell.
+    test_gimple_stdout("gimple_boxed_mut_local_held_by_a_returned_inner_is_kept", """\
+def outer(n: Int):
+    var x = n
+    def mid():
+        def inner() -> Int:
+            nonlocal x
+            x = x + 1
+            return x
+        return inner
+    return mid()
+
+def main():
+    var g = outer(5)
+    print(g())
+    print(g())
+    var h = outer(10)
+    print(h())
+""", "6\n7\n11\n")
+
+    # ── A box in a function whose body has a try/except that RAISES past its own
+    # return: the box's cleanup thunk sits on the same stack the try unwinds, and
+    # the return-path cancel counts on that stack. A miscount here is a double
+    # free or a dropped thunk, and the 100k calls make either one a crash.
+    test_gimple_stdout("gimple_boxed_mut_local_survives_try_and_raise", """\
+def guarded(n: Int) -> Int:
+    var x = n
+    def bump() -> Int:
+        nonlocal x
+        x = x + 1
+        return x
+    try:
+        if n > 2:
+            raise ValueError("big")
+        return bump()
+    except ValueError as e:
+        return bump() + 100
+
+def main():
+    var total = 0
+    for r in range(100000):
+        total += guarded(r)
+    print(total)
+    print(guarded(1))
+    print(guarded(5))
+""", "5010049700\n2\n106\n")
+
+    # ── The escape half of the box rule: a closure that RETURNS its
+    # `nonlocal` box must keep it alive. `make_counter`'s `bump` outlives the
+    # call, so the box must not be freed at `make_counter`'s exit; calling it
+    # afterwards is a use-after-free if the rule is not fail-closed.
+    test_gimple_stdout("gimple_boxed_mut_local_escapes_is_kept", """\
+def make_counter(n: Int):
+    var x = n
+    def bump() -> Int:
+        nonlocal x
+        x = x + 1
+        return x
+    return bump
+
+def main():
+    var f = make_counter(5)
+    print(f())
+    print(f())
+""", "6\n7\n")
+
     # ── A callee that provably returns a FRESH STRING hands ownership to its
     # caller, exactly as one returning a fresh container always has
     # (analyze_returns_fresh, which until now accepted only a container

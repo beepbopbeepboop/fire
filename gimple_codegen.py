@@ -5424,8 +5424,8 @@ class GimpleGen:
         return ginf._plan_mut_captured_params(self, node, func_name)
     def _seed_addressed_locals(self, body: list):
         return ginf._seed_addressed_locals(self, body)
-    def _emit_mut_local_box_allocs(self):
-        return ginf._emit_mut_local_box_allocs(self)
+    def _emit_mut_local_box_allocs(self, fn=None):
+        return ginf._emit_mut_local_box_allocs(self, fn)
     def _new_jbp_temp(self) -> str:
         return ginf._new_jbp_temp(self)
     def _closure_info_for_ident(self, name: str):
