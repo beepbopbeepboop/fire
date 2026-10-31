@@ -576,7 +576,7 @@ DIFF_CASES = [
     # — but there is NO case for it here, and that is a fact about this path
     # rather than about the rule: reaching a `@classmethod` means naming the
     # CLASS, and a module-level class name is a name with no storage
-    # (`bugs/FORMAL_module_state_no_storage.md`), so `E.widen(x)` is refused as
+    # (`bugs/formal/FORMAL_module_state_no_storage.md`), so `E.widen(x)` is refused as
     # a read of `E` before anything stores it.  Measured on this tree, both
     # spellings of the receiver irrelevant to the refusal.  What the rule still
     # has to get right for a classmethod is covered where the receiver IS

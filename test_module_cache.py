@@ -1919,7 +1919,7 @@ def test_mangle_is_injective(wd):
     import closure the formal sweep could not resolve, which filed the file
     under `not-answerable/host-import` — a class the coverage denominator
     excludes — and `test_formal_dylib.py` was the same, for thirteen more
-    files. `bugs/FORMAL_a_call_result_field_access_has_no_representation.md`
+    files. `bugs/formal/FORMAL_a_call_result_field_access_has_no_representation.md`
     measures the row and why no `.mojo` module answers it (a generator of
     tuples is not one 64-bit word); both files are now spelled without it."""
     _alpha = ['A', 'B', '_', ' ', '.', '[', ']', ',', '1']

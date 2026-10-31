@@ -47,7 +47,7 @@ THE RECORD FORMAT
 -----------------
 `%lld:<value>` per case, one line per case. `%lld` and not `%d` because a `%d`
 conversion is 32 bits wide on this path
-(`bugs/FORMAL_string_value_model.md` §2) — and every value here is a
+(`bugs/formal/FORMAL_string_value_model.md` §2) — and every value here is a
 STRING, so the point is the `\\n` in the value rather than the width, but the
 width is the same trap `test_formal_small_hosts.py` records for
 `io.DEFAULT_BUFFER_SIZE`. The value is bracketed `[...]` so an empty answer is

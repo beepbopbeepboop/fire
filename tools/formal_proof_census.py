@@ -182,7 +182,7 @@ is not a fact:
 2. **It does not fail on `prove=True` refusing something new** inside a rank.
    A different `reason` at the same rank is INFO, printed in full. A refusal
    moving is how a value-model project makes progress (see
-   `bugs/FORMAL_proof_coverage_census_2026-10-03.md` §0.4, where one false
+   `bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md` §0.4, where one false
    refusal closed and the corpus moved to the next row with the class count
    unchanged), and a gate that fired on it would be fired at every step of it.
 3. **It does not have a memory gate.** Peak is recorded per example and the
@@ -554,7 +554,7 @@ def _classify_failure(runs, detail):
       here**, because `formal/lean.py` is what SETS that `-M` and a second copy
       of the sentence is a second answer to "is this a verdict or an absence" —
       which is the disagreement this classification exists to end
-      (`bugs/FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_
+      (`bugs/formal/FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_
       declared.md`).
     * anything else — Lean elaborated the file and said no. That IS a verdict,
       and Lean's own message is the finding.

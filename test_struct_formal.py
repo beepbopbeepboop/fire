@@ -145,7 +145,7 @@ def _child_cpu_seconds():
     differ by exactly the image's own CPU.  That is what turns a hang's two-way
     branch — "never got SCHEDULED (the machine)" vs "SPINNING inside the image"
     — from a question a reader answers by inspection into a number the message
-    carries, which is what `bugs/FORMAL_a_calcsize_image_hangs_once_in_several.md`
+    carries, which is what `bugs/formal/FORMAL_a_calcsize_image_hangs_once_in_several.md`
     §"What is left" asks for.
 
     A process that never ran uses ~0 s; a process that is looping burns CPU at
@@ -191,7 +191,7 @@ def _preserve_a_hung_image(name, out, path):
     answered with the image in hand and the image was already gone.  The
     `SIGKILL` sibling of that report needs no image: `-9` cannot be sent by a
     process from inside, so it is a fact about the machine, and it is the
-    reading that was already taken (`bugs/FORMAL_a_calcsize_image_hangs_once_in_
+    reading that was already taken (`bugs/formal/FORMAL_a_calcsize_image_hangs_once_in_
     several.md` §"Step 1").  **A hang is the one outcome where the harness holds
     no evidence at all beyond "it did not finish",** which is why it is this one
     that is preserved and why the copy is the whole of the fix.
@@ -1381,7 +1381,7 @@ def test_the_harness_records_a_case_even_when_it_cannot_pass(tmpdir):
         'reading, not merely offering two',
         f'{detail!r}: a message that offers the two readings without measuring '
         f'sends the next reader to `gdbtool.py` for a question the CPU time '
-        f'already answered (`bugs/FORMAL_a_calcsize_image_hangs_once_in_'
+        f'already answered (`bugs/formal/FORMAL_a_calcsize_image_hangs_once_in_'
         f'several.md` §"What is left").'))
     verdicts.append((
         'SPINNING inside the image' in _hang_reading(3.0)

@@ -827,7 +827,7 @@ def _build_program(tmpdir, tag, src, arch):
 def group_structroute(tmpdir, verbose):
     """The `struct tm` route, both halves of it, measured on both backends.
 
-    `bugs/FORMAL_time_struct_shaped_answers.md` says the five absent names are
+    `bugs/formal/FORMAL_time_struct_shaped_answers.md` says the five absent names are
     absent because "a `struct tm` cannot cross a module boundary, and cannot be
     constructed by one". That is true and it is NOT the whole reason, and the
     difference decides what a fix looks like. This group is the measurement, and
@@ -857,7 +857,7 @@ def group_structroute(tmpdir, verbose):
     still read 0 in a buffer that was cleared.
 
     What this group is NOT is the five absent names. Those are
-    `bugs/FORMAL_time_struct_shaped_answers.md`'s work — the API shape against
+    `bugs/formal/FORMAL_time_struct_shaped_answers.md`'s work — the API shape against
     CPython's one struct is a judgement that doc owns — and the capability they
     were waiting for is what this group measures.
     """

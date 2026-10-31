@@ -50,7 +50,7 @@ writing it.
 3. THE STRING PRIMITIVES ARE NOT STRING FEATURES. Concatenation, `strip`,
    `replace` and `split` are refused on this path because a string is a bare
    NUL-terminated `char *` in a read-only text section with no heap to grow
-   into (bugs/FORMAL_string_value_model.md). That does NOT make a new string
+   into (bugs/formal/FORMAL_string_value_model.md). That does NOT make a new string
    impossible: `malloc` is in libSystem, and a buffer it hands back IS
    writable. So a string this module returns is either an INTERIOR POINTER
    into its input (no allocation, and the caller's buffer outlives the call) or
@@ -107,7 +107,7 @@ out rather than guessed at:
         b + (1 + 2 * n)    -> base + 1 + 2n
         b + 8 * (1 + n)    -> base + 8 + 8n
 
-    `bugs/FORMAL_pointer_value_model.md` §9 records this as open with the next
+    `bugs/formal/FORMAL_pointer_value_model.md` §9 records this as open with the next
     step (`_emit_binop` is the hottest site in both backends and scaling there
     wants its own diff), and what is written there is about a DEREFERENCE: the
     guard refuses `q = p + k` when the pointee is wider than a byte AND
@@ -138,7 +138,7 @@ out rather than guessed at:
     property of the ABI rather than of the source and is written down in full
     under `ST_DEV` below. The general half — a struct read for a struct the
     SOURCE declares — is still not possible, and nothing here pretends to do
-    it: see `bugs/FORMAL_pointer_value_model.md`. What changed is that the
+    it: see `bugs/formal/FORMAL_pointer_value_model.md`. What changed is that the
     buffer is readable at all, so `st_mode` is a value and `isfile` is
     CPython's answer rather than an approximation of it.
 """
@@ -251,7 +251,7 @@ def str_prefix(s, n) -> str:
 
     What a string SLICE would be. `s[0:n]` is refused on this path — the count
     would be read from offset 0 of a `char *`, which is the first eight
-    CHARACTERS (bugs/FORMAL_string_value_model.md) — so every substring here is
+    CHARACTERS (bugs/formal/FORMAL_string_value_model.md) — so every substring here is
     built with `memmove` and a terminator instead. `n` may exceed the length of
     `s`, which copies the whole string; every caller bounds it first.
     """
@@ -1131,7 +1131,7 @@ def fs_rewinddir(d) -> int:
 # read, which is the only safe thing to do with a byte whose meaning this
 # source does not state.
 #
-# This is the half of `bugs/FORMAL_listdir_no_run_time_sequence.md` the byte
+# This is the half of `bugs/formal/FORMAL_listdir_no_run_time_sequence.md` the byte
 # read made answerable. It was not answerable before because a read of the
 # struct was a COUNT-WALK — a bounds check against whatever word sat at offset
 # 0 — and now each byte is a load of the width it declares.
@@ -1229,7 +1229,7 @@ def fs_name_is_dot(name: Pointer[UInt8]) -> int:
 # read at a declared offset is what C does, and it is now answerable.
 #
 # The offsets are CONSTANTS, and a module-level constant is not exported as a
-# word across a dylib boundary (`bugs/FORMAL_module_state_no_storage.md`), so they
+# word across a dylib boundary (`bugs/formal/FORMAL_module_state_no_storage.md`), so they
 # are `int` PARAMETERS of the readers and the values live at the use sites.
 # The names are spelled `ST_*` here as the numbers they are; the spellings a
 # caller uses are the functions further down, which is also where the layout is

@@ -19,7 +19,7 @@ have been green throughout.
 ## What this file is for
 
 A string on the formal path is a bare `char *` to NUL-terminated BYTES, and
-that is decided (`bugs/FORMAL_string_value_model.md` §"The decision"). A Python
+that is decided (`bugs/formal/FORMAL_string_value_model.md` §"The decision"). A Python
 `str` is a sequence of CODE POINTS. For ASCII those are the same number, which
 is why every answer here was right for a reason nobody had written down; for
 anything else they are not, and the divergence is not a rounding error — it
@@ -572,7 +572,7 @@ ORACLE_CASES = [
     # string where this path's is the BYTE, so `%d` of it is a number where
     # CPython raises — the case prints the byte through `%c`, which is the
     # spelling the two agree on, and the DIVERGENCE of types is recorded in
-    # `bugs/FORMAL_string_value_model.md` §"what was found while looking" as a
+    # `bugs/formal/FORMAL_string_value_model.md` §"what was found while looking" as a
     # consequence of the missing buffer rather than of this block.
     ("subscript_into_an_ascii_string_reads_its_byte",
      'def main(n):\n'
@@ -1399,7 +1399,7 @@ def model_checks():
 
     # ── this repository's OWN host modules must scan as ASCII ──
     #
-    # `bugs/FORMAL_string_value_model.md`'s last section recorded that
+    # `bugs/formal/FORMAL_string_value_model.md`'s last section recorded that
     # `formal/hostmods/os/_syscalls.mojo` and `formal/hostmods/struct.mojo` are
     # written with em-dashes and that FOUR registered suites were red on master
     # for that one reason. **Both halves of that are now false, and this row is

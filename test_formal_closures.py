@@ -27,7 +27,7 @@ on both backends. It is not a closure/lambda/generator question, so its rows are
 `test_formal_run.py`'s `COMPREHENSION_ELEMENT_CASES`: the flat-container literals
 are now materialised per-iteration (CPython's answer), and the nested / slice /
 list-of-lists shapes are refused rather than aliased. See
-`bugs/FORMAL_a_comprehension_container_element_needs_a_runtime_blob_base.md` for
+`bugs/formal/FORMAL_a_comprehension_container_element_needs_a_runtime_blob_base.md` for
 the remaining runtime-base work (the shape is not B1, B2 or B4 in
 `bugs/OPEN_WORK.md`).
 

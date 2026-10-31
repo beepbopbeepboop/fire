@@ -25,7 +25,7 @@ All six are runtime ABI census quotes that the live scan now measures higher:
 
 The same stale quotes make `test_runtime_header_scan.py` (`rthdrscan`) red
 across `FORMAL.md`, `formal/model.py`, `formal/build.py`,
-`build_stdlib_dylib.py` and `bugs/FORMAL_known_limits.md`. That lane is
+`build_stdlib_dylib.py` and `bugs/formal/FORMAL_known_limits.md`. That lane is
 claimed by `fix-gate-rthdrscan`, so these were not edited here.
 
 ## Next step

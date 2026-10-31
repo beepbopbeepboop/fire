@@ -346,7 +346,7 @@ CASES = [
     # the same way `_iterable_kind` asks it for a `for` over the same container.
     #
     # Found by `tools/formal_fuzz.py` widening its corpus to tuple unpacking
-    # (see `bugs/FORMAL_fuzz_ledger.md` §3).
+    # (see `bugs/formal/FORMAL_fuzz_ledger.md` §3).
     ("a_tuple_unpack_target_holds_an_element",
      "def main(n):\n"
      "    var t = (3, 4, 5)\n"
@@ -1860,7 +1860,7 @@ MODULE_GLOBAL_CASES = [
 # paragraph until 2026-10-05 — it told a reader to "give each name one binding,
 # or give every candidate the same `__eq__`", neither of which can fix a program
 # whose names are already bound once each. See
-# `bugs/FORMAL_eq_dispatch_on_a_frame_receiver.md`.
+# `bugs/formal/FORMAL_eq_dispatch_on_a_frame_receiver.md`.
 REFUSALS = [
     # THE GENERAL RULE, with NO module-level binding of the name anywhere, and
     # its sibling two entries below this list apart is the case where there IS
@@ -2006,7 +2006,7 @@ REFUSALS = [
     # that would answer it soundly is the field's own default initializer, which
     # no file in the corpus spells — and what is missing underneath is a dict
     # FIELD with a value at all, which is the module-state question
-    # (`bugs/FORMAL_module_state_no_storage.md`), not this one.
+    # (`bugs/formal/FORMAL_module_state_no_storage.md`), not this one.
     #
     # The needle is the unclassified-operand sentence because that is what the
     # build produces: the slot has no kind to classify the subscript with, so the
@@ -2395,7 +2395,7 @@ REFUSALS = [
     # BOTH architectures from this same text, and `0` is not even stable: a call
     # before it that returned 77 does not survive, so the word is whatever the
     # callee's last instruction left behind.
-    # (`bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_
+    # (`bugs/formal/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_
     # yields_None.md`, whose §0a corpus census is what made this affordable: the
     # refusal is asked at the one position where a value this path cannot carry
     # becomes TEXT, and that position holds ZERO call sites over this repository,

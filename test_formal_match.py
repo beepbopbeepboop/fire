@@ -362,7 +362,7 @@ ROWS = [
     # question, which is what makes it usable as a pattern here. (A dotted name
     # rooted at an IMPORTED module is not: `case os.sep:` reaches
     # `os.sep`, a module value, and this path has nowhere to keep one —
-    # `bugs/FORMAL_module_state_no_storage.md`. That is a refusal about module
+    # `bugs/formal/FORMAL_module_state_no_storage.md`. That is a refusal about module
     # state and not about `match`, so it is not a row here.)
     # CPython equivalent: the same program with `class Q` and `q.b` — the same
     # answer, `b`, because a dotted pattern is a value pattern in both.
@@ -979,7 +979,7 @@ KNOWN_DEFECT_ROWS = []
 # here rather than left to be discovered: it is a pre-existing gap in arm64's
 # generator for a three-block conditional chain (both spellings — the `elif`
 # chain and the nested `else: if` — were measured), it is in the family
-# `bugs/FORMAL_arm64_known_proof_gaps.md` censuses, and the property this
+# `bugs/formal/FORMAL_arm64_known_proof_gaps.md` censuses, and the property this
 # section asserts is PARITY with the `if`, not that every `match` elaborates.
 PROOF_PAIRS = [
     ("two_cases",

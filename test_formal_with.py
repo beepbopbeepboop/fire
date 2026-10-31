@@ -685,7 +685,7 @@ DECLARED = [
     # a REFUSAL ("would be a guess about what it means on"); the alias's struct
     # is now published (`_rewrite_holder_method_calls`), so it is answered and
     # compared against CPython, which resolves it through the object's own type.
-    # See `bugs/FORMAL_a_context_manager_exit_cannot_take_cpythons_three_
+    # See `bugs/formal/FORMAL_a_context_manager_exit_cannot_take_cpythons_three_
     # exception_words.md` §4.
     ("a_method_through_the_alias_with_a_rival_owner_is_answered",
      CTX_MOJO + RIVAL + "def main(n):\n"

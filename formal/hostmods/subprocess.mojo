@@ -66,7 +66,7 @@ WHAT `run` HANDS BACK, AND WHY IT IS THE STATUS WORD
 a DECISION recorded here because its caller-side consequence is visible in the
 source.  CPython's `CompletedProcess` has four fields (`args`, `returncode`,
 `stdout`, `stderr`); a formal value is one 64-bit word and an admitted host
-contract is one word wide (`bugs/FORMAL_admitted_contract_is_one_word_wide.md`),
+contract is one word wide (`bugs/formal/FORMAL_admitted_contract_is_one_word_wide.md`),
 so a returned `CompletedProcess` cannot carry them.  What `run` is called FOR in
 all 547 sites in this tree is the status, so that is the word it returns, and
 `CompletedProcess(args, returncode)` below returns the same word so the
@@ -80,7 +80,7 @@ should use, because `completed_process_returncode` is the model's accessor here
 and a caller gives the same name an identical CPython definition
 (`lambda r: r.returncode`) when the same text must also run on CPython.  That is
 option 3 of the three costed in
-`bugs/FORMAL_subprocess_run_is_modelled_as_returning_the_status_word.md`, and it
+`bugs/formal/FORMAL_subprocess_run_is_modelled_as_returning_the_status_word.md`, and it
 is the option taken here.  Option 1 — "make the model return a struct" — is not
 available, and the reason is not the one-word ABI alone: the second field a
 caller such as `version.py` reads, `r.stdout`, is a captured STREAM, which this
@@ -93,7 +93,7 @@ WHAT `run` HANDS BACK, AND WHY IT IS THE STATUS WORD
 a DECISION recorded here because its caller-side consequence is visible in the
 source.  CPython's `CompletedProcess` has four fields (`args`, `returncode`,
 `stdout`, `stderr`); a formal value is one 64-bit word and an admitted host
-contract is one word wide (`bugs/FORMAL_admitted_contract_is_one_word_wide.md`),
+contract is one word wide (`bugs/formal/FORMAL_admitted_contract_is_one_word_wide.md`),
 so a returned `CompletedProcess` cannot carry them.  What `run` is called FOR in
 all 547 sites in this tree is the status, so that is the word it returns, and
 `CompletedProcess(args, returncode)` below returns the same word so the
@@ -107,7 +107,7 @@ should use, because `completed_process_returncode` is the model's accessor here
 and a caller gives the same name an identical CPython definition
 (`lambda r: r.returncode`) when the same text must also run on CPython.  That is
 option 3 of the three costed in
-`bugs/FORMAL_subprocess_run_is_modelled_as_returning_the_status_word.md`, and it
+`bugs/formal/FORMAL_subprocess_run_is_modelled_as_returning_the_status_word.md`, and it
 is the option taken here.  Option 1 — "make the model return a struct" — is not
 available, and the reason is not the one-word ABI alone: the second field a
 caller such as `version.py` reads, `r.stdout`, is a captured STREAM, which this
@@ -120,7 +120,7 @@ WHAT A CALL ACTUALLY DOES AT RUN TIME
 diagnostic naming the contract they rest on and exit with `ADMITTED_EXIT_STATUS`.
 A program that calls `subprocess.run` on this target stops with a number that says
 so, rather than printing a number the source never wrote — the failure this
-project treats as its worst, recorded in `bugs/FORMAL_known_limits.md`
+project treats as its worst, recorded in `bugs/formal/FORMAL_known_limits.md`
 §"fabricated a value".
 
 **What that status can and cannot do**, because this file's earlier version of
@@ -165,7 +165,7 @@ WHAT IS NOT HERE, AND WHY
     as attributes, `.stdin.write`, `.stdout.read`.  A process handle is a
     descriptor, a status word and a pair of pipes; a value cannot cross a dylib
     boundary unless it is one 64-bit word
-    (`bugs/FORMAL_module_state_no_storage.md`), which is the same limit that took
+    (`bugs/formal/FORMAL_module_state_no_storage.md`), which is the same limit that took
     `sys.stdout` out of `formal/hostmods/sys.mojo`, and a method call on a value
     receiver is not lowered either.  What IS here is `Popen` as a FUNCTION
     returning the child's process id — which is the handle, so `.pid` needs no
@@ -173,7 +173,7 @@ WHAT IS NOT HERE, AND WHY
     the old `popen_wait` had.
   * `subprocess.PIPE` used as a VALUE rather than called (`stdout=subprocess.PIPE`,
     13 call sites).  Reading a module-level name that is not folded to a literal is
-    `bugs/FORMAL_module_state_no_storage.md`; the constants are here as the
+    `bugs/formal/FORMAL_module_state_no_storage.md`; the constants are here as the
     zero-argument functions every other hostmod uses, because a module-level name
     is folded at every read on this path and a folded function name is not a word.
   * `SubprocessError` and `SubprocessError` as a catchable type.  It is the base
@@ -186,7 +186,7 @@ WHAT IS NOT HERE, AND WHY
   * The `**kwargs` half of `run`/`call`/`check_call`/`check_output`.  `**` is a
     run-time-length mapping, and a mapping on this path is a bump-allocated blob
     in the frame of the function that built it
-    (`bugs/FORMAL_listdir_no_run_time_sequence.md`).  Each keyword CPython's
+    (`bugs/formal/FORMAL_listdir_no_run_time_sequence.md`).  Each keyword CPython's
     callers in this tree actually pass is a NAMED parameter instead, and
     `validate_args`' `ARG_UNKNOWN_KEYWORD` is where a keyword that is neither
     named nor variadic is reported.
@@ -422,7 +422,7 @@ ARG_NONZERO_STATUS = 7
 # A function and not a `struct`, and the difference is the whole reason this is
 # here: a struct on this path is a frame blob, so a caller could construct one
 # and could not read a field out of it across the boundary
-# (`bugs/FORMAL_module_state_no_storage.md`).  What these return is the field the
+# (`bugs/formal/FORMAL_module_state_no_storage.md`).  What these return is the field the
 # caller wanted, and it is the number the caller wrote — not a value this file
 # invented, which is the line `formal/admitted.py`'s scope rule draws.
 
@@ -536,7 +536,7 @@ def run(args, capture_output=0, text=0, timeout=0, check=0, input=0, cwd="",
     `capture_output`-beside-`stdout` rules is `validate_run`.
 
     Which is why they are declared rather than collected: a `**kwargs` is a
-    run-time-length mapping (`bugs/FORMAL_listdir_no_run_time_sequence.md`), and
+    run-time-length mapping (`bugs/formal/FORMAL_listdir_no_run_time_sequence.md`), and
     12 named parameters that bind are the same program with a representation.
 
     The admitted status is the SIGNED one and CPython's return is not this word

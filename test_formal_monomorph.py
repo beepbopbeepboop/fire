@@ -6,7 +6,7 @@ is, and this file pins what that means on the formal dylib path: a module that
 declares only `struct Pair[T]` now publishes `prefix_Pair_Int` and its methods,
 and a program that writes `Pair[Int]()` binds them. Before this the module had no
 boundary symbol at all and the whole thing was one refusal — the second wall
-behind the 165-file row in the `b8` round of `bugs/FORMAL_sweep_work_map.md` §4.1,
+behind the 165-file row in the `b8` round of `bugs/formal/FORMAL_sweep_work_map.md` §4.1,
 which sits behind the codegen wall in `std/collections/binary_heap.mojo` and so
 was invisible until that file's own constructs lower.
 
@@ -333,7 +333,7 @@ def test_a_generic_struct_template_is_instantiated_at_the_importers_type(
         either.
 
     — `formal/build.py::no_public_api_reason`, which was RIGHT about the file and
-    was also the whole of `bugs/FORMAL_known_limits.md` §1.2's "Stage 5
+    was also the whole of `bugs/formal/FORMAL_known_limits.md` §1.2's "Stage 5
     monomorphization on the formal path … this is weeks, not an afternoon".
 
     Two type arguments in one program, because the failure this feature has to
@@ -567,7 +567,7 @@ def test_a_bare_local_construction_with_no_annotation_is_still_refused(tmpdir):
 
     `var a = Box(7)` writes no bracket anywhere, so there is no type argument to
     demand and this reader invents none — the type-argument INFERENCE a bare call
-    needs is `bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_
+    needs is `bugs/formal/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_
     inferrable.md`, a separate feature. The build must keep the refusal it has,
     which is a fact worth pinning: a reader that turned every bare call to a
     template into a demand would bind an instantiation nobody named.
@@ -915,7 +915,7 @@ def test_a_package_reexport_attributes_the_demand_to_the_defining_module(
 
     — a complaint about the LINK LINE for a library that had been built and was
     simply not on it. 162 of the 165 files in
-    the `b8` round of `bugs/FORMAL_sweep_work_map.md` §3.1 reach
+    the `b8` round of `bugs/formal/FORMAL_sweep_work_map.md` §3.1 reach
     `binary_heap.mojo` through `std/collections/__init__.mojo`'s re-export and
     not by naming it, so this is the shape the row actually has.
 
@@ -1049,7 +1049,7 @@ def test_a_bare_call_to_an_imported_generic_is_still_refused(tmpdir):
     names the library). With a template and nothing else there is no demand at
     all, so nothing is instantiated and the module is refused for having no
     boundary symbol — which is true of it, and is
-    `bugs/FORMAL_known_limits.md` §1.2's original refusal doing exactly its job.
+    `bugs/formal/FORMAL_known_limits.md` §1.2's original refusal doing exactly its job.
     """
     lib = ("def widen[T: Intable](v: T) -> T:\n"
            "    return v\n"
@@ -1113,7 +1113,7 @@ def test_a_bare_call_to_an_imported_generic_is_still_refused(tmpdir):
 def test_an_inferred_parameter_function_is_called_without_the_bracket(tmpdir):
     """`def unbox(t: Box[T]) -> T`: `unbox[Int](b)` is refused, `unbox(b)` builds.
 
-    `bugs/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md` §2 row 3
+    `bugs/formal/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md` §2 row 3
     and §3: the function's `T` is INFERRED from its parameter's type, so it is
     not one of the module's BRACKETED templates (`formal/monomorph.py::
     template_names` reads `def name[…]`/`struct name[…]`), and `instantiate`
@@ -1273,7 +1273,7 @@ def test_an_own_struct_template_with_a_comptime_value_is_diagnosed_as_one(tmpdir
     PARAMETER LIST, and the refusal must say so — not call it a tuple index.
 
     The construct is the one
-    `bugs/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md` §2 row 4
+    `bugs/formal/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md` §2 row 4
     measures: a generic applied with a TYPE argument and a comptime VALUE, which
     this path cannot instantiate (`formal/monomorph.py::type_arg_text` answers
     `""` for a top-level literal, by design, so no demand is computed). What is
@@ -2052,7 +2052,7 @@ def main():
 """
 
 # The bare-literal half of the same construct — §2 row 4 of
-# `bugs/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md`. `n` is a
+# `bugs/formal/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md`. `n` is a
 # comptime VALUE declared `n: Int`, the bracket mixes it with the type `Int`, and
 # the literal is what proves the value was substituted (a collapsed mangling, or
 # a body that read the parameter as a type, would print a different number). The
@@ -2682,7 +2682,7 @@ def test_a_value_bracket_argument_reaches_the_boundary_symbol(tmpdir):
 def test_a_bare_literal_value_parameter_instantiates(tmpdir):
     """`Tagged[Int, 0]` binds a comptime VALUE parameter, on both architectures.
 
-    The end-to-end half of `bugs/FORMAL_an_explicit_parameter_list_naming_a_
+    The end-to-end half of `bugs/formal/FORMAL_an_explicit_parameter_list_naming_a_
     comptime_value.md` §4.1: a bracket whose element is a comptime ARGUMENT
     rather than a type spelling.  A display already reached the boundary symbol
     (`test_a_value_bracket_argument_reaches_the_boundary_symbol` above); a BARE
@@ -3148,7 +3148,7 @@ def test_a_stated_mangled_spelling_is_the_one_the_mangler_produces(tmpdir):
 # The case above is the control: `widen(5)` is refused, and the refusal says the
 # source is right and this path does not infer the type arguments. That is the
 # honest half. The other half is the SIZE of the work, and
-# `bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`
+# `bugs/formal/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`
 # §3 step 1 asks for it without having it: "derive its type arguments from the
 # call's argument types instead of from a bracket" — where the type argument "is
 # not IN the call, it is a property of the argument's DECLARED TYPE".
@@ -3385,7 +3385,7 @@ def test_the_census_does_not_count_this_worktrees_scratch(tmpdir):
     call to `FormatStruct`, this doc's own subject, in a file that does not
     exist and that no reader will ever find again.
 
-    That is the defect `bugs/FORMAL_a_function_with_no_return_...` §0c already
+    That is the defect `bugs/formal/FORMAL_a_function_with_no_return_...` §0c already
     recorded for the OTHER census over the same corpus ("a census whose numbers
     move with the worktree's scratch is not a measurement"), fixed there with a
     hardcoded `(".tmp", ".git", "__pycache__")`.  Both censuses now ask
@@ -3435,7 +3435,7 @@ def test_the_census_does_not_count_this_worktrees_scratch(tmpdir):
 def test_the_census_reads_the_measured_shapes_out_of_the_corpus(_tmpdir):
     """The three symbols the doc measured, asked of the real stdlib.
 
-    `bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`
+    `bugs/formal/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`
     §1 measures the row by the callee the refusal names — `FormatStruct` 68
     files, `dealloc` 29, `is_negative` 13 — and §2 says every one of those type
     arguments is inferable from the argument's declared type. Asking this census

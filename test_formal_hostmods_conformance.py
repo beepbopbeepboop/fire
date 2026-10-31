@@ -767,7 +767,7 @@ def build_cases(spec):
             continue
         if any(isinstance(v, str) and "\x00" in v for v in bound):
             # A formal string is a bare NUL-TERMINATED `char *`
-            # (`bugs/FORMAL_string_value_model.md`), so a NUL inside an
+            # (`bugs/formal/FORMAL_string_value_model.md`), so a NUL inside an
             # argument truncates it and the model would be asked about a
             # DIFFERENT input rather than about this one. CPython's
             # `test_re.py` has two cases that are exactly this --
@@ -1175,7 +1175,7 @@ NOT_YET = [
     ("os", "test_os.py's cases are filesystem operations, not pure functions."),
     ("time", "test_time.py's literals are `strftime` formats, and `strftime` is "
              "absent from the model "
-             "(`bugs/FORMAL_time_struct_shaped_answers.md`)."),
+             "(`bugs/formal/FORMAL_time_struct_shaped_answers.md`)."),
     ("platform", "no literal calls; the answer is a property of the machine."),
     ("argparse", "CPython's cases are `parse_args` over argv LISTS and "
                  "SystemExit, and a list cannot cross a dylib boundary."),

@@ -293,7 +293,7 @@ CASES = [
     # bare `IdentExpr` and the build refused "'K' has no home" on BOTH
     # architectures, blaming the register allocator for a disagreement between
     # two walks. Measured on `tools/memslot.py:held_env`
-    # (`bugs/FORMAL_proof_coverage_census_2026-10-03.md` §0.6's round-2
+    # (`bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md` §0.6's round-2
     # census), whose `out[POOL] = str(pool)` is this shape exactly.
     #
     # Four shapes in one case, because "the index of a store target is a read"

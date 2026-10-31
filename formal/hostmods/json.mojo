@@ -14,7 +14,7 @@ CPython's `json` is a MARSHALLER: `json.loads(text)` builds a Python object
 graph out of the text, and `json.dump(obj, fp)` walks one. Neither direction
 is expressible here, and the reason is the one that shapes every module in
 this directory: **a value cannot cross a dylib boundary unless it is one
-64-bit word** (`bugs/FORMAL_module_state_no_storage.md`), while a dict is a
+64-bit word** (`bugs/formal/FORMAL_module_state_no_storage.md`), while a dict is a
 blob carved out of the frame that built it. So `loads`, `load`, `dump` and
 `dumps` of a container are ABSENT rather than approximated — see "WHAT IS NOT
 HERE" below, where each is named.
@@ -40,7 +40,7 @@ container read. And `valid`, `top_kind` and `member_kind` are named at their
 definitions as names CPython's `json` does not have, for the same reason
 `sys.write_stdout` is not one: CPython spells "this text is malformed" by
 raising, and this path has no exceptions to raise
-(`bugs/FORMAL_no_exceptions.md`), so the question has to become a return
+(`bugs/formal/FORMAL_no_exceptions.md`), so the question has to become a return
 value to be asked at all.
 
 THE PRIMITIVE THIS FILE IS BUILT ON
@@ -104,7 +104,7 @@ WHAT IS NOT HERE, AND WHY
     function that answers something plausible.
   * `JSONDecodeError`, `JSONEncoder`, `JSONDecoder`, `detect_encoding` — a
     type, two factories and one spelling rule. A type is not a value
-    (`bugs/FORMAL_module_state_no_storage.md`).
+    (`bugs/formal/FORMAL_module_state_no_storage.md`).
   * `NaN`, `Infinity`, `-Infinity` as INPUT — CPython's `json.loads` accepts
     all three, because its default `parse_constant` does, even though RFC
     8259 does not mention them. This module follows CPython rather than the
@@ -1172,7 +1172,7 @@ def dumps_int(n) -> str:
 
     `%lld` and NOT `%d`, which is measured and not a matter of taste: a `%d`
     conversion is 32 bits wide on this path, so `snprintf("%d", 4294967296)`
-    writes `-2147483648` (`bugs/FORMAL_string_value_model.md` §2, "the `-1` a
+    writes `-2147483648` (`bugs/formal/FORMAL_string_value_model.md` §2, "the `-1` a
     `%d` prints for `~2**62` is the formatter, not the operator"). Every
     other `printf` in this tree that prints a number a caller could have made
     large is `%d` and is therefore only right below 2**31 — a 24-byte buffer

@@ -706,7 +706,7 @@ class TestAConditionalExpressionIsAValue(unittest.TestCase):
     machine half's own word for what it cannot step.
 
     A conditional expression is the construct this file's sibling
-    `bugs/FORMAL_a_conditional_expression_has_no_value_in_the_semantic_model.md`
+    `bugs/formal/FORMAL_a_conditional_expression_has_no_value_in_the_semantic_model.md`
     is about, and it is here rather than in that file because the subject is the
     same one this file is about: two renderings of a source construct that have
     to agree, and what happens when one of them cannot exist.
@@ -853,7 +853,7 @@ class TestAConditionalExpressionIsAValue(unittest.TestCase):
         self.assertIsNone(G._step_branch_index(word),
                           "`arm64_step` grew a CSEL branch: the refusal message "
                           "is no longer the reason this program has no proof, "
-                          "and `bugs/FORMAL_arm64_csel_is_not_modelled_so_the_"
+                          "and `bugs/formal/FORMAL_arm64_csel_is_not_modelled_so_the_"
                           "step_table_cannot_claim_it.md` should be re-read "
                           "before this row is deleted")
 
@@ -936,7 +936,7 @@ class TestTheConditionalExpressionModelTypechecks(unittest.TestCase):
 
     x86-64 only, and the reason is the arm64 wall rather than a preference:
     `a if c else b` is one `CSEL` there and `arm64_step` has no branch for it,
-    so arm64 refuses the program (`bugs/FORMAL_arm64_csel_is_not_modelled_so_
+    so arm64 refuses the program (`bugs/formal/FORMAL_arm64_csel_is_not_modelled_so_
     the_step_table_cannot_claim_it.md`). What this pins on x86-64 is the half
     that IS landable now — that the model a conditional expression produces is
     a term the generated file accepts, that the bridge really is absent rather
@@ -1051,7 +1051,7 @@ class TestBitwiseNotTheRunTestTypechecks(unittest.TestCase):
 #
 # `MojoExpr.call` carries ONE `MojoExpr`, so a call with two arguments has no
 # faithful AST and `eval_eq_mojo` is false for it
-# (`bugs/FORMAL_ast_bridge_carries_one_argument_per_call.md`).  That doc names
+# (`bugs/formal/FORMAL_ast_bridge_carries_one_argument_per_call.md`).  That doc names
 # three ways to widen it and says the first is a "0.3-second experiment", which
 # is this class: three Lean files, each answering one question, all of them
 # things the NEXT worker would otherwise re-derive by hand.

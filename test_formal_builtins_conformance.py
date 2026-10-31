@@ -63,7 +63,7 @@ declines would be reporting a smaller number than it measured.
 WHAT IS ACTUALLY IN THE TABLE, AND WHY SO MUCH OF IT IS A REFUSAL
 -----------------------------------------------------------------
 A value on this path is ONE 64-bit integer word, or a frame address, or a
-`char *` to interned literal bytes (`formal/model.py`'s own header, and `bugs/FORMAL_a_fold_over_a_blob_needs_a_
+`char *` to interned literal bytes (`formal/model.py`'s own header, and `bugs/formal/FORMAL_a_fold_over_a_blob_needs_a_
 proof_model_and_not_only_codegen.md` for what that costs). That single fact
 decides most of
 the table before a case is even built: `sorted` needs a comparison call per

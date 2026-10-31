@@ -35,7 +35,7 @@ No build, no Lean, no sweep: a parse and two walks.
 # missing one and costs the same. `tools/formal_host_import_shapes.py`
 # reads it as `DEAD` and `formal_sweep_causes.py`'s `mentions` column is
 # the older measure of the same thing; see
-# `bugs/FORMAL_a_call_result_field_access_has_no_representation.md` §3.
+# `bugs/formal/FORMAL_a_call_result_field_access_has_no_representation.md` §3.
 import os
 import sys
 

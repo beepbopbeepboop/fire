@@ -35,7 +35,7 @@ are not holes at all for the shape they were written for.
 
 **One red this entry's `PASS=39 KNOWN-GAP=6 FAIL=0` no longer describes, and it
 is pre-existing and not a `sorry`:** `count` fails at proof line 5330
-(`bugs/FORMAL_arm64_x30_is_reloaded_from_the_frame.md`). It is not in
+(`bugs/formal/FORMAL_arm64_x30_is_reloaded_from_the_frame.md`). It is not in
 `test_formal.py`'s `EXPECTED_FAILURES`.
 
 **The `sgt8`/`sle8` row that used to sit beside it is GONE, and its owner was
@@ -73,7 +73,7 @@ verdicts that no run had ever produced — re-banked with `--remeasure`, which
 moved the census from 34 proved to 37.
 
 **The other half of master's sentence is the same fact stated for the
-census entry above**: `bugs/FORMAL_arm64_known_proof_gaps.md` records that
+census entry above**: `bugs/formal/FORMAL_arm64_known_proof_gaps.md` records that
 these two examples were missing from this file entirely, and the document
 that owned them was deleted with the fix — which is why the citation that
 used to sit here dangled.

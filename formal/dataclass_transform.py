@@ -116,7 +116,7 @@ Refused, each with the reason measured rather than asserted:
     word (or a frame address) with no type tag. Measured: passing a struct
     receiver into a call is already refused by `frame_receiver_escape_refusal`
     (`.tmp/dc/u1.py`), so even a perfect `fields()` could not be called. See
-    `bugs/FORMAL_dataclass_runtime_reflection.md` for the full argument and the
+    `bugs/formal/FORMAL_dataclass_runtime_reflection.md` for the full argument and the
     exact next step; each of those names is refused BY NAME here, so the
     diagnostic says which capability is missing instead of the import failing
     three layers up.
@@ -358,7 +358,7 @@ def reflection_refusal(callee: str) -> str:
     `from dataclasses import fields`), so the message names the name the reader
     wrote. The reason is the same for all of them and is stated once here: the
     answer is a function of the value's TYPE, and this path has no type tag on
-    a value. `bugs/FORMAL_dataclass_runtime_reflection.md` has the measurement
+    a value. `bugs/formal/FORMAL_dataclass_runtime_reflection.md` has the measurement
     and the exact next step; this is the same claim in the place that refuses
     it, so the two cannot drift."""
     bare = callee.rsplit(".", 1)[-1]
@@ -377,7 +377,7 @@ def reflection_refusal(callee: str) -> str:
         f"a perfect implementation could not be reached. Use the field names "
         f"directly — `x.a`, `x.b` — which is what the same source does "
         f"everywhere the value's type is already written down. "
-        f"bugs/FORMAL_dataclass_runtime_reflection.md")
+        f"bugs/formal/FORMAL_dataclass_runtime_reflection.md")
 
 
 def reflection_member_refusal(name: str) -> str:
@@ -527,7 +527,7 @@ def field_refusal(name: str, default, declared_type,
     `bit_width: Optional[int] = None`, which parses to `IdentExpr('None')` on
     this parser and is not a call). A refusal that mis-describes the construct
     sends the next reader looking for the wrong thing, which is the failure
-    `bugs/FORMAL_known_limits.md` exists to prevent.
+    `bugs/formal/FORMAL_known_limits.md` exists to prevent.
 
     **`None` used to need a branch of its own here, and no longer does.** It
     was the common case and the one a reader is most likely to believe is
@@ -1253,7 +1253,7 @@ def check_reflection_calls(functions: list, module_names: set) -> None:
     same reason (`.tmp/dc/b1.py`). So a perfect `fields()` could not be
     REACHED, let alone implemented. The fields are known to the FRONT END,
     from the class declaration; there is nothing at run time that could report
-    them. `bugs/FORMAL_dataclass_runtime_reflection.md` has the full argument
+    them. `bugs/formal/FORMAL_dataclass_runtime_reflection.md` has the full argument
     and the exact next step.
 
     `module_names` is the set of names the module bound the module under —

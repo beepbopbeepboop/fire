@@ -255,7 +255,7 @@ CASES = [
     # the target as defined, and a read of it then returns whatever the caller
     # left in the register. CPython raises for `n == 0`. Deciding it needs the
     # value of `n`, which is what
-    # `bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`
+    # `bugs/formal/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`
     # is about.
     ("unknown_bound_keeps_the_target_defined",
      "    for i in range(0, n):\n        pass\n    return i\n", "ok",
@@ -371,7 +371,7 @@ CASES = [
     # `while` half, reached here through a range bound. CPython raises at
     # `probe(0)` and this path keeps the target defined, so it stays a
     # recorded divergence rather than a refusal; see
-    # `bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`.
+    # `bugs/formal/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`.
     ("preheader_range_bound_from_a_parameter_keeps_the_target",
      "    k = n\n    for i in range(0, k):\n        pass\n    return i\n", "ok",
      "CPython leaves the target unbound when a runtime-empty range is read"),
@@ -1881,7 +1881,7 @@ def check_module_entry_facts() -> list:
 
     The SEED half is `read_before_store`'s `entry_facts`, the parameter the fix
     added and the whole of the second residual of
-    `bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`: a
+    `bugs/formal/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`: a
     module-level literal sequence must decide the loop's emptiness the same way
     a function-local one does, and a LOCAL binding of the same name must still
     override the module's value.
@@ -2019,7 +2019,7 @@ def check_loop_bound_flags() -> list:
     read where it may be unbound. Both backends read this one function — the
     flag word, the set-on-store and the check-on-read in
     `formal/arm64_codegen.py` and `formal/x86_64_codegen.py` are the emitter
-    half of `bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`
+    half of `bugs/formal/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`
     — so these cases are the build-time half of the same fix. The direction
     of every error matters: a flag the loop never takes is dead code in the
     image, but a flag a loop misses is the old garbage answer, which is the

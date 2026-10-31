@@ -25,7 +25,7 @@ otherwise. A file's terminal cause is the FIRST refusal the build's walk
 reaches, so a module is typically behind a stack of two to four of them, and
 fixing one moves the file to the next with the count unchanged. Two causes were
 measured this way on 2026-09-30 and BOTH had a ceiling of zero files — see the
-`2026-09-30` round, indexed in `bugs/FORMAL_sweep_work_map.md` §3.1. The current
+`2026-09-30` round, indexed in `bugs/formal/FORMAL_sweep_work_map.md` §3.1. The current
 map, which every number below comes from, is that document's §1.
 Nothing here can tell you a cause's real value; only re-sweeping the files it
 blocks can.
@@ -404,7 +404,7 @@ CAUSES = (
     # what is left in that second arm is a member whose VALUE is not a literal
     # — a true refusal about a value this path cannot materialise. So the label
     # still claims neither: the per-file split is in
-    # the `b3` round of `bugs/FORMAL_sweep_work_map.md`, and a reader who trusts
+    # the `b3` round of `bugs/formal/FORMAL_sweep_work_map.md`, and a reader who trusts
     # the message's own "In Python this is an AttributeError" clause will be
     # wrong about 2 of these 5.
     ("a field the struct does not declare (missing, or a comptime member)",
@@ -498,7 +498,7 @@ CAUSES = (
     # such a file lands in `other refusal` — the bucket this module's docstring
     # defines as "nobody has looked" — which is how a real 55-file codegen gap
     # once sat under a class that said the opposite
-    # (`bugs/FORMAL_env_family_next_terminal.md`). It sits ABOVE every row keyed
+    # (`bugs/formal/FORMAL_env_family_next_terminal.md`). It sits ABOVE every row keyed
     # on the ordinary refusal text, because those texts do not appear in this
     # message at all: what is printed for a file in this row is the sweep's own
     # sentence.
@@ -578,7 +578,7 @@ CAUSES = (
     # word, and a word prints as a number), and what is wrong is that the word is
     # not a value at all — it is the leftover of a callee that returns nothing,
     # where CPython prints `None`
-    # (`bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_
+    # (`bugs/formal/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_
     # yields_None.md`). It needs its own row because a file refused here is
     # refused by a DECISION with a remedy (`return` something, or do not use the
     # callee's value), which is what `other refusal` — the bucket this table
@@ -783,7 +783,7 @@ CAUSES = (
      (("before anything in this function stores it",),)),
     # ── the two x86-64-only refusals, which are arch DRIFT rather than a
     #    construct. Both are recorded, with this exact wording, in
-    #    `bugs/FORMAL_known_limits.md` §6.5 as the two files whose message
+    #    `bugs/formal/FORMAL_known_limits.md` §6.5 as the two files whose message
     #    differs between architectures on an otherwise class-identical sweep —
     #    and neither had a marker, so the instrument could not show the drift
     #    the doc had already measured. `swap.mojo` BUILDS on arm64 and is
@@ -836,7 +836,7 @@ CAUSES = (
     # `char *` the result means writing a terminator over the receiver's
     # bytes, and a string literal's bytes are in a read+execute `__TEXT`
     # section. 1 file (`mlir.py`), in-file, both architectures, and named in
-    # `bugs/FORMAL_string_value_model.md`, which is why it gets a row rather
+    # `bugs/formal/FORMAL_string_value_model.md`, which is why it gets a row rather
     # than staying in the bucket: the doc says `lstrip` is the one method that
     # does not write, which is the fix's shape.
     ("a String method that returns a SHORTER string writes the receiver's bytes",
@@ -868,7 +868,7 @@ CAUSES = (
     # them — the handler-arm row went 30 -> 1 with 29 files dark, and the
     # module-ATTRIBUTE row 30 -> 4 with 25 dark — which is
     # `FILES BLOCKED IS AN UPPER BOUND` arriving as a queue's blind spot rather
-    # than as a caveat. See `bugs/FORMAL_string_composition_has_no_buffer.md` for
+    # than as a caveat. See `bugs/formal/FORMAL_string_composition_has_no_buffer.md` for
     # the measurement and what a lowering would have to be.
     #
     # THE MARKER IS THE FACT, NOT THE ADVICE. "no buffer to compose one in" is
@@ -914,7 +914,7 @@ CAUSES = (
     # DOCSTRINGS, whose bytes nothing can name, so six lines of em-dash in one
     # hostmod's prose made this refusal fire over the whole corpus. That is
     # `formal/model.py::is_docstring_statement`, and
-    # the `b12` round of `bugs/FORMAL_sweep_work_map.md` §3.2 has the measurement.
+    # the `b12` round of `bugs/formal/FORMAL_sweep_work_map.md` §3.2 has the measurement.
     # The row STAYS, because the refusal is CORRECT for a real non-ASCII value —
     # `s[i]` on `"héllo"` would read a continuation byte, and `len` would answer
     # 5 where the byte count is 6 — and a queue that emptied this row by deleting
@@ -1567,7 +1567,7 @@ def _host_refusal_clause(name: str, source_path: str):
     module, and no such file exists" — as what a module in neither tier is
     refused with, and that sentence stopped being what the build says when
     `formal/imports.py::unresolvable_import_error` grew its third wording
-    (`bugs/FORMAL_stdlib_module_names_are_not_classified.md` §0): a name CPython
+    (`bugs/formal/FORMAL_stdlib_module_names_are_not_classified.md` §0): a name CPython
     ships and no tier names is now told it is "a CPython standard-library module,
     which has no Mojo source in this tree and no tier … saying whether
     implementing it would need an object this target does not have". So the
@@ -1931,7 +1931,7 @@ def main():
           "first refusal reached,\nso fixing one usually moves it to the "
           "next. Measure a cause's real value by\nre-sweeping the files it "
           "blocks — the census is "
-          "`bugs/FORMAL_sweep_work_map.md` §1, which supersedes every "
+          "`bugs/formal/FORMAL_sweep_work_map.md` §1, which supersedes every "
           "per-round map.")
 
     # THE UNCLASSIFIED BUCKET, LOUDLY, and it is `formal_sweep.py`'s alarm

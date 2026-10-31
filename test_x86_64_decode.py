@@ -177,7 +177,7 @@ check("mov r11d, [rax]", X.encode_mov_rm32_r32(R.RAX, 0, R.R11),
 #
 # The float-repr helper stores and loads its digit buffer through
 # `[base + index]` (`encode_mov_rm8_r8_idx`, `encode_movzx_r64_rm8_idx`), and the
-# decoder refused every such SIB until `bugs/FORMAL_x86_64_decoder_refuses_sib_
+# decoder refused every such SIB until `bugs/formal/FORMAL_x86_64_decoder_refuses_sib_
 # indexed_forms.md`.  They are the SAME form as the displacement forms above —
 # `mov_rm8_r8` and `movzx_r64_rm8` — because the opcode is unchanged and only the
 # SIB's index field differs; the decoder records the base register in `mem_base`
@@ -422,7 +422,7 @@ except D.DecodeError:
 # The float-repr helper's own image decodes in full.  It is emitted after every
 # function body and stores/loads its digit buffer through the SIB-INDEXED byte
 # forms above, so a decoder that refused those forms made this whole region
-# undecodable -- which is how `bugs/FORMAL_x86_64_decoder_refuses_sib_indexed_
+# undecodable -- which is how `bugs/formal/FORMAL_x86_64_decoder_refuses_sib_indexed_
 # forms.md` was seen.  The region runs from `float_repr_addr` to the first string
 # label (the data pool the decode must NOT walk into).
 import formal.build as _FB

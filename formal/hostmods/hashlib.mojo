@@ -15,7 +15,7 @@ OBJECT with `.update()`, `.digest()` and `.hexdigest()`. None of that is
 expressible here, and the reason is the same one that shapes every other
 module in this directory: **a value cannot cross a dylib boundary unless it is
 one 64-bit word**, and a hash object is 8 to 64 bytes of state that has to
-survive between calls (`bugs/FORMAL_module_state_no_storage.md`). So every
+survive between calls (`bugs/formal/FORMAL_module_state_no_storage.md`). So every
 digest here is ONE FUNCTION taking a byte string and a length and returning
 its hex digest — the shape `test_formal_hashlib.py` checks against CPython
 byte for byte.
@@ -56,7 +56,7 @@ measured reason — libSystem provides none of them, so each would be a
 from-scratch implementation of a specification nobody has checked here — and
 SHAKE additionally needs an extendable output, which is a run-time-length
 sequence this path cannot build
-(`bugs/FORMAL_listdir_no_run_time_sequence.md`). `test_formal_hashlib.py`'s
+(`bugs/formal/FORMAL_listdir_no_run_time_sequence.md`). `test_formal_hashlib.py`'s
 `absent` group asserts each one is refused with a message naming itself, so an
 omission can never be mistaken for an implementation.
 
@@ -452,7 +452,7 @@ def sigma_table() -> Pointer[UInt8]:
     Built at RUN TIME into a `malloc`'d buffer rather than being a
     module-level list, for the reason at the top of this section: a
     module-level name that is not a literal-only constant has nowhere to live
-    (`bugs/FORMAL_module_state_no_storage.md`), and a list is not a
+    (`bugs/formal/FORMAL_module_state_no_storage.md`), and a list is not a
     literal-only constant. Sixteen bytes per row, so row r starts at 16*r and
     a round's base index is a constant at each call site in `b2_compress`.
     """

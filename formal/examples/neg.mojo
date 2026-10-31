@@ -6,7 +6,7 @@
 # so the arm never ran and the arm64 machine model's reading of `Rn = 31` in the
 # SUB-register branch was never contradicted by a proof in the corpus.
 #
-# That reading is the defect `bugs/FORMAL_arm64_neg_is_shadowed_by_the_sub_
+# That reading is the defect `bugs/formal/FORMAL_arm64_neg_is_shadowed_by_the_sub_
 # register_arm.md` names: the branch read `arm64_reg_or_sp 31 s`, so the model
 # computed `sp - x` for an instruction whose result is `-x`.  The generator's own
 # `_step_rhs` always said `arm64_reg 31 s`, so the step-result lemma for this

@@ -797,7 +797,7 @@ def test_the_tagged_box_accessors_are_declared_and_callable():
     a kind tag beside every element, which is what FORMAL.md §5 converges on —
     written, compiled into the runtime dylib and exported, and refused by
     `gimple_runtime_callable` for want of a DECLARATION.  That is the whole of
-    ceiling 2 in `bugs/FORMAL_runtime_library_on_the_link_line.md`, and it is a
+    ceiling 2 in `bugs/formal/FORMAL_runtime_library_on_the_link_line.md`, and it is a
     header gap rather than a capability limit: five of the six are word-shaped
     and were callable the moment a header said so.
 
@@ -987,7 +987,7 @@ def test_a_void_return_is_a_legal_call_and_an_illegal_value():
     **`'void'` is in `_WORD_SCALARS` for a POINTER's sake** — `MojoFileHandle`
     and `mojo_coro_handle` are both `typedef void*`, and reading either as the
     bare spelling `void` is what made nine entry points look like by-value
-    aggregates (`bugs/FORMAL_runtime_library_on_the_link_line.md` §0.3). Carrying
+    aggregates (`bugs/formal/FORMAL_runtime_library_on_the_link_line.md` §0.3). Carrying
     that membership into RETURN position made **68** entry points word-shaped
     whose callee writes nothing to the return register, so any of them could be
     bound to whatever the call sequence happened to leave there.

@@ -1173,7 +1173,7 @@ class Normalising(unittest.TestCase):
         ("fn g(n):\n    return n\n", ("fn ",), ("def g(n):",)),
         # A `struct` is a DECISION rather than a removal of syntax (a Python
         # `class` of bare annotations has no attributes): the decision made in
-        # `bugs/FORMAL_metamorphic_ledger.md` §6 item 1 is to translate a
+        # `bugs/formal/FORMAL_metamorphic_ledger.md` §6 item 1 is to translate a
         # struct whose every field reads `0` on this path, so `var x: Int`
         # becomes a `__init__` that assigns it.  All three struct examples are
         # driven, which is why `wide_recv.mojo` is no longer the reason this
@@ -1378,7 +1378,7 @@ class Normalising(unittest.TestCase):
 
         Every example must be measured.  The one former exception was the
         `struct` decision — a `struct` body is not removable syntax, so it
-        needed the DECISION `bugs/FORMAL_metamorphic_ledger.md` §6 item 1
+        needed the DECISION `bugs/formal/FORMAL_metamorphic_ledger.md` §6 item 1
         records — and it was made: a struct whose every field is an integer
         type is translated to a Python class whose fields read the `0` this
         path's construction gives them, so `wide_recv`, `struct_point` and

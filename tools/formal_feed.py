@@ -27,8 +27,8 @@ CONTEXT = ("Context: formal backend (arm64 + x86-64 Mach-O, Lean proofs). `expor
            "Lean ONLY through formal/lean.py::run_lean; narrow tests via `python3 tools/memslot.py --gb 8 --label t -- ...`; "
            "no gate for formal; >3-4 GB is a bug; never `git checkout <path>`/`git stash`. Check `python3 tools/control.py "
            "claims` and `git branch --no-merged master | grep formal` first (a merger may be landing overlapping work). "
-           "Every fix gets a test and a commit; file what you cannot fix as bugs/FORMAL_*.md (no duplicates). "
-           "The latest sweep map (`ls -t bugs/FORMAL_sweep_work_map_*.md | head -1`) says where the corpus stands.\n\n")
+           "Every fix gets a test and a commit; file what you cannot fix as bugs/formal/FORMAL_*.md (no duplicates). "
+           "The latest sweep map (`ls -t bugs/formal/FORMAL_sweep_work_map_*.md | head -1`) says where the corpus stands.\n\n")
 
 
 def state_path():
@@ -94,7 +94,7 @@ def free_docs(held, q):
     for it in q:
         taken.update(it["claims"])
     out = []
-    for p in sorted(glob.glob(os.path.join(C.MAIN, "bugs", "FORMAL_*.md"))):
+    for p in sorted(glob.glob(os.path.join(C.MAIN, "bugs", "formal", "FORMAL_*.md"))):
         b = os.path.basename(p)[:-3]
         if "sweep_work_map" in b or b == "FORMAL_known_limits":
             continue

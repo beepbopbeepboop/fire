@@ -371,7 +371,7 @@ class TestAgainstTheRealCorpus(unittest.TestCase):
         irrelevant: a file that stops on `collections` before it reaches
         `itertools` is invisible in the `itertools` row and just as blocked.
         Four `collections` files and four more outside the wall came out of this
-        walk (`bugs/FORMAL_a_call_result_field_access_has_no_representation.md`
+        walk (`bugs/formal/FORMAL_a_call_result_field_access_has_no_representation.md`
         §3); this is what stops a fifth.
 
         `fire_compiler.py`'s dead `from abc import abstractmethod` was the last

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Which BARE calls to a declared template could have their type arguments
 inferred, and what each one would take — the measurement
-`bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`
+`bugs/formal/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`
 §3 asks for and does not have.
 
     python3 tools/formal_template_call_census.py [--paths DIR …] [--rows 40]
@@ -10,7 +10,7 @@ inferred, and what each one would take — the measurement
 largest codegen cause is one sentence — "`X` is called, and it is imported from
 `M`, so the call has to bind a symbol `M` exports. That module does not export
 it" — 170 files, 14 symbols, 79 call sites, measured over 710 files by
-the `b10` round of `bugs/FORMAL_sweep_work_map.md` §3.1. Every one of those calls is
+the `b10` round of `bugs/formal/FORMAL_sweep_work_map.md` §3.1. Every one of those calls is
 a BARE call to a name the defining module declares a TEMPLATE, and Mojo infers
 a template call's type arguments, so the source is correct and this path is
 short. The doc's §3 step 1 is "derive its type arguments from the call's
@@ -71,7 +71,7 @@ harder:
     failure `tools/formal_sweep_causes.py` documents as "nobody has looked", and
     a total that silently excludes sites is the one number nobody can use.
 
-**`bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`
+**`bugs/formal/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`
 §5b is the measurement of what the last two buckets and the KEYWORD reading cost
 the first one: 32 sites became 2, and §5's recommendation — "the matcher bucket is
 the only piece of the three that is a patch" — is refuted by it.** The five
@@ -155,7 +155,7 @@ BUCKET_UNREAD = "the declaration could not be read"
 #
 # **Seven, and the last two are the ones this instrument was missing** — see
 # `classify`'s own docstring and
-# `bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`
+# `bugs/formal/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`
 # §5b, which is the measurement of what adding them did to the totals. Both exist
 # because a site that CANNOT be answered by argument inspection used to be
 # reported as `solvable`, and that is the one direction a census may not round:
@@ -174,7 +174,7 @@ BUCKETS = [BUCKET_SOLVABLE, BUCKET_NO_UNIFY, BUCKET_UNDECLARED,
 #: parameter, which is what put `std/sys/_libc.mojo`'s `fcntl[*types: Intable]`
 #: in the `solvable` bucket with nothing to solve. What to DO with a packed
 #: parameter is the variadic ABI's question
-#: (`bugs/FORMAL_a_variadic_parameter_read_has_no_abi.md`) and not this
+#: (`bugs/formal/FORMAL_a_variadic_parameter_read_has_no_abi.md`) and not this
 #: instrument's; keeping the parameter in the list is what routes the site to a
 #: bucket that says the answer is not in the arguments.
 MARKER_PIECES = ("", "/", "*", "**", "//")

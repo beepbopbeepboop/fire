@@ -150,7 +150,7 @@ BCOND_CASES = [
 # source says `1 0`, because `Assembler.resolve()` had no TBZ/TBNZ arm and kept
 # imm14 = 0 — and then the arm it got preserved the wrong bits and tested bit 0.
 # Both are invisible to a byte comparison, which is the lesson in
-# `bugs/FORMAL_arm64_instruction_coverage.md` §"Comparing instruction bytes is
+# `bugs/formal/FORMAL_arm64_instruction_coverage.md` §"Comparing instruction bytes is
 # not comparing instructions"; the value assertion below is what caught them
 # and the self-branch assertion is what would have caught the first.
 TBZ_CASES = [

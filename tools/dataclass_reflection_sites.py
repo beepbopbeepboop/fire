@@ -2,7 +2,7 @@
 """Every `dataclasses.fields(…)` / `getattr(x, f.name)` site in a file, and how
 much is statically known about its receiver.
 
-The question `bugs/FORMAL_dataclass_runtime_reflection.md` asks is whether the
+The question `bugs/formal/FORMAL_dataclass_runtime_reflection.md` asks is whether the
 RUNTIME half of `dataclasses` is worth a front-end transform: "measure how many
 of the `dataclasses.fields(...)` / `getattr(node, f.name)` sites in the two files
 have a statically known receiver type". A transform can only answer `fields(x)`
@@ -148,7 +148,7 @@ def report(path):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("files", nargs="*", help="defaults to the two files "
-                    "bugs/FORMAL_dataclass_runtime_reflection.md names")
+                    "bugs/formal/FORMAL_dataclass_runtime_reflection.md names")
     args = ap.parse_args()
     known = unknown = 0
     for path in (args.files or [p for p in DEFAULT_FILES if os.path.exists(p)]):

@@ -13,7 +13,7 @@ This one answers the two questions a proof-cost bug needs and breadth cannot:
 
   * `--mode profile` — **where the seconds are**, in one `lean --profile` run,
     with the buckets RANKED so the answer is a list rather than a wall of text.
-    `bugs/FORMAL_the_arm64_proof_time_floor_is_one_composition_theorem.md` is
+    `bugs/formal/FORMAL_the_arm64_proof_time_floor_is_one_composition_theorem.md` is
     entirely about this: it attributes 83% of one generated proof to one
     declaration, and its own next steps are guesses about which tactic to
     cheapen. "Guess which tactic" is what this mode exists to stop.
@@ -36,7 +36,7 @@ This one answers the two questions a proof-cost bug needs and breadth cannot:
     the difference is attributed instead of inferred from a tactic's share of a
     total — and it reads `lean --profile`'s cumulative summary, which is the
     only place `type checking` is printed at all. That is how
-    `bugs/FORMAL_the_arm64_proof_time_floor_is_one_composition_theorem.md`
+    `bugs/formal/FORMAL_the_arm64_proof_time_floor_is_one_composition_theorem.md`
     learned that ~50 % of its 7.8 s flow is the kernel checking the term the
     flow's `simp` produced, which no simp-set change reaches.
 

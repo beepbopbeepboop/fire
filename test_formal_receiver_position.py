@@ -22,7 +22,7 @@ which is the list every frame table is keyed by (`formal/model.py`'s
 WHY IT WAS REFUSED, AND WHY THE REASON WAS FALSE.  The terminal message was
 "a method call on a value receiver is dispatched by NAME, so `recv.m(x)` carries
 no type" — about a callee that is a plain name with no receiver, no method and
-no dispatch in it.  Six of the 25 files the `2026-09-30` round of `bugs/FORMAL_sweep_work_map.md`
+no dispatch in it.  Six of the 25 files the `2026-09-30` round of `bugs/formal/FORMAL_sweep_work_map.md`
 blocks on that message have a comptime specialization at the callee
 (`std/algorithm/reduction.mojo`, `std/builtin/string_literal.mojo`,
 `std/collections/bitset.mojo`, `std/collections/string/format.mojo`,
@@ -297,7 +297,7 @@ DIFF_CASES = [
      '    print("v=%d" % q.combine(2, 3), end="")\n'
      "    return 0\n\n"
      "main()\n"),
-    # ── THE SUBSCRIPT RECEIVER, which is `bugs/FORMAL_method_call_on_a_
+    # ── THE SUBSCRIPT RECEIVER, which is `bugs/formal/FORMAL_method_call_on_a_
     # subscribed_receiver.md`'s Done-when and the capability the receiver-type
     # predicate exists for.  `u1.mojo`, verbatim: the element type is the
     # constructor's own declaration, and the answer is 3 on both architectures
@@ -573,7 +573,7 @@ DIFF_CASES = [
     # reads it.  The STEP it needed — the nested frame at a construction site —
     # landed 2026-10-03 in `4af77b16`, and the lift with it on 2026-10-04; the
     # doc both steps were filed in is deleted with them, and the bug it left
-    # behind is `bugs/FORMAL_a_construction_does_not_run_a_nested_structs_
+    # behind is `bugs/formal/FORMAL_a_construction_does_not_run_a_nested_structs_
     # constructor.md`.
     #
     # **A WRITE THROUGH IT, because a read cannot establish this.**  `get()`

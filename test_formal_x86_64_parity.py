@@ -442,7 +442,7 @@ CASES = [
     # (`formal/model.py::printf_kind_conversion_refusal`) refuses that by name,
     # because a `%g` conversion tells the C library to read the word as a double
     # while the word's own kind says integer — a rendering of the wrong value.
-    # The refusal is right (`bugs/FORMAL_float_binary64_only.md`), so the row
+    # The refusal is right (`bugs/formal/FORMAL_float_binary64_only.md`), so the row
     # uses doubles: the ABI question it pins is unchanged, and a declared
     # `Float64` is what puts a value in XMM0 in the first place. 4ceb7603 made
     # this change and a later bulk merge reverted it (the row went back to the
@@ -794,7 +794,7 @@ CASES = [
     # That is a codegen gap in x86-64 and not a wording difference: it refused
     # correct stdlib Mojo, `std/builtin/swap.mojo` (`var tmp = lhs^`), which
     # builds on arm64 and was carried as unstarted x86-64-side work in
-    # `bugs/FORMAL_known_limits.md` §6.5.
+    # `bugs/formal/FORMAL_known_limits.md` §6.5.
     #
     # The case is the WHOLE of `swap.mojo`'s shape rather than the bare
     # operator, because a bare `var t = a^` and `swap(a, b)`'s three-operator
@@ -1991,7 +1991,7 @@ CASES = [
     # reachable if the store landed in the blob the caller's local points at, and
     # `before 3` is only reachable if it did not already.
     #
-    # `bugs/FORMAL_binary_heap_mojo_after_the_len_value.md` §3a row 1.
+    # `bugs/formal/FORMAL_binary_heap_mojo_after_the_len_value.md` §3a row 1.
     ("list_clear_through_a_one_word_structs_sole_field",
      "struct Wrap:\n"
      "    var _data: List[Int]\n"

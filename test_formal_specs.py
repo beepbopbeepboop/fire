@@ -138,7 +138,7 @@ def test_the_all_inputs_refinement_has_its_multiplication_lemma(tmpdir, shared):
     The layer's refinement is stated over a FINITE `List.range N` because the
     ALL-INPUTS statement needs a `UInt64` multiplication lemma and the library
     had no analogue of `u64_ofNat_add`/`u64_ofNat_sub`
-    (`bugs/FORMAL_a_specification_layer_that_stops_at_a_finite_range.md`).  The
+    (`bugs/formal/FORMAL_a_specification_layer_that_stops_at_a_finite_range.md`).  The
     text pin is against a later edit that silently weakens the statement; the
     elaboration is what makes the pin mean "provable" rather than "present".
     """

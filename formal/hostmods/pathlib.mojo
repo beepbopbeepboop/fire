@@ -45,7 +45,7 @@ WHAT IS NOT HERE, AND WHY
   * `Path`, `PurePath`, `PurePosixPath`, `PosixPath`, `WindowsPath` — TYPES. A
     type is not a value on this path and cannot be returned from a module
     function, let alone stored in a module-level name
-    (`bugs/FORMAL_module_state_no_storage.md`). Every function here takes a
+    (`bugs/formal/FORMAL_module_state_no_storage.md`). Every function here takes a
     path as a `str`, which is the substitution `sys.mojo` makes for
     `sys.argv` and `os.mojo` makes for `os.environ`.
   * `parts`, `parents`, `suffixes` — SEQUENCES. A list is a blob carved out of
@@ -58,7 +58,7 @@ WHAT IS NOT HERE, AND WHY
     `is_file` and the size are `os.path`'s; the rest need a stream, a
     directory listing, or an inode, and a directory listing is a run-time-length
     sequence this path cannot build
-    (`bugs/FORMAL_listdir_no_run_time_sequence.md`).
+    (`bugs/formal/FORMAL_listdir_no_run_time_sequence.md`).
   * `is_absolute` (`os.path.isabs`), `joinpath` (`os.path.join`), `as_uri`
     (a percent-encoding, and a str is one so it is not written here rather
     than written twice), `drive` / `root` / `anchor` (a Windows question, and

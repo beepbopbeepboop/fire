@@ -4206,7 +4206,7 @@ UNREGISTERED = {
     # differential fuzzer's suite above is: its heavier settings (thousands of
     # pairs across every mix, and the whole of `formal/examples`) are a sweep,
     # and CLAUDE.md's rule for a job no gate can afford is to declare it rather
-    # than quietly omit it. `bugs/FORMAL_metamorphic_ledger.md` records the
+    # than quietly omit it. `bugs/formal/FORMAL_metamorphic_ledger.md` records the
     # sweeps; this file is what a change to the ten transformations must run.
     'test_formal_metamorph.py':
         'Checks that each of tools/formal_metamorph.py\'s ten transformations '
@@ -4216,7 +4216,7 @@ UNREGISTERED = {
         'Measured 2026-10-05: 27 tests, 39.6 s wall, 55 MB peak, two builds on '
         'the host. Declared rather than registered because its heavier '
         'settings are a sweep; CLAUDE.md\'s rule for a job no gate can afford '
-        'is to declare it. bugs/FORMAL_metamorphic_ledger.md records the '
+        'is to declare it. bugs/formal/FORMAL_metamorphic_ledger.md records the '
         'sweeps.',
     'test_formal_fuzz.py':
         'Builds and runs twenty generated images per architecture and compares '
@@ -4493,7 +4493,7 @@ UNREGISTERED = {
         'call, a struct construction) and the three that would otherwise '
         "invent 456 — generators, coroutines, and a name whose definitions "
         'disagree about whether it returns, which is the defect the census it '
-        'replaces had (`bugs/FORMAL_a_function_with_no_return_yields_a_word_'
+        'replaces had (`bugs/formal/FORMAL_a_function_with_no_return_yields_a_word_'
         'where_cpython_yields_None.md` §0), as a case.',
 
     # `test_formal_proof_breadth.py` was listed here when it landed on
@@ -4514,7 +4514,7 @@ UNREGISTERED = {
     'test_formal_comptime_string.py': 'A comptime string MATERIALIZED: a '
         'module-level `comptime` bound to a string reaches the image as the '
         'bytes it is, on both architectures, with the escapes decoded rather '
-        'than printed back (bugs/FORMAL_string_literal_escape_is_not_'
+        'than printed back (bugs/formal/FORMAL_string_literal_escape_is_not_'
         'decoded.md). Build-and-RUN, because a substitution that is wrong in '
         'the last byte is indistinguishable from a right one in a refusal.',
     'test_formal_mlir_precedence.py': 'WHICH of the two MLIR refusals answers a '
@@ -5527,7 +5527,7 @@ def test_a_deleted_bug_doc_is_not_still_cited():
           f'({sorted(outside)[:8]}); a new one is a ratchet failure')
     check('dangling refs: it does not invent one — a cited doc that EXISTS is '
           'not reported',
-          'bugs/FORMAL_known_limits.md' in have
+          'bugs/formal/FORMAL_known_limits.md' in have
           and 'FORMAL_known_limits.md' not in by_doc
           and 'CODEGEN_ab_native_fails.md' not in by_doc,
           f'the walk found {len(have)} docs under bugs/; a walk that reports '
@@ -5952,12 +5952,12 @@ def test_the_formal_sweep_series_is_one_document_with_an_index_of_its_rounds():
     "current" one from and no way to tell which was current except the base
     commit inside each.
 
-    They are now `bugs/FORMAL_sweep_work_map.md`: §1 is the latest census,
+    They are now `bugs/formal/FORMAL_sweep_work_map.md`: §1 is the latest census,
     §2 is what the earlier rounds established and still holds, and §3 is an
     INDEX of the twenty rounds with the base commit, the scope, and — because
     seventy-odd files in this tree cite a round by its section number — what
     each cited section carried. The citations were rewritten to "the `b9` round
-    of `bugs/FORMAL_sweep_work_map.md` §4.1", which resolves into §3.1.
+    of `bugs/formal/FORMAL_sweep_work_map.md` §4.1", which resolves into §3.1.
 
     So two properties, and both are checked here because the failure mode that
     produced twenty documents is not a crash:
@@ -5973,7 +5973,7 @@ def test_the_formal_sweep_series_is_one_document_with_an_index_of_its_rounds():
        that check cannot see because the path it names DOES resolve.
     """
     import glob
-    maps = sorted(glob.glob(os.path.join(HERE, 'bugs',
+    maps = sorted(glob.glob(os.path.join(HERE, 'bugs', 'formal',
                                         'FORMAL_sweep_work_map*.md')))
     canonical = 'FORMAL_sweep_work_map.md'
     check('sweep maps: there is exactly ONE per-round map, and it is the '

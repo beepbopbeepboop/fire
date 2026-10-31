@@ -84,7 +84,7 @@ skipped silently -- the point is to know what is and is not proved.
   PARTIAL, and no statement of it can be chained by this generator.  The long
   version, with why naming the quotient and remainder needs a side condition the
   generator cannot discharge and keeping the `match` stops the next address
-  from reducing, is in `bugs/FORMAL_x86_64_end_to_end_proof.md`.
+  from reducing, is in `bugs/formal/FORMAL_x86_64_end_to_end_proof.md`.
 
   `setcc` (26) was the one that did NOT fall out of a generalisation, and it is
   worth saying why rather than leaving it in the list.  `cmp` and `test` are
@@ -129,7 +129,7 @@ skipped silently -- the point is to know what is and is not proved.
       admitted (`_concrete_read`): the popped address is a closed term, so the
       proof evaluates it instead of simplifying it into one.  What it cost when
       it was admitted is in
-      `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`,
+      `bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`,
       which is where the boundary and the measurement behind the fix both live.
 
 
@@ -937,7 +937,7 @@ def _body(code, info):
     wrong function.  Widening this is therefore half of what a call to a function
     the compiler emitted BEFORE its caller needs, and not all of it; the other
     half, and what is left after this, is in
-    `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`.
+    `bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`.
     """
     base, entry = info["base_addr"], info["func_offset"]
     end = D.body_end(info)
@@ -2848,7 +2848,7 @@ def _tree(code, info, shapes):
             # a goal that is not true until a heartbeat or wall bound fires, and
             # that reads as "the chain is too long" rather than "the chain
             # claims something untrue" -- which is the diagnosis the 24-argument
-            # program in `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`
+            # program in `bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`
             # was filed with, and it is not what is wrong.
             #
             # So the return is FOLLOWED, which is the fix, and it is not free.
@@ -3415,7 +3415,7 @@ def _unfold(hs_path, rex=()):
 #: outcome than an elaboration that never finishes, because it is countable.
 #:
 #: The fix that makes this constant unnecessary is the per-step separation
-#: invariant `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`
+#: invariant `bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`
 #: names: one cheap fact per step, so the read costs O(1) in the chain's length
 #: instead of O(length) once per crossing. That needs an emitter-side
 #: stack/frame tracker to make each write's address a literal, and it is not
@@ -3427,7 +3427,7 @@ def _concrete_read(hs_path, rex=()):
     """The two lines that ATTEMPT a memory read out of a CONCRETE state.
 
     **This is the fix for the boundary
-    `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`
+    `bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`
     names, and it is a change of what gets EVALUATED rather than of what gets
     simplified.**  The read at a `ret` -- the popped return address when it
     returns into a caller, the zero `X86State.init` leaves on the stack when it
@@ -3826,7 +3826,7 @@ def emit_terminates(path):
         # the outermost `ret`, which pops the zero `X86State.init` leaves on the
         # stack and so ends the run at the exit sentinel. `_tree` tells them
         # apart by exactly this, and the difference is the whole of
-        # bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md:
+        # bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md:
         # treating the first as the second is what emitted `s_N.rip = 0` where
         # the machine pops the address the `call` pushed.
         ret_to = node.succ if node.kind == "ret" else None
@@ -3868,7 +3868,7 @@ def emit_terminates(path):
             at `PROOF_WALL_S` (1500 s), with `mem_write_bytes`'s `ite` chain and the
             nested `Int.ofNat … + disp` addresses being re-normalised at every one
             of the 131 levels. The file was 1500 s of wall and then a FAILURE about
-            the clock, which is the trade `bugs/FORMAL_x86_64_end_to_end_proof.md`
+            the clock, which is the trade `bugs/formal/FORMAL_x86_64_end_to_end_proof.md`
             calls B21 from the wrong side — a worse report than the refusal it
             replaced.
 
@@ -3996,7 +3996,7 @@ def emit_terminates(path):
             # de-duplicates by name, so a chain with four admitted `hpop`s reads
             # as `proved, 1 sorry` exactly like one with a single gap in it.
             # The number is a bound and not a count of holes (which is what
-            # bugs/FORMAL_x86_64_end_to_end_proof.md concluded about it
+            # bugs/formal/FORMAL_x86_64_end_to_end_proof.md concluded about it
             # independently), and these holes are countable by NAME in the
             # generated file: `hpop{k}`, one per returned-to.
             emit("have hpop%d : (mem_read_bytes %s.mem (%s.rsp.toNat) 8).toNat"
@@ -4188,7 +4188,7 @@ def emit_terminates(path):
                 # inequality over a `mem_write_bytes` chain, and it is stated
                 # with `repeat rw` because `rw` peels ONE layer and the chain is
                 # N deep -- see the B18 entry in
-                # bugs/FORMAL_x86_64_end_to_end_proof.md for the measurement.
+                # bugs/formal/FORMAL_x86_64_end_to_end_proof.md for the measurement.
                 #
                 # Every step below is one that CANNOT fail: `simp` succeeds even
                 # when it simplifies nothing, and the rest are `try`. So the
@@ -4468,7 +4468,7 @@ def admitted_facts(text):
                   either way, because it reports "declaration 'terminates' uses
                   `sorry`" once per DECLARATION and
                   `formal/lean.py::_census_from_output` de-duplicates by name.
-                  `bugs/FORMAL_x86_64_end_to_end_proof.md` reaches the same
+                  `bugs/formal/FORMAL_x86_64_end_to_end_proof.md` reaches the same
                   conclusion about `augassign` from the other end, and this is a
                   statement about the CENSUS rather than the proof.
 

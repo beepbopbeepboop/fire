@@ -36,7 +36,7 @@ with "Symbol not found". These tests pin the replacement behaviour:
      boundary symbol needs no library at all, and a module that genuinely has
      no boundary symbol is still REFUSED for every edge that does bind
      something from it — with a message saying which of the ways it has none.
-     The decision and its cost are in bugs/FORMAL_known_limits.md §1, and the
+     The decision and its cost are in bugs/formal/FORMAL_known_limits.md §1, and the
      tests at the end of this file pin both the rule and the accuracy of the
      message, because a message that is false about the file sends the reader
      after a construct that is not there.
@@ -1653,7 +1653,7 @@ def test_no_standard_library_module_is_left_in_neither_tier(tmpdir, _shared):
 def test_a_name_with_nothing_to_implement_gets_its_own_tier(tmpdir, _shared):
     """The FOURTH answer, and the two corrections that earned it.
 
-    `bugs/FORMAL_stdlib_module_names_are_not_classified.md` §"The next step"
+    `bugs/formal/FORMAL_stdlib_module_names_are_not_classified.md` §"The next step"
     named the gap exactly: its "neither tier, deliberately" group — "a name
     whose only spelling is a documentation or test artefact (`this`,
     `antigravity`, `turtledemo`, `idlelib`), or a Windows-only / POSIX-only
@@ -1813,7 +1813,7 @@ def test_a_host_module_refusal_says_what_this_target_offers(tmpdir, _shared):
     `struct`. Without that sentence the refusal reads as "this target cannot do
     records", and the next thing a reader does is file the next bug document
     about `collections` — which is what
-    `bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md` is.
+    `bugs/formal/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md` is.
 
     **BOTH DIRECTIONS, because advice on every host module is the same noise in a
     different place.** The second row is a host module with no entry: its
@@ -1975,7 +1975,7 @@ def test_no_unclassified_stdlib_name_is_imported_by_anything(tmpdir, _shared):
 
     Measured over this repository and the stdlib on 2026-10-03, it is EMPTY --
     not one of the 223 was imported by any of the 370 files, which is why
-    `bugs/FORMAL_stdlib_module_names_are_not_classified.md` stopped asking for
+    `bugs/formal/FORMAL_stdlib_module_names_are_not_classified.md` stopped asking for
     222 per-name judgements: there is no measurement to tell a right entry from
     a plausible one, and no file whose answer changes. Asserting it here makes
     that a standing invariant rather than a snapshot, and it is a TRIPWIRE with
@@ -2050,7 +2050,7 @@ def test_no_unclassified_stdlib_name_is_imported_by_anything(tmpdir, _shared):
           f"{consumers[:10]}")
 
 
-# The 216-name queue of `bugs/FORMAL_stdlib_module_names_are_not_classified.md`
+# The 216-name queue of `bugs/formal/FORMAL_stdlib_module_names_are_not_classified.md`
 # is closed here by a RULE rather than by 216 remembered entries, and these two
 # tests are the rule's whole specification. Both are checked over EVERY name
 # CPython ships rather than over a list, so a rule that stopped firing fails
@@ -2373,7 +2373,7 @@ def test_every_name_has_one_named_verdict_and_no_answer_is_an_absence(
 
 
 def test_the_five_find_spec_decided_names_are_unreachable(tmpdir, _shared):
-    """The first entries `bugs/FORMAL_stdlib_module_names_are_not_classified.md`
+    """The first entries `bugs/formal/FORMAL_stdlib_module_names_are_not_classified.md`
     §0.5 said a worker could add "with a measurement behind each".
 
     `importlib.util.find_spec` returns no spec for every one of them here, and
@@ -3853,12 +3853,12 @@ def test_a_forwarded_name_nothing_defines_is_still_refused(tmpdir, _shared):
 # the disappearance of is indistinguishable from a limit nobody re-checked.
 #
 # The family is documented, audited and costed in
-# bugs/FORMAL_known_limits.md §1. Measured there: 33 files, EIGHT terminal
+# bugs/formal/FORMAL_known_limits.md §1. Measured there: 33 files, EIGHT terminal
 # modules, and all eight refusals TRUE. What is pinned here is therefore not a
 # bug but a decision, plus three message-ACCURACY guards, because
 # `no_public_api_reason` had no test at all before this wave and three of its
 # six branches were saying something false about the file they were reported
-# against (bugs/FORMAL_known_limits.md §1.3).
+# against (bugs/formal/FORMAL_known_limits.md §1.3).
 
 GENERIC_ONLY_MODULE = "def widen[T: Intable](v: T) -> T:\n  return v\n"
 CONCRETE_MODULE = "def widen(v):\n  return v\n"
@@ -3876,7 +3876,7 @@ def test_a_module_nobody_binds_a_concrete_name_from_needs_no_library(
     that per edge and `build_module_dylib` and `_resolve_imports` both act on
     it. `BinaryHeap` is the measured case (`std/collections/__init__.mojo`
     re-exports it and 162 of the 163 files the export gate blocked name nothing
-    it declares), and the `b9` round of `bugs/FORMAL_sweep_work_map.md` §4.1 is the
+    it declares), and the `b9` round of `bugs/formal/FORMAL_sweep_work_map.md` §4.1 is the
     measurement.
 
     What this pins is the half that could have gone wrong silently: the program
@@ -4328,7 +4328,7 @@ def test_a_constants_only_module_is_not_told_nothing_could_be_added(
     module-constant substitution; what is absent is a RULE that a module with
     nothing to export needs no dylib at all, so an importer reading the
     constant directly needs no library. That is one feature, and
-    `bugs/FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md` is where
+    `bugs/formal/FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md` is where
     it is written down — so the message now says which feature it is and where
     it lives, rather than telling a reader that nothing would help.
 
@@ -4380,7 +4380,7 @@ def test_a_constants_only_module_is_importable(tmpdir, _shared):
     **This is the feature `test_a_constants_only_module_is_not_told_nothing_
     could_be_added` names as missing, and it is 33 of the 59 files on the
     `module exports no public functions` row of
-    the `b13` round of `bugs/FORMAL_sweep_work_map.md` §4.** That row's largest
+    the `b13` round of `bugs/formal/FORMAL_sweep_work_map.md` §4.** That row's largest
     single group was "blocked in `constants.mojo`", and the map could not even
     say WHICH `constants.mojo` — the chain names a module by basename and this
     tree has three of them — so the row read as unmeasurable. It is
@@ -4930,7 +4930,7 @@ def test_the_exclusion_table_does_not_change_the_export_set(tmpdir, _shared):
 # names, which is the question a sweep's `not-answerable/host-import` class
 # cannot answer: the class is one bucket over a queue of unrelated capabilities,
 # and a module landing unmasks the row behind it. The doc that asked for the
-# tool is `bugs/FORMAL_the_host_import_wall_is_at_its_honest_floor.md` §5, and
+# tool is `bugs/formal/FORMAL_the_host_import_wall_is_at_its_honest_floor.md` §5, and
 # these are its pins — the properties that make the ranking a MEASUREMENT rather
 # than a second description to drift.
 #
@@ -5661,7 +5661,7 @@ TESTS = [
 #
 # EMPTY, and that is the point. It held three message-ACCURACY guards for
 # `no_public_api_reason`, each with the stdlib module it had been measured on
-# (bugs/FORMAL_known_limits.md §1.3), and all three started reporting
+# (bugs/formal/FORMAL_known_limits.md §1.3), and all three started reporting
 # "marked expect=… but it PASSES" the moment the messages were corrected — which
 # is the mechanism working, not a failure to suppress. The guards are still in
 # `TESTS` above and are now ordinary passing tests; what was removed is the

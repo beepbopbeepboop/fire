@@ -39,7 +39,7 @@ merge on, `L[T]()` was refused exactly as it had been before the fix:
 
 Every clause of that sentence is false about the program. `List` is a TYPE, it
 is in none of the four places a value can be, and no amount of reading
-`_load_var` would have found anything — it is the `bugs/FORMAL_known_limits.md`
+`_load_var` would have found anything — it is the `bugs/formal/FORMAL_known_limits.md`
 rule that a message false about the file is worse than no message.
 
 THE COST OF NOTICING LATE, which is why there is a structural guard at the

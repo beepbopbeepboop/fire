@@ -53,7 +53,7 @@ What is asserted here, and why each one is a separate test:
   2. the shapes that must STAY refused stay refused, each for its own reason
      and with a message that names it: a STORE to another module's constant, a
      module-level LIST (a real global with nowhere to live,
-     `bugs/FORMAL_module_state_no_storage.md`), and a name the module does not
+     `bugs/formal/FORMAL_module_state_no_storage.md`), and a name the module does not
      publish.
   3. the manifest is the contract, and it says what the consumer needs: which
      module the library IS, the constants it publishes, and the symbol each
@@ -576,7 +576,7 @@ def test_a_store_to_a_module_constant_is_refused(tmpdir, _shared, verbose):
     there, which is the outcome this backend exists to refuse rather than
     produce. A module-level name in another module is a real global, and a real
     global has nowhere to live on this path
-    (`bugs/FORMAL_module_state_no_storage.md`)."""
+    (`bugs/formal/FORMAL_module_state_no_storage.md`)."""
     prog = ("import mylib\n\n"
             "def main():\n"
             "  mylib.CONST = 9\n"
@@ -736,7 +736,7 @@ def test_a_module_object_read_is_still_refused(tmpdir, _shared, verbose):
 # spine exemption was unconditional and the diagnostic raised during emission
 # beat the one raised at the end of the symbol walk. `formal/hostmods/os`
 # publishes `environ` and a dozen operations on it now
-# (`bugs/FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md`), which
+# (`bugs/formal/FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md`), which
 # moved this shape from the middle case to the third one: the parent publishes
 # the link, so the chain is a call through a VALUE and the answer has to say
 # that and name the functions that are the operations.
@@ -777,7 +777,7 @@ def test_a_spine_link_that_resolves_to_nothing_is_an_attribute_read(
     link rather than about whatever the rest of the expression happens to do
     with the result. The message must print what `pkg` DOES publish, because
     that is what separates "a capability `pkg` lacks" (`os.environ` is a
-    `char **` walk, `bugs/FORMAL_module_state_no_storage.md`) from "a name it
+    `char **` walk, `bugs/formal/FORMAL_module_state_no_storage.md`) from "a name it
     does not have".
     """
     prog = ("import pkg\n\n"
@@ -1114,7 +1114,7 @@ def test_a_name_the_module_does_not_publish_says_so(tmpdir, _shared, verbose):
     reason that name is missing is a SOURCE — `_NSGetExecutablePath` is refused
     by name on this path and the `__file__` route would put one build's `-o`
     into a content-addressed dylib's cache key
-    (`bugs/FORMAL_module_state_no_storage.md`'s `sys.executable` row) — not a
+    (`bugs/formal/FORMAL_module_state_no_storage.md`'s `sys.executable` row) — not a
     representation.
 
     So the assertion is threefold and the middle one is the load-bearing: the
@@ -1309,7 +1309,7 @@ def test_the_store_value_side_goes_through_the_one_test(tmpdir, _shared,
         # this position only because `_fold_target_queries` normalizes every pair
         # into a list earlier in the same pipeline, for its own reasons. Nothing
         # recorded the dependency, and the two walks that run BEFORE that
-        # normalization did miss their arms (`bugs/FORMAL_elif_arms_and_random_
+        # normalization did miss their arms (`bugs/formal/FORMAL_elif_arms_and_random_
         # mojo_remainder.md`), so the position is asserted here rather than left
         # to a pass that happens to run first.
         "elif_arm":  "  if x == 1:\n    x = 2\n  elif x == 3:\n"

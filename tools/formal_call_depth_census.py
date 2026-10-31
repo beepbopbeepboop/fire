@@ -3,7 +3,7 @@
 
     python3 tools/formal_call_depth_census.py [--top N]
 
-The measurement `bugs/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md`
+The measurement `bugs/formal/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md`
 names as its step 1 — "measure first: the maximum call-graph DEPTH over
 `formal/`, `std/` and the repo's own files, and the depth at which a frame chain
 exceeds `STACK_FLOOR_BUDGET_BYTES`. If no corpus file is within an order of

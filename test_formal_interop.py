@@ -47,7 +47,7 @@ import argparse
 # `CTYPES_DRIVER` string below imports it for the GENERATED program, which
 # is not a use of it here. A dead import blocks a file on the formal path
 # for exactly the reason an absent module does; see
-# `bugs/FORMAL_a_call_result_field_access_has_no_representation.md` §3.
+# `bugs/formal/FORMAL_a_call_result_field_access_has_no_representation.md` §3.
 import json
 import os
 import platform

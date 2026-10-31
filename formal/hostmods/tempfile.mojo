@@ -123,7 +123,7 @@ THE TWO PLACES THIS IS NOT CPYTHON, EACH MEASURED
     is what CPython does with the same filesystem.
   * **NOTHING IS CACHED.** CPython computes the answer once per process, in the
     module global `tempdir`, behind a lock. A module-level name has no storage
-    on this path (`bugs/FORMAL_module_state_no_storage.md`), so every call walks
+    on this path (`bugs/formal/FORMAL_module_state_no_storage.md`), so every call walks
     the candidates again. Two consequences, both in the safe direction and both
     stated: a caller that changes `TMPDIR` and asks again gets the NEW answer
     where CPython would still answer with the first one, and two calls in one
@@ -148,7 +148,7 @@ WHAT IS NOT HERE, AND WHY — each measured, and none of them approximated
     parameters that are not answered here. `dir=` would be a field this struct
     keeps and `__enter__` honours, and it is absent because every corpus
     spelling that uses it (`dir=os.environ.get("TMPDIR")`, three sites) is
-    refused upstream by `os.environ` (`bugs/FORMAL_module_state_no_storage.md`)
+    refused upstream by `os.environ` (`bugs/formal/FORMAL_module_state_no_storage.md`)
     — `io.mojo`'s rule again: a parameter is here when a caller needs it,
     checked rather than assumed. `suffix=` cannot be honoured by ANY
     implementation here: it goes at the END of the name, and this path has no
@@ -169,7 +169,7 @@ WHAT IS NOT HERE, AND WHY — each measured, and none of them approximated
   * `mkstemp` (2 files) — its answer is `(fd, name)`, a two-element tuple, and a
     tuple is a frame blob that cannot cross a dylib boundary: the same limit
     that keeps `shutil.disk_usage` and `os.path.split` from returning their own
-    answers (`bugs/FORMAL_time_struct_shaped_answers.md`). Splitting it into
+    answers (`bugs/formal/FORMAL_time_struct_shaped_answers.md`). Splitting it into
     `mkstemp_fd` and `mkstemp_path` is possible and is NOT done here, for
     `io.mojo`'s reason again: no caller in this corpus could use either, and a
     half of a CPython answer with a name of its own is a second thing to keep

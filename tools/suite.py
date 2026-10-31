@@ -562,7 +562,7 @@ MEASURED_PEAK_GB = {
     # (93 generated proofs, one after another) resembles. The `memwhy` on its
     # registration says the same thing and points at the doc that owns the
     # cause: `mem_read_bytes`'s `ite` chain over a 113-equation successor nest,
-    # which `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`
+    # which `bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`
     # is about and which a class change would not fix.
     'formal-x86-endtoend': (6.1, 'measured'),
     # The eleven `expect=`-marked tests that were registered and in NO BUCKET,
@@ -1773,7 +1773,7 @@ test('comptime-parity', [PY, 'test_comptime_parity.py'],
 test('returned-frame-layout', [PY, 'test_returned_frame_layout.py'],
      deps=['preflight'], mem='tiny',
      desc="a frame that outlives its creator has a place to live, or is refused by name")
-# `formal/model.py`, `bugs/FORMAL_known_limits.md` and
+# `formal/model.py`, `bugs/formal/FORMAL_known_limits.md` and
 # `build_stdlib_dylib.py` are in `extra` because the check READS them, not
 # because the scanner does: `test_runtime_header_scan.py`'s census check
 # compares the figures those three quote in prose with `runtime_abi()`, and an
@@ -1787,7 +1787,7 @@ test('rthdrscan', [PY, 'test_runtime_header_scan.py'], mem='tiny', cache=True,
             RUNTIME_HDR, 'runtime/fire_sqlite3.h', 'runtime/fire_zlib.h',
             'runtime/fire_ssl.h', 'runtime/fire_ncurses.h',
             'runtime/fire_python.h',
-            'formal/model.py', 'bugs/FORMAL_known_limits.md',
+            'formal/model.py', 'bugs/formal/FORMAL_known_limits.md',
             'build_stdlib_dylib.py'],
      desc='runtime header export scan sees every declaration')
 # `mem='small'` (8 GB), down from `stage` (96) — the single biggest change in
@@ -2735,7 +2735,7 @@ test('prooflib', [PY, '-c',
 #      around the whole composed `Arm64State`, which `bv_decide`'s internal
 #      normalisation cannot be configured out of, and three budgets were
 #      measured failing to fire (`FORMAL.md` §12,
-#      `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md` §1).
+#      `bugs/formal/FORMAL_dylib_export_loops_and_frame_bounds.md` §1).
 #      `formal/arm64_proof_gen.py` now
 #      emits the `if` resolved for every step it knows moves no pc, and keeps
 #      it only for the closing `ret`, which `BlockCert` genuinely cannot
@@ -2983,7 +2983,7 @@ test('formal-x86', [PY, 'test_formal.py', '--backend', 'x86_64'], j=True,
 # `formal/x86_64_endtoend_test.py`'s successor table against a corrected model —
 # and the only report of it was a bug doc. Fixed 2026-10-05
 # (`formal43-x86-endtoend-red`): 26 -> 1, and what is left is `wide_recv`'s
-# `lean::memory_exception`, which `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`
+# `lean::memory_exception`, which `bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`
 # owns and which is a resource ceiling rather than a wrong proof. That doc's own
 # 2026-10-05 Status entry carries this branch's measurement.
 #
@@ -3008,14 +3008,14 @@ test('formal-x86-endtoend', [PY, 'formal/x86_64_endtoend_test.py'],
             'debt line in ' + MEM_DEBT_DOC + ' because the generated proofs are '
             '~700 KB of `native_decide` goals and `mem_read_bytes`\'s `ite` '
             'chain, which is the subject of '
-            '`bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md` '
+            '`bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md` '
             'and not something a class change would fix.',
      expect='1 of 65: `wide_recv` only, and it is a resource ceiling rather '
             'than a wrong proof — `lean` aborts with '
             '`lean::memory_exception: excessive memory consumption detected at '
             '\'interpreter\'` (`rc=-6`) while evaluating this emitter\'s closing '
             'read over a 113-equation chain. See '
-            '`bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`. '
+            '`bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`. '
             'The other 64 are 58 proved with no sorry and 6 proved with a '
             'counted hole; the 28 that build no path tree are reported by the '
             'harness itself (19 loop, 9 uncovered form) and are not cases.',
@@ -3598,7 +3598,7 @@ test('formal-read-before-store', [PY, 'test_formal_read_before_store.py'],
 # another field's word.
 #
 # It was also the one file in the estate that no gate ran at all while
-# `bugs/FORMAL_build_cost_2026-10-03.md` §3.1 rested on it, because
+# `bugs/formal/FORMAL_build_cost_2026-10-03.md` §3.1 rested on it, because
 # `test_suite.py`'s `test_formal_*` FAMILY rule excused it on the cost rule
 # ("minutes of real compilation") — a rule made about the file rather than about
 # its expensive part, since only two of the 26 rows build. The `module table`
@@ -3669,7 +3669,7 @@ test('formal-textwrap', [PY, 'test_formal_textwrap.py'], mem='tiny',
      extra=['test_formal_textwrap.py', 'formal/hostmods/textwrap.mojo',
             'formal/hostmods/os/_syscalls.mojo'] + FORMAL_BUILD_INPUTS,
      desc="textwrap's dedent and indent, diffed against CPython on both backends")
-# The instrument behind `bugs/FORMAL_proof_coverage_census_2026-10-03.md`, and
+# The instrument behind `bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md`, and
 # only the instrument: `tools/formal_proof_breadth.py` takes 60 functions from
 # this repository's own `*.py` through `compile_formal(prove=True, …)` on both
 # architectures and reads Lean's verdict, and its numbers are quoted in a bug doc
@@ -3709,7 +3709,7 @@ test('formal-proof-breadth-tool', [PY, 'test_formal_proof_breadth.py'],
 # `formal` (test_formal.py) prints today's pass/fail against a hand-maintained
 # `EXPECTED_FAILURES` dict and throws the rest away, so a proof that got five
 # times slower, or started admitting holes, or started needing 3 GB, leaves the
-# suite green. `§0.8` of `bugs/FORMAL_proof_coverage_census_2026-10-03.md` is
+# suite green. `§0.8` of `bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md` is
 # the census's own summary and the finding it produced on its first run.
 #
 # Why it is a separate job from `formal` and not folded into it: `formal` runs

@@ -24,7 +24,7 @@ each of them was a SILENT WRONG ANSWER rather than a refusal:
     (“FORMAL_stat_out_parameter_is_unreadable: `isfile` cannot be exact”).
   * `readdir(3)`'s `d_name` is a `char[]` inside a struct the source never
     declares, so there was no name to read and therefore no `listdir`
-    (bugs/FORMAL_listdir_no_run_time_sequence.md — the name half of it).
+    (bugs/formal/FORMAL_listdir_no_run_time_sequence.md — the name half of it).
 
 Why an ORACLE and not a table. Every case here that has a CPython answer is
 checked against CPython running the same computation, and every case that has a
@@ -378,7 +378,7 @@ def main(n):
 # The three shapes above read a blob through the module's own accessors,
 # because that is what it published: `listdir` was declared `-> int` and a
 # caller could do nothing else with the word. That was the half of
-# `bugs/FORMAL_listdir_no_run_time_sequence.md` that was open, and it was a
+# `bugs/formal/FORMAL_listdir_no_run_time_sequence.md` that was open, and it was a
 # KIND and not a representation — the value has been one word pointing at
 # `[count][element]…` since the blob landed. With `-> List[String]` on the
 # declaration the annotation says so across the dylib boundary, and the three
@@ -1382,7 +1382,7 @@ def main(n):
     # Four things are being said at once, and the first is the point of the
     # function existing: the answer is ONE word — a blob's address — carrying
     # BOTH halves of the pair, which is what
-    # `bugs/FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md` §4 called
+    # `bugs/formal/FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md` §4 called
     # "a genuine two-word limit" and is not. The second is that the count word
     # says how many elements the blob has, so a caller reads it by subscript
     # rather than trusting a convention. The third is that the removal happened:

@@ -362,13 +362,13 @@ MIX_MUST_REACH = {
                  "a `def` with no `return` yields a word where CPython yields "
                  "None, so `f() == 0` takes this path's arm and CPython's takes "
                  "the other. This row is only legitimate BECAUSE the mix "
-                 "generates the construct: `bugs/FORMAL_a_function_with_no_"
+                 "generates the construct: `bugs/formal/FORMAL_a_function_with_no_"
                  "return_yields_a_word_where_cpython_yields_None.md` §3 requires "
                  "it (\"a row nothing can trigger is a row that has stopped "
                  "measuring\"), and until this mix existed the minimiser reached "
                  "the class constantly with no way to name it — 21 of the 27 "
                  "`MISMATCH-X86` rows in the `strings` sweep at scale were it "
-                 "(bugs/FORMAL_fuzz_ledger.md §4.11)"),
+                 "(bugs/formal/FORMAL_fuzz_ledger.md §4.11)"),
 }
 
 
@@ -381,7 +381,7 @@ def _check_generation(mix, indexes, verbose):
     a dead row (a row nothing can trigger is a row that has stopped measuring),
     and a mix that stops emitting a construct the backend is now RIGHT about
     leaves a silently smaller corpus, which is the failure
-    `bugs/FORMAL_fuzz_ledger.md` §1 states — "a mix that stops producing a
+    `bugs/formal/FORMAL_fuzz_ledger.md` §1 states — "a mix that stops producing a
     construct reports the same clean tally as one that never produced it".  Only
     the second one has any way of being noticed, and it was `signed`'s, which is
     why it is checked on its own table (`formal_fuzz.MIX_MUST_GENERATE`) rather
@@ -468,7 +468,7 @@ CLASSIFIER_CASES = [
      "MISMATCH-X86"),
     # BOTH refusing is NOT a finding. A construct with no representation is
     # correctly refused, and counting those as bugs would spend the whole
-    # budget on `bugs/FORMAL_known_limits.md`.
+    # budget on `bugs/formal/FORMAL_known_limits.md`.
     ("both_refuse", {"x86_64": {"verdict": "refusal", "diag": "no"},
                      "arm64": {"verdict": "refusal", "diag": "no"}},
      "refusal"),
@@ -752,7 +752,7 @@ def check_audit(verbose):
 #: answers per backend, the blame, the expected `reduced_verdict`).
 #:
 #: The subject is `check_one`'s record, which §4.12 of
-#: `bugs/FORMAL_fuzz_ledger.md` measured against a real 34-finding campaign:
+#: `bugs/formal/FORMAL_fuzz_ledger.md` measured against a real 34-finding campaign:
 #: `want`/`results` are the ORIGINAL program's answers and the file written to
 #: `programs/` is the minimised one, so a reader who takes the reproducer at its
 #: word cannot reproduce the record. Four rows because the record has three
@@ -761,7 +761,7 @@ def check_audit(verbose):
 #: CPython cannot run — and only the first is the one the old code could say.
 #: `None` for the oracle is `cpython_answer`'s "no answer" — a CPython TIMEOUT
 #: and a program CPython REJECTS are now the same shape with different reasons,
-#: which is what §4.14 of `bugs/FORMAL_fuzz_ledger.md` asked for; both have to
+#: which is what §4.14 of `bugs/formal/FORMAL_fuzz_ledger.md` asked for; both have to
 #: survive into the record rather than becoming an empty one.
 RECORD_CASES = (
     ("the reduction_still_reproduces", True, (F.OracleAnswer(0, "1\n"), ""),
@@ -1052,7 +1052,7 @@ def check_reduction_tally(verbose=False):
 def check_oracle_shape(verbose=False):
     """The oracle's return shape cannot be read the wrong way.
 
-    §4.14 of `bugs/FORMAL_fuzz_ledger.md`, and it is a row about a TYPE rather
+    §4.14 of `bugs/formal/FORMAL_fuzz_ledger.md`, and it is a row about a TYPE rather
     than about a value. `cpython_answer` used to return `((exit, stdout),
     stderr)` with the first element being `("error", text)` when CPython rejected
     the program and `None` when it timed out — two non-answers and one answer,
@@ -1147,7 +1147,7 @@ def check_shrink_predicate(verbose=False):
     sweepD 4000-4001 shrank two wrong-number findings into programs CPython
     itself rejects, and the record's new `reduced_verdict` was the only place
     that said so. Five rows: the two kinds of finding against the two kinds of
-    candidate, plus the one §4.13 of `bugs/FORMAL_fuzz_ledger.md` is about.
+    candidate, plus the one §4.13 of `bugs/formal/FORMAL_fuzz_ledger.md` is about.
     """
     import tempfile
 
@@ -1207,7 +1207,7 @@ def check_shrink_predicate(verbose=False):
     check("a_refusal_finding_keeps_a_refusal",
           {"x86_64": ("refusal", "build: 's' is a String receiver ...")},
           refused, "", True)
-    # §4.13 of `bugs/FORMAL_fuzz_ledger.md`, pinned here because the predicate is
+    # §4.13 of `bugs/formal/FORMAL_fuzz_ledger.md`, pinned here because the predicate is
     # what it is about: a candidate CPython REJECTS is not a reduction of
     # anything, whatever the image does with it. The oracle being `None` is the
     # only thing that stops the comparison, and `oracle=` above is how the two

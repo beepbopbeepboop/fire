@@ -11,7 +11,7 @@ fallthrough, so no single
 
     arm64_reg r <block> = 0 ↔ ¬(<source condition>)
 
-describes it, and `bugs/FORMAL_arm64_known_proof_gaps.md` recorded the
+describes it, and `bugs/formal/FORMAL_arm64_known_proof_gaps.md` recorded the
 per-path statement as not expressible.  Three things were wrong about
 it, and each is a separate defect this file pins:
 
@@ -70,7 +70,7 @@ PROGRAMS = {
 }
 
 # A chain NESTED inside a chain is a separate, recorded gap: see
-# bugs/FORMAL_nested_short_circuit_chain_in_a_condition.md.  `((a or b) or c)`
+# bugs/formal/FORMAL_nested_short_circuit_chain_in_a_condition.md.  `((a or b) or c)`
 # gives the outer merge FOUR entry paths, each with a different cset having
 # written the register, so the two-path statement this file is about does not
 # reach it.  It is listed here so the boundary is a test rather than a comment.
@@ -91,7 +91,7 @@ KNOWN_GAP = {
                   "        return 1\n"
                   "    else:\n"
                   "        return 0\n",
-                  "bugs/FORMAL_nested_short_circuit_chain_in_a_condition.md: "
+                  "bugs/formal/FORMAL_nested_short_circuit_chain_in_a_condition.md: "
                   "the MACHINE half. The merge statement's right-hand side is a "
                   "nested chain's VALUE, and `simp [h]` cannot split the `Or`, so "
                   "the operand that did not write the register is unconstrained "
@@ -117,7 +117,7 @@ def _model_only(proof_path):
     the model bridge names anything the machine half defines.  So the honest way
     to check it for a program whose machine half does not typecheck (which
     `nested_or` does not, and `either`/`both` do not either — Lean's kernel
-    refuses them, see `bugs/FORMAL_a_generated_proof_over_leans_memory_ceiling_is_
+    refuses them, see `bugs/formal/FORMAL_a_generated_proof_over_leans_memory_ceiling_is_
     rejected.md`) is to cut the file at the next top-level declaration after the
     theorem and check that.
 
@@ -529,7 +529,7 @@ class TestLeanModelBridge(unittest.TestCase):
 
     Separate from `TestLean` for the reason `_model_only` gives: the machine
     half of every short-circuit proof is currently over Lean's memory ceiling
-    (`bugs/FORMAL_a_generated_proof_over_leans_memory_ceiling_is_rejected.md`,
+    (`bugs/formal/FORMAL_a_generated_proof_over_leans_memory_ceiling_is_rejected.md`,
     measured 2026-10-05 at 13.6 GB peak for `either`), so a `TestLean` row for
     the nested chain would be reporting the ceiling and not the construct.  The
     model bridge does not depend on any of it, so it is checked on its own and

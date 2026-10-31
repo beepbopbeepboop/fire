@@ -1236,7 +1236,7 @@ dylib_exports: list = None, globals_base: int = None,
             # in `info` for both proof generators to read, because the word an
             # unwinder writes on one side has to mean the same integer on the
             # other (`model.exception_kind_table`'s docstring). Nothing reads it
-            # yet — see `bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md`
+            # yet — see `bugs/formal/FORMAL_a_try_handler_arm_is_still_never_emitted.md`
             # §5, where this is step 2 of 6. `info` rather than a re-derivation
             # here is the point: x86-64's `info` carries the same table from the
             # same publisher, so a proof that reads one cannot drift from the
@@ -1426,7 +1426,7 @@ dylib_exports: list = None, globals_base: int = None,
         # `SP + k` is INSIDE it and a method that writes its receiver does not
         # satisfy `FrameOk` — which is why the callee contract for a method is
         # `Refine.FrameOk_except`, the predicate
-        # `bugs/FORMAL_wide_receiver_by_reference.md` lands for exactly this.
+        # `bugs/formal/FORMAL_wide_receiver_by_reference.md` lands for exactly this.
         # The layout itself is `formal/model.py`'s, so the x86-64 backend
         # reserves the same bytes in the same order.
         self._frame_sites = M.struct_constructor_sites(f, self._structs)
@@ -1760,7 +1760,7 @@ dylib_exports: list = None, globals_base: int = None,
         # right about the ABI and wrong about the consequence: `pack(fmt, v0..v7)`
         # is nine arguments, and it is `formal/hostmods/struct.mojo`'s OWN
         # documented "a format I cannot serve returns an empty list" contract
-        # that the caller could never reach.  `bugs/FORMAL_struct_pack_over_eight_
+        # that the caller could never reach.  `bugs/formal/FORMAL_struct_pack_over_eight_
         # arguments.md` has the measurement and both halves of the mechanism.
         for i, (pname, ptype) in enumerate(incoming):
             if i >= _ABI_ARG_REGS:
@@ -6100,7 +6100,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         shared text, so x86-64 cannot describe the same construct differently,
         and both backends ask it at BOTH comparison sites (`_emit_binop` for a
         value and `_emit_branch_unless_cmp` for a condition) — the choke-point
-        argument `bugs/FORMAL_string_value_model.md` makes for `if s < t:`
+        argument `bugs/formal/FORMAL_string_value_model.md` makes for `if s < t:`
         bypassing `_emit_binop`, which is exactly how a string comparison came
         to be a diagnostic in one context and a branch in the other.
         """
@@ -7052,7 +7052,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         **Two lines of delegation**, and `M.print_kwargs`'s docstring is where
         the decision and its reasons are: `flush=` is answered there (the
         largest `codegen-refused` family in this repository's own source, per
-        `bugs/FORMAL_proof_coverage_census_2026-10-03.md` §0.2), and the rule
+        `bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md` §0.2), and the rule
         that the keyword is dispatched BEFORE its value is inspected is what
         stops a bool from being refused with a sentence about `sep`."""
         return M.print_kwargs(e, "arm64")
@@ -7112,7 +7112,7 @@ ctor_field_value=self._ctor_field_value_for(name),
     # computes CPython's spelling lives at `M.FLOAT_REPR_SYMBOL` — and this
     # method pair is the ARM half of the branch and the buffer, the machine
     # part only this backend can spell. The algorithm is the validated one
-    # (`bugs/FORMAL_a_float_has_no_print_spelling.md`'s next step): the
+    # (`bugs/formal/FORMAL_a_float_has_no_print_spelling.md`'s next step): the
     # specials from the bits, then `%.*g` at the smallest precision n that
     # parses back to the same 64 bits (a `snprintf`/`strtod` round trip),
     # laid out in CPython's own notation — scientific iff E >= 16 or
@@ -7905,7 +7905,7 @@ ctor_field_value=self._ctor_field_value_for(name),
     # emitter is allowed to choose, and that is the entire point: the pre-change
     # tree could only have emitted an 8-byte load, which over-reads a `UInt8`
     # pointee by seven bytes and faults at a page edge (see the measurement in
-    # `bugs/FORMAL_pointer_value_model.md`).
+    # `bugs/formal/FORMAL_pointer_value_model.md`).
     #
     # The two answers and the two instructions:
     #
@@ -8757,7 +8757,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         which is another C library call (`__error`) and therefore another
         unfollowable call in a block the proof framework has to cross — so the
         foldable case is refused here, precisely, and the rest is
-        `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`.
+        `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`.
         """
         reason = M.int_parse_overflow_refusal(
             M.fold_literal_expr(text_expr), base)
@@ -9351,7 +9351,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             # a wrapped number or a status code. The run-time half — the same
             # predicate over a value the build cannot know — is emitted by
             # `_emit_int_alu_checked`, which is wired up but not yet reachable;
-            # `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`
+            # `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`
             # says why and what it needs.
             if M.int_overflow_traps(op, result_t, pointer_arith=bool(scale)):
                 reason = M.fold_overflow(op, e.left, e.right, result_t,
@@ -11398,7 +11398,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             # `struct Outer: n: Inner` with `o.n.d.x = 5` built, ran and died of
             # SIGSEGV (exit 139), while the depth-1 and depth-2 reads of the same
             # three structs answered correctly.
-            # `bugs/FORMAL_a_one_field_struct_whose_only_field_is_a_nested_
+            # `bugs/formal/FORMAL_a_one_field_struct_whose_only_field_is_a_nested_
             # frame.md` §2 has the disassembly.
             #
             # AFTER the defaults above, not before: the slot this stores into is
@@ -11635,7 +11635,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             # lives. `value_callee_can_hold_a_function` above reads the
             # DECLARATION; this reads the FLOW, and neither can see the other:
             # a local bound to `17` has no annotation to refuse on, and
-            # `bugs/FORMAL_function_value_calls_are_not_proved_to_be_calls.md`
+            # `bugs/formal/FORMAL_function_value_calls_are_not_proved_to_be_calls.md`
             # is the doc for what is left when neither has an answer.
             holds = M.callee_word_is_not_an_address(
                 self._cur_fn, name, self._vkinds)
@@ -13131,7 +13131,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             #
             # Both are decidable when the AMOUNT is a literal and the BASE is
             # not, and precisely decidable when both are; the variable-base case
-            # is `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`.
+            # is `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`.
             reason = M.shift_overflow_refusal(
                 op, M.fold_literal_expr(e.right), M.fold_literal_expr(e.left),
                 [e.left, e.right])
@@ -13227,7 +13227,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             #
             # All three are decidable here whenever both operands fold, which
             # is the case the corpus and a reader hit first. The variable-base
-            # case is `bugs/FORMAL_integer_overflow_at_run_time_is_still_
+            # case is `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_
             # untrapped.md`.
             reason = M.power_overflow_refusal(
                 M.fold_literal_expr(e.left), M.fold_literal_expr(exp),
@@ -14646,14 +14646,14 @@ ctor_field_value=self._ctor_field_value_for(name),
 
         `base_reg` points at the blob's COUNT word, so the elements start at
         `base_reg + 8` and each element is one 8-byte word -- a set lowers as a
-        list of words on this path (`bugs/FORMAL_set_value_model.md`).  This is
+        list of words on this path (`bugs/formal/FORMAL_set_value_model.md`).  This is
         the linear scan `_emit_set_op` runs per element of the other operand,
         lifted out so `&`, `-`, `^` and `|` share one implementation rather
         than four copies of the same loop.
 
         The comparison is element WORD to element WORD, which for a set of
         strings is a comparison of `char *` ADDRESSES; that is the same limit
-        the union's dedup always had, and `bugs/FORMAL_set_value_model.md`
+        the union's dedup always had, and `bugs/formal/FORMAL_set_value_model.md`
         owns it.
 
         Clobbers X10/X11/X12 and `out_reg`; X0-X9 and the caller's registers
@@ -14730,7 +14730,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         The scan is over `other[0..other_n)`, and the element is read as a whole
         8-byte slot, which is `_emit_set_union`'s dedup compare and the same
         thing CPython means by membership here — a set lowers as a list on this
-        path (`bugs/FORMAL_set_value_model.md`), so the elements are words and
+        path (`bugs/formal/FORMAL_set_value_model.md`), so the elements are words and
         the compare is a word compare."""
         self.asm.emit(encode_movz_wd_imm(5, 0))          # i = 0
         self._while_counter += 1

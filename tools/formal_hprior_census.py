@@ -8,7 +8,7 @@ those are identical?") is about the generator's OUTPUT, so the output is the
 artefact and reading it is cheaper and more exact than reasoning about the
 generator.
 
-**Why it exists.** `bugs/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md`
+**Why it exists.** `bugs/formal/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md`
 measured the growth and named ONE family as the cause: "`hprior` is the only row
 that grows faster than 2x per branch". That is true and it is not sufficient,
 which is what this tool shows. Every per-path block local grows 2x per branch

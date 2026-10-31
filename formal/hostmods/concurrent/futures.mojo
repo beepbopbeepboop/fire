@@ -27,7 +27,7 @@ WHAT IS ADMITTED, AND WHY IT IS EXACTLY TWO CALLS
 --------------------------------------------------
   * `executor_submit` — submitting a callable to a pool.  The callable is a
     Python function object, which is a thing this path cannot name
-    (`bugs/FORMAL_module_state_no_storage.md`), and the pool is a set of threads,
+    (`bugs/formal/FORMAL_module_state_no_storage.md`), and the pool is a set of threads,
     which is a thing this image does not have.
   * `executor_shutdown` — joining the pool's threads.
 
@@ -165,7 +165,7 @@ def executor_submit(callable_word: int) -> int:
 
     The parameter is the CALLABLE as a word.  A Python function is an object with
     a code pointer, a closure cell and a globals dictionary
-    (`bugs/FORMAL_module_state_no_storage.md`), so what crosses here is the
+    (`bugs/formal/FORMAL_module_state_no_storage.md`), so what crosses here is the
     ADDRESS, and the contract says the answer is one word without saying anything
     about what running that address computes.
 

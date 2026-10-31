@@ -27,7 +27,7 @@ WHAT IS NOT HERE, AND WHY
 -------------------------
   * `wrap` — a SEQUENCE. It answers a list of strings, and a list on this path
     lives in the frame of the function that made it and cannot cross a dylib
-    boundary (`bugs/FORMAL_listdir_no_run_time_sequence.md`). This is the same
+    boundary (`bugs/formal/FORMAL_listdir_no_run_time_sequence.md`). This is the same
     reason `fnmatch.filter` is absent from `fnmatch.mojo`.
   * `fill` — the same shape one step later: `fill` is `wrap`'s answer joined
     by newlines, so it is answerable, and it is absent because NOTHING on this
@@ -44,7 +44,7 @@ WHAT IS NOT HERE, AND WHY
     It is `fill` plus a word count, so it inherits `fill`'s absence; and
     `TextWrapper` is an object with nine pieces of mutable configuration, which
     is at least nine words where a value on this path is one
-    (`formal/model.py`; `bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`
+    (`formal/model.py`; `bugs/formal/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`
     is the measurement, and it is `collections`' and `copy`'s
     blocker too). Note the consequence honestly: `wrap`/`fill` being ABSENT
     means the absent `TextWrapper` costs nothing extra, because nothing that

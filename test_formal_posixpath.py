@@ -361,7 +361,7 @@ def _emit(lines, k, call, kind, nparts):
     """The Mojo lines that evaluate one case and print it. How many records.
 
     `%lld` and not `%d` for the case NUMBER because a `%d` conversion is 32 bits
-    wide on this path (`bugs/FORMAL_string_value_model.md` §2) and the corpus
+    wide on this path (`bugs/formal/FORMAL_string_value_model.md` §2) and the corpus
     runs to 484 cases — which is worth saying because the first version of
     this file printed it with `%d`.
 
@@ -774,7 +774,7 @@ def group_constants(tmpdir, verbose):
     check(not bad, f"{len(bad)} constant(s) differ from CPython" + detail)
     # And the spelling: the ATTRIBUTE is refused, naming itself, because
     # `None`-like module state has no representation on this path
-    # (`bugs/FORMAL_module_state_no_storage.md`).
+    # (`bugs/formal/FORMAL_module_state_no_storage.md`).
     src = ("import posixpath\n\ndef main():\n"
            "    printf(\"[%s]\\n\", posixpath.sep)\n")
     tmp = os.path.join(TEMP, "attr.mojo")

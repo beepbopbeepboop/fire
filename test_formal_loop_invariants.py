@@ -156,7 +156,7 @@ def test_every_program_answers_cpython_on_both_architectures(tmpdir):
     tidiness: running an arm64 image under `arch -x86_64` reports Rosetta's
     `Bad CPU type in executable` (exit 1) as the program's answer, and a table
     of confident wrong numbers is what that produces
-    (`bugs/FORMAL_sweep_work_map.md`'s `b14` round, §7, records the hour it
+    (`bugs/formal/FORMAL_sweep_work_map.md`'s `b14` round, §7, records the hour it
     cost that map's author).
     """
     for stem in programs():

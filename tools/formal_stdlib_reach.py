@@ -11,7 +11,7 @@
     python3 tools/memslot.py --gb 8 --label reach -- \
       python3 tools/formal_stdlib_reach.py --check     # non-zero if a row is stale
 
-**This is the measurement `bugs/FORMAL_stdlib_module_names_are_not_classified.md`
+**This is the measurement `bugs/formal/FORMAL_stdlib_module_names_are_not_classified.md`
 §0.3 promised for the 216-name queue, run and recorded.** That section's next
 step says a name whose spec CPython cannot find here is `unreachable` by the
 rule, "and a name whose spec it can is `modelled` unless the content is not
@@ -204,7 +204,7 @@ def check():
 
     What is deliberately NOT checked: whether a name with a spec and no library
     outside libSystem should be `modelled`. That is the judgement
-    `bugs/FORMAL_stdlib_module_names_are_not_classified.md` leaves open, and the
+    `bugs/formal/FORMAL_stdlib_module_names_are_not_classified.md` leaves open, and the
     reason it is not machine-decidable is in that doc's §0.5 — measured over the
     whole stdlib with three named mechanisms, none of which is a bug in this
     tool.

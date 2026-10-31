@@ -33,7 +33,7 @@ compile-time transform rather than a `formal/hostmods/dataclasses.mojo`).
 
 **Deliberately not here.** `fields()` / `is_dataclass()` / `asdict()` /
 `replace()` — the runtime reflection half. They are refused by name, and
-`bugs/FORMAL_dataclass_runtime_reflection.md` records why they cannot be
+`bugs/formal/FORMAL_dataclass_runtime_reflection.md` records why they cannot be
 implemented at all on this path (a value is one 64-bit word with no type tag)
 and what the next step would be. Pinning "it is refused, with this reason" is
 in scope; making it work is a different project.
