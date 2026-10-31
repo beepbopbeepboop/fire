@@ -5723,7 +5723,14 @@ class Interpreter:
         elif op == '/':
             if isinstance(left, (str, MojoString)) and isinstance(right, (str, MojoString)):
                 return MojoString(os.path.join(str(left), str(right)))
-            return left / right
+            # `_wrap_int` like every other arithmetic op above: a bare
+            # `return left / right` emits `mojo_div_double` (double) into a
+            # return slot the str branch types as `MojoString *` — gcc:
+            # "makes pointer from ... double" (no double->pointer cast under
+            # -fgimple). `_wrap_int` is a @staticmethod identity for non-int
+            # (a `/` result is a float), so Python semantics are unchanged —
+            # it only gives codegen a call whose result it can type as a word.
+            return self._wrap_int(left / right)
         elif op == '//': return left // right
         elif op == '%': return left % right
         elif op == '**': return self._wrap_int(left ** right)

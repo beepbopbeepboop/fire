@@ -2316,6 +2316,9 @@ def _sce_simple_emit(gen, dest: str, v: str, s: str, d: str) -> None:
         filename = getattr(gen, '_current_filename', '') or '<unknown>'
         line = getattr(gen, '_current_line', None)
         loc = f'{filename}:{line}' if line else filename
+        _fn = getattr(gen, 'current_func_name', None)
+        if _fn:
+            loc = f'{loc} in function `{_fn}`'
         raise TypeError(
             f'cannot coerce {s} to {d} (incompatible container kinds) '
             f'at {loc}: value={v!r} dest={dest!r}')

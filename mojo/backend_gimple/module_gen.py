@@ -1299,7 +1299,12 @@ REPR_CLUSTER_NAMES = (
 # a transitively-imported module is compiled with `emit_struct_defs=False` and
 # still calls these) plus the fifth only the `emit_struct_defs` module gets
 # (`_emit_reflection_fwd_decls`, which runs before the imported modules' code is
-# spliced in). Exact equality with a `parts` entry is how the gate finds them:
+# spliced in) and the sixth, `_mojo_repr_set`: a `repr(<set>)` call site names
+# it DIRECTLY (emit_infra/emit_resolve lower it to `_mojo_repr_set`), so a call
+# before the definition block needs this prototype — without it gcc's
+# implicit-declaration fallback made it `int()` and the later `char *`
+# definition was a hard conflicting-types error in the self-hosted TU.
+# Exact equality with a `parts` entry is how the gate finds them:
 # a part that is one of these strings IS a cluster declaration and nothing else
 # can be.
 REPR_CLUSTER_DECLS = (
@@ -1308,6 +1313,7 @@ REPR_CLUSTER_DECLS = (
     'static char * _mojo_repr_dict (MojoDict *);',
     'static char * _mojo_generic_elem_repr (int64_t);',
     'static char * _mojo_repr_pair (MojoList *);',
+    'static char * _mojo_repr_set (MojoSet *);',
 )
 # The single `parts` entry that carries all six definitions, recognised by its
 # first line. `_emit_reflection_dispatch` builds the block as ONE append, so one
@@ -7702,7 +7708,20 @@ def gen_module_impl(self, stmts):
                         self._struct_init_defaults[s.name] = _sid_dict
                     if m.return_type is None:
                         _mangled_key = f"{s.name}_{m.name}"
-                        for i, (pname, ptype) in enumerate(m.params):
+                        # Index, don't unpack: `for i, (pname, ptype) in
+                        # enumerate(m.params):` boxes each tuple element to a
+                        # typed `mojo_list_get_str` (char*) while the hoisted
+                        # `ptype` is int64_t (inferred from its arg-use) — gcc:
+                        # "makes integer from pointer without a cast". The
+                        # `_p1_params` loop earlier in this pass already uses
+                        # the indexed form; mirror it: subscript reads emit a
+                        # word read + cast to each target's declared kind.
+                        # `pname` is _as_str'd (it feeds `==` / dict-set-str);
+                        # `ptype` stays a word (it feeds `_resolve_type`).
+                        _p21_params = m.params
+                        for i in range(len(_p21_params)):
+                            pname = _as_str(_p21_params[i][0])
+                            ptype = _p21_params[i][1]
                             if pname == 'self':
                                 self.var_types[pname] = f"{s.name} *"
                             elif (i == 0 and pname == 'cls'
@@ -8881,7 +8900,16 @@ def gen_module_impl(self, stmts):
                     self.func_param_types[method_full_name] = self._signature_ctypes(m.params, m, s.name)
                 else:
                     param_ctypes = []
-                    for i, (pname, ptype) in enumerate(m.params):
+                    # Index, don't unpack: `for i, (pname, ptype) in
+                    # enumerate(m.params)` boxes each tuple element to a typed
+                    # `mojo_list_get_str` (char *) while the hoisted `ptype` is
+                    # int64_t (gcc: "assignment to 'int64_t' from 'char *'").
+                    # The same fix as the `_p21_params` loop above; `pname`
+                    # is `_as_str`'d, `ptype` stays a word.
+                    _p22_params = m.params
+                    for i in range(len(_p22_params)):
+                        pname = _as_str(_p22_params[i][0])
+                        ptype = _p22_params[i][1]
                         if pname.startswith('**'):
                             continue  # skip **kwargs
                         if pname == 'self':
@@ -10705,10 +10733,18 @@ def gen_module_impl(self, stmts):
                         _all_struct_ptr = False
                         break
                 if _all_struct_ptr:
-                    _names = ', '.join(sorted(str(_t) for _t in types))
+                    # `_polym_names`, NOT `_names`: the name `_names` is also
+                    # bound to a SET elsewhere in this function (`_names =
+                    # set()`), so the hoisted declaration is `MojoSet *` —
+                    # assigning the join's char* into it, and the f-string's
+                    # `_mojo_repr_set(_names)`, both mis-type (gcc: implicit
+                    # decl + conflicting types). A fresh name sidesteps the
+                    # collision (the value here genuinely IS a str, so a
+                    # rename is the surgical fix, unlike D1/D3's rewrites).
+                    _polym_names = ', '.join(sorted(str(_t) for _t in types))
                     raise RuntimeError(
                         f"polymorphic struct parameter {pname!r} in {callee!r} "
-                        f"used as method receiver: types {_names} have no single "
+                        f"used as method receiver: types {_polym_names} have no single "
                         f"C signature; fall back to interpreted execution")
                 continue
             # `sorted(...)` + index, NOT `next(iter(...))`: iterating a
@@ -16141,10 +16177,15 @@ def gen_module_impl(self, stmts):
     parts.append("static int _mojo_dispatch_is_dataclass (void *);")
     parts.append("static int64_t _mojo_dispatch_shallow_copy (void *);")
     # The FOUR the ungated path needs, which is `REPR_CLUSTER_DECLS` without
-    # `_mojo_repr_pair` — the one member no generated call site names directly,
-    # so only the `emit_struct_defs` module's `_emit_reflection_fwd_decls` pass
-    # declares it. Sliced off the shared table rather than respelled, so the
-    # gate's table and this emission cannot drift.
+    # `_mojo_repr_pair` and `_mojo_repr_set`. Pair is the member no generated
+    # call site names directly, so only the `emit_struct_defs` module's
+    # `_emit_reflection_fwd_decls` pass declares it. Set IS named directly by
+    # a `repr(<set>)` call site, but every such site in a whole-program TU
+    # comes after the `emit_struct_defs` module's forward-declaration block
+    # (emitted at the top of the unit, before the imported modules' code is
+    # spliced in), so the ungated path gets its prototype from there too —
+    # the same way pair does. Sliced off the shared table rather than
+    # respelled, so the gate's table and this emission cannot drift.
     parts.extend(REPR_CLUSTER_DECLS[:4])
     if 'type_name_table' in self._emitted_singletons:
         parts.append("static char * _mojo_type_name (int64_t);")
@@ -16194,7 +16235,19 @@ def gen_module_impl(self, stmts):
             ptypes_list = []
             if ci.env_struct:
                 ptypes_list.append(f"{ci.env_struct} *")
-            for i, (pn, pt) in enumerate(node.params):
+            # Index, don't unpack: `for i, (pn, pt) in enumerate(node.params):`
+            # boxes each tuple element to a typed `mojo_list_get_str` (char*)
+            # while the hoisted `pn`/`pt` shadows are int64_t — gcc: "makes
+            # integer from pointer without a cast". Subscript reads emit a word
+            # read + cast to each target's declared kind. `pn`/`pt` stay plain
+            # words (NO _as_str): `pn` feeds `mojo_dict_contains_kw` /
+            # `mojo_dict_get_int_kw` (int64_t kw) and `_param_ctype` (which does
+            # `mojo_cstr_or_int_str` internally) — exactly the word the working
+            # forward-declaration loop's flat unpack produces.
+            _lp2_params = node.params
+            for i in range(len(_lp2_params)):
+                pn = _lp2_params[i][0]
+                pt = _lp2_params[i][1]
                 if ci.is_re_sub_callback and i == 0:
                     ptypes_list.append('char *')
                 elif pn in ci.inferred_params:
