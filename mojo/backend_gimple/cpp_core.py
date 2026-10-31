@@ -1616,9 +1616,9 @@ def _cpp_dyn_call_expr(gen, e):
     return ("[&]() { struct _W { int64_t w; "
             "operator int64_t() const { return w; } "
             "operator char *() const { return (char *)w; } "
-            "operator MojoList *() const { return (MojoList *)w; } "
-            "operator MojoDict *() const { return (MojoDict *)w; } "
-            "operator MojoSet *() const { return (MojoSet *)w; } }; "
+            + ''.join(gen._cpp_word_container_operator(_k, False) + ' '
+                      for _k in ('MojoList', 'MojoDict', 'MojoSet'))
+            + "}; "
             "MojoList *_a = mojo_list_new(); MojoDict *_k = mojo_dict_new(); "
             + ''.join(parts)
             + f"return _W{{mojo_dyn_call((int64_t)(intptr_t)({_cpp_fname}), _a, _k)}}; }}()")
@@ -3070,7 +3070,7 @@ def _cpp_expr(gen, e) -> str:
                     # then `entries.append(entry)`): the list methods apply to the
                     # pointer behind it
                     _cont_ct = 'MojoList *'
-                    _cont_ref = f"((MojoList *)(intptr_t){_cont_name})"
+                    _cont_ref = f"({gen._cpp_container_cast_prefix('MojoList', True)}{_cont_name})"
                 if (_cont_ct == 'MojoList *' and e.func.member == 'pop'
                         and len(e.args) <= 1):
                     # `<list-local>.pop()` / `.pop(i)` -- returns the raw
@@ -3956,7 +3956,8 @@ def _cpp_expr(gen, e) -> str:
                 return ("[&]() { struct _W { int64_t w; "
                         "operator int64_t() const { return w; } "
                         "operator char *() const { return (char *)w; } "
-                        "operator MojoList *() const { return (MojoList *)w; } }; "
+                        + gen._cpp_word_container_operator('MojoList', False)
+                        + " }; "
                         "return _W{(int64_t)(intptr_t)mojo_list_copy("
                         f"mojo_iter_word((int64_t)(intptr_t)({args[0]})))}}; }}()")
             if fname == 'enumerate' and not gen._locally_binds_name('enumerate'):
@@ -4865,10 +4866,10 @@ def _cpp_expr(gen, e) -> str:
             _st0 = start if e.start is not None else '0'
             _sp0 = stop if e.stop is not None else '0'
             if _sct == 'MojoList *':
-                return (f"mojo_list_slice_step((MojoList *)({gen._cpp_expr(_sx)}), {_hs}, "
+                return (f"mojo_list_slice_step({gen._cpp_container_cast_prefix('MojoList', False)}({gen._cpp_expr(_sx)}), {_hs}, "
                         f"(int64_t)({_st0}), {_he}, (int64_t)({_sp0}), (int64_t)({step}))")
             if _sct == 'int64_t':
-                return (f"(MojoList *)(intptr_t)mojo_word_slice_step((int64_t)({gen._cpp_expr(_sx)}), "
+                return (f"{gen._cpp_container_cast_prefix('MojoList', True)}mojo_word_slice_step((int64_t)({gen._cpp_expr(_sx)}), "
                         f"{_hs}, (int64_t)({_st0}), {_he}, (int64_t)({_sp0}), (int64_t)({step}))")
             return f"({start}, {stop}, {step})"
         # Python `s[i:j]` on a string (this emitter's `char *`) → the
@@ -5333,7 +5334,7 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 # `if isinstance(x, tuple): yield x` where `x` is the boxed
                 # word a heterogeneous `pop()` produced: the promise slot is
                 # a `MojoList *` (the tuple), so narrow the word to it.
-                return [f"{indent}co_yield (MojoList *)(intptr_t)({gen._cpp_expr(s.value.value)});"]
+                return [f"{indent}co_yield {gen._cpp_container_cast_prefix('MojoList', True)}({gen._cpp_expr(s.value.value)});"]
             # Mark the site with its static ctype: if the generator's yields turn
             # out to be of different known scalar kinds, `_gen_cpp_generator_unit`
             # boxes each site by this marker (a TAGGED-word value slot);

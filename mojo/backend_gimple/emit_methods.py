@@ -1620,7 +1620,7 @@ def _lower_re_dynamic_call(gen, node, recv, method):
         gen._void_call('mojo_list_append_int', [('MojoList *', lst), ('int64_t', w)])
     for _kn, _kv in (getattr(node, 'kwargs', None) or []):
         gen.lower_expr(_kv)
-    kw = gen._new_val('MojoDict *', '(MojoDict *)0')
+    kw = gen._new_val('MojoDict *', gen._container_null('MojoDict'))
     r = gen._call_expr('int64_t', 'mojo_re_call',
                        [('int64_t', gen._to_int64('int64_t', recv)),
                         ('char *', gen._intern_string(_as_str(method))),
@@ -1678,7 +1678,7 @@ def _lower_re_module_call(gen, node, method):
     if method == 'findall':
         lst = gen._call_expr('MojoList *', 'mojo_list_new', [])
         gen._void_call('mojo_list_append_int', [('MojoList *', lst), ('int64_t', sw_word)])
-        kw = gen._new_val('MojoDict *', '(MojoDict *)0')
+        kw = gen._new_val('MojoDict *', gen._container_null('MojoDict'))
         r = gen._call_expr('int64_t', 'mojo_re_call',
                            [('int64_t', h), ('char *', gen._intern_string('findall')),
                             ('MojoList *', lst), ('MojoDict *', kw)])

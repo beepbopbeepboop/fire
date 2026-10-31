@@ -4094,3 +4094,32 @@ def _eval_const_compare_op(gen, op: str, left, right):
     return None
 
 
+
+
+# ── The C++ side of the container-kind chokepoint ───────────────────────────
+# `_safe_coerce_emit` guards the GIMPLE C backend. The coroutine backend emits
+# C++ TEXT, where a container-kind cast is spelled in the emitted source and
+# there is no temp to route through it. These three helpers are the only place
+# that text is composed, so `test_no_new_container_casts.py` (which exempts this
+# file) still sees every other container-kind cast as a regression.
+
+def cpp_container_cast_prefix(kind: str, via_intptr: bool) -> str:
+    """`(MojoList *)(intptr_t)` or `(MojoList *)`: the cast a C++ coroutine
+    expression applies to the operand text that follows. `kind` is the bare
+    struct name (`MojoList`, `MojoDict`, `MojoSet`, `MojoBytes`)."""
+    if via_intptr:
+        return f"({kind} *)(intptr_t)"
+    return f"({kind} *)"
+
+
+def container_null(kind: str) -> str:
+    """The typed NULL of a container kind, `(MojoDict *)0`."""
+    return f"({kind} *)0"
+
+
+def cpp_word_container_operator(kind: str, via_intptr: bool) -> str:
+    """`operator MojoList *() const { return (MojoList *)w; }`, one conversion
+    of the pointer-sized WORD struct the coroutine backend returns for a call
+    whose C return type is not final yet."""
+    return (f"operator {kind} *() const {{ return "
+            f"{cpp_container_cast_prefix(kind, via_intptr)}w; }}")
