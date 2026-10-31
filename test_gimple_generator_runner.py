@@ -6827,6 +6827,25 @@ def main():
 main()
 """, "/tmp/x\n/tmp/y\nTrue\nFalse\n")
 
+    # A generator METHOD of a class defined INSIDE a function, yielding the
+    # str / str|None / None 4-tuples `string.Formatter.parse` yields
+    # (Lib/test/test_string/test_string.py's `BarFormatter` in
+    # `test_override_parse`). The class never reaches top-level struct
+    # registration, and this used to refuse the whole module.
+    test_generator_stdout("generator_method_of_function_nested_class_yields_str_none_tuples", """\
+def test():
+    class BarFormatter:
+        def parse(self, format_string):
+            yield ('', format_string, None, None)
+            yield ('x', 'y', 'z', None)
+
+    f = BarFormatter()
+    for t in f.parse("abc"):
+        print(t)
+
+test()
+""", "('', 'abc', None, None)\n('x', 'y', 'z', None)\n")
+
     test_generator_stdout("generator_enumerate_index_yields_index", """\
 def rows(data):
     for i, r in enumerate(data):
