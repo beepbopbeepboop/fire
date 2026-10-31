@@ -561,3 +561,4 @@ elaboration aborts at the error — §2 says this and it cost that pass an hour
 before it was noticed. And `maxHeartbeats` accumulates over the whole
 declaration, so lowering it names a tactic that merely ran out of budget on a
 cumulative count, not the one that is expensive.
+
