@@ -584,6 +584,7 @@ def pick_slot(item, busy):
     return next((x for x in order if slot_free(x, busy)), None)
 
 
+FORMAL_LANE = ("formal",)   # task-name prefixes that belong to the owner's FORMAL lane, never dispatched here
 CLASSES = ("easy", "mid", "hard")   # the work classes, weakest model first; a slot without a class is easy
 
 
@@ -623,6 +624,9 @@ def cmd_refill(a):
     items = sorted(items_all, key=lambda i: i["added"])
     started = 0
     items = [i for i in items if i["name"].startswith(tuple(a.prefix.split(",")))]
+    # The FORMAL lane is the owner's: its Qwen runs formal* tasks by hand, and the swarm never starts one, on any slot
+    # (2026-10-31: queued formal tasks were started on haiku, which is paid and not for the formal lane).
+    items = [i for i in items if not i["name"].startswith(FORMAL_LANE)]
     for it in items:
         if live + started >= a.target and not it["name"].startswith("fix-landed"):
             continue                      # a red master is repaired at once, whatever the slot count
