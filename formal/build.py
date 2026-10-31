@@ -23,10 +23,12 @@ architecture: formal.arm64_proof_gen and formal.x86_64_proof_gen.
 """
 
 import copy
+import functools
 import os
 import re
 import subprocess
 import sys
+import threading
 from types import SimpleNamespace
 
 import fire_compiler as F
@@ -1885,6 +1887,32 @@ def cas_dir() -> str:
     return cas.CAS_DIR
 
 
+# Every in-process entry into the compiler is serialised behind ONE lock, and
+# this is the recorded choice between this module's two reentrancy fixes:
+# per-build state (a context object threaded through every reader of the
+# module-level tables below) is the production answer, and this lock is the
+# smaller change until the state is per-build. A build is not safe to start
+# while another build is running in the same process: both read and write the
+# module-level constant and home tables this file keeps (measured: a process
+# that had just built a program with `LIMIT` at module level reported
+# `'LIMIT' has no home: the register allocator collected no home for it` for
+# the NEXT program in it), and the libsystem audit they both end in reads the
+# handle `model._libsystem_handle` publishes. `compile_formal_dylib` is not
+# wrapped: the tools that call it directly build in their own process, and on
+# the executable path it is nested inside `compile_formal` (through
+# `build_module_dylib`), where this lock is already held.
+_COMPILE_LOCK = threading.Lock()
+
+
+def _with_compile_lock(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with _COMPILE_LOCK:
+            return fn(*args, **kwargs)
+    return wrapper
+
+
+@_with_compile_lock
 def compile_formal(source_path: str, output: str = None,
                    test_input: int = 10, prove: bool = True,
                    check: bool = True, arch: str = "arm64",

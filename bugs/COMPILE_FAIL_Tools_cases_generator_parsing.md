@@ -1,5 +1,40 @@
 # COMPILE_FAIL: Tools/cases_generator/parsing.py
 
+## Status (2026-10-29, worker bug-compile-fail-tools-cases-generator-p, branch work/bug-compile-fail-tools-cases-generator-p — planning round, no code landed)
+
+Light-worker round. A single `python3 fire.py build .../parsing.py -o .tmp/out/parsing`
+under `tools/memslot.py --gb 8` did NOT finish in >10 minutes: it compiles the whole
+Python stdlib closure reached through `parsing.py` (weakref, inspect, enum, annotationlib, ...,
+each with its own "falling back to interpreting from source" diagnostic). It was killed
+(my process only) and the error list was never captured, so the 12 residual own-file
+errors below were NOT re-observed this round. Those 12 are the 2026-10-25 numbers, carried
+forward unverified.
+
+What this round established, by reading source only:
+
+- The `__mgco_tokenize_*` class (8 of the 12) names a MODULE-LEVEL generator:
+  `lexer.py:294 def tokenize(...)` (a generator, `yield Token(...)` at :357). `plexer.py:10`
+  calls it as `lx.tokenize(...)`, and the plexer translation unit is where the
+  `plexer.py:13583`-range errors sit, so the generator's companion appears to be emitted
+  into more than one unit with differing prototypes. `grep` finds no second `def tokenize`
+  in `Tools/cases_generator/`, so this is a same-name-across-units emission question, not a
+  second source definition. This is an HYPOTHESIS. It is the same family as SB-1 (C symbols
+  not module-qualified) and was not confirmed.
+- `gimple_gen_coro.py`/`mojo/middle/coro.py` build the companion base from the BARE function
+  name for a free function (`coro.py:2764-2765`: `__mgco_<fn.name>` unless a method), with no
+  module qualifier. That is where a cross-unit collision would come from.
+- The `yield from self.<field>.tokens()` polymorphic class (parsing.py:179..470) is unchanged
+  and remains the excluded runtime-dispatch feature project.
+
+NEXT STEP (heavy, for the integrator or a non-light worker): run the build once with the
+`.ci`/`.cpp` kept, then `grep -n "__mgco_tokenize" <out>/*.cpp <out>/*.ci` and compare the
+two prototypes. If they differ and both are free-function generators, the fix is to qualify
+the free-function companion base by module in `mojo/middle/coro.py:2764-2765` (and its
+`5073-5074` twin), the same shape as the SB-1 fix in `bugs/` history, pinned by a
+two-module regression test with a same-named generator in each module. If they are identical,
+the collision is elsewhere: diff the two TUs' emitted `__mgco_tokenize_start` definition
+sites before changing anything.
+
 ## Status (2026-10-25, master 93d13780 — the 2026-09-30 "false green" header is invalidated in both halves: the file now FAILS LOUDLY, and its first own-file class was a NEW shared-path defect, fixed as cb156b54; the residual 12 own-file errors are an older class)
 
 Fresh whole-closure `python3 fire.py build .../Tools/cases_generator/parsing.py` on master `93d13780` (post mojo-reference2 merge b35a79ea, plus f234a398, baa9854b, cb156b54, 93d13780):

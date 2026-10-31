@@ -336,6 +336,8 @@ def _lower_generator_next(gen, av: str, api: dict) -> tuple[str, str]:
     result = gen._new_val(vct, f"{base}_value ({av})")
     if api.get('boxed_container'):
         gen._boxed_container_vals.add(result)
+    if api.get('mixed_slots') and vct == 'int64_t':
+        gen._boxed_vals.add(result)       # a tagged word: rendered by kind
     gen._emit(f"  goto {bb_merge};")
     gen._emit_label(bb_merge)
     return vct, result
@@ -458,10 +460,21 @@ def _lower_generator_close(gen, node, av: str, api: dict):
     exiting (which is what `__mojo_gen_close`'s return value reports).
     Consuming a generator does not free it, so this deliberately does not
     destroy the handle either."""
+    if _as_str(api.get('base', '')).startswith('_mojogen_'):
+        # a C++20-coroutine generator: `close()` destroys the frame (its
+        # destructors run as it unwinds) -- there is no stack-switch runtime
+        # (`__mojo_gen_close`) in a module whose generators are all C++20.
+        gen._void_call(f"{api['base']}_destroy", [('MojoGenerator *', av)])
+        return 'void', None
     handle = gen._to_int64('MojoGenerator *', av)
-    ignored = gen._new_val(
-        '_Bool',
+    # `__mojo_gen_close` returns int64_t: assigning that call straight into a
+    # `_Bool` temp is a hard `-fgimple` "invalid conversion in gimple call", so
+    # compare the word against zero (same-type operands, `_Bool` target).
+    closed_word = gen._new_val(
+        'int64_t',
         f"__mojo_gen_close ({handle}, {gen._exc_type_id('GeneratorExit')})")
+    zero_word = gen._new_val('int64_t', '0')
+    ignored = gen._new_val('_Bool', f"{closed_word} != {zero_word}")
     bb_ok = gen._new_bb(); bb_ignored = gen._new_bb()
     gen._emit(f"  if ({ignored}) goto {bb_ignored}; else goto {bb_ok};")
     gen._emit_label(bb_ignored)
@@ -2178,7 +2191,11 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         if isinstance(node.func, (gimple_ctypes.CallExpr, gimple_ctypes.LambdaExpr)):
             _callee_t, _callee_v = gen.lower_expr(node.func)
             if _callee_t == 'MojoBoundMethod *':
-                return gen._lower_bound_method_call_value(_callee_v, node)
+                # `factory()(...)` where the factory returns a capturing
+                # closure: its return type rides on the CallExpr node, the
+                # same way the bare-pointer arm below reads it.
+                return gen._lower_bound_method_call_value(
+                    _callee_v, node, getattr(node.func, '_callable_ret', 'int64_t'))
             if _callee_t == 'void *' or _callee_t in ('int', 'int64_t', '_Bool'):
                 # `factory()(...)`, where the factory returns a callable: the
                 # callee's own return type rides on its CallExpr node (see
@@ -8993,6 +9010,10 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # result for `a, b = f()` to read slot 0 with slot 0's type.
     if fname_raw in gen._return_slot_types:
         gen._tuple_slot_types[t] = gen._return_slot_types[fname_raw]
+    if fname_raw in getattr(gen, '_return_runtime_kinded', ()):
+        # the callee returns a list that carries its own per-slot kinds
+        gen._struct_slot_kinds[t] = ginf._RuntimeKinded(['int', 'str'])
+        gen._maybe_kinds_vals.add(t)
     if fname_raw in gen._return_elem_types:
         # Annotated `-> tuple[...]` functions resolve to boxed int64_t (see
         # _mojo_type), so unlike the MojoList*-typed case above the elem
@@ -9801,6 +9822,8 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
         # index genuinely has no static answer, so it keeps the uniform
         # fallback rather than guessing.
         _sk = gen._struct_slot_kinds.get(ov)
+        if isinstance(_sk, ginf._RuntimeKinded):
+            _sk = None      # kinds only known at run time: the boxed read below
         if _sk and isinstance(node.index, gimple_ctypes.IntLiteral):
             _si = node.index.value
             if 0 <= _si < len(_sk):

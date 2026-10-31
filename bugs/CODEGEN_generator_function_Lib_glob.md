@@ -1,5 +1,213 @@
 # CODEGEN_generator_function: Lib/glob.py
 
+## Status (2026-10-31, round 4 — `_glob2`, `_iterdir`, `_listdir` and the `glob_in_dir` dispatch now compile; `_iglob`/`_rlistdir` stop at a RECURSIVE kind fixpoint, then the selector closures)
+
+Measured on CPython 3.15's `glob.py` (`compile_to_gimple_with_cpp`):
+
+- **Landed:** `with contextlib.closing(E) as v` (bind + `try/finally v.close()`),
+  generator handles followed through `list()` / `for` / `close()`, a returned
+  runtime-kinded list keeping its kinds at the call site, comprehensions over a
+  kinded list, bytes as a pointer word, `bytes(text, enc)`, a local choosing
+  between module generators lowered to a dispatch index (`_lower_callable_choices`),
+  a sliced parameter / `os.fspath` / `a or b` of path words as pointer words,
+  `p`+`w` call-site kinds unifying, and return-kind inference for a plain function
+  returning `list(<tagged generator>)` / `fnmatch.filter` / a pointer word
+  (`_list_return_elem_kind`, `_pointer_return_kind`).
+- **Still refusing**, in order of what unblocks what:
+  1. `_rlistdir` (and so `_glob2`'s delegation and `_iglob`): it is RECURSIVE —
+     `for y in _rlistdir(path, ...): yield _join(x, y)` — so `y`'s kind is the
+     generator's own kind, which the resolver gives as None for a cycle
+     (`_GEN_RESOLVING`). Next: resolve a self-recursive generator by assuming
+     the join of its non-recursive yield sites (`x`: 'p') for the recursive call's
+     target, then checking the recursive site agrees (`_join(x, y)` is a pointer
+     word if its arguments are). With that, `_join` (`return dirname or basename`
+     / `os.path.join`) types as a pointer word.
+  2. `select_recursive`, `select_recursive_step`, `select_wildcard` — nested
+     generators capturing `self`, `match`, `select_next`, `dir_only`,
+     `follow_symlinks` that ESCAPE their enclosing method as values
+     (`return select_wildcard`), which the hidden-parameter capture model
+     refuses by design. Needs a closure record (captured words + the generator's
+     `_start`) as the callable value, called through `mojo_dyn_call`.
+
+## Status (2026-10-31, round 3 — list-draining and `yield from` of a tagged generator landed; the exact consumer shapes glob still needs)
+
+Landed (pinned by `generator_mixed_kind_yields_drained_into_a_list` and
+`generator_yield_from_a_tagged_word_generator`): a tagged-word generator can be
+consumed by `list(g())` and comprehensions (the drained list carries its own
+per-slot kinds — `mojo_list_append_word`, a growable private kinds row, and the
+`_RuntimeKinded` `_struct_slot_kinds` row routing `print`/index/iterate through
+the list's own kinds), and `yield from` of one forwards its words, so the
+delegating generator is tagged too. A slice of a name of unknown kind
+(`pattern[:0]`) and `os.fspath/fsencode(...)` are pointer-word yield sites
+(`'w'`, never a float, so no boxing).
+
+`glob.py` still refuses, and each reason is now a CONSUMER or PARAMETER shape,
+not a yield-kind one:
+
+1. `_iterdir` (`yield fsencode(entry.name)` beside `yield entry.name`, str vs
+   bytes) is tagged-capable but is consumed through `with contextlib.closing(
+   _iterdir(...)) as it: return list(it)` — a generator handle passed to a
+   function and read through its `__enter__` value. The tag is only chosen for
+   `for` / `list` / comprehension / `yield from` consumers, so it falls back to
+   the cpp path (`bytes(...)` unresolved). Next: lower `with contextlib.closing(E)
+   as v: BODY` to `v = E; BODY; v.close()`, and let the consumer whitelist follow
+   a handle bound once to a call (`v` is only `list(v)`ed / iterated / closed).
+2. `_iglob`: `yield pathname` where `pathname` is a parameter whose call sites
+   are `os.fspath(...)`-rebound public-API parameters (a rebound PARAMETER is a
+   hole: the env sees the param and the assignment). Next: a name bound only
+   from pointer-word calls after its parameter binding is a pointer word.
+   `glob_in_dir = _glob2 / _glob1 / _glob0` then `for name in glob_in_dir(...)` is
+   a call through a callable-valued local that is one of three compiled
+   generators.
+3. The three selector closures — escaping nested generators; unchanged.
+
+## Status (2026-10-31, round 2 — the tagged yield now exists on BOTH paths; glob needs the tag on PARAMETERS and on delegation)
+
+Landed since the entry below: the tagged-word yield on the C++20-coroutine path
+(`cpp_async._cpp_tag_yield_sites`: every `co_yield` carries a `/*Y:<kind>*/`
+marker; when the stack-switch kind analysis says the kinds are all known and
+different, the sites are boxed by it — and never when a yield is a hole, since
+the cpp typer reads an unresolved name as int64_t). Also `mojo_list_append_word`
+and box-aware drain/`next`/comprehension plumbing (the consumer whitelist is still
+`for`-loops only: a tagged list's static repr reads ints).
+
+Measured on `glob.py` after it, the refusals are the same three, and the reasons
+are now precise:
+
+1. `_iglob`: `yield pathname` where `pathname` is a PARAMETER whose call sites
+   pass str here, bytes there, an unresolved `os.fspath(...)` elsewhere. A
+   parameter that is a DYNAMIC WORD (the project's `_dyn_word_locals` concept:
+   `object`-annotated params already are) does not need boxing to be yielded —
+   its word is already self-describing (str vs bytes by the runtime registries).
+   Next: let `_ambiguous_yielded_params` classify such a parameter as a dyn-word
+   and a yield of one as a tagged-word site that passes through unboxed.
+2. `_glob2`: `yield pattern[:0]` + `yield from _rlistdir(...)`: delegation is
+   excluded from the tag (a `yield from` re-yields the sub-generator's own value
+   word, which is a word either way — it needs `_generator_value_kind`'s
+   `delegated` hook to answer 'w' for a tagged sub and the loop in
+   `_rewrite_stmts` to forward raw words).
+3. The three selector closures — escaping nested generators; unchanged.
+
+Tests when these land: `glob.glob('*.py')`, `glob.glob(b'*.py')`,
+`glob.glob('**/*', recursive=True, root_dir=<tmp>)` against CPython.
+
+## Status (2026-10-31 — the TAGGED yield landed on the stack-switch path; glob's refusals are unchanged, and the list of what still stands between them and it is exact)
+
+Landed (pinned by `generator_mixed_kind_yields_are_a_tagged_word`): yields of KNOWN,
+different scalar kinds (str / int / float / bool) are no longer refused. The value
+slot is a boxed word (`coro._generator_value_kind` kind `'w'`): a float yield is
+`mojo_box_from_double(v)`, a bool `mojo_box_from_bool(v)`, a string its pointer, an
+int itself, and a `for v in g():` consumer binds `v` as a boxed word
+(`api['mixed_slots']` -> `gen._boxed_vals`) rendered by `mojo_repr_boxed`. Output
+equals CPython for `yield "a"; yield 1; yield 2.5; yield True`.
+
+It is deliberately NARROW, because every other consumer reads the word as an
+int64_t and prints the box's address (measured: `next(it)`, `list(g())`, a list
+comprehension): the tag is chosen only when every use of the generator in the module
+is a direct `for` iterable, and not when the body has a `yield from`. Anything else
+keeps today's refusal.
+
+`glob.py` still refuses on exactly:
+1. `_glob2` / `_iglob` — they are CPP-path generators (the C++20 emitter), whose
+   own yield typing (`exprtypes._generator_yield_ctype`) has no tagged mode, and
+   they use `yield from` delegation and are consumed by `list(...)` / by other
+   generators. To reach them: (a) the same tagged rule in the C++ path
+   (`co_yield` of a boxed word; promise value type `int64_t`), (b) `yield from`
+   of a tagged sub-generator, (c) the other consumers — `next`, `list()`,
+   comprehensions, `sum`/`any` — reading a tagged word through
+   `mojo_list_append_word` (box-aware append; not written yet) instead of
+   `append_int`.
+2. `select_recursive`, `select_recursive_step`, `select_wildcard` — escaping
+   closure generators, as planned above.
+
+## Status (2026-10-30 — planning: what is left is the TAGGED YIELD, and the nested-selector closures)
+
+Measured on CPython 3.15's `glob.py` after the generator work of this week
+(`self`-capturing nested generators in methods, `nonlocal` writes, `close()`,
+`os.path` function values, `scandir`): the refusals are exactly
+
+- `_iglob` / `_glob2`: "yields ['pathname'], whose call sites do not all pass
+  the same statically-known type" / "every yield must carry a value, and all
+  values must agree on one scalar type". The code is str/bytes polymorphic
+  (`isinstance(dirname, bytes)`, `fsencode`) and yields `pathname`, `pattern[:0]`,
+  `os.path.join(dirname, name)` and delegated values from callable-valued locals
+  (`glob_in_dir = _glob2 / _glob1 / _glob0`). No single C value slot exists, so
+  the solver cannot keep it tight; this is the case the project rule assigns to
+  the TAGGED type: when yield kinds do not unify, the value slot is a boxed word
+  (`MojoBox`: str / bytes / int / float / bool, the runtime already has the box
+  and `mojo_repr_boxed` / `mojo_box_word` readers), every yield site boxes its
+  value with its STATIC kind, and the consumer reads by tag instead of refusing.
+- `select_recursive`, `select_recursive_step`, `select_wildcard`: nested
+  generators that read `match`, `select_next`, `self`, `dir_only`,
+  `follow_symlinks` and ESCAPE their enclosing method as values
+  (`return select_wildcard`), which the capture model refuses by design (the
+  hidden `self`/box handles can only be supplied by the enclosing function's own
+  call sites). They need escaping closure generators: a closure record (the
+  captured words + the generator's `_start`) as the callable value, called
+  through `mojo_dyn_call` (the dynamic-call layer `fsutil.py` added), with
+  `match` (a bound `re.Pattern.match`) as a registered bound-method value.
+
+Order: (a) the tagged yield (also the answer for `Lib_enum` and `Lib_os`'s
+`_fwalk` slots): the promise's `value_ctype` becomes `int64_t` + a "tagged"
+flag on the generator API entry, `co_yield` sites box, consumer loops declare
+the target as a tagged word and `print`/arithmetic/`str` dispatch on the tag;
+(b) escaping closure generators on `mojo_dyn_call`. Tests: the three `_glob*`
+functions' real call shapes against CPython, `glob.glob('**/*.py',
+recursive=True, root_dir=...)` over a `/tmp` tree.
+
+## Status (2026-10-30 — partial fix landed: the os.path.split unpack / str-slice / stale-memo holes are closed; module still refuses)
+
+Measured with `compile_to_gimple_with_cpp(open(Lib/glob.py).read(), do_imports=False)`
+(the generator-capable entry point; `compile_to_gimple` refuses EVERY generator
+module with a different message and is the wrong probe for this doc).
+
+Before this round, the refusal named `_glob2`, `_iglob`, `select_recursive`,
+`select_recursive_step`, `select_wildcard`. Root cause of the first two:
+`_static_env` / `_yield_kind` could not type the tuple-unpacked results of
+`os.path.split` (`dirname, basename = os.path.split(pathname)`), so
+`basename` and `dirname` were untypable call-site args, i.e. HOLES in
+`_scan_callsite_param_kinds`, and every generator fed by them was refused.
+
+Landed (mojo/middle/coro.py, test_gimple_generator_runner.py):
+- `d, b = os.path.split(p)` / `splitext(p)` binds each unpacked name to 'p'
+  (`_os_path_pair_call`, `_OS_PATH_PAIR_FNS`).
+- `pattern[:0]` on a 'p'-kinded local is 'p' (SliceExpr arm of `_yield_kind`).
+- SILENT-MISCOMPILE FIX found while landing the above: `_GEN_VALUE_KINDS`
+  memoized a callee's kind as int64_t during `_scan_callsite_param_kinds`,
+  before the call-site table was filled, and nothing invalidated it. So
+  `def _g(p): yield p` called only as `yield from _g("abc")` printed the
+  string's address at exit 0. This was ALREADY the case on master for the
+  `for x in _g(p): yield x` shape with a literal argument (measured); the new
+  typing would have exposed it on the split path. Fixed by clearing the memo
+  in `_scan_callsite_param_kinds._classify`.
+- Regression tests: `generator_fed_os_path_split_unpacked_str` (fails before:
+  refused; passes after) and `generator_delegate_callsite_typed_param_not_memoized_int`
+  (fails before: prints an address; passes after), in test_gimple_generator_runner.py.
+
+Current refusal on glob.py (measured after the landing above):
+- `_glob2`: now refused with "every `yield` must carry a value, and all values
+  must agree on one scalar type ... one of them's value kind could not be
+  resolved". Not yet identified which yield is unresolved. `yield pattern[:0]`
+  types now; the remaining candidate is the `yield from _rlistdir(...)`
+  delegation. NEXT: probe `_rlistdir` alone (and `_glob2` with `_rlistdir`
+  stubbed) to pin the unresolved yield before changing anything.
+- `_iglob`: `pathname` is still a hole. Its public caller `iglob(pathname, ...)`
+  has NO in-module call site, so `iglob`'s own param is untypable. This is a
+  DECISION, not a bug: (a) refuse all public-API generators with an untyped
+  param and no in-module caller (current, honest), or (b) type an
+  uncalled public function's unannotated param from the stdlib signature
+  (Lib/glob.py's `iglob` is documented to take `str`). (a) keeps every
+  stdlib-shaped refusal honest; (b) needs a documented-signature table. The
+  controller should choose.
+- `select_recursive`, `select_recursive_step`, `select_wildcard`: nested
+  generators reading enclosing-scope variables (`match`, `select_next`, `self`,
+  `dir_only`, `follow_symlinks`). The coroutine path has no capture model for a
+  generator defined inside another function. This is the feature project the
+  2026-09-07 entry describes; unchanged by this round.
+
+So the doc stays open. No glob.py behaviour changes until all three are
+resolved; the landed pieces are general (any module with these shapes).
+
 ## Status (2026-09-07 — "cluster A" premise re-examined; NOT a callable-value-local wiring gap)
 
 Investigated as part of a batch aimed at "extend the callable-value-local

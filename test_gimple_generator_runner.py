@@ -916,7 +916,7 @@ def _cpp_for_over_callable_local_is_named():
     # gaps (c_common/tables.py `read_table`, c_analyzer/__init__.py
     # `check_all`, c_common/fsutil.py `glob_tree`/`_walk_tree`,
     # bugs/CODEGEN_generator_function_Lib_glob.md's `_iglob`,
-    # bugs/CODEGEN_generator_function_Lib_os.md's `walk`) and each doc had to
+    # the (since-fixed) Lib/os.py generator refusal's `walk`) and each doc had to
     # re-derive what to do about it. It stays a refusal — the callee's
     # return type genuinely is not knowable in this body model — but now says
     # which call and what would unblock it.
@@ -1403,25 +1403,40 @@ def run_mixed_yield_kind_tests():
     # yields agree, so the shape is REFUSED with a message naming the rule
     # and the module falls back to interpreting from source, which produces
     # the correct answer (see the note above these throw/close tests).
-    test_generator_refused("generator_mixed_yield_kinds_int_str", """\
+    test_generator_stdout("generator_mixed_yield_kinds_int_str", """\
 def gen():
     yield 1
     yield "a"
-""", "all values must agree on one scalar type")
+
+def main():
+    for v in gen():
+        print(v)
+main()
+""", "1\na\n")
 
     # The same rule, in the other order and across the other two kinds: the
     # check is on the SET of kinds, not on a particular pair.
-    test_generator_refused("generator_mixed_yield_kinds_str_int", """\
+    test_generator_stdout("generator_mixed_yield_kinds_str_int", """\
 def gen():
     yield "a"
     yield 1
-""", "all values must agree on one scalar type")
 
-    test_generator_refused("generator_mixed_yield_kinds_int_double", """\
+def main():
+    for v in gen():
+        print(v)
+main()
+""", "a\n1\n")
+
+    test_generator_stdout("generator_mixed_yield_kinds_int_double", """\
 def gen():
     yield 1
     yield 2.5
-""", "all values must agree on one scalar type")
+
+def main():
+    for v in gen():
+        print(v)
+main()
+""", "1\n2.5\n")
 
     # A `*args`-style UNPACK at a call site is a hole for every parameter it
     # could have supplied, and the call-site scan used to record it against
@@ -1668,23 +1683,33 @@ def gen():
     # (`_register_generator_value_kinds`) and folded into the agreement check:
     # without it, `yield from <int sub>` + `yield "a"` SEGFAULTED and
     # `yield from <str sub>` + `yield 1` printed a raw address.
-    test_generator_refused("generator_mixed_yield_kinds_yield_from_int_str", """\
+    test_generator_stdout("generator_mixed_yield_kinds_yield_from_int_str", """\
 def sub():
     yield 1
 
 def gen():
     yield from sub()
     yield "a"
-""", "all values must agree on one scalar type")
 
-    test_generator_refused("generator_mixed_yield_kinds_yield_from_str_int", """\
+def main():
+    for v in gen():
+        print(v)
+main()
+""", "1\na\n")
+
+    test_generator_stdout("generator_mixed_yield_kinds_yield_from_str_int", """\
 def sub():
     yield "s"
 
 def gen():
     yield from sub()
     yield 1
-""", "all values must agree on one scalar type")
+
+def main():
+    for v in gen():
+        print(v)
+main()
+""", "s\n1\n")
 
     # …and a delegation whose kind AGREES must still compile in both
     # directions, so the check cannot be satisfied by refusing every
@@ -2559,6 +2584,40 @@ def main():
     # Two classes each with a nested `g` that captures `self`: the hoisted
     # bases are struct-qualified, so neither generator is mistaken for the
     # other.
+    # test_frame.py's `test_clear_generator` shape: a nested generator that
+    # reads `self`, WRITES an enclosing local through `nonlocal` in a
+    # `finally`, and is driven by `next(gen)` then `gen.close()`. `.close()`
+    # drives the generator in place (it does not hand the object out of the
+    # method, so `self` capture is still sound), and its lowering had assigned
+    # the int64_t `__mojo_gen_close` result into a `_Bool` temp -- a hard
+    # `-fgimple` "invalid conversion in gimple call".
+    test_generator_stdout("nested_generator_method_self_nonlocal_write_then_close", """\
+class T:
+    def __init__(self, n):
+        self.n = n
+
+    def inner(self):
+        return self.n
+
+    def run(self):
+        endly = 0
+        def g():
+            nonlocal endly
+            try:
+                yield 1
+                self.inner()
+            finally:
+                endly = 5
+        gen = g()
+        print(next(gen))
+        print(endly)
+        gen.close()
+        print(endly)
+
+t = T(3)
+t.run()
+""", "1\n0\n5\n")
+
     test_generator_stdout("nested_generator_method_same_name_two_classes", """\
 struct A:
     var k: Int
@@ -4353,7 +4412,7 @@ def main():
 
     # Second-level unpack: `marker, payload = stack.pop()` where `payload`
     # is itself a boxed tuple needing its own unpack (the exact `_fwalk`
-    # shape from bugs/CODEGEN_generator_function_Lib_os.md — `action,
+    # shape from the (since-fixed) Lib/os.py generator refusal — `action,
     # value = stack.pop()` then `isroot, ... = value`).
     test_generator_stdout("generator_pops_stack_two_level_tuple_unpack", """\
 def walker():
@@ -4854,7 +4913,7 @@ main()
     # `std::function<int64_t()>`, so both yields were typed int64_t and it
     # printed `1` / `1`. It now refuses the bool yield, because the slot it
     # was given cannot hold a bool. CPython: `True` then `1.5`.
-    test_generator_refused("generator_mixed_lambda_yield_shape2_refused", """\
+    test_generator_stdout("generator_mixed_lambda_yield_shape2_refused", """\
 def gen(n):
     f = lambda: n > 2
     yield f()
@@ -4866,7 +4925,7 @@ def main():
     for v in gen(5):
         print(v)
 main()
-""", "is typed 'int64_t' by the cpp path")
+""", "True\n1.5\n")
 
     # Regression test for generator METHOD yielding a float field.
     # Before this fix, cpp_value_slot_refusal called _static_env(fn, None),
@@ -6127,6 +6186,39 @@ def main():
         print(r)
 """, "yields ['x'], whose call sites do not all pass the same")
 
+    # `d, b = os.path.split(p)` binds both names to str, so a generator fed
+    # the unpacked `b` is no longer a call-site HOLE. See Lib/glob.py's
+    # `_iglob`/`_glob2`, whose `basename` comes from exactly this shape.
+    test_generator_stdout("generator_fed_os_path_split_unpacked_str", """\
+import os
+
+def _g1(pattern):
+    yield pattern
+
+def outer(p):
+    d, b = os.path.split(p)
+    yield from _g1(b)
+
+def main():
+    for x in outer("a/bc"):
+        print(x)
+""", "bc\n")
+    # An unannotated generator param typed ONLY by its call sites must reach
+    # its delegating generator as that kind. The scan used to memoize the
+    # callee's kind as int before the call-site table was filled, so this
+    # printed the string's address at exit 0.
+    test_generator_stdout("generator_delegate_callsite_typed_param_not_memoized_int", """\
+def _g1(pattern):
+    yield pattern
+
+def outer():
+    yield from _g1("abc")
+
+def main():
+    for x in outer():
+        print(x)
+""", "abc\n")
+
     _foreign_a3_generator_handle_next()
     _foreign_a3_generator_handle_for_loop()
     _foreign_cpp_module_global_value()
@@ -6691,8 +6783,9 @@ go()
     # bits (`1` / `2` where CPython prints `1.5` / `2.5`) with exit 0. The
     # index `i` is an int and the element is a float, so the value slot cannot
     # carry both: the right answer is an honest refusal, which the interpreter
-    # fallback then runs correctly. The refusal names the truncation.
-    test_generator_refused("generator_enumerate_float_element_is_refused_not_truncated", """\
+    # fallback then runs correctly. (Now a TAGGED-word yield: int index beside a
+    # float element, boxed by kind, prints exactly what CPython prints.)
+    test_generator_stdout("generator_enumerate_float_element_is_refused_not_truncated", """\
 def rows(data):
     for i, r in enumerate(data):
         yield i
@@ -6702,7 +6795,7 @@ def main():
     for v in rows([1.5, 2.5]):
         print(v)
 main()
-""", "a `yield` of a float value is typed 'int64_t'")
+""", "0\n1.5\n1\n2.5\n")
 
     # The positive side of the same fix: an enumerate loop whose yields are
     # all the element (float, or string) compiles and prints the element, and
@@ -6792,6 +6885,458 @@ def main():
         print(v)
 main()
 """, "/tmp/x\n/tmp/y\nTrue\nFalse\n")
+
+    # A generator METHOD of a class defined INSIDE a function, yielding the
+    # str / str|None / None 4-tuples `string.Formatter.parse` yields
+    # (Lib/test/test_string/test_string.py's `BarFormatter` in
+    # `test_override_parse`). The class never reaches top-level struct
+    # registration, and this used to refuse the whole module.
+    test_generator_stdout("generator_method_of_function_nested_class_yields_str_none_tuples", """\
+def test():
+    class BarFormatter:
+        def parse(self, format_string):
+            yield ('', format_string, None, None)
+            yield ('x', 'y', 'z', None)
+
+    f = BarFormatter()
+    for t in f.parse("abc"):
+        print(t)
+
+test()
+""", "('', 'abc', None, None)\n('x', 'y', 'z', None)\n")
+
+    # A list built by `append(os.path.join(...))` and walked with
+    # `reversed(...)`: the element kind of the appended call (a string) and
+    # `reversed`'s passthrough of it were both unknown, so the yield slot was
+    # the int64_t default and the strings printed as heap ADDRESSES (exit 0).
+    test_generator_stdout("generator_reversed_list_of_os_path_join_results", """\
+import os
+
+def g(top):
+    dirs = ["a", "b", "c"]
+    names = []
+    for d in reversed(dirs):
+        names.append(os.path.join(top, d))
+    for n in reversed(names):
+        yield n
+
+def main():
+    for v in g("/t"):
+        print(v)
+main()
+""", "/t/a\n/t/b\n/t/c\n")
+
+    # Lib/os.py `walk`'s stack: a list that holds path STRINGS and pushed
+    # `(top, dirs, nondirs)` TUPLES, popped into the parameter itself and
+    # discriminated with `isinstance(top, tuple)`. The solver cannot give `top`
+    # one type, so it is the boxed word (and only then); the bare `yield top`
+    # under the guard is the tuple, the tuple's slot 0 is the string.
+    test_generator_stdout("generator_heterogeneous_stack_param_rebound_from_pop", """\
+def g(top, topdown):
+    stack = [top]
+    n = 0
+    while stack:
+        top = stack.pop()
+        if isinstance(top, tuple):
+            yield top
+            continue
+        dirs = ["d" + str(n)]
+        nondirs = ["f" + str(n)]
+        n = n + 1
+        if topdown:
+            yield top, dirs, nondirs
+        else:
+            stack.append((top, dirs, nondirs))
+        if n < 3:
+            stack.append(top + "/x")
+
+def main():
+    for a, b, c in g("r", True):
+        print(a, b, c)
+    for a, b, c in g("r", False):
+        print(a, b, c)
+
+main()
+""", "r ['d0'] ['f0']\nr/x ['d1'] ['f1']\nr/x/x ['d2'] ['f2']\nr/x/x ['d2'] ['f2']\nr/x ['d1'] ['f1']\nr ['d0'] ['f0']\n")
+
+    # `with os.scandir(top) as entries:` in a generator: a real list of DirEntry
+    # handles (entry.name / .path / .is_dir() are runtime calls), and a missing
+    # directory raises FileNotFoundError, which `except OSError` catches (the
+    # builtin exception hierarchy is part of the compiled `except` match).
+    import os as _os_fx
+    _os_fx.makedirs("/tmp/_gen_scandir_fixture/sub", exist_ok=True)
+    open("/tmp/_gen_scandir_fixture/file.txt", "w").close()
+    test_generator_stdout("generator_scandir_context_manager_dirs_and_oserror", """\
+import os
+
+def g(top):
+    try:
+        with os.scandir(top) as entries:
+            for entry in entries:
+                if entry.is_dir():
+                    yield entry.name
+    except OSError:
+        yield "ERR"
+
+def main():
+    for v in g("/tmp/_gen_scandir_fixture"):
+        print(v)
+    for v in g("/nonexistent_dir_for_scandir"):
+        print(v)
+main()
+""", "sub\nERR\n")
+
+    # posixpath.join: an empty second part still adds the separator, and an
+    # absolute second part replaces the first (os.walk's child prefix is
+    # `join(top, top[:0])`).
+    test_generator_stdout("generator_os_path_join_empty_and_absolute", """\
+import os
+
+def g(top):
+    yield os.path.join(top, "")
+    yield os.path.join(top, "/abs")
+    yield os.path.join(top, "c")
+
+def main():
+    for v in g("/tmp/x"):
+        print(v)
+main()
+""", "/tmp/x/\n/abs\n/tmp/x/c\n")
+
+    # A TAGGED-word yield: str / int / float / bool yields no single C type
+    # holds. The solver cannot keep it tight, so the value slot is the boxed word
+    # (floats and bools boxed by their static kind at the yield site) and the
+    # `for` consumer renders each value by what it is.
+    test_generator_stdout("generator_mixed_kind_yields_are_a_tagged_word", """\
+def g(flag):
+    yield "a"
+    yield 1
+    yield 2.5
+    yield True
+    if flag:
+        yield "z"
+
+def main():
+    for v in g(True):
+        print(v)
+    for v in g(False):
+        print(f"<{v}>")
+
+main()
+""", "a\n1\n2.5\nTrue\nz\n<a>\n<1>\n<2.5>\n<True>\n")
+
+    # The same TAGGED word on the C++20-coroutine path (a generator with a
+    # `try` / `with os.scandir` the stack-switch path hands to it): a string,
+    # an int and a float yield from one body.
+    test_generator_stdout("generator_mixed_kind_yields_tagged_word_cpp_path", """\
+import os
+
+def g(top):
+    try:
+        with os.scandir(top) as entries:
+            for entry in entries:
+                if entry.is_dir():
+                    yield entry.name
+                else:
+                    yield 1
+    except OSError:
+        yield 2.5
+
+def main():
+    for v in g("/nonexistent_dir_for_scandir"):
+        print(v)
+    for v in g("/tmp/_gen_scandir_fixture"):
+        if v == 1:
+            print("file")
+        else:
+            print(v)
+main()
+""", "2.5\nfile\nsub\n")
+
+    # `list(g())` and a comprehension drain a tagged-word generator into a list
+    # that carries its OWN per-slot kinds, so it prints, iterates, indexes and
+    # takes len() by what each element is.
+    test_generator_stdout("generator_mixed_kind_yields_drained_into_a_list", """\
+def g():
+    yield "a"
+    yield 1
+    yield 2.5
+    yield True
+
+def main():
+    xs = list(g())
+    print(xs)
+    print(len(xs))
+    for v in xs:
+        print(f"<{v}>")
+    print(xs[0])
+    print(xs[2])
+    print([v for v in g()])
+
+main()
+""", "['a', 1, 2.5, True]\n4\n<a>\n<1>\n<2.5>\n<True>\na\n2.5\n['a', 1, 2.5, True]\n")
+
+    # `yield from` of a tagged-word generator forwards its words: the delegating
+    # generator is tagged too (a bool of its own, the delegate's str / int /
+    # float, a str), and `list(outer())` carries each element's kind.
+    test_generator_stdout("generator_yield_from_a_tagged_word_generator", """\
+def inner():
+    yield "a"
+    yield 1
+    yield 2.5
+
+def outer():
+    yield True
+    yield from inner()
+    yield "z"
+
+def main():
+    for v in outer():
+        print(v)
+    print(list(outer()))
+
+main()
+""", "True\na\n1\n2.5\nz\n[True, 'a', 1, 2.5, 'z']\n")
+
+    # Lib/glob.py's `_iterdir` / `_listdir`: a generator yielding str names beside
+    # bytes (`fsencode(name)`), consumed through `with contextlib.closing(g) as
+    # it: return list(it)` (lowered to `it = g; try: ... finally: it.close()`),
+    # whose returned list carries its own kinds into the caller's comprehension.
+    test_generator_stdout("generator_closing_a_tagged_dir_iterator_then_list", """\
+import contextlib
+import os
+
+def _iterdir(dirname, dironly):
+    try:
+        fsencode = None
+        if isinstance(dirname, bytes):
+            fsencode = os.fsencode
+        with os.scandir(dirname) as it:
+            for entry in it:
+                try:
+                    if not dironly or entry.is_dir():
+                        if fsencode is not None:
+                            yield fsencode(entry.name)
+                        else:
+                            yield entry.name
+                except OSError:
+                    pass
+    except OSError:
+        return
+
+def _listdir(dirname, dironly):
+    with contextlib.closing(_iterdir(dirname, dironly)) as it:
+        return list(it)
+
+def main():
+    xs = _listdir("/tmp/_gen_scandir_fixture", False)
+    print(sorted([str(x) for x in xs]))
+    print(len(xs))
+
+main()
+""", "['file.txt', 'sub']\n2\n")
+
+    # A local bound to one of several MODULE-LEVEL generators and only called as
+    # a `for` iterable (Lib/glob.py's `glob_in_dir = _glob2 / _glob1 / _glob0`) is
+    # a dispatch index: the loop is copied once per candidate, each a direct call.
+    test_generator_stdout("generator_callable_local_choosing_between_module_generators", """\
+def a(x):
+    yield x
+    yield x + 1
+
+def b(x):
+    yield x * 10
+
+def pick(flag, n):
+    if flag:
+        f = a
+    else:
+        f = b
+    out = []
+    for v in f(n):
+        out.append(v)
+    return out
+
+def main():
+    print(pick(True, 3))
+    print(pick(False, 3))
+
+main()
+""", "[3, 4]\n[30]\n")
+
+    # ...but any consumer that is NOT a for / list / comprehension (here `next`
+    # of a bound handle) would read the box's address as an int, so the
+    # generator keeps its refusal.
+    test_generator_refused("generator_mixed_kind_yields_consumed_by_next_refused", """\
+def g():
+    yield "a"
+    yield 1
+
+def main():
+    it = g()
+    print(next(it))
+
+main()
+""", "all values must agree on one scalar type")
+
+    # CPython's `os.fwalk` / `_fwalk` (fd-relative walk) compiled whole: stat /
+    # open(dir_fd=) / close / scandir(fd) / DirEntry.stat / samestat / S_ISDIR,
+    # the heterogeneous (action, args) stack, `stack.extend(<genexp over zip>)`,
+    # `assert`, `entries = None if .. else []` and the `yield value` that is a
+    # 4-tuple popped off that stack. Top-down and bottom-up.
+    test_generator_stdout("generator_os_fwalk_fd_relative_walk", """\
+import os
+import stat as st
+from os import scandir, stat, open, close, O_RDONLY, O_NONBLOCK
+
+def fspath(p):
+    return p
+
+def fsencode(p):
+    return p
+
+import posixpath as path
+import sys
+
+_fwalk_walk = 0
+_fwalk_yield = 1
+_fwalk_close = 2
+
+def fwalk(top=".", topdown=True, onerror=None, *, follow_symlinks=False, dir_fd=None):
+    \"\"\"Directory tree generator.
+
+    This behaves exactly like walk(), except that it yields a 4-tuple
+
+        dirpath, dirnames, filenames, dirfd
+
+    `dirpath`, `dirnames` and `filenames` are identical to walk() output,
+    and `dirfd` is a file descriptor referring to the directory `dirpath`.
+
+    The advantage of fwalk() over walk() is that it's safe against symlink
+    races (when follow_symlinks is False).
+
+    If dir_fd is not None, it should be a file descriptor open to
+    a directory, and top should be relative; top will then be relative to
+    that directory.  (dir_fd is always supported for fwalk.)
+
+    Caution:
+    Since fwalk() yields file descriptors, those are only valid until the
+    next iteration step, so you should dup() them if you want to keep them
+    for a longer period.
+
+    Example:
+
+    import os
+    for root, dirs, files, rootfd in os.fwalk('python/Lib/xml'):
+        print(root, "consumes", end="")
+        print(sum(os.stat(name, dir_fd=rootfd).st_size for name in files),
+              end="")
+        print("bytes in", len(files), "non-directory files")
+        if '__pycache__' in dirs:
+            dirs.remove('__pycache__')  # don't visit __pycache__ directories
+    \"\"\"
+    sys.audit("os.fwalk", top, topdown, onerror, follow_symlinks, dir_fd)
+    top = fspath(top)
+    stack = [(_fwalk_walk, (True, dir_fd, top, top, None))]
+    isbytes = isinstance(top, bytes)
+    try:
+        while stack:
+            yield from _fwalk(stack, isbytes, topdown, onerror, follow_symlinks)
+    finally:
+        # Close any file descriptors still on the stack.
+        while stack:
+            action, value = stack.pop()
+            if action == _fwalk_close:
+                close(value)
+
+# Each item in the _fwalk() stack is a pair (action, args).
+_fwalk_walk = 0  # args: (isroot, dirfd, toppath, topname, entry)
+_fwalk_yield = 1  # args: (toppath, dirnames, filenames, topfd)
+_fwalk_close = 2  # args: dirfd
+
+def _fwalk(stack, isbytes, topdown, onerror, follow_symlinks):
+    # Note: This uses O(depth of the directory tree) file descriptors: if
+    # necessary, it can be adapted to only require O(1) FDs, see issue
+    # #13734.
+
+    action, value = stack.pop()
+    if action == _fwalk_close:
+        close(value)
+        return
+    elif action == _fwalk_yield:
+        yield value
+        return
+    assert action == _fwalk_walk
+    isroot, dirfd, toppath, topname, entry = value
+    try:
+        if not follow_symlinks:
+            # Note: To guard against symlink races, we use the standard
+            # lstat()/open()/fstat() trick.
+            if entry is None:
+                orig_st = stat(topname, follow_symlinks=False, dir_fd=dirfd)
+            else:
+                orig_st = entry.stat(follow_symlinks=False)
+        topfd = open(topname, O_RDONLY | O_NONBLOCK, dir_fd=dirfd)
+    except OSError as err:
+        if isroot:
+            raise
+        if onerror is not None:
+            onerror(err)
+        return
+    stack.append((_fwalk_close, topfd))
+    if not follow_symlinks:
+        if isroot and not st.S_ISDIR(orig_st.st_mode):
+            return
+        if not path.samestat(orig_st, stat(topfd)):
+            return
+
+    scandir_it = scandir(topfd)
+    dirs = []
+    nondirs = []
+    entries = None if topdown or follow_symlinks else []
+    for entry in scandir_it:
+        name = entry.name
+        if isbytes:
+            name = fsencode(name)
+        try:
+            if entry.is_dir():
+                dirs.append(name)
+                if entries is not None:
+                    entries.append(entry)
+            else:
+                nondirs.append(name)
+        except OSError:
+            try:
+                # Add dangling symlinks, ignore disappeared files
+                if entry.is_symlink():
+                    nondirs.append(name)
+            except OSError:
+                pass
+
+    if topdown:
+        yield toppath, dirs, nondirs, topfd
+    else:
+        stack.append((_fwalk_yield, (toppath, dirs, nondirs, topfd)))
+
+    toppath = path.join(toppath, toppath[:0])  # Add trailing slash.
+    if entries is None:
+        stack.extend(
+            (_fwalk_walk, (False, topfd, toppath + name, name, None))
+            for name in dirs[::-1])
+    else:
+        stack.extend(
+            (_fwalk_walk, (False, topfd, toppath + name, name, entry))
+            for name, entry in zip(dirs[::-1], entries[::-1]))
+
+
+def main():
+    for r, d, f, fd in fwalk("/tmp/_gen_scandir_fixture"):
+        print(r, d, f)
+    for r, d, f, fd in fwalk("/tmp/_gen_scandir_fixture", topdown=False):
+        print(r, d, f)
+
+main()
+""", "/tmp/_gen_scandir_fixture ['sub'] ['file.txt']\n/tmp/_gen_scandir_fixture/sub [] []\n/tmp/_gen_scandir_fixture/sub [] []\n/tmp/_gen_scandir_fixture ['sub'] ['file.txt']\n")
 
     test_generator_stdout("generator_enumerate_index_yields_index", """\
 def rows(data):

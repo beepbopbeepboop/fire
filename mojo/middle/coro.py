@@ -93,7 +93,7 @@ _ASYNC_BITS_SHIM = {'b': '__mojo_bits_b', 'd': '__mojo_bits_d', 'p': '__mojo_bit
 # divergent copy, so 'b' exists to make the two agree rather than because
 # the ABI needed a fifth channel -- it does not: see `_yield_shim`, a `_Bool`
 # is already a lossless int64_t 0/1 on the wire, exactly like 'i'.
-_KIND_CTYPE  = {'i': 'int64_t', 'b': '_Bool', 'p': 'char *', 'd': 'double',
+_KIND_CTYPE  = {'w': 'int64_t', 'i': 'int64_t', 'b': '_Bool', 'p': 'char *', 'd': 'double',
                 'tuple': 'MojoList *'}
 
 
@@ -250,6 +250,101 @@ _NUMERIC_CTORS = {'Float64': 'd', 'Float32': 'd', 'Float': 'd', 'float': 'd',
                   'String': 'p', 'StringSlice': 'p', 'str': 'p'}
 
 
+_LIST_RET_KINDS: dict = {}
+
+
+def _list_return_elem_kind(name: str):
+    """Element kind of the list a same-module PLAIN function returns, when every
+    `return` of it says so: `list(<tagged generator call>)` (directly, or through
+    a handle bound once to the call), `fnmatch.filter(..)` (a list of path
+    words), a one-element list display of a typed name; `[]` agrees with
+    anything. None when any return is something else. Memoised per module
+    (cleared with `_register_generator_defs`)."""
+    if name in _LIST_RET_KINDS:
+        return _LIST_RET_KINDS[name]
+    _LIST_RET_KINDS[name] = None            # recursion guard
+    fd = None
+    for st in _MODULE_STMTS:
+        if isinstance(st, N.FunctionDef) and st.name == name \
+                and not getattr(st, 'is_generator', False) \
+                and not getattr(st, 'is_async', False):
+            fd = st
+    if fd is None:
+        return None
+    handle_calls = {}
+    for n in _walk(fd):
+        if (isinstance(n, N.AssignStmt) and isinstance(n.target, N.IdentExpr)
+                and isinstance(n.value, N.CallExpr) and isinstance(n.value.func, N.IdentExpr)
+                and n.value.func.name in _GEN_DEFS):
+            handle_calls.setdefault(n.target.name, []).append(n.value.func.name)
+    kinds = set()
+    for n in _walk(fd):
+        if not isinstance(n, N.ReturnStmt) or n.value is None:
+            continue
+        v = n.value
+        k = None
+        if isinstance(v, N.ListExpr) and not v.elements:
+            continue
+        if (isinstance(v, N.CallExpr) and isinstance(v.func, N.IdentExpr)
+                and v.func.name == 'list' and len(v.args) == 1):
+            a = v.args[0]
+            g = None
+            if isinstance(a, N.CallExpr) and isinstance(a.func, N.IdentExpr) \
+                    and a.func.name in _GEN_DEFS:
+                g = a.func.name
+            elif isinstance(a, N.IdentExpr) and len(handle_calls.get(a.name, [])) == 1:
+                g = handle_calls[a.name][0]
+            if g is not None:
+                k = _GEN_VALUE_KINDS.get(g, (None, ''))[0]
+                if k is None and g in _GEN_DEFS and g not in _GEN_RESOLVING:
+                    k = _resolve_gen_kind(g)[0]
+        elif (isinstance(v, N.CallExpr) and isinstance(v.func, N.MemberExpr)
+                and v.func.member == 'filter' and isinstance(v.func.obj, N.IdentExpr)
+                and v.func.obj.name == 'fnmatch'):
+            k = 'w'
+        elif isinstance(v, N.ListExpr) and len(v.elements) == 1:
+            k = _yield_kind(v.elements[0], _static_env(fd))
+        if k is None:
+            return None
+        kinds.add(k)
+    r = list(kinds)[0] if len(kinds) == 1 else None
+    _LIST_RET_KINDS[name] = r
+    return r
+
+
+_PTR_RET_KINDS: dict = {}
+
+
+def _pointer_return_kind(name: str):
+    """'w' when a same-module plain function returns ONLY path words (every
+    `return` is a 'p'/'w' kind: `return dirname or basename`, `return
+    os.path.join(..)`), else None. Lib/glob.py's `_join`. Memoised per module."""
+    if name in _PTR_RET_KINDS:
+        return _PTR_RET_KINDS[name]
+    _PTR_RET_KINDS[name] = None
+    fd = None
+    for st in _MODULE_STMTS:
+        if isinstance(st, N.FunctionDef) and st.name == name \
+                and not getattr(st, 'is_generator', False) \
+                and not getattr(st, 'is_async', False):
+            fd = st
+    if fd is None:
+        return None
+    env = _static_env(fd)
+    kinds = set()
+    for n in _walk(fd):
+        if isinstance(n, N.ReturnStmt) and n.value is not None:
+            k = _yield_kind(n.value, env)
+            if k not in ('p', 'w'):
+                return None
+            kinds.add(k)
+    r = None
+    if kinds:
+        r = 'w' if 'w' in kinds or len(kinds) > 1 else 'p'
+    _PTR_RET_KINDS[name] = r
+    return r
+
+
 def _callee_return_kind(expr, env: dict | None = None) -> str | None:
     """Scalar kind of `expr`'s value when `expr` is a call to a BARE name whose
     return type this module knows: a lambda-bound local of the enclosing
@@ -276,7 +371,13 @@ def _callee_return_kind(expr, env: dict | None = None) -> str | None:
         _cv = env.get(expr.func.name)
         if isinstance(_cv, tuple) and _cv[0] == 'callable':
             return _cv[1]
-    return _NUMERIC_CTORS.get(expr.func.name) or _FUNC_RET_KIND.get(expr.func.name)
+    _sk = _NUMERIC_CTORS.get(expr.func.name) or _FUNC_RET_KIND.get(expr.func.name)
+    if _sk is not None:
+        return _sk
+    _lk = _list_return_elem_kind(expr.func.name)
+    if _lk is not None:
+        return ('list', _lk)
+    return _pointer_return_kind(expr.func.name)
 
 
 # Result kind of each `os.path.<fn>` the runtime implements as a function
@@ -284,6 +385,34 @@ def _callee_return_kind(expr, env: dict | None = None) -> str | None:
 # to one (`join = os.path.join`) types its call results.
 _OS_PATH_FN_KINDS = {'join': 'p', 'basename': 'p', 'dirname': 'p',
                      'islink': 'b', 'isdir': 'b', 'isfile': 'b', 'exists': 'b'}
+
+
+# `os.path.<fn>` runtime functions whose result is a PAIR of strings for a str
+# argument (`d, b = os.path.split(p)`). Their unpacked elements are str-kinded.
+_OS_PATH_PAIR_FNS = ('split', 'splitext')
+
+
+def _os_path_pair_call(v) -> bool:
+    """True when `v` is a direct call to one of `_OS_PATH_PAIR_FNS` through
+    `os.path` / `posixpath` / `path`, i.e. a 2-tuple-of-str result."""
+    if not isinstance(v, N.CallExpr):
+        return False
+    fn = v.func
+    if not isinstance(fn, N.MemberExpr) or fn.member not in _OS_PATH_PAIR_FNS:
+        return False
+    o = fn.obj
+    if isinstance(o, N.MemberExpr) and o.member == 'path' \
+            and isinstance(o.obj, N.IdentExpr) and o.obj.name == 'os':
+        return True
+    return isinstance(o, N.IdentExpr) and o.name in ('path', 'posixpath')
+
+
+def _os_path_call_kind(v) -> str | None:
+    """The result kind of a DIRECT call `os.path.<fn>(...)` (or `path.<fn>` /
+    `posixpath.<fn>`) to a runtime-implemented function, else None."""
+    if isinstance(v, N.CallExpr):
+        return _os_path_fn_kind(v.func)
+    return None
 
 
 def _os_path_fn_kind(v) -> str | None:
@@ -385,6 +514,15 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
             # A parameter is a binding too: `def g(x: int): x = 2.5` rebinds
             # it, and the rebind must be seen by the conflict check below.
             str_kinds.setdefault(pname, set()).add(k)
+    # An unannotated parameter the body SLICES (`pathname[:0]`, `s[:2]`) is a
+    # sequence -- a str, a bytes, a list: a pointer word, never a number. Only a
+    # fallback: the call-site contract below (`setdefault`) and annotations win.
+    _pnames = set(pp[0] if isinstance(pp, (tuple, list)) else pp
+                  for pp in getattr(fn, 'params', []))
+    for _n in _walk(fn):
+        if (isinstance(_n, N.SliceExpr) and isinstance(_n.obj, N.IdentExpr)
+                and _n.obj.name in _pnames and _n.obj.name not in env):
+            env[_n.obj.name] = 'w'
     # Fill unannotated params from the unanimous cross-call-site kind
     # contract (bugs/hard/CODEGEN_coro_stackswitch_yield_kind_identifier_
     # inference.md repro 1: `def g(x): yield x` called only `g(3.5)`).
@@ -443,6 +581,16 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
             tgt, val, ann = n.target.name, n.value, getattr(n, 'type_ann', None)
         elif isinstance(n, N.VarDecl):
             tgt, val, ann = n.name, n.value, n.type_ann
+        # `dirname, basename = os.path.split(p)`: each unpacked element is a
+        # str. Without this, `basename` is an untypable local, so passing it to
+        # a generator is a call-site HOLE and the generator is refused (the
+        # `_iglob`/`_glob2` refusal in Lib/glob.py).
+        if (isinstance(n, N.AssignStmt) and isinstance(n.target, N.TupleExpr)
+                and _os_path_pair_call(n.value)):
+            for _t in n.target.elements:
+                if isinstance(_t, N.IdentExpr):
+                    str_kinds.setdefault(_t.name, set()).add('p')
+                    env.setdefault(_t.name, 'p')
         if tgt is not None:
             k = _ann_kind(ann)
             if k is None:
@@ -498,6 +646,10 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
                 and n.func.member in ('append', 'insert')
                 and isinstance(n.func.obj, N.IdentExpr) and n.args):
             ek = _literal_kind(n.args[-1])
+            if ek is None:
+                # `names.append(os.path.join(top, d))`: not a literal, but its
+                # kind is as certain (a runtime-implemented `os.path` call).
+                ek = _os_path_call_kind(n.args[-1])
             if isinstance(ek, str):
                 list_elem.setdefault(n.func.obj.name, set()).add(ek)
     for nm, eks in list_elem.items():
@@ -526,6 +678,27 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
                 env[nm] = 'i'
             else:
                 env[nm] = ('conflict', frozenset(eks))
+    # `with os.scandir(top) as entries:` ... `for entry in entries:` -- `entry`
+    # is a DirEntry (marked as the tuple ('dirent',), which no list/conflict
+    # reader mistakes for a scalar kind); `entry.name` / `entry.path` are strings.
+    _sd_aliases = set()
+    for n in _walk(fn):
+        if isinstance(n, N.WithStmt):
+            for _it in n.items:
+                _c = _it.expr
+                if (isinstance(_c, N.CallExpr) and len(_c.args) == 1
+                        and ((isinstance(_c.func, N.IdentExpr) and _c.func.name == 'scandir')
+                             or (isinstance(_c.func, N.MemberExpr) and _c.func.member == 'scandir'
+                                 and isinstance(_c.func.obj, N.IdentExpr)
+                                 and _c.func.obj.name in ('os', 'posix')))):
+                    _al = _it.alias.name if isinstance(_it.alias, N.IdentExpr) else _it.alias
+                    if isinstance(_al, str):
+                        _sd_aliases.add(_al)
+    for n in _walk(fn):
+        if (isinstance(n, N.ForStmt) and isinstance(n.iterable, N.IdentExpr)
+                and n.iterable.name in _sd_aliases and isinstance(n.target, str)
+                and n.target not in env):
+            env[n.target] = ('dirent',)
     # `for <v> in <list-local-or-literal | sibling-generator-call>():` binds
     # <v> to the element kind
     for n in _walk(fn):
@@ -560,6 +733,15 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
                 # address (test: generator_iterating_a_string_parameter_
                 # yields_nothing).
                 ek = 'p'
+        elif (isinstance(it, N.CallExpr) and isinstance(it.func, N.IdentExpr)
+                and it.func.name in ('reversed', 'sorted', 'list')
+                and len(it.args) == 1 and not it.kwargs
+                and isinstance(it.args[0], N.IdentExpr)
+                and isinstance(env.get(it.args[0].name), tuple)
+                and env[it.args[0].name][0] == 'list'):
+            # `reversed(xs)` / `sorted(xs)` / `list(xs)` reorder or copy a
+            # list and never change its element kind.
+            ek = env[it.args[0].name][1]
         elif isinstance(it, N.CallExpr):
             # A sibling generator's call — the consuming twin of `yield
             # from`. See `_sibling_gen_kind`, which is where the recursion
@@ -674,6 +856,22 @@ def _yield_kind(expr, env: dict | None = None) -> str | None:
         if isinstance(v, tuple) and v[0] == 'list':
             return v[1]
         return None
+    # `entry.name` / `entry.path` after the DirEntry lowering
+    # (`cpp_core._cpp_dirent_rewrite`) are these runtime calls: strings.
+    if (isinstance(expr, N.CallExpr) and isinstance(expr.func, N.IdentExpr)
+            and expr.func.name in ('mojo_dirent_name', 'mojo_dirent_path')):
+        return 'p'
+    if (isinstance(expr, N.CallExpr) and isinstance(expr.func, N.IdentExpr)
+            and expr.func.name in ('mojo_bytes_from_cstr', 'mojo_bytes_from_str')):
+        return 'w'          # bytes: a pointer word
+    # A DIRECT `os.path.<fn>(...)` call to a runtime-implemented function.
+    _opk = _os_path_call_kind(expr)
+    if _opk is not None:
+        return _opk
+    if (isinstance(expr, N.MemberExpr) and isinstance(expr.obj, N.IdentExpr)
+            and expr.member in ('name', 'path')
+            and env.get(expr.obj.name) == ('dirent',)):
+        return 'p'
     if isinstance(expr, N.MemberExpr) and isinstance(expr.obj, N.IdentExpr) \
             and expr.obj.name == 'self':
         return env.get(f'self.{expr.member}')
@@ -682,6 +880,25 @@ def _yield_kind(expr, env: dict | None = None) -> str | None:
         if isinstance(v, tuple) and v[0] == 'list':
             return v[1]
         return None
+    # `pattern[:0]` on a str-kinded local is a str (Lib/glob.py's `_glob2`
+    # yields exactly that). A slice of a list-local is a list, not a scalar,
+    # so only the 'p' kind is answered here.
+    if isinstance(expr, N.SliceExpr) and isinstance(expr.obj, N.IdentExpr):
+        if env.get(expr.obj.name) == 'p':
+            return 'p'
+        # A slice of a name whose kind is unknown is a sequence the SAME KIND as
+        # the name (a str, a bytes, a list): a pointer word, never a float, so it
+        # can travel as a tagged word without boxing.
+        if env.get(expr.obj.name) is None:
+            return 'w'
+        return None
+    # `os.fspath(x)` / `fsencode(x)`: a str or bytes -- a pointer word.
+    if (isinstance(expr, N.CallExpr)
+            and ((isinstance(expr.func, N.IdentExpr) and expr.func.name in ('fspath', 'fsencode', 'fsdecode'))
+                 or (isinstance(expr.func, N.MemberExpr)
+                     and isinstance(expr.func.obj, N.IdentExpr) and expr.func.obj.name == 'os'
+                     and expr.func.member in ('fspath', 'fsencode', 'fsdecode')))):
+        return 'w'
     # `next(it)` / `next(it, default)` where `it` was bound by
     # `it = iter(<list-local>)` — the element kind carried onto `it` in
     # `_static_env` (as a ('list', kind) entry) is this expression's kind.
@@ -734,6 +951,9 @@ def _yield_kind(expr, env: dict | None = None) -> str | None:
         if expr.op in _YIELD_CMP_OPS or expr.op in ('in', 'not in'):
             return 'b'
         lk, rk = _yield_kind(expr.left, env), _yield_kind(expr.right, env)
+        if expr.op in ('or', 'and') and lk in ('p', 'w') and rk in ('p', 'w'):
+            # `dirname or basename`: the selected OPERAND, a path word
+            return 'w' if 'w' in (lk, rk) else 'p'
         if 'p' in (lk, rk):
             return 'p'
         if 'd' in (lk, rk):
@@ -751,7 +971,7 @@ def _yield_kind(expr, env: dict | None = None) -> str | None:
     return None
 
 
-_KIND_TO_SLOT_CTYPE = {'i': 'int64_t', 'b': '_Bool', 'p': 'char *', 'd': 'double',
+_KIND_TO_SLOT_CTYPE = {'w': 'int64_t', 'i': 'int64_t', 'b': '_Bool', 'p': 'char *', 'd': 'double',
                        None: 'int64_t'}
 
 
@@ -893,6 +1113,101 @@ def _conflicting_names_in(expr, env: dict | None) -> list:
     return []
 
 
+def _tagged_consumers_ok(name: str) -> bool:
+    """True when every reference to the module-level generator `name` in the
+    module being lowered is a call that is DIRECTLY the iterable of a `for`
+    loop -- the one consumer form that reads a tagged-word value slot (the loop
+    target is bound as a boxed word and rendered by `mojo_repr_boxed`). Any
+    other use (`next(g())`, `list(g())`, a comprehension, `sum`, passing `g`
+    around, `yield from g()`) would read the word as a plain int64_t, which
+    prints a box's ADDRESS: so a generator used that way keeps its refusal."""
+    for_iters = set()
+    refs = []
+    def _is_gcall(x):
+        return (isinstance(x, N.CallExpr) and isinstance(x.func, N.IdentExpr)
+                and x.func.name == name)
+    # a handle bound ONCE to the generator call (`it = g(..)`), every other use
+    # of which is `list(it)`, `for x in it`, a comprehension over it, or
+    # `it.close()`: followed as if it were the call.
+    handles = {}
+    for st in _MODULE_STMTS:
+        for n in _walk(st):
+            if (isinstance(n, N.AssignStmt) and isinstance(n.target, N.IdentExpr)
+                    and _is_gcall(n.value)):
+                handles.setdefault(n.target.name, []).append(id(n.value))
+    ok_handle_uses = set()
+    for st in _MODULE_STMTS:
+        for n in _walk(st):
+            if isinstance(n, N.ForStmt) and isinstance(n.iterable, N.IdentExpr) \
+                    and n.iterable.name in handles:
+                ok_handle_uses.add(id(n.iterable))
+            elif (isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr)
+                    and n.func.name == 'list' and len(n.args) == 1
+                    and isinstance(n.args[0], N.IdentExpr) and n.args[0].name in handles):
+                ok_handle_uses.add(id(n.args[0]))
+            elif isinstance(n, N.Generator) and isinstance(n.iterable, N.IdentExpr) \
+                    and n.iterable.name in handles:
+                ok_handle_uses.add(id(n.iterable))
+            elif (isinstance(n, N.CallExpr) and isinstance(n.func, N.MemberExpr)
+                    and n.func.member == 'close' and isinstance(n.func.obj, N.IdentExpr)
+                    and n.func.obj.name in handles):
+                ok_handle_uses.add(id(n.func.obj))
+    handle_names = set()
+    for hn in handles:
+        if len(handles[hn]) != 1:
+            continue
+        bad = False
+        for st in _MODULE_STMTS:
+            for n in _walk(st):
+                if (isinstance(n, N.IdentExpr) and n.name == hn
+                        and id(n) not in ok_handle_uses):
+                    # the binding target itself is an IdentExpr too: skip it
+                    bad = True
+        # the target of `hn = g()` is one IdentExpr we cannot tell from a use by
+        # id; account for it
+        n_targets = sum(1 for st in _MODULE_STMTS for n in _walk(st)
+                        if isinstance(n, N.AssignStmt) and isinstance(n.target, N.IdentExpr)
+                        and n.target.name == hn)
+        n_bad = sum(1 for st in _MODULE_STMTS for n in _walk(st)
+                    if isinstance(n, N.IdentExpr) and n.name == hn and id(n) not in ok_handle_uses)
+        if n_bad == n_targets:
+            handle_names.add(hn)
+            for cid in handles[hn]:
+                for_iters.add(cid)
+    for st in _MODULE_STMTS:
+        for n in _walk(st):
+            if isinstance(n, N.ForStmt) and _is_gcall(n.iterable):
+                for_iters.add(id(n.iterable))
+            # `list(g())` / `tuple(g())` and a comprehension clause's iterable:
+            # the generator is drained into a list that carries its own kinds
+            # (`_generator_to_list`, `_compr_generator_loop`).
+            elif (isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr)
+                    and n.func.name == 'list' and len(n.args) == 1
+                    and _is_gcall(n.args[0])):
+                for_iters.add(id(n.args[0]))
+            elif isinstance(n, N.Generator) and _is_gcall(n.iterable):
+                for_iters.add(id(n.iterable))
+            elif isinstance(n, N.YieldFromExpr) and _is_gcall(n.value):
+                # `yield from g()` forwards the words; the delegating generator
+                # is itself tagged (its delegated kind is 'w')
+                for_iters.add(id(n.value))
+            if isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr) \
+                    and n.func.name == name:
+                refs.append(id(n))
+            elif isinstance(n, N.IdentExpr) and n.name == name:
+                refs.append(None)           # a bare reference (not a call)
+    for r in refs:
+        if r is None:
+            continue
+        if r not in for_iters:
+            return False
+    # bare IdentExprs: the func IdentExpr of every call is also an IdentExpr
+    bare = 0
+    calls = sum(1 for r in refs if r is not None)
+    idents = sum(1 for r in refs if r is None)
+    return idents == calls
+
+
 def _generator_value_kind(fn: N.FunctionDef,
                           env: dict | None = None,
                           delegated=None) -> tuple[str | None, str]:
@@ -973,6 +1288,23 @@ def _generator_value_kind(fn: N.FunctionDef,
         return None, ('a `yield` whose value kind could not be resolved, '
                       'beside one that requires a non-int64_t value slot '
                       '(v0)')
+    # TAGGED WORD: yields of KNOWN, different scalar kinds (str / int / float /
+    # bool) that no single C type holds. The solver cannot keep this tight, so
+    # the value slot is the boxed word the runtime already knows how to read
+    # (`mojo_repr_boxed`, `_boxed_vals`): a float travels as a `mojo_box_from_double`
+    # box, a bool as a `mojo_box_from_bool` box, a string as its pointer, an int
+    # as itself -- and the consumer renders each by what it IS. Only when EVERY
+    # yield has a known kind (a hole stays a refusal, above) and the kinds are
+    # not just the int/bool pair the DECISION below already widens.
+    _tag_kinds = kinds - {None}
+    if (None not in kinds
+            and (_tag_kinds <= {'i', 'p', 'd', 'b', 'w'})
+            and ('w' in _tag_kinds or (len(_tag_kinds) >= 2 and _tag_kinds != {'i', 'b'}))
+            and not any(isinstance(x, N.YieldFromExpr) and delegated is not None
+                        and delegated(x.value, fn) in ('d', 'b')
+                        for x in _walk(fn))
+            and _tagged_consumers_ok(fn.name)):
+        return 'w', ''
     if 'd' in kinds and (kinds - {'d', None}):
         return None, f'mixed float / non-float yields (v0)'
     if 'd' in kinds:
@@ -1158,6 +1490,7 @@ _GEN_VALUE_KINDS: dict[str, tuple[str | None, str]] = {}
 # `_scan_callsite_param_kinds`, which calls `_static_env` too — so that
 # every `_static_env` caller in the pipeline sees the same sibling set.
 _GEN_DEFS: dict[str, object] = {}
+_MODULE_STMTS: list = []     # the module being lowered (for whole-module reference scans)
 # Names whose kind is being computed RIGHT NOW, module-level so that the
 # recursion guard covers `_static_env` -> `_sibling_gen_kind` -> resolve ->
 # `_static_env` re-entry as well as the direct `resolve` -> `resolve` case.
@@ -1182,9 +1515,12 @@ def _register_generator_defs(stmts) -> None:
     _GEN_DEFS.clear()
     _GEN_VALUE_KINDS.clear()
     _GEN_RESOLVING.clear()
+    _LIST_RET_KINDS.clear()
+    _PTR_RET_KINDS.clear()
     for s in stmts:
         if isinstance(s, N.FunctionDef) and getattr(s, 'is_generator', False):
             _GEN_DEFS[s.name] = s
+    _MODULE_STMTS[:] = list(stmts)
 
 
 def _resolve_gen_kind(name):
@@ -1326,6 +1662,10 @@ def _delegated_yield_kind(value, fn: N.FunctionDef = None):
     if not isinstance(target, N.IdentExpr):
         return None
     name = _cm_as_str(target.name)
+    if name not in _GEN_DEFS:
+        _lk = _list_return_elem_kind(name)       # `yield from <plain fn returning a list>`
+        if _lk is not None:
+            return _lk
     if name not in _GEN_DEFS and fn is not None:
         name = (_callable_param_generator_names(fn) or {}).get(name, '')
     if not name:
@@ -1790,6 +2130,12 @@ def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
                        f'attribute {_nc_attr[1]!r} (v0: only literal class '
                        f'attributes are seeded; a value naming a generator '
                        f'local is never assigned)')
+    if _uses_cpp_only_runtime(fn):
+        # `os.scandir` & co. are lowered by the C++20-coroutine path
+        # (cpp_core's DirEntry / fd-relative posix idiom passes); this path's
+        # ordinary codegen would call the uncompiled `os` module at run time.
+        return False, ('uses os.scandir / fd-relative posix calls, which only the '
+                       'C++20-coroutine path lowers')
     kind, why = _generator_value_kind(fn, _static_env(fn, struct_def),
                                    _delegated_yield_kind)
     if kind is None:
@@ -1798,6 +2144,26 @@ def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
     if _amb:
         return False, _ambiguous_slot_message(_amb, 'stack-switch')
     return True, ''
+
+
+def _uses_cpp_only_runtime(fn: N.FunctionDef) -> bool:
+    """Does `fn`'s body call `scandir` / `os.scandir`, or the fd-relative
+    `stat(..)` / `close(..)` / `open(.., dir_fd=)`, which only the C++20
+    coroutine emitter knows how to lower?"""
+    for n in _walk(fn):
+        if not isinstance(n, N.CallExpr):
+            continue
+        f = n.func
+        if isinstance(f, N.IdentExpr) and f.name in ('scandir', 'fsencode'):
+            return True
+        if (isinstance(f, N.MemberExpr) and isinstance(f.obj, N.IdentExpr)
+                and f.obj.name in ('os', 'posix')
+                and f.member in ('scandir', 'fsencode', 'stat', 'lstat', 'close', 'open')):
+            return True
+        if isinstance(f, N.IdentExpr) and f.name == 'open' \
+                and any(k == 'dir_fd' for k, _v in (n.kwargs or [])):
+            return True
+    return False
 
 
 def _ambiguous_slot_message(names: set, slot_noun: str) -> str:
@@ -3920,6 +4286,14 @@ def _rewrite_expr(node, cvar: str, kind: str, env=None):
             return _call('__mojo_coro_yield_i', [_c_ident(cvar), boxed])
         val = (_rewrite_expr(node.value, cvar, kind, env) if node.value is not None
                else N.IntLiteral(value=0))
+        if kind == 'w':
+            # tagged word: box a float / bool by ITS static kind so the
+            # consumer can tell it from an int
+            _sk = _yield_kind(node.value, env) if node.value is not None else 'i'
+            if _sk == 'd':
+                val = _call('mojo_box_from_double', [val])
+            elif _sk == 'b':
+                val = _call('mojo_box_from_bool', [val])
         call = _call(_yield_shim(kind), [_c_ident(cvar), val])
         if kind == 'd':
             # `x = yield <double>`: the shim returns the raw int64_t slot
@@ -4427,6 +4801,16 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
         _CALLSITE_PARAM_KINDS.clear()
         _CALLSITE_PARAM_CONFLICTS.clear()
         _PLAIN_CALLSITE_PARAM_KINDS.clear()
+        # The generator-kind memo (`_GEN_VALUE_KINDS`) is a function of these
+        # tables: a generator's kind reads its unannotated params' call-site
+        # kinds through `_static_env`. The scan itself reaches the memo
+        # (`_argkind` -> `_yield_kind` -> `_resolve_gen_kind`) BEFORE these
+        # tables are filled, so an answer memoized there is stale by the time
+        # classification finishes. Measured: `def _g(p): yield p` called only
+        # as `_g("abc")` memoized as 'i' and read back through `yield from _g(...)`
+        # as an int64_t, printing the string's address at exit 0. Drop it here.
+        _GEN_VALUE_KINDS.clear()
+        _GEN_RESOLVING.clear()
         for gname, slot in seen.items():
             resolved = {}
             conflicted = set()
@@ -4460,6 +4844,11 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
                 # undefined-symbol regression")
                 if len(kinds) == 1:
                     resolved[pname] = list(kinds)[0]
+                elif kinds == {'p', 'w'}:
+                    # a string at one call site and a pointer word (a str OR a
+                    # bytes -- `os.fspath(x)`) at another: both are pointers, so
+                    # the parameter is a pointer word
+                    resolved[pname] = 'w'
                 elif len(kinds) > 1:
                     # Genuinely ambiguous: two call sites pass provably
                     # different kinds for the same slot. Record it so
@@ -4538,6 +4927,156 @@ def _scan_value_used_functions(stmts) -> None:
                     _VALUE_USED_FUNCS.add(dv.name)
 
 
+def _is_closing_item(item) -> bool:
+    e = item.expr
+    return (isinstance(e, N.CallExpr) and len(e.args) == 1 and not e.kwargs
+            and ((isinstance(e.func, N.MemberExpr) and e.func.member == 'closing'
+                  and isinstance(e.func.obj, N.IdentExpr) and e.func.obj.name == 'contextlib')
+                 or (isinstance(e.func, N.IdentExpr) and e.func.name == 'closing'))
+            and isinstance(item.alias, (str, N.IdentExpr)))
+
+
+def _lower_closing_withs(stmts: list) -> None:
+    """`with contextlib.closing(E) as v: BODY` -> `v = E` then `try: BODY
+    finally: v.close()` (what the context manager does), in every statement
+    list of `stmts`, recursively, IN PLACE. A generator handle read through
+    `closing(...)`'s `__enter__` value is otherwise an opaque call result no
+    consumer can follow (Lib/glob.py's `_listdir`)."""
+    i = 0
+    while i < len(stmts):
+        st = stmts[i]
+        if (isinstance(st, N.WithStmt) and len(st.items) == 1
+                and not getattr(st, 'is_async', False) and _is_closing_item(st.items[0])):
+            it = st.items[0]
+            name = it.alias.name if isinstance(it.alias, N.IdentExpr) else it.alias
+            _lower_closing_withs(st.body)
+            bind = N.AssignStmt(target=N.IdentExpr(name=name), value=it.expr.args[0],
+                                line=st.line, col=st.col)
+            fin = [N.ExprStmt(value=N.CallExpr(
+                func=N.MemberExpr(obj=N.IdentExpr(name=name), member='close'),
+                args=[], line=st.line, col=st.col), line=st.line, col=st.col)]
+            stmts[i:i + 1] = [bind, N.TryStmt(body=st.body, handlers=[], else_body=None,
+                                              finally_body=fin, line=st.line, col=st.col)]
+            i += 2
+            continue
+        for fld in ('body', 'then_body', 'else_body', 'finally_body'):
+            sub = getattr(st, fld, None)
+            if isinstance(sub, list):
+                _lower_closing_withs(sub)
+        for el in (getattr(st, 'elifs', None) or []):
+            if isinstance(el, (list, tuple)) and len(el) > 1 and isinstance(el[1], list):
+                _lower_closing_withs(el[1])
+        for h in (getattr(st, 'handlers', None) or []):
+            if isinstance(getattr(h, 'body', None), list):
+                _lower_closing_withs(h.body)
+        for m in (getattr(st, 'methods', None) or []):
+            if isinstance(getattr(m, 'body', None), list):
+                _lower_closing_withs(m.body)
+        i += 1
+
+
+def _lower_callable_choices(stmts: list) -> None:
+    """A local that is bound to one of several MODULE-LEVEL functions
+    (`glob_in_dir = _glob2` / `_glob1` / `_glob0`, Lib/glob.py's `_iglob`) and
+    only ever CALLED as the iterable of a `for` loop is a dispatch index:
+    `glob_in_dir = <i>` and the loop is copied once per candidate under an
+    `if glob_in_dir == <i>:` chain. Every candidate is then a direct call to a
+    known function, which the generator machinery can type. Anything else the
+    local is used for leaves the function untouched. IN PLACE, per function."""
+    import copy as _copy
+    fn_names = set(st.name for st in stmts if isinstance(st, N.FunctionDef))
+
+    def _rewrite_fn(fd):
+        binds: dict = {}
+        for n in _walk(fd):
+            if isinstance(n, N.AssignStmt) and isinstance(n.target, N.IdentExpr):
+                binds.setdefault(n.target.name, []).append(n)
+        params = set(pp[0] if isinstance(pp, (tuple, list)) else pp for pp in fd.params)
+        cands = {}
+        for nm, assigns in binds.items():
+            if nm in params or len(assigns) < 2:
+                continue
+            fs = []
+            ok = True
+            for a in assigns:
+                if isinstance(a.value, N.IdentExpr) and a.value.name in fn_names:
+                    if a.value.name not in fs:
+                        fs.append(a.value.name)
+                else:
+                    ok = False
+            if ok and len(fs) >= 2:
+                cands[nm] = fs
+        if not cands:
+            return
+        # every other use must be the callee of a `for` iterable
+        good = {}
+        for nm, fs in cands.items():
+            loops = []
+            bad = False
+            total = sum(1 for n in _walk(fd) if isinstance(n, N.IdentExpr) and n.name == nm)
+            n_assign = len(binds[nm])
+            n_loop = 0
+            for n in _walk(fd):
+                if (isinstance(n, N.ForStmt) and isinstance(n.iterable, N.CallExpr)
+                        and isinstance(n.iterable.func, N.IdentExpr)
+                        and n.iterable.func.name == nm):
+                    n_loop += 1
+            # identifier occurrences: one per assignment target + one per loop callee
+            if total == n_assign + n_loop and n_loop >= 1:
+                good[nm] = fs
+        if not good:
+            return
+
+        def _walk_lists(body):
+            for i, st in enumerate(list(body)):
+                yield body, i
+                for fld in ('body', 'then_body', 'else_body', 'finally_body'):
+                    sub = getattr(st, fld, None)
+                    if isinstance(sub, list):
+                        yield from _walk_lists(sub)
+                for el in (getattr(st, 'elifs', None) or []):
+                    if isinstance(el, (list, tuple)) and len(el) > 1 and isinstance(el[1], list):
+                        yield from _walk_lists(el[1])
+                for h in (getattr(st, 'handlers', None) or []):
+                    if isinstance(getattr(h, 'body', None), list):
+                        yield from _walk_lists(h.body)
+
+        for body, i in list(_walk_lists(fd.body)):
+            st = body[i]
+            if (isinstance(st, N.AssignStmt) and isinstance(st.target, N.IdentExpr)
+                    and st.target.name in good and isinstance(st.value, N.IdentExpr)):
+                fs = good[st.target.name]
+                st.value = N.IntLiteral(value=fs.index(st.value.name),
+                                        line=st.line, col=st.col)
+        for body, i in list(_walk_lists(fd.body)):
+            st = body[i]
+            if (isinstance(st, N.ForStmt) and isinstance(st.iterable, N.CallExpr)
+                    and isinstance(st.iterable.func, N.IdentExpr)
+                    and st.iterable.func.name in good):
+                nm = st.iterable.func.name
+                fs = good[nm]
+                branches = []
+                for k, fname in enumerate(fs):
+                    loop = _copy.deepcopy(st)
+                    loop.iterable.func = N.IdentExpr(name=fname, line=st.line, col=st.col)
+                    branches.append(loop)
+                chain = branches[-1:]
+                for k in range(len(fs) - 2, -1, -1):
+                    chain = [N.IfStmt(
+                        condition=N.BinaryOp(op='==', left=N.IdentExpr(name=nm),
+                                             right=N.IntLiteral(value=k)),
+                        then_body=[branches[k]], elifs=[], else_body=chain,
+                        line=st.line, col=st.col)]
+                body[i] = chain[0]
+
+    for st in stmts:
+        if isinstance(st, N.FunctionDef):
+            _rewrite_fn(st)
+        elif isinstance(st, N.StructDef):
+            for m in (getattr(st, 'methods', None) or []):
+                _rewrite_fn(m)
+
+
 def lower(stmts: list, closure_stmts=(),
           module_name: str | None = None) -> tuple[list, list]:
     """Returns (new_stmts, coro_meta). coro_meta entries are dicts:
@@ -4557,6 +5096,8 @@ def lower(stmts: list, closure_stmts=(),
     _STRUCT_NAMES.clear()
     _UNTHREADABLE_NESTED_ASYNC_GENS.clear()
     _STRUCT_NAMES.update(s.name for s in stmts if isinstance(s, N.StructDef))
+    _lower_closing_withs(stmts)
+    _lower_callable_choices(stmts)
     _scan_value_used_functions(stmts)
     if not enabled():
         # The C++ backend (`MOJO_CORO=cpp`, the escape hatch) lowers nested
@@ -5730,6 +6271,11 @@ def _generator_result_escapes(outer: N.FunctionDef, name: str) -> bool:
             safe_names.add(id(n.target))
         elif _is_next_of(n) and isinstance(n.args[0], N.IdentExpr):
             safe_names.add(id(n.args[0]))
+        elif (isinstance(n, N.MemberExpr) and isinstance(n.obj, N.IdentExpr)
+                and n.member in ('close', 'send', 'throw')):
+            # `gen.close()` / `gen.send(v)` / `gen.throw(e)` drive the
+            # generator in place; the object does not leave the frame.
+            safe_names.add(id(n.obj))
     for n in nodes:
         if isinstance(n, N.IdentExpr) and n.name in local_names and id(n) not in safe_names:
             return True
@@ -6423,6 +6969,10 @@ def register(gen, meta: list) -> None:
     # Nested-async mutable closure capture (bugs/hard/CODEGEN_coro_nested_
     # async_closure_capture.md) -- v0 int-literal-local heap box, see
     # _nested_async_capture_plan's own docstring.
+    gen.func_param_types.setdefault('mojo_box_from_double', ['double'])
+    gen.func_return_types.setdefault('mojo_box_from_double', 'int64_t')
+    gen.func_param_types.setdefault('mojo_box_from_bool', ['int64_t'])
+    gen.func_return_types.setdefault('mojo_box_from_bool', 'int64_t')
     gen.func_param_types.setdefault(_BOX_NEW, ['int64_t'])
     gen.func_return_types.setdefault(_BOX_NEW, 'int64_t')
     gen.func_param_types.setdefault(_BOX_GET, ['int64_t'])
@@ -6499,6 +7049,9 @@ def register(gen, meta: list) -> None:
         api = {
             'base': m['base'],
             'value_ctype': m['value_ctype'],
+            # a TAGGED-word generator: the consumer binds the value as a boxed
+            # word (`gen._boxed_vals`, rendered by `mojo_repr_boxed`)
+            'mixed_slots': m.get('value_kind') == 'w',
             'params': m['params'],
             # Which SOURCE parameter, if any, is the receiver slot the
             # caller must fill: 'self' for an instance method, 'cls' for a

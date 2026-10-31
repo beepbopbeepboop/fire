@@ -45,6 +45,36 @@ concurrently with other `compile_formal` calls in the same process. Either the
 compiler's state is per-build, or every entry point that touches the shared
 state is serialised behind one lock, and the choice is recorded.
 
+## Status (2026-10-30)
+
+- **The lock half landed.** `formal/build.py` serialises every in-process
+  entry into the compiler behind one `_COMPILE_LOCK` wrapping
+  `compile_formal` — the choice this doc asked to be recorded, per-build
+  state being the production answer and the lock the smaller change. The
+  `compile_formal_dylib` entry is not wrapped: the tools that call it
+  directly build in their own process, and on the executable path it is
+  nested inside `compile_formal` (through `build_module_dylib`), where the
+  lock is already held. `test_formal_link_accounting.py` gained
+  `test_concurrent_compile_formal_calls_agree_with_the_serial_answer`
+  (two `compile_formal` calls in one process, one a module-constant program,
+  must answer the serial bytes) and
+  `test_libsystem_handle_racing_callers_read_the_settled_answer` (eight
+  threads on a cold libsystem state, twenty-five rounds; measured, the
+  pre-fix marker was read wrong once in twenty single rounds, so one round
+  would not have been a guard). All checks green under memslot.
+- **What remains: the sentinel half, blocked out-of-tree.** The fix to
+  `model._libsystem_handle` (the in-flight `False` marker replaced by a
+  double-checked load behind `model._LIBSYSTEM_LOAD_LOCK`, with a racing
+  caller blocking on the lock rather than reading the marker) is drafted in
+  the worktree copy of `formal/model.py` and was verified green here before
+  an in-progress stash-pop conflict landed in the same file (the hunk in the
+  `parameter_kinds_by_call_site` region, which does not overlap the sentinel
+  region, so resolving it keeps the drafted fix). Until that conflict is
+  resolved the file does not parse and the sentinel fix cannot be committed;
+  the doc stays open for that half and for step 4 (the harness going back to
+  a thread pool, once both halves are in — the process pool remains the
+  correct design until then).
+
 ## Next steps
 
 1. Enumerate the module-level mutable state reached by `compile_formal`: every
@@ -65,5 +95,8 @@ state is serialised behind one lock, and the choice is recorded.
 
 ## Related
 
-- `bugs/FORMAL_examples_harness_exits_zero_on_all_skip.md`: the all-SKIP run
-  exiting 0 is what made this look green for so long.
+- The all-SKIP run exiting 0 — what made this look green for so long — was
+  resolved 2026-10-30 in `test_x86_64_examples.py` itself: the harness now
+  fails the run when SKIP exceeds its stated bound (`MAX_SKIP`), so a run
+  whose arm64 reference is unavailable for most examples can no longer pass
+  the gate silently.
