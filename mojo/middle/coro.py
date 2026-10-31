@@ -286,6 +286,26 @@ _OS_PATH_FN_KINDS = {'join': 'p', 'basename': 'p', 'dirname': 'p',
                      'islink': 'b', 'isdir': 'b', 'isfile': 'b', 'exists': 'b'}
 
 
+# `os.path.<fn>` runtime functions whose result is a PAIR of strings for a str
+# argument (`d, b = os.path.split(p)`). Their unpacked elements are str-kinded.
+_OS_PATH_PAIR_FNS = ('split', 'splitext')
+
+
+def _os_path_pair_call(v) -> bool:
+    """True when `v` is a direct call to one of `_OS_PATH_PAIR_FNS` through
+    `os.path` / `posixpath` / `path`, i.e. a 2-tuple-of-str result."""
+    if not isinstance(v, N.CallExpr):
+        return False
+    fn = v.func
+    if not isinstance(fn, N.MemberExpr) or fn.member not in _OS_PATH_PAIR_FNS:
+        return False
+    o = fn.obj
+    if isinstance(o, N.MemberExpr) and o.member == 'path' \
+            and isinstance(o.obj, N.IdentExpr) and o.obj.name == 'os':
+        return True
+    return isinstance(o, N.IdentExpr) and o.name in ('path', 'posixpath')
+
+
 def _os_path_call_kind(v) -> str | None:
     """The result kind of a DIRECT call `os.path.<fn>(...)` (or `path.<fn>` /
     `posixpath.<fn>`) to a runtime-implemented function, else None."""
@@ -451,6 +471,16 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
             tgt, val, ann = n.target.name, n.value, getattr(n, 'type_ann', None)
         elif isinstance(n, N.VarDecl):
             tgt, val, ann = n.name, n.value, n.type_ann
+        # `dirname, basename = os.path.split(p)`: each unpacked element is a
+        # str. Without this, `basename` is an untypable local, so passing it to
+        # a generator is a call-site HOLE and the generator is refused (the
+        # `_iglob`/`_glob2` refusal in Lib/glob.py).
+        if (isinstance(n, N.AssignStmt) and isinstance(n.target, N.TupleExpr)
+                and _os_path_pair_call(n.value)):
+            for _t in n.target.elements:
+                if isinstance(_t, N.IdentExpr):
+                    str_kinds.setdefault(_t.name, set()).add('p')
+                    env.setdefault(_t.name, 'p')
         if tgt is not None:
             k = _ann_kind(ann)
             if k is None:
@@ -702,6 +732,13 @@ def _yield_kind(expr, env: dict | None = None) -> str | None:
         v = env.get(expr.obj.name)
         if isinstance(v, tuple) and v[0] == 'list':
             return v[1]
+        return None
+    # `pattern[:0]` on a str-kinded local is a str (Lib/glob.py's `_glob2`
+    # yields exactly that). A slice of a list-local is a list, not a scalar,
+    # so only the 'p' kind is answered here.
+    if isinstance(expr, N.SliceExpr) and isinstance(expr.obj, N.IdentExpr):
+        if env.get(expr.obj.name) == 'p':
+            return 'p'
         return None
     # `next(it)` / `next(it, default)` where `it` was bound by
     # `it = iter(<list-local>)` — the element kind carried onto `it` in
@@ -4448,6 +4485,16 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
         _CALLSITE_PARAM_KINDS.clear()
         _CALLSITE_PARAM_CONFLICTS.clear()
         _PLAIN_CALLSITE_PARAM_KINDS.clear()
+        # The generator-kind memo (`_GEN_VALUE_KINDS`) is a function of these
+        # tables: a generator's kind reads its unannotated params' call-site
+        # kinds through `_static_env`. The scan itself reaches the memo
+        # (`_argkind` -> `_yield_kind` -> `_resolve_gen_kind`) BEFORE these
+        # tables are filled, so an answer memoized there is stale by the time
+        # classification finishes. Measured: `def _g(p): yield p` called only
+        # as `_g("abc")` memoized as 'i' and read back through `yield from _g(...)`
+        # as an int64_t, printing the string's address at exit 0. Drop it here.
+        _GEN_VALUE_KINDS.clear()
+        _GEN_RESOLVING.clear()
         for gname, slot in seen.items():
             resolved = {}
             conflicted = set()
