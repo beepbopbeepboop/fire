@@ -18,6 +18,58 @@ NOT DONE:
 
 BUG DOC STATUS: this doc stays open until the integrator confirms byte-identical output and the parallel path is cut over (step 4).
 
+## Status (2026-10-31) — Step 0 measured ON fire.py: the dominant serial cost is not emission, and two of the three biggest items are not parallelisable work at all
+
+Method: `cProfile` around `gimple_codegen.compile_to_gimple(fire.py_src, do_imports=True, filename=fire.py)`
+(the exact call `fire.py --dump-full` makes through `compile_to_gimple_parallel_frozen`, which today forwards to
+`_run_pipeline`), 18-core machine, other agents running (load average 8-13, so wall numbers are inflated;
+shares are what to read). Profiled in-process time 91.7 s. For scale, an un-profiled `fire.py --dump-full fire.py`
+took 4m45s-5m18s wall on the same loaded machine.
+
+| item (cumulative, share of 91.3 s) | s | share | calls |
+|---|---|---|---|
+| `gen_module_impl` (all lowering, 6 `gen_module` calls) | 63.5 | 69.5% | |
+| of which `_compile_imported_module` (the 227 imported-module compiles) | 54.7 | 60.0% | 227 |
+| **`_selfhost_register_gimplegen`** (one call, once per process) | **27.4** | **30.0%** | 1 |
+| of which `_selfhost_scan_gimplegen_extra_fields` | 24.4 | 26.7% | 1 |
+| `_selfhost_parsed_source` (parse + tokenize + rewrite of the COMPILER'S OWN sources) | 28.5 | 31.2% | 845 |
+| `_parsed_import` (the closure's own modules) | 25.3 | 27.7% | 1406 |
+| **`ast_rewriter.rewrite`** (all 101 parsed modules) | **20.4** | **22.3%** | 101 (662,556 `_rewrite_node`) |
+| `py_tokenize` | 19.1 | 20.9% | 1033 |
+| `parse_module` | 17.3 | 19.0% | 101 |
+| `coro.lower` (`_scan_callsite_param_kinds` 10.5 s) | 13.2 | 14.4% | 6 |
+| `_detect_generator` / `_scan_yield_bearing` | 8.3 | 9.1% | 3.0 M |
+| per-function emission, `gen_func` (previous profile: ~21-23%) | not separately re-measured | | |
+
+What this changes in the plan:
+
+1. **27% is a once-per-process scan that re-parses the compiler's own ~60 sources** (`emit_funcs.py:1224`
+   `_selfhost_scan_gimplegen_extra_fields` -> `_selfhost_parsed_source`, `funcs_shared.py:1963`, cached
+   in-process by (path, mtime)). Its OUTPUT is a tiny `{attr: ctype}` dict and is a pure function of the file
+   contents. Fork-parallelising it would still pay it once per worker; persisting it removes it. The fix is a
+   content-keyed on-disk cache for `_selfhost_parsed_source` (pickled rewritten AST) or for the scan's result,
+   keyed by file SHA + `cas.selfhost_fingerprint()` (the larger set that covers the parser and rewriter; NOT
+   `compiler_fingerprint()`, which omits them). **Constraint:** these functions are compiled into the self-hosted
+   binary (`mojo/middle/funcs_shared.py`, `emit_funcs.py`), so the cache must live behind a Python-only seam that
+   the binary does not lower (or be skipped when running compiled); the owed gate for that edit is
+   `test_selfhost.py` + `make bootstrap`, which is why it is a separate round and not in this one.
+2. **22% is `ast_rewriter`** (`candidate_rules` -> `try_rewrite` -> `_term_discriminator`: 618,792 `try_rewrite`
+   calls, 3.2 M `_term_discriminator` calls, 105 M `isinstance`). It is per-node dispatch cost, not I/O: a rule
+   index keyed by node class (dict lookup instead of testing every rule) is a single-process win that stacks with
+   any parallelism, and it must produce an identical tree (`cmp` of `.ast` over the corpus).
+3. Parallelising the 101 closure parses (the original step 2) is bounded by the ~19% parse + ~20% tokenize + the
+   rewrite, i.e. up to ~45% of the profile, but only the closure modules, not the 27% scan; and unpickling a large
+   AST back from a Pool worker costs real time. Measure that unpickle cost BEFORE building it (one module,
+   `pickle.dumps(ast)` size and `loads` time).
+4. The owner's 1.1x ceiling decision applied to emission only. Items 1 and 2 are not emission and do not need the
+   frozen snapshot, so they are not subject to it.
+
+Implementation order (each step independently `cmp`-verifiable, gate = `compile_stdlib.py` + the targeted test):
+(a) rule index in `ast_rewriter.candidate_rules` -> identical `.ast` for every `*.py`/`*.mojo` in the repo;
+(b) persist the gimplegen field scan's result keyed by `selfhost_fingerprint` + file hashes, Python-only seam;
+(c) measure pickle round-trip of one parsed module, then decide on the Pool parse;
+(d) only then the frozen-snapshot emission. Re-run this profile after each and record the table here.
+
 ## Measured / known
 
 - `fire.py --dump-full F.mojo` is one call (`fire.py` ~line 1556): `gimple_codegen.compile_to_gimple(src, do_imports=True)`.
