@@ -339,3 +339,31 @@ Run ONE row (mailbox, `do_imports=True`, cold store) with the
 zipfile 62 / mailbox 66) must be re-measured after whichever branch lands; a
 fix is progress only if the census drops or the moved modules' values match
 CPython.
+
+### Round 2026-10-31b — the owed probe lands as a tool (light worker; no full-closure run)
+
+**Landed:** `tools/probe_coro_close_refusal.py`. It wraps
+`emit_exprs._lower_IdentExpr` for one name (default `_coro`) and prints one
+`PROBE` line per read with every table the 2026-10-29 decision list names
+(`_global_generator_api`, `_global_generator_api_poisoned`,
+`_imported_global_accessors`, `_captures`, `_narrowed_exprs`,
+`_boxed_mut_locals`, `_in_toplevel_gen`, `_async_api`,
+`_unsupported_generator_names`), plus `gen.module_name`, the returned ctype/temp
+and the carried api's base. The wrapper only observes; the compile is unchanged.
+`test_regress_coro_close_closure.py::test_probe_observes_read_without_changing_it`
+pins that the wrapped read returns the real arm's result.
+
+**Verified:** `test_regress_coro_close_closure.py` PASS (direct run, peak 0.0 GB);
+a two-module smoke (`import sib` + idiom in the entry) compiles OK under the
+probe and prints the expected `PROBE` line (`api_table=True`, carried base
+`__mgco__c2`).
+
+**The owed run (integrator, heavy — one row only):**
+
+    python3 tools/memslot.py --gb 8 --label probe-coro -- \
+        python3 tools/probe_coro_close_refusal.py <row entry .py> --do-imports
+
+Use the mailbox row's entry (cold store). The last `PROBE` line before
+`COMPILE: REFUSED` is the read that lost the api; read its flags against the
+2026-10-31 decision list. This round does not move the reject census and changes
+no codegen behaviour.
