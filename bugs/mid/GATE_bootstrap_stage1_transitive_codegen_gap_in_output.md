@@ -23,7 +23,7 @@ The job is a whole-closure `fire.py --dump-full` (about 20 minutes). It does not
    find which import is unresolved.
 3. Candidate cause to check first: `myinterpreter.py` now contains a generator
    (`_mojo_struct_iter_steps`, 422ab8a9) and `next(iterator, *default)`; see
-   `GATE_bootstrap_stage1_dumps_myinterpreter_exit_1.md` (its fix is being landed from `work/s1`). A
+   the stage1 myinterpreter.py dump failure (its fix is being landed from `work/s1`). A
    transitive compile that reaches `myinterpreter` would print exactly `# ERROR: compiling imported
    module myinterpreter`.
 
