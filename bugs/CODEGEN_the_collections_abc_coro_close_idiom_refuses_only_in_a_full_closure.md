@@ -288,3 +288,54 @@ gen, the fix is to carry generator-ness through the export (module_loader's
 `var` export, plus the defining accessor's C type kept consistent with the
 export's declared type), not in the read arm. Full-gate verdict needed on the
 four rows' reject censuses (56/48/62/66) before this lands as a closure fix.
+
+### Round 2026-10-31 — planning round (light worker; no full-closure run; no code change)
+
+**State of the landed partials.** `5161214e9`, `7c2224ee9` and `76672d9e0` are
+on master. `test_regress_coro_close_closure.py` passes on HEAD
+(`python3 tools/memslot.py --gb 8 --label coro-close -- python3 test_regress_coro_close_closure.py`
+→ `PASS: accessor-read generator api carry`, peak 0.1 GB). Those commits fix
+the accessor-read arm but are NOT established as the closure cause (see the
+2026-10-30 rounds).
+
+**What the api record is (read, not run).** `_note_global_generator_store`
+(emit_stmts.py:1001) stores `gen._generator_var_api[v]`, whose `'base'` key is
+the C symbol family of one compiled generator. The consumers build calls from
+it: `cpp_core.py:1590-1605` / `:1752` / `:7986` (`{base}_start`, resume
+dispatch), and `cpp_async.py:1209-1210` (`{base}_start` as a function address).
+So an api is only meaningful in a translation unit that can see
+`{base}_start` and its resume symbols. A cross-module carry is therefore not
+just a type/table fix: the importer also needs those symbols declared, and the
+defining module must emit them with external linkage.
+
+**Decision the next round needs (still the owed heavy probe, integrator).**
+Run ONE row (mailbox, `do_imports=True`, cold store) with the
+`_lower_IdentExpr('_coro')` dump from the 2026-10-29 round. Add
+`gen._generator_var_api` keys and the `base` of any hit, and record WHICH gen
+(`gen.module_name`) performs each `_coro` read. Then:
+
+- If the reading gen has no `_global_generator_api['_coro']` and the defining
+  module's gen is a different object: the cross-module transport is the cause.
+  Next round lands it as: (a) the defining module's `_note_global_generator_store`
+  result is exported in its module_loader entry (`kind: 'global_var'` gains a
+  `generator_base` / `value_ctype` field, filled from the compiled gen, not
+  the text scan); (b) the importer's `_emit_imported_global_accessors` seeds
+  `_global_generator_api` from that field and declares the `{base}_start` /
+  resume symbols extern (the same `#ifndef` guard pattern as the
+  `std`-import extern block in `emit_infra.py` ~1520-1535); (c) poisoning
+  still applies to any second writer. Test: two-module fixture in
+  `test_gimple_generator_runner.py::run_module_global_generator_tests`, the
+  idiom in the entry, compile + run, output matched to CPython.
+- If the reading gen HAS the api and the refusal still fires: the loss is
+  inside the closure's read path, not the transport. The dump names which of
+  `_captures` / `_narrowed_exprs` / `_boxed_mut_locals` / `_tagged_dyn_src`
+  returned early; that arm then carries the api (the 2026-10-30 fix is the
+  template).
+- If `_unsupported_generator_names` holds `_coro`: the defining `async def` was
+  skipped by relaxed gating (module_gen.py:11103-11127); the fix is to keep it
+  compiled when eligible, not to carry anything.
+
+**Gate verdict owed.** The four rows' reject censuses (socket 56 / parsing 48 /
+zipfile 62 / mailbox 66) must be re-measured after whichever branch lands; a
+fix is progress only if the census drops or the moved modules' values match
+CPython.
