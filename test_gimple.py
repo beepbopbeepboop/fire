@@ -8144,6 +8144,15 @@ def mk_bool():
 def use_bool_factory():
     print(mk_bool()())
 use_bool_factory()
+def mk_str(p: str):
+    def inner(x: str) -> str:
+        return p + x
+    return inner
+def use_str_factory():
+    g = mk_str("<")
+    print(g(">"))
+    print(mk_str("[")("]"))
+use_str_factory()
 '''
         want = _cpython_stdout(src)
         if want is None:

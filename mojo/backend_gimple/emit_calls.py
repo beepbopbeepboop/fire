@@ -2029,7 +2029,11 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         if isinstance(node.func, (gimple_ctypes.CallExpr, gimple_ctypes.LambdaExpr)):
             _callee_t, _callee_v = gen.lower_expr(node.func)
             if _callee_t == 'MojoBoundMethod *':
-                return gen._lower_bound_method_call_value(_callee_v, node)
+                # `factory()(...)` where the factory returns a capturing
+                # closure: its return type rides on the CallExpr node, the
+                # same way the bare-pointer arm below reads it.
+                return gen._lower_bound_method_call_value(
+                    _callee_v, node, getattr(node.func, '_callable_ret', 'int64_t'))
             if _callee_t == 'void *' or _callee_t in ('int', 'int64_t', '_Bool'):
                 # `factory()(...)`, where the factory returns a callable: the
                 # callee's own return type rides on its CallExpr node (see

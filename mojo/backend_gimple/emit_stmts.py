@@ -2855,6 +2855,12 @@ def _gen_stmt_ReturnStmt(gen, node):
         if gen.current_func_name and v in gen._callable_ret_types:
             gen._return_callable_ret_types[gen.current_func_name] = \
                 gen._callable_ret_types[v]
+        # A returned CAPTURING closure is a `MojoBoundMethod *` value, which
+        # its lowering recorded in `_bound_method_ret_types` (not the table
+        # above), so the factory's return type is read from there.
+        if gen.current_func_name and v in gen._bound_method_ret_types:
+            gen._return_bound_method_ret_types[gen.current_func_name] = \
+                gen._bound_method_ret_types[v]
         if gen.current_func_name and v in gen._func_value_names:
             gen._return_func_value_names[gen.current_func_name] = \
                 gen._func_value_names[v]

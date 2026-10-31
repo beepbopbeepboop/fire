@@ -1773,9 +1773,11 @@ def carry_callable_ret_from_call(gen, value_node, dst: str) -> None:
     `return` wrote. This reads the callee name straight off the CallExpr, which
     is the one spelling that has it.
 
-    Only `_callable_ret_types`, because that is where a non-capturing closure or
-    a lifted free function lands; a callee returning a `MojoBoundMethod *` is
-    the `_bound_method_ret_types` family and is not claimed here.
+    Two tables, one per representation a returned callable can have: a
+    non-capturing closure or a lifted free function lands in
+    `_callable_ret_types`, a capturing closure (a `MojoBoundMethod *`) in
+    `_bound_method_ret_types`. The callee's `return` records each under its
+    own table, and this hop copies each to the destination.
 
     A bound method bound through a call is NOT covered, and deliberately so:
     `f = m.truthy` is an AssignStmt whose RHS is a MemberExpr, not a call,
@@ -1793,6 +1795,12 @@ def carry_callable_ret_from_call(gen, value_node, dst: str) -> None:
     _rt = gen._return_callable_ret_types.get(_as_str(_f.name))
     if _rt:
         gen._callable_ret_types[dst] = _rt
+    # A capturing closure's return type rides the bound-method table: the
+    # destination holds a `MojoBoundMethod *`, which `g(...)` dispatches
+    # through `mojo_bound_method_call_N` and reads the type from there.
+    _brt = gen._return_bound_method_ret_types.get(_as_str(_f.name))
+    if _brt:
+        gen._bound_method_ret_types[dst] = _brt
 
     _rn = getattr(gen, '_return_func_value_names', {}).get(_as_str(_f.name))
     if _rn:

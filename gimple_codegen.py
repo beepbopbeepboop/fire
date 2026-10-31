@@ -1634,6 +1634,12 @@ class GimpleGen:
         # table cannot match it. See
         # “CODEGEN: a lambda whose body is a bool returns int64 0/1”.
         self._return_callable_ret_types: dict[str, str] = {}
+        # The same fact for a CAPTURING closure (a `MojoBoundMethod *`
+        # value, recorded in `_bound_method_ret_types`): a factory returning
+        # one is `def mk(p): def inner(x): ...; return inner`, and the
+        # caller's `g = mk(...)` must carry the return type into
+        # `_bound_method_ret_types` for `g(...)` to narrow its box.
+        self._return_bound_method_ret_types: dict[str, str] = {}
         self._return_func_value_names: dict[str, str] = {}
         # Function name -> per-slot C types of a MULTI-VALUE return's
         # tuple handle (`return cfg, Model(cfg)`). Deliberately module
@@ -5064,13 +5070,20 @@ class GimpleGen:
         # differs except this key.
         if isinstance(node, CallExpr) and isinstance(node.func, IdentExpr):
             _fname = _as_str(node.func.name)
-            _frt = self._return_callable_ret_types.get(_fname)
+            _frt = self._return_callable_ret_for(_fname)
             if _frt is None and _fname in getattr(self, '_closure_envs', ()):
-                _frt = self._return_callable_ret_types.get(
+                _frt = self._return_callable_ret_for(
                     f'{self.current_func_name}_{_fname}')
             if _frt:
                 node._callable_ret = _frt
         return _lt, _lv
+    def _return_callable_ret_for(self, fname: str):
+        """The return type a callable returned by `fname` carries, from
+        whichever table its representation landed in: a bare function
+        pointer (`_return_callable_ret_types`) or a capturing closure's
+        `MojoBoundMethod *` (`_return_bound_method_ret_types`)."""
+        return (self._return_callable_ret_types.get(fname)
+                or self._return_bound_method_ret_types.get(fname))
     def _lower_IntLiteral(self, node) -> tuple[str, str]:
         return gex._lower_IntLiteral(self, node)
     def _lower_FloatLiteral(self, node) -> tuple[str, str]:
