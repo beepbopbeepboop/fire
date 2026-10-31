@@ -5085,6 +5085,13 @@ main()
     # assertion for the same reason: `in` asks the key domain and nothing else,
     # so it is the one spelling of the read that cannot be answered by the
     # value's own accessor (a kind-4 slot's word IS 0).
+    #
+    # KNOWN WRONG, pinned on purpose so the row stays about reachability: the
+    # first line's `1` is the bool VALUE read as an int. CPython prints
+    # `True 1`. The read drops the bool kind for every dict, string keys too
+    # (`d["a"] = True; print(d["a"])` also prints `1`), so it is the value-kind
+    # read gap in CODEGEN_dict_slot_read_loses_its_value_kind, not a container-
+    # key defect. Update this expectation when that read lands.
     test_gimple_stdout("gimple_container_keyed_store_reaches_its_own_read", """\
 def main():
     b = {}
@@ -5101,6 +5108,23 @@ def main():
     print(s[(1, 2)], len(s))
 main()
 """, "1 1\nTrue 1\n3.5 1\nR 1\n")
+
+    # The string half of the same seam: a string slot built by a CALL, not a
+    # literal. A homogeneous string tuple used to record no kinds, so the key
+    # renderer read the slot's word as an int and keyed the dict by the slot's
+    # ADDRESS -- two calls to `k("a")` are two addresses, so the read missed.
+    # Recording the kinds for a homogeneous string row (`_literal_needs_kinds`)
+    # is what lets `mojo_dict_key_for` render the slot by content.
+    test_gimple_stdout("gimple_runtime_string_tuple_key_is_content_keyed", """\
+def k(s):
+    return s + "!"
+def main():
+    d = {}
+    d[(k("a"),)] = "R"
+    print(d[(k("a"),)], len(d))
+    print(d.get((k("b"),), "none"), len(d))
+main()
+""", "R 1\nnone 1\n")
 
     # The other half of that doc, and the expensive one: a MISSING tuple key
     # grew the dict by one entry per lookup, which is where ~16 GB of the live

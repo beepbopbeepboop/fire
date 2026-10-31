@@ -6313,7 +6313,7 @@ def _provably_int_word(gen, el, ev: str) -> bool:
     return ev in gen._int_word_vals
 
 
-def _literal_needs_kinds(gen, elem: str, kinds: str, lowered=None) -> bool:
+def _literal_needs_kinds(gen, elem: str, kinds: str, lowered=None, is_tuple=False) -> bool:
     """Whether a list/tuple LITERAL must record `mojo_list_set_kinds`.
 
     Two independent reasons, both of which the runtime already supports:
@@ -6337,7 +6337,10 @@ def _literal_needs_kinds(gen, elem: str, kinds: str, lowered=None) -> bool:
     ks = set(kinds)
     if len(ks) > 1 or 'n' in ks:
         return True
-    if not _is_scalar_elem_kind(elem):
+    # A STRING row is recorded only for a tuple: a tuple is the one display that
+    # becomes a dict KEY (`mojo_dict_key_for` renders its slots by kind), and a
+    # list of strings never is, so a list keeps no row and no allocation.
+    if not _is_scalar_elem_kind(elem) and not (is_tuple and elem == 'char *'):
         return False
     # A homogeneous INTEGER row is only true of integers: an `int64_t`
     # element that is a boxed node or string would be rendered as its address
@@ -6885,7 +6888,7 @@ def _lower_tuple_literal(gen, node: gimple_ctypes.TupleExpr) -> tuple[str, str]:
             if _as_str(_pl[1]) == 'int64_t' and not _provably_int_word(gen, _pl[0], _as_str(_pl[2])):
                 _force_record_t = False
                 break
-    if (not _has_spread) and (_literal_needs_kinds(gen, elem, _tkinds, lowered) or _force_record_t):
+    if (not _has_spread) and (_literal_needs_kinds(gen, elem, _tkinds, lowered, is_tuple=True) or _force_record_t):
         gen._emit_call('void', '', 'mojo_list_set_kinds',
                        [('MojoList *', t),
                         ('const char *', gen._intern_string(_tkinds))])
