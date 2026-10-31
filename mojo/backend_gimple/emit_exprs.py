@@ -56,6 +56,7 @@ from mojo.middle.types import _BOXED_CONTAINER_CTYPES
 # emit_calls the way its other callers reach it, rather than imported here, so
 # there is exactly one spelling of it in the tree.
 from mojo.middle.calls_shared import _callable_value_symbol
+from mojo.middle.calls_shared import _RUNTIME_CALLABLE_VALUES as _RUNTIME_CALLABLE_VALUES_NAMES
 from mojo.middle.calls_shared import _py_box_expr
 
 def _lower_strided(gen, node, store: bool):
@@ -787,6 +788,13 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         # local read returns the variable's own C name, which is the whole
         # difference between the two.
         ginf.carry_callable_ret_types(gen, name, t)
+        # …and "this global holds a function VALUE" (a decorated `def` rebound
+        # to a global, whose repr name the rebinding recorded on the NAME): the
+        # same hop, for the same reason, so `print(step)` formats the read-back
+        # temp as a function and not as the int64_t box it is stored in.
+        _gfrn = gen._global_func_value_names.get(name)
+        if _gfrn is not None:
+            gen._func_value_names[t] = _gfrn
         # …and "this global holds a compiled generator/coroutine": every
         # consumer of the handle (`.close()`, `next()`, `for`) recovers the
         # resume/value/destroy api by looking up the VALUE it was handed, so
@@ -1292,7 +1300,36 @@ def _mark_boxed_field_read(gen, struct_name, member, field_type, t) -> None:
         gen._dyn_word_vals.add(t)
 
 
+def _stat_module_constant(gen, node):
+    """`stat.S_IRUSR` & co: the `stat` module's integer constants, resolved at
+    compile time from the host's own `stat` (values are platform ABI, fixed for
+    the build). None unless `node` is `<stat module name>.<UPPER_CASE int>`."""
+    if not (isinstance(node.obj, gimple_ctypes.IdentExpr)
+            and node.obj.name not in gen.var_types
+            and node.member.isupper() and node.member.startswith('S_')):
+        return None
+    _imp = getattr(gen, 'imported_symbols', {}).get(node.obj.name) or {}
+    if node.obj.name != 'stat' and _imp.get('module') != 'stat':
+        return None
+    import stat as _stat_mod
+    _v = getattr(_stat_mod, node.member, None)
+    if isinstance(_v, int) and not isinstance(_v, bool):
+        return _v
+    return None
+
+
 def _lower_MemberExpr(gen, node) -> tuple[str, str]:
+    _sc = _stat_module_constant(gen, node)
+    if _sc is not None:
+        return 'int64_t', gen._new_val('int64_t', f'(int64_t){_sc}')
+    # `os.walk` / `glob.glob` / `glob.iglob` as a VALUE (passed, stored): the
+    # runtime's own function, by address (see calls_shared._callable_value_symbol).
+    if (isinstance(node.obj, gimple_ctypes.IdentExpr)
+            and node.obj.name not in gen.var_types
+            and f'{node.obj.name}.{node.member}' in _RUNTIME_CALLABLE_VALUES_NAMES):
+        _rcv = _callable_value_symbol(gen, node)
+        if _rcv is not None:
+            return _rcv
     # Flow-sensitive `isinstance` narrowing for a MemberExpr receiver
     # (`if isinstance(node.target, IdentExpr): ... node.target.name`). The
     # guarded expression's cast temp was materialised at the `if` — return
@@ -1480,7 +1517,7 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
                 and node.member in gen._class_attrs.get(_cur_struct, {})):
             _gname = gen._class_attrs[_cur_struct][node.member]
             _gtype = gen._global_var_types.get(_gname, 'int64_t')
-            return _gtype, gen._new_val(_gtype, f'{_gname}')
+            return _gtype, gmp._cattr_read(gen, _gname, _gtype)
 
         # `f.attr` read where `f` is a free function memoizing a value on
         # itself (`f._cached`) — see the `_func_attrs` pre-scan (Phase 1,
@@ -1828,11 +1865,12 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             # bare type name. Without this a `ClassName.CONST` string/int
             # constant stubbed to 0 (or, when the base was an opaque module
             # handle, raised AttributeError at runtime).
-            _cattrs = gen._class_attrs.get(module_name)
+            _cattrs = gen._class_attrs.get(
+                gmp._resolve_fn_scoped_struct_name(gen, module_name))
             if _cattrs and node.member in _cattrs:
                 gname = _cattrs[node.member]
                 gtype = gen._global_var_types.get(gname, 'int64_t')
-                _gv = gen._new_val(gtype, f'{gname}')
+                _gv = gmp._cattr_read(gen, gname, gtype)
                 # Carry the attribute's recorded ELEMENT type onto the read
                 # value, so iterating or subscripting it downstream uses
                 # the right accessor. A class-level container is stored as
@@ -2605,14 +2643,28 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         val_ast = gen._subst_idents(aliases[node.member],
                                      {'Self': node.obj, struct_name: node.obj})
         return gen.lower_expr(val_ast)
-    # Class-level attribute (not an instance field) — redirect to global variable
+    # Class-level attribute (not an instance field) — redirect to global variable.
+    # A bare class-name read goes to the synthesized backing global / the
+    # current per-execution cell; an instance read goes through the instance
+    # first (its dynamic storage shadows the class attribute), see
+    # `_cattr_instance_read`.
     class_attrs = gen._class_attrs
     if struct_name in class_attrs and node.member in class_attrs[struct_name]:
         gname = class_attrs[struct_name][node.member]
         # Use the actual declared type of the global (stored in _global_var_types)
         gtype = gen._global_var_types.get(gname, 'int64_t')
-        t = gen._new_val(gtype, f'{gname}')
+        if isinstance(node.obj, gimple_ctypes.IdentExpr) and node.obj.name == struct_name:
+            t = gmp._cattr_read(gen, gname, gtype)
+        else:
+            t = gmp._cattr_instance_read(gen, ov, ot, node.member, gname, gtype)
         return gtype, t
+    elif (struct_name in class_attrs and node.member in class_attrs[struct_name]
+            and ot.endswith(' *')):
+        # Instance read: dynamic storage first (an instance write shadows
+        # the class attribute), then the cell this instance was built under.
+        gname = class_attrs[struct_name][node.member]
+        gtype = gen._global_var_types.get(gname, 'int64_t')
+        return gmp._cattr_instance_dyn_read(gen, ov, ot, node.member, gname, gtype)
     elif struct_name in gen.struct_field_types and ot.endswith(' *'):
         # The struct defines its own `__getattr__` (compiled body ⇒ bare
         # `{Struct}___getattr__` key in func_return_types, or an overload
@@ -3139,8 +3191,10 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
             return fast
 
     lt, lv = gen.lower_expr(node.left)
-    lt, lv = ginf._unbox_float_param_operand(gen, node.left, lt, lv)
     rt, rv = gen.lower_expr(node.right)
+    if ginf._float_param_arith_applies(gen, node.op, node.left, lt, node.right, rt):
+        return 'int64_t', ginf._float_param_arith(gen, node.op, node.left, lt, lv, node.right, rt, rv)
+    lt, lv = ginf._unbox_float_param_operand(gen, node.left, lt, lv)
     rt, rv = ginf._unbox_float_param_operand(gen, node.right, rt, rv)
 
     # `x.prop OP y` (or `y OP x.prop`) where `prop` is a 0-arg
@@ -3604,6 +3658,23 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     still guaranteeing each shared operand is evaluated exactly once —
     re-lowering left_node/right_node here would break that guarantee
     for a side-effecting comparand shared between two links."""
+    # Int / Int is true division: Python and Mojo answer a Float64, never an
+    # integer. The gate is on BOTH operands being plain signed C integers, not
+    # on the joined type: a struct operand (`Scalar[dtype]`, `Path`) whose join
+    # with an int is an integer must keep its own `/`. The first attempt gated
+    # on the join alone, broke std/pathlib/path.mojo and std/simd.mojo, and was
+    # reverted (98043fe81). The `%` floor gate further down uses the same test.
+    #
+    # It is decided HERE, on the operand types as they arrive, and not after the
+    # struct-pointer coercion below: that coercion rewrites a `P *` operand to
+    # `int64_t` (so the struct's `/` is lowered as integer arithmetic on its
+    # pointer), and a gate read after it cannot tell a struct from an int. That
+    # is how `result /= part` in std/pathlib/path.mojo became a double division
+    # of a pointer, which gcc rejects. The `%` gate has the same ordering issue
+    # in principle, but its operands reach it unchanged, so it is left alone.
+    int_true_div = op == '/' and all(
+        t in gimple_ctypes._SCALAR_INT_TYPES and not t.startswith('uint')
+        for t in (lt, rt))
     # A builtin-`bytes` subclass instance (`class _Extra(bytes)`) carries
     # its payload in a hidden `_data: MojoBytes *` field — an inherited
     # binary op (`x == y`, `x + y`, `x % y`, `x * n`) operates on that
@@ -4600,6 +4671,8 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         rt, rv = gen._resolve_container_kind(rt, rv)
     c_op      = gimple_ctypes._BIN_OPS.get(op, op)
     res_type  = '_Bool' if op in gimple_ctypes._CMP_OPS else gimple_ctypes.TypeLattice.join(lt, rt)
+    if int_true_div:
+        res_type = 'double'
 
     # Type system: Check BIT_WIDTH_PRESERVATION for arithmetic ops
     # `a | b` where either operand is a real MojoDict* is Dict.__or__ (key
@@ -4674,7 +4747,7 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # casts below rebind `lv`/`rv` to fresh temps, so without a record carried
     # across them the tail would see two unknown operands and mark nothing.
     # Cast operands to result type to satisfy GIMPLE strict type checking
-    arith_type = gimple_ctypes.TypeLattice.join(lt, rt)  # common type for arithmetic
+    arith_type = 'double' if int_true_div else gimple_ctypes.TypeLattice.join(lt, rt)  # common type for arithmetic
     if lt != arith_type and arith_type not in ('_Bool',) and not arith_type.endswith(' *'):
         ct = gen._new_temp(arith_type)
         gen._safe_coerce_emit(lt, arith_type, lv, ct)
@@ -5228,6 +5301,15 @@ def _lower_percent_width_args(gen, rhs_exprs, arg_i: int, dyn: int) -> list:
 def _lower_floordiv(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
     lt, lv = gen.lower_expr(node.left)
     rt, rv = gen.lower_expr(node.right)
+    # A float-possible parameter beside an integer argument: the answer
+    # depends on whether the parameter holds an int or a double (in which
+    # case it is a double floor), the same shape as `_float_param_arith`.
+    # `//` is dispatched here before the arithmetic tail, so `//` needs its
+    # own float branch; the generic `__mojo_floordiv` path only sees plain
+    # ints/doubles and does not know how to print a double-side result.
+    from mojo.backend_gimple import emit_infra as ginf
+    if ginf._float_param_arith_applies(gen, '//', node.left, lt, node.right, rt):
+        return 'int64_t', ginf._float_param_arith(gen, '//', node.left, lt, lv, node.right, rt, rv)
     # Boxed-PythonObject floor division (2026-10-21 part 4, further,
     # test_python_object): `a // b` on box locals answers through the
     # runtime's word-class checks (int result, zero-division RAISE, double

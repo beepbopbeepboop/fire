@@ -119,6 +119,12 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
     # its own honest, already-existing refusal instead.
     if node.is_async and not node.is_generator:
         return
+    # A nested sync generator that reads enclosing names was compiled to its
+    # own coroutine unit by _compile_nested_generator_closures; like the async
+    # case above it has no ordinary closure body here. Its call sites resolve
+    # through _nested_generator_api, keyed (current_func_name, name).
+    if node.is_generator and (gen.current_func_name, node.name) in gen._nested_generator_api:
+        return
     outer_closures = getattr(gen, '_all_closures', {}).get(
         gen.current_func_name, {})
     ci = outer_closures.get(node.name)
@@ -209,8 +215,14 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
                 gen._emit(f"  {env_var}->{gimple_ctypes._c_field_name(vname)} = {tmp};")
             else:
                 # Use _safe_coerce_emit to handle int→int64_t and other conversions.
-                local_type = gen.var_types.get(vname, vtype)
-                cname = gen._write_dest(vname)  # resolve capture path if nested
+                # A heap-boxed local's var_types entry is the BOX's pointer type,
+                # so its source is the value `*box` (see _boxed_capture_source).
+                _boxed = ggc._boxed_capture_source(gen, vname, _fct)
+                if _boxed is not None:
+                    local_type, cname = _boxed
+                else:
+                    local_type = gen.var_types.get(vname, vtype)
+                    cname = gen._write_dest(vname)  # resolve capture path if nested
                 gen._safe_coerce_emit(local_type, _fct, cname, f"{env_var}->{gimple_ctypes._c_field_name(vname)}")
         gen._closure_envs[node.name] = env_var
         # Take ownership of the environment this nested `def` just allocated,
@@ -909,7 +921,7 @@ def _gen_stmt_ComptimeForStmt(gen, node):
             # chokepoint every other store uses (`_sce_simple_emit`'s
             # literal-to-int64_t branch), so the emitted form is decided by
             # the destination type rather than re-derived per call site.
-            # See bugs/CODEGEN_imported_generic_never_elaborated_calls_
+            # See bug:CODEGEN_imported_generic_never_elaborated_calls_
             # nothing_defines.md.
             dst = gen.var_types.get(node.target) or 'int64_t'
             i = start
@@ -2940,6 +2952,9 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     _pmx = getattr(gen, '_param_nested_mixed', {}).get(node.name, ())
     for _pmx_bare in _pmx:
         gen._nested_mixed_names.add(_as_str(_pmx_bare))
+    _pem = getattr(gen, '_param_elem_mixed', {}).get(node.name, ())
+    for _pem_bare in _pem:
+        gen._maybe_kinds_vals.add(_as_str(_pem_bare))
     _pdv = getattr(gen, '_param_dict_val_types', {}).get(node.name, {})
     for bare in _pdv:
         # '' is the conflicting-call-sites marker (see _record_param_dict_val),
@@ -3145,9 +3160,12 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     gen._emitting_plain_func = True
     try:
         gen._begin_function(node)
+        gmp._cattr_restore_begin(gen, node.body)
         for stmt in node.body:
             gen.gen_stmt(stmt)
         gen._emit_fallthrough_frees(node)
+        gmp._cattr_restore_fallthrough(gen, node)
+        gmp._cattr_restore_end(gen)
     finally:
         gen._emitting_plain_func = False
 
@@ -3942,11 +3960,12 @@ def _abs_module(ref: str, base: str) -> str:
 
 
 def _register_imported_generics(gen, stmts) -> None:
-    """dylib mode: register `from M import gen` where gen is a generic free
-    function (following re-export chains) so its call sites elaborate a
-    concrete CAS-cached instantiation."""
-    if gen.do_imports:
-        return
+    """Register `from M import gen` where gen is a generic free function
+    (following re-export chains) so its call sites elaborate a concrete
+    instantiation. This runs in the inline do_imports=True path too: there a
+    bracketed call `gen[2](x)` to a sibling module's generic otherwise matched
+    no registration and lowered to a zero stub (a silent miscompile; see
+    bugs/CODEGEN_dylib_generic_inline_copies_share_one_symbol.md)."""
     for st in stmts:
         if not (isinstance(st, gimple_ctypes.FromImportStmt) and not getattr(st, 'wildcard', False)):
             continue
@@ -3975,14 +3994,8 @@ def _register_imported_generic_structs(gen, stmts) -> None:
     TYPE ARGUMENT to another generic (_elaborate_generic_call's use of
     _ensure_generic_struct, e.g. `alloc[MoveOnly[Int]]`) can resolve it.
 
-    `MoveOnly` (test_utils.types) is only re-exported through
-    `test_utils/__init__.mojo`, and `test_utils` itself isn't resolvable
-    via imports.py's MOJO_PATH-based search at all (it's a local
-    test-only package, sibling to the test files that import it, not on
-    any search path) — _find_generic_source's _parsed_import call falls
-    back to _resolve_test_relative_module for that case."""
-    if gen.do_imports:
-        return
+    Runs in the inline do_imports=True path too (same guard removal as
+    _register_imported_generics, bugs/CODEGEN_dylib_generic_inline_copies_share_one_symbol.md)."""
     for st in stmts:
         if not (isinstance(st, gimple_ctypes.FromImportStmt) and not getattr(st, 'wildcard', False)):
             continue
@@ -4396,9 +4409,12 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     # knows. The candidates computed here replace the empty set
     # `reset_no_candidates` left above.
     gen._begin_function(node)
+    gmp._cattr_restore_begin(gen, node.body)
     for stmt in node.body:
         gen.gen_stmt(stmt)
     gen._emit_fallthrough_frees(node)
+    gmp._cattr_restore_fallthrough(gen, node)
+    gmp._cattr_restore_end(gen)
 
     # Store per-overload param types so forward declarations can match definitions exactly
     param_ctypes_only = [s.rsplit(' ', 1)[0].strip() for s in param_strs]

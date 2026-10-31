@@ -10,9 +10,17 @@
       "note": "OpenRouter free router: uses the free tokens. Never falls back."
     },
     {
+      "name": "opencode-free",
+      "model": "opencode/deepseek-v4.1-flash-free",
+      "count": 1,
+      "kind": "opencode",
+      "recover_hours": 2.5,
+      "note": "DeepSeek V4.1 Flash on the free OpenCode tier. One worker. A limit waits 2.5 h."
+    },
+    {
       "name": "qwen-local",
       "model": "omlx/Qwen3.8-27B-oQ4e-mtp",
-      "count": 2,
+      "count": 1,
       "kind": "opencode",
       "recover_hours": 0,
       "note": "Local 4-bit Qwen 3.8 27B, two workers. Never changes model, never banned."
@@ -20,15 +28,15 @@
     {
       "name": "llama-work",
       "model": "llama-local/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS",
-      "count": 1,
+      "count": 0,
       "kind": "opencode",
       "recover_hours": 0,
-      "note": "Qwen3.6-35B-A3B-262k-turbo (unsloth UD-IQ4_XS) on the work machine, 10.0.0.240:8080 (opencode provider llama-local). One worker. Never changes model, never banned."
+      "note": "Spun down to 0 by the user's instruction: no new llama-work runs. Was one worker on 10.0.0.240:8080."
     },
     {
       "name": "haiku",
       "model": "claude-haiku-5-5",
-      "count": 4,
+      "count": 2,
       "kind": "claude",
       "recover_hours": 4.23,
       "note": "Paid Claude tokens (headless claude -p). Four workers (2026-10-29 17:16: 21% of the 5-hour block with the reset at 18:50 local). Goal: the block to 100% before that reset; a limit bans it until the reset. (Weekly reset Friday 11:00 is the next wall after that.)"

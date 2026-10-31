@@ -4,6 +4,86 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status 2026-10-29 (round 2) — planning guide; the blocker is a callable-signature feature, not a `for` branch
+
+**Measured this round.** `_regression_read_table_callable_reader`
+(`test_gimple_generator_runner.py`) passes on this tree under
+`python3 tools/memslot.py --gb 8 --label read-table-refusal -- python3 -c
+"import test_gimple_generator_runner as t; t._regression_read_table_callable_reader()"`
+(PASS, peak 0.1 GB). The refusal text is the one the test pins.
+
+**Why the `for` branch alone cannot land.** `_cpp_for_stmt` is not missing a
+branch. Three things are missing, and the loop needs all three:
+
+1. **The parameter is not a callable at all.** `_get_reader=__import__('csv').reader`
+   is a keyword-only parameter with a DEFAULT. `mojo/middle/types.py`
+   `_cpp_lambda_ctype(lam)` (≈ :2470) is only ever consulted for a lambda, and
+   returns `None` on ANY parameter default (`if _d is not None: return None`).
+   So `_infer_param_types` (`mojo/middle/infra_infer.py:256`) leaves
+   `_get_reader` at its `int64_t` fallback. A call through it therefore never
+   reaches a callable path.
+2. **The default has no body and no signature in this TU.** `csv.reader` is a
+   C-implemented stdlib builtin: there is no `def` to lower and no
+   `_cpp_declared` entry. Its return type (an iterator of `list[str]`) is not
+   knowable from the body. Anything that gives it a type must come from a
+   table of known foreign callables or from the caller.
+3. **Element access and `fix_row` typing.** Even with a return type, the loop
+   target needs a real element ctype (a `MojoList *` of strings, with per-slot
+   accessors), and `fix_row(row)` (`_normalize_fix_read`) must type over it.
+   Neither exists for an iterator produced by a foreign callable.
+
+**Decision needed (cannot be decided by reading the code):**
+
+- **(A) Foreign-callable signature table.** Add a table of stdlib callables
+  whose return shape this emitter can represent (`csv.reader` →
+  iterator of `list[str]`), plus a runtime iterator for it. Under this answer,
+  the default's type binds from the table and `read_table` compiles.
+  Cost: a csv runtime in `runtime/` and a per-callable table that must stay in
+  step with real CPython. This is a real feature project.
+- **(B) Call-site signature discovery.** Infer `_get_reader`'s signature from
+  the call sites in the program (`read_table(..., _get_reader=...)` and the
+  default). Under this answer, the default still needs (A) for the element
+  type in any program that calls with the default, so (B) alone does not close it.
+- **(C) Permanent refusal, documented.** Callable-valued parameters whose
+  default is a foreign C callable stay refused by name (the current behaviour,
+  pinned by the test above). Under this answer, the doc is deleted with
+  a note that `tables.py` is out of scope, and `c_analyzer/__init__.py`'s
+  `check_all` and `c_common/fsutil.py` get the same decision.
+
+**Recommended: (A).** It is the only answer that compiles the file, and the
+other two stdlib-callable files (`fsutil`'s `glob_tree`, `check_all`) need the
+same table, so the decision is shared.
+
+**Implementation plan under (A), in order:**
+
+1. `mojo/middle/types.py` `_cpp_lambda_ctype`: admit a default whose value is a
+   known foreign callable (table lookup) rather than refusing every default.
+   Test: `test_gimple_generator_runner.py` — a callable parameter with a
+   `csv.reader` default now gets `_CPP_CALLABLE_CTYPE` and the refusal test's
+   shape compiles past that point.
+2. `mojo/middle/infra_infer.py` `_infer_param_types`: consult the same table so
+   the parameter is typed as callable, not `int64_t`.
+3. `mojo/backend_gimple/cpp_core.py` `_cpp_for_stmt`: a new branch, placed
+   after the generator-handle branch and before the generic path, for
+   `for <target> in <call through a callable local>` whose callee's table
+   entry gives an iterator element ctype. Loop target gets that ctype; element
+   access through a new per-row accessor. Refuse by name if the entry is absent
+   (keep the current refusal for unknown callees).
+4. `fix_row(row)`: type-check the body with the element ctype from step 3.
+5. Flip `_regression_read_table_callable_reader` from a refusal to a
+   stdlib-output comparison (CPython ground truth via `tools/mojo`), and keep the
+   refusal test for an UNTABLED callable.
+
+**Quick proof for the next round:** step 1's test alone (a default-valued
+callable parameter with a table default compiles and calls through correctly).
+Steps 2-4 then need `read_table` itself, which is an A3-ineligible
+generator (kwonly params) on the cpp path, so it will also hit
+`coro.py`'s `_eligible` rule. Measure that before step 3.
+
+**Integrator note:** steps 1-4 are compiled-path changes (`types.py`,
+`infra_infer.py`, `cpp_core.py`), so the full `make gate` is owed for them.
+This round changed only this doc and makes no code change.
+
 ## Status 2026-10-29 — regression test added; structural blocker untouched (PARTIAL)
 
 Added `cpp_for_callable_param_read_table_like` regression in
@@ -42,7 +122,7 @@ building `tables.py`** — `_walk_tree` and `glob_tree` refused on the same
 callable-valued-parameter `for`, plus `iter_files`' variadic lambda, plus a fourth,
 `iter_many`, refused on `a call to unresolved callee 'onempty(...)'`. So the three-file
 grouping in the entry below ("one fix, three files") is really four, and
-`bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md`'s own status says its blocker list
+`the (since-fixed) c_common/fsutil.py compile failure`'s own status says its blocker list
 has shrunk from four to three — `process_filenames`' `Exception(...)` is no longer among
 them, so `onempty(...)` is the same shape reached from another module and both should be
 counted once.
@@ -142,7 +222,7 @@ iterator (it needs the loop-variable types, which come from the iterator's
 element type). This is the same family as the `check_all` blocker in
 `bugs/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___init__.md` and the
 `unsupported for-loop iterable type: CallExpr` family in
-`bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md` — i.e. three of
+`the (since-fixed) c_common/fsutil.py compile failure` — i.e. three of
 my files now share ONE remaining blocker, which is the right grouping for a
 follow-up.
 

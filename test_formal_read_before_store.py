@@ -2010,6 +2010,167 @@ def check_oracle() -> list:
     return bad
 
 
+def check_loop_bound_flags() -> list:
+    """Failures in `model.loop_bound_flags`, as strings.
+
+    The reader that decides which `for` targets the EMITTED image must guard
+    with a run-time bound flag: a `for` whose range is a run-time fact
+    (`'maybe'`), whose target no path stores before it, and whose target is
+    read where it may be unbound. Both backends read this one function — the
+    flag word, the set-on-store and the check-on-read in
+    `formal/arm64_codegen.py` and `formal/x86_64_codegen.py` are the emitter
+    half of `bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`
+    — so these cases are the build-time half of the same fix. The direction
+    of every error matters: a flag the loop never takes is dead code in the
+    image, but a flag a loop misses is the old garbage answer, which is the
+    whole reason the reader is conservative where it can be.
+    """
+    cases = [
+        # The doc's residual, unchanged: the read after the loop is the one
+        # the flag exists for.
+        ("residual_read_after_loop",
+         "    for q in range(0, n):\n"
+         "        x = 1\n"
+         "    printf(\"q=%d\", q)\n"
+         "    return 0\n",
+         {"q"}),
+        # Nothing reads the target where it may be unbound: the accumulator
+        # is stored before the loop, so the flag would branch nowhere.
+        ("body_store_only_no_flag",
+         "    s = 0\n"
+         "    for q in range(0, n):\n"
+         "        s = s + 1\n"
+         "    return s\n",
+         set()),
+        # `return` is a read, and the last statement's position is where the
+        # residual lives.
+        ("return_after_loop_flags",
+         "    for q in range(0, n):\n"
+         "        x = 1\n"
+         "    return q\n",
+         {"q"}),
+        # A path that stores the target before the loop keeps its value when
+        # the range is empty, so the check there would exit where CPython
+        # prints the stored word: the soundness condition, not an
+        # optimisation.
+        ("prestored_target_no_flag",
+         "    q = 7\n"
+         "    for q in range(0, n):\n"
+         "        x = 1\n"
+         "    return q\n",
+         set()),
+        # One path stores the target before the loop and the other does not:
+        # the storing path's store is the store that SETS the flag, and the
+        # other path is the one the check fires for, so the name is flagged
+        # and the two paths get their two answers — the mixed shape a
+        # "possibly stored" exclusion would have left as the caller's
+        # leftover.
+        ("mixed_prestored_target_flags",
+         "    if n:\n"
+         "        q = 5\n"
+         "    for q in range(0, n - n):\n"
+         "        x = 1\n"
+         "    return q\n",
+         {"q"}),
+        # A parameter is stored by the caller at entry, so the loop target
+        # that shadows it holds the caller's word on the zero-iteration edge.
+        ("parameter_target_no_flag",
+         "    for n in range(0, n):\n"
+         "        x = 1\n"
+         "    return n\n",
+         set()),
+        # The preheader decides the range empty: `read_before_store` refuses
+        # the read itself, and the flag reader must not flag the loop either,
+        # which would allocate a word a refused program never emits.
+        ("never_empty_no_flag",
+         "    k = 0\n"
+         "    for q in range(0, k):\n"
+         "        x = 1\n"
+         "    return q\n",
+         set()),
+        # The preheader decides the range runs: the header's zero-iteration
+        # edge is dropped, the body's store dominates the read, and CPython
+        # answers `2` — a flag there is a word nothing branches on.
+        ("always_runs_no_flag",
+         "    k = 3\n"
+         "    for q in range(0, k):\n"
+         "        x = 1\n"
+         "    return q\n",
+         set()),
+        # The store and the read are one block, and the block's ENTRY state
+        # says the name may be unbound: only the statement order decides,
+        # which is why the read test walks a block per statement.
+        ("restore_in_same_block_no_flag",
+         "    for q in range(0, n):\n"
+         "        x = 1\n"
+         "    q = 5\n"
+         "    return q\n",
+         set()),
+        # The read is in an arm: the path to it did not store the name, and
+        # the arm's entry state is the loop-exit one.
+        ("branch_read_flags",
+         "    for q in range(0, n):\n"
+         "        x = 1\n"
+         "    if n:\n"
+         "        return q\n",
+         {"q"}),
+        # The loop's own else runs exactly when the range was empty, so its
+        # read of the target is the unbound one.
+        ("else_read_flags",
+         "    for q in range(0, n):\n"
+         "        x = 1\n"
+         "    else:\n"
+         "        return q\n",
+         {"q"}),
+        # One arm stores and the other reads: the store is not on the
+        # reading path, so the join must keep the flag.
+        ("one_arm_stores_other_reads_flags",
+         "    for q in range(0, n):\n"
+         "        x = 1\n"
+         "    if n:\n"
+         "        q = 5\n"
+         "    else:\n"
+         "        return q\n",
+         {"q"}),
+        # A bound the preheader cannot decide is a run-time fact: `n - n` is
+        # not a literal, so the emptiness is the call's, and the flag is the
+        # only answer.
+        ("arithmetic_bound_flags",
+         "    for q in range(0, n - n):\n"
+         "        x = 1\n"
+         "    return q\n",
+         {"q"}),
+        # The same fact through a local: `k` is stored before the loop, but
+        # its VALUE is a run-time fact, so the loop is `'maybe'` and the
+        # target is flagged exactly like the direct form.
+        ("runtime_computed_bound_flags",
+         "    k = n - n + 3\n"
+         "    for q in range(0, k):\n"
+         "        x = 1\n"
+         "    return q\n",
+         {"q"}),
+        # The read in expression position, not at a statement boundary:
+        # `q + 1` reads `q` where it may be unbound.
+        ("return_expr_read_flags",
+         "    for q in range(0, n):\n"
+         "        x = 1\n"
+         "    return q + 1\n",
+         {"q"}),
+    ]
+    bad = []
+    for name, body, expect in cases:
+        try:
+            fn = the_function(parse_module("def probe(n):\n" + body,
+                                           filename=f"lb_{name}.mojo"))
+        except Exception as exc:                        # noqa: BLE001
+            bad.append(f"{name}: the Mojo parser rejected the case: {exc!r}")
+            continue
+        got = set(M.loop_bound_flags(fn))
+        if got != expect:
+            bad.append(f"{name}: flagged {sorted(got)}, expected {sorted(expect)}")
+    return bad
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -2102,6 +2263,9 @@ def main():
     for problem in check_module_entry_facts():
         failed += 1
         print(f"  FAIL  module-entry-facts: {problem}")
+    for problem in check_loop_bound_flags():
+        failed += 1
+        print(f"  FAIL  loop-bound-flags: {problem}")
     for problem in check_oracle():
         failed += 1
         print(f"  FAIL  {problem}")

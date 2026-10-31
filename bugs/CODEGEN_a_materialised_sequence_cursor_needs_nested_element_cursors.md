@@ -11,7 +11,7 @@ stdlib-xfail tree and removed `test/collections/test_span.mojo` from
 its first obstacle is.
 
 Part of the family in
-`bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md`; this doc
+`the user-iterator next() bug (doc deleted in db724c4d6)`; this doc
 is only about the FOUR files whose receiver is a real pointer rather than a
 boxed integer, which is the half that does NOT need type-argument inference.
 
