@@ -345,7 +345,7 @@ def _match_node_fields(fields, term, bindings):
     return bindings
 
 
-def match_pattern(pat, term: object, bindings: dict):
+def match_pattern(pat, term: object, bindings):
     # `term: object` -- it IS any AST value (a node, a string, an int, None,
     # a list), and saying so is what keeps the self-hosted backend from
     # inferring one kind from its call sites: unannotated, the string a
@@ -721,7 +721,7 @@ def _rewrite_node(node, trie):
     return node
 
 
-def rewrite_module(stmts: list, trie) -> list:
+def rewrite_module(stmts, trie) -> list:
     """Bottom-up rewrite of every statement in a parsed module, in place."""
     for i in range(len(stmts)):
         stmts[i] = _rewrite_node(stmts[i], trie)
@@ -949,7 +949,7 @@ RULES = [
 TRIE = build_trie(RULES)
 
 
-def rewrite(stmts: list) -> list:
+def rewrite(stmts) -> list:
     """Entry point: run the full registered ruleset over a parsed module."""
     return rewrite_module(stmts, TRIE)
 

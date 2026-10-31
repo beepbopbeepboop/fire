@@ -562,7 +562,7 @@ MEASURED_PEAK_GB = {
     # (93 generated proofs, one after another) resembles. The `memwhy` on its
     # registration says the same thing and points at the doc that owns the
     # cause: `mem_read_bytes`'s `ite` chain over a 113-equation successor nest,
-    # which `bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`
+    # which `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`
     # is about and which a class change would not fix.
     'formal-x86-endtoend': (6.1, 'measured'),
     # The eleven `expect=`-marked tests that were registered and in NO BUCKET,
@@ -730,8 +730,6 @@ MEASURED_PEAK_GB = {
     'formal-ast':                             (0.1, 'measured'),
     'gimple':                                 (0.4, 'measured'),
     'gimplegenerators':                       (0.2, 'measured'),
-    'runtimere':                              (0.2, 'estimated'),
-    'globcompiled':                           (0.2, 'estimated'),
     'gimplerunner':                           (0.2, 'measured'),
     'interporacle':                           (0.1, 'measured'),
     'linkmode':                               (0.1, 'measured'),
@@ -1773,7 +1771,7 @@ test('comptime-parity', [PY, 'test_comptime_parity.py'],
 test('returned-frame-layout', [PY, 'test_returned_frame_layout.py'],
      deps=['preflight'], mem='tiny',
      desc="a frame that outlives its creator has a place to live, or is refused by name")
-# `formal/model.py`, `bugs/formal/FORMAL_known_limits.md` and
+# `formal/model.py`, `bugs/FORMAL_known_limits.md` and
 # `build_stdlib_dylib.py` are in `extra` because the check READS them, not
 # because the scanner does: `test_runtime_header_scan.py`'s census check
 # compares the figures those three quote in prose with `runtime_abi()`, and an
@@ -1787,7 +1785,7 @@ test('rthdrscan', [PY, 'test_runtime_header_scan.py'], mem='tiny', cache=True,
             RUNTIME_HDR, 'runtime/fire_sqlite3.h', 'runtime/fire_zlib.h',
             'runtime/fire_ssl.h', 'runtime/fire_ncurses.h',
             'runtime/fire_python.h',
-            'formal/model.py', 'bugs/formal/FORMAL_known_limits.md',
+            'formal/model.py', 'bugs/FORMAL_known_limits.md',
             'build_stdlib_dylib.py'],
      desc='runtime header export scan sees every declaration')
 # `mem='small'` (8 GB), down from `stage` (96) — the single biggest change in
@@ -1837,7 +1835,7 @@ test('runtimediff', [PY, 'test_runtime_diff.py'], mem='tiny', cache=True,
 # is then wrong in the same direction and every engine-vs-engine diff in the
 # tree stays clean. That is how `@classmethod`'s `cls` binding the first real
 # ARGUMENT, and `@deco` being parsed and then never applied at all, stayed
-# invisible (`bug:UNTESTED` 3.2 -- and what `interporacle` was written for).
+# invisible (`bugs/UNTESTED.md` 3.2 -- and what `interporacle` was written for).
 #
 # It ran by NOTHING until 2026-10-02: it loaded `mojo/ast_nodes.mojo`,
 # `mojo/tokenizer.mojo` and `mojo/parser.mojo`, none of which exists, and
@@ -1987,17 +1985,6 @@ test('gimplegenerators', [PY, 'test_gimple_generator_runner.py'], cache=True, me
          + CORO_RUNTIME,
      desc='compile-and-execute: every generator/coroutine shape, both backends')
 
-test('runtimere', [PY, 'test_runtime_re.py'], cache=True, mem='tiny',
-     extra=GIMPLE_SOURCES + ['test_runtime_re.py', 'build_config.py', 'exec_budget.py',
-                             RUNTIME_SRC, RUNTIME_HDR, 'runtime/fire_re_engine.inc',
-                             'runtime/test_fire_re_engine.c'],
-     desc='run-time re: the engine against CPython, and a compiled program using it')
-
-test('globcompiled', [PY, 'test_glob_compiled.py'], cache=True, mem='tiny',
-     extra=GIMPLE_SOURCES + ['test_glob_compiled.py', 'build_config.py', 'exec_budget.py',
-                             RUNTIME_SRC, RUNTIME_HDR, 'runtime/fire_re_engine.inc'],
-     desc="CPython's glob.py + fnmatch.py compiled as siblings and run on a tree, vs CPython")
-
 # [1]'s round was "the silent no-op class", and this is the test that pins it.
 # It is in `check` and not in a heavyweight bucket because it needs no Lean and
 # no library -- 212 s measured, against `sqliteruntime`'s ~100 s, so it costs
@@ -2072,12 +2059,12 @@ test('examples-parse', [PY, 'test_examples_parse.py'], cache=True, mem='tiny',
      # so the 46th example is covered the day it is added and a rename moves
      # the key. Measured by [5]: this key read 48 repo files and 0 under
      # formal/examples/, so a SyntaxError in any of the 45 could not invalidate
-     # it and a recorded PASS replayed. See bug:UNTESTED 3.1.
+     # it and a recorded PASS replayed. See bugs/UNTESTED.md 3.1.
      extra=['test_examples_parse.py', 'formal/examples'],
      desc='every formal/examples/*.mojo parses; decorator arg shapes distinct')
 
 
-# ── the test estate, inventoried by [5] in bug:UNTESTED ────────────────
+# ── the test estate, inventoried by [5] in bugs/UNTESTED.md ────────────────
 #
 # 50 test files were named by no registered spec, and 21 of those exited
 # non-zero. Measured per file here rather than read out of a bug doc, because
@@ -2199,8 +2186,7 @@ test('coro-future-await', [PY, 'test_coro_future_await.py'], mem='tiny',
           'async struct-method calls (receiver + args)')
 test('async-void-return', [PY, 'test_async_void_return.py'], mem='tiny',
      deps=['preflight'],
-desc='void-returning async functions and the device_context-shaped '
-          'repro, on both coroutine backends')
+     desc='an async function with no return value')
 test('taskgroup', [PY, 'test_taskgroup.py'], mem='tiny',
      deps=['preflight'],
      desc='TaskGroup')
@@ -2327,7 +2313,7 @@ test('coro-nested-capture', [PY, 'test_coro_nested_async_capture.py'], cache=Tru
 # `native-dumpfull` was marked with this same reason until its bootstrap chain
 # went green (2026-10-25); its registration below says why it is not marked
 # any more. This constant is
-# also the whole of §4's subject matter: bugs/hard/CODEGEN_ab_native_fails.md tables
+# also the whole of §4's subject matter: bugs/CODEGEN_ab_native_fails.md tables
 # every `expect=` job in the registry with its measured peak, its class and its
 # reservation, and a recommendation each.
 # `small` (8 GB), not `stage` (96): `fire.py build fire.py` is the
@@ -2355,7 +2341,7 @@ test('mojoc', ['mojoc'], driver='make', mem='small', excl=True,
      artifact='mojoc', inputs=[MOJO_MAIN] + PY_FILES + [RUNTIME_SRC, RUNTIME_HDR],
      desc='build the one managed native compiler (-O2 -g0)')
 # ab-native's expect= reason. Named for the 15-30 GB self-host pre-pass
-# blowup it used to describe; the blowup is closed (bugs/hard/CODEGEN_ab_native_fails.md,
+# blowup it used to describe; the blowup is closed (bugs/CODEGEN_ab_native_fails.md,
 # 2026-10-26: 0.1 GB / ~10s), so the text now states the current 1-of-30
 # divergence. `2f75609d` turned the job back from disabled= to expect=
 # referencing the constant `58192261` had removed, so every import of this
@@ -2364,7 +2350,7 @@ test('mojoc', ['mojoc'], driver='make', mem='small', excl=True,
 # re-counts the run's "Results: N passed, M failed" line against it, so a
 # second divergence cannot be absorbed silently by the marker.
 SELFHOST_TOKENIZE_BLOWUP = (
-    'bugs/hard/CODEGEN_ab_native_fails.md — 1 failing: match_stmt diverges '
+    'bugs/CODEGEN_ab_native_fails.md — 1 failing: match_stmt diverges '
     '(29/30 byte-identical; the blowup this constant was named for is '
     'closed, the run is now 0.1 GB / ~10s)')
 # `program` (55 GB), UP from `module` (24) — the one job the ratchet moves up,
@@ -2394,7 +2380,7 @@ SELFHOST_TOKENIZE_BLOWUP = (
 # for it, which is the mechanism, and `tools/suite.py --dry-run native` prints
 # the 0.
 #
-# The bug doc IS the switch: bugs/hard/CODEGEN_ab_native_fails.md is what the test
+# The bug doc IS the switch: bugs/CODEGEN_ab_native_fails.md is what the test
 # is waiting on, the repo's rule is that a fixed bug's doc is DELETED, and
 # `disabled_problems` refuses to load this registry the moment that doc is
 # gone — naming the job and saying to turn the test back on. So the test cannot
@@ -2404,7 +2390,7 @@ SELFHOST_TOKENIZE_BLOWUP = (
 test('ab-native', [PY, 'test_ab_native.py'], driver='mem', mem='program',
      memwhy='measured 20.5 GB when it last ran: the self-hosting bootstrap '
             'pre-pass this corpus legitimately triggers (see '
-            'bugs/hard/CODEGEN_ab_native_fails.md), and 1.5x is 30.75 GB, so '
+            'bugs/CODEGEN_ab_native_fails.md), and 1.5x is 30.75 GB, so '
             '`module` (24) was 85% of what it uses. Recorded, not charged: the '
             'job is disabled, so this class is what it will cost the day it is '
             'turned back on, and it reserves 0 meanwhile. Over the 4 GB line '
@@ -2417,7 +2403,7 @@ test('ab-native', [PY, 'test_ab_native.py'], driver='mem', mem='program',
 # reason and is the owner's call, because it is also the job whose run produces
 # the measurements the blowup work is steered by — a marker that cannot be
 # observed going green is weak, and this is the case for not weakening it.
-# §4 of bugs/hard/CODEGEN_ab_native_fails.md tables it with its peak, class and
+# §4 of bugs/CODEGEN_ab_native_fails.md tables it with its peak, class and
 # reservation and a recommendation, so the choice is a line rather than an
 # investigation.
 # `native-dumpfull` needs `mojoc` built first: it runs `./mojoc --dump-full`
@@ -2736,7 +2722,7 @@ test('prooflib', [PY, '-c',
 #      around the whole composed `Arm64State`, which `bv_decide`'s internal
 #      normalisation cannot be configured out of, and three budgets were
 #      measured failing to fire (`FORMAL.md` §12,
-#      `bugs/formal/FORMAL_dylib_export_loops_and_frame_bounds.md` §1).
+#      `bugs/FORMAL_dylib_export_loops_and_frame_bounds.md` §1).
 #      `formal/arm64_proof_gen.py` now
 #      emits the `if` resolved for every step it knows moves no pc, and keeps
 #      it only for the closing `ret`, which `BlockCert` genuinely cannot
@@ -2845,8 +2831,7 @@ test('formal-call-proofgen', [PY, 'test_formal_call_proof_gen.py'],
      deps=['preflight', 'prooflib'], timeout=1200, mem='tiny',
      extra=['test_formal_call_proof_gen.py', 'fire_compiler.py',
             'formal/arm64_proof_gen.py', 'formal/x86_64_proof_gen.py',
-            'formal/arm64_codegen.py', 'formal/x86_64_codegen.py',
-            'formal/build.py', 'formal/lean.py',
+            'formal/arm64_codegen.py', 'formal/build.py', 'formal/lean.py',
             'formal/types.py', 'lib/ProofLib.lean', 'lib/Refine.lean',
             'lib/X86.lean', 'lib/work.lean'],
      desc='proof generation on programs that CALL: a call must not raise, the '
@@ -2984,7 +2969,7 @@ test('formal-x86', [PY, 'test_formal.py', '--backend', 'x86_64'], j=True,
 # `formal/x86_64_endtoend_test.py`'s successor table against a corrected model —
 # and the only report of it was a bug doc. Fixed 2026-10-05
 # (`formal43-x86-endtoend-red`): 26 -> 1, and what is left is `wide_recv`'s
-# `lean::memory_exception`, which `bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`
+# `lean::memory_exception`, which `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`
 # owns and which is a resource ceiling rather than a wrong proof. That doc's own
 # 2026-10-05 Status entry carries this branch's measurement.
 #
@@ -3009,14 +2994,14 @@ test('formal-x86-endtoend', [PY, 'formal/x86_64_endtoend_test.py'],
             'debt line in ' + MEM_DEBT_DOC + ' because the generated proofs are '
             '~700 KB of `native_decide` goals and `mem_read_bytes`\'s `ite` '
             'chain, which is the subject of '
-            '`bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md` '
+            '`bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md` '
             'and not something a class change would fix.',
      expect='1 of 65: `wide_recv` only, and it is a resource ceiling rather '
             'than a wrong proof — `lean` aborts with '
             '`lean::memory_exception: excessive memory consumption detected at '
             '\'interpreter\'` (`rc=-6`) while evaluating this emitter\'s closing '
             'read over a 113-equation chain. See '
-            '`bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`. '
+            '`bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`. '
             'The other 64 are 58 proved with no sorry and 6 proved with a '
             'counted hole; the 28 that build no path tree are reported by the '
             'harness itself (19 loop, 9 uncovered form) and are not cases.',
@@ -3599,7 +3584,7 @@ test('formal-read-before-store', [PY, 'test_formal_read_before_store.py'],
 # another field's word.
 #
 # It was also the one file in the estate that no gate ran at all while
-# `bugs/formal/FORMAL_build_cost_2026-10-03.md` §3.1 rested on it, because
+# `bugs/FORMAL_build_cost_2026-10-03.md` §3.1 rested on it, because
 # `test_suite.py`'s `test_formal_*` FAMILY rule excused it on the cost rule
 # ("minutes of real compilation") — a rule made about the file rather than about
 # its expensive part, since only two of the 26 rows build. The `module table`
@@ -3670,7 +3655,7 @@ test('formal-textwrap', [PY, 'test_formal_textwrap.py'], mem='tiny',
      extra=['test_formal_textwrap.py', 'formal/hostmods/textwrap.mojo',
             'formal/hostmods/os/_syscalls.mojo'] + FORMAL_BUILD_INPUTS,
      desc="textwrap's dedent and indent, diffed against CPython on both backends")
-# The instrument behind `bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md`, and
+# The instrument behind `bugs/FORMAL_proof_coverage_census_2026-10-03.md`, and
 # only the instrument: `tools/formal_proof_breadth.py` takes 60 functions from
 # this repository's own `*.py` through `compile_formal(prove=True, …)` on both
 # architectures and reads Lean's verdict, and its numbers are quoted in a bug doc
@@ -3710,7 +3695,7 @@ test('formal-proof-breadth-tool', [PY, 'test_formal_proof_breadth.py'],
 # `formal` (test_formal.py) prints today's pass/fail against a hand-maintained
 # `EXPECTED_FAILURES` dict and throws the rest away, so a proof that got five
 # times slower, or started admitting holes, or started needing 3 GB, leaves the
-# suite green. `§0.8` of `bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md` is
+# suite green. `§0.8` of `bugs/FORMAL_proof_coverage_census_2026-10-03.md` is
 # the census's own summary and the finding it produced on its first run.
 #
 # Why it is a separate job from `formal` and not folded into it: `formal` runs
@@ -4093,7 +4078,7 @@ BUCKETS = {
     'check': ['gimple', 'runner', 'modcache', 'selfhost', 'runtimediff',
               'interp-tokenizer-oracle',
               'linkmode', 'no-new-casts', 'nonlocal', 'gimplerunner',
-              'gimplegenerators', 'runtimere', 'globcompiled', 'interporacle', 'examples-parse',
+              'gimplegenerators', 'interporacle', 'examples-parse',
 # `ptrreg-boxed-str` is master's split-out dedicated group of the
               # pointer-registry harness and `formal-ast` is the batch's
               # hostmod claim for `ast`; each was added to this bucket on its
@@ -4531,8 +4516,8 @@ BUCKETS = {
     # were the fixed `mojo_repr_bool` spelling `True` all along, and all 39
     # cases pass (re-measured 41 s / 0.1 GB, below).
     #
-    # The remaining `expect=`-marked job stays in `coroutine` rather than
-    # `check` for the reason stated once: an `expect` in `check` puts a permanently-EXPECTED
+    # The three `expect=`-marked ones stay in `coroutine` rather than `check` for
+    # the reason stated once: an `expect` in `check` puts a permanently-EXPECTED
     # line in the tally a developer reads to know their tree is fine (the same
     # reasoning that keeps `formal-module-attr`, `formal-external-call` and
     # `formal-receiver-position` in `proofs` only). `coroutine` is in `gate`, so
@@ -4543,8 +4528,7 @@ BUCKETS = {
     # (0.0-0.2 GB each, against the `small`/8 GB they carried while ungated):
     #   gimple-async-runner  41.4 s  0.1 GB  39 passed   (green since 2026-10-28)
     #   coro-detached-async  2.2 s  0.1 GB   2 passed   (was red: stale mojo_coro.c paths)
-    #   async-void-return    3.3 s  0.1 GB  11 passed   (green 2026-10-29;
-    #                                       import-time MOJO_CORO leak fixed)
+    #   async-void-return    3.3 s  0.1 GB   3 failing             (expect=)
     #   coro-future-await   11.6 s  0.1 GB  2 failing              (expect=)
     #   async-with-lock-guard 2.7 s 0.1 GB   3 passed
     #   mutable-async-capture 2.7 s 0.1 GB   2 passed
@@ -5318,16 +5302,6 @@ def execute(jobs, per_test, opts, log: Log):
         state[name] = max([s for s in (prev, status) if s],
                           key=lambda s: _RANK.get(s, 0))
 
-    def pending(name):
-        """True while a dependency has no verdict yet. `state` gets an entry
-        when the FIRST job of a fanout settles, so `name in state` alone would
-        release a dependent after one of 46 items; a passing dep is only done
-        when every one of its jobs has settled (`resolved` counts them). A
-        failing one is final already: the dependent is skipped at once."""
-        if name not in state:
-            return True
-        return state[name] in DEP_SATISFIED and resolved[name] < per_test[name]
-
     with ThreadPoolExecutor(max_workers=opts.jobs,
                             thread_name_prefix='suite') as pool:
         running: dict[object, Job] = {}
@@ -5349,7 +5323,7 @@ def execute(jobs, per_test, opts, log: Log):
             ready, blocked = [], []
             for key in sorted(waiting, key=lambda k: order[k]):
                 job = waiting[key]
-                if any(pending(d) for d in job.spec.deps):
+                if any(d not in state for d in job.spec.deps):
                     continue                     # a dep is still running
                 if all(state[d] in DEP_SATISFIED for d in job.spec.deps):
                     ready.append(job)
@@ -5378,7 +5352,7 @@ def execute(jobs, per_test, opts, log: Log):
                 # plan can ever satisfy (a test whose dep was not selected).
                 # Say so instead of spinning.
                 job = sorted(waiting.values(), key=lambda j: order[j.key])[0]
-                missing = [d for d in job.spec.deps if pending(d)]
+                missing = [d for d in job.spec.deps if d not in state]
                 res = Result(ERROR, detail='dependency not selected: '
                              + ', '.join(missing))
                 del waiting[job.key]
@@ -5782,62 +5756,6 @@ def _line(job, res, done, total, active):
 # ── Reporting ────────────────────────────────────────────────────────────────
 # The screen gets the failures and one tally. Everything per-test — a PASS
 # line each, with argv, exit code, duration and measured peak — is in the log.
-def known_bugs(name):
-    """The bug docs that already track a failing job, so a red gate says whether it is a regression someone has
-    seen before (a doc exists) or a new one (none does). A doc matches when its file name carries every word of the
-    job's name (`gimple` -> GATE_check_gimple_selfhost_...), or when its title names the job in backticks. The
-    result is a list of bugs/ paths, possibly empty; it is a pointer for the reader, not a verdict on the failure."""
-    import re as _re
-    words = [w for w in _re.split(r'[-_]', name.lower()) if w]
-    hits = []
-    for root, _dirs, files in os.walk(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'bugs')):
-        for f in files:
-            if not f.endswith('.md') or f.startswith(('OPEN_WORK', 'README')):
-                continue
-            path = os.path.normpath(os.path.join(root, f))
-            tokens = set(_re.split(r'[-_.]', f[:-3].lower()))
-            if all(w in tokens for w in words):
-                hits.append(path)
-                continue
-            try:
-                title = open(path, encoding='utf-8', errors='replace').readline()
-            except OSError:
-                continue
-            if title.startswith('#') and f'`{name}`' in title:    # the title names the job, not a passing mention
-                hits.append(path)
-    rel = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
-    return sorted(os.path.relpath(h, rel) for h in hits)
-
-
-def _hms(secs):
-    """Seconds as H:MM:SS (or M:SS under an hour), for the time line a reader compares run to run."""
-    secs = int(round(secs))
-    h, rem = divmod(secs, 3600)
-    m, sec = divmod(rem, 60)
-    return f'{h}:{m:02d}:{sec:02d}' if h else f'{m}:{sec:02d}'
-
-
-def _record_timing(wall, work, results, opts):
-    """Append this run's timing to build/suite-timings.jsonl: one line per run, with the revision and every job's
-    own time, so a slowdown can be traced to the job and the commit that caused it."""
-    import json as _json, subprocess as _sp, time as _time
-    try:
-        head = _sp.run(['git', 'rev-parse', '--short', 'HEAD'], capture_output=True, text=True, cwd=HERE).stdout.strip()
-    except OSError:
-        head = ''
-    rec = {'when': _time.strftime('%Y-%m-%dT%H:%M:%S'), 'head': head,
-           'wall_s': round(wall, 1), 'work_s': round(work, 1),
-           'jobs': {k: round(r.secs, 1) for k, r in sorted(results.items())},
-           'cached': sum(1 for r in results.values() if r.cached)}
-    path = os.path.join(HERE, '..', 'build', 'suite-timings.jsonl')
-    try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, 'a') as f:
-            f.write(_json.dumps(rec) + '\n')
-    except OSError as e:
-        print(f'  (could not record timing: {e})')
-
-
 def report(names, state, results, wall, peak, opts, log: Log):
     # Group the run's tests into the tally's counters, one lookup per test, so
     # a test cannot end up in a bucket nobody reads.
@@ -5999,23 +5917,6 @@ def report(names, state, results, wall, peak, opts, log: Log):
                       + (f'  [{_TAG.get(status, "?")}]'
                          if status != row.statuses[0] else '')
                       + (f'  — {why}' if why else ''))
-                if row.count == 'failed':
-                    # Is this a regression someone has already filed? A gate reads this line to tell a repeat
-                    # from a new break: the bug doc that tracks the job, or NEW when no doc does.
-                    docs = known_bugs(name)
-                    print('      ' + (('previously seen: ' + ', '.join(docs)) if docs
-                                      else 'NEW: no bug doc tracks this job'))
-    # How long the gate took, and where the time went. The wall clock is what a person waits for; the sum of the jobs'
-    # own times is the work done (it exceeds the wall when jobs ran in parallel, and the gap is the parallelism). The
-    # slowest jobs are the first place to look when a gate gets slower. Each run is also appended to
-    # build/suite-timings.jsonl, so "how long does the gate take" has an answer over time, not just for this run.
-    work = sum(r.secs for r in results.values())
-    slow = sorted(((r.secs, k) for k, r in results.items() if not r.cached), reverse=True)[:8]
-    print(f'time: wall {_hms(wall)} | work {_hms(work)} across {len(results)} job(s) '
-          f'({sum(1 for r in results.values() if r.cached)} replayed from cache)')
-    for secs, key in slow:
-        print(f'  slowest  {_hms(secs):>9}  {key}')
-    _record_timing(wall, work, results, opts)
     print(tally + (f'   log: {log.path}' if log.path else ''))
     # Non-zero for any member of a counter that `fails`, and for a summary that
     # could not account for every test: a run that cannot count itself has not

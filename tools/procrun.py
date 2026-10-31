@@ -214,7 +214,6 @@ def tree_usage_unique(root, ppid=None, rss=None, cpu=None):
     while stack:
         pid = stack.pop()
         count += 1
-        spent += (cpu or {}).get(pid, 0.0)
         max_total = max(max_total, rss.get(pid, 0))
         stack.extend(kids.get(pid, ()))
     return (spent, max_total * 1024, count)

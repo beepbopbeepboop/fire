@@ -48,7 +48,7 @@ THE ONE THING THIS MODULE HAS TO EXPORT, AND WHY IT IS A FUNCTION
 -----------------------------------------------------------------
 `Enum` itself, and it is a zero-argument FUNCTION returning 0 for the reason
 every constant in this directory is one: a module-level name is not exported as a
-word (`bugs/formal/FORMAL_module_state_no_storage.md`), so `os.sep` and `io.SEEK_SET`
+word (`bugs/FORMAL_module_state_no_storage.md`), so `os.sep` and `io.SEEK_SET`
 are functions too. Its VALUE is never read — the base is erased — so what it
 returns is not a claim about `Enum`, it is the smallest thing that satisfies the
 export rule. `test_formal_core_hostmods.py` pins that: the module builds, a program that
@@ -80,7 +80,7 @@ WHAT IS NOT HERE, AND WHY
     member's value on every member).
   * `unique`, `verify`, `global_enum`, `show_flag_values` — DECORATORS. Measured
     on this tree, a decorator on a function OR a class is DROPPED, silently, by
-    both backends (`bugs/mid/COMPILE_FAIL_decorator_application_dropped.md`), so
+    both backends (`bugs/COMPILE_FAIL_decorator_application_dropped.md`), so
     exporting them would make `@unique` build and enforce nothing. That is the
     worst outcome available and it is why none of them is here.
   * `EnumMeta`, `EnumType`, `EnumDict`, `EnumCheck` — TYPES. A type is not a value

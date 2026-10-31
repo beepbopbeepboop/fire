@@ -27,8 +27,8 @@ CONTEXT = ("Context: formal backend (arm64 + x86-64 Mach-O, Lean proofs). `expor
            "Lean ONLY through formal/lean.py::run_lean; narrow tests via `python3 tools/memslot.py --gb 8 --label t -- ...`; "
            "no gate for formal; >3-4 GB is a bug; never `git checkout <path>`/`git stash`. Check `python3 tools/control.py "
            "claims` and `git branch --no-merged master | grep formal` first (a merger may be landing overlapping work). "
-           "Every fix gets a test and a commit; file what you cannot fix as bugs/formal/FORMAL_*.md (no duplicates). "
-           "The latest sweep map (`ls -t bugs/formal/FORMAL_sweep_work_map_*.md | head -1`) says where the corpus stands.\n\n")
+           "Every fix gets a test and a commit; file what you cannot fix as bugs/FORMAL_*.md (no duplicates). "
+           "The latest sweep map (`ls -t bugs/FORMAL_sweep_work_map_*.md | head -1`) says where the corpus stands.\n\n")
 
 
 def state_path():
@@ -65,41 +65,16 @@ def running_claims(tasks):
 
 
 def _unlanded(t):
-    """True when the task's work is not on master. A live branch: it has commits master lacks. A branch that is gone
-    (`cleanup --branches` deletes only merged ones, but a task can also lose its branch some other way): the tip the
-    registry recorded while the branch existed must be an ancestor of master. No recorded tip means nothing proves the
-    work landed, so it counts as unlanded. Releasing the claim of such a task is how the same bug got fixed five times
-    over: the work sat unmerged for days, the doc looked open, and a new worker re-did it."""
+    """True when the task's branch still has commits master lacks. Releasing the claim of such a task is how the same
+    bug got fixed five times over: the work sat unmerged for days, the doc looked open, and a new worker re-did it."""
     br = t.get("branch")
     if not br:
         return False
-    if subprocess.run(["git", "-C", C.MAIN, "rev-parse", "--verify", "-q", "refs/heads/" + br],
-                      capture_output=True).returncode == 0:
-        r = subprocess.run(["git", "-C", C.MAIN, "rev-list", "--count", "master.." + br], capture_output=True, text=True)
-        return r.returncode == 0 and int(r.stdout.strip() or 0) > 0
-    tip = t.get("tip")
-    if not tip:
-        return True
-    return subprocess.run(["git", "-C", C.MAIN, "merge-base", "--is-ancestor", tip, "master"],
-                          capture_output=True).returncode != 0
-
-
-def _record_tips():
-    """Remember each finished task's branch tip while its branch still exists, so a later deletion of the branch
-    cannot make its work look landed or lost."""
-    with C.registry() as reg:
-        for name, t in reg.items():
-            br = t.get("branch")
-            if not br or t.get("tip") or C.state_of(t) not in ("exited-ok", "exited-err"):
-                continue
-            r = subprocess.run(["git", "-C", C.MAIN, "rev-parse", "--verify", "-q", "refs/heads/" + br],
-                               capture_output=True, text=True)
-            if r.returncode == 0:
-                t["tip"] = r.stdout.strip()
+    r = subprocess.run(["git", "-C", C.MAIN, "rev-list", "--count", "master.." + br], capture_output=True, text=True)
+    return r.returncode == 0 and int(r.stdout.strip() or 0) > 0
 
 
 def release_finished():
-    _record_tips()
     n = 0
     for name, t in C.load().items():
         st = C.state_of(t)
@@ -107,10 +82,7 @@ def release_finished():
             continue   # died of a limit/outage before doing anything: `refill` bounces it to the queue, it is not "integrated"
         if st in ("exited-ok", "exited-err") and _unlanded(t):
             continue   # its fix is on a branch master does not have yet: the doc is NOT free, or the next worker re-fixes it
-        if st in ("exited-ok", "exited-err") and not _unlanded(t):
-            # Done, and nothing left to land: "integrated" is true. A superseded task is NOT integrated: it was handed to
-            # a fixer because its branch failed to merge or broke the gate, so its state stays superseded (2026-11-02:
-            # this loop relabelled five such tasks integrated while their commits were still off master).
+        if st in ("exited-ok", "exited-err", "superseded"):
             r = subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "mark", name, "integrated"],
                                capture_output=True, text=True)
             n += r.returncode == 0
@@ -122,7 +94,7 @@ def free_docs(held, q):
     for it in q:
         taken.update(it["claims"])
     out = []
-    for p in sorted(glob.glob(os.path.join(C.MAIN, "bugs", "formal", "FORMAL_*.md"))):
+    for p in sorted(glob.glob(os.path.join(C.MAIN, "bugs", "FORMAL_*.md"))):
         b = os.path.basename(p)[:-3]
         if "sweep_work_map" in b or b == "FORMAL_known_limits":
             continue

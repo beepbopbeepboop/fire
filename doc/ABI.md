@@ -113,7 +113,7 @@ non-literal cannot be scanned.
 **The one row that is a wrong number rather than a refusal.** Every row above
 is exact or refused **when the build can fold the operands**. A variable
 operand cannot be folded, and the run-time check for it is not landed: `a = n
-+ n` with `n = 2^62` answers 0 today. `bugs/formal/FORMAL_integer_overflow_at_run_
++ n` with `n = 2^62` answers 0 today. `bugs/FORMAL_integer_overflow_at_run_
 time_is_still_untrapped.md` has the measurements, the emitters and instruction
 sequences that are written and working, and the one proof-framework obstacle
 in front of turning them on;
@@ -217,7 +217,7 @@ UTF-8 on its own.
 that is not about encoding: a composed string is a NEW buffer, and a `String`
 value here is a pointer into an image section mapped read+execute. The full
 missing-capability list is `formal/model.py::LENGTH_DEPENDENT_METHODS` and
-`bugs/formal/FORMAL_string_composition_has_no_buffer.md`; the encoding question is
+`bugs/FORMAL_string_composition_has_no_buffer.md`; the encoding question is
 downstream of both and is the easier half.
 
 **Three text builtins, one of which has an answer here.** `ord` folds for a
@@ -259,7 +259,7 @@ one the library does not implement.
 | `Bool` | one word holding 0 or 1 | **yes** |
 | `String` / `str` | `char *` | **yes** |
 | `Float64` | **one 64-bit word holding the IEEE-754 bit pattern, in a GENERAL-PURPOSE register** — not a `double` in an FP register | **NO.** This is the row that was false. |
-| `Float32`, `Float16` | a word, by the same rule; the rewrite in `formal_boundary_signature` is uniform over the C float types | no — and neither is there a `Float32` to measure yet (`bugs/formal/FORMAL_float_binary64_only.md`) |
+| `Float32`, `Float16` | a word, by the same rule; the rewrite in `formal_boundary_signature` is uniform over the C float types | no — and neither is there a `Float32` to measure yet (`bugs/FORMAL_float_binary64_only.md`) |
 
 **So a client sends and receives a `Float64` as a word and converts it itself**
 (`memcpy` to and from a `double`, or a union), and the manifest now says so:
@@ -376,7 +376,7 @@ function boundary, a module dylib and a frame slot in the return register like
 any other value. The two-word alternative — `Optional[T]` the ADDRESS of a
 `{tag, payload}` pair — is what a payload with no niche needs, it reuses the
 frame machinery this file's receiver section already documents, and its cost and
-its three measured obstacles are in `bugs/formal/FORMAL_optional_needs_a_niche.md`.
+its three measured obstacles are in `bugs/FORMAL_optional_needs_a_niche.md`.
 
 **`OptionalReg[T]` is NOT in that table and is refused by name.** It was, on the
 strength of the spelling, and that was a wrong answer rather than a missing one:
@@ -498,7 +498,7 @@ for a call in statement position: `c.bump(5)` became `c = Cell_bump(c, 5)`, and 
 mutator call in an argument position (`sink(c.bump(5))`) or a call into another
 module had nowhere to put that store and silently dropped it — the callee
 computed the new value, the caller kept the old one, and both architectures
-agreed on the wrong answer. See `bugs/formal/FORMAL_binary_heap_mojo_after_the_len_value.md`
+agreed on the wrong answer. See `bugs/FORMAL_binary_heap_mojo_after_the_len_value.md`
 and the commit on `work/formal15-mutator-return-abi`.
 
 **A client calling one of these symbols from C needs no declaration of its own**
@@ -514,7 +514,7 @@ was effectively doing — is reading a register the callee never promised.
 specified one, and it was wrong about the current design: `setjmp` is emitted
 **directly into the generated function** by the try lowering
 (`mojo/backend_gimple/emit_stmts.py` sets `gen._func_used_setjmp` and emits the
-region there — `runtime/fire_runtime.h:544` says so in as many words: *"setjmp
+region there — `runtime/fire_runtime.h:512` says so in as many words: *"setjmp
 is emitted directly in generated functions"*). That is why
 `_mojo_exc_stack` and `_mojo_exc_top` are exported `extern` globals rather than
 reached through an accessor: the generated code indexes them itself. A client
@@ -525,13 +525,13 @@ the old macro had to be a macro.
 - **`mojo_exc_pop()`** — pops the topmost frame (`void`).
 - **`mojo_raise()`** — `longjmp`s to the current frame (`void`). A real function
   with no `setjmp` of its own, so it is safe to call from a wrapper — the header
-  says so beside its own declaration (`runtime/fire_runtime.h:545`, and the
-  declaration itself at `runtime/fire_runtime.h:552`).
+  says so beside its own declaration (`runtime/fire_runtime.h:513`, and the
+  declaration itself at `runtime/fire_runtime.h:520`).
 - **`mojo_exc_msg_set` / `mojo_exc_msg_get`** — set/get the string payload of a `raise` (`void` / `char *`).
 - **`mojo_exc_obj_set` / `mojo_exc_obj_get`** — set/get the opaque typed exception object (`void *`).
 - **`mojo_exc_type_set` / `mojo_exc_type_get`** — set/get the exception type tag
   (`void` / `int64_t`, over `extern int64_t _mojo_exc_type`;
-  `runtime/fire_runtime.h:566` context, 10 / 11 header comments). Added since this section was first
+  `runtime/fire_runtime.h:532-534`). Added since this section was first
   written and load-bearing for typed exceptions.
 
 **Cleanup-thunk registry.** `mojo_raise`'s `longjmp` skips every C statement
@@ -593,20 +593,20 @@ silently going undocumented:
 
 **Coroutine boundary.** `extern int _mojo_exc_pending` with
 `mojo_exc_pending_set` / `mojo_exc_pending_get`
-(`runtime/fire_runtime.h:661-663`). This is the one entry set a client must not
+(`runtime/fire_runtime.h:612-614`). This is the one entry set a client must not
 guess at: the generated C++ generator body calls it at the `extern "C"
 _resume()` boundary, because an ordinary `yield from` delegation loop re-throws
 as a C++ exception and gets unwound for real, while GIMPLE C code calls
 `mojo_raise()` itself. A callee on that boundary that is not a live GIMPLE C
 frame must not have its `longjmp` cross ordinary live C frames — the header's
 own comment on the set explains why in terms of a suspended frame no longer
-existing (`runtime/fire_runtime.h:661-663`).
+existing (`runtime/fire_runtime.h:585-610`).
 
 ### A `*rest` parameter: a fixed-arity SPECIALIZATION per call site, and no
 ### new calling convention
 
 **Decided 2026-10-05 (`work/formal59-docs`), for the formal dylib path.**
-`bugs/formal/FORMAL_a_variadic_parameter_read_has_no_abi.md` §5 step 1 asks for this
+`bugs/FORMAL_a_variadic_parameter_read_has_no_abi.md` §5 step 1 asks for this
 decision to be written here before any emitter moves, and this is it.
 
 **The decision: `def f(head, *rest)` called with N extras becomes an ordinary
@@ -652,7 +652,7 @@ builds and computes the wrong answer rather than one that fails:
   keep it.
 * **`**kwargs` is NOT this.** A keyword collection's KEYS are not knowable at
   the call site, so there is no arity to specialize on; `**kwargs` stays refused
-  (`bugs/formal/FORMAL_a_keyword_construction_with_a_star_star_spread.md`), and the two
+  (`bugs/FORMAL_a_keyword_construction_with_a_star_star_spread.md`), and the two
   refusers are separate for that reason.
 * **The mangling is `monomorphize.mangle`'s, not a new spelling.** It is
   INJECTIVE, and `test_formal_monomorph.py::a_stated_mangled_spelling_is_the_one_
@@ -724,7 +724,7 @@ stale spelling is a defect in the CONTRACT, not only in a test, so
 `test_formal_monomorph.py::a_stated_mangled_spelling_is_the_one_the_mangler_produces`
 reads every `doc/` and `bugs/` file and fails on any mangled spelling
 `monomorphize.mangle` does not produce.
-`bugs/formal/FORMAL_generic_monomorph_scope.md` records what the mechanism does not yet
+`bugs/FORMAL_generic_monomorph_scope.md` records what the mechanism does not yet
 cover.
 
 The compiled (GIMPLE) path continues to monomorphize generics inline in its
