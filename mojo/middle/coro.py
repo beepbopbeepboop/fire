@@ -93,7 +93,7 @@ _ASYNC_BITS_SHIM = {'b': '__mojo_bits_b', 'd': '__mojo_bits_d', 'p': '__mojo_bit
 # divergent copy, so 'b' exists to make the two agree rather than because
 # the ABI needed a fifth channel -- it does not: see `_yield_shim`, a `_Bool`
 # is already a lossless int64_t 0/1 on the wire, exactly like 'i'.
-_KIND_CTYPE  = {'i': 'int64_t', 'b': '_Bool', 'p': 'char *', 'd': 'double',
+_KIND_CTYPE  = {'w': 'int64_t', 'i': 'int64_t', 'b': '_Bool', 'p': 'char *', 'd': 'double',
                 'tuple': 'MojoList *'}
 
 
@@ -813,7 +813,7 @@ def _yield_kind(expr, env: dict | None = None) -> str | None:
     return None
 
 
-_KIND_TO_SLOT_CTYPE = {'i': 'int64_t', 'b': '_Bool', 'p': 'char *', 'd': 'double',
+_KIND_TO_SLOT_CTYPE = {'w': 'int64_t', 'i': 'int64_t', 'b': '_Bool', 'p': 'char *', 'd': 'double',
                        None: 'int64_t'}
 
 
@@ -955,6 +955,39 @@ def _conflicting_names_in(expr, env: dict | None) -> list:
     return []
 
 
+def _tagged_consumers_ok(name: str) -> bool:
+    """True when every reference to the module-level generator `name` in the
+    module being lowered is a call that is DIRECTLY the iterable of a `for`
+    loop -- the one consumer form that reads a tagged-word value slot (the loop
+    target is bound as a boxed word and rendered by `mojo_repr_boxed`). Any
+    other use (`next(g())`, `list(g())`, a comprehension, `sum`, passing `g`
+    around, `yield from g()`) would read the word as a plain int64_t, which
+    prints a box's ADDRESS: so a generator used that way keeps its refusal."""
+    for_iters = set()
+    refs = []
+    for st in _MODULE_STMTS:
+        for n in _walk(st):
+            if isinstance(n, N.ForStmt) and isinstance(n.iterable, N.CallExpr) \
+                    and isinstance(n.iterable.func, N.IdentExpr) \
+                    and n.iterable.func.name == name:
+                for_iters.add(id(n.iterable))
+            if isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr) \
+                    and n.func.name == name:
+                refs.append(id(n))
+            elif isinstance(n, N.IdentExpr) and n.name == name:
+                refs.append(None)           # a bare reference (not a call)
+    for r in refs:
+        if r is None:
+            continue
+        if r not in for_iters:
+            return False
+    # bare IdentExprs: the func IdentExpr of every call is also an IdentExpr
+    bare = 0
+    calls = sum(1 for r in refs if r is not None)
+    idents = sum(1 for r in refs if r is None)
+    return idents == calls
+
+
 def _generator_value_kind(fn: N.FunctionDef,
                           env: dict | None = None,
                           delegated=None) -> tuple[str | None, str]:
@@ -1035,6 +1068,20 @@ def _generator_value_kind(fn: N.FunctionDef,
         return None, ('a `yield` whose value kind could not be resolved, '
                       'beside one that requires a non-int64_t value slot '
                       '(v0)')
+    # TAGGED WORD: yields of KNOWN, different scalar kinds (str / int / float /
+    # bool) that no single C type holds. The solver cannot keep this tight, so
+    # the value slot is the boxed word the runtime already knows how to read
+    # (`mojo_repr_boxed`, `_boxed_vals`): a float travels as a `mojo_box_from_double`
+    # box, a bool as a `mojo_box_from_bool` box, a string as its pointer, an int
+    # as itself -- and the consumer renders each by what it IS. Only when EVERY
+    # yield has a known kind (a hole stays a refusal, above) and the kinds are
+    # not just the int/bool pair the DECISION below already widens.
+    _tag_kinds = kinds - {None}
+    if (None not in kinds and len(_tag_kinds) >= 2 and _tag_kinds <= {'i', 'p', 'd', 'b'}
+            and _tag_kinds != {'i', 'b'}
+            and not any(isinstance(x, N.YieldFromExpr) for x in _walk(fn))
+            and _tagged_consumers_ok(fn.name)):
+        return 'w', ''
     if 'd' in kinds and (kinds - {'d', None}):
         return None, f'mixed float / non-float yields (v0)'
     if 'd' in kinds:
@@ -1220,6 +1267,7 @@ _GEN_VALUE_KINDS: dict[str, tuple[str | None, str]] = {}
 # `_scan_callsite_param_kinds`, which calls `_static_env` too — so that
 # every `_static_env` caller in the pipeline sees the same sibling set.
 _GEN_DEFS: dict[str, object] = {}
+_MODULE_STMTS: list = []     # the module being lowered (for whole-module reference scans)
 # Names whose kind is being computed RIGHT NOW, module-level so that the
 # recursion guard covers `_static_env` -> `_sibling_gen_kind` -> resolve ->
 # `_static_env` re-entry as well as the direct `resolve` -> `resolve` case.
@@ -1247,6 +1295,7 @@ def _register_generator_defs(stmts) -> None:
     for s in stmts:
         if isinstance(s, N.FunctionDef) and getattr(s, 'is_generator', False):
             _GEN_DEFS[s.name] = s
+    _MODULE_STMTS[:] = list(stmts)
 
 
 def _resolve_gen_kind(name):
@@ -3982,6 +4031,14 @@ def _rewrite_expr(node, cvar: str, kind: str, env=None):
             return _call('__mojo_coro_yield_i', [_c_ident(cvar), boxed])
         val = (_rewrite_expr(node.value, cvar, kind, env) if node.value is not None
                else N.IntLiteral(value=0))
+        if kind == 'w':
+            # tagged word: box a float / bool by ITS static kind so the
+            # consumer can tell it from an int
+            _sk = _yield_kind(node.value, env) if node.value is not None else 'i'
+            if _sk == 'd':
+                val = _call('mojo_box_from_double', [val])
+            elif _sk == 'b':
+                val = _call('mojo_box_from_bool', [val])
         call = _call(_yield_shim(kind), [_c_ident(cvar), val])
         if kind == 'd':
             # `x = yield <double>`: the shim returns the raw int64_t slot
@@ -6500,6 +6557,10 @@ def register(gen, meta: list) -> None:
     # Nested-async mutable closure capture (bugs/hard/CODEGEN_coro_nested_
     # async_closure_capture.md) -- v0 int-literal-local heap box, see
     # _nested_async_capture_plan's own docstring.
+    gen.func_param_types.setdefault('mojo_box_from_double', ['double'])
+    gen.func_return_types.setdefault('mojo_box_from_double', 'int64_t')
+    gen.func_param_types.setdefault('mojo_box_from_bool', ['int64_t'])
+    gen.func_return_types.setdefault('mojo_box_from_bool', 'int64_t')
     gen.func_param_types.setdefault(_BOX_NEW, ['int64_t'])
     gen.func_return_types.setdefault(_BOX_NEW, 'int64_t')
     gen.func_param_types.setdefault(_BOX_GET, ['int64_t'])
@@ -6576,6 +6637,9 @@ def register(gen, meta: list) -> None:
         api = {
             'base': m['base'],
             'value_ctype': m['value_ctype'],
+            # a TAGGED-word generator: the consumer binds the value as a boxed
+            # word (`gen._boxed_vals`, rendered by `mojo_repr_boxed`)
+            'mixed_slots': m.get('value_kind') == 'w',
             'params': m['params'],
             # Which SOURCE parameter, if any, is the receiver slot the
             # caller must fill: 'self' for an instance method, 'cls' for a

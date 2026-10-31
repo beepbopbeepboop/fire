@@ -776,6 +776,7 @@ int64_t     mojo_box_int(int64_t v);
  * `_int64_may_hold_float`): a fresh kind-'d' box, never freed, whose address
  * is the word. mojo_repr_boxed / mojo_box_double read it back. */
 int64_t     mojo_box_from_double(double v);
+int64_t     mojo_box_from_bool(int64_t v);   /* a bool in a tagged word: renders True/False */
 /* The result of `+`, `-` or `*` where one operand is a float-possible
  * parameter (see `_float_param_arith` in emit_infra.py): `ires` is the integer
  * answer and `dres` the double answer, both already computed. Returns a fresh

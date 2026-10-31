@@ -1403,25 +1403,40 @@ def run_mixed_yield_kind_tests():
     # yields agree, so the shape is REFUSED with a message naming the rule
     # and the module falls back to interpreting from source, which produces
     # the correct answer (see the note above these throw/close tests).
-    test_generator_refused("generator_mixed_yield_kinds_int_str", """\
+    test_generator_stdout("generator_mixed_yield_kinds_int_str", """\
 def gen():
     yield 1
     yield "a"
-""", "all values must agree on one scalar type")
+
+def main():
+    for v in gen():
+        print(v)
+main()
+""", "1\na\n")
 
     # The same rule, in the other order and across the other two kinds: the
     # check is on the SET of kinds, not on a particular pair.
-    test_generator_refused("generator_mixed_yield_kinds_str_int", """\
+    test_generator_stdout("generator_mixed_yield_kinds_str_int", """\
 def gen():
     yield "a"
     yield 1
-""", "all values must agree on one scalar type")
 
-    test_generator_refused("generator_mixed_yield_kinds_int_double", """\
+def main():
+    for v in gen():
+        print(v)
+main()
+""", "a\n1\n")
+
+    test_generator_stdout("generator_mixed_yield_kinds_int_double", """\
 def gen():
     yield 1
     yield 2.5
-""", "all values must agree on one scalar type")
+
+def main():
+    for v in gen():
+        print(v)
+main()
+""", "1\n2.5\n")
 
     # A `*args`-style UNPACK at a call site is a hole for every parameter it
     # could have supplied, and the call-site scan used to record it against
@@ -4888,7 +4903,7 @@ main()
     # `std::function<int64_t()>`, so both yields were typed int64_t and it
     # printed `1` / `1`. It now refuses the bool yield, because the slot it
     # was given cannot hold a bool. CPython: `True` then `1.5`.
-    test_generator_refused("generator_mixed_lambda_yield_shape2_refused", """\
+    test_generator_stdout("generator_mixed_lambda_yield_shape2_refused", """\
 def gen(n):
     f = lambda: n > 2
     yield f()
@@ -4900,7 +4915,7 @@ def main():
     for v in gen(5):
         print(v)
 main()
-""", "is typed 'int64_t' by the cpp path")
+""", "True\n1.5\n")
 
     # Regression test for generator METHOD yielding a float field.
     # Before this fix, cpp_value_slot_refusal called _static_env(fn, None),
@@ -6758,8 +6773,9 @@ go()
     # bits (`1` / `2` where CPython prints `1.5` / `2.5`) with exit 0. The
     # index `i` is an int and the element is a float, so the value slot cannot
     # carry both: the right answer is an honest refusal, which the interpreter
-    # fallback then runs correctly. The refusal names the truncation.
-    test_generator_refused("generator_enumerate_float_element_is_refused_not_truncated", """\
+    # fallback then runs correctly. (Now a TAGGED-word yield: int index beside a
+    # float element, boxed by kind, prints exactly what CPython prints.)
+    test_generator_stdout("generator_enumerate_float_element_is_refused_not_truncated", """\
 def rows(data):
     for i, r in enumerate(data):
         yield i
@@ -6769,7 +6785,7 @@ def main():
     for v in rows([1.5, 2.5]):
         print(v)
 main()
-""", "a `yield` of a float value is typed 'int64_t'")
+""", "0\n1.5\n1\n2.5\n")
 
     # The positive side of the same fix: an enumerate loop whose yields are
     # all the element (float, or string) compiles and prints the element, and
@@ -6976,6 +6992,42 @@ def main():
         print(v)
 main()
 """, "/tmp/x/\n/abs\n/tmp/x/c\n")
+
+    # A TAGGED-word yield: str / int / float / bool yields no single C type
+    # holds. The solver cannot keep it tight, so the value slot is the boxed word
+    # (floats and bools boxed by their static kind at the yield site) and the
+    # `for` consumer renders each value by what it is.
+    test_generator_stdout("generator_mixed_kind_yields_are_a_tagged_word", """\
+def g(flag):
+    yield "a"
+    yield 1
+    yield 2.5
+    yield True
+    if flag:
+        yield "z"
+
+def main():
+    for v in g(True):
+        print(v)
+    for v in g(False):
+        print(f"<{v}>")
+
+main()
+""", "a\n1\n2.5\nTrue\nz\n<a>\n<1>\n<2.5>\n<True>\n")
+
+    # ...and a tagged-word generator consumed any OTHER way (next, list,
+    # comprehension) would read the box's address as an int, so it keeps its
+    # refusal instead.
+    test_generator_refused("generator_mixed_kind_yields_consumed_by_list_refused", """\
+def g():
+    yield "a"
+    yield 1
+
+def main():
+    print(list(g()))
+
+main()
+""", "all values must agree on one scalar type")
 
     test_generator_stdout("generator_enumerate_index_yields_index", """\
 def rows(data):

@@ -1162,6 +1162,20 @@ int64_t mojo_box_from_double(double v)
     return (int64_t)(uintptr_t)bx;
 }
 
+/* A bool travelling in a TAGGED word (a generator whose yields are not all one
+ * kind): a fresh kind-'b' box, so the consumer still renders True / False and
+ * not 1 / 0. mojo_box_int / mojo_box_word read the 0/1 back. */
+int64_t mojo_box_from_bool(int64_t v)
+{
+    MojoBox *bx = (MojoBox *)malloc(sizeof(MojoBox));
+    if (!bx) return v ? 1 : 0;
+    bx->magic = MOJO_BOX_MAGIC;
+    bx->bits = v ? 1 : 0;
+    bx->kind = 'b';
+    _pr_add(&_reg_box, (uint64_t)(uintptr_t)bx);
+    return (int64_t)(uintptr_t)bx;
+}
+
 /* The answer of `a OP b` for an arithmetic operator whose operands may be
  * float boxes: the double answer as a fresh box when either operand IS a
  * double box, else the integer answer. Both answers are computed by the
@@ -1246,6 +1260,7 @@ char *mojo_repr_boxed(int64_t v)
             case 'l': return mojo_repr_list_kinds(
                 (MojoList *)(intptr_t)bx->bits, NULL);
             case 'n': return strdup("None");
+            case 'b': return strdup(bx->bits ? "True" : "False");
             default:  return mojo_repr_int(bx->bits);
         }
     }
