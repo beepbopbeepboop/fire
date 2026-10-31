@@ -1074,6 +1074,34 @@ int mojo_is_boxed(int64_t v)
     return _pr_has(&_reg_box, (uint64_t)v);
 }
 
+/* ── A list ITERATOR as a first-class value ──────────────────────────────────
+ *
+ * `it = iter(<list>)` normally lowers to a C-local cursor (see
+ * emit_stmts._try_bind_iter_cursor), which cannot cross a call. When the name
+ * is passed to another function (`_parse_varint(it)` in Lib/dis.py), it is
+ * bound to one of these instead: a heap {list, position} pair registered so a
+ * word can be asked "are you a list iterator?". `next(w)` (mojo_next_word) and
+ * `for x in w` (mojo_iter_word) consume it from the SAME position, so a callee
+ * that takes some elements leaves the rest for its caller, as CPython does. */
+typedef struct { MojoList *l; int64_t pos; } MojoListIter;
+static _PtrReg _reg_listiter;
+
+int64_t mojo_listiter_new(MojoList *l)
+{
+    MojoListIter *it = (MojoListIter *)malloc(sizeof(MojoListIter));
+    if (!it) return (int64_t)(intptr_t)l;
+    it->l = l;
+    it->pos = 0;
+    _pr_add(&_reg_listiter, (uint64_t)(uintptr_t)it);
+    return (int64_t)(intptr_t)it;
+}
+
+int mojo_is_listiter(int64_t v)
+{
+    if (v < 65536) return 0;
+    return _pr_has(&_reg_listiter, (uint64_t)v);
+}
+
 int64_t mojo_list_get_boxed(MojoList *l, int64_t i)
 {
     if (!l || i < 0 || i >= l->len) return 0;
@@ -9883,6 +9911,13 @@ MojoList *mojo_str_chars(char *s)
 MojoList *mojo_iter_word(int64_t v)
 {
     if (mojo_is_registered_list(v)) return (MojoList *)(intptr_t)v;
+    if (mojo_is_listiter(v)) {
+        /* the REMAINING elements; the iterator is exhausted by the loop */
+        MojoListIter *it = (MojoListIter *)(intptr_t)v;
+        MojoList *rest = mojo_list_slice(it->l, it->pos, mojo_list_len(it->l));
+        it->pos = mojo_list_len(it->l);
+        return rest;
+    }
     if (mojo_is_registered_dict(v)) return mojo_dict_keys((MojoDict *)(intptr_t)v);
     if (mojo_is_registered_set(v)) return mojo_set_to_list((MojoSet *)(intptr_t)v);
     { MojoList *g = mojo_iter_gen_handle(v); if (g) return g; }
@@ -14898,6 +14933,19 @@ static MojoGenSig *_gen_handle_peek(int64_t w)
 }
 int64_t mojo_next_word(int64_t w, int has_default, int64_t dflt)
 {
+    if (mojo_is_listiter(w)) {
+        MojoListIter *it = (MojoListIter *)(intptr_t)w;
+        if (it->pos >= mojo_list_len(it->l)) {
+            if (has_default) return dflt;
+            char *m = strdup("StopIteration");
+            mojo_exc_type_set(_MOJO_EXC_TAG_STOPITERATION);
+            mojo_exc_msg_set(m);
+            mojo_exc_obj_set(m);
+            mojo_raise();
+            return 0;
+        }
+        return mojo_box_word(mojo_list_get_boxed(it->l, it->pos++));
+    }
     MojoGenSig *sg = _gen_handle_peek(w);
     if (!sg) {
         if (has_default) return dflt;

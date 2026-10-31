@@ -77,6 +77,7 @@ import mojo.backend_gimple.emit_calls as _gmi_emit_calls
 import mojo.backend_gimple.cpp_async as _gca
 import mojo.backend_gimple.emit_metal as _gmi_emit_metal
 import mojo.middle.funcs_shared as funcs_shared
+import mojo.middle.itcursor as itc
 from mojo.middle.funcs_shared import param_default_pairs
 from mojo.middle.types import _TUPLE_ANN_BY_NAME, _unpack_target_leaf_names
 from mojo.middle.methods_shared import _is_selfhost_source_file
@@ -9574,6 +9575,11 @@ def gen_module_impl(self, stmts):
             return 'MojoDict *'
         if isinstance(a, gimple_ctypes.IdentExpr):
             _n = _gmi_as_str(a.name)
+            # `it = iter(<list>)` handed to a function is a runtime iterator WORD
+            # in the caller (see itcursor), not the list: no container evidence.
+            _icfn = _fn_by_name.get(_as_str(caller_name))
+            if _icfn is not None and itc.name_is_escaping_iter(_icfn.body, _n):
+                return None
             # Split the `getattr(...) or {}` from the `.get(...)` that consumes
             # it: a call on the INTERMEDIATE result of an `or` has no static
             # type on the self-hosted path, the same trap the three sibling

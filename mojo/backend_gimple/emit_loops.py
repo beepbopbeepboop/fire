@@ -911,6 +911,15 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
     # Check if this is an int64_t-stored pointer (from method call returning pointer)
     it_type = gen._get_actual_type(it_type, it_val)
 
+    # `for x in it:` where `it = iter(<list>)` was bound to a runtime list-iterator
+    # WORD because it is handed to another function (see itcursor): the loop takes
+    # whatever the callee left, and the iterator is exhausted afterwards.
+    if (isinstance(it, gimple_ctypes.IdentExpr) and it_type == 'int64_t'
+            and gen.var_types.get(it.name) == 'int64_t'
+            and itc.name_is_escaping_iter(gen._cur_func_body, it.name)):
+        it_val = gen._call_expr('MojoList *', 'mojo_iter_word', [('int64_t', it_val)])
+        it_type = 'MojoList *'
+
     # `for it in <str param>:` inside a generator body: the parameter crosses
     # the stack-switch ABI as an untyped int64_t slot, but `_static_env` proved
     # it is a string. Treat the boxed value as a `char *` and iterate it as a

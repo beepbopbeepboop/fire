@@ -55,6 +55,7 @@
 from __future__ import annotations
 
 import mojo.middle.types as gimple_ctypes
+import mojo.middle.exprtypes as gimple_exprtypes
 from fire_compiler import _as_str
 
 
@@ -186,3 +187,42 @@ def remaining(gen, rec):
     gen._emit(f"  goto {bb_merge};")
     gen._emit_label(bb_merge)
     return out
+
+# ── An iterator that crosses a call ─────────────────────────────────────────
+# A cursor is a C-local temp, so it cannot be handed to another function. When
+# `it = iter(<list>)` is passed to a user function (`_parse_varint(it)` in
+# Lib/dis.py), `it` is bound to a runtime list-iterator WORD instead
+# (`mojo_listiter_new`; `next`/`for` consume it through `mojo_next_word` /
+# `mojo_iter_word`). The caller's binding (emit_stmts) and the callee's
+# parameter typing (module_gen's call-site contract) must agree on which names
+# those are, so both ask this one function.
+
+# Calls that look at an iterator without keeping it or consuming it elsewhere.
+ITER_NON_ESCAPING_CALLS = frozenset((
+    'next', 'iter', 'list', 'tuple', 'set', 'dict', 'len', 'sum', 'min', 'max', 'sorted',
+    'enumerate', 'zip', 'any', 'all', 'print', 'reversed', 'map', 'filter', 'str', 'repr'))
+
+
+def iter_name_escapes_into_call(body, name):
+    """True when `name` appears as a bare argument of a call to some function
+    other than the builtins above, anywhere in `body`."""
+    for _n in gimple_exprtypes._walk_ast(body or []):
+        if (type(_n).__name__ == 'CallExpr' and type(_n.func).__name__ == 'IdentExpr'
+                and _as_str(_n.func.name) not in ITER_NON_ESCAPING_CALLS):
+            for _a in _n.args:
+                if type(_a).__name__ == 'IdentExpr' and _as_str(_a.name) == name:
+                    return True
+    return False
+
+
+def name_is_escaping_iter(body, name):
+    """`name` is bound by `name = iter(...)` in `body` AND escapes into a call."""
+    _bound = False
+    for _n in gimple_exprtypes._walk_ast(body or []):
+        if (type(_n).__name__ == 'AssignStmt' and type(_n.target).__name__ == 'IdentExpr'
+                and _as_str(_n.target.name) == name and type(_n.value).__name__ == 'CallExpr'
+                and type(_n.value.func).__name__ == 'IdentExpr'
+                and _as_str(_n.value.func.name) == 'iter'):
+            _bound = True
+            break
+    return _bound and iter_name_escapes_into_call(body, name)

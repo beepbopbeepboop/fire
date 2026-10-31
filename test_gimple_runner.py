@@ -3309,6 +3309,42 @@ def main():
 main()
 """, "<5>\n<6>\n")
 
+    # `it = iter(<list>)` passed to another function: a C-local cursor cannot cross
+    # the call, so `it` is a runtime list-iterator word that the callee's next()
+    # and the caller's `for` both consume from the same position
+    # (Lib/dis.py's `_parse_varint(iterator)`).
+    test_gimple_stdout("gimple_list_iterator_crosses_a_call", """\
+def pv(iterator):
+    b = next(iterator)
+    val = b & 63
+    while b & 64:
+        val <<= 6
+        b = next(iterator)
+        val |= b & 63
+    return val
+
+def take(it, d):
+    return next(it, d)
+
+def main():
+    it = iter([1, 65, 3, 9, 7])
+    print(pv(it))
+    print(pv(it))
+    print(pv(it))
+    j = iter([1, 2, 3, 4, 5])
+    print(take(j, -1))
+    for x in j:
+        print("rest", x)
+    print(take(j, -1))
+    k = iter([1])
+    print(pv(k))
+    try:
+        pv(k)
+    except StopIteration:
+        print("stop")
+main()
+""", "1\n67\n9\n1\nrest 2\nrest 3\nrest 4\nrest 5\n-1\n1\nstop\n")
+
     # String site FIRST, int site second (an int list records no contract, so
     # it used to be invisible as a disagreeing call site).
     test_gimple_stdout("gimple_mixed_kind_flat_list_param_str_first", """\
