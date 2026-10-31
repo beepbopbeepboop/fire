@@ -1823,6 +1823,21 @@ def _gen_stmt_AssignStmt(gen, node):
             gen._emit_call('void', '', 'mojo_replace_argv',
                             [('MojoList *', _av)])
             return
+        # `Cls.attr = value` / `cls.attr = value` for an attribute the class body never
+        # declares: the run-time class table (what `setattr(Cls, ...)` writes too).
+        _wst = ggc._class_struct_of_arg(gen, node.target.obj)
+        if (_wst is not None
+                and node.target.member not in gen._class_attrs.get(_wst, {})
+                and node.target.member not in gen._struct_method_names.get(_wst, ())
+                and node.target.member not in gen.struct_field_types.get(_wst, {})):
+            _wtag = gen._new_val('int64_t', f'{gimple_exprtypes._struct_type_id(_wst)}LL')
+            _ww = (gen._call_expr('int64_t', 'mojo_box_from_double', [('double', v)])
+                   if vtype == 'double' else gen._to_int64(vtype, v))
+            gen._void_call('mojo_class_setattr',
+                           [('int64_t', _wtag),
+                            ('char *', gen._intern_string(_as_str(node.target.member))),
+                            ('int64_t', _ww)])
+            return
         # `f.attr = value` where `f` is a free function memoizing a
         # value on itself -- see the `_func_attrs` pre-scan's docstring
         # (gen_module, Phase 1) and `_lower_MemberExpr`'s matching read-

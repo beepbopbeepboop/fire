@@ -2216,6 +2216,13 @@ def _cpp_expr(gen, e) -> str:
             if _cls_gname is not None:
                 gen._cpp_class_attr_refs.add(_cls_gname)
                 return _cls_gname
+            if (e.member not in gen._struct_method_names.get(struct_name, ())
+                    and e.member not in gen.struct_field_types.get(struct_name, {})):
+                # An attribute the class body never declares (installed with `setattr(cls, ..)` /
+                # `Cls.x = v` / a metaclass): the run-time class table holds it, found through
+                # the bases. A word of unknown kind.
+                _ctag = gimple_exprtypes._struct_type_id(struct_name)
+                return f'mojo_class_getattr({_ctag}LL, "{e.member}")'
             raise gimple_exprtypes._UnsupportedGeneratorShape(
                 f"cls.{e.member}: only a class-level attribute assigned "
                 "in the enclosing class's own body is supported for "
@@ -5740,6 +5747,13 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                         gen._cpp_class_attr_refs.add(_cls_gname)
                         val = gen._cpp_expr(s.value)
                         return [f"{indent}{_cls_gname} = {val};"]
+                    if (_cls_gname is None
+                            and s.target.member not in gen._struct_method_names.get(_tgt_struct, ())
+                            and s.target.member not in gen.struct_field_types.get(_tgt_struct, {})):
+                        val = gen._cpp_expr(s.value)
+                        _ctag = gimple_exprtypes._struct_type_id(_tgt_struct)
+                        return [f'{indent}mojo_class_setattr({_ctag}LL, "{s.target.member}", '
+                                f'(int64_t)(intptr_t)({val}));']
             # arr[i] = val / d[k] = val  →  a real runtime-helper write
             # (mojo_list_set_*/mojo_dict_set_*), mirroring the plain
             # (non-generator) GIMPLE path's own SubscriptExpr-target
@@ -9601,10 +9615,17 @@ def _cls_refs_supported(gen, body, struct_name: str) -> bool:
     """
     class_attrs = gen._class_attrs.get(struct_name, {})
     supported_ids: set = set()
+    _call_funcs = {id(c.func) for c in gimple_exprtypes._walk_ast(body)
+                   if isinstance(c, gimple_ctypes.CallExpr)}
     for n in gimple_exprtypes._walk_ast(body):
         if (isinstance(n, gimple_ctypes.MemberExpr) and isinstance(n.obj, gimple_ctypes.IdentExpr)
                 and n.obj.name == 'cls' and n.member in class_attrs):
             supported_ids.add(id(n.obj))
+        elif (isinstance(n, gimple_ctypes.MemberExpr) and isinstance(n.obj, gimple_ctypes.IdentExpr)
+                and n.obj.name == 'cls' and id(n) not in _call_funcs
+                and n.member not in gen._struct_method_names.get(struct_name, ())
+                and n.member not in gen.struct_field_types.get(struct_name, {})):
+            supported_ids.add(id(n.obj))   # a run-time class attribute (`mojo_class_getattr`)
         elif (isinstance(n, gimple_ctypes.CallExpr) and isinstance(n.func, gimple_ctypes.MemberExpr)
                 and isinstance(n.func.obj, gimple_ctypes.IdentExpr) and n.func.obj.name == 'cls'):
             mangled = f"{struct_name}_{n.func.member}"

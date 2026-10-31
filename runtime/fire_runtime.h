@@ -1379,6 +1379,13 @@ void        mojo_dict_clear(MojoDict *d);
 
 void        mojo_dict_set_int(MojoDict *d, char *key, int64_t v);
 int64_t mojo_gen_call_with(void *start, MojoList *pre, MojoList *a, MojoDict *kw);
+/* run-time class attributes (see the definitions): a class is its type tag */
+void    mojo_class_register(int64_t tag, int64_t base_tag, char *name);
+void    mojo_class_setattr(int64_t tag, char *name, int64_t word);
+int     mojo_class_hasattr(int64_t tag, char *name);
+int64_t mojo_class_getattr(int64_t tag, char *name);                       /* AttributeError when absent */
+int64_t mojo_class_getattr_default(int64_t tag, char *name, int64_t dflt);
+void    mojo_class_delattr(int64_t tag, char *name);
 int64_t mojo_re_call(int64_t obj, char *name, MojoList *args, MojoDict *kw);
 /* `_kw` variants: the key arrives as a raw machine WORD that is either a boxed
  * string pointer or an integer, and the same decision mojo_cstr_or_int_str

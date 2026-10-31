@@ -14723,3 +14723,76 @@ void mojo_chain_extend(MojoList *dst, int64_t src)
     for (int64_t i = 0; i < mojo_list_len(l); i++)
         mojo_list_append_word(dst, mojo_list_get_boxed(l, i));
 }
+
+
+/* ───────── run-time class attributes ─────────
+ * A class is identified by its type tag (`_struct_type_id(name)`, the same number the
+ * allocation site stamps into instances). Attributes a class does not declare in its
+ * body - `setattr(cls, n, v)`, `Cls.n = v`, what a metaclass installs - live here as
+ * words, per class, and are found through the bases (depth first, left to right). A
+ * class body's own attributes stay static globals; the compiler reads those directly. */
+typedef struct MojoClassRec {
+    int64_t tag; char *name;
+    int64_t bases[8]; int nbases;
+    MojoDict *attrs;
+    struct MojoClassRec *next;
+} MojoClassRec;
+static MojoClassRec *_class_head = 0;
+
+static MojoClassRec *_class_find(int64_t tag)
+{
+    for (MojoClassRec *c = _class_head; c; c = c->next) if (c->tag == tag) return c;
+    return 0;
+}
+static MojoClassRec *_class_get(int64_t tag)
+{
+    MojoClassRec *c = _class_find(tag);
+    if (c) return c;
+    c = (MojoClassRec *)calloc(1, sizeof *c);
+    c->tag = tag; c->attrs = mojo_dict_new(); c->next = _class_head; _class_head = c;
+    return c;
+}
+void mojo_class_register(int64_t tag, int64_t base_tag, char *name)
+{
+    MojoClassRec *c = _class_get(tag);
+    if (name && !c->name) c->name = strdup(name);
+    if (base_tag && c->nbases < 8) {
+        for (int i = 0; i < c->nbases; i++) if (c->bases[i] == base_tag) return;
+        c->bases[c->nbases++] = base_tag;
+    }
+}
+void mojo_class_setattr(int64_t tag, char *name, int64_t word)
+{
+    mojo_dict_set_int(_class_get(tag)->attrs, name, word);
+}
+static int _class_lookup(int64_t tag, const char *name, int64_t *out, int depth)
+{
+    MojoClassRec *c = _class_find(tag);
+    if (!c || depth > 32) return 0;
+    if (mojo_dict_contains(c->attrs, (char *)name)) { *out = mojo_dict_get_int(c->attrs, (char *)name); return 1; }
+    for (int i = 0; i < c->nbases; i++) if (_class_lookup(c->bases[i], name, out, depth + 1)) return 1;
+    return 0;
+}
+int mojo_class_hasattr(int64_t tag, char *name)
+{
+    int64_t w; return _class_lookup(tag, name, &w, 0);
+}
+int64_t mojo_class_getattr(int64_t tag, char *name)
+{
+    int64_t w;
+    if (_class_lookup(tag, name, &w, 0)) return w;
+    mojo_raise_attribute_error(name);
+    return 0;
+}
+/* `getattr(cls, name, default)` */
+int64_t mojo_class_getattr_default(int64_t tag, char *name, int64_t dflt)
+{
+    int64_t w;
+    return _class_lookup(tag, name, &w, 0) ? w : dflt;
+}
+void mojo_class_delattr(int64_t tag, char *name)
+{
+    MojoClassRec *c = _class_find(tag);
+    if (!c || !mojo_dict_contains(c->attrs, name)) { mojo_raise_attribute_error(name); return; }
+    (void)mojo_dict_pop_int(c->attrs, name, 0);
+}

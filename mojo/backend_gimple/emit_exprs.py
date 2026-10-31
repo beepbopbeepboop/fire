@@ -1133,6 +1133,17 @@ def _lower_WalrusExpr(gen, node) -> tuple[str, str]:
     return dst, gen._cname(node.name)
 
 
+def _lower_class_dyn_getattr(gen, struct_name: str, member: str) -> tuple[str, str]:
+    """`Cls.member` / `cls.member` for an attribute the class body never declares: a word read
+    from the run-time class table (AttributeError when no class on the MRO has it)."""
+    tag = gimple_exprtypes._struct_type_id(_as_str(struct_name))
+    tg = gen._new_val('int64_t', f'{tag}LL')
+    r = gen._call_expr('int64_t', 'mojo_class_getattr',
+                       [('int64_t', tg), ('char *', gen._intern_string(_as_str(member)))])
+    gen._dyn_word_vals.add(r)
+    return 'int64_t', r
+
+
 def _lower_UnaryOp(gen, node) -> tuple[str, str]:
     ot, ov = gen.lower_expr(node.operand)
     if node.op == 'not':
@@ -1610,6 +1621,12 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             _gname = gen._class_attrs[_cur_struct][node.member]
             _gtype = gen._global_var_types.get(_gname, 'int64_t')
             return _gtype, gmp._cattr_read(gen, _gname, _gtype)
+        if (module_name == 'cls' and _cur_struct and module_name in gen.var_types
+                and _cur_struct in gen._struct_bases
+                and node.member not in gen._struct_method_names.get(_cur_struct, ())
+                and node.member not in gen.struct_field_types.get(_cur_struct, {})
+                and node.member not in gen._class_attrs.get(_cur_struct, {})):
+            return _lower_class_dyn_getattr(gen, _cur_struct, node.member)
 
         # `f.attr` read where `f` is a free function memoizing a value on
         # itself (`f._cached`) — see the `_func_attrs` pre-scan (Phase 1,
@@ -2002,6 +2019,13 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
                     gen._elem_types[_gv] = _ge
                     gen._actual_types[_gv] = 'MojoList *'
                 return gtype, _gv
+            # Not declared in the class body: an attribute installed at run time
+            # (`setattr(Cls, ..)` / `Cls.x = v` / a metaclass) lives in the run-time class table.
+            _rt_struct = gmp._resolve_fn_scoped_struct_name(gen, module_name)
+            if (_rt_struct in gen._struct_bases
+                    and node.member not in gen._struct_method_names.get(_rt_struct, ())
+                    and node.member not in gen.struct_field_types.get(_rt_struct, {})):
+                return _lower_class_dyn_getattr(gen, _rt_struct, node.member)
             # Not a comptime alias — a genuine class-level access this
             # compiler doesn't yet resolve statically (unimplemented,
             # not merely unreached); stub with a clearly-marked value.

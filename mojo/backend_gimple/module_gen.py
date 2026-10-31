@@ -16653,6 +16653,20 @@ def gen_module_impl(self, stmts):
         parts.append('}')
         parts.append('')
 
+    if self.emit_struct_defs and self._struct_bases:
+        # Every class announces itself (type tag, bases) to the run-time class table, so
+        # `setattr(cls, ...)` / `cls.attr` reads of attributes the class body never
+        # declared find them through the bases (`mojo_class_getattr`).
+        parts.append('static void __attribute__((constructor)) _mojo_register_classes(void) {')
+        for _cn in sorted(self._struct_bases):
+            _ctag = gimple_exprtypes._struct_type_id(_as_str(_cn))
+            parts.append(f'    mojo_class_register({_ctag}LL, 0, "{_as_str(_cn)}");')
+            for _bn in self._struct_bases[_cn]:
+                parts.append(f'    mojo_class_register({_ctag}LL, '
+                             f'{gimple_exprtypes._struct_type_id(_as_str(_bn))}LL, 0);')
+        parts.append('}')
+        parts.append('')
+
     if self.emit_struct_defs:
         class_attr_inits = getattr(self, '_class_attr_inits', [])
         parts.append("static void _mojo_classattr_init (void)")

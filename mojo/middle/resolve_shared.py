@@ -843,6 +843,12 @@ def _quick_type(gen, node) -> str:
         # coerce the real value into it (concretely: module_gen's
         # `dict or set or set or set` chain, join(Dict*, int64_t)=Dict*
         # vs actual Set*, "cannot coerce MojoSet * to MojoDict *").
+        # `cls.attr` / `ClassName.attr` is a CLASS attribute (a word from the run-time class table
+        # when the body never declares it), never a field of some unrelated struct that
+        # happens to use the same name (`extra`): no field search.
+        if (isinstance(node.obj, gimple_ctypes.IdentExpr)
+                and (node.obj.name == 'cls' or node.obj.name in gen._struct_bases)):
+            return 'int64_t'
         if not _fields:
             _kt = gen._known_field_type(node.member)
             if _kt is not None:

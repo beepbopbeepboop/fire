@@ -1,5 +1,44 @@
 # CODEGEN_generator_function: Lib/enum.py
 
+## Status (2026-10-31, round 3 — STAGE 1 of the run-time class model LANDED; two of the three refusals are gone; the plan for the rest)
+
+Direction chosen with the user: build real run-time class objects, in stages, each landing
+with a test; `enum.py` flips to compiled only when `Flag`/`IntFlag` iteration matches CPython.
+
+**Stage 1 (landed, pinned by `generator_classmethod_reads_runtime_class_attributes`, diffed
+against CPython):** a run-time CLASS TABLE (`runtime/fire_runtime.c`: `mojo_class_register /
+setattr / getattr / getattr_default / hasattr / delattr`). A class is its type tag
+(`_struct_type_id(name)`); every module registers its classes and bases in a constructor
+(`_mojo_register_classes`); an attribute the class BODY never declares - `setattr(cls, n, v)`,
+`Cls.n = v` with a non-literal value, what a metaclass installs - is a word in that class's
+dict and is found through the bases. Compiler side: `cls.x` / `Cls.x` reads (ordinary
+methods, `@classmethod`s and compiled generators - `_cls_refs_supported` now admits them),
+`Cls.x = v` / `cls.x = v`, and `setattr/getattr/hasattr/delattr(Cls, name)` all use it; a
+name the body does declare (class attribute, method, field) keeps its static meaning. Also
+fixed on the way: `cls.extra` took the type of an UNRELATED struct's field of the same name
+(`ImportStmt.extra`) when inferring a method's return type.
+Measured on CPython 3.15's `enum.py`: the refusal set went from {`_iter_member_`,
+`_iter_member_by_def_`, `_iter_member_by_value_`} to {`_iter_member_by_def_`} alone.
+
+**Next (Stage 1b):** `_iter_member_by_def_` is `yield from sorted(cls._iter_member_by_value_(value),
+key=lambda m: m._sort_order_)`: a call to a compiled GENERATOR method of the class used as an
+ARGUMENT (needs the generator-call-as-iterable arm in `_cpp_expr`: start the generator, drain it
+with `_resume/_value` into a runtime-kinded list), and `sorted(..., key=<lambda over a dynamic
+instance>)` whose `m._sort_order_` is a dynamic INSTANCE attribute.
+
+**Stages after that (each needs its own test against CPython):**
+2. dynamic INSTANCE attributes on objects of dynamic classes (`m._sort_order_`, `_value_`,
+   `_name_`): `_mojo_dispatch_getattr` falls through to `mojo_obj_getattr`'s dynattr dict - make
+   `setattr(obj, n, v)` and `obj.n = v` for undeclared names write it, `__dict__`.
+3. `type.__new__(metacls, name, bases, classdict)` / `type(name, bases, dict)` at run time: a
+   class created at run time is a class-table entry (tag from the name, bases from the list)
+   whose dict starts from `classdict`; instances of it are dynamic objects (attr dict, class tag).
+4. metaclass protocol used by `EnumType`: `__prepare__`, `__new__`, `__call__`, `__set_name__`,
+   `__init_subclass__`, `__getattr__` on the class, `isinstance(x, cls)` for dynamic classes.
+5. `Enum`/`Flag`/`IntFlag` end to end: `class Color(Enum): RED = 1` through the metaclass,
+   `Color.RED`, `Color(1)`, `iter(Flag)`, `Flag._iter_member_by_value_`; flip `enum` to compiled
+   and add the program to `test_glob_compiled.py`-style end-to-end tests.
+
 ## Status (2026-10-31, worktree work/bug-codegen-generator-function-lib-enum — ROUND: refusal unchanged, pinning regression added)
 
 Verified via `test_regress_enum_refusal.py` (passes): the 4 refusal lines

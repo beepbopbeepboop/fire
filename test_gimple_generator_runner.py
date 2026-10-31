@@ -7515,6 +7515,60 @@ def main():
 main()
 """)
 
+    # Stage 1 of run-time class objects (bugs/CODEGEN_generator_function_Lib_enum.md): an attribute
+    # the class body never declares - `setattr(cls, ..)`, `Cls.x = v`, what a metaclass installs -
+    # lives in a run-time class table found through the bases, and a @classmethod generator (or
+    # method) reads it as `cls.x`; getattr / hasattr on a class use the same table.
+    test_generator_matches_cpython("generator_classmethod_reads_runtime_class_attributes", """\
+class A:
+    base = 10
+
+    @classmethod
+    def gen(cls, n):
+        for i in range(n):
+            yield cls.base + cls.extra + i
+
+    @classmethod
+    def total(cls):
+        return cls.base + cls.extra
+
+class B(A):
+    base = 100
+
+def main():
+    setattr(A, 'extra', 5)
+    B.extra = 7
+    print(list(A.gen(2)))
+    print(list(B.gen(2)))
+    print(A.total(), B.total())
+    print(getattr(A, 'extra'), B.extra, hasattr(A, 'nope'), hasattr(A, 'extra'))
+main()
+""", """\
+class A:
+    base = 10
+
+    @classmethod
+    def gen(cls, n):
+        for i in range(n):
+            yield cls.base + cls.extra + i
+
+    @classmethod
+    def total(cls):
+        return cls.base + cls.extra
+
+class B(A):
+    base = 100
+
+def main():
+    setattr(A, 'extra', 5)
+    B.extra = 7
+    print(list(A.gen(2)))
+    print(list(B.gen(2)))
+    print(A.total(), B.total())
+    print(getattr(A, 'extra'), B.extra, hasattr(A, 'nope'), hasattr(A, 'extra'))
+main()
+""")
+
     # ...but any consumer that is NOT a for / list / comprehension (here `next`
     # of a bound handle) would read the box's address as an int, so the
     # generator keeps its refusal.

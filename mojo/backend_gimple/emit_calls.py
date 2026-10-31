@@ -35,6 +35,7 @@ import mojo.backend_gimple.device_glue as _gmi_glue
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
+import fire_compiler as N
 from mojo.middle.exprtypes import _walk_ast_invalidate
 import mojo.middle.itcursor as itc
 import mojo.middle.lambdareduce as _gld
@@ -1380,6 +1381,61 @@ def _lower_factory_call(gen, node: gimple_ctypes.CallExpr, rec: dict) -> tuple[s
     return _wt, wv
 
 
+def _class_struct_of_arg(gen, a):
+    """The struct a class-valued argument names: `Cls` (a known struct, not shadowed by a local)
+    or `cls` inside a classmethod; None otherwise."""
+    if not isinstance(a, gimple_ctypes.IdentExpr):
+        return None
+    nm = _as_str(a.name)
+    if nm == 'cls':
+        cur = getattr(gen, '_current_struct_name', None)
+        return _as_str(cur) if cur and _as_str(cur) in gen._struct_bases and 'cls' in gen.var_types else None
+    if nm in gen._struct_bases and nm not in gen.var_types and nm not in gen._global_var_types:
+        return nm
+    return None
+
+
+def _lower_class_attr_builtin(gen, node, fn):
+    """The four attribute builtins on a class. A name the class body declares (a class-level
+    attribute, a method) keeps its static meaning; anything else is the run-time class table."""
+    struct = _class_struct_of_arg(gen, node.args[0])
+    name_node = node.args[1] if len(node.args) > 1 else None
+    lit = (_as_str(name_node.value) if isinstance(name_node, gimple_ctypes.StringLiteral)
+           and not N.is_fstring_literal(name_node) else None)
+    if lit is not None and (lit in gen._class_attrs.get(struct, {})
+                            or lit in gen._struct_method_names.get(struct, ())):
+        return None   # static: the ordinary lowering owns it
+    tag = gen._new_val('int64_t', f'{gimple_exprtypes._struct_type_id(struct)}LL')
+    nt, nv = gen.lower_expr(name_node)
+    nm = nv if nt == 'char *' else gen._new_val('char *', f'(char *){gen._to_int64(nt, nv)}')
+    if fn == 'hasattr':
+        if len(node.args) != 2:
+            return None
+        r = gen._call_expr('int', 'mojo_class_hasattr', [('int64_t', tag), ('char *', nm)])
+        return '_Bool', gen._new_val('_Bool', f'{r} != 0')
+    if fn == 'getattr':
+        if len(node.args) == 2:
+            r = gen._call_expr('int64_t', 'mojo_class_getattr', [('int64_t', tag), ('char *', nm)])
+        else:
+            dt, dv = gen.lower_expr(node.args[2])
+            dw = gen._call_expr('int64_t', 'mojo_box_from_double', [('double', dv)]) if dt == 'double' \
+                else gen._to_int64(dt, dv)
+            r = gen._call_expr('int64_t', 'mojo_class_getattr_default',
+                               [('int64_t', tag), ('char *', nm), ('int64_t', dw)])
+        gen._dyn_word_vals.add(r)
+        return 'int64_t', r
+    if fn == 'setattr' and len(node.args) == 3:
+        vt, vv = gen.lower_expr(node.args[2])
+        vw = gen._call_expr('int64_t', 'mojo_box_from_double', [('double', vv)]) if vt == 'double' \
+            else gen._to_int64(vt, vv)
+        gen._void_call('mojo_class_setattr', [('int64_t', tag), ('char *', nm), ('int64_t', vw)])
+        return 'int64_t', gen._new_val('int64_t', '0')
+    if fn == 'delattr' and len(node.args) == 2:
+        gen._void_call('mojo_class_delattr', [('int64_t', tag), ('char *', nm)])
+        return 'int64_t', gen._new_val('int64_t', '0')
+    return None
+
+
 def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # `itertools.chain(a, b, ...)`: the elements of each argument in turn. Built eagerly
     # into one list that records its own slot kinds; a generator handle argument is
@@ -1407,6 +1463,17 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         gen._struct_slot_kinds[_ch] = ginf._RuntimeKinded(['int', 'str'])
         gen._maybe_kinds_vals.add(_ch)
         return 'MojoList *', _ch
+    # `setattr(Cls, name, v)` / `getattr(Cls, name[, d])` / `hasattr(Cls, name)` / `delattr(Cls, name)`
+    # where the first argument is a CLASS (a struct name, or `cls` in a classmethod): attributes
+    # the class body never declared live in the run-time class table.
+    if (isinstance(node.func, gimple_ctypes.IdentExpr)
+            and _as_str(node.func.name) in ('setattr', 'getattr', 'hasattr', 'delattr')
+            and not gen._locally_binds_name(_as_str(node.func.name))
+            and not getattr(node, 'kwargs', None) and node.args
+            and _class_struct_of_arg(gen, node.args[0]) is not None):
+        _kcls = _lower_class_attr_builtin(gen, node, _as_str(node.func.name))
+        if _kcls is not None:
+            return _kcls
     # `functools.lru_cache(maxsize=N)(f)` / `functools.cache(f)`: memoization is an
     # optimization with no observable effect here, so the decorated value IS `f`.
     _lc = node.func
