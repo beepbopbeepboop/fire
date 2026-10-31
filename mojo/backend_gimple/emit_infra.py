@@ -1246,14 +1246,20 @@ def _compile_link_inline_cpp_unit(gen, cpp_code: str):
         import cas
         import subprocess
         import tempfile
-        from build_config import find_gxx
+        from build_config import find_gxx, runtime_dir as _bc_runtime_dir
     except Exception as e:
         gimple_ctypes._debug_note('cannot compile link-mode inline-module cpp unit '
                     '(import failure)', e)
         return None
     try:
         gxx = find_gxx()
-        runtime_dir = gimple_ctypes.os.path.join(gimple_ctypes.os.path.dirname(gimple_ctypes.os.path.abspath(__file__)), 'runtime')
+        # The tree's one answer to "where is runtime/" (build_config), not a path
+        # derived from this file's own location: this code moved under
+        # mojo/backend_gimple/, which made the old `dirname(__file__)/runtime`
+        # a directory that does not exist, and every sibling module's C++
+        # generator unit then failed to compile SILENTLY (-> an undefined
+        # `_mojogen_*` symbol at link).
+        runtime_dir = _bc_runtime_dir()
         cpp_flags = ('-std=c++20', '-fPIC', f'-I{runtime_dir}')
         key = cas.module_key(cpp_code, [], gxx, cpp_flags)
 

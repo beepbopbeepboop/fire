@@ -1172,6 +1172,110 @@ main()
 """
     test_generator_matches_cpython(
         "cpp_coroutine_iter_many_callable_param", _iter_many_src, _iter_many_src)
+    # c_common/fsutil.py's iter_files / walk_tree / glob_tree, verbatim: kw-only
+    # callable parameters defaulting to os.walk / glob.iglob / compiled
+    # generator functions, `get_files in (glob.glob, glob.iglob, glob_tree)`,
+    # `lambda *a, **k: _walk(*a, walk=_files, **k)` rebound into a parameter,
+    # keyword calls through unknown callables, `tuple(suffix)` +
+    # `endswith(<tuple>)`, and `yield from` recursion. Directory is an absolute
+    # path so the run does not depend on the child's cwd; counts, not order, are
+    # compared (CPython is the oracle).
+    _fsutil_src = """\
+import os
+import glob
+
+def _walk_tree(root, *,
+               _walk=os.walk,
+               ):
+    for parent, _, names in _walk(root):
+        for name in names:
+            yield os.path.join(parent, name)
+
+
+def walk_tree(root, *,
+              suffix=None,
+              walk=_walk_tree,
+              ):
+    if suffix and not isinstance(suffix, str):
+        raise ValueError('suffix must be a string')
+
+    for filename in walk(root):
+        if suffix and not filename.endswith(suffix):
+            continue
+        yield filename
+
+
+def glob_tree(root, *,
+              suffix=None,
+              _glob=glob.iglob,
+              ):
+    suffix = suffix or ''
+    if not isinstance(suffix, str):
+        raise ValueError('suffix must be a string')
+
+    for filename in _glob(f'{root}/*{suffix}'):
+        yield filename
+    for filename in _glob(f'{root}/**/*{suffix}'):
+        yield filename
+
+
+def iter_files(root, suffix=None, relparent=None, *,
+               get_files=os.walk,
+               _glob=glob_tree,
+               _walk=walk_tree,
+               ):
+    if not isinstance(root, str):
+        roots = root
+        for root in roots:
+            yield from iter_files(root, suffix, relparent,
+                                  get_files=get_files,
+                                  _glob=_glob, _walk=_walk)
+        return
+
+    # Use the right "walk" function.
+    if get_files in (glob.glob, glob.iglob, glob_tree):
+        get_files = _glob
+    else:
+        _files = _walk_tree if get_files in (os.walk, walk_tree) else get_files
+        get_files = (lambda *a, **k: _walk(*a, walk=_files, **k))
+
+    # Handle a single suffix.
+    if suffix and not isinstance(suffix, str):
+        filenames = get_files(root)
+        suffix = tuple(suffix)
+    else:
+        filenames = get_files(root, suffix=suffix)
+        suffix = None
+
+    for filename in filenames:
+        if suffix and not isinstance(suffix, str):  # multiple suffixes
+            if not filename.endswith(suffix):
+                continue
+        if relparent:
+            filename = os.path.relpath(filename, relparent)
+        yield filename
+
+def main():
+    a = 0
+    for f in iter_files("@RUNTIME@", ".h"):
+        a += 1
+    print(a)
+    b = 0
+    for f in iter_files("@RUNTIME@", [".h", ".c"]):
+        b += 1
+    print(b)
+    c = 0
+    for f in iter_files(["@RUNTIME@", "tools"], ".py", get_files=glob.glob):
+        c += 1
+    print(c > 0)
+    for f in iter_files("@RUNTIME@", ".h", "."):
+        print(1 if f.startswith("@RUNTIME@") else 0)
+        break
+main()
+"""
+    _fsutil_src = _fsutil_src.replace("@RUNTIME@", os.path.abspath("runtime"))
+    test_generator_matches_cpython(
+        "cpp_fsutil_iter_files_walk_tree_glob_tree", _fsutil_src, _fsutil_src)
     # The no-argument form: `TypeError()` is legal Python and the message is
     # the empty string, which is what the emitted `char *` empty literal
     # carries. Kept because it is the shape whose typing needs no argument to

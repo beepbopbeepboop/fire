@@ -1640,6 +1640,21 @@ def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
         return False, 'lambda with *args/**kwargs or a default parameter'
     if not _property_call_ok(fn, struct_name, struct_def, prop_names):
         return False, 'calls the result of a @property getter (v0)'
+    if struct_name is None and getattr(fn, 'name', None) in _VALUE_USED_FUNCS:
+        return False, ('used as a function value (a by-value call binds '
+                       'keywords through the runtime signature only the C++ '
+                       'unit registers)')
+    # A generator that CALLS one of its own parameters consumes a function value
+    # whose backend it cannot know; the handle layouts of the two backends
+    # differ, so every generator that flows as a value and every generator that
+    # consumes one are on the C++ path, which drives the handle dynamically.
+    if struct_name is None:
+        _pnames = {p[0] for p in fn.params}
+        for _n in _walk(fn):
+            if (isinstance(_n, N.CallExpr) and isinstance(_n.func, N.IdentExpr)
+                    and _n.func.name in _pnames):
+                return False, ('calls a parameter (a function value: driven '
+                               'dynamically by the C++ path)')
     params = fn.params
     _is_cm = False
     _is_static = False
@@ -4390,6 +4405,39 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
     _classify()
 
 
+# Names of this module's top-level functions referenced as VALUES (an
+# identifier that is not the callee of a call): passed, stored, compared, used
+# as a parameter default. A generator among them is dispatched through its
+# `<base>_start` address by code that does not know its signature, which the
+# C++ unit alone registers with the runtime (`mojo_gen_sig_register`), so the
+# stack-switch backend declines it. Per-lower() lifetime, like `_PARAM_NAMES`.
+_VALUE_USED_FUNCS: set = set()
+
+
+def _scan_value_used_functions(stmts) -> None:
+    _VALUE_USED_FUNCS.clear()
+    fn_names = {s.name for s in stmts if isinstance(s, N.FunctionDef)}
+    if not fn_names:
+        return
+    callee_ids = set()
+    refs = []
+    for n in gimple_exprtypes._walk_ast(stmts):
+        if isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr):
+            callee_ids.add(id(n.func))
+        elif isinstance(n, N.IdentExpr) and n.name in fn_names:
+            refs.append(n)
+    for n in refs:
+        if id(n) not in callee_ids:
+            _VALUE_USED_FUNCS.add(n.name)
+    # ...and a function named as a parameter DEFAULT (`def f(x, *, walk=leaf)`),
+    # which is a value the callee dispatches through without ever naming it.
+    for n in gimple_exprtypes._walk_ast(stmts):
+        if isinstance(n, N.FunctionDef):
+            for dv in (getattr(n, 'param_defaults', None) or {}).values():
+                if isinstance(dv, N.IdentExpr) and dv.name in fn_names:
+                    _VALUE_USED_FUNCS.add(dv.name)
+
+
 def lower(stmts: list, closure_stmts=(),
           module_name: str | None = None) -> tuple[list, list]:
     """Returns (new_stmts, coro_meta). coro_meta entries are dicts:
@@ -4409,6 +4457,7 @@ def lower(stmts: list, closure_stmts=(),
     _STRUCT_NAMES.clear()
     _UNTHREADABLE_NESTED_ASYNC_GENS.clear()
     _STRUCT_NAMES.update(s.name for s in stmts if isinstance(s, N.StructDef))
+    _scan_value_used_functions(stmts)
     if not enabled():
         # The C++ backend (`MOJO_CORO=cpp`, the escape hatch) lowers nested
         # async defs itself and never asks this module to hoist anything --

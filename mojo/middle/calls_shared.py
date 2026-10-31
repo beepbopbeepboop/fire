@@ -111,6 +111,17 @@ def _callable_value_symbol(gen, node, cxx: bool = False):
     REDIRECTED symbol, because `_funcptr_`'s statics live in the .c
     translation unit and are not visible from the separately-compiled .cpp.
     """
+    # A callable the RUNTIME implements (`os.walk`, `glob.glob`, ...) used as a
+    # value: its address, through the same `_funcptr_` static every other
+    # "function as a value" site uses.
+    if (isinstance(node, gimple_ctypes.MemberExpr)
+            and isinstance(node.obj, gimple_ctypes.IdentExpr)):
+        _rtf = _RUNTIME_CALLABLE_VALUES.get(f'{node.obj.name}.{node.member}')
+        if _rtf is not None and node.obj.name not in getattr(gen, 'var_types', ()):
+            if cxx:
+                return ('void *', f'(void *){_rtf}')
+            gen._funcptr_builtins_needed.add(_rtf)
+            return ('void *', f'_funcptr_{_rtf}')
     _fname = None
     if isinstance(node, gimple_ctypes.IdentExpr):
         _fname = _as_str(node.name)

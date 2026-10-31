@@ -165,6 +165,9 @@ def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
     # `gen_forward(3, b=5)` emitted `_t4 = (MojoDict *)_t3` — the
     # integer 5 reinterpreted as a dict pointer — which segfaults
     # the moment the generator body reads its own `**kwargs`.
+    # Only a C++-path generator registers a runtime signature
+    # (`mojo_gen_sig_register`); a stack-switch one (`__mgco_`) does not.
+    _gen_is_cpp = not _as_str(api['base']).startswith('__mgco_')
     _gen_kwslot = gen._func_kwargs_slot.get(
         fname_raw, gen._func_kwargs_slot.get(f"{api['base']}_start", -1))
     # A `*args` callee: the fixed slots before it are padded here, and the
@@ -183,7 +186,18 @@ def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
                 arg_pairs.append(('MojoDict *', gen._pack_kwargs_dict(_gen_kwarg_dict)))
                 _gen_kwarg_values = []
                 continue
-            if _gen_kwarg_values:
+            # A keyword argument binds to the slot of its own NAME, not to the
+            # next free slot in sequence.
+            _gen_pnames = list(gen._func_param_names.get(fname_raw) or [])
+            if (_gen_kwarg_dict and len(_gen_pnames) == len(_gen_expected)
+                    and _pos < len(_gen_pnames)
+                    and _gen_pnames[_pos] in _gen_kwarg_dict):
+                _kv = _gen_kwarg_dict[_gen_pnames[_pos]]
+                arg_pairs.append(_kv)
+                if _kv in _gen_kwarg_values:
+                    _gen_kwarg_values.remove(_kv)
+                continue
+            if _gen_kwarg_values and not (_gen_kwarg_dict and len(_gen_pnames) == len(_gen_expected)):
                 arg_pairs.append(_gen_kwarg_values.pop(0))
                 continue
             # Trailing-run offset via the shared helper (`param_defaults`
@@ -194,9 +208,36 @@ def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
             _dv = gimple_exprtypes._trailing_default_at(
                 _gen_dflts, _gen_nfixed, _pos)
             if _dv is not None:
+                # A default that names a FUNCTION (`_walk=walk_tree`) is
+                # meaningful in the CALLEE's module, not the caller's scope:
+                # take the word the callee registered for it
+                # (`mojo_gen_sig_register`) instead of lowering the name here,
+                # where it is unbound and padded as 0.
+                if _gen_is_cpp and isinstance(_dv, (gimple_ctypes.IdentExpr, gimple_ctypes.MemberExpr)) \
+                        and not (isinstance(_dv, gimple_ctypes.IdentExpr)
+                                 and _dv.name in ('None', 'True', 'False')):
+                    _gsv = _callable_value_symbol(
+                        gen, gimple_ctypes.IdentExpr(fname_raw, node.line, node.col))
+                    if _gsv is not None:
+                        _gw = gen._call_expr('int64_t', 'mojo_gen_default_word',
+                                             [('void *', _gsv[1]), ('int64_t', str(_pos))])
+                        arg_pairs.append(('int64_t', _gw))
+                        continue
                 arg_pairs.append(gen._default_expr_to_pair(_dv))
             else:
-                arg_pairs.append(('int', '0'))
+                # No default is known HERE (a generator reached through a
+                # module whose parameter defaults this scope never recorded):
+                # the callee's registered signature knows, and answers 0 for a
+                # parameter that has none, which is what was padded before.
+                _gsv0 = (_callable_value_symbol(
+                    gen, gimple_ctypes.IdentExpr(fname_raw, node.line, node.col))
+                    if _gen_is_cpp else None)
+                if _gsv0 is not None:
+                    _gw0 = gen._call_expr('int64_t', 'mojo_gen_default_word',
+                                          [('void *', _gsv0[1]), ('int64_t', str(_pos))])
+                    arg_pairs.append(('int64_t', _gw0))
+                else:
+                    arg_pairs.append(('int', '0'))
     else:
         for _, _ke in _gen_kwargs:
             gen.lower_expr(_ke)
