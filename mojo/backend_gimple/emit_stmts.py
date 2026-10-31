@@ -229,7 +229,7 @@ def _gen_stmt_PassStmt(gen, node):
 
 
 
-def _try_bind_iter_cursor(gen, name, value):
+def _try_bind_iter_cursor(gen, name, value, is_decl=False):
     """`it = iter(<container-expr>)` — bind `it` to the container plus a
     companion int64_t cursor temp so `next(it)` advances a genuine position
     and a following `for x in it:` resumes from it (single-pass Python
@@ -267,6 +267,11 @@ def _try_bind_iter_cursor(gen, name, value):
             and not gen._locally_binds_name('iter')
             and name not in gen.var_types
             and name not in gen._global_var_types):
+        return False
+    # A `var` that redeclares a bound name is a NEW binding in its own block
+    # (`ginf._bind_local_decl` gives it a fresh C name); it is never a cursor
+    # bound to the outer name, however the rebinding path below evolves.
+    if is_decl and name in gen.var_types:
         return False
     at, av = gen.lower_expr(value.args[0])
     at = gen._get_actual_type(at, av)
@@ -366,7 +371,8 @@ def _record_bool_valued(gen, name: str, value) -> None:
 
 
 def _gen_stmt_VarDecl(gen, node):
-    if node.value is not None and _try_bind_iter_cursor(gen, node.name, node.value):
+    if node.value is not None and _try_bind_iter_cursor(
+            gen, node.name, node.value, is_decl=True):
         return
     # A box-producing initializer (2026-10-21 part 4, further,
     # test_python_object): `var py_float = PythonObject(0.123...)` stores
@@ -477,7 +483,7 @@ def _gen_stmt_VarDecl(gen, node):
             ctype = gen._resolve_type(node.type_ann)
             if isinstance(ctype, str) and ctype.startswith('MojoTuple_'):
                 gen._ensure_tuple_struct(node.type_ann)
-        gen._declare_var(node.name, ctype)
+        ginf._bind_local_decl(gen, node.name, ctype)
         # Use the actual declared type (may differ if variable was already declared
         # in an earlier branch with a different inferred type)
         actual_dst = gen.var_types.get(node.name, ctype)
@@ -3073,8 +3079,10 @@ def _gen_stmt_IfStmt(gen, node):
     gen._emit(f"  if ({cond_v}) goto {bb_true}; else goto {bb_false};")
     gen._emit_label(bb_true)
     _narrowed = gen._apply_isinstance_narrowings(node.condition)
+    _bscope = ginf._open_block_scope(gen)
     for s in node.then_body:
         gen.gen_stmt(s)
+    ginf._close_block_scope(gen, _bscope)
     gen._restore_isinstance_narrowings(_narrowed)
     # No `goto {bb_merge}` when the body already ended in `return`/`goto`:
     # a dead `goto` after `return` is not just noise — when GCC INLINES
@@ -3108,8 +3116,10 @@ def _gen_stmt_IfStmt(gen, node):
         gen._emit(f"  if ({ev}) goto {next_true}; else goto {next_false};")
         gen._emit_label(next_true)
         _elif_narrowed = gen._apply_isinstance_narrowings(ec)
+        _bscope = ginf._open_block_scope(gen)
         for s in eb:
             gen.gen_stmt(s)
+        ginf._close_block_scope(gen, _bscope)
         gen._restore_isinstance_narrowings(_elif_narrowed)
         if not gen._last_was_terminal:
             gen._emit(f"  goto {bb_merge};")
@@ -3118,8 +3128,10 @@ def _gen_stmt_IfStmt(gen, node):
 
     if _n_else > 0:
         gen._emit_label(current_false)
+        _bscope = ginf._open_block_scope(gen)
         for s in node.else_body:
             gen.gen_stmt(s)
+        ginf._close_block_scope(gen, _bscope)
         if not gen._last_was_terminal:
             gen._emit(f"  goto {bb_merge};")
             _merge_reachable = True
@@ -3389,8 +3401,10 @@ def _gen_stmt_MatchStmt(gen, node):
 
     for i, match_case in enumerate(node.cases):
         gen._emit_label(case_bbs[i])
+        _bscope = ginf._open_block_scope(gen)
         for s in match_case.body:
             gen.gen_stmt(s)
+        ginf._close_block_scope(gen, _bscope)
         gen._emit(f"  goto {bb_merge};")
 
     gen._emit_label(bb_merge)
@@ -3835,8 +3849,10 @@ def _emit_try_loop_exit_exc_pops(gen) -> None:
     _bodies = getattr(gen, '_try_finally_bodies', None) or []
     for _i in reversed(_exited):
         if _i < len(_bodies) and _bodies[_i]:
+            _bscope = ginf._open_block_scope(gen)
             for _s in _bodies[_i]:
                 gen.gen_stmt(_s)
+            ginf._close_block_scope(gen, _bscope)
 
 
 def _gen_stmt_BreakStmt(gen, node):
@@ -4571,11 +4587,15 @@ def _emit_except_handler(gen, handler, node, bb_after: str):
         gen._emit(f"  {bound} = ({exc_ctype}) {temp_var};")
         gen._c_names[bind_name] = bound
     gen._last_was_terminal = False
+    _bscope = ginf._open_block_scope(gen)
     for s in handler.body:
         gen.gen_stmt(s)
+    ginf._close_block_scope(gen, _bscope)
     if node.finally_body:
+        _bscope = ginf._open_block_scope(gen)
         for s in node.finally_body:
             gen.gen_stmt(s)
+        ginf._close_block_scope(gen, _bscope)
     # Only emit goto if the exception handler didn't end with a return
     if not gen._last_was_terminal:
         gen._emit(f"  goto {bb_after};")
@@ -4667,11 +4687,13 @@ def _gen_stmt_TryStmt(gen, node):
     if bb_finally:
         _frame.bb_finally = bb_finally
     ginf.push_emit_frame(gen, _frame)
+    _bscope = ginf._open_block_scope(gen)
     for s in node.body:
         gen.gen_stmt(s)
         if gen._last_was_terminal:
             _had_terminal = True
             break
+    ginf._close_block_scope(gen, _bscope)
     ginf.pop_emit_frame(gen)
     _return_value = _frame.return_value if _frame.has_return_value else None
     _saw_return = [_frame.saw_return]
@@ -4703,8 +4725,10 @@ def _gen_stmt_TryStmt(gen, node):
     # Run `finally`, then perform the deferred return.
     if bb_finally:
         gen._emit_label(bb_finally)
+        _bscope = ginf._open_block_scope(gen)
         for s in node.finally_body:
             gen.gen_stmt(s)
+        ginf._close_block_scope(gen, _bscope)
         if _return_value is not None:
             gen._emit(f"  return {_return_value};")
         elif _saw_return[0]:
@@ -4726,8 +4750,10 @@ def _gen_stmt_TryStmt(gen, node):
     # clause — with an `else`, bb_else runs the finally itself).
     if not _had_terminal and node.finally_body and not bb_else:
         gen._emit_label(bb_finally_done)
+        _bscope = ginf._open_block_scope(gen)
         for s in node.finally_body:
             gen.gen_stmt(s)
+        ginf._close_block_scope(gen, _bscope)
         gen._emit(f"  goto {bb_after};")
 
     # Reset terminal state for caller
@@ -4878,17 +4904,23 @@ def _gen_stmt_TryStmt(gen, node):
     # Finally-then-propagate block (see bb_exc_reraise's declaration).
     gen._emit_label(bb_exc_reraise)
     if node.finally_body:
+        _bscope = ginf._open_block_scope(gen)
         for s in node.finally_body:
             gen.gen_stmt(s)
+        ginf._close_block_scope(gen, _bscope)
     gen._emit("  mojo_raise ();")
 
     if bb_else:
         gen._emit_label(bb_else)
+        _bscope = ginf._open_block_scope(gen)
         for s in node.else_body:
             gen.gen_stmt(s)
+        ginf._close_block_scope(gen, _bscope)
         if node.finally_body:
+            _bscope = ginf._open_block_scope(gen)
             for s in node.finally_body:
                 gen.gen_stmt(s)
+            ginf._close_block_scope(gen, _bscope)
         # Only emit goto if the else block didn't end with a return
         if not gen._last_was_terminal:
             gen._emit(f"  goto {bb_after};")
@@ -5210,6 +5242,7 @@ def _gen_stmt_WithStmt(gen, node):
             gen._emit(f"  if ({cond_t}) goto {bb_exc}; else goto {bb_try};")
 
             gen._emit_label(bb_try)
+            _bscope = ginf._open_block_scope(gen)
             for s in node.body:
                 if type(s).__name__ == 'ReturnStmt':
                     # A `return` out of the block is normal control flow:
@@ -5236,6 +5269,7 @@ def _gen_stmt_WithStmt(gen, node):
                 gen._emit = intercepted_emit
                 gen.gen_stmt(s)
                 gen._emit = original_emit
+            ginf._close_block_scope(gen, _bscope)
 
             if not gen._last_was_terminal:
                 gen._emit("  mojo_exc_pop ();")
@@ -5326,6 +5360,7 @@ def _gen_stmt_WithStmt(gen, node):
         # it a second time as unreachable code. A one-element list rather than
         # a `nonlocal`, for the self-hosted compiled path.
         _teardown_done = [False]
+        _bscope = ginf._open_block_scope(gen)
         for s in node.body:
             # break/continue lower to a bare `goto <loop label>;` and jump
             # out of this with's protected region same as an early return
@@ -5367,6 +5402,7 @@ def _gen_stmt_WithStmt(gen, node):
             ginf.pop_emit_frame(gen)
             if _wframe.teardown_done:
                 _teardown_done[0] = True
+        ginf._close_block_scope(gen, _bscope)
         # Only emit cleanup and goto if the with body didn't end with a
         # return — but an early return still leaves the protected region
         # and must pop the exception stack (_mojo_exc_top) exactly like
@@ -5392,6 +5428,8 @@ def _gen_stmt_WithStmt(gen, node):
 
         gen._emit_label(bb_after)
     else:
+        _bscope = ginf._open_block_scope(gen)
         for s in node.body:
             gen.gen_stmt(s)
+        ginf._close_block_scope(gen, _bscope)
         _with_emit_exits(gen, _ctx_ts, _ctx_vs, _ctx_sns, _gctx_bases, _gctx_vs)

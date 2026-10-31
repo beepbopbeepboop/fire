@@ -742,16 +742,20 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
     # latter cannot tell "unknown" from "false" (comptime.CONST_UNKNOWN).
     val = gen._eval_const_bool_state(node.condition)
     if val == 1:
+        _bscope = ginf._open_block_scope(gen)
         for s in node.then_body:
             gen.gen_stmt(s)
+        ginf._close_block_scope(gen, _bscope)
         return
     if val == 0:
         # Try each elif branch before falling to else
         for elif_cond, elif_body in (getattr(node, 'elifs', None) or []):
             elif_val = gen._eval_const_bool_state(elif_cond)
             if elif_val == 1:
+                _bscope = ginf._open_block_scope(gen)
                 for s in elif_body:
                     gen.gen_stmt(s)
+                ginf._close_block_scope(gen, _bscope)
                 return
             if elif_val == 0:
                 continue
@@ -760,14 +764,18 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
             bb_t = gen._new_bb(); bb_m = gen._new_bb()
             gen._emit(f"  if ({cv}) goto {bb_t}; else goto {bb_m};")
             gen._emit_label(bb_t)
+            _bscope = ginf._open_block_scope(gen)
             for s in elif_body:
                 gen.gen_stmt(s)
+            ginf._close_block_scope(gen, _bscope)
             gen._emit(f"  goto {bb_m};")
             gen._emit_label(bb_m)
             return
         if node.else_body:
+            _bscope = ginf._open_block_scope(gen)
             for s in node.else_body:
                 gen.gen_stmt(s)
+            ginf._close_block_scope(gen, _bscope)
         return
     # Condition unknown at compile time: emit full runtime if-elif-else chain
     _, cond_v = gen.lower_expr(node.condition)
@@ -782,8 +790,10 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
     bb_true = gen._new_bb()
     gen._emit(f"  if ({cond_v}) goto {bb_true}; else goto {bb_false};")
     gen._emit_label(bb_true)
+    _bscope = ginf._open_block_scope(gen)
     for s in node.then_body:
         gen.gen_stmt(s)
+    ginf._close_block_scope(gen, _bscope)
     gen._emit(f"  goto {bb_merge};")
     # elif chains
     for _elif_idx, (elif_cond, elif_body) in enumerate(elifs):
@@ -797,13 +807,17 @@ def _gen_stmt_ComptimeIfStmt(gen, node):
             bb_false = bb_merge
         gen._emit(f"  if ({elif_cv}) goto {bb_elif_true}; else goto {bb_false};")
         gen._emit_label(bb_elif_true)
+        _bscope = ginf._open_block_scope(gen)
         for _elif_stmt in elif_body:
             gen.gen_stmt(_elif_stmt)
+        ginf._close_block_scope(gen, _bscope)
         gen._emit(f"  goto {bb_merge};")
     if has_else:
         gen._emit_label(bb_false)
+        _bscope = ginf._open_block_scope(gen)
         for s in node.else_body:
             gen.gen_stmt(s)
+        ginf._close_block_scope(gen, _bscope)
         gen._emit(f"  goto {bb_merge};")
     gen._emit_label(bb_merge)
 
@@ -901,8 +915,10 @@ def _gen_stmt_ComptimeForStmt(gen, node):
             i = start
             while (step > 0 and i < stop) or (step < 0 and i > stop):
                 gen._safe_coerce_emit('int', dst, str(i), node.target)
+                _bscope = ginf._open_block_scope(gen)
                 for s in node.body:
                     gen.gen_stmt(s)
+                ginf._close_block_scope(gen, _bscope)
                 i += step
             return
     elif (isinstance(node.iterable, gimple_ctypes.CallExpr)
@@ -981,8 +997,10 @@ def _gen_stmt_ComptimeForStmt(gen, node):
                             _dst = gen.var_types.get(_t) or 'int64_t'
                             gen._safe_coerce_emit(
                                 'int', _dst, str(_v), _t)
+                        _bscope = ginf._open_block_scope(gen)
                         for s in node.body:
                             gen.gen_stmt(s)
+                        ginf._close_block_scope(gen, _bscope)
                     return
     if not unrolled:
         pass

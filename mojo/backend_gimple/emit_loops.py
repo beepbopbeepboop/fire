@@ -43,6 +43,7 @@ import mojo.middle.exprtypes as gimple_exprtypes
 import mojo.middle.itcursor as itc
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
+import mojo.backend_gimple.emit_infra as ginf
 import mojo.backend_gimple.emit_calls as ggc
 
 # Re-export shared helpers from mojo.middle.loops_shared via explicit imports.
@@ -814,8 +815,10 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                     gen._emit(f"  {cvn} = {av};")
                 else:
                     gen._safe_coerce_emit(at, gen.var_types[vn], av, cvn)
+            _bscope = ginf._open_block_scope(gen)
             for s in node.body:
                 gen.gen_stmt(s)
+            ginf._close_block_scope(gen, _bscope)
         return
 
     var = node.target

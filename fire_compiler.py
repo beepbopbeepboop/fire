@@ -4943,7 +4943,7 @@ class Parser:
                 # The compiled path no longer requires the rename — a
                 # comprehension's target gets its own binding and the enclosing
                 # one is restored afterwards, in `emit_infra.py`'s
-                # `_compr_bind_target` / `_compr_restore_target`, regression
+                # `_compr_bind_target` / `_restore_binding`, regression
                 # `comprehension_target_shadows_struct_local` in
                 # `test_gimple_runner.py`. The rename stays: it is free, and it
                 # keeps this function's own C output identical to what the

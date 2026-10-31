@@ -1660,6 +1660,10 @@ class GimpleGen:
         # a bare int would restart at 0 in each throwaway GimpleGen and
         # reproduce the very collision this fixes. See emit_infra's mint site.
         self._shadow_seq_box = [0]
+        # The open block bodies, innermost last; each frame lists the `var`
+        # shadows made inside it (emit_infra._bind_local_decl), undone when the
+        # block closes (emit_infra._close_block_scope).
+        self._block_scope_frames: list[list] = []
         self._device_kernels: dict[str, bool] = {}
         self._device_parts: list[str] = []
         self._device_launch_args: dict = {}
