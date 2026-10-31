@@ -2918,6 +2918,35 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # struct-protocol branch above is what makes them honest.
     if (fname_raw == 'next' and 1 <= len(node.args) <= 2
             and _next_is_builtin):
+        # A WORD receiver (`next(iterator, *default)` in the interpreter's own `_mojo_next`):
+        # stepped at run time when the word is a generator handle the run time knows.
+        _w_t, _w_v = gen.lower_expr(node.args[0])
+        if _w_t in ('int64_t', 'int') and not isinstance(
+                node.args[0], (gimple_ctypes.ListExpr, gimple_ctypes.DictExpr)):
+            _hasd = gen._new_val('int', '0')
+            _dw = gen._new_val('int64_t', '0')
+            if len(node.args) == 2:
+                _a1 = node.args[1]
+                if isinstance(_a1, gimple_ctypes.UnaryOp) and _a1.op == '*':
+                    # `*default`: a (possibly empty) tuple holding the default
+                    _dt, _dv = gen.lower_expr(_a1.operand)
+                    _dl = gen._coerce_to_type(_dt, 'MojoList *', _dv) if _dt != 'MojoList *' else _dv
+                    _n = gen._call_expr('int64_t', 'mojo_list_len', [('MojoList *', _dl)])
+                    _zero = gen._new_val('int64_t', '0')
+                    _nz = gen._new_val('_Bool', f'{_n} > {_zero}')
+                    _hasd = gen._new_val('int', f'(int){_nz}')
+                    _first = gen._call_expr('int64_t', 'mojo_list_get_int',
+                                            [('MojoList *', _dl), ('int64_t', _zero)])
+                    _dw = _first
+                else:
+                    _hasd = gen._new_val('int', '1')
+                    _dt2, _dv2 = gen.lower_expr(_a1)
+                    _dw = gen._to_int64(_dt2, _dv2)
+            _nr = gen._call_expr('int64_t', 'mojo_next_word',
+                                 [('int64_t', gen._to_int64(_w_t, _w_v)), ('int', _hasd),
+                                  ('int64_t', _dw)])
+            gen._dyn_word_vals.add(_nr)
+            return 'int64_t', _nr
         _shape = 'next(%s)' % (
             type(node.args[0]).__name__
             if len(node.args) == 1

@@ -3251,6 +3251,7 @@ class GimpleGen:
         'mojo_split_dyn':      ('int64_t', ['int64_t', 'int64_t']),
         'mojo_class_getattr':  ('int64_t', ['int64_t', 'char *']),
         'mojo_getattr_any':    ('int64_t', ['void *', 'char *']),
+        'mojo_next_word':      ('int64_t', ['int64_t', 'int', 'int64_t']),
         'mojo_class_setattr':  ('void', ['int64_t', 'char *', 'int64_t']),
         'mojo_class_hasattr':  ('int', ['int64_t', 'char *']),
         'mojo_class_getattr_default': ('int64_t', ['int64_t', 'char *', 'int64_t']),

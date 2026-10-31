@@ -2367,8 +2367,21 @@ def _ambiguous_yielded_params(fn: N.FunctionDef,
     for n in _walk(fn):
         if not isinstance(n, N.YieldExpr):
             continue
+        # A parameter that only reaches the yield as an ARGUMENT of a call to one of this
+        # module's own functions does not set the slot's kind: the call's result does (the
+        # callee's return kind). `yield _mojo_next(iterator)` is a yield of whatever
+        # `_mojo_next` returns, not of `iterator`.
+        passed_through = set()
+        for c in _walk(n.value):
+            if (isinstance(c, N.CallExpr) and isinstance(c.func, N.IdentExpr)
+                    and c.func.name in _MODULE_FUNC_NAMES):
+                for a in c.args:
+                    for sub in _walk(a):
+                        passed_through.add(id(sub))
         for ident in _walk(n.value):
             if not isinstance(ident, N.IdentExpr):
+                continue
+            if id(ident) in passed_through:
                 continue
             if ident.name in bad and ident.name in names:
                 out.add(ident.name)

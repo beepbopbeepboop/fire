@@ -14825,3 +14825,44 @@ int64_t mojo_getattr_any(void *obj, char *attr)
     mojo_raise_attribute_error(attr);
     return 0;
 }
+
+/* ───────── next(word[, default]) ─────────
+ * `next(x)` where `x` is a word of unknown kind: a generator handle the run time has been told
+ * about (`mojo_gen_note*`, `mojo_gen_call_with`, a dynamic call) is stepped one value; anything
+ * else is not an iterator. StopIteration (or the default) when it is exhausted. */
+#define _MOJO_EXC_TAG_STOPITERATION 590612416
+static MojoGenSig *_gen_handle_peek(int64_t w)
+{
+    if (!_ghnd_cap) return 0;
+    void *h = (void *)(intptr_t)w;
+    size_t j = _gh(h, _ghnd_cap);
+    while (_ghnd_key[j]) {
+        if (_ghnd_key[j] == h) return _ghnd_val[j];
+        j = (j + 1) & (_ghnd_cap - 1);
+    }
+    return 0;
+}
+int64_t mojo_next_word(int64_t w, int has_default, int64_t dflt)
+{
+    MojoGenSig *sg = _gen_handle_peek(w);
+    if (!sg) {
+        if (has_default) return dflt;
+        mojo_raise_type_error((char *)"object is not an iterator");
+        return 0;
+    }
+    void *h = (void *)(intptr_t)w;
+    if (!((bool (*)(void *))sg->resume)(h)) {
+        if (has_default) return dflt;
+        char *m = strdup("StopIteration");
+        mojo_exc_type_set(_MOJO_EXC_TAG_STOPITERATION);
+        mojo_exc_msg_set(m);
+        mojo_exc_obj_set(m);
+        mojo_raise();
+        return 0;
+    }
+    switch (sg->vkind) {
+    case 1: return ((bool (*)(void *))sg->value)(h) ? 1 : 0;
+    case 2: return mojo_box_from_double(((double (*)(void *))sg->value)(h));
+    default: return ((int64_t (*)(void *))sg->value)(h);
+    }
+}

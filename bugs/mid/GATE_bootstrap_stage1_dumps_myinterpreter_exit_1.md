@@ -1,5 +1,17 @@
 # GATE: `make bootstrap` fails `bootstrap-stage1-dumps:myinterpreter.py` (exit 1, 5 s)
 
+## Status (2026-10-31, FIX IN PROGRESS on work/s1 — compile of `myinterpreter.py` now succeeds)
+
+Reproduced (`compile_to_gimple_with_cpp(myinterpreter.py, do_imports=False)` refused). Two refusals, both fixed:
+1. `_mojo_struct_iter_steps`: `yield _mojo_next(iterator)` was classed as a yield of the PARAMETER
+   `iterator` (an unresolved call-site kind). A parameter that reaches a yield only as an argument of a
+   call to one of the module's own functions does not set the slot's kind (the callee's return does);
+   `coro._ambiguous_yielded_params` now skips those.
+2. `_mojo_next`'s `next(iterator, *default)` on a word receiver was refused ("no lowering"); it is now
+   `mojo_next_word` (a generator handle the run time knows is stepped; anything else is "not an
+   iterator", StopIteration or the default on exhaustion).
+Still to do: run the named job (`python3 tools/suite.py bootstrap-stage1-dumps`) and the gate.
+
 ## Status (2026-10-31, OPEN, cause found, fix not started)
 
 Reported from a run of `make bootstrap` on `up-laptop:mojo-reference2`. The run

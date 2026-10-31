@@ -690,6 +690,7 @@ int64_t mojo_re_m_group(int64_t m, int64_t g);
 int64_t mojo_re_m_start(int64_t m, int64_t g);
 int64_t mojo_re_m_end(int64_t m, int64_t g);
 int64_t mojo_re_getattr(int64_t obj, char *name);
+int64_t mojo_next_word(int64_t w, int has_default, int64_t dflt);   /* next(x[, d]) on a word: a noted generator handle */
 int64_t mojo_getitem_word(int64_t w, int64_t i);   /* list element / string character of an unknown-kind word */
 void    mojo_chain_extend(MojoList *dst, int64_t src);   /* itertools.chain, one argument */
 int64_t mojo_add_words(int64_t a, int64_t b);   /* str+str concatenates, else integer add */
