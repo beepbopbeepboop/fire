@@ -39,7 +39,6 @@ from fire_compiler import for_target_is_tuple, for_target_single_name
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
-import mojo.middle.module_shared as msh
 import mojo.middle.itcursor as itc
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
@@ -283,7 +282,7 @@ def _try_bind_iter_cursor(gen, name, value, is_decl=False):
         return False
     at, av = gen.lower_expr(value.args[0])
     at = gen._get_actual_type(at, av)
-    if _rebind and (gen.var_types.get(name) != 'MojoList *' or at != 'MojoList *'):
+    if _rebind and gen.var_types.get(name) != at:
         return False
     data = None
     if at == 'MojoList *':
@@ -875,22 +874,6 @@ def _emit_dynattr_setattr_dispatch(gen, member: str, vtype: str, v: str,
     vp_tmp = gen._new_val('void *', f"(void *){obj64}")
     gen._emit_call('void', '', '_mojo_dispatch_setattr',
                     [('void *', vp_tmp), ('char *', key_tmp), ('int64_t', v64)])
-
-
-def _note_global_dict_store(gen, target_obj, vtype: str) -> None:
-    """Record a dict store's value type under the SOURCE name of a module-scope
-    dict receiver.
-
-    A bare read of a module global loads its field into a FRESH temp
-    (`_lower_IdentExpr`), so a record keyed by the store's lowered temp is
-    never seen by the next `d[k]` read. `_lower_IdentExpr` copies
-    `_dict_val_types[<source name>]` onto every such temp, which is the
-    channel a later read uses. Keyed by name only when the bare name really
-    reads a global (`bare_global_read_plan`), so a local dict is untouched.
-    """
-    if (isinstance(target_obj, IdentExpr)
-            and msh.bare_global_read_plan(gen, target_obj.name)[0]):
-        gen._dict_val_types[target_obj.name] = vtype
 
 
 def _note_global_store_types(gen, tname: str, vtype: str, v: str,
@@ -2079,7 +2062,6 @@ def _gen_stmt_AssignStmt(gen, node):
                     or vtype.endswith(' *'))
                     and obj_v not in getattr(gen, '_opaque_container_locals', ())):
                 gen._dict_val_types[obj_v] = vtype
-                _note_global_dict_store(gen, node.target.obj, vtype)
             # dict[key] = val → mojo_dict_set_str_* (key coerced via
             # _char_to_cstr, the single dict-key-to-string conversion
             # used by both read and write sides — see its docstring).
@@ -2171,11 +2153,6 @@ def _gen_stmt_AssignStmt(gen, node):
                     # only the dict handle is a coerced int here.
                     gen._emit_dict_int_value_store(dp, 'char *', key_tmp2,
                                                   vtype, v, node.value)
-                    # A module-scope dict is boxed as int64_t, so its store
-                    # comes through THIS arm and not the typed one above:
-                    # without the record here the read of the same global
-                    # has no value type and prints the stored double's bits.
-                    _note_global_dict_store(gen, node.target.obj, vtype)
             elif _dsw_sn and not gen._struct_defines_method(_dsw_sn, '__setitem__'):
                 # `d[k] = v` on a builtin-`dict` subclass with no
                 # `__setitem__` override: store into the backing MojoDict.
@@ -2926,12 +2903,6 @@ def _gen_stmt_ReturnStmt(gen, node):
         if gen.current_func_name and v in gen._callable_ret_types:
             gen._return_callable_ret_types[gen.current_func_name] = \
                 gen._callable_ret_types[v]
-        # A returned CAPTURING closure is a `MojoBoundMethod *` value, which
-        # its lowering recorded in `_bound_method_ret_types` (not the table
-        # above), so the factory's return type is read from there.
-        if gen.current_func_name and v in gen._bound_method_ret_types:
-            gen._return_bound_method_ret_types[gen.current_func_name] = \
-                gen._bound_method_ret_types[v]
         if gen.current_func_name and v in gen._func_value_names:
             gen._return_func_value_names[gen.current_func_name] = \
                 gen._func_value_names[v]

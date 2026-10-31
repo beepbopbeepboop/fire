@@ -4,49 +4,6 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/scripts/summarize_stats.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
-## Status (2026-10-30, round 6 — str-returning factory closure fixed on the NON-coroutine path; the coroutine gates are untouched)
-
-Round 5 stopped because the typed-callable change overlapped
-`bug:CODEGEN_closure_str_return_is_lost`. The owner handed that bug to this
-worker (2026-10-30), so this round did the closure-str fix first. It is
-landed and documented in `bugs/CODEGEN_closure_str_return_is_lost.md`.
-
-What it does and does NOT do for this file:
-
-- It fixes a capturing closure RETURNED as `str` through the ordinary
-  (gimple) pipeline, including `g = mk(...)` and `mk(...)(...)`. It does not
-  touch `cpp_async.py`'s closure-factory gates (lines ~1568/1592), which are
-  what refuses `calc_h(...)` inside a GENERATOR body. `calc_histogram_table`
-  is a generator body, so the real file still takes the coroutine path and
-  is still refused there.
-- Plan steps 2-5 (typed `std::function<R(P...)>` slots, the two `int64_t`
-  gates, and `cpp_core.py` typed dispatch) are NOT started. The next round
-  owns them, and the closure-str owner's gate work is now this worker's.
-- Untyped closure parameters still default to `int64_t` (see the closure-str
-  doc). The real file's `calc(stats: Stats)` is annotated, so it is not that.
-
-Next step is unchanged: plan step 2 (`types.py` `callable_ctype`), then the
-coroutine-path gates. Measure with the one-module build on the real file
-before editing `cpp_async.py`, since the round-3 probe table is the only
-evidence for which bodies pass.
-
-## Status (2026-10-29, round 5 — STOPPED at a claim boundary; no code change)
-
-Next step is plan step 2 onward (`types.py` `callable_ctype`, `cpp_async.py`
-closure-factory gates, `cpp_core.py` typed call dispatch). Steps 2-4 are one
-change: a `str`/pointer-returning closure needs its typed `std::function` slot
-AND its call-site dispatch together, or the value is read back as int64.
-Landing step 2 alone changes no behaviour.
-
-Stopped because that mechanism is the same one another worker holds:
-`bug:CODEGEN_closure_str_return_is_lost` (`bugs/CODEGEN_closure_str_return_is_lost.md`,
-"a closure that returns a `str` prints a decimal address"). Its return-type
-carry-through at the call site is steps 3-4 here. Editing `cpp_async.py`'s
-closure-factory gates or `cpp_core.py`'s callable dispatch from this worker
-would collide with that claim. Next round needs the controller to either hand
-the typed-callable model to this bug (and let the closure-str owner land the
-call-site return type first) or to the closure-str owner. The choice is theirs.
-
 ## Status (2026-10-29, round 4 — plan step 1 MEASURED; no code change this round)
 
 Plan step 1 from round 3 (how a `Callable[...]` annotation reaches the emitter)

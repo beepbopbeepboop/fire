@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from mojo.middle.types import _C_RESERVED_FUNCS, _FORCE_RENAME_RESERVED, _split_top_level_commas, _used_idents_node, _CPP_CALLABLE_CTYPE, _CPP_CALLABLE_CTYPE_1ARG, _CPP_CALLABLE_CTYPE_STARARGS, _CPP_CALLABLE_CTYPE_KWARGS, _CPP_CALLABLE_CTYPE_STAR_KW, _FLOAT_TYPES
 import dataclasses
-from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _as_set, _signed_int64, ForStmt, IfStmt, MatchStmt, StructDef, AssignStmt
+from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _as_set, _signed_int64, ForStmt, IfStmt, MatchStmt, StructDef
 _WALK_FIELD_NAMES_CACHE: dict[type, tuple] = {}
 # Whether a node's CLASS is a dataclass, cached beside the field names for
 # the same reason and on the same key. `dataclasses.is_dataclass` is a pure
@@ -997,12 +997,10 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
             return 'double'
         return 'int64_t'
     if isinstance(e, CallExpr) and isinstance(e.func, IdentExpr):
-        if e.func.name in ('str', 'String', 'repr', 'os.path.join', 'os.path.basename', 'os.path.dirname', 'os.path.splitext', 'mojo_dirent_name', 'mojo_dirent_path'):
+        if e.func.name in ('str', 'String', 'repr', 'os.path.join', 'os.path.basename', 'os.path.dirname', 'os.path.splitext'):
             return 'char *'
         if e.func.name in ('len', 'ord'):
             return 'int64_t'
-        if e.func.name == 'mojo_os_scandir':
-            return 'MojoList *'
         if e.func.name == 'sorted' and e.args:
             return 'MojoList *'
         if e.func.name in ('list', 'set') and len(e.args) == 1 and (len(e.kwargs or []) == 0):
@@ -1310,15 +1308,6 @@ def _generator_tuple_yield_slot_ctypes(fn: FunctionDef, known: dict | None=None,
     for n in _walk_own_body(fn.body):
         if isinstance(n, YieldExpr) and isinstance(n.value, TupleExpr):
             site = [_infer_simple_expr_ctype(el, known, self_fields, async_api, closure_api) or 'int64_t' for el in n.value.elements]
-            # A tuple slot that is a TAGGED word -- a name the body tests with
-            # `isinstance(<name>, tuple)` (so it is a boxed word that is
-            # sometimes a tuple) and otherwise uses as a string -- is a string
-            # in the non-tuple case this yield sits in.
-            for _si, _el in enumerate(n.value.elements):
-                if (site[_si] == 'int64_t' and isinstance(_el, IdentExpr)
-                        and _el.name in _tuple_tested_names(fn)
-                        and _name_has_str_evidence(_el.name, fn)):
-                    site[_si] = 'char *'
         elif isinstance(n, YieldFromExpr) and generator_api is not None and isinstance(n.value, CallExpr) and isinstance(n.value.func, IdentExpr) and (n.value.func.name != fn.name):
             delegate_api = generator_api.get(n.value.func.name)
             delegate_slots = delegate_api.get('tuple_slot_ctypes') if delegate_api else None
@@ -1346,84 +1335,6 @@ def _generator_tuple_yield_slot_ctypes(fn: FunctionDef, known: dict | None=None,
                     return (True, None)
             slots = merged
     return (found, slots)
-
-
-def _tuple_tested_names(fn) -> set:
-    """Names `fn`'s own body tests with `isinstance(<name>, tuple)`."""
-    out: set = set()
-    for n in _walk_own_body(fn.body):
-        if (isinstance(n, CallExpr) and isinstance(n.func, IdentExpr)
-                and n.func.name == 'isinstance' and len(n.args) == 2
-                and isinstance(n.args[0], IdentExpr)
-                and isinstance(n.args[1], IdentExpr) and n.args[1].name == 'tuple'):
-            out.add(n.args[0].name)
-    return out
-
-
-def _name_has_str_evidence(name: str, fn) -> bool:
-    """True when `fn`'s body uses `name` in a way only a string supports:
-    subscripted / sliced, a str-method receiver, or the left/right operand of
-    `+` with a string literal."""
-    for n in _walk_own_body(fn.body):
-        if isinstance(n, (SubscriptExpr, SliceExpr)):
-            if isinstance(n.obj, IdentExpr) and n.obj.name == name:
-                return True
-        elif isinstance(n, CallExpr) and isinstance(n.func, MemberExpr):
-            if (n.func.member in ('strip', 'lstrip', 'rstrip', 'lower', 'upper',
-                                  'split', 'rsplit', 'join', 'replace',
-                                  'startswith', 'endswith')
-                    and isinstance(n.func.obj, IdentExpr) and n.func.obj.name == name):
-                return True
-        elif isinstance(n, BinaryOp) and n.op == '+':
-            for a, b in ((n.left, n.right), (n.right, n.left)):
-                if isinstance(a, IdentExpr) and a.name == name \
-                        and isinstance(b, StringLiteral):
-                    return True
-    return False
-
-
-def _tagged_word_params(fn) -> set:
-    """Parameters of `fn` that the body REBINDS from `<list>.pop(...)` and also
-    tests with `isinstance(<name>, tuple)`: Lib/os.py's `walk(top, ...)` does
-    `top = stack.pop()` where the stack holds path strings AND pushed
-    `(top, dirs, nondirs)` tuples. Such a parameter cannot keep the one C type
-    its call sites gave it; it is the boxed WORD (`int64_t`), and each use
-    narrows it (cast to `char *` / `MojoList *`)."""
-    names = {p[0] if isinstance(p, (tuple, list)) else p for p in (fn.params or [])}
-    tested = _tuple_tested_names(fn) & names
-    if not tested:
-        return set()
-    out: set = set()
-    for n in _walk_own_body(fn.body):
-        if (isinstance(n, AssignStmt) and isinstance(n.target, IdentExpr)
-                and n.target.name in tested
-                and isinstance(n.value, CallExpr)
-                and isinstance(n.value.func, MemberExpr)
-                and n.value.func.member == 'pop'):
-            out.add(n.target.name)
-    return out
-
-
-def _tuple_guarded_bare_yields(fn) -> set:
-    """ids of the `yield <name>` nodes of `fn` that sit inside an
-    `if isinstance(<name>, tuple):` body (the same name), i.e. yields that are
-    known to hand out a tuple whatever type inference gave the name."""
-    out: set = set()
-    for n in _walk_own_body(fn.body):
-        if not isinstance(n, IfStmt):
-            continue
-        c = n.condition
-        if not (isinstance(c, CallExpr) and isinstance(c.func, IdentExpr)
-                and c.func.name == 'isinstance' and len(c.args) == 2
-                and isinstance(c.args[0], IdentExpr)
-                and isinstance(c.args[1], IdentExpr) and c.args[1].name == 'tuple'):
-            continue
-        name = c.args[0].name
-        for sub in _walk_own_body(n.then_body):
-            if (isinstance(sub, YieldExpr) and isinstance(sub.value, IdentExpr)
-                    and sub.value.name == name):
-                out.add(id(sub))
-    return out
 
 
 def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_api: dict | None=None, self_fields: dict | None=None, async_api: dict | None=None, closure_api: dict | None=None, known_structs: frozenset | None=None, dict_val_types: dict | None=None, method_return_types: dict | None=None, fn_return_types: dict | None=None, field_elem_types: dict | None=None, local_elem_types: dict | None=None, include_returns: bool=True, self_struct_ctype: str | None=None, generator_method_api: dict | None=None, self_struct_name: str | None=None, module_global_types: dict | None=None) -> str | None:
@@ -1503,13 +1414,6 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
                 _vct = generator_api[iterable.func.name].get('value_ctype')
                 if _vct is not None:
                     known[target_name] = _vct
-    # `if isinstance(top, tuple): yield top` -- a bare `yield <name>` under an
-    # `isinstance(<name>, tuple)` guard yields a TUPLE (a boxed `MojoList *`)
-    # whatever the name's inferred type is: Lib/os.py's `walk` pops `top` off a
-    # heterogeneous stack (a path string or a pushed `(top, dirs, nondirs)`
-    # tuple), and its bottom-up path yields the popped tuple beside the
-    # top-down `yield top, dirs, nondirs`.
-    _tuple_guarded = _tuple_guarded_bare_yields(fn)
     ctype = None
     for n in _walk_own_body(fn.body):
         if isinstance(n, YieldExpr):
@@ -1517,9 +1421,7 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
                 if ctype is None:
                     ctype = 'int64_t'
                 continue
-            if id(n) in _tuple_guarded:
-                t = 'MojoList *'
-            elif isinstance(n.value, TupleExpr):
+            if isinstance(n.value, TupleExpr):
                 if any((isinstance(el, (TupleExpr, ListExpr, DictExpr, SetExpr)) for el in n.value.elements)):
                     return None
                 t = 'MojoList *'

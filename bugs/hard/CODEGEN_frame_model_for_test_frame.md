@@ -11,4 +11,4 @@ The surface in question: sys._getframe, f_back, clear, f_generator, gi_frame, tb
 2. Which of these can never be exact in compiled C (for example a live f_locals), and what limit should the owner accept?
 3. Recommend (a) or (b) and give the first step.
 
-Source context: frame model feature for test_frame.py (bug fixed: generator division-by-zero and method self-capture); not the frame-model feature itself.
+Source doc: bugs/CODEGEN_generator_function_Lib_test_test_frame.md

@@ -658,10 +658,6 @@ def _auto_invoke_bound_method_value(gen, bm_val: str) -> tuple[str, str]:
     0 like the pre-consolidation copies did.
     """
     ret_type = gen._bound_method_ret_types.get(bm_val, 'int64_t')
-    if ret_type == 'double':
-        raw_t = gen._call_expr('double', 'mojo_bound_method_call_d0',
-                                [('MojoBoundMethod *', bm_val)])
-        return ret_type, raw_t
     raw_t = gen._call_expr('int64_t', 'mojo_bound_method_call_0',
                             [('MojoBoundMethod *', bm_val)])
     if ret_type == 'int64_t':
@@ -870,14 +866,12 @@ def _lower_bound_method_call_value(gen, bm: str, node: gimple_ctypes.CallExpr,
         at, av = gen.lower_expr(a)
         widened.append(av if at == 'int64_t' else gen._new_val('int64_t', f'(int64_t){av}'))
     n = len(widened)
-    # A `double`-returning bound method must go through the `dN` twin
-    # (same ABI fix as `mojo_fnptr_call_dN`): calling through the `int64_t`
-    # helper reads the wrong register and truncates.
-    if ret_type == 'double':
-        helper = f'mojo_bound_method_call_d{min(n, 8)}'
-        raw_t = gen._call_expr('double', helper, [('MojoBoundMethod *', bm)] +
-                              [('int64_t', w) for w in widened[:8]])
-        return ret_type, raw_t
+    # Arity 8, matching the sibling `_lower_fnptr_call_value` /
+    # `_lower_maybe_bound_call` paths (which the variadic-callable work
+    # widened from 4). This one still capped at 4, so a five-or-more-argument
+    # call through a `MojoBoundMethod *` value dropped its tail — the same
+    # silent wrong value, and a reader would rightly ask why the three
+    # sibling paths disagreed.
     helper = f'mojo_bound_method_call_{min(n, 8)}'
     raw_t = gen._call_expr('int64_t', helper, [('MojoBoundMethod *', bm)] +
                              [('int64_t', w) for w in widened[:8]])

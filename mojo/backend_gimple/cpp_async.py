@@ -385,16 +385,6 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
                                       same existing convention)
       <base>_destroy(MojoGenerator*) -> void  (coroutine_handle::destroy())
     """
-    _has_sd = False
-    for _n in gimple_exprtypes._walk_ast(fn):
-        if gcc_._cpp_scandir_item(gen, _n) is not None:
-            _has_sd = True
-    if _has_sd:
-        fn = gcc_._cpp_lower_scandir_withs(gen, fn)   # `with scandir(..) as e` -> a real list of DirEntry handles
-    _opa = gcc_._cpp_collect_os_path_aliases(fn)
-    if _opa:
-        fn = gcc_._cpp_lower_os_path_aliases(fn, _opa)   # `join(a, b)` -> `os.path.join(a, b)`
-
     # Reset the tuple-yield side channel up front (see its own
     # docstring at __init__) so an early exception/refusal in THIS
     # compile attempt can never leave a PRIOR generator's leftover
@@ -585,10 +575,6 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
             param_ctypes.append((pn[1:], 'MojoList *'))
             continue
         ctype = gen._param_ctype(pn, pt, fn)
-        if ctype == 'char *' and pn in gimple_exprtypes._tagged_word_params(fn):
-            # rebound from a heterogeneous `pop()`: the boxed word, not the
-            # call sites' string (see `_tagged_word_params`).
-            ctype = 'int64_t'
         # A struct pointer is an ordinary trivially-copyable C type —
         # the compiler-generated coroutine frame copies it into itself
         # by value exactly like any scalar/container parameter, zero
@@ -780,7 +766,6 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         _self_cts.append(_sct0)
     gen._cpp_gen_self_params = _self_cts
     gen._cpp_os_path_aliases = gcc_._cpp_collect_os_path_aliases(fn)
-    gen._cpp_tuple_guarded_yields = gimple_exprtypes._tuple_guarded_bare_yields(fn)
     # Set True by _cpp_yield_from the moment it actually emits a
     # self-recursive delegation call — read back (into a local,
     # BEFORE `finally` below) to decide whether `{base}_start`/
@@ -1011,7 +996,6 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         gen._cpp_gen_self_base = None
         gen._cpp_gen_self_params = None
         gen._cpp_os_path_aliases = None
-        gen._cpp_tuple_guarded_yields = None
         gen._cpp_gen_self_recursed = None
         gen._cpp_fwd_gen_delegates = None
     # The cpp typer types a yield it cannot resolve as int64_t, and that

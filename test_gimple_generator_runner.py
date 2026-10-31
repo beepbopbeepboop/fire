@@ -2559,40 +2559,6 @@ def main():
     # Two classes each with a nested `g` that captures `self`: the hoisted
     # bases are struct-qualified, so neither generator is mistaken for the
     # other.
-    # test_frame.py's `test_clear_generator` shape: a nested generator that
-    # reads `self`, WRITES an enclosing local through `nonlocal` in a
-    # `finally`, and is driven by `next(gen)` then `gen.close()`. `.close()`
-    # drives the generator in place (it does not hand the object out of the
-    # method, so `self` capture is still sound), and its lowering had assigned
-    # the int64_t `__mojo_gen_close` result into a `_Bool` temp -- a hard
-    # `-fgimple` "invalid conversion in gimple call".
-    test_generator_stdout("nested_generator_method_self_nonlocal_write_then_close", """\
-class T:
-    def __init__(self, n):
-        self.n = n
-
-    def inner(self):
-        return self.n
-
-    def run(self):
-        endly = 0
-        def g():
-            nonlocal endly
-            try:
-                yield 1
-                self.inner()
-            finally:
-                endly = 5
-        gen = g()
-        print(next(gen))
-        print(endly)
-        gen.close()
-        print(endly)
-
-t = T(3)
-t.run()
-""", "1\n0\n5\n")
-
     test_generator_stdout("nested_generator_method_same_name_two_classes", """\
 struct A:
     var k: Int
@@ -6161,39 +6127,6 @@ def main():
         print(r)
 """, "yields ['x'], whose call sites do not all pass the same")
 
-    # `d, b = os.path.split(p)` binds both names to str, so a generator fed
-    # the unpacked `b` is no longer a call-site HOLE. See Lib/glob.py's
-    # `_iglob`/`_glob2`, whose `basename` comes from exactly this shape.
-    test_generator_stdout("generator_fed_os_path_split_unpacked_str", """\
-import os
-
-def _g1(pattern):
-    yield pattern
-
-def outer(p):
-    d, b = os.path.split(p)
-    yield from _g1(b)
-
-def main():
-    for x in outer("a/bc"):
-        print(x)
-""", "bc\n")
-    # An unannotated generator param typed ONLY by its call sites must reach
-    # its delegating generator as that kind. The scan used to memoize the
-    # callee's kind as int before the call-site table was filled, so this
-    # printed the string's address at exit 0.
-    test_generator_stdout("generator_delegate_callsite_typed_param_not_memoized_int", """\
-def _g1(pattern):
-    yield pattern
-
-def outer():
-    yield from _g1("abc")
-
-def main():
-    for x in outer():
-        print(x)
-""", "abc\n")
-
     _foreign_a3_generator_handle_next()
     _foreign_a3_generator_handle_for_loop()
     _foreign_cpp_module_global_value()
@@ -6859,123 +6792,6 @@ def main():
         print(v)
 main()
 """, "/tmp/x\n/tmp/y\nTrue\nFalse\n")
-
-    # A generator METHOD of a class defined INSIDE a function, yielding the
-    # str / str|None / None 4-tuples `string.Formatter.parse` yields
-    # (Lib/test/test_string/test_string.py's `BarFormatter` in
-    # `test_override_parse`). The class never reaches top-level struct
-    # registration, and this used to refuse the whole module.
-    test_generator_stdout("generator_method_of_function_nested_class_yields_str_none_tuples", """\
-def test():
-    class BarFormatter:
-        def parse(self, format_string):
-            yield ('', format_string, None, None)
-            yield ('x', 'y', 'z', None)
-
-    f = BarFormatter()
-    for t in f.parse("abc"):
-        print(t)
-
-test()
-""", "('', 'abc', None, None)\n('x', 'y', 'z', None)\n")
-
-    # A list built by `append(os.path.join(...))` and walked with
-    # `reversed(...)`: the element kind of the appended call (a string) and
-    # `reversed`'s passthrough of it were both unknown, so the yield slot was
-    # the int64_t default and the strings printed as heap ADDRESSES (exit 0).
-    test_generator_stdout("generator_reversed_list_of_os_path_join_results", """\
-import os
-
-def g(top):
-    dirs = ["a", "b", "c"]
-    names = []
-    for d in reversed(dirs):
-        names.append(os.path.join(top, d))
-    for n in reversed(names):
-        yield n
-
-def main():
-    for v in g("/t"):
-        print(v)
-main()
-""", "/t/a\n/t/b\n/t/c\n")
-
-    # Lib/os.py `walk`'s stack: a list that holds path STRINGS and pushed
-    # `(top, dirs, nondirs)` TUPLES, popped into the parameter itself and
-    # discriminated with `isinstance(top, tuple)`. The solver cannot give `top`
-    # one type, so it is the boxed word (and only then); the bare `yield top`
-    # under the guard is the tuple, the tuple's slot 0 is the string.
-    test_generator_stdout("generator_heterogeneous_stack_param_rebound_from_pop", """\
-def g(top, topdown):
-    stack = [top]
-    n = 0
-    while stack:
-        top = stack.pop()
-        if isinstance(top, tuple):
-            yield top
-            continue
-        dirs = ["d" + str(n)]
-        nondirs = ["f" + str(n)]
-        n = n + 1
-        if topdown:
-            yield top, dirs, nondirs
-        else:
-            stack.append((top, dirs, nondirs))
-        if n < 3:
-            stack.append(top + "/x")
-
-def main():
-    for a, b, c in g("r", True):
-        print(a, b, c)
-    for a, b, c in g("r", False):
-        print(a, b, c)
-
-main()
-""", "r ['d0'] ['f0']\nr/x ['d1'] ['f1']\nr/x/x ['d2'] ['f2']\nr/x/x ['d2'] ['f2']\nr/x ['d1'] ['f1']\nr ['d0'] ['f0']\n")
-
-    # `with os.scandir(top) as entries:` in a generator: a real list of DirEntry
-    # handles (entry.name / .path / .is_dir() are runtime calls), and a missing
-    # directory raises FileNotFoundError, which `except OSError` catches (the
-    # builtin exception hierarchy is part of the compiled `except` match).
-    import os as _os_fx
-    _os_fx.makedirs("/tmp/_gen_scandir_fixture/sub", exist_ok=True)
-    open("/tmp/_gen_scandir_fixture/file.txt", "w").close()
-    test_generator_stdout("generator_scandir_context_manager_dirs_and_oserror", """\
-import os
-
-def g(top):
-    try:
-        with os.scandir(top) as entries:
-            for entry in entries:
-                if entry.is_dir():
-                    yield entry.name
-    except OSError:
-        yield "ERR"
-
-def main():
-    for v in g("/tmp/_gen_scandir_fixture"):
-        print(v)
-    for v in g("/nonexistent_dir_for_scandir"):
-        print(v)
-main()
-""", "sub\nERR\n")
-
-    # posixpath.join: an empty second part still adds the separator, and an
-    # absolute second part replaces the first (os.walk's child prefix is
-    # `join(top, top[:0])`).
-    test_generator_stdout("generator_os_path_join_empty_and_absolute", """\
-import os
-
-def g(top):
-    yield os.path.join(top, "")
-    yield os.path.join(top, "/abs")
-    yield os.path.join(top, "c")
-
-def main():
-    for v in g("/tmp/x"):
-        print(v)
-main()
-""", "/tmp/x/\n/abs\n/tmp/x/c\n")
 
     test_generator_stdout("generator_enumerate_index_yields_index", """\
 def rows(data):

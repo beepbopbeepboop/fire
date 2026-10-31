@@ -459,14 +459,9 @@ def _lower_generator_close(gen, node, av: str, api: dict):
     Consuming a generator does not free it, so this deliberately does not
     destroy the handle either."""
     handle = gen._to_int64('MojoGenerator *', av)
-    # `__mojo_gen_close` returns int64_t: assigning that call straight into a
-    # `_Bool` temp is a hard `-fgimple` "invalid conversion in gimple call", so
-    # compare the word against zero (same-type operands, `_Bool` target).
-    closed_word = gen._new_val(
-        'int64_t',
+    ignored = gen._new_val(
+        '_Bool',
         f"__mojo_gen_close ({handle}, {gen._exc_type_id('GeneratorExit')})")
-    zero_word = gen._new_val('int64_t', '0')
-    ignored = gen._new_val('_Bool', f"{closed_word} != {zero_word}")
     bb_ok = gen._new_bb(); bb_ignored = gen._new_bb()
     gen._emit(f"  if ({ignored}) goto {bb_ignored}; else goto {bb_ok};")
     gen._emit_label(bb_ignored)
@@ -2183,11 +2178,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         if isinstance(node.func, (gimple_ctypes.CallExpr, gimple_ctypes.LambdaExpr)):
             _callee_t, _callee_v = gen.lower_expr(node.func)
             if _callee_t == 'MojoBoundMethod *':
-                # `factory()(...)` where the factory returns a capturing
-                # closure: its return type rides on the CallExpr node, the
-                # same way the bare-pointer arm below reads it.
-                return gen._lower_bound_method_call_value(
-                    _callee_v, node, getattr(node.func, '_callable_ret', 'int64_t'))
+                return gen._lower_bound_method_call_value(_callee_v, node)
             if _callee_t == 'void *' or _callee_t in ('int', 'int64_t', '_Bool'):
                 # `factory()(...)`, where the factory returns a callable: the
                 # callee's own return type rides on its CallExpr node (see

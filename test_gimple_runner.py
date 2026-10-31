@@ -3231,18 +3231,6 @@ def dflt(items):
 print(rest([1, 2, 3]), twice([4, 5, 6]), dflt([]), dflt([9]))
 """, "(1, [20, 30]) 9 -1 9\n")
 
-    # A constructor stub lowers to int64_t 0. The iter() rebind guard must
-    # not treat that scalar as a MojoList * cursor. See
-    # bugs/CODEGEN_gate_stdlib_syntax_red.md.
-    test_gimple_execution("gimple_iter_does_not_rebind_scalar_to_cursor", """\
-from collections import LinkedList
-def go():
-    var ll = LinkedList[Int]()
-    var it = iter(ll)
-    return 0
-print(go())
-""")
-
     # A FLAT list parameter whose call sites disagree on the element type
     # (ints, strings, floats; literal and bound-to-a-name). The contract is
     # unknown, so the loop reads each slot through mojo_list_get_boxed and the
@@ -4703,27 +4691,6 @@ def main():
     print(total)
 """, "1996000000\n", 40)
 
-    # Regression for bug:CODEGEN_closure_env_and_boxed_local_never_freed —
-    # the escaping half (a returned closure's box stays alive with it).
-    # Before the single-owner design this leaks ~91 B/iter (38 MB at 400k);
-    # after it must stay flat (within 40 MB ceiling) with stdout unchanged.
-    test_gimple_bounded_memory("gimple_boxed_mut_local_escapes_is_flat", """\
-def make_counter(n: Int):
-    var x = n
-    def bump() -> Int:
-        nonlocal x
-        x = x + 1
-        return x
-    return bump
-
-def main():
-    var total = 0
-    for r in range(400000):
-        var f = make_counter(r)
-        total += f() % 1000
-    print(total)
-""", "199800000\n", 40)
-
     # ── The other side of the same rule: a lambda bound inside a nested `def`
     # that RETURNS it is the closure's escape, so `maker`'s box must be kept.
     # The per-owner walk refuses `inner` (a returned def is not owned) and must
@@ -5361,32 +5328,6 @@ def main():
     print(d.get((k("b"),), "none"), len(d))
 main()
 """, "R 1\nnone 1\n")
-
-    # The module-scope half of the value-type seam: `d = {}` at module level
-    # is boxed as int64_t, so its subscript store comes through the untyped
-    # dict arm and every bare read of `d` loads a FRESH temp. The store's value
-    # type was recorded only on its own temp, so the read answered as int64_t:
-    # a double printed its IEEE-754 bits and a string printed its address
-    # (`4621537642612260864`, `4372406328` on the same tree). The record is
-    # now also keyed by the source name (`_note_global_dict_store`), which
-    # `_lower_IdentExpr` carries onto each read. Both halves are read in the
-    # same scope as the store, which is the case this covers; a READ from a
-    # different function is a separate gap (empty-literal module dicts are
-    # not seeded from their stores in the Phase 1.7 pre-scan).
-    test_gimple_stdout("gimple_module_scope_dict_value_type_survives_read", """\
-d = {}
-d[(1, 2)] = 9.5
-print(d[(1, 2)], len(d))
-s = {}
-s[("a",)] = "R"
-print(s[("a",)], len(s))
-p = {}
-p["k"] = 2.5
-print(p["k"], len(p))
-def main():
-    pass
-main()
-""", "9.5 1\nR 1\n2.5 1\n")
 
     # The other half of that doc, and the expensive one: a MISSING tuple key
     # grew the dict by one entry per lookup, which is where ~16 GB of the live

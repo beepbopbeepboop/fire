@@ -3271,10 +3271,14 @@ def run(gen, stmts):
                 # and None for everything else, which keeps its old path
                 # exactly.
                 args = _d2_ctor_args(work, base, n)
-        elif not _fn_returns_unbuildable_struct(work, base):
-            return
-        if kind == 'fn':
+        elif kind == 'fn':
+            # Materialize EVERY generic function instantiation with concrete
+            # type arguments (Option A: unique mangled names per spec).
             args = _concrete_args(work, kind, base, n)
+            if args is None:
+                return
+        else:
+            return
         if args is None:
             return
         work.enqueue((kind, base, tuple(args)), 0, queue)

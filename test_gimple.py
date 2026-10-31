@@ -8367,28 +8367,11 @@ def mk_bool():
 def use_bool_factory():
     print(mk_bool()())
 use_bool_factory()
-def mk_str(p: str):
-    def inner(x: str) -> str:
-        return p + x
-    return inner
-def use_str_factory():
-    g = mk_str("<")
-    print(g(">"))
-    print(mk_str("[")("]"))
-use_str_factory()
-# Capturing nested def with float return (CODEGEN fix regression)
-def use_capturing_float():
-    n = 2
-    def inner(x: int) -> float:
-        return n + 0.5
-    h = inner
-    print(h(0))
-use_capturing_float()
-def mk_str_lambda():
+def mk_str():
     return lambda: "hi"
-def use_str_lambda_factory():
-    print(mk_str_lambda()())
-use_str_lambda_factory()
+def use_str_factory():
+    print(mk_str()())
+use_str_factory()
 '''
         want = _cpython_stdout(src)
         if want is None:

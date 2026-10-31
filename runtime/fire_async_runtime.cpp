@@ -15,7 +15,6 @@
 #include <vector>
 #include <unordered_map>
 
-#include <stdio.h>
 #include <time.h>
 #include <unistd.h>
 #include <sys/types.h>

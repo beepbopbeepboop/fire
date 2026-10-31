@@ -287,7 +287,6 @@ def main():
     while True:
         try:
             log("feed +%d, abandoned %d; %s" % (feed(), abandon_empty(), refill(a.target)))
-            subprocess.run([sys.executable, os.path.join(HERE, "cpu_cap.py"), "ratchet"], capture_output=True, cwd=C.MAIN)
             if land():
                 verify_async()
                 subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "cleanup"], capture_output=True, cwd=C.MAIN)  # landed trees go

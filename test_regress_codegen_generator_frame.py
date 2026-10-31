@@ -1,5 +1,5 @@
-"""Regression test for bug:CODEGEN_generator_function_Lib_test_test_frame (fixed: integer division by zero now raises ZeroDivisionError; bare expression statement in generator body lowers; method-nested generator reading self complies):
-Reproduces the three sub-issues documented:
+"""Regression test for bug:CODEGEN_generator_function_Lib_test_test_frame.
+Reproduces the three sub-issues documented in bugs/CODEGEN_generator_function_Lib_test_test_frame.md:
 - g: bare BinaryOp (1/0) in generator body -> unsupported expression statement
 - gen: yield nested() with sibling nested def -> unresolved callee (fixed:
   a non-capturing sibling is compiled as a helper)
