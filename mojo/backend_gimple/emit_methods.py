@@ -6046,6 +6046,9 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
     # window call site still gets the 2-argument helper, so nothing that does
     # not pass a window changes shape.
     if method in ('startswith', 'endswith') and arg_vals:
+        # The runtime answers an int; Python answers a bool, and so does
+        # `exprtypes` for this call. Declaring the raw int here made
+        # `print(f.startswith("x"))` on a word receiver print `1`.
         is_start = method == 'startswith'
         arg0_type = arg_pairs[0][0] if arg_pairs else 'char *'
         arg0_val = arg_vals[0]
@@ -6055,21 +6058,21 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
             # mojo_str_startswith_word.
             fn = 'mojo_str_startswith_word' if is_start else 'mojo_str_endswith_word'
             _pw = gen._to_int64(arg0_type, arg0_val)
-            return 'int', gen._call_expr('int', fn, [('char *', cstr_ov), ('int64_t', _pw)])
-        if full_window:
-            if arg0_type == 'char':
-                fn = 'mojo_str_startswith_char' if is_start else 'mojo_str_endswith_char'
-                t = gen._new_temp('int')
-                gen._emit_call('int', t, fn, [('char *', cstr_ov), ('char', arg0_val)])
-                return 'int', t
+            t = gen._call_expr('int', fn, [('char *', cstr_ov), ('int64_t', _pw)])
+        elif full_window and arg0_type == 'char':
+            fn = 'mojo_str_startswith_char' if is_start else 'mojo_str_endswith_char'
+            t = gen._new_temp('int')
+            gen._emit_call('int', t, fn, [('char *', cstr_ov), ('char', arg0_val)])
+        elif full_window:
             fn = 'mojo_str_startswith' if is_start else 'mojo_str_endswith'
-            return 'int', gen._call_expr('int', fn,
-                                         [('char *', cstr_ov), (arg0_type, arg0_val)])
-        fn = 'mojo_str_startswith_from' if is_start else 'mojo_str_endswith_from'
-        ntype, nval = _cstr_needle(gen, arg0_type, arg0_val)
-        return 'int', gen._call_expr('int', fn, [
-            ('char *', cstr_ov), (ntype, nval),
-            ('int64_t', st), ('int64_t', sp)])
+            t = gen._call_expr('int', fn, [('char *', cstr_ov), (arg0_type, arg0_val)])
+        else:
+            fn = 'mojo_str_startswith_from' if is_start else 'mojo_str_endswith_from'
+            ntype, nval = _cstr_needle(gen, arg0_type, arg0_val)
+            t = gen._call_expr('int', fn, [
+                ('char *', cstr_ov), (ntype, nval),
+                ('int64_t', st), ('int64_t', sp)])
+        return '_Bool', gen._new_val('_Bool', f'{t} != 0')
     if method in ('find', 'index', 'rfind', 'rindex', 'count') and arg_vals:
         # index/rindex are find/rfind with ValueError instead of -1 on a miss,
         # which nothing in this tree relies on (see rindex's note below), so
