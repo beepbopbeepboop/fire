@@ -2,13 +2,34 @@
 
 ## Status
 
-OPEN. Found 2026-10-30 while fixing `CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered`.
+PARTIAL. Found 2026-10-30 while fixing `CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered`.
 
-Landed alongside that doc's interpreter half (`_mojo_iter` / `_mojo_next` in
-`myinterpreter.py`): `next(c)`, `iter(c)`, `for x in c` and list comprehensions
-over a struct with `__iter__`/`__next__` now drive the Mojo protocol.
+Landed 2026-10-30 (option 2 below, through one choke point): `list`, `tuple`,
+`set`, `frozenset`, `sum`, `sorted`, `enumerate`, `any`, `all`, `zip`, and
+`min`/`max` with one argument now accept a Mojo struct with `__iter__`. The
+hook is `_mojo_builtin_args`, called from `invoke` — the one call path shared
+by `eval_CallExpr` and `map[func]`. The builtin objects are not wrapped, so
+`isinstance(x, list)` is unchanged. Regression:
+`test_interp_oracle.py::user_iterator_struct_next_and_for` (fails on the
+unfixed tree with `KeyError: 0`, passes now). Verified: `python3
+test_interp_oracle.py` → 24 passed, 0 failed.
 
-Still failing, measured with `python3 fire.py run`:
+Still failing, measured with `python3 fire.py run` on 2026-10-30:
+
+```python
+    print(list(map(lambda x: x * 10, Counter(1, 4))))   # KeyError: 0
+    print(list(filter(lambda x: x > 1, Counter(1, 4)))) # KeyError: 0
+    print(list(reversed(Counter(1, 4))))                # KeyError: 0
+```
+
+`map`/`filter` take the iterable as their SECOND argument and the first
+positional is the callable, so the first-argument rule in `_mojo_builtin_args`
+does not reach it; `reversed` needs a sequence protocol, not `__iter__`, and
+Python's `reversed()` would call `__reversed__`, so it is a separate decision.
+`dict(c)` (pairs) was not measured. Remaining work: extend the table for
+`map`/`filter` (iterable argument index 1) and decide `reversed` explicitly.
+
+Still failing, the original report:
 
 ```python
 class Counter:              # __init__/__iter__ (returns self)/__next__ as usual
@@ -25,6 +46,9 @@ only attribute reads, so a builtin given a user iterator falls through to
 `__getitem__` and dies with `KeyError: 0`.
 
 ## Next step
+
+Option 2 was taken (2026-10-30) for the builtins listed in Status. What remains
+is `map`/`filter`/`reversed`/`dict`, per Status. The original options follow.
 
 Make the protocol visible to Python's own builtins, not one call site at a
 time. Two options, pick one:

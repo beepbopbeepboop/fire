@@ -3491,8 +3491,20 @@ builds through `fire.py build` and prints `5`, `6`, matching CPython. So for a
 LOCAL factory the compiled receiver is already typed; the blocker in the
 sections above is the CROSS-MODULE generic case (`peekable(list)`).
 
-**Still open:** builtins that call Python's `iter()` internally (`list(c)`,
-`sum(c)`, `zip`, `enumerate`, `sorted`, ...) still fail in the interpreter. Filed
-as `bugs/RUN_builtins_over_a_user_iterator_struct_still_fail.md` with the two
-options. The compiled type-inference / in-TU iterator work described above is
-untouched by this change.
+**Also landed (same interpreter half):** Python's own iterable-consuming
+builtins now accept a Mojo struct with `__iter__`. `list`, `tuple`, `set`,
+`frozenset`, `sum`, `sorted`, `enumerate`, `any`, `all`, `zip`, and
+`min`/`max` (one argument) get the `_mojo_iter` generator for such a struct,
+through `_mojo_builtin_args` at the single shared `invoke` call path. The
+builtins themselves are unchanged, so `isinstance(x, list)` is unaffected.
+Regression: the `user_iterator_struct_next_and_for` oracle program, which
+fails on the unfixed interpreter with `KeyError: 0` and passes now.
+
+The interpreter's builtin gap for the common builtins is closed by this change.
+`map`/`filter`/`reversed` still fail and are tracked, with the exact next step,
+in `bugs/RUN_builtins_over_a_user_iterator_struct_still_fail.md` (PARTIAL).
+
+**Still open (this bug's own remainder):** the compiled type-inference / in-TU
+iterator work described above is untouched by this change, and so is the
+compiled `list(c)` path. The 2026-10-30 interpreter changes do not move the
+compiled sweep.
