@@ -4969,8 +4969,8 @@ class GimpleGen:
         return glo._gen_for_set(self, var, it_val, body, shadow_name)
     def _gen_lifted_closure(self, ci: ClosureInfo, outer_name: str=None) -> str:
         return glo._gen_lifted_closure(self, ci, outer_name)
-    def _emit_generator_tuple_unpack(self, var_names: list, slot_types: list, list_ptr: str, nested_flags: list | None=None) -> None:
-        return glo._emit_generator_tuple_unpack(self, var_names, slot_types, list_ptr, nested_flags)
+    def _emit_generator_tuple_unpack(self, var_names: list, slot_types: list, list_ptr: str, nested_flags: list | None=None, slot_elems: list | None=None) -> None:
+        return glo._emit_generator_tuple_unpack(self, var_names, slot_types, list_ptr, nested_flags, slot_elems)
     def _gen_for_generator_iter(self, var: str, gen_val: str, api: dict, body: list, destroy_after: bool=True, shadow_name: str | None=None):
         return glo._gen_for_generator_iter(self, var, gen_val, api, body, destroy_after, shadow_name)
     def _emit_generator_pending_exc_check(self, gen_val: str, base: str, destroy_after: bool, bb_not_pending: str):
@@ -6310,7 +6310,10 @@ def _verify_desugared_genexps(code: str, gen, names: list) -> None:
     missing = []
     for _vn in names:
         _vname = _as_str(_vn)
-        if f'__mgco_{_vname}_' not in code and f'__mojogen_{_vname}_' not in cpp:
+        # The C++20 companion names its generator `_mojogen_<name>_*` (one
+        # leading underscore; see `_has_cpp_bodies` in the runner). Checking
+        # `__mojogen_` refused every genexp that DID lower through that path.
+        if f'__mgco_{_vname}_' not in code and f'_mojogen_{_vname}_' not in cpp:
             missing.append(_vname)
     if missing:
         raise RuntimeError(

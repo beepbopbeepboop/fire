@@ -5150,6 +5150,21 @@ def main():
             print(x)
 """, "root\nsub\na\nb\nroot/sub\nx\ny\nc\n")
 
+    # The same list-valued slot with INTEGER elements: the consumer must read
+    # the list's elements with the int accessor (the slot's recorded element
+    # kind), not as the words of a string or a pointer.
+    test_generator_stdout("gen_tuple_slot_list_of_ints", """\
+def pairs(n: Int):
+    var a = [1, 2]
+    yield "x", a
+
+def main():
+    for tag, vals in pairs(1):
+        print(tag)
+        for v in vals:
+            print(v + 10)
+""", "x\n11\n12\n")
+
     test_generator_stdout("gen_tuple_mixed_arity_preserves_length", """\
 def pairs(wide):
     if wide:
@@ -7272,8 +7287,10 @@ def main():
 """, "12\n13\n")
 
     # Enclosing def rebinds the captured name after the generator is defined:
-    # Python would show the new value, a snapshot would not. Must be refused.
-    test_generator_refused("generator_nested_rebound_after_def_refused", """\
+    # Python shows the NEW value (a snapshot would show 10). The enclosing
+    # parameter is threaded into the generator frame (`extra_captures`), so
+    # this now compiles and must match CPython: g(2) yields 2 + 5 = 7.
+    test_generator_stdout("generator_nested_rebound_after_def_sees_new_value", """\
 def outer(k: int):
     def g(n):
         yield n + k
@@ -7283,11 +7300,13 @@ def outer(k: int):
 
 def main():
     outer(10)
-""", "reads enclosing-scope variable(s) k")
+""", "7\n")
 
     # A `nonlocal` write from a nested generator used to compile to a fresh
-    # local starting at zero (silently wrong). It must be refused.
-    test_generator_refused("generator_nested_nonlocal_write_refused", """\
+    # local starting at zero (silently wrong). The write must reach the
+    # enclosing def's variable: outer(10) -> k = 11, yield 2 + 11 = 13, then
+    # the enclosing print sees k == 11.
+    test_generator_stdout("generator_nested_nonlocal_write_reaches_enclosing", """\
 def outer(k: int):
     def g(n):
         nonlocal k
@@ -7299,7 +7318,7 @@ def outer(k: int):
 
 def main():
     outer(10)
-""", "through `nonlocal`")
+""", "13\n11\n")
 
     if _FAIL:
         print(f"\n{_PASS} passed, {_FAIL} failed")
