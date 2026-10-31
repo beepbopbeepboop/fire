@@ -9,7 +9,7 @@ grow. The known set is `compile_stdlib.EXPECTED_FAILURES`, the same per-file bas
 a module that is expected there is expected here, and a module that is not is a regression.
 
 The symbol-collision exclusions (`excluded for symbol collisions`) are a separate, documented stopgap
-(bugs/CODEGEN_dylib_generic_inline_copies_share_one_symbol.md) and are reported, not gated.
+(bug:CODEGEN_dylib_generic_inline_copies_share_one_symbol) and are reported, not gated.
 
 Screen: only the verdict and any unexpected skip. The full build output goes to build/stdlib_dylib.log."""
 import os, re, subprocess, sys
