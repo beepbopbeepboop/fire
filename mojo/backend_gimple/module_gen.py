@@ -8990,11 +8990,17 @@ def gen_module_impl(self, stmts):
             # struct pointer — the "makes integer from pointer without a
             # cast" the pre-registration above was written to stop. Write
             # the refined per-overload signature here, where inference is
-            # final, for the structs THIS compile materialized in-TU
-            # (gen._intu_structs — the elab factory closure and the generic
-            # seed); every other struct keeps the bare-key fallback exactly
-            # as it always did.
-            if s.name in getattr(self, '_intu_structs', {}):
+            # final. Every OVERLOADED method needs it, not only the structs
+            # THIS compile materialized in-TU (gen._intu_structs): the bare
+            # key is last-overload-wins, so an overloaded constructor that
+            # missed the slot had its definition's param types read off a
+            # sibling. Measured in std/collections/string/codepoint.mojo:
+            # `Codepoint.__init__(out self, *, unsafe_unchecked_codepoint:
+            # UInt32)` was defined as `char *` (the `lit: StringLiteral`
+            # overload's type), so every caller cast its UInt32 through a
+            # pointer (-Wint-to-pointer-cast). A non-overloaded method's
+            # suffix is empty, so its slot IS the bare key and is untouched.
+            if _oid or s.name in getattr(self, '_intu_structs', {}):
                 self.func_param_types[_sigkey] = _new_ct
 
     for s in all_functions:

@@ -2732,6 +2732,89 @@ def _func_csym(gen, bare_name: str) -> str:
     return mangled
 
 
+def _seed_annotated_param_elem_types(gen, node) -> None:
+    """Seed what a param's own declared annotation says about its contents.
+
+    Shared by gen_func and _gen_struct_method, so a method's params get the
+    same seed a free function's do. Two things are seeded, both straight from
+    the annotation (the same static-truth seed struct fields already get; see
+    gimple_module_gen.py's `list[tuple[T, T]]` field block):
+
+    * the element type of a container param (`list[tuple[str, str]]`,
+      `dict[str, list[str]]`, `Span[Tuple[A, B], _]`), so loop/unpack vars and
+      `xs[i]` are not boxed int64_t inside the body;
+    * a `Tuple[...]` param's by-value struct, registered in struct_field_types.
+      The param pass resolves the ctype but does not register the struct, so
+      `t[0]` on a Tuple param missed the member-access fast path and
+      dereferenced the struct value (`invalid type argument of unary '*'`).
+    """
+    for pname, ptype in node.params:
+        if ptype is None or pname.startswith('*') or not isinstance(ptype, str):
+            continue
+        bare = pname.lstrip('*')
+        _pa = ptype.strip()
+        _pbase = _pa.split('[', 1)[0].strip()
+        if _pbase in ('Tuple', 'tuple') and '[' in _pa:
+            gen._ensure_tuple_struct(_pa)
+        if _pbase not in ('list', 'List', 'set', 'Set', 'frozenset', 'dict', 'Dict', 'Span') or '[' not in _pa:
+            continue
+        _pin = gimple_ctypes._split_top_level_commas(
+            _pa[_pa.index('[') + 1:_pa.rindex(']')].strip())
+        if _pbase in ('dict', 'Dict'):
+            if len(_pin) != 2:
+                continue
+            _vann = _pin[1].strip()
+            _vc = gen._resolve_type(_vann)
+            if _vc and _vc != 'int64_t':
+                gen._dict_val_types.setdefault(bare, _vc)
+            _vbase = _vann.split('[', 1)[0].strip()
+            if _vbase in ('list', 'List', 'set', 'Set', 'frozenset') and '[' in _vann:
+                _ei = gimple_ctypes._split_top_level_commas(
+                    _vann[_vann.index('[') + 1:_vann.rindex(']')].strip())
+                if len(_ei) == 1 and _ei[0].strip():
+                    _ec = gen._resolve_type(_ei[0].strip())
+                    if _ec and _ec != 'int64_t':
+                        gen._dict_nested_val_types.setdefault(bare, _ec)
+            continue
+        # `Span[T, origin]` carries an origin parameter after the element
+        # type, so its element is the FIRST bracket argument; List/Set take
+        # exactly one. Without this a `Span[Tuple[A, B], _]` parameter had no
+        # element type seeded, and `tuples[i][0]` read the element as a raw
+        # char* (the `_mojo_at_int64_t` / `*` errors in python.mojo's
+        # Python.dict(tuples: Span[Tuple[...], _]) body, which only became
+        # visible once that overload's signature was correct).
+        if _pbase == 'Span':
+            if not _pin or not _pin[0].strip():
+                continue
+            _pin = [_pin[0]]
+        if len(_pin) != 1 or not _pin[0].strip():
+            continue
+        _eann = _pin[0].strip()
+        _ebase = _eann.split('[', 1)[0].strip()
+        if _ebase in ('tuple', 'Tuple') and '[' in _eann:
+            _slots = gimple_ctypes._split_top_level_commas(
+                _eann[_eann.index('[') + 1:_eann.rindex(']')].strip())
+            _sc = None
+            _same = True
+            for _sl in _slots:
+                _sl = _sl.strip()
+                if not _sl:
+                    continue
+                _t = gen._resolve_type(_sl)
+                if _sc is None:
+                    _sc = _t
+                elif _t != _sc:
+                    _same = False
+                    break
+            if _same and _sc and _sc != 'int64_t':
+                gen._elem_types.setdefault(bare, 'MojoList *')
+                gen._nested_elem_types.setdefault(bare, _sc)
+        else:
+            _ec = gen._resolve_type(_eann)
+            if _ec and _ec != 'int64_t':
+                gen._elem_types.setdefault(bare, _ec)
+
+
 def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # A COROUTINE BODY is lowered by a dedicated pass whose body model is
     # scalar-only, so the lambda beta-reduction must not inline a capturing
@@ -2866,67 +2949,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
         if pst:
             gen._param_struct_types[bare] = pst
 
-    # Seed container element types straight from a param's own declared
-    # annotation — the same static-truth seed struct fields already get
-    # (see gimple_module_gen.py's `list[tuple[T, T]]` field block). A param
-    # annotated `list[tuple[str, str]]` / `list[str]` / `dict[str, list[str]]`
-    # otherwise binds its loop/unpack vars as boxed int64_t inside the body
-    # even though the caller's shape is fully known here (concretely:
-    # `_emit_call(arg_pairs: list[tuple[str, str]])` unpacked `(atype, aval)`
-    # as int64_t, so once a callee's `func_param_types` entry became readable
-    # the `ptype != atype` compare fired a bogus `(char *)` reinterpret cast).
-    for pname, ptype in node.params:
-        if ptype is None or pname.startswith('*') or not isinstance(ptype, str):
-            continue
-        bare = pname.lstrip('*')
-        _pa = ptype.strip()
-        _pbase = _pa.split('[', 1)[0].strip()
-        if _pbase not in ('list', 'List', 'set', 'Set', 'frozenset', 'dict', 'Dict') or '[' not in _pa:
-            continue
-        _pin = gimple_ctypes._split_top_level_commas(
-            _pa[_pa.index('[') + 1:_pa.rindex(']')].strip())
-        if _pbase in ('dict', 'Dict'):
-            if len(_pin) != 2:
-                continue
-            _vann = _pin[1].strip()
-            _vc = gen._resolve_type(_vann)
-            if _vc and _vc != 'int64_t':
-                gen._dict_val_types.setdefault(bare, _vc)
-            _vbase = _vann.split('[', 1)[0].strip()
-            if _vbase in ('list', 'List', 'set', 'Set', 'frozenset') and '[' in _vann:
-                _ei = gimple_ctypes._split_top_level_commas(
-                    _vann[_vann.index('[') + 1:_vann.rindex(']')].strip())
-                if len(_ei) == 1 and _ei[0].strip():
-                    _ec = gen._resolve_type(_ei[0].strip())
-                    if _ec and _ec != 'int64_t':
-                        gen._dict_nested_val_types.setdefault(bare, _ec)
-            continue
-        if len(_pin) != 1 or not _pin[0].strip():
-            continue
-        _eann = _pin[0].strip()
-        _ebase = _eann.split('[', 1)[0].strip()
-        if _ebase in ('tuple', 'Tuple') and '[' in _eann:
-            _slots = gimple_ctypes._split_top_level_commas(
-                _eann[_eann.index('[') + 1:_eann.rindex(']')].strip())
-            _sc = None
-            _same = True
-            for _sl in _slots:
-                _sl = _sl.strip()
-                if not _sl:
-                    continue
-                _t = gen._resolve_type(_sl)
-                if _sc is None:
-                    _sc = _t
-                elif _t != _sc:
-                    _same = False
-                    break
-            if _same and _sc and _sc != 'int64_t':
-                gen._elem_types.setdefault(bare, 'MojoList *')
-                gen._nested_elem_types.setdefault(bare, _sc)
-        else:
-            _ec = gen._resolve_type(_eann)
-            if _ec and _ec != 'int64_t':
-                gen._elem_types.setdefault(bare, _ec)
+    _seed_annotated_param_elem_types(gen, node)
 
     # Seed the cross-call element-type contract for container params, so
     # param[i][j] reads the inner element with the right getter and return
@@ -4097,6 +4120,7 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     # IEEE-754 bit pattern flowing on as an ordinary int64_t — silently
     # wrong, exit 0. Keyed by the QUALIFIED `Struct_method` name the
     # call-site pre-pass records under.
+    _seed_annotated_param_elem_types(gen, node)
     _mkey = f"{_as_str(struct_name)}_{_as_str(node.name)}"
     _mpe = getattr(gen, '_param_elem_types', {}).get(_mkey, {})
     for _mbare in _mpe:
