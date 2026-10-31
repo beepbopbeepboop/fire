@@ -5606,6 +5606,7 @@ def _compr_generator_loop(gen, node, gen0, res: str, res_type: str, it_val: str)
     # tuple unpacking target" comment) instead of reinventing a
     # narrower check.
     tuple_slot_ctypes = api.get('tuple_slot_ctypes')
+    tuple_slot_elems = api.get('tuple_slot_elems')
     _target_str = gen0.target.strip()
     _inner_str = (_target_str[1:-1].strip()
                   if (_target_str.startswith('(') and _target_str.endswith(')'))
@@ -5655,7 +5656,7 @@ def _compr_generator_loop(gen, node, gen0, res: str, res_type: str, it_val: str)
     gen._emit_label(bb_body)
     val = gen._new_val(vct, f"{base}_value ({_iv})")
     if is_tuple_target:
-        gen._emit_generator_tuple_unpack(var_names, tuple_slot_ctypes, val)
+        gen._emit_generator_tuple_unpack(var_names, tuple_slot_ctypes, val, None, tuple_slot_elems)
     else:
         # _cname, not the raw Python name: see _compr_range_loop's
         # reserved-identifier comment (`index` et al. are renamed by

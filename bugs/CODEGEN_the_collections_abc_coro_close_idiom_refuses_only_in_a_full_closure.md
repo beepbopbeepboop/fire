@@ -248,9 +248,10 @@ refused with "receiver typed `void *`" even though the api had been carried.
 Test: `test_regress_coro_close_closure.py::test_accessor_read_of_generator_is_typed_as_generator`
 (FAILS on HEAD with `accessor read _t1 typed void *`, PASSES with the fix).
 `test_gimple_generator_runner.py`: 297 pass / 8 fail, the SAME 8 on HEAD
-(`generator_explicit_call_arguments_still_resolve`, ... see
-`CODEGEN_genexp_over_annotated_param_refused.md`,
-`CODEGEN_generator_function_Lib_os.md`), so none is caused by this change.
+(`generator_explicit_call_arguments_still_resolve`, ... the genexp-over-annotated-
+param pair, and `CODEGEN_generator_function_Lib_os.md`), so none is caused by this
+change. (The 8 were fixed on the generator-runner branch: the `__mojo_coro_yield_p`
+ABI, the list-valued tuple slot kind, and the genexp verifier's `_mojogen_` prefix.)
 
 **Measured this round (not a fix):**
 - The defining module's OWN accessor for a generator-held global is
@@ -480,7 +481,7 @@ instead of a bare name, because the tables are shared across the whole compile):
 - The same two-module program built with `fire.py build` and run prints `1` /
   `ok`, matching CPython (`next(_coro)` then `_coro.close()`).
 - `test_gimple_generator_runner.py`: 297 passed, 8 failed, both WITH and WITHOUT
-  this change (the same 8 at HEAD; see `bugs/CODEGEN_generator_runner_pre_existing_failures.md`).
+  this change (the same 8 at HEAD; fixed on the generator-runner branch, see the note above).
 
 **Not verified, owed to the integrator (heavy):** whether this removes the
 four row closures' `_collections_abc` refusal (socket 56 / parsing 48 / zipfile

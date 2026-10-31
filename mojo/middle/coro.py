@@ -98,12 +98,14 @@ _KIND_CTYPE  = {'i': 'int64_t', 'b': '_Bool', 'p': 'char *', 'd': 'double',
 
 
 def _yield_shim(kind: str) -> str:
-    # int/bool/pointer all go through the int64_t yield -- _emit_call coerces
-    # a char*/pointer arg to int64_t via the registered param types, and a
-    # `_Bool` promotes to its own 0/1 losslessly. Only a genuine double needs
-    # the bitcast variant; pointer needs the pointer-typed shim so the C
-    # argument is not cast to int64_t (which yields the pointer address as
-    # an integer rather than the pointed-to value).
+    # int/bool/pointer all go through an int64_t-box yield -- _emit_call
+    # coerces a char*/pointer arg to int64_t via the registered param types
+    # (see `func_param_types` in lower()), and a `_Bool` promotes to its own
+    # 0/1 losslessly. A string's box word IS its pointer bits, so the `_p`
+    # shim takes the same int64_t as `_i`: a generator's String local is
+    # declared int64_t (it is read back from `__mojo_gen_arg`), and a
+    # `void *` parameter there is an int->pointer conversion GIMPLE rejects.
+    # Only a genuine double needs the bitcast variant.
     if kind == 'd':
         return '__mojo_coro_yield_d'
     if kind == 'p':
@@ -703,6 +705,21 @@ _KIND_TO_SLOT_CTYPE = {'i': 'int64_t', 'b': '_Bool', 'p': 'char *', 'd': 'double
                        None: 'int64_t'}
 
 
+def _tuple_slot_kind(expr, env: dict | None = None) -> str | None:
+    """The slot kind of one element of a tuple yield. A bare list-local
+    (`yield "root", dirs`) is a 'list:<elem>' slot -- a `MojoList *` boxed by
+    pointer bits, whose ELEMENT kind rides along so the consumer can read the
+    list's elements. `_yield_kind` answers a bare list name with its ELEMENT
+    kind (the `yield xs[i]` case), which typed the slot `char *` and made the
+    consumer read the list pointer back with `mojo_list_get_str`."""
+    env = env or {}
+    if isinstance(expr, N.IdentExpr):
+        v = env.get(expr.name)
+        if isinstance(v, tuple) and v[0] == 'list':
+            return f'list:{v[1] or ""}'
+    return _yield_kind(expr, env)
+
+
 def _generator_tuple_shapes(fn: N.FunctionDef, env: dict | None = None):
     """Per-yield-site slot-KIND tuples, or None for a non-tuple yield."""
     shapes = []
@@ -710,7 +727,7 @@ def _generator_tuple_shapes(fn: N.FunctionDef, env: dict | None = None):
         if isinstance(n, N.YieldExpr):
             if not isinstance(n.value, N.TupleExpr):
                 return None
-            shapes.append(tuple(_yield_kind(e, env) for e in n.value.elements))
+            shapes.append(tuple(_tuple_slot_kind(e, env) for e in n.value.elements))
     return shapes or None
 
 
@@ -745,6 +762,11 @@ def _generator_tuple_slots(fn: N.FunctionDef, env: dict | None = None):
         return None
     slots = []
     for k in kinds:
+        if isinstance(k, str) and k.startswith('list:'):
+            # A list-valued element: its MojoList * pointer bits, read back
+            # as the list itself (`_emit_generator_tuple_unpack`).
+            slots.append('MojoList *')
+            continue
         if k == 'tuple':
             # A nested tuple literal in a slot (Lib/modulefinder.py's
             # `yield "store", (name,)` / `yield "relative_import", (level,
@@ -761,6 +783,22 @@ def _generator_tuple_slots(fn: N.FunctionDef, env: dict | None = None):
             continue
         slots.append(_KIND_TO_SLOT_CTYPE[k])
     return slots
+
+
+def _generator_tuple_slot_elems(fn: N.FunctionDef, env: dict | None = None):
+    """Per-slot element C type for a list-valued slot (`'list:<elem>'`, see
+    `_tuple_slot_kind`), aligned with `_generator_tuple_slots`'s result; None
+    for every other slot. None when the tuple shape is inconsistent (same
+    refusal conditions as `_generator_tuple_slots`)."""
+    shapes = _generator_tuple_shapes(fn, env)
+    if shapes is None:
+        return None
+    kinds = _generator_tuple_unify(shapes)
+    if kinds is None:
+        return None
+    return [_KIND_TO_SLOT_CTYPE.get(k[len('list:'):] or None, 'int64_t')
+            if isinstance(k, str) and k.startswith('list:') else None
+            for k in kinds]
 
 
 def _generator_nested_slots(fn: N.FunctionDef, env: dict | None = None):
@@ -6000,6 +6038,7 @@ def _lower_one(fn: N.FunctionDef, meta: list,
         'value_kind': kind,
         'tuple_slot_ctypes': _generator_tuple_slots(fn, env) if kind == 'tuple' else None,
         'tuple_slot_nested': _generator_nested_slots(fn, env) if kind == 'tuple' else None,
+        'tuple_slot_elems': _generator_tuple_slot_elems(fn, env) if kind == 'tuple' else None,
         'defaults': list((getattr(fn, 'param_defaults', None) or {}).items()),
         # Parameters whose declared DEFAULT names one of this module's own
         # generators (`def walk_tree(root, *, walk=_walk_tree)`), as
@@ -6265,6 +6304,7 @@ def register(gen, meta: list) -> None:
     # char*/pointer/double yield value to the int64_t the shim takes,
     # instead of emitting a raw "makes integer from pointer" call.
     gen.func_param_types.setdefault('__mojo_coro_yield_i', ['int64_t', 'int64_t'])
+    gen.func_param_types.setdefault('__mojo_coro_yield_p', ['int64_t', 'int64_t'])
     gen.func_param_types.setdefault('__mojo_coro_yield_d', ['int64_t', 'double'])
     gen.func_param_types.setdefault('__mojo_gen_arg', ['int64_t', 'int64_t'])
     gen.func_param_types.setdefault('__mojo_gen_arg_d', ['int64_t', 'int64_t'])
@@ -6414,6 +6454,7 @@ def register(gen, meta: list) -> None:
             'star_slot': m.get('star_slot'),
             'tuple_slot_ctypes': m.get('tuple_slot_ctypes'),
             'tuple_slot_nested': m.get('tuple_slot_nested'),
+            'tuple_slot_elems': m.get('tuple_slot_elems'),
             'has_return_value': True,
             'is_async_gen': m.get('is_async_gen', False),
             # Whether this coroutine's body can EVER put a wait-descriptor

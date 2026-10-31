@@ -3649,7 +3649,8 @@ def _gen_lifted_closure_body(gen, ci, outer_name: str) -> str:
 
 
 def _emit_generator_tuple_unpack(gen, var_names: list, slot_types: list, list_ptr: str,
-                                 nested_flags: list | None = None) -> None:
+                                 nested_flags: list | None = None,
+                                 slot_elems: list | None = None) -> None:
     """Unpacks a boxed-tuple `MojoList *` (produced by a tuple-yielding
     compiled generator's `_cpp_yield_tuple` boxing — see that method's
     docstring for the producer side) into `var_names`, one runtime
@@ -3687,6 +3688,20 @@ def _emit_generator_tuple_unpack(gen, var_names: list, slot_types: list, list_pt
             if not hasattr(gen, '_tagged_gen_tuple_locals'):
                 gen._tagged_gen_tuple_locals = set()
             gen._tagged_gen_tuple_locals.add(vn)
+            continue
+        if slot_elem == 'MojoList *':
+            # A list-valued slot (`coro._tuple_slot_kind`'s 'list:<elem>'):
+            # read the pointer bits back as the list, and record its element
+            # type so `for x in <vn>` reads the elements with the right
+            # accessor (`_elem_of`), not as int64_t words.
+            gen._declare_var(vn, 'MojoList *')
+            cvn = gen._cname(vn)
+            pv = gen._coerce_to_type(
+                'int64_t', 'MojoList *',
+                gen._new_val('int64_t', f"mojo_list_get_int ({list_ptr}, {i})"))
+            gen._emit(f"  {cvn} = {pv};")
+            if slot_elems and i < len(slot_elems) and slot_elems[i]:
+                gen._elem_types[vn] = slot_elems[i]
             continue
         gen._declare_var(vn, slot_elem)
         cvn = gen._cname(vn)
@@ -3762,6 +3777,7 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
     # single-name declare below, unchanged prior behavior).
     tuple_slot_ctypes = api.get('tuple_slot_ctypes')
     tuple_slot_nested = api.get('tuple_slot_nested')
+    tuple_slot_elems = api.get('tuple_slot_elems')
     is_tuple_target = (for_target_is_tuple(var)
                        and tuple_slot_ctypes is not None)
     if is_tuple_target:
@@ -3820,7 +3836,8 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
     if api.get('boxed_container'):
         gen._boxed_container_vals.add(val)
     if is_tuple_target:
-        gen._emit_generator_tuple_unpack(var_names, tuple_slot_ctypes, val, tuple_slot_nested)
+        gen._emit_generator_tuple_unpack(var_names, tuple_slot_ctypes, val, tuple_slot_nested,
+                                         tuple_slot_elems)
         # A generator that iterates a kind-mixed list parameter yields BOXES in
         # its int64_t slots (see cpp_core's `_cpp_mixed_list_params` read), so
         # the unpacked names must resolve them at each use.
