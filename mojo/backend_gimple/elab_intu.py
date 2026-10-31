@@ -3638,6 +3638,8 @@ def _rewrite_annotations(work):
     # mention whose argument was never rewritten is untouched.
     mangled_raw = {}
     for (kind, base, args), mangled in work.alias.items():
+        if mangled is None:
+            continue
         if kind == 'struct':
             mangled_raw[mangled] = f"{base}[{', '.join(args)}]"
     for rec in work.records.values():
@@ -3736,8 +3738,9 @@ def _rewrite_local_struct_anns(work, stmts):
     """
     by_base = {}
     for (kind, base, args), mangled in work.alias.items():
-        if kind == 'struct':
-            by_base.setdefault(base, []).append(mangled)
+        if mangled is None or kind != 'struct':
+            continue
+        by_base.setdefault(base, []).append(mangled)
     solo = {base: ms[0] for base, ms in by_base.items() if len(ms) == 1}
     if not solo:
         return
@@ -3794,15 +3797,16 @@ def _rewrite_ctor_calls(work, stmts):
     by_base = {}
     mangled_of = {}
     for (kind, base, args), mangled in work.alias.items():
-        if kind == 'struct':
-            _akey = _US.join(args)
-            _lst = by_base.get(base)
-            if _lst is None:
-                _lst = []
-                by_base[base] = _lst
-            if _akey not in _lst:
-                _lst.append(_akey)
-            mangled_of[base + _US + _akey] = mangled
+        if mangled is None or kind != 'struct':
+            continue
+        _akey = _US.join(args)
+        _lst = by_base.get(base)
+        if _lst is None:
+            _lst = []
+            by_base[base] = _lst
+        if _akey not in _lst:
+            _lst.append(_akey)
+        mangled_of[base + _US + _akey] = mangled
     if not by_base:
         return
     for st in stmts or ():
@@ -3898,15 +3902,16 @@ def _rewrite_intu_ctor_calls(work):
     by_base = {}
     mangled_of = {}
     for (kind, base, args), mangled in work.alias.items():
-        if kind == 'struct':
-            _akey = _US.join(args)
-            _lst = by_base.get(base)
-            if _lst is None:
-                _lst = []
-                by_base[base] = _lst
-            if _akey not in _lst:
-                _lst.append(_akey)
-            mangled_of[base + _US + _akey] = mangled
+        if mangled is None or kind != 'struct':
+            continue
+        _akey = _US.join(args)
+        _lst = by_base.get(base)
+        if _lst is None:
+            _lst = []
+            by_base[base] = _lst
+        if _akey not in _lst:
+            _lst.append(_akey)
+        mangled_of[base + _US + _akey] = mangled
     if not by_base:
         return
     for rec in work.records.values():
