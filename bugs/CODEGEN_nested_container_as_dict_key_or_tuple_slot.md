@@ -1,5 +1,19 @@
 # CODEGEN: a nested container as a dict-comprehension key, and as a tuple slot, is not described
 
+## Status — 2026-10-30: nothing new landed; what remains is claimed elsewhere
+
+A leftover resume of this bug (`.git/control/leftover/bug-codegen-nested-container-as-dict-key-9641.patch`)
+was checked and contains no source change: its only entry is a 57 KB compiled
+binary named `t1` at the repo root. Nothing from it was applied. The tuple-slot
+regression `test_runtime_diff.py --case tuple_with_a_nested_container_slot`
+passes on this tree (1 passed, peak 0.3 GB), so the 2026-10-02 closures below
+still hold.
+
+The one symptom still wrong here is the content key's PRINTED form
+(`print({(0, 1): 1})` gives `{'T1100…': 1}`), and that is owned by
+`bugs/CODEGEN_dict_content_key_aliases_a_string_key.md` (§1), which another
+worker has claimed. It is not fixed by any change in this doc's scope.
+
 ## Status — 2026-10-02: two more of the four closed; the content key's REPR
 ## is the one left, and it is not this doc's to take
 
