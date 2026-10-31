@@ -7787,17 +7787,22 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     # question because the question above cannot see it — a conditional branch
     # is not a `b` — and its answer was the reason every such loop raised
     # "unsupported cbz taken continuation" (the walk's `cbz` arm reads a loop
-    # contract off `ctx`, and `ctx` had none for this shape).  Only asked when
-    # the shape above found nothing, so a countdown loop is unaffected.
+    # contract off `ctx`, and `ctx` had none for this shape).  Asked
+    # UNCONDITIONALLY, independent of the countdown hit above: the float-repr
+    # helper's byte-copy loop is a `b` onto a `cbz`, so it shadows a real
+    # bottom-tested loop in the same image (the helper is emitted after every
+    # function body), and a discovery that only runs when the countdown
+    # question found nothing has been silently skipped since the helper
+    # landed.  The generation section below keeps the countdown PREFERENCE:
+    # this is a second candidate, not a replacement.
     loop_check_bottom = None
-    if loop_check is None:
-        for bi, b in enumerate(blocks):
-            if _reach_i is not None and bi not in _reach_i:
-                continue
-            if (b["kind"] == "cbz" and len(b["instrs"]) > 1
-                    and b["targets"][1] == b["start"]):
-                loop_check_bottom = (bi, b["start"])
-                break
+    for bi, b in enumerate(blocks):
+        if _reach_i is not None and bi not in _reach_i:
+            continue
+        if (b["kind"] == "cbz" and len(b["instrs"]) > 1
+                and b["targets"][1] == b["start"]):
+            loop_check_bottom = (bi, b["start"])
+            break
     # WHY a bottom-tested loop got no contract, when the reason is one a reader
     # can act on. `_gen_range_loop` returns None for several shapes, and the
     # only message the walk has is the generic "unsupported cbz taken
@@ -10008,7 +10013,18 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         # caller's branch matched `cbz_start` against it.
                         "check_bi": cbz_bi,
                     }
-    elif loop_check_bottom is not None and not recursive:
+    # The bottom-tested shape is a FALLBACK, not a rival: the countdown shape
+    # above keeps the preference (an image with both loops contracts the same
+    # one as before, and a second back edge in the same walk is still refused
+    # by name).  What changed is WHEN the branch runs — `loop_check is None`,
+    # or "the countdown question produced nothing".  Since the float-repr
+    # helper is emitted after every function body, its epilogue's byte-copy
+    # loop is a `b` onto a `cbz` and sets `loop_check` for a real
+    # `for … in range(…)` in the same image, where both generators decline it
+    # and the real loop's re-entry was left with no contract, so the generic
+    # "unsupported cbz taken continuation" refusal carried no reason.
+    if ((loop_check is None or _loop_contract is None)
+            and loop_check_bottom is not None and not recursive):
         # A bottom-tested loop: ONE block holding the body, the increment and
         # the comparison, whose taken edge is its own start.  `_gen_range_loop`
         # returns None for anything that is not a 1-arg range accumulator, so
@@ -10790,13 +10806,28 @@ def _program_extern_calls(info: dict) -> list:
     The subtraction is by ADDRESS against `func_offset` rather than by symbol,
     for the same reason as above: a program can call `getrlimit` itself, and
     dropping the symbol would drop that call too.
+
+    **And the float-repr helper's calls are not the program's, either.** The
+    helper (`formal/arm64_codegen.py::_emit_float_repr_helper`) is emitted
+    once per image after every function body, so its `snprintf`/`strtod` are
+    in `extern_calls` at or above `func_offset` for EVERY image on this
+    backend, and reading them as program calls turns every image into an
+    opaque-call image whose run is stated to reach a call the concrete run
+    never takes. The emitter publishes their sites in
+    `info["float_repr_calls"]` and they are subtracted by address, the way
+    the traps are: a program that never formats a float must not lose its run
+    tests over code its run never takes, and a program that does is handled
+    by the helper's own path.
     """
     traps = set(info.get("compiler_traps") or ())
+    helper = set(info.get("float_repr_calls") or ())
     entry = info.get("func_offset")
     out = []
     for c in (info.get("extern_calls") or ()):
         addr = c.get("addr")
         if addr in traps:
+            continue
+        if addr in helper:
             continue
         if entry is not None and addr is not None and addr < entry:
             continue

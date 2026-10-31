@@ -6164,38 +6164,42 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
         claims THIS program's trap list is empty, and arm64 DOES publish one for
         a program with a bounded stop — see the rows below, which are the other
         half and which this row used to contradict.
+
+        The float-repr helper is emitted after every body, so its own
+        `snprintf`/`strtod` are at or ABOVE the entry in every image; they are
+        the emitter's calls, published in `info["float_repr_calls"]` and
+        subtracted by `_program_extern_calls`, and this row pins that they are
+        the ONLY unbound calls at or above the entry — a guard `BL` in a
+        prologue would sit there too and would show up here.
         """
         from formal.arm64_proof_gen import _program_extern_calls
         info = self._info("arm64", "plain")
         entry = info.get("func_offset")
         calls = info.get("extern_calls") or []
-        self.assertEqual([e["sym"] for e in calls], ["getrlimit"],
+        below = [e for e in calls if e["addr"] < entry]
+        above = [e for e in calls if e["addr"] >= entry]
+        self.assertEqual([e["sym"] for e in below], ["getrlimit"],
                          "a plain arm64 image carries exactly the startup "
-                         "stub's `getrlimit`, and nothing else — the guard "
+                         "stub's `getrlimit` below the entry — the guard "
                          "itself must have no call in it")
-        self.assertLess(calls[0]["addr"], entry,
+        self.assertLess(below[0]["addr"], entry,
                         "the stub's `getrlimit` must be BELOW the entry, or no "
                         "run test can subtract it by address")
+        self.assertEqual(
+            [e["addr"] for e in above], info.get("float_repr_calls"),
+            "a call at or above the entry that is not the float-repr helper's "
+            f"own published site: {[e['sym'] for e in above]}")
+        self.assertEqual(
+            sorted(e["sym"] for e in above), ["snprintf", "strtod"],
+            "the helper's own calls are the only unbound calls at or above "
+            f"the entry: {[e['sym'] for e in above]}")
         self.assertEqual(_program_extern_calls(info), [],
-                         "the startup stub's `getrlimit` is being read as a "
-                         "call the PROGRAM makes")
+                         "the startup limit read or the helper's calls are "
+                         "being read as a call the PROGRAM makes, so every "
+                         "run test on this backend stays suppressed")
         self.assertFalse(info.get("compiler_traps"),
                          "a program with no bounded trap published one, so "
                          "something other than a stop is being recorded")
-        entry = info.get("func_offset")
-        for call in (info.get("extern_calls") or []):
-            with self.subTest(sym=call["sym"], addr=hex(call["addr"])):
-                self.assertLess(
-                    call["addr"], entry,
-                    "an unbound call at or above the entry function is on a "
-                    "walked path: the stack limit's `getrlimit` belongs in the "
-                    "startup stub, below `func_offset`, and a `BL` in a "
-                    "prologue is what cost every calling program its universal "
-                    "theorem")
-        from formal.arm64_proof_gen import _program_extern_calls
-        self.assertEqual(_program_extern_calls(info), [],
-                         "the startup limit read is not being subtracted, so "
-                         "every run test on this backend stays suppressed")
         text = self._text("arm64", "plain")
         self.assertNotIn("NO RUN TESTS", text)
         self.assertIn("theorem main_runs_0 :", text)

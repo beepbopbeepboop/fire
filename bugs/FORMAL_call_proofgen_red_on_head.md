@@ -50,6 +50,104 @@ is the smallest), run it on HEAD, read the first failing assertion, and decide
 whether the guard emitter or the test's expectation is stale. Then the others
 by the same reasoning.
 
+## Status (2026-10-31)
+
+Clusters A and B's next steps were executed. Both landed; what remains is a
+Lean-kernel wall on the helper-sized image, measured this round and tracked
+below with named leaves.
+
+**Cluster B — landed, green.** The bottom-tested discovery
+(`formal/arm64_proof_gen.py`, the `loop_check_bottom` loop) now runs
+independently of the countdown hit, and the generation section falls back to
+it when the countdown question produced nothing: since the helper landed, its
+epilogue is a `b` onto a `cbz`, so `loop_check` is set, both generators decline
+it, and the real `for … in range(…)` loop's re-entry was left with no contract,
+so the refusal carried no reason. The declined contract with `_range_declined`
+now reaches the cbz arm's `_why`. Green: `TestBottomTestedRangeLoop` 3/3,
+`TestTheRecursionFamiliesStillGenerate` 3/3 (sum_range refuses with `SIGNED
+condition code 11` / `arm64_flag_lt_s` / `while_lt_exit_contract_bottom` /
+`FALSE`), and the same needle inside
+`TestTheBranchFlagLemmaIsTheBranchOwns.test_both_shapes_generate` — its
+pristine red was this refusal's missing reason, not a separate defect.
+
+**Cluster A — the census subtraction landed, green.** Both emitters now
+publish the float-repr helper's OWN extern call sites — its `snprintf`/
+`strtod` — as `info["float_repr_calls"]` (`formal/x86_64_codegen.py`,
+`formal/arm64_codegen.py`), and `_program_externs` /
+`_program_extern_calls` subtract them by address, the same subtraction
+`compiler_traps` is for the guard's `exit`/`fflush`. The helper is the
+emitter's, emitted once per image after every function body, so reading its
+calls as the program's was what put `NO RUN TESTS` back into every x86 image
+and the reaches-call substitution back into every arm64 one. Green:
+`TestCompilerTrapIsNotAProgramCall` 11/11 (the arm64 raw-census row is updated:
+the helper's two calls are pinned as the ONLY unbound calls at or above the
+entry, with `info["float_repr_calls"]` naming them, and the guard still has no
+call), `TestTheStackFloorGuardLeavesNoCallOnTheWalkedPath` 2/2 (mod_by_var
+states `runs_…` again), `TestExternCallTheRunDoesNotReach`'s three generation
+rows, `TestAPlaceholderModelClaimsNothing.test_the_control_claims_all_four`
+(the x86_64 half), `TestTheStackFloorGuardReadsTheLimitInTheStartupStub` 2/2
+(its pristine red was the same subtraction), and the still-green
+`TestTheDivideByZeroGuardIsEmittedOnlyWhenItCanFire` 4/4,
+`TestTheDiv0FixtureHaltsAtTheCompilerTrap`, `TestTheOneOpaqueCallIsAnnounced`,
+`TestTheReachedWalkIsPerPath`.
+
+**What remains: the Lean methods, walled by the kernel on the helper-sized
+image.** Three leaves measured this round; all three are RESOURCE failures,
+none logical:
+
+- `TestExternCallTheRunDoesNotReach.test_lean_accepts_both_probes_with_no_
+  sorries` (print1): `lean.print1_proof.lean:6699:126` — `(deterministic)
+  timeout at whnf, maximum number of heartbeats (20000000)`, in the
+  `print1_b4_self1` block certificate; b4 is a HELPER block (its qT0 is the
+  helper's `lsr #52` specials read at its specials branch).
+- `…test_the_corpus_example_that_was_false_is_proved` (mod_by_var):
+  `mod_proof.lean:7894..8006` — `(kernel) excessive memory consumption
+  detected`, clustered in the b6/b7 block-certificate chains (b7 is the
+  helper's `fr_copy1` byte-copy loop).
+- `TestTheRegisterValueReaderReadsEveryWrapper.test_the_epilogue_blocks_
+  own_chain_states_what_it_wrote` (cluster C): `chain.lean:2057` — the same
+  `excessive memory consumption`, in the prefix of the bitops file the method
+  truncates at its RET block.
+
+The wall is the helper itself: it adds ~2.4 KB to EVERY image (mod_by_var's
+image is 2395 bytes, of which the body is ~150), and the kernel — not
+`native_decide` — evaluates `code addr` as `List.getD` over the whole byte
+list on every step certificate, every `…_sr_N` closer and the run tests, so
+the ~12x size is a ~12x per-occurrence kernel cost in exactly the regions the
+diagnostics name. Two structural facts from the measurements, and the next
+step rests on both:
+
+1. The per-block straight-line certificates are emitted for EVERY block in
+   the partition, and for an ordinary program the partition spans the whole
+   image, so the helper's unreachable blocks get the full `bN_selfN` /
+   `bN_runs` / `bN_mid` treatment although the universal walk never references
+   them. `_reach_i` already exists and its guard already sits on exactly that
+   loop (`formal/arm64_proof_gen.py`, the `run_info` loop,
+   `if _reach_i is not None and bi not in _reach_i`); it is just computed only
+   when `fuel is not None`, a branch ordinary programs do not take.
+2. `TestTheZeroDivisorGuardAgainstLean` (4 methods) is a SEPARATE, non-walled,
+   named failure, unchanged by the subtraction above: its fixture `q(a, b)`
+   takes the reaches-call substitution because the WALK'S call boundary cannot
+   discharge the div0 arm's `BL fflush` on a SYMBOLIC divisor — `blind`
+   records exactly that, and the substitution is `_call_boundary`'s decision,
+   not `_program_extern_calls`'s. It is owned by
+   `bugs/FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_conditional_path.
+   md`, which stays the place to fix it.
+
+Next step, in order: (1) compute the reachability set unconditionally in
+`formal/arm64_proof_gen.py` (the BFS currently inside `if fuel is not None:`
+at the `_reach_i` definition; the fuel-only decision keeps using it) so the
+existing guard on the `run_info` loop skips the helper's unreachable blocks —
+the walk only ever references certificates of reachable blocks, and the
+`run_info[bi] = (None, None, "st", 0, [], False, 0, [])` placeholder is the
+pattern the guard already establishes; (2) re-measure the three walled
+leaves above; if the wall moves but does not close, the next program is the
+helper's EMISSION — it is unconditional today, so a program that never formats
+a float carries ~2.4 KB of dead code in its image and in every generated
+proof, and `info["float_repr_addr"]`'s one named consumer
+(`formal/x86_64_endtoend_test.py::_body`) is the start of the blast radius
+for making it on-demand.
+
 ## Status (2026-10-30)
 
 The next step above was executed on HEAD, and the remaining failures were
