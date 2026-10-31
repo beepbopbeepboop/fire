@@ -2526,12 +2526,12 @@ def _cpp_expr(gen, e) -> str:
                         f"(char *)({gen._cpp_expr(e.right)}))")
             # `word + "literal"` / `"literal" + word`: Python's `+` with a str
             # on one side can only be concatenation (int + str is a TypeError),
-            # so an unsolved word on the other side IS a string.
+            # so an unsolved word (a parameter OR a local, e.g. the boxed word a
+            # heterogeneous `pop()` produced) on the other side IS a string.
             def _is_word_ident(node):
                 return (isinstance(node, gimple_ctypes.IdentExpr)
                         and gen._cpp_declared is not None
-                        and gen._cpp_declared.get(node.name) == 'int64_t'
-                        and node.name in getattr(gen, '_cpp_param_names', ()))
+                        and gen._cpp_declared.get(node.name) == 'int64_t')
             if ((isinstance(e.right, gimple_ctypes.StringLiteral) and _is_word_ident(e.left))
                     or (isinstance(e.left, gimple_ctypes.StringLiteral) and _is_word_ident(e.right))):
                 return (f"mojo_str_cat((char *)(intptr_t)({gen._cpp_expr(e.left)}), "
@@ -5183,6 +5183,11 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 return [f"{indent}co_yield (int64_t)0;  /* bare yield */"]
             if isinstance(s.value.value, gimple_ctypes.TupleExpr):
                 return gen._cpp_yield_tuple(s.value.value, declared, indent)
+            if id(s.value) in (getattr(gen, '_cpp_tuple_guarded_yields', None) or ()):
+                # `if isinstance(x, tuple): yield x` where `x` is the boxed
+                # word a heterogeneous `pop()` produced: the promise slot is
+                # a `MojoList *` (the tuple), so narrow the word to it.
+                return [f"{indent}co_yield (MojoList *)(intptr_t)({gen._cpp_expr(s.value.value)});"]
             return [f"{indent}co_yield {gen._cpp_expr(s.value.value)};"]
         if isinstance(s.value, gimple_ctypes.YieldFromExpr):
             if gen._cpp_emit_kind in ('async', 'async_gen'):
@@ -6435,6 +6440,21 @@ def _cpp_with_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 # — zipapp.py's `with open(archive, mode) as f:` yields
                 # `f` later), so the body's references resolve; only the
                 # enter/exit calls themselves are dropped.
+                #
+                # EXCEPT when `as name` BINDS a value: the manager expression
+                # is never evaluated, so that name is declared and left
+                # UNINITIALISED -- Lib/os.py's `with scandir(top) as entries:`
+                # then iterates garbage and `walk` silently yields nothing.
+                # Binding a value that was never computed is a miscompile, so
+                # it is an honest refusal (the module falls back to the
+                # interpreter); an alias-less `with` still elides cleanly.
+                if item.alias is not None:
+                    raise gimple_exprtypes._UnsupportedGeneratorShape(
+                        "`with <context manager> as <name>:` over a manager "
+                        "this codegen does not model is not supported in a "
+                        "compiled generator body: the manager expression is "
+                        "never evaluated, so the bound name would be "
+                        "uninitialised")
                 gname = None
                 _al = item.alias
                 if _al is not None and isinstance(_al, str) and _al not in declared:

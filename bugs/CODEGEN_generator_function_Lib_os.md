@@ -1,5 +1,35 @@
 # CODEGEN_generator_function: Lib/os.py
 
+## Status (2026-10-30, round 4 — the mixed-stack typing LANDED (solver-first, tagged only when forced); `walk` is refused honestly on `with scandir(top) as entries:`)
+
+Landed, pinned by `generator_heterogeneous_stack_param_rebound_from_pop` (a
+five-line model of `walk`'s stack, byte-identical to CPython in both `topdown`
+modes) and `generator_with_unmodelled_manager_alias_refused`:
+
+- **Tagged only when the solver cannot type it** (the project's rule: tight
+  untagged generators wherever types solve): a parameter that the body REBINDS
+  from `<list>.pop()` AND tests with `isinstance(<name>, tuple)` is the boxed
+  WORD (`exprtypes._tagged_word_params`, used by `cpp_async`); every other
+  parameter keeps its solved C type. A bare `yield <name>` under that guard is a
+  `MojoList *` (`_tuple_guarded_bare_yields`, cast in `cpp_core`), and a tuple
+  slot holding such a name is a string when the body uses it as one
+  (`_tuple_tested_names` / `_name_has_str_evidence`). `word + "lit"` now
+  concatenates for any `int64_t` local, not only a parameter.
+- **A silent miscompile the old refusal was hiding, now an honest refusal:** with
+  `walk`'s yield kinds unified it compiled — to garbage. `with scandir(top) as
+  entries:` in a SYNC generator body dropped the manager expression and left
+  `entries` UNINITIALISED, so the loop read garbage, and `is_dir` / `islink`
+  were stubbed `0`. A `with <unmodelled manager> as name:` now refuses (an
+  alias-less `with` still elides as before). `Lib/os.py` therefore still falls
+  back to interpretation, for two reasons that are both real features.
+
+`Lib/os.py` now refuses on exactly: (1) `with scandir(top) as entries:` and
+(2) `_fwalk`'s `stat(...)`. Next steps: a runtime `DirEntry` + `scandir`
+(`mojo_os_scandir`, entry name/path and lazily stat'd `is_dir()/is_symlink()`),
+modelled as a context manager so `with` binds a real handle; then `stat` /
+`stat_result` for `_fwalk`. The generator runner is 319 pass / 0 fail with all of
+this.
+
 ## Status (2026-10-30, round 3 — measured: the mixed-tuple yield is a TYPE-MODEL problem, not a yield-kind one; a naive yield-kind fix is worse than the refusal)
 
 Experiment (not landed, because it makes things worse): teach

@@ -6867,6 +6867,54 @@ def main():
 main()
 """, "/t/a\n/t/b\n/t/c\n")
 
+    # Lib/os.py `walk`'s stack: a list that holds path STRINGS and pushed
+    # `(top, dirs, nondirs)` TUPLES, popped into the parameter itself and
+    # discriminated with `isinstance(top, tuple)`. The solver cannot give `top`
+    # one type, so it is the boxed word (and only then); the bare `yield top`
+    # under the guard is the tuple, the tuple's slot 0 is the string.
+    test_generator_stdout("generator_heterogeneous_stack_param_rebound_from_pop", """\
+def g(top, topdown):
+    stack = [top]
+    n = 0
+    while stack:
+        top = stack.pop()
+        if isinstance(top, tuple):
+            yield top
+            continue
+        dirs = ["d" + str(n)]
+        nondirs = ["f" + str(n)]
+        n = n + 1
+        if topdown:
+            yield top, dirs, nondirs
+        else:
+            stack.append((top, dirs, nondirs))
+        if n < 3:
+            stack.append(top + "/x")
+
+def main():
+    for a, b, c in g("r", True):
+        print(a, b, c)
+    for a, b, c in g("r", False):
+        print(a, b, c)
+
+main()
+""", "r ['d0'] ['f0']\nr/x ['d1'] ['f1']\nr/x/x ['d2'] ['f2']\nr/x/x ['d2'] ['f2']\nr/x ['d1'] ['f1']\nr ['d0'] ['f0']\n")
+
+    # A `with <unmodelled manager> as name:` in a generator body never
+    # evaluates the manager, so `name` would be an uninitialised handle
+    # (Lib/os.py's `with scandir(top) as entries:` iterated garbage). Refused.
+    test_generator_refused("generator_with_unmodelled_manager_alias_refused", """\
+def g(top):
+    with mystery(top) as handle:
+        for x in handle:
+            yield x
+
+def main():
+    for v in g("a"):
+        print(v)
+main()
+""", "over a manager this codegen does not model")
+
     test_generator_stdout("generator_enumerate_index_yields_index", """\
 def rows(data):
     for i, r in enumerate(data):
