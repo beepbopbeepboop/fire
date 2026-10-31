@@ -371,3 +371,4 @@ the two must be told apart in the table (this one says `more than one value` and
 that arm says `more than one value` too — **a collision to resolve when the row
 is added**, most likely by keying this row on the `**` spread rather than on the
 sentence).
+
