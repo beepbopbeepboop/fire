@@ -4,6 +4,17 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_common/tables.py`
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status 2026-10-30 — PARTIAL, refusal pinned, full fix deferred (no make gate)
+
+Verified with `python3 tools/memslot.py --gb 8 --label read-table-refusal -- ...`:
+PASS `cpp_for_callable_param_read_table_like`; refusal message `callable-valued parameter '_get_reader'`
+honest (not silent wrong). Root cause is Plan A (foreign-callable signature table + iterator
+typing in `types.py`/`infra_infer.py`/`cpp_core.py` + `coro.py` eligibility) — a multi-session
+feature project requiring `make gate`. Not attempted in this session per constraint.
+Doc kept (not deleted): `tables.py` compile failure remains tracked; `c_analyzer/__init__.py`
+and `c_common/fsutil.py` share the same callable-valued-parameter blocker.
+Regression `test_gimple_generator_runner.py` line 991 updated to match refusal.
+
 ## Status 2026-10-29 (round 2) — planning guide; the blocker is a callable-signature feature, not a `for` branch
 
 **Measured this round.** `_regression_read_table_callable_reader`

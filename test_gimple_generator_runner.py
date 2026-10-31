@@ -988,7 +988,7 @@ def read_table(infile, header, *, sep='\\t',
 
 def main():
     pass
-""", "callable-valued local/parameter '_get_reader(...)'")
+""", "callable-valued parameter '_get_reader'")
 
 
 def _cpp_coroutine_builtin_module_constant():
