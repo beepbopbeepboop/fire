@@ -1436,6 +1436,14 @@ def _lower_class_attr_builtin(gen, node, fn):
     return None
 
 
+# Names Python itself binds in `builtins`: only these can be SHADOWED by a module-level
+# assignment (see the shadowing guard in `_lower_call`). Any other global callee keeps the
+# ordinary path, which has several arms (inlined lambdas, bound-method taint, ...) this
+# guard must not preempt.
+import builtins as _py_builtins
+_PY_BUILTIN_NAMES = frozenset(n for n in dir(_py_builtins) if not n.startswith('_'))
+
+
 def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # `itertools.chain(a, b, ...)`: the elements of each argument in turn. Built eagerly
     # into one list that records its own slot kinds; a generator handle argument is
@@ -3032,6 +3040,28 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # '_gimple_main'; have 'int64_t(int64_t)'").
         if 'main' in gen.func_return_types and fname_raw not in gen.func_return_types:
             gen.func_return_types[fname_raw] = gen.func_return_types['main']
+
+    # A BUILTIN name this module ITSELF binds at module scope (`repr = aRepr.repr`,
+    # `open = _open_impl`) is not the builtin: Python scoping decides that before
+    # "is it a builtin?" ever matters. The builtin arms below key on the bare name
+    # only, so `repr(5)` after `repr = mine` lowered as the builtin and printed
+    # `5` where CPython printed `<5>`, exit 0, no diagnostic. Own-overlay only
+    # (`_own_global_var_types`, this module's conclusions), never the shared
+    # table, so another module's global of the same name cannot shadow a builtin
+    # here. A def of that name is handled by the arms' own `_locally_binds_name`
+    # gates, hence the func_return_types exclusion.
+    if (fname_raw in gen._own_global_var_types
+            and fname_raw not in gen.func_return_types
+            and fname_raw not in gen.var_types
+            and fname_raw in _PY_BUILTIN_NAMES
+            and fname_raw not in (getattr(gen, '_inlined_lambdas', None) or {})
+            and fname_raw not in gen._builtin_method_values
+            and fname_raw not in getattr(gen, '_bm_tainted_locals', ())):
+        _own_ct = gen._global_var_types.get(fname_raw, '')
+        if gen._get_actual_type(_own_ct, fname_raw) == 'MojoBoundMethod *':
+            return gen._lower_bound_method_call(fname_raw, node, _own_ct)
+        if _callee_is_fnptr_value(gen, fname_raw):
+            return gen._lower_fnptr_call(fname_raw, _own_ct, node)
 
     # Builtin dispatch
     if fname_raw == 'strided_load' and node.args:

@@ -3266,6 +3266,49 @@ show([2.5])
 go()
 """, "1\n2\na\nb\n2.5\np\nq\n1.5\n2.5\n")
 
+    # A name the module binds at module scope is not the builtin: `repr = mine`
+    # then `repr(5)` used to lower as the builtin (printed `5`, CPython `<5>`).
+    test_gimple_stdout("gimple_module_global_function_value_shadows_builtin", """\
+def mine(x):
+    return "<" + str(x) + ">"
+repr = mine
+def main():
+    print(repr(5))
+main()
+""", "<5>\n")
+
+    # ...and the same when the global is a BOUND METHOD (reprlib's
+    # `repr = aRepr.repr`): the call must go through the bound-method path and
+    # return the method's own type (a str, not its pointer's decimal).
+    test_gimple_stdout("gimple_module_global_bound_method_shadows_builtin", """\
+class Repr:
+    def repr(self, x):
+        return self.repr1(x, 2)
+    def repr1(self, x, level):
+        return "<" + str(x) + ">" * level
+
+aRepr = Repr()
+repr = aRepr.repr
+
+def main():
+    print(repr(5))
+main()
+""", "<5>>\n")
+
+    # A module-scope bound method called from a function keeps its return type
+    # (the call is emitted before `_toplevel` lowers the store).
+    test_gimple_stdout("gimple_module_global_bound_method_call_keeps_return_type", """\
+class R:
+    def m(self, x):
+        return "<" + str(x) + ">"
+a = R()
+rr = a.m
+def main():
+    print(rr(5))
+    print(a.m(6))
+main()
+""", "<5>\n<6>\n")
+
     # String site FIRST, int site second (an int list records no contract, so
     # it used to be invisible as a disagreeing call site).
     test_gimple_stdout("gimple_mixed_kind_flat_list_param_str_first", """\

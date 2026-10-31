@@ -12881,6 +12881,21 @@ def gen_module_impl(self, stmts):
             # a function that CALLS `e` is emitted before `_toplevel`
             # lowers the lambda at all.
             self._global_callable_ret_types[_gname] = _lambda_ret_type(self, _value)
+        elif (isinstance(_value, MemberExpr) and isinstance(_value.obj, IdentExpr)):
+            # `rr = inst.method` at module scope, `inst` a module global bound
+            # to a struct instance: a bound method VALUE. A function that
+            # calls `rr(...)` is emitted before `_toplevel` lowers this store,
+            # so the call site's only source for the method's return type is
+            # this pre-scan; without it the call answered `int64_t` and a
+            # `-> str` method printed its pointer's decimal.
+            _bm_ct = self._global_var_types.get(_as_str(_value.obj.name))
+            if isinstance(_bm_ct, str) and _bm_ct.endswith(' *'):
+                _bm_sn = _bm_ct[:-2]
+                if _bm_sn in self.struct_field_types:
+                    _bm_rt = self.func_return_types.get(
+                        f"{_bm_sn}_{gimple_ctypes._safe_name(_as_str(_value.member))}")
+                    if isinstance(_bm_rt, str) and _bm_rt not in ('', 'int64_t', 'void'):
+                        self._global_callable_ret_types[_gname] = _bm_rt
 
     def _phase17_scan_try_branches(_try_stmt):
         """Collect {name: C type} for every AssignStmt/MultiAssignStmt
