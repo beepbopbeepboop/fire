@@ -1,5 +1,43 @@
 # CODEGEN_generator_function: Lib/glob.py
 
+## Status (2026-10-31, round 5 — every MODULE-LEVEL generator of glob.py now compiles; what is left is the `_GlobberBase` selector closures, and that is TWO features, not one)
+
+`compile_to_gimple_with_cpp(glob.py)` now refuses on exactly `select_recursive`,
+`select_recursive_step` and `select_wildcard`. Landed this round (pinned in
+`test_gimple_generator_runner.py`): a self-recursive generator's kind is a
+fixpoint (`_rlistdir`: the recursive target is assumed a path word and verified;
+`generator_self_recursive_through_a_path_join`); a parameter the body (or a
+callee) uses as a path / sequence is a pointer word whatever its call sites
+pass (`_compute_pointer_evidence`); the self-recursive generator's extern
+declaration agrees with its definition; per-function generator-handle scoping;
+`fnmatch.filter`, `sys.audit`, `os.O_*` in ordinary code.
+
+The three selector generators close over `self`, `match`, `dir_only`,
+`follow_symlinks` and `select_next` and ESCAPE their enclosing method as values
+(`return select_wildcard`), and the module cannot be finished without BOTH:
+
+1. **Escaping closure generators** (a generator feature). Design, from reading
+   the existing layers: hoist the nested generator with its captures as
+   trailing box-handle parameters (`_apply_nested_async_capture`, as for a
+   non-escaping one); at the `def`, build a CLOSURE RECORD
+   `{start address, captured box handles}` and return it as the callable word;
+   register it as a variadic callable (`MojoVarargFn`, whose thunk appends the
+   captured handles and starts the generator) so `mojo_maybe_bound_call_N`
+   dispatches to it; register a `MojoGenSig` whose value kind is the tagged word
+   so `mojo_iter_gen_handle` drains it with `mojo_list_append_word`; and teach
+   the ordinary `for x in <word>` dispatch to take the generator-handle branch.
+   Verification program: `def make(k): def gen(n): ...yield i*k...; return gen`
+   consumed as `for v in make(3)(4)`.
+2. **A run-time regex compiler.** `self.compile(part)` is
+   `re.compile(translate(pat), flags).match` on a pattern built AT RUN TIME;
+   `regex_compile.py` only compiles literal patterns ahead of time, and the
+   runtime has matchers (`mojo_regex_search` over a compiled `ReNode` program)
+   but no pattern-string compiler. `match(entry_name)` is a call through the
+   bound method of that object. This is a regex feature, not a generator one;
+   without it the selectors would compile and then fail at run time, so it is
+   the real gate on this file. Next step there: port `regex_compile`'s parser to
+   the runtime (emit the same `ReNode` arrays at run time).
+
 ## Status (2026-10-31, round 4 — `_glob2`, `_iterdir`, `_listdir` and the `glob_in_dir` dispatch now compile; `_iglob`/`_rlistdir` stop at a RECURSIVE kind fixpoint, then the selector closures)
 
 Measured on CPython 3.15's `glob.py` (`compile_to_gimple_with_cpp`):
