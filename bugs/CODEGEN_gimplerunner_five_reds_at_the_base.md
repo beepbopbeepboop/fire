@@ -23,8 +23,8 @@ the change (the two new rows pass).
 
 Each one prints a float or a string slot's bits as an int: a list or a
 polymorphic slot is read at the wrong element kind, which is the family of
-`bugs/CODEGEN_polymorphic_param_non_str_kinds_print_wrong.md` and
-`bugs/CODEGEN_loop_target_rebind_outside_the_zip_enumerate_families.md`.
+the polymorphic non-str print bug (its doc was deleted when fixed) and
+the loop-target rebind bug (its doc was deleted when fixed).
 That is a guess from the symptoms; no row has been traced yet.
 
 ## Next step

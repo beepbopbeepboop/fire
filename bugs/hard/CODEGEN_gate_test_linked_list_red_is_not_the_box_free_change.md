@@ -70,7 +70,7 @@ none of them names a `{mut}` box or a free.
    predicate from `65e0f0775` without the wiring that `47ccf8d1c` adds).
 2. The JIT red is the compiled-path stdlib closure. It is owned by the existing
    `CODEGEN_*` docs whose errors match these families, chiefly
-   `bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md`
+   the imported-generic never-elaborated bug (its doc was deleted when fixed)
    (96 sites in section 1, 1938 in section 2 of `tools/undef_import_census.py`).
    Fix there, not in the box-free change.
 3. The interpreter's wall time for this file is a separate measurement. Time

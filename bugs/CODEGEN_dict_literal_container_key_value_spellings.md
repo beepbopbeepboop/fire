@@ -15,7 +15,7 @@ Landed, measured against the compiled path and CPython:
   **Not yet measured:** every homogeneous string tuple literal now costs one
   `mojo_list_set_kinds` allocation, and that row is never pruned except on
   `mojo_list_destroy`. The integrator's gate must check the self-host memory
-  ceiling against `bugs/PERF_selfhost_memory_leak_hunt.md`.
+  ceiling against the selfhost memory-leak bug (fixed 2026-10-27, doc deleted).
 
 Re-diagnosed, NOT fixed:
 
