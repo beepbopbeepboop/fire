@@ -7043,16 +7043,40 @@ def main():
 main()
 """, "2.5\nfile\nsub\n")
 
-    # ...and a tagged-word generator consumed any OTHER way (next, list,
-    # comprehension) would read the box's address as an int, so it keeps its
-    # refusal instead.
-    test_generator_refused("generator_mixed_kind_yields_consumed_by_list_refused", """\
+    # `list(g())` and a comprehension drain a tagged-word generator into a list
+    # that carries its OWN per-slot kinds, so it prints, iterates, indexes and
+    # takes len() by what each element is.
+    test_generator_stdout("generator_mixed_kind_yields_drained_into_a_list", """\
+def g():
+    yield "a"
+    yield 1
+    yield 2.5
+    yield True
+
+def main():
+    xs = list(g())
+    print(xs)
+    print(len(xs))
+    for v in xs:
+        print(f"<{v}>")
+    print(xs[0])
+    print(xs[2])
+    print([v for v in g()])
+
+main()
+""", "['a', 1, 2.5, True]\n4\n<a>\n<1>\n<2.5>\n<True>\na\n2.5\n['a', 1, 2.5, True]\n")
+
+    # ...but any consumer that is NOT a for / list / comprehension (here `next`
+    # of a bound handle) would read the box's address as an int, so the
+    # generator keeps its refusal.
+    test_generator_refused("generator_mixed_kind_yields_consumed_by_next_refused", """\
 def g():
     yield "a"
     yield 1
 
 def main():
-    print(list(g()))
+    it = g()
+    print(next(it))
 
 main()
 """, "all values must agree on one scalar type")

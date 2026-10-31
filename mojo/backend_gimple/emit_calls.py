@@ -9812,6 +9812,8 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
         # index genuinely has no static answer, so it keeps the uniform
         # fallback rather than guessing.
         _sk = gen._struct_slot_kinds.get(ov)
+        if isinstance(_sk, ginf._RuntimeKinded):
+            _sk = None      # kinds only known at run time: the boxed read below
         if _sk and isinstance(node.index, gimple_ctypes.IntLiteral):
             _si = node.index.value
             if 0 <= _si < len(_sk):

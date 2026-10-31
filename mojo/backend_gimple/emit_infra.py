@@ -4055,6 +4055,8 @@ def _generator_to_list(gen, value: str) -> str:
         # string), so the list renders and iterates right.
         gen._void_call('mojo_list_append_word',
                        [('MojoList *', res), ('int64_t', val)])
+        gen._struct_slot_kinds[res] = _RuntimeKinded(['int', 'str'])
+        gen._maybe_kinds_vals.add(res)
     elif vct in ('char *', 'MojoStr *'):
         gen._void_call('mojo_list_append_str',
                        [('MojoList *', res), ('const char *', val)])
@@ -4397,6 +4399,9 @@ def _list_repr_fn(gen, rav: str) -> str:
     no None-sentinel check) whenever the element type is known to be
     int64_t.
     """
+    # A list drained from a tagged-word generator carries its own per-slot kinds.
+    if isinstance(gen._struct_slot_kinds.get(rav), _RuntimeKinded):
+        return 'mojo_repr_list_kinds'
     # A list of 2-element PAIR lists (what `enumerate(x)` and `zip(a, b)`
     # build): the generic repr reads each inner slot through the
     # None-sentinel heuristic, so the index 0 of the first pair printed as
@@ -4507,10 +4512,21 @@ _TUPLE_SLOT_KIND_BYTE = {'int': 'i', 'int64_t': 'i', 'char': 'i', '_Bool': 'i',
                          'MojoDict *': 'l', 'MojoSet *': 'l'}
 
 
+class _RuntimeKinded(list):
+    """The `_struct_slot_kinds` row of a list whose slot kinds are only known at
+    RUN time (a list drained from a tagged-word generator): the list carries its
+    own per-slot kinds string (`mojo_list_append_word`), so the repr reads THAT
+    (`mojo_repr_list_kinds` handed the value's own row) instead of a static kinds
+    string. Two distinct entries, so every `len(set(kinds)) > 1` "this list is
+    mixed" test classifies it as mixed."""
+
+
 def _struct_slot_kind_bytes(gen, rav: str) -> str | None:
     kinds = gen._struct_slot_kinds.get(rav)
     if not kinds or len(set(kinds)) == 1:
         return None
+    if isinstance(kinds, _RuntimeKinded):
+        return None          # no static table: the value's own row (see the args builder)
     return ''.join(_STRUCT_KIND_BYTE[k] for k in kinds)
 
 
@@ -5711,6 +5727,9 @@ def _compr_generator_loop(gen, node, gen0, res: str, res_type: str, it_val: str)
         gen._emit(f"  {gen._cname(_tgt)} = {val};")
         if api.get('mixed_slots') and vct == 'int64_t':
             gen._boxed_vals.add(gen._cname(_tgt))
+            if not hasattr(gen, '_tagged_gen_vals'):
+                gen._tagged_gen_vals = set()
+            gen._tagged_gen_vals.add(gen._cname(_tgt))
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
     gen._emit(f"  goto {bb_post};")
     gen._emit_label(bb_post)

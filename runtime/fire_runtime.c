@@ -1184,18 +1184,38 @@ int64_t mojo_box_from_bool(int64_t v)
 static void _list_word_push(MojoList *l, char kind, int64_t raw)
 {
     /* Append `raw` and extend the list's per-slot kinds string by `kind`
-     * (slots before this one that the string does not describe are ints). */
+     * (slots before this one that the string does not describe are ints).
+     * The kinds string is a PRIVATE growable buffer (`mojo_list_set_kinds`
+     * stores the pointer it is given, it never copies): an 8-byte header
+     * holds its capacity so the append is amortised O(1), and a row whose
+     * kinds are not such a buffer (shared/pooled) is copied first. */
     int64_t n = l->len;
-    const char *old = mojo_list_get_kinds(l);
-    char *buf = (char *)malloc((size_t)n + 2);
-    if (!buf) { mojo_list_append_int(l, raw); return; }
-    for (int64_t i = 0; i < n; i++)
-        buf[i] = (old && old[i]) ? old[i] : 'i';
+    _KindRow *r = _kinds_row((uint64_t)(uintptr_t)l);
+    char *buf = NULL;
+    if (r && r->kinds && r->owned == 2) {
+        buf = r->kinds;
+        int64_t cap = *(int64_t *)(buf - 8);
+        if (n + 2 > cap) {
+            int64_t ncap = cap * 2 + 8;
+            char *nb = (char *)malloc((size_t)ncap + 8);
+            memcpy(nb + 8, buf, (size_t)n);
+            *(int64_t *)nb = ncap;
+            buf = nb + 8;
+        }
+    } else {
+        int64_t ncap = n * 2 + 16;
+        char *nb = (char *)malloc((size_t)ncap + 8);
+        *(int64_t *)nb = ncap;
+        buf = nb + 8;
+        const char *old = (r && r->kinds) ? r->kinds : NULL;
+        for (int64_t i = 0; i < n; i++) buf[i] = (old && old[i]) ? old[i] : 'i';
+    }
     buf[n] = kind;
     buf[n + 1] = '\0';
     mojo_list_append_int(l, raw);
     mojo_list_set_kinds(l, buf);
-    free(buf);
+    r = _kinds_row((uint64_t)(uintptr_t)l);
+    if (r) r->owned = 2;
 }
 
 void mojo_list_append_word(MojoList *l, int64_t w)

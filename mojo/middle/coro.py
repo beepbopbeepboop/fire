@@ -977,6 +977,15 @@ def _tagged_consumers_ok(name: str) -> bool:
         for n in _walk(st):
             if isinstance(n, N.ForStmt) and _is_gcall(n.iterable):
                 for_iters.add(id(n.iterable))
+            # `list(g())` / `tuple(g())` and a comprehension clause's iterable:
+            # the generator is drained into a list that carries its own kinds
+            # (`_generator_to_list`, `_compr_generator_loop`).
+            elif (isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr)
+                    and n.func.name == 'list' and len(n.args) == 1
+                    and _is_gcall(n.args[0])):
+                for_iters.add(id(n.args[0]))
+            elif isinstance(n, N.Generator) and _is_gcall(n.iterable):
+                for_iters.add(id(n.iterable))
             if isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr) \
                     and n.func.name == name:
                 refs.append(id(n))
