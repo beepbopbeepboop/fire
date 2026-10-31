@@ -83,4 +83,4 @@ Status update 2026-10-30 (work/bug-codegen-closure-str-return-is-lost):
 - Root cause: unannotated closure param lacks call-site inference (`_gmi_apply_call_site_param_evidence` only handles `IdentExpr` free-function calls, not bound-method closure calls).
 
 Adjacent, not this bug: a capturing nested `def` with `-> float` truncates its
-result on the call path. See `bugs/CODEGEN_capturing_closure_float_return_truncated.md`.
+result on the call path. See the separate bug: a capturing nested `def` with `-> float` truncates its result on the call path.

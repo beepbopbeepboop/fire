@@ -79,8 +79,8 @@ the owner's, poisoned names MUST keep the old refusal, and the four rows'
 reject censuses (56/48/62/66) are the standing profile to diff against — a
 fix is progress only if it is LOUDER or strictly fewer rejects with every
 moved module's value behavior checked against CPython. Pointers: the row docs
-(`COMPILE_FAIL_Lib_socket_...`, `COMPILE_FAIL_Tools_cases_generator_parsing.md`,
-`COMPILE_FAIL_zipfile___init__.md`, `CODEGEN_tuple_unpack_of_a_boxed_dict_reads_slots_as_pointer_words.md`)
+(`COMPILE_FAIL_Lib_socket_...`, the `parsing.py` compile-fail row,
+the zipfile `__init__` compile-fail row, `CODEGEN_tuple_unpack_of_a_boxed_dict_reads_slots_as_pointer_words.md`)
 carry the per-row censuses.
 
 ### Round 2026-10-29 — planning round (light worker; no full-closure run)

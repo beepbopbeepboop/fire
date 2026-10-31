@@ -253,7 +253,7 @@ string.
 Link-mode sibling resolution still stubs `parser.*` / `lexer.*` (so
 `analyzer.py` reaches gcc but links against weak stubs), and
 `parsing.py`'s polymorphic `yield from self.<field>.tokens()` generators
-are still refused — see `bugs/COMPILE_FAIL_Tools_cases_generator_parsing.md`,
+are still refused — see the `parsing.py` compile-fail row (the cases-generator parsing bug),
 whose own status changed materially this session.
 
 Doc kept open on the one remaining error.
@@ -303,7 +303,7 @@ reproducing the previous entry's end-to-end state exactly (the
    but never DEFINED, because BlockStmt.tokens is one of parsing.py's
    polymorphic-`yield from self.body.tokens()` generators that the C++
    coroutine emitter refuses/rolls back (the excluded hard-doc cluster
-   documented in bugs/COMPILE_FAIL_Tools_cases_generator_parsing.md).
+   documented in the `parsing.py` compile-fail row).
    So analyzer.py currently has NO working end-to-end path: link mode
    silently stubs siblings; inline mode dies on parsing.py's refused
    generator shapes.

@@ -600,7 +600,7 @@ as a C++ exception and gets unwound for real, while GIMPLE C code calls
 `mojo_raise()` itself. A callee on that boundary that is not a live GIMPLE C
 frame must not have its `longjmp` cross ordinary live C frames — the header's
 own comment on the set explains why in terms of a suspended frame no longer
-existing (`runtime/fire_runtime.h:585-610`).
+existing (`runtime/fire_runtime.h:585-613`).
 
 ### A `*rest` parameter: a fixed-arity SPECIALIZATION per call site, and no
 ### new calling convention
