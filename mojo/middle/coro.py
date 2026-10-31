@@ -1498,6 +1498,7 @@ _GEN_VALUE_KINDS: dict[str, tuple[str | None, str]] = {}
 # every `_static_env` caller in the pipeline sees the same sibling set.
 _GEN_DEFS: dict[str, object] = {}
 _PTR_EVIDENCE: dict = {}      # function name -> set of its parameters used as path words
+_PTR_FORWARDED: dict = {}     # function name -> parameters handed on to another function's path-word parameter
 _GEN_REC_ASSUME: dict = {}   # self-recursive generator -> assumed kind of its recursive loop target
 _MODULE_STMTS: list = []     # the module being lowered (for whole-module reference scans)
 # Names whose kind is being computed RIGHT NOW, module-level so that the
@@ -1524,6 +1525,7 @@ def _compute_pointer_evidence(stmts) -> None:
     call sites pass, such a parameter IS a pointer word; the call-site scan uses
     this to stop reading an untypable call site as a possible float."""
     _PTR_EVIDENCE.clear()
+    _PTR_FORWARDED.clear()
     fds = {}
     for st in stmts:
         if isinstance(st, N.FunctionDef):
@@ -1566,6 +1568,7 @@ def _compute_pointer_evidence(stmts) -> None:
                             if isinstance(a, N.IdentExpr) and a.name in names:
                                 ev.add(a.name)
         _PTR_EVIDENCE[nm] = ev
+        _PTR_FORWARDED[nm] = set()
     changed = True
     while changed:
         changed = False
@@ -1577,9 +1580,13 @@ def _compute_pointer_evidence(stmts) -> None:
                     gp = _params(fds[n.func.name])
                     for i, a in enumerate(n.args):
                         if (isinstance(a, N.IdentExpr) and a.name in names
+                                and i < len(gp) and gp[i] in _PTR_EVIDENCE[n.func.name]):
+                            _PTR_FORWARDED[nm].add(a.name)
+                        if (isinstance(a, N.IdentExpr) and a.name in names
                                 and i < len(gp) and gp[i] in _PTR_EVIDENCE[n.func.name]
                                 and a.name not in _PTR_EVIDENCE[nm]):
                             _PTR_EVIDENCE[nm].add(a.name)
+                            _PTR_FORWARDED[nm].add(a.name)
                             changed = True
                     for k, v in (n.kwargs or []):
                         if (isinstance(v, N.IdentExpr) and v.name in names
@@ -5232,30 +5239,68 @@ def _evidently_int_name(name: str, body: list) -> bool:
 
 
 def _lower_escaping_generators(stmts: list) -> None:
-    """A SYNC generator defined inside a plain function that reads the
-    function's parameters / locals AND escapes it as a value
-    (`def make(k): def gen(n): yield n * k; return gen`) is split in two, IN
-    PLACE:
+    """A SYNC generator defined inside a plain function or method that reads the
+    enclosing scope and cannot stay nested -- it ESCAPES as a value
+    (`def make(k): def gen(n): yield n * k; return gen`), or the stack-switch
+    hoist (`_hoist_nested_sync_generator`) does not take it -- moves to module
+    level IN PLACE as `<outer>__<inner>__esc`, with the names it reads as LEADING
+    parameters (a by-value capture: only taken when nothing rebinds the name after
+    the `def`, which is exactly when a snapshot equals Python's
+    read-at-each-resume). So it is an ordinary module generator the existing
+    backends type and compile.
 
-      * the generator itself moves to module level as `<outer>__<inner>__esc`
-        with the names it read as LEADING parameters (a by-value capture: only
-        taken when nothing rebinds the name after the `def`, which is exactly
-        when a snapshot equals Python's read-at-each-resume), so it is an
-        ordinary module generator the existing backends type and compile;
-      * the `def` stays where it was as an ordinary closure with the original
-        parameters, whose body starts the moved generator with the captured
-        values and returns its handle through `mojo_gen_note`, which records the
-        handle against the generator's registered signature. The closure is the
-        callable value (`return gen`), and a `for` over what a call through it
-        returns drains that handle (`mojo_iter_word`).
+      * A call to it (from the enclosing function, or from another moved sibling,
+        which then captures what the callee does) is a direct call with the
+        captured names ahead of the arguments.
+      * One that ESCAPES also leaves its `def` behind as a variadic closure
+        `def gen(*a, **kw)`, which starts the moved generator with the captured
+        values and the caller's arguments (`mojo_gen_call_with`: names and defaults
+        bind through the registered signature). The closure is the callable value
+        (`return gen`); a `for` over what a call through it returns drains the
+        handle (`mojo_iter_word`).
 
-    Left alone: a generator that never escapes (`_hoist_nested_sync_generator`
-    keeps it tight, called by name), one with decorators / keyword-only / star
-    parameters, one that assigns a `nonlocal`, and one reading a name another
-    nested def provides."""
+    Left alone: a generator that never escapes and that the stack-switch hoist
+    takes (it stays tight, called by name), one with decorators / keyword-only / star
+    parameters, one that assigns a `nonlocal`, one that calls an ordinary nested
+    helper of the enclosing function, and one reading a name another nested def
+    provides."""
     from mojo.backend_gimple import cpp_async as _ca
+    import copy as _copy
     moved = []
     owners = []
+    # A subclass inherits a method by SHARING the base's FunctionDef, so the
+    # moved generator (bound to one concrete receiver class) would be shared too,
+    # and `self.<method>()` inside it would reach the BASE's override. Give every
+    # module-local descendant that does not override such a method its own copy
+    # first, so each class moves its own generator.
+    _structs = {}
+    for _st in stmts:
+        if isinstance(_st, N.StructDef):
+            _structs[_st.name] = _st
+
+    def _has_nested_gen(_fn):
+        for _x in _fn.body:
+            if isinstance(_x, N.FunctionDef) and getattr(_x, 'is_generator', False):
+                return True
+        return False
+
+    def _descendants(_base_name):
+        out = []
+        for _sd in _structs.values():
+            if _base_name in (getattr(_sd, 'bases', None) or []):
+                out.append(_sd)
+                out.extend(_descendants(_sd.name))
+        return out
+
+    for _st in list(_structs.values()):
+        for _m in list(_st.methods or []):
+            if not (isinstance(_m, N.FunctionDef) and method_receiver_kind(_m) == 'self'
+                    and _has_nested_gen(_m)):
+                continue
+            for _d in _descendants(_st.name):
+                if any(getattr(_dm, 'name', None) == _m.name for _dm in (_d.methods or [])):
+                    continue
+                _d.methods.append(_copy.deepcopy(_m))
     for _st in stmts:
         if isinstance(_st, N.FunctionDef):
             owners.append((_st, None))
@@ -5267,6 +5312,20 @@ def _lower_escaping_generators(stmts: list) -> None:
         if not (isinstance(outer, N.FunctionDef) and not getattr(outer, 'is_generator', False)
                 and not getattr(outer, 'is_async', False)):
             continue
+        # Every name `outer` binds in its own scope, not only the top-level ones:
+        # `select_next` is assigned under an `if` yet read by the generator
+        # whenever that branch ran.
+        _bound = set()
+        for _pn, _pa in outer.params:
+            _bound.add(_pn)
+        for _bn in gimple_exprtypes._walk_own_body(outer.body):
+            _bound |= _ca._binding_node_names(_bn)
+        sibling_defs = {}
+        for _d in outer.body:
+            if isinstance(_d, N.FunctionDef):
+                sibling_defs[_d.name] = _d
+        # name -> {'node', 'ix', 'escapes', 'caps'}
+        allgens = {}
         for ix, inner in enumerate(list(outer.body)):
             if not (isinstance(inner, N.FunctionDef) and getattr(inner, 'is_generator', False)
                     and not getattr(inner, 'is_async', False)):
@@ -5277,43 +5336,137 @@ def _lower_escaping_generators(stmts: list) -> None:
                     _starred = True
             if inner.decorators or inner.kwonly or _starred:
                 continue
-            if _only_called_in(outer, inner.name):
-                continue
             if any(isinstance(n, N.NonlocalStmt) for n in _walk(inner)):
                 continue
-            # An f-string is one raw literal to the parser, so the names it
-            # interpolates are reads `_nested_async_free_vars` cannot see.
+            escapes = not _only_called_in(outer, inner.name)
             _fs = _ca._fstring_field_names(inner.body)
             _own = set()
             for _pn, _pa in inner.params:
                 _own.add(_pn)
             _own |= gimple_ctypes._declared_vars_body(inner.body)
-            # Every name `outer` binds in its own scope, not only the top-level
-            # ones: `select_next` is assigned under an `if` yet read by the
-            # generator whenever that branch ran.
-            _bound = set()
-            for _pn, _pa in outer.params:
-                _bound.add(_pn)
-            for _bn in gimple_exprtypes._walk_own_body(outer.body):
-                _bound |= _ca._binding_node_names(_bn)
             _used = set()
             for _b in _capture_scan_body(inner.body):
                 _used |= gimple_ctypes._used_idents_node(_b)
-            caps = sorted(((_used | _fs) - _own) & _bound)
-            if not caps:
+            caps = set(((_used | _fs) - _own) & _bound)
+            allgens[inner.name] = {'node': inner, 'ix': ix, 'escapes': escapes,
+                                   'caps': caps, 'own': _own}
+        # Which of them move: every escaping one, and a non-escaping one the
+        # stack-switch hoist does not take (`_hoist_nested_sync_generator`'s own
+        # conditions) or that a moved generator calls.
+        cand = {}
+        for nm, c in allgens.items():
+            inner = c['node']
+            if c['escapes']:
+                cand[nm] = c
                 continue
-            sibling_defs = {d.name for d in outer.body if isinstance(d, N.FunctionDef)}
-            if any(c in sibling_defs for c in caps):
-                continue
-            after = outer.body[ix + 1:]
+            plan = _nested_async_capture_plan(inner, outer, self_struct=owner_struct) \
+                if _eligible(inner)[0] else None
+            uses_self = owner_struct is not None and 'self' in _nested_async_free_vars(inner, outer)
+            a3 = (plan is not None and (plan or uses_self)
+                  and not (uses_self and (_generator_result_escapes(outer, nm)
+                                          or _calls_in_nested_defs(outer, inner))))
+            if not a3 and not (uses_self and _generator_result_escapes(outer, nm)):
+                # (a generator handed OUT of the method while holding `self`
+                # would outlive the receiver: that stays refused)
+                cand[nm] = c
+        changed = True
+        while changed:
+            changed = False
+            for nm in list(cand):
+                for n in _walk(cand[nm]['node']):
+                    if (isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr)
+                            and n.func.name in allgens and n.func.name not in cand):
+                        cand[n.func.name] = allgens[n.func.name]
+                        changed = True
+        # A candidate whose body calls (or reads) an ordinary nested helper, or
+        # a sibling generator that is not itself a candidate, cannot move: the
+        # helper is not visible at module level.
+        changed = True
+        while changed:
+            changed = False
+            for nm in list(cand):
+                inner = cand[nm]['node']
+                bad = False
+                for n in _walk(inner):
+                    if (isinstance(n, N.IdentExpr) and n.name in sibling_defs
+                            and n.name not in cand and n.name not in cand[nm]['own']):
+                        bad = True
+                    if (isinstance(n, N.IdentExpr) and n.name in cand and n.name == nm):
+                        pass
+                if bad:
+                    del cand[nm]
+                    changed = True
+        # Transitive captures: calling a sibling means passing what it captures.
+        changed = True
+        while changed:
+            changed = False
+            for nm, c in cand.items():
+                for n in _walk(c['node']):
+                    if (isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr)
+                            and n.func.name in cand and n.func.name != nm):
+                        extra = cand[n.func.name]['caps'] - c['caps']
+                        if extra:
+                            c['caps'] |= (extra & _bound)
+                            changed = True
+        for nm in list(cand):
+            c = cand[nm]
+            caps = sorted(c['caps'])
+            after = outer.body[c['ix'] + 1:]
             rebound = False
-            for c in caps:
-                if any(c in _ca._binding_node_names(n) for n in gimple_exprtypes._walk_ast(after)):
+            for cn in caps:
+                if any(cn in _ca._binding_node_names(n) for n in gimple_exprtypes._walk_ast(after)):
                     rebound = True
-            if rebound:
+            if not caps or rebound:
+                del cand[nm]
                 continue
-            orig = inner.name
-            base = (f'{owner_struct}__' if owner_struct else '') + f'{outer.name}__{orig}__esc'
+            c['caps'] = caps
+        # A generator calling a dropped sibling cannot move either.
+        changed = True
+        while changed:
+            changed = False
+            for nm in list(cand):
+                for n in _walk(cand[nm]['node']):
+                    if (isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr)
+                            and n.func.name in sibling_defs and n.func.name not in cand
+                            and n.func.name != nm):
+                        del cand[nm]
+                        changed = True
+                        break
+        if not cand:
+            continue
+        for nm, c in cand.items():
+            c['base'] = (f'{owner_struct}__' if owner_struct else '') + f'{outer.name}__{nm}__esc'
+
+        def _mk(nm0, ln0, col0):
+            return N.IdentExpr(name=nm0, line=ln0, col=col0)
+
+        def _direct_calls(root, in_moved):
+            """Rewrite calls to candidates under `root` into direct calls of the
+            moved generator with the captured names ahead of the arguments. In the
+            enclosing body only called-only candidates (an escaping one keeps its
+            closure there)."""
+            for n in _walk(root):
+                if (isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr)
+                        and n.func.name in cand
+                        and (in_moved or not cand[n.func.name]['escapes'])
+                        and not getattr(n, '_esc_done', False)):
+                    t = cand[n.func.name]
+                    pre = [_mk(cn, n.line, getattr(n, 'col', 0)) for cn in t['caps']]
+                    n.func = _mk(t['base'], n.func.line, getattr(n.func, 'col', 0))
+                    n.args = pre + list(n.args)
+                    n._esc_done = True
+                    _walk_ast_invalidate(n)
+
+        for nm, c in cand.items():
+            _direct_calls(c['node'], True)
+        for st in outer.body:
+            if not (isinstance(st, N.FunctionDef) and st.name in cand):
+                _direct_calls(st, False)
+        for nm, c in cand.items():
+            inner = c['node']
+            caps = c['caps']
+            orig = nm
+            base = c['base']
             ln, col = inner.line, getattr(inner, 'col', 0)
             gen_def = inner
             gen_def.name = base
@@ -5324,7 +5477,6 @@ def _lower_escaping_generators(stmts: list) -> None:
                     _dyn.append((_pn, 'object'))
                 else:
                     _dyn.append((_pn, _pa))
-            tramp_params_typed = _dyn
             if owner_struct and 'self' in caps:
                 # A free generator's parameter named `self` is read as the
                 # receiver of a METHOD by the emitters; give it an ordinary name.
@@ -5333,18 +5485,23 @@ def _lower_escaping_generators(stmts: list) -> None:
                         _sn.name = '__esc_self'
                 _walk_ast_invalidate(inner)
             gen_def.params = []
-            for c in caps:
+            for cn in caps:
                 # A method's `self` keeps its struct type: the moved generator
                 # reads the object's fields through it.
-                if c == 'self' and owner_struct:
+                if cn == 'self' and owner_struct:
                     gen_def.params.append(('__esc_self', owner_struct))
-                elif _evidently_int_name(c, inner.body):
-                    gen_def.params.append((c, None))
+                elif _evidently_int_name(cn, inner.body):
+                    gen_def.params.append((cn, None))
                 else:
-                    gen_def.params.append((c, 'object'))
-            gen_def.params.extend(tramp_params_typed)
-            def _id(nm):
-                return N.IdentExpr(name=nm, line=ln, col=col)
+                    gen_def.params.append((cn, 'object'))
+            gen_def.params.extend(_dyn)
+            moved.append(gen_def)
+            if not c['escapes']:
+                outer.body[c['ix']] = N.PassStmt(line=ln, col=col)
+                continue
+
+            def _id(nm0):
+                return N.IdentExpr(name=nm0, line=ln, col=col)
 
             def _call(fn, *cargs):
                 return N.CallExpr(func=_id(fn), args=list(cargs), line=ln, col=col)
@@ -5354,22 +5511,20 @@ def _lower_escaping_generators(stmts: list) -> None:
             # (names, defaults), with the captured words ahead of them.
             body = [N.AssignStmt(target=_id('__esc_pre'), value=_call('mojo_list_new'),
                                  line=ln, col=col)]
-            for c in caps:
-                body.append(N.ExprStmt(value=_call('mojo_list_append_int', _id('__esc_pre'), _id(c)),
+            for cn in caps:
+                body.append(N.ExprStmt(value=_call('mojo_list_append_int', _id('__esc_pre'), _id(cn)),
                                        line=ln, col=col))
             body.append(N.AssignStmt(target=_id('__esc_start'), value=_id(base), line=ln, col=col))
             body.append(N.ReturnStmt(value=_call('mojo_gen_call_with', _id('__esc_start'),
                                                  _id('__esc_pre'), _id('__esc_a'), _id('__esc_kw')),
                                      line=ln, col=col))
-            tramp = N.FunctionDef(
+            outer.body[c['ix']] = N.FunctionDef(
                 name=orig,
                 params=[('*__esc_a', None), ('**__esc_kw', None)],
                 return_type=None,
                 body=body,
                 line=ln, col=col)
-            outer.body[ix] = tramp
-            moved.append(gen_def)
-            _walk_ast_invalidate(outer)
+        _walk_ast_invalidate(outer)
     stmts.extend(moved)
 
 

@@ -7411,6 +7411,75 @@ def main():
 main()
 """, "abcd\nxy\n1\n")
 
+    # glob's recursive selector: an escaping closure generator drives a sibling
+    # (non-escaping) generator that both read `self` and the method's locals; the
+    # abstract base method is overridden by the receiver's class.
+    test_generator_matches_cpython("generator_escaping_closure_drives_capturing_sibling_virtual_self", """\
+class Base:
+    def __init__(self, k):
+        self.k = k
+
+    def step_val(self, v):
+        raise NotImplementedError
+
+    def sel(self, n):
+        limit = n
+
+        def outer_gen(start):
+            stack = [start]
+            while stack:
+                yield from step(stack)
+
+        def step(stack):
+            v = stack.pop()
+            if v < limit:
+                yield self.step_val(v)
+                stack.append(v + 1)
+        return outer_gen
+
+class Sub(Base):
+    def step_val(self, v):
+        return v * self.k
+
+def main():
+    s = Sub(10)
+    for x in s.sel(4)(0):
+        print(x)
+main()
+""", """\
+class Base:
+    def __init__(self, k):
+        self.k = k
+
+    def step_val(self, v):
+        raise NotImplementedError
+
+    def sel(self, n):
+        limit = n
+
+        def outer_gen(start):
+            stack = [start]
+            while stack:
+                yield from step(stack)
+
+        def step(stack):
+            v = stack.pop()
+            if v < limit:
+                yield self.step_val(v)
+                stack.append(v + 1)
+        return outer_gen
+
+class Sub(Base):
+    def step_val(self, v):
+        return v * self.k
+
+def main():
+    s = Sub(10)
+    for x in s.sel(4)(0):
+        print(x)
+main()
+""")
+
     # ...but any consumer that is NOT a for / list / comprehension (here `next`
     # of a bound handle) would read the box's address as an int, so the
     # generator keeps its refusal.

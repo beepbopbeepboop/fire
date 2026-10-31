@@ -8266,6 +8266,11 @@ def gen_module_impl(self, stmts):
     for s in all_functions:
         if isinstance(s, FunctionDef):
             self._inferred_param_types[s.name] = self._infer_param_types(s)
+    # A call to a function defined LATER in the module (`iglob` forwarding to
+    # `_iglob`) read a callee that had no inference yet; a second pass sees it.
+    for s in all_functions:
+        if isinstance(s, FunctionDef):
+            self._inferred_param_types[s.name] = self._infer_param_types(s)
     # Ground those use-derived parameter types in what callers pass, where the
     # two disagree and a call site is unambiguous. See
     # `_gmi_apply_call_site_param_evidence`.

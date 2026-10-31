@@ -1516,6 +1516,13 @@ def _cpp_assign_cast_type(gen, val):
     _m = re.match(r'(mojo_[a-z0-9_]+)\(', val)
     if _m and _m.group(1) in _CPP_RT_RETURN_CTYPE:
         return _CPP_RT_RETURN_CTYPE[_m.group(1)]
+    # A direct call of a compiled function (a struct method, a staticmethod) whose
+    # registered return type is a pointer.
+    _m = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\(', val)
+    if _m:
+        _t = gen.func_return_types.get(_m.group(1))
+        if _t in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *'):
+            return _t
     _m = re.match(r'@@CSYM:([A-Za-z0-9_]+)@@\(', val)
     if _m:
         _t = (gen.func_return_types.get(_m.group(1))
@@ -3172,6 +3179,8 @@ def _cpp_expr(gen, e) -> str:
                     gen, _sym,
                     f"{_cpp_self_struct}_{gimple_ctypes._safe_name(e.func.member)}",
                     args)
+                if f"{_cpp_self_struct}_{e.func.member}" in gen._static_methods:
+                    return f"{_sym}({', '.join(args)})"   # a staticmethod takes no receiver
                 return f"{_sym}(self{', ' + ', '.join(args) if args else ''})"
             # `cls.method(...)` inside a @classmethod generator — the
             # SAME name-only resolution mechanism the ordinary
@@ -3237,6 +3246,8 @@ def _cpp_expr(gen, e) -> str:
                         gen, _sym,
                         f"{_obj_struct}_{gimple_ctypes._safe_name(e.func.member)}",
                         args)
+                    if f"{_obj_struct}_{e.func.member}" in gen._static_methods:
+                        return f"{_sym}({', '.join(args)})"   # a staticmethod takes no receiver
                     return f"{_sym}({e.func.obj.name}{', ' + ', '.join(args) if args else ''})"
             # `SomeStruct.<method>(...)` — a CLASS-QUALIFIED method call,
             # where the receiver name is a known STRUCT NAME rather than a
@@ -6158,6 +6169,9 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     return init
             if isinstance(val, str) and val.startswith('@@CSYM:'):
                 return [f"{indent}{cpp_name} = _mj_w({val});"]
+            _acast0 = _cpp_assign_cast_type(gen, val)
+            if _acast0 is not None and ctype == 'int64_t' and _acast0 != ctype:
+                return [f"{indent}{cpp_name} = (int64_t)(intptr_t)({val});"]
             return [f"{indent}{cpp_name} = {val};"]
         if _container_literal and declared.get(name) in ('MojoList *', 'MojoDict *', 'MojoSet *'):
             init = _cpp_container_literal_init(gen, cpp_name, s.value, indent)
@@ -9472,6 +9486,12 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             f"`yield from {sub_name}(...)`: expected {len(sub_params)} "
             f"argument(s), got {len(call.args)}")
+    # A word-typed slot (`int64_t`) fed a pointer-typed local (a list, a string) is
+    # an implicit pointer->integer conversion g++ rejects.
+    for _ai in range(len(arg_exprs)):
+        if _ai < len(sub_params) and sub_params[_ai] == 'int64_t' and not re.fullmatch(
+                r'-?\d+|true|false', arg_exprs[_ai].strip()):
+            arg_exprs[_ai] = f"(int64_t)(intptr_t)({arg_exprs[_ai]})"
     sub_base = api['base']
     # Record a forward declaration for this callee's four `extern "C"`
     # wrappers when its own unit comes LATER in this .cpp -- see

@@ -1,5 +1,42 @@
 # CODEGEN_generator_function: Lib/glob.py
 
+## Status (2026-10-31, round 10 — `glob.py` NOW COMPILES (`compile_to_gimple_with_cpp` accepts the whole module, links and runs); what stands between it and CPython's answers is the `re` module at run time)
+
+Measured with CPython 3.15's `glob.py` as a sibling module (a driver importing it):
+the refusal list is EMPTY, `g++` accepts the generated `.cpp`, the program links, and
+literal-path globbing runs correctly in the compiled program
+(`glob.glob('/tmp/.../*.py')`, `.../s*/*.py`, bytes patterns' literal parts).
+
+Landed this round (`generator_escaping_closure_drives_capturing_sibling_virtual_self`,
+diffed against CPython, pins the shape):
+- `_lower_escaping_generators` moves every nested sync generator the stack-switch
+  hoist does not take (and every escaping one) to module level, with TRANSITIVE
+  captures (calling a sibling passes what it captures) and direct calls between
+  moved siblings; a generator handed out of the method while holding `self` still
+  stays refused. Each module-local subclass that inherits such a method gets its OWN
+  copy first, so `self.scandir(...)` inside the moved generator reaches the subclass's
+  override (the base copy reaches the abstract one).
+- a method whose body only `raise`s (an abstract method) returns a word, not `void`
+  (its result is read through the base); a staticmethod called through `self` takes no
+  receiver in a generator body; a `yield from` / call passing a pointer local to a
+  word-typed parameter casts it; a plain call returning a pointer assigned to a
+  word-typed generator local is cast.
+- an `iglob(pathname)`-style parameter that is sliced AND handed to `os.path.*` or on
+  to another function's path-word parameter is a `char *`, not a list; a second
+  `_infer_param_types` pass sees callees defined later.
+
+What still fails at run time (measured): everything that needs a regex or a compiled
+pattern object. `re` is not resolved to anything in the compiled program
+(`re.search('a+b', 'xaab')` is "stubbed" and answers False, as does a module-level
+`magic_check = re.compile(...)`; so `glob.has_magic('a*')` is False, `**` and the
+`*`-with-text selectors (`self.compile(part)` -> `re.compile(translate(pat)).match`)
+match nothing). That is no longer a generator problem: it is the missing run-time
+`re` (the runtime has the matcher, `mojo_regex_search`, over a `ReNode` program, but
+the pattern-to-program compiler `regex_compile.py` only runs inside the compiler).
+Plan: a stdlib `re` shim written in Python (Pattern holding a program built by
+`regex_compile`'s parser compiled into the program), registered so `import re`
+resolves; then `glob.glob('**/*.py', recursive=True)` and `root_dir=` are the tests.
+
 ## Status (2026-10-31, round 9 — the reduced selector chain with a method-built path now matches CPython; remaining: class-attribute function values and the regex compiler)
 
 Landed (pinned by `generator_escaping_closure_chain_method_concat_dynamic_words`,
