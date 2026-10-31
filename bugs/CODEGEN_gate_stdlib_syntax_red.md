@@ -1,20 +1,39 @@
-# Gate job `stdlib-syntax` goes red once master is merged: `iter()` on a scalar binds a list cursor
+# Gate job `stdlib-syntax` red on the master merge: status and remaining latent `iter()` defect
 
 ## Status
 
-OPEN. Root cause found; the fix is verified in a scratch copy but is NOT on this branch, because the
-faulty lines were added to master by `b3814dbfd` ("iter() on an already-declared container parameter
-binds a cursor"), which this branch does not contain.
+Re-measured 2026-10-30 (narrow only, `compile_stdlib.transpile_file` on the five files the gate names,
+each under `python3 tools/memslot.py --gb 8`, cold `GMOJO_HOME` per tree):
 
-Correction (2026-10-30): the red is NOT caused by this branch's merge. Current master (`d1e59974f`)
-itself fails `test/collections/test_linked_list.mojo`, while this branch's HEAD passes it. Measured with
-`python3 tools/memslot.py --gb 8 -- python3 .tmp/run_one.py <tree> <abs path to test_linked_list.mojo>`
-(`compile_stdlib.transpile_file`, file at `new-modular/Mojo/stdlib/test/collections/`):
-- this branch HEAD `22405d677`: `RESULT True`
-- `git archive master` copy: `RESULT False`, gcc `test_linked_list.mojo:657:6: error: assignment to ...`
-- same master copy with the one-line fix below: `RESULT True`
-The merge is only the carrier: the defect is master's own, and the integrator will see it on any branch
-merged onto master.
+| tree | dtype | logger | address_space | testing/suite | test_linked_list |
+|---|---|---|---|---|---|
+| branch HEAD `9023f0c5d` | PASS | PASS | PASS | PASS | PASS |
+| merge tree `710624a56` (`git merge-tree --write-tree master HEAD`) | PASS | PASS | PASS | PASS | PASS |
+| master `154444590` (`git archive`) | FAIL | FAIL | FAIL | FAIL | PASS |
+
+So the red this doc was opened for is not the `iter()` gcc error any more. On current master the four
+failing files are refused by codegen with `a case pattern is an ENUM CASE (case .PASS:) ...`, and
+this branch's enum-case commits (`86f908c22`, `1e6a34e01`, `8e2b8f227`) are what closes it. The merge
+result is green on all five narrow files. **The full `stdlib-syntax` job (664 files, `U` count) has
+NOT been run here; that is the integrator's.**
+
+The earlier `iter()` symptom (gcc `passing argument 1 of 'mojo_list_get_int'` in
+`test/collections/test_linked_list.mojo`) no longer reproduces: that file passes on master
+`154444590`, so the Status below no longer describes a live gate failure.
+
+Remaining, latent (NOT fixed, NOT on this branch): master's `mojo/backend_gimple/emit_stmts.py:285`
+still reads `if _rebind and gen.var_types.get(name) != at:` (from master `b3814dbfd`). It lets an
+already-declared scalar target gain a list cursor when `iter()`'s argument lowers to `int64_t`. The
+root-cause analysis below is still correct for that line. Next step, which must land on master (this
+branch does not contain the `_rebind` block, so a change here would only conflict with it):
+1. Replace the line with `if _rebind and (gen.var_types.get(name) != 'MojoList *' or at != 'MojoList *'):`.
+2. Add a test next to `gimple_iter_rebinds_a_parameter_to_a_cursor` (`test_gimple_runner.py`) that
+   `var ll = LinkedList[Int](); var it = iter(ll)` does not gain a list cursor when `ll` is `int64_t`.
+3. Re-run the five narrow files above and `test_gimple_runner.py` for the new test, then delete this doc.
+
+Earlier measurements (kept for the history of the reasoning): on master `d1e59974f` the defect did
+reproduce on `test_linked_list.mojo`, and the one-line fix made the generated C byte-identical to the
+branch's. Master has since moved past that state.
 
 ## What was run
 
