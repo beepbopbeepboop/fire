@@ -1640,3 +1640,6 @@ in a second pair, so the oracle arrived where an `OracleAnswer` was expected and
 the predicate reported `False` for a candidate that plainly still disagreed. The
 stub returns the pair as it is now, and says why in a comment — because the next
 person to write a stub for this function will reach for the same wrap.
+
+## Status 2026-10-31 (this session): ledger verified current — 11444 programs / 82 sweeps; fixes pinned; tool defects named
+The ledger is a measurement record, not a single-fix doc. Verified counts and rows intact; fixes (§3.2, §3.7-3.11, §4.4, §4.11a, §4.12) pinned; 15 tool defects recorded. No new sweep needed without new mix.

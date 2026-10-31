@@ -520,3 +520,6 @@ assumed and the two architectures required to produce the SAME sentence, and its
 `…and a list of FUNCTIONS is still one, on both` row pins the boundary the
 element reader draws (a subscript whose literal holds a function still reaches
 the function). This file is what the UNCHECKED side is.
+
+## Status 2026-10-31 (this session): PASSING end verified closed; undecidable half open — partial progress
+Verified: _binding_values/_container_element_writes/_global_slot_value present; caller_local_element_holds takes index; dict literal values; parameter_kinds_by_call_site; false refusals fixed. PASSING end 1209/1209. Residual (undecidable half / recursion / cross-call proofs) remains.

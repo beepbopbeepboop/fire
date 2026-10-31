@@ -242,3 +242,6 @@ as the reason; the `VARIABLE_ROWS` table is the one that must change when the
 run-time trap lands. (It carried a per-row `test_variable_operands_are_still_
 untrapped` function when this doc was written; the driver is now the table, and
 the table's `STILL_UNTRAPPED_DOC` constant is what points back here.)
+
+## Status 2026-10-31 (this session): sequence written/measured; emission not wired; Lean proof framework is obstacle — partial progress
+Verified: `model.int_overflow_traps`, `int_overflow_trap_message`, `INT_OVERFLOW_TRAP_STATUS`, encoders (`encode_adds_xd_xn_xm`, `encode_smulh_xd_xn_xm`), and `_emit_int_alu_checked` sequences present (ADDS/SMULH + trap); both backends match. Emission to AHBD/compiler not wired (build-time only); `Math` proof framework (`lib/ProofLib.lean` branches for ADDS/SMULH) present but not fully integrated. No regression on narrowing/unsigned exclusions.
