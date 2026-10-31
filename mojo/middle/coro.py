@@ -5233,7 +5233,15 @@ def _lower_escaping_generators(stmts: list) -> None:
     nested def provides."""
     from mojo.backend_gimple import cpp_async as _ca
     moved = []
-    for outer in stmts:
+    owners = []
+    for _st in stmts:
+        if isinstance(_st, N.FunctionDef):
+            owners.append((_st, None))
+        elif isinstance(_st, N.StructDef):
+            for _m in (_st.methods or []):
+                if isinstance(_m, N.FunctionDef) and method_receiver_kind(_m) == 'self':
+                    owners.append((_m, _st.name))
+    for outer, owner_struct in owners:
         if not (isinstance(outer, N.FunctionDef) and not getattr(outer, 'is_generator', False)
                 and not getattr(outer, 'is_async', False)):
             continue
@@ -5258,8 +5266,18 @@ def _lower_escaping_generators(stmts: list) -> None:
             for _pn, _pa in inner.params:
                 _own.add(_pn)
             _own |= gimple_ctypes._declared_vars_body(inner.body)
-            caps = sorted(_nested_async_free_vars(inner, outer)
-                          | ((_fs - _own) & _outer_all_locals(outer)))
+            # Every name `outer` binds in its own scope, not only the top-level
+            # ones: `select_next` is assigned under an `if` yet read by the
+            # generator whenever that branch ran.
+            _bound = set()
+            for _pn, _pa in outer.params:
+                _bound.add(_pn)
+            for _bn in gimple_exprtypes._walk_own_body(outer.body):
+                _bound |= _ca._binding_node_names(_bn)
+            _used = set()
+            for _b in _capture_scan_body(inner.body):
+                _used |= gimple_ctypes._used_idents_node(_b)
+            caps = sorted(((_used | _fs) - _own) & _bound)
             if not caps:
                 continue
             sibling_defs = {d.name for d in outer.body if isinstance(d, N.FunctionDef)}
@@ -5273,14 +5291,26 @@ def _lower_escaping_generators(stmts: list) -> None:
             if rebound:
                 continue
             orig = inner.name
-            base = f'{outer.name}__{orig}__esc'
+            base = (f'{owner_struct}__' if owner_struct else '') + f'{outer.name}__{orig}__esc'
             ln, col = inner.line, getattr(inner, 'col', 0)
             gen_def = inner
             gen_def.name = base
             tramp_params = list(inner.params)
+            if owner_struct and 'self' in caps:
+                # A free generator's parameter named `self` is read as the
+                # receiver of a METHOD by the emitters; give it an ordinary name.
+                for _sn in _walk(inner):
+                    if isinstance(_sn, N.IdentExpr) and _sn.name == 'self':
+                        _sn.name = '__esc_self'
+                _walk_ast_invalidate(inner)
             gen_def.params = []
             for c in caps:
-                gen_def.params.append((c, None))
+                # A method's `self` keeps its struct type: the moved generator
+                # reads the object's fields through it.
+                if c == 'self' and owner_struct:
+                    gen_def.params.append(('__esc_self', owner_struct))
+                else:
+                    gen_def.params.append((c, None))
             gen_def.params.extend(tramp_params)
             args = [N.IdentExpr(name=c, line=ln, col=col) for c in caps]
             for pn, _pa in tramp_params:

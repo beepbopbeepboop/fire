@@ -7251,6 +7251,30 @@ def main():
 main()
 """, "0\n3\n6\n9\n[0, 5, 10]\n0\n5\n")
 
+    # The same split for a METHOD's nested generator: `self` is captured as the
+    # moved generator's receiver parameter, so it reads the live object's fields,
+    # and the method returns the closure as a value.
+    test_generator_stdout("generator_escaping_closure_in_method_reads_self", """\
+class G:
+    def __init__(self, k):
+        self.k = k
+
+    def sel(self, m):
+        def gen(n):
+            for i in range(n):
+                yield i * self.k * m
+        return gen
+
+def main():
+    g = G(2)
+    s = g.sel(3)
+    for v in s(4):
+        print(v)
+    print(list(g.sel(1)(3)))
+
+main()
+""", "0\n6\n12\n18\n[0, 2, 4]\n")
+
     # ...but any consumer that is NOT a for / list / comprehension (here `next`
     # of a bound handle) would read the box's address as an int, so the
     # generator keeps its refusal.

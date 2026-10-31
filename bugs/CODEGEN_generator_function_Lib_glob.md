@@ -1,5 +1,43 @@
 # CODEGEN_generator_function: Lib/glob.py
 
+## Status (2026-10-31, round 7 — ESCAPING closure generators landed (feature 1 of 2); what stands between this and `glob.py` is dynamic objects + the regex compiler)
+
+Landed (pinned by `generator_escaping_closure_returned_and_iterated`,
+`generator_escaping_closure_in_method_reads_self`, the three former
+`nested_generator_*_refused` pins now `..._escaping...` stdout tests):
+`coro._lower_escaping_generators` splits a sync generator defined in a function
+OR METHOD that reads the enclosing scope and escapes as a value (`return gen`)
+into (a) a module generator `<outer>__<inner>__esc` taking the captured names as
+LEADING parameters (by value; only when nothing rebinds them after the `def`;
+`self` keeps its struct type as `__esc_self`; f-string reads and names bound under
+an `if` count), and (b) an ordinary closure `def gen(params)` that starts it and
+returns the handle through `mojo_gen_note(h, <start>)` (runtime: records the
+handle against the registered signature). A call through the returned function
+value is a plain word; `for x in <word>` and `list(<word>)` / comprehensions drain
+a live handle (`mojo_iter_boxed_list` -> `mojo_iter_gen_handle`; the `for` has a
+generator-handle arm lowered last, with a string and an int sub-arm picked by the
+drained list's runtime kind so each body sees a correctly typed loop variable).
+`mojo_gen_sig_register` now also accepts struct-pointer parameters.
+
+Measured limits of what is landed (all outside the generator machinery):
+- arithmetic on the loop variable of such a `for` (`[v + 1 for v in g(3)]`) reads
+  the unknown-kind word as a float; `print`/`str`/f-string are right. That is the
+  general "word of unknown kind" arithmetic gap, not specific to generators.
+- `next(<word>)` of such a handle is still unsupported (only `for`/`list`/comp).
+
+`glob.py` itself still does not compile, and the next blockers are in this order:
+1. the selectors take `path` from dynamic callers, so the moved generator's `path`
+   has no static type (`yields ['path'], whose call sites do not all pass the same
+   statically-known type`). Annotating such parameters `object` (a dynamic word)
+   gets past it (measured on a reduced program) and lands on
+2. `nxt(self.concat_path(path, ...), exists=True)`: a call through a callable
+   PARAMETER (`_cpp_dyn_call_expr`) whose argument is an expression of unknown
+   static C type. `concat_path` is a class attribute bound to `operator.add` in
+   `_StringGlobber` and a method elsewhere, `self.scandir`/`self.compile` likewise:
+   this wants arguments passed as dynamic words (runtime-resolved `+`, attribute
+   call on a polymorphic `self`), i.e. the dynamic-object model Lib_enum also needs.
+3. the run-time regex compiler (`self.compile(part)` -> `re.compile(...).match`).
+
 ## Status (2026-10-31, round 6 — worker verification: refusal set unchanged, feature gap confirmed, no code change attempted)
 
 Re-verified against branch work/bug-codegen-generator-function-lib-glob.

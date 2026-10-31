@@ -1420,8 +1420,12 @@ def _cpp_generator_sig_lines(gen, fn, base, param_ctypes, cpp_value_ctype,
         else:
             return []
     _names = [gimple_ctypes._as_str(_pn) for _pn, _ in param_ctypes]
-    if any(_ct not in _SIG_WORD_CTYPES for _, _ct in param_ctypes):
-        return []
+    # A struct pointer travels in an integer register like any word (an
+    # escaping method generator takes its receiver this way).
+    for _pn, _ct in param_ctypes:
+        if _ct not in _SIG_WORD_CTYPES and not (
+                _ct.endswith(' *') and _ct[:-2] in gen.struct_field_types):
+            return []
     if any(_n.startswith('*') for _n in _names):
         return []
     _defs = getattr(fn, 'param_defaults', None) or {}
