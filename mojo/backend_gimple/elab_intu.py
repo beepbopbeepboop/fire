@@ -3389,17 +3389,41 @@ def run(gen, stmts):
                 # and None for everything else, which keeps its old path
                 # exactly.
                 args = _d2_ctor_args(work, base, n)
+            if args is not None:
+                work.enqueue((kind, base, tuple(args)), 0, queue)
         elif kind == 'fn':
-            if not _fn_returns_unbuildable_struct(work, base):
+            # ROOT for generic function instantiation: either the return is
+            # unbuildable (old path) OR the function has type params that
+            # need a per-T body (new path for shared-symbol fix).
+            if _fn_returns_unbuildable_struct(work, base):
+                args = _concrete_args(work, kind, base, n, scope)
+                if args is not None:
+                    work.enqueue((kind, base, tuple(args)), 0, queue)
+                return
+            # NEW (bug-codegen-dylib-generic-inline-copies-370): enqueue
+            # any generic fn with non-empty template whose args are all
+            # type params (value params stay on .o route).
+            import elaborate as el
+            module_src = _module_src(work.gen, base, 'fn')
+            if module_src is None:
+                return
+            tmpl = el.extract_fn_source(module_src, base)
+            if tmpl is None:
+                return
+            params = el.type_param_names(tmpl) if hasattr(el, 'type_param_names') else []
+            if not params:
                 return
             args = _concrete_args(work, kind, base, n, scope)
             if args is None:
+                args = _infer_fn_args(work, base, n)
+            if args is None:
                 return
+            if not _fn_args_are_types(work, base, args):
+                return
+            work.enqueue((kind, base, tuple(args)), 0, queue)
+            return
         else:
             return
-        if args is None:
-            return
-        work.enqueue((kind, base, tuple(args)), 0, queue)
     _walk_scoped(stmts, seed)
     if not queue:
         return []

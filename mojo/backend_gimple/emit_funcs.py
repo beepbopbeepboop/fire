@@ -3965,7 +3965,7 @@ def _register_imported_generics(gen, stmts) -> None:
     instantiation. This runs in the inline do_imports=True path too: there a
     bracketed call `gen[2](x)` to a sibling module's generic otherwise matched
     no registration and lowered to a zero stub (a silent miscompile; see
-    bugs/CODEGEN_dylib_generic_inline_copies_share_one_symbol.md)."""
+    bug:CODEGEN_dylib_generic_inline_copies_share_one_symbol (generic fn shared symbol)."""
     for st in stmts:
         if not (isinstance(st, gimple_ctypes.FromImportStmt) and not getattr(st, 'wildcard', False)):
             continue
@@ -3995,7 +3995,7 @@ def _register_imported_generic_structs(gen, stmts) -> None:
     _ensure_generic_struct, e.g. `alloc[MoveOnly[Int]]`) can resolve it.
 
     Runs in the inline do_imports=True path too (same guard removal as
-    _register_imported_generics, bugs/CODEGEN_dylib_generic_inline_copies_share_one_symbol.md)."""
+    _register_imported_generics, bug:CODEGEN_dylib_generic_inline_copies_share_one_symbol)."""
     for st in stmts:
         if not (isinstance(st, gimple_ctypes.FromImportStmt) and not getattr(st, 'wildcard', False)):
             continue
