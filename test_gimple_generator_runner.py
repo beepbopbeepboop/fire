@@ -6161,6 +6161,39 @@ def main():
         print(r)
 """, "yields ['x'], whose call sites do not all pass the same")
 
+    # `d, b = os.path.split(p)` binds both names to str, so a generator fed
+    # the unpacked `b` is no longer a call-site HOLE. See Lib/glob.py's
+    # `_iglob`/`_glob2`, whose `basename` comes from exactly this shape.
+    test_generator_stdout("generator_fed_os_path_split_unpacked_str", """\
+import os
+
+def _g1(pattern):
+    yield pattern
+
+def outer(p):
+    d, b = os.path.split(p)
+    yield from _g1(b)
+
+def main():
+    for x in outer("a/bc"):
+        print(x)
+""", "bc\n")
+    # An unannotated generator param typed ONLY by its call sites must reach
+    # its delegating generator as that kind. The scan used to memoize the
+    # callee's kind as int before the call-site table was filled, so this
+    # printed the string's address at exit 0.
+    test_generator_stdout("generator_delegate_callsite_typed_param_not_memoized_int", """\
+def _g1(pattern):
+    yield pattern
+
+def outer():
+    yield from _g1("abc")
+
+def main():
+    for x in outer():
+        print(x)
+""", "abc\n")
+
     _foreign_a3_generator_handle_next()
     _foreign_a3_generator_handle_for_loop()
     _foreign_cpp_module_global_value()
