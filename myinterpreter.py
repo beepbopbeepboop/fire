@@ -2486,6 +2486,57 @@ def _mojo_min(*args, **kwargs):
     return _mojo_minmax(False, *args, **kwargs)
 
 
+def _mojo_iter(value):
+    """`iter(value)` for a struct that defines its own `__iter__`.
+
+    Python's `iter()` and `next()` look the protocol method up on the TYPE,
+    and `MojoInstance` only forwards attribute reads (`__getattr__`) to the
+    Mojo method table, so a Mojo struct with `__iter__`/`__next__` was not an
+    iterator here: `next(c)` raised "'MojoInstance' object is not an
+    iterator", and `for x in c` fell through to `__getitem__` and died with
+    `KeyError: 0`. The fix is to drive the Mojo protocol explicitly, the way
+    `__len__`/`__getitem__` already forward. A struct WITHOUT `__iter__`
+    keeps the old `iter()` behaviour (its `__getitem__` sequence fallback is
+    unchanged). Exhaustion is the Mojo `__next__` raising `StopIteration`,
+    which is a real Python exception, so it propagates unchanged."""
+    if isinstance(value, MojoInstance):
+        cls = value._mojo_class
+        method = cls.methods.get('__iter__')
+        if method is not None:
+            return _mojo_struct_iter_steps(cls, method(cls.interpreter, value))
+    return iter(value)
+
+
+def _mojo_struct_iter_steps(cls, iterator):
+    """Yield the values of a Mojo iterator object by calling its `__next__`
+    until that raises `StopIteration`. `iterator` is whatever the struct's
+    `__iter__` returned (usually `self`)."""
+    while True:
+        try:
+            yield _mojo_next(iterator)
+        except StopIteration:
+            return
+
+
+def _mojo_next(iterator, *default):
+    """`next(iterator[, default])` that also drives a Mojo struct's own
+    `__next__`. Anything that is not a `MojoInstance` goes to the builtin
+    unchanged. A struct without `__next__` is refused with CPython's own
+    message for a non-iterator."""
+    if not isinstance(iterator, MojoInstance):
+        return next(iterator, *default)
+    cls = iterator._mojo_class
+    method = cls.methods.get('__next__')
+    if method is None:
+        raise TypeError(f"'{cls.name}' object is not an iterator")
+    if default:
+        try:
+            return method(cls.interpreter, iterator)
+        except StopIteration:
+            return default[0]
+    return method(cls.interpreter, iterator)
+
+
 class _MojoSIMD:
     """Stand-in for real Mojo's `SIMD[dtype, width]` vector type. No real
     vectorization/hardware backend here — just a fixed-width list of scalars
@@ -3433,7 +3484,7 @@ class Interpreter:
         self.scope.define('chr', chr)
         self.scope.define('ord', ord)
         self.scope.define('divmod', divmod)
-        self.scope.define('next', next)
+        self.scope.define('next', _mojo_next)
         self.scope.define('index', _mojo_operator_index)
         self.scope.define('isnan', _mojo_isnan)
         self.scope.define('isinf', _mojo_isinf)
@@ -3513,7 +3564,7 @@ class Interpreter:
         self.scope.define('complex', complex)
         self.scope.define('slice', slice)
         self.scope.define('callable', callable)
-        self.scope.define('iter', iter)
+        self.scope.define('iter', _mojo_iter)
         self.scope.define('format', format)
         self.scope.define('hex', hex)
         self.scope.define('oct', oct)
@@ -4738,7 +4789,7 @@ class Interpreter:
             if isinstance(iterable, MojoInstance):
                 kind = iterable._mojo_class.name
             raise TypeError(f"{self._loc(node)}'{kind}' object is not iterable")
-        for value in iterable:
+        for value in _mojo_iter(iterable):
             # node.target is always a plain string from fire_compiler.py's
             # _parse_for (possibly comma-joined for tuple unpacking, e.g.
             # "op, i" or "(op, i)"), never an Expr node or list — was
@@ -4766,7 +4817,7 @@ class Interpreter:
             if isinstance(iterable, MojoInstance):
                 kind = iterable._mojo_class.name
             raise TypeError(f"{self._loc(node)}'{kind}' object is not iterable")
-        for value in iterable:
+        for value in _mojo_iter(iterable):
             self._bind_comprehension_target(node.target, value)
             try:
                 for stmt in node.body:
@@ -4936,7 +4987,12 @@ class Interpreter:
         if node.value is None:
             raise
         value = self.eval_expr(node.value)
-        if isinstance(value, BaseException):
+        # A real exception CLASS (`raise StopIteration`) is raised the way
+        # Python raises it — instantiated and propagated — not stashed as a
+        # Mojo value, which left `raise StopIteration` unable to end a
+        # user-defined `__next__` (the iterator protocol's exhaustion signal).
+        if isinstance(value, BaseException) or (
+                isinstance(value, type) and issubclass(value, BaseException)):
             raise value
         self._raised_mojo_value = value
         raise MojoRaisedException()
@@ -6410,7 +6466,7 @@ class Interpreter:
                     return
                 gen = generators[0]
                 rest = generators[1:]
-                for item in self.eval_expr(gen.iterable):
+                for item in _mojo_iter(self.eval_expr(gen.iterable)):
                     self._bind_comprehension_target(gen.target, item)
                     if all(self.eval_expr(cond) for cond in gen.conditions):
                         run(rest)

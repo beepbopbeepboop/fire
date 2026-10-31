@@ -3464,3 +3464,35 @@ generic-struct / iterator-family work described above, not this change.
 increase), and the byte-identity comparison of generated C on a large
 succeeding module, since the change renames shadowing locals in any module
 that redeclares a name across blocks.
+
+### 2026-10-30 — the interpreter half of "runs on both pipelines" was false; fixed
+
+The Status claim that `next(<user iterator struct>)` "compiles and RUNS correctly"
+on both pipelines was only half measured: `test_next_on_a_user_struct_...` checks
+the compiled path against CPython and never runs the interpreter. Run through
+`python3 fire.py run`, the same program was broken:
+
+- `next(c)` on a struct with `__next__` raised `TypeError: 'MojoInstance' object
+  is not an iterator`, because CPython's `next()` looks `__next__` up on the type.
+- `for x in c` fell through to `__getitem__` and died with `KeyError: 0`.
+- `raise StopIteration` (a bare exception class) was stashed as a Mojo value
+  instead of raised, so it could not end a user `__next__`.
+
+**Landed:** `myinterpreter.py` gains `_mojo_iter` / `_mojo_next`, which drive a
+struct's own `__iter__`/`__next__`. They are wired as the `iter`/`next` builtins,
+into the two `for` executors and the comprehension loop. `execute_RaiseStmt`
+now raises a real exception class the way Python does. Regression:
+`test_interp_oracle.py::user_iterator_struct_next_and_for` (fails on the
+unfixed interpreter with the exact `TypeError` above, passes now).
+
+**Verified by:** `python3 test_interp_oracle.py` → 24 passed, 0 failed. The
+compiled `make()`-returns-`Counter` receiver (`c = make(5, 8)`; `next(c)` twice)
+builds through `fire.py build` and prints `5`, `6`, matching CPython. So for a
+LOCAL factory the compiled receiver is already typed; the blocker in the
+sections above is the CROSS-MODULE generic case (`peekable(list)`).
+
+**Still open:** builtins that call Python's `iter()` internally (`list(c)`,
+`sum(c)`, `zip`, `enumerate`, `sorted`, ...) still fail in the interpreter. Filed
+as `bugs/RUN_builtins_over_a_user_iterator_struct_still_fail.md` with the two
+options. The compiled type-inference / in-TU iterator work described above is
+untouched by this change.
