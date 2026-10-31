@@ -10,7 +10,7 @@ pointer bits. Two consequences, both silent (exit 0, no diagnostic):
     always False and every `d[k] = v` re-inserted;
   * with no GC to reclaim the tuple, each miss leaked one — this was about 16 of
     the 19 GB live on `mojoc --dump-full fire.py`
-    (the content-keyed tuple key fix; see mojo_dict_key_for in runtime/fire_runtime.c).
+    (bugs/PERF_selfhost_memory_leak_hunt.md).
 
 The leak hunt fixed the call sites that mattered (string keys, the `_pair_key`
 convention already in fire_compiler.py) and left the MECHANISM, which is what

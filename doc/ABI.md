@@ -579,12 +579,6 @@ silently going undocumented:
 - **`mojo_cleanup_push_closure(void *p)`** — a closure's bound method and its
   environment are one allocation unit (see `mojo_closure_free`), and this frees
   both.
-- **`mojo_cleanup_push_cattr(void **slot, void *saved)`** — a class-attribute
-  cell global (codegen's `_cattr_restore_begin`): `slot` is the global's
-  address and `saved` the cell it held on entry to the function. The unwind
-  writes `saved` back, so a function that never restores the cell itself does
-  not leave the global on the inner cell when an exception is caught further
-  up. Normal exits pop the record instead of running it.
 - **`mojo_cleanup_cancel_n(int64_t n)`** — pop the `n` most-recently-pushed
   thunks **without invoking them**; called immediately before the inline frees
   they duplicate.
@@ -593,14 +587,14 @@ silently going undocumented:
 
 **Coroutine boundary.** `extern int _mojo_exc_pending` with
 `mojo_exc_pending_set` / `mojo_exc_pending_get`
-(`runtime/fire_runtime.h:612-614`). This is the one entry set a client must not
+(`runtime/fire_runtime.h:606-608`). This is the one entry set a client must not
 guess at: the generated C++ generator body calls it at the `extern "C"
 _resume()` boundary, because an ordinary `yield from` delegation loop re-throws
 as a C++ exception and gets unwound for real, while GIMPLE C code calls
 `mojo_raise()` itself. A callee on that boundary that is not a live GIMPLE C
 frame must not have its `longjmp` cross ordinary live C frames — the header's
 own comment on the set explains why in terms of a suspended frame no longer
-existing (`runtime/fire_runtime.h:585-610`).
+existing (`runtime/fire_runtime.h:579-604`).
 
 ### A `*rest` parameter: a fixed-arity SPECIALIZATION per call site, and no
 ### new calling convention
@@ -710,7 +704,7 @@ The mangling is `monomorphize.mangle`, and `Pair[Int]` is `Pair_1_T_3_Int` — n
 argument emitted as `{len(name)}_{name}_{len(value)}_{value}` under the base
 name, so a name cannot be read back ambiguously and two instantiations cannot
 collide (`monomorphize.py`'s `mangle` and `_fields` state both, and
-`bugs/imported-generic-elaboration-defect` is why
+`bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md` is why
 the flat spelling was replaced). It is what the compiled path's `Elaborator`
 computes and what its objects are named.
 

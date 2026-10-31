@@ -196,7 +196,7 @@ def mangle(name: str, type_args: dict) -> str:
     the CAS key (`cas.instantiation_key`) folds in `compiler_fingerprint()`,
     which hashes this file — every previously cached object is therefore
     unreachable rather than silently served under the new spelling. See
-    `bugs/imported-generic-elaboration-defect`.
+    `bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md`.
 
     A name with no type arguments is returned unchanged, so a template's
     zero-parameter instantiation keeps its own name (`empty` -> `empty`)."""
@@ -741,7 +741,7 @@ def monomorphize_source(template_src: str, type_args: dict,
     was boxed `int64_t` instead of `<iterator> *`, the receiver of
     `next(self._inner)` / `next(it)` had no resolvable struct type, and the
     `for`-loop over the same object degraded to `mojo_unsupported_iter`
-    (see the user-iterator next() bug (doc deleted in db724c4d6)).
+    (see bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md).
     Substituting the qualified form first also keeps the bare pass from
     double-substituting it — by then no `Self.<param>` text survives."""
 

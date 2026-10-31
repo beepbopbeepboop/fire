@@ -47,7 +47,7 @@ class ConformanceError(Exception):
 #: argument `formal/monomorph.py::_derived_from_source` makes for the same
 #: reason. Keyed by the TEXT rather than by `id()`, because a key that is an
 #: address can be handed to a different object once the first is freed
-#: (`the `_walk_ast` re-scan bug (fixed; the memo and self-assign scan fixes are in the same commit).`'s hazard
+#: (`bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md`'s hazard
 #: 2), and hashing the text costs far less than the scan it stands in for.
 #:
 #: 8 entries, far above one elaboration's working set: the three readers below
@@ -243,7 +243,7 @@ def _is_param_marker(p: str) -> bool:
     elaborator declines measured over the stdlib sweep, which is why
     `ceildiv`/`exp`/`sqrt`/`isnan`/`black_box` and the rest of the numeric
     library reached the generated C as bare externs (see
-    bugs/imported-generic-elaboration-defect).
+    bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md).
     """
     return bool(p) and all(ch in '/*' for ch in p)
 
@@ -281,7 +281,7 @@ def type_param_defaults(template_src: str):
     exactly as the stdlib writes it — `size_of[UInt8]()` — was declined before
     anything was compiled, and its call site reached the generated C as a bare
     `extern int64_t size_of (...)`. See
-    `bugs/imported-generic-elaboration-defect`.
+    `bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md`.
 
     Only the text is returned; whether it is USABLE as a concrete argument is
     `_default_type_arg`'s question, and it is deliberately narrow."""
@@ -782,22 +782,6 @@ def infer_type_args(template_src: str, arg_ctypes):
         for k, v in _unify_param_ann(ann, params, arg_ctypes[i]).items():
             binding.setdefault(k, v)
     binding = _fill_erased_params(template_src, params, binding)
-    # A parameter no argument binds but the template DEFAULTS
-    # (`def pick[result_type: AnyType = NoneType](x: Int)`, called as
-    # `pick(10)`) takes its default, exactly as Mojo does when the caller
-    # omits it. Left unbound, `pick(10)` declined here, its call site fell
-    # through to a bare `pick` with no definition anywhere, and the program
-    # printed the weak "unavailable in compiled mode" stub. This is the
-    # same provable-default rule `infer_struct_type_args(fill_defaults=True)`
-    # applies to constructors, and `elab_intu`'s in-TU seed reaches this
-    # function too, so the definition and the call site agree on one
-    # instantiation.
-    _defaults = type_param_defaults(template_src)
-    for p in params:
-        if p not in binding:
-            _d = _default_type_arg(_defaults.get(p, ''))
-            if _d is not None:
-                binding[p] = _d
     if any(p not in binding for p in params):
         return None
     return [binding[p] for p in params]
@@ -821,7 +805,7 @@ def infer_struct_type_args(module_src: str, struct_name: str, arg_ctypes,
     `FormatStruct (writer, _t2);` — a call to a symbol nothing defines. That
     single shape was 56 of the 108 real undefined-call sites measured over the
     stdlib sweep (see
-    `bugs/imported-generic-elaboration-defect`).
+    `bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md`).
 
     Every candidate `__init__` whose arity matches is tried, and the type args
     must agree across all of them that bind: a struct with two constructors
@@ -999,7 +983,7 @@ def _defined_symbols(obj: str) -> set:
     This is how the elaborator learns what the instantiation TU actually NAMED
     its methods, instead of re-deriving the names — which is impossible, and
     was measured impossible (see the `FormatStruct` section of
-    bugs/imported-generic-elaboration-defect:
+    bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md:
     the erasure that makes two `fields` overloads look identical is the same
     erasure that destroys the function `overload_suffix_for` is computed from).
 

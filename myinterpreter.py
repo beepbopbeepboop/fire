@@ -1294,26 +1294,6 @@ class MojoInstance:
     def __init__(self, mojo_class):
         self._mojo_class = mojo_class
 
-    def __getattr__(self, name):
-        # Python's built-in `getattr(obj, name)` only consults real instance
-        # attributes and class attributes, never the Mojo method table, so a
-        # method fetched dynamically (`getattr(c, "tag")`) raised
-        # AttributeError even though `c.tag` worked. Mirror `_eval_member_of`
-        # so the two spellings agree.
-        if name in self.__dict__:
-            return self.__dict__[name]
-        cls = self._mojo_class
-        method = cls.methods.get(name)
-        if method is not None:
-            if name in cls.static_methods:
-                return method
-            if name in cls.class_methods:
-                return BoundClassMethod(method, cls, cls.interpreter)
-            return BoundMethod(method, self, cls.interpreter)
-        if name in cls.comptime_aliases:
-            return cls.comptime_aliases[name]
-        raise AttributeError(f"'{cls.name}' object has no attribute '{name}'")
-
     def _write_via(self, method_name):
         """Call a user-defined `write_to`/`write_repr_to(self, mut writer)`
         method, if the struct defines one, and return the accumulated text —
@@ -1405,7 +1385,8 @@ class BoundMethod:
                 # An overloaded method taken as a value (and then bound to
                 # an instance) has no single `_invoke` to delegate to; route
                 # through the overload set's own dispatch instead, with `self`
-                # prepended as the receiver.
+                # prepended as the receiver. See
+                # bugs/CODEGEN_method_with_overloads_is_unresolvable_as_a_value.md.
                 #
                 # The receiver is folded into the `*`-unpack (`invoke(f,
                 # *_merged, **kwargs)`) rather than written as an explicit
@@ -2486,96 +2467,6 @@ def _mojo_min(*args, **kwargs):
     return _mojo_minmax(False, *args, **kwargs)
 
 
-def _mojo_iter(value):
-    """`iter(value)` for a struct that defines its own `__iter__`.
-
-    Python's `iter()` and `next()` look the protocol method up on the TYPE,
-    and `MojoInstance` only forwards attribute reads (`__getattr__`) to the
-    Mojo method table, so a Mojo struct with `__iter__`/`__next__` was not an
-    iterator here: `next(c)` raised "'MojoInstance' object is not an
-    iterator", and `for x in c` fell through to `__getitem__` and died with
-    `KeyError: 0`. The fix is to drive the Mojo protocol explicitly, the way
-    `__len__`/`__getitem__` already forward. A struct WITHOUT `__iter__`
-    keeps the old `iter()` behaviour (its `__getitem__` sequence fallback is
-    unchanged). Exhaustion is the Mojo `__next__` raising `StopIteration`,
-    which is a real Python exception, so it propagates unchanged."""
-    if isinstance(value, MojoInstance):
-        cls = value._mojo_class
-        method = cls.methods.get('__iter__')
-        if method is not None:
-            return _mojo_struct_iter_steps(cls, method(cls.interpreter, value))
-    return iter(value)
-
-
-def _mojo_struct_iter_steps(cls, iterator):
-    """Yield the values of a Mojo iterator object by calling its `__next__`
-    until that raises `StopIteration`. `iterator` is whatever the struct's
-    `__iter__` returned (usually `self`)."""
-    while True:
-        try:
-            yield _mojo_next(iterator)
-        except StopIteration:
-            return
-
-
-def _mojo_next(iterator, *default):
-    """`next(iterator[, default])` that also drives a Mojo struct's own
-    `__next__`. Anything that is not a `MojoInstance` goes to the builtin
-    unchanged. A struct without `__next__` is refused with CPython's own
-    message for a non-iterator."""
-    if not isinstance(iterator, MojoInstance):
-        return next(iterator, *default)
-    cls = iterator._mojo_class
-    method = cls.methods.get('__next__')
-    if method is None:
-        raise TypeError(f"'{cls.name}' object is not an iterator")
-    if default:
-        try:
-            return method(cls.interpreter, iterator)
-        except StopIteration:
-            return default[0]
-    return method(cls.interpreter, iterator)
-
-
-def _mojo_iterable(value):
-    """A value handed to one of Python's own iterable-consuming builtins.
-
-    Those builtins call `iter()` on the argument, which looks `__iter__` up
-    on the TYPE, so a `MojoInstance` with a Mojo `__iter__` was not iterable
-    to them (`list(c)` fell through to `__getitem__` and died with
-    `KeyError: 0`). Such a struct is handed over as the `_mojo_iter` generator
-    instead. Anything else is returned untouched, so builtins keep their
-    exact argument semantics for every other value."""
-    if isinstance(value, MojoInstance) and '__iter__' in value._mojo_class.methods:
-        return _mojo_iter(value)
-    return value
-
-
-# Builtins that iterate their first positional argument, identified by
-# `id()` because builtins live for the whole process and an `id` test never
-# hashes the callee (a Mojo value may be unhashable). `zip` iterates every
-# positional argument; `min`/`max` iterate only when given ONE argument —
-# `max(a, b)` compares values and must not turn a struct into a generator.
-_MOJO_ITER_FIRST_ARG = {id(list), id(tuple), id(set), id(frozenset), id(sum),
-                        id(sorted), id(enumerate), id(any), id(all)}
-_MOJO_ITER_ALL_ARGS = id(zip)
-_MOJO_ITER_ONE_ARG = {id(_mojo_min), id(_mojo_max)}
-
-
-def _mojo_builtin_args(func, args):
-    """`args` with any Mojo iterable struct passed to `func` replaced by its
-    `_mojo_iterable` form. Only the calls `invoke` routes here are touched."""
-    key = id(func)
-    if key == _MOJO_ITER_ALL_ARGS:
-        return tuple(_mojo_iterable(a) for a in args)
-    if key in _MOJO_ITER_ONE_ARG:
-        if len(args) != 1:
-            return args
-    elif key not in _MOJO_ITER_FIRST_ARG or not args:
-        return args
-    return (_mojo_iterable(args[0]),) + tuple(args[1:])
-
-
 class _MojoSIMD:
     """Stand-in for real Mojo's `SIMD[dtype, width]` vector type. No real
     vectorization/hardware backend here — just a fixed-width list of scalars
@@ -3523,7 +3414,7 @@ class Interpreter:
         self.scope.define('chr', chr)
         self.scope.define('ord', ord)
         self.scope.define('divmod', divmod)
-        self.scope.define('next', _mojo_next)
+        self.scope.define('next', next)
         self.scope.define('index', _mojo_operator_index)
         self.scope.define('isnan', _mojo_isnan)
         self.scope.define('isinf', _mojo_isinf)
@@ -3603,7 +3494,7 @@ class Interpreter:
         self.scope.define('complex', complex)
         self.scope.define('slice', slice)
         self.scope.define('callable', callable)
-        self.scope.define('iter', _mojo_iter)
+        self.scope.define('iter', iter)
         self.scope.define('format', format)
         self.scope.define('hex', hex)
         self.scope.define('oct', oct)
@@ -4710,46 +4601,6 @@ class Interpreter:
                     self.scope.define(pattern.name, subject)
                     matched = True
                     break
-                # Class pattern: `case C():` or `case C(x):` — isinstance
-                # check, not a constructor call (CPython 3.14 semantics).
-                if self._is_instance(pattern, 'CallExpr'):
-                    class_obj = self.eval_expr(pattern.func)
-                    # Check instance status, handling both real Python types
-                    # and interpreter MojoClass objects.
-                    is_mojo_class = isinstance(class_obj, MojoClass)
-                    is_instance = False
-                    if is_mojo_class:
-                        is_instance = isinstance(subject, MojoInstance) and subject._mojo_class is class_obj
-                    else:
-                        try:
-                            is_instance = isinstance(subject, class_obj)
-                        except TypeError:
-                            is_instance = False
-                    if not is_instance:
-                        matched = False
-                        break
-                    args = getattr(pattern, 'args', []) or []
-                    matched = True
-                    if args:
-                        match_args = getattr(class_obj, '__match_args__', None)
-                        if match_args is None:
-                            raise TypeError(
-                                f"class '{getattr(class_obj, '__name__', class_obj)}' "
-                                f"does not define __match_args__")
-                        for i, subpat in enumerate(args):
-                            attr_name = match_args[i] if i < len(match_args) else None
-                            if attr_name is None:
-                                raise TypeError("not enough arguments for __match_args__")
-                            attr_val = getattr(subject, attr_name)
-                            if self._is_instance(subpat, 'IdentExpr') and subpat.name != '_' and not self.scope.has(subpat.name):
-                                self.scope.define(subpat.name, attr_val)
-                            elif self.eval_expr(subpat) != attr_val:
-                                matched = False
-                                break
-                        if not matched:
-                            break
-                    matched = True
-                    break
                 if self.eval_expr(pattern) == subject:
                     matched = True
                     break
@@ -4828,7 +4679,7 @@ class Interpreter:
             if isinstance(iterable, MojoInstance):
                 kind = iterable._mojo_class.name
             raise TypeError(f"{self._loc(node)}'{kind}' object is not iterable")
-        for value in _mojo_iter(iterable):
+        for value in iterable:
             # node.target is always a plain string from fire_compiler.py's
             # _parse_for (possibly comma-joined for tuple unpacking, e.g.
             # "op, i" or "(op, i)"), never an Expr node or list — was
@@ -4856,7 +4707,7 @@ class Interpreter:
             if isinstance(iterable, MojoInstance):
                 kind = iterable._mojo_class.name
             raise TypeError(f"{self._loc(node)}'{kind}' object is not iterable")
-        for value in _mojo_iter(iterable):
+        for value in iterable:
             self._bind_comprehension_target(node.target, value)
             try:
                 for stmt in node.body:
@@ -5026,12 +4877,7 @@ class Interpreter:
         if node.value is None:
             raise
         value = self.eval_expr(node.value)
-        # A real exception CLASS (`raise StopIteration`) is raised the way
-        # Python raises it — instantiated and propagated — not stashed as a
-        # Mojo value, which left `raise StopIteration` unable to end a
-        # user-defined `__next__` (the iterator protocol's exhaustion signal).
-        if isinstance(value, BaseException) or (
-                isinstance(value, type) and issubclass(value, BaseException)):
+        if isinstance(value, BaseException):
             raise value
         self._raised_mojo_value = value
         raise MojoRaisedException()
@@ -5818,14 +5664,7 @@ class Interpreter:
         elif op == '/':
             if isinstance(left, (str, MojoString)) and isinstance(right, (str, MojoString)):
                 return MojoString(os.path.join(str(left), str(right)))
-            # `_wrap_int` like every other arithmetic op above: a bare
-            # `return left / right` emits `mojo_div_double` (double) into a
-            # return slot the str branch types as `MojoString *` — gcc:
-            # "makes pointer from ... double" (no double->pointer cast under
-            # -fgimple). `_wrap_int` is a @staticmethod identity for non-int
-            # (a `/` result is a float), so Python semantics are unchanged —
-            # it only gives codegen a call whose result it can type as a word.
-            return self._wrap_int(left / right)
+            return left / right
         elif op == '//': return left // right
         elif op == '%': return left % right
         elif op == '**': return self._wrap_int(left ** right)
@@ -5947,7 +5786,6 @@ class Interpreter:
         (MojoCoroutine only) so plain generators are entirely unaffected."""
         if isinstance(func, (MojoFunction, MojoOverloadSet, _MojoBoundComptimeFunction)):
             return func(self, *args, **kwargs)
-        args = _mojo_builtin_args(func, args)
         tls = self._gen_tls
         if getattr(tls, 'is_coroutine', False):
             yield_fn = getattr(tls, 'yield_fn', None)
@@ -6513,7 +6351,7 @@ class Interpreter:
                     return
                 gen = generators[0]
                 rest = generators[1:]
-                for item in _mojo_iter(self.eval_expr(gen.iterable)):
+                for item in self.eval_expr(gen.iterable):
                     self._bind_comprehension_target(gen.target, item)
                     if all(self.eval_expr(cond) for cond in gen.conditions):
                         run(rest)

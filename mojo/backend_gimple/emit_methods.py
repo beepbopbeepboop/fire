@@ -27,7 +27,7 @@ from fire_compiler import (
     GlobalStmt, NonlocalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
     YieldExpr, YieldFromExpr, AwaitExpr,
-    _sms_key, _pair_key, _as_str,
+    _sms_key, _as_str,
 )
 import regex_compile
 import mlir
@@ -224,8 +224,7 @@ def _resolve_class_attr_write_target(gen, target):
     class_name = _as_str(obj.name)
     if class_name not in gen.struct_field_types or class_name in gen.var_types:
         return None
-    cattrs = gen._class_attrs.get(
-        _gmm_as_str(_resolve_fn_scoped_struct_name(gen, class_name)))
+    cattrs = gen._class_attrs.get(_gmm_as_str(class_name))
     # `_as_str(target.member)` for the KEY: `target.member` is a boxed AST
     # field read, and a boxed pointer used as a dict key misses the
     # `_class_attrs` entry whose key is a real string — so this returned None
@@ -238,229 +237,7 @@ def _resolve_class_attr_write_target(gen, target):
         return None
     gname = cattrs[_member_s]
     gtype = gen._global_var_types.get(_gmm_as_str(gname), 'int64_t')
-    if _cattr_cell_type(gen, gname) is not None:
-        # A per-execution cell: the store goes to the CURRENT cell, so the
-        # lvalue is the dereferenced pointer, not the global itself.
-        return gtype, _cattr_cell_lvalue(gen, gname, gtype)
     return gtype, gname
-
-
-def _cattr_cell_type(gen, gname):
-    """The value C type of `gname` when it is a function-scoped class attribute
-    kept in a per-execution cell (module_gen registration), else None."""
-    _cells = getattr(gen, '_cell_cattr_types', None)
-    if not _cells:
-        return None
-    return _cells.get(_gmm_as_str(gname))
-
-
-def _resolve_fn_scoped_struct_name(gen, bare_name):
-    """The struct a class NAME written in the current function refers to.
-
-    A class declared inside a function body is hoisted to module scope, and a
-    hoisted class whose bare name collided is renamed to `<Name>__<enclosing>`
-    with the mapping recorded in `_nested_struct_names` (see
-    `_gmi_hoist_nested_structs`). Two functions can each declare a `T`, so the
-    rename is keyed by the function the name is written in. Every site that
-    resolves a class NAME to its struct (constructor call, `ClassName.attr`
-    read, `ClassName.attr` write) goes through here, so they agree on which
-    class a name means. Without it the class-attribute reads consulted the
-    FIRST `T`'s attributes and returned them for the second, silently.
-
-    A name with no recorded rename is returned unchanged.
-    """
-    _renamed = getattr(gen, '_nested_struct_names', None) or {}
-    return _renamed.get(
-        _pair_key(_as_str(getattr(gen, 'current_func_name', '') or ''), bare_name),
-        bare_name)
-
-
-def _cattr_read(gen, gname, gtype):
-    """Value of the class attribute `gname` as seen through its class NAME (or a
-    `cls.` read): the plain global, or the CURRENT execution's cell. A cell is
-    loaded into a temp first, because GIMPLE takes no `*global`."""
-    if _cattr_cell_type(gen, gname) is None:
-        return gen._new_val(gtype, f'{gname}')
-    _p = gen._new_val(f'{gtype} *', f'{gname}')
-    return gen._new_val(gtype, f'*{_p}')
-
-
-def _cattr_cell_lvalue(gen, gname, gtype):
-    """C lvalue text for the CURRENT execution's cell of `gname`: `*<temp>`,
-    where the temp holds the cell pointer loaded from the global."""
-    _p = gen._new_val(f'{gtype} *', f'{gname}')
-    return f'*{_p}'
-
-
-def _cattr_restore_begin(gen, body) -> None:
-    """Save, on entry to a function body, the CURRENT cell pointer of every
-    per-execution cell that a `class` statement in `body` will repoint, and
-    record them on `gen._cattr_restores` for `_cattr_restore_fallthrough` and
-    `_cattr_restore_emit` to write back.
-
-    Why: a cell global is shared by every execution of its function, so a
-    nested or recursive call that runs the same `class` statement repoints it.
-    Without a restore, the caller's class-name reads and instance seeds reach
-    the callee's cell: `def f(v, d): class T: __version__ = v; if d > 0:
-    f(v + 1, d - 1); print(T.__version__)` printed `6` where CPython prints `5`.
-    Writing the saved pointer back on every exit makes the global follow the
-    execution that set it.
-
-    A body with no such class records nothing and emits nothing, so its C is
-    unchanged.
-
-    An exception that leaves the body without reaching a `return` is covered
-    by an unwind record: each saved cell is also pushed on the cleanup stack
-    (`mojo_cleanup_push_cattr`), and `mojo_raise`'s unwind writes it back when
-    the body is unwound, whichever function catches. `_cattr_leave` pops those
-    records on every normal exit. A `try` still restores its OWN function's
-    cells from its snapshot (`_cattr_snapshot`), since its handler does not
-    leave the function.
-    """
-    _found: list = []
-    gimple_exprtypes._gmi_nested_struct_defs(body, '', _found, False)
-    gen._cattr_restores = []
-    _seen: set = set()
-    for _i in range(len(_found)):
-        _sd = _found[_i][0]
-        _cattrs = gen._class_attrs.get(_sd.name)
-        if not _cattrs:
-            continue
-        for _f in (_sd.fields or []):
-            if isinstance(_f, gimple_ctypes.AssignStmt) \
-                    and isinstance(_f.target, gimple_ctypes.IdentExpr):
-                _aname = _f.target.name
-            elif isinstance(_f, gimple_ctypes.VarDecl) and _f.value is not None:
-                _aname = _f.name
-            else:
-                continue
-            if _aname not in _cattrs:
-                continue
-            _gname = _cattrs[_aname]
-            _ctype = _cattr_cell_type(gen, _gname)
-            if _ctype is None or _gname in _seen:
-                continue
-            _seen.add(_gname)
-            _saved = gen._new_val(f'{_ctype} *', f'{_gname}')
-            gen._cattr_restores.append([_gname, _saved])
-            # The unwind record: an exception that leaves this function
-            # without reaching a `return` writes `_saved` back during
-            # `mojo_raise`'s unwind (see fire_runtime.c's MOJO_CLEANUP_CATTR).
-            # Popped by `_cattr_leave` on every normal exit.
-            gen._emit(f"  mojo_cleanup_push_cattr ((void **) &{_gname}, (void *) {_saved});")
-
-
-def _cattr_snapshot(gen) -> list:
-    """`[gname, temp]` pairs holding the CURRENT pointer of every cell global
-    this function restores, taken where a `try` region begins. An exception
-    handler in that region writes these back: the function's own cell is the
-    one its `class` statement set, which is not the entry value (that is the
-    CALLER's cell, and is what a `return` restores)."""
-    _snap: list = []
-    for _i in range(len(gen._cattr_restores)):
-        _gname = gen._cattr_restores[_i][0]
-        _snap.append([_gname, gen._new_val(f'{_cattr_cell_type(gen, _gname)} *', _gname)])
-    return _snap
-
-
-def _cattr_restore_emit(gen, pairs=None) -> None:
-    """Write cell pointers back to their globals. `pairs` is a `_cattr_snapshot`
-    (an exception handler's region) or, by default, the entry values a `return`
-    restores. Called immediately before each `return`, after the returned value
-    is computed: a class-name read in the return expression has already been
-    loaded into a temp, so the restore cannot change what is returned."""
-    if pairs is None:
-        pairs = gen._cattr_restores
-    for _i in range(len(pairs)):
-        gen._emit(f'  {pairs[_i][0]} = {pairs[_i][1]};')
-
-
-def _cattr_leave(gen) -> None:
-    """Leave the function body by a `return`: write the entry cells back and
-    pop this body's unwind records (one per restored cell, pushed at entry by
-    `_cattr_restore_begin`). Called after the owned-local frees, which pop the
-    newer records above these."""
-    _cattr_restore_emit(gen)
-    if gen._cattr_restores:
-        gen._emit(f"  mojo_cleanup_cancel_n ({len(gen._cattr_restores)});")
-
-
-def _cattr_restore_fallthrough(gen, fn) -> None:
-    """`_cattr_leave` for a body that can fall off its end. Mirrors
-    `ginf.emit_fallthrough_frees`: an unreachable restore after a final
-    `return` would be dead C, so it is emitted only when the end is reachable."""
-    if ginf._function_has_reachable_fallthrough(fn):
-        _cattr_leave(gen)
-
-
-def _cattr_restore_end(gen) -> None:
-    """Forget the saved pointers once the function's body is fully emitted."""
-    gen._cattr_restores = []
-
-
-def _cattr_instance_read(gen, ov, ot, aname, gname, gtype):
-    """Value of class attribute `aname` read through an INSTANCE `ov` of struct
-    type `ot`, in CPython's lookup order: an attribute the instance itself holds
-    (an instance write `ov.aname = ...` lands in its dynamic storage) shadows the
-    class attribute, so the dynamic storage is probed first, under the nothrow
-    flag, and the class value is the default. The class value is the cell this
-    instance was built under (its hidden field), not the current one, which is
-    what keeps `a = make(5); b = make(7); a.attr` at 5. Falls back to the
-    current cell when `ov` is not a struct pointer, and skips the probe there
-    (no dynamic storage can be reached through a non-pointer word)."""
-    if not ot.endswith(' *') or _cattr_cell_type(gen, gname) is None:
-        _classval = _cattr_read(gen, gname, gtype)
-    else:
-        _field = gimple_ctypes._safe_field(gimple_ctypes.cattr_cell_field(aname))
-        _p = gen._new_val(f'{gtype} *', f'{ov}->{_field}')
-        _classval = gen._new_val(gtype, f'*{_p}')
-    if not ot.endswith(' *'):
-        return _classval
-    gen._emit("  _mojo_getattr_missed = 0;")
-    gen._emit("  _mojo_getattr_nothrow = 1;")
-    _vp = gen._new_val('void *', f'(void *){ov}')
-    _name = gen._new_val('char *', gen._intern_string(aname))
-    _raw = gen._call_expr('int64_t', '_mojo_dispatch_getattr',
-                          [('void *', _vp), ('char *', _name)])
-    gen._emit("  _mojo_getattr_nothrow = 0;")
-    _missed = gen._new_val('int', '_mojo_getattr_missed')
-    _cond = gen._new_val('_Bool', f'{_missed} != 0')
-    _hit = gen._new_val(gtype, f'({gtype}){_raw}')
-    return gen._new_val(gtype, f'{_cond} ? {_classval} : {_hit}')
-
-
-def _cattr_instance_dyn_read(gen, ov, ot, aname, gname, gtype):
-    """Value of class attribute `aname` read through an INSTANCE `ov`. An
-    instance attribute written on that object (`a.x = 9`) lives in the
-    dynamic storage and SHADOWS the class attribute, so the dynamic lookup
-    is consulted first; only a miss falls back to `_cattr_instance_read`.
-
-    The lookup runs under the `_mojo_getattr_nothrow` probe the 3-arg
-    `getattr` lowering uses, so a miss sets `_mojo_getattr_missed` and
-    selects the fallback instead of raising AttributeError (the bug this
-    replaces: `class A: x = 9` followed by `a.x` raised on every read).
-    The hit value comes back as the runtime's int64 word and is cast to the
-    class attribute's C type."""
-    _vp = gen._new_val('void *', f'(void *){ov}')
-    gen._emit("  _mojo_getattr_missed = 0;")
-    gen._emit("  _mojo_getattr_nothrow = 1;")
-    _r = gen._call_expr('int64_t', '_mojo_dispatch_getattr',
-                        [('void *', _vp), ('char *', gen._intern_string(aname))])
-    gen._emit("  _mojo_getattr_nothrow = 0;")
-    _missed = gen._new_val('int', '_mojo_getattr_missed')
-    _hit = gen._new_val('_Bool', f'{_missed} == 0')
-    t = gen._new_temp(gtype)
-    _bb_h = gen._new_bb(); _bb_m = gen._new_bb(); _bb_e = gen._new_bb()
-    gen._emit(f"  if ({_hit}) goto {_bb_h}; else goto {_bb_m};")
-    gen._emit_label(_bb_h)
-    gen._emit(f"  {t} = ({gtype}){_r};")
-    gen._emit(f"  goto {_bb_e};")
-    gen._emit_label(_bb_m)
-    _fb = _cattr_instance_read(gen, ov, ot, aname, gname, gtype)
-    gen._emit(f"  {t} = {_fb};")
-    gen._emit(f"  goto {_bb_e};")
-    gen._emit_label(_bb_e)
-    return gtype, t
 
 
 def _selfhost_sibling_member_kind(gen, module_name: str, method_name: str):
@@ -1483,7 +1260,7 @@ def _uncompiled_module_marker(gen, node) -> str:
     with a parser that is not a parser, silently, until the first attribute
     read off the result died with an `AttributeError` naming an attribute of a
     class the program never built
-    (DELETED commit 319ab932c).
+    (bugs/RUNTIME_argparse_is_stubbed_so_parse_args_consumers_crash.md).
 
     Keyed on `_module_alias_names`, NOT `imported_symbols`, for the reason that
     set's own docstring gives at length (an unresolved `from X import name`
@@ -2878,26 +2655,6 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             gen._elem_types[t] = 'char *'
             return 'MojoList *', t
 
-        # os.walk(top) / glob.glob(pat) / glob.iglob(pat): eager runtime
-        # helpers (mojo_os_walk / mojo_glob) returning a list. A walk is a
-        # list of (dirpath, dirnames, filenames) tuples; a glob a list[str].
-        if ((module_name == 'os' and method_name == 'walk')
-                or (module_name == 'glob' and method_name in ('glob', 'iglob'))) \
-                and len(node.args) == 1 and not node.kwargs:
-            arg_type, arg_val = gen.lower_expr(node.args[0])
-            if arg_type not in ('char *', 'void *'):
-                arg_cast = gen._new_temp('char *')
-                gen._emit(f'  {arg_cast} = (char *){arg_val};')
-                arg_val = arg_cast
-            _wsym = 'mojo_os_walk' if method_name == 'walk' else 'mojo_glob'
-            t = gen._call_expr('MojoList *', _wsym, [('char *', arg_val)])
-            if method_name == 'walk':
-                gen._elem_types[t] = 'MojoList *'
-                gen._tuple_slot_types[t] = ['char *', 'MojoList *', 'MojoList *']
-            else:
-                gen._elem_types[t] = 'char *'
-            return 'MojoList *', t
-
         # sysconfig.get_config_var(name) — real Python signature returns
         # `str | None` (the build-config value for `name`, e.g.
         # "BUILD_GNU_TYPE"/"BUILD_DIR"), never int. Not previously
@@ -3161,11 +2918,11 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # Narrow guard, deliberately conservative: `module_name` must be
         # a REGISTERED import alias/marker (`_module_alias_names` —
         # covers both a bare `from . import SUBMODULE` marker and a
-        # plain `import SUBMODULE as alias`), any argument shape (keyword
-        # arguments included: they are forwarded to the bare-name call,
-        # which binds them exactly as the `from X import f` spelling does),
-        # and `method_name` must be independently confirmed — by actually
-        # reading and regex-scanning the target module's OWN source, never guessed
+        # plain `import SUBMODULE as alias`), no keyword arguments (this
+        # fallback, like the ast_rewriter/mlir/regex_compile cases
+        # above, forwards only positional args), and `method_name` must
+        # be independently confirmed — by actually reading and
+        # regex-scanning the target module's OWN source, never guessed
         # — to be a plain (non-generic, non-overloaded, no sibling
         # struct of the same name) top-level `def`/`fn`, so this never
         # misfires on a name meant for a completely different
@@ -3220,7 +2977,8 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         _mgc_is_selfhost = _is_selfhost_source_file(
             getattr(gen, '_current_filename', None))
         if (not _mgc_is_selfhost
-                and module_name in getattr(gen, '_module_alias_names', ())):
+                and module_name in getattr(gen, '_module_alias_names', ())
+                and not getattr(node, 'kwargs', None)):
             _mgc_info = gen.imported_symbols.get(module_name)
             _mgc_sub_ref = (_mgc_info.get('module')
                             if isinstance(_mgc_info, dict) else None) or module_name
@@ -3790,12 +3548,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # `arg_pairs`.
         _gm_kwargs = getattr(node, 'kwargs', []) or []
         _gm_expected = gen.func_param_types.get(f"{_gm_api['base']}_start", [])
-        # `*args` callee: pad the fixed slots (self included) up to its slot,
-        # then pack the positionals from there on -- see
-        # ggc._emit_generator_start_call, which this mirrors.
-        _gm_star = ggc._generator_star_slot(_gm_api, node)
-        _gm_nfixed = _gm_star if _gm_star is not None else len(_gm_expected)
-        if _gm_expected and len(all_args) < _gm_nfixed:
+        if _gm_expected and len(all_args) < len(_gm_expected):
             # Explicit loop, NOT `{kn: gen.lower_expr(ke) for kn, ke in
             # _gm_kwargs}` — the comprehension's tuple-unpacked key `kn`
             # erases to int64_t (the pointer-decimal key trap) and the
@@ -3805,7 +3558,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 _gm_kwarg_dict[_gmm_as_str(_gm_kn)] = gen.lower_expr(_gm_ke)
             _gm_kwarg_values = list(_gm_kwarg_dict.values())
             _gm_dflts = gen._func_param_defaults.get(f"{_gm_api['base']}_start", [])
-            while len(all_args) < _gm_nfixed:
+            while len(all_args) < len(_gm_expected):
                 if _gm_kwarg_values:
                     all_args.append(_gm_kwarg_values.pop(0))
                     continue
@@ -3820,7 +3573,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 # step with 0 instead of 2).
                 _pos = len(all_args) - 1
                 _dv = gimple_exprtypes._trailing_default_at(
-                    _gm_dflts, _gm_nfixed - 1, _pos)
+                    _gm_dflts, len(_gm_expected) - 1, _pos)
                 if _dv is not None:
                     all_args.append(ggc._default_expr_to_pair(gen, _dv))
                 else:
@@ -3828,8 +3581,6 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         else:
             for _, _ke in _gm_kwargs:
                 gen.lower_expr(_ke)
-        if _gm_star is not None:
-            all_args = ggc._pack_generator_star_args(gen, all_args, _gm_star)
         t = gen._call_expr('MojoGenerator *', f"{_gm_api['base']}_start", all_args)
         gen._generator_var_api[t] = _gm_api
         return 'MojoGenerator *', t
@@ -3844,7 +3595,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # struct (or a local base up its MRO) defines its own override, in
     # which case ordinary struct-method dispatch below wins. Counter /
     # OrderedDict / defaultdict use these heavily. See
-    # bug:COMPILE_FAIL_collections___init__ (3-arg type() refusal; feature open). Checked here, right after
+    # bugs/COMPILE_FAIL_collections___init__.md. Checked here, right after
     # `ot` has been resolved to the receiver's real struct-pointer type
     # and BEFORE every generic fallback (opaque-int coerce, the
     # `_sn not in func_return_types` mojo_obj_call1 stub, struct-method
@@ -4230,7 +3981,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # DESIGN.html R2's chokepoint refusal ("incompatible container
     # kinds"). Runtime-dispatch via the kind registries instead, exactly
     # like the 'clear'/'remove' ambiguity fix above (DESIGN.html R5). See
-    # commit e8a7135b8 Finding 4.
+    # bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md Finding 4.
     if ot in ('int', 'int64_t') and not _get_float_timeout and method == 'update' and node.args:
         ip = gen._new_temp('int64_t')
         ov_local = gen._ensure_local(ot, ov)
@@ -5950,7 +5701,7 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
     else:
         cstr_ov = ov
     if method == '__len__':
-        return 'int64_t', gen._new_val('int64_t', f'mojo_str_codepoint_len ({cstr_ov})')
+        return 'int64_t', gen._new_val('int64_t', f'mojo_strlen ({cstr_ov})')
     if method == 'hex':
         # `str` has NO `hex` in Python — `'abc'.hex()` is an AttributeError.
         # This compiler had a `mojo_hex` for it (an INTEGER formatter, used
@@ -6046,9 +5797,6 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
     # window call site still gets the 2-argument helper, so nothing that does
     # not pass a window changes shape.
     if method in ('startswith', 'endswith') and arg_vals:
-        # The runtime answers an int; Python answers a bool, and so does
-        # `exprtypes` for this call. Declaring the raw int here made
-        # `print(f.startswith("x"))` on a word receiver print `1`.
         is_start = method == 'startswith'
         arg0_type = arg_pairs[0][0] if arg_pairs else 'char *'
         arg0_val = arg_vals[0]
@@ -6058,21 +5806,21 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
             # mojo_str_startswith_word.
             fn = 'mojo_str_startswith_word' if is_start else 'mojo_str_endswith_word'
             _pw = gen._to_int64(arg0_type, arg0_val)
-            t = gen._call_expr('int', fn, [('char *', cstr_ov), ('int64_t', _pw)])
-        elif full_window and arg0_type == 'char':
-            fn = 'mojo_str_startswith_char' if is_start else 'mojo_str_endswith_char'
-            t = gen._new_temp('int')
-            gen._emit_call('int', t, fn, [('char *', cstr_ov), ('char', arg0_val)])
-        elif full_window:
+            return 'int', gen._call_expr('int', fn, [('char *', cstr_ov), ('int64_t', _pw)])
+        if full_window:
+            if arg0_type == 'char':
+                fn = 'mojo_str_startswith_char' if is_start else 'mojo_str_endswith_char'
+                t = gen._new_temp('int')
+                gen._emit_call('int', t, fn, [('char *', cstr_ov), ('char', arg0_val)])
+                return 'int', t
             fn = 'mojo_str_startswith' if is_start else 'mojo_str_endswith'
-            t = gen._call_expr('int', fn, [('char *', cstr_ov), (arg0_type, arg0_val)])
-        else:
-            fn = 'mojo_str_startswith_from' if is_start else 'mojo_str_endswith_from'
-            ntype, nval = _cstr_needle(gen, arg0_type, arg0_val)
-            t = gen._call_expr('int', fn, [
-                ('char *', cstr_ov), (ntype, nval),
-                ('int64_t', st), ('int64_t', sp)])
-        return '_Bool', gen._new_val('_Bool', f'{t} != 0')
+            return 'int', gen._call_expr('int', fn,
+                                         [('char *', cstr_ov), (arg0_type, arg0_val)])
+        fn = 'mojo_str_startswith_from' if is_start else 'mojo_str_endswith_from'
+        ntype, nval = _cstr_needle(gen, arg0_type, arg0_val)
+        return 'int', gen._call_expr('int', fn, [
+            ('char *', cstr_ov), (ntype, nval),
+            ('int64_t', st), ('int64_t', sp)])
     if method in ('find', 'index', 'rfind', 'rindex', 'count') and arg_vals:
         # index/rindex are find/rfind with ValueError instead of -1 on a miss,
         # which nothing in this tree relies on (see rindex's note below), so

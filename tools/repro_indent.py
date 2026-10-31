@@ -2,7 +2,6 @@
 """Repro: Unexpected INDENT('') in monomorphized Coord / UnsafeUnion / Variant."""
 import os
 import sys
-import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -36,13 +35,8 @@ for rel, name, targs in CASES:
         continue
     print(f'  mangled: {mangled}')
     print(f'  concrete lines: {len(concrete.splitlines())}')
-    # Private scratch directory, not a shared /tmp path: two runs must not hand
-    # each other's monomorphized bytes (the guard in test_formal_sweep_truth.py
-    # pins this). Print where it went — the point of writing it is to read it.
-    out = os.path.join(tempfile.mkdtemp(prefix="mono_"), name + '.mojo')
-    with open(out, 'w') as f:
+    with open('/tmp/mono_' + name + '.mojo', 'w') as f:
         f.write(concrete)
-    print(f'  wrote {out}')
     try:
         Parser(py_tokenize(concrete)).parse_module()
         print('  PARSE: OK')

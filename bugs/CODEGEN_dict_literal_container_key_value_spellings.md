@@ -67,9 +67,7 @@ with the generated C in hand:
    is a key before it is built, which it does not; the second puts a row in
    `_reg_kinds` per list, and that table is never pruned except on
    `mojo_list_destroy`, so its cost has to be measured against
-   the content-keyed-tuple-key memory ceiling (the leak-hunt fixes
-   already in the tree: per-element kinds on the content key)
-   before it lands.
+   `bugs/PERF_selfhost_memory_leak_hunt.md` before it lands.
 2. **For (1): key the dict's value-type record on the SOURCE-LEVEL name when the
    receiver is an `IdentExpr`.** Both sides already have it — `_lower_subscript`
    is handed `node.value`, and `_gen_stmt_AssignStmt`'s subscript arm is too —

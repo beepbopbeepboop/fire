@@ -170,7 +170,8 @@ _PROBE_SRC = 'int mojo_probe(void) { return 0; }\n'
 _driver_probe: dict = {}
 
 
-class _StagingDir:
+@contextlib.contextmanager
+def _staging_dir(prefix: str):
     """A `tempfile.mkdtemp` directory removed on the way out, success or raise.
 
     `ignore_errors=True` is deliberate: the failure worth raising is the
@@ -181,16 +182,11 @@ class _StagingDir:
     missing, which leaked a `mojostdlib_*` directory. One reader of the shape
     is what keeps the next staging site from being the one that forgets.
     `formal/build.py::_publish_signed_image` is the same shape."""
-
-    def __init__(self, prefix: str) -> None:
-        self.d = tempfile.mkdtemp(prefix=prefix)
-
-    def __enter__(self) -> str:
-        return self.d
-
-    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
-        shutil.rmtree(self.d, ignore_errors=True)
-        return False
+    d = tempfile.mkdtemp(prefix=prefix)
+    try:
+        yield d
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def _driver_targets(driver: str, arch: str) -> tuple:
@@ -204,7 +200,7 @@ def _driver_targets(driver: str, arch: str) -> tuple:
         # is read and then nothing needs the directory, so it is removed here or
         # it leaks one dir per probed (driver, arch) — the same class of leak
         # `runtime_dylib` had, in the same file.
-        with _StagingDir('mojo_archprobe_') as wd:
+        with _staging_dir('mojo_archprobe_') as wd:
             src = os.path.join(wd, 'probe.c')
             out = os.path.join(wd, 'probe.o')
             with open(src, 'w') as f:
@@ -676,34 +672,17 @@ def _local_dep_fingerprint(path: str, dep_src_by_key: dict) -> str:
     return '\n'.join(f"{k}={seen[k]}" for k in sorted(seen))
 
 
-def _defined_symbols(gcc: str, obj: str, *, include_weak: bool = False) -> set:
+def _defined_symbols(gcc: str, obj: str) -> set:
     """External symbols *defined* (not undefined) by an object file, via nm.
-
-    By default a WEAK definition is left out: it is the clash check's question
-    ("which names would collide if this module joined the dylib?"), and a weak
-    definition is merged by the linker rather than colliding. Questions about
-    what the object SURFACES — the runtime's export table, or whether a header
-    declaration has a definition — pass `include_weak=True`, because a weak
-    definition is a real, callable, exported symbol (`input` in fire_runtime.c
-    is one: the stdlib's own `input` overrides it, but the runtime still defines
-    it for everyone who does not)."""
+    Used to drop modules whose symbols collide with an already-included one."""
     nm = 'nm'  # llvm/bsd nm on the PATH; gcc toolchains ship a compatible one
     try:
-        # -m names a Mach-O weak definition as "weak external"; plain nm reports it as an ordinary `T`.
-        out = subprocess.run([nm, '-g', '-m', obj], capture_output=True, text=True).stdout
+        out = subprocess.run([nm, '-g', obj], capture_output=True, text=True).stdout
     except Exception:
         return set()
     syms = set()
     for line in out.splitlines():
-        if 'weak' in line and not include_weak:
-            # A WEAK definition is merged by the linker, not a clash: every module that carries the same weak
-            # copy (the empty GPU sidecar's introspection stubs, in ~every stdlib module) links fine.
-            continue
         parts = line.split()
-        # -m lines: "<addr> (<section>) external <name>"; plain: "<addr> <TYPE> <name>".
-        if 'external' in parts and len(parts) >= 3:
-            syms.add(parts[-1])
-            continue
         # Defined external: "<addr> <TYPE> <name>"; undefined: "<TYPE=U> <name>".
         # Uppercase type letter (T/D/S/B/C/I/R) = external & defined.
         if len(parts) >= 3 and parts[1] in ('T', 'D', 'S', 'B', 'C', 'I', 'R'):
@@ -986,7 +965,7 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
     # 664 modules plus the runtime and the reflection table, so tens to hundreds
     # of MB), created unconditionally even on a cache hit, and leaked per cold
     # CAS before this.
-    with _StagingDir('mojostdlib_') as workdir:
+    with _staging_dir('mojostdlib_') as workdir:
         objs = []
 
         # BUG-2026-029 cross-file follow-up: a cheap, source-text-only pre-pass
@@ -1094,13 +1073,12 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
                 if edited:
                     ofile = edited
                     defs = defs - clash   # clashing syms no longer exported here
-                    # routine (not an error): the dedup log, not the screen
-                    with open(os.environ.get('MOJO_DEDUP_LOG') or os.path.join(workdir, 'dedup.log'), 'a') as _dl:
-                        _dl.write(f"localize {len(clash)} dup symbol(s) in {name} (e.g. {sorted(clash)[0]})\n")
+                    print(f"  localize {len(clash)} dup symbol(s) in {name} "
+                          f"(e.g. {sorted(clash)[0]})", file=sys.stderr)
                 else:
                     one = sorted(clash)[0]
-                    with open(os.environ.get('MOJO_DEDUP_LOG') or os.path.join(workdir, 'dedup.log'), 'a') as _dl:
-                        _dl.write(f"exclude {name} from dylib: symbol already defined ({one})\n")
+                    print(f"  exclude {name} from dylib: symbol already defined ({one})",
+                          file=sys.stderr)
                     excluded += 1
                     continue
             seen_syms |= defs
@@ -1185,7 +1163,7 @@ def build(modules: list, out: str, use_cache: bool = True, link_runtime: bool = 
         # dylib that can't even be loaded.
         all_defs = set()
         for o in objs:
-            all_defs |= _defined_symbols(gcc, o, include_weak=True)
+            all_defs |= _defined_symbols(gcc, o)
         _kept = []
         _misresolved, _undefined = [], []
         for e in all_exports:
@@ -1454,7 +1432,7 @@ def runtime_dylib(gcc: str = None, flags: tuple = (), arch: str = None) -> str:
     # `_staging_dir` is the model `formal/build.py::_publish_signed_image` uses:
     # stage, publish, and remove the staging DIRECTORY so a killed build leaves
     # no debris for a later glob to mistake for a library.
-    with _StagingDir('mojo_rt_') as wd:
+    with _staging_dir('mojo_rt_') as wd:
         objs = []
         for src, lang, unit_flags in units:
             stem = os.path.splitext(os.path.basename(src))[0]
@@ -1532,7 +1510,7 @@ def runtime_export_entries(gcc: str, objs: list) -> tuple:
         `_X`, and `reflect.export_csym` resolved the entry to some OTHER
         symbol. Nothing is missing; the shared export-csym rule is computing
         a Mojo overload-mangled name for a C prototype. This is a real,
-        currently-live defect measured on this tree: of `fire_runtime.h`'s 623
+        currently-live defect measured on this tree: of `fire_runtime.h`'s 610
         entry points, only a handful survive `build_stdlib()`'s `nm`
         cross-check, and the rest are dropped for exactly this reason. So the
         stdlib dylib has never advertised most of the runtime entry points it
@@ -1565,7 +1543,7 @@ def runtime_export_entries(gcc: str, objs: list) -> tuple:
             exports.append(e)
     defined = set()
     for o in objs:
-        defined |= _defined_symbols(gcc, o, include_weak=True)
+        defined |= _defined_symbols(gcc, o)
     kept = []
     misresolved, undefined = [], []
     for e in exports:
