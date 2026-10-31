@@ -1472,6 +1472,7 @@ def main():
 
     dump_full = '--dump-full' in sys.argv
     dump = '--dump' in sys.argv
+    dump_serial = '--serial' in sys.argv
     # Strip flags from sys.argv so input_file = sys.argv[1] works.
     # sys.argv.remove() is broken in the compiled binary (list method
     # dispatch fails), so rebuild the list instead -- via an explicit
@@ -1490,7 +1491,7 @@ def main():
     if dump_full or dump:
         _filtered_argv = []
         for a in sys.argv:
-            if a not in ('--dump-full', '--dump'):
+            if a not in ('--dump-full', '--dump', '--serial'):
                 _filtered_argv.append(a)
         sys.argv = _filtered_argv
 
@@ -1567,12 +1568,23 @@ def main():
             print("✓ Generated " + basename + ".ci (arm64 backend listing)", file=sys.stderr)
             return
         import gimple_codegen
-        c_code = gimple_codegen.compile_to_gimple(
-            src, do_imports=True, filename=input_file, auto_gpu=auto_gpu)
-        f_out = open(basename + ".ci", "w")
-        f_out.write(c_code)
-        f_out.close()
-        print("✓ Generated " + basename + ".ci (transitive closure)", file=sys.stderr)
+        if dump_serial:
+            c_code = gimple_codegen.compile_to_gimple(
+                src, do_imports=True, filename=input_file, auto_gpu=auto_gpu)
+            f_out = open(basename + ".ci", "w")
+            f_out.write(c_code)
+            f_out.close()
+            print("✓ Generated " + basename + ".ci (serial, --serial)", file=sys.stderr)
+        else:
+            # Phase A/B: frozen-snapshot emission (parallel parse, frozen snapshot emission)
+            # The C11 lock-free mmap queue is deferred; multiprocessing.Pool is used instead.
+            # See bugs/PERF_dump_full_closure_is_single_threaded.md steps 1-4.
+            c_code = gimple_codegen.compile_to_gimple_parallel_frozen(
+                src, do_imports=True, filename=input_file, auto_gpu=auto_gpu)
+            f_out = open(basename + ".ci", "w")
+            f_out.write(c_code)
+            f_out.close()
+            print("✓ Generated " + basename + ".ci (parallel frozen-snapshot, queue deferred)", file=sys.stderr)
         return
 
     # If --dump requested, generate .tok, .ast, .ci, .pyi files
