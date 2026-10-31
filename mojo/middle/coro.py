@@ -986,6 +986,10 @@ def _tagged_consumers_ok(name: str) -> bool:
                 for_iters.add(id(n.args[0]))
             elif isinstance(n, N.Generator) and _is_gcall(n.iterable):
                 for_iters.add(id(n.iterable))
+            elif isinstance(n, N.YieldFromExpr) and _is_gcall(n.value):
+                # `yield from g()` forwards the words; the delegating generator
+                # is itself tagged (its delegated kind is 'w')
+                for_iters.add(id(n.value))
             if isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr) \
                     and n.func.name == name:
                 refs.append(id(n))
@@ -1092,9 +1096,12 @@ def _generator_value_kind(fn: N.FunctionDef,
     # yield has a known kind (a hole stays a refusal, above) and the kinds are
     # not just the int/bool pair the DECISION below already widens.
     _tag_kinds = kinds - {None}
-    if (None not in kinds and len(_tag_kinds) >= 2 and _tag_kinds <= {'i', 'p', 'd', 'b'}
-            and _tag_kinds != {'i', 'b'}
-            and not any(isinstance(x, N.YieldFromExpr) for x in _walk(fn))
+    if (None not in kinds
+            and (_tag_kinds <= {'i', 'p', 'd', 'b', 'w'})
+            and ('w' in _tag_kinds or (len(_tag_kinds) >= 2 and _tag_kinds != {'i', 'b'}))
+            and not any(isinstance(x, N.YieldFromExpr) and delegated is not None
+                        and delegated(x.value, fn) in ('d', 'b')
+                        for x in _walk(fn))
             and _tagged_consumers_ok(fn.name)):
         return 'w', ''
     if 'd' in kinds and (kinds - {'d', None}):

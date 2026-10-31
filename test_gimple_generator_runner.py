@@ -1683,23 +1683,33 @@ def gen():
     # (`_register_generator_value_kinds`) and folded into the agreement check:
     # without it, `yield from <int sub>` + `yield "a"` SEGFAULTED and
     # `yield from <str sub>` + `yield 1` printed a raw address.
-    test_generator_refused("generator_mixed_yield_kinds_yield_from_int_str", """\
+    test_generator_stdout("generator_mixed_yield_kinds_yield_from_int_str", """\
 def sub():
     yield 1
 
 def gen():
     yield from sub()
     yield "a"
-""", "all values must agree on one scalar type")
 
-    test_generator_refused("generator_mixed_yield_kinds_yield_from_str_int", """\
+def main():
+    for v in gen():
+        print(v)
+main()
+""", "1\na\n")
+
+    test_generator_stdout("generator_mixed_yield_kinds_yield_from_str_int", """\
 def sub():
     yield "s"
 
 def gen():
     yield from sub()
     yield 1
-""", "all values must agree on one scalar type")
+
+def main():
+    for v in gen():
+        print(v)
+main()
+""", "s\n1\n")
 
     # …and a delegation whose kind AGREES must still compile in both
     # directions, so the check cannot be satisfied by refusing every
@@ -7065,6 +7075,28 @@ def main():
 
 main()
 """, "['a', 1, 2.5, True]\n4\n<a>\n<1>\n<2.5>\n<True>\na\n2.5\n['a', 1, 2.5, True]\n")
+
+    # `yield from` of a tagged-word generator forwards its words: the delegating
+    # generator is tagged too (a bool of its own, the delegate's str / int /
+    # float, a str), and `list(outer())` carries each element's kind.
+    test_generator_stdout("generator_yield_from_a_tagged_word_generator", """\
+def inner():
+    yield "a"
+    yield 1
+    yield 2.5
+
+def outer():
+    yield True
+    yield from inner()
+    yield "z"
+
+def main():
+    for v in outer():
+        print(v)
+    print(list(outer()))
+
+main()
+""", "True\na\n1\n2.5\nz\n[True, 'a', 1, 2.5, 'z']\n")
 
     # ...but any consumer that is NOT a for / list / comprehension (here `next`
     # of a bound handle) would read the box's address as an int, so the
