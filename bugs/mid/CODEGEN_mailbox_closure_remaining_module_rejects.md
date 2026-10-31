@@ -20,6 +20,15 @@ lines, in the order the probe printed them:
 
 (The probe was stopped after these; later modules were not reached.)
 
+## Update (2026-10-31, later)
+
+- Rows 2-3 of the table (`functools`, `encodings/_win_cp_codecs`) are the existing
+  `bugs/CODEGEN_nested_class_method_cannot_reach_an_enclosing_local.md`; do not duplicate the work here.
+- `reprlib.py` compiles standalone on master (`compile_to_gimple` OK) and its module-scope
+  `repr = aRepr.repr` now lowers correctly (two silent miscompiles found and fixed on the way: a module-scope
+  binding of a builtin name was ignored, and a module-scope bound-method global lost its return type). The
+  "2 overloads" refusal is therefore closure-contextual: re-run the probe to see whether it still fires.
+
 ## Next step
 
 One fix per row, each with its own quick test against CPython output:
