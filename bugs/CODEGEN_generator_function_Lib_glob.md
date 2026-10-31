@@ -1,5 +1,35 @@
 # CODEGEN_generator_function: Lib/glob.py
 
+## Status (2026-10-31, round 2 — the tagged yield now exists on BOTH paths; glob needs the tag on PARAMETERS and on delegation)
+
+Landed since the entry below: the tagged-word yield on the C++20-coroutine path
+(`cpp_async._cpp_tag_yield_sites`: every `co_yield` carries a `/*Y:<kind>*/`
+marker; when the stack-switch kind analysis says the kinds are all known and
+different, the sites are boxed by it — and never when a yield is a hole, since
+the cpp typer reads an unresolved name as int64_t). Also `mojo_list_append_word`
+and box-aware drain/`next`/comprehension plumbing (the consumer whitelist is still
+`for`-loops only: a tagged list's static repr reads ints).
+
+Measured on `glob.py` after it, the refusals are the same three, and the reasons
+are now precise:
+
+1. `_iglob`: `yield pathname` where `pathname` is a PARAMETER whose call sites
+   pass str here, bytes there, an unresolved `os.fspath(...)` elsewhere. A
+   parameter that is a DYNAMIC WORD (the project's `_dyn_word_locals` concept:
+   `object`-annotated params already are) does not need boxing to be yielded —
+   its word is already self-describing (str vs bytes by the runtime registries).
+   Next: let `_ambiguous_yielded_params` classify such a parameter as a dyn-word
+   and a yield of one as a tagged-word site that passes through unboxed.
+2. `_glob2`: `yield pattern[:0]` + `yield from _rlistdir(...)`: delegation is
+   excluded from the tag (a `yield from` re-yields the sub-generator's own value
+   word, which is a word either way — it needs `_generator_value_kind`'s
+   `delegated` hook to answer 'w' for a tagged sub and the loop in
+   `_rewrite_stmts` to forward raw words).
+3. The three selector closures — escaping nested generators; unchanged.
+
+Tests when these land: `glob.glob('*.py')`, `glob.glob(b'*.py')`,
+`glob.glob('**/*', recursive=True, root_dir=<tmp>)` against CPython.
+
 ## Status (2026-10-31 — the TAGGED yield landed on the stack-switch path; glob's refusals are unchanged, and the list of what still stands between them and it is exact)
 
 Landed (pinned by `generator_mixed_kind_yields_are_a_tagged_word`): yields of KNOWN,
