@@ -17,8 +17,17 @@ the way the export scan types it. A cross-module compile that reaches this
 arm with the api known is NOT yet reproducible: an imported generator global's
 store is not recorded in the importer's gen (see the bug doc's Status).
 """
+import contextlib
+import io
+import os
+import sys
+
 import gimple_codegen
 from fire_compiler import IdentExpr
+from mojo.backend_gimple import emit_exprs
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tools'))
+import probe_coro_close_refusal
 
 
 def _lower_read(api, poisoned, acc_ctype='void *'):
@@ -50,8 +59,28 @@ def test_poisoned_name_does_not_carry_generator_api():
     assert ctype == 'void *', f"poisoned name {temp} retyped as {ctype}"
 
 
+def test_probe_observes_read_without_changing_it():
+    # tools/probe_coro_close_refusal.py wraps _lower_IdentExpr for the
+    # refusal investigation. Its wrapper must return exactly what the real
+    # arm returned (same ctype, same carried api) and report the read.
+    api = ('sentinel-generator-api',)
+    real = emit_exprs._lower_IdentExpr
+    probe_coro_close_refusal._install('_coro')
+    try:
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            ctype, temp, carried = _lower_read(api, poisoned=False)
+    finally:
+        emit_exprs._lower_IdentExpr = real
+    assert (ctype, carried) == ('MojoGenerator *', api), (ctype, carried)
+    line = err.getvalue()
+    assert line.startswith('PROBE '), f"no probe line: {line!r}"
+    assert f"temp={temp} " in line and "poisoned=False" in line, line
+
+
 if __name__ == '__main__':
     test_accessor_read_carries_generator_api()
     test_accessor_read_of_generator_is_typed_as_generator()
     test_poisoned_name_does_not_carry_generator_api()
+    test_probe_observes_read_without_changing_it()
     print("PASS: accessor-read generator api carry")
