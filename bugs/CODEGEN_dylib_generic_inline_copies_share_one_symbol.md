@@ -56,6 +56,36 @@ Next round can start on step 1 once A is confirmed.
 Separately found while scoping: a bare call to a generic function binds the weak stub in link mode (fixed by
 `test_same_module_call_to_generic_with_default_binds_instantiation`, the defaulted-bracket-parameter inference).
 
+### 2026-10-30 Option A step 1 narrowed to type parameters (landed; gate repair)
+
+The elaboration seed's "materialize every generic function instantiation" change (`b06f14cbe`) turned the
+landing gate red on master: `stdlib-syntax` (`std/math/math.mojo`, `std/_gpu/_utils.mojo`, the
+`case .PASS:` / `comptime __match` refusal) and `std/collections/list.mojo` (`'NoneType' ... 'startswith'`),
+plus the test/benchmark files that import them. Measured root cause, three parts, all now fixed in
+`mojo/backend_gimple/elab_intu.py`:
+
+- **Value arguments were instantiated.** `check_bounds`' `cpu_default: Bool` was bound to the literal `'0'`,
+  `call_location`'s `inline_count` the same way, and `_get_llvm_struct_fields[n, dtype]` / `_get_buffer_...[bytes]`
+  were bound to the caller's own parameters. A value parameter's body still holds a `comptime __match` /
+  `comptime if` over the value, which cannot fold after substitution. `_fn_args_are_types` now admits a
+  function root only when every bound parameter is a TYPE parameter (its annotation is a trait: builtin
+  `_BUILTIN_TRAITS`, or a `trait X:` in the template's module). Value parameters stay on the `.o` route.
+- **Caller-bound names were instantiated.** `_concrete_args` refuses a bracket argument the enclosing function
+  binds (`_bound_in_scope`, fed by `_walk_scoped` in the seed, which replaces `_walk`).
+- **Refused instantiations left a None callee.** `_Work.enqueue` reserves the alias as None; a refused
+  `Pointer[...]` then made `_rewrite_ctor_calls` write `IdentExpr(name=None)`. Every alias consumer now reads
+  through `_live_aliases`.
+
+Verified (narrow, per named file, `compile_stdlib`'s `transpile_file` = codegen + gcc -fsyntax-only): all
+eleven gate files PASS, plus `--module math|collections|_gpu|testing` with 0 failures. `test_link_mode.py`'s
+`test_two_modules_specialize_one_generic_differently` and `..._binds_instantiation` both PASS (14-16 s each).
+Checked on a worktree at current master with this change applied, since this branch's base lacks master's
+`runtime/fire_async_runtime.cpp` `<cstdio>` fix. NOT verified: `build_stdlib_dylib.py` (the `exclude`
+count and whether `_dlsym` copies now get unique names were not measured), `make gate`, self-host.
+
+Still open: the dylib dedup, Option A steps 2-4 above. Only type-parameter instantiations are materialized
+by this change; value-parameter generics stay on the `.o` route, which is what made the gate red.
+
 ### 2026-10-30 partial fix (landed; the dylib part is still open)
 
 **What landed.** The repro `test_two_modules_specialize_one_generic_differently` was not a shared-symbol

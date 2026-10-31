@@ -2,7 +2,6 @@
 
 ## Status 2026-10-30 — six reds, five fixed, one remains
 
-<<<<<<< HEAD
 Reproduces alone (not load): `python3 test_gimple_runner.py`. The reds were SIX,
 not five, and they were not one bug:
 
@@ -54,11 +53,6 @@ that case is fixed or is registered as a known failure with its doc, which is a
 Found while merging, not fixed here, and not a gimplerunner case:
 `b = a[:]` of a kind-mixed list reads its int slot as a double.
 See `bugs/CODEGEN_list_slice_of_mixed_list_reads_slot_as_bits.md`.
-||||||| parent of a98f133ed (CODEGEN: mixed-kind list literals and copies keep each slot's kind (gimplerunner))
-OPEN. Found in the full `make gate` run on the `get_sign` String-argument fix (`974d0e538`, landed 2026-10-28 with the gate red). The failure is not confirmed to come from that fix: `mojoc` is red on master as well (see `bugs/CODEGEN_imported_function_default_argument_dropped_at_call.md`), and the other jobs are not compared against master yet.
-=======
-PARTIAL (2026-10-29, branch work/fix-gate-gimplerunner). Reproduced alone (not load): `python3 test_gimple_runner.py` gives `477 passed, 4 failed` on the pre-fix tree. The four failures are the cases in `bugs/CODEGEN_mixed_kind_struct_and_list_reads_red_on_head.md`. Three are fixed in this round; the fourth (`gimple_ctor_param_polymorphic_slot_reads_receiver`) is the method-receiver bug in `bugs/CODEGEN_unresolved_method_receiver_returns_its_own_pointer.md`, which is owned by another worker. The `gimplerunner` job stays red until that lands.
->>>>>>> a98f133ed (CODEGEN: mixed-kind list literals and copies keep each slot's kind (gimplerunner))
 
 ## Gate output (first lines)
 
