@@ -3161,11 +3161,11 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # Narrow guard, deliberately conservative: `module_name` must be
         # a REGISTERED import alias/marker (`_module_alias_names` —
         # covers both a bare `from . import SUBMODULE` marker and a
-        # plain `import SUBMODULE as alias`), no keyword arguments (this
-        # fallback, like the ast_rewriter/mlir/regex_compile cases
-        # above, forwards only positional args), and `method_name` must
-        # be independently confirmed — by actually reading and
-        # regex-scanning the target module's OWN source, never guessed
+        # plain `import SUBMODULE as alias`), any argument shape (keyword
+        # arguments included: they are forwarded to the bare-name call,
+        # which binds them exactly as the `from X import f` spelling does),
+        # and `method_name` must be independently confirmed — by actually
+        # reading and regex-scanning the target module's OWN source, never guessed
         # — to be a plain (non-generic, non-overloaded, no sibling
         # struct of the same name) top-level `def`/`fn`, so this never
         # misfires on a name meant for a completely different
@@ -3220,8 +3220,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         _mgc_is_selfhost = _is_selfhost_source_file(
             getattr(gen, '_current_filename', None))
         if (not _mgc_is_selfhost
-                and module_name in getattr(gen, '_module_alias_names', ())
-                and not getattr(node, 'kwargs', None)):
+                and module_name in getattr(gen, '_module_alias_names', ())):
             _mgc_info = gen.imported_symbols.get(module_name)
             _mgc_sub_ref = (_mgc_info.get('module')
                             if isinstance(_mgc_info, dict) else None) or module_name

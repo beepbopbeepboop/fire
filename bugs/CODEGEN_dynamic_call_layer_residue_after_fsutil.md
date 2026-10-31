@@ -12,17 +12,29 @@ name, and `mojo_iter_word` drains a handle it started. Generators that are used
 as values, or that call one of their own parameters, are kept on the C++ path
 (`coro._eligible`).
 
-## 1. `mod.gen(..., kw=...)` through a module attribute
+## Status (2026-10-30)
+
+- **Item 1 FIXED** (`test_link_mode.py::test_bare_submodule_import_keyword_call`).
+  The module-alias fallback in `emit_methods._lower_method_call` carried a
+  `not node.kwargs` guard, so `mod.gen(..., kw=...)` / `mod.f(..., kw=...)`
+  fell through to the module-marker stub (`mojo_module_not_compiled`). The
+  fallback already forwards kwargs into the bare-name call, so the guard was
+  the defect; removed. Measured before/after: test FAIL (rc=1, no output) ->
+  PASS (`0 10 20 30 15`, CPython-identical).
+- **Item 2 NOT REPRODUCED in minimal form** on this tree:
+  `print(len(list(lib.counter(4))))` in a package prints `4` (CPython `4`).
+  Next step: reproduce with the real `c_common/fsutil.py` shape
+  (`len(list(fsutil.walk_tree("runtime")))`, a generator whose defaulted
+  parameters the call omits) before writing a fix.
+- Items 3, 4, 5: not yet started.
+
+## 1. (FIXED — see Status) `mod.gen(..., kw=...)` through a module attribute
 
     from c_common import fsutil
     for f in fsutil.walk_tree("runtime", suffix=".h"): ...
 
-compiles, then dies at run time with `NotImplementedError: c_common.fsutil.walk_tree:
-module 'c_common.fsutil' is not compiled into this binary`. The from-import
-spelling (`from c_common.fsutil import walk_tree`) and the positional
-module-attribute spelling (`fsutil.iter_files("runtime", ".h")`) both work. The
-module-method call path in `emit_methods.py` has no keyword-argument arm for a
-generator.
+compiled, then died at run time with `NotImplementedError: ... module
+'c_common.fsutil' is not compiled into this binary`. Fixed as above.
 
 ## 2. `list(mod.gen(...))`
 
