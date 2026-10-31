@@ -2537,6 +2537,45 @@ def _mojo_next(iterator, *default):
     return method(cls.interpreter, iterator)
 
 
+def _mojo_iterable(value):
+    """A value handed to one of Python's own iterable-consuming builtins.
+
+    Those builtins call `iter()` on the argument, which looks `__iter__` up
+    on the TYPE, so a `MojoInstance` with a Mojo `__iter__` was not iterable
+    to them (`list(c)` fell through to `__getitem__` and died with
+    `KeyError: 0`). Such a struct is handed over as the `_mojo_iter` generator
+    instead. Anything else is returned untouched, so builtins keep their
+    exact argument semantics for every other value."""
+    if isinstance(value, MojoInstance) and '__iter__' in value._mojo_class.methods:
+        return _mojo_iter(value)
+    return value
+
+
+# Builtins that iterate their first positional argument, identified by
+# `id()` because builtins live for the whole process and an `id` test never
+# hashes the callee (a Mojo value may be unhashable). `zip` iterates every
+# positional argument; `min`/`max` iterate only when given ONE argument —
+# `max(a, b)` compares values and must not turn a struct into a generator.
+_MOJO_ITER_FIRST_ARG = {id(list), id(tuple), id(set), id(frozenset), id(sum),
+                        id(sorted), id(enumerate), id(any), id(all)}
+_MOJO_ITER_ALL_ARGS = id(zip)
+_MOJO_ITER_ONE_ARG = {id(_mojo_min), id(_mojo_max)}
+
+
+def _mojo_builtin_args(func, args):
+    """`args` with any Mojo iterable struct passed to `func` replaced by its
+    `_mojo_iterable` form. Only the calls `invoke` routes here are touched."""
+    key = id(func)
+    if key == _MOJO_ITER_ALL_ARGS:
+        return tuple(_mojo_iterable(a) for a in args)
+    if key in _MOJO_ITER_ONE_ARG:
+        if len(args) != 1:
+            return args
+    elif key not in _MOJO_ITER_FIRST_ARG or not args:
+        return args
+    return (_mojo_iterable(args[0]),) + tuple(args[1:])
+
+
 class _MojoSIMD:
     """Stand-in for real Mojo's `SIMD[dtype, width]` vector type. No real
     vectorization/hardware backend here — just a fixed-width list of scalars
@@ -5901,6 +5940,7 @@ class Interpreter:
         (MojoCoroutine only) so plain generators are entirely unaffected."""
         if isinstance(func, (MojoFunction, MojoOverloadSet, _MojoBoundComptimeFunction)):
             return func(self, *args, **kwargs)
+        args = _mojo_builtin_args(func, args)
         tls = self._gen_tls
         if getattr(tls, 'is_coroutine', False):
             yield_fn = getattr(tls, 'yield_fn', None)

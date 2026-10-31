@@ -427,6 +427,15 @@ def main():
     for x in Counter(1, 4):
         print(x)
     print([x * 2 for x in Counter(1, 4)])
+    print(list(Counter(1, 4)))
+    print(tuple(Counter(1, 4)))
+    print(sum(Counter(1, 4)))
+    print(sorted(Counter(1, 4), reverse=True))
+    print(list(enumerate(Counter(1, 4))))
+    print(list(zip(Counter(1, 4), Counter(5, 9))))
+    print(max(Counter(1, 4)), min(Counter(1, 4)))
+    print(any(Counter(0, 3)), all(Counter(1, 4)))
+    print(max(3, 7))
 ''',
 }
 
