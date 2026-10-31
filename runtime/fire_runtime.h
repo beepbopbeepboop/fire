@@ -685,6 +685,7 @@ void mojo_gen_sig_register(void *start, void *resume, void *value, void *destroy
                            const char *const *names, int first_kwonly, const int64_t *defaults,
                            const unsigned char *has_default);
 MojoList *mojo_iter_gen_handle(int64_t w);
+int64_t mojo_gen_note(int64_t h, void *start);
 int64_t mojo_gen_default_word(void *start, int64_t idx);
 /* `x in <boxed container>`: resolves list/dict/set at runtime instead of
  * the old hardcoded-false fallback. See mojo_in_dispatch_str's definition. */

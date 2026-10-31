@@ -3243,6 +3243,7 @@ class GimpleGen:
         # mojo_fnptr_call_N / mojo_maybe_bound_call_N can tell it apart
         # from a bare function pointer at a dynamically-dispatched call.
         'mojo_vararg_fn_new':  ('MojoVarargFn *', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_gen_note':       ('int64_t', ['int64_t', 'void *']),
         'mojo_is_vararg_fn':   ('int', ['void *']),
         'mojo_vararg_call_0':  ('int64_t', ['void *', 'void *']),
         'mojo_vararg_call_1':  ('int64_t', ['void *', 'void *', 'int64_t']),

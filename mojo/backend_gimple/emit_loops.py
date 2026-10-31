@@ -1202,6 +1202,19 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                         gimple_ctypes._c_escape("object is not iterable")))])
                 gen._emit(f"  goto {bb_nonnum};")
                 gen._emit_label(bb_nonnum)
+                # A pointer-range word no registry claims may still be a
+                # GENERATOR HANDLE returned by a call through a function value
+                # (`for v in make(3)(4)`, `mojo_dyn_call` records the handle):
+                # drain it into the list its signature reads. Anything else
+                # answers NULL and keeps the unsupported-iterable abort.
+                bb_gen = gen._new_bb(); bb_nogen = gen._new_bb()
+                _gl = gen._call_expr('MojoList *', 'mojo_iter_gen_handle',
+                                     [('int64_t', it64)])
+                _gl64 = gen._to_int64('MojoList *', _gl)
+                _gz = gen._new_val('int64_t', '0')
+                _gnull = gen._new_val('_Bool', f'{_gl64} == {_gz}')
+                gen._emit(f"  if ({_gnull}) goto {bb_nogen}; else goto {bb_gen};")
+                gen._emit_label(bb_nogen)
                 gen._emit_unsupported_iter(it_type, node)
                 gen._emit(f"  goto {bb_after};")
                 # `for item in <x>.items():` — even when `x`'s type is
@@ -1264,6 +1277,32 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                                          [('MojoSet *', _for_set_ptr)])
                 gen._gen_for_list(var, _set_lp, node.body, share_var_with_sibling_arm=True)
                 gen._emit(f"  goto {bb_after};")
+                # The generator-handle arm is lowered LAST: the dict arm's
+                # `char *` declaration of the shared loop variable must stay
+                # the first one (first-decl-wins, see above), and a handle's
+                # list is read by the same slot accessor as the other arms.
+                gen._emit_label(bb_gen)
+                # What a drained handle yields is uniform (the signature's one
+                # value kind, recorded on the list), so ONE runtime kind probe
+                # picks the arm whose loop variable has the right C type: a
+                # string slot is a `char *`, anything else the int word. The body is lowered once per arm, which is the
+                # price of keeping each element a plain typed value.
+                _k0 = gen._call_expr('char', 'mojo_list_slot_kind',
+                                     [('MojoList *', _gl), ('int64_t', gen._new_val('int64_t', '0'))])
+                _kp = gen._new_val('char', "(char)'p'")
+                _isp = gen._new_val('_Bool', f'{_k0} == {_kp}')
+                bb_gp = gen._new_bb(); bb_gi = gen._new_bb()
+                gen._emit(f"  if ({_isp}) goto {bb_gp}; else goto {bb_gi};")
+                for _bb, _et in ((bb_gp, 'char *'), (bb_gi, 'int64_t')):
+                    gen._emit_label(_bb)
+                    _al = gen._new_val('MojoList *', _gl)
+                    gen._elem_types[_al] = _et
+                    # NOT a sibling-sharing arm: each sub-arm lowers the body
+                    # afresh and rebinds the loop variable to its own element
+                    # type (a retype mints a fresh C variable), which is the
+                    # only way a string and an int body can both be right.
+                    gen._gen_for_list(var, _al, node.body)
+                    gen._emit(f"  goto {bb_after};")
                 gen._emit_label(bb_after)
             else:
                 gimple_ctypes._debug_note('for loop dropped (unsupported iterable)', it_type)

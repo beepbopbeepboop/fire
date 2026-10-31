@@ -1890,6 +1890,7 @@ static MojoList *_gen_drain(void *h, MojoGenSig *sg)
     ((void (*)(void *))sg->destroy)(h);
     if (pending) { mojo_exc_pending_set(0); mojo_raise(); }
     if (sg->vkind == 3) mojo_list_set_kinds_uniform(out, 'p');
+    else if (sg->vkind == 0) mojo_list_set_kinds_uniform(out, 'i');
     else if (sg->vkind == 2) mojo_list_set_kinds_uniform(out, 'd');
     else if (sg->vkind == 4) mojo_list_set_kinds_uniform(out, 'l');
     return out;
@@ -1901,6 +1902,16 @@ int64_t mojo_gen_default_word(void *start, int64_t idx)
     MojoGenSig *sg = _gen_sig_lookup(start);
     if (!sg || idx < 0 || idx >= sg->np) return 0;
     return sg->defaults[idx];
+}
+/* Record `h` (a live handle from calling a compiled generator's `_start`
+ * directly) against the signature registered for `start`, so a `for` over the
+ * word it travels as can drain it (`mojo_iter_gen_handle`). The trampoline of
+ * an ESCAPING nested generator returns its handle through this. */
+int64_t mojo_gen_note(int64_t h, void *start)
+{
+    MojoGenSig *sg = _gen_sig_lookup(start);
+    if (sg && h) _gen_handle_put((void *)(intptr_t)h, sg);
+    return h;
 }
 MojoList *mojo_iter_gen_handle(int64_t w)
 {
@@ -9786,6 +9797,9 @@ MojoList *mojo_iter_word(int64_t v)
 
 MojoList *mojo_iter_boxed_list(int64_t v)
 {
+    /* A live generator handle returned by a call through a function value
+     * (`mojo_gen_note`) drains into the list its signature reads. */
+    { MojoList *g = mojo_iter_gen_handle(v); if (g) return g; }
     /* A type-erased bytes value iterates its bytes as ints 0-255
      * (CPython), the same element source the statically-typed
      * `MojoBytes *` arm of `_materialize_as_list` uses. Before this arm,

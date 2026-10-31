@@ -5209,6 +5209,105 @@ def _lower_callable_choices(stmts: list) -> None:
                 _rewrite_fn(m)
 
 
+def _lower_escaping_generators(stmts: list) -> None:
+    """A SYNC generator defined inside a plain function that reads the
+    function's parameters / locals AND escapes it as a value
+    (`def make(k): def gen(n): yield n * k; return gen`) is split in two, IN
+    PLACE:
+
+      * the generator itself moves to module level as `<outer>__<inner>__esc`
+        with the names it read as LEADING parameters (a by-value capture: only
+        taken when nothing rebinds the name after the `def`, which is exactly
+        when a snapshot equals Python's read-at-each-resume), so it is an
+        ordinary module generator the existing backends type and compile;
+      * the `def` stays where it was as an ordinary closure with the original
+        parameters, whose body starts the moved generator with the captured
+        values and returns its handle through `mojo_gen_note`, which records the
+        handle against the generator's registered signature. The closure is the
+        callable value (`return gen`), and a `for` over what a call through it
+        returns drains that handle (`mojo_iter_word`).
+
+    Left alone: a generator that never escapes (`_hoist_nested_sync_generator`
+    keeps it tight, called by name), one with decorators / keyword-only / star
+    parameters, one that assigns a `nonlocal`, and one reading a name another
+    nested def provides."""
+    from mojo.backend_gimple import cpp_async as _ca
+    moved = []
+    for outer in stmts:
+        if not (isinstance(outer, N.FunctionDef) and not getattr(outer, 'is_generator', False)
+                and not getattr(outer, 'is_async', False)):
+            continue
+        for ix, inner in enumerate(list(outer.body)):
+            if not (isinstance(inner, N.FunctionDef) and getattr(inner, 'is_generator', False)
+                    and not getattr(inner, 'is_async', False)):
+                continue
+            _starred = False
+            for _pn, _pa in inner.params:
+                if _pn.startswith('*'):
+                    _starred = True
+            if inner.decorators or inner.kwonly or _starred:
+                continue
+            if _only_called_in(outer, inner.name):
+                continue
+            if any(isinstance(n, N.NonlocalStmt) for n in _walk(inner)):
+                continue
+            # An f-string is one raw literal to the parser, so the names it
+            # interpolates are reads `_nested_async_free_vars` cannot see.
+            _fs = _ca._fstring_field_names(inner.body)
+            _own = set()
+            for _pn, _pa in inner.params:
+                _own.add(_pn)
+            _own |= gimple_ctypes._declared_vars_body(inner.body)
+            caps = sorted(_nested_async_free_vars(inner, outer)
+                          | ((_fs - _own) & _outer_all_locals(outer)))
+            if not caps:
+                continue
+            sibling_defs = {d.name for d in outer.body if isinstance(d, N.FunctionDef)}
+            if any(c in sibling_defs for c in caps):
+                continue
+            after = outer.body[ix + 1:]
+            rebound = False
+            for c in caps:
+                if any(c in _ca._binding_node_names(n) for n in gimple_exprtypes._walk_ast(after)):
+                    rebound = True
+            if rebound:
+                continue
+            orig = inner.name
+            base = f'{outer.name}__{orig}__esc'
+            ln, col = inner.line, getattr(inner, 'col', 0)
+            gen_def = inner
+            gen_def.name = base
+            tramp_params = list(inner.params)
+            gen_def.params = []
+            for c in caps:
+                gen_def.params.append((c, None))
+            gen_def.params.extend(tramp_params)
+            args = [N.IdentExpr(name=c, line=ln, col=col) for c in caps]
+            for pn, _pa in tramp_params:
+                args.append(N.IdentExpr(name=pn, line=ln, col=col))
+            call = N.CallExpr(func=N.IdentExpr(name=base, line=ln, col=col), args=args,
+                              line=ln, col=col)
+            note = N.CallExpr(func=N.IdentExpr(name='mojo_gen_note', line=ln, col=col),
+                              args=[call, N.IdentExpr(name='__esc_start', line=ln, col=col)],
+                              line=ln, col=col)
+            tramp = N.FunctionDef(
+                name=orig,
+                params=tramp_params,
+                return_type=None,
+                body=[N.AssignStmt(target=N.IdentExpr(name='__esc_start', line=ln, col=col),
+                                   value=N.IdentExpr(name=base, line=ln, col=col),
+                                   line=ln, col=col),
+                      N.ReturnStmt(value=note, line=ln, col=col)],
+                param_convs=dict(gen_def.param_convs),
+                param_has_default=dict(gen_def.param_has_default),
+                param_defaults=dict(gen_def.param_defaults),
+                line=ln, col=col)
+            outer.body[ix] = tramp
+            moved.append(gen_def)
+            _walk_ast_invalidate(outer)
+    stmts.extend(moved)
+
+
 def lower(stmts: list, closure_stmts=(),
           module_name: str | None = None) -> tuple[list, list]:
     """Returns (new_stmts, coro_meta). coro_meta entries are dicts:
@@ -5230,6 +5329,7 @@ def lower(stmts: list, closure_stmts=(),
     _STRUCT_NAMES.update(s.name for s in stmts if isinstance(s, N.StructDef))
     _lower_closing_withs(stmts)
     _lower_callable_choices(stmts)
+    _lower_escaping_generators(stmts)
     _scan_value_used_functions(stmts)
     if not enabled():
         # The C++ backend (`MOJO_CORO=cpp`, the escape hatch) lowers nested

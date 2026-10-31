@@ -2404,7 +2404,7 @@ def run_nested_generator_capture_tests():
     # The f-string case is the one that matters for c-analyzer's
     # `build_section`: `f'{name}:'` reads `name` even though the parser keeps
     # the f-string as one raw literal.
-    test_generator_refused("nested_generator_reads_enclosing_param_in_fstring_refused", """\
+    test_generator_stdout("nested_generator_reads_enclosing_param_in_fstring_escaping", """\
 def build_section(name: String, n: Int):
     def render():
         yield f'{name}:'
@@ -2417,17 +2417,22 @@ def main():
     render = build_section('x', 2)
     for x in render():
         print(x)
-""", "variable(s) n, name")
+""", "x:\nrow\nrow\n")
     # The plain local now boxes (see `..._captures_enclosing_plain_local`);
     # this generator ESCAPES as a value, which has no frame to hand the box
     # handle to, so the escape is what stays refused.
-    test_generator_refused("nested_generator_escaping_plain_local_refused", """\
+    test_generator_stdout("nested_generator_escaping_plain_local", """\
 def outer(n: Int):
     total = n * 2
     def g():
         yield total
     return g
-""", "variable(s) total")
+
+def main():
+    for v in outer(4)():
+        print(v)
+main()
+""", "8\n")
     # A nested generator that reads a `var` local or a parameter is hoisted
     # on the default (stack-switch) path with its enclosing binding boxed,
     # the same machinery as a nested async generator. The box handle is a
@@ -2504,13 +2509,18 @@ outer()
 """)
     # A nested generator that escapes as a value (returned, so later called
     # with no enclosing frame to supply its box handle) stays refused.
-    test_generator_refused("nested_generator_escaping_as_value_with_capture_refused", """\
+    test_generator_stdout("nested_generator_escaping_as_value_with_capture", """\
 def outer():
     var k = 5
     def g():
         yield k
     return g
-""", "variable(s) k")
+
+def main():
+    for v in outer()():
+        print(v)
+main()
+""", "5\n")
     # The same escape, but the generator WRITES the enclosing local through
     # `nonlocal`. The write has to reach the enclosing frame, which an
     # escaping generator cannot provide, so it is refused rather than
@@ -7219,6 +7229,27 @@ def main():
 
 main()
 """, "[10, 11, 12]\n[100, 101, 102]\n20 200\n7\n")
+
+    # A generator defined inside a function, reading its parameter, that ESCAPES as
+    # a value (`return gen`): split into a module generator taking the capture plus
+    # a closure that starts it, and consumed through the returned callable.
+    test_generator_stdout("generator_escaping_closure_returned_and_iterated", """\
+def make(k):
+    def gen(n):
+        for i in range(n):
+            yield i * k
+    return gen
+
+def main():
+    for v in make(3)(4):
+        print(v)
+    g = make(5)
+    print(list(g(3)))
+    for v in g(2):
+        print(v)
+
+main()
+""", "0\n3\n6\n9\n[0, 5, 10]\n0\n5\n")
 
     # ...but any consumer that is NOT a for / list / comprehension (here `next`
     # of a bound handle) would read the box's address as an int, so the
