@@ -539,6 +539,13 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
     if name in gen._imported_global_accessors and name not in gen.var_types:
         _acc_ctype, _acc_csym = gen._imported_global_accessors[name]
         t = gen._call_expr(_acc_ctype, _acc_csym, [])
+        # A module-level generator/coroutine held in a global that is read
+        # through an imported accessor (full-closure case where another
+        # module registered the accessor) must still carry its API onto
+        # the fresh read-back temp, else .close() / next() refuse.
+        if (name in gen._global_generator_api
+                and name not in gen._global_generator_api_poisoned):
+            gen._generator_var_api[t] = gen._global_generator_api[name]
         return _acc_ctype, t
     # Struct/class type name used as a value (e.g. cls arg) — return zero placeholder
     _BUILTIN_TYPE_NAMES = frozenset({

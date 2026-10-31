@@ -3685,9 +3685,9 @@ def _compr_enumerate_loop(gen, node, gen0, res: str, res_type: str, it_val: str,
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
     # The comprehension is over: every name it bound is the enclosing
-    # function's own binding again (see `ginf._compr_restore_target`).
+    # function's own binding again (see `ginf._restore_binding`).
     for _gn in gi:
-        ginf._compr_restore_target(gen, _gn[0], _gn[1])
+        ginf._restore_binding(gen, _gn[0], _gn[1])
 
 
 def _compr_str_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
@@ -3711,7 +3711,7 @@ def _compr_str_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     gen._emit(f"  {idx64} = {st};")
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
-    ginf._compr_restore_target(gen, _as_str(gen0.target), saved_target)
+    ginf._restore_binding(gen, _as_str(gen0.target), saved_target)
 
 
 def _compr_cstr_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
@@ -3765,7 +3765,7 @@ def _compr_cstr_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     gen._emit(f"  {idx64} = {st};")
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
-    ginf._compr_restore_target(gen, _as_str(gen0.target), saved_target)
+    ginf._restore_binding(gen, _as_str(gen0.target), saved_target)
 
 
 def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,

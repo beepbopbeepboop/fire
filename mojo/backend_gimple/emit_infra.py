@@ -5167,7 +5167,7 @@ def _compr_range_loop(gen, node, gen0, res: str, res_type: str):
         # downstream consumed the bind above, so undo it (a no-op for the
         # common free-name case, which is the only one that allocates) and
         # leave the enclosing function exactly as we found it.
-        _compr_restore_target(gen, _as_str(gen0.target), saved_target)
+        _restore_binding(gen, _as_str(gen0.target), saved_target)
         return
 
     # Every emitted reference below must go through _cname: _declare_var
@@ -5213,8 +5213,8 @@ def _compr_range_loop(gen, node, gen0, res: str, res_type: str):
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
     # The comprehension is over: the enclosing function's own binding for this
-    # name is live again (see `_compr_restore_target`).
-    _compr_restore_target(gen, _as_str(gen0.target), saved_target)
+    # name is live again (see `_restore_binding`).
+    _restore_binding(gen, _as_str(gen0.target), saved_target)
 
 
 def _compr_cursor_loop(gen, node, gen0, res: str, res_type: str, rec):
@@ -5268,7 +5268,7 @@ def _compr_cursor_loop(gen, node, gen0, res: str, res_type: str, rec):
     gen._emit(f"  {rec_cur} = {st};")
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
-    _compr_restore_target(gen, _as_str(gen0.target), saved_target)
+    _restore_binding(gen, _as_str(gen0.target), saved_target)
 
 
 def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
@@ -5461,7 +5461,7 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
         gen._emit(f"  goto {bb_cond};")
         gen._emit_label(bb_after)
         for _sn, _st in saved_slots:
-            _compr_restore_target(gen, _sn, _st)
+            _restore_binding(gen, _sn, _st)
         return
     elem = _as_str(gen._elem_of(_iv))
     # The TUPLE arm above already binds its slots with `_compr_bind_target`
@@ -5478,7 +5478,7 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     #      read of that name sees — `a = [t for t in names]` then `t.k` reads
     #      the element. `_compr_bind_target`'s `force` is exactly this
     #      arm's old `_declare_var(..., force=...)`, and its saved token is
-    #      what the `_compr_restore_target` at the bottom needs.
+    #      what the `_restore_binding` at the bottom needs.
     #   2. `target_type = gen._type_of(...)` below is read AFTER this call, so
     #      a forced declaration also makes the element's OWN type the one the
     #      assignment below coerces to. Without it, a `char *` element whose
@@ -5545,8 +5545,8 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
     # The comprehension is over: the enclosing function's own binding for this
-    # name is live again (see `_compr_restore_target`).
-    _compr_restore_target(gen, _as_str(gen0.target), saved_target)
+    # name is live again (see `_restore_binding`).
+    _restore_binding(gen, _as_str(gen0.target), saved_target)
 
 
 def _compr_generator_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
@@ -5606,7 +5606,7 @@ def _compr_generator_loop(gen, node, gen0, res: str, res_type: str, it_val: str)
     # `_gen_for_generator_iter` refuses it.
     #
     # Read once, above the branch, because BOTH arms need it: the non-tuple arm
-    # declares and binds it, and the `_compr_restore_target` call after the loop
+    # declares and binds it, and the `_restore_binding` call after the loop
     # has to put the enclosing function's own binding back under the SAME name
     # the loop shadowed — restoring under `gen0.target` would miss `(x,)` and
     # leave the shadow standing for the rest of the function.
@@ -5647,10 +5647,10 @@ def _compr_generator_loop(gen, node, gen0, res: str, res_type: str, it_val: str)
     gen._emit(f"  goto {bb_cond};")
     gen._emit_label(bb_after)
     # The comprehension is over: the enclosing function's own binding for this
-    # name is live again (see `_compr_restore_target`). A no-op for a free
+    # name is live again (see `_restore_binding`). A no-op for a free
     # name and for the tuple-target arm, which binds its slots through
     # `_gen_compr_append`'s own per-slot path.
-    _compr_restore_target(gen, _tgt, saved_target)
+    _restore_binding(gen, _tgt, saved_target)
     # Deliberately NO `{base}_destroy` here. Consuming a generator does not
     # CLOSE it, in real Python or here: the handle belongs to whatever holds
     # it (usually a variable), and this loop may be run again over the same,
@@ -5695,8 +5695,8 @@ def _compr_dict_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     gen._emit_label(bb_after)
     gen._emit(f"  mojo_dict_iter_free ({iter_t});")
     # The comprehension is over: the enclosing function's own binding for this
-    # name is live again (see `_compr_restore_target`).
-    _compr_restore_target(gen, _as_str(gen0.target), saved_target)
+    # name is live again (see `_restore_binding`).
+    _restore_binding(gen, _as_str(gen0.target), saved_target)
 
 
 def _compr_target_is_shadowed(gen, target) -> bool:
@@ -5770,7 +5770,7 @@ def _compr_target_leaf_names(target_str: str) -> list:
 
 def _compr_bind_target(gen, name, ctype):
     """Declare a comprehension's loop target as a binding of its OWN, and
-    return the token `_compr_restore_target` needs (None when the name was
+    return the token `_restore_binding` needs (None when the name was
     free, so the common case allocates nothing).
 
     A comprehension's `for` target is a new binding in the comprehension's own
@@ -5797,16 +5797,71 @@ def _compr_bind_target(gen, name, ctype):
     if not _compr_target_is_shadowed(gen, _n):
         gen._declare_var(_n, ctype)
         return None
-    saved = (gen._c_names.get(_n), gen.var_types.get(_n),
-             _n in gen._elem_types, gen._elem_types.get(_n),
-             _n in gen._actual_types, gen._actual_types.get(_n))
+    saved = _save_binding(gen, _n)
     gen._declare_var(_n, ctype, force=True)
     return saved
 
 
-def _compr_restore_target(gen, name, saved):
-    """Undo `_compr_bind_target`'s shadow: put the enclosing function's binding
-    back under that source name.
+def _save_binding(gen, name):
+    """The binding a Python local `name` has right now, across every table
+    `_declare_var` writes: its C name, its type, and its element and actual
+    types (each as present-or-absent, so a restore can tell "was absent" from
+    "was None"). `_restore_binding` is its inverse."""
+    return (gen._c_names.get(name), gen.var_types.get(name),
+            name in gen._elem_types, gen._elem_types.get(name),
+            name in gen._actual_types, gen._actual_types.get(name))
+
+
+def _bind_local_decl(gen, name, ctype):
+    """Declare a `var` as a NEW binding of `name`.
+
+    A Python-style local is typed once per function (`_declare_var` is
+    first-decl-wins, and everything keyed by name follows that), which is right
+    for every rebinding `x = ...` but wrong for a `var` that REDECLARES a name
+    already bound: Mojo makes that a new variable in its own block, so
+
+        var it = l.__iter__()          # int64_t handle
+        with assert_raises():
+            var it = iter(ll)          # MojoList *
+
+    must not keep the outer `int64_t` storage (the old result was `it = ll;`
+    with `__next__` silently stubbed, and once the cursor path refused it, a
+    gcc assignment error). Such a `var` gets a fresh C name, and the outer
+    binding comes back when the enclosing block closes (`_close_block_scope`).
+    With no open block there is no outer scope to return to, so the shadow
+    simply stands for the rest of the function.
+    """
+    if name not in gen.var_types:
+        gen._declare_var(name, ctype)
+        return
+    saved = _save_binding(gen, name)
+    gen._declare_var(name, ctype, force=True)
+    if gen._block_scope_frames:
+        gen._block_scope_frames[-1].append((name, saved))
+
+
+def _open_block_scope(gen):
+    """Open a block body (an if/else/elif, loop, with, try/except/finally or
+    match-case body). Returns the frame `_close_block_scope` needs."""
+    frame = []
+    gen._block_scope_frames.append(frame)
+    return frame
+
+
+def _close_block_scope(gen, frame):
+    """Close the block `_open_block_scope` opened: undo every shadow a `var`
+    made inside it, innermost first, so a read after the block sees the
+    binding it saw before the block."""
+    popped = gen._block_scope_frames.pop()
+    assert popped is frame, 'block scopes closed out of order'
+    for name, saved in reversed(frame):
+        _restore_binding(gen, name, saved)
+
+
+def _restore_binding(gen, name, saved):
+    """Undo a shadow: put the binding `saved` (from `_save_binding`) back
+    under `name`. Serves `_compr_bind_target`'s comprehension targets and the
+    block-scoped `var` redeclarations of `_bind_local_decl`.
 
     Without this the shadow would last until the end of the function, and the
     comprehension's LAST element would be what every later read of that name
@@ -5880,8 +5935,8 @@ def _compr_set_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     gen._emit_label(bb_after)
     gen._emit(f"  mojo_set_iter_free ({iter_t});")
     # The comprehension is over: the enclosing function's own binding for this
-    # name is live again (see `_compr_restore_target`).
-    _compr_restore_target(gen, _as_str(gen0.target), saved_target)
+    # name is live again (see `_restore_binding`).
+    _restore_binding(gen, _as_str(gen0.target), saved_target)
 
 
 def note_container_callable_ret(gen, container_val: str, value_text: str,
@@ -8018,8 +8073,10 @@ def gen_loop_body(gen, body: list) -> None:
     set lookup)."""
     scoped = gen._scoped_free_candidates
     if not scoped:
+        _bscope = _open_block_scope(gen)
         for s in body:
             gen.gen_stmt(s)
+        _close_block_scope(gen, _bscope)
         return
     names: list = []
     for s in body:
@@ -8034,8 +8091,10 @@ def gen_loop_body(gen, body: list) -> None:
         # of the declaration, with its own storage, push and free.
         gen._owned_free_pushed.discard(nm)
         gen._owned_stack_allocated.discard(nm)
+    _bscope = _open_block_scope(gen)
     for s in body:
         gen.gen_stmt(s)
+    _close_block_scope(gen, _bscope)
     _emit_scope_end(gen, mark)
     for nm in names:
         gen._scope_armed.discard(nm)
