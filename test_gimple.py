@@ -8367,11 +8367,20 @@ def mk_bool():
 def use_bool_factory():
     print(mk_bool()())
 use_bool_factory()
-def mk_str():
-    return lambda: "hi"
+def mk_str(p: str):
+    def inner(x: str) -> str:
+        return p + x
+    return inner
 def use_str_factory():
-    print(mk_str()())
+    g = mk_str("<")
+    print(g(">"))
+    print(mk_str("[")("]"))
 use_str_factory()
+def mk_str_lambda():
+    return lambda: "hi"
+def use_str_lambda_factory():
+    print(mk_str_lambda()())
+use_str_lambda_factory()
 '''
         want = _cpython_stdout(src)
         if want is None:
