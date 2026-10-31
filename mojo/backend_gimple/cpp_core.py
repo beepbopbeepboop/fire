@@ -4742,6 +4742,25 @@ def _cpp_expr(gen, e) -> str:
     if isinstance(e, gimple_ctypes.SubscriptExpr):
         obj = gen._cpp_expr(e.obj)
         idx = gen._cpp_expr(e.index)
+        # `obj[key]` on a local whose declared type is a USER STRUCT pointer
+        # that defines `__getitem__` is the dunder protocol, not a string or
+        # container read: call the struct's own `__getitem__` C method, as the
+        # ordinary GIMPLE path does (emit_methods.py's
+        # `_lower_struct_subscript_dunder`). This is the shape a gdb-style
+        # `gdb.Value` subject takes (`ep['me_key']` in Tools/gdb/libpython.py),
+        # and it must be taken BEFORE the str-key refusal below, which would
+        # otherwise reject it as an unmodelled mapping lookup.
+        if isinstance(e.obj, gimple_ctypes.IdentExpr):
+            _getitem_struct = gen._cpp_struct_ptr_local(e.obj.name)
+            if _getitem_struct and gen._struct_defines_method(
+                    _getitem_struct, '__getitem__'):
+                _sym = gen._struct_method_csym(_getitem_struct, '__getitem__', '')
+                gen._cpp_struct_method_refs.add((_getitem_struct, '__getitem__'))
+                _gi_args = _cpp_pad_struct_method_call_args(
+                    gen, _sym,
+                    f"{_getitem_struct}_{gimple_ctypes._safe_name('__getitem__')}",
+                    [idx])
+                return f"{_sym}({obj}, {', '.join(_gi_args)})"
         # Python `s[i]` on a string → a 1-char string (not a C++ char).
         # Subscripting a char* expression (a local, another subscript's
         # result, or a string literal) is the common generator-body
@@ -6397,7 +6416,10 @@ def _cpp_with_stmt(gen, s, declared: dict, indent: str) -> list[str]:
     for item in s.items:
         expr = item.expr
         gname = gen._cpp_with_guard_type_name(expr)
-        if gname not in gen._ASYNC_NOOP_LOCK_GUARD_TYPES:
+        _intrinsic = False
+        if gname == 'tempfile.TemporaryDirectory':
+            _intrinsic = True
+        elif gname not in gen._ASYNC_NOOP_LOCK_GUARD_TYPES:
             if gen._cpp_emit_kind in ('async', 'async_gen'):
                 raise gimple_exprtypes._UnsupportedAsyncShape(
                     "`with` inside an async function body is only "
@@ -6422,7 +6444,12 @@ def _cpp_with_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     declared[_al.name] = 'int64_t'
                     _alias_decl_lines.append(f"{indent}int64_t {_al.name};")
                 break
-        if item.alias is not None and gen._cpp_emit_kind in ('async', 'async_gen'):
+        if _intrinsic and item.alias is not None:
+            if isinstance(item.alias, str) and item.alias not in declared:
+                declared[item.alias] = 'const char *'
+            elif isinstance(item.alias, gimple_ctypes.IdentExpr) and item.alias.name not in declared:
+                declared[item.alias.name] = 'const char *'
+        elif item.alias is not None and gen._cpp_emit_kind in ('async', 'async_gen'):
             raise gimple_exprtypes._UnsupportedAsyncShape(
                 "`with ... as name:` is not supported for an async "
                 f"no-op guard `with` ({gname} has no usable return "
@@ -6431,7 +6458,8 @@ def _cpp_with_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             declared[item.alias] = 'int64_t'
         elif item.alias is not None and isinstance(item.alias, gimple_ctypes.IdentExpr):
             declared[item.alias.name] = 'int64_t'
-    if any(isinstance(n, gimple_ctypes.AwaitExpr) for st in s.body for n in gimple_exprtypes._walk_ast(st)):
+    # Intrinsic guard (Real RAII): cleanup survives await inside body.
+    if not _intrinsic and any(isinstance(n, gimple_ctypes.AwaitExpr) for st in s.body for n in gimple_exprtypes._walk_ast(st)):
         raise gimple_exprtypes._UnsupportedAsyncShape(
             "`await` inside a `with`-guarded body is not supported "
             "-- eliding the guard (this codegen's own no-op "
@@ -6441,8 +6469,44 @@ def _cpp_with_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             "across a real suspension point, where another coroutine "
             "genuinely could run")
     lines: list[str] = list(_alias_decl_lines)
+    guard_var = ''
+    bind_line = ''
+    if _intrinsic:
+        for item in s.items:
+            alias = item.alias
+            if alias is None:
+                continue
+        declared_local = None
+        # pick the binding alias of the single with item
+        target_alias = None
+        target_alias_name = None
+        for item in s.items:
+            alias = item.alias
+            if isinstance(alias, str) and alias not in declared:
+                declared[alias] = 'const char *'
+                target_alias_name = alias
+                break
+            elif (isinstance(alias, gimple_ctypes.IdentExpr)
+                  and alias.name not in declared):
+                declared[alias.name] = 'const char *'
+                target_alias_name = alias.name
+                break
+        for it in s.items:
+            pass
+        guard_var = gen._cpp_fresh_name('mojo_td')
+        declare = [
+            f"{indent}mojo_tempdir_guard_t {guard_var};",
+            f"{indent}int __init_ok_ = mojo_tempdir_guard_init(&{guard_var});",
+        ]
+        if target_alias_name is not None:
+            declare.append(
+                f"{indent}const char* {target_alias_name} = "
+                f"mojo_tempdir_guard_path(&{guard_var});")
+        lines.extend(declare)
     for st in s.body:
         lines.extend(gen._cpp_stmt(st, declared, indent))
+    if _intrinsic and guard_var:
+        lines.append(f"{indent}mojo_tempdir_guard_fini(&{guard_var});")
     return lines
 
 
