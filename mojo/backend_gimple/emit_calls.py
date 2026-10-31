@@ -336,6 +336,8 @@ def _lower_generator_next(gen, av: str, api: dict) -> tuple[str, str]:
     result = gen._new_val(vct, f"{base}_value ({av})")
     if api.get('boxed_container'):
         gen._boxed_container_vals.add(result)
+    if api.get('mixed_slots') and vct == 'int64_t':
+        gen._boxed_vals.add(result)       # a tagged word: rendered by kind
     gen._emit(f"  goto {bb_merge};")
     gen._emit_label(bb_merge)
     return vct, result

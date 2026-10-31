@@ -965,11 +965,12 @@ def _tagged_consumers_ok(name: str) -> bool:
     prints a box's ADDRESS: so a generator used that way keeps its refusal."""
     for_iters = set()
     refs = []
+    def _is_gcall(x):
+        return (isinstance(x, N.CallExpr) and isinstance(x.func, N.IdentExpr)
+                and x.func.name == name)
     for st in _MODULE_STMTS:
         for n in _walk(st):
-            if isinstance(n, N.ForStmt) and isinstance(n.iterable, N.CallExpr) \
-                    and isinstance(n.iterable.func, N.IdentExpr) \
-                    and n.iterable.func.name == name:
+            if isinstance(n, N.ForStmt) and _is_gcall(n.iterable):
                 for_iters.add(id(n.iterable))
             if isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr) \
                     and n.func.name == name:

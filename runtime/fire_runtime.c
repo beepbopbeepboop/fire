@@ -1176,6 +1176,42 @@ int64_t mojo_box_from_bool(int64_t v)
     return (int64_t)(uintptr_t)bx;
 }
 
+/* Append a TAGGED word (see mojo_box_from_bool / mojo_box_from_double) to a list
+ * under the kind it carries, so the list's per-slot kinds render it right: a
+ * float box appends a double, a bool box a bool, a str box or a live heap
+ * string a string, anything else an int. */
+static void _list_word_push(MojoList *l, char kind, int64_t raw)
+{
+    /* Append `raw` and extend the list's per-slot kinds string by `kind`
+     * (slots before this one that the string does not describe are ints). */
+    int64_t n = l->len;
+    const char *old = mojo_list_get_kinds(l);
+    char *buf = (char *)malloc((size_t)n + 2);
+    if (!buf) { mojo_list_append_int(l, raw); return; }
+    for (int64_t i = 0; i < n; i++)
+        buf[i] = (old && old[i]) ? old[i] : 'i';
+    buf[n] = kind;
+    buf[n + 1] = '\0';
+    mojo_list_append_int(l, raw);
+    mojo_list_set_kinds(l, buf);
+    free(buf);
+}
+
+void mojo_list_append_word(MojoList *l, int64_t w)
+{
+    if (mojo_is_boxed(w)) {
+        MojoBox *bx = (MojoBox *)(intptr_t)w;
+        switch (bx->kind) {
+            case 'd': _list_word_push(l, 'd', bx->bits); return;
+            case 'p': _list_word_push(l, 'p', bx->bits); return;
+            case 'b': _list_word_push(l, MOJO_KIND_BOOL, bx->bits); return;
+            default:  _list_word_push(l, 'i', bx->bits); return;
+        }
+    }
+    if (mojo_boxed_is_str(w)) { _list_word_push(l, 'p', w); return; }
+    _list_word_push(l, 'i', w);
+}
+
 /* The answer of `a OP b` for an arithmetic operator whose operands may be
  * float boxes: the double answer as a fresh box when either operand IS a
  * double box, else the integer answer. Both answers are computed by the

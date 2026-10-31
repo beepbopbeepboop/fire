@@ -4049,7 +4049,13 @@ def _generator_to_list(gen, value: str) -> str:
     gen._emit(f"  if ({more}) goto {bb_body}; else goto {bb_after};")
     gen._emit_label(bb_body)
     val = gen._new_val(vct, f"{base}_value ({_iv})")
-    if vct in ('char *', 'MojoStr *'):
+    if api.get('mixed_slots') and vct == 'int64_t':
+        # a TAGGED-word generator: each value is appended under the kind it
+        # carries (a float box as a double, a bool box as a bool, a string as a
+        # string), so the list renders and iterates right.
+        gen._void_call('mojo_list_append_word',
+                       [('MojoList *', res), ('int64_t', val)])
+    elif vct in ('char *', 'MojoStr *'):
         gen._void_call('mojo_list_append_str',
                        [('MojoList *', res), ('const char *', val)])
         gen._elem_types[res] = 'char *'
@@ -5687,6 +5693,8 @@ def _compr_generator_loop(gen, node, gen0, res: str, res_type: str, it_val: str)
         # reserved-identifier comment (`index` et al. are renamed by
         # _declare_var; body reads resolve through _c_names).
         gen._emit(f"  {gen._cname(_tgt)} = {val};")
+        if api.get('mixed_slots') and vct == 'int64_t':
+            gen._boxed_vals.add(gen._cname(_tgt))
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
     gen._emit(f"  goto {bb_post};")
     gen._emit_label(bb_post)
