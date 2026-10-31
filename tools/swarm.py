@@ -23,7 +23,6 @@ import integrate as I
 
 SKIP = re.compile(r"^(FORMAL_|COMPILE_FAIL_|MERGE_|OPEN_WORK|PERF_memory_over|DOCS_)")
 PREFIXES = ("bug-", "fix-")
-REFILL_EXTRA = ("formal",)    # FORMAL docs queued for the OpenRouter slot (pinned there by the owner, 2026-10-30)
 STOP = re.compile(r"^STOP:[ \t]*(.+?)[ \t]*$", re.M)   # the stop indicator: a line `STOP: <reason>` in the bug doc
 
 
@@ -165,7 +164,7 @@ def feed():
 
 def refill(target):
     r = subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "refill", "--target", str(target),
-                        "--prefix", ",".join(PREFIXES + REFILL_EXTRA)], capture_output=True, text=True, cwd=C.MAIN)
+                        "--prefix", ",".join(PREFIXES)], capture_output=True, text=True, cwd=C.MAIN)
     return (r.stdout.strip().splitlines() or [""])[-1]
 
 
