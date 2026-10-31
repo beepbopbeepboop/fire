@@ -51,7 +51,7 @@ import mojo.backend_gimple.emit_calls as ggc
 from mojo.middle.calls_shared import *  # noqa: F401,F403
 from mojo.middle.types import _SCALAR_INT_TYPES, _SCALAR_FLOAT_TYPES  # underscore: `import *` won't carry them
 from mojo.middle.calls_shared import (
-    _is_pointer_ctype,
+    _is_pointer_ctype, _null_default_pair,
     _as_str, _build_call_args_for_candidate, _callable_default_generator,
     _callable_param_generator_apis, _callable_param_ret_types, _callable_value_symbol, _default_expr_to_pair,
     _ident_call_name, _isinstance_type_name, _pack_kwargs_dict,
@@ -223,7 +223,13 @@ def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
                                              [('void *', _gsv[1]), ('int64_t', str(_pos))])
                         arg_pairs.append(('int64_t', _gw))
                         continue
-                arg_pairs.append(gen._default_expr_to_pair(_dv))
+                # `_gen_expected` is the callee's declared C type per slot: a
+                # `None` default for a POINTER slot must pad as a typed NULL,
+                # not the integer 0 that `mojo_cstr_or_int_str` would render as
+                # the non-null string "0" (see `_default_expr_to_pair`'s
+                # `param_ctype`). Same fix as `_lower_named_call`'s padding.
+                _pct = _gen_expected[_pos] if _pos < len(_gen_expected) else None
+                arg_pairs.append(gen._default_expr_to_pair(_dv, param_ctype=_pct))
             else:
                 # No default is known HERE (a generator reached through a
                 # module whose parameter defaults this scope never recorded):
@@ -237,7 +243,10 @@ def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
                                           [('void *', _gsv0[1]), ('int64_t', str(_pos))])
                     arg_pairs.append(('int64_t', _gw0))
                 else:
-                    arg_pairs.append(('int', '0'))
+                    # Same typed-NULL rule as the default branch above: a
+                    # POINTER slot padded with a bare int 0 becomes "0".
+                    _pct0 = _gen_expected[_pos] if _pos < len(_gen_expected) else None
+                    arg_pairs.append(_null_default_pair(_pct0))
     else:
         for _, _ke in _gen_kwargs:
             gen.lower_expr(_ke)
