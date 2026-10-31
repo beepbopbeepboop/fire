@@ -426,7 +426,7 @@ landed accessor-arm fix (`emit_exprs.py:538-560`) needs in order to fire.
      unrelated global `foo` could inherit module A's `foo` api. Mitigation to
      verify first: a non-generator store of `foo` in B must poison it (it
      does, via `_write_dest` / `_global_var_types` at emit_infra.py:3689 if
-     `_global_var_types` is shared, which it is at emit_resolve ~line 1100).
+     `_global_var_types` is shared, which it is at emit_resolve.py:824).
    - (b) key the table by module-qualified name. More correct, larger change.
    Recommendation: (a) with the poison-sharing check, because the existing
    trust model already poisons on any second binding.
