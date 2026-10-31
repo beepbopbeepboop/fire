@@ -4347,6 +4347,25 @@ def _cpp_expr(gen, e) -> str:
     if isinstance(e, gimple_ctypes.SubscriptExpr):
         obj = gen._cpp_expr(e.obj)
         idx = gen._cpp_expr(e.index)
+        # `obj[key]` on a local whose declared type is a USER STRUCT pointer
+        # that defines `__getitem__` is the dunder protocol, not a string or
+        # container read: call the struct's own `__getitem__` C method, as the
+        # ordinary GIMPLE path does (emit_methods.py's
+        # `_lower_struct_subscript_dunder`). This is the shape a gdb-style
+        # `gdb.Value` subject takes (`ep['me_key']` in Tools/gdb/libpython.py),
+        # and it must be taken BEFORE the str-key refusal below, which would
+        # otherwise reject it as an unmodelled mapping lookup.
+        if isinstance(e.obj, gimple_ctypes.IdentExpr):
+            _getitem_struct = gen._cpp_struct_ptr_local(e.obj.name)
+            if _getitem_struct and gen._struct_defines_method(
+                    _getitem_struct, '__getitem__'):
+                _sym = gen._struct_method_csym(_getitem_struct, '__getitem__', '')
+                gen._cpp_struct_method_refs.add((_getitem_struct, '__getitem__'))
+                _gi_args = _cpp_pad_struct_method_call_args(
+                    gen, _sym,
+                    f"{_getitem_struct}_{gimple_ctypes._safe_name('__getitem__')}",
+                    [idx])
+                return f"{_sym}({obj}, {', '.join(_gi_args)})"
         # Python `s[i]` on a string → a 1-char string (not a C++ char).
         # Subscripting a char* expression (a local, another subscript's
         # result, or a string literal) is the common generator-body
