@@ -9401,8 +9401,15 @@ def gen_module_impl(self, stmts):
         _ps_body = getattr(_fp_s, '_mojo_coro_param_str_params', None)
         if _ps_body:
             _ps_d = self._coro_str_params.setdefault(_as_str(_fp_s.name), set())
+            # The same string evidence, in the table the binary operators
+            # consult: a generator's parameter crosses the ABI as an untyped
+            # int64_t slot, so `root + str(k)` in the body has only this table
+            # to say the word may be a string. Without it the `+` lowered to
+            # `str(root)` concatenation and printed the pointer as decimal.
+            _mh_d = self._int64_may_hold_str.setdefault(_as_str(_fp_s.name), set())
             for _ps_k in _ps_body:
                 _ps_d.add(_as_str(_ps_k))
+                _mh_d.add(_as_str(_ps_k))
 
     def _record_param_elem(callee, pname, e, ne):
         # `_as_str` on both NAME params: a nested function's untyped params

@@ -322,6 +322,47 @@ def test_cross_module_generator_default_is_padded() -> bool:
     return ok
 
 
+def test_generator_str_param_concat_is_string_concatenation() -> bool:
+    """`root + str(k)` in a generator whose unannotated `root` is only ever
+    passed a string literal is string concatenation, not integer addition.
+
+    The call site's literal is the evidence (`_CALLSITE_PARAM_KINDS` records
+    `root: 'p'`), and the coroutine pass keeps it in `_coro_str_params`, but
+    the `+` lowering only consults `_int64_may_hold_str`, which a generator
+    body never received. `root` stayed a plain int64 word, `str(root)`-style
+    stringification ran on the pointer, and the yielded values printed as
+    pointer decimals (`['43033668960', ...]`, exit 0).
+
+    Pinned here: the same-module spelling. The cross-module spelling
+    (`lib.walk("r")` from another module) is NOT pinned, because it is not
+    fixed: the defining module's compile never sees the importer's call site,
+    so the evidence does not exist there. See
+    bugs/CODEGEN_generator_param_str_concat_is_pointer_add.md.
+    """
+    src = (
+        'def walk(root, suffix=None):\n'
+        '    for k in range(3):\n'
+        '        yield root + str(k)\n'
+        '\n'
+        'print(list(walk("r")))\n'
+    )
+    pkg = {'walk.py': src}
+    root = os.path.join(REPO, 'build', 'test_link_mode')
+    os.makedirs(root, exist_ok=True)
+    td = tempfile.mkdtemp(prefix='gen_str_concat_', dir=root)
+    try:
+        rc, stdout = _build_and_run(pkg, 'walk.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'walk.py')
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and stdout.strip() == "['r0', 'r1', 'r2']")
+    if not ok:
+        print(f"  ✗ generator_str_param_concat_is_string_concatenation: "
+              f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
+    return ok
+
+
 def test_str_affix_method_on_unsolved_word_is_bool() -> bool:
     """`.startswith(...)` / `.endswith(...)` on a loop target that is an
     UNSOLVED word (the element of a registered generator, whose kind the
@@ -2059,6 +2100,7 @@ CASES = [
     test_bare_submodule_import_call_inside_source_tree,
     test_bare_submodule_import_keyword_call,
     test_cross_module_generator_default_is_padded,
+    test_generator_str_param_concat_is_string_concatenation,
     test_str_affix_method_on_unsolved_word_is_bool,
     test_generator_none_default_reaches_callee_as_null,
     test_from_submodule_import_symbol_value_read,
