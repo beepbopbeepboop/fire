@@ -1599,7 +1599,7 @@ def seed_global_generator_apis(gen, stmts, mod_index) -> None:
     The fix is to record the store's api up front, from the one place it is
     statically certain: a DIRECT top-level `name = <generator>(...)` statement
     whose name has exactly one binder in the whole module. `mod_index` is
-    `module_gen._gmi_binding_index(stmts)`, the binder census that already
+    `literal_bindings.binding_index(stmts)`, the binder census that already
     counts every binding (nested functions included, `global` declarations
     and wildcard imports too) of every name, so "exactly one binder, and it
     is this statement" is the same test the literal-argument lookup uses. A

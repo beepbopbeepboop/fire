@@ -68,6 +68,7 @@ from mojo.middle.exprtypes import _is_asyncio_sleep_call, _is_asyncio_sock_recv_
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.exprtypes as gimple_exprtypes
 from mojo.middle.module_shared import module_qualifier
+from mojo.middle.literal_bindings import binding_index, unique_literal_value
 _ENV = 'MOJO_CORO'
 _MODE = 'stackswitch'
 _OLD_MODE = 'cpp'
@@ -4973,6 +4974,26 @@ def _dotted_name(expr) -> str | None:
     return None
 
 
+def _module_literal_env(stmts) -> dict:
+    """name -> literal kind for every module-level name whose ONE binder in the
+    module is a literal, as the caller env of a module-level call.
+
+    The answer is the same single-binder rule `_static_env` applies to a
+    function's locals, over the module census (`literal_bindings`): a name
+    with a second binder, a parameter, a non-literal binder or a wildcard
+    import has no entry, and `_argkind` treats that identifier as the hole it
+    was before this env existed."""
+    mod_index = binding_index(stmts)
+    env: dict = {}
+    for name in mod_index:
+        if name == '*':
+            continue
+        k = _literal_kind(unique_literal_value(name, {}, mod_index))
+        if k is not None:
+            env[name] = k
+    return env
+
+
 def _argkind(expr, caller_env: dict | None = None) -> str | tuple | None:
     """Static yield-C-kind of a call ARGUMENT expression, or None when it
     can't be told purely syntactically. Literals, a unary +/- of a literal,
@@ -5309,6 +5330,9 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
         return aliases
 
     def _collect_from(src, visit, closure):
+        # The module-level caller env, built on the first module-level call
+        # (see the module-level branch below).
+        mod_env = None
         for s in src:
             fns = []
             if isinstance(s, N.FunctionDef):
@@ -5349,11 +5373,16 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
                             cenv = _static_env(fn, sdef)
                             have_env = True
                         visit(n, cenv)
-            # module-level calls (rare, e.g. a bare generator call in a stmt)
+            # module-level calls (rare, e.g. a bare generator call in a stmt).
+            # Their caller env is the module's own single-literal bindings, so
+            # an identifier argument (`walk(s)` with `s = "r"`) is typed the way
+            # the same call inside a function is, through `_static_env`.
             if not isinstance(s, (N.FunctionDef, N.StructDef)):
                 for n in _walk(s):
                     if isinstance(n, N.CallExpr):
-                        visit(n, None)
+                        if mod_env is None:
+                            mod_env = _module_literal_env(src)
+                        visit(n, mod_env)
 
     def _collect():
         _collect_from(stmts, _visit_call, False)
