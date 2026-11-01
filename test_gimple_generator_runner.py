@@ -3267,8 +3267,187 @@ main()
 """, "a None yield (bare `yield` / `yield None`) has no value slot")
 
 
+def run_tagged_word_cpp_tests():
+    # The C++ escape hatch (`MOJO_CORO=cpp`) carries a generator whose yields
+    # mix kinds as ONE tagged word per slot: each yield is boxed by its kind
+    # (`_cpp_tag_yield_sites`). The consumer then printed that word as a raw
+    # int64_t, so `print(v)` showed the box's ADDRESS (e.g. `1\n4338238880\n2`)
+    # where CPython prints the yielded value. Both consumers -- a for loop and
+    # `next(g)` -- must render a tagged word as the box it is. Pinned on the
+    # cpp backend, against the CPython oracle.
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("tagged_int_str_for_loop_cpp", """\
+def gen():
+    yield 1
+    yield "a"
+    yield 2
+
+def main():
+    for v in gen():
+        print(v)
+main()
+""", """\
+def gen():
+    yield 1
+    yield "a"
+    yield 2
+
+def main():
+    for v in gen():
+        print(v)
+main()
+""")
+        test_generator_matches_cpython("tagged_int_str_next_cpp", """\
+def gen():
+    yield 1
+    yield "a"
+    yield 2
+
+def main():
+    g = gen()
+    print(next(g))
+    print(next(g))
+    print(next(g))
+main()
+""", """\
+def gen():
+    yield 1
+    yield "a"
+    yield 2
+
+def main():
+    g = gen()
+    print(next(g))
+    print(next(g))
+    print(next(g))
+main()
+""")
+        test_generator_matches_cpython("tagged_int_float_for_loop_cpp", """\
+def gen():
+    yield 1
+    yield 2.5
+    yield 3
+
+def main():
+    for v in gen():
+        print(v)
+main()
+""", """\
+def gen():
+    yield 1
+    yield 2.5
+    yield 3
+
+def main():
+    for v in gen():
+        print(v)
+main()
+""")
+        # The consumer is itself a C++ generator body (not `main`, which is
+        # emitted as GIMPLE C): these are the consumer sites lowered by
+        # cpp_core -- the direct-call for loop, `next(g)` in a print, and
+        # `x = next(g)` bound then printed.
+        test_generator_matches_cpython("tagged_int_str_for_in_generator_body_cpp", """\
+def gen():
+    yield 1
+    yield "a"
+    yield 2
+
+def consume():
+    for v in gen():
+        print(v)
+    yield 0
+
+def main():
+    for z in consume():
+        pass
+main()
+""", """\
+def gen():
+    yield 1
+    yield "a"
+    yield 2
+
+def consume():
+    for v in gen():
+        print(v)
+    yield 0
+
+def main():
+    for z in consume():
+        pass
+main()
+""")
+        test_generator_matches_cpython("tagged_int_str_next_in_generator_body_cpp", """\
+def gen():
+    yield 1
+    yield "a"
+    yield 2
+
+def consume():
+    g = gen()
+    print(next(g))
+    x = next(g)
+    print(x)
+    yield 0
+
+def main():
+    for z in consume():
+        pass
+main()
+""", """\
+def gen():
+    yield 1
+    yield "a"
+    yield 2
+
+def consume():
+    g = gen()
+    print(next(g))
+    x = next(g)
+    print(x)
+    yield 0
+
+def main():
+    for z in consume():
+        pass
+main()
+""")
+        test_generator_matches_cpython("tagged_bool_str_next_in_generator_body_cpp", """\
+def gen():
+    yield True
+    yield "b"
+
+def consume():
+    g = gen()
+    print(next(g))
+    print(next(g))
+    yield 0
+
+def main():
+    for z in consume():
+        pass
+main()
+""", """\
+def gen():
+    yield True
+    yield "b"
+
+def consume():
+    g = gen()
+    print(next(g))
+    print(next(g))
+    yield 0
+
+def main():
+    for z in consume():
+        pass
+main()
+""")
+
 def run_tests():
     run_none_yield_tests()
+    run_tagged_word_cpp_tests()
     run_star_args_call_tests()
     run_callable_param_tests()
     run_lambda_capture_tests()

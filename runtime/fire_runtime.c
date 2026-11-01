@@ -1206,6 +1206,23 @@ int64_t mojo_box_from_bool(int64_t v)
     return (int64_t)(uintptr_t)bx;
 }
 
+/* A str travelling in a TAGGED word (a generator whose yields are not all one
+ * kind): a fresh kind-'p' box holding the pointer, so the consumer renders the
+ * string and not its address. A bare pointer is recognised as a string only
+ * when it is a registered literal or a live heap block (mojo_boxed_is_str),
+ * which a C++ string literal is not. mojo_repr_boxed / mojo_box_word read the
+ * pointer back. */
+int64_t mojo_box_from_str(char *s)
+{
+    MojoBox *bx = (MojoBox *)malloc(sizeof(MojoBox));
+    if (!bx) return (int64_t)(intptr_t)s;
+    bx->magic = MOJO_BOX_MAGIC;
+    bx->bits = (int64_t)(intptr_t)s;
+    bx->kind = 'p';
+    _pr_add(&_reg_box, (uint64_t)(uintptr_t)bx);
+    return (int64_t)(uintptr_t)bx;
+}
+
 /* None in a TAGGED word (a generator that yields None beside values, read by a
  * for loop): the one kind-'n' box, allocated once and shared, so a generator
  * yielding None in a loop does not grow the box registry per yield.

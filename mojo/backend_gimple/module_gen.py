@@ -11762,6 +11762,9 @@ def gen_module_impl(self, stmts):
             # consumer reading `{base}_value` AFTER the sub-generator
             # reports done gets that return value.
             'has_return_value': self._cpp_last_has_return_value,
+            # A TAGGED value slot (mixed-kind yields, each boxed): consumers
+            # render a read of it as a box, not as a raw int64_t.
+            'tagged': self._cpp_last_tagged_yield,
         }
         _gq = self._func_qualifier(s.name)
         if _gq:
