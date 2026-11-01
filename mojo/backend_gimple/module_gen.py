@@ -8360,7 +8360,20 @@ def gen_module_impl(self, stmts):
                 for _rpn3, _rpt3 in real_params:
                     _rp_names.append(_rpn3)
                     _rp_convs.append(_pconv.get(_rpn3.lstrip('*')))
-                self._struct_method_signatures.setdefault(key, []).append({
+                # IDEMPOTENT per overload id: a module whose compile is rolled back
+                # and retried against the same shared gen (the import fallback)
+                # registers its structs again, and a bare `.append` made one method
+                # look like N overloads -- `repr = aRepr.repr` then refused with
+                # "method Repr.'repr' has 2 overloads and is referenced as a plain
+                # value". A real overload carries its own `_oid`, so replacing the
+                # entry with the same id loses nothing.
+                _sms_list = self._struct_method_signatures.setdefault(key, [])
+                _sms_keep = []
+                for _sms_old in _sms_list:
+                    if _as_str(_sms_old.get('overload_id', '')) != _oid:
+                        _sms_keep.append(_sms_old)
+                _sms_list[:] = _sms_keep
+                _sms_list.append({
                     'overload_id': _oid,
                     'param_names': _rp_names,
                     'param_ctypes': param_ctypes,

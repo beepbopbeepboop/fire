@@ -8007,6 +8007,41 @@ def main():
             print(f"FAIL  {name}: {e}")
             _FAIL += 1
 
+    def test_recompiling_a_struct_does_not_multiply_its_method_overloads():
+        """A struct whose module is compiled again against the same gen (the import
+        fallback retries after a rollback) re-registered every method with a bare
+        `.append`, so `Repr.repr` became "2 overloads" and `repr = aRepr.repr`
+        refused as "referenced as a plain value". Registration is now idempotent
+        per overload id."""
+        global _PASS, _FAIL
+        name = "recompiling_a_struct_does_not_multiply_its_method_overloads"
+        import gimple_codegen as _g
+        src = ("class R:\n"
+               "    def m(self, x):\n"
+               "        return x\n"
+               "r = R()\n"
+               "f = r.m\n"
+               "def main():\n"
+               "    print(f(1))\n"
+               "main()\n")
+        gen = _g.GimpleGen(do_imports=False, module_name='t')
+        _g.compile_to_gimple(src)
+        # register the same struct twice on one gen, as a retried module does
+        from fire_compiler import Parser, py_tokenize
+        stmts = Parser(py_tokenize(src)).parse_module()
+        gen.gen_module(stmts)
+        try:
+            gen.gen_module(stmts)
+        except Exception:
+            pass
+        n = max([len(v) for k, v in gen._struct_method_signatures.items() if k.endswith('m')] or [0])
+        if n <= 1:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: {n} candidates for R.m")
+            _FAIL += 1
+
     def test_bracket_mentions_matches_the_regex_it_replaced():
         """`elab_intu._bracket_mentions` is the run-time-regex-free form of
         `\\bNAME\\s*\\[\\s*([^\\]]+)\\s*\\]` (a pattern built around a name
@@ -13370,6 +13405,7 @@ print(run('x/y.txt'))
     _run_isolated(lambda: test_import_line_modules_matches_the_regex_it_replaced(), 'test_import_line_modules_matches_the_regex_it_replaced (line 12711)')
     _run_isolated(lambda: test_flagged_re_compile_is_not_lowered_as_the_bare_pattern(), 'test_flagged_re_compile_is_not_lowered_as_the_bare_pattern (line 12712)')
     _run_isolated(lambda: test_set_field_read_off_a_boxed_receiver_is_a_set_not_a_list(), 'test_set_field_read_off_a_boxed_receiver_is_a_set_not_a_list')
+    _run_isolated(lambda: test_recompiling_a_struct_does_not_multiply_its_method_overloads(), 'test_recompiling_a_struct_does_not_multiply_its_method_overloads')
     _run_isolated(lambda: test_bracket_mentions_matches_the_regex_it_replaced(), 'test_bracket_mentions_matches_the_regex_it_replaced (line 12713)')
     _run_isolated(lambda: test_func_state_snapshot_covers_reset_func(), 'test_func_state_snapshot_covers_reset_func (line 12714)')
     _run_isolated(lambda: test_every_funcptr_initializer_has_a_definition(), 'test_every_funcptr_initializer_has_a_definition (line 12715)')
