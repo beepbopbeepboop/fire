@@ -115,7 +115,7 @@ def test_bare_zero_division_statement_in_generator():
 
 def test_bool_true_division_is_float():
     # A bool operand (`_Bool`) must take the float path too (`True / 2 == 0.5`),
-    # not truncate to 0. See bugs/CODEGEN_int_true_division_truncates.md.
+    # not truncate to 0.
     src = ('def main():\n'
            '    t = True\n'
            '    f = False\n'
@@ -138,6 +138,18 @@ def test_int_true_division_is_float_in_generator_body():
     assert rc == 0, out
     assert out == '3.5\n2.0', repr(out)
 
+def test_unsigned_division_matches_real_mojo():
+    # Real Mojo (tools/mojo, checked 2026-11-01): `UInt(7) / UInt(2)` and the
+    # UInt8 form both print 3, so unsigned operands stay out of the Float64 gate
+    # (_SIGNED_INT_TRUE_DIV_TYPES).
+    src = ('def main():\n'
+           '    a = UInt(7)\n'
+           '    b = UInt(2)\n'
+           '    print(a / b)\n')
+    out, rc = run_jit(src)
+    assert rc == 0, out
+    assert out == '3', repr(out)
+
 def test_struct_true_division_builds():
     # A struct operand keeps its own `/` even when the other operand is an int
     # (std/pathlib/path.mojo's `result /= segment`). The Int / Int gate must not
@@ -145,7 +157,7 @@ def test_struct_true_division_builds():
     # into a double division of a pointer, which gcc rejects. This asserts the
     # file lowers to C that gcc accepts, not the run-time value: the int-typed
     # element of `*parts` is a separate gap, recorded in
-    # bugs/CODEGEN_int_true_division_truncates.md.
+    # commit history for the Int / Int true-division gate.
     import compile_stdlib
     from pathlib import Path
     src = ('struct P:\n'
@@ -177,6 +189,7 @@ if __name__ == '__main__':
     test_int_true_division_is_float()
     test_bool_true_division_is_float()
     test_int_true_division_is_float_in_generator_body()
+    test_unsigned_division_matches_real_mojo()
     test_struct_true_division_builds()
     test_integer_modulo_floors_toward_divisor_sign()
     test_integer_modulo_floors_in_generator_body()
