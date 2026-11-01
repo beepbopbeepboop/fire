@@ -99,7 +99,6 @@ BASELINE = {
 # reason the header above gives for its prefixed entry.
 BARE_BASELINE = {
     'CRASH.md': 1,
-    'bugs/CODEGEN_ctor_temp_field_read_loses_element_type.md': 2,
     'bugs/CODEGEN_dict_comprehension_repr_is_separately_broken.md': 3,
     'bugs/CODEGEN_nested_container_as_dict_key_or_tuple_slot.md': 2,
     'bugs/CODEGEN_selfhost_tokenize_region_eq_quadratic.md': 1,
