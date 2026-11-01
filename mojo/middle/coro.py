@@ -1342,6 +1342,16 @@ def _generator_value_kind(fn: N.FunctionDef,
                         for x in _walk(fn))
             and _tagged_consumers_ok(fn.name)):
         return 'w', ''
+    # A None yield that did NOT take the tagged word has no slot that can carry
+    # it: the fall-through below is the int64_t slot, and that prints the raw 0
+    # (measured: `next(it)` on a bare-`yield` generator printed `0` where CPython
+    # prints `None`). Refuse rather than compile a silently wrong value, the same
+    # way the mixed-kind checks below refuse. A `for` / `list()` / comprehension
+    # consumer takes the tag, so only a consumer outside that set lands here.
+    if has_none:
+        return None, ('a None yield whose consumer is not a for loop / list() / '
+                      'comprehension: the int64_t value slot cannot carry None '
+                      'and would print 0 (v0)')
     if 'd' in kinds and (kinds - {'d', None}):
         return None, f'mixed float / non-float yields (v0)'
     if 'd' in kinds:
