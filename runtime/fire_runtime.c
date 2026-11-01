@@ -3125,11 +3125,99 @@ MojoBytes *mojo_bytes_from_list(MojoList *l)
     return b;
 }
 
+/* ── Text codecs for str.encode / bytes.decode ───────────────────────────
+ * The three codecs a compiled program can name without a codec package:
+ * utf-8, ascii and latin-1. The spelling is normalised the way CPython's
+ * codecs.lookup does (lowercase; '-' and ' ' become '_') and then matched
+ * against CPython's own aliases for each codec. Any other name is a
+ * LookupError. Errors are always 'strict': the `errors=` argument is not
+ * forwarded by the callers. */
+typedef enum { MOJO_CODEC_UTF8, MOJO_CODEC_ASCII, MOJO_CODEC_LATIN1 } MojoCodec;
+
+static const char *const _mojo_codec_name[] = { "utf-8", "ascii", "latin-1" };
+
+static MojoCodec mojo_codec_lookup(const char *name)
+{
+    if (name == NULL) return MOJO_CODEC_UTF8;
+    char norm[32];
+    size_t n = strlen(name);
+    if (n == 0 || n >= sizeof norm) goto unknown;
+    for (size_t i = 0; i < n; i++) {
+        char c = name[i];
+        if (c == '-' || c == ' ') c = '_';
+        norm[i] = (char)tolower((unsigned char)c);
+    }
+    norm[n] = 0;
+    if (!strcmp(norm, "utf_8") || !strcmp(norm, "utf8") || !strcmp(norm, "u8") ||
+        !strcmp(norm, "utf") || !strcmp(norm, "cp65001"))
+        return MOJO_CODEC_UTF8;
+    if (!strcmp(norm, "ascii") || !strcmp(norm, "us_ascii") ||
+        !strcmp(norm, "646") || !strcmp(norm, "us"))
+        return MOJO_CODEC_ASCII;
+    if (!strcmp(norm, "latin_1") || !strcmp(norm, "latin1") || !strcmp(norm, "latin") ||
+        !strcmp(norm, "l1") || !strcmp(norm, "iso_8859_1") || !strcmp(norm, "iso8859_1") ||
+        !strcmp(norm, "8859") || !strcmp(norm, "cp819") || !strcmp(norm, "iso_ir_100"))
+        return MOJO_CODEC_LATIN1;
+unknown: {
+        char detail[64];
+        snprintf(detail, sizeof detail, "unknown encoding: %s", name);
+        mojo_raise_lookup_error(detail);
+    }
+    return MOJO_CODEC_UTF8; /* unreached: mojo_raise_* does not return */
+}
+
+/* Decode one code point of a UTF-8 buffer at *i and advance *i past it. The
+ * source of str.encode is always valid UTF-8 (it is a char*), so a malformed
+ * lead byte is taken as its own code point rather than checked. */
+static uint32_t mojo_utf8_next(const unsigned char *p, int64_t n, int64_t *i)
+{
+    unsigned c = p[*i];
+    int extra = c >= 0xF0 ? 3 : c >= 0xE0 ? 2 : c >= 0xC0 ? 1 : 0;
+    if (extra == 0 || *i + extra >= n) { (*i)++; return c; }
+    uint32_t cp = c & (0x1Fu >> (extra - 1));
+    for (int k = 1; k <= extra; k++) cp = (cp << 6) | (p[*i + k] & 0x3Fu);
+    *i += extra + 1;
+    return cp;
+}
+
+/* CPython's \xNN / \uNNNN / \UNNNNNNNN spelling of a code point in a message. */
+static void mojo_codepoint_escape(uint32_t cp, char *out, size_t cap)
+{
+    if (cp < 0x100) snprintf(out, cap, "\\x%02x", (unsigned)cp);
+    else if (cp < 0x10000) snprintf(out, cap, "\\u%04x", (unsigned)cp);
+    else snprintf(out, cap, "\\U%08x", (unsigned)cp);
+}
+
 MojoBytes *mojo_bytes_from_str(char *s, char *encoding)
 {
-    (void)encoding; /* utf-8 / ascii: source is already a UTF-8 char* */
+    MojoCodec codec = mojo_codec_lookup(encoding);
+    const unsigned char *p = (const unsigned char *)s;
     int64_t n = (int64_t)strlen(s);
-    return mojo_bytes_new_lit(s, n);
+    if (codec == MOJO_CODEC_UTF8) return mojo_bytes_new_lit(s, n);
+    /* ascii and latin-1 both encode one code point to one byte, so the
+     * result length is the code-point count. Pass 1 counts it and refuses the
+     * first character the codec cannot hold, before anything is allocated. */
+    int64_t limit = codec == MOJO_CODEC_ASCII ? 0x80 : 0x100;
+    int64_t count = 0;
+    for (int64_t i = 0; i < n; count++) {
+        int64_t at = count;
+        uint32_t cp = mojo_utf8_next(p, n, &i);
+        if ((int64_t)cp >= limit) {
+            char esc[16], detail[160];
+            mojo_codepoint_escape(cp, esc, sizeof esc);
+            snprintf(detail, sizeof detail,
+                     "'%s' codec can't encode character '%s' in position %lld: "
+                     "ordinal not in range(%lld)",
+                     _mojo_codec_name[codec], esc, (long long)at, (long long)limit);
+            mojo_raise_unicode_encode_error(detail);
+        }
+    }
+    MojoBytes *b = mojo_bytes_alloc(count);
+    int64_t i = 0;
+    for (int64_t k = 0; k < count; k++) {
+        b->data[k] = (uint8_t)mojo_utf8_next(p, n, &i);
+    }
+    return b;
 }
 
 /* NUL-terminated C string -> MojoBytes (copies up to the terminator).
@@ -3400,8 +3488,35 @@ int mojo_bytes_endswith(MojoBytes *b, MojoBytes *p)
 
 char *mojo_bytes_decode(MojoBytes *b, char *encoding)
 {
-    (void)encoding;
+    MojoCodec codec = mojo_codec_lookup(encoding);
     int64_t n = b ? b->len : 0;
+    if (codec == MOJO_CODEC_ASCII) {
+        for (int64_t i = 0; i < n; i++) {
+            if (b->data[i] >= 0x80) {
+                char detail[160];
+                snprintf(detail, sizeof detail,
+                         "'ascii' codec can't decode byte 0x%02x in position %lld: "
+                         "ordinal not in range(128)",
+                         (unsigned)b->data[i], (long long)i);
+                mojo_raise_unicode_decode_error(detail);
+            }
+        }
+    }
+    if (codec == MOJO_CODEC_LATIN1) {
+        /* Every byte is one code point, which is the UTF-8 of that value:
+         * one byte below 0x80, two above it. */
+        char *s = malloc((size_t)n * 2 + 1);
+        size_t k = 0;
+        for (int64_t i = 0; i < n; i++) {
+            unsigned c = b->data[i];
+            if (c < 0x80) s[k++] = (char)c;
+            else { s[k++] = (char)(0xC0 | (c >> 6)); s[k++] = (char)(0x80 | (c & 0x3F)); }
+        }
+        s[k] = 0;
+        return s;
+    }
+    /* utf-8: the bytes are taken as they are, as they always were. Malformed
+     * UTF-8 is not yet rejected (see the codec note above mojo_bytes_from_str). */
     char *s = malloc((size_t)n + 1);
     if (n) memcpy(s, b->data, (size_t)n);
     s[n] = 0;
@@ -9832,6 +9947,46 @@ void mojo_raise_index_error(char *detail) {
     snprintf(msg, sizeof msg, "IndexError: %s", detail ? detail : "?");
     char *heap_msg = strdup(msg);
     mojo_exc_type_set(_MOJO_EXC_TAG_INDEXERROR);
+    mojo_exc_msg_set(heap_msg);
+    mojo_exc_obj_set(heap_msg);
+    mojo_raise();
+}
+
+/* The codec raisers: the same mechanism as mojo_raise_index_error, for the
+ * three classes a str.encode / bytes.decode with a codec name can raise.
+ * UnicodeEncodeError and UnicodeDecodeError are ValueErrors (through
+ * UnicodeError) and LookupError is its own base, and the compiled except
+ * matching reads those ancestors from _BUILTIN_EXC_PARENT in
+ * mojo/middle/types.py, so these tags must stay in step with that table. */
+#define _MOJO_EXC_TAG_UNICODEENCODEERROR 1332678121
+#define _MOJO_EXC_TAG_UNICODEDECODEERROR 1979787742
+#define _MOJO_EXC_TAG_LOOKUPERROR 1982726532
+
+void mojo_raise_unicode_encode_error(char *detail) {
+    char msg[256];
+    snprintf(msg, sizeof msg, "UnicodeEncodeError: %s", detail ? detail : "?");
+    char *heap_msg = strdup(msg);
+    mojo_exc_type_set(_MOJO_EXC_TAG_UNICODEENCODEERROR);
+    mojo_exc_msg_set(heap_msg);
+    mojo_exc_obj_set(heap_msg);
+    mojo_raise();
+}
+
+void mojo_raise_unicode_decode_error(char *detail) {
+    char msg[256];
+    snprintf(msg, sizeof msg, "UnicodeDecodeError: %s", detail ? detail : "?");
+    char *heap_msg = strdup(msg);
+    mojo_exc_type_set(_MOJO_EXC_TAG_UNICODEDECODEERROR);
+    mojo_exc_msg_set(heap_msg);
+    mojo_exc_obj_set(heap_msg);
+    mojo_raise();
+}
+
+void mojo_raise_lookup_error(char *detail) {
+    char msg[256];
+    snprintf(msg, sizeof msg, "LookupError: %s", detail ? detail : "?");
+    char *heap_msg = strdup(msg);
+    mojo_exc_type_set(_MOJO_EXC_TAG_LOOKUPERROR);
     mojo_exc_msg_set(heap_msg);
     mojo_exc_obj_set(heap_msg);
     mojo_raise();

@@ -2436,6 +2436,8 @@ _BUILTIN_EXC_PARENT = {
     'ConnectionRefusedError': 'ConnectionError',
     'ConnectionResetError': 'ConnectionError',
     'KeyError': 'LookupError', 'IndexError': 'LookupError',
+    'UnicodeError': 'ValueError', 'UnicodeEncodeError': 'UnicodeError',
+    'UnicodeDecodeError': 'UnicodeError',
     'ZeroDivisionError': 'ArithmeticError', 'OverflowError': 'ArithmeticError',
     'FloatingPointError': 'ArithmeticError',
 }

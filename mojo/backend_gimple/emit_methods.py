@@ -6403,11 +6403,9 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
         # `len()` of it counted UTF-8 codepoints' bytes wrong. The result is a
         # real MojoBytes * (the same runtime constructor `bytes(s)` uses). The
         # encoding is passed through as a char*; the runtime's
-        # mojo_bytes_from_str currently produces UTF-8 for every name (see
-        # bugs/CODEGEN_str_encode_compiles_to_the_identity_char_ptr.md, Status).
-        # `errors` is not
-        # forwarded: a str is always valid UTF-8, so the strict/replace
-        # distinction cannot arise for the one codec the runtime implements.
+        # mojo_bytes_from_str resolves it against its codec table (utf-8,
+        # ascii, latin-1; anything else is a LookupError). `errors` is not
+        # forwarded, so every codec runs with strict error handling.
         if arg_pairs:
             _enc = arg_pairs[0]
         else:
@@ -6637,12 +6635,19 @@ def _lower_bytes_method(gen, ov: str, method: str, args: list, kwargs=None) -> t
         return 'int64_t', gen._call_expr('int64_t', 'mojo_bytes_len', [('MojoBytes *', ov)])
 
     if method == 'decode':
-        enc = '"utf-8"'
+        # bytes.decode(encoding='utf-8', errors='strict'): the codec is the
+        # first positional or the `encoding=` keyword, the same shape as
+        # str.encode's lowering in _lower_str_method. The default is interned.
+        _enc = arg_pairs[0] if arg_pairs else None
         for k, v in (kwargs or []):
             if k == 'encoding':
-                enc = gen.lower_expr(v)[1]
-        if not enc.startswith('"') and arg_pairs and arg_pairs[0][0] == 'char *':
-            enc = arg_pairs[0][1]
+                _enc = gen.lower_expr(v)
+        if _enc is None:
+            enc = gen._intern_string('utf-8')
+        elif _enc[0] == 'char *':
+            enc = _enc[1]
+        else:
+            enc = gen._coerce_to_type(_enc[0], 'char *', _enc[1])
         return 'char *', gen._call_expr('char *', 'mojo_bytes_decode',
                                         [('MojoBytes *', ov), ('char *', enc)])
 

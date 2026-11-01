@@ -3483,6 +3483,36 @@ print(str(7).encode() + b'!')
 print(len("héllo".encode()), "é".encode() == 'é'.encode())
 """)
 
+    # str.encode(codec) / bytes.decode(codec) honour the codec NAME. The
+    # runtime used to ignore it: "é".encode("latin-1") gave the UTF-8 bytes
+    # c3 a9 (CPython: e9), and ascii silently accepted what it must refuse.
+    # An unencodable character is a UnicodeEncodeError (a ValueError), an
+    # unknown codec a LookupError, and the codec spellings are CPython's own.
+    test_gimple_matches_cpython("gimple_str_encode_codecs", """\
+s = "héllo"
+print(s.encode("latin-1"), len(s.encode("latin-1")))
+print(s.encode("ISO-8859-1") == s.encode("latin1"))
+print("abc".encode("US-ASCII"), "abc".encode("ascii") == b"abc")
+print(s.encode("UTF_8") == s.encode("utf8"), len(s.encode("utf-8")))
+try:
+    print("é".encode("ascii"))
+except UnicodeEncodeError:
+    print("ascii refused")
+try:
+    print("中".encode("latin-1"))
+except ValueError:
+    print("latin-1 refused as ValueError")
+try:
+    "nope".encode("no-such-codec")
+except LookupError:
+    print("unknown codec is LookupError")
+print(b"\\xe9".decode("latin-1") == "é", b"abc".decode("ascii"))
+try:
+    print(b"\\xe9".decode("ascii"))
+except UnicodeDecodeError:
+    print("ascii decode refused")
+""")
+
     test_gimple_stdout("gimple_set_str_rehash_unchanged", """\
 s = set()
 for i in range(30):
