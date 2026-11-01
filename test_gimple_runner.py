@@ -3481,6 +3481,32 @@ def main():
 main()
 """)
 
+    # An INT needle over a list whose elements are `char *` (a str list, or a
+    # kind-mixed literal) was cast to `char *` and handed to
+    # mojo_list_contains_str, which strcmp'd the integer's value as a pointer:
+    # `1 in ["a", 1]` was a SIGSEGV with no output. Each slot is compared in
+    # its own domain instead, so membership is defined per element as Python
+    # defines it. The `None` cases are the ones a naive word comparison gets
+    # wrong (a None slot is the NULL word, which is 0), and `not in` must
+    # negate the answer of the mixed branch, not return it raw.
+    test_gimple_matches_cpython("gimple_int_in_mixed_str_int_list", """\
+def main():
+    print(1 in ["a", 1], 1 in ["a"], 0 in ["a", None])
+    print(0 in [None, "a", 0], None in ["a", None], None in ["a"])
+    print(None in [0, 1], None in [1, None], 0 in [1, None])
+    print(1 not in ["a", 1], 3 not in ["a", 1], True in ["a", 1])
+    print(2 in [1, 2.0], True in [1.0, "a"], 2 in ["a", 2.5])
+    names = ["ccc", "a", "bb"]
+    print(1 in names, 0 in names, "a" in names)
+    built = ["a"]
+    built.append(1)
+    print(1 in built, 2 in built, "a" in built)
+    t = (None, "x")
+    print(None in t, "x" in t, 1 in t)
+    print('a' not in [b'a', b'b'], b'a' not in [b'a'], b'a' in [b'a'])
+main()
+""")
+
     # str.encode() is BYTES, not a str. It was lowered as an identity stub
     # typed char*, so the value printed as the str and len() counted the
     # wrong thing for a non-ASCII string (2 for "héllo" was not 6, the
