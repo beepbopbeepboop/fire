@@ -9502,3 +9502,27 @@ class TestDecWhileSignedModelRegression(unittest.TestCase):
         self.assertIn("countdown_go_neg", text,
                       "_go_neg theorem missing; signed negative case "
                       "is not modelled")
+
+    def test_go_block_elaborates_in_lean(self):
+        """The emitted `_go` def and its two theorems must typecheck.
+
+        Text checks cannot see a tactic that makes no progress: `simp [h]`
+        did not unfold the def and `simp [h, hm]` made no progress, and both
+        lines passed every substring assertion above.  So run Lean on the
+        block alone -- it is self-contained, so this is seconds, not the
+        proof's own CPU budget."""
+        import shutil as _sh, subprocess
+        if _sh.which("lean") is None:
+            self.skipTest("lean not on PATH")
+        text = open(self.proof).read()
+        m = re.search(r"def countdown_go : .*?simp \[countdown_go, h'\]",
+                      text, re.S)
+        self.assertIsNotNone(m, "the _go block is not in the emitted proof")
+        path = os.path.join(self.tmp, "go_block.lean")
+        with open(path, "w") as f:
+            f.write(m.group(0) + "\n")
+        r = subprocess.run(["lean", path], capture_output=True, text=True,
+                           timeout=600, cwd=self.tmp)
+        self.assertEqual(r.returncode, 0,
+                         "emitted _go block does not typecheck:\n"
+                         + r.stdout + r.stderr)

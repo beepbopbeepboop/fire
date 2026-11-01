@@ -1,3 +1,53 @@
+## Status (2026-11-01, round 2 — PARTIAL: the `_go` model block now elaborates; the proof's own callers still do not)
+
+**Landed (commit on `work/bug-codegen-arm64-cmp-flags-and-loop-sig-7981`):**
+
+- The dec-while `_go` block that `3dbec27a6` introduced did NOT typecheck. Both
+  theorems failed with `simp made no progress`: `simp [h]` never unfolds the
+  `def`, and `simp [h, hm]` cannot turn `¬ n < 2^63` into a fact from
+  `2^63 ≤ n`. The text checks in `TestDecWhileSignedModelRegression` could not see
+  this, which is why the commit looked right. Reproduced standalone with
+  `lean` on the bare block (seconds, no ProofLib). Fixed in
+  `formal/arm64_proof_gen.py::_gen_go`: `simp [{f}_go, h]` for the zero lemma;
+  `have h' : ¬ n < 2^63 := by omega` then `simp [{f}_go, h']` for the neg lemma.
+  The corrected block typechecks standalone.
+- `test_formal_call_proof_gen.py::TestDecWhileSignedModelRegression.test_go_block_elaborates_in_lean`
+  runs `lean` on the emitted block (skips if `lean` is absent). It fails on the
+  pre-fix text and passes now.
+
+**Measured this round:** `python3 -m unittest test_formal_call_proof_gen.TestDecWhileSignedModelRegression`
+→ 4 OK. The whole file → 222 run, 14 skipped, 1 ERROR: `TestStepLemmasCoverTheExecutableRegionOnly`
+`setUpClass` `KeyError: 4294970372` in `_trap_terminating`. Reproduced identically on
+the baseline `ff1c26d3f`, so it is NOT this change; it is the existing
+`bugs/formal/FORMAL_call_proofgen_red_on_head.md`.
+
+**Still open (the Lean proof is not yet correct for the signed model):**
+
+1. The emitted `countdown_go_zero` now carries `(h : n < 2^63)`, but its callers
+   still supply no hypothesis. Each must be given the sign fact, or the
+   conditional rewrite is never applied and the leaf is left unsolved:
+   - emitted proof, `simp [mojo, countdown_go_zero]` in `(by intro a _; …)` (the
+     exit-x0 leaf of the countdown machine loop), and at the CFG terminal
+     `simp [hx0f_*, mojo, countdown_go_zero]`;
+   - `_gen_dec_while_block`'s template: `simp [@FN@_go_zero, hz]` (the `hz` branch,
+     where `m % S = 0` discharges `0 < 2^63`) and `simp [@FN@_go_zero]` at the end
+     of the step case, where the sign fact is NOT available — that one needs the
+     `m % 2^64 < 2^63` split.
+2. `cond_val` in the same template is stated as `evalExpr ≠ 0 ↔ m % S ≠ 0`. That
+   is false for `m % S ≥ 2^63`: `pred_iff` now makes the predicate false there, so
+   the left side is `0` while the right side is `true`. It must become
+   `… ↔ (m % S ≠ 0 ∧ m % S < 2^63)` (or equivalent), and `prog_correct` needs the
+   third case `m % 2^64 ≥ 2^63`: one `runF_while_false` step plus the identity,
+   as the planning entry below describes.
+3. Not verified: the whole countdown proof, `wdiff` (the canary — its `NE` model
+   is unchanged, but it is not re-run this round), and `countdown`/`wge` stay in
+   `EXPECTED_FAILURES`.
+
+**Next step:** fix item 1's two lemma-call sites and item 2's `cond_val`
+statement, verify the template with `lean` on a copy of the generated proof
+(under `memslot`, one run, not the full `test_formal.py`), then add the third
+`prog_correct` case.
+
 ## Status (2026-11-01 — PLANNING ROUND: the Lean half cannot be verified by a light worker on this machine; the guide below is what the next round executes)
 
 **Measured this round (a real run, not carried forward):**

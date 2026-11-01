@@ -2330,11 +2330,12 @@ def _gen_go(fn, tc: dict = None) -> list:
             f"UInt64.ofNat (m % 18446744073709551616)\n\n"
             f"theorem {fname}_go_zero (n : Nat) (h : n < 9223372036854775808) : "
             f"{fname}_go n = 0 := by\n"
-            f"  simp [h]\n\n"
+            f"  simp [{fname}_go, h]\n\n"
             f"theorem {fname}_go_neg (n : Nat) (h : 9223372036854775808 ≤ n) "
             f"(hm : n < 18446744073709551616) :\n"
             f"    {fname}_go n = UInt64.ofNat (n % 18446744073709551616) := by\n"
-            f"  simp [h, hm]"
+            f"  have h' : ¬ n < 9223372036854775808 := by omega\n"
+            f"  simp [{fname}_go, h']"
         )
         return helpers
     dec1 = _dec1_pattern(fn)
