@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pin for bugs/CODEGEN_generic_struct_local_typed_int64_linked_list.md.
+"""Pin for the fixed LinkedList[Int] local-typed-int64_t bug.
 
 `var l = LinkedList[Int](1, 2, 3)` must lower to a real elaborated struct, not
 `int64_t l; l = 0;` with `__iter__()`/`__next__()` stubbed out."""
@@ -106,6 +106,21 @@ def test_iterator_local_is_the_materialized_iterator():
     assert 'int64_t.prev() stubbed' not in c
 
 
+def test_repro_path_has_no_stub():
+    """The repro's whole call path (ctor, `__iter__`, `__next__`, the Node
+    allocation and links) is real code: no `stubbed` marker mentions any of
+    those methods, and `main` has none at all. The only stubs left are the
+    off-path ones tracked in bugs/CODEGEN_linked_list_reflection_and_struct_elements.md."""
+    c = _compile()
+    assert 'stubbed' not in _main_body(c)
+    off_path = ('__hash__', 'IteratorOwnedType', 'write_sequence_to',
+                '_write_self_to', 'FormatStruct', 'TypeNames', 'params',
+                'fields')
+    for line in c.splitlines():
+        if 'stubbed' in line:
+            assert any(m in line for m in off_path), line.strip()
+
+
 def test_erased_word_structs_not_materialized():
     """`Optional[Int](...)` keeps its erased tagged-word model: materializing
     it as a struct is the measured test_optional regression."""
@@ -124,5 +139,6 @@ if __name__ == '__main__':
     test_node_pointer_unwrap_is_identity()
     test_node_allocation_api_is_lowered()
     test_iterator_local_is_the_materialized_iterator()
+    test_repro_path_has_no_stub()
     test_erased_word_structs_not_materialized()
     print('PASS: generic-struct local is a struct')
