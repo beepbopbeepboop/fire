@@ -1,5 +1,30 @@
 # CODEGEN_a_bare_or_explicit_yield_of_none: a None yield value prints 0
 
+## Status (2026-11-01, seventeenth round, work/bug-codegen-a-bare-or-explicit-yield-of: yield-side probe, receive side filed separately, no code changed)
+
+**Probed (default path, CPython oracle on the same text), the yield side only:**
+
+| shape | compiled | CPython |
+|---|---|---|
+| `use(g())` where `use` loops `for v in it` (lone None) | refused: "generator function(s) ... straight-line" | `None` |
+| `it = g(); print(next(it, 5))` (lone bare yield) | `None` | `None` |
+| `for v in g(): print(v)` with `yield` then `yield 'a'` | `None`, `a` | `None`, `a` |
+
+The first row is an honest compile refusal, not a silent 0. The other two match.
+So the yield side has no silent `0` left on the default path among these shapes.
+
+**New silent wrong value found, on the RECEIVE side, filed as its own doc:**
+`bugs/CODEGEN_a_none_sent_into_a_generator_prints_zero.md`. A None resumed into
+`x = yield` (via `next(it)`) prints `0`. It goes through the int64 resume slot,
+which has no None kind, so it is a different fix (a resume ABI change) and is not
+claimed as fixed here.
+
+**Not changed this round:** no code, no test. The three open items above stand:
+(1) the non-int64 mixed store is refused (round 16); (2) `v is None` on a tagged
+False/0 is `bugs/CODEGEN_is_none_on_a_tagged_false_or_zero_is_true.md`; (3) a lone
+None whose consumer is outside the tagged set is refused (`NONE_YIELD_CPP_REFUSAL`
+and the `_generator_value_kind` refusal in `mojo/middle/coro.py`).
+
 ## Status (2026-11-01, sixteenth round, work/bug-codegen-a-bare-or-explicit-yield-of: open item 1 decided, refused, partial)
 
 **Probe (item 1 of the fifteenth round), measured before this round:** a
