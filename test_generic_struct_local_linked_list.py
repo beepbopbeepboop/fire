@@ -50,6 +50,18 @@ def test_node_pointer_alias_is_typed():
     assert 'Node_1_T_3_Int * _tail;' in st, st
 
 
+def test_node_links_are_typed_self_pointers():
+    """`Node`'s own `_prev`/`_next` (`Optional[Pointer[Self, o]]`) stay typed
+    `Node_..._Int *`: the constructor's `self._prev = <erased word>` must not
+    override the field's explicit annotation."""
+    c = _compile()
+    i = c.index('typedef struct Node_1_T_3_Int {')
+    st = c[i:c.index('} Node_1_T_3_Int;', i)]
+    assert 'Node_1_T_3_Int * _prev;' in st, st
+    assert 'Node_1_T_3_Int * _next;' in st, st
+    assert 'int64_t _prev;' not in st
+
+
 def test_erased_word_structs_not_materialized():
     """`Optional[Int](...)` keeps its erased tagged-word model: materializing
     it as a struct is the measured test_optional regression."""
@@ -64,5 +76,6 @@ def test_erased_word_structs_not_materialized():
 if __name__ == '__main__':
     test_linked_list_local_is_a_struct()
     test_node_pointer_alias_is_typed()
+    test_node_links_are_typed_self_pointers()
     test_erased_word_structs_not_materialized()
     print('PASS: generic-struct local is a struct')
