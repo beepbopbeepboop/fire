@@ -3829,6 +3829,36 @@ _PYBOX_SCALARS = frozenset({
 })
 
 
+def _tagged_arith_select(gen, op: str, left_node, lt: str, lv: str,
+                         right_node, rt: str, rv: str):
+    """`lhs OP rhs` where a TAGGED generator word (`_tagged_word_vals`) is an
+    operand beside an INTEGER, and OP is arithmetic. Returns the result temp,
+    or None when the shape does not apply.
+
+    The answer is the integer one or a double box holding the double answer,
+    and which one is a run-time fact: the box's kind. That is the same select
+    `_float_param_arith` runs for a maybe-float parameter, fed this operand's
+    kind tracking instead of a parameter name. The result is itself a tagged
+    word (a double box is rendered by kind and stays a box for the next
+    operator). A double operand is not handled here: its answer is a double
+    whatever the box holds, and the tail's double arm already gives that."""
+    if op not in ginf._FLOAT_PARAM_OPS:
+        return None
+    _tagged = getattr(gen, '_tagged_word_vals', ())
+    _boxed = getattr(gen, '_boxed_vals', ())
+    _tag_l = lv in _tagged and lv in _boxed
+    _tag_r = rv in _tagged and rv in _boxed
+    if not (_tag_l or _tag_r):
+        return None
+    if lt not in ('int', 'int64_t') or rt not in ('int', 'int64_t'):
+        return None
+    _t = ginf._float_param_arith(gen, op, left_node, lt, lv, right_node, rt, rv,
+                                 lmaybe=_tag_l, rmaybe=_tag_r)
+    gen._boxed_vals.add(_t)
+    gen._tagged_word_vals.add(_t)
+    return _t
+
+
 def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                         right_node, rt: str, rv: str) -> tuple[str, str]:
     """The rest of BinaryOp lowering once both operands are already
@@ -3946,11 +3976,17 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # here made `x + "!"` a `double + char *` gcc error. Otherwise a tagged word
     # in arithmetic is an int or bool word far more often than a float box, so
     # it is read as its integer (`mojo_box_int`) beside an int, and as a double
-    # (`mojo_box_double`, exact for an int too) beside a double. A float box
-    # beside an int truncates -- the same stopgap `_unbox_float_param_operand`
-    # documents for a maybe-float parameter; the full answer needs the box read
-    # as a double at run time.
+    # (`mojo_box_double`, exact for an int too) beside a double. A tagged word
+    # beside an INTEGER under `+ - * // %` never reaches this arm: the select
+    # above answers it by the box's kind. The arm below serves what is left:
+    # the comparisons and bitwise operators beside an int, which keep the
+    # truncating read (`mojo_box_int`).
     _tagged = getattr(gen, '_tagged_word_vals', ())
+    # A tagged word beside an integer under arithmetic: the run-time select
+    # by the box's kind (see `_tagged_arith_select`).
+    _tsel = _tagged_arith_select(gen, op, left_node, lt, lv, right_node, rt, rv)
+    if _tsel is not None:
+        return 'int64_t', _tsel
     if lv in getattr(gen, '_boxed_vals', ()) and not (
             lv in _tagged and rt == 'char *' and op == '+'):
         if op in _ident_ops and (op in ('is', 'is not')
@@ -5555,6 +5591,9 @@ def _lower_floordiv(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
     from mojo.backend_gimple import emit_infra as ginf
     if ginf._float_param_arith_applies(gen, '//', node.left, lt, node.right, rt):
         return 'int64_t', ginf._float_param_arith(gen, '//', node.left, lt, lv, node.right, rt, rv)
+    _tsel = _tagged_arith_select(gen, '//', node.left, lt, lv, node.right, rt, rv)
+    if _tsel is not None:
+        return 'int64_t', _tsel
     # Boxed-PythonObject floor division (2026-10-21 part 4, further,
     # test_python_object): `a // b` on box locals answers through the
     # runtime's word-class checks (int result, zero-division RAISE, double

@@ -3812,6 +3812,41 @@ def main():
     print(x + 1)
 main()
 """)
+    # A FLOAT box bound to a name and used under arithmetic: the answer is a
+    # double (`x * 2` is 5.0), not the truncated integer the box's word reads
+    # as. Both operand orders, and the integer-only operators that must keep
+    # their integer answer beside the same tagged word (`x // 2`, `x % 2`
+    # answer 1.0 and 0.5 for 2.5, the double forms). A chained result is a
+    # tagged word again, so its own arithmetic selects by kind too.
+    test_generator_matches_cpython("tagged_float_bound_to_name_arithmetic", """\
+def gen():
+    yield 2.5
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x)
+    print(x * 2)
+    print(2 * x, x + 1, x - 1)
+    print(x // 2, x % 2, x / 2)
+    print((x * 2) + 1)
+main()
+""", """\
+def gen():
+    yield 2.5
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x)
+    print(x * 2)
+    print(2 * x, x + 1, x - 1)
+    print(x // 2, x % 2, x / 2)
+    print((x * 2) + 1)
+main()
+""")
     test_generator_matches_cpython("tagged_str_bound_to_name_has_length", """\
 def gen():
     yield 1
