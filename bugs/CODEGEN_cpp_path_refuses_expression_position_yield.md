@@ -77,5 +77,7 @@ evaluated) is still hoisted.
 - A received word used as an `and`/`or` operand is not truth-tested:
   `bugs/CODEGEN_cpp_path_and_or_on_received_word.md`.
 
-The `send()` gap that would change what these receive is in
-`bugs/CODEGEN_cpp_send_emits_default_path_symbol.md`.
+The `send()` gap that would change what these receive (the cpp resume carrying
+a sent word, now landed) is recorded in the commit that added `{base}_send`
+to the cpp generator unit (cpp_async.py), with the pins in
+`run_cpp_send_tests` in test_gimple_generator_runner.py.
