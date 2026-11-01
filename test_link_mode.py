@@ -233,7 +233,7 @@ def test_bare_submodule_import_keyword_call() -> bool:
     this binary` at run time, and the plain call answered through the
     stub. The from-import spelling of the same calls already worked.
     Found while closing c_common/fsutil.py (`fsutil.walk_tree("runtime",
-    suffix=".h")`); see bugs/CODEGEN_dynamic_call_layer_residue_after_fsutil.md.
+    suffix=".h")`); see the dynamic call layer residue bug (after the fsutil closure).
     """
     pkg = {
         'pkg3/__init__.py': '',
@@ -281,7 +281,7 @@ def test_cross_module_generator_default_is_padded() -> bool:
     `tuple(...)` was all zeros (CPython 6 / (0, 1, 2)). The defining
     module's snapshot (`api['defaults']`) is the fallback now. Found while
     closing c_common/fsutil.py; see
-    bugs/CODEGEN_dynamic_call_layer_residue_after_fsutil.md item 2.
+    the dynamic call layer residue bug (after the fsutil closure).
     """
     pkg = {
         'pkg5/__init__.py': '',
@@ -475,7 +475,7 @@ def test_str_affix_method_on_unsolved_word_is_bool() -> bool:
     variant already wraps its result with `!= 0`; the word receiver must
     agree. Found while closing c_common/fsutil.py (`iter_files` yields
     words, and `f.startswith("runtime")` printed `1` where CPython prints
-    `True`); see bugs/CODEGEN_dynamic_call_layer_residue_after_fsutil.md
+    `True`); see the dynamic call layer residue bug (after the fsutil closure)
     item 3.
     """
     pkg = {
@@ -522,8 +522,7 @@ def test_generator_none_default_reaches_callee_as_null() -> bool:
     ordinary `for` loop -- which had no try frame, so the program died with
     "Unhandled exception: empty". Plain functions padded this slot correctly
     (`_default_expr_to_pair(..., param_ctype=...)`), which is why only the
-    generator path showed it. Found via bugs/CODEGEN_dynamic_call_layer_residue_
-    after_fsutil.md item 4 (its doc named a try/except after a loop; the
+    generator path showed it. Found via the dynamic call layer residue bug (after the fsutil closure) (its doc named a try/except after a loop; the
     real trigger is the None default, reproduced with the loop and try kept).
     """
     src = (
@@ -583,7 +582,7 @@ def test_statement_call_packs_keywords_into_kwargs_slot() -> bool:
     must also reach the dict as a double (it was truncated to an int); reading
     the value back is a separate gap (a dict slot read loses its value kind),
     so this test asserts only that the keyword was packed.
-    Found via bugs/CODEGEN_dynamic_call_layer_residue_after_fsutil.md item 5's
+    Found via the dynamic call layer residue bug (after the fsutil closure)
     open `**kw` float pack."""
     src = (
         'def show(tag, **kw):\n'
@@ -613,8 +612,7 @@ def test_generator_value_called_with_kwargs_spread_and_float_default() -> bool:
     parameter with a float default (`scale=2.0`) was typed int64_t, so its
     unit could not register a runtime signature; and the `for` over the
     returned handle read a double-valued drain through the int arm, printing
-    the bit pattern. Found via bugs/CODEGEN_dynamic_call_layer_residue_after_
-    fsutil.md item 5's open gaps."""
+    the bit pattern. Found via the dynamic call layer residue bug (after the fsutil closure) open gaps."""
     src = (
         'def g(n, scale=2.0):\n'
         '    for i in range(n):\n'
@@ -645,7 +643,7 @@ def test_generator_value_called_with_double_beside_star_spread() -> bool:
     list's kind string was positional and a spread's length is unknown. A
     double is now appended with `mojo_list_append_double_kinded`, which records
     that slot's 'd' kind at run time, so it may sit before or after the
-    spread. Found via bugs/CODEGEN_dynamic_call_layer_residue_after_fsutil.md."""
+    spread. Found via the dynamic call layer residue bug (after the fsutil closure)."""
     src = (
         'def g(x: float, n: int, y: float = 0.25):\n'
         '    for i in range(n):\n'
@@ -683,7 +681,7 @@ def test_generator_value_called_with_float_element_in_star_spread() -> bool:
     `mojo_list_append_int`, so the double box's address reached the callee as
     an integer word and the registered generator read garbage. Elements are
     now appended with `mojo_list_append_word`, which records the kind. Found
-    via bugs/CODEGEN_dynamic_call_layer_residue_after_fsutil.md."""
+    via the dynamic call layer residue bug (after the fsutil closure)."""
     src = (
         'def g(x: float, n: int):\n'
         '    for i in range(n):\n'
@@ -703,6 +701,36 @@ def test_generator_value_called_with_float_element_in_star_spread() -> bool:
           and stdout == '0.0\n1.5\n3.0\n')
     if not ok:
         print(f"  ✗ generator_value_called_with_float_element_in_star_spread: "
+              f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
+    return ok
+
+
+def test_plain_function_unannotated_float_default_is_a_float() -> bool:
+    """An UNANNOTATED plain-function parameter whose default is a float literal
+    is a float parameter (the rule generators already had in `cpp_async`; now
+    shared in `funcs_shared._param_ctype`). Left as the int64_t box, an omitted
+    `scale=0.5` was padded as the integer 0 / its bits and printed garbage.
+    Found via the dynamic call layer residue bug (after the fsutil closure)."""
+    src = (
+        'def show(tag, scale=0.5):\n'
+        '    print(tag, scale)\n'
+        '\n'
+        'def keep(scale=0.5):\n'
+        '    return scale\n'
+        '\n'
+        'def main():\n'
+        '    show("a")\n'
+        '    show("b", 2.5)\n'
+        '    print(keep())\n'
+        '    print(keep(1.25))\n'
+        'main()\n'
+    )
+    rc, stdout, py_rc, py_stdout = _run_single_file_vs_cpython(
+        'plainfloatdflt', src, 'plain_fd_')
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and stdout == 'a 0.5\nb 2.5\n0.5\n1.25\n')
+    if not ok:
+        print(f"  ✗ plain_function_unannotated_float_default_is_a_float: "
               f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
     return ok
 
@@ -2356,6 +2384,7 @@ CASES = [
     test_generator_value_called_with_kwargs_spread_and_float_default,
     test_generator_value_called_with_double_beside_star_spread,
     test_generator_value_called_with_float_element_in_star_spread,
+    test_plain_function_unannotated_float_default_is_a_float,
     test_from_submodule_import_symbol_value_read,
     test_sibling_function_import_call_is_inlined,
     test_sibling_class_attribute_function_scoped,
