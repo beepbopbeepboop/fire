@@ -3267,6 +3267,7 @@ class GimpleGen:
         'mojo_type_add_base':  ('void', ['int64_t', 'int64_t']),
         'mojo_classobj_tag':   ('int64_t', ['int64_t']),
         'mojo_classobj_setattr': ('void', ['int64_t', 'char *', 'int64_t']),
+        'mojo_type_fill_from_dict': ('void', ['int64_t', 'MojoDict *']),
         'mojo_chain_extend':   ('void', ['MojoList *', 'int64_t']),
         'mojo_re_exec':        ('int64_t', ['int64_t', 'char *', 'int64_t', 'int64_t', 'int64_t']),
         'mojo_re_exec_bytes':  ('int64_t', ['int64_t', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),

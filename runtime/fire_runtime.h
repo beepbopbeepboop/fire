@@ -1408,6 +1408,7 @@ void    mojo_type_add_base(int64_t cls, int64_t base);
 int     mojo_is_classobj(int64_t w);
 int64_t mojo_classobj_tag(int64_t w);
 void    mojo_classobj_setattr(int64_t cls, char *name, int64_t word);
+void    mojo_type_fill_from_dict(int64_t cls, MojoDict *ns);
 int     mojo_classobj_lookup(void *obj, char *attr, int64_t *out);
 int64_t mojo_re_call(int64_t obj, char *name, MojoList *args, MojoDict *kw);
 /* `_kw` variants: the key arrives as a raw machine WORD that is either a boxed

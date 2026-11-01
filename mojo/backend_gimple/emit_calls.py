@@ -1455,13 +1455,21 @@ def _lower_type_new(gen, node):
     name_n, bases_n, ns_n = node.args
     if not isinstance(bases_n, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
         return None
-    if not isinstance(ns_n, gimple_ctypes.DictExpr):
-        return None
     keys = []
-    for k, _v in ns_n.pairs:
-        if not isinstance(k, gimple_ctypes.StringLiteral) or N.is_fstring_literal(k):
+    if isinstance(ns_n, gimple_ctypes.DictExpr):
+        for k, _v in ns_n.pairs:
+            if not isinstance(k, gimple_ctypes.StringLiteral) or N.is_fstring_literal(k):
+                return None
+            keys.append(_as_str(k.value))
+    elif not isinstance(ns_n, (gimple_ctypes.IdentExpr, gimple_ctypes.MemberExpr)):
+        return None
+    ns_dict = None
+    if not isinstance(ns_n, gimple_ctypes.DictExpr):
+        # a COMPUTED namespace (a variable): only a dict value can be walked into the table
+        nst, nsv = gen.lower_expr(ns_n)
+        if nst != 'MojoDict *':
             return None
-        keys.append(_as_str(k.value))
+        ns_dict = nsv
     nt, nv = gen.lower_expr(name_n)
     nm = nv if nt == 'char *' else gen._new_val('char *', f'(char *){gen._to_int64(nt, nv)}')
     cls = gen._call_expr('int64_t', 'mojo_type_new', [('char *', nm)])
@@ -1473,6 +1481,10 @@ def _lower_type_new(gen, node):
             bt, bv = gen.lower_expr(b)
             bw = gen._call_expr('int64_t', 'mojo_classobj_tag', [('int64_t', gen._to_int64(bt, bv))])
         gen._void_call('mojo_type_add_base', [('int64_t', cls), ('int64_t', bw)])
+    if ns_dict is not None:
+        gen._void_call('mojo_type_fill_from_dict', [('int64_t', cls), ('MojoDict *', ns_dict)])
+        gen._dyn_word_vals.add(cls)
+        return 'int64_t', cls
     for key, (_k, vnode) in zip(keys, ns_n.pairs):
         vt, vv = gen.lower_expr(vnode)
         vw = (gen._call_expr('int64_t', 'mojo_box_from_double', [('double', vv)])
@@ -3856,7 +3868,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             'cannot compile module: 3-argument type(name, bases, namespace) '
             'creates a class at run time, which the compiled path does not '
             'model unless the bases are a literal tuple/list and the namespace a '
-            'literal dict of string keys (bug:CODEGEN_enum_runtime_class_creation)')
+            'dict of string keys (bug:CODEGEN_enum_runtime_class_creation)')
     # A `namedtuple(...)` the module-level desugar (fire_compiler.
     # desugar_namedtuples) did not lower: a call inside a function, a
     # different typename, `rename=`/`defaults=`, a computed field list. It

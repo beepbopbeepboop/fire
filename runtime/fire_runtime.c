@@ -15178,6 +15178,20 @@ void mojo_classobj_setattr(int64_t cls, char *name, int64_t word)
 {
     mojo_class_setattr(mojo_classobj_tag(cls), name, word);
 }
+/* `type(name, bases, ns)` with a COMPUTED namespace: every string-keyed entry of the dict `ns`
+ * becomes a class attribute, in insertion order. A float slot (kind 1) travels as a tagged box
+ * so `Foo.x` reads it back as a float; every other kind's word is the value. */
+void mojo_type_fill_from_dict(int64_t cls, MojoDict *ns)
+{
+    if (!ns) return;
+    int64_t *order = mojo_dict_order_indices(ns);
+    for (int64_t oi = 0; oi < ns->used; oi++) {
+        _DictSlot *s = &ns->slots[order[oi]];
+        int64_t w = s->kind == 1 ? mojo_box_from_double(mojo_double_from_bits(s->val)) : s->val;
+        mojo_classobj_setattr(cls, _slot_key(s), w);
+    }
+    free(order);
+}
 /* 1 and *out set when `obj` is a class handle that has `attr`; AttributeError (or the soft
  * miss) is the caller's, so a non-class falls through to its own lookup. */
 int mojo_classobj_lookup(void *obj, char *attr, int64_t *out)
