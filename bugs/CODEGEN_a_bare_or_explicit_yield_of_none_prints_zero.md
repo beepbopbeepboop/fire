@@ -1,10 +1,152 @@
 # CODEGEN_a_bare_or_explicit_yield_of_none: a None yield value prints 0
 
+## Status (2026-11-01, twelfth round, work/bug-codegen-a-bare-or-explicit-yield-of: lone None is a one-kind tagged word on cpp, partial)
+
+**Landed (real behaviour change on `MOJO_CORO=cpp`):** a generator whose ONLY
+yield is None (bare `yield` or `yield None`) is no longer refused on the escape
+hatch. `_cpp_tag_yield_sites` (`cpp_async.py`) accepts the single kind `None`
+and emits `mojo_box_none()` as the word; the stack-switch analysis already
+returned the tagged kind `'w'` for it, so the consumers that render tagged
+words (`for`, `next`) print `None`.
+
+**Pins** (`run_none_yield_tests` in `test_gimple_generator_runner.py`): the
+`none_yield_lone_refused_on_cpp_path` refusal pin became two CPython-oracle
+tests, `none_yield_lone_bare_for_loop_cpp` and `none_yield_lone_explicit_next_cpp`.
+Fail-before, measured by reverting only the one-line source edit: both FAIL with
+the refusal text. After: both PASS. Group run: 13/0.
+
+**Still refused (honest, not a silent 0):** a None yield whose consumer the
+tagged word does not cover (`_tagged_consumers_ok` false), on either path, and
+the `NONE_YIELD_CPP_REFUSAL` guard that catches any None slot left untagged.
+The default path prints None for every None shape that compiles (see the
+fifth-round matrix).
+
+**Gate note for the integrator (not run here):** the change touches only the
+`MOJO_CORO=cpp` escape hatch and only generators whose sole yield is None, which
+the stdlib cpp path did not compile before. Run `gimplegenerators` and
+`compile_stdlib.py`; a rise in `U` or `skip` would be a regression.
+
+## Status (2026-11-01, eleventh round, work/bug-codegen-a-bare-or-explicit-yield-of: None carried into the tagged word on the cpp path, partial)
+
+**Landed (real behaviour change on `MOJO_CORO=cpp`):** a None yield beside other
+kinds is no longer refused. It is marked at the emitter (`co_yield /*Y:none*/ (0);`,
+`cpp_core.py`, the bare-yield and explicit `yield None` arm), and
+`_cpp_tag_yield_sites` (`cpp_async.py`) boxes the marker as `mojo_box_none()`, so a
+mixed generator is a tagged word like the str/float ones. The consumers that already
+render tagged words (`print`, `for`, `next`, `append`) print `None`. The lone-None
+generator is still refused, and the refusal now comes from the generator-level check
+only when the slot was not tagged (`not _tagged_yield`), so the `(0)` placeholder can
+never reach the output.
+
+**Pins** (`run_none_yield_tests` in `test_gimple_generator_runner.py`): the two
+`*_refused_on_cpp_path` tests for mixed shapes became CPython-oracle output tests
+(`none_yield_bare_beside_int_on_cpp_path`, `none_yield_explicit_beside_str_on_cpp_path`).
+Fail-before, measured by reverse-applying only the source edits: both FAIL with the
+refusal text. After: both PASS. The lone-None pin `none_yield_lone_refused_on_cpp_path`
+is kept (PASS before and after). Group run: 22/0 with `run_tagged_word_cpp_tests` and
+`run_none_list_iteration_tests`.
+
+**Gate note for the integrator (not run here):** the change touches only the
+`MOJO_CORO=cpp` escape hatch, and the default stack-switch path emits no `/*Y:none*/`
+marker, so compiled output on the default path should not move. The integrator should
+still run `gimplegenerators` and `compile_stdlib.py`: any stdlib generator that yields
+None in cpp mode was previously refused and now compiles, which moves the `U`/`skip`
+counts only if one of those modules is cpp-pinned.
+
+**Still open (superseded by the twelfth round, which landed the lone-None word):** a lone None on the
+cpp path was refused. The tagged path needs at least two kinds, and a lone None
+has no word to carry it: a one-kind None slot would need a `'none'`-only word
+convention in `_cpp_tag_yield_sites` and the kind analysis (`_generator_value_kind`
+returns a non-`'w'` kind for it). That is the next step if the escape hatch must run
+lone-None generators; the default path already prints None for them.
+
+
+## Status (2026-11-01, tenth round, work/bug-codegen-a-bare-or-explicit-yield-of: dead `co_yield (int64_t)0` removed, partial)
+
+**Landed (the fifth round's item 3, the dead bare-yield emitter):**
+`mojo/backend_gimple/cpp_core.py`'s bare-yield arm no longer writes
+`co_yield (int64_t)0;  /* bare yield */`. It raises
+`_UnsupportedGeneratorShape` with the refusal text, so no path can emit the
+0 literal. The text is one constant, `coro.NONE_YIELD_CPP_REFUSAL`, which
+`cpp_async.py`'s generator-level check now also raises (it had its own copy).
+
+**Behaviour:** the output is unchanged. `cpp_async.py` ran the emitter before
+its own None check, and the emitted line was discarded by that check, so the
+refusal is the same, now raised from the statement that caused it. No new
+fail-before pin exists for this, because the old line never reached the
+output; the guards are the existing `none_yield_bare_refused_on_cpp_path` and
+`none_yield_explicit_beside_str_refused_on_cpp_path`, which pass before and
+after.
+
+**Pins run:** `run_none_yield_tests` + `run_tagged_word_bind_tests` +
+`run_none_list_iteration_tests`: 20 passed, 0 failed.
+
+**Still open:** the None value on the C++ coroutine path itself (the
+refusal stays; carrying a None through the value slot is the owner-level ABI
+feature named at the top of this doc), and the eighth round's item 2 (an
+explicit `yield None` beside str/float is still a typer refusal). Gate note
+for the integrator: `gimplegenerators` and `compile_stdlib.py` are not run
+here; the change should move no compiled output.
+
+## Status (2026-11-01, ninth round, work/bug-codegen-a-bare-or-explicit-yield-of: None list elements print, partial)
+
+**Landed: the root cause of the comprehension gap, which is not generator-specific.**
+`for x in [None]: print(x)` printed the box's address (`4315206080`), and a
+None yielded into `[y for y in gen()]` then iterated had the same symptom. The
+codegen reads a kind-mixed list slot through `mojo_list_get_boxed`, which boxes
+the None slot ('n'), and `mojo_cstr_or_int_str` spelled only the 'd' and 'p'
+boxes by kind, so the 'n' box fell through to the integer arm. The predicate
+`_box_spelled_by_kind` now covers every box kind except the `id()` token ('i'),
+and the spelling goes through `mojo_repr_boxed`, which already renders 'n', 'b',
+'s', 'l' (`runtime/fire_runtime.c`).
+
+**Pins:** `run_none_list_iteration_tests` in `test_gimple_generator_runner.py`
+(four cases: `[1, None]`, `[None]`, `[True, "a"]`, and the comprehension over a
+None-yielding generator). Before: three FAIL with addresses. After: 4/4. Subset
+`run_none_yield_tests` + `run_tagged_word_bind_tests` + the new group: 20/0.
+
+**Gate note for the integrator (not run here):** this changes how every list-slot
+box of kind 'n', 'b', 's' or 'l' is spelled by `mojo_cstr_or_int_str`. Compiled
+output for those cases moves from an address to the value; a regression would
+show as a diff in `gimplegenerators` and in any stdlib module that printed a
+None-bearing list. Run `gimplegenerators` and `compile_stdlib.py`.
+
+**Still open:** items 2 and 3 of the eighth round's list (the explicit
+`yield None` beside str/float is still an honest typer refusal, and the dead
+`co_yield (int64_t)0` line in `cpp_core.py`); `sum` and the other non-`for`
+consumers named in the seventh round's list were not re-measured this round.
+
+
 A generator that yields `None` (bare `yield` or explicit `yield None`) prints
 `0` on the compiled path where CPython prints `None`. Every other value type
 the generator value-slot lattice supports (int / bool / float / str) matches
 CPython on BOTH the local and global generator paths. None is the only
 mismatching type. Owner-level ABI feature; measured and pinned, NOT shipped.
+
+## Status (2026-11-01, eighth round, work/bug-codegen-a-bare-or-explicit-yield-of: bind-site kind kept, partial)
+
+**Landed (the seventh round's planned change, scoped to what the pins show):**
+a tagged generator word bound to a name keeps its box, so `x = next(g);
+print(x)` prints the yielded kind on both paths. The bind rule is
+`tagged_next_bind_name` (emit_infra.py); the landing commit is
+`b09622930` ("a tagged generator word bound to a name keeps its kind"). The
+remaining gap, float-box arithmetic on a tagged local, is noted at the
+tagged-operand arm in emit_exprs.py.
+
+- `_tagged_word_vals` (emit_infra.py, saved/restored like `_boxed_vals`),
+  marked at the two tagged-`next` sites (emit_calls.py).
+- Bind (emit_stmts.py): kept only when `ginf.tagged_next_bind_name` holds
+  (every binding is `name = next(g)` for one once-bound generator `g`).
+- Operand (emit_exprs.py): a tagged local is read as its int word
+  (`mojo_box_word`), not `mojo_box_double`.
+
+**Pins:** `run_tagged_word_bind_tests` in `test_gimple_generator_runner.py`
+(five cases). Before the fix: print default and print cpp FAIL (`1` and an
+address). After: 5/5.
+
+**Still open in this doc:** the bind-site doc's float-box arithmetic gap;
+the dead `co_yield (int64_t)0` line (item 3); the module-global `next()`
+refusal's own doc. None-yield printing `0` remains fixed on the default path.
 
 ## Status (2026-11-01, seventh round, work/bug-codegen-a-bare-or-explicit-yield-of: planning guide for the bind-site kind loss, no code changed)
 

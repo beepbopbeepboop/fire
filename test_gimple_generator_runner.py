@@ -3318,12 +3318,13 @@ def main():
         print(v)
 main()
 """)
-    # The C++ escape hatch (`MOJO_CORO=cpp`) cannot carry a None slot, so its
-    # typer must REFUSE a None yield (sending the module to the interpreter,
-    # which prints None) rather than compile `co_yield (int64_t)0`, which
-    # prints 0. Pinned on the cpp backend explicitly.
+    # The C++ escape hatch (`MOJO_CORO=cpp`) has no int64_t slot for None: a
+    # None yield beside other kinds is boxed into the tagged word
+    # (`mojo_box_none()`, rendered by the consumer), so it must print what
+    # CPython prints. Writing `co_yield (int64_t)0` would print 0 instead.
+    # Pinned on the cpp backend explicitly; fail-before was the refusal.
     with coro.pinned('cpp'):
-        test_generator_refused("none_yield_bare_refused_on_cpp_path", """\
+        test_generator_matches_cpython("none_yield_bare_beside_int_on_cpp_path", """\
 def g():
     yield 1
     yield
@@ -3333,8 +3334,18 @@ def main():
     for v in g():
         print(v)
 main()
-""", "a None yield (bare `yield` / `yield None`) has no value slot")
-        test_generator_refused("none_yield_explicit_beside_str_refused_on_cpp_path", """\
+""", """\
+def g():
+    yield 1
+    yield
+    yield 2
+
+def main():
+    for v in g():
+        print(v)
+main()
+""")
+        test_generator_matches_cpython("none_yield_explicit_beside_str_on_cpp_path", """\
 def g():
     yield "a"
     yield None
@@ -3344,7 +3355,60 @@ def main():
     for v in g():
         print(v)
 main()
-""", "a None yield (bare `yield` / `yield None`) has no value slot")
+""", """\
+def g():
+    yield "a"
+    yield None
+    yield "b"
+
+def main():
+    for v in g():
+        print(v)
+main()
+""")
+        # A generator whose ONLY yield is None is a one-kind tagged word: its
+        # box is `mojo_box_none()`, so the escape hatch prints `None` (not the
+        # raw 0 `co_yield (int64_t)0` would) for both consumers.
+        test_generator_matches_cpython("none_yield_lone_bare_for_loop_cpp", """\
+def g():
+    yield
+    yield
+
+def main():
+    for v in g():
+        print(v)
+main()
+""", """\
+def g():
+    yield
+    yield
+
+def main():
+    for v in g():
+        print(v)
+main()
+""")
+        test_generator_matches_cpython("none_yield_lone_explicit_next_cpp", """\
+def g():
+    yield None
+
+def main():
+    it = g()
+    x = next(it)
+    print(x)
+    print(x is None)
+main()
+""", """\
+def g():
+    yield None
+
+def main():
+    it = g()
+    x = next(it)
+    print(x)
+    print(x is None)
+main()
+""")
 
 
 def run_tagged_word_cpp_tests():
@@ -3526,14 +3590,14 @@ main()
 """)
 
 def run_tagged_word_bind_tests():
-    # `x = next(g)` binds a tagged generator word to a NAME in the GIMPLE
-    # consumer. The bind used to unwrap the box (`mojo_box_word`, the same
-    # rule as every possibly-boxed slot read), so the local held the bare bits
-    # and `print(x)` lost the kind: a bool printed `1`, a str printed the
-    # address of an unregistered C literal on the cpp path. The local must keep
-    # the kind; both the default stack-switch path and the cpp escape hatch are
-    # pinned against the CPython oracle.
-    bind_src = """\
+    # A tagged generator word bound to a NAME (`x = next(g)`) must keep its
+    # kind. The GIMPLE bind used to unwrap the box with `mojo_box_word`, so a
+    # bool printed as `1` and a str read as an int on the cpp path. Every
+    # shape is pinned against the CPython oracle, on the default path and on
+    # the cpp escape hatch. Arithmetic on the bound name must still work, a
+    # None-yield name must still test `is None`, and a rebinding of the name
+    # to a plain value must still print that plain value.
+    test_generator_matches_cpython("tagged_bind_print_default", """\
 def gen():
     yield True
     yield "b"
@@ -3545,12 +3609,112 @@ def main():
     x = next(g)
     print(x)
 main()
-"""
-    test_generator_matches_cpython("tagged_bool_str_bound_to_name_default", bind_src,
-                                   bind_src)
+""", """\
+def gen():
+    yield True
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x)
+    x = next(g)
+    print(x)
+main()
+""")
     with coro.pinned('cpp'):
-        test_generator_matches_cpython("tagged_bool_str_bound_to_name_cpp", bind_src,
-                                       bind_src)
+        test_generator_matches_cpython("tagged_bind_print_cpp", """\
+def gen():
+    yield True
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x)
+    x = next(g)
+    print(x)
+main()
+""", """\
+def gen():
+    yield True
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x)
+    x = next(g)
+    print(x)
+main()
+""")
+    test_generator_matches_cpython("tagged_bind_arithmetic_default", """\
+def gen():
+    yield 1
+    yield "a"
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x + 1)
+main()
+""", """\
+def gen():
+    yield 1
+    yield "a"
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x + 1)
+main()
+""")
+    test_generator_matches_cpython("tagged_bind_is_none_default", """\
+def gen():
+    yield
+    yield 3
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x is None)
+main()
+""", """\
+def gen():
+    yield
+    yield 3
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x is None)
+main()
+""")
+    test_generator_matches_cpython("tagged_bind_rebound_to_plain_default", """\
+def gen():
+    yield True
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    x = 5
+    print(x)
+main()
+""", """\
+def gen():
+    yield True
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    x = 5
+    print(x)
+main()
+""")
+
+
     test_generator_matches_cpython("tagged_int_str_bound_to_name_default", """\
 def gen():
     yield 1
@@ -3674,9 +3838,71 @@ def main():
 main()
 """)
 
+def run_none_list_iteration_tests():
+    # A None element of a LIST read by a for loop printed the box's own address
+    # (`for x in [None]: print(x)` -> 4315206080). `mojo_list_get_boxed` boxes
+    # every non-int slot, including the None ('n') and bool ('b') kinds, but
+    # `mojo_cstr_or_int_str` spelled only the double and str boxes by kind, so
+    # the other boxes fell through to the integer arm. The comprehension case is
+    # the generator-yield shape this file's None-yield doc tracks: a None
+    # yielded into a comprehension and then iterated. Each source carries a
+    # generator so the harness takes the compiled path.
+    gen_pre = "def _dummy():\n    yield 0\n"
+    test_generator_matches_cpython("none_literal_list_for_loop", gen_pre + """\
+def main():
+    for x in [1, None]:
+        print(x)
+main()
+""", """\
+def main():
+    for x in [1, None]:
+        print(x)
+main()
+""")
+    test_generator_matches_cpython("none_only_list_for_loop", gen_pre + """\
+def main():
+    for x in [None]:
+        print(x)
+main()
+""", """\
+def main():
+    for x in [None]:
+        print(x)
+main()
+""")
+    test_generator_matches_cpython("bool_beside_str_list_for_loop", gen_pre + """\
+def main():
+    for x in [True, "a"]:
+        print(x)
+main()
+""", """\
+def main():
+    for x in [True, "a"]:
+        print(x)
+main()
+""")
+    test_generator_matches_cpython("none_comprehension_over_generator_for_loop", """\
+def gen():
+    yield "a"
+    yield
+def main():
+    for x in [y for y in gen()]:
+        print(x)
+main()
+""", """\
+def gen():
+    yield "a"
+    yield
+def main():
+    for x in [y for y in gen()]:
+        print(x)
+main()
+""")
+
 
 def run_tests():
     run_none_yield_tests()
+    run_none_list_iteration_tests()
     run_tagged_word_cpp_tests()
     run_tagged_word_bind_tests()
     run_star_args_call_tests()

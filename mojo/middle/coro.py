@@ -1233,6 +1233,13 @@ def _tagged_consumers_ok(name: str) -> bool:
     return idents == calls
 
 
+# The one refusal text for a None yield on the C++ coroutine path. Both the
+# emitter's bare-yield arm (cpp_core.py) and the generator-level check
+# (cpp_async.py) raise it, so the two cannot drift apart.
+NONE_YIELD_CPP_REFUSAL = ("a None yield (bare `yield` / `yield None`) has no value "
+                          "slot the C++ coroutine path can carry (it would print 0); refused")
+
+
 def _is_none_yield(y) -> bool:
     """A bare `yield` or an explicit `yield None` -- the yield whose value is
     None. Its slot kind in `kinds` is the int64_t fallback (`'i'`), so it

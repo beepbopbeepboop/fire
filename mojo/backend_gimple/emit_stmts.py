@@ -1328,17 +1328,21 @@ def _gen_stmt_AssignStmt(gen, node):
         # int64_t spelling) and returns every other kind's own word, so the
         # local is a word of unknown kind -- which is what `_dyn_word_locals`
         # records, so its `str()`/`==` ask the runtime.
-        # A TAGGED generator word (`x = next(g)` on a kind-mixed generator,
-        # `_tagged_word_vals`) keeps its box. Unwrapping it here is what lost
-        # the kind: `print(x)` showed 1 for a True and an address for a str on
-        # the cpp path. The local is declared a word and registered in
-        # `_boxed_vals` exactly as a for-loop target over such a generator is
-        # (emit_loops), so every consumer resolves the box where it reads the
-        # local, and a local bound FROM a tagged local (`y = x`) stays tagged.
-        # A local already declared as something other than a word keeps the
-        # unwrap below, which is the behaviour it always had.
-        if (vtype == 'int64_t' and v in getattr(gen, '_tagged_word_vals', ())
-                and gen.var_types.get(tname, 'int64_t') == 'int64_t'):
+        # A TAGGED generator word (`x = next(g)` on a mixed-kind generator,
+        # `_tagged_word_vals`) is the exception: unwrapping it loses the yield's
+        # kind, so `print(x)` then shows a bool as `1` or a str as an address.
+        # The local keeps the box and is registered in `_boxed_vals` exactly as
+        # a for-loop target over such a generator is (emit_loops), so every
+        # consumer resolves the box by kind. Only a name whose every binding is
+        # a tagged word of one generator keeps it (`tagged_next_bind_name`):
+        # a box-holding local that is later stored a bare word would be read as
+        # a box. A local already declared as something other than a word keeps
+        # the unwrap below, which is the behaviour it always had.
+        _keep_tagged_box = (vtype == 'int64_t'
+                            and v in getattr(gen, '_tagged_word_vals', ())
+                            and gen.var_types.get(tname, 'int64_t') == 'int64_t'
+                            and ginf.tagged_next_bind_name(gen, _as_str(tname)))
+        if _keep_tagged_box:
             if tname not in gen.var_types:
                 gen._declare_var(tname, 'int64_t')
             _tn = gen._cname(tname)

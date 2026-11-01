@@ -42,6 +42,7 @@ from fire_compiler import target_slots
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
+import mojo.middle.coro as coro_mod
 from mojo.middle.exprtypes import _walk_ast_invalidate
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
@@ -5390,8 +5391,12 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     "`yield` not supported in an async function body "
                     "(that would make it an async generator, its own "
                     "combined-refusal category — see gen_module)")
-            if s.value.value is None:
-                return [f"{indent}co_yield (int64_t)0;  /* bare yield */"]
+            if coro_mod._is_none_yield(s.value):
+                # A None yield is marked, not written as a 0: cpp_async.py boxes
+                # every marked site into a tagged word (`mojo_box_none()`) when
+                # the generator mixes kinds, and refuses the whole generator when
+                # it does not (a lone None has no word to carry it).
+                return [f"{indent}co_yield /*Y:none*/ (0);"]
             if isinstance(s.value.value, gimple_ctypes.TupleExpr):
                 return gen._cpp_yield_tuple(s.value.value, declared, indent)
             if id(s.value) in (getattr(gen, '_cpp_tuple_guarded_yields', None) or ()):

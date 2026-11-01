@@ -625,6 +625,14 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         'Optional', 'Variant', 'Tuple',
         'InlineArray', 'InlineList', 'StaticTuple',
     })
+    if name in gen._struct_bases and name not in gen.var_types and name not in gen._global_var_types:
+        # A static class named as a VALUE is its type tag -- the word the run-time class table
+        # files it under (`type('C', (A, B), ns)` / `bases = (A, B)` hand it to
+        # `mojo_type_add_base`; bugs/CODEGEN_enum_runtime_class_creation.md stage 3). Not the
+        # zero placeholder below, which every class would share.
+        t = gen._new_temp('int64_t')
+        gen._emit(f'  {t} = (int64_t){gimple_exprtypes._struct_type_id(name)}LL;  /* class {name} as value */')
+        return 'int64_t', t
     if (name in gen.struct_field_types or name in _BUILTIN_TYPE_NAMES) and name not in gen.var_types:
         # int64_t, not int: this placeholder commonly flows into a (void *)
         # cast (e.g. boxed for mojo_obj_getattr on `UInt64.MAX`-style class
@@ -3931,17 +3939,17 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # mark it a word of unknown kind, which is what the equality lowering
     # dispatches on at run time.
     _ident_ops = ('is', 'is not', '==', '!=', 'in', 'not in')
-    # A TAGGED word (a local bound from a kind-mixed generator, see
-    # emit_stmts' simple-name bind) beside a str operand is a string
-    # concatenation, not arithmetic: it stays the word, which the concatenation
-    # below renders by its kind (`mojo_cstr_or_int_str`). Converting it to a
-    # double here made `x + "!"` a `double + char *` gcc error.
-    # A tagged word in arithmetic is an INTEGER (or bool / None) word unless
-    # the other operand is a double, so it is read as its integer value
-    # (`mojo_box_int`) beside an int, and as a double (`mojo_box_double`, exact
-    # for an int too) beside a double. A float box beside an int truncates --
-    # the same stopgap `_unbox_float_param_operand` documents for a maybe-float
-    # parameter; the full answer needs the box read as a double at run time.
+    # A TAGGED word (a local bound from a kind-mixed generator, kept boxed by
+    # emit_stmts' simple-name bind; `_tagged_word_vals`) beside a str operand is
+    # a string concatenation: it stays the box, which the concatenation below
+    # renders by its kind (`mojo_cstr_or_int_str`). Converting it to a double
+    # here made `x + "!"` a `double + char *` gcc error. Otherwise a tagged word
+    # in arithmetic is an int or bool word far more often than a float box, so
+    # it is read as its integer (`mojo_box_int`) beside an int, and as a double
+    # (`mojo_box_double`, exact for an int too) beside a double. A float box
+    # beside an int truncates -- the same stopgap `_unbox_float_param_operand`
+    # documents for a maybe-float parameter; the full answer needs the box read
+    # as a double at run time.
     _tagged = getattr(gen, '_tagged_word_vals', ())
     if lv in getattr(gen, '_boxed_vals', ()) and not (
             lv in _tagged and rt == 'char *' and op == '+'):
