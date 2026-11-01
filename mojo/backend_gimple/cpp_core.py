@@ -727,7 +727,7 @@ def _cpp_trusted_fn_return_types(gen) -> dict:
     for _k, _v in gen.func_return_types.items():
         if not isinstance(_v, str):
             continue
-        if _v in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *') or (
+        if _v in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *', 'double') or (
                 _v.endswith(' *') and _v[:-2] in _known_structs):
             trusted[_k] = _v
     gen._cpp_trusted_fn_returns = trusted
