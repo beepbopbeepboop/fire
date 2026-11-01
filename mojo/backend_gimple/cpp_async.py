@@ -692,16 +692,6 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
             param_ctypes.append((pn[1:], 'MojoList *'))
             continue
         ctype = gen._param_ctype(pn, pt, fn)
-        # An UNANNOTATED parameter whose declared default is a float literal
-        # IS a float parameter (the same default-as-evidence rule
-        # `_param_ctype` applies to string and container literals): left as
-        # the int64_t box, `scale=0.5` was padded as the integer 0 and the
-        # unit could not register a runtime signature (its default is not an
-        # integer word), so a call through the generator VALUE failed.
-        if (ctype == 'int64_t' and (pt is None or pt == '')
-                and isinstance((getattr(fn, 'param_defaults', None) or {}).get(pn),
-                               gimple_ctypes.FloatLiteral)):
-            ctype = 'double'
         if (ctype == 'char *' and (pt is None or pt == '')
                 and pn in coro_mod._PTR_EVIDENCE.get(fn.name, ())
                 and any(isinstance(_n, gimple_ctypes.CallExpr)
