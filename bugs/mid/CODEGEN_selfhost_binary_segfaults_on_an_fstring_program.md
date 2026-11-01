@@ -48,6 +48,53 @@ Next step (needs a self-host build, so it is the integrator's or a heavy worker'
 3. lldb on the binary at the crash (`tools/gdbtool`, HOW-TO-DEBUG.html), then the fix at the faulting frame.
 4. Regression: extend `test_selfhost.run_produced_binary` with an f-string program so the `selfhost` step covers it.
 
+## Status update (2026-10-31, round 2, worker bug-mid-codegen-selfhost-binary-segfault): planning guide, no fix
+
+Round output is a planning guide (no build allowed to this worker; the crash needs the self-host binary).
+
+What is established by reading, not by running:
+
+- The crash is in the compiled CODEGEN of an f-string, not in parsing `f.mojo`. The two-line program with no
+  f-string is clean on the same binary, and every f-string site is in `emit_exprs._lower_StringLiteral`'s
+  f-string branch (`mojo/backend_gimple/emit_exprs.py` ~L357-420; `gimple_codegen.py:5187` forwards to it).
+- Python-level failures inside an interpolation are caught by `except Exception` (~L392) and become a warning
+  plus literal text. So a -11 means a native fault. Work that runs OUTSIDE that `try` is the set of candidates
+  where a binary-only fault can escape:
+  1. `gen._parse_fstring_parts(val)` (`mojo/middle/resolve_shared.py:1863`, wired as `gimple_codegen.py:5698`).
+     Its 4-tuple slots are the same ones the self-hosted type-inference comment warns about (only the first
+     slot was once typed; the annotation fixed that). The `while i < len(inner)` scan indexes `inner[i+1]`
+     directly; an off-by-one or a boxed `inner` would read past the string.
+  2. The `_lit`/`_all_lit` loop and the `plain += _as_str(_pv2)` accumulation (near the top of the f-string branch, ~L366-390): reads `_pv2` from
+     the boxed slot.
+  3. The accumulator loop after the `try` (~L420 onward): `acc_val` / `free_left` / `free_right` ownership.
+     A wrong free on a borrowed `_slit_` or variable temp is a use-after-free crash that shows up only when
+     more than one interpolation is concatenated, which fits `f(a,b)`, whose three interpolations and literal pieces make many cats in one expression.
+- Inside the `try`, a native fault can still happen in `Parser(py_tokenize(text))._parse_expr(0)` (the compiled
+  parser on a fresh string at codegen time), `rewrite_node`, `lower_expr`, `_stringify_value`, `_repr_value`,
+  `_apply_fstring_spec` (`mojo/backend_gimple/emit_infra.py:4839`, uses `spec[1]` after `len(spec) >= 2`).
+
+Decisions needed (controller/integrator, once a binary exists):
+
+- Whether the first fault is in the parse (candidate 1, a str-slot read), the cat chain (candidate 3, a free),
+  or inside the `try`. Decided by lldb on the binary, not by this reading. If lldb shows the faulting frame in
+  `mojo_str_cat` or a `free`, it is candidate 3; if it is in `_parse_fstring_parts` or the tokenizer, candidate 1.
+
+Implementation plan once the frame is known:
+
+1. Reproduce: `test_selfhost.build(td)` then `<td>/mojo_selfhost --dump-full f.mojo` (exit -11 expected).
+2. Field bisect: five single-interpolation programs (`{a}`, `{b + 1}`, `{a * 2}`, `{name}`, `{len(name)}`), each
+   in its own file, to split the parse/rewrite/lower causes from the cat-chain cause.
+3. lldb: `tools/gdbtool` on the binary, break at the fault, `bt`, then the source line in
+   `emit_exprs.py` or `resolve_shared.py`.
+4. Fix at the faulting frame. A fix in `_lower_StringLiteral` must not change the generated C for programs
+   without f-strings: `cmp` the `--dump-full` output for `test_selfhost`'s two-line program before and after.
+5. Regression: a new one-program test with an f-string added to `test_selfhost.run_produced_binary`'s cases,
+   plus a quick check that the generated `.ci` for `f.mojo` is byte-identical to the Python-path `.ci` in
+   the parts that are not f-string text. The `selfhost` step (heavy) must run it, so it is an integrator job.
+
+Heavy jobs this needs (NOT run by this round): the `selfhost` step (`python3 tools/suite.py selfhost`), and the
+self-host binary build (`test_selfhost.build`). Light check that was run: none new this round.
+
 ## Next step
 
 1. Reduce: which of the five f-string fields crashes (try each alone), and whether it is the field parse,
