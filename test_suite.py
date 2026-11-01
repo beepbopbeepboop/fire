@@ -3627,6 +3627,31 @@ def test_named_test_brings_its_deps():
               names == ['prereq', 'needs'], f'got {names}')
 
 
+def test_dependent_waits_for_the_whole_fanout():
+    """A dependent of a fanout starts after EVERY item, not after the first.
+
+    `state` gets an entry when the first job of a test settles, so a bare
+    `dep in state` released the dependents of a 46-item fanout after one item
+    (and a stuck plan then reported `dependency not selected:` with the name
+    empty). The slow item finishes last; the dependent must see both markers.
+    """
+    import tempfile
+    d = tempfile.mkdtemp(prefix='suite-fanout-')
+    body = ('import sys,time,os\n'
+            'n=sys.argv[1]\n'
+            'time.sleep(1.5 if n=="slow" else 0)\n'
+            'open(os.path.join(%r,n),"w").close()' % d)
+    after = ('import os,sys\n'
+             'sys.exit(0 if os.path.exists(%r) and os.path.exists(%r) else 1)'
+             % (os.path.join(d, 'fast'), os.path.join(d, 'slow')))
+    with Sandbox(fan=suite.Fanout(name='fan', cmd=[PY, '-c', body, '{file}'],
+                                  items=['fast', 'slow'], mem='small'),
+                 after=dict(cmd=ok_cmd(after), deps=['fan'])):
+        rc, out = run(['after'], jobs=4)
+    check('fanout deps: the dependent ran only after the last item',
+          rc == 0, f'rc={rc} out={out!r}')
+
+
 def test_log_has_passes_screen_does_not():
     """The contract the screen/log split rests on."""
     log = os.path.join(HERE, 'build', 'test-suite-logsplit.log')
@@ -4206,7 +4231,7 @@ UNREGISTERED = {
     # differential fuzzer's suite above is: its heavier settings (thousands of
     # pairs across every mix, and the whole of `formal/examples`) are a sweep,
     # and CLAUDE.md's rule for a job no gate can afford is to declare it rather
-    # than quietly omit it. `bugs/FORMAL_metamorphic_ledger.md` records the
+    # than quietly omit it. `bugs/formal/FORMAL_metamorphic_ledger.md` records the
     # sweeps; this file is what a change to the ten transformations must run.
     'test_formal_metamorph.py':
         'Checks that each of tools/formal_metamorph.py\'s ten transformations '
@@ -4216,7 +4241,7 @@ UNREGISTERED = {
         'Measured 2026-10-05: 27 tests, 39.6 s wall, 55 MB peak, two builds on '
         'the host. Declared rather than registered because its heavier '
         'settings are a sweep; CLAUDE.md\'s rule for a job no gate can afford '
-        'is to declare it. bugs/FORMAL_metamorphic_ledger.md records the '
+        'is to declare it. bugs/formal/FORMAL_metamorphic_ledger.md records the '
         'sweeps.',
     'test_formal_fuzz.py':
         'Builds and runs twenty generated images per architecture and compares '
@@ -4493,7 +4518,7 @@ UNREGISTERED = {
         'call, a struct construction) and the three that would otherwise '
         "invent 456 — generators, coroutines, and a name whose definitions "
         'disagree about whether it returns, which is the defect the census it '
-        'replaces had (`bugs/FORMAL_a_function_with_no_return_yields_a_word_'
+        'replaces had (`bugs/formal/FORMAL_a_function_with_no_return_yields_a_word_'
         'where_cpython_yields_None.md` §0), as a case.',
 
     # `test_formal_proof_breadth.py` was listed here when it landed on
@@ -4514,7 +4539,7 @@ UNREGISTERED = {
     'test_formal_comptime_string.py': 'A comptime string MATERIALIZED: a '
         'module-level `comptime` bound to a string reaches the image as the '
         'bytes it is, on both architectures, with the escapes decoded rather '
-        'than printed back (bugs/FORMAL_string_literal_escape_is_not_'
+        'than printed back (bugs/formal/FORMAL_string_literal_escape_is_not_'
         'decoded.md). Build-and-RUN, because a substitution that is wrong in '
         'the last byte is indistinguishable from a right one in a refusal.',
     'test_formal_mlir_precedence.py': 'WHICH of the two MLIR refusals answers a '
@@ -4713,7 +4738,6 @@ UNREGISTERED = {
     'test_regression_bool_isinstance.py': _BATCH_REGRESSION_REASON,
     'test_regression_ctor_temp_field_read_loses_element_type.py': _BATCH_REGRESSION_REASON,
     'test_regression_cursor_nested.py': _BATCH_REGRESSION_REASON,
-    'test_regression_enum_cls_refusal.py': _BATCH_REGRESSION_REASON,
     'test_regression_needle_drift.py': _BATCH_REGRESSION_REASON,
     'test_regression_partial_work_handoff.py': _BATCH_REGRESSION_REASON,
     'test_regression_round2_gap.py': _BATCH_REGRESSION_REASON,
@@ -5528,7 +5552,7 @@ def test_a_deleted_bug_doc_is_not_still_cited():
           f'({sorted(outside)[:8]}); a new one is a ratchet failure')
     check('dangling refs: it does not invent one — a cited doc that EXISTS is '
           'not reported',
-          'bugs/FORMAL_known_limits.md' in have
+          'bugs/formal/FORMAL_known_limits.md' in have
           and 'FORMAL_known_limits.md' not in by_doc
           and 'CODEGEN_ab_native_fails.md' not in by_doc,
           f'the walk found {len(have)} docs under bugs/; a walk that reports '
@@ -5953,12 +5977,12 @@ def test_the_formal_sweep_series_is_one_document_with_an_index_of_its_rounds():
     "current" one from and no way to tell which was current except the base
     commit inside each.
 
-    They are now `bugs/FORMAL_sweep_work_map.md`: §1 is the latest census,
+    They are now `bugs/formal/FORMAL_sweep_work_map.md`: §1 is the latest census,
     §2 is what the earlier rounds established and still holds, and §3 is an
     INDEX of the twenty rounds with the base commit, the scope, and — because
     seventy-odd files in this tree cite a round by its section number — what
     each cited section carried. The citations were rewritten to "the `b9` round
-    of `bugs/FORMAL_sweep_work_map.md` §4.1", which resolves into §3.1.
+    of `bugs/formal/FORMAL_sweep_work_map.md` §4.1", which resolves into §3.1.
 
     So two properties, and both are checked here because the failure mode that
     produced twenty documents is not a crash:
@@ -5974,7 +5998,7 @@ def test_the_formal_sweep_series_is_one_document_with_an_index_of_its_rounds():
        that check cannot see because the path it names DOES resolve.
     """
     import glob
-    maps = sorted(glob.glob(os.path.join(HERE, 'bugs',
+    maps = sorted(glob.glob(os.path.join(HERE, 'bugs', 'formal',
                                         'FORMAL_sweep_work_map*.md')))
     canonical = 'FORMAL_sweep_work_map.md'
     check('sweep maps: there is exactly ONE per-round map, and it is the '
@@ -6438,6 +6462,7 @@ def main():
                test_the_disabled_markers_in_the_registry_are_honest,
                test_bucket_dedup, test_missing_dep_is_reported,
                test_named_test_brings_its_deps,
+               test_dependent_waits_for_the_whole_fanout,
                test_log_has_passes_screen_does_not,
                test_checked_run_key_covers_what_it_names,
                test_checked_run_replays_a_pass_and_reruns_a_failure,

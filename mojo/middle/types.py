@@ -385,6 +385,11 @@ _BUILTIN_RET_CTYPES = {
 }
 
 _SCALAR_INT_TYPES = frozenset({'int', 'char', '_Bool', 'int8_t', 'int16_t', 'int32_t', 'int64_t', 'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'})
+# The plain SIGNED subset: the operand types for which `a / b` is true division
+# (Float64). One definition, read by the plain tail (emit_exprs.py), the
+# coroutine emitter (cpp_core.py) and the static result-type inference
+# (exprtypes.py), so a yielded `n / 2` is slotted as a double, not truncated.
+_SIGNED_INT_TRUE_DIV_TYPES = frozenset({'int', 'char', '_Bool', 'int8_t', 'int16_t', 'int32_t', 'int64_t'})
 # The floating counterparts, next to _SCALAR_INT_TYPES and for the same
 # reason: a builtin that has to branch on "is this argument numeric, and
 # if so which" (abs, min, max) should not each re-spell the two sets.
@@ -1641,6 +1646,94 @@ def _safe_field(name: str) -> str:
     if name in _C_KEYWORDS or name in _C_PARAM_EXTRA_KEYWORDS or name in _C_MACRO_NAMES or (name in _CPP_KEYWORD_FIELDS):
         return f'_kw_{name}'
     return name
+
+
+# Presence bits for compiler-minted fields (StructDef.presence_fields).
+# A minted field exists in every instance's storage, so an instance that was
+# never assigned it must still answer `hasattr(obj, name)` False. The bit
+# lives in a hidden word array that is NOT a field: it is absent from
+# struct_field_types, _mojo_fieldnames_ and repr, and it is zeroed by the
+# struct's own memset/calloc and carried by every whole-struct memcpy, so a
+# copy keeps the presence it was copied with.
+PRESENCE_WORD = '__mojo_present'
+
+
+def presence_bit(sdef, member):
+    """(word index, bit index) of `member`'s presence bit in `sdef`, or None
+    when `member` is not a presence-tracked (minted) field of `sdef`."""
+    if sdef is None or member not in sdef.presence_fields:
+        return None
+    k = sdef.presence_fields.index(member)
+    return (k // 64, k % 64)
+
+
+def presence_word_count(sdef) -> int:
+    """Number of 64-bit presence words `sdef`'s C struct carries (0: none)."""
+    if sdef is None:
+        return 0
+    return (len(sdef.presence_fields) + 63) // 64
+
+
+def presence_set_stmt(sdef, member, obj_c, op) -> str:
+    """C text (not GIMPLE) that marks `member` present on `obj_c`, or '' when
+    the member is not presence-tracked. For the plain-C and C++ emitters.
+    `op` is '->' for a pointer receiver and '.' for a value receiver."""
+    bit = presence_bit(sdef, member)
+    if bit is None:
+        return ''
+    return f"{obj_c}{op}{PRESENCE_WORD}[{bit[0]}] |= (uint64_t)1 << {bit[1]};"
+
+
+def presence_set_emit(gen, sdef, member, obj_c, op) -> None:
+    """Emit the GIMPLE for marking `member` present on `obj_c` (no-op when the
+    member is not presence-tracked). GIMPLE strict mode rejects a compound
+    `|=` on a component reference, so the read-modify-write goes through
+    typed temps, the same way the codegen's other component stores do."""
+    bit = presence_bit(sdef, member)
+    if bit is None:
+        return
+    cur = gen._new_temp('uint64_t')
+    gen._emit(f"  {cur} = {obj_c}{op}{PRESENCE_WORD}[{bit[0]}];")
+    nxt = gen._new_temp('uint64_t')
+    gen._emit(f"  {nxt} = {cur} | {1 << bit[1]}ULL;")
+    gen._emit(f"  {obj_c}{op}{PRESENCE_WORD}[{bit[0]}] = {nxt};")
+
+
+def presence_check_emit(gen, sdef, member, obj_c, op, class_name) -> None:
+    """Emit the GIMPLE guard for a DIRECT read of `member` on `obj_c`: raise
+    AttributeError when this instance's presence bit is clear, as CPython does
+    for a minted attribute the instance never received. No-op when `member`
+    is not presence-tracked. Emitted before the field load, so the load of a
+    never-stored slot (zero storage) is never reached. Read-only: a store
+    sets the bit (`presence_set_emit`) and must not be guarded."""
+    bit = presence_bit(sdef, member)
+    if bit is None:
+        return
+    cur = gen._new_temp('uint64_t')
+    gen._emit(f"  {cur} = {obj_c}{op}{PRESENCE_WORD}[{bit[0]}];")
+    got = gen._new_temp('uint64_t')
+    gen._emit(f"  {got} = {cur} & {1 << bit[1]}ULL;")
+    msg = f"'{class_name}' object has no attribute '{member}'"
+    # GIMPLE has no `if (c) call();` statement form, so the raise sits in its
+    # own basic block (the same goto shape `_lower_IfExpr` uses).
+    bb_raise = gen._new_bb()
+    bb_ok = gen._new_bb()
+    gen._emit(f"  if ({got} == 0ULL) goto {bb_raise}; else goto {bb_ok};")
+    gen._emit_label(bb_raise)
+    gen._emit_call('void', '', 'mojo_raise_attribute_error',
+                   [('char *', gen._intern_string(msg))])
+    gen._emit_label(bb_ok)
+
+
+def presence_copy_emit(gen, sdef, dst_c, src_c, op) -> None:
+    """Emit the GIMPLE that copies every presence word of `sdef` from `src_c`
+    to `dst_c` (a whole-struct field-wise copy does not cover them: they are
+    not in struct_field_types). A byte `memcpy`, the same shape the codegen
+    already uses for embedded array fields, because a component-to-component
+    assignment is not a legal GIMPLE store."""
+    _n = presence_word_count(sdef)
+    if _n:
+        gen._emit(f"  memcpy({dst_c}{op}{PRESENCE_WORD}, {src_c}{op}{PRESENCE_WORD}, {8 * _n});")
 _C_RESERVED_FUNCS = frozenset({'exit', 'abort', 'write', 'read', 'close', 'malloc', 'calloc', 'realloc', 'free', 'printf', 'fprintf', 'snprintf', 'sprintf', 'dprintf', 'puts', 'putchar', 'memcpy', 'memmove', 'memset', 'memcmp', 'memchr', 'strlen', 'strcmp', 'strncmp', 'strcpy', 'strncpy', 'strcat', 'strncat', 'strchr', 'strrchr', 'strstr', 'strtok', 'strerror', 'atoi', 'atol', 'atoll', 'atof', 'strtol', 'strtoll', 'strtod', 'strtof', 'setvbuf', 'setbuf', 'remainderf', 'remainderl', 'posix_spawn', 'posix_spawnp', 'index', 'rindex', 'cos', 'cosf', 'sin', 'sinf', 'tan', 'tanf', 'acos', 'acosf', 'asin', 'asinf', 'atan', 'atanf', 'atan2', 'atan2f', 'ceil', 'ceilf', 'floor', 'floorf', 'round', 'roundf', 'trunc', 'truncf', 'sqrt', 'sqrtf', 'cbrt', 'cbrtf', 'pow', 'powf', 'exp', 'expf', 'exp2', 'exp2f', 'log', 'logf', 'log2', 'log2f', 'log10', 'log10f', 'fabs', 'fabsf', 'fmod', 'fmodf', 'erf', 'erff', 'erfc', 'erfcf', 'tgamma', 'lgamma', 'ldexp', 'ldexpf', 'frexp', 'frexpf', 'modf', 'modff', 'sinh', 'sinhf', 'cosh', 'coshf', 'tanh', 'tanhf', 'asinh', 'acosh', 'atanh', 'asinhf', 'acoshf', 'atanhf', 'nextafter', 'nextafterf', 'copysign', 'copysignf', 'nan', 'nanf', 'hypot', 'hypotf', 'fma', 'fmaf', 'remainder', 'expm1', 'expm1f', 'log1p', 'log1pf', 'scalb', 'scalbf', 'scalbn', 'scalbnf', 'logb', 'logbf', 'j0', 'j1', 'y0', 'y1', 'getenv', 'setenv', 'unsetenv', 'putenv', 'realpath', 'open', 'fopen', 'fclose', 'fread', 'fwrite', 'fseek', 'ftell', 'rewind', 'fflush', 'getline', 'getdelim', 'fgets', 'fputs', 'feof', 'ferror', 'clearerr', 'vprintf', 'vfprintf', 'vsnprintf', 'vsprintf', 'fdopen', 'popen', 'pclose', 'remove', 'rename', 'rand', 'srand', 'random', 'srandom', 'getuid', 'getgid', 'getpid', 'getppid', 'waitpid', 'fork', 'execv', 'symlink', 'readlink', 'link', 'mkdir', 'chmod', 'chown', 'unlink', 'rmdir', 'ioctl', 'fcntl', 'dup', 'dup2', 'pipe', 'dlopen', 'dlsym', 'dlclose', 'dlerror', 'access', 'stat', 'lstat', 'fstat', 'qsort', 'bsearch', 'abs', 'labs', 'llabs', 'fabsf', 'fmodf', 'sqrtf', 'powf', 'ceilf', 'floorf', 'roundf', 'truncf', 'isfinite', 'isinf', 'isnan', 'isnormal', 'signbit', 'fpclassify', 'isalpha', 'isdigit', 'isalnum', 'isspace', 'isupper', 'islower', 'toupper', 'tolower', 'strdup', 'strndup', 'strtok_r', # `clock_gettime` is deliberately NOT here: it takes a `struct timespec*`,
 # and a struct is a frame blob that cannot cross the Mojo/C boundary --
 # the same reason formal/hostmods/time.mojo omits localtime/gmtime/mktime.
@@ -2395,7 +2488,53 @@ def _compute_exc_descendants(all_struct_defs):
             if base_name in by_name:
                 descendants.setdefault(base_name, {base_name}).add(name)
                 stack.extend(getattr(by_name[base_name], 'bases', None) or [])
+    # The BUILTIN exception hierarchy: `except OSError:` must catch a raised
+    # `FileNotFoundError` (the runtime raises one for a missing path), and
+    # `except LookupError:` a `KeyError`. Static tags are compared by
+    # equality, so each builtin ancestor's descendant set has to be listed
+    # here -- and a user class deriving from a builtin joins its base's set
+    # and every ancestor's. Plain loops, not comprehensions: this function is
+    # self-compiled.
+    for child in _BUILTIN_EXC_PARENT:
+        anc = _BUILTIN_EXC_PARENT[child]
+        while anc is not None:
+            if anc not in by_name:
+                descendants.setdefault(anc, {anc}).add(child)
+            anc = _BUILTIN_EXC_PARENT.get(anc)
+    for name, s in by_name.items():
+        stack = list(getattr(s, 'bases', None) or [])
+        seen = set()
+        while stack:
+            base_name = stack.pop()
+            if base_name in seen:
+                continue
+            seen.add(base_name)
+            anc = base_name
+            while anc is not None and anc in _BUILTIN_EXC_PARENT_OR_ROOT:
+                if anc not in by_name:
+                    descendants.setdefault(anc, {anc}).add(name)
+                anc = _BUILTIN_EXC_PARENT.get(anc)
     return descendants
+
+# child -> parent for the builtin exceptions whose parent a compiled `except`
+# is likely to name.
+_BUILTIN_EXC_PARENT = {
+    'FileNotFoundError': 'OSError', 'PermissionError': 'OSError',
+    'FileExistsError': 'OSError', 'NotADirectoryError': 'OSError',
+    'IsADirectoryError': 'OSError', 'TimeoutError': 'OSError',
+    'BlockingIOError': 'OSError', 'InterruptedError': 'OSError',
+    'ChildProcessError': 'OSError', 'ProcessLookupError': 'OSError',
+    'ConnectionError': 'OSError', 'BrokenPipeError': 'ConnectionError',
+    'ConnectionAbortedError': 'ConnectionError',
+    'ConnectionRefusedError': 'ConnectionError',
+    'ConnectionResetError': 'ConnectionError',
+    'KeyError': 'LookupError', 'IndexError': 'LookupError',
+    'UnicodeError': 'ValueError', 'UnicodeEncodeError': 'UnicodeError',
+    'UnicodeDecodeError': 'UnicodeError',
+    'ZeroDivisionError': 'ArithmeticError', 'OverflowError': 'ArithmeticError',
+    'FloatingPointError': 'ArithmeticError',
+}
+_BUILTIN_EXC_PARENT_OR_ROOT = set(_BUILTIN_EXC_PARENT) | {'OSError', 'LookupError', 'ArithmeticError'}
 
 def _unpack_target_leaf_names(target: str) -> list:
     """Flatten a tuple-unpack target string (`'(a, b)'`,
@@ -2463,7 +2602,7 @@ _CPP_CALLABLE_CTYPE_1ARG = 'std::function<int64_t(int64_t)>'
 # cpp_core's CallExpr declared-callable-local case. `Tools/c-analyzer/
 # c_common/fsutil.py`'s `get_files = lambda *a, **k: ...` is the motivating
 # occurrence; see bugs/hard/
-# COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md.
+# the (since-fixed) c_common/fsutil.py compile failure.
 _CPP_CALLABLE_CTYPE_STARARGS = 'std::function<int64_t(MojoList *)>'
 _CPP_CALLABLE_CTYPE_KWARGS = 'std::function<int64_t(MojoDict *)>'
 _CPP_CALLABLE_CTYPE_STAR_KW = 'std::function<int64_t(MojoList *, MojoDict *)>'

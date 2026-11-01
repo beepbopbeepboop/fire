@@ -514,6 +514,15 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
                     _cnm0 = _as_str(nd.func.name)
                     if _cnm0 not in _called_list:
                         _called_list.append(_cnm0)
+                elif isinstance(nd, IdentExpr):
+                    # A sibling closure named as a VALUE (handed to another function,
+                    # stored) needs its env exactly as a call to it does: the group
+                    # below shares one env across connected siblings, and a closure
+                    # that only REFERENCES another used to be left out of the group,
+                    # so the value was built with a NULL env.
+                    _cnm1 = _as_str(nd.name)
+                    if _cnm1 not in _called_list:
+                        _called_list.append(_cnm1)
             _called_names = set(_called_list)
             _transitive_mut: set = set()
             for _called in _called_names:
@@ -528,6 +537,11 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
                         _transitive_mut.add(_tn)
             env_struct   = f"{lifted}_env" if len(captures) > 0 else ""
             ci           = ClosureInfo(lifted, env_struct, captures, inner)
+            # Call-site evidence for this closure's UNANNOTATED parameters
+            # (`_gmi_closure_call_site_param_evidence`); absent for callers
+            # that never ran that pass (formal).
+            _cs_all = getattr(ctx, '_closure_call_site_types', None) or {}
+            ci.call_site_param_types = dict(_cs_all.get(lifted) or {})
             _inner_dflts = getattr(inner, 'param_defaults', None) or {}
             if _inner_dflts:
                 ctx._func_param_defaults[lifted] = [
@@ -556,6 +570,11 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
             else:
                 for pname, ptype in inner_params:
                     ctx.var_types[pname] = ctx._resolve_type(ptype)
+                    if ptype is None and pname in ci.call_site_param_types:
+                        ctx.var_types[pname] = ci.call_site_param_types[pname]
+                for _cn, _ct in captures:
+                    if _cn not in ctx.var_types:
+                        ctx.var_types[_cn] = _ct
                 ctx.func_return_types[lifted] = ctx._infer_return_type(inner_body)
                 ctx.var_types.clear()
             inner_scope = dict(enriched_scope)
@@ -727,6 +746,14 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
                         # std/atomic/atomic.mojo).
                         _sh_ct = _hook(ctx, pname, ptype, s)
                 outer_scope[pname] = _sh_ct or ctx._resolve_type(ptype)
+                if ptype is None and not _sh_ct:
+                    # An unannotated parameter's real type is what the
+                    # use/call-site inference settled on, not the bare
+                    # `int64_t` default: a closure capturing `p` stores it in
+                    # its env under THIS type.
+                    _ip = (getattr(ctx, '_inferred_param_types', None) or {}).get(s.name)
+                    if _ip and _ip.get(pname):
+                        outer_scope[pname] = _ip[pname]
             _saved_vt = dict(ctx.var_types)
             ctx.var_types.update(outer_scope)
             for stmt in s.body:

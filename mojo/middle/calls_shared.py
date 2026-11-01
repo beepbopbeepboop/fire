@@ -70,7 +70,7 @@ def _callable_value_symbol(gen, node, cxx: bool = False):
     f=leaf): return f(x)` invoked as `apply_it("q")` compiled, linked,
     and died with SIGSEGV on `mojo_fnptr_call_1(NULL, ...)` — exit 139,
     no diagnostic, and the doc that recorded the *generator* instance of
-    this shape (`bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_fsutil.md`)
+    this shape (`the (since-fixed) c_common/fsutil.py compile failure`)
     never saw it, because it is reachable from an ordinary `def` too.
 
     Two spellings, matching the two the corpus actually uses:
@@ -111,6 +111,17 @@ def _callable_value_symbol(gen, node, cxx: bool = False):
     REDIRECTED symbol, because `_funcptr_`'s statics live in the .c
     translation unit and are not visible from the separately-compiled .cpp.
     """
+    # A callable the RUNTIME implements (`os.walk`, `glob.glob`, ...) used as a
+    # value: its address, through the same `_funcptr_` static every other
+    # "function as a value" site uses.
+    if (isinstance(node, gimple_ctypes.MemberExpr)
+            and isinstance(node.obj, gimple_ctypes.IdentExpr)):
+        _rtf = _RUNTIME_CALLABLE_VALUES.get(f'{node.obj.name}.{node.member}')
+        if _rtf is not None and node.obj.name not in getattr(gen, 'var_types', ()):
+            if cxx:
+                return ('void *', f'(void *){_rtf}')
+            gen._funcptr_builtins_needed.add(_rtf)
+            return ('void *', f'_funcptr_{_rtf}')
     _fname = None
     if isinstance(node, gimple_ctypes.IdentExpr):
         _fname = _as_str(node.name)
@@ -553,6 +564,19 @@ def _resolve_overload(gen, candidates: list, args: list, kwargs: list | None) ->
         if _score(_c2) == best_score:
             ties.append(_c2)
     if len(ties) > 1:
+        # Type erasure cannot tell `def __iter__(var self)` from `def
+        # __iter__(ref self)` (both are `(Struct *)`), but a call on a
+        # receiver that is not consumed (`l.__iter__()`, no `^`) can only mean
+        # the non-consuming overload: real Mojo prefers it, and picking the
+        # owning one typed `LinkedList.__iter__()`'s result as the
+        # `IteratorOwnedType` stub. Explicit loop (self-host: no comprehension).
+        _kept = []
+        for _c4 in ties:
+            if not _c4.get('self_owned'):
+                _kept.append(_c4)
+        if _kept:
+            ties = _kept
+    if len(ties) > 1:
         gimple_ctypes._debug_note('ambiguous or type-indistinguishable overload, picking first in declaration order',
                     f"candidates={[c['overload_id'] for c in ties]}")
     return ties[0]
@@ -568,8 +592,8 @@ def _pack_kwargs_dict(gen, kwarg_pairs) -> str:
 
     String values go through mojo_dict_set_str so the dict's own value
     type is right (mojo_dict_set_int would store the char* as an integer
-    and later read it back as one). Everything else — ints, doubles,
-    pointers — goes through mojo_dict_set_int, which _emit_call coerces,
+    and later read it back as one), doubles through mojo_dict_set_double.
+    Everything else — ints, pointers — goes through mojo_dict_set_int, which _emit_call coerces,
     matching how `d[k] = v` already lowers a subscript store."""
     d = gen._new_val('MojoDict *', 'mojo_dict_new ()')
     _val_ty = ''
@@ -589,6 +613,14 @@ def _pack_kwargs_dict(gen, kwarg_pairs) -> str:
             gen._emit_call('void', '', 'mojo_dict_set_str',
                             [('MojoDict *', d), ('char *', f'"{gimple_ctypes._c_escape(kname)}"'),
                              ('char *', kv)])
+        elif kt == 'double':
+            # Not `mojo_dict_set_int`: `_emit_call` would coerce the double to
+            # an integer and `run(g, scale=2.5)` would arrive as 2. The slot
+            # carries the double kind, which `mojo_dyn_call` also reads to
+            # route it to a float register (or refuse it for a plain pointer).
+            gen._emit_call('void', '', 'mojo_dict_set_double',
+                            [('MojoDict *', d), ('char *', f'"{gimple_ctypes._c_escape(kname)}"'),
+                             ('double', kv)])
         else:
             gen._emit_call('void', '', 'mojo_dict_set_int',
                             [('MojoDict *', d), ('char *', f'"{gimple_ctypes._c_escape(kname)}"'),

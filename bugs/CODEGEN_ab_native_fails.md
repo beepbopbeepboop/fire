@@ -88,7 +88,7 @@ matters for what to do next:
   scratch directory under the worktree rather than the repo root since the
   2026-09-29 flake fix — see `test_ab_native.py`'s module docstring), and that
   pre-pass costs ~15-30 GB / ~15-25 s per call. It is localised, not fixed:
-  `bugs/CODEGEN_bootstrap_resource_blowup.md` and BLOW.md §0.
+  `bugs/mid/CODEGEN_bootstrap_resource_blowup.md` and BLOW.md §0.
 
 ## 2. What would make it pass
 
@@ -119,7 +119,7 @@ Two independent conditions, and the cheap one is worth doing first:
    the python reference's. Every instance found so far is documented in
    commit e8a7135b8 (its per-class
    list, "A/B divergence list" and the dated entries) — that doc, plus
-   `bugs/CODEGEN_bootstrap_resource_blowup.md` for the cost that makes the
+   `bugs/mid/CODEGEN_bootstrap_resource_blowup.md` for the cost that makes the
    corpus expensive, is where the next step belongs.
 
 Lowering the pre-pass cost is worth doing on its own account (it is

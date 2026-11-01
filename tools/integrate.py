@@ -105,8 +105,8 @@ def land_on_master():
     sys.exit("master moved under the round (%s): cannot fast-forward; redo the round" % ", ".join(moved[:5]))
 
 
-def pick_candidates(only=None, allow_dirty=(), quiet=False):
-    """Tasks whose worker has exited with commits, a clean tree and no NEEDS-INFO/BLOCKED verdict."""
+def pick_candidates(only=None, allow_dirty=(), quiet=False, ignore_verdict=()):
+    """Tasks whose worker has exited with commits, a clean tree and a DONE verdict: only a finished bug is integrated."""
     cands = []
     say = (lambda *_: None) if quiet else print
     for name, t in sorted(C.load().items(), key=lambda kv: kv[1]["slot"]):
@@ -117,8 +117,8 @@ def pick_candidates(only=None, allow_dirty=(), quiet=False):
         st = C.state_of(t)
         if st not in ("exited-ok", "exited-err", "integration-failed"):
             continue
-        if C.verdict(t) in ("NEEDS-INFO", "BLOCKED"):
-            say("skip %s: worker says %s" % (name, C.verdict(t))); continue
+        if C.verdict(t) != "DONE" and name not in ignore_verdict:
+            say("skip %s: worker says %s, not DONE (the swarm continues it)" % (name, C.verdict(t) or "nothing")); continue
         if not C.ahead(t):
             say("skip %s: no commits" % name); continue
         if C.git("status", "--short", cwd=t["worktree"]) and name not in allow_dirty:
@@ -144,7 +144,7 @@ def enqueue_merge_fix(name, t, conflict_text):
     if mname in C.load():
         mname += "-%d" % int(time.time() % 100000)
     C.cmd_enqueue(_ap.Namespace(name=mname[:60], claim=t["claims"] or ["task:" + mname], task=task, task_file=None,
-                                file=[], base=t["branch"], needs=[], model=None))
+                                file=[], base=t["branch"], needs=[], model=None, cls=t.get("cls")))
     with C.registry() as reg:
         reg[name]["state"] = "superseded"
 
@@ -164,7 +164,7 @@ def enqueue_red_fix(name, t, failing):
     if mname in C.load():
         mname += "-%d" % int(time.time() % 100000)
     C.cmd_enqueue(_ap.Namespace(name=mname[:60], claim=t["claims"] or ["task:" + mname], task=task, task_file=None,
-                                file=[], base=t["branch"], needs=[], model=None))
+                                file=[], base=t["branch"], needs=[], model=None, cls=t.get("cls")))
     with C.registry() as reg:
         reg[name]["state"] = "superseded"
         reg[name]["needs"] = list(failing)
@@ -175,6 +175,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dry-run", action="store_true", help="merge and report, do not gate or land")
     ap.add_argument("--only", nargs="*", help="restrict to these task names")
+    ap.add_argument("--ignore-verdict", nargs="*", default=[], metavar="NAME",
+                    help="take these named tasks although their worker's CONTROL-STATUS says BLOCKED or NEEDS-INFO; "
+                         "an explicit decision by the owner, recorded in the landing log, never automatic")
     ap.add_argument("--jobs", nargs="*", metavar="JOB",
                     help="verify with just these suite jobs (e.g. bootstrap-stage1-transitive bootstrap-stage2-cc) "
                          "instead of the full `make gate`: the way a branch's heavy verification is done, by the "
@@ -211,7 +214,7 @@ def main():
     except OSError:
         sys.exit("another integrator is already running (lock %s/integrator.lock): there is only ever one" % C.ctl_dir())
 
-    cands = pick_candidates(a.only, a.allow_dirty)
+    cands = pick_candidates(a.only, a.allow_dirty, ignore_verdict=a.ignore_verdict)
     if a.only:                                       # the caller's order is the merge order (a bisect depends on it)
         cands = sorted(cands, key=lambda n: a.only.index(n))
     if not cands:

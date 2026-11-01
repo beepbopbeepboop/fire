@@ -70,7 +70,7 @@ WHAT IS AND IS NOT A FINDING
   refusal             the compiler said no.  Not a finding: a construct with
                        no representation is CORRECTLY refused, and a fuzzer
                        that counted those as bugs would spend its whole budget
-                       re-discovering `bugs/FORMAL_known_limits.md`.  Counted by
+                       re-discovering `bugs/formal/FORMAL_known_limits.md`.  Counted by
                        the CONSTRUCT the message names, and audited — see "THE
                        REFUSAL AUDIT" below, which is the part that decides
                        whether the message is true.
@@ -175,7 +175,7 @@ wrong number would be worse than no tool.
 A `REFUSAL-DIVERGES-*` counts, and it is the newest member of that list.  A
 refusal on its own is not a finding — a construct with no representation is
 CORRECTLY refused, and counting those would spend the whole budget on
-`bugs/FORMAL_known_limits.md`.  A refusal on ONE architecture while ANOTHER
+`bugs/formal/FORMAL_known_limits.md`.  A refusal on ONE architecture while ANOTHER
 answers the same program is a different thing: the construct is representable,
 one machine says so by running the program, and this one declines it.  That is
 the divergence `test_formal_x86_64_parity.py` exists to keep closed, and while
@@ -259,7 +259,7 @@ mix that expected answers could only report refusals — see
 `test_formal_fuzz.py`'s `MIXES_NOT_LOWERED`).
 
 Every one of the last five was added because a DIFFERENTIAL SWEEP found
-something in it, and the ledger is `bugs/FORMAL_fuzz_ledger.md`: `containers`
+something in it, and the ledger is `bugs/formal/FORMAL_fuzz_ledger.md`: `containers`
 because `for k in d` read `k0, v0, k1` on BOTH architectures (exit 0) and
 because a membership test's bound was its own needle on x86-64;
 `generics`/`globals`/`strmeth`/`environ` because they were newly lowered and
@@ -402,7 +402,7 @@ PY_TIMEOUT = 30
 # there and stops here. It is a verdict about the program rather than a verdict
 # about a bug, and it is counted as its own status so a sweep's numbers stay
 # readable — a deep recursion is a documented limit of this path
-# (`bugs/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md`), not a silent
+# (`bugs/formal/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md`), not a silent
 # wrong answer.
 #
 # Reading it off the exit status is sound for THIS generator because `main`
@@ -434,18 +434,18 @@ STACK_TRAP_STATUS = 2
 # pass here and measure nothing.
 #
 # `str_subscript` is the row still standing, and it is the shape of the claim
-# the other two carried: `bugs/FORMAL_string_value_model.md` owns it.
+# the other two carried: `bugs/formal/FORMAL_string_value_model.md` owns it.
 #
 # `no_return_call` is the second row, and **it is legitimate only because the
 # generator now produces the construct** — which is what
-# `bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md`
+# `bugs/formal/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md`
 # §3 requires before a row may name it ("a row nothing can trigger is a row
 # that has stopped measuring", and "if the generator is ever taught to emit a
 # helper with an empty body, this is the construct to add"). Until
 # `nor_define`/`nor_call` existed the minimiser reached this class constantly
 # and `blame` had no way to name it, which is what 21 of the 27
 # `MISMATCH-X86` rows in the `strings` sweep at scale actually were
-# (`bugs/FORMAL_fuzz_ledger.md` §4.11).
+# (`bugs/formal/FORMAL_fuzz_ledger.md` §4.11).
 KNOWN_DIVERGENCES = {
     "str_subscript": (
         "`s[i]` is a byte, not a one-character string (bugs/"
@@ -465,7 +465,7 @@ KNOWN_DIVERGENCES = {
     # "same arity, same operand types" discipline every other row uses.
     "set_order": (
         "a set lowers as a LIST, so it iterates in INSERTION order where CPython "
-        "iterates in hash order (bugs/FORMAL_set_value_model.md)"),
+        "iterates in hash order (bugs/formal/FORMAL_set_value_model.md)"),
     "no_return_call": (
         "a `def` with no `return` yields a word where CPython yields None, "
         "so `f() == 0` takes this path's arm and CPython's takes the "
@@ -1186,7 +1186,7 @@ def run_on(backend, text, tmpdir, name, test_input=None):
         # `classify` counted it as a correctly-refused construct — so a sweep
         # reported a clean `refusal` over a parser-lowering bug that only x86-64
         # had.  "A message that is false about the file is worse than no
-        # message" (`bugs/FORMAL_known_limits.md`) applies twice over here: once
+        # message" (`bugs/formal/FORMAL_known_limits.md`) applies twice over here: once
         # because the message was false about the FILE, and again because the
         # tally said the file was outside the modelled subset.
         crashed = ("Traceback (most recent call last)" in diag
@@ -1297,7 +1297,7 @@ STRINGS = ["ab", "cd", "ef", "gh", "", "a", "xyz", "pqrs"]
 #: the four below. It does NOT draw `len(os.getenv(k))` (refused: `len` of an
 #: `Optional` has no representation) nor `os.environ` (a module view whose
 #: `len`/subscript are refused; its coverage is the sweep row in
-#: `bugs/FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md`).
+#: `bugs/formal/FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md`).
 FIXED_ENV = {
     "__CF_USER_TEXT_ENCODING": "0x1F9:0x0:0x0",
     "FORMAL_FUZZ_PLAIN": "one",
@@ -1396,7 +1396,7 @@ MIXES = {
     # one of the mixes above emits something the path is supposed to LOWER,
     # which is the right discipline for finding miscompiles and the wrong
     # one for measuring limits — measured: 4032 programs over the thirteen sweeps
-    # `bugs/FORMAL_fuzz_ledger.md` records produced 13 refusals and all 13 were
+    # `bugs/formal/FORMAL_fuzz_ledger.md` records produced 13 refusals and all 13 were
     # one bug (`_cb0` has no home), so the refusal surface had no coverage at all
     # and neither did the audit below have anything to audit.
     #
@@ -1419,7 +1419,7 @@ MIXES = {
     # name whose arm depends on which one the `elif` chain reached first.
     #
     # `variadic_define` and `variadic_call` are here for the reason
-    # `bugs/FORMAL_a_variadic_parameter_read_has_no_abi.md` §5 step 5 records and
+    # `bugs/formal/FORMAL_a_variadic_parameter_read_has_no_abi.md` §5 step 5 records and
     # measured: a function that DECLARES `*rest` and READS it was unreachable
     # from this generator, so nothing here could notice the day it was fixed.
     # Both halves are needed for a verdict — the read is what
@@ -1437,7 +1437,7 @@ MIXES = {
     # Every one of them is a construct the corpus could not produce at all, and
     # each was probed on both architectures BEFORE it was written down here, so
     # that a mix measures a lowering rather than a refusal it would have spent
-    # its budget re-deriving (`bugs/FORMAL_fuzz_ledger.md` §2 and §5). What each
+    # its budget re-deriving (`bugs/formal/FORMAL_fuzz_ledger.md` §2 and §5). What each
     # one is here to reach:
     #
     #   loopelse  `while`/`for` with an `else` arm, which is the shape where the
@@ -1512,7 +1512,7 @@ MIXES = {
     #             stay because a mix name is part of the program's SEED
     #             (`make_program` seeds on `f"{seed}:{index}:{mix}"`), so
     #             collapsing them would make every row
-    #             `bugs/FORMAL_fuzz_ledger.md` records under one of the two
+    #             `bugs/formal/FORMAL_fuzz_ledger.md` records under one of the two
     #             names a row about programs this tool can no longer generate.
     #             Two SELECTIONS of one generator is what the table is for —
     #             `core` and `signed` share half their kinds too.
@@ -1525,7 +1525,7 @@ MIXES = {
     # Each is here because the CORPUS could not produce the construct at all,
     # and each was PROBED ON BOTH ARCHITECTURES before it was written down, for
     # the reason `§2.1`'s nine families give: a mix that measures a refusal
-    # spends its budget re-deriving `bugs/FORMAL_known_limits.md`.
+    # spends its budget re-deriving `bugs/formal/FORMAL_known_limits.md`.
     #
     #   comps     the comprehension walks and the `*` splice — the OTHER TWO
     #             walks that bind one thing per count, beside `for k in d` and
@@ -1579,7 +1579,7 @@ MIXES = {
 #: disagrees with CPython, every one of them by `set_order`, and each pays for a
 #: full reduction that `blame` then neutralises — measured: 465 s for 100
 #: programs at 30 steps against the 20 minutes a full budget costs per program
-#: for `strings` (§5 of `bugs/FORMAL_fuzz_ledger.md`).
+#: for `strings` (§5 of `bugs/formal/FORMAL_fuzz_ledger.md`).
 SETS_MIN_STEPS = 30
 
 #: mix -> (a pattern the mix must still PRODUCE, why it must).
@@ -1599,7 +1599,7 @@ SETS_MIN_STEPS = 30
 #: is exercised.  A change that made the signedness uniform, or dropped the
 #: operators from the mix, would leave every sweep reporting the same clean
 #: tally with one fewer thing measured, which is the failure mode
-#: `bugs/FORMAL_fuzz_ledger.md` §1 calls out: "a mix that stops producing a
+#: `bugs/formal/FORMAL_fuzz_ledger.md` §1 calls out: "a mix that stops producing a
 #: construct reports the same clean tally as one that never produced it".
 MIX_MUST_GENERATE = {
     "noreturn": (_NOR_CALL_EQ.pattern,
@@ -3057,7 +3057,7 @@ class Gen:
     # A key that is ABSENT is not generated: `os.getenv` is `getenv(3)`, which
     # cannot tell an unset variable from an empty one, so CPython prints `None`
     # where this path prints `""`. That is a documented difference
-    # (`bugs/FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md`) and
+    # (`bugs/formal/FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md`) and
     # generating it would report the model, not a lowering.
     #
     # **`environ_len` was `len(os.getenv(k))` and is gone: the backend refuses
@@ -3088,7 +3088,7 @@ class Gen:
     # measures nothing — which is what `test_formal_fuzz.py`'s
     # `check_mix_builds` exists to say, and it says it about every mix but this
     # one.  The refusal surface is therefore not covered at all: 4032 programs
-    # over the thirteen sweeps `bugs/FORMAL_fuzz_ledger.md` records produced 13
+    # over the thirteen sweeps `bugs/formal/FORMAL_fuzz_ledger.md` records produced 13
     # refusals, and all thirteen were one bug.  That is not a corpus measuring
     # the limits; it is a corpus that cannot reach them.
     #
@@ -3199,7 +3199,7 @@ class Gen:
             # `REFUSAL-DIVERGES` rather than a bug in either lowering — a
             # construct refused on one machine and lowered on the other, which
             # is this fuzzer's definition of a parity finding, and
-            # `bugs/FORMAL_the_two_architectures_have_different_container_
+            # `bugs/formal/FORMAL_the_two_architectures_have_different_container_
             # budgets.md` is what it was filed as.
             #
             # The SIZE is computed from `formal/model.py::CONTAINER_BUDGET` —
@@ -3590,7 +3590,7 @@ class Gen:
     # that could produce it would be measuring the oracle's traceback. The body
     # returns, for the same reason: a helper with no `return` yields a word on
     # this path where CPython yields `None`
-    # (`bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md`),
+    # (`bugs/formal/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md`),
     # and a family that printed such a call would spend its budget on a bug this
     # corpus cannot fix.
     def argshape_stmt(self, indent, kind):
@@ -3650,11 +3650,11 @@ class Gen:
         """A call to a `def` with NO `return`, watched through a comparison.
 
         **This is the construct the minimiser kept finding and the corpus could
-        not produce**, and §4.11 of `bugs/FORMAL_fuzz_ledger.md` measured that as
+        not produce**, and §4.11 of `bugs/formal/FORMAL_fuzz_ledger.md` measured that as
         21 of the 27 `MISMATCH-X86` rows in the `strings` sweep at scale — a
         class reached only because `shrink` deletes statements, and one
         `blame` has no way to name. §3.3 filed it and
-        `bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md`
+        `bugs/formal/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md`
         §3 says exactly what had to become true first: "If the generator is ever
         taught to emit a helper with an empty body, this is the construct to add,
         and this doc is what it should point at." This is that.
@@ -4231,7 +4231,7 @@ class Gen:
             # word is an integer". With the element kind read off the literal it
             # is a count-field read, and the answer is `ncols` — so this is
             # emitted rather than avoided, which is what
-            # `bugs/FORMAL_fuzz_ledger.md` §5 listed as the next thing to
+            # `bugs/formal/FORMAL_fuzz_ledger.md` §5 listed as the next thing to
             # generate and what no generator could measure until the rule
             # existed.
             self.emit(indent, f"print(len({inner}))")
@@ -5473,7 +5473,7 @@ def classify(results, want_exit, want_out, args):
         return "trapped"
     # A REFUSAL is not a finding — a construct with no representation is
     # CORRECTLY refused, and a fuzzer that counted those as bugs would spend
-    # its whole budget re-discovering `bugs/FORMAL_known_limits.md`.  That is
+    # its whole budget re-discovering `bugs/formal/FORMAL_known_limits.md`.  That is
     # true of a refusal EVERY engine agrees on, and false of one engine
     # refusing what another lowered: then the construct IS representable, one
     # machine says so by running the program, and this one declines it.  That
@@ -5611,7 +5611,7 @@ def reduction_lines(rec):
 
     The two blocks above are the ORIGINAL program's, and the file
     `programs/pN.mojo` is the reduction, so printing only the first is what
-    §4.12 of `bugs/FORMAL_fuzz_ledger.md` measured: a reproducer on disk that
+    §4.12 of `bugs/formal/FORMAL_fuzz_ledger.md` measured: a reproducer on disk that
     cannot print what the record says it prints. This line is the difference
     visible without opening `findings.json`, and it says so when the reduction
     stopped reproducing — which is a fact about the SHRINKER, worth seeing here
@@ -6122,7 +6122,7 @@ MIN_KINDS = {"x86_64": "x86", "arm64": "arm"}
 ALWAYS_REPORTED = ("match", "trapped", "refusal", "CPYTHON-TIMEOUT")
 
 #: What became of each finding's REDUCTION, counted and printed ALWAYS. §4.12 of
-#: `bugs/FORMAL_fuzz_ledger.md` put `reduced_verdict` on the record and named the
+#: `bugs/formal/FORMAL_fuzz_ledger.md` put `reduced_verdict` on the record and named the
 #: honest next step: it is a REPORT with no owner, because nothing acts on it —
 #: "the two programs above are the only findings the `strings` corpus still
 #: produces on one backend, and `reduced_verdict` for a reduction that stopped

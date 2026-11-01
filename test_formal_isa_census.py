@@ -79,7 +79,7 @@ class TestEmittedFormCoverage(unittest.TestCase):
     def test_the_census_is_about_emitted_forms_and_not_the_encoder_table(self):
         """Every row is emitted, and there are enough of them to be a census.
 
-        The first half is the definition (`bugs/FORMAL_arm64_instruction_
+        The first half is the definition (`bugs/formal/FORMAL_arm64_instruction_
         coverage.md`'s 2026-10-03 method change: an encoder no lowering calls
         is not an instruction any image can contain). The second is a
         DIRECTION check rather than a count, for the reason the arm64 survey
@@ -100,7 +100,7 @@ class TestEmittedFormCoverage(unittest.TestCase):
                 unwired,
                 "every encoder in formal/%s.py reads as emitted, so the census "
                 "has stopped distinguishing the TABLE from the CALLERS — which "
-                "is the mistake `bugs/FORMAL_arm64_instruction_coverage.md` "
+                "is the mistake `bugs/formal/FORMAL_arm64_instruction_coverage.md` "
                 "records as overstating coverage by 120,647 real instructions"
                 % arch)
 
@@ -177,7 +177,7 @@ class TestTheExColumnIsKeyedByShape(unittest.TestCase):
     operands) disassemble to the SAME mnemonic, so a mnemonic-only key
     credited an image that contained only the two-operand form to the
     three-operand encoder, and the census claimed a corpus the images did
-    not contain. `bugs/FORMAL_isa_census_examples_column_matches_by_
+    not contain. `bugs/formal/FORMAL_isa_census_examples_column_matches_by_
     mnemonic.md` and its two siblings are the filings of this one defect.
     """
 

@@ -574,7 +574,7 @@ CITATION_LINES = [
      'mojo_exc_type_get'),
     ('doc/ABI.md', 'runtime/fire_runtime.h:612-614', 'runtime/fire_runtime.h',
      'mojo_exc_pending_get'),
-    ('doc/ABI.md', 'runtime/fire_runtime.h:585-610', 'runtime/fire_runtime.h',
+    ('doc/ABI.md', 'runtime/fire_runtime.h:585-613', 'runtime/fire_runtime.h',
      '_mojo_exc_pending'),
 ]
 

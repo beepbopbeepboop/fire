@@ -142,7 +142,7 @@ class TestDeviceSelect(unittest.TestCase):
         decorator (measured: 0 after `formal37-2` removed it, because the
         decorator was the file's whole `functools` dependency — see
         the thirteen-row host-import doc (deleted in 12774624)), and
-        `bugs/FORMAL_a_call_result_field_access_has_no_representation.md` §4
+        `bugs/formal/FORMAL_a_call_result_field_access_has_no_representation.md` §4
         named that as the reason to leave the row alone: "removing the import
         would trade one file of this wall for a hole in a compiled-path test."
 
