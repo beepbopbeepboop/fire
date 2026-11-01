@@ -5406,8 +5406,63 @@ main()
 """, "1 23\n")
 
 
+def run_send_into_just_started_regression():
+    # Bug: CODEGEN_send_into_just_started_generator_is_not_refused
+    # `g.send(7)` on a fresh generator must raise TypeError, not resume.
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython(
+            "send_into_just_started_refused_cpp", """\
+def g():
+    yield 1
+
+def main():
+    it = g()
+    try:
+        it.send(7)
+    except TypeError:
+        print("TypeError")
+main()
+""", """\
+def g():
+    yield 1
+
+def main():
+    it = g()
+    try:
+        it.send(7)
+    except TypeError:
+        print("TypeError")
+main()
+""")
+    with coro.pinned('stackswitch'):
+        test_generator_matches_cpython(
+            "send_into_just_started_refused_stackswitch", """\
+def g():
+    yield 1
+
+def main():
+    it = g()
+    try:
+        it.send(7)
+    except TypeError:
+        print("TypeError")
+main()
+""", """\
+def g():
+    yield 1
+
+def main():
+    it = g()
+    try:
+        it.send(7)
+    except TypeError:
+        print("TypeError")
+main()
+""")
+
 def run_tests():
     run_cpp_send_tests()
+    run_send_into_just_started_regression()
     run_cpp_path_multi_arg_print_tests()
     run_none_yield_tests()
     run_tagged_none_equality_tests()
