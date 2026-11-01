@@ -1570,7 +1570,8 @@ def _cpp_dyn_call_expr(gen, e):
     declared as. int64_t-word, `char *`, container-pointer and `double`
     arguments are admitted. A double travels as its bit pattern (like every
     other word in the packed list/dict) and is TAGGED as a double - the
-    positional list's kind string, `mojo_dict_set_double` for a keyword - so a
+    positional list's per-slot kind (`mojo_list_append_double_kinded`),
+    `mojo_dict_set_double` for a keyword - so a
     callee that takes its arguments in integer registers (a plain function
     pointer) can refuse it (`mojo_dyn_call`) instead of reading garbage, while
     a registered generator signature (`mojo_gen_sig_register`) routes it to a
@@ -1582,7 +1583,6 @@ def _cpp_dyn_call_expr(gen, e):
         return None
     _fname = e.func.name
     parts = []
-    _pos_kinds = []
     for _fa in e.args:
         _op = _fa.operand if (isinstance(_fa, gimple_ctypes.UnaryOp)
                               and _fa.op in ('*', '**')) else _fa
@@ -1597,18 +1597,13 @@ def _cpp_dyn_call_expr(gen, e):
             _fct = 'double'
         _spread = isinstance(_fa, gimple_ctypes.UnaryOp) and _fa.op in ('*', '**')
         if _fct == 'double' and not _spread:
-            parts.append(f"mojo_list_append_double(_a, (double)({gen._cpp_expr(_op)})); ")
-            _pos_kinds.append('d')
+            parts.append(f"mojo_list_append_double_kinded(_a, (double)({gen._cpp_expr(_op)}), 'i'); ")
             continue
         if _fct not in ('int64_t', 'char *', 'MojoList *', 'MojoDict *', 'MojoSet *'):
             raise gimple_exprtypes._UnsupportedGeneratorShape(
                 "a call through the callable-valued parameter "
                 f"'{_fname}' passes an argument whose C type is not "
                 "statically a word, string or container")
-        if _spread:
-            _pos_kinds.append(None)
-        else:
-            _pos_kinds.append('p' if _fct == 'char *' else 'i' if _fct == 'int64_t' else 'l')
         _txt = f"(int64_t)(intptr_t)({gen._cpp_expr(_op)})"
         if isinstance(_fa, gimple_ctypes.UnaryOp) and _fa.op == '*':
             parts.append(f"mojo_args_extend_word(_a, {_txt}); ")
@@ -1637,12 +1632,6 @@ def _cpp_dyn_call_expr(gen, e):
                 "statically a word, string or container")
         parts.append(f'mojo_dict_set_int(_k, (char *)"{_kn}", '
                      f"(int64_t)(intptr_t)({gen._cpp_expr(_kv)})); ")
-    if 'd' in _pos_kinds:
-        if None in _pos_kinds:
-            raise gimple_exprtypes._UnsupportedGeneratorShape(
-                "a call through the callable-valued parameter "
-                f"'{_fname}' mixes a double argument with a `*` spread")
-        parts.append(f'mojo_list_set_kinds(_a, "{"".join(_pos_kinds)}"); ')
     _cpp_fname = gen._cpp_kw_param_renames.get(_fname, _fname)
     return ("[&]() { struct _W { int64_t w; "
             "operator int64_t() const { return w; } "

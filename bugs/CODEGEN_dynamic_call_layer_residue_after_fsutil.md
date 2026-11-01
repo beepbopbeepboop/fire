@@ -116,6 +116,19 @@ as values, or that call one of their own parameters, are kept on the C++ path
   a double beside a `*` spread in a call through a function value is refused
   at compile time (the kind string is positional); the unannotated-float-default
   rule is applied to generator parameters only, not plain functions.
+- **Double beside a `*` spread FIXED 2026-11-01**
+  (`test_link_mode.py::test_generator_value_called_with_double_beside_star_spread`).
+  Both call-through-a-function-value lowerings
+  (`emit_calls._lower_fnptr_spread_call`, `cpp_core._cpp_dyn_call_expr`)
+  refused `f(1.5, *a)` / `f(*a, 0.5)` because the argument list's kind string
+  was positional. A double is now appended with
+  `mojo_list_append_double_kinded`, which records that slot's `d` kind at run
+  time, so the static kind string (and the refusal) is gone. Measured: FAIL
+  (`ValueError: ... mixes a double argument with a `*` spread`) -> PASS
+  (CPython-identical). Still open: a FLOAT ELEMENT inside the spread list
+  itself (`mojo_args_extend_word` appends words via `mojo_list_append_int`, so
+  it loses its `d` kind), and the unannotated-float-default rule is applied to
+  generator parameters only, not plain functions.
 - Regressions: item 1 `test_link_mode.py::test_bare_submodule_import_keyword_call`,
   item 3 `...::test_str_affix_method_on_unsolved_word_is_bool`, item 4
   `...::test_generator_none_default_reaches_callee_as_null`, item 2 `...::test_cross_module_generator_default_is_padded`, item 5 above (+ its 2026-10-31 entry). (The

@@ -7937,26 +7937,21 @@ def _lower_fnptr_spread_call(gen, fp_type: str, fp_raw: str, node: gimple_ctypes
 
     Argument order is preserved: a plain positional after a `*x` is appended
     after the spread's elements. A double travels as its bit pattern tagged as
-    a double (the list's kind string / `mojo_dict_set_double`); the kind string
-    is positional, so a double beside a `*` spread is refused at compile time
-    rather than guessed at."""
+    a double (`mojo_list_append_double_kinded` records the 'd' kind of THAT slot
+    at run time, so it may sit before or after a `*` spread whose length is
+    unknown here; `mojo_dict_set_double` for a keyword)."""
     if fp_type != 'void *':
         fp_void = gen._new_val('void *', f'(void *){fp_raw}')
     else:
         fp_void = fp_raw
     _a = gen._new_val('MojoList *', 'mojo_list_new ()')
-    _kinds = []
     _kw_spreads = []
-    _has_star = False
     for _node_arg in node.args:
         _is_spread = isinstance(_node_arg, gimple_ctypes.UnaryOp) and _node_arg.op in ('*', '**')
         _t, _v = gen.lower_expr(_node_arg.operand if _is_spread else _node_arg)
         _t, _v = _as_str(_t), _as_str(_v)
         if _is_spread:
             _w = _v if _t == 'int64_t' else gen._new_val('int64_t', f'(int64_t){_v}')
-            if _node_arg.op == '*':
-                _has_star = True
-                _kinds.append(None)
         else:
             _w = None
         if _is_spread and _node_arg.op == '*':
@@ -7964,17 +7959,10 @@ def _lower_fnptr_spread_call(gen, fp_type: str, fp_raw: str, node: gimple_ctypes
         elif _is_spread:
             _kw_spreads.append(_w)
         elif _t == 'double':
-            gen._emit(f"  mojo_list_append_double ({_a}, {_v});")
-            _kinds.append('d')
+            gen._emit(f"  mojo_list_append_double_kinded ({_a}, {_v}, 'i');")
         else:
             _w = _v if _t == 'int64_t' else gen._new_val('int64_t', f'(int64_t){_v}')
             gen._emit(f"  mojo_list_append_int ({_a}, {_w});")
-            _kinds.append('p' if _t == 'char *' else 'i' if _t == 'int64_t' else 'l')
-    if 'd' in _kinds:
-        if _has_star:
-            raise ValueError("a call through a function value mixes a double "
-                             "argument with a `*` spread")
-        gen._emit(f'  mojo_list_set_kinds ({_a}, "{"".join(_kinds)}");')
     _kw_pairs = {kn: gen.lower_expr(kv) for kn, kv in (getattr(node, 'kwargs', None) or [])}
     _k = gen._pack_kwargs_dict(_kw_pairs)
     for _w in _kw_spreads:
