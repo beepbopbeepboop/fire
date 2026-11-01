@@ -92,6 +92,10 @@ Measured, not changed: `_infer_local_var_types` is called 278,673 times for 3,80
 (`func_return_types`, `var_types`, struct field types) that GROW during the compile, so two calls on one function can legitimately differ. The
 safe form keys the memo on a version stamp of exactly the tables it read (or finds the passes that re-ask with unchanged tables); do that
 measurement first -- count how many of the 308 repeats return an identical dict -- before writing any cache.
+MEASURED (same run, results hashed per function): 278,673 calls yield only 4,081 distinct (function, result) pairs, at most 8 per function, so 98.5% of the
+calls recompute a result already seen. The cache is worth ~11 s (7%) but needs an invalidation key; count-only fingerprints (`len(table)`) miss a
+REFINED entry, so the table writes themselves have to bump a version (the tables are plain dicts written from many places -- a ~dozen
+write sites per table must be found first). Not attempted: a stale entry here is a silent wrong C type.
 Remaining, in order of share: the other `_walk` users in `_scan_callsite_param_kinds` (cache per function across
 the two `_one_pass` rounds and the six `lower` calls: needs an invalidation story because the contract maps evolve);
 `realpath` memo for the constant `_SELFHOST_DIR`; `_infer_return_maybe_kinds`; `_gmi_binding_index`.
