@@ -90,6 +90,15 @@ every module is reachable from a word with `mojo_getattr_any(obj, attr)`
    (`type.__new__(Meta, ..)`) is refused by name
    (`type_dunder_new_with_a_user_metaclass_is_refused_by_name`) - it is stage 4: the class must be
    an instance of `Meta` and `Meta.__call__ / __getattr__` must see it.
+   **Run-time metaclass landed 2026-11-01 (first piece of stage 4)**: `Meta = type('Meta', (type,), {..})`
+   (`type` as a base is the implicit root, not a table base) and `type.__new__(Meta, n, b, ns)` with
+   `Meta` a LOCAL bound to a run-time class: the new class records `Meta` (`mojo_type_set_meta`);
+   `Foo.x` that misses the class and its bases is answered by `Meta`'s attributes, then
+   `Meta.__getattr__(Foo, name)`; `Foo.m()` finds a metaclass method and passes `Foo` as `self`
+   (`mojo_classobj_lookup`, `mojo_rtobj_method_call`). Pinned by
+   `metaclass_made_at_run_time_answers_misses`. Still missing: a STATIC `class Meta(type)` (still
+   refused by name; needs methods of static classes reachable from the class table), `Meta.__call__`,
+   `__prepare__`, `__set_name__`, `__init_subclass__`, `type(Foo)` is `Meta`, `isinstance(Foo, Meta)`.
 4. the metaclass protocol `EnumType` uses: `__prepare__`, `__new__`, `__call__`, `__set_name__`,
    `__init_subclass__`, class-level `__getattr__`, `isinstance(x, cls)` for dynamic classes,
    `DynamicClassAttribute` / `property` on dynamic classes.

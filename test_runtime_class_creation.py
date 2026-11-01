@@ -216,6 +216,24 @@ def main():
     print(p.many(2, 0, 0, 0, 0, 0, 3))
 main()
 """,
+    'metaclass_made_at_run_time_answers_misses': """\
+def ga(cls, name):
+    return len(name) * 100
+
+def mname(cls):
+    return 42
+
+def main():
+    Meta = type('Meta', (type,), {'__getattr__': ga, 'tag': 7, 'mname': mname})
+    Foo = type.__new__(Meta, 'Foo', (), {'x': 1})
+    print(Foo.x)
+    print(Foo.tag)
+    print(Foo.abc)
+    print(Foo.mname())
+    Foo.y = 3
+    print(Foo.y)
+main()
+""",
     'two_classes_of_one_name_are_two_classes': """\
 def main():
     P = type('Same', (), {'v': 1})
