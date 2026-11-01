@@ -6,6 +6,22 @@ the generator value-slot lattice supports (int / bool / float / str) matches
 CPython on BOTH the local and global generator paths. None is the only
 mismatching type. Owner-level ABI feature; measured and pinned, NOT shipped.
 
+## Status (2026-10-31, second round, work/bug-codegen-a-bare-or-explicit-yield-of)
+
+**Landed:** a for-loop variable from a tagged generator that is appended to a
+list (`for v in g(): out.append(v)`) now keeps its None. Two sites:
+`mojo_list_append_word` (runtime/fire_runtime.c) has a `'n'` arm that gives the
+slot the list's None kind (`MOJO_KIND_NONE`), and the `.append` emitter
+(`mojo/backend_gimple/emit_methods.py`, list append `else` branch) routes a
+tagged-word argument (`av in gen._boxed_vals`) to `mojo_list_append_word`
+instead of `mojo_list_append_int`, which stored the box's address. Pin:
+`none_yield_appended_to_list_in_for_loop` in `run_none_yield_tests`
+(`[1, None, 2]`, CPython oracle; FAILED `[1, 4315…, 2]` before, PASS after;
+the four none-yield cases 4/0). Item 4 below is closed for the append path.
+
+**Still open:** items 1, 2 and 3 below, and `list(g())`, comprehensions over
+`g()`, and `next(g())` (not tagged; see item 1).
+
 ## Status (2026-10-31, partial fix landed on work/bug-codegen-a-bare-or-explicit-yield-of-3467)
 
 **Landed (real behaviour change, stackswitch default path, for-loop consumers):**

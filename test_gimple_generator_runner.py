@@ -3070,6 +3070,34 @@ def main():
         print(v)
 main()
 """)
+    # The loop target is appended to a list: `mojo_list_append_word` must give
+    # the None box a list slot of kind 'n', or the element prints as the box's
+    # address rather than `None`.
+    test_generator_matches_cpython("none_yield_appended_to_list_in_for_loop", """\
+def g():
+    yield 1
+    yield
+    yield 2
+
+def main():
+    out = []
+    for v in g():
+        out.append(v)
+    print(out)
+main()
+""", """\
+def g():
+    yield 1
+    yield
+    yield 2
+
+def main():
+    out = []
+    for v in g():
+        out.append(v)
+    print(out)
+main()
+""")
     test_generator_matches_cpython("none_yield_explicit_beside_int_in_for_loop", """\
 def g():
     yield 1

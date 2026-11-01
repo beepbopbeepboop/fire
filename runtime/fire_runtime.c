@@ -1275,6 +1275,9 @@ void mojo_list_append_word(MojoList *l, int64_t w)
             case 'd': _list_word_push(l, 'd', bx->bits, 'i'); return;
             case 'p': _list_word_push(l, 'p', bx->bits, 'i'); return;
             case 'b': _list_word_push(l, MOJO_KIND_BOOL, bx->bits, 'i'); return;
+            /* A None box (mojo_box_none): a slot of kind 'n' whose raw value
+             * is ignored -- the same shape `None` takes in every other list. */
+            case 'n': _list_word_push(l, MOJO_KIND_NONE, 0, 'i'); return;
             default:  _list_word_push(l, 'i', bx->bits, 'i'); return;
         }
     }
