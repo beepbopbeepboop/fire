@@ -677,6 +677,36 @@ def test_generator_value_called_with_double_beside_star_spread() -> bool:
     return ok
 
 
+def test_generator_value_called_with_float_element_in_star_spread() -> bool:
+    """A FLOAT ELEMENT inside a `*` spread (`f(*a)` with `a = [1.5, 3]`) lost
+    its 'd' kind: `mojo_args_extend_word` appended each element with
+    `mojo_list_append_int`, so the double box's address reached the callee as
+    an integer word and the registered generator read garbage. Elements are
+    now appended with `mojo_list_append_word`, which records the kind. Found
+    via bugs/CODEGEN_dynamic_call_layer_residue_after_fsutil.md."""
+    src = (
+        'def g(x: float, n: int):\n'
+        '    for i in range(n):\n'
+        '        yield x * i\n'
+        '\n'
+        'def run(f, a):\n'
+        '    for v in f(*a):\n'
+        '        print(v)\n'
+        '\n'
+        'def main():\n'
+        '    run(g, [1.5, 3])\n'
+        'main()\n'
+    )
+    rc, stdout, py_rc, py_stdout = _run_single_file_vs_cpython(
+        'dblelem', src, 'dbl_elem_')
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and stdout == '0.0\n1.5\n3.0\n')
+    if not ok:
+        print(f"  ✗ generator_value_called_with_float_element_in_star_spread: "
+              f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
+    return ok
+
+
 def test_from_submodule_import_symbol_value_read() -> bool:
     """`from SUBMODULE import SYMBOL` (not a bare submodule marker), the
     symbol bound to a new local, then called through that local
@@ -2325,6 +2355,7 @@ CASES = [
     test_statement_call_packs_keywords_into_kwargs_slot,
     test_generator_value_called_with_kwargs_spread_and_float_default,
     test_generator_value_called_with_double_beside_star_spread,
+    test_generator_value_called_with_float_element_in_star_spread,
     test_from_submodule_import_symbol_value_read,
     test_sibling_function_import_call_is_inlined,
     test_sibling_class_attribute_function_scoped,
