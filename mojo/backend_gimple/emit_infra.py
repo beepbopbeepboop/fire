@@ -3746,6 +3746,31 @@ def tagged_for_target_name(gen, name) -> bool:
     return loops == len(values)
 
 
+def tagged_recv_name(gen, name) -> bool:
+    """True iff every binding of `name` in THIS function is `name = yield`
+    (an int-valued `yield` used as a value, `__mojo_coro_yield_i`), so every
+    value the name holds is the generator's resume word: the None box when the
+    generator was resumed by `next()` / `send(None)`, or a bare integer when it
+    was sent one. Such a name keeps the box (the caller registers it in
+    `_boxed_vals` / `_tagged_word_vals`), so `print(x)` and `x == None` see the
+    resume's kind, and `x = yield` after `next(it)` prints None, not 0.
+
+    A bare word and a box are both legal here: a consumer of a tagged name
+    renders an unboxed integer as itself (`mojo_repr_boxed`). A name with any
+    other binder (a plain store, a copy, a loop target) answers False and the
+    bind unwraps as it always did."""
+    params = getattr(gen, '_cur_func_params', None) or ()
+    if name in params:
+        return False
+    values = _local_bindings(gen, name)
+    if not values:
+        return False
+    return all(isinstance(v, gimple_ctypes.CallExpr)
+               and isinstance(v.func, gimple_ctypes.IdentExpr)
+               and v.func.name == '__mojo_coro_yield_i'
+               for v in values)
+
+
 def mixed_container_locals(gen) -> set:
     """The names in THIS function's body that are assigned values of more
     than one distinct container kind (`MojoDict *` / `MojoList *` /

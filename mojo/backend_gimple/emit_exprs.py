@@ -111,7 +111,19 @@ def lower_expr(gen, node) -> tuple[str, str]:
     elif isinstance(node, gimple_ctypes.UnaryOp):
         return gen._lower_UnaryOp(node)
     elif isinstance(node, gimple_ctypes.CallExpr):
-        return gen._lower_call(node)
+        _rt, _rv = gen._lower_call(node)
+        # A `yield` used as a VALUE (`x = yield`, `print((yield))`) reads the
+        # resume word, which is the None box when the generator was resumed by
+        # `next()` / `send(None)` (coro.py's trampoline). Mark it as a tagged
+        # word, as `next(g)` on a mixed generator is marked, so a consumer
+        # renders it by kind. A name bound to it is unwrapped at the bind unless
+        # it is a receive-only name (emit_stmts' simple-name bind, tagged_recv_name).
+        if (isinstance(node.func, gimple_ctypes.IdentExpr)
+                and node.func.name == '__mojo_coro_yield_i'
+                and _rt == 'int64_t' and isinstance(_rv, str)):
+            gen._boxed_vals.add(_rv)
+            gen._tagged_word_vals.add(_rv)
+        return _rt, _rv
     elif isinstance(node, gimple_ctypes.TernaryExpr):
         return gen._lower_TernaryExpr(node)
     elif isinstance(node, gimple_ctypes.MemberExpr):

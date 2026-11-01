@@ -7426,7 +7426,7 @@ MojoGenerator *{base}_start ({start_params}) {{
   return (MojoGenerator *)__g;
 }}
 _Bool {base}_resume (MojoGenerator *__g) {{
-  return (_Bool)__mojo_gen_resume ((int64_t)__g, 0);
+  return (_Bool)__mojo_gen_resume ((int64_t)__g, {resume_word});
 }}
 {value_ctype} {base}_value (MojoGenerator *__g) {{
   return {value_unbox};
@@ -7497,10 +7497,19 @@ def emit_c(meta_entry: dict) -> str:
     body_extra = f', {meta_entry["struct"]} *' if is_method else ''
     last_yield_fn = (_LAST_YIELD_TMPL.format(base=meta_entry['base'])
                      if meta_entry.get('is_async_gen') else '')
+    # The word a plain resume (`<base>_resume`, which `next(g)` calls) hands
+    # the generator as the value of its suspended `x = yield`. Python sends None,
+    # so an int-valued generator (kind 'i' or 'w', both int64_t) gets the
+    # shared None box, which `x = yield` binds as a tagged word and every
+    # consumer renders as None (see emit_infra's tagged_recv_name). The other
+    # kinds keep 0: their receive slot is a pointer / double / bool, to which a
+    # box word would be a wild value.
+    resume_word = 'mojo_box_none ()' if vct == 'int64_t' else '0'
     return _C_TRAMPOLINE_TMPL.format(
         name=meta_entry['name'], base=meta_entry['base'], last_yield_fn=last_yield_fn,
         body_name=meta_entry['body_name'], new_fn=new_fn, value_kind=kind,
         value_ctype=vct, value_unbox=value_unbox, body_extra=body_extra,
+        resume_word=resume_word,
         start_params=start_params, arg_fwd=arg_fwd, new_params=new_params,
     )
 

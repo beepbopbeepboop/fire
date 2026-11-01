@@ -401,8 +401,17 @@ def _lower_generator_send(gen, node, av: str, api: dict) -> tuple[str, str]:
     the runtime function directly rather than through the trampoline."""
     vct = api['value_ctype']
     if len(node.args) == 1:
-        st, sv = gen.lower_expr(node.args[0])
-        send = _gen_slot_box(gen, st, sv, vct)
+        arg = node.args[0]
+        if (vct == 'int64_t'
+                and (isinstance(arg, gimple_ctypes.NoneLiteral)
+                     or (isinstance(arg, gimple_ctypes.IdentExpr) and arg.name == 'None'))):
+            # `g.send(None)` on an int-valued generator ('i' or 'w', both
+            # int64_t): the same None box a plain resume sends (coro.py's
+            # trampoline), not the raw 0 that `x = yield` reads as zero.
+            send = gen._call_expr('int64_t', 'mojo_box_none', [])
+        else:
+            st, sv = gen.lower_expr(arg)
+            send = _gen_slot_box(gen, st, sv, vct)
     else:
         send = '0'
     handle = gen._to_int64('MojoGenerator *', av)

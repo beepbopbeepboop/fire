@@ -3271,6 +3271,56 @@ def main():
     print(next(it, 2.5))
 main()
 """)
+    # The RECEIVE side of the None family ("a None sent into a generator prints
+    # zero"): `next(it)` resumes the generator with None, so `x = yield` binds
+    # None. The resume ABI used to hand the generator the raw int64 0 and
+    # `print(x)` printed `0`. CPython prints `None`.
+    test_generator_matches_cpython("none_sent_into_generator_default", """\
+def g():
+    x = yield
+    print(x)
+    yield 1
+
+def main():
+    it = g()
+    next(it)
+    next(it)
+main()
+""", """\
+def g():
+    x = yield
+    print(x)
+    yield 1
+
+def main():
+    it = g()
+    next(it)
+    next(it)
+main()
+""")
+    test_generator_matches_cpython("none_sent_into_generator_explicit_yield", """\
+def g():
+    x = yield 7
+    print(x)
+    yield 1
+
+def main():
+    it = g()
+    print(next(it))
+    print(it.send(None))
+main()
+""", """\
+def g():
+    x = yield 7
+    print(x)
+    yield 1
+
+def main():
+    it = g()
+    print(next(it))
+    print(it.send(None))
+main()
+""")
     test_generator_matches_cpython("mixed_str_int_yield_consumed_by_next", """\
 def g():
     yield 1
