@@ -57,3 +57,11 @@ is tagged (`_lower_generator_next`, emit_calls.py, marks the result boxed),
 so the bind site can record the name the same way the C++ emitter does.
 Pin: the two-line program above on both paths, against the CPython oracle,
 in `test_gimple_generator_runner.py` (add next to `run_tagged_word_cpp_tests`).
+
+## Planning guide (2026-11-01)
+
+The full design, the consumer audit and the pin list are in the Status of
+`bugs/CODEGEN_a_bare_or_explicit_yield_of_none_prints_zero.md` (seventh round).
+Recommended shape: a `_tagged_word_vals` set at the two tagged-`next` sites,
+kept as a box at the bind only for a name whose every assignment is a tagged
+bind; the list-element `mojo_box_word` path is unchanged.
