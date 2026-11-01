@@ -65,12 +65,21 @@ repro segfaults at run time.
   branch; the struct-operand regression that caused the revert is the thing
   to watch.
 
+**2026-11-01: coroutine mirror reached and fixed.**
+
+`yield n / 2` in a generator body printed `3`: `_cpp_expr` lowered the `/` to
+`mojo_div_double`, but the yield's promise slot is typed by
+`exprtypes._infer_simple_expr_ctype`, which answered `int64_t` for Int / Int,
+so the double was truncated on the way into the slot. That inference now answers
+`double` for two signed-int operands. The signed-operand set is one definition,
+`_SIGNED_INT_TRUE_DIV_TYPES` (`mojo/middle/types.py`), read by `emit_exprs.py`,
+`cpp_core.py` (whose `/` gate had also admitted `uint*`, unlike the tail) and
+`exprtypes.py`. Pinned by `test_int_true_division_is_float_in_generator_body`
+(failed before: `3`/`2`; passes now). The stdlib gate was NOT run.
+
 ## Next step
 
-1. `_Bool` decided (included; `test_bool_true_division_is_float` passes).
-   Check Mojo's `UInt` true division against `tools/mojo` before touching the
-   `uint` exclusion.
-2. Run the full stdlib gate once and compare `std/pathlib/path.mojo` and
+1. Check Mojo's `UInt` true division against `tools/mojo` before touching the
+   `uint` exclusion (all three sites share the one set now).
+2. Integrator: run the stdlib gate once and compare `std/pathlib/path.mojo` and
    `std/simd.mojo`; if either regresses, bisect the struct-operand shape first.
-3. Write a coroutine run-time test for `/` if the `cpp_core.py` lowering is
-   reachable; otherwise delete the mirror as dead code.

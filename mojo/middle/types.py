@@ -385,6 +385,11 @@ _BUILTIN_RET_CTYPES = {
 }
 
 _SCALAR_INT_TYPES = frozenset({'int', 'char', '_Bool', 'int8_t', 'int16_t', 'int32_t', 'int64_t', 'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t'})
+# The plain SIGNED subset: the operand types for which `a / b` is true division
+# (Float64). One definition, read by the plain tail (emit_exprs.py), the
+# coroutine emitter (cpp_core.py) and the static result-type inference
+# (exprtypes.py), so a yielded `n / 2` is slotted as a double, not truncated.
+_SIGNED_INT_TRUE_DIV_TYPES = frozenset({'int', 'char', '_Bool', 'int8_t', 'int16_t', 'int32_t', 'int64_t'})
 # The floating counterparts, next to _SCALAR_INT_TYPES and for the same
 # reason: a builtin that has to branch on "is this argument numeric, and
 # if so which" (abs, min, max) should not each re-spell the two sets.

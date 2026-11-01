@@ -732,12 +732,14 @@ def _cpp_trusted_fn_return_types(gen) -> dict:
     return trusted
 
 
-def _cpp_is_int_operand(gen, node) -> bool:
+def _cpp_is_int_operand(gen, node, types=None) -> bool:
     """True when a coroutine-body expression is a plain integer, the only
     kind of divisor `_cpp_expr`'s `/`/`%` lowering must check for zero. An
     int literal is always one; anything else is judged by the same static
     inference the string checks above use, and an unknown type is NOT
-    treated as an integer (a float divisor must never be truncated)."""
+    treated as an integer (a float divisor must never be truncated). `types`
+    narrows the accepted ctypes (default: every scalar integer); the `/`
+    lowering passes the signed set emit_exprs.py's tail uses."""
     if isinstance(node, gimple_ctypes.IntLiteral):
         return True
     try:
@@ -749,7 +751,7 @@ def _cpp_is_int_operand(gen, node) -> bool:
         )
     except Exception:
         return False
-    return _ct in gimple_ctypes._SCALAR_INT_TYPES
+    return _ct in (gimple_ctypes._SCALAR_INT_TYPES if types is None else types)
 
 
 def _cpp_apply_fstring_spec(part_val: str, spec: str) -> str:
@@ -2752,8 +2754,9 @@ def _cpp_expr(gen, e) -> str:
         # Int / Int is true division (Float64), as in emit_exprs.py's tail. It
         # goes through mojo_div_double, not a bare C `/`, so a zero divisor
         # still raises ZeroDivisionError instead of answering inf.
-        if (op == '/' and _cpp_is_int_operand(gen, e.left)
-                and _cpp_is_int_operand(gen, e.right)):
+        if (op == '/'
+                and _cpp_is_int_operand(gen, e.left, gimple_ctypes._SIGNED_INT_TRUE_DIV_TYPES)
+                and _cpp_is_int_operand(gen, e.right, gimple_ctypes._SIGNED_INT_TRUE_DIV_TYPES)):
             return f"mojo_div_double((double)({_bl}), (double)({_br}))"
         if op in ('/', '%') and _cpp_is_int_operand(gen, e.right):
             _br = f"mojo_int_divisor((int64_t)({_br}))"
