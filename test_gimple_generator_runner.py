@@ -3366,17 +3366,49 @@ def main():
         print(v)
 main()
 """)
-        # A lone None has no word to carry it, so the escape hatch still
-        # refuses it rather than writing `co_yield (int64_t)0`.
-        test_generator_refused("none_yield_lone_refused_on_cpp_path", """\
+        # A generator whose ONLY yield is None is a one-kind tagged word: its
+        # box is `mojo_box_none()`, so the escape hatch prints `None` (not the
+        # raw 0 `co_yield (int64_t)0` would) for both consumers.
+        test_generator_matches_cpython("none_yield_lone_bare_for_loop_cpp", """\
 def g():
+    yield
     yield
 
 def main():
     for v in g():
         print(v)
 main()
-""", "a None yield (bare `yield` / `yield None`) has no value slot")
+""", """\
+def g():
+    yield
+    yield
+
+def main():
+    for v in g():
+        print(v)
+main()
+""")
+        test_generator_matches_cpython("none_yield_lone_explicit_next_cpp", """\
+def g():
+    yield None
+
+def main():
+    it = g()
+    x = next(it)
+    print(x)
+    print(x is None)
+main()
+""", """\
+def g():
+    yield None
+
+def main():
+    it = g()
+    x = next(it)
+    print(x)
+    print(x is None)
+main()
+""")
 
 
 def run_tagged_word_cpp_tests():

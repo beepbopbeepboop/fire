@@ -1,5 +1,31 @@
 # CODEGEN_a_bare_or_explicit_yield_of_none: a None yield value prints 0
 
+## Status (2026-11-01, twelfth round, work/bug-codegen-a-bare-or-explicit-yield-of: lone None is a one-kind tagged word on cpp, partial)
+
+**Landed (real behaviour change on `MOJO_CORO=cpp`):** a generator whose ONLY
+yield is None (bare `yield` or `yield None`) is no longer refused on the escape
+hatch. `_cpp_tag_yield_sites` (`cpp_async.py`) accepts the single kind `None`
+and emits `mojo_box_none()` as the word; the stack-switch analysis already
+returned the tagged kind `'w'` for it, so the consumers that render tagged
+words (`for`, `next`) print `None`.
+
+**Pins** (`run_none_yield_tests` in `test_gimple_generator_runner.py`): the
+`none_yield_lone_refused_on_cpp_path` refusal pin became two CPython-oracle
+tests, `none_yield_lone_bare_for_loop_cpp` and `none_yield_lone_explicit_next_cpp`.
+Fail-before, measured by reverting only the one-line source edit: both FAIL with
+the refusal text. After: both PASS. Group run: 13/0.
+
+**Still refused (honest, not a silent 0):** a None yield whose consumer the
+tagged word does not cover (`_tagged_consumers_ok` false), on either path, and
+the `NONE_YIELD_CPP_REFUSAL` guard that catches any None slot left untagged.
+The default path prints None for every None shape that compiles (see the
+fifth-round matrix).
+
+**Gate note for the integrator (not run here):** the change touches only the
+`MOJO_CORO=cpp` escape hatch and only generators whose sole yield is None, which
+the stdlib cpp path did not compile before. Run `gimplegenerators` and
+`compile_stdlib.py`; a rise in `U` or `skip` would be a regression.
+
 ## Status (2026-11-01, eleventh round, work/bug-codegen-a-bare-or-explicit-yield-of: None carried into the tagged word on the cpp path, partial)
 
 **Landed (real behaviour change on `MOJO_CORO=cpp`):** a None yield beside other
@@ -27,8 +53,8 @@ still run `gimplegenerators` and `compile_stdlib.py`: any stdlib generator that 
 None in cpp mode was previously refused and now compiles, which moves the `U`/`skip`
 counts only if one of those modules is cpp-pinned.
 
-**Still open:** a lone None (a generator whose only yield is a bare `yield`) on the
-cpp path is still refused. The tagged path needs at least two kinds, and a lone None
+**Still open (superseded by the twelfth round, which landed the lone-None word):** a lone None on the
+cpp path was refused. The tagged path needs at least two kinds, and a lone None
 has no word to carry it: a one-kind None slot would need a `'none'`-only word
 convention in `_cpp_tag_yield_sites` and the kind analysis (`_generator_value_kind`
 returns a non-`'w'` kind for it). That is the next step if the escape hatch must run

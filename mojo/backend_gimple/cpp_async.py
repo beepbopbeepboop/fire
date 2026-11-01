@@ -324,8 +324,10 @@ def _cpp_tag_yield_sites(body_lines: list):
     into one int64_t word by its marked ctype (a double as `mojo_box_from_double`,
     a bool as `mojo_box_from_bool`, a string as `mojo_box_from_str`, an int as itself),
     or None when the sites do not form a TAGGED value slot: fewer than two
-    different ctypes, a ctype that is not one of the four scalar kinds, or a
-    yield with no marker (a tuple / delegated / bare yield)."""
+    different ctypes (a generator whose ONLY yields are None is the one
+    single-kind word: its box is `mojo_box_none()`, which the consumers render
+    as `None`), a ctype that is not one of the scalar kinds, or a yield with no
+    marker (a tuple / delegated / bare yield)."""
     kinds = set()
     out = []
     for ln in body_lines:
@@ -358,6 +360,8 @@ def _cpp_tag_yield_sites(body_lines: list):
         else:
             w = f"(int64_t)({expr})"
         out.append(f"{indent}co_yield {w};")
+    if kinds == {'None'}:
+        return out
     if len(kinds) < 2 or kinds == {'int64_t', '_Bool'}:
         return None
     return out
