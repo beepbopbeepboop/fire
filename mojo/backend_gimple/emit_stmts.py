@@ -3609,6 +3609,26 @@ def _resolve_dotted_case_pattern(gen, subj_type: str, pattern):
                                     member=pattern.path)
 
 
+def _is_python_source(gen) -> bool:
+    return _as_str(getattr(gen, '_current_filename', '') or '').endswith('.py')
+
+
+def _flatten_or_patterns(patterns) -> list:
+    """`[A | B, C]` -> `[A, B, C]`: the alternatives of every `|` or-pattern, in order."""
+    out: list = []
+    for pat in patterns:
+        _flatten_or_pattern_into(pat, out)
+    return out
+
+
+def _flatten_or_pattern_into(pat, out: list) -> None:
+    if isinstance(pat, gimple_ctypes.BinaryOp) and pat.op == '|':
+        _flatten_or_pattern_into(pat.left, out)
+        _flatten_or_pattern_into(pat.right, out)
+    else:
+        out.append(pat)
+
+
 def _gen_stmt_MatchStmt(gen, node):
     """`match subject: case p1: ... case p2, p3: ... case _: ...`
 
@@ -3655,6 +3675,14 @@ def _gen_stmt_MatchStmt(gen, node):
         guard_bb = gen._new_bb() if match_case.guard is not None else None
         arm_bb = guard_bb if guard_bb is not None else case_bbs[i]
         patterns = match_case.patterns
+        # In a Python source `case A | B | C:` is an OR-PATTERN (PEP 634): the arm runs when the
+        # subject matches any alternative. The parser reads it as the `|` operator, so the leaves
+        # are flattened into the alternatives of a comma list (`case A, B, C:`), which is exactly
+        # what this chain already tests one block at a time. A `.mojo` source keeps the
+        # switch-style reading (`case 1 | 2:` is the number 3 there), which the classifier below
+        # refuses by name.
+        if _is_python_source(gen):
+            patterns = _flatten_or_patterns(patterns)
         if not patterns:
             gen._emit(f"  goto {next_check_bb};")
         for j, pattern in enumerate(patterns):

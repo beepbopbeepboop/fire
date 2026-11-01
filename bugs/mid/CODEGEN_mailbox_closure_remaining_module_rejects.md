@@ -70,3 +70,13 @@ What is left in the closure, by module (each its own feature, none a one-line fi
 a class declared inside a function that captures locals (`bugs/CODEGEN_nested_class_method_cannot_reach_an_enclosing_local.md`);
 `dataclasses`/`traceback` `match` or-patterns and class patterns; `signal` a decorator inside a module-level
 block; `weakref` was `d.pop(key, *args)` with the packed list taken for the default (FIXED 2026-10-31, `gimple_dict_pop_with_spread_default`; re-probe for what weakref hits next).
+
+## Update (2026-11-01): `match` or-patterns
+
+`dataclasses.py`'s `case Format.VALUE | Format.FORWARDREF | Format.STRING:` no longer refuses: in a Python source
+the lowering flattens `A | B | C` into the alternatives its arm chain already tests (`emit_stmts._flatten_or_patterns`;
+a `.mojo` source keeps the switch-style reading and the refusal). Found on the way, fixed, and tested
+(`gimple_return_type_through_match_arms`): a function whose only `return`s are inside `match` arms was typed from
+no return statement and handed back 0 for a string. Still refused in that closure: `traceback.py`'s class patterns
+(`case ast.Return(value=ast.Call()):`), module-level `namedtuple` built from non-literals, `type(...)` with three
+arguments, a class declared in a function that captures its locals, a decorator inside a module-level `if`.

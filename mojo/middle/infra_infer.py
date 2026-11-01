@@ -1789,6 +1789,13 @@ def _collect_return_types(gen, stmts: list, acc: list):
                 gen._collect_return_types(node.else_body, acc)
         elif isinstance(node, (gimple_ctypes.WhileStmt, gimple_ctypes.ForStmt)):
             gen._collect_return_types(node.body, acc)
+            if node.else_body:
+                gen._collect_return_types(node.else_body, acc)
+        elif isinstance(node, gimple_ctypes.MatchStmt):
+            # A function whose `return`s are all inside `match` arms had NO return statement as
+            # far as this scan could see, so it was typed `void` (or `int64_t`) and handed back 0.
+            for _mc in node.cases:
+                gen._collect_return_types(_mc.body, acc)
         elif isinstance(node, gimple_ctypes.TryStmt):
             gen._collect_return_types(node.body, acc)
             for h in node.handlers:

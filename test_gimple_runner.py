@@ -3646,6 +3646,54 @@ for d, f in check_all([1, 2, 3], [check_a, check_b], True):
     print(d, f)
 """, '2 big\n3 big\n2 big\nNone None\n')
 
+    # `case A | B | C:` in a Python source is an OR-PATTERN (PEP 634); the lowering refused it (and read
+    # `case 1 | 2` as the number 3 elsewhere). The alternatives are flattened into the comma list the
+    # arm chain already tests one block at a time.
+    test_gimple_stdout("gimple_match_or_pattern", """\
+import enum
+
+class Fmt(enum.IntEnum):
+    VALUE = 1
+    FORWARDREF = 2
+    STRING = 3
+    OTHER = 4
+
+def name(f):
+    match f:
+        case Fmt.VALUE | Fmt.FORWARDREF | Fmt.STRING:
+            return "one-of-three"
+        case Fmt.OTHER:
+            return "other"
+        case _:
+            return "none"
+
+def num(n):
+    match n:
+        case 1 | 2:
+            return "small"
+        case 3 | 4 | 5:
+            return "mid"
+        case _:
+            return "big"
+
+print(name(Fmt.VALUE), name(Fmt.STRING), name(Fmt.OTHER), name(9))
+print(num(1), num(2), num(4), num(7), num(10))
+""", 'one-of-three one-of-three other none\nsmall small mid big big\n')
+
+    # A function whose only `return`s are inside `match` arms was typed from NO return statement and
+    # handed back 0 for a string.
+    test_gimple_stdout("gimple_return_type_through_match_arms", """\
+def num(n):
+    match n:
+        case 1:
+            return "small"
+        case 3:
+            return "mid"
+        case _:
+            return "big"
+print(num(1), num(3), num(10))
+""", 'small mid big\n')
+
     # String site FIRST, int site second (an int list records no contract, so
     # it used to be invisible as a disagreeing call site).
     test_gimple_stdout("gimple_mixed_kind_flat_list_param_str_first", """\
