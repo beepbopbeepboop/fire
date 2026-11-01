@@ -3438,6 +3438,98 @@ def outer(base, items):
 print(outer(10, [1, 2, 3]))
 """, "13\n")
 
+    # Python-level frames (stage 1): `sys._getframe(n)`, `.f_back`, `.f_lineno`,
+    # `.f_code.co_name`, in a module that says `_getframe`. A frame record is pushed per
+    # function and popped by `return`, by falling off the end, and by an exception
+    # unwinding past it. Module-level code is not a frame (CPython's `<module>`).
+    test_gimple_stdout("gimple_sys_getframe_names_lines_and_callers", """\
+import sys
+
+def where():
+    return sys._getframe(1).f_code.co_name + ":" + str(sys._getframe(1).f_lineno)
+
+def boom(n):
+    if n == 0:
+        raise ValueError("x")
+    return boom(n - 1)
+
+def catcher():
+    try:
+        boom(3)
+    except ValueError:
+        pass
+    return where()
+
+def rec(n):
+    if n == 0:
+        return sys._getframe(0).f_back.f_code.co_name
+    return rec(n - 1)
+
+def branches(a):
+    if a:
+        return where()
+    x = 2
+    return where()
+
+def inner():
+    f = sys._getframe(0)
+    print(f.f_code.co_name, f.f_lineno)
+    g = sys._getframe(1)
+    print(g.f_code.co_name, g.f_lineno)
+
+def middle():
+    x = 1
+    inner()
+
+def top():
+    print(catcher())
+    print(rec(3))
+    print(branches(True), branches(False))
+    middle()
+
+top()
+""", "catcher:16\nrec\nbranches:25 branches:27\ninner 31\nmiddle 37\n")
+
+    # Tracebacks (frames stage 2): `e.__traceback__` walks tb_next from the frame that caught the
+    # exception down to the one that raised it, each entry with the line it was executing at the
+    # raise; a bare `raise` keeps the original traceback. `<module>` is a frame.
+    test_gimple_stdout("gimple_traceback_chain_names_and_lines", """\
+import sys
+
+def leaf(n):
+    if n == 0:
+        raise KeyError("k")
+    leaf(n - 1)
+
+def mid():
+    try:
+        leaf(2)
+    except KeyError as e:
+        tb = e.__traceback__
+        names = []
+        while tb is not None:
+            names.append(tb.tb_frame.f_code.co_name + ":" + str(tb.tb_lineno))
+            tb = tb.tb_next
+        print(names)
+        raise
+
+def top():
+    try:
+        mid()
+    except KeyError as e:
+        tb = e.__traceback__
+        names = []
+        while tb is not None:
+            names.append(tb.tb_frame.f_code.co_name + ":" + str(tb.tb_lineno))
+            tb = tb.tb_next
+        print(names)
+        fb = e.__traceback__.tb_frame.f_back
+        print(fb.f_code.co_name if fb is not None else None)
+
+top()
+print(sys._getframe(0).f_code.co_name, sys._getframe(0).f_lineno)
+""", "['mid:10', 'leaf:6', 'leaf:6', 'leaf:5']\n['top:22', 'mid:10', 'leaf:6', 'leaf:6', 'leaf:5']\n<module>\n<module> 34\n")
+
     # String site FIRST, int site second (an int list records no contract, so
     # it used to be invisible as a disagreeing call site).
     test_gimple_stdout("gimple_mixed_kind_flat_list_param_str_first", """\
@@ -5694,9 +5786,27 @@ main()
     # (`4621537642612260864`, `4372406328` on the same tree). The record is
     # now also keyed by the source name (`_note_global_dict_store`), which
     # `_lower_IdentExpr` carries onto each read. Both halves are read in the
-    # same scope as the store, which is the case this covers; a READ from a
-    # different function is a separate gap (empty-literal module dicts are
-    # not seeded from their stores in the Phase 1.7 pre-scan).
+    # same scope as the store, which is the case this covers; the cross-function
+    # READ is `gimple_module_dict_value_type_read_in_other_function`.
+    # The READ in a function other than the one holding the store: an empty
+    # module dict gets its value type from the Phase 1.7 store pre-scan
+    # (`_gmi_phase17_collect_appends`'s `_store_hits`), not from a literal.
+    test_gimple_stdout("gimple_module_dict_value_type_read_in_other_function", """\
+d = {}
+d["a"] = "R"
+f = {}
+f[(1, 2)] = 9.5
+b = {}
+b["t"] = True
+def show():
+    print(d["a"], len(d))
+    print(f[(1, 2)], len(f))
+    print(b["t"], len(b))
+def main():
+    show()
+main()
+""", "R 1\n9.5 1\nTrue 1\n")
+
     test_gimple_stdout("gimple_module_scope_dict_value_type_survives_read", """\
 d = {}
 d[(1, 2)] = 9.5
@@ -13263,6 +13373,35 @@ struct Color:
             print('other')
 """, "ENUM CASE")
 
+    # A `__match` arm with several patterns, or a guard, inside a struct method
+    # (a `__GIMPLE` body): `||` / `&&` on a condition are not GIMPLE, so each
+    # pattern is its own test block and the guard its own block after them.
+    test_gimple_stdout("gimple_match_multi_pattern_and_guard_in_method", """\
+struct K:
+    var _v: Int
+    def __init__(out self, v: Int):
+        self._v = v
+    def pick(self, n: Int):
+        __match self._v:
+        case 1, 2:
+            print('low')
+        case 3 if n > 0:
+            print('three-guarded')
+        case 4, 5 if n > 0:
+            print('four-five-guarded')
+        case _:
+            print('other')
+
+def main():
+    K(1).pick(0)
+    K(2).pick(0)
+    K(3).pick(1)
+    K(3).pick(0)
+    K(5).pick(1)
+    K(5).pick(0)
+    K(9).pick(1)
+""", "low\nlow\nthree-guarded\nother\nfour-five-guarded\nother\nother\n")
+
     test_gimple_stdout("gimple_module_attribute_value_and_alias", """\
 import sys
 import sys as s
@@ -13300,6 +13439,7 @@ def main():
                   test_namedtuple_tuple_protocol_is_refused_by_name,
                   test_nested_class_attr_reads_enclosing_local_regression,
                   test_nested_class_attr_from_str_param_regression,
+                  test_nested_class_attr_expr_over_str_param_regression,
                   test_instance_write_shadows_class_attr_regression,
                   test_nested_class_attr_rebind_after_construction_regression,
                   test_namedtuple_shaped_class_runs_regression,
@@ -13472,7 +13612,7 @@ main()
 
 
 def test_nested_class_attr_from_str_param_regression():
-    """Regression for bugs/CODEGEN_nested_class_attr_from_str_param_typed_as_int.md.
+    """Regression: a function-scoped class attribute taken from a `str` parameter.
     A function-scoped class attribute whose value is a bare name of the
     enclosing function's parameter was typed `int64_t` (the fallback for a
     value with no literal type), so a `str` argument read back as a pointer-
@@ -13490,6 +13630,24 @@ def main():
     print(a.name)
     print(b.name)
 """, "x\ny\n")
+
+
+def test_nested_class_attr_expr_over_str_param_regression():
+    """Companion to the bare-name case above:
+    an EXPRESSION over the enclosing function's parameters is typed from the
+    parameters' annotations, not the int64_t fallback."""
+    test_gimple_stdout("gimple_nested_class_attr_expr_over_str_param", """\
+def h(s: str):
+    class C():
+        name = s + "!"
+    return C()
+
+def main():
+    a = h("x")
+    b = h("y")
+    print(a.name)
+    print(b.name)
+""", "x!\ny!\n")
 
 
 def test_nested_class_attr_rebind_after_construction_regression():

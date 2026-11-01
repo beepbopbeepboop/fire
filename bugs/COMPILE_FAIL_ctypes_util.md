@@ -31,13 +31,13 @@ the struct-constructor pass, so there is one resolution rule, not two.
 Regression: `test_link_mode.py::test_cross_module_unannotated_param_takes_the_callers_literal_type`
 (fails on HEAD's `module_gen.py`, passes after).
 
-**NOT done (the remaining blocker on this file's `find_library` path, filed in
-`bugs/CODEGEN_module_attr_call_result_type_is_not_inferred.md`).** The call's
-result ctype is now correct, but a function that RETURNS a local bound from the
-module-attribute call still infers `int64_t` for its own return, and a
-MODULE-SCOPE global bound from it is still `int64_t`. Both are result-type
-inference through a `MemberExpr` callee on an imported module, which
-`_infer_simple_expr_ctype` does not consult. This needs the full gate.
+**Result half FIXED (2026-11-01).** A function that returns a local bound from
+a bare-import module-attribute call, and a module-scope global bound from one,
+used to infer `int64_t` for a `str` result. `_quick_type` now answers
+`m.f(...)` from the defining unit's published return type
+(`resolve_shared._module_attr_call_return_type`), and `_prebound_local_ctypes`
+uses the same answer for the bound local. Regression:
+`test_link_mode.py::test_module_attr_call_result_is_typed_by_the_callee_return`.
 
 **Not measured here.** The memory-kill row (the resource class named below) and
 the downstream `shutil_which_15d274` implicit declaration: this tree's

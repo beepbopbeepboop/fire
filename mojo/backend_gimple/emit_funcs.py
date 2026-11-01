@@ -3201,6 +3201,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     gen._emitting_plain_func = True
     try:
         gen._begin_function(node)
+        gmp._frame_enter(gen, node)
         gmp._cattr_restore_begin(gen, node.body)
         for stmt in node.body:
             gen.gen_stmt(stmt)
@@ -3350,11 +3351,14 @@ def _gen_toplevel(gen, toplevel_stmts: list) -> str:
 
     # Generate code for each top-level statement
     gen._in_toplevel_gen = True
+    gmp._frame_enter_module(gen)
     try:
         for stmt in toplevel_stmts:
             gen.gen_stmt(stmt)
     finally:
         gen._in_toplevel_gen = False
+    gmp._frame_leave(gen)
+    gen._frame_func = ''
 
     # Dependency-init prelude: a `fire dylib` build compiles every
     # module SEPARATELY (see gen_module's population of
@@ -4460,6 +4464,7 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     # knows. The candidates computed here replace the empty set
     # `reset_no_candidates` left above.
     gen._begin_function(node)
+    gmp._frame_enter(gen, node)
     gmp._cattr_restore_begin(gen, node.body)
     for stmt in node.body:
         gen.gen_stmt(stmt)

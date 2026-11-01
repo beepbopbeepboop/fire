@@ -12,6 +12,7 @@ import re
 import determinism_trace as _dtrace
 from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _as_list, _as_dict, _sms_key, _as_assignstmt_node, _as_vardecl_node, _as_multiassignstmt_node
 import regex_compile
+from fire_compiler import _pair_key
 import mlir
 from mojo.middle.types import *  # noqa: F401,F403
 from mojo.middle.exprtypes import *  # noqa: F401,F403
@@ -178,6 +179,42 @@ def _operand_is_dict(gen, node, t: str, v=None) -> bool:
         if _as_str(node.name) in (_obs.get(_cf) or {}):
             return True
     return False
+
+
+def _module_attr_call_return_type(gen, node):
+    """Return ctype of `m.f(...)` where `m` is a bare-import module binding
+    (`import m` / `import m as a`), or None when it cannot be said.
+
+    `_quick_type` used to have no answer for this callee shape, so a
+    consumer that infers (a module-scope global, or the enclosing function's
+    return type) fell to the `int64_t` default and a `str` printed as its
+    pointer. The answer is the DEFINING unit's published return type
+    (`_home_def_return_type`, keyed by the sibling's module qualifier — the
+    same store `_func_csym` mirrors from for the call's own lowering), and
+    only for the shapes that are already trusted: a plain scalar default
+    must stay the default. Keyed by (module, member) and gated on the
+    receiver being a registered module alias, so a method called `which` on
+    a struct is never typed by a module function of that name.
+    """
+    f = node.func
+    if not isinstance(f.obj, gimple_ctypes.IdentExpr):
+        return None
+    name = _as_str(f.obj.name)
+    if name not in getattr(gen, '_module_alias_names', ()):
+        return None
+    info = gen.imported_symbols.get(name)
+    ref = info.get('module') if isinstance(info, dict) else None
+    try:
+        _exps, qual = gen._local_sibling_module_exports(ref or name)
+    except Exception:
+        return None
+    if qual is None:
+        return None
+    ret = (getattr(gen, '_home_def_return_types', None) or {}).get(
+        _pair_key(qual, _as_str(f.member)))
+    if isinstance(ret, str) and ret in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *'):
+        return ret
+    return None
 
 
 def _quick_type(gen, node) -> str:
@@ -579,6 +616,9 @@ def _quick_type(gen, node) -> str:
                     _srt = gen.func_return_types.get(f"{_ssn}_{_smeth}")
                     if _srt:
                         return _srt
+        _mr = _module_attr_call_return_type(gen, node)
+        if _mr is not None:
+            return _mr
         # .read()/.readline()/.readlines() on ANY receiver shape (not just
         # a plain IdentExpr file handle) — e.g. `sys.stdin.read()` (obj is
         # itself a MemberExpr) or `open(path).read()` (obj is a CallExpr).
@@ -796,6 +836,12 @@ def _quick_type(gen, node) -> str:
                     'decode', 'join')
                 and gen._quick_type(node.func.obj) == 'char *'):
             return 'char *'
+    # Frame/code attributes that are strings (a module using `sys._getframe`; see
+    # emit_exprs._lower_MemberExpr): without this a function returning `f.f_code.co_name`
+    # was inferred int64_t and the name printed as a pointer.
+    if (len(gen._frames_mods) > 0 and isinstance(node, gimple_ctypes.MemberExpr)
+            and node.member in ('co_name', 'co_qualname', 'co_filename')):
+        return 'char *'
     if isinstance(node, gimple_ctypes.MemberExpr):
         # A modelled module attribute (see _MODULE_ATTR_CTYPES's docstring
         # for why this lookup is shared with the lowering) has a settled

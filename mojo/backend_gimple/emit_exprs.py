@@ -111,7 +111,19 @@ def lower_expr(gen, node) -> tuple[str, str]:
     elif isinstance(node, gimple_ctypes.UnaryOp):
         return gen._lower_UnaryOp(node)
     elif isinstance(node, gimple_ctypes.CallExpr):
-        return gen._lower_call(node)
+        _rt, _rv = gen._lower_call(node)
+        # A `yield` used as a VALUE (`x = yield`, `print((yield))`) reads the
+        # resume word, which is the None box when the generator was resumed by
+        # `next()` / `send(None)` (coro.py's trampoline). Mark it as a tagged
+        # word, as `next(g)` on a mixed generator is marked, so a consumer
+        # renders it by kind. A name bound to it is unwrapped at the bind unless
+        # it is a receive-only name (emit_stmts' simple-name bind, tagged_recv_name).
+        if (isinstance(node.func, gimple_ctypes.IdentExpr)
+                and node.func.name == '__mojo_coro_yield_i'
+                and _rt == 'int64_t' and isinstance(_rv, str)):
+            gen._boxed_vals.add(_rv)
+            gen._tagged_word_vals.add(_rv)
+        return _rt, _rv
     elif isinstance(node, gimple_ctypes.TernaryExpr):
         return gen._lower_TernaryExpr(node)
     elif isinstance(node, gimple_ctypes.MemberExpr):
@@ -1173,6 +1185,45 @@ def _lower_class_dyn_getattr(gen, struct_name: str, member: str) -> tuple[str, s
     return 'int64_t', r
 
 
+def _is_tagged_box_operand(gen, node, val: str) -> bool:
+    """Is the already-lowered operand `val` (the AST `node`) a tagged word that
+    may be a box: a name bound from a kind-mixed generator (`_tagged_word_vals`,
+    e.g. `next(g)`), or a for-loop target over one (`tagged_for_target_name`,
+    whose word is the loop's box but is not in `_tagged_word_vals`)? Such a word
+    may be the None box or a DOUBLE box, so it must be read by its kind."""
+    if val not in getattr(gen, '_boxed_vals', ()):
+        return False
+    if val in getattr(gen, '_tagged_word_vals', ()):
+        return True
+    return (isinstance(node, gimple_ctypes.IdentExpr)
+            and ginf.tagged_for_target_name(gen, node.name))
+
+
+def _tagged_unary_neg(gen, val: str) -> str:
+    """Unary `-` on a tagged word `val`, by the box's kind. The None box raises
+    TypeError, as CPython does for `-None` (`mojo_none_unary_guard`). The answer
+    is then the integer negation, or a double box holding the negated double
+    when the word is a DOUBLE box, which `mojo_float_arith_select` picks at run
+    time. The result is itself a tagged word, so a consumer renders it by kind
+    and a further operator reads it by kind too (as `_tagged_arith_select`'s
+    result is)."""
+    g = gen._call_expr('int64_t', 'mojo_none_unary_guard',
+                       [('int64_t', val), ('char *', '"-"')])
+    ibx = gen._call_expr('int64_t', 'mojo_box_int', [('int64_t', g)])
+    ires = gen._new_val('int64_t', f'-({_as_str(ibx)})')
+    dbx = gen._call_expr('double', 'mojo_box_double', [('int64_t', g)])
+    dres = gen._new_val('double', f'-({_as_str(dbx)})')
+    t = gen._call_expr('int64_t', 'mojo_float_arith_select', [
+        ('int64_t', _as_str(g)),
+        ('int64_t', '0'),
+        ('int64_t', _as_str(ires)),
+        ('double', _as_str(dres)),
+    ])
+    gen._boxed_vals.add(t)
+    gen._tagged_word_vals.add(t)
+    return t
+
+
 def _lower_UnaryOp(gen, node) -> tuple[str, str]:
     ot, ov = gen.lower_expr(node.operand)
     if node.op == 'not':
@@ -1285,6 +1336,11 @@ def _lower_UnaryOp(gen, node) -> tuple[str, str]:
             return ot, ov
     if node.op == '+':
         return ot, ov
+    # `-x` on a tagged word is a run-time select by the box's kind, as
+    # `_tagged_arith_select` is for the binary forms: negating the WORD would
+    # negate a double box's address. See `_tagged_unary_neg`.
+    if node.op == '-' and ot == 'int64_t' and _is_tagged_box_operand(gen, node.operand, ov):
+        return 'int64_t', _tagged_unary_neg(gen, ov)
     c_op = {'-': '-', '~': '~'}.get(node.op, node.op)
     # Struct pointers can't be negated/inverted — coerce to int64_t first.
     # char* included: `-<char*>` is never valid Python (negating a string
@@ -1425,7 +1481,38 @@ _OS_PATH_RUNTIME_CALLABLE_VALUES = {
 }
 
 
+_FRAME_ATTRS = frozenset(('f_code', 'f_back', 'f_lineno', 'co_name', 'co_qualname', 'co_filename', 'co_firstlineno',
+                          '__traceback__', 'tb_frame', 'tb_next', 'tb_lineno'))
+
+
 def _lower_MemberExpr(gen, node) -> tuple[str, str]:
+    # Attributes of a Python-level frame word (`sys._getframe(n)`), in a module that uses
+    # frames. The names are specific to frame/code objects, and nothing is lowered here
+    # unless a module of this compile mentions `_getframe`.
+    if len(gen._frames_mods) > 0 and node.member in _FRAME_ATTRS:
+        _fr_t, _fr_v = gen.lower_expr(node.obj)
+        _fr_w = gen._to_int64(_fr_t, _fr_v)
+        _fm = node.member
+        if _fm == 'f_code':
+            return 'int64_t', _fr_w
+        if _fm == '__traceback__':
+            _tb_d = gen._call_expr('int64_t', 'mojo_frame_depth', [])
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_traceback', [('int64_t', _tb_d)])
+        if _fm == 'tb_frame':
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_tb_frame', [('int64_t', _fr_w)])
+        if _fm == 'tb_next':
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_tb_next', [('int64_t', _fr_w)])
+        if _fm == 'tb_lineno':
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_tb_lineno', [('int64_t', _fr_w)])
+        if _fm == 'f_back':
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_frame_back', [('int64_t', _fr_w)])
+        if _fm == 'f_lineno':
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_frame_lineno', [('int64_t', _fr_w)])
+        if _fm == 'co_firstlineno':
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_frame_firstlineno', [('int64_t', _fr_w)])
+        if _fm == 'co_filename':
+            return 'char *', gen._call_expr('char *', 'mojo_frame_file', [('int64_t', _fr_w)])
+        return 'char *', gen._call_expr('char *', 'mojo_frame_name', [('int64_t', _fr_w)])
     _sc = _stat_module_constant(gen, node)
     if _sc is not None:
         return 'int64_t', gen._new_val('int64_t', f'(int64_t){_sc}')
@@ -2713,6 +2800,11 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         return 'char *', gen._new_val('char *', f"(char *){dn}")
     if node.member in field_map:
         field_type = field_map[node.member]
+        # A minted field (StructDef.presence_fields) the instance never
+        # received is an AttributeError on a direct read, not its zero
+        # storage: guard the load on the instance's presence bit.
+        gimple_ctypes.presence_check_emit(
+            gen, gen._struct_name_owner.get(struct_name), node.member, ov, op, struct_name)
         t = gen._new_val(field_type, f'{ov}{op}{gimple_ctypes._safe_field(node.member)}')
         _mark_boxed_field_read(gen, struct_name, node.member, field_type, t)
         # PART 6 (2026-10-22, family C): record a READ of a tagged-Optional
@@ -3839,6 +3931,26 @@ _PYBOX_SCALARS = frozenset({
 })
 
 
+def _numeric_type_name(ctype: str) -> str:
+    """The Python type name of a numeric C operand type, for an error message."""
+    return 'float' if ctype in ('double', 'float') else 'int'
+
+
+def _none_arith_guard(gen, op: str, val: str, other: str, none_is_left: int) -> str:
+    """Emit `mojo_none_arith_guard` for a tagged operand `val` of arithmetic
+    `op` whose other operand is a `other` ("int" or "float") value. Returns the
+    checked word, which is `val` itself for every non-None box. The result
+    stays a tagged box (as `val` was), so the operand lowering that follows
+    still unwraps it by its kind; a copy that lost that marking would be read
+    as a raw word."""
+    _t = gen._call_expr('int64_t', 'mojo_none_arith_guard',
+                        [('int64_t', val), ('char *', f'"{op}"'),
+                         ('char *', f'"{other}"'), ('int', str(none_is_left))])
+    gen._boxed_vals.add(_t)
+    gen._tagged_word_vals.add(_t)
+    return _t
+
+
 def _tagged_arith_select(gen, op: str, left_node, lt: str, lv: str,
                          right_node, rt: str, rv: str):
     """`lhs OP rhs` where a TAGGED generator word (`_tagged_word_vals`) is an
@@ -3862,6 +3974,14 @@ def _tagged_arith_select(gen, op: str, left_node, lt: str, lv: str,
         return None
     if lt not in ('int', 'int64_t') or rt not in ('int', 'int64_t'):
         return None
+    # A tagged operand may be the shared None box (`x = yield` after
+    # `next(it)`), which has no numeric kind. Unwrapping it would compute with
+    # its word (0), so each tagged operand is checked first and a None box
+    # raises TypeError here, as CPython does for `None + 1`.
+    if _tag_l:
+        lv = _none_arith_guard(gen, op, lv, 'int', 1)
+    if _tag_r:
+        rv = _none_arith_guard(gen, op, rv, 'int', 0)
     _t = ginf._float_param_arith(gen, op, left_node, lt, lv, right_node, rt, rv,
                                  lmaybe=_tag_l, rmaybe=_tag_r)
     gen._boxed_vals.add(_t)
@@ -3888,14 +4008,32 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # "not None" on the scalar arm, printing `False` for `v == None`. The
     # answer is the box's kind (`mojo_word_is_none`), which for a non-box is
     # the same constant False the scalar arm gives.
-    if op in ('==', '!=') and _is_none_literal(left_node) != _is_none_literal(right_node):
+    #
+    # `is None` / `is not None` takes the same kind read, but ONLY for a
+    # TAGGED word (`_tagged_word_vals`: a name bound from `next(g)` on a
+    # kind-mixed generator). There a tagged False or int 0 is a box whose bits
+    # are 0, so the word compare answered `is None` True for it. Every other
+    # boxed operand keeps the word compare: a list or tuple slot that is None
+    # is a bare NULL word with no box, which the kind read would call "not
+    # None" (pinned by `run_tagged_none_identity_tests`).
+    _tagged = getattr(gen, '_tagged_word_vals', ())
+    if op in ('==', '!=', 'is', 'is not') and _is_none_literal(left_node) != _is_none_literal(right_node):
         _other = rv if _is_none_literal(left_node) else lv
         _other_t = rt if _is_none_literal(left_node) else lt
+        _other_node = right_node if _is_none_literal(left_node) else left_node
+        _ident = op in ('is', 'is not')
+        # A for-loop target over a tagged generator (`for v in g()`) holds the
+        # loop's box in `_boxed_vals` but is not in `_tagged_word_vals`; the
+        # per-name rule `tagged_for_target_name` is what says every value the
+        # name holds is that box, so it takes the same kind read.
+        _for_tagged = (_ident and isinstance(_other_node, gimple_ctypes.IdentExpr)
+                       and ginf.tagged_for_target_name(gen, _other_node.name))
         # Only an int word: a `char *` name keeps its NULL-pointer test below.
         # A float box answers 0 here, which is the right answer for a float.
-        if _other_t in ('int', 'int64_t') and _other in getattr(gen, '_boxed_vals', ()):
+        if (_other_t in ('int', 'int64_t') and _other in getattr(gen, '_boxed_vals', ())
+                and (not _ident or _other in _tagged or _for_tagged)):
             _is_none = gen._call_expr('int', 'mojo_word_is_none', [('int64_t', _other)])
-            _cmp = '!= 0' if op == '==' else '== 0'
+            _cmp = '!= 0' if op in ('==', 'is') else '== 0'
             _t = gen._new_temp('_Bool')
             gen._emit(f'  {_t} = {_is_none} {_cmp};')
             return '_Bool', _t
@@ -4015,6 +4153,17 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     _tsel = _tagged_arith_select(gen, op, left_node, lt, lv, right_node, rt, rv)
     if _tsel is not None:
         return 'int64_t', _tsel
+    # A tagged word beside a DOUBLE under arithmetic (`x + 1.5`, `x / 2.0`):
+    # the box is unwrapped to a double below, and a None box would unwrap to
+    # 0.0. It is checked first, as in `_tagged_arith_select`, which answers only
+    # the integer-operand case. A str operand is not numeric and is excluded:
+    # `x + "!"` keeps its concatenation lowering.
+    if op in ginf._FLOAT_PARAM_OPS:
+        _boxed = getattr(gen, '_boxed_vals', ())
+        if lv in _tagged and lv in _boxed and rt in ('int', 'int64_t', 'double', 'float'):
+            lv = _none_arith_guard(gen, op, lv, _numeric_type_name(rt), 1)
+        if rv in _tagged and rv in _boxed and lt in ('int', 'int64_t', 'double', 'float'):
+            rv = _none_arith_guard(gen, op, rv, _numeric_type_name(lt), 0)
     if lv in getattr(gen, '_boxed_vals', ()) and not (
             lv in _tagged and rt == 'char *' and op == '+'):
         if op in _ident_ops and (op in ('is', 'is not')

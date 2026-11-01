@@ -394,19 +394,43 @@ def _lower_generator_send(gen, node, av: str, api: dict) -> tuple[str, str]:
     including the StopIteration on exhaustion (the generator protocol's
     uniform "ran out of values" signal, not a silent end).
 
-    This is the SAME resume the `<base>_resume` trampoline performs, with a
-    non-zero send payload: `__mojo_gen_resume(gen, send)` is the runtime
-    entry both funnel into, so no new ABI is involved. The per-generator
-    `<base>_resume(g)` wrapper hardcodes a 0 send, which is why this calls
-    the runtime function directly rather than through the trampoline."""
+    Two resume entries carry the sent word, one per backend:
+    - the default stack-switch path: `__mojo_gen_resume(gen, send)`, the
+      runtime entry the `<base>_resume(g)` trampoline also funnels into (it
+      hardcodes a 0 send, which is why this calls the runtime directly);
+    - the C++20 path (`_mojogen_` base): `{base}_send(g, send)`, the unit's
+      own entry, which stores the word where the suspended `x = yield` reads
+      it (cpp_async.py's generator promise). `{base}_resume` is the same
+      resume with the None box."""
+    is_cpp = _as_str(api.get('base', '')).startswith('_mojogen_')
+    if is_cpp and api.get('is_async_gen'):
+        # An async generator's yield channel carries wait-descriptors as well
+        # as values (see _lower_generator_next), so a sent word has no
+        # consumer-side protocol to ride on yet on the cpp path.
+        raise gimple_exprtypes._UnsupportedGeneratorShape(
+            "`.send()` on a C++20-coroutine async generator is not supported: "
+            "its yield channel carries wait-descriptors, so the sent word has "
+            "no protocol on that path (MOJO_CORO=cpp)")
     vct = api['value_ctype']
     if len(node.args) == 1:
-        st, sv = gen.lower_expr(node.args[0])
-        send = _gen_slot_box(gen, st, sv, vct)
+        arg = node.args[0]
+        if (vct == 'int64_t'
+                and (isinstance(arg, gimple_ctypes.NoneLiteral)
+                     or (isinstance(arg, gimple_ctypes.IdentExpr) and arg.name == 'None'))):
+            # `g.send(None)` on an int-valued generator ('i' or 'w', both
+            # int64_t): the same None box a plain resume sends (coro.py's
+            # trampoline), not the raw 0 that `x = yield` reads as zero.
+            send = gen._call_expr('int64_t', 'mojo_box_none', [])
+        else:
+            st, sv = gen.lower_expr(arg)
+            send = _gen_slot_box(gen, st, sv, vct)
     else:
         send = '0'
-    handle = gen._to_int64('MojoGenerator *', av)
-    resumed = gen._new_val('_Bool', f"__mojo_gen_resume ({handle}, {send})")
+    if is_cpp:
+        resumed = gen._new_val('_Bool', f"{api['base']}_send ({av}, {send})")
+    else:
+        handle = gen._to_int64('MojoGenerator *', av)
+        resumed = gen._new_val('_Bool', f"__mojo_gen_resume ({handle}, {send})")
     bb_ok = gen._new_bb(); bb_exhausted = gen._new_bb(); bb_merge = gen._new_bb()
     bb_stopiter = gen._new_bb()
     gen._emit(f"  if ({resumed}) goto {bb_ok}; else goto {bb_exhausted};")
@@ -749,6 +773,78 @@ def _lower_pointer_alloc(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     t = gen._new_temp(ptr_ctype)
     gen._emit(f"  {t} = _alloc_n_{gimple_ctypes._c_id(elem_ctype)} ({n_val});")
     return ptr_ctype, t
+
+
+def _layout_single_elem(node):
+    """The element type expression `S` of `alloc(Layout[S].single())`, or
+    None when `node` is not that call shape."""
+    if not (isinstance(node, gimple_ctypes.CallExpr)
+            and isinstance(node.func, gimple_ctypes.IdentExpr)
+            and node.func.name == 'alloc' and len(node.args) == 1
+            and not getattr(node, 'kwargs', None)):
+        return None
+    lay = node.args[0]
+    if not (isinstance(lay, gimple_ctypes.CallExpr) and not lay.args
+            and isinstance(lay.func, gimple_ctypes.MemberExpr)
+            and lay.func.member == 'single'
+            and isinstance(lay.func.obj, gimple_ctypes.SubscriptExpr)
+            and isinstance(lay.func.obj.obj, gimple_ctypes.IdentExpr)
+            and lay.func.obj.obj.name == 'Layout'):
+        return None
+    idx = lay.func.obj.index
+    elems = idx.elements if isinstance(idx, gimple_ctypes.TupleExpr) else [idx]
+    return elems[0] if len(elems) == 1 else None
+
+
+def _lower_alloc_single_leak(gen, node: gimple_ctypes.CallExpr):
+    """`alloc(Layout[S].single()).unsafe_leak()` -- one zeroed `S` on the heap,
+    handed out as a bare `S *` (the leak is the point: the caller owns it and
+    frees it with `dealloc(ThinAllocation(unsafe_owned_ptr=p)...)`). Shares
+    the `_alloc_n_<S>` helper with `UnsafePointer[S].alloc(1)`, so a struct
+    element gets its `__mojo_type_id` header set. Returns None when `node` is
+    not that exact shape."""
+    elem = _layout_single_elem(node.func.obj)
+    if elem is None or node.args:
+        return None
+    ann = gen._type_expr_to_ann(elem)
+    if not ann:
+        return None
+    ptr_ctype = gen._resolve_type(f'UnsafePointer[{ann}]')
+    if not ptr_ctype.endswith(' *'):
+        ptr_ctype = ptr_ctype + ' *'
+    elem_ctype = ptr_ctype[:-2].strip()
+    n_val = gen._new_val('int64_t', '(int64_t)1')
+    gen._ptr_alloc_n_needed.add(elem_ctype)
+    t = gen._new_temp(ptr_ctype)
+    gen._emit(f"  {t} = _alloc_n_{gimple_ctypes._c_id(elem_ctype)} ({n_val});")
+    return ptr_ctype, t
+
+
+def _lower_dealloc_thin_allocation(gen, node: gimple_ctypes.CallExpr):
+    """`dealloc(ThinAllocation(unsafe_owned_ptr=p).unsafe_with_layout(...))` --
+    free the block `p` points at (the other half of
+    `_lower_alloc_single_leak`). Returns None for any other call shape."""
+    if not (isinstance(node.func, gimple_ctypes.IdentExpr)
+            and node.func.name == 'dealloc' and len(node.args) == 1
+            and not getattr(node, 'kwargs', None)):
+        return None
+    wl = node.args[0]
+    if not (isinstance(wl, gimple_ctypes.CallExpr)
+            and isinstance(wl.func, gimple_ctypes.MemberExpr)
+            and wl.func.member == 'unsafe_with_layout'
+            and isinstance(wl.func.obj, gimple_ctypes.CallExpr)):
+        return None
+    ta = wl.func.obj
+    kw = list(getattr(ta, 'kwargs', None) or [])
+    if not (isinstance(ta.func, gimple_ctypes.IdentExpr)
+            and ta.func.name == 'ThinAllocation' and not ta.args
+            and len(kw) == 1 and kw[0][0] == 'unsafe_owned_ptr'):
+        return None
+    pt, pv = gen.lower_expr(kw[0][1])
+    if not pt.endswith('*'):
+        return None
+    gen._emit_call('void', '', 'free', [(pt, pv)])
+    return 'int64_t', gen._new_val('int64_t', '(int64_t)0')
 
 
 def _future_done_callback_kind_tag(cb_ctype: str) -> int:
@@ -1465,14 +1561,21 @@ def _lower_class_attr_builtin(gen, node, fn):
     return None
 
 
-def _lower_type_new(gen, node):
+def _lower_type_new(gen, node, args=None, meta=None):
     """`type(name, (Base, ..), {'attr': value, ..})` with a literal base tuple/list and a literal
     dict of string keys: a class made at run time (stage 3 of
     bugs/CODEGEN_enum_runtime_class_creation.md). It is a class-table entry (`mojo_type_new`) whose
     bases are the listed classes and whose dict starts from the namespace; the value is a class
     handle word that `Foo.x`, `Foo.x = v` and `getattr(Foo, ..)` read through the class table.
-    None when the arguments are not that literal shape (the caller refuses by name)."""
-    name_n, bases_n, ns_n = node.args
+    None when the arguments are not that literal shape (the caller refuses by name).
+    `args` overrides `node.args` (`type.__new__(type, n, b, ns)` passes its last three).
+    `meta` is the metaclass argument of `type.__new__(Meta, ..)` when `Meta` is a local bound to
+    a class made at run time: the new class records it, and an attribute the class and its bases
+    lack is then answered by `Meta` (its attributes, then `Meta.__getattr__`)."""
+    name_n, bases_n, ns_n = node.args if args is None else args
+    # Python evaluates the arguments left to right; a call-result namespace can have effects.
+    nt, nv = gen.lower_expr(name_n)
+    nm = nv if nt == 'char *' else gen._new_val('char *', f'(char *){gen._to_int64(nt, nv)}')
     literal_bases = isinstance(bases_n, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr))
     bases_list = None
     if not literal_bases:
@@ -1490,21 +1593,27 @@ def _lower_type_new(gen, node):
             if not isinstance(k, gimple_ctypes.StringLiteral) or N.is_fstring_literal(k):
                 return None
             keys.append(_as_str(k.value))
-    elif not isinstance(ns_n, (gimple_ctypes.IdentExpr, gimple_ctypes.MemberExpr)):
+    elif not isinstance(ns_n, (gimple_ctypes.IdentExpr, gimple_ctypes.MemberExpr,
+                               gimple_ctypes.CallExpr)):
         return None
     ns_dict = None
     if not isinstance(ns_n, gimple_ctypes.DictExpr):
-        # a COMPUTED namespace (a variable): only a dict value can be walked into the table
+        # a COMPUTED namespace (a variable or a call result): only a dict value can be walked
+        # into the table
         nst, nsv = gen.lower_expr(ns_n)
         if nst != 'MojoDict *':
             return None
         ns_dict = nsv
-    nt, nv = gen.lower_expr(name_n)
-    nm = nv if nt == 'char *' else gen._new_val('char *', f'(char *){gen._to_int64(nt, nv)}')
     cls = gen._call_expr('int64_t', 'mojo_type_new', [('char *', nm)])
     if bases_list is not None:
         gen._void_call('mojo_type_add_bases_from_list', [('int64_t', cls), ('MojoList *', bases_list)])
+    if meta is not None:
+        mt, mv = gen.lower_expr(meta)
+        gen._void_call('mojo_type_set_meta', [('int64_t', cls), ('int64_t', gen._to_int64(mt, mv))])
     for b in (bases_n.elements if literal_bases else ()):
+        if (isinstance(b, gimple_ctypes.IdentExpr) and b.name == 'type'
+                and 'type' not in gen.var_types):
+            continue  # `class Meta(type)`: `type` is the implicit root, not a class-table base
         st = _class_struct_of_arg(gen, b)
         if st is not None:
             bw = gen._new_val('int64_t', f'{gimple_exprtypes._struct_type_id(st)}LL')
@@ -1516,6 +1625,7 @@ def _lower_type_new(gen, node):
         gen._void_call('mojo_type_fill_from_dict', [('int64_t', cls), ('MojoDict *', ns_dict)])
         gen._dyn_word_vals.add(cls)
         gen._rtobj_kinds[('v', cls)] = 'class'
+        gen._rt_classes_made = True
         return 'int64_t', cls
     for key, (_k, vnode) in zip(keys, ns_n.pairs):
         vt, vv = gen.lower_expr(vnode)
@@ -1525,6 +1635,7 @@ def _lower_type_new(gen, node):
                        [('int64_t', cls), ('char *', gen._intern_string(key)), ('int64_t', vw)])
     gen._dyn_word_vals.add(cls)
     gen._rtobj_kinds[('v', cls)] = 'class'
+    gen._rt_classes_made = True
     return 'int64_t', cls
 
 
@@ -1537,6 +1648,9 @@ _PY_BUILTIN_NAMES = frozenset(n for n in dir(_py_builtins) if not n.startswith('
 
 
 def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    _dealloc = gen._lower_dealloc_thin_allocation(node)
+    if _dealloc is not None:
+        return _dealloc
     # `itertools.chain(a, b, ...)`: the elements of each argument in turn. Built eagerly
     # into one list that records its own slot kinds; a generator handle argument is
     # registered first so the run time can drain it.
@@ -1563,6 +1677,32 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         gen._struct_slot_kinds[_ch] = ginf._RuntimeKinded(['int', 'str'])
         gen._maybe_kinds_vals.add(_ch)
         return 'MojoList *', _ch
+    # `type.__new__(type, name, bases, ns)` is `type(name, bases, ns)` spelled through the
+    # metaclass slot (what `EnumType.__new__` writes as `type.__new__(metacls, ..)`). Only the
+    # plain `type` metaclass and a run-time-class metaclass are modelled; a static user metaclass
+    # (`class Meta(type)`, stage 4) is refused by name.
+    if (isinstance(node.func, gimple_ctypes.MemberExpr)
+            and _as_str(node.func.member) == '__new__'
+            and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
+            and node.func.obj.name == 'type'
+            and 'type' not in gen.var_types
+            and len(node.args) == 4 and not getattr(node, 'kwargs', None)):
+        _m = node.args[0]
+        if isinstance(_m, gimple_ctypes.IdentExpr) and _m.name == 'type':
+            _cls = _lower_type_new(gen, node, node.args[1:])
+            if _cls is not None:
+                return _cls
+        elif (isinstance(_m, gimple_ctypes.IdentExpr)
+                and gen._rtobj_kinds.get(('l', _as_str(_m.name))) == 'class'):
+            # a metaclass made at run time (`Meta = type('Meta', (type,), {..})`)
+            _cls = _lower_type_new(gen, node, node.args[1:], meta=_m)
+            if _cls is not None:
+                return _cls
+        raise RuntimeError(
+            'cannot compile module: type.__new__(metacls, name, bases, namespace) creates a '
+            'class at run time, which the compiled path models only for metacls `type`, a '
+            'literal, dict-variable or dict-call-result namespace and tuple/list bases '
+            '(bug:CODEGEN_enum_runtime_class_creation)')
     # `setattr(Cls, name, v)` / `getattr(Cls, name[, d])` / `hasattr(Cls, name)` / `delattr(Cls, name)`
     # where the first argument is a CLASS (a struct name, or `cls` in a classmethod): attributes
     # the class body never declared live in the run-time class table.
@@ -3932,6 +4072,9 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # safe's own type); the old 'int' boxed the 64-bit tag into a 32-bit
         # temp, a hard gcc "invalid conversion in gimple call" error.
         av64 = gen._new_val('int64_t', f"(int64_t){av}")
+        if gen._rt_classes_made:
+            # a run-time class's metaclass / an instance's class, else the struct tag
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_type_of', [('int64_t', av64)])
         return 'int64_t', gen._new_val('int64_t', f"mojo_read_type_tag_safe ({av64})")
     if fname_raw == 'setattr' and len(node.args) >= 3:
         pairs = [gen.lower_expr(a) for a in node.args[:3]]
@@ -4358,7 +4501,12 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
                            [('int64_t', gen._to_int64(obj_type, obj_val)), ('int64_t', cw)])
         return gen._new_val('_Bool', f'(_Bool){r}')
     if type_name == 'type':
-        return gen._new_val('_Bool', '0')  # isinstance(x, type) always false in C
+        if gen._rt_classes_made:
+            # a class made at run time is an instance of `type`
+            r = gen._call_expr('int', 'mojo_isinstance_type',
+                               [('int64_t', gen._to_int64(obj_type, obj_val))])
+            return gen._new_val('_Bool', f'(_Bool){r}')
+        return gen._new_val('_Bool', '0')  # no run-time class in this module: nothing is a `type`
     if type_name == 'tuple':
         # A tuple's runtime representation is a MojoList carrying the
         # `mojo_mark_as_tuple` marker (see _lower_tuple_literal). Neither
@@ -4414,6 +4562,13 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
         target = gen._new_val('int64_t', f'(int64_t){target_id}')
         cmp_t = gen._new_temp('_Bool')
         gen._emit(f'  {cmp_t} = {tag} == {target};')
+        if gen._rt_classes_made:
+            # an instance of a class made at run time that derives this static class: its
+            # header is not a struct tag, the class table knows the bases
+            rt = gen._call_expr('int', 'mojo_isinstance_rtclass', [('int64_t', addr), ('int64_t', target)])
+            both = gen._new_temp('_Bool')
+            gen._emit(f'  {both} = {cmp_t} | (_Bool){rt};')
+            return both
         return cmp_t
     _TYPE_IDS = {'bool': '1', 'int': '2', 'float': '3', 'str': '4',
                  'list': '5', 'dict': '6', 'set': '7', 'tuple': '8',

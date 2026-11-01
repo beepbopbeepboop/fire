@@ -3625,6 +3625,65 @@ def tagged_next_bind_name(gen, name, _seen=frozenset()) -> bool:
     return bool(gen_names) or copies > 0
 
 
+# The refusal for a tagged generator word stored into a name whose type is not
+# int64, or a non-int64 store into a name that holds a tagged word. A Mojo name
+# has one type, and a box-holding local cannot be given a str or float store
+# (a bare word is read as a box, and an int word is not a char* or a double),
+# so the copy used to compile to a segfault (str) or to `1.0` / `0.0` (float).
+MIXED_NAME_NON_INT64_REFUSAL = (
+    "a name bound to a tagged generator word (a yield of more than one kind) "
+    "cannot also hold a value of another C type (str or float): the box "
+    "cannot carry it; refused")
+
+
+def is_non_int_c_type(ctype) -> bool:
+    """True for a C type a tagged word cannot be unwrapped into: a float/double
+    or a pointer (a str is a `char *`, a container a `Mojo... *`). An integer
+    type, bool included, is the word's own kind and is not refused here."""
+    return ctype is not None and (
+        ctype in gimple_ctypes._SCALAR_FLOAT_TYPES or ctype.endswith(' *'))
+
+
+def tagged_mixed_name(gen, name) -> bool:
+    """True iff `name` is bound to a tagged word somewhere in THIS function
+    (a copy of a tagged for-loop target, a copy of a tagged `next()` name, or
+    `next(g)` over a tagged generator) AND also to plain values elsewhere, so
+    `tagged_next_bind_name` answers False for it.
+
+    Such a name is a box-holding local whose every store must be a box: a
+    plain int64 store (`x = 0`, `x = 7`, `x = w` over a plain generator) is
+    boxed with `mojo_box_int` at the bind site, so `print(x)` and `x == None`
+    see the kind of the value last stored. Without this, a store of a bare
+    word unwrapped the tagged box's payload, and a None yield copied into `x`
+    printed `0` (`x = 0; for v in g(): x = v`)."""
+    # Cheap exit first: this runs for every int64 simple-name bind, and the
+    # body walk below is linear in the function. A module with no tagged
+    # generator (no `mixed_slots` API) has no tagged word to mix in.
+    if not any((api or {}).get('mixed_slots')
+               for api in (getattr(gen, '_generator_api', None) or {}).values()):
+        return False
+    params = getattr(gen, '_cur_func_params', None) or ()
+    if name in params:
+        return False
+    values = _local_bindings(gen, name)
+    if not values:
+        return False
+    tagged = False
+    for v in values:
+        if isinstance(v, gimple_ctypes.IdentExpr):
+            if (v.name != name and
+                    (tagged_for_target_name(gen, v.name)
+                     or tagged_next_bind_name(gen, v.name))):
+                tagged = True
+        elif (isinstance(v, gimple_ctypes.CallExpr)
+              and isinstance(v.func, gimple_ctypes.IdentExpr)
+              and v.func.name == 'next' and v.args
+              and isinstance(v.args[0], gimple_ctypes.IdentExpr)
+              and _tagged_generator_iterable(gen, v.args[0])):
+            tagged = True
+    return tagged and not tagged_next_bind_name(gen, name)
+
+
 def _tagged_generator_iterable(gen, node) -> bool:
     """True iff the `for` iterable `node` is a call of a generator whose value
     slot is a TAGGED word (`mixed_slots`: its yields are of more than one
@@ -3682,6 +3741,31 @@ def tagged_for_target_name(gen, name) -> bool:
                     return False
                 loops += 1
     return loops == len(values)
+
+
+def tagged_recv_name(gen, name) -> bool:
+    """True iff every binding of `name` in THIS function is `name = yield`
+    (an int-valued `yield` used as a value, `__mojo_coro_yield_i`), so every
+    value the name holds is the generator's resume word: the None box when the
+    generator was resumed by `next()` / `send(None)`, or a bare integer when it
+    was sent one. Such a name keeps the box (the caller registers it in
+    `_boxed_vals` / `_tagged_word_vals`), so `print(x)` and `x == None` see the
+    resume's kind, and `x = yield` after `next(it)` prints None, not 0.
+
+    A bare word and a box are both legal here: a consumer of a tagged name
+    renders an unboxed integer as itself (`mojo_repr_boxed`). A name with any
+    other binder (a plain store, a copy, a loop target) answers False and the
+    bind unwraps as it always did."""
+    params = getattr(gen, '_cur_func_params', None) or ()
+    if name in params:
+        return False
+    values = _local_bindings(gen, name)
+    if not values:
+        return False
+    return all(isinstance(v, gimple_ctypes.CallExpr)
+               and isinstance(v.func, gimple_ctypes.IdentExpr)
+               and v.func.name == '__mojo_coro_yield_i'
+               for v in values)
 
 
 def mixed_container_locals(gen) -> set:

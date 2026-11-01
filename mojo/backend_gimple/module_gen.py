@@ -81,6 +81,7 @@ import mojo.middle.funcs_shared as funcs_shared
 import mojo.middle.itcursor as itc
 from mojo.middle.funcs_shared import param_default_pairs
 from mojo.middle.types import _TUPLE_ANN_BY_NAME, _unpack_target_leaf_names
+from mojo.middle.types import PRESENCE_WORD, presence_bit, presence_word_count, presence_set_stmt
 from mojo.middle.methods_shared import _is_selfhost_source_file
 from gimple_codegen import ClosureInfo, DispatchSolver, TypeLattice, _CPP_KEYWORD_FIELDS, _C_KEYWORDS, _C_PARAM_EXTRA_KEYWORDS, _C_RESERVED_FUNCS, _EXPR_DISPATCH, _FIXED_ARRAY_ANN_RE, _LIST_RETURNING_METHODS, _PSEUDO_DUNDER_ATTRS, _RUNTIME_FUNCS, _SELFHOST_DIR, _SELFHOST_KWARGS_HAS_VARARG, _SELFHOST_KWARGS_SLOTS, _STMT_DISPATCH, _STR_RETURNING_METHODS, _TYPE_MAP, _UnsupportedGeneratorShape, _async_gen_quick_eligible, _async_quick_eligible, _bracket_param_type_annotations, _c_escape, _c_field_name, _c_id, _class_attr_ctype, _compute_exc_descendants, _debug_note, _declared_vars_body, _extract_init_expr, _generator_quick_eligible, _import_targets, _merge_struct_inheritance, _module_init_name, _module_toplevel_name, _mojo_type, _safe_field, _safe_name, _struct_type_id, _stub_guard_name, _used_idents_deep, _used_idents_node
 
@@ -1443,7 +1444,38 @@ def _homogeneous_tuple_ann_elem(self, _ret_ann):
 
 
 
-def _render_struct_typedef_body(struct_name: str, fields: dict, optional_tags=None) -> list:
+def _mark_presence_field(sdef, fname):
+    """Record the compiler-MINTED field `fname` of `sdef` as presence-tracked
+    (see StructDef.presence_fields), unless `sdef`'s own `__init__` assigns
+    it: a constructor-assigned field is part of every instance by definition,
+    so it needs no bit. Every mint site calls this with the StructDef it just
+    appended `fname` to, which keeps the tracked set a whole-struct fact that
+    every generator reads the same way. Idempotent."""
+    if sdef is None or fname in sdef.presence_fields:
+        return
+    for _m in sdef.methods:
+        if _m.name != '__init__':
+            continue
+        for _n in _walk_ast(_m.body):
+            _tgts = []
+            if isinstance(_n, AssignStmt):
+                _tgts = [_n.target]
+            elif isinstance(_n, MultiAssignStmt):
+                _tgts = list(_n.targets)
+            for _t in _tgts:
+                _leaves = [_t]
+                if isinstance(_t, (TupleExpr, ListExpr)):
+                    _leaves = list(_t.elements)
+                for _lf in _leaves:
+                    if (isinstance(_lf, MemberExpr) and isinstance(_lf.obj, IdentExpr)
+                            and _as_str(_lf.obj.name) == 'self'
+                            and _as_str(_lf.member) == fname):
+                        return
+    sdef.presence_fields.append(fname)
+
+
+def _render_struct_typedef_body(struct_name: str, fields: dict, optional_tags=None,
+                                presence_words: int = 0) -> list:
     """Render just the `typedef struct NAME { ... } NAME;` body lines for
     one struct, given its resolved {field_name: field_ctype} map (the same
     per-field rendering gen_module_impl's own emit_struct_defs pass uses,
@@ -1499,6 +1531,8 @@ def _render_struct_typedef_body(struct_name: str, fields: dict, optional_tags=No
                     lines.append(f"  _Bool {safe_fn}_is_some;")
     else:
         lines.append(f"  int _dummy;")
+    if presence_words:
+        lines.append(f"  uint64_t {PRESENCE_WORD}[{presence_words}];")
     lines.append(f"}} {struct_name};")
     return lines
 
@@ -1979,18 +2013,33 @@ def _emit_reflection_dispatch(self, parts):
         set_lines = []
         name_lits = []
         asdict_lines = []
+        # The owning StructDef, whose `presence_fields` decide which minted
+        # fields answer `hasattr`/`getattr` only once stored (see
+        # StructDef.presence_fields). Declared fields are not in it, so their
+        # arms are unchanged.
+        _pres_sd = self._struct_name_owner.get(_as_str(sn))
         for fname, ftype in fields.items():
             if fname == '__mojo_type_id':
                 continue
             safe_f = _safe_field(fname)
+            _pb = presence_bit(_pres_sd, fname)
+            # Read guard: the arm answers only when this object's presence
+            # bit is set. A clear bit falls through to the trailing
+            # `mojo_obj_getattr`, which raises (or sets the nothrow miss flag),
+            # as CPython does for an attribute the instance never received.
+            _pget = ''
+            _pset = ''
+            if _pb is not None:
+                _pget = (f' && ((obj->{PRESENCE_WORD}[{_pb[0]}] >> {_pb[1]}) & 1)')
+                _pset = presence_set_stmt(_pres_sd, fname, 'obj', '->') + ' '
             if re.match(r'^.+\[\d+\]$', ftype):
                 name_lits.append(f'"{fname}"')
                 continue
             if ftype.endswith(' *'):
                 get_lines.append(
-                    f'  if (strcmp(attr, "{fname}") == 0) return (int64_t)(intptr_t)obj->{safe_f};')
+                    f'  if (strcmp(attr, "{fname}") == 0{_pget}) return (int64_t)(intptr_t)obj->{safe_f};')
                 set_lines.append(
-                    f'  if (strcmp(attr, "{fname}") == 0) {{ obj->{safe_f} = ({ftype})(intptr_t)val; return; }}')
+                    f'  if (strcmp(attr, "{fname}") == 0) {{ obj->{safe_f} = ({ftype})(intptr_t)val; {_pset}return; }}')
                 asdict_lines.append(
                     f'  mojo_dict_set_int(_r, "{fname}", (int64_t)(intptr_t)obj->{safe_f});')
             elif ftype in self.struct_field_types:
@@ -2004,16 +2053,16 @@ def _emit_reflection_dispatch(self, parts):
                 # shape the runtime tag readers expect of a struct
                 # pointer — and setattr copies the struct back by value.
                 get_lines.append(
-                    f'  if (strcmp(attr, "{fname}") == 0) return (int64_t)(intptr_t)&obj->{safe_f};')
+                    f'  if (strcmp(attr, "{fname}") == 0{_pget}) return (int64_t)(intptr_t)&obj->{safe_f};')
                 set_lines.append(
-                    f'  if (strcmp(attr, "{fname}") == 0) {{ obj->{safe_f} = *({ftype} *)(intptr_t)val; return; }}')
+                    f'  if (strcmp(attr, "{fname}") == 0) {{ obj->{safe_f} = *({ftype} *)(intptr_t)val; {_pset}return; }}')
                 asdict_lines.append(
                     f'  mojo_dict_set_int(_r, "{fname}", (int64_t)(intptr_t)&obj->{safe_f});')
             else:
                 get_lines.append(
-                    f'  if (strcmp(attr, "{fname}") == 0) return (int64_t)obj->{safe_f};')
+                    f'  if (strcmp(attr, "{fname}") == 0{_pget}) return (int64_t)obj->{safe_f};')
                 set_lines.append(
-                    f'  if (strcmp(attr, "{fname}") == 0) {{ obj->{safe_f} = ({ftype})val; return; }}')
+                    f'  if (strcmp(attr, "{fname}") == 0) {{ obj->{safe_f} = ({ftype})val; {_pset}return; }}')
                 asdict_lines.append(
                     f'  mojo_dict_set_int(_r, "{fname}", (int64_t)obj->{safe_f});')
             name_lits.append(f'"{fname}"')
@@ -3285,6 +3334,11 @@ def _gmi_record_fn_scoped_param_types(gen, cls_name: str, params) -> None:
         if not isinstance(_pann, str) or not _pann:
             continue
         _table[_pair_key(cls_name, _as_str(_pname))] = _mojo_type(_pann)
+        _by_cls = getattr(gen, '_fn_scoped_params_by_class', None)
+        if _by_cls is None:
+            _by_cls = {}
+            gen._fn_scoped_params_by_class = _by_cls
+        _by_cls.setdefault(cls_name, {})[_as_str(_pname)] = _mojo_type(_pann)
 
 
 def _gmi_hoist_nested_structs(self, stmts: list) -> list:
@@ -3807,6 +3861,16 @@ def gen_module_impl(self, stmts):
     _declare_posthoc_class_attrs(stmts)
     _gmi_refuse_nested_class_enclosing_reads(stmts)
     stmts = _gmi_decorator_pass(self, stmts, {}, True)
+
+    # Python-level frames: a module that says `_getframe` gets a frame record on every
+    # function it defines (see emit_methods._frame_enter). Decided here, once, from the
+    # module's own statements; every other module's C is unchanged.
+    for _fr_nd in _walk_ast(stmts):
+        if ((isinstance(_fr_nd, gimple_ctypes.MemberExpr)
+                and _fr_nd.member in ('_getframe', '__traceback__', 'tb_frame', 'f_back', 'f_lineno'))
+                or (isinstance(_fr_nd, gimple_ctypes.IdentExpr) and _fr_nd.name == '_getframe')):
+            self._frames_mods.add(self.module_name or '')
+            break
 
     # ── GPU offload, Seam 1 ──────────────────────────────────────────────
     # Classified ONCE, at the very top, because three different places
@@ -6612,6 +6676,22 @@ def gen_module_impl(self, stmts):
                         # `_gmi_record_fn_scoped_param_types`).
                         ctype = self._fn_scoped_param_types[
                             _pair_key(s.name, _as_str(v.name))]
+                    elif (v is not None
+                            and s.name in (getattr(self, '_fn_scoped_params_by_class', None) or {})
+                            and not isinstance(v, (IdentExpr, StringLiteral, FloatLiteral))):
+                        # An EXPRESSION over the enclosing function's
+                        # parameters (`name = s + "!"`): `_quick_type` reads
+                        # `var_types`, which is empty during this
+                        # pre-pass, so overlay the recorded parameter types
+                        # for the duration of the one call.
+                        _saved_vt = self.var_types
+                        _ov = dict(_saved_vt)
+                        _ov.update(self._fn_scoped_params_by_class[s.name])
+                        self.var_types = _ov
+                        try:
+                            ctype = self._quick_type(v)
+                        finally:
+                            self.var_types = _saved_vt
                     elif v is None:
                         # A no-initializer container field: there is no
                         # literal to read the kind from, so the ANNOTATION
@@ -6625,6 +6705,16 @@ def gen_module_impl(self, stmts):
                     else:
                         ctype = 'int64_t'
                 self._global_var_types[mangled] = ctype
+                if v is None:
+                    # A no-initializer container field is an INSTANCE field,
+                    # not a class attribute: every instance needs its own
+                    # empty container (`_alloc_S` builds it fresh), so the
+                    # per-class global is only the type/kind carrier.
+                    _fresh = getattr(self, '_fresh_field_cattrs', None)
+                    if _fresh is None:
+                        _fresh = {}
+                        self._fresh_field_cattrs = _fresh
+                    _fresh[mangled] = ctype
                 # A NON-constant value of a FUNCTION-SCOPED class is per
                 # EXECUTION of its `class` statement (Python builds a new class
                 # object each time it runs). The `_classattr_` global then holds
@@ -7063,13 +7153,28 @@ def gen_module_impl(self, stmts):
                     # receiver's own struct (`self.next = other`, `self.parent
                     # = owner`) exactly where it is: both sides answer the same
                     # and nothing changes.
+                    # An EXPLICITLY annotated field is not "we don't know":
+                    # `var _prev: Node_1_T_3_Int` on `Node_1_T_3_Int` itself
+                    # (a node's own link) is the field's real type, and the
+                    # constructor's `self._prev = <erased word>` is weaker
+                    # evidence than the annotation (it typed the link
+                    # `int64_t`, so `.next()` had no receiver type).
+                    _annotated_self = (
+                        existing_ft == s.name + ' *'
+                        and any(getattr(_f, 'type_ann', None) is not None
+                                and (_f.name if isinstance(_f, VarDecl)
+                                     else getattr(getattr(_f, 'target', None),
+                                                  'name', None)) == fn
+                                for _f in s.fields))
                     can_override = ((existing_ft == 'int' and ft.endswith(' *'))
                                     or (existing_ft == s.name + ' *'
-                                        and ft != existing_ft))
+                                        and ft != existing_ft
+                                        and not _annotated_self))
                     if fn not in self.struct_field_types[s.name] or can_override:
                         self.struct_field_types[s.name][fn] = ft
                         if fn not in already:
                             s.fields.append(VarDecl(name=fn, type_ann=None, value=None))
+                            _mark_presence_field(s, fn)
                             already.add(fn)
                             _walk_ast_invalidate(s)
             # A method that returns a `bool`-annotated FIELD hands back an
@@ -7161,6 +7266,7 @@ def gen_module_impl(self, stmts):
                         self.struct_field_types[s.name][fn] = _base_ft if _base_ft is not None else ft
                         if fn not in already:
                             s.fields.append(VarDecl(name=fn, type_ann=None, value=None))
+                            _mark_presence_field(s, fn)
                             already.add(fn)
                             _walk_ast_invalidate(s)
 
@@ -7358,6 +7464,7 @@ def gen_module_impl(self, stmts):
                 if target_def is not None and not any(
                         isinstance(f, VarDecl) and f.name == fn for f in target_def.fields):
                     target_def.fields.append(VarDecl(name=fn, type_ann=None, value=None))
+                    _mark_presence_field(target_def, fn)
                     _walk_ast_invalidate(target_def)
 
     _scan_body_for_local_field_access(stmts, None)
@@ -8452,6 +8559,7 @@ def gen_module_impl(self, stmts):
                     'max_arity': max_arity,
                     'ret_type': _ret_type,
                     'ret_ann': m.return_type,
+                    'self_owned': _pconv.get('self') == 'owned',
                     'has_varargs': _star_idx >= 0,
                     'pre_star_count': _star_idx if _star_idx >= 0 else None,
                 })
@@ -13541,7 +13649,9 @@ def gen_module_impl(self, stmts):
     import mojo.backend_gimple.emit_infra as _ein_seed
     _ein_seed.seed_global_generator_apis(self, stmts, _gmi_binding_index(stmts))
     _phase17_append_hits: dict = {}
-    _gmi_phase17_collect_appends(self, _phase17_stmts, _phase17_append_hits)
+    _phase17_store_hits: dict = {}
+    _gmi_phase17_collect_appends(
+        self, _phase17_stmts, _phase17_append_hits, _phase17_store_hits)
     for _gname, _gargs in _phase17_append_hits.items():
         if self._global_var_types.get(_gname) != 'MojoList *':
             continue
@@ -13553,6 +13663,21 @@ def gen_module_impl(self, stmts):
         if _elt:
             self._elem_types[_gname] = _elt
             self._global_elem_types[_gname] = _elt
+
+    # Dict analogue: a module dict built empty (`d = {}`) and filled by
+    # subscript stores has no literal pairs to type it, so a function that
+    # only READS it would see no value type. The joined stored-value type is
+    # function-independent, like the list answer above.
+    for _gname, _gvals in _phase17_store_hits.items():
+        if self._global_var_types.get(_gname) != 'MojoDict *':
+            continue
+        if _gname in self._global_dict_val_types:
+            continue
+        _dvt = None
+        for _sv in _gvals:
+            _dvt = _sv if _dvt is None else TypeLattice.join(_dvt, _sv)
+        if _dvt:
+            self._global_dict_val_types[_gname] = _dvt
 
     _gmi_scan_try_imports(
         self, _phase17_mod,
@@ -14724,7 +14849,8 @@ def gen_module_impl(self, stmts):
                     _td_start = len(parts)
                 parts.extend(_render_struct_typedef_body(
                     struct_name, fields,
-                    optional_tags=self._tagged_optional_fields.get(struct_name)))
+                    optional_tags=self._tagged_optional_fields.get(struct_name),
+                    presence_words=presence_word_count(self._struct_name_owner.get(struct_name))))
                 self._struct_typedef_texts[struct_name] = '\n'.join(parts[_td_start:])
                 parts.append(f"#define {_stub_guard_name(struct_name)}")  # suppress any later variadic stub
                 emitted.add(struct_name)
@@ -16103,6 +16229,9 @@ def gen_module_impl(self, stmts):
                                 parts.append(f"  {_arr_dm2.group(1)} {safe_fn}[{_arr_dm2.group(2)}];")
                             else:
                                 parts.append(f"  {field_type} {safe_fn};")
+                _sd_pw = presence_word_count(sd)
+                if _sd_pw:
+                    parts.append(f"  uint64_t {PRESENCE_WORD}[{_sd_pw}];")
                 parts.append(f"}} {sd.name};")
                 self._struct_typedef_texts[sd.name] = '\n'.join(parts[_td_start:])
                 parts.append(f"#define {_stub_guard_name(sd.name)}")
@@ -16193,7 +16322,15 @@ def gen_module_impl(self, stmts):
                     f"  _p->{_safe_field(gimple_ctypes.cattr_cell_field(_aname))} = {_gname};\n")
             elif (_aname in field_map
                     and field_map[_aname] == self._global_var_types.get(_gname, field_map[_aname])):
-                _ai_parts.append(f"  _p->{_safe_field(_aname)} = {_gname};\n")
+                _fresh_ct = (getattr(self, '_fresh_field_cattrs', None) or {}).get(_gname)
+                if _fresh_ct == 'MojoList *':
+                    _ai_parts.append(f"  _p->{_safe_field(_aname)} = mojo_list_new ();\n")
+                elif _fresh_ct == 'MojoDict *':
+                    _ai_parts.append(f"  _p->{_safe_field(_aname)} = mojo_dict_new ();\n")
+                elif _fresh_ct == 'MojoSet *':
+                    _ai_parts.append(f"  _p->{_safe_field(_aname)} = mojo_set_new ();\n")
+                else:
+                    _ai_parts.append(f"  _p->{_safe_field(_aname)} = {_gname};\n")
         attr_inits = ''.join(_ai_parts)
         # A builtin-`dict` subclass gets its hidden `_data` backing
         # MojoDict allocated here so inherited container ops have real
@@ -16669,6 +16806,7 @@ def gen_module_impl(self, stmts):
             _gptypes = ', '.join(_gp_parts) or 'void'
             parts.append(f"extern MojoGenerator *{_base}_start ({_gptypes});")
             parts.append(f"extern _Bool {_base}_resume (MojoGenerator *);")
+            parts.append(f"extern _Bool {_base}_send (MojoGenerator *, int64_t);")
             parts.append(f"extern {_vct} {_base}_value (MojoGenerator *);")
             parts.append(f"extern void {_base}_destroy (MojoGenerator *);")
             if _api.get('is_async_gen'):
@@ -17325,7 +17463,8 @@ def gen_module_impl(self, stmts):
                 _flds = _struct_typedef_fields(self, _sn)
                 return '\n'.join(_render_struct_typedef_body(
                     _sn, _flds,
-                    optional_tags=self._tagged_optional_fields.get(_sn)))
+                    optional_tags=self._tagged_optional_fields.get(_sn),
+                    presence_words=presence_word_count(self._struct_name_owner.get(_sn))))
             for _gm_fwd_sn in sorted(_gm_struct_names_seen):
                 if _gm_typedef_text(_gm_fwd_sn) is not None:
                     cpp_parts.append(f'struct {_gm_fwd_sn};')
@@ -17424,7 +17563,9 @@ def gen_module_impl(self, stmts):
                             _render_struct_typedef_body(
                                 _me_sn, _me_flds,
                                 optional_tags=self._tagged_optional_fields
-                                .get(_me_sn)))
+                                .get(_me_sn),
+                                presence_words=presence_word_count(
+                                    self._struct_name_owner.get(_me_sn))))
                         cpp_parts.append(_me_td.replace('_Bool', 'bool'))
                         cpp_parts.append('')
                     _cpp_preamble_typedef_structs.update(_mirror_extra_structs)
@@ -17574,9 +17715,15 @@ def gen_module_impl(self, stmts):
                     for p in (_xg_info.get('params') or [])) or 'void'
                 cpp_parts.append(f'extern "C" MojoGenerator *{_xg_base}_start ({_xg_params});')
                 cpp_parts.append(f'extern "C" bool {_xg_base}_resume (MojoGenerator *);')
+                cpp_parts.append(f'extern "C" bool {_xg_base}_send (MojoGenerator *, int64_t);')
                 cpp_parts.append(f'extern "C" {_xg_vct} {_xg_base}_value (MojoGenerator *);')
                 cpp_parts.append(f'extern "C" void {_xg_base}_destroy (MojoGenerator *);')
             cpp_parts.append('')
+        if getattr(self, '_cpp_runtime_gen_resume_used', False):
+            # A cpp unit's `yield from` of a stack-switch sub-generator forwards
+            # the sent word through the runtime's `__mojo_gen_resume` (cpp_core's
+            # `_cpp_yield_from`), which this TU otherwise never declares.
+            cpp_parts.append('extern "C" int64_t __mojo_gen_resume (int64_t, int64_t);')
         for unit in self._generator_cpp_units:
             cpp_parts.append(unit)
             cpp_parts.append('')

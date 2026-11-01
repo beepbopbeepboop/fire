@@ -5,7 +5,7 @@ Each program is compiled, RUN, and its stdout compared with CPython's on the sam
 class is a class-table entry (`mojo_type_new`) whose bases are the listed classes and whose
 dict starts from the namespace; `Foo.x`, `Foo.x = v`, `getattr / hasattr` on the handle read the
 table, found through the bases (depth first, left to right). A shape the compiler cannot
-model (a namespace that is a call result) must still be refused by name, not miscompiled.
+model (a user metaclass) must still be refused by name, not miscompiled.
 """
 import sys
 
@@ -159,6 +159,108 @@ def main():
     print(isinstance(A(), B), isinstance(o, (C, A)), isinstance(5, A))
 main()
 """,
+    'isinstance_of_a_static_base_of_a_run_time_class': """\
+class Base:
+    pass
+
+def main():
+    B = type('B', (Base,), {'b': 2})
+    o = B()
+    print(isinstance(o, B), isinstance(o, Base))
+    print(isinstance(Base(), Base), isinstance(5, Base))
+    C = type('C', (), {})
+    print(isinstance(C(), Base))
+main()
+""",
+    'type_dunder_new_with_the_type_metaclass': """\
+def main():
+    Foo = type.__new__(type, 'Foo', (), {'x': 1, 'z': 'hi'})
+    print(Foo.x, Foo.z, Foo.__name__)
+    B = type.__new__(type, 'B', (Foo,), {'b': 2})
+    print(B.x, B.b)
+    B.q = 5
+    print(B.q, hasattr(B, 'q'), hasattr(Foo, 'q'))
+main()
+""",
+    'call_result_namespace': """\
+def ns():
+    d = {}
+    d['x'] = 1
+    d['z'] = 'hi'
+    return d
+
+def main():
+    Foo = type('Foo', (), ns())
+    print(Foo.x, Foo.z)
+    B = type('B', (Foo,), dict(b=2))
+    print(B.x, B.b)
+main()
+""",
+    'methods_and_constructor_take_up_to_seven_arguments': """\
+def init(self, a, b, c, d, e, f, g):
+    self.t = a + b + c + d + e + f + g
+
+def many(self, a, b, c, d, e, f, g):
+    return self.t * 100 + a + g
+
+def stat(a, b, c, d, e, f, g):
+    return a * 1000 + g
+
+def main():
+    Foo = type('Foo', (), {'__init__': init, 'many': many, 'stat': stat})
+    o = Foo(1, 2, 3, 4, 5, 6, 7)
+    print(o.t)
+    print(o.many(1, 0, 0, 0, 0, 0, 9))
+    print(Foo.stat(3, 0, 0, 0, 0, 0, 4))
+    p = Foo(1, 1, 1, 1, 1, 1, 1)
+    print(p.many(2, 0, 0, 0, 0, 0, 3))
+main()
+""",
+    'metaclass_made_at_run_time_answers_misses': """\
+def ga(cls, name):
+    return len(name) * 100
+
+def mname(cls):
+    return 42
+
+def main():
+    Meta = type('Meta', (type,), {'__getattr__': ga, 'tag': 7, 'mname': mname})
+    Foo = type.__new__(Meta, 'Foo', (), {'x': 1})
+    print(Foo.x)
+    print(Foo.tag)
+    print(Foo.abc)
+    print(Foo.mname())
+    Foo.y = 3
+    print(Foo.y)
+main()
+""",
+    'type_of_and_isinstance_with_a_run_time_metaclass': """\
+def main():
+    Meta = type('Meta', (type,), {'tag': 7})
+    Sub = type('Sub', (Meta,), {})
+    Foo = type.__new__(Meta, 'Foo', (), {'x': 1})
+    Baz = type.__new__(Sub, 'Baz', (), {})
+    Bar = type('Bar', (), {})
+    o = Foo()
+    print(isinstance(Foo, Meta), isinstance(Bar, Meta), isinstance(Baz, Meta), isinstance(Foo, Sub))
+    print(isinstance(Foo, type), isinstance(Bar, type), isinstance(o, type), isinstance(5, type))
+    print(type(Foo) is Meta, type(Bar) is Meta, type(Baz) is Sub, type(Bar) is type)
+    print(type(o) is Foo, type(o) is Bar, isinstance(o, Foo), isinstance(o, Meta))
+main()
+""",
+    'rt_class_flag_reaches_a_later_function': """\
+def make():
+    Meta = type('Meta', (type,), {})
+    return type.__new__(Meta, 'Foo', (), {})
+
+def check(c):
+    print(isinstance(c, type))
+
+def main():
+    check(make())
+    check(5)
+main()
+""",
     'two_classes_of_one_name_are_two_classes': """\
 def main():
     P = type('Same', (), {'v': 1})
@@ -173,16 +275,16 @@ def main():
     for name, src in CASES.items():
         R.test_gimple_matches_cpython(name, src)
     R.test_gimple_build_refusal(
-        'call_result_namespace_is_refused_by_name',
+        'type_dunder_new_with_a_user_metaclass_is_refused_by_name',
         """\
-def ns():
-    return {'x': 1}
+class Meta(type):
+    pass
 
 def main():
-    Foo = type('Foo', (), ns())
+    Foo = type.__new__(Meta, 'Foo', (), {'x': 1})
     print(Foo.x)
 main()
-""", 'creates a class at run time')
+""", 'type.__new__(metacls')
     print(f'\n{R._PASS} passed, {R._FAIL} failed')
     return 1 if (R._FAIL or R._TIMEOUT) else 0
 
