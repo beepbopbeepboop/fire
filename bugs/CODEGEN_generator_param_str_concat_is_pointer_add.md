@@ -62,14 +62,50 @@ Landed:
   (pre-fix output `['43634604000', ...]`, post-fix matches CPython). The
   same-module sibling still passes.
 
-**Still open: a cross-module call whose string argument is a VARIABLE, not a
-literal.** Measured 2026-10-31: `s = "r"; print(list(lib.walk(s)))` in
-`main.py` still prints `['43393922480', '43393922481', '43393922482']`
-(exit 0). `_gmi_literal_ctype` answers `None` for an identifier, so
-`_xg_record_scalar_args` records no hint for it. Next step: when an argument
-is an identifier, resolve its ctype in the importer's enclosing function
-(the same provenance `_xg_enc_map` already uses for list-element contracts)
-and record that through `_xg_record_scalar_args`; the quick test is
-`main.py` with `s = "r"` as above, against CPython `['r0', 'r1', 'r2']`. The
-plain-function literal contract has the same literal-only limit, so check
-it there too when fixing this.
+**Cross-module variable argument: FIXED 2026-10-31.** `s = "r";
+lib.walk(s)` (module scope, and a local `s` in a function) now prints
+`['r0', 'r1', 'r2']`. Root cause: `_gmi_literal_ctype` answers `None` for an
+identifier, so `_xg_record_scalar_args` recorded no hint for it. Landed:
+
+* `mojo/backend_gimple/module_gen.py`: a binder census
+  (`_gmi_bound_names`, `_gmi_binding_index`) and
+  `_gmi_identifier_literal_ctype`, which resolves an identifier argument only
+  when its ONE binder in scope is `name = <literal>` (or `var name = ...`).
+  The scope is the enclosing function when it binds the name, else the whole
+  module. Any second binder, a non-literal binder, a parameter, a
+  `global`/`nonlocal`, or a wildcard import declines. The cross-module
+  recorder uses it; the module index is built once per module.
+* Tests: `test_link_mode.py::test_generator_str_param_concat_cross_module_variable_arg`
+  and `..._cross_module_local_var_arg` (both fail before, pass after; the
+  existing literal and same-module tests still pass).
+
+**Still open: same-module identifier arguments (2 spellings, measured
+2026-10-31).** The same root (an identifier argument carries no call-site type
+evidence) is not fixed on the same-module paths, which take literal arguments
+only:
+
+1. **Ordinary `def`, silent corruption.** `def f(root): return root + str(0)`
+   and `s = "r"; print(f(s))` in one module prints `43104041840` (exit 0;
+   CPython `r0`). The evidence comes from `_gmi_apply_call_site_param_evidence`
+   (`module_gen.py`), which calls `_gmi_literal_ctype(arg)` only. The
+   cross-module ordinary-def spelling `lib.f(s)` is already correct.
+2. **Generator, module-level call, loud refusal.** `def walk(root): yield
+   root + str(k)` with `s = "r"; print(list(walk(s)))` at module scope fails
+   the build with `walk: yields ['root'], whose call sites do not all pass
+   the same statically-known type`. The same call inside a function (`def
+   main(): s = "r"; ...`) compiles and prints `['r0', 'r1', 'r2']`. The
+   evidence comes from `_scan_callsite_param_kinds` / `_visit_call` in
+   `mojo/middle/coro.py`, which is where the module-scope identifier is not
+   typed.
+
+Next step: for (1), call `_gmi_identifier_literal_ctype(name, enclosing,
+mod_index)` from `_gmi_apply_call_site_param_evidence` for an `IdentExpr`
+argument, passing the enclosing FunctionDef (the function already iterates
+per call; it needs the enclosing function alongside each call, and a
+module-level call passes `None`). Build `mod_index = _gmi_binding_index(stmts)`
+once. Quick test: the snippet in (1) against CPython `r0`. For (2), find how
+`_visit_call` types an identifier argument and why a module-scope binding
+does not reach it, then route it through the same resolver. Quick test:
+`walk(s)` at module scope against CPython `['r0', 'r1', 'r2']`. Both are
+`module_gen.py`/`coro.py` changes; each needs its own regression test next to
+`test_generator_str_param_concat_*` in `test_link_mode.py`.

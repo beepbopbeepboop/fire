@@ -406,6 +406,64 @@ def test_generator_str_param_concat_cross_module() -> bool:
     return ok
 
 
+def _xmod_str_var_case(name: str, main_src: str) -> bool:
+    """Shared body for the variable-argument spellings of the cross-module
+    generator string-concat case: the importer passes a NAME bound to a string
+    literal, not the literal itself. `_gmi_literal_ctype` answers None for an
+    identifier, so the literal-only hint recorder never saw it and the
+    generator body's `root + str(k)` lowered as pointer arithmetic (exit 0,
+    decimal pointers printed). The expected output is CPython's, not a literal."""
+    lib = (
+        'def walk(root, suffix=None):\n'
+        '    for k in range(3):\n'
+        '        yield root + str(k)\n'
+    )
+    pkg = {
+        'pkg/__init__.py': '',
+        'pkg/lib.py': lib,
+        'main.py': main_src,
+    }
+    root = os.path.join(REPO, 'build', 'test_link_mode')
+    os.makedirs(root, exist_ok=True)
+    td = tempfile.mkdtemp(prefix=f'{name}_', dir=root)
+    try:
+        rc, stdout = _build_and_run(pkg, 'main.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'main.py')
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and stdout.strip() == "['r0', 'r1', 'r2']")
+    if not ok:
+        print(f"  ✗ {name}: "
+              f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
+    return ok
+
+
+def test_generator_str_param_concat_cross_module_variable_arg() -> bool:
+    """`s = "r"` at module scope, then `lib.walk(s)`: the importer's argument is
+    a single-binding identifier whose value is a string literal. Before the
+    fix the hint recorder read only literal arguments and dropped this one."""
+    return _xmod_str_var_case(
+        'xmod_gen_str_var_module',
+        'from pkg import lib\n'
+        's = "r"\n'
+        'print(list(lib.walk(s)))\n',
+    )
+
+
+def test_generator_str_param_concat_cross_module_local_var_arg() -> bool:
+    """The same call with `s` a LOCAL of the function that makes the call.
+    The binding is resolved in the enclosing function, not at module scope."""
+    return _xmod_str_var_case(
+        'xmod_gen_str_var_local',
+        'from pkg import lib\n'
+        'def main():\n'
+        '    s = "r"\n'
+        '    print(list(lib.walk(s)))\n'
+        'main()\n',
+    )
+
+
 def test_str_affix_method_on_unsolved_word_is_bool() -> bool:
     """`.startswith(...)` / `.endswith(...)` on a loop target that is an
     UNSOLVED word (the element of a registered generator, whose kind the
@@ -2156,6 +2214,8 @@ CASES = [
     test_bare_import_sibling_struct_field_through_module,
     test_bare_import_sibling_function_call_through_module,
     test_cross_module_unannotated_param_takes_the_callers_literal_type,
+    test_generator_str_param_concat_cross_module_variable_arg,
+    test_generator_str_param_concat_cross_module_local_var_arg,
     test_module_scoped_cross_module_struct_ctor_both_import_spellings,
     test_module_scoped_cross_module_ctor_arg_through_a_param,
     test_dotted_sibling_import_qualifier_agrees,
