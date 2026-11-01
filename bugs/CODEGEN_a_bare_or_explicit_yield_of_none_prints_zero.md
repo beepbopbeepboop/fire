@@ -6,6 +6,51 @@ the generator value-slot lattice supports (int / bool / float / str) matches
 CPython on BOTH the local and global generator paths. None is the only
 mismatching type. Owner-level ABI feature; measured and pinned, NOT shipped.
 
+## Status (2026-11-01, sixth round, work/bug-codegen-a-bare-or-explicit-yield-of: escape-hatch word print, partial)
+
+**Landed (real behaviour change on the `MOJO_CORO=cpp` path, measured against
+CPython):** a TAGGED word (a generator whose yields mix kinds) is now printed
+as the value it boxes, not as the box's address. Two layers:
+
+- *Str yields were not boxed.* `_cpp_tag_yield_sites` (cpp_async.py) stored a
+  `char *` yield as a raw pointer, which the runtime reads as a string only
+  when it is registered (a C++ literal is not). It now boxes it with a new
+  `mojo_box_from_str` (fire_runtime.c/.h): a kind-`'p'` box, the same
+  convention as `mojo_box_from_double` / `mojo_box_from_bool`.
+- *Consumers did not know the slot was tagged.* The generator api dict now
+  carries `'tagged'` (set at the tagging site as `gen._cpp_last_tagged_yield`,
+  registered by `module_gen._register_free_generator` and the nested-generator
+  api). The C++ emitter (cpp_core.py) marks the locals bound from a tagged
+  generator (`_cpp_tagged_word_names`: a direct-call `for`, a generator-handle
+  `for`, `x = next(g)`), and the single-argument `print` renders a tagged word
+  through `mojo_repr_boxed`. `_cpp_tagged_next_api` / `_cpp_is_tagged_word_expr`
+  / `_cpp_mark_tagged_word` are the helpers.
+
+Pins: `run_tagged_word_cpp_tests` in `test_gimple_generator_runner.py`, six
+cases, all under `coro.pinned('cpp')`, CPython oracle. Measured on a HEAD
+snapshot (pre-fix): 5 of 6 FAIL (the int/str for-loop and next() print an
+address; the two generator-body shapes are refused as "print() argument must
+be a scalar", falling back to the interpreter). `tagged_int_float_for_loop_cpp`
+already passed before the fix and is a regression guard, not a fail-before pin.
+After: 6/6. `test_gimple_generator_runner.py` 368/0; `test_gimple_async_runner.py` 39/0.
+
+**Scope of the consumer change, stated plainly:** the C++ emitter renders a
+tagged word only in the three consumer sites above and only for a single-argument
+`print`. A tagged value used any other way (arithmetic, `str()`, an f-string,
+a multi-argument `print`, `list.append`) is not covered by this round.
+
+**Found, NOT fixed here (separate defect, default path too):** a tagged value
+bound to a name in the GIMPLE consumer is unwrapped by `mojo_box_word` at the
+bind, so `x = next(g); print(x)` prints a bool as `1` on the default path, and
+an unregistered str on the cpp path prints an address. Filed:
+`bugs/CODEGEN_tagged_generator_value_bound_to_a_name_loses_its_kind.md`.
+
+**Still open in this doc:** item 1 of the fifth-round plan is now landed for
+the three consumer sites and `print`; the remaining consumers, the bind-site
+kind loss (filed above), and the `x` local-kind design are the next steps. The
+`co_yield (int64_t)0` dead line (item 3) and the module-global `next()` refusal
+(item 2, its own doc) are unchanged.
+
 ## Status (2026-11-01, fifth round, work/bug-codegen-a-bare-or-explicit-yield-of: measured matrix, pins, planning guide)
 
 **Measured (compiled binary vs CPython, same text; `_build_generator_program`
