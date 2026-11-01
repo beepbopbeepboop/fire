@@ -70,6 +70,11 @@ Sampling profile after both wins (4,106 samples, 158.5 s): `_parsed_import` 18.8
 nothing in `callee_kinds` has the same answer every round, so rounds 2+ can reuse round 1's result for it),
 `_gmi_binding_index` 8.7% / `_xg_record_scalar_args` 8.3%, `os.path.realpath` 6.7% (`methods_shared._is_selfhost_*`),
 `gen_func` 6.7%, `coro.lower` 5.0% (was 29.4%).
+Third win: `methods_shared._cached_realpath` memoises the `os.path.realpath` calls of `_is_selfhost_source_file` /
+`_is_selfhost_sibling_alias` (84k calls, all about `_SELFHOST_DIR` and the compiler's own sources): realpath 6.7% -> 1.1% of
+samples, compile 155 s. Its first version was an unannotated helper and BROKE the self-host build (`methods_shared.py:141:
+invalid operands to binary + (have 'double' and 'char *')`), caught by `test_selfhost.py`; it is annotated now and
+`test_selfhost.py` passes 3/3 and `compile_stdlib.py` GCC CAS stays 610/610. Any edit under `mojo/middle` needs `test_selfhost.py`.
 Remaining, in order of share: the other `_walk` users in `_scan_callsite_param_kinds` (cache per function across
 the two `_one_pass` rounds and the six `lower` calls: needs an invalidation story because the contract maps evolve);
 `realpath` memo for the constant `_SELFHOST_DIR`; `_infer_return_maybe_kinds`; `_gmi_binding_index`.
