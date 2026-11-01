@@ -62,6 +62,20 @@ def main():
     print(C.a, C.b, C.c, C.k)
 main()
 """,
+    'static_class_in_computed_bases_list': """\
+class B:
+    y = 5
+
+def main():
+    A = type('A', (), {'a': 1})
+    bases = (A, B)
+    C = type('C', bases, {'c': 3})
+    print(C.a, C.c, C.y)
+    ls = (B,)
+    D = type('D', ls, {})
+    print(D.y)
+main()
+""",
     'static_base_body_attributes_are_inherited': """\
 class B:
     y = 5

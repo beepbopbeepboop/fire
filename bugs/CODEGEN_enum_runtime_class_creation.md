@@ -50,7 +50,11 @@ every module is reachable from a word with `mojo_getattr_any(obj, attr)`
    class it visits, so a later `B.y = 8` is seen through `F`. Pinned by
    `static_base_body_attributes_are_inherited` / `static_base_attribute_is_read_live`. Not
    covered: methods of a static base reached through a dynamic class.
-   STILL MISSING in stage 3: a static class listed inside a computed bases list;
+   **Static class in a computed bases list landed 2026-11-01**: a bare static class name used as a
+   VALUE (`bases = (A, B)`) now lowers to its type tag (`emit_exprs._lower_IdentExpr`) instead of the
+   shared zero placeholder, so `mojo_type_add_bases_from_list` files it correctly; pinned by
+   `static_class_in_computed_bases_list`.
+   STILL MISSING in stage 3:
    `type.__new__(metacls, ..)`; instances of a dynamic class (stage 2 is its prerequisite).
 4. the metaclass protocol `EnumType` uses: `__prepare__`, `__new__`, `__call__`, `__set_name__`,
    `__init_subclass__`, class-level `__getattr__`, `isinstance(x, cls)` for dynamic classes,
