@@ -31,24 +31,51 @@ only part of that function: four `_cpp` tests after it (`none_received_*`,
 `none_sent_into_generator_prints_none_cpp`, `value_yield_assignment_cpp`) ran on
 the default path. They now run on the cpp path and pass.
 
+### Conditions of compound statements (2026-11-01)
+
+Landed: a yield in the condition of `if`, `elif` and `while` now lowers on the
+cpp path.
+
+- `if (yield 1):` hoists the yield in front of the `if`.
+- `elif (yield 2):` cannot be hoisted to the front of the chain (it runs only
+  when the earlier branches fail), so the chain from that elif on becomes a
+  nested `if` in the else branch of the one before it, and that nested `if`
+  hoists its own condition (`GimpleGen`'s `IfStmt` branch in `_cpp_stmt`).
+- `while (yield n):` becomes `while (true) { <yield>; if (!cond) break; body }`,
+  so a `continue` re-runs the yield and the else clause keeps its flag-tracked
+  break semantics.
+- A received yield word is a box, so its truth is `mojo_truthy_word`, both as
+  an `if`/`while` test and under `not` (`_cpp_is_tagged_word_expr`).
+
+Pinned in `run_tagged_word_cpp_tests` (`test_gimple_generator_runner.py`):
+`if_yield_condition_cpp`, `elif_yield_condition_cpp`, `while_yield_condition_cpp`
+(against CPython). Before the fix the three refused with
+`unsupported expression in generator body: YieldExpr`, and `if` and `elif`
+would have printed `t` for the None the consumer resumes with.
+
+### Silent miscompile closed: yield under `and` / `or` / a ternary branch
+
+Before this change `print(x and (yield 1))` compiled and ran the yield even when
+`x` was false, because the hoist moved it out of its conditional operand.
+`_cpp_rewrite_yields` now refuses a yield in the right operand of `and`/`or` and
+in either branch of a ternary (`and_yield_operand_refused_cpp`), with the reason
+"conditionally evaluated". A yield in the LEFT operand of `and`/`or` (always
+evaluated) is still hoisted.
+
 ### Still refused (open)
 
-A yield in the condition of a compound statement:
-
-- `if (yield 1): ...` -- refused: `unsupported expression in generator body: YieldExpr`.
-  The condition is evaluated once before the `if`, so the top-level condition can
-  be hoisted; an `elif` condition is only evaluated when the earlier branches fail,
-  so it cannot be hoisted to the front of the chain. Next step: hoist the top-level
-  `IfStmt.condition` only (the hoist must not descend into the bodies), and lower an
-  `elif` condition with its prelude inside the else branch. Confirm the else-branch
-  emission goes through `_cpp_stmt` before relying on it.
-- `while (yield 1): ...` -- refused. The condition is re-evaluated on every
-  iteration, so a hoisted yield needs the loop restructured to
-  `while True: <prelude>; if not cond: break`, with `continue` re-running the
-  prelude. Next step: same as `if`, through `_cpp_stmt`'s `WhileStmt` branch.
-
-To reproduce: `gimple_codegen.compile_to_gimple_with_cpp(src)` under
-`coro.pinned('cpp')` prints the `Unsupported shape(s)` text for the source.
+- `x and (yield v)` / `x or (yield v)` / `a if c else (yield v)`: the yield is
+  conditionally evaluated and so is refused. Next step: lower the operator in
+  statement position as `_mg_t = <left>; if (<truthy _mg_t>) { <hoist right's
+  yields>; _mg_t = <right> }` (or the ternary analogue), through
+  `_cpp_hoist_yields_expr`, so the yield runs only on the path that evaluates
+  it. The value must keep the operand (Python's `and`/`or` return an operand),
+  which is why the tagged-word operator gap below matters for the same shape.
+- A yield after a call in the same statement (`f(x) + (yield 1)`): refused, since
+  hoisting would run `f` after the suspension. Next step: evaluate the earlier
+  calls into temporaries first, in the same order, then hoist.
+- A received word used as an `and`/`or` operand is not truth-tested:
+  `bugs/CODEGEN_cpp_path_and_or_on_received_word.md`.
 
 The `send()` gap that would change what these receive is in
 `bugs/CODEGEN_cpp_send_emits_default_path_symbol.md`.
