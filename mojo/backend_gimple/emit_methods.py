@@ -5592,6 +5592,20 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
                     if _sn not in gen._field_elem_types:
                         gen._field_elem_types[_sn] = {}
                     gen._field_elem_types[_sn][_fn] = 'char *'
+        elif at == 'double':
+            # A float is not an int: stored through the int64_t slot below it
+            # is converted by C (2.5 -> 2), so the element read back is the
+            # truncated int. Store the double's bits under the 'd' kind, and
+            # record the list's static kind for the slots already present
+            # (`prior`: a str list's are 'p', an int list's or an empty list's
+            # are 'i'), so the per-slot kinds row describes every element.
+            # The list is kind-mixed from here on, so it takes the same
+            # per-slot compare path a mixed literal does (`_maybe_kinds_vals`).
+            _prior = gimple_ctypes.TypeLattice.slot_kind_byte(
+                gen._elem_types.get(ov) or 'int64_t')
+            gen._emit_call('void', '', 'mojo_list_append_double_kinded',
+                           [('MojoList *', ov), ('double', av), ('char', "'" + _prior + "'")])
+            gen._maybe_kinds_vals.add(ov)
         else:
             # Coerce a bare `int`/`_Bool` literal to `int64_t` HERE rather
             # than leaving it to `_emit_call`'s param-type lookup: in the
