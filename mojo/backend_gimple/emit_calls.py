@@ -1445,6 +1445,44 @@ def _lower_class_attr_builtin(gen, node, fn):
     return None
 
 
+def _lower_type_new(gen, node):
+    """`type(name, (Base, ..), {'attr': value, ..})` with a literal base tuple/list and a literal
+    dict of string keys: a class made at run time (stage 3 of
+    bugs/CODEGEN_enum_runtime_class_creation.md). It is a class-table entry (`mojo_type_new`) whose
+    bases are the listed classes and whose dict starts from the namespace; the value is a class
+    handle word that `Foo.x`, `Foo.x = v` and `getattr(Foo, ..)` read through the class table.
+    None when the arguments are not that literal shape (the caller refuses by name)."""
+    name_n, bases_n, ns_n = node.args
+    if not isinstance(bases_n, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
+        return None
+    if not isinstance(ns_n, gimple_ctypes.DictExpr):
+        return None
+    keys = []
+    for k, _v in ns_n.pairs:
+        if not isinstance(k, gimple_ctypes.StringLiteral) or N.is_fstring_literal(k):
+            return None
+        keys.append(_as_str(k.value))
+    nt, nv = gen.lower_expr(name_n)
+    nm = nv if nt == 'char *' else gen._new_val('char *', f'(char *){gen._to_int64(nt, nv)}')
+    cls = gen._call_expr('int64_t', 'mojo_type_new', [('char *', nm)])
+    for b in bases_n.elements:
+        st = _class_struct_of_arg(gen, b)
+        if st is not None:
+            bw = gen._new_val('int64_t', f'{gimple_exprtypes._struct_type_id(st)}LL')
+        else:
+            bt, bv = gen.lower_expr(b)
+            bw = gen._call_expr('int64_t', 'mojo_classobj_tag', [('int64_t', gen._to_int64(bt, bv))])
+        gen._void_call('mojo_type_add_base', [('int64_t', cls), ('int64_t', bw)])
+    for key, (_k, vnode) in zip(keys, ns_n.pairs):
+        vt, vv = gen.lower_expr(vnode)
+        vw = (gen._call_expr('int64_t', 'mojo_box_from_double', [('double', vv)])
+              if vt == 'double' else gen._to_int64(vt, vv))
+        gen._void_call('mojo_classobj_setattr',
+                       [('int64_t', cls), ('char *', gen._intern_string(key)), ('int64_t', vw)])
+    gen._dyn_word_vals.add(cls)
+    return 'int64_t', cls
+
+
 # Names Python itself binds in `builtins`: only these can be SHADOWED by a module-level
 # assignment (see the shadowing guard in `_lower_call`). Any other global callee keeps the
 # ordinary path, which has several arms (inlined lambdas, bound-method taint, ...) this
@@ -3811,10 +3849,14 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # produced a C call with three arguments, a gcc hard error with no
     # pointer back to the Mojo construct. Refuse it here, by name.
     if fname_raw == 'type' and len(node.args) == 3:
+        _cls = _lower_type_new(gen, node)
+        if _cls is not None:
+            return _cls
         raise RuntimeError(
             'cannot compile module: 3-argument type(name, bases, namespace) '
             'creates a class at run time, which the compiled path does not '
-            'model (bug:COMPILE_FAIL_collections___init__)')
+            'model unless the bases are a literal tuple/list and the namespace a '
+            'literal dict of string keys (bug:CODEGEN_enum_runtime_class_creation)')
     # A `namedtuple(...)` the module-level desugar (fire_compiler.
     # desugar_namedtuples) did not lower: a call inside a function, a
     # different typename, `rename=`/`defaults=`, a computed field list. It

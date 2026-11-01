@@ -29,9 +29,19 @@ every module is reachable from a word with `mojo_getattr_any(obj, attr)`
 2. dynamic INSTANCE attributes on objects of dynamic classes: `setattr(obj, n, v)` / `obj.n = v`
    for undeclared names write `mojo_obj_getattr`'s dynattr dict, `obj.__dict__`.
 3. `type(name, bases, namespace)` / `type.__new__(metacls, name, bases, classdict)` at run
-   time: a class-table entry (tag from the name, bases from the list) whose dict starts from the
-   namespace; instances of such a class are dynamic objects (attribute dict + class tag), their
-   method lookup goes through the class table.
+   time. **Landed 2026-10-31 for the literal shape** (`type('N', (B1, B2), {'a': v, ..})`:
+   literal base tuple/list, literal dict of string keys; anything else is still refused by name):
+   `mojo_type_new` returns a class HANDLE word (`{MOJO_CLASSOBJ_MAGIC, class-table tag}`, magic
+   inside the 31-bit range `mojo_read_type_tag_safe` accepts), `mojo_type_add_base`,
+   `mojo_classobj_setattr`; `Foo.x`, `Foo.x = v`, `setattr/getattr`, `Foo.__name__` on the handle
+   go through `mojo_obj_getattr / mojo_getattr_any / mojo_setattr` to the class table, found
+   through the bases. Pinned by `test_runtime_class_creation.py` (CPython-diffed).
+   STILL MISSING in stage 3: a computed namespace/bases (`type(n, b, ns)` with `ns` a variable,
+   which is what `EnumType.__new__` does: needs dict-of-words iteration into the table);
+   inheriting a STATIC base's class-body attributes through a dynamic class (`class B: y = 5`,
+   `type('F', (B,), {}).y` - body attributes are static globals, not table entries; register
+   them as words in `_mojo_classattr_init` or fall back to the struct's static read);
+   `type.__new__(metacls, ..)`; instances of a dynamic class (stage 2 is its prerequisite).
 4. the metaclass protocol `EnumType` uses: `__prepare__`, `__new__`, `__call__`, `__set_name__`,
    `__init_subclass__`, class-level `__getattr__`, `isinstance(x, cls)` for dynamic classes,
    `DynamicClassAttribute` / `property` on dynamic classes.
