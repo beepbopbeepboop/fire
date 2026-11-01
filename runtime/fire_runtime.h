@@ -1465,6 +1465,7 @@ void    mojo_class_delattr(int64_t tag, char *name);
 #define MOJO_CLASSOBJ_MAGIC 0x4d434f31LL   /* inside the 31-bit range mojo_read_type_tag_safe accepts */
 int64_t mojo_type_new(char *name);
 void    mojo_type_add_base(int64_t cls, int64_t base);
+void    mojo_type_set_meta(int64_t cls, int64_t meta);
 void    mojo_type_add_bases_from_list(int64_t cls, MojoList *bases);
 int     mojo_is_classobj(int64_t w);
 int64_t mojo_rtobj_method_call(int64_t recv, char *name, int64_t n, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6);

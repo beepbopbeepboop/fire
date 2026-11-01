@@ -1559,14 +1559,17 @@ def _lower_class_attr_builtin(gen, node, fn):
     return None
 
 
-def _lower_type_new(gen, node, args=None):
+def _lower_type_new(gen, node, args=None, meta=None):
     """`type(name, (Base, ..), {'attr': value, ..})` with a literal base tuple/list and a literal
     dict of string keys: a class made at run time (stage 3 of
     bugs/CODEGEN_enum_runtime_class_creation.md). It is a class-table entry (`mojo_type_new`) whose
     bases are the listed classes and whose dict starts from the namespace; the value is a class
     handle word that `Foo.x`, `Foo.x = v` and `getattr(Foo, ..)` read through the class table.
     None when the arguments are not that literal shape (the caller refuses by name).
-    `args` overrides `node.args` (`type.__new__(type, n, b, ns)` passes its last three)."""
+    `args` overrides `node.args` (`type.__new__(type, n, b, ns)` passes its last three).
+    `meta` is the metaclass argument of `type.__new__(Meta, ..)` when `Meta` is a local bound to
+    a class made at run time: the new class records it, and an attribute the class and its bases
+    lack is then answered by `Meta` (its attributes, then `Meta.__getattr__`)."""
     name_n, bases_n, ns_n = node.args if args is None else args
     # Python evaluates the arguments left to right; a call-result namespace can have effects.
     nt, nv = gen.lower_expr(name_n)
@@ -1602,7 +1605,13 @@ def _lower_type_new(gen, node, args=None):
     cls = gen._call_expr('int64_t', 'mojo_type_new', [('char *', nm)])
     if bases_list is not None:
         gen._void_call('mojo_type_add_bases_from_list', [('int64_t', cls), ('MojoList *', bases_list)])
+    if meta is not None:
+        mt, mv = gen.lower_expr(meta)
+        gen._void_call('mojo_type_set_meta', [('int64_t', cls), ('int64_t', gen._to_int64(mt, mv))])
     for b in (bases_n.elements if literal_bases else ()):
+        if (isinstance(b, gimple_ctypes.IdentExpr) and b.name == 'type'
+                and 'type' not in gen.var_types):
+            continue  # `class Meta(type)`: `type` is the implicit root, not a class-table base
         st = _class_struct_of_arg(gen, b)
         if st is not None:
             bw = gen._new_val('int64_t', f'{gimple_exprtypes._struct_type_id(st)}LL')
@@ -1668,7 +1677,8 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         return 'MojoList *', _ch
     # `type.__new__(type, name, bases, ns)` is `type(name, bases, ns)` spelled through the
     # metaclass slot (what `EnumType.__new__` writes as `type.__new__(metacls, ..)`). Only the
-    # plain `type` metaclass is modelled; a user metaclass (stage 4) is refused by name.
+    # plain `type` metaclass and a run-time-class metaclass are modelled; a static user metaclass
+    # (`class Meta(type)`, stage 4) is refused by name.
     if (isinstance(node.func, gimple_ctypes.MemberExpr)
             and _as_str(node.func.member) == '__new__'
             and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
@@ -1678,6 +1688,12 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         _m = node.args[0]
         if isinstance(_m, gimple_ctypes.IdentExpr) and _m.name == 'type':
             _cls = _lower_type_new(gen, node, node.args[1:])
+            if _cls is not None:
+                return _cls
+        elif (isinstance(_m, gimple_ctypes.IdentExpr)
+                and gen._rtobj_kinds.get(('l', _as_str(_m.name))) == 'class'):
+            # a metaclass made at run time (`Meta = type('Meta', (type,), {..})`)
+            _cls = _lower_type_new(gen, node, node.args[1:], meta=_m)
             if _cls is not None:
                 return _cls
         raise RuntimeError(

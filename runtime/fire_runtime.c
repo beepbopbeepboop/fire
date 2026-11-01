@@ -15315,6 +15315,7 @@ void mojo_chain_extend(MojoList *dst, int64_t src)
 typedef struct MojoClassRec {
     int64_t tag; char *name;
     int64_t bases[8]; int nbases;
+    int64_t meta;               /* tag of the metaclass (a run-time class), 0 = plain `type` */
     MojoDict *attrs;
     struct MojoClassRec *next;
 } MojoClassRec;
@@ -15482,6 +15483,12 @@ int64_t mojo_rtobj_method_call(int64_t recv, char *name, int64_t n, int64_t a0, 
     }
     if (mojo_is_classobj(recv)) {
         if (!_class_lookup(((MojoClassObj *)(intptr_t)recv)->tag, name, &fn, 0)) {
+            /* a method of the METACLASS: bound to the class, which goes first as `self` */
+            MojoClassRec *rc = _class_find(((MojoClassObj *)(intptr_t)recv)->tag);
+            if (rc && rc->meta && _class_lookup(rc->meta, name, &fn, 0)) {
+                a[0] = recv; a[1] = a0; a[2] = a1; a[3] = a2; a[4] = a3; a[5] = a4; a[6] = a5; a[7] = a6;
+                return _call_words(fn, n + 1, a);
+            }
             mojo_raise_attribute_error(name);
             return 0;
         }
@@ -15553,7 +15560,24 @@ int mojo_classobj_lookup(void *obj, char *attr, int64_t *out)
     if (!mojo_is_classobj((int64_t)(intptr_t)obj)) return 0;
     MojoClassRec *c = _class_find(((MojoClassObj *)obj)->tag);
     if (c && c->name && !strcmp(attr, "__name__")) { *out = (int64_t)(intptr_t)c->name; return 1; }
-    return _class_lookup(((MojoClassObj *)obj)->tag, attr, out, 0);
+    if (_class_lookup(((MojoClassObj *)obj)->tag, attr, out, 0)) return 1;
+    /* a miss on the class and its bases: the METACLASS answers - its own attributes first,
+     * then `Meta.__getattr__(cls, name)` (CPython's `type.__getattribute__` order). */
+    if (c && c->meta) {
+        if (_class_lookup(c->meta, attr, out, 0)) return 1;
+        int64_t ga, a[2] = { (int64_t)(intptr_t)obj, (int64_t)(intptr_t)attr };
+        if (strcmp(attr, "__getattr__") && _class_lookup(c->meta, "__getattr__", &ga, 0)) {
+            *out = _call_words(ga, 2, a);
+            return 1;
+        }
+    }
+    return 0;
+}
+/* `type.__new__(Meta, name, bases, ns)` with a run-time class `Meta`: the new class is an
+ * instance of `Meta`. */
+void mojo_type_set_meta(int64_t cls, int64_t meta)
+{
+    _class_get(mojo_classobj_tag(cls))->meta = mojo_classobj_tag(meta);
 }
 
 /* Struct reflection across modules: every translation unit registers its own
