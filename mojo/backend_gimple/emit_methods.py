@@ -5639,10 +5639,21 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
             # instead of the `(int64_t)4` temp the Python reference builds
             # (byte-parity drift on `list_append`). `mojo_list_append_int`'s
             # 2nd param is always int64_t, so this is unconditionally correct.
-            if at in ('int', '_Bool'):
-                av = gen._coerce_to_type(at, 'int64_t', av)
-                at = 'int64_t'
-            gen._emit_call('void', '', 'mojo_list_append_int', [('MojoList *', ov), (at, av)])
+            if at == 'int64_t' and av in gen._boxed_vals:
+                # A TAGGED word -- the loop variable of a generator whose yields
+                # are mixed kinds (`for v in g(): out.append(v)`). Append it under
+                # the kind it carries (a None box as a None slot, a float as a
+                # double, ...) rather than as a raw int, which would store the
+                # box's address. Same helper the comprehension and generator-
+                # iteration sites use (`mojo_list_append_word`).
+                gen._emit_call('void', '', 'mojo_list_append_word',
+                               [('MojoList *', ov), ('int64_t', av)])
+                gen._maybe_kinds_vals.add(ov)
+            else:
+                if at in ('int', '_Bool'):
+                    av = gen._coerce_to_type(at, 'int64_t', av)
+                    at = 'int64_t'
+                gen._emit_call('void', '', 'mojo_list_append_int', [('MojoList *', ov), (at, av)])
             # A CALLABLE appended to a list, so a later `lst[0](...)` can
             # dispatch. The list literal records through the same helper (see
             # `_lower_list_literal`), and this is the `append` half: without
