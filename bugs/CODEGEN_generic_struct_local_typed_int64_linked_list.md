@@ -169,3 +169,58 @@ Gate verdicts owed by the integrator: `stdlib-syntax` `U` must not increase;
 
 NOT started this round: the code (steps 1-3 are one coherent change that must
 land together, because step 1 alone enqueues and then refuses, per wall 2/3).
+
+## Status (2026-11-01): PARTIAL FIX LANDED — seed + erased-word alias; the iterator/Node typing remains.
+
+### What landed (`mojo/backend_gimple/elab_intu.py`, test `test_generic_struct_local_linked_list.py`)
+
+- `_duplicated_method_names(gen, base)`: ONE reading of a template's overloaded
+  method names, now shared by `_protocol_only_overloads` and the new branch so
+  the two cannot drift.
+- `_positional_bracket_ctor_args` (reached from `_d2_ctor_args`'s non-kwarg
+  bracket case, so the seed and `_rewrite_callees` agree): a POSITIONAL concrete
+  bracket ctor call `Struct[Int](...)` of a struct whose duplicated methods are
+  OUTSIDE the iteration protocol is enqueued for in-TU materialization. Gated to
+  scalar type arguments (`gimple_ctypes._TYPE_MAP`) and excluding
+  `_ERASED_WORD_STRUCTS` (`Optional`, `OptionalReg`, `Pointer`, `UnsafePointer`).
+  Measured why both gates: unrestricted, `test_linked_list` went 0 -> 8 gcc
+  errors (an imported non-struct-registered element such as `CopyCountedStruct`
+  erases `get_nth`'s return to `int64_t`) and `test_optional` 0 -> 2
+  (`Optional_..___getitem__` arity).
+- `_eval_comptime_type_aliases`: an alias whose base is an erased-word struct
+  (`_NodePointer = Optional[Pointer[Node[T], o]]`) now substitutes its own
+  spelling and enqueues nothing (walls 2 and 3 of the 2026-10-31 guide).
+  Replacement of `Self.<alias>` is by whole-word regex.
+- Effect on the minimal repro: `l` is `LinkedList_11_ElementType_3_Int *`, the
+  hashed `__init__` overload is called, the `indirect call via SubscriptExpr`
+  is gone from `main`, and the stub count in the probe dropped 812 -> 59 once
+  the alias fix was in. gcc `-fsyntax-only` is clean on the probe,
+  `test_linked_list`, `test_optional`, `test_deque`, `test_dict`, `test_set`,
+  `test_list`, `test_arc`, `test_bitset`, `test_iter` (0 errors; stub counts
+  equal to master except `test_linked_list`/`test_deque`/`test_bitset` which
+  now materialize instead of literal-0).
+
+### What remains (why the doc stays)
+
+1. `it = l.__iter__()` is still `int64_t it;` and `it.__next__()` is stubbed:
+   `info['methods']` erases `__iter__ -> int64_t`; `_LinkedListIter` needs
+   materializing via `LinkedList.IteratorType[...]`, a parametrized comptime
+   alias (`comptime IteratorType[iterable_mut: Bool, //, iterable_origin: ...]:
+   Iterator = _LinkedListIter[downcast[Self.ElementType, Copyable],
+   iterable_origin]`) that `_COMPTIME_ALIAS_HEAD_RE` does not match, with a
+   `downcast[...]` call in the argument and an erased origin parameter.
+2. `Node[T]` methods (`next`, `prev`, `single`, `unsafe_with_layout`,
+   `_into_value`, ~59 stubs in the probe) are called on the erased
+   `Optional[Pointer[Node]]` word: `Node[Int]` is never materialized because
+   the pointer alias is erased. Needs `Pointer[Node[T], o]` typed as `Node_T *`
+   in the field/return types (a tagged-word `Optional` of a struct pointer).
+3. Struct-valued element types (`LinkedList[CopyCountedStruct]`,
+   `LinkedList[LinkedList[...]]`) are refused by the scalar gate until the
+   element's imported non-generic struct is registered before the materialized
+   methods' annotations are resolved.
+4. The pin for the whole bug (no `stubbed` in the generated C for the repro) is
+   not in the test yet; add it when 1-2 land, then delete this doc.
+
+NOT run: gate / `stdlib-syntax` / `stdlib-dylib` (the integrator's). The
+`test_linked_list`/`test_deque`/`test_bitset` outputs change, so `stdlib-syntax`
+`U` and `stdlib-dylib` skip count are owed a check.
