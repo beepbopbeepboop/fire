@@ -3356,11 +3356,9 @@ def _gmi_hoist_nested_structs(self, stmts: list) -> list:
     the receiver's struct through `struct_field_types`) found nothing and fell
     into its stub branch, which yields the RECEIVER. That made every method
     call on a class defined inside a function answer with the object itself at
-    exit 0 with no diagnostic. (Fixed 2026-10-02; the residue — a nested
-    class's method cannot read the enclosing function's locals, so
-    `functools.cmp_to_key`'s comparison dunders compare with a stubbed
-    comparator — is bugs/CODEGEN_nested_class_method_cannot_reach_an_
-    enclosing_local.md.)
+    exit 0 with no diagnostic. (Fixed 2026-10-02; a nested class's method
+    reading the enclosing function's locals is
+    `_gmi_capture_nested_class_enclosing_reads`.)
 
     Hoisting APPENDS and does not move: the original statement stays in the
     function body, where it lowers to the same `TODO: StructDef` no-op it
@@ -3470,27 +3468,41 @@ def _gmi_hoist_nested_structs(self, stmts: list) -> list:
 
 
 
-def _gmi_refuse_nested_class_enclosing_reads(stmts: list) -> None:
-    """Refuse a class declared inside a function body when one of its methods
-    reads a name that belongs to that function's scope: a parameter, or a name
-    the function binds.
+def _gmi_capture_nested_class_enclosing_reads(stmts: list) -> None:
+    """Give a class declared inside a function body access to the enclosing
+    function's parameters and locals that its methods read.
 
     The hoist lifts such a class to module scope (`_gmi_hoist_nested_structs`),
     and the lifted method is an ordinary module-level C function with no
     environment threaded through from the enclosing frame. A read of an
-    enclosing local there falls through `emit_exprs`' unknown-identifier arm and
-    answers `(int64_t)0` with exit 0 and no diagnostic: `functools.cmp_to_key`'s
-    comparator is the real-world shape. Threading the environment is the full
-    fix, tracked in bugs/CODEGEN_nested_class_method_cannot_reach_an_enclosing_local.md.
-    Until it lands this stops the build and names the read, instead of answering
-    0.
+    enclosing local there used to fall through `emit_exprs`' unknown-identifier
+    arm and answer `(int64_t)0` with exit 0 and no diagnostic:
+    `functools.cmp_to_key`'s comparator is the real-world shape.
 
-    Only the method's free reads count: its own parameters, its own bindings and
-    `self` are its scope, and a module-level name it reads is not refused. The
-    enclosing scope is over-approximated the way `_gmi_local_binding_names` is
-    (it includes bindings inside nested defs), so a name bound only in a nested
-    def can be refused. That is a loud refusal of a read that was already wrong,
-    never a silent change of a correct answer.
+    The fix reuses the class-attribute machinery, which is already per
+    EXECUTION of the `class` statement for a class written in a function: for
+    every enclosing name `n` a method reads, the class body gains
+    `_cap_n = n` (evaluated by the `class` statement, in the enclosing frame,
+    so each execution gets its own value), and the method's free reads of `n`
+    become `self._cap_n`. Python's own closure is by reference; this is a
+    snapshot at class-statement time, which is the same thing unless the
+    enclosing function rebinds `n` after the class statement and a method
+    runs later — that case is refused, below, rather than answered wrongly.
+
+    A captured name that is CALLED (`mycmp(a, b)`, the `functools.cmp_to_key`
+    shape) is read into a method-local first, because `self._cap_mycmp(a, b)`
+    would be a method call on `self`.
+
+    Refused (loudly, as before): a method with no `self` (a staticmethod, or
+    one with no parameters) has no object to carry the value, and a captured
+    name the enclosing function rebinds (an assignment beyond its
+    first binding), where a snapshot could differ from late binding.
+
+    Only the method's free reads count: its own parameters, its own bindings
+    and `self` are its scope, and a module-level name it reads is untouched.
+    The enclosing scope is over-approximated the way `_gmi_local_binding_names`
+    is (it includes bindings inside nested defs); a name bound only in a nested
+    def is captured needlessly, which is harmless.
     """
     _encl_fns: list = []
     for _rf_i in range(len(stmts or [])):
@@ -3504,14 +3516,21 @@ def _gmi_refuse_nested_class_enclosing_reads(stmts: list) -> None:
     for _ef_i in range(len(_encl_fns)):
         _ef = _encl_fns[_ef_i]
         _ef_bound: set = set()
+        _ef_params: set = set()
         for _efp in range(len(_ef.params or [])):
-            _gmi_target_leaf_names(_ef.params[_efp][0], _ef_bound)
+            _gmi_target_leaf_names(_ef.params[_efp][0], _ef_params)
+        _ef_bound = set(_ef_params)
         _gmi_local_binding_names(_ef.body, _ef_bound)
         _ef_classes: list = []
         _gmi_nested_struct_defs(_ef.body, '', _ef_classes, False)
         for _ec_i in range(len(_ef_classes)):
             _ec = _ef_classes[_ec_i][0]
-            for _ecm in (_ec.methods or []):
+            _ec_have: set = set()
+            for _ecf in (_ec.fields or []):
+                if isinstance(_ecf, AssignStmt) and isinstance(_ecf.target, IdentExpr):
+                    _ec_have.add(_as_str(_ecf.target.name))
+            for _ecm_i in range(len(_ec.methods or [])):
+                _ecm = _ec.methods[_ecm_i]
                 if not isinstance(_ecm, FunctionDef):
                     continue
                 _ecm_own: set = set()
@@ -3519,17 +3538,97 @@ def _gmi_refuse_nested_class_enclosing_reads(stmts: list) -> None:
                 for _ecp in range(len(_ecm.params or [])):
                     _gmi_target_leaf_names(_ecm.params[_ecp][0], _ecm_own)
                 _gmi_local_binding_names(_ecm.body, _ecm_own)
+                _caps: dict = {}
                 for _er in _used_idents_node(_ecm.body):
                     _ern = _as_str(_er)
                     if _ern in _ef_bound and _ern not in _ecm_own:
-                        raise ValueError(
-                            f"method `{_as_str(_ecm.name)}` of class "
-                            f"`{_as_str(_ec.name)}` reads `{_ern}`, a parameter "
-                            f"or local of `{_as_str(_ef.name)}`, which declares "
-                            f"the class; a class declared inside a function "
-                            f"cannot reach its enclosing function's frame yet, "
-                            f"so the read would silently answer 0 (see "
-                            f"bugs/CODEGEN_nested_class_method_cannot_reach_an_enclosing_local.md)")
+                        _caps[_ern] = True
+                if not _caps:
+                    continue
+                _why = ''
+                if not _ecm.params or _as_str(_ecm.params[0][0]) in ('cls',):
+                    _why = "has no `self` to carry the value"
+                for _dec in (getattr(_ecm, 'decorators', None) or []):
+                    if isinstance(_dec, IdentExpr) and _as_str(_dec.name) in (
+                            'staticmethod', 'classmethod'):
+                        _why = "is a static/class method with no `self` to carry the value"
+                _called: dict = {}
+                for _cn in _walk_ast(_ecm.body):
+                    if (isinstance(_cn, CallExpr) and isinstance(_cn.func, IdentExpr)
+                            and _as_str(_cn.func.name) in _caps):
+                        _called[_as_str(_cn.func.name)] = True
+                for _cn3 in _caps:
+                    _nb = 1 if _cn3 in _ef_params else 0
+                    for _bn in _walk_ast(_ef.body):
+                        if ((isinstance(_bn, (AssignStmt, AugAssignStmt))
+                                and isinstance(_bn.target, IdentExpr)
+                                and _as_str(_bn.target.name) == _cn3)
+                                or (isinstance(_bn, VarDecl) and _as_str(_bn.name) == _cn3)):
+                            _nb += 1
+                    if _nb > 1:
+                        _why = (f"reads `{_cn3}`, which the enclosing function "
+                                f"rebinds, so a snapshot taken at the class "
+                                f"statement could differ from Python's late binding")
+                if _why != '':
+                    _ern = list(_caps)[0]
+                    raise ValueError(
+                        f"method `{_as_str(_ecm.name)}` of class "
+                        f"`{_as_str(_ec.name)}` reads `{_ern}`, a parameter "
+                        f"or local of `{_as_str(_ef.name)}`, which declares "
+                        f"the class, and {_why}; a class declared inside a "
+                        f"function cannot reach its enclosing function's frame "
+                        f"there, so the read would silently answer 0")
+                _self_name = _as_str(_ecm.params[0][0])
+                _map: dict = {}
+                _prologue: list = []
+                for _cn2 in _caps:
+                    _attr = '_cap_' + _cn2
+                    _rd = MemberExpr(
+                        obj=IdentExpr(name=_self_name, line=_ecm.line, col=_ecm.col),
+                        member=_attr, line=_ecm.line, col=_ecm.col)
+                    if _cn2 in _called:
+                        # `self._cap_f(x)` would be a METHOD call on self; a
+                        # callable is read into a local first and called
+                        # through that, as any function value is.
+                        _loc = '_nc_' + _cn2
+                        _prologue.append(AssignStmt(
+                            target=IdentExpr(name=_loc, line=_ecm.line, col=_ecm.col),
+                            value=_rd, line=_ecm.line, col=_ecm.col))
+                        _map[_cn2] = IdentExpr(name=_loc, line=_ecm.line, col=_ecm.col)
+                    else:
+                        _map[_cn2] = _rd
+                    if _attr not in _ec_have:
+                        _ec_have.add(_attr)
+                        _ec.fields.append(AssignStmt(
+                            target=IdentExpr(name=_attr, line=_ec.line, col=_ec.col),
+                            value=IdentExpr(name=_cn2, line=_ec.line, col=_ec.col),
+                            line=_ec.line, col=_ec.col))
+                _new_body: list = list(_prologue)
+                for _bs in _ecm.body:
+                    _new_body.append(_subst_ident_tree(_bs, _map))
+                _ecm.body = _new_body
+
+
+def _subst_ident_tree(node, mapping: dict):
+    """A copy of `node` with every `IdentExpr` named in `mapping` replaced by
+    the mapped node (the AST is shared with the hoisted copy of the class, so
+    nothing is mutated except by the caller's explicit store)."""
+    if isinstance(node, IdentExpr) and _as_str(node.name) in mapping:
+        return mapping[_as_str(node.name)]
+    if isinstance(node, list):
+        return [_subst_ident_tree(x, mapping) for x in node]
+    if isinstance(node, tuple):
+        return tuple([_subst_ident_tree(x, mapping) for x in node])
+    if gimple_ctypes.dataclasses.is_dataclass(node) and not isinstance(node, type):
+        _changes: dict = {}
+        for _f in gimple_ctypes.dataclasses.fields(node):
+            _v = getattr(node, _f.name)
+            _nv = _subst_ident_tree(_v, mapping)
+            if _nv is not _v:
+                _changes[_f.name] = _nv
+        if _changes:
+            return gimple_ctypes.dataclasses.replace(node, **_changes)
+    return node
 
 
 # Return types a decoration can leave behind that are NOT callable. A
@@ -3859,7 +3958,7 @@ def gen_module_impl(self, stmts):
     # `_gmi_hoist_nested_structs` for why it appends rather than moves.
     stmts = _gmi_hoist_nested_structs(self, stmts)
     _declare_posthoc_class_attrs(stmts)
-    _gmi_refuse_nested_class_enclosing_reads(stmts)
+    _gmi_capture_nested_class_enclosing_reads(stmts)
     stmts = _gmi_decorator_pass(self, stmts, {}, True)
 
     # Python-level frames: a module that says `_getframe` gets a frame record on every

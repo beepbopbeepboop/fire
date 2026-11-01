@@ -22,8 +22,9 @@ lines, in the order the probe printed them:
 
 ## Update (2026-10-31, later)
 
-- Rows 2-3 of the table (`functools`, `encodings/_win_cp_codecs`) are the existing
-  `bugs/CODEGEN_nested_class_method_cannot_reach_an_enclosing_local.md`; do not duplicate the work here.
+- Rows 2-3 of the table (`functools`, `encodings/_win_cp_codecs`) were the nested-class
+  enclosing-local read bug, FIXED 2026-11-01 (`_gmi_capture_nested_class_enclosing_reads`; also user-struct
+  `<`/`>=` dunders now dispatch). Re-probe to see what those modules hit next.
 - `reprlib.py` compiles standalone on master (`compile_to_gimple` OK) and its module-scope
   `repr = aRepr.repr` now lowers correctly (two silent miscompiles found and fixed on the way: a module-scope
   binding of a builtin name was ignored, and a module-scope bound-method global lost its return type). The
@@ -67,7 +68,7 @@ the same probe on the fix shows 0 overload refusals and 52 errors.
 What is left in the closure, by module (each its own feature, none a one-line fix):
 `collections`/`enum` run-time 3-argument `type(...)`; `dis`/`typing`/`inspect`/`selectors` module-level
 `namedtuple` forms beyond `Name = namedtuple("Name", [literals])`; `functools`/`_win_cp_codecs`/`_bootstrap`
-a class declared inside a function that captures locals (`bugs/CODEGEN_nested_class_method_cannot_reach_an_enclosing_local.md`);
+a class declared inside a function that captures locals (FIXED 2026-11-01, re-probe);
 `dataclasses`/`traceback` `match` or-patterns and class patterns; `signal` a decorator inside a module-level
 block; `weakref` was `d.pop(key, *args)` with the packed list taken for the default (FIXED 2026-10-31, `gimple_dict_pop_with_spread_default`; re-probe for what weakref hits next).
 

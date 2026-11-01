@@ -2171,25 +2171,45 @@ main()
     # exactly that reason: moving the statement out of the body would silently
     # withdraw the folded field.
     # A method of a class declared inside a function cannot reach that
-    # function's frame yet (bugs/CODEGEN_nested_class_method_cannot_reach_an_enclosing_local.md).
-    # The full fix threads the environment; until then the
-    # build refuses the read instead of answering 0. The first is the
-    # `functools.cmp_to_key` shape, the second a parameter read, the third a
-    # local read.
-    test_gimple_build_refusal(
-        "gimple_nested_class_method_reads_enclosing_param_is_refused", """\
-def cmp_to_key(mycmp):
-    class K(object):
-        def __lt__(self, other):
+    # function's frame in the shapes refused below.
+    # Reads of an enclosing name are captured (the `functools.cmp_to_key`
+    # shape, a CALLED capture, included); a rebound one and a method with no
+    # `self` are still refused instead of answering 0.
+    test_gimple_stdout("gimple_nested_class_method_calls_enclosing_param", """\
+def mkpair(mycmp: int, a: int, b: int):
+    class K:
+        def __init__(self, obj: int):
+            self.obj = obj
+        def __lt__(self, other: K):
             return mycmp(self.obj, other.obj) < 0
-    return K
+    return K(a) < K(b)
+
+def c(x: int, y: int) -> int:
+    return x - y
 
 def main():
-    return 0
-""", "cannot reach its enclosing function's frame")
+    print(mkpair(c, 1, 2), mkpair(c, 5, 2))
+""", "True False\n")
 
-    test_gimple_build_refusal(
-        "gimple_nested_class_method_reads_enclosing_local_is_refused", """\
+    # A user struct's ordering dunder is what `<`/`>=` call, with Python's
+    # reflection when only the opposite one exists; it was a heap-address
+    # comparison (True for every pair).
+    test_gimple_stdout("gimple_user_struct_ordering_dunders", """\
+class K:
+    def __init__(self, obj: int):
+        self.obj = obj
+    def __lt__(self, other: K):
+        return self.obj < other.obj
+    def __ge__(self, other: K):
+        return self.obj >= other.obj
+
+def main():
+    print(K(1) < K(2), K(5) < K(2), K(5) > K(2), K(2) > K(5), K(3) >= K(3), K(1) <= K(3))
+""", "True False True False True True\n")
+
+    # A read of a plain (non-called, bound-once) enclosing name is captured:
+    # the class body gains `_cap_t = t` and the method reads `self._cap_t`.
+    test_gimple_stdout("gimple_nested_class_method_reads_enclosing_local", """\
 def mk(n: int):
     t = n + 1
     class C:
@@ -2199,6 +2219,39 @@ def mk(n: int):
 
 def main():
     print(mk(10))
+""", "11\n")
+
+    # Each execution of the `class` statement has its own captured values.
+    test_gimple_stdout("gimple_nested_class_captures_are_per_execution", """\
+def mk(n: int, s: str):
+    class C:
+        def __init__(self, k: int):
+            self.v = n + k
+        def get(self):
+            return self.v + n
+        def tag(self):
+            return s + "!"
+    return C(1)
+
+def main():
+    a = mk(10, "x")
+    b = mk(100, "yy")
+    print(a.get(), b.get(), a.tag(), b.tag())
+""", "21 201 x! yy!\n")
+
+    # A name the enclosing function rebinds is late-bound in Python; the
+    # snapshot would differ, so it is refused.
+    test_gimple_build_refusal(
+        "gimple_nested_class_method_reads_rebound_enclosing_local_is_refused", """\
+def mk(n: int):
+    class C:
+        def get(self):
+            return n
+    n = n + 1
+    return C().get()
+
+def main():
+    print(mk(1))
 """, "cannot reach its enclosing function's frame")
 
     # A method that reads only its own names and a module-level global is not

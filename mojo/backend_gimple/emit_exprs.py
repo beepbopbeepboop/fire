@@ -3648,6 +3648,16 @@ _EQ_CTOR_KIND = {
 }
 
 
+# operator -> (its own dunder, the dunder Python falls back to with the
+# operands swapped)
+_USER_ORD_REFLECT = {
+    '<': ('__lt__', '__gt__'),
+    '<=': ('__le__', '__ge__'),
+    '>': ('__gt__', '__lt__'),
+    '>=': ('__ge__', '__le__'),
+}
+
+
 def _user_eq_struct(gen, ctype: str) -> str | None:
     """The struct's name when `ctype` is a pointer to a struct that defines
     `__eq__` (its own method, in `_struct_method_names`), else None."""
@@ -4665,6 +4675,25 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             if _negate:
                 _eq_val = gen._bool_not('_Bool', _eq_val)
             return '_Bool', _eq_val
+
+    # `a < b` between two values of a user struct that defines the ordering
+    # dunder is that method (Python's `__lt__`/`__le__`/`__gt__`/`__ge__`), not
+    # the C pointer comparison the generic tail would emit: that answered by
+    # heap address, a stable and plausible verdict at exit 0 (`functools.
+    # cmp_to_key`'s `K(a) < K(b)` was True for every pair). When only the
+    # reflected method exists, Python swaps the operands and calls it.
+    if op in _USER_ORD_REFLECT and lt == rt and lt.endswith(' *'):
+        _ord_struct = gimple_exprtypes._struct_name_of(lt)
+        _ord_have = gen._struct_method_names.get(_ord_struct, ())
+        _ord_dunder, _ord_refl = _USER_ORD_REFLECT[op]
+        if _ord_dunder in _ord_have:
+            return '_Bool', gen._call_expr(
+                '_Bool', gen._struct_method_csym(_ord_struct, _ord_dunder, ''),
+                [(lt, lv), (rt, rv)])
+        if _ord_refl in _ord_have:
+            return '_Bool', gen._call_expr(
+                '_Bool', gen._struct_method_csym(_ord_struct, _ord_refl, ''),
+                [(rt, rv), (lt, lv)])
 
     if op in _CONTAINER_CMP_OPS:
         _lk = _eq_operand_kind(gen, left_node, lt, lv)
