@@ -281,3 +281,35 @@ Extend `test_generic_struct_local_linked_list.py`: assert `'int64_t it;' not in 
 `for` loop printing `1 2 3` (compare against `tools/mojo`). Commands:
 `python3 tools/memslot.py --gb 8 --label x -- python3 test_generic_struct_local_linked_list.py`.
 Integrator owes `stdlib-syntax` `U` and `stdlib-dylib` skip count checks.
+
+## Status (2026-11-01, round 3): PARTIAL — plan step 1 landed (typed Node pointee); step 2 (emit side) is the blocker.
+
+### What landed (`elab_intu._eval_comptime_type_aliases`, `_erased_pointee_struct`; pin `test_node_pointer_alias_is_typed`)
+
+An erased-word alias whose innermost argument is a generic struct at scalar
+args (`_NodePointer = Optional[Pointer[Node[T], o]]`) now names the pointee's
+mangled struct, enqueues it, and registers it from the spliced struct's own
+file (`Node` lives beside `LinkedList`, so it was never in
+`_imported_generic_structs`). `LinkedList_..._Int` now has `Node_1_T_3_Int *
+_head/_tail` (was an erased word) and `Node[Int]` materializes in-TU.
+Measured: gcc `-fsyntax-only` 0 errors on the probe and on `test_linked_list`,
+`test_optional`, `test_deque`, `test_bitset`, `test_dict`, `test_list`,
+`test_set`; stub counts equal to before except `test_linked_list` 213 -> 227
+(Node's own method bodies are now emitted and hit the walls below).
+
+### Still blocking (measured, not guessed)
+
+1. `Node._prev/_next: Self._PointerType = Optional[Pointer[Self, o]]` are
+   `int64_t`. Mapping the pointee `Self` to `mm.mangle(base, targs)` was
+   tried: the field became plain `int64_t` (worse than the previous
+   `int64_t *`), because the struct being materialized is not yet a registered
+   name when its own field annotations are resolved. Needs the self name to be
+   registered before field resolution (or a post-registration fixup).
+2. Emit side (plan step 2) is not done and is the real wall: `x.value()[]`,
+   `node[].next()`, `not p` on an `Optional[Pointer[Node]]` still lower through
+   `mojo_list_get_int` (subscript-of-word) and the `int64_t.next() stubbed`
+   path (19 `next`, 10 `prev`, ... = 66 stubs in the probe). `.value()` and
+   `[]` on a struct-pointer-typed Optional/Pointer must be the identity,
+   `not p` a NULL test, and `Self._NodePointer()` a literal 0.
+3. Iterator (`IteratorType[...]` parametrized alias) and struct-valued
+   elements: unchanged from the previous entry.
