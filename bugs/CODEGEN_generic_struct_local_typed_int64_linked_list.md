@@ -313,3 +313,27 @@ Measured: gcc `-fsyntax-only` 0 errors on the probe and on `test_linked_list`,
    `not p` a NULL test, and `Self._NodePointer()` a literal 0.
 3. Iterator (`IteratorType[...]` parametrized alias) and struct-valued
    elements: unchanged from the previous entry.
+
+## Status (2026-11-01, round 4): PARTIAL — Node's own links are typed; emit side (plan step 2) and the iterator remain.
+
+### What landed (`elab_intu._erased_pointee_is_self`, `module_gen.py` constructor self-assign pass; pin `test_node_links_are_typed_self_pointers`)
+
+- `_eval_comptime_type_aliases`: `Optional[Pointer[Self, o]]` (a node's own link)
+  names the struct being spliced (`mm.mangle(base, targs)`), nothing enqueued.
+- Root cause of round 3's blocker 1 ("the field became plain `int64_t`"): NOT
+  registration order. The layout walk did type `_prev/_next` `Node_1_T_3_Int *`
+  (registered placeholders exist before fields resolve); the later
+  constructor-`self.X = ...` evidence pass (`module_gen.py`, `can_override`)
+  then replaced it, because its rule "a `<Self> *` field is an unknown-type
+  placeholder, let evidence win" cannot tell the placeholder from an
+  EXPLICITLY ANNOTATED self-pointer field. An explicit annotation now wins.
+- Effect: `Node_1_T_3_Int` has `struct Node_1_T_3_Int * _prev/_next`; gcc
+  `-fsyntax-only` 0 errors on the probe. Stub count unchanged (66): the emit
+  side below is what removes them.
+
+### Still open (unchanged from round 3 items 2-3)
+Emit side: `.value()` / `[]` identity, `not p` NULL test, `Self._NodePointer()`
+-> 0 for pointer-typed Optional/Pointer; the `IteratorType[...]` alias;
+struct-valued elements. NOT run: gate / `stdlib-syntax` / `stdlib-dylib`
+(the integrator's): the `module_gen.py` change affects any annotated
+self-pointer field, so `stdlib-syntax` `U` and `stdlib-dylib` skip count are owed.

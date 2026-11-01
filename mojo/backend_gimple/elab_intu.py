@@ -3202,6 +3202,26 @@ def _erased_pointee_struct(resolved):
     return m.group(1), pargs
 
 
+def _erased_pointee_is_self(resolved):
+    """True when the innermost argument of an erased-word alias is `Self`
+    (`Optional[Pointer[Self, o]]`)."""
+    if not resolved:
+        return False
+    arg = resolved[0].strip()
+    m = re.match(r'^(Optional|OptionalReg|Pointer|UnsafePointer)\s*\[(.*)\]$',
+                 arg, re.S)
+    while m:
+        inner = [a.strip() for a in
+                 gimple_exprtypes._split_top_level_commas(m.group(2))
+                 if a.strip()]
+        if not inner:
+            return False
+        arg = inner[0]
+        m = re.match(r'^(Optional|OptionalReg|Pointer|UnsafePointer)\s*\['
+                     r'(.*)\]$', arg, re.S)
+    return arg == 'Self'
+
+
 def _eval_comptime_type_aliases(work, mm, module_src, base, targs, concrete):
     """Evaluate the `comptime <alias> = <Base>[<concrete args>]` type
     aliases of a spliced generic struct. Returns (concrete, nested_keys):
@@ -3256,6 +3276,11 @@ def _eval_comptime_type_aliases(work, mm, module_src, base, targs, concrete):
             # (materializing `Optional` is the regression
             # `_protocol_only_overloads` documents).
             pointee = _erased_pointee_struct(resolved)
+            if pointee is None and _erased_pointee_is_self(resolved):
+                # `Optional[Pointer[Self, o]]` (a node's own link): the
+                # pointee is the struct being spliced; nothing to enqueue.
+                aliases[aname] = mm.mangle(base, targs)
+                continue
             if pointee is not None:
                 pbase, pargs = pointee
                 # The pointee usually lives in the SAME module as the struct

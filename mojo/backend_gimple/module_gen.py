@@ -7073,9 +7073,23 @@ def gen_module_impl(self, stmts):
                     # receiver's own struct (`self.next = other`, `self.parent
                     # = owner`) exactly where it is: both sides answer the same
                     # and nothing changes.
+                    # An EXPLICITLY annotated field is not "we don't know":
+                    # `var _prev: Node_1_T_3_Int` on `Node_1_T_3_Int` itself
+                    # (a node's own link) is the field's real type, and the
+                    # constructor's `self._prev = <erased word>` is weaker
+                    # evidence than the annotation (it typed the link
+                    # `int64_t`, so `.next()` had no receiver type).
+                    _annotated_self = (
+                        existing_ft == s.name + ' *'
+                        and any(getattr(_f, 'type_ann', None) is not None
+                                and (_f.name if isinstance(_f, VarDecl)
+                                     else getattr(getattr(_f, 'target', None),
+                                                  'name', None)) == fn
+                                for _f in s.fields))
                     can_override = ((existing_ft == 'int' and ft.endswith(' *'))
                                     or (existing_ft == s.name + ' *'
-                                        and ft != existing_ft))
+                                        and ft != existing_ft
+                                        and not _annotated_self))
                     if fn not in self.struct_field_types[s.name] or can_override:
                         self.struct_field_types[s.name][fn] = ft
                         if fn not in already:
