@@ -508,6 +508,10 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
     Values are 'i'/'p'/'d', or ('list', elem_kind) for a list-typed local."""
     env: dict = {}
     str_kinds: dict = {}   # local name -> {scalar kinds bound to it, every binding}
+    # ONE walk of `fn`, shared by every scan below (it was walked seven times per call, and
+    # `_scan_callsite_param_kinds` calls this for every function in the closure on every pass --
+    # a quarter of `fire.py --dump-full`). `fn` is not mutated in here.
+    _fn_nodes = _walk(fn)
     for pname, pann in getattr(fn, 'params', []):
         k = _ann_kind(pann)
         if k is not None:
@@ -520,7 +524,7 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
     # fallback: the call-site contract below (`setdefault`) and annotations win.
     _pnames = set(pp[0] if isinstance(pp, (tuple, list)) else pp
                   for pp in getattr(fn, 'params', []))
-    for _n in _walk(fn):
+    for _n in _fn_nodes:
         if (isinstance(_n, N.SliceExpr) and isinstance(_n.obj, N.IdentExpr)
                 and _n.obj.name in _pnames and _n.obj.name not in env):
             env[_n.obj.name] = 'w'
@@ -546,7 +550,7 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
     # rather than a wrong kind. Parameters are excluded for the same reason:
     # a parameter's binding is not a lambda's.
     _lam_binds: dict = {}
-    for n in _walk(fn):
+    for n in _fn_nodes:
         if isinstance(n, N.AssignStmt) and isinstance(n.target, N.IdentExpr):
             _lam_binds.setdefault(n.target.name, []).append(n.value)
         elif (isinstance(n, N.AssignStmt) and isinstance(n.target, N.TupleExpr)
@@ -576,7 +580,7 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
         if len(_kinds) == 1:
             env[_nm] = ('callable', _kinds.pop())
     list_elem: dict = {}   # local name -> {elem kinds seen via `= [...]` / .append(...)}
-    for n in _walk(fn):
+    for n in _fn_nodes:
         tgt = val = ann = None
         if isinstance(n, N.AssignStmt) and isinstance(n.target, N.IdentExpr):
             tgt, val, ann = n.target.name, n.value, getattr(n, 'type_ann', None)
@@ -683,7 +687,7 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
     # is a DirEntry (marked as the tuple ('dirent',), which no list/conflict
     # reader mistakes for a scalar kind); `entry.name` / `entry.path` are strings.
     _sd_aliases = set()
-    for n in _walk(fn):
+    for n in _fn_nodes:
         if isinstance(n, N.WithStmt):
             for _it in n.items:
                 _c = _it.expr
@@ -695,14 +699,14 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
                     _al = _it.alias.name if isinstance(_it.alias, N.IdentExpr) else _it.alias
                     if isinstance(_al, str):
                         _sd_aliases.add(_al)
-    for n in _walk(fn):
+    for n in _fn_nodes:
         if (isinstance(n, N.ForStmt) and isinstance(n.iterable, N.IdentExpr)
                 and n.iterable.name in _sd_aliases and isinstance(n.target, str)
                 and n.target not in env):
             env[n.target] = ('dirent',)
     # `for <v> in <list-local-or-literal | sibling-generator-call>():` binds
     # <v> to the element kind
-    for n in _walk(fn):
+    for n in _fn_nodes:
         if not isinstance(n, N.ForStmt):
             continue
         # ONE name only, and read through `for_target_names` so a redundant
@@ -781,7 +785,7 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
     # raw bits (`for i, r in enumerate([1.5, 2.5]): yield r` printed
     # `1` / `2` where CPython prints `1.5` / `2.5`). Both names must be
     # unbound, the same rule the single-name case uses.
-    for n in _walk(fn):
+    for n in _fn_nodes:
         if not isinstance(n, N.ForStmt):
             continue
         it = n.iterable

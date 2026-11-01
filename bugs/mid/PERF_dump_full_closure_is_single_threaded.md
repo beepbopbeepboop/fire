@@ -45,6 +45,23 @@ call-site-contract walk quadratic (a whole-body scan per call argument) and took
 368 s; memoised per body in `itcursor.escaping_iter_names` it is 214 s. The remaining ~17 s over the 197 s
 baseline has not been attributed (other commits landed in between); do that first.
 
+## Sampling profile (2026-10-31, no profiler overhead) and the first landed win
+
+A sampler thread reading `sys._current_frames()` every 20 ms (5,679 samples over a 214 s compile of fire.py;
+the script is 25 lines, `sample.py` in the commit message) gives real inclusive shares:
+`coro.lower` 29.4% (all of it `_scan_callsite_param_kinds` -> `_collect_from` -> `_static_env`, 25.3%, of which
+`coro._walk` is 22.8% SELF time), `_parsed_import` 14% (tokenize 6.3%, parse 4.3%, rewrite 4.2%),
+`_infer_return_maybe_kinds` 9.5%, `_gmi_binding_index` 6.4%, `os.path.realpath` 4.8% (40,000 calls from
+`methods_shared._is_selfhost_sibling_alias` / `_is_selfhost_source_file`, each resolving the same
+`_SELFHOST_DIR`), `gen_func` 4.8%.
+
+Landed: `coro._static_env` walked its function seven times; it now walks once (`_fn_nodes`). The generated C
+for generator programs is byte-identical before/after (68 KB generator program compared; `fire.py`'s own
+closure differs only in the compiled `_static_env` function, as the compiler source changed).
+Remaining, in order of share: the other `_walk` users in `_scan_callsite_param_kinds` (cache per function across
+the two `_one_pass` rounds and the six `lower` calls: needs an invalidation story because the contract maps evolve);
+`realpath` memo for the constant `_SELFHOST_DIR`; `_infer_return_maybe_kinds`; `_gmi_binding_index`.
+
 ## Status (2026-10-31) — Step 0 measured ON fire.py (profile-inflated, see the correction above): the dominant serial cost is not emission, and two of the three biggest items are not parallelisable work at all
 
 Method: `cProfile` around `gimple_codegen.compile_to_gimple(fire.py_src, do_imports=True, filename=fire.py)`
