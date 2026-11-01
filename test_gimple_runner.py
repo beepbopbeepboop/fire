@@ -10278,8 +10278,9 @@ main()
     # read the field, so a resolved `T *` would still print `0 0` here and the
     # test would pass either way — which is exactly why the receiver-reading
     # variant lives in
-    # bugs/CODEGEN_unresolved_method_receiver_returns_its_own_pointer.md
-    # instead, where the two outcomes are actually distinguishable.
+    # the receiver-reading regression that distinguishes resolved (`2/2`)
+    # from unresolved (garbage pointer bits) — see `gimple_ctor_param_`
+    # `polymorphic_slot_reads_receiver` for the pinned case.
     test_gimple_stdout("gimple_ctor_param_polymorphic_slot_stays_unresolved", """\
 class T:
     def __init__(self, n):
