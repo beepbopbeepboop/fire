@@ -518,6 +518,27 @@ def test_gimple_runtime_error(name: str, mojo_src: str, expected_substr: str):
                 pass
 
 
+def test_gimple_no_poly_dispatch(name: str, mojo_src: str, expected_stdout: str):
+    """`test_gimple_stdout`, plus: the generated C must contain no
+    `_mojo_poly_*` dispatch. For a slot the constructor observation resolves
+    to ONE type, a dispatch would mean the polymorphic record widened to a
+    unanimous slot — the right answer is still correct, but the static call is
+    the contract this pins."""
+    global _PASS, _FAIL, _TIMEOUT
+    from gimple_codegen import compile_to_gimple
+    try:
+        c_code = compile_to_gimple(mojo_src)
+        if "_mojo_poly_" in c_code:
+            print(f"FAIL  {name}: unanimous slot lowered to a polymorphic dispatch")
+            _FAIL += 1
+            return
+    except Exception as e:
+        print(f"FAIL  {name}: {e}")
+        _FAIL += 1
+        return
+    test_gimple_stdout(name, mojo_src, expected_stdout)
+
+
 def run_tests():
     """Run GIMPLE-specific tests."""
 
@@ -9583,6 +9604,28 @@ def main():
 
 main()
 """, "2\n2\n")
+
+    # A slot that received ONE struct type everywhere still resolves statically:
+    # the receiver is a typed `T *` call, not a `_mojo_poly_*` dispatch. Pins
+    # that the polymorphic record does not widen to unanimous slots.
+    test_gimple_no_poly_dispatch("gimple_ctor_param_unanimous_slot_has_no_poly_dispatch", """\
+class T:
+    def __init__(self, n):
+        self.n = n
+    def numel(self):
+        return self.n
+
+class L:
+    def __init__(self, w):
+        self.w = w
+    def numel(self):
+        return self.w.numel()
+
+def main():
+    print(L(T(2)).numel(), L(T(5)).numel())
+
+main()
+""", "2 5\n")
 
 
     # A container SHARED ACROSS FUNCTIONS — a module global, populated by a
