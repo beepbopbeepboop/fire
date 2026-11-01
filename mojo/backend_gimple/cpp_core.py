@@ -1959,6 +1959,58 @@ def _cpp_is_tagged_word_expr(gen, expr) -> bool:
     return _cpp_tagged_next_api(gen, expr) is not None
 
 
+def _cpp_rethrow_pending(ctype: str, call: str) -> str:
+    """`call` (a runtime call returning `ctype` that reports a Python exception
+    through the pending flag, as every raiser in fire_runtime.c does) as a C++
+    expression that rethrows the pending exception as a real `_MojoCppExc`, so
+    an enclosing C++ try/catch in this coroutine body sees it. A coroutine body
+    must not longjmp, so the flag is the only channel a runtime raiser has."""
+    return (f"[&]() -> {ctype} {{ {ctype} _pr = {call}; "
+            "if (mojo_exc_pending_get()) { mojo_exc_pending_set(0); "
+            "throw _MojoCppExc{ mojo_exc_type_get(), mojo_exc_msg_get(), "
+            "mojo_exc_obj_get() }; } return _pr; }()")
+
+
+_NONE_ARITH_BINOPS = frozenset({'+', '-', '*', '/', '//', '%', '**'})
+
+
+def _cpp_guard_none_operand(gen, operand, op: str, other=None, none_is_left: int = 1) -> None:
+    """Register the lowering of a tagged-word operand of arithmetic `op` as
+    `mojo_none_arith_guard_pending(word, op, <other's type>, none_is_left)`
+    rethrown as a catchable exception, so the operand raises TypeError when it
+    is the None box (`x = yield` after `next(g)`), as CPython does for
+    `None + 1`, instead of computing with the box's address. Any other word
+    comes back unchanged, so a non-None value keeps the lowering it always had.
+    `other` is None for the unary `-`, which uses
+    `mojo_none_unary_guard_pending` with CPython's unary message. The guard is
+    registered on the operand NODE, which every branch of the operator lowering
+    reaches through `_cpp_expr`, so no branch (the str-concatenation arms
+    included) can bypass it. A coroutine body must not longjmp, which is why
+    the pending-flag runtime forms are used and not the raising ones."""
+    if not _cpp_is_tagged_word_expr(gen, operand):
+        return
+    table = getattr(gen, '_cpp_none_guards', None)
+    if table is None:
+        table = {}
+        gen._cpp_none_guards = table
+    _held = table.get(id(operand))
+    if _held is not None and _held[0] is operand:
+        return
+    word = gen._cpp_expr(operand)
+    if other is None:
+        text = _cpp_rethrow_pending(
+            'int64_t', f'mojo_none_unary_guard_pending((int64_t)({word}), "{op}")')
+    else:
+        _oc = gimple_exprtypes._infer_simple_expr_ctype(
+            other, gen._cpp_declared or {},
+            getattr(gen, '_cpp_gen_self_fields', None), gen._async_api)
+        _other_name = {'double': 'float', 'char *': 'str', '_Bool': 'bool'}.get(_oc, 'int')
+        text = _cpp_rethrow_pending(
+            'int64_t', f'mojo_none_arith_guard_pending((int64_t)({word}), "{op}", '
+                       f'"{_other_name}", {none_is_left})')
+    table[id(operand)] = (operand, text)
+
+
 def _cpp_rename_ident_container(v, old: str, new: str):
     """Helper for `_cpp_rename_ident`: recurse into a list/tuple field or
     a nested AST-node field, rewriting every bare `IdentExpr(name=old)`
@@ -2075,6 +2127,11 @@ def _cpp_build_container_from_iterable(gen, kind: str, iter_node, target_name: s
 
 
 def _cpp_expr(gen, e) -> str:
+    # An operand registered by _cpp_guard_none_operand lowers to its guarded
+    # word (the identity check keeps a recycled id from matching a new node).
+    _guarded = (getattr(gen, '_cpp_none_guards', None) or {}).get(id(e))
+    if _guarded is not None and _guarded[0] is e:
+        return _guarded[1]
     if isinstance(e, gimple_ctypes.IntLiteral):
         value = _signed_int64(e.value)
         return _signed_int64_c_literal(value)
@@ -2587,6 +2644,8 @@ def _cpp_expr(gen, e) -> str:
         return (f"(({gimple_ctypes._CPP_CALLABLE_CTYPE})"
                 f"([&]() -> int64_t {{ return (int64_t)({_body}); }}))")
     if isinstance(e, gimple_ctypes.UnaryOp):
+        if e.op == '-':
+            _cpp_guard_none_operand(gen, e.operand, '-')
         op = {'not': '!'}.get(e.op, e.op)
         # `not <string>` — Python truthiness for a str is NON-EMPTYNESS,
         # not pointer-non-null: every char* in this model (a stripped/
@@ -2623,6 +2682,9 @@ def _cpp_expr(gen, e) -> str:
             return f"({gen._cpp_expr(e.condition)} ? {_tb(e.then_val)} : {_tb(e.else_val)})"
         return f"({gen._cpp_expr(e.condition)} ? {gen._cpp_expr(e.then_val)} : {gen._cpp_expr(e.else_val)})"
     if isinstance(e, gimple_ctypes.BinaryOp):
+        if e.op in _NONE_ARITH_BINOPS:
+            _cpp_guard_none_operand(gen, e.left, e.op, e.right, 1)
+            _cpp_guard_none_operand(gen, e.right, e.op, e.left, 0)
         if e.op == '//':
             # Python floor division — uses the same __mojo_floordiv
             # runtime helper the GIMPLE path's _lower_floordiv emits (a
@@ -4800,10 +4862,7 @@ def _cpp_expr(gen, e) -> str:
                     f"(char *)(intptr_t)({a})" if (fname in ('mojo_os_scandir',) or
                                                   (fname == 'mojo_os_openat' and i == 0))
                     else f"(int64_t)({a})" for i, a in enumerate(args))
-                return (f"[&]() -> {_rt} {{ {_rt} _pr = {fname}({_cargs}); "
-                        "if (mojo_exc_pending_get()) { mojo_exc_pending_set(0); "
-                        "throw _MojoCppExc{ mojo_exc_type_get(), mojo_exc_msg_get(), "
-                        "mojo_exc_obj_get() }; } return _pr; }()")
+                return _cpp_rethrow_pending(_rt, f"{fname}({_cargs})")
             if fname == 'mojo_list_slice_word' and len(args) == 6:
                 return (f"mojo_list_slice_word((int64_t)(intptr_t)({args[0]}), "
                         + ', '.join(f"(int64_t)({a})" for a in args[1:]) + ")")
@@ -5244,6 +5303,49 @@ def _cpp_expr(gen, e) -> str:
         f"unsupported expression in generator body: {type(e).__name__}")
 
 
+def _cpp_assign_received_yield(gen, s, declared: dict, indent: str) -> list[str]:
+    """`x = yield` / `x = yield v`: the yield as its own statement, then `x`
+    bound to the value the yield received.
+
+    The cpp consumer protocol carries no value INTO the generator: `next(g)`,
+    a for loop and `yield from` all resume it with None, and `send()` is not
+    lowered on this path (see bugs/CODEGEN_cpp_send_emits_default_path_symbol.md).
+    So the received value is the None box, `mojo_box_none()` -- the same word a
+    None yield is boxed to (cpp_async._cpp_tag_yield_sites) -- which `print`
+    renders as `None` and the tagged arithmetic refuses with TypeError. `x` is
+    marked a tagged word so every read of it goes through that box.
+
+    When `send()` is lowered, the resume must carry the sent word and this
+    must read it instead of the constant: that is the one place to change.
+    """
+    name = s.target.name
+    existing = declared.get(name)
+    if existing is not None and existing != 'int64_t':
+        raise gimple_exprtypes._UnsupportedGeneratorShape(
+            f"`{name} = yield` rebinds '{name}', already declared {existing!r} "
+            "in this coroutine body; the received value is a tagged word "
+            "(int64_t), which cannot be bound to that declaration")
+    lines = gen._cpp_stmt(ExprStmt(value=s.value, line=s.line, col=s.col),
+                          declared, indent)
+    # The local's C name, derived exactly as the ordinary assignment does
+    # (a keyword-named local is renamed; a mutated capture is a pointer).
+    if name in gen._cpp_kw_param_renames:
+        cpp_name = gen._cpp_kw_param_renames[name]
+    elif name in gimple_ctypes._C_KEYWORDS or name in gimple_ctypes._CPP_KEYWORD_FIELDS or name in gimple_ctypes._C_PARAM_EXTRA_KEYWORDS:
+        cpp_name = f"_kw_{name}"
+        gen._cpp_kw_param_renames[name] = cpp_name
+    else:
+        cpp_name = name
+    if name not in declared:
+        declared[name] = 'int64_t'
+        if gen._cpp_func_scope_decls is not None:
+            gen._cpp_func_scope_decls.append(f"int64_t {cpp_name};")
+    _cpp_mark_tagged_word(gen, name)
+    target = f"*{cpp_name}" if name in gen._cpp_mut_capture_names else cpp_name
+    lines.append(f"{indent}{target} = mojo_box_none();")
+    return lines
+
+
 def _cpp_yield_tuple(gen, tup: 'TupleExpr', declared: dict, indent: str) -> list[str]:
     """`yield a, b, ...` — boxes the tuple's elements into a real
     runtime `MojoList *` (mojo_mark_as_tuple'd, exactly the same
@@ -5633,6 +5735,9 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
         # rejects as a constant-expression division by zero.
         return [f"{indent}(void)({gen._cpp_expr(s.value)});"]
     if isinstance(s, gimple_ctypes.AssignStmt):
+        if (isinstance(s.target, gimple_ctypes.IdentExpr)
+                and isinstance(s.value, gimple_ctypes.YieldExpr)):
+            return _cpp_assign_received_yield(gen, s, declared, indent)
         if (isinstance(s.target, gimple_ctypes.TupleExpr)
                 and isinstance(s.value, gimple_ctypes.TupleExpr)
                 and len(s.target.elements) == len(s.value.elements)

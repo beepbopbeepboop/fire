@@ -1474,30 +1474,73 @@ int mojo_word_is_none(int64_t v)
     return ((MojoBox *)(intptr_t)v)->kind == 'n';
 }
 
-/* See the header. Arithmetic on a possibly-boxed operand: a None box has no
- * numeric kind, so CPython raises TypeError where the unwrap would compute
- * with its word (0). Any other word comes back unchanged. The detail names
- * the operator and the two types in CPython's order. */
-int64_t mojo_none_arith_guard(int64_t v, const char *op, const char *other, int none_is_left)
+/* Sets the TypeError slots (tag, message, object) for `detail` WITHOUT
+ * raising. Both the raising TypeError helpers and the pending-flag guards
+ * below share it, so the message and tag have one definition. */
+static void _mojo_type_error_set(const char *detail)
 {
-    if (!mojo_word_is_none(v)) return v;
+    char msg[256];
+    snprintf(msg, sizeof msg, "TypeError: %s", detail ? detail : "?");
+    char *heap_msg = strdup(msg);
+    mojo_exc_type_set(_MOJO_EXC_TAG_TYPEERROR);
+    mojo_exc_msg_set(heap_msg);
+    mojo_exc_obj_set(heap_msg);
+}
+
+/* The None check behind the arithmetic guards: 1 (with the TypeError slots
+ * set) when `v` is the None box, 0 for every other word. The detail names the
+ * operator and the two types in CPython's order. */
+static int _mojo_none_arith_check(int64_t v, const char *op, const char *other, int none_is_left)
+{
+    if (!mojo_word_is_none(v)) return 0;
     char m[128];
     if (none_is_left)
         snprintf(m, sizeof m, "unsupported operand type(s) for %s: 'NoneType' and '%s'", op, other);
     else
         snprintf(m, sizeof m, "unsupported operand type(s) for %s: '%s' and 'NoneType'", op, other);
-    mojo_raise_type_error(m);
+    _mojo_type_error_set(m);
+    return 1;
+}
+
+/* See the header. Arithmetic on a possibly-boxed operand: a None box has no
+ * numeric kind, so CPython raises TypeError where the unwrap would compute
+ * with its word (0). Any other word comes back unchanged. */
+int64_t mojo_none_arith_guard(int64_t v, const char *op, const char *other, int none_is_left)
+{
+    if (_mojo_none_arith_check(v, op, other, none_is_left)) mojo_raise();
     return v;
 }
 
-/* See the header. Unary `-` on a possibly-boxed operand: the same None check
- * as mojo_none_arith_guard, with CPython's unary message. */
-int64_t mojo_none_unary_guard(int64_t v, const char *op)
+/* See the header. The pending-flag form of mojo_none_arith_guard, for a
+ * coroutine body, which must not longjmp: it marks the TypeError pending and
+ * returns, and the generated code rethrows it. */
+int64_t mojo_none_arith_guard_pending(int64_t v, const char *op, const char *other, int none_is_left)
 {
-    if (!mojo_word_is_none(v)) return v;
+    if (_mojo_none_arith_check(v, op, other, none_is_left)) mojo_exc_pending_set(1);
+    return v;
+}
+
+/* See the header. Unary `-` on a possibly-boxed operand: the same None check,
+ * with CPython's unary message. */
+static int _mojo_none_unary_check(int64_t v, const char *op)
+{
+    if (!mojo_word_is_none(v)) return 0;
     char m[128];
     snprintf(m, sizeof m, "bad operand type for unary %s: 'NoneType'", op);
-    mojo_raise_type_error(m);
+    _mojo_type_error_set(m);
+    return 1;
+}
+
+int64_t mojo_none_unary_guard(int64_t v, const char *op)
+{
+    if (_mojo_none_unary_check(v, op)) mojo_raise();
+    return v;
+}
+
+/* The pending-flag form of mojo_none_unary_guard (see the arithmetic one). */
+int64_t mojo_none_unary_guard_pending(int64_t v, const char *op)
+{
+    if (_mojo_none_unary_check(v, op)) mojo_exc_pending_set(1);
     return v;
 }
 
@@ -10192,12 +10235,7 @@ void mojo_raise_key_error(char *key) {
  * 0. `detail` is the tail CPython puts after "TypeError: ", e.g. "'str' object
  * is not callable". */
 void mojo_raise_type_error(char *detail) {
-    char msg[256];
-    snprintf(msg, sizeof msg, "TypeError: %s", detail ? detail : "?");
-    char *heap_msg = strdup(msg);
-    mojo_exc_type_set(_MOJO_EXC_TAG_TYPEERROR);
-    mojo_exc_msg_set(heap_msg);
-    mojo_exc_obj_set(heap_msg);
+    _mojo_type_error_set(detail);
     mojo_raise();
 }
 
