@@ -3455,6 +3455,32 @@ for i in range(30):
 print(len(s), b'k0' in s, b'k29' in s)
 """, "30 True True\n")
 
+    # `c in ["a", "c"]` for a one-character `char *` taken from a string: a
+    # list-of-strings literal deliberately carries NO per-slot kinds row
+    # (`_literal_needs_kinds` -- the generic walker already names those
+    # slots), and `mojo_list_contains_str`'s non-string-slot guard read
+    # `mojo_list_slot_kind`'s 'i' fallback as "this slot is an int". Every
+    # slot was skipped, so the membership test answered False for every
+    # character and the branch never ran (CPython prints a, c, a, c). The
+    # second half is the same question against a list BUILT by append, which
+    # is also undescribed: a fix that only tagged string LITERALS with kinds
+    # would pass the first half and still answer False here.
+    test_gimple_matches_cpython("gimple_str_in_list_of_string_literals", """\
+def main():
+    seen = ""
+    for c in "abcabc":
+        if c in ["a", "c"]:
+            print(c)
+            seen += c
+    print("seen=" + seen)
+
+    built = []
+    built.append("a")
+    built.append("c")
+    print("a" in built, "b" in built, "c" in built)
+main()
+""")
+
     # str.encode() is BYTES, not a str. It was lowered as an identity stub
     # typed char*, so the value printed as the str and len() counted the
     # wrong thing for a non-ASCII string (2 for "héllo" was not 6, the

@@ -2354,11 +2354,21 @@ int mojo_list_contains_bytes(MojoList *l, MojoBytes *v)
 
 int mojo_list_contains_str(MojoList *l, char *v)
 {
+    /* Only a list that CARRIES per-slot kinds can say a slot is not a
+     * string. `mojo_list_slot_kind` answers 'i' for a slot its table does
+     * not describe, and that fallback is right for repr (an undescribed
+     * word is most plausibly an int) but not here: a homogeneous list of
+     * strings deliberately records NO row (`_literal_needs_kinds` -- the
+     * generic walker already names its slots), so `["a", "c"]` has no row
+     * and its slots fell into the `'i'` skip below. Every `c in ["a", "c"]`
+     * over a `char *` was therefore False, and the branch never ran. Gate
+     * the skip on the ROW's existence, not on the fallback kind. */
+    const char *kinds = mojo_list_get_kinds(l);
     for (int64_t i = 0; i < l->len; i++) {
         char *s = (char *)(uintptr_t)l->data[i];
         /* A slot the list's own kinds say is not a string (a tuple like
          * `('.', b'.'[0])` mixes a str and an int) can never equal a string. */
-        if (l->len > 0 && v != NULL) {
+        if (kinds && v != NULL) {
             char _k = mojo_list_slot_kind(l, i);
             if (_k == 'i' || _k == 'd') continue;
         }
