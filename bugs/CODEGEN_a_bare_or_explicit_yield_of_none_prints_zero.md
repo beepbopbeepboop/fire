@@ -6,6 +6,75 @@ the generator value-slot lattice supports (int / bool / float / str) matches
 CPython on BOTH the local and global generator paths. None is the only
 mismatching type. Owner-level ABI feature; measured and pinned, NOT shipped.
 
+## Status (2026-11-01, fifth round, work/bug-codegen-a-bare-or-explicit-yield-of: measured matrix, pins, planning guide)
+
+**Measured (compiled binary vs CPython, same text; `_build_generator_program`
+on the default stack-switch backend, and `coro.pinned('cpp')` for the escape
+hatch):**
+
+| shape | default local | default global | cpp |
+|---|---|---|---|
+| bare `yield` beside int, `for` + `next()` | MATCH | `for` MATCH; `next()` refused (see below) | refused (None) |
+| explicit `yield None` beside int | MATCH | `for` MATCH; `next()` refused | refused (None) |
+| bare-only generator, `for` + `next()` | MATCH | refused (global `next()`) | refused (None) |
+| explicit `None` beside str / float | MATCH | refused (global `next()`) | refused (None) |
+| int-only global, `next(it)` | — | refused (global `next()`, NOT None-specific) | — |
+| mixed int/str, `next()` | MATCH | — | prints a box ADDRESS (`'1\n4335…\n2\n'`) |
+| mixed int/str, `for` | MATCH | — | prints a box ADDRESS |
+
+So on the default path no None shape prints `0`: every None shape that
+compiles matches CPython, and the rest are honest refusals. The escape hatch
+refuses every None yield (no silent 0), but it still has a non-None defect:
+a tagged (mixed-kind) generator's value is printed as a raw int64, in `for`
+loops and in `next()`.
+
+**Landed this round (coverage, `test_gimple_generator_runner.py`,
+`run_none_yield_tests`):** three pins. `none_yield_bare_in_module_global_generator_for_loop`
+(default path, MATCH; the global store/read path had no None test).
+`none_yield_bare_refused_on_cpp_path` and
+`none_yield_explicit_beside_str_refused_on_cpp_path` (under `coro.pinned('cpp')`,
+must refuse with "a None yield (bare `yield` / `yield None`) has no value slot").
+These guard against a regression to the silent `co_yield (int64_t)0`. No
+production code changed this round; none of the three pins fails before the
+round-3 refusal, so they are coverage, not a fix.
+
+**Planning guide for the remaining work (not started):**
+
+1. *C++ word print (escape hatch only, the doc's item 2).* A tagged yield is
+   boxed at `_cpp_tag_yield_sites` (`mojo/backend_gimple/cpp_async.py:322`,
+   called at ~1138 when `_tagged_yield`). Nothing downstream knows the value is
+   a word, so the print lowering (`mojo/backend_gimple/cpp_core.py`, the
+   `print` single-arg scalar branch ~5500) emits `%lld` for every `int64_t`.
+   Plan: (a) record the tagged generator base in a gen-level set
+   (`gen._cpp_tagged_gen_bases`) at the tagging site, and carry `'tagged'` in the
+   cross-module record (`_cpp_xmod_generator_refs`, cpp_core.py ~1750/1899).
+   The API dict (cpp_async.py ~3600 / ~1803) is built from
+   `_gen_cpp_generator_unit`'s return, which does not carry the flag. (b)
+   `_cpp_next_on_generator_expr` (cpp_core.py ~1878) and the generator
+   `for`-binding (cpp_core.py ~7559) mark a tagged value as a word. (c) the print
+   branch emits `mojo_repr_boxed((int64_t)(...))` for a word (the stack-switch
+   print already does this; the runtime function exists). Ordering risk: a
+   consumer emitted before its generator must see the set, so compute tagged-ness
+   from the generator's FunctionDef with the same predicate
+   (`coro._generator_value_kind(...)[0] == 'w'`), not from emission order.
+   Tests: `test_generator_matches_cpython` under `coro.pinned('cpp')` for the
+   mixed int/str `next()` and `for` shapes (CPython oracle); must FAIL before,
+   PASS after. Gate note: escape hatch only; a `MOJO_CORO=cpp` compile is never
+   on the stdlib default path, so the integrator's `skip`/`U` counts should
+   not move from this.
+
+2. *Module-global `next()` refusal* is NOT None-specific and is filed as its own
+   doc: `bugs/CODEGEN_next_on_a_module_global_generator_is_refused.md`.
+
+3. *Dead C++ bare-yield line* (`cpp_core.py`, `co_yield (int64_t)0`): unreachable
+   for a None yield now (the typer refuses first). Delete in a cleanup, with
+   the pin above guarding it.
+
+**Why this is still open:** the None symptom (`0`) is gone on the default path,
+but the escape hatch's word print (item 1) is a separate, pre-existing defect,
+and the bug doc's own item 2 is that work. It is not a None issue, so it stays
+here as the planning guide rather than a new doc.
+
 ## Status (2026-11-01, fourth round, work/bug-codegen-a-bare-or-explicit-yield-of: `next()` reads the None box)
 
 **Landed (behaviour change, compiled path, measured against CPython):** a

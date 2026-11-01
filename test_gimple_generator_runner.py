@@ -19,6 +19,7 @@ import sys
 import tempfile
 
 import gimple_codegen
+from mojo.middle import coro
 from build_config import find_gcc, find_gxx
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -3213,6 +3214,57 @@ def main():
     print(next(it, "dflt"))
 main()
 """)
+    # A MODULE-GLOBAL None-yielding generator consumed by a for loop: the
+    # global spelling takes its own store/read path, so it is pinned separately
+    # from the local one above (measured MATCH on the default path).
+    test_generator_matches_cpython("none_yield_bare_in_module_global_generator_for_loop", """\
+def g():
+    yield 1
+    yield
+    yield 2
+
+def main():
+    for v in g():
+        print(v)
+main()
+""", """\
+def g():
+    yield 1
+    yield
+    yield 2
+
+def main():
+    for v in g():
+        print(v)
+main()
+""")
+    # The C++ escape hatch (`MOJO_CORO=cpp`) cannot carry a None slot, so its
+    # typer must REFUSE a None yield (sending the module to the interpreter,
+    # which prints None) rather than compile `co_yield (int64_t)0`, which
+    # prints 0. Pinned on the cpp backend explicitly.
+    with coro.pinned('cpp'):
+        test_generator_refused("none_yield_bare_refused_on_cpp_path", """\
+def g():
+    yield 1
+    yield
+    yield 2
+
+def main():
+    for v in g():
+        print(v)
+main()
+""", "a None yield (bare `yield` / `yield None`) has no value slot")
+        test_generator_refused("none_yield_explicit_beside_str_refused_on_cpp_path", """\
+def g():
+    yield "a"
+    yield None
+    yield "b"
+
+def main():
+    for v in g():
+        print(v)
+main()
+""", "a None yield (bare `yield` / `yield None`) has no value slot")
 
 
 def run_tests():
