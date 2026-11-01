@@ -3917,6 +3917,52 @@ main()
 """)
 
 
+def run_cpp_path_module_state_tests():
+    # The C++ escape hatch decides from the module it is lowering, not from
+    # the module lowered before it. `_tagged_consumers_ok` reads
+    # `coro._MODULE_STMTS`, which only the stack-switch path refreshed, so a
+    # previous module whose same-named `g` is consumed by `sum()` (refused)
+    # used to make the cpp compile of THIS module's `g` (consumed by a `for`
+    # loop, accepted) refuse with "generator function(s) g". Each module must
+    # answer for itself, so the cpp module here must match CPython.
+    prev_src = """\
+def g():
+    yield 1
+    yield "s"
+
+def main():
+    print(sum(g()))
+main()
+"""
+    with coro.pinned('stackswitch'):
+        try:
+            gimple_codegen.compile_to_gimple_with_cpp(prev_src, do_imports=False)
+        except Exception:
+            # Refusing the previous module is expected; what matters is that
+            # its lowering has run and left its module state behind.
+            pass
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("cpp_path_ignores_previous_module_state", """\
+def g():
+    yield 1
+    yield "s"
+
+def main():
+    for v in g():
+        print(v)
+main()
+""", """\
+def g():
+    yield 1
+    yield "s"
+
+def main():
+    for v in g():
+        print(v)
+main()
+""")
+
+
 _AUG_YIELD_SRC = """\
 def g():
     x = 1
@@ -4858,6 +4904,7 @@ def run_tests():
     run_tagged_none_identity_tests()
     run_none_list_iteration_tests()
     run_tagged_word_cpp_tests()
+    run_cpp_path_module_state_tests()
     run_tagged_word_bind_tests()
     # Was defined but never called, so its pins (and the copy-of-a-for-target
     # shape) were not part of the file's run. Registered here, 2026-11-01.
