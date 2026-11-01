@@ -4061,8 +4061,8 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         # repr printed those address bytes, `{'\xef\xac\x99f': 1, ...}`. The
         # literal spelling `{k: 1 for k in pairs}` reached `_repr_value` and
         # keyed by content, so the two spellings of one key disagreed. See
-        # bugs/CODEGEN_dict_comprehension_repr_is_separately_broken.md, and
-        # CODEGEN_tuple_dict_key_hashed_by_address for the subscript
+        # CODEGEN_dict_comprehension_repr_is_separately_broken (tuple key
+        # hashed by address) and CODEGEN_tuple_dict_key_hashed_by_address for
         # spelling that was fixed the same way.
         #
         # `_emit_dict_pair_store` lowers both operands itself, so the values

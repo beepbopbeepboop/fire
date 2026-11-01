@@ -772,7 +772,8 @@ BUILTIN_PROGRAMS = {
     # evidence and `kind == 0` is `mojo_repr_int(val)`. The `kind == 1` arm is
     # added in the same place: a double's IEEE-754 bits went to `mojo_repr_str`
     # as a `char *`, and that pattern is pointer-shaped, so it printed garbage
-    # or faulted. See bugs/CODEGEN_dict_comprehension_repr_is_separately_broken.md.
+    # or faulted. See CODEGEN_dict_comprehension_repr_is_separately_broken (dict
+    # repr: 0-is-None sentinel, int-key stringification, tuple-key address).
     #
     # INTEGER KEYS are all this case uses, and they are all STRINGS on purpose:
     # `{1: "a"}` prints `{'1': 'a'}`, and that needs the slot to remember
