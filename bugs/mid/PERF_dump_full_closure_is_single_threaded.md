@@ -58,6 +58,13 @@ the script is 25 lines, `sample.py` in the commit message) gives real inclusive 
 Landed: `coro._static_env` walked its function seven times; it now walks once (`_fn_nodes`). The generated C
 for generator programs is byte-identical before/after (68 KB generator program compared; `fire.py`'s own
 closure differs only in the compiled `_static_env` function, as the compiler source changed).
+Second win, same round: `_scan_callsite_param_kinds._collect_from` built `_static_env` for EVERY function of
+the whole import closure on every pass, though almost none calls one of this module's generators. The env is now
+built lazily on the first call the visitor will act on (`_wants_call`, the same two tests the visitors make), and the
+CallExpr list of each function is found once per scan and reused (`_calls_in`). Measured on the same compile of
+fire.py (`time.perf_counter` around the outermost call, machine load 14): 214 s -> 160 s. Generated C is unchanged:
+`compile_stdlib.py` GCC CAS 610/610 hits (every module's C hashes to what it was before), plus a byte-identical
+generator program.
 Remaining, in order of share: the other `_walk` users in `_scan_callsite_param_kinds` (cache per function across
 the two `_one_pass` rounds and the six `lower` calls: needs an invalidation story because the contract maps evolve);
 `realpath` memo for the constant `_SELFHOST_DIR`; `_infer_return_maybe_kinds`; `_gmi_binding_index`.

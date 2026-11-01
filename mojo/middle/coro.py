@@ -4863,14 +4863,8 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
     _bound_here: dict = {}
     _alias_here: set = set()
 
-    def _visit_closure_call(node, caller_env):
-        # A call from ANOTHER module of the import closure, counted in three
-        # spellings only: `<this module>.<generator>(...)`, `<alias>.<generator>(...)`
-        # for `import <this module> as <alias>`, and a bare `<local>(...)` bound
-        # by `from <this module> import <generator> [as <local>]`. Each names
-        # this module's generator without any other table, so none can collide
-        # with a same-named generator elsewhere. A call through a value is not
-        # counted; it stays a hole, as it always was.
+    def _closure_callee(node):
+        # The name in THIS module a closure module's call resolves to, or None.
         fn = node.func
         _callee = None
         if isinstance(fn, N.MemberExpr):
@@ -4882,8 +4876,30 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
             _local = _cm_as_str(fn.name)
             if _local in _bound_here:
                 _callee = _bound_here[_local]
+        return _callee
+
+    def _visit_closure_call(node, caller_env):
+        # A call from ANOTHER module of the import closure, counted in three
+        # spellings only: `<this module>.<generator>(...)`, `<alias>.<generator>(...)`
+        # for `import <this module> as <alias>`, and a bare `<local>(...)` bound
+        # by `from <this module> import <generator> [as <local>]`. Each names
+        # this module's generator without any other table, so none can collide
+        # with a same-named generator elsewhere. A call through a value is not
+        # counted; it stays a hole, as it always was.
+        _callee = _closure_callee(node)
         if _callee is not None:
             _visit_call(node, caller_env, _callee)
+
+    def _wants_call(visit, node):
+        # Whether `visit` would do anything with `node`: the same two tests the
+        # visitors make before they touch the caller's env, so `_collect_from` can
+        # skip building that env (see there) without changing what is recorded.
+        if visit is _visit_closure_call:
+            return _closure_callee(node) is not None
+        fn = node.func
+        gname = (fn.name if isinstance(fn, N.IdentExpr) else
+                 (fn.member if isinstance(fn, N.MemberExpr) else None))
+        return gname in gen_names or gname in plain_names
 
     def _from_bound_names(src):
         names: dict = {}
@@ -4914,6 +4930,25 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
                     aliases.add(_cm_as_str(_al))
         return aliases
 
+    # The CallExpr nodes of each function (and of each module-level statement),
+    # found by ONE walk and reused by every later pass of this scan. `_collect` runs
+    # twice per scan and the scan runs once per `lower`; re-walking every function of
+    # the whole import closure each time was a quarter of `fire.py --dump-full`. The
+    # AST is not mutated while a scan runs, and the dict lives only for this call.
+    _calls_of: dict = {}
+
+    def _calls_in(node):
+        _k = id(node)
+        _hit = _calls_of.get(_k)
+        if _hit is not None:
+            return _hit
+        _out = []
+        for _w in _walk(node):
+            if isinstance(_w, N.CallExpr):
+                _out.append(_w)
+        _calls_of[_k] = _out
+        return _out
+
     def _collect_from(src, visit):
         for s in src:
             fns = []
@@ -4936,15 +4971,24 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
                 # sites of a method already get (`_eligible` ->
                 # `_static_env(fn, struct_def)`) is what makes the two agree
                 # about `self.k`.
-                cenv = _static_env(fn, sdef)
-                for n in _walk(fn):
-                    if isinstance(n, N.CallExpr):
-                        visit(n, cenv)
+                #
+                # LAZY: the env is built on the first call the visitor will
+                # actually act on (`_wants_call`), not for every function. In the
+                # closure walk almost no function calls one of THIS module's
+                # generators, and `_static_env` is the expensive part.
+                cenv = None
+                have_env = False
+                for n in _calls_in(fn):
+                    if not _wants_call(visit, n):
+                        continue
+                    if not have_env:
+                        cenv = _static_env(fn, sdef)
+                        have_env = True
+                    visit(n, cenv)
             # module-level calls (rare, e.g. a bare generator call in a stmt)
             if not isinstance(s, (N.FunctionDef, N.StructDef)):
-                for n in _walk(s):
-                    if isinstance(n, N.CallExpr):
-                        visit(n, None)
+                for n in _calls_in(s):
+                    visit(n, None)
 
     def _collect():
         _collect_from(stmts, _visit_call)
