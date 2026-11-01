@@ -1561,6 +1561,53 @@ def main():
 main()
 """, "1\n2.5\n")
 
+    # The for-loop target over a kind-mixed generator is a tagged word, so an
+    # int operand's arithmetic answers by the box's kind: an int yield keeps
+    # its integer answer (`x * 2` printed `2.0` before the target was tagged),
+    # and a float yield keeps its double. Every operator the target can take
+    # beside an int literal, and `2 * x` / `x * x`, is pinned against CPython.
+    test_generator_matches_cpython("mixed_for_target_int_arith_keeps_int_kind", """\
+def g():
+    yield 1
+    yield 2.5
+    yield 4
+
+def main():
+    for x in g():
+        print(x * 2)
+        print(x - 1)
+        print(x + 1)
+        print(x // 1)
+        print(x % 3)
+        print(x / 2)
+        print(x + 1.5)
+        print(2 * x)
+        print(x * x)
+        print(x == None)
+        print(x)
+main()
+""", """\
+def g():
+    yield 1
+    yield 2.5
+    yield 4
+
+def main():
+    for x in g():
+        print(x * 2)
+        print(x - 1)
+        print(x + 1)
+        print(x // 1)
+        print(x % 3)
+        print(x / 2)
+        print(x + 1.5)
+        print(2 * x)
+        print(x * x)
+        print(x == None)
+        print(x)
+main()
+""")
+
     # A `*args`-style UNPACK at a call site is a hole for every parameter it
     # could have supplied, and the call-site scan used to record it against
     # positional index 0 alone: `gen(*args)` charged the untypable argument to

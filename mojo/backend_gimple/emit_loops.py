@@ -3931,7 +3931,12 @@ def _gen_for_generator_iter(gen, var: str, gen_val: str, api: dict, body: list,
     else:
         gen._emit(f"  {gen._cname(var)} = {val};")
         if api.get('mixed_slots') and gen.var_types.get(var) == 'int64_t':
+            # A tagged word, exactly as `next(g)` binds one (emit_calls):
+            # rendered by kind, and the operator lowering reads its kind
+            # (`_tagged_arith_select`). Without the tagged mark `x * 2` took
+            # the plain box-as-double arm and printed `2.0` for an int yield.
             gen._boxed_vals.add(gen._cname(var))
+            gen._tagged_word_vals.add(gen._cname(var))
         elif vct == 'int64_t' and gen.var_types.get(var) == 'int64_t':
             # An int64_t value slot may carry a string pointer the kind analysis could
             # not prove (a word read out of a runtime-kinded list): the loop variable
