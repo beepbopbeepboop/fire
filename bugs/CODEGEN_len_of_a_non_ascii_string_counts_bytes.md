@@ -1,5 +1,11 @@
 # CODEGEN: `len(s)` on a non-ASCII string counts BYTES, where the other engines count CODE POINTS
 
+## Status (2026-11-01): the index half now has its regression test; still blocked on the representation decision
+
+Landed: `test_nonascii_index_regression.py` (not registered in `tools/suite.py`, on purpose: it is red on the compiled path until the representation lands). It runs one program through CPython, `fire.py run` and `fire.py --jit`. Measured now: interpreter PASSES; `--jit` FAILS on every index row: `s[1]` prints a lone `0xC3` byte, `s.find("b")` gives 3 (CPython 2), `while i < len(s): s[i]` over `"a\u00e9b"` yields `a|<C3>|<A9>` (CPython `a|\u00e9|b`), and `for c in s` yields 4 items for a 3-character string. (`len(s[1:])` is 2 on this tree, which is already right.)
+
+Why no runtime-only patch was landed: translating a code-point index to a byte offset over a bare `char *` is O(i). The existing `mojo_cstr_slice`/`mojo_char_at_str` already scan `s[0..stop)` with `memchr`, so an ASCII prefix check costs only a constant factor. A non-ASCII string is different: after the first multi-byte character every `src[pos]` walks from byte 0, and the self-hosted tokenizer does that over 2 MB sources whose comments contain em-dashes. A resume cache keyed on the pointer is unsound (a freed buffer reallocated at the same address with different content). So the unit change needs option (A) below: a value that carries `(byte_len, cp_len, is_ascii)`. That is the implementation plan in the 2026-10-29 entry, unchanged; the next round starts at its step (1).
+
 ## Status (2026-10-29): planning round — measured state and the implementation guide for the index half
 
 Re-measured on `work/bug-codegen-len-of-a-non-ascii-string-co-5901` (HEAD includes c99c057fb):

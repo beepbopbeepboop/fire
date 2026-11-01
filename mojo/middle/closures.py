@@ -514,15 +514,6 @@ def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
                     _cnm0 = _as_str(nd.func.name)
                     if _cnm0 not in _called_list:
                         _called_list.append(_cnm0)
-                elif isinstance(nd, IdentExpr):
-                    # A sibling closure named as a VALUE (handed to another function,
-                    # stored) needs its env exactly as a call to it does: the group
-                    # below shares one env across connected siblings, and a closure
-                    # that only REFERENCES another used to be left out of the group,
-                    # so the value was built with a NULL env.
-                    _cnm1 = _as_str(nd.name)
-                    if _cnm1 not in _called_list:
-                        _called_list.append(_cnm1)
             _called_names = set(_called_list)
             _transitive_mut: set = set()
             for _called in _called_names:

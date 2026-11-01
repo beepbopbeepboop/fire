@@ -20,8 +20,8 @@ then `mojo_list_contains_mixed_int (_t1, _t6)`, so the needle is an int 0 by
 the time the membership is lowered. Master also answers `False` here, so this
 is not a regression from the int-needle fix; it is the same underlying gap.
 
-Cause: the value ABI has no None word. The generator-yield None family ("a None yield value prints 0",
-fixed on the default path) records the same representational fact for generator yields ("a None value
+Cause: the value ABI has no None word. `CODEGEN_a_bare_or_explicit_yield_of_none_prints_zero.md`
+records the same representational fact for generator yields ("a None value
 cannot be represented in the word at all"). The membership lowering can only
 see the static type `int64_t`, so it applies the int meaning, which is the
 right answer for `0 in ["a", None]` and wrong for a None variable.
@@ -67,7 +67,8 @@ The flow-insensitive check cannot answer this, because the local has a
 non-None binding. The next step is either (1) a flow-sensitive record of which
 locals are None at the membership point, which needs the join points of `if`/
 `while`/`try` lowered into the bookkeeping, or (2) the tagged None word the
-none-yield fix introduced for generator yields, which removes the ambiguity at the value level. Dict and set
+yield doc (`CODEGEN_a_bare_or_explicit_yield_of_none_prints_zero.md`)
+describes, which removes the ambiguity at the value level. Dict and set
 membership of a None-held local are also still unaddressed: `x_is_none` only
 reaches the list branch, and the `none_only_locals` answer is not consulted by
 `_lower_in_dispatch`'s dict/set arms.

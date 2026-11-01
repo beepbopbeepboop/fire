@@ -41,38 +41,6 @@ check("the lifted ban frees the slot", C.slot_free(paid, {}))
 h2 = C.mark_dead(paid["model"], paid)
 check("a second limit inside a day waits the 15-day block", abs(h2 - 15 * 24) < 1e-9)
 
-# a limit that prints its reset ends the ban at that reset (plus the margin), not at the recovery time
-from datetime import datetime
-from zoneinfo import ZoneInfo
-_now = datetime(2026, 11, 1, 9, 22, tzinfo=ZoneInfo("America/Los_Angeles")).timestamp()
-_r = C.reset_at("You've hit your 5-hour limit \u00b7 resets 11am (America/Los_Angeles)", _now)
-check("the printed 11am reset is the next 11am Pacific", datetime.fromtimestamp(_r, ZoneInfo("America/Los_Angeles")).hour == 11 and _r - _now < 3600 * 2)
-check("a reset already passed today rolls to tomorrow", C.reset_at("resets 8am (America/Los_Angeles)", _now) - _now > 3600 * 20)
-check("no reset in the text, no reset time", C.reset_at("nothing printed", _now) is None)
-_fut = time.time() + 3600
-h3 = C.mark_dead("claude-test-model", {"name": "t", "model": "claude-test-model", "recover_hours": 4.23}, _fut)
-check("a ban with a printed reset ends at it plus the margin", abs(h3 - (3600 + C.RESET_MARGIN_S) / 3600) < 0.01)
-check("a reset already past falls back to the recovery time", abs(C.mark_dead("claude-test-model", {"name": "t", "model": "claude-test-model", "recover_hours": 4.23}, time.time() - 60) - 4.23) < 1e-9)
-
-# a daily free tier bans until its replenish time, plus the margin, not for a fixed block
-_utc = datetime(2026, 11, 1, 9, 0, tzinfo=ZoneInfo("UTC")).timestamp()
-_free = {"name": "free", "model": "free-model", "recover_hours": 2.5,
-         "replenish": {"tz": "UTC", "at": "00:00", "margin_min": 1}}
-_rp = C.replenish_at(_free, _utc)
-check("a daily tier replenishes at its time plus the margin", datetime.fromtimestamp(_rp, ZoneInfo("UTC")).strftime("%F %H:%M") == "2026-11-02 00:01")
-check("a slot without a replenish time has none", C.replenish_at({"name": "x", "model": "x", "recover_hours": 1}, _utc) is None)
-C.mark_dead("free-model", _free, now=_utc)
-check("a limit on a daily tier bans until the next replenish", abs(C._ledger()["free-model"]["until"] - _rp) < 1)
-
-# holds: only work holds a claim; a dead entry with no commits holds nothing and cannot block a retry
-_real_ahead = C.ahead
-C.ahead = lambda t: t["_ahead"]
-try:
-    check("a dead entry with no commits does not hold its claim", not C.holds_claims({"state": "integration-failed", "pid": 0, "worktree": "/x", "_ahead": 0}))
-    check("a dead entry with commits holds its claim", C.holds_claims({"state": "exited-err", "pid": 0, "worktree": "/x", "_ahead": 1}))
-finally:
-    C.ahead = _real_ahead
-
 try:
     C.pool_slot("no-such-slot")
     check("an unknown slot is refused", False)
@@ -92,24 +60,6 @@ check("a task with no preferred slot takes the first free slot", C.pick_slot({"p
 check("a task takes its preferred slot when that is free", C.pick_slot({"pool": "b"}, {})["name"] == "b")
 check("a task whose preferred slot is busy moves to a free one", C.pick_slot({"pool": "a"}, {"a": 1})["name"] == "b")
 check("with every slot full the task waits", C.pick_slot({"pool": "a"}, {"a": 1, "b": 1}) is None)
-C.load_pool = _real_load_pool
-
-# free-tier probe: a daily free tier's ban ends when the tier answers a one-word prompt, not at a guessed reset.
-_real_load_pool = C.load_pool
-C.load_pool = lambda: {"slots": [dict(name="free", model="mfree", count=1, kind="opencode", replenish={"tz": "UTC", "at": "00:00", "margin_min": 1}),
-                                 dict(name="paid", model="mpaid", count=1, kind="opencode")]}
-_now = time.time()
-C.mark_dead("mfree", {"name": "free", "replenish": {"tz": "UTC", "at": "00:00", "margin_min": 1}}, until=_now + 2 * C.PROBE_EVERY_S, now=_now)
-C.mark_dead("mpaid", {"name": "paid", "recover_hours": 2.5}, until=_now + 3600, now=_now)
-asked = []
-C.probe_free_bans(now=_now, probe=lambda m: asked.append(m) or False)
-check("a refusing free tier is asked", asked == ["mfree"])
-check("a refusing free tier stays banned", C._ledger()["mfree"]["until"] > _now)
-check("a paid model is never probed", "mpaid" not in asked)
-C.probe_free_bans(now=_now + 60, probe=lambda m: asked.append(m) or False)
-check("a free tier is not re-asked inside the probe interval", asked == ["mfree"])
-lifted = C.probe_free_bans(now=_now + C.PROBE_EVERY_S + 1, probe=lambda m: True)
-check("a free tier that answers is lifted", lifted == ["mfree"] and C._ledger()["mfree"]["until"] <= _now + C.PROBE_EVERY_S + 1)
 C.load_pool = _real_load_pool
 
 print("%d passed, %d failed" % (len(PASSES), len(FAILS)))

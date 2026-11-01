@@ -22,9 +22,8 @@ lines, in the order the probe printed them:
 
 ## Update (2026-10-31, later)
 
-- Rows 2-3 of the table (`functools`, `encodings/_win_cp_codecs`) were the nested-class
-  enclosing-local read bug, FIXED 2026-11-01 (`_gmi_capture_nested_class_enclosing_reads`; also user-struct
-  `<`/`>=` dunders now dispatch). Re-probe to see what those modules hit next.
+- Rows 2-3 of the table (`functools`, `encodings/_win_cp_codecs`) are the existing
+  `bugs/CODEGEN_nested_class_method_cannot_reach_an_enclosing_local.md`; do not duplicate the work here.
 - `reprlib.py` compiles standalone on master (`compile_to_gimple` OK) and its module-scope
   `repr = aRepr.repr` now lowers correctly (two silent miscompiles found and fixed on the way: a module-scope
   binding of a builtin name was ignored, and a module-scope bound-method global lost its return type). The
@@ -68,53 +67,6 @@ the same probe on the fix shows 0 overload refusals and 52 errors.
 What is left in the closure, by module (each its own feature, none a one-line fix):
 `collections`/`enum` run-time 3-argument `type(...)`; `dis`/`typing`/`inspect`/`selectors` module-level
 `namedtuple` forms beyond `Name = namedtuple("Name", [literals])`; `functools`/`_win_cp_codecs`/`_bootstrap`
-a class declared inside a function that captures locals (FIXED 2026-11-01, re-probe);
+a class declared inside a function that captures locals (`bugs/CODEGEN_nested_class_method_cannot_reach_an_enclosing_local.md`);
 `dataclasses`/`traceback` `match` or-patterns and class patterns; `signal` a decorator inside a module-level
 block; `weakref` was `d.pop(key, *args)` with the packed list taken for the default (FIXED 2026-10-31, `gimple_dict_pop_with_spread_default`; re-probe for what weakref hits next).
-
-## Update (2026-11-01): `match` or-patterns
-
-`dataclasses.py`'s `case Format.VALUE | Format.FORWARDREF | Format.STRING:` no longer refuses: in a Python source
-the lowering flattens `A | B | C` into the alternatives its arm chain already tests (`emit_stmts._flatten_or_patterns`;
-a `.mojo` source keeps the switch-style reading and the refusal). Found on the way, fixed, and tested
-(`gimple_return_type_through_match_arms`): a function whose only `return`s are inside `match` arms was typed from
-no return statement and handed back 0 for a string. Still refused in that closure: `traceback.py`'s class patterns
-(`case ast.Return(value=ast.Call()):`), module-level `namedtuple` built from non-literals, `type(...)` with three
-arguments, a class declared in a function that captures its locals, a decorator inside a module-level `if`.
-
-## Update (2026-11-01, probe after the nested-class and property fixes)
-
-Probe: `/tmp`-style dir holding a copy of the 3.14 `Lib` plus `entry.py` = `import mailbox`,
-`python3 tools/probe_coro_close_refusal.py entry.py --do-imports` (an entry WITHOUT the Lib copy beside it
-compiles "OK" at 0.1 GB because nothing is resolved; that is not a clean closure). Result: 59 -> 15
-`# ERROR: compiling imported module` lines. What they are now:
-
-- `functools`: `decorator 'wraps(...)' on 'wrapper' returns int64_t (not callable)` (the old nested-class wall is gone, this is the next one).
-- `dis` / `inspect`: non-literal `namedtuple(...)` (by-design refusal, see above).
-- `importlib/_bootstrap`: was `ModuleSpec.has_location` 2 overloads = a `@property` with `@x.setter`. FIXED
-  (`_gmi_rename_property_setters`: the setter becomes `__setprop_x`, `obj.x = v` calls it); also fixed in
-  passing: a `@property` READ printed the bound-method pointer and `==` compared two such pointers.
-- `tokenize`, `annotationlib`, `dataclasses`, `traceback`: `No module named 'formal'` / missing `fire_compiler.py` —
-  the probe's cwd/path, not a compiler defect (run it from the repo root).
-Next: the `@wraps(...)` decorator wall, then `namedtuple` from non-literals, then 3-arg `type()`.
-
-## Update (2026-11-01, functools: walls found by bypassing each refusal in turn)
-
-Compiling a copy of `functools.py` alone (`python3 fire.py build functools_copy.py`), bypassing one refusal at a time:
-
-1. `@wraps(f) def wrapper` refusal (`_gmi_refuse_scalar_decorator_rebind`: `wraps` returns `partial(update_wrapper, ...)`,
-   inferred int64_t). Using `functools.wraps` from USER code already works (`g(5)` -> 11); this is only the same-module
-   `wraps`. Real fix = apply `wraps(f)(wrapper)` as a decorator whose factory returns a `partial` object, which needs
-   (a) the module's own `class partial` (`__new__`/`__call__` with `*args, **kwargs`) compiled, and (b) `update_wrapper`'s
-   attribute copying (`setattr` on a function: `_func_attrs`). Treating `wraps` as identity was rejected: it drops
-   `__wrapped__`/`__name__`/`__doc__` silently.
-2. FIXED here: `_CacheInfo = namedtuple("CacheInfo", (...))` (typename != bound name, tuple of literals) now lowers; the
-   class is declared under the bound name and the repr shows the typename.
-3. NEXT WALL: `_CacheInfo(hits, misses, maxsize, currsize)` with non-literal arguments: the namedtuple lowering types a
-   field only from literals. Untyped fields are NOT an answer: `maxsize` is `int | None` and the word ABI prints a None
-   as `0` (see bugs/CODEGEN_a_none_held_in_an_int64_local_is_indistinguishable_from_zero_in_membership.md). The route is
-   typed fields from the call-site argument types, resolved by the codegen (not by `fire_compiler.desugar_namedtuples`,
-   which runs before types exist).
-
-Also fixed on the way: `print(x)` of a user struct printed its address as a decimal; it is now `__str__`, else
-`__repr__` (test `gimple_print_user_struct_dunder_repr`).

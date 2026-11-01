@@ -564,19 +564,6 @@ def _resolve_overload(gen, candidates: list, args: list, kwargs: list | None) ->
         if _score(_c2) == best_score:
             ties.append(_c2)
     if len(ties) > 1:
-        # Type erasure cannot tell `def __iter__(var self)` from `def
-        # __iter__(ref self)` (both are `(Struct *)`), but a call on a
-        # receiver that is not consumed (`l.__iter__()`, no `^`) can only mean
-        # the non-consuming overload: real Mojo prefers it, and picking the
-        # owning one typed `LinkedList.__iter__()`'s result as the
-        # `IteratorOwnedType` stub. Explicit loop (self-host: no comprehension).
-        _kept = []
-        for _c4 in ties:
-            if not _c4.get('self_owned'):
-                _kept.append(_c4)
-        if _kept:
-            ties = _kept
-    if len(ties) > 1:
         gimple_ctypes._debug_note('ambiguous or type-indistinguishable overload, picking first in declaration order',
                     f"candidates={[c['overload_id'] for c in ties]}")
     return ties[0]

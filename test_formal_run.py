@@ -1169,9 +1169,9 @@ CASES = [
      "        return Self.length\n"
      "\n"
      "def main(n) -> Int:\n"
-     "    var b = Box()\n"
+     "    var b = Box[Int, [1, 2, 3]]()\n"
      "    printf(\"%d\", b.size())\n"
-     "    return 0\n", 0, "3"),
+     "    return 0\n", "refuse:Refused rather than read as an index — a binding for `size_of[type, target]`", None),
     # …and the generic spelling, pinned because it is a refusal with a real
     # cause and nothing else in the group names it. The message is the
     # no-home one, which is about `Box` as a NAME: a class-attribute read through
@@ -23008,7 +23008,7 @@ TYPE_ARGUMENT_LIST_CASES = [
     # (`type_argument_list_of_two_type_arguments_answers`, further down), and the
     # discriminator is exact: a VALUE in a MULTI-element bracket over a TEMPLATE
     # struct declared by this unit.
-    ("type_argument_list_with_a_frame_in_the_bracket_refuses_at_the_escape_check",
+    ("type_argument_list_on_a_generic_struct_of_this_unit_is_read_as_a_container",
      "struct S:\n"
      "    var a: Int\n"
      "    var b: Int\n\n"

@@ -240,7 +240,7 @@ DEVIATION from the plan below: no `F__env` struct and no `F__C` static function.
 Plain C++ `[=]` capture copies each factory local at the `return`, which is exact
 because `return C` is the last statement. So the "reassigned captured parameter"
 refusal in the plan is unnecessary. The env is heap-allocated and never freed, the
-accepted gap in the closure-env leak (fail-closed: a kept env is never a wrong free).
+accepted gap in `bugs/CODEGEN_closure_env_and_boxed_local_never_freed.md`.
 
 NOT DONE: the real `Tools/scripts/summarize_stats.py` still refuses. A reproducer
 (`iter_tables` calling `calc_hist(i + base, 2)`) hits two shapes outside this
@@ -349,7 +349,7 @@ consequences, both accepted:
    the honest refusal) when a captured name is assigned in the factory body.
    This is a checkable condition on the factory's own body.
 2. **The env is never freed.** This is the same accepted leak as
-   the closure-env leak (a kept env is never a wrong free); do not invent a
+   `bugs/CODEGEN_closure_env_and_boxed_local_never_freed.md`; do not invent a
    free path in this round.
 
 ### Implementation plan (exact files and functions)
