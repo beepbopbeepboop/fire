@@ -309,6 +309,25 @@ def _emit_nested_generator_start_call(gen, node: gimple_ctypes.CallExpr,
     return _finish_generator_start(gen, api, arg_pairs)
 
 
+def _tagged_word_value(gen, node) -> str:
+    """Lower `node` as a TAGGED word, the int64_t form a `mojo_repr_boxed`
+    consumer renders by kind: None -> `mojo_box_none`, a float / bool -> its
+    box, and anything else by its int64_t value (an int as itself, a string
+    as its pointer). Used for a `next(it, default)` default on a tagged
+    generator, whose result is read through the same word."""
+    if (isinstance(node, gimple_ctypes.NoneLiteral)
+            or (isinstance(node, gimple_ctypes.IdentExpr) and node.name == 'None')):
+        return gen._call_expr('int64_t', 'mojo_box_none', [])
+    dt, dv = gen.lower_expr(node)
+    if dt == 'double':
+        return gen._call_expr('int64_t', 'mojo_box_from_double', [('double', dv)])
+    if dt in ('_Bool', 'bool'):
+        return gen._call_expr('int64_t', 'mojo_box_from_bool', [('int64_t', dv)])
+    w = gen._new_temp('int64_t')
+    gen._safe_coerce_emit(dt, 'int64_t', dv, w)
+    return w
+
+
 def _lower_generator_next(gen, av: str, api: dict) -> tuple[str, str]:
     # An async GENERATOR's yield channel carries a wait-descriptor
     # (is_wd=1) for every parking `await` as well as a real value (is_wd=0)
@@ -2872,12 +2891,21 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 # `default` is only evaluated on the exhausted branch —
                 # real Python semantics (a non-trivial default expr must
                 # not run when the iterator actually yields a value).
-                dt, dv = gen.lower_expr(node.args[1])
-                gen._safe_coerce_emit(dt, vct, dv, result)
+                if api.get('mixed_slots') and vct == 'int64_t':
+                    # A tagged-word generator: the default is itself a word
+                    # of its own kind, so `next(it, None)` / `next(it, 1.5)`
+                    # render as their values, not as a coerced int.
+                    dw = _tagged_word_value(gen, node.args[1])
+                    gen._safe_coerce_emit('int64_t', vct, dw, result)
+                else:
+                    dt, dv = gen.lower_expr(node.args[1])
+                    gen._safe_coerce_emit(dt, vct, dv, result)
                 gen._emit(f"  goto {bb_merge};")
                 gen._emit_label(bb_merge)
                 if api.get('boxed_container'):
                     gen._boxed_container_vals.add(result)
+                if api.get('mixed_slots') and vct == 'int64_t':
+                    gen._boxed_vals.add(result)       # a tagged word: rendered by kind
                 return vct, result
     # `next(obj)` / `next(obj, default)` where `obj` is a USER-DEFINED STRUCT
     # carrying the iterator protocol — Python's `next()` on any object is

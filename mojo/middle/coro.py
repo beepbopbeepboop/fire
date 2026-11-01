@@ -1128,12 +1128,14 @@ def _conflicting_names_in(expr, env: dict | None) -> list:
 
 def _tagged_consumers_ok(name: str) -> bool:
     """True when every reference to the module-level generator `name` in the
-    module being lowered is a call that is DIRECTLY the iterable of a `for`
-    loop -- the one consumer form that reads a tagged-word value slot (the loop
-    target is bound as a boxed word and rendered by `mojo_repr_boxed`). Any
-    other use (`next(g())`, `list(g())`, a comprehension, `sum`, passing `g`
-    around, `yield from g()`) would read the word as a plain int64_t, which
-    prints a box's ADDRESS: so a generator used that way keeps its refusal."""
+    module being lowered is a consumer that reads a tagged-word value slot as a
+    BOXED word, rendered by `mojo_repr_boxed`: a `for` loop's iterable, a
+    `list()` / comprehension / `yield from` of the call, and `next()` (on the
+    call or on a handle bound to it, with or without a default). The `next()`
+    result is marked boxed by `_lower_generator_next`. Any other use (`sum`,
+    passing `g` around, `send`, ...) would read the word as a plain int64_t,
+    which prints a box's ADDRESS: so a generator used that way keeps its
+    refusal."""
     for_iters = set()
     refs = []
     def _is_gcall(x):
@@ -1175,6 +1177,10 @@ def _tagged_consumers_ok(name: str) -> bool:
                     and n.func.member == 'close' and isinstance(n.func.obj, N.IdentExpr)
                     and n.func.obj.name in handles):
                 ok_uses.add(id(n.func.obj))
+            elif (isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr)
+                    and n.func.name == 'next' and len(n.args) >= 1
+                    and isinstance(n.args[0], N.IdentExpr) and n.args[0].name in handles):
+                ok_uses.add(id(n.args[0]))
         for hn in handles:
             if len(handles[hn]) != 1:
                 continue
@@ -1199,6 +1205,13 @@ def _tagged_consumers_ok(name: str) -> bool:
                 for_iters.add(id(n.args[0]))
             elif isinstance(n, N.Generator) and _is_gcall(n.iterable):
                 for_iters.add(id(n.iterable))
+            elif (isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr)
+                    and n.func.name == 'next' and 1 <= len(n.args) <= 2
+                    and _is_gcall(n.args[0])):
+                # `next(g())` / `next(g(), default)`: the one-shot read of the
+                # generator's first value; the tagged word is rendered through
+                # the `next()` lowering's boxed result (see _lower_generator_next).
+                for_iters.add(id(n.args[0]))
             elif isinstance(n, N.YieldFromExpr) and _is_gcall(n.value):
                 # `yield from g()` forwards the words; the delegating generator
                 # is itself tagged (its delegated kind is 'w')
