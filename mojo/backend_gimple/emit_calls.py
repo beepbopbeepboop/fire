@@ -760,6 +760,78 @@ def _lower_pointer_alloc(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     return ptr_ctype, t
 
 
+def _layout_single_elem(node):
+    """The element type expression `S` of `alloc(Layout[S].single())`, or
+    None when `node` is not that call shape."""
+    if not (isinstance(node, gimple_ctypes.CallExpr)
+            and isinstance(node.func, gimple_ctypes.IdentExpr)
+            and node.func.name == 'alloc' and len(node.args) == 1
+            and not getattr(node, 'kwargs', None)):
+        return None
+    lay = node.args[0]
+    if not (isinstance(lay, gimple_ctypes.CallExpr) and not lay.args
+            and isinstance(lay.func, gimple_ctypes.MemberExpr)
+            and lay.func.member == 'single'
+            and isinstance(lay.func.obj, gimple_ctypes.SubscriptExpr)
+            and isinstance(lay.func.obj.obj, gimple_ctypes.IdentExpr)
+            and lay.func.obj.obj.name == 'Layout'):
+        return None
+    idx = lay.func.obj.index
+    elems = idx.elements if isinstance(idx, gimple_ctypes.TupleExpr) else [idx]
+    return elems[0] if len(elems) == 1 else None
+
+
+def _lower_alloc_single_leak(gen, node: gimple_ctypes.CallExpr):
+    """`alloc(Layout[S].single()).unsafe_leak()` -- one zeroed `S` on the heap,
+    handed out as a bare `S *` (the leak is the point: the caller owns it and
+    frees it with `dealloc(ThinAllocation(unsafe_owned_ptr=p)...)`). Shares
+    the `_alloc_n_<S>` helper with `UnsafePointer[S].alloc(1)`, so a struct
+    element gets its `__mojo_type_id` header set. Returns None when `node` is
+    not that exact shape."""
+    elem = _layout_single_elem(node.func.obj)
+    if elem is None or node.args:
+        return None
+    ann = gen._type_expr_to_ann(elem)
+    if not ann:
+        return None
+    ptr_ctype = gen._resolve_type(f'UnsafePointer[{ann}]')
+    if not ptr_ctype.endswith(' *'):
+        ptr_ctype = ptr_ctype + ' *'
+    elem_ctype = ptr_ctype[:-2].strip()
+    n_val = gen._new_val('int64_t', '(int64_t)1')
+    gen._ptr_alloc_n_needed.add(elem_ctype)
+    t = gen._new_temp(ptr_ctype)
+    gen._emit(f"  {t} = _alloc_n_{gimple_ctypes._c_id(elem_ctype)} ({n_val});")
+    return ptr_ctype, t
+
+
+def _lower_dealloc_thin_allocation(gen, node: gimple_ctypes.CallExpr):
+    """`dealloc(ThinAllocation(unsafe_owned_ptr=p).unsafe_with_layout(...))` --
+    free the block `p` points at (the other half of
+    `_lower_alloc_single_leak`). Returns None for any other call shape."""
+    if not (isinstance(node.func, gimple_ctypes.IdentExpr)
+            and node.func.name == 'dealloc' and len(node.args) == 1
+            and not getattr(node, 'kwargs', None)):
+        return None
+    wl = node.args[0]
+    if not (isinstance(wl, gimple_ctypes.CallExpr)
+            and isinstance(wl.func, gimple_ctypes.MemberExpr)
+            and wl.func.member == 'unsafe_with_layout'
+            and isinstance(wl.func.obj, gimple_ctypes.CallExpr)):
+        return None
+    ta = wl.func.obj
+    kw = list(getattr(ta, 'kwargs', None) or [])
+    if not (isinstance(ta.func, gimple_ctypes.IdentExpr)
+            and ta.func.name == 'ThinAllocation' and not ta.args
+            and len(kw) == 1 and kw[0][0] == 'unsafe_owned_ptr'):
+        return None
+    pt, pv = gen.lower_expr(kw[0][1])
+    if not pt.endswith('*'):
+        return None
+    gen._emit_call('void', '', 'free', [(pt, pv)])
+    return 'int64_t', gen._new_val('int64_t', '(int64_t)0')
+
+
 def _future_done_callback_kind_tag(cb_ctype: str) -> int:
     """Tag stored with a `fut.add_done_callback(cb)` handle so the runtime
     (`__mojo_future_invoke_callback`, runtime/mojo_coro_gen.c) invokes it
@@ -1552,6 +1624,9 @@ _PY_BUILTIN_NAMES = frozenset(n for n in dir(_py_builtins) if not n.startswith('
 
 
 def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    _dealloc = gen._lower_dealloc_thin_allocation(node)
+    if _dealloc is not None:
+        return _dealloc
     # `itertools.chain(a, b, ...)`: the elements of each argument in turn. Built eagerly
     # into one list that records its own slot kinds; a generator handle argument is
     # registered first so the run time can drain it.

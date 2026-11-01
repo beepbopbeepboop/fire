@@ -1842,6 +1842,13 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             and func.obj.obj.name in ('UnsafePointer', 'OwnedPointer', 'ArcPointer', 'Pointer')):
         return gen._lower_pointer_alloc(node)
 
+    # `alloc(Layout[S].single()).unsafe_leak()`: one heap `S`, as a bare `S *`.
+    if (func.member == 'unsafe_leak' and isinstance(func.obj, gimple_ctypes.CallExpr)
+            and not node.args):
+        _leak = gen._lower_alloc_single_leak(node)
+        if _leak is not None:
+            return _leak
+
     # `sys.getfilesystemencoding()`/`sys.getdefaultencoding()` — like
     # the existing `sys.platform` comptime-constant special case just
     # below (obj.name == 'sys'), these are genuinely string-returning

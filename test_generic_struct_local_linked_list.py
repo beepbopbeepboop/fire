@@ -72,6 +72,18 @@ def test_node_pointer_unwrap_is_identity():
     assert c.count('int64_t.next() stubbed') <= 1, 'Node.next() is stubbed again'
 
 
+def test_node_allocation_api_is_lowered():
+    """`alloc(Layout[Node[T]].single()).unsafe_leak()` is a zeroed `Node *` from
+    the shared `_alloc_n_` helper and `dealloc(ThinAllocation(unsafe_owned_ptr=p)
+    .unsafe_with_layout(..))` frees `p`; neither is stubbed to a scalar."""
+    c = _compile()
+    for m in ('.single() stubbed', '.unsafe_leak() stubbed',
+              '.unsafe_with_layout() stubbed'):
+        assert m not in c, m
+    assert '_alloc_n_Node_1_T_3_Int' in c
+    assert 'dealloc (' not in c
+
+
 def test_erased_word_structs_not_materialized():
     """`Optional[Int](...)` keeps its erased tagged-word model: materializing
     it as a struct is the measured test_optional regression."""
@@ -88,5 +100,6 @@ if __name__ == '__main__':
     test_node_pointer_alias_is_typed()
     test_node_links_are_typed_self_pointers()
     test_node_pointer_unwrap_is_identity()
+    test_node_allocation_api_is_lowered()
     test_erased_word_structs_not_materialized()
     print('PASS: generic-struct local is a struct')

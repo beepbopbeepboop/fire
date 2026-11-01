@@ -3816,6 +3816,22 @@ def _rewrite_callees(work, stmts):
     gen = work.gen
 
     def visit(n):
+        if (isinstance(n, SubscriptExpr) and isinstance(n.obj, IdentExpr)
+                and n.obj.name == 'Layout' and isinstance(n.index, SubscriptExpr)
+                and isinstance(n.index.obj, IdentExpr)):
+            # `Layout[Node[Int]]` (`alloc(Layout[Node[T]].single())`): the
+            # element is a TYPE expression in an expression body, so it is not
+            # one of the annotation sites `_rewrite_annotations` walks. Name
+            # the materialized struct, or the allocation's element type
+            # erases to `int64_t` and `alloc` hands back a scalar word.
+            _b = n.index.obj.name
+            _targs = _bracket_args(gen, n.index)
+            _m = (work.alias.get(('struct', _b, tuple(_targs)))
+                  if _targs else None)
+            if _m:
+                n.index = IdentExpr(name=_m)
+                _walk_ast_invalidate(n)
+            return
         if not isinstance(n, CallExpr):
             return
         base = (n.func.obj.name if isinstance(n.func, SubscriptExpr)

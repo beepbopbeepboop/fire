@@ -362,3 +362,28 @@ gcc `-fsyntax-only` 0 errors; pin fails before, passes after.
    reflection helpers (`FormatStruct`, `TypeNames`, `params`, `fields`).
 NOT run: gate / stdlib-syntax / stdlib-dylib (integrator's); `emit_methods.py`
 change affects any struct with a field named `value` called as `.value()`.
+
+## Status (2026-11-01, round 6): PARTIAL — allocation API landed (26 -> 14 stubs); iterator + reflection helpers remain.
+
+### What landed (`emit_calls.py`, `emit_methods.py`, `emit_stmts.py`, `elab_intu._rewrite_callees`; pin `test_node_allocation_api_is_lowered`)
+
+- `alloc(Layout[S].single()).unsafe_leak()` -> one zeroed `S *` via the shared
+  `_alloc_n_<S>` helper (`_lower_alloc_single_leak`, hooked in `_lower_method_call`).
+- `dealloc(ThinAllocation(unsafe_owned_ptr=p).unsafe_with_layout(..))` -> `free(p)`
+  (`_lower_dealloc_thin_allocation`; hooked in BOTH `_lower_call` and the
+  statement fast path in `emit_stmts._gen_stmt_ExprStmt`, which never reaches `_lower_call`).
+- `Layout[Node[Int]]` is an expression-body type, not an annotation site, so
+  `_rewrite_callees` now names the materialized struct there; without it the
+  element erased to `int64_t`.
+- Probe: `single`/`unsafe_leak`/`unsafe_with_layout` stubs gone; gcc `-fsyntax-only` 0 errors.
+
+### Remaining (14 stubs, measured)
+`it = l.__iter__()` is still `int64_t` and `__next__` is stubbed (the
+`IteratorType[...]` parametrized comptime alias, plan step 3 of the earlier
+guide); one residual `Node.next()`/`prev()`/`__hash__`; reflection helpers
+(`FormatStruct`, `TypeNames`, `params`, `fields`, `write_sequence_to`,
+`_write_self_to`, `IteratorOwnedType`); struct-valued elements.
+NOT run: gate / stdlib-syntax / stdlib-dylib (integrator's). `test_gimple.py`:
+421 pass, 3 fail (`generator_mixed_yield_types_honest_fallback`,
+`every_ast_mutation_site_invalidates_the_walk_memo` on coro.py/cpp_core.py/module_gen.py
+sites, `func_state_snapshot_covers_reset_func`) -- none in files this change touches.
