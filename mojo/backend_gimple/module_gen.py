@@ -24,7 +24,7 @@ from fire_compiler import (
     BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt,
     ImportStmt, FromImportStmt,
     IfStmt, WhileStmt, ForStmt,
-    FunctionDef, TryStmt, WithStmt,
+    FunctionDef, TryStmt, WithStmt, WithItem, ExceptHandler,
     ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt,
     GlobalStmt, NonlocalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
@@ -159,6 +159,127 @@ def _gmi_literal_ctype(node):
         return 'MojoSet *'
     if isinstance(node, gimple_ctypes.DictExpr):
         return 'MojoDict *'
+    return None
+
+
+def _gmi_target_names(target, out) -> None:
+    """Append to `out` every bare name an assignment target binds: an
+    identifier, or an identifier inside a tuple/list target. Attribute and
+    subscript targets bind no name. A plain str (a `with ... as name` alias
+    spelled as a string) binds itself."""
+    if isinstance(target, str):
+        if target:
+            out.append(target)
+        return
+    if isinstance(target, gimple_ctypes.IdentExpr):
+        out.append(target.name)
+        return
+    if isinstance(target, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
+        for el in target.elements:
+            _gmi_target_names(el, out)
+
+
+def _gmi_bound_names(nd) -> list:
+    """Every name the single AST node `nd` binds in the scope that contains
+    it, as a list (empty for nodes that bind nothing). A wildcard
+    `from m import *` binds an unknown set and reports `'*'`.
+
+    This is the binder census `_gmi_identifier_literal_ctype` reads, so it
+    must cover every construct that can rebind a name. Anything it misses
+    lets a rebound name look like a single literal binding, which is the
+    one way that lookup can be wrong.
+    """
+    out: list = []
+    if isinstance(nd, (gimple_ctypes.AssignStmt, gimple_ctypes.AugAssignStmt,
+                       gimple_ctypes.ForStmt)):
+        _gmi_target_names(nd.target, out)
+    elif isinstance(nd, gimple_ctypes.MultiAssignStmt):
+        for t in nd.targets:
+            _gmi_target_names(t, out)
+    elif isinstance(nd, WithItem):
+        if nd.alias is not None:
+            _gmi_target_names(nd.alias, out)
+    elif isinstance(nd, gimple_ctypes.DelStmt):
+        for t in nd.targets:
+            _gmi_target_names(t, out)
+    elif isinstance(nd, (gimple_ctypes.GlobalStmt, gimple_ctypes.NonlocalStmt)):
+        for n in nd.names:
+            out.append(n)
+    elif isinstance(nd, gimple_ctypes.FunctionDef):
+        out.append(nd.name)
+        for pn in gimple_ctypes._param_names_stripped(nd.params):
+            out.append(pn)
+    elif isinstance(nd, (gimple_ctypes.StructDef, gimple_ctypes.TraitDef,
+                         gimple_ctypes.VarDecl, gimple_ctypes.WalrusExpr,
+                         ExceptHandler)):
+        if nd.name:
+            out.append(nd.name)
+    elif isinstance(nd, (gimple_ctypes.Generator, gimple_ctypes.ComptimeForStmt,
+                         gimple_ctypes.ComptimeVarStmt)):
+        if nd.target:
+            out.append(nd.target)
+    elif isinstance(nd, gimple_ctypes.ImportStmt):
+        if nd.alias:
+            out.append(nd.alias)
+        else:
+            out.append(nd.module.split('.')[0])
+        for ent in nd.extra or []:
+            mod_e, al_e = ent
+            out.append(al_e if al_e else mod_e.split('.')[0])
+    elif isinstance(nd, gimple_ctypes.FromImportStmt):
+        if nd.wildcard:
+            out.append('*')
+        for s in nd.name_alias_strs:
+            al = gimple_ctypes._fi_alias(s)
+            out.append(al if al else gimple_ctypes._fi_name(s))
+    return out
+
+
+def _gmi_binding_index(scopes) -> dict:
+    """name -> list of the nodes in `scopes` (a statement list, or one AST node
+    such as a FunctionDef; walked whole, nested functions included) that bind
+    that name. One walk; the per-name lookups are then dict reads."""
+    idx: dict = {}
+    for nd in _walk_ast(scopes):
+        for nm in _gmi_bound_names(nd):
+            if nm in idx:
+                idx[nm].append(nd)
+            else:
+                idx[nm] = [nd]
+    return idx
+
+
+def _gmi_identifier_literal_ctype(name, enclosing, mod_index):
+    """The ctype of an IDENTIFIER argument whose only binding is a literal.
+
+    A call `lib.walk(s)` where `s = "r"` is the one binding of `s` in scope
+    passes a string, and the callee's parameter types should follow it just as
+    they follow `lib.walk("r")`. `_gmi_literal_ctype` answers None for a name,
+    so without this the argument recorded no evidence and the callee's body
+    lowered `root + str(k)` as pointer arithmetic.
+
+    The lookup is sound only because it demands EXACTLY ONE binder of the name
+    in scope, and that binder is `name = <literal>` (or `var name = <literal>`).
+    Two bindings, a non-literal binding, a parameter, a global declaration or a
+    wildcard import all return None. The scope is the enclosing function when
+    it binds the name at all (a local shadows a global), otherwise the whole
+    module, which is a superset of every binder that could reach the name.
+    `mod_index` is `_gmi_binding_index` over the module's statements.
+    """
+    sites: list = []
+    if enclosing is not None:
+        enc_idx = _gmi_binding_index(enclosing)
+        sites = list(enc_idx.get(name, [])) + list(enc_idx.get('*', []))
+    if not sites:
+        sites = list(mod_index.get(name, [])) + list(mod_index.get('*', []))
+    if len(sites) != 1:
+        return None
+    site = sites[0]
+    if isinstance(site, gimple_ctypes.AssignStmt) \
+            and isinstance(site.target, gimple_ctypes.IdentExpr):
+        return _gmi_literal_ctype(site.value)
+    if isinstance(site, gimple_ctypes.VarDecl) and site.value is not None:
+        return _gmi_literal_ctype(site.value)
     return None
 
 
@@ -4471,17 +4592,22 @@ def gen_module_impl(self, stmts):
                         return _xs
                 return None
 
-            def _xg_record_scalar_args(_xkey, _xpnames, _xargs):
+            def _xg_record_scalar_args(_xkey, _xpnames, _xargs, _xenc):
                 """Record the unanimous literal SCALAR-ish ctype of each
                 argument into _xmod_gen_param_hints (the cross-module twin of
                 Pass 1.3d's same-module literal contract, see
-                `_gmi_apply_call_site_param_evidence`). A parameter whose
-                call sites disagree records None, and the merge below then
-                leaves it at the body-derived type."""
+                `_gmi_apply_call_site_param_evidence`). An IDENTIFIER argument
+                counts when its one binding in scope is a literal
+                (`_gmi_identifier_literal_ctype`). A parameter whose call sites
+                disagree records None, and the merge below then leaves it at
+                the body-derived type."""
                 for _xi, _xa in enumerate(_xargs):
                     if _xi >= len(_xpnames):
                         break
                     _xct = _gmi_literal_ctype(_xa)
+                    if _xct is None and isinstance(_xa, gimple_ctypes.IdentExpr):
+                        _xct = _gmi_identifier_literal_ctype(
+                            _xa.name, _xenc, _xg_bind_index)
                     if not _xct or not _xpnames[_xi]:
                         continue
                     _xs_map = self._xmod_gen_param_hints.setdefault(_xkey, {})
@@ -4548,6 +4674,10 @@ def gen_module_impl(self, stmts):
             # latter being exactly c_common/tables.py's
             # `strutil._iter_significant_lines(infile)` shape.
             _xg_calls = []
+            # The module-wide binder census the identifier-argument lookup
+            # falls back to (a global, or a name the call's function does not
+            # bind). Built once: every call site below reads it.
+            _xg_bind_index = _gmi_binding_index(stmts)
             for _xg_fd in stmts:
                 if isinstance(_xg_fd, FunctionDef):
                     for _xg_n3 in _walk_ast(_xg_fd.body):
@@ -4621,7 +4751,8 @@ def gen_module_impl(self, stmts):
                     _xg_key = (_xg_mod_joined.replace('.', '_').replace('-', '_')
                                + '::' + _xg_call.func.member)
                     _xg_pnames = gimple_ctypes._param_names_stripped(_xg_fn.params)
-                    _xg_record_scalar_args(_xg_key, _xg_pnames, _xg_call.args)
+                    _xg_record_scalar_args(_xg_key, _xg_pnames, _xg_call.args,
+                                           _xg_enclosing)
                     if not _xg_fn.is_generator:
                         continue  # element contracts are generator-only
                     _xg_enc_map = (_xg_local_param_elems.get(_xg_enclosing.name, {})
@@ -4646,7 +4777,8 @@ def gen_module_impl(self, stmts):
                 # dict's self-hosted compilation.
                 _xg_key = _xg_mod.replace('.', '_').replace('-', '_') + '::' + _xg_orig
                 _xg_pnames = gimple_ctypes._param_names_stripped(_xg_fn.params)
-                _xg_record_scalar_args(_xg_key, _xg_pnames, _xg_call.args)
+                _xg_record_scalar_args(_xg_key, _xg_pnames, _xg_call.args,
+                                       _xg_enclosing)
                 if not _xg_fn.is_generator:
                     continue  # element contracts are generator-only; ordinary
                     # callees keep Pass 1.3d's own ordering for those
