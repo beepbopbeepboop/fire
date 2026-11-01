@@ -9464,3 +9464,41 @@ class TestTheSignedOrderLemmaIsInTheLibrary(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+class TestDecWhileSignedModelRegression(unittest.TestCase):
+    """The dec-while loop model assumes a non-negative counter.
+
+    With a signed `int`, `while n > 0` on `n = -3` exits immediately and
+    returns `-3` unchanged. The old model returned 0 unconditionally.
+    Regression pinned by bugs/CODEGEN_arm64_cmp_flags_and_loop_signedness.md.
+    """
+
+    SOURCE = "def countdown(n):\n    while n > 0:\n        n = n - 1\n    return n\n"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="a2-decwhile-signed-")
+        cls.proof, cls.error = _generate(cls.tmp, cls.SOURCE, "decwhile_sig")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_model_is_conditional_not_unconditional_zero(self):
+        self.assertIsNotNone(self.proof, "proof not generated")
+        text = open(self.proof).read()
+        # The new model uses an if/else, not structural recursion to 0.
+        self.assertIn("if m < 9223372036854775808 then 0 else", text,
+                      "model does not split on the sign bit (2^63); "
+                      "old unconditional-zero model likely still emitted")
+
+    def test_go_zero_has_hypothesis(self):
+        text = open(self.proof).read()
+        self.assertIn("countdown_go_zero (n : Nat) (h : n < 9223372036854775808)", text,
+                      "_go_zero must carry the < 2^63 hypothesis")
+
+    def test_go_neg_is_emitted(self):
+        text = open(self.proof).read()
+        self.assertIn("countdown_go_neg", text,
+                      "_go_neg theorem missing; signed negative case "
+                      "is not modelled")

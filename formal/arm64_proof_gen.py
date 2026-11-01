@@ -2325,13 +2325,16 @@ def _gen_go(fn, tc: dict = None) -> list:
     if _dec_while_pattern(fn) is not None:
         _require_one_param(fname, params)
         helpers.append(
-            f"def {fname}_go : Nat → UInt64\n"
-            f"  | 0 => 0\n"
-            f"  | k + 1 => {fname}_go k\n\n"
-            f"theorem {fname}_go_zero (n : Nat) : {fname}_go n = 0 := by\n"
-            f"  induction n with\n"
-            f"  | zero => rfl\n"
-            f"  | succ k ih => exact ih"
+            f"def {fname}_go : Nat → UInt64 :=\n"
+            f"  fun m => if m < 9223372036854775808 then 0 else "
+            f"UInt64.ofNat (m % 18446744073709551616)\n\n"
+            f"theorem {fname}_go_zero (n : Nat) (h : n < 9223372036854775808) : "
+            f"{fname}_go n = 0 := by\n"
+            f"  simp [h]\n\n"
+            f"theorem {fname}_go_neg (n : Nat) (h : 9223372036854775808 ≤ n) "
+            f"(hm : n < 18446744073709551616) :\n"
+            f"    {fname}_go n = UInt64.ofNat (n % 18446744073709551616) := by\n"
+            f"  simp [h, hm]"
         )
         return helpers
     dec1 = _dec1_pattern(fn)
@@ -6312,7 +6315,8 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
             A(f"  rw [hchain]")
             A(f"  simp only [{name}_b{exit_bi}_qS0]")
             A(f"  rw [show arm64_reg 19 s = 0 from by simpa [arm64_reg] using hx19]")
-            A(f"  simp [mojo, {name}_go_zero]")
+            A(f"  have hlt : (s.x19.toNat) < 9223372036854775808 := by rw [hx19]; simp")
+            A(f"  simp [mojo, {name}_go_zero, hlt]")
         elif hname == f"{name}_loop_body_step":
             _w = words[body_last]
             _imm26 = _w & 0x03ffffff
