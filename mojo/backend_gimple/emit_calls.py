@@ -399,6 +399,19 @@ def _lower_generator_send(gen, node, av: str, api: dict) -> tuple[str, str]:
     entry both funnel into, so no new ABI is involved. The per-generator
     `<base>_resume(g)` wrapper hardcodes a 0 send, which is why this calls
     the runtime function directly rather than through the trampoline."""
+    if _as_str(api.get('base', '')).startswith('_mojogen_'):
+        # A C++20-coroutine generator (MOJO_CORO=cpp): its resume entry
+        # (`{base}_resume`) takes no sent word, and the cpp unit never
+        # declares the stack-switch runtime's `__mojo_gen_resume` that this
+        # lowering calls, so the program failed in gcc with an implicit
+        # declaration. Refused honestly here until the cpp resume carries the
+        # sent word (CODEGEN_cpp_send_emits_default_path_symbol). Same prefix
+        # test `_lower_generator_close` uses to tell the two protocols apart.
+        raise gimple_exprtypes._UnsupportedGeneratorShape(
+            "`.send()` on a C++20-coroutine generator is not supported: the "
+            "cpp resume entry takes no sent value, so the send cannot reach "
+            "the generator's `yield` (MOJO_CORO=cpp; the default stack-switch "
+            "path supports send)")
     vct = api['value_ctype']
     if len(node.args) == 1:
         arg = node.args[0]

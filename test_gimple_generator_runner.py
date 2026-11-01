@@ -4674,7 +4674,47 @@ main()
     test_generator_refused("tagged_for_target_plain_float_store_after_copy_refused",
                            _mixed_after, "refused")
 
+def run_cpp_send_refusal_tests():
+    # `it.send(v)` on a generator compiled by the C++20 backend (MOJO_CORO=cpp).
+    # The cpp resume entry (`{base}_resume`) takes no sent word and the cpp
+    # unit never declares the A3 runtime's `__mojo_gen_resume`, so the send
+    # lowering used to emit a call to it and the program failed in gcc with
+    # "implicit declaration of function '__mojo_gen_resume'". The honest
+    # answer on this path is a refusal at codegen, not a gcc error; full
+    # send support on the cpp path is the remaining work
+    # (CODEGEN_cpp_send_emits_default_path_symbol).
+    _send_src = """\
+def g():
+    yield 1
+    yield 2
+
+def main():
+    it = g()
+    print(next(it))
+    print(it.send(7))
+main()
+"""
+    with coro.pinned('cpp'):
+        test_generator_refused("generator_send_on_cpp_path_refused_at_codegen",
+                               _send_src, "`.send()` on a C++20-coroutine generator")
+    # The control: the SAME program on the default stack-switch path must keep
+    # lowering `send` (it is not refused there), and must match CPython.
+    with coro.pinned('stackswitch'):
+        test_generator_matches_cpython(
+            "generator_send_on_default_path_still_lowers", _send_src, """\
+def g():
+    yield 1
+    yield 2
+
+def main():
+    it = g()
+    print(next(it))
+    print(it.send(7))
+main()
+""")
+
 def run_tests():
+    run_cpp_send_refusal_tests()
     run_none_yield_tests()
     run_tagged_none_equality_tests()
     run_tagged_none_identity_tests()
