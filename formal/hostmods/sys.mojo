@@ -44,7 +44,7 @@ SO `sys.argv`, `sys.path`, `sys.modules`, `sys.stdin`, `sys.stdout`,
 implementation of them would be honest on this target. The reason in every
 case is the same one - a name that outlives the frame that made it - and the
 construct each of them needs is written down in
-`bugs/FORMAL_module_state_no_storage.md` with the measurements.
+`bugs/formal/FORMAL_module_state_no_storage.md` with the measurements.
 
 That is the honest answer, and the alternative — shipping `sys.argv` as a
 function that returns a made-up list, or `sys.stderr` as a struct with no
@@ -53,7 +53,7 @@ its name says.
 
 `sys.exit(code)` is absent for a DIFFERENT and settled reason: `doc/ABI.md`'s
 export rule declines to advertise a C library symbol, and `exit` is one
-(`reflect._CLIB_SYMS`; measured and settled in `bugs/FORMAL_known_limits.md`
+(`reflect._CLIB_SYMS`; measured and settled in `bugs/formal/FORMAL_known_limits.md`
 1.1). No module dylib can therefore be called by that name. On this target
 the working spelling is the library's own `exit(code)`, which lowers today as
 an extern call - see `test_formal_sys.py`.

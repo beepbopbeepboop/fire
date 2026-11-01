@@ -1317,7 +1317,7 @@ def _prefix_is_interpolated(prefix: str) -> bool:
     field spans **lines**, which `test_formal_libc_symbol.py` was the one
     file in the 2026-10-04 sweep to meet (its refusal read `unterminated
     string literal`). It is fixed — at `cca2a17f`, recorded at
-    `bugs/FORMAL_sweep_work_map.md` §3.1's `b13` row and §1.13's `#### 1.5` —
+    `bugs/formal/FORMAL_sweep_work_map.md` §3.1's `b13` row and §1.13's `#### 1.5` —
     and `test_string_literal_lexing.py`'s `LITERALS` block is what holds it
     there. With no shared predicate the scanner asked "is there a line end
     here?" without ever asking "am I inside code?", and CPython's rule for
@@ -2498,7 +2498,7 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
                     # depth; without that this branch is dead code, which is the
                     # shape the bug had — the first of the two halves was
                     # missing and this is the second. Fixed at `cca2a17f` (the
-                    # `b13` round's §5, now `bugs/FORMAL_sweep_work_map.md`
+                    # `b13` round's §5, now `bugs/formal/FORMAL_sweep_work_map.md`
                     # §3.1's `b13` row), and held by
                     # `test_string_literal_lexing.py`.
                     interpolated = _prefix_is_interpolated(src[start:i])

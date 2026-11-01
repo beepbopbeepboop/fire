@@ -16,8 +16,78 @@ def check(name, cond):
     return cond
 
 
+def test_hold():
+    ok = True
+    H = "a" * 40
+    ok &= check("no record: not held", not S.hold_active(None, H, 3600))
+    ok &= check("same doc inside the retry window: held",
+                S.hold_active({"hash": H, "at": 1000.0}, H, 3600, now=2000.0))
+    ok &= check("same doc after the retry window: released",
+                not S.hold_active({"hash": H, "at": 1000.0}, H, 3600, now=1000.0 + 3600))
+    ok &= check("doc changed inside the window: released",
+                not S.hold_active({"hash": H, "at": 1000.0}, "b" * 40, 3600, now=2000.0))
+    return ok
+
+
+def test_limit_detection(tmp):
+    def wt(text):
+        d = os.path.join(tmp, "wt%d" % len(os.listdir(tmp)))
+        os.makedirs(d)
+        open(os.path.join(d, "work.log"), "w").write(text)
+        return {"worktree": d}
+    ok = True
+    ok &= check("claude CLI weekly limit line is a limit",
+                C.limit_hit(wt("=== spawned ===\nYou've hit your weekly limit \u00b7 resets 11am\n")))
+    ok &= check("a worker that merely READ a rate-limit text is not limited",
+                not C.limit_hit(wt("> read file\n    if rate limit exceeded: retry\n")))
+    return ok
+
+
+def test_classes():
+    ok = True
+    ok &= check("every doc starts easy, even in bugs/hard/", S.doc_class("hard/CODEGEN_x", {}, "CODEGEN_x") == "easy")
+    ok &= check("an escalated class overrides the directory",
+                S.doc_class("CODEGEN_x", {"cls": {"CODEGEN_x": "mid"}}, "CODEGEN_x") == "mid")
+    ok &= check("the top class has nothing above it", S.escalate("hard") is None)
+    ok &= check("easy escalates to mid, mid to hard", S.escalate("easy") == "mid" and S.escalate("mid") == "hard")
+
+    real_pool = C.load_pool
+    C.load_pool = lambda: {"slots": [
+        {"name": "haiku", "model": "h", "count": 2, "kind": "claude", "class": "easy"},
+        {"name": "sonnet", "model": "s", "count": 1, "kind": "claude", "class": "mid"},
+        {"name": "opus", "model": "o", "count": 1, "kind": "claude", "class": "hard"}]}
+    try:
+        busy = {}
+        ok &= check("a mid task goes to the mid slot, never an easy one",
+                    C.pick_slot({"cls": "mid", "pool": None}, busy)["name"] == "sonnet")
+        busy = {"sonnet": 1}
+        ok &= check("a mid task with its mid slot full waits, even with easy slots free",
+                    C.pick_slot({"cls": "mid", "pool": None}, busy) is None)
+        ok &= check("an unclassed task takes the first free slot in pool order",
+                    C.pick_slot({"pool": None}, {})["name"] == "haiku")
+    finally:
+        C.load_pool = real_pool
+
+    st = {"fails": {}}
+    for _ in range(S.ESCALATE_AFTER):
+        S.reclass_on_failure(st, "CODEGEN_x", "CODEGEN_x")
+    ok &= check("one no-commit attempt at easy boosts the doc to mid", st["cls"]["CODEGEN_x"] == "mid")
+    ok &= check("the failure count restarts after a reclass", st["fails"]["CODEGEN_x"] == 0)
+    st2 = {"fails": {}, "no_progress": {"CODEGEN_y": {"hash": "h", "at": 0}}}
+    st2["cls"] = {"CODEGEN_y": "hard"}
+    for _ in range(S.ESCALATE_AFTER):
+        S.reclass_on_failure(st2, "CODEGEN_y", "hard/CODEGEN_y")
+    ok &= check("a hard doc stays hard and keeps its hold", st2["cls"]["CODEGEN_y"] == "hard"
+                and "CODEGEN_y" in st2["no_progress"])
+    return ok
+
+
 def main():
     ok = True
+    ok &= test_hold()
+    ok &= test_classes()
+    with tempfile.TemporaryDirectory() as tmp:
+        ok &= test_limit_detection(tmp)
     with tempfile.TemporaryDirectory() as tmp:
         C.MAIN = tmp
         os.makedirs(os.path.join(tmp, "bugs"))

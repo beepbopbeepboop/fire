@@ -669,7 +669,7 @@ EXPECTED_FAILURES = {
     # bug:CODEGEN_imported_generic_never_elaborated_calls_nothing_
     # defines.md (2026-10-23 closing section).
     # (The four `case .PASS:` enum-case files were recorded here until the enum-case lowering landed; they compile now,
-    # so the entries are removed. bugs/CODEGEN_gate_stdlib_syntax_red.md.)
+    # so the entries are removed. the stdlib-syntax gate-red row.)
 }
 
 def get_stdlib_path():

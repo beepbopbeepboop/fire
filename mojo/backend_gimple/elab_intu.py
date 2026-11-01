@@ -3389,17 +3389,41 @@ def run(gen, stmts):
                 # and None for everything else, which keeps its old path
                 # exactly.
                 args = _d2_ctor_args(work, base, n)
+            if args is not None:
+                work.enqueue((kind, base, tuple(args)), 0, queue)
         elif kind == 'fn':
-            if not _fn_returns_unbuildable_struct(work, base):
+            # ROOT for generic function instantiation: either the return is
+            # unbuildable (old path) OR the function has type params that
+            # need a per-T body (new path for shared-symbol fix).
+            if _fn_returns_unbuildable_struct(work, base):
+                args = _concrete_args(work, kind, base, n, scope)
+                if args is not None:
+                    work.enqueue((kind, base, tuple(args)), 0, queue)
+                return
+            # NEW (bug-codegen-dylib-generic-inline-copies-370): enqueue
+            # any generic fn with non-empty template whose args are all
+            # type params (value params stay on .o route).
+            import elaborate as el
+            module_src = _module_src(work.gen, base, 'fn')
+            if module_src is None:
+                return
+            tmpl = el.extract_fn_source(module_src, base)
+            if tmpl is None:
+                return
+            params = el.type_param_names(tmpl) if hasattr(el, 'type_param_names') else []
+            if not params:
                 return
             args = _concrete_args(work, kind, base, n, scope)
             if args is None:
+                args = _infer_fn_args(work, base, n)
+            if args is None:
                 return
+            if not _fn_args_are_types(work, base, args):
+                return
+            work.enqueue((kind, base, tuple(args)), 0, queue)
+            return
         else:
             return
-        if args is None:
-            return
-        work.enqueue((kind, base, tuple(args)), 0, queue)
     _walk_scoped(stmts, seed)
     if not queue:
         return []
@@ -3614,6 +3638,8 @@ def _rewrite_annotations(work):
     # mention whose argument was never rewritten is untouched.
     mangled_raw = {}
     for (kind, base, args), mangled in work.alias.items():
+        if mangled is None:
+            continue
         if kind == 'struct':
             mangled_raw[mangled] = f"{base}[{', '.join(args)}]"
     for rec in work.records.values():
@@ -3712,8 +3738,9 @@ def _rewrite_local_struct_anns(work, stmts):
     """
     by_base = {}
     for (kind, base, args), mangled in work.alias.items():
-        if kind == 'struct':
-            by_base.setdefault(base, []).append(mangled)
+        if mangled is None or kind != 'struct':
+            continue
+        by_base.setdefault(base, []).append(mangled)
     solo = {base: ms[0] for base, ms in by_base.items() if len(ms) == 1}
     if not solo:
         return
@@ -3770,15 +3797,16 @@ def _rewrite_ctor_calls(work, stmts):
     by_base = {}
     mangled_of = {}
     for (kind, base, args), mangled in work.alias.items():
-        if kind == 'struct':
-            _akey = _US.join(args)
-            _lst = by_base.get(base)
-            if _lst is None:
-                _lst = []
-                by_base[base] = _lst
-            if _akey not in _lst:
-                _lst.append(_akey)
-            mangled_of[base + _US + _akey] = mangled
+        if mangled is None or kind != 'struct':
+            continue
+        _akey = _US.join(args)
+        _lst = by_base.get(base)
+        if _lst is None:
+            _lst = []
+            by_base[base] = _lst
+        if _akey not in _lst:
+            _lst.append(_akey)
+        mangled_of[base + _US + _akey] = mangled
     if not by_base:
         return
     for st in stmts or ():
@@ -3874,15 +3902,16 @@ def _rewrite_intu_ctor_calls(work):
     by_base = {}
     mangled_of = {}
     for (kind, base, args), mangled in work.alias.items():
-        if kind == 'struct':
-            _akey = _US.join(args)
-            _lst = by_base.get(base)
-            if _lst is None:
-                _lst = []
-                by_base[base] = _lst
-            if _akey not in _lst:
-                _lst.append(_akey)
-            mangled_of[base + _US + _akey] = mangled
+        if mangled is None or kind != 'struct':
+            continue
+        _akey = _US.join(args)
+        _lst = by_base.get(base)
+        if _lst is None:
+            _lst = []
+            by_base[base] = _lst
+        if _akey not in _lst:
+            _lst.append(_akey)
+        mangled_of[base + _US + _akey] = mangled
     if not by_base:
         return
     for rec in work.records.values():

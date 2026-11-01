@@ -208,7 +208,7 @@ def _quick_type(gen, node) -> str:
         # of the int64_t default (which made `return add` return NULL).
         _ci = gen._closure_info_for_ident(node.name)
         if _ci is not None:
-            return 'MojoBoundMethod *' if _ci.env_struct else 'void *'
+            return _ci.value_ctype()
         # A MODULE-LEVEL global, read by bare name. `var_types` holds only
         # locals and parameters, so a name that is not one fell to the
         # int64_t default even though the global's own SEMANTIC type is
@@ -843,6 +843,12 @@ def _quick_type(gen, node) -> str:
         # coerce the real value into it (concretely: module_gen's
         # `dict or set or set or set` chain, join(Dict*, int64_t)=Dict*
         # vs actual Set*, "cannot coerce MojoSet * to MojoDict *").
+        # `cls.attr` / `ClassName.attr` is a CLASS attribute (a word from the run-time class table
+        # when the body never declares it), never a field of some unrelated struct that
+        # happens to use the same name (`extra`): no field search.
+        if (isinstance(node.obj, gimple_ctypes.IdentExpr)
+                and (node.obj.name == 'cls' or node.obj.name in gen._struct_bases)):
+            return 'int64_t'
         if not _fields:
             _kt = gen._known_field_type(node.member)
             if _kt is not None:
@@ -2268,7 +2274,7 @@ def _record_closure_alias(gen, result: dict, tgt: str, val):
         return
     _ci = gen._closure_info_for_ident(val.name)
     if _ci is not None:
-        result[tgt] = 'MojoBoundMethod *' if _ci.env_struct else 'void *'
+        result[tgt] = _ci.value_ctype()
 
 # --- dependency KNOWN_LEAF_RETS (from gimple_gen_resolve.py) ---
 KNOWN_LEAF_RETS = {'_mojo_type': 'char *'}

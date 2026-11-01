@@ -678,6 +678,22 @@ MojoList *mojo_str_chars(char *s);
  * `list(5)` printed `[]` and a loop body silently never ran). CPython names
  * the offending type here and this cannot — see the definition. */
 MojoList *mojo_iter_boxed_list(int64_t v);
+int64_t mojo_re_escape_w(int64_t s);
+int64_t mojo_split_dyn(int64_t recv, int64_t arg);   /* pattern.split(s) or str.split(sep) on a word of unknown kind */
+int     mojo_is_re_pattern(int64_t w);
+int     mojo_is_re_match(int64_t w);
+int64_t mojo_re_compile(char *pat, int64_t flags);                      /* handle, 0 if unsupported */
+int64_t mojo_re_compile_bytes(void *pat, int64_t len, int64_t flags);     /* handle, 0 if unsupported */
+int64_t mojo_re_exec(int64_t h, char *s, int64_t pos, int64_t endpos, int64_t mode);  /* 0 match 1 search 2 fullmatch */
+int64_t mojo_re_exec_bytes(int64_t h, void *s, int64_t len, int64_t pos, int64_t endpos, int64_t mode);
+int64_t mojo_re_m_group(int64_t m, int64_t g);
+int64_t mojo_re_m_start(int64_t m, int64_t g);
+int64_t mojo_re_m_end(int64_t m, int64_t g);
+int64_t mojo_re_getattr(int64_t obj, char *name);
+int64_t mojo_next_word(int64_t w, int has_default, int64_t dflt);   /* next(x[, d]) on a word: a noted generator handle */
+int64_t mojo_getitem_word(int64_t w, int64_t i);   /* list element / string character of an unknown-kind word */
+void    mojo_chain_extend(MojoList *dst, int64_t src);   /* itertools.chain, one argument */
+int64_t mojo_add_words(int64_t a, int64_t b);   /* str+str concatenates, else integer add */
 MojoList *mojo_iter_word(int64_t v);   /* list / dict keys / set / str / bytes of a word of unknown kind */
 /* Compiled-generator signatures (filled by each unit's constructor) and the
  * live-handle table behind a dynamic call; see the definitions. */
@@ -685,7 +701,8 @@ void mojo_gen_sig_register(void *start, void *resume, void *value, void *destroy
                            const char *const *names, int first_kwonly, const int64_t *defaults,
                            const unsigned char *has_default);
 MojoList *mojo_iter_gen_handle(int64_t w);
-void mojo_gen_handle_put(void *start, void *h);  /* record a directly-started handle for a later `for` */
+int64_t mojo_gen_note(int64_t h, void *start);
+int64_t mojo_gen_note_a3(int64_t h, int64_t vkind);   /* 0 int, 1 bool, 2 double, 3 str */
 int64_t mojo_gen_default_word(void *start, int64_t idx);
 /* `x in <boxed container>`: resolves list/dict/set at runtime instead of
  * the old hardcoded-false fallback. See mojo_in_dispatch_str's definition. */
@@ -1362,6 +1379,17 @@ void        mojo_dict_destroy(MojoDict *d);
 void        mojo_dict_clear(MojoDict *d);
 
 void        mojo_dict_set_int(MojoDict *d, char *key, int64_t v);
+int64_t mojo_gen_call_with(void *start, MojoList *pre, MojoList *a, MojoDict *kw);
+/* run-time class attributes (see the definitions): a class is its type tag */
+void    mojo_register_getattr_dispatch(int64_t (*fn)(void *, char *));
+int64_t mojo_getattr_any(void *obj, char *attr);   /* obj.attr on a word: struct reflection of any module */
+void    mojo_class_register(int64_t tag, int64_t base_tag, char *name);
+void    mojo_class_setattr(int64_t tag, char *name, int64_t word);
+int     mojo_class_hasattr(int64_t tag, char *name);
+int64_t mojo_class_getattr(int64_t tag, char *name);                       /* AttributeError when absent */
+int64_t mojo_class_getattr_default(int64_t tag, char *name, int64_t dflt);
+void    mojo_class_delattr(int64_t tag, char *name);
+int64_t mojo_re_call(int64_t obj, char *name, MojoList *args, MojoDict *kw);
 /* `_kw` variants: the key arrives as a raw machine WORD that is either a boxed
  * string pointer or an integer, and the same decision mojo_cstr_or_int_str
  * makes (mojo_boxed_is_str) is made here — but an integer is looked up directly,
@@ -2038,7 +2066,7 @@ typedef void* MojoFileHandle;
    They were left undeclared for the whole of FORMAL.md phase 2's ceiling 2,
    on the belief that the symbol the dylib exports is a DIFFERENT function from
    one `fire_runtime.c` declares — which is why declaring them needed a decision
-   rather than a line. Measured (`bugs/FORMAL_runtime_library_on_the_link_line.md`
+   rather than a line. Measured (`bugs/formal/FORMAL_runtime_library_on_the_link_line.md`
    §0.2, and re-measured on this tree): `fire_runtime.c` has `#define USE_PYTHON
    0`, so the definition behind the symbol is the `#else` arm at :452, and BOTH
    arms of that `#if` carry the same C signature. `MojoFileHandle` is

@@ -7947,26 +7947,65 @@ def main():
 
     def test_flagged_re_compile_is_not_lowered_as_the_bare_pattern():
         """`P = re.compile(p, re.MULTILINE)` is a different pattern than `p`
-        and the regex engine has no flag input, so a loop over `P.findall` /
-        `P.finditer` must stay refused (loudly) instead of scanning `p` with
-        the flags silently dropped -- which matched nothing for a `^` pattern
-        and made the compiled `_dep_sources_texts` find no dependencies."""
+        and the compile-time regex engine has no flag input, so `P.findall`
+        must NOT be scanned as the bare `p` with the flags silently dropped
+        -- which matched nothing for a `^` pattern and made the compiled
+        `_dep_sources_texts` find no dependencies. The call used to stay a
+        loud `mojo_unsupported_iter`; it now goes through the runtime `re`
+        (`mojo_re_compile(pat, flags)`), which honours the flag, so what is
+        pinned is the ANSWER: the built binary prints what CPython prints
+        (both lines match `^a`; the bare pattern would match only the first)."""
         global _PASS, _FAIL
         name = "flagged_re_compile_is_not_lowered_as_the_bare_pattern"
-        import gimple_codegen as _g
+        import subprocess as _sp, tempfile as _tf
         src = ("import re\n"
                "_R = re.compile(r'^(a)', re.MULTILINE)\n"
                "def main():\n"
                "    for m in _R.findall('a\\na'):\n"
                "        print(m)\n"
                "main()\n")
-        c = _g.compile_to_gimple(src)
-        if 'mojo_regex_search' in c or 'mojo_unsupported_iter' not in c:
-            print(f"FAIL  {name}")
+        with _tf.TemporaryDirectory() as d:
+            sp = os.path.join(d, 'flagged.py')
+            with open(sp, 'w') as fh:
+                fh.write(src)
+            want = _sp.run([sys.executable, sp], capture_output=True, text=True).stdout
+            exe = os.path.join(d, 'flagged')
+            b = _sp.run([sys.executable, os.path.join(_PROJECT_DIR, 'fire.py'), 'build',
+                         '-o', exe, sp], capture_output=True, text=True, timeout=600)
+            got = (_sp.run([exe], capture_output=True, text=True, timeout=60).stdout
+                   if b.returncode == 0 and os.path.exists(exe) else None)
+        if got != want or want != 'a\na\n':
+            print(f"FAIL  {name}: got {got!r}, want {want!r}")
             _FAIL += 1
         else:
             print(f"PASS  {name}")
             _PASS += 1
+
+    def test_set_field_read_off_a_boxed_receiver_is_a_set_not_a_list():
+        """`st.fs_x = gen._fresh_vals` (a `set` field read off an untyped
+        `gen`) was lowered as a `MojoList *` -- the boxed-field fallback took
+        "has a recorded element type" to mean "list" -- and refused with
+        `cannot coerce MojoList * to MojoSet *`, so the self-host closure
+        compiled emit_infra.py twice (the refused attempt, then source
+        inclusion)."""
+        global _PASS, _FAIL
+        name = "set_field_read_off_a_boxed_receiver_is_a_set_not_a_list"
+        import gimple_codegen as _g
+        src = ("class FS:\n"
+               "    def __init__(self):\n"
+               "        self.a: set = set()\n"
+               "\n"
+               "def save(gen):\n"
+               "    st = FS()\n"
+               "    st.a = gen._fresh_vals\n"
+               "    return st\n")
+        try:
+            _g.compile_to_gimple(src)
+            print(f"PASS  {name}")
+            _PASS += 1
+        except Exception as e:
+            print(f"FAIL  {name}: {e}")
+            _FAIL += 1
 
     def test_bracket_mentions_matches_the_regex_it_replaced():
         """`elab_intu._bracket_mentions` is the run-time-regex-free form of
@@ -13330,6 +13369,7 @@ print(run('x/y.txt'))
     _run_isolated(lambda: test_no_compiler_module_defines_a_function_twice(), 'test_no_compiler_module_defines_a_function_twice (line 12710)')
     _run_isolated(lambda: test_import_line_modules_matches_the_regex_it_replaced(), 'test_import_line_modules_matches_the_regex_it_replaced (line 12711)')
     _run_isolated(lambda: test_flagged_re_compile_is_not_lowered_as_the_bare_pattern(), 'test_flagged_re_compile_is_not_lowered_as_the_bare_pattern (line 12712)')
+    _run_isolated(lambda: test_set_field_read_off_a_boxed_receiver_is_a_set_not_a_list(), 'test_set_field_read_off_a_boxed_receiver_is_a_set_not_a_list')
     _run_isolated(lambda: test_bracket_mentions_matches_the_regex_it_replaced(), 'test_bracket_mentions_matches_the_regex_it_replaced (line 12713)')
     _run_isolated(lambda: test_func_state_snapshot_covers_reset_func(), 'test_func_state_snapshot_covers_reset_func (line 12714)')
     _run_isolated(lambda: test_every_funcptr_initializer_has_a_definition(), 'test_every_funcptr_initializer_has_a_definition (line 12715)')

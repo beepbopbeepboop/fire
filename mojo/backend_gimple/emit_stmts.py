@@ -1267,6 +1267,33 @@ def _gen_stmt_AssignStmt(gen, node):
     vtype, v = gen.lower_expr(node.value)
     if isinstance(node.target, gimple_ctypes.IdentExpr):
         tname = node.target.name
+        # A generator handle bound to a local whose slot is a plain word (it also
+        # holds a list on another path: `dirs = _iglob(...)` / `dirs = [dirname]`,
+        # then `for d in dirs`): the run time has to be told which generator it is
+        # for the `for` over the word to drain it.
+        _tdecl = gen.var_types.get(tname)
+        if _tdecl is None and vtype == 'MojoGenerator *':
+            # first assignment: the slot is declared from the pre-pass verdict
+            if tname in ginf.mixed_container_locals(gen):
+                _tdecl = 'int64_t'
+            else:
+                _fk = gen.current_func_name
+                _tdecl = (getattr(gen, '_inferred_var_types', {}).get(_fk, {}) or {}).get(tname)
+        if (vtype == 'MojoGenerator *' and v in gen._generator_var_api
+                and _tdecl is not None and _tdecl != 'MojoGenerator *'):
+            _gapi2 = gen._generator_var_api[v]
+            if _as_str(_gapi2.get('base') or '').startswith('__mgco_'):
+                _vk2 = {'int64_t': 0, '_Bool': 1, 'double': 2, 'char *': 3}.get(
+                    _as_str(_gapi2.get('value_ctype') or 'int64_t'))
+                if _vk2 is not None:
+                    if not hasattr(gen, '_gen_handle_word_locals'):
+                        gen._gen_handle_word_locals = set()
+                    gen._gen_handle_word_locals.add(_as_str(tname))
+                    _hw2 = gen._to_int64(vtype, v)
+                    _kv2 = gen._new_val('int64_t', str(_vk2))
+                    v = gen._call_expr('int64_t', 'mojo_gen_note_a3',
+                                       [('int64_t', _hw2), ('int64_t', _kv2)])
+                    vtype = 'int64_t'
         # A slot read that may be a BOX (`mojo_list_get_boxed`: `v = t[1]` off
         # a tuple whose kinds are only known at run time) is unwrapped when it
         # is bound to a name. The temp is tracked in `_boxed_vals`; the local
@@ -1795,6 +1822,21 @@ def _gen_stmt_AssignStmt(gen, node):
                 vtype, 'MojoList *', v)
             gen._emit_call('void', '', 'mojo_replace_argv',
                             [('MojoList *', _av)])
+            return
+        # `Cls.attr = value` / `cls.attr = value` for an attribute the class body never
+        # declares: the run-time class table (what `setattr(Cls, ...)` writes too).
+        _wst = ggc._class_struct_of_arg(gen, node.target.obj)
+        if (_wst is not None
+                and node.target.member not in gen._class_attrs.get(_wst, {})
+                and node.target.member not in gen._struct_method_names.get(_wst, ())
+                and node.target.member not in gen.struct_field_types.get(_wst, {})):
+            _wtag = gen._new_val('int64_t', f'{gimple_exprtypes._struct_type_id(_wst)}LL')
+            _ww = (gen._call_expr('int64_t', 'mojo_box_from_double', [('double', v)])
+                   if vtype == 'double' else gen._to_int64(vtype, v))
+            gen._void_call('mojo_class_setattr',
+                           [('int64_t', _wtag),
+                            ('char *', gen._intern_string(_as_str(node.target.member))),
+                            ('int64_t', _ww)])
             return
         # `f.attr = value` where `f` is a free function memoizing a
         # value on itself -- see the `_func_attrs` pre-scan's docstring
@@ -2794,6 +2836,21 @@ def _gen_stmt_ReturnStmt(gen, node):
         vtype: str = ''
         v: str = ''
         vtype, v = gen.lower_expr(node.value)
+        # A generator handle leaving a function whose return slot is a plain word
+        # (`def iglob(...): it = _iglob(...); return it`, consumed as `list(iglob(...))`):
+        # the consumer can only drain it if the run time knows which generator it is.
+        if (vtype == 'MojoGenerator *' and v in gen._generator_var_api
+                and _as_str(gen.func_ret_type) != 'MojoGenerator *'):
+            _gapi = gen._generator_var_api[v]
+            if _as_str(_gapi.get('base') or '').startswith('__mgco_'):
+                _vk = {'int64_t': 0, '_Bool': 1, 'double': 2, 'char *': 3}.get(
+                    _as_str(_gapi.get('value_ctype') or 'int64_t'))
+                if _vk is not None:
+                    _hw = gen._to_int64(vtype, v)
+                    _kv = gen._new_val('int64_t', str(_vk))
+                    v = gen._call_expr('int64_t', 'mojo_gen_note_a3',
+                                       [('int64_t', _hw), ('int64_t', _kv)])
+                    vtype = 'int64_t'
         # A function that is used as a VALUE (passed or stored, never only
         # called) is invoked by a consumer that cannot know its return type,
         # so a string/float list it returns carries its slot kind (the
@@ -4504,6 +4561,14 @@ def _gen_stmt_ExprStmt(gen, node):
                 gen._auto_stubbed.add(fname)
             # For user-defined functions, still use _emit_call to handle type coercion
             ret_type = gen.func_return_types.get(raw_name, 'void')
+            # `yield x` of a loop variable read as a BOX (an element of a list that records
+            # its own per-slot kinds): the consumer wants the word inside, not the box.
+            if (raw_name in ('__mojo_coro_yield_i', '__mojo_coro_yield_p')
+                    and len(arg_pairs) == 2 and len(node.value.args) == 2
+                    and isinstance(node.value.args[1], gimple_ctypes.IdentExpr)
+                    and _as_str(arg_pairs[1][1]) in getattr(gen, '_boxed_vals', ())):
+                _uw = gen._call_expr('int64_t', 'mojo_box_word', [('int64_t', arg_pairs[1][1])])
+                arg_pairs = [arg_pairs[0], ('int64_t', _uw)]
             gen._emit_call(ret_type, '', fname, arg_pairs)
     else:
         gen.lower_expr(node.value)

@@ -91,7 +91,7 @@ answer is a claim about a host nobody checked.
 # missing one and costs the same. `tools/formal_host_import_shapes.py`
 # reads it as `DEAD` and `formal_sweep_causes.py`'s `mentions` column is
 # the older measure of the same thing; see
-# `bugs/FORMAL_a_call_result_field_access_has_no_representation.md` §3.
+# `bugs/formal/FORMAL_a_call_result_field_access_has_no_representation.md` §3.
 import os
 import re
 import sys
@@ -482,7 +482,7 @@ _OVERCLAIM = (
 #
 # A version that scales past both limits is the one this doc named second: give
 # `Contract` a declared KIND (`status`, `byte_string`, `handle`, …) and check
-# the text against that kind's shape, which is `bugs/FORMAL_contract_scope_
+# the text against that kind's shape, which is `bugs/formal/FORMAL_contract_scope_
 # rule_is_a_phrase_list.md`'s §"option 2" and is not done here because it
 # duplicates every `@admitted` text in a second place — the one thing this
 # module's header forbids.

@@ -1014,6 +1014,31 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         if _ci.env_struct:
             env_void = gen._new_val(
                 'void *', f'(void *){gen._closure_envs.get(name) or "0"}')
+            # A VARIADIC nested def (`def gen(*a, **kw)`) is a MojoVarargFn
+            # exactly as a variadic lambda is: a call through the value packs
+            # its arguments into the list / dict the callee wants.
+            _vk = -1
+            _vfix = 0
+            for _vpn, _vpa in _ci.inner_def.params:
+                if _vpn.startswith('**'):
+                    _vk = 1 if _vk == 0 else 2
+                elif _vpn.startswith('*'):
+                    if _vk < 0:
+                        _vk = 0
+                elif _vk < 0:
+                    _vfix += 1
+            if _vk >= 0 and _vfix <= 4:
+                _vnf = gen._new_val('int64_t', str(_vfix))
+                _vkd = gen._new_val('int64_t', str(_vk))
+                _vhs = gen._new_val('int64_t', '1')
+                _vf = gen._call_expr('MojoVarargFn *', 'mojo_vararg_fn_new',
+                                     [('void *', fp), ('void *', env_void),
+                                      ('int64_t', _vnf), ('int64_t', _vkd),
+                                      ('int64_t', _vhs)])
+                _vft = gen._new_val('void *', f'(void *){_vf}')
+                gen._callable_ret_types[_vft] = gen.func_return_types.get(lifted, 'int64_t')
+                gen._func_value_names[_vft] = _repr_name
+                return 'void *', _vft
             t = gen._call_expr('MojoBoundMethod *', 'mojo_bound_method_new',
                                 [('void *', fp), ('void *', env_void)])
             gen._bound_method_ret_types[t] = gen.func_return_types.get(lifted, 'int64_t')
@@ -1106,6 +1131,17 @@ def _lower_WalrusExpr(gen, node) -> tuple[str, str]:
     dst = gen.var_types[node.name]
     gen._safe_coerce_emit(vtype, dst, vv, gen._cname(node.name))
     return dst, gen._cname(node.name)
+
+
+def _lower_class_dyn_getattr(gen, struct_name: str, member: str) -> tuple[str, str]:
+    """`Cls.member` / `cls.member` for an attribute the class body never declares: a word read
+    from the run-time class table (AttributeError when no class on the MRO has it)."""
+    tag = gimple_exprtypes._struct_type_id(_as_str(struct_name))
+    tg = gen._new_val('int64_t', f'{tag}LL')
+    r = gen._call_expr('int64_t', 'mojo_class_getattr',
+                       [('int64_t', tg), ('char *', gen._intern_string(_as_str(member)))])
+    gen._dyn_word_vals.add(r)
+    return 'int64_t', r
 
 
 def _lower_UnaryOp(gen, node) -> tuple[str, str]:
@@ -1585,6 +1621,12 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
             _gname = gen._class_attrs[_cur_struct][node.member]
             _gtype = gen._global_var_types.get(_gname, 'int64_t')
             return _gtype, gmp._cattr_read(gen, _gname, _gtype)
+        if (module_name == 'cls' and _cur_struct and module_name in gen.var_types
+                and _cur_struct in gen._struct_bases
+                and node.member not in gen._struct_method_names.get(_cur_struct, ())
+                and node.member not in gen.struct_field_types.get(_cur_struct, {})
+                and node.member not in gen._class_attrs.get(_cur_struct, {})):
+            return _lower_class_dyn_getattr(gen, _cur_struct, node.member)
 
         # `f.attr` read where `f` is a free function memoizing a value on
         # itself (`f._cached`) — see the `_func_attrs` pre-scan (Phase 1,
@@ -1856,6 +1898,16 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
                     and isinstance(getattr(_host_os, _mem, None), int)):
                 return 'int64_t', gen._new_val('int64_t', str(getattr(_host_os, _mem)))
 
+        # `re.IGNORECASE` & co.: the flag values the run-time regex engine reads.
+        if _canon == 're':
+            if _as_str(node.member) == 'escape':
+                return 'void *', gen._new_val('void *', '(void *)mojo_re_escape_w')
+            _re_flags = {'NOFLAG': 0, 'I': 2, 'IGNORECASE': 2, 'M': 8, 'MULTILINE': 8,
+                         'S': 16, 'DOTALL': 16, 'U': 32, 'UNICODE': 32, 'X': 64,
+                         'VERBOSE': 64, 'A': 256, 'ASCII': 256}
+            if _as_str(node.member) in _re_flags:
+                return 'int64_t', gen._new_val('int64_t', str(_re_flags[_as_str(node.member)]))
+
         # Special handling for os.path attribute access
         if _canon == 'os' and node.member == 'path':
             # The actual function call will be handled at the call site
@@ -1967,6 +2019,13 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
                     gen._elem_types[_gv] = _ge
                     gen._actual_types[_gv] = 'MojoList *'
                 return gtype, _gv
+            # Not declared in the class body: an attribute installed at run time
+            # (`setattr(Cls, ..)` / `Cls.x = v` / a metaclass) lives in the run-time class table.
+            _rt_struct = gmp._resolve_fn_scoped_struct_name(gen, module_name)
+            if (_rt_struct in gen._struct_bases
+                    and node.member not in gen._struct_method_names.get(_rt_struct, ())
+                    and node.member not in gen.struct_field_types.get(_rt_struct, {})):
+                return _lower_class_dyn_getattr(gen, _rt_struct, node.member)
             # Not a comptime alias — a genuine class-level access this
             # compiler doesn't yet resolve statically (unimplemented,
             # not merely unreached); stub with a clearly-marked value.
@@ -2836,7 +2895,8 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # two arms bind the SAME loop variable to a `char *` key and to a
         # real element — one variable, two incompatible declared types.
         if _boxed_ft is None and gen._known_field_elem_type(node.member):
-            _boxed_ft = 'MojoList *'
+            _boxed_ft = ('MojoSet *' if node.member in gen._set_elem_fields
+                         else 'MojoList *')
         raw = gen._call_expr('int64_t', '_mojo_dispatch_getattr',
                               [('void *', vp), ('char *', f'"{node.member}"')])
         if _boxed_ft is not None and _boxed_ft != 'int64_t':
@@ -2899,7 +2959,8 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # two arms bind the SAME loop variable to a `char *` key and to a
         # real element — one variable, two incompatible declared types.
         if _boxed_ft is None and gen._known_field_elem_type(node.member):
-            _boxed_ft = 'MojoList *'
+            _boxed_ft = ('MojoSet *' if node.member in gen._set_elem_fields
+                         else 'MojoList *')
         if (_boxed_ft is None and gen._is_except_as_member_target(node.obj)
                 and node.member in gen._except_attr_str_fields):
             # `err.filename` (a caught exception object's dynamically-set
@@ -3972,6 +4033,18 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
             gen._emit(f"  {cp} = (char *){ip};")
             return 'char *', cp
         return typ, val
+    if (op == '+' and lt in ('int', 'int64_t') and rt in ('int', 'int64_t')
+            and (ginf._is_may_hold_str_param(gen, left_node)
+                 or ginf._is_may_hold_str_param(gen, right_node))):
+        # Operands that are words of unknown kind, one of them a PARAMETER some call
+        # site passed a string for: `+` is string concatenation or integer
+        # addition depending on what the words are, which only the run time
+        # knows. The result is a word of the same unknown kind.
+        _aw = gen._call_expr('int64_t', 'mojo_add_words',
+                             [('int64_t', gen._to_int64(lt, lv)),
+                              ('int64_t', gen._to_int64(rt, rv))])
+        gen._dyn_word_vals.add(_aw)
+        return 'int64_t', _aw
     if op == '+':
         # Check if the OTHER operand is a string literal - helps identify string concatenation
         right_is_lit = isinstance(right_node, gimple_ctypes.StringLiteral)

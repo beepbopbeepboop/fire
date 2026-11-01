@@ -915,7 +915,7 @@ def _cpp_for_over_callable_local_is_named():
     # the call nor the reason — so the SAME blocker read as five unrelated
     # gaps (c_common/tables.py `read_table`, c_analyzer/__init__.py
     # `check_all`, c_common/fsutil.py `glob_tree`/`_walk_tree`,
-    # bugs/CODEGEN_generator_function_Lib_glob.md's `_iglob`,
+    # Lib/glob.py's `_iglob` (the generator-compile bug, fixed 2026-10-31),
     # the (since-fixed) Lib/os.py generator refusal's `walk`) and each doc had to
     # re-derive what to do about it. It stays a refusal — the callee's
     # return type genuinely is not knowable in this body model — but now says
@@ -2404,7 +2404,7 @@ def run_nested_generator_capture_tests():
     # The f-string case is the one that matters for c-analyzer's
     # `build_section`: `f'{name}:'` reads `name` even though the parser keeps
     # the f-string as one raw literal.
-    test_generator_refused("nested_generator_reads_enclosing_param_in_fstring_refused", """\
+    test_generator_stdout("nested_generator_reads_enclosing_param_in_fstring_escaping", """\
 def build_section(name: String, n: Int):
     def render():
         yield f'{name}:'
@@ -2417,17 +2417,29 @@ def main():
     render = build_section('x', 2)
     for x in render():
         print(x)
-""", "variable(s) n, name")
-    # The plain local now boxes (see `..._captures_enclosing_plain_local`);
-    # this generator ESCAPES as a value, which has no frame to hand the box
-    # handle to, so the escape is what stays refused.
-        # The former `nested_generator_escaping_plain_local_refused`: a nested
-    # generator that reads a PLAIN (non-`var`) local and escapes as a value
-    # used to stay refused ("no frame to hand the box handle to"). The
-    # escaping-closure mechanism now compiles it — the captured local's
-    # value is snapshotted into the closure record at the `def`, and the
-    # caller's loop drains the generator it returns.
-    test_generator_matches_cpython("nested_generator_escaping_plain_local", """\
+""", "x:\nrow\nrow\n")
+    # The plain local now boxes (see `..._captures_enclosing_plain_local`).
+    # This generator ESCAPES as a value: the former
+    # `nested_generator_escaping_plain_local_refused` ("no frame to hand the
+    # box handle to") now compiles — the captured local's value is
+    # snapshotted into the closure at the `def`, and the caller's loop
+    # drains the generator it returns.
+    test_generator_stdout("nested_generator_escaping_plain_local", """\
+def outer(n: Int):
+    total = n * 2
+    def g():
+        yield total
+    return g
+
+def main():
+    for v in outer(4)():
+        print(v)
+main()
+""", "8\n")
+    # The same escape checked against CPython with a second value: the
+    # oracle form the shape is pinned in (run_escaping_nested_generator_
+    # tests pins the consumer family).
+    test_generator_matches_cpython("nested_generator_escaping_plain_local_oracle", """\
 def outer(n: Int):
     total = n * 2
     def g():
@@ -2528,9 +2540,24 @@ outer()
 """)
     # A nested generator that escapes as a value (returned, so later called
     # with no enclosing frame to supply its box handle) used to stay
-    # refused; the escaping-closure mechanism (run_escaping_nested_
-    # generator_tests) now compiles it — the generated C must be valid, and
-    # the consumer shape is pinned behaviorally there.
+    # refused; the escaping-closure mechanism now compiles it — the closure
+    # starts the moved generator and the caller's loop drains the live
+    # handle.
+    test_generator_stdout("nested_generator_escaping_as_value_with_capture", """\
+def outer():
+    var k = 5
+    def g():
+        yield k
+    return g
+
+def main():
+    for v in outer()():
+        print(v)
+main()
+""", "5\n")
+    # The same escape with no consumer: a factory whose returned word is
+    # dropped still compiles to valid C (the consumer shape is pinned
+    # behaviorally in run_escaping_nested_generator_tests).
     test_generator_c_compiles("nested_generator_escaping_as_value_with_capture_compiles", """\
 def outer():
     var k = 5
@@ -2809,13 +2836,13 @@ def main():
 def run_escaping_nested_generator_tests():
     """The ESCAPING-closure generator: a nested generator that reads
     enclosing names AND escapes its enclosing def as a value (`return g` —
-    the glob.py selector factories, bugs/CODEGEN_generator_function_
-    Lib_glob.md's round-5 verification program). At the `def`, the enclosing
-    function materializes a closure record (the captured values + the
-    generator's start, wrapped as a registered variadic callable); the
-    caller drives it through the ordinary function-value dispatch and
-    iterates the returned handle through the runtime's drained list. Before
-    this landed, the module refused to compile ("is a nested generator that
+    the Lib/glob.py selector-factory shape, the generator-compile bug fixed
+    2026-10-31; this section pins the round-5 verification program). At the
+    `def`, the enclosing function materializes a closure around the captured
+    values that starts the moved generator; the caller drives it through the
+    ordinary function-value dispatch and iterates the returned handle through
+    the runtime's drained list. Before the escaping-closure mechanism
+    landed, the module refused to compile ("is a nested generator that
     reads enclosing-scope variable(s)")."""
     test_generator_matches_cpython("nested_generator_escaping_closure_factory", """\
 def make(k):
@@ -2870,14 +2897,14 @@ def make(a, b):
 for v in make(2, 10)(3):
     print(v)
 """)
-    # Boundary: a STRING capture is not threaded yet. The enclosing scope
-    # a nested generator may read from is scalar-only (int64_t/double/
-    # _Bool — the same limit the in-place drive form has: a char * capture
-    # would make the caller's `for` bind the drained elements through the
-    # generic dispatch, whose loop variable is dict-key-typed — a silent
-    # misread of str elements). The module keeps the honest refusal until
-    # the char * capture + drained-list element typing land together.
-    test_generator_refused("nested_generator_escaping_str_capture_refused", """\
+    # A STRING capture rides the closure record as a tagged word: the
+    # trampoline appends the pointer's bits to the captured-word list and the
+    # drained loop reads them back through the dynamic-word kind
+    # classification (the "tagged word" handling in
+    # runtime/fire_runtime.c's generator-signature path). The honest refusal
+    # this module carried before the middle tier learned to move a
+    # string-reading generator is now an answer, pinned against CPython.
+    test_generator_matches_cpython("nested_generator_escaping_str_capture", """\
 def make(tag):
     def gen(n):
         for i in range(n):
@@ -2891,7 +2918,17 @@ def main():
 
 
 main()
-""", "variable(s) tag")
+""", """\
+def make(tag):
+    def gen(n):
+        for i in range(n):
+            yield tag
+    return gen
+
+
+for v in make('row')(3):
+    print(v)
+""")
     # In-place drive AND escape of the same nested generator: the direct
     # call threads the captures as before (_emit_nested_generator_start_
     # call) and the returned closure records them for the caller.
@@ -4073,7 +4110,7 @@ def main():
     # `cls._value2member_map_.get(val)`, a `Flag *`), reduced to a `self`-
     # based (non-classmethod) generator method here since the `cls`-access
     # gap itself is a separate, still out-of-scope limitation (see
-    # CODEGEN_generator_function_Lib_enum.md). Exercises: struct-pointer
+    # CODEGEN_enum_runtime_class_creation.md). Exercises: struct-pointer
     # yield-type inference via `_field_dict_val_types` (seeded early, from
     # the field's own `var map: dict[Int, Flag]` declaration, so it's
     # available in time for generator-method translation), the promise/
@@ -4181,7 +4218,7 @@ def main():
     # `cls.method(...)` call inside a compiled @classmethod generator —
     # resolved purely by NAME (the enclosing struct's own real compiled
     # classmethod), mirroring the `self.method(...)` call case's own
-    # mechanism. See bugs/CODEGEN_generator_function_Lib_enum.md's
+    # mechanism. See bugs/CODEGEN_enum_runtime_class_creation.md's
     # 2026-08-21 update, point (2). Also called via an instance, for the
     # same call-site-gap reason noted above.
     test_generator_stdout("cls_classmethod_call_in_generator", """\
@@ -7353,6 +7390,428 @@ def main():
 
 main()
 """, "['n1', 'n1/n11', 'n1/n12', 'n2', 'n2/n21', 'n2/n22']\n")
+
+    # A class attribute that is only ASSIGNED outside the class body
+    # (`A.zmask = 7`, as Lib/enum.py's metaclass does for `_flag_mask_`) is a
+    # class attribute: reading it back used to answer an empty container.
+    # Inherited class-body attributes in `@classmethod` generators still resolve
+    # per class (`B.gen` sees B's `base`).
+    test_generator_stdout("generator_classmethod_reads_class_attributes_incl_posthoc", """\
+class A:
+    base = 10
+
+    @classmethod
+    def gen(cls, n):
+        for i in range(n):
+            yield cls.base + i
+
+    @classmethod
+    def total(cls, n):
+        return cls.base * n
+
+class B(A):
+    base = 100
+
+A.zmask = 7
+
+def main():
+    print(list(A.gen(3)))
+    print(list(B.gen(3)))
+    print(A.total(2), B.total(2))
+    print(A.zmask)
+
+main()
+""", "[10, 11, 12]\n[100, 101, 102]\n20 200\n7\n")
+
+    # A generator defined inside a function, reading its parameter, that ESCAPES as
+    # a value (`return gen`): split into a module generator taking the capture plus
+    # a closure that starts it, and consumed through the returned callable.
+    test_generator_stdout("generator_escaping_closure_returned_and_iterated", """\
+def make(k):
+    def gen(n):
+        for i in range(n):
+            yield i * k
+    return gen
+
+def main():
+    for v in make(3)(4):
+        print(v)
+    g = make(5)
+    print(list(g(3)))
+    for v in g(2):
+        print(v)
+
+main()
+""", "0\n3\n6\n9\n[0, 5, 10]\n0\n5\n")
+
+    # The same split for a METHOD's nested generator: `self` is captured as the
+    # moved generator's receiver parameter, so it reads the live object's fields,
+    # and the method returns the closure as a value.
+    test_generator_stdout("generator_escaping_closure_in_method_reads_self", """\
+class G:
+    def __init__(self, k):
+        self.k = k
+
+    def sel(self, m):
+        def gen(n):
+            for i in range(n):
+                yield i * self.k * m
+        return gen
+
+def main():
+    g = G(2)
+    s = g.sel(3)
+    for v in s(4):
+        print(v)
+    print(list(g.sel(1)(3)))
+
+main()
+""", "0\n6\n12\n18\n[0, 2, 4]\n")
+
+    # The glob-selector shape: a method returns a closure generator that delegates
+    # to the closure the SAME method built for the rest of the pattern, called
+    # with a keyword argument; the path is a dynamic word (str here).
+    test_generator_matches_cpython("generator_escaping_closure_chain_keyword_call_dynamic_path", """\
+class Base:
+    def __init__(self, sep):
+        self.sep = sep
+
+    def sel(self, parts):
+        dir_only = bool(parts)
+        if dir_only:
+            nxt = self.sel(parts[1:])
+
+        def gen(path, exists=False):
+            if dir_only:
+                yield from nxt(path, exists=True)
+            else:
+                yield path
+        return gen
+
+def main():
+    g = Base("/")
+    s = g.sel(["a/", "b/"])
+    for v in s("root/"):
+        print(v)
+    for v in s("x"):
+        print(v)
+
+main()
+""", """\
+class Base:
+    def __init__(self, sep):
+        self.sep = sep
+
+    def sel(self, parts):
+        dir_only = bool(parts)
+        if dir_only:
+            nxt = self.sel(parts[1:])
+
+        def gen(path, exists=False):
+            if dir_only:
+                yield from nxt(path, exists=True)
+            else:
+                yield path
+        return gen
+
+def main():
+    g = Base("/")
+    s = g.sel(["a/", "b/"])
+    for v in s("root/"):
+        print(v)
+    for v in s("x"):
+        print(v)
+
+main()
+""")
+
+    # The selector chain with a path built by a METHOD over dynamic words: the
+    # method's `a + b` must concatenate (its parameters are strings at run time),
+    # and `parts[0]` of the captured word is a list element.
+    test_generator_matches_cpython("generator_escaping_closure_chain_method_concat_dynamic_words", """\
+class Base:
+    def __init__(self, sep):
+        self.sep = sep
+
+    def concat_path(self, a, b):
+        return a + b
+
+    def sel(self, parts):
+        dir_only = bool(parts)
+        if dir_only:
+            nxt = self.sel(parts[1:])
+
+        def gen(path, exists=False):
+            if dir_only:
+                yield from nxt(self.concat_path(path, parts[0]), exists=True)
+            else:
+                yield path
+        return gen
+
+def main():
+    g = Base("/")
+    s = g.sel(["a/", "b/"])
+    for v in s("root/"):
+        print(v)
+
+main()
+""", """\
+class Base:
+    def __init__(self, sep):
+        self.sep = sep
+
+    def concat_path(self, a, b):
+        return a + b
+
+    def sel(self, parts):
+        dir_only = bool(parts)
+        if dir_only:
+            nxt = self.sel(parts[1:])
+
+        def gen(path, exists=False):
+            if dir_only:
+                yield from nxt(self.concat_path(path, parts[0]), exists=True)
+            else:
+                yield path
+        return gen
+
+def main():
+    g = Base("/")
+    s = g.sel(["a/", "b/"])
+    for v in s("root/"):
+        print(v)
+
+main()
+""")
+    # A method whose parameters every call site passes strings for returns the
+    # string it builds (its return type was inferred before the parameters were).
+    test_generator_stdout("method_returning_concat_of_string_params", """\
+class B:
+    def cat(self, a, b):
+        return a + b
+
+def gen():
+    yield 1
+
+def main():
+    b = B()
+    print(b.cat("ab", "cd"))
+    w = "x"
+    print(b.cat(w, "y"))
+    for v in gen():
+        print(v)
+
+main()
+""", "abcd\nxy\n1\n")
+
+    # glob's recursive selector: an escaping closure generator drives a sibling
+    # (non-escaping) generator that both read `self` and the method's locals; the
+    # abstract base method is overridden by the receiver's class.
+    test_generator_matches_cpython("generator_escaping_closure_drives_capturing_sibling_virtual_self", """\
+class Base:
+    def __init__(self, k):
+        self.k = k
+
+    def step_val(self, v):
+        raise NotImplementedError
+
+    def sel(self, n):
+        limit = n
+
+        def outer_gen(start):
+            stack = [start]
+            while stack:
+                yield from step(stack)
+
+        def step(stack):
+            v = stack.pop()
+            if v < limit:
+                yield self.step_val(v)
+                stack.append(v + 1)
+        return outer_gen
+
+class Sub(Base):
+    def step_val(self, v):
+        return v * self.k
+
+def main():
+    s = Sub(10)
+    for x in s.sel(4)(0):
+        print(x)
+main()
+""", """\
+class Base:
+    def __init__(self, k):
+        self.k = k
+
+    def step_val(self, v):
+        raise NotImplementedError
+
+    def sel(self, n):
+        limit = n
+
+        def outer_gen(start):
+            stack = [start]
+            while stack:
+                yield from step(stack)
+
+        def step(stack):
+            v = stack.pop()
+            if v < limit:
+                yield self.step_val(v)
+                stack.append(v + 1)
+        return outer_gen
+
+class Sub(Base):
+    def step_val(self, v):
+        return v * self.k
+
+def main():
+    s = Sub(10)
+    for x in s.sel(4)(0):
+        print(x)
+main()
+""")
+
+    # A generator yielding the elements of a list that records its own slot kinds
+    # (a drained tagged generator): the words are unwrapped from their boxes, and the
+    # consumer's loop variable is a word of unknown kind, so strings and ints print right.
+    test_generator_matches_cpython("generator_relays_elements_of_a_runtime_kinded_list", """\
+def tagged():
+    yield 'x'
+    yield 1
+    yield 'z'
+
+def relay():
+    for v in list(tagged()):
+        yield v
+
+def main():
+    for v in relay():
+        print(v)
+
+main()
+""", """\
+def tagged():
+    yield 'x'
+    yield 1
+    yield 'z'
+
+def relay():
+    for v in list(tagged()):
+        yield v
+
+def main():
+    for v in relay():
+        print(v)
+
+main()
+""")
+
+    # Stage 1 of run-time class objects (bugs/CODEGEN_enum_runtime_class_creation.md): an attribute
+    # the class body never declares - `setattr(cls, ..)`, `Cls.x = v`, what a metaclass installs -
+    # lives in a run-time class table found through the bases, and a @classmethod generator (or
+    # method) reads it as `cls.x`; getattr / hasattr on a class use the same table.
+    test_generator_matches_cpython("generator_classmethod_reads_runtime_class_attributes", """\
+class A:
+    base = 10
+
+    @classmethod
+    def gen(cls, n):
+        for i in range(n):
+            yield cls.base + cls.extra + i
+
+    @classmethod
+    def total(cls):
+        return cls.base + cls.extra
+
+class B(A):
+    base = 100
+
+def main():
+    setattr(A, 'extra', 5)
+    B.extra = 7
+    print(list(A.gen(2)))
+    print(list(B.gen(2)))
+    print(A.total(), B.total())
+    print(getattr(A, 'extra'), B.extra, hasattr(A, 'nope'), hasattr(A, 'extra'))
+main()
+""", """\
+class A:
+    base = 10
+
+    @classmethod
+    def gen(cls, n):
+        for i in range(n):
+            yield cls.base + cls.extra + i
+
+    @classmethod
+    def total(cls):
+        return cls.base + cls.extra
+
+class B(A):
+    base = 100
+
+def main():
+    setattr(A, 'extra', 5)
+    B.extra = 7
+    print(list(A.gen(2)))
+    print(list(B.gen(2)))
+    print(A.total(), B.total())
+    print(getattr(A, 'extra'), B.extra, hasattr(A, 'nope'), hasattr(A, 'extra'))
+main()
+""")
+
+    # Lib/enum.py's `Flag._iter_member_by_def_`: `yield from sorted(cls.<generator method>(..),
+    # key=lambda m: m.<attr>)` - a generator call drained into a list, sorted by a key that reads
+    # an attribute of objects whose class the body cannot name (run-time struct reflection).
+    test_generator_matches_cpython("generator_yield_from_sorted_generator_call_with_attr_key", """\
+class M:
+    def __init__(self, v):
+        self.v = v
+        self._sort_order_ = 10 - v
+
+class F:
+    @classmethod
+    def by_value(cls, value):
+        for v in range(value):
+            yield M(v)
+
+    @classmethod
+    def by_def(cls, value):
+        yield from sorted(
+            cls.by_value(value),
+            key=lambda m: m._sort_order_,
+        )
+
+def main():
+    for m in F.by_def(4):
+        print(m.v)
+main()
+""", """\
+class M:
+    def __init__(self, v):
+        self.v = v
+        self._sort_order_ = 10 - v
+
+class F:
+    @classmethod
+    def by_value(cls, value):
+        for v in range(value):
+            yield M(v)
+
+    @classmethod
+    def by_def(cls, value):
+        yield from sorted(
+            cls.by_value(value),
+            key=lambda m: m._sort_order_,
+        )
+
+def main():
+    for m in F.by_def(4):
+        print(m.v)
+main()
+""")
 
     # ...but any consumer that is NOT a for / list / comprehension (here `next`
     # of a bound handle) would read the box's address as an int, so the

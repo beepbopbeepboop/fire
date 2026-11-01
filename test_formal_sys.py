@@ -126,7 +126,7 @@ def main():
 """
 
 # `sys.exit` is deliberately not an export; see the module's own docstring and
-# bugs/FORMAL_known_limits.md 1.1 for the settled decision.
+# bugs/formal/FORMAL_known_limits.md 1.1 for the settled decision.
 CALL_UNEXPORTED = """\
 import sys
 
@@ -526,7 +526,7 @@ def test_a_dotted_call_the_module_does_not_export_is_refused(tmp, _shared):
 
     `exit` is a C library symbol and `doc/ABI.md`'s export rule does not
     advertise one (`reflect._CLIB_SYMS`; measured and settled in
-    bugs/FORMAL_known_limits.md 1.1), so no module dylib can be called by that
+    bugs/formal/FORMAL_known_limits.md 1.1), so no module dylib can be called by that
     name. Before this the call fell through to the bare name and emitted a
     `BL` against a symbol nothing defines — an image that built, passed every
     static check, and died in the loader. A refusal that names the module and

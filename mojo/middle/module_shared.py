@@ -146,7 +146,7 @@ def _selfhost_parsed_modules(sd: str) -> list:
     tokenized and parsed three times AND all three AST copies stayed live
     for the life of the process. That is both the repeated work and a
     contributor to the never-frees accumulation measured in
-    `bugs/CODEGEN_bootstrap_resource_blowup.md`: one shared parse is ~1/3
+    `bugs/mid/CODEGEN_bootstrap_resource_blowup.md`: one shared parse is ~1/3
     the instructions and ~1/3 the retained AST nodes.
 
     The cache is keyed PER FILE on `(path, mtime)`, not on the whole file

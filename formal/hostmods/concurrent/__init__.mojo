@@ -17,7 +17,7 @@ def concurrent_futures_package() -> int:
 
     A `.mojo` module with no declarations is refused by `formal/build.py`'s dylib
     export gate -- "formal dylib has no public functions", the message that
-    `bugs/FORMAL_known_limits.md` §1.1 audits -- and a file importing `concurrent`
+    `bugs/formal/FORMAL_known_limits.md` §1.1 audits -- and a file importing `concurrent`
     would then be refused for a package that in CPython binds no name either.  One
     function is the cheapest thing that makes the module a module, and it is named
     after what it is rather than invented: a caller who wants `concurrent.futures`

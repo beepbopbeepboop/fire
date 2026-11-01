@@ -7,7 +7,8 @@
       "count": 1,
       "kind": "opencode",
       "recover_hours": 24,
-      "note": "OpenRouter free router: uses the free tokens. Never falls back."
+      "note": "OpenRouter free router: uses the free tokens. Never falls back.",
+      "class": "easy"
     },
     {
       "name": "opencode-free",
@@ -15,7 +16,8 @@
       "count": 1,
       "kind": "opencode",
       "recover_hours": 2.5,
-      "note": "DeepSeek V4.1 Flash on the free OpenCode tier. One worker. A limit waits 2.5 h."
+      "note": "DeepSeek V4.1 Flash on the free OpenCode tier. One worker. A limit waits 2.5 h.",
+      "class": "easy"
     },
     {
       "name": "qwen-local",
@@ -23,7 +25,8 @@
       "count": 1,
       "kind": "opencode",
       "recover_hours": 0,
-      "note": "Local 4-bit Qwen 3.8 27B, two workers. Never changes model, never banned."
+      "note": "Local 4-bit Qwen 3.8 27B, two workers. Never changes model, never banned.",
+      "class": "easy"
     },
     {
       "name": "llama-work",
@@ -31,7 +34,8 @@
       "count": 0,
       "kind": "opencode",
       "recover_hours": 0,
-      "note": "Spun down to 0 by the user's instruction: no new llama-work runs. Was one worker on 10.0.0.240:8080."
+      "note": "Spun down to 0 by the user's instruction: no new llama-work runs. Was one worker on 10.0.0.240:8080.",
+      "class": "easy"
     },
     {
       "name": "haiku",
@@ -39,7 +43,8 @@
       "count": 2,
       "kind": "claude",
       "recover_hours": 4.23,
-      "note": "Paid Claude tokens (headless claude -p). Four workers (2026-10-29 17:16: 21% of the 5-hour block with the reset at 18:50 local). Goal: the block to 100% before that reset; a limit bans it until the reset. (Weekly reset Friday 11:00 is the next wall after that.)"
+      "note": "Paid Claude tokens (headless claude -p). Four workers (2026-10-29 17:16: 21% of the 5-hour block with the reset at 18:50 local). Goal: the block to 100% before that reset; a limit bans it until the reset. (Weekly reset Friday 11:00 is the next wall after that.)",
+      "class": "easy"
     },
     {
       "name": "opencode-paid",
@@ -48,16 +53,44 @@
       "kind": "opencode",
       "recover_hours": 2.5,
       "long_recover_days": 15,
-      "note": "Paid OpenCode tokens (DeepSeek). A 5-hour block waits 2.5 h; a second block inside a day waits 15 days (the 30-day block)."
+      "note": "Paid OpenCode tokens (DeepSeek). A 5-hour block waits 2.5 h; a second block inside a day waits 15 days (the 30-day block).",
+      "class": "easy"
+    },
+    {
+      "name": "sonnet",
+      "model": "claude-sonnet-5-5",
+      "count": 0,
+      "kind": "claude",
+      "class": "mid",
+      "recover_hours": 4.23,
+      "note": "Sonnet 5.5, paid Claude tokens. Class mid: bugs/mid/*. Count 0 until the owner turns it on."
+    },
+    {
+      "name": "opus",
+      "model": "claude-opus-5-5",
+      "count": 0,
+      "kind": "claude",
+      "class": "hard",
+      "recover_hours": 4.23,
+      "note": "Opus 5.5, paid Claude tokens. Class hard: bugs/hard/*. Count 0 until the owner turns it on."
     }
   ],
   "feed": [
     "bugs/*.md",
+    "bugs/mid/*.md",
     "bugs/hard/*.md"
   ],
   "skip": [
     "FORMAL_",
-    "OPEN_WORK"
+    "OPEN_WORK",
+    "README"
   ],
-  "retry_hours": 12
+  "retry_hours": 12,
+  "classes": {
+    "easy": "bugs/*.md, everything not in mid/ or hard/ (haiku and the free/local slots)",
+    "mid": "bugs/mid/*.md (Sonnet 5.5)",
+    "hard": "bugs/hard/*.md (Opus 5.5)",
+    "escalate_after": 1,
+    "note": "Every doc starts easy. A no-commit attempt (a limit kill excluded) boosts it one class; the top class keeps its docs. Work stays in its class."
+  }
 }

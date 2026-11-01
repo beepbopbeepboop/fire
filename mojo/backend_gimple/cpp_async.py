@@ -237,8 +237,12 @@ def _cpp_iterable_is_delegatable_generator_call(gen, iterable) -> bool:
         _self_struct = getattr(gen, '_cpp_gen_self_struct', None)
         return bool(_self_struct
                     and isinstance(iterable.func.obj, gimple_ctypes.IdentExpr)
-                    and iterable.func.obj.name == 'self'
-                    and iterable.func.member in gen._all_generator_names)
+                    and iterable.func.obj.name in ('self', 'cls')
+                    and (iterable.func.member in gen._all_generator_names
+                         # a method the stack-switch path already compiled
+                         # (`__mgco_<S>_<m>_start/_resume/_value/_destroy`: the same four
+                         # entry points) is driven exactly like a coroutine one
+                         or (_self_struct, iterable.func.member) in gen._generator_method_api))
     return False
 
 
@@ -475,9 +479,19 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     if _has_sd:
         fn = gcc_._cpp_lower_scandir_withs(gen, fn)   # `with scandir(..) as e` -> a real list of DirEntry handles
     gen.func_return_types.setdefault('mojo_list_slice_word', 'MojoList *')
+    _saved_self_struct = getattr(gen, '_cpp_gen_self_struct', None)
+    gen._cpp_gen_self_struct = struct_name   # the delegatable-call test reads it
+    try:
+        fn = gcc_._cpp_drain_generator_args(gen, fn)   # `yield from sorted(G(..))` -> drain G first
+    finally:
+        gen._cpp_gen_self_struct = _saved_self_struct
     if gcc_._cpp_needs_posix_idioms(gen, fn):
         fn = gcc_._cpp_lower_posix_idioms(gen, fn)   # fd-relative posix calls -> runtime calls
     gen._cpp_str_evidence_names = gimple_exprtypes._str_evidence_names(fn)
+    gen._cpp_object_params = set()   # parameters declared `object`: dynamic words
+    for _opn, _opa in (fn.params or []):
+        if _opa == 'object':
+            gen._cpp_object_params.add(gimple_ctypes._as_str(_opn))
     gen._cpp_list_word_names = gimple_exprtypes._list_method_names(fn)
     _opa = gcc_._cpp_collect_os_path_aliases(fn)
     if _opa:
@@ -625,7 +639,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
             # shape, so nothing can reach _cpp_expr's MemberExpr
             # "non-self member access" fallback (invalid C++ on a
             # scalar) or silently read the placeholder as a real value.
-            # See bugs/CODEGEN_generator_function_Lib_enum.md's
+            # See bugs/CODEGEN_enum_runtime_class_creation.md's
             # 2026-08-21 update for the motivating Lib/enum.py
             # `Flag._iter_member_by_value_` shape (previously refused
             # unconditionally here — see the
@@ -1437,8 +1451,26 @@ def _cpp_generator_sig_lines(gen, fn, base, param_ctypes, cpp_value_ctype,
         else:
             return []
     _names = [gimple_ctypes._as_str(_pn) for _pn, _ in param_ctypes]
-    if any(_ct not in _SIG_WORD_CTYPES for _, _ct in param_ctypes):
-        return []
+    # A generator that yields a parameter declared `object` (a dynamic word:
+    # an escaping closure generator's caller-supplied argument) yields words
+    # whose kind - string or integer - only the run time knows.
+    _obj_params = set()
+    for _pn0, _pa0 in (fn.params or []):
+        if _pa0 == 'object':
+            _obj_params.add(gimple_ctypes._as_str(_pn0))
+    if _vk == 0 and _obj_params:
+        for _yn in gimple_exprtypes._walk_ast(fn.body):
+            if (isinstance(_yn, gimple_ctypes.YieldExpr)
+                    and isinstance(_yn.value, gimple_ctypes.IdentExpr)
+                    and _yn.value.name in _obj_params):
+                _vk = 5
+                break
+    # A struct pointer travels in an integer register like any word (an
+    # escaping method generator takes its receiver this way).
+    for _pn, _ct in param_ctypes:
+        if _ct not in _SIG_WORD_CTYPES and not (
+                _ct.endswith(' *') and _ct[:-2] in gen.struct_field_types):
+            return []
     if any(_n.startswith('*') for _n in _names):
         return []
     _defs = getattr(fn, 'param_defaults', None) or {}

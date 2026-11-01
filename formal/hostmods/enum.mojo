@@ -48,7 +48,7 @@ THE ONE THING THIS MODULE HAS TO EXPORT, AND WHY IT IS A FUNCTION
 -----------------------------------------------------------------
 `Enum` itself, and it is a zero-argument FUNCTION returning 0 for the reason
 every constant in this directory is one: a module-level name is not exported as a
-word (`bugs/FORMAL_module_state_no_storage.md`), so `os.sep` and `io.SEEK_SET`
+word (`bugs/formal/FORMAL_module_state_no_storage.md`), so `os.sep` and `io.SEEK_SET`
 are functions too. Its VALUE is never read — the base is erased — so what it
 returns is not a claim about `Enum`, it is the smallest thing that satisfies the
 export rule. `test_formal_core_hostmods.py` pins that: the module builds, a program that

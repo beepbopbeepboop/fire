@@ -1335,7 +1335,7 @@ class GimpleGen:
         # `_cpp_param_struct_names`/`_cpp_ctor_struct_names`, just triggered
         # by the YIELDED value's type instead of a parameter/constructor —
         # merged into the same typedef-emission loop (gen_module) rather
-        # than a separate one. See CODEGEN_generator_function_Lib_enum.md's
+        # than a separate one. See CODEGEN_enum_runtime_class_creation.md's
         # 2026-08-20 update.
         self._cpp_value_struct_names: set[str] = set()
         # Module-level function names (for variadic-unmangled calls like os.py's
@@ -2729,6 +2729,13 @@ class GimpleGen:
         self._int_word_vals: set = set()
         self._fresh_str_tmps: set = set()  # see emit_infra._emit_str_cat
         self._fresh_vals: set = set()  # see emit_infra.is_fresh_container_operand
+        # Field names whose recorded element type (`_field_elem_types`) belongs to
+        # a SET rather than a list. An element type says "this field is a
+        # container of X", not which container, so `_lower_MemberExpr`'s boxed
+        # fallback used to call every such field a `MojoList *` and
+        # `st.fs_x = gen._fresh_vals` refused with "cannot coerce MojoList * to
+        # MojoSet *" (the self-host closure then compiled emit_infra twice).
+        self._set_elem_fields: set = set()
         # Names bound to a bool, keyed by NAME across functions (see
         # emit_stmts._record_bool_valued). Declared HERE, not created lazily
         # behind `if not hasattr(gen, '_bool_valued')`: self-hosted, the field
@@ -3251,6 +3258,28 @@ class GimpleGen:
         # mojo_fnptr_call_N / mojo_maybe_bound_call_N can tell it apart
         # from a bare function pointer at a dynamically-dispatched call.
         'mojo_vararg_fn_new':  ('MojoVarargFn *', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_gen_note':       ('int64_t', ['int64_t', 'void *']),
+        'mojo_gen_note_a3':    ('int64_t', ['int64_t', 'int64_t']),
+        'mojo_add_words':      ('int64_t', ['int64_t', 'int64_t']),
+        'mojo_re_compile':     ('int64_t', ['char *', 'int64_t']),
+        'mojo_re_compile_bytes': ('int64_t', ['void *', 'int64_t', 'int64_t']),
+        'mojo_split_dyn':      ('int64_t', ['int64_t', 'int64_t']),
+        'mojo_class_getattr':  ('int64_t', ['int64_t', 'char *']),
+        'mojo_getattr_any':    ('int64_t', ['void *', 'char *']),
+        'mojo_next_word':      ('int64_t', ['int64_t', 'int', 'int64_t']),
+        'mojo_class_setattr':  ('void', ['int64_t', 'char *', 'int64_t']),
+        'mojo_class_hasattr':  ('int', ['int64_t', 'char *']),
+        'mojo_class_getattr_default': ('int64_t', ['int64_t', 'char *', 'int64_t']),
+        'mojo_class_delattr':  ('void', ['int64_t', 'char *']),
+        'mojo_chain_extend':   ('void', ['MojoList *', 'int64_t']),
+        'mojo_re_exec':        ('int64_t', ['int64_t', 'char *', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_re_exec_bytes':  ('int64_t', ['int64_t', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_re_call':        ('int64_t', ['int64_t', 'char *', 'MojoList *', 'MojoDict *']),
+        'mojo_re_getattr':     ('int64_t', ['int64_t', 'char *']),
+        'mojo_is_re_pattern':  ('int', ['int64_t']),
+        'mojo_is_re_match':    ('int', ['int64_t']),
+        'mojo_getitem_word':   ('int64_t', ['int64_t', 'int64_t']),
+        'mojo_gen_call_with':  ('int64_t', ['void *', 'MojoList *', 'MojoList *', 'MojoDict *']),
         'mojo_is_vararg_fn':   ('int', ['void *']),
         'mojo_vararg_call_0':  ('int64_t', ['void *', 'void *']),
         'mojo_vararg_call_1':  ('int64_t', ['void *', 'void *', 'int64_t']),

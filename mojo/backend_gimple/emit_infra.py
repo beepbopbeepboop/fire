@@ -2723,6 +2723,10 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                 else:
                     _iv = (aval if atype == 'int64_t'
                            else gen._new_val('int64_t', f'(int64_t){aval}'))
+                    if aval in getattr(gen, '_boxed_vals', ()):
+                        # a runtime-kinded list element read as a BOX: the string
+                        # is the word inside it (a box's own address is not one)
+                        _iv = gen._call_expr('int64_t', 'mojo_box_word', [('int64_t', _iv)])
                     coerced_args.append(gen._call_expr(
                         'char *', 'mojo_cstr_or_int_str', [('int64_t', _iv)]))
 
@@ -6973,7 +6977,9 @@ def _gen_print(gen, args: list, kwargs: list = None):
                                                [('int64_t', aval)]), _owned_reprs)
                 resolved_parts.append(('char *', _rv))
                 continue
-            if _pi < len(args) and _is_may_hold_str_param(gen, args[_pi]):
+            if (_pi < len(args) and _is_may_hold_str_param(gen, args[_pi])) or aval in gen._dyn_word_vals \
+                    or (_pi < len(args) and isinstance(args[_pi], IdentExpr)
+                        and _as_str(args[_pi].name) in gen._dyn_word_locals):
                 _rv = gen._call_expr('char *', 'mojo_cstr_or_int_str',
                                      [('int64_t', aval)])
                 # CONVERT, do not print. This branch used to emit
@@ -8130,6 +8136,11 @@ def _reset_scope_state(gen) -> None:
     _fet['_fresh_vals'] = 'char *'
     _fet['_fresh_str_tmps'] = 'char *'
     _fet['_boxed_vals'] = 'char *'
+    # Which of the above are SETS (the rest are lists): see `_set_elem_fields`.
+    for _sf in ('_scoped_free_candidates', '_scope_armed', '_owned_str_elem_names',
+                '_owned_str_elem_vals', '_owned_closure_names', '_owned_env_names',
+                '_fresh_vals', '_fresh_str_tmps', '_boxed_vals'):
+        gen._set_elem_fields.add(_sf)
 
 
 def _scope_register(gen, name: str, fn: str) -> None:

@@ -330,7 +330,7 @@ still `{1: 1}` (a bool is already an integer by the time it is a key).
    in `runtime/fire_runtime.h`, and `test_runtime_header_scan.py` enforces that
    every quoted ABI count in the tree matches `runtime_abi()`. Adding one
    header entry moves `fire_runtime_h` 581 -> 582 and the total 684 -> 685,
-   which fails 25 checks across `FORMAL.md`, `bugs/FORMAL_known_limits.md`,
+   which fails 25 checks across `FORMAL.md`, `bugs/formal/FORMAL_known_limits.md`,
    `build_stdlib_dylib.py`, `fire_runtime.h`, `formal/build.py` and
    `formal/model.py`. Two of those six live in `formal/`, which this worker is
    instructed not to touch. There is no way to add the marker's producer

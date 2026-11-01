@@ -1396,6 +1396,61 @@ def main():
     print(both(1, 2, z=3))
 """, "3\n201\n200\n3\n201\n")
 
+    # The same packing for a nested DEF (a lifted closure), not just a
+    # top-level function or lambda value. `_gen_lifted_closure` registers the
+    # `*args` slot of a `**kwargs`-bearing closure as a CONCRETE `MojoList *`
+    # (the `**kwargs` `MojoDict *` follows it, so the trailing `'...'`
+    # packing sentinel cannot sit there), and only
+    # `_pack_closure_star_slots` at the closure call site packs the loose
+    # elements and the keyword arguments into those two pointers. Before it,
+    # a call to a nested `def f(*a, **kw)` emitted the flat arguments against
+    # a `(MojoList *, MojoDict *)` prototype — "too few arguments" — and a
+    # nested `def f(**kw)` silently dropped every keyword argument.
+    test_gimple_stdout("gimple_nested_def_star_kwargs_packed_at_call", """\
+def outer(k):
+    def f(*a, **kw):
+        print(a[0] + k)
+        print(kw['x'])
+    f(1, 2, x=3)
+
+
+def main():
+    outer(10)
+
+main()
+""", "11\n3\n")
+    test_gimple_stdout("gimple_nested_def_kwargs_only_packed_at_call", """\
+def outer():
+    def f(**kw):
+        print(kw['x'])
+        print(kw['y'])
+    f(x=5, y=7)
+
+
+def main():
+    outer()
+
+main()
+""", "5\n7\n")
+    # The padding-and-packing interaction: a defaulted fixed parameter is
+    # filled from its default while the call's keyword arguments pack into
+    # the `**kwargs` slot. The keyword expression is lowered exactly once
+    # (`_bind_closure_kwargs` stashes its lowered kwarg dict on the node
+    # instead of letting the packing re-lower it).
+    test_gimple_stdout("gimple_nested_def_default_then_kwargs_packed", """\
+def outer():
+    def f(a=1, **kw):
+        print(a)
+        print(kw['x'])
+    f(x=3)
+
+
+def main():
+    outer()
+
+main()
+""", "1\n3\n")
+
     # A `*seq` element of a list or tuple DISPLAY extends the container
     # instead of occupying one slot, and it is the one place where a runtime
     # slot COUNT meets a compile-time kinds string. Three separate mechanisms

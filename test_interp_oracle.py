@@ -311,7 +311,7 @@ def main():
     # This is the shape `test_runtime_diff.py` structurally CANNOT see, which is
     # why it is here: that suite compares the two ENGINES, and the compiled
     # path had this bug too (a module global a module writes was published as
-    # a constant, `bugs/FORMAL_module_state_no_storage.md` §(2)) — so a
+    # a constant, `bugs/formal/FORMAL_module_state_no_storage.md` §(2)) — so a
     # diff between them was clean while both were wrong. This case is the third
     # opinion.
     #
