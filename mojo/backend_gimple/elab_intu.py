@@ -644,9 +644,17 @@ def _positional_bracket_ctor_args(work, base, node):
         return None
     if _d2_kwarg_bracket(f):
         return None
-    if base in _ERASED_WORD_STRUCTS:
+    # A base this codegen erases to a RUNTIME object (`List`/`Dict`/`Set` ->
+    # `MojoList *`/...; `_IN_TU_LIST_BASES` documents why a formal `List`
+    # layout must never be built) is declined by the `.o` route on the same
+    # ground as here (`_materialize_generic_struct_mentions`), and its
+    # overloaded `__getitem__` is exactly what this branch looks for: pulling
+    # `List[String]()` in-TU lowered its slice lambda's `-> T` as `int64_t`
+    # (`invalid conversion in gimple call`, std/os/os.mojo).
+    if (base in _ERASED_WORD_STRUCTS or base in _IN_TU_LIST_BASES
+            or base in gimple_ctypes._TYPE_MAP):
         return None
-    dups = _duplicated_method_names(work.gen, base)
+    dups =_duplicated_method_names(work.gen, base)
     if not dups or dups <= _ITERATION_PROTOCOL:
         return None
     args = _concrete_args(work, 'struct', base, node)
