@@ -4072,6 +4072,9 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # safe's own type); the old 'int' boxed the 64-bit tag into a 32-bit
         # temp, a hard gcc "invalid conversion in gimple call" error.
         av64 = gen._new_val('int64_t', f"(int64_t){av}")
+        if gen._rt_classes_made:
+            # a run-time class's metaclass / an instance's class, else the struct tag
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_type_of', [('int64_t', av64)])
         return 'int64_t', gen._new_val('int64_t', f"mojo_read_type_tag_safe ({av64})")
     if fname_raw == 'setattr' and len(node.args) >= 3:
         pairs = [gen.lower_expr(a) for a in node.args[:3]]
@@ -4498,7 +4501,12 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
                            [('int64_t', gen._to_int64(obj_type, obj_val)), ('int64_t', cw)])
         return gen._new_val('_Bool', f'(_Bool){r}')
     if type_name == 'type':
-        return gen._new_val('_Bool', '0')  # isinstance(x, type) always false in C
+        if gen._rt_classes_made:
+            # a class made at run time is an instance of `type`
+            r = gen._call_expr('int', 'mojo_isinstance_type',
+                               [('int64_t', gen._to_int64(obj_type, obj_val))])
+            return gen._new_val('_Bool', f'(_Bool){r}')
+        return gen._new_val('_Bool', '0')  # no run-time class in this module: nothing is a `type`
     if type_name == 'tuple':
         # A tuple's runtime representation is a MojoList carrying the
         # `mojo_mark_as_tuple` marker (see _lower_tuple_literal). Neither
