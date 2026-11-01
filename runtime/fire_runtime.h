@@ -232,55 +232,58 @@ static inline double mojo_bound_method_call_d4(MojoBoundMethod *bm, int64_t a, i
 
 /* run-time classes (`type(name, bases, ns)`): a call on a class handle makes an instance */
 int mojo_is_classobj(int64_t w);
-int64_t mojo_classobj_call(int64_t cls, int64_t n, int64_t a0, int64_t a1, int64_t a2, int64_t a3);
+int64_t mojo_classobj_call(int64_t cls, int64_t n, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6);
 int mojo_instobj_class_lookup(void *obj, char *attr, int64_t *out);
 int mojo_is_instobj(int64_t w);
 
 static inline int64_t mojo_fnptr_call_0(void *fp) {
     if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_0(fp, 0);
-    if (mojo_is_classobj((int64_t)(intptr_t)fp)) return mojo_classobj_call((int64_t)(intptr_t)fp, 0, 0, 0, 0, 0);
+    if (mojo_is_classobj((int64_t)(intptr_t)fp)) return mojo_classobj_call((int64_t)(intptr_t)fp, 0, 0, 0, 0, 0, 0, 0, 0);
     if (mojo_is_bound_method(fp)) return mojo_bound_method_call_0((MojoBoundMethod *)fp);
     return ((int64_t (*)(void))fp)();
 }
 static inline int64_t mojo_fnptr_call_1(void *fp, int64_t a) {
     if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_1(fp, 0, a);
-    if (mojo_is_classobj((int64_t)(intptr_t)fp)) return mojo_classobj_call((int64_t)(intptr_t)fp, 1, a, 0, 0, 0);
+    if (mojo_is_classobj((int64_t)(intptr_t)fp)) return mojo_classobj_call((int64_t)(intptr_t)fp, 1, a, 0, 0, 0, 0, 0, 0);
     if (mojo_is_bound_method(fp)) return mojo_bound_method_call_1((MojoBoundMethod *)fp, a);
     return ((int64_t (*)(int64_t))fp)(a);
 }
 static inline int64_t mojo_fnptr_call_2(void *fp, int64_t a, int64_t b) {
     if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_2(fp, 0, a, b);
-    if (mojo_is_classobj((int64_t)(intptr_t)fp)) return mojo_classobj_call((int64_t)(intptr_t)fp, 2, a, b, 0, 0);
+    if (mojo_is_classobj((int64_t)(intptr_t)fp)) return mojo_classobj_call((int64_t)(intptr_t)fp, 2, a, b, 0, 0, 0, 0, 0);
     if (mojo_is_bound_method(fp)) return mojo_bound_method_call_2((MojoBoundMethod *)fp, a, b);
     return ((int64_t (*)(int64_t, int64_t))fp)(a, b);
 }
 static inline int64_t mojo_fnptr_call_3(void *fp, int64_t a, int64_t b, int64_t c) {
     if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_3(fp, 0, a, b, c);
-    if (mojo_is_classobj((int64_t)(intptr_t)fp)) return mojo_classobj_call((int64_t)(intptr_t)fp, 3, a, b, c, 0);
+    if (mojo_is_classobj((int64_t)(intptr_t)fp)) return mojo_classobj_call((int64_t)(intptr_t)fp, 3, a, b, c, 0, 0, 0, 0);
     if (mojo_is_bound_method(fp)) return mojo_bound_method_call_3((MojoBoundMethod *)fp, a, b, c);
     return ((int64_t (*)(int64_t, int64_t, int64_t))fp)(a, b, c);
 }
 static inline int64_t mojo_fnptr_call_4(void *fp, int64_t a, int64_t b, int64_t c, int64_t d) {
     if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_4(fp, 0, a, b, c, d);
-    if (mojo_is_classobj((int64_t)(intptr_t)fp)) return mojo_classobj_call((int64_t)(intptr_t)fp, 4, a, b, c, d);
+    if (mojo_is_classobj((int64_t)(intptr_t)fp)) return mojo_classobj_call((int64_t)(intptr_t)fp, 4, a, b, c, d, 0, 0, 0);
     if (mojo_is_bound_method(fp)) return mojo_bound_method_call_4((MojoBoundMethod *)fp, a, b, c, d);
     return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t))fp)(a, b, c, d);
 }
 
 static inline int64_t mojo_fnptr_call_5(void *fp, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4) {
     if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_5(fp, 0, _a0, _a1, _a2, _a3, _a4);
+    if (mojo_is_classobj((int64_t)(intptr_t)fp)) return mojo_classobj_call((int64_t)(intptr_t)fp, 5, _a0, _a1, _a2, _a3, _a4, 0, 0);
     if (mojo_is_bound_method(fp)) return mojo_bound_method_call_5((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4);
     return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t, int64_t))fp)(_a0, _a1, _a2, _a3, _a4);
 }
 
 static inline int64_t mojo_fnptr_call_6(void *fp, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5) {
     if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_6(fp, 0, _a0, _a1, _a2, _a3, _a4, _a5);
+    if (mojo_is_classobj((int64_t)(intptr_t)fp)) return mojo_classobj_call((int64_t)(intptr_t)fp, 6, _a0, _a1, _a2, _a3, _a4, _a5, 0);
     if (mojo_is_bound_method(fp)) return mojo_bound_method_call_6((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4, _a5);
     return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t))fp)(_a0, _a1, _a2, _a3, _a4, _a5);
 }
 
 static inline int64_t mojo_fnptr_call_7(void *fp, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5, int64_t _a6) {
     if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_7(fp, 0, _a0, _a1, _a2, _a3, _a4, _a5, _a6);
+    if (mojo_is_classobj((int64_t)(intptr_t)fp)) return mojo_classobj_call((int64_t)(intptr_t)fp, 7, _a0, _a1, _a2, _a3, _a4, _a5, _a6);
     if (mojo_is_bound_method(fp)) return mojo_bound_method_call_7((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4, _a5, _a6);
     return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t))fp)(_a0, _a1, _a2, _a3, _a4, _a5, _a6);
 }
@@ -426,18 +429,21 @@ static inline int64_t mojo_maybe_bound_call_4(void *f, int64_t a, int64_t b, int
 
 static inline int64_t mojo_maybe_bound_call_5(void *fp, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4) {
     if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_5(fp, 0, _a0, _a1, _a2, _a3, _a4);
+    if (mojo_is_classobj((int64_t)(intptr_t)fp)) return mojo_classobj_call((int64_t)(intptr_t)fp, 5, _a0, _a1, _a2, _a3, _a4, 0, 0);
     if (mojo_is_bound_method(fp)) return mojo_bound_method_call_5((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4);
     return mojo_fnptr_call_5(fp, _a0, _a1, _a2, _a3, _a4);
 }
 
 static inline int64_t mojo_maybe_bound_call_6(void *fp, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5) {
     if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_6(fp, 0, _a0, _a1, _a2, _a3, _a4, _a5);
+    if (mojo_is_classobj((int64_t)(intptr_t)fp)) return mojo_classobj_call((int64_t)(intptr_t)fp, 6, _a0, _a1, _a2, _a3, _a4, _a5, 0);
     if (mojo_is_bound_method(fp)) return mojo_bound_method_call_6((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4, _a5);
     return mojo_fnptr_call_6(fp, _a0, _a1, _a2, _a3, _a4, _a5);
 }
 
 static inline int64_t mojo_maybe_bound_call_7(void *fp, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5, int64_t _a6) {
     if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_7(fp, 0, _a0, _a1, _a2, _a3, _a4, _a5, _a6);
+    if (mojo_is_classobj((int64_t)(intptr_t)fp)) return mojo_classobj_call((int64_t)(intptr_t)fp, 7, _a0, _a1, _a2, _a3, _a4, _a5, _a6);
     if (mojo_is_bound_method(fp)) return mojo_bound_method_call_7((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4, _a5, _a6);
     return mojo_fnptr_call_7(fp, _a0, _a1, _a2, _a3, _a4, _a5, _a6);
 }
@@ -1455,7 +1461,7 @@ int64_t mojo_type_new(char *name);
 void    mojo_type_add_base(int64_t cls, int64_t base);
 void    mojo_type_add_bases_from_list(int64_t cls, MojoList *bases);
 int     mojo_is_classobj(int64_t w);
-int64_t mojo_rtobj_method_call(int64_t recv, char *name, int64_t n, int64_t a0, int64_t a1, int64_t a2, int64_t a3);
+int64_t mojo_rtobj_method_call(int64_t recv, char *name, int64_t n, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6);
 int     mojo_isinstance_rtclass(int64_t obj, int64_t cls);
 int64_t mojo_classobj_tag(int64_t w);
 void    mojo_classobj_setattr(int64_t cls, char *name, int64_t word);

@@ -71,8 +71,10 @@ every module is reachable from a word with `mojo_getattr_any(obj, attr)`
    the bases, the instance passed first as `self`, a miss is AttributeError) - before, `o.get()` was
    lowered as `dict.get` and printed 0 - and `isinstance(o, Foo)` (also inside a tuple) is
    `mojo_isinstance_rtclass`. Pinned by `methods_in_the_namespace_are_called_on_instances` /
-   `isinstance_of_a_run_time_class`. Not covered: more than 4 call arguments (refused by name),
-   keyword/star arguments, a method returning a float or string (the word is an untyped
+   `isinstance_of_a_run_time_class`. **Up to 7 call arguments landed 2026-11-01** (constructor `Foo(a..g)` and `o.m(a..g)`/`Foo.m(a..g)`:
+   `mojo_classobj_call` / `mojo_rtobj_method_call` carry 7 argument words, `mojo_fnptr_call_5..7` check
+   for a class handle; pinned by `methods_and_constructor_take_up_to_seven_arguments`; more than 7 is
+   still refused by name). Not covered: keyword/star arguments, a method returning a float or string (the word is an untyped
    `_dyn_word_vals` word), a class or instance reached through a parameter/attribute rather than
    a local, `repr(o)`.
    **`isinstance(o, StaticBase)` landed 2026-11-01**: once a module lowers any `type(n, bases, ns)`
