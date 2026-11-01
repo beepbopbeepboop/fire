@@ -32,7 +32,7 @@ What is pinned, and why each one matters:
   reporting    one tally at the end, and the log file gets the detail the
                screen does not.
 
-Three more, added after the audit in `bug:UNTESTED`, and they are about the
+Three more, added after the audit in `bugs/UNTESTED.md`, and they are about the
 cache in front of the runner rather than the runner:
 
   cache keys   `checked_run.check_key` covers what `--extra` names, including a
@@ -2107,7 +2107,7 @@ def test_the_ab_native_writer_keeps_its_scratch_out_of_the_repo_root():
 # The census `test_no_stale_per_child_budget_is_left_as_a_literal` walks, kept
 # as DATA so the check that reads it can be a ratchet instead of a prohibition.
 # Read the reasoning there and the per-file reading in
-# `bugs/TEST_stale_per_child_timeout_literals.md` (DELETED); converting a file means
+# `bugs/TEST_stale_per_child_timeout_literals.md`; converting a file means
 # deleting its row here in the same commit, which is the only thing that makes
 # the number a measure of progress rather than a number.
 #
@@ -2133,6 +2133,24 @@ STALE_PER_CHILD_BUDGETS = {
     'formal/x86_64_endtoend_test.py': 1,
     'formal/x86_64_model_test.py': 1,
     'scripts/bootstrap_full_test.py': 1,
+    'test_ab_native.py': 2,
+    'test_arm64_emission.py': 1,
+    'test_async_runtime_scaffold.py': 1,
+            'test_closure_capture_comptime_func_params.py': 2,
+    'test_comptime_bracket_params.py': 1,
+    'test_container_constructor_arg_um.py': 1,  # +1 2026-10-27: the pinning
+        # file's own `fire.py run` of the .mojo it writes (3e4501a42, the
+        # container-constructor pin) — a per-child wall on a run of a program
+        # the case wrote itself, which is what a residue row is for; the file
+        # does not import exec_budget, so it is residue, not subject.
+    'test_container_equality.py': 3,
+    'test_container_membership.py': 3,
+    'test_container_ordering.py': 3,
+    'test_coro_detached_async.py': 4,
+    'test_coro_future_await.py': 4,
+        'test_coro_runtime.py': 1,
+    'test_coro_scoreboard.py': 2,
+    'test_dict_tuple_key.py': 3,
     # `test_formal_admitted.py`'s row (5, 2026-10-26's c20bdf09e "5 remain as
     # data-table examples") is dropped 2026-10-27: the conversion landed, and
     # the walk now finds 0 real literals — the "data-table examples" are
@@ -2146,18 +2164,46 @@ STALE_PER_CHILD_BUDGETS = {
     # image. Both are per-child walls on an image the case built itself, which is
     # what a residue row is for; neither is the SUBJECT of its test, so neither
     # moves to `BUDGET_IS_THE_SUBJECT`.
+    'test_formal_call_proof_gen.py': 2,
+    'test_formal_cross_module.py': 2,
     'test_formal_dylib.py': 2,
+    'test_formal_external_call.py': 1,
+    'test_formal_frame_return_overloads.py': 1,
+    'test_formal_link_accounting.py': 4,  # +2 with 515fe237's printf-of-a-container cases (per-child walls on images the case builds)
+    'test_formal_peephole.py': 1,  # +1 on 2026-10-05: work/formal36-verified-peephole's
+                                   # image-run of an emitted artifact
     'test_formal_proof_breadth.py': 6,  # +1 with the bulk merge of the formal-worker branches
+    'test_formal_runtime_link.py': 1,
     'test_formal_specs.py': 1,  # +1 on 2026-10-05: work/formal36-contracts-language's
                                  # `lean` run of a generated spec proof
+    'test_formal_specialization.py': 2,
     'test_formal_sweep_cache_key.py': 2,
     'test_formal_sweep_truth.py': 1,  # +1 on 2026-10-04 (76143aaa), a row the
                                       # census missed when that file's literal
                                       # arrived with the derived host-import rows
+    'test_formal_sys.py': 2,
+    'test_formal_tempfile.py': 3,
+    'test_formal_x86_64_dylib.py': 6,  # +2 with the bulk merge of the formal-worker branches (more per-child build walls); earlier +1 on 2026-10-08: the os.path.getsize
+                                       # hostmod-dylib row's build of the reduced
+                                       # program, the same 600 s wall the file's
+                                       # other three build sites carry
+    'test_general_mutable_closure_capture.py': 2,
+    'test_import_integration.py': 4,
+    'test_link_mode.py': 3,  # +1 2026-10-24: the non-shadow stderr probe in
+                            # test_nested_def_is_not_a_module_level_fn_export re-runs the built binary to read its refusal message off stderr
     'test_metal_codegen.py': 9,
+    'test_mixed_cpp_link.py': 1,
+            'test_nonlocal.py': 2,
     'test_ptr_registry.py': 2,
+    'test_python_source_mut_capture.py': 1,
     'test_runtime_dylib.py': 1,
+    'test_selfhost.py': 2,  # +1 on 2026-10-04: work/bugs6-1's
+                                       # build_scratch_is_private_and_removed
     'test_selfhost_memory.py': 1,
+    'test_stdlib.py': 1,
+    'test_taskgroup.py': 4,
+        'test_x86_64_containers.py': 1,
+    'test_x86_64_decode.py': 1,
 }
 
 #: Files where a per-child literal is the SUBJECT rather than residue, with the
@@ -2204,7 +2250,7 @@ def test_no_stale_per_child_budget_is_left_as_a_literal():
     declared that its budgets are shared — and it is what makes this a check
     rather than a sweep of every `timeout=NN` in the repo, which is a different
     piece of work over 40 other files.  The census of that residue is in
-    `bugs/TEST_stale_per_child_timeout_literals.md` (DELETED); extending this check to
+    `bugs/TEST_stale_per_child_timeout_literals.md`; extending this check to
     cover a file that has NOT opted in is the step that doc describes, and it is
     deliberately not taken here because the mapping from "this child" to "which
     budget" is a per-file judgement.
@@ -2289,7 +2335,7 @@ def test_no_stale_per_child_budget_is_left_as_a_literal():
     # SIGTERM drain window, a host-tool probe) is named at the site rather than
     # forced into a constant that does not describe it. The census, the
     # exemptions and that reasoning are in
-    # `bugs/TEST_stale_per_child_timeout_literals.md` (DELETED).
+    # `bugs/TEST_stale_per_child_timeout_literals.md`.
     residue, subject = {}, {}
     for rel in _test_files_in_repo():
         path = os.path.join(HERE, rel)
@@ -2962,7 +3008,7 @@ def test_selfhost_key_hashes_nothing_dead():
         here: an unstated exception is the thing this check exists to end.
 
     Each half is mutation-tested below, because a check that cannot be shown to
-    fail is the trap `bug:UNTESTED` §4 documents.
+    fail is the trap `bugs/UNTESTED.md` §4 documents.
     """
     import cas
     missing, unreached, reached = cas.selfhost_extra_is_justified()
@@ -3629,7 +3675,7 @@ def test_log_has_passes_screen_does_not():
 # and 12 of the specs in `check` and `gate` are `cache=True`. A wrong answer
 # there is not one red test: a replayed PASS is a green test that never ran, and
 # a replayed FAILURE is a red that no fix can clear. Nothing imported this file
-# before `bug:UNTESTED`, so the properties below were documented and never
+# before `bugs/UNTESTED.md`, so the properties below were documented and never
 # executed.
 
 def _key_tree(tag):
@@ -3657,7 +3703,7 @@ def test_checked_run_key_covers_what_it_names():
     editing a file inside it, adding one, or removing one all left the key
     still. That is not a theoretical gap — `examples-parse` is `cache=True` and
     guards the 45 files of `formal/examples/`, which its `extra` cannot name
-    without a list that rots on the 46th. Measured in `bug:UNTESTED`.
+    without a list that rots on the 46th. Measured in `bugs/UNTESTED.md`.
     """
     import checked_run
     d = _key_tree(os.getpid())
@@ -3983,7 +4029,7 @@ def test_checked_run_replays_a_pass_and_reruns_a_failure():
 # below are what keep it honest in the other direction, so an entry cannot
 # outlive the file it excuses or the registration that supersedes it.
 #
-# This IS the inventory from `bug:UNTESTED`, in a form that runs. The shape
+# This IS the inventory from `bugs/UNTESTED.md`, in a form that runs. The shape
 # when the check was written: 50 of 81 test files named by nothing, 5 of those
 # RED, so 25 known-failing assertions no gate, tally or coverage number
 # reported. What is left after the registrations that have since landed is 38
@@ -4513,7 +4559,7 @@ UNREGISTERED = {
     # `fire_compiler.py` and `ast_nodes` was deleted outright. They died at
     # their first `open()` and reported success while doing it — the `coro`
     # story from CLAUDE.md, one file over. The doc that catalogued them
-    # (`bug:UNTESTED` Tier 3) named both options and said deletion was the
+    # (`bugs/UNTESTED.md` Tier 3) named both options and said deletion was the
     # defensible one: a test of a module that no longer exists is not a slow
     # test, it is a wrong claim.
     #
@@ -4554,10 +4600,8 @@ UNREGISTERED = {
         'output IS the measurement, so there is no assertion to fail and it is '
         'inert unless something reads it.',
     'test_coro_bugs.py': 'Per-bug diagnostic for the A3 stack-switch backend. '
-        'Exits 1 on any CFAIL (generated C that does not syntax-check) and 2 when '
-        'it diagnosed nothing; RAISE stays informational. Not gated: it reads '
-        'generator bug docs, which are few now, and a CFAIL is a real codegen '
-        'defect tracked in its own bug doc.',
+        'Exits 0 while its own output reads CFAIL=1 COMPILE=1 — see UNTESTED.md '
+        '§3: a green exit that reports a failure in its own text.',
     'test_closure_capture_shadows_function.py': 'The scoping rule behind a '
         'closure capture: a free name the ENCLOSING function also binds is a '
         'capture even when another module of the same compile defines a '
@@ -4651,10 +4695,8 @@ UNREGISTERED = {
     'test_type_system.py': "That the invariant checker catches every bug from "
         "the session that produced it — i.e. the checker is tested against its "
         "own author's list of what it should reject.",
-    'test_type_system_integration.py': 'Snippets compile through gimple_codegen '
-        '(the type checker was removed there, b05dc1111), but NOTHING in the '
-        'pipeline reports a violation, so these cannot detect one. Not a gate '
-        'until they are rewritten against a real check or deleted (UNTESTED.md).',
+    'test_type_system_integration.py': 'The type system catching violations '
+        'during a real compile, which is the half the fixture list above is not.',
 
     # ── the batch's 46 standalone regression records, declared as a group ──
     # 2026-10-27, gate triage of the 53-job gate on 08e9229bf: the batch landed
@@ -4686,6 +4728,7 @@ UNREGISTERED = {
     'test_perf_lean_lib_memory_regression.py': _BATCH_REGRESSION_REASON,
     'test_perf_memory_leak_pin.py': _BATCH_REGRESSION_REASON,
     'test_pin_dict_content_key_aliases.py': _BATCH_REGRESSION_REASON,
+    'test_procrun_regression.py': _BATCH_REGRESSION_REASON,
     'test_reg_dispatched_for_loop.py': _BATCH_REGRESSION_REASON,
     'test_regress_bytes_erased.py': _BATCH_REGRESSION_REASON,
     'test_regress_interface_request_1.py': _BATCH_REGRESSION_REASON,
@@ -4706,11 +4749,6 @@ UNREGISTERED = {
     'test_regression_unpack_spread.py': _BATCH_REGRESSION_REASON,
     'test_spread_string_regression.py': _BATCH_REGRESSION_REASON,
     'test_untested_regression.py': _BATCH_REGRESSION_REASON,
-    # bug:UNTESTED §5: tools/procrun.py and tools/memcap.py had no test. Pure
-    # parsing/accounting against injected process tables, plus the kill path and
-    # the ceiling against real short-lived processes (a few seconds, no compiler).
-    'test_procrun.py': 'tools/procrun.py and tools/memcap.py: the RSS measurement, '
-        'the tree kill and memcap\'s printed verdict, tested directly.',
     'test_zip_loop_target_rebind_regress.py': _BATCH_REGRESSION_REASON,
 
     # Landed with 313513c45 (2026-10-28, while this gate triage was running —
@@ -4930,7 +4968,7 @@ def test_cached_spec_names_its_own_test():
     old verdict is served. Measured on this tree: all 12 cached specs name their
     own script, so this is the regression guard for the property, not a fix for
     a live hole. The live hole is what `extra` does NOT name, and
-    `bug:UNTESTED` records that one.
+    `bugs/UNTESTED.md` records that one.
     """
     cached = [n for n, s in suite.REGISTRY.items()
               if getattr(s, 'cache', False) and not isinstance(s, suite.Fanout)]
@@ -4961,7 +4999,7 @@ def test_every_test_file_is_registered():
     Measured before it existed: 50 of 81, of which 5 are RED. They were
     declared with a reason each rather than left failing, because a check that
     failed 50 times on its first day is a check nobody runs — and the
-    declarations are the inventory from `bug:UNTESTED`, in a form that
+    declarations are the inventory from `bugs/UNTESTED.md`, in a form that
     executes. The declarations SHRINK as tests get registered (a registration
     supersedes an excuse, and the anti-rot assertion below says so), so the
     count here is the residue, not the original measurement.

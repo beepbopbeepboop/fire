@@ -17,12 +17,18 @@ and the proof it is safe is the self-host build (`test_selfhost.py`'s
 
 ## Status (2026-11-01, worker landing)
 
-Step 1 LANDED on `work/bug-codegen-coro-callsite-visitors-calle-5724`: the
+Step 1 LANDED on master as `86746ec60` (the earlier branch name cited here,
+`...-5724`, no longer exists; the commit is the authoritative record): the
 by-name calls in `mojo/middle/coro.py` `_scan_callsite_param_kinds` are reverted
 to passing `visit` as a value (`_collect_from(src, visit, closure)`,
 `_visit_call(node, caller_env, callee=None)`), and the workaround comment is
-removed. The region now matches the pre-`0f009480b` code exactly (checked with
-`diff` against `0f009480b^`). `test_coro_bugs.py` passes (exit 0).
+removed. `test_coro_bugs.py` passes (exit 0, re-run 2026-11-01 under
+`memslot --gb 8`, peak 0.1 GB).
+
+No light regression test is possible for this shape: the failure exists only
+in the self-hosted binary's NULL-env codegen, which no python-interpreted test
+reaches. The only coverage is the `CALL_PROGRAM` probe in `test_selfhost.py`
+and `make bootstrap`, both heavy.
 
 NOT verified here: steps 2-3 (`test_selfhost.py` `CALL_PROGRAM` probe and
 `make bootstrap`) are heavy self-host runs, reserved for the integrator. This

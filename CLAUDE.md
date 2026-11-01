@@ -84,10 +84,6 @@ anywhere else), these rules override any instinct to move on quickly:
   when the intent was always to gate once at the end anyway.
 
 ## Bug rounds — every round must move us closer to the end
-Base directive (user, 2026-10-31): one work round handles ONE bug, fully
-finished (including its commit) before the next round starts. Earlier batches
-of three were relaxed away on 2026-11-01: the extra scope is where rounds die
-mid-flight and leave in-flight state for the next session to reconstruct.
 Base directive (user, 2026-10-29): every work round on a bug must move the work
 forward. A round's output may not be "re-verified, still open" with no tree or
 doc change. The valid outputs of a round, in descending order of preference:
@@ -423,6 +419,7 @@ and the reasoning for `expect=` rather than `disabled=` on each.
 | test | marker | subject | cost it charges every gate |
 |---|---|---|---|
 | `ab-native` | `expect=`, count checked (1) | python vs native codegen over the A/B corpus | 0.1 GB / ~10 s measured, `program` (reserves 55 GB); `native` |
+| `async-void-return` | `expect=`, count checked (3) | an async function with no return value | `tiny`; `coroutine` |
 | `coro-future-await` | `expect=`, count checked (17) | `await` on a Future in the coroutine runtime | `tiny`; `coroutine` |
 
 `formal-toplevel` and `formal-module-attr` were in this table and are not any

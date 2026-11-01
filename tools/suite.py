@@ -1837,7 +1837,7 @@ test('runtimediff', [PY, 'test_runtime_diff.py'], mem='tiny', cache=True,
 # is then wrong in the same direction and every engine-vs-engine diff in the
 # tree stays clean. That is how `@classmethod`'s `cls` binding the first real
 # ARGUMENT, and `@deco` being parsed and then never applied at all, stayed
-# invisible (`bug:UNTESTED` 3.2 -- and what `interporacle` was written for).
+# invisible (`bugs/UNTESTED.md` 3.2 -- and what `interporacle` was written for).
 #
 # It ran by NOTHING until 2026-10-02: it loaded `mojo/ast_nodes.mojo`,
 # `mojo/tokenizer.mojo` and `mojo/parser.mojo`, none of which exists, and
@@ -2072,12 +2072,12 @@ test('examples-parse', [PY, 'test_examples_parse.py'], cache=True, mem='tiny',
      # so the 46th example is covered the day it is added and a rename moves
      # the key. Measured by [5]: this key read 48 repo files and 0 under
      # formal/examples/, so a SyntaxError in any of the 45 could not invalidate
-     # it and a recorded PASS replayed. See bug:UNTESTED 3.1.
+     # it and a recorded PASS replayed. See bugs/UNTESTED.md 3.1.
      extra=['test_examples_parse.py', 'formal/examples'],
      desc='every formal/examples/*.mojo parses; decorator arg shapes distinct')
 
 
-# ── the test estate, inventoried by [5] in bug:UNTESTED ────────────────
+# ── the test estate, inventoried by [5] in bugs/UNTESTED.md ────────────────
 #
 # 50 test files were named by no registered spec, and 21 of those exited
 # non-zero. Measured per file here rather than read out of a bug doc, because
@@ -2199,8 +2199,7 @@ test('coro-future-await', [PY, 'test_coro_future_await.py'], mem='tiny',
           'async struct-method calls (receiver + args)')
 test('async-void-return', [PY, 'test_async_void_return.py'], mem='tiny',
      deps=['preflight'],
-desc='void-returning async functions and the device_context-shaped '
-          'repro, on both coroutine backends')
+     desc='an async function with no return value')
 test('taskgroup', [PY, 'test_taskgroup.py'], mem='tiny',
      deps=['preflight'],
      desc='TaskGroup')
@@ -4531,8 +4530,8 @@ BUCKETS = {
     # were the fixed `mojo_repr_bool` spelling `True` all along, and all 39
     # cases pass (re-measured 41 s / 0.1 GB, below).
     #
-    # The remaining `expect=`-marked job stays in `coroutine` rather than
-    # `check` for the reason stated once: an `expect` in `check` puts a permanently-EXPECTED
+    # The three `expect=`-marked ones stay in `coroutine` rather than `check` for
+    # the reason stated once: an `expect` in `check` puts a permanently-EXPECTED
     # line in the tally a developer reads to know their tree is fine (the same
     # reasoning that keeps `formal-module-attr`, `formal-external-call` and
     # `formal-receiver-position` in `proofs` only). `coroutine` is in `gate`, so
@@ -4543,8 +4542,7 @@ BUCKETS = {
     # (0.0-0.2 GB each, against the `small`/8 GB they carried while ungated):
     #   gimple-async-runner  41.4 s  0.1 GB  39 passed   (green since 2026-10-28)
     #   coro-detached-async  2.2 s  0.1 GB   2 passed   (was red: stale mojo_coro.c paths)
-    #   async-void-return    3.3 s  0.1 GB  11 passed   (green 2026-10-29;
-    #                                       import-time MOJO_CORO leak fixed)
+    #   async-void-return    3.3 s  0.1 GB   3 failing             (expect=)
     #   coro-future-await   11.6 s  0.1 GB  2 failing              (expect=)
     #   async-with-lock-guard 2.7 s 0.1 GB   3 passed
     #   mutable-async-capture 2.7 s 0.1 GB   2 passed

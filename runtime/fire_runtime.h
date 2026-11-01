@@ -87,15 +87,7 @@ typedef void* mojo_generic_func;
  * re-supplies `self` as the method's implicit first argument — the same
  * "self, then N ordinary args" convention every compiled struct method
  * already uses. See bugs/CODEGEN_bound_method_as_value_not_resolved.md. */
-/* A capturing closure's `self` is its environment, and that environment can
-   hold the heap boxes of the `{mut}`-captured locals it closes over (a box is
-   a separate `malloc` the environment field merely POINTS at, so freeing the
-   environment alone would leak it). `boxes`/`nboxes` record those box
-   pointers so `mojo_closure_free` can free them with the environment; they are
-   NULL/0 for a method-taken-as-a-value and for a closure that captured no box,
-   and `mojo_bound_method_add_box` (called from the generated closure
-   constructor) appends one box at a time, growing the list. */
-typedef struct { void *fn; void *self; void **boxes; int64_t nboxes; } MojoBoundMethod;
+typedef struct { void *fn; void *self; } MojoBoundMethod;
 
 /* Real (non-inline) so the single bound-method registry lives in one TU
  * (fire_runtime.c) — mojo_is_bound_method below consults it to tell a
@@ -104,12 +96,6 @@ typedef struct { void *fn; void *self; void **boxes; int64_t nboxes; } MojoBound
  * self.m; f()`). */
 MojoBoundMethod *mojo_bound_method_new(void *fn, void *self);
 int mojo_is_bound_method(void *p);
-/* Append one `{mut}` box the environment holds to `bm`, so `mojo_closure_free`
- * frees it with the environment. The list is grown with `realloc` (a `NULL`
- * start is a `malloc`), and `bm` owns it: `mojo_closure_free` frees every box
- * in it, then the list itself. Called only from the generated closure
- * constructor, once per box the environment field points at. */
-void mojo_bound_method_add_box(MojoBoundMethod *bm, void *box);
 
 /* ── Variadic callables ───────────────────────────────────────────────────
  * A `lambda *a, **k: ...` (or any function whose real C signature is
@@ -685,11 +671,6 @@ typedef struct {
     int64_t  inl[MOJO_LIST_INLINE];
 } MojoList;
 
-/* Exception object with args (for e.args / StopIteration.value). */
-typedef struct { int64_t type; char *msg; MojoList *args; } MojoExc;
-MojoExc *mojo_exc_new(int64_t type, char *msg, MojoList *args);
-MojoList *mojo_exc_args(void *obj);
-
 MojoList *mojo_list_new(void);
 int mojo_is_registered_list(int64_t addr);
 int mojo_boxed_is_str(int64_t v);
@@ -861,10 +842,6 @@ void        mojo_list_append_double_kinded(MojoList *l, double v, char prior);  
  * double box holding `dres` when either raw operand word is a double box, and
  * `ires` otherwise, so the caller never allocates on the integer path. */
 int64_t     mojo_float_arith_select(int64_t a, int64_t b, int64_t ires, double dres);
-/* The result of `<`/`<=`/`>`/`>=` where either operand is a float box: `ires`
- * is the integer comparison's `_Bool` answer and `dres` the double one's.
- * Returns `dres` when either raw operand word is a double box, else `ires`. */
-int     mojo_float_cmp_select(int64_t a, int64_t b, int ires, int dres);
 /* The box's OWN word for every kind that has one — a str/bytes/list box gives
  * back its pointer, a None box the NULL word that IS None in this value model,
  * an int/bool box its integer — and the box itself, unchanged, for a float
@@ -1137,7 +1114,7 @@ int64_t      mojo_list_count_bytes(MojoList *l, MojoBytes *v);
 MojoBytes *mojo_bytes_empty(void);
 MojoBytes *mojo_bytes_zeros(int64_t n);
 MojoBytes *mojo_bytes_from_list(MojoList *l);      /* list of ints 0-255 */
-MojoBytes *mojo_bytes_from_str(char *s, char *encoding, char *errors); /* 'utf-8'/'ascii' */
+MojoBytes *mojo_bytes_from_str(char *s, char *encoding); /* 'utf-8'/'ascii' */
 MojoBytes *mojo_bytes_from_cstr(const char *s);   /* NUL-terminated copy */
 int64_t    mojo_bytes_len(MojoBytes *b);
 int64_t    mojo_bytes_get(MojoBytes *b, int64_t i); /* -> int 0-255, neg idx ok */
@@ -1179,7 +1156,7 @@ int64_t    mojo_bytes_count(MojoBytes *hay, MojoBytes *needle);
 int64_t    mojo_bytes_count_from(MojoBytes *hay, MojoBytes *needle, int64_t start, int64_t stop);
 int        mojo_bytes_startswith(MojoBytes *b, MojoBytes *p);
 int        mojo_bytes_endswith(MojoBytes *b, MojoBytes *p);
-char      *mojo_bytes_decode(MojoBytes *b, char *encoding, char *errors);
+char      *mojo_bytes_decode(MojoBytes *b, char *encoding);
 char      *mojo_bytes_hex(MojoBytes *b);
 char      *mojo_bytes_hash_hexdigest(MojoBytes *b);  /* hashlib(...).hexdigest() backing */
 MojoBytes *mojo_bytes_removeprefix(MojoBytes *b, MojoBytes *p);
@@ -1668,17 +1645,6 @@ void        mojo_raise_type_error(char *detail);
  * operation rejects its ARGUMENT rather than failing to find something
  * (mojo_bytes_partition's empty separator). */
 void        mojo_raise_value_error(char *detail);
-void        mojo_frame_clear(int64_t w);
-int64_t     mojo_frame_get_attr(int64_t w, int64_t id);
-void        mojo_frame_set_attr(int64_t w, int64_t id, int64_t v);
-void        mojo_exc_value_set(int64_t w);
-int64_t     mojo_exc_value_get(void);
-void        mojo_frame_set_resuming(int64_t gen);
-void        mojo_frame_bind_gen(void);
-int64_t     mojo_frame_generator(int64_t w);
-int64_t     mojo_frame_for_gen(int64_t gen, int64_t old_word, const char *name, const char *file, int64_t firstlineno, int64_t lineno);
-int         mojo_coro_slice_peek(void *snap, const char **name, const char **file, int64_t *first, int64_t *line);
-extern int64_t (*_mojo_gen_state_hook)(int64_t);
 void        mojo_raise_index_error(char *detail);
 /* The codec raisers behind str.encode(codec) / bytes.decode(codec): a
  * character or byte the codec cannot hold, and an unknown codec name. */

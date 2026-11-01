@@ -6,4 +6,4 @@ deleted in the same commit, as for any bug.
 
 | doc | what it needs | for |
 |---|---|---|
-| `CODEGEN_frame_f_locals_and_settrace.md` | what is left of the frame model: a real `f_locals`, `sys.settrace`, running test_frame.py through its imports |
+| `CODEGEN_frame_model_for_test_frame.md` | research: how much of a frame model compiled code can have, within the C API | Sonnet 5.5 (research, then a decision) |

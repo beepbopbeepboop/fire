@@ -7543,8 +7543,7 @@ def _cpp_lower_posix_idioms(gen, node, handles=None):
             if f.name == 'bytes' and len(new.args) == 2 and not kw:
                 # `bytes(text, 'ASCII')`: the string's bytes
                 return G.CallExpr(func=G.IdentExpr(name='mojo_bytes_from_str'),
-                                  args=list(new.args) + [G.StringLiteral(value='strict', line=new.line, col=new.col)],
-                                  line=new.line, col=new.col)
+                                  args=list(new.args), line=new.line, col=new.col)
             if f.name == 'close' and len(new.args) == 1 and not kw:
                 return G.CallExpr(func=G.IdentExpr(name='mojo_os_close'),
                                   args=list(new.args), line=new.line, col=new.col)
@@ -7606,7 +7605,6 @@ def _cpp_drain_generator_args(gen, fn):
                       line=line),
         ]
         call.args = [G.IdentExpr(name=acc, line=line)] + list(call.args[1:])
-        _walk_ast_invalidate(call)
         return pre
 
     def walk(body):
@@ -7616,7 +7614,6 @@ def _cpp_drain_generator_args(gen, fn):
                 sub = getattr(st, fld, None)
                 if isinstance(sub, list):
                     setattr(st, fld, walk(sub))
-                    _walk_ast_invalidate(st)
             if (isinstance(st, G.ExprStmt) and isinstance(st.value, G.YieldFromExpr)
                     and is_wrapped_gen_call(st.value.value)):
                 out.extend(drain(st.value.value, st.line))
@@ -10297,27 +10294,25 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
     gen._yield_from_seq = getattr(gen, '_yield_from_seq', 0) + 1
     guard = f"__mojogen_sub{gen._yield_from_seq}"
     args_text = ', '.join(arg_exprs)
-    # `yield from` forwards `send()` to the sub-generator, as Python does. The
-    # first step is Python's implicit `next()` on the sub-generator, which is
-    # `{sub_base}_resume` (it delivers the None box). Every later step hands
-    # the word the outer generator was just resumed with to `{sub_base}_send`,
-    # and the outer's own `co_yield` evaluates to that word (see cpp_async.py's
-    # `_step`/`_send` and `yield_value`'s awaiter).
+    # `yield from` forwards `send()` to the sub-generator, as Python does: the
+    # word the outer generator was resumed with (`None` on the first step, the
+    # box a plain resume delivers) is handed to the sub-generator's
+    # `{sub_base}_send`, and the outer's own `co_yield` returns the word the
+    # NEXT resume of the outer generator carries.
     _fw = gen._cpp_fresh_name("_mg_yf_word")
     if sub_base.startswith('_mojogen_'):
-        # A C++20 sub-generator: its own `_resume`/`_send` entries (cpp_async.py).
+        # A C++20 sub-generator: its own `_send` entry (cpp_async.py).
         _fw_decl = []
-        _fw_first = f"{sub_base}_resume({guard}.g)"
         _fw_step = f"{sub_base}_send({guard}.g, {_fw})"
     else:
         # A stack-switch sub-generator (the mixed case: a cpp outer delegating
-        # to a `__mgco_` callee) has no `_resume`/`_send` symbols; its only
-        # entry is the runtime's `__mojo_gen_resume(gen, word)`, which both
-        # steps use (the first with the None box). The runtime's file-scope
-        # declaration is emitted by module_gen once this flag is set.
+        # to a `__mgco_` callee) has no `_send` symbol; its resume entry is the
+        # runtime's `__mojo_gen_resume(gen, word)`, the one the default path's
+        # own `_send`-equivalent (emit_calls._lower_generator_send) calls. The
+        # runtime's file-scope declaration is emitted with the unit (module_gen).
+        # The file-scope declaration is emitted by module_gen once this flag is set.
         gen._cpp_runtime_gen_resume_used = True
         _fw_decl = []
-        _fw_first = f"__mojo_gen_resume ((int64_t)(intptr_t){guard}.g, mojo_box_none())"
         _fw_step = f"__mojo_gen_resume ((int64_t)(intptr_t){guard}.g, {_fw})"
     return [
         f"{indent}{{",
@@ -10325,11 +10320,8 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
         f"{{ {sub_base}_start({args_text}), &{sub_base}_destroy }};",
         *_fw_decl,
         f"{indent}    int64_t {_fw} = mojo_box_none();",
-        f"{indent}    if ({_fw_first}) {{",
-        f"{indent}        for (;;) {{",
-        f"{indent}            {_fw} = co_yield {sub_base}_value({guard}.g);",
-        f"{indent}            if (!{_fw_step}) break;",
-        f"{indent}        }}",
+        f"{indent}    while ({_fw_step}) {{",
+        f"{indent}        {_fw} = co_yield {sub_base}_value({guard}.g);",
         f"{indent}    }}",
         # Milestone D: the sub-generator's own `_resume` (same wrapper
         # every compiled generator gets — see _gen_cpp_generator_unit)
