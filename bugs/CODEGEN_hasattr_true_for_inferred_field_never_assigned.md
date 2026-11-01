@@ -140,6 +140,60 @@ was assigned through an uninstrumented path, which is a regression for every cur
 `getattr(node, f, default)` on the compiler's own AST (the self-hosted compiler uses this
 extensively). The bit must be set at ALL sites in Step C in the same commit.
 
+### Round 2026-11-01 (b): re-measured, cross-unit constraint added to the plan
+
+Re-measured on the current tree (`python3 tools/memslot.py --gb 8 --label repro -- python3 .tmp/repro.py`,
+where `.tmp/repro.py` calls `test_gimple_runner.compile_mojo_to_gimple_exe` on the repro above and
+prints the exe's stdout): `True / 0 / True 5`. Still open, matches the repro.
+
+Store-site count, measured (`grep` over `mojo/backend_gimple/*.py`): about 20 emitter sites that write a
+struct member through `_safe_field(...)` alone (cpp_core 4547/5800/6371/8449; emit_calls 2965/9960;
+emit_exprs 2329/2706/2951/3075/3078; emit_methods 414/4198; emit_stmts 2059/2068/2292/2645/3853;
+module_gen 1982/2136/16029/16047/16140/16143), plus raw `->{member}` spellings that do not pass through
+`_safe_field`. Step C above must be re-enumerated against this list, not against the earlier 10-site list.
+
+**New constraint the plan above does not yet state.** The mint writes into the SHARED `StructDef.fields`
+(module_gen.py ~7344-7346) while `struct_field_types` is PER-GEN (comment at ~7000-7010: "the two tables are
+per-gen while `StructDef.fields` is shared"). The struct typedef is emitted only by the owning TU, i.e. the
+gen with `emit_struct_defs=True` (module_gen.py ~1549, emit_funcs.py ~3167/3427, emit_resolve.py ~731). Sibling
+gens with `emit_struct_defs=False` compile member stores and reads against that same layout. So a presence
+word whose bit index is decided per gen would disagree between TUs: a sibling sets bit `k` that the owner's
+typedef does not have, which is an out-of-bounds write. Consequence for the design:
+
+- The tracked set and each tracked field's bit index MUST be derived from one authority that every gen
+  sees identically: the shared `StructDef` (e.g. a deterministic bit index per tracked field, stored on the
+  `StructDef`, or recomputed from the sorted tracked names), NOT from a gen's `struct_field_types`.
+- The presence word count must be included in EVERY typedef emission path that the owner and the siblings
+  depend on: `_render_struct_typedef_body` callers at module_gen.py ~14672, ~17273, ~17371 (and the
+  C++ preamble `_struct_typedef_texts` path). A typedef rendered without the word while a sibling writes it
+  is the exact ABI break this section is about.
+- The existing minted field `b` already has this exposure (the owner's layout can lack a sibling's mint).
+  That is a pre-existing hazard and this change must not widen it: a presence word added to a struct makes
+  the layout depend on the same shared authority, so it is no worse than the field itself.
+
+**Next round, concretely (this is the implementation order; nothing below is landed yet):**
+
+1. Establish the authority: add a `presence_fields` list to `StructDef` (set by the mint passes at
+   module_gen.py ~7343 and ~7055, only for names not assigned in that struct's `__init__`), with a stable
+   sorted order. Index = position in that list. Re-run the repro after this step alone: no output change
+   expected (it is data only).
+2. Layout: render `uint64_t __mojo_present[ceil(n/64)];` in `_render_struct_typedef_body` only when
+   the StructDef has presence fields. Not in `fields`, not in `struct_field_types`. Byte-compare the generated C
+   of a struct with no minted fields before/after (must be identical).
+3. Stores: one helper `gen._emit_presence_set(struct, member, obj_c)`; call it at every site in the list
+   above that writes a presence field, and in the field-wise copy sites (emit_stmts 2292, emit_methods
+   4198) copy the presence words too. Do steps 2 and 3 in one commit: the read side may not land before
+   every store site does.
+4. Read side: `_mojo_getattr_<S>` arms for presence fields test the bit and fall through to
+   `mojo_obj_getattr` on a clear bit (module_gen.py ~1980-2090). `_mojo_setattr_<S>` sets the bit.
+5. Tests: `test_gimple_matches_cpython`-style cases in a file next to hasattr coverage (test_comptime_function_alias_r2.py
+   and test_dataclasses_formal.py mention hasattr; the runtime-class-creation file is about `type()` and is
+   the wrong home for this). Cases: the repro; a method-assigned field read on an instance that never
+   called the method; a copy by value then hasattr on the copy; `setattr` then `hasattr`; more than 64 presence
+   fields. Each must FAIL before step 4 and pass after.
+6. Integrator gate (not run here): `stdlib-dylib` and `stdlib-syntax` skip / FAILED counts before vs after, and
+   byte-compare of generated C for a struct with no presence fields.
+
 ### Related, not this bug
 
 - A read of a tracked field on an object that never had it set returns 0 instead of raising.
