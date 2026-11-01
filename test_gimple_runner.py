@@ -3530,6 +3530,31 @@ top()
 print(sys._getframe(0).f_code.co_name, sys._getframe(0).f_lineno)
 """, "['mid:10', 'leaf:6', 'leaf:6', 'leaf:5']\n['top:22', 'mid:10', 'leaf:6', 'leaf:6', 'leaf:5']\n<module>\n<module> 34\n")
 
+    # `for d, e in f(xs):` where `f` is a callable PARAMETER or a loop variable over a list of
+    # generator functions: dispatched through mojo_dyn_call and drained, the tuple targets read
+    # boxed so a None / a string beside an int keep their kinds. The generators record the
+    # per-slot kinds of the tuple they yield. (This used to print mojo_unsupported_iter and run the
+    # body zero times.)
+    test_gimple_stdout("gimple_for_over_a_call_through_a_function_value", """\
+def ga(xs):
+    for x in xs:
+        yield x, None
+def gb(xs):
+    for x in xs:
+        if x > 1:
+            yield x, "big"
+def run(f, xs):
+    for d, e in f(xs):
+        print(d, e)
+def run2(fs, xs):
+    for f in fs:
+        for d, e in f(xs):
+            print(d, e)
+run(ga, [1, 2])
+run(gb, [1, 2, 3])
+run2([ga, gb], [1, 2])
+""", "1 None\n2 None\n2 big\n3 big\n1 None\n2 None\n2 big\n")
+
     # String site FIRST, int site second (an int list records no contract, so
     # it used to be invisible as a disagreeing call site).
     test_gimple_stdout("gimple_mixed_kind_flat_list_param_str_first", """\

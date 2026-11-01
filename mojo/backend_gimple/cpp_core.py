@@ -5765,11 +5765,34 @@ def _cpp_yield_tuple(gen, tup: 'TupleExpr', declared: dict, indent: str) -> list
     # first made every `yield (a, b)` raise out of its own construction. Same
     # ordering rule as _lower_tuple_literal's identical literal.
     lines = [f"{indent}MojoList *{tvar} = mojo_list_new();"]
+    # A tuple with a None slot must carry every slot's kind AT RUN TIME: a consumer that reads the
+    # tuple dynamically -- a loop over the result of a call through a function VALUE
+    # (`for d, e in check(a)`) -- prints a None as 0 and a string as a pointer otherwise, and an
+    # int64_t slot here may only be the default for an unknown local. Such a tuple is built with
+    # the kind-recording appends; a tuple without a None keeps the plain appends it always had
+    # (a double beside an unknown int64_t read back as its raw bits when it did not).
+    _dyn_slots = False
+    _els = []
     for el in tup.elements:
         ectype = gimple_exprtypes._infer_simple_expr_ctype(el, declared, self_fields, gen._async_api) or 'int64_t'
-        ev = gen._cpp_expr(el)
+        _is_none = isinstance(el, NoneLiteral) or (isinstance(el, IdentExpr) and el.name == 'None')
+        _certain_int = isinstance(el, (IntLiteral, BoolLiteral))
         suf = gimple_ctypes.TypeLattice.list_suffix(ectype)
-        if suf == 'double':
+        if _is_none:
+            _dyn_slots = True
+        _els.append((el, ectype, suf, _is_none))
+    for el, ectype, suf, _is_none in _els:
+        ev = gen._cpp_expr(el)
+        if _dyn_slots:
+            if _is_none:
+                lines.append(f"{indent}mojo_list_append_word({tvar}, mojo_box_none());")
+            elif suf == 'double':
+                lines.append(f"{indent}mojo_list_append_double_kinded({tvar}, (double)({ev}), 'i');")
+            elif suf == 'str':
+                lines.append(f"{indent}mojo_list_append_str_kinded({tvar}, (char *)({ev}));")
+            else:
+                lines.append(f"{indent}mojo_list_append_word({tvar}, (int64_t)(intptr_t)({ev}));")
+        elif suf == 'double':
             lines.append(f"{indent}mojo_list_append_double({tvar}, (double)({ev}));")
         elif suf == 'str':
             lines.append(f"{indent}mojo_list_append_str({tvar}, (char *)({ev}));")

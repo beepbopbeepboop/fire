@@ -2835,6 +2835,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # cannot be used to detect this. Read off the node rather than inferred
     # from the name: `*_body` is a legal user function name.
     _is_coro_body = bool(getattr(node, '_mojo_coro_body', False))
+    gen._cur_func_is_coro = _is_coro_body
     gen._reset_func(node.body, node.params,
                     allow_lambda_reduction=not _is_coro_body)
     # Per-FUNCTION record of which locals hold a beta-reducible
