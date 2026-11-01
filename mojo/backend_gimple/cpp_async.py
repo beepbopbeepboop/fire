@@ -336,13 +336,16 @@ def _cpp_tag_yield_sites(body_lines: list):
         if m is None:
             return None
         ct = {'int': 'int64_t', 'dbl': 'double', 'str': 'char *',
-              'bool': '_Bool', 'bytes': 'MojoBytes *'}.get(m.group(1).strip())
+              'bool': '_Bool', 'bytes': 'MojoBytes *', 'none': 'None'}.get(m.group(1).strip())
         if ct is None:
             return None
         kinds.add(ct)
         indent = ln[:len(ln) - len(ln.lstrip())]
         expr = m.group(2)
-        if ct == 'double':
+        if ct == 'None':
+            # the None box: renders `None` wherever a tagged word is printed
+            w = "mojo_box_none()"
+        elif ct == 'double':
             w = f"mojo_box_from_double((double)({expr}))"
         elif ct == '_Bool':
             w = f"mojo_box_from_bool((int64_t)({expr}))"
@@ -1133,7 +1136,8 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         _tagged_yield = False
         if ((value_ctype is None
                 or (value_ctype == 'char *'
-                    and any('/*Y:bytes*/' in _bl for _bl in body_lines)))
+                    and any('/*Y:bytes*/' in _bl for _bl in body_lines))
+                or any('/*Y:none*/' in _bl for _bl in body_lines))
                 and not has_tuple_yield
                 and coro_mod._generator_value_kind(
                     fn, coro_mod._static_env(fn, struct_def))[0] == 'w'):
@@ -1185,13 +1189,13 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         _slot_why = gimple_gen_coro.cpp_value_slot_refusal(fn, value_ctype, struct_def)
         if _slot_why is not None:
             raise gimple_exprtypes._UnsupportedGeneratorShape(f"{fn.name}: {_slot_why}")
-    # A None yield (bare `yield` / `yield None`) has no slot this path can carry
-    # (the stack-switch path refuses the same shape in `_generator_value_kind`).
-    # The bare-yield emitter in cpp_core.py raises the same refusal when it
-    # reaches one; this check covers every shape, not just a statement-level
-    # bare yield, and runs after the body is lowered.
-    if value_ctype is not None and any(
-            coro_mod._is_none_yield(_n) for _n in coro_mod._walk(fn)):
+    # A None yield (bare `yield` / `yield None`) that did not become a tagged
+    # word has no slot this path can carry: its marked site would otherwise
+    # be written as a 0. A mixed-kind generator was boxed above (`_tagged_yield`),
+    # so this refuses only the lone-None shape. Runs after the body is lowered
+    # and covers every shape, not just a statement-level bare yield.
+    if (value_ctype is not None and not _tagged_yield and any(
+            coro_mod._is_none_yield(_n) for _n in coro_mod._walk(fn))):
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             f"{fn.name}: {coro_mod.NONE_YIELD_CPP_REFUSAL}")
     if value_ctype is not None:
