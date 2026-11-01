@@ -4941,11 +4941,11 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
         if _callee is not None:
             _visit_call(node, caller_env, _callee)
 
-    def _wants_call(visit, node):
-        # Whether `visit` would do anything with `node`: the same two tests the
+    def _wants_call(closure, node):
+        # Whether the visitor would do anything with `node`: the same two tests the
         # visitors make before they touch the caller's env, so `_collect_from` can
         # skip building that env (see there) without changing what is recorded.
-        if visit is _visit_closure_call:
+        if closure:
             return _closure_callee(node) is not None
         fn = node.func
         gname = (fn.name if isinstance(fn, N.IdentExpr) else
@@ -4981,26 +4981,7 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
                     aliases.add(_cm_as_str(_al))
         return aliases
 
-    # The CallExpr nodes of each function (and of each module-level statement),
-    # found by ONE walk and reused by every later pass of this scan. `_collect` runs
-    # twice per scan and the scan runs once per `lower`; re-walking every function of
-    # the whole import closure each time was a quarter of `fire.py --dump-full`. The
-    # AST is not mutated while a scan runs, and the dict lives only for this call.
-    _calls_of: dict = {}
-
-    def _calls_in(node):
-        _k = id(node)
-        _hit = _calls_of.get(_k)
-        if _hit is not None:
-            return _hit
-        _out = []
-        for _w in _walk(node):
-            if isinstance(_w, N.CallExpr):
-                _out.append(_w)
-        _calls_of[_k] = _out
-        return _out
-
-    def _collect_from(src, visit):
+    def _collect_from(src, visit, closure):
         for s in src:
             fns = []
             if isinstance(s, N.FunctionDef):
@@ -5027,28 +5008,34 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
                 # actually act on (`_wants_call`), not for every function. In the
                 # closure walk almost no function calls one of THIS module's
                 # generators, and `_static_env` is the expensive part.
+                #
+                # Iterates `_walk(fn)` and tests `isinstance` per node, as the
+                # original did: a list of pre-filtered CallExpr nodes returned
+                # from a helper lost its element type in the self-hosted build
+                # (the loop variable became a boxed word and `node.func` read
+                # garbage -- every program with a `def` crashed the binary).
                 cenv = None
                 have_env = False
-                for n in _calls_in(fn):
-                    if not _wants_call(visit, n):
-                        continue
-                    if not have_env:
-                        cenv = _static_env(fn, sdef)
-                        have_env = True
-                    visit(n, cenv)
+                for n in _walk(fn):
+                    if isinstance(n, N.CallExpr) and _wants_call(closure, n):
+                        if not have_env:
+                            cenv = _static_env(fn, sdef)
+                            have_env = True
+                        visit(n, cenv)
             # module-level calls (rare, e.g. a bare generator call in a stmt)
             if not isinstance(s, (N.FunctionDef, N.StructDef)):
-                for n in _calls_in(s):
-                    visit(n, None)
+                for n in _walk(s):
+                    if isinstance(n, N.CallExpr):
+                        visit(n, None)
 
     def _collect():
-        _collect_from(stmts, _visit_call)
+        _collect_from(stmts, _visit_call, False)
         for _cs in closure_stmts:
             _bound_here.clear()
             _bound_here.update(_from_bound_names(_cs))
             _alias_here.clear()
             _alias_here.update(_module_aliases(_cs))
-            _collect_from(_cs, _visit_closure_call)
+            _collect_from(_cs, _visit_closure_call, True)
 
     def _classify():
         # Replace, not merge: a pass that no longer finds a conflict must
