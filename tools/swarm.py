@@ -103,7 +103,7 @@ def hold_active(np, h, retry_s, now=None):
     return np["hash"] == h and now - np["at"] < retry_s
 
 
-ESCALATE_AFTER = 1   # a no-commit attempt boosts the doc one class: a work tree that does not finish moves up
+ESCALATE_AFTER = C.load_pool().get("classes", {}).get("escalate_after", 1)   # no-commit attempts before a doc moves up a class (pool.json)
 
 
 def dir_class(doc):

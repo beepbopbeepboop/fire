@@ -90,7 +90,7 @@
     "easy": "bugs/*.md, everything not in mid/ or hard/ (haiku and the free/local slots)",
     "mid": "bugs/mid/*.md (Sonnet 5.5)",
     "hard": "bugs/hard/*.md (Opus 5.5)",
-    "escalate_after": 1,
+    "escalate_after": 2,
     "note": "Every doc starts easy. A no-commit attempt (a limit kill excluded) boosts it one class; the top class keeps its docs. Work stays in its class."
   }
 }
