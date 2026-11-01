@@ -36,8 +36,12 @@ every module is reachable from a word with `mojo_getattr_any(obj, attr)`
    `mojo_classobj_setattr`; `Foo.x`, `Foo.x = v`, `setattr/getattr`, `Foo.__name__` on the handle
    go through `mojo_obj_getattr / mojo_getattr_any / mojo_setattr` to the class table, found
    through the bases. Pinned by `test_runtime_class_creation.py` (CPython-diffed).
-   STILL MISSING in stage 3: a computed namespace/bases (`type(n, b, ns)` with `ns` a variable,
-   which is what `EnumType.__new__` does: needs dict-of-words iteration into the table);
+   **Computed namespace landed 2026-10-31**: `type(n, (B,..), ns)` with `ns` a dict-typed
+   variable/attribute is walked at run time by `mojo_type_fill_from_dict` (insertion order, float
+   slots boxed); pinned by `computed_namespace_dict_variable`. A call-result namespace is still
+   refused by name.
+   STILL MISSING in stage 3: computed BASES (a tuple/list variable, which `EnumType.__new__`
+   also passes: needs a list-of-class-words walk into `mojo_type_add_base`);
    inheriting a STATIC base's class-body attributes through a dynamic class (`class B: y = 5`,
    `type('F', (B,), {}).y` - body attributes are static globals, not table entries; register
    them as words in `_mojo_classattr_init` or fall back to the struct's static read);
