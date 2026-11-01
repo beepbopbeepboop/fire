@@ -13480,6 +13480,13 @@ def gen_module_impl(self, stmts):
                 self._global_to_module[_scan_stmt.target] = _phase17_mod
             _phase17_infer_global_type(_scan_stmt.target, _scan_stmt.value, _scan_own)
 
+    # Module-global generator handles, recorded BEFORE any function body is
+    # lowered: a function reading `it = g()` (a global) must find the api
+    # the toplevel store will later bind, and the toplevel body is emitted
+    # last. See `emit_infra.seed_global_generator_apis`. Function-local
+    # import, as at the `mixed_container_locals` call above.
+    import mojo.backend_gimple.emit_infra as _ein_seed
+    _ein_seed.seed_global_generator_apis(self, stmts, _gmi_binding_index(stmts))
     _phase17_append_hits: dict = {}
     _gmi_phase17_collect_appends(self, _phase17_stmts, _phase17_append_hits)
     for _gname, _gargs in _phase17_append_hits.items():

@@ -184,8 +184,11 @@ round-3 refusal, so they are coverage, not a fix.
    on the stdlib default path, so the integrator's `skip`/`U` counts should
    not move from this.
 
-2. *Module-global `next()` refusal* is NOT None-specific and is filed as its own
-   doc: `bugs/CODEGEN_next_on_a_module_global_generator_is_refused.md`.
+2. *Module-global `next()` refusal* is NOT None-specific. It was its own bug
+   (`next()` on a module-level generator read from a function was refused: the
+   toplevel store, which seeds the generator api, is emitted after every
+   function) and is FIXED by `emit_infra.seed_global_generator_apis`, pinned by
+   `run_module_global_generator_tests` in `test_gimple_generator_runner.py`.
 
 3. *Dead C++ bare-yield line* (`cpp_core.py`, `co_yield (int64_t)0`): unreachable
    for a None yield now (the typer refuses first). Delete in a cleanup, with
