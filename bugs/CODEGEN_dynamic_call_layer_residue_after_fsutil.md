@@ -129,6 +129,15 @@ as values, or that call one of their own parameters, are kept on the C++ path
   itself (`mojo_args_extend_word` appends words via `mojo_list_append_int`, so
   it loses its `d` kind), and the unannotated-float-default rule is applied to
   generator parameters only, not plain functions.
+- **Float element inside a `*` spread FIXED 2026-11-01**
+  (`test_link_mode.py::test_generator_value_called_with_float_element_in_star_spread`).
+  `mojo_args_extend_word` appended each spread element with
+  `mojo_list_append_int`, so a double element's box address reached the callee
+  as an integer (`f(*[1.5, 3])` printed `2.13e-314`). It now uses
+  `mojo_list_append_word`, which records the `d` kind. Measured: FAIL
+  (`0.0 2.13e-314 4.27e-314`) -> PASS (CPython-identical `0.0 1.5 3.0`).
+  Still open: the unannotated-float-default rule is applied to generator
+  parameters only, not plain functions.
 - Regressions: item 1 `test_link_mode.py::test_bare_submodule_import_keyword_call`,
   item 3 `...::test_str_affix_method_on_unsolved_word_is_bool`, item 4
   `...::test_generator_none_default_reaches_callee_as_null`, item 2 `...::test_cross_module_generator_default_is_padded`, item 5 above (+ its 2026-10-31 entry). (The

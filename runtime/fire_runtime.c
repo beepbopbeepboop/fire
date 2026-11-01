@@ -2138,7 +2138,7 @@ MojoList *mojo_args_extend_word(MojoList *dst, int64_t src)
 {
     MojoList *l = mojo_iter_word(src);
     for (int64_t i = 0; i < mojo_list_len(l); i++)
-        mojo_list_append_int(dst, mojo_box_word(mojo_list_get_boxed(l, i)));
+        mojo_list_append_word(dst, mojo_box_word(mojo_list_get_boxed(l, i)));
     return dst;
 }
 MojoDict *mojo_kwargs_merge_word(MojoDict *dst, int64_t src)
