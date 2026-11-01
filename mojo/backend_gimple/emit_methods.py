@@ -72,6 +72,7 @@ from mojo.middle.types import (
     _struct_value_codes, _struct_slot_kinds, _struct_elem_ctype,
 )
 from mojo.middle.calls_shared import _is_pointer_ctype
+from mojo.middle.methods_shared import poly_dispatch_plan
 from mojo.middle.methods_shared import *  # noqa: F401,F403
 from mojo.middle.methods_shared import (
     _SELFHOST_SIBLING_MODULE_PREFIXES, _as_str, _gmm_callexpr_node, _is_selfhost_sibling_alias, _is_selfhost_source_file, _sms_key
@@ -4761,6 +4762,23 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             ov_local = gen._new_val(ot, f"({ot}){ov}")
         else:
             ov_local = gen._ensure_local(ot, ov)
+        # `self.<f>.m()` where `<f>` is a constructor slot that received two or
+        # more different struct pointers (`_poly_slot_cands`, module_gen.py): the
+        # word holds one of those structs, so the call dispatches on its runtime
+        # tag through the generated `_mojo_poly_<m>_*` switch instead of the
+        # scalar no-op stub below, which answered the receiver's own bits.
+        # Zero-argument, `int64_t`-returning methods only (`poly_dispatch_plan`).
+        _pm_recv = node.func.obj if isinstance(node.func, gimple_ctypes.MemberExpr) else None
+        if (ot in ('int', 'int64_t') and not node.args and not node.kwargs
+                and isinstance(_pm_recv, gimple_ctypes.MemberExpr)
+                and isinstance(_pm_recv.obj, gimple_ctypes.IdentExpr)
+                and _pm_recv.obj.name == 'self'
+                and getattr(gen, '_current_struct_name', None)):
+            _pm_slot = f"{gen._current_struct_name}::{_pm_recv.member}"
+            _pm_name = poly_dispatch_plan(gen)['slots'].get(_pm_slot, {}).get(method)
+            if _pm_name:
+                _pm_t = gen._call_expr('int64_t', _pm_name, [('int64_t', gen._to_int64(ot, ov_local))])
+                return 'int64_t', _pm_t
         # A call on a MODULE MARKER — `argparse.ArgumentParser(...)` and every
         # `.method()` after it — is not a scalar operation at all, and the
         # generic passthrough at the bottom of this block (which returns the

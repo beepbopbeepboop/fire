@@ -32,7 +32,6 @@ honestly bound.
 """
 BASELINE = {
     'FORMAL.md': 1,
-    'bugs/CODEGEN_gate_gimplerunner_red.md': 1,
     'bugs/COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md': 1,
     'bugs/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__.md': 2,
     'bugs/COMPILE_FAIL_ctypes_util.md': 1,

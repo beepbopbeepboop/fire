@@ -1,5 +1,24 @@
 # A method receiver whose type could not be resolved returns the receiver's own pointer bits
 
+## Status 2026-11-01 — PARTIAL: zero-argument polymorphic receivers land
+
+Landed: a constructor slot that received two or more different `<Struct> *` is
+recorded (`_poly_slot_cands`, module_gen.py) and stays `int64_t`; for each
+method ≥2 candidates define, a generated `_mojo_poly_<m>_<S...>` switch on the
+receiver's `__mojo_type_id` (`poly_dispatch_plan`, mojo/middle/methods_shared.py)
+is called from the scalar-receiver branch of `emit_methods.py`. Scope: methods
+taking no arguments beyond `self` and returning `int64_t`, receivers `self.<f>`
+where `<f>` has the same name as the constructor parameter. Quick check:
+`gimple_ctor_param_polymorphic_slot_reads_receiver` passes (2/2); the
+unanimous-slot pin `gimple_ctor_param_unanimous_slot_has_no_poly_dispatch` passes;
+`test_gimple_runner.py` 509 passed, 0 failed.
+
+Still open: methods with arguments on a polymorphic slot (plan step 4 extension,
+needs C parameter types per candidate), and receivers that are a plain local or
+parameter rather than `self.<field>`. Until then those keep the scalar no-op
+stub. The plan's refusal on candidate disagreement is also not implemented: the
+plan skips a method whose candidates disagree instead of raising.
+
 ## Status 2026-10-29 — planning round (the guide; no code landed here)
 
 Measured on the tree after the list-copy and class-attribute fixes: this is

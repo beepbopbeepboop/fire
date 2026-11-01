@@ -82,7 +82,7 @@ import mojo.middle.itcursor as itc
 from mojo.middle.funcs_shared import param_default_pairs
 from mojo.middle.types import _TUPLE_ANN_BY_NAME, _unpack_target_leaf_names
 from mojo.middle.types import PRESENCE_WORD, presence_bit, presence_word_count, presence_set_stmt
-from mojo.middle.methods_shared import _is_selfhost_source_file
+from mojo.middle.methods_shared import _is_selfhost_source_file, poly_dispatch_plan
 from gimple_codegen import ClosureInfo, DispatchSolver, TypeLattice, _CPP_KEYWORD_FIELDS, _C_KEYWORDS, _C_PARAM_EXTRA_KEYWORDS, _C_RESERVED_FUNCS, _EXPR_DISPATCH, _FIXED_ARRAY_ANN_RE, _LIST_RETURNING_METHODS, _PSEUDO_DUNDER_ATTRS, _RUNTIME_FUNCS, _SELFHOST_DIR, _SELFHOST_KWARGS_HAS_VARARG, _SELFHOST_KWARGS_SLOTS, _STMT_DISPATCH, _STR_RETURNING_METHODS, _TYPE_MAP, _UnsupportedGeneratorShape, _async_gen_quick_eligible, _async_quick_eligible, _bracket_param_type_annotations, _c_escape, _c_field_name, _c_id, _class_attr_ctype, _compute_exc_descendants, _debug_note, _declared_vars_body, _extract_init_expr, _generator_quick_eligible, _import_targets, _merge_struct_inheritance, _module_init_name, _module_toplevel_name, _mojo_type, _safe_field, _safe_name, _struct_type_id, _stub_guard_name, _used_idents_deep, _used_idents_node
 
 # Re-export shared helpers from mojo.middle.module_shared via explicit imports.
@@ -1801,6 +1801,11 @@ def _emit_reflection_fwd_decls(self, parts):
     # (`REPR_CLUSTER_DECLS`) — spelling them again here is how the gate and the
     # emission would come to disagree.
     parts.extend(REPR_CLUSTER_DECLS)
+    # The polymorphic-receiver dispatches a method call on a polymorphic slot
+    # lowers to (`poly_dispatch_plan`). Declared here, ahead of the imported
+    # modules' bodies that call them; defined by `_emit_reflection_dispatch`.
+    for _pd_name in poly_dispatch_plan(self)['dispatch']:
+        parts.append(f"static int64_t {_pd_name} (int64_t);")
     _emitted = _reflect_emitted_names(self)
     repr_fwd_decls = [f"static char * _mojo_repr_{sn} ({sn} *obj);"
                       for sn in _emitted]
@@ -2389,6 +2394,22 @@ def _emit_reflection_dispatch(self, parts):
             "  return strdup(\"None\");\n"
             "}\n")
         parts.extend(refl_parts)
+        # The polymorphic-receiver dispatches (see `poly_dispatch_plan`): one
+        # switch per (method, candidate set), on the receiver's tag. Each
+        # candidate's own method is prototyped here so the switch does not
+        # depend on definition order.
+        for _pd_name, (_pd_m, _pd_names) in poly_dispatch_plan(self)['dispatch'].items():
+            _pd_lines = [f"int64_t {_pd_s}_{_pd_m} ({_pd_s} *);" for _pd_s in _pd_names]
+            _pd_lines.append(f"static int64_t {_pd_name} (int64_t recv) {{")
+            _pd_lines.append("  int64_t _tag = *(int64_t *)(intptr_t)recv;")
+            for _pd_s in _pd_names:
+                _pd_lines.append(
+                    f"  if (_tag == {_struct_type_id(_pd_s)}) "
+                    f"return {_pd_s}_{_pd_m} (({_pd_s} *)(intptr_t)recv);")
+            _pd_lines.append(f'  mojo_raise_attribute_error("{_pd_m}");')
+            _pd_lines.append("  return 0;")
+            _pd_lines.append("}")
+            parts.append("\n".join(_pd_lines) + "\n")
         _getattr_emitted = list(reflect_emitted)
         for _sn2 in reflect_structs:
             if _sn2 in _getattr_emitted:
@@ -6255,6 +6276,13 @@ def gen_module_impl(self, stmts):
         self._bytes_subclass_payload_argidx[_bsc_name] = _bsc_idx
 
     self._ctor_lit_param_types: dict[str, dict[str, str]] = {}
+    # Polymorphic constructor slots: "<struct>::<param>" -> sorted list of the
+    # `<Struct>` names observed passed to it, when two or more DIFFERENT struct
+    # types were observed (the slot stays `int64_t`; see the fixpoint below).
+    # `poly_dispatch_plan` (mojo/middle/methods_shared.py) turns this into the
+    # generated `_mojo_poly_*` switches.
+    self._poly_slot_cands: dict[str, list] = {}
+    self._poly_struct_defs: dict = {}
     # Raw container-literal evidence from the pass above, kept for the
     # `_arg_scalar_type`-based observer to VETO on (a field holds exactly one
     # ctype, so a slot seen as a list by one observer and a string by the
@@ -11729,6 +11757,19 @@ def gen_module_impl(self, stmts):
 
     _ctor_scalar_obs: dict = {}          # "<struct>::<pname>" -> scalar type
     _ctor_scalar_conflict: dict = {}     # "<struct>::<pname>" -> True (mixed)
+    # Every DISTINCT `<Struct> *` observed for a slot, in first-seen order. A
+    # conflict between two struct pointers is what the polymorphic-slot record
+    # below needs; the single-answer `_ctor_scalar_obs` cannot hold both.
+    _ctor_struct_cands: dict = {}        # "<struct>::<pname>" -> [ "<Struct> *", ... ]
+
+    def _note_struct_cand(_k, _t):
+        if not _t.endswith(' *'):
+            return
+        _cl = _ctor_struct_cands.get(_k)
+        if _cl is None:
+            _ctor_struct_cands[_k] = [_t]
+        elif _t not in _cl:
+            _cl.append(_t)
     # This is the CONSTRUCTOR direction of
     # the ctor-direction cross-call struct contract. The repro's
     # receiver is `self.w` inside `L.numel`, whose type is whatever `__init__`'s
@@ -11802,6 +11843,7 @@ def gen_module_impl(self, stmts):
                         st = _arg_scalar_type(_cname, a, caller_struct=_cstruct)
                     if not st:
                         continue
+                    _note_struct_cand(_skey, st)
                     _sprev = _ctor_scalar_obs.get(_skey, '')
                     if not _sprev:
                         _ctor_scalar_obs[_skey] = st
@@ -11826,6 +11868,7 @@ def gen_module_impl(self, stmts):
                         st = _arg_struct_ptr_type(caller_name, a, None)
                     if not st:
                         continue
+                    _note_struct_cand(_skey, st)
                     _sprev = _ctor_scalar_obs.get(_skey, '')
                     if not _sprev:
                         _ctor_scalar_obs[_skey] = st
@@ -11880,7 +11923,18 @@ def gen_module_impl(self, stmts):
                     if not (_st2.endswith(' *') and _st2[:-2] in self.struct_field_types):
                         continue                # none, or not unanimous
                 if _ctor_scalar_conflict.get(_skey2):
-                    continue                    # mixed scalar evidence
+                    # Two or more DIFFERENT struct pointers were passed here.
+                    # The slot stays `int64_t` (no single type is correct), but
+                    # its candidates are recorded so a method called on it can
+                    # dispatch on the receiver's runtime `__mojo_type_id`
+                    # instead of lowering to the scalar no-op stub.
+                    _pc = _ctor_struct_cands.get(_skey2) or []
+                    if len(_pc) >= 2 and all(_p.endswith(' *') for _p in _pc):
+                        _pcn = sorted([_p[:-2] for _p in _pc])
+                        self._poly_slot_cands[_skey2] = _pcn
+                        self._poly_struct_defs = {
+                            s.name: s for s in all_functions if isinstance(s, StructDef)}
+                    continue                    # mixed evidence: keep int64_t
                 _resolved_type = _st2
                 if _ann.get(pname) is not None:
                     continue                    # respect explicit annotation
