@@ -6020,6 +6020,55 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 if flush:
                     out.append(f'{indent}fflush(stdout);')
                 return out
+        # `print(<multiple scalar args>)` — CPython's default separator is `sep=' '`.
+        # Emit one printf per argument with space between them, end_str after last.
+        if (isinstance(s.value, gimple_ctypes.CallExpr) and isinstance(s.value.func, gimple_ctypes.IdentExpr)
+                and s.value.func.name == 'print' and len(s.value.args) > 1):
+            parsed = _print_end_flush(getattr(s.value, 'kwargs', None))
+            if parsed is not None:
+                end_str, flush = parsed
+                self_fields = getattr(gen, '_cpp_gen_self_fields', None)
+                arg_exprs = []
+                for arg in s.value.args:
+                    if _cpp_is_tagged_word_expr(gen, arg):
+                        arg_exprs.append(f"mojo_repr_boxed((int64_t)({gen._cpp_expr(arg)}))")
+                    else:
+                        arg_exprs.append(gen._cpp_expr(arg))
+                # For each argument: emit printf with space after all but last,
+                # and end_str after the last argument.
+                lines = []
+                n = len(arg_exprs)
+                for i, ae in enumerate(arg_exprs):
+                    arg_ctype = gimple_exprtypes._infer_simple_expr_ctype(
+                        s.value.args[i], declared, self_fields) if s.value.args[i] else 'int64_t'
+                    is_first = (i == 0)
+                    is_last = (i == n - 1)
+                    # Build format with leading space only if not first,
+                    # and trailing end_str only if last.
+                    sep_before = '' if is_first else ' '
+                    fmt = '%s' if arg_ctype == 'char *' else ('%s' if arg_ctype == 'double' else '%lld')
+                    # For double use mojo_repr_float, for bool use conditional, for char* direct, for int cast
+                    if arg_ctype == 'double':
+                        val_expr = f"mojo_repr_float((double)({ae}))"
+                    elif arg_ctype == '_Bool':
+                        val_expr = f"({ae}) ? \"True\" : \"False\""
+                    elif arg_ctype == 'char *':
+                        val_expr = ae
+                    else:
+                        val_expr = f"(long long)({ae})"
+                    # Format: space before + fmt + end_str after (only on last)
+                    fmt_str = f'"{sep_before}{fmt}'
+                    if is_last:
+                        fmt_str += f'{end_str}"'
+                    else:
+                        fmt_str += '"'
+                    if arg_ctype == 'double' or arg_ctype == '_Bool' or arg_ctype == 'char *':
+                        lines.append(f"{indent}printf({fmt_str}, {val_expr});")
+                    else:
+                        lines.append(f"{indent}printf({fmt_str}, {val_expr});")
+                if flush:
+                    lines.append(f'{indent}fflush(stdout);')
+                return lines
         # A bare call to a captured (or scalar-parameter) function-type
         # value — device_context.mojo's `async def wrapper(...)
         # capturing -> None: func()`/`func(idx)`, the ENTIRE body of
