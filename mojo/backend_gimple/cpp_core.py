@@ -5612,25 +5612,56 @@ def _cpp_hoist_conditional_expression(gen, s, declared: dict, indent: str) -> li
         indent2 = indent + '    '
         lines = [f"{indent}{mg_t_name} = {lhs_cpp};"]
         lines.append(f"{indent2}if ({cond} ({mg_t_name}))) {{")
+        
         # Now hoist the yield into this block. Since we're inside _cpp_hoist_conditional_expression,
         # we need to create the yield hoisting within this function.
         # We can reuse _cpp_rewrite_yields and _cpp_plan_yield_walk on the right_expr,
         # but we need to capture the hoisted statements and emit them inside the if block.
-
-        # Actually, this is getting very complex. The simplest approach that matches
-        # the doc's intent is to return the lines structure that the caller (_cpp_stmt)
-        # can prepend before the statement. But the hoisted statements need to be
-        # emitted inside the if block, not before.
-
-        # Given the complexity and scope, return None to defer to incremental implementation.
-        # The current (removed-refusal) state is a partial fix; the full conditional
-        # lowering requires more infrastructure.
-        return None
+        
+        # For simplicity, we'll use _cpp_hoist_yields_expr on the right_expr to hoist yields
+        # into the local _mg_t, and emit the hoisted statements inside the if block.
+        hoisted_lines, new_right_expr = _cpp_hoist_yields_expr(gen, right_expr, declared, indent2)
+        lines.extend(hoisted_lines)
+        # Emit the actual value (with the yield replaced by the hoisted local)
+        # We need to emit: _mg_t = (the new right expression)
+        rhs_cpp = gen._cpp_expr(new_right_expr) if hasattr(gen, '_cpp_expr') else new_right_expr.name
+        lines.append(f"{indent2}{mg_t_name} = {rhs_cpp};")
+        lines.append(f"{indent2}}}")
+        return lines
 
     if isinstance(value, gimple_ctypes.TernaryExpr):
         if not _contains_conditional_yield(value):
             return None
-        return None
+        # We have `a if c else (yield v)`
+        # Need to handle: _mg_t = <c_truthy_check>; if (c) { _mg_t = <a>; } else { _mg_t = <yield>; }
+        
+        # Get the C++ expression for condition
+        cond_cpp = gen._cpp_expr(value.condition) if hasattr(gen, '_cpp_expr') else value.condition.name
+        # The ternary condition truthy check
+        truthy_check = f"mojo_truthy_word ({cond_cpp})"
+        
+        mg_t_name = '_mg_t'
+        indent2 = indent + '    '
+        
+        # Generate lines: _mg_t = <truthy_check>; if (c) { _mg_t = <a>; } else { _mg_t = <yield>; }
+        lines = [f"{indent}{mg_t_name} = {truthy_check};"]
+        
+        # Get C++ expressions for then_val and else_val
+        then_cpp = gen._cpp_expr(value.then_val) if hasattr(gen, '_cpp_expr') else value.then_val.name
+        else_cpp = gen._cpp_expr(value.else_val) if hasattr(gen, '_cpp_expr') else value.else_val.name
+        
+        lines.append(f"{indent2}if ({cond_cpp}) {{")
+        lines.append(f"{indent2}    {mg_t_name} = {then_cpp};")
+        lines.append(f"{indent2}}} else {{")
+        
+        # For the else branch that may contain a yield, we need to hoist it
+        hoisted_lines, new_else_expr = _cpp_hoist_yields_expr(gen, value.else_val, declared, indent2)
+        lines.extend(hoisted_lines)
+        # Emit the actual value (with the yield replaced by the hoisted local)
+        else_cpp = gen._cpp_expr(new_else_expr) if hasattr(gen, '_cpp_expr') else new_else_expr.name
+        lines.append(f"{indent2}    {mg_t_name} = {else_cpp};")
+        lines.append(f"{indent2}}}")
+        return lines
 
     return None
 
