@@ -322,7 +322,7 @@ _Y_SITE = re.compile(r'co_yield /\*Y:([^*]*)\*/ \((.*)\);$')
 def _cpp_tag_yield_sites(body_lines: list):
     """The body lines with every `co_yield /*Y:<ctype>*/ (<expr>);` site boxed
     into one int64_t word by its marked ctype (a double as `mojo_box_from_double`,
-    a bool as `mojo_box_from_bool`, a string by its pointer, an int as itself),
+    a bool as `mojo_box_from_bool`, a string as `mojo_box_from_str`, an int as itself),
     or None when the sites do not form a TAGGED value slot: fewer than two
     different ctypes, a ctype that is not one of the four scalar kinds, or a
     yield with no marker (a tuple / delegated / bare yield)."""
@@ -347,7 +347,9 @@ def _cpp_tag_yield_sites(body_lines: list):
         elif ct == '_Bool':
             w = f"mojo_box_from_bool((int64_t)({expr}))"
         elif ct == 'char *':
-            w = f"(int64_t)(intptr_t)((char *)({expr}))"
+            # boxed by kind like the others: a raw pointer is only read as a
+            # string when the runtime registered it (a C++ literal is not)
+            w = f"mojo_box_from_str((char *)({expr}))"
         elif ct == 'MojoBytes *':
             w = f"(int64_t)(intptr_t)({expr})"
         else:
@@ -1000,6 +1002,9 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     gen._cpp_list_local_elem_types = {}
     gen._cpp_word_locals = set()
     gen._cpp_word_iter_locals = set()
+    # Locals of this unit that hold a TAGGED word (a generator's boxed slot
+    # bound by a for loop or `x = next(g)`); see cpp_core._cpp_is_tagged_word_expr.
+    gen._cpp_tagged_word_names = set()
     gen._cpp_param_names = set(gimple_ctypes._as_str(_p[0]) for _p in (fn.params or []))
     gen._cpp_mixed_list_params = set(
         getattr(gen, '_param_elem_mixed', {}).get(fn.name, ()))
@@ -1141,6 +1146,11 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
                 value_ctype = 'int64_t'
                 gen._cpp_last_mixed_slots = True
                 _tagged_yield = True
+        # Published for the registrar (module_gen._register_free_generator,
+        # and the nested-generator api below): a consumer of a TAGGED slot
+        # must render it as a box (see cpp_core._cpp_is_tagged_word_expr),
+        # and the api dict is the only record that crosses modules.
+        gen._cpp_last_tagged_yield = _tagged_yield
         func_decls = list(gen._cpp_func_scope_decls)
         self_recursed = gen._cpp_gen_self_recursed
         fwd_delegates = list(gen._cpp_fwd_gen_delegates)
@@ -1803,6 +1813,7 @@ def _compile_nested_generator_closures(gen, outer_fn: gimple_ctypes.FunctionDef,
             'base': base, 'value_ctype': value_ctype,
             'params': param_ctypes, 'captures': caps,
             'nested_name': inner.name,
+            'tagged': gen._cpp_last_tagged_yield,
         }
         gen.func_param_types[f"{base}_start"] = param_ctypes
         gen._generator_cpp_units.append(cpp_text)

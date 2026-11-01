@@ -1915,6 +1915,49 @@ def _cpp_next_on_generator_expr(gen, handle_expr, api):
     )
 
 
+def _cpp_tagged_next_api(gen, expr):
+    """The api of the TAGGED-word generator that `expr` = `next(<handle>)`
+    reads from, or None. A tagged generator's slot is one int64_t word that
+    boxes each yield by its kind (`_cpp_tag_yield_sites`), so the value
+    `next()` returns is a word, not a plain integer, and only a consumer that
+    renders it through `mojo_repr_boxed` prints the yielded value. Only the
+    one-argument form is a generator read here (the two-argument `next(g,
+    default)` is not lowered by this emitter)."""
+    if not (isinstance(expr, gimple_ctypes.CallExpr)
+            and isinstance(expr.func, gimple_ctypes.IdentExpr)
+            and expr.func.name == 'next' and len(expr.args) == 1
+            and not getattr(expr, 'kwargs', None)):
+        return None
+    arg = expr.args[0]
+    if isinstance(arg, gimple_ctypes.IdentExpr):
+        api = getattr(gen, '_cpp_generator_var_api', {}).get(arg.name)
+    elif isinstance(arg, gimple_ctypes.CallExpr):
+        api = _cpp_resolve_generator_call_api(gen, arg.func)
+    else:
+        api = None
+    return api if api is not None and api.get('tagged') else None
+
+
+def _cpp_mark_tagged_word(gen, name: str):
+    """Record `name` as a local that holds a TAGGED word (see
+    `_cpp_is_tagged_word_expr`). The set is created on demand: the generator
+    unit initialises it, but the for-loop emitter also runs inside async
+    bodies, which do not."""
+    if not hasattr(gen, '_cpp_tagged_word_names'):
+        gen._cpp_tagged_word_names = set()
+    gen._cpp_tagged_word_names.add(name)
+
+
+def _cpp_is_tagged_word_expr(gen, expr) -> bool:
+    """True when `expr` yields a TAGGED word that must be printed as a box:
+    a local bound from a tagged generator (`gen._cpp_tagged_word_names`, set
+    by the for-loop binding and `x = next(g)`), or a direct `next(g)` on a
+    tagged generator. Every other scalar is left to its ordinary spelling."""
+    if isinstance(expr, gimple_ctypes.IdentExpr):
+        return expr.name in getattr(gen, '_cpp_tagged_word_names', ())
+    return _cpp_tagged_next_api(gen, expr) is not None
+
+
 def _cpp_rename_ident_container(v, old: str, new: str):
     """Helper for `_cpp_rename_ident`: recurse into a list/tuple field or
     a nested AST-node field, rewriting every bare `IdentExpr(name=old)`
@@ -5490,6 +5533,15 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             parsed = _print_end_flush(getattr(s.value, 'kwargs', None))
             if parsed is not None:
                 end_str, flush = parsed
+                if _cpp_is_tagged_word_expr(gen, s.value.args[0]):
+                    # A tagged word (one yield-kind box per slot): the repr
+                    # resolves the kind the box carries, so it prints the
+                    # yielded value itself, not the box's address.
+                    out = [f'{indent}printf("%s{end_str}", '
+                           f'mojo_repr_boxed((int64_t)({gen._cpp_expr(s.value.args[0])})));']
+                    if flush:
+                        out.append(f'{indent}fflush(stdout);')
+                    return out
                 self_fields = getattr(gen, '_cpp_gen_self_fields', None)
                 arg_ctype = gimple_exprtypes._infer_simple_expr_ctype(s.value.args[0], declared, self_fields)
                 if arg_ctype not in ('int64_t', 'double', '_Bool', 'char *'):
@@ -6064,6 +6116,10 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                                                   gimple_ctypes.DictExpr,
                                                   gimple_ctypes.SetExpr))
         val = gen._cpp_expr(s.value)
+        if _cpp_tagged_next_api(gen, s.value) is not None:
+            # `x = next(g)` on a tagged generator: `x` holds a box from every
+            # assignment on, so `print(x)` renders the yielded value.
+            _cpp_mark_tagged_word(gen, name)
         if name not in declared:
             # `x = StructName(args)` — see `_cpp_expr`'s CallExpr
             # struct-constructor branch just above, which already
@@ -7430,6 +7486,9 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
             declared[target] = vct
             lines.append(f"{body_indent}{gimple_exprtypes._c_to_cpp_scalar_type(vct)} {target};")
         lines.append(f"{body_indent}{target} = {base}_value({guard}.g);")
+        if api.get('tagged'):
+            # Each value the loop binds is a box of the yield's own kind.
+            _cpp_mark_tagged_word(gen, target)
     for inner in body:
         lines.extend(gen._cpp_stmt(inner, declared, body_indent))
     if index_var is not None:
@@ -7562,6 +7621,9 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             declared[target] = _gi_vct
             if gen._cpp_func_scope_decls is not None:
                 gen._cpp_func_scope_decls.append(f"{_gi_vct} {target};")
+        if _gi_api.get('tagged'):
+            # Each value the loop binds is a box of the yield's own kind.
+            _cpp_mark_tagged_word(gen, target)
         # A `_Bool`-valued generator's slot must be narrowed the same way
         # `next()`'s `-> bool` lambda return does, or assigning the `_Bool`
         # through a `bool`-typed local is at best a narrowing warning.
