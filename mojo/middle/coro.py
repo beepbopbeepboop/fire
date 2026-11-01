@@ -1971,6 +1971,19 @@ def _compute_pointer_evidence(stmts) -> None:
         fd._ptr_forwarded = frozenset(_PTR_FORWARDED.get(nm, ()))
 
 
+def _index_generator_defs(stmts) -> None:
+    """Refill `_GEN_DEFS` with this module's top-level generator defs. A pure
+    function of `stmts`: it touches no kind memo and no ret-kind table, so it
+    is safe on BOTH backends. The cpp escape hatch runs it too (see `lower`),
+    because `_static_env`, `_sibling_gen_kind`, `_delegated_yield_kind` and
+    `_list_return_elem_kind` all decide "is this name one of my generators?"
+    from it, and a stale table answered that for the previous module."""
+    _GEN_DEFS.clear()
+    for s in stmts:
+        if isinstance(s, N.FunctionDef) and getattr(s, 'is_generator', False):
+            _GEN_DEFS[s.name] = s
+
+
 def _register_generator_defs(stmts) -> None:
     """Register this module's top-level generator defs, and drop the
     previous module's kind answers.
@@ -1986,14 +1999,11 @@ def _register_generator_defs(stmts) -> None:
     (`_static_env`'s for-loop branch) is reached from passes that run
     before kind registration would otherwise have happened.
     """
-    _GEN_DEFS.clear()
+    _index_generator_defs(stmts)
     _GEN_VALUE_KINDS.clear()
     _GEN_RESOLVING.clear()
     _LIST_RET_KINDS.clear()
     _PTR_RET_KINDS.clear()
-    for s in stmts:
-        if isinstance(s, N.FunctionDef) and getattr(s, 'is_generator', False):
-            _GEN_DEFS[s.name] = s
     _MODULE_STMTS[:] = list(stmts)
     _compute_pointer_evidence(stmts)
     _GEN_REC_ASSUME.clear()
@@ -6076,6 +6086,25 @@ def lower(stmts: list, closure_stmts=(),
         # cpp-path module was judged against the PREVIOUS module's statements:
         # a same-named generator with other consumers flipped the answer.
         _MODULE_STMTS[:] = list(stmts)
+        # The generator registry is the same kind of state, and it is read on
+        # this path too (`_static_env`, `_sibling_gen_kind`,
+        # `_delegated_yield_kind`, `_list_return_elem_kind`, all reached from
+        # cpp_async.py via `_generator_value_kind`). Before this, a cpp-path
+        # module saw the previous stack-switch module's `_GEN_DEFS`: a plain
+        # `def h(): return [...]` here, consumed by `for v in h()` in a
+        # generator, was treated as the previous module's `h` GENERATOR, and
+        # its kind memo (`_GEN_VALUE_KINDS`) was read straight back. Measured:
+        # previous module `def h(): yield 2.5`, then this module's plain
+        # `h` returning strings -> refused with a 'float' reason. Only the pure
+        # index and the memos that are functions of it are refreshed here.
+        # `_register_generator_defs` is NOT called: it also fills the
+        # kind/ret-kind tables that only the stack-switch path computes.
+        _index_generator_defs(stmts)
+        _compute_pointer_evidence(stmts)
+        _GEN_VALUE_KINDS.clear()
+        _GEN_RESOLVING.clear()
+        _LIST_RET_KINDS.clear()
+        _PTR_RET_KINDS.clear()
         _scan_unthreadable_nested_async_gens(stmts)
         return stmts, []
     _BOX_STRUCT_OF.clear()
