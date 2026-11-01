@@ -27,20 +27,47 @@ non-UTF-8 codec argument (below).
   return, a chained `.encode().decode()`, and `str(7).encode() + b'!'`. It
   fails on the pre-fix tree (`abc` / `h\xc3\xa9llo 5`) and passes with the fix.
 
+## Status 2026-10-31 (second round) — codec table landed
+
+- `runtime/fire_runtime.c`: `mojo_codec_lookup` resolves the codec name the way
+  CPython's `codecs.lookup` normalises it (lowercase, `-`/space to `_`) against
+  CPython's aliases for utf-8, ascii and latin-1; anything else raises
+  `LookupError: unknown encoding: <name>`. `mojo_bytes_from_str` encodes ascii
+  and latin-1, and an unencodable character raises `UnicodeEncodeError` with
+  CPython's message (`'ascii' codec can't encode character '\xe9' in position
+  1: ordinal not in range(128)`). `mojo_bytes_decode` refuses ascii bytes
+  >= 0x80 with `UnicodeDecodeError`, and maps latin-1 bytes to their code points.
+- New typed raisers `mojo_raise_unicode_encode_error`,
+  `mojo_raise_unicode_decode_error`, `mojo_raise_lookup_error` (same mechanism
+  as `mojo_raise_index_error`); tags are `crc32` of the class name.
+- `mojo/middle/types.py` (`_BUILTIN_EXC_PARENT`): `UnicodeError` is a
+  `ValueError`, and `UnicodeEncodeError`/`UnicodeDecodeError` are
+  `UnicodeError`s, so `except ValueError:` catches an unencodable character.
+- `mojo/backend_gimple/emit_methods.py` (`bytes` `decode`): the codec was read
+  only from the `encoding=` keyword; a positional `b.decode("ascii")` silently
+  used utf-8. Now the positional and keyword forms both reach the runtime, the
+  same shape as `str.encode`.
+- Regression: `gimple_str_encode_codecs` in `test_gimple_runner.py` (a
+  CPython-oracle comparison). It failed before the fix (`c3 a9` for latin-1,
+  no refusal for ascii, `ascii` decode returned the raw byte) and passes now.
+
 ## What remains
 
-- **The encoding argument is ignored by the runtime.** `mojo_bytes_from_str`
-  (`runtime/fire_runtime.c`, `(void)encoding;`) produces UTF-8 for every codec
-  name, so `"é".encode("latin-1")` gives `c3 a9` where CPython gives `e9`, and
-  `"é".encode("ascii")` gives bytes where CPython raises `UnicodeEncodeError`.
-  `bytes.decode(enc)` (`mojo_bytes_decode`) has the same gap. Next step: give
-  both runtime helpers a real codec table (utf-8/ascii/latin-1 at minimum), with
-  an unencodable character raising `UnicodeEncodeError` (the runtime has
-  `mojo_raise_value_error`; a dedicated raise is needed for the exact class), and
-  pin each codec with a `test_gimple_matches_cpython` case.
-- **`errors=` is not forwarded.** A `str` is always valid UTF-8, so for the one
-  codec the runtime implements `strict` and `replace` cannot differ. This becomes
-  live once the codec table above exists.
+- **`errors=` is not forwarded.** `str.encode` and `bytes.decode` run every
+  codec with strict handling. `errors='replace'`/`'ignore'`/`'strict'` now
+  matter for ascii and latin-1 (`"é".encode("ascii", "replace")` must give
+  `b'?'`); the callers would need to pass the error policy through
+  `mojo_bytes_from_str` / `mojo_bytes_decode`, with the signature change in
+  `fire_runtime.h`. Next step: add an `errors` argument to both helpers,
+  thread it from `_lower_str_method` / `_lower_bytes_method` (and the two
+  `bytes(...)`/`bytearray(...)` call sites in `emit_calls.py`, which pass
+  utf-8 today), and pin `replace` and `ignore` with a `test_gimple_matches_cpython`
+  case.
+- **utf-8 decode is not validated.** `mojo_bytes_decode` with the utf-8 codec
+  still copies malformed bytes through; CPython raises `UnicodeDecodeError`
+  ("invalid start byte" / "invalid continuation byte" / "unexpected end of
+  data"). Next step: a UTF-8 validator in the decode path that reports those
+  three reasons with CPython's byte/position wording.
 
 ## Related, not this bug
 

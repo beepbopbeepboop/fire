@@ -1560,6 +1560,11 @@ void        mojo_raise_type_error(char *detail);
  * (mojo_bytes_partition's empty separator). */
 void        mojo_raise_value_error(char *detail);
 void        mojo_raise_index_error(char *detail);
+/* The codec raisers behind str.encode(codec) / bytes.decode(codec): a
+ * character or byte the codec cannot hold, and an unknown codec name. */
+void        mojo_raise_unicode_encode_error(char *detail);
+void        mojo_raise_unicode_decode_error(char *detail);
+void        mojo_raise_lookup_error(char *detail);
 /* Raises a real, catchable NotImplementedError for `detail` — the sixth typed
  * raiser, same mechanism and same tag derivation as the five above. */
 void        mojo_raise_not_implemented(char *detail);
