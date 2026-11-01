@@ -1361,6 +1361,20 @@ def _gen_stmt_AssignStmt(gen, node):
                                  or _for_copy)
                             and gen.var_types.get(tname, 'int64_t') == 'int64_t'
                             and ginf.tagged_next_bind_name(gen, _as_str(tname)))
+        # A MIXED name (`x = 0` beside `x = v` over a tagged generator) is a
+        # box-holding local too, so every int64 store into it must be a box:
+        # a plain value is boxed here (`mojo_box_int`), and the local keeps
+        # the box of whichever store ran last. A store that is not int64 is
+        # not boxed (its C type is not the local's), as it always was.
+        if (not _keep_tagged_box and vtype == 'int64_t'
+                and gen.var_types.get(tname, 'int64_t') == 'int64_t'
+                and ginf.tagged_mixed_name(gen, _as_str(tname))):
+            if (v not in getattr(gen, '_boxed_vals', ())
+                    and v not in getattr(gen, '_tagged_word_vals', ())):
+                _mb = gen._new_temp('int64_t')
+                gen._emit(f'  {_mb} = mojo_box_int ({v});')
+                v = _mb
+            _keep_tagged_box = True
         if (not _keep_tagged_box and _copy_src is not None
                 and ginf.tagged_next_bind_name(gen, _as_str(tname))):
             # The local is registered as a box by every store (the static

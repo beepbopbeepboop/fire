@@ -1,5 +1,63 @@
 # CODEGEN_a_bare_or_explicit_yield_of_none: a None yield value prints 0
 
+## Status (2026-11-01, fifteenth round, work/bug-codegen-a-bare-or-explicit-yield-of-1762: mixed-name copy keeps the box, partial)
+
+**Landed (real behaviour change on both paths): open item 3 of the fourteenth
+round, for int64 values.** `x = 0; for v in g(): x = v; print(x)` over a
+generator yielding 1, None, 2 printed `0` for the None (CPython `None`) on both
+paths before this round, and prints `None` after it.
+- `emit_infra.py`: `tagged_mixed_name(gen, name)` (new) answers True iff `name`
+  has at least one tagged binding (a copy of a tagged for target or of a tagged
+  `next()` name, or `next(g)` over a tagged generator) AND `tagged_next_bind_name`
+  answers False for it (a plain binding exists). It exits early when the module
+  has no `mixed_slots` generator, so ordinary functions pay nothing.
+- `emit_stmts.py`: at the simple-name bind, an int64 store into such a name is
+  boxed with `mojo_box_int` unless the value is already a box (`_boxed_vals` /
+  `_tagged_word_vals`), and the local is registered as a box exactly as the
+  all-tagged case is. So every int64 store into a mixed name is a box, and
+  reads resolve the box by kind.
+
+**Choice made here (the round-14 "per-store box representation" option):** the
+local keeps a box, and plain int64 stores are boxed at the bind site. The other
+option in the doc, a `_dyn_word_locals` word of unknown kind, was rejected: a
+bare word cannot tell None from int 0 (both are bits 0), so no runtime tag on a
+word can carry the None kind; only the box can.
+
+**Pins** (`run_tagged_for_target_bind_tests`, `test_gimple_generator_runner.py`):
+`tagged_for_target_copy_mixed_name_none_{default,cpp}`: the mixed copy shape
+(yields 1, None, 2) plus arithmetic, `+=`, `*`, comparison and a plain-generator
+store, so the box must unwrap for those readers too. Fail-before, measured by
+restoring HEAD's `emit_infra.py`/`emit_stmts.py` (patch saved, not checkout):
+both FAIL, printing `0` where CPython prints `None` (`1/0/2/...` on both
+paths). The two `mixed_*` pins from earlier rounds pass on both trees (guards).
+After: the group is 6/0, both paths match CPython.
+
+**Pin registration fix in the same round:** `run_tagged_for_target_bind_tests`
+was defined but never called from `run_tests()`, so none of its pins (the
+round-14 ones included) ran in `test_gimple_generator_runner.py`. It is now
+called there. The full file was run before that wiring (389/0) and not re-run
+after it; the group itself was run on the final code.
+
+**Still open (this doc keeps it):**
+
+1. **A mixed name whose plain store is NOT int64** (a str or float stored into
+   the same local) is not boxed here: it keeps the old unwrap, which is wrong
+   for a None yield copied beside it. Not measured in this round. Next step:
+   either box a store of any kind (the local must then be typed a word-box for
+   every store), or refuse the mixed name with an explicit error if its
+   non-int64 stores cannot be boxed. Decide with a probe first.
+2. **`v is None` on a tagged False/0 is True**: still filed as
+   `bugs/CODEGEN_is_none_on_a_tagged_false_or_zero_is_true.md`.
+3. **A lone None yield on the cpp path is refused for consumers the tagged word
+   does not cover** (`NONE_YIELD_CPP_REFUSAL`, round 12). Not a silent 0.
+
+**Gate note for the integrator (not run here):** the change is in the simple-name
+bind rule (`emit_stmts.py`), which every int64 store reads. Run `compile_stdlib.py`
+and compare `U`/`skip` before and after. The only new output is a `mojo_box_int`
+call on a store into a name that is ALSO bound to a tagged generator value, so
+the change should be invisible to every module without one; a rise in `U` would
+point at a mixed name that now reads a box where it expected a word.
+
 ## Status (2026-11-01, fourteenth round, work/bug-codegen-a-bare-or-explicit-yield-of: for-loop target copy keeps the box, partial)
 
 **Landed (real behaviour change on both paths): open item 1 of the thirteenth
