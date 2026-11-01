@@ -897,6 +897,7 @@ class FuncState:
         self.fs_emit_frames: list = []
         self.fs_dyn_word_vals: set = set()
         self.fs_dyn_word_locals: set = set()
+        self.fs_tagged_word_vals: set = set()
         self.fs_maybe_kinds_vals: set = set()
         self.fs_nested_mixed_names: set = set()
         self.fsloop_stack: list = []
@@ -998,6 +999,7 @@ def save_func_state(gen) -> FuncState:
     st.fs_emit_frames = gen._emit_frames
     st.fs_dyn_word_vals = gen._dyn_word_vals
     st.fs_dyn_word_locals = gen._dyn_word_locals
+    st.fs_tagged_word_vals = gen._tagged_word_vals
     st.fs_maybe_kinds_vals = gen._maybe_kinds_vals
     st.fs_nested_mixed_names = gen._nested_mixed_names
     st.fsloop_stack = gen.loop_stack
@@ -1109,6 +1111,7 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._emit_frames = st.fs_emit_frames
     gen._dyn_word_vals = st.fs_dyn_word_vals
     gen._dyn_word_locals = st.fs_dyn_word_locals
+    gen._tagged_word_vals = st.fs_tagged_word_vals
     gen._maybe_kinds_vals = st.fs_maybe_kinds_vals
     gen._nested_mixed_names = st.fs_nested_mixed_names
     gen.loop_stack = st.fsloop_stack
@@ -3555,24 +3558,35 @@ def _local_bindings(gen, name) -> list:
     return found
 
 
-def tagged_next_bind_name(gen, name) -> bool:
-    """True iff every binding of `name` in THIS function is `name = next(g)`
-    for one and the same generator local `g`, and `g` itself is bound exactly
-    once (so it is one generator, whose yields are tagged the same way every
-    time), and `name` is not a parameter.
+def tagged_next_bind_name(gen, name, _seen=frozenset()) -> bool:
+    """True iff every binding of `name` in THIS function is a tagged word:
+    either `name = next(g)` for one and the same generator local `g`, where
+    `g` itself is bound exactly once (so it is one generator, whose yields are
+    tagged the same way every time), or a copy `name = x` of another local
+    that is itself such a name (`y = x` stays tagged, and `_seen` breaks a
+    copy cycle). `name` must not be a parameter.
 
     This is the rule a tagged-word bind needs. A local that keeps a yield's
     box is read as a box by every consumer, so it must never be stored a bare
     word: the rule guarantees every store into `name` is the same tagged
     word. Anything else (a rebinding to a plain value, a second generator, a
     for target) answers False, and the caller unwraps as it always did."""
-    if name in (getattr(gen, '_cur_func_params', None) or ()):
+    params = getattr(gen, '_cur_func_params', None) or ()
+    if name in params:
         return False
     values = _local_bindings(gen, name)
     if not values:
         return False
     gen_names = set()
+    copies = 0
     for v in values:
+        if isinstance(v, gimple_ctypes.IdentExpr):
+            src = v.name
+            if (src == name or src in _seen
+                    or not tagged_next_bind_name(gen, src, _seen | {name})):
+                return False
+            copies += 1
+            continue
         if not (isinstance(v, gimple_ctypes.CallExpr)
                 and isinstance(v.func, gimple_ctypes.IdentExpr)
                 and v.func.name == 'next'
@@ -3580,12 +3594,15 @@ def tagged_next_bind_name(gen, name) -> bool:
                 and isinstance(v.args[0], gimple_ctypes.IdentExpr)):
             return False
         gen_names.add(v.args[0].name)
-    if len(gen_names) != 1:
+    if len(gen_names) > 1:
         return False
-    (gname,) = gen_names
-    if gname in (getattr(gen, '_cur_func_params', None) or ()):
-        return False
-    return len(_local_bindings(gen, gname)) == 1
+    if gen_names:
+        (gname,) = gen_names
+        if gname in params:
+            return False
+        if len(_local_bindings(gen, gname)) != 1:
+            return False
+    return bool(gen_names) or copies > 0
 
 
 def mixed_container_locals(gen) -> set:

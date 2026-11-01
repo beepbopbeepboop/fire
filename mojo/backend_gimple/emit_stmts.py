@@ -1328,18 +1328,27 @@ def _gen_stmt_AssignStmt(gen, node):
         # int64_t spelling) and returns every other kind's own word, so the
         # local is a word of unknown kind -- which is what `_dyn_word_locals`
         # records, so its `str()`/`==` ask the runtime.
-        # A TAGGED generator word (`x = next(g)` on a mixed-kind generator) is
-        # the exception: unwrapping it loses the yield's kind, so `print(x)`
-        # then shows a bool as `1` or a str as an address. The local keeps the
-        # box, and is marked boxed so every consumer resolves it by kind. Only
-        # for a name bound exactly once in the function: a box-holding local
-        # that is later stored a bare word would be read as a box.
+        # A TAGGED generator word (`x = next(g)` on a mixed-kind generator,
+        # `_tagged_word_vals`) is the exception: unwrapping it loses the yield's
+        # kind, so `print(x)` then shows a bool as `1` or a str as an address.
+        # The local keeps the box and is registered in `_boxed_vals` exactly as
+        # a for-loop target over such a generator is (emit_loops), so every
+        # consumer resolves the box by kind. Only a name whose every binding is
+        # a tagged word of one generator keeps it (`tagged_next_bind_name`):
+        # a box-holding local that is later stored a bare word would be read as
+        # a box. A local already declared as something other than a word keeps
+        # the unwrap below, which is the behaviour it always had.
         _keep_tagged_box = (vtype == 'int64_t'
                             and v in getattr(gen, '_tagged_word_vals', ())
+                            and gen.var_types.get(tname, 'int64_t') == 'int64_t'
                             and ginf.tagged_next_bind_name(gen, _as_str(tname)))
         if _keep_tagged_box:
-            gen._boxed_vals.add(gen._cname(tname))
-            gen._tagged_word_vals.add(gen._cname(tname))
+            if tname not in gen.var_types:
+                gen._declare_var(tname, 'int64_t')
+            _tn = gen._cname(tname)
+            gen._boxed_vals.add(_tn)
+            gen._tagged_word_vals.add(_tn)
+            gen._dyn_word_locals.add(_as_str(tname))
         elif vtype == 'int64_t' and v in getattr(gen, '_boxed_vals', ()):
             _bw = gen._new_temp('int64_t')
             gen._emit(f'  {_bw} = mojo_box_word ({v});')

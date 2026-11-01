@@ -127,10 +127,11 @@ mismatching type. Owner-level ABI feature; measured and pinned, NOT shipped.
 
 **Landed (the seventh round's planned change, scoped to what the pins show):**
 a tagged generator word bound to a name keeps its box, so `x = next(g);
-print(x)` prints the yielded kind on both paths. Details, the rule, and the
-remaining gap (float-box arithmetic) are in
-`bugs/CODEGEN_tagged_generator_value_bound_to_a_name_loses_its_kind.md`, which
-is updated with the same status.
+print(x)` prints the yielded kind on both paths. The bind rule is
+`tagged_next_bind_name` (emit_infra.py); the landing commit is
+`b09622930` ("a tagged generator word bound to a name keeps its kind"). The
+remaining gap, float-box arithmetic on a tagged local, is noted at the
+tagged-operand arm in emit_exprs.py.
 
 - `_tagged_word_vals` (emit_infra.py, saved/restored like `_boxed_vals`),
   marked at the two tagged-`next` sites (emit_calls.py).
@@ -150,9 +151,10 @@ refusal's own doc. None-yield printing `0` remains fixed on the default path.
 ## Status (2026-11-01, seventh round, work/bug-codegen-a-bare-or-explicit-yield-of: planning guide for the bind-site kind loss, no code changed)
 
 **Output of this round: a planning guide (not a fix).** The open item is the
-bind-site kind loss, filed as `bugs/CODEGEN_tagged_generator_value_bound_to_a_name_loses_its_kind.md`:
-`x = next(g)` on a tagged generator unwraps the box at the bind, so `print(x)`
-prints a bool as `1` on the default path and an address on the cpp path.
+bind-site kind loss (since fixed in `b09622930`, which keeps the box at the
+bind):
+`x = next(g)` on a tagged generator unwrapped the box at the bind, so `print(x)`
+printed a bool as `1` on the default path and an address on the cpp path.
 Investigated, not landed: the change crosses per-function state and several
 consumers, and it reverses a deliberate design, so it needs its own round with
 the full pin set below.
@@ -256,15 +258,17 @@ tagged word only in the three consumer sites above and only for a single-argumen
 `print`. A tagged value used any other way (arithmetic, `str()`, an f-string,
 a multi-argument `print`, `list.append`) is not covered by this round.
 
-**Found, NOT fixed here (separate defect, default path too):** a tagged value
-bound to a name in the GIMPLE consumer is unwrapped by `mojo_box_word` at the
-bind, so `x = next(g); print(x)` prints a bool as `1` on the default path, and
-an unregistered str on the cpp path prints an address. Filed:
-`bugs/CODEGEN_tagged_generator_value_bound_to_a_name_loses_its_kind.md`.
+**Found and FIXED (separate defect, default path too), in `b09622930`:** a
+tagged value bound to a name in the GIMPLE consumer was unwrapped by
+`mojo_box_word` at the bind, so `x = next(g); print(x)` printed a bool as `1`
+on the default path, and an unregistered str on the cpp path printed an
+address. The bind now keeps the box for a tagged word; pinned by the
+`tagged_*_bound_to_name_*` cases (`run_tagged_word_bind_tests`) in
+`test_gimple_generator_runner.py`.
 
 **Still open in this doc:** item 1 of the fifth-round plan is now landed for
-the three consumer sites and `print`; the remaining consumers, the bind-site
-kind loss (filed above), and the `x` local-kind design are the next steps. The
+the three consumer sites and `print`; the remaining consumers and the `x`
+local-kind design are the next steps. The
 `co_yield (int64_t)0` dead line (item 3) and the module-global `next()` refusal
 (item 2, its own doc) are unchanged.
 
