@@ -2885,6 +2885,12 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     if struct_name in gen.struct_field_types and (
             f"{struct_name}_{node.member}" in gen.func_return_types
             or _sms_key(struct_name, node.member) in gen._struct_method_signatures):
+        # A `@property` read is the getter's RESULT, not the method as a value:
+        # `print(s.val)` printed the bound-method pointer and `s.val == o.val`
+        # compared two such pointers (False for equal values), at exit 0.
+        if node.member in gen._struct_property_names.get(struct_name, ()):
+            return gen.lower_expr(gimple_ctypes.CallExpr(
+                func=node, args=[], line=node.line, col=node.col))
         return gen._lower_bound_method_value(struct_name, node.member, ot, ov)
     # A BUILTIN-container method referenced as a plain VALUE (`append =
     # l.append`) — the container twin of the user-struct case just above.

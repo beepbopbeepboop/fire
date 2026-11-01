@@ -1293,6 +1293,28 @@ def _gen_stmt_AssignStmt(gen, node):
                 et, ev = gen._tuple_elem_value(vtype, v, i)
                 gen._assign_target(tgt, et, ev)
         return
+    # `obj.prop = value` where the receiver's struct defines a `@prop.setter`
+    # (renamed `__setprop_<prop>` by `_gmi_rename_property_setters`) is a CALL
+    # of that setter, not a field store: the store used to write a field the
+    # struct does not have, or be dropped.
+    if (isinstance(node.target, gimple_ctypes.MemberExpr)
+            and isinstance(node.target.obj, gimple_ctypes.IdentExpr)
+            and getattr(node, 'value', None) is not None):
+        _sp_t = gen.var_types.get(node.target.obj.name, '')
+        if not _sp_t.endswith(' *'):
+            _sp_t = gen.lower_expr(node.target.obj)[0]
+        if _sp_t.endswith(' *'):
+            _sp_s = gimple_exprtypes._struct_name_of(_sp_t)
+            _sp_n = '__setprop_' + _as_str(node.target.member)
+            if _sp_n in gen._struct_method_names.get(_sp_s, ()):
+                gen._gen_stmt_ExprStmt(ExprStmt(
+                    value=gimple_ctypes.CallExpr(
+                        func=gimple_ctypes.MemberExpr(
+                            obj=node.target.obj, member=_sp_n,
+                            line=node.line, col=node.col),
+                        args=[node.value], line=node.line, col=node.col),
+                    line=node.line, col=node.col))
+                return
     vtype, v = gen.lower_expr(node.value)
     if isinstance(node.target, gimple_ctypes.IdentExpr):
         tname = node.target.name

@@ -2291,6 +2291,29 @@ def main():
     print(mk(4))
 """, "12\n")
 
+    # A `@property` read is the getter's result (it printed the bound-method
+    # pointer, and `==` compared two such pointers), and `@x.setter` is a
+    # call of the setter on assignment, not a second overload of `x`.
+    test_gimple_stdout("gimple_property_getter_and_setter", """\
+class S:
+    def __init__(self, a: int):
+        self._v = a
+    @property
+    def val(self) -> int:
+        return self._v
+    @val.setter
+    def val(self, value: int):
+        self._v = value * 2
+    def __eq__(self, o: S):
+        return self.val == o.val
+
+def main():
+    s = S(3)
+    print(s.val, s.val + 1, s == S(3))
+    s.val = 5
+    print(s.val, s == S(10))
+""", "3 4 True\n10 True\n")
+
     test_gimple_stdout("gimple_nested_class_in_every_body", """\
 class WithAttrs:
     tag = 7

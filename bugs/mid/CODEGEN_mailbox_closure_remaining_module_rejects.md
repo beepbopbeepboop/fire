@@ -81,3 +81,19 @@ a `.mojo` source keeps the switch-style reading and the refusal). Found on the w
 no return statement and handed back 0 for a string. Still refused in that closure: `traceback.py`'s class patterns
 (`case ast.Return(value=ast.Call()):`), module-level `namedtuple` built from non-literals, `type(...)` with three
 arguments, a class declared in a function that captures its locals, a decorator inside a module-level `if`.
+
+## Update (2026-11-01, probe after the nested-class and property fixes)
+
+Probe: `/tmp`-style dir holding a copy of the 3.14 `Lib` plus `entry.py` = `import mailbox`,
+`python3 tools/probe_coro_close_refusal.py entry.py --do-imports` (an entry WITHOUT the Lib copy beside it
+compiles "OK" at 0.1 GB because nothing is resolved; that is not a clean closure). Result: 59 -> 15
+`# ERROR: compiling imported module` lines. What they are now:
+
+- `functools`: `decorator 'wraps(...)' on 'wrapper' returns int64_t (not callable)` (the old nested-class wall is gone, this is the next one).
+- `dis` / `inspect`: non-literal `namedtuple(...)` (by-design refusal, see above).
+- `importlib/_bootstrap`: was `ModuleSpec.has_location` 2 overloads = a `@property` with `@x.setter`. FIXED
+  (`_gmi_rename_property_setters`: the setter becomes `__setprop_x`, `obj.x = v` calls it); also fixed in
+  passing: a `@property` READ printed the bound-method pointer and `==` compared two such pointers.
+- `tokenize`, `annotationlib`, `dataclasses`, `traceback`: `No module named 'formal'` / missing `fire_compiler.py` —
+  the probe's cwd/path, not a compiler defect (run it from the repo root).
+Next: the `@wraps(...)` decorator wall, then `namedtuple` from non-literals, then 3-arg `type()`.

@@ -3489,6 +3489,34 @@ def _gmi_hoist_nested_structs(self, stmts: list) -> list:
 
 
 
+def _gmi_rename_property_setters(stmts: list) -> None:
+    """`@x.setter def x(self, v)` shares its NAME with the `@property` getter
+    `x`, so the struct pipeline saw two overloads of one method and refused the
+    module ("method has 2 overloads and is referenced as a plain value" --
+    `importlib._bootstrap.ModuleSpec.has_location`). The setter is renamed
+    `__setprop_x` and loses the decorator; `obj.x = v` on a receiver whose
+    struct has it lowers to a call (`_gen_stmt_AssignStmt`). Idempotent: a
+    renamed method no longer carries the decorator."""
+    for _ps in _walk_ast(stmts):
+        if not isinstance(_ps, StructDef):
+            continue
+        for _pm in (_ps.methods or []):
+            if not isinstance(_pm, FunctionDef):
+                continue
+            _pd = getattr(_pm, 'decorators', None) or []
+            _keep: list = []
+            _prop = ''
+            for _pdd in _pd:
+                _pds = _pdd if isinstance(_pdd, str) else ''
+                if _pds.endswith('.setter'):
+                    _prop = _pds[:-len('.setter')]
+                else:
+                    _keep.append(_pdd)
+            if _prop != '' and _as_str(_pm.name) == _prop:
+                _pm.name = '__setprop_' + _prop
+                _pm.decorators = _keep
+
+
 def _gmi_capture_nested_class_enclosing_reads(stmts: list) -> None:
     """Give a class declared inside a function body access to the enclosing
     function's parameters and locals that its methods read.
@@ -3977,6 +4005,7 @@ def gen_module_impl(self, stmts):
     # other, and the struct pipeline reads the module-level statement list, so
     # it is hoisted there before anything consumes the list. See
     # `_gmi_hoist_nested_structs` for why it appends rather than moves.
+    _gmi_rename_property_setters(stmts)
     stmts = _gmi_hoist_nested_structs(self, stmts)
     _declare_posthoc_class_attrs(stmts)
     _gmi_capture_nested_class_enclosing_reads(stmts)
