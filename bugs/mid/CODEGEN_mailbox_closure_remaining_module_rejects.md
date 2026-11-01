@@ -69,4 +69,4 @@ What is left in the closure, by module (each its own feature, none a one-line fi
 `namedtuple` forms beyond `Name = namedtuple("Name", [literals])`; `functools`/`_win_cp_codecs`/`_bootstrap`
 a class declared inside a function that captures locals (`bugs/CODEGEN_nested_class_method_cannot_reach_an_enclosing_local.md`);
 `dataclasses`/`traceback` `match` or-patterns and class patterns; `signal` a decorator inside a module-level
-block; `weakref` `d.pop(key, default)` with a list default on an int-valued dict.
+block; `weakref` was `d.pop(key, *args)` with the packed list taken for the default (FIXED 2026-10-31, `gimple_dict_pop_with_spread_default`; re-probe for what weakref hits next).

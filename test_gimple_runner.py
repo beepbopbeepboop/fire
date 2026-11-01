@@ -3345,6 +3345,24 @@ def main():
 main()
 """, "1\n67\n9\n1\nrest 2\nrest 3\nrest 4\nrest 5\n-1\n1\nstop\n")
 
+    # `d.pop(key, *args)` (weakref.WeakKeyDictionary.pop): the default is the first
+    # spread element when present. The packed `*args` list used to be taken for the
+    # DEFAULT VALUE and refused as a MojoList on an int-valued dict.
+    test_gimple_stdout("gimple_dict_pop_with_spread_default", """\
+class W:
+    def __init__(self):
+        self.data = {1: 10, 2: 20}
+    def pop(self, key, *args):
+        return self.data.pop(key, *args)
+def main():
+    w = W()
+    print(w.pop(1))
+    print(w.pop(5, 99))
+    print(w.pop(2, 7))
+    print(w.pop(2, 7))
+main()
+""", "10\n99\n20\n7\n")
+
     # String site FIRST, int site second (an int list records no contract, so
     # it used to be invisible as a disagreeing call site).
     test_gimple_stdout("gimple_mixed_kind_flat_list_param_str_first", """\

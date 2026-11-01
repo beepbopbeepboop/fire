@@ -5388,7 +5388,31 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
         val_type = gen._dict_val_of(ov)
         val_known = gen._dict_val_is_known(ov)
         dflt_is_none = False
-        if len(args) > 1:
+        # `d.pop(key, *args)` (weakref's WeakKeyDictionary.pop): the default is the
+        # first spread element when there is one, else absent. A packed `*args` list
+        # is a MojoList, which is not a value of the dict's slot type, so the usual
+        # default-type check below would refuse it; select the element instead.
+        _pop_spread = (args[1] if len(args) == 2
+                       and isinstance(args[1], gimple_ctypes.UnaryOp)
+                       and args[1].op == '*' else None)
+        if _pop_spread is not None and val_type in ('int64_t', 'int') :
+            _sl_t, _sl_v = gen.lower_expr(_pop_spread.operand)
+            if _sl_t == 'MojoList *':
+                _sl_n = gen._call_expr('int64_t', 'mojo_list_len', [(_sl_t, _sl_v)])
+                _sl_0 = gen._call_expr('int64_t', 'mojo_list_get_int',
+                                       [(_sl_t, _sl_v), ('int64_t', gen._new_val('int64_t', '(int64_t)0'))])
+                _sl_z = gen._new_val('int64_t', '(int64_t)0')
+                dflt_ty = 'int64_t'
+                _sl_c = gen._new_val('_Bool', f'{_sl_n} > {_sl_z}')
+                dflt_val = gen._new_val('int64_t', f'{_sl_c} ? {_sl_0} : {_sl_z}')
+                _pop_spread_done = True
+            else:
+                _pop_spread_done = False
+        else:
+            _pop_spread_done = False
+        if _pop_spread_done:
+            pass
+        elif len(args) > 1:
             dflt_ty, dflt_val = gen.lower_expr(args[1])
             dflt_is_none = bool(_is_none_literal(args[1]))
         else:
