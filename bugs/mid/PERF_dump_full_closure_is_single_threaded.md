@@ -75,12 +75,10 @@ Third win: `methods_shared._cached_realpath` memoises the `os.path.realpath` cal
 samples, compile 155 s. Its first version was an unannotated helper and BROKE the self-host build (`methods_shared.py:141:
 invalid operands to binary + (have 'double' and 'char *')`), caught by `test_selfhost.py`; it is annotated now and
 `test_selfhost.py` passes 3/3 and `compile_stdlib.py` GCC CAS stays 610/610. Any edit under `mojo/middle` needs `test_selfhost.py`.
-Measured, NOT landed: f-string field tokenization is ~12% of the compile (`py_tokenize` called 17,696 times for 2,378
-distinct texts, 17,141 of them from `emit_exprs._lower_StringLiteral` and `emit_infra._fstring_sub_exprs`; 19 s). Memoising
-the token list per text is safe in Python (the Parser reads tokens by index) but is in the self-host closure, and
-verifying it needs the self-hosted binary to compile an f-string program, which crashes on unmodified master
-(the self-host crash on any program with a call (fixed 2026-11-01; `bugs/mid/CODEGEN_capturing_closure_value_passed_from_a_closure_has_no_env.md` is the language-level bug behind it; `test_selfhost` now compiles a call + f-string program)). The edit is kept in `git stash` on
-`work/midhard3` ("_fstring_field_tokens"); land it after that bug is fixed and the check passes.
+Measured and REJECTED: memoising f-string field tokenization. `py_tokenize` is called 17,696 times, but 17,141 of those are
+tiny f-string field texts; with the memo the calls drop to 2,884 and the time does not move (19.1 s -> 22.2 s, whole compile
+167 s vs 171 s at the same low load). The 19 s is the ~550 real module sources, every one distinct, so only a faster tokenizer
+(or caching tokens across processes) would help. Call count is not time: measure before building.
 Remaining, in order of share: the other `_walk` users in `_scan_callsite_param_kinds` (cache per function across
 the two `_one_pass` rounds and the six `lower` calls: needs an invalidation story because the contract maps evolve);
 `realpath` memo for the constant `_SELFHOST_DIR`; `_infer_return_maybe_kinds`; `_gmi_binding_index`.
