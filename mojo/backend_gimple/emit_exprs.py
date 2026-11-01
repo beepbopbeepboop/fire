@@ -5884,6 +5884,13 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
             xv64 = gen._to_int64(xt, xv)
             gen._emit_call('int', ti, 'mojo_list_contains_mixed_int',
                            [('MojoList *', rv), ('int64_t', xv64)])
+        elif list_elem == 'char *' and xt == 'double':
+            # A float needle over the same str / kind-mixed lists. It was
+            # cast to `char *` by _cast_for_list below, a gcc error for
+            # `2.5 in [2.5, "a"]`. Each slot is compared in its own domain;
+            # see mojo_list_contains_mixed_double.
+            gen._emit_call('int', ti, 'mojo_list_contains_mixed_double',
+                           [('MojoList *', rv), ('double', xv)])
         else:
             suf = gimple_ctypes.TypeLattice.list_suffix(list_elem)
             xv_cast = gen._cast_for_list(xt, xv, suf)

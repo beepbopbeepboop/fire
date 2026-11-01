@@ -3507,6 +3507,24 @@ def main():
 main()
 """)
 
+    # A FLOAT needle over a str or kind-mixed list. The int-needle fix above
+    # gave ints their own helper; a double needle still fell into the generic
+    # str branch and passed a `double` to mojo_list_contains_str, a gcc error
+    # (`2.5 in [2.5, "a"]` produced no binary). Membership is per-element `==`,
+    # so an int slot matches only when it is exactly the needle's value, a
+    # double slot matches by numeric equality, and str/None/bytes slots never
+    # match a number. -0.0 == 0 and NaN equals nothing, as CPython says.
+    test_gimple_matches_cpython("gimple_double_in_mixed_str_list", """\
+def main():
+    print(2.5 in [2.5, "a"], 2.0 in [2, "a"], 2.5 in ["a"])
+    print(2.5 not in [2.5, "a"], 3.0 not in [2.5, "a"], 2.0 in ["a", 2])
+    print(2.0 in [2, 2.0], -0.0 in [0, "a"], 0.0 in [None, "a"])
+    print(1.5 in ["a", None, 1.5], 2.0 in [1, "a"], 2.5 in [2, "a"])
+    mixed = ["a", 2.5, 3]
+    print(2.5 in mixed, 2.0 in mixed, 3.0 in mixed, "a" in mixed)
+main()
+""")
+
     # str.encode() is BYTES, not a str. It was lowered as an identity stub
     # typed char*, so the value printed as the str and len() counted the
     # wrong thing for a non-ASCII string (2 for "héllo" was not 6, the
