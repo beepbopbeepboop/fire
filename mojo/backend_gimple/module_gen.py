@@ -8528,6 +8528,7 @@ def gen_module_impl(self, stmts):
                     'max_arity': max_arity,
                     'ret_type': _ret_type,
                     'ret_ann': m.return_type,
+                    'self_owned': _pconv.get('self') == 'owned',
                     'has_varargs': _star_idx >= 0,
                     'pre_star_count': _star_idx if _star_idx >= 0 else None,
                 })

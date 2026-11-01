@@ -84,6 +84,28 @@ def test_node_allocation_api_is_lowered():
     assert 'dealloc (' not in c
 
 
+def test_iterator_local_is_the_materialized_iterator():
+    """`it = l.__iter__()` is the `_LinkedListIter` struct (the parametrized
+    `IteratorType[..]` alias evaluates to it, its pointer fields name `Node`/
+    `LinkedList`), `l.__iter__()` calls the NON-consuming `ref self` overload
+    (not the `var self` / `IteratorOwnedType` one), and `it.__next__()` is a
+    real call, not a stub."""
+    c = _compile()
+    body = _main_body(c)
+    it = '_LinkedListIter_11_ElementType_3_Int_7_forward_4_True_3_mut_4_True_6_origin_12_MutAnyOrigin'
+    assert 'int64_t it;' not in body, 'it is still a scalar'
+    assert it + ' * it;' in body
+    assert '___iter___0120be_2 (l)' in body, 'owning __iter__ overload called'
+    assert '__next__() stubbed' not in body
+    assert it + '___next__ (it)' in body
+    i = c.index('typedef struct ' + it + ' {')
+    st = c[i:c.index('} ' + it + ';', i)]
+    assert 'Node_1_T_3_Int * curr;' in st, st
+    assert 'LinkedList_11_ElementType_3_Int * src;' in st, st
+    assert 'int64_t.next() stubbed' not in c
+    assert 'int64_t.prev() stubbed' not in c
+
+
 def test_erased_word_structs_not_materialized():
     """`Optional[Int](...)` keeps its erased tagged-word model: materializing
     it as a struct is the measured test_optional regression."""
@@ -101,5 +123,6 @@ if __name__ == '__main__':
     test_node_links_are_typed_self_pointers()
     test_node_pointer_unwrap_is_identity()
     test_node_allocation_api_is_lowered()
+    test_iterator_local_is_the_materialized_iterator()
     test_erased_word_structs_not_materialized()
     print('PASS: generic-struct local is a struct')
