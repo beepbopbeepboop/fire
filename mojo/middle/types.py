@@ -1699,6 +1699,32 @@ def presence_set_emit(gen, sdef, member, obj_c, op) -> None:
     gen._emit(f"  {obj_c}{op}{PRESENCE_WORD}[{bit[0]}] = {nxt};")
 
 
+def presence_check_emit(gen, sdef, member, obj_c, op, class_name) -> None:
+    """Emit the GIMPLE guard for a DIRECT read of `member` on `obj_c`: raise
+    AttributeError when this instance's presence bit is clear, as CPython does
+    for a minted attribute the instance never received. No-op when `member`
+    is not presence-tracked. Emitted before the field load, so the load of a
+    never-stored slot (zero storage) is never reached. Read-only: a store
+    sets the bit (`presence_set_emit`) and must not be guarded."""
+    bit = presence_bit(sdef, member)
+    if bit is None:
+        return
+    cur = gen._new_temp('uint64_t')
+    gen._emit(f"  {cur} = {obj_c}{op}{PRESENCE_WORD}[{bit[0]}];")
+    got = gen._new_temp('uint64_t')
+    gen._emit(f"  {got} = {cur} & {1 << bit[1]}ULL;")
+    msg = f"'{class_name}' object has no attribute '{member}'"
+    # GIMPLE has no `if (c) call();` statement form, so the raise sits in its
+    # own basic block (the same goto shape `_lower_IfExpr` uses).
+    bb_raise = gen._new_bb()
+    bb_ok = gen._new_bb()
+    gen._emit(f"  if ({got} == 0ULL) goto {bb_raise}; else goto {bb_ok};")
+    gen._emit_label(bb_raise)
+    gen._emit_call('void', '', 'mojo_raise_attribute_error',
+                   [('char *', gen._intern_string(msg))])
+    gen._emit_label(bb_ok)
+
+
 def presence_copy_emit(gen, sdef, dst_c, src_c, op) -> None:
     """Emit the GIMPLE that copies every presence word of `sdef` from `src_c`
     to `dst_c` (a whole-struct field-wise copy does not cover them: they are

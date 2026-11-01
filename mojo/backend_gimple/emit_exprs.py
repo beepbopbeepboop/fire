@@ -2744,6 +2744,11 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         return 'char *', gen._new_val('char *', f"(char *){dn}")
     if node.member in field_map:
         field_type = field_map[node.member]
+        # A minted field (StructDef.presence_fields) the instance never
+        # received is an AttributeError on a direct read, not its zero
+        # storage: guard the load on the instance's presence bit.
+        gimple_ctypes.presence_check_emit(
+            gen, gen._struct_name_owner.get(struct_name), node.member, ov, op, struct_name)
         t = gen._new_val(field_type, f'{ov}{op}{gimple_ctypes._safe_field(node.member)}')
         _mark_boxed_field_read(gen, struct_name, node.member, field_type, t)
         # PART 6 (2026-10-22, family C): record a READ of a tagged-Optional
