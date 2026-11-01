@@ -1206,6 +1206,24 @@ int64_t mojo_box_from_bool(int64_t v)
     return (int64_t)(uintptr_t)bx;
 }
 
+/* None in a TAGGED word (a generator that yields None beside values, read by a
+ * for loop): the one kind-'n' box, allocated once and shared, so a generator
+ * yielding None in a loop does not grow the box registry per yield.
+ * mojo_repr_boxed renders it "None". */
+int64_t mojo_box_none(void)
+{
+    static int64_t none_word;
+    if (none_word) return none_word;
+    MojoBox *bx = (MojoBox *)malloc(sizeof(MojoBox));
+    if (!bx) return 0;
+    bx->magic = MOJO_BOX_MAGIC;
+    bx->bits = 0;
+    bx->kind = 'n';
+    _pr_add(&_reg_box, (uint64_t)(uintptr_t)bx);
+    none_word = (int64_t)(uintptr_t)bx;
+    return none_word;
+}
+
 /* Append a TAGGED word (see mojo_box_from_bool / mojo_box_from_double) to a list
  * under the kind it carries, so the list's per-slot kinds render it right: a
  * float box appends a double, a bool box a bool, a str box or a live heap

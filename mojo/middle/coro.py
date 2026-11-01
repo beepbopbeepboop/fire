@@ -1220,11 +1220,24 @@ def _tagged_consumers_ok(name: str) -> bool:
     return idents == calls
 
 
+def _is_none_yield(y) -> bool:
+    """A bare `yield` or an explicit `yield None` -- the yield whose value is
+    None. Its slot kind in `kinds` is the int64_t fallback (`'i'`), so it
+    never looks like a hole; `has_none` in `_generator_value_kind` is what
+    records that it was a None."""
+    # The parser spells `None` as an IdentExpr (Python forbids rebinding it),
+    # so the NoneLiteral arm is for any producer that builds the literal node.
+    return isinstance(y, N.YieldExpr) and (
+        y.value is None or isinstance(y.value, N.NoneLiteral)
+        or (isinstance(y.value, N.IdentExpr) and y.value.name == 'None'))
+
+
 def _generator_value_kind(fn: N.FunctionDef,
                           env: dict | None = None,
                           delegated=None) -> tuple[str | None, str]:
     kinds = set()
     has_tuple = has_nontuple = False
+    has_none = False
     for n in _walk(fn):
         if isinstance(n, N.YieldExpr):
             _conflicts = _conflicting_names_in(n.value, env)
@@ -1235,7 +1248,11 @@ def _generator_value_kind(fn: N.FunctionDef,
                 # below would do for a yield with no other kind beside it.
                 return None, (f'a `yield` of {_conflicts[0]!r}, a local rebound '
                               f'to values of different kinds (v0)')
-            k = _yield_kind(n.value, env)
+            if _is_none_yield(n):
+                has_none = True
+                k = 'i'
+            else:
+                k = _yield_kind(n.value, env)
             kinds.add(k)
             if k == 'tuple':
                 has_tuple = True
@@ -1308,9 +1325,17 @@ def _generator_value_kind(fn: N.FunctionDef,
     # as itself -- and the consumer renders each by what it IS. Only when EVERY
     # yield has a known kind (a hole stays a refusal, above) and the kinds are
     # not just the int/bool pair the DECISION below already widens.
+    # A None yield is a kind of its own here ('n'): it joins the tagged word as
+    # a `mojo_box_none` box, which the for-loop consumer renders as `None`. A
+    # generator whose ONLY yields are None is tagged too, so it renders `None`
+    # rather than the int 0 its int64_t slot would print. The tag is still only
+    # taken when `_tagged_consumers_ok` holds; otherwise the code below sees the
+    # unchanged `kinds`, so a None yield keeps the int64_t slot it always had.
     _tag_kinds = kinds - {None}
+    if has_none:
+        _tag_kinds = _tag_kinds | {'n'}
     if (None not in kinds
-            and (_tag_kinds <= {'i', 'p', 'd', 'b', 'w'})
+            and (_tag_kinds <= {'i', 'p', 'd', 'b', 'w', 'n'})
             and ('w' in _tag_kinds or (len(_tag_kinds) >= 2 and _tag_kinds != {'i', 'b'}))
             and not any(isinstance(x, N.YieldFromExpr) and delegated is not None
                         and delegated(x.value, fn) in ('d', 'b')
@@ -4448,13 +4473,16 @@ def _rewrite_expr(node, cvar: str, kind: str, env=None):
         val = (_rewrite_expr(node.value, cvar, kind, env) if node.value is not None
                else N.IntLiteral(value=0))
         if kind == 'w':
-            # tagged word: box a float / bool by ITS static kind so the
+            # tagged word: box a float / bool / None by ITS static kind so the
             # consumer can tell it from an int
-            _sk = _yield_kind(node.value, env) if node.value is not None else 'i'
-            if _sk == 'd':
-                val = _call('mojo_box_from_double', [val])
-            elif _sk == 'b':
-                val = _call('mojo_box_from_bool', [val])
+            if _is_none_yield(node):
+                val = _call('mojo_box_none', [])
+            else:
+                _sk = _yield_kind(node.value, env) if node.value is not None else 'i'
+                if _sk == 'd':
+                    val = _call('mojo_box_from_double', [val])
+                elif _sk == 'b':
+                    val = _call('mojo_box_from_bool', [val])
         call = _call(_yield_shim(kind), [_c_ident(cvar), val])
         if kind == 'd':
             # `x = yield <double>`: the shim returns the raw int64_t slot
@@ -7562,6 +7590,8 @@ def register(gen, meta: list) -> None:
     gen.func_return_types.setdefault('mojo_box_from_double', 'int64_t')
     gen.func_param_types.setdefault('mojo_box_from_bool', ['int64_t'])
     gen.func_return_types.setdefault('mojo_box_from_bool', 'int64_t')
+    gen.func_param_types.setdefault('mojo_box_none', [])
+    gen.func_return_types.setdefault('mojo_box_none', 'int64_t')
     gen.func_param_types.setdefault(_BOX_NEW, ['int64_t'])
     gen.func_return_types.setdefault(_BOX_NEW, 'int64_t')
     gen.func_param_types.setdefault(_BOX_GET, ['int64_t'])
