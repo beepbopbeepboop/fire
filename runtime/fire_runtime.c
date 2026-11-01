@@ -15316,6 +15316,7 @@ typedef struct MojoClassRec {
     int64_t tag; char *name;
     int64_t bases[8]; int nbases;
     int64_t meta;               /* tag of the metaclass (a run-time class), 0 = plain `type` */
+    int64_t handle;             /* the class handle `mojo_type_new` made for this tag, 0 = a static class */
     MojoDict *attrs;
     struct MojoClassRec *next;
 } MojoClassRec;
@@ -15418,6 +15419,7 @@ int64_t mojo_type_new(char *name)
     MojoClassObj *o = (MojoClassObj *)malloc(sizeof *o);
     o->magic = MOJO_CLASSOBJ_MAGIC; o->tag = tag;
     _pr_add(&_reg_classobj, (uint64_t)(uintptr_t)o);
+    _class_get(tag)->handle = (int64_t)(intptr_t)o;
     return (int64_t)(intptr_t)o;
 }
 /* A registry, not a magic-number read: `mojo_fnptr_call_N` asks this of EVERY dynamically
@@ -15510,8 +15512,34 @@ static int _class_derives(int64_t tag, int64_t want, int depth)
  * class is `Cls` or derives from it. */
 int mojo_isinstance_rtclass(int64_t obj, int64_t cls)
 {
+    if (mojo_is_classobj(obj)) {
+        /* a class is an instance of its metaclass (and of that metaclass's bases) */
+        MojoClassRec *c = _class_find(((MojoClassObj *)(intptr_t)obj)->tag);
+        return c && c->meta && _class_derives(c->meta, mojo_classobj_tag(cls), 0);
+    }
     if (!mojo_is_instobj(obj)) return 0;
     return _class_derives(((MojoInstObj *)(intptr_t)obj)->tag, mojo_classobj_tag(cls), 0);
+}
+/* `isinstance(x, type)`: every class made at run time is one */
+int mojo_isinstance_type(int64_t w)
+{
+    return mojo_is_classobj(w);
+}
+/* `type(x)` for a word that may be a run-time class or an instance of one: a class is an
+ * instance of its metaclass (plain `type` when it has none), an instance's type is its class;
+ * anything else is the struct tag `type(x)` has always been. */
+int64_t mojo_type_of(int64_t w)
+{
+    if (mojo_is_classobj(w)) {
+        MojoClassRec *c = _class_find(((MojoClassObj *)(intptr_t)w)->tag);
+        MojoClassRec *m = c && c->meta ? _class_find(c->meta) : 0;
+        return m && m->handle ? m->handle : (int64_t)(intptr_t)mojo_type;
+    }
+    if (mojo_is_instobj(w)) {
+        MojoClassRec *c = _class_find(((MojoInstObj *)(intptr_t)w)->tag);
+        if (c && c->handle) return c->handle;
+    }
+    return mojo_read_type_tag_safe(w);
 }
 /* 1 and *out set when `obj` is an instance whose class (or a base) has `attr` */
 int mojo_instobj_class_lookup(void *obj, char *attr, int64_t *out)

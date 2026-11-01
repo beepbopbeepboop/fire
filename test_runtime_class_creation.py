@@ -234,6 +234,33 @@ def main():
     print(Foo.y)
 main()
 """,
+    'type_of_and_isinstance_with_a_run_time_metaclass': """\
+def main():
+    Meta = type('Meta', (type,), {'tag': 7})
+    Sub = type('Sub', (Meta,), {})
+    Foo = type.__new__(Meta, 'Foo', (), {'x': 1})
+    Baz = type.__new__(Sub, 'Baz', (), {})
+    Bar = type('Bar', (), {})
+    o = Foo()
+    print(isinstance(Foo, Meta), isinstance(Bar, Meta), isinstance(Baz, Meta), isinstance(Foo, Sub))
+    print(isinstance(Foo, type), isinstance(Bar, type), isinstance(o, type), isinstance(5, type))
+    print(type(Foo) is Meta, type(Bar) is Meta, type(Baz) is Sub, type(Bar) is type)
+    print(type(o) is Foo, type(o) is Bar, isinstance(o, Foo), isinstance(o, Meta))
+main()
+""",
+    'rt_class_flag_reaches_a_later_function': """\
+def make():
+    Meta = type('Meta', (type,), {})
+    return type.__new__(Meta, 'Foo', (), {})
+
+def check(c):
+    print(isinstance(c, type))
+
+def main():
+    check(make())
+    check(5)
+main()
+""",
     'two_classes_of_one_name_are_two_classes': """\
 def main():
     P = type('Same', (), {'v': 1})

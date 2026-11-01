@@ -1470,6 +1470,8 @@ void    mojo_type_add_bases_from_list(int64_t cls, MojoList *bases);
 int     mojo_is_classobj(int64_t w);
 int64_t mojo_rtobj_method_call(int64_t recv, char *name, int64_t n, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6);
 int     mojo_isinstance_rtclass(int64_t obj, int64_t cls);
+int     mojo_isinstance_type(int64_t w);
+int64_t mojo_type_of(int64_t w);
 int64_t mojo_classobj_tag(int64_t w);
 void    mojo_classobj_setattr(int64_t cls, char *name, int64_t word);
 void    mojo_type_fill_from_dict(int64_t cls, MojoDict *ns);
