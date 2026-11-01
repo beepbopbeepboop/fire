@@ -6719,20 +6719,27 @@ def _float_param_arith_applies(gen, op: str, lnode, lt: str, rnode, rt: str) -> 
     return _is_may_hold_float_param(gen, lnode) or _is_may_hold_float_param(gen, rnode)
 
 
-def _float_operand_as_double(gen, node, ctype: str, val: str) -> str:
-    """An operand of a float-aware arithmetic operator, as a C double. A
-    float-possible parameter's word is read with `mojo_box_double` (a double
-    box's double, or a plain integer promoted); a `double` operand is already
-    one; any other integer is converted."""
-    if _is_may_hold_float_param(gen, node):
+def _float_operand_as_double(gen, ctype: str, val: str, maybe_box: bool) -> str:
+    """An operand of a float-aware arithmetic operator, as a C double. A word
+    that may be a float box (`maybe_box`) is read with `mojo_box_double` (a
+    double box's double, or a plain integer promoted); a `double` operand is
+    already one; any other integer is converted."""
+    if maybe_box:
         return _as_str(gen._call_expr('double', 'mojo_box_double', [('int64_t', val)]))
     if ctype == 'double':
         return _as_str(val)
     return _as_str(gen._new_val('double', f'(double) ({_as_str(val)})'))
 
 
-def _float_param_arith(gen, op: str, lnode, lt: str, lv: str, rnode, rt: str, rv: str) -> str:
+def _float_param_arith(gen, op: str, lnode, lt: str, lv: str, rnode, rt: str, rv: str,
+                       *, lmaybe=None, rmaybe=None) -> str:
     """`lnode op rnode` where an operand is a float-possible parameter.
+
+    `lmaybe` / `rmaybe` say whether that operand's word may be a float box.
+    None (the default) asks `_is_may_hold_float_param` about the AST node,
+    which is the float-possible parameter case; the tagged-generator-word
+    arm passes True/False from the temp's own kind tracking instead, since
+    there is no parameter to name.
 
     Beside an INTEGER the answer is the integer one every operator gave before
     the box existed, or a double box holding the DOUBLE answer when either
@@ -6749,8 +6756,10 @@ def _float_param_arith(gen, op: str, lnode, lt: str, lv: str, rnode, rt: str, rv
     `mojo_div_double`: gcc -fgimple ICEs on an inline double `/`, and that
     helper raises ZeroDivisionError on a zero divisor. No integer answer is
     computed, so the integer divide never runs."""
-    dl = _float_operand_as_double(gen, lnode, lt, lv)
-    dr = _float_operand_as_double(gen, rnode, rt, rv)
+    lp = _is_may_hold_float_param(gen, lnode) if lmaybe is None else bool(lmaybe)
+    rp = _is_may_hold_float_param(gen, rnode) if rmaybe is None else bool(rmaybe)
+    dl = _float_operand_as_double(gen, lt, lv, lp)
+    dr = _float_operand_as_double(gen, rt, rv, rp)
     if op == _FLOAT_DIV_OP:
         dres = gen._call_expr('double', 'mojo_div_double',
                               [('double', _as_str(dl)), ('double', _as_str(dr))])
@@ -6763,10 +6772,10 @@ def _float_param_arith(gen, op: str, lnode, lt: str, lv: str, rnode, rt: str, rv
         dres = gen._new_val('double', f'({dl}) {op} ({dr})')
     if lt == 'double' or rt == 'double':
         return gen._call_expr('int64_t', 'mojo_box_from_double', [('double', _as_str(dres))])
-    lp = _is_may_hold_float_param(gen, lnode)
-    rp = _is_may_hold_float_param(gen, rnode)
-    _, ilv = _unbox_float_param_operand(gen, lnode, 'int64_t', lv)
-    _, irv = _unbox_float_param_operand(gen, rnode, 'int64_t', rv)
+    # The integer answer reads a maybe-box operand as its integer
+    # (`mojo_box_int`), exactly as `_unbox_float_param_operand` does.
+    ilv = gen._call_expr('int64_t', 'mojo_box_int', [('int64_t', lv)]) if lp else lv
+    irv = gen._call_expr('int64_t', 'mojo_box_int', [('int64_t', rv)]) if rp else rv
     if op == '//':
         ires = gen._new_val('int64_t', f'__mojo_floordiv ({_as_str(ilv)}, {_as_str(irv)})')
     else:
