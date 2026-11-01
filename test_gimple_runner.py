@@ -6825,8 +6825,9 @@ for a, b in itertools.zip_longest([1.5, 2.5, 3.5], [9.0]):
     print(a, b)
 """, "a padded `double` slot has no value that means `absent`")
 
-    # Regression for CODEGEN_a_padded_zip_longest_struct_slot_is_a_null_dereference:
-    # a member read through a padded struct-pointer slot must take the None-aware
+    # Regression (a padded zip_longest struct slot was a NULL the body
+    # dereferenced: SIGSEGV on a member write, fixed by the `_nullable_ptrs`
+    # recording in emit_loops.py): a member read through a padded struct-pointer slot must take the None-aware
     # dynamic path (not a raw -> dereference) when the slot can hold NULL.
     test_gimple_runtime_error(
         "gimple_zip_longest_struct_padded_slot_member_read_is_none_aware", """\
@@ -6838,6 +6839,25 @@ def main():
     var outputs = [StackItem()]
     for input, output in itertools.zip_longest(inputs, outputs):
         input.peek = output.peek = True
+    print("done")
+main()
+""", "AttributeError")
+
+    # The READ twin of the case above: `output.peek` on a padded struct slot
+    # is a member read through a NULL pointer, which must take the None-aware
+    # dynamic dispatch (AttributeError), not a raw `->` dereference (SIGSEGV).
+    # The write-only program above never reads the slot, so it could not see
+    # a read path that had lost its guard.
+    test_gimple_runtime_error(
+        "gimple_zip_longest_struct_padded_slot_member_read_is_none_aware_read", """\
+struct StackItem:
+    var peek: Bool = False
+import itertools
+def main():
+    var inputs = [StackItem(), StackItem(), StackItem()]
+    var outputs = [StackItem()]
+    for input, output in itertools.zip_longest(inputs, outputs):
+        print(input.peek, output.peek)
     print("done")
 main()
 """, "AttributeError")
