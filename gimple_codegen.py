@@ -4439,6 +4439,12 @@ class GimpleGen:
     def _lower_pointer_alloc(self, node: CallExpr) -> tuple[str, str]:
         return ggc._lower_pointer_alloc(self, node)
 
+    def _lower_alloc_single_leak(self, node: CallExpr):
+        return ggc._lower_alloc_single_leak(self, node)
+
+    def _lower_dealloc_thin_allocation(self, node: CallExpr):
+        return ggc._lower_dealloc_thin_allocation(self, node)
+
     def _lower_builtin_len(self, node: CallExpr) -> tuple[str, str]:
         return ggc._lower_builtin_len(self, node)
 

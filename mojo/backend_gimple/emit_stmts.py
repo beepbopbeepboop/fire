@@ -4200,6 +4200,10 @@ def _gen_stmt_ExprStmt(gen, node):
         if raw_name == 'print':
             gen._gen_print(node.value.args, node.value.kwargs)
             return
+        # `dealloc(ThinAllocation(unsafe_owned_ptr=p).unsafe_with_layout(..))`
+        # as a statement: this fast path never reaches _lower_call.
+        if raw_name == 'dealloc' and gen._lower_dealloc_thin_allocation(node.value) is not None:
+            return
         # `fut.add_done_callback(cb)` / `.remove_done_callback(cb)` as a
         # bare statement (the async-body hook in gimple_gen_coro lowers
         # the method call to this 2-arg `__mojo_future_*` shim call). The
