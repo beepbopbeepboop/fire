@@ -38,8 +38,8 @@ every module is reachable from a word with `mojo_getattr_any(obj, attr)`
    through the bases. Pinned by `test_runtime_class_creation.py` (CPython-diffed).
    **Computed namespace landed 2026-10-31**: `type(n, (B,..), ns)` with `ns` a dict-typed
    variable/attribute is walked at run time by `mojo_type_fill_from_dict` (insertion order, float
-   slots boxed); pinned by `computed_namespace_dict_variable`. A call-result namespace is still
-   refused by name.
+   slots boxed); pinned by `computed_namespace_dict_variable`. A call-result namespace (`type(n, b, ns())`) landed 2026-11-01 too (dict-typed result; pinned by
+   `call_result_namespace`; the name argument is now lowered first, left to right).
    **Computed bases landed 2026-11-01**: `type(n, bases, ns)` with `bases` a tuple/list-typed
    variable/attribute is walked at run time by `mojo_type_add_bases_from_list` (pinned by
    `computed_bases_list_variable`; a static class inside such a list is not yet covered).

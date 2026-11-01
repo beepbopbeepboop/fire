@@ -1483,6 +1483,9 @@ def _lower_type_new(gen, node, args=None):
     None when the arguments are not that literal shape (the caller refuses by name).
     `args` overrides `node.args` (`type.__new__(type, n, b, ns)` passes its last three)."""
     name_n, bases_n, ns_n = node.args if args is None else args
+    # Python evaluates the arguments left to right; a call-result namespace can have effects.
+    nt, nv = gen.lower_expr(name_n)
+    nm = nv if nt == 'char *' else gen._new_val('char *', f'(char *){gen._to_int64(nt, nv)}')
     literal_bases = isinstance(bases_n, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr))
     bases_list = None
     if not literal_bases:
@@ -1500,17 +1503,17 @@ def _lower_type_new(gen, node, args=None):
             if not isinstance(k, gimple_ctypes.StringLiteral) or N.is_fstring_literal(k):
                 return None
             keys.append(_as_str(k.value))
-    elif not isinstance(ns_n, (gimple_ctypes.IdentExpr, gimple_ctypes.MemberExpr)):
+    elif not isinstance(ns_n, (gimple_ctypes.IdentExpr, gimple_ctypes.MemberExpr,
+                               gimple_ctypes.CallExpr)):
         return None
     ns_dict = None
     if not isinstance(ns_n, gimple_ctypes.DictExpr):
-        # a COMPUTED namespace (a variable): only a dict value can be walked into the table
+        # a COMPUTED namespace (a variable or a call result): only a dict value can be walked
+        # into the table
         nst, nsv = gen.lower_expr(ns_n)
         if nst != 'MojoDict *':
             return None
         ns_dict = nsv
-    nt, nv = gen.lower_expr(name_n)
-    nm = nv if nt == 'char *' else gen._new_val('char *', f'(char *){gen._to_int64(nt, nv)}')
     cls = gen._call_expr('int64_t', 'mojo_type_new', [('char *', nm)])
     if bases_list is not None:
         gen._void_call('mojo_type_add_bases_from_list', [('int64_t', cls), ('MojoList *', bases_list)])
