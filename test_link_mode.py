@@ -639,6 +639,44 @@ def test_generator_value_called_with_kwargs_spread_and_float_default() -> bool:
     return ok
 
 
+def test_generator_value_called_with_double_beside_star_spread() -> bool:
+    """A call through a function VALUE that mixes a float argument with a `*`
+    spread (`f(1.5, *a)`) was refused at compile time: the packed argument
+    list's kind string was positional and a spread's length is unknown. A
+    double is now appended with `mojo_list_append_double_kinded`, which records
+    that slot's 'd' kind at run time, so it may sit before or after the
+    spread. Found via bugs/CODEGEN_dynamic_call_layer_residue_after_fsutil.md."""
+    src = (
+        'def g(x: float, n: int, y: float = 0.25):\n'
+        '    for i in range(n):\n'
+        '        yield x * i + y\n'
+        '\n'
+        'def h(n: int, y: float):\n'
+        '    for i in range(n):\n'
+        '        yield i + y\n'
+        '\n'
+        'def run(f, a):\n'
+        '    for v in f(1.5, *a):\n'
+        '        print(v)\n'
+        '\n'
+        'def run2(f, a):\n'
+        '    for v in f(*a, 0.5):\n'
+        '        print(v)\n'
+        '\n'
+        'def main():\n'
+        '    run(g, [3])\n'
+        '    run2(h, [2])\n'
+        'main()\n'
+    )
+    rc, stdout, py_rc, py_stdout = _run_single_file_vs_cpython(
+        'dblspread', src, 'dbl_spread_')
+    ok = rc == 0 and py_rc == 0 and stdout == py_stdout and stdout != ''
+    if not ok:
+        print(f"  ✗ generator_value_called_with_double_beside_star_spread: "
+              f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
+    return ok
+
+
 def test_from_submodule_import_symbol_value_read() -> bool:
     """`from SUBMODULE import SYMBOL` (not a bare submodule marker), the
     symbol bound to a new local, then called through that local
@@ -2286,6 +2324,7 @@ CASES = [
     test_generator_none_default_reaches_callee_as_null,
     test_statement_call_packs_keywords_into_kwargs_slot,
     test_generator_value_called_with_kwargs_spread_and_float_default,
+    test_generator_value_called_with_double_beside_star_spread,
     test_from_submodule_import_symbol_value_read,
     test_sibling_function_import_call_is_inlined,
     test_sibling_class_attribute_function_scoped,
