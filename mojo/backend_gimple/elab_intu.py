@@ -637,7 +637,7 @@ def _positional_bracket_ctor_args(work, base, node):
     because a method name is overloaded OUTSIDE the iteration protocol. Without
     this the call is lowered against no struct at all: the local is typed
     `int64_t`, `l.__iter__()` is "stubbed" and every construction is a literal 0
-    (bugs/CODEGEN_generic_struct_local_typed_int64_linked_list.md). None for
+    (the LinkedList[Int] local typed int64_t bug). None for
     every other shape, so those keep their old path exactly."""
     f = node.func
     if not (isinstance(f, SubscriptExpr) and isinstance(f.obj, IdentExpr)):
