@@ -1126,11 +1126,12 @@ def _conflicting_names_in(expr, env: dict | None) -> list:
     return []
 
 
-def _scope_defs() -> list:
+def _scope_defs(module_stmts=None) -> list:
     """Every function body a module-level reference can sit in: the top-level
-    `def`s and the methods of top-level structs."""
+    `def`s and the methods of top-level structs. `module_stmts` defaults to the
+    module being lowered (`_MODULE_STMTS`)."""
     scopes = []
-    for st in _MODULE_STMTS:
+    for st in (_MODULE_STMTS if module_stmts is None else module_stmts):
         if isinstance(st, N.FunctionDef):
             scopes.append(st)
         elif isinstance(st, N.StructDef):
@@ -1161,10 +1162,11 @@ class _ParamFlow:
     from the call site, so its result is tagged like the caller's `next()`.
     """
 
-    def __init__(self, name: str):
+    def __init__(self, name: str, module_stmts=None):
+        module_stmts = _MODULE_STMTS if module_stmts is None else module_stmts
         self.name = name
         self.defs: dict = {}
-        for st in _MODULE_STMTS:
+        for st in module_stmts:
             if (isinstance(st, N.FunctionDef)
                     and not getattr(st, 'is_generator', False)
                     and not getattr(st, 'is_async', False)):
@@ -1173,12 +1175,12 @@ class _ParamFlow:
         self.sites: dict = {}       # callee name -> [CallExpr with IdentExpr func]
         self.refs: dict = {}        # IdentExpr name -> occurrence count
         self._nested: set = set()   # ids of scope defs that contain a nested def
-        for sc in _scope_defs():
+        for sc in _scope_defs(module_stmts):
             for n in _walk(sc):
                 if n is not sc and isinstance(n, N.FunctionDef):
                     self._nested.add(id(sc))
                 self._index(sc, n)
-        for st in _MODULE_STMTS:
+        for st in module_stmts:
             if isinstance(st, (N.FunctionDef, N.StructDef)):
                 continue
             for n in _walk(st):
@@ -1217,7 +1219,15 @@ class _ParamFlow:
     def source_ok(self, fd, pidx: int, visiting: set) -> bool:
         """True when parameter `pidx` of plain def `fd` is the tagged generator
         at every call site of `fd`, and is consumed boxed inside `fd`."""
-        key = (fd.name, pidx)
+        return self.sources_ok(fd, pidx, visiting, consumed=True)
+
+    def sources_ok(self, fd, pidx: int, visiting: set, consumed: bool) -> bool:
+        """The source half of `source_ok`: the tagged generator at every call
+        site of `fd`. With `consumed` it also requires the boxed-consumer check
+        in `fd`'s body (`use_ok`). The per-kind split asks the source half alone:
+        a callee that is not yet split can fail the consumer check only through
+        a call site the split is about to separate."""
+        key = (fd.name, pidx, consumed)
         if key in visiting:
             return True     # a pass-through cycle contributes no other value
         visiting.add(key)
@@ -1237,20 +1247,27 @@ class _ParamFlow:
                     and a.func.name == self.name):
                 continue
             if isinstance(a, N.IdentExpr):
-                # a pass-through: the caller hands on ITS OWN parameter
-                caller = self.caller.get(id(c))
-                if (caller is None or id(caller) in self._nested
-                        or caller.comptime_params
-                        or getattr(caller, 'is_generator', False)
-                        or getattr(caller, 'is_async', False)
-                        or self._rebinds(caller, a.name)):
-                    return False
-                q = [i for i, p in enumerate(caller.params) if p[0] == a.name]
-                if len(q) != 1 or not self.source_ok(caller, q[0], visiting):
+                if not self.passed_from_source(c, a.name, visiting, consumed):
                     return False
                 continue
             return False
-        return self.use_ok(fd, pname, visiting)
+        return (not consumed) or self.use_ok(fd, pname, visiting)
+
+    def passed_from_source(self, call, aname: str, visiting: set,
+                           consumed: bool = True) -> bool:
+        """True when the argument `aname` of `call` is a pass-through: the
+        caller hands on ITS OWN parameter `aname`, and that parameter is itself
+        the tagged generator at every call site of the caller (`source_ok`, or
+        its source half alone with `consumed=False`)."""
+        caller = self.caller.get(id(call))
+        if (caller is None or id(caller) in self._nested
+                or caller.comptime_params
+                or getattr(caller, 'is_generator', False)
+                or getattr(caller, 'is_async', False)
+                or self._rebinds(caller, aname)):
+            return False
+        q = [i for i, p in enumerate(caller.params) if p[0] == aname]
+        return len(q) == 1 and self.sources_ok(caller, q[0], visiting, consumed)
 
     def use_ok(self, fd, pname: str, visiting: set) -> bool:
         if self._rebinds(fd, pname):
@@ -1304,7 +1321,7 @@ class _ParamFlow:
         return out
 
 
-def _tagged_consumers_ok(name: str) -> bool:
+def _tagged_consumers_ok(name: str, module_stmts=None) -> bool:
     """True when every reference to the module-level generator `name` in the
     module being lowered is a consumer that reads a tagged-word value slot as a
     BOXED word, rendered by `mojo_repr_boxed`: a `for` loop's iterable, a
@@ -1313,7 +1330,10 @@ def _tagged_consumers_ok(name: str) -> bool:
     result is marked boxed by `_lower_generator_next`. Any other use (`sum`,
     passing `g` around, `send`, ...) would read the word as a plain int64_t,
     which prints a box's ADDRESS: so a generator used that way keeps its
-    refusal."""
+    refusal. `module_stmts` defaults to the module being lowered; the per-kind
+    split (`_specialize_mixed_generator_callers`) asks the same question of a
+    trial module before it commits to the split."""
+    mod = _MODULE_STMTS if module_stmts is None else module_stmts
     for_iters = set()
     refs = []
     def _is_gcall(x):
@@ -1324,7 +1344,7 @@ def _tagged_consumers_ok(name: str) -> bool:
     # `list(it)`, `for x in it`, a comprehension over it, or `it.close()`:
     # followed as if it were the call. Scoped per function -- an unrelated `it`
     # in another function must not poison (or be mistaken for) this one.
-    for fd in _scope_defs():
+    for fd in _scope_defs(mod):
         handles = {}
         for n in _walk(fd):
             if (isinstance(n, N.AssignStmt) and isinstance(n.target, N.IdentExpr)
@@ -1364,14 +1384,14 @@ def _tagged_consumers_ok(name: str) -> bool:
                 for cid in handles[hn]:
                     for_iters.add(cid)
     flow = None     # built only when a generator call is passed as an argument
-    for st in _MODULE_STMTS:
+    for st in mod:
         for n in _walk(st):
             if isinstance(n, N.CallExpr) and any(_is_gcall(a) for a in n.args):
                 # `use(g())`: the generator is handed to a plain def, whose
                 # parameter must be a boxed consumer at every call site
                 # (see `_ParamFlow`). Any other shape is left to the refusal.
                 if flow is None:
-                    flow = _ParamFlow(name)
+                    flow = _ParamFlow(name, mod)
                 for a in flow.passes_generator(n):
                     for_iters.add(id(a))
             if isinstance(n, N.ForStmt) and _is_gcall(n.iterable):
@@ -1411,6 +1431,116 @@ def _tagged_consumers_ok(name: str) -> bool:
     calls = sum(1 for r in refs if r is not None)
     idents = sum(1 for r in refs if r is None)
     return idents == calls
+
+
+def _is_gen_call_of(x, gname: str) -> bool:
+    return (isinstance(x, N.CallExpr) and isinstance(x.func, N.IdentExpr)
+            and x.func.name == gname)
+
+
+def _mixed_generator_callee(stmts: list, g: str):
+    """The first (callee, parameter, sites) where a plain module-level `def`
+    receives a generator-derived value at SOME call sites and some other value
+    at the rest, and the parameter is consumed boxed in the body. The
+    generator-derived sites are the generator's own call `g(...)` and a
+    pass-through of a caller parameter that is `g` at every one of its call
+    sites (`_ParamFlow.passed_from_source`). Returned as
+    `(fd, pidx, gen_sites)`, or None."""
+    flow = _ParamFlow(g, stmts)
+    for fd in stmts:
+        if (not isinstance(fd, N.FunctionDef) or fd.comptime_params or fd.kwonly
+                or flow._plain(fd.name) is not fd):
+            continue
+        sites = flow._sites_of(fd.name)
+        if not sites or any(
+                c.kwargs or any(isinstance(a, N.UnaryOp) and a.op in ('*', '**')
+                                for a in c.args) for c in sites):
+            continue
+        for pidx, (pname, _t) in enumerate(fd.params):
+            if pname.startswith('*') or any(pidx >= len(c.args) for c in sites):
+                continue
+            gen = [c for c in sites
+                   if _is_gen_call_of(c.args[pidx], g)
+                   or (isinstance(c.args[pidx], N.IdentExpr)
+                       and flow.passed_from_source(c, c.args[pidx].name, set(),
+                                                   consumed=False))]
+            if not gen or len(gen) == len(sites):
+                continue
+            return fd, pidx, gen
+    return None
+
+
+def _specialize_mixed_generator_callers(stmts: list) -> list:
+    """Per-kind specialization for a parameter that receives a tagged generator
+    at some call sites and a different value at the others (the refusal of
+    `use(g())` beside `use([1, 2])` for a None or mixed-kind `g`). `module_gen`'s parameter inference types a callee's parameter
+    ONE way for every call site, so `use(g())` beside `use([1, 2])` has no
+    single type to give `use`. Instead the callee is cloned as
+    `<name>__<generator>`, the generator-derived call sites are rewritten to
+    call the clone, and the same is done for any callee the clone passes its
+    parameter on to (to a fixed point). The clones are kept for a generator only
+    when `_tagged_consumers_ok` then accepts that generator on the resulting
+    module; otherwise every rewrite made for it is undone and the module is
+    left exactly as it was. So a module with no mixed parameter is not touched.
+
+    Returns the module statement list with each clone inserted directly after
+    its original `def`. Runs before `_register_generator_defs`, so the clones
+    are ordinary single-kind functions to every later pass."""
+    import copy as _copy
+    gen_names = {s.name for s in stmts
+                 if isinstance(s, N.FunctionDef) and getattr(s, 'is_generator', False)}
+    passed = set()
+    for st in stmts:
+        for n in _walk(st):
+            if isinstance(n, N.CallExpr):
+                for a in n.args:
+                    if isinstance(a, N.CallExpr) and isinstance(a.func, N.IdentExpr) \
+                            and a.func.name in gen_names:
+                        passed.add(a.func.name)
+    if not passed:
+        return stmts
+    used = set()
+    for st in stmts:
+        for n in _walk(st):
+            if isinstance(n, (N.FunctionDef, N.StructDef)):
+                used.add(n.name)
+            elif isinstance(n, N.IdentExpr):
+                used.add(n.name)
+    out = list(stmts)
+    for g in sorted(passed):
+        trial = list(out)
+        undo = []           # (CallExpr, its previous func) to restore
+        added = []
+        budget = 10 * len(stmts) + 100
+        while True:
+            hit = _mixed_generator_callee(trial, g)
+            if hit is None:
+                break
+            budget -= 1
+            if budget < 0:
+                raise RuntimeError(f"per-kind specialization of generator {g!r} "
+                                   "did not reach a fixed point")
+            fd, pidx, gen = hit
+            clone_name = f"{fd.name}__{g}"
+            while clone_name in used or any(a.name == clone_name for a in added):
+                clone_name += '_'
+            clone = _deep_copy_stmt(fd)
+            clone.name = clone_name
+            for c in gen:
+                undo.append((c, c.func))
+                nf = _copy.copy(c.func)
+                nf.name = clone_name
+                c.func = nf
+            pos = next(i for i, s in enumerate(trial) if s is fd)
+            trial.insert(pos + 1, clone)
+            added.append(clone)
+        if added and _tagged_consumers_ok(g, trial):
+            out = trial
+            used.update(a.name for a in added)
+        else:
+            for c, f in reversed(undo):
+                c.func = f
+    return out
 
 
 # The one refusal text for a None yield on the C++ coroutine path. Both the
@@ -5907,6 +6037,10 @@ def lower(stmts: list, closure_stmts=(),
     _STRUCT_NAMES.clear()
     _UNTHREADABLE_NESTED_ASYNC_GENS.clear()
     _STRUCT_NAMES.update(s.name for s in stmts if isinstance(s, N.StructDef))
+    # Before anything reads the module's call sites or generator kinds: a
+    # parameter that receives a tagged generator beside another value is split
+    # into per-kind clones (see `_specialize_mixed_generator_callers`).
+    stmts = _specialize_mixed_generator_callers(stmts)
     _desugar_attr_tuple_assign(stmts)
     _lower_closing_withs(stmts)
     _lower_callable_choices(stmts)

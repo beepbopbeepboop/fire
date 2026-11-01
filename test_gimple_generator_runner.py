@@ -3818,8 +3818,10 @@ def main():
 main()
 """)
     # A parameter that ALSO receives a different value at another call site has
-    # no single kind to read, so it keeps its refusal.
-    test_generator_refused("none_yield_passed_to_function_mixed_callers_refused", """\
+    # no single kind for `module_gen`'s inference, so `use` is split into a
+    # clone per generator (`_specialize_mixed_generator_callers`): the generator
+    # call sites reach `use__g`, the list call site keeps `use`.
+    test_generator_matches_cpython("none_yield_passed_to_function_mixed_callers", """\
 def g():
     yield
     yield 2
@@ -3832,7 +3834,87 @@ def main():
     use(g())
     use([1, 2])
 main()
-""", "generator function(s)")
+""", """\
+def g():
+    yield
+    yield 2
+
+def use(it):
+    for v in it:
+        print(v)
+
+def main():
+    use(g())
+    use([1, 2])
+main()
+""")
+    # The split follows a pass-through: `use` hands its parameter on to `inner`,
+    # so `inner` is split too once `use` is (its generator call site reaches
+    # `inner__g` through `use__g`, its list site keeps `inner`).
+    test_generator_matches_cpython("none_yield_mixed_callers_through_two_functions", """\
+def g():
+    yield
+    yield 2
+
+def inner(it):
+    for v in it:
+        print(v)
+
+def use(it):
+    inner(it)
+
+def main():
+    use(g())
+    use([1, 2])
+main()
+""", """\
+def g():
+    yield
+    yield 2
+
+def inner(it):
+    for v in it:
+        print(v)
+
+def use(it):
+    inner(it)
+
+def main():
+    use(g())
+    use([1, 2])
+main()
+""")
+    # The same mixed-callers split on the C++ escape hatch, where the tagged
+    # mixed-kind word is carried as one box per slot (see
+    # `run_tagged_word_cpp_tests`).
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("tagged_mixed_passed_to_function_mixed_callers_cpp", """\
+def g():
+    yield 1
+    yield "s"
+
+def use(it):
+    for v in it:
+        print(v)
+
+def main():
+    use(g())
+    use([1, 2])
+main()
+""", """\
+def g():
+    yield 1
+    yield "s"
+
+def use(it):
+    for v in it:
+        print(v)
+
+def main():
+    use(g())
+    use([1, 2])
+main()
+""")
 
 
 def run_tagged_word_cpp_tests():
