@@ -15,6 +15,20 @@ restoring the value-passing form changes the self-hosted compiler's own code,
 and the proof it is safe is the self-host build (`test_selfhost.py`'s
 `CALL_PROGRAM` probe, plus `make bootstrap`), which a light worker may not run.
 
+## Status (2026-11-01, worker landing)
+
+Step 1 LANDED on `work/bug-codegen-coro-callsite-visitors-calle-5724`: the
+by-name calls in `mojo/middle/coro.py` `_scan_callsite_param_kinds` are reverted
+to passing `visit` as a value (`_collect_from(src, visit, closure)`,
+`_visit_call(node, caller_env, callee=None)`), and the workaround comment is
+removed. The region now matches the pre-`0f009480b` code exactly (checked with
+`diff` against `0f009480b^`). `test_coro_bugs.py` passes (exit 0).
+
+NOT verified here: steps 2-3 (`test_selfhost.py` `CALL_PROGRAM` probe and
+`make bootstrap`) are heavy self-host runs, reserved for the integrator. This
+doc is NOT deleted until they pass. If the probe fails, step 4 applies: restore
+the by-name form and record the failing shape here.
+
 ## Next step
 
 1. Revert the by-name calls in `mojo/middle/coro.py` (the comment block near

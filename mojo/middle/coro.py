@@ -4789,7 +4789,7 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
         describe themselves in terms of UNANNOTATED params."""
         return pann is None or pann == ''
 
-    def _visit_call(node, caller_env, callee):
+    def _visit_call(node, caller_env, callee=None):
         # `callee` is the name the call resolves to in THIS module, given by a
         # closure caller whose spelling is an alias (`from m import gen as g`
         # calls `g`, which is `gen` here). Absent, the spelling is the name.
@@ -4988,7 +4988,7 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
                     aliases.add(_cm_as_str(_al))
         return aliases
 
-    def _collect_from(src, closure):
+    def _collect_from(src, visit, closure):
         for s in src:
             fns = []
             if isinstance(s, N.FunctionDef):
@@ -5011,12 +5011,6 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
                 # `_static_env(fn, struct_def)`) is what makes the two agree
                 # about `self.k`.
                 #
-                # The visitors are called BY NAME, not handed in as values: a capturing
-                # nested function passed on from inside another nested function reaches
-                # its callee with a NULL environment in the self-hosted build (the
-                # compiled compiler crashed on every program with a module-level call;
-                # reproduction: the capturing-closure NULL-env bug, fixed at its root in 145fd1089).
-                #
                 # LAZY: the env is built on the first call the visitor will
                 # actually act on (`_wants_call`), not for every function. In the
                 # closure walk almost no function calls one of THIS module's
@@ -5034,27 +5028,21 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
                         if not have_env:
                             cenv = _static_env(fn, sdef)
                             have_env = True
-                        if closure:
-                            _visit_closure_call(n, cenv)
-                        else:
-                            _visit_call(n, cenv, None)
+                        visit(n, cenv)
             # module-level calls (rare, e.g. a bare generator call in a stmt)
             if not isinstance(s, (N.FunctionDef, N.StructDef)):
                 for n in _walk(s):
                     if isinstance(n, N.CallExpr):
-                        if closure:
-                            _visit_closure_call(n, None)
-                        else:
-                            _visit_call(n, None, None)
+                        visit(n, None)
 
     def _collect():
-        _collect_from(stmts, False)
+        _collect_from(stmts, _visit_call, False)
         for _cs in closure_stmts:
             _bound_here.clear()
             _bound_here.update(_from_bound_names(_cs))
             _alias_here.clear()
             _alias_here.update(_module_aliases(_cs))
-            _collect_from(_cs, True)
+            _collect_from(_cs, _visit_closure_call, True)
 
     def _classify():
         # Replace, not merge: a pass that no longer finds a conflict must
