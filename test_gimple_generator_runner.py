@@ -4014,6 +4014,46 @@ main()
     test_generator_matches_cpython("tagged_for_target_copy_mixed_default", _mixed, _mixed)
     with coro.pinned('cpp'):
         test_generator_matches_cpython("tagged_for_target_copy_mixed_cpp", _mixed, _mixed)
+    # A MIXED name: a plain int binding (`x = 0`) beside a copy of a tagged
+    # for target. The copy keeps the yield's box, so every plain int64 store
+    # into `x` must be boxed too, or the None yield unwraps to 0 on the copy
+    # (the pre-fix output was "1 / 0 / 2 / 2"). The second half reads the
+    # mixed name back through arithmetic, augmented assignment and comparison,
+    # so the box has to unwrap for those consumers.
+    _mixed_none = """\
+def g():
+    yield 1
+    yield None
+    yield 2
+def plain():
+    yield 5
+    yield 6
+def main():
+    x = 0
+    for v in g():
+        x = v
+        print(x)
+        print(x == None)
+    x = 7
+    print(x + 1)
+    x += 3
+    print(x)
+    print(x * 2)
+    for w in plain():
+        x = w
+        print(x + 10)
+    print(x)
+    print(x == 6)
+    x = 0
+    print(x == None)
+    print(x)
+main()
+"""
+    test_generator_matches_cpython("tagged_for_target_copy_mixed_name_none_default",
+                                   _mixed_none, _mixed_none)
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("tagged_for_target_copy_mixed_name_none_cpp",
+                                       _mixed_none, _mixed_none)
 
 def run_tests():
     run_none_yield_tests()
@@ -4021,6 +4061,9 @@ def run_tests():
     run_none_list_iteration_tests()
     run_tagged_word_cpp_tests()
     run_tagged_word_bind_tests()
+    # Was defined but never called, so its pins (and the copy-of-a-for-target
+    # shape) were not part of the file's run. Registered here, 2026-11-01.
+    run_tagged_for_target_bind_tests()
     run_star_args_call_tests()
     run_callable_param_tests()
     run_lambda_capture_tests()
