@@ -64,7 +64,7 @@ from mojo.middle.calls_shared import _py_box_expr
 # re-raises, and `emit_loops` cannot be imported here (it goes through
 # `gimple_codegen`, which imports this module). See the class's own docstring
 # for why the two arms treat it differently from a plain `ValueError`.
-from mojo.middle.loops_shared import ZipLongestFillRefusal
+from mojo.middle.loops_shared import ZipLongestFillRefusal, desugar_loop_else
 
 
 def gen_stmt(gen, node):
@@ -3720,6 +3720,10 @@ def _gen_stmt_MatchStmt(gen, node):
 
 
 def _gen_stmt_WhileStmt(gen, node):
+    if node.else_body:
+        for _le_st in desugar_loop_else(node):
+            gen.gen_stmt(_le_st)
+        return
     bb_cond  = gen._new_bb()
     bb_body  = gen._new_bb()
     bb_after = gen._new_bb()
@@ -3992,6 +3996,12 @@ def _range_minus_one(e):
 
 
 def _gen_stmt_ForStmt(gen, node):
+    # A loop with an `else` clause: desugared to a flag + the loop + `if flag: else-body` (see
+    # loops_shared.desugar_loop_else). No loop lowering emitted the clause, so it was dropped.
+    if node.else_body:
+        for _le_st in desugar_loop_else(node):
+            gen.gen_stmt(_le_st)
+        return
     # A PARENTHESISED SINGLE NAME — `for (a) in b:` — is one binding, spelled
     # `'(a)'` by the parser, while the 1-tuple `for (a,) in b:` is `'(a,)'` and
     # DOES unpack (fire_compiler.py's "Unpacking-target representation"; see

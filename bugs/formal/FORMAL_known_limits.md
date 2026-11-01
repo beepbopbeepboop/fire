@@ -19,7 +19,7 @@ exceeds it under load:
 | fresh worktree, -j18 gate load | > 600 s | TIMEOUT |
 
 Contributors: the self-host bootstrap's double-compile fallback (see
-`CODEGEN_selfhost_closure_set_kind_refusal_double_compiles_the_module.md`)
+the set-field-read-as-list refusal, fixed 2026-10-31: `_set_elem_fields`)
 + the shared dylib lock (in the closing gate another job held it
 10:47-10:59, finishing 7 min after the kill) + -j18 contention. Calibration
 levers (both backed by measured termination — not masking): warm the gate

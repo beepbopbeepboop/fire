@@ -3555,6 +3555,97 @@ run(gb, [1, 2, 3])
 run2([ga, gb], [1, 2])
 """, "1 None\n2 None\n2 big\n3 big\n1 None\n2 None\n2 big\n")
 
+    # The `else` clause of a loop (runs when the loop ends without a `break`) used to be dropped by
+    # every loop lowering. Desugared to a flag + loop + `if flag:`; a `break` in a nested loop's own
+    # `else` belongs to the OUTER loop, and `else: continue` / `break` pairs (itertools-style
+    # nested-break idiom) behave.
+    test_gimple_stdout("gimple_loop_else_clauses", """\
+def a(ys):
+    for b in ys:
+        print(b)
+    else:
+        print("else-a")
+def b2(ys):
+    for b in ys:
+        if b == 9:
+            break
+    else:
+        print("else-b")
+def c(ys, zs):
+    for q in zs:
+        for b in ys:
+            print(q, b)
+        else:
+            print("else-c", q)
+def d(xs, ys):
+    for a in xs:
+        for b in ys:
+            print(a, b)
+        else:
+            continue
+        break
+def e(n):
+    i = 0
+    while i < n:
+        i += 1
+        if i == 7:
+            break
+    else:
+        print("while-else", i)
+def f(n):
+    for i in range(n):
+        if i == 3:
+            break
+    else:
+        print("range-else")
+def g(xs, ys):
+    for a in xs:
+        for b in ys:
+            pass
+        else:
+            break
+    print("g done")
+a([1]); a([])
+b2([1]); b2([9])
+c([1], [0, 5])
+d([1, 2], [3, 4])
+e(3); e(10)
+f(2); f(5)
+g([1, 2], [3])
+""", '1\nelse-a\nelse-a\nelse-b\n0 1\nelse-c 0\n5 1\nelse-c 5\n1 3\n1 4\n2 3\n2 4\nwhile-else 3\nrange-else\ng done\n')
+
+    # A callable chain as `itertools`/c-analyzer's `check_all` writes it: a generator that loops over
+    # `check(analysis)` for each callable in `checks or ()` and re-yields the (data, failure) pair,
+    # with the `for ... else: continue` / `break` fail-fast idiom.
+    test_gimple_stdout("gimple_check_all_idiom", """\
+def check_a(analysis):
+    for x in analysis:
+        yield x, None
+
+def check_b(analysis):
+    for x in analysis:
+        if x > 1:
+            yield x, "big"
+
+def check_all(analysis, checks, failfast=False):
+    for check in checks or ():
+        for data, failure in check(analysis):
+            if failure is None:
+                continue
+            yield data, failure
+            if failfast:
+                yield None, None
+                break
+        else:
+            continue
+        break
+
+for d, f in check_all([1, 2, 3], [check_a, check_b]):
+    print(d, f)
+for d, f in check_all([1, 2, 3], [check_a, check_b], True):
+    print(d, f)
+""", '2 big\n3 big\n2 big\nNone None\n')
+
     # String site FIRST, int site second (an int list records no contract, so
     # it used to be invisible as a disagreeing call site).
     test_gimple_stdout("gimple_mixed_kind_flat_list_param_str_first", """\

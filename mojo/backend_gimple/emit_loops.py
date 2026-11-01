@@ -896,8 +896,7 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             it_type, it_val = gen.lower_expr(_int_recv)
         elif (isinstance(it, gimple_ctypes.CallExpr) and isinstance(it.func, gimple_ctypes.IdentExpr)
                 and it.func.name in gen.var_types and it.func.name not in gen.func_return_types
-                and gen.var_types.get(it.func.name) in ('int64_t', 'void *', 'char *')
-                and not gen._cur_func_is_coro):
+                and gen.var_types.get(it.func.name) in ('int64_t', 'void *', 'char *')):
             # `for x in f(args):` where `f` is a callable VARIABLE or PARAMETER (`for check in
             # checks: for d, e in check(a):`). The callee may be a compiled GENERATOR, whose
             # call yields a live handle only when dispatched by `mojo_dyn_call` (a plain
@@ -3836,6 +3835,15 @@ def _emit_generator_tuple_unpack(gen, var_names: list, slot_types: list, list_pt
                 gen._emit(f"  {cvn} = {dv};")
             else:
                 gen._safe_coerce_emit('double', vt, dv, cvn)
+        elif vt == 'int64_t' and suf != 'str':
+            # A slot whose static type is only the int64_t default: the yielded tuple records the
+            # slot's kind at run time (a string, a None, a float box -- the stack-switch yield
+            # boxes through `mojo_list_append_word`), so read it BOXED. An integer slot comes back
+            # as the same raw word it always did; a None / string slot is spelled by its kind
+            # instead of printing as 0 / a pointer's decimal.
+            raw = gen._new_val('int64_t', f"mojo_list_get_boxed ({list_ptr}, {i})")
+            gen._boxed_vals.add(cvn)
+            gen._emit(f"  {cvn} = {raw};")
         else:
             raw = gen._new_val('int64_t', f"mojo_list_get_int ({list_ptr}, {i})")
             if vt == 'int64_t':

@@ -5765,7 +5765,7 @@ def _cpp_yield_tuple(gen, tup: 'TupleExpr', declared: dict, indent: str) -> list
     # first made every `yield (a, b)` raise out of its own construction. Same
     # ordering rule as _lower_tuple_literal's identical literal.
     lines = [f"{indent}MojoList *{tvar} = mojo_list_new();"]
-    # A tuple with a None slot must carry every slot's kind AT RUN TIME: a consumer that reads the
+    # A tuple with a None or a string slot must carry every slot's kind AT RUN TIME: a consumer that reads the
     # tuple dynamically -- a loop over the result of a call through a function VALUE
     # (`for d, e in check(a)`) -- prints a None as 0 and a string as a pointer otherwise, and an
     # int64_t slot here may only be the default for an unknown local. Such a tuple is built with
@@ -5778,7 +5778,7 @@ def _cpp_yield_tuple(gen, tup: 'TupleExpr', declared: dict, indent: str) -> list
         _is_none = isinstance(el, NoneLiteral) or (isinstance(el, IdentExpr) and el.name == 'None')
         _certain_int = isinstance(el, (IntLiteral, BoolLiteral))
         suf = gimple_ctypes.TypeLattice.list_suffix(ectype)
-        if _is_none:
+        if _is_none or suf == 'str':
             _dyn_slots = True
         _els.append((el, ectype, suf, _is_none))
     for el, ectype, suf, _is_none in _els:
