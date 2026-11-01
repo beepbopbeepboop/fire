@@ -21,10 +21,19 @@ as values, or that call one of their own parameters, are kept on the C++ path
   fallback already forwards kwargs into the bare-name call, so the guard was
   the defect; removed. Measured before/after: test FAIL (rc=1, no output) ->
   PASS (`0 10 20 30 15`, CPython-identical).
-- **Item 2 NOT REPRODUCED in minimal form** on this tree (verified 2026-10-30):
-  `len(list(lib.counter(4, step=10)))` in a package prints `4` (CPython `4`).
-  Full `c_common/fsutil.py` link-mode reproduction exceeds quick-test budget
-  (compile >2 min). Next step unchanged: reproduce with real shape before fix.
+- **Item 2 FIXED, with its real cause** (2026-10-31,
+  `test_link_mode.py::test_cross_module_generator_default_is_padded`). The
+  `len(list(mod.gen(...)))` spelling was never the defect (it works). The real
+  shape is a generator reached through another module with a defaulted
+  parameter OMITTED, consumed by anything that drains it:
+  `sum(lib.counter(4))` printed 0 and `tuple(lib.counter(3))` printed
+  `(0, 0, 0)` (CPython 6 / `(0, 1, 2)`), and a `flag=None` default arrived as
+  the non-None word 0, so `walk_tree`'s `suffix=None` took the wrong branch.
+  Both `lib.counter(4)` and `from pkg.lib import counter` were affected.
+  `_emit_generator_start_call` padded from the CALLER's
+  `_func_param_defaults`, which never saw the defining module's pass; the api
+  entry's own `defaults` snapshot is now the fallback. Measured before/after:
+  `0 / (0, 0, 0) / 0` -> `6 / (0, 1, 2) / 6`, CPython-identical.
 - **Item 3 FIXED** (`test_link_mode.py::test_str_affix_method_on_unsolved_word_is_bool`).
   The word-receiver branch of `emit_methods._lower_str_method`'s
   `startswith`/`endswith` arm declared its runtime result as a plain C `int`
@@ -75,7 +84,7 @@ as values, or that call one of their own parameters, are kept on the C++ path
   type`). Item 5 is otherwise closed; item 2 still needs its real shape.
 - Regressions: item 1 `test_link_mode.py::test_bare_submodule_import_keyword_call`,
   item 3 `...::test_str_affix_method_on_unsolved_word_is_bool`, item 4
-  `...::test_generator_none_default_reaches_callee_as_null`, item 5 above. (The
+  `...::test_generator_none_default_reaches_callee_as_null`, item 2 `...::test_cross_module_generator_default_is_padded`, item 5 above. (The
   placeholder `test_regress_dynamic_call_layer_residue.py`, which asserted
   `True`, is removed.)
 
@@ -87,11 +96,10 @@ as values, or that call one of their own parameters, are kept on the C++ path
 compiled, then died at run time with `NotImplementedError: ... module
 'c_common.fsutil' is not compiled into this binary`. Fixed as above.
 
-## 2. `list(mod.gen(...))`
+## 2. (FIXED — see Status) omitted default of a cross-module generator padded as 0
 
-`len(list(fsutil.walk_tree("runtime")))` raises the same NotImplementedError: a
-module-attribute generator call used as an ARGUMENT is not recognised as a
-generator construction.
+Originally written as `len(list(fsutil.walk_tree("runtime")))` raising
+NotImplementedError; the real defect was the omitted-default padding.
 
 ## 3. A bool result off an unsolved word prints `1`
 
@@ -126,5 +134,3 @@ reproduce), so such a generator used as a value and called with keywords raises
 a catchable `TypeError`. A signature carrying per-parameter kinds, and a call
 thunk per arity/kind shape, would close it.
 
-Quick test for items 1-3: build `.tmp`-style copy of CPython's `c_common` and run
-the three snippets above against CPython.

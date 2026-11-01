@@ -180,7 +180,16 @@ def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
     if _gen_expected and len(arg_pairs) < _gen_nfixed:
         _gen_kwarg_dict = {kn: gen.lower_expr(ke) for kn, ke in _gen_kwargs}
         _gen_kwarg_values = list(_gen_kwarg_dict.values())
-        _gen_dflts = gen._func_param_defaults.get(f"{api['base']}_start", [])
+        # The api entry carries the DEFINING module's own default snapshot
+        # (`api['defaults']`), which is the only record of them when this
+        # scope reaches the generator through a module (`lib.counter(4)`,
+        # `from pkg.lib import counter`): this gen's `_func_param_defaults`
+        # never saw that module's registration pass. Without the fallback
+        # the omitted `step=1` was padded as a typed 0, so
+        # `sum(lib.counter(4))` answered 0 and a `suffix=None` default
+        # arrived as the non-None word 0.
+        _gen_dflts = (gen._func_param_defaults.get(f"{api['base']}_start")
+                      or api.get('defaults') or [])
         while len(arg_pairs) < _gen_nfixed:
             _pos = len(arg_pairs)
             if _gen_kwslot >= 0 and _pos == _gen_kwslot:
