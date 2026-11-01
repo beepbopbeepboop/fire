@@ -1595,7 +1595,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         raise RuntimeError(
             'cannot compile module: type.__new__(metacls, name, bases, namespace) creates a '
             'class at run time, which the compiled path models only for metacls `type`, a '
-            'literal-or-dict-variable namespace and tuple/list bases '
+            'literal, dict-variable or dict-call-result namespace and tuple/list bases '
             '(bug:CODEGEN_enum_runtime_class_creation)')
     # `setattr(Cls, name, v)` / `getattr(Cls, name[, d])` / `hasattr(Cls, name)` / `delattr(Cls, name)`
     # where the first argument is a CLASS (a struct name, or `cls` in a classmethod): attributes
