@@ -953,7 +953,7 @@ a NUL-terminated `char *`, so the interned `""` is the answer and `len` of it is
 `model.gimple_runtime_callable(name, provided)` is the whole rule: every type
 crossing the call boundary is one 64-bit word, AND the symbol is on the link
 line. `GIMPLE_LIST_PREFIX` is **gone** — it was a hand-kept list of prefixes
-standing in for a shape, and the shape answers the same question for all 838
+standing in for a shape, and the shape answers the same question for all 846
 entry points instead of the 40-odd names one prefix covered.
 
 The two halves are independent and both are needed, which is what the prefix
@@ -964,17 +964,17 @@ because nothing provides it.
 
 | | measured over all 11 headers in `runtime/` |
 |---|---|
-| entry points declared | 838 |
-| every type crossing the boundary is one word | **382** |
-| a box in an argument or the return | 456 |
-| of the 382, refused only for want of a linked library | 382 |
+| entry points declared | 846 |
+| every type crossing the boundary is one word | **389** |
+| a box in an argument or the return | 457 |
+| of the 389, refused only for want of a linked library | 389 |
 
-**382 of 838 is what a link line converts into working code with no backend
+**389 of 846 is what a link line converts into working code with no backend
 change at all.** For `mojo_sqlite3_*` it is **16 of 22**.
 
 (Re-measured 2026-10-04 on this tree with `formal.model.runtime_abi()`, which
-is the authority and reads the headers rather than repeating this table: 838
-entry points, 382 word-shaped, 456 with a box. The figures above were right for
+is the authority and reads the headers rather than repeating this table: 846
+entry points, 389 word-shaped, 457 with a box. The figures above were right for
 the tree this section was written on and had been drifting since, which is what
 `test_runtime_header_scan.py`'s census check now prevents — it reads each of
 these numbers out of the file and compares it with the live table, so a comment
@@ -985,13 +985,13 @@ quoting yesterday's number.)
 
 ### Two numbers from the round-1 brief that the headers do not support
 
-The brief said "of 455 entry points, 382 return one 64-bit word and 101 return a
+The brief said "of 455 entry points, 389 return one 64-bit word and 101 return a
 heap box" and "for sqlite, **20 of 22** … the only two that are not are
 `mojo_sqlite3_query` and `_query_dict`". Measured, both are off, and the reason
 is worth recording because it is a rule, not a typo:
 
-1. **455 / 382 / 101.** I measure 838 / 653 / 185 by return type alone, and 382
-   once the ARGUMENTS are counted too. Neither matches 455/382/101. The
+1. **455 / 389 / 101.** I measure 846 / 661 / 185 by return type alone, and 389
+   once the ARGUMENTS are counted too. Neither matches 455/389/101. The
    scanner those numbers were taken with recorded `char *f` as returning `char`
    (see below), so every pointer-returning function was scored as a scalar —
    and the brief's own headline rule ("callable iff every parameter type AND
@@ -1027,7 +1027,7 @@ both in `reflect.py`:
   `mojo_fnptr_call_0` … `_4` are `static inline` helpers, and the scanner read
   the `return` statement in one's body as a prototype (`build_stdlib_dylib.py`
   emits `extern void <sym>();` and takes its address). BUG-2026-036's shape.
-  `fire_runtime.h` 459 → 456; four real declarations gained in the same fix.
+  `fire_runtime.h` 459 → 457; four real declarations gained in the same fix.
 
 Neither is closed by a test in the tree, so both are in
 `INTERFACE_REQUESTS_agent3.md` §2 as diffs for the integrator.
@@ -1036,10 +1036,10 @@ Neither is closed by a test in the tree, so both are in
 
 A word-shaped call is emitted only when the symbol is on the link line, and the
 executable path (`build --formal`, which every suite drives) has no runtime
-library on its link line at all. So today the 382 are refused *for want of a
+library on its link line at all. So today the 389 are refused *for want of a
 library*, which the new message says plainly instead of claiming there is
 nothing to lower. INTERFACE REQUEST to [1] for the optional-runtime-unit
-registry; it is the only thing between the 382 and working code.
+registry; it is the only thing between the 389 and working code.
 
 ---
 

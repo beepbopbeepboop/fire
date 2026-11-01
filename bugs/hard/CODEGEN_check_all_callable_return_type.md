@@ -90,3 +90,18 @@ runs with silently wrong values is worse than one that prints the diagnostic, so
 contract between the C++ generator's yield and `mojo_iter_gen_handle`/`_gen_drain` (its `vkind` 4 'l' case): it must record the per-slot kinds on
 each yielded tuple (`mojo_list_set_kinds`), and the dynamic loop must read the targets with `mojo_list_get_boxed`. Do that first; the
 evidence/specialisation design above is then only needed for the static typing of the loop targets.
+
+## Status (2026-11-01, later) — the non-generator half LANDED; the generator-that-re-yields half is still loud
+
+Landed: `for d, e in f(xs):` where `f` is a callable PARAMETER or a loop variable over a list of generator functions, in an ordinary
+function, now matches CPython (`gimple_for_over_a_call_through_a_function_value`): `emit_loops._gen_for_iter` dispatches the call through
+`mojo_dyn_call` (a generator is bound by its registered name), drains it with `mojo_iter_word`, and reads the tuple targets BOXED, so a
+`None`, a string or a float beside an int keeps its kind. The C++ generator side records those kinds: `_cpp_yield_tuple` builds a tuple that
+has a `None` slot with the kind-recording appends (`mojo_list_append_word` / `_double_kinded` / the new `mojo_list_append_str_kinded`, which
+tags a string literal that lives in the coroutine unit and is not in the runtime's registered pool). A tuple without a `None` keeps its plain
+appends (a double beside an unknown int64_t read back as raw bits when it did not, caught by `cpp_coroutine_mixed_kind_list_param_tuple_yield`).
+
+NOT done: the shape `check_all` really has, a GENERATOR whose body loops over `check(analysis)` and re-yields the pair. The stack-switch
+body re-yields `d, e` as plain int words (no kinds), so the dynamic loop is disabled inside a coroutine body (`gen._cur_func_is_coro`) and that
+shape keeps its `mojo_unsupported_iter` diagnostic rather than printing wrong values. Next: make the A3 yield of a tuple whose slots are dynamic
+words record their kinds (the same `mojo_list_append_word` discipline), then drop the `_cur_func_is_coro` guard.
