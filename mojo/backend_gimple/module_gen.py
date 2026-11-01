@@ -8944,14 +8944,29 @@ def gen_module_impl(self, stmts):
         signature is emitted, which is why it is called from both of that
         table's population loops rather than from one of them.
         """
+        # Process functions with usage-derived parameter types
         for _rn in list(getattr(self, '_inferred_var_types', None) or {}):
             _rp = self._inferred_param_types.get(_rn)
             if not _rp:
-                continue
+                _rp = {}
+                self._inferred_param_types[_rn] = _rp
             for _rpn in list(_rp.keys()):
                 _fixed = funcs_shared.param_binding_ctype(self, _rn, _rpn, _rp[_rpn])
                 if _fixed != _rp[_rpn]:
                     _rp[_rpn] = _fixed
+        # Also apply unanimous container evidence to parameters that had no
+        # usage-derived evidence at all (e.g. pure-forwarders, or bodies that
+        # only call print() so inference never resolves a container kind).
+        _pct = getattr(self, '_param_container_types', None) or {}
+        for _fn, _pmap in _pct.items():
+            if _fn not in self._inferred_param_types:
+                self._inferred_param_types[_fn] = {}
+            for _pname, _ctype in _pmap.items():
+                if _ctype not in ('MojoDict *', 'MojoList *', 'MojoSet *'):
+                    continue
+                _cur = self._inferred_param_types[_fn].get(_pname)
+                if _cur in (None, 'int64_t', 'int', ''):
+                    self._inferred_param_types[_fn][_pname] = _ctype
 
     for s in all_functions:
         if isinstance(s, FunctionDef):
@@ -10727,6 +10742,10 @@ def gen_module_impl(self, stmts):
                         self._param_elem_mixed.setdefault(callee, set()).add(pnames[i])
         _resolve_param_dict_vals()
         _resolve_param_containers()
+        # After resolving container observations, apply them to parameter
+        # inference so untyped parameters that only receive container
+        # arguments (e.g. `show(x)` with `x = [1,2,3]`) get typed correctly.
+        _reconcile_param_container_kinds()
         _em_now = sum(len(_v) for _v in self._param_elem_mixed.values())
         if _em_now != _em_before:
             _em_before = _em_now
