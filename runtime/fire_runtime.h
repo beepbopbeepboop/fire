@@ -856,9 +856,15 @@ int         mojo_word_is_none(int64_t v);
  * operand ("int" or "float"); `none_is_left` says which side the None is,
  * for CPython's message order. Any other word is returned unchanged. */
 int64_t     mojo_none_arith_guard(int64_t v, const char *op, const char *other, int none_is_left);
+/* The same check for a coroutine body, which must not longjmp: a None box
+ * marks the TypeError pending (mojo_exc_pending_set) and returns; the
+ * generated code rethrows it as a catchable _MojoCppExc. */
+int64_t     mojo_none_arith_guard_pending(int64_t v, const char *op, const char *other, int none_is_left);
 /* Unary `-` on a possibly-boxed operand: the same check, with CPython's
  * "bad operand type for unary -" message. */
 int64_t     mojo_none_unary_guard(int64_t v, const char *op);
+/* The pending-flag form of mojo_none_unary_guard. */
+int64_t     mojo_none_unary_guard_pending(int64_t v, const char *op);
 /* Python truthiness of a word whose kind only the runtime knows (an
  * unannotated parameter, an untyped attribute read): an empty container or
  * string is false, None is false, 0 is false, anything else is true. */

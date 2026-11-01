@@ -3837,6 +3837,95 @@ def main():
         pass
 main()
 """)
+    # `x = yield` on the cpp escape hatch: the yield's received value is the
+    # None box (`x` is a tagged word), so the programs the default path pins in
+    # run_none_yield_tests run here too. Before the cpp lowering existed this
+    # refused to compile (`unsupported expression in generator body: YieldExpr`).
+    test_generator_matches_cpython("none_received_arithmetic_raises_typeerror_cpp",
+                                   _NONE_RECEIVED_ARITH_SRC, _NONE_RECEIVED_ARITH_SRC)
+    test_generator_matches_cpython("none_received_unary_minus_raises_typeerror_cpp", """\
+def g():
+    x = yield
+    try:
+        print(-x)
+    except TypeError:
+        print("TypeError")
+    yield 1
+
+def main():
+    it = g()
+    next(it)
+    next(it)
+main()
+""", """\
+def g():
+    x = yield
+    try:
+        print(-x)
+    except TypeError:
+        print("TypeError")
+    yield 1
+
+def main():
+    it = g()
+    next(it)
+    next(it)
+main()
+""")
+    test_generator_matches_cpython("none_sent_into_generator_prints_none_cpp", """\
+def g():
+    x = yield
+    print(x)
+    yield 1
+
+def main():
+    it = g()
+    next(it)
+    next(it)
+main()
+""", """\
+def g():
+    x = yield
+    print(x)
+    yield 1
+
+def main():
+    it = g()
+    next(it)
+    next(it)
+main()
+""")
+    # A value-yielding `x = yield v` binds the None the resume delivers, while
+    # the yielded value still reaches the consumer as a tagged box.
+    test_generator_matches_cpython("value_yield_assignment_cpp", """\
+def g():
+    x = yield 7
+    print(x)
+    y = yield "s"
+    print(y)
+    yield 1
+
+def main():
+    it = g()
+    print(next(it))
+    print(next(it))
+    print(next(it))
+main()
+""", """\
+def g():
+    x = yield 7
+    print(x)
+    y = yield "s"
+    print(y)
+    yield 1
+
+def main():
+    it = g()
+    print(next(it))
+    print(next(it))
+    print(next(it))
+main()
+""")
 
 def run_tagged_word_bind_tests():
     # A tagged generator word bound to a NAME (`x = next(g)`) must keep its
