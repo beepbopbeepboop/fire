@@ -337,3 +337,28 @@ Emit side: `.value()` / `[]` identity, `not p` NULL test, `Self._NodePointer()`
 struct-valued elements. NOT run: gate / `stdlib-syntax` / `stdlib-dylib`
 (the integrator's): the `module_gen.py` change affects any annotated
 self-pointer field, so `stdlib-syntax` `U` and `stdlib-dylib` skip count are owed.
+
+## Status (2026-11-01, round 5): PARTIAL — emit side for the typed Node pointer landed (66 -> 26 stubs); allocation API + iterator remain.
+
+### What landed (`emit_methods.py`, pin `test_node_pointer_unwrap_is_identity`)
+
+On a struct-pointer receiver whose struct has no such METHOD, `.value()` /
+`.unsafe_value()` / `.take_pointee()` / `.unsafe_take_pointee()` with no
+arguments is the identity (the pointer word; NULL = None), placed before the
+callable-field rule. Root cause of the `mojo_fnptr_call_0` in
+`_LinkedListIter.__next__`: `Node` has a FIELD named `value`, so
+`curr.value()` was lowered as a call through that field. Probe stubs 66 -> 26;
+gcc `-fsyntax-only` 0 errors; pin fails before, passes after.
+
+### Remaining (26 stubs, measured)
+1. Allocation API: `alloc(Layout[Node[T]].single()).unsafe_leak()` and
+   `ThinAllocation(unsafe_owned_ptr=nn).unsafe_with_layout({count = 1})`
+   (`single` 4, `unsafe_leak` 4, `unsafe_with_layout` 6). Needs a lowering of
+   `alloc(Layout[S].single())` to a zeroed `sizeof(S)` allocation typed `S *`,
+   and `ThinAllocation(...).unsafe_with_layout(...)` to a free of that pointer.
+2. `it = l.__iter__()` still `int64_t` (`IteratorType[...]` parametrized
+   alias; `_LinkedListIter.__next__` stubbed, 2).
+3. One residual `Node.next()`/`prev()` each, struct-valued elements, and the
+   reflection helpers (`FormatStruct`, `TypeNames`, `params`, `fields`).
+NOT run: gate / stdlib-syntax / stdlib-dylib (integrator's); `emit_methods.py`
+change affects any struct with a field named `value` called as `.value()`.

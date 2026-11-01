@@ -5117,6 +5117,26 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # mojo_fnptr_call_N indirect-call helpers instead
     # (_lower_fnptr_call_value).
     _recv_struct = gimple_exprtypes._struct_name_of(ot) if ot.endswith(' *') else None
+    # `.value()` / `.unsafe_value()` on a STRUCT-POINTER receiver whose struct
+    # has no such METHOD is the unwrap of an `Optional[Pointer[S, o]]` that
+    # the elaborator typed as the bare `S *` (NULL = None, see
+    # `elab_intu._erased_pointee_struct`): the identity, exactly the
+    # non-struct-pointer branch above. It must come BEFORE the callable-field
+    # rule below, which would otherwise read a same-named FIELD
+    # (`LinkedList.Node.value: T`) and call it through `mojo_fnptr_call_0`
+    # (`self.curr.value()[].next()` in `_LinkedListIter.__next__`).
+    # `[unsafe_]take_pointee()` of such a pointer is the same word: a struct
+    # value is already carried as its `S *`, so the "move out" is the pointer
+    # (`var node = nn.unsafe_take_pointee()` in `LinkedList.pop`).
+    if (_recv_struct is not None and _recv_struct in gen.struct_field_types
+            and method in ('value', 'unsafe_value', 'take_pointee',
+                           'unsafe_take_pointee')
+            and not node.args and not (getattr(node, 'kwargs', None) or [])
+            and f'{_recv_struct}_{method}' not in gen.func_return_types
+            and _gmm_sms_key(_recv_struct, method) not in getattr(gen, '_struct_method_signatures', {})):
+        t = gen._new_temp(ot)
+        gen._emit(f'  {t} = {ov};')
+        return ot, t
     if (_recv_struct is not None and _recv_struct in gen.struct_field_types
             and method in gen.struct_field_types[_recv_struct]
             and f'{_recv_struct}_{method}' not in gen.func_return_types
