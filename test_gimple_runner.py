@@ -5786,9 +5786,27 @@ main()
     # (`4621537642612260864`, `4372406328` on the same tree). The record is
     # now also keyed by the source name (`_note_global_dict_store`), which
     # `_lower_IdentExpr` carries onto each read. Both halves are read in the
-    # same scope as the store, which is the case this covers; a READ from a
-    # different function is a separate gap (empty-literal module dicts are
-    # not seeded from their stores in the Phase 1.7 pre-scan).
+    # same scope as the store, which is the case this covers; the cross-function
+    # READ is `gimple_module_dict_value_type_read_in_other_function`.
+    # The READ in a function other than the one holding the store: an empty
+    # module dict gets its value type from the Phase 1.7 store pre-scan
+    # (`_gmi_phase17_collect_appends`'s `_store_hits`), not from a literal.
+    test_gimple_stdout("gimple_module_dict_value_type_read_in_other_function", """\
+d = {}
+d["a"] = "R"
+f = {}
+f[(1, 2)] = 9.5
+b = {}
+b["t"] = True
+def show():
+    print(d["a"], len(d))
+    print(f[(1, 2)], len(f))
+    print(b["t"], len(b))
+def main():
+    show()
+main()
+""", "R 1\n9.5 1\nTrue 1\n")
+
     test_gimple_stdout("gimple_module_scope_dict_value_type_survives_read", """\
 d = {}
 d[(1, 2)] = 9.5
