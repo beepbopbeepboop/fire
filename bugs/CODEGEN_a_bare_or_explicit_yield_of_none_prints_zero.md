@@ -42,8 +42,9 @@ a multi-argument `print`, `list.append`) is not covered by this round.
 **Found, NOT fixed here (separate defect, default path too):** a tagged value
 bound to a name in the GIMPLE consumer is unwrapped by `mojo_box_word` at the
 bind, so `x = next(g); print(x)` prints a bool as `1` on the default path, and
-an unregistered str on the cpp path prints an address. Filed:
-`bugs/CODEGEN_tagged_generator_value_bound_to_a_name_loses_its_kind.md`.
+an unregistered str on the cpp path prints an address. Fixed on the bind
+site (a tagged word bound to a name keeps its box); pinned by the
+`tagged_*_bound_to_name_*` cases in `test_gimple_generator_runner.py`.
 
 **Still open in this doc:** item 1 of the fifth-round plan is now landed for
 the three consumer sites and `print`; the remaining consumers, the bind-site

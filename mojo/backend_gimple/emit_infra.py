@@ -238,6 +238,11 @@ def _reset_func(gen, body: list = None, params: list = None,
     # per-function is not merely safe, it is the only scope in which the
     # name means anything.
     gen._boxed_vals = set()
+    # The TAGGED generator words among the temps (`next(g)` / `next(g, d)` on a
+    # kind-mixed generator, see `_lower_generator_next`). Same scope and reason
+    # as `_boxed_vals`; a subset of it. A local bound from one keeps the box
+    # (emit_stmts' simple-name bind), so its consumers render by kind.
+    gen._tagged_word_vals = set()
     # Same scope and same reason as `_boxed_vals` above: the writers are
     # `_lower_IdentExpr`'s two function-value branches and the sole reader is
     # `print`, all inside one function's lowering, and the keys are SSA temp
@@ -890,6 +895,7 @@ class FuncState:
         self.fs_emit_frames: list = []
         self.fs_dyn_word_vals: set = set()
         self.fs_dyn_word_locals: set = set()
+        self.fs_tagged_word_vals: set = set()
         self.fs_maybe_kinds_vals: set = set()
         self.fs_nested_mixed_names: set = set()
         self.fsloop_stack: list = []
@@ -989,6 +995,7 @@ def save_func_state(gen) -> FuncState:
     st.fs_emit_frames = gen._emit_frames
     st.fs_dyn_word_vals = gen._dyn_word_vals
     st.fs_dyn_word_locals = gen._dyn_word_locals
+    st.fs_tagged_word_vals = gen._tagged_word_vals
     st.fs_maybe_kinds_vals = gen._maybe_kinds_vals
     st.fs_nested_mixed_names = gen._nested_mixed_names
     st.fsloop_stack = gen.loop_stack
@@ -1097,6 +1104,7 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._emit_frames = st.fs_emit_frames
     gen._dyn_word_vals = st.fs_dyn_word_vals
     gen._dyn_word_locals = st.fs_dyn_word_locals
+    gen._tagged_word_vals = st.fs_tagged_word_vals
     gen._maybe_kinds_vals = st.fs_maybe_kinds_vals
     gen._nested_mixed_names = st.fs_nested_mixed_names
     gen.loop_stack = st.fsloop_stack

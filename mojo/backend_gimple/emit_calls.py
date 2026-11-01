@@ -367,6 +367,7 @@ def _lower_generator_next(gen, av: str, api: dict) -> tuple[str, str]:
         gen._boxed_container_vals.add(result)
     if api.get('mixed_slots') and vct == 'int64_t':
         gen._boxed_vals.add(result)       # a tagged word: rendered by kind
+        gen._tagged_word_vals.add(result)
     gen._emit(f"  goto {bb_merge};")
     gen._emit_label(bb_merge)
     return vct, result
@@ -2917,6 +2918,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     gen._boxed_container_vals.add(result)
                 if api.get('mixed_slots') and vct == 'int64_t':
                     gen._boxed_vals.add(result)       # a tagged word: rendered by kind
+                    gen._tagged_word_vals.add(result)
                 return vct, result
     # `next(obj)` / `next(obj, default)` where `obj` is a USER-DEFINED STRUCT
     # carrying the iterator protocol — Python's `next()` on any object is

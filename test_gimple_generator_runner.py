@@ -3445,9 +3445,160 @@ def main():
 main()
 """)
 
+def run_tagged_word_bind_tests():
+    # `x = next(g)` binds a tagged generator word to a NAME in the GIMPLE
+    # consumer. The bind used to unwrap the box (`mojo_box_word`, the same
+    # rule as every possibly-boxed slot read), so the local held the bare bits
+    # and `print(x)` lost the kind: a bool printed `1`, a str printed the
+    # address of an unregistered C literal on the cpp path. The local must keep
+    # the kind; both the default stack-switch path and the cpp escape hatch are
+    # pinned against the CPython oracle.
+    bind_src = """\
+def gen():
+    yield True
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x)
+    x = next(g)
+    print(x)
+main()
+"""
+    test_generator_matches_cpython("tagged_bool_str_bound_to_name_default", bind_src,
+                                   bind_src)
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("tagged_bool_str_bound_to_name_cpp", bind_src,
+                                       bind_src)
+    test_generator_matches_cpython("tagged_int_str_bound_to_name_default", """\
+def gen():
+    yield 1
+    yield "a"
+    yield 2
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x)
+    x = next(g)
+    print(x)
+    x = next(g)
+    print(x)
+main()
+""", """\
+def gen():
+    yield 1
+    yield "a"
+    yield 2
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x)
+    x = next(g)
+    print(x)
+    x = next(g)
+    print(x)
+main()
+""")
+
+
+    # The same bound name read by the other consumers: a copy of it (`y = x`
+    # stays tagged), a multi-argument print, and a str use of a str yield.
+    test_generator_matches_cpython("tagged_bound_name_copied_then_printed", """\
+def gen():
+    yield True
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    y = x
+    print(y, x)
+    x = next(g)
+    print(x, "|", y)
+main()
+""", """\
+def gen():
+    yield True
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    y = x
+    print(y, x)
+    x = next(g)
+    print(x, "|", y)
+main()
+""")
+    # A bound int yield keeps its integer arithmetic: the tagged word is read
+    # as its integer, not as a double, beside an int operand (`1 + 1` is `2`).
+    test_generator_matches_cpython("tagged_int_bound_to_name_arithmetic", """\
+def gen():
+    yield 1
+    yield 2.5
+    yield True
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x + 1)
+    print(x * 3)
+    x = next(g)
+    print(x)
+    x = next(g)
+    print(x + 1)
+main()
+""", """\
+def gen():
+    yield 1
+    yield 2.5
+    yield True
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x + 1)
+    print(x * 3)
+    x = next(g)
+    print(x)
+    x = next(g)
+    print(x + 1)
+main()
+""")
+    test_generator_matches_cpython("tagged_str_bound_to_name_has_length", """\
+def gen():
+    yield 1
+    yield "abc"
+
+def main():
+    g = gen()
+    x = next(g)
+    x = next(g)
+    print(len(x))
+    print(x + "!")
+main()
+""", """\
+def gen():
+    yield 1
+    yield "abc"
+
+def main():
+    g = gen()
+    x = next(g)
+    x = next(g)
+    print(len(x))
+    print(x + "!")
+main()
+""")
+
+
 def run_tests():
     run_none_yield_tests()
     run_tagged_word_cpp_tests()
+    run_tagged_word_bind_tests()
     run_star_args_call_tests()
     run_callable_param_tests()
     run_lambda_capture_tests()

@@ -3931,21 +3931,41 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # mark it a word of unknown kind, which is what the equality lowering
     # dispatches on at run time.
     _ident_ops = ('is', 'is not', '==', '!=', 'in', 'not in')
-    if lv in getattr(gen, '_boxed_vals', ()):
+    # A TAGGED word (a local bound from a kind-mixed generator, see
+    # emit_stmts' simple-name bind) beside a str operand is a string
+    # concatenation, not arithmetic: it stays the word, which the concatenation
+    # below renders by its kind (`mojo_cstr_or_int_str`). Converting it to a
+    # double here made `x + "!"` a `double + char *` gcc error.
+    # A tagged word in arithmetic is an INTEGER (or bool / None) word unless
+    # the other operand is a double, so it is read as its integer value
+    # (`mojo_box_int`) beside an int, and as a double (`mojo_box_double`, exact
+    # for an int too) beside a double. A float box beside an int truncates --
+    # the same stopgap `_unbox_float_param_operand` documents for a maybe-float
+    # parameter; the full answer needs the box read as a double at run time.
+    _tagged = getattr(gen, '_tagged_word_vals', ())
+    if lv in getattr(gen, '_boxed_vals', ()) and not (
+            lv in _tagged and rt == 'char *' and op == '+'):
         if op in _ident_ops and (op in ('is', 'is not')
                                  or rt not in ('double', 'float')):
             lv = gen._new_val('int64_t', f"mojo_box_word ({lv})")
             lt = 'int64_t'
             gen._dyn_word_vals.add(lv)
+        elif lv in _tagged and rt not in ('double', 'float'):
+            lv = gen._new_val('int64_t', f"mojo_box_int ({lv})")
+            lt = 'int64_t'
         else:
             lv = gen._new_val('double', f"mojo_box_double ({lv})")
             lt = 'double'
-    if rv in getattr(gen, '_boxed_vals', ()):
+    if rv in getattr(gen, '_boxed_vals', ()) and not (
+            rv in _tagged and lt == 'char *' and op == '+'):
         if op in _ident_ops and (op in ('is', 'is not')
                                  or lt not in ('double', 'float')):
             rv = gen._new_val('int64_t', f"mojo_box_word ({rv})")
             rt = 'int64_t'
             gen._dyn_word_vals.add(rv)
+        elif rv in _tagged and lt not in ('double', 'float'):
+            rv = gen._new_val('int64_t', f"mojo_box_int ({rv})")
+            rt = 'int64_t'
         else:
             rv = gen._new_val('double', f"mojo_box_double ({rv})")
             rt = 'double'
