@@ -3917,6 +3917,50 @@ main()
 """)
 
 
+_AUG_YIELD_SRC = """\
+def g():
+    x = 1
+    try:
+        x += yield 2
+    except TypeError:
+        print("TypeError")
+    yield x
+
+def main():
+    it = g()
+    print(next(it))
+    print(next(it))
+main()
+"""
+
+_RETURN_YIELD_SRC = """\
+def g():
+    yield 1
+    return (yield 2)
+
+def main():
+    it = g()
+    print(next(it))
+    print(next(it))
+    try:
+        next(it)
+    except StopIteration:
+        print("stop")
+main()
+"""
+
+_CALL_ARG_YIELD_SRC = """\
+def g():
+    print((yield 1))
+    yield 2
+
+def main():
+    it = g()
+    print(next(it))
+    print(next(it))
+main()
+"""
+
 def run_tagged_word_cpp_tests():
     # The C++ escape hatch (`MOJO_CORO=cpp`) carries a generator whose yields
     # mix kinds as ONE tagged word per slot: each yield is boxed by its kind
@@ -4094,13 +4138,13 @@ def main():
         pass
 main()
 """)
-    # `x = yield` on the cpp escape hatch: the yield's received value is the
-    # None box (`x` is a tagged word), so the programs the default path pins in
-    # run_none_yield_tests run here too. Before the cpp lowering existed this
-    # refused to compile (`unsupported expression in generator body: YieldExpr`).
-    test_generator_matches_cpython("none_received_arithmetic_raises_typeerror_cpp",
-                                   _NONE_RECEIVED_ARITH_SRC, _NONE_RECEIVED_ARITH_SRC)
-    test_generator_matches_cpython("none_received_unary_minus_raises_typeerror_cpp", """\
+        # `x = yield` on the cpp escape hatch: the yield's received value is the
+        # None box (`x` is a tagged word), so the programs the default path pins in
+        # run_none_yield_tests run here too. Before the cpp lowering existed this
+        # refused to compile (`unsupported expression in generator body: YieldExpr`).
+        test_generator_matches_cpython("none_received_arithmetic_raises_typeerror_cpp",
+                                       _NONE_RECEIVED_ARITH_SRC, _NONE_RECEIVED_ARITH_SRC)
+        test_generator_matches_cpython("none_received_unary_minus_raises_typeerror_cpp", """\
 def g():
     x = yield
     try:
@@ -4129,7 +4173,7 @@ def main():
     next(it)
 main()
 """)
-    test_generator_matches_cpython("none_sent_into_generator_prints_none_cpp", """\
+        test_generator_matches_cpython("none_sent_into_generator_prints_none_cpp", """\
 def g():
     x = yield
     print(x)
@@ -4152,9 +4196,9 @@ def main():
     next(it)
 main()
 """)
-    # A value-yielding `x = yield v` binds the None the resume delivers, while
-    # the yielded value still reaches the consumer as a tagged box.
-    test_generator_matches_cpython("value_yield_assignment_cpp", """\
+        # A value-yielding `x = yield v` binds the None the resume delivers, while
+        # the yielded value still reaches the consumer as a tagged box.
+        test_generator_matches_cpython("value_yield_assignment_cpp", """\
 def g():
     x = yield 7
     print(x)
@@ -4183,6 +4227,18 @@ def main():
     print(next(it))
 main()
 """)
+        # A yield used as a VALUE inside a larger statement (not the whole
+        # right side of `x = yield`) is hoisted to its own received-value
+        # statement on the cpp path. `x += yield v` is the same shape with one
+        # read of `x`, so the received None reaches the arithmetic guard and
+        # raises TypeError as CPython does. `print((yield v))` passes the
+        # received None to print.
+        test_generator_matches_cpython("aug_assign_received_yield_none_cpp",
+                                       _AUG_YIELD_SRC, _AUG_YIELD_SRC)
+        test_generator_matches_cpython("call_argument_yield_cpp",
+                                       _CALL_ARG_YIELD_SRC, _CALL_ARG_YIELD_SRC)
+        test_generator_matches_cpython("return_yield_operand_cpp",
+                                       _RETURN_YIELD_SRC, _RETURN_YIELD_SRC)
 
 def run_tagged_word_bind_tests():
     # A tagged generator word bound to a NAME (`x = next(g)`) must keep its

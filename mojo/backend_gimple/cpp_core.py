@@ -8,6 +8,7 @@ the class; cross-module references are qualified.
 """
 from __future__ import annotations
 
+import copy
 import dataclasses
 import os
 import re
@@ -5346,6 +5347,108 @@ def _cpp_assign_received_yield(gen, s, declared: dict, indent: str) -> list[str]
     return lines
 
 
+def _cpp_hoist_yield_operands(gen, s, declared: dict, indent: str):
+    """Hoist every `yield` that is an OPERAND of a simple statement into its own
+    received-value statement, so the statement reads the bound name instead.
+
+    `print((yield 1))` and `x += yield 2` put a suspension in a value position
+    that the expression lowering cannot emit. Each such yield becomes a fresh
+    local bound by `_cpp_assign_received_yield` -- the lowering `x = yield v`
+    already uses, so the received word is the None box and every read of it
+    goes through the tagged-arithmetic guards -- and the statement is then
+    lowered with that local in place of the yield.
+
+    Returns None when there is nothing to hoist; the caller then lowers `s` as
+    it always did. A ROOT yield is not hoisted: the whole value of an
+    expression statement, or of `x = yield`, is already a form those lowerings
+    handle. The hoisting recurses into a root yield's own operands.
+
+    Evaluation order: a hoisted yield runs before the statement's other
+    operands. That is exact as long as no call evaluated before the yield is
+    still pending in the statement; such a call would run after the
+    suspension, so that shape is refused instead of being reordered.
+    """
+    if isinstance(s, gimple_ctypes.ExprStmt):
+        root = s.value if isinstance(s.value, gimple_ctypes.YieldExpr) else None
+    elif isinstance(s, gimple_ctypes.AssignStmt):
+        root = (s.value if isinstance(s.target, gimple_ctypes.IdentExpr)
+                and isinstance(s.value, gimple_ctypes.YieldExpr) else None)
+    elif isinstance(s, (gimple_ctypes.AugAssignStmt, gimple_ctypes.ReturnStmt)):
+        root = None
+    else:
+        return None
+
+    hoisted: list = []
+    # True while a call evaluated earlier in this statement has not yet been
+    # passed by a hoisted yield, i.e. it would otherwise run after a suspension.
+    call_pending = [False]
+
+    def rw(node):
+        if isinstance(node, list):
+            return [rw(x) for x in node]
+        if isinstance(node, tuple):
+            return tuple(rw(x) for x in node)
+        if isinstance(node, type) or not dataclasses.is_dataclass(node):
+            return node
+        if isinstance(node, gimple_ctypes.YieldExpr):
+            before = call_pending[0]
+            value = rw(node.value) if node.value is not None else None
+            ynode = node
+            if value is not node.value:
+                ynode = copy.copy(node)
+                ynode.value = value
+            if before:
+                raise gimple_exprtypes._UnsupportedGeneratorShape(
+                    "a `yield` operand follows a call in the same statement; "
+                    "hoisting the yield would run that call after the suspension")
+            # The yield's own operand calls now run in the hoisted statement,
+            # which precedes this statement, so they are no longer pending.
+            call_pending[0] = before
+            name = gen._cpp_fresh_name('_mg_yv')
+            hoisted.append(AssignStmt(
+                target=gimple_ctypes.IdentExpr(name=name, line=node.line, col=node.col),
+                value=ynode, line=node.line, col=node.col))
+            return gimple_ctypes.IdentExpr(name=name, line=node.line, col=node.col)
+        changes = {}
+        for f in dataclasses.fields(node):
+            v = getattr(node, f.name)
+            nv = rw(v)
+            if nv is not v:
+                changes[f.name] = nv
+        if isinstance(node, gimple_ctypes.CallExpr):
+            call_pending[0] = True
+        if not changes:
+            return node
+        out = copy.copy(node)
+        for k, v in changes.items():
+            setattr(out, k, v)
+        return out
+
+    # The root yield stays the statement's own node (its identity is keyed by
+    # the yield-site tables); only its operands are rewritten.
+    new_stmt = copy.copy(s)
+    for f in dataclasses.fields(s):
+        v = getattr(s, f.name)
+        if root is not None and v is root:
+            nv = v
+            if root.value is not None:
+                rv = rw(root.value)
+                if rv is not root.value:
+                    nv = copy.copy(root)
+                    nv.value = rv
+        else:
+            nv = rw(v)
+        if nv is not v:
+            setattr(new_stmt, f.name, nv)
+    if not hoisted:
+        return None
+    lines: list[str] = []
+    for h in hoisted:
+        lines.extend(_cpp_assign_received_yield(gen, h, declared, indent))
+    lines.extend(gen._cpp_stmt(new_stmt, declared, indent))
+    return lines
+
+
 def _cpp_yield_tuple(gen, tup: 'TupleExpr', declared: dict, indent: str) -> list[str]:
     """`yield a, b, ...` — boxes the tuple's elements into a real
     runtime `MojoList *` (mojo_mark_as_tuple'd, exactly the same
@@ -5467,6 +5570,9 @@ def _cpp_hoist_walrus_decls(gen, expr, declared: dict, indent: str) -> list[str]
 def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
     if isinstance(s, gimple_ctypes.PassStmt):
         return []
+    _hoisted = _cpp_hoist_yield_operands(gen, s, declared, indent)
+    if _hoisted is not None:
+        return _hoisted
     if isinstance(s, gimple_ctypes.ExprStmt):
         # Step I (create_task/Task/TaskGroup/RaisingTask project): a
         # bare string-literal expression statement — real Mojo/Python's
@@ -6471,6 +6577,16 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     f"{gimple_exprtypes._c_to_cpp_scalar_type(ctype)} {cpp_name};")
         return []
     if isinstance(s, gimple_ctypes.AugAssignStmt):
+        if (isinstance(s.target, gimple_ctypes.IdentExpr) and s.target.name in declared
+                and _cpp_is_tagged_word_expr(gen, s.value)):
+            # `x += <tagged word>` (e.g. `x += yield v` once hoisted): the plain
+            # `x = x op v` below would compute with the box's address. Lower it
+            # as the binary operation, so the operand's None guard applies.
+            return gen._cpp_stmt(AssignStmt(
+                target=s.target,
+                value=BinaryOp(op=s.op[:-1], left=s.target, right=s.value,
+                               line=s.line, col=s.col),
+                line=s.line, col=s.col), declared, indent)
         if not isinstance(s.target, gimple_ctypes.IdentExpr) or s.target.name not in declared:
             # self.field += val  →  self->field = self->field op val
             if isinstance(s.target, gimple_ctypes.MemberExpr) and isinstance(s.target.obj, gimple_ctypes.IdentExpr) \
