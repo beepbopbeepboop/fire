@@ -65,6 +65,11 @@ CallExpr list of each function is found once per scan and reused (`_calls_in`). 
 fire.py (`time.perf_counter` around the outermost call, machine load 14): 214 s -> 160 s. Generated C is unchanged:
 `compile_stdlib.py` GCC CAS 610/610 hits (every module's C hashes to what it was before), plus a byte-identical
 generator program.
+Sampling profile after both wins (4,106 samples, 158.5 s): `_parsed_import` 18.8% (tokenize 8.0, parse 6.4, rewrite 5.8),
+`_infer_return_maybe_kinds` 13.0% (`module_gen._mk_round`, 4 fixpoint rounds x 6 `gen_module` calls; a body that calls
+nothing in `callee_kinds` has the same answer every round, so rounds 2+ can reuse round 1's result for it),
+`_gmi_binding_index` 8.7% / `_xg_record_scalar_args` 8.3%, `os.path.realpath` 6.7% (`methods_shared._is_selfhost_*`),
+`gen_func` 6.7%, `coro.lower` 5.0% (was 29.4%).
 Remaining, in order of share: the other `_walk` users in `_scan_callsite_param_kinds` (cache per function across
 the two `_one_pass` rounds and the six `lower` calls: needs an invalidation story because the contract maps evolve);
 `realpath` memo for the constant `_SELFHOST_DIR`; `_infer_return_maybe_kinds`; `_gmi_binding_index`.
