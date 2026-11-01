@@ -7708,7 +7708,25 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
                               f"corrected, which is the fix this doc wants")
 
     def test_the_residual_is_the_same_with_and_without_the_branch_fact(self):
-        """The doc's next step, measured: identical goals, byte for byte."""
+        """The doc's next step, measured: the residual GOAL is unchanged.
+
+        The set is the right comparison now, because the walk-side closure
+        (`bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
+        step 2) put a SECOND terminal value flow in the file: the
+        `q_compiles_correctly_universal` walk runs the divisor-nonzero path
+        once per visit to the guard block, and the `hc_N` patch below reaches
+        the second terminal too, where the in-scope branch fact is the
+        NEGATION, so its `simp` leaves the same goal open that the first
+        terminal always leaves.  Measured 2026-10-31: `as_emitted` traces
+        `[goal]` and `doc_next_step` traces `[goal, goal]` — the goal the
+        sibling row pins above, byte for byte, twice.  The survival itself —
+        that adding the branch fact does not resolve the false goal — is
+        pinned by `test_the_false_goal_survives_the_documented_next_step`;
+        this row pins that the patch produces the SAME goal, nothing new and
+        nothing different.  If the fix the sibling doc names lands,
+        `as_emitted` loses its goal and the `assertTrue` below goes red with
+        the survival row at the same time.
+        """
         goals = {}
         for label, _patch in self.SPELLINGS:
             self.assertIsNone(self.blind.get(label),
@@ -7727,13 +7745,14 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
         self.assertTrue(goals.get("as_emitted"),
                         "no residual goal was traced at all, so the measurement "
                         "this class exists for did not happen")
-        self.assertEqual(goals["doc_next_step"], goals["as_emitted"],
+        self.assertEqual(sorted(set(goals["doc_next_step"])),
+                         sorted(set(goals["as_emitted"])),
                          "adding the enclosing by_cases hypothesis to the "
-                         "terminal value flow's simp only list CHANGED the "
-                         "residual — which means the fix is further along than "
-                         "bugs/formal/FORMAL_a_division_by_a_symbolic_value_leaves_"
-                         "the_zero_guard_open.md records, and its next step "
-                         "and its Status both need re-reading")
+                         "terminal value flow's simp only list produced a "
+                         "DIFFERENT goal — which means the fix is further "
+                         "along than bugs/formal/FORMAL_a_division_by_a_symbolic_"
+                         "value_leaves_the_zero_guard_open.md records, and its "
+                         "next step and its Status both need re-reading")
 
 
 class TestTheDiv0FixtureHaltsAtTheCompilerTrap(unittest.TestCase):
@@ -9095,8 +9114,22 @@ class TestTheOneOpaqueCallIsAnnounced(unittest.TestCase):
     visible or invisible.
     """
 
+    #: A GENUINE out-of-image call.  The div0 fixture this class used to
+    #: measure (`return a // b`) is no longer one: its `BL fflush` is the
+    #: compiler's trap, and the walk closes that path at its `hnone` instead
+    #: of substituting a reachability theorem — the flip
+    #: `TestTheDiv0FixtureHaltsAtTheCompilerTrap` pins, and
+    #: `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
+    #: step 2.  `printf` with an UNUSED return value is the corpus's other
+    #: single-opaque-call shape (`formal/examples/printf_int.mojo`'s body,
+    #: named `q`): one `BL` out of the image, no source conditional, and the
+    #: AST bridge states the body — the value is discarded, so `callFunc`'s 0
+    #: for `printf` never sits in a position to disagree with the model.
+    #: Measured 2026-10-31: the substitution and the note are emitted exactly
+    #: as the rows below pin, with no trap involvement (`hnone` absent).
     PROGRAM = ("def q(a, b):\n"
-               "    return a // b\n")
+               "    printf(\"hi\")\n"
+               "    return 7\n")
 
     @classmethod
     def setUpClass(cls):
