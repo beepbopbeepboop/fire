@@ -3841,6 +3841,24 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     still guaranteeing each shared operand is evaluated exactly once —
     re-lowering left_node/right_node here would break that guarantee
     for a side-effecting comparand shared between two links."""
+    # `x == None` / `x != None` on a BOXED name (a tagged-generator value, or
+    # any slot read kept as a box). This must be decided BEFORE the boxed
+    # operand conversion below, which unwraps the box to its word: a None
+    # yield is the shared kind-'n' box, whose word is 0 and so compares as
+    # "not None" on the scalar arm, printing `False` for `v == None`. The
+    # answer is the box's kind (`mojo_word_is_none`), which for a non-box is
+    # the same constant False the scalar arm gives.
+    if op in ('==', '!=') and _is_none_literal(left_node) != _is_none_literal(right_node):
+        _other = rv if _is_none_literal(left_node) else lv
+        _other_t = rt if _is_none_literal(left_node) else lt
+        # Only an int word: a `char *` name keeps its NULL-pointer test below.
+        # A float box answers 0 here, which is the right answer for a float.
+        if _other_t in ('int', 'int64_t') and _other in getattr(gen, '_boxed_vals', ()):
+            _is_none = gen._call_expr('int', 'mojo_word_is_none', [('int64_t', _other)])
+            _cmp = '!= 0' if op == '==' else '== 0'
+            _t = gen._new_temp('_Bool')
+            gen._emit(f'  {_t} = {_is_none} {_cmp};')
+            return '_Bool', _t
     # Int / Int is true division: Python and Mojo answer a Float64, never an
     # integer. The gate is on BOTH operands being plain signed C integers, not
     # on the joined type: a struct operand (`Scalar[dtype]`, `Path`) whose join
