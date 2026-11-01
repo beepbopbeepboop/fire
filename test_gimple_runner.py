@@ -13185,7 +13185,8 @@ def main():
                   test_nested_class_attr_from_str_param_regression,
                   test_instance_write_shadows_class_attr_regression,
                   test_nested_class_attr_rebind_after_construction_regression,
-                  test_namedtuple_shaped_class_runs_regression):
+                  test_namedtuple_shaped_class_runs_regression,
+                  test_none_bound_local_is_none_not_zero_in_membership):
         try:
             _late()
         except AssertionError as e:
@@ -13418,6 +13419,34 @@ def main():
     print(q.x)
     print(q.y)
 """, "Point(x=1, y=2)\n3\n4\n")
+
+
+def test_none_bound_local_is_none_not_zero_in_membership():
+    """A `None` HELD in a local is the NULL word, not the int 0 its int64_t
+    storage spells. `n = None; n in ["a", None]` was False (CPython: True),
+    because the membership lowering only saw the local's static type and
+    applied the int meaning to the needle. A local every binding of which is
+    the literal None is answered as the None needle it is, while a local
+    that is also bound to something else keeps the int path. The second
+    function shows the decision is per function: `n = 0` there is an int,
+    and `0 in ["a", None]` is False."""
+    test_gimple_matches_cpython("gimple_none_local_needle_in_membership", """\
+def f():
+    n = None
+    return n in ["a", None]
+
+def g():
+    n = 0
+    return n in ["a", None]
+
+def main():
+    n = None
+    print(n in ["a", None], n in ["a"], n in [0, 1], n in [1, None])
+    print(n not in ["a", None], n not in ["a"])
+    print(f(), g())
+
+main()
+""")
 
 
 if __name__ == '__main__':
