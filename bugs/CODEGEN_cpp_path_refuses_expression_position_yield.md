@@ -50,5 +50,7 @@ A yield in the condition of a compound statement:
 To reproduce: `gimple_codegen.compile_to_gimple_with_cpp(src)` under
 `coro.pinned('cpp')` prints the `Unsupported shape(s)` text for the source.
 
-The `send()` gap that would change what these receive is in
-`bugs/CODEGEN_cpp_send_emits_default_path_symbol.md`.
+The `send()` gap that would change what these receive (the cpp resume carrying
+a sent word, now landed) is recorded in the commit that added `{base}_send`
+to the cpp generator unit (cpp_async.py), with the pins in
+`run_cpp_send_tests` in test_gimple_generator_runner.py.

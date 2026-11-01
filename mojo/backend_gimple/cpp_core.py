@@ -5308,16 +5308,12 @@ def _cpp_assign_received_yield(gen, s, declared: dict, indent: str) -> list[str]
     """`x = yield` / `x = yield v`: the yield as its own statement, then `x`
     bound to the value the yield received.
 
-    The cpp consumer protocol carries no value INTO the generator: `next(g)`,
-    a for loop and `yield from` all resume it with None, and `send()` is not
-    lowered on this path (see bugs/CODEGEN_cpp_send_emits_default_path_symbol.md).
-    So the received value is the None box, `mojo_box_none()` -- the same word a
-    None yield is boxed to (cpp_async._cpp_tag_yield_sites) -- which `print`
-    renders as `None` and the tagged arithmetic refuses with TypeError. `x` is
-    marked a tagged word so every read of it goes through that box.
-
-    When `send()` is lowered, the resume must carry the sent word and this
-    must read it instead of the constant: that is the one place to change.
+    The received value is the word the generator was resumed with. Every
+    consumer that resumes through `{base}_resume` (`next(g)`, a for loop,
+    `yield from`) delivers the None box, `mojo_box_none()`, which `print`
+    renders as `None`; `send(v)` resumes through `{base}_send`, which delivers
+    the tagged word of `v` (see cpp_async.py's generator promise). `x` is marked
+    a tagged word so every read of it goes through that word.
     """
     name = s.target.name
     existing = declared.get(name)
@@ -5343,6 +5339,17 @@ def _cpp_assign_received_yield(gen, s, declared: dict, indent: str) -> list[str]
             gen._cpp_func_scope_decls.append(f"int64_t {cpp_name};")
     _cpp_mark_tagged_word(gen, name)
     target = f"*{cpp_name}" if name in gen._cpp_mut_capture_names else cpp_name
+    if len(lines) == 1 and lines[0].lstrip().startswith('co_yield '):
+        # The yield is one `co_yield` statement, so bind `x` to the value the
+        # `co_yield` expression evaluates to: the awaiter's await_resume(),
+        # which is the word `{base}_send` stored, or the None box a plain
+        # `{base}_resume` stored. The yield-site tagger keeps this `x = `
+        # prefix when it boxes the yielded value (cpp_async._cpp_tag_yield_sites).
+        ln = lines[0]
+        lead = ln[:len(ln) - len(ln.lstrip())]
+        return [f"{lead}{target} = {ln.lstrip()}"]
+    # Any other yield shape (a tuple or delegated yield) keeps the None box:
+    # it has no single co_yield to read the sent word from.
     lines.append(f"{indent}{target} = mojo_box_none();")
     return lines
 
@@ -9906,12 +9913,34 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
     gen._yield_from_seq = getattr(gen, '_yield_from_seq', 0) + 1
     guard = f"__mojogen_sub{gen._yield_from_seq}"
     args_text = ', '.join(arg_exprs)
+    # `yield from` forwards `send()` to the sub-generator, as Python does: the
+    # word the outer generator was resumed with (`None` on the first step, the
+    # box a plain resume delivers) is handed to the sub-generator's
+    # `{sub_base}_send`, and the outer's own `co_yield` returns the word the
+    # NEXT resume of the outer generator carries.
+    _fw = gen._cpp_fresh_name("_mg_yf_word")
+    if sub_base.startswith('_mojogen_'):
+        # A C++20 sub-generator: its own `_send` entry (cpp_async.py).
+        _fw_decl = []
+        _fw_step = f"{sub_base}_send({guard}.g, {_fw})"
+    else:
+        # A stack-switch sub-generator (the mixed case: a cpp outer delegating
+        # to a `__mgco_` callee) has no `_send` symbol; its resume entry is the
+        # runtime's `__mojo_gen_resume(gen, word)`, the one the default path's
+        # own `_send`-equivalent (emit_calls._lower_generator_send) calls. The
+        # runtime's file-scope declaration is emitted with the unit (module_gen).
+        # The file-scope declaration is emitted by module_gen once this flag is set.
+        gen._cpp_runtime_gen_resume_used = True
+        _fw_decl = []
+        _fw_step = f"__mojo_gen_resume ((int64_t)(intptr_t){guard}.g, {_fw})"
     return [
         f"{indent}{{",
         f"{indent}    _mojogen_sub_guard {guard}"
         f"{{ {sub_base}_start({args_text}), &{sub_base}_destroy }};",
-        f"{indent}    while ({sub_base}_resume({guard}.g)) {{",
-        f"{indent}        co_yield {sub_base}_value({guard}.g);",
+        *_fw_decl,
+        f"{indent}    int64_t {_fw} = mojo_box_none();",
+        f"{indent}    while ({_fw_step}) {{",
+        f"{indent}        {_fw} = co_yield {sub_base}_value({guard}.g);",
         f"{indent}    }}",
         # Milestone D: the sub-generator's own `_resume` (same wrapper
         # every compiled generator gets — see _gen_cpp_generator_unit)

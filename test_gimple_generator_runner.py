@@ -4812,16 +4812,153 @@ main()
     test_generator_refused("tagged_for_target_plain_float_store_after_copy_refused",
                            _mixed_after, "refused")
 
-def run_cpp_send_refusal_tests():
+def run_cpp_send_tests():
     # `it.send(v)` on a generator compiled by the C++20 backend (MOJO_CORO=cpp).
-    # The cpp resume entry (`{base}_resume`) takes no sent word and the cpp
-    # unit never declares the A3 runtime's `__mojo_gen_resume`, so the send
-    # lowering used to emit a call to it and the program failed in gcc with
-    # "implicit declaration of function '__mojo_gen_resume'". The honest
-    # answer on this path is a refusal at codegen, not a gcc error; full
-    # send support on the cpp path is the remaining work
-    # (CODEGEN_cpp_send_emits_default_path_symbol).
-    _send_src = """\
+    # The cpp resume entry used to take no sent word, so the send lowering
+    # emitted a call to the A3 runtime's `__mojo_gen_resume` (never declared on
+    # this path, gcc: "implicit declaration") and then, once refused, was
+    # refused at codegen. Now the cpp unit has a `{base}_send(g, word)` entry
+    # that stores the word in its promise; `x = yield` reads it back. Pinned
+    # against CPython on the same text: an int send, a multi-parameter
+    # generator (the shape the GCC-15 promise-layout note in cpp_async.py
+    # warns about), a str send, and a None send.
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython(
+            "generator_send_int_on_cpp_path_matches_cpython", """\
+def g(a: Int, b: Int):
+    x = yield a
+    print(x)
+    y = yield b
+    print(y)
+    yield x + y
+
+def main():
+    it = g(1, 2)
+    print(next(it))
+    print(it.send(7))
+    print(it.send(5))
+main()
+""", """\
+def g(a, b):
+    x = yield a
+    print(x)
+    y = yield b
+    print(y)
+    yield x + y
+
+def main():
+    it = g(1, 2)
+    print(next(it))
+    print(it.send(7))
+    print(it.send(5))
+main()
+""")
+        test_generator_matches_cpython(
+            "generator_send_str_and_none_on_cpp_path_matches_cpython", """\
+def h():
+    s = yield 0
+    print(s)
+    t = yield 0
+    print(t)
+    yield 9
+
+def main():
+    it = h()
+    print(next(it))
+    print(it.send("ab"))
+    print(it.send(None))
+main()
+""", """\
+def h():
+    s = yield 0
+    print(s)
+    t = yield 0
+    print(t)
+    yield 9
+
+def main():
+    it = h()
+    print(next(it))
+    print(it.send("ab"))
+    print(it.send(None))
+main()
+""")
+        # `yield from` forwards a send to the sub-generator, as Python does:
+        # the sent 7 must reach `x = yield` in `sub`, not be dropped to None.
+        test_generator_matches_cpython(
+            "generator_send_forwarded_through_yield_from_on_cpp_path", """\
+def sub():
+    x = yield 1
+    print(x)
+    yield 2
+
+def outer():
+    yield from sub()
+
+def main():
+    it = outer()
+    print(next(it))
+    print(it.send(7))
+main()
+""", """\
+def sub():
+    x = yield 1
+    print(x)
+    yield 2
+
+def outer():
+    yield from sub()
+
+def main():
+    it = outer()
+    print(next(it))
+    print(it.send(7))
+main()
+""")
+        # The mixed protocol: a cpp generator method delegating to a
+        # stack-switch sub-generator (a staticmethod generator is not on the
+        # cpp path). The forwarded word goes through the runtime's resume.
+        test_generator_matches_cpython(
+            "generator_send_forwarded_to_stackswitch_sub_from_cpp_outer", """\
+class Emitter:
+    @staticmethod
+    def sub(n: Int):
+        x = yield 1
+        print(x)
+        yield n
+
+    @classmethod
+    def outer(cls, n: Int):
+        yield from cls.sub(n)
+
+def main():
+    it = Emitter.outer(5)
+    print(next(it))
+    print(it.send(7))
+main()
+""", """\
+class Emitter:
+    @staticmethod
+    def sub(n):
+        x = yield 1
+        print(x)
+        yield n
+
+    @classmethod
+    def outer(cls, n):
+        yield from cls.sub(n)
+
+def main():
+    it = Emitter.outer(5)
+    print(next(it))
+    print(it.send(7))
+main()
+""")
+    # The control: the SAME kind of program on the default stack-switch path
+    # keeps lowering `send` and must match CPython.
+    with coro.pinned('stackswitch'):
+        test_generator_matches_cpython(
+            "generator_send_on_default_path_still_lowers", """\
 def g():
     yield 1
     yield 2
@@ -4831,15 +4968,7 @@ def main():
     print(next(it))
     print(it.send(7))
 main()
-"""
-    with coro.pinned('cpp'):
-        test_generator_refused("generator_send_on_cpp_path_refused_at_codegen",
-                               _send_src, "`.send()` on a C++20-coroutine generator")
-    # The control: the SAME program on the default stack-switch path must keep
-    # lowering `send` (it is not refused there), and must match CPython.
-    with coro.pinned('stackswitch'):
-        test_generator_matches_cpython(
-            "generator_send_on_default_path_still_lowers", _send_src, """\
+""", """\
 def g():
     yield 1
     yield 2
@@ -4852,7 +4981,7 @@ main()
 """)
 
 def run_tests():
-    run_cpp_send_refusal_tests()
+    run_cpp_send_tests()
     run_none_yield_tests()
     run_tagged_none_equality_tests()
     run_tagged_none_identity_tests()

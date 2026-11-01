@@ -16788,6 +16788,7 @@ def gen_module_impl(self, stmts):
             _gptypes = ', '.join(_gp_parts) or 'void'
             parts.append(f"extern MojoGenerator *{_base}_start ({_gptypes});")
             parts.append(f"extern _Bool {_base}_resume (MojoGenerator *);")
+            parts.append(f"extern _Bool {_base}_send (MojoGenerator *, int64_t);")
             parts.append(f"extern {_vct} {_base}_value (MojoGenerator *);")
             parts.append(f"extern void {_base}_destroy (MojoGenerator *);")
             if _api.get('is_async_gen'):
@@ -17696,9 +17697,15 @@ def gen_module_impl(self, stmts):
                     for p in (_xg_info.get('params') or [])) or 'void'
                 cpp_parts.append(f'extern "C" MojoGenerator *{_xg_base}_start ({_xg_params});')
                 cpp_parts.append(f'extern "C" bool {_xg_base}_resume (MojoGenerator *);')
+                cpp_parts.append(f'extern "C" bool {_xg_base}_send (MojoGenerator *, int64_t);')
                 cpp_parts.append(f'extern "C" {_xg_vct} {_xg_base}_value (MojoGenerator *);')
                 cpp_parts.append(f'extern "C" void {_xg_base}_destroy (MojoGenerator *);')
             cpp_parts.append('')
+        if getattr(self, '_cpp_runtime_gen_resume_used', False):
+            # A cpp unit's `yield from` of a stack-switch sub-generator forwards
+            # the sent word through the runtime's `__mojo_gen_resume` (cpp_core's
+            # `_cpp_yield_from`), which this TU otherwise never declares.
+            cpp_parts.append('extern "C" int64_t __mojo_gen_resume (int64_t, int64_t);')
         for unit in self._generator_cpp_units:
             cpp_parts.append(unit)
             cpp_parts.append('')

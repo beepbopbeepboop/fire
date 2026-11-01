@@ -394,24 +394,23 @@ def _lower_generator_send(gen, node, av: str, api: dict) -> tuple[str, str]:
     including the StopIteration on exhaustion (the generator protocol's
     uniform "ran out of values" signal, not a silent end).
 
-    This is the SAME resume the `<base>_resume` trampoline performs, with a
-    non-zero send payload: `__mojo_gen_resume(gen, send)` is the runtime
-    entry both funnel into, so no new ABI is involved. The per-generator
-    `<base>_resume(g)` wrapper hardcodes a 0 send, which is why this calls
-    the runtime function directly rather than through the trampoline."""
-    if _as_str(api.get('base', '')).startswith('_mojogen_'):
-        # A C++20-coroutine generator (MOJO_CORO=cpp): its resume entry
-        # (`{base}_resume`) takes no sent word, and the cpp unit never
-        # declares the stack-switch runtime's `__mojo_gen_resume` that this
-        # lowering calls, so the program failed in gcc with an implicit
-        # declaration. Refused honestly here until the cpp resume carries the
-        # sent word (CODEGEN_cpp_send_emits_default_path_symbol). Same prefix
-        # test `_lower_generator_close` uses to tell the two protocols apart.
+    Two resume entries carry the sent word, one per backend:
+    - the default stack-switch path: `__mojo_gen_resume(gen, send)`, the
+      runtime entry the `<base>_resume(g)` trampoline also funnels into (it
+      hardcodes a 0 send, which is why this calls the runtime directly);
+    - the C++20 path (`_mojogen_` base): `{base}_send(g, send)`, the unit's
+      own entry, which stores the word where the suspended `x = yield` reads
+      it (cpp_async.py's generator promise). `{base}_resume` is the same
+      resume with the None box."""
+    is_cpp = _as_str(api.get('base', '')).startswith('_mojogen_')
+    if is_cpp and api.get('is_async_gen'):
+        # An async generator's yield channel carries wait-descriptors as well
+        # as values (see _lower_generator_next), so a sent word has no
+        # consumer-side protocol to ride on yet on the cpp path.
         raise gimple_exprtypes._UnsupportedGeneratorShape(
-            "`.send()` on a C++20-coroutine generator is not supported: the "
-            "cpp resume entry takes no sent value, so the send cannot reach "
-            "the generator's `yield` (MOJO_CORO=cpp; the default stack-switch "
-            "path supports send)")
+            "`.send()` on a C++20-coroutine async generator is not supported: "
+            "its yield channel carries wait-descriptors, so the sent word has "
+            "no protocol on that path (MOJO_CORO=cpp)")
     vct = api['value_ctype']
     if len(node.args) == 1:
         arg = node.args[0]
@@ -427,8 +426,11 @@ def _lower_generator_send(gen, node, av: str, api: dict) -> tuple[str, str]:
             send = _gen_slot_box(gen, st, sv, vct)
     else:
         send = '0'
-    handle = gen._to_int64('MojoGenerator *', av)
-    resumed = gen._new_val('_Bool', f"__mojo_gen_resume ({handle}, {send})")
+    if is_cpp:
+        resumed = gen._new_val('_Bool', f"{api['base']}_send ({av}, {send})")
+    else:
+        handle = gen._to_int64('MojoGenerator *', av)
+        resumed = gen._new_val('_Bool', f"__mojo_gen_resume ({handle}, {send})")
     bb_ok = gen._new_bb(); bb_exhausted = gen._new_bb(); bb_merge = gen._new_bb()
     bb_stopiter = gen._new_bb()
     gen._emit(f"  if ({resumed}) goto {bb_ok}; else goto {bb_exhausted};")
