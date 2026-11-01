@@ -3222,6 +3222,183 @@ def _erased_pointee_is_self(resolved):
     return arg == 'Self'
 
 
+# `comptime IteratorType[iterable_mut: Bool, //, iterable_origin: Origin[..]]:
+# Iterator = _LinkedListIter[downcast[T, Copyable], iterable_origin]` — a
+# PARAMETRIZED alias whose parameters are all ownership/origin plumbing this
+# codegen erases. Group 1 = alias name, 2 = the parameter list's open bracket.
+_PARAM_ALIAS_HEAD_RE = re.compile(
+    r'comptime\s+(_?[A-Za-z]\w*)\s*\[')
+_ERASED_ORIGIN = 'MutAnyOrigin'
+
+
+def _balanced_end(text, i):
+    """Index just past the `]` closing the bracket opened right before `i`
+    (None when unbalanced)."""
+    depth = 1
+    while i < len(text) and depth:
+        if text[i] == '[':
+            depth += 1
+        elif text[i] == ']':
+            depth -= 1
+        i += 1
+    return None if depth else i
+
+
+def _replace_bracketed_mentions(text, head, repl):
+    """`text` with every `<head>[ ...balanced... ]` replaced by `repl`."""
+    out, i = [], 0
+    pat = re.compile(re.escape(head) + r'\[')
+    while True:
+        m = pat.search(text, i)
+        if not m:
+            out.append(text[i:])
+            return ''.join(out)
+        e = _balanced_end(text, m.end())
+        if e is None:
+            out.append(text[i:])
+            return ''.join(out)
+        out.append(text[i:m.start()])
+        out.append(repl)
+        i = e
+
+
+def _struct_bind_args(tmpl, written, origin_arg):
+    """Positional type arguments for `tmpl`'s bracket head from the arguments
+    `written` after the infer-only `//` group: infer-only `Bool` parameters
+    (`mut: Bool, //`) take `True`, an `Origin[..]` parameter takes
+    `origin_arg` where the alias passed its own origin parameter, and
+    trailing defaulted parameters are left to `bind_type_args`."""
+    import elaborate
+    import monomorphize as mm
+    hm = mm.head_match(tmpl)
+    if not hm:
+        return None
+    plist = [p.strip() for p in
+             gimple_exprtypes._split_top_level_commas(hm.params) if p.strip()]
+    marker = -1
+    for k, p in enumerate(plist):
+        if p.startswith('//'):
+            marker = k
+    infer_only = [p for p in plist[:marker] if marker >= 0]
+    explicit = [p for p in plist[marker + 1:]
+                if not elaborate._is_param_marker(p)]
+    out = ['True' for _p in infer_only]
+    if len(written) > len(explicit):
+        return None
+    for p, a in zip(explicit, written):
+        ann = p.split(':', 1)[1].strip() if ':' in p else ''
+        out.append(origin_arg if ann.startswith('Origin') else a)
+    return out
+
+
+def _eval_parametrized_aliases(work, mm, base, concrete):
+    """Evaluate `comptime <alias>[<origin plumbing>]: Trait = Struct[args]`
+    aliases (LinkedList's `IteratorType`), rewriting every
+    `Self.<alias>[<origin>]` mention to the mangled instantiation and
+    enqueueing it. `downcast[X, Trait]` evaluates to `X`; the alias's own
+    parameters are erased origins. Refusal leaves `concrete` unchanged.
+    Returns (concrete, nested_keys or None)."""
+    import elaborate
+    nested = []
+    for m in list(_PARAM_ALIAS_HEAD_RE.finditer(concrete)):
+        aname = m.group(1)
+        pend = _balanced_end(concrete, m.end())
+        if pend is None:
+            continue
+        hm = re.match(r'\s*:\s*[^=\n]+=\s*([A-Za-z_]\w*)\s*\[',
+                      concrete[pend:])
+        if not hm or hm.group(1) in _ERASED_WORD_STRUCTS:
+            continue
+        abase = hm.group(1)
+        astart = pend + hm.end()
+        aend = _balanced_end(concrete, astart)
+        if aend is None:
+            continue
+        alias_params = {
+            p.split(':')[0].strip() for p in
+            gimple_exprtypes._split_top_level_commas(
+                concrete[m.end():pend - 1])
+            if p.strip() and not elaborate._is_param_marker(p.strip())}
+        written = []
+        origin_arg = _ERASED_ORIGIN
+        for a in gimple_exprtypes._split_top_level_commas(
+                concrete[astart:aend - 1]):
+            a = a.strip()
+            if not a:
+                continue
+            dm = re.match(r'^downcast\s*\[(.*)\]$', a, re.S)
+            if dm:
+                a = gimple_exprtypes._split_top_level_commas(
+                    dm.group(1))[0].strip()
+            written.append(_ERASED_ORIGIN if a in alias_params else a)
+        _register_named(work.gen, work.gen._imported_generic_structs.get(base),
+                        [abase])
+        asrc = _module_src(work.gen, abase, 'struct')
+        atmpl = elaborate.extract_struct_source(asrc, abase) if asrc else None
+        if not atmpl:
+            work.refuse(f'{base}: comptime alias {aname} names {abase} '
+                        'with no struct template')
+            continue
+        bound = _struct_bind_args(atmpl, written, origin_arg)
+        targs = elaborate.bind_type_args(atmpl, bound) if bound else None
+        if targs is None or not all(
+                isinstance(v, str) and v for v in targs.values()):
+            work.refuse(f'{base}: comptime alias {aname} names {abase}[...] '
+                        'whose arguments do not bind')
+            continue
+        # The alias's own `[...] = Struct[...]` text and every
+        # `Self.<alias>[...]` mention name the instantiation.
+        name = mm.mangle(abase, targs)
+        key = ('struct', abase, tuple(
+            targs[p] for p in elaborate.type_param_names(atmpl)))
+        concrete = _replace_bracketed_mentions(
+            concrete, 'Self.' + aname, name)
+        nested.append(key)
+    return concrete, nested or None
+
+
+_PTR_FIELD_HEAD_RE = re.compile(
+    r'^([ \t]*var\s+\w+\s*:\s*)((?:Optional|OptionalReg|Pointer|UnsafePointer)'
+    r'\s*\[)', re.M)
+
+
+def _eval_pointer_fields(work, mm, base, concrete):
+    """A `var f: Optional[UnsafePointer[Node[Int], o]]` / `Pointer[LinkedList[
+    Int], o]` FIELD of a materialized struct names a pointer to a generic
+    struct at scalar types: spell it as that struct's mangled name (the
+    registered-name branch of the field loop types it `<S> *`, NULL = None)
+    and enqueue the pointee — the same reading `_eval_comptime_type_aliases`
+    gives an erased-word ALIAS (`_NodePointer`), here for the annotation
+    written inline (`_LinkedListIter.curr`). Annotation sites only: an
+    expression-position spelling is left alone. Returns (concrete, keys)."""
+    import elaborate
+    out, i, keys = [], 0, []
+    for m in _PTR_FIELD_HEAD_RE.finditer(concrete):
+        if m.start() < i:
+            continue
+        end = _balanced_end(concrete, m.end())
+        if end is None:
+            continue
+        ann = concrete[m.start(2):end].strip()
+        pointee = _erased_pointee_struct([ann])
+        if pointee is None:
+            continue
+        pbase, pargs = pointee
+        _register_named(work.gen, work.gen._imported_generic_structs.get(base),
+                        [pbase])
+        psrc = _module_src(work.gen, pbase, 'struct')
+        ptmpl = elaborate.extract_struct_source(psrc, pbase) if psrc else None
+        pn = elaborate.type_param_names(ptmpl) if ptmpl else None
+        if not pn or len(pn) != len(pargs):
+            continue
+        out.append(concrete[i:m.start(2)])
+        out.append(mm.mangle(pbase, dict(zip(pn, pargs))))
+        i = end
+        keys.append(('struct', pbase, tuple(pargs)))
+    out.append(concrete[i:])
+    return ''.join(out), keys or None
+
+
 def _eval_comptime_type_aliases(work, mm, module_src, base, targs, concrete):
     """Evaluate the `comptime <alias> = <Base>[<concrete args>]` type
     aliases of a spliced generic struct. Returns (concrete, nested_keys):
@@ -3448,6 +3625,13 @@ def _materialize(work, key):
     if kind == 'struct' and targs:
         concrete, _nested = _eval_comptime_type_aliases(
             work, mm, module_src, base, targs, concrete)
+        concrete, _pnested = _eval_parametrized_aliases(
+            work, mm, base, concrete)
+        if _pnested:
+            _nested = (_nested or []) + _pnested
+        concrete, _fnested = _eval_pointer_fields(work, mm, base, concrete)
+        if _fnested:
+            _nested = (_nested or []) + _fnested
         concrete = _rewrite_product_next(base, targs, concrete)
         concrete = _rewrite_product2_elem_copy(base, targs, concrete)
     if kind == 'struct' and base in _IN_TU_ITER_BODIES:

@@ -387,3 +387,43 @@ NOT run: gate / stdlib-syntax / stdlib-dylib (integrator's). `test_gimple.py`:
 421 pass, 3 fail (`generator_mixed_yield_types_honest_fallback`,
 `every_ast_mutation_site_invalidates_the_walk_memo` on coro.py/cpp_core.py/module_gen.py
 sites, `func_state_snapshot_covers_reset_func`) -- none in files this change touches.
+
+## Status (2026-11-01, round 7): PARTIAL — iterator materialized; `it = l.__iter__()` is a typed struct and `__next__` is a real call.
+
+### What landed (`elab_intu._eval_parametrized_aliases`, `_eval_pointer_fields`, `module_gen.py` + `calls_shared._resolve_overload`; pin `test_iterator_local_is_the_materialized_iterator`)
+
+- `_eval_parametrized_aliases`: `comptime IteratorType[iterable_mut: Bool, //,
+  iterable_origin: ..]: Iterator = _LinkedListIter[downcast[T, Copyable],
+  iterable_origin]` evaluates to the mangled `_LinkedListIter` instantiation
+  (`downcast[X, _]` -> `X`, the alias's own origin parameter -> an erased
+  `MutAnyOrigin`, infer-only `mut: Bool` -> `True`, `forward` left to its
+  default via `bind_type_args`); every `Self.IteratorType[...]` mention is
+  rewritten to it and it is enqueued.
+- `_eval_pointer_fields`: an inline `var f: Optional[UnsafePointer[Node[Int], o]]`
+  / `Pointer[LinkedList[Int], o]` FIELD annotation names the pointee's mangled
+  struct (`_LinkedListIter.curr` is `Node_1_T_3_Int *`, `.src` is
+  `LinkedList_..._Int *`); annotation sites only.
+- Overload tie-break: `LinkedList.__iter__` has `var self` (`IteratorOwnedType`)
+  and `ref self` overloads, identical after type erasure, so `l.__iter__()`
+  took the first (owning, stubbed `int64_t`). Candidates now carry
+  `self_owned` and `_resolve_overload` prefers a non-consuming overload among
+  type-indistinguishable ties.
+- Probe: `it` is `_LinkedListIter_... *`, `l.__iter__()` calls `___iter___0120be_2`,
+  `it.__next__()` calls the materialized method; the `int64_t.next()/prev()`
+  stubs are gone (stubs 59 -> 8). gcc `-fsyntax-only` was not re-run on the
+  other stdlib tests this round (only the pin + `test_gimple.py`: 421 pass,
+  the same 3 pre-existing failures).
+
+### Remaining
+1. 8 stubs in methods off the repro's path: `LinkedList.__hash__`,
+   `IteratorOwnedType` (the `var self` iterator alias, same shape as the one
+   landed but unparametrized via `Self.IteratorOwnedType` + a `where` clause),
+   and the reflection helpers `write_sequence_to`/`_write_self_to`/`FormatStruct`/
+   `TypeNames`/`params`/`fields`.
+2. Struct-valued elements (`LinkedList[CopyCountedStruct]`).
+3. End-to-end build-and-run of `1 2 3` against `tools/mojo`: `fire.py build` of
+   the probe (link mode) did not finish in 10+ minutes in this light-worker
+   session; the integrator should run it. The pin asserts only the generated C.
+NOT run: gate / `stdlib-syntax` / `stdlib-dylib` (integrator's). `calls_shared`
+tie-break affects any overloaded method with a `var self` twin; `stdlib-syntax`
+`U` and `stdlib-dylib` skip count are owed.
