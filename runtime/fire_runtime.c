@@ -12647,14 +12647,17 @@ static char *_container_key_str(int64_t v) {
    decimal of the address) and returned 0. mojo_boxed_is_str is the model's
    own discriminator — pointer-shaped and not a live registered list — so
    ask it here rather than guessing a direction. */
-/* Only the two kinds mojo_list_get_boxed makes for a list slot ('d' double,
-   'p' str) are spelled by kind. The other box, kind 'i', is an id() TOKEN: an
-   integer that happens to be pointer-shaped and registered, and it must keep
-   being an integer (a dict key, `int(id(a))`). */
+/* Every box is spelled by its kind EXCEPT the kind 'i' box, which is an id()
+   TOKEN: an integer that happens to be pointer-shaped and registered, and it
+   must keep being an integer (a dict key, `int(id(a))`). The rest are the
+   kinds mojo_list_get_boxed makes for a non-int list slot ('d' double, 'p' str,
+   'b' bool, 'n' None, 's' bytes, 'l' nested list) and the tagged-word boxes
+   (mojo_box_none, mojo_box_from_bool, ...). Each has a real str() spelling in
+   mojo_repr_boxed, so a None or bool box read out of a list must not fall
+   through to the integer arm and print its own address. */
 static int _box_spelled_by_kind(int64_t v) {
     if (!mojo_is_boxed(v)) return 0;
-    char k = ((MojoBox *)(intptr_t)v)->kind;
-    return k == 'd' || k == 'p';
+    return ((MojoBox *)(intptr_t)v)->kind != 'i';
 }
 
 char *mojo_cstr_or_int_str(int64_t v) {
@@ -12666,8 +12669,10 @@ char *mojo_cstr_or_int_str(int64_t v) {
        when `orig` is a box. */
     if (_box_spelled_by_kind(v)) {
         MojoBox *bx = (MojoBox *)(intptr_t)v;
+        /* mojo_repr_float returns a shared buffer; every other arm of
+           mojo_repr_boxed returns a fresh heap string. */
         if (bx->kind == 'd') return strdup(mojo_repr_float(mojo_double_from_bits(bx->bits)));
-        return strdup((char *)(intptr_t)bx->bits);
+        return mojo_repr_boxed(v);
     }
     if (mojo_boxed_is_str(v)) return (char *)(intptr_t)v;
     if (mojo_is_registered_bytes(v))

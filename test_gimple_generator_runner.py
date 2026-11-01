@@ -3650,8 +3650,70 @@ def main():
 main()
 """)
 
+def run_none_list_iteration_tests():
+    # A None element of a LIST read by a for loop printed the box's own address
+    # (`for x in [None]: print(x)` -> 4315206080). `mojo_list_get_boxed` boxes
+    # every non-int slot, including the None ('n') and bool ('b') kinds, but
+    # `mojo_cstr_or_int_str` spelled only the double and str boxes by kind, so
+    # the other boxes fell through to the integer arm. The comprehension case is
+    # the generator-yield shape this file's None-yield doc tracks: a None
+    # yielded into a comprehension and then iterated. Each source carries a
+    # generator so the harness takes the compiled path.
+    gen_pre = "def _dummy():\n    yield 0\n"
+    test_generator_matches_cpython("none_literal_list_for_loop", gen_pre + """\
+def main():
+    for x in [1, None]:
+        print(x)
+main()
+""", """\
+def main():
+    for x in [1, None]:
+        print(x)
+main()
+""")
+    test_generator_matches_cpython("none_only_list_for_loop", gen_pre + """\
+def main():
+    for x in [None]:
+        print(x)
+main()
+""", """\
+def main():
+    for x in [None]:
+        print(x)
+main()
+""")
+    test_generator_matches_cpython("bool_beside_str_list_for_loop", gen_pre + """\
+def main():
+    for x in [True, "a"]:
+        print(x)
+main()
+""", """\
+def main():
+    for x in [True, "a"]:
+        print(x)
+main()
+""")
+    test_generator_matches_cpython("none_comprehension_over_generator_for_loop", """\
+def gen():
+    yield "a"
+    yield
+def main():
+    for x in [y for y in gen()]:
+        print(x)
+main()
+""", """\
+def gen():
+    yield "a"
+    yield
+def main():
+    for x in [y for y in gen()]:
+        print(x)
+main()
+""")
+
 def run_tests():
     run_none_yield_tests()
+    run_none_list_iteration_tests()
     run_tagged_word_cpp_tests()
     run_tagged_word_bind_tests()
     run_star_args_call_tests()
