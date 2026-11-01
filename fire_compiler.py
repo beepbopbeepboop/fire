@@ -7957,13 +7957,25 @@ class Parser:
         that collect statements, keeps every `_parse_stmt` branch free to return
         either without each caller having to know which it got.
         """
+        _stmt_line = self._peek().line
         produced = self._parse_stmt()
         if produced is None:
             return
         if isinstance(produced, list):
+            for _pn in produced:
+                self._stamp_stmt_line(_pn, _stmt_line)
             stmts.extend(produced)
         else:
+            self._stamp_stmt_line(produced, _stmt_line)
             stmts.append(produced)
+
+    def _stamp_stmt_line(self, node, line):
+        """Give a statement the source line it STARTS on when its own parse did not (`if`,
+        `while`, `raise`, `def`, ... were built with `line` left 0). `f_lineno` and a
+        traceback's `tb_lineno` are statement lines, and the `#line` directives of the
+        generated C were missing for these statements."""
+        if getattr(node, 'line', 1) == 0 and line > 0:
+            node.line = line
 
     def _parse_block(self) -> list:
         # Support inline single-statement body: "def foo(): return x" on one line

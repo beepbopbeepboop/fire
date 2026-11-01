@@ -110,3 +110,22 @@ checks; a frame word kept past its function's return (it names whatever frame re
 frames in modules that do not themselves mention `_getframe` (their functions are invisible, like C frames in CPython).
 Next step: the exception snapshot (heap frame records captured in `mojo_raise`, attached as `__traceback__`), which `tb_frame`,
 `tb_next`, `tb_lineno` and test_frame's `clear()` cases need.
+
+## Status (2026-11-01, later) — stage 2 LANDED: tracebacks and the `<module>` frame
+
+- **`<module>` is a frame** (`emit_methods._frame_enter_module`, emitted around `_gen_toplevel`'s statements), so a walk up `f_back` or a
+  traceback ends where CPython's does.
+- **Tracebacks**: `mojo_raise` snapshots the live frame stack once per exception (keyed by the exception's message/object pointers, so a bare
+  `raise` keeps the original), before the unwind pops it. `e.__traceback__` lowers to `mojo_traceback(<current depth>)`, which builds the
+  chain from the catching frame down to the raising one; `tb_frame`, `tb_next`, `tb_lineno` read an entry, and the heap snapshot records
+  are valid frames for `f_code`/`f_lineno`/`f_back`. Test `gimple_traceback_chain_names_and_lines` matches CPython (names and lines through
+  a re-raise).
+- **Statement lines**: the parser built `if`/`while`/`raise`/`def`/... with `line=0`, so those statements carried no line (neither for
+  `f_lineno` nor for the `#line` directives of the generated C). `Parser._parse_stmt_into` now stamps the line the statement starts on
+  (`_stamp_stmt_line`). This is global: every module's C gains `#line` directives for those statements (semantics unchanged;
+  `compile_stdlib.py` 0 failed, `test_selfhost` 3/3, `test_gimple.py` 421 pass with the same 2 failures as before).
+
+Still open: generator/coroutine frames (`gi_frame`, `f_generator`, `cr_frame`, the suspended/executing flags `frame.clear()` checks),
+`frame.clear()` itself, `__traceback__` on an exception object other than the one currently handled (it reads the last snapshot),
+`f_locals`, `f_trace`, and instrumented-module-only visibility (a module that never mentions `_getframe`/`__traceback__`/`tb_frame`/`f_back`/
+`f_lineno` has no frames). Run `Lib/test/test_frame.py` through the compiler next to see which of its cases now compile and which refusal is first.

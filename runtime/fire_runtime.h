@@ -599,6 +599,12 @@ int64_t mojo_frame_lineno(int64_t w);
 int64_t mojo_frame_firstlineno(int64_t w);
 char *  mojo_frame_name(int64_t w);
 char *  mojo_frame_file(int64_t w);
+int64_t mojo_frame_depth(void);
+/* Tracebacks: `e.__traceback__` is mojo_traceback(<current depth>); tb_frame / tb_next / tb_lineno read an entry. */
+int64_t mojo_traceback(int64_t catcher_depth);
+int64_t mojo_tb_frame(int64_t t);
+int64_t mojo_tb_next(int64_t t);
+int64_t mojo_tb_lineno(int64_t t);
 /* Snapshot the current cleanup-stack depth as the level `_mojo_exc_top`
  * (already incremented) should unwind back down to. Call immediately
  * after bumping `_mojo_exc_top` for a new try/except level, before its

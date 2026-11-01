@@ -393,6 +393,20 @@ def _frame_enter(gen, node) -> None:
                    [('char *', _fname), ('char *', _ffile), ('int64_t', _fline)])
 
 
+def _frame_enter_module(gen) -> None:
+    """The `<module>` frame: module-level code runs in a frame of its own in CPython, and a
+    walk up `f_back` (or a traceback) ends there. Same record as a function's."""
+    gen._frame_func = ''
+    if (gen.module_name or '') not in gen._frames_mods:
+        return
+    gen._frame_func = _as_str(gen.current_func_name)
+    _fname = gen._new_val('char *', f'{gen._intern_string("<module>")}')
+    _ffile = gen._new_val('char *', f'{gen._intern_string(gimple_ctypes._c_escape(_as_str(getattr(gen, "_current_filename", "") or "")))}')
+    _fline = gen._new_val('int64_t', '(int64_t)1')
+    gen._void_call('mojo_frame_enter',
+                   [('char *', _fname), ('char *', _ffile), ('int64_t', _fline)])
+
+
 def _frame_leave(gen) -> None:
     if gen._frame_func and _as_str(gen.current_func_name) == gen._frame_func:
         gen._emit("  mojo_frame_leave ();")

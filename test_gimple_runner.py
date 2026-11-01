@@ -3490,6 +3490,46 @@ def top():
 top()
 """, "catcher:16\nrec\nbranches:25 branches:27\ninner 31\nmiddle 37\n")
 
+    # Tracebacks (frames stage 2): `e.__traceback__` walks tb_next from the frame that caught the
+    # exception down to the one that raised it, each entry with the line it was executing at the
+    # raise; a bare `raise` keeps the original traceback. `<module>` is a frame.
+    test_gimple_stdout("gimple_traceback_chain_names_and_lines", """\
+import sys
+
+def leaf(n):
+    if n == 0:
+        raise KeyError("k")
+    leaf(n - 1)
+
+def mid():
+    try:
+        leaf(2)
+    except KeyError as e:
+        tb = e.__traceback__
+        names = []
+        while tb is not None:
+            names.append(tb.tb_frame.f_code.co_name + ":" + str(tb.tb_lineno))
+            tb = tb.tb_next
+        print(names)
+        raise
+
+def top():
+    try:
+        mid()
+    except KeyError as e:
+        tb = e.__traceback__
+        names = []
+        while tb is not None:
+            names.append(tb.tb_frame.f_code.co_name + ":" + str(tb.tb_lineno))
+            tb = tb.tb_next
+        print(names)
+        fb = e.__traceback__.tb_frame.f_back
+        print(fb.f_code.co_name if fb is not None else None)
+
+top()
+print(sys._getframe(0).f_code.co_name, sys._getframe(0).f_lineno)
+""", "['mid:10', 'leaf:6', 'leaf:6', 'leaf:5']\n['top:22', 'mid:10', 'leaf:6', 'leaf:6', 'leaf:5']\n<module>\n<module> 34\n")
+
     # String site FIRST, int site second (an int list records no contract, so
     # it used to be invisible as a disagreeing call site).
     test_gimple_stdout("gimple_mixed_kind_flat_list_param_str_first", """\

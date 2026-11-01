@@ -1425,7 +1425,8 @@ _OS_PATH_RUNTIME_CALLABLE_VALUES = {
 }
 
 
-_FRAME_ATTRS = frozenset(('f_code', 'f_back', 'f_lineno', 'co_name', 'co_qualname', 'co_filename', 'co_firstlineno'))
+_FRAME_ATTRS = frozenset(('f_code', 'f_back', 'f_lineno', 'co_name', 'co_qualname', 'co_filename', 'co_firstlineno',
+                          '__traceback__', 'tb_frame', 'tb_next', 'tb_lineno'))
 
 
 def _lower_MemberExpr(gen, node) -> tuple[str, str]:
@@ -1438,6 +1439,15 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         _fm = node.member
         if _fm == 'f_code':
             return 'int64_t', _fr_w
+        if _fm == '__traceback__':
+            _tb_d = gen._call_expr('int64_t', 'mojo_frame_depth', [])
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_traceback', [('int64_t', _tb_d)])
+        if _fm == 'tb_frame':
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_tb_frame', [('int64_t', _fr_w)])
+        if _fm == 'tb_next':
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_tb_next', [('int64_t', _fr_w)])
+        if _fm == 'tb_lineno':
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_tb_lineno', [('int64_t', _fr_w)])
         if _fm == 'f_back':
             return 'int64_t', gen._call_expr('int64_t', 'mojo_frame_back', [('int64_t', _fr_w)])
         if _fm == 'f_lineno':

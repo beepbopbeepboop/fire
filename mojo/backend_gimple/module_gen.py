@@ -3812,7 +3812,8 @@ def gen_module_impl(self, stmts):
     # function it defines (see emit_methods._frame_enter). Decided here, once, from the
     # module's own statements; every other module's C is unchanged.
     for _fr_nd in _walk_ast(stmts):
-        if ((isinstance(_fr_nd, gimple_ctypes.MemberExpr) and _fr_nd.member == '_getframe')
+        if ((isinstance(_fr_nd, gimple_ctypes.MemberExpr)
+                and _fr_nd.member in ('_getframe', '__traceback__', 'tb_frame', 'f_back', 'f_lineno'))
                 or (isinstance(_fr_nd, gimple_ctypes.IdentExpr) and _fr_nd.name == '_getframe')):
             self._frames_mods.add(self.module_name or '')
             break

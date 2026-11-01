@@ -63,9 +63,11 @@ void mojo_exc_pop(void)
  * frame's return names whatever frame later reuses the slot. Frames of uninstrumented
  * functions are invisible, as C frames are in CPython. */
 #define MOJO_FRAME_MAX 4096
-typedef struct { const char *name; const char *file; int64_t firstlineno; int64_t lineno; } MojoFrameRec;
+typedef struct MojoFrameRec { const char *name; const char *file; int64_t firstlineno; int64_t lineno; struct MojoFrameRec *back; } MojoFrameRec;
 static MojoFrameRec _mojo_frames[MOJO_FRAME_MAX];
 int _mojo_frame_depth = 0;
+extern char *_mojo_exc_msg;
+extern void *_mojo_exc_obj;
 
 typedef enum { MOJO_CLEANUP_DICT, MOJO_CLEANUP_LIST, MOJO_CLEANUP_SET,
                MOJO_CLEANUP_DICT_STACK, MOJO_CLEANUP_LIST_STACK, MOJO_CLEANUP_SET_STACK,
@@ -124,7 +126,7 @@ void mojo_frame_enter(char *name, char *file, int64_t firstlineno)
 {
     if (_mojo_frame_depth < MOJO_FRAME_MAX) {
         MojoFrameRec *f = &_mojo_frames[_mojo_frame_depth];
-        f->name = name; f->file = file; f->firstlineno = firstlineno; f->lineno = firstlineno;
+        f->name = name; f->file = file; f->firstlineno = firstlineno; f->lineno = firstlineno; f->back = NULL;
     }
     ++_mojo_frame_depth;                /* keeps pairing even past the table's end */
     _mojo_cleanup_push(MOJO_CLEANUP_FRAME, NULL);
@@ -154,12 +156,65 @@ int64_t mojo_getframe(int64_t depth)
     return idx;
 }
 
+/* A frame word is either a live-stack index (1..MOJO_FRAME_MAX) or, for a frame reached through a
+ * traceback (`tb_frame`), the address of a heap snapshot record (always far above MOJO_FRAME_MAX). */
 static MojoFrameRec *_frame_of(int64_t w)
 {
-    if (w < 1 || w > _mojo_frame_depth || w > MOJO_FRAME_MAX) return NULL;
+    if (w > MOJO_FRAME_MAX) return (MojoFrameRec *)(intptr_t)w;
+    if (w < 1 || w > _mojo_frame_depth) return NULL;
     return &_mojo_frames[w - 1];
 }
-int64_t mojo_frame_back(int64_t w)        { return (w > 1 && w <= _mojo_frame_depth) ? w - 1 : 0; }
+int64_t mojo_frame_back(int64_t w)
+{
+    if (w > MOJO_FRAME_MAX) return (int64_t)(intptr_t)((MojoFrameRec *)(intptr_t)w)->back;
+    return (w > 1 && w <= _mojo_frame_depth) ? w - 1 : 0;
+}
+int64_t mojo_frame_depth(void)            { return _mojo_frame_depth; }
+
+/* ── Tracebacks ──────────────────────────────────────────────────────────────
+ * `mojo_raise` snapshots the live frame stack once per exception (keyed by the exception's
+ * message/object pointers, so a bare re-raise keeps the original), BEFORE the unwind pops it.
+ * `e.__traceback__` (mojo_traceback) then builds the chain CPython shows: from the frame that
+ * caught it (the current depth) down to the frame that raised, each entry carrying the line that
+ * frame was executing at the raise. Frame objects of the chain are the heap snapshot records. */
+typedef struct MojoTb { MojoFrameRec *frame; struct MojoTb *next; } MojoTb;
+static MojoFrameRec *_mojo_tb_snap = NULL;
+static int _mojo_tb_snap_n = 0;
+static void *_mojo_tb_key_obj = NULL;
+static char *_mojo_tb_key_msg = NULL;
+
+void _mojo_tb_snapshot(void)
+{
+    if (_mojo_tb_snap && _mojo_exc_obj == _mojo_tb_key_obj && _mojo_exc_msg == _mojo_tb_key_msg)
+        return;                                   /* the same exception passing through again */
+    int n = _mojo_frame_depth < MOJO_FRAME_MAX ? _mojo_frame_depth : MOJO_FRAME_MAX;
+    MojoFrameRec *snap = n > 0 ? (MojoFrameRec *)malloc(sizeof(MojoFrameRec) * (size_t)n) : NULL;
+    for (int i = 0; i < n; i++) {
+        snap[i] = _mojo_frames[i];
+        snap[i].back = i > 0 ? &snap[i - 1] : NULL;
+    }
+    _mojo_tb_snap = snap;                         /* the previous snapshot is leaked: a traceback may outlive its handler */
+    _mojo_tb_snap_n = n;
+    _mojo_tb_key_obj = _mojo_exc_obj;
+    _mojo_tb_key_msg = _mojo_exc_msg;
+}
+
+int64_t mojo_traceback(int64_t catcher_depth)
+{
+    if (!_mojo_tb_snap || catcher_depth < 1) return 0;
+    MojoTb *head = NULL, *tail = NULL;
+    for (int i = (int)catcher_depth - 1; i < _mojo_tb_snap_n; i++) {
+        MojoTb *t = (MojoTb *)malloc(sizeof(MojoTb));
+        t->frame = &_mojo_tb_snap[i];
+        t->next = NULL;
+        if (tail) tail->next = t; else head = t;
+        tail = t;
+    }
+    return (int64_t)(intptr_t)head;
+}
+int64_t mojo_tb_frame(int64_t t)  { return t ? (int64_t)(intptr_t)((MojoTb *)(intptr_t)t)->frame : 0; }
+int64_t mojo_tb_next(int64_t t)   { return t ? (int64_t)(intptr_t)((MojoTb *)(intptr_t)t)->next : 0; }
+int64_t mojo_tb_lineno(int64_t t) { return t ? ((MojoTb *)(intptr_t)t)->frame->lineno : 0; }
 int64_t mojo_frame_lineno(int64_t w)      { MojoFrameRec *f = _frame_of(w); return f ? f->lineno : 0; }
 int64_t mojo_frame_firstlineno(int64_t w) { MojoFrameRec *f = _frame_of(w); return f ? f->firstlineno : 0; }
 char *mojo_frame_name(int64_t w)          { MojoFrameRec *f = _frame_of(w); return (char *)(f ? f->name : "<unknown>"); }
@@ -218,6 +273,10 @@ static void _mojo_cleanup_unwind_to(int chk)
     }
 }
 
+extern char *_mojo_exc_msg;
+extern void *_mojo_exc_obj;
+void _mojo_tb_snapshot(void);
+
 void mojo_raise(void)
 {
     /* _mojo_exc_top < 0 means no enclosing try/with is active — either a
@@ -237,6 +296,7 @@ void mojo_raise(void)
                 MOJO_EXC_STACK_MAX);
         exit(1);
     }
+    _mojo_tb_snapshot();
     _mojo_cleanup_unwind_to(_mojo_cleanup_checkpoint[_mojo_exc_top]);
     longjmp((void *)&_mojo_exc_stack[_mojo_exc_top], 1);
 }

@@ -3351,11 +3351,14 @@ def _gen_toplevel(gen, toplevel_stmts: list) -> str:
 
     # Generate code for each top-level statement
     gen._in_toplevel_gen = True
+    gmp._frame_enter_module(gen)
     try:
         for stmt in toplevel_stmts:
             gen.gen_stmt(stmt)
     finally:
         gen._in_toplevel_gen = False
+    gmp._frame_leave(gen)
+    gen._frame_func = ''
 
     # Dependency-init prelude: a `fire dylib` build compiles every
     # module SEPARATELY (see gen_module's population of
