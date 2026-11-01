@@ -2241,6 +2241,17 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
                     # generator api, and only when `next` is not shadowed, so
                     # nothing about a scalar- or opaque-class-valued call
                     # changes.
+                    elif (isinstance(_v.func, gimple_ctypes.MemberExpr)
+                          and _vt in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *')
+                          and gen._module_attr_call_return_type(_v) == _vt):
+                        # `c = m.f(...)` through a bare-import module binding
+                        # whose defining unit published a pointer return: a
+                        # local bound to it is that pointer, so `return c`
+                        # must not infer the int64_t default (the string
+                        # printed as its address). Gated on the SAME helper
+                        # `_quick_type` answers the call with, never on the
+                        # member name alone.
+                        cand = _vt
                     elif (isinstance(_v.func, gimple_ctypes.IdentExpr)
                           and _as_str(_v.func.name) == 'next'
                           and not gen._locally_binds_name('next')):
