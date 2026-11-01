@@ -194,6 +194,49 @@ typedef does not have, which is an out-of-bounds write. Consequence for the desi
 6. Integrator gate (not run here): `stdlib-dylib` and `stdlib-syntax` skip / FAILED counts before vs after, and
    byte-compare of generated C for a struct with no presence fields.
 
+### Round 2026-11-01 (c): store-site inventory, verified by reading the branches
+
+Re-measured this round (`python3 tools/memslot.py --gb 8 --label repro -- python3 .tmp/repro.py`,
+`.tmp/repro.py` calls `test_gimple_runner.compile_mojo_to_gimple_exe` on the repro): `True / 0 / True 5`.
+Still open.
+
+The grep inventory in the Decision/Plan above is NOT complete. A member store does not go through one
+helper: each `MemberExpr`-target branch has its own dispatch ladder, and a presence set must be placed in
+every branch that reaches a raw `->field = v` write. Verified this round, `mojo/backend_gimple/emit_stmts.py`:
+
+- **Single-target AssignStmt**, `MemberExpr` branch at ~1880. Ladder, in order: `sys.argv` runtime store
+  (~1889, not a field); `Cls.attr` / `cls.attr` run-time class table (~1897, not a field); opaque-receiver
+  dynattr dispatch `_mojo_dispatch_setattr` (~2040-2060, a minted member on an opaque object goes here and
+  its bit must be set by the dispatch, not by the field store); known-field typed store (~2064 onward,
+  `field_type = known_fields.get(...)`). The nullable-receiver guard (`_nullable_ptrs`) sits before the raw
+  store. The presence set goes at the end of the known-field store, after the nullable guard.
+- **AugAssign**, `MemberExpr` branch at ~2592 (same `sys.argv` head, then the field read-modify-write).
+  Presence set after the store. Note an AugAssign on a MINTED field reads an unset member first: CPython
+  raises AttributeError there, the compiled path reads 0. That is the separate "read of an unset tracked
+  field returns 0" gap already recorded under Related, and it is out of scope here.
+- **MultiAssign / chained-assign** target loop, `MemberExpr` branch at ~3808. Same two sub-paths as
+  single-target: `ot in ('int', 'int64_t', 'void *')` goes to `_mojo_dispatch_setattr` (~3815-3830); the
+  raw path ends at ~3850-3880 with the `field_type = gen.struct_field_types.get(sn, {})` coercion and the
+  nullable guard. Presence set on the raw path only; the dispatch path must set it inside the generated `_mojo_setattr_<S>`
+arm (Plan step 4). That arm does not set it today.
+- **Dynattr fallback** `gen._emit_dynattr_setattr_dispatch(target.member, ...)` (emit_stmts ~3850-3852) is
+  called from the multi-target loop. It must set the bit exactly as `_mojo_setattr_<S>` does.
+- **Field-wise struct copy** (`addr->f = v->f` per field, ~2276-2339 per the earlier grep): copies the
+  presence words too. Not yet re-read this round.
+- **Not yet re-read this round, must be before landing:** `emit_stmts.py` for-loop and with-target member
+  writes (`emit_loops.py`); `emit_methods.py` `_emit_fw_copy` (~4190-4240); `emit_calls.py` constructor
+  field init (~9857-9885, and the `_safe_coerce_emit` sites at 9878/9885); `cpp_core.py` self-field assign
+  (5800), augassign (6371), class-attr init (4547); `module_gen.py` class-attr cell writes (16203-16206).
+  The C++ coroutine emitter in `cpp_core.py` is a separate implementation of the same stores, so each of its
+  sites needs the same set.
+
+Why this round still lands no code: the presence set is a store-site-complete invariant. Setting it at
+some of these branches and not others makes `hasattr`/`getattr(..., default)` return False for a field
+that really was assigned through the missed branch. The compiler's own AST code relies on that
+`getattr` pattern (see Decision), so a partial landing is a silent regression that only the integrator's
+`stdlib-dylib` / `stdlib-syntax` gate would see. The next round should land the whole store set and the
+read side together, in one commit, per Plan steps 1-5.
+
 ### Related, not this bug
 
 - A read of a tracked field on an object that never had it set returns 0 instead of raising.
