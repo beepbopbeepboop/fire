@@ -18,7 +18,34 @@ NOT DONE:
 
 BUG DOC STATUS: this doc stays open until the integrator confirms byte-identical output and the parallel path is cut over (step 4).
 
-## Status (2026-10-31) — Step 0 measured ON fire.py: the dominant serial cost is not emission, and two of the three biggest items are not parallelisable work at all
+## CORRECTION (2026-10-31, later) — the cProfile table below is wrong about shares; use the numbers here
+
+`cProfile` inflates call-heavy code (hundreds of thousands of tiny calls) by 3-4x, so the table
+below overstated `ast_rewriter` (22% profiled) and the gimplegen scan (27% profiled). Measured with
+`time.perf_counter` wrappers around single outermost calls (no profiler; `/tmp`-style script in the
+commit message of this change), `compile_to_gimple(fire.py, do_imports=True)` on a loaded 18-core machine:
+
+| | seconds |
+|---|---|
+| total (CPU == wall, single thread) | 197 (before `f77b8ec21`) |
+| `_compile_imported_module` (227 imported-module compiles, includes their parses) | 189 |
+| `ast_rewriter.rewrite` (all modules) | 8.7 |
+| `gen_func` (per-function emission, outermost only) | 8.3 |
+| `_selfhost_scan_gimplegen_extra_fields` (once per process) | 2.6 |
+| tokenize+parse+rewrite of 44 compiler sources, standalone | 2.9 |
+
+So parsing, rewriting and the gimplegen scan together are about 12 s of ~197, i.e. roughly 6%: the
+plan below that targets them (rule index, persisted scan) is NOT worth its self-host risk. ~170 s of the
+total is inside `_compile_imported_module` and is not parse or emission of the entry; the next measurement is
+a per-phase split INSIDE it (function lowering vs signature/inference passes vs `coro.lower` vs the
+call-site contract walks in `module_gen`), taken with the same wrappers, before any design.
+
+Also recorded here because the measurement caught it: `f77b8ec21` (list iterator across a call) made a
+call-site-contract walk quadratic (a whole-body scan per call argument) and took the same compile from 197 s to
+368 s; memoised per body in `itcursor.escaping_iter_names` it is 214 s. The remaining ~17 s over the 197 s
+baseline has not been attributed (other commits landed in between); do that first.
+
+## Status (2026-10-31) — Step 0 measured ON fire.py (profile-inflated, see the correction above): the dominant serial cost is not emission, and two of the three biggest items are not parallelisable work at all
 
 Method: `cProfile` around `gimple_codegen.compile_to_gimple(fire.py_src, do_imports=True, filename=fire.py)`
 (the exact call `fire.py --dump-full` makes through `compile_to_gimple_parallel_frozen`, which today forwards to

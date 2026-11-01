@@ -203,9 +203,44 @@ ITER_NON_ESCAPING_CALLS = frozenset((
     'enumerate', 'zip', 'any', 'all', 'print', 'reversed', 'map', 'filter', 'str', 'repr'))
 
 
+# Per-body memo: `escaping_iter_names(body)` is asked once per CALL ARGUMENT of a
+# module (module_gen's call-site contract) and once per `iter(...)` binding, and a
+# walk of the whole body each time is quadratic in the module's size (it made
+# `fire.py --dump-full` several times slower). Keyed by id(body): a body list
+# lives for the whole compile and is never mutated in the passes that ask.
+_ESCAPING_ITER_CACHE: dict = {}
+
+
+def escaping_iter_names(body) -> set:
+    """Names bound by `name = iter(...)` in `body` that also appear as a bare
+    argument of a call to a function other than the builtins above."""
+    key = id(body)
+    hit = _ESCAPING_ITER_CACHE.get(key)
+    if hit is not None and hit[0] is body:
+        return hit[1]
+    bound: set = set()
+    passed: set = set()
+    for _n in gimple_exprtypes._walk_ast(body or []):
+        _tn = type(_n).__name__
+        if (_tn == 'AssignStmt' and type(_n.target).__name__ == 'IdentExpr'
+                and type(_n.value).__name__ == 'CallExpr'
+                and type(_n.value.func).__name__ == 'IdentExpr'
+                and _as_str(_n.value.func.name) == 'iter'):
+            bound.add(_as_str(_n.target.name))
+        elif (_tn == 'CallExpr' and type(_n.func).__name__ == 'IdentExpr'
+                and _as_str(_n.func.name) not in ITER_NON_ESCAPING_CALLS):
+            for _a in _n.args:
+                if type(_a).__name__ == 'IdentExpr':
+                    passed.add(_as_str(_a.name))
+    out = bound & passed
+    _ESCAPING_ITER_CACHE[key] = (body, out)
+    return out
+
+
 def iter_name_escapes_into_call(body, name):
     """True when `name` appears as a bare argument of a call to some function
-    other than the builtins above, anywhere in `body`."""
+    other than the builtins above, anywhere in `body`. (Callers that have also
+    established the binding use `name_is_escaping_iter`.)"""
     for _n in gimple_exprtypes._walk_ast(body or []):
         if (type(_n).__name__ == 'CallExpr' and type(_n.func).__name__ == 'IdentExpr'
                 and _as_str(_n.func.name) not in ITER_NON_ESCAPING_CALLS):
@@ -217,12 +252,4 @@ def iter_name_escapes_into_call(body, name):
 
 def name_is_escaping_iter(body, name):
     """`name` is bound by `name = iter(...)` in `body` AND escapes into a call."""
-    _bound = False
-    for _n in gimple_exprtypes._walk_ast(body or []):
-        if (type(_n).__name__ == 'AssignStmt' and type(_n.target).__name__ == 'IdentExpr'
-                and _as_str(_n.target.name) == name and type(_n.value).__name__ == 'CallExpr'
-                and type(_n.value.func).__name__ == 'IdentExpr'
-                and _as_str(_n.value.func.name) == 'iter'):
-            _bound = True
-            break
-    return _bound and iter_name_escapes_into_call(body, name)
+    return name in escaping_iter_names(body)
