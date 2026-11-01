@@ -81,6 +81,7 @@ import mojo.middle.funcs_shared as funcs_shared
 import mojo.middle.itcursor as itc
 from mojo.middle.funcs_shared import param_default_pairs
 from mojo.middle.types import _TUPLE_ANN_BY_NAME, _unpack_target_leaf_names
+from mojo.middle.types import PRESENCE_WORD, presence_bit, presence_word_count, presence_set_stmt
 from mojo.middle.methods_shared import _is_selfhost_source_file
 from gimple_codegen import ClosureInfo, DispatchSolver, TypeLattice, _CPP_KEYWORD_FIELDS, _C_KEYWORDS, _C_PARAM_EXTRA_KEYWORDS, _C_RESERVED_FUNCS, _EXPR_DISPATCH, _FIXED_ARRAY_ANN_RE, _LIST_RETURNING_METHODS, _PSEUDO_DUNDER_ATTRS, _RUNTIME_FUNCS, _SELFHOST_DIR, _SELFHOST_KWARGS_HAS_VARARG, _SELFHOST_KWARGS_SLOTS, _STMT_DISPATCH, _STR_RETURNING_METHODS, _TYPE_MAP, _UnsupportedGeneratorShape, _async_gen_quick_eligible, _async_quick_eligible, _bracket_param_type_annotations, _c_escape, _c_field_name, _c_id, _class_attr_ctype, _compute_exc_descendants, _debug_note, _declared_vars_body, _extract_init_expr, _generator_quick_eligible, _import_targets, _merge_struct_inheritance, _module_init_name, _module_toplevel_name, _mojo_type, _safe_field, _safe_name, _struct_type_id, _stub_guard_name, _used_idents_deep, _used_idents_node
 
@@ -1443,7 +1444,38 @@ def _homogeneous_tuple_ann_elem(self, _ret_ann):
 
 
 
-def _render_struct_typedef_body(struct_name: str, fields: dict, optional_tags=None) -> list:
+def _mark_presence_field(sdef, fname):
+    """Record the compiler-MINTED field `fname` of `sdef` as presence-tracked
+    (see StructDef.presence_fields), unless `sdef`'s own `__init__` assigns
+    it: a constructor-assigned field is part of every instance by definition,
+    so it needs no bit. Every mint site calls this with the StructDef it just
+    appended `fname` to, which keeps the tracked set a whole-struct fact that
+    every generator reads the same way. Idempotent."""
+    if sdef is None or fname in sdef.presence_fields:
+        return
+    for _m in sdef.methods:
+        if _m.name != '__init__':
+            continue
+        for _n in _walk_ast(_m.body):
+            _tgts = []
+            if isinstance(_n, AssignStmt):
+                _tgts = [_n.target]
+            elif isinstance(_n, MultiAssignStmt):
+                _tgts = list(_n.targets)
+            for _t in _tgts:
+                _leaves = [_t]
+                if isinstance(_t, (TupleExpr, ListExpr)):
+                    _leaves = list(_t.elements)
+                for _lf in _leaves:
+                    if (isinstance(_lf, MemberExpr) and isinstance(_lf.obj, IdentExpr)
+                            and _as_str(_lf.obj.name) == 'self'
+                            and _as_str(_lf.member) == fname):
+                        return
+    sdef.presence_fields.append(fname)
+
+
+def _render_struct_typedef_body(struct_name: str, fields: dict, optional_tags=None,
+                                presence_words: int = 0) -> list:
     """Render just the `typedef struct NAME { ... } NAME;` body lines for
     one struct, given its resolved {field_name: field_ctype} map (the same
     per-field rendering gen_module_impl's own emit_struct_defs pass uses,
@@ -1499,6 +1531,8 @@ def _render_struct_typedef_body(struct_name: str, fields: dict, optional_tags=No
                     lines.append(f"  _Bool {safe_fn}_is_some;")
     else:
         lines.append(f"  int _dummy;")
+    if presence_words:
+        lines.append(f"  uint64_t {PRESENCE_WORD}[{presence_words}];")
     lines.append(f"}} {struct_name};")
     return lines
 
@@ -1979,18 +2013,33 @@ def _emit_reflection_dispatch(self, parts):
         set_lines = []
         name_lits = []
         asdict_lines = []
+        # The owning StructDef, whose `presence_fields` decide which minted
+        # fields answer `hasattr`/`getattr` only once stored (see
+        # StructDef.presence_fields). Declared fields are not in it, so their
+        # arms are unchanged.
+        _pres_sd = self._struct_name_owner.get(_as_str(sn))
         for fname, ftype in fields.items():
             if fname == '__mojo_type_id':
                 continue
             safe_f = _safe_field(fname)
+            _pb = presence_bit(_pres_sd, fname)
+            # Read guard: the arm answers only when this object's presence
+            # bit is set. A clear bit falls through to the trailing
+            # `mojo_obj_getattr`, which raises (or sets the nothrow miss flag),
+            # as CPython does for an attribute the instance never received.
+            _pget = ''
+            _pset = ''
+            if _pb is not None:
+                _pget = (f' && ((obj->{PRESENCE_WORD}[{_pb[0]}] >> {_pb[1]}) & 1)')
+                _pset = presence_set_stmt(_pres_sd, fname, 'obj', '->') + ' '
             if re.match(r'^.+\[\d+\]$', ftype):
                 name_lits.append(f'"{fname}"')
                 continue
             if ftype.endswith(' *'):
                 get_lines.append(
-                    f'  if (strcmp(attr, "{fname}") == 0) return (int64_t)(intptr_t)obj->{safe_f};')
+                    f'  if (strcmp(attr, "{fname}") == 0{_pget}) return (int64_t)(intptr_t)obj->{safe_f};')
                 set_lines.append(
-                    f'  if (strcmp(attr, "{fname}") == 0) {{ obj->{safe_f} = ({ftype})(intptr_t)val; return; }}')
+                    f'  if (strcmp(attr, "{fname}") == 0) {{ obj->{safe_f} = ({ftype})(intptr_t)val; {_pset}return; }}')
                 asdict_lines.append(
                     f'  mojo_dict_set_int(_r, "{fname}", (int64_t)(intptr_t)obj->{safe_f});')
             elif ftype in self.struct_field_types:
@@ -2004,16 +2053,16 @@ def _emit_reflection_dispatch(self, parts):
                 # shape the runtime tag readers expect of a struct
                 # pointer — and setattr copies the struct back by value.
                 get_lines.append(
-                    f'  if (strcmp(attr, "{fname}") == 0) return (int64_t)(intptr_t)&obj->{safe_f};')
+                    f'  if (strcmp(attr, "{fname}") == 0{_pget}) return (int64_t)(intptr_t)&obj->{safe_f};')
                 set_lines.append(
-                    f'  if (strcmp(attr, "{fname}") == 0) {{ obj->{safe_f} = *({ftype} *)(intptr_t)val; return; }}')
+                    f'  if (strcmp(attr, "{fname}") == 0) {{ obj->{safe_f} = *({ftype} *)(intptr_t)val; {_pset}return; }}')
                 asdict_lines.append(
                     f'  mojo_dict_set_int(_r, "{fname}", (int64_t)(intptr_t)&obj->{safe_f});')
             else:
                 get_lines.append(
-                    f'  if (strcmp(attr, "{fname}") == 0) return (int64_t)obj->{safe_f};')
+                    f'  if (strcmp(attr, "{fname}") == 0{_pget}) return (int64_t)obj->{safe_f};')
                 set_lines.append(
-                    f'  if (strcmp(attr, "{fname}") == 0) {{ obj->{safe_f} = ({ftype})val; return; }}')
+                    f'  if (strcmp(attr, "{fname}") == 0) {{ obj->{safe_f} = ({ftype})val; {_pset}return; }}')
                 asdict_lines.append(
                     f'  mojo_dict_set_int(_r, "{fname}", (int64_t)obj->{safe_f});')
             name_lits.append(f'"{fname}"')
@@ -7080,6 +7129,7 @@ def gen_module_impl(self, stmts):
                         self.struct_field_types[s.name][fn] = ft
                         if fn not in already:
                             s.fields.append(VarDecl(name=fn, type_ann=None, value=None))
+                            _mark_presence_field(s, fn)
                             already.add(fn)
                             _walk_ast_invalidate(s)
             # A method that returns a `bool`-annotated FIELD hands back an
@@ -7171,6 +7221,7 @@ def gen_module_impl(self, stmts):
                         self.struct_field_types[s.name][fn] = _base_ft if _base_ft is not None else ft
                         if fn not in already:
                             s.fields.append(VarDecl(name=fn, type_ann=None, value=None))
+                            _mark_presence_field(s, fn)
                             already.add(fn)
                             _walk_ast_invalidate(s)
 
@@ -7368,6 +7419,7 @@ def gen_module_impl(self, stmts):
                 if target_def is not None and not any(
                         isinstance(f, VarDecl) and f.name == fn for f in target_def.fields):
                     target_def.fields.append(VarDecl(name=fn, type_ann=None, value=None))
+                    _mark_presence_field(target_def, fn)
                     _walk_ast_invalidate(target_def)
 
     _scan_body_for_local_field_access(stmts, None)
@@ -14734,7 +14786,8 @@ def gen_module_impl(self, stmts):
                     _td_start = len(parts)
                 parts.extend(_render_struct_typedef_body(
                     struct_name, fields,
-                    optional_tags=self._tagged_optional_fields.get(struct_name)))
+                    optional_tags=self._tagged_optional_fields.get(struct_name),
+                    presence_words=presence_word_count(self._struct_name_owner.get(struct_name))))
                 self._struct_typedef_texts[struct_name] = '\n'.join(parts[_td_start:])
                 parts.append(f"#define {_stub_guard_name(struct_name)}")  # suppress any later variadic stub
                 emitted.add(struct_name)
@@ -16113,6 +16166,9 @@ def gen_module_impl(self, stmts):
                                 parts.append(f"  {_arr_dm2.group(1)} {safe_fn}[{_arr_dm2.group(2)}];")
                             else:
                                 parts.append(f"  {field_type} {safe_fn};")
+                _sd_pw = presence_word_count(sd)
+                if _sd_pw:
+                    parts.append(f"  uint64_t {PRESENCE_WORD}[{_sd_pw}];")
                 parts.append(f"}} {sd.name};")
                 self._struct_typedef_texts[sd.name] = '\n'.join(parts[_td_start:])
                 parts.append(f"#define {_stub_guard_name(sd.name)}")
@@ -17335,7 +17391,8 @@ def gen_module_impl(self, stmts):
                 _flds = _struct_typedef_fields(self, _sn)
                 return '\n'.join(_render_struct_typedef_body(
                     _sn, _flds,
-                    optional_tags=self._tagged_optional_fields.get(_sn)))
+                    optional_tags=self._tagged_optional_fields.get(_sn),
+                    presence_words=presence_word_count(self._struct_name_owner.get(_sn))))
             for _gm_fwd_sn in sorted(_gm_struct_names_seen):
                 if _gm_typedef_text(_gm_fwd_sn) is not None:
                     cpp_parts.append(f'struct {_gm_fwd_sn};')
@@ -17434,7 +17491,9 @@ def gen_module_impl(self, stmts):
                             _render_struct_typedef_body(
                                 _me_sn, _me_flds,
                                 optional_tags=self._tagged_optional_fields
-                                .get(_me_sn)))
+                                .get(_me_sn),
+                                presence_words=presence_word_count(
+                                    self._struct_name_owner.get(_me_sn))))
                         cpp_parts.append(_me_td.replace('_Bool', 'bool'))
                         cpp_parts.append('')
                     _cpp_preamble_typedef_structs.update(_mirror_extra_structs)
