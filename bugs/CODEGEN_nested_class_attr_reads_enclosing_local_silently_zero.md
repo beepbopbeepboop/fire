@@ -83,8 +83,8 @@ Still open:
    runtime value: a separate, larger project. Until then the loud failure is
    the honest behaviour, and a silent answer has not been observed for this shape.
 4. **Leak.** One heap cell per non-constant attribute per execution of the
-   `class` statement, never freed (same fail-closed class as the closure-env
-   leak). A `class` statement
+   `class` statement, never freed (same class as
+   `CODEGEN_closure_env_and_boxed_local_never_freed.md`). A `class` statement
    in a hot loop leaks about 8 bytes per attribute per iteration.
 5. **CLOSED in round 9** (2026-11-01). A no-initializer container field
    (`var xs: List[Int]`) was seeded into every instance from ONE per-class

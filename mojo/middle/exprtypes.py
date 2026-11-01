@@ -749,13 +749,6 @@ def is_python_bool_expr(gen, node) -> bool:
     if isinstance(node, MemberExpr):
         return _is_python_bool_field(gen, node)
     if isinstance(node, CallExpr):
-        # The read of a boxed (nested-def captured) local: `__mojo_box_get_i64(n)`
-        # holds the bool iff `n` was bound to one (`_record_bool_valued` looks
-        # through the `__mojo_box_new_i64(...)` of the first binding).
-        if (isinstance(node.func, IdentExpr) and node.func.name == '__mojo_box_get_i64'
-                and len(node.args) == 1 and isinstance(node.args[0], IdentExpr)
-                and node.args[0].name in getattr(gen, '_bool_valued', ())):
-            return True
         return _is_python_bool_method(gen, node)
     try:
         return gen._quick_type(node) == '_Bool'

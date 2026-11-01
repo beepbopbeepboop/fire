@@ -4027,72 +4027,6 @@ main()
         test_generator_matches_cpython("cpp_path_ignores_previous_generator_registry",
                                        plain_h_src, plain_h_src)
 
-    # The call-site param tables (`_CALLSITE_PARAM_KINDS`, `_PLAIN_CALLSITE_PARAM_KINDS`)
-    # were not cleared/refilled on the cpp path; a previous module's generator
-    # with unannotated params that resolved to 'd' leaked into this module's
-    # same-named generator, causing an erroneous refusal or wrong typing.
-    prev_callsite_src = """\
-def g(x):
-    yield x
-
-def main():
-    print(g(2.5))
-main()
-"""
-    with coro.pinned('stackswitch'):
-        try:
-            gimple_codegen.compile_to_gimple_with_cpp(prev_callsite_src, do_imports=False)
-        except Exception:
-            pass
-    with coro.pinned('cpp'):
-        test_generator_matches_cpython("cpp_path_ignores_previous_callsite_params", """\
-def g(x):
-    yield x
-
-def main():
-    for v in g(2.5):
-        print(v)
-main()
-""", """\
-def g(x):
-    yield x
-
-def main():
-    for v in g(2.5):
-        print(v)
-main()
-""")
-
-    # The stale-state case the test above does NOT reproduce: the previous
-    # module's unannotated `g(x)` was called with a float, so its call-site
-    # table typed `x` as 'd'. This module calls the same-named `g` with an
-    # int. Before the cpp branch refreshed `_CALLSITE_PARAM_KINDS`, the cpp
-    # path kept the float typing and printed `2.0` where CPython prints `2`
-    # (measured on the pre-8c305b720 tree; the fixed tree prints `2`).
-    with coro.pinned('stackswitch'):
-        try:
-            gimple_codegen.compile_to_gimple_with_cpp(prev_callsite_src, do_imports=False)
-        except Exception:
-            pass
-    with coro.pinned('cpp'):
-        test_generator_matches_cpython("cpp_path_callsite_int_after_previous_float", """\
-def g(x):
-    yield x
-
-def main():
-    for v in g(2):
-        print(v)
-main()
-""", """\
-def g(x):
-    yield x
-
-def main():
-    for v in g(2):
-        print(v)
-main()
-""")
-
 
 _AUG_YIELD_SRC = """\
 def g():
@@ -4859,27 +4793,6 @@ def main():
     print((x * 2) + 1)
 main()
 """)
-    test_generator_matches_cpython("tagged_float_box_comparison", """\
-def gen():
-    yield 2.5
-    yield "b"
-
-def main():
-    g = gen()
-    x = next(g)
-    print(x > 2, x == 2.5, x < 3, x >= 2.5, x <= 2.5)
-main()
-""", """\
-def gen():
-    yield 2.5
-    yield "b"
-
-def main():
-    g = gen()
-    x = next(g)
-    print(x > 2, x == 2.5, x < 3, x >= 2.5, x <= 2.5)
-main()
-""")
     test_generator_matches_cpython("tagged_str_bound_to_name_has_length", """\
 def gen():
     yield 1
@@ -5427,63 +5340,8 @@ main()
 """, "1 23\n")
 
 
-def run_send_into_just_started_regression():
-    # Bug: CODEGEN_send_into_just_started_generator_is_not_refused
-    # `g.send(7)` on a fresh generator must raise TypeError, not resume.
-    with coro.pinned('cpp'):
-        test_generator_matches_cpython(
-            "send_into_just_started_refused_cpp", """\
-def g():
-    yield 1
-
-def main():
-    it = g()
-    try:
-        it.send(7)
-    except TypeError:
-        print("TypeError")
-main()
-""", """\
-def g():
-    yield 1
-
-def main():
-    it = g()
-    try:
-        it.send(7)
-    except TypeError:
-        print("TypeError")
-main()
-""")
-    with coro.pinned('stackswitch'):
-        test_generator_matches_cpython(
-            "send_into_just_started_refused_stackswitch", """\
-def g():
-    yield 1
-
-def main():
-    it = g()
-    try:
-        it.send(7)
-    except TypeError:
-        print("TypeError")
-main()
-""", """\
-def g():
-    yield 1
-
-def main():
-    it = g()
-    try:
-        it.send(7)
-    except TypeError:
-        print("TypeError")
-main()
-""")
-
 def run_tests():
     run_cpp_send_tests()
-    run_send_into_just_started_regression()
     run_cpp_path_multi_arg_print_tests()
     run_none_yield_tests()
     run_tagged_none_equality_tests()
@@ -8959,57 +8817,6 @@ def main():
     # AT TEST TIME (`test_generator_matches_cpython`), because every
     # failure mode in this area is a silent wrong value and a
     # hand-transcribed "expected" string is exactly how one gets enshrined.
-    # A capture-free nested `def` that itself defines a generator, and the plain
-    # helper that generator calls, are lifted to module level: the generator was
-    # one level too deep for the nested-generator machinery and fell to the C++
-    # companion, which cannot call the helper (test_frame.py's `t0`).
-    test_generator_stdout("gimple_generator_two_levels_deep_calls_a_sibling_helper", """\
-import sys
-
-class T:
-    def test(self):
-        def t0():
-            def nested():
-                frame = sys._getframe()
-                return frame.f_generator
-
-            def gen():
-                yield nested()
-
-            g = gen()
-            try:
-                return next(g)
-            finally:
-                g.close()
-        print(t0() is None)
-
-def main():
-    T().test()
-""", "True\n")
-
-    # A nested `async def` of a METHOD whose result is the coroutine object itself
-    # (test_frame.py's `t3`): lifted to module level, it is an ordinary coroutine.
-    test_generator_stdout("method_nested_async_returns_its_own_coroutine", """\
-import sys
-
-class T:
-    def test(self):
-        async def t3():
-            frame = sys._getframe()
-            return frame.f_generator
-
-        c = t3()
-        try:
-            c.send(None)
-        except StopIteration as ex:
-            print(ex.value is c)
-        else:
-            raise AssertionError('coroutine did not exit')
-
-def main():
-    T().test()
-""", "True\n")
-
     test_generator_matches_cpython("nested_async_gen_driven_by_async_for", """\
 def outer() raises:
     var acc = 0

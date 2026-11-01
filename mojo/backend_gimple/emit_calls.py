@@ -328,14 +328,6 @@ def _tagged_word_value(gen, node) -> str:
     return w
 
 
-def _stop_value_attach(gen, av, base) -> None:
-    """Right after the exhaustion `mojo_exc_type_set(StopIteration)`: hand the finished generator's
-    `return` value to the exception (`ex.value`). Only a stack-switch generator (`__mgco_`) has the
-    runtime handle that holds it; a C++20-coroutine generator keeps the old (None) answer."""
-    if _as_str(base).startswith('__mgco_'):
-        gen._void_call('__mojo_gen_stop_value', [('int64_t', gen._to_int64('MojoGenerator *', av))])
-
-
 def _lower_generator_next(gen, av: str, api: dict) -> tuple[str, str]:
     # An async GENERATOR's yield channel carries a wait-descriptor
     # (is_wd=1) for every parking `await` as well as a real value (is_wd=0)
@@ -367,7 +359,6 @@ def _lower_generator_next(gen, av: str, api: dict) -> tuple[str, str]:
     gen._emit_generator_pending_exc_check(av, base, False, bb_stopiter)
     gen._emit_label(bb_stopiter)
     gen._emit(f"  mojo_exc_type_set ({gen._exc_type_id('StopIteration')});")
-    _stop_value_attach(gen, av, base)
     gen._emit("  mojo_raise ();")
     gen._emit(f"  goto {bb_merge};")
     gen._emit_label(bb_ok)
@@ -447,7 +438,6 @@ def _lower_generator_send(gen, node, av: str, api: dict) -> tuple[str, str]:
     gen._emit_generator_pending_exc_check(av, api['base'], False, bb_stopiter)
     gen._emit_label(bb_stopiter)
     gen._emit(f"  mojo_exc_type_set ({gen._exc_type_id('StopIteration')});")
-    _stop_value_attach(gen, av, api['base'])
     gen._emit("  mojo_raise ();")
     gen._emit(f"  goto {bb_merge};")
     gen._emit_label(bb_ok)
@@ -507,7 +497,6 @@ def _lower_generator_throw(gen, node, av: str, api: dict) -> tuple[str, str]:
     gen._emit_generator_pending_exc_check(av, api['base'], False, bb_stopiter)
     gen._emit_label(bb_stopiter)
     gen._emit(f"  mojo_exc_type_set ({gen._exc_type_id('StopIteration')});")
-    _stop_value_attach(gen, av, api['base'])
     gen._emit("  mojo_raise ();")
     gen._emit(f"  goto {bb_merge};")
     gen._emit_label(bb_ok)
@@ -3539,10 +3528,9 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         if at in ('char *', 'MojoStr *'):
             sv = av if at == 'char *' else gen._stringify_value(at, av)
             enc = gen._new_val('char *', gen._intern_string('utf-8'))
-            err = gen._new_val('char *', gen._intern_string('strict'))
             return 'MojoBytes *', gen._call_expr(
                 'MojoBytes *', 'mojo_bytes_from_str',
-                [('char *', sv), ('char *', enc), ('char *', err)])
+                [('char *', sv), ('char *', enc)])
         if at in ('MojoList *', 'MojoDict *', 'MojoSet *', 'void *'):
             # `bytes(a_dict)`/`bytes(a_set)` of ints is real Python (an
             # iterable of ints is a valid bytes() source; a dict's own
@@ -3579,9 +3567,8 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         elif at in ('char *', 'MojoStr *'):
             sv = av if at == 'char *' else gen._stringify_value(at, av)
             enc = gen._new_val('char *', gen._intern_string('utf-8'))
-            err = gen._new_val('char *', gen._intern_string('strict'))
             _b = gen._call_expr('MojoBytes *', 'mojo_bytes_from_str',
-                                [('char *', sv), ('char *', enc), ('char *', err)])
+                                [('char *', sv), ('char *', enc)])
         elif at in ('MojoList *', 'MojoDict *', 'MojoSet *', 'void *'):
             # `bytearray(a_dict)`/`bytearray(a_set)` of ints - same real
             # Python shape as bytes() above.

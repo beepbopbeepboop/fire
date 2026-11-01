@@ -66,7 +66,6 @@ sys.path.insert(0, HERE)
 # The driver and the pass/fail helper live in the dylib suite; imported rather
 # than copied so a fix to one cannot leave a second, quietly different one.
 from test_formal_dylib import TestFailure, check, run_fire
-from exec_budget import RUN_TIMEOUT_S
 
 # Module dylibs are cached by content and written per architecture, so a test
 # that looks for one has to ask for the architecture it built — and it must not
@@ -131,7 +130,7 @@ def build_dylib(root, name, sources, expect_ok=True):
 
 
 def run(out):
-    r = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
+    r = subprocess.run([out], capture_output=True, text=True, timeout=120)
     return r.returncode, (r.stderr or r.stdout)
 
 
@@ -264,7 +263,7 @@ def cpython(root, name, main_arg="0", preamble=""):
     env["PYTHONPATH"] = os.pathsep.join(
         r for r in (root, os.path.dirname(root)) if r and os.path.isdir(r))
     r = subprocess.run([sys.executable, path], capture_output=True,
-                       text=True, timeout=RUN_TIMEOUT_S, cwd=root, env=env)
+                       text=True, timeout=120, cwd=root, env=env)
     check(r.returncode in (0, 1),
           f"CPython itself failed on {path}: {r.stderr.strip()[-400:]}")
     return r.returncode, r.stdout

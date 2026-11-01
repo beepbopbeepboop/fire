@@ -344,6 +344,8 @@ def param_binding_ctype(gen, func_name: str, pname: str, ctype: str) -> str:
     `resolve_shared._infer_local_var_types`'s `_multi_kind_locals` and
     `_gen_stmt_AssignStmt`'s `_pin_to_ground_truth`).
     """
+    if ctype not in ('MojoDict *', 'MojoList *', 'MojoSet *'):
+        return ctype
     _bound = (getattr(gen, '_inferred_var_types', None) or {}).get(
         func_name, {}).get(pname)
     if _bound in ('MojoDict *', 'MojoList *', 'MojoSet *') and _bound != ctype:
@@ -372,14 +374,7 @@ def param_binding_ctype(gen, func_name: str, pname: str, ctype: str) -> str:
     if _xcf is not None:
         _xc = _xcf.get(pname)
     if _xc in ('MojoDict *', 'MojoList *', 'MojoSet *') and _xc != ctype:
-        # Apply unanimous container evidence when usage left the slot at the
-        # int64_t default, but preserve scalar (char* / double) or struct
-        # conclusions.
-        if ctype in ('int64_t', 'int', ''):
-            return _xc
         return _xc
-    if ctype not in ('MojoDict *', 'MojoList *', 'MojoSet *'):
-        return ctype
     return ctype
 
 

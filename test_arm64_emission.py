@@ -28,7 +28,6 @@ import re
 import subprocess
 import sys
 import tempfile
-from exec_budget import RUN_TIMEOUT_S
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIRE = os.path.join(HERE, "fire.py")
@@ -55,7 +54,7 @@ def build_and_run(source, tmpdir, name):
                        timeout=BUILD_TIMEOUT, cwd=HERE)
     check(b.returncode == 0,
           f"build failed: {(b.stderr or b.stdout).strip()[-300:]}")
-    r = subprocess.run([exe], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
+    r = subprocess.run([exe], capture_output=True, text=True, timeout=120)
     dis = subprocess.run(["otool", "-tv", exe], capture_output=True,
                          text=True).stdout
     return r.returncode, dis, r.stdout

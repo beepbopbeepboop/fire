@@ -62,8 +62,7 @@ class MojoError(Exception):
     self-hosting compiler doesn't know what to do with `super()` at all
     (tries to call it as a plain undefined function named `_super`)."""
     def __init__(self, *args):
-        self.args = args
-        Exception.__init__(self, *args)
+        Exception.__init__(self, ' '.join(str(a) for a in args))
 
 
 class MojoRaisedException(Exception):

@@ -1,3 +1,79 @@
+## Status (2026-11-01 — PLANNING ROUND: the Lean half cannot be verified by a light worker on this machine; the guide below is what the next round executes)
+
+**Measured this round (a real run, not carried forward):**
+
+```
+$ python3 tools/memslot.py --gb 8 --label formal-baseline -- python3 test_formal.py -j 1 countdown wdiff wge
+  [1/3] KNOWN-GAP  countdown  build/proof failed: lean exceeded 1500s CPU (RLIMIT_CPU) — NOT a verdict
+  [2/3] FAIL       wdiff      same
+  [3/3] KNOWN-GAP  wge        same
+Results for arm64 formal proofs: PASS=0 KNOWN-GAP=2 FAIL=1
+real 14m45s   user 30m56s   peak 5.9 GB (ceiling 8.0 GB)
+```
+
+So `wdiff` — the canary this document says passes, and which must keep passing
+through any model change — does not finish inside the per-proof CPU limit on
+this tree. `lib/ProofLib.olean` (54 MB, 11:59) is newer than `ProofLib.lean`
+(11:58), so this is not a stale-olean artifact I can see. Whether it is a
+regression since the 2026-10-01 `PASS=39` measurement, or a change in the
+machine, was NOT investigated. Until one `wdiff` check finishes inside its
+limit, no change to `_go` or `pred_iff` can be verified by any quick test.
+
+**Decision for the next round** (both are real work; (a) is the prerequisite):
+
+- (a) Find what Lean spends its CPU on in `wdiff_proof.lean` (the candidates are the
+  `simp`/`grind` closers in the ProofLib lemmas it pulls in), make it finish, and
+  re-measure. Only then is the signed-model work below checkable.
+- (b) If (a) is not tractable, run the three proofs once on the integrator with the
+  CPU limit raised, to get true costs before choosing the model work's shape.
+
+**Call-site inventory** (`grep -n _go_zero formal/*.py`, this tree). Every site the
+signed `_go` model touches:
+
+- `formal/arm64_proof_gen.py:2331` and `:2350` — the `{f}_go_zero : ∀ n, {f}_go n = 0`
+  theorem. `:2331` is the dec-while arm of `_gen_go` (2325–2336) and is the one to
+  change; `:2350` is the dec1 arm and must keep its own statement.
+- `:2994` (`_go_simp_lemmas`, dec-while) — a NAME in the terminal simp set; the
+  name stays, its statement changes.
+- `:6315` and `:6417` in `_gen_countdown_loop` (the machine loop's exit-x0 leaf and
+  its `hcondDone` closer) — `simp [mojo, go_zero]` is valid only below 2^63 and
+  needs the `by_cases` split described in Still-open-3 item 3.
+- `:8702` in `_gen_universal_e2e_cfg` — terminal value flow; same signed split.
+- `:11519` and `:11570` in `_gen_dec_while_block` (`prog_correct`'s base and step
+  cases) — the step needs the `m % 2^64 ≥ 2^63` case: one `runF_while_false` step
+  and the identity.
+- `:11607` — the `gozero` name binding.
+
+**Not affected, do not touch:** `:2251`, `:2263`, `:2987`, `:6976` are
+`{f}_loop_go_zero` of the RANGE loop (`_gen_range_loop_model`), a different model.
+
+**The Lean statements to write first** (structure before soundness, FORMAL.md §11.3):
+
+```
+def {f}_go (m : Nat) : UInt64 :=
+  if m < 9223372036854775808 then 0 else UInt64.ofNat m
+theorem {f}_go_zero (m : Nat) (h : m < 9223372036854775808) : {f}_go m = 0
+theorem {f}_go_neg (m : Nat) (h : 9223372036854775808 ≤ m)
+    (hm : m < 18446744073709551616) : {f}_go m = UInt64.ofNat m
+```
+
+`prog_correct` gains the third case `m % 2^64 ≥ 2^63`. `eval_eq_mojo` must then
+conclude `mojo n = n` for a negative `n` through `go (n.toNat % 2^64)` and
+`{f}_go_neg`, not through the old unconditional `go_zero`. The sorry budget for any
+leaf left open must be stated in the commit. `test_formal.py`'s `EXPECTED_FAILURES`
+entries for `countdown` and `wge` stay until those proofs actually pass, and are then
+dropped (anti-rot).
+
+**Tests that prove it, in order:**
+
+1. A generator-text test in `test_formal_call_proof_gen.py`: the dec-while block emits
+   `{f}_go_zero` WITH its `< 2^63` hypothesis and emits `{f}_go_neg`. No Lean. It fails
+   before the change and passes after.
+2. `test_formal.py wdiff` — must stay PASS. It is the canary that the change did not
+   leak into the unsigned `NE` case. (Blocked until item (a) above.)
+3. `test_formal.py countdown wge` — KNOWN-GAP may flip to PASS only when the proofs are
+   complete; the `EXPECTED_FAILURES` entries are then removed.
+
 ## Status (2026-10-04 — the CFG leaves are NAMED and the census is a measurement; `Still open 3` below is unchanged)
 
 Every `sorry` the CFG walk can emit now carries the name of the site that emits
