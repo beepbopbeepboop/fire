@@ -196,6 +196,26 @@ def main():
     print(B.x, B.b)
 main()
 """,
+    'methods_and_constructor_take_up_to_seven_arguments': """\
+def init(self, a, b, c, d, e, f, g):
+    self.t = a + b + c + d + e + f + g
+
+def many(self, a, b, c, d, e, f, g):
+    return self.t * 100 + a + g
+
+def stat(a, b, c, d, e, f, g):
+    return a * 1000 + g
+
+def main():
+    Foo = type('Foo', (), {'__init__': init, 'many': many, 'stat': stat})
+    o = Foo(1, 2, 3, 4, 5, 6, 7)
+    print(o.t)
+    print(o.many(1, 0, 0, 0, 0, 0, 9))
+    print(Foo.stat(3, 0, 0, 0, 0, 0, 4))
+    p = Foo(1, 1, 1, 1, 1, 1, 1)
+    print(p.many(2, 0, 0, 0, 0, 0, 3))
+main()
+""",
     'two_classes_of_one_name_are_two_classes': """\
 def main():
     P = type('Same', (), {'v': 1})

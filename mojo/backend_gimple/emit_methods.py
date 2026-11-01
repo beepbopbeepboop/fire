@@ -3593,16 +3593,16 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             and not getattr(node, 'kwargs', None)
             and not any(isinstance(a, gimple_ctypes.UnaryOp) and _as_str(a.op) in ('*', '**')
                         for a in node.args)):
-        if len(node.args) > 4:
+        if len(node.args) > 7:
             raise RuntimeError(
                 'cannot compile module: a method call on a class made at run time takes at '
-                'most 4 arguments (bug:CODEGEN_enum_runtime_class_creation)')
+                'most 7 arguments (bug:CODEGEN_enum_runtime_class_creation)')
         words = []
         for a in node.args:
             at, av = gen.lower_expr(a)
             words.append(gen._call_expr('int64_t', 'mojo_box_from_double', [('double', av)])
                          if at == 'double' else gen._to_int64(at, av))
-        words += [gen._new_val('int64_t', '(int64_t)0')] * (4 - len(words))
+        words += [gen._new_val('int64_t', '(int64_t)0')] * (7 - len(words))
         res = gen._call_expr('int64_t', 'mojo_rtobj_method_call',
                              [('int64_t', gen._to_int64(ot, ov)),
                               ('char *', gen._intern_string(_as_str(func.member))),
