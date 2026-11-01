@@ -648,10 +648,15 @@ def _quick_type(gen, node) -> str:
             # `_strip_inline_comment`-style tokenizer stack corruption
             # (a huge garbage `indent` value). Found via py_tokenize's own
             # `expanded = line.expandtabs(_INDENT_SIZE)`.
+            # `encode` is str-only in Python, and its result is BYTES, not a
+            # str: the lowering returns a MojoBytes * (see _lower_str_method's
+            # 'encode' case), so the pre-pass must agree with it.
+            if meth == 'encode':
+                return 'MojoBytes *'
             if meth in ('expandtabs', 'lstrip', 'rstrip', 'strip', 'lower',
                         'upper', 'title', 'capitalize', 'swapcase',
                         'replace', 'format', 'zfill', 'center', 'ljust', 'rjust',
-                        'encode', 'decode', 'join', 'group'):
+                        'decode', 'join', 'group'):
                 return 'char *'
             if mod == 're' and meth == 'sub':    return 'char *'
             # The match object is the runtime's universal int64_t scalar —
@@ -782,10 +787,13 @@ def _quick_type(gen, node) -> str:
         # this, format_token()'s `tok.value.replace(...).replace(...)`
         # (fire_compiler.py's own tokenizer dump helper) declared its
         # result int64_t, corrupting the pointer on every read.
+        if (node.func.member == 'encode'
+                and gen._quick_type(node.func.obj) == 'char *'):
+            return 'MojoBytes *'
         if (node.func.member in ('expandtabs', 'lstrip', 'rstrip', 'strip', 'lower',
                     'upper', 'title', 'capitalize', 'swapcase',
                     'replace', 'format', 'zfill', 'center', 'ljust', 'rjust',
-                    'encode', 'decode', 'join')
+                    'decode', 'join')
                 and gen._quick_type(node.func.obj) == 'char *'):
             return 'char *'
     if isinstance(node, gimple_ctypes.MemberExpr):

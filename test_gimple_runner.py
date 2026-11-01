@@ -3455,6 +3455,34 @@ for i in range(30):
 print(len(s), b'k0' in s, b'k29' in s)
 """, "30 True True\n")
 
+    # str.encode() is BYTES, not a str. It was lowered as an identity stub
+    # typed char*, so the value printed as the str and len() counted the
+    # wrong thing for a non-ASCII string (2 for "héllo" was not 6, the
+    # 'é' is two UTF-8 bytes). CPython is the oracle: the bytes repr, the
+    # length, the equality against a bytes literal, the round trip, and the
+    # type are all pinned, from a local, a module global, a function return,
+    # and a chained expression, so each of the four type-inference paths
+    # (lowering, resolve_shared pre-pass, chained quick-type, module global)
+    # is exercised.
+    test_gimple_matches_cpython("gimple_str_encode_is_bytes", """\
+s = "abc"
+b = s.encode()
+print(b)
+print(len(b), type(b) == bytes)
+print(b == b'abc', s.encode().decode() == s)
+GREETING = "héllo"
+ENC = GREETING.encode()
+print(ENC, len(ENC))
+
+def pack(x):
+    return x.encode()
+
+p = pack("é")
+print(p, len(p))
+print(str(7).encode() + b'!')
+print(len("héllo".encode()), "é".encode() == 'é'.encode())
+""")
+
     test_gimple_stdout("gimple_set_str_rehash_unchanged", """\
 s = set()
 for i in range(30):

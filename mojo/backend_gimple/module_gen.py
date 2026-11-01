@@ -12716,11 +12716,18 @@ def gen_module_impl(self, stmts):
                     and _value.func.member == 'readlines'):
                 return 'MojoList *'
             elif (isinstance(_value.func, MemberExpr)
-                    and _value.func.member in ('encode', 'decode', 'format')):
-                # str.encode()/str.decode()/str.format() all lower to a
-                # real `char *` everywhere else in this codegen (see
+                    and _value.func.member == 'encode'):
+                # str.encode() returns BYTES: the lowering builds a real
+                # MojoBytes * (emit_methods' char* 'encode' case), so the
+                # global must be declared as one, not as the str it was
+                # made from.
+                return 'MojoBytes *'
+            elif (isinstance(_value.func, MemberExpr)
+                    and _value.func.member in ('decode', 'format')):
+                # str.decode()/str.format() lower to a real `char *`
+                # everywhere else in this codegen (see
                 # gimple_gen_methods.py's char*-method table, which
-                # stubs all three as identity passthroughs of the
+                # stubs both as identity passthroughs of the
                 # receiver). Without this case the global got declared
                 # int64_t against a char*-producing RHS — a hard
                 # "assignment to 'int64_t' from 'char *'" in
