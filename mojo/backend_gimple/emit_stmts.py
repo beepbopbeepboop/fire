@@ -1356,11 +1356,15 @@ def _gen_stmt_AssignStmt(gen, node):
                      and v in getattr(gen, '_boxed_vals', ())
                      and gen.var_types.get(_copy_src) == 'int64_t'
                      and ginf.tagged_for_target_name(gen, _copy_src))
+        # A receive-only name (`x = yield`, every binding of it) keeps the
+        # resume word's box too: `x = yield` after `next(it)` is the None box,
+        # and the name must render it as None (`tagged_recv_name`).
         _keep_tagged_box = (vtype == 'int64_t'
                             and (v in getattr(gen, '_tagged_word_vals', ())
                                  or _for_copy)
                             and gen.var_types.get(tname, 'int64_t') == 'int64_t'
-                            and ginf.tagged_next_bind_name(gen, _as_str(tname)))
+                            and (ginf.tagged_next_bind_name(gen, _as_str(tname))
+                                 or ginf.tagged_recv_name(gen, _as_str(tname))))
         # A MIXED name (`x = 0` beside `x = v` over a tagged generator) is a
         # box-holding local too, so every int64 store into it must be a box:
         # a plain value is boxed here (`mojo_box_int`), and the local keeps

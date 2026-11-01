@@ -3271,6 +3271,56 @@ def main():
     print(next(it, 2.5))
 main()
 """)
+    # The RECEIVE side of the None family ("a None sent into a generator prints
+    # zero"): `next(it)` resumes the generator with None, so `x = yield` binds
+    # None. The resume ABI used to hand the generator the raw int64 0 and
+    # `print(x)` printed `0`. CPython prints `None`.
+    test_generator_matches_cpython("none_sent_into_generator_default", """\
+def g():
+    x = yield
+    print(x)
+    yield 1
+
+def main():
+    it = g()
+    next(it)
+    next(it)
+main()
+""", """\
+def g():
+    x = yield
+    print(x)
+    yield 1
+
+def main():
+    it = g()
+    next(it)
+    next(it)
+main()
+""")
+    test_generator_matches_cpython("none_sent_into_generator_explicit_yield", """\
+def g():
+    x = yield 7
+    print(x)
+    yield 1
+
+def main():
+    it = g()
+    print(next(it))
+    print(it.send(None))
+main()
+""", """\
+def g():
+    x = yield 7
+    print(x)
+    yield 1
+
+def main():
+    it = g()
+    print(next(it))
+    print(it.send(None))
+main()
+""")
     test_generator_matches_cpython("mixed_str_int_yield_consumed_by_next", """\
 def g():
     yield 1
@@ -3979,6 +4029,60 @@ main()
     with coro.pinned('cpp'):
         test_generator_matches_cpython("tagged_none_equality_cpp", _src, _src)
 
+def run_tagged_none_identity_tests():
+    # `x is None` / `x is not None` on a name bound from `next(g)` on a TAGGED
+    # generator. The `is` lowering compared the slot's WORD, and a tagged False
+    # or int 0 is a box whose bits are 0, so it compared equal to the None
+    # yield's NULL word and answered True. The identity test must read the
+    # box's kind, as `==` does. Pinned against the CPython oracle on the default
+    # path and on the cpp escape hatch.
+    _src = """\
+def g():
+    yield False
+    yield 0
+    yield None
+    yield "a"
+    yield 1.5
+def main():
+    it = g()
+    x = next(it)
+    print(x is None)
+    print(x is not None)
+    x = next(it)
+    print(x is None)
+    print(x is not None)
+    x = next(it)
+    print(x is None)
+    print(x is not None)
+    x = next(it)
+    print(x is None)
+    print(x is not None)
+    x = next(it)
+    print(x is None)
+    print(x is not None)
+main()
+"""
+    test_generator_matches_cpython("tagged_none_identity_default", _src, _src)
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("tagged_none_identity_cpp", _src, _src)
+    # The for-loop target shape: `v` is the loop's box (`_boxed_vals`), not a
+    # `next(g)` bind, so it is covered by the per-name for-target rule.
+    _for_src = """\
+def g():
+    yield False
+    yield 0
+    yield None
+    yield "a"
+def main():
+    for v in g():
+        print(v is None)
+        print(v is not None)
+main()
+"""
+    test_generator_matches_cpython("tagged_none_identity_for_default", _for_src, _for_src)
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("tagged_none_identity_for_cpp", _for_src, _for_src)
+
 def run_tagged_for_target_bind_tests():
     # A for-loop TARGET over a kind-mixed generator, copied to a name
     # (`x = v`), must keep the yield's kind exactly as `x = next(g)` does
@@ -4130,6 +4234,7 @@ main()
 def run_tests():
     run_none_yield_tests()
     run_tagged_none_equality_tests()
+    run_tagged_none_identity_tests()
     run_none_list_iteration_tests()
     run_tagged_word_cpp_tests()
     run_tagged_word_bind_tests()

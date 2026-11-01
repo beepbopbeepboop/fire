@@ -5,7 +5,7 @@ Each program is compiled, RUN, and its stdout compared with CPython's on the sam
 class is a class-table entry (`mojo_type_new`) whose bases are the listed classes and whose
 dict starts from the namespace; `Foo.x`, `Foo.x = v`, `getattr / hasattr` on the handle read the
 table, found through the bases (depth first, left to right). A shape the compiler cannot
-model (a namespace that is a call result) must still be refused by name, not miscompiled.
+model (a user metaclass) must still be refused by name, not miscompiled.
 """
 import sys
 
@@ -182,6 +182,20 @@ def main():
     print(B.q, hasattr(B, 'q'), hasattr(Foo, 'q'))
 main()
 """,
+    'call_result_namespace': """\
+def ns():
+    d = {}
+    d['x'] = 1
+    d['z'] = 'hi'
+    return d
+
+def main():
+    Foo = type('Foo', (), ns())
+    print(Foo.x, Foo.z)
+    B = type('B', (Foo,), dict(b=2))
+    print(B.x, B.b)
+main()
+""",
     'two_classes_of_one_name_are_two_classes': """\
 def main():
     P = type('Same', (), {'v': 1})
@@ -195,17 +209,6 @@ main()
 def main():
     for name, src in CASES.items():
         R.test_gimple_matches_cpython(name, src)
-    R.test_gimple_build_refusal(
-        'call_result_namespace_is_refused_by_name',
-        """\
-def ns():
-    return {'x': 1}
-
-def main():
-    Foo = type('Foo', (), ns())
-    print(Foo.x)
-main()
-""", 'creates a class at run time')
     R.test_gimple_build_refusal(
         'type_dunder_new_with_a_user_metaclass_is_refused_by_name',
         """\

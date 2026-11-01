@@ -4789,7 +4789,7 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
         describe themselves in terms of UNANNOTATED params."""
         return pann is None or pann == ''
 
-    def _visit_call(node, caller_env, callee):
+    def _visit_call(node, caller_env, callee=None):
         # `callee` is the name the call resolves to in THIS module, given by a
         # closure caller whose spelling is an alias (`from m import gen as g`
         # calls `g`, which is `gen` here). Absent, the spelling is the name.
@@ -4988,7 +4988,7 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
                     aliases.add(_cm_as_str(_al))
         return aliases
 
-    def _collect_from(src, closure):
+    def _collect_from(src, visit, closure):
         for s in src:
             fns = []
             if isinstance(s, N.FunctionDef):
@@ -5011,12 +5011,6 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
                 # `_static_env(fn, struct_def)`) is what makes the two agree
                 # about `self.k`.
                 #
-                # The visitors are called BY NAME, not handed in as values: a capturing
-                # nested function passed on from inside another nested function reaches
-                # its callee with a NULL environment in the self-hosted build (the
-                # compiled compiler crashed on every program with a module-level call;
-                # reproduction in bugs/mid/CODEGEN_capturing_closure_value_passed_from_a_closure_has_no_env.md).
-                #
                 # LAZY: the env is built on the first call the visitor will
                 # actually act on (`_wants_call`), not for every function. In the
                 # closure walk almost no function calls one of THIS module's
@@ -5034,27 +5028,21 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
                         if not have_env:
                             cenv = _static_env(fn, sdef)
                             have_env = True
-                        if closure:
-                            _visit_closure_call(n, cenv)
-                        else:
-                            _visit_call(n, cenv, None)
+                        visit(n, cenv)
             # module-level calls (rare, e.g. a bare generator call in a stmt)
             if not isinstance(s, (N.FunctionDef, N.StructDef)):
                 for n in _walk(s):
                     if isinstance(n, N.CallExpr):
-                        if closure:
-                            _visit_closure_call(n, None)
-                        else:
-                            _visit_call(n, None, None)
+                        visit(n, None)
 
     def _collect():
-        _collect_from(stmts, False)
+        _collect_from(stmts, _visit_call, False)
         for _cs in closure_stmts:
             _bound_here.clear()
             _bound_here.update(_from_bound_names(_cs))
             _alias_here.clear()
             _alias_here.update(_module_aliases(_cs))
-            _collect_from(_cs, True)
+            _collect_from(_cs, _visit_closure_call, True)
 
     def _classify():
         # Replace, not merge: a pass that no longer finds a conflict must
@@ -7426,7 +7414,7 @@ MojoGenerator *{base}_start ({start_params}) {{
   return (MojoGenerator *)__g;
 }}
 _Bool {base}_resume (MojoGenerator *__g) {{
-  return (_Bool)__mojo_gen_resume ((int64_t)__g, 0);
+  return (_Bool)__mojo_gen_resume ((int64_t)__g, {resume_word});
 }}
 {value_ctype} {base}_value (MojoGenerator *__g) {{
   return {value_unbox};
@@ -7497,10 +7485,19 @@ def emit_c(meta_entry: dict) -> str:
     body_extra = f', {meta_entry["struct"]} *' if is_method else ''
     last_yield_fn = (_LAST_YIELD_TMPL.format(base=meta_entry['base'])
                      if meta_entry.get('is_async_gen') else '')
+    # The word a plain resume (`<base>_resume`, which `next(g)` calls) hands
+    # the generator as the value of its suspended `x = yield`. Python sends None,
+    # so an int-valued generator (kind 'i' or 'w', both int64_t) gets the
+    # shared None box, which `x = yield` binds as a tagged word and every
+    # consumer renders as None (see emit_infra's tagged_recv_name). The other
+    # kinds keep 0: their receive slot is a pointer / double / bool, to which a
+    # box word would be a wild value.
+    resume_word = 'mojo_box_none ()' if vct == 'int64_t' else '0'
     return _C_TRAMPOLINE_TMPL.format(
         name=meta_entry['name'], base=meta_entry['base'], last_yield_fn=last_yield_fn,
         body_name=meta_entry['body_name'], new_fn=new_fn, value_kind=kind,
         value_ctype=vct, value_unbox=value_unbox, body_extra=body_extra,
+        resume_word=resume_word,
         start_params=start_params, arg_fwd=arg_fwd, new_params=new_params,
     )
 

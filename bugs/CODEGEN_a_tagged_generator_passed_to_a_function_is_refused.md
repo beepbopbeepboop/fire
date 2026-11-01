@@ -1,8 +1,8 @@
 # CODEGEN_a_tagged_generator_passed_to_a_function_is_refused: a valid program refused on the default path
 
-Filed 2026-11-01 when `CODEGEN_a_bare_or_explicit_yield_of_none_prints_zero` was
-closed (its silent `0` is fixed on every shape that compiles; see that doc's
-history in git, `git log -- bugs/CODEGEN_a_bare_or_explicit_yield_of_none_prints_zero.md`).
+Filed 2026-11-01 when the silent `0` from a bare or explicit `yield None` (the
+yield side of the None family, closed in 39ed52623) was fixed on every shape that
+compiles. The fix commit's message carries the measurements.
 
 ## Symptom (refusal, not a silent wrong value)
 

@@ -62,6 +62,16 @@ def test_node_links_are_typed_self_pointers():
     assert 'int64_t _prev;' not in st
 
 
+def test_node_pointer_unwrap_is_identity():
+    """`curr.value()[].next()` on the typed `Node *` unwraps the pointer; it
+    must not read `Node`'s same-named `value` FIELD and call it, and
+    `nn.unsafe_take_pointee()` is the pointer, not a phantom struct method."""
+    c = _compile()
+    assert 'mojo_fnptr_call_0' not in c
+    assert 'Node_1_T_3_Int_unsafe_take_pointee' not in c
+    assert c.count('int64_t.next() stubbed') <= 1, 'Node.next() is stubbed again'
+
+
 def test_erased_word_structs_not_materialized():
     """`Optional[Int](...)` keeps its erased tagged-word model: materializing
     it as a struct is the measured test_optional regression."""
@@ -77,5 +87,6 @@ if __name__ == '__main__':
     test_linked_list_local_is_a_struct()
     test_node_pointer_alias_is_typed()
     test_node_links_are_typed_self_pointers()
+    test_node_pointer_unwrap_is_identity()
     test_erased_word_structs_not_materialized()
     print('PASS: generic-struct local is a struct')

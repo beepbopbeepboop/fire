@@ -85,6 +85,47 @@ def main():
     print(hasattr(d, 'b'))
 main()
 """,
+    # A DIRECT member read of a minted field the instance never received is an
+    # AttributeError in CPython (not a zero). Caught in-program so CPython exits
+    # 0 and the harness can compare stdout + exit code.
+    'direct_read_of_minted_field_absent_on_instance_raises': """\
+class P:
+    def __init__(self):
+        self.a = 1
+
+def main():
+    p = P()
+    p.b = 5
+    q = P()
+    try:
+        print(q.b)
+    except AttributeError:
+        print('absent')
+    print(p.b)
+    p2 = P()
+    p2.b = 9
+    print(p2.b)
+main()
+""",
+    'direct_read_of_method_assigned_field_on_other_instance_raises': """\
+class Box:
+    def __init__(self):
+        self.a = 1
+
+    def set(self):
+        self.c = 7
+
+def main():
+    b = Box()
+    b.set()
+    other = Box()
+    try:
+        print(other.c)
+    except AttributeError:
+        print('absent')
+    print(b.c)
+main()
+""",
     'more_than_64_minted_fields_use_several_presence_words': (
         "class P:\n"
         "    def __init__(self):\n"

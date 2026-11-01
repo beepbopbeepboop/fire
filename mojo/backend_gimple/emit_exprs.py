@@ -111,7 +111,19 @@ def lower_expr(gen, node) -> tuple[str, str]:
     elif isinstance(node, gimple_ctypes.UnaryOp):
         return gen._lower_UnaryOp(node)
     elif isinstance(node, gimple_ctypes.CallExpr):
-        return gen._lower_call(node)
+        _rt, _rv = gen._lower_call(node)
+        # A `yield` used as a VALUE (`x = yield`, `print((yield))`) reads the
+        # resume word, which is the None box when the generator was resumed by
+        # `next()` / `send(None)` (coro.py's trampoline). Mark it as a tagged
+        # word, as `next(g)` on a mixed generator is marked, so a consumer
+        # renders it by kind. A name bound to it is unwrapped at the bind unless
+        # it is a receive-only name (emit_stmts' simple-name bind, tagged_recv_name).
+        if (isinstance(node.func, gimple_ctypes.IdentExpr)
+                and node.func.name == '__mojo_coro_yield_i'
+                and _rt == 'int64_t' and isinstance(_rv, str)):
+            gen._boxed_vals.add(_rv)
+            gen._tagged_word_vals.add(_rv)
+        return _rt, _rv
     elif isinstance(node, gimple_ctypes.TernaryExpr):
         return gen._lower_TernaryExpr(node)
     elif isinstance(node, gimple_ctypes.MemberExpr):
@@ -2744,6 +2756,11 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         return 'char *', gen._new_val('char *', f"(char *){dn}")
     if node.member in field_map:
         field_type = field_map[node.member]
+        # A minted field (StructDef.presence_fields) the instance never
+        # received is an AttributeError on a direct read, not its zero
+        # storage: guard the load on the instance's presence bit.
+        gimple_ctypes.presence_check_emit(
+            gen, gen._struct_name_owner.get(struct_name), node.member, ov, op, struct_name)
         t = gen._new_val(field_type, f'{ov}{op}{gimple_ctypes._safe_field(node.member)}')
         _mark_boxed_field_read(gen, struct_name, node.member, field_type, t)
         # PART 6 (2026-10-22, family C): record a READ of a tagged-Optional
@@ -3919,14 +3936,32 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # "not None" on the scalar arm, printing `False` for `v == None`. The
     # answer is the box's kind (`mojo_word_is_none`), which for a non-box is
     # the same constant False the scalar arm gives.
-    if op in ('==', '!=') and _is_none_literal(left_node) != _is_none_literal(right_node):
+    #
+    # `is None` / `is not None` takes the same kind read, but ONLY for a
+    # TAGGED word (`_tagged_word_vals`: a name bound from `next(g)` on a
+    # kind-mixed generator). There a tagged False or int 0 is a box whose bits
+    # are 0, so the word compare answered `is None` True for it. Every other
+    # boxed operand keeps the word compare: a list or tuple slot that is None
+    # is a bare NULL word with no box, which the kind read would call "not
+    # None" (pinned by `run_tagged_none_identity_tests`).
+    _tagged = getattr(gen, '_tagged_word_vals', ())
+    if op in ('==', '!=', 'is', 'is not') and _is_none_literal(left_node) != _is_none_literal(right_node):
         _other = rv if _is_none_literal(left_node) else lv
         _other_t = rt if _is_none_literal(left_node) else lt
+        _other_node = right_node if _is_none_literal(left_node) else left_node
+        _ident = op in ('is', 'is not')
+        # A for-loop target over a tagged generator (`for v in g()`) holds the
+        # loop's box in `_boxed_vals` but is not in `_tagged_word_vals`; the
+        # per-name rule `tagged_for_target_name` is what says every value the
+        # name holds is that box, so it takes the same kind read.
+        _for_tagged = (_ident and isinstance(_other_node, gimple_ctypes.IdentExpr)
+                       and ginf.tagged_for_target_name(gen, _other_node.name))
         # Only an int word: a `char *` name keeps its NULL-pointer test below.
         # A float box answers 0 here, which is the right answer for a float.
-        if _other_t in ('int', 'int64_t') and _other in getattr(gen, '_boxed_vals', ()):
+        if (_other_t in ('int', 'int64_t') and _other in getattr(gen, '_boxed_vals', ())
+                and (not _ident or _other in _tagged or _for_tagged)):
             _is_none = gen._call_expr('int', 'mojo_word_is_none', [('int64_t', _other)])
-            _cmp = '!= 0' if op == '==' else '== 0'
+            _cmp = '!= 0' if op in ('==', 'is') else '== 0'
             _t = gen._new_temp('_Bool')
             gen._emit(f'  {_t} = {_is_none} {_cmp};')
             return '_Bool', _t

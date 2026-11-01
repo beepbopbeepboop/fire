@@ -401,8 +401,17 @@ def _lower_generator_send(gen, node, av: str, api: dict) -> tuple[str, str]:
     the runtime function directly rather than through the trampoline."""
     vct = api['value_ctype']
     if len(node.args) == 1:
-        st, sv = gen.lower_expr(node.args[0])
-        send = _gen_slot_box(gen, st, sv, vct)
+        arg = node.args[0]
+        if (vct == 'int64_t'
+                and (isinstance(arg, gimple_ctypes.NoneLiteral)
+                     or (isinstance(arg, gimple_ctypes.IdentExpr) and arg.name == 'None'))):
+            # `g.send(None)` on an int-valued generator ('i' or 'w', both
+            # int64_t): the same None box a plain resume sends (coro.py's
+            # trampoline), not the raw 0 that `x = yield` reads as zero.
+            send = gen._call_expr('int64_t', 'mojo_box_none', [])
+        else:
+            st, sv = gen.lower_expr(arg)
+            send = _gen_slot_box(gen, st, sv, vct)
     else:
         send = '0'
     handle = gen._to_int64('MojoGenerator *', av)
@@ -1474,6 +1483,9 @@ def _lower_type_new(gen, node, args=None):
     None when the arguments are not that literal shape (the caller refuses by name).
     `args` overrides `node.args` (`type.__new__(type, n, b, ns)` passes its last three)."""
     name_n, bases_n, ns_n = node.args if args is None else args
+    # Python evaluates the arguments left to right; a call-result namespace can have effects.
+    nt, nv = gen.lower_expr(name_n)
+    nm = nv if nt == 'char *' else gen._new_val('char *', f'(char *){gen._to_int64(nt, nv)}')
     literal_bases = isinstance(bases_n, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr))
     bases_list = None
     if not literal_bases:
@@ -1491,17 +1503,17 @@ def _lower_type_new(gen, node, args=None):
             if not isinstance(k, gimple_ctypes.StringLiteral) or N.is_fstring_literal(k):
                 return None
             keys.append(_as_str(k.value))
-    elif not isinstance(ns_n, (gimple_ctypes.IdentExpr, gimple_ctypes.MemberExpr)):
+    elif not isinstance(ns_n, (gimple_ctypes.IdentExpr, gimple_ctypes.MemberExpr,
+                               gimple_ctypes.CallExpr)):
         return None
     ns_dict = None
     if not isinstance(ns_n, gimple_ctypes.DictExpr):
-        # a COMPUTED namespace (a variable): only a dict value can be walked into the table
+        # a COMPUTED namespace (a variable or a call result): only a dict value can be walked
+        # into the table
         nst, nsv = gen.lower_expr(ns_n)
         if nst != 'MojoDict *':
             return None
         ns_dict = nsv
-    nt, nv = gen.lower_expr(name_n)
-    nm = nv if nt == 'char *' else gen._new_val('char *', f'(char *){gen._to_int64(nt, nv)}')
     cls = gen._call_expr('int64_t', 'mojo_type_new', [('char *', nm)])
     if bases_list is not None:
         gen._void_call('mojo_type_add_bases_from_list', [('int64_t', cls), ('MojoList *', bases_list)])
@@ -1583,7 +1595,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         raise RuntimeError(
             'cannot compile module: type.__new__(metacls, name, bases, namespace) creates a '
             'class at run time, which the compiled path models only for metacls `type`, a '
-            'literal-or-dict-variable namespace and tuple/list bases '
+            'literal, dict-variable or dict-call-result namespace and tuple/list bases '
             '(bug:CODEGEN_enum_runtime_class_creation)')
     # `setattr(Cls, name, v)` / `getattr(Cls, name[, d])` / `hasattr(Cls, name)` / `delattr(Cls, name)`
     # where the first argument is a CLASS (a struct name, or `cls` in a classmethod): attributes

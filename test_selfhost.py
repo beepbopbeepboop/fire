@@ -45,7 +45,7 @@ TWO_LINE = "x = 1\nprint(x)\n"
 # call at all, so it passed while the self-hosted compiler crashed (SIGSEGV) on every
 # program that had one: `coro._scan_callsite_param_kinds` passed a capturing closure on as a
 # value, which reaches its callee with a NULL environment (see
-# bugs/mid/CODEGEN_capturing_closure_value_passed_from_a_closure_has_no_env.md).
+# the capturing-closure NULL-env bug, fixed at its root in 145fd1089).
 CALL_PROGRAM = ("def f(a, b):\n    return f\"x={a} y={b + 1}\"\n"
                 "print(f(3, 4))\nname = \"w\"\nprint(f\"hello {name} {len(name)}\")\n")
 
