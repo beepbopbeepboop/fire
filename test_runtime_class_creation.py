@@ -159,6 +159,16 @@ def main():
     print(isinstance(A(), B), isinstance(o, (C, A)), isinstance(5, A))
 main()
 """,
+    'type_dunder_new_with_the_type_metaclass': """\
+def main():
+    Foo = type.__new__(type, 'Foo', (), {'x': 1, 'z': 'hi'})
+    print(Foo.x, Foo.z, Foo.__name__)
+    B = type.__new__(type, 'B', (Foo,), {'b': 2})
+    print(B.x, B.b)
+    B.q = 5
+    print(B.q, hasattr(B, 'q'), hasattr(Foo, 'q'))
+main()
+""",
     'two_classes_of_one_name_are_two_classes': """\
 def main():
     P = type('Same', (), {'v': 1})
@@ -183,6 +193,17 @@ def main():
     print(Foo.x)
 main()
 """, 'creates a class at run time')
+    R.test_gimple_build_refusal(
+        'type_dunder_new_with_a_user_metaclass_is_refused_by_name',
+        """\
+class Meta(type):
+    pass
+
+def main():
+    Foo = type.__new__(Meta, 'Foo', (), {'x': 1})
+    print(Foo.x)
+main()
+""", 'type.__new__(metacls')
     print(f'\n{R._PASS} passed, {R._FAIL} failed')
     return 1 if (R._FAIL or R._TIMEOUT) else 0
 
