@@ -56,6 +56,24 @@ def _gmm_callexpr_node(x) -> CallExpr:
     (miss sentinel 1 -> `mojo_list_len(1)` SIGSEGV)."""
     return x
 
+# `os.path.realpath` is a chain of lstat calls and these two predicates ask it about the
+# same few paths (`_SELFHOST_DIR`, each compiler source file) tens of thousands of times
+# per `--dump-full` -- about 7% of the compile. A path's realpath does not change while the
+# compile runs. Annotated like the other module-level memo tables the compiled path uses.
+_REALPATH_MEMO: dict = {}
+
+
+def _cached_realpath(p: str) -> str:
+    # Typed on purpose: an unannotated helper's result unified with unrelated
+    # call sites in the self-hosted build (`invalid operands to binary +`).
+    _hit: str = _as_str(_REALPATH_MEMO.get(p, ''))
+    if _hit != '':
+        return _hit
+    _r: str = _as_str(os.path.realpath(p))
+    _REALPATH_MEMO[p] = _r
+    return _r
+
+
 def _is_selfhost_source_file(path: str) -> bool:
     """True when `path` is a source file OF this compiler — a root-level
     `*.py` beside `fire_compiler.py`, or one inside its own `mojo/` package
@@ -104,9 +122,9 @@ def _is_selfhost_source_file(path: str) -> bool:
     # comment's rule. Nothing in `mojo/middle/*` may reach `gimple_codegen` at
     # module level, because that edge IS the middle-tier import cycle.
     import gimple_codegen
-    _rp = os.path.realpath(os.path.abspath(path))
+    _rp = _cached_realpath(os.path.abspath(path))
     _sd = gimple_codegen._SELFHOST_DIR
-    _rsd = os.path.realpath(_sd)
+    _rsd = _cached_realpath(_sd)
     _dir = os.path.dirname(_rp)
     # `'/'`, not `os.sep`: `gimple_ctypes.os` is an opaque module marker on
     # the compiled backend and `.sep` raised `AttributeError: sep`
@@ -185,8 +203,8 @@ def _is_selfhost_sibling_alias(gen, module_name: str) -> bool:
     # `_mojo_dispatch_setattr` on a bogus pointer. Re-derived locally rather
     # than imported cross-module (see _is_selfhost_source_file's own docstring
     # for the self-hosted resolution gap that forces the duplication).
-    _rcur = gimple_ctypes.os.path.realpath(cur_abs)
-    _rsd = gimple_ctypes.os.path.realpath(sd)
+    _rcur = _cached_realpath(cur_abs)
+    _rsd = _cached_realpath(sd)
     _in_shtree = (cur_abs == sd or cur_abs.startswith(sd + gimple_ctypes.os.sep)
                   or _rcur == _rsd or _rcur.startswith(_rsd + gimple_ctypes.os.sep))
     if not _in_shtree:

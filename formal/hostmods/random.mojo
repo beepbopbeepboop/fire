@@ -20,7 +20,7 @@ callers (`test_gimple.py`, `tools/formal_fuzz.py`, `tools/formal_proof_fuzz.py`,
 `tools/formal_model_fuzz.py`, `formal/x86_64_model_fuzz.py`) spell
 `random.Random(<a str or an int>)`, and a `Random` is an OBJECT whose whole
 state is 624 words — behind a pointer, on the wrong side of a dylib boundary, in
-the place `bugs/FORMAL_module_state_no_storage.md` is about. **The capability
+the place `bugs/formal/FORMAL_module_state_no_storage.md` is about. **The capability
 that would serve them is not this module; it is that one**, and it is not
 reachable by writing a `.mojo` file. The two callers that are served
 (`test_formal_hashlib.py:233` and `test_formal_time.py:345`) spell the module
@@ -33,7 +33,7 @@ THE PREMISE, MEASURED, AND IT IS NOT THE OBVIOUS ONE
 ---------------------------------------------------
 This module keeps 624 words of state in two module-level names and reads and
 writes them from several functions, so it rests on a claim that
-`bugs/FORMAL_module_state_no_storage.md` appears to deny: **a module's OWN
+`bugs/formal/FORMAL_module_state_no_storage.md` appears to deny: **a module's OWN
 globals have storage, and it persists across calls inside one process.**
 Measured on both architectures before this module was written, from a program
 whose module-level `var` is written through `global` by one function and read by
@@ -121,7 +121,7 @@ be a wrong answer.
 WHAT IS NOT HERE, AND WHY — each one measured, none of them approximated
 ----------------------------------------------------------------------
   * **`random.Random(seed)`** — 5 of the 8 files, and the object half:
-    `bugs/FORMAL_module_state_no_storage.md`. A `Random` is 624 words behind a
+    `bugs/formal/FORMAL_module_state_no_storage.md`. A `Random` is 624 words behind a
     pointer and cannot cross a dylib boundary. What is written here is the
     module-level `seed` the two reachable callers spell, and nothing pretends
     to be the other half.
@@ -334,7 +334,7 @@ def _word_count(n: int) -> int:
     count: a zero seed is ONE key word, and that word is 0. The key is never
     MATERIALISED as a list — `_seed_by_array` reads word `j` out of `n` with a
     shift — because a run-time-length list is not a value this path has
-    (`bugs/FORMAL_listdir_no_run_time_sequence.md`) and the words are the same
+    (`bugs/formal/FORMAL_listdir_no_run_time_sequence.md`) and the words are the same
     two lines either way.
     """
     var w = 1

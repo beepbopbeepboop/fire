@@ -14,7 +14,7 @@ CPython's `io` is STREAMS: `open`, `StringIO`, `BytesIO`, `FileIO`, the
 `RawIOBase` / `BufferedIOBase` / `TextIOBase` hierarchy and the `Reader` /
 `Writer` pair. Every one of those is an object with state — a descriptor, a
 cursor and a buffer — and on this path **a value cannot cross a dylib boundary
-unless it is one 64-bit word** (`bugs/FORMAL_module_state_no_storage.md`).
+unless it is one 64-bit word** (`bugs/formal/FORMAL_module_state_no_storage.md`).
 `formal/hostmods/sys.mojo` already says what that leaves of CPython's `sys`
 streams, and this is the same statement one level up: `sys` spells
 `sys.stdout.write` as two functions because a stream is not a word, and `io` is
@@ -39,7 +39,7 @@ WHAT IS NOT HERE, AND WHY
     this one. A file's CONTENTS are the missing half, and they are a stream.
   * `StringIO`, `BytesIO` — a MUTABLE BUFFER WITH A CURSOR. A buffer that grows
     is a run-time-length sequence, which is the same limit that stops
-    `os.listdir` and SHAKE (`bugs/FORMAL_listdir_no_run_time_sequence.md`): a
+    `os.listdir` and SHAKE (`bugs/formal/FORMAL_listdir_no_run_time_sequence.md`): a
     list's capacity is the number of `append` SITES in the function that builds
     it, so a buffer whose length is only known at run time cannot be built.
     `test_formal_sweep_truth.py` is the one file in this tree blocked on `io`,

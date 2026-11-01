@@ -6,7 +6,7 @@ r"""`tools/formal_proof_shape.py`'s text handling, without running Lean.
 WHY THIS FILE IS LEAN-FREE, AND WHY IT EXISTS AT ALL
 -----------------------------------------------------
 `tools/formal_proof_shape.py` answers two questions about a generated proof that
-`bugs/FORMAL_the_arm64_proof_time_floor_is_one_composition_theorem.md` needed:
+`bugs/formal/FORMAL_the_arm64_proof_time_floor_is_one_composition_theorem.md` needed:
 where the seconds go (`--mode profile`) and what the expensive tactic is still
 trying to prove (`--mode goal`). Both cost one `lean` run over a 250 KB
 generated file — 12-20 s and ~2 GB each — so the instrument itself is far more
@@ -314,7 +314,7 @@ class TestObjectiveVersusContext(unittest.TestCase):
     `formal/examples/bitops.mojo` that is 23 856 characters over 307 lines of
     which the objective is **three lines and 110 characters** — the rest is 40
     hypotheses, four groups of which embed a fully-expanded 33-field
-    `Arm64State`. `bugs/FORMAL_the_arm64_proof_time_floor_is_one_composition_theorem.md`
+    `Arm64State`. `bugs/formal/FORMAL_the_arm64_proof_time_floor_is_one_composition_theorem.md`
     §Status records a whole memory-window argument built on the 23 856 and then
     records that the number is 99.5 % context, which is exactly the failure this
     reader removes: the measurement was of the printed state, not of the thing

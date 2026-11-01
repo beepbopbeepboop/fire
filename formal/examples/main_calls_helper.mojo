@@ -16,7 +16,7 @@
 #
 # So "an entry that calls something" is refused and "a callee that is the
 # entry" is not, and the corpus says so in two rows instead of one. See
-# `bugs/FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_
+# `bugs/formal/FORMAL_arm64_the_universal_theorem_cannot_follow_a_call_into_the_same_
 # image.md`, which measures the same refusal over the breadth census.
 def helper(a):
     return a + 3

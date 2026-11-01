@@ -1,6 +1,6 @@
 # CODEGEN: a `*parts: T` variadic parameter's elements are typed `int64_t`, so a struct `/=` element is raw arithmetic
 
-Found 2026-10-30 while fixing the gate break in `CODEGEN_int_true_division_truncates.md`.
+Found 2026-10-30 while fixing the gate break in the Int / Int true-division fix (`test_codegen_int_div_zero.py`).
 
 ## Repro
 

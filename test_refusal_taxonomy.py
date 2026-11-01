@@ -28,7 +28,7 @@ protecting, and they are not the same thing:
    sample attached to it.** The family "a module whose API is its top-level
    statements, imported by another" and its sample were removed on
    2026-10-03 with the dylib-module-body row it keyed on (§6 of
-   the `b7` round, indexed in `bugs/FORMAL_sweep_work_map.md` §3.1, whose
+   the `b7` round, indexed in `bugs/formal/FORMAL_sweep_work_map.md` §3.1, whose
    document was consolidated with the fix): both object writers emit a
    load-time initializer, so the refusal
    that named it no longer exists and a sample of a message nothing produces is
@@ -786,7 +786,7 @@ SAMPLES = [
 # So: one real message per cause, abbreviated at clause boundaries exactly as
 # above, and every cause must be reached by at least one of them. Cut from the
 # 2026-09-30 r2 arm64 sweep (637 files, log in the worktree that produced
-# the `2026-09-30_r2` round of `bugs/FORMAL_sweep_work_map.md`).
+# the `2026-09-30_r2` round of `bugs/formal/FORMAL_sweep_work_map.md`).
 CAUSE_SAMPLES = [
     ("MLIR dialect construct (__mlir_attr / __mlir_type / __mlir_op)",
      "the module-level comptime binding '_PLUGIN_COUNT' is initialized from an "
@@ -930,7 +930,7 @@ CAUSE_SAMPLES = [
     # tree, every one of them this one sentence. The ranking reported them as
     # `other refusal` — the bucket `tools/formal_sweep_causes.py`'s own docstring
     # defines as "nobody has looked" — which is the defect §5 of
-    # the `b10` round of `bugs/FORMAL_sweep_work_map.md` is about.
+    # the `b10` round of `bugs/formal/FORMAL_sweep_work_map.md` is about.
     #
     # **ONE sample, and BUILT, where there were two cut by hand until
     # 2026-10-05.** The two ends of the row differ only in the names they name
@@ -1094,7 +1094,7 @@ CAUSE_SAMPLES = [
      "(6 in registers and 18 on the stack)"),
     # The two x86-64-only refusals. They are the two files whose message DIFFERS
     # between architectures on an otherwise class-identical sweep
-    # (`bugs/FORMAL_known_limits.md` §6.5), and they are here because the doc
+    # (`bugs/formal/FORMAL_known_limits.md` §6.5), and they are here because the doc
     # had measured the drift the table could not show.
     ("an operator the x86-64 codegen does not lower",
      "unsupported unary operator '^' on the formal x86-64 path"),
@@ -1465,7 +1465,7 @@ def _no_def_callee_arm_checks(failures):
     arm classifies as the one family in BOTH tables.
 
     The row this rests on is the sweep's `callee has no definition on this
-    path` (the `2026-09-30` round of `bugs/FORMAL_sweep_work_map.md` §3.1,
+    path` (the `2026-09-30` round of `bugs/formal/FORMAL_sweep_work_map.md` §3.1,
     row 8 — 12 files in the sweep's scope, 41 over all roots, and a ceiling
     measured at 0 for both arms, which is why there is nothing left to fix
     here and only the arms to keep honest): the
@@ -2071,7 +2071,7 @@ _HOST_UNTIERED_NAME = "bz2"
 # error` can produce, and the one this sample has to be written in.** It used to
 # be `"… which is not a stdlib or sibling module, and no such file exists"`,
 # which was what a module in neither tier was refused with until
-# `bugs/FORMAL_stdlib_module_names_are_not_classified.md` §0 gave the function a
+# `bugs/formal/FORMAL_stdlib_module_names_are_not_classified.md` §0 gave the function a
 # third arm: a name CPython ships and no tier names is now told it is "a
 # CPython standard-library module, which has no Mojo source in this tree and no
 # tier …". The sample is only parsed for the module name, so the words never

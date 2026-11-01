@@ -32,7 +32,7 @@ REMAINING PLAN for option B (the guide the next round executes):
      generator symbol(s)`). The same generator with a LOCAL struct
      (`v = Value("a")` inside the body) is accepted. This is
      `CODEGEN_generator_struct_typed_param_refused` (see
-     `bugs/CODEGEN_generator_function_Lib_glob.md` for its sibling). Under the
+     Lib/glob.py's `iglob` for its sibling). Under the
      default backend, `items_from_keys_and_values(keys, values)` and
      `PyDictObjectPtr.iteritems` (struct-typed params/self) are expected to
      hit the same refusal. NOT yet measured on libpython.py itself: the next

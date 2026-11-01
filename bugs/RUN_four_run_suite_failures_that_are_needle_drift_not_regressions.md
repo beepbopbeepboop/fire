@@ -2,7 +2,7 @@
 
 **Area:** `test_formal_run.py`'s build-and-run cases.
 
-**Status: PARTIAL — cases 1–3 measured and pinned; case 4 (tag-generator host-import wall) remains with `bugs/FORMAL_the_host_import_wall_is_at_its_honest_floor.md`.** Cases 1 (`deref_refuse_a_binary64_value_store_of_an_integer`) already passes on master; cases 2 (`type_argument_list_on_a_generic_struct_of_this_unit_is_read_as_a_container`) and 3 (`comptime_binding_with_a_literal_value_still_builds`) had needle drift and are now pinned to their measured refusal messages (`refuse:the function which created it...` and `refuse:Refused rather than read as an index...` respectively), verified by `test_formal_run.py` and `test_regression_needle_drift.py`. Case 4 is out of scope per the doc's own instruction.
+**Status: PARTIAL — cases 1–3 measured and pinned; case 4 (tag-generator host-import wall) remains with `bugs/formal/FORMAL_the_host_import_wall_is_at_its_honest_floor.md`.** Cases 1 (`deref_refuse_a_binary64_value_store_of_an_integer`) already passes on master; cases 2 (`type_argument_list_on_a_generic_struct_of_this_unit_is_read_as_a_container`) and 3 (`comptime_binding_with_a_literal_value_still_builds`) had needle drift and are now pinned to their measured refusal messages (`refuse:the function which created it...` and `refuse:Refused rather than read as an index...` respectively), verified by `test_formal_run.py` and `test_regression_needle_drift.py`. Case 4 is out of scope per the doc's own instruction.
 
 ## What I ran
 
@@ -52,7 +52,7 @@ Pins `refuse:compile-time explicit-parameter list` for
 row's whole subject is that the list is read as a CONTAINER. It refuses with the
 **wide-receiver** sentence instead ("…the function which created it, so it can
 only be read, written, copied, or passed as a method's receiver", which also
-cites `bugs/FORMAL_wide_receiver_by_reference.md`).
+cites `bugs/formal/FORMAL_wide_receiver_by_reference.md`).
 
 **This row's own neighbour says the pin is stale**: the comment immediately below
 it records that "`Triple[Int, s, False]` now draws that sentence too, because
@@ -81,7 +81,7 @@ Not a case at all — a whole-file check. Its import closure does not resolve:
 itself ("every one of those is a `not-answerable/host-import` row in the sweep
 and takes this file's 1043 build-and-run rows with it"). This is the documented
 host-import wall, not a regression, and it is the same subject as
-`bugs/FORMAL_the_host_import_wall_is_at_its_honest_floor.md`. **Next step:** it
+`bugs/formal/FORMAL_the_host_import_wall_is_at_its_honest_floor.md`. **Next step:** it
 is that doc's, and nothing on this branch may change it.
 
 ## What is NOT wrong here

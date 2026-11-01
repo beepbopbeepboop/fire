@@ -145,7 +145,7 @@ BOOL_TYPE_NAMES = frozenset({"Bool", "bool"})
 # are therefore NOT here: they stay unclassified, which routes them into the
 # pre-existing refusal with a reason about their declared type rather than
 # producing an integer where a half-precision value should be.  See
-# `bugs/FORMAL_float_binary64_only.md`.
+# `bugs/formal/FORMAL_float_binary64_only.md`.
 #
 # Both spellings are here, for the reason `TYPE_NAMES` carries both `int` and
 # `Int` and `STRING_TYPE_NAMES` both `String` and `str`: they are one

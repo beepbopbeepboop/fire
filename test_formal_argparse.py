@@ -602,7 +602,7 @@ def mojo_argv_lines(parser):
     """The embedded command lines, one `if` arm per case.
 
     The formal entry stub takes ONE integer and the command line is not a source
-    on this target at all (`bugs/FORMAL_module_state_no_storage.md`, measurement
+    on this target at all (`bugs/formal/FORMAL_module_state_no_storage.md`, measurement
     (4)), so the command line is compiled in and the integer selects the case.
     One image per parser therefore covers every case in the table, which is what
     makes a differential test against CPython affordable at all: an image per

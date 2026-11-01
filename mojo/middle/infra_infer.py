@@ -382,7 +382,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
     # and `_SCALAR_ARITY_BUILTINS` below is what keeps that true — see its own
     # comment for why the arity test is not optional.
     _ITERABLE_CONSUMING_BUILTINS = {
-        'map', 'zip', 'enumerate', 'sorted', 'reversed', 'iter', 'next',
+        'map', 'zip', 'enumerate', 'sorted', 'reversed', 'iter',
         'list', 'tuple', 'set', 'frozenset', 'sum', 'any', 'all',
         'min', 'max', 'divmod', 'round',
     }
@@ -733,6 +733,19 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                         is_indirect = isinstance(a, gimple_ctypes.IdentExpr) and a.name in single_char_vars
                         if (is_direct or is_indirect) and _is_single_char_literal(b):
                             _F['is_char_compared'] = True
+                if expr.op == 'in' and isinstance(expr.right, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
+                    # `path[0] in ('.', ...)`: an element of the parameter tested
+                    # against single-character string literals is a character of a
+                    # string, exactly as `path[0] == '.'` is (Lib/glob.py's
+                    # `_ishidden`).
+                    _a_in = expr.left
+                    if (isinstance(_a_in, gimple_ctypes.SubscriptExpr)
+                            and not isinstance(_a_in.index, gimple_ctypes.SliceExpr)
+                            and isinstance(_a_in.obj, gimple_ctypes.IdentExpr)
+                            and _a_in.obj.name in derived_from_param):
+                        for _el in expr.right.elements:
+                            if _is_single_char_literal(_el):
+                                _F['is_char_compared'] = True
                 if expr.op == '+':
                     # `param + <string literal>` / `<string literal> +
                     # param` (directly, or through a local already known
@@ -1363,10 +1376,38 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                         # "cannot coerce MojoList * to MojoDict * ... value=
                         # 'binding'", which took `selfhost`, `mojoc` and
                         # `bootstrap-stage2-cc` down together.
+                        # A parameter handed to `os.path.*(...)` is a path (a
+                        # string or bytes pointer in this model): slicing it
+                        # (`pathname[:0]`) is a string slice, not a list's.
+                        _os_path_arg = False
+                        for _fcx in function_calls:
+                            _fcxp = _as_str(_fcx).split(_FC_SEP)
+                            if _fcxp[0] == '__os_path_arg':
+                                _os_path_arg = True
+                                continue
+                            # ...or forwarded to a function whose own parameter
+                            # was inferred a string.
+                            _fnames = getattr(gen, '_func_param_names', {}).get(_fcxp[0])
+                            if _fnames and len(_fcxp) > 1:
+                                try:
+                                    _fpn = _fnames[int(_fcxp[1])]
+                                except (ValueError, IndexError):
+                                    continue
+                                if gen._inferred_param_types.get(_fcxp[0], {}).get(_fpn) == 'char *':
+                                    _os_path_arg = True
+                        # ...or one handed on to another function's path-word
+                        # parameter (`iglob` -> `_iglob`, a generator this
+                        # inference never sees).
+                        import mojo.middle.coro as _coro
+                        if (pname in _coro._PTR_FORWARDED.get(_as_str(func.name), ())
+                                or pname in getattr(func, '_ptr_forwarded', ())):
+                            _os_path_arg = True
+                        _fallback = 'MojoList *'
                         inferred[pname] = (_returned_param_containers(func)
                                           .get(pname)
                                           or _rebound_param_containers(gen, func)
-                                          .get(pname) or 'MojoList *')
+                                          .get(pname)
+                                          or ('char *' if _os_path_arg else _fallback))
 
             # If not subscripted, try to infer from function calls
             elif function_calls:
@@ -1489,6 +1530,19 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
             # for the reason given where that list is built.
             if pname not in inferred and is_string_method and len(_struct_evidence_list) == 0:
                 inferred[pname] = 'char *'
+
+    # An UNANNOTATED parameter whose declared default is a float literal IS a
+    # float parameter, by the default-as-evidence rule `_param_ctype` applies
+    # to its definition. Recorded here too so the body's return-type inference
+    # (which seeds `var_types` from this table, not from `_param_ctype`) agrees
+    # with the signature: `def keep(scale=0.5): return scale` inferred
+    # `int64_t` and printed 0 for 0.5. Weaker than any usage evidence above.
+    _fdefaults = getattr(func, 'param_defaults', None) or {}
+    for _fp in func.params:
+        _fpn = _as_str(_fp[0]).lstrip('*')
+        if (_fp[1] is None and _fpn not in inferred
+                and isinstance(_fdefaults.get(_fpn), FloatLiteral)):
+            inferred[_fpn] = 'double'
 
     # A container guess is only as good as the body's own use of the name. A
     # parameter the body REBINDS to a container of another kind (`live =
@@ -1735,6 +1789,13 @@ def _collect_return_types(gen, stmts: list, acc: list):
                 gen._collect_return_types(node.else_body, acc)
         elif isinstance(node, (gimple_ctypes.WhileStmt, gimple_ctypes.ForStmt)):
             gen._collect_return_types(node.body, acc)
+            if node.else_body:
+                gen._collect_return_types(node.else_body, acc)
+        elif isinstance(node, gimple_ctypes.MatchStmt):
+            # A function whose `return`s are all inside `match` arms had NO return statement as
+            # far as this scan could see, so it was typed `void` (or `int64_t`) and handed back 0.
+            for _mc in node.cases:
+                gen._collect_return_types(_mc.body, acc)
         elif isinstance(node, gimple_ctypes.TryStmt):
             gen._collect_return_types(node.body, acc)
             for h in node.handlers:
@@ -1750,7 +1811,15 @@ def _infer_return_type_core(gen, body: list) -> str:
     """Infer return type by scanning body for ReturnStmt nodes."""
     acc: list[str] = []
     gen._collect_return_types(body, acc)
-    return gimple_ctypes.TypeLattice.join_all(acc) if acc else 'void'
+    if acc:
+        return gimple_ctypes.TypeLattice.join_all(acc)
+    # A function that can only RAISE (an abstract method: `raise
+    # NotImplementedError`) never produces a value, but a subclass overrides it
+    # and every call through the base reads one: a word, not `void`.
+    if (body and isinstance(body[-1], gimple_ctypes.RaiseStmt)
+            and not _as_str(gen.current_func_name or '').startswith('__mgco')):
+        return 'int64_t'
+    return 'void'
 
 # A local bound to a CONTAINER LITERAL, and the ctype that literal is.
 # Deliberately only these four node types: a container is a real pointer,
@@ -2179,6 +2248,17 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
                     # generator api, and only when `next` is not shadowed, so
                     # nothing about a scalar- or opaque-class-valued call
                     # changes.
+                    elif (isinstance(_v.func, gimple_ctypes.MemberExpr)
+                          and _vt in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *')
+                          and gen._module_attr_call_return_type(_v) == _vt):
+                        # `c = m.f(...)` through a bare-import module binding
+                        # whose defining unit published a pointer return: a
+                        # local bound to it is that pointer, so `return c`
+                        # must not infer the int64_t default (the string
+                        # printed as its address). Gated on the SAME helper
+                        # `_quick_type` answers the call with, never on the
+                        # member name alone.
+                        cand = _vt
                     elif (isinstance(_v.func, gimple_ctypes.IdentExpr)
                           and _as_str(_v.func.name) == 'next'
                           and not gen._locally_binds_name('next')):
