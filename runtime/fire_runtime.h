@@ -690,6 +690,8 @@ int64_t mojo_re_m_group(int64_t m, int64_t g);
 int64_t mojo_re_m_start(int64_t m, int64_t g);
 int64_t mojo_re_m_end(int64_t m, int64_t g);
 int64_t mojo_re_getattr(int64_t obj, char *name);
+int64_t mojo_listiter_new(MojoList *l);   /* iter(<list>) that escapes into a call: a {list, position} iterator word */
+int     mojo_is_listiter(int64_t v);
 int64_t mojo_next_word(int64_t w, int has_default, int64_t dflt);   /* next(x[, d]) on a word: a noted generator handle */
 int64_t mojo_getitem_word(int64_t w, int64_t i);   /* list element / string character of an unknown-kind word */
 void    mojo_chain_extend(MojoList *dst, int64_t src);   /* itertools.chain, one argument */
@@ -699,7 +701,7 @@ MojoList *mojo_iter_word(int64_t v);   /* list / dict keys / set / str / bytes o
  * live-handle table behind a dynamic call; see the definitions. */
 void mojo_gen_sig_register(void *start, void *resume, void *value, void *destroy, int vkind, int np,
                            const char *const *names, int first_kwonly, const int64_t *defaults,
-                           const unsigned char *has_default);
+                           const unsigned char *has_default, const unsigned char *is_double);
 MojoList *mojo_iter_gen_handle(int64_t w);
 int64_t mojo_gen_note(int64_t h, void *start);
 int64_t mojo_gen_note_a3(int64_t h, int64_t vkind);   /* 0 int, 1 bool, 2 double, 3 str */

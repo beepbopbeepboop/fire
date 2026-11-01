@@ -6397,7 +6397,29 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
         if _sn in (gen.struct_field_types or {}):
             t = gen._new_val(f'{_sn} *', f'_alloc_{_sn} ({cstr_ov})')
             return f'{_sn} *', t
-    if method in ('encode', 'decode', 'readlink'):
+    if method == 'encode':
+        # str.encode(encoding='utf-8', errors='strict') -> bytes. It was an
+        # identity stub typed char*, so `s.encode()` printed as the str and
+        # `len()` of it counted UTF-8 codepoints' bytes wrong. The result is a
+        # real MojoBytes * (the same runtime constructor `bytes(s)` uses). The
+        # encoding is passed through as a char*; the runtime's
+        # mojo_bytes_from_str currently produces UTF-8 for every name (see
+        # bugs/CODEGEN_str_encode_compiles_to_the_identity_char_ptr.md, Status).
+        # `errors` is not
+        # forwarded: a str is always valid UTF-8, so the strict/replace
+        # distinction cannot arise for the one codec the runtime implements.
+        if arg_pairs:
+            _enc = arg_pairs[0]
+        else:
+            _enc = next(((gen.lower_expr(_kv)) for _kn, _kv in (kwargs or [])
+                         if _kn == 'encoding'), None)
+        if _enc is None:
+            _enc_val = gen._intern_string('utf-8')
+        else:
+            _enc_val = _enc[1] if _enc[0] == 'char *' else gen._coerce_to_type(_enc[0], 'char *', _enc[1])
+        return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_bytes_from_str',
+                                             [('char *', cstr_ov), ('char *', _enc_val)])
+    if method in ('decode', 'readlink'):
         return gen._stub_result('char *', cstr_ov, f'TODO: {method}')
     # Unknown method on char* — stub
     return gen._stub_result('int', '0', f'TODO: char*.{method}')

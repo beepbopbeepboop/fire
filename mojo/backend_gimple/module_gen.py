@@ -77,6 +77,7 @@ import mojo.backend_gimple.emit_calls as _gmi_emit_calls
 import mojo.backend_gimple.cpp_async as _gca
 import mojo.backend_gimple.emit_metal as _gmi_emit_metal
 import mojo.middle.funcs_shared as funcs_shared
+import mojo.middle.itcursor as itc
 from mojo.middle.funcs_shared import param_default_pairs
 from mojo.middle.types import _TUPLE_ANN_BY_NAME, _unpack_target_leaf_names
 from mojo.middle.methods_shared import _is_selfhost_source_file
@@ -9574,6 +9575,11 @@ def gen_module_impl(self, stmts):
             return 'MojoDict *'
         if isinstance(a, gimple_ctypes.IdentExpr):
             _n = _gmi_as_str(a.name)
+            # `it = iter(<list>)` handed to a function is a runtime iterator WORD
+            # in the caller (see itcursor), not the list: no container evidence.
+            _icfn = _fn_by_name.get(_as_str(caller_name))
+            if _icfn is not None and itc.name_is_escaping_iter(_icfn.body, _n):
+                return None
             # Split the `getattr(...) or {}` from the `.get(...)` that consumes
             # it: a call on the INTERMEDIATE result of an `or` has no static
             # type on the self-hosted path, the same trap the three sibling
@@ -12710,11 +12716,18 @@ def gen_module_impl(self, stmts):
                     and _value.func.member == 'readlines'):
                 return 'MojoList *'
             elif (isinstance(_value.func, MemberExpr)
-                    and _value.func.member in ('encode', 'decode', 'format')):
-                # str.encode()/str.decode()/str.format() all lower to a
-                # real `char *` everywhere else in this codegen (see
+                    and _value.func.member == 'encode'):
+                # str.encode() returns BYTES: the lowering builds a real
+                # MojoBytes * (emit_methods' char* 'encode' case), so the
+                # global must be declared as one, not as the str it was
+                # made from.
+                return 'MojoBytes *'
+            elif (isinstance(_value.func, MemberExpr)
+                    and _value.func.member in ('decode', 'format')):
+                # str.decode()/str.format() lower to a real `char *`
+                # everywhere else in this codegen (see
                 # gimple_gen_methods.py's char*-method table, which
-                # stubs all three as identity passthroughs of the
+                # stubs both as identity passthroughs of the
                 # receiver). Without this case the global got declared
                 # int64_t against a char*-producing RHS — a hard
                 # "assignment to 'int64_t' from 'char *'" in
@@ -12881,6 +12894,21 @@ def gen_module_impl(self, stmts):
             # a function that CALLS `e` is emitted before `_toplevel`
             # lowers the lambda at all.
             self._global_callable_ret_types[_gname] = _lambda_ret_type(self, _value)
+        elif (isinstance(_value, MemberExpr) and isinstance(_value.obj, IdentExpr)):
+            # `rr = inst.method` at module scope, `inst` a module global bound
+            # to a struct instance: a bound method VALUE. A function that
+            # calls `rr(...)` is emitted before `_toplevel` lowers this store,
+            # so the call site's only source for the method's return type is
+            # this pre-scan; without it the call answered `int64_t` and a
+            # `-> str` method printed its pointer's decimal.
+            _bm_ct = self._global_var_types.get(_as_str(_value.obj.name))
+            if isinstance(_bm_ct, str) and _bm_ct.endswith(' *'):
+                _bm_sn = _bm_ct[:-2]
+                if _bm_sn in self.struct_field_types:
+                    _bm_rt = self.func_return_types.get(
+                        f"{_bm_sn}_{gimple_ctypes._safe_name(_as_str(_value.member))}")
+                    if isinstance(_bm_rt, str) and _bm_rt not in ('', 'int64_t', 'void'):
+                        self._global_callable_ret_types[_gname] = _bm_rt
 
     def _phase17_scan_try_branches(_try_stmt):
         """Collect {name: C type} for every AssignStmt/MultiAssignStmt

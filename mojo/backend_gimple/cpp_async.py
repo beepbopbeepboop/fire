@@ -1368,12 +1368,24 @@ _SIG_WORD_CTYPES = frozenset({'int64_t', '_Bool', 'int', 'char *',
                               'MojoList *', 'MojoDict *', 'MojoSet *'})
 
 
-def _cpp_sig_default_word(gen, dv) -> str | None:
+def _cpp_sig_default_word(gen, dv, is_double: bool = False) -> str | None:
     """C++ text of a parameter DEFAULT as an int64_t word, for a generator's
     runtime signature (`mojo_gen_sig_register`); None when the default is not
     one this can spell, which leaves the generator unregistered (calling it by
     value with keywords then raises a catchable TypeError rather than guessing).
     """
+    if is_double:
+        # The word is the double's bit pattern (`mojo_double_from_bits`).
+        if dv is None:
+            return '0'
+        _num = None
+        if isinstance(dv, gimple_ctypes.IntLiteral):
+            _num = float(dv.value)
+        elif isinstance(dv, gimple_ctypes.FloatLiteral):
+            _num = float(dv.value)
+        if _num is None:
+            return None
+        return f'mojo_double_to_bits({_num!r})'
     if dv is None:
         return '0'
     if isinstance(dv, gimple_ctypes.BoolLiteral):
@@ -1422,9 +1434,12 @@ def _cpp_generator_sig_lines(gen, fn, base, param_ctypes, cpp_value_ctype,
     its yielded value is read) with `mojo_gen_sig_register`, so a call through
     the generator's `_start` ADDRESS used as a value (`mojo_dyn_call`) can bind
     keywords by name and a `for` over the returned handle can drain it.
-    Emitted only for a plain free generator whose parameters are all words
-    (a double would travel in a float register, which a word-typed call cannot
-    reproduce) and whose every default is spellable."""
+    Emitted only for a plain free generator whose every default is spellable
+    and whose parameters are words or doubles. A double travels in a float
+    register, so the signature carries a per-parameter `is_double` mask and
+    `_gen_sig_call` passes the integer and floating-point words separately
+    (the two register files are assigned independently on both supported
+    ABIs); that bounds a unit at 6 integer and 8 double parameters."""
     if extra_captures or struct_name is not None or len(param_ctypes) > 8:
         return []
     _vk = {'int64_t': 0, '_Bool': 1, 'double': 2, 'char *': 3}.get(cpp_value_ctype)
@@ -1451,9 +1466,12 @@ def _cpp_generator_sig_lines(gen, fn, base, param_ctypes, cpp_value_ctype,
     # A struct pointer travels in an integer register like any word (an
     # escaping method generator takes its receiver this way).
     for _pn, _ct in param_ctypes:
-        if _ct not in _SIG_WORD_CTYPES and not (
+        if _ct not in _SIG_WORD_CTYPES and _ct != 'double' and not (
                 _ct.endswith(' *') and _ct[:-2] in gen.struct_field_types):
             return []
+    _isd = ['1' if _ct == 'double' else '0' for _pn, _ct in param_ctypes]
+    if len(_isd) - _isd.count('1') > 6:
+        return []
     if any(_n.startswith('*') for _n in _names):
         return []
     _defs = getattr(fn, 'param_defaults', None) or {}
@@ -1468,7 +1486,7 @@ def _cpp_generator_sig_lines(gen, fn, base, param_ctypes, cpp_value_ctype,
     for _n in _names:
         _has_def = bool(fn.param_has_default.get(_n)) if getattr(fn, 'param_has_default', None) else (_n in _defs)
         if _has_def:
-            _w = _cpp_sig_default_word(gen, _defs.get(_n))
+            _w = _cpp_sig_default_word(gen, _defs.get(_n), _isd[len(_words)] == '1')
             if _w is None:
                 return []
         else:
@@ -1482,11 +1500,12 @@ def _cpp_generator_sig_lines(gen, fn, base, param_ctypes, cpp_value_ctype,
         f"    static const char *const _nm[] = {{ {_namelist} }};",
         f"    static int64_t _df[{max(_np, 1)}];",
         f"    static const unsigned char _hd[{max(_np, 1)}] = {{ {', '.join(_has) or '0'} }};",
+        f"    static const unsigned char _id[{max(_np, 1)}] = {{ {', '.join(_isd) or '0'} }};",
     ]
     for _i, _w in enumerate(_words):
         out.append(f"    _df[{_i}] = {_w};")
     out.append(f"    mojo_gen_sig_register((void *){base}_start, (void *){base}_resume, "
-               f"(void *){base}_value, (void *){base}_destroy, {_vk}, {_np}, _nm, {_fk}, _df, _hd);")
+               f"(void *){base}_value, (void *){base}_destroy, {_vk}, {_np}, _nm, {_fk}, _df, _hd, _id);")
     out.append("}")
     return out
 

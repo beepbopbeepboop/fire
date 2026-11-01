@@ -51,11 +51,33 @@ as values, or that call one of their own parameters, are kept on the C++ path
   `_mojogen_im_start (_t1, 0)`. Variants measured while isolating: loop over an
   empty generator + explicit-arg try (no default) passes; a plain-function
   default passes; the failure needs the defaulted `None` on a generator.
-- Item 5: not yet started. Quick regression added:
-  `test_link_mode.py::test_generator_none_default_reaches_callee_as_null`
-  (item 4); `test_regress_dynamic_call_layer_residue.py` (item 1 verified via
-  `test_link_mode.py::test_bare_submodule_import_keyword_call`; item 2
-  minimal form passes).
+- **Item 5 FIXED for the call shape the doc names**
+  (`test_gimple_generator_runner.py::cpp_generator_double_param_called_by_keywords`).
+  `_cpp_generator_sig_lines` now registers a unit with `double` parameters:
+  `mojo_gen_sig_register` takes a per-parameter `is_double` mask, and
+  `_gen_sig_call` passes the integer and floating-point words in separate
+  register files (assigned independently on AAPCS64 and SysV x86-64), so a
+  unit is registered up to 6 integer + 8 double parameters. Defaults that are
+  int/float literals travel as `mojo_double_to_bits`. The call site
+  (`cpp_core._cpp_dyn_call_expr`) used to refuse a `double` argument; it now
+  packs it as bits and tags it (positional kind string `d`,
+  `mojo_dict_set_double`), and `mojo_dyn_call` raises a catchable `TypeError`
+  for a tagged double that reaches anything other than a registered generator
+  (a plain function pointer / variadic thunk would read garbage).
+  Still open, found while measuring (each its own gap, not filed as a doc
+  because they are the same family as items 2/5):
+  an UNANNOTATED generator parameter with a float default (`scale=0.5`) is
+  typed `int64_t`, and a `for` over a call through a callable parameter yields
+  an unsolved word that cannot be re-yielded as a float
+  (`a yield of a float value is typed 'int64_t'`), so a consumer must reduce
+  the values to ints. Float values in a `**kw` pack (`run(g, scale=2.5)` into
+  `def run(g, **kw)`) fail to compile in gcc (`cannot convert to a pointer
+  type`). Item 5 is otherwise closed; item 2 still needs its real shape.
+- Regressions: item 1 `test_link_mode.py::test_bare_submodule_import_keyword_call`,
+  item 3 `...::test_str_affix_method_on_unsolved_word_is_bool`, item 4
+  `...::test_generator_none_default_reaches_callee_as_null`, item 5 above. (The
+  placeholder `test_regress_dynamic_call_layer_residue.py`, which asserted
+  `True`, is removed.)
 
 ## 1. (FIXED — see Status) `mod.gen(..., kw=...)` through a module attribute
 
@@ -96,7 +118,7 @@ Reproduces without any of the dynamic layer (`if len(items) == 0:` too); the
 consumer's `setjmp`-based `try` is not entered correctly after an earlier
 `return`-terminated generator loop in the same function.
 
-## 5. Generators with `double` parameters have no runtime signature
+## 5. (FIXED — see Status) Generators with `double` parameters have no runtime signature
 
 `_cpp_generator_sig_lines` declines a unit with a `double` parameter (it would
 travel in a float register, which the word-typed `_gen_sig_call` cannot

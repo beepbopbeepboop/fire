@@ -283,6 +283,28 @@ def _try_bind_iter_cursor(gen, name, value, is_decl=False):
         return False
     at, av = gen.lower_expr(value.args[0])
     at = gen._get_actual_type(at, av)
+    # The iterator is handed to another function (`_parse_varint(it)`): a C-local
+    # cursor cannot cross the call, so bind a first-class runtime iterator word
+    # instead. `next(it)` / `for x in it` on a word go through mojo_next_word /
+    # mojo_iter_word, which consume it from the same position.
+    if (not _rebind and not is_decl and at == 'MojoList *'
+            and itc.iter_name_escapes_into_call(gen._cur_func_body, name)
+            and gen._elem_of(av) not in (None, 'int64_t')):
+        # An iterator over strings/floats handed to a function: the word the callee
+        # gets back from next() carries no kind, so it would print as an integer.
+        # Refuse (the module falls back to source) rather than answer wrong.
+        raise RuntimeError(
+            f"cannot compile module: list iterator `{name}` over {gen._elem_of(av)} "
+            "elements is passed to a function; only integer-element iterators can "
+            "cross a call (the element kind is lost) -- falling back to interpreting "
+            "this module from source instead")
+    if (not _rebind and not is_decl and at == 'MojoList *'
+            and itc.iter_name_escapes_into_call(gen._cur_func_body, name)):
+        _liw = gen._call_expr('int64_t', 'mojo_listiter_new', [(at, av)])
+        gen._declare_var(name, 'int64_t')
+        gen._emit(f"  {gen._write_dest(name)} = {_liw};")
+        gen._dyn_word_locals.add(name)
+        return True
     if _rebind and (gen.var_types.get(name) != 'MojoList *' or at != 'MojoList *'):
         return False
     data = None

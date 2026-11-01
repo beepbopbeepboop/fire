@@ -3266,6 +3266,85 @@ show([2.5])
 go()
 """, "1\n2\na\nb\n2.5\np\nq\n1.5\n2.5\n")
 
+    # A name the module binds at module scope is not the builtin: `repr = mine`
+    # then `repr(5)` used to lower as the builtin (printed `5`, CPython `<5>`).
+    test_gimple_stdout("gimple_module_global_function_value_shadows_builtin", """\
+def mine(x):
+    return "<" + str(x) + ">"
+repr = mine
+def main():
+    print(repr(5))
+main()
+""", "<5>\n")
+
+    # ...and the same when the global is a BOUND METHOD (reprlib's
+    # `repr = aRepr.repr`): the call must go through the bound-method path and
+    # return the method's own type (a str, not its pointer's decimal).
+    test_gimple_stdout("gimple_module_global_bound_method_shadows_builtin", """\
+class Repr:
+    def repr(self, x):
+        return self.repr1(x, 2)
+    def repr1(self, x, level):
+        return "<" + str(x) + ">" * level
+
+aRepr = Repr()
+repr = aRepr.repr
+
+def main():
+    print(repr(5))
+main()
+""", "<5>>\n")
+
+    # A module-scope bound method called from a function keeps its return type
+    # (the call is emitted before `_toplevel` lowers the store).
+    test_gimple_stdout("gimple_module_global_bound_method_call_keeps_return_type", """\
+class R:
+    def m(self, x):
+        return "<" + str(x) + ">"
+a = R()
+rr = a.m
+def main():
+    print(rr(5))
+    print(a.m(6))
+main()
+""", "<5>\n<6>\n")
+
+    # `it = iter(<list>)` passed to another function: a C-local cursor cannot cross
+    # the call, so `it` is a runtime list-iterator word that the callee's next()
+    # and the caller's `for` both consume from the same position
+    # (Lib/dis.py's `_parse_varint(iterator)`).
+    test_gimple_stdout("gimple_list_iterator_crosses_a_call", """\
+def pv(iterator):
+    b = next(iterator)
+    val = b & 63
+    while b & 64:
+        val <<= 6
+        b = next(iterator)
+        val |= b & 63
+    return val
+
+def take(it, d):
+    return next(it, d)
+
+def main():
+    it = iter([1, 65, 3, 9, 7])
+    print(pv(it))
+    print(pv(it))
+    print(pv(it))
+    j = iter([1, 2, 3, 4, 5])
+    print(take(j, -1))
+    for x in j:
+        print("rest", x)
+    print(take(j, -1))
+    k = iter([1])
+    print(pv(k))
+    try:
+        pv(k)
+    except StopIteration:
+        print("stop")
+main()
+""", "1\n67\n9\n1\nrest 2\nrest 3\nrest 4\nrest 5\n-1\n1\nstop\n")
+
     # String site FIRST, int site second (an int list records no contract, so
     # it used to be invisible as a disagreeing call site).
     test_gimple_stdout("gimple_mixed_kind_flat_list_param_str_first", """\
@@ -3375,6 +3454,34 @@ for i in range(30):
     s.add(b'k' + str(i).encode())
 print(len(s), b'k0' in s, b'k29' in s)
 """, "30 True True\n")
+
+    # str.encode() is BYTES, not a str. It was lowered as an identity stub
+    # typed char*, so the value printed as the str and len() counted the
+    # wrong thing for a non-ASCII string (2 for "héllo" was not 6, the
+    # 'é' is two UTF-8 bytes). CPython is the oracle: the bytes repr, the
+    # length, the equality against a bytes literal, the round trip, and the
+    # type are all pinned, from a local, a module global, a function return,
+    # and a chained expression, so each of the four type-inference paths
+    # (lowering, resolve_shared pre-pass, chained quick-type, module global)
+    # is exercised.
+    test_gimple_matches_cpython("gimple_str_encode_is_bytes", """\
+s = "abc"
+b = s.encode()
+print(b)
+print(len(b), type(b) == bytes)
+print(b == b'abc', s.encode().decode() == s)
+GREETING = "héllo"
+ENC = GREETING.encode()
+print(ENC, len(ENC))
+
+def pack(x):
+    return x.encode()
+
+p = pack("é")
+print(p, len(p))
+print(str(7).encode() + b'!')
+print(len("héllo".encode()), "é".encode() == 'é'.encode())
+""")
 
     test_gimple_stdout("gimple_set_str_rehash_unchanged", """\
 s = set()

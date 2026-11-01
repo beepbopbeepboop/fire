@@ -382,7 +382,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
     # and `_SCALAR_ARITY_BUILTINS` below is what keeps that true — see its own
     # comment for why the arity test is not optional.
     _ITERABLE_CONSUMING_BUILTINS = {
-        'map', 'zip', 'enumerate', 'sorted', 'reversed', 'iter', 'next',
+        'map', 'zip', 'enumerate', 'sorted', 'reversed', 'iter',
         'list', 'tuple', 'set', 'frozenset', 'sum', 'any', 'all',
         'min', 'max', 'divmod', 'round',
     }
