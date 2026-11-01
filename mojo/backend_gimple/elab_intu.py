@@ -3173,6 +3173,35 @@ _ELEM_COPY_RE = re.compile(
     r'([ \t]*)var elem = self\._inner_a_elem\.unsafe_value\(\)\.copy\(\)')
 
 
+def _erased_pointee_struct(resolved):
+    """`(Struct, scalar args)` when the first argument of an erased-word
+    alias (`Optional[Pointer[Node[Int], o]]`, `Pointer[Node[Int], o]`) is a
+    pointer to a generic struct instantiated at scalar types, else None."""
+    if not resolved:
+        return None
+    arg = resolved[0].strip()
+    m = re.match(r'^(Optional|OptionalReg|Pointer|UnsafePointer)\s*\[(.*)\]$',
+                 arg, re.S)
+    while m:
+        inner = [a.strip() for a in
+                 gimple_exprtypes._split_top_level_commas(m.group(2))
+                 if a.strip()]
+        if not inner:
+            return None
+        arg = inner[0]
+        m = re.match(r'^(Optional|OptionalReg|Pointer|UnsafePointer)\s*\['
+                     r'(.*)\]$', arg, re.S)
+    m = re.match(r'^([A-Za-z_]\w*)\s*\[(.*)\]$', arg, re.S)
+    if not m or m.group(1) in _ERASED_WORD_STRUCTS:
+        return None
+    pargs = [a.strip() for a in
+             gimple_exprtypes._split_top_level_commas(m.group(2))
+             if a.strip()]
+    if not pargs or not all(a in gimple_ctypes._TYPE_MAP for a in pargs):
+        return None
+    return m.group(1), pargs
+
+
 def _eval_comptime_type_aliases(work, mm, module_src, base, targs, concrete):
     """Evaluate the `comptime <alias> = <Base>[<concrete args>]` type
     aliases of a spliced generic struct. Returns (concrete, nested_keys):
@@ -3226,6 +3255,23 @@ def _eval_comptime_type_aliases(work, mm, module_src, base, targs, concrete):
             # the layout/type readers already erase, and nothing is enqueued
             # (materializing `Optional` is the regression
             # `_protocol_only_overloads` documents).
+            pointee = _erased_pointee_struct(resolved)
+            if pointee is not None:
+                pbase, pargs = pointee
+                # The pointee usually lives in the SAME module as the struct
+                # being spliced (`Node` beside `LinkedList`), so it is not
+                # registered yet: register it from this struct's own file.
+                _register_named(work.gen,
+                                work.gen._imported_generic_structs.get(base),
+                                [pbase])
+                psrc = _module_src(work.gen, pbase, 'struct')
+                ptmpl = (elaborate.extract_struct_source(psrc, pbase)
+                         if psrc else None)
+                pn = elaborate.type_param_names(ptmpl) if ptmpl else None
+                if pn and len(pn) == len(pargs):
+                    aliases[aname] = mm.mangle(pbase, dict(zip(pn, pargs)))
+                    paired.append((aname, ('struct', pbase, tuple(pargs))))
+                    continue
             aliases[aname] = f'{abase}[{", ".join(resolved)}]'
             continue
         tmpl = (elaborate.extract_struct_source(module_src, abase)
