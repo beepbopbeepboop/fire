@@ -250,7 +250,7 @@ def _gmi_binding_index(scopes) -> dict:
     return idx
 
 
-def _gmi_identifier_literal_ctype(name, enclosing, mod_index):
+def _gmi_identifier_literal_ctype(name, enc_idx: dict, mod_index: dict):
     """The ctype of an IDENTIFIER argument whose only binding is a literal.
 
     A call `lib.walk(s)` where `s = "r"` is the one binding of `s` in scope
@@ -265,11 +265,14 @@ def _gmi_identifier_literal_ctype(name, enclosing, mod_index):
     wildcard import all return None. The scope is the enclosing function when
     it binds the name at all (a local shadows a global), otherwise the whole
     module, which is a superset of every binder that could reach the name.
-    `mod_index` is `_gmi_binding_index` over the module's statements.
+    `mod_index` is `_gmi_binding_index` over the module's statements and
+    `enc_idx` the same over the ENCLOSING function (an empty dict for a
+    module-level call). The caller builds `enc_idx` once per function: building
+    it here walked the whole function for every identifier argument of every
+    call in it, which was 8% of `fire.py --dump-full`.
     """
     sites: list = []
-    if enclosing is not None:
-        enc_idx = _gmi_binding_index(enclosing)
+    if len(enc_idx) > 0:
         sites = list(enc_idx.get(name, [])) + list(enc_idx.get('*', []))
     if not sites:
         sites = list(mod_index.get(name, [])) + list(mod_index.get('*', []))
@@ -4609,6 +4612,9 @@ def gen_module_impl(self, stmts):
                         return _xs
                 return None
 
+            # The enclosing function's binder census, built ONCE per function
+            # (see `_gmi_identifier_literal_ctype`), keyed by the function's id.
+            _xg_enc_index: dict = {}
             def _xg_record_scalar_args(_xkey, _xpnames, _xargs, _xenc):
                 """Record the unanimous literal SCALAR-ish ctype of each
                 argument into _xmod_gen_param_hints (the cross-module twin of
@@ -4623,8 +4629,16 @@ def gen_module_impl(self, stmts):
                         break
                     _xct = _gmi_literal_ctype(_xa)
                     if _xct is None and isinstance(_xa, gimple_ctypes.IdentExpr):
+                        _xenc_idx: dict = {}
+                        if _xenc is not None:
+                            _xek = id(_xenc)
+                            if _xek in _xg_enc_index:
+                                _xenc_idx = _as_dict(_xg_enc_index[_xek])
+                            else:
+                                _xenc_idx = _gmi_binding_index(_xenc)
+                                _xg_enc_index[_xek] = _xenc_idx
                         _xct = _gmi_identifier_literal_ctype(
-                            _xa.name, _xenc, _xg_bind_index)
+                            _xa.name, _xenc_idx, _xg_bind_index)
                     if not _xct or not _xpnames[_xi]:
                         continue
                     _xs_map = self._xmod_gen_param_hints.setdefault(_xkey, {})
