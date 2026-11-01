@@ -22,7 +22,7 @@ generators, and a receive-only `x = yield` name keeps it.)
 
 **Not changed this round:** no code, no test. The three open items above stand:
 (1) the non-int64 mixed store is refused (round 16); (2) `v is None` on a tagged
-False/0 is `bugs/CODEGEN_is_none_on_a_tagged_false_or_zero_is_true.md`; (3) a lone
+False/0 is the `v is None` on a tagged False/0 bug (fixed; pinned by `run_tagged_none_identity_tests`); (3) a lone
 None whose consumer is outside the tagged set is refused (`NONE_YIELD_CPP_REFUSAL`
 and the `_generator_value_kind` refusal in `mojo/middle/coro.py`).
 
@@ -61,7 +61,7 @@ The refusal is the honest answer, the same shape as the round-3 refusal.
    and the segfault are gone for str and float. Whether a box can carry a
    str/float store is not needed for any valid Mojo program, so it stays refused.
 2. `v is None` on a tagged False/0: unchanged, see
-   `bugs/CODEGEN_is_none_on_a_tagged_false_or_zero_is_true.md`.
+   the `v is None` on a tagged False/0 bug (fixed; pinned by `run_tagged_none_identity_tests`).
 3. Lone None yield on the cpp path: unchanged (`NONE_YIELD_CPP_REFUSAL`).
 
 **Gate note for the integrator (not run here):** the refusal is a new
@@ -118,7 +118,7 @@ after it; the group itself was run on the final code.
    every store), or refuse the mixed name with an explicit error if its
    non-int64 stores cannot be boxed. Decide with a probe first.
 2. **`v is None` on a tagged False/0 is True**: still filed as
-   `bugs/CODEGEN_is_none_on_a_tagged_false_or_zero_is_true.md`.
+   the `v is None` on a tagged False/0 bug (fixed; pinned by `run_tagged_none_identity_tests`).
 3. **A lone None yield on the cpp path is refused for consumers the tagged word
    does not cover** (`NONE_YIELD_CPP_REFUSAL`, round 12). Not a silent 0.
 
@@ -163,7 +163,7 @@ and after (guard). After: 4/0.
 **Still open (this doc keeps it):**
 
 1. **`v is None` on a tagged False/0 is True**: unchanged, filed as
-   `bugs/CODEGEN_is_none_on_a_tagged_false_or_zero_is_true.md`.
+   the `v is None` on a tagged False/0 bug (fixed; pinned by `run_tagged_none_identity_tests`).
 2. **A lone None yield on the cpp path is refused** (`NONE_YIELD_CPP_REFUSAL`) for
    consumers the tagged word does not cover (round 12). Not a silent 0, but not
    yet a value either.
@@ -218,7 +218,7 @@ checkout) and running only that group: both FAIL (the None row answers
    and re-run its rebinding rule; pin `x = v; print(x)` on both paths.
 2. **`v is None` on a tagged False/0 is True** (same root as the old bit
    comparison, not None-specific). Filed as
-   `bugs/CODEGEN_is_none_on_a_tagged_false_or_zero_is_true.md` with its next step.
+   the `v is None` on a tagged False/0 bug (fixed; pinned by `run_tagged_none_identity_tests`) with its next step.
 
 **Gate note for the integrator (not run here):** the `==`/`!=` change applies to
 any boxed operand compared to a None literal, not only tagged generator values.

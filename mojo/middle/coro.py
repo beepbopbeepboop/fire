@@ -5015,7 +5015,7 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
                 # nested function passed on from inside another nested function reaches
                 # its callee with a NULL environment in the self-hosted build (the
                 # compiled compiler crashed on every program with a module-level call;
-                # reproduction in bugs/mid/CODEGEN_capturing_closure_value_passed_from_a_closure_has_no_env.md).
+                # reproduction: the capturing-closure NULL-env bug, fixed at its root in 145fd1089).
                 #
                 # LAZY: the env is built on the first call the visitor will
                 # actually act on (`_wants_call`), not for every function. In the
