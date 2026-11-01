@@ -1,5 +1,30 @@
 # A method receiver whose type could not be resolved returns the receiver's own pointer bits
 
+## Status 2026-11-01 (second round) — refusal on candidate disagreement lands
+
+Landed: `poly_dispatch_plan` (mojo/middle/methods_shared.py) no longer skips a
+polymorphic method whose candidates disagree on arity or on a known return type;
+it records the disagreement under `'refused'`, and the `self.<f>.<m>()` call
+site in `emit_methods.py` raises a `RuntimeError` naming `polymorphic receiver`
+instead of lowering to the scalar stub. A method no candidate disagreement
+touches, with arguments or a non-`int64_t` unanimous return, still gets the
+stub: refusing it would turn currently-compiling code into a build failure, and
+the argument extension is the next step below. Tests in `test_gimple_runner.py`:
+`gimple_poly_dispatch_refuses_return_type_disagreement`,
+`gimple_poly_dispatch_refuses_arity_disagreement` (both fail before, pass
+after) and `gimple_ctor_param_three_candidate_poly_dispatch` (three candidates,
+`2 20 102`, passes). Full `test_gimple_runner.py`: 540 passed, 5 failed, the
+same 5 generator/match cases that fail on master.
+
+Risk for the integrator: a stdlib module whose constructor slot receives
+different struct types and calls a method those structs disagree on used to
+compile (to the stub) and now refuses. Check `compile_stdlib.py`'s unexpected
+count for that.
+
+Still open: methods with arguments on a polymorphic slot (plan step 4 extension,
+needs C parameter types per candidate), and receivers that are a plain local or
+parameter rather than `self.<field>`.
+
 ## Status 2026-11-01 — PARTIAL: zero-argument polymorphic receivers land
 
 Landed: a constructor slot that received two or more different `<Struct> *` is

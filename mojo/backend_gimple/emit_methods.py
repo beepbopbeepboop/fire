@@ -4767,16 +4767,22 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # word holds one of those structs, so the call dispatches on its runtime
         # tag through the generated `_mojo_poly_<m>_*` switch instead of the
         # scalar no-op stub below, which answered the receiver's own bits.
-        # Zero-argument, `int64_t`-returning methods only (`poly_dispatch_plan`).
+        # Zero-argument, `int64_t`-returning methods only (`poly_dispatch_plan`);
+        # a candidate set that disagrees on arity or return type is refused here,
+        # at the call, rather than stubbed.
         _pm_recv = node.func.obj if isinstance(node.func, gimple_ctypes.MemberExpr) else None
-        if (ot in ('int', 'int64_t') and not node.args and not node.kwargs
+        if (ot in ('int', 'int64_t')
                 and isinstance(_pm_recv, gimple_ctypes.MemberExpr)
                 and isinstance(_pm_recv.obj, gimple_ctypes.IdentExpr)
                 and _pm_recv.obj.name == 'self'
                 and getattr(gen, '_current_struct_name', None)):
             _pm_slot = f"{gen._current_struct_name}::{_pm_recv.member}"
-            _pm_name = poly_dispatch_plan(gen)['slots'].get(_pm_slot, {}).get(method)
-            if _pm_name:
+            _pm_plan = poly_dispatch_plan(gen)
+            _pm_refused = _pm_plan['refused'].get(_pm_slot, {}).get(method)
+            if _pm_refused:
+                raise RuntimeError(_pm_refused)
+            _pm_name = _pm_plan['slots'].get(_pm_slot, {}).get(method)
+            if _pm_name and not node.args and not node.kwargs:
                 _pm_t = gen._call_expr('int64_t', _pm_name, [('int64_t', gen._to_int64(ot, ov_local))])
                 return 'int64_t', _pm_t
         # A call on a MODULE MARKER — `argparse.ArgumentParser(...)` and every
