@@ -588,6 +588,17 @@ void mojo_cleanup_push_cattr(void **slot, void *saved);
  * immediately at a point that is itself about to (or just did) free those
  * same `n` locals inline. */
 void mojo_cleanup_cancel_n(int64_t n);
+/* Python-level frames: sys._getframe / f_back / f_lineno / f_code.co_name for functions the compiler
+ * instrumented (see runtime/fire_runtime.c, "Python-level frames"). A frame is a word (0 is None). */
+void    mojo_frame_enter(char *name, char *file, int64_t firstlineno);
+void    mojo_frame_leave(void);
+void    mojo_frame_set_line(int64_t line);
+int64_t mojo_getframe(int64_t depth);
+int64_t mojo_frame_back(int64_t w);
+int64_t mojo_frame_lineno(int64_t w);
+int64_t mojo_frame_firstlineno(int64_t w);
+char *  mojo_frame_name(int64_t w);
+char *  mojo_frame_file(int64_t w);
 /* Snapshot the current cleanup-stack depth as the level `_mojo_exc_top`
  * (already incremented) should unwind back down to. Call immediately
  * after bumping `_mojo_exc_top` for a new try/except level, before its

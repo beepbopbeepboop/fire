@@ -92,12 +92,12 @@ not just `fire_runtime.h`:
 
 | | count | note |
 |---|---|---|
-| entry points across **11** headers | **798** | `fire_runtime.h` 692, `fire_sqlite3.h` 22, `fire_ncurses.h` 18, `fire_python.h` 15, `fire_async_runtime.h` 16, `fire_ssl.h` 13, `fire_coro.h` 7, `fire_metal.h` 6, `fire_zlib.h` 6, `fire_coro_ctx.h` 3; `fire_wd.h` scans to **zero** |
-| **word in, word out** | **352** | every parameter and the return value is one 64-bit word |
-| not word-shaped | **446** | a box crosses the boundary — in an argument, in the return, or both |
+| entry points across **11** headers | **833** | `fire_runtime.h` 727, `fire_sqlite3.h` 22, `fire_ncurses.h` 18, `fire_python.h` 15, `fire_async_runtime.h` 16, `fire_ssl.h` 13, `fire_coro.h` 7, `fire_metal.h` 6, `fire_zlib.h` 6, `fire_coro_ctx.h` 3; `fire_wd.h` scans to **zero** |
+| **word in, word out** | **377** | every parameter and the return value is one 64-bit word |
+| not word-shaped | **456** | a box crosses the boundary — in an argument, in the return, or both |
 
-So **352 of 798 (44.1%)** is the reachable-surface ceiling. The previous
-revision of this section published 219 of 540 (40.6%), and before that 352 of
+So **377 of 833 (44.1%)** is the reachable-surface ceiling. The previous
+revision of this section published 219 of 540 (40.6%), and before that 377 of
 455 (77%) — the word *share* has been stable near 40% across all three
 censuses, and it is the denominators that moved. Two headers have been added
 since (`fire_coro.h`, `fire_metal.h`), `fire_runtime.h` alone grew by 115
@@ -111,7 +111,7 @@ this paragraph used to carry, below.
 
 **The word/box split is over parameters AND return, and never was only the
 return.** The old table split by return type alone, which is why it read
-352/101; `mojo_list_get_int(MojoList *, int64_t) -> int64_t` returns a single
+377/101; `mojo_list_get_int(MojoList *, int64_t) -> int64_t` returns a single
 word and is in neither column, because the box is in the *parameter*. Phase 2's
 table filters both, and `runtime_abi()`'s per-entry `word` flag is that filter —
 `word: True` means every type crossing the boundary is one word, so an entry
@@ -265,7 +265,7 @@ bounded: arm64 against a scratch region (`_SCRATCH = ARM64_CONTAINER_BUDGET =
 131072`, declared in `formal/model.py` and read by
 `formal/arm64_codegen.py`; over-capacity raises in `_blob_cap`'s callers) and
 x86-64 against `_BLOB_BYTES = X86_64_CONTAINER_BUDGET = 16384` the same way.
-So the **446** non-word entry points of §2.2 are not merely unwired — they have
+So the **456** non-word entry points of §2.2 are not merely unwired — they have
 no representation.
 
 ### 3.3 The gimple premise — ESTABLISHED by phase 0, with one latent failure left
@@ -418,7 +418,7 @@ true.
 
 This is stated separately because it is the load-bearing consequence of decision 3.
 
-Under (c) alone, the formal target's containers stay frame blobs and the 446
+Under (c) alone, the formal target's containers stay frame blobs and the 456
 box-crossing entry points of §2.2 stay gimple-only, permanently. That is a real
 ceiling, and it is why (c) cannot be the destination.
 
@@ -524,14 +524,14 @@ refused, and the refusal now names the *type* mismatch rather than a prefix.
 
 | | arm64 | x86_64 |
 |---|---|---|
-| word-shaped entry points (`runtime_abi`) | 352 | 352 |
+| word-shaped entry points (`runtime_abi`) | 377 | 377 |
 | …of which the runtime dylib actually **exports** | 241 | 241 |
 | …reachable with no heap handle the formal path cannot obtain | **201** | **201** |
 
 So the honest statement of the surface is **201 word-shaped calls are callable
 from a formal image today**, not the "0" this document published when the phase
-was written, and not the 219 (now 352) of §2.2. The two gaps between the
-352 of the row above (the 2026-10-23 census, below, measured 284) and 201 are
+was written, and not the 219 (now 377) of §2.2. The two gaps between the
+377 of the row above (the 2026-10-23 census, below, measured 284) and 201 are
 both deliberate and both named:
 
 - **40 of the 241** the library exports take a `void *` parameter the
@@ -1267,7 +1267,7 @@ site. **Trap:** proving it for a concrete `n` and generalising by hand.
 **[3] per-export contracts.** Phase 4 proper. `export_result_spec` is an
 obligation and `dylib_export_contract_of_spec` is proved, so a caller's theorem
 now consumes a contract instead of asserting one — but no real *spec* exists
-yet for any actual export. **352 of 798** entry points are word-in/word-out
+yet for any actual export. **377 of 833** entry points are word-in/word-out
 (§2.2) and **201** of them are callable from a formal image today (§6 phase 2),
 so there is a callable surface with no contracts on it, which is the state phase
 4 exists to end. Start with the

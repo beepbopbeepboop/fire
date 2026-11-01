@@ -3438,6 +3438,58 @@ def outer(base, items):
 print(outer(10, [1, 2, 3]))
 """, "13\n")
 
+    # Python-level frames (stage 1): `sys._getframe(n)`, `.f_back`, `.f_lineno`,
+    # `.f_code.co_name`, in a module that says `_getframe`. A frame record is pushed per
+    # function and popped by `return`, by falling off the end, and by an exception
+    # unwinding past it. Module-level code is not a frame (CPython's `<module>`).
+    test_gimple_stdout("gimple_sys_getframe_names_lines_and_callers", """\
+import sys
+
+def where():
+    return sys._getframe(1).f_code.co_name + ":" + str(sys._getframe(1).f_lineno)
+
+def boom(n):
+    if n == 0:
+        raise ValueError("x")
+    return boom(n - 1)
+
+def catcher():
+    try:
+        boom(3)
+    except ValueError:
+        pass
+    return where()
+
+def rec(n):
+    if n == 0:
+        return sys._getframe(0).f_back.f_code.co_name
+    return rec(n - 1)
+
+def branches(a):
+    if a:
+        return where()
+    x = 2
+    return where()
+
+def inner():
+    f = sys._getframe(0)
+    print(f.f_code.co_name, f.f_lineno)
+    g = sys._getframe(1)
+    print(g.f_code.co_name, g.f_lineno)
+
+def middle():
+    x = 1
+    inner()
+
+def top():
+    print(catcher())
+    print(rec(3))
+    print(branches(True), branches(False))
+    middle()
+
+top()
+""", "catcher:16\nrec\nbranches:25 branches:27\ninner 31\nmiddle 37\n")
+
     # String site FIRST, int site second (an int list records no contract, so
     # it used to be invisible as a disagreeing call site).
     test_gimple_stdout("gimple_mixed_kind_flat_list_param_str_first", """\

@@ -1425,7 +1425,28 @@ _OS_PATH_RUNTIME_CALLABLE_VALUES = {
 }
 
 
+_FRAME_ATTRS = frozenset(('f_code', 'f_back', 'f_lineno', 'co_name', 'co_qualname', 'co_filename', 'co_firstlineno'))
+
+
 def _lower_MemberExpr(gen, node) -> tuple[str, str]:
+    # Attributes of a Python-level frame word (`sys._getframe(n)`), in a module that uses
+    # frames. The names are specific to frame/code objects, and nothing is lowered here
+    # unless a module of this compile mentions `_getframe`.
+    if len(gen._frames_mods) > 0 and node.member in _FRAME_ATTRS:
+        _fr_t, _fr_v = gen.lower_expr(node.obj)
+        _fr_w = gen._to_int64(_fr_t, _fr_v)
+        _fm = node.member
+        if _fm == 'f_code':
+            return 'int64_t', _fr_w
+        if _fm == 'f_back':
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_frame_back', [('int64_t', _fr_w)])
+        if _fm == 'f_lineno':
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_frame_lineno', [('int64_t', _fr_w)])
+        if _fm == 'co_firstlineno':
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_frame_firstlineno', [('int64_t', _fr_w)])
+        if _fm == 'co_filename':
+            return 'char *', gen._call_expr('char *', 'mojo_frame_file', [('int64_t', _fr_w)])
+        return 'char *', gen._call_expr('char *', 'mojo_frame_name', [('int64_t', _fr_w)])
     _sc = _stat_module_constant(gen, node)
     if _sc is not None:
         return 'int64_t', gen._new_val('int64_t', f'(int64_t){_sc}')

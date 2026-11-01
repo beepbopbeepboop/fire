@@ -72,6 +72,12 @@ def gen_stmt(gen, node):
     # optimizations intermix and reorder code from different lines and files.
     # Only emit if we haven't emitted this exact (filename, line) pair before.
     node_kind = type(node).__name__
+    # Python-level frames: record the line about to run in this function's frame, so
+    # `f_lineno` (of this frame, or of a caller reading it through `f_back`) is the
+    # statement being executed. Nothing is emitted unless the function is instrumented.
+    if (gen._frame_func and hasattr(node, 'line') and node.line and node.line > 0
+            and gen.current_func_name == gen._frame_func):
+        gen._void_call('mojo_frame_set_line', [('int64_t', gen._new_val('int64_t', f'(int64_t){int(node.line)}'))])
     if hasattr(node, 'line') and node.line and node.line > 0:
         # `_line_src_file` overrides `_current_filename` for the duration of
         # one enclosing unit (a base class's method body re-emitted as a

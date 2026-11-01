@@ -796,6 +796,11 @@ def _quick_type(gen, node) -> str:
                     'decode', 'join')
                 and gen._quick_type(node.func.obj) == 'char *'):
             return 'char *'
+    # Frame/code attributes that are strings (a module using `sys._getframe`; see
+    # emit_exprs._lower_MemberExpr): without this a function returning `f.f_code.co_name`
+    # was inferred int64_t and the name printed as a pointer.
+    if len(gen._frames_mods) > 0 and node.member in ('co_name', 'co_qualname', 'co_filename'):
+        return 'char *'
     if isinstance(node, gimple_ctypes.MemberExpr):
         # A modelled module attribute (see _MODULE_ATTR_CTYPES's docstring
         # for why this lookup is shared with the lowering) has a settled

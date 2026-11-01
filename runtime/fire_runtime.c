@@ -54,12 +54,26 @@ void mojo_exc_pop(void)
  * must tear down only its internal buffers (`mojo_*_destroy`) and never
  * call `free()` on the struct pointer itself (`mojo_*_free` would free a
  * stack address — undefined behavior, corrupting the heap allocator). */
+/* ── Python-level frames (sys._getframe, f_back, f_lineno, f_code.co_name) ───────
+ * A shadow stack, maintained ONLY by functions the compiler instrumented (a module that
+ * mentions `_getframe`; see emit_methods._frame_enter). Entry/exit pair with a cleanup
+ * record (MOJO_CLEANUP_FRAME) so an exception unwinding past a frame pops it too. A frame
+ * "object" is a word: its 1-based index in the stack (0 is None). It stays valid while that
+ * frame is live, which is what `sys._getframe(n)` callers use it for; a word kept past the
+ * frame's return names whatever frame later reuses the slot. Frames of uninstrumented
+ * functions are invisible, as C frames are in CPython. */
+#define MOJO_FRAME_MAX 4096
+typedef struct { const char *name; const char *file; int64_t firstlineno; int64_t lineno; } MojoFrameRec;
+static MojoFrameRec _mojo_frames[MOJO_FRAME_MAX];
+int _mojo_frame_depth = 0;
+
 typedef enum { MOJO_CLEANUP_DICT, MOJO_CLEANUP_LIST, MOJO_CLEANUP_SET,
                MOJO_CLEANUP_DICT_STACK, MOJO_CLEANUP_LIST_STACK, MOJO_CLEANUP_SET_STACK,
                MOJO_CLEANUP_PTR,   /* a plain malloc/calloc block: a struct instance */
                MOJO_CLEANUP_LIST_STRS, /* a list that owns its string elements */
                MOJO_CLEANUP_CLOSURE,  /* a bound method plus the env it owns */
-               MOJO_CLEANUP_CATTR     /* a class-attribute cell global: unwinding writes its saved value back */
+               MOJO_CLEANUP_CATTR,    /* a class-attribute cell global: unwinding writes its saved value back */
+               MOJO_CLEANUP_FRAME     /* a Python-level frame record: unwinding pops it from the frame stack */
              } mojo_cleanup_kind_t;
 #define MOJO_CLEANUP_STACK_MAX 8192
 static mojo_cleanup_kind_t _mojo_cleanup_kind[MOJO_CLEANUP_STACK_MAX];
@@ -105,6 +119,51 @@ void mojo_cleanup_push_cattr(void **slot, void *saved)
     if (_mojo_cleanup_push(MOJO_CLEANUP_CATTR, slot))
         _mojo_cleanup_aux[_mojo_cleanup_top] = saved;
 }
+
+void mojo_frame_enter(char *name, char *file, int64_t firstlineno)
+{
+    if (_mojo_frame_depth < MOJO_FRAME_MAX) {
+        MojoFrameRec *f = &_mojo_frames[_mojo_frame_depth];
+        f->name = name; f->file = file; f->firstlineno = firstlineno; f->lineno = firstlineno;
+    }
+    ++_mojo_frame_depth;                /* keeps pairing even past the table's end */
+    _mojo_cleanup_push(MOJO_CLEANUP_FRAME, NULL);
+}
+
+void mojo_frame_leave(void)
+{
+    if (_mojo_frame_depth > 0) --_mojo_frame_depth;
+    mojo_cleanup_cancel_n(1);
+}
+
+void mojo_frame_set_line(int64_t line)
+{
+    if (_mojo_frame_depth > 0 && _mojo_frame_depth <= MOJO_FRAME_MAX)
+        _mojo_frames[_mojo_frame_depth - 1].lineno = line;
+}
+
+/* sys._getframe(depth): the word of the frame `depth` callers up (0 = the caller of this
+ * runtime function, i.e. the instrumented function that wrote `sys._getframe`). */
+int64_t mojo_getframe(int64_t depth)
+{
+    int64_t idx = (int64_t)_mojo_frame_depth - depth;       /* 1-based */
+    if (depth < 0 || idx < 1 || idx > MOJO_FRAME_MAX) {
+        mojo_raise_value_error((char *)"call stack is not deep enough");
+        return 0;
+    }
+    return idx;
+}
+
+static MojoFrameRec *_frame_of(int64_t w)
+{
+    if (w < 1 || w > _mojo_frame_depth || w > MOJO_FRAME_MAX) return NULL;
+    return &_mojo_frames[w - 1];
+}
+int64_t mojo_frame_back(int64_t w)        { return (w > 1 && w <= _mojo_frame_depth) ? w - 1 : 0; }
+int64_t mojo_frame_lineno(int64_t w)      { MojoFrameRec *f = _frame_of(w); return f ? f->lineno : 0; }
+int64_t mojo_frame_firstlineno(int64_t w) { MojoFrameRec *f = _frame_of(w); return f ? f->firstlineno : 0; }
+char *mojo_frame_name(int64_t w)          { MojoFrameRec *f = _frame_of(w); return (char *)(f ? f->name : "<unknown>"); }
+char *mojo_frame_file(int64_t w)          { MojoFrameRec *f = _frame_of(w); return (char *)(f ? f->file : ""); }
 
 void mojo_cleanup_cancel_n(int64_t n)
 {
@@ -154,6 +213,7 @@ static void _mojo_cleanup_unwind_to(int chk)
             case MOJO_CLEANUP_LIST_STRS:  mojo_list_free_owned_strs((MojoList *)ptr); break;
             case MOJO_CLEANUP_CLOSURE:    mojo_closure_free(ptr);            break;
             case MOJO_CLEANUP_CATTR:      *(void **)ptr = aux;               break;
+            case MOJO_CLEANUP_FRAME:      if (_mojo_frame_depth > 0) --_mojo_frame_depth; break;
         }
     }
 }

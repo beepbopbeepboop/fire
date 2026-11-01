@@ -3808,6 +3808,15 @@ def gen_module_impl(self, stmts):
     _gmi_refuse_nested_class_enclosing_reads(stmts)
     stmts = _gmi_decorator_pass(self, stmts, {}, True)
 
+    # Python-level frames: a module that says `_getframe` gets a frame record on every
+    # function it defines (see emit_methods._frame_enter). Decided here, once, from the
+    # module's own statements; every other module's C is unchanged.
+    for _fr_nd in _walk_ast(stmts):
+        if ((isinstance(_fr_nd, gimple_ctypes.MemberExpr) and _fr_nd.member == '_getframe')
+                or (isinstance(_fr_nd, gimple_ctypes.IdentExpr) and _fr_nd.name == '_getframe')):
+            self._frames_mods.add(self.module_name or '')
+            break
+
     # ── GPU offload, Seam 1 ──────────────────────────────────────────────
     # Classified ONCE, at the very top, because three different places
     # need the answer and they run at different times: the preamble (to emit

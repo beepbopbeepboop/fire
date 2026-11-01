@@ -3201,6 +3201,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     gen._emitting_plain_func = True
     try:
         gen._begin_function(node)
+        gmp._frame_enter(gen, node)
         gmp._cattr_restore_begin(gen, node.body)
         for stmt in node.body:
             gen.gen_stmt(stmt)
@@ -4460,6 +4461,7 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     # knows. The candidates computed here replace the empty set
     # `reset_no_candidates` left above.
     gen._begin_function(node)
+    gmp._frame_enter(gen, node)
     gmp._cattr_restore_begin(gen, node.body)
     for stmt in node.body:
         gen.gen_stmt(stmt)

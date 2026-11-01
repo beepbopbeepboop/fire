@@ -84,3 +84,29 @@ epilogue emission in `emit_funcs.py`, the per-statement line store in `emit_stmt
 printing `sys._getframe(0..2).f_code.co_name` and `f_lineno`, run-compared with CPython (the
 `test_interp_oracle.py` pattern), plus one program with no frame use whose `.ci` must `cmp` identical to
 master's.
+
+## Status (2026-11-01) — stage 1 LANDED: shadow frame stack for sys._getframe / f_back / f_lineno / f_code.co_name
+
+Implemented the design above, first slice, for plain functions and methods of any module that says `_getframe`:
+
+- **Runtime** (`runtime/fire_runtime.[ch]`, "Python-level frames"): a frame stack of `{name, file, firstlineno, lineno}`;
+  `mojo_frame_enter/leave/set_line`, `mojo_getframe(depth)` (raises `ValueError: call stack is not deep enough`), and
+  `mojo_frame_back/lineno/firstlineno/name/file`. A frame "object" is a word (its 1-based stack index, 0 is None). Enter pushes a
+  `MOJO_CLEANUP_FRAME` record on the existing cleanup stack, so an exception unwinding past a frame pops it too (exact pairing with
+  `mojo_frame_leave`, same discipline as the class-attribute cell records).
+- **Compiler**: `module_gen` marks a module that mentions `_getframe` (`gen._frames_mods`); `emit_methods._frame_enter` runs before
+  `_cattr_restore_begin` and `_frame_leave` rides `_cattr_leave` (every `return`, and fall-off-the-end); `emit_stmts.gen_stmt` sets
+  the line per statement; `emit_methods._lower_method_call` lowers `sys._getframe(n)`; `emit_exprs._lower_MemberExpr` lowers
+  `f_code`/`f_back`/`f_lineno`/`co_name`/`co_qualname`/`co_filename`/`co_firstlineno`; `resolve_shared._quick_type` types the string
+  attributes. A module that never says `_getframe` emits nothing new: `compile_stdlib.py` GCC CAS 610/610 with the compiler change
+  reversed (generated C unchanged for every stdlib module).
+- **Tests**: `gimple_sys_getframe_names_lines_and_callers` (test_gimple_runner.py: names, lines, callers through a raise/catch, recursion,
+  branches that return from two places) matches CPython; `test_selfhost.py` 3/3.
+
+**Not done (stage 2+)**: the `<module>` frame (module-level code is not a frame, so a walk up `f_back` ends one frame earlier than
+CPython); generators/coroutines (`gi_frame`, `f_generator`, `cr_frame`; their frames are not pushed); exception tracebacks
+(`__traceback__`, `tb_frame`, `tb_next`: `mojo_raise` does not snapshot the chain yet); `frame.clear()` and its executing/suspended
+checks; a frame word kept past its function's return (it names whatever frame reuses the slot); a read-only `f_locals` snapshot;
+frames in modules that do not themselves mention `_getframe` (their functions are invisible, like C frames in CPython).
+Next step: the exception snapshot (heap frame records captured in `mojo_raise`, attached as `__traceback__`), which `tb_frame`,
+`tb_next`, `tb_lineno` and test_frame's `clear()` cases need.

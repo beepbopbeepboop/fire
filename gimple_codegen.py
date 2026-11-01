@@ -2701,6 +2701,12 @@ class GimpleGen:
         # write back on exit: `[gname, saved temp]` pairs, set by
         # emit_methods._cattr_restore_begin and cleared by _cattr_restore_end.
         self._cattr_restores: list = []
+        # Python-level frames (sys._getframe & co): the module names whose functions are
+        # instrumented with a frame record (a module that mentions `_getframe`), and the
+        # name of the function currently being emitted when it is one of them (''
+        # otherwise). See emit_methods._frame_enter.
+        self._frames_mods: set = set()
+        self._frame_func: str = ''
         self._owned_free_candidates: set = set()
         self._owned_free_pushed: set = set()
         self._owned_stack_allocated: set = set()
