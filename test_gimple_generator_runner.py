@@ -3461,13 +3461,12 @@ main()
 """)
 
 
-    # A lone None generator PASSED TO A FUNCTION (`use(g())`, whose parameter is
-    # iterated there) is outside `_tagged_consumers_ok`, so the default path
-    # refuses it. The refusal is the pinned behaviour: before the refusal existed
-    # this shape printed the raw int64 0. It must stay a refusal, never a silent 0,
-    # until a tagged word can cross a call boundary (see
-    # bugs/CODEGEN_a_tagged_generator_passed_to_a_function_is_refused.md).
-    test_generator_refused("none_yield_lone_passed_to_function_refused", """\
+    # A tagged generator PASSED TO A FUNCTION whose parameter is consumed boxed
+    # there (`for`, `list()`, a pass-on to another such function) crosses the
+    # call boundary through `_ParamFlow` in coro.py: the callee's loop reads the
+    # tagged word, so these compile and match CPython. Before that rule they were
+    # refused (or, for the mixed shape, refused by the mixed-kind checks).
+    test_generator_matches_cpython("none_yield_lone_passed_to_function", """\
 def g():
     yield
 
@@ -3478,7 +3477,104 @@ def use(it):
 def main():
     use(g())
 main()
-""", "a None yield (bare `yield` / `yield None`) has no value slot")
+""", """\
+def g():
+    yield
+
+def use(it):
+    for v in it:
+        print(v)
+
+def main():
+    use(g())
+main()
+""")
+    test_generator_matches_cpython("tagged_mixed_passed_to_function", """\
+def g():
+    yield 1
+    yield "s"
+
+def use(it):
+    for v in it:
+        print(v)
+
+def main():
+    use(g())
+main()
+""", """\
+def g():
+    yield 1
+    yield "s"
+
+def use(it):
+    for v in it:
+        print(v)
+
+def main():
+    use(g())
+main()
+""")
+    test_generator_matches_cpython("tagged_none_passed_through_two_functions", """\
+def g():
+    yield None
+    yield 2
+
+def inner(it):
+    for v in it:
+        print(v)
+
+def use(it):
+    inner(it)
+
+def main():
+    use(g())
+main()
+""", """\
+def g():
+    yield None
+    yield 2
+
+def inner(it):
+    for v in it:
+        print(v)
+
+def use(it):
+    inner(it)
+
+def main():
+    use(g())
+main()
+""")
+    # `next()` on the PARAMETER in the callee has no generator api there, so the
+    # tagged word would read as a raw int64_t (`0`): it must stay a refusal.
+    test_generator_refused("none_yield_passed_to_function_next_refused", """\
+def g():
+    yield
+    yield 2
+
+def use(it):
+    print(next(it))
+
+def main():
+    use(g())
+main()
+""", "generator function(s)")
+    # A parameter that ALSO receives a different value at another call site has
+    # no single kind to read, so it keeps its refusal.
+    test_generator_refused("none_yield_passed_to_function_mixed_callers_refused", """\
+def g():
+    yield
+    yield 2
+
+def use(it):
+    for v in it:
+        print(v)
+
+def main():
+    use(g())
+    use([1, 2])
+main()
+""", "generator function(s)")
 
 
 def run_tagged_word_cpp_tests():

@@ -1126,6 +1126,177 @@ def _conflicting_names_in(expr, env: dict | None) -> list:
     return []
 
 
+def _scope_defs() -> list:
+    """Every function body a module-level reference can sit in: the top-level
+    `def`s and the methods of top-level structs."""
+    scopes = []
+    for st in _MODULE_STMTS:
+        if isinstance(st, N.FunctionDef):
+            scopes.append(st)
+        elif isinstance(st, N.StructDef):
+            for m in (getattr(st, 'methods', None) or []):
+                scopes.append(m)
+    return scopes
+
+
+def _is_name(x, name: str) -> bool:
+    return isinstance(x, N.IdentExpr) and x.name == name
+
+
+class _ParamFlow:
+    """Whole-module index answering one question for the tagged-generator
+    decision (`_tagged_consumers_ok`): when the generator `name`'s call is
+    passed as a positional argument to a plain module-level `def`, does the
+    callee read that PARAMETER only through the boxed consumers (`for`, `list()`,
+    a comprehension), either directly or by passing it on to another such
+    `def`? Built lazily, once per query, because the walk is whole-module.
+
+    The rule is conservative on purpose. The parameter's value must be the
+    tagged generator at EVERY call site of the callee (an unrelated value at
+    any call site, a `*`-unpack, a keyword, a bare reference to the callee as a
+    value, or a nested `def` in the caller all answer False), and every use of
+    the parameter in the callee must be one of the accepted consumers. `next()`
+    on the parameter is NOT accepted: it has no generator api in the callee,
+    so `_lower_generator_next` is never reached and the value reads as a raw
+    int64_t (measured: `next(it)` in the callee printed `0` for a bare yield).
+    """
+
+    def __init__(self, name: str):
+        self.name = name
+        self.defs: dict = {}
+        for st in _MODULE_STMTS:
+            if (isinstance(st, N.FunctionDef)
+                    and not getattr(st, 'is_generator', False)
+                    and not getattr(st, 'is_async', False)):
+                self.defs.setdefault(st.name, []).append(st)
+        self.caller: dict = {}      # id(CallExpr) -> enclosing scope def (or None)
+        self.sites: dict = {}       # callee name -> [CallExpr with IdentExpr func]
+        self.refs: dict = {}        # IdentExpr name -> occurrence count
+        self._nested: set = set()   # ids of scope defs that contain a nested def
+        for sc in _scope_defs():
+            for n in _walk(sc):
+                if n is not sc and isinstance(n, N.FunctionDef):
+                    self._nested.add(id(sc))
+                self._index(sc, n)
+        for st in _MODULE_STMTS:
+            if isinstance(st, (N.FunctionDef, N.StructDef)):
+                continue
+            for n in _walk(st):
+                self._index(None, n)
+
+    def _index(self, scope, n):
+        if isinstance(n, N.CallExpr):
+            self.caller[id(n)] = scope
+            if isinstance(n.func, N.IdentExpr):
+                self.sites.setdefault(n.func.name, []).append(n)
+        elif isinstance(n, N.IdentExpr):
+            self.refs[n.name] = self.refs.get(n.name, 0) + 1
+
+    def _plain(self, fname: str):
+        """The one plain module-level def named `fname`, or None (absent,
+        duplicated, or a generator/async def)."""
+        ds = self.defs.get(fname) or []
+        return ds[0] if len(ds) == 1 else None
+
+    def _sites_of(self, fname: str):
+        """Every call of `fname`, or None when `fname` is also referenced
+        other than as the func of a call (passed as a value, rebound)."""
+        calls = self.sites.get(fname, [])
+        if self.refs.get(fname, 0) != len(calls):
+            return None
+        return calls
+
+    @staticmethod
+    def _rebinds(fd, pname: str) -> bool:
+        for n in _walk(fd):
+            for t in ([getattr(n, 'target', None)] + list(getattr(n, 'targets', None) or [])):
+                if t == pname or _is_name(t, pname):
+                    return True
+        return False
+
+    def source_ok(self, fd, pidx: int, visiting: set) -> bool:
+        """True when parameter `pidx` of plain def `fd` is the tagged generator
+        at every call site of `fd`, and is consumed boxed inside `fd`."""
+        key = (fd.name, pidx)
+        if key in visiting:
+            return True     # a pass-through cycle contributes no other value
+        visiting.add(key)
+        if (fd.comptime_params or fd.kwonly or pidx >= len(fd.params)
+                or fd.params[pidx][0].startswith('*')):
+            return False
+        pname = fd.params[pidx][0]
+        sites = self._sites_of(fd.name)
+        if not sites:
+            return False
+        for c in sites:
+            if any(isinstance(a, N.UnaryOp) and a.op in ('*', '**') for a in c.args) \
+                    or c.kwargs or pidx >= len(c.args):
+                return False
+            a = c.args[pidx]
+            if (isinstance(a, N.CallExpr) and isinstance(a.func, N.IdentExpr)
+                    and a.func.name == self.name):
+                continue
+            if isinstance(a, N.IdentExpr):
+                # a pass-through: the caller hands on ITS OWN parameter
+                caller = self.caller.get(id(c))
+                if (caller is None or id(caller) in self._nested
+                        or caller.comptime_params
+                        or getattr(caller, 'is_generator', False)
+                        or getattr(caller, 'is_async', False)
+                        or self._rebinds(caller, a.name)):
+                    return False
+                q = [i for i, p in enumerate(caller.params) if p[0] == a.name]
+                if len(q) != 1 or not self.source_ok(caller, q[0], visiting):
+                    return False
+                continue
+            return False
+        return self.use_ok(fd, pname, visiting)
+
+    def use_ok(self, fd, pname: str, visiting: set) -> bool:
+        if self._rebinds(fd, pname):
+            return False
+        ok_ids = set()
+        for n in _walk(fd):
+            if isinstance(n, N.ForStmt) and _is_name(n.iterable, pname):
+                ok_ids.add(id(n.iterable))
+            elif isinstance(n, N.Generator) and _is_name(n.iterable, pname):
+                ok_ids.add(id(n.iterable))
+            elif (isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr)
+                    and n.func.name == 'list' and len(n.args) == 1
+                    and _is_name(n.args[0], pname)):
+                ok_ids.add(id(n.args[0]))
+            elif isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr) \
+                    and n.func.name != pname:
+                h = self._plain(n.func.name)
+                if h is None:
+                    continue
+                for q, a in enumerate(n.args):
+                    if _is_name(a, pname) and q < len(h.params) \
+                            and self.source_ok(h, q, visiting):
+                        ok_ids.add(id(a))
+        for n in _walk(fd):
+            if isinstance(n, N.IdentExpr) and n.name == pname and id(n) not in ok_ids:
+                return False
+        return True
+
+    def passes_generator(self, call) -> list:
+        """The argument nodes of `call` that are the tagged generator's call
+        AND reach a boxed-consumer parameter of their callee. Empty when none."""
+        if not isinstance(call.func, N.IdentExpr):
+            return []
+        h = self._plain(call.func.name)
+        if h is None or call.kwargs:
+            return []
+        out = []
+        for i, a in enumerate(call.args):
+            if (isinstance(a, N.CallExpr) and isinstance(a.func, N.IdentExpr)
+                    and a.func.name == self.name
+                    and i < len(h.params)
+                    and self.source_ok(h, i, set())):
+                out.append(a)
+        return out
+
+
 def _tagged_consumers_ok(name: str) -> bool:
     """True when every reference to the module-level generator `name` in the
     module being lowered is a consumer that reads a tagged-word value slot as a
@@ -1146,14 +1317,7 @@ def _tagged_consumers_ok(name: str) -> bool:
     # `list(it)`, `for x in it`, a comprehension over it, or `it.close()`:
     # followed as if it were the call. Scoped per function -- an unrelated `it`
     # in another function must not poison (or be mistaken for) this one.
-    scopes = []
-    for st in _MODULE_STMTS:
-        if isinstance(st, N.FunctionDef):
-            scopes.append(st)
-        elif isinstance(st, N.StructDef):
-            for m in (getattr(st, 'methods', None) or []):
-                scopes.append(m)
-    for fd in scopes:
+    for fd in _scope_defs():
         handles = {}
         for n in _walk(fd):
             if (isinstance(n, N.AssignStmt) and isinstance(n.target, N.IdentExpr)
@@ -1192,8 +1356,17 @@ def _tagged_consumers_ok(name: str) -> bool:
             if n_bad == n_targets:
                 for cid in handles[hn]:
                     for_iters.add(cid)
+    flow = None     # built only when a generator call is passed as an argument
     for st in _MODULE_STMTS:
         for n in _walk(st):
+            if isinstance(n, N.CallExpr) and any(_is_gcall(a) for a in n.args):
+                # `use(g())`: the generator is handed to a plain def, whose
+                # parameter must be a boxed consumer at every call site
+                # (see `_ParamFlow`). Any other shape is left to the refusal.
+                if flow is None:
+                    flow = _ParamFlow(name)
+                for a in flow.passes_generator(n):
+                    for_iters.add(id(a))
             if isinstance(n, N.ForStmt) and _is_gcall(n.iterable):
                 for_iters.add(id(n.iterable))
             # `list(g())` / `tuple(g())` and a comprehension clause's iterable:
