@@ -1,6 +1,25 @@
 # CODEGEN_cpp_send_emits_default_path_symbol: `gen.send(v)` on the cpp generator path emits the default path's runtime call
 
-## Status (2026-11-01, found while landing the cpp lowering of `x = yield`)
+## Status (2026-11-01) — PARTIAL: the honest refusal has landed; full send support has not
+
+**Landed (2026-11-01):** `_lower_generator_send` (`mojo/backend_gimple/emit_calls.py`)
+now refuses `.send()` on a C++20-coroutine generator at codegen, with
+`_UnsupportedGeneratorShape`, instead of emitting a call to the stack-switch
+runtime's `__mojo_gen_resume`. The cause is that the send lowering keyed on the
+`MojoGenerator *` handle type alone, so a generator whose API is a cpp unit
+(`base` starts `_mojogen_`) reached the A3 entry point. It now uses the same
+`_mojogen_` prefix test `_lower_generator_close` already uses to tell the two
+protocols apart. Pinned by `run_cpp_send_refusal_tests` in
+`test_gimple_generator_runner.py`: the cpp refusal (failed before the fix with
+"expected a refusal, but it compiled"), and a control that the same program on
+the default stack-switch path still lowers `send` and matches CPython.
+
+**Still missing (steps 1-4 below):** send support on the cpp path. Nothing
+delivers a sent word into a cpp-path `yield`, and `x = yield` still binds the
+None box.
+
+The original description follows.
+
 
 Under the cpp escape hatch (`coro.pinned('cpp')`, `MOJO_CORO=cpp`), a call
 `it.send(v)` on a generator is not lowered by the cpp emitter at all. The
@@ -67,6 +86,6 @@ delivers. That is faithful only while nothing sends a value.
 4. Pin with `test_generator_matches_cpython` under `coro.pinned('cpp')`:
    `send` into an `int` yield, a `str` yield, and a `None` send.
 
-Until (2) lands, `send` on the cpp path should be refused at codegen with
-`_UnsupportedGeneratorShape`, not left to surface as a gcc error. That refusal
-is the smallest honest step and can land on its own.
+Until (2) lands, `send` on the cpp path is refused at codegen with
+`_UnsupportedGeneratorShape` (landed 2026-11-01, see the Status above). That
+refusal is the smallest honest step and is what this doc now records as done.
