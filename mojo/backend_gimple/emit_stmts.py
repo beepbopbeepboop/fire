@@ -1339,10 +1339,30 @@ def _gen_stmt_AssignStmt(gen, node):
         # a box-holding local that is later stored a bare word would be read as
         # a box. A local already declared as something other than a word keeps
         # the unwrap below, which is the behaviour it always had.
+        # A copy `x = v` of a for-loop target over a tagged generator keeps
+        # the box the same way: the loop stored the box in `v` (`_boxed_vals`,
+        # emit_loops' generator for-target arm), and `tagged_for_target_name`
+        # is what makes every store into `x` a box.
+        _copy_src = (_as_str(node.value.name)
+                     if isinstance(node.value, gimple_ctypes.IdentExpr) else None)
+        _for_copy = (_copy_src is not None
+                     and vtype == 'int64_t'
+                     and v in getattr(gen, '_boxed_vals', ())
+                     and gen.var_types.get(_copy_src) == 'int64_t'
+                     and ginf.tagged_for_target_name(gen, _copy_src))
         _keep_tagged_box = (vtype == 'int64_t'
-                            and v in getattr(gen, '_tagged_word_vals', ())
+                            and (v in getattr(gen, '_tagged_word_vals', ())
+                                 or _for_copy)
                             and gen.var_types.get(tname, 'int64_t') == 'int64_t'
                             and ginf.tagged_next_bind_name(gen, _as_str(tname)))
+        if (not _keep_tagged_box and _copy_src is not None
+                and ginf.tagged_next_bind_name(gen, _as_str(tname))):
+            # The local is registered as a box by every store (the static
+            # rule says all of them are tagged), so this store must keep the
+            # box too: a bare word here would be read as a box.
+            raise RuntimeError(
+                f"internal: copy of a tagged for-loop target into {tname!r} "
+                f"did not keep the box (source {_copy_src!r})")
         if _keep_tagged_box:
             if tname not in gen.var_types:
                 gen._declare_var(tname, 'int64_t')

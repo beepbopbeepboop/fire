@@ -1,5 +1,58 @@
 # CODEGEN_a_bare_or_explicit_yield_of_none: a None yield value prints 0
 
+## Status (2026-11-01, fourteenth round, work/bug-codegen-a-bare-or-explicit-yield-of: for-loop target copy keeps the box, partial)
+
+**Landed (real behaviour change on both paths): open item 1 of the thirteenth
+round.** `x = v` where `v` is a for-loop target over a tagged generator keeps
+the yield's box, so `print(x)` prints `None` / `True` and `x == None` is right.
+- `emit_infra.py`: `tagged_for_target_name(gen, name)` (new) answers True iff
+  every binder of `name` is a `for name in <tagged generator>` loop
+  (`_tagged_generator_iterable`, resolved from `gen._generator_api`'s
+  `mixed_slots`, directly or through a local bound once to the call).
+  `tagged_next_bind_name` accepts such a name as a copy source.
+- `emit_stmts.py`: the simple-name bind keeps the box for `x = v` when `v` is a
+  boxed for-target copy source (`_for_copy`), and raises an internal error
+  (not a silent bare word) if the static rule says every store of `x` is a box
+  but this store is not.
+- `emit_infra.py` `_local_bindings`: the parser keeps a `for` target as its
+  source TEXT (a str, see `for_target_single_name`), which `idents_named` never
+  saw. A `for name in ...` is now counted as a binder of `name`. This was a
+  hole in `tagged_next_bind_name` too (a `next(g)` name rebound by a `for` looked
+  tagged); the copy-after-loop shape in the pin does not observe it on either
+  tree, so it is landed as a soundness fix, not as a measured fix.
+
+**Pins** (`run_tagged_for_target_bind_tests` in `test_gimple_generator_runner.py`):
+`tagged_for_target_copy_{default,cpp}` (the open shape: yields 1, None, True,
+`x = v; print(x); print(x == None)`) and `tagged_for_target_copy_mixed_{default,cpp}`
+(a name also bound to a plain value, a plain generator's loop target, and a
+`next()` name rebound by a `for`: must stay correct).
+Fail-before, measured by putting the pre-fix `emit_infra.py`/`emit_stmts.py`
+back (copy from `git show HEAD:`, not checkout): the open-shape pair FAILS
+(`0`, `False` where CPython says `None`, `True`); the mixed pair passes before
+and after (guard). After: 4/0.
+
+**Still open (this doc keeps it):**
+
+1. **`v is None` on a tagged False/0 is True**: unchanged, filed as
+   `bugs/CODEGEN_is_none_on_a_tagged_false_or_zero_is_true.md`.
+2. **A lone None yield on the cpp path is refused** (`NONE_YIELD_CPP_REFUSAL`) for
+   consumers the tagged word does not cover (round 12). Not a silent 0, but not
+   yet a value either.
+3. **A copy of a for target whose name also has a plain binding** still unwraps
+   (the static rule refuses, as it must); `x = 0; for v in g(): x = v` prints
+   `0` for a None yield. That is the conservative answer, not a fix: the name's
+   every store would have to be a box for the local to keep one. Next step: a
+   per-store box representation for mixed names, or a retype of `x` to a
+   word-of-unknown-kind local (`_dyn_word_locals`) that keeps the kind by a
+   runtime tag.
+
+**Gate note for the integrator (not run here):** the change is in the
+`x = v` bind rule and `_local_bindings`, which every simple-name bind reads.
+Run `compile_stdlib.py` and compare `U`/`skip` before and after. The
+`RuntimeError` guard in `emit_stmts.py` is the one place a new error can appear:
+any `U` rise with an "internal: copy of a tagged for-loop target" message is
+this change.
+
 ## Status (2026-11-01, thirteenth round, work/bug-codegen-a-bare-or-explicit-yield-of: `v == None` on a None yield, partial)
 
 **Re-measured first (both paths, CPython oracle):** the rounds' matrix still

@@ -3959,6 +3959,62 @@ main()
     with coro.pinned('cpp'):
         test_generator_matches_cpython("tagged_none_equality_cpp", _src, _src)
 
+def run_tagged_for_target_bind_tests():
+    # A for-loop TARGET over a kind-mixed generator, copied to a name
+    # (`x = v`), must keep the yield's kind exactly as `x = next(g)` does
+    # (run_tagged_word_bind_tests). The copy used to unwrap the box with
+    # `mojo_box_word`, so a None yield printed 0 and `x == None` was False.
+    # The target is a tagged word (`_tagged_word_vals`); the bind rule only
+    # answered for `next(g)` values, so a copy of the target lost the box.
+    _src = """\
+def g():
+    yield 1
+    yield None
+    yield True
+def main():
+    for v in g():
+        x = v
+        print(x)
+        print(x == None)
+main()
+"""
+    test_generator_matches_cpython("tagged_for_target_copy_default", _src, _src)
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("tagged_for_target_copy_cpp", _src, _src)
+    # The copy is only a box while EVERY binding of the name is a tagged word:
+    # a name that is also bound to a plain value, or to a plain generator's
+    # loop target, must keep the unwrapped word. And a `for` that rebinds a
+    # name previously bound by `next(g)` must not be read as a tagged word.
+    _mixed = """\
+def g():
+    yield 1
+    yield "a"
+def plain():
+    yield 5
+    yield 6
+def main():
+    x = 0
+    for v in g():
+        x = v
+    x = 7
+    print(x)
+    for w in plain():
+        x = w
+        print(x)
+    h = g()
+    y = next(h)
+    print(y)
+    for y in ["p", "q"]:
+        print(y)
+    print(y)
+    z = y
+    print(z)
+main()
+"""
+    test_generator_matches_cpython("tagged_for_target_copy_mixed_default", _mixed, _mixed)
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("tagged_for_target_copy_mixed_cpp", _mixed, _mixed)
+
 def run_tests():
     run_none_yield_tests()
     run_tagged_none_equality_tests()
