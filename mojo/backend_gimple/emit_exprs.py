@@ -21,7 +21,7 @@ from fire_compiler import (
     VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt,
     ReturnStmt, RaiseStmt,
     BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt,
-    ImportStmt, FromImportStmt,
+    ImportStmt, FromImportStmt, ExceptHandler, WithItem, Generator,
     IfStmt, WhileStmt, ForStmt,
     FunctionDef, TryStmt, WithStmt,
     ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt,
@@ -5103,7 +5103,7 @@ def _lower_compare_chain(gen, node: gimple_ctypes.CompareChain) -> tuple[str, st
         if op in ('in', 'not in'):
             cmp_type, cmp_val = gen._lower_in_dispatch(
                 lt, lv, rt, rv, negate=(op == 'not in'),
-                x_is_none=gen._is_none_literal(node.operands[i]))
+                x_is_none=is_none_needle(gen, node.operands[i]))
         else:
             cmp_type, cmp_val = gen._lower_binary_tail(op, left_node, lt, lv, right_node, rt, rv)
         cond = gen._ensure_bool_cond(cmp_type, cmp_val)
@@ -5728,7 +5728,7 @@ def _lower_in_impl(gen, node: gimple_ctypes.BinaryOp, negate: bool) -> tuple[str
     elif xt.endswith(' *') and xt != 'char *' and gen.var_types.get(xv) == 'int64_t':
         xv = gen._new_val(xt, f"({xt}){xv}")
     return gen._lower_in_impl_values(xt, xv, node.right, negate,
-                                     x_is_none=gen._is_none_literal(node.left))
+                                     x_is_none=is_none_needle(gen, node.left))
 
 
 def _lower_in_impl_values(gen, xt: str, xv: str, right_node, negate: bool,
@@ -6481,6 +6481,128 @@ def none_bound_locals(gen) -> set:
                 out.add(_as_str(_vd.name))
     gen._none_bound_names = out
     return out
+
+
+def _target_names(target) -> set:
+    """Every identifier a binding target names. A target may be a bare name,
+    a str (a `for`/comprehension/comptime target), or a tuple/list/member/
+    subscript/starred expression; for the last group every identifier inside
+    it is taken, which over-approximates (`obj.x = ...` names `obj`) and so
+    only ever makes a name LESS trusted."""
+    if target is None:
+        return set()
+    if isinstance(target, str):
+        return {target}
+    if isinstance(target, IdentExpr):
+        return {_as_str(_as_ident_node(target).name)}
+    return {_as_str(n.name) for n in gimple_exprtypes._walk_ast(target)
+            if isinstance(n, IdentExpr)}
+
+
+def _param_name(p) -> str:
+    return _as_str(p[0] if isinstance(p, (tuple, list)) else p)
+
+
+def _names_bound_by(node) -> set:
+    """The names this ONE node binds, rebinds or unbinds in the scope it sits
+    in. Sub-expressions are not descended here: the caller walks every node,
+    so each binding is seen at its own node. A `None` literal store binds
+    nothing new to this question, because it is the one binding a
+    none-only local is allowed to have.
+
+    Covers every binding form the parser produces. A form that is not listed
+    binds nothing here, so `none_only_locals` would not see it; the forms are
+    the ones `fire_compiler` defines as statements, targets or parameters."""
+    out: set = set()
+    if isinstance(node, AssignStmt):
+        if _is_none_literal(node.value) and isinstance(node.target, IdentExpr):
+            return out
+        out |= _target_names(node.target)
+    elif isinstance(node, AugAssignStmt):
+        out |= _target_names(node.target)
+    elif isinstance(node, MultiAssignStmt):
+        for t in node.targets:
+            out |= _target_names(t)
+    elif isinstance(node, VarDecl):
+        if node.value is None or not _is_none_literal(node.value):
+            out.add(_as_str(node.name))
+    elif isinstance(node, (ForStmt, Generator, ComptimeForStmt)):
+        out |= _target_names(node.target)
+    elif isinstance(node, WithItem):
+        out |= _target_names(node.alias)
+    elif isinstance(node, ExceptHandler):
+        if node.name:
+            out.add(_as_str(node.name))
+    elif isinstance(node, WalrusExpr):
+        out.add(_as_str(node.name))
+    elif isinstance(node, (FunctionDef, StructDef, TraitDef)):
+        out.add(_as_str(node.name))
+        if isinstance(node, FunctionDef):
+            out |= {_param_name(p) for p in node.params}
+            out |= {_as_str(p) for p in node.kwonly}
+            out |= {_as_str(p) for p in node.comptime_params}
+    elif isinstance(node, LambdaExpr):
+        out |= {_param_name(p) for p in node.params}
+    elif isinstance(node, ComptimeVarStmt):
+        out.add(_as_str(node.target))
+    elif isinstance(node, ImportStmt):
+        out.add(_as_str(node.alias) if node.alias else
+                _as_str(node.module).split('.')[0])
+        for mod, alias in (node.extra or ()):
+            out.add(_as_str(alias) if alias else _as_str(mod).split('.')[0])
+    elif isinstance(node, FromImportStmt):
+        for name, alias in node.names:
+            out.add(_as_str(alias) if alias else _as_str(name))
+    elif isinstance(node, (GlobalStmt, NonlocalStmt)):
+        out |= {_as_str(n) for n in node.names}
+    elif isinstance(node, DelStmt):
+        for t in node.targets:
+            out |= _target_names(t)
+    return out
+
+
+def none_only_locals(gen) -> set:
+    """The locals of the function being lowered that hold `None` at EVERY
+    read: each binding of the name is the literal `None`, and there is no
+    other binding anywhere in the function (a parameter, a `for` or `with`
+    target, a `global`/`nonlocal`, a nested def's own binding of the same name
+    -- which is treated as this function's, conservatively).
+
+    Flow-insensitive on purpose. `none_bound_locals` is the weaker "some
+    binding is None" and answers the container-slot question; a membership
+    needle has to be None on every path, so `default = None` followed by
+    `default = parse()` must NOT qualify. A `None` local is the NULL word,
+    not the int 0 its int64_t storage spells, which is why its membership
+    needle is answered as None (see `is_none_needle`).
+
+    A `match` statement may bind names in patterns this walk does not
+    enumerate, so a function containing one has no none-only locals.
+    Cached per function (`_reset_func` clears it)."""
+    cached = gen._none_only_names
+    if cached is not None:
+        return cached
+    out: set = set()
+    body = gen._cur_func_body
+    if body is not None:
+        nodes = gimple_exprtypes._walk_ast(body)
+        if not any(isinstance(n, MatchStmt) for n in nodes):
+            bound: set = set(gen._cur_func_params or ())
+            for n in nodes:
+                bound |= _names_bound_by(n)
+            out = none_bound_locals(gen) - bound
+    gen._none_only_names = out
+    return out
+
+
+def is_none_needle(gen, e) -> bool:
+    """Is the membership NEEDLE `e` the value `None`? True for a `None`
+    literal, and for a local that holds `None` on every path (see
+    `none_only_locals`). Such a needle must not reach the int path: its
+    int64_t word is the same as an int 0's, which matched a `0` slot."""
+    if _is_none_literal(e):
+        return True
+    return (isinstance(e, IdentExpr)
+            and _as_str(_as_ident_node(e).name) in none_only_locals(gen))
 
 
 def _list_literal_slot_kind(gen, el, et) -> str:
