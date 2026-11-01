@@ -1185,6 +1185,45 @@ def _lower_class_dyn_getattr(gen, struct_name: str, member: str) -> tuple[str, s
     return 'int64_t', r
 
 
+def _is_tagged_box_operand(gen, node, val: str) -> bool:
+    """Is the already-lowered operand `val` (the AST `node`) a tagged word that
+    may be a box: a name bound from a kind-mixed generator (`_tagged_word_vals`,
+    e.g. `next(g)`), or a for-loop target over one (`tagged_for_target_name`,
+    whose word is the loop's box but is not in `_tagged_word_vals`)? Such a word
+    may be the None box or a DOUBLE box, so it must be read by its kind."""
+    if val not in getattr(gen, '_boxed_vals', ()):
+        return False
+    if val in getattr(gen, '_tagged_word_vals', ()):
+        return True
+    return (isinstance(node, gimple_ctypes.IdentExpr)
+            and ginf.tagged_for_target_name(gen, node.name))
+
+
+def _tagged_unary_neg(gen, val: str) -> str:
+    """Unary `-` on a tagged word `val`, by the box's kind. The None box raises
+    TypeError, as CPython does for `-None` (`mojo_none_unary_guard`). The answer
+    is then the integer negation, or a double box holding the negated double
+    when the word is a DOUBLE box, which `mojo_float_arith_select` picks at run
+    time. The result is itself a tagged word, so a consumer renders it by kind
+    and a further operator reads it by kind too (as `_tagged_arith_select`'s
+    result is)."""
+    g = gen._call_expr('int64_t', 'mojo_none_unary_guard',
+                       [('int64_t', val), ('char *', '"-"')])
+    ibx = gen._call_expr('int64_t', 'mojo_box_int', [('int64_t', g)])
+    ires = gen._new_val('int64_t', f'-({_as_str(ibx)})')
+    dbx = gen._call_expr('double', 'mojo_box_double', [('int64_t', g)])
+    dres = gen._new_val('double', f'-({_as_str(dbx)})')
+    t = gen._call_expr('int64_t', 'mojo_float_arith_select', [
+        ('int64_t', _as_str(g)),
+        ('int64_t', '0'),
+        ('int64_t', _as_str(ires)),
+        ('double', _as_str(dres)),
+    ])
+    gen._boxed_vals.add(t)
+    gen._tagged_word_vals.add(t)
+    return t
+
+
 def _lower_UnaryOp(gen, node) -> tuple[str, str]:
     ot, ov = gen.lower_expr(node.operand)
     if node.op == 'not':
@@ -1297,14 +1336,11 @@ def _lower_UnaryOp(gen, node) -> tuple[str, str]:
             return ot, ov
     if node.op == '+':
         return ot, ov
-    # A tagged word may be the shared None box, which has no numeric kind:
-    # `-x` on it raises TypeError, as CPython does, rather than negating the
-    # box's address. See `_tagged_arith_select` for the binary forms.
-    if (node.op == '-' and ot == 'int64_t'
-            and ov in getattr(gen, '_tagged_word_vals', ())
-            and ov in getattr(gen, '_boxed_vals', ())):
-        ov = gen._call_expr('int64_t', 'mojo_none_unary_guard',
-                            [('int64_t', ov), ('char *', '"-"')])
+    # `-x` on a tagged word is a run-time select by the box's kind, as
+    # `_tagged_arith_select` is for the binary forms: negating the WORD would
+    # negate a double box's address. See `_tagged_unary_neg`.
+    if node.op == '-' and ot == 'int64_t' and _is_tagged_box_operand(gen, node.operand, ov):
+        return 'int64_t', _tagged_unary_neg(gen, ov)
     c_op = {'-': '-', '~': '~'}.get(node.op, node.op)
     # Struct pointers can't be negated/inverted — coerce to int64_t first.
     # char* included: `-<char*>` is never valid Python (negating a string

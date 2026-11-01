@@ -652,6 +652,70 @@ print("done")
 """, "no known generator API")
 
 
+def run_unary_minus_received_float_tests():
+    # `-x` on a value received from a kind-mixed generator. The received word is
+    # a box, and the box may hold a DOUBLE: negating the word negated the box's
+    # ADDRESS (`-4341657616` for `-2.5`). A unary minus must read the box by its
+    # kind, as the binary arithmetic does (`_tagged_arith_select`): a double box
+    # negated as a double, an int box as its integer.
+    #
+    # Both binders are covered: a for-loop target over the generator (the box is
+    # not in `_tagged_word_vals`; the loop's name is the tagged word) and a name
+    # bound by `next()`, which is.
+    test_generator_matches_cpython(
+        "unary_minus_on_for_target_of_mixed_generator_reads_box_by_kind",
+        """\
+def g():
+    yield 1
+    yield 2.5
+    yield 4
+
+def main():
+    for x in g():
+        print(-x)
+main()
+""",
+        """\
+def g():
+    yield 1
+    yield 2.5
+    yield 4
+
+def main():
+    for x in g():
+        print(-x)
+main()
+""")
+    test_generator_matches_cpython(
+        "unary_minus_on_next_bound_mixed_generator_value_reads_box_by_kind",
+        """\
+def g():
+    yield 1
+    yield 2.5
+
+def main():
+    it = g()
+    a = next(it)
+    print(-a)
+    b = next(it)
+    print(-b)
+main()
+""",
+        """\
+def g():
+    yield 1
+    yield 2.5
+
+def main():
+    it = g()
+    a = next(it)
+    print(-a)
+    b = next(it)
+    print(-b)
+main()
+""")
+
+
 def run_sibling_loop_value_kind_tests():
     # Two sibling `for` loops in one function that bind the SAME name to two
     # generators with different yield kinds. The loop variable was declared by
@@ -4494,6 +4558,7 @@ def run_tests():
     run_next_method_tests()
     run_next_return_position_tests()
     run_sibling_loop_value_kind_tests()
+    run_unary_minus_received_float_tests()
     run_module_global_generator_tests()
     run_nested_generator_capture_tests()
     run_escaping_nested_generator_tests()
