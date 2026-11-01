@@ -5101,7 +5101,9 @@ def _lower_compare_chain(gen, node: gimple_ctypes.CompareChain) -> tuple[str, st
         right_node = node.operands[i + 1]
         rt, rv = gen.lower_expr(right_node)
         if op in ('in', 'not in'):
-            cmp_type, cmp_val = gen._lower_in_dispatch(lt, lv, rt, rv, negate=(op == 'not in'))
+            cmp_type, cmp_val = gen._lower_in_dispatch(
+                lt, lv, rt, rv, negate=(op == 'not in'),
+                x_is_none=gen._is_none_literal(node.operands[i]))
         else:
             cmp_type, cmp_val = gen._lower_binary_tail(op, left_node, lt, lv, right_node, rt, rv)
         cond = gen._ensure_bool_cond(cmp_type, cmp_val)
@@ -5725,10 +5727,12 @@ def _lower_in_impl(gen, node: gimple_ctypes.BinaryOp, negate: bool) -> tuple[str
         xv = gen._new_val('char *', f"(char *){xv}")
     elif xt.endswith(' *') and xt != 'char *' and gen.var_types.get(xv) == 'int64_t':
         xv = gen._new_val(xt, f"({xt}){xv}")
-    return gen._lower_in_impl_values(xt, xv, node.right, negate)
+    return gen._lower_in_impl_values(xt, xv, node.right, negate,
+                                     x_is_none=gen._is_none_literal(node.left))
 
 
-def _lower_in_impl_values(gen, xt: str, xv: str, right_node, negate: bool) -> tuple[str, str]:
+def _lower_in_impl_values(gen, xt: str, xv: str, right_node, negate: bool,
+                          x_is_none: bool = False) -> tuple[str, str]:
     """The rest of `in`/`not in` lowering, taking the already-lowered
     left operand (xt, xv) instead of re-lowering it from an AST node.
     Split out of _lower_in_impl so a CompareChain link (`a in b < c`,
@@ -5741,7 +5745,7 @@ def _lower_in_impl_values(gen, xt: str, xv: str, right_node, negate: bool) -> tu
         return gen._lower_in_range(xv, right_node.args, negate=negate)
 
     rt, rv = gen.lower_expr(right_node)
-    res = gen._lower_in_dispatch(xt, xv, rt, rv, negate)
+    res = gen._lower_in_dispatch(xt, xv, rt, rv, negate, x_is_none=x_is_none)
     # `c in ('[', '(', '{')`, `k in {"a", "b"}`, `x in [1, 2]`: the container is
     # built for this one membership test and no name can ever refer to it, yet
     # it was never released -- three per character of every tokenizer scan.
@@ -5765,7 +5769,8 @@ def _set_needle_is_word(gen, xv: str) -> bool:
     return xv not in gen._int_word_vals
 
 
-def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool) -> tuple[str, str]:
+def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
+                       x_is_none: bool = False) -> tuple[str, str]:
     """Container-type dispatch (list/dict/set/str) for `in`/`not in`,
     given both operands already lowered. Split out of
     _lower_in_impl_values so _lower_compare_chain's 'in'/'not in' links
@@ -5831,7 +5836,24 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool) ->
         # garbage overload key (`Counter_inc_0_2`).
         if list_elem == 'int64_t' and xt == 'char *':
             list_elem = 'char *'
-        if list_elem == 'MojoBytes *' and xt != 'MojoBytes *':
+        # Every arm below sets `ti` and falls through to the shared `negate`
+        # tail at the end of this function; none of them may return early,
+        # or `not in` answers the positive question.
+        if x_is_none:
+            # `None` is the NULL word of a None slot, which the kinds row
+            # names 'n'. Its needle is NOT the int 0 this lowering gives it,
+            # so it must not reach the int path (a `0` word matched a None
+            # slot, and an int 0 slot matched None). A str list answers it
+            # through the str helper with a NULL needle; any other list can
+            # only hold None in a slot its kinds row names 'n'.
+            if list_elem == 'char *':
+                _nil = gen._new_val('char *', '(char *)0')
+                gen._emit_call('int', ti, 'mojo_list_contains_str',
+                               [('MojoList *', rv), ('char *', _nil)])
+            else:
+                gen._emit_call('int', ti, 'mojo_list_contains_none',
+                               [('MojoList *', rv)])
+        elif list_elem == 'MojoBytes *' and xt != 'MojoBytes *':
             # A non-bytes needle against a list of bytes is not a comparison
             # the runtime can even perform: `b'a' == 'a'` is False for every
             # pair in Python, so the membership question is already decided.
@@ -5843,8 +5865,7 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool) ->
             # domains already imply is also what the dict branch does below
             # for the same shape.
             gen._emit(f"  {ti} = 0;")
-            return 'int', ti
-        if list_elem == 'MojoBytes *' or xt == 'MojoBytes *':
+        elif list_elem == 'MojoBytes *' or xt == 'MojoBytes *':
             # Elements are boxed `MojoBytes *` pointers, so the generic
             # mojo_list_contains_int would compare POINTER identity — two
             # separately-constructed `b'a'` values are different pointers, so
@@ -5853,10 +5874,20 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool) ->
             xv_b = xv
             gen._emit_call('int', ti, 'mojo_list_contains_bytes',
                            [('MojoList *', rv), ('MojoBytes *', xv_b)])
-            return 'int', ti
-        suf = gimple_ctypes.TypeLattice.list_suffix(list_elem)
-        xv_cast = gen._cast_for_list(xt, xv, suf)
-        gen._emit(f"  {ti} = mojo_list_contains_{suf} ({rv}, {xv_cast});")
+        elif list_elem == 'char *' and xt in ('int', 'int64_t', '_Bool'):
+            # An int needle over a list whose elements are `char *`: a str
+            # list, or a kind-mixed literal such as `["a", 1]`. Casting the
+            # needle to `char *` (below) made mojo_list_contains_str strcmp
+            # the integer's value as a pointer -- a wild read, SIGSEGV for
+            # `1 in ["a", 1]`. Each slot is compared in its own domain
+            # instead; see mojo_list_contains_mixed_int.
+            xv64 = gen._to_int64(xt, xv)
+            gen._emit_call('int', ti, 'mojo_list_contains_mixed_int',
+                           [('MojoList *', rv), ('int64_t', xv64)])
+        else:
+            suf = gimple_ctypes.TypeLattice.list_suffix(list_elem)
+            xv_cast = gen._cast_for_list(xt, xv, suf)
+            gen._emit(f"  {ti} = mojo_list_contains_{suf} ({rv}, {xv_cast});")
     elif rt == 'MojoDict *':
         # A bytes key gets its OWN key domain in the runtime (see
         # _DictSlot.keykind) so `d[b'x']` and `d['x']` stay the two distinct

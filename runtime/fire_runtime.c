@@ -2327,8 +2327,12 @@ int64_t mojo_list_len(MojoList *l) { return l ? l->len : 0; }
 
 int mojo_list_contains_int(MojoList *l, int64_t v)
 {
+    /* A None slot holds the NULL word, which is 0, so `0 in [1, None]` would
+     * match it. Only the word 0 can be a None slot, so the kinds row is
+     * consulted only for that needle and costs nothing on the common path. */
     for (int64_t i = 0; i < l->len; i++)
-        if (l->data[i] == v) return 1;
+        if (l->data[i] == v && !(v == 0 && mojo_list_slot_kind(l, i) == 'n'))
+            return 1;
     return 0;
 }
 
@@ -2362,25 +2366,71 @@ int mojo_list_contains_str(MojoList *l, char *v)
      * generic walker already names its slots), so `["a", "c"]` has no row
      * and its slots fell into the `'i'` skip below. Every `c in ["a", "c"]`
      * over a `char *` was therefore False, and the branch never ran. Gate
-     * the skip on the ROW's existence, not on the fallback kind. */
+     * the skip on the ROW's existence, not on the fallback kind.
+     *
+     * With a row, each slot is compared in its own domain (the same rule
+     * mojo_list_contains_mixed_int states for ints): only a 'p' slot is a
+     * string, and only an 'n' slot is None. A NULL needle is a real `None`
+     * value (a tuple literal like `(None, '<conflict>')` stores None as a
+     * NULL element, and `rt_prov not in (None, '<conflict>')` in
+     * gimple_codegen.py's generator-provenance pass legitimately probes
+     * it), so None == None, and None is equal to no str slot. */
     const char *kinds = mojo_list_get_kinds(l);
     for (int64_t i = 0; i < l->len; i++) {
         char *s = (char *)(uintptr_t)l->data[i];
-        /* A slot the list's own kinds say is not a string (a tuple like
-         * `('.', b'.'[0])` mixes a str and an int) can never equal a string. */
-        if (kinds && v != NULL) {
+        if (kinds) {
             char _k = mojo_list_slot_kind(l, i);
-            if (_k == 'i' || _k == 'd') continue;
+            if (v == NULL ? _k != 'n' : _k != 'p') continue;
         }
-        /* A NULL needle is a real `None`/NULL value, not an error: a tuple
-         * literal like `(None, '<conflict>')` stores None as a NULL element,
-         * and `rt_prov not in (None, '<conflict>')` (gimple_codegen.py's
-         * generator-provenance pass) legitimately probes it. Previously only
-         * `s` was guarded, so strcmp(s, NULL) segfaulted on the second
-         * iteration. Match Python: None == None. */
-        if (v == NULL)
-            return s == NULL ? 1 : 0;
+        if (v == NULL) {
+            if (s == NULL) return 1;
+            continue;
+        }
         if (s && strcmp(s, v) == 0) return 1;
+    }
+    return 0;
+}
+
+/* `None in <list>` for a list whose elements are NOT `char *` (an int or
+ * double list, or a bytes list): None can only be such a list's element
+ * where its kinds row names the slot 'n'. Without a row no slot can be None
+ * -- a NULL word there is the int 0 (or a NULL bytes pointer), never None --
+ * so the answer is False, which is what CPython gives. */
+int mojo_list_contains_none(MojoList *l)
+{
+    for (int64_t i = 0; i < l->len; i++)
+        if (mojo_list_slot_kind(l, i) == 'n') return 1;
+    return 0;
+}
+
+/* `x in <list>` for an INT needle over a list whose element type was taken
+ * as `char *` -- a str list, or a kind-mixed literal like `["a", 1]`. A
+ * list-level accessor cannot serve it: `mojo_list_contains_str` would strcmp
+ * the needle's value as a pointer, and `mojo_list_contains_int` would compare
+ * the str slots' pointers. Python defines `in` as per-ELEMENT `==`, so each
+ * slot is compared in its own domain (the one `mojo_list_slot_kind` names):
+ *   'i'  an int slot         -- word equality
+ *   'd'  a double slot       -- numeric equality, as Python's int == float
+ *   other (str, bytes, list, None) -- never equal to an int. A None slot is
+ *        a NULL word, which is why this must not compare words blindly:
+ *        `0 in ["a", None]` is False.
+ * A list with no kinds row reads every slot as 'i', so it is compared as the
+ * words it holds, the same answer mojo_list_contains_int gives. */
+int mojo_list_contains_mixed_int(MojoList *l, int64_t v)
+{
+    for (int64_t i = 0; i < l->len; i++) {
+        char k = mojo_list_slot_kind(l, i);
+        if (k == 'i') {
+            if (l->data[i] == v) return 1;
+        } else if (k == 'd') {
+            double d = mojo_double_from_bits(l->data[i]);
+            /* Exact: d equals v only if d is an integral value in int64_t
+             * range and that integer is v. The range test keeps the
+             * (int64_t) cast defined; NaN fails it. */
+            if (d >= -9223372036854775808.0 && d < 9223372036854775808.0
+                    && (double)(int64_t)d == d && (int64_t)d == v)
+                return 1;
+        }
     }
     return 0;
 }

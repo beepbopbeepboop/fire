@@ -856,6 +856,12 @@ int64_t mojo_list_len(MojoList *l);
 int mojo_list_contains_int(MojoList *l, int64_t v);
 int mojo_list_contains_double(MojoList *l, double v);
 int mojo_list_contains_str(MojoList *l, char *v);
+/* `x in <list>` for an int needle over a str / kind-mixed list: each slot is
+ * compared in its own domain (see the definition). */
+int mojo_list_contains_mixed_int(MojoList *l, int64_t v);
+/* `None in <list>` for a non-str list: a None slot is the one the kinds
+ * row names 'n'. */
+int mojo_list_contains_none(MojoList *l);
 /* `l.count(x)` — occurrence COUNT, not membership; see each definition.
  * The bytes needle is declared down at the MojoBytes block, which is where
  * that type is first defined. */
