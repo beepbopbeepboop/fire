@@ -1497,7 +1497,8 @@ def _cpp_exc_ctor_value(gen, node) -> bool:
 
 _CPP_RT_RETURN_CTYPE = {
     'mojo_path_join': 'char *', 'mojo_str_cat': 'char *', 'mojo_cstr_slice': 'char *',
-    'mojo_dirent_name': 'char *', 'mojo_dirent_path': 'char *',
+    'mojo_dirent_name': 'int64_t', 'mojo_dirent_path': 'int64_t',
+    'mojo_fsencode_w': 'int64_t',
     'mojo_list_new': 'MojoList *', 'mojo_list_slice_word': 'MojoList *',
     'mojo_bytes_from_str': 'MojoBytes *', 'mojo_bytes_from_cstr': 'MojoBytes *',
 }
@@ -4883,6 +4884,10 @@ def _cpp_expr(gen, e) -> str:
                     'mojo_os_close', 'mojo_list_slice_word', 'mojo_bytes_from_cstr',
                     'mojo_bytes_from_str'):
                 return f"{fname}({', '.join(args)})"
+            if fname == 'mojo_fsencode_w' and len(args) == 1:
+                # the argument is a str pointer or a bytes pointer or a word: the
+                # runtime tells them apart, so pass the bits as a word
+                return f"mojo_fsencode_w((int64_t)(intptr_t)({args[0]}))"
             # A call to a C-stdlib / POSIX function with a curated, known
             # signature (`_LIBC_SIGS`) — e.g. `close(fd)` inside a compiled
             # generator (Lib/os.py's `_fwalk`, reached via
@@ -7537,8 +7542,9 @@ def _cpp_lower_posix_idioms(gen, node, handles=None):
                                   line=new.line, col=new.col)
             if f.name == 'fsencode' and len(new.args) == 1 and not kw \
                     and 'fsencode' not in getattr(gen, 'func_return_types', {}):
-                # os.fsencode on a UTF-8 POSIX filesystem: the string's bytes
-                return G.CallExpr(func=G.IdentExpr(name='mojo_bytes_from_cstr'),
+                # os.fsencode of a str OR bytes word (a DirEntry name is either,
+                # by its scandir's kind): bytes pass through, a str is encoded
+                return G.CallExpr(func=G.IdentExpr(name='mojo_fsencode_w'),
                                   args=[new.args[0]], line=new.line, col=new.col)
             if f.name == 'bytes' and len(new.args) == 2 and not kw:
                 # `bytes(text, 'ASCII')`: the string's bytes

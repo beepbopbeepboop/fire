@@ -1415,10 +1415,14 @@ void mojo_list_append_word(MojoList *l, int64_t w)
             /* A None box (mojo_box_none): a slot of kind 'n' whose raw value
              * is ignored -- the same shape `None` takes in every other list. */
             case 'n': _list_word_push(l, MOJO_KIND_NONE, 0, 'i'); return;
+            case 's': _list_word_push(l, MOJO_KIND_BYTES, bx->bits, 'i'); return;
             default:  _list_word_push(l, 'i', bx->bits, 'i'); return;
         }
     }
     if (mojo_boxed_is_str(w)) { _list_word_push(l, 'p', w, 'i'); return; }
+    /* a bytes object is a pointer too, but not a str: its own slot kind, so the
+     * list reads and prints it as bytes (not as its address, an int) */
+    if (mojo_is_registered_bytes(w)) { _list_word_push(l, MOJO_KIND_BYTES, w, 'i'); return; }
     _list_word_push(l, 'i', w, 'i');
 }
 
@@ -12040,7 +12044,13 @@ int64_t mojo_os_path_dirname_w(int64_t p) { return int_dirname(0, p); }
  * Fails like CPython: a missing directory is FileNotFoundError, anything else
  * OSError (reported through the pending-exception flag; the coroutine body
  * rethrows it as a C++ exception, so `except OSError` catches both). Order is the directory's own. */
-typedef struct { char *name; char *path; int is_dir_nofollow; int is_symlink; int dirfd; } MojoDirEntry;
+/* `name`/`path` are the C strings every stat-family call reads. A scandir of a
+ * BYTES path (CPython: `os.scandir(b'...')` yields bytes names) also carries
+ * `bname`/`bpath` as MojoBytes objects, and `is_bytes` says which pair
+ * mojo_dirent_name/path hand back: the runtime, not the compiler, knows the
+ * kind, because a glob's `dirname` is an untyped parameter. */
+typedef struct { char *name; char *path; int is_dir_nofollow; int is_symlink; int dirfd;
+                 int is_bytes; MojoBytes *bname; MojoBytes *bpath; } MojoDirEntry;
 
 /* `w[a:b:c]` on a WORD whose kind only the runtime knows (a list or a string):
  * a registered list slices as a list, anything else as a string. */
@@ -12115,13 +12125,24 @@ MojoList *mojo_fnmatch_filter(MojoList *names, int64_t pat) {
 MojoList *mojo_os_scandir(char *top) {
     /* `scandir(fd)`: a word below the pointer range is an open directory fd */
     if ((intptr_t)top > 0 && (intptr_t)top < 65536) return mojo_os_scandir_fd((int64_t)(intptr_t)top);
-    DIR *d = top ? opendir(top) : NULL;
+    /* `scandir(b'...')`: a registered MojoBytes is a bytes path. The syscalls
+     * take a C string, so a NUL-terminated copy is made; the entries built
+     * below then answer `name`/`path` as bytes. */
+    int is_bytes = top && mojo_is_registered_bytes((int64_t)(intptr_t)top);
+    char *dpath = top;
+    if (is_bytes) {
+        MojoBytes *b = (MojoBytes *)top;
+        dpath = (char *)malloc((size_t)b->len + 1);
+        memcpy(dpath, b->data, (size_t)b->len);
+        dpath[b->len] = '\0';
+    }
+    DIR *d = dpath ? opendir(dpath) : NULL;
     if (!d) {
-        mojo_exc_type_set(top && errno == ENOENT ? _MOJO_EXC_TAG_FILENOTFOUND
-                                                 : _MOJO_EXC_TAG_OSERROR);
+        mojo_exc_type_set(dpath && errno == ENOENT ? _MOJO_EXC_TAG_FILENOTFOUND
+                                                   : _MOJO_EXC_TAG_OSERROR);
         char msg[512];
         snprintf(msg, sizeof msg, "[Errno %d] %s: '%s'", errno, strerror(errno),
-                 top ? top : "?");
+                 dpath ? dpath : "?");
         char *heap_msg = strdup(msg);
         mojo_exc_msg_set(heap_msg);
         mojo_exc_obj_set(heap_msg);
@@ -12129,29 +12150,61 @@ MojoList *mojo_os_scandir(char *top) {
          * is a C++20 coroutine body, which must never longjmp out of its
          * frame; it rethrows a real C++ exception when it sees the flag. */
         mojo_exc_pending_set(1);
+        if (is_bytes) free(dpath);
         return mojo_list_new();
     }
     MojoList *out = mojo_list_new();
-    size_t tl = strlen(top);
+    size_t tl = strlen(dpath);
     struct dirent *de;
     while ((de = readdir(d)) != NULL) {
         if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) continue;
-        MojoDirEntry *e = (MojoDirEntry *)malloc(sizeof *e);
+        MojoDirEntry *e = (MojoDirEntry *)calloc(1, sizeof *e);
         e->name = strdup(de->d_name);
         size_t n = tl + strlen(de->d_name) + 2;
         e->path = (char *)malloc(n);
-        snprintf(e->path, n, "%s%s%s", top, (tl && top[tl - 1] != '/') ? "/" : "", de->d_name);
+        snprintf(e->path, n, "%s%s%s", dpath, (tl && dpath[tl - 1] != '/') ? "/" : "", de->d_name);
         struct stat st;
         e->dirfd = -1;
         e->is_symlink = lstat(e->path, &st) == 0 && S_ISLNK(st.st_mode);
         e->is_dir_nofollow = (e->is_symlink ? 0 : (S_ISDIR(st.st_mode) ? 1 : 0));
+        if (is_bytes) {
+            e->is_bytes = 1;
+            e->bname = mojo_bytes_from_cstr(e->name);
+            e->bpath = mojo_bytes_from_cstr(e->path);
+        }
         mojo_list_append_int(out, (int64_t)(intptr_t)e);
     }
     closedir(d);
+    if (is_bytes) free(dpath);
     return out;
 }
-char *mojo_dirent_name(int64_t h) { return ((MojoDirEntry *)(intptr_t)h)->name; }
-char *mojo_dirent_path(int64_t h) { return ((MojoDirEntry *)(intptr_t)h)->path; }
+/* str(x, encoding) for a word whose kind is known only at run time: a bytes
+ * object decodes, anything else is already a str and is returned as it is. */
+char *mojo_str_from_word(int64_t w, char *encoding)
+{
+    if (mojo_is_registered_bytes(w))
+        return mojo_bytes_decode((MojoBytes *)(intptr_t)w, encoding);
+    return (char *)(intptr_t)w;
+}
+
+/* os.fsencode(x) for a str OR bytes word: bytes pass through unchanged (the
+ * object is its own encoding), a str is encoded to a new bytes object. */
+int64_t mojo_fsencode_w(int64_t w)
+{
+    if (mojo_is_registered_bytes(w)) return w;
+    return (int64_t)(intptr_t)mojo_bytes_from_cstr((char *)(intptr_t)w);
+}
+/* DirEntry.name / .path as a runtime-kinded WORD: a str (a heap C string) for
+ * a str scandir, a bytes object for a bytes scandir. Same kind convention as
+ * fspath/fsencode, so consumers dispatch with mojo_boxed_is_str. */
+int64_t mojo_dirent_name(int64_t h) {
+    MojoDirEntry *e = (MojoDirEntry *)(intptr_t)h;
+    return e->is_bytes ? (int64_t)(intptr_t)e->bname : (int64_t)(intptr_t)e->name;
+}
+int64_t mojo_dirent_path(int64_t h) {
+    MojoDirEntry *e = (MojoDirEntry *)(intptr_t)h;
+    return e->is_bytes ? (int64_t)(intptr_t)e->bpath : (int64_t)(intptr_t)e->path;
+}
 int64_t mojo_dirent_is_symlink(int64_t h) { return ((MojoDirEntry *)(intptr_t)h)->is_symlink; }
 int64_t mojo_dirent_is_dir(int64_t h, int64_t follow) {
     MojoDirEntry *e = (MojoDirEntry *)(intptr_t)h;
@@ -12227,7 +12280,7 @@ MojoList *mojo_os_scandir_fd(int64_t fd) {
     struct dirent *de;
     while ((de = readdir(d)) != NULL) {
         if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) continue;
-        MojoDirEntry *e = (MojoDirEntry *)malloc(sizeof *e);
+        MojoDirEntry *e = (MojoDirEntry *)calloc(1, sizeof *e);
         e->name = strdup(de->d_name);
         e->path = strdup(de->d_name);
         struct stat st;
@@ -14986,9 +15039,14 @@ int mojo_is_re_pattern(int64_t w) { return _mojo_ptr_shaped(w) && _pr_has(&_reg_
 int mojo_is_re_match(int64_t w) { return _mojo_ptr_shaped(w) && _pr_has(&_reg_re_match, (uint64_t)w); }
 
 /* re.compile(pattern, flags): a handle, or 0 when the pattern is outside the supported syntax. */
+/* The str entry point also takes a bytes OBJECT, by the object's kind at run
+ * time: a pattern built as a value whose static type is unknown (fnmatch's
+ * `res = bytes(...)`) reaches here as a word, and must not be read as text. */
 int64_t mojo_re_compile(char *pat, int64_t flags)
 {
     if (!pat) return 0;
+    if (mojo_is_registered_bytes((int64_t)(intptr_t)pat))
+        return mojo_re_compile_bytes((MojoBytes *)(intptr_t)pat, flags);
     FreProg *pg = fre_compile(pat, (int)flags);
     if (pg->ncode < 0) { fre_free(pg); return 0; }
     MojoRePat *r = (MojoRePat *)malloc(sizeof *r);
@@ -14998,9 +15056,12 @@ int64_t mojo_re_compile(char *pat, int64_t flags)
 }
 
 /* mode 0 match / 1 search / 2 fullmatch.  A match handle or 0 (None). */
+/* Likewise a bytes subject, by its kind: see mojo_re_compile. */
 int64_t mojo_re_exec(int64_t h, char *s, int64_t pos, int64_t endpos, int64_t mode)
 {
     if (!mojo_is_re_pattern(h) || !s) return 0;
+    if (mojo_is_registered_bytes((int64_t)(intptr_t)s))
+        return mojo_re_exec_bytes(h, (MojoBytes *)(intptr_t)s, pos, endpos, mode);
     MojoRePat *r = (MojoRePat *)(intptr_t)h;
     int64_t n = (int64_t)strlen(s);
     if (endpos < 0 || endpos > n) endpos = n;
@@ -15013,28 +15074,33 @@ int64_t mojo_re_exec(int64_t h, char *s, int64_t pos, int64_t endpos, int64_t mo
     return (int64_t)(intptr_t)m;
 }
 
-int64_t mojo_re_compile_bytes(void *pat, int64_t len, int64_t flags)
+/* `pat` is the bytes OBJECT (a MojoBytes *): its data and length are read here,
+ * not passed in, so a caller cannot hand the engine the struct's own bytes. */
+int64_t mojo_re_compile_bytes(MojoBytes *pat, int64_t flags)
 {
-    if (!pat || len < 0) return 0;
-    FreProg *pg = fre_compile_bytes((char *)pat, (int)len, (int)flags);
+    if (!pat || !pat->data || pat->len < 0) return 0;
+    int64_t len = pat->len;
+    FreProg *pg = fre_compile_bytes((char *)pat->data, (int)len, (int)flags);
     if (pg->ncode < 0) { fre_free(pg); return 0; }
     MojoRePat *r = (MojoRePat *)malloc(sizeof *r);
-    r->pg = pg; r->pattern = (char *)malloc((size_t)len + 1); memcpy(r->pattern, pat, (size_t)len); r->pattern[len] = 0; r->flags = flags;
+    r->pg = pg; r->pattern = (char *)malloc((size_t)len + 1); memcpy(r->pattern, pat->data, (size_t)len); r->pattern[len] = 0; r->flags = flags;
     _pr_add(&_reg_re_pat, (uint64_t)(uintptr_t)r);
     return (int64_t)(intptr_t)r;
 }
 
-int64_t mojo_re_exec_bytes(int64_t h, void *s, int64_t len, int64_t pos, int64_t endpos, int64_t mode)
+/* `s` is the bytes OBJECT, as in mojo_re_compile_bytes. */
+int64_t mojo_re_exec_bytes(int64_t h, MojoBytes *s, int64_t pos, int64_t endpos, int64_t mode)
 {
-    if (!mojo_is_re_pattern(h) || !s || len < 0) return 0;
+    if (!mojo_is_re_pattern(h) || !s || !s->data || s->len < 0) return 0;
     MojoRePat *r = (MojoRePat *)(intptr_t)h;
+    int64_t len = s->len;
     int64_t n = len;
     if (endpos < 0 || endpos > n) endpos = n;
     int nc = 2 * (r->pg->ngroups + 1);
     int64_t *caps = (int64_t *)malloc((size_t)nc * sizeof(int64_t));
-    if (!fre_exec_bytes(r->pg, (char *)s, n, pos, endpos, (int)mode, caps)) { free(caps); return 0; }
+    if (!fre_exec_bytes(r->pg, (char *)s->data, n, pos, endpos, (int)mode, caps)) { free(caps); return 0; }
     MojoReMatch *m = (MojoReMatch *)malloc(sizeof *m);
-    m->re = r; m->text = (char *)malloc((size_t)len + 1); memcpy(m->text, s, (size_t)len); m->text[len] = 0; m->n = n; m->caps = caps; m->pos = pos; m->endpos = endpos;
+    m->re = r; m->text = (char *)malloc((size_t)len + 1); memcpy(m->text, s->data, (size_t)len); m->text[len] = 0; m->n = n; m->caps = caps; m->pos = pos; m->endpos = endpos;
     _pr_add(&_reg_re_match, (uint64_t)(uintptr_t)m);
     return (int64_t)(intptr_t)m;
 }

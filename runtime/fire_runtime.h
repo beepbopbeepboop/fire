@@ -717,9 +717,7 @@ int64_t mojo_split_dyn(int64_t recv, int64_t arg);   /* pattern.split(s) or str.
 int     mojo_is_re_pattern(int64_t w);
 int     mojo_is_re_match(int64_t w);
 int64_t mojo_re_compile(char *pat, int64_t flags);                      /* handle, 0 if unsupported */
-int64_t mojo_re_compile_bytes(void *pat, int64_t len, int64_t flags);     /* handle, 0 if unsupported */
 int64_t mojo_re_exec(int64_t h, char *s, int64_t pos, int64_t endpos, int64_t mode);  /* 0 match 1 search 2 fullmatch */
-int64_t mojo_re_exec_bytes(int64_t h, void *s, int64_t len, int64_t pos, int64_t endpos, int64_t mode);
 int64_t mojo_re_m_group(int64_t m, int64_t g);
 int64_t mojo_re_m_start(int64_t m, int64_t g);
 int64_t mojo_re_m_end(int64_t m, int64_t g);
@@ -1105,6 +1103,9 @@ typedef struct {
     int64_t  len;
     int      readonly;
 } MojoBytes;
+/* The bytes regex entry points take the bytes OBJECT and read data/len themselves. */
+int64_t mojo_re_compile_bytes(MojoBytes *pat, int64_t flags);             /* handle, 0 if unsupported */
+int64_t mojo_re_exec_bytes(int64_t h, MojoBytes *s, int64_t pos, int64_t endpos, int64_t mode);
 
 MojoBytes *mojo_bytes_new_lit(const char *data, int64_t len); /* copies `len` bytes */
 /* `x in <list of bytes>`: elements are boxed MojoBytes * pointers, so plain
@@ -2434,8 +2435,10 @@ int64_t   mojo_word_slice_step(int64_t w, int has_start, int64_t start, int has_
 MojoList *mojo_list_slice_word(int64_t w, int has_start, int64_t start, int has_stop, int64_t stop, int64_t step);
 MojoList *mojo_fnmatch_filter(MojoList *names, int64_t pat);
 MojoList *mojo_os_scandir(char *top);            /* os.scandir(top): eager list of DirEntry handles */
-char     *mojo_dirent_name(int64_t h);            /* DirEntry.name */
-char     *mojo_dirent_path(int64_t h);            /* DirEntry.path */
+int64_t   mojo_fsencode_w(int64_t w);            /* os.fsencode(str or bytes word) -> bytes word */
+char     *mojo_str_from_word(int64_t w, char *encoding);  /* str(x, enc) for a str-or-bytes word */
+int64_t   mojo_dirent_name(int64_t h);            /* DirEntry.name: a str word, or a bytes word for a bytes scandir */
+int64_t   mojo_dirent_path(int64_t h);            /* DirEntry.path: likewise */
 int64_t   mojo_dirent_is_symlink(int64_t h);      /* DirEntry.is_symlink() */
 int64_t   mojo_dirent_is_dir(int64_t h, int64_t follow);   /* DirEntry.is_dir(follow_symlinks=) */
 int64_t   mojo_dirent_is_file(int64_t h, int64_t follow);  /* DirEntry.is_file(follow_symlinks=) */

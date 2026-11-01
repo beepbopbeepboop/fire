@@ -870,10 +870,13 @@ def _yield_kind(expr, env: dict | None = None) -> str | None:
             return v[1]
         return None
     # `entry.name` / `entry.path` after the DirEntry lowering
-    # (`cpp_core._cpp_dirent_rewrite`) are these runtime calls: strings.
+    # (`cpp_core._cpp_dirent_rewrite`) are these runtime calls. The runtime
+    # answers a str for a str scandir and a bytes for a bytes scandir (the
+    # path's kind is not known statically: a glob's `dirname` is a parameter),
+    # so the value is a pointer word, like `fsencode`'s.
     if (isinstance(expr, N.CallExpr) and isinstance(expr.func, N.IdentExpr)
             and expr.func.name in ('mojo_dirent_name', 'mojo_dirent_path')):
-        return 'p'
+        return 'w'
     if (isinstance(expr, N.CallExpr) and isinstance(expr.func, N.IdentExpr)
             and expr.func.name in ('mojo_bytes_from_cstr', 'mojo_bytes_from_str')):
         return 'w'          # bytes: a pointer word
@@ -884,7 +887,7 @@ def _yield_kind(expr, env: dict | None = None) -> str | None:
     if (isinstance(expr, N.MemberExpr) and isinstance(expr.obj, N.IdentExpr)
             and expr.member in ('name', 'path')
             and env.get(expr.obj.name) == ('dirent',)):
-        return 'p'
+        return 'w'          # a str or a bytes word, as the runtime call is (see above)
     if isinstance(expr, N.MemberExpr) and isinstance(expr.obj, N.IdentExpr) \
             and expr.obj.name == 'self':
         return env.get(f'self.{expr.member}')

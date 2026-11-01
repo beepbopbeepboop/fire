@@ -1702,9 +1702,8 @@ def _lower_re_module_call(gen, node, method):
         fl = gen._new_val('int64_t', '0')
     # Select bytes vs str compile based on argument static type
     if pat_t == 'MojoBytes *':
-        len_v = gen._call_expr('int64_t', 'mojo_bytes_len', [(pat_t, pat_v)])
         h = gen._call_expr('int64_t', 'mojo_re_compile_bytes',
-                           [('void *', pat_v), ('int64_t', len_v), ('int64_t', fl)])
+                           [('MojoBytes *', pat_v), ('int64_t', fl)])
     else:
         pat_s = gen._new_val('char *', f'(char *){pat_word}')
         h = gen._call_expr('int64_t', 'mojo_re_compile', [('char *', pat_s), ('int64_t', fl)])
@@ -1728,9 +1727,8 @@ def _lower_re_module_call(gen, node, method):
         neg1 = gen._new_val('int64_t', '-1')
         md = gen._new_val('int64_t', str(mode))
         if sw_t == 'MojoBytes *':
-            len_v = gen._call_expr('int64_t', 'mojo_bytes_len', [(sw_t, sw_v)])
             r = gen._call_expr('int64_t', 'mojo_re_exec_bytes',
-                               [('int64_t', h), ('void *', sw_v), ('int64_t', len_v),
+                               [('int64_t', h), ('MojoBytes *', sw_v),
                                 ('int64_t', zero), ('int64_t', neg1), ('int64_t', md)])
         else:
             s_s = gen._new_val('char *', f'(char *){sw_word}')
