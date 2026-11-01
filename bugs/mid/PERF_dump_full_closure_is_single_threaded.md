@@ -87,6 +87,11 @@ Fifth win: `module_gen._mk_round` reuses round 1's `_infer_return_maybe_kinds` a
 calls nothing in the grown callee set (the answer depends on the set only through call names); the call spellings of each body are
 recorded once in round 1. Sampled share of `_mk_round` 13.8% -> 8.8%; sampled whole compile 168 s -> 153 s (both under the sampler);
 generated C byte-identical for all 610 stdlib modules, `test_selfhost` 3/3.
+Measured, not changed: `_infer_local_var_types` is called 278,673 times for 3,801 distinct functions (one function up to 308 times) and costs
+11.6 s of a 146 s compile (8%). A per-function memo is NOT safe as it stands: the inference reads `_quick_type`, which reads `gen` tables
+(`func_return_types`, `var_types`, struct field types) that GROW during the compile, so two calls on one function can legitimately differ. The
+safe form keys the memo on a version stamp of exactly the tables it read (or finds the passes that re-ask with unchanged tables); do that
+measurement first -- count how many of the 308 repeats return an identical dict -- before writing any cache.
 Remaining, in order of share: the other `_walk` users in `_scan_callsite_param_kinds` (cache per function across
 the two `_one_pass` rounds and the six `lower` calls: needs an invalidation story because the contract maps evolve);
 `realpath` memo for the constant `_SELFHOST_DIR`; `_infer_return_maybe_kinds`; `_gmi_binding_index`.
