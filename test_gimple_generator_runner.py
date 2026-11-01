@@ -4077,6 +4077,89 @@ def main():
 main()
 """
 
+# A call evaluated before a yield in the same statement runs before the
+# suspension, as in Python. `h` is a user function, not `print`, because a
+# two-argument `print` is not lowered on the cpp path (a separate gap). The
+# "start" line and the order of "f" against the yielded value show where each
+# call ran.
+_CALL_BEFORE_YIELD_SRC = """\
+def f(x):
+    print("f", x)
+    return x + 1
+
+def h(a, b):
+    print("h", a)
+
+def g():
+    h(f(1), (yield 1))
+    yield 2
+
+def main():
+    it = g()
+    print("start")
+    print(next(it))
+    print(next(it))
+main()
+"""
+
+_NESTED_CALL_BEFORE_YIELD_SRC = """\
+def f(x):
+    print("f", x)
+    return x + 1
+
+def h(a, b):
+    print("h", a)
+
+def g():
+    h(f(f(1)), (yield 1))
+    yield 2
+
+def main():
+    it = g()
+    print(next(it))
+    print(next(it))
+main()
+"""
+
+# A call AFTER the yield must stay after it: it is not spilled ahead of the
+# suspension.
+_CALL_AFTER_YIELD_SRC = """\
+def f(x):
+    print("f", x)
+    return x + 1
+
+def h(a, b):
+    print("h", b)
+
+def g():
+    h((yield 1), f(1))
+    yield 2
+
+def main():
+    it = g()
+    print("start")
+    print(next(it))
+    print(next(it))
+main()
+"""
+
+_CONDITIONAL_CALL_BEFORE_YIELD_SRC = """\
+def f(x):
+    return x + 1
+
+def h(a, b):
+    print("h", a)
+
+def g(c):
+    h(c and f(2), (yield 1))
+    yield 2
+
+def main():
+    it = g(False)
+    print(next(it))
+main()
+"""
+
 def run_tagged_word_cpp_tests():
     # The C++ escape hatch (`MOJO_CORO=cpp`) carries a generator whose yields
     # mix kinds as ONE tagged word per slot: each yield is boxed by its kind
@@ -4370,6 +4453,20 @@ main()
         # program (it would suspend even when `x` is false).
         test_generator_refused("and_yield_operand_refused_cpp",
                                _AND_YIELD_SRC,
+                               "conditionally evaluated")
+        # A call evaluated before a hoisted yield is spilled into a temporary
+        # ahead of it, so it still runs before the suspension. A call after the
+        # yield stays after it. A nested call is spilled innermost first.
+        test_generator_matches_cpython("call_before_yield_order_cpp",
+                                       _CALL_BEFORE_YIELD_SRC, _CALL_BEFORE_YIELD_SRC)
+        test_generator_matches_cpython("nested_call_before_yield_cpp",
+                                       _NESTED_CALL_BEFORE_YIELD_SRC, _NESTED_CALL_BEFORE_YIELD_SRC)
+        test_generator_matches_cpython("call_after_yield_order_cpp",
+                                       _CALL_AFTER_YIELD_SRC, _CALL_AFTER_YIELD_SRC)
+        # A call that is conditionally evaluated cannot be spilled ahead of a
+        # yield without running it on a path Python would skip: refused.
+        test_generator_refused("conditional_call_before_yield_refused_cpp",
+                               _CONDITIONAL_CALL_BEFORE_YIELD_SRC,
                                "conditionally evaluated")
 
 def run_tagged_word_bind_tests():

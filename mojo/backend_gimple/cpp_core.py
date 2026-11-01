@@ -5364,57 +5364,68 @@ def _cpp_contains_yield(node) -> bool:
                for f in dataclasses.fields(node))
 
 
-def _cpp_rewrite_yields(gen, node, hoisted: list, call_pending: list):
-    """Copy of the expression `node` in which every `YieldExpr` is replaced by a
-    fresh local name, the yield itself appended to `hoisted` as
-    `<fresh> = <yield>` (an AssignStmt). The caller binds those statements, in
-    order, before the statement that reads the names.
+class _YieldWalk:
+    """State of one walk over a statement's expressions for `_cpp_plan_yield_walk`.
 
-    `call_pending[0]` is True while a call evaluated earlier in the same
-    statement has not yet been passed by a hoisted yield. A yield after such a
-    call is refused: hoisting it would run the call after the suspension.
+    `hoisted` collects the statements that run before the rewritten statement,
+    in order, each tagged `'yield'` (a received-value statement) or `'call'`
+    (a call spilled into a temporary). `events` records every call and every
+    hoisted yield in evaluation order, as `(kind, call-node-id, conditional)`,
+    which is what the planning pass reads. `spill` is the set of call nodes (by
+    `id`) the rewrite must spill; None on the trial walk, which only records.
+    """
+
+    def __init__(self, spill):
+        self.spill = spill
+        self.hoisted: list = []
+        self.events: list = []
+
+
+def _cpp_rewrite_yields(gen, node, w: _YieldWalk, conditional: bool = False):
+    """Copy of the expression `node` in which every `YieldExpr` is replaced by a
+    fresh local name, the yield itself appended to `w.hoisted` as
+    `<fresh> = <yield>`. The caller binds those statements, in order, before
+    the statement that reads the names.
+
+    A call that is evaluated before a hoisted yield in the same statement would
+    run after the suspension if left in place, so the planning pass (see
+    `_cpp_plan_yield_walk`) asks for it to be spilled: it is evaluated into a
+    fresh local ahead of that yield, in its original order.
 
     A yield in a CONDITIONALLY evaluated operand (the right side of `and`/`or`,
-    either branch of a ternary) is refused too: hoisting it would suspend the
-    generator on a path where Python never evaluates it.
+    either branch of a ternary) is refused: hoisting it would suspend the
+    generator on a path where Python never evaluates it. `conditional` marks
+    the walk of such an operand, so that a call there that would need spilling
+    is refused for the same reason.
     """
     if isinstance(node, list):
-        return [_cpp_rewrite_yields(gen, x, hoisted, call_pending) for x in node]
+        return [_cpp_rewrite_yields(gen, x, w, conditional) for x in node]
     if isinstance(node, tuple):
-        return tuple(_cpp_rewrite_yields(gen, x, hoisted, call_pending) for x in node)
+        return tuple(_cpp_rewrite_yields(gen, x, w, conditional) for x in node)
     if isinstance(node, type) or not dataclasses.is_dataclass(node):
         return node
     if isinstance(node, gimple_ctypes.YieldExpr):
-        before = call_pending[0]
-        value = (_cpp_rewrite_yields(gen, node.value, hoisted, call_pending)
+        value = (_cpp_rewrite_yields(gen, node.value, w, conditional)
                  if node.value is not None else None)
         ynode = node
         if value is not node.value:
             ynode = copy.copy(node)
             ynode.value = value
-        if before:
-            raise gimple_exprtypes._UnsupportedGeneratorShape(
-                "a `yield` operand follows a call in the same statement; "
-                "hoisting the yield would run that call after the suspension")
-        # The yield's own operand calls now run in the hoisted statement,
-        # which precedes the rewritten one, so they are no longer pending.
-        call_pending[0] = before
         name = gen._cpp_fresh_name('_mg_yv')
-        hoisted.append(AssignStmt(
+        w.hoisted.append(('yield', AssignStmt(
             target=gimple_ctypes.IdentExpr(name=name, line=node.line, col=node.col),
-            value=ynode, line=node.line, col=node.col))
+            value=ynode, line=node.line, col=node.col)))
+        w.events.append(('yield', None, conditional))
         return gimple_ctypes.IdentExpr(name=name, line=node.line, col=node.col)
     if isinstance(node, gimple_ctypes.BinaryOp) and node.op in ('and', 'or'):
-        # The left operand always runs; the right one only sometimes. The
-        # right is walked with no hoist list (it holds no yield, checked
-        # above) only so that its calls set `call_pending` for a later yield.
+        # The left operand always runs; the right one only sometimes.
         if _cpp_contains_yield(node.right):
             raise gimple_exprtypes._UnsupportedGeneratorShape(
                 f"a `yield` in the right operand of `{node.op}` is "
                 "conditionally evaluated; hoisting it would suspend the "
                 "generator when Python would not evaluate it")
-        left = _cpp_rewrite_yields(gen, node.left, hoisted, call_pending)
-        right = _cpp_rewrite_yields(gen, node.right, [], call_pending)
+        left = _cpp_rewrite_yields(gen, node.left, w, conditional)
+        right = _cpp_rewrite_yields(gen, node.right, w, True)
         if left is node.left and right is node.right:
             return node
         out = copy.copy(node)
@@ -5426,9 +5437,9 @@ def _cpp_rewrite_yields(gen, node, hoisted: list, call_pending: list):
                 "a `yield` in a branch of a conditional expression is "
                 "conditionally evaluated; hoisting it would suspend the "
                 "generator when Python would not evaluate it")
-        cond = _cpp_rewrite_yields(gen, node.condition, hoisted, call_pending)
-        then_v = _cpp_rewrite_yields(gen, node.then_val, [], call_pending)
-        else_v = _cpp_rewrite_yields(gen, node.else_val, [], call_pending)
+        cond = _cpp_rewrite_yields(gen, node.condition, w, conditional)
+        then_v = _cpp_rewrite_yields(gen, node.then_val, w, True)
+        else_v = _cpp_rewrite_yields(gen, node.else_val, w, True)
         if cond is node.condition and then_v is node.then_val and else_v is node.else_val:
             return node
         out = copy.copy(node)
@@ -5437,17 +5448,77 @@ def _cpp_rewrite_yields(gen, node, hoisted: list, call_pending: list):
     changes = {}
     for f in dataclasses.fields(node):
         v = getattr(node, f.name)
-        nv = _cpp_rewrite_yields(gen, v, hoisted, call_pending)
+        nv = _cpp_rewrite_yields(gen, v, w, conditional)
         if nv is not v:
             changes[f.name] = nv
+    out = node
+    if changes:
+        out = copy.copy(node)
+        for k, v in changes.items():
+            setattr(out, k, v)
     if isinstance(node, gimple_ctypes.CallExpr):
-        call_pending[0] = True
-    if not changes:
-        return node
-    out = copy.copy(node)
-    for k, v in changes.items():
-        setattr(out, k, v)
+        # Post-order: the call's own operands were recorded above, so the
+        # call's event follows them, as its evaluation does.
+        w.events.append(('call', id(node), conditional))
+        if w.spill is not None and id(node) in w.spill:
+            name = gen._cpp_fresh_name('_mg_cv')
+            w.hoisted.append(('call', AssignStmt(
+                target=gimple_ctypes.IdentExpr(name=name, line=out.line, col=out.col),
+                value=out, line=out.line, col=out.col)))
+            return gimple_ctypes.IdentExpr(name=name, line=out.line, col=out.col)
     return out
+
+
+def _cpp_plan_yield_walk(gen, rewrite):
+    """Run `rewrite(walk)` (a walk over one statement's or condition's
+    expressions, built on `_cpp_rewrite_yields`) so that every call evaluated
+    before the last hoisted yield is evaluated into a temporary, in order,
+    ahead of that yield.
+
+    Returns `(hoisted, new)`: `hoisted` is the list of `(kind, stmt)` pairs to
+    emit in order, `new` is what `rewrite` returned on the final walk. Returns
+    None when the expression holds no hoisted yield, so the caller lowers it
+    as it always did.
+
+    Two walks: the first only records the evaluation order of calls and
+    yields; the second spills exactly the unconditional calls that precede the
+    last yield. A conditionally evaluated call that precedes a yield is refused:
+    spilling it would evaluate it on a path Python would skip.
+    """
+    trial = _YieldWalk(None)
+    rewrite(trial)
+    last = None
+    for i, (kind, _nid, _cond) in enumerate(trial.events):
+        if kind == 'yield':
+            last = i
+    if last is None:
+        return None
+    spill = set()
+    for kind, nid, cond in trial.events[:last]:
+        if kind != 'call':
+            continue
+        if cond:
+            raise gimple_exprtypes._UnsupportedGeneratorShape(
+                "a call in a conditionally evaluated operand runs before a "
+                "`yield` in the same statement; evaluating it early would call "
+                "it on a path where Python would not")
+        spill.add(nid)
+    real = _YieldWalk(spill)
+    new = rewrite(real)
+    return real.hoisted, new
+
+
+def _cpp_emit_hoisted(gen, hoisted, declared: dict, indent: str) -> list[str]:
+    """Lower the `(kind, stmt)` pairs of `_cpp_plan_yield_walk` in order: a
+    yield as its received-value statement, a spilled call as an ordinary
+    assignment to its fresh temporary."""
+    lines: list[str] = []
+    for kind, h in hoisted:
+        if kind == 'yield':
+            lines.extend(_cpp_assign_received_yield(gen, h, declared, indent))
+        else:
+            lines.extend(gen._cpp_stmt(h, declared, indent))
+    return lines
 
 
 def _cpp_hoist_yields_expr(gen, expr, declared: dict, indent: str):
@@ -5456,12 +5527,11 @@ def _cpp_hoist_yields_expr(gen, expr, declared: dict, indent: str):
     hoisted yields in order, and `new_expr` is `expr` with each yield replaced
     by the local that holds its received word. Used for a condition, which is
     always evaluated as a whole, so its root yield is hoisted too."""
-    hoisted: list = []
-    new_expr = _cpp_rewrite_yields(gen, expr, hoisted, [False])
-    lines: list[str] = []
-    for h in hoisted:
-        lines.extend(_cpp_assign_received_yield(gen, h, declared, indent))
-    return lines, new_expr
+    plan = _cpp_plan_yield_walk(gen, lambda w: _cpp_rewrite_yields(gen, expr, w))
+    if plan is None:
+        return [], expr
+    hoisted, new_expr = plan
+    return _cpp_emit_hoisted(gen, hoisted, declared, indent), new_expr
 
 
 def _cpp_hoist_yield_operands(gen, s, declared: dict, indent: str):
@@ -5480,10 +5550,10 @@ def _cpp_hoist_yield_operands(gen, s, declared: dict, indent: str):
     expression statement, or of `x = yield`, is already a form those lowerings
     handle. The hoisting recurses into a root yield's own operands.
 
-    Evaluation order: a hoisted yield runs before the statement's other
-    operands. That is exact as long as no call evaluated before the yield is
-    still pending in the statement; such a call would run after the
-    suspension, so that shape is refused instead of being reordered.
+    Evaluation order: a call evaluated before a hoisted yield is spilled into a
+    temporary ahead of it (`_cpp_plan_yield_walk`), so it still runs before the
+    suspension, as in Python. A call that is conditionally evaluated and so
+    cannot be spilled is refused.
     """
     if isinstance(s, gimple_ctypes.ExprStmt):
         root = s.value if isinstance(s.value, gimple_ctypes.YieldExpr) else None
@@ -5495,35 +5565,30 @@ def _cpp_hoist_yield_operands(gen, s, declared: dict, indent: str):
     else:
         return None
 
-    hoisted: list = []
-    # Shared across the statement's fields, in field order: a call in an
-    # earlier field is pending for a yield in a later one.
-    call_pending = [False]
+    def rewrite(w):
+        # The root yield stays the statement's own node (its identity is keyed
+        # by the yield-site tables); only its operands are rewritten.
+        new_stmt = copy.copy(s)
+        for f in dataclasses.fields(s):
+            v = getattr(s, f.name)
+            if root is not None and v is root:
+                nv = v
+                if root.value is not None:
+                    rv = _cpp_rewrite_yields(gen, root.value, w)
+                    if rv is not root.value:
+                        nv = copy.copy(root)
+                        nv.value = rv
+            else:
+                nv = _cpp_rewrite_yields(gen, v, w)
+            if nv is not v:
+                setattr(new_stmt, f.name, nv)
+        return new_stmt
 
-    def rw(node):
-        return _cpp_rewrite_yields(gen, node, hoisted, call_pending)
-
-    # The root yield stays the statement's own node (its identity is keyed by
-    # the yield-site tables); only its operands are rewritten.
-    new_stmt = copy.copy(s)
-    for f in dataclasses.fields(s):
-        v = getattr(s, f.name)
-        if root is not None and v is root:
-            nv = v
-            if root.value is not None:
-                rv = rw(root.value)
-                if rv is not root.value:
-                    nv = copy.copy(root)
-                    nv.value = rv
-        else:
-            nv = rw(v)
-        if nv is not v:
-            setattr(new_stmt, f.name, nv)
-    if not hoisted:
+    plan = _cpp_plan_yield_walk(gen, rewrite)
+    if plan is None:
         return None
-    lines: list[str] = []
-    for h in hoisted:
-        lines.extend(_cpp_assign_received_yield(gen, h, declared, indent))
+    hoisted, new_stmt = plan
+    lines = _cpp_emit_hoisted(gen, hoisted, declared, indent)
     lines.extend(gen._cpp_stmt(new_stmt, declared, indent))
     return lines
 

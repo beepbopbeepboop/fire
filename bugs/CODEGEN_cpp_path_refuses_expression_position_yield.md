@@ -18,8 +18,8 @@ word is the None box and reads go through the tagged-arithmetic guards) and
 lowers the statement with that fresh local in place of the yield. The
 AugAssign routes a tagged-word operand through the BinaryOp lowering so the
 None guard applies. A call evaluated before a hoisted yield in the same
-statement would run after the suspension, so that shape is refused rather than
-reordered.
+statement is spilled into a fresh local ahead of that yield (see the
+2026-11-01 call-ordering entry below).
 
 Pinned in `run_tagged_word_cpp_tests` (`test_gimple_generator_runner.py`) with
 CPython twins: `aug_assign_received_yield_none_cpp`, `call_argument_yield_cpp`,
@@ -62,6 +62,25 @@ in either branch of a ternary (`and_yield_operand_refused_cpp`), with the reason
 "conditionally evaluated". A yield in the LEFT operand of `and`/`or` (always
 evaluated) is still hoisted.
 
+### Call ordering before a yield (2026-11-01)
+
+Landed: a call evaluated before a hoisted yield in the same statement no
+longer refuses. `_cpp_plan_yield_walk` runs a trial walk that records the
+evaluation order of calls and yields, then spills every unconditional call
+that precedes the last hoisted yield into a fresh `_mg_cv` local, in order,
+ahead of that yield. The spilled call is an ordinary assignment through
+`_cpp_stmt`, so its type comes from the ordinary path. Calls after the yield
+stay inline, after the suspension. Shared by the statement hoist and the
+`if`/`while` condition hoist (`_cpp_hoist_yields_expr`).
+
+Pinned in `run_tagged_word_cpp_tests` (`test_gimple_generator_runner.py`)
+against CPython: `call_before_yield_order_cpp` (a call's print runs before the
+suspension), `nested_call_before_yield_cpp`, `call_after_yield_order_cpp`.
+Before the fix the first two refused with "a `yield` operand follows a call in
+the same statement". Note: `print(a, b)` with two arguments is not lowered on
+the cpp path (refused as an unresolved callee, independent of this change), so
+the tests use a user function as the consumer.
+
 ### Still refused (open)
 
 - `x and (yield v)` / `x or (yield v)` / `a if c else (yield v)`: the yield is
@@ -71,9 +90,11 @@ evaluated) is still hoisted.
   `_cpp_hoist_yields_expr`, so the yield runs only on the path that evaluates
   it. The value must keep the operand (Python's `and`/`or` return an operand),
   which is why the tagged-word operator gap below matters for the same shape.
-- A yield after a call in the same statement (`f(x) + (yield 1)`): refused, since
-  hoisting would run `f` after the suspension. Next step: evaluate the earlier
-  calls into temporaries first, in the same order, then hoist.
+- A call that is conditionally evaluated (the right side of `and`/`or`, a
+  ternary branch) and precedes a yield in the same statement, as in
+  `h(c and f(2), (yield 1))`: refused (`conditional_call_before_yield_refused_cpp`),
+  since spilling it would call it on a path Python skips. Lowering the
+  conditional operand as an `if` (see the next step above) would also cover it.
 - A received word used as an `and`/`or` operand is not truth-tested:
   `bugs/CODEGEN_cpp_path_and_or_on_received_word.md`.
 
