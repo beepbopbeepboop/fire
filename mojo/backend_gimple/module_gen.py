@@ -3334,6 +3334,11 @@ def _gmi_record_fn_scoped_param_types(gen, cls_name: str, params) -> None:
         if not isinstance(_pann, str) or not _pann:
             continue
         _table[_pair_key(cls_name, _as_str(_pname))] = _mojo_type(_pann)
+        _by_cls = getattr(gen, '_fn_scoped_params_by_class', None)
+        if _by_cls is None:
+            _by_cls = {}
+            gen._fn_scoped_params_by_class = _by_cls
+        _by_cls.setdefault(cls_name, {})[_as_str(_pname)] = _mojo_type(_pann)
 
 
 def _gmi_hoist_nested_structs(self, stmts: list) -> list:
@@ -6671,6 +6676,22 @@ def gen_module_impl(self, stmts):
                         # `_gmi_record_fn_scoped_param_types`).
                         ctype = self._fn_scoped_param_types[
                             _pair_key(s.name, _as_str(v.name))]
+                    elif (v is not None
+                            and s.name in (getattr(self, '_fn_scoped_params_by_class', None) or {})
+                            and not isinstance(v, (IdentExpr, StringLiteral, FloatLiteral))):
+                        # An EXPRESSION over the enclosing function's
+                        # parameters (`name = s + "!"`): `_quick_type` reads
+                        # `var_types`, which is empty during this
+                        # pre-pass, so overlay the recorded parameter types
+                        # for the duration of the one call.
+                        _saved_vt = self.var_types
+                        _ov = dict(_saved_vt)
+                        _ov.update(self._fn_scoped_params_by_class[s.name])
+                        self.var_types = _ov
+                        try:
+                            ctype = self._quick_type(v)
+                        finally:
+                            self.var_types = _saved_vt
                     elif v is None:
                         # A no-initializer container field: there is no
                         # literal to read the kind from, so the ANNOTATION

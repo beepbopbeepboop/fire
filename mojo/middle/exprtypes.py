@@ -2062,7 +2062,7 @@ def _gmi_nested_struct_defs(body, enclosing, out: list, top: bool = False,
     innermost enclosing function or method, or None at module level. It is
     carried so a class-level attribute whose value is a bare parameter name
     can take its C type from that parameter's annotation
-    (bugs/CODEGEN_nested_class_attr_from_str_param_typed_as_int.md).
+    (a `str` parameter used to read back as a pointer-sized int).
     """
     for _nc in (body or []):
         if isinstance(_nc, StructDef):

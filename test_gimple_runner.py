@@ -13439,6 +13439,7 @@ def main():
                   test_namedtuple_tuple_protocol_is_refused_by_name,
                   test_nested_class_attr_reads_enclosing_local_regression,
                   test_nested_class_attr_from_str_param_regression,
+                  test_nested_class_attr_expr_over_str_param_regression,
                   test_instance_write_shadows_class_attr_regression,
                   test_nested_class_attr_rebind_after_construction_regression,
                   test_namedtuple_shaped_class_runs_regression,
@@ -13611,7 +13612,7 @@ main()
 
 
 def test_nested_class_attr_from_str_param_regression():
-    """Regression for bugs/CODEGEN_nested_class_attr_from_str_param_typed_as_int.md.
+    """Regression: a function-scoped class attribute taken from a `str` parameter.
     A function-scoped class attribute whose value is a bare name of the
     enclosing function's parameter was typed `int64_t` (the fallback for a
     value with no literal type), so a `str` argument read back as a pointer-
@@ -13629,6 +13630,24 @@ def main():
     print(a.name)
     print(b.name)
 """, "x\ny\n")
+
+
+def test_nested_class_attr_expr_over_str_param_regression():
+    """Companion to the bare-name case above:
+    an EXPRESSION over the enclosing function's parameters is typed from the
+    parameters' annotations, not the int64_t fallback."""
+    test_gimple_stdout("gimple_nested_class_attr_expr_over_str_param", """\
+def h(s: str):
+    class C():
+        name = s + "!"
+    return C()
+
+def main():
+    a = h("x")
+    b = h("y")
+    print(a.name)
+    print(b.name)
+""", "x!\ny!\n")
 
 
 def test_nested_class_attr_rebind_after_construction_regression():
