@@ -4053,6 +4053,15 @@ except UnicodeDecodeError:
     print("ascii decode refused")
 """)
 
+    # Pinning regression for CODEGEN_str_encode_compiles_to_the_identity_char_ptr:
+    # `str.encode()` must return bytes (MojoBytes*), not an identity char*.
+    test_gimple_matches_cpython("gimple_str_encode_identity_fixed", """\
+s = "abc"
+b = s.encode()
+print(b)
+print(type(b) == bytes, len(b) == 3, b == b'abc')
+""")
+
     test_gimple_stdout("gimple_set_str_rehash_unchanged", """\
 s = set()
 for i in range(30):
