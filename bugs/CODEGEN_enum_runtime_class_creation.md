@@ -98,14 +98,7 @@ every module is reachable from a word with `mojo_getattr_any(obj, attr)`
    (`mojo_classobj_lookup`, `mojo_rtobj_method_call`). Pinned by
    `metaclass_made_at_run_time_answers_misses`. Still missing: a STATIC `class Meta(type)` (still
    refused by name; needs methods of static classes reachable from the class table), `Meta.__call__`,
-   `__prepare__`, `__set_name__`, `__init_subclass__`.
-   **`type(Foo)` / `isinstance(Foo, Meta)` landed 2026-11-01**: `type(x)` is `mojo_type_of` once the module
-   makes a run-time class (a class -> its metaclass handle, or `type`; an instance -> its class handle;
-   else the struct tag), `isinstance(Foo, Meta)` walks the metaclass's bases, `isinstance(c, type)` is
-   `mojo_isinstance_type`. `gen._rt_classes_made` is now module-wide (it was reset per function, so a
-   later function never saw it). Pinned by `type_of_and_isinstance_with_a_run_time_metaclass` /
-   `rt_class_flag_reaches_a_later_function`. Limit: still set when the `type(..)` is lowered, so a function
-   emitted BEFORE it is not covered.
+   `__prepare__`, `__set_name__`, `__init_subclass__`, `type(Foo)` is `Meta`, `isinstance(Foo, Meta)`.
 4. the metaclass protocol `EnumType` uses: `__prepare__`, `__new__`, `__call__`, `__set_name__`,
    `__init_subclass__`, class-level `__getattr__`, `isinstance(x, cls)` for dynamic classes,
    `DynamicClassAttribute` / `property` on dynamic classes.

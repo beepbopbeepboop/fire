@@ -328,14 +328,6 @@ def _tagged_word_value(gen, node) -> str:
     return w
 
 
-def _stop_value_attach(gen, av, base) -> None:
-    """Right after the exhaustion `mojo_exc_type_set(StopIteration)`: hand the finished generator's
-    `return` value to the exception (`ex.value`). Only a stack-switch generator (`__mgco_`) has the
-    runtime handle that holds it; a C++20-coroutine generator keeps the old (None) answer."""
-    if _as_str(base).startswith('__mgco_'):
-        gen._void_call('__mojo_gen_stop_value', [('int64_t', gen._to_int64('MojoGenerator *', av))])
-
-
 def _lower_generator_next(gen, av: str, api: dict) -> tuple[str, str]:
     # An async GENERATOR's yield channel carries a wait-descriptor
     # (is_wd=1) for every parking `await` as well as a real value (is_wd=0)
@@ -367,7 +359,6 @@ def _lower_generator_next(gen, av: str, api: dict) -> tuple[str, str]:
     gen._emit_generator_pending_exc_check(av, base, False, bb_stopiter)
     gen._emit_label(bb_stopiter)
     gen._emit(f"  mojo_exc_type_set ({gen._exc_type_id('StopIteration')});")
-    _stop_value_attach(gen, av, base)
     gen._emit("  mojo_raise ();")
     gen._emit(f"  goto {bb_merge};")
     gen._emit_label(bb_ok)
@@ -403,23 +394,24 @@ def _lower_generator_send(gen, node, av: str, api: dict) -> tuple[str, str]:
     including the StopIteration on exhaustion (the generator protocol's
     uniform "ran out of values" signal, not a silent end).
 
-    Two resume entries carry the sent word, one per backend:
-    - the default stack-switch path: `__mojo_gen_resume(gen, send)`, the
-      runtime entry the `<base>_resume(g)` trampoline also funnels into (it
-      hardcodes a 0 send, which is why this calls the runtime directly);
-    - the C++20 path (`_mojogen_` base): `{base}_send(g, send)`, the unit's
-      own entry, which stores the word where the suspended `x = yield` reads
-      it (cpp_async.py's generator promise). `{base}_resume` is the same
-      resume with the None box."""
-    is_cpp = _as_str(api.get('base', '')).startswith('_mojogen_')
-    if is_cpp and api.get('is_async_gen'):
-        # An async generator's yield channel carries wait-descriptors as well
-        # as values (see _lower_generator_next), so a sent word has no
-        # consumer-side protocol to ride on yet on the cpp path.
+    This is the SAME resume the `<base>_resume` trampoline performs, with a
+    non-zero send payload: `__mojo_gen_resume(gen, send)` is the runtime
+    entry both funnel into, so no new ABI is involved. The per-generator
+    `<base>_resume(g)` wrapper hardcodes a 0 send, which is why this calls
+    the runtime function directly rather than through the trampoline."""
+    if _as_str(api.get('base', '')).startswith('_mojogen_'):
+        # A C++20-coroutine generator (MOJO_CORO=cpp): its resume entry
+        # (`{base}_resume`) takes no sent word, and the cpp unit never
+        # declares the stack-switch runtime's `__mojo_gen_resume` that this
+        # lowering calls, so the program failed in gcc with an implicit
+        # declaration. Refused honestly here until the cpp resume carries the
+        # sent word (CODEGEN_cpp_send_emits_default_path_symbol). Same prefix
+        # test `_lower_generator_close` uses to tell the two protocols apart.
         raise gimple_exprtypes._UnsupportedGeneratorShape(
-            "`.send()` on a C++20-coroutine async generator is not supported: "
-            "its yield channel carries wait-descriptors, so the sent word has "
-            "no protocol on that path (MOJO_CORO=cpp)")
+            "`.send()` on a C++20-coroutine generator is not supported: the "
+            "cpp resume entry takes no sent value, so the send cannot reach "
+            "the generator's `yield` (MOJO_CORO=cpp; the default stack-switch "
+            "path supports send)")
     vct = api['value_ctype']
     if len(node.args) == 1:
         arg = node.args[0]
@@ -435,11 +427,8 @@ def _lower_generator_send(gen, node, av: str, api: dict) -> tuple[str, str]:
             send = _gen_slot_box(gen, st, sv, vct)
     else:
         send = '0'
-    if is_cpp:
-        resumed = gen._new_val('_Bool', f"{api['base']}_send ({av}, {send})")
-    else:
-        handle = gen._to_int64('MojoGenerator *', av)
-        resumed = gen._new_val('_Bool', f"__mojo_gen_resume ({handle}, {send})")
+    handle = gen._to_int64('MojoGenerator *', av)
+    resumed = gen._new_val('_Bool', f"__mojo_gen_resume ({handle}, {send})")
     bb_ok = gen._new_bb(); bb_exhausted = gen._new_bb(); bb_merge = gen._new_bb()
     bb_stopiter = gen._new_bb()
     gen._emit(f"  if ({resumed}) goto {bb_ok}; else goto {bb_exhausted};")
@@ -447,7 +436,6 @@ def _lower_generator_send(gen, node, av: str, api: dict) -> tuple[str, str]:
     gen._emit_generator_pending_exc_check(av, api['base'], False, bb_stopiter)
     gen._emit_label(bb_stopiter)
     gen._emit(f"  mojo_exc_type_set ({gen._exc_type_id('StopIteration')});")
-    _stop_value_attach(gen, av, api['base'])
     gen._emit("  mojo_raise ();")
     gen._emit(f"  goto {bb_merge};")
     gen._emit_label(bb_ok)
@@ -507,7 +495,6 @@ def _lower_generator_throw(gen, node, av: str, api: dict) -> tuple[str, str]:
     gen._emit_generator_pending_exc_check(av, api['base'], False, bb_stopiter)
     gen._emit_label(bb_stopiter)
     gen._emit(f"  mojo_exc_type_set ({gen._exc_type_id('StopIteration')});")
-    _stop_value_attach(gen, av, api['base'])
     gen._emit("  mojo_raise ();")
     gen._emit(f"  goto {bb_merge};")
     gen._emit_label(bb_ok)
@@ -3539,10 +3526,9 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         if at in ('char *', 'MojoStr *'):
             sv = av if at == 'char *' else gen._stringify_value(at, av)
             enc = gen._new_val('char *', gen._intern_string('utf-8'))
-            err = gen._new_val('char *', gen._intern_string('strict'))
             return 'MojoBytes *', gen._call_expr(
                 'MojoBytes *', 'mojo_bytes_from_str',
-                [('char *', sv), ('char *', enc), ('char *', err)])
+                [('char *', sv), ('char *', enc)])
         if at in ('MojoList *', 'MojoDict *', 'MojoSet *', 'void *'):
             # `bytes(a_dict)`/`bytes(a_set)` of ints is real Python (an
             # iterable of ints is a valid bytes() source; a dict's own
@@ -3579,9 +3565,8 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         elif at in ('char *', 'MojoStr *'):
             sv = av if at == 'char *' else gen._stringify_value(at, av)
             enc = gen._new_val('char *', gen._intern_string('utf-8'))
-            err = gen._new_val('char *', gen._intern_string('strict'))
             _b = gen._call_expr('MojoBytes *', 'mojo_bytes_from_str',
-                                [('char *', sv), ('char *', enc), ('char *', err)])
+                                [('char *', sv), ('char *', enc)])
         elif at in ('MojoList *', 'MojoDict *', 'MojoSet *', 'void *'):
             # `bytearray(a_dict)`/`bytearray(a_set)` of ints - same real
             # Python shape as bytes() above.
@@ -4085,9 +4070,6 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # safe's own type); the old 'int' boxed the 64-bit tag into a 32-bit
         # temp, a hard gcc "invalid conversion in gimple call" error.
         av64 = gen._new_val('int64_t', f"(int64_t){av}")
-        if gen._rt_classes_made:
-            # a run-time class's metaclass / an instance's class, else the struct tag
-            return 'int64_t', gen._call_expr('int64_t', 'mojo_type_of', [('int64_t', av64)])
         return 'int64_t', gen._new_val('int64_t', f"mojo_read_type_tag_safe ({av64})")
     if fname_raw == 'setattr' and len(node.args) >= 3:
         pairs = [gen.lower_expr(a) for a in node.args[:3]]
@@ -4514,12 +4496,7 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
                            [('int64_t', gen._to_int64(obj_type, obj_val)), ('int64_t', cw)])
         return gen._new_val('_Bool', f'(_Bool){r}')
     if type_name == 'type':
-        if gen._rt_classes_made:
-            # a class made at run time is an instance of `type`
-            r = gen._call_expr('int', 'mojo_isinstance_type',
-                               [('int64_t', gen._to_int64(obj_type, obj_val))])
-            return gen._new_val('_Bool', f'(_Bool){r}')
-        return gen._new_val('_Bool', '0')  # no run-time class in this module: nothing is a `type`
+        return gen._new_val('_Bool', '0')  # isinstance(x, type) always false in C
     if type_name == 'tuple':
         # A tuple's runtime representation is a MojoList carrying the
         # `mojo_mark_as_tuple` marker (see _lower_tuple_literal). Neither

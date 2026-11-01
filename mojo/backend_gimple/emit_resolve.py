@@ -1111,7 +1111,6 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # generator slots; the module's own statements are appended
                 # for ITS imports, so a generator reached through a chain of
                 # imports sees every call site compiled before it.
-                gimple_codegen.gimple_gen_coro._PY_SRC[0] = str(_abspath).endswith('.py')
                 stmts, _ss_meta = gimple_codegen.gimple_gen_coro.lower(
                     stmts, gen._closure_call_stmts, module_name)
                 temp_gen._closure_call_stmts = gen._closure_call_stmts + [stmts]
@@ -4062,8 +4061,8 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         # repr printed those address bytes, `{'\xef\xac\x99f': 1, ...}`. The
         # literal spelling `{k: 1 for k in pairs}` reached `_repr_value` and
         # keyed by content, so the two spellings of one key disagreed. See
-        # CODEGEN_dict_comprehension_repr_is_separately_broken (tuple key
-        # hashed by address) and CODEGEN_tuple_dict_key_hashed_by_address for
+        # bugs/CODEGEN_dict_comprehension_repr_is_separately_broken.md, and
+        # CODEGEN_tuple_dict_key_hashed_by_address for the subscript
         # spelling that was fixed the same way.
         #
         # `_emit_dict_pair_store` lowers both operands itself, so the values

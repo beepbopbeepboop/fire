@@ -106,7 +106,7 @@ def land_on_master():
 
 
 def pick_candidates(only=None, allow_dirty=(), quiet=False, ignore_verdict=()):
-    """Tasks whose worker has exited with commits, a clean tree and a DONE verdict: only a finished bug is integrated."""
+    """Tasks whose worker has exited with commits, a clean tree and no NEEDS-INFO/BLOCKED verdict."""
     cands = []
     say = (lambda *_: None) if quiet else print
     for name, t in sorted(C.load().items(), key=lambda kv: kv[1]["slot"]):
@@ -117,8 +117,8 @@ def pick_candidates(only=None, allow_dirty=(), quiet=False, ignore_verdict=()):
         st = C.state_of(t)
         if st not in ("exited-ok", "exited-err", "integration-failed"):
             continue
-        if C.verdict(t) != "DONE" and name not in ignore_verdict:
-            say("skip %s: worker says %s, not DONE (the swarm continues it)" % (name, C.verdict(t) or "nothing")); continue
+        if C.verdict(t) in ("NEEDS-INFO", "BLOCKED") and name not in ignore_verdict:
+            say("skip %s: worker says %s" % (name, C.verdict(t))); continue
         if not C.ahead(t):
             say("skip %s: no commits" % name); continue
         if C.git("status", "--short", cwd=t["worktree"]) and name not in allow_dirty:

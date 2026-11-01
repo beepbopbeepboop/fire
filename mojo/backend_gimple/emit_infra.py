@@ -66,7 +66,7 @@ from mojo.middle.infra_infer import *  # noqa: F401,F403
 from mojo.middle.infra_infer import (
     opaque_container_locals,
     _FC_SEP, _POINTER_CTOR_NAMES, _as_ident_node, _as_int, _as_member_node, _as_set,
-    _as_str, _block_terminates, _closure_info_for_ident, _generator_value_ctype_for_next, _collect_return_types, _build_analysis_funcs, _build_analysis_structs, _build_fresh_returning, _build_fresh_closure_returning, _string_uses_ok, _key_views_ok, _list_elements_ok, _lambda_owned, _call_value_owned, _no_closure_escapes, _compute_closure_candidates, _compute_scoped_closure_candidates, _compute_scoped_fresh_closure_candidates, _compute_owned_free_candidates, _compute_scoped_free_candidates, _compute_int_keyed_dicts, _scope_decl_name, _is_ctor_display, _empty_ctor_ctype,
+    _as_str, _block_terminates, _closure_info_for_ident, _generator_value_ctype_for_next, _collect_return_types, _build_analysis_funcs, _build_analysis_structs, _build_fresh_returning, _string_uses_ok, _key_views_ok, _list_elements_ok, _lambda_owned, _no_closure_escapes, _compute_closure_candidates, _compute_scoped_closure_candidates, _compute_owned_free_candidates, _compute_scoped_free_candidates, _compute_int_keyed_dicts, _scope_decl_name, _is_ctor_display, _empty_ctor_ctype,
     _function_has_reachable_fallthrough, _infer_param_types, _infer_return_type, _is_free_eligible_function, _is_known_field, _known_field_type,
     _pair_key, _prepass_list_elem, _ptr_slot_in_range, _resolve_member_expr_type, _resolve_type, _scan_container_elems,
     _seed_addressed_locals, _type_of
@@ -359,12 +359,6 @@ def _reset_func(gen, body: list = None, params: list = None,
     # safe to seed only where the answer is provable.
     gen._int_word_vals.clear()
     gen._fresh_vals.clear()   # per function: temp names repeat across functions
-    # (TEMPs holding a fresh closure, `_fresh_closure_vals`, reset by REBIND in
-    # the ownership-assignment section below, never in place: a nested lifted
-    # closure's `save_func_state` holds a reference to the current object, and
-    # an in-place `.clear()` here would empty the saved state the enclosing
-    # function is restored to. Rebinding detaches `gen` from the saved object
-    # first, exactly as `_fresh_vals`'s own reset does.)
     # The four the ownership work added are ASSIGNED here rather than cleared,
     # and the difference is not a style choice: they are not in
     # `GimpleGen.__init__`, so this is where they come into existence, and a
@@ -385,12 +379,6 @@ def _reset_func(gen, body: list = None, params: list = None,
     # is the malloc'd environment emit_calls' constructor paired with it, so
     # both are one allocation unit and one free.
     gen._closure_vals: set = set()
-    # The VALUES (temps) holding a FRESH CLOSURE a call returned: a callee
-    # proven to hand back a brand-new capturing closure (returns_fresh_closure),
-    # so the local bound to it may own the value — environment, `{mut}` boxes
-    # and bound method — and free it with `mojo_closure_free` at its scope exit.
-    # The caller-side counterpart of `_closure_vals` (a local lambda).
-    gen._fresh_closure_vals: set = set()
     # The NAMES of owned locals bound to a closure; the free is emitted for the
     # name at the scope exit.
     gen._owned_closure_names: set = set()
@@ -423,6 +411,9 @@ def _reset_func(gen, body: list = None, params: list = None,
     # 'inst'. A method call or `isinstance` on them goes to the class table, never to the
     # container/struct method guesses an untyped word otherwise gets.
     gen._rtobj_kinds: dict = {}
+    # Set once any `type(n, bases, ns)` is lowered: an instance of a run-time class may then
+    # reach an `isinstance(x, StaticClass)` check, which the class table must answer.
+    gen._rt_classes_made: bool = False
     # A parameter ANNOTATED `object` is such a word by declaration: whatever
     # the call sites pass, the function's own code may not assume a kind.
     if params is not None:
@@ -908,7 +899,6 @@ class FuncState:
         self.fs_owned_str_elem_vals: set = set()
         self.fs_owned_str_elem_names: set = set()
         self.fs_closure_vals: set = set()
-        self.fs_fresh_closure_vals: set = set()
         self.fs_owned_closure_names: set = set()
         self.fs_owned_env_names: set = set()
         self.fs_owned_box_names: set = set()
@@ -1012,7 +1002,6 @@ def save_func_state(gen) -> FuncState:
     st.fs_owned_str_elem_vals = gen._owned_str_elem_vals
     st.fs_owned_str_elem_names = gen._owned_str_elem_names
     st.fs_closure_vals = gen._closure_vals
-    st.fs_fresh_closure_vals = gen._fresh_closure_vals
     st.fs_owned_closure_names = gen._owned_closure_names
     st.fs_owned_env_names = gen._owned_env_names
     st.fs_owned_box_names = gen._owned_box_names
@@ -1126,7 +1115,6 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._owned_str_elem_vals = st.fs_owned_str_elem_vals
     gen._owned_str_elem_names = st.fs_owned_str_elem_names
     gen._closure_vals = st.fs_closure_vals
-    gen._fresh_closure_vals = st.fs_fresh_closure_vals
     gen._owned_closure_names = st.fs_owned_closure_names
     gen._owned_env_names = st.fs_owned_env_names
     gen._owned_box_names = st.fs_owned_box_names
@@ -1614,7 +1602,7 @@ def seed_global_generator_apis(gen, stmts, mod_index) -> None:
     The fix is to record the store's api up front, from the one place it is
     statically certain: a DIRECT top-level `name = <generator>(...)` statement
     whose name has exactly one binder in the whole module. `mod_index` is
-    `literal_bindings.binding_index(stmts)`, the binder census that already
+    `module_gen._gmi_binding_index(stmts)`, the binder census that already
     counts every binding (nested functions included, `global` declarations
     and wildcard imports too) of every name, so "exactly one binder, and it
     is this statement" is the same test the literal-argument lookup uses. A
@@ -7394,19 +7382,6 @@ def _gen_print(gen, args: list, kwargs: list = None):
             _wout = gen._materialize_in_tu_wrapper(_wct[:-2], aval)
             resolved_parts.append(('MojoList *', _wout))
             continue
-        # A user struct value: `print(x)` is `print(str(x))`, which is the
-        # struct's `__str__`, else its `__repr__` (the same lookup `str(x)`
-        # uses). With neither the value falls through as it did. This arm did
-        # not exist, so `print(p)` printed the object's ADDRESS as a decimal
-        # while `str(p)` / `repr(p)` were right.
-        if isinstance(atype, str) and atype.endswith(' *') and atype != 'void *':
-            _psn = atype[:-2].strip()
-            if _psn in gen.struct_field_types:
-                _pcall = user_dunder_repr_call(gen, _psn, atype, aval,
-                                               ('__str__', '__repr__'))
-                if _pcall is not None:
-                    resolved_parts.append(('char *', _pcall))
-                    continue
         resolved_parts.append((atype, aval))
     parts = resolved_parts
     for i, (atype, aval) in enumerate(parts):
@@ -8240,29 +8215,6 @@ def maybe_push_owned_local(gen, name: str, value=None) -> None:
         if name in gen._scope_armed:
             _scope_register(gen, name, 'mojo_closure_free')
         return
-    # A FRESH CLOSURE returned by a vetted call: the same single-owner shape
-    # as the capturing lambda above, but the value comes back through a
-    # CALLEE (`var f = make_counter(r)`; the callee passed `returns_fresh_closure`
-    # and `_lower_call` credited its result temp into `_fresh_closure_vals`),
-    # so the ownership question is the caller-side usage one
-    # (`_call_value_owned`) and the free path is identical: `mojo_closure_free`
-    # tears down the bound method, the environment, and the `{mut}` boxes the
-    # environment holds — the escaping half of the closure-env leak: a
-    # returned `{mut}`-capturing closure whose env, boxes and bound method were
-    # never freed. If the value
-    # escaped the usage (an alias, a capture, a second holder) fail closed:
-    # nothing is freed, today's leak, never a wrong free.
-    if gen._decl_rhs_val != '' and gen._decl_rhs_val in gen._fresh_closure_vals:
-        gen._fresh_closure_vals.discard(gen._decl_rhs_val)
-        if not _call_value_owned(gen._cur_func_body, name):
-            _drop_owned_candidate(gen, name)
-            return
-        gen._owned_closure_names.add(name)
-        gen._emit(f"  mojo_cleanup_push_closure ({name});")
-        pushed.add(name)
-        if name in gen._scope_armed:
-            _scope_register(gen, name, 'mojo_closure_free')
-        return
     # A declaration whose value is not a container display (a call, a slice, a
     # comprehension, a `+`) only MAY have built a fresh container — the
     # analysis credited the name on that "maybe". Ownership is kept only when
@@ -8915,8 +8867,7 @@ def begin_function(gen, fn) -> None:
     # nowhere outside it), so the same arming and the same three exit points
     # apply. Computed from the same body, so the two sets cannot disagree.
     gen._scoped_free_candidates = (gen._scoped_free_candidates
-                                   | _compute_scoped_closure_candidates(fn, gen._owned_free_candidates)
-                                   | _compute_scoped_fresh_closure_candidates(fn, gen._fresh_closure_returning))
+                                   | _compute_scoped_closure_candidates(fn, gen._owned_free_candidates))
 
 
 def reset_no_candidates(gen) -> None:
@@ -8953,8 +8904,8 @@ def register_nested_env_free(gen, def_name: str, env_var: str,
 
     `_alloc_<name>_env()` is a `malloc` per nested `def` STATEMENT, and
     nothing freed it: `def helper(n): def inner(x): return x + n; return
-    inner(1)` measured +16 B/iteration (3.06 MB at 100k, 7.64 MB at 400k) in
-    that probe. There
+    inner(1)` measured +16 B/iteration (3.06 MB at 100k, 7.64 MB at 400k) —
+    bugs/CODEGEN_closure_env_and_boxed_local_never_freed.md's OPEN 1. There
     is no `MojoBoundMethod` and no `_reg_bound_method` entry here (the call
     sites are DIRECT — `helper_inner (_env_inner, 1)`), so the teardown is a
     bare `free` and the unwind entry is `mojo_cleanup_push_ptr`, NOT

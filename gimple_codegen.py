@@ -104,8 +104,8 @@ _FIXED_ARRAY_ANN_RE = re.compile(
 # processing into `self.struct_field_types`, which is mutable/extensible:
 # a not-yet-seen field on a USER struct legitimately grows the struct, see
 # `_collect_self_assigns`). A fixed-layout runtime struct has no such
-# extensibility (`MojoBoundMethod` is exactly `{ void *fn; void *self;
-# void **boxes; int64_t nboxes; }`, hardcoded in fire_runtime.h, forever) — an attribute name that isn't one
+# extensibility (`MojoBoundMethod` is exactly `{ void *fn; void *self; }`,
+# hardcoded in fire_runtime.h, forever) — an attribute name that isn't one
 # of its real C fields must route through the same dynamic-attribute
 # dispatch (`_mojo_dispatch_getattr`/`_mojo_dispatch_setattr` ->
 # `mojo_obj_getattr`/`mojo_setattr`'s real per-object storage, see
@@ -136,8 +136,6 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_raise':                 'void',
     'mojo_exc_msg_set':           'void',
     'mojo_exc_msg_get':           'char *',
-    'mojo_exc_args':              'MojoList *',
-    'mojo_exc_new':              'MojoExc *',
     # list
     'mojo_list_new':              'MojoList *',
     'mojo_list_len':              'int64_t',
@@ -2708,8 +2706,6 @@ class GimpleGen:
         # name of the function currently being emitted when it is one of them (''
         # otherwise). See emit_methods._frame_enter.
         self._frames_mods: set = set()
-        # True while the body of a stack-switch (A3) coroutine is being lowered; see emit_loops.
-        self._cur_func_is_coro: bool = False
         self._frame_func: str = ''
         self._owned_free_candidates: set = set()
         self._owned_free_pushed: set = set()
@@ -2732,17 +2728,6 @@ class GimpleGen:
         self._int_word_vals: set = set()
         self._fresh_str_tmps: set = set()  # see emit_infra._emit_str_cat
         self._fresh_vals: set = set()  # see emit_infra.is_fresh_container_operand
-        # TEMP names holding a FRESH CLOSURE a vetted call returned (the
-        # caller-side counterpart of `_closure_vals`'s local lambdas): the callee
-        # passed returns_fresh_closure, so the local bound to the result may own
-        # the value — environment, `{mut}` boxes, bound method — and free it with
-        # `mojo_closure_free` at its scope exit. Same per-function reset terms as
-        # `_fresh_vals` above (declared here, reset by REBIND in `_reset_func`
-        # — never in place, because a nested lifted closure's saved state holds
-        # a reference to the current object — and saved/restored by reference in
-        # FuncState), because a stale "this temp holds a fresh closure" entry
-        # would be a wrong free, not a missed one.
-        self._fresh_closure_vals: set = set()  # see emit_infra.maybe_push_owned_local
         # Field names whose recorded element type (`_field_elem_types`) belongs to
         # a SET rather than a list. An element type says "this field is a
         # container of X", not which container, so `_lower_MemberExpr`'s boxed
@@ -2758,9 +2743,6 @@ class GimpleGen:
         # a NULL set -- the SIGSEGV that ended every `mojoc --dump-full
         # fire.py` in `mojo_set_add_str`.
         self._bool_valued: set = set()
-        # Names bound to a Python-level frame word (`f = sys._getframe()`, `f = e.__traceback__.tb_frame`):
-        # `f.clear()` on one of them is a frame clear, not a list/dict clear (emit_methods._is_frame_expr).
-        self._frame_vars: set = set()
         # Parameter names whose ANNOTATION says `bool`, for the struct method
         # `_gmi_collect_self_assigns` is scanning RIGHT NOW (module_gen.py
         # rebuilds it per method). That walk is the one place that knows both
@@ -2797,7 +2779,6 @@ class GimpleGen:
         # Block-scoped destruction state — see emit_infra's block-scope section.
         self._analysis_funcs: dict = {}   # see infra_infer._build_analysis_funcs
         self._fresh_returning: set = set()   # names whose calls return a fresh container
-        self._fresh_closure_returning: set = set()  # names whose calls return a fresh capturing closure
         self._analysis_structs: dict = {}    # see infra_infer._build_analysis_structs
         self._cur_func_body: list = []  # the AST body being lowered (see _reset_func)
         self._decl_value_node = None   # see lower_expr: the decl statement's RHS node
@@ -3218,9 +3199,6 @@ class GimpleGen:
         if gimple_gen_coro.enabled():
             self.BUILTIN_VALUE_MAP['_coro_resume_fn'] = '__mojo_gen_resume_once'
             self.BUILTIN_VALUE_MAP['_coro_destroy_fn'] = '__mojo_gen_destroy'
-        # MODULE-wide, not per function (so not in `_reset_func`): once any `type(n, bases, ns)`
-        # is lowered, a later function's `isinstance` / `type(x)` must consult the class table.
-        self._rt_classes_made: bool = False
         self._reset_func()
 
     # Builtin exception names (mirrors myinterpreter.py's _setup_builtins plus
@@ -3298,8 +3276,6 @@ class GimpleGen:
         'mojo_classobj_tag':   ('int64_t', ['int64_t']),
         'mojo_rtobj_method_call': ('int64_t', ['int64_t', 'char *'] + ['int64_t'] * 8),
         'mojo_isinstance_rtclass': ('int', ['int64_t', 'int64_t']),
-        'mojo_isinstance_type': ('int', ['int64_t']),
-        'mojo_type_of':        ('int64_t', ['int64_t']),
         'mojo_classobj_setattr': ('void', ['int64_t', 'char *', 'int64_t']),
         'mojo_type_fill_from_dict': ('void', ['int64_t', 'MojoDict *']),
         'mojo_chain_extend':   ('void', ['MojoList *', 'int64_t']),
@@ -4458,16 +4434,6 @@ class GimpleGen:
         if (isinstance(node.func, IdentExpr) and node.func.name in self._analysis_structs
                 and node.func.name not in self.var_types):
             self._fresh_vals.add(_cv)
-        # A call to a function proven to hand back a FRESH capturing closure
-        # (infra_infer._build_fresh_closure_returning / returns_fresh_closure):
-        # the result is a brand-new bound method whose environment and `{mut}`
-        # boxes are owned by whoever binds it, and may be torn down with
-        # `mojo_closure_free` at that binder's scope exit. Same local-shadow
-        # guard as the two creditors above: a local of this function named like
-        # the module fn (a function pointer / parameter) is a different value.
-        if (isinstance(node.func, IdentExpr) and node.func.name in self._fresh_closure_returning
-                and node.func.name not in self.var_types):
-            self._fresh_closure_vals.add(_cv)
         return _ct, _cv
 
     def _lower_pointer_alloc(self, node: CallExpr) -> tuple[str, str]:
@@ -5421,12 +5387,6 @@ class GimpleGen:
         self._analysis_funcs = ginf._build_analysis_funcs(stmts)
         self._analysis_structs = ginf._build_analysis_structs(stmts)
         self._fresh_returning = ginf._build_fresh_returning(self._analysis_funcs, self._analysis_structs)
-        # Names whose calls return a FRESH CLOSURE (see infra_infer's
-        # returns_fresh_closure): `_lower_call` credits the result temp into
-        # `_fresh_closure_vals` so the binding's declaration can own — and free
-        # with `mojo_closure_free` — the environment, `{mut}` boxes and bound
-        # method the call handed back.
-        self._fresh_closure_returning = ginf._build_fresh_closure_returning(self._analysis_funcs)
     def _emit_container_new(self, t: str, ctype: str) -> None:
         return ginf.emit_container_new(self, t, ctype)
     def _note_fresh_result(self, t: str) -> None:
@@ -6293,7 +6253,6 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     # MOJO_CORO=stackswitch. Replaces eligible generator FunctionDefs with a
     # plain `__mgco_<g>_body` the ordinary codegen lowers; ineligible ones
     # fall through to the gimple_cpp_* C++20-coroutine path unchanged.
-    gimple_gen_coro._PY_SRC[0] = bool(filename) and str(filename).endswith('.py')
     stmts, _coro_meta = gimple_gen_coro.lower(stmts)
     gen = GimpleGen(do_imports=do_imports, link_imports=link_mode,
                     auto_gpu=auto_gpu)

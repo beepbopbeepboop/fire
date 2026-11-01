@@ -424,9 +424,9 @@ So this shape needs no part of the analysis below to be closed before it can be
 giving a lifted function a value representation — an environment struct
 allocated at the `return`, passed through the word, and unpacked at the
 indirect call — and the compiled path already has both halves of that machinery
-under different names (`_gen_lifted_closure` allocates `_env`; the
-closure-env leak measured the per-closure allocation cost: an env struct,
-a bound method, and a `{mut}` box). It is not filed as its own FORMAL doc because nothing
+under different names (`_gen_lifted_closure` allocates `_env`; see
+`bugs/CODEGEN_closure_env_and_boxed_local_never_freed.md` for what the
+allocation costs today). It is not filed as its own FORMAL doc because nothing
 here is refused-by-accident and nothing traps: it is refused, and the sentence
 says what to write instead.
 

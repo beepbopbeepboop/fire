@@ -15,8 +15,6 @@ import subprocess
 import sys
 import tempfile
 
-from exec_budget import RUN_TIMEOUT_S
-
 HERE = os.path.dirname(os.path.abspath(__file__))
 RT = os.path.join(HERE, 'runtime')
 
@@ -80,7 +78,7 @@ def _run(name, test_c, deps, backend, opt, wd, flags=()):
     cp = subprocess.run(cmd, capture_output=True, text=True)
     if cp.returncode != 0:
         return False, f'compile failed:\n{cp.stderr}'
-    cp = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
+    cp = subprocess.run([out], capture_output=True, text=True, timeout=60)
     ok = cp.returncode == 0
     return ok, (cp.stdout + cp.stderr).strip()
 

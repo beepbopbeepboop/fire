@@ -267,56 +267,6 @@ written and measured and the Lean model is ready, section above), the
 `VARIABLE_ROWS` table flips to the trap answers, and this doc is deleted in
 the same commit.
 
-## Status, 2026-11-01: the verification completed — the class ran to the end,
-## and the two pins the flip left stale moved with the measurement
-
-The round above committed the walk-side half before the class's own Lean
-lines had run to completion on the new state.  This round ran them, and the
-two pins the flip left stale are fixed and measured; nothing in the entry
-above changes, except one sentence's precision.
-
-- **The Lean lines ran, 3/3** (`TestTheZeroDivisorGuardAgainstLean`, under
-  the 12 GB ceiling, peak 5.8 GB).  The entry's "both spellings
-  byte-identical" was the GOAL's identity, not the trace count's: the walk
-  runs the divisor-nonzero path once per visit to the guard block, so the
-  file carries a SECOND terminal value flow, and the `hc_N` patch reaches
-  the second terminal, where the in-scope branch fact is the NEGATION, so
-  its `simp` leaves the same goal the first terminal always leaves.
-  Measured: `as_emitted` traces `[goal]`, `doc_next_step` traces
-  `[goal, goal]` — the implication-shaped false goal above, byte for byte,
-  twice.  The line now compares the residual's goal (the set); the
-  survival itself is the sibling line's pin, and the walk-terminal's own
-  `done` at the second terminal as emitted is what says the divisor-nonzero
-  path is fully closed there.  With the old list-identity assertion the
-  line was red on the committed state — the first real run of the class
-  since the flip.
-- **`TestTheOneOpaqueCallIsAnnounced`'s fixture was this doc's own.**  It
-  measured the substitution the walk no longer makes for `a // b` — three
-  of its four lines red on the committed state, the fourth (the no-opaque
-  control) the only survivor.  It now measures the note with a GENUINE
-  single out-of-image call — `printf` with an unused return value, the
-  corpus's other shape (`formal/examples/printf_int.mojo`'s body, named
-  `q`): the substitution and the note are emitted exactly as its lines
-  pin, Lean-free, 4/4.  The flip its div0 fixture pinned is
-  `TestTheDiv0FixtureHaltsAtTheCompilerTrap`'s to own now.
-- **The rest of the round, re-measured on this tree:** the quick test
-  16/16 (the `VARIABLE_ROWS` rows asserting the current answer — the table
-  step 3 must flip); the 13 Lean-free affected classes green (the four
-  above plus `TestCompilerTrapIsNotAProgramCall`, `TestCfgLeafCensus`,
-  `TestTheDivisionExamplesHaveNoProofToCheck`, `TestTheReachedWalkIsPerPath`,
-  `TestACallOnAnUntakenPathIsARefusalNotALeanError`,
-  `TestTheRecursionFamiliesStillGenerate`,
-  `TestTheStackFloorGuardReadsTheLimitInTheStartupStub`,
-  `TestAPlaceholderModelClaimsNothing`,
-  `TestTheDivideByZeroGuardIsEmittedOnlyWhenItCanFire`); and the
-  regenerated `q` proof checks clean in Lean (peak 6.5 GB under 12 GB) —
-  the entry above's verdict, confirmed on the file the current source
-  generates, the two `hnone` branches included.
-
-What is still missing is step 3, unchanged: the emission flip in both
-backends, the `VARIABLE_ROWS` flip, and this doc's deletion in the same
-commit.
-
 ## The next step, in order
 
 1. **Name the limit, so it is a refusal rather than a Lean error.** In
