@@ -52,21 +52,3 @@ iterator is not a list. Test: `gimple_list_iterator_crosses_a_call` in `test_gim
 Limits, both loud: an iterator over strings/floats passed to a function still refuses at compile time
 (the kind is lost through the returned word), and a list iterator and a generator through the SAME
 parameter crash at run time on master as well (pre-existing, separate).
-
-## Update (2026-10-31, closure probe on a clean path)
-
-`tools/probe_coro_close_refusal.py` on `import mailbox` against a COPY of the 3.14.6 `Lib` (a directory name
-whose case matches the resolved one; on macOS `lib` vs `Lib` is the same directory, and the module was then
-registered under two spellings): master 59 `# ERROR: compiling imported module` lines, 13 of them
-"N overloads ... referenced as a plain value" (`reprlib`, `inspect` x4 with 2/3/5/7, `locale`, `_parser`).
-Cause: a struct's method signatures were `.append`ed on every compile of its module, so a module retried
-against the shared gen after a rollback multiplied its methods into fake overloads. Registration is now
-idempotent per overload id (`module_gen`, test `recompiling_a_struct_does_not_multiply_its_method_overloads`);
-the same probe on the fix shows 0 overload refusals and 52 errors.
-
-What is left in the closure, by module (each its own feature, none a one-line fix):
-`collections`/`enum` run-time 3-argument `type(...)`; `dis`/`typing`/`inspect`/`selectors` module-level
-`namedtuple` forms beyond `Name = namedtuple("Name", [literals])`; `functools`/`_win_cp_codecs`/`_bootstrap`
-a class declared inside a function that captures locals (`bugs/CODEGEN_nested_class_method_cannot_reach_an_enclosing_local.md`);
-`dataclasses`/`traceback` `match` or-patterns and class patterns; `signal` a decorator inside a module-level
-block; `weakref` was `d.pop(key, *args)` with the packed list taken for the default (FIXED 2026-10-31, `gimple_dict_pop_with_spread_default`; re-probe for what weakref hits next).

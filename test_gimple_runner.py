@@ -1396,61 +1396,6 @@ def main():
     print(both(1, 2, z=3))
 """, "3\n201\n200\n3\n201\n")
 
-    # The same packing for a nested DEF (a lifted closure), not just a
-    # top-level function or lambda value. `_gen_lifted_closure` registers the
-    # `*args` slot of a `**kwargs`-bearing closure as a CONCRETE `MojoList *`
-    # (the `**kwargs` `MojoDict *` follows it, so the trailing `'...'`
-    # packing sentinel cannot sit there), and only
-    # `_pack_closure_star_slots` at the closure call site packs the loose
-    # elements and the keyword arguments into those two pointers. Before it,
-    # a call to a nested `def f(*a, **kw)` emitted the flat arguments against
-    # a `(MojoList *, MojoDict *)` prototype — "too few arguments" — and a
-    # nested `def f(**kw)` silently dropped every keyword argument.
-    test_gimple_stdout("gimple_nested_def_star_kwargs_packed_at_call", """\
-def outer(k):
-    def f(*a, **kw):
-        print(a[0] + k)
-        print(kw['x'])
-    f(1, 2, x=3)
-
-
-def main():
-    outer(10)
-
-main()
-""", "11\n3\n")
-    test_gimple_stdout("gimple_nested_def_kwargs_only_packed_at_call", """\
-def outer():
-    def f(**kw):
-        print(kw['x'])
-        print(kw['y'])
-    f(x=5, y=7)
-
-
-def main():
-    outer()
-
-main()
-""", "5\n7\n")
-    # The padding-and-packing interaction: a defaulted fixed parameter is
-    # filled from its default while the call's keyword arguments pack into
-    # the `**kwargs` slot. The keyword expression is lowered exactly once
-    # (`_bind_closure_kwargs` stashes its lowered kwarg dict on the node
-    # instead of letting the packing re-lower it).
-    test_gimple_stdout("gimple_nested_def_default_then_kwargs_packed", """\
-def outer():
-    def f(a=1, **kw):
-        print(a)
-        print(kw['x'])
-    f(x=3)
-
-
-def main():
-    outer()
-
-main()
-""", "1\n3\n")
-
     # A `*seq` element of a list or tuple DISPLAY extends the container
     # instead of occupying one slot, and it is the one place where a runtime
     # slot COUNT meets a compile-time kinds string. Three separate mechanisms
@@ -3400,24 +3345,6 @@ def main():
 main()
 """, "1\n67\n9\n1\nrest 2\nrest 3\nrest 4\nrest 5\n-1\n1\nstop\n")
 
-    # `d.pop(key, *args)` (weakref.WeakKeyDictionary.pop): the default is the first
-    # spread element when present. The packed `*args` list used to be taken for the
-    # DEFAULT VALUE and refused as a MojoList on an int-valued dict.
-    test_gimple_stdout("gimple_dict_pop_with_spread_default", """\
-class W:
-    def __init__(self):
-        self.data = {1: 10, 2: 20}
-    def pop(self, key, *args):
-        return self.data.pop(key, *args)
-def main():
-    w = W()
-    print(w.pop(1))
-    print(w.pop(5, 99))
-    print(w.pop(2, 7))
-    print(w.pop(2, 7))
-main()
-""", "10\n99\n20\n7\n")
-
     # String site FIRST, int site second (an int list records no contract, so
     # it used to be invisible as a disagreeing call site).
     test_gimple_stdout("gimple_mixed_kind_flat_list_param_str_first", """\
@@ -3551,74 +3478,6 @@ def main():
     built.append("a")
     built.append("c")
     print("a" in built, "b" in built, "c" in built)
-main()
-""")
-
-    # An INT needle over a list whose elements are `char *` (a str list, or a
-    # kind-mixed literal) was cast to `char *` and handed to
-    # mojo_list_contains_str, which strcmp'd the integer's value as a pointer:
-    # `1 in ["a", 1]` was a SIGSEGV with no output. Each slot is compared in
-    # its own domain instead, so membership is defined per element as Python
-    # defines it. The `None` cases are the ones a naive word comparison gets
-    # wrong (a None slot is the NULL word, which is 0), and `not in` must
-    # negate the answer of the mixed branch, not return it raw.
-    test_gimple_matches_cpython("gimple_int_in_mixed_str_int_list", """\
-def main():
-    print(1 in ["a", 1], 1 in ["a"], 0 in ["a", None])
-    print(0 in [None, "a", 0], None in ["a", None], None in ["a"])
-    print(None in [0, 1], None in [1, None], 0 in [1, None])
-    print(1 not in ["a", 1], 3 not in ["a", 1], True in ["a", 1])
-    print(2 in [1, 2.0], True in [1.0, "a"], 2 in ["a", 2.5])
-    names = ["ccc", "a", "bb"]
-    print(1 in names, 0 in names, "a" in names)
-    built = ["a"]
-    built.append(1)
-    print(1 in built, 2 in built, "a" in built)
-    t = (None, "x")
-    print(None in t, "x" in t, 1 in t)
-    print('a' not in [b'a', b'b'], b'a' not in [b'a'], b'a' in [b'a'])
-main()
-""")
-
-    # A FLOAT needle over a str or kind-mixed list. The int-needle fix above
-    # gave ints their own helper; a double needle still fell into the generic
-    # str branch and passed a `double` to mojo_list_contains_str, a gcc error
-    # (`2.5 in [2.5, "a"]` produced no binary). Membership is per-element `==`,
-    # so an int slot matches only when it is exactly the needle's value, a
-    # double slot matches by numeric equality, and str/None/bytes slots never
-    # match a number. -0.0 == 0 and NaN equals nothing, as CPython says.
-    test_gimple_matches_cpython("gimple_double_in_mixed_str_list", """\
-def main():
-    print(2.5 in [2.5, "a"], 2.0 in [2, "a"], 2.5 in ["a"])
-    print(2.5 not in [2.5, "a"], 3.0 not in [2.5, "a"], 2.0 in ["a", 2])
-    print(2.0 in [2, 2.0], -0.0 in [0, "a"], 0.0 in [None, "a"])
-    print(1.5 in ["a", None, 1.5], 2.0 in [1, "a"], 2.5 in [2, "a"])
-    mixed = ["a", 2.5, 3]
-    print(2.5 in mixed, 2.0 in mixed, 3.0 in mixed, "a" in mixed)
-main()
-""")
-
-    # `.append(<float>)` stored the double into the list's int64_t slot by C
-    # conversion, so 2.5 became 2 and every later read saw the int. The
-    # element is the double itself, recorded under the 'd' kind, for every
-    # list the append can reach: a str list (the slot already holds str
-    # pointers, which the kinds row must still describe as 'p'), an int list,
-    # and an empty list. CPython is the oracle for the repr and the `in`.
-    test_gimple_matches_cpython("gimple_append_float_keeps_double", """\
-def main():
-    built = ["a"]
-    built.append(2.5)
-    print(built)
-    print(2.5 in built, 2.0 in built, "a" in built)
-    xs = [1]
-    xs.append(2.5)
-    print(xs)
-    print(2.5 in xs, 2.0 in xs, 1 in xs)
-    empty = []
-    empty.append(2.5)
-    empty.append(1)
-    print(empty)
-    print(2.5 in empty)
 main()
 """)
 
@@ -13282,8 +13141,7 @@ def main():
                   test_nested_class_attr_from_str_param_regression,
                   test_instance_write_shadows_class_attr_regression,
                   test_nested_class_attr_rebind_after_construction_regression,
-                  test_namedtuple_shaped_class_runs_regression,
-                  test_none_bound_local_is_none_not_zero_in_membership):
+                  test_namedtuple_shaped_class_runs_regression):
         try:
             _late()
         except AssertionError as e:
@@ -13516,34 +13374,6 @@ def main():
     print(q.x)
     print(q.y)
 """, "Point(x=1, y=2)\n3\n4\n")
-
-
-def test_none_bound_local_is_none_not_zero_in_membership():
-    """A `None` HELD in a local is the NULL word, not the int 0 its int64_t
-    storage spells. `n = None; n in ["a", None]` was False (CPython: True),
-    because the membership lowering only saw the local's static type and
-    applied the int meaning to the needle. A local every binding of which is
-    the literal None is answered as the None needle it is, while a local
-    that is also bound to something else keeps the int path. The second
-    function shows the decision is per function: `n = 0` there is an int,
-    and `0 in ["a", None]` is False."""
-    test_gimple_matches_cpython("gimple_none_local_needle_in_membership", """\
-def f():
-    n = None
-    return n in ["a", None]
-
-def g():
-    n = 0
-    return n in ["a", None]
-
-def main():
-    n = None
-    print(n in ["a", None], n in ["a"], n in [0, 1], n in [1, None])
-    print(n not in ["a", None], n not in ["a"])
-    print(f(), g())
-
-main()
-""")
 
 
 if __name__ == '__main__':

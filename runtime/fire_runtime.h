@@ -797,9 +797,7 @@ int64_t     mojo_box_int(int64_t v);
  * is the word. mojo_repr_boxed / mojo_box_double read it back. */
 int64_t     mojo_box_from_double(double v);
 int64_t     mojo_box_from_bool(int64_t v);   /* a bool in a tagged word: renders True/False */
-int64_t     mojo_box_none(void);             /* None in a tagged word: renders None (one shared box) */
 void        mojo_list_append_word(MojoList *l, int64_t w);   /* append a tagged word under the kind it carries */
-void        mojo_list_append_double_kinded(MojoList *l, double v, char prior);   /* append a double under kind 'd'; `prior` describes the slots already there */
 /* The result of `+`, `-` or `*` where one operand is a float-possible
  * parameter (see `_float_param_arith` in emit_infra.py): `ires` is the integer
  * answer and `dres` the double answer, both already computed. Returns a fresh
@@ -858,15 +856,6 @@ int64_t mojo_list_len(MojoList *l);
 int mojo_list_contains_int(MojoList *l, int64_t v);
 int mojo_list_contains_double(MojoList *l, double v);
 int mojo_list_contains_str(MojoList *l, char *v);
-/* `x in <list>` for an int needle over a str / kind-mixed list: each slot is
- * compared in its own domain (see the definition). */
-int mojo_list_contains_mixed_int(MojoList *l, int64_t v);
-/* `x in <list>` for a double needle over a str / kind-mixed list (the float
- * counterpart of mojo_list_contains_mixed_int; see the definition). */
-int mojo_list_contains_mixed_double(MojoList *l, double v);
-/* `None in <list>` for a non-str list: a None slot is the one the kinds
- * row names 'n'. */
-int mojo_list_contains_none(MojoList *l);
 /* `l.count(x)` — occurrence COUNT, not membership; see each definition.
  * The bytes needle is declared down at the MojoBytes block, which is where
  * that type is first defined. */
@@ -1409,7 +1398,6 @@ void    mojo_type_add_base(int64_t cls, int64_t base);
 int     mojo_is_classobj(int64_t w);
 int64_t mojo_classobj_tag(int64_t w);
 void    mojo_classobj_setattr(int64_t cls, char *name, int64_t word);
-void    mojo_type_fill_from_dict(int64_t cls, MojoDict *ns);
 int     mojo_classobj_lookup(void *obj, char *attr, int64_t *out);
 int64_t mojo_re_call(int64_t obj, char *name, MojoList *args, MojoDict *kw);
 /* `_kw` variants: the key arrives as a raw machine WORD that is either a boxed

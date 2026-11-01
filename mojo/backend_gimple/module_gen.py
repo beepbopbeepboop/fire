@@ -24,7 +24,7 @@ from fire_compiler import (
     BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt,
     ImportStmt, FromImportStmt,
     IfStmt, WhileStmt, ForStmt,
-    FunctionDef, TryStmt, WithStmt, WithItem, ExceptHandler,
+    FunctionDef, TryStmt, WithStmt,
     ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt,
     GlobalStmt, NonlocalStmt, DelStmt, MatchStmt,
     StructDef, TraitDef,
@@ -159,127 +159,6 @@ def _gmi_literal_ctype(node):
         return 'MojoSet *'
     if isinstance(node, gimple_ctypes.DictExpr):
         return 'MojoDict *'
-    return None
-
-
-def _gmi_target_names(target, out) -> None:
-    """Append to `out` every bare name an assignment target binds: an
-    identifier, or an identifier inside a tuple/list target. Attribute and
-    subscript targets bind no name. A plain str (a `with ... as name` alias
-    spelled as a string) binds itself."""
-    if isinstance(target, str):
-        if target:
-            out.append(target)
-        return
-    if isinstance(target, gimple_ctypes.IdentExpr):
-        out.append(target.name)
-        return
-    if isinstance(target, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
-        for el in target.elements:
-            _gmi_target_names(el, out)
-
-
-def _gmi_bound_names(nd) -> list:
-    """Every name the single AST node `nd` binds in the scope that contains
-    it, as a list (empty for nodes that bind nothing). A wildcard
-    `from m import *` binds an unknown set and reports `'*'`.
-
-    This is the binder census `_gmi_identifier_literal_ctype` reads, so it
-    must cover every construct that can rebind a name. Anything it misses
-    lets a rebound name look like a single literal binding, which is the
-    one way that lookup can be wrong.
-    """
-    out: list = []
-    if isinstance(nd, (gimple_ctypes.AssignStmt, gimple_ctypes.AugAssignStmt,
-                       gimple_ctypes.ForStmt)):
-        _gmi_target_names(nd.target, out)
-    elif isinstance(nd, gimple_ctypes.MultiAssignStmt):
-        for t in nd.targets:
-            _gmi_target_names(t, out)
-    elif isinstance(nd, WithItem):
-        if nd.alias is not None:
-            _gmi_target_names(nd.alias, out)
-    elif isinstance(nd, gimple_ctypes.DelStmt):
-        for t in nd.targets:
-            _gmi_target_names(t, out)
-    elif isinstance(nd, (gimple_ctypes.GlobalStmt, gimple_ctypes.NonlocalStmt)):
-        for n in nd.names:
-            out.append(n)
-    elif isinstance(nd, gimple_ctypes.FunctionDef):
-        out.append(nd.name)
-        for pn in gimple_ctypes._param_names_stripped(nd.params):
-            out.append(pn)
-    elif isinstance(nd, (gimple_ctypes.StructDef, gimple_ctypes.TraitDef,
-                         gimple_ctypes.VarDecl, gimple_ctypes.WalrusExpr,
-                         ExceptHandler)):
-        if nd.name:
-            out.append(nd.name)
-    elif isinstance(nd, (gimple_ctypes.Generator, gimple_ctypes.ComptimeForStmt,
-                         gimple_ctypes.ComptimeVarStmt)):
-        if nd.target:
-            out.append(nd.target)
-    elif isinstance(nd, gimple_ctypes.ImportStmt):
-        if nd.alias:
-            out.append(nd.alias)
-        else:
-            out.append(nd.module.split('.')[0])
-        for ent in nd.extra or []:
-            mod_e, al_e = ent
-            out.append(al_e if al_e else mod_e.split('.')[0])
-    elif isinstance(nd, gimple_ctypes.FromImportStmt):
-        if nd.wildcard:
-            out.append('*')
-        for s in nd.name_alias_strs:
-            al = gimple_ctypes._fi_alias(s)
-            out.append(al if al else gimple_ctypes._fi_name(s))
-    return out
-
-
-def _gmi_binding_index(scopes) -> dict:
-    """name -> list of the nodes in `scopes` (a statement list, or one AST node
-    such as a FunctionDef; walked whole, nested functions included) that bind
-    that name. One walk; the per-name lookups are then dict reads."""
-    idx: dict = {}
-    for nd in _walk_ast(scopes):
-        for nm in _gmi_bound_names(nd):
-            if nm in idx:
-                idx[nm].append(nd)
-            else:
-                idx[nm] = [nd]
-    return idx
-
-
-def _gmi_identifier_literal_ctype(name, enclosing, mod_index):
-    """The ctype of an IDENTIFIER argument whose only binding is a literal.
-
-    A call `lib.walk(s)` where `s = "r"` is the one binding of `s` in scope
-    passes a string, and the callee's parameter types should follow it just as
-    they follow `lib.walk("r")`. `_gmi_literal_ctype` answers None for a name,
-    so without this the argument recorded no evidence and the callee's body
-    lowered `root + str(k)` as pointer arithmetic.
-
-    The lookup is sound only because it demands EXACTLY ONE binder of the name
-    in scope, and that binder is `name = <literal>` (or `var name = <literal>`).
-    Two bindings, a non-literal binding, a parameter, a global declaration or a
-    wildcard import all return None. The scope is the enclosing function when
-    it binds the name at all (a local shadows a global), otherwise the whole
-    module, which is a superset of every binder that could reach the name.
-    `mod_index` is `_gmi_binding_index` over the module's statements.
-    """
-    sites: list = []
-    if enclosing is not None:
-        enc_idx = _gmi_binding_index(enclosing)
-        sites = list(enc_idx.get(name, [])) + list(enc_idx.get('*', []))
-    if not sites:
-        sites = list(mod_index.get(name, [])) + list(mod_index.get('*', []))
-    if len(sites) != 1:
-        return None
-    site = sites[0]
-    if isinstance(site, gimple_ctypes.AssignStmt) \
-            and isinstance(site.target, gimple_ctypes.IdentExpr):
-        return _gmi_literal_ctype(site.value)
-    if isinstance(site, gimple_ctypes.VarDecl) and site.value is not None:
-        return _gmi_literal_ctype(site.value)
     return None
 
 
@@ -4592,22 +4471,17 @@ def gen_module_impl(self, stmts):
                         return _xs
                 return None
 
-            def _xg_record_scalar_args(_xkey, _xpnames, _xargs, _xenc):
+            def _xg_record_scalar_args(_xkey, _xpnames, _xargs):
                 """Record the unanimous literal SCALAR-ish ctype of each
                 argument into _xmod_gen_param_hints (the cross-module twin of
                 Pass 1.3d's same-module literal contract, see
-                `_gmi_apply_call_site_param_evidence`). An IDENTIFIER argument
-                counts when its one binding in scope is a literal
-                (`_gmi_identifier_literal_ctype`). A parameter whose call sites
-                disagree records None, and the merge below then leaves it at
-                the body-derived type."""
+                `_gmi_apply_call_site_param_evidence`). A parameter whose
+                call sites disagree records None, and the merge below then
+                leaves it at the body-derived type."""
                 for _xi, _xa in enumerate(_xargs):
                     if _xi >= len(_xpnames):
                         break
                     _xct = _gmi_literal_ctype(_xa)
-                    if _xct is None and isinstance(_xa, gimple_ctypes.IdentExpr):
-                        _xct = _gmi_identifier_literal_ctype(
-                            _xa.name, _xenc, _xg_bind_index)
                     if not _xct or not _xpnames[_xi]:
                         continue
                     _xs_map = self._xmod_gen_param_hints.setdefault(_xkey, {})
@@ -4674,10 +4548,6 @@ def gen_module_impl(self, stmts):
             # latter being exactly c_common/tables.py's
             # `strutil._iter_significant_lines(infile)` shape.
             _xg_calls = []
-            # The module-wide binder census the identifier-argument lookup
-            # falls back to (a global, or a name the call's function does not
-            # bind). Built once: every call site below reads it.
-            _xg_bind_index = _gmi_binding_index(stmts)
             for _xg_fd in stmts:
                 if isinstance(_xg_fd, FunctionDef):
                     for _xg_n3 in _walk_ast(_xg_fd.body):
@@ -4751,8 +4621,7 @@ def gen_module_impl(self, stmts):
                     _xg_key = (_xg_mod_joined.replace('.', '_').replace('-', '_')
                                + '::' + _xg_call.func.member)
                     _xg_pnames = gimple_ctypes._param_names_stripped(_xg_fn.params)
-                    _xg_record_scalar_args(_xg_key, _xg_pnames, _xg_call.args,
-                                           _xg_enclosing)
+                    _xg_record_scalar_args(_xg_key, _xg_pnames, _xg_call.args)
                     if not _xg_fn.is_generator:
                         continue  # element contracts are generator-only
                     _xg_enc_map = (_xg_local_param_elems.get(_xg_enclosing.name, {})
@@ -4777,8 +4646,7 @@ def gen_module_impl(self, stmts):
                 # dict's self-hosted compilation.
                 _xg_key = _xg_mod.replace('.', '_').replace('-', '_') + '::' + _xg_orig
                 _xg_pnames = gimple_ctypes._param_names_stripped(_xg_fn.params)
-                _xg_record_scalar_args(_xg_key, _xg_pnames, _xg_call.args,
-                                       _xg_enclosing)
+                _xg_record_scalar_args(_xg_key, _xg_pnames, _xg_call.args)
                 if not _xg_fn.is_generator:
                     continue  # element contracts are generator-only; ordinary
                     # callees keep Pass 1.3d's own ordering for those
@@ -8360,20 +8228,7 @@ def gen_module_impl(self, stmts):
                 for _rpn3, _rpt3 in real_params:
                     _rp_names.append(_rpn3)
                     _rp_convs.append(_pconv.get(_rpn3.lstrip('*')))
-                # IDEMPOTENT per overload id: a module whose compile is rolled back
-                # and retried against the same shared gen (the import fallback)
-                # registers its structs again, and a bare `.append` made one method
-                # look like N overloads -- `repr = aRepr.repr` then refused with
-                # "method Repr.'repr' has 2 overloads and is referenced as a plain
-                # value". A real overload carries its own `_oid`, so replacing the
-                # entry with the same id loses nothing.
-                _sms_list = self._struct_method_signatures.setdefault(key, [])
-                _sms_keep = []
-                for _sms_old in _sms_list:
-                    if _as_str(_sms_old.get('overload_id', '')) != _oid:
-                        _sms_keep.append(_sms_old)
-                _sms_list[:] = _sms_keep
-                _sms_list.append({
+                self._struct_method_signatures.setdefault(key, []).append({
                     'overload_id': _oid,
                     'param_names': _rp_names,
                     'param_ctypes': param_ctypes,
@@ -8478,11 +8333,6 @@ def gen_module_impl(self, stmts):
     # function name for the same reason `_container_param_kinds` is — a
     # forwarding chain's second hop is a DIFFERENT slot with the same shape.
     self._int64_may_hold_str: dict[str, set] = {}
-    # coroutine body name -> {param} whose call sites pass a string: the
-    # generator-body twin of `_int64_may_hold_str`. Created HERE, before the
-    # cross-module hint merge below writes into it, and not re-initialised
-    # later in this function (a re-init would drop those entries).
-    self._coro_str_params: dict[str, set] = {}
     # Function name -> the NAMES of its parameters left at the `int64_t`
     # default whose call sites observed a `double` AND an integer. The float
     # twin of the set above, with the same provenance rule: a slot is in it
@@ -8595,24 +8445,10 @@ def gen_module_impl(self, stmts):
                 continue
             _xg_pmap = self._xmod_gen_param_hints[_xg_key]
             _xg_tgt = self._inferred_param_types.setdefault(_xg_hfn, {})
-            # The lowered generator BODY is what emits `root + str(k)`, and
-            # its `+` consults the body-keyed string tables, not the
-            # signature's `_inferred_param_types` (which only types the
-            # start shim). A caller's string literal is the same evidence the
-            # same-module coroutine pass records in `_coro_str_params`, so it
-            # feeds the same two tables under the body's name. Without this a
-            # cross-module `lib.walk("r")` yielded `root + str(k)` as pointer
-            # arithmetic, printing `43634604000`.
-            _xg_body = (gimple_gen_coro.generator_base_name(
-                            _xg_hfn, gimple_gen_coro.module_qualifier(self.module_name))
-                        + '_body')
             for _xg_pn in _xg_pmap:
                 _xg_ct = _xg_pmap[_xg_pn]
                 if _xg_ct and _xg_tgt.get(_xg_pn) in (None, 'int', 'int64_t'):
                     _xg_tgt[_xg_pn] = _xg_ct
-                if _xg_ct == 'char *':
-                    self._coro_str_params.setdefault(_xg_body, set()).add(_xg_pn)
-                    self._int64_may_hold_str.setdefault(_xg_body, set()).add(_xg_pn)
     # Companion list-ELEMENT hints merge: same qualifier match as the scalar
     # hints above, applied into this gen's own _param_list_elem_types for
     # _gen_cpp_generator_unit to seed the coroutine-body emitter with.
@@ -9468,6 +9304,7 @@ def gen_module_impl(self, stmts):
     # at run time (`mojo_list_get_boxed`) rather than trust one typed accessor.
     self._param_elem_mixed: dict[str, set] = {}
     self._param_int_elem_obs: dict[str, set] = {}
+    self._coro_str_params: dict[str, set] = {}
     # coroutine body name -> {param} whose element type is POSITIVELY int:
     # the list-of-ints counterpart of `_coro_str_params`. Kept apart from
     # `_param_elem_types` because `_elem_types[x] == 'int64_t'` means "nothing
@@ -9564,15 +9401,8 @@ def gen_module_impl(self, stmts):
         _ps_body = getattr(_fp_s, '_mojo_coro_param_str_params', None)
         if _ps_body:
             _ps_d = self._coro_str_params.setdefault(_as_str(_fp_s.name), set())
-            # The same string evidence, in the table the binary operators
-            # consult: a generator's parameter crosses the ABI as an untyped
-            # int64_t slot, so `root + str(k)` in the body has only this table
-            # to say the word may be a string. Without it the `+` lowered to
-            # `str(root)` concatenation and printed the pointer as decimal.
-            _mh_d = self._int64_may_hold_str.setdefault(_as_str(_fp_s.name), set())
             for _ps_k in _ps_body:
                 _ps_d.add(_as_str(_ps_k))
-                _mh_d.add(_as_str(_ps_k))
 
     def _record_param_elem(callee, pname, e, ne):
         # `_as_str` on both NAME params: a nested function's untyped params

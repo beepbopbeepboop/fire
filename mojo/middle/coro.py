@@ -508,10 +508,6 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
     Values are 'i'/'p'/'d', or ('list', elem_kind) for a list-typed local."""
     env: dict = {}
     str_kinds: dict = {}   # local name -> {scalar kinds bound to it, every binding}
-    # ONE walk of `fn`, shared by every scan below (it was walked seven times per call, and
-    # `_scan_callsite_param_kinds` calls this for every function in the closure on every pass --
-    # a quarter of `fire.py --dump-full`). `fn` is not mutated in here.
-    _fn_nodes = _walk(fn)
     for pname, pann in getattr(fn, 'params', []):
         k = _ann_kind(pann)
         if k is not None:
@@ -524,7 +520,7 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
     # fallback: the call-site contract below (`setdefault`) and annotations win.
     _pnames = set(pp[0] if isinstance(pp, (tuple, list)) else pp
                   for pp in getattr(fn, 'params', []))
-    for _n in _fn_nodes:
+    for _n in _walk(fn):
         if (isinstance(_n, N.SliceExpr) and isinstance(_n.obj, N.IdentExpr)
                 and _n.obj.name in _pnames and _n.obj.name not in env):
             env[_n.obj.name] = 'w'
@@ -550,7 +546,7 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
     # rather than a wrong kind. Parameters are excluded for the same reason:
     # a parameter's binding is not a lambda's.
     _lam_binds: dict = {}
-    for n in _fn_nodes:
+    for n in _walk(fn):
         if isinstance(n, N.AssignStmt) and isinstance(n.target, N.IdentExpr):
             _lam_binds.setdefault(n.target.name, []).append(n.value)
         elif (isinstance(n, N.AssignStmt) and isinstance(n.target, N.TupleExpr)
@@ -580,7 +576,7 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
         if len(_kinds) == 1:
             env[_nm] = ('callable', _kinds.pop())
     list_elem: dict = {}   # local name -> {elem kinds seen via `= [...]` / .append(...)}
-    for n in _fn_nodes:
+    for n in _walk(fn):
         tgt = val = ann = None
         if isinstance(n, N.AssignStmt) and isinstance(n.target, N.IdentExpr):
             tgt, val, ann = n.target.name, n.value, getattr(n, 'type_ann', None)
@@ -687,7 +683,7 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
     # is a DirEntry (marked as the tuple ('dirent',), which no list/conflict
     # reader mistakes for a scalar kind); `entry.name` / `entry.path` are strings.
     _sd_aliases = set()
-    for n in _fn_nodes:
+    for n in _walk(fn):
         if isinstance(n, N.WithStmt):
             for _it in n.items:
                 _c = _it.expr
@@ -699,14 +695,14 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
                     _al = _it.alias.name if isinstance(_it.alias, N.IdentExpr) else _it.alias
                     if isinstance(_al, str):
                         _sd_aliases.add(_al)
-    for n in _fn_nodes:
+    for n in _walk(fn):
         if (isinstance(n, N.ForStmt) and isinstance(n.iterable, N.IdentExpr)
                 and n.iterable.name in _sd_aliases and isinstance(n.target, str)
                 and n.target not in env):
             env[n.target] = ('dirent',)
     # `for <v> in <list-local-or-literal | sibling-generator-call>():` binds
     # <v> to the element kind
-    for n in _fn_nodes:
+    for n in _walk(fn):
         if not isinstance(n, N.ForStmt):
             continue
         # ONE name only, and read through `for_target_names` so a redundant
@@ -785,7 +781,7 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
     # raw bits (`for i, r in enumerate([1.5, 2.5]): yield r` printed
     # `1` / `2` where CPython prints `1.5` / `2.5`). Both names must be
     # unbound, the same rule the single-name case uses.
-    for n in _fn_nodes:
+    for n in _walk(fn):
         if not isinstance(n, N.ForStmt):
             continue
         it = n.iterable
@@ -1220,24 +1216,11 @@ def _tagged_consumers_ok(name: str) -> bool:
     return idents == calls
 
 
-def _is_none_yield(y) -> bool:
-    """A bare `yield` or an explicit `yield None` -- the yield whose value is
-    None. Its slot kind in `kinds` is the int64_t fallback (`'i'`), so it
-    never looks like a hole; `has_none` in `_generator_value_kind` is what
-    records that it was a None."""
-    # The parser spells `None` as an IdentExpr (Python forbids rebinding it),
-    # so the NoneLiteral arm is for any producer that builds the literal node.
-    return isinstance(y, N.YieldExpr) and (
-        y.value is None or isinstance(y.value, N.NoneLiteral)
-        or (isinstance(y.value, N.IdentExpr) and y.value.name == 'None'))
-
-
 def _generator_value_kind(fn: N.FunctionDef,
                           env: dict | None = None,
                           delegated=None) -> tuple[str | None, str]:
     kinds = set()
     has_tuple = has_nontuple = False
-    has_none = False
     for n in _walk(fn):
         if isinstance(n, N.YieldExpr):
             _conflicts = _conflicting_names_in(n.value, env)
@@ -1248,11 +1231,7 @@ def _generator_value_kind(fn: N.FunctionDef,
                 # below would do for a yield with no other kind beside it.
                 return None, (f'a `yield` of {_conflicts[0]!r}, a local rebound '
                               f'to values of different kinds (v0)')
-            if _is_none_yield(n):
-                has_none = True
-                k = 'i'
-            else:
-                k = _yield_kind(n.value, env)
+            k = _yield_kind(n.value, env)
             kinds.add(k)
             if k == 'tuple':
                 has_tuple = True
@@ -1325,17 +1304,9 @@ def _generator_value_kind(fn: N.FunctionDef,
     # as itself -- and the consumer renders each by what it IS. Only when EVERY
     # yield has a known kind (a hole stays a refusal, above) and the kinds are
     # not just the int/bool pair the DECISION below already widens.
-    # A None yield is a kind of its own here ('n'): it joins the tagged word as
-    # a `mojo_box_none` box, which the for-loop consumer renders as `None`. A
-    # generator whose ONLY yields are None is tagged too, so it renders `None`
-    # rather than the int 0 its int64_t slot would print. The tag is still only
-    # taken when `_tagged_consumers_ok` holds; otherwise the code below sees the
-    # unchanged `kinds`, so a None yield keeps the int64_t slot it always had.
     _tag_kinds = kinds - {None}
-    if has_none:
-        _tag_kinds = _tag_kinds | {'n'}
     if (None not in kinds
-            and (_tag_kinds <= {'i', 'p', 'd', 'b', 'w', 'n'})
+            and (_tag_kinds <= {'i', 'p', 'd', 'b', 'w'})
             and ('w' in _tag_kinds or (len(_tag_kinds) >= 2 and _tag_kinds != {'i', 'b'}))
             and not any(isinstance(x, N.YieldFromExpr) and delegated is not None
                         and delegated(x.value, fn) in ('d', 'b')
@@ -3845,18 +3816,6 @@ def _async_receiver_kind(fn, is_method: bool) -> str:
     return method_receiver_kind(fn) if is_method else ''
 
 
-def generator_base_name(fn_name, module_qualifier_str: str) -> str:
-    """The base symbol of a MODULE-LEVEL generator / async def's lowering:
-    its body is `<base>_body`, its start shim `<base>_start`. The one place
-    this spelling lives, so a consumer that must address a lowered body by
-    its source name (module_gen's cross-module hint merge) cannot drift from
-    the name `_async_method_setup` gives it. `module_qualifier_str` is
-    `module_qualifier(<module name>)`, empty for the root module."""
-    if module_qualifier_str:
-        return f'__mgco_{module_qualifier_str}_{_cm_as_str(fn_name)}'
-    return f'__mgco_{_cm_as_str(fn_name)}'
-
-
 def _async_method_setup(fn, base, struct_name):
     """Shared prologue/param plumbing for a plain `async def` and an async
     generator, top-level OR a struct method. For a method: arg 0 is the
@@ -3865,7 +3824,8 @@ def _async_method_setup(fn, base, struct_name):
     the ordinary params start at 1 and `self` gets no prologue entry."""
     is_method = struct_name is not None
     base = base or (f'__mgco_{_cm_as_str(struct_name)}_{_cm_as_str(fn.name)}' if is_method
-                    else generator_base_name(fn.name, _MODULE_QUALIFIER))
+                    else f'__mgco_{_MODULE_QUALIFIER}_{_cm_as_str(fn.name)}' if _MODULE_QUALIFIER
+                    else f'__mgco_{_cm_as_str(fn.name)}')
     real_params = fn.params[1:] if is_method else fn.params
     arg_base = 1 if is_method else 0
     prologue = []
@@ -4473,16 +4433,13 @@ def _rewrite_expr(node, cvar: str, kind: str, env=None):
         val = (_rewrite_expr(node.value, cvar, kind, env) if node.value is not None
                else N.IntLiteral(value=0))
         if kind == 'w':
-            # tagged word: box a float / bool / None by ITS static kind so the
+            # tagged word: box a float / bool by ITS static kind so the
             # consumer can tell it from an int
-            if _is_none_yield(node):
-                val = _call('mojo_box_none', [])
-            else:
-                _sk = _yield_kind(node.value, env) if node.value is not None else 'i'
-                if _sk == 'd':
-                    val = _call('mojo_box_from_double', [val])
-                elif _sk == 'b':
-                    val = _call('mojo_box_from_bool', [val])
+            _sk = _yield_kind(node.value, env) if node.value is not None else 'i'
+            if _sk == 'd':
+                val = _call('mojo_box_from_double', [val])
+            elif _sk == 'b':
+                val = _call('mojo_box_from_bool', [val])
         call = _call(_yield_shim(kind), [_c_ident(cvar), val])
         if kind == 'd':
             # `x = yield <double>`: the shim returns the raw int64_t slot
@@ -4891,8 +4848,14 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
     _bound_here: dict = {}
     _alias_here: set = set()
 
-    def _closure_callee(node):
-        # The name in THIS module a closure module's call resolves to, or None.
+    def _visit_closure_call(node, caller_env):
+        # A call from ANOTHER module of the import closure, counted in three
+        # spellings only: `<this module>.<generator>(...)`, `<alias>.<generator>(...)`
+        # for `import <this module> as <alias>`, and a bare `<local>(...)` bound
+        # by `from <this module> import <generator> [as <local>]`. Each names
+        # this module's generator without any other table, so none can collide
+        # with a same-named generator elsewhere. A call through a value is not
+        # counted; it stays a hole, as it always was.
         fn = node.func
         _callee = None
         if isinstance(fn, N.MemberExpr):
@@ -4904,30 +4867,8 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
             _local = _cm_as_str(fn.name)
             if _local in _bound_here:
                 _callee = _bound_here[_local]
-        return _callee
-
-    def _visit_closure_call(node, caller_env):
-        # A call from ANOTHER module of the import closure, counted in three
-        # spellings only: `<this module>.<generator>(...)`, `<alias>.<generator>(...)`
-        # for `import <this module> as <alias>`, and a bare `<local>(...)` bound
-        # by `from <this module> import <generator> [as <local>]`. Each names
-        # this module's generator without any other table, so none can collide
-        # with a same-named generator elsewhere. A call through a value is not
-        # counted; it stays a hole, as it always was.
-        _callee = _closure_callee(node)
         if _callee is not None:
             _visit_call(node, caller_env, _callee)
-
-    def _wants_call(visit, node):
-        # Whether `visit` would do anything with `node`: the same two tests the
-        # visitors make before they touch the caller's env, so `_collect_from` can
-        # skip building that env (see there) without changing what is recorded.
-        if visit is _visit_closure_call:
-            return _closure_callee(node) is not None
-        fn = node.func
-        gname = (fn.name if isinstance(fn, N.IdentExpr) else
-                 (fn.member if isinstance(fn, N.MemberExpr) else None))
-        return gname in gen_names or gname in plain_names
 
     def _from_bound_names(src):
         names: dict = {}
@@ -4958,25 +4899,6 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
                     aliases.add(_cm_as_str(_al))
         return aliases
 
-    # The CallExpr nodes of each function (and of each module-level statement),
-    # found by ONE walk and reused by every later pass of this scan. `_collect` runs
-    # twice per scan and the scan runs once per `lower`; re-walking every function of
-    # the whole import closure each time was a quarter of `fire.py --dump-full`. The
-    # AST is not mutated while a scan runs, and the dict lives only for this call.
-    _calls_of: dict = {}
-
-    def _calls_in(node):
-        _k = id(node)
-        _hit = _calls_of.get(_k)
-        if _hit is not None:
-            return _hit
-        _out = []
-        for _w in _walk(node):
-            if isinstance(_w, N.CallExpr):
-                _out.append(_w)
-        _calls_of[_k] = _out
-        return _out
-
     def _collect_from(src, visit):
         for s in src:
             fns = []
@@ -4999,24 +4921,15 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
                 # sites of a method already get (`_eligible` ->
                 # `_static_env(fn, struct_def)`) is what makes the two agree
                 # about `self.k`.
-                #
-                # LAZY: the env is built on the first call the visitor will
-                # actually act on (`_wants_call`), not for every function. In the
-                # closure walk almost no function calls one of THIS module's
-                # generators, and `_static_env` is the expensive part.
-                cenv = None
-                have_env = False
-                for n in _calls_in(fn):
-                    if not _wants_call(visit, n):
-                        continue
-                    if not have_env:
-                        cenv = _static_env(fn, sdef)
-                        have_env = True
-                    visit(n, cenv)
+                cenv = _static_env(fn, sdef)
+                for n in _walk(fn):
+                    if isinstance(n, N.CallExpr):
+                        visit(n, cenv)
             # module-level calls (rare, e.g. a bare generator call in a stmt)
             if not isinstance(s, (N.FunctionDef, N.StructDef)):
-                for n in _calls_in(s):
-                    visit(n, None)
+                for n in _walk(s):
+                    if isinstance(n, N.CallExpr):
+                        visit(n, None)
 
     def _collect():
         _collect_from(stmts, _visit_call)
@@ -7590,8 +7503,6 @@ def register(gen, meta: list) -> None:
     gen.func_return_types.setdefault('mojo_box_from_double', 'int64_t')
     gen.func_param_types.setdefault('mojo_box_from_bool', ['int64_t'])
     gen.func_return_types.setdefault('mojo_box_from_bool', 'int64_t')
-    gen.func_param_types.setdefault('mojo_box_none', [])
-    gen.func_return_types.setdefault('mojo_box_none', 'int64_t')
     gen.func_param_types.setdefault(_BOX_NEW, ['int64_t'])
     gen.func_return_types.setdefault(_BOX_NEW, 'int64_t')
     gen.func_param_types.setdefault(_BOX_GET, ['int64_t'])

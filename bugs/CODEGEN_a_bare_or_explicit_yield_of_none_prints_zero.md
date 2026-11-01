@@ -6,42 +6,6 @@ the generator value-slot lattice supports (int / bool / float / str) matches
 CPython on BOTH the local and global generator paths. None is the only
 mismatching type. Owner-level ABI feature; measured and pinned, NOT shipped.
 
-## Status (2026-10-31, partial fix landed on work/bug-codegen-a-bare-or-explicit-yield-of-3467)
-
-**Landed (real behaviour change, stackswitch default path, for-loop consumers):**
-a generator whose yields include a bare `yield` / `yield None` is now a TAGGED
-word (`'w'`) when `_tagged_consumers_ok` holds, and each None yield is boxed by
-the new `mojo_box_none()` (runtime/fire_runtime.c, a shared kind-`'n'` box that
-`mojo_repr_boxed` already rendered as `None`). Pins: `run_none_yield_tests` in
-`test_gimple_generator_runner.py` (3 cases, CPython oracle; 0/3 before the fix,
-3/3 after; full file 354/0). The mechanism is `_is_none_yield` +
-`has_none` in `_generator_value_kind` (mojo/middle/coro.py), `_rewrite_expr`'s
-`kind == 'w'` arm. `_yield_kind` is unchanged (it has ~15 callers).
-
-**Still open (the next steps, in order):**
-1. `next(g())`, `list(g())`, comprehensions, `sum`, and other non-`for`
-   consumers still print `0`: the tagged word is for-loop-only by design
-   (`_tagged_consumers_ok`), so a None-yielding generator used that way keeps
-   its int64_t slot. Needs a None-aware `next()` reader (`__mgco_<base>_value`
-   consumer), not the tagged path.
-2. An explicit `yield None` beside a str or float yield is still REFUSED by the
-   C++ fallback typer (`mojo/backend_gimple/cpp_async.py`, `value_ctype is None`
-   raised at ~1177): the cpp typer reads `None` as an unresolved hole. The module
-   then falls back to the interpreter, which is correct output but not compiled.
-   Next step: `cpp_core.py` (~5366 bare yield emits `co_yield (int64_t)0;`, and
-   the `/*Y:…*/` marker at ~5376 has no `none` tag) plus `_cpp_tag_yield_sites`
-   (cpp_async.py:322) need a `none` marker boxed by `mojo_box_none()`.
-3. The `MOJO_CORO=cpp` escape hatch (`cpp_core.py` bare yield) still prints `0`
-   in its own output.
-4. `_list_word_push` (runtime) has no None arm, so a None box appended to a list
-   becomes an int; unreached by the for-loop path, but a real gap for list use.
-
-**Gate status:** not run here (light-worker rules). The integrator should run
-`gimplegenerators` and `compile_stdlib.py`: this change moves stdlib generators
-with a bare `yield` consumed by a `for` loop from the int64_t slot to the tagged
-word, so `stdlib-dylib`'s `skip <module>:` count and `stdlib-syntax`'s
-`U` count must be compared before and after.
-
 ## Status (2026-10-28, master 8c19a643f — value matrix measured 2026-10-26 on 1d2bdfe0; the mechanism was re-located on 8c19a643f and is intact)
 
 ### Value-type matrix (fresh-store build each; binary output vs CPython on the same text)

@@ -18,74 +18,7 @@ NOT DONE:
 
 BUG DOC STATUS: this doc stays open until the integrator confirms byte-identical output and the parallel path is cut over (step 4).
 
-## CORRECTION (2026-10-31, later) — the cProfile table below is wrong about shares; use the numbers here
-
-`cProfile` inflates call-heavy code (hundreds of thousands of tiny calls) by 3-4x, so the table
-below overstated `ast_rewriter` (22% profiled) and the gimplegen scan (27% profiled). Measured with
-`time.perf_counter` wrappers around single outermost calls (no profiler; `/tmp`-style script in the
-commit message of this change), `compile_to_gimple(fire.py, do_imports=True)` on a loaded 18-core machine:
-
-| | seconds |
-|---|---|
-| total (CPU == wall, single thread) | 197 (before `f77b8ec21`) |
-| `_compile_imported_module` (227 imported-module compiles, includes their parses) | 189 |
-| `ast_rewriter.rewrite` (all modules) | 8.7 |
-| `gen_func` (per-function emission, outermost only) | 8.3 |
-| `_selfhost_scan_gimplegen_extra_fields` (once per process) | 2.6 |
-| tokenize+parse+rewrite of 44 compiler sources, standalone | 2.9 |
-
-So parsing, rewriting and the gimplegen scan together are about 12 s of ~197, i.e. roughly 6%: the
-plan below that targets them (rule index, persisted scan) is NOT worth its self-host risk. ~170 s of the
-total is inside `_compile_imported_module` and is not parse or emission of the entry; the next measurement is
-a per-phase split INSIDE it (function lowering vs signature/inference passes vs `coro.lower` vs the
-call-site contract walks in `module_gen`), taken with the same wrappers, before any design.
-
-Also recorded here because the measurement caught it: `f77b8ec21` (list iterator across a call) made a
-call-site-contract walk quadratic (a whole-body scan per call argument) and took the same compile from 197 s to
-368 s; memoised per body in `itcursor.escaping_iter_names` it is 214 s. The remaining ~17 s over the 197 s
-baseline has not been attributed (other commits landed in between); do that first.
-
-## Sampling profile (2026-10-31, no profiler overhead) and the first landed win
-
-A sampler thread reading `sys._current_frames()` every 20 ms (5,679 samples over a 214 s compile of fire.py;
-the script is 25 lines, `sample.py` in the commit message) gives real inclusive shares:
-`coro.lower` 29.4% (all of it `_scan_callsite_param_kinds` -> `_collect_from` -> `_static_env`, 25.3%, of which
-`coro._walk` is 22.8% SELF time), `_parsed_import` 14% (tokenize 6.3%, parse 4.3%, rewrite 4.2%),
-`_infer_return_maybe_kinds` 9.5%, `_gmi_binding_index` 6.4%, `os.path.realpath` 4.8% (40,000 calls from
-`methods_shared._is_selfhost_sibling_alias` / `_is_selfhost_source_file`, each resolving the same
-`_SELFHOST_DIR`), `gen_func` 4.8%.
-
-Landed: `coro._static_env` walked its function seven times; it now walks once (`_fn_nodes`). The generated C
-for generator programs is byte-identical before/after (68 KB generator program compared; `fire.py`'s own
-closure differs only in the compiled `_static_env` function, as the compiler source changed).
-Second win, same round: `_scan_callsite_param_kinds._collect_from` built `_static_env` for EVERY function of
-the whole import closure on every pass, though almost none calls one of this module's generators. The env is now
-built lazily on the first call the visitor will act on (`_wants_call`, the same two tests the visitors make), and the
-CallExpr list of each function is found once per scan and reused (`_calls_in`). Measured on the same compile of
-fire.py (`time.perf_counter` around the outermost call, machine load 14): 214 s -> 160 s. Generated C is unchanged:
-`compile_stdlib.py` GCC CAS 610/610 hits (every module's C hashes to what it was before), plus a byte-identical
-generator program.
-Sampling profile after both wins (4,106 samples, 158.5 s): `_parsed_import` 18.8% (tokenize 8.0, parse 6.4, rewrite 5.8),
-`_infer_return_maybe_kinds` 13.0% (`module_gen._mk_round`, 4 fixpoint rounds x 6 `gen_module` calls; a body that calls
-nothing in `callee_kinds` has the same answer every round, so rounds 2+ can reuse round 1's result for it),
-`_gmi_binding_index` 8.7% / `_xg_record_scalar_args` 8.3%, `os.path.realpath` 6.7% (`methods_shared._is_selfhost_*`),
-`gen_func` 6.7%, `coro.lower` 5.0% (was 29.4%).
-Third win: `methods_shared._cached_realpath` memoises the `os.path.realpath` calls of `_is_selfhost_source_file` /
-`_is_selfhost_sibling_alias` (84k calls, all about `_SELFHOST_DIR` and the compiler's own sources): realpath 6.7% -> 1.1% of
-samples, compile 155 s. Its first version was an unannotated helper and BROKE the self-host build (`methods_shared.py:141:
-invalid operands to binary + (have 'double' and 'char *')`), caught by `test_selfhost.py`; it is annotated now and
-`test_selfhost.py` passes 3/3 and `compile_stdlib.py` GCC CAS stays 610/610. Any edit under `mojo/middle` needs `test_selfhost.py`.
-Measured, NOT landed: f-string field tokenization is ~12% of the compile (`py_tokenize` called 17,696 times for 2,378
-distinct texts, 17,141 of them from `emit_exprs._lower_StringLiteral` and `emit_infra._fstring_sub_exprs`; 19 s). Memoising
-the token list per text is safe in Python (the Parser reads tokens by index) but is in the self-host closure, and
-verifying it needs the self-hosted binary to compile an f-string program, which crashes on unmodified master
-(`bugs/mid/CODEGEN_selfhost_binary_segfaults_on_an_fstring_program.md`). The edit is kept in `git stash` on
-`work/midhard3` ("_fstring_field_tokens"); land it after that bug is fixed and the check passes.
-Remaining, in order of share: the other `_walk` users in `_scan_callsite_param_kinds` (cache per function across
-the two `_one_pass` rounds and the six `lower` calls: needs an invalidation story because the contract maps evolve);
-`realpath` memo for the constant `_SELFHOST_DIR`; `_infer_return_maybe_kinds`; `_gmi_binding_index`.
-
-## Status (2026-10-31) — Step 0 measured ON fire.py (profile-inflated, see the correction above): the dominant serial cost is not emission, and two of the three biggest items are not parallelisable work at all
+## Status (2026-10-31) — Step 0 measured ON fire.py: the dominant serial cost is not emission, and two of the three biggest items are not parallelisable work at all
 
 Method: `cProfile` around `gimple_codegen.compile_to_gimple(fire.py_src, do_imports=True, filename=fire.py)`
 (the exact call `fire.py --dump-full` makes through `compile_to_gimple_parallel_frozen`, which today forwards to

@@ -5,7 +5,7 @@ Each program is compiled, RUN, and its stdout compared with CPython's on the sam
 class is a class-table entry (`mojo_type_new`) whose bases are the listed classes and whose
 dict starts from the namespace; `Foo.x`, `Foo.x = v`, `getattr / hasattr` on the handle read the
 table, found through the bases (depth first, left to right). A shape the compiler cannot
-model (a namespace that is a call result) must still be refused by name, not miscompiled.
+model (a computed namespace) must still be refused by name, not miscompiled.
 """
 import sys
 
@@ -43,16 +43,6 @@ def main():
     print(D.k)
 main()
 """,
-    'computed_namespace_dict_variable': """\
-def main():
-    ns = {'x': 1, 'f': 2.5, 's': 'hi'}
-    ns['y'] = 3
-    Foo = type('Foo', (), ns)
-    print(Foo.x, Foo.f, Foo.s, Foo.y)
-    ns['z'] = 9
-    print(hasattr(Foo, 'z'), getattr(Foo, 'y'))
-main()
-""",
     'two_classes_of_one_name_are_two_classes': """\
 def main():
     P = type('Same', (), {'v': 1})
@@ -67,13 +57,11 @@ def main():
     for name, src in CASES.items():
         R.test_gimple_matches_cpython(name, src)
     R.test_gimple_build_refusal(
-        'call_result_namespace_is_refused_by_name',
+        'computed_namespace_is_refused_by_name',
         """\
-def ns():
-    return {'x': 1}
-
 def main():
-    Foo = type('Foo', (), ns())
+    ns = {'x': 1}
+    Foo = type('Foo', (), ns)
     print(Foo.x)
 main()
 """, 'creates a class at run time')

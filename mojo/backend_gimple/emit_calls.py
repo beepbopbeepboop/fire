@@ -1455,21 +1455,13 @@ def _lower_type_new(gen, node):
     name_n, bases_n, ns_n = node.args
     if not isinstance(bases_n, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
         return None
-    keys = []
-    if isinstance(ns_n, gimple_ctypes.DictExpr):
-        for k, _v in ns_n.pairs:
-            if not isinstance(k, gimple_ctypes.StringLiteral) or N.is_fstring_literal(k):
-                return None
-            keys.append(_as_str(k.value))
-    elif not isinstance(ns_n, (gimple_ctypes.IdentExpr, gimple_ctypes.MemberExpr)):
-        return None
-    ns_dict = None
     if not isinstance(ns_n, gimple_ctypes.DictExpr):
-        # a COMPUTED namespace (a variable): only a dict value can be walked into the table
-        nst, nsv = gen.lower_expr(ns_n)
-        if nst != 'MojoDict *':
+        return None
+    keys = []
+    for k, _v in ns_n.pairs:
+        if not isinstance(k, gimple_ctypes.StringLiteral) or N.is_fstring_literal(k):
             return None
-        ns_dict = nsv
+        keys.append(_as_str(k.value))
     nt, nv = gen.lower_expr(name_n)
     nm = nv if nt == 'char *' else gen._new_val('char *', f'(char *){gen._to_int64(nt, nv)}')
     cls = gen._call_expr('int64_t', 'mojo_type_new', [('char *', nm)])
@@ -1481,10 +1473,6 @@ def _lower_type_new(gen, node):
             bt, bv = gen.lower_expr(b)
             bw = gen._call_expr('int64_t', 'mojo_classobj_tag', [('int64_t', gen._to_int64(bt, bv))])
         gen._void_call('mojo_type_add_base', [('int64_t', cls), ('int64_t', bw)])
-    if ns_dict is not None:
-        gen._void_call('mojo_type_fill_from_dict', [('int64_t', cls), ('MojoDict *', ns_dict)])
-        gen._dyn_word_vals.add(cls)
-        return 'int64_t', cls
     for key, (_k, vnode) in zip(keys, ns_n.pairs):
         vt, vv = gen.lower_expr(vnode)
         vw = (gen._call_expr('int64_t', 'mojo_box_from_double', [('double', vv)])
@@ -3868,7 +3856,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             'cannot compile module: 3-argument type(name, bases, namespace) '
             'creates a class at run time, which the compiled path does not '
             'model unless the bases are a literal tuple/list and the namespace a '
-            'dict of string keys (bug:CODEGEN_enum_runtime_class_creation)')
+            'literal dict of string keys (bug:CODEGEN_enum_runtime_class_creation)')
     # A `namedtuple(...)` the module-level desugar (fire_compiler.
     # desugar_namedtuples) did not lower: a call inside a function, a
     # different typename, `rename=`/`defaults=`, a computed field list. It
@@ -6426,7 +6414,6 @@ def _lower_outer_closure_call(gen, fname_raw: str, ci, node: gimple_ctypes.CallE
     # _bind_closure_kwargs's docstring for what silently went wrong when
     # this line stood alone.
     arg_pairs = _bind_closure_kwargs(gen, ci, node, arg_pairs)
-    arg_pairs = _pack_closure_star_slots(gen, ci, node, arg_pairs)
     fname_c   = gimple_ctypes._safe_name(lifted)
     if ci.env_struct:
         _cur_env = getattr(gen, '_env_param', '')
@@ -6527,11 +6514,6 @@ def _bind_closure_kwargs(gen, ci, node, arg_pairs):
         return arg_pairs
     kwargs = getattr(node, 'kwargs', []) or []
     kwarg_dict = {kname: gen.lower_expr(kexpr) for kname, kexpr in kwargs}
-    # Stash for _pack_closure_star_slots: a callee that ALSO declares a
-    # `**kwargs` parameter packs the keyword arguments this dict did not
-    # consume positionally, and re-lowering them there would emit every
-    # side-effectful keyword expression a second time.
-    node._kw_lowered = kwarg_dict
     _dflt_by_name = {}
     for _dpn, _ddv in (gen._func_param_defaults.get(lifted) or []):
         _dflt_by_name[_dpn] = _ddv
@@ -6575,88 +6557,6 @@ def _closure_param_names(ci) -> list:
     return _names
 
 
-def _pack_closure_star_slots(gen, ci, node: gimple_ctypes.CallExpr, arg_pairs: list) -> list:
-    """Pack a lifted-closure call's loose positional tail and keyword
-    arguments into the `*args`/`**kwargs` slots of a callee that declares a
-    `**kwargs` parameter, and return the rebuilt argument list.
-
-    `_gen_lifted_closure`'s signature registration spells the `*args` slot of
-    such a callee as a CONCRETE `MojoList *` — a `'...'` packing sentinel
-    would only be meaningful as the LAST slot, and the `**kwargs` `MojoDict *`
-    follows it — so `_emit_call`'s trailing-sentinel packing never fires for
-    these call sites. Without this helper a call to a nested
-    `def f(*a, **kw)` — exactly the shape `_lower_escaping_generators` leaves
-    behind as the trampoline of an ESCAPING nested generator (`def gen(
-    *__esc_a, **__esc_kw): return mojo_gen_call_with(...)`) — or to a plain
-    nested `def f(**kw)` passes the loose elements where the C prototype
-    wants two pointers ("too few arguments to function 'make_gen'") and
-    silently drops every keyword argument.
-
-    No-op (the list returned unchanged) when the callee declares NO
-    `**kwargs` parameter: a `*args`-only callee keeps the trailing `'...'`
-    sentinel that `_emit_call` already packs (re-packing here would
-    double-box the list), and a starless callee has nothing to pack.
-    Likewise no-op when the call SPREADs an iterable into its argument list
-    (`f(*xs)` / `f(**d)`): the element count is not known at compile time, so
-    such a call keeps the spread's own lowering — today's behaviour for that
-    corner, unchanged.
-
-    The positional elements beyond the fixed prefix are packed by
-    `_pack_generator_star_args` (the shared generator-call packing, whose
-    per-kind append accessors — str/double/int — keep the stored bits the
-    callee's element reads see), and the call's REMAINING keyword arguments
-    — those whose name is not one of the callee's fixed parameters, which
-    `_bind_closure_kwargs` has already bound positionally — into a real
-    `MojoDict` via `_pack_kwargs_dict`, reusing the lowered values
-    `_bind_closure_kwargs` stashed on the node (`_kw_lowered`) when it had to
-    lower them for default padding. A call with no remaining keywords still
-    gets an EMPTY dict: CPython hands `**kw` `{}`, not a NULL.
-
-    `arg_pairs` carries no env pointer: both call sites prepend the env AFTER
-    this returns, the same contract `_bind_closure_kwargs` documents.
-    """
-    try:
-        _params = ci.inner_def.params
-    except Exception:
-        return arg_pairs
-    _fixed_names = []
-    _has_args = False
-    _has_kw = False
-    for _pp in _params:
-        _raw = gimple_ctypes._as_str(_pp[0])
-        if _raw.startswith('**'):
-            _has_kw = True
-        elif _raw.startswith('*'):
-            _has_args = True
-        else:
-            _fixed_names.append(_raw)
-    if not _has_kw:
-        return arg_pairs
-    for _a in getattr(node, 'args', None) or []:
-        if isinstance(_a, gimple_ctypes.UnaryOp) and _as_str(_a.op) == '*':
-            return arg_pairs
-    _kwargs = getattr(node, 'kwargs', []) or []
-    for _kname, _kexpr in _kwargs:
-        if isinstance(_kname, gimple_ctypes.UnaryOp) and _as_str(_kname.op) == '**':
-            return arg_pairs
-    _n_fixed = len(_fixed_names)
-    if _has_args:
-        _tail = _pack_generator_star_args(gen, arg_pairs, _n_fixed)
-    else:
-        _tail = list(arg_pairs[:_n_fixed])
-    _pre_lowered = getattr(node, '_kw_lowered', None)
-    _kw_pairs = {}
-    for _kname, _kexpr in _kwargs:
-        if not _kname or _as_str(_kname) in _fixed_names:
-            continue
-        if isinstance(_pre_lowered, dict) and _kname in _pre_lowered:
-            _kw_pairs[_as_str(_kname)] = _pre_lowered[_kname]
-        else:
-            _kw_pairs[_as_str(_kname)] = gen.lower_expr(_kexpr)
-    _tail.append(('MojoDict *', _pack_kwargs_dict(gen, _kw_pairs)))
-    return _tail
-
-
 def _lower_closure_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     lifted   = f'{gen.current_func_name}_{fname_raw}'
     env_var  = gen._closure_envs[fname_raw]
@@ -6676,7 +6576,6 @@ def _lower_closure_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tu
     _ci_here = (gen._all_closures.get(gen.current_func_name, {}) or {}).get(fname_raw)
     if _ci_here is not None:
         arg_pairs = _bind_closure_kwargs(gen, _ci_here, node, arg_pairs)
-        arg_pairs = _pack_closure_star_slots(gen, _ci_here, node, arg_pairs)
     fname_c  = gimple_ctypes._safe_name(lifted)
     if _has_env:
         # No slice inside the f-string: the self-hosted f-string parser
@@ -7884,6 +7783,73 @@ def _pad_lambda_defaults(gen, node: gimple_ctypes.CallExpr,
         arg_pairs.append(('int64_t', _dv))
 
 
+def _lower_fnptr_spread_call(gen, fp_type: str, fp_raw: str, node: gimple_ctypes.CallExpr,
+                             ret_type: str = 'int64_t') -> tuple[str, str]:
+    """A call through a function VALUE whose argument list has a `*x` / `**x`
+    spread (`f(3, **kw)`, `g(*a)`): the arity-based `mojo_fnptr_call_N`
+    convention cannot express it (the `**kw` dict used to travel as ONE
+    positional word, so a callee's keyword parameter received the dict's
+    address). The call is packed into a positional `MojoList *` and a keyword
+    `MojoDict *` and dispatched by `mojo_dyn_call`, exactly as the C++-path
+    twin (`cpp_core`, `mojo_args_extend_word` / `mojo_kwargs_merge_word`) does:
+    a registered compiled generator binds by name, a variadic value binds the
+    pair itself, a plain function pointer takes the words positionally.
+
+    Argument order is preserved: a plain positional after a `*x` is appended
+    after the spread's elements. A double travels as its bit pattern tagged as
+    a double (the list's kind string / `mojo_dict_set_double`); the kind string
+    is positional, so a double beside a `*` spread is refused at compile time
+    rather than guessed at."""
+    if fp_type != 'void *':
+        fp_void = gen._new_val('void *', f'(void *){fp_raw}')
+    else:
+        fp_void = fp_raw
+    _a = gen._new_val('MojoList *', 'mojo_list_new ()')
+    _kinds = []
+    _kw_spreads = []
+    _has_star = False
+    for _node_arg in node.args:
+        _is_spread = isinstance(_node_arg, gimple_ctypes.UnaryOp) and _node_arg.op in ('*', '**')
+        _t, _v = gen.lower_expr(_node_arg.operand if _is_spread else _node_arg)
+        _t, _v = _as_str(_t), _as_str(_v)
+        if _is_spread:
+            _w = _v if _t == 'int64_t' else gen._new_val('int64_t', f'(int64_t){_v}')
+            if _node_arg.op == '*':
+                _has_star = True
+                _kinds.append(None)
+        else:
+            _w = None
+        if _is_spread and _node_arg.op == '*':
+            gen._emit(f"  mojo_args_extend_word ({_a}, {_w});")
+        elif _is_spread:
+            _kw_spreads.append(_w)
+        elif _t == 'double':
+            gen._emit(f"  mojo_list_append_double ({_a}, {_v});")
+            _kinds.append('d')
+        else:
+            _w = _v if _t == 'int64_t' else gen._new_val('int64_t', f'(int64_t){_v}')
+            gen._emit(f"  mojo_list_append_int ({_a}, {_w});")
+            _kinds.append('p' if _t == 'char *' else 'i' if _t == 'int64_t' else 'l')
+    if 'd' in _kinds:
+        if _has_star:
+            raise ValueError("a call through a function value mixes a double "
+                             "argument with a `*` spread")
+        gen._emit(f'  mojo_list_set_kinds ({_a}, "{"".join(_kinds)}");')
+    _kw_pairs = {kn: gen.lower_expr(kv) for kn, kv in (getattr(node, 'kwargs', None) or [])}
+    _k = gen._pack_kwargs_dict(_kw_pairs)
+    for _w in _kw_spreads:
+        gen._emit(f"  mojo_kwargs_merge_word ({_k}, {_w});")
+    if ret_type == 'int64_t':
+        ret_type = gen._callable_ret_types.get(fp_raw, ret_type)
+    _fn = gen._new_val('int64_t', f'(int64_t){fp_void}')
+    raw_t = gen._new_val('int64_t', f'mojo_dyn_call ({_fn}, {_a}, {_k})')
+    if ret_type == 'void':
+        return 'int', gen._new_val('int', '0')
+    if ret_type == 'int64_t':
+        gen._dyn_word_vals.add(raw_t)
+    return 'int64_t', raw_t
+
+
 def _lower_fnptr_call_value(gen, fp_type: str, fp_raw: str, node: gimple_ctypes.CallExpr,
                             ret_type: str = 'int64_t') -> tuple[str, str]:
     """Emit a call through an already-lowered function-pointer VALUE
@@ -7899,6 +7865,9 @@ def _lower_fnptr_call_value(gen, fp_type: str, fp_raw: str, node: gimple_ctypes.
     homogenized helper hands back is a BOX, not the value's real type — so
     without it a `lambda: False` prints `0` and a `lambda: "hi"` prints its
     own pointer decimal. `_narrow_callable_result` is that one conversion."""
+    if any(isinstance(_a, gimple_ctypes.UnaryOp) and _a.op in ('*', '**')
+           for _a in node.args):
+        return _lower_fnptr_spread_call(gen, fp_type, fp_raw, node, ret_type)
     arg_pairs = [gen.lower_expr(a) for a in node.args]
     # A LAMBDA's declared defaults, applied here rather than in the env, is the
     # other half of the fix and the reason `_lower_LambdaExpr` strips them from
@@ -8492,6 +8461,64 @@ static gs_stat_result * stat_8_PathLike_6_String (char * path)
 """
 
 
+def _pack_kwargs_slot_call(gen, fname, fname_raw, arg_pairs, kwarg_dict,
+                           call_has_spread=False):
+    """Pack a call's LITERAL keyword arguments into the callee's own `**kwargs`
+    slot (a real `MojoDict *`), and its surplus positionals into the `*args`
+    list when it has one. A no-op unless `_func_kwargs_slot` records a
+    `**kwargs` parameter for this callee (only genuine user free functions
+    are registered) and the call has no `*x` / `**x` spread.
+
+    Shared by `_lower_named_call` (value-consuming call sites) and
+    `_gen_stmt_ExprStmt`'s statement-level twin (bare, value-discarding calls
+    never reach `_lower_named_call`): the twin had no such step, so
+    `go(1, scale=2)` as a statement passed the raw keyword VALUE where the
+    `MojoDict *` belongs (`(MojoDict *)2.5`, a gcc error for a float; a wild
+    dict pointer for an int). Returns `(arg_pairs, kwarg_dict)`; the dict is
+    emptied once packed."""
+    _kwslot_for_pack = gen._func_kwargs_slot.get(fname)
+    if _kwslot_for_pack is None:
+        _kwslot_for_pack = gen._func_kwargs_slot.get(fname_raw, -1)
+    if _kwslot_for_pack >= 0 and not call_has_spread:
+        # Whether the callee ALSO declares a real `*args` before its
+        # `**kwargs` (the `f(self, *args, **kwargs)` forwarding pattern,
+        # which gets a concrete `MojoList *` C param) — as opposed to
+        # `**kwargs` being its only vararg-style parameter (`def
+        # f(**kwargs)`, exactly one `MojoDict *` C param; see
+        # `_func_kwargs_has_vararg`'s own docstring). Defaults to True
+        # (the old, always-pack-a-list-too behavior) when unknown, since
+        # every call site that reaches this branch at all necessarily
+        # has a `_func_kwargs_slot` entry, and both dicts are populated
+        # together at the exact same registration site — this fallback
+        # only matters for some other, not-yet-audited path that might
+        # populate `_func_kwargs_slot` without its sibling.
+        _has_vararg = gen._func_kwargs_has_vararg.get(
+            fname, gen._func_kwargs_has_vararg.get(fname_raw, True))
+        _n_fixed = max(0, _kwslot_for_pack - 1) if _has_vararg else _kwslot_for_pack
+        _fixed_pairs = arg_pairs[:_n_fixed]
+        _vararg_pairs = arg_pairs[_n_fixed:]
+        _packed_dict_pair = ('MojoDict *', gen._pack_kwargs_dict(kwarg_dict))
+        if _has_vararg:
+            _lst = gen._new_val('MojoList *', "mojo_list_new ()")
+            for _at, _av in _vararg_pairs:
+                _av = gen._coerce_to_type(_at, 'int64_t', _av)
+                gen._emit(f"  mojo_list_append_int ({_lst}, {_av});")
+            arg_pairs = _fixed_pairs + [('MojoList *', _lst), _packed_dict_pair]
+        else:
+            # No `*args` slot at all: any leftover positional args (a
+            # real Python-level TypeError against a kwargs-only
+            # signature, but this codegen has no type-checker to catch
+            # it earlier) have nowhere valid to go — pass them through
+            # unchanged ahead of the single `MojoDict *` param rather
+            # than silently discarding them, mirroring `_fixed_pairs`'
+            # existing "leave it to the generic arity/coercion handling
+            # further down" convention for a genuinely malformed call.
+            arg_pairs = _fixed_pairs + _vararg_pairs + [_packed_dict_pair]
+        kwarg_dict = {}
+
+    return arg_pairs, kwarg_dict
+
+
 def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """Final dispatch for user-defined and C stdlib functions."""
     # `_locally_binds_name` gate: BUILTIN_VALUE_MAP's entries (open,
@@ -8814,45 +8841,8 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # unresolved/imported names with no recorded signature.
     _call_has_spread = any(isinstance(_a, gimple_ctypes.UnaryOp) and _a.op in ('*', '**')
                            for _a in node.args)
-    _kwslot_for_pack = gen._func_kwargs_slot.get(fname)
-    if _kwslot_for_pack is None:
-        _kwslot_for_pack = gen._func_kwargs_slot.get(fname_raw, -1)
-    if _kwslot_for_pack >= 0 and not _call_has_spread:
-        # Whether the callee ALSO declares a real `*args` before its
-        # `**kwargs` (the `f(self, *args, **kwargs)` forwarding pattern,
-        # which gets a concrete `MojoList *` C param) — as opposed to
-        # `**kwargs` being its only vararg-style parameter (`def
-        # f(**kwargs)`, exactly one `MojoDict *` C param; see
-        # `_func_kwargs_has_vararg`'s own docstring). Defaults to True
-        # (the old, always-pack-a-list-too behavior) when unknown, since
-        # every call site that reaches this branch at all necessarily
-        # has a `_func_kwargs_slot` entry, and both dicts are populated
-        # together at the exact same registration site — this fallback
-        # only matters for some other, not-yet-audited path that might
-        # populate `_func_kwargs_slot` without its sibling.
-        _has_vararg = gen._func_kwargs_has_vararg.get(
-            fname, gen._func_kwargs_has_vararg.get(fname_raw, True))
-        _n_fixed = max(0, _kwslot_for_pack - 1) if _has_vararg else _kwslot_for_pack
-        _fixed_pairs = arg_pairs[:_n_fixed]
-        _vararg_pairs = arg_pairs[_n_fixed:]
-        _packed_dict_pair = ('MojoDict *', gen._pack_kwargs_dict(kwarg_dict))
-        if _has_vararg:
-            _lst = gen._new_val('MojoList *', "mojo_list_new ()")
-            for _at, _av in _vararg_pairs:
-                _av = gen._coerce_to_type(_at, 'int64_t', _av)
-                gen._emit(f"  mojo_list_append_int ({_lst}, {_av});")
-            arg_pairs = _fixed_pairs + [('MojoList *', _lst), _packed_dict_pair]
-        else:
-            # No `*args` slot at all: any leftover positional args (a
-            # real Python-level TypeError against a kwargs-only
-            # signature, but this codegen has no type-checker to catch
-            # it earlier) have nowhere valid to go — pass them through
-            # unchanged ahead of the single `MojoDict *` param rather
-            # than silently discarding them, mirroring `_fixed_pairs`'
-            # existing "leave it to the generic arity/coercion handling
-            # further down" convention for a genuinely malformed call.
-            arg_pairs = _fixed_pairs + _vararg_pairs + [_packed_dict_pair]
-        kwarg_dict = {}
+    arg_pairs, kwarg_dict = gen._pack_kwargs_slot_call(
+        fname, fname_raw, arg_pairs, kwarg_dict, _call_has_spread)
 
     # `def f(fixed, *args, trailing_kwonly=default, ...)` — a vararg
     # followed by more (keyword-only) params but no `**kwargs`; see

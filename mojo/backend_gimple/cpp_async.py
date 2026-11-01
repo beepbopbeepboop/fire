@@ -687,6 +687,16 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
             param_ctypes.append((pn[1:], 'MojoList *'))
             continue
         ctype = gen._param_ctype(pn, pt, fn)
+        # An UNANNOTATED parameter whose declared default is a float literal
+        # IS a float parameter (the same default-as-evidence rule
+        # `_param_ctype` applies to string and container literals): left as
+        # the int64_t box, `scale=0.5` was padded as the integer 0 and the
+        # unit could not register a runtime signature (its default is not an
+        # integer word), so a call through the generator VALUE failed.
+        if (ctype == 'int64_t' and (pt is None or pt == '')
+                and isinstance((getattr(fn, 'param_defaults', None) or {}).get(pn),
+                               gimple_ctypes.FloatLiteral)):
+            ctype = 'double'
         if (ctype == 'char *' and (pt is None or pt == '')
                 and pn in coro_mod._PTR_EVIDENCE.get(fn.name, ())
                 and any(isinstance(_n, gimple_ctypes.CallExpr)
@@ -1707,19 +1717,12 @@ def _compile_nested_generator_closures(gen, outer_fn: gimple_ctypes.FunctionDef,
     `_gen_cpp_generator_unit` already gives:
       * the generator is a DIRECT top-level statement of `outer_fn` (the same
         scope `_compile_nested_async_functions` walks), not a method, and it
-        is only ever CALLED by name from `outer_fn` (`_only_directly_called`).
-        A generator RETURNED from `outer_fn` (the escaping shape) no longer
-        reaches this claim: `mojo/middle/coro.py`'s `_lower_escaping_
-        generators` moves it to module level before the backend runs, leaving
-        a variadic trampoline the ordinary nested-closure mechanism compiles;
-        the escapes that path leaves alone (a nonlocal write, a rebound
-        capture) keep the honest refusal from the generic pass below;
+        is only ever CALLED by name from `outer_fn` (`_only_directly_called`);
+        a generator returned or stored as a value is refused;
       * every enclosing name it reads is one `_compute_nested_closure_
         captures` resolves against `outer_fn`'s params and top-level locals
         (`_enclosing_scope_with_locals`) -- a read of anything else is not
-        claimed; that resolver seeds only scalar parameters and locals
-        (int64_t/double/_Bool), so a char * capture is not threaded yet and
-        keeps the honest refusal;
+        claimed;
       * no captured name is REBOUND in `outer_fn`'s own body: a parameter
         has no binding site and a local has exactly its one `var`
         declaration. Python reads an enclosing name at each resume, so a
@@ -2322,18 +2325,7 @@ def _enclosing_scope_with_locals(gen, outer_fn: gimple_ctypes.FunctionDef) -> di
     scope: dict = {}
     for pname, ptype in (outer_fn.params or []):
         pname = pname.lstrip('*')
-        # THE SAME resolver the enclosing function's own C signature uses
-        # (_gen_cpp_generator_unit's own param loop calls it per param):
-        # an annotated param resolves through _resolve_type, an
-        # unannotated one through the usage inference and then the
-        # whole-module call-site-kind scan. Using it here keeps the
-        # capture's declared ctype and the enclosing param's real C ctype
-        # in agreement by construction — a second, independent guess is
-        # exactly how this method's earlier drafts disagreed with the real
-        # declaration. `_param_ctype` is a module function
-        # (mojo/middle/funcs_shared.py) exposed on the generator, so call
-        # it as a method.
-        ctype = gen._param_ctype(pname, ptype, outer_fn)
+        ctype = gen._resolve_type(ptype) if ptype is not None else None
         if ctype in ('int64_t', 'int', 'double', '_Bool'):
             scope[pname] = ctype
     widened = gen._inferred_var_types.get(outer_fn.name, {})

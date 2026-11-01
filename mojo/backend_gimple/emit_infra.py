@@ -772,10 +772,6 @@ def _reset_func(gen, body: list = None, params: list = None,
     # in this function sets to the literal `None`. Per function, because local
     # names recycle.
     gen._none_bound_names = None
-    # Lazily filled by `emit_exprs.none_only_locals`: the locals that hold
-    # `None` at every read (a membership needle). Per function, for the same
-    # reason.
-    gen._none_only_names = None
     # Pre-seed known global dicts with their value types so .get() uses the right function.
     # Also seeded from self._global_dict_val_types (Phase 1.7, never
     # reset) for the same reason _elem_types is seeded from
@@ -923,7 +919,6 @@ class FuncState:
         self.fs_pybox_vars: object = None
         self.fs_tagged_opt_read: object = None
         self.fs_none_bound_names: object = None
-        self.fs_none_only_names: object = None
         self.fs_dict_val_types: dict = {}
         self.fs_dict_nested_val_types: dict = {}
         self.fs_struct_layout: dict = {}
@@ -1022,7 +1017,6 @@ def save_func_state(gen) -> FuncState:
     st.fs_pybox_vars = gen._pybox_vars
     st.fs_tagged_opt_read = gen._tagged_opt_read
     st.fs_none_bound_names = gen._none_bound_names
-    st.fs_none_only_names = gen._none_only_names
     st.fs_dict_val_types = gen._dict_val_types
     st.fs_dict_nested_val_types = gen._dict_nested_val_types
     st.fs_struct_layout = gen._struct_layout
@@ -1130,7 +1124,6 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._pybox_vars = st.fs_pybox_vars
     gen._tagged_opt_read = st.fs_tagged_opt_read
     gen._none_bound_names = st.fs_none_bound_names
-    gen._none_only_names = st.fs_none_only_names
     gen._dict_val_types = st.fs_dict_val_types
     gen._dict_nested_val_types = st.fs_dict_nested_val_types
     gen._struct_layout = st.fs_struct_layout

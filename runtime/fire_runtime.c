@@ -1206,38 +1206,18 @@ int64_t mojo_box_from_bool(int64_t v)
     return (int64_t)(uintptr_t)bx;
 }
 
-/* None in a TAGGED word (a generator that yields None beside values, read by a
- * for loop): the one kind-'n' box, allocated once and shared, so a generator
- * yielding None in a loop does not grow the box registry per yield.
- * mojo_repr_boxed renders it "None". */
-int64_t mojo_box_none(void)
-{
-    static int64_t none_word;
-    if (none_word) return none_word;
-    MojoBox *bx = (MojoBox *)malloc(sizeof(MojoBox));
-    if (!bx) return 0;
-    bx->magic = MOJO_BOX_MAGIC;
-    bx->bits = 0;
-    bx->kind = 'n';
-    _pr_add(&_reg_box, (uint64_t)(uintptr_t)bx);
-    none_word = (int64_t)(uintptr_t)bx;
-    return none_word;
-}
-
 /* Append a TAGGED word (see mojo_box_from_bool / mojo_box_from_double) to a list
  * under the kind it carries, so the list's per-slot kinds render it right: a
  * float box appends a double, a bool box a bool, a str box or a live heap
  * string a string, anything else an int. */
-static void _list_word_push(MojoList *l, char kind, int64_t raw, char prior)
+static void _list_word_push(MojoList *l, char kind, int64_t raw)
 {
-    /* Append `raw` and extend the list's per-slot kinds string by `kind`.
-     * Slots before this one that the string does not describe are `prior`:
-     * the static kind of the list's existing elements (a str list's slots
-     * are 'p', an int list's are 'i'). The kinds string is a PRIVATE growable
-     * buffer (`mojo_list_set_kinds` stores the pointer it is given, it never
-     * copies): an 8-byte header holds its capacity so the append is amortised
-     * O(1), and a row whose kinds are not such a buffer (shared/pooled) is
-     * copied first. */
+    /* Append `raw` and extend the list's per-slot kinds string by `kind`
+     * (slots before this one that the string does not describe are ints).
+     * The kinds string is a PRIVATE growable buffer (`mojo_list_set_kinds`
+     * stores the pointer it is given, it never copies): an 8-byte header
+     * holds its capacity so the append is amortised O(1), and a row whose
+     * kinds are not such a buffer (shared/pooled) is copied first. */
     int64_t n = l->len;
     _KindRow *r = _kinds_row((uint64_t)(uintptr_t)l);
     char *buf = NULL;
@@ -1257,7 +1237,7 @@ static void _list_word_push(MojoList *l, char kind, int64_t raw, char prior)
         *(int64_t *)nb = ncap;
         buf = nb + 8;
         const char *old = (r && r->kinds) ? r->kinds : NULL;
-        for (int64_t i = 0; i < n; i++) buf[i] = (old && old[i]) ? old[i] : prior;
+        for (int64_t i = 0; i < n; i++) buf[i] = (old && old[i]) ? old[i] : 'i';
     }
     buf[n] = kind;
     buf[n + 1] = '\0';
@@ -1272,24 +1252,14 @@ void mojo_list_append_word(MojoList *l, int64_t w)
     if (mojo_is_boxed(w)) {
         MojoBox *bx = (MojoBox *)(intptr_t)w;
         switch (bx->kind) {
-            case 'd': _list_word_push(l, 'd', bx->bits, 'i'); return;
-            case 'p': _list_word_push(l, 'p', bx->bits, 'i'); return;
-            case 'b': _list_word_push(l, MOJO_KIND_BOOL, bx->bits, 'i'); return;
-            default:  _list_word_push(l, 'i', bx->bits, 'i'); return;
+            case 'd': _list_word_push(l, 'd', bx->bits); return;
+            case 'p': _list_word_push(l, 'p', bx->bits); return;
+            case 'b': _list_word_push(l, MOJO_KIND_BOOL, bx->bits); return;
+            default:  _list_word_push(l, 'i', bx->bits); return;
         }
     }
-    if (mojo_boxed_is_str(w)) { _list_word_push(l, 'p', w, 'i'); return; }
-    _list_word_push(l, 'i', w, 'i');
-}
-
-/* `lst.append(<float>)` where the list's static element kind is `prior` (see
- * `_list_word_push`): the double's bits under the 'd' kind, so the element
- * stays a double and is not truncated to its int value by the int64_t slot. */
-void mojo_list_append_double_kinded(MojoList *l, double v, char prior)
-{
-    int64_t bits;
-    memcpy(&bits, &v, sizeof(bits));
-    _list_word_push(l, 'd', bits, prior);
+    if (mojo_boxed_is_str(w)) { _list_word_push(l, 'p', w); return; }
+    _list_word_push(l, 'i', w);
 }
 
 /* The answer of `a OP b` for an arithmetic operator whose operands may be
@@ -2357,12 +2327,8 @@ int64_t mojo_list_len(MojoList *l) { return l ? l->len : 0; }
 
 int mojo_list_contains_int(MojoList *l, int64_t v)
 {
-    /* A None slot holds the NULL word, which is 0, so `0 in [1, None]` would
-     * match it. Only the word 0 can be a None slot, so the kinds row is
-     * consulted only for that needle and costs nothing on the common path. */
     for (int64_t i = 0; i < l->len; i++)
-        if (l->data[i] == v && !(v == 0 && mojo_list_slot_kind(l, i) == 'n'))
-            return 1;
+        if (l->data[i] == v) return 1;
     return 0;
 }
 
@@ -2396,97 +2362,25 @@ int mojo_list_contains_str(MojoList *l, char *v)
      * generic walker already names its slots), so `["a", "c"]` has no row
      * and its slots fell into the `'i'` skip below. Every `c in ["a", "c"]`
      * over a `char *` was therefore False, and the branch never ran. Gate
-     * the skip on the ROW's existence, not on the fallback kind.
-     *
-     * With a row, each slot is compared in its own domain (the same rule
-     * mojo_list_contains_mixed_int states for ints): only a 'p' slot is a
-     * string, and only an 'n' slot is None. A NULL needle is a real `None`
-     * value (a tuple literal like `(None, '<conflict>')` stores None as a
-     * NULL element, and `rt_prov not in (None, '<conflict>')` in
-     * gimple_codegen.py's generator-provenance pass legitimately probes
-     * it), so None == None, and None is equal to no str slot. */
+     * the skip on the ROW's existence, not on the fallback kind. */
     const char *kinds = mojo_list_get_kinds(l);
     for (int64_t i = 0; i < l->len; i++) {
         char *s = (char *)(uintptr_t)l->data[i];
-        if (kinds) {
+        /* A slot the list's own kinds say is not a string (a tuple like
+         * `('.', b'.'[0])` mixes a str and an int) can never equal a string. */
+        if (kinds && v != NULL) {
             char _k = mojo_list_slot_kind(l, i);
-            if (v == NULL ? _k != 'n' : _k != 'p') continue;
+            if (_k == 'i' || _k == 'd') continue;
         }
-        if (v == NULL) {
-            if (s == NULL) return 1;
-            continue;
-        }
+        /* A NULL needle is a real `None`/NULL value, not an error: a tuple
+         * literal like `(None, '<conflict>')` stores None as a NULL element,
+         * and `rt_prov not in (None, '<conflict>')` (gimple_codegen.py's
+         * generator-provenance pass) legitimately probes it. Previously only
+         * `s` was guarded, so strcmp(s, NULL) segfaulted on the second
+         * iteration. Match Python: None == None. */
+        if (v == NULL)
+            return s == NULL ? 1 : 0;
         if (s && strcmp(s, v) == 0) return 1;
-    }
-    return 0;
-}
-
-/* `None in <list>` for a list whose elements are NOT `char *` (an int or
- * double list, or a bytes list): None can only be such a list's element
- * where its kinds row names the slot 'n'. Without a row no slot can be None
- * -- a NULL word there is the int 0 (or a NULL bytes pointer), never None --
- * so the answer is False, which is what CPython gives. */
-int mojo_list_contains_none(MojoList *l)
-{
-    for (int64_t i = 0; i < l->len; i++)
-        if (mojo_list_slot_kind(l, i) == 'n') return 1;
-    return 0;
-}
-
-/* `x in <list>` for an INT needle over a list whose element type was taken
- * as `char *` -- a str list, or a kind-mixed literal like `["a", 1]`. A
- * list-level accessor cannot serve it: `mojo_list_contains_str` would strcmp
- * the needle's value as a pointer, and `mojo_list_contains_int` would compare
- * the str slots' pointers. Python defines `in` as per-ELEMENT `==`, so each
- * slot is compared in its own domain (the one `mojo_list_slot_kind` names):
- *   'i'  an int slot         -- word equality
- *   'd'  a double slot       -- numeric equality, as Python's int == float
- *   other (str, bytes, list, None) -- never equal to an int. A None slot is
- *        a NULL word, which is why this must not compare words blindly:
- *        `0 in ["a", None]` is False.
- * A list with no kinds row reads every slot as 'i', so it is compared as the
- * words it holds, the same answer mojo_list_contains_int gives. */
-int mojo_list_contains_mixed_int(MojoList *l, int64_t v)
-{
-    for (int64_t i = 0; i < l->len; i++) {
-        char k = mojo_list_slot_kind(l, i);
-        if (k == 'i') {
-            if (l->data[i] == v) return 1;
-        } else if (k == 'd') {
-            double d = mojo_double_from_bits(l->data[i]);
-            /* Exact: d equals v only if d is an integral value in int64_t
-             * range and that integer is v. The range test keeps the
-             * (int64_t) cast defined; NaN fails it. */
-            if (d >= -9223372036854775808.0 && d < 9223372036854775808.0
-                    && (double)(int64_t)d == d && (int64_t)d == v)
-                return 1;
-        }
-    }
-    return 0;
-}
-
-/* `x in <list>` for a DOUBLE needle over a str / kind-mixed list: the double
- * counterpart of mojo_list_contains_mixed_int, with the same per-slot domains
- * (see its comment). Python's `==` between a float and an int is exact, so
- *   'i'  an int slot    -- equal only when the needle is integral, in int64_t
- *                          range, and that integer is the slot's word. Not
- *                          `(double)word == v`: that rounds a large int and
- *                          would match a neighbour that Python rejects.
- *   'd'  a double slot  -- ordinary floating equality (NaN equals nothing).
- *   other (str, bytes, list, None) -- never equal to a number.
- * `2.5 in [2.5, "a"]` and `2.0 in [2, "a"]` are True; `2.5 in ["a"]` is False. */
-int mojo_list_contains_mixed_double(MojoList *l, double v)
-{
-    int needle_is_int = v >= -9223372036854775808.0 && v < 9223372036854775808.0
-                        && (double)(int64_t)v == v;
-    int64_t vi = needle_is_int ? (int64_t)v : 0;
-    for (int64_t i = 0; i < l->len; i++) {
-        char k = mojo_list_slot_kind(l, i);
-        if (k == 'i') {
-            if (needle_is_int && l->data[i] == vi) return 1;
-        } else if (k == 'd') {
-            if (mojo_double_from_bits(l->data[i]) == v) return 1;
-        }
     }
     return 0;
 }
@@ -15195,20 +15089,6 @@ void mojo_type_add_base(int64_t cls, int64_t base)
 void mojo_classobj_setattr(int64_t cls, char *name, int64_t word)
 {
     mojo_class_setattr(mojo_classobj_tag(cls), name, word);
-}
-/* `type(name, bases, ns)` with a COMPUTED namespace: every string-keyed entry of the dict `ns`
- * becomes a class attribute, in insertion order. A float slot (kind 1) travels as a tagged box
- * so `Foo.x` reads it back as a float; every other kind's word is the value. */
-void mojo_type_fill_from_dict(int64_t cls, MojoDict *ns)
-{
-    if (!ns) return;
-    int64_t *order = mojo_dict_order_indices(ns);
-    for (int64_t oi = 0; oi < ns->used; oi++) {
-        _DictSlot *s = &ns->slots[order[oi]];
-        int64_t w = s->kind == 1 ? mojo_box_from_double(mojo_double_from_bits(s->val)) : s->val;
-        mojo_classobj_setattr(cls, _slot_key(s), w);
-    }
-    free(order);
 }
 /* 1 and *out set when `obj` is a class handle that has `attr`; AttributeError (or the soft
  * miss) is the caller's, so a non-class falls through to its own lookup. */

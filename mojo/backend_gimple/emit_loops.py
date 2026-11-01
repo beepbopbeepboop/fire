@@ -1310,9 +1310,17 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
                                      [('MojoList *', _gl), ('int64_t', gen._new_val('int64_t', '0'))])
                 _kp = gen._new_val('char', "(char)'p'")
                 _isp = gen._new_val('_Bool', f'{_k0} == {_kp}')
+                _kd = gen._new_val('char', "(char)'d'")
+                _isd = gen._new_val('_Bool', f'{_k0} == {_kd}')
                 bb_gp = gen._new_bb(); bb_gi = gen._new_bb()
-                gen._emit(f"  if ({_isp}) goto {bb_gp}; else goto {bb_gi};")
-                for _bb, _et in ((bb_gp, 'char *'), (bb_gi, 'int64_t')):
+                bb_gd = gen._new_bb(); bb_gnp = gen._new_bb()
+                gen._emit(f"  if ({_isp}) goto {bb_gp}; else goto {bb_gnp};")
+                gen._emit_label(bb_gnp)
+                # A signature whose value kind is `double` drains a list of
+                # doubles; reading it through the int arm printed the bit
+                # pattern (`for v in f(3, **kw): print(v)` gave 4612811918334230528).
+                gen._emit(f"  if ({_isd}) goto {bb_gd}; else goto {bb_gi};")
+                for _bb, _et in ((bb_gp, 'char *'), (bb_gd, 'double'), (bb_gi, 'int64_t')):
                     gen._emit_label(_bb)
                     _al = gen._new_val('MojoList *', _gl)
                     gen._elem_types[_al] = _et

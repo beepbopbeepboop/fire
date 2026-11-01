@@ -5388,31 +5388,7 @@ def _lower_dict_method(gen, ov: str, method: str, args: list) -> tuple:
         val_type = gen._dict_val_of(ov)
         val_known = gen._dict_val_is_known(ov)
         dflt_is_none = False
-        # `d.pop(key, *args)` (weakref's WeakKeyDictionary.pop): the default is the
-        # first spread element when there is one, else absent. A packed `*args` list
-        # is a MojoList, which is not a value of the dict's slot type, so the usual
-        # default-type check below would refuse it; select the element instead.
-        _pop_spread = (args[1] if len(args) == 2
-                       and isinstance(args[1], gimple_ctypes.UnaryOp)
-                       and args[1].op == '*' else None)
-        if _pop_spread is not None and val_type in ('int64_t', 'int') :
-            _sl_t, _sl_v = gen.lower_expr(_pop_spread.operand)
-            if _sl_t == 'MojoList *':
-                _sl_n = gen._call_expr('int64_t', 'mojo_list_len', [(_sl_t, _sl_v)])
-                _sl_0 = gen._call_expr('int64_t', 'mojo_list_get_int',
-                                       [(_sl_t, _sl_v), ('int64_t', gen._new_val('int64_t', '(int64_t)0'))])
-                _sl_z = gen._new_val('int64_t', '(int64_t)0')
-                dflt_ty = 'int64_t'
-                _sl_c = gen._new_val('_Bool', f'{_sl_n} > {_sl_z}')
-                dflt_val = gen._new_val('int64_t', f'{_sl_c} ? {_sl_0} : {_sl_z}')
-                _pop_spread_done = True
-            else:
-                _pop_spread_done = False
-        else:
-            _pop_spread_done = False
-        if _pop_spread_done:
-            pass
-        elif len(args) > 1:
+        if len(args) > 1:
             dflt_ty, dflt_val = gen.lower_expr(args[1])
             dflt_is_none = bool(_is_none_literal(args[1]))
         else:
@@ -5616,20 +5592,6 @@ def _lower_list_method(gen, ov: str, method: str, args: list,
                     if _sn not in gen._field_elem_types:
                         gen._field_elem_types[_sn] = {}
                     gen._field_elem_types[_sn][_fn] = 'char *'
-        elif at == 'double':
-            # A float is not an int: stored through the int64_t slot below it
-            # is converted by C (2.5 -> 2), so the element read back is the
-            # truncated int. Store the double's bits under the 'd' kind, and
-            # record the list's static kind for the slots already present
-            # (`prior`: a str list's are 'p', an int list's or an empty list's
-            # are 'i'), so the per-slot kinds row describes every element.
-            # The list is kind-mixed from here on, so it takes the same
-            # per-slot compare path a mixed literal does (`_maybe_kinds_vals`).
-            _prior = gimple_ctypes.TypeLattice.slot_kind_byte(
-                gen._elem_types.get(ov) or 'int64_t')
-            gen._emit_call('void', '', 'mojo_list_append_double_kinded',
-                           [('MojoList *', ov), ('double', av), ('char', "'" + _prior + "'")])
-            gen._maybe_kinds_vals.add(ov)
         else:
             # Coerce a bare `int`/`_Bool` literal to `int64_t` HERE rather
             # than leaving it to `_emit_call`'s param-type lookup: in the
