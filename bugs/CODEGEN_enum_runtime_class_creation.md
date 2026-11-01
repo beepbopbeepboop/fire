@@ -62,8 +62,19 @@ every module is reachable from a word with `mojo_getattr_any(obj, attr)`
    (`mojo_instobj_class_lookup` in `mojo_obj_getattr`), so `Foo.x = 9` is seen by every instance.
    `emit_calls._lower_call`'s uppercase-name "opaque constructor" guess no longer fires for a LOCAL
    (`Foo` was lowered to the literal 0). Pinned by `instance_of_a_run_time_class` /
-   `instance_reads_through_the_class_bases`. Not covered: methods in the namespace called as
-   `o.m()`, `isinstance(o, Foo)`, `repr(o)`, a call with more than 4 arguments.
+   `instance_reads_through_the_class_bases`. Not covered then (methods, `isinstance` since landed, below): `repr(o)`, a call with more than 4
+   arguments.
+   **Methods and `isinstance` on dynamic classes landed 2026-11-01**: a local bound to `type(..)` (or
+   to a call of such a local) is recorded in `gen._rtobj_kinds` (`('l', name)` -> `'class'`/`'inst'`,
+   set by `stmts_shared._note_rtobj_binding`, dropped when the name is rebound to anything else).
+   `o.m(a, b)` / `Foo.m(x)` on such a local is `mojo_rtobj_method_call` (class-table lookup through
+   the bases, the instance passed first as `self`, a miss is AttributeError) - before, `o.get()` was
+   lowered as `dict.get` and printed 0 - and `isinstance(o, Foo)` (also inside a tuple) is
+   `mojo_isinstance_rtclass`. Pinned by `methods_in_the_namespace_are_called_on_instances` /
+   `isinstance_of_a_run_time_class`. Not covered: more than 4 call arguments (refused by name),
+   keyword/star arguments, a method returning a float or string (the word is an untyped
+   `_dyn_word_vals` word), a class or instance reached through a parameter/attribute rather than
+   a local, `isinstance(o, StaticBase)` for a dynamic class deriving a static one, `repr(o)`.
    Separate finding, not fixed: for a STATIC class `p.b = 5` outside `__init__` infers a struct
    field, so `hasattr(q, 'b')` is True on an instance that never set it (CPython: False).
    STILL MISSING in stage 3: `type.__new__(metacls, ..)`.

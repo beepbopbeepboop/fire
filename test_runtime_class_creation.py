@@ -124,6 +124,41 @@ def main():
     print(o.k, getattr(o, 'k'), getattr(o, 'nope', 42))
 main()
 """,
+    'methods_in_the_namespace_are_called_on_instances': """\
+def init(self, v):
+    self.v = v
+
+def get(self):
+    return self.v + 1
+
+def add(self, a, b):
+    return self.v + a + b
+
+def make(x):
+    return x * 2
+
+def main():
+    Foo = type('Foo', (), {'__init__': init, 'get': get, 'add': add, 'make': make})
+    o = Foo(4)
+    print(o.get(), o.add(10, 20))
+    o.v = 7
+    print(o.get())
+    print(Foo.make(21))
+    Bar = type('Bar', (Foo,), {'get': lambda self: 100})
+    b = Bar(1)
+    print(b.get(), b.add(1, 1))
+main()
+""",
+    'isinstance_of_a_run_time_class': """\
+def main():
+    A = type('A', (), {'a': 1})
+    B = type('B', (A,), {'b': 2})
+    C = type('C', (), {})
+    o = B()
+    print(isinstance(o, B), isinstance(o, A), isinstance(o, C))
+    print(isinstance(A(), B), isinstance(o, (C, A)), isinstance(5, A))
+main()
+""",
     'two_classes_of_one_name_are_two_classes': """\
 def main():
     P = type('Same', (), {'v': 1})

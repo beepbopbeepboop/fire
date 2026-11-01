@@ -1515,6 +1515,7 @@ def _lower_type_new(gen, node):
     if ns_dict is not None:
         gen._void_call('mojo_type_fill_from_dict', [('int64_t', cls), ('MojoDict *', ns_dict)])
         gen._dyn_word_vals.add(cls)
+        gen._rtobj_kinds[('v', cls)] = 'class'
         return 'int64_t', cls
     for key, (_k, vnode) in zip(keys, ns_n.pairs):
         vt, vv = gen.lower_expr(vnode)
@@ -1523,6 +1524,7 @@ def _lower_type_new(gen, node):
         gen._void_call('mojo_classobj_setattr',
                        [('int64_t', cls), ('char *', gen._intern_string(key)), ('int64_t', vw)])
     gen._dyn_word_vals.add(cls)
+    gen._rtobj_kinds[('v', cls)] = 'class'
     return 'int64_t', cls
 
 
@@ -4093,7 +4095,11 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         return _lower_inlined_lambda_call(gen, _red_lambda, node)
 
     if _callee_is_fnptr_value(gen, fname_raw):
-        return gen._lower_fnptr_call(fname_raw, _fname_var_ctype, node)
+        _ct, _cv = gen._lower_fnptr_call(fname_raw, _fname_var_ctype, node)
+        # `Foo(..)` on a local holding a run-time class makes an INSTANCE of it
+        if gen._rtobj_kinds.get(('l', fname_raw)) == 'class':
+            gen._rtobj_kinds[('v', _cv)] = 'inst'
+        return _ct, _cv
 
     # PART 6 (2026-10-23, closing piece): the system stat() C-ABI FFI — see
     # _CABI_STAT_BLOCK's own comment for the full measured chain, the
@@ -4345,6 +4351,12 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
     if obj_type == 'char *' and _as_str(obj_val) in gen._dyn_word_locals:
         obj_val = gen._new_val('int64_t', f'(int64_t){obj_val}')
         obj_type = 'int64_t'
+    if gen._rtobj_kinds.get(('l', type_name)) == 'class':
+        # a class made at run time: the class table answers (instance's class or a base of it)
+        cw = gen._new_val('int64_t', type_name)
+        r = gen._call_expr('int', 'mojo_isinstance_rtclass',
+                           [('int64_t', gen._to_int64(obj_type, obj_val)), ('int64_t', cw)])
+        return gen._new_val('_Bool', f'(_Bool){r}')
     if type_name == 'type':
         return gen._new_val('_Bool', '0')  # isinstance(x, type) always false in C
     if type_name == 'tuple':

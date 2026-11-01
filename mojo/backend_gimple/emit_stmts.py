@@ -50,6 +50,7 @@ import mojo.backend_gimple.emit_infra as ginf
 # (Was globals().update(dir(_shared)); self-hosted globals() is a
 # weak stub returning NULL — see runtime/fire_runtime.c _globals.)
 from mojo.middle.stmts_shared import *  # noqa: F401,F403
+from mojo.middle.stmts_shared import _note_rtobj_binding
 from mojo.middle.stmts_shared import (
     _annotation_container_elem_type, _annotation_dict_nested_val_type, _annotation_dict_val_type, _as_str, _assign_target, _collect_isinstance_narrowings, _handler_bind_name,
     _handler_exc_name, _is_except_as_member_target, _is_genexp, _isinstance_narrow_struct, _iter_ast, _narrow_key_for_expr,
@@ -1359,6 +1360,7 @@ def _gen_stmt_AssignStmt(gen, node):
         # the runtime, exactly as the temp's would have. See `_dyn_word_vals`.
         if v in gen._dyn_word_vals:
             gen._dyn_word_locals.add(_as_str(tname))
+        _note_rtobj_binding(gen, _as_str(tname), vtype, v)
         # Rebinding a genexp-materialised local to a non-genexp value (the
         # RHS was just lowered above, still seeing the list-typed window)
         # ends that window — later reads use the slot's own declared type.
