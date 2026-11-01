@@ -322,10 +322,12 @@ _Y_SITE = re.compile(r'co_yield /\*Y:([^*]*)\*/ \((.*)\);$')
 def _cpp_tag_yield_sites(body_lines: list):
     """The body lines with every `co_yield /*Y:<ctype>*/ (<expr>);` site boxed
     into one int64_t word by its marked ctype (a double as `mojo_box_from_double`,
-    a bool as `mojo_box_from_bool`, a string by its pointer, an int as itself),
+    a bool as `mojo_box_from_bool`, a string as `mojo_box_from_str`, an int as itself),
     or None when the sites do not form a TAGGED value slot: fewer than two
-    different ctypes, a ctype that is not one of the four scalar kinds, or a
-    yield with no marker (a tuple / delegated / bare yield)."""
+    different ctypes (a generator whose ONLY yields are None is the one
+    single-kind word: its box is `mojo_box_none()`, which the consumers render
+    as `None`), a ctype that is not one of the scalar kinds, or a yield with no
+    marker (a tuple / delegated / bare yield)."""
     kinds = set()
     out = []
     for ln in body_lines:
@@ -336,23 +338,30 @@ def _cpp_tag_yield_sites(body_lines: list):
         if m is None:
             return None
         ct = {'int': 'int64_t', 'dbl': 'double', 'str': 'char *',
-              'bool': '_Bool', 'bytes': 'MojoBytes *'}.get(m.group(1).strip())
+              'bool': '_Bool', 'bytes': 'MojoBytes *', 'none': 'None'}.get(m.group(1).strip())
         if ct is None:
             return None
         kinds.add(ct)
         indent = ln[:len(ln) - len(ln.lstrip())]
         expr = m.group(2)
-        if ct == 'double':
+        if ct == 'None':
+            # the None box: renders `None` wherever a tagged word is printed
+            w = "mojo_box_none()"
+        elif ct == 'double':
             w = f"mojo_box_from_double((double)({expr}))"
         elif ct == '_Bool':
             w = f"mojo_box_from_bool((int64_t)({expr}))"
         elif ct == 'char *':
-            w = f"(int64_t)(intptr_t)((char *)({expr}))"
+            # boxed by kind like the others: a raw pointer is only read as a
+            # string when the runtime registered it (a C++ literal is not)
+            w = f"mojo_box_from_str((char *)({expr}))"
         elif ct == 'MojoBytes *':
             w = f"(int64_t)(intptr_t)({expr})"
         else:
             w = f"(int64_t)({expr})"
         out.append(f"{indent}co_yield {w};")
+    if kinds == {'None'}:
+        return out
     if len(kinds) < 2 or kinds == {'int64_t', '_Bool'}:
         return None
     return out
@@ -990,6 +999,9 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     gen._cpp_list_local_elem_types = {}
     gen._cpp_word_locals = set()
     gen._cpp_word_iter_locals = set()
+    # Locals of this unit that hold a TAGGED word (a generator's boxed slot
+    # bound by a for loop or `x = next(g)`); see cpp_core._cpp_is_tagged_word_expr.
+    gen._cpp_tagged_word_names = set()
     gen._cpp_param_names = set(gimple_ctypes._as_str(_p[0]) for _p in (fn.params or []))
     gen._cpp_mixed_list_params = set(
         getattr(gen, '_param_elem_mixed', {}).get(fn.name, ()))
@@ -1118,7 +1130,8 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         _tagged_yield = False
         if ((value_ctype is None
                 or (value_ctype == 'char *'
-                    and any('/*Y:bytes*/' in _bl for _bl in body_lines)))
+                    and any('/*Y:bytes*/' in _bl for _bl in body_lines))
+                or any('/*Y:none*/' in _bl for _bl in body_lines))
                 and not has_tuple_yield
                 and coro_mod._generator_value_kind(
                     fn, coro_mod._static_env(fn, struct_def))[0] == 'w'):
@@ -1131,6 +1144,11 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
                 value_ctype = 'int64_t'
                 gen._cpp_last_mixed_slots = True
                 _tagged_yield = True
+        # Published for the registrar (module_gen._register_free_generator,
+        # and the nested-generator api below): a consumer of a TAGGED slot
+        # must render it as a box (see cpp_core._cpp_is_tagged_word_expr),
+        # and the api dict is the only record that crosses modules.
+        gen._cpp_last_tagged_yield = _tagged_yield
         func_decls = list(gen._cpp_func_scope_decls)
         self_recursed = gen._cpp_gen_self_recursed
         fwd_delegates = list(gen._cpp_fwd_gen_delegates)
@@ -1165,6 +1183,15 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         _slot_why = gimple_gen_coro.cpp_value_slot_refusal(fn, value_ctype, struct_def)
         if _slot_why is not None:
             raise gimple_exprtypes._UnsupportedGeneratorShape(f"{fn.name}: {_slot_why}")
+    # A None yield (bare `yield` / `yield None`) that did not become a tagged
+    # word has no slot this path can carry: its marked site would otherwise
+    # be written as a 0. A mixed-kind generator was boxed above (`_tagged_yield`),
+    # so this refuses only the lone-None shape. Runs after the body is lowered
+    # and covers every shape, not just a statement-level bare yield.
+    if (value_ctype is not None and not _tagged_yield and any(
+            coro_mod._is_none_yield(_n) for _n in coro_mod._walk(fn))):
+        raise gimple_exprtypes._UnsupportedGeneratorShape(
+            f"{fn.name}: {coro_mod.NONE_YIELD_CPP_REFUSAL}")
     if value_ctype is not None:
         # A SELF-recursive generator's own extern declaration was registered while
         # its value type was still unknown (the placeholder int64_t); now that it
@@ -1782,6 +1809,7 @@ def _compile_nested_generator_closures(gen, outer_fn: gimple_ctypes.FunctionDef,
             'base': base, 'value_ctype': value_ctype,
             'params': param_ctypes, 'captures': caps,
             'nested_name': inner.name,
+            'tagged': gen._cpp_last_tagged_yield,
         }
         gen.func_param_types[f"{base}_start"] = param_ctypes
         gen._generator_cpp_units.append(cpp_text)

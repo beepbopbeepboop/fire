@@ -50,6 +50,7 @@ import mojo.backend_gimple.emit_infra as ginf
 # (Was globals().update(dir(_shared)); self-hosted globals() is a
 # weak stub returning NULL — see runtime/fire_runtime.c _globals.)
 from mojo.middle.stmts_shared import *  # noqa: F401,F403
+from mojo.middle.stmts_shared import _note_rtobj_binding
 from mojo.middle.stmts_shared import (
     _annotation_container_elem_type, _annotation_dict_nested_val_type, _annotation_dict_val_type, _as_str, _assign_target, _collect_isinstance_narrowings, _handler_bind_name,
     _handler_exc_name, _is_except_as_member_target, _is_genexp, _isinstance_narrow_struct, _iter_ast, _narrow_key_for_expr,
@@ -1328,7 +1329,48 @@ def _gen_stmt_AssignStmt(gen, node):
         # int64_t spelling) and returns every other kind's own word, so the
         # local is a word of unknown kind -- which is what `_dyn_word_locals`
         # records, so its `str()`/`==` ask the runtime.
-        if vtype == 'int64_t' and v in getattr(gen, '_boxed_vals', ()):
+        # A TAGGED generator word (`x = next(g)` on a mixed-kind generator,
+        # `_tagged_word_vals`) is the exception: unwrapping it loses the yield's
+        # kind, so `print(x)` then shows a bool as `1` or a str as an address.
+        # The local keeps the box and is registered in `_boxed_vals` exactly as
+        # a for-loop target over such a generator is (emit_loops), so every
+        # consumer resolves the box by kind. Only a name whose every binding is
+        # a tagged word of one generator keeps it (`tagged_next_bind_name`):
+        # a box-holding local that is later stored a bare word would be read as
+        # a box. A local already declared as something other than a word keeps
+        # the unwrap below, which is the behaviour it always had.
+        # A copy `x = v` of a for-loop target over a tagged generator keeps
+        # the box the same way: the loop stored the box in `v` (`_boxed_vals`,
+        # emit_loops' generator for-target arm), and `tagged_for_target_name`
+        # is what makes every store into `x` a box.
+        _copy_src = (_as_str(node.value.name)
+                     if isinstance(node.value, gimple_ctypes.IdentExpr) else None)
+        _for_copy = (_copy_src is not None
+                     and vtype == 'int64_t'
+                     and v in getattr(gen, '_boxed_vals', ())
+                     and gen.var_types.get(_copy_src) == 'int64_t'
+                     and ginf.tagged_for_target_name(gen, _copy_src))
+        _keep_tagged_box = (vtype == 'int64_t'
+                            and (v in getattr(gen, '_tagged_word_vals', ())
+                                 or _for_copy)
+                            and gen.var_types.get(tname, 'int64_t') == 'int64_t'
+                            and ginf.tagged_next_bind_name(gen, _as_str(tname)))
+        if (not _keep_tagged_box and _copy_src is not None
+                and ginf.tagged_next_bind_name(gen, _as_str(tname))):
+            # The local is registered as a box by every store (the static
+            # rule says all of them are tagged), so this store must keep the
+            # box too: a bare word here would be read as a box.
+            raise RuntimeError(
+                f"internal: copy of a tagged for-loop target into {tname!r} "
+                f"did not keep the box (source {_copy_src!r})")
+        if _keep_tagged_box:
+            if tname not in gen.var_types:
+                gen._declare_var(tname, 'int64_t')
+            _tn = gen._cname(tname)
+            gen._boxed_vals.add(_tn)
+            gen._tagged_word_vals.add(_tn)
+            gen._dyn_word_locals.add(_as_str(tname))
+        elif vtype == 'int64_t' and v in getattr(gen, '_boxed_vals', ()):
             _bw = gen._new_temp('int64_t')
             gen._emit(f'  {_bw} = mojo_box_word ({v});')
             v = _bw
@@ -1338,6 +1380,7 @@ def _gen_stmt_AssignStmt(gen, node):
         # the runtime, exactly as the temp's would have. See `_dyn_word_vals`.
         if v in gen._dyn_word_vals:
             gen._dyn_word_locals.add(_as_str(tname))
+        _note_rtobj_binding(gen, _as_str(tname), vtype, v)
         # Rebinding a genexp-materialised local to a non-genexp value (the
         # RHS was just lowered above, still seeing the list-typed window)
         # ends that window — later reads use the slot's own declared type.
@@ -4442,6 +4485,8 @@ def _gen_stmt_ExprStmt(gen, node):
         # '_verbose_message' makes pointer from integer without a cast".
         _call_has_spread = any(isinstance(_a, gimple_ctypes.UnaryOp) and _a.op in ('*', '**')
                                for _a in node.value.args)
+        arg_pairs, kwarg_dict = gen._pack_kwargs_slot_call(
+            fname, raw_name, arg_pairs, kwarg_dict, _call_has_spread)
         arg_pairs, kwarg_dict = gen._pack_vararg_trailing_params(
             fname, raw_name, arg_pairs, kwarg_dict, _call_has_spread)
 

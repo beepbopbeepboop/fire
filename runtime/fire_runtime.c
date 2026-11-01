@@ -1206,6 +1206,23 @@ int64_t mojo_box_from_bool(int64_t v)
     return (int64_t)(uintptr_t)bx;
 }
 
+/* A str travelling in a TAGGED word (a generator whose yields are not all one
+ * kind): a fresh kind-'p' box holding the pointer, so the consumer renders the
+ * string and not its address. A bare pointer is recognised as a string only
+ * when it is a registered literal or a live heap block (mojo_boxed_is_str),
+ * which a C++ string literal is not. mojo_repr_boxed / mojo_box_word read the
+ * pointer back. */
+int64_t mojo_box_from_str(char *s)
+{
+    MojoBox *bx = (MojoBox *)malloc(sizeof(MojoBox));
+    if (!bx) return (int64_t)(intptr_t)s;
+    bx->magic = MOJO_BOX_MAGIC;
+    bx->bits = (int64_t)(intptr_t)s;
+    bx->kind = 'p';
+    _pr_add(&_reg_box, (uint64_t)(uintptr_t)bx);
+    return (int64_t)(uintptr_t)bx;
+}
+
 /* None in a TAGGED word (a generator that yields None beside values, read by a
  * for loop): the one kind-'n' box, allocated once and shared, so a generator
  * yielding None in a loop does not grow the box registry per yield.
@@ -1327,6 +1344,14 @@ int64_t mojo_box_word(int64_t v)
     MojoBox *bx = (MojoBox *)(intptr_t)v;
     if (bx->kind == 'd') return v;
     return bx->bits;
+}
+
+/* See the header. The shared kind-'n' box is the only word that IS None when
+ * it is still boxed; a bare word cannot say so (an int 0 has the same bits). */
+int mojo_word_is_none(int64_t v)
+{
+    if (!mojo_is_boxed(v)) return 0;
+    return ((MojoBox *)(intptr_t)v)->kind == 'n';
 }
 
 /* Python truthiness of a word of unknown kind (see the header). Containers
@@ -2138,7 +2163,7 @@ MojoList *mojo_args_extend_word(MojoList *dst, int64_t src)
 {
     MojoList *l = mojo_iter_word(src);
     for (int64_t i = 0; i < mojo_list_len(l); i++)
-        mojo_list_append_int(dst, mojo_box_word(mojo_list_get_boxed(l, i)));
+        mojo_list_append_word(dst, mojo_box_word(mojo_list_get_boxed(l, i)));
     return dst;
 }
 MojoDict *mojo_kwargs_merge_word(MojoDict *dst, int64_t src)
@@ -10355,6 +10380,7 @@ int64_t mojo_obj_getattr(void *obj, char *attr) {
                 return mojo_dict_get_int(attrs, attr);
         }
     }
+    { int64_t _iw; if (mojo_instobj_class_lookup(obj, attr, &_iw)) return _iw; }
     if (_mojo_getattr_nothrow) {
         _mojo_getattr_missed = 1;
         return 0;
@@ -12630,14 +12656,17 @@ static char *_container_key_str(int64_t v) {
    decimal of the address) and returned 0. mojo_boxed_is_str is the model's
    own discriminator — pointer-shaped and not a live registered list — so
    ask it here rather than guessing a direction. */
-/* Only the two kinds mojo_list_get_boxed makes for a list slot ('d' double,
-   'p' str) are spelled by kind. The other box, kind 'i', is an id() TOKEN: an
-   integer that happens to be pointer-shaped and registered, and it must keep
-   being an integer (a dict key, `int(id(a))`). */
+/* Every box is spelled by its kind EXCEPT the kind 'i' box, which is an id()
+   TOKEN: an integer that happens to be pointer-shaped and registered, and it
+   must keep being an integer (a dict key, `int(id(a))`). The rest are the
+   kinds mojo_list_get_boxed makes for a non-int list slot ('d' double, 'p' str,
+   'b' bool, 'n' None, 's' bytes, 'l' nested list) and the tagged-word boxes
+   (mojo_box_none, mojo_box_from_bool, ...). Each has a real str() spelling in
+   mojo_repr_boxed, so a None or bool box read out of a list must not fall
+   through to the integer arm and print its own address. */
 static int _box_spelled_by_kind(int64_t v) {
     if (!mojo_is_boxed(v)) return 0;
-    char k = ((MojoBox *)(intptr_t)v)->kind;
-    return k == 'd' || k == 'p';
+    return ((MojoBox *)(intptr_t)v)->kind != 'i';
 }
 
 char *mojo_cstr_or_int_str(int64_t v) {
@@ -12649,8 +12678,10 @@ char *mojo_cstr_or_int_str(int64_t v) {
        when `orig` is a box. */
     if (_box_spelled_by_kind(v)) {
         MojoBox *bx = (MojoBox *)(intptr_t)v;
+        /* mojo_repr_float returns a shared buffer; every other arm of
+           mojo_repr_boxed returns a fresh heap string. */
         if (bx->kind == 'd') return strdup(mojo_repr_float(mojo_double_from_bits(bx->bits)));
-        return strdup((char *)(intptr_t)bx->bits);
+        return mojo_repr_boxed(v);
     }
     if (mojo_boxed_is_str(v)) return (char *)(intptr_t)v;
     if (mojo_is_registered_bytes(v))
@@ -15104,6 +15135,23 @@ typedef struct MojoClassRec {
 } MojoClassRec;
 static MojoClassRec *_class_head = 0;
 
+/* A class body's own attributes are static globals of the module that declares the class, so
+ * the table cannot hold them; each module registers one reader (tag, name -> live word) and a
+ * lookup that reaches such a class asks them. The word is read at lookup time, so a later
+ * `Base.x = v` is seen through a run-time class that inherits `x` from `Base`. */
+static int (**_classattr_readers)(int64_t, char *, int64_t *) = 0;
+static int _n_classattr_readers = 0, _cap_classattr_readers = 0;
+void mojo_register_classattr_reader(int (*fn)(int64_t, char *, int64_t *))
+{
+    for (int i = 0; i < _n_classattr_readers; i++) if (_classattr_readers[i] == fn) return;
+    if (_n_classattr_readers == _cap_classattr_readers) {
+        _cap_classattr_readers = _cap_classattr_readers ? _cap_classattr_readers * 2 : 16;
+        _classattr_readers = (int (**)(int64_t, char *, int64_t *))realloc(
+            (void *)_classattr_readers, (size_t)_cap_classattr_readers * sizeof *_classattr_readers);
+    }
+    _classattr_readers[_n_classattr_readers++] = fn;
+}
+
 static MojoClassRec *_class_find(int64_t tag)
 {
     for (MojoClassRec *c = _class_head; c; c = c->next) if (c->tag == tag) return c;
@@ -15135,6 +15183,8 @@ static int _class_lookup(int64_t tag, const char *name, int64_t *out, int depth)
     MojoClassRec *c = _class_find(tag);
     if (!c || depth > 32) return 0;
     if (mojo_dict_contains(c->attrs, (char *)name)) { *out = mojo_dict_get_int(c->attrs, (char *)name); return 1; }
+    for (int i = 0; i < _n_classattr_readers; i++)
+        if (_classattr_readers[i](tag, (char *)name, out)) return 1;
     for (int i = 0; i < c->nbases; i++) if (_class_lookup(c->bases[i], name, out, depth + 1)) return 1;
     return 0;
 }
@@ -15168,6 +15218,7 @@ void mojo_class_delattr(int64_t tag, char *name)
  * class-table entry is filed under. `Foo.x`, `Foo.x = v`, `getattr(Foo, ..)` on the handle
  * reach the class table through `mojo_classobj_getattr / mojo_classobj_setattr`. */
 typedef struct { int64_t magic; int64_t tag; } MojoClassObj;
+static _PtrReg _reg_classobj, _reg_instobj;
 static int64_t _classobj_serial = 0;
 int64_t mojo_type_new(char *name)
 {
@@ -15180,11 +15231,98 @@ int64_t mojo_type_new(char *name)
     mojo_class_register(tag, 0, name);
     MojoClassObj *o = (MojoClassObj *)malloc(sizeof *o);
     o->magic = MOJO_CLASSOBJ_MAGIC; o->tag = tag;
+    _pr_add(&_reg_classobj, (uint64_t)(uintptr_t)o);
     return (int64_t)(intptr_t)o;
 }
+/* A registry, not a magic-number read: `mojo_fnptr_call_N` asks this of EVERY dynamically
+ * called word, and a plain function pointer's first bytes are code, which must never be able
+ * to look like a handle. */
 int mojo_is_classobj(int64_t w)
 {
-    return w && mojo_read_type_tag_safe(w) == MOJO_CLASSOBJ_MAGIC;
+    return w > 65536 && _pr_has(&_reg_classobj, (uint64_t)w);
+}
+/* An INSTANCE of a run-time class (`Foo = type(..); o = Foo()`): a heap block holding the
+ * class's table tag. Its attributes live in the per-object dynamic-attribute dict
+ * (`mojo_setattr`); a read that misses there is found through the class and its bases. */
+typedef struct { int64_t magic; int64_t tag; } MojoInstObj;
+int mojo_is_instobj(int64_t w)
+{
+    return w > 65536 && _pr_has(&_reg_instobj, (uint64_t)w);
+}
+/* `Foo(args..)` on a class handle. A class made at run time has no `__init__` unless its
+ * namespace names one, and a namespace function is called with the new instance first. */
+/* call the function word `fn` with the first `n` (0..5) of `a` */
+static int64_t _call_words(int64_t fn, int64_t n, const int64_t *a)
+{
+    void *fp = (void *)(intptr_t)fn;
+    switch (n) {
+    case 0: return mojo_fnptr_call_0(fp);
+    case 1: return mojo_fnptr_call_1(fp, a[0]);
+    case 2: return mojo_fnptr_call_2(fp, a[0], a[1]);
+    case 3: return mojo_fnptr_call_3(fp, a[0], a[1], a[2]);
+    case 4: return mojo_fnptr_call_4(fp, a[0], a[1], a[2], a[3]);
+    default: return mojo_fnptr_call_5(fp, a[0], a[1], a[2], a[3], a[4]);
+    }
+}
+int64_t mojo_classobj_call(int64_t cls, int64_t n, int64_t a0, int64_t a1, int64_t a2, int64_t a3)
+{
+    MojoInstObj *o = (MojoInstObj *)malloc(sizeof *o);
+    o->magic = MOJO_INSTOBJ_MAGIC; o->tag = ((MojoClassObj *)(intptr_t)cls)->tag;
+    _pr_add(&_reg_instobj, (uint64_t)(uintptr_t)o);
+    int64_t self = (int64_t)(intptr_t)o, init;
+    if (_class_lookup(o->tag, "__init__", &init, 0)) {
+        int64_t a[5] = { self, a0, a1, a2, a3 };
+        _call_words(init, n + 1, a);
+    } else if (n) {
+        mojo_raise_type_error((char *)"this class takes no arguments");
+    }
+    return self;
+}
+/* `recv.name(args..)` where `recv` is an instance of a run-time class (the instance goes first,
+ * as `self`) or the class handle itself (a plain call, as `Foo.m(x)`). The function is looked up
+ * in the class table through the bases; a miss is an AttributeError. */
+int64_t mojo_rtobj_method_call(int64_t recv, char *name, int64_t n, int64_t a0, int64_t a1, int64_t a2, int64_t a3)
+{
+    int64_t fn, a[5];
+    if (mojo_is_instobj(recv)) {
+        if (!_class_lookup(((MojoInstObj *)(intptr_t)recv)->tag, name, &fn, 0)) {
+            mojo_raise_attribute_error(name);
+            return 0;
+        }
+        a[0] = recv; a[1] = a0; a[2] = a1; a[3] = a2; a[4] = a3;
+        return _call_words(fn, n + 1, a);
+    }
+    if (mojo_is_classobj(recv)) {
+        if (!_class_lookup(((MojoClassObj *)(intptr_t)recv)->tag, name, &fn, 0)) {
+            mojo_raise_attribute_error(name);
+            return 0;
+        }
+        a[0] = a0; a[1] = a1; a[2] = a2; a[3] = a3;
+        return _call_words(fn, n, a);
+    }
+    mojo_raise_attribute_error(name);
+    return 0;
+}
+static int _class_derives(int64_t tag, int64_t want, int depth)
+{
+    if (tag == want) return 1;
+    MojoClassRec *c = _class_find(tag);
+    if (!c || depth > 32) return 0;
+    for (int i = 0; i < c->nbases; i++) if (_class_derives(c->bases[i], want, depth + 1)) return 1;
+    return 0;
+}
+/* `isinstance(obj, Cls)` where `Cls` is a class made at run time: `obj` is an instance whose
+ * class is `Cls` or derives from it. */
+int mojo_isinstance_rtclass(int64_t obj, int64_t cls)
+{
+    if (!mojo_is_instobj(obj)) return 0;
+    return _class_derives(((MojoInstObj *)(intptr_t)obj)->tag, mojo_classobj_tag(cls), 0);
+}
+/* 1 and *out set when `obj` is an instance whose class (or a base) has `attr` */
+int mojo_instobj_class_lookup(void *obj, char *attr, int64_t *out)
+{
+    if (!mojo_is_instobj((int64_t)(intptr_t)obj)) return 0;
+    return _class_lookup(((MojoInstObj *)obj)->tag, attr, out, 0);
 }
 /* the class-table tag of a class word: a handle's own tag, anything else is already a tag */
 int64_t mojo_classobj_tag(int64_t w)
@@ -15198,6 +15336,13 @@ void mojo_type_add_base(int64_t cls, int64_t base)
 void mojo_classobj_setattr(int64_t cls, char *name, int64_t word)
 {
     mojo_class_setattr(mojo_classobj_tag(cls), name, word);
+}
+/* `type(name, bases, ns)` with COMPUTED bases: every element of the list `bases` is a class
+ * word (a handle from `mojo_type_new`, or a static class's tag), added in order. */
+void mojo_type_add_bases_from_list(int64_t cls, MojoList *bases)
+{
+    int64_t n = mojo_list_len(bases);
+    for (int64_t i = 0; i < n; i++) mojo_type_add_base(cls, mojo_list_get_int(bases, i));
 }
 /* `type(name, bases, ns)` with a COMPUTED namespace: every string-keyed entry of the dict `ns`
  * becomes a class attribute, in insertion order. A float slot (kind 1) travels as a tagged box

@@ -457,6 +457,13 @@ def _param_ctype(gen, pname: str, ptype, node: gimple_ctypes.FunctionDef,
         # annotation still takes precedence (ptype is not None there).
         ctype = 'MojoBytes *'
     elif (ptype is None and ctype == 'int64_t'
+          and isinstance(_pdflt, FloatLiteral)):
+        # The float half of the same rule: `scale=0.5` is a float parameter.
+        # Left as the int64_t box, an omitted argument was padded with the
+        # literal's bits as an integer. Generator parameters follow the same
+        # rule (cpp_async's parameter loop reaches it through this resolver).
+        ctype = 'double'
+    elif (ptype is None and ctype == 'int64_t'
           and isinstance(_pdflt, (DictExpr, TupleExpr, ListExpr, SetExpr))):
         # The CONTAINER-literal half of the rule the two branches above
         # state for strings: an unannotated parameter whose declared

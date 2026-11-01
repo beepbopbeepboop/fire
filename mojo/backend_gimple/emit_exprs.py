@@ -465,8 +465,18 @@ def _closure_value(gen, name: str, _ci) -> tuple:
     fp = gen._new_val('void *', f'_funcptr_{lifted}')
     _repr_name = f"{gen.current_func_name or 'root'}.<locals>.{name}"
     if _ci.env_struct:
-        env_void = gen._new_val(
-            'void *', f'(void *){gen._closure_envs.get(name) or "0"}')
+        _own_env = gen._closure_envs.get(name)
+        if _own_env:
+            env_void = gen._new_val('void *', f'(void *){_own_env}')
+        elif getattr(gen, '_env_param', ''):
+            # Inside ANOTHER lifted closure: the sibling's env variable belongs to the
+            # parent's scope and is not visible here, so build it from this closure's own
+            # env (the same thing a CALL to the sibling does). `(void *)0` here crashed the
+            # callee on its first capture read.
+            _sib_env = ggc._build_outer_closure_env(gen, _ci)
+            env_void = gen._new_val('void *', f'(void *){_sib_env}')
+        else:
+            env_void = gen._new_val('void *', '(void *)0')
         # A VARIADIC nested def (`def gen(*a, **kw)`) is a MojoVarargFn
         # exactly as a variadic lambda is: a call through the value packs
         # its arguments into the list / dict the callee wants.
@@ -625,6 +635,14 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
         'Optional', 'Variant', 'Tuple',
         'InlineArray', 'InlineList', 'StaticTuple',
     })
+    if name in gen._struct_bases and name not in gen.var_types and name not in gen._global_var_types:
+        # A static class named as a VALUE is its type tag -- the word the run-time class table
+        # files it under (`type('C', (A, B), ns)` / `bases = (A, B)` hand it to
+        # `mojo_type_add_base`; bugs/CODEGEN_enum_runtime_class_creation.md stage 3). Not the
+        # zero placeholder below, which every class would share.
+        t = gen._new_temp('int64_t')
+        gen._emit(f'  {t} = (int64_t){gimple_exprtypes._struct_type_id(name)}LL;  /* class {name} as value */')
+        return 'int64_t', t
     if (name in gen.struct_field_types or name in _BUILTIN_TYPE_NAMES) and name not in gen.var_types:
         # int64_t, not int: this placeholder commonly flows into a (void *)
         # cast (e.g. boxed for mojo_obj_getattr on `UInt64.MAX`-style class
@@ -3045,7 +3063,14 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # lands here (test/collections/test_span.mojo's
         # `assert_equal(span[0].data, 42)`). The tag-dispatched accessor is a
         # real read of the boxed value rather than a fabricated one.
-        vp = gen._new_val('void *', f'(void *)(int64_t){ov}')
+        # A scalar base is widened to the integer word in its OWN temp first:
+        # GIMPLE rejects the nested rvalue cast `(void *)(int64_t)x` ("expected
+        # expression before '('"), which a `double` loop variable of the
+        # generator-handle drain's `double` arm (whose body may treat the
+        # element as an object) used to hit.
+        if ot != 'int64_t':
+            ov = gen._coerce_to_type(ot, 'int64_t', ov)
+        vp = gen._new_val('void *', f'(void *){ov}')
         return 'int64_t', gen._call_expr('int64_t', '_mojo_dispatch_getattr',
                         [('void *', vp), ('char *', f'"{node.member}"')])
     else:
@@ -3814,6 +3839,36 @@ _PYBOX_SCALARS = frozenset({
 })
 
 
+def _tagged_arith_select(gen, op: str, left_node, lt: str, lv: str,
+                         right_node, rt: str, rv: str):
+    """`lhs OP rhs` where a TAGGED generator word (`_tagged_word_vals`) is an
+    operand beside an INTEGER, and OP is arithmetic. Returns the result temp,
+    or None when the shape does not apply.
+
+    The answer is the integer one or a double box holding the double answer,
+    and which one is a run-time fact: the box's kind. That is the same select
+    `_float_param_arith` runs for a maybe-float parameter, fed this operand's
+    kind tracking instead of a parameter name. The result is itself a tagged
+    word (a double box is rendered by kind and stays a box for the next
+    operator). A double operand is not handled here: its answer is a double
+    whatever the box holds, and the tail's double arm already gives that."""
+    if op not in ginf._FLOAT_PARAM_OPS:
+        return None
+    _tagged = getattr(gen, '_tagged_word_vals', ())
+    _boxed = getattr(gen, '_boxed_vals', ())
+    _tag_l = lv in _tagged and lv in _boxed
+    _tag_r = rv in _tagged and rv in _boxed
+    if not (_tag_l or _tag_r):
+        return None
+    if lt not in ('int', 'int64_t') or rt not in ('int', 'int64_t'):
+        return None
+    _t = ginf._float_param_arith(gen, op, left_node, lt, lv, right_node, rt, rv,
+                                 lmaybe=_tag_l, rmaybe=_tag_r)
+    gen._boxed_vals.add(_t)
+    gen._tagged_word_vals.add(_t)
+    return _t
+
+
 def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                         right_node, rt: str, rv: str) -> tuple[str, str]:
     """The rest of BinaryOp lowering once both operands are already
@@ -3826,6 +3881,24 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     still guaranteeing each shared operand is evaluated exactly once —
     re-lowering left_node/right_node here would break that guarantee
     for a side-effecting comparand shared between two links."""
+    # `x == None` / `x != None` on a BOXED name (a tagged-generator value, or
+    # any slot read kept as a box). This must be decided BEFORE the boxed
+    # operand conversion below, which unwraps the box to its word: a None
+    # yield is the shared kind-'n' box, whose word is 0 and so compares as
+    # "not None" on the scalar arm, printing `False` for `v == None`. The
+    # answer is the box's kind (`mojo_word_is_none`), which for a non-box is
+    # the same constant False the scalar arm gives.
+    if op in ('==', '!=') and _is_none_literal(left_node) != _is_none_literal(right_node):
+        _other = rv if _is_none_literal(left_node) else lv
+        _other_t = rt if _is_none_literal(left_node) else lt
+        # Only an int word: a `char *` name keeps its NULL-pointer test below.
+        # A float box answers 0 here, which is the right answer for a float.
+        if _other_t in ('int', 'int64_t') and _other in getattr(gen, '_boxed_vals', ()):
+            _is_none = gen._call_expr('int', 'mojo_word_is_none', [('int64_t', _other)])
+            _cmp = '!= 0' if op == '==' else '== 0'
+            _t = gen._new_temp('_Bool')
+            gen._emit(f'  {_t} = {_is_none} {_cmp};')
+            return '_Bool', _t
     # Int / Int is true division: Python and Mojo answer a Float64, never an
     # integer. The gate is on BOTH operands being plain signed C integers, not
     # on the joined type: a struct operand (`Scalar[dtype]`, `Path`) whose join
@@ -3840,9 +3913,8 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # is how `result /= part` in std/pathlib/path.mojo became a double division
     # of a pointer, which gcc rejects. The `%` gate has the same ordering issue
     # in principle, but its operands reach it unchanged, so it is left alone.
-    int_true_div = op == '/' and all(
-        t in gimple_ctypes._SCALAR_INT_TYPES and not t.startswith('uint')
-        for t in (lt, rt))
+    int_true_div = (op == '/' and lt in gimple_ctypes._SIGNED_INT_TRUE_DIV_TYPES
+                    and rt in gimple_ctypes._SIGNED_INT_TRUE_DIV_TYPES)
     # A builtin-`bytes` subclass instance (`class _Extra(bytes)`) carries
     # its payload in a hidden `_data: MojoBytes *` field — an inherited
     # binary op (`x == y`, `x + y`, `x % y`, `x * n`) operates on that
@@ -3925,21 +3997,47 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # mark it a word of unknown kind, which is what the equality lowering
     # dispatches on at run time.
     _ident_ops = ('is', 'is not', '==', '!=', 'in', 'not in')
-    if lv in getattr(gen, '_boxed_vals', ()):
+    # A TAGGED word (a local bound from a kind-mixed generator, kept boxed by
+    # emit_stmts' simple-name bind; `_tagged_word_vals`) beside a str operand is
+    # a string concatenation: it stays the box, which the concatenation below
+    # renders by its kind (`mojo_cstr_or_int_str`). Converting it to a double
+    # here made `x + "!"` a `double + char *` gcc error. Otherwise a tagged word
+    # in arithmetic is an int or bool word far more often than a float box, so
+    # it is read as its integer (`mojo_box_int`) beside an int, and as a double
+    # (`mojo_box_double`, exact for an int too) beside a double. A tagged word
+    # beside an INTEGER under `+ - * // %` never reaches this arm: the select
+    # above answers it by the box's kind. The arm below serves what is left:
+    # the comparisons and bitwise operators beside an int, which keep the
+    # truncating read (`mojo_box_int`).
+    _tagged = getattr(gen, '_tagged_word_vals', ())
+    # A tagged word beside an integer under arithmetic: the run-time select
+    # by the box's kind (see `_tagged_arith_select`).
+    _tsel = _tagged_arith_select(gen, op, left_node, lt, lv, right_node, rt, rv)
+    if _tsel is not None:
+        return 'int64_t', _tsel
+    if lv in getattr(gen, '_boxed_vals', ()) and not (
+            lv in _tagged and rt == 'char *' and op == '+'):
         if op in _ident_ops and (op in ('is', 'is not')
                                  or rt not in ('double', 'float')):
             lv = gen._new_val('int64_t', f"mojo_box_word ({lv})")
             lt = 'int64_t'
             gen._dyn_word_vals.add(lv)
+        elif lv in _tagged and rt not in ('double', 'float'):
+            lv = gen._new_val('int64_t', f"mojo_box_int ({lv})")
+            lt = 'int64_t'
         else:
             lv = gen._new_val('double', f"mojo_box_double ({lv})")
             lt = 'double'
-    if rv in getattr(gen, '_boxed_vals', ()):
+    if rv in getattr(gen, '_boxed_vals', ()) and not (
+            rv in _tagged and lt == 'char *' and op == '+'):
         if op in _ident_ops and (op in ('is', 'is not')
                                  or lt not in ('double', 'float')):
             rv = gen._new_val('int64_t', f"mojo_box_word ({rv})")
             rt = 'int64_t'
             gen._dyn_word_vals.add(rv)
+        elif rv in _tagged and lt not in ('double', 'float'):
+            rv = gen._new_val('int64_t', f"mojo_box_int ({rv})")
+            rt = 'int64_t'
         else:
             rv = gen._new_val('double', f"mojo_box_double ({rv})")
             rt = 'double'
@@ -5521,6 +5619,9 @@ def _lower_floordiv(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
     from mojo.backend_gimple import emit_infra as ginf
     if ginf._float_param_arith_applies(gen, '//', node.left, lt, node.right, rt):
         return 'int64_t', ginf._float_param_arith(gen, '//', node.left, lt, lv, node.right, rt, rv)
+    _tsel = _tagged_arith_select(gen, '//', node.left, lt, lv, node.right, rt, rv)
+    if _tsel is not None:
+        return 'int64_t', _tsel
     # Boxed-PythonObject floor division (2026-10-21 part 4, further,
     # test_python_object): `a // b` on box locals answers through the
     # runtime's word-class checks (int result, zero-division RAISE, double

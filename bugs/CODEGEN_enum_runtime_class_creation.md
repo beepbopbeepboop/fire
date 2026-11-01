@@ -40,12 +40,44 @@ every module is reachable from a word with `mojo_getattr_any(obj, attr)`
    variable/attribute is walked at run time by `mojo_type_fill_from_dict` (insertion order, float
    slots boxed); pinned by `computed_namespace_dict_variable`. A call-result namespace is still
    refused by name.
-   STILL MISSING in stage 3: computed BASES (a tuple/list variable, which `EnumType.__new__`
-   also passes: needs a list-of-class-words walk into `mojo_type_add_base`);
-   inheriting a STATIC base's class-body attributes through a dynamic class (`class B: y = 5`,
-   `type('F', (B,), {}).y` - body attributes are static globals, not table entries; register
-   them as words in `_mojo_classattr_init` or fall back to the struct's static read);
-   `type.__new__(metacls, ..)`; instances of a dynamic class (stage 2 is its prerequisite).
+   **Computed bases landed 2026-11-01**: `type(n, bases, ns)` with `bases` a tuple/list-typed
+   variable/attribute is walked at run time by `mojo_type_add_bases_from_list` (pinned by
+   `computed_bases_list_variable`; a static class inside such a list is not yet covered).
+   **Static base body attributes landed 2026-11-01**: `class B: y = 5` / `s = 'hi'` / `f = 2.5` and
+   `type('F', (B,), {}).y` - each module emits `_mojo_classattr_read(tag, name, &word)` (the LIVE
+   class-attribute global as a word: float boxed, string registered, container by address) and
+   registers it with `mojo_register_classattr_reader`; `_class_lookup` asks the readers at every
+   class it visits, so a later `B.y = 8` is seen through `F`. Pinned by
+   `static_base_body_attributes_are_inherited` / `static_base_attribute_is_read_live`. Not
+   covered: methods of a static base reached through a dynamic class.
+   **Static class in a computed bases list landed 2026-11-01**: a bare static class name used as a
+   VALUE (`bases = (A, B)`) now lowers to its type tag (`emit_exprs._lower_IdentExpr`) instead of the
+   shared zero placeholder, so `mojo_type_add_bases_from_list` files it correctly; pinned by
+   `static_class_in_computed_bases_list`.
+   **Instances of a dynamic class landed 2026-11-01**: `Foo = type(..); o = Foo()` - a call on a
+   class handle (`mojo_fnptr_call_0..4` checks the `_reg_classobj` registry) makes an instance
+   (`mojo_classobj_call`: a registered `{MOJO_INSTOBJ_MAGIC, class tag}` block, `__init__` from the
+   class table called with it if the namespace names one). `o.y = v` / `setattr` use the per-object
+   dynattr dict; a read that misses it is found through the class and its bases
+   (`mojo_instobj_class_lookup` in `mojo_obj_getattr`), so `Foo.x = 9` is seen by every instance.
+   `emit_calls._lower_call`'s uppercase-name "opaque constructor" guess no longer fires for a LOCAL
+   (`Foo` was lowered to the literal 0). Pinned by `instance_of_a_run_time_class` /
+   `instance_reads_through_the_class_bases`. Not covered then (methods, `isinstance` since landed, below): `repr(o)`, a call with more than 4
+   arguments.
+   **Methods and `isinstance` on dynamic classes landed 2026-11-01**: a local bound to `type(..)` (or
+   to a call of such a local) is recorded in `gen._rtobj_kinds` (`('l', name)` -> `'class'`/`'inst'`,
+   set by `stmts_shared._note_rtobj_binding`, dropped when the name is rebound to anything else).
+   `o.m(a, b)` / `Foo.m(x)` on such a local is `mojo_rtobj_method_call` (class-table lookup through
+   the bases, the instance passed first as `self`, a miss is AttributeError) - before, `o.get()` was
+   lowered as `dict.get` and printed 0 - and `isinstance(o, Foo)` (also inside a tuple) is
+   `mojo_isinstance_rtclass`. Pinned by `methods_in_the_namespace_are_called_on_instances` /
+   `isinstance_of_a_run_time_class`. Not covered: more than 4 call arguments (refused by name),
+   keyword/star arguments, a method returning a float or string (the word is an untyped
+   `_dyn_word_vals` word), a class or instance reached through a parameter/attribute rather than
+   a local, `isinstance(o, StaticBase)` for a dynamic class deriving a static one, `repr(o)`.
+   Separate finding, not fixed: for a STATIC class `p.b = 5` outside `__init__` infers a struct
+   field, so `hasattr(q, 'b')` is True on an instance that never set it (CPython: False).
+   STILL MISSING in stage 3: `type.__new__(metacls, ..)`.
 4. the metaclass protocol `EnumType` uses: `__prepare__`, `__new__`, `__call__`, `__set_name__`,
    `__init_subclass__`, class-level `__getattr__`, `isinstance(x, cls)` for dynamic classes,
    `DynamicClassAttribute` / `property` on dynamic classes.

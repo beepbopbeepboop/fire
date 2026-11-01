@@ -579,8 +579,8 @@ def _pack_kwargs_dict(gen, kwarg_pairs) -> str:
 
     String values go through mojo_dict_set_str so the dict's own value
     type is right (mojo_dict_set_int would store the char* as an integer
-    and later read it back as one). Everything else — ints, doubles,
-    pointers — goes through mojo_dict_set_int, which _emit_call coerces,
+    and later read it back as one), doubles through mojo_dict_set_double.
+    Everything else — ints, pointers — goes through mojo_dict_set_int, which _emit_call coerces,
     matching how `d[k] = v` already lowers a subscript store."""
     d = gen._new_val('MojoDict *', 'mojo_dict_new ()')
     _val_ty = ''
@@ -600,6 +600,14 @@ def _pack_kwargs_dict(gen, kwarg_pairs) -> str:
             gen._emit_call('void', '', 'mojo_dict_set_str',
                             [('MojoDict *', d), ('char *', f'"{gimple_ctypes._c_escape(kname)}"'),
                              ('char *', kv)])
+        elif kt == 'double':
+            # Not `mojo_dict_set_int`: `_emit_call` would coerce the double to
+            # an integer and `run(g, scale=2.5)` would arrive as 2. The slot
+            # carries the double kind, which `mojo_dyn_call` also reads to
+            # route it to a float register (or refuse it for a plain pointer).
+            gen._emit_call('void', '', 'mojo_dict_set_double',
+                            [('MojoDict *', d), ('char *', f'"{gimple_ctypes._c_escape(kname)}"'),
+                             ('double', kv)])
         else:
             gen._emit_call('void', '', 'mojo_dict_set_int',
                             [('MojoDict *', d), ('char *', f'"{gimple_ctypes._c_escape(kname)}"'),

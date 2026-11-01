@@ -14,6 +14,7 @@ import re
 import sys
 
 from fire_compiler import (
+    _as_floatlit_node,
     IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral,
     EllipsisLiteral, NoneLiteral,
     IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr,
@@ -249,7 +250,7 @@ def _gmi_binding_index(scopes) -> dict:
     return idx
 
 
-def _gmi_identifier_literal_ctype(name, enclosing, mod_index):
+def _gmi_identifier_literal_ctype(name, enc_idx: dict, mod_index: dict):
     """The ctype of an IDENTIFIER argument whose only binding is a literal.
 
     A call `lib.walk(s)` where `s = "r"` is the one binding of `s` in scope
@@ -264,11 +265,14 @@ def _gmi_identifier_literal_ctype(name, enclosing, mod_index):
     wildcard import all return None. The scope is the enclosing function when
     it binds the name at all (a local shadows a global), otherwise the whole
     module, which is a superset of every binder that could reach the name.
-    `mod_index` is `_gmi_binding_index` over the module's statements.
+    `mod_index` is `_gmi_binding_index` over the module's statements and
+    `enc_idx` the same over the ENCLOSING function (an empty dict for a
+    module-level call). The caller builds `enc_idx` once per function: building
+    it here walked the whole function for every identifier argument of every
+    call in it, which was 8% of `fire.py --dump-full`.
     """
     sites: list = []
-    if enclosing is not None:
-        enc_idx = _gmi_binding_index(enclosing)
+    if len(enc_idx) > 0:
         sites = list(enc_idx.get(name, [])) + list(enc_idx.get('*', []))
     if not sites:
         sites = list(mod_index.get(name, [])) + list(mod_index.get('*', []))
@@ -4039,6 +4043,22 @@ def gen_module_impl(self, stmts):
             if isinstance(_m, FunctionDef):
                 _struct_method_ids.add(id(_m))
     self._all_generator_names: set = {n.name for n in _generator_fns.values()}
+    # Whether any generator in this module yields `double`. A `for` over a
+    # DYNAMIC generator handle (one returned through a function value) lowers
+    # its body once per value kind it may drain; the `double` arm is only worth
+    # (and only safe) lowering where a double-valued generator exists, because
+    # a body written for an object/pointer element (`s.unsafe_ptr()`,
+    # `item.key`) does not type-check with the loop variable a `double`.
+    # The syntactic evidence is the kind analysis, or a float-literal default
+    # on an unannotated parameter (`scale=2.0`: the generator's unit types that
+    # parameter `double`, and `i * scale` is then a double yield the
+    # annotation-free kind analysis cannot see).
+    self._has_double_generator = any(
+        gimple_gen_coro._generator_value_kind(
+            _gf, gimple_gen_coro._static_env(_gf))[0] == 'd'
+        or any(isinstance(_dv, FloatLiteral)
+               for _dv in (getattr(_gf, 'param_defaults', None) or {}).values())
+        for _gf in _generator_fns.values())
     self._all_async_fn_names: set[str] = {n.name for n in _async_fns.values()}
 
     for _s in stmts:
@@ -4592,6 +4612,9 @@ def gen_module_impl(self, stmts):
                         return _xs
                 return None
 
+            # The enclosing function's binder census, built ONCE per function
+            # (see `_gmi_identifier_literal_ctype`), keyed by the function's id.
+            _xg_enc_index: dict = {}
             def _xg_record_scalar_args(_xkey, _xpnames, _xargs, _xenc):
                 """Record the unanimous literal SCALAR-ish ctype of each
                 argument into _xmod_gen_param_hints (the cross-module twin of
@@ -4606,8 +4629,16 @@ def gen_module_impl(self, stmts):
                         break
                     _xct = _gmi_literal_ctype(_xa)
                     if _xct is None and isinstance(_xa, gimple_ctypes.IdentExpr):
+                        _xenc_idx: dict = {}
+                        if _xenc is not None:
+                            _xek = id(_xenc)
+                            if _xek in _xg_enc_index:
+                                _xenc_idx = _as_dict(_xg_enc_index[_xek])
+                            else:
+                                _xenc_idx = _gmi_binding_index(_xenc)
+                                _xg_enc_index[_xek] = _xenc_idx
                         _xct = _gmi_identifier_literal_ctype(
-                            _xa.name, _xenc, _xg_bind_index)
+                            _xa.name, _xenc_idx, _xg_bind_index)
                     if not _xct or not _xpnames[_xi]:
                         continue
                     _xs_map = self._xmod_gen_param_hints.setdefault(_xkey, {})
@@ -8106,6 +8137,29 @@ def gen_module_impl(self, stmts):
     # over every function (twice: free functions and methods) up to 8 times
     # per nesting level. Memoised by body identity so a body is walked once
     # per compile even when the enclosing structure revisits it.
+    # Round 1 of the fixpoint below runs with NO callee set; its answers are kept here so
+    # a later round can reuse them for any body that calls nothing in the grown set. The
+    # answer of `_infer_return_maybe_kinds` depends on `callee_kinds` ONLY through call
+    # names (`_valued`: a bare `f(...)` or a `obj.m(...)` spelled `obj_m`), so a body with
+    # no such call has the same answer every round -- and most bodies have none.
+    _mk_first_maybe: dict = {}
+    _mk_first_slots: dict = {}
+    _mk_first_calls: dict = {}
+
+    def _mk_call_keys(body) -> str:
+        # ",name,obj_m,..." -- the callee spellings `_valued` tests, comma-delimited so a
+        # membership test cannot match a longer name.
+        out = ','
+        for nd in _walk_ast(body):
+            if isinstance(nd, gimple_ctypes.CallExpr):
+                f = nd.func
+                if isinstance(f, gimple_ctypes.IdentExpr):
+                    out += _as_str(f.name) + ','
+                elif (isinstance(f, gimple_ctypes.MemberExpr)
+                        and isinstance(f.obj, gimple_ctypes.IdentExpr)):
+                    out += _as_str(f.obj.name) + '_' + _as_str(f.member) + ','
+        return out
+
     def _mk_round(callee_kinds):
         # A FRESH cache per round, and that is load-bearing rather than
         # wasteful: the answer depends on `callee_kinds`, so a cache shared
@@ -8126,10 +8180,26 @@ def gen_module_impl(self, stmts):
         def _mk(name, body, params=None):
             _k = id(body)
             if _k not in _mk_maybe:
-                _r_maybe, _r_slots = _infer_return_maybe_kinds(
-                    self, body, params, callee_kinds)
-                _mk_maybe[_k] = bool(_r_maybe)
-                _mk_slots[_k] = _r_slots
+                _reuse = False
+                if callee_kinds is not None and _k in _mk_first_maybe:
+                    _reuse = True
+                    _first_keys = _as_str(_mk_first_calls[_k])
+                    for _ck0 in callee_kinds:
+                        if (',' + _as_str(_ck0) + ',') in _first_keys:
+                            _reuse = False
+                            break
+                if _reuse:
+                    _mk_maybe[_k] = bool(_mk_first_maybe[_k])
+                    _mk_slots[_k] = _mk_first_slots[_k]
+                else:
+                    _r_maybe, _r_slots = _infer_return_maybe_kinds(
+                        self, body, params, callee_kinds)
+                    _mk_maybe[_k] = bool(_r_maybe)
+                    _mk_slots[_k] = _r_slots
+                    if callee_kinds is None:
+                        _mk_first_maybe[_k] = bool(_r_maybe)
+                        _mk_first_slots[_k] = _r_slots
+                        _mk_first_calls[_k] = _mk_call_keys(body)
             _maybe: bool = _mk_maybe[_k]
             _slotkinds: list = _mk_slots[_k]
             if _maybe:
@@ -11745,6 +11815,9 @@ def gen_module_impl(self, stmts):
             # consumer reading `{base}_value` AFTER the sub-generator
             # reports done gets that return value.
             'has_return_value': self._cpp_last_has_return_value,
+            # A TAGGED value slot (mixed-kind yields, each boxed): consumers
+            # render a read of it as a box, not as a raw int64_t.
+            'tagged': self._cpp_last_tagged_yield,
         }
         _gq = self._func_qualifier(s.name)
         if _gq:
@@ -13460,6 +13533,13 @@ def gen_module_impl(self, stmts):
                 self._global_to_module[_scan_stmt.target] = _phase17_mod
             _phase17_infer_global_type(_scan_stmt.target, _scan_stmt.value, _scan_own)
 
+    # Module-global generator handles, recorded BEFORE any function body is
+    # lowered: a function reading `it = g()` (a global) must find the api
+    # the toplevel store will later bind, and the toplevel body is emitted
+    # last. See `emit_infra.seed_global_generator_apis`. Function-local
+    # import, as at the `mixed_container_locals` call above.
+    import mojo.backend_gimple.emit_infra as _ein_seed
+    _ein_seed.seed_global_generator_apis(self, stmts, _gmi_binding_index(stmts))
     _phase17_append_hits: dict = {}
     _gmi_phase17_collect_appends(self, _phase17_stmts, _phase17_append_hits)
     for _gname, _gargs in _phase17_append_hits.items():
@@ -15731,6 +15811,10 @@ def gen_module_impl(self, stmts):
             and not any(isinstance(s, StructDef) and s.name == 'GimpleGen'
                         for s in _cai_structs)):
         _cai_structs.append(_gg_syn)
+    # (struct, attr, global, C type) of every class-body attribute: the run-time class table
+    # reads them back through `_mojo_classattr_read` (a class made by `type(..)` that lists
+    # this class as a base inherits them).
+    class_attr_words = []
     for s in _cai_structs:
         if isinstance(s, StructDef):
             class_attrs = self._class_attrs
@@ -15917,6 +16001,9 @@ def gen_module_impl(self, stmts):
                         elif isinstance(v, StringLiteral):
                             ctype = 'char *'
                             class_attr_inits.append(f'  {mangled} = "{_c_escape(v.value)}";')
+                            # a class-table lookup hands this global out as a bare word, and
+                            # `mojo_boxed_is_str` must know that word is a string
+                            class_attr_inits.append(f'  mojo_str_register ({mangled});')
                         elif isinstance(v, IntLiteral):
                             ctype = 'int64_t'
                             class_attr_inits.append(f'  {mangled} = {_signed_int64_c_literal(v.value)};')
@@ -15924,11 +16011,18 @@ def gen_module_impl(self, stmts):
                             ctype = 'int64_t'
                         class_attr_decls.append(f"{ctype} {mangled};")
                         self._global_var_types[mangled] = ctype
+                        # a float literal has no global of its own kind (it is read as a
+                        # folded constant), so its word is built from the literal
+                        class_attr_words.append(
+                            (s.name, aname, mangled, ctype,
+                             _as_str(repr(_as_floatlit_node(v).value))
+                             if isinstance(v, FloatLiteral) else None))
                         break
     if class_attr_decls:
         parts.extend(class_attr_decls)
         parts.append('')
     self._class_attr_inits = class_attr_inits
+    self._class_attr_words = class_attr_words
 
     _funcattr_decls = []
     for _fn_name in sorted(self._func_attrs):
@@ -17020,6 +17114,32 @@ def gen_module_impl(self, stmts):
             for _bn in self._struct_bases[_cn]:
                 parts.append(f'    mojo_class_register({_ctag}LL, '
                              f'{gimple_exprtypes._struct_type_id(_as_str(_bn))}LL, 0);')
+        parts.append('}')
+        parts.append('')
+
+    if self.emit_struct_defs and getattr(self, '_class_attr_words', None):
+        # The reader the run-time class table asks for an attribute a class BODY declares:
+        # the live global, as one word (a float boxed, a string/container by address).
+        parts.append('static int _mojo_classattr_read(int64_t tag, char *name, int64_t *out) {')
+        for _wn, _wa, _wm, _wt, _wf in self._class_attr_words:
+            _wn = _as_str(_wn)
+            if _wf is not None:
+                _wexpr = f'mojo_box_from_double({_wf if (chr(46) in _wf or chr(101) in _wf) else _wf + ".0"})'
+            elif _wt == 'int64_t':
+                _wexpr = _wm
+            elif _wt == 'double':
+                _wexpr = f'mojo_box_from_double({_wm})'
+            elif _wt.endswith('*'):
+                _wexpr = f'(int64_t)(intptr_t){_wm}'
+            else:
+                continue
+            parts.append(f'    if (tag == {gimple_exprtypes._struct_type_id(_wn)}LL '
+                         f'&& !strcmp(name, "{_c_escape(_as_str(_wa))}")) '
+                         f'{{ *out = {_wexpr}; return 1; }}')
+        parts.append('    return 0;')
+        parts.append('}')
+        parts.append('static void __attribute__((constructor)) _mojo_register_classattr_reader(void) {')
+        parts.append('    mojo_register_classattr_reader(_mojo_classattr_read);')
         parts.append('}')
         parts.append('')
 

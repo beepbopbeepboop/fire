@@ -169,3 +169,147 @@ Gate verdicts owed by the integrator: `stdlib-syntax` `U` must not increase;
 
 NOT started this round: the code (steps 1-3 are one coherent change that must
 land together, because step 1 alone enqueues and then refuses, per wall 2/3).
+
+## Status (2026-11-01): PARTIAL FIX LANDED — seed + erased-word alias; the iterator/Node typing remains.
+
+### What landed (`mojo/backend_gimple/elab_intu.py`, test `test_generic_struct_local_linked_list.py`)
+
+- `_duplicated_method_names(gen, base)`: ONE reading of a template's overloaded
+  method names, now shared by `_protocol_only_overloads` and the new branch so
+  the two cannot drift.
+- `_positional_bracket_ctor_args` (reached from `_d2_ctor_args`'s non-kwarg
+  bracket case, so the seed and `_rewrite_callees` agree): a POSITIONAL concrete
+  bracket ctor call `Struct[Int](...)` of a struct whose duplicated methods are
+  OUTSIDE the iteration protocol is enqueued for in-TU materialization. Gated to
+  scalar type arguments (`gimple_ctypes._TYPE_MAP`) and excluding
+  `_ERASED_WORD_STRUCTS` (`Optional`, `OptionalReg`, `Pointer`, `UnsafePointer`).
+  Measured why both gates: unrestricted, `test_linked_list` went 0 -> 8 gcc
+  errors (an imported non-struct-registered element such as `CopyCountedStruct`
+  erases `get_nth`'s return to `int64_t`) and `test_optional` 0 -> 2
+  (`Optional_..___getitem__` arity).
+- `_eval_comptime_type_aliases`: an alias whose base is an erased-word struct
+  (`_NodePointer = Optional[Pointer[Node[T], o]]`) now substitutes its own
+  spelling and enqueues nothing (walls 2 and 3 of the 2026-10-31 guide).
+  Replacement of `Self.<alias>` is by whole-word regex.
+- Effect on the minimal repro: `l` is `LinkedList_11_ElementType_3_Int *`, the
+  hashed `__init__` overload is called, the `indirect call via SubscriptExpr`
+  is gone from `main`, and the stub count in the probe dropped 812 -> 59 once
+  the alias fix was in. gcc `-fsyntax-only` is clean on the probe,
+  `test_linked_list`, `test_optional`, `test_deque`, `test_dict`, `test_set`,
+  `test_list`, `test_arc`, `test_bitset`, `test_iter` (0 errors; stub counts
+  equal to master except `test_linked_list`/`test_deque`/`test_bitset` which
+  now materialize instead of literal-0).
+
+### What remains (why the doc stays)
+
+1. `it = l.__iter__()` is still `int64_t it;` and `it.__next__()` is stubbed:
+   `info['methods']` erases `__iter__ -> int64_t`; `_LinkedListIter` needs
+   materializing via `LinkedList.IteratorType[...]`, a parametrized comptime
+   alias (`comptime IteratorType[iterable_mut: Bool, //, iterable_origin: ...]:
+   Iterator = _LinkedListIter[downcast[Self.ElementType, Copyable],
+   iterable_origin]`) that `_COMPTIME_ALIAS_HEAD_RE` does not match, with a
+   `downcast[...]` call in the argument and an erased origin parameter.
+2. `Node[T]` methods (`next`, `prev`, `single`, `unsafe_with_layout`,
+   `_into_value`, ~59 stubs in the probe) are called on the erased
+   `Optional[Pointer[Node]]` word: `Node[Int]` is never materialized because
+   the pointer alias is erased. Needs `Pointer[Node[T], o]` typed as `Node_T *`
+   in the field/return types (a tagged-word `Optional` of a struct pointer).
+3. Struct-valued element types (`LinkedList[CopyCountedStruct]`,
+   `LinkedList[LinkedList[...]]`) are refused by the scalar gate until the
+   element's imported non-generic struct is registered before the materialized
+   methods' annotations are resolved.
+4. The pin for the whole bug (no `stubbed` in the generated C for the repro) is
+   not in the test yet; add it when 1-2 land, then delete this doc.
+
+NOT run: gate / `stdlib-syntax` / `stdlib-dylib` (the integrator's). The
+`test_linked_list`/`test_deque`/`test_bitset` outputs change, so `stdlib-syntax`
+`U` and `stdlib-dylib` skip count are owed a check.
+
+## Status (2026-11-01, later): PLANNING ROUND — remaining work is one coherent program (iterator + typed Node pointer); guide below.
+
+### Measurement (this tree, probe = the minimal repro, `.tmp/` script over `test_generic_struct_local_linked_list._compile()`)
+
+- `test_generic_struct_local_linked_list.py` passes (`l` is `LinkedList_11_ElementType_3_Int *`,
+  hashed `__init__` called). `main` still has `int64_t it;`,
+  `_t7 = LinkedList_11_ElementType_3_Int___iter___0120be (l);` (returns `int64_t`) and
+  `/* int64_t.__next__() stubbed */`. 59 `stubbed` markers in the whole TU, by receiver method:
+  `Node` methods `next prev single unsafe_with_layout unsafe_leak _into_value __hash__` (~50, every one
+  on an `int64_t` word), plus `IteratorOwnedType __next__ write_sequence_to _write_self_to FormatStruct
+  TypeNames params fields`.
+- So the two remaining walls are NOT independent: materializing `_LinkedListIter` alone gives a typed
+  `it` whose `__next__` body is itself the `self.curr.value()[].next()` Node-word stub. Landing the
+  iterator without the Node model would make `it` a struct but `print(it.__next__())` still wrong.
+  This is why no piece landed this round: each half alone leaves the repro's output unchanged.
+
+### Decision needed (readings), then the plan
+
+The root of walls 1-2 is that `Optional[UnsafePointer[Node[T], MutUntrackedOrigin]]` is "an erased
+word" (`_ERASED_WORD_STRUCTS`), so `Node[T]` is never named and `.next()` has no receiver type.
+Reading A (recommended): model `Optional[UnsafePointer[X, o]]` / `Optional[Pointer[X, o]]` where `X`
+is a materialized struct as `X *` with NULL = None. This is the representation the rest of the
+struct-pointer codegen already uses (a struct local is `X *`), `not p` / `p.value()` / `p.value()[]`
+become NULL test / identity / identity, and no tagged word is needed. Reading B: keep the tagged word
+and teach every method call to recover the pointee type from the alias text; rejected, it is the
+current failure shape (the type exists only in the spelling).
+
+### Implementation plan
+
+1. `elab_intu._eval_comptime_type_aliases`: for an erased-word base whose innermost argument is a
+   `Struct[...]` with scalar args, enqueue that struct (`Node[Int]`) and make the alias name
+   `<mangled Node> *` (NOT the spelling) so field/return annotations resolve through the registered-name
+   branch to a pointer type. Pointer-nesting is `Optional[UnsafePointer[Node[T], o]]` -> one `*`.
+2. Emit side (`emit_exprs`/`emit_methods`): `.value()` on a pointer-typed Optional receiver is the
+   identity, `not x` / `if x` is `x == 0` / `x != 0`, `x[]` on `UnsafePointer[Node]` is identity (the
+   struct is already `*`), assignment of `None` to such a field is `0`. Find the existing
+   `Optional.value` lowering by grepping `unsafe_value` / `_ELEM_COPY_RE` branch (a) in `emit_methods`.
+3. Parametrized alias: widen `_COMPTIME_ALIAS_HEAD_RE` to
+   `comptime\s+(_?[A-Za-z]\w*)(\[[^\]]*\])?\s*(?::[^=]+)?=\s*Base\[`; for `IteratorType[..., //, o]`
+   drop the origin/mut parameters (erased), evaluate `downcast[T, Trait]` to `T`, and rewrite
+   `Self.IteratorType[origin_of(self)]` (return annotation text) to the mangled iterator. `_LinkedListIter`
+   has defaulted `forward: Bool = True` and a leading `mut: Bool, //` — `type_param_names` must skip the
+   infer-only group and `mm.mangle` must fold defaults, otherwise the positional-binding refusal fires.
+4. Re-measure: zero `stubbed`, `int64_t it;` gone; `test_optional`, `test_arc`, `test_bitset`,
+   `test_deque`, `test_dict`, `test_set`, `test_list` gcc `-fsyntax-only` clean with unchanged stub counts.
+5. Struct-valued elements (`LinkedList[CopyCountedStruct]`): register the element's imported struct
+   before resolving materialized annotations, then lift the scalar gate in
+   `_positional_bracket_ctor_args`.
+
+### Tests that will prove it
+
+Extend `test_generic_struct_local_linked_list.py`: assert `'int64_t it;' not in main`,
+`'stubbed' not in _compile()`, and a build-and-run of `LinkedList[Int](1, 2, 3)` iterated with a
+`for` loop printing `1 2 3` (compare against `tools/mojo`). Commands:
+`python3 tools/memslot.py --gb 8 --label x -- python3 test_generic_struct_local_linked_list.py`.
+Integrator owes `stdlib-syntax` `U` and `stdlib-dylib` skip count checks.
+
+## Status (2026-11-01, round 3): PARTIAL — plan step 1 landed (typed Node pointee); step 2 (emit side) is the blocker.
+
+### What landed (`elab_intu._eval_comptime_type_aliases`, `_erased_pointee_struct`; pin `test_node_pointer_alias_is_typed`)
+
+An erased-word alias whose innermost argument is a generic struct at scalar
+args (`_NodePointer = Optional[Pointer[Node[T], o]]`) now names the pointee's
+mangled struct, enqueues it, and registers it from the spliced struct's own
+file (`Node` lives beside `LinkedList`, so it was never in
+`_imported_generic_structs`). `LinkedList_..._Int` now has `Node_1_T_3_Int *
+_head/_tail` (was an erased word) and `Node[Int]` materializes in-TU.
+Measured: gcc `-fsyntax-only` 0 errors on the probe and on `test_linked_list`,
+`test_optional`, `test_deque`, `test_bitset`, `test_dict`, `test_list`,
+`test_set`; stub counts equal to before except `test_linked_list` 213 -> 227
+(Node's own method bodies are now emitted and hit the walls below).
+
+### Still blocking (measured, not guessed)
+
+1. `Node._prev/_next: Self._PointerType = Optional[Pointer[Self, o]]` are
+   `int64_t`. Mapping the pointee `Self` to `mm.mangle(base, targs)` was
+   tried: the field became plain `int64_t` (worse than the previous
+   `int64_t *`), because the struct being materialized is not yet a registered
+   name when its own field annotations are resolved. Needs the self name to be
+   registered before field resolution (or a post-registration fixup).
+2. Emit side (plan step 2) is not done and is the real wall: `x.value()[]`,
+   `node[].next()`, `not p` on an `Optional[Pointer[Node]]` still lower through
+   `mojo_list_get_int` (subscript-of-word) and the `int64_t.next() stubbed`
+   path (19 `next`, 10 `prev`, ... = 66 stubs in the probe). `.value()` and
+   `[]` on a struct-pointer-typed Optional/Pointer must be the identity,
+   `not p` a NULL test, and `Self._NodePointer()` a literal 0.
+3. Iterator (`IteratorType[...]` parametrized alias) and struct-valued
+   elements: unchanged from the previous entry.

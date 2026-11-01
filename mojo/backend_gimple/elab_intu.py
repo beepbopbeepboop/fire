@@ -599,7 +599,7 @@ def _d2_ctor_args(work, base, node):
         if not isinstance(node.func.obj, IdentExpr):
             return None
         if not _d2_kwarg_bracket(node.func):
-            return None
+            return _positional_bracket_ctor_args(work, base, node)
         module_src = _module_src(work.gen, base, 'struct')
         if module_src is None:
             work.refuse(f'{base}[...]: no source for its home module')
@@ -620,6 +620,47 @@ def _d2_ctor_args(work, base, node):
     if _literal_args(node) is None:
         return None
     return _infer_struct_args(work, base, _literal_args(node))
+
+
+# Structs this codegen models as an ERASED tagged word everywhere else
+# (`Optional[Int]` is a raw int64 slot, 0 = None; a `Pointer` is a bare
+# pointer), so materializing one as a real struct would disagree with every
+# other site that reads the word. `test_optional`'s `a[]` is the measured
+# casualty (`Optional_..___getitem__` called with the wrong arity).
+_ERASED_WORD_STRUCTS = frozenset(('Optional', 'OptionalReg', 'Pointer',
+                                 'UnsafePointer'))
+
+
+def _positional_bracket_ctor_args(work, base, node):
+    """The type arguments of a POSITIONAL concrete-bracket constructor call
+    (`LinkedList[Int](1, 2, 3)`) of a struct the `.o` route declines to register
+    because a method name is overloaded OUTSIDE the iteration protocol. Without
+    this the call is lowered against no struct at all: the local is typed
+    `int64_t`, `l.__iter__()` is "stubbed" and every construction is a literal 0
+    (bugs/CODEGEN_generic_struct_local_typed_int64_linked_list.md). None for
+    every other shape, so those keep their old path exactly."""
+    f = node.func
+    if not (isinstance(f, SubscriptExpr) and isinstance(f.obj, IdentExpr)):
+        return None
+    if _d2_kwarg_bracket(f):
+        return None
+    # A base this codegen erases to a RUNTIME object (`List`/`Dict`/`Set` ->
+    # `MojoList *`/...; `_IN_TU_LIST_BASES` documents why a formal `List`
+    # layout must never be built) is declined by the `.o` route on the same
+    # ground as here (`_materialize_generic_struct_mentions`), and its
+    # overloaded `__getitem__` is exactly what this branch looks for: pulling
+    # `List[String]()` in-TU lowered its slice lambda's `-> T` as `int64_t`
+    # (`invalid conversion in gimple call`, std/os/os.mojo).
+    if (base in _ERASED_WORD_STRUCTS or base in _IN_TU_LIST_BASES
+            or base in gimple_ctypes._TYPE_MAP):
+        return None
+    dups =_duplicated_method_names(work.gen, base)
+    if not dups or dups <= _ITERATION_PROTOCOL:
+        return None
+    args = _concrete_args(work, 'struct', base, node)
+    if args is None or not all(a in gimple_ctypes._TYPE_MAP for a in args):
+        return None
+    return args
 
 
 def _d2_elem_mangle(work, mm, node):
@@ -728,10 +769,20 @@ def _protocol_only_overloads(gen, base) -> bool:
     cannot satisfy. See
     `the user-iterator next() bug (doc deleted in db724c4d6)` for
     the measurement of what widening this costs."""
+    dups = _duplicated_method_names(gen, base)
+    return bool(dups) and dups <= _ITERATION_PROTOCOL
+
+
+def _duplicated_method_names(gen, base) -> frozenset:
+    """The method names `base`'s template defines more than once (overloads).
+    ONE reading of the template, shared by `_protocol_only_overloads` (the
+    in-TU route's gate) and `_d2_ctor_args`' positional-bracket branch (which
+    must fire exactly for the structs `emit_resolve._register_generic_struct`
+    declines on the same ground), so the two cannot drift."""
     if base in _OVERLOAD_CACHE:
         return _OVERLOAD_CACHE[base]
     module_src = _module_src(gen, base, 'struct')
-    ok = False
+    dups: set = set()
     if module_src:
         import elaborate
         tmpl = elaborate.extract_struct_source(module_src, base)
@@ -743,15 +794,14 @@ def _protocol_only_overloads(gen, base) -> bool:
             for s in parsed:
                 if isinstance(s, StructDef) and s.name == base:
                     seen: set = set()
-                    dups: set = set()
                     for m in (getattr(s, 'methods', None) or []):
                         if m.name in seen:
                             dups.add(m.name)
                         seen.add(m.name)
-                    ok = bool(dups) and dups <= _ITERATION_PROTOCOL
                     break
-    _OVERLOAD_CACHE[base] = ok
-    return ok
+    result = frozenset(dups)
+    _OVERLOAD_CACHE[base] = result
+    return result
 
 
 _OVERLOAD_CACHE: dict = {}
@@ -3123,6 +3173,35 @@ _ELEM_COPY_RE = re.compile(
     r'([ \t]*)var elem = self\._inner_a_elem\.unsafe_value\(\)\.copy\(\)')
 
 
+def _erased_pointee_struct(resolved):
+    """`(Struct, scalar args)` when the first argument of an erased-word
+    alias (`Optional[Pointer[Node[Int], o]]`, `Pointer[Node[Int], o]`) is a
+    pointer to a generic struct instantiated at scalar types, else None."""
+    if not resolved:
+        return None
+    arg = resolved[0].strip()
+    m = re.match(r'^(Optional|OptionalReg|Pointer|UnsafePointer)\s*\[(.*)\]$',
+                 arg, re.S)
+    while m:
+        inner = [a.strip() for a in
+                 gimple_exprtypes._split_top_level_commas(m.group(2))
+                 if a.strip()]
+        if not inner:
+            return None
+        arg = inner[0]
+        m = re.match(r'^(Optional|OptionalReg|Pointer|UnsafePointer)\s*\['
+                     r'(.*)\]$', arg, re.S)
+    m = re.match(r'^([A-Za-z_]\w*)\s*\[(.*)\]$', arg, re.S)
+    if not m or m.group(1) in _ERASED_WORD_STRUCTS:
+        return None
+    pargs = [a.strip() for a in
+             gimple_exprtypes._split_top_level_commas(m.group(2))
+             if a.strip()]
+    if not pargs or not all(a in gimple_ctypes._TYPE_MAP for a in pargs):
+        return None
+    return m.group(1), pargs
+
+
 def _eval_comptime_type_aliases(work, mm, module_src, base, targs, concrete):
     """Evaluate the `comptime <alias> = <Base>[<concrete args>]` type
     aliases of a spliced generic struct. Returns (concrete, nested_keys):
@@ -3169,6 +3248,32 @@ def _eval_comptime_type_aliases(work, mm, module_src, base, targs, concrete):
         if bad:
             work.refuse(f'{base}: comptime alias {aname} {bad}')
             return concrete, None
+        if abase in _ERASED_WORD_STRUCTS:
+            # An erased-word base (`Optional[Pointer[Node[T], o]]`) is not a
+            # struct this codegen builds: every other site reads it as the
+            # tagged word. The alias therefore names its own spelling, which
+            # the layout/type readers already erase, and nothing is enqueued
+            # (materializing `Optional` is the regression
+            # `_protocol_only_overloads` documents).
+            pointee = _erased_pointee_struct(resolved)
+            if pointee is not None:
+                pbase, pargs = pointee
+                # The pointee usually lives in the SAME module as the struct
+                # being spliced (`Node` beside `LinkedList`), so it is not
+                # registered yet: register it from this struct's own file.
+                _register_named(work.gen,
+                                work.gen._imported_generic_structs.get(base),
+                                [pbase])
+                psrc = _module_src(work.gen, pbase, 'struct')
+                ptmpl = (elaborate.extract_struct_source(psrc, pbase)
+                         if psrc else None)
+                pn = elaborate.type_param_names(ptmpl) if ptmpl else None
+                if pn and len(pn) == len(pargs):
+                    aliases[aname] = mm.mangle(pbase, dict(zip(pn, pargs)))
+                    paired.append((aname, ('struct', pbase, tuple(pargs))))
+                    continue
+            aliases[aname] = f'{abase}[{", ".join(resolved)}]'
+            continue
         tmpl = (elaborate.extract_struct_source(module_src, abase)
                 if module_src else None)
         pnames = elaborate.type_param_names(tmpl) if tmpl else None
@@ -3178,12 +3283,13 @@ def _eval_comptime_type_aliases(work, mm, module_src, base, targs, concrete):
             return concrete, None
         aliases[aname] = mm.mangle(abase, dict(zip(pnames, resolved)))
         paired.append((aname, ('struct', abase, tuple(resolved))))
-    used = [n for n, _ in paired
+    used = [n for n in aliases
             if re.search(r'Self\.' + re.escape(n) + r'\b', concrete)]
     if not used:
         return concrete, None
     for n in used:
-        concrete = concrete.replace(f'Self.{n}', aliases[n])
+        concrete = re.sub(r'Self\.' + re.escape(n) + r'\b',
+                          lambda _m, _a=aliases[n]: _a, concrete)
     return concrete, [k for n, k in paired if n in used] or None
 
 

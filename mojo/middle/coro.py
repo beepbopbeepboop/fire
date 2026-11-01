@@ -1128,12 +1128,14 @@ def _conflicting_names_in(expr, env: dict | None) -> list:
 
 def _tagged_consumers_ok(name: str) -> bool:
     """True when every reference to the module-level generator `name` in the
-    module being lowered is a call that is DIRECTLY the iterable of a `for`
-    loop -- the one consumer form that reads a tagged-word value slot (the loop
-    target is bound as a boxed word and rendered by `mojo_repr_boxed`). Any
-    other use (`next(g())`, `list(g())`, a comprehension, `sum`, passing `g`
-    around, `yield from g()`) would read the word as a plain int64_t, which
-    prints a box's ADDRESS: so a generator used that way keeps its refusal."""
+    module being lowered is a consumer that reads a tagged-word value slot as a
+    BOXED word, rendered by `mojo_repr_boxed`: a `for` loop's iterable, a
+    `list()` / comprehension / `yield from` of the call, and `next()` (on the
+    call or on a handle bound to it, with or without a default). The `next()`
+    result is marked boxed by `_lower_generator_next`. Any other use (`sum`,
+    passing `g` around, `send`, ...) would read the word as a plain int64_t,
+    which prints a box's ADDRESS: so a generator used that way keeps its
+    refusal."""
     for_iters = set()
     refs = []
     def _is_gcall(x):
@@ -1175,6 +1177,10 @@ def _tagged_consumers_ok(name: str) -> bool:
                     and n.func.member == 'close' and isinstance(n.func.obj, N.IdentExpr)
                     and n.func.obj.name in handles):
                 ok_uses.add(id(n.func.obj))
+            elif (isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr)
+                    and n.func.name == 'next' and len(n.args) >= 1
+                    and isinstance(n.args[0], N.IdentExpr) and n.args[0].name in handles):
+                ok_uses.add(id(n.args[0]))
         for hn in handles:
             if len(handles[hn]) != 1:
                 continue
@@ -1199,6 +1205,13 @@ def _tagged_consumers_ok(name: str) -> bool:
                 for_iters.add(id(n.args[0]))
             elif isinstance(n, N.Generator) and _is_gcall(n.iterable):
                 for_iters.add(id(n.iterable))
+            elif (isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr)
+                    and n.func.name == 'next' and 1 <= len(n.args) <= 2
+                    and _is_gcall(n.args[0])):
+                # `next(g())` / `next(g(), default)`: the one-shot read of the
+                # generator's first value; the tagged word is rendered through
+                # the `next()` lowering's boxed result (see _lower_generator_next).
+                for_iters.add(id(n.args[0]))
             elif isinstance(n, N.YieldFromExpr) and _is_gcall(n.value):
                 # `yield from g()` forwards the words; the delegating generator
                 # is itself tagged (its delegated kind is 'w')
@@ -1218,6 +1231,13 @@ def _tagged_consumers_ok(name: str) -> bool:
     calls = sum(1 for r in refs if r is not None)
     idents = sum(1 for r in refs if r is None)
     return idents == calls
+
+
+# The one refusal text for a None yield on the C++ coroutine path. Both the
+# emitter's bare-yield arm (cpp_core.py) and the generator-level check
+# (cpp_async.py) raise it, so the two cannot drift apart.
+NONE_YIELD_CPP_REFUSAL = ("a None yield (bare `yield` / `yield None`) has no value "
+                          "slot the C++ coroutine path can carry (it would print 0); refused")
 
 
 def _is_none_yield(y) -> bool:
@@ -1342,6 +1362,16 @@ def _generator_value_kind(fn: N.FunctionDef,
                         for x in _walk(fn))
             and _tagged_consumers_ok(fn.name)):
         return 'w', ''
+    # A None yield that did NOT take the tagged word has no slot that can carry
+    # it: the fall-through below is the int64_t slot, and that prints the raw 0
+    # (measured: `next(it)` on a bare-`yield` generator printed `0` where CPython
+    # prints `None`). Refuse rather than compile a silently wrong value, the same
+    # way the mixed-kind checks below refuse. A `for` / `list()` / comprehension
+    # consumer takes the tag, so only a consumer outside that set lands here.
+    if has_none:
+        return None, ('a None yield whose consumer is not a for loop / list() / '
+                      'comprehension: the int64_t value slot cannot carry None '
+                      'and would print 0 (v0)')
     if 'd' in kinds and (kinds - {'d', None}):
         return None, f'mixed float / non-float yields (v0)'
     if 'd' in kinds:
@@ -4759,7 +4789,7 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
         describe themselves in terms of UNANNOTATED params."""
         return pann is None or pann == ''
 
-    def _visit_call(node, caller_env, callee=None):
+    def _visit_call(node, caller_env, callee):
         # `callee` is the name the call resolves to in THIS module, given by a
         # closure caller whose spelling is an alias (`from m import gen as g`
         # calls `g`, which is `gen` here). Absent, the spelling is the name.
@@ -4918,11 +4948,11 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
         if _callee is not None:
             _visit_call(node, caller_env, _callee)
 
-    def _wants_call(visit, node):
-        # Whether `visit` would do anything with `node`: the same two tests the
+    def _wants_call(closure, node):
+        # Whether the visitor would do anything with `node`: the same two tests the
         # visitors make before they touch the caller's env, so `_collect_from` can
         # skip building that env (see there) without changing what is recorded.
-        if visit is _visit_closure_call:
+        if closure:
             return _closure_callee(node) is not None
         fn = node.func
         gname = (fn.name if isinstance(fn, N.IdentExpr) else
@@ -4958,26 +4988,7 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
                     aliases.add(_cm_as_str(_al))
         return aliases
 
-    # The CallExpr nodes of each function (and of each module-level statement),
-    # found by ONE walk and reused by every later pass of this scan. `_collect` runs
-    # twice per scan and the scan runs once per `lower`; re-walking every function of
-    # the whole import closure each time was a quarter of `fire.py --dump-full`. The
-    # AST is not mutated while a scan runs, and the dict lives only for this call.
-    _calls_of: dict = {}
-
-    def _calls_in(node):
-        _k = id(node)
-        _hit = _calls_of.get(_k)
-        if _hit is not None:
-            return _hit
-        _out = []
-        for _w in _walk(node):
-            if isinstance(_w, N.CallExpr):
-                _out.append(_w)
-        _calls_of[_k] = _out
-        return _out
-
-    def _collect_from(src, visit):
+    def _collect_from(src, closure):
         for s in src:
             fns = []
             if isinstance(s, N.FunctionDef):
@@ -5000,32 +5011,50 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
                 # `_static_env(fn, struct_def)`) is what makes the two agree
                 # about `self.k`.
                 #
+                # The visitors are called BY NAME, not handed in as values: a capturing
+                # nested function passed on from inside another nested function reaches
+                # its callee with a NULL environment in the self-hosted build (the
+                # compiled compiler crashed on every program with a module-level call;
+                # reproduction in bugs/mid/CODEGEN_capturing_closure_value_passed_from_a_closure_has_no_env.md).
+                #
                 # LAZY: the env is built on the first call the visitor will
                 # actually act on (`_wants_call`), not for every function. In the
                 # closure walk almost no function calls one of THIS module's
                 # generators, and `_static_env` is the expensive part.
+                #
+                # Iterates `_walk(fn)` and tests `isinstance` per node, as the
+                # original did: a list of pre-filtered CallExpr nodes returned
+                # from a helper lost its element type in the self-hosted build
+                # (the loop variable became a boxed word and `node.func` read
+                # garbage -- every program with a `def` crashed the binary).
                 cenv = None
                 have_env = False
-                for n in _calls_in(fn):
-                    if not _wants_call(visit, n):
-                        continue
-                    if not have_env:
-                        cenv = _static_env(fn, sdef)
-                        have_env = True
-                    visit(n, cenv)
+                for n in _walk(fn):
+                    if isinstance(n, N.CallExpr) and _wants_call(closure, n):
+                        if not have_env:
+                            cenv = _static_env(fn, sdef)
+                            have_env = True
+                        if closure:
+                            _visit_closure_call(n, cenv)
+                        else:
+                            _visit_call(n, cenv, None)
             # module-level calls (rare, e.g. a bare generator call in a stmt)
             if not isinstance(s, (N.FunctionDef, N.StructDef)):
-                for n in _calls_in(s):
-                    visit(n, None)
+                for n in _walk(s):
+                    if isinstance(n, N.CallExpr):
+                        if closure:
+                            _visit_closure_call(n, None)
+                        else:
+                            _visit_call(n, None, None)
 
     def _collect():
-        _collect_from(stmts, _visit_call)
+        _collect_from(stmts, False)
         for _cs in closure_stmts:
             _bound_here.clear()
             _bound_here.update(_from_bound_names(_cs))
             _alias_here.clear()
             _alias_here.update(_module_aliases(_cs))
-            _collect_from(_cs, _visit_closure_call)
+            _collect_from(_cs, True)
 
     def _classify():
         # Replace, not merge: a pass that no longer finds a conflict must

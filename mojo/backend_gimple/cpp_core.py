@@ -42,6 +42,7 @@ from fire_compiler import target_slots
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
+import mojo.middle.coro as coro_mod
 from mojo.middle.exprtypes import _walk_ast_invalidate
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
@@ -732,12 +733,14 @@ def _cpp_trusted_fn_return_types(gen) -> dict:
     return trusted
 
 
-def _cpp_is_int_operand(gen, node) -> bool:
+def _cpp_is_int_operand(gen, node, types=None) -> bool:
     """True when a coroutine-body expression is a plain integer, the only
     kind of divisor `_cpp_expr`'s `/`/`%` lowering must check for zero. An
     int literal is always one; anything else is judged by the same static
     inference the string checks above use, and an unknown type is NOT
-    treated as an integer (a float divisor must never be truncated)."""
+    treated as an integer (a float divisor must never be truncated). `types`
+    narrows the accepted ctypes (default: every scalar integer); the `/`
+    lowering passes the signed set emit_exprs.py's tail uses."""
     if isinstance(node, gimple_ctypes.IntLiteral):
         return True
     try:
@@ -749,7 +752,7 @@ def _cpp_is_int_operand(gen, node) -> bool:
         )
     except Exception:
         return False
-    return _ct in gimple_ctypes._SCALAR_INT_TYPES
+    return _ct in (gimple_ctypes._SCALAR_INT_TYPES if types is None else types)
 
 
 def _cpp_apply_fstring_spec(part_val: str, spec: str) -> str:
@@ -1568,7 +1571,8 @@ def _cpp_dyn_call_expr(gen, e):
     declared as. int64_t-word, `char *`, container-pointer and `double`
     arguments are admitted. A double travels as its bit pattern (like every
     other word in the packed list/dict) and is TAGGED as a double - the
-    positional list's kind string, `mojo_dict_set_double` for a keyword - so a
+    positional list's per-slot kind (`mojo_list_append_double_kinded`),
+    `mojo_dict_set_double` for a keyword - so a
     callee that takes its arguments in integer registers (a plain function
     pointer) can refuse it (`mojo_dyn_call`) instead of reading garbage, while
     a registered generator signature (`mojo_gen_sig_register`) routes it to a
@@ -1580,7 +1584,6 @@ def _cpp_dyn_call_expr(gen, e):
         return None
     _fname = e.func.name
     parts = []
-    _pos_kinds = []
     for _fa in e.args:
         _op = _fa.operand if (isinstance(_fa, gimple_ctypes.UnaryOp)
                               and _fa.op in ('*', '**')) else _fa
@@ -1595,18 +1598,13 @@ def _cpp_dyn_call_expr(gen, e):
             _fct = 'double'
         _spread = isinstance(_fa, gimple_ctypes.UnaryOp) and _fa.op in ('*', '**')
         if _fct == 'double' and not _spread:
-            parts.append(f"mojo_list_append_double(_a, (double)({gen._cpp_expr(_op)})); ")
-            _pos_kinds.append('d')
+            parts.append(f"mojo_list_append_double_kinded(_a, (double)({gen._cpp_expr(_op)}), 'i'); ")
             continue
         if _fct not in ('int64_t', 'char *', 'MojoList *', 'MojoDict *', 'MojoSet *'):
             raise gimple_exprtypes._UnsupportedGeneratorShape(
                 "a call through the callable-valued parameter "
                 f"'{_fname}' passes an argument whose C type is not "
                 "statically a word, string or container")
-        if _spread:
-            _pos_kinds.append(None)
-        else:
-            _pos_kinds.append('p' if _fct == 'char *' else 'i' if _fct == 'int64_t' else 'l')
         _txt = f"(int64_t)(intptr_t)({gen._cpp_expr(_op)})"
         if isinstance(_fa, gimple_ctypes.UnaryOp) and _fa.op == '*':
             parts.append(f"mojo_args_extend_word(_a, {_txt}); ")
@@ -1635,12 +1633,6 @@ def _cpp_dyn_call_expr(gen, e):
                 "statically a word, string or container")
         parts.append(f'mojo_dict_set_int(_k, (char *)"{_kn}", '
                      f"(int64_t)(intptr_t)({gen._cpp_expr(_kv)})); ")
-    if 'd' in _pos_kinds:
-        if None in _pos_kinds:
-            raise gimple_exprtypes._UnsupportedGeneratorShape(
-                "a call through the callable-valued parameter "
-                f"'{_fname}' mixes a double argument with a `*` spread")
-        parts.append(f'mojo_list_set_kinds(_a, "{"".join(_pos_kinds)}"); ')
     _cpp_fname = gen._cpp_kw_param_renames.get(_fname, _fname)
     return ("[&]() { struct _W { int64_t w; "
             "operator int64_t() const { return w; } "
@@ -1922,6 +1914,49 @@ def _cpp_next_on_generator_expr(gen, handle_expr, api):
         f"throw _MojoCppExc{{ (int64_t){stop_tag}, nullptr, (void *)nullptr }}; }} "
         f"return {base}_value({local_name}); }}()"
     )
+
+
+def _cpp_tagged_next_api(gen, expr):
+    """The api of the TAGGED-word generator that `expr` = `next(<handle>)`
+    reads from, or None. A tagged generator's slot is one int64_t word that
+    boxes each yield by its kind (`_cpp_tag_yield_sites`), so the value
+    `next()` returns is a word, not a plain integer, and only a consumer that
+    renders it through `mojo_repr_boxed` prints the yielded value. Only the
+    one-argument form is a generator read here (the two-argument `next(g,
+    default)` is not lowered by this emitter)."""
+    if not (isinstance(expr, gimple_ctypes.CallExpr)
+            and isinstance(expr.func, gimple_ctypes.IdentExpr)
+            and expr.func.name == 'next' and len(expr.args) == 1
+            and not getattr(expr, 'kwargs', None)):
+        return None
+    arg = expr.args[0]
+    if isinstance(arg, gimple_ctypes.IdentExpr):
+        api = getattr(gen, '_cpp_generator_var_api', {}).get(arg.name)
+    elif isinstance(arg, gimple_ctypes.CallExpr):
+        api = _cpp_resolve_generator_call_api(gen, arg.func)
+    else:
+        api = None
+    return api if api is not None and api.get('tagged') else None
+
+
+def _cpp_mark_tagged_word(gen, name: str):
+    """Record `name` as a local that holds a TAGGED word (see
+    `_cpp_is_tagged_word_expr`). The set is created on demand: the generator
+    unit initialises it, but the for-loop emitter also runs inside async
+    bodies, which do not."""
+    if not hasattr(gen, '_cpp_tagged_word_names'):
+        gen._cpp_tagged_word_names = set()
+    gen._cpp_tagged_word_names.add(name)
+
+
+def _cpp_is_tagged_word_expr(gen, expr) -> bool:
+    """True when `expr` yields a TAGGED word that must be printed as a box:
+    a local bound from a tagged generator (`gen._cpp_tagged_word_names`, set
+    by the for-loop binding and `x = next(g)`), or a direct `next(g)` on a
+    tagged generator. Every other scalar is left to its ordinary spelling."""
+    if isinstance(expr, gimple_ctypes.IdentExpr):
+        return expr.name in getattr(gen, '_cpp_tagged_word_names', ())
+    return _cpp_tagged_next_api(gen, expr) is not None
 
 
 def _cpp_rename_ident_container(v, old: str, new: str):
@@ -2752,8 +2787,9 @@ def _cpp_expr(gen, e) -> str:
         # Int / Int is true division (Float64), as in emit_exprs.py's tail. It
         # goes through mojo_div_double, not a bare C `/`, so a zero divisor
         # still raises ZeroDivisionError instead of answering inf.
-        if (op == '/' and _cpp_is_int_operand(gen, e.left)
-                and _cpp_is_int_operand(gen, e.right)):
+        if (op == '/'
+                and _cpp_is_int_operand(gen, e.left, gimple_ctypes._SIGNED_INT_TRUE_DIV_TYPES)
+                and _cpp_is_int_operand(gen, e.right, gimple_ctypes._SIGNED_INT_TRUE_DIV_TYPES)):
             return f"mojo_div_double((double)({_bl}), (double)({_br}))"
         if op in ('/', '%') and _cpp_is_int_operand(gen, e.right):
             _br = f"mojo_int_divisor((int64_t)({_br}))"
@@ -5355,8 +5391,12 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     "`yield` not supported in an async function body "
                     "(that would make it an async generator, its own "
                     "combined-refusal category — see gen_module)")
-            if s.value.value is None:
-                return [f"{indent}co_yield (int64_t)0;  /* bare yield */"]
+            if coro_mod._is_none_yield(s.value):
+                # A None yield is marked, not written as a 0: cpp_async.py boxes
+                # every marked site into a tagged word (`mojo_box_none()`) when
+                # the generator mixes kinds, and refuses the whole generator when
+                # it does not (a lone None has no word to carry it).
+                return [f"{indent}co_yield /*Y:none*/ (0);"]
             if isinstance(s.value.value, gimple_ctypes.TupleExpr):
                 return gen._cpp_yield_tuple(s.value.value, declared, indent)
             if id(s.value) in (getattr(gen, '_cpp_tuple_guarded_yields', None) or ()):
@@ -5498,6 +5538,15 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             parsed = _print_end_flush(getattr(s.value, 'kwargs', None))
             if parsed is not None:
                 end_str, flush = parsed
+                if _cpp_is_tagged_word_expr(gen, s.value.args[0]):
+                    # A tagged word (one yield-kind box per slot): the repr
+                    # resolves the kind the box carries, so it prints the
+                    # yielded value itself, not the box's address.
+                    out = [f'{indent}printf("%s{end_str}", '
+                           f'mojo_repr_boxed((int64_t)({gen._cpp_expr(s.value.args[0])})));']
+                    if flush:
+                        out.append(f'{indent}fflush(stdout);')
+                    return out
                 self_fields = getattr(gen, '_cpp_gen_self_fields', None)
                 arg_ctype = gimple_exprtypes._infer_simple_expr_ctype(s.value.args[0], declared, self_fields)
                 if arg_ctype not in ('int64_t', 'double', '_Bool', 'char *'):
@@ -6072,6 +6121,10 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                                                   gimple_ctypes.DictExpr,
                                                   gimple_ctypes.SetExpr))
         val = gen._cpp_expr(s.value)
+        if _cpp_tagged_next_api(gen, s.value) is not None:
+            # `x = next(g)` on a tagged generator: `x` holds a box from every
+            # assignment on, so `print(x)` renders the yielded value.
+            _cpp_mark_tagged_word(gen, name)
         if name not in declared:
             # `x = StructName(args)` — see `_cpp_expr`'s CallExpr
             # struct-constructor branch just above, which already
@@ -7438,6 +7491,9 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
             declared[target] = vct
             lines.append(f"{body_indent}{gimple_exprtypes._c_to_cpp_scalar_type(vct)} {target};")
         lines.append(f"{body_indent}{target} = {base}_value({guard}.g);")
+        if api.get('tagged'):
+            # Each value the loop binds is a box of the yield's own kind.
+            _cpp_mark_tagged_word(gen, target)
     for inner in body:
         lines.extend(gen._cpp_stmt(inner, declared, body_indent))
     if index_var is not None:
@@ -7570,6 +7626,9 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             declared[target] = _gi_vct
             if gen._cpp_func_scope_decls is not None:
                 gen._cpp_func_scope_decls.append(f"{_gi_vct} {target};")
+        if _gi_api.get('tagged'):
+            # Each value the loop binds is a box of the yield's own kind.
+            _cpp_mark_tagged_word(gen, target)
         # A `_Bool`-valued generator's slot must be narrowed the same way
         # `next()`'s `-> bool` lambda return does, or assigning the `_Bool`
         # through a `bool`-typed local is at best a narrowing warning.

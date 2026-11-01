@@ -3533,6 +3533,31 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             'int64_t', 'mojo_str_first_codepoint', [('char *', _ord_av)])
 
     ot, ov = gen.lower_expr(func.obj)
+    # `o.m(args)` on an instance of a class made at run time (or `Foo.m(args)` on the class):
+    # the method is in the class table (found through the bases), never a container/struct
+    # method of an untyped word.
+    if (isinstance(func.obj, gimple_ctypes.IdentExpr)
+            and gen._rtobj_kinds.get(('l', _as_str(func.obj.name)))
+            and not getattr(node, 'kwargs', None)
+            and not any(isinstance(a, gimple_ctypes.UnaryOp) and _as_str(a.op) in ('*', '**')
+                        for a in node.args)):
+        if len(node.args) > 4:
+            raise RuntimeError(
+                'cannot compile module: a method call on a class made at run time takes at '
+                'most 4 arguments (bug:CODEGEN_enum_runtime_class_creation)')
+        words = []
+        for a in node.args:
+            at, av = gen.lower_expr(a)
+            words.append(gen._call_expr('int64_t', 'mojo_box_from_double', [('double', av)])
+                         if at == 'double' else gen._to_int64(at, av))
+        words += [gen._new_val('int64_t', '(int64_t)0')] * (4 - len(words))
+        res = gen._call_expr('int64_t', 'mojo_rtobj_method_call',
+                             [('int64_t', gen._to_int64(ot, ov)),
+                              ('char *', gen._intern_string(_as_str(func.member))),
+                              ('int64_t', gen._new_val('int64_t', f'(int64_t){len(node.args)}'))]
+                             + [('int64_t', w) for w in words])
+        gen._dyn_word_vals.add(res)
+        return 'int64_t', res
     # The receiver's RAW lowered pair, before the resolution blocks below
     # may retag `ot` (the classmethod-receiver block can retag an
     # int64_t-typed `cls` to `{Struct} *`). The generator-method call

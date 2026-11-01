@@ -309,6 +309,25 @@ def _emit_nested_generator_start_call(gen, node: gimple_ctypes.CallExpr,
     return _finish_generator_start(gen, api, arg_pairs)
 
 
+def _tagged_word_value(gen, node) -> str:
+    """Lower `node` as a TAGGED word, the int64_t form a `mojo_repr_boxed`
+    consumer renders by kind: None -> `mojo_box_none`, a float / bool -> its
+    box, and anything else by its int64_t value (an int as itself, a string
+    as its pointer). Used for a `next(it, default)` default on a tagged
+    generator, whose result is read through the same word."""
+    if (isinstance(node, gimple_ctypes.NoneLiteral)
+            or (isinstance(node, gimple_ctypes.IdentExpr) and node.name == 'None')):
+        return gen._call_expr('int64_t', 'mojo_box_none', [])
+    dt, dv = gen.lower_expr(node)
+    if dt == 'double':
+        return gen._call_expr('int64_t', 'mojo_box_from_double', [('double', dv)])
+    if dt in ('_Bool', 'bool'):
+        return gen._call_expr('int64_t', 'mojo_box_from_bool', [('int64_t', dv)])
+    w = gen._new_temp('int64_t')
+    gen._safe_coerce_emit(dt, 'int64_t', dv, w)
+    return w
+
+
 def _lower_generator_next(gen, av: str, api: dict) -> tuple[str, str]:
     # An async GENERATOR's yield channel carries a wait-descriptor
     # (is_wd=1) for every parking `await` as well as a real value (is_wd=0)
@@ -348,6 +367,7 @@ def _lower_generator_next(gen, av: str, api: dict) -> tuple[str, str]:
         gen._boxed_container_vals.add(result)
     if api.get('mixed_slots') and vct == 'int64_t':
         gen._boxed_vals.add(result)       # a tagged word: rendered by kind
+        gen._tagged_word_vals.add(result)
     gen._emit(f"  goto {bb_merge};")
     gen._emit_label(bb_merge)
     return vct, result
@@ -1453,8 +1473,17 @@ def _lower_type_new(gen, node):
     handle word that `Foo.x`, `Foo.x = v` and `getattr(Foo, ..)` read through the class table.
     None when the arguments are not that literal shape (the caller refuses by name)."""
     name_n, bases_n, ns_n = node.args
-    if not isinstance(bases_n, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
-        return None
+    literal_bases = isinstance(bases_n, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr))
+    bases_list = None
+    if not literal_bases:
+        # COMPUTED bases (`EnumType.__new__` passes a variable): a list of class words, walked
+        # at run time. Anything that is not a list-typed variable/attribute is refused.
+        if not isinstance(bases_n, (gimple_ctypes.IdentExpr, gimple_ctypes.MemberExpr)):
+            return None
+        bst, bsv = gen.lower_expr(bases_n)
+        if bst != 'MojoList *':
+            return None
+        bases_list = bsv
     keys = []
     if isinstance(ns_n, gimple_ctypes.DictExpr):
         for k, _v in ns_n.pairs:
@@ -1473,7 +1502,9 @@ def _lower_type_new(gen, node):
     nt, nv = gen.lower_expr(name_n)
     nm = nv if nt == 'char *' else gen._new_val('char *', f'(char *){gen._to_int64(nt, nv)}')
     cls = gen._call_expr('int64_t', 'mojo_type_new', [('char *', nm)])
-    for b in bases_n.elements:
+    if bases_list is not None:
+        gen._void_call('mojo_type_add_bases_from_list', [('int64_t', cls), ('MojoList *', bases_list)])
+    for b in (bases_n.elements if literal_bases else ()):
         st = _class_struct_of_arg(gen, b)
         if st is not None:
             bw = gen._new_val('int64_t', f'{gimple_exprtypes._struct_type_id(st)}LL')
@@ -1484,6 +1515,7 @@ def _lower_type_new(gen, node):
     if ns_dict is not None:
         gen._void_call('mojo_type_fill_from_dict', [('int64_t', cls), ('MojoDict *', ns_dict)])
         gen._dyn_word_vals.add(cls)
+        gen._rtobj_kinds[('v', cls)] = 'class'
         return 'int64_t', cls
     for key, (_k, vnode) in zip(keys, ns_n.pairs):
         vt, vv = gen.lower_expr(vnode)
@@ -1492,6 +1524,7 @@ def _lower_type_new(gen, node):
         gen._void_call('mojo_classobj_setattr',
                        [('int64_t', cls), ('char *', gen._intern_string(key)), ('int64_t', vw)])
     gen._dyn_word_vals.add(cls)
+    gen._rtobj_kinds[('v', cls)] = 'class'
     return 'int64_t', cls
 
 
@@ -2872,12 +2905,22 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 # `default` is only evaluated on the exhausted branch —
                 # real Python semantics (a non-trivial default expr must
                 # not run when the iterator actually yields a value).
-                dt, dv = gen.lower_expr(node.args[1])
-                gen._safe_coerce_emit(dt, vct, dv, result)
+                if api.get('mixed_slots') and vct == 'int64_t':
+                    # A tagged-word generator: the default is itself a word
+                    # of its own kind, so `next(it, None)` / `next(it, 1.5)`
+                    # render as their values, not as a coerced int.
+                    dw = _tagged_word_value(gen, node.args[1])
+                    gen._safe_coerce_emit('int64_t', vct, dw, result)
+                else:
+                    dt, dv = gen.lower_expr(node.args[1])
+                    gen._safe_coerce_emit(dt, vct, dv, result)
                 gen._emit(f"  goto {bb_merge};")
                 gen._emit_label(bb_merge)
                 if api.get('boxed_container'):
                     gen._boxed_container_vals.add(result)
+                if api.get('mixed_slots') and vct == 'int64_t':
+                    gen._boxed_vals.add(result)       # a tagged word: rendered by kind
+                    gen._tagged_word_vals.add(result)
                 return vct, result
     # `next(obj)` / `next(obj, default)` where `obj` is a USER-DEFINED STRUCT
     # carrying the iterator protocol — Python's `next()` on any object is
@@ -3968,6 +4011,9 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     _ctor_rt = gen.func_return_types.get(fname_raw, 'int64_t')
     if ((_ctor_rt == 'int64_t' or _ctor_rt == '')
             and fname_raw[0:1].isupper()
+            # a LOCAL holding a class word (`Foo = type('Foo', (), {})`) is a value to call
+            # through `mojo_fnptr_call_N`, not an imported type this table does not know
+            and fname_raw not in gen.var_types
             and fname_raw not in gen.func_param_types
             and (fname_raw not in gen.imported_symbols
                  or fname_raw in gimple_ctypes._STR_WRAPPER_CTORS)
@@ -4049,7 +4095,11 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         return _lower_inlined_lambda_call(gen, _red_lambda, node)
 
     if _callee_is_fnptr_value(gen, fname_raw):
-        return gen._lower_fnptr_call(fname_raw, _fname_var_ctype, node)
+        _ct, _cv = gen._lower_fnptr_call(fname_raw, _fname_var_ctype, node)
+        # `Foo(..)` on a local holding a run-time class makes an INSTANCE of it
+        if gen._rtobj_kinds.get(('l', fname_raw)) == 'class':
+            gen._rtobj_kinds[('v', _cv)] = 'inst'
+        return _ct, _cv
 
     # PART 6 (2026-10-23, closing piece): the system stat() C-ABI FFI — see
     # _CABI_STAT_BLOCK's own comment for the full measured chain, the
@@ -4301,6 +4351,12 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
     if obj_type == 'char *' and _as_str(obj_val) in gen._dyn_word_locals:
         obj_val = gen._new_val('int64_t', f'(int64_t){obj_val}')
         obj_type = 'int64_t'
+    if gen._rtobj_kinds.get(('l', type_name)) == 'class':
+        # a class made at run time: the class table answers (instance's class or a base of it)
+        cw = gen._new_val('int64_t', type_name)
+        r = gen._call_expr('int', 'mojo_isinstance_rtclass',
+                           [('int64_t', gen._to_int64(obj_type, obj_val)), ('int64_t', cw)])
+        return gen._new_val('_Bool', f'(_Bool){r}')
     if type_name == 'type':
         return gen._new_val('_Bool', '0')  # isinstance(x, type) always false in C
     if type_name == 'tuple':
@@ -6401,6 +6457,61 @@ def _lower_recursive_self_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr
     return ret_type, gen._call_expr(ret_type, fname_c, full_arg_pairs)
 
 
+def _build_outer_closure_env(gen, ci):
+    """The env to hand a SIBLING nested closure `ci` from inside another lifted closure:
+    a fresh `ci.env_struct`, each captured field copied from the current closure's own env
+    where the name matches (else from local scope), or a NULL env when this scope owns
+    nothing to copy. Shared by a CALL to the sibling (`_lower_outer_closure_call`) and by
+    its use as a VALUE (`emit_exprs._closure_value`): the value path used to pass a NULL
+    env unconditionally, so a capturing closure handed on from inside another closure
+    crashed when its callee read a capture."""
+    _cur_env = getattr(gen, '_env_param', '')
+    _cur_caps = getattr(gen, '_captures', {}) or {}
+    if _cur_env and getattr(ci, 'captures', None):
+        new_env = gen._new_temp(f'{ci.env_struct} *')
+        gen._emit(f'  {new_env} = {gimple_ctypes._safe_name("_alloc_" + ci.env_struct)} ();')
+        for vname, vtype in ci.captures:
+            fld = gimple_ctypes._c_field_name(vname)
+            # The FIELD's type, not the capture's value type: a
+            # by-reference capture (`ci.mut_names`) is a pointer to the
+            # owner's box, and this store is the only thing that has to
+            # agree with the typedef. See
+            # `gimple_ctypes._env_field_ctype`.
+            fct = gimple_ctypes._env_field_ctype(ci, _as_str(vname))
+            if vname in _cur_caps:
+                # Forwarding from THIS closure's own env, which holds the
+                # name under its OWN field type: `_gimple_mut_ptr` is the
+                # box pointer `_gen_lifted_closure` preloaded for a
+                # by-reference capture, so it is both the discriminator
+                # and the value (a by-value capture arrives through
+                # `_env-><name>`, and a value the callee wants by
+                # reference has to be boxed -- through a plain local,
+                # because GIMPLE cannot take a component_ref's address).
+                _own_box = (getattr(gen, '_gimple_mut_ptr', None) or {}).get(vname)
+                _cur_t = _as_str(_cur_caps.get(vname) or 'int64_t')
+                _cur_is_ptr = _cur_t.endswith(' *')
+                if _own_box:
+                    tmp = gen._new_val(
+                        fct, _own_box if fct.endswith(' *') else f'*{_own_box}')
+                elif fct.endswith(' *') and not _cur_is_ptr:
+                    _boxed = gen._new_val(_cur_t, f'{_cur_env}->{fld}')
+                    tmp = gen._new_val(fct, f'&{_boxed}')
+                else:
+                    tmp = gen._new_val(fct, f'{_cur_env}->{fld}')
+                gen._emit(f'  {new_env}->{fld} = {tmp};')
+            elif vname in gen.var_types:
+                _boxed = _boxed_capture_source(gen, vname, fct)
+                if _boxed is not None:
+                    gen._safe_coerce_emit(_boxed[0], fct, _boxed[1],
+                                          f'{new_env}->{fld}')
+                else:
+                    gen._safe_coerce_emit(gen.var_types.get(vname, vtype), fct,
+                                          gen._write_dest(vname),
+                                          f'{new_env}->{fld}')
+        return new_env
+    return gen._new_val(f'{ci.env_struct} *', f'({ci.env_struct} *)0')
+
+
 def _lower_outer_closure_call(gen, fname_raw: str, ci, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """Call a SIBLING nested closure of the same parent from inside another
     lifted closure/lambda body (`gen_module_impl`'s `_scan_body_for_local_
@@ -6429,53 +6540,7 @@ def _lower_outer_closure_call(gen, fname_raw: str, ci, node: gimple_ctypes.CallE
     arg_pairs = _pack_closure_star_slots(gen, ci, node, arg_pairs)
     fname_c   = gimple_ctypes._safe_name(lifted)
     if ci.env_struct:
-        _cur_env = getattr(gen, '_env_param', '')
-        _cur_caps = getattr(gen, '_captures', {}) or {}
-        if _cur_env and getattr(ci, 'captures', None):
-            new_env = gen._new_temp(f'{ci.env_struct} *')
-            gen._emit(f'  {new_env} = {gimple_ctypes._safe_name("_alloc_" + ci.env_struct)} ();')
-            for vname, vtype in ci.captures:
-                fld = gimple_ctypes._c_field_name(vname)
-                # The FIELD's type, not the capture's value type: a
-                # by-reference capture (`ci.mut_names`) is a pointer to the
-                # owner's box, and this store is the only thing that has to
-                # agree with the typedef. See
-                # `gimple_ctypes._env_field_ctype`.
-                fct = gimple_ctypes._env_field_ctype(ci, _as_str(vname))
-                if vname in _cur_caps:
-                    # Forwarding from THIS closure's own env, which holds the
-                    # name under its OWN field type: `_gimple_mut_ptr` is the
-                    # box pointer `_gen_lifted_closure` preloaded for a
-                    # by-reference capture, so it is both the discriminator
-                    # and the value (a by-value capture arrives through
-                    # `_env-><name>`, and a value the callee wants by
-                    # reference has to be boxed -- through a plain local,
-                    # because GIMPLE cannot take a component_ref's address).
-                    _own_box = (getattr(gen, '_gimple_mut_ptr', None) or {}).get(vname)
-                    _cur_t = _as_str(_cur_caps.get(vname) or 'int64_t')
-                    _cur_is_ptr = _cur_t.endswith(' *')
-                    if _own_box:
-                        tmp = gen._new_val(
-                            fct, _own_box if fct.endswith(' *') else f'*{_own_box}')
-                    elif fct.endswith(' *') and not _cur_is_ptr:
-                        _boxed = gen._new_val(_cur_t, f'{_cur_env}->{fld}')
-                        tmp = gen._new_val(fct, f'&{_boxed}')
-                    else:
-                        tmp = gen._new_val(fct, f'{_cur_env}->{fld}')
-                    gen._emit(f'  {new_env}->{fld} = {tmp};')
-                elif vname in gen.var_types:
-                    _boxed = _boxed_capture_source(gen, vname, fct)
-                    if _boxed is not None:
-                        gen._safe_coerce_emit(_boxed[0], fct, _boxed[1],
-                                              f'{new_env}->{fld}')
-                    else:
-                        gen._safe_coerce_emit(gen.var_types.get(vname, vtype), fct,
-                                              gen._write_dest(vname),
-                                              f'{new_env}->{fld}')
-            full_arg_pairs = [(f'{ci.env_struct} *', new_env)] + arg_pairs
-        else:
-            null_env = gen._new_val(f'{ci.env_struct} *', f'({ci.env_struct} *)0')
-            full_arg_pairs = [(f'{ci.env_struct} *', null_env)] + arg_pairs
+        full_arg_pairs = [(f'{ci.env_struct} *', _build_outer_closure_env(gen, ci))] + arg_pairs
     else:
         full_arg_pairs = arg_pairs
     if ret_type == 'void':
@@ -7884,6 +7949,61 @@ def _pad_lambda_defaults(gen, node: gimple_ctypes.CallExpr,
         arg_pairs.append(('int64_t', _dv))
 
 
+def _lower_fnptr_spread_call(gen, fp_type: str, fp_raw: str, node: gimple_ctypes.CallExpr,
+                             ret_type: str = 'int64_t') -> tuple[str, str]:
+    """A call through a function VALUE whose argument list has a `*x` / `**x`
+    spread (`f(3, **kw)`, `g(*a)`): the arity-based `mojo_fnptr_call_N`
+    convention cannot express it (the `**kw` dict used to travel as ONE
+    positional word, so a callee's keyword parameter received the dict's
+    address). The call is packed into a positional `MojoList *` and a keyword
+    `MojoDict *` and dispatched by `mojo_dyn_call`, exactly as the C++-path
+    twin (`cpp_core`, `mojo_args_extend_word` / `mojo_kwargs_merge_word`) does:
+    a registered compiled generator binds by name, a variadic value binds the
+    pair itself, a plain function pointer takes the words positionally.
+
+    Argument order is preserved: a plain positional after a `*x` is appended
+    after the spread's elements. A double travels as its bit pattern tagged as
+    a double (`mojo_list_append_double_kinded` records the 'd' kind of THAT slot
+    at run time, so it may sit before or after a `*` spread whose length is
+    unknown here; `mojo_dict_set_double` for a keyword)."""
+    if fp_type != 'void *':
+        fp_void = gen._new_val('void *', f'(void *){fp_raw}')
+    else:
+        fp_void = fp_raw
+    _a = gen._new_val('MojoList *', 'mojo_list_new ()')
+    _kw_spreads = []
+    for _node_arg in node.args:
+        _is_spread = isinstance(_node_arg, gimple_ctypes.UnaryOp) and _node_arg.op in ('*', '**')
+        _t, _v = gen.lower_expr(_node_arg.operand if _is_spread else _node_arg)
+        _t, _v = _as_str(_t), _as_str(_v)
+        if _is_spread:
+            _w = _v if _t == 'int64_t' else gen._new_val('int64_t', f'(int64_t){_v}')
+        else:
+            _w = None
+        if _is_spread and _node_arg.op == '*':
+            gen._emit(f"  mojo_args_extend_word ({_a}, {_w});")
+        elif _is_spread:
+            _kw_spreads.append(_w)
+        elif _t == 'double':
+            gen._emit(f"  mojo_list_append_double_kinded ({_a}, {_v}, 'i');")
+        else:
+            _w = _v if _t == 'int64_t' else gen._new_val('int64_t', f'(int64_t){_v}')
+            gen._emit(f"  mojo_list_append_int ({_a}, {_w});")
+    _kw_pairs = {kn: gen.lower_expr(kv) for kn, kv in (getattr(node, 'kwargs', None) or [])}
+    _k = gen._pack_kwargs_dict(_kw_pairs)
+    for _w in _kw_spreads:
+        gen._emit(f"  mojo_kwargs_merge_word ({_k}, {_w});")
+    if ret_type == 'int64_t':
+        ret_type = gen._callable_ret_types.get(fp_raw, ret_type)
+    _fn = gen._new_val('int64_t', f'(int64_t){fp_void}')
+    raw_t = gen._new_val('int64_t', f'mojo_dyn_call ({_fn}, {_a}, {_k})')
+    if ret_type == 'void':
+        return 'int', gen._new_val('int', '0')
+    if ret_type == 'int64_t':
+        gen._dyn_word_vals.add(raw_t)
+    return 'int64_t', raw_t
+
+
 def _lower_fnptr_call_value(gen, fp_type: str, fp_raw: str, node: gimple_ctypes.CallExpr,
                             ret_type: str = 'int64_t') -> tuple[str, str]:
     """Emit a call through an already-lowered function-pointer VALUE
@@ -7899,6 +8019,9 @@ def _lower_fnptr_call_value(gen, fp_type: str, fp_raw: str, node: gimple_ctypes.
     homogenized helper hands back is a BOX, not the value's real type — so
     without it a `lambda: False` prints `0` and a `lambda: "hi"` prints its
     own pointer decimal. `_narrow_callable_result` is that one conversion."""
+    if any(isinstance(_a, gimple_ctypes.UnaryOp) and _a.op in ('*', '**')
+           for _a in node.args):
+        return _lower_fnptr_spread_call(gen, fp_type, fp_raw, node, ret_type)
     arg_pairs = [gen.lower_expr(a) for a in node.args]
     # A LAMBDA's declared defaults, applied here rather than in the env, is the
     # other half of the fix and the reason `_lower_LambdaExpr` strips them from
@@ -8492,6 +8615,64 @@ static gs_stat_result * stat_8_PathLike_6_String (char * path)
 """
 
 
+def _pack_kwargs_slot_call(gen, fname, fname_raw, arg_pairs, kwarg_dict,
+                           call_has_spread=False):
+    """Pack a call's LITERAL keyword arguments into the callee's own `**kwargs`
+    slot (a real `MojoDict *`), and its surplus positionals into the `*args`
+    list when it has one. A no-op unless `_func_kwargs_slot` records a
+    `**kwargs` parameter for this callee (only genuine user free functions
+    are registered) and the call has no `*x` / `**x` spread.
+
+    Shared by `_lower_named_call` (value-consuming call sites) and
+    `_gen_stmt_ExprStmt`'s statement-level twin (bare, value-discarding calls
+    never reach `_lower_named_call`): the twin had no such step, so
+    `go(1, scale=2)` as a statement passed the raw keyword VALUE where the
+    `MojoDict *` belongs (`(MojoDict *)2.5`, a gcc error for a float; a wild
+    dict pointer for an int). Returns `(arg_pairs, kwarg_dict)`; the dict is
+    emptied once packed."""
+    _kwslot_for_pack = gen._func_kwargs_slot.get(fname)
+    if _kwslot_for_pack is None:
+        _kwslot_for_pack = gen._func_kwargs_slot.get(fname_raw, -1)
+    if _kwslot_for_pack >= 0 and not call_has_spread:
+        # Whether the callee ALSO declares a real `*args` before its
+        # `**kwargs` (the `f(self, *args, **kwargs)` forwarding pattern,
+        # which gets a concrete `MojoList *` C param) — as opposed to
+        # `**kwargs` being its only vararg-style parameter (`def
+        # f(**kwargs)`, exactly one `MojoDict *` C param; see
+        # `_func_kwargs_has_vararg`'s own docstring). Defaults to True
+        # (the old, always-pack-a-list-too behavior) when unknown, since
+        # every call site that reaches this branch at all necessarily
+        # has a `_func_kwargs_slot` entry, and both dicts are populated
+        # together at the exact same registration site — this fallback
+        # only matters for some other, not-yet-audited path that might
+        # populate `_func_kwargs_slot` without its sibling.
+        _has_vararg = gen._func_kwargs_has_vararg.get(
+            fname, gen._func_kwargs_has_vararg.get(fname_raw, True))
+        _n_fixed = max(0, _kwslot_for_pack - 1) if _has_vararg else _kwslot_for_pack
+        _fixed_pairs = arg_pairs[:_n_fixed]
+        _vararg_pairs = arg_pairs[_n_fixed:]
+        _packed_dict_pair = ('MojoDict *', gen._pack_kwargs_dict(kwarg_dict))
+        if _has_vararg:
+            _lst = gen._new_val('MojoList *', "mojo_list_new ()")
+            for _at, _av in _vararg_pairs:
+                _av = gen._coerce_to_type(_at, 'int64_t', _av)
+                gen._emit(f"  mojo_list_append_int ({_lst}, {_av});")
+            arg_pairs = _fixed_pairs + [('MojoList *', _lst), _packed_dict_pair]
+        else:
+            # No `*args` slot at all: any leftover positional args (a
+            # real Python-level TypeError against a kwargs-only
+            # signature, but this codegen has no type-checker to catch
+            # it earlier) have nowhere valid to go — pass them through
+            # unchanged ahead of the single `MojoDict *` param rather
+            # than silently discarding them, mirroring `_fixed_pairs`'
+            # existing "leave it to the generic arity/coercion handling
+            # further down" convention for a genuinely malformed call.
+            arg_pairs = _fixed_pairs + _vararg_pairs + [_packed_dict_pair]
+        kwarg_dict = {}
+
+    return arg_pairs, kwarg_dict
+
+
 def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """Final dispatch for user-defined and C stdlib functions."""
     # `_locally_binds_name` gate: BUILTIN_VALUE_MAP's entries (open,
@@ -8814,45 +8995,8 @@ def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tupl
     # unresolved/imported names with no recorded signature.
     _call_has_spread = any(isinstance(_a, gimple_ctypes.UnaryOp) and _a.op in ('*', '**')
                            for _a in node.args)
-    _kwslot_for_pack = gen._func_kwargs_slot.get(fname)
-    if _kwslot_for_pack is None:
-        _kwslot_for_pack = gen._func_kwargs_slot.get(fname_raw, -1)
-    if _kwslot_for_pack >= 0 and not _call_has_spread:
-        # Whether the callee ALSO declares a real `*args` before its
-        # `**kwargs` (the `f(self, *args, **kwargs)` forwarding pattern,
-        # which gets a concrete `MojoList *` C param) — as opposed to
-        # `**kwargs` being its only vararg-style parameter (`def
-        # f(**kwargs)`, exactly one `MojoDict *` C param; see
-        # `_func_kwargs_has_vararg`'s own docstring). Defaults to True
-        # (the old, always-pack-a-list-too behavior) when unknown, since
-        # every call site that reaches this branch at all necessarily
-        # has a `_func_kwargs_slot` entry, and both dicts are populated
-        # together at the exact same registration site — this fallback
-        # only matters for some other, not-yet-audited path that might
-        # populate `_func_kwargs_slot` without its sibling.
-        _has_vararg = gen._func_kwargs_has_vararg.get(
-            fname, gen._func_kwargs_has_vararg.get(fname_raw, True))
-        _n_fixed = max(0, _kwslot_for_pack - 1) if _has_vararg else _kwslot_for_pack
-        _fixed_pairs = arg_pairs[:_n_fixed]
-        _vararg_pairs = arg_pairs[_n_fixed:]
-        _packed_dict_pair = ('MojoDict *', gen._pack_kwargs_dict(kwarg_dict))
-        if _has_vararg:
-            _lst = gen._new_val('MojoList *', "mojo_list_new ()")
-            for _at, _av in _vararg_pairs:
-                _av = gen._coerce_to_type(_at, 'int64_t', _av)
-                gen._emit(f"  mojo_list_append_int ({_lst}, {_av});")
-            arg_pairs = _fixed_pairs + [('MojoList *', _lst), _packed_dict_pair]
-        else:
-            # No `*args` slot at all: any leftover positional args (a
-            # real Python-level TypeError against a kwargs-only
-            # signature, but this codegen has no type-checker to catch
-            # it earlier) have nowhere valid to go — pass them through
-            # unchanged ahead of the single `MojoDict *` param rather
-            # than silently discarding them, mirroring `_fixed_pairs`'
-            # existing "leave it to the generic arity/coercion handling
-            # further down" convention for a genuinely malformed call.
-            arg_pairs = _fixed_pairs + _vararg_pairs + [_packed_dict_pair]
-        kwarg_dict = {}
+    arg_pairs, kwarg_dict = gen._pack_kwargs_slot_call(
+        fname, fname_raw, arg_pairs, kwarg_dict, _call_has_spread)
 
     # `def f(fixed, *args, trailing_kwonly=default, ...)` — a vararg
     # followed by more (keyword-only) params but no `**kwargs`; see

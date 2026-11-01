@@ -3418,6 +3418,26 @@ def main():
 main()
 """, "10\n99\n20\n7\n")
 
+    # A capturing nested function handed on AS A VALUE from inside another nested function:
+    # its env used to be NULL, so the callee crashed on its first capture read.
+    test_gimple_stdout("gimple_capturing_closure_value_passed_from_a_closure", """\
+def outer(base, items):
+    seen = {}
+    gen_names = {"a": 1}
+    def visit_call(node, env, callee):
+        seen[node] = base + gen_names["a"]
+    def visit_main(node, env):
+        visit_call(node, env, None)
+    def collect_from(src, visit, closure):
+        for n in src:
+            visit(n, None)
+    def collect():
+        collect_from(items, visit_main, False)
+    collect()
+    return len(seen) + base
+print(outer(10, [1, 2, 3]))
+""", "13\n")
+
     # String site FIRST, int site second (an int list records no contract, so
     # it used to be invisible as a disagreeing call site).
     test_gimple_stdout("gimple_mixed_kind_flat_list_param_str_first", """\

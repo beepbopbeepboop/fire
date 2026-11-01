@@ -53,6 +53,112 @@ def main():
     print(hasattr(Foo, 'z'), getattr(Foo, 'y'))
 main()
 """,
+    'computed_bases_list_variable': """\
+def main():
+    A = type('A', (), {'a': 1, 'k': 10})
+    B = type('B', (), {'b': 2, 'k': 20})
+    bases = (A, B)
+    C = type('C', bases, {'c': 3})
+    print(C.a, C.b, C.c, C.k)
+main()
+""",
+    'static_class_in_computed_bases_list': """\
+class B:
+    y = 5
+
+def main():
+    A = type('A', (), {'a': 1})
+    bases = (A, B)
+    C = type('C', bases, {'c': 3})
+    print(C.a, C.c, C.y)
+    ls = (B,)
+    D = type('D', ls, {})
+    print(D.y)
+main()
+""",
+    'static_base_body_attributes_are_inherited': """\
+class B:
+    y = 5
+    s = 'hi'
+    f = 2.5
+
+def main():
+    F = type('F', (B,), {'z': 1})
+    print(F.z, F.y, F.s, F.f)
+    print(hasattr(F, 'y'), hasattr(F, 'q'), getattr(F, 'y'))
+    F.y = 6
+    print(F.y, B.y)
+main()
+""",
+    'static_base_attribute_is_read_live': """\
+class B:
+    y = 5
+
+def main():
+    F = type('F', (B,), {})
+    B.y = 8
+    print(F.y)
+main()
+""",
+    'instance_of_a_run_time_class': """\
+def main():
+    Foo = type('Foo', (), {'x': 1})
+    o = Foo()
+    o.y = 3
+    print(o.x, o.y)
+    o.x = 5
+    print(o.x, Foo.x)
+    p = Foo()
+    print(p.x, hasattr(p, 'y'), hasattr(o, 'y'))
+    Foo.x = 9
+    print(p.x, o.x)
+main()
+""",
+    'instance_reads_through_the_class_bases': """\
+def main():
+    A = type('A', (), {'a': 1, 'k': 10})
+    B = type('B', (A,), {'b': 2})
+    o = B()
+    print(o.a, o.b, o.k)
+    A.k = 11
+    print(o.k, getattr(o, 'k'), getattr(o, 'nope', 42))
+main()
+""",
+    'methods_in_the_namespace_are_called_on_instances': """\
+def init(self, v):
+    self.v = v
+
+def get(self):
+    return self.v + 1
+
+def add(self, a, b):
+    return self.v + a + b
+
+def make(x):
+    return x * 2
+
+def main():
+    Foo = type('Foo', (), {'__init__': init, 'get': get, 'add': add, 'make': make})
+    o = Foo(4)
+    print(o.get(), o.add(10, 20))
+    o.v = 7
+    print(o.get())
+    print(Foo.make(21))
+    Bar = type('Bar', (Foo,), {'get': lambda self: 100})
+    b = Bar(1)
+    print(b.get(), b.add(1, 1))
+main()
+""",
+    'isinstance_of_a_run_time_class': """\
+def main():
+    A = type('A', (), {'a': 1})
+    B = type('B', (A,), {'b': 2})
+    C = type('C', (), {})
+    o = B()
+    print(isinstance(o, B), isinstance(o, A), isinstance(o, C))
+    print(isinstance(A(), B), isinstance(o, (C, A)), isinstance(5, A))
+main()
+""",
     'two_classes_of_one_name_are_two_classes': """\
 def main():
     P = type('Same', (), {'v': 1})
