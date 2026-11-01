@@ -3525,6 +3525,30 @@ def main():
 main()
 """)
 
+    # `.append(<float>)` stored the double into the list's int64_t slot by C
+    # conversion, so 2.5 became 2 and every later read saw the int. The
+    # element is the double itself, recorded under the 'd' kind, for every
+    # list the append can reach: a str list (the slot already holds str
+    # pointers, which the kinds row must still describe as 'p'), an int list,
+    # and an empty list. CPython is the oracle for the repr and the `in`.
+    test_gimple_matches_cpython("gimple_append_float_keeps_double", """\
+def main():
+    built = ["a"]
+    built.append(2.5)
+    print(built)
+    print(2.5 in built, 2.0 in built, "a" in built)
+    xs = [1]
+    xs.append(2.5)
+    print(xs)
+    print(2.5 in xs, 2.0 in xs, 1 in xs)
+    empty = []
+    empty.append(2.5)
+    empty.append(1)
+    print(empty)
+    print(2.5 in empty)
+main()
+""")
+
     # str.encode() is BYTES, not a str. It was lowered as an identity stub
     # typed char*, so the value printed as the str and len() counted the
     # wrong thing for a non-ASCII string (2 for "héllo" was not 6, the
