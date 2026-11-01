@@ -53,6 +53,15 @@ def main():
     print(hasattr(Foo, 'z'), getattr(Foo, 'y'))
 main()
 """,
+    'computed_bases_list_variable': """\
+def main():
+    A = type('A', (), {'a': 1, 'k': 10})
+    B = type('B', (), {'b': 2, 'k': 20})
+    bases = (A, B)
+    C = type('C', bases, {'c': 3})
+    print(C.a, C.b, C.c, C.k)
+main()
+""",
     'two_classes_of_one_name_are_two_classes': """\
 def main():
     P = type('Same', (), {'v': 1})

@@ -1472,8 +1472,17 @@ def _lower_type_new(gen, node):
     handle word that `Foo.x`, `Foo.x = v` and `getattr(Foo, ..)` read through the class table.
     None when the arguments are not that literal shape (the caller refuses by name)."""
     name_n, bases_n, ns_n = node.args
-    if not isinstance(bases_n, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
-        return None
+    literal_bases = isinstance(bases_n, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr))
+    bases_list = None
+    if not literal_bases:
+        # COMPUTED bases (`EnumType.__new__` passes a variable): a list of class words, walked
+        # at run time. Anything that is not a list-typed variable/attribute is refused.
+        if not isinstance(bases_n, (gimple_ctypes.IdentExpr, gimple_ctypes.MemberExpr)):
+            return None
+        bst, bsv = gen.lower_expr(bases_n)
+        if bst != 'MojoList *':
+            return None
+        bases_list = bsv
     keys = []
     if isinstance(ns_n, gimple_ctypes.DictExpr):
         for k, _v in ns_n.pairs:
@@ -1492,7 +1501,9 @@ def _lower_type_new(gen, node):
     nt, nv = gen.lower_expr(name_n)
     nm = nv if nt == 'char *' else gen._new_val('char *', f'(char *){gen._to_int64(nt, nv)}')
     cls = gen._call_expr('int64_t', 'mojo_type_new', [('char *', nm)])
-    for b in bases_n.elements:
+    if bases_list is not None:
+        gen._void_call('mojo_type_add_bases_from_list', [('int64_t', cls), ('MojoList *', bases_list)])
+    for b in (bases_n.elements if literal_bases else ()):
         st = _class_struct_of_arg(gen, b)
         if st is not None:
             bw = gen._new_val('int64_t', f'{gimple_exprtypes._struct_type_id(st)}LL')

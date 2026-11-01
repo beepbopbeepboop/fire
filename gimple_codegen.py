@@ -3266,6 +3266,7 @@ class GimpleGen:
         'mojo_class_delattr':  ('void', ['int64_t', 'char *']),
         'mojo_type_new':       ('int64_t', ['char *']),
         'mojo_type_add_base':  ('void', ['int64_t', 'int64_t']),
+        'mojo_type_add_bases_from_list': ('void', ['int64_t', 'MojoList *']),
         'mojo_classobj_tag':   ('int64_t', ['int64_t']),
         'mojo_classobj_setattr': ('void', ['int64_t', 'char *', 'int64_t']),
         'mojo_type_fill_from_dict': ('void', ['int64_t', 'MojoDict *']),

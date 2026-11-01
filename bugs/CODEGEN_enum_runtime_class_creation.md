@@ -40,9 +40,10 @@ every module is reachable from a word with `mojo_getattr_any(obj, attr)`
    variable/attribute is walked at run time by `mojo_type_fill_from_dict` (insertion order, float
    slots boxed); pinned by `computed_namespace_dict_variable`. A call-result namespace is still
    refused by name.
-   STILL MISSING in stage 3: computed BASES (a tuple/list variable, which `EnumType.__new__`
-   also passes: needs a list-of-class-words walk into `mojo_type_add_base`);
-   inheriting a STATIC base's class-body attributes through a dynamic class (`class B: y = 5`,
+   **Computed bases landed 2026-11-01**: `type(n, bases, ns)` with `bases` a tuple/list-typed
+   variable/attribute is walked at run time by `mojo_type_add_bases_from_list` (pinned by
+   `computed_bases_list_variable`; a static class inside such a list is not yet covered).
+   STILL MISSING in stage 3: inheriting a STATIC base's class-body attributes through a dynamic class (`class B: y = 5`,
    `type('F', (B,), {}).y` - body attributes are static globals, not table entries; register
    them as words in `_mojo_classattr_init` or fall back to the struct's static read);
    `type.__new__(metacls, ..)`; instances of a dynamic class (stage 2 is its prerequisite).
