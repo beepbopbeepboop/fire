@@ -4442,6 +4442,8 @@ def _gen_stmt_ExprStmt(gen, node):
         # '_verbose_message' makes pointer from integer without a cast".
         _call_has_spread = any(isinstance(_a, gimple_ctypes.UnaryOp) and _a.op in ('*', '**')
                                for _a in node.value.args)
+        arg_pairs, kwarg_dict = gen._pack_kwargs_slot_call(
+            fname, raw_name, arg_pairs, kwarg_dict, _call_has_spread)
         arg_pairs, kwarg_dict = gen._pack_vararg_trailing_params(
             fname, raw_name, arg_pairs, kwarg_dict, _call_has_spread)
 

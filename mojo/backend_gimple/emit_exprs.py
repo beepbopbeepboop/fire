@@ -3045,7 +3045,14 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         # lands here (test/collections/test_span.mojo's
         # `assert_equal(span[0].data, 42)`). The tag-dispatched accessor is a
         # real read of the boxed value rather than a fabricated one.
-        vp = gen._new_val('void *', f'(void *)(int64_t){ov}')
+        # A scalar base is widened to the integer word in its OWN temp first:
+        # GIMPLE rejects the nested rvalue cast `(void *)(int64_t)x` ("expected
+        # expression before '('"), which a `double` loop variable of the
+        # generator-handle drain's `double` arm (whose body may treat the
+        # element as an object) used to hit.
+        if ot != 'int64_t':
+            ov = gen._coerce_to_type(ot, 'int64_t', ov)
+        vp = gen._new_val('void *', f'(void *){ov}')
         return 'int64_t', gen._call_expr('int64_t', '_mojo_dispatch_getattr',
                         [('void *', vp), ('char *', f'"{node.member}"')])
     else:

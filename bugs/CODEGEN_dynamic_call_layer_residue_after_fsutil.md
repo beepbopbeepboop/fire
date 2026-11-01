@@ -82,9 +82,43 @@ as values, or that call one of their own parameters, are kept on the C++ path
   the values to ints. Float values in a `**kw` pack (`run(g, scale=2.5)` into
   `def run(g, **kw)`) fail to compile in gcc (`cannot convert to a pointer
   type`). Item 5 is otherwise closed; item 2 still needs its real shape.
+- **Item 5's open gaps, FIXED 2026-10-31**
+  (`test_link_mode.py::test_statement_call_packs_keywords_into_kwargs_slot`,
+  `...::test_generator_value_called_with_kwargs_spread_and_float_default`).
+  Four defects, found by building the doc's own repro (`run(g, scale=2.5)` into
+  `def run(f, **kw): for v in f(3, **kw)`):
+  1. A bare statement call `run(g, scale=2.5)` never packed its keywords into
+     the callee's `**kw` slot (the expression twin `_lower_named_call` did);
+     the raw value landed where the `MojoDict *` goes (`(MojoDict *)2.5`, the
+     gcc error the doc names; a wild pointer for an int, which is why the int
+     form printed nothing). The packing is now one shared helper,
+     `emit_calls._pack_kwargs_slot_call`, called from both paths.
+  2. `_pack_kwargs_dict` stored a float keyword with `mojo_dict_set_int`
+     (truncating 2.5 to 2); it now uses `mojo_dict_set_double` (and
+     `_KNOWN_SIGS` gained that prototype).
+  3. `f(3, **kw)` through a callable parameter was lowered as
+     `mojo_fnptr_call_2(f, 3, kw)`, the dict's address as one positional word.
+     `_lower_fnptr_call_value` now sends any call with a `*x`/`**x` spread
+     through `_lower_fnptr_spread_call` (packed list + dict, merged at run
+     time, `mojo_dyn_call`), the GIMPLE twin of the C++-path
+     `cpp_core._cpp_dyn_call_expr`.
+  4. An UNANNOTATED generator parameter with a float-literal default
+     (`scale=2.0`) was typed `int64_t`, so its unit could not register a
+     runtime signature; it is `double` now (`cpp_async`'s parameter loop). And
+     a `for` over a dynamic generator handle read a double-valued drain
+     through the int arm (printing the bit pattern); `emit_loops` now has a
+     `double` arm next to the string and int ones.
+  A float read back out of the callee's `kw["scale"]` prints its bits (the
+  dict slot read loses its value kind, a separate gap in
+  `bugs/CODEGEN_dict_slot_read_loses_its_value_kind.md`).
+  Measured: both tests FAIL before (gcc error / empty output) and PASS after
+  (CPython-identical `0.0 2.5 5.0 0.0 2.0 4.0`). Still open from that list:
+  a double beside a `*` spread in a call through a function value is refused
+  at compile time (the kind string is positional); the unannotated-float-default
+  rule is applied to generator parameters only, not plain functions.
 - Regressions: item 1 `test_link_mode.py::test_bare_submodule_import_keyword_call`,
   item 3 `...::test_str_affix_method_on_unsolved_word_is_bool`, item 4
-  `...::test_generator_none_default_reaches_callee_as_null`, item 2 `...::test_cross_module_generator_default_is_padded`, item 5 above. (The
+  `...::test_generator_none_default_reaches_callee_as_null`, item 2 `...::test_cross_module_generator_default_is_padded`, item 5 above (+ its 2026-10-31 entry). (The
   placeholder `test_regress_dynamic_call_layer_residue.py`, which asserted
   `True`, is removed.)
 
