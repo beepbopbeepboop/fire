@@ -1,5 +1,32 @@
 # CODEGEN_a_bare_or_explicit_yield_of_none: a None yield value prints 0
 
+## Status (2026-11-01, tenth round, work/bug-codegen-a-bare-or-explicit-yield-of: dead `co_yield (int64_t)0` removed, partial)
+
+**Landed (the fifth round's item 3, the dead bare-yield emitter):**
+`mojo/backend_gimple/cpp_core.py`'s bare-yield arm no longer writes
+`co_yield (int64_t)0;  /* bare yield */`. It raises
+`_UnsupportedGeneratorShape` with the refusal text, so no path can emit the
+0 literal. The text is one constant, `coro.NONE_YIELD_CPP_REFUSAL`, which
+`cpp_async.py`'s generator-level check now also raises (it had its own copy).
+
+**Behaviour:** the output is unchanged. `cpp_async.py` ran the emitter before
+its own None check, and the emitted line was discarded by that check, so the
+refusal is the same, now raised from the statement that caused it. No new
+fail-before pin exists for this, because the old line never reached the
+output; the guards are the existing `none_yield_bare_refused_on_cpp_path` and
+`none_yield_explicit_beside_str_refused_on_cpp_path`, which pass before and
+after.
+
+**Pins run:** `run_none_yield_tests` + `run_tagged_word_bind_tests` +
+`run_none_list_iteration_tests`: 20 passed, 0 failed.
+
+**Still open:** the None value on the C++ coroutine path itself (the
+refusal stays; carrying a None through the value slot is the owner-level ABI
+feature named at the top of this doc), and the eighth round's item 2 (an
+explicit `yield None` beside str/float is still a typer refusal). Gate note
+for the integrator: `gimplegenerators` and `compile_stdlib.py` are not run
+here; the change should move no compiled output.
+
 ## Status (2026-11-01, ninth round, work/bug-codegen-a-bare-or-explicit-yield-of: None list elements print, partial)
 
 **Landed: the root cause of the comprehension gap, which is not generator-specific.**

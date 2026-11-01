@@ -42,6 +42,7 @@ from fire_compiler import target_slots
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
+import mojo.middle.coro as coro_mod
 from mojo.middle.exprtypes import _walk_ast_invalidate
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
@@ -5391,7 +5392,11 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     "(that would make it an async generator, its own "
                     "combined-refusal category — see gen_module)")
             if s.value.value is None:
-                return [f"{indent}co_yield (int64_t)0;  /* bare yield */"]
+                # A bare yield has no value slot on this path: writing
+                # `co_yield (int64_t)0` would print 0 where CPython prints
+                # None. Refuse, as cpp_async.py does for the whole generator.
+                raise gimple_exprtypes._UnsupportedGeneratorShape(
+                    coro_mod.NONE_YIELD_CPP_REFUSAL)
             if isinstance(s.value.value, gimple_ctypes.TupleExpr):
                 return gen._cpp_yield_tuple(s.value.value, declared, indent)
             if id(s.value) in (getattr(gen, '_cpp_tuple_guarded_yields', None) or ()):
