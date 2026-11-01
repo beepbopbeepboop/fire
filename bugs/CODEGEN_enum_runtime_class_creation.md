@@ -54,8 +54,19 @@ every module is reachable from a word with `mojo_getattr_any(obj, attr)`
    VALUE (`bases = (A, B)`) now lowers to its type tag (`emit_exprs._lower_IdentExpr`) instead of the
    shared zero placeholder, so `mojo_type_add_bases_from_list` files it correctly; pinned by
    `static_class_in_computed_bases_list`.
-   STILL MISSING in stage 3:
-   `type.__new__(metacls, ..)`; instances of a dynamic class (stage 2 is its prerequisite).
+   **Instances of a dynamic class landed 2026-11-01**: `Foo = type(..); o = Foo()` - a call on a
+   class handle (`mojo_fnptr_call_0..4` checks the `_reg_classobj` registry) makes an instance
+   (`mojo_classobj_call`: a registered `{MOJO_INSTOBJ_MAGIC, class tag}` block, `__init__` from the
+   class table called with it if the namespace names one). `o.y = v` / `setattr` use the per-object
+   dynattr dict; a read that misses it is found through the class and its bases
+   (`mojo_instobj_class_lookup` in `mojo_obj_getattr`), so `Foo.x = 9` is seen by every instance.
+   `emit_calls._lower_call`'s uppercase-name "opaque constructor" guess no longer fires for a LOCAL
+   (`Foo` was lowered to the literal 0). Pinned by `instance_of_a_run_time_class` /
+   `instance_reads_through_the_class_bases`. Not covered: methods in the namespace called as
+   `o.m()`, `isinstance(o, Foo)`, `repr(o)`, a call with more than 4 arguments.
+   Separate finding, not fixed: for a STATIC class `p.b = 5` outside `__init__` infers a struct
+   field, so `hasattr(q, 'b')` is True on an instance that never set it (CPython: False).
+   STILL MISSING in stage 3: `type.__new__(metacls, ..)`.
 4. the metaclass protocol `EnumType` uses: `__prepare__`, `__new__`, `__call__`, `__set_name__`,
    `__init_subclass__`, class-level `__getattr__`, `isinstance(x, cls)` for dynamic classes,
    `DynamicClassAttribute` / `property` on dynamic classes.

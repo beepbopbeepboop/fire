@@ -100,6 +100,30 @@ def main():
     print(F.y)
 main()
 """,
+    'instance_of_a_run_time_class': """\
+def main():
+    Foo = type('Foo', (), {'x': 1})
+    o = Foo()
+    o.y = 3
+    print(o.x, o.y)
+    o.x = 5
+    print(o.x, Foo.x)
+    p = Foo()
+    print(p.x, hasattr(p, 'y'), hasattr(o, 'y'))
+    Foo.x = 9
+    print(p.x, o.x)
+main()
+""",
+    'instance_reads_through_the_class_bases': """\
+def main():
+    A = type('A', (), {'a': 1, 'k': 10})
+    B = type('B', (A,), {'b': 2})
+    o = B()
+    print(o.a, o.b, o.k)
+    A.k = 11
+    print(o.k, getattr(o, 'k'), getattr(o, 'nope', 42))
+main()
+""",
     'two_classes_of_one_name_are_two_classes': """\
 def main():
     P = type('Same', (), {'v': 1})
