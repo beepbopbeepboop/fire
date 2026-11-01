@@ -491,3 +491,96 @@ bump plus a spec rewrite, and its acceptance gate is the stdlib compile the
 integrator runs. A light worker cannot verify that, and landing step 1 alone
 would change observable key behaviour (see the ordering correction). The
 guide is the deliverable of this round. The doc stays open.
+
+## Status (2026-11-01, `work/bug-codegen-dict-comprehension-repr-is-s-8473`) — re-measured; the defect-1/2 claims above are stale; the remaining change has a design fork that the guide missed
+
+No code change of the defect itself landed this round. Landed: one CPython-comparable
+regression case, `test_runtime_diff.py::dict_int_key_spelling_repr_matches_cpython`
+(coverage, not a fix: it passes on master and pins the shapes that are already right).
+The reasons it is not more are measured below.
+
+### Measured on master, compiled (`fire.py --jit`) vs CPython 3.14, 2026-11-01
+
+| source | CPython | compiled now | status |
+|---|---|---|---|
+| `{10: "a"}` | `{10: 'a'}` | `{10: 'a'}` | RIGHT (the 2026-10-02 "defect 1" is fixed) |
+| `{"10": "a"}` | `{'10': 'a'}` | `{'10': 'a'}` | RIGHT |
+| `{i: 1 for i in range(3)}` | `{0: 1, 1: 1, 2: 1}` | same | RIGHT (defect 1 fixed) |
+| `{i: i for i in range(2)}` | `{0: 0, 1: 1}` | same | RIGHT (defect 2 fixed) |
+| `d[5]="int"; d["5"]="str"; print(d)` | `{5: 'int', '5': 'str'}` | `{'5': 'str'}` | WRONG: int/str merge |
+| same, `len(d)` | 2 | 1 | WRONG: int/str merge |
+| `d={}; d[10]="a"; d["10"]="b"` | `{10: 'a', '10': 'b'}` | `{'10': 'b'}` | WRONG: int/str merge |
+| `{"10": 1, 10: 2}` | `{'10': 1, 10: 2}` | `{10: 2}` | WRONG: int/str merge |
+| `{True: 1}` | `{True: 1}` | `{1: 1}` | WRONG: bool lowered to int 1 |
+| `{1.5: "x"}` | `{1.5: 'x'}` | `{'1.5': 'x'}` | WRONG: float key has no domain |
+
+So the doc's headline "defect 1" (`{i: 1 for i in range(3)}` stringified) is FIXED on
+master, and so is defect 2 (`0` rendered as `None`). What is left is ONE domain problem
+(the merge: `_canon_int` promotes every canonical-decimal STR key into a keykind-2
+integer slot), plus a bool lowered to int, plus a float key. The merge row is the
+root of the first three `WRONG` rows and is the only one with a real consumer.
+
+### Why the merge cannot be removed as a one-line step (the guide's step 1 is unsafe)
+
+`_canon_int` (`runtime/fire_runtime.c` ~6261) is load-bearing for the keys that leave
+the dict as TEXT:
+
+* `mojo_dict_keys` (~10890) appends `_slot_key(...)` for every slot into a `str`
+  list; `_slot_key` (~6155) formats an integer slot as its decimal. The element is an
+  untagged `char *`, and the codegen types it as `str`.
+* `for k in d.keys(): d[k]` (and `d.keys()` then indexing) therefore hands
+  `mojo_dict_get_*` a STR word. Today the merge makes that find the integer slot. With
+  the merge removed it is a keykind-0 lookup and MISSES. The guide's step-1 ordering
+  correction covered the codegen integer path but not this one.
+* `mojo_dict_values`/`items` and any `sorted(d.keys())` round-trip have the same shape.
+
+### The fork the next round must decide (both are real; I recommend A)
+
+**A (recommended): keys() yields REGISTERED decimal blocks.** A decimal produced for an
+integer slot is added to a live-block set and removed when the list that owns it is
+freed (`mojo_list_free` already owns the list's element lifetime). The dict's
+str-domain find/lookup/set then promotes a canonical key to an integer slot ONLY when
+its pointer is in that live set, so a user str literal `"10"` (never a registered block)
+stays a str key and `d[k]` for `k` from `keys()` still finds the integer slot. Pros: no
+ABI change (the set is internal; `mojo_cstr_or_int_str` and `mojo_int_str_transient`
+keep their exported shape); the 581/684 header counts and the six `formal/` count
+strings are NOT touched. Cons: the set is a new piece of runtime state with a release
+protocol (`mojo_cstr_or_int_release`, `mojo_dict_key_release`, `mojo_list_free`) that
+has to be exact; a missed unregister is a leak, a wrong register is the merge again.
+
+**B: the guide's marker.** `\x02` + decimal as the key text, stripped by the str-domain
+API. Needs one new exported producer (ABI 581->582 / 684->685 in six files), and is
+collision-prone: a user str `"\x02" + "5"` would become integer 5. The
+`MOJO_KEY_TUPLE 3` precedent the guide cites is NOT a text marker: container keys are
+keykind 3 in the slot, so the discriminator is the slot, not the text. Do not use B
+without an answer to the collision.
+
+### Next round, concretely (A)
+
+1. `runtime/fire_runtime.c`: a small open-addressed pointer set of live integer
+   decimals. `_int_str_transient` / the int half of `mojo_cstr_or_int_str` register
+   the block they hand out; `mojo_cstr_or_int_release` and `mojo_dict_key_release`
+   unregister it on pool return.
+2. `mojo_dict_keys` / `values` / `items` / `sorted_keys`: register each integer-slot
+   decimal they put in a list; `mojo_list_free` unregisters and frees them.
+3. `_dict_find_k`, `_dict_lookup_k`, `_dict_set_raw_seq_kind_k`: replace `_canon_int`
+   promotion with `_canon_int(key) && _live_int_text(key)`. The `_dict_find_ik` /
+   `_dict_lookup_ik` redirects go with it.
+4. `test_ptr_registry.py` `dict_int_keys` (the "ONE entry, both directions" assertions,
+   including `d->used == 2` and the `keys()` order) and `dict_set_inline` (`contains(cp,
+   "103")` finding an integer slot) rewritten to the CPython contract. Cite the
+   interpreter's agreement (`d[5]` and `d["5"]` both present, `len` 2; the interpreter
+   prints `{5: 'int', '5': 'str'}`, measured 2026-10-19).
+5. New test in `test_runtime_diff.py`: `d[5]`/`d["5"]` both present; `for k in d.keys():
+   d[k]` over an int-keyed dict finds every value (this is the regression that step 3
+   without step 2 would cause); `len` 2. This test must FAIL before step 3 and pass
+   after. The case added this round must still pass.
+6. Bool and float keys are separate changes after that: bool needs codegen to stop
+   lowering a bool key to int 1; float needs its own domain.
+
+### Status of the gate-facing claims
+
+Nothing above was gated. `test_runtime_diff.py` was run in full on the unmodified tree
+(67 passed, 0 failed) and again with the new case (the new case: PASS). `test_ptr_registry.py`
+(28 groups) and `test_runtime_header_scan.py` (72/72) were run on the unmodified tree and
+are green; neither was touched.

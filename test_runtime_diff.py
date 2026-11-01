@@ -800,6 +800,23 @@ BUILTIN_PROGRAMS = {
             d["j"] = 1
             print(d)
     """),
+    # INTEGER key spelling in a repr, for the shapes that already match CPython
+    # (measured 2026-11-01 against CPython 3.14): an integer key prints
+    # unquoted, a canonical-decimal STRING key prints quoted, and a
+    # comprehension's int keys are integers. NOT pinned here, because they are
+    # still wrong and belong to bugs/CODEGEN_dict_comprehension_repr_is_
+    # separately_broken.md: `d[5]="int"; d["5"]="str"` is ONE entry here
+    # (CPython: two), `{True: 1}` prints `{1: 1}`, and `{1.5: "x"}` prints
+    # `{'1.5': 'x'}` -- those are the int/str domain merge, a bool lowered to
+    # the integer 1, and a float key with no domain of its own.
+    "dict_int_key_spelling_repr_matches_cpython": textwrap.dedent("""\
+        def main():
+            print({10: "a"})
+            print({"10": "a"})
+            print({i: 1 for i in range(3)})
+            print({i: i for i in range(2)})
+            print({"10": 1})
+    """),
     # The SAME value kinds, read back through `.items()` instead of through
     # `print(d)`. The dict's own repr reads `_DictSlot.kind`; a `(key, value)`
     # PAIR does not, because a pair slot is a raw int64_t and the pair is built
@@ -1638,6 +1655,8 @@ BUILTIN_PROGRAMS = {
 CPYTHON_COMPARABLE = {
     "minimal_main", "function_def", "method_call_result",
     "dict_get_none_guard",
+    # Int-key spelling in a repr: both engines and CPython agree on these shapes.
+    "dict_int_key_spelling_repr_matches_cpython",
     # Both engines answered these the SAME wrong way before the for-target
     # fix, so an engine-vs-engine diff was clean while both printed `1` where
     # CPython prints `(1,)`. The third opinion is the only thing that could
