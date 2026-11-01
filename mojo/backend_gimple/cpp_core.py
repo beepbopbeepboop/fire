@@ -5797,7 +5797,11 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             if isinstance(s.target, gimple_ctypes.MemberExpr) and isinstance(s.target.obj, gimple_ctypes.IdentExpr) \
                     and s.target.obj.name == 'self' and getattr(gen, '_cpp_gen_self_struct', None):
                 val = gen._cpp_expr(s.value)
-                return [f"{indent}self->{gimple_ctypes._safe_field(s.target.member)} = {val};"]
+                _pset = gimple_ctypes.presence_set_stmt(
+                    gen._struct_name_owner.get(gen._cpp_gen_self_struct),
+                    s.target.member, 'self', '->')
+                return [f"{indent}self->{gimple_ctypes._safe_field(s.target.member)} = {val};"
+                        + (f" {_pset}" if _pset else '')]
             # `cls.<attr> = val` / `ClassName.<attr> = val` — the write-side
             # analogue of the class-level-attribute READ support just above
             # (`_cpp_expr`'s `cls.<attr>`/`ClassName.<attr>` MemberExpr
@@ -6368,7 +6372,11 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     and s.target.obj.name == 'self' and getattr(gen, '_cpp_gen_self_struct', None):
                 op = gimple_ctypes._GD_BIN_OPS.get(s.op, s.op)
                 val = gen._cpp_expr(s.value)
-                return [f"{indent}self->{gimple_ctypes._safe_field(s.target.member)} = self->{gimple_ctypes._safe_field(s.target.member)} {op} {val};"]
+                _pset = gimple_ctypes.presence_set_stmt(
+                    gen._struct_name_owner.get(gen._cpp_gen_self_struct),
+                    s.target.member, 'self', '->')
+                return [f"{indent}self->{gimple_ctypes._safe_field(s.target.member)} = self->{gimple_ctypes._safe_field(s.target.member)} {op} {val};"
+                        + (f" {_pset}" if _pset else '')]
             raise gimple_exprtypes._UnsupportedGeneratorShape(
                 "augmented assignment to an undeclared/non-simple target")
         op = gimple_ctypes._GD_BIN_OPS.get(s.op, s.op)

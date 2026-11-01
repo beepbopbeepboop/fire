@@ -4345,6 +4345,12 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                                     f"_is_some;")
                                 gen._emit(
                                     f"  {dst}->{_fnm}_is_some = {_sv};")
+                        # The presence words are not in struct_field_types
+                        # (see StructDef.presence_fields), so the loop above
+                        # never copies them: a copy of an object that had a
+                        # minted field set must keep answering hasattr True.
+                        gimple_ctypes.presence_copy_emit(
+                            gen, gen._struct_name_owner.get(sname), dst, src_local, '->')
 
                     _emit_fw_copy(t, _recv_local, _csn, 0)
                     return f'{_csn} *', t

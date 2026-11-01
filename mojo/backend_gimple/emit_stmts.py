@@ -2108,6 +2108,7 @@ def _gen_stmt_AssignStmt(gen, node):
                 gen._emit(f'  if ({_nul} == 0) mojo_raise_attribute_error ({gen._intern_string(
                     f"\x27NoneType\x27 object has no attribute \x27{node.target.member}\x27")});')
             gen._safe_coerce_emit(vtype, field_type, v, f"{ov}{op}{gimple_ctypes._safe_field(node.target.member)}")
+            gimple_ctypes.presence_set_emit(gen, gen._struct_name_owner.get(struct_name), node.target.member, ov, op)
             # PART 6 (2026-10-22, family C): the tagged-Optional side-band
             # store — the word store above is the payload; the adjacent
             # `_Bool <f>_is_some` records Some/None so a Some(0) payload is
@@ -2397,6 +2398,11 @@ def _gen_stmt_AssignStmt(gen, node):
                                         continue
                                     fv = gen._new_val(ftype, f"{v}->{safe_fn}")
                                     gen._emit(f"  {addr}->{safe_fn} = {fv};")
+                                # The presence words are not in `fields` (see
+                                # StructDef.presence_fields): copy them too, so
+                                # the copy answers hasattr as its source does.
+                                gimple_ctypes.presence_copy_emit(
+                                    gen, gen._struct_name_owner.get(elem_t), addr, v, '->')
                             else:
                                 gimple_ctypes._debug_note('struct subscript write dropped',
                                             f'{elem_t}[...] = {vtype}')
@@ -2694,6 +2700,7 @@ def _gen_stmt_AugAssignStmt(gen, node):
             struct_name = gimple_exprtypes._struct_name_of(ot)
             field_type = gen.struct_field_types.get(struct_name, {}).get(node.target.member, vtype)
             gen._safe_coerce_emit(vtype, field_type, v, f"{ov}{op}{gimple_ctypes._safe_field(node.target.member)}")
+            gimple_ctypes.presence_set_emit(gen, gen._struct_name_owner.get(struct_name), node.target.member, ov, op)
     elif isinstance(node.target, gimple_ctypes.SubscriptExpr):
         # Fixed-size-array struct field write: `obj.field[idx] = ...` /
         # `obj.field[idx] += ...` (whole-element assignment, e.g. a
@@ -3903,6 +3910,7 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                 gen._emit(f'  if ({_nul} == 0) mojo_raise_attribute_error ({gen._intern_string(
                     f"\x27NoneType\x27 object has no attribute \x27{target.member}\x27")});')
             gen._safe_coerce_emit(vtype, field_type, v, f"{ov}{op}{gimple_ctypes._safe_field(target.member)}")
+            gimple_ctypes.presence_set_emit(gen, gen._struct_name_owner.get(sn), target.member, ov, op)
         elif isinstance(target, gimple_ctypes.SubscriptExpr):
             ot, obj_v = gen.lower_expr(target.obj)
             it2, idx_v = gen.lower_expr(target.index)
