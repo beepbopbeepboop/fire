@@ -3918,6 +3918,22 @@ def gen_module_impl(self, stmts):
             if isinstance(_m, FunctionDef):
                 _struct_method_ids.add(id(_m))
     self._all_generator_names: set = {n.name for n in _generator_fns.values()}
+    # Whether any generator in this module yields `double`. A `for` over a
+    # DYNAMIC generator handle (one returned through a function value) lowers
+    # its body once per value kind it may drain; the `double` arm is only worth
+    # (and only safe) lowering where a double-valued generator exists, because
+    # a body written for an object/pointer element (`s.unsafe_ptr()`,
+    # `item.key`) does not type-check with the loop variable a `double`.
+    # The syntactic evidence is the kind analysis, or a float-literal default
+    # on an unannotated parameter (`scale=2.0`: the generator's unit types that
+    # parameter `double`, and `i * scale` is then a double yield the
+    # annotation-free kind analysis cannot see).
+    self._has_double_generator = any(
+        gimple_gen_coro._generator_value_kind(
+            _gf, gimple_gen_coro._static_env(_gf))[0] == 'd'
+        or any(isinstance(_dv, FloatLiteral)
+               for _dv in (getattr(_gf, 'param_defaults', None) or {}).values())
+        for _gf in _generator_fns.values())
     self._all_async_fn_names: set[str] = {n.name for n in _async_fns.values()}
 
     for _s in stmts:

@@ -1064,6 +1064,7 @@ class GimpleGen:
         # safe for any code path that reaches `_cpp_for_stmt` without going
         # through gen_module first.
         self._all_generator_names: set = set()
+        self._has_double_generator: bool = False
         # Side channel: _gen_cpp_generator_unit/_gen_cpp_async_generator_unit
         # stash their just-computed _generator_tuple_yield_slot_ctypes
         # result here (list[str] for a tuple-yielding generator, None for
