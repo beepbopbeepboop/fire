@@ -517,6 +517,86 @@ for x in g:
 print("done")
 """, "1\n2\ndone\n")
 
+    # `next()` on a module-global handle read from a FUNCTION body. The
+    # toplevel store is emitted after every function, so the read used to
+    # find no api and refuse ("`next(...)` on next(IdentExpr) ... has no
+    # lowering"); `seed_global_generator_apis` records the api before any
+    # function is lowered. The oracle is CPython itself.
+    test_generator_matches_cpython(
+        "next_on_a_module_global_generator_read_from_a_function",
+        """\
+def g():
+    yield 1
+    yield 2
+
+it = g()
+
+def main():
+    print(next(it))
+    print(next(it, -1))
+    print(next(it, -1))
+main()
+""", """\
+def g():
+    yield 1
+    yield 2
+
+it = g()
+
+def main():
+    print(next(it))
+    print(next(it, -1))
+    print(next(it, -1))
+main()
+""")
+
+    # The same read from a function, with the handle consumed at toplevel
+    # too: both reads must share the one api the store recorded.
+    test_generator_matches_cpython(
+        "next_on_a_module_global_generator_from_a_function_and_toplevel",
+        """\
+def g():
+    yield 10
+    yield 20
+
+it = g()
+
+def main():
+    print(next(it))
+
+main()
+print(next(it))
+""", """\
+def g():
+    yield 10
+    yield 20
+
+it = g()
+
+def main():
+    print(next(it))
+
+main()
+print(next(it))
+""")
+
+    # A global bound TWICE to a generator is not one fact, so the read from
+    # the function keeps the honest refusal rather than a guessed api.
+    test_generator_refused("next_on_a_module_global_bound_twice_refused", """\
+def g():
+    yield 1
+
+def h():
+    yield 2
+
+it = g()
+it = h()
+
+def main():
+    print(next(it))
+main()
+""", "has no lowering in this codegen")
+
     # The carried entry is only a fact while the name has ONE binding, because
     # a wrong entry is not a refusal — it is another generator's resume/value
     # ABI. Both rebinding shapes must therefore keep the honest refusal.

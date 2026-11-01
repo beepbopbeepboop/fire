@@ -1567,6 +1567,55 @@ def global_generator_key(module_safe: str, name: str) -> tuple:
     return f"{module_safe}.{name}"
 
 
+def seed_global_generator_apis(gen, stmts, mod_index) -> None:
+    """Record, before ANY function body is emitted, which module globals are
+    bound to one compiled generator for the whole module.
+
+    `_note_global_generator_store` learns a global's generator api from the
+    TOPLEVEL store, and the toplevel body is emitted last (after every
+    function, because `_toplevel` is the one that runs them). So a function
+    that reads the global (`def main(): print(next(it))`) was lowered against
+    an empty `_global_generator_api`, found no api, and refused. The read
+    arm of `_lower_IdentExpr` can only carry what is already recorded.
+
+    The fix is to record the store's api up front, from the one place it is
+    statically certain: a DIRECT top-level `name = <generator>(...)` statement
+    whose name has exactly one binder in the whole module. `mod_index` is
+    `module_gen._gmi_binding_index(stmts)`, the binder census that already
+    counts every binding (nested functions included, `global` declarations
+    and wildcard imports too) of every name, so "exactly one binder, and it
+    is this statement" is the same test the literal-argument lookup uses. A
+    name with any other binder is not seeded, and keeps the honest refusal.
+
+    The generator itself must be a compiled generator defined in THIS module
+    (`gen._generator_api`) and not rebound (exactly one binder), so the api
+    recorded is the one the call lowering would attach to the value.
+    Nothing is recorded for a store nested in a block or a conditional: that
+    shape keeps the existing (toplevel-ordered) path and its refusal.
+    """
+    key_mod = gimple_ctypes._c_field_name(gen._current_module_ctx or "root")
+    for st in stmts or []:
+        if not (isinstance(st, AssignStmt) and isinstance(st.target, IdentExpr)
+                and isinstance(st.value, CallExpr)
+                and isinstance(st.value.func, IdentExpr)):
+            continue
+        api = gen._generator_api.get(st.value.func.name)
+        if api is None:
+            continue
+        # The generator's own `def` may be rewritten away by the stack-switch
+        # lowering (its body becomes `__mgco_<name>_body`), so zero FunctionDef
+        # binders is normal. What must NOT be there is any other binder kind:
+        # a rebinding of the function name to something else.
+        if not all(isinstance(_fs, FunctionDef)
+                   for _fs in mod_index.get(st.value.func.name, [])):
+            continue
+        name = st.target.name
+        sites = list(mod_index.get(name, [])) + list(mod_index.get('*', []))
+        if len(sites) != 1 or sites[0] is not st:
+            continue
+        gen._global_generator_api[global_generator_key(key_mod, name)] = api
+
+
 def _emit_imported_global_accessors(gen, stmts) -> None:
     """Bare `from X import <module_scope_var>` — BUG-2026-009. See
     `_imported_global_accessors`'s own docstring and module_loader.py's

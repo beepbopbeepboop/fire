@@ -6,6 +6,83 @@ the generator value-slot lattice supports (int / bool / float / str) matches
 CPython on BOTH the local and global generator paths. None is the only
 mismatching type. Owner-level ABI feature; measured and pinned, NOT shipped.
 
+## Status (2026-11-01, seventh round, work/bug-codegen-a-bare-or-explicit-yield-of: planning guide for the bind-site kind loss, no code changed)
+
+**Output of this round: a planning guide (not a fix).** The open item is the
+bind-site kind loss (since fixed in `b09622930`, which keeps the box at the
+bind):
+`x = next(g)` on a tagged generator unwrapped the box at the bind, so `print(x)`
+printed a bool as `1` on the default path and an address on the cpp path.
+Investigated, not landed: the change crosses per-function state and several
+consumers, and it reverses a deliberate design, so it needs its own round with
+the full pin set below.
+
+**Current state (carried from the sixth round's measurements; not re-run):**
+the repro in the bind-site doc prints `'1\nb\n'` default (CPython `'True\nb\n'`)
+and `'1\n<address>\n'` on `MOJO_CORO=cpp`.
+
+**Where the unwrap is (measured by reading, master 7ceb5092e):**
+- `mojo/backend_gimple/emit_stmts.py` ~1321-1334: a `vtype == 'int64_t'` value
+  whose temp is in `gen._boxed_vals` is bound through `mojo_box_word` into a
+  fresh temp, and the LOCAL is NOT added to `_boxed_vals`. The comment there
+  records why: a local that kept the box broke `v is None` (a non-NULL heap
+  box), which is the `_mojo_classattr_init` / `_class_field_decl` regression.
+  Any fix must keep that case correct.
+- Tagged-word temps are added to the SAME `_boxed_vals` set as list-element
+  boxes: `mojo/backend_gimple/emit_calls.py` ~369 (`_lower_generator_next`) and
+  ~2919 (two-argument `next(it, default)`), and `emit_loops.py` ~2590/3930 for
+  for-targets. So the bind site cannot tell a tagged word from a list box today.
+- Per-function scope: `_boxed_vals` is saved/restored in
+  `mojo/backend_gimple/emit_infra.py` (`save_func_state` ~969/1052, restore
+  ~1077/1164). A new set must follow the same pattern (or the code must reuse
+  `_boxed_vals` with a tag), not leak across functions.
+- Cpp side: `_cpp_tagged_word_names` (`cpp_core.py` ~1941-1960) already tracks
+  tagged locals inside coroutine bodies. The failing cpp repro is `_gimple_main`
+  (a NON-coroutine binder), so the GIMPLE bind fix covers it; no cpp change is
+  needed for the bind itself.
+
+**Consumers of a `_boxed_vals` local (what the fix must get right):**
+`emit_exprs.py` ~3930-3946 (arithmetic `mojo_box_word` on operands, already
+correct for a boxed name), ~4699-4704 (compare: the `is None` path; this is the
+consumer the classattr comment is about), `emit_infra.py` ~2556/2733 (call
+arguments), ~4789 (`str()` / print via `mojo_repr_boxed`, already correct),
+~5030 (`mojo_box_int` for numeric use), ~7071-7079 (format/`str` of an int
+argument). Each must give the box's VALUE for every kind; the audit is the work.
+
+**Decision (recommended): tag, do not overload.**
+1. Add `gen._tagged_word_vals` (temps produced by the two tagged-`next`
+   sites above), save/restore it in `emit_infra.py` next to `_boxed_vals`.
+2. At the bind (`emit_stmts.py` ~1327): if `v in gen._tagged_word_vals`, do NOT
+   `mojo_box_word`; keep the box, add the LOCAL's cname to `_boxed_vals` and to a
+   new `gen._tagged_word_locals`. Leave the list-element path unchanged.
+3. Rebinding is the hazard: `_boxed_vals` membership is static, so a name that
+   is later rebound to a plain int would still be treated as a box. Rule: mark
+   the local ONLY when every assignment to that name in the function is a
+   tagged-word bind (scan the function body's `Assign` targets once, at the
+   bind site or in a pre-pass). Any other assignment makes the name untagged,
+   and the old `mojo_box_word` path stays.
+
+**Tests (write first, must FAIL before the change, CPython oracle), in
+`test_gimple_generator_runner.py` next to `run_tagged_word_cpp_tests`:**
+- the two-line repro (`x = next(g); print(x)` twice), default and
+  `coro.pinned('cpp')`: expect `True` / `b`.
+- `x = next(g); x + 1` on an int-first mixed generator (arithmetic still works).
+- `x = next(g); print(x is None)` on a None-yield tagged generator (the
+  `is None` consumer the classattr regression is about).
+- rebinding: `x = next(g); x = 5; print(x)` must print `5` (guards the
+  every-assignment rule).
+Run only that file, under `python3 tools/memslot.py --gb 8 --label x --`.
+
+**Gate note for the integrator:** this change widens which generator-bound
+names keep the box, so `stdlib-dylib`'s `skip <module>:` count and
+`stdlib-syntax`'s `U` count must be compared before and after, and the
+classattr emission (`_mojo_classattr_init`) checked for byte-identical C on a
+large case (the behaviour-preserving standard applies to every non-tagged path).
+
+**Still open in this doc (unchanged):** the dead `co_yield (int64_t)0` line
+(item 3), the module-global `next()` refusal (its own doc), and the remaining
+non-`print` consumers of a tagged value on the cpp path.
+
 ## Status (2026-11-01, sixth round, work/bug-codegen-a-bare-or-explicit-yield-of: escape-hatch word print, partial)
 
 **Landed (real behaviour change on the `MOJO_CORO=cpp` path, measured against
@@ -39,16 +116,17 @@ tagged word only in the three consumer sites above and only for a single-argumen
 `print`. A tagged value used any other way (arithmetic, `str()`, an f-string,
 a multi-argument `print`, `list.append`) is not covered by this round.
 
-**Found, NOT fixed here (separate defect, default path too):** a tagged value
-bound to a name in the GIMPLE consumer is unwrapped by `mojo_box_word` at the
-bind, so `x = next(g); print(x)` prints a bool as `1` on the default path, and
-an unregistered str on the cpp path prints an address. Fixed on the bind
-site (a tagged word bound to a name keeps its box); pinned by the
-`tagged_*_bound_to_name_*` cases in `test_gimple_generator_runner.py`.
+**Found and FIXED (separate defect, default path too), in `b09622930`:** a
+tagged value bound to a name in the GIMPLE consumer was unwrapped by
+`mojo_box_word` at the bind, so `x = next(g); print(x)` printed a bool as `1`
+on the default path, and an unregistered str on the cpp path printed an
+address. The bind now keeps the box for a tagged word; pinned by the
+`tagged_*_bound_to_name_*` cases (`run_tagged_word_bind_tests`) in
+`test_gimple_generator_runner.py`.
 
 **Still open in this doc:** item 1 of the fifth-round plan is now landed for
-the three consumer sites and `print`; the remaining consumers, the bind-site
-kind loss (filed above), and the `x` local-kind design are the next steps. The
+the three consumer sites and `print`; the remaining consumers and the `x`
+local-kind design are the next steps. The
 `co_yield (int64_t)0` dead line (item 3) and the module-global `next()` refusal
 (item 2, its own doc) are unchanged.
 
@@ -109,8 +187,11 @@ round-3 refusal, so they are coverage, not a fix.
    on the stdlib default path, so the integrator's `skip`/`U` counts should
    not move from this.
 
-2. *Module-global `next()` refusal* is NOT None-specific and is filed as its own
-   doc: `bugs/CODEGEN_next_on_a_module_global_generator_is_refused.md`.
+2. *Module-global `next()` refusal* is NOT None-specific. It was its own bug
+   (`next()` on a module-level generator read from a function was refused: the
+   toplevel store, which seeds the generator api, is emitted after every
+   function) and is FIXED by `emit_infra.seed_global_generator_apis`, pinned by
+   `run_module_global_generator_tests` in `test_gimple_generator_runner.py`.
 
 3. *Dead C++ bare-yield line* (`cpp_core.py`, `co_yield (int64_t)0`): unreachable
    for a None yield now (the typer refuses first). Delete in a cleanup, with
