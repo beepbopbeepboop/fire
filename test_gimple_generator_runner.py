@@ -3714,6 +3714,130 @@ def main():
 main()
 """)
 
+
+    test_generator_matches_cpython("tagged_int_str_bound_to_name_default", """\
+def gen():
+    yield 1
+    yield "a"
+    yield 2
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x)
+    x = next(g)
+    print(x)
+    x = next(g)
+    print(x)
+main()
+""", """\
+def gen():
+    yield 1
+    yield "a"
+    yield 2
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x)
+    x = next(g)
+    print(x)
+    x = next(g)
+    print(x)
+main()
+""")
+
+
+    # The same bound name read by the other consumers: a copy of it (`y = x`
+    # stays tagged), a multi-argument print, and a str use of a str yield.
+    test_generator_matches_cpython("tagged_bound_name_copied_then_printed", """\
+def gen():
+    yield True
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    y = x
+    print(y, x)
+    x = next(g)
+    print(x, "|", y)
+main()
+""", """\
+def gen():
+    yield True
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    y = x
+    print(y, x)
+    x = next(g)
+    print(x, "|", y)
+main()
+""")
+    # A bound int yield keeps its integer arithmetic: the tagged word is read
+    # as its integer, not as a double, beside an int operand (`1 + 1` is `2`).
+    test_generator_matches_cpython("tagged_int_bound_to_name_arithmetic", """\
+def gen():
+    yield 1
+    yield 2.5
+    yield True
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x + 1)
+    print(x * 3)
+    x = next(g)
+    print(x)
+    x = next(g)
+    print(x + 1)
+main()
+""", """\
+def gen():
+    yield 1
+    yield 2.5
+    yield True
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x + 1)
+    print(x * 3)
+    x = next(g)
+    print(x)
+    x = next(g)
+    print(x + 1)
+main()
+""")
+    test_generator_matches_cpython("tagged_str_bound_to_name_has_length", """\
+def gen():
+    yield 1
+    yield "abc"
+
+def main():
+    g = gen()
+    x = next(g)
+    x = next(g)
+    print(len(x))
+    print(x + "!")
+main()
+""", """\
+def gen():
+    yield 1
+    yield "abc"
+
+def main():
+    g = gen()
+    x = next(g)
+    x = next(g)
+    print(len(x))
+    print(x + "!")
+main()
+""")
+
 def run_none_list_iteration_tests():
     # A None element of a LIST read by a for loop printed the box's own address
     # (`for x in [None]: print(x)` -> 4315206080). `mojo_list_get_boxed` boxes

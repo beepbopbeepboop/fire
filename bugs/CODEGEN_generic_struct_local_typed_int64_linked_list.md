@@ -224,3 +224,60 @@ land together, because step 1 alone enqueues and then refuses, per wall 2/3).
 NOT run: gate / `stdlib-syntax` / `stdlib-dylib` (the integrator's). The
 `test_linked_list`/`test_deque`/`test_bitset` outputs change, so `stdlib-syntax`
 `U` and `stdlib-dylib` skip count are owed a check.
+
+## Status (2026-11-01, later): PLANNING ROUND — remaining work is one coherent program (iterator + typed Node pointer); guide below.
+
+### Measurement (this tree, probe = the minimal repro, `.tmp/` script over `test_generic_struct_local_linked_list._compile()`)
+
+- `test_generic_struct_local_linked_list.py` passes (`l` is `LinkedList_11_ElementType_3_Int *`,
+  hashed `__init__` called). `main` still has `int64_t it;`,
+  `_t7 = LinkedList_11_ElementType_3_Int___iter___0120be (l);` (returns `int64_t`) and
+  `/* int64_t.__next__() stubbed */`. 59 `stubbed` markers in the whole TU, by receiver method:
+  `Node` methods `next prev single unsafe_with_layout unsafe_leak _into_value __hash__` (~50, every one
+  on an `int64_t` word), plus `IteratorOwnedType __next__ write_sequence_to _write_self_to FormatStruct
+  TypeNames params fields`.
+- So the two remaining walls are NOT independent: materializing `_LinkedListIter` alone gives a typed
+  `it` whose `__next__` body is itself the `self.curr.value()[].next()` Node-word stub. Landing the
+  iterator without the Node model would make `it` a struct but `print(it.__next__())` still wrong.
+  This is why no piece landed this round: each half alone leaves the repro's output unchanged.
+
+### Decision needed (readings), then the plan
+
+The root of walls 1-2 is that `Optional[UnsafePointer[Node[T], MutUntrackedOrigin]]` is "an erased
+word" (`_ERASED_WORD_STRUCTS`), so `Node[T]` is never named and `.next()` has no receiver type.
+Reading A (recommended): model `Optional[UnsafePointer[X, o]]` / `Optional[Pointer[X, o]]` where `X`
+is a materialized struct as `X *` with NULL = None. This is the representation the rest of the
+struct-pointer codegen already uses (a struct local is `X *`), `not p` / `p.value()` / `p.value()[]`
+become NULL test / identity / identity, and no tagged word is needed. Reading B: keep the tagged word
+and teach every method call to recover the pointee type from the alias text; rejected, it is the
+current failure shape (the type exists only in the spelling).
+
+### Implementation plan
+
+1. `elab_intu._eval_comptime_type_aliases`: for an erased-word base whose innermost argument is a
+   `Struct[...]` with scalar args, enqueue that struct (`Node[Int]`) and make the alias name
+   `<mangled Node> *` (NOT the spelling) so field/return annotations resolve through the registered-name
+   branch to a pointer type. Pointer-nesting is `Optional[UnsafePointer[Node[T], o]]` -> one `*`.
+2. Emit side (`emit_exprs`/`emit_methods`): `.value()` on a pointer-typed Optional receiver is the
+   identity, `not x` / `if x` is `x == 0` / `x != 0`, `x[]` on `UnsafePointer[Node]` is identity (the
+   struct is already `*`), assignment of `None` to such a field is `0`. Find the existing
+   `Optional.value` lowering by grepping `unsafe_value` / `_ELEM_COPY_RE` branch (a) in `emit_methods`.
+3. Parametrized alias: widen `_COMPTIME_ALIAS_HEAD_RE` to
+   `comptime\s+(_?[A-Za-z]\w*)(\[[^\]]*\])?\s*(?::[^=]+)?=\s*Base\[`; for `IteratorType[..., //, o]`
+   drop the origin/mut parameters (erased), evaluate `downcast[T, Trait]` to `T`, and rewrite
+   `Self.IteratorType[origin_of(self)]` (return annotation text) to the mangled iterator. `_LinkedListIter`
+   has defaulted `forward: Bool = True` and a leading `mut: Bool, //` — `type_param_names` must skip the
+   infer-only group and `mm.mangle` must fold defaults, otherwise the positional-binding refusal fires.
+4. Re-measure: zero `stubbed`, `int64_t it;` gone; `test_optional`, `test_arc`, `test_bitset`,
+   `test_deque`, `test_dict`, `test_set`, `test_list` gcc `-fsyntax-only` clean with unchanged stub counts.
+5. Struct-valued elements (`LinkedList[CopyCountedStruct]`): register the element's imported struct
+   before resolving materialized annotations, then lift the scalar gate in
+   `_positional_bracket_ctor_args`.
+
+### Tests that will prove it
+
+Extend `test_generic_struct_local_linked_list.py`: assert `'int64_t it;' not in main`,
+`'stubbed' not in _compile()`, and a build-and-run of `LinkedList[Int](1, 2, 3)` iterated with a
+`for` loop printing `1 2 3` (compare against `tools/mojo`). Commands:
+`python3 tools/memslot.py --gb 8 --label x -- python3 test_generic_struct_local_linked_list.py`.
+Integrator owes `stdlib-syntax` `U` and `stdlib-dylib` skip count checks.
