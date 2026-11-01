@@ -4035,6 +4035,36 @@ def main():
 main()
 """)
 
+    # The stale-state case the test above does NOT reproduce: the previous
+    # module's unannotated `g(x)` was called with a float, so its call-site
+    # table typed `x` as 'd'. This module calls the same-named `g` with an
+    # int. Before the cpp branch refreshed `_CALLSITE_PARAM_KINDS`, the cpp
+    # path kept the float typing and printed `2.0` where CPython prints `2`
+    # (measured on the pre-8c305b720 tree; the fixed tree prints `2`).
+    with coro.pinned('stackswitch'):
+        try:
+            gimple_codegen.compile_to_gimple_with_cpp(prev_callsite_src, do_imports=False)
+        except Exception:
+            pass
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("cpp_path_callsite_int_after_previous_float", """\
+def g(x):
+    yield x
+
+def main():
+    for v in g(2):
+        print(v)
+main()
+""", """\
+def g(x):
+    yield x
+
+def main():
+    for v in g(2):
+        print(v)
+main()
+""")
+
 
 _AUG_YIELD_SRC = """\
 def g():
