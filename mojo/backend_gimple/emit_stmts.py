@@ -64,7 +64,7 @@ from mojo.middle.calls_shared import _py_box_expr
 # re-raises, and `emit_loops` cannot be imported here (it goes through
 # `gimple_codegen`, which imports this module). See the class's own docstring
 # for why the two arms treat it differently from a plain `ValueError`.
-from mojo.middle.loops_shared import ZipLongestFillRefusal
+from mojo.middle.loops_shared import ZipLongestFillRefusal, desugar_loop_else
 
 
 def gen_stmt(gen, node):
@@ -3609,6 +3609,26 @@ def _resolve_dotted_case_pattern(gen, subj_type: str, pattern):
                                     member=pattern.path)
 
 
+def _is_python_source(gen) -> bool:
+    return _as_str(getattr(gen, '_current_filename', '') or '').endswith('.py')
+
+
+def _flatten_or_patterns(patterns) -> list:
+    """`[A | B, C]` -> `[A, B, C]`: the alternatives of every `|` or-pattern, in order."""
+    out: list = []
+    for pat in patterns:
+        _flatten_or_pattern_into(pat, out)
+    return out
+
+
+def _flatten_or_pattern_into(pat, out: list) -> None:
+    if isinstance(pat, gimple_ctypes.BinaryOp) and pat.op == '|':
+        _flatten_or_pattern_into(pat.left, out)
+        _flatten_or_pattern_into(pat.right, out)
+    else:
+        out.append(pat)
+
+
 def _gen_stmt_MatchStmt(gen, node):
     """`match subject: case p1: ... case p2, p3: ... case _: ...`
 
@@ -3655,6 +3675,14 @@ def _gen_stmt_MatchStmt(gen, node):
         guard_bb = gen._new_bb() if match_case.guard is not None else None
         arm_bb = guard_bb if guard_bb is not None else case_bbs[i]
         patterns = match_case.patterns
+        # In a Python source `case A | B | C:` is an OR-PATTERN (PEP 634): the arm runs when the
+        # subject matches any alternative. The parser reads it as the `|` operator, so the leaves
+        # are flattened into the alternatives of a comma list (`case A, B, C:`), which is exactly
+        # what this chain already tests one block at a time. A `.mojo` source keeps the
+        # switch-style reading (`case 1 | 2:` is the number 3 there), which the classifier below
+        # refuses by name.
+        if _is_python_source(gen):
+            patterns = _flatten_or_patterns(patterns)
         if not patterns:
             gen._emit(f"  goto {next_check_bb};")
         for j, pattern in enumerate(patterns):
@@ -3720,6 +3748,10 @@ def _gen_stmt_MatchStmt(gen, node):
 
 
 def _gen_stmt_WhileStmt(gen, node):
+    if node.else_body:
+        for _le_st in desugar_loop_else(node):
+            gen.gen_stmt(_le_st)
+        return
     bb_cond  = gen._new_bb()
     bb_body  = gen._new_bb()
     bb_after = gen._new_bb()
@@ -3992,6 +4024,12 @@ def _range_minus_one(e):
 
 
 def _gen_stmt_ForStmt(gen, node):
+    # A loop with an `else` clause: desugared to a flag + the loop + `if flag: else-body` (see
+    # loops_shared.desugar_loop_else). No loop lowering emitted the clause, so it was dropped.
+    if node.else_body:
+        for _le_st in desugar_loop_else(node):
+            gen.gen_stmt(_le_st)
+        return
     # A PARENTHESISED SINGLE NAME — `for (a) in b:` — is one binding, spelled
     # `'(a)'` by the parser, while the 1-tuple `for (a,) in b:` is `'(a,)'` and
     # DOES unpack (fire_compiler.py's "Unpacking-target representation"; see
