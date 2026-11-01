@@ -13,11 +13,12 @@
 The first row is an honest compile refusal, not a silent 0. The other two match.
 So the yield side has no silent `0` left on the default path among these shapes.
 
-**New silent wrong value found, on the RECEIVE side, filed as its own doc:**
-`bugs/CODEGEN_a_none_sent_into_a_generator_prints_zero.md`. A None resumed into
-`x = yield` (via `next(it)`) prints `0`. It goes through the int64 resume slot,
-which has no None kind, so it is a different fix (a resume ABI change) and is not
-claimed as fixed here.
+**New silent wrong value found, on the RECEIVE side, filed as its own bug:**
+a None sent into a generator (`x = yield` resumed by `next(it)`) prints `0`. It
+goes through the int64 resume slot, which has no None kind, so it is a different
+fix (a resume ABI change) and is not claimed as fixed here. (That bug is now
+fixed on the default path: the resume word is the None box for int-valued
+generators, and a receive-only `x = yield` name keeps it.)
 
 **Not changed this round:** no code, no test. The three open items above stand:
 (1) the non-int64 mixed store is refused (round 16); (2) `v is None` on a tagged
