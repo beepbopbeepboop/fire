@@ -111,10 +111,73 @@ example `'p'`), and it may now take the `'w'` slot instead. That is a slot chang
 for shapes that used to compile, so run `compile_stdlib.py` (`U` and `skip`
 before/after) and the full `gimplegenerators` run.
 
+## Planning round (2026-11-01): the mixed-callers shape
+
+**Measurement.** `test_gimple_generator_runner.py` on this tree: 415 passed,
+0 failed (the pins above included). The mixed-callers guard
+`none_yield_passed_to_function_mixed_callers_refused` (`use(g())` plus
+`use([1, 2])`) still refuses with "generator function(s)".
+
+**Why it refuses (the mechanism, read from code).** `module_gen.py`
+(`_param_gen_obs` loop, about line 12600-12660) infers ONE C type per callee
+parameter from its call sites: a call that passes a generator call observes the
+generator's api (`_arg_generator_prov`) and sets the parameter to
+`MojoGenerator *` with `_param_generator_api[callee][param] = api`. A list at
+another call site produces no observation, so nothing reconciles it: the
+parameter is `MojoGenerator *` while `use([1, 2])` passes a `MojoList *`. The
+`_ParamFlow.source_ok` check (`mojo/middle/coro.py`) is the guard that keeps
+this from being emitted: every call site must pass the generator call.
+
+**Decision: per-kind specialization, not box-at-call.** Two options:
+- *Box at call*: every call site of a mixed callee passes a tagged word, and
+  the callee's `for` / `next` reads a box at runtime. Changes the call ABI for
+  every caller of every such function, and needs a runtime dispatch on list vs
+  generator inside the callee. Wide blast radius.
+- *Specialize per call-site kind* (recommended): clone the callee once per
+  distinct argument kind (`use` for the generator, `use__list` for the list),
+  rewrite each call site to its clone, and let the existing single-kind
+  inference run unchanged on each clone. This is the same move
+  `mojo/middle/monomorphize.py` already makes for generic structs, and it keeps
+  every individual function single-typed, so no ABI change.
+
+**Plan (recommended option).**
+1. New AST pre-pass in `mojo/middle/` (a sibling of `coro.py`'s
+   `_ParamFlow`, e.g. `mojo/middle/param_specialize.py`): for each plain
+   module-level `def` with a parameter that is a call-site mixed-kind argument
+   (generator call at some sites, a non-generator at others), emit a clone
+   `name__<kind>` per distinct kind and rewrite the matching `CallExpr.func`.
+   Clone only when the parameter is consumed boxed in the body (reuse
+   `_ParamFlow.use_ok` for the check), so the rest of the program is untouched.
+   Run it before `_tagged_consumers_ok` / `module_gen.py`'s inference so each
+   clone is seen as an ordinary single-kind function.
+2. Name mangling: clone names must not collide with user names; reuse the
+   `monomorphize.py` naming convention (check how it mangles instantiation
+   names before choosing).
+3. Recursion: a clone that calls the original (or another mixed callee) must
+   be rewritten to the matching clone; a pass-through (`_ParamFlow` pass-on
+   case) is already followed recursively and must be re-keyed the same way.
+4. Coverage: only clone when at least two distinct kinds reach the same
+   parameter. Single-kind callees keep their current code path byte-for-byte.
+
+**Tests that prove it (add to `run_none_yield_tests`).**
+- `none_yield_passed_to_function_mixed_callers_refused` flips from a refusal to
+  a CPython-matched run (`use(g())` then `use([1, 2])`, both printing the
+  same as CPython). Rename it accordingly; the guard it pins is the thing
+  that changes.
+- A cpp-path pin for the same shape (`MOJO_CORO=cpp` already compiles the
+  tagged form).
+- A single-kind control (`use(g())` only) whose generated C is byte-identical
+  before and after (`cmp` the artifacts), proving the pass is a no-op there.
+
+**Gate notes for the integrator.** Specialization changes which functions exist
+in the module, so run `compile_stdlib.py` (U and skip counts before/after) and
+the full `gimplegenerators` run. Also measure how many stdlib callees would be
+cloned; if it is zero, the change is test-only in practice.
+
 ## Next step
 
-1. Decide the remaining item above: per-call-site parameter kinds, or box at the
-   call. This is the only shape still refused for a tagged generator passed to a
-   function.
-2. Integrator: the gate note above (the `next()` acceptance widens the same
-   `_ParamFlow` decision and needs the same `compile_stdlib.py` U/skip check).
+1. Implement the per-kind specialization pre-pass above (planning is done; the
+   next round executes it). Decision already made: specialize, do not box.
+2. Integrator: the gate note above, plus the earlier `next()` note (the
+   `next()` acceptance widens the same `_ParamFlow` decision and needs the
+   same `compile_stdlib.py` U/skip check).
