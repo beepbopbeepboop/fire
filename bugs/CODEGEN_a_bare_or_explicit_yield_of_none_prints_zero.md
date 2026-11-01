@@ -1,5 +1,34 @@
 # CODEGEN_a_bare_or_explicit_yield_of_none: a None yield value prints 0
 
+## Status (2026-11-01, ninth round, work/bug-codegen-a-bare-or-explicit-yield-of: None list elements print, partial)
+
+**Landed: the root cause of the comprehension gap, which is not generator-specific.**
+`for x in [None]: print(x)` printed the box's address (`4315206080`), and a
+None yielded into `[y for y in gen()]` then iterated had the same symptom. The
+codegen reads a kind-mixed list slot through `mojo_list_get_boxed`, which boxes
+the None slot ('n'), and `mojo_cstr_or_int_str` spelled only the 'd' and 'p'
+boxes by kind, so the 'n' box fell through to the integer arm. The predicate
+`_box_spelled_by_kind` now covers every box kind except the `id()` token ('i'),
+and the spelling goes through `mojo_repr_boxed`, which already renders 'n', 'b',
+'s', 'l' (`runtime/fire_runtime.c`).
+
+**Pins:** `run_none_list_iteration_tests` in `test_gimple_generator_runner.py`
+(four cases: `[1, None]`, `[None]`, `[True, "a"]`, and the comprehension over a
+None-yielding generator). Before: three FAIL with addresses. After: 4/4. Subset
+`run_none_yield_tests` + `run_tagged_word_bind_tests` + the new group: 20/0.
+
+**Gate note for the integrator (not run here):** this changes how every list-slot
+box of kind 'n', 'b', 's' or 'l' is spelled by `mojo_cstr_or_int_str`. Compiled
+output for those cases moves from an address to the value; a regression would
+show as a diff in `gimplegenerators` and in any stdlib module that printed a
+None-bearing list. Run `gimplegenerators` and `compile_stdlib.py`.
+
+**Still open:** items 2 and 3 of the eighth round's list (the explicit
+`yield None` beside str/float is still an honest typer refusal, and the dead
+`co_yield (int64_t)0` line in `cpp_core.py`); `sum` and the other non-`for`
+consumers named in the seventh round's list were not re-measured this round.
+
+
 A generator that yields `None` (bare `yield` or explicit `yield None`) prints
 `0` on the compiled path where CPython prints `None`. Every other value type
 the generator value-slot lattice supports (int / bool / float / str) matches
