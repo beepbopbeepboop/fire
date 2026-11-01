@@ -83,6 +83,10 @@ Fourth win: `module_gen._xg_record_scalar_args` called `_gmi_identifier_literal_
 index (`_gmi_binding_index`, a whole-function walk) for every identifier argument of every call in it. The index is now built once per
 function (`_xg_enc_index`) and passed in. `fire.py` compile 167 s -> 151 s at load ~3; generated C byte-identical for all 610 stdlib
 modules (GCC CAS 610/610 with the change reversed), `test_selfhost` 3/3.
+Fifth win: `module_gen._mk_round` reuses round 1's `_infer_return_maybe_kinds` answer, in the fixpoint's later rounds, for any body that
+calls nothing in the grown callee set (the answer depends on the set only through call names); the call spellings of each body are
+recorded once in round 1. Sampled share of `_mk_round` 13.8% -> 8.8%; sampled whole compile 168 s -> 153 s (both under the sampler);
+generated C byte-identical for all 610 stdlib modules, `test_selfhost` 3/3.
 Remaining, in order of share: the other `_walk` users in `_scan_callsite_param_kinds` (cache per function across
 the two `_one_pass` rounds and the six `lower` calls: needs an invalidation story because the contract maps evolve);
 `realpath` memo for the constant `_SELFHOST_DIR`; `_infer_return_maybe_kinds`; `_gmi_binding_index`.

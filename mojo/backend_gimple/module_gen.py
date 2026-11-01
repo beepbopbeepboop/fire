@@ -8137,6 +8137,29 @@ def gen_module_impl(self, stmts):
     # over every function (twice: free functions and methods) up to 8 times
     # per nesting level. Memoised by body identity so a body is walked once
     # per compile even when the enclosing structure revisits it.
+    # Round 1 of the fixpoint below runs with NO callee set; its answers are kept here so
+    # a later round can reuse them for any body that calls nothing in the grown set. The
+    # answer of `_infer_return_maybe_kinds` depends on `callee_kinds` ONLY through call
+    # names (`_valued`: a bare `f(...)` or a `obj.m(...)` spelled `obj_m`), so a body with
+    # no such call has the same answer every round -- and most bodies have none.
+    _mk_first_maybe: dict = {}
+    _mk_first_slots: dict = {}
+    _mk_first_calls: dict = {}
+
+    def _mk_call_keys(body) -> str:
+        # ",name,obj_m,..." -- the callee spellings `_valued` tests, comma-delimited so a
+        # membership test cannot match a longer name.
+        out = ','
+        for nd in _walk_ast(body):
+            if isinstance(nd, gimple_ctypes.CallExpr):
+                f = nd.func
+                if isinstance(f, gimple_ctypes.IdentExpr):
+                    out += _as_str(f.name) + ','
+                elif (isinstance(f, gimple_ctypes.MemberExpr)
+                        and isinstance(f.obj, gimple_ctypes.IdentExpr)):
+                    out += _as_str(f.obj.name) + '_' + _as_str(f.member) + ','
+        return out
+
     def _mk_round(callee_kinds):
         # A FRESH cache per round, and that is load-bearing rather than
         # wasteful: the answer depends on `callee_kinds`, so a cache shared
@@ -8157,10 +8180,26 @@ def gen_module_impl(self, stmts):
         def _mk(name, body, params=None):
             _k = id(body)
             if _k not in _mk_maybe:
-                _r_maybe, _r_slots = _infer_return_maybe_kinds(
-                    self, body, params, callee_kinds)
-                _mk_maybe[_k] = bool(_r_maybe)
-                _mk_slots[_k] = _r_slots
+                _reuse = False
+                if callee_kinds is not None and _k in _mk_first_maybe:
+                    _reuse = True
+                    _first_keys = _as_str(_mk_first_calls[_k])
+                    for _ck0 in callee_kinds:
+                        if (',' + _as_str(_ck0) + ',') in _first_keys:
+                            _reuse = False
+                            break
+                if _reuse:
+                    _mk_maybe[_k] = bool(_mk_first_maybe[_k])
+                    _mk_slots[_k] = _mk_first_slots[_k]
+                else:
+                    _r_maybe, _r_slots = _infer_return_maybe_kinds(
+                        self, body, params, callee_kinds)
+                    _mk_maybe[_k] = bool(_r_maybe)
+                    _mk_slots[_k] = _r_slots
+                    if callee_kinds is None:
+                        _mk_first_maybe[_k] = bool(_r_maybe)
+                        _mk_first_slots[_k] = _r_slots
+                        _mk_first_calls[_k] = _mk_call_keys(body)
             _maybe: bool = _mk_maybe[_k]
             _slotkinds: list = _mk_slots[_k]
             if _maybe:
