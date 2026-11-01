@@ -159,6 +159,19 @@ def main():
     print(isinstance(A(), B), isinstance(o, (C, A)), isinstance(5, A))
 main()
 """,
+    'isinstance_of_a_static_base_of_a_run_time_class': """\
+class Base:
+    pass
+
+def main():
+    B = type('B', (Base,), {'b': 2})
+    o = B()
+    print(isinstance(o, B), isinstance(o, Base))
+    print(isinstance(Base(), Base), isinstance(5, Base))
+    C = type('C', (), {})
+    print(isinstance(C(), Base))
+main()
+""",
     'type_dunder_new_with_the_type_metaclass': """\
 def main():
     Foo = type.__new__(type, 'Foo', (), {'x': 1, 'z': 'hi'})

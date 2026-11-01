@@ -411,6 +411,9 @@ def _reset_func(gen, body: list = None, params: list = None,
     # 'inst'. A method call or `isinstance` on them goes to the class table, never to the
     # container/struct method guesses an untyped word otherwise gets.
     gen._rtobj_kinds: dict = {}
+    # Set once any `type(n, bases, ns)` is lowered: an instance of a run-time class may then
+    # reach an `isinstance(x, StaticClass)` check, which the class table must answer.
+    gen._rt_classes_made: bool = False
     # A parameter ANNOTATED `object` is such a word by declaration: whatever
     # the call sites pass, the function's own code may not assume a kind.
     if params is not None:

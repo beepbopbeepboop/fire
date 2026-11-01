@@ -74,7 +74,12 @@ every module is reachable from a word with `mojo_getattr_any(obj, attr)`
    `isinstance_of_a_run_time_class`. Not covered: more than 4 call arguments (refused by name),
    keyword/star arguments, a method returning a float or string (the word is an untyped
    `_dyn_word_vals` word), a class or instance reached through a parameter/attribute rather than
-   a local, `isinstance(o, StaticBase)` for a dynamic class deriving a static one, `repr(o)`.
+   a local, `repr(o)`.
+   **`isinstance(o, StaticBase)` landed 2026-11-01**: once a module lowers any `type(n, bases, ns)`
+   (`gen._rt_classes_made`), the static-struct `isinstance` ORs the tag compare with
+   `mojo_isinstance_rtclass(obj, tag)`; pinned by `isinstance_of_a_static_base_of_a_run_time_class`.
+   Limit: the flag is set when the `type(..)` call is lowered, so an `isinstance` in a function
+   emitted BEFORE any such call is not covered.
    Separate finding, not fixed: for a STATIC class `p.b = 5` outside `__init__` infers a struct
    field, so `hasattr(q, 'b')` is True on an instance that never set it (CPython: False).
    **`type.__new__(type, name, bases, ns)` landed 2026-11-01**: the same lowering as the 3-argument
