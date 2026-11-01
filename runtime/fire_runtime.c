@@ -15243,6 +15243,19 @@ int mojo_is_instobj(int64_t w)
 }
 /* `Foo(args..)` on a class handle. A class made at run time has no `__init__` unless its
  * namespace names one, and a namespace function is called with the new instance first. */
+/* call the function word `fn` with the first `n` (0..5) of `a` */
+static int64_t _call_words(int64_t fn, int64_t n, const int64_t *a)
+{
+    void *fp = (void *)(intptr_t)fn;
+    switch (n) {
+    case 0: return mojo_fnptr_call_0(fp);
+    case 1: return mojo_fnptr_call_1(fp, a[0]);
+    case 2: return mojo_fnptr_call_2(fp, a[0], a[1]);
+    case 3: return mojo_fnptr_call_3(fp, a[0], a[1], a[2]);
+    case 4: return mojo_fnptr_call_4(fp, a[0], a[1], a[2], a[3]);
+    default: return mojo_fnptr_call_5(fp, a[0], a[1], a[2], a[3], a[4]);
+    }
+}
 int64_t mojo_classobj_call(int64_t cls, int64_t n, int64_t a0, int64_t a1, int64_t a2, int64_t a3)
 {
     MojoInstObj *o = (MojoInstObj *)malloc(sizeof *o);
@@ -15250,17 +15263,52 @@ int64_t mojo_classobj_call(int64_t cls, int64_t n, int64_t a0, int64_t a1, int64
     _pr_add(&_reg_instobj, (uint64_t)(uintptr_t)o);
     int64_t self = (int64_t)(intptr_t)o, init;
     if (_class_lookup(o->tag, "__init__", &init, 0)) {
-        switch (n) {
-        case 0: mojo_fnptr_call_1((void *)(intptr_t)init, self); break;
-        case 1: mojo_fnptr_call_2((void *)(intptr_t)init, self, a0); break;
-        case 2: mojo_fnptr_call_3((void *)(intptr_t)init, self, a0, a1); break;
-        case 3: mojo_fnptr_call_4((void *)(intptr_t)init, self, a0, a1, a2); break;
-        default: mojo_fnptr_call_5((void *)(intptr_t)init, self, a0, a1, a2, a3); break;
-        }
+        int64_t a[5] = { self, a0, a1, a2, a3 };
+        _call_words(init, n + 1, a);
     } else if (n) {
         mojo_raise_type_error((char *)"this class takes no arguments");
     }
     return self;
+}
+/* `recv.name(args..)` where `recv` is an instance of a run-time class (the instance goes first,
+ * as `self`) or the class handle itself (a plain call, as `Foo.m(x)`). The function is looked up
+ * in the class table through the bases; a miss is an AttributeError. */
+int64_t mojo_rtobj_method_call(int64_t recv, char *name, int64_t n, int64_t a0, int64_t a1, int64_t a2, int64_t a3)
+{
+    int64_t fn, a[5];
+    if (mojo_is_instobj(recv)) {
+        if (!_class_lookup(((MojoInstObj *)(intptr_t)recv)->tag, name, &fn, 0)) {
+            mojo_raise_attribute_error(name);
+            return 0;
+        }
+        a[0] = recv; a[1] = a0; a[2] = a1; a[3] = a2; a[4] = a3;
+        return _call_words(fn, n + 1, a);
+    }
+    if (mojo_is_classobj(recv)) {
+        if (!_class_lookup(((MojoClassObj *)(intptr_t)recv)->tag, name, &fn, 0)) {
+            mojo_raise_attribute_error(name);
+            return 0;
+        }
+        a[0] = a0; a[1] = a1; a[2] = a2; a[3] = a3;
+        return _call_words(fn, n, a);
+    }
+    mojo_raise_attribute_error(name);
+    return 0;
+}
+static int _class_derives(int64_t tag, int64_t want, int depth)
+{
+    if (tag == want) return 1;
+    MojoClassRec *c = _class_find(tag);
+    if (!c || depth > 32) return 0;
+    for (int i = 0; i < c->nbases; i++) if (_class_derives(c->bases[i], want, depth + 1)) return 1;
+    return 0;
+}
+/* `isinstance(obj, Cls)` where `Cls` is a class made at run time: `obj` is an instance whose
+ * class is `Cls` or derives from it. */
+int mojo_isinstance_rtclass(int64_t obj, int64_t cls)
+{
+    if (!mojo_is_instobj(obj)) return 0;
+    return _class_derives(((MojoInstObj *)(intptr_t)obj)->tag, mojo_classobj_tag(cls), 0);
 }
 /* 1 and *out set when `obj` is an instance whose class (or a base) has `attr` */
 int mojo_instobj_class_lookup(void *obj, char *attr, int64_t *out)
