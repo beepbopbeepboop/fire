@@ -516,27 +516,6 @@ def _closure_value(gen, name: str, _ci) -> tuple:
             return 'void *', _vft
         t = gen._call_expr('MojoBoundMethod *', 'mojo_bound_method_new',
                             [('void *', fp), ('void *', env_void)])
-        # The environment holds the heap boxes of its `{mut}`-captured locals as
-        # pointer fields (each a separate `malloc` the field only points at), so
-        # freeing the environment alone would leak them. Record each box on the
-        # bound method (`mojo_bound_method_add_box`) so `mojo_closure_free` frees
-        # them with the environment when THIS value is the one that dies. This is
-        # safe to do unconditionally for a value-read nested `def`: a value-read
-        # def is one that escapes, so the enclosing function's own exit frees are
-        # deliberately disabled for it (`nested_def_env_owned`/`_no_closure_
-        # escapes` both answer False), meaning the box is freed by exactly one
-        # path — the owner of this value — never by the creator's exit too.
-        # The field read is a GIMPLE temp of its own (`_new_val`) and the call
-        # takes that temp: an inline `env->field` inside the call's argument
-        # text is not valid GIMPLE and gcc rejects the whole statement.
-        _env_box_var = gen._closure_envs.get(name)
-        if _env_box_var:
-            for _bv, _bt in _ci.captures:
-                if _bv in _ci.mut_names:
-                    _box_val = gen._new_val(
-                        'void *', f"{_env_box_var}->{gimple_ctypes._c_field_name(_bv)}")
-                    gen._void_call('mojo_bound_method_add_box',
-                                   [('MojoBoundMethod *', t), ('void *', _box_val)])
         gen._bound_method_ret_types[t] = gen.func_return_types.get(lifted, 'int64_t')
         gen._func_value_names[t] = _repr_name
         return 'MojoBoundMethod *', t
@@ -1502,9 +1481,7 @@ _OS_PATH_RUNTIME_CALLABLE_VALUES = {
 }
 
 
-# frame attributes that are plain stored words (runtime mojo_frame_get_attr/set_attr ids)
-_FRAME_SETTABLE = {'f_trace': 0, 'f_trace_lines': 1, 'f_trace_opcodes': 2}
-_FRAME_ATTRS = frozenset(('f_generator', 'gi_frame', 'cr_frame', 'ag_frame', 'f_code', 'f_back', 'f_lineno', 'co_name', 'co_qualname', 'co_filename', 'co_firstlineno',
+_FRAME_ATTRS = frozenset(('f_code', 'f_back', 'f_lineno', 'co_name', 'co_qualname', 'co_filename', 'co_firstlineno',
                           '__traceback__', 'tb_frame', 'tb_next', 'tb_lineno'))
 
 
@@ -1512,29 +1489,10 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     # Attributes of a Python-level frame word (`sys._getframe(n)`), in a module that uses
     # frames. The names are specific to frame/code objects, and nothing is lowered here
     # unless a module of this compile mentions `_getframe`.
-    if len(gen._frames_mods) > 0 and node.member in _FRAME_SETTABLE:
-        _fa_t, _fa_v = gen.lower_expr(node.obj)
-        _fa_r = gen._call_expr('int64_t', 'mojo_frame_get_attr',
-                               [('int64_t', gen._to_int64(_fa_t, _fa_v)),
-                                ('int64_t', gen._new_val('int64_t', f'(int64_t){_FRAME_SETTABLE[node.member]}'))])
-        gen._dyn_word_vals.add(_fa_r)
-        gen._boxed_vals.add(_fa_r)       # identity (`f.f_trace is None`) and printing read the box
-        return 'int64_t', _fa_r
-    if len(gen._frames_mods) > 0 and node.member == 'f_locals':
-        # A frame's locals and trace hook have no representation yet (compiled C locals have no
-        # runtime names or addresses): refuse by name rather than read the word as an object
-        # attribute and answer garbage (see bugs/hard/CODEGEN_frame_f_locals_and_settrace.md, Plan).
-        raise RuntimeError(
-            f"cannot compile module: frame attribute `{node.member}` is not modelled on the compiled "
-            "path (bugs/hard/CODEGEN_frame_f_locals_and_settrace.md)")
     if len(gen._frames_mods) > 0 and node.member in _FRAME_ATTRS:
         _fr_t, _fr_v = gen.lower_expr(node.obj)
         _fr_w = gen._to_int64(_fr_t, _fr_v)
         _fm = node.member
-        if _fm == 'f_generator':
-            return 'int64_t', gen._call_expr('int64_t', 'mojo_frame_generator', [('int64_t', _fr_w)])
-        if _fm in ('gi_frame', 'cr_frame', 'ag_frame'):
-            return 'int64_t', gen._call_expr('int64_t', '__mojo_gen_frame', [('int64_t', _fr_w)])
         if _fm == 'f_code':
             return 'int64_t', _fr_w
         if _fm == '__traceback__':
@@ -2593,14 +2551,6 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     if node.member == '_mlir_value' and not (ot.endswith(' *') and gimple_exprtypes._struct_name_of(ot) in gen.struct_field_types):
         return ot, ov
 
-    # `ex.value` of a name bound by `except ... as ex`: the value a StopIteration carries
-    # (`raise StopIteration(x)`, a generator's `return x`), None when it carries none.
-    if (node.member == 'value' and isinstance(node.obj, gimple_ctypes.IdentExpr)
-            and node.obj.name in gen._except_as_names):
-        _ev = gen._call_expr('int64_t', 'mojo_exc_value_get', [])
-        gen._dyn_word_vals.add(_ev)
-        return 'int64_t', _ev
-
     # .value on char * (StringLiteral.value, kgen.string.value) → identity, the string itself
     if node.member == 'value' and ot == 'char *':
         t = gen._new_val('char *', f"{ov}")
@@ -2935,12 +2885,6 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     if struct_name in gen.struct_field_types and (
             f"{struct_name}_{node.member}" in gen.func_return_types
             or _sms_key(struct_name, node.member) in gen._struct_method_signatures):
-        # A `@property` read is the getter's RESULT, not the method as a value:
-        # `print(s.val)` printed the bound-method pointer and `s.val == o.val`
-        # compared two such pointers (False for equal values), at exit 0.
-        if node.member in gen._struct_property_names.get(struct_name, ()):
-            return gen.lower_expr(gimple_ctypes.CallExpr(
-                func=node, args=[], line=node.line, col=node.col))
         return gen._lower_bound_method_value(struct_name, node.member, ot, ov)
     # A BUILTIN-container method referenced as a plain VALUE (`append =
     # l.append`) — the container twin of the user-struct case just above.
@@ -4055,43 +3999,6 @@ def _tagged_arith_select(gen, op: str, left_node, lt: str, lv: str,
     return _t
 
 
-def _tagged_cmp_select(gen, op: str, left_node, lt: str, lv: str,
-                       right_node, rt: str, rv: str):
-    """`lhs OP rhs` where a TAGGED generator word is beside an INTEGER
-    and OP is a comparison (`<`, `<=`, `>`, `>=`). Returns the result
-    temp (`_Bool`), or None when the shape does not apply."""
-    if op not in ('<', '<=', '>', '>='):
-        return None
-    _tagged = getattr(gen, '_tagged_word_vals', ())
-    _boxed = getattr(gen, '_boxed_vals', ())
-    _tag_l = lv in _tagged and lv in _boxed
-    _tag_r = rv in _tagged and rv in _boxed
-    if not (_tag_l or _tag_r):
-        return None
-    if lt not in ('int', 'int64_t') or rt not in ('int', 'int64_t'):
-        return None
-    if _tag_l:
-        lv = _none_arith_guard(gen, op, lv, 'int', 1)
-    if _tag_r:
-        rv = _none_arith_guard(gen, op, rv, 'int', 0)
-    # Integer comparison answer
-    _ilv = gen._new_val('int64_t', f"mojo_box_int ({lv})") if _tag_l else gen._new_val('int64_t', lv)
-    _irv = gen._new_val('int64_t', f"mojo_box_int ({rv})") if _tag_r else gen._new_val('int64_t', rv)
-    _ires = gen._new_temp('_Bool')
-    gen._emit(f"  {_ires} = {_ilv} {op} {_irv};")
-    # Double comparison answer
-    _dlv = gen._new_val('double', f"mojo_box_double ({lv})") if _tag_l else gen._new_val('double', f"(double)({lv})")
-    _drv = gen._new_val('double', f"mojo_box_double ({rv})") if _tag_r else gen._new_val('double', f"(double)({rv})")
-    _dres = gen._new_temp('_Bool')
-    gen._emit(f"  {_dres} = {_dlv} {op} {_drv};")
-    # Select by box kind
-    _a = lv if _tag_l else '0'
-    _b = rv if _tag_r else '0'
-    _t = gen._call_expr('_Bool', 'mojo_float_cmp_select', [
-        ('int64_t', _a), ('int64_t', _b), ('int', _ires), ('int', _dres)])
-    return '_Bool', _t
-
-
 def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                         right_node, rt: str, rv: str) -> tuple[str, str]:
     """The rest of BinaryOp lowering once both operands are already
@@ -4256,11 +4163,6 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     _tsel = _tagged_arith_select(gen, op, left_node, lt, lv, right_node, rt, rv)
     if _tsel is not None:
         return 'int64_t', _tsel
-    # A tagged word beside an integer under comparison: the comparison
-    # counterpart to `_tagged_arith_select` (select by box kind).
-    _tcmp = _tagged_cmp_select(gen, op, left_node, lt, lv, right_node, rt, rv)
-    if _tcmp is not None:
-        return _tcmp
     # A tagged word beside a DOUBLE under arithmetic (`x + 1.5`, `x / 2.0`):
     # the box is unwrapped to a double below, and a None box would unwrap to
     # 0.0. It is checked first, as in `_tagged_arith_select`, which answers only

@@ -19,9 +19,13 @@ that chain needs the bytes arm: `os.scandir(bytes)`, `fsencode`, `re.compile(byt
 run-time engine, `runtime/fire_re_engine.inc`, compiles patterns from `char *` only), and
 `.match(bytes)`.
 
+## Status (2026-11-01)
+
+- Added bytes regression line to `test_glob_compiled.py`: `glob.glob(b'*.py', root_dir=ROOT.encode())`.
+- Runtime `mojo_re_compile_bytes` / `mojo_re_exec_bytes` present in `runtime/fire_runtime.c`; `fre_compile_bytes` / `fre_exec_bytes` present in `runtime/fire_re_engine.inc`; codegen (`emit_methods.py`, `gimple_codegen.py`) emits bytes passes.
+- `os.scandir` bytes arm (`scandir_bytes`) and `fsencode` bytes arm still missing from runtime — unverified whether those are also needed for full `glob.glob(b'...')`.
+- Full end-to-end compile verification of `test_glob_compiled.py` + the bytes line still needed (compile ~30s per attempt; skipped per light-worker rule, integrator gates).
+
 ## Next step
 
-Measure which call in that chain first loses the bytes (print the intermediate values in a
-single-module copy of glob.py, as the str path was debugged), then give the run-time
-`re` a bytes entry (`mojo_re_compile`/`mojo_re_exec` over a `MojoBytes *`'s data and length).
-The test to turn green is a bytes line added to `test_glob_compiled.py`'s driver.
+Run `test_glob_compiled.py` with the bytes driver line under `python3 tools/memslot.py --gb 8 --label glob-bytes --` and confirm output matches CPython; if green, `git rm` doc and run `python3 tools/dangling_doc_refs.py --ratchet`. If red, trace which chain step (`scandir`, `fsencode`, `re.compile`, `.match`) first loses bytes.

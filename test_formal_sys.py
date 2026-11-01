@@ -88,7 +88,6 @@ ARCHES = ("arm64", "x86_64")
 # expected stdout is a constant and not something recomputed by the test.
 USE_SYS = """\
 import sys
-from exec_budget import RUN_TIMEOUT_S  # per-child budgets
 
 def main():
   print(sys.version())
@@ -300,7 +299,7 @@ def build_and_run(root, name, source, expect_exit=0):
           f"build of {name}.mojo failed: "
           f"{(built.stderr or built.stdout).strip()[-500:]}")
     check(os.path.isfile(out), f"no executable written at {out}")
-    ran = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
+    ran = subprocess.run([out], capture_output=True, text=True, timeout=60)
     check(ran.returncode == expect_exit,
           f"{name}.mojo exited {ran.returncode}, expected {expect_exit}; "
           f"stderr: {(ran.stderr or '').strip()[-300:]}")
@@ -430,7 +429,7 @@ def test_the_dotted_spelling_runs_on_both_backends(tmp, _shared):
               f"{arch}: build failed: "
               f"{(built.stderr or built.stdout).strip()[-500:]}")
         check(os.path.isfile(out), f"{arch}: no executable written at {out}")
-        ran = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
+        ran = subprocess.run([out], capture_output=True, text=True, timeout=60)
         check(ran.returncode == 0,
               f"{arch}: the image exited {ran.returncode}; "
               f"stderr: {(ran.stderr or '').strip()[-300:]}")

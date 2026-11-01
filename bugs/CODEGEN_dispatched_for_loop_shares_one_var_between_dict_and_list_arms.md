@@ -4,13 +4,13 @@
 
 Measured reproduction still SIGSEGV (exit -11) on compiled path `for i in o.read(): print(i)`; subscripting (`o.read()[0]`) correct at `10`. Root cause confirmed at `emit_loops.py` lines 1219/1229 (`share_var_with_sibling_arm=True`) and `_fl_ctype` line 2263: dict arm's `char *` wins the shared C declaration when element type is unknown.
 
-Blocker: the fix requires choosing between (a) `int64_t` — fixes int list, regresses string-keyed dict to pointer-decimal silent wrong value; (b) runtime query (`mojo_list_get_kinds` / `_dyn_word_locals`) — touches element-type bookkeeping (`_elem_of`, `_nested_elem_types`, `gen._actual_types`) that is shared with `bug-codegen-ctor-temp-field-read-loses-e-8778` (`_field_elem_types`) and the PARTIAL_WORK_HANDOFF container-ctor evidence gap (`4ee95addd`). Both paths touch claims outside this worker's write set — per CLAUDE.md and claim-checks, not this doc's author's call alone.
+Blocker: the fix requires choosing between (a) `int64_t` — fixes int list, regresses string-keyed dict to pointer-decimal silent wrong value; (b) runtime query (`mojo_list_get_kinds` / `_dyn_word_locals`) — touches element-type bookkeeping (`_elem_of`, `_nested_elem_types`, `gen._actual_types`) that is shared with `bug-codegen-ctor-temp-field-read-loses-e-8778` (`_field_elem_types`) and the `PARTIAL_WORK_HANDOFF.md` §2.1 inference gap. Both paths touch claims outside this worker's write set — per CLAUDE.md and claim-checks, not this doc's author's call alone.
 
 Regression test written at `test_reg_dispatched_for_loop.py` (FAILS at compiled-run verification; Python-level assertion passes — the bug is codegen, not source parsing).
 
 No fix committed; doc kept; tree clean except new test + doc update.
 
-Found while re-measuring the PARTIAL_WORK_HANDOFF container-ctor evidence gap (§2.1, fixed in `4ee95addd`), whose own claim
+Found while re-measuring `bugs/PARTIAL_WORK_HANDOFF.md` §2.1, whose own claim
 ("`len`/`[i]` work and `for x in b.items` segfaults") is still exactly true and
 whose recorded cause is only half of it.
 
@@ -36,7 +36,7 @@ main()
 ```
 
 and the same thing through a local (`r = Reader(o._items); for i in r.items:
-print(i)`), which is the PARTIAL_WORK_HANDOFF §2.1 `Reader(self._items)`
+print(i)`), which is `PARTIAL_WORK_HANDOFF.md` §2.1's own `Reader(self._items)`
 shape. Identical verdict for both:
 
 | | CPython 3.14.7 | compiled (`compile_to_gimple` + `gcc -fgimple` + run) |
@@ -106,16 +106,14 @@ loop body, before the arms, instead of a guess from whichever arm is lowered
 first. That is the change worth making, and it is in `emit_loops.py` plus the
 element-type bookkeeping, which is another claim's write set.
 
-## Why the field is `int64_t` at all (the upstream half)
-
-**2026-11-01:** the two-hop shape (`Owner([10, 20])` -> `self._items = items` -> `Reader(self._items)`) now types `Reader.items` as `MojoList *`, so the repro above no longer reaches the dispatch arm and prints `10`/`20` (see the container-ctor evidence gap, fixed in `4ee95addd`). The dispatch-arm bug itself is unchanged; this only removes this repro's route into it, and the arm is still reached by any loop whose iterable is statically `int64_t`.
-
+## Why the field is `int64_t` at all (the upstream half, still open)
 
 `self.items = items` with an unannotated `__init__` parameter. The field's C
 type comes from `param_types.get('items')` in
 `mojo/middle/module_shared.py`'s field pre-pass, which has no call-site evidence
 to consult, so it defaults to `int64_t`; and the element type is never threaded
-at all (`_field_elem_types['Reader']` is empty). This is the container-ctor evidence gap (§2.1, fixed `4ee95addd`)'s residue, re-measured today and still true.
+at all (`_field_elem_types['Reader']` is empty). This is `PARTIAL_WORK_HANDOFF`
+§2.1's residue, re-measured today and still true — see that doc's updated entry.
 Fixing the field type removes THIS repro (the loop would take the static list
 path) without fixing the dispatch arm, which is why both are named here: the
 first is an inference gap and the second is a codegen gap, and either one alone
@@ -124,7 +122,8 @@ leaves a SIGSEGV reachable.
 ## Also measured, because it is the same bug and it is NOT the same repro
 
 * `Box(x)` where `x` is a local bound to a list literal: **correct** now
-  (`1 2 3` on both paths), so the PARTIAL_WORK_HANDOFF container-ctor evidence gap (§2.1, fixed `4ee95addd`) claim that the field `int64_t` is stale for the literal route.
+  (`1 2 3` on both paths), so `PARTIAL_WORK_HANDOFF` §2.1's "still leaves the
+  field `int64_t`" is stale for the literal route.
 * `self.<field>` / local-field route: still loses the element type, as above.
 
 ## Not attempted, and why

@@ -265,15 +265,8 @@ def poly_dispatch_plan(self):
     dispatched. Any other polymorphic method keeps the scalar no-op stub, which
     is the behaviour before this function existed.
 
-    Candidates that disagree on the method's return type or on its arity have
-    no single dispatch call shape, so they are not dispatched at all: they are
-    recorded under `'refused'` with the compile error the call site raises. A
-    method that is merely not dispatchable yet (arguments, a non-`int64_t`
-    unanimous return) is left out of both, and keeps the stub it always had.
-
     Returns {'slots': {slot key: {method: dispatch name}},
-             'dispatch': {dispatch name: (method, [struct, ...])},
-             'refused': {slot key: {method: error message}}}.
+             'dispatch': {dispatch name: (method, [struct, ...])}}.
     Cached on `self._poly_plan`, keyed by the candidate-slot count so a plan
     asked for before the constructor pass has run is never served stale.
     """
@@ -281,7 +274,7 @@ def poly_dispatch_plan(self):
     _cached = getattr(self, '_poly_plan', None)
     if _cached is not None and _cached[0] == _cache_key:
         return _cached[1]
-    plan = {'slots': {}, 'dispatch': {}, 'refused': {}}
+    plan = {'slots': {}, 'dispatch': {}}
     defs = getattr(self, '_poly_struct_defs', None) or {}
     for skey, cands in (getattr(self, '_poly_slot_cands', None) or {}).items():
         defining_by_method = {}
@@ -297,7 +290,7 @@ def poly_dispatch_plan(self):
         for m, defining in defining_by_method.items():
             if len(defining) < 2:
                 continue
-            shapes = {}
+            eligible = True
             for S in defining:
                 md = None
                 for _x in (defs[S].methods or []):
@@ -305,26 +298,7 @@ def poly_dispatch_plan(self):
                         md = _x
                         break
                 extra = [p for p in (md.params or []) if _as_str(p[0]) != 'self']
-                shapes[S] = (len(extra), self.func_return_types.get(f"{S}_{m}"))
-            arities = {a for a, _r in shapes.values()}
-            # A return type is only a disagreement once every candidate's is
-            # known: an unregistered one is "not yet inferred", not a conflict.
-            rets = {r for _a, r in shapes.values()}
-            ret_conflict = None not in rets and len(rets) > 1
-            if len(arities) > 1 or ret_conflict:
-                what = ("arity" if len(arities) > 1 else "return type")
-                detail = ", ".join(f"{S}.{m} {shapes[S][0]} extra arg(s) -> "
-                                   f"{shapes[S][1]}" for S in sorted(defining))
-                plan['refused'].setdefault(skey, {})[m] = (
-                    f"polymorphic receiver {skey}.{m}(): the structs "
-                    f"{sorted(defining)} that a constructor slot received disagree "
-                    f"on the {what} of `{m}` ({detail}); no single dispatch call "
-                    f"can serve them")
-                continue
-            eligible = True
-            for S in defining:
-                extra_n, ret = shapes[S]
-                if extra_n or ret != 'int64_t':
+                if extra or self.func_return_types.get(f"{S}_{m}") != 'int64_t':
                     eligible = False
                     break
             if not eligible:

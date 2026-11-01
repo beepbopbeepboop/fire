@@ -63,7 +63,6 @@ sys.path.insert(0, REPO)
 import formal.build as B
 import formal.imports as I
 import formal.model as M
-from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S  # per-child budgets
 
 RESULTS = []
 
@@ -1198,7 +1197,7 @@ def test_audit_fires_on_a_real_build():
             [sys.executable, os.path.join(REPO, 'fire.py'), 'build', '--formal',
              '--no-prove', '--backend=arm64', '-o', os.path.join(d, 'sound'),
              sound],
-            capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S, cwd=REPO)
+            capture_output=True, text=True, timeout=600, cwd=REPO)
         check(r.returncode == 0, 'a sound program still builds',
               (r.stdout + r.stderr)[-300:])
         check('nothing provides' not in (r.stdout + r.stderr),
@@ -1211,7 +1210,7 @@ def test_audit_fires_on_a_real_build():
         r2 = subprocess.run(
             [sys.executable, os.path.join(REPO, 'fire.py'), 'build', '--formal',
              '--no-prove', '--backend=arm64', '-o', os.path.join(d, 'bad'), bad],
-            capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S, cwd=REPO)
+            capture_output=True, text=True, timeout=600, cwd=REPO)
         out = r2.stdout + r2.stderr
         check(r2.returncode != 0,
               'an image binding an unprovided symbol is REFUSED, not built', out)
@@ -1524,13 +1523,13 @@ def test_raise_flushes_stdout():
                     [sys.executable, os.path.join(REPO, 'fire.py'), 'build',
                      '--formal', '--no-prove', f'--backend={backend}',
                      '-o', out, program],
-                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S, cwd=REPO)
+                    capture_output=True, text=True, timeout=600, cwd=REPO)
                 check(r.returncode == 0,
                       f'{name} builds on {backend}', (r.stdout + r.stderr)[-300:])
                 if r.returncode != 0:
                     continue
                 run = subprocess.run([out], capture_output=True, text=True,
-                                     timeout=RUN_TIMEOUT_S)
+                                     timeout=60)
                 check(run.stdout == 'before@@',
                       f'a `{name}` on {backend} keeps the bytes it printed '
                       f'(got {run.stdout!r})', run.stdout)

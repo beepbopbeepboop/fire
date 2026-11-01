@@ -7,7 +7,6 @@ Verifies that mojo_read_type_tag_safe rejects a boxed string (returns 0)
 so the self-hosted binary does not segfault on dict-key lookup.
 """
 import subprocess, sys, tempfile, os
-from exec_budget import RUN_TIMEOUT_S
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -30,7 +29,7 @@ def main():
         ]
         cp = subprocess.run(cmd, capture_output=True, text=True)
         assert cp.returncode == 0, f"compile failed: {cp.stderr}"
-        cp = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
+        cp = subprocess.run([out], capture_output=True, text=True, timeout=60)
         ok = cp.returncode == 0
         msg = (cp.stdout + cp.stderr).strip()
         if ok:
