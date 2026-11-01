@@ -191,6 +191,18 @@ def questions(t):
     return re.findall(r"^\s*QUESTION:\s*(.+)$", txt, re.M)
 
 
+def holds_claims(t):
+    """Whether task T still holds its bug claims. Only work holds: a live worker, or commits that have not landed. A
+    dead worker that committed nothing holds nothing, so a retry of the same bug is never refused by it (2026-11-01:
+    23 such entries, all with no commits, refused every retry for days)."""
+    st = state_of(t)
+    if st in TERMINAL:
+        return False
+    if st == "running":
+        return True
+    return ahead(t) > 0
+
+
 def ahead(t):
     r = subprocess.run(["git", "rev-list", "--count", "master.." + t["branch"]],
                        cwd=MAIN, capture_output=True, text=True)
@@ -217,12 +229,13 @@ def cmd_spawn(a):
         if a.name in tasks:
             sys.exit("task %s already exists" % a.name)
         for other, t in tasks.items():
-            if state_of(t) in TERMINAL:
+            if not holds_claims(t):
                 continue
             for c in a.claim:
                 for oc in t["claims"]:
                     if conflicts(c, oc):
-                        sys.exit("claim %r conflicts with %r held by task %s" % (c, oc, other))
+                        sys.exit("claim %r conflicts with %r held by task %s (%s, %d commits)" % (
+                            c, oc, other, state_of(t), ahead(t)))
         ext = external_conflicts(a.claim)
         if ext:
             sys.exit("claim %r conflicts with %r held by external session %s" % (ext[0][1], ext[0][2], ext[0][0]))
@@ -493,13 +506,64 @@ def dead_models():
     return {m: e["until"] for m, e in _ledger().items() if e["until"] > time.time()}
 
 
-def mark_dead(model, sl):
-    """Ban MODEL for the slot SL's recovery time; the second limit inside a day uses the long window."""
+RESET_MARGIN_S = 300   # a ban that ends at the printed reset time lifts five minutes after it, so the limit has really cleared
+RESET_RE = re.compile(r"resets (\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(([A-Za-z_/+-]+)\)", re.I)
+
+
+def next_wall_time(hour, minute, tz, now=None):
+    """The epoch time of the next HH:MM in zone TZ strictly after NOW (tomorrow if today's has passed)."""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    now = time.time() if now is None else now
+    t = datetime.fromtimestamp(now, ZoneInfo(tz)).replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if t.timestamp() <= now:
+        t += timedelta(days=1)
+    return t.timestamp()
+
+
+def replenish_at(sl, now=None):
+    """When a daily free tier gets its tokens back: the slot's `replenish` time plus its margin, or None when the slot
+    has no daily replenish. pool.json: "replenish": {"tz": "UTC", "at": "00:00", "margin_min": 1}."""
+    r = sl.get("replenish")
+    if not r:
+        return None
+    hh, mm = (int(x) for x in r["at"].split(":"))
+    return next_wall_time(hh, mm, r["tz"], now) + r.get("margin_min", 1) * 60
+
+
+def reset_at(text, now=None):
+    """The epoch time of the NEXT reset the claude CLI printed in a limit line ("resets 11am (America/Los_Angeles)"),
+    or None when the text carries no reset. The next occurrence of that wall-clock time in that zone, strictly after now."""
+    m = RESET_RE.search(text or "")
+    if not m:
+        return None
+    hour, minute = int(m.group(1)) % 12 + (12 if m.group(3).lower() == "pm" else 0), int(m.group(2) or 0)
+    return next_wall_time(hour, minute, m.group(4), now)
+
+
+def limit_reset(t):
+    """The reset time of the limit that stopped worker T, read from its own log; None if its log names none."""
+    lp = os.path.join(t["worktree"], "work.log")
+    if not os.path.exists(lp):
+        return None
+    return reset_at(re.sub(r"\x1b\[[0-9;]*m", "", open(lp, errors="replace").read()[-3000:]))
+
+
+def mark_dead(model, sl, until=None):
+    """Ban MODEL until UNTIL (a limit's printed reset) when given, else for the slot SL's recovery time. Without a reset,
+    the second limit inside a day uses the long window."""
     d, now = _ledger(), time.time()
     prev = d.get(model, {})
     strikes = prev.get("strikes", 0) + 1 if now - prev.get("last", 0) < 86400 else 1
-    hours = sl.get("long_recover_days", 0) * 24 if strikes >= 2 and sl.get("long_recover_days") else sl["recover_hours"]
-    d[model] = {"until": now + hours * 3600, "strikes": strikes, "last": now}
+    if until and until > now:
+        end = until + RESET_MARGIN_S
+    elif replenish_at(sl, now):
+        end = replenish_at(sl, now)     # a daily free tier: back when its tokens come back, not a fixed block
+    else:
+        hours = sl.get("long_recover_days", 0) * 24 if strikes >= 2 and sl.get("long_recover_days") else sl["recover_hours"]
+        end = now + hours * 3600
+    hours = (end - now) / 3600
+    d[model] = {"until": end, "strikes": strikes, "last": now}
     json.dump(d, open(os.path.join(ctl_dir(), LEDGER), "w"), indent=1)
     return hours
 
@@ -559,7 +623,7 @@ def bounce(name, t):
     if extra:
         return False
     if t.get("pool") and limit_hit(t):
-        mark_dead(t["model"], pool_slot(t["pool"]))   # the task stays on its slot; refill waits for the ban to lift
+        mark_dead(t["model"], pool_slot(t["pool"]), limit_reset(t))   # the ban ends at the printed reset, else the recovery time
     git("worktree", "remove", "--force", wt, check=False)
     git("branch", "-D", t["branch"], check=False)
     with registry() as reg:
