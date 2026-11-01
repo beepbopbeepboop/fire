@@ -3318,12 +3318,13 @@ def main():
         print(v)
 main()
 """)
-    # The C++ escape hatch (`MOJO_CORO=cpp`) cannot carry a None slot, so its
-    # typer must REFUSE a None yield (sending the module to the interpreter,
-    # which prints None) rather than compile `co_yield (int64_t)0`, which
-    # prints 0. Pinned on the cpp backend explicitly.
+    # The C++ escape hatch (`MOJO_CORO=cpp`) has no int64_t slot for None: a
+    # None yield beside other kinds is boxed into the tagged word
+    # (`mojo_box_none()`, rendered by the consumer), so it must print what
+    # CPython prints. Writing `co_yield (int64_t)0` would print 0 instead.
+    # Pinned on the cpp backend explicitly; fail-before was the refusal.
     with coro.pinned('cpp'):
-        test_generator_refused("none_yield_bare_refused_on_cpp_path", """\
+        test_generator_matches_cpython("none_yield_bare_beside_int_on_cpp_path", """\
 def g():
     yield 1
     yield
@@ -3333,12 +3334,43 @@ def main():
     for v in g():
         print(v)
 main()
-""", "a None yield (bare `yield` / `yield None`) has no value slot")
-        test_generator_refused("none_yield_explicit_beside_str_refused_on_cpp_path", """\
+""", """\
+def g():
+    yield 1
+    yield
+    yield 2
+
+def main():
+    for v in g():
+        print(v)
+main()
+""")
+        test_generator_matches_cpython("none_yield_explicit_beside_str_on_cpp_path", """\
 def g():
     yield "a"
     yield None
     yield "b"
+
+def main():
+    for v in g():
+        print(v)
+main()
+""", """\
+def g():
+    yield "a"
+    yield None
+    yield "b"
+
+def main():
+    for v in g():
+        print(v)
+main()
+""")
+        # A lone None has no word to carry it, so the escape hatch still
+        # refuses it rather than writing `co_yield (int64_t)0`.
+        test_generator_refused("none_yield_lone_refused_on_cpp_path", """\
+def g():
+    yield
 
 def main():
     for v in g():

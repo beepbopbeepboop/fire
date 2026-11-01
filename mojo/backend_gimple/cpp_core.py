@@ -5391,12 +5391,12 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     "`yield` not supported in an async function body "
                     "(that would make it an async generator, its own "
                     "combined-refusal category — see gen_module)")
-            if s.value.value is None:
-                # A bare yield has no value slot on this path: writing
-                # `co_yield (int64_t)0` would print 0 where CPython prints
-                # None. Refuse, as cpp_async.py does for the whole generator.
-                raise gimple_exprtypes._UnsupportedGeneratorShape(
-                    coro_mod.NONE_YIELD_CPP_REFUSAL)
+            if coro_mod._is_none_yield(s.value):
+                # A None yield is marked, not written as a 0: cpp_async.py boxes
+                # every marked site into a tagged word (`mojo_box_none()`) when
+                # the generator mixes kinds, and refuses the whole generator when
+                # it does not (a lone None has no word to carry it).
+                return [f"{indent}co_yield /*Y:none*/ (0);"]
             if isinstance(s.value.value, gimple_ctypes.TupleExpr):
                 return gen._cpp_yield_tuple(s.value.value, declared, indent)
             if id(s.value) in (getattr(gen, '_cpp_tuple_guarded_yields', None) or ()):

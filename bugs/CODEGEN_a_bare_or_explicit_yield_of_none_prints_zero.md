@@ -1,5 +1,40 @@
 # CODEGEN_a_bare_or_explicit_yield_of_none: a None yield value prints 0
 
+## Status (2026-11-01, eleventh round, work/bug-codegen-a-bare-or-explicit-yield-of: None carried into the tagged word on the cpp path, partial)
+
+**Landed (real behaviour change on `MOJO_CORO=cpp`):** a None yield beside other
+kinds is no longer refused. It is marked at the emitter (`co_yield /*Y:none*/ (0);`,
+`cpp_core.py`, the bare-yield and explicit `yield None` arm), and
+`_cpp_tag_yield_sites` (`cpp_async.py`) boxes the marker as `mojo_box_none()`, so a
+mixed generator is a tagged word like the str/float ones. The consumers that already
+render tagged words (`print`, `for`, `next`, `append`) print `None`. The lone-None
+generator is still refused, and the refusal now comes from the generator-level check
+only when the slot was not tagged (`not _tagged_yield`), so the `(0)` placeholder can
+never reach the output.
+
+**Pins** (`run_none_yield_tests` in `test_gimple_generator_runner.py`): the two
+`*_refused_on_cpp_path` tests for mixed shapes became CPython-oracle output tests
+(`none_yield_bare_beside_int_on_cpp_path`, `none_yield_explicit_beside_str_on_cpp_path`).
+Fail-before, measured by reverse-applying only the source edits: both FAIL with the
+refusal text. After: both PASS. The lone-None pin `none_yield_lone_refused_on_cpp_path`
+is kept (PASS before and after). Group run: 22/0 with `run_tagged_word_cpp_tests` and
+`run_none_list_iteration_tests`.
+
+**Gate note for the integrator (not run here):** the change touches only the
+`MOJO_CORO=cpp` escape hatch, and the default stack-switch path emits no `/*Y:none*/`
+marker, so compiled output on the default path should not move. The integrator should
+still run `gimplegenerators` and `compile_stdlib.py`: any stdlib generator that yields
+None in cpp mode was previously refused and now compiles, which moves the `U`/`skip`
+counts only if one of those modules is cpp-pinned.
+
+**Still open:** a lone None (a generator whose only yield is a bare `yield`) on the
+cpp path is still refused. The tagged path needs at least two kinds, and a lone None
+has no word to carry it: a one-kind None slot would need a `'none'`-only word
+convention in `_cpp_tag_yield_sites` and the kind analysis (`_generator_value_kind`
+returns a non-`'w'` kind for it). That is the next step if the escape hatch must run
+lone-None generators; the default path already prints None for them.
+
+
 ## Status (2026-11-01, tenth round, work/bug-codegen-a-bare-or-explicit-yield-of: dead `co_yield (int64_t)0` removed, partial)
 
 **Landed (the fifth round's item 3, the dead bare-yield emitter):**
