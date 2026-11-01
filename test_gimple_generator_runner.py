@@ -3962,6 +3962,34 @@ def main():
 main()
 """)
 
+    # Regression: a float-returning plain fn call inside a generator must yield as
+    # double, not truncated to int64_t (the cpp-path bug: CODEGEN_cpp_path_plain_float_call_in_generator_yields_as_int).
+    test_generator_matches_cpython("cpp_path_float_call_in_generator_yields_as_double", """\
+def h():
+    return 2.5
+
+def g():
+    y = h()
+    yield y
+
+def main():
+    for v in g():
+        print(v)
+main()
+""", """\
+def h():
+    return 2.5
+
+def g():
+    y = h()
+    yield y
+
+def main():
+    for v in g():
+        print(v)
+main()
+""")
+
     # The same stale state, one level down: `_GEN_DEFS` (and the kind memo read
     # through it) is the generator registry. The previous module's `h` is a
     # FLOAT generator; this module's `h` is a plain function returning strings,

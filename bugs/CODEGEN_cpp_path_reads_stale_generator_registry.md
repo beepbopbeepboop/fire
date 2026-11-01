@@ -27,7 +27,7 @@ REMAINING (still stale on the cpp path):
   Next step: decide whether the cpp path should run the call-site scan (it reads
   `closure_stmts`, so it needs the same arguments) or clear and refill those tables
   from `stmts` alone. Then move `_GEN_REC_ASSUME` behind it.
-- Separate silent bug, filed as `bugs/CODEGEN_cpp_path_plain_float_call_in_generator_yields_as_int.md`:
+- Separate silent bug (float call in generator truncated on cpp path):
   a fresh cpp-only compile of `y = h()` (plain `h` returning 2.5) prints `2`.
 
 
