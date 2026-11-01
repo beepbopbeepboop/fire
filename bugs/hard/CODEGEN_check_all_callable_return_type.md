@@ -75,3 +75,18 @@ callable-parameter function.
    `test_gimple_generator_runner.py`: one importer + a two-function list with equal element types compiles
    and matches CPython; two functions with different element types stays refused; a default argument stays
    refused (a default is not call-site evidence).
+
+## Status (2026-11-01) — measured on the C gimple path; one partial implementation reverted
+
+Reproduction without the c-analyzer sources (`for d, e in f(xs)` with `f` a callable PARAMETER, and `for f in fs: for d, e in f(xs)` with `f`
+a loop variable over a list of generator functions): the compiled program prints `mojo_unsupported_iter: 'for' loop over unsupported iterable
+type int64_t` on stderr, exits 0, and the loop body runs zero times (CPython prints every yielded pair).
+
+Tried and NOT landed: in `emit_loops._gen_for_iter`, a call through a callable variable/parameter dispatched by `mojo_dyn_call`
+(`_lower_fnptr_spread_call`) and drained with `mojo_iter_word` makes the loop run the right number of times with the right first slot, but the
+second slot of each yielded tuple is wrong when it is a `None` or a string (prints `0` / a pointer), because the generators involved
+(`yield x, None` / `yield x, "big"`) take the C++-coroutine path and their tuples carry no per-slot kinds to the dynamic reader. A loop that
+runs with silently wrong values is worse than one that prints the diagnostic, so it was reverted. The missing piece is the tuple-kinds
+contract between the C++ generator's yield and `mojo_iter_gen_handle`/`_gen_drain` (its `vkind` 4 'l' case): it must record the per-slot kinds on
+each yielded tuple (`mojo_list_set_kinds`), and the dynamic loop must read the targets with `mojo_list_get_boxed`. Do that first; the
+evidence/specialisation design above is then only needed for the static typing of the loop targets.
