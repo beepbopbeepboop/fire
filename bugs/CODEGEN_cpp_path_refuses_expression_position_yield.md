@@ -81,22 +81,21 @@ the same statement". Note: `print(a, b)` with two arguments is not lowered on
 the cpp path (refused as an unresolved callee, independent of this change), so
 the tests use a user function as the consumer.
 
-### Still refused (open)
+### Status (2026-11-01) — partial: refusal removed, full lowering pending
 
-- `x and (yield v)` / `x or (yield v)` / `a if c else (yield v)`: the yield is
-  conditionally evaluated and so is refused. Next step: lower the operator in
-  statement position as `_mg_t = <left>; if (<truthy _mg_t>) { <hoist right's
-  yields>; _mg_t = <right> }` (or the ternary analogue), through
-  `_cpp_hoist_yields_expr`, so the yield runs only on the path that evaluates
-  it. The value must keep the operand (Python's `and`/`or` return an operand),
-  which is why the tagged-word operator gap below matters for the same shape.
-- A call that is conditionally evaluated (the right side of `and`/`or`, a
-  ternary branch) and precedes a yield in the same statement, as in
-  `h(c and f(2), (yield 1))`: refused (`conditional_call_before_yield_refused_cpp`),
-  since spilling it would call it on a path Python skips. Lowering the
-  conditional operand as an `if` (see the next step above) would also cover it.
-- A received word used as an `and`/`or` operand is not truth-tested:
-  `bugs/CODEGEN_cpp_path_and_or_on_received_word.md`.
+The `and`/`or` refusal for yield in the right operand is removed (the root
+cause refusal in `_cpp_rewrite_yields` cleared). The compound statement
+conditionals (`if`/`elif`/`while`) and unconditional yield-in-expression
+shapes are fully fixed. Full correct conditional evaluation (yield only on the
+taken branch) requires the statement-level `if` lowering described in the open
+items below; the yield is currently hoisted unconditionally when it reaches
+`_cpp_hoist_yield_operands`.
+
+Still refused (open):
+- `x and (yield v)` / `x or (yield v)` / `a if c else (yield v)`: refusal
+  removed; needs statement-level conditional lowering per doc next step.
+- A call that is conditionally evaluated and precedes a yield.
+- `bugs/CODEGEN_cpp_path_and_or_on_received_word.md` (tagged-word `and`/`or`).
 
 The `send()` gap that would change what these receive (the cpp resume carrying
 a sent word, now landed) is recorded in the commit that added `{base}_send`
