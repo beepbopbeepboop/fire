@@ -270,6 +270,58 @@ def test_bare_submodule_import_keyword_call() -> bool:
     return ok
 
 
+def test_cross_module_generator_default_is_padded() -> bool:
+    """A generator reached through ANOTHER module (`lib.counter(4)` on a bare
+    `from pkg import lib`, and `from pkg.lib import counter`) with a
+    defaulted parameter omitted must receive the callee's real default.
+
+    `_emit_generator_start_call` padded the omitted slot from the CALLER's
+    `_func_param_defaults`, which never saw the defining module's pass, so
+    `step=1` arrived as a typed 0: `sum(lib.counter(4))` printed 0 and
+    `tuple(...)` was all zeros (CPython 6 / (0, 1, 2)). The defining
+    module's snapshot (`api['defaults']`) is the fallback now. Found while
+    closing c_common/fsutil.py; see
+    bugs/CODEGEN_dynamic_call_layer_residue_after_fsutil.md item 2.
+    """
+    pkg = {
+        'pkg5/__init__.py': '',
+        'pkg5/lib.py': (
+            'def counter(n, *, step=1):\n'
+            '    i = 0\n'
+            '    while i < n:\n'
+            '        yield i * step\n'
+            '        i = i + 1\n'
+            '\n'
+            'def pick(n, flag=None):\n'
+            '    for k in range(n):\n'
+            '        if flag is None:\n'
+            '            yield k\n'
+        ),
+        'pkg5/main.py': (
+            'from pkg5 import lib\n'
+            'from pkg5.lib import counter\n'
+            'print(sum(lib.counter(4)))\n'
+            'print(tuple(lib.counter(3)))\n'
+            'print(sum(counter(4)))\n'
+            'print(list(lib.pick(3)))\n'
+        ),
+    }
+    root = os.path.join(REPO, 'build', 'test_link_mode')
+    os.makedirs(root, exist_ok=True)
+    td = tempfile.mkdtemp(prefix='xmod_gen_default_', dir=root)
+    try:
+        rc, stdout = _build_and_run(pkg, 'pkg5/main.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'pkg5/main.py', as_module=True)
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and stdout == '6\n(0, 1, 2)\n6\n[0, 1, 2]\n')
+    if not ok:
+        print(f"  ✗ cross_module_generator_default_is_padded: rc={rc} "
+              f"stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
+    return ok
+
+
 def test_str_affix_method_on_unsolved_word_is_bool() -> bool:
     """`.startswith(...)` / `.endswith(...)` on a loop target that is an
     UNSOLVED word (the element of a registered generator, whose kind the
@@ -2006,6 +2058,7 @@ CASES = [
     test_bare_submodule_import_call,
     test_bare_submodule_import_call_inside_source_tree,
     test_bare_submodule_import_keyword_call,
+    test_cross_module_generator_default_is_padded,
     test_str_affix_method_on_unsolved_word_is_bool,
     test_generator_none_default_reaches_callee_as_null,
     test_from_submodule_import_symbol_value_read,
