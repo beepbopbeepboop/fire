@@ -3105,6 +3105,28 @@ main()
 """, "")
 
 
+# A None received by `x = yield` used in arithmetic must raise TypeError, as
+# CPython does. The None box has no numeric kind, so the tagged arithmetic
+# select used to unwrap it to its word (0) and print `x + 1` as 1. The
+# try/except form lets the CPython reference run to completion. One program
+# text serves as both the Mojo source and the CPython oracle.
+_NONE_RECEIVED_ARITH_SRC = """\
+def g():
+    x = yield
+    try:
+        print(x + 1)
+    except TypeError:
+        print("TypeError")
+    yield 1
+
+def main():
+    it = g()
+    next(it)
+    next(it)
+main()
+"""
+
+
 def run_none_yield_tests():
     # A None yield (bare `yield`, or `yield None`) used to share the int64_t
     # value slot with the integers, so a for loop printed the raw 0 where
@@ -3240,6 +3262,67 @@ def g():
 def main():
     it = g()
     print(next(it))
+main()
+""")
+    # Arithmetic on a None received by `x = yield` (program in
+    # _NONE_RECEIVED_ARITH_SRC) must raise TypeError on the default path.
+    test_generator_matches_cpython("none_received_arithmetic_raises_typeerror",
+                                   _NONE_RECEIVED_ARITH_SRC, _NONE_RECEIVED_ARITH_SRC)
+    # Unary minus on the same None box raises too, with CPython's unary text.
+    test_generator_matches_cpython("none_received_unary_minus_raises_typeerror", """\
+def g():
+    x = yield
+    try:
+        print(-x)
+    except TypeError:
+        print("TypeError")
+    yield 1
+
+def main():
+    it = g()
+    next(it)
+    next(it)
+main()
+""", """\
+def g():
+    x = yield
+    try:
+        print(-x)
+    except TypeError:
+        print("TypeError")
+    yield 1
+
+def main():
+    it = g()
+    next(it)
+    next(it)
+main()
+""")
+    # The guard must leave a FLOAT box alone: arithmetic on a double received
+    # from `next(it)` still computes the double answer (a float box is not None).
+    test_generator_matches_cpython("float_received_arithmetic_unchanged", """\
+def g():
+    yield 2.5
+    yield 3
+
+def main():
+    it = g()
+    x = next(it)
+    print(x + 1.5)
+    y = next(it)
+    print(y + 1.5)
+main()
+""", """\
+def g():
+    yield 2.5
+    yield 3
+
+def main():
+    it = g()
+    x = next(it)
+    print(x + 1.5)
+    y = next(it)
+    print(y + 1.5)
 main()
 """)
     # `next(g())` direct, and the two-argument default form: a default of

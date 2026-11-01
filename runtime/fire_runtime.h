@@ -849,6 +849,16 @@ int64_t     mojo_box_word(int64_t v);
  * Returns 1 only for that box; any other word answers 0, which is what the
  * constant comparison answered before this existed. */
 int         mojo_word_is_none(int64_t v);
+/* Arithmetic on a possibly-boxed operand (`x + 1` on a None received by
+ * `x = yield`): a None box raises a catchable TypeError, as CPython does,
+ * instead of being unwrapped to its word (0) and computed with. `op` is the
+ * operator text ("+", "//", ...); `other` is the type name of the other
+ * operand ("int" or "float"); `none_is_left` says which side the None is,
+ * for CPython's message order. Any other word is returned unchanged. */
+int64_t     mojo_none_arith_guard(int64_t v, const char *op, const char *other, int none_is_left);
+/* Unary `-` on a possibly-boxed operand: the same check, with CPython's
+ * "bad operand type for unary -" message. */
+int64_t     mojo_none_unary_guard(int64_t v, const char *op);
 /* Python truthiness of a word whose kind only the runtime knows (an
  * unannotated parameter, an untyped attribute read): an empty container or
  * string is false, None is false, 0 is false, anything else is true. */

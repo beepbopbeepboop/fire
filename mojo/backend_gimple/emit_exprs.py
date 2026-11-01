@@ -1297,6 +1297,14 @@ def _lower_UnaryOp(gen, node) -> tuple[str, str]:
             return ot, ov
     if node.op == '+':
         return ot, ov
+    # A tagged word may be the shared None box, which has no numeric kind:
+    # `-x` on it raises TypeError, as CPython does, rather than negating the
+    # box's address. See `_tagged_arith_select` for the binary forms.
+    if (node.op == '-' and ot == 'int64_t'
+            and ov in getattr(gen, '_tagged_word_vals', ())
+            and ov in getattr(gen, '_boxed_vals', ())):
+        ov = gen._call_expr('int64_t', 'mojo_none_unary_guard',
+                            [('int64_t', ov), ('char *', '"-"')])
     c_op = {'-': '-', '~': '~'}.get(node.op, node.op)
     # Struct pointers can't be negated/inverted — coerce to int64_t first.
     # char* included: `-<char*>` is never valid Python (negating a string
@@ -3887,6 +3895,26 @@ _PYBOX_SCALARS = frozenset({
 })
 
 
+def _numeric_type_name(ctype: str) -> str:
+    """The Python type name of a numeric C operand type, for an error message."""
+    return 'float' if ctype in ('double', 'float') else 'int'
+
+
+def _none_arith_guard(gen, op: str, val: str, other: str, none_is_left: int) -> str:
+    """Emit `mojo_none_arith_guard` for a tagged operand `val` of arithmetic
+    `op` whose other operand is a `other` ("int" or "float") value. Returns the
+    checked word, which is `val` itself for every non-None box. The result
+    stays a tagged box (as `val` was), so the operand lowering that follows
+    still unwraps it by its kind; a copy that lost that marking would be read
+    as a raw word."""
+    _t = gen._call_expr('int64_t', 'mojo_none_arith_guard',
+                        [('int64_t', val), ('char *', f'"{op}"'),
+                         ('char *', f'"{other}"'), ('int', str(none_is_left))])
+    gen._boxed_vals.add(_t)
+    gen._tagged_word_vals.add(_t)
+    return _t
+
+
 def _tagged_arith_select(gen, op: str, left_node, lt: str, lv: str,
                          right_node, rt: str, rv: str):
     """`lhs OP rhs` where a TAGGED generator word (`_tagged_word_vals`) is an
@@ -3910,6 +3938,14 @@ def _tagged_arith_select(gen, op: str, left_node, lt: str, lv: str,
         return None
     if lt not in ('int', 'int64_t') or rt not in ('int', 'int64_t'):
         return None
+    # A tagged operand may be the shared None box (`x = yield` after
+    # `next(it)`), which has no numeric kind. Unwrapping it would compute with
+    # its word (0), so each tagged operand is checked first and a None box
+    # raises TypeError here, as CPython does for `None + 1`.
+    if _tag_l:
+        lv = _none_arith_guard(gen, op, lv, 'int', 1)
+    if _tag_r:
+        rv = _none_arith_guard(gen, op, rv, 'int', 0)
     _t = ginf._float_param_arith(gen, op, left_node, lt, lv, right_node, rt, rv,
                                  lmaybe=_tag_l, rmaybe=_tag_r)
     gen._boxed_vals.add(_t)
@@ -4081,6 +4117,17 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     _tsel = _tagged_arith_select(gen, op, left_node, lt, lv, right_node, rt, rv)
     if _tsel is not None:
         return 'int64_t', _tsel
+    # A tagged word beside a DOUBLE under arithmetic (`x + 1.5`, `x / 2.0`):
+    # the box is unwrapped to a double below, and a None box would unwrap to
+    # 0.0. It is checked first, as in `_tagged_arith_select`, which answers only
+    # the integer-operand case. A str operand is not numeric and is excluded:
+    # `x + "!"` keeps its concatenation lowering.
+    if op in ginf._FLOAT_PARAM_OPS:
+        _boxed = getattr(gen, '_boxed_vals', ())
+        if lv in _tagged and lv in _boxed and rt in ('int', 'int64_t', 'double', 'float'):
+            lv = _none_arith_guard(gen, op, lv, _numeric_type_name(rt), 1)
+        if rv in _tagged and rv in _boxed and lt in ('int', 'int64_t', 'double', 'float'):
+            rv = _none_arith_guard(gen, op, rv, _numeric_type_name(lt), 0)
     if lv in getattr(gen, '_boxed_vals', ()) and not (
             lv in _tagged and rt == 'char *' and op == '+'):
         if op in _ident_ops and (op in ('is', 'is not')
