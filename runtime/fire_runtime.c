@@ -15104,6 +15104,23 @@ typedef struct MojoClassRec {
 } MojoClassRec;
 static MojoClassRec *_class_head = 0;
 
+/* A class body's own attributes are static globals of the module that declares the class, so
+ * the table cannot hold them; each module registers one reader (tag, name -> live word) and a
+ * lookup that reaches such a class asks them. The word is read at lookup time, so a later
+ * `Base.x = v` is seen through a run-time class that inherits `x` from `Base`. */
+static int (**_classattr_readers)(int64_t, char *, int64_t *) = 0;
+static int _n_classattr_readers = 0, _cap_classattr_readers = 0;
+void mojo_register_classattr_reader(int (*fn)(int64_t, char *, int64_t *))
+{
+    for (int i = 0; i < _n_classattr_readers; i++) if (_classattr_readers[i] == fn) return;
+    if (_n_classattr_readers == _cap_classattr_readers) {
+        _cap_classattr_readers = _cap_classattr_readers ? _cap_classattr_readers * 2 : 16;
+        _classattr_readers = (int (**)(int64_t, char *, int64_t *))realloc(
+            (void *)_classattr_readers, (size_t)_cap_classattr_readers * sizeof *_classattr_readers);
+    }
+    _classattr_readers[_n_classattr_readers++] = fn;
+}
+
 static MojoClassRec *_class_find(int64_t tag)
 {
     for (MojoClassRec *c = _class_head; c; c = c->next) if (c->tag == tag) return c;
@@ -15135,6 +15152,8 @@ static int _class_lookup(int64_t tag, const char *name, int64_t *out, int depth)
     MojoClassRec *c = _class_find(tag);
     if (!c || depth > 32) return 0;
     if (mojo_dict_contains(c->attrs, (char *)name)) { *out = mojo_dict_get_int(c->attrs, (char *)name); return 1; }
+    for (int i = 0; i < _n_classattr_readers; i++)
+        if (_classattr_readers[i](tag, (char *)name, out)) return 1;
     for (int i = 0; i < c->nbases; i++) if (_class_lookup(c->bases[i], name, out, depth + 1)) return 1;
     return 0;
 }

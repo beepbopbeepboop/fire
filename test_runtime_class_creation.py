@@ -62,6 +62,30 @@ def main():
     print(C.a, C.b, C.c, C.k)
 main()
 """,
+    'static_base_body_attributes_are_inherited': """\
+class B:
+    y = 5
+    s = 'hi'
+    f = 2.5
+
+def main():
+    F = type('F', (B,), {'z': 1})
+    print(F.z, F.y, F.s, F.f)
+    print(hasattr(F, 'y'), hasattr(F, 'q'), getattr(F, 'y'))
+    F.y = 6
+    print(F.y, B.y)
+main()
+""",
+    'static_base_attribute_is_read_live': """\
+class B:
+    y = 5
+
+def main():
+    F = type('F', (B,), {})
+    B.y = 8
+    print(F.y)
+main()
+""",
     'two_classes_of_one_name_are_two_classes': """\
 def main():
     P = type('Same', (), {'v': 1})

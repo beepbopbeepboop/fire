@@ -43,9 +43,14 @@ every module is reachable from a word with `mojo_getattr_any(obj, attr)`
    **Computed bases landed 2026-11-01**: `type(n, bases, ns)` with `bases` a tuple/list-typed
    variable/attribute is walked at run time by `mojo_type_add_bases_from_list` (pinned by
    `computed_bases_list_variable`; a static class inside such a list is not yet covered).
-   STILL MISSING in stage 3: inheriting a STATIC base's class-body attributes through a dynamic class (`class B: y = 5`,
-   `type('F', (B,), {}).y` - body attributes are static globals, not table entries; register
-   them as words in `_mojo_classattr_init` or fall back to the struct's static read);
+   **Static base body attributes landed 2026-11-01**: `class B: y = 5` / `s = 'hi'` / `f = 2.5` and
+   `type('F', (B,), {}).y` - each module emits `_mojo_classattr_read(tag, name, &word)` (the LIVE
+   class-attribute global as a word: float boxed, string registered, container by address) and
+   registers it with `mojo_register_classattr_reader`; `_class_lookup` asks the readers at every
+   class it visits, so a later `B.y = 8` is seen through `F`. Pinned by
+   `static_base_body_attributes_are_inherited` / `static_base_attribute_is_read_live`. Not
+   covered: methods of a static base reached through a dynamic class.
+   STILL MISSING in stage 3: a static class listed inside a computed bases list;
    `type.__new__(metacls, ..)`; instances of a dynamic class (stage 2 is its prerequisite).
 4. the metaclass protocol `EnumType` uses: `__prepare__`, `__new__`, `__call__`, `__set_name__`,
    `__init_subclass__`, class-level `__getattr__`, `isinstance(x, cls)` for dynamic classes,
