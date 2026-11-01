@@ -3545,9 +3545,10 @@ def main():
     use(g())
 main()
 """)
-    # `next()` on the PARAMETER in the callee has no generator api there, so the
-    # tagged word would read as a raw int64_t (`0`): it must stay a refusal.
-    test_generator_refused("none_yield_passed_to_function_next_refused", """\
+    # `next()` on the PARAMETER in the callee: the callee's generator api is
+    # seeded from the call site (emit_funcs `_param_generator_api`), so the
+    # tagged word is rendered by `_lower_generator_next` (not a raw int64_t 0).
+    test_generator_matches_cpython("none_yield_passed_to_function_next", """\
 def g():
     yield
     yield 2
@@ -3558,7 +3559,70 @@ def use(it):
 def main():
     use(g())
 main()
-""", "generator function(s)")
+""", """\
+def g():
+    yield
+    yield 2
+
+def use(it):
+    print(next(it))
+
+def main():
+    use(g())
+main()
+""")
+    test_generator_matches_cpython("tagged_passed_to_function_next_default", """\
+def g():
+    yield
+    yield 2
+
+def use(it):
+    print(next(it, 7))
+    print(next(it, 7))
+    print(next(it, 7))
+
+def main():
+    use(g())
+main()
+""", """\
+def g():
+    yield
+    yield 2
+
+def use(it):
+    print(next(it, 7))
+    print(next(it, 7))
+    print(next(it, 7))
+
+def main():
+    use(g())
+main()
+""")
+    test_generator_matches_cpython("tagged_mixed_passed_to_function_next", """\
+def g():
+    yield 1
+    yield "s"
+
+def use(it):
+    print(next(it))
+    print(next(it))
+
+def main():
+    use(g())
+main()
+""", """\
+def g():
+    yield 1
+    yield "s"
+
+def use(it):
+    print(next(it))
+    print(next(it))
+
+def main():
+    use(g())
+main()
+""")
     # A parameter that ALSO receives a different value at another call site has
     # no single kind to read, so it keeps its refusal.
     test_generator_refused("none_yield_passed_to_function_mixed_callers_refused", """\

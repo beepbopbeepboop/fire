@@ -1148,17 +1148,17 @@ class _ParamFlow:
     decision (`_tagged_consumers_ok`): when the generator `name`'s call is
     passed as a positional argument to a plain module-level `def`, does the
     callee read that PARAMETER only through the boxed consumers (`for`, `list()`,
-    a comprehension), either directly or by passing it on to another such
+    a comprehension, `next()`), either directly or by passing it on to another such
     `def`? Built lazily, once per query, because the walk is whole-module.
 
     The rule is conservative on purpose. The parameter's value must be the
     tagged generator at EVERY call site of the callee (an unrelated value at
     any call site, a `*`-unpack, a keyword, a bare reference to the callee as a
     value, or a nested `def` in the caller all answer False), and every use of
-    the parameter in the callee must be one of the accepted consumers. `next()`
-    on the parameter is NOT accepted: it has no generator api in the callee,
-    so `_lower_generator_next` is never reached and the value reads as a raw
-    int64_t (measured: `next(it)` in the callee printed `0` for a bare yield).
+    the parameter in the callee must be one of the accepted consumers
+    (`for`, `list()`, a comprehension, `next(it)` / `next(it, default)`, or a
+    pass-on). `next()` is accepted because the callee's generator api is seeded
+    from the call site, so its result is tagged like the caller's `next()`.
     """
 
     def __init__(self, name: str):
@@ -1264,6 +1264,13 @@ class _ParamFlow:
             elif (isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr)
                     and n.func.name == 'list' and len(n.args) == 1
                     and _is_name(n.args[0], pname)):
+                ok_ids.add(id(n.args[0]))
+            elif (isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr)
+                    and n.func.name == 'next' and 1 <= len(n.args) <= 2
+                    and _is_name(n.args[0], pname)):
+                # `next(it)` / `next(it, default)`: the callee's api is seeded
+                # from the call site (emit_funcs `_param_generator_api`), so
+                # `_lower_generator_next` tags the word (see docstring above).
                 ok_ids.add(id(n.args[0]))
             elif isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr) \
                     and n.func.name != pname:

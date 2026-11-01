@@ -54,8 +54,9 @@ a feature of the generator kind system, not a patch at one site.
 ## Pins
 
 - `test_gimple_generator_runner.py`, `run_none_yield_tests`:
-  `none_yield_lone_passed_to_function_refused` pins the honest refusal (a guard:
-  it must stay a refusal, never a silent `0`).
+  `none_yield_passed_to_function_next` and `tagged_passed_to_function_next_default`
+  / `tagged_mixed_passed_to_function_next` (CPython oracle) pin `next(it)` and
+  `next(it, default)` on the parameter (landed 2026-11-01, see Status below).
 - The cpp-path shapes are covered by `none_yield_lone_bare_for_loop_cpp` and
   `tagged_int_str_for_loop_cpp` (the cpp path already compiles them).
 
@@ -83,20 +84,24 @@ Pins are in `run_none_yield_tests`: `none_yield_lone_passed_to_function`,
 (CPython oracle), and the two guards `none_yield_passed_to_function_next_refused`
 and `none_yield_passed_to_function_mixed_callers_refused`.
 
-**Found while probing, not fixed.** With the tag forced on for any caller, the
-callee's `next(it)` on the parameter printed `0` for a bare `yield` and exit 0.
-`_lower_generator_next` needs the generator's `api`, which a parameter does not
-carry (`emit_calls.py`: `gen._generator_var_api.get(av)` is None in the callee).
-That is why `next()` in the callee is excluded and still refused.
+**Landed 2026-11-01 (item 1 of the first round): `next()` on the parameter.**
+`_ParamFlow.use_ok` now accepts `next(it)` and `next(it, default)` on the callee
+parameter as a boxed consumer. No new seeding was needed: the callee's generator
+api is already carried from the call site by `emit_funcs.py`'s
+`_param_generator_api` (Pass 1.3f-gen), so `_lower_generator_next` runs and tags
+the result. The earlier `0` in this doc was measured before that seeding path
+reached this shape; re-measured, the tagged bare-yield case prints `None`.
+Verified against the CPython oracle: `use(g())` with `print(next(it))` on a bare
+yield (`None`); the mixed shape with two `next()` calls (`1` / `s`); a two-level
+pass-through (`None` / `2`); and `next(it, 7)` three times over `yield` / `yield 2`
+(`None` / `2` / `7`, matching CPython). Before the change each
+was refused. `test_gimple_generator_runner.py`: 411 passed, 0 failed.
 
 **Still refused (the remaining work):**
-1. `next(it)` on a parameter that receives a tagged generator. The fix is to
-   carry the generator's `api` (value ctype, `mixed_slots`) to the callee's
-   parameter, so `_lower_generator_next` runs and tags the result. Until then it
-   must stay a refusal (pinned).
-2. A parameter that also receives a non-generator value at another call site
+1. A parameter that also receives a non-generator value at another call site
    (`use(g())` plus `use([1, 2])`). The callee has one parameter kind, so this
-   needs per-call-site kinds or a boxed-at-call rule. Pinned as a refusal.
+   needs per-call-site kinds or a boxed-at-call rule. Pinned as a refusal by
+   `none_yield_passed_to_function_mixed_callers_refused`.
 
 **Gate note for the integrator.** `_tagged_consumers_ok` is shared by every
 generator. The change only widens acceptance for generators that reach a boxed
@@ -108,8 +113,8 @@ before/after) and the full `gimplegenerators` run.
 
 ## Next step
 
-1. Land remaining item 1 above (carry the generator `api` to a callee's
-   parameter for `next()`), then flip `none_yield_passed_to_function_next_refused`
-   to a CPython-oracle pin.
-2. Decide item 2 above: per-call-site parameter kinds, or box at the call.
-3. Integrator: the gate note above.
+1. Decide the remaining item above: per-call-site parameter kinds, or box at the
+   call. This is the only shape still refused for a tagged generator passed to a
+   function.
+2. Integrator: the gate note above (the `next()` acceptance widens the same
+   `_ParamFlow` decision and needs the same `compile_stdlib.py` U/skip check).
