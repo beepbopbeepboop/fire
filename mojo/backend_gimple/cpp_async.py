@@ -1354,17 +1354,8 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         f"    if (h) h.destroy();",
         f"}}",
     ]
-    # The registration lines, captured on the generator before they are
-    # spliced in: the escaping-closure claim (see _compile_nested_generator_
-    # closures) must know whether the unit REGISTERED a runtime signature —
-    # the caller's `for` drains the returned handle through that entry, and
-    # a generator whose signature could not be spelled must keep the honest
-    # refusal instead of iterating nothing at run time. Reset+set per unit,
-    # the same side-channel convention as _cpp_last_tuple_slot_ctypes.
-    _sig_lines = _cpp_generator_sig_lines(gen, fn, base, param_ctypes, cpp_value_ctype,
-                                          extra_captures, struct_name)
-    gen._cpp_last_sig_lines = _sig_lines
-    lines.extend(_sig_lines)
+    lines.extend(_cpp_generator_sig_lines(gen, fn, base, param_ctypes, cpp_value_ctype,
+                                          extra_captures, struct_name))
     # Plain unpack loop, NOT `[ct for _, ct in param_ctypes]` — a
     # comprehension's tuple-unpack target boxes to int64_t self-hosted.
     _ret_cts = []
@@ -1433,16 +1424,8 @@ def _cpp_generator_sig_lines(gen, fn, base, param_ctypes, cpp_value_ctype,
     keywords by name and a `for` over the returned handle can drain it.
     Emitted only for a plain free generator whose parameters are all words
     (a double would travel in a float register, which a word-typed call cannot
-    reproduce) and whose every default is spellable.
-    A NESTED generator's trailing capture parameters (extra_captures,
-    appended to param_ctypes before this runs) ride the registration too:
-    its escaping-closure thunk starts the generator DIRECTLY (the captures
-    come from the closure record, no keyword binding can name them) and
-    records the handle through mojo_gen_handle_put, which needs exactly this
-    signature entry to drain the handle later — a registered-generator call
-    that omits the captures binds them as missing and raises, an honest
-    error rather than a mis-slotted start."""
-    if struct_name is not None or len(param_ctypes) > 8:
+    reproduce) and whose every default is spellable."""
+    if extra_captures or struct_name is not None or len(param_ctypes) > 8:
         return []
     _vk = {'int64_t': 0, '_Bool': 1, 'double': 2, 'char *': 3}.get(cpp_value_ctype)
     if _vk is None:
@@ -1694,38 +1677,6 @@ def _only_directly_called(body: list, name: str) -> bool:
     return all(id(r) in called for r in refs)
 
 
-def _called_or_returned_only(body: list, name: str) -> bool:
-    """True when every reference to `name` inside `body` is the callee of a
-    direct call OR the value of a `return` statement — the ESCAPING-closure
-    shape of a nested generator: driven in place (the direct call, threaded
-    by emit_calls._emit_nested_generator_start_call as before) and/or handed
-    out as a value for the CALLER to drive later (`return g`, the glob.py
-    selector factories). The return reference is lowered at the `def` by
-    _gen_stmt_FunctionDef's closure record: the captured values plus the
-    generator's start, wrapped as a registered variadic callable. Any OTHER
-    value use (an assignment, a yield, a call argument) has no lowering and
-    keeps the honest refusal. The walker yields BOTH such nodes AGAIN as
-    bare IdentExprs (a call's callee, a return's value), so the reference
-    nodes are collected by id first and whitelisted on the second pass
-    rather than matched on their parent statements alone."""
-    called_ids = set()
-    ret_ids = set()
-    for nd in gimple_exprtypes._walk_ast(body):
-        if (isinstance(nd, gimple_ctypes.CallExpr)
-                and isinstance(nd.func, gimple_ctypes.IdentExpr)
-                and nd.func.name == name):
-            called_ids.add(id(nd.func))
-        if (isinstance(nd, gimple_ctypes.ReturnStmt)
-                and isinstance(nd.value, gimple_ctypes.IdentExpr)
-                and nd.value.name == name):
-            ret_ids.add(id(nd.value))
-    for nd in gimple_exprtypes._walk_ast(body):
-        if isinstance(nd, gimple_ctypes.IdentExpr) and nd.name == name:
-            if id(nd) not in called_ids and id(nd) not in ret_ids:
-                return False
-    return True
-
-
 def _compile_nested_generator_closures(gen, outer_fn: gimple_ctypes.FunctionDef,
                                        generator_fns: dict) -> None:
     """Compile each NESTED sync generator of `outer_fn` that reads enclosing
@@ -1735,20 +1686,15 @@ def _compile_nested_generator_closures(gen, outer_fn: gimple_ctypes.FunctionDef,
 
     Scope, deliberately narrow -- everything else keeps the honest refusal
     `_gen_cpp_generator_unit` already gives:
-      * `outer_fn` is a TOP-LEVEL `def` (the claim site walks the module's
-        top-level statements), and the generator is a DIRECT statement of it:
-        a nested generator inside a struct method (the Lib/glob.py selectors)
-        is never claimed;
-      * it is either only CALLED by name from `outer_fn` (`_only_directly_
-        called`, driven in place with the captures threaded as trailing
-        arguments) or only CALLED or RETURNED (`_called_or_returned_only`):
-        the ESCAPING shape, in which the enclosing factory materializes a
-        closure record (a heap env of the captured values plus the generator's
-        start, registered as a MojoVarargFn whose static thunk appends the
-        captures and starts the generator directly) and the caller's
-        `for v in factory(...)()` drains it; any other value reference (a
-        list element, a dict entry, a branch the call/return scan cannot see)
-        stays refused;
+      * the generator is a DIRECT top-level statement of `outer_fn` (the same
+        scope `_compile_nested_async_functions` walks), not a method, and it
+        is only ever CALLED by name from `outer_fn` (`_only_directly_called`).
+        A generator RETURNED from `outer_fn` (the escaping shape) no longer
+        reaches this claim: `mojo/middle/coro.py`'s `_lower_escaping_
+        generators` moves it to module level before the backend runs, leaving
+        a variadic trampoline the ordinary nested-closure mechanism compiles;
+        the escapes that path leaves alone (a nonlocal write, a rebound
+        capture) keep the honest refusal from the generic pass below;
       * every enclosing name it reads is one `_compute_nested_closure_
         captures` resolves against `outer_fn`'s params and top-level locals
         (`_enclosing_scope_with_locals`) -- a read of anything else is not
@@ -1776,14 +1722,8 @@ def _compile_nested_generator_closures(gen, outer_fn: gimple_ctypes.FunctionDef,
         read = gen._nested_gen_captures.get(id(inner))
         if not read:
             continue
-        _escaping = False
         if not _only_directly_called(outer_fn.body, inner.name):
-            # A value reference besides the direct call: the escaping
-            # closure shape (`return g`, driven by the caller) when every
-            # other reference is a return, refused otherwise.
-            if not _called_or_returned_only(outer_fn.body, inner.name):
-                continue
-            _escaping = True
+            continue
         if outer_scope is None:
             outer_scope = gen._enclosing_scope_with_locals(outer_fn)
         caps = gen._compute_nested_closure_captures(inner, outer_scope)
@@ -1819,39 +1759,14 @@ def _compile_nested_generator_closures(gen, outer_fn: gimple_ctypes.FunctionDef,
         except gimple_exprtypes._UnsupportedGeneratorShape as e:
             gen._cpp_refusal_reasons.setdefault(inner.name, str(e))
             continue
-        if _escaping and not gen._cpp_last_sig_lines:
-            # The caller's `for` drains the handle through the signature
-            # table; a signature the unit could not register (a default it
-            # cannot spell, a value kind it cannot read) would make the
-            # loop iterate nothing at run time — a silent wrong answer.
-            # Refuse the claim so the module keeps the honest refusal.
-            gen._cpp_refusal_reasons.setdefault(
-                inner.name,
-                f"{inner.name}: an escaping nested generator needs its "
-                "runtime signature registered for the caller's iteration, "
-                "which this unit could not spell")
-            continue
         gen._nested_generator_api[(outer_fn.name, inner.name)] = {
             'base': base, 'value_ctype': value_ctype,
             'params': param_ctypes, 'captures': caps,
             'nested_name': inner.name,
-            'escaping': _escaping,
-            # The closure's THUNK symbol, derived from `base` (unique per
-            # unit: the same-name ordinal _gen_cpp_generator_unit appends is
-            # already in it) so a whole-program do_imports compile can never
-            # emit two identical statics.
-            'thunk': (f"_closure_thunk_{base}" if _escaping else None),
         }
         gen.func_param_types[f"{base}_start"] = param_ctypes
         gen._generator_cpp_units.append(cpp_text)
         generator_fns.pop(id(inner), None)
-        if _escaping:
-            # The enclosing factory's value returns are the closure word;
-            # a `for` over a chained call through it drains the handle the
-            # thunk recorded (see _gen_for_iter's closing over this table).
-            gen._gen_closure_return_fns.setdefault(
-                outer_fn.name, {})[inner.name] = (
-                base, gimple_ctypes._as_str(value_ctype))
 
 
 def _nested_generator_sibling_defs(stmts) -> dict[int, list]:

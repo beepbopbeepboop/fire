@@ -886,55 +886,6 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
         _gen_for_iter_cursor(gen, node, var)
         return
 
-    # `for v in <factory>(...)(...):` — the chained call whose INNER call
-    # returns an ESCAPING nested generator's closure word (the factory
-    # `return`s a nested `def`; `_gen_closure_return_fns`, recorded by
-    # cpp_async._compile_nested_generator_closures). The outer call drives
-    # the closure's registered thunk, which starts the generator and records
-    # its handle in the runtime's table; this arm drains it
-    # (mojo_iter_gen_handle) and iterates the drained list, whose elements
-    # are typed by the generator's own value_ctype. Without this arm the
-    # chained call's result is a plain untyped int64_t word the generic
-    # boxed dispatch below cannot tell a generator handle from, and the
-    # loop body would be dropped as not-iterable. One value_ctype or the
-    # arm is not taken (a factory returning two different nested generators
-    # on different branches has no single element type to declare the
-    # target with, and the pre-existing generic path — no loop — is the
-    # honest answer for that, still-feature shape).
-    _cfr = getattr(gen, '_gen_closure_return_fns', None) or {}
-    if (isinstance(it, gimple_ctypes.CallExpr)
-            and isinstance(it.func, gimple_ctypes.CallExpr)
-            and isinstance(it.func.func, gimple_ctypes.IdentExpr)):
-        _fact = _cfr.get(it.func.func.name)
-        if _fact:
-            _vcts = {gimple_ctypes._as_str(_vc) for _bs, _vc in _fact.values()}
-            if len(_vcts) == 1:
-                _vct = _vcts.pop()
-                it_type, it_val = gen.lower_expr(node.iterable)
-                it64 = gen._to_int64(it_type, it_val)
-                gl = gen._call_expr('MojoList *', 'mojo_iter_gen_handle',
-                                    [('int64_t', it64)])
-                if _vct == 'char *':
-                    gen._elem_types[gl] = 'char *'
-                elif _vct == 'double':
-                    gen._elem_types[gl] = 'double'
-                _chk = gen._new_val('_Bool', f'({gl} != 0)')
-                bb_gen = gen._new_bb(); bb_miss = gen._new_bb()
-                bb_after = gen._new_bb()
-                gen._emit(f"  if ({_chk}) goto {bb_gen}; else goto {bb_miss};")
-                gen._emit_label(bb_miss)
-                # Compile-time impossible for a word this shape produced
-                # (the thunk always records the handle): a same-named
-                # factory in another module returning a non-closure word
-                # keeps the old no-op rather than inventing a new one.
-                gen._emit_unsupported_iter(it_type, node)
-                gen._emit(f"  goto {bb_after};")
-                gen._emit_label(bb_gen)
-                gen._gen_for_list(var, gl, node.body)
-                gen._emit(f"  goto {bb_after};")
-                gen._emit_label(bb_after)
-                return
-
     # A loop over a provably Dict[Int, V] name (`for k in d`, `d.keys()`,
     # `d.items()`) gets its keys back as integers; see _int_dict_loop_source.
     _int_mode, _int_recv = _int_dict_loop_source(gen, it)

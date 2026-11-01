@@ -16247,35 +16247,6 @@ def gen_module_impl(self, stmts):
             parts.append(f"extern void {_base}_destroy (MojoGenerator *);")
             if _api.get('is_async_gen'):
                 parts.append(f"extern _Bool {_base}_last_yield_was_wd (MojoGenerator *);")
-            if _api.get('escaping') and _api.get('thunk'):
-                # The closure's THUNK: the registered variadic callable the
-                # `def` wraps around the captured values + start address
-                # (see _gen_stmt_FunctionDef's escaping branch). It receives
-                # the caller's positional arguments (n_fixed of them,
-                # scalars — _mojo_vararg_invoke's (env, a0..an, MojoList*)
-                # call form) and the closure record, appends the captured
-                # values in the order the coroutine frame takes them (user
-                # params, then trailing captures — the _gen_cpp_generator_
-                # unit convention), starts the generator DIRECTLY (the
-                # captures no keyword binding can name), and records the
-                # handle in the runtime's table for the caller's `for` to
-                # drain. `n_fixed` bounded to 8: _mojo_vararg_invoke's
-                # wrappers cap the arity there too.
-                _nc = len(_api.get('captures') or [])
-                _nf = len(_api.get('params') or []) - _nc
-                _args = ', '.join(f'int64_t _a{i}' for i in range(_nf))
-                _sig = f'void * _env, {_args + ", " if _args else ""}MojoList * _packed'
-                _start_args = (
-                    [f'_a{i}' for i in range(_nf)]
-                    + [f'(int64_t)(intptr_t)_caps [{i}]' for i in range(_nc)])
-                parts.extend([
-                    f'static int64_t {_api["thunk"]} ({_sig}) {{',
-                    f'    void ** _caps = (void **) _env;',
-                    f'    int64_t _h = (int64_t) (intptr_t) {_base}_start ({", ".join(_start_args)});',
-                    f'    mojo_gen_handle_put ((void *) {_base}_start, (void *) _h);',
-                    '    return _h;',
-                    '}',
-                ])
         parts.append('')
     if '__mojo_gen_resume_once' in self._funcptr_builtins_needed:
         # "Detached async"'s resume_fn half (bugs/hard/CODEGEN_coro_

@@ -1440,14 +1440,6 @@ class GimpleGen:
         # enclosing names, compiled by cpp_async._compile_nested_generator_
         # closures; keyed (enclosing def, generator name) like the async dict.
         self._nested_generator_api: dict[tuple, dict] = {}
-        # An ESCAPING nested generator (returned by value, the glob.py
-        # selector factories): enclosing factory name -> {nested generator
-        # name: (C base, value_ctype)} — the value a chained call through
-        # the factory returns is a generator HANDLE word, and a `for` over
-        # it drains it through the runtime's handle table with the drained
-        # list's elements typed by the generator's own value_ctype
-        # (see _gen_for_iter's closing branch over this table).
-        self._gen_closure_return_fns: dict[str, dict] = {}
         # Step I (create_task/Task/TaskGroup/RaisingTask project): async
         # functions nested INSIDE an ordinary top-level function's own body
         # (e.g. a local `@parameter async def wrapper(): ...` helper

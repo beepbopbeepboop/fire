@@ -124,45 +124,6 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
     # case above it has no ordinary closure body here. Its call sites resolve
     # through _nested_generator_api, keyed (current_func_name, name).
     if node.is_generator and (gen.current_func_name, node.name) in gen._nested_generator_api:
-        _api = gen._nested_generator_api[(gen.current_func_name, node.name)]
-        if _api.get('escaping'):
-            # An ESCAPING nested generator: the `def` materializes the
-            # CLOSURE RECORD at the statement site — the captured enclosing
-            # values in a heap word array plus the generator's start, wrapped
-            # as a registered variadic callable (mojo_vararg_fn_new, the thunk
-            # defined in module_gen's preamble off this api entry). The local
-            # the `def` binds holds that word: `return g` hands it to the
-            # caller, whose call drives it through the ordinary function-
-            # value dispatch (mojo_fnptr_call_N checks the vararg registry
-            # first), and the caller's `for` drains the handle the thunk
-            # recorded in the runtime's table.
-            _caps = _api.get('captures') or []
-            _n_fixed = len(_api.get('params') or []) - len(_caps)
-            gen._declare_var(node.name, 'int64_t')
-            if _caps:
-                _env = gen._new_val(
-                    'void **',
-                    f'(void **)malloc (sizeof (void *) * {len(_caps)})')
-                for _ix, _cap in enumerate(_caps):
-                    _cap_name, _cap_ctype = _cap
-                    _ct2, _cv = gen.lower_expr(
-                        gimple_ctypes.IdentExpr(_cap_name))
-                    if gimple_ctypes._as_str(_ct2) in ('int64_t', 'int', '_Bool'):
-                        # A scalar capture travels as its OWN bits in the
-                        # word slot; a pointer capture as its pointer.
-                        _slot = f'(void *) (intptr_t) ({_cv})'
-                    else:
-                        _slot = f'(void *) ({_cv})'
-                    gen._emit(f'  {_env} [{_ix}] = {_slot};')
-                gen._emit(
-                    f'  {gen._cname(node.name)} = (int64_t) (intptr_t) '
-                    f'mojo_vararg_fn_new ((void *) {_api["thunk"]}, '
-                    f'(void *) {_env}, {_n_fixed}, 0, 1);')
-            else:
-                gen._emit(
-                    f'  {gen._cname(node.name)} = (int64_t) (intptr_t) '
-                    f'mojo_vararg_fn_new ((void *) {_api["thunk"]}, 0, '
-                    f'{_n_fixed}, 0, 1);')
         return
     outer_closures = getattr(gen, '_all_closures', {}).get(
         gen.current_func_name, {})

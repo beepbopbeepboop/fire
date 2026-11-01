@@ -2871,7 +2871,7 @@ for v in make(3)(4):
 """)
     # Every enclosing value the body reads rides the closure record: two
     # captures, and the caller's loop drains the generator through the
-    # runtime handle table the thunk records.
+    # runtime handle table the trampoline records (mojo_gen_call_with).
     test_generator_matches_cpython("nested_generator_escaping_two_captures", """\
 def make(a, b):
     def gen(n):
@@ -2929,9 +2929,10 @@ def make(tag):
 for v in make('row')(3):
     print(v)
 """)
-    # In-place drive AND escape of the same nested generator: the direct
-    # call threads the captures as before (_emit_nested_generator_start_
-    # call) and the returned closure records them for the caller.
+    # In-place drive AND escape of the same nested generator: the in-place
+    # call is rewritten to the moved generator with the captures ahead of
+    # the arguments, and the returned trampoline closure hands the same
+    # captures to mojo_gen_call_with for the caller's drive.
     test_generator_matches_cpython("nested_generator_escaping_and_called_in_place", """\
 def make(k):
     def gen(n):
