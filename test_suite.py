@@ -1631,6 +1631,27 @@ def _reserving_cmd():
     return ok_cmd(RESERVE_JOB.format(tools=os.path.join(HERE, 'tools')))
 
 
+def test_every_job_that_runs_mojoc_depends_on_it():
+    """A job that executes `./mojoc` must declare `deps=['mojoc']`.
+
+    `mojoc` is built by a Makefile target, and nothing starts the job that runs
+    it before that build exists unless the registry says so. `native-dumpfull`
+    had no such dep: it raced `mojoc` at t=0 and died with "mojoc not built",
+    and the failure stayed hidden only because the job was `expect=`-marked.
+    The marker came off, the race was left in place, and the gate went red.
+    The consumers are named here rather than discovered, because the binary
+    is reached through a test file's own path arithmetic.
+    """
+    consumers = ('ab-native', 'native-dumpfull',
+                 'selfhost-memory', 'selfhost-memory-fire')
+    missing = [n for n in consumers
+               if 'mojoc' not in (getattr(suite.REGISTRY[n], 'deps', ()) or ())]
+    check('deps: every job that runs ./mojoc waits for the mojoc build',
+          not missing,
+          f'no deps=[\'mojoc\'] on {missing}: they start at t=0 and race the '
+          f'build, which is "mojoc not built" on a cold tree')
+
+
 def test_every_job_is_reserved_before_it_starts():
     """Every kind of job — cmd, mem, make, and each fanout item — reserves
     before it starts, and the sum of live reservations never exceeds the
@@ -3427,7 +3448,7 @@ def test_a_message_a_test_pins_is_still_a_message_the_tree_can_say():
     still correct, the words were still in the tree somewhere else, and the
     TEST was asserting a sentence the build could not print —
 
-      * `TEST_formal_specialization_pins_a_message_master_deleted.md`, whose
+      * the doc deleted by commit dabccb808, whose
         needles named a copy of `model.function_value_refusal` that Python's
         rebinding had made DEAD, so the case was red on a tree whose behaviour
         was right;
@@ -3604,6 +3625,31 @@ def test_named_test_brings_its_deps():
         names = suite.select(['needs'], A())
         check('deps: a named test selects its dep first',
               names == ['prereq', 'needs'], f'got {names}')
+
+
+def test_dependent_waits_for_the_whole_fanout():
+    """A dependent of a fanout starts after EVERY item, not after the first.
+
+    `state` gets an entry when the first job of a test settles, so a bare
+    `dep in state` released the dependents of a 46-item fanout after one item
+    (and a stuck plan then reported `dependency not selected:` with the name
+    empty). The slow item finishes last; the dependent must see both markers.
+    """
+    import tempfile
+    d = tempfile.mkdtemp(prefix='suite-fanout-')
+    body = ('import sys,time,os\n'
+            'n=sys.argv[1]\n'
+            'time.sleep(1.5 if n=="slow" else 0)\n'
+            'open(os.path.join(%r,n),"w").close()' % d)
+    after = ('import os,sys\n'
+             'sys.exit(0 if os.path.exists(%r) and os.path.exists(%r) else 1)'
+             % (os.path.join(d, 'fast'), os.path.join(d, 'slow')))
+    with Sandbox(fan=suite.Fanout(name='fan', cmd=[PY, '-c', body, '{file}'],
+                                  items=['fast', 'slow'], mem='small'),
+                 after=dict(cmd=ok_cmd(after), deps=['fan'])):
+        rc, out = run(['after'], jobs=4)
+    check('fanout deps: the dependent ran only after the last item',
+          rc == 0, f'rc={rc} out={out!r}')
 
 
 def test_log_has_passes_screen_does_not():
@@ -4185,7 +4231,7 @@ UNREGISTERED = {
     # differential fuzzer's suite above is: its heavier settings (thousands of
     # pairs across every mix, and the whole of `formal/examples`) are a sweep,
     # and CLAUDE.md's rule for a job no gate can afford is to declare it rather
-    # than quietly omit it. `bugs/FORMAL_metamorphic_ledger.md` records the
+    # than quietly omit it. `bugs/formal/FORMAL_metamorphic_ledger.md` records the
     # sweeps; this file is what a change to the ten transformations must run.
     'test_formal_metamorph.py':
         'Checks that each of tools/formal_metamorph.py\'s ten transformations '
@@ -4195,7 +4241,7 @@ UNREGISTERED = {
         'Measured 2026-10-05: 27 tests, 39.6 s wall, 55 MB peak, two builds on '
         'the host. Declared rather than registered because its heavier '
         'settings are a sweep; CLAUDE.md\'s rule for a job no gate can afford '
-        'is to declare it. bugs/FORMAL_metamorphic_ledger.md records the '
+        'is to declare it. bugs/formal/FORMAL_metamorphic_ledger.md records the '
         'sweeps.',
     'test_formal_fuzz.py':
         'Builds and runs twenty generated images per architecture and compares '
@@ -4472,7 +4518,7 @@ UNREGISTERED = {
         'call, a struct construction) and the three that would otherwise '
         "invent 456 — generators, coroutines, and a name whose definitions "
         'disagree about whether it returns, which is the defect the census it '
-        'replaces had (`bugs/FORMAL_a_function_with_no_return_yields_a_word_'
+        'replaces had (`bugs/formal/FORMAL_a_function_with_no_return_yields_a_word_'
         'where_cpython_yields_None.md` §0), as a case.',
 
     # `test_formal_proof_breadth.py` was listed here when it landed on
@@ -4493,7 +4539,7 @@ UNREGISTERED = {
     'test_formal_comptime_string.py': 'A comptime string MATERIALIZED: a '
         'module-level `comptime` bound to a string reaches the image as the '
         'bytes it is, on both architectures, with the escapes decoded rather '
-        'than printed back (bugs/FORMAL_string_literal_escape_is_not_'
+        'than printed back (bugs/formal/FORMAL_string_literal_escape_is_not_'
         'decoded.md). Build-and-RUN, because a substitution that is wrong in '
         'the last byte is indistinguishable from a right one in a refusal.',
     'test_formal_mlir_precedence.py': 'WHICH of the two MLIR refusals answers a '
@@ -4692,7 +4738,6 @@ UNREGISTERED = {
     'test_regression_bool_isinstance.py': _BATCH_REGRESSION_REASON,
     'test_regression_ctor_temp_field_read_loses_element_type.py': _BATCH_REGRESSION_REASON,
     'test_regression_cursor_nested.py': _BATCH_REGRESSION_REASON,
-    'test_regression_enum_cls_refusal.py': _BATCH_REGRESSION_REASON,
     'test_regression_needle_drift.py': _BATCH_REGRESSION_REASON,
     'test_regression_partial_work_handoff.py': _BATCH_REGRESSION_REASON,
     'test_regression_round2_gap.py': _BATCH_REGRESSION_REASON,
@@ -5507,7 +5552,7 @@ def test_a_deleted_bug_doc_is_not_still_cited():
           f'({sorted(outside)[:8]}); a new one is a ratchet failure')
     check('dangling refs: it does not invent one — a cited doc that EXISTS is '
           'not reported',
-          'bugs/FORMAL_known_limits.md' in have
+          'bugs/formal/FORMAL_known_limits.md' in have
           and 'FORMAL_known_limits.md' not in by_doc
           and 'CODEGEN_ab_native_fails.md' not in by_doc,
           f'the walk found {len(have)} docs under bugs/; a walk that reports '
@@ -5547,8 +5592,7 @@ def test_a_deleted_bug_doc_is_not_still_cited():
     # `FORMAL_known_limits.md`, which is the very document the check above uses
     # as its positive control for the `bugs/`-prefixed class — so the tool
     # reported its own control as broken and every figure quoted from it
-    # (`DOCS_merge_left_citations_of_the_docs_the_branches_deleted.md` quotes
-    # 289) was wrong by 64. The bare class is deliberately outside the ratchet,
+    # (the doc deleted by commit 0702d4087 quotes 289) was wrong by 64. The bare class is deliberately outside the ratchet,
     # so nothing else would have caught it.
     bare_by_doc, bare_by_file = dangling_doc_refs.bare_find()
     live = {n.rsplit('/', 1)[-1]: v for n, v in bare_by_doc.items()
@@ -5561,18 +5605,18 @@ def test_a_deleted_bug_doc_is_not_still_cited():
           f'({sorted(live)[:5]}); `bare_find` must skip a name that resolves, '
           f'and the census it prints is quoted in bugs/ documents')
     # …and it must still find a corpus, or the fix is a walk that matches
-    # nothing. 200+ was the measured floor on this tree after the fix
-    # (847677268, 2026-10-05). The 2026-10-27 batch deleted the fixed bug
-    # docs, and regenerating OPEN_WORK.md's formal-doc-index block (the
-    # stale-block fix in this same gate-triage series) dropped the rows that
-    # still named the deleted ones, so the live corpus is 196 citations of
-    # 117 names — re-measured today, floor re-baselined to it.
+    # nothing. The floor is read off the bare ledger, not hard-coded: every
+    # sweep that retires citations moves the corpus, and a literal floor was
+    # re-baselined by hand after each one (196 on 2026-10-27, then this
+    # sweep's 172). Half the ledger is far below any real corpus and far above
+    # what an over-skipping predicate leaves behind.
+    _bare_floor = sum(_baseline_mod.BARE_BASELINE.values()) // 2
+    _bare_found = sum(len(v) for v in bare_by_doc.values())
     check('dangling refs: the BARE walk is still not vacuous after that fix',
-          sum(len(v) for v in bare_by_doc.values()) >= 196,
-          f'{sum(len(v) for v in bare_by_doc.values())} citations of '
-          f'{len(bare_by_doc)} names that are nowhere; a walk that skips every '
-          f'name because it skips too many is the same defect wearing the '
-          f'opposite sign')
+          _bare_found >= _bare_floor,
+          f'{_bare_found} citations of {len(bare_by_doc)} names that are '
+          f'nowhere, floor {_bare_floor}; a walk that skips every name because '
+          f'it skips too many is the same defect wearing the opposite sign')
     # The ledger's floor is read by TWO mechanisms now — the ratchet below and
     # the strict check above — so the readers that decide what it records are
     # checked against a synthetic corpus rather than against this tree's, whose
@@ -5933,12 +5977,12 @@ def test_the_formal_sweep_series_is_one_document_with_an_index_of_its_rounds():
     "current" one from and no way to tell which was current except the base
     commit inside each.
 
-    They are now `bugs/FORMAL_sweep_work_map.md`: §1 is the latest census,
+    They are now `bugs/formal/FORMAL_sweep_work_map.md`: §1 is the latest census,
     §2 is what the earlier rounds established and still holds, and §3 is an
     INDEX of the twenty rounds with the base commit, the scope, and — because
     seventy-odd files in this tree cite a round by its section number — what
     each cited section carried. The citations were rewritten to "the `b9` round
-    of `bugs/FORMAL_sweep_work_map.md` §4.1", which resolves into §3.1.
+    of `bugs/formal/FORMAL_sweep_work_map.md` §4.1", which resolves into §3.1.
 
     So two properties, and both are checked here because the failure mode that
     produced twenty documents is not a crash:
@@ -5954,7 +5998,7 @@ def test_the_formal_sweep_series_is_one_document_with_an_index_of_its_rounds():
        that check cannot see because the path it names DOES resolve.
     """
     import glob
-    maps = sorted(glob.glob(os.path.join(HERE, 'bugs',
+    maps = sorted(glob.glob(os.path.join(HERE, 'bugs', 'formal',
                                         'FORMAL_sweep_work_map*.md')))
     canonical = 'FORMAL_sweep_work_map.md'
     check('sweep maps: there is exactly ONE per-round map, and it is the '
@@ -6418,6 +6462,7 @@ def main():
                test_the_disabled_markers_in_the_registry_are_honest,
                test_bucket_dedup, test_missing_dep_is_reported,
                test_named_test_brings_its_deps,
+               test_dependent_waits_for_the_whole_fanout,
                test_log_has_passes_screen_does_not,
                test_checked_run_key_covers_what_it_names,
                test_checked_run_replays_a_pass_and_reruns_a_failure,
@@ -6466,7 +6511,8 @@ def main():
                test_an_expect_marker_points_at_a_doc_that_exists,
                test_an_expect_marker_count_is_checked_against_the_run,
                test_a_doc_that_states_a_tests_status_agrees_with_the_registry,
-               test_a_make_recipe_never_asks_for_more_than_its_job_reserved):
+               test_a_make_recipe_never_asks_for_more_than_its_job_reserved,
+               test_every_job_that_runs_mojoc_depends_on_it):
         fn()
     print()
     print(f'Results: {PASSES} passed, {len(FAILURES)} failed')

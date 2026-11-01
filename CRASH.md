@@ -17,14 +17,14 @@ predicate. **Not fixed** — this is a handoff.
 > The remaining live subject is a *different* bug: what is left is the
 > self-hosting bootstrap pre-pass's cost and a silent-wrong-answer
 > `mojo_unsupported_iter` class, not a crash. That is
-> `bugs/CODEGEN_bootstrap_resource_blowup.md` and
-> `bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md`, and the run status of
+> `bugs/mid/CODEGEN_bootstrap_resource_blowup.md` and
+> commit e8a7135b8, and the run status of
 > the three steps below is in CLAUDE.md, "Known-failing tests".
 >
 > **Not deleted, and the decision is settled rather than parked.** By this
 > repo's own bug-doc rule a fixed bug's doc is deleted rather than left with a
 > status history — but this is a top-level file, and SIX places cite it *by
-> name*: `bugs/FORMAL_string_value_model.md` (twice), `bugs/
+> name*: `bugs/formal/FORMAL_string_value_model.md` (twice), `bugs/
 > RUNTIME_int64_key_above_2gb_dereferenced_as_pointer.md`, and three comments
 > in `mojo/backend_gimple/` (`emit_infra.py` twice, `module_gen.py`) that name
 > it as the source of the argument they are making. Deleting it would turn
@@ -204,8 +204,8 @@ previously "worked by accident". Expect fallout in the A/B corpus and in
 | the dereference that dies | `runtime/fire_runtime.c:6239` |
 | the value entering it | `mojo/middle/exprtypes.py:61` |
 | the same bug class, Python side, already fixed | `mojo/backend_gimple/emit_funcs.py:727` |
-| existing history on this crash | `bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md`, entry dated 2026-09-27 |
-| NOT the same bug | `bugs/CODEGEN_bootstrap_resource_blowup.md` — that is a SIGTRAP (133) on the large transitive dump, intermittent. This is SIGSEGV (139), two-line input, 100% reproducible. Different signal, trigger, and reproducibility. |
+| existing history on this crash | commit e8a7135b8, entry dated 2026-09-27 |
+| NOT the same bug | `bugs/mid/CODEGEN_bootstrap_resource_blowup.md` — that is a SIGTRAP (133) on the large transitive dump, intermittent. This is SIGSEGV (139), two-line input, 100% reproducible. Different signal, trigger, and reproducibility. |
 
 ## 7. Debugging notes
 

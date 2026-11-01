@@ -236,7 +236,7 @@ different jobs:
   gate would pass by construction and stop detecting the byte-identity
   divergence it exists to detect. Do not "fix" this by adding a cache; if
   bootstrap is too slow, fix the memory blowup
-  (`bugs/CODEGEN_bootstrap_resource_blowup.md`), which is the actual cause.
+  (`bugs/mid/CODEGEN_bootstrap_resource_blowup.md`), which is the actual cause.
   For scale: the 45-file per-stage sweeps measure **1.8 s** in total, so all
   of bootstrap's ~32 minutes is the three whole-closure dumps plus the
   `gcc -O0` compile between them. Per-file caching would buy nothing.
@@ -446,9 +446,9 @@ jobs that can see a compiled-codegen divergence: `bootstrap-stage2-dumps`
 passing is not evidence the binary dumps correctly, because `reject=` is a
 regex over a child's output and a child that writes a wrong artifact prints
 nothing. Residual divergence class, if one reappears:
-`bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md`; the whole-closure
+commit e8a7135b8; the whole-closure
 compile costs 12-15 GB and ~7.5 min per stage
-(`bugs/CODEGEN_bootstrap_resource_blowup.md`).
+(`bugs/mid/CODEGEN_bootstrap_resource_blowup.md`).
 
 **The gate is otherwise clean, and deliberately no file here says how many.**
 Every `expect=` and `disabled=` registration in the registry is accounted for

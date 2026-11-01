@@ -30,7 +30,7 @@ which is the `fnmatch.iglob` shape, so it is not in reach by the same argument).
 `split` is NOT here, for the reason `textwrap.mojo` gives for `wrap`: it returns
 a LIST of strings, and a list on this path lives in the frame of the function
 that made it and cannot cross a dylib boundary
-(`bugs/FORMAL_listdir_no_run_time_sequence.md`). Nothing in this repository calls
+(`bugs/formal/FORMAL_listdir_no_run_time_sequence.md`). Nothing in this repository calls
 it, so a module that exported it would advertise a name whose answer does not
 survive the boundary — the same trap `textwrap.mojo` names for
 `fnmatch.filter`.
@@ -50,7 +50,7 @@ that cannot be reached from a caller is not a capability, it is a comment.
     of the three words this path does not have. Absent.
   * `shlex` — the class, a configured parser with instance state. Absent for
     `textwrap.TextWrapper`'s reason (`formal/model.py`;
-    `bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`).
+    `bugs/formal/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`).
   * `split` (the public name) — absent, above.
 
 THE ALGORITHM, AND THE THREE THINGS IN IT THAT ARE LOAD-BEARING

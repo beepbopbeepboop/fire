@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pinning regression for bugs/hard/CODEGEN_dispatch_globals_list_forces_every_name_to_a_dict.md
+"""Pinning regression for commit 658deff0d
 The list of dispatch globals used to force EVERY name to MojoDict * because
 it could not distinguish dict from set / string / regex. Fixed by the single
 _DISPATCH_TABLE_GLOBAL_CTYPES mapping + dispatch_table_global_ctype() accessor.

@@ -741,7 +741,7 @@ def monomorphize_source(template_src: str, type_args: dict,
     was boxed `int64_t` instead of `<iterator> *`, the receiver of
     `next(self._inner)` / `next(it)` had no resolvable struct type, and the
     `for`-loop over the same object degraded to `mojo_unsupported_iter`
-    (see bugs/CODEGEN_next_on_a_user_defined_iterator_struct_is_unlowered.md).
+    (see the user-iterator next() bug (doc deleted in db724c4d6)).
     Substituting the qualified form first also keeps the bare pass from
     double-substituting it — by then no `Self.<param>` text survives."""
 

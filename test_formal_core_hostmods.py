@@ -31,7 +31,7 @@ and a decorator on this path is parsed and never applied, so an exported
 `lru_cache` would be a program that runs and skips the work it asked
 for. (A first-class function value WAS one of the two capabilities, and stopped
 being one on 2026-10-04; the group's own docstring records the measurement that
-corrects it.) `bugs/FORMAL_functools_is_unbuildable_as_a_host_module.md` has the census
+corrects it.) `bugs/formal/FORMAL_functools_is_unbuildable_as_a_host_module.md` has the census
 and the two refusals that are measurements rather than readings.
 
 WHY THE ORACLE IS CPython AND NOT A TABLE
@@ -552,7 +552,7 @@ def group_functools_absent(tmpdir, verbose):
         `call2(dbl, 5)` / `call2(neg, 5)` through the same parameter answer 10
         and -5, so the word carries a call site and not one fixed target. The
         names below still refuse because THE MODULE IS ABSENT, which is what this
-        group checks; `bugs/FORMAL_functools_is_unbuildable_as_a_host_module.md`
+        group checks; `bugs/formal/FORMAL_functools_is_unbuildable_as_a_host_module.md`
         §Status 2026-10-04 carries the re-measured census, and the two rows of it
         that remain are DECORATOR semantics and a TYPE OR OBJECT with state.
 
@@ -565,7 +565,7 @@ def group_functools_absent(tmpdir, verbose):
     is not a library).
 
     The names are the doc's own census of CPython 3.14.7's `functools` by what
-    each one needs (`bugs/FORMAL_functools_is_unbuildable_as_a_host_module.md`),
+    each one needs (`bugs/formal/FORMAL_functools_is_unbuildable_as_a_host_module.md`),
     minus the one it says has no correct constant answer. This group exists
     because that document's closing line — "the test's `functools`-shaped
     absence group is what keeps that true" — was a promise about a test that did
@@ -968,7 +968,7 @@ def group_sig_absent(tmpdir, verbose):
 #                        one arithmetic rule a truncating implementation gets
 #                        wrong and it is in the table for that;
 #   an operand PAST 32 BITS — `%lld` and not `%d`, for the reason every other
-#                        test in this tree gives (`bugs/FORMAL_string_value_model.md`
+#                        test in this tree gives (`bugs/formal/FORMAL_string_value_model.md`
 #                        §2): `%d` is 32 bits on this path, so the first version of
 #                        this corpus printed `operator.lshift(1, 40)` as 0 where
 #                        CPython says 1099511627776, and the test was comparing a

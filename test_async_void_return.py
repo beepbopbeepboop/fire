@@ -41,9 +41,9 @@ import subprocess
 import tempfile
 
 import gimple_codegen
+from mojo.middle import coro
 from build_config import find_gcc, find_gxx
 from test_coro_future_await import _build_and_run as _build_stackswitch
-from test_coro_future_await import coro_mode
 from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -80,7 +80,10 @@ def _build_and_run(mojo_src: str) -> str:
     with open(src_path, 'w') as f:
         f.write(mojo_src)
 
-    with coro_mode('cpp'):
+# The companion .cpp is the C++20-coroutine backend's output (MOJO_CORO=cpp,
+    # the escape hatch). Pinned around this one compile, the way test_taskgroup.py
+    # does it process-wide, because the stack-switch default never emits one.
+    with coro.pinned('cpp'):
         c_code, cpp_code = gimple_codegen.compile_to_gimple_with_cpp(mojo_src, filename=src_path)
     if not cpp_code:
         raise RuntimeError(

@@ -271,6 +271,25 @@ def _collect_var_names(f: F.FunctionDef) -> list:
         names = [n for n in names if n not in module_globals]
     seen = set(names)
 
+    # Loop-bound flags, one per name `model.loop_bound_flags` flags: a `for`
+    # whose range is a run-time fact binds its target only if it runs, so the
+    # image carries a word per such name — zero at entry, set by every store
+    # of the name, and branched on at a read that may be unbound. Backend-local
+    # like the loop temps: the name is not in the source, so it goes through
+    # the same append-only path rather than the bound-name walk. The ORDER is
+    # `sorted` because `_emit_function` derives the same name from the same
+    # call, and a name whose position depends on set iteration order would be
+    # a different local on the two reads of the same function. The arm64
+    # allocator appends the same names after its own locals, so the two
+    # architectures flag the same loops from the same shared reader.
+    flags = M.loop_bound_flags(f)
+    if flags:
+        for i, name in enumerate(sorted(flags)):
+            lb = f"_lb{i}"
+            if lb not in seen:
+                seen.add(lb)
+                names.append(lb)
+
     def walk(stmts, depth: int, acc: list) -> None:
         """Track the deepest loop nesting, whatever kind.
 
@@ -792,6 +811,29 @@ class X86_64Codegen:
         self._var_spills = {}
         self._spill_bytes = 0
         self._frame_bytes = 0
+        # `{name: "_lb{i}"}` — the loop-bound flag of each name
+        # `model.loop_bound_flags` flags in THIS function: the target of a
+        # `for` whose range is a run-time fact, read where it may be unbound.
+        # Zero at entry, set by every store of the name (the flag SETS are the
+        # stores, through `_store_var`), read as a `TEST`/`JZ` at a load whose
+        # position `_mub` says may be unbound. Empty unless the function has
+        # one; reset per function. The x86-64 twin of arm64's, reading the
+        # same shared model function, so the two flag the same loops.
+        self._lb_flags: dict = {}
+        # The flagged names whose flag may be ZERO at the point of emission:
+        # the "may be unbound" state the `JZ` check is gated on. One mutable
+        # set with save/restore + OR-at-join discipline, because a branch forks
+        # the paths and a store on one arm is not a store on the other.
+        # `_store_var` clears a name as it stores it, loops and if-arms save
+        # and restore around their bodies, and a join unions the arms. Reset
+        # per function.
+        self._mub: set = set()
+        # The one label every unbound check in the CURRENT function branches
+        # to (keyed on its per-definition label; None when the function has no
+        # flagged name). Set in `_emit_function`; the body's checks emit
+        # forward `JZ` references to it before the label is defined, the same
+        # forward reference every branch in this file makes.
+        self._lb_unbound_label: str = None
         # PCs of the conditional branches that test an `if`/`elif`/`while`/
         # ternary condition, so a later proof generator can tell an `if`'s own
         # branch from a short-circuit `and`/`or`'s (same reason, and the same
@@ -806,6 +848,14 @@ class X86_64Codegen:
         # run test, and `test_formal_call_proof_gen.py::
         # TestCompilerTrapIsNotAProgramCall` for what is asserted about it.
         self._compiler_trap_addrs: list = []
+        # ADDRESSES of the calls the float-repr helper made — its `snprintf`
+        # and `strtod`.  The helper is this emitter's own (every image carries
+        # it, after the function bodies), so its call sites are not calls the
+        # PROGRAM makes: `formal/x86_64_proof_gen.py::_program_externs`
+        # subtracts them for the same reason it subtracts the traps, and not
+        # doing so suppresses the run tests of every image on this backend.
+        # Published in `compile()`'s `info` as `float_repr_calls`.
+        self._float_repr_call_addrs: list = []
         # The functions whose prologue carries the stack-floor guard, filled by
         # `compile()` once the whole image's call graph is known — see
         # `model.stack_floor_guarded_names`. The x86-64 twin of arm64's, from the
@@ -979,7 +1029,7 @@ class X86_64Codegen:
         both backends through one `_codegen_and_link` and hands both the same
         list). Accepting it here is what keeps `--backend=x86_64` from dying
         with a TypeError on a keyword meant for the other backend (see
-        bugs/FORMAL_arm64_instruction_coverage.md, "Landed alongside: dylib_syms"),
+        bugs/formal/FORMAL_arm64_instruction_coverage.md, "Landed alongside: dylib_syms"),
         and USING it is what keeps the two backends from disagreeing about
         which callee names are types: without it a struct constructor fell
         through to the extern path and became a `call _Point` against a symbol
@@ -1179,6 +1229,12 @@ class X86_64Codegen:
             "func_offset": self.asm.labels.get(first_func_name, 0),
             "labels": {n: a for n, a in self.asm.labels.items()
                        if n not in self._internal_labels},
+            # The float-repr helper's entry, published separately because it is
+            # internal and so absent from `labels`. It is emitted after every
+            # function body, so a consumer that decodes a body linearly from its
+            # entry must stop here or it walks into the helper. Consumer:
+            # `_body` in `formal/x86_64_endtoend_test.py`.
+            "float_repr_addr": self.asm.labels[M.FLOAT_REPR_SYMBOL],
             "func_name": first_func_name,
             "external_syms": external_syms,
             "extern_calls": extern_calls,
@@ -1190,6 +1246,12 @@ class X86_64Codegen:
             # the unreachability argument this is worth) is on
             # `_emit_stack_floor_guard`.
             "compiler_traps": sorted(self._compiler_trap_addrs),
+            # The float-repr helper's OWN extern calls (`snprintf`, `strtod`),
+            # by address — it is emitted once per image after every function
+            # body, so the sites are in `extern_calls` at or above the entry
+            # and `_program_externs` subtracts them there, the same subtraction
+            # `compiler_traps` is for the guard's `exit`.
+            "float_repr_calls": sorted(self._float_repr_call_addrs),
             "test_input": self.test_input,
             # EVERY entry argument's value, in order — the proof generator's
             # entry state is built from this list, so a two-parameter entry has
@@ -1211,7 +1273,7 @@ class X86_64Codegen:
             # side has to mean the same integer on the other, and `info` is how
             # both proof generators are handed one list instead of each
             # recomputing it. Nothing reads it yet
-            # (`bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §5).
+            # (`bugs/formal/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §5).
             "exception_kinds": M.exception_kinds(),
             # The INTERN TABLE, keyed by DECODED text — the same map, from the
             # same `_intern_string`, for the same reason as on arm64: a string
@@ -1234,6 +1296,29 @@ class X86_64Codegen:
     def _emit_function(self, f: F.FunctionDef, label: str = None) -> None:
         self._current_function = f.name
         self._cur_fn = f
+        # The loop-bound flags of this body, BEFORE any store or load can
+        # happen in it: the prologue's own `_store_var` calls (argument homes)
+        # run through the flag hook, and a flag table that is set later would
+        # miss a store of a flagged name that the prologue makes.
+        # `model.loop_bound_flags` is the one reader, shared with arm64's
+        # `_emit_function` and the allocator's `_collect_var_names`, so the
+        # name, the `_lb{i}` home and the check cannot disagree about which
+        # loops are flagged.
+        self._lb_flags = {name: f"_lb{i}"
+                          for i, name in enumerate(sorted(
+                              M.loop_bound_flags(f)))}
+        self._mub = set(self._lb_flags)
+        # The error label every check in this body branches to, keyed on the
+        # per-DEFINITION label: two overloads of one name are two bodies, and
+        # a shared `{name}_unbound` label would be a second binding the moment
+        # the second flagged body emitted it, which `Assembler.label` refuses
+        # — the same reason every control label in this file carries a
+        # per-site counter or a per-definition prefix.
+        if self._lb_flags:
+            _entry = label if label is not None else f"{f.name}__def1"
+            self._lb_unbound_label = f"{_entry}_unbound"
+        else:
+            self._lb_unbound_label = None
         # The by-reference RECEIVER locals and the statement-call ids, BEFORE the
         # allocation: `_allocation_split` reads `f._address_taken` to decide which
         # names get a register, and `_address_taken_for` asks
@@ -1615,8 +1700,29 @@ class X86_64Codegen:
             self.asm.emit(encode_mov_r64_r64(Reg.R11, ARG_REGS[sret_arg]))
             self._store_var(_SRET_LOCAL, Reg.R11)
 
+        # A loop-bound flag starts UNBOUND, the state the function entry has:
+        # nothing has stored the name yet, so the read after an empty range
+        # must take the error edge. Emitted after the frame is reserved,
+        # because a flag in a spill slot is addressed from the frame pointer,
+        # and after the argument stores above, which R11 moves through.
+        for _lb_name in self._lb_flags.values():
+            self._emit_mov_imm(Reg.R11, 0)
+            self._store_var(_lb_name, Reg.R11)
+
         for stmt in f.body:
             self._emit_stmt(stmt)
+
+        # The one place every unbound check branches to: the image has no way
+        # to mean "unbound", so the read takes an error exit rather than
+        # answering the caller's leftover — the same `TEST`/`JZ` → exit(1)
+        # shape the divide-by-zero guard emits, which is what keeps the proof
+        # generators' walk from meeting an instruction it has no step for. It
+        # sits after the body so the branch is forward everywhere, and before
+        # the fall-through epilogue so a body that falls off its end still
+        # reaches its own return.
+        if self._lb_flags:
+            self.asm.label(self._lb_unbound_label)
+            self._emit_call_exit(1)
 
         if not _always_returns(f.body):
             if self._recv_ref_receiver is not None:
@@ -1711,7 +1817,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         `formal/x86_64_model_coverage_test.py`); what the disp32 form is NOT is
         reachable by a generated end-to-end proof yet, because the path through
         a call this wide does not close —
-        `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`.
+        `bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`.
         """
         self.asm.emit(encode_mov_r64_rm64(
             Reg.R11, Reg.RBP, _STACK_ARG_OFF + 8 * (index - len(ARG_REGS))))
@@ -1751,6 +1857,22 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         intercepted here, and not at the read sites, because every read of a
         field on this path already funnels through this one function — the
         same interception, and the same reason for it, as arm64's."""
+        # A loop-bound flag gates the read: `name` is a `for` target whose
+        # range is a run-time fact, the build-time state says the flag may be
+        # ZERO here, so ask at run time — load the flag, test it, branch on
+        # zero to the function's one unbound exit. The same `TEST`/`JZ` →
+        # `exit(1)` shape the divide-by-zero guard emits, recorded as a
+        # cond-branch for it. Every read of a local funnels through here,
+        # which is what makes this one branch and the flag SET (in
+        # `_store_var`) the whole discipline. A name not flagged in this body
+        # skips it; a flag home (`_lb{i}`) is never a key of `_lb_flags`, so
+        # the recursion terminates on the first step.
+        lb = self._lb_flags.get(name)
+        if lb is not None and name in self._mub:
+            self._load_var(lb, Reg.R11)
+            self.asm.emit(encode_test_r64_r64(Reg.R11, Reg.R11))
+            self._record_cond_branch()
+            self._emit_jcc(COND_E, self._lb_unbound_label)
         slot = self._frame_slots.get(name)
         if slot is not None:
             self._load_var(name.rsplit(".", 1)[0], Reg.R11)
@@ -2196,6 +2318,36 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         return M.module_slot_for(name, self._fn_local_names)
 
 
+    def _lb_note_store(self, name: str) -> None:
+        """The loop-bound flag of `name` goes 0 → 1 the moment `name` is
+        STORED, and only from here, so that a read can never take its `JZ`
+        error edge on a path that stored it: the flag and the store are two
+        halves of one binding, and the store is the half that always runs.
+
+        Every store of a local is one of the two home branches of
+        `_store_var` (a name bound in this body is a local by
+        `model.module_slot_for`'s rule, so the frame-slot and global branches
+        never see a flagged name), which is why the hook lives there rather
+        than at the assignment sites: a loop's `init:` store, a comprehension's
+        per-element store and a plain assignment all funnel through it, and a
+        store spelling added later is flagged without a second hook.
+
+        The build-time half — `self._mub` — is narrowed the same way, because
+        the state at the NEXT read is what decides whether that read asks. A
+        register home is one materializer in place; a spill home parks 1 in
+        R11 and stores it, R11 being the address scratch this backend
+        reserves for exactly such writes. `lb` is never a key of
+        `_lb_flags`, so the recursive store does not re-enter the hook."""
+        lb = self._lb_flags.get(name)
+        if lb is None:
+            return
+        self._mub.discard(name)
+        if lb in self._var_regs:
+            self._emit_mov_imm(self._var_regs[lb], 1)
+        else:
+            self._emit_mov_imm(Reg.R11, 1)
+            self._store_var(lb, Reg.R11)
+
     def _store_var(self, name: str, src: Reg) -> None:
         """local `name` = src. Register homes MOV; spill slots store to
         [RBP + off]. A frame slot is a store into the receiver's frame, and
@@ -2235,10 +2387,12 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             r = self._var_regs[name]
             if src != r:
                 self.asm.emit(encode_mov_r64_r64(r, src))
+            self._lb_note_store(name)
             return
         if name in self._var_spills:
             self.asm.emit(encode_mov_rm64_r64(Reg.RBP, self._spill_off(name),
                                               src))
+            self._lb_note_store(name)
             return
         raise CodegenError(self._no_home(name))
 
@@ -2674,7 +2828,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         rather than a runtime local, because a runtime local would give the
         program different behaviour than the source declares.
 
-        This is the refusal `bugs/FORMAL_known_limits.md` §3 records as ARCH
+        This is the refusal `bugs/formal/FORMAL_known_limits.md` §3 records as ARCH
         DRIFT. x86-64 used to refuse every `comptime` binding one layer up, at
         the statement dispatch, with "unsupported statement ComptimeVarStmt" —
         a different limit for the same construct on the two architectures, and
@@ -3136,7 +3290,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # premise is the BINDING OF THE BASE — and the same program written
             # `gen.temp_counter = 1` or `gen.temp_counter, x = 1, 2` already
             # produced arm64's sentence on BOTH machines. Filed as
-            # `bugs/FORMAL_the_two_backends_refuse_different_constructs_in_the_
+            # `bugs/formal/FORMAL_the_two_backends_refuse_different_constructs_in_the_
             # same_function.md`.
             key = self._frame_member_slot(stmt.target)
             if key is None:
@@ -3440,21 +3594,46 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         has_else = stmt.else_body is not None or bool(stmt.elifs)
         else_label = f"{fn}_else_{if_id}"
 
+        # The flagged names that may be unbound BEFORE this if: every arm
+        # forks from that state, so each arm — condition first, because an
+        # elif's condition runs in the pre-if state, not in the previous
+        # arm's body state — is walked on a copy of it, and the join after the
+        # if unions the arms' end states. With no else, the fall-through is a
+        # third arm that ends where it started. A store one arm made is not a
+        # store the other arm made, which is the whole reason the sets fork.
+        # The x86-64 twin of arm64's, over the same `self._mub` state.
+        if_base = set(self._mub) if self._lb_flags else None
+        arm_ends = []
         for i, (cond, body) in enumerate(tests):
             self.asm.label(f"{fn}_if{if_id}_alt_{i}")
+            if if_base is not None:
+                self._mub = set(if_base)
             self._emit_truthy_word(cond)
             fail = f"{fn}_if{if_id}_alt_{i + 1}" if i + 1 < len(tests) else (
                 else_label if has_else else end_label)
             self._emit_branch_if_false(fail)
             for s in body:
                 self._emit_stmt(s)
+            if if_base is not None:
+                arm_ends.append(set(self._mub))
             if i < len(tests) - 1 or stmt.else_body is not None:
                 self._emit_jmp(end_label)
 
         if has_else:
             self.asm.label(else_label)
+            if if_base is not None:
+                self._mub = set(if_base)
             for s in (stmt.else_body or []):
                 self._emit_stmt(s)
+            if if_base is not None:
+                arm_ends.append(set(self._mub))
+        elif if_base is not None:
+            arm_ends.append(set(if_base))
+        if if_base is not None:
+            joined = set()
+            for e in arm_ends:
+                joined |= e
+            self._mub = joined
         self.asm.label(end_label)
 
     def _emit_loop(self, cond, body, else_body, for_info) -> None:
@@ -3550,6 +3729,20 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 self._store_var(target, Reg.RAX)
             self._for_depth += 1
 
+        # The flagged names that may be unbound BEFORE the loop: the exit path
+        # — and the join after it — arrives where the body never ran, so the
+        # state there is the pre-loop one, and the restore below is what hands
+        # it to the else body and to the code after the loop. Taken AFTER the
+        # prologue store above because with `bind_after_test` false that store
+        # runs on every path, empty range included: the target is bound there
+        # wherever the loop goes, and the flag its hook sets says so, so a
+        # check after such a loop would be dead code in the image. The body
+        # needs no save of its own: the target's `init:` store (or the
+        # prologue's) has already narrowed it out, and a name the body stores
+        # is a name the flag SETS, through the same hook. The x86-64 twin of
+        # arm64's, over the same `self._mub` state.
+        saved_mub = set(self._mub) if self._lb_flags else None
+
         self._loops.append({"start": start_label, "step": step_label,
                             "break": end_label,
                             "fin_depth": len(self._pending_finally)})
@@ -3587,6 +3780,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 self._emit_jmp(start_label)
 
             self.asm.label(false_label)
+            if saved_mub is not None:
+                self._mub = saved_mub
             for s in (else_body or []):
                 self._emit_stmt(s)
             self.asm.label(end_label)
@@ -4849,10 +5044,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         lea_rip(RDX, self._intern_string("%.*g"))
         m64(RCX, R12)           # n → RCX (4th int arg)
         mi(RAX, 1)              # 1 XMM register used
-        self._emit_extern_call("snprintf")
+        self._float_repr_call_addrs.append(self._emit_extern_call("snprintf"))
         lea64(RDI, RBP, -96)
         lea64(RSI, RBP, -48)
-        self._emit_extern_call("strtod")
+        self._float_repr_call_addrs.append(self._emit_extern_call("strtod"))
         a.emit(encode_movq_r64_xmm(RAX, 0))
         mm64(RCX, RBP, -40)
         cpr(RAX, RCX)
@@ -7169,7 +7364,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         a symmetric difference append into one result.
 
         The elements are read as whole 8-byte slots, which is what a set means
-        on this path (`bugs/FORMAL_set_value_model.md`: a set lowers as a
+        on this path (`bugs/formal/FORMAL_set_value_model.md`: a set lowers as a
         LIST), so an element is a word and `1 in {1, 2}` is a word compare.
 
         REGISTER PLAN.  src/other/src_n/other_n are the caller's; R10 is the
@@ -7615,6 +7810,12 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._emit_mov_imm(Reg.RAX, 0)
             self._store_var(fi_name, Reg.RAX)
 
+            # The `_emit_loop` twin: the body runs only past the count test,
+            # where the per-element store has already bound the target (and
+            # set its flag through the same hook), so the pre-loop state is
+            # the one the false path and the join after the loop carry.
+            saved_mub = set(self._mub) if self._lb_flags else None
+
             self._loops.append({"start": start_label, "step": step_label,
                                 "break": end_label,
                                 "fin_depth": len(self._pending_finally)})
@@ -7676,6 +7877,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 self._emit_jmp(start_label)
 
                 self.asm.label(false_label)
+                if saved_mub is not None:
+                    self._mub = saved_mub
                 for s in (else_body or []):
                     self._emit_stmt(s)
                 self.asm.label(end_label)
@@ -8460,7 +8663,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # value, x86-64 raised `unsupported unary operator '^' on the formal
             # x86-64 path`) for a construct with one meaning. It refused correct
             # stdlib Mojo: `std/builtin/swap.mojo` builds on arm64 and is refused
-            # here, and `bugs/FORMAL_known_limits.md` §6.5 has carried it as
+            # here, and `bugs/formal/FORMAL_known_limits.md` §6.5 has carried it as
             # "x86-64-side work of a sitting" since. It is the same shape as the
             # `~` case above, and for the same reason: the ARM side names both
             # operators it lowers rather than falling through to a refusal.
@@ -8648,7 +8851,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # is decided now, and a refusal carrying the exact CPython value is
             # a better answer than a wrapped number or a status code. The
             # run-time half over a value the build cannot know is
-            # `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`.
+            # `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`.
             result_t = common_type(self._ttype(e.left), self._ttype(e.right))
             if M.int_overflow_traps(op, result_t, pointer_arith=bool(scale)):
                 reason = M.fold_overflow(op, e.left, e.right, result_t,
@@ -9284,7 +9487,7 @@ preference.
         # (`8 >> 64` is 0; `1 << 64` is 18446744073709551616 and the saturating
         # arm answered 0), and an amount in range can still overflow the RESULT
         # (`1 << 63`), so the `0..63` test is not a safety test. The variable
-        # base is `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.
+        # base is `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.
         # md`.
         reason = M.shift_overflow_refusal(
             op, M.fold_literal_expr(e.right), M.fold_literal_expr(e.left),
@@ -11716,7 +11919,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             # carried a `SubscriptExpr` arm for a long time and this copy has
             # not, so a bracketed call target reaches the refusal below on this
             # architecture alone — a pre-existing x86-64 gap, listed in
-            # `bugs/FORMAL_wide_receiver_by_reference.md` §5.1 among the
+            # `bugs/formal/FORMAL_wide_receiver_by_reference.md` §5.1 among the
             # architecture gaps, and NOT closed here: closing it means teaching
             # this backend a comptime-specialization call convention it does not
             # have, which is a change of far more than this construct.
@@ -13214,7 +13417,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             # `struct Outer: n: Inner` with `o.n.d.x = 5` built, ran and died of
             # SIGSEGV (exit 139), while the depth-1 and depth-2 reads of the same
             # three structs answered correctly.
-            # `bugs/FORMAL_a_one_field_struct_whose_only_field_is_a_nested_
+            # `bugs/formal/FORMAL_a_one_field_struct_whose_only_field_is_a_nested_
             # frame.md` §2 has the disassembly.
             #
             # AFTER the defaults above and for the framed path's reason

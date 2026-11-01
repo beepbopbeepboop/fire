@@ -66,7 +66,7 @@ The honest limit of the instrument is stated in the emitted theorem's own
 docstring: it is a range, not all inputs.  The unbounded claim needs an
 induction over the program's loop structure, which is a different proof for each
 example and is not attempted here — see
-`bugs/FORMAL_a_specification_layer_that_stops_at_a_finite_range.md`.
+`bugs/formal/FORMAL_a_specification_layer_that_stops_at_a_finite_range.md`.
 """
 import os
 import re
@@ -368,7 +368,7 @@ class AllInputs:
 #: The word readings the all-inputs emitter can prove, keyed by the name the
 #: annotation writes.  A row exists only where the induction has been written
 #: and checked; every other `@refines(…)` spec gets the finite-range theorem and
-#: no more.  See `bugs/FORMAL_a_specification_layer_that_stops_at_a_finite_range.md`.
+#: no more.  See `bugs/formal/FORMAL_a_specification_layer_that_stops_at_a_finite_range.md`.
 #:
 #: `lemma=` is the BARE `u64_ofNat_mul`, and used to be `Specs.u64_ofNat_mul`:
 #: `lib/Specs.lean` restated the theorem so the name would be in scope without

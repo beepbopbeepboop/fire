@@ -59,11 +59,11 @@ WHAT IS NOT HERE, AND WHY — each measured or each a fact about the target
 
   * `disk_usage` — its answer is a NAMED TUPLE `(total, used, free)` of three
     numbers, and a tuple is a frame blob that cannot cross a dylib boundary
-    (`bugs/FORMAL_module_state_no_storage.md`); `statfs(2)` is available and
+    (`bugs/formal/FORMAL_module_state_no_storage.md`); `statfs(2)` is available and
     `formal/hostmods/os/_syscalls.mojo` already reads `struct stat` byte-wise,
     so `struct statfs` is the same exercise. What is missing is not the syscall
     but a way to return three words, and that is
-    `bugs/FORMAL_time_struct_shaped_answers.md`'s subject rather than this
+    `bugs/formal/FORMAL_time_struct_shaped_answers.md`'s subject rather than this
     one's.
 
   * `get_terminal_size`, `get_terminal_size`, `chown`, `chown_follow_symlinks` —
@@ -517,7 +517,7 @@ def _seg(s, i, j) -> str:
 
     A slice is refused on this path — the count would be read from offset 0 of a
     `char *`, which is the first eight CHARACTERS
-    (`bugs/FORMAL_string_value_model.md`) — so every substring here is a
+    (`bugs/formal/FORMAL_string_value_model.md`) — so every substring here is a
     `memmove` and a terminator. `formal/hostmods/os/_syscalls.mojo`'s
     `str_prefix` is the `s[0:j]` case and `str_dup` is the whole string; this is
     the middle.

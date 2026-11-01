@@ -844,7 +844,7 @@ def _x_imm_zero(window, ctx):
     theorem for this rule has to state them the way
     `peephole_arm64_mov_self` states them; the flag condition is the side
     condition, and where that theorem is written down is §3 of
-    `bugs/FORMAL_peephole_rules_without_proofs.md`.
+    `bugs/formal/FORMAL_peephole_rules_without_proofs.md`.
     """
     if len(window) < 1:
         return None
@@ -864,7 +864,7 @@ def _x_imm_zero(window, ctx):
 #: `lib/Peephole.lean`. `x86_64/mov_self` is the one measured by the bug doc
 #: and the only one with a theorem that discharges its whole window; the rest
 #: of the table's candidates are recorded (with the exact lemma each is
-#: waiting on) in `bugs/FORMAL_peephole_rules_without_proofs.md` §3.
+#: waiting on) in `bugs/formal/FORMAL_peephole_rules_without_proofs.md` §3.
 X86_RULES: list = [
     Rule("x86_64/mov_self", "x86_64", "peephole_x86_mov_self",
          ("mod == 3", "reg == rm", "rm < 16"),
