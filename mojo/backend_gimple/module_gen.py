@@ -13617,7 +13617,9 @@ def gen_module_impl(self, stmts):
     import mojo.backend_gimple.emit_infra as _ein_seed
     _ein_seed.seed_global_generator_apis(self, stmts, _gmi_binding_index(stmts))
     _phase17_append_hits: dict = {}
-    _gmi_phase17_collect_appends(self, _phase17_stmts, _phase17_append_hits)
+    _phase17_store_hits: dict = {}
+    _gmi_phase17_collect_appends(
+        self, _phase17_stmts, _phase17_append_hits, _phase17_store_hits)
     for _gname, _gargs in _phase17_append_hits.items():
         if self._global_var_types.get(_gname) != 'MojoList *':
             continue
@@ -13629,6 +13631,21 @@ def gen_module_impl(self, stmts):
         if _elt:
             self._elem_types[_gname] = _elt
             self._global_elem_types[_gname] = _elt
+
+    # Dict analogue: a module dict built empty (`d = {}`) and filled by
+    # subscript stores has no literal pairs to type it, so a function that
+    # only READS it would see no value type. The joined stored-value type is
+    # function-independent, like the list answer above.
+    for _gname, _gvals in _phase17_store_hits.items():
+        if self._global_var_types.get(_gname) != 'MojoDict *':
+            continue
+        if _gname in self._global_dict_val_types:
+            continue
+        _dvt = None
+        for _sv in _gvals:
+            _dvt = _sv if _dvt is None else TypeLattice.join(_dvt, _sv)
+        if _dvt:
+            self._global_dict_val_types[_gname] = _dvt
 
     _gmi_scan_try_imports(
         self, _phase17_mod,
