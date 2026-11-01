@@ -465,8 +465,18 @@ def _closure_value(gen, name: str, _ci) -> tuple:
     fp = gen._new_val('void *', f'_funcptr_{lifted}')
     _repr_name = f"{gen.current_func_name or 'root'}.<locals>.{name}"
     if _ci.env_struct:
-        env_void = gen._new_val(
-            'void *', f'(void *){gen._closure_envs.get(name) or "0"}')
+        _own_env = gen._closure_envs.get(name)
+        if _own_env:
+            env_void = gen._new_val('void *', f'(void *){_own_env}')
+        elif getattr(gen, '_env_param', ''):
+            # Inside ANOTHER lifted closure: the sibling's env variable belongs to the
+            # parent's scope and is not visible here, so build it from this closure's own
+            # env (the same thing a CALL to the sibling does). `(void *)0` here crashed the
+            # callee on its first capture read.
+            _sib_env = ggc._build_outer_closure_env(gen, _ci)
+            env_void = gen._new_val('void *', f'(void *){_sib_env}')
+        else:
+            env_void = gen._new_val('void *', '(void *)0')
         # A VARIADIC nested def (`def gen(*a, **kw)`) is a MojoVarargFn
         # exactly as a variadic lambda is: a call through the value packs
         # its arguments into the list / dict the callee wants.

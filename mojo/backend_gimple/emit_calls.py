@@ -6457,6 +6457,61 @@ def _lower_recursive_self_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr
     return ret_type, gen._call_expr(ret_type, fname_c, full_arg_pairs)
 
 
+def _build_outer_closure_env(gen, ci):
+    """The env to hand a SIBLING nested closure `ci` from inside another lifted closure:
+    a fresh `ci.env_struct`, each captured field copied from the current closure's own env
+    where the name matches (else from local scope), or a NULL env when this scope owns
+    nothing to copy. Shared by a CALL to the sibling (`_lower_outer_closure_call`) and by
+    its use as a VALUE (`emit_exprs._closure_value`): the value path used to pass a NULL
+    env unconditionally, so a capturing closure handed on from inside another closure
+    crashed when its callee read a capture."""
+    _cur_env = getattr(gen, '_env_param', '')
+    _cur_caps = getattr(gen, '_captures', {}) or {}
+    if _cur_env and getattr(ci, 'captures', None):
+        new_env = gen._new_temp(f'{ci.env_struct} *')
+        gen._emit(f'  {new_env} = {gimple_ctypes._safe_name("_alloc_" + ci.env_struct)} ();')
+        for vname, vtype in ci.captures:
+            fld = gimple_ctypes._c_field_name(vname)
+            # The FIELD's type, not the capture's value type: a
+            # by-reference capture (`ci.mut_names`) is a pointer to the
+            # owner's box, and this store is the only thing that has to
+            # agree with the typedef. See
+            # `gimple_ctypes._env_field_ctype`.
+            fct = gimple_ctypes._env_field_ctype(ci, _as_str(vname))
+            if vname in _cur_caps:
+                # Forwarding from THIS closure's own env, which holds the
+                # name under its OWN field type: `_gimple_mut_ptr` is the
+                # box pointer `_gen_lifted_closure` preloaded for a
+                # by-reference capture, so it is both the discriminator
+                # and the value (a by-value capture arrives through
+                # `_env-><name>`, and a value the callee wants by
+                # reference has to be boxed -- through a plain local,
+                # because GIMPLE cannot take a component_ref's address).
+                _own_box = (getattr(gen, '_gimple_mut_ptr', None) or {}).get(vname)
+                _cur_t = _as_str(_cur_caps.get(vname) or 'int64_t')
+                _cur_is_ptr = _cur_t.endswith(' *')
+                if _own_box:
+                    tmp = gen._new_val(
+                        fct, _own_box if fct.endswith(' *') else f'*{_own_box}')
+                elif fct.endswith(' *') and not _cur_is_ptr:
+                    _boxed = gen._new_val(_cur_t, f'{_cur_env}->{fld}')
+                    tmp = gen._new_val(fct, f'&{_boxed}')
+                else:
+                    tmp = gen._new_val(fct, f'{_cur_env}->{fld}')
+                gen._emit(f'  {new_env}->{fld} = {tmp};')
+            elif vname in gen.var_types:
+                _boxed = _boxed_capture_source(gen, vname, fct)
+                if _boxed is not None:
+                    gen._safe_coerce_emit(_boxed[0], fct, _boxed[1],
+                                          f'{new_env}->{fld}')
+                else:
+                    gen._safe_coerce_emit(gen.var_types.get(vname, vtype), fct,
+                                          gen._write_dest(vname),
+                                          f'{new_env}->{fld}')
+        return new_env
+    return gen._new_val(f'{ci.env_struct} *', f'({ci.env_struct} *)0')
+
+
 def _lower_outer_closure_call(gen, fname_raw: str, ci, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """Call a SIBLING nested closure of the same parent from inside another
     lifted closure/lambda body (`gen_module_impl`'s `_scan_body_for_local_
@@ -6485,53 +6540,7 @@ def _lower_outer_closure_call(gen, fname_raw: str, ci, node: gimple_ctypes.CallE
     arg_pairs = _pack_closure_star_slots(gen, ci, node, arg_pairs)
     fname_c   = gimple_ctypes._safe_name(lifted)
     if ci.env_struct:
-        _cur_env = getattr(gen, '_env_param', '')
-        _cur_caps = getattr(gen, '_captures', {}) or {}
-        if _cur_env and getattr(ci, 'captures', None):
-            new_env = gen._new_temp(f'{ci.env_struct} *')
-            gen._emit(f'  {new_env} = {gimple_ctypes._safe_name("_alloc_" + ci.env_struct)} ();')
-            for vname, vtype in ci.captures:
-                fld = gimple_ctypes._c_field_name(vname)
-                # The FIELD's type, not the capture's value type: a
-                # by-reference capture (`ci.mut_names`) is a pointer to the
-                # owner's box, and this store is the only thing that has to
-                # agree with the typedef. See
-                # `gimple_ctypes._env_field_ctype`.
-                fct = gimple_ctypes._env_field_ctype(ci, _as_str(vname))
-                if vname in _cur_caps:
-                    # Forwarding from THIS closure's own env, which holds the
-                    # name under its OWN field type: `_gimple_mut_ptr` is the
-                    # box pointer `_gen_lifted_closure` preloaded for a
-                    # by-reference capture, so it is both the discriminator
-                    # and the value (a by-value capture arrives through
-                    # `_env-><name>`, and a value the callee wants by
-                    # reference has to be boxed -- through a plain local,
-                    # because GIMPLE cannot take a component_ref's address).
-                    _own_box = (getattr(gen, '_gimple_mut_ptr', None) or {}).get(vname)
-                    _cur_t = _as_str(_cur_caps.get(vname) or 'int64_t')
-                    _cur_is_ptr = _cur_t.endswith(' *')
-                    if _own_box:
-                        tmp = gen._new_val(
-                            fct, _own_box if fct.endswith(' *') else f'*{_own_box}')
-                    elif fct.endswith(' *') and not _cur_is_ptr:
-                        _boxed = gen._new_val(_cur_t, f'{_cur_env}->{fld}')
-                        tmp = gen._new_val(fct, f'&{_boxed}')
-                    else:
-                        tmp = gen._new_val(fct, f'{_cur_env}->{fld}')
-                    gen._emit(f'  {new_env}->{fld} = {tmp};')
-                elif vname in gen.var_types:
-                    _boxed = _boxed_capture_source(gen, vname, fct)
-                    if _boxed is not None:
-                        gen._safe_coerce_emit(_boxed[0], fct, _boxed[1],
-                                              f'{new_env}->{fld}')
-                    else:
-                        gen._safe_coerce_emit(gen.var_types.get(vname, vtype), fct,
-                                              gen._write_dest(vname),
-                                              f'{new_env}->{fld}')
-            full_arg_pairs = [(f'{ci.env_struct} *', new_env)] + arg_pairs
-        else:
-            null_env = gen._new_val(f'{ci.env_struct} *', f'({ci.env_struct} *)0')
-            full_arg_pairs = [(f'{ci.env_struct} *', null_env)] + arg_pairs
+        full_arg_pairs = [(f'{ci.env_struct} *', _build_outer_closure_env(gen, ci))] + arg_pairs
     else:
         full_arg_pairs = arg_pairs
     if ret_type == 'void':
