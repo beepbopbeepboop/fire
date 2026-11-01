@@ -3924,9 +3924,47 @@ main()
     with coro.pinned('cpp'):
         test_generator_matches_cpython("tagged_none_equality_cpp", _src, _src)
 
+def run_tagged_none_identity_tests():
+    # `x is None` / `x is not None` on a name bound from `next(g)` on a TAGGED
+    # generator. The `is` lowering compared the slot's WORD, and a tagged False
+    # or int 0 is a box whose bits are 0, so it compared equal to the None
+    # yield's NULL word and answered True. The identity test must read the
+    # box's kind, as `==` does. Pinned against the CPython oracle on the default
+    # path and on the cpp escape hatch.
+    _src = """\
+def g():
+    yield False
+    yield 0
+    yield None
+    yield "a"
+    yield 1.5
+def main():
+    it = g()
+    x = next(it)
+    print(x is None)
+    print(x is not None)
+    x = next(it)
+    print(x is None)
+    print(x is not None)
+    x = next(it)
+    print(x is None)
+    print(x is not None)
+    x = next(it)
+    print(x is None)
+    print(x is not None)
+    x = next(it)
+    print(x is None)
+    print(x is not None)
+main()
+"""
+    test_generator_matches_cpython("tagged_none_identity_default", _src, _src)
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("tagged_none_identity_cpp", _src, _src)
+
 def run_tests():
     run_none_yield_tests()
     run_tagged_none_equality_tests()
+    run_tagged_none_identity_tests()
     run_none_list_iteration_tests()
     run_tagged_word_cpp_tests()
     run_tagged_word_bind_tests()

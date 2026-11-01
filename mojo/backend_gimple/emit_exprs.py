@@ -3848,14 +3848,25 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # "not None" on the scalar arm, printing `False` for `v == None`. The
     # answer is the box's kind (`mojo_word_is_none`), which for a non-box is
     # the same constant False the scalar arm gives.
-    if op in ('==', '!=') and _is_none_literal(left_node) != _is_none_literal(right_node):
+    #
+    # `is None` / `is not None` takes the same kind read, but ONLY for a
+    # TAGGED word (`_tagged_word_vals`: a name bound from `next(g)` on a
+    # kind-mixed generator). There a tagged False or int 0 is a box whose bits
+    # are 0, so the word compare answered `is None` True for it. Every other
+    # boxed operand keeps the word compare: a list or tuple slot that is None
+    # is a bare NULL word with no box, which the kind read would call "not
+    # None" (bugs/CODEGEN_is_none_on_a_tagged_false_or_zero_is_true.md).
+    _tagged = getattr(gen, '_tagged_word_vals', ())
+    if op in ('==', '!=', 'is', 'is not') and _is_none_literal(left_node) != _is_none_literal(right_node):
         _other = rv if _is_none_literal(left_node) else lv
         _other_t = rt if _is_none_literal(left_node) else lt
+        _ident = op in ('is', 'is not')
         # Only an int word: a `char *` name keeps its NULL-pointer test below.
         # A float box answers 0 here, which is the right answer for a float.
-        if _other_t in ('int', 'int64_t') and _other in getattr(gen, '_boxed_vals', ()):
+        if (_other_t in ('int', 'int64_t') and _other in getattr(gen, '_boxed_vals', ())
+                and (not _ident or _other in _tagged)):
             _is_none = gen._call_expr('int', 'mojo_word_is_none', [('int64_t', _other)])
-            _cmp = '!= 0' if op == '==' else '== 0'
+            _cmp = '!= 0' if op in ('==', 'is') else '== 0'
             _t = gen._new_temp('_Bool')
             gen._emit(f'  {_t} = {_is_none} {_cmp};')
             return '_Bool', _t
