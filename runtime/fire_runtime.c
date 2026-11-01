@@ -54,12 +54,28 @@ void mojo_exc_pop(void)
  * must tear down only its internal buffers (`mojo_*_destroy`) and never
  * call `free()` on the struct pointer itself (`mojo_*_free` would free a
  * stack address — undefined behavior, corrupting the heap allocator). */
+/* ── Python-level frames (sys._getframe, f_back, f_lineno, f_code.co_name) ───────
+ * A shadow stack, maintained ONLY by functions the compiler instrumented (a module that
+ * mentions `_getframe`; see emit_methods._frame_enter). Entry/exit pair with a cleanup
+ * record (MOJO_CLEANUP_FRAME) so an exception unwinding past a frame pops it too. A frame
+ * "object" is a word: its 1-based index in the stack (0 is None). It stays valid while that
+ * frame is live, which is what `sys._getframe(n)` callers use it for; a word kept past the
+ * frame's return names whatever frame later reuses the slot. Frames of uninstrumented
+ * functions are invisible, as C frames are in CPython. */
+#define MOJO_FRAME_MAX 4096
+typedef struct MojoFrameRec { const char *name; const char *file; int64_t firstlineno; int64_t lineno; struct MojoFrameRec *back; } MojoFrameRec;
+static MojoFrameRec _mojo_frames[MOJO_FRAME_MAX];
+int _mojo_frame_depth = 0;
+extern char *_mojo_exc_msg;
+extern void *_mojo_exc_obj;
+
 typedef enum { MOJO_CLEANUP_DICT, MOJO_CLEANUP_LIST, MOJO_CLEANUP_SET,
                MOJO_CLEANUP_DICT_STACK, MOJO_CLEANUP_LIST_STACK, MOJO_CLEANUP_SET_STACK,
                MOJO_CLEANUP_PTR,   /* a plain malloc/calloc block: a struct instance */
                MOJO_CLEANUP_LIST_STRS, /* a list that owns its string elements */
                MOJO_CLEANUP_CLOSURE,  /* a bound method plus the env it owns */
-               MOJO_CLEANUP_CATTR     /* a class-attribute cell global: unwinding writes its saved value back */
+               MOJO_CLEANUP_CATTR,    /* a class-attribute cell global: unwinding writes its saved value back */
+               MOJO_CLEANUP_FRAME     /* a Python-level frame record: unwinding pops it from the frame stack */
              } mojo_cleanup_kind_t;
 #define MOJO_CLEANUP_STACK_MAX 8192
 static mojo_cleanup_kind_t _mojo_cleanup_kind[MOJO_CLEANUP_STACK_MAX];
@@ -105,6 +121,104 @@ void mojo_cleanup_push_cattr(void **slot, void *saved)
     if (_mojo_cleanup_push(MOJO_CLEANUP_CATTR, slot))
         _mojo_cleanup_aux[_mojo_cleanup_top] = saved;
 }
+
+void mojo_frame_enter(char *name, char *file, int64_t firstlineno)
+{
+    if (_mojo_frame_depth < MOJO_FRAME_MAX) {
+        MojoFrameRec *f = &_mojo_frames[_mojo_frame_depth];
+        f->name = name; f->file = file; f->firstlineno = firstlineno; f->lineno = firstlineno; f->back = NULL;
+    }
+    ++_mojo_frame_depth;                /* keeps pairing even past the table's end */
+    _mojo_cleanup_push(MOJO_CLEANUP_FRAME, NULL);
+}
+
+void mojo_frame_leave(void)
+{
+    if (_mojo_frame_depth > 0) --_mojo_frame_depth;
+    mojo_cleanup_cancel_n(1);
+}
+
+void mojo_frame_set_line(int64_t line)
+{
+    if (_mojo_frame_depth > 0 && _mojo_frame_depth <= MOJO_FRAME_MAX)
+        _mojo_frames[_mojo_frame_depth - 1].lineno = line;
+}
+
+/* sys._getframe(depth): the word of the frame `depth` callers up (0 = the caller of this
+ * runtime function, i.e. the instrumented function that wrote `sys._getframe`). */
+int64_t mojo_getframe(int64_t depth)
+{
+    int64_t idx = (int64_t)_mojo_frame_depth - depth;       /* 1-based */
+    if (depth < 0 || idx < 1 || idx > MOJO_FRAME_MAX) {
+        mojo_raise_value_error((char *)"call stack is not deep enough");
+        return 0;
+    }
+    return idx;
+}
+
+/* A frame word is either a live-stack index (1..MOJO_FRAME_MAX) or, for a frame reached through a
+ * traceback (`tb_frame`), the address of a heap snapshot record (always far above MOJO_FRAME_MAX). */
+static MojoFrameRec *_frame_of(int64_t w)
+{
+    if (w > MOJO_FRAME_MAX) return (MojoFrameRec *)(intptr_t)w;
+    if (w < 1 || w > _mojo_frame_depth) return NULL;
+    return &_mojo_frames[w - 1];
+}
+int64_t mojo_frame_back(int64_t w)
+{
+    if (w > MOJO_FRAME_MAX) return (int64_t)(intptr_t)((MojoFrameRec *)(intptr_t)w)->back;
+    return (w > 1 && w <= _mojo_frame_depth) ? w - 1 : 0;
+}
+int64_t mojo_frame_depth(void)            { return _mojo_frame_depth; }
+
+/* ── Tracebacks ──────────────────────────────────────────────────────────────
+ * `mojo_raise` snapshots the live frame stack once per exception (keyed by the exception's
+ * message/object pointers, so a bare re-raise keeps the original), BEFORE the unwind pops it.
+ * `e.__traceback__` (mojo_traceback) then builds the chain CPython shows: from the frame that
+ * caught it (the current depth) down to the frame that raised, each entry carrying the line that
+ * frame was executing at the raise. Frame objects of the chain are the heap snapshot records. */
+typedef struct MojoTb { MojoFrameRec *frame; struct MojoTb *next; } MojoTb;
+static MojoFrameRec *_mojo_tb_snap = NULL;
+static int _mojo_tb_snap_n = 0;
+static void *_mojo_tb_key_obj = NULL;
+static char *_mojo_tb_key_msg = NULL;
+
+void _mojo_tb_snapshot(void)
+{
+    if (_mojo_tb_snap && _mojo_exc_obj == _mojo_tb_key_obj && _mojo_exc_msg == _mojo_tb_key_msg)
+        return;                                   /* the same exception passing through again */
+    int n = _mojo_frame_depth < MOJO_FRAME_MAX ? _mojo_frame_depth : MOJO_FRAME_MAX;
+    MojoFrameRec *snap = n > 0 ? (MojoFrameRec *)malloc(sizeof(MojoFrameRec) * (size_t)n) : NULL;
+    for (int i = 0; i < n; i++) {
+        snap[i] = _mojo_frames[i];
+        snap[i].back = i > 0 ? &snap[i - 1] : NULL;
+    }
+    _mojo_tb_snap = snap;                         /* the previous snapshot is leaked: a traceback may outlive its handler */
+    _mojo_tb_snap_n = n;
+    _mojo_tb_key_obj = _mojo_exc_obj;
+    _mojo_tb_key_msg = _mojo_exc_msg;
+}
+
+int64_t mojo_traceback(int64_t catcher_depth)
+{
+    if (!_mojo_tb_snap || catcher_depth < 1) return 0;
+    MojoTb *head = NULL, *tail = NULL;
+    for (int i = (int)catcher_depth - 1; i < _mojo_tb_snap_n; i++) {
+        MojoTb *t = (MojoTb *)malloc(sizeof(MojoTb));
+        t->frame = &_mojo_tb_snap[i];
+        t->next = NULL;
+        if (tail) tail->next = t; else head = t;
+        tail = t;
+    }
+    return (int64_t)(intptr_t)head;
+}
+int64_t mojo_tb_frame(int64_t t)  { return t ? (int64_t)(intptr_t)((MojoTb *)(intptr_t)t)->frame : 0; }
+int64_t mojo_tb_next(int64_t t)   { return t ? (int64_t)(intptr_t)((MojoTb *)(intptr_t)t)->next : 0; }
+int64_t mojo_tb_lineno(int64_t t) { return t ? ((MojoTb *)(intptr_t)t)->frame->lineno : 0; }
+int64_t mojo_frame_lineno(int64_t w)      { MojoFrameRec *f = _frame_of(w); return f ? f->lineno : 0; }
+int64_t mojo_frame_firstlineno(int64_t w) { MojoFrameRec *f = _frame_of(w); return f ? f->firstlineno : 0; }
+char *mojo_frame_name(int64_t w)          { MojoFrameRec *f = _frame_of(w); return (char *)(f ? f->name : "<unknown>"); }
+char *mojo_frame_file(int64_t w)          { MojoFrameRec *f = _frame_of(w); return (char *)(f ? f->file : ""); }
 
 void mojo_cleanup_cancel_n(int64_t n)
 {
@@ -154,9 +268,14 @@ static void _mojo_cleanup_unwind_to(int chk)
             case MOJO_CLEANUP_LIST_STRS:  mojo_list_free_owned_strs((MojoList *)ptr); break;
             case MOJO_CLEANUP_CLOSURE:    mojo_closure_free(ptr);            break;
             case MOJO_CLEANUP_CATTR:      *(void **)ptr = aux;               break;
+            case MOJO_CLEANUP_FRAME:      if (_mojo_frame_depth > 0) --_mojo_frame_depth; break;
         }
     }
 }
+
+extern char *_mojo_exc_msg;
+extern void *_mojo_exc_obj;
+void _mojo_tb_snapshot(void);
 
 void mojo_raise(void)
 {
@@ -177,6 +296,7 @@ void mojo_raise(void)
                 MOJO_EXC_STACK_MAX);
         exit(1);
     }
+    _mojo_tb_snapshot();
     _mojo_cleanup_unwind_to(_mojo_cleanup_checkpoint[_mojo_exc_top]);
     longjmp((void *)&_mojo_exc_stack[_mojo_exc_top], 1);
 }
@@ -15251,6 +15371,19 @@ int mojo_is_instobj(int64_t w)
 }
 /* `Foo(args..)` on a class handle. A class made at run time has no `__init__` unless its
  * namespace names one, and a namespace function is called with the new instance first. */
+/* call the function word `fn` with the first `n` (0..5) of `a` */
+static int64_t _call_words(int64_t fn, int64_t n, const int64_t *a)
+{
+    void *fp = (void *)(intptr_t)fn;
+    switch (n) {
+    case 0: return mojo_fnptr_call_0(fp);
+    case 1: return mojo_fnptr_call_1(fp, a[0]);
+    case 2: return mojo_fnptr_call_2(fp, a[0], a[1]);
+    case 3: return mojo_fnptr_call_3(fp, a[0], a[1], a[2]);
+    case 4: return mojo_fnptr_call_4(fp, a[0], a[1], a[2], a[3]);
+    default: return mojo_fnptr_call_5(fp, a[0], a[1], a[2], a[3], a[4]);
+    }
+}
 int64_t mojo_classobj_call(int64_t cls, int64_t n, int64_t a0, int64_t a1, int64_t a2, int64_t a3)
 {
     MojoInstObj *o = (MojoInstObj *)malloc(sizeof *o);
@@ -15258,17 +15391,52 @@ int64_t mojo_classobj_call(int64_t cls, int64_t n, int64_t a0, int64_t a1, int64
     _pr_add(&_reg_instobj, (uint64_t)(uintptr_t)o);
     int64_t self = (int64_t)(intptr_t)o, init;
     if (_class_lookup(o->tag, "__init__", &init, 0)) {
-        switch (n) {
-        case 0: mojo_fnptr_call_1((void *)(intptr_t)init, self); break;
-        case 1: mojo_fnptr_call_2((void *)(intptr_t)init, self, a0); break;
-        case 2: mojo_fnptr_call_3((void *)(intptr_t)init, self, a0, a1); break;
-        case 3: mojo_fnptr_call_4((void *)(intptr_t)init, self, a0, a1, a2); break;
-        default: mojo_fnptr_call_5((void *)(intptr_t)init, self, a0, a1, a2, a3); break;
-        }
+        int64_t a[5] = { self, a0, a1, a2, a3 };
+        _call_words(init, n + 1, a);
     } else if (n) {
         mojo_raise_type_error((char *)"this class takes no arguments");
     }
     return self;
+}
+/* `recv.name(args..)` where `recv` is an instance of a run-time class (the instance goes first,
+ * as `self`) or the class handle itself (a plain call, as `Foo.m(x)`). The function is looked up
+ * in the class table through the bases; a miss is an AttributeError. */
+int64_t mojo_rtobj_method_call(int64_t recv, char *name, int64_t n, int64_t a0, int64_t a1, int64_t a2, int64_t a3)
+{
+    int64_t fn, a[5];
+    if (mojo_is_instobj(recv)) {
+        if (!_class_lookup(((MojoInstObj *)(intptr_t)recv)->tag, name, &fn, 0)) {
+            mojo_raise_attribute_error(name);
+            return 0;
+        }
+        a[0] = recv; a[1] = a0; a[2] = a1; a[3] = a2; a[4] = a3;
+        return _call_words(fn, n + 1, a);
+    }
+    if (mojo_is_classobj(recv)) {
+        if (!_class_lookup(((MojoClassObj *)(intptr_t)recv)->tag, name, &fn, 0)) {
+            mojo_raise_attribute_error(name);
+            return 0;
+        }
+        a[0] = a0; a[1] = a1; a[2] = a2; a[3] = a3;
+        return _call_words(fn, n, a);
+    }
+    mojo_raise_attribute_error(name);
+    return 0;
+}
+static int _class_derives(int64_t tag, int64_t want, int depth)
+{
+    if (tag == want) return 1;
+    MojoClassRec *c = _class_find(tag);
+    if (!c || depth > 32) return 0;
+    for (int i = 0; i < c->nbases; i++) if (_class_derives(c->bases[i], want, depth + 1)) return 1;
+    return 0;
+}
+/* `isinstance(obj, Cls)` where `Cls` is a class made at run time: `obj` is an instance whose
+ * class is `Cls` or derives from it. */
+int mojo_isinstance_rtclass(int64_t obj, int64_t cls)
+{
+    if (!mojo_is_instobj(obj)) return 0;
+    return _class_derives(((MojoInstObj *)(intptr_t)obj)->tag, mojo_classobj_tag(cls), 0);
 }
 /* 1 and *out set when `obj` is an instance whose class (or a base) has `attr` */
 int mojo_instobj_class_lookup(void *obj, char *attr, int64_t *out)

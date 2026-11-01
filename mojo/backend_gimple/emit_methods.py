@@ -375,6 +375,43 @@ def _cattr_restore_emit(gen, pairs=None) -> None:
         gen._emit(f'  {pairs[_i][0]} = {pairs[_i][1]};')
 
 
+def _frame_enter(gen, node) -> None:
+    """Push a Python-level frame record for the function being emitted, when its module
+    mentions `_getframe` (`gen._frames_mods`). Called after `_begin_function` and BEFORE
+    `_cattr_restore_begin`, so the record sits below the cattr/owned-local records and
+    `_cattr_leave` can pop it last. The runtime pairs it with a cleanup record, so an
+    exception unwinding past this function pops the frame too. A module that never says
+    `_getframe` emits nothing here and its C is unchanged."""
+    gen._frame_func = ''
+    if (gen.module_name or '') not in gen._frames_mods:
+        return
+    gen._frame_func = _as_str(gen.current_func_name)
+    _fname = gen._new_val('char *', f'{gen._intern_string(gimple_ctypes._c_escape(_as_str(node.name)))}')
+    _ffile = gen._new_val('char *', f'{gen._intern_string(gimple_ctypes._c_escape(_as_str(getattr(gen, "_current_filename", "") or "")))}')
+    _fline = gen._new_val('int64_t', f'(int64_t){int(getattr(node, "line", 0) or 0)}')
+    gen._void_call('mojo_frame_enter',
+                   [('char *', _fname), ('char *', _ffile), ('int64_t', _fline)])
+
+
+def _frame_enter_module(gen) -> None:
+    """The `<module>` frame: module-level code runs in a frame of its own in CPython, and a
+    walk up `f_back` (or a traceback) ends there. Same record as a function's."""
+    gen._frame_func = ''
+    if (gen.module_name or '') not in gen._frames_mods:
+        return
+    gen._frame_func = _as_str(gen.current_func_name)
+    _fname = gen._new_val('char *', f'{gen._intern_string("<module>")}')
+    _ffile = gen._new_val('char *', f'{gen._intern_string(gimple_ctypes._c_escape(_as_str(getattr(gen, "_current_filename", "") or "")))}')
+    _fline = gen._new_val('int64_t', '(int64_t)1')
+    gen._void_call('mojo_frame_enter',
+                   [('char *', _fname), ('char *', _ffile), ('int64_t', _fline)])
+
+
+def _frame_leave(gen) -> None:
+    if gen._frame_func and _as_str(gen.current_func_name) == gen._frame_func:
+        gen._emit("  mojo_frame_leave ();")
+
+
 def _cattr_leave(gen) -> None:
     """Leave the function body by a `return`: write the entry cells back and
     pop this body's unwind records (one per restored cell, pushed at entry by
@@ -383,6 +420,7 @@ def _cattr_leave(gen) -> None:
     _cattr_restore_emit(gen)
     if gen._cattr_restores:
         gen._emit(f"  mojo_cleanup_cancel_n ({len(gen._cattr_restores)});")
+    _frame_leave(gen)
 
 
 def _cattr_restore_fallthrough(gen, fn) -> None:
@@ -396,6 +434,7 @@ def _cattr_restore_fallthrough(gen, fn) -> None:
 def _cattr_restore_end(gen) -> None:
     """Forget the saved pointers once the function's body is fully emitted."""
     gen._cattr_restores = []
+    gen._frame_func = ''
 
 
 def _cattr_instance_read(gen, ov, ot, aname, gname, gtype):
@@ -1708,6 +1747,19 @@ def _lower_re_module_call(gen, node, method):
 def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """Lower obj.method(args) — handles module calls, raw C pointers (UnsafePointer) and structs."""
     func = node.func  # MemberExpr
+
+    # `sys._getframe(n)`: the frame word `n` callers up (default 0), for a module whose
+    # functions are instrumented with frame records (emit_methods._frame_enter). Its
+    # attributes are lowered in `_lower_MemberExpr`.
+    if (func.member == '_getframe' and isinstance(func.obj, gimple_ctypes.IdentExpr)
+            and func.obj.name == 'sys' and (gen.module_name or '') in gen._frames_mods
+            and len(node.args) <= 1):
+        if node.args:
+            _gf_t, _gf_v = gen.lower_expr(node.args[0])
+            _gf_d = gen._to_int64(_gf_t, _gf_v)
+        else:
+            _gf_d = gen._new_val('int64_t', '(int64_t)0')
+        return 'int64_t', gen._call_expr('int64_t', 'mojo_getframe', [('int64_t', _gf_d)])
 
     # `mod_a.Dialog(...)` — a QUALIFIED CONSTRUCTOR CALL: the receiver names
     # a real module marker and the member names a real, already-inlined
@@ -3533,6 +3585,31 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             'int64_t', 'mojo_str_first_codepoint', [('char *', _ord_av)])
 
     ot, ov = gen.lower_expr(func.obj)
+    # `o.m(args)` on an instance of a class made at run time (or `Foo.m(args)` on the class):
+    # the method is in the class table (found through the bases), never a container/struct
+    # method of an untyped word.
+    if (isinstance(func.obj, gimple_ctypes.IdentExpr)
+            and gen._rtobj_kinds.get(('l', _as_str(func.obj.name)))
+            and not getattr(node, 'kwargs', None)
+            and not any(isinstance(a, gimple_ctypes.UnaryOp) and _as_str(a.op) in ('*', '**')
+                        for a in node.args)):
+        if len(node.args) > 4:
+            raise RuntimeError(
+                'cannot compile module: a method call on a class made at run time takes at '
+                'most 4 arguments (bug:CODEGEN_enum_runtime_class_creation)')
+        words = []
+        for a in node.args:
+            at, av = gen.lower_expr(a)
+            words.append(gen._call_expr('int64_t', 'mojo_box_from_double', [('double', av)])
+                         if at == 'double' else gen._to_int64(at, av))
+        words += [gen._new_val('int64_t', '(int64_t)0')] * (4 - len(words))
+        res = gen._call_expr('int64_t', 'mojo_rtobj_method_call',
+                             [('int64_t', gen._to_int64(ot, ov)),
+                              ('char *', gen._intern_string(_as_str(func.member))),
+                              ('int64_t', gen._new_val('int64_t', f'(int64_t){len(node.args)}'))]
+                             + [('int64_t', w) for w in words])
+        gen._dyn_word_vals.add(res)
+        return 'int64_t', res
     # The receiver's RAW lowered pair, before the resolution blocks below
     # may retag `ot` (the classmethod-receiver block can retag an
     # int64_t-typed `cls` to `{Struct} *`). The generator-method call
@@ -4268,6 +4345,12 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                                     f"_is_some;")
                                 gen._emit(
                                     f"  {dst}->{_fnm}_is_some = {_sv};")
+                        # The presence words are not in struct_field_types
+                        # (see StructDef.presence_fields), so the loop above
+                        # never copies them: a copy of an object that had a
+                        # minted field set must keep answering hasattr True.
+                        gimple_ctypes.presence_copy_emit(
+                            gen, gen._struct_name_owner.get(sname), dst, src_local, '->')
 
                     _emit_fw_copy(t, _recv_local, _csn, 0)
                     return f'{_csn} *', t

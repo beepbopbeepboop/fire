@@ -3271,6 +3271,56 @@ def main():
     print(next(it, 2.5))
 main()
 """)
+    # The RECEIVE side of the None family ("a None sent into a generator prints
+    # zero"): `next(it)` resumes the generator with None, so `x = yield` binds
+    # None. The resume ABI used to hand the generator the raw int64 0 and
+    # `print(x)` printed `0`. CPython prints `None`.
+    test_generator_matches_cpython("none_sent_into_generator_default", """\
+def g():
+    x = yield
+    print(x)
+    yield 1
+
+def main():
+    it = g()
+    next(it)
+    next(it)
+main()
+""", """\
+def g():
+    x = yield
+    print(x)
+    yield 1
+
+def main():
+    it = g()
+    next(it)
+    next(it)
+main()
+""")
+    test_generator_matches_cpython("none_sent_into_generator_explicit_yield", """\
+def g():
+    x = yield 7
+    print(x)
+    yield 1
+
+def main():
+    it = g()
+    print(next(it))
+    print(it.send(None))
+main()
+""", """\
+def g():
+    x = yield 7
+    print(x)
+    yield 1
+
+def main():
+    it = g()
+    print(next(it))
+    print(it.send(None))
+main()
+""")
     test_generator_matches_cpython("mixed_str_int_yield_consumed_by_next", """\
 def g():
     yield 1
@@ -3812,6 +3862,41 @@ def main():
     print(x + 1)
 main()
 """)
+    # A FLOAT box bound to a name and used under arithmetic: the answer is a
+    # double (`x * 2` is 5.0), not the truncated integer the box's word reads
+    # as. Both operand orders, and the integer-only operators that must keep
+    # their integer answer beside the same tagged word (`x // 2`, `x % 2`
+    # answer 1.0 and 0.5 for 2.5, the double forms). A chained result is a
+    # tagged word again, so its own arithmetic selects by kind too.
+    test_generator_matches_cpython("tagged_float_bound_to_name_arithmetic", """\
+def gen():
+    yield 2.5
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x)
+    print(x * 2)
+    print(2 * x, x + 1, x - 1)
+    print(x // 2, x % 2, x / 2)
+    print((x * 2) + 1)
+main()
+""", """\
+def gen():
+    yield 2.5
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x)
+    print(x * 2)
+    print(2 * x, x + 1, x - 1)
+    print(x // 2, x % 2, x / 2)
+    print((x * 2) + 1)
+main()
+""")
     test_generator_matches_cpython("tagged_str_bound_to_name_has_length", """\
 def gen():
     yield 1
@@ -3960,6 +4045,171 @@ main()
     test_generator_matches_cpython("tagged_none_identity_default", _src, _src)
     with coro.pinned('cpp'):
         test_generator_matches_cpython("tagged_none_identity_cpp", _src, _src)
+    # The for-loop target shape: `v` is the loop's box (`_boxed_vals`), not a
+    # `next(g)` bind, so it is covered by the per-name for-target rule.
+    _for_src = """\
+def g():
+    yield False
+    yield 0
+    yield None
+    yield "a"
+def main():
+    for v in g():
+        print(v is None)
+        print(v is not None)
+main()
+"""
+    test_generator_matches_cpython("tagged_none_identity_for_default", _for_src, _for_src)
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("tagged_none_identity_for_cpp", _for_src, _for_src)
+
+def run_tagged_for_target_bind_tests():
+    # A for-loop TARGET over a kind-mixed generator, copied to a name
+    # (`x = v`), must keep the yield's kind exactly as `x = next(g)` does
+    # (run_tagged_word_bind_tests). The copy used to unwrap the box with
+    # `mojo_box_word`, so a None yield printed 0 and `x == None` was False.
+    # The target is a tagged word (`_tagged_word_vals`); the bind rule only
+    # answered for `next(g)` values, so a copy of the target lost the box.
+    _src = """\
+def g():
+    yield 1
+    yield None
+    yield True
+def main():
+    for v in g():
+        x = v
+        print(x)
+        print(x == None)
+main()
+"""
+    test_generator_matches_cpython("tagged_for_target_copy_default", _src, _src)
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("tagged_for_target_copy_cpp", _src, _src)
+    # The copy is only a box while EVERY binding of the name is a tagged word:
+    # a name that is also bound to a plain value, or to a plain generator's
+    # loop target, must keep the unwrapped word. And a `for` that rebinds a
+    # name previously bound by `next(g)` must not be read as a tagged word.
+    _mixed = """\
+def g():
+    yield 1
+    yield "a"
+def plain():
+    yield 5
+    yield 6
+def main():
+    x = 0
+    for v in g():
+        x = v
+    x = 7
+    print(x)
+    for w in plain():
+        x = w
+        print(x)
+    h = g()
+    y = next(h)
+    print(y)
+    for y in ["p", "q"]:
+        print(y)
+    print(y)
+    z = y
+    print(z)
+main()
+"""
+    test_generator_matches_cpython("tagged_for_target_copy_mixed_default", _mixed, _mixed)
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("tagged_for_target_copy_mixed_cpp", _mixed, _mixed)
+    # A MIXED name: a plain int binding (`x = 0`) beside a copy of a tagged
+    # for target. The copy keeps the yield's box, so every plain int64 store
+    # into `x` must be boxed too, or the None yield unwraps to 0 on the copy
+    # (the pre-fix output was "1 / 0 / 2 / 2"). The second half reads the
+    # mixed name back through arithmetic, augmented assignment and comparison,
+    # so the box has to unwrap for those consumers.
+    _mixed_none = """\
+def g():
+    yield 1
+    yield None
+    yield 2
+def plain():
+    yield 5
+    yield 6
+def main():
+    x = 0
+    for v in g():
+        x = v
+        print(x)
+        print(x == None)
+    x = 7
+    print(x + 1)
+    x += 3
+    print(x)
+    print(x * 2)
+    for w in plain():
+        x = w
+        print(x + 10)
+    print(x)
+    print(x == 6)
+    x = 0
+    print(x == None)
+    print(x)
+main()
+"""
+    test_generator_matches_cpython("tagged_for_target_copy_mixed_name_none_default",
+                                   _mixed_none, _mixed_none)
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("tagged_for_target_copy_mixed_name_none_cpp",
+                                       _mixed_none, _mixed_none)
+    # Open item 1 of the 15th round: a mixed name whose OTHER store is not
+    # int64. The copy of a tagged word into a str or float local used to
+    # compile to a bare unwrap: the str local segfaulted (an int word used as
+    # a char*), and the float local printed `1.0` / `0.0` for `1` / None. A
+    # Mojo name has one type, so the refusal is the honest answer in either
+    # direction (the copy first, or the plain store first).
+    _mixed_str = """\
+def g():
+    yield 1
+    yield None
+    yield 2
+def main():
+    x = "s"
+    for v in g():
+        x = v
+        print(x)
+    x = "t"
+    print(x)
+main()
+"""
+    _mixed_float = """\
+def g():
+    yield 1
+    yield None
+    yield 2
+def main():
+    x = 0.5
+    for v in g():
+        x = v
+        print(x)
+    x = 2.5
+    print(x)
+main()
+"""
+    _mixed_after = """\
+def g():
+    yield 1
+    yield None
+    yield 2
+def main():
+    x = 0
+    for v in g():
+        x = v
+        print(x)
+    x = 2.5
+    print(x)
+main()
+"""
+    test_generator_refused("tagged_for_target_copy_into_str_refused", _mixed_str, "refused")
+    test_generator_refused("tagged_for_target_copy_into_float_refused", _mixed_float, "refused")
+    test_generator_refused("tagged_for_target_plain_float_store_after_copy_refused",
+                           _mixed_after, "refused")
 
 def run_tests():
     run_none_yield_tests()
@@ -3968,6 +4218,9 @@ def run_tests():
     run_none_list_iteration_tests()
     run_tagged_word_cpp_tests()
     run_tagged_word_bind_tests()
+    # Was defined but never called, so its pins (and the copy-of-a-for-target
+    # shape) were not part of the file's run. Registered here, 2026-11-01.
+    run_tagged_for_target_bind_tests()
     run_star_args_call_tests()
     run_callable_param_tests()
     run_lambda_capture_tests()

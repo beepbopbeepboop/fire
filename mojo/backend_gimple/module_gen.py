@@ -81,6 +81,7 @@ import mojo.middle.funcs_shared as funcs_shared
 import mojo.middle.itcursor as itc
 from mojo.middle.funcs_shared import param_default_pairs
 from mojo.middle.types import _TUPLE_ANN_BY_NAME, _unpack_target_leaf_names
+from mojo.middle.types import PRESENCE_WORD, presence_bit, presence_word_count, presence_set_stmt
 from mojo.middle.methods_shared import _is_selfhost_source_file
 from gimple_codegen import ClosureInfo, DispatchSolver, TypeLattice, _CPP_KEYWORD_FIELDS, _C_KEYWORDS, _C_PARAM_EXTRA_KEYWORDS, _C_RESERVED_FUNCS, _EXPR_DISPATCH, _FIXED_ARRAY_ANN_RE, _LIST_RETURNING_METHODS, _PSEUDO_DUNDER_ATTRS, _RUNTIME_FUNCS, _SELFHOST_DIR, _SELFHOST_KWARGS_HAS_VARARG, _SELFHOST_KWARGS_SLOTS, _STMT_DISPATCH, _STR_RETURNING_METHODS, _TYPE_MAP, _UnsupportedGeneratorShape, _async_gen_quick_eligible, _async_quick_eligible, _bracket_param_type_annotations, _c_escape, _c_field_name, _c_id, _class_attr_ctype, _compute_exc_descendants, _debug_note, _declared_vars_body, _extract_init_expr, _generator_quick_eligible, _import_targets, _merge_struct_inheritance, _module_init_name, _module_toplevel_name, _mojo_type, _safe_field, _safe_name, _struct_type_id, _stub_guard_name, _used_idents_deep, _used_idents_node
 
@@ -250,7 +251,7 @@ def _gmi_binding_index(scopes) -> dict:
     return idx
 
 
-def _gmi_identifier_literal_ctype(name, enclosing, mod_index):
+def _gmi_identifier_literal_ctype(name, enc_idx: dict, mod_index: dict):
     """The ctype of an IDENTIFIER argument whose only binding is a literal.
 
     A call `lib.walk(s)` where `s = "r"` is the one binding of `s` in scope
@@ -265,11 +266,14 @@ def _gmi_identifier_literal_ctype(name, enclosing, mod_index):
     wildcard import all return None. The scope is the enclosing function when
     it binds the name at all (a local shadows a global), otherwise the whole
     module, which is a superset of every binder that could reach the name.
-    `mod_index` is `_gmi_binding_index` over the module's statements.
+    `mod_index` is `_gmi_binding_index` over the module's statements and
+    `enc_idx` the same over the ENCLOSING function (an empty dict for a
+    module-level call). The caller builds `enc_idx` once per function: building
+    it here walked the whole function for every identifier argument of every
+    call in it, which was 8% of `fire.py --dump-full`.
     """
     sites: list = []
-    if enclosing is not None:
-        enc_idx = _gmi_binding_index(enclosing)
+    if len(enc_idx) > 0:
         sites = list(enc_idx.get(name, [])) + list(enc_idx.get('*', []))
     if not sites:
         sites = list(mod_index.get(name, [])) + list(mod_index.get('*', []))
@@ -1440,7 +1444,38 @@ def _homogeneous_tuple_ann_elem(self, _ret_ann):
 
 
 
-def _render_struct_typedef_body(struct_name: str, fields: dict, optional_tags=None) -> list:
+def _mark_presence_field(sdef, fname):
+    """Record the compiler-MINTED field `fname` of `sdef` as presence-tracked
+    (see StructDef.presence_fields), unless `sdef`'s own `__init__` assigns
+    it: a constructor-assigned field is part of every instance by definition,
+    so it needs no bit. Every mint site calls this with the StructDef it just
+    appended `fname` to, which keeps the tracked set a whole-struct fact that
+    every generator reads the same way. Idempotent."""
+    if sdef is None or fname in sdef.presence_fields:
+        return
+    for _m in sdef.methods:
+        if _m.name != '__init__':
+            continue
+        for _n in _walk_ast(_m.body):
+            _tgts = []
+            if isinstance(_n, AssignStmt):
+                _tgts = [_n.target]
+            elif isinstance(_n, MultiAssignStmt):
+                _tgts = list(_n.targets)
+            for _t in _tgts:
+                _leaves = [_t]
+                if isinstance(_t, (TupleExpr, ListExpr)):
+                    _leaves = list(_t.elements)
+                for _lf in _leaves:
+                    if (isinstance(_lf, MemberExpr) and isinstance(_lf.obj, IdentExpr)
+                            and _as_str(_lf.obj.name) == 'self'
+                            and _as_str(_lf.member) == fname):
+                        return
+    sdef.presence_fields.append(fname)
+
+
+def _render_struct_typedef_body(struct_name: str, fields: dict, optional_tags=None,
+                                presence_words: int = 0) -> list:
     """Render just the `typedef struct NAME { ... } NAME;` body lines for
     one struct, given its resolved {field_name: field_ctype} map (the same
     per-field rendering gen_module_impl's own emit_struct_defs pass uses,
@@ -1496,6 +1531,8 @@ def _render_struct_typedef_body(struct_name: str, fields: dict, optional_tags=No
                     lines.append(f"  _Bool {safe_fn}_is_some;")
     else:
         lines.append(f"  int _dummy;")
+    if presence_words:
+        lines.append(f"  uint64_t {PRESENCE_WORD}[{presence_words}];")
     lines.append(f"}} {struct_name};")
     return lines
 
@@ -1976,18 +2013,33 @@ def _emit_reflection_dispatch(self, parts):
         set_lines = []
         name_lits = []
         asdict_lines = []
+        # The owning StructDef, whose `presence_fields` decide which minted
+        # fields answer `hasattr`/`getattr` only once stored (see
+        # StructDef.presence_fields). Declared fields are not in it, so their
+        # arms are unchanged.
+        _pres_sd = self._struct_name_owner.get(_as_str(sn))
         for fname, ftype in fields.items():
             if fname == '__mojo_type_id':
                 continue
             safe_f = _safe_field(fname)
+            _pb = presence_bit(_pres_sd, fname)
+            # Read guard: the arm answers only when this object's presence
+            # bit is set. A clear bit falls through to the trailing
+            # `mojo_obj_getattr`, which raises (or sets the nothrow miss flag),
+            # as CPython does for an attribute the instance never received.
+            _pget = ''
+            _pset = ''
+            if _pb is not None:
+                _pget = (f' && ((obj->{PRESENCE_WORD}[{_pb[0]}] >> {_pb[1]}) & 1)')
+                _pset = presence_set_stmt(_pres_sd, fname, 'obj', '->') + ' '
             if re.match(r'^.+\[\d+\]$', ftype):
                 name_lits.append(f'"{fname}"')
                 continue
             if ftype.endswith(' *'):
                 get_lines.append(
-                    f'  if (strcmp(attr, "{fname}") == 0) return (int64_t)(intptr_t)obj->{safe_f};')
+                    f'  if (strcmp(attr, "{fname}") == 0{_pget}) return (int64_t)(intptr_t)obj->{safe_f};')
                 set_lines.append(
-                    f'  if (strcmp(attr, "{fname}") == 0) {{ obj->{safe_f} = ({ftype})(intptr_t)val; return; }}')
+                    f'  if (strcmp(attr, "{fname}") == 0) {{ obj->{safe_f} = ({ftype})(intptr_t)val; {_pset}return; }}')
                 asdict_lines.append(
                     f'  mojo_dict_set_int(_r, "{fname}", (int64_t)(intptr_t)obj->{safe_f});')
             elif ftype in self.struct_field_types:
@@ -2001,16 +2053,16 @@ def _emit_reflection_dispatch(self, parts):
                 # shape the runtime tag readers expect of a struct
                 # pointer — and setattr copies the struct back by value.
                 get_lines.append(
-                    f'  if (strcmp(attr, "{fname}") == 0) return (int64_t)(intptr_t)&obj->{safe_f};')
+                    f'  if (strcmp(attr, "{fname}") == 0{_pget}) return (int64_t)(intptr_t)&obj->{safe_f};')
                 set_lines.append(
-                    f'  if (strcmp(attr, "{fname}") == 0) {{ obj->{safe_f} = *({ftype} *)(intptr_t)val; return; }}')
+                    f'  if (strcmp(attr, "{fname}") == 0) {{ obj->{safe_f} = *({ftype} *)(intptr_t)val; {_pset}return; }}')
                 asdict_lines.append(
                     f'  mojo_dict_set_int(_r, "{fname}", (int64_t)(intptr_t)&obj->{safe_f});')
             else:
                 get_lines.append(
-                    f'  if (strcmp(attr, "{fname}") == 0) return (int64_t)obj->{safe_f};')
+                    f'  if (strcmp(attr, "{fname}") == 0{_pget}) return (int64_t)obj->{safe_f};')
                 set_lines.append(
-                    f'  if (strcmp(attr, "{fname}") == 0) {{ obj->{safe_f} = ({ftype})val; return; }}')
+                    f'  if (strcmp(attr, "{fname}") == 0) {{ obj->{safe_f} = ({ftype})val; {_pset}return; }}')
                 asdict_lines.append(
                     f'  mojo_dict_set_int(_r, "{fname}", (int64_t)obj->{safe_f});')
             name_lits.append(f'"{fname}"')
@@ -3805,6 +3857,16 @@ def gen_module_impl(self, stmts):
     _gmi_refuse_nested_class_enclosing_reads(stmts)
     stmts = _gmi_decorator_pass(self, stmts, {}, True)
 
+    # Python-level frames: a module that says `_getframe` gets a frame record on every
+    # function it defines (see emit_methods._frame_enter). Decided here, once, from the
+    # module's own statements; every other module's C is unchanged.
+    for _fr_nd in _walk_ast(stmts):
+        if ((isinstance(_fr_nd, gimple_ctypes.MemberExpr)
+                and _fr_nd.member in ('_getframe', '__traceback__', 'tb_frame', 'f_back', 'f_lineno'))
+                or (isinstance(_fr_nd, gimple_ctypes.IdentExpr) and _fr_nd.name == '_getframe')):
+            self._frames_mods.add(self.module_name or '')
+            break
+
     # ── GPU offload, Seam 1 ──────────────────────────────────────────────
     # Classified ONCE, at the very top, because three different places
     # need the answer and they run at different times: the preamble (to emit
@@ -4609,6 +4671,9 @@ def gen_module_impl(self, stmts):
                         return _xs
                 return None
 
+            # The enclosing function's binder census, built ONCE per function
+            # (see `_gmi_identifier_literal_ctype`), keyed by the function's id.
+            _xg_enc_index: dict = {}
             def _xg_record_scalar_args(_xkey, _xpnames, _xargs, _xenc):
                 """Record the unanimous literal SCALAR-ish ctype of each
                 argument into _xmod_gen_param_hints (the cross-module twin of
@@ -4623,8 +4688,16 @@ def gen_module_impl(self, stmts):
                         break
                     _xct = _gmi_literal_ctype(_xa)
                     if _xct is None and isinstance(_xa, gimple_ctypes.IdentExpr):
+                        _xenc_idx: dict = {}
+                        if _xenc is not None:
+                            _xek = id(_xenc)
+                            if _xek in _xg_enc_index:
+                                _xenc_idx = _as_dict(_xg_enc_index[_xek])
+                            else:
+                                _xenc_idx = _gmi_binding_index(_xenc)
+                                _xg_enc_index[_xek] = _xenc_idx
                         _xct = _gmi_identifier_literal_ctype(
-                            _xa.name, _xenc, _xg_bind_index)
+                            _xa.name, _xenc_idx, _xg_bind_index)
                     if not _xct or not _xpnames[_xi]:
                         continue
                     _xs_map = self._xmod_gen_param_hints.setdefault(_xkey, {})
@@ -7049,13 +7122,28 @@ def gen_module_impl(self, stmts):
                     # receiver's own struct (`self.next = other`, `self.parent
                     # = owner`) exactly where it is: both sides answer the same
                     # and nothing changes.
+                    # An EXPLICITLY annotated field is not "we don't know":
+                    # `var _prev: Node_1_T_3_Int` on `Node_1_T_3_Int` itself
+                    # (a node's own link) is the field's real type, and the
+                    # constructor's `self._prev = <erased word>` is weaker
+                    # evidence than the annotation (it typed the link
+                    # `int64_t`, so `.next()` had no receiver type).
+                    _annotated_self = (
+                        existing_ft == s.name + ' *'
+                        and any(getattr(_f, 'type_ann', None) is not None
+                                and (_f.name if isinstance(_f, VarDecl)
+                                     else getattr(getattr(_f, 'target', None),
+                                                  'name', None)) == fn
+                                for _f in s.fields))
                     can_override = ((existing_ft == 'int' and ft.endswith(' *'))
                                     or (existing_ft == s.name + ' *'
-                                        and ft != existing_ft))
+                                        and ft != existing_ft
+                                        and not _annotated_self))
                     if fn not in self.struct_field_types[s.name] or can_override:
                         self.struct_field_types[s.name][fn] = ft
                         if fn not in already:
                             s.fields.append(VarDecl(name=fn, type_ann=None, value=None))
+                            _mark_presence_field(s, fn)
                             already.add(fn)
                             _walk_ast_invalidate(s)
             # A method that returns a `bool`-annotated FIELD hands back an
@@ -7147,6 +7235,7 @@ def gen_module_impl(self, stmts):
                         self.struct_field_types[s.name][fn] = _base_ft if _base_ft is not None else ft
                         if fn not in already:
                             s.fields.append(VarDecl(name=fn, type_ann=None, value=None))
+                            _mark_presence_field(s, fn)
                             already.add(fn)
                             _walk_ast_invalidate(s)
 
@@ -7344,6 +7433,7 @@ def gen_module_impl(self, stmts):
                 if target_def is not None and not any(
                         isinstance(f, VarDecl) and f.name == fn for f in target_def.fields):
                     target_def.fields.append(VarDecl(name=fn, type_ann=None, value=None))
+                    _mark_presence_field(target_def, fn)
                     _walk_ast_invalidate(target_def)
 
     _scan_body_for_local_field_access(stmts, None)
@@ -8123,6 +8213,29 @@ def gen_module_impl(self, stmts):
     # over every function (twice: free functions and methods) up to 8 times
     # per nesting level. Memoised by body identity so a body is walked once
     # per compile even when the enclosing structure revisits it.
+    # Round 1 of the fixpoint below runs with NO callee set; its answers are kept here so
+    # a later round can reuse them for any body that calls nothing in the grown set. The
+    # answer of `_infer_return_maybe_kinds` depends on `callee_kinds` ONLY through call
+    # names (`_valued`: a bare `f(...)` or a `obj.m(...)` spelled `obj_m`), so a body with
+    # no such call has the same answer every round -- and most bodies have none.
+    _mk_first_maybe: dict = {}
+    _mk_first_slots: dict = {}
+    _mk_first_calls: dict = {}
+
+    def _mk_call_keys(body) -> str:
+        # ",name,obj_m,..." -- the callee spellings `_valued` tests, comma-delimited so a
+        # membership test cannot match a longer name.
+        out = ','
+        for nd in _walk_ast(body):
+            if isinstance(nd, gimple_ctypes.CallExpr):
+                f = nd.func
+                if isinstance(f, gimple_ctypes.IdentExpr):
+                    out += _as_str(f.name) + ','
+                elif (isinstance(f, gimple_ctypes.MemberExpr)
+                        and isinstance(f.obj, gimple_ctypes.IdentExpr)):
+                    out += _as_str(f.obj.name) + '_' + _as_str(f.member) + ','
+        return out
+
     def _mk_round(callee_kinds):
         # A FRESH cache per round, and that is load-bearing rather than
         # wasteful: the answer depends on `callee_kinds`, so a cache shared
@@ -8143,10 +8256,26 @@ def gen_module_impl(self, stmts):
         def _mk(name, body, params=None):
             _k = id(body)
             if _k not in _mk_maybe:
-                _r_maybe, _r_slots = _infer_return_maybe_kinds(
-                    self, body, params, callee_kinds)
-                _mk_maybe[_k] = bool(_r_maybe)
-                _mk_slots[_k] = _r_slots
+                _reuse = False
+                if callee_kinds is not None and _k in _mk_first_maybe:
+                    _reuse = True
+                    _first_keys = _as_str(_mk_first_calls[_k])
+                    for _ck0 in callee_kinds:
+                        if (',' + _as_str(_ck0) + ',') in _first_keys:
+                            _reuse = False
+                            break
+                if _reuse:
+                    _mk_maybe[_k] = bool(_mk_first_maybe[_k])
+                    _mk_slots[_k] = _mk_first_slots[_k]
+                else:
+                    _r_maybe, _r_slots = _infer_return_maybe_kinds(
+                        self, body, params, callee_kinds)
+                    _mk_maybe[_k] = bool(_r_maybe)
+                    _mk_slots[_k] = _r_slots
+                    if callee_kinds is None:
+                        _mk_first_maybe[_k] = bool(_r_maybe)
+                        _mk_first_slots[_k] = _r_slots
+                        _mk_first_calls[_k] = _mk_call_keys(body)
             _maybe: bool = _mk_maybe[_k]
             _slotkinds: list = _mk_slots[_k]
             if _maybe:
@@ -14671,7 +14800,8 @@ def gen_module_impl(self, stmts):
                     _td_start = len(parts)
                 parts.extend(_render_struct_typedef_body(
                     struct_name, fields,
-                    optional_tags=self._tagged_optional_fields.get(struct_name)))
+                    optional_tags=self._tagged_optional_fields.get(struct_name),
+                    presence_words=presence_word_count(self._struct_name_owner.get(struct_name))))
                 self._struct_typedef_texts[struct_name] = '\n'.join(parts[_td_start:])
                 parts.append(f"#define {_stub_guard_name(struct_name)}")  # suppress any later variadic stub
                 emitted.add(struct_name)
@@ -16050,6 +16180,9 @@ def gen_module_impl(self, stmts):
                                 parts.append(f"  {_arr_dm2.group(1)} {safe_fn}[{_arr_dm2.group(2)}];")
                             else:
                                 parts.append(f"  {field_type} {safe_fn};")
+                _sd_pw = presence_word_count(sd)
+                if _sd_pw:
+                    parts.append(f"  uint64_t {PRESENCE_WORD}[{_sd_pw}];")
                 parts.append(f"}} {sd.name};")
                 self._struct_typedef_texts[sd.name] = '\n'.join(parts[_td_start:])
                 parts.append(f"#define {_stub_guard_name(sd.name)}")
@@ -17272,7 +17405,8 @@ def gen_module_impl(self, stmts):
                 _flds = _struct_typedef_fields(self, _sn)
                 return '\n'.join(_render_struct_typedef_body(
                     _sn, _flds,
-                    optional_tags=self._tagged_optional_fields.get(_sn)))
+                    optional_tags=self._tagged_optional_fields.get(_sn),
+                    presence_words=presence_word_count(self._struct_name_owner.get(_sn))))
             for _gm_fwd_sn in sorted(_gm_struct_names_seen):
                 if _gm_typedef_text(_gm_fwd_sn) is not None:
                     cpp_parts.append(f'struct {_gm_fwd_sn};')
@@ -17371,7 +17505,9 @@ def gen_module_impl(self, stmts):
                             _render_struct_typedef_body(
                                 _me_sn, _me_flds,
                                 optional_tags=self._tagged_optional_fields
-                                .get(_me_sn)))
+                                .get(_me_sn),
+                                presence_words=presence_word_count(
+                                    self._struct_name_owner.get(_me_sn))))
                         cpp_parts.append(_me_td.replace('_Bool', 'bool'))
                         cpp_parts.append('')
                     _cpp_preamble_typedef_structs.update(_mirror_extra_structs)

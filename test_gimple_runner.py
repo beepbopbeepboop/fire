@@ -3418,6 +3418,118 @@ def main():
 main()
 """, "10\n99\n20\n7\n")
 
+    # A capturing nested function handed on AS A VALUE from inside another nested function:
+    # its env used to be NULL, so the callee crashed on its first capture read.
+    test_gimple_stdout("gimple_capturing_closure_value_passed_from_a_closure", """\
+def outer(base, items):
+    seen = {}
+    gen_names = {"a": 1}
+    def visit_call(node, env, callee):
+        seen[node] = base + gen_names["a"]
+    def visit_main(node, env):
+        visit_call(node, env, None)
+    def collect_from(src, visit, closure):
+        for n in src:
+            visit(n, None)
+    def collect():
+        collect_from(items, visit_main, False)
+    collect()
+    return len(seen) + base
+print(outer(10, [1, 2, 3]))
+""", "13\n")
+
+    # Python-level frames (stage 1): `sys._getframe(n)`, `.f_back`, `.f_lineno`,
+    # `.f_code.co_name`, in a module that says `_getframe`. A frame record is pushed per
+    # function and popped by `return`, by falling off the end, and by an exception
+    # unwinding past it. Module-level code is not a frame (CPython's `<module>`).
+    test_gimple_stdout("gimple_sys_getframe_names_lines_and_callers", """\
+import sys
+
+def where():
+    return sys._getframe(1).f_code.co_name + ":" + str(sys._getframe(1).f_lineno)
+
+def boom(n):
+    if n == 0:
+        raise ValueError("x")
+    return boom(n - 1)
+
+def catcher():
+    try:
+        boom(3)
+    except ValueError:
+        pass
+    return where()
+
+def rec(n):
+    if n == 0:
+        return sys._getframe(0).f_back.f_code.co_name
+    return rec(n - 1)
+
+def branches(a):
+    if a:
+        return where()
+    x = 2
+    return where()
+
+def inner():
+    f = sys._getframe(0)
+    print(f.f_code.co_name, f.f_lineno)
+    g = sys._getframe(1)
+    print(g.f_code.co_name, g.f_lineno)
+
+def middle():
+    x = 1
+    inner()
+
+def top():
+    print(catcher())
+    print(rec(3))
+    print(branches(True), branches(False))
+    middle()
+
+top()
+""", "catcher:16\nrec\nbranches:25 branches:27\ninner 31\nmiddle 37\n")
+
+    # Tracebacks (frames stage 2): `e.__traceback__` walks tb_next from the frame that caught the
+    # exception down to the one that raised it, each entry with the line it was executing at the
+    # raise; a bare `raise` keeps the original traceback. `<module>` is a frame.
+    test_gimple_stdout("gimple_traceback_chain_names_and_lines", """\
+import sys
+
+def leaf(n):
+    if n == 0:
+        raise KeyError("k")
+    leaf(n - 1)
+
+def mid():
+    try:
+        leaf(2)
+    except KeyError as e:
+        tb = e.__traceback__
+        names = []
+        while tb is not None:
+            names.append(tb.tb_frame.f_code.co_name + ":" + str(tb.tb_lineno))
+            tb = tb.tb_next
+        print(names)
+        raise
+
+def top():
+    try:
+        mid()
+    except KeyError as e:
+        tb = e.__traceback__
+        names = []
+        while tb is not None:
+            names.append(tb.tb_frame.f_code.co_name + ":" + str(tb.tb_lineno))
+            tb = tb.tb_next
+        print(names)
+        fb = e.__traceback__.tb_frame.f_back
+        print(fb.f_code.co_name if fb is not None else None)
+
+top()
+print(sys._getframe(0).f_code.co_name, sys._getframe(0).f_lineno)
+""", "['mid:10', 'leaf:6', 'leaf:6', 'leaf:5']\n['top:22', 'mid:10', 'leaf:6', 'leaf:6', 'leaf:5']\n<module>\n<module> 34\n")
+
     # String site FIRST, int site second (an int list records no contract, so
     # it used to be invisible as a disagreeing call site).
     test_gimple_stdout("gimple_mixed_kind_flat_list_param_str_first", """\
@@ -13242,6 +13354,35 @@ struct Color:
         case _:
             print('other')
 """, "ENUM CASE")
+
+    # A `__match` arm with several patterns, or a guard, inside a struct method
+    # (a `__GIMPLE` body): `||` / `&&` on a condition are not GIMPLE, so each
+    # pattern is its own test block and the guard its own block after them.
+    test_gimple_stdout("gimple_match_multi_pattern_and_guard_in_method", """\
+struct K:
+    var _v: Int
+    def __init__(out self, v: Int):
+        self._v = v
+    def pick(self, n: Int):
+        __match self._v:
+        case 1, 2:
+            print('low')
+        case 3 if n > 0:
+            print('three-guarded')
+        case 4, 5 if n > 0:
+            print('four-five-guarded')
+        case _:
+            print('other')
+
+def main():
+    K(1).pick(0)
+    K(2).pick(0)
+    K(3).pick(1)
+    K(3).pick(0)
+    K(5).pick(1)
+    K(5).pick(0)
+    K(9).pick(1)
+""", "low\nlow\nthree-guarded\nother\nfour-five-guarded\nother\nother\n")
 
     test_gimple_stdout("gimple_module_attribute_value_and_alias", """\
 import sys

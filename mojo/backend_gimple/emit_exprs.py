@@ -111,7 +111,19 @@ def lower_expr(gen, node) -> tuple[str, str]:
     elif isinstance(node, gimple_ctypes.UnaryOp):
         return gen._lower_UnaryOp(node)
     elif isinstance(node, gimple_ctypes.CallExpr):
-        return gen._lower_call(node)
+        _rt, _rv = gen._lower_call(node)
+        # A `yield` used as a VALUE (`x = yield`, `print((yield))`) reads the
+        # resume word, which is the None box when the generator was resumed by
+        # `next()` / `send(None)` (coro.py's trampoline). Mark it as a tagged
+        # word, as `next(g)` on a mixed generator is marked, so a consumer
+        # renders it by kind. A name bound to it is unwrapped at the bind unless
+        # it is a receive-only name (emit_stmts' simple-name bind, tagged_recv_name).
+        if (isinstance(node.func, gimple_ctypes.IdentExpr)
+                and node.func.name == '__mojo_coro_yield_i'
+                and _rt == 'int64_t' and isinstance(_rv, str)):
+            gen._boxed_vals.add(_rv)
+            gen._tagged_word_vals.add(_rv)
+        return _rt, _rv
     elif isinstance(node, gimple_ctypes.TernaryExpr):
         return gen._lower_TernaryExpr(node)
     elif isinstance(node, gimple_ctypes.MemberExpr):
@@ -465,8 +477,18 @@ def _closure_value(gen, name: str, _ci) -> tuple:
     fp = gen._new_val('void *', f'_funcptr_{lifted}')
     _repr_name = f"{gen.current_func_name or 'root'}.<locals>.{name}"
     if _ci.env_struct:
-        env_void = gen._new_val(
-            'void *', f'(void *){gen._closure_envs.get(name) or "0"}')
+        _own_env = gen._closure_envs.get(name)
+        if _own_env:
+            env_void = gen._new_val('void *', f'(void *){_own_env}')
+        elif getattr(gen, '_env_param', ''):
+            # Inside ANOTHER lifted closure: the sibling's env variable belongs to the
+            # parent's scope and is not visible here, so build it from this closure's own
+            # env (the same thing a CALL to the sibling does). `(void *)0` here crashed the
+            # callee on its first capture read.
+            _sib_env = ggc._build_outer_closure_env(gen, _ci)
+            env_void = gen._new_val('void *', f'(void *){_sib_env}')
+        else:
+            env_void = gen._new_val('void *', '(void *)0')
         # A VARIADIC nested def (`def gen(*a, **kw)`) is a MojoVarargFn
         # exactly as a variadic lambda is: a call through the value packs
         # its arguments into the list / dict the callee wants.
@@ -1415,7 +1437,38 @@ _OS_PATH_RUNTIME_CALLABLE_VALUES = {
 }
 
 
+_FRAME_ATTRS = frozenset(('f_code', 'f_back', 'f_lineno', 'co_name', 'co_qualname', 'co_filename', 'co_firstlineno',
+                          '__traceback__', 'tb_frame', 'tb_next', 'tb_lineno'))
+
+
 def _lower_MemberExpr(gen, node) -> tuple[str, str]:
+    # Attributes of a Python-level frame word (`sys._getframe(n)`), in a module that uses
+    # frames. The names are specific to frame/code objects, and nothing is lowered here
+    # unless a module of this compile mentions `_getframe`.
+    if len(gen._frames_mods) > 0 and node.member in _FRAME_ATTRS:
+        _fr_t, _fr_v = gen.lower_expr(node.obj)
+        _fr_w = gen._to_int64(_fr_t, _fr_v)
+        _fm = node.member
+        if _fm == 'f_code':
+            return 'int64_t', _fr_w
+        if _fm == '__traceback__':
+            _tb_d = gen._call_expr('int64_t', 'mojo_frame_depth', [])
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_traceback', [('int64_t', _tb_d)])
+        if _fm == 'tb_frame':
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_tb_frame', [('int64_t', _fr_w)])
+        if _fm == 'tb_next':
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_tb_next', [('int64_t', _fr_w)])
+        if _fm == 'tb_lineno':
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_tb_lineno', [('int64_t', _fr_w)])
+        if _fm == 'f_back':
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_frame_back', [('int64_t', _fr_w)])
+        if _fm == 'f_lineno':
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_frame_lineno', [('int64_t', _fr_w)])
+        if _fm == 'co_firstlineno':
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_frame_firstlineno', [('int64_t', _fr_w)])
+        if _fm == 'co_filename':
+            return 'char *', gen._call_expr('char *', 'mojo_frame_file', [('int64_t', _fr_w)])
+        return 'char *', gen._call_expr('char *', 'mojo_frame_name', [('int64_t', _fr_w)])
     _sc = _stat_module_constant(gen, node)
     if _sc is not None:
         return 'int64_t', gen._new_val('int64_t', f'(int64_t){_sc}')
@@ -2703,6 +2756,11 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         return 'char *', gen._new_val('char *', f"(char *){dn}")
     if node.member in field_map:
         field_type = field_map[node.member]
+        # A minted field (StructDef.presence_fields) the instance never
+        # received is an AttributeError on a direct read, not its zero
+        # storage: guard the load on the instance's presence bit.
+        gimple_ctypes.presence_check_emit(
+            gen, gen._struct_name_owner.get(struct_name), node.member, ov, op, struct_name)
         t = gen._new_val(field_type, f'{ov}{op}{gimple_ctypes._safe_field(node.member)}')
         _mark_boxed_field_read(gen, struct_name, node.member, field_type, t)
         # PART 6 (2026-10-22, family C): record a READ of a tagged-Optional
@@ -3829,6 +3887,36 @@ _PYBOX_SCALARS = frozenset({
 })
 
 
+def _tagged_arith_select(gen, op: str, left_node, lt: str, lv: str,
+                         right_node, rt: str, rv: str):
+    """`lhs OP rhs` where a TAGGED generator word (`_tagged_word_vals`) is an
+    operand beside an INTEGER, and OP is arithmetic. Returns the result temp,
+    or None when the shape does not apply.
+
+    The answer is the integer one or a double box holding the double answer,
+    and which one is a run-time fact: the box's kind. That is the same select
+    `_float_param_arith` runs for a maybe-float parameter, fed this operand's
+    kind tracking instead of a parameter name. The result is itself a tagged
+    word (a double box is rendered by kind and stays a box for the next
+    operator). A double operand is not handled here: its answer is a double
+    whatever the box holds, and the tail's double arm already gives that."""
+    if op not in ginf._FLOAT_PARAM_OPS:
+        return None
+    _tagged = getattr(gen, '_tagged_word_vals', ())
+    _boxed = getattr(gen, '_boxed_vals', ())
+    _tag_l = lv in _tagged and lv in _boxed
+    _tag_r = rv in _tagged and rv in _boxed
+    if not (_tag_l or _tag_r):
+        return None
+    if lt not in ('int', 'int64_t') or rt not in ('int', 'int64_t'):
+        return None
+    _t = ginf._float_param_arith(gen, op, left_node, lt, lv, right_node, rt, rv,
+                                 lmaybe=_tag_l, rmaybe=_tag_r)
+    gen._boxed_vals.add(_t)
+    gen._tagged_word_vals.add(_t)
+    return _t
+
+
 def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                         right_node, rt: str, rv: str) -> tuple[str, str]:
     """The rest of BinaryOp lowering once both operands are already
@@ -3855,16 +3943,23 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # are 0, so the word compare answered `is None` True for it. Every other
     # boxed operand keeps the word compare: a list or tuple slot that is None
     # is a bare NULL word with no box, which the kind read would call "not
-    # None" (bugs/CODEGEN_is_none_on_a_tagged_false_or_zero_is_true.md).
+    # None" (pinned by `run_tagged_none_identity_tests`).
     _tagged = getattr(gen, '_tagged_word_vals', ())
     if op in ('==', '!=', 'is', 'is not') and _is_none_literal(left_node) != _is_none_literal(right_node):
         _other = rv if _is_none_literal(left_node) else lv
         _other_t = rt if _is_none_literal(left_node) else lt
+        _other_node = right_node if _is_none_literal(left_node) else left_node
         _ident = op in ('is', 'is not')
+        # A for-loop target over a tagged generator (`for v in g()`) holds the
+        # loop's box in `_boxed_vals` but is not in `_tagged_word_vals`; the
+        # per-name rule `tagged_for_target_name` is what says every value the
+        # name holds is that box, so it takes the same kind read.
+        _for_tagged = (_ident and isinstance(_other_node, gimple_ctypes.IdentExpr)
+                       and ginf.tagged_for_target_name(gen, _other_node.name))
         # Only an int word: a `char *` name keeps its NULL-pointer test below.
         # A float box answers 0 here, which is the right answer for a float.
         if (_other_t in ('int', 'int64_t') and _other in getattr(gen, '_boxed_vals', ())
-                and (not _ident or _other in _tagged)):
+                and (not _ident or _other in _tagged or _for_tagged)):
             _is_none = gen._call_expr('int', 'mojo_word_is_none', [('int64_t', _other)])
             _cmp = '!= 0' if op in ('==', 'is') else '== 0'
             _t = gen._new_temp('_Bool')
@@ -3975,11 +4070,17 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # here made `x + "!"` a `double + char *` gcc error. Otherwise a tagged word
     # in arithmetic is an int or bool word far more often than a float box, so
     # it is read as its integer (`mojo_box_int`) beside an int, and as a double
-    # (`mojo_box_double`, exact for an int too) beside a double. A float box
-    # beside an int truncates -- the same stopgap `_unbox_float_param_operand`
-    # documents for a maybe-float parameter; the full answer needs the box read
-    # as a double at run time.
+    # (`mojo_box_double`, exact for an int too) beside a double. A tagged word
+    # beside an INTEGER under `+ - * // %` never reaches this arm: the select
+    # above answers it by the box's kind. The arm below serves what is left:
+    # the comparisons and bitwise operators beside an int, which keep the
+    # truncating read (`mojo_box_int`).
     _tagged = getattr(gen, '_tagged_word_vals', ())
+    # A tagged word beside an integer under arithmetic: the run-time select
+    # by the box's kind (see `_tagged_arith_select`).
+    _tsel = _tagged_arith_select(gen, op, left_node, lt, lv, right_node, rt, rv)
+    if _tsel is not None:
+        return 'int64_t', _tsel
     if lv in getattr(gen, '_boxed_vals', ()) and not (
             lv in _tagged and rt == 'char *' and op == '+'):
         if op in _ident_ops and (op in ('is', 'is not')
@@ -5584,6 +5685,9 @@ def _lower_floordiv(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
     from mojo.backend_gimple import emit_infra as ginf
     if ginf._float_param_arith_applies(gen, '//', node.left, lt, node.right, rt):
         return 'int64_t', ginf._float_param_arith(gen, '//', node.left, lt, lv, node.right, rt, rv)
+    _tsel = _tagged_arith_select(gen, '//', node.left, lt, lv, node.right, rt, rv)
+    if _tsel is not None:
+        return 'int64_t', _tsel
     # Boxed-PythonObject floor division (2026-10-21 part 4, further,
     # test_python_object): `a // b` on box locals answers through the
     # runtime's word-class checks (int result, zero-division RAISE, double

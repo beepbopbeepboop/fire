@@ -588,6 +588,23 @@ void mojo_cleanup_push_cattr(void **slot, void *saved);
  * immediately at a point that is itself about to (or just did) free those
  * same `n` locals inline. */
 void mojo_cleanup_cancel_n(int64_t n);
+/* Python-level frames: sys._getframe / f_back / f_lineno / f_code.co_name for functions the compiler
+ * instrumented (see runtime/fire_runtime.c, "Python-level frames"). A frame is a word (0 is None). */
+void    mojo_frame_enter(char *name, char *file, int64_t firstlineno);
+void    mojo_frame_leave(void);
+void    mojo_frame_set_line(int64_t line);
+int64_t mojo_getframe(int64_t depth);
+int64_t mojo_frame_back(int64_t w);
+int64_t mojo_frame_lineno(int64_t w);
+int64_t mojo_frame_firstlineno(int64_t w);
+char *  mojo_frame_name(int64_t w);
+char *  mojo_frame_file(int64_t w);
+int64_t mojo_frame_depth(void);
+/* Tracebacks: `e.__traceback__` is mojo_traceback(<current depth>); tb_frame / tb_next / tb_lineno read an entry. */
+int64_t mojo_traceback(int64_t catcher_depth);
+int64_t mojo_tb_frame(int64_t t);
+int64_t mojo_tb_next(int64_t t);
+int64_t mojo_tb_lineno(int64_t t);
 /* Snapshot the current cleanup-stack depth as the level `_mojo_exc_top`
  * (already incremented) should unwind back down to. Call immediately
  * after bumping `_mojo_exc_top` for a new try/except level, before its
@@ -1428,6 +1445,8 @@ int64_t mojo_type_new(char *name);
 void    mojo_type_add_base(int64_t cls, int64_t base);
 void    mojo_type_add_bases_from_list(int64_t cls, MojoList *bases);
 int     mojo_is_classobj(int64_t w);
+int64_t mojo_rtobj_method_call(int64_t recv, char *name, int64_t n, int64_t a0, int64_t a1, int64_t a2, int64_t a3);
+int     mojo_isinstance_rtclass(int64_t obj, int64_t cls);
 int64_t mojo_classobj_tag(int64_t w);
 void    mojo_classobj_setattr(int64_t cls, char *name, int64_t word);
 void    mojo_type_fill_from_dict(int64_t cls, MojoDict *ns);

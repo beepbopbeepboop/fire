@@ -401,8 +401,17 @@ def _lower_generator_send(gen, node, av: str, api: dict) -> tuple[str, str]:
     the runtime function directly rather than through the trampoline."""
     vct = api['value_ctype']
     if len(node.args) == 1:
-        st, sv = gen.lower_expr(node.args[0])
-        send = _gen_slot_box(gen, st, sv, vct)
+        arg = node.args[0]
+        if (vct == 'int64_t'
+                and (isinstance(arg, gimple_ctypes.NoneLiteral)
+                     or (isinstance(arg, gimple_ctypes.IdentExpr) and arg.name == 'None'))):
+            # `g.send(None)` on an int-valued generator ('i' or 'w', both
+            # int64_t): the same None box a plain resume sends (coro.py's
+            # trampoline), not the raw 0 that `x = yield` reads as zero.
+            send = gen._call_expr('int64_t', 'mojo_box_none', [])
+        else:
+            st, sv = gen.lower_expr(arg)
+            send = _gen_slot_box(gen, st, sv, vct)
     else:
         send = '0'
     handle = gen._to_int64('MojoGenerator *', av)
@@ -1465,14 +1474,15 @@ def _lower_class_attr_builtin(gen, node, fn):
     return None
 
 
-def _lower_type_new(gen, node):
+def _lower_type_new(gen, node, args=None):
     """`type(name, (Base, ..), {'attr': value, ..})` with a literal base tuple/list and a literal
     dict of string keys: a class made at run time (stage 3 of
     bugs/CODEGEN_enum_runtime_class_creation.md). It is a class-table entry (`mojo_type_new`) whose
     bases are the listed classes and whose dict starts from the namespace; the value is a class
     handle word that `Foo.x`, `Foo.x = v` and `getattr(Foo, ..)` read through the class table.
-    None when the arguments are not that literal shape (the caller refuses by name)."""
-    name_n, bases_n, ns_n = node.args
+    None when the arguments are not that literal shape (the caller refuses by name).
+    `args` overrides `node.args` (`type.__new__(type, n, b, ns)` passes its last three)."""
+    name_n, bases_n, ns_n = node.args if args is None else args
     literal_bases = isinstance(bases_n, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr))
     bases_list = None
     if not literal_bases:
@@ -1515,6 +1525,8 @@ def _lower_type_new(gen, node):
     if ns_dict is not None:
         gen._void_call('mojo_type_fill_from_dict', [('int64_t', cls), ('MojoDict *', ns_dict)])
         gen._dyn_word_vals.add(cls)
+        gen._rtobj_kinds[('v', cls)] = 'class'
+        gen._rt_classes_made = True
         return 'int64_t', cls
     for key, (_k, vnode) in zip(keys, ns_n.pairs):
         vt, vv = gen.lower_expr(vnode)
@@ -1523,6 +1535,8 @@ def _lower_type_new(gen, node):
         gen._void_call('mojo_classobj_setattr',
                        [('int64_t', cls), ('char *', gen._intern_string(key)), ('int64_t', vw)])
     gen._dyn_word_vals.add(cls)
+    gen._rtobj_kinds[('v', cls)] = 'class'
+    gen._rt_classes_made = True
     return 'int64_t', cls
 
 
@@ -1561,6 +1575,25 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         gen._struct_slot_kinds[_ch] = ginf._RuntimeKinded(['int', 'str'])
         gen._maybe_kinds_vals.add(_ch)
         return 'MojoList *', _ch
+    # `type.__new__(type, name, bases, ns)` is `type(name, bases, ns)` spelled through the
+    # metaclass slot (what `EnumType.__new__` writes as `type.__new__(metacls, ..)`). Only the
+    # plain `type` metaclass is modelled; a user metaclass (stage 4) is refused by name.
+    if (isinstance(node.func, gimple_ctypes.MemberExpr)
+            and _as_str(node.func.member) == '__new__'
+            and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
+            and node.func.obj.name == 'type'
+            and 'type' not in gen.var_types
+            and len(node.args) == 4 and not getattr(node, 'kwargs', None)):
+        _m = node.args[0]
+        if isinstance(_m, gimple_ctypes.IdentExpr) and _m.name == 'type':
+            _cls = _lower_type_new(gen, node, node.args[1:])
+            if _cls is not None:
+                return _cls
+        raise RuntimeError(
+            'cannot compile module: type.__new__(metacls, name, bases, namespace) creates a '
+            'class at run time, which the compiled path models only for metacls `type`, a '
+            'literal-or-dict-variable namespace and tuple/list bases '
+            '(bug:CODEGEN_enum_runtime_class_creation)')
     # `setattr(Cls, name, v)` / `getattr(Cls, name[, d])` / `hasattr(Cls, name)` / `delattr(Cls, name)`
     # where the first argument is a CLASS (a struct name, or `cls` in a classmethod): attributes
     # the class body never declared live in the run-time class table.
@@ -4093,7 +4126,11 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         return _lower_inlined_lambda_call(gen, _red_lambda, node)
 
     if _callee_is_fnptr_value(gen, fname_raw):
-        return gen._lower_fnptr_call(fname_raw, _fname_var_ctype, node)
+        _ct, _cv = gen._lower_fnptr_call(fname_raw, _fname_var_ctype, node)
+        # `Foo(..)` on a local holding a run-time class makes an INSTANCE of it
+        if gen._rtobj_kinds.get(('l', fname_raw)) == 'class':
+            gen._rtobj_kinds[('v', _cv)] = 'inst'
+        return _ct, _cv
 
     # PART 6 (2026-10-23, closing piece): the system stat() C-ABI FFI — see
     # _CABI_STAT_BLOCK's own comment for the full measured chain, the
@@ -4345,6 +4382,12 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
     if obj_type == 'char *' and _as_str(obj_val) in gen._dyn_word_locals:
         obj_val = gen._new_val('int64_t', f'(int64_t){obj_val}')
         obj_type = 'int64_t'
+    if gen._rtobj_kinds.get(('l', type_name)) == 'class':
+        # a class made at run time: the class table answers (instance's class or a base of it)
+        cw = gen._new_val('int64_t', type_name)
+        r = gen._call_expr('int', 'mojo_isinstance_rtclass',
+                           [('int64_t', gen._to_int64(obj_type, obj_val)), ('int64_t', cw)])
+        return gen._new_val('_Bool', f'(_Bool){r}')
     if type_name == 'type':
         return gen._new_val('_Bool', '0')  # isinstance(x, type) always false in C
     if type_name == 'tuple':
@@ -4402,6 +4445,13 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
         target = gen._new_val('int64_t', f'(int64_t){target_id}')
         cmp_t = gen._new_temp('_Bool')
         gen._emit(f'  {cmp_t} = {tag} == {target};')
+        if gen._rt_classes_made:
+            # an instance of a class made at run time that derives this static class: its
+            # header is not a struct tag, the class table knows the bases
+            rt = gen._call_expr('int', 'mojo_isinstance_rtclass', [('int64_t', addr), ('int64_t', target)])
+            both = gen._new_temp('_Bool')
+            gen._emit(f'  {both} = {cmp_t} | (_Bool){rt};')
+            return both
         return cmp_t
     _TYPE_IDS = {'bool': '1', 'int': '2', 'float': '3', 'str': '4',
                  'list': '5', 'dict': '6', 'set': '7', 'tuple': '8',
@@ -6445,6 +6495,61 @@ def _lower_recursive_self_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr
     return ret_type, gen._call_expr(ret_type, fname_c, full_arg_pairs)
 
 
+def _build_outer_closure_env(gen, ci):
+    """The env to hand a SIBLING nested closure `ci` from inside another lifted closure:
+    a fresh `ci.env_struct`, each captured field copied from the current closure's own env
+    where the name matches (else from local scope), or a NULL env when this scope owns
+    nothing to copy. Shared by a CALL to the sibling (`_lower_outer_closure_call`) and by
+    its use as a VALUE (`emit_exprs._closure_value`): the value path used to pass a NULL
+    env unconditionally, so a capturing closure handed on from inside another closure
+    crashed when its callee read a capture."""
+    _cur_env = getattr(gen, '_env_param', '')
+    _cur_caps = getattr(gen, '_captures', {}) or {}
+    if _cur_env and getattr(ci, 'captures', None):
+        new_env = gen._new_temp(f'{ci.env_struct} *')
+        gen._emit(f'  {new_env} = {gimple_ctypes._safe_name("_alloc_" + ci.env_struct)} ();')
+        for vname, vtype in ci.captures:
+            fld = gimple_ctypes._c_field_name(vname)
+            # The FIELD's type, not the capture's value type: a
+            # by-reference capture (`ci.mut_names`) is a pointer to the
+            # owner's box, and this store is the only thing that has to
+            # agree with the typedef. See
+            # `gimple_ctypes._env_field_ctype`.
+            fct = gimple_ctypes._env_field_ctype(ci, _as_str(vname))
+            if vname in _cur_caps:
+                # Forwarding from THIS closure's own env, which holds the
+                # name under its OWN field type: `_gimple_mut_ptr` is the
+                # box pointer `_gen_lifted_closure` preloaded for a
+                # by-reference capture, so it is both the discriminator
+                # and the value (a by-value capture arrives through
+                # `_env-><name>`, and a value the callee wants by
+                # reference has to be boxed -- through a plain local,
+                # because GIMPLE cannot take a component_ref's address).
+                _own_box = (getattr(gen, '_gimple_mut_ptr', None) or {}).get(vname)
+                _cur_t = _as_str(_cur_caps.get(vname) or 'int64_t')
+                _cur_is_ptr = _cur_t.endswith(' *')
+                if _own_box:
+                    tmp = gen._new_val(
+                        fct, _own_box if fct.endswith(' *') else f'*{_own_box}')
+                elif fct.endswith(' *') and not _cur_is_ptr:
+                    _boxed = gen._new_val(_cur_t, f'{_cur_env}->{fld}')
+                    tmp = gen._new_val(fct, f'&{_boxed}')
+                else:
+                    tmp = gen._new_val(fct, f'{_cur_env}->{fld}')
+                gen._emit(f'  {new_env}->{fld} = {tmp};')
+            elif vname in gen.var_types:
+                _boxed = _boxed_capture_source(gen, vname, fct)
+                if _boxed is not None:
+                    gen._safe_coerce_emit(_boxed[0], fct, _boxed[1],
+                                          f'{new_env}->{fld}')
+                else:
+                    gen._safe_coerce_emit(gen.var_types.get(vname, vtype), fct,
+                                          gen._write_dest(vname),
+                                          f'{new_env}->{fld}')
+        return new_env
+    return gen._new_val(f'{ci.env_struct} *', f'({ci.env_struct} *)0')
+
+
 def _lower_outer_closure_call(gen, fname_raw: str, ci, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """Call a SIBLING nested closure of the same parent from inside another
     lifted closure/lambda body (`gen_module_impl`'s `_scan_body_for_local_
@@ -6473,53 +6578,7 @@ def _lower_outer_closure_call(gen, fname_raw: str, ci, node: gimple_ctypes.CallE
     arg_pairs = _pack_closure_star_slots(gen, ci, node, arg_pairs)
     fname_c   = gimple_ctypes._safe_name(lifted)
     if ci.env_struct:
-        _cur_env = getattr(gen, '_env_param', '')
-        _cur_caps = getattr(gen, '_captures', {}) or {}
-        if _cur_env and getattr(ci, 'captures', None):
-            new_env = gen._new_temp(f'{ci.env_struct} *')
-            gen._emit(f'  {new_env} = {gimple_ctypes._safe_name("_alloc_" + ci.env_struct)} ();')
-            for vname, vtype in ci.captures:
-                fld = gimple_ctypes._c_field_name(vname)
-                # The FIELD's type, not the capture's value type: a
-                # by-reference capture (`ci.mut_names`) is a pointer to the
-                # owner's box, and this store is the only thing that has to
-                # agree with the typedef. See
-                # `gimple_ctypes._env_field_ctype`.
-                fct = gimple_ctypes._env_field_ctype(ci, _as_str(vname))
-                if vname in _cur_caps:
-                    # Forwarding from THIS closure's own env, which holds the
-                    # name under its OWN field type: `_gimple_mut_ptr` is the
-                    # box pointer `_gen_lifted_closure` preloaded for a
-                    # by-reference capture, so it is both the discriminator
-                    # and the value (a by-value capture arrives through
-                    # `_env-><name>`, and a value the callee wants by
-                    # reference has to be boxed -- through a plain local,
-                    # because GIMPLE cannot take a component_ref's address).
-                    _own_box = (getattr(gen, '_gimple_mut_ptr', None) or {}).get(vname)
-                    _cur_t = _as_str(_cur_caps.get(vname) or 'int64_t')
-                    _cur_is_ptr = _cur_t.endswith(' *')
-                    if _own_box:
-                        tmp = gen._new_val(
-                            fct, _own_box if fct.endswith(' *') else f'*{_own_box}')
-                    elif fct.endswith(' *') and not _cur_is_ptr:
-                        _boxed = gen._new_val(_cur_t, f'{_cur_env}->{fld}')
-                        tmp = gen._new_val(fct, f'&{_boxed}')
-                    else:
-                        tmp = gen._new_val(fct, f'{_cur_env}->{fld}')
-                    gen._emit(f'  {new_env}->{fld} = {tmp};')
-                elif vname in gen.var_types:
-                    _boxed = _boxed_capture_source(gen, vname, fct)
-                    if _boxed is not None:
-                        gen._safe_coerce_emit(_boxed[0], fct, _boxed[1],
-                                              f'{new_env}->{fld}')
-                    else:
-                        gen._safe_coerce_emit(gen.var_types.get(vname, vtype), fct,
-                                              gen._write_dest(vname),
-                                              f'{new_env}->{fld}')
-            full_arg_pairs = [(f'{ci.env_struct} *', new_env)] + arg_pairs
-        else:
-            null_env = gen._new_val(f'{ci.env_struct} *', f'({ci.env_struct} *)0')
-            full_arg_pairs = [(f'{ci.env_struct} *', null_env)] + arg_pairs
+        full_arg_pairs = [(f'{ci.env_struct} *', _build_outer_closure_env(gen, ci))] + arg_pairs
     else:
         full_arg_pairs = arg_pairs
     if ret_type == 'void':

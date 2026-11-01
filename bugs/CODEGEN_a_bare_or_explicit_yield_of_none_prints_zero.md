@@ -1,5 +1,187 @@
 # CODEGEN_a_bare_or_explicit_yield_of_none: a None yield value prints 0
 
+## Status (2026-11-01, seventeenth round, work/bug-codegen-a-bare-or-explicit-yield-of: yield-side probe, receive side filed separately, no code changed)
+
+**Probed (default path, CPython oracle on the same text), the yield side only:**
+
+| shape | compiled | CPython |
+|---|---|---|
+| `use(g())` where `use` loops `for v in it` (lone None) | refused: "generator function(s) ... straight-line" | `None` |
+| `it = g(); print(next(it, 5))` (lone bare yield) | `None` | `None` |
+| `for v in g(): print(v)` with `yield` then `yield 'a'` | `None`, `a` | `None`, `a` |
+
+The first row is an honest compile refusal, not a silent 0. The other two match.
+So the yield side has no silent `0` left on the default path among these shapes.
+
+**New silent wrong value found, on the RECEIVE side, filed as its own bug:**
+a None sent into a generator (`x = yield` resumed by `next(it)`) prints `0`. It
+goes through the int64 resume slot, which has no None kind, so it is a different
+fix (a resume ABI change) and is not claimed as fixed here. (That bug is now
+fixed on the default path: the resume word is the None box for int-valued
+generators, and a receive-only `x = yield` name keeps it.)
+
+**Not changed this round:** no code, no test. The three open items above stand:
+(1) the non-int64 mixed store is refused (round 16); (2) `v is None` on a tagged
+False/0 is the `v is None` on a tagged False/0 bug (fixed; pinned by `run_tagged_none_identity_tests`); (3) a lone
+None whose consumer is outside the tagged set is refused (`NONE_YIELD_CPP_REFUSAL`
+and the `_generator_value_kind` refusal in `mojo/middle/coro.py`).
+
+## Status (2026-11-01, sixteenth round, work/bug-codegen-a-bare-or-explicit-yield-of: open item 1 decided, refused, partial)
+
+**Probe (item 1 of the fifteenth round), measured before this round:** a
+mixed name whose other store is not int64, with `g()` yielding 1, None, 2:
+- `x = "s"; for v in g(): x = v; print(x)`: the compiled program SEGFAULTS
+  (exit -11, no output). The copy unwrapped the box into a `char *` local.
+- `x = 0.5; for v in g(): x = v; print(x)`: prints `1.0` / `0.0` / `2.0` where
+  CPython prints `1` / `None` / `2`. The copy unwrapped into a double local.
+
+**Decision: refuse, do not box.** A Mojo name has one type, so a str or float
+store cannot share a name with a tagged word. The box cannot carry a `char *`
+or a double, and boxing those would be a new word kind for no valid program.
+The refusal is the honest answer, the same shape as the round-3 refusal.
+
+**Landed:**
+- `emit_infra.py`: `MIXED_NAME_NON_INT64_REFUSAL` (message) and
+  `is_non_int_c_type(ctype)` (true for a float/double or a pointer type; an
+  integer type, bool included, is the word's own kind and is not refused).
+- `emit_stmts.py`, simple-name bind: raises `RuntimeError` when (a) a tagged
+  word or a tagged for-target copy is stored into a name whose declared type is
+  non-int, or (b) a non-int store goes into a name that `tagged_mixed_name`
+  says holds a tagged word. Both are refused before any store is emitted.
+- Pins (`run_tagged_for_target_bind_tests`): `tagged_for_target_copy_into_str_refused`,
+  `tagged_for_target_copy_into_float_refused`,
+  `tagged_for_target_plain_float_store_after_copy_refused`. Fail-before: all
+  three FAIL with "expected a refusal, but it compiled". After: all PASS.
+- The existing mixed pins (`tagged_for_target_copy_mixed_*`, `..._mixed_name_none_*`)
+  still pass: the `y = next(h)` then `for y in [...]` shape is a for-loop bind,
+  not a simple-name bind, so the rule does not reach it.
+
+**Open-item status after this round:**
+1. Item 1 (non-int64 mixed store): DECIDED and refused. The silent `0` / `1.0`
+   and the segfault are gone for str and float. Whether a box can carry a
+   str/float store is not needed for any valid Mojo program, so it stays refused.
+2. `v is None` on a tagged False/0: unchanged, see
+   the `v is None` on a tagged False/0 bug (fixed; pinned by `run_tagged_none_identity_tests`).
+3. Lone None yield on the cpp path: unchanged (`NONE_YIELD_CPP_REFUSAL`).
+
+**Gate note for the integrator (not run here):** the refusal is a new
+`RuntimeError` from the simple-name bind (`emit_stmts.py`), which every bind
+reads. Compare `stdlib-dylib`'s `skip` count and `stdlib-syntax`'s `U` before
+and after. Only a module that stores a str/float into a name that also receives
+a tagged generator word should change; a rise in `U` on such a module means a
+real program was relying on the old unwrap, which was already wrong for None.
+
+## Status (2026-11-01, fifteenth round, work/bug-codegen-a-bare-or-explicit-yield-of-1762: mixed-name copy keeps the box, partial)
+
+**Landed (real behaviour change on both paths): open item 3 of the fourteenth
+round, for int64 values.** `x = 0; for v in g(): x = v; print(x)` over a
+generator yielding 1, None, 2 printed `0` for the None (CPython `None`) on both
+paths before this round, and prints `None` after it.
+- `emit_infra.py`: `tagged_mixed_name(gen, name)` (new) answers True iff `name`
+  has at least one tagged binding (a copy of a tagged for target or of a tagged
+  `next()` name, or `next(g)` over a tagged generator) AND `tagged_next_bind_name`
+  answers False for it (a plain binding exists). It exits early when the module
+  has no `mixed_slots` generator, so ordinary functions pay nothing.
+- `emit_stmts.py`: at the simple-name bind, an int64 store into such a name is
+  boxed with `mojo_box_int` unless the value is already a box (`_boxed_vals` /
+  `_tagged_word_vals`), and the local is registered as a box exactly as the
+  all-tagged case is. So every int64 store into a mixed name is a box, and
+  reads resolve the box by kind.
+
+**Choice made here (the round-14 "per-store box representation" option):** the
+local keeps a box, and plain int64 stores are boxed at the bind site. The other
+option in the doc, a `_dyn_word_locals` word of unknown kind, was rejected: a
+bare word cannot tell None from int 0 (both are bits 0), so no runtime tag on a
+word can carry the None kind; only the box can.
+
+**Pins** (`run_tagged_for_target_bind_tests`, `test_gimple_generator_runner.py`):
+`tagged_for_target_copy_mixed_name_none_{default,cpp}`: the mixed copy shape
+(yields 1, None, 2) plus arithmetic, `+=`, `*`, comparison and a plain-generator
+store, so the box must unwrap for those readers too. Fail-before, measured by
+restoring HEAD's `emit_infra.py`/`emit_stmts.py` (patch saved, not checkout):
+both FAIL, printing `0` where CPython prints `None` (`1/0/2/...` on both
+paths). The two `mixed_*` pins from earlier rounds pass on both trees (guards).
+After: the group is 6/0, both paths match CPython.
+
+**Pin registration fix in the same round:** `run_tagged_for_target_bind_tests`
+was defined but never called from `run_tests()`, so none of its pins (the
+round-14 ones included) ran in `test_gimple_generator_runner.py`. It is now
+called there. The full file was run before that wiring (389/0) and not re-run
+after it; the group itself was run on the final code.
+
+**Still open (this doc keeps it):**
+
+1. **A mixed name whose plain store is NOT int64** (a str or float stored into
+   the same local) is not boxed here: it keeps the old unwrap, which is wrong
+   for a None yield copied beside it. Not measured in this round. Next step:
+   either box a store of any kind (the local must then be typed a word-box for
+   every store), or refuse the mixed name with an explicit error if its
+   non-int64 stores cannot be boxed. Decide with a probe first.
+2. **`v is None` on a tagged False/0 is True**: still filed as
+   the `v is None` on a tagged False/0 bug (fixed; pinned by `run_tagged_none_identity_tests`).
+3. **A lone None yield on the cpp path is refused for consumers the tagged word
+   does not cover** (`NONE_YIELD_CPP_REFUSAL`, round 12). Not a silent 0.
+
+**Gate note for the integrator (not run here):** the change is in the simple-name
+bind rule (`emit_stmts.py`), which every int64 store reads. Run `compile_stdlib.py`
+and compare `U`/`skip` before and after. The only new output is a `mojo_box_int`
+call on a store into a name that is ALSO bound to a tagged generator value, so
+the change should be invisible to every module without one; a rise in `U` would
+point at a mixed name that now reads a box where it expected a word.
+
+## Status (2026-11-01, fourteenth round, work/bug-codegen-a-bare-or-explicit-yield-of: for-loop target copy keeps the box, partial)
+
+**Landed (real behaviour change on both paths): open item 1 of the thirteenth
+round.** `x = v` where `v` is a for-loop target over a tagged generator keeps
+the yield's box, so `print(x)` prints `None` / `True` and `x == None` is right.
+- `emit_infra.py`: `tagged_for_target_name(gen, name)` (new) answers True iff
+  every binder of `name` is a `for name in <tagged generator>` loop
+  (`_tagged_generator_iterable`, resolved from `gen._generator_api`'s
+  `mixed_slots`, directly or through a local bound once to the call).
+  `tagged_next_bind_name` accepts such a name as a copy source.
+- `emit_stmts.py`: the simple-name bind keeps the box for `x = v` when `v` is a
+  boxed for-target copy source (`_for_copy`), and raises an internal error
+  (not a silent bare word) if the static rule says every store of `x` is a box
+  but this store is not.
+- `emit_infra.py` `_local_bindings`: the parser keeps a `for` target as its
+  source TEXT (a str, see `for_target_single_name`), which `idents_named` never
+  saw. A `for name in ...` is now counted as a binder of `name`. This was a
+  hole in `tagged_next_bind_name` too (a `next(g)` name rebound by a `for` looked
+  tagged); the copy-after-loop shape in the pin does not observe it on either
+  tree, so it is landed as a soundness fix, not as a measured fix.
+
+**Pins** (`run_tagged_for_target_bind_tests` in `test_gimple_generator_runner.py`):
+`tagged_for_target_copy_{default,cpp}` (the open shape: yields 1, None, True,
+`x = v; print(x); print(x == None)`) and `tagged_for_target_copy_mixed_{default,cpp}`
+(a name also bound to a plain value, a plain generator's loop target, and a
+`next()` name rebound by a `for`: must stay correct).
+Fail-before, measured by putting the pre-fix `emit_infra.py`/`emit_stmts.py`
+back (copy from `git show HEAD:`, not checkout): the open-shape pair FAILS
+(`0`, `False` where CPython says `None`, `True`); the mixed pair passes before
+and after (guard). After: 4/0.
+
+**Still open (this doc keeps it):**
+
+1. **`v is None` on a tagged False/0 is True**: unchanged, filed as
+   the `v is None` on a tagged False/0 bug (fixed; pinned by `run_tagged_none_identity_tests`).
+2. **A lone None yield on the cpp path is refused** (`NONE_YIELD_CPP_REFUSAL`) for
+   consumers the tagged word does not cover (round 12). Not a silent 0, but not
+   yet a value either.
+3. **A copy of a for target whose name also has a plain binding** still unwraps
+   (the static rule refuses, as it must); `x = 0; for v in g(): x = v` prints
+   `0` for a None yield. That is the conservative answer, not a fix: the name's
+   every store would have to be a box for the local to keep one. Next step: a
+   per-store box representation for mixed names, or a retype of `x` to a
+   word-of-unknown-kind local (`_dyn_word_locals`) that keeps the kind by a
+   runtime tag.
+
+**Gate note for the integrator (not run here):** the change is in the
+`x = v` bind rule and `_local_bindings`, which every simple-name bind reads.
+Run `compile_stdlib.py` and compare `U`/`skip` before and after. The
+`RuntimeError` guard in `emit_stmts.py` is the one place a new error can appear:
+any `U` rise with an "internal: copy of a tagged for-loop target" message is
+this change.
+
 ## Status (2026-11-01, thirteenth round, work/bug-codegen-a-bare-or-explicit-yield-of: `v == None` on a None yield, partial)
 
 **Re-measured first (both paths, CPython oracle):** the rounds' matrix still
@@ -36,7 +218,7 @@ checkout) and running only that group: both FAIL (the None row answers
    and re-run its rebinding rule; pin `x = v; print(x)` on both paths.
 2. **`v is None` on a tagged False/0 is True** (same root as the old bit
    comparison, not None-specific). Filed as
-   `bugs/CODEGEN_is_none_on_a_tagged_false_or_zero_is_true.md` with its next step.
+   the `v is None` on a tagged False/0 bug (fixed; pinned by `run_tagged_none_identity_tests`) with its next step.
 
 **Gate note for the integrator (not run here):** the `==`/`!=` change applies to
 any boxed operand compared to a None literal, not only tagged generator values.
