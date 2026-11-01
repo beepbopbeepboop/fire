@@ -3411,6 +3411,26 @@ main()
 """)
 
 
+    # A lone None generator PASSED TO A FUNCTION (`use(g())`, whose parameter is
+    # iterated there) is outside `_tagged_consumers_ok`, so the default path
+    # refuses it. The refusal is the pinned behaviour: before the refusal existed
+    # this shape printed the raw int64 0. It must stay a refusal, never a silent 0,
+    # until a tagged word can cross a call boundary (see
+    # bugs/CODEGEN_a_tagged_generator_passed_to_a_function_is_refused.md).
+    test_generator_refused("none_yield_lone_passed_to_function_refused", """\
+def g():
+    yield
+
+def use(it):
+    for v in it:
+        print(v)
+
+def main():
+    use(g())
+main()
+""", "a None yield (bare `yield` / `yield None`) has no value slot")
+
+
 def run_tagged_word_cpp_tests():
     # The C++ escape hatch (`MOJO_CORO=cpp`) carries a generator whose yields
     # mix kinds as ONE tagged word per slot: each yield is boxed by its kind

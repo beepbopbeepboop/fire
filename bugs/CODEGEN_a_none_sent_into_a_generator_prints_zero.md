@@ -1,14 +1,13 @@
 # CODEGEN_a_none_sent_into_a_generator_prints_zero: `x = yield` resumed with None prints 0
 
-## Status (2026-11-01, found while probing bugs/CODEGEN_a_bare_or_explicit_yield_of_none_prints_zero.md, round 17; not fixed)
+## Status (2026-11-01, found while closing the "a None yield value prints 0" family, 2026-11-01; not fixed)
 
 The value a generator receives at `x = yield` is an int64 slot in the
 resume ABI, and it has no None kind. A resume with None (`next(it)`, which
 sends None, or `it.send(None)`) therefore hands the generator the raw `0`,
 and `print(x)` prints `0` where CPython prints `None`. This is the RECEIVE
 side of the None-value family: the yield side (`yield` / `yield None` as an
-OUTPUT) is the other bug doc, and it is fixed on the default path for every
-consumer that compiles.
+OUTPUT) is fixed on the default path for every consumer that compiles.
 
 ### Repro (default path, measured 2026-11-01)
 
