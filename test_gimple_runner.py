@@ -4062,6 +4062,17 @@ print(b)
 print(type(b) == bytes, len(b) == 3, b == b'abc')
 """)
 
+    test_gimple_matches_cpython("gimple_str_encode_errors_and_decode_remaining", """\
+s = "é"
+print(s.encode("ascii", "replace"))
+print(s.encode("ascii", "ignore"))
+print(b"\xff".decode("ascii", "replace"))
+try:
+    b"\xff\xfe".decode("utf-8")
+except UnicodeDecodeError:
+    print("utf-8 decode refused malformed")
+""")
+
     test_gimple_stdout("gimple_set_str_rehash_unchanged", """\
 s = set()
 for i in range(30):

@@ -6592,8 +6592,14 @@ def _lower_str_method(gen, ov: str, method: str, args: list, kwargs=None) -> tup
             _enc_val = gen._intern_string('utf-8')
         else:
             _enc_val = _enc[1] if _enc[0] == 'char *' else gen._coerce_to_type(_enc[0], 'char *', _enc[1])
+        _err = next(((gen.lower_expr(_kv)) for _kn, _kv in (kwargs or [])
+                     if _kn == 'errors'), None)
+        if _err is None:
+            _err_val = gen._intern_string('strict')
+        else:
+            _err_val = _err[1] if _err[0] == 'char *' else gen._coerce_to_type(_err[0], 'char *', _err[1])
         return 'MojoBytes *', gen._call_expr('MojoBytes *', 'mojo_bytes_from_str',
-                                             [('char *', cstr_ov), ('char *', _enc_val)])
+                                             [('char *', cstr_ov), ('char *', _enc_val), ('char *', _err_val)])
     if method in ('decode', 'readlink'):
         return gen._stub_result('char *', cstr_ov, f'TODO: {method}')
     # Unknown method on char* — stub
@@ -6825,8 +6831,14 @@ def _lower_bytes_method(gen, ov: str, method: str, args: list, kwargs=None) -> t
             enc = _enc[1]
         else:
             enc = gen._coerce_to_type(_enc[0], 'char *', _enc[1])
+        _err = next(((gen.lower_expr(_kv)) for _kn, _kv in (kwargs or [])
+                     if _kn == 'errors'), None)
+        if _err is None:
+            err = gen._intern_string('strict')
+        else:
+            err = _err[1] if _err[0] == 'char *' else gen._coerce_to_type(_err[0], 'char *', _err[1])
         return 'char *', gen._call_expr('char *', 'mojo_bytes_decode',
-                                        [('MojoBytes *', ov), ('char *', enc)])
+                                        [('MojoBytes *', ov), ('char *', enc), ('char *', err)])
 
     # hashlib(...)'s `.update(data)`/`.hexdigest()` — see _lower_method_call's
     # `hashlib.blake2b/md5/...` construction, which types the accumulator as

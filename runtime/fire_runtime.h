@@ -1114,7 +1114,7 @@ int64_t      mojo_list_count_bytes(MojoList *l, MojoBytes *v);
 MojoBytes *mojo_bytes_empty(void);
 MojoBytes *mojo_bytes_zeros(int64_t n);
 MojoBytes *mojo_bytes_from_list(MojoList *l);      /* list of ints 0-255 */
-MojoBytes *mojo_bytes_from_str(char *s, char *encoding); /* 'utf-8'/'ascii' */
+MojoBytes *mojo_bytes_from_str(char *s, char *encoding, char *errors); /* 'utf-8'/'ascii' */
 MojoBytes *mojo_bytes_from_cstr(const char *s);   /* NUL-terminated copy */
 int64_t    mojo_bytes_len(MojoBytes *b);
 int64_t    mojo_bytes_get(MojoBytes *b, int64_t i); /* -> int 0-255, neg idx ok */
@@ -1156,7 +1156,7 @@ int64_t    mojo_bytes_count(MojoBytes *hay, MojoBytes *needle);
 int64_t    mojo_bytes_count_from(MojoBytes *hay, MojoBytes *needle, int64_t start, int64_t stop);
 int        mojo_bytes_startswith(MojoBytes *b, MojoBytes *p);
 int        mojo_bytes_endswith(MojoBytes *b, MojoBytes *p);
-char      *mojo_bytes_decode(MojoBytes *b, char *encoding);
+char      *mojo_bytes_decode(MojoBytes *b, char *encoding, char *errors);
 char      *mojo_bytes_hex(MojoBytes *b);
 char      *mojo_bytes_hash_hexdigest(MojoBytes *b);  /* hashlib(...).hexdigest() backing */
 MojoBytes *mojo_bytes_removeprefix(MojoBytes *b, MojoBytes *p);
