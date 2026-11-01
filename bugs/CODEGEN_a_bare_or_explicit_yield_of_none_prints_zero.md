@@ -6,6 +6,62 @@ the generator value-slot lattice supports (int / bool / float / str) matches
 CPython on BOTH the local and global generator paths. None is the only
 mismatching type. Owner-level ABI feature; measured and pinned, NOT shipped.
 
+## Status (2026-11-01, fourth round, work/bug-codegen-a-bare-or-explicit-yield-of: `next()` reads the None box)
+
+**Landed (behaviour change, compiled path, measured against CPython):** a
+None-yielding generator consumed by `next()` now COMPILES and prints `None`,
+instead of being refused (third round) or printing `0` (before it).
+- `_tagged_consumers_ok` (`mojo/middle/coro.py`) accepts `next(<handle>)` and
+  `next(g())` / `next(g(), default)` as tagged consumers. `_lower_generator_next`
+  (`mojo/backend_gimple/emit_calls.py`) already marked the result of a `'w'`
+  generator as a boxed word; the two-argument `next(it, default)` form did not,
+  and read its result as a raw int64_t (printed an address for `next(it, 7)`
+  after a None yield). Both forms now mark the result boxed.
+- The `default` of a tagged `next(it, default)` is lowered as a TAGGED word of
+  its own kind (`_tagged_word_value`, emit_calls.py): `None` -> `mojo_box_none`,
+  a float / bool -> its box, an int / pointer by value. So `next(it, None)` and
+  `next(it, 2.5)` render as their values.
+- Side effect (measured, not pinned as a goal): a str/int, bool/str or float/str
+  mixed generator consumed by `next()` also now compiles through the tagged
+  word. Measured against CPython on the default path: all match. (The stack-
+  switch backend refused these mixed kinds before this round, per
+  `_generator_value_kind`'s "mixed int / string yields" refusal; not re-measured
+  on a HEAD snapshot for the default path.)
+- Pins: `run_none_yield_tests` in `test_gimple_generator_runner.py`. The two
+  `*_consumed_by_next_refused` refusal pins are replaced by
+  `none_yield_consumed_by_next` / `bare_none_yield_consumed_by_next` (CPython
+  oracle), and added: `none_yield_direct_next_and_default`,
+  `mixed_str_int_yield_consumed_by_next`. Before the fix the three `next()`
+  cases refuse or print the wrong value (checked on a HEAD snapshot); after,
+  all 8 cases in the group pass.
+
+**Known remaining gap (pre-existing, NOT changed here):** under the
+`MOJO_CORO=cpp` escape hatch, `next()` on a mixed str/int or bool/str
+generator prints a box's ADDRESS (`'1\n4378379896\n2\n'` where CPython prints
+`1\ns\n2`). The same output is produced on HEAD, so this is the C++ emitter's
+`next()` reader, not a regression from this round. The default path is the
+one that is correct; the C++ path is reached only when the stack-switch
+backend refuses the module.
+
+**Still open (next steps, in order):**
+1. Item 2 (explicit `yield None` beside str/float): still REFUSED by the C++
+   typer (`mojo/backend_gimple/cpp_async.py`, the top-level None-yield refusal
+   added in round 3). Next step: the `none` marker in `cpp_core.py`'s
+   yield emission and `_cpp_tag_yield_sites` (cpp_async.py:322), so the C++
+   path boxes a None with `mojo_box_none()` like the stack-switch path does.
+   Until then it is an honest refusal, not a silent 0.
+2. The `MOJO_CORO=cpp` `next()` reader (above): the C++ path's `next()` must
+   box a tagged result the way `_lower_generator_next` does.
+3. The C++ bare-yield emitter line (`cpp_core.py`, `co_yield (int64_t)0`) is now
+   unreachable for a None yield; delete it in a cleanup.
+
+**Gate note for the integrator (not run here, light-worker rules):** this
+round widens which generators take the tagged word. Compare `stdlib-dylib`'s
+`skip <module>:` count and `stdlib-syntax`'s `U` count before and after: a
+str/int, bool/str or float/str generator consumed by `next()` used to be
+refused (a move to source fallback) and now compiles, so a DROP in `skip` is
+expected; a RISE in `skip` or `U` is a regression to bisect.
+
 ## Status (2026-11-01, third round, work/bug-codegen-a-bare-or-explicit-yield-of: refusal, not silent 0)
 
 **Landed (behaviour change, measured before/after):** a None yield that the

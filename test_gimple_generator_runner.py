@@ -3029,9 +3029,9 @@ def run_none_yield_tests():
     # value slot with the integers, so a for loop printed the raw 0 where
     # CPython prints None. A generator with a None yield beside values is now
     # a tagged word (`mojo_box_none`, rendered by the for-loop consumer), and
-    # the oracle is CPython itself, measured at test time. A generator that
-    # is consumed by `next()` is NOT tagged (the tagged word is for-loop-only),
-    # so it keeps its old int64_t slot and is not pinned here.
+    # the oracle is CPython itself, measured at test time. A generator consumed
+    # by `next()` (on a handle, directly, or with a default) reads the same
+    # tagged word, rendered by the boxed result of `_lower_generator_next`.
     test_generator_matches_cpython("none_yield_bare_beside_int_in_for_loop", """\
 def g():
     yield 1
@@ -3119,12 +3119,11 @@ def main():
         print(v)
 main()
 """)
-    # `next()` is not a tagged consumer: the tagged word is rendered only by
-    # the for-loop / list() / comprehension readers, so a None yield consumed
-    # by `next()` has no slot that can carry it. It used to compile to the
-    # int64_t slot and print `0` (CPython: None). It is now an honest refusal,
-    # so the module takes the interpreter path, which prints None.
-    test_generator_refused("none_yield_consumed_by_next_refused", """\
+    # `next()` reads the tagged word too: `_lower_generator_next` marks its
+    # result as a boxed word, so a None yield read by `next(it)` renders as
+    # `None` (it used to print the int64_t slot's `0`). Each shape below is
+    # pinned against the CPython oracle, not a hand-written string.
+    test_generator_matches_cpython("none_yield_consumed_by_next", """\
 def g():
     yield 1
     yield
@@ -3134,8 +3133,18 @@ def main():
     print(next(it))
     print(next(it))
 main()
-""", "a None yield")
-    test_generator_refused("bare_none_yield_consumed_by_next_refused", """\
+""", """\
+def g():
+    yield 1
+    yield
+
+def main():
+    it = g()
+    print(next(it))
+    print(next(it))
+main()
+""")
+    test_generator_matches_cpython("bare_none_yield_consumed_by_next", """\
 def g():
     yield
 
@@ -3143,7 +3152,67 @@ def main():
     it = g()
     print(next(it))
 main()
-""", "a None yield")
+""", """\
+def g():
+    yield
+
+def main():
+    it = g()
+    print(next(it))
+main()
+""")
+    # `next(g())` direct, and the two-argument default form: a default of
+    # None or of a float is itself a tagged word, so it renders by its kind.
+    test_generator_matches_cpython("none_yield_direct_next_and_default", """\
+def g():
+    yield 1
+    yield
+
+def main():
+    print(next(g()))
+    print(next(g(), 5))
+    it = g()
+    print(next(it))
+    print(next(it, 2.5))
+    print(next(it, 2.5))
+main()
+""", """\
+def g():
+    yield 1
+    yield
+
+def main():
+    print(next(g()))
+    print(next(g(), 5))
+    it = g()
+    print(next(it))
+    print(next(it, 2.5))
+    print(next(it, 2.5))
+main()
+""")
+    test_generator_matches_cpython("mixed_str_int_yield_consumed_by_next", """\
+def g():
+    yield 1
+    yield "s"
+
+def main():
+    it = g()
+    print(next(it))
+    print(next(it))
+    print(next(it, "dflt"))
+main()
+""", """\
+def g():
+    yield 1
+    yield "s"
+
+def main():
+    it = g()
+    print(next(it))
+    print(next(it))
+    print(next(it, "dflt"))
+main()
+""")
 
 
 def run_tests():
@@ -7979,10 +8048,10 @@ def main():
 main()
 """)
 
-    # ...but any consumer that is NOT a for / list / comprehension (here `next`
-    # of a bound handle) would read the box's address as an int, so the
-    # generator keeps its refusal.
-    test_generator_refused("generator_mixed_kind_yields_consumed_by_next_refused", """\
+    # ...and `next` of a bound handle reads the same tagged word: its result is
+    # a boxed word (`_lower_generator_next`), so the str renders as its text,
+    # not as the box's address an int64_t read would print.
+    test_generator_matches_cpython("generator_mixed_kind_yields_consumed_by_next", """\
 def g():
     yield "a"
     yield 1
@@ -7992,7 +8061,17 @@ def main():
     print(next(it))
 
 main()
-""", "all values must agree on one scalar type")
+""", """\
+def g():
+    yield "a"
+    yield 1
+
+def main():
+    it = g()
+    print(next(it))
+
+main()
+""")
 
     # CPython's `os.fwalk` / `_fwalk` (fd-relative walk) compiled whole: stat /
     # open(dir_fd=) / close / scandir(fd) / DirEntry.stat / samestat / S_ISDIR,
