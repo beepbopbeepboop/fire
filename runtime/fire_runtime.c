@@ -1422,14 +1422,6 @@ void mojo_list_append_word(MojoList *l, int64_t w)
     _list_word_push(l, 'i', w, 'i');
 }
 
-/* A string slot appended under the 'p' kind: the codegen KNOWS this slot is a string (a literal or a
- * str-typed value), including a literal that lives in a C++ coroutine unit and is not in the
- * runtime's registered string pool, which `mojo_list_append_word` could only classify as an integer. */
-void mojo_list_append_str_kinded(MojoList *l, const char *v)
-{
-    _list_word_push(l, 'p', (int64_t)(uintptr_t)v, 'i');
-}
-
 /* `lst.append(<float>)` where the list's static element kind is `prior` (see
  * `_list_word_push`): the double's bits under the 'd' kind, so the element
  * stays a double and is not truncated to its int value by the int64_t slot. */

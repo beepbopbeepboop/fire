@@ -18814,7 +18814,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # struct TWICE, so one ask is a whole-struct walk: the loop below asked it
     # once per function (1 031 of them on `myinterpreter.py`, 2.9 s of that
     # file's 3.8 s), `_one_word_field_map` once per function, and
-    # `model.one_field_mutating_methods` once per method (389). Derived here
+    # `model.one_field_mutating_methods` once per method (382). Derived here
     # beside the other two and threaded, on the measurement that makes it sound:
     # §3.1 of `bugs/formal/FORMAL_build_cost_2026-10-03.md`, 0 of 7 788 (question,
     # struct) pairs changing their answer inside one call, `struct_is_one_field`
@@ -21734,7 +21734,7 @@ def _runtime_library_for(ordered: list, arch: str, fmt: str):
     on the tree that measured it and means nothing to a reader on any other
     one. The tree-level figures live in one place and are checked against the
     live census by `test_runtime_header_scan.py` — `bugs/formal/FORMAL_known_limits.md`
-    §3.1 for the word-shaped surface (846 entry points, 389 of them word-shaped,
+    §3.1 for the word-shaped surface (838 entry points, 382 of them word-shaped,
     measured over every header in `runtime/`).
 
     Checking the intersection rather than linking optimistically is what keeps

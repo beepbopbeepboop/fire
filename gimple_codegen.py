@@ -2706,8 +2706,6 @@ class GimpleGen:
         # name of the function currently being emitted when it is one of them (''
         # otherwise). See emit_methods._frame_enter.
         self._frames_mods: set = set()
-        # True while the body of a stack-switch (A3) coroutine is being lowered; see emit_loops.
-        self._cur_func_is_coro: bool = False
         self._frame_func: str = ''
         self._owned_free_candidates: set = set()
         self._owned_free_pushed: set = set()

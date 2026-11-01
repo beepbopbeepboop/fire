@@ -6,4 +6,5 @@ deleted in the same commit, as for any bug.
 
 | doc | what it needs | for |
 |---|---|---|
+| `CODEGEN_check_all_callable_return_type.md` | research: whole-program reverse-import index (CAS key change) vs local vs refusal | Sonnet 5.5 (research, then a decision) |
 | `CODEGEN_frame_model_for_test_frame.md` | research: how much of a frame model compiled code can have, within the C API | Sonnet 5.5 (research, then a decision) |

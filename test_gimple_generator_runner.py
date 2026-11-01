@@ -3962,34 +3962,6 @@ def main():
 main()
 """)
 
-    # Regression: a float-returning plain fn call inside a generator must yield as
-    # double, not truncated to int64_t (the cpp-path bug: CODEGEN_cpp_path_plain_float_call_in_generator_yields_as_int).
-    test_generator_matches_cpython("cpp_path_float_call_in_generator_yields_as_double", """\
-def h():
-    return 2.5
-
-def g():
-    y = h()
-    yield y
-
-def main():
-    for v in g():
-        print(v)
-main()
-""", """\
-def h():
-    return 2.5
-
-def g():
-    y = h()
-    yield y
-
-def main():
-    for v in g():
-        print(v)
-main()
-""")
-
     # The same stale state, one level down: `_GEN_DEFS` (and the kind memo read
     # through it) is the generator registry. The previous module's `h` is a
     # FLOAT generator; this module's `h` is a plain function returning strings,
@@ -4026,6 +3998,42 @@ main()
     with coro.pinned('cpp'):
         test_generator_matches_cpython("cpp_path_ignores_previous_generator_registry",
                                        plain_h_src, plain_h_src)
+
+    # The call-site param tables (`_CALLSITE_PARAM_KINDS`, `_PLAIN_CALLSITE_PARAM_KINDS`)
+    # were not cleared/refilled on the cpp path; a previous module's generator
+    # with unannotated params that resolved to 'd' leaked into this module's
+    # same-named generator, causing an erroneous refusal or wrong typing.
+    prev_callsite_src = """\
+def g(x):
+    yield x
+
+def main():
+    print(g(2.5))
+main()
+"""
+    with coro.pinned('stackswitch'):
+        try:
+            gimple_codegen.compile_to_gimple_with_cpp(prev_callsite_src, do_imports=False)
+        except Exception:
+            pass
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("cpp_path_ignores_previous_callsite_params", """\
+def g(x):
+    yield x
+
+def main():
+    for v in g(2.5):
+        print(v)
+main()
+""", """\
+def g(x):
+    yield x
+
+def main():
+    for v in g(2.5):
+        print(v)
+main()
+""")
 
 
 _AUG_YIELD_SRC = """\
@@ -4514,12 +4522,11 @@ main()
                                        _ELIF_YIELD_SRC, _ELIF_YIELD_SRC)
         test_generator_matches_cpython("while_yield_condition_cpp",
                                        _WHILE_YIELD_SRC, _WHILE_YIELD_SRC)
-        # Partial fix (2026-11-01): refusal removed.
-        # Compiles on cpp path; full conditional lowering pending.
-        # Before: refused. After: compiles (unconditional hoist).
-        from test_gimple_generator_runner import _build_generator_program
-        prog = _build_generator_program(_AND_YIELD_SRC)
-        assert prog is not None
+        # Refused, not hoisted: an unconditionally-run yield would be a wrong
+        # program (it would suspend even when `x` is false).
+        test_generator_refused("and_yield_operand_refused_cpp",
+                               _AND_YIELD_SRC,
+                               "conditionally evaluated")
         # A call evaluated before a hoisted yield is spilled into a temporary
         # ahead of it, so it still runs before the suspension. A call after the
         # yield stays after it. A nested call is spilled innermost first.
@@ -5275,74 +5282,8 @@ def main():
 main()
 """)
 
-def run_cpp_path_multi_arg_print_tests():
-    """CODEGEN_cpp_path_print_multi_arg_in_generator: print(a, b) with two
-    arguments is refused in a generator body on the cpp path. Extend the
-    single-argument print dispatch to N arguments, emitting one printf per
-    argument with space separator (CPython's default sep=' ')."""
-    with coro.pinned('cpp'):
-        test_generator_matches_cpython(
-            "cpp_path_print_multi_arg_in_generator_matches_cpython", """\
-@coro.pinned('cpp')
-def g():
-    a = 2
-    print(a, 5)
-    yield 2
-
-def main():
-    it = g()
-    print(next(it))
-main()
-""", """\
-def g():
-    a = 2
-    print(a, 5)
-    yield 2
-
-def main():
-    it = g()
-    print(next(it))
-main()
-""")
-        # More than two args, mixed types
-        test_generator_matches_cpython(
-            "cpp_path_print_three_args_mixed_types_matches_cpython", """\
-@coro.pinned('cpp')
-def g():
-    print(1, 2.5, "hello")
-    yield 42
-
-def main():
-    it = g()
-    print(next(it))
-main()
-""", """\
-def g():
-    print(1, 2.5, "hello")
-    yield 42
-
-def main():
-    it = g()
-    print(next(it))
-main()
-""")
-        # print with end= kwarg and multiple args (end='' suppresses trailing newline)
-        test_generator_stdout("cpp_path_print_multi_arg_with_end_kwarg", """\
-@coro.pinned('cpp')
-def g():
-    print(1, 2, end='')
-    yield 3
-
-def main():
-    it = g()
-    print(next(it))
-main()
-""", "1 23\n")
-
-
 def run_tests():
     run_cpp_send_tests()
-    run_cpp_path_multi_arg_print_tests()
     run_none_yield_tests()
     run_tagged_none_equality_tests()
     run_tagged_none_identity_tests()

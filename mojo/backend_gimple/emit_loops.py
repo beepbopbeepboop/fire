@@ -894,24 +894,6 @@ def _gen_for_iter(gen, node: gimple_ctypes.ForStmt):
             it_type, it_val = _lower_int_dict_items(gen, _int_recv)
         elif _int_mode:
             it_type, it_val = gen.lower_expr(_int_recv)
-        elif (isinstance(it, gimple_ctypes.CallExpr) and isinstance(it.func, gimple_ctypes.IdentExpr)
-                and it.func.name in gen.var_types and it.func.name not in gen.func_return_types
-                and gen.var_types.get(it.func.name) in ('int64_t', 'void *', 'char *')):
-            # `for x in f(args):` where `f` is a callable VARIABLE or PARAMETER (`for check in
-            # checks: for d, e in check(a):`). The callee may be a compiled GENERATOR, whose
-            # call yields a live handle only when dispatched by `mojo_dyn_call` (a plain
-            # fnptr call returns it un-noted); the runtime's view of the result
-            # (`mojo_iter_word`: a list, or a noted handle drained to one) is what is iterated.
-            # This shape reached `mojo_unsupported_iter`: a diagnostic, and a body that ran
-            # zero times.
-            _cf_t, _cf_v = gen.lower_expr(it.func)
-            _cr_t, _cr_v = ggc._lower_fnptr_spread_call(gen, _cf_t, _cf_v, it)
-            it_val = gen._call_expr('MojoList *', 'mojo_iter_word',
-                                    [('int64_t', gen._to_int64(_cr_t, _cr_v))])
-            it_type = 'MojoList *'
-            # What the callee yielded carries its own per-slot kinds (a string, a None, a
-            # float beside an int), which only a boxed read recovers.
-            gen._maybe_kinds_vals.add(it_val)
         else:
             it_type, it_val = gen.lower_expr(node.iterable)
     except Exception:
@@ -2503,10 +2485,8 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
         # _tuple_slot_types / _nested_elem_types inputs — one computation
         # shared with the declarations there).
         pair_elem = gen._nested_elem_types.get(it_val, 'int64_t')
-        _tuple_boxed_slots = (it_val in getattr(gen, '_maybe_kinds_vals', ())
-                              or _as_str(it_val) in getattr(gen, '_maybe_kinds_vals', ()))
 
-        def _emit_target_assign(ptr, vn, i, slot_elem, boxed_slots):
+        def _emit_target_assign(ptr, vn, i, slot_elem):
             """Assign slot `i` of the tuple at `ptr` to target name `vn` —
             which may itself be a parenthesized nested tuple target
             (`(old_mode, old_file)`), in which case the slot is read as an
@@ -2519,7 +2499,7 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                 nested_ptr = gen._coerce_to_type(rt, 'MojoList *', nested_raw)
                 nested_names = gen._split_top_level_comma(vn[1:-1].strip())
                 for j, nn in enumerate(nested_names):
-                    _emit_target_assign(nested_ptr, nn, j, pair_elem, False)
+                    _emit_target_assign(nested_ptr, nn, j, pair_elem)
                 return
             gen._declare_var(vn, slot_elem)
             cvn = gen._cname(vn)
@@ -2544,13 +2524,6 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                     # f-strings, method args) — otherwise the char* boxed
                     # into the int64_t loop var reads as %ld (decimal addr).
                     gen._actual_types[vn] = 'char *'
-            elif boxed_slots and vt == 'int64_t':
-                # The tuples of this list record their own per-slot kinds (what a call through
-                # a function value yielded: a None, a string, a float beside an int): read the
-                # slot BOXED so the target is spelled by its kind.
-                raw = gen._new_val('int64_t', f"mojo_list_get_boxed ({_as_str(ptr)}, {i})")
-                gen._boxed_vals.add(cvn)
-                gen._emit(f"  {cvn} = {raw};")
             else:
                 raw = gen._new_val('int64_t', f"mojo_list_get_int ({_as_str(ptr)}, {i})")
                 if vt == 'int64_t':
@@ -2588,9 +2561,9 @@ def _gen_for_list(gen, var: str, it_val: str, body: list, shadow_name: str | Non
                 _off = gen._new_val('int64_t', f"{i - star_idx - 1}LL")
                 slot_i = gen._new_val('int64_t', f"{_base} + {_off}")
             if vn.startswith('(') and vn.endswith(')'):
-                _emit_target_assign(tuple_ptr, vn, slot_i, 'int64_t', False)
+                _emit_target_assign(tuple_ptr, vn, slot_i, 'int64_t')
                 continue
-            _emit_target_assign(tuple_ptr, vn, slot_i, slot_elems[i], _tuple_boxed_slots)
+            _emit_target_assign(tuple_ptr, vn, slot_i, slot_elems[i])
     else:
         cvar = gen._cname(var)
         suf = gimple_ctypes.TypeLattice.list_suffix(elem)
@@ -3835,15 +3808,6 @@ def _emit_generator_tuple_unpack(gen, var_names: list, slot_types: list, list_pt
                 gen._emit(f"  {cvn} = {dv};")
             else:
                 gen._safe_coerce_emit('double', vt, dv, cvn)
-        elif vt == 'int64_t' and suf != 'str':
-            # A slot whose static type is only the int64_t default: the yielded tuple records the
-            # slot's kind at run time (a string, a None, a float box -- the stack-switch yield
-            # boxes through `mojo_list_append_word`), so read it BOXED. An integer slot comes back
-            # as the same raw word it always did; a None / string slot is spelled by its kind
-            # instead of printing as 0 / a pointer's decimal.
-            raw = gen._new_val('int64_t', f"mojo_list_get_boxed ({list_ptr}, {i})")
-            gen._boxed_vals.add(cvn)
-            gen._emit(f"  {cvn} = {raw};")
         else:
             raw = gen._new_val('int64_t', f"mojo_list_get_int ({list_ptr}, {i})")
             if vt == 'int64_t':

@@ -1046,7 +1046,7 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
             return known[e.func.name]
         if fn_return_types is not None:
             _frt = fn_return_types.get(e.func.name)
-            if isinstance(_frt, str) and (_frt in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *', 'double', 'int64_t', '_Bool') or (_frt.endswith(' *') and known_structs is not None and (_frt[:-2] in known_structs))):
+            if isinstance(_frt, str) and (_frt in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *') or (_frt.endswith(' *') and known_structs is not None and (_frt[:-2] in known_structs))):
                 return _frt
     if isinstance(e, CallExpr) and isinstance(e.func, MemberExpr):
         if isinstance(e.func.obj, MemberExpr) and isinstance(e.func.obj.obj, IdentExpr) and (e.func.obj.obj.name == 'os') and (e.func.obj.member == 'path'):
