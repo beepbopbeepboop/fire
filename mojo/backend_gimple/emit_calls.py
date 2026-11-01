@@ -1465,14 +1465,15 @@ def _lower_class_attr_builtin(gen, node, fn):
     return None
 
 
-def _lower_type_new(gen, node):
+def _lower_type_new(gen, node, args=None):
     """`type(name, (Base, ..), {'attr': value, ..})` with a literal base tuple/list and a literal
     dict of string keys: a class made at run time (stage 3 of
     bugs/CODEGEN_enum_runtime_class_creation.md). It is a class-table entry (`mojo_type_new`) whose
     bases are the listed classes and whose dict starts from the namespace; the value is a class
     handle word that `Foo.x`, `Foo.x = v` and `getattr(Foo, ..)` read through the class table.
-    None when the arguments are not that literal shape (the caller refuses by name)."""
-    name_n, bases_n, ns_n = node.args
+    None when the arguments are not that literal shape (the caller refuses by name).
+    `args` overrides `node.args` (`type.__new__(type, n, b, ns)` passes its last three)."""
+    name_n, bases_n, ns_n = node.args if args is None else args
     literal_bases = isinstance(bases_n, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr))
     bases_list = None
     if not literal_bases:
@@ -1563,6 +1564,25 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         gen._struct_slot_kinds[_ch] = ginf._RuntimeKinded(['int', 'str'])
         gen._maybe_kinds_vals.add(_ch)
         return 'MojoList *', _ch
+    # `type.__new__(type, name, bases, ns)` is `type(name, bases, ns)` spelled through the
+    # metaclass slot (what `EnumType.__new__` writes as `type.__new__(metacls, ..)`). Only the
+    # plain `type` metaclass is modelled; a user metaclass (stage 4) is refused by name.
+    if (isinstance(node.func, gimple_ctypes.MemberExpr)
+            and _as_str(node.func.member) == '__new__'
+            and isinstance(node.func.obj, gimple_ctypes.IdentExpr)
+            and node.func.obj.name == 'type'
+            and 'type' not in gen.var_types
+            and len(node.args) == 4 and not getattr(node, 'kwargs', None)):
+        _m = node.args[0]
+        if isinstance(_m, gimple_ctypes.IdentExpr) and _m.name == 'type':
+            _cls = _lower_type_new(gen, node, node.args[1:])
+            if _cls is not None:
+                return _cls
+        raise RuntimeError(
+            'cannot compile module: type.__new__(metacls, name, bases, namespace) creates a '
+            'class at run time, which the compiled path models only for metacls `type`, a '
+            'literal-or-dict-variable namespace and tuple/list bases '
+            '(bug:CODEGEN_enum_runtime_class_creation)')
     # `setattr(Cls, name, v)` / `getattr(Cls, name[, d])` / `hasattr(Cls, name)` / `delattr(Cls, name)`
     # where the first argument is a CLASS (a struct name, or `cls` in a classmethod): attributes
     # the class body never declared live in the run-time class table.

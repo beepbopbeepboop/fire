@@ -77,7 +77,12 @@ every module is reachable from a word with `mojo_getattr_any(obj, attr)`
    a local, `isinstance(o, StaticBase)` for a dynamic class deriving a static one, `repr(o)`.
    Separate finding, not fixed: for a STATIC class `p.b = 5` outside `__init__` infers a struct
    field, so `hasattr(q, 'b')` is True on an instance that never set it (CPython: False).
-   STILL MISSING in stage 3: `type.__new__(metacls, ..)`.
+   **`type.__new__(type, name, bases, ns)` landed 2026-11-01**: the same lowering as the 3-argument
+   `type(..)` (`emit_calls._lower_type_new(gen, node, args)`), pinned by
+   `type_dunder_new_with_the_type_metaclass`. A user metaclass as the first argument
+   (`type.__new__(Meta, ..)`) is refused by name
+   (`type_dunder_new_with_a_user_metaclass_is_refused_by_name`) - it is stage 4: the class must be
+   an instance of `Meta` and `Meta.__call__ / __getattr__` must see it.
 4. the metaclass protocol `EnumType` uses: `__prepare__`, `__new__`, `__call__`, `__set_name__`,
    `__init_subclass__`, class-level `__getattr__`, `isinstance(x, cls)` for dynamic classes,
    `DynamicClassAttribute` / `property` on dynamic classes.
