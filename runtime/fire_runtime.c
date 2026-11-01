@@ -1474,6 +1474,33 @@ int mojo_word_is_none(int64_t v)
     return ((MojoBox *)(intptr_t)v)->kind == 'n';
 }
 
+/* See the header. Arithmetic on a possibly-boxed operand: a None box has no
+ * numeric kind, so CPython raises TypeError where the unwrap would compute
+ * with its word (0). Any other word comes back unchanged. The detail names
+ * the operator and the two types in CPython's order. */
+int64_t mojo_none_arith_guard(int64_t v, const char *op, const char *other, int none_is_left)
+{
+    if (!mojo_word_is_none(v)) return v;
+    char m[128];
+    if (none_is_left)
+        snprintf(m, sizeof m, "unsupported operand type(s) for %s: 'NoneType' and '%s'", op, other);
+    else
+        snprintf(m, sizeof m, "unsupported operand type(s) for %s: '%s' and 'NoneType'", op, other);
+    mojo_raise_type_error(m);
+    return v;
+}
+
+/* See the header. Unary `-` on a possibly-boxed operand: the same None check
+ * as mojo_none_arith_guard, with CPython's unary message. */
+int64_t mojo_none_unary_guard(int64_t v, const char *op)
+{
+    if (!mojo_word_is_none(v)) return v;
+    char m[128];
+    snprintf(m, sizeof m, "bad operand type for unary %s: 'NoneType'", op);
+    mojo_raise_type_error(m);
+    return v;
+}
+
 /* Python truthiness of a word of unknown kind (see the header). Containers
  * and strings are asked for their length, a box for its payload, None (the
  * NULL word) is false, and any other word -- an integer or a struct handle --
