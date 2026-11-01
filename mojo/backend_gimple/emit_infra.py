@@ -37,7 +37,7 @@ import mojo.backend_gimple.device_glue as _gmi_glue
 # re-export is invisible to the self-hosted call lowering while this module is
 # inside the compiler's own import cycle, and the call became a weak
 # "unavailable in compiled mode" stub returning 0.
-from fire_compiler import for_target_is_tuple, target_slots, _as_list
+from fire_compiler import for_target_is_tuple, for_target_single_name, target_slots, _as_list
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.lambdareduce as gimple_lambdareduce
 import mojo.middle.comptime as comptime_eval
@@ -3545,7 +3545,15 @@ def _local_bindings(gen, name) -> list:
                 for t in (n.targets or []):
                     found.extend([None] * len(idents_named(t)))
             elif isinstance(n, gimple_ctypes.ForStmt):
-                found.extend([None] * len(idents_named(n.target)))
+                # The parser keeps a for target as its source TEXT (a str,
+                # `for_target_single_name`), not an IdentExpr, so
+                # `idents_named` cannot see it. Count the name as a word of the
+                # target text: an over-count only refuses an optimisation.
+                if isinstance(n.target, str):
+                    if re.search(r'\b%s\b' % re.escape(name), n.target):
+                        found.append(None)
+                else:
+                    found.extend([None] * len(idents_named(n.target)))
             elif isinstance(n, gimple_ctypes.WithStmt):
                 for it in (n.items or []):
                     found.extend([None] * len(idents_named(getattr(it, 'alias', None))))
@@ -3582,8 +3590,12 @@ def tagged_next_bind_name(gen, name, _seen=frozenset()) -> bool:
     for v in values:
         if isinstance(v, gimple_ctypes.IdentExpr):
             src = v.name
-            if (src == name or src in _seen
-                    or not tagged_next_bind_name(gen, src, _seen | {name})):
+            if src == name or src in _seen:
+                return False
+            # A copy of a for-loop target over a tagged generator is itself a
+            # tagged word (the loop's box, see `tagged_for_target_name`).
+            if not (tagged_for_target_name(gen, src)
+                    or tagged_next_bind_name(gen, src, _seen | {name})):
                 return False
             copies += 1
             continue
@@ -3603,6 +3615,65 @@ def tagged_next_bind_name(gen, name, _seen=frozenset()) -> bool:
         if len(_local_bindings(gen, gname)) != 1:
             return False
     return bool(gen_names) or copies > 0
+
+
+def _tagged_generator_iterable(gen, node) -> bool:
+    """True iff the `for` iterable `node` is a call of a generator whose value
+    slot is a TAGGED word (`mixed_slots`: its yields are of more than one
+    kind, so each is boxed), either spelled directly (`for v in g():`) or
+    through a local bound once to such a call (`g = gen(); for v in g:`).
+    Resolved from `gen._generator_api`, which is built before any body is
+    emitted, so the answer does not depend on the order of the lowering."""
+    fname = None
+    if (isinstance(node, gimple_ctypes.CallExpr)
+            and isinstance(node.func, gimple_ctypes.IdentExpr)):
+        fname = node.func.name
+    elif isinstance(node, gimple_ctypes.IdentExpr):
+        params = getattr(gen, '_cur_func_params', None) or ()
+        if node.name in params:
+            return False
+        bound = _local_bindings(gen, node.name)
+        if (len(bound) == 1
+                and isinstance(bound[0], gimple_ctypes.CallExpr)
+                and isinstance(bound[0].func, gimple_ctypes.IdentExpr)):
+            fname = bound[0].func.name
+    if fname is None:
+        return False
+    api = (getattr(gen, '_generator_api', None) or {}).get(fname)
+    return bool(api) and bool(api.get('mixed_slots')) and api.get('value_ctype') == 'int64_t'
+
+
+def tagged_for_target_name(gen, name) -> bool:
+    """True iff every binding of `name` in THIS function is a `for name in
+    <tagged generator>` loop target (`_tagged_generator_iterable`), so every
+    value the name holds is the loop's box, the same tagged word a
+    `next(g)` bind holds. Such a name is a copy source for
+    `tagged_next_bind_name`: `x = v` inside the loop keeps the box, so
+    `print(x)` and `x == None` see the yield's kind (a None yield prints
+    None, not 0).
+
+    Sound against a later rebinding: the count of loop targets over `name`
+    must equal every binder of `name` (`_local_bindings` answers None for each
+    of them, and any plain assignment, tuple target or other binder makes the
+    answer False). The loops are found by walking the whole body, so a loop
+    emitted after the copy counts too."""
+    params = getattr(gen, '_cur_func_params', None) or ()
+    if name in params:
+        return False
+    values = _local_bindings(gen, name)
+    if not values or any(v is not None for v in values):
+        return False
+    loops = 0
+    for stmt in (gen._cur_func_body or []):
+        for n in _iter_ast(stmt):
+            if (isinstance(n, gimple_ctypes.ForStmt)
+                    and isinstance(n.target, str)
+                    and not for_target_is_tuple(n.target)
+                    and for_target_single_name(n.target) == name):
+                if not _tagged_generator_iterable(gen, n.iterable):
+                    return False
+                loops += 1
+    return loops == len(values)
 
 
 def mixed_container_locals(gen) -> set:
