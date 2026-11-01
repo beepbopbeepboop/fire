@@ -3024,7 +3024,77 @@ main()
 """, "")
 
 
+def run_none_yield_tests():
+    # A None yield (bare `yield`, or `yield None`) used to share the int64_t
+    # value slot with the integers, so a for loop printed the raw 0 where
+    # CPython prints None. A generator with a None yield beside values is now
+    # a tagged word (`mojo_box_none`, rendered by the for-loop consumer), and
+    # the oracle is CPython itself, measured at test time. A generator that
+    # is consumed by `next()` is NOT tagged (the tagged word is for-loop-only),
+    # so it keeps its old int64_t slot and is not pinned here.
+    test_generator_matches_cpython("none_yield_bare_beside_int_in_for_loop", """\
+def g():
+    yield 1
+    yield
+    yield 2
+
+def main():
+    for v in g():
+        print(v)
+main()
+""", """\
+def g():
+    yield 1
+    yield
+    yield 2
+
+def main():
+    for v in g():
+        print(v)
+main()
+""")
+    test_generator_matches_cpython("none_yield_only_in_for_loop_prints_none", """\
+def g():
+    yield
+
+def main():
+    for v in g():
+        print(v)
+main()
+""", """\
+def g():
+    yield
+
+def main():
+    for v in g():
+        print(v)
+main()
+""")
+    test_generator_matches_cpython("none_yield_explicit_beside_int_in_for_loop", """\
+def g():
+    yield 1
+    yield None
+    yield 2
+
+def main():
+    for v in g():
+        print(v)
+main()
+""", """\
+def g():
+    yield 1
+    yield None
+    yield 2
+
+def main():
+    for v in g():
+        print(v)
+main()
+""")
+
+
 def run_tests():
+    run_none_yield_tests()
     run_star_args_call_tests()
     run_callable_param_tests()
     run_lambda_capture_tests()
