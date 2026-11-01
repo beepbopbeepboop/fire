@@ -2435,6 +2435,32 @@ int mojo_list_contains_mixed_int(MojoList *l, int64_t v)
     return 0;
 }
 
+/* `x in <list>` for a DOUBLE needle over a str / kind-mixed list: the double
+ * counterpart of mojo_list_contains_mixed_int, with the same per-slot domains
+ * (see its comment). Python's `==` between a float and an int is exact, so
+ *   'i'  an int slot    -- equal only when the needle is integral, in int64_t
+ *                          range, and that integer is the slot's word. Not
+ *                          `(double)word == v`: that rounds a large int and
+ *                          would match a neighbour that Python rejects.
+ *   'd'  a double slot  -- ordinary floating equality (NaN equals nothing).
+ *   other (str, bytes, list, None) -- never equal to a number.
+ * `2.5 in [2.5, "a"]` and `2.0 in [2, "a"]` are True; `2.5 in ["a"]` is False. */
+int mojo_list_contains_mixed_double(MojoList *l, double v)
+{
+    int needle_is_int = v >= -9223372036854775808.0 && v < 9223372036854775808.0
+                        && (double)(int64_t)v == v;
+    int64_t vi = needle_is_int ? (int64_t)v : 0;
+    for (int64_t i = 0; i < l->len; i++) {
+        char k = mojo_list_slot_kind(l, i);
+        if (k == 'i') {
+            if (needle_is_int && l->data[i] == vi) return 1;
+        } else if (k == 'd') {
+            if (mojo_double_from_bits(l->data[i]) == v) return 1;
+        }
+    }
+    return 0;
+}
+
 /* `l.count(x)` — how many SLOTS equal x, the counting sibling of the
  * `x in l` predicates above. Distinct because those answer a yes/no from the
  * first hit and stop; these must visit every slot. Each takes the needle in

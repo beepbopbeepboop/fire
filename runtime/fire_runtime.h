@@ -859,6 +859,9 @@ int mojo_list_contains_str(MojoList *l, char *v);
 /* `x in <list>` for an int needle over a str / kind-mixed list: each slot is
  * compared in its own domain (see the definition). */
 int mojo_list_contains_mixed_int(MojoList *l, int64_t v);
+/* `x in <list>` for a double needle over a str / kind-mixed list (the float
+ * counterpart of mojo_list_contains_mixed_int; see the definition). */
+int mojo_list_contains_mixed_double(MojoList *l, double v);
 /* `None in <list>` for a non-str list: a None slot is the one the kinds
  * row names 'n'. */
 int mojo_list_contains_none(MojoList *l);
