@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""Pin for bugs/CODEGEN_generic_struct_local_typed_int64_linked_list.md.
+
+`var l = LinkedList[Int](1, 2, 3)` must lower to a real elaborated struct, not
+`int64_t l; l = 0;` with `__iter__()`/`__next__()` stubbed out."""
+import os
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+
+SRC = '''from std.collections import LinkedList
+
+def main():
+    var l = LinkedList[Int](1, 2, 3)
+    var it = l.__iter__()
+    print(it.__next__())
+'''
+
+
+def _compile():
+    from build_stdlib_dylib import compile_module_to_c
+    path = os.path.join(HERE, '.tmp', 'll_probe.mojo')
+    return compile_module_to_c(SRC, path, 'll_probe', linkable=False)
+
+
+def _main_body(c):
+    i = c.index('_ll_probe_main (void)')
+    return c[i:c.index('\n}\n', i)]
+
+
+def test_linked_list_local_is_a_struct():
+    """`l` is the elaborated struct and its constructor is really called."""
+    body = _main_body(_compile())
+    assert 'int64_t l;' not in body, 'l is still typed as a scalar'
+    assert 'LinkedList_11_ElementType_3_Int * l;' in body
+    assert 'LinkedList_11_ElementType_3_Int___init___' in body, \
+        'the constructor call was not lowered'
+    assert 'indirect call via SubscriptExpr' not in body
+
+
+def test_erased_word_structs_not_materialized():
+    """`Optional[Int](...)` keeps its erased tagged-word model: materializing
+    it as a struct is the measured test_optional regression."""
+    from build_stdlib_dylib import compile_module_to_c
+    src = ('from std.collections import Optional\n\n'
+           'def main():\n    var a = Optional[Int](5)\n    print(a.value())\n')
+    c = compile_module_to_c(src, os.path.join(HERE, '.tmp', 'opt_probe.mojo'),
+                            'opt_probe', linkable=False)
+    assert 'Optional_1_T_3_Int' not in c
+
+
+if __name__ == '__main__':
+    test_linked_list_local_is_a_struct()
+    test_erased_word_structs_not_materialized()
+    print('PASS: generic-struct local is a struct')
