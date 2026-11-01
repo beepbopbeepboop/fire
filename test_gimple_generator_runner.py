@@ -3962,6 +3962,43 @@ def main():
 main()
 """)
 
+    # The same stale state, one level down: `_GEN_DEFS` (and the kind memo read
+    # through it) is the generator registry. The previous module's `h` is a
+    # FLOAT generator; this module's `h` is a plain function returning strings,
+    # consumed by a `for` loop inside generator `g`. The cpp path used to read
+    # the previous `h` as its own generator, typed `g`'s yield as a float, and
+    # refuse the module. It must now answer for itself and match CPython.
+    prev_float_src = """\
+def h():
+    yield 2.5
+
+def main():
+    for v in h():
+        print(v)
+main()
+"""
+    with coro.pinned('stackswitch'):
+        try:
+            gimple_codegen.compile_to_gimple_with_cpp(prev_float_src, do_imports=False)
+        except Exception:
+            pass
+    plain_h_src = """\
+def h():
+    return ["p", "q"]
+
+def g():
+    for v in h():
+        yield v
+
+def main():
+    for v in g():
+        print(v)
+main()
+"""
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("cpp_path_ignores_previous_generator_registry",
+                                       plain_h_src, plain_h_src)
+
 
 _AUG_YIELD_SRC = """\
 def g():
