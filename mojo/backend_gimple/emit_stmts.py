@@ -3594,8 +3594,8 @@ def _gen_stmt_MatchStmt(gen, node):
 
     Switch-style equality dispatch (see fire_compiler.py's MatchStmt
     docstring for why this isn't full structural pattern matching):
-    lowered as a chain of `if (subject == p1 || subject == p2 || ...)`
-    checks with C short-circuiting, reusing the existing `==` lowering
+    lowered as a chain of one `if (subject == p) goto arm; else goto next;`
+    block per pattern (no `||`/`&&`: not valid GIMPLE), reusing the existing `==` lowering
     (_lower_BinaryOp already knows how to compare strings via
     mojo_str_eq/strcmp vs. plain value equality for everything else)
     rather than duplicating that type dispatch here. The subject is
@@ -3625,12 +3625,20 @@ def _gen_stmt_MatchStmt(gen, node):
         # and ends the pattern list; bare bound name is a comparison; bare
         # unbound name is a capture (assign subject and irrefutable); structural
         # patterns are refused by name.
-        # Build the case's test as a chained || for short-circuit in C.
-        # A list that ends in a capture/w Wildcard: the arm runs when reached,
-        # but no later patterns are evaluated — pattern list stops here.
-        condition = None
-        pattern_refs = []
-        for pattern in match_case.patterns:
+        #
+        # Each pattern is its own test block: `if (test) goto arm; else goto
+        # <next pattern>`. `||` / `&&` on a condition are not GIMPLE, and a
+        # `__GIMPLE` body (every struct method, closure and lifted body) is
+        # checked as GIMPLE. A guard is its own block after the patterns, so it
+        # runs only once a pattern matched. A wildcard or capture is
+        # irrefutable and ends the pattern list.
+        guard_bb = gen._new_bb() if match_case.guard is not None else None
+        arm_bb = guard_bb if guard_bb is not None else case_bbs[i]
+        patterns = match_case.patterns
+        if not patterns:
+            gen._emit(f"  goto {next_check_bb};")
+        for j, pattern in enumerate(patterns):
+            fail_bb = gen._new_bb() if j + 1 < len(patterns) else next_check_bb
             # `.NAME` against a struct-typed subject resolves against that type
             # here, before the formal model's refusal below, which has no type.
             if isinstance(pattern, gimple_ctypes.DottedLiteral):
@@ -3641,51 +3649,44 @@ def _gen_stmt_MatchStmt(gen, node):
                 # `case C():` or positional-capture-only `case C(x):` — isinstance
                 # guard; positional args bind the subject's __match_args__[i]
                 # attribute via runtime getattr so the refusal is cleared.
+                # Positional captures: binding via __match_args__ is a
+                # next-step feature; the instance guard is sufficient to
+                # lift the refusal for now.
                 isinstance_node = gimple_ctypes.CallExpr(
                     func=gimple_ctypes.IdentExpr(name="isinstance"),
                     args=[subj_ref, pattern.func],
                 )
                 ict, icv = gen._lower_builtin_isinstance(isinstance_node)
-                icv = gen._ensure_bool_cond(ict, icv)
-                condition = icv if condition is None else f"{condition} || {icv}"
-                args = getattr(pattern, 'args', []) or []
-                if args:
-                    # Positional captures: binding via __match_args__ is a
-                    # next-step feature; the instance guard is sufficient to
-                    # lift the refusal for now.
-                    pass
-                continue
-            if kind in formal_model.MATCH_REFUSED_KINDS:
+                cv = gen._ensure_bool_cond(ict, icv)
+            elif kind in formal_model.MATCH_REFUSED_KINDS:
                 # Emit a refusal error message and raise.
                 raise formal_model.CodegenError(formal_model.match_pattern_refusal(
                     kind, formal_model.spelled(pattern),
                     getattr(gen, 'function_name', '<module>'),
                     getattr(pattern, 'line', 0) or getattr(match_case, 'line', 0) or 0))
-            if kind == "wildcard":
-                # Irrefutable, binds nothing — any truth value works for a chain.
-                condition = "1"
+            elif kind == "wildcard":
+                # Irrefutable, binds nothing.
+                gen._emit(f"  goto {arm_bb};")
                 break
-            if kind == "capture":
+            elif kind == "capture":
                 # Unbound bare name: assign subject to it, then this arm always
                 # runs (the pattern list stops here). The formal emitter's
                 # _lower_one_case has already bound this name in its local set.
                 gen._emit(f"  {pattern.name} = {subj_v};")
-                condition = "1"
+                gen._emit(f"  goto {arm_bb};")
                 break
-            # 'name' or 'value': compare subject with pattern via ==.
-            ct, cv = gen.lower_expr(gimple_ctypes.BinaryOp(op='==', left=subj_ref, right=pattern))
-            cv = gen._ensure_bool_cond(ct, cv)
-            if condition is None:
-                condition = cv
             else:
-                condition = f"{condition} || {cv}"
-        # If no pattern in the list is a capture or wildcard, but there are patterns,
-        # `condition` is a chained || expression — C's short-circuit works.
-        if match_case.guard is not None:
+                # 'name' or 'value': compare subject with pattern via ==.
+                ct, cv = gen.lower_expr(gimple_ctypes.BinaryOp(op='==', left=subj_ref, right=pattern))
+                cv = gen._ensure_bool_cond(ct, cv)
+            gen._emit(f"  if ({cv}) goto {arm_bb}; else goto {fail_bb};")
+            if j + 1 < len(patterns):
+                gen._emit_label(fail_bb)
+        if guard_bb is not None:
+            gen._emit_label(guard_bb)
             gt, gv = gen.lower_expr(match_case.guard)
             gv = gen._ensure_bool_cond(gt, gv)
-            condition = f"{condition} && {gv}"
-        gen._emit(f"  if ({condition}) goto {case_bbs[i]}; else goto {next_check_bb};")
+            gen._emit(f"  if ({gv}) goto {case_bbs[i]}; else goto {next_check_bb};")
 
     for i, match_case in enumerate(node.cases):
         gen._emit_label(case_bbs[i])
