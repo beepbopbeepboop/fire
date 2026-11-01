@@ -7674,42 +7674,63 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 and entry != func_entry)
 
     _TOTAL = max(1, sum(len(b["instrs"]) for b in blocks))
-    _reach_i = None
+    # The blocks REACHABLE from `func_entry` -- not every block `_cfg_blocks`
+    # finds in `[func_entry, func_end)`.  Computed UNCONDITIONALLY (it used to
+    # be computed only under `fuel is not None`, so every ordinary walk took
+    # the `None` branch and the guards below were inert on exactly the walks
+    # that needed them):
+    #
+    # The per-block certificate loop emits a `bN_selfN` / `bN_runs` / `bN_mid`
+    # certificate for every block in the partition, and for an ordinary
+    # program the partition spans the whole image -- so the float-repr
+    # helper's blocks, emitted UNCONDITIONALLY after every function body, got
+    # the full treatment although no path from `func_entry` reaches them for a
+    # program that never formats a float.  The kernel -- not `native_decide`
+    # -- evaluates `code addr` as `List.getD` over the whole byte list on
+    # every certificate, so the helper's blocks put its ~2.4 KB of dead code
+    # into every generated proof's kernel working set: the whnf timeout at
+    # `print1_b4_self1` and the excessive-memory in `mod_proof`'s b6/b7 chain
+    # (b7 is the helper's `fr_copy1` byte-copy loop) are those certificates
+    # (`bugs/formal/FORMAL_call_proofgen_red_on_head.md`, 2026-10-31).  The
+    # loop now skips them to the placeholder, and the loop-discovery passes
+    # below skip them the same way, so the helper's own loops can no longer
+    # shadow a real one (the `sum_range` symptom in the same doc).
+    #
+    # The constant-fuel guard below judges the same set for a sharper reason:
+    # the LAST export of an image has the end of the image as its extent
+    # (`_export_extent`), so it also spans whatever the emitter laid down
+    # after the last export's own code (the stack-floor handler, the runtime
+    # routines), and those carry back edges of their own.  Counting them made
+    # `_acyclic` False for a run that is a DAG, so the last export's
+    # `semantics_total` was a named `sorry` over a true termination claim --
+    # measured on `test_formal_dylib.py`'s `pick` (`def pick(n): if n > 3:
+    # return 1; return 0`), whose own extent ends in a `ret` and whose three
+    # forward branches are all inside it.
+    #
+    # A back edge is any branch whose target is at or before the branch
+    # itself; `_cfg_blocks` orders blocks by start pc, so forward-only
+    # targets mean the walk is a DAG and each instruction runs at most once.
+    # `func_entry` is always a block start (`_cfg_blocks` seeds it), so the
+    # seed below cannot miss.
+    _by_start = {b["start"]: i for i, b in enumerate(blocks)}
+    _order = sorted(range(len(blocks)), key=lambda i: blocks[i]["start"])
+    _fall = {_order[k]: _order[k + 1] for k in range(len(_order) - 1)}
+    _reach_i, _stack = set(), [_by_start[func_entry]]
+    while _stack:
+        _i0 = _stack.pop()
+        if _i0 in _reach_i:
+            continue
+        _reach_i.add(_i0)
+        _b0 = blocks[_i0]
+        _succ = [_by_start[t] for t in _b0["targets"] if t in _by_start]
+        # A `seq` block has no `targets` of its own: its successor is the
+        # next block in pc order, which is the fall-through the machine
+        # takes.  A `ret` has none.
+        if _b0["kind"] == "seq" and _i0 in _fall:
+            _succ.append(_fall[_i0])
+        _stack.extend(_j for _j in _succ if _j not in _reach_i)
+    _reach = [blocks[i] for i in _order if i in _reach_i]
     if fuel is not None:
-        # The constant-fuel guard judges the CFG the RUN uses, which is the
-        # blocks REACHABLE from `func_entry` -- not every block `_cfg_blocks`
-        # finds in `[func_entry, func_end)`.  The two differ for the LAST
-        # export of an image: its extent is the end of the image
-        # (`_export_extent`), so it also spans whatever the emitter laid down
-        # after the last export's own code (the stack-floor handler, the
-        # runtime routines), and those carry back edges of their own.  Counting
-        # them made `_acyclic` False for a run that is a DAG, so the last
-        # export's `semantics_total` was a named `sorry` over a true
-        # termination claim -- measured on `test_formal_dylib.py`'s `pick`
-        # (`def pick(n): if n > 3: return 1; return 0`), whose own extent ends
-        # in a `ret` and whose three forward branches are all inside it.
-        #
-        # A back edge is any branch whose target is at or before the branch
-        # itself; `_cfg_blocks` orders blocks by start pc, so forward-only
-        # targets mean the walk is a DAG and each instruction runs at most once.
-        _by_start = {b["start"]: i for i, b in enumerate(blocks)}
-        _order = sorted(range(len(blocks)), key=lambda i: blocks[i]["start"])
-        _fall = {_order[k]: _order[k + 1] for k in range(len(_order) - 1)}
-        _reach_i, _stack = set(), [_by_start[func_entry]]
-        while _stack:
-            _i0 = _stack.pop()
-            if _i0 in _reach_i:
-                continue
-            _reach_i.add(_i0)
-            _b0 = blocks[_i0]
-            _succ = [_by_start[t] for t in _b0["targets"] if t in _by_start]
-            # A `seq` block has no `targets` of its own: its successor is the
-            # next block in pc order, which is the fall-through the machine
-            # takes.  A `ret` has none.
-            if _b0["kind"] == "seq" and _i0 in _fall:
-                _succ.append(_fall[_i0])
-            _stack.extend(_j for _j in _succ if _j not in _reach_i)
-        _reach = [blocks[i] for i in _order if i in _reach_i]
         _acyclic = all(t > b["instrs"][-1] for b in _reach for t in b["targets"])
         if (recursive or not _acyclic or fuel < _TOTAL
                 or any(b["kind"] == "bl" for b in _reach)):
@@ -7890,10 +7911,15 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     loop_check = None
     for _bi0, b in enumerate(blocks):
         # A loop the RUN cannot reach is not a loop this walk has to contract:
-        # the fixed-fuel export case is why this matters (see the guard above),
-        # where the LAST export's extent spans the image's runtime tail and that
-        # tail has back edges of its own.  A contract generated over them would
-        # be a lemma about code no argument reaches.
+        # the fixed-fuel export case is where the guard was measured (see the
+        # BFS above), where the LAST export's extent spans the image's runtime
+        # tail and that tail has back edges of its own; and since the BFS is
+        # unconditional, on EVERY walk the float-repr helper's byte-copy loop,
+        # emitted after every function body and unreachable for a program that
+        # never formats a float.  A contract generated over them would be a
+        # lemma about code no argument reaches -- and the helper's epilogue
+        # was exactly the `b` onto a `cbz` that used to be found first here,
+        # shadowing the real loop the walk then had no contract for.
         if _reach_i is not None and _bi0 not in _reach_i:
             continue
         if b["kind"] == "b" and start_to_bi.get(b["targets"][0]) is not None:
