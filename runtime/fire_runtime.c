@@ -15199,6 +15199,13 @@ void mojo_classobj_setattr(int64_t cls, char *name, int64_t word)
 {
     mojo_class_setattr(mojo_classobj_tag(cls), name, word);
 }
+/* `type(name, bases, ns)` with COMPUTED bases: every element of the list `bases` is a class
+ * word (a handle from `mojo_type_new`, or a static class's tag), added in order. */
+void mojo_type_add_bases_from_list(int64_t cls, MojoList *bases)
+{
+    int64_t n = mojo_list_len(bases);
+    for (int64_t i = 0; i < n; i++) mojo_type_add_base(cls, mojo_list_get_int(bases, i));
+}
 /* `type(name, bases, ns)` with a COMPUTED namespace: every string-keyed entry of the dict `ns`
  * becomes a class attribute, in insertion order. A float slot (kind 1) travels as a tagged box
  * so `Foo.x` reads it back as a float; every other kind's word is the value. */
