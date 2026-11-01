@@ -13355,6 +13355,35 @@ struct Color:
             print('other')
 """, "ENUM CASE")
 
+    # A `__match` arm with several patterns, or a guard, inside a struct method
+    # (a `__GIMPLE` body): `||` / `&&` on a condition are not GIMPLE, so each
+    # pattern is its own test block and the guard its own block after them.
+    test_gimple_stdout("gimple_match_multi_pattern_and_guard_in_method", """\
+struct K:
+    var _v: Int
+    def __init__(out self, v: Int):
+        self._v = v
+    def pick(self, n: Int):
+        __match self._v:
+        case 1, 2:
+            print('low')
+        case 3 if n > 0:
+            print('three-guarded')
+        case 4, 5 if n > 0:
+            print('four-five-guarded')
+        case _:
+            print('other')
+
+def main():
+    K(1).pick(0)
+    K(2).pick(0)
+    K(3).pick(1)
+    K(3).pick(0)
+    K(5).pick(1)
+    K(5).pick(0)
+    K(9).pick(1)
+""", "low\nlow\nthree-guarded\nother\nfour-five-guarded\nother\nother\n")
+
     test_gimple_stdout("gimple_module_attribute_value_and_alias", """\
 import sys
 import sys as s
