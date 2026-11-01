@@ -6426,6 +6426,7 @@ def _lower_outer_closure_call(gen, fname_raw: str, ci, node: gimple_ctypes.CallE
     # _bind_closure_kwargs's docstring for what silently went wrong when
     # this line stood alone.
     arg_pairs = _bind_closure_kwargs(gen, ci, node, arg_pairs)
+    arg_pairs = _pack_closure_star_slots(gen, ci, node, arg_pairs)
     fname_c   = gimple_ctypes._safe_name(lifted)
     if ci.env_struct:
         _cur_env = getattr(gen, '_env_param', '')
@@ -6526,6 +6527,11 @@ def _bind_closure_kwargs(gen, ci, node, arg_pairs):
         return arg_pairs
     kwargs = getattr(node, 'kwargs', []) or []
     kwarg_dict = {kname: gen.lower_expr(kexpr) for kname, kexpr in kwargs}
+    # Stash for _pack_closure_star_slots: a callee that ALSO declares a
+    # `**kwargs` parameter packs the keyword arguments this dict did not
+    # consume positionally, and re-lowering them there would emit every
+    # side-effectful keyword expression a second time.
+    node._kw_lowered = kwarg_dict
     _dflt_by_name = {}
     for _dpn, _ddv in (gen._func_param_defaults.get(lifted) or []):
         _dflt_by_name[_dpn] = _ddv
@@ -6569,6 +6575,88 @@ def _closure_param_names(ci) -> list:
     return _names
 
 
+def _pack_closure_star_slots(gen, ci, node: gimple_ctypes.CallExpr, arg_pairs: list) -> list:
+    """Pack a lifted-closure call's loose positional tail and keyword
+    arguments into the `*args`/`**kwargs` slots of a callee that declares a
+    `**kwargs` parameter, and return the rebuilt argument list.
+
+    `_gen_lifted_closure`'s signature registration spells the `*args` slot of
+    such a callee as a CONCRETE `MojoList *` — a `'...'` packing sentinel
+    would only be meaningful as the LAST slot, and the `**kwargs` `MojoDict *`
+    follows it — so `_emit_call`'s trailing-sentinel packing never fires for
+    these call sites. Without this helper a call to a nested
+    `def f(*a, **kw)` — exactly the shape `_lower_escaping_generators` leaves
+    behind as the trampoline of an ESCAPING nested generator (`def gen(
+    *__esc_a, **__esc_kw): return mojo_gen_call_with(...)`) — or to a plain
+    nested `def f(**kw)` passes the loose elements where the C prototype
+    wants two pointers ("too few arguments to function 'make_gen'") and
+    silently drops every keyword argument.
+
+    No-op (the list returned unchanged) when the callee declares NO
+    `**kwargs` parameter: a `*args`-only callee keeps the trailing `'...'`
+    sentinel that `_emit_call` already packs (re-packing here would
+    double-box the list), and a starless callee has nothing to pack.
+    Likewise no-op when the call SPREADs an iterable into its argument list
+    (`f(*xs)` / `f(**d)`): the element count is not known at compile time, so
+    such a call keeps the spread's own lowering — today's behaviour for that
+    corner, unchanged.
+
+    The positional elements beyond the fixed prefix are packed by
+    `_pack_generator_star_args` (the shared generator-call packing, whose
+    per-kind append accessors — str/double/int — keep the stored bits the
+    callee's element reads see), and the call's REMAINING keyword arguments
+    — those whose name is not one of the callee's fixed parameters, which
+    `_bind_closure_kwargs` has already bound positionally — into a real
+    `MojoDict` via `_pack_kwargs_dict`, reusing the lowered values
+    `_bind_closure_kwargs` stashed on the node (`_kw_lowered`) when it had to
+    lower them for default padding. A call with no remaining keywords still
+    gets an EMPTY dict: CPython hands `**kw` `{}`, not a NULL.
+
+    `arg_pairs` carries no env pointer: both call sites prepend the env AFTER
+    this returns, the same contract `_bind_closure_kwargs` documents.
+    """
+    try:
+        _params = ci.inner_def.params
+    except Exception:
+        return arg_pairs
+    _fixed_names = []
+    _has_args = False
+    _has_kw = False
+    for _pp in _params:
+        _raw = gimple_ctypes._as_str(_pp[0])
+        if _raw.startswith('**'):
+            _has_kw = True
+        elif _raw.startswith('*'):
+            _has_args = True
+        else:
+            _fixed_names.append(_raw)
+    if not _has_kw:
+        return arg_pairs
+    for _a in getattr(node, 'args', None) or []:
+        if isinstance(_a, gimple_ctypes.UnaryOp) and _as_str(_a.op) == '*':
+            return arg_pairs
+    _kwargs = getattr(node, 'kwargs', []) or []
+    for _kname, _kexpr in _kwargs:
+        if isinstance(_kname, gimple_ctypes.UnaryOp) and _as_str(_kname.op) == '**':
+            return arg_pairs
+    _n_fixed = len(_fixed_names)
+    if _has_args:
+        _tail = _pack_generator_star_args(gen, arg_pairs, _n_fixed)
+    else:
+        _tail = list(arg_pairs[:_n_fixed])
+    _pre_lowered = getattr(node, '_kw_lowered', None)
+    _kw_pairs = {}
+    for _kname, _kexpr in _kwargs:
+        if not _kname or _as_str(_kname) in _fixed_names:
+            continue
+        if isinstance(_pre_lowered, dict) and _kname in _pre_lowered:
+            _kw_pairs[_as_str(_kname)] = _pre_lowered[_kname]
+        else:
+            _kw_pairs[_as_str(_kname)] = gen.lower_expr(_kexpr)
+    _tail.append(('MojoDict *', _pack_kwargs_dict(gen, _kw_pairs)))
+    return _tail
+
+
 def _lower_closure_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     lifted   = f'{gen.current_func_name}_{fname_raw}'
     env_var  = gen._closure_envs[fname_raw]
@@ -6588,6 +6676,7 @@ def _lower_closure_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tu
     _ci_here = (gen._all_closures.get(gen.current_func_name, {}) or {}).get(fname_raw)
     if _ci_here is not None:
         arg_pairs = _bind_closure_kwargs(gen, _ci_here, node, arg_pairs)
+        arg_pairs = _pack_closure_star_slots(gen, _ci_here, node, arg_pairs)
     fname_c  = gimple_ctypes._safe_name(lifted)
     if _has_env:
         # No slice inside the f-string: the self-hosted f-string parser
