@@ -66,6 +66,10 @@ import mojo.middle.coro as gimple_gen_coro
 # `emit_funcs._struct_method_qualifier`'s function-local
 # `from mojo.middle.module_shared import module_qualifier`.
 from mojo.middle.exprtypes import _walk_ast, _walk_ast_invalidate, expr_provably_str as _gmi_expr_provably_str
+from mojo.middle.literal_bindings import (
+    binding_index as _gmi_binding_index, scope_index as _gmi_scope_index,
+    scoped_calls as _gmi_scoped_calls, unique_literal_value as _gmi_unique_literal_value,
+)
 from mojo.middle.exprtypes import _gmi_nested_struct_defs
 import gimple_codegen
 import mojo.backend_gimple.emit_funcs as _ggf_dup
@@ -164,128 +168,20 @@ def _gmi_literal_ctype(node):
     return None
 
 
-def _gmi_target_names(target, out) -> None:
-    """Append to `out` every bare name an assignment target binds: an
-    identifier, or an identifier inside a tuple/list target. Attribute and
-    subscript targets bind no name. A plain str (a `with ... as name` alias
-    spelled as a string) binds itself."""
-    if isinstance(target, str):
-        if target:
-            out.append(target)
-        return
-    if isinstance(target, gimple_ctypes.IdentExpr):
-        out.append(target.name)
-        return
-    if isinstance(target, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
-        for el in target.elements:
-            _gmi_target_names(el, out)
+def _gmi_arg_literal_ctype(arg, enc_idx: dict, mod_index: dict):
+    """The unambiguous ctype a call ARGUMENT passes, else None.
 
-
-def _gmi_bound_names(nd) -> list:
-    """Every name the single AST node `nd` binds in the scope that contains
-    it, as a list (empty for nodes that bind nothing). A wildcard
-    `from m import *` binds an unknown set and reports `'*'`.
-
-    This is the binder census `_gmi_identifier_literal_ctype` reads, so it
-    must cover every construct that can rebind a name. Anything it misses
-    lets a rebound name look like a single literal binding, which is the
-    one way that lookup can be wrong.
+    A literal argument answers for itself. An IDENTIFIER answers only when its
+    one binder in the call's scope is a literal (`s = "r"; f(s)`): the callee
+    receives that literal's value, so its parameter follows the literal just
+    as it does for `f("r")`. `enc_idx` is the call's enclosing scope census
+    (`scope_index`, empty at module scope) and `mod_index` the module-wide
+    census (`binding_index`).
     """
-    out: list = []
-    if isinstance(nd, (gimple_ctypes.AssignStmt, gimple_ctypes.AugAssignStmt,
-                       gimple_ctypes.ForStmt)):
-        _gmi_target_names(nd.target, out)
-    elif isinstance(nd, gimple_ctypes.MultiAssignStmt):
-        for t in nd.targets:
-            _gmi_target_names(t, out)
-    elif isinstance(nd, WithItem):
-        if nd.alias is not None:
-            _gmi_target_names(nd.alias, out)
-    elif isinstance(nd, gimple_ctypes.DelStmt):
-        for t in nd.targets:
-            _gmi_target_names(t, out)
-    elif isinstance(nd, (gimple_ctypes.GlobalStmt, gimple_ctypes.NonlocalStmt)):
-        for n in nd.names:
-            out.append(n)
-    elif isinstance(nd, gimple_ctypes.FunctionDef):
-        out.append(nd.name)
-        for pn in gimple_ctypes._param_names_stripped(nd.params):
-            out.append(pn)
-    elif isinstance(nd, (gimple_ctypes.StructDef, gimple_ctypes.TraitDef,
-                         gimple_ctypes.VarDecl, gimple_ctypes.WalrusExpr,
-                         ExceptHandler)):
-        if nd.name:
-            out.append(nd.name)
-    elif isinstance(nd, (gimple_ctypes.Generator, gimple_ctypes.ComptimeForStmt,
-                         gimple_ctypes.ComptimeVarStmt)):
-        if nd.target:
-            out.append(nd.target)
-    elif isinstance(nd, gimple_ctypes.ImportStmt):
-        if nd.alias:
-            out.append(nd.alias)
-        else:
-            out.append(nd.module.split('.')[0])
-        for ent in nd.extra or []:
-            mod_e, al_e = ent
-            out.append(al_e if al_e else mod_e.split('.')[0])
-    elif isinstance(nd, gimple_ctypes.FromImportStmt):
-        if nd.wildcard:
-            out.append('*')
-        for s in nd.name_alias_strs:
-            al = gimple_ctypes._fi_alias(s)
-            out.append(al if al else gimple_ctypes._fi_name(s))
-    return out
-
-
-def _gmi_binding_index(scopes) -> dict:
-    """name -> list of the nodes in `scopes` (a statement list, or one AST node
-    such as a FunctionDef; walked whole, nested functions included) that bind
-    that name. One walk; the per-name lookups are then dict reads."""
-    idx: dict = {}
-    for nd in _walk_ast(scopes):
-        for nm in _gmi_bound_names(nd):
-            if nm in idx:
-                idx[nm].append(nd)
-            else:
-                idx[nm] = [nd]
-    return idx
-
-
-def _gmi_identifier_literal_ctype(name, enc_idx: dict, mod_index: dict):
-    """The ctype of an IDENTIFIER argument whose only binding is a literal.
-
-    A call `lib.walk(s)` where `s = "r"` is the one binding of `s` in scope
-    passes a string, and the callee's parameter types should follow it just as
-    they follow `lib.walk("r")`. `_gmi_literal_ctype` answers None for a name,
-    so without this the argument recorded no evidence and the callee's body
-    lowered `root + str(k)` as pointer arithmetic.
-
-    The lookup is sound only because it demands EXACTLY ONE binder of the name
-    in scope, and that binder is `name = <literal>` (or `var name = <literal>`).
-    Two bindings, a non-literal binding, a parameter, a global declaration or a
-    wildcard import all return None. The scope is the enclosing function when
-    it binds the name at all (a local shadows a global), otherwise the whole
-    module, which is a superset of every binder that could reach the name.
-    `mod_index` is `_gmi_binding_index` over the module's statements and
-    `enc_idx` the same over the ENCLOSING function (an empty dict for a
-    module-level call). The caller builds `enc_idx` once per function: building
-    it here walked the whole function for every identifier argument of every
-    call in it, which was 8% of `fire.py --dump-full`.
-    """
-    sites: list = []
-    if len(enc_idx) > 0:
-        sites = list(enc_idx.get(name, [])) + list(enc_idx.get('*', []))
-    if not sites:
-        sites = list(mod_index.get(name, [])) + list(mod_index.get('*', []))
-    if len(sites) != 1:
-        return None
-    site = sites[0]
-    if isinstance(site, gimple_ctypes.AssignStmt) \
-            and isinstance(site.target, gimple_ctypes.IdentExpr):
-        return _gmi_literal_ctype(site.value)
-    if isinstance(site, gimple_ctypes.VarDecl) and site.value is not None:
-        return _gmi_literal_ctype(site.value)
-    return None
+    if isinstance(arg, gimple_ctypes.IdentExpr):
+        return _gmi_literal_ctype(
+            _gmi_unique_literal_value(arg.name, enc_idx, mod_index))
+    return _gmi_literal_ctype(arg)
 
 
 def _gmi_iter_calls(stmts, _seen=None) -> list:
@@ -368,7 +264,13 @@ def _gmi_apply_call_site_param_evidence(gen, stmts):
     # `evidence_keys` keeps the first-seen order the dict had.
     evidence: dict = {}
     evidence_keys: list = []
-    for call in _gmi_iter_calls(stmts):
+    # The module-wide binder census, and one scope census per enclosing
+    # function (built on first use, keyed by the function's id). An
+    # IDENTIFIER argument is resolved in the scope of the call that passes it
+    # (see `literal_bindings.unique_literal_value`).
+    mod_index = _gmi_binding_index(stmts)
+    scope_cache: dict = {}
+    for call, enc in _gmi_scoped_calls(stmts):
         if not isinstance(call.func, gimple_ctypes.IdentExpr):
             continue
         fname = _as_str(call.func.name)
@@ -380,8 +282,14 @@ def _gmi_apply_call_site_param_evidence(gen, stmts):
             # Arity mismatch means positional alignment (an optional or
             # defaulted param, a *args call) is not trustworthy here.
             continue
+        enc_idx: dict = {}
+        if enc is not None:
+            _ek_scope = id(enc)
+            if _ek_scope not in scope_cache:
+                scope_cache[_ek_scope] = _gmi_scope_index(enc)
+            enc_idx = scope_cache[_ek_scope]
         for pname, arg in zip(params, args):
-            ctype = _gmi_literal_ctype(arg)
+            ctype = _gmi_arg_literal_ctype(arg, enc_idx, mod_index)
             if ctype is not None:
                 _ek = fname + '\x1f' + _as_str(pname)
                 if _ek not in evidence:
@@ -4825,8 +4733,8 @@ def gen_module_impl(self, stmts):
                         return _xs
                 return None
 
-            # The enclosing function's binder census, built ONCE per function
-            # (see `_gmi_identifier_literal_ctype`), keyed by the function's id.
+            # The enclosing function's scope census, built ONCE per function
+            # (see `_gmi_arg_literal_ctype`), keyed by the function's id.
             _xg_enc_index: dict = {}
             def _xg_record_scalar_args(_xkey, _xpnames, _xargs, _xenc):
                 """Record the unanimous literal SCALAR-ish ctype of each
@@ -4834,24 +4742,19 @@ def gen_module_impl(self, stmts):
                 Pass 1.3d's same-module literal contract, see
                 `_gmi_apply_call_site_param_evidence`). An IDENTIFIER argument
                 counts when its one binding in scope is a literal
-                (`_gmi_identifier_literal_ctype`). A parameter whose call sites
+                (`_gmi_arg_literal_ctype`). A parameter whose call sites
                 disagree records None, and the merge below then leaves it at
                 the body-derived type."""
                 for _xi, _xa in enumerate(_xargs):
                     if _xi >= len(_xpnames):
                         break
-                    _xct = _gmi_literal_ctype(_xa)
-                    if _xct is None and isinstance(_xa, gimple_ctypes.IdentExpr):
-                        _xenc_idx: dict = {}
-                        if _xenc is not None:
-                            _xek = id(_xenc)
-                            if _xek in _xg_enc_index:
-                                _xenc_idx = _as_dict(_xg_enc_index[_xek])
-                            else:
-                                _xenc_idx = _gmi_binding_index(_xenc)
-                                _xg_enc_index[_xek] = _xenc_idx
-                        _xct = _gmi_identifier_literal_ctype(
-                            _xa.name, _xenc_idx, _xg_bind_index)
+                    _xenc_idx: dict = {}
+                    if _xenc is not None:
+                        _xek = id(_xenc)
+                        if _xek not in _xg_enc_index:
+                            _xg_enc_index[_xek] = _gmi_scope_index(_xenc)
+                        _xenc_idx = _as_dict(_xg_enc_index[_xek])
+                    _xct = _gmi_arg_literal_ctype(_xa, _xenc_idx, _xg_bind_index)
                     if not _xct or not _xpnames[_xi]:
                         continue
                     _xs_map = self._xmod_gen_param_hints.setdefault(_xkey, {})
