@@ -80,7 +80,7 @@ def _build_and_run(mojo_src: str) -> str:
     with open(src_path, 'w') as f:
         f.write(mojo_src)
 
-    # The companion .cpp is the C++20-coroutine backend's output (MOJO_CORO=cpp,
+# The companion .cpp is the C++20-coroutine backend's output (MOJO_CORO=cpp,
     # the escape hatch). Pinned around this one compile, the way test_taskgroup.py
     # does it process-wide, because the stack-switch default never emits one.
     with coro.pinned('cpp'):
@@ -244,6 +244,36 @@ def main() raises:
     out = _build_and_run(src)
     check("enqueue_cpu_range-shaped repro: three captured calls, each with the right idx",
           out == "idx 0\nidx 1\nidx 2\n", detail=repr(out))
+
+
+def test_cpp_harness_pins_its_own_backend():
+    """Regression pin for the gate job's three failures: importing this
+    file's stack-switch harness (test_coro_future_await) used to leave
+    MOJO_CORO=stackswitch set process-wide, so the cpp-path cases above were
+    lowered by the A3 backend — no generated .cpp at all for a void async
+    function, and stack-switch runtime symbols in a harness that links only
+    fire_runtime/fire_async_runtime. The harness must select the backend it
+    names regardless of the caller's environment."""
+    src = """\
+import asyncio
+
+async def noop() -> None:
+    print(7)
+
+def main() raises:
+    asyncio.run(noop())
+"""
+    prev = os.environ.get('MOJO_CORO')
+    os.environ['MOJO_CORO'] = 'stackswitch'
+    try:
+        out = _build_and_run(src)
+    finally:
+        if prev is None:
+            os.environ.pop('MOJO_CORO', None)
+        else:
+            os.environ['MOJO_CORO'] = prev
+    check("cpp-path harness compiles the cpp backend even under MOJO_CORO=stackswitch",
+          out == "7\n", detail=repr(out))
 
 
 def _async_refusal(src: str) -> str | None:
