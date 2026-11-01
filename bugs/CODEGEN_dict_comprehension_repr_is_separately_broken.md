@@ -374,3 +374,120 @@ emit_infra}.py` and `runtime/fire_runtime.h`, and
 4. Float and bool keys are a SEPARATE change on top: a float key needs its own
    marker and its own keykind, because `_canon_int` cannot read `"1.5"` either,
    and a bool key needs the codegen to stop lowering it to the integer 1.
+
+## Status (2026-11-01, `work/bug-codegen-dict-comprehension-repr-is-s`) — planning round: implementation guide, nothing landed in code
+
+Scope of this round: re-measured the state, checked the doc's own four-step
+ordering against the runtime, and recorded the guide below. No code change.
+The reason no code landed is in "Why this is a guide and not a commit" at the
+end. Everything under "Measured" was read from the tree on this date; the
+interpreter rows are the 2026-10-19 measurements, not re-run here.
+
+### Measured (this tree, 2026-11-01)
+
+- Runtime key canonicalisation: `runtime/fire_runtime.c` `_canon_int` (~line
+  6261) promotes any canonical-decimal STR key into an integer slot
+  (`keykind == 2`). `_dict_find_k` (~6321), `_dict_lookup_k` (~6552) redirect
+  a canonical-decimal text key to `_dict_find_ik` / `_dict_lookup_ik`.
+  `_dict_set_raw_seq_kind_k` (~6350) re-normalises through `_canon_int`.
+  `mojo_dict_key_release` (~12960) also consults `_canon_int`.
+- Iteration reads a keykind-2 slot's `ikey` directly
+  (`mojo_dict_iter_key_int`, ~7013); any other slot is `strtoll` of its text.
+  `mojo_dict_iter_key_kind` (~7008) is the unpack refusal's domain test.
+- `test_ptr_registry.py` pins the merge in `dict_int_keys` (~303, registered
+  at line 820) and `dict_set_inline`.
+- The 2026-10-19 table still holds: compiled `{10: "a"}` prints `{'10': 'a'}`,
+  `{True: 1}` prints `{1: 1}`, `d[5]="int"; d["5"]="str"` is one entry
+  (`len` 1; CPython and the interpreter give 2). The interpreter is correct
+  on every row.
+
+### Correction to the doc's ordering (read before step 1)
+
+The 2026-10-19 "what the next worker should do" puts "remove the `_canon_int`
+promotion FIRST, alone" and asserts "nothing else in the tree depends on the
+merge". That is NOT verified and is probably wrong for this reason: after the
+merge is removed, an integer key written by the codegen still travels the TEXT
+API (`_char_to_cstr` renders it as decimal and calls the str-domain setter),
+so it lands in a keykind-0 slot, and iteration / unpack / repr then see a
+text key where they currently see an integer slot. Step 1 is therefore a
+behaviour change that needs the codegen to route typed integer keys through
+the integer API in the SAME change. Reordering is the fix: the marker
+(step 2 below) and the removal of the merge must land together, or the
+integer key path must be switched to the `_ik` family first. Do not land
+step 1 alone.
+
+### The change, in the order it can actually land
+
+**A. Integer key routing without a new ABI symbol (the decision to make).**
+The header scan (`test_runtime_header_scan.py`) counts every `fire_runtime.h`
+entry against quoted totals in `FORMAL.md`,
+`bugs/formal/FORMAL_known_limits.md`, `build_stdlib_dylib.py`,
+`fire_runtime.h`, `formal/build.py` and `formal/model.py`. A new runtime
+function moves 581 -> 582 and 684 -> 685 and fails 25 checks. Two decisions:
+
+- **A1 (recommended):** accept the ABI bump. It is mechanical: update the
+  quoted counts in all six files in the same commit, the way every earlier
+  ABI addition did. The `formal/` edits are count strings only, not proof
+  structure, so the formal lane's rule is not engaged. Check first with
+  `git log -S"581" -- formal/build.py` that this has been the practice.
+- **A2:** emit the marked-key producer as generated C in the per-TU prologue
+  (the way `_mojo_repr_dict` is emitted) instead of a runtime entry. Avoids
+  the count but duplicates a helper into every TU, which CLAUDE.md forbids
+  ("consolidate duplicates"). Not recommended.
+
+**B. The marked integer key (one commit, one doc).**
+1. `runtime/fire_runtime.c`: `mojo_intkey_str_transient(int64_t)` returns
+   `'\x02'` + decimal from the transient pool `mojo_int_str_transient` uses
+   (`_INT_STR_BLOCK` 32 >= 20 + 1 + 1). Declare in `runtime/fire_runtime.h`.
+2. Strip the marker in `_dict_set_raw_seq_kind_k`, `_dict_find_k`,
+   `_dict_lookup_k`: a marked key is `key + 1` with keykind 2, taken from the
+   integer, no copy. The marker byte is a prefix so the string handed to
+   `_str_hash` / `strcmp` is already NUL-terminated.
+3. Codegen: the two sites that render a typed integer dict key,
+   `mojo/backend_gimple/emit_infra.py` `_emit_dict_pair_store` (the
+   `int` / `int64_t` / `_Bool` arm, reached from `mojo/middle/emit_resolve.py`'s
+   `_gen_compr_append`) and `_char_to_cstr`'s `_int_word_vals` branch, emit the
+   marked form. `_char_to_cstr` is the one conversion every subscript
+   get/set/augmented-assign/`in`/`del`/`pop`/`setdefault`/comprehension key
+   goes through, so one edit covers them all.
+4. `_canon_int` promotion, and the redirects in `_dict_find_k`,
+   `_dict_lookup_k`, `mojo_dict_key_release`, removed in the SAME commit.
+5. Spec: `test_ptr_registry.py` `dict_int_keys` (the "ONE entry, both
+   directions" assertions at four points, including `d->used == 2` and the
+   `keys()` order) and `dict_set_inline` (`mojo_dict_contains(cp, "103")`
+   finding an integer slot) are rewritten to the CPython contract. The
+   interpreter's agreement (`d[5]` and `d["5"]` both present, `len` 2) is
+   cited in the test comment, not assumed.
+
+Measured earlier (2026-10-19, reverted): this change made six of eight rows
+byte-identical to CPython, `test_gimple.py` 396/396, `test_runtime_diff.py`
+63/63.
+
+**C. The repr arm (one line, after B).** `_mojo_repr_dict`
+(`mojo/backend_gimple/emit_infra.py` ~6661 / `module_gen.py` copy) prints
+`mojo_dict_slot_key` UNQUOTED when `keykind == 2`. Only safe after B, since
+before B a keykind-2 slot can hold a str spelling.
+
+**D. Float and bool keys (separate change, after C).** `{1.5: "x"}` needs its
+own marker/keykind because `_canon_int` cannot read `"1.5"`. `{True: 1}` needs
+the codegen to stop lowering a bool key to integer 1. Each is measured
+separately before it is named.
+
+### Tests that prove it
+
+- Before B: `test_runtime_diff.py` new group `dict_int_key_repr`, CPython-
+  comparable (`{10: 'a'}`, `{i: 1 for i in range(3)}`, `d[5]`/`d["5"]` len 2,
+  `{"10": "a"}` unchanged). It must FAIL on master and pass after C.
+- `test_ptr_registry.py` `dict_int_keys` and `dict_set_inline` rewritten per B5.
+- `test_gimple.py` and `test_runtime_header_scan.py` (after A1 count update).
+- The integrator's gate, not this worker: `compile_stdlib.py` `U` must not
+  increase; `stdlib-dylib` `skip` count must not increase; byte-identical
+  generated C is NOT the standard here (this changes output on purpose).
+
+### Why this is a guide and not a commit
+
+The next step (A1 then B) is a runtime-contract change plus a header ABI
+bump plus a spec rewrite, and its acceptance gate is the stdlib compile the
+integrator runs. A light worker cannot verify that, and landing step 1 alone
+would change observable key behaviour (see the ordering correction). The
+guide is the deliverable of this round. The doc stays open.
