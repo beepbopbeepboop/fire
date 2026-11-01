@@ -6705,6 +6705,16 @@ def gen_module_impl(self, stmts):
                     else:
                         ctype = 'int64_t'
                 self._global_var_types[mangled] = ctype
+                if v is None:
+                    # A no-initializer container field is an INSTANCE field,
+                    # not a class attribute: every instance needs its own
+                    # empty container (`_alloc_S` builds it fresh), so the
+                    # per-class global is only the type/kind carrier.
+                    _fresh = getattr(self, '_fresh_field_cattrs', None)
+                    if _fresh is None:
+                        _fresh = {}
+                        self._fresh_field_cattrs = _fresh
+                    _fresh[mangled] = ctype
                 # A NON-constant value of a FUNCTION-SCOPED class is per
                 # EXECUTION of its `class` statement (Python builds a new class
                 # object each time it runs). The `_classattr_` global then holds
@@ -16312,7 +16322,15 @@ def gen_module_impl(self, stmts):
                     f"  _p->{_safe_field(gimple_ctypes.cattr_cell_field(_aname))} = {_gname};\n")
             elif (_aname in field_map
                     and field_map[_aname] == self._global_var_types.get(_gname, field_map[_aname])):
-                _ai_parts.append(f"  _p->{_safe_field(_aname)} = {_gname};\n")
+                _fresh_ct = (getattr(self, '_fresh_field_cattrs', None) or {}).get(_gname)
+                if _fresh_ct == 'MojoList *':
+                    _ai_parts.append(f"  _p->{_safe_field(_aname)} = mojo_list_new ();\n")
+                elif _fresh_ct == 'MojoDict *':
+                    _ai_parts.append(f"  _p->{_safe_field(_aname)} = mojo_dict_new ();\n")
+                elif _fresh_ct == 'MojoSet *':
+                    _ai_parts.append(f"  _p->{_safe_field(_aname)} = mojo_set_new ();\n")
+                else:
+                    _ai_parts.append(f"  _p->{_safe_field(_aname)} = {_gname};\n")
         attr_inits = ''.join(_ai_parts)
         # A builtin-`dict` subclass gets its hidden `_data` backing
         # MojoDict allocated here so inherited container ops have real

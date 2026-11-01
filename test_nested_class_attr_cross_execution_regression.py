@@ -142,16 +142,6 @@ def main():
     print(A.x)
 """, "9\n4\n9\n")
 
-if __name__ == '__main__':
-    test_nested_class_attr_cross_execution_regression()
-    test_nested_class_container_attr_cross_execution_regression()
-    test_nested_class_attr_recursive_execution_regression()
-    test_nested_class_attr_recursive_value_return_regression()
-    test_nested_class_attr_exception_unwind_regression()
-    test_nested_class_attr_unwind_other_function_regression()
-    test_class_attr_instance_read_falls_back_to_class_regression()
-    print("PASS")
-
 def test_same_named_function_scoped_classes_attr_regression():
     # Two function-scoped classes with the same bare name: the second is hoisted
     # under a renamed struct (`T__g`), so its class-name read must resolve
@@ -173,3 +163,50 @@ def main():
     print(f())
     print(g())
 """, "1\n2\n")
+
+def test_no_initializer_container_field_is_per_instance_regression():
+    # `var xs: List[Int]` is an instance field: each instance owns its own empty
+    # container. It was seeded from one per-class global, so every instance
+    # shared one list: `1 1` where each instance should print `1 0`.
+    test_gimple_stdout("gimple_noinit_container_field_per_instance", """\
+class C():
+    var xs: List[Int]
+
+def main():
+    a = C()
+    b = C()
+    a.xs.append(1)
+    print(len(a.xs))
+    print(len(b.xs))
+""", "1\n0\n")
+
+def test_nested_no_initializer_container_field_per_instance_regression():
+    # Same, for a function-scoped class (open item 5 of the bug doc).
+    test_gimple_stdout("gimple_nested_noinit_container_field_per_instance", """\
+def h(v: int):
+    class C():
+        var xs: List[Int]
+    c = C()
+    c.xs.append(v)
+    return c
+
+def main():
+    a = h(1)
+    b = h(2)
+    print(len(a.xs))
+    print(len(b.xs))
+""", "1\n1\n")
+
+if __name__ == '__main__':
+    test_nested_class_attr_cross_execution_regression()
+    test_nested_class_container_attr_cross_execution_regression()
+    test_nested_class_attr_recursive_execution_regression()
+    test_nested_class_attr_recursive_value_return_regression()
+    test_nested_class_attr_exception_unwind_regression()
+    test_nested_class_attr_unwind_other_function_regression()
+    test_class_attr_instance_read_falls_back_to_class_regression()
+    test_same_named_function_scoped_classes_attr_regression()
+    test_no_initializer_container_field_is_per_instance_regression()
+    test_nested_no_initializer_container_field_per_instance_regression()
+    print("PASS")
+
