@@ -951,10 +951,9 @@ def test_cross_module_unannotated_param_takes_the_callers_literal_type() -> bool
     The two spellings pinned here are the ones the cross-module literal
     contract reaches: a bare `import SIBLING` attribute call bound to a
     local inside a function, and a `from SIBLING import fn` call. Each must
-    print what CPython prints. (A module-scope global bound from a bare
-    module attribute call is a separate gap in result-type inference, filed
-    in bugs/CODEGEN_module_attr_call_result_type_is_not_inferred.md, and is
-    deliberately not pinned here as if it were correct.)"""
+    print what CPython prints. (A module-scope global or a returned local bound from a bare
+    module attribute call is pinned by
+    `test_module_attr_call_result_is_typed_by_the_callee_return`.)"""
     lib = (
         'def which(cmd, path=None):\n'
         '    return cmd\n'
@@ -992,6 +991,51 @@ def test_cross_module_unannotated_param_takes_the_callers_literal_type() -> bool
               f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r}) "
               f"| from-import rc={rc2} stdout={stdout2!r} "
               f"(CPython rc={py_rc2} {py_stdout2!r})")
+    return ok
+
+
+def test_module_attr_call_result_is_typed_by_the_callee_return() -> bool:
+    """`import m; m.f(...)` consumed by INFERENCE (a module-scope global, or a
+    local the enclosing function returns) must take the callee's `char *`
+    return, not the `int64_t` default: the string's pointer printed as a
+    decimal integer (`4299312296`), exit 0. Each program is compared to
+    CPython. `obj.which(...)` on a plain struct instance must NOT be typed by
+    the module function of the same name."""
+    pkg = {
+        '_shm.py': 'def which(cmd, path=None):\n    return cmd\n',
+        'mg.py': (
+            'import _shm\n'
+            "x = _shm.which('gcc')\n"
+            'print(x)\n'
+        ),
+        'mr.py': (
+            'import _shm\n'
+            '\n'
+            'def find(n):\n'
+            "    c = _shm.which('gcc')\n"
+            '    if not c:\n'
+            '        return None\n'
+            '    return c\n'
+            '\n'
+            'print(find(1))\n'
+        ),
+        'ma.py': (
+            'import _shm as sh\n'
+            "y = sh.which('gcc')\n"
+            'print(y)\n'
+        ),
+    }
+    ok = True
+    with tempfile.TemporaryDirectory() as td:
+        for entry in ('mg.py', 'mr.py', 'ma.py'):
+            rc, out = _build_and_run(pkg, entry, td)
+            py_rc, py_out = _cpython_run(td, entry)
+            good = (rc == 0 and py_rc == 0 and out == py_out
+                    and out.strip() == 'gcc')
+            if not good:
+                print(f"  ✗ module_attr_call_result {entry}: rc={rc} "
+                      f"stdout={out!r} (CPython rc={py_rc} {py_out!r})")
+            ok = ok and good
     return ok
 
 
@@ -2394,6 +2438,7 @@ CASES = [
     test_bare_import_sibling_struct_field_through_module,
     test_bare_import_sibling_function_call_through_module,
     test_cross_module_unannotated_param_takes_the_callers_literal_type,
+    test_module_attr_call_result_is_typed_by_the_callee_return,
     test_generator_str_param_concat_cross_module_variable_arg,
     test_generator_str_param_concat_cross_module_local_var_arg,
     test_module_scoped_cross_module_struct_ctor_both_import_spellings,
