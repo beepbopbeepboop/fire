@@ -6920,6 +6920,32 @@ def mk():
 f = mk()
 print(f["a"])
 """, "1\n")
+    # The container-returning-call globals in ONE program, against CPython.
+    # `mk` (dict) and `mkl` (list) are the two fixtures the bug doc named;
+    # `pick` returns a dict on one path and a list on the other, so its
+    # return type is not a single container and its global must keep the
+    # boxed `int64_t` field rather than being narrowed to either pointer.
+    # Each of the four globals is stored and read back through its field
+    # (`_root_globals.NAME`), so a store that is not boxed to match the
+    # declared field fails here at gcc, not silently at runtime.
+    test_gimple_stdout("gimple_module_scope_global_bound_to_container_returning_calls_one_program", """\
+def mk():
+    return {"a": 1}
+def mkl():
+    return [1, 2]
+def pick(n):
+    if n:
+        return {"a": 7}
+    return [9, 8]
+f = mk()
+g = mkl()
+h = pick(1)
+k = pick(0)
+print(f["a"])
+print(g[1])
+print(h["a"])
+print(k[0])
+""", "1\n2\n7\n9\n")
 
     test_gimple_stdout("gimple_dict_items_value_kinds_survive", """\
 def c() -> dict:
