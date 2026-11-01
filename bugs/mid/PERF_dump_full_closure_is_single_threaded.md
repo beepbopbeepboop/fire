@@ -79,7 +79,7 @@ Measured, NOT landed: f-string field tokenization is ~12% of the compile (`py_to
 distinct texts, 17,141 of them from `emit_exprs._lower_StringLiteral` and `emit_infra._fstring_sub_exprs`; 19 s). Memoising
 the token list per text is safe in Python (the Parser reads tokens by index) but is in the self-host closure, and
 verifying it needs the self-hosted binary to compile an f-string program, which crashes on unmodified master
-(`bugs/mid/CODEGEN_selfhost_binary_segfaults_on_an_fstring_program.md`). The edit is kept in `git stash` on
+(the self-host crash on any program with a call (fixed 2026-11-01; `bugs/mid/CODEGEN_capturing_closure_value_passed_from_a_closure_has_no_env.md` is the language-level bug behind it; `test_selfhost` now compiles a call + f-string program)). The edit is kept in `git stash` on
 `work/midhard3` ("_fstring_field_tokens"); land it after that bug is fixed and the check passes.
 Remaining, in order of share: the other `_walk` users in `_scan_callsite_param_kinds` (cache per function across
 the two `_one_pass` rounds and the six `lower` calls: needs an invalidation story because the contract maps evolve);
