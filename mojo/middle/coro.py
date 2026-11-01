@@ -1984,6 +1984,29 @@ def _index_generator_defs(stmts) -> None:
             _GEN_DEFS[s.name] = s
 
 
+def _populate_gen_rec_assume(stmts) -> None:
+    _GEN_REC_ASSUME.clear()
+    for name, fd in list(_GEN_DEFS.items()):
+        targets = set()
+        for n in _walk(fd):
+            if (isinstance(n, N.ForStmt) and isinstance(n.target, str)
+                    and isinstance(n.iterable, N.CallExpr)
+                    and isinstance(n.iterable.func, N.IdentExpr)
+                    and n.iterable.func.name == name):
+                targets.add(n.target)
+        if not targets:
+            continue
+        env0 = _static_env(fd)
+        others = []
+        for n in _walk(fd):
+            if isinstance(n, N.YieldExpr) and n.value is not None:
+                refs = set(x.name for x in _walk(n.value) if isinstance(x, N.IdentExpr))
+                if not (refs & targets):
+                    others.append(_yield_kind(n.value, env0))
+        if others and all(k in ('p', 'w') for k in others):
+            _GEN_REC_ASSUME[name] = 'w'
+
+
 def _register_generator_defs(stmts) -> None:
     """Register this module's top-level generator defs, and drop the
     previous module's kind answers.
@@ -2006,32 +2029,9 @@ def _register_generator_defs(stmts) -> None:
     _PTR_RET_KINDS.clear()
     _MODULE_STMTS[:] = list(stmts)
     _compute_pointer_evidence(stmts)
-    _GEN_REC_ASSUME.clear()
+    _populate_gen_rec_assume(stmts)
     _LIST_RET_KINDS.clear()
     _PTR_RET_KINDS.clear()
-    for name, fd in list(_GEN_DEFS.items()):
-        # `for T in name(...)` inside `name` itself, with T yielded through an
-        # expression: assume pointer words for T iff every OTHER yield site of
-        # the generator (the ones not built from T) is a path word. The
-        # assumption is a guess that `_resolve_gen_kind` then verifies.
-        targets = set()
-        for n in _walk(fd):
-            if (isinstance(n, N.ForStmt) and isinstance(n.target, str)
-                    and isinstance(n.iterable, N.CallExpr)
-                    and isinstance(n.iterable.func, N.IdentExpr)
-                    and n.iterable.func.name == name):
-                targets.add(n.target)
-        if not targets:
-            continue
-        env0 = _static_env(fd)
-        others = []
-        for n in _walk(fd):
-            if isinstance(n, N.YieldExpr) and n.value is not None:
-                refs = set(x.name for x in _walk(n.value) if isinstance(x, N.IdentExpr))
-                if not (refs & targets):
-                    others.append(_yield_kind(n.value, env0))
-        if others and all(k in ('p', 'w') for k in others):
-            _GEN_REC_ASSUME[name] = 'w'
 
 
 def _resolve_gen_kind(name):
@@ -6106,6 +6106,14 @@ def lower(stmts: list, closure_stmts=(),
         _LIST_RET_KINDS.clear()
         _PTR_RET_KINDS.clear()
         _scan_unthreadable_nested_async_gens(stmts)
+        # The call-site param tables (`_CALLSITE_PARAM_KINDS`, `_PLAIN_CALLSITE_PARAM_KINDS`)
+        # and `_GEN_REC_ASSUME` are only populated by `_scan_callsite_param_kinds`,
+        # which the cpp path was missing. Run it here to clear/refill them.
+        _scan_callsite_param_kinds(stmts, closure_stmts, module_name)
+        # `_GEN_REC_ASSUME` is populated based on self-recursive for-loop patterns.
+        # It needs the call-site tables to be current first, so we compute it after
+        # `_scan_callsite_param_kinds` runs. Clear it first, then populate.
+        _populate_gen_rec_assume(stmts)
         return stmts, []
     _BOX_STRUCT_OF.clear()
     _WIRED_CAPTURES.clear()

@@ -4027,6 +4027,72 @@ main()
         test_generator_matches_cpython("cpp_path_ignores_previous_generator_registry",
                                        plain_h_src, plain_h_src)
 
+    # The call-site param tables (`_CALLSITE_PARAM_KINDS`, `_PLAIN_CALLSITE_PARAM_KINDS`)
+    # were not cleared/refilled on the cpp path; a previous module's generator
+    # with unannotated params that resolved to 'd' leaked into this module's
+    # same-named generator, causing an erroneous refusal or wrong typing.
+    prev_callsite_src = """\
+def g(x):
+    yield x
+
+def main():
+    print(g(2.5))
+main()
+"""
+    with coro.pinned('stackswitch'):
+        try:
+            gimple_codegen.compile_to_gimple_with_cpp(prev_callsite_src, do_imports=False)
+        except Exception:
+            pass
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("cpp_path_ignores_previous_callsite_params", """\
+def g(x):
+    yield x
+
+def main():
+    for v in g(2.5):
+        print(v)
+main()
+""", """\
+def g(x):
+    yield x
+
+def main():
+    for v in g(2.5):
+        print(v)
+main()
+""")
+
+    # The stale-state case the test above does NOT reproduce: the previous
+    # module's unannotated `g(x)` was called with a float, so its call-site
+    # table typed `x` as 'd'. This module calls the same-named `g` with an
+    # int. Before the cpp branch refreshed `_CALLSITE_PARAM_KINDS`, the cpp
+    # path kept the float typing and printed `2.0` where CPython prints `2`
+    # (measured on the pre-8c305b720 tree; the fixed tree prints `2`).
+    with coro.pinned('stackswitch'):
+        try:
+            gimple_codegen.compile_to_gimple_with_cpp(prev_callsite_src, do_imports=False)
+        except Exception:
+            pass
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("cpp_path_callsite_int_after_previous_float", """\
+def g(x):
+    yield x
+
+def main():
+    for v in g(2):
+        print(v)
+main()
+""", """\
+def g(x):
+    yield x
+
+def main():
+    for v in g(2):
+        print(v)
+main()
+""")
+
 
 _AUG_YIELD_SRC = """\
 def g():
