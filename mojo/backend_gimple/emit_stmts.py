@@ -1328,7 +1328,19 @@ def _gen_stmt_AssignStmt(gen, node):
         # int64_t spelling) and returns every other kind's own word, so the
         # local is a word of unknown kind -- which is what `_dyn_word_locals`
         # records, so its `str()`/`==` ask the runtime.
-        if vtype == 'int64_t' and v in getattr(gen, '_boxed_vals', ()):
+        # A TAGGED generator word (`x = next(g)` on a mixed-kind generator) is
+        # the exception: unwrapping it loses the yield's kind, so `print(x)`
+        # then shows a bool as `1` or a str as an address. The local keeps the
+        # box, and is marked boxed so every consumer resolves it by kind. Only
+        # for a name bound exactly once in the function: a box-holding local
+        # that is later stored a bare word would be read as a box.
+        _keep_tagged_box = (vtype == 'int64_t'
+                            and v in getattr(gen, '_tagged_word_vals', ())
+                            and ginf.tagged_next_bind_name(gen, _as_str(tname)))
+        if _keep_tagged_box:
+            gen._boxed_vals.add(gen._cname(tname))
+            gen._tagged_word_vals.add(gen._cname(tname))
+        elif vtype == 'int64_t' and v in getattr(gen, '_boxed_vals', ()):
             _bw = gen._new_temp('int64_t')
             gen._emit(f'  {_bw} = mojo_box_word ({v});')
             v = _bw

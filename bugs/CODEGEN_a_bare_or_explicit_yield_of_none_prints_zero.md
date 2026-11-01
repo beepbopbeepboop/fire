@@ -6,6 +6,30 @@ the generator value-slot lattice supports (int / bool / float / str) matches
 CPython on BOTH the local and global generator paths. None is the only
 mismatching type. Owner-level ABI feature; measured and pinned, NOT shipped.
 
+## Status (2026-11-01, eighth round, work/bug-codegen-a-bare-or-explicit-yield-of: bind-site kind kept, partial)
+
+**Landed (the seventh round's planned change, scoped to what the pins show):**
+a tagged generator word bound to a name keeps its box, so `x = next(g);
+print(x)` prints the yielded kind on both paths. Details, the rule, and the
+remaining gap (float-box arithmetic) are in
+`bugs/CODEGEN_tagged_generator_value_bound_to_a_name_loses_its_kind.md`, which
+is updated with the same status.
+
+- `_tagged_word_vals` (emit_infra.py, saved/restored like `_boxed_vals`),
+  marked at the two tagged-`next` sites (emit_calls.py).
+- Bind (emit_stmts.py): kept only when `ginf.tagged_next_bind_name` holds
+  (every binding is `name = next(g)` for one once-bound generator `g`).
+- Operand (emit_exprs.py): a tagged local is read as its int word
+  (`mojo_box_word`), not `mojo_box_double`.
+
+**Pins:** `run_tagged_word_bind_tests` in `test_gimple_generator_runner.py`
+(five cases). Before the fix: print default and print cpp FAIL (`1` and an
+address). After: 5/5.
+
+**Still open in this doc:** the bind-site doc's float-box arithmetic gap;
+the dead `co_yield (int64_t)0` line (item 3); the module-global `next()`
+refusal's own doc. None-yield printing `0` remains fixed on the default path.
+
 ## Status (2026-11-01, seventh round, work/bug-codegen-a-bare-or-explicit-yield-of: planning guide for the bind-site kind loss, no code changed)
 
 **Output of this round: a planning guide (not a fix).** The open item is the

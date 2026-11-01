@@ -3525,9 +3525,135 @@ def main():
 main()
 """)
 
+def run_tagged_word_bind_tests():
+    # A tagged generator word bound to a NAME (`x = next(g)`) must keep its
+    # kind. The GIMPLE bind used to unwrap the box with `mojo_box_word`, so a
+    # bool printed as `1` and a str read as an int on the cpp path. Every
+    # shape is pinned against the CPython oracle, on the default path and on
+    # the cpp escape hatch. Arithmetic on the bound name must still work, a
+    # None-yield name must still test `is None`, and a rebinding of the name
+    # to a plain value must still print that plain value.
+    test_generator_matches_cpython("tagged_bind_print_default", """\
+def gen():
+    yield True
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x)
+    x = next(g)
+    print(x)
+main()
+""", """\
+def gen():
+    yield True
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x)
+    x = next(g)
+    print(x)
+main()
+""")
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("tagged_bind_print_cpp", """\
+def gen():
+    yield True
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x)
+    x = next(g)
+    print(x)
+main()
+""", """\
+def gen():
+    yield True
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x)
+    x = next(g)
+    print(x)
+main()
+""")
+    test_generator_matches_cpython("tagged_bind_arithmetic_default", """\
+def gen():
+    yield 1
+    yield "a"
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x + 1)
+main()
+""", """\
+def gen():
+    yield 1
+    yield "a"
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x + 1)
+main()
+""")
+    test_generator_matches_cpython("tagged_bind_is_none_default", """\
+def gen():
+    yield
+    yield 3
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x is None)
+main()
+""", """\
+def gen():
+    yield
+    yield 3
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x is None)
+main()
+""")
+    test_generator_matches_cpython("tagged_bind_rebound_to_plain_default", """\
+def gen():
+    yield True
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    x = 5
+    print(x)
+main()
+""", """\
+def gen():
+    yield True
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    x = 5
+    print(x)
+main()
+""")
+
 def run_tests():
     run_none_yield_tests()
     run_tagged_word_cpp_tests()
+    run_tagged_word_bind_tests()
     run_star_args_call_tests()
     run_callable_param_tests()
     run_lambda_capture_tests()
