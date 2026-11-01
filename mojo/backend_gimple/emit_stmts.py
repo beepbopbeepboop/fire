@@ -1366,6 +1366,15 @@ def _gen_stmt_AssignStmt(gen, node):
         # a plain value is boxed here (`mojo_box_int`), and the local keeps
         # the box of whichever store ran last. A store that is not int64 is
         # not boxed (its C type is not the local's), as it always was.
+        # A tagged word and a non-int64 name never mix: see
+        # MIXED_NAME_NON_INT64_REFUSAL. Refused here, before any store is
+        # emitted, rather than unwrapping the box into a str/float slot.
+        _tagged_bind = (v in getattr(gen, '_tagged_word_vals', ()) or _for_copy)
+        if ((_tagged_bind and ginf.is_non_int_c_type(gen.var_types.get(tname)))
+                or (ginf.is_non_int_c_type(vtype)
+                    and ginf.tagged_mixed_name(gen, _as_str(tname)))):
+            raise RuntimeError(
+                f"{tname!r}: {ginf.MIXED_NAME_NON_INT64_REFUSAL}")
         if (not _keep_tagged_box and vtype == 'int64_t'
                 and gen.var_types.get(tname, 'int64_t') == 'int64_t'
                 and ginf.tagged_mixed_name(gen, _as_str(tname))):

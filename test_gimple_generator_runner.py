@@ -4054,6 +4054,58 @@ main()
     with coro.pinned('cpp'):
         test_generator_matches_cpython("tagged_for_target_copy_mixed_name_none_cpp",
                                        _mixed_none, _mixed_none)
+    # Open item 1 of the 15th round: a mixed name whose OTHER store is not
+    # int64. The copy of a tagged word into a str or float local used to
+    # compile to a bare unwrap: the str local segfaulted (an int word used as
+    # a char*), and the float local printed `1.0` / `0.0` for `1` / None. A
+    # Mojo name has one type, so the refusal is the honest answer in either
+    # direction (the copy first, or the plain store first).
+    _mixed_str = """\
+def g():
+    yield 1
+    yield None
+    yield 2
+def main():
+    x = "s"
+    for v in g():
+        x = v
+        print(x)
+    x = "t"
+    print(x)
+main()
+"""
+    _mixed_float = """\
+def g():
+    yield 1
+    yield None
+    yield 2
+def main():
+    x = 0.5
+    for v in g():
+        x = v
+        print(x)
+    x = 2.5
+    print(x)
+main()
+"""
+    _mixed_after = """\
+def g():
+    yield 1
+    yield None
+    yield 2
+def main():
+    x = 0
+    for v in g():
+        x = v
+        print(x)
+    x = 2.5
+    print(x)
+main()
+"""
+    test_generator_refused("tagged_for_target_copy_into_str_refused", _mixed_str, "refused")
+    test_generator_refused("tagged_for_target_copy_into_float_refused", _mixed_float, "refused")
+    test_generator_refused("tagged_for_target_plain_float_store_after_copy_refused",
+                           _mixed_after, "refused")
 
 def run_tests():
     run_none_yield_tests()
