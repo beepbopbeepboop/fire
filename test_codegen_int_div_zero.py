@@ -124,6 +124,20 @@ def test_bool_true_division_is_float():
     assert rc == 0, out
     assert out == '0.5 0.0', repr(out)
 
+def test_int_true_division_is_float_in_generator_body():
+    # The coroutine emitter's own `/` lowering (cpp_core.py `_cpp_expr`) must
+    # answer Float64 for Int / Int, as emit_exprs.py's plain tail does.
+    src = ('def g(*, start=[]):\n'
+           '    n = 7\n'
+           '    yield n / 2\n'
+           '    yield 8 / 4\n'
+           'def main():\n'
+           '    for v in g():\n'
+           '        print(v)\n')
+    out, rc = run_jit(src)
+    assert rc == 0, out
+    assert out == '3.5\n2.0', repr(out)
+
 def test_struct_true_division_builds():
     # A struct operand keeps its own `/` even when the other operand is an int
     # (std/pathlib/path.mojo's `result /= segment`). The Int / Int gate must not
@@ -162,6 +176,7 @@ if __name__ == '__main__':
     test_nonzero_integer_division_unchanged()
     test_int_true_division_is_float()
     test_bool_true_division_is_float()
+    test_int_true_division_is_float_in_generator_body()
     test_struct_true_division_builds()
     test_integer_modulo_floors_toward_divisor_sign()
     test_integer_modulo_floors_in_generator_body()
