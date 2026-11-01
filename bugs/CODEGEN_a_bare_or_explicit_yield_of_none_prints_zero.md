@@ -1,5 +1,50 @@
 # CODEGEN_a_bare_or_explicit_yield_of_none: a None yield value prints 0
 
+## Status (2026-11-01, sixteenth round, work/bug-codegen-a-bare-or-explicit-yield-of: open item 1 decided, refused, partial)
+
+**Probe (item 1 of the fifteenth round), measured before this round:** a
+mixed name whose other store is not int64, with `g()` yielding 1, None, 2:
+- `x = "s"; for v in g(): x = v; print(x)`: the compiled program SEGFAULTS
+  (exit -11, no output). The copy unwrapped the box into a `char *` local.
+- `x = 0.5; for v in g(): x = v; print(x)`: prints `1.0` / `0.0` / `2.0` where
+  CPython prints `1` / `None` / `2`. The copy unwrapped into a double local.
+
+**Decision: refuse, do not box.** A Mojo name has one type, so a str or float
+store cannot share a name with a tagged word. The box cannot carry a `char *`
+or a double, and boxing those would be a new word kind for no valid program.
+The refusal is the honest answer, the same shape as the round-3 refusal.
+
+**Landed:**
+- `emit_infra.py`: `MIXED_NAME_NON_INT64_REFUSAL` (message) and
+  `is_non_int_c_type(ctype)` (true for a float/double or a pointer type; an
+  integer type, bool included, is the word's own kind and is not refused).
+- `emit_stmts.py`, simple-name bind: raises `RuntimeError` when (a) a tagged
+  word or a tagged for-target copy is stored into a name whose declared type is
+  non-int, or (b) a non-int store goes into a name that `tagged_mixed_name`
+  says holds a tagged word. Both are refused before any store is emitted.
+- Pins (`run_tagged_for_target_bind_tests`): `tagged_for_target_copy_into_str_refused`,
+  `tagged_for_target_copy_into_float_refused`,
+  `tagged_for_target_plain_float_store_after_copy_refused`. Fail-before: all
+  three FAIL with "expected a refusal, but it compiled". After: all PASS.
+- The existing mixed pins (`tagged_for_target_copy_mixed_*`, `..._mixed_name_none_*`)
+  still pass: the `y = next(h)` then `for y in [...]` shape is a for-loop bind,
+  not a simple-name bind, so the rule does not reach it.
+
+**Open-item status after this round:**
+1. Item 1 (non-int64 mixed store): DECIDED and refused. The silent `0` / `1.0`
+   and the segfault are gone for str and float. Whether a box can carry a
+   str/float store is not needed for any valid Mojo program, so it stays refused.
+2. `v is None` on a tagged False/0: unchanged, see
+   `bugs/CODEGEN_is_none_on_a_tagged_false_or_zero_is_true.md`.
+3. Lone None yield on the cpp path: unchanged (`NONE_YIELD_CPP_REFUSAL`).
+
+**Gate note for the integrator (not run here):** the refusal is a new
+`RuntimeError` from the simple-name bind (`emit_stmts.py`), which every bind
+reads. Compare `stdlib-dylib`'s `skip` count and `stdlib-syntax`'s `U` before
+and after. Only a module that stores a str/float into a name that also receives
+a tagged generator word should change; a rise in `U` on such a module means a
+real program was relying on the old unwrap, which was already wrong for None.
+
 ## Status (2026-11-01, fifteenth round, work/bug-codegen-a-bare-or-explicit-yield-of-1762: mixed-name copy keeps the box, partial)
 
 **Landed (real behaviour change on both paths): open item 3 of the fourteenth
