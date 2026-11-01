@@ -25,6 +25,13 @@
 #include <string.h>
 #include <unistd.h>
 
+extern int64_t mojo_box_none(void);
+extern void mojo_exc_type_set(int64_t);
+extern void mojo_exc_msg_set(char *);
+extern void mojo_exc_obj_set(void *);
+extern void mojo_exc_pending_set(int);
+extern void mojo_raise(void);
+
 /* The generated-code exception frame stack (runtime/fire_runtime.h), needed
    by __mojo_gen_close's local landing pad below. fire_coro.h declares neither,
    and this translation unit deliberately does not include fire_runtime.h (it
@@ -50,6 +57,7 @@ typedef struct MojoGen {
     int64_t   value;      /* last yielded box */
     int64_t   retval;     /* return box once done */
     int       done;
+    int       started;
     int       pending_exc;
 } MojoGen;
 
@@ -430,6 +438,17 @@ __mojo_gen_resume(int64_t gen, int64_t send)
 {
     MojoGen *g = (MojoGen *)(uintptr_t)gen;
     if (!g || g->done) return 0;
+    extern int64_t mojo_box_none(void);
+    if (!g->started) {
+        if (send != mojo_box_none()) {
+            mojo_exc_type_set(348628165);
+            mojo_exc_msg_set((char *)"can't send non-None value to a just-started generator");
+            mojo_exc_pending_set(1);
+            mojo_raise();
+            return 0;
+        }
+        g->started = 1;
+    }
     int64_t out = 0;
     int r = __mojo_coro_resume(g->coro, send, &out);
     if (r == 1) { g->value = out; return 1; }

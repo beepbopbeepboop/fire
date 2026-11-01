@@ -1267,6 +1267,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         f"struct {promise} {{",
         f"    {cpp_value_ctype} current_value{{}};",
         f"    int64_t sent_word{{}};",
+        f"    bool started{{}};",
         f"    {task} get_return_object() {{ return {task}{{ {handle_t}::from_promise(*this) }}; }}",
         f"    std::suspend_always initial_suspend() noexcept {{ return {{}}; }}",
         f"    std::suspend_always final_suspend() noexcept {{ return {{}}; }}",
@@ -1376,6 +1377,15 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         f"static {cpp_bool} {base}_step (MojoGenerator *g, int64_t word) {{",
         f"    {handle_t} h = {handle_t}::from_address(reinterpret_cast<void *>(g));",
         f"    if (h.done()) return false;",
+        f"    if (!h.promise().started) {{",
+        f"        if (word != mojo_box_none()) {{",
+        f"            mojo_exc_type_set(348628165);",
+        f"            mojo_exc_msg_set((char *)\"can't send non-None value to a just-started generator\");",
+        f"            mojo_exc_pending_set(1);",
+        f"            return false;",
+        f"        }}",
+        f"        h.promise().started = true;",
+        f"    }}",
         f"    h.promise().sent_word = word;",
         # Cleared right before resuming (not after — see
         # mojo_exc_pending_get's docstring in fire_runtime.h): this
@@ -2886,6 +2896,7 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
         # (parameter-less) kind.
         f"    _MojoCppExc exc{{}};",
         f"    bool exc_pending{{}};",
+        f"    bool started{{}};",
         # Type-erased (not `{handle_t}`): the coroutine AWAITING this
         # one may be an entirely different async function with its own
         # distinct promise type (e.g. `outer`'s promise stores a
@@ -3861,6 +3872,7 @@ def _gen_cpp_async_generator_unit(gen, fn: gimple_ctypes.FunctionDef) -> tuple[s
         f"    {cpp_value_ctype} current_value{{}};",
         f"    _MojoCppExc exc{{}};",
         f"    bool exc_pending{{}};",
+        f"    bool started{{}};",
         f"    std::coroutine_handle<> continuation{{}};",
         f"    {task} get_return_object() {{ return {task}{{ {handle_t}::from_promise(*this) }}; }}",
         f"    std::suspend_always initial_suspend() noexcept {{ return {{}}; }}",
