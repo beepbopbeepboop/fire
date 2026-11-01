@@ -4005,6 +4005,43 @@ def _tagged_arith_select(gen, op: str, left_node, lt: str, lv: str,
     return _t
 
 
+def _tagged_cmp_select(gen, op: str, left_node, lt: str, lv: str,
+                       right_node, rt: str, rv: str):
+    """`lhs OP rhs` where a TAGGED generator word is beside an INTEGER
+    and OP is a comparison (`<`, `<=`, `>`, `>=`). Returns the result
+    temp (`_Bool`), or None when the shape does not apply."""
+    if op not in ('<', '<=', '>', '>='):
+        return None
+    _tagged = getattr(gen, '_tagged_word_vals', ())
+    _boxed = getattr(gen, '_boxed_vals', ())
+    _tag_l = lv in _tagged and lv in _boxed
+    _tag_r = rv in _tagged and rv in _boxed
+    if not (_tag_l or _tag_r):
+        return None
+    if lt not in ('int', 'int64_t') or rt not in ('int', 'int64_t'):
+        return None
+    if _tag_l:
+        lv = _none_arith_guard(gen, op, lv, 'int', 1)
+    if _tag_r:
+        rv = _none_arith_guard(gen, op, rv, 'int', 0)
+    # Integer comparison answer
+    _ilv = gen._new_val('int64_t', f"mojo_box_int ({lv})") if _tag_l else gen._new_val('int64_t', lv)
+    _irv = gen._new_val('int64_t', f"mojo_box_int ({rv})") if _tag_r else gen._new_val('int64_t', rv)
+    _ires = gen._new_temp('_Bool')
+    gen._emit(f"  {_ires} = {_ilv} {op} {_irv};")
+    # Double comparison answer
+    _dlv = gen._new_val('double', f"mojo_box_double ({lv})") if _tag_l else gen._new_val('double', f"(double)({lv})")
+    _drv = gen._new_val('double', f"mojo_box_double ({rv})") if _tag_r else gen._new_val('double', f"(double)({rv})")
+    _dres = gen._new_temp('_Bool')
+    gen._emit(f"  {_dres} = {_dlv} {op} {_drv};")
+    # Select by box kind
+    _a = lv if _tag_l else '0'
+    _b = rv if _tag_r else '0'
+    _t = gen._call_expr('_Bool', 'mojo_float_cmp_select', [
+        ('int64_t', _a), ('int64_t', _b), ('int', _ires), ('int', _dres)])
+    return '_Bool', _t
+
+
 def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
                         right_node, rt: str, rv: str) -> tuple[str, str]:
     """The rest of BinaryOp lowering once both operands are already
@@ -4169,6 +4206,11 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     _tsel = _tagged_arith_select(gen, op, left_node, lt, lv, right_node, rt, rv)
     if _tsel is not None:
         return 'int64_t', _tsel
+    # A tagged word beside an integer under comparison: the comparison
+    # counterpart to `_tagged_arith_select` (select by box kind).
+    _tcmp = _tagged_cmp_select(gen, op, left_node, lt, lv, right_node, rt, rv)
+    if _tcmp is not None:
+        return _tcmp
     # A tagged word beside a DOUBLE under arithmetic (`x + 1.5`, `x / 2.0`):
     # the box is unwrapped to a double below, and a None box would unwrap to
     # 0.0. It is checked first, as in `_tagged_arith_select`, which answers only

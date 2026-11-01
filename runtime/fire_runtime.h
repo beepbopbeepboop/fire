@@ -842,6 +842,10 @@ void        mojo_list_append_double_kinded(MojoList *l, double v, char prior);  
  * double box holding `dres` when either raw operand word is a double box, and
  * `ires` otherwise, so the caller never allocates on the integer path. */
 int64_t     mojo_float_arith_select(int64_t a, int64_t b, int64_t ires, double dres);
+/* The result of `<`/`<=`/`>`/`>=` where either operand is a float box: `ires`
+ * is the integer comparison's `_Bool` answer and `dres` the double one's.
+ * Returns `dres` when either raw operand word is a double box, else `ires`. */
+int     mojo_float_cmp_select(int64_t a, int64_t b, int ires, int dres);
 /* The box's OWN word for every kind that has one — a str/bytes/list box gives
  * back its pointer, a None box the NULL word that IS None in this value model,
  * an int/bool box its integer — and the box itself, unchanged, for a float
