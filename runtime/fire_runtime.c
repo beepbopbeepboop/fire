@@ -1346,6 +1346,14 @@ int64_t mojo_box_word(int64_t v)
     return bx->bits;
 }
 
+/* See the header. The shared kind-'n' box is the only word that IS None when
+ * it is still boxed; a bare word cannot say so (an int 0 has the same bits). */
+int mojo_word_is_none(int64_t v)
+{
+    if (!mojo_is_boxed(v)) return 0;
+    return ((MojoBox *)(intptr_t)v)->kind == 'n';
+}
+
 /* Python truthiness of a word of unknown kind (see the header). Containers
  * and strings are asked for their length, a box for its payload, None (the
  * NULL word) is false, and any other word -- an integer or a struct handle --

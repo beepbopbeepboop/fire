@@ -815,6 +815,12 @@ int64_t     mojo_float_arith_select(int64_t a, int64_t b, int64_t ires, double d
  * kept the box answered `is None` false for a None slot and handed every
  * consumer the box's address instead of the value. */
 int64_t     mojo_box_word(int64_t v);
+/* `x == None` / `x != None` on a possibly-boxed value (a tagged-word None is
+ * the one shared kind-'n' box, which `mojo_box_word` unwraps to the NULL word
+ * and an int 0 shares that word, so the kind is read from the box itself).
+ * Returns 1 only for that box; any other word answers 0, which is what the
+ * constant comparison answered before this existed. */
+int         mojo_word_is_none(int64_t v);
 /* Python truthiness of a word whose kind only the runtime knows (an
  * unannotated parameter, an untyped attribute read): an empty container or
  * string is false, None is false, 0 is false, anything else is true. */

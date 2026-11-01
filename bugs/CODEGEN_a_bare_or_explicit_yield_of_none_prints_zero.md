@@ -1,5 +1,49 @@
 # CODEGEN_a_bare_or_explicit_yield_of_none: a None yield value prints 0
 
+## Status (2026-11-01, thirteenth round, work/bug-codegen-a-bare-or-explicit-yield-of: `v == None` on a None yield, partial)
+
+**Re-measured first (both paths, CPython oracle):** the rounds' matrix still
+holds for `print(v)`, `print(str(v))`, `if v is None`, `for`, `next()`, and
+`list(g())`, all MATCH. Two shapes were still silently wrong, and both print
+the same family of wrong None value:
+
+| shape (tagged generator yields 1, None) | default | cpp |
+|---|---|---|
+| `for v in g(): x = v; print(x)` | `1`, `0` (CPython `None`) | same |
+| `for v in g(): print(v == None)` on a None yield | `False` (CPython `True`) | same |
+
+**Landed (real behaviour change on both paths):** `v == None` / `v != None`
+on a boxed operand now asks the box's kind. `_lower_binary_tail`
+(`mojo/backend_gimple/emit_exprs.py`) decides it BEFORE the boxed-operand
+conversion unwraps the box, through the new runtime helper
+`mojo_word_is_none` (`runtime/fire_runtime.{c,h}`): true only for the shared
+kind-`n` box. For a non-box it answers 0, which is what the scalar arm
+already answered, so no non-None answer changes.
+
+**Pins:** `run_tagged_none_equality_tests` in `test_gimple_generator_runner.py`
+(default and `coro.pinned('cpp')`, five mixed yields: False, 0, None, "a", 1.5).
+Fail-before, measured by putting the pre-fix `emit_exprs.py` back (copy, not
+checkout) and running only that group: both FAIL (the None row answers
+`False`). After: both PASS, 2/0.
+
+**Still open (this doc keeps it):**
+
+1. **`x = v` of a for-loop target copies the box's unwrap.** This is the title's
+   own symptom (`0` for a None yield). It is the bind-site rule's documented
+   exclusion (`CODEGEN_tagged_generator_value_bound_to_a_name_loses_its_kind.md`:
+   "a for target takes the old unwrap"). Next step: extend
+   `ginf.tagged_next_bind_name` to a for-target bound from a tagged generator
+   and re-run its rebinding rule; pin `x = v; print(x)` on both paths.
+2. **`v is None` on a tagged False/0 is True** (same root as the old bit
+   comparison, not None-specific). Filed as
+   `bugs/CODEGEN_is_none_on_a_tagged_false_or_zero_is_true.md` with its next step.
+
+**Gate note for the integrator (not run here):** the `==`/`!=` change applies to
+any boxed operand compared to a None literal, not only tagged generator values.
+Run `compile_stdlib.py` and compare `U`/`skip` before and after; a list-element
+None is still answered "not None" (it is a NULL word, not a box), so the
+change cannot make a non-None answer wrong.
+
 ## Status (2026-11-01, twelfth round, work/bug-codegen-a-bare-or-explicit-yield-of: lone None is a one-kind tagged word on cpp, partial)
 
 **Landed (real behaviour change on `MOJO_CORO=cpp`):** a generator whose ONLY

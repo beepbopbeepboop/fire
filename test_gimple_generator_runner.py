@@ -3775,8 +3775,34 @@ def main():
 main()
 """)
 
+def run_tagged_none_equality_tests():
+    # `v == None` / `v != None` on a value from a TAGGED generator. A None yield
+    # is the shared kind-'n' box, and the boxed-operand conversion used to
+    # unwrap it to its word before the None comparison ran, so `v == None` came
+    # out False for a None yield while every other value answered correctly.
+    # Pinned against the CPython oracle on the default path and on the cpp
+    # escape hatch: the mixed yields cover the None box, the int and bool 0
+    # words that share its bits, a str, and a float.
+    _src = """\
+def g():
+    yield False
+    yield 0
+    yield None
+    yield "a"
+    yield 1.5
+def main():
+    for v in g():
+        print(v == None)
+        print(v != None)
+main()
+"""
+    test_generator_matches_cpython("tagged_none_equality_default", _src, _src)
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("tagged_none_equality_cpp", _src, _src)
+
 def run_tests():
     run_none_yield_tests()
+    run_tagged_none_equality_tests()
     run_none_list_iteration_tests()
     run_tagged_word_cpp_tests()
     run_tagged_word_bind_tests()
