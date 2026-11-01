@@ -14,6 +14,7 @@ import re
 import sys
 
 from fire_compiler import (
+    _as_floatlit_node,
     IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral,
     EllipsisLiteral, NoneLiteral,
     IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr,
@@ -15747,6 +15748,10 @@ def gen_module_impl(self, stmts):
             and not any(isinstance(s, StructDef) and s.name == 'GimpleGen'
                         for s in _cai_structs)):
         _cai_structs.append(_gg_syn)
+    # (struct, attr, global, C type) of every class-body attribute: the run-time class table
+    # reads them back through `_mojo_classattr_read` (a class made by `type(..)` that lists
+    # this class as a base inherits them).
+    class_attr_words = []
     for s in _cai_structs:
         if isinstance(s, StructDef):
             class_attrs = self._class_attrs
@@ -15933,6 +15938,9 @@ def gen_module_impl(self, stmts):
                         elif isinstance(v, StringLiteral):
                             ctype = 'char *'
                             class_attr_inits.append(f'  {mangled} = "{_c_escape(v.value)}";')
+                            # a class-table lookup hands this global out as a bare word, and
+                            # `mojo_boxed_is_str` must know that word is a string
+                            class_attr_inits.append(f'  mojo_str_register ({mangled});')
                         elif isinstance(v, IntLiteral):
                             ctype = 'int64_t'
                             class_attr_inits.append(f'  {mangled} = {_signed_int64_c_literal(v.value)};')
@@ -15940,11 +15948,18 @@ def gen_module_impl(self, stmts):
                             ctype = 'int64_t'
                         class_attr_decls.append(f"{ctype} {mangled};")
                         self._global_var_types[mangled] = ctype
+                        # a float literal has no global of its own kind (it is read as a
+                        # folded constant), so its word is built from the literal
+                        class_attr_words.append(
+                            (s.name, aname, mangled, ctype,
+                             _as_str(repr(_as_floatlit_node(v).value))
+                             if isinstance(v, FloatLiteral) else None))
                         break
     if class_attr_decls:
         parts.extend(class_attr_decls)
         parts.append('')
     self._class_attr_inits = class_attr_inits
+    self._class_attr_words = class_attr_words
 
     _funcattr_decls = []
     for _fn_name in sorted(self._func_attrs):
@@ -17036,6 +17051,32 @@ def gen_module_impl(self, stmts):
             for _bn in self._struct_bases[_cn]:
                 parts.append(f'    mojo_class_register({_ctag}LL, '
                              f'{gimple_exprtypes._struct_type_id(_as_str(_bn))}LL, 0);')
+        parts.append('}')
+        parts.append('')
+
+    if self.emit_struct_defs and getattr(self, '_class_attr_words', None):
+        # The reader the run-time class table asks for an attribute a class BODY declares:
+        # the live global, as one word (a float boxed, a string/container by address).
+        parts.append('static int _mojo_classattr_read(int64_t tag, char *name, int64_t *out) {')
+        for _wn, _wa, _wm, _wt, _wf in self._class_attr_words:
+            _wn = _as_str(_wn)
+            if _wf is not None:
+                _wexpr = f'mojo_box_from_double({_wf if (chr(46) in _wf or chr(101) in _wf) else _wf + ".0"})'
+            elif _wt == 'int64_t':
+                _wexpr = _wm
+            elif _wt == 'double':
+                _wexpr = f'mojo_box_from_double({_wm})'
+            elif _wt.endswith('*'):
+                _wexpr = f'(int64_t)(intptr_t){_wm}'
+            else:
+                continue
+            parts.append(f'    if (tag == {gimple_exprtypes._struct_type_id(_wn)}LL '
+                         f'&& !strcmp(name, "{_c_escape(_as_str(_wa))}")) '
+                         f'{{ *out = {_wexpr}; return 1; }}')
+        parts.append('    return 0;')
+        parts.append('}')
+        parts.append('static void __attribute__((constructor)) _mojo_register_classattr_reader(void) {')
+        parts.append('    mojo_register_classattr_reader(_mojo_classattr_read);')
         parts.append('}')
         parts.append('')
 

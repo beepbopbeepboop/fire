@@ -1398,6 +1398,7 @@ void    mojo_register_getattr_dispatch(int64_t (*fn)(void *, char *));
 int64_t mojo_getattr_any(void *obj, char *attr);   /* obj.attr on a word: struct reflection of any module */
 void    mojo_class_register(int64_t tag, int64_t base_tag, char *name);
 void    mojo_class_setattr(int64_t tag, char *name, int64_t word);
+void    mojo_register_classattr_reader(int (*fn)(int64_t, char *, int64_t *));
 int     mojo_class_hasattr(int64_t tag, char *name);
 int64_t mojo_class_getattr(int64_t tag, char *name);                       /* AttributeError when absent */
 int64_t mojo_class_getattr_default(int64_t tag, char *name, int64_t dflt);
