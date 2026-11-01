@@ -6067,6 +6067,15 @@ def lower(stmts: list, closure_stmts=(),
         # does exactly that, one module at a time), and a set left populated
         # by the previous stack-switch module would make this module's C++
         # emitter refuse a same-named nested async generator it can handle.
+        #
+        # `_MODULE_STMTS` is the same kind of state, and the cpp path's own
+        # decisions read it (`_generator_value_kind` -> `_tagged_consumers_ok`,
+        # reached from cpp_async.py, module_gen.py and coro.py) whenever no
+        # module is passed. It is refreshed only by `_register_generator_defs`,
+        # which runs on the stack-switch path alone, so without this line a
+        # cpp-path module was judged against the PREVIOUS module's statements:
+        # a same-named generator with other consumers flipped the answer.
+        _MODULE_STMTS[:] = list(stmts)
         _scan_unthreadable_nested_async_gens(stmts)
         return stmts, []
     _BOX_STRUCT_OF.clear()
