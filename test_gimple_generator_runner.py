@@ -3119,6 +3119,31 @@ def main():
         print(v)
 main()
 """)
+    # `next()` is not a tagged consumer: the tagged word is rendered only by
+    # the for-loop / list() / comprehension readers, so a None yield consumed
+    # by `next()` has no slot that can carry it. It used to compile to the
+    # int64_t slot and print `0` (CPython: None). It is now an honest refusal,
+    # so the module takes the interpreter path, which prints None.
+    test_generator_refused("none_yield_consumed_by_next_refused", """\
+def g():
+    yield 1
+    yield
+
+def main():
+    it = g()
+    print(next(it))
+    print(next(it))
+main()
+""", "a None yield")
+    test_generator_refused("bare_none_yield_consumed_by_next_refused", """\
+def g():
+    yield
+
+def main():
+    it = g()
+    print(next(it))
+main()
+""", "a None yield")
 
 
 def run_tests():

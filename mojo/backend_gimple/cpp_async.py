@@ -1165,6 +1165,17 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         _slot_why = gimple_gen_coro.cpp_value_slot_refusal(fn, value_ctype, struct_def)
         if _slot_why is not None:
             raise gimple_exprtypes._UnsupportedGeneratorShape(f"{fn.name}: {_slot_why}")
+    # A None yield (bare `yield` / `yield None`) has no slot this path can carry:
+    # its bare-yield emitter writes `co_yield (int64_t)0`, which prints 0 where
+    # CPython prints None (the stack-switch path refuses the same shape in
+    # `_generator_value_kind`). Refuse it here too, so a module the stack-switch
+    # path cannot take goes to the interpreter, which prints None, instead of
+    # compiling the wrong value.
+    if value_ctype is not None and any(
+            coro_mod._is_none_yield(_n) for _n in coro_mod._walk(fn)):
+        raise gimple_exprtypes._UnsupportedGeneratorShape(
+            f"{fn.name}: a None yield (bare `yield` / `yield None`) has no value "
+            "slot the C++ coroutine path can carry (it would print 0); refused")
     if value_ctype is not None:
         # A SELF-recursive generator's own extern declaration was registered while
         # its value type was still unknown (the placeholder int64_t); now that it

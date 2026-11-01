@@ -6,6 +6,51 @@ the generator value-slot lattice supports (int / bool / float / str) matches
 CPython on BOTH the local and global generator paths. None is the only
 mismatching type. Owner-level ABI feature; measured and pinned, NOT shipped.
 
+## Status (2026-11-01, third round, work/bug-codegen-a-bare-or-explicit-yield-of: refusal, not silent 0)
+
+**Landed (behaviour change, measured before/after):** a None yield that the
+tagged word cannot carry is now an honest refusal on BOTH compiled paths,
+instead of compiling to the int64_t slot that prints `0`.
+- `_generator_value_kind` (`mojo/middle/coro.py`): after the tagged-word
+  decision, `has_none` with no tag refuses with "a None yield whose consumer
+  is not a for loop / list() / comprehension". Reached by `next(it)` on a
+  bare-yield generator, which printed `0` (CPython `None`).
+- `cpp typer` (`mojo/backend_gimple/cpp_async.py`, next to the
+  `cpp_value_slot_refusal` check): any top-level None yield in a generator
+  refuses ("a None yield ... would print 0"). Needed because the stack-switch
+  refusal alone sent the module to the C++ path, which still printed `0`.
+- Pins: `none_yield_consumed_by_next_refused` and
+  `bare_none_yield_consumed_by_next_refused` in `run_none_yield_tests`
+  (`test_generator_refused`). Before the fix both FAIL ("expected a refusal,
+  but it compiled"); after, both PASS. `test_gimple_generator_runner.py`
+  357/0; `test_gimple_async_runner.py` 39/0.
+- Fallback output is correct: `python3 fire.py run` on the `next(it)` program
+  prints `1` / `None` (CPython: `1` / `None`), with and without
+  `MOJO_CORO=cpp`.
+
+**Open-item status after this round:**
+- Item 1 (`next()`): the silent `0` is GONE, but `next()` on a None-yielding
+  generator is now refused, not compiled. The real fix is still open: a
+  None-aware `next()` reader that returns a boxed word (see the 2026-10-31
+  notes below). Refusal is the interim, consistent with `_tagged_consumers_ok`.
+- Item 2 (explicit `yield None` beside str/float): still refused by the C++
+  typer, and now refused by the explicit check above too. Unchanged next step.
+- Item 3 (`MOJO_CORO=cpp` bare yield prints 0): CLOSED. The C++ bare-yield
+  emitter (`cpp_core.py` `co_yield (int64_t)0`) is no longer reachable for a
+  None yield, because the typer refuses first. The emitter line is dead for
+  this shape and can be deleted in a later cleanup.
+- Item 4 (`_list_word_push` has no None arm): CLOSED. `_list_word_push` has
+  two callers (`mojo_list_append_word`, `mojo_list_append_double_kinded`), and
+  the `'n'` arm is in `mojo_list_append_word`, landed on 2026-10-31.
+- `list(g())` and comprehensions over `g()` were measured this round and
+  already MATCH CPython (they are tagged, `_tagged_consumers_ok` covers them).
+
+**Gate note for the integrator (not run here):** the refusal moves any stdlib
+module with a None-yielding generator consumed by a non-for consumer, or
+compiled through the C++ path, from compiled to source fallback. Compare
+`stdlib-dylib`'s `skip <module>:` count and `stdlib-syntax`'s `U` count before
+and after; a rise in `skip` is expected only from these modules.
+
 ## Status (2026-10-31, second round, work/bug-codegen-a-bare-or-explicit-yield-of)
 
 **Landed:** a for-loop variable from a tagged generator that is appended to a
