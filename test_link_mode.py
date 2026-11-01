@@ -333,11 +333,8 @@ def test_generator_str_param_concat_is_string_concatenation() -> bool:
     stringification ran on the pointer, and the yielded values printed as
     pointer decimals (`['43033668960', ...]`, exit 0).
 
-    Pinned here: the same-module spelling. The cross-module spelling
-    (`lib.walk("r")` from another module) is NOT pinned, because it is not
-    fixed: the defining module's compile never sees the importer's call site,
-    so the evidence does not exist there. See
-    bugs/CODEGEN_generator_param_str_concat_is_pointer_add.md.
+    Pinned here: the same-module spelling. The cross-module spelling is
+    pinned by test_generator_str_param_concat_cross_module, below.
     """
     src = (
         'def walk(root, suffix=None):\n'
@@ -359,6 +356,52 @@ def test_generator_str_param_concat_is_string_concatenation() -> bool:
           and stdout.strip() == "['r0', 'r1', 'r2']")
     if not ok:
         print(f"  ✗ generator_str_param_concat_is_string_concatenation: "
+              f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
+    return ok
+
+
+def test_generator_str_param_concat_cross_module() -> bool:
+    """The cross-module spelling of `test_generator_str_param_concat_is_string_concatenation`:
+    `lib.walk("r")` called from another module, through a package
+    attribute (`from pkg import lib`). The defining module is compiled on its
+    own, so its generator body never sees the importer's call site in its own
+    coroutine pass; the importer's string-literal call site reaches it only
+    through the cross-module hint merge (`_xmod_gen_param_hints`), which must
+    feed the BODY's string tables (`_coro_str_params`,
+    `_int64_may_hold_str`) as well as the signature. Before that merge fed
+    them, `root + str(k)` lowered as pointer arithmetic and printed the
+    pointer's decimal (`['43634604000', ...]`, exit 0).
+
+    The from-import spelling (`from walk_lib import walk`) already worked; the
+    module-attribute spelling is the one that did not, because the body's
+    name is module-qualified (`__mgco_pkg_lib_walk_body`) and the hint's key
+    must resolve to exactly that name.
+    """
+    lib = (
+        'def walk(root, suffix=None):\n'
+        '    for k in range(3):\n'
+        '        yield root + str(k)\n'
+    )
+    pkg = {
+        'pkg/__init__.py': '',
+        'pkg/lib.py': lib,
+        'main.py': (
+            'from pkg import lib\n'
+            'print(list(lib.walk("r")))\n'
+        ),
+    }
+    root = os.path.join(REPO, 'build', 'test_link_mode')
+    os.makedirs(root, exist_ok=True)
+    td = tempfile.mkdtemp(prefix='xmod_gen_str_concat_', dir=root)
+    try:
+        rc, stdout = _build_and_run(pkg, 'main.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'main.py')
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and stdout.strip() == "['r0', 'r1', 'r2']")
+    if not ok:
+        print(f"  ✗ generator_str_param_concat_cross_module: "
               f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
     return ok
 
@@ -2101,6 +2144,7 @@ CASES = [
     test_bare_submodule_import_keyword_call,
     test_cross_module_generator_default_is_padded,
     test_generator_str_param_concat_is_string_concatenation,
+    test_generator_str_param_concat_cross_module,
     test_str_affix_method_on_unsolved_word_is_bool,
     test_generator_none_default_reaches_callee_as_null,
     test_from_submodule_import_symbol_value_read,

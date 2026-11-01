@@ -42,18 +42,34 @@ decimal. Landed:
   (fails before the fix with `['43111790480', ...]`, passes after with
   `['r0', 'r1', 'r2']`).
 
-**Cross-module spelling: still open.** `pkg/main.py` doing
-`from pkg import lib; lib.walk("r")` still prints pointer decimals. Measured:
-compiling `main.py` with `do_imports=True` leaves `_CALLSITE_PARAM_KINDS`
-empty and emits no `__mgco_walk_body` in the importer's unit, and the
-defining module (`lib.py`) is compiled on its own with no view of the
-importer's call site. So the evidence does not exist in the module that
-needs it. Next step: a cross-module call-site contract for generators, the
-generator analogue of the plain-function literal contract
-(`test_cross_module_unannotated_param_takes_the_callers_literal_type`):
-the importer's `_scan_callsite_param_kinds` results for an imported
-generator must reach the defining module's `register` pass, and that
-module's compiled artifact (CAS key, see `CAS cache-key completeness`) must
-depend on the importer's call-site evidence. Quick test: the two-file
-`lib.py` / `main.py` pair at the top of this doc, compared against CPython
-(`['r0', 'r1', 'r2']`).
+**Cross-module literal spelling: FIXED 2026-10-31.** `pkg/main.py` doing
+`from pkg import lib; lib.walk("r")` now prints `['r0', 'r1', 'r2']`.
+Root cause: the importer's string-literal call site was already recorded in
+`_xmod_gen_param_hints` (`pkg_lib::walk` -> `root: 'char *'`) and merged into
+the generator's start-shim signature, but the lowered generator BODY — the
+thing that emits `root + str(k)` — reads the body-keyed string tables
+(`_coro_str_params`, `_int64_may_hold_str`), which that merge never wrote.
+Landed:
+
+* `mojo/middle/coro.py`: `generator_base_name(fn_name, qualifier)`, the one
+  place the module-level generator base symbol is spelled;
+  `_async_method_setup` uses it.
+* `mojo/backend_gimple/module_gen.py`: the cross-module hint merge feeds a
+  `char *` hint into both body-keyed tables under `<base>_body`;
+  `_coro_str_params` is now created beside `_int64_may_hold_str` so the
+  merge's writes are not dropped by a later re-initialisation.
+* Test: `test_link_mode.py::test_generator_str_param_concat_cross_module`
+  (pre-fix output `['43634604000', ...]`, post-fix matches CPython). The
+  same-module sibling still passes.
+
+**Still open: a cross-module call whose string argument is a VARIABLE, not a
+literal.** Measured 2026-10-31: `s = "r"; print(list(lib.walk(s)))` in
+`main.py` still prints `['43393922480', '43393922481', '43393922482']`
+(exit 0). `_gmi_literal_ctype` answers `None` for an identifier, so
+`_xg_record_scalar_args` records no hint for it. Next step: when an argument
+is an identifier, resolve its ctype in the importer's enclosing function
+(the same provenance `_xg_enc_map` already uses for list-element contracts)
+and record that through `_xg_record_scalar_args`; the quick test is
+`main.py` with `s = "r"` as above, against CPython `['r0', 'r1', 'r2']`. The
+plain-function literal contract has the same literal-only limit, so check
+it there too when fixing this.

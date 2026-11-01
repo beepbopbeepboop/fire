@@ -8333,6 +8333,11 @@ def gen_module_impl(self, stmts):
     # function name for the same reason `_container_param_kinds` is — a
     # forwarding chain's second hop is a DIFFERENT slot with the same shape.
     self._int64_may_hold_str: dict[str, set] = {}
+    # coroutine body name -> {param} whose call sites pass a string: the
+    # generator-body twin of `_int64_may_hold_str`. Created HERE, before the
+    # cross-module hint merge below writes into it, and not re-initialised
+    # later in this function (a re-init would drop those entries).
+    self._coro_str_params: dict[str, set] = {}
     # Function name -> the NAMES of its parameters left at the `int64_t`
     # default whose call sites observed a `double` AND an integer. The float
     # twin of the set above, with the same provenance rule: a slot is in it
@@ -8445,10 +8450,24 @@ def gen_module_impl(self, stmts):
                 continue
             _xg_pmap = self._xmod_gen_param_hints[_xg_key]
             _xg_tgt = self._inferred_param_types.setdefault(_xg_hfn, {})
+            # The lowered generator BODY is what emits `root + str(k)`, and
+            # its `+` consults the body-keyed string tables, not the
+            # signature's `_inferred_param_types` (which only types the
+            # start shim). A caller's string literal is the same evidence the
+            # same-module coroutine pass records in `_coro_str_params`, so it
+            # feeds the same two tables under the body's name. Without this a
+            # cross-module `lib.walk("r")` yielded `root + str(k)` as pointer
+            # arithmetic, printing `43634604000`.
+            _xg_body = (gimple_gen_coro.generator_base_name(
+                            _xg_hfn, gimple_gen_coro.module_qualifier(self.module_name))
+                        + '_body')
             for _xg_pn in _xg_pmap:
                 _xg_ct = _xg_pmap[_xg_pn]
                 if _xg_ct and _xg_tgt.get(_xg_pn) in (None, 'int', 'int64_t'):
                     _xg_tgt[_xg_pn] = _xg_ct
+                if _xg_ct == 'char *':
+                    self._coro_str_params.setdefault(_xg_body, set()).add(_xg_pn)
+                    self._int64_may_hold_str.setdefault(_xg_body, set()).add(_xg_pn)
     # Companion list-ELEMENT hints merge: same qualifier match as the scalar
     # hints above, applied into this gen's own _param_list_elem_types for
     # _gen_cpp_generator_unit to seed the coroutine-body emitter with.
@@ -9304,7 +9323,6 @@ def gen_module_impl(self, stmts):
     # at run time (`mojo_list_get_boxed`) rather than trust one typed accessor.
     self._param_elem_mixed: dict[str, set] = {}
     self._param_int_elem_obs: dict[str, set] = {}
-    self._coro_str_params: dict[str, set] = {}
     # coroutine body name -> {param} whose element type is POSITIVELY int:
     # the list-of-ints counterpart of `_coro_str_params`. Kept apart from
     # `_param_elem_types` because `_elem_types[x] == 'int64_t'` means "nothing

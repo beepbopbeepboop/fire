@@ -3816,6 +3816,18 @@ def _async_receiver_kind(fn, is_method: bool) -> str:
     return method_receiver_kind(fn) if is_method else ''
 
 
+def generator_base_name(fn_name, module_qualifier_str: str) -> str:
+    """The base symbol of a MODULE-LEVEL generator / async def's lowering:
+    its body is `<base>_body`, its start shim `<base>_start`. The one place
+    this spelling lives, so a consumer that must address a lowered body by
+    its source name (module_gen's cross-module hint merge) cannot drift from
+    the name `_async_method_setup` gives it. `module_qualifier_str` is
+    `module_qualifier(<module name>)`, empty for the root module."""
+    if module_qualifier_str:
+        return f'__mgco_{module_qualifier_str}_{_cm_as_str(fn_name)}'
+    return f'__mgco_{_cm_as_str(fn_name)}'
+
+
 def _async_method_setup(fn, base, struct_name):
     """Shared prologue/param plumbing for a plain `async def` and an async
     generator, top-level OR a struct method. For a method: arg 0 is the
@@ -3824,8 +3836,7 @@ def _async_method_setup(fn, base, struct_name):
     the ordinary params start at 1 and `self` gets no prologue entry."""
     is_method = struct_name is not None
     base = base or (f'__mgco_{_cm_as_str(struct_name)}_{_cm_as_str(fn.name)}' if is_method
-                    else f'__mgco_{_MODULE_QUALIFIER}_{_cm_as_str(fn.name)}' if _MODULE_QUALIFIER
-                    else f'__mgco_{_cm_as_str(fn.name)}')
+                    else generator_base_name(fn.name, _MODULE_QUALIFIER))
     real_params = fn.params[1:] if is_method else fn.params
     arg_base = 1 if is_method else 0
     prologue = []
