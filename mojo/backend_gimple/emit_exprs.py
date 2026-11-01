@@ -3931,18 +3931,25 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # mark it a word of unknown kind, which is what the equality lowering
     # dispatches on at run time.
     _ident_ops = ('is', 'is not', '==', '!=', 'in', 'not in')
+    # A TAGGED local (`x = next(g)` on a mixed-kind generator, kept boxed by
+    # the bind) is an int or bool word far more often than a float box, and
+    # `mojo_box_double` would turn `x + 1` into float arithmetic (`2.0`). Its
+    # operand is the word (`mojo_box_word`), the same answer the bind gave
+    # before it kept the box.
+    _tagged_lv = lv in getattr(gen, '_tagged_word_vals', ())
     if lv in getattr(gen, '_boxed_vals', ()):
-        if op in _ident_ops and (op in ('is', 'is not')
-                                 or rt not in ('double', 'float')):
+        if _tagged_lv or (op in _ident_ops and (op in ('is', 'is not')
+                                                or rt not in ('double', 'float'))):
             lv = gen._new_val('int64_t', f"mojo_box_word ({lv})")
             lt = 'int64_t'
             gen._dyn_word_vals.add(lv)
         else:
             lv = gen._new_val('double', f"mojo_box_double ({lv})")
             lt = 'double'
+    _tagged_rv = rv in getattr(gen, '_tagged_word_vals', ())
     if rv in getattr(gen, '_boxed_vals', ()):
-        if op in _ident_ops and (op in ('is', 'is not')
-                                 or lt not in ('double', 'float')):
+        if _tagged_rv or (op in _ident_ops and (op in ('is', 'is not')
+                                                or lt not in ('double', 'float'))):
             rv = gen._new_val('int64_t', f"mojo_box_word ({rv})")
             rt = 'int64_t'
             gen._dyn_word_vals.add(rv)

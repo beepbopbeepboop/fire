@@ -78,7 +78,7 @@ from mojo.middle.infra_infer import (
 from mojo.middle.calls_shared import user_dunder_repr_call
 import mojo.middle.module_shared as msh
 import mojo.middle.itcursor as itc
-from mojo.middle.stmts_shared import _annotation_container_elem_type
+from mojo.middle.stmts_shared import _annotation_container_elem_type, _iter_ast
 # The extended-unpacking (`*rest`) slot arithmetic, shared with the
 # for-loop lowering that has the same per-slot walk — see
 # `_compr_list_loop`'s own comment and `starred_slot_index`'s docstring.
@@ -238,6 +238,11 @@ def _reset_func(gen, body: list = None, params: list = None,
     # per-function is not merely safe, it is the only scope in which the
     # name means anything.
     gen._boxed_vals = set()
+    # `_tagged_word_vals` is the subset of `_boxed_vals` temps that are a
+    # TAGGED generator word (a yield-kind box from `next(g)` on a mixed-kind
+    # generator). Same scope and reason as `_boxed_vals`: temp names restart
+    # per function, so a stale entry would tag an unrelated temp.
+    gen._tagged_word_vals = set()
     # Same scope and same reason as `_boxed_vals` above: the writers are
     # `_lower_IdentExpr`'s two function-value branches and the sole reader is
     # `print`, all inside one function's lowering, and the keys are SSA temp
@@ -481,6 +486,7 @@ def _reset_func(gen, body: list = None, params: list = None,
     # self-hosted compiler, so it is emptied where every other per-function
     # table is.
     gen._boxed_vals.clear()
+    gen._tagged_word_vals.clear()
     gen._func_value_names.clear()
     # The per-slot kind of a `struct.unpack` result (and of a local bound
     # from one), in the long-form spelling the statically-indexed MojoList
@@ -868,6 +874,7 @@ class FuncState:
         self.fs_fresh_vals: set = set()
         self.fs_fresh_str_tmps: set = set()
         self.fs_boxed_vals: set = set()
+        self.fs_tagged_word_vals: set = set()
         self.fs_func_value_names: dict = {}
         self.fsdecls: list = []
         self.fsbody_lines: list = []
@@ -949,6 +956,7 @@ class FuncState:
         self.fs_int_word_vals_items: set = set()
         self.fs_fresh_vals_items: set = set()
         self.fs_boxed_vals_items: set = set()
+        self.fs_tagged_word_vals_items: set = set()
         self.fs_func_value_names_items: dict = {}
         self.fs_fresh_str_tmps_items: set = set()
         self.fs_struct_field_owners_items: dict = {}
@@ -967,6 +975,7 @@ def save_func_state(gen) -> FuncState:
     st.fs_fresh_vals = gen._fresh_vals
     st.fs_fresh_str_tmps = gen._fresh_str_tmps
     st.fs_boxed_vals = gen._boxed_vals
+    st.fs_tagged_word_vals = gen._tagged_word_vals
     st.fs_func_value_names = gen._func_value_names
     st.fsdecls = gen.decls
     st.fsbody_lines = gen.body_lines
@@ -1051,6 +1060,8 @@ def save_func_state(gen) -> FuncState:
         st.fs_fresh_vals_items.add(_k)
     for _k in gen._boxed_vals:
         st.fs_boxed_vals_items.add(_k)
+    for _k in gen._tagged_word_vals:
+        st.fs_tagged_word_vals_items.add(_k)
     for _k in gen._func_value_names:
         st.fs_func_value_names_items[_k] = gen._func_value_names[_k]
     for _k in gen._fresh_str_tmps:
@@ -1075,6 +1086,7 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._fresh_vals = st.fs_fresh_vals
     gen._fresh_str_tmps = st.fs_fresh_str_tmps
     gen._boxed_vals = st.fs_boxed_vals
+    gen._tagged_word_vals = st.fs_tagged_word_vals
     gen._func_value_names = st.fs_func_value_names
     gen.decls = st.fsdecls
     gen.body_lines = st.fsbody_lines
@@ -1164,6 +1176,9 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._boxed_vals.clear()
     for _k in st.fs_boxed_vals_items:
         gen._boxed_vals.add(_k)
+    gen._tagged_word_vals.clear()
+    for _k in st.fs_tagged_word_vals_items:
+        gen._tagged_word_vals.add(_k)
     gen._func_value_names.clear()
     for _k in st.fs_func_value_names_items:
         gen._func_value_names[_k] = st.fs_func_value_names_items[_k]
@@ -3498,6 +3513,79 @@ def _char_to_cstr(gen, typ: str, val: str, transient: bool = False, word_ok: boo
 
 
 
+
+
+def _local_bindings(gen, name) -> list:
+    """Every binding of `name` in THIS function's body, as a list of the
+    `value` expression for a plain `name = <value>` assignment, or `None` for
+    any other binder form (an augmented or multi-assign, a for or with target,
+    a comprehension generator, a walrus, an except name, a nested def or a
+    declaration). A form that is ambiguous is counted as a binder: an
+    over-count only refuses the caller's optimisation, which is the safe
+    answer. Computed on demand from `gen._cur_func_body`, so nothing new has
+    to be saved or restored per function."""
+    def idents_named(root):
+        return [n for n in _iter_ast(root)
+                if isinstance(n, gimple_ctypes.IdentExpr) and n.name == name]
+
+    found = []
+    for stmt in (gen._cur_func_body or []):
+        for n in _iter_ast(stmt):
+            if isinstance(n, gimple_ctypes.AssignStmt):
+                if isinstance(n.target, gimple_ctypes.IdentExpr) and n.target.name == name:
+                    found.append(n.value)
+                else:
+                    found.extend([None] * len(idents_named(n.target)))
+            elif isinstance(n, gimple_ctypes.AugAssignStmt):
+                found.extend([None] * len(idents_named(n.target)))
+            elif isinstance(n, gimple_ctypes.MultiAssignStmt):
+                for t in (n.targets or []):
+                    found.extend([None] * len(idents_named(t)))
+            elif isinstance(n, gimple_ctypes.ForStmt):
+                found.extend([None] * len(idents_named(n.target)))
+            elif isinstance(n, gimple_ctypes.WithStmt):
+                for it in (n.items or []):
+                    found.extend([None] * len(idents_named(getattr(it, 'alias', None))))
+            elif isinstance(n, gimple_ctypes.Comprehension):
+                for gn in (n.generators or []):
+                    found.extend([None] * len(idents_named(gn)))
+            elif not isinstance(n, gimple_ctypes.IdentExpr):
+                if getattr(n, 'name', None) == name:
+                    found.append(None)
+    return found
+
+
+def tagged_next_bind_name(gen, name) -> bool:
+    """True iff every binding of `name` in THIS function is `name = next(g)`
+    for one and the same generator local `g`, and `g` itself is bound exactly
+    once (so it is one generator, whose yields are tagged the same way every
+    time), and `name` is not a parameter.
+
+    This is the rule a tagged-word bind needs. A local that keeps a yield's
+    box is read as a box by every consumer, so it must never be stored a bare
+    word: the rule guarantees every store into `name` is the same tagged
+    word. Anything else (a rebinding to a plain value, a second generator, a
+    for target) answers False, and the caller unwraps as it always did."""
+    if name in (getattr(gen, '_cur_func_params', None) or ()):
+        return False
+    values = _local_bindings(gen, name)
+    if not values:
+        return False
+    gen_names = set()
+    for v in values:
+        if not (isinstance(v, gimple_ctypes.CallExpr)
+                and isinstance(v.func, gimple_ctypes.IdentExpr)
+                and v.func.name == 'next'
+                and v.args
+                and isinstance(v.args[0], gimple_ctypes.IdentExpr)):
+            return False
+        gen_names.add(v.args[0].name)
+    if len(gen_names) != 1:
+        return False
+    (gname,) = gen_names
+    if gname in (getattr(gen, '_cur_func_params', None) or ()):
+        return False
+    return len(_local_bindings(gen, gname)) == 1
 
 
 def mixed_container_locals(gen) -> set:
@@ -8192,10 +8280,11 @@ def _reset_scope_state(gen) -> None:
     _fet['_fresh_vals'] = 'char *'
     _fet['_fresh_str_tmps'] = 'char *'
     _fet['_boxed_vals'] = 'char *'
+    _fet['_tagged_word_vals'] = 'char *'
     # Which of the above are SETS (the rest are lists): see `_set_elem_fields`.
     for _sf in ('_scoped_free_candidates', '_scope_armed', '_owned_str_elem_names',
                 '_owned_str_elem_vals', '_owned_closure_names', '_owned_env_names',
-                '_fresh_vals', '_fresh_str_tmps', '_boxed_vals'):
+                '_fresh_vals', '_fresh_str_tmps', '_boxed_vals', '_tagged_word_vals'):
         gen._set_elem_fields.add(_sf)
 
 
