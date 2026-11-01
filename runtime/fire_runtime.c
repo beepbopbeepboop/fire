@@ -10372,6 +10372,7 @@ int64_t mojo_obj_getattr(void *obj, char *attr) {
                 return mojo_dict_get_int(attrs, attr);
         }
     }
+    { int64_t _iw; if (mojo_instobj_class_lookup(obj, attr, &_iw)) return _iw; }
     if (_mojo_getattr_nothrow) {
         _mojo_getattr_missed = 1;
         return 0;
@@ -15209,6 +15210,7 @@ void mojo_class_delattr(int64_t tag, char *name)
  * class-table entry is filed under. `Foo.x`, `Foo.x = v`, `getattr(Foo, ..)` on the handle
  * reach the class table through `mojo_classobj_getattr / mojo_classobj_setattr`. */
 typedef struct { int64_t magic; int64_t tag; } MojoClassObj;
+static _PtrReg _reg_classobj, _reg_instobj;
 static int64_t _classobj_serial = 0;
 int64_t mojo_type_new(char *name)
 {
@@ -15221,11 +15223,50 @@ int64_t mojo_type_new(char *name)
     mojo_class_register(tag, 0, name);
     MojoClassObj *o = (MojoClassObj *)malloc(sizeof *o);
     o->magic = MOJO_CLASSOBJ_MAGIC; o->tag = tag;
+    _pr_add(&_reg_classobj, (uint64_t)(uintptr_t)o);
     return (int64_t)(intptr_t)o;
 }
+/* A registry, not a magic-number read: `mojo_fnptr_call_N` asks this of EVERY dynamically
+ * called word, and a plain function pointer's first bytes are code, which must never be able
+ * to look like a handle. */
 int mojo_is_classobj(int64_t w)
 {
-    return w && mojo_read_type_tag_safe(w) == MOJO_CLASSOBJ_MAGIC;
+    return w > 65536 && _pr_has(&_reg_classobj, (uint64_t)w);
+}
+/* An INSTANCE of a run-time class (`Foo = type(..); o = Foo()`): a heap block holding the
+ * class's table tag. Its attributes live in the per-object dynamic-attribute dict
+ * (`mojo_setattr`); a read that misses there is found through the class and its bases. */
+typedef struct { int64_t magic; int64_t tag; } MojoInstObj;
+int mojo_is_instobj(int64_t w)
+{
+    return w > 65536 && _pr_has(&_reg_instobj, (uint64_t)w);
+}
+/* `Foo(args..)` on a class handle. A class made at run time has no `__init__` unless its
+ * namespace names one, and a namespace function is called with the new instance first. */
+int64_t mojo_classobj_call(int64_t cls, int64_t n, int64_t a0, int64_t a1, int64_t a2, int64_t a3)
+{
+    MojoInstObj *o = (MojoInstObj *)malloc(sizeof *o);
+    o->magic = MOJO_INSTOBJ_MAGIC; o->tag = ((MojoClassObj *)(intptr_t)cls)->tag;
+    _pr_add(&_reg_instobj, (uint64_t)(uintptr_t)o);
+    int64_t self = (int64_t)(intptr_t)o, init;
+    if (_class_lookup(o->tag, "__init__", &init, 0)) {
+        switch (n) {
+        case 0: mojo_fnptr_call_1((void *)(intptr_t)init, self); break;
+        case 1: mojo_fnptr_call_2((void *)(intptr_t)init, self, a0); break;
+        case 2: mojo_fnptr_call_3((void *)(intptr_t)init, self, a0, a1); break;
+        case 3: mojo_fnptr_call_4((void *)(intptr_t)init, self, a0, a1, a2); break;
+        default: mojo_fnptr_call_5((void *)(intptr_t)init, self, a0, a1, a2, a3); break;
+        }
+    } else if (n) {
+        mojo_raise_type_error((char *)"this class takes no arguments");
+    }
+    return self;
+}
+/* 1 and *out set when `obj` is an instance whose class (or a base) has `attr` */
+int mojo_instobj_class_lookup(void *obj, char *attr, int64_t *out)
+{
+    if (!mojo_is_instobj((int64_t)(intptr_t)obj)) return 0;
+    return _class_lookup(((MojoInstObj *)obj)->tag, attr, out, 0);
 }
 /* the class-table tag of a class word: a handle's own tag, anything else is already a tag */
 int64_t mojo_classobj_tag(int64_t w)

@@ -4009,6 +4009,9 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     _ctor_rt = gen.func_return_types.get(fname_raw, 'int64_t')
     if ((_ctor_rt == 'int64_t' or _ctor_rt == '')
             and fname_raw[0:1].isupper()
+            # a LOCAL holding a class word (`Foo = type('Foo', (), {})`) is a value to call
+            # through `mojo_fnptr_call_N`, not an imported type this table does not know
+            and fname_raw not in gen.var_types
             and fname_raw not in gen.func_param_types
             and (fname_raw not in gen.imported_symbols
                  or fname_raw in gimple_ctypes._STR_WRAPPER_CTORS)
