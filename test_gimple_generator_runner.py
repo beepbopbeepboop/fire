@@ -4007,6 +4007,76 @@ def main():
 main()
 """
 
+_IF_YIELD_SRC = """\
+def g():
+    if (yield 1):
+        print("t")
+    else:
+        print("f")
+    yield 2
+
+def main():
+    it = g()
+    print(next(it))
+    print(next(it))
+main()
+"""
+
+_ELIF_YIELD_SRC = """\
+def g():
+    x = 0
+    if x == 1:
+        print("one")
+    elif (yield 1):
+        print("t")
+    else:
+        print("f")
+    yield 2
+
+def main():
+    it = g()
+    print(next(it))
+    print(next(it))
+main()
+"""
+
+# The condition is re-tested on every iteration: each test resumes the yield
+# with None, which is falsy, so `not` holds and the loop runs until the body's
+# `break`.
+# `continue` must re-run the yield in the condition, not skip it.
+_WHILE_YIELD_SRC = """\
+def g():
+    n = 0
+    while not (yield n):
+        n += 1
+        if n == 1:
+            continue
+        print(n)
+        if n == 3:
+            break
+    yield 99
+
+def main():
+    it = g()
+    print(next(it))
+    print(next(it))
+    print(next(it))
+    print(next(it))
+main()
+"""
+
+_AND_YIELD_SRC = """\
+def g():
+    x = False
+    print(x and (yield 1))
+    yield 2
+
+def main():
+    it = g()
+    print(next(it))
+main()
+"""
+
 def run_tagged_word_cpp_tests():
     # The C++ escape hatch (`MOJO_CORO=cpp`) carries a generator whose yields
     # mix kinds as ONE tagged word per slot: each yield is boxed by its kind
@@ -4285,6 +4355,22 @@ main()
                                        _CALL_ARG_YIELD_SRC, _CALL_ARG_YIELD_SRC)
         test_generator_matches_cpython("return_yield_operand_cpp",
                                        _RETURN_YIELD_SRC, _RETURN_YIELD_SRC)
+        # A yield in the condition of a compound statement. The condition runs
+        # before the body (`if`), or before each iteration (`while`); the yield
+        # is hoisted to that point, and an `elif` condition is hoisted into the
+        # else branch it belongs to, since it runs only when the earlier
+        # branches fail.
+        test_generator_matches_cpython("if_yield_condition_cpp",
+                                       _IF_YIELD_SRC, _IF_YIELD_SRC)
+        test_generator_matches_cpython("elif_yield_condition_cpp",
+                                       _ELIF_YIELD_SRC, _ELIF_YIELD_SRC)
+        test_generator_matches_cpython("while_yield_condition_cpp",
+                                       _WHILE_YIELD_SRC, _WHILE_YIELD_SRC)
+        # Refused, not hoisted: an unconditionally-run yield would be a wrong
+        # program (it would suspend even when `x` is false).
+        test_generator_refused("and_yield_operand_refused_cpp",
+                               _AND_YIELD_SRC,
+                               "conditionally evaluated")
 
 def run_tagged_word_bind_tests():
     # A tagged generator word bound to a NAME (`x = next(g)`) must keep its
