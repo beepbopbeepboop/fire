@@ -59,16 +59,57 @@ a feature of the generator kind system, not a patch at one site.
 - The cpp-path shapes are covered by `none_yield_lone_bare_for_loop_cpp` and
   `tagged_int_str_for_loop_cpp` (the cpp path already compiles them).
 
+## Status (2026-11-01): partial fix landed
+
+**Landed.** `mojo/middle/coro.py` gained `_ParamFlow` (plus the shared
+`_scope_defs` helper, which `_tagged_consumers_ok` now also uses). A tagged
+generator call passed as a positional argument to a plain module-level `def` is
+now accepted as a boxed consumer when the callee's parameter is consumed boxed:
+
+- every call site of the callee passes that same generator call, or passes its
+  own parameter on to another such callee (followed recursively);
+- every use of the parameter in the callee is a `for` iterable, a `list()`
+  argument, a comprehension iterable, or a pass-on as above.
+
+Anything else answers False and keeps its refusal: a `*` / keyword / bare
+reference to the callee, a second call site with another value, a rebound
+parameter, a nested `def` in the caller, and `next()` on the parameter.
+
+Verified: the doc's own example (`use(g())`, bare `yield`) now prints `None`, the
+mixed shape prints `1` / `s`, and a two-level pass-through prints `None` / `2`
+(all match CPython). `test_gimple_generator_runner.py`: 409 passed, 0 failed.
+Pins are in `run_none_yield_tests`: `none_yield_lone_passed_to_function`,
+`tagged_mixed_passed_to_function`, `tagged_none_passed_through_two_functions`
+(CPython oracle), and the two guards `none_yield_passed_to_function_next_refused`
+and `none_yield_passed_to_function_mixed_callers_refused`.
+
+**Found while probing, not fixed.** With the tag forced on for any caller, the
+callee's `next(it)` on the parameter printed `0` for a bare `yield` and exit 0.
+`_lower_generator_next` needs the generator's `api`, which a parameter does not
+carry (`emit_calls.py`: `gen._generator_var_api.get(av)` is None in the callee).
+That is why `next()` in the callee is excluded and still refused.
+
+**Still refused (the remaining work):**
+1. `next(it)` on a parameter that receives a tagged generator. The fix is to
+   carry the generator's `api` (value ctype, `mixed_slots`) to the callee's
+   parameter, so `_lower_generator_next` runs and tags the result. Until then it
+   must stay a refusal (pinned).
+2. A parameter that also receives a non-generator value at another call site
+   (`use(g())` plus `use([1, 2])`). The callee has one parameter kind, so this
+   needs per-call-site kinds or a boxed-at-call rule. Pinned as a refusal.
+
+**Gate note for the integrator.** `_tagged_consumers_ok` is shared by every
+generator. The change only widens acceptance for generators that reach a boxed
+parameter. Not measured: a generator whose kinds were tagged-able and which was
+passed to such a function previously fell through to a non-tagged slot (for
+example `'p'`), and it may now take the `'w'` slot instead. That is a slot change
+for shapes that used to compile, so run `compile_stdlib.py` (`U` and `skip`
+before/after) and the full `gimplegenerators` run.
+
 ## Next step
 
-1. Decide the rule for a tagged generator crossing a call: pass the kind as the
-   parameter's kind (preferred: it reuses `_generator_value_kind` per call site),
-   or box at the call so the callee's `for` reads a box.
-2. Probe the same shapes with `next(it)` inside the callee and with `list(it)` in
-   the callee, so the fix covers every consumer kind the callee can apply.
-3. Flip `none_yield_lone_passed_to_function_refused` to a CPython-oracle pin
-   (`test_generator_matches_cpython`, expected `None\n`) when the default path
-   compiles it, and add the mixed-kind shape beside it.
-4. Gate note for the integrator: `_tagged_consumers_ok` is shared by every
-   generator, so the change needs `compile_stdlib.py` `U`/`skip` before and after
-   and the full `gimplegenerators` run.
+1. Land remaining item 1 above (carry the generator `api` to a callee's
+   parameter for `next()`), then flip `none_yield_passed_to_function_next_refused`
+   to a CPython-oracle pin.
+2. Decide item 2 above: per-call-site parameter kinds, or box at the call.
+3. Integrator: the gate note above.
