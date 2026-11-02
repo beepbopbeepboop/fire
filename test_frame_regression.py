@@ -12,3 +12,7 @@ test_gimple_build_refusal("reg_f_locals_refused", "import sys\ndef f():\n    x=1
 
 # Before fix: del all succeeded silently; after: correct CPython answers.
 test_gimple_stdout("reg_f_trace_del", "import sys\ndef test():\n    f = sys._getframe(0)\n    f.f_trace = 42\n    del f.f_trace\n    print(f.f_trace is None)\n    try:\n        del f.f_trace_lines\n        print('deleted')\n    except TypeError:\n        print('TypeError')\n    try:\n        del f.f_trace_opcodes\n        print('deleted')\n    except AttributeError:\n        print('AttributeError')\n    print(f.f_trace_lines, f.f_trace_opcodes)\ndef main():\n    test()\n", "True\nTypeError\nAttributeError\nTrue False\n")
+
+# Before fix: storing a variable holding an int into f_trace_lines did not raise;
+# after: rejects any non-bool value.
+test_gimple_stdout("reg_f_trace_lines_rejects_int_var", "import sys\ndef test():\n    f = sys._getframe(0)\n    x = 1\n    try:\n        f.f_trace_lines = x\n        print('stored')\n    except TypeError:\n        print('TypeError')\n    f.f_trace_lines = True\n    print(f.f_trace_lines)\ndef main():\n    test()\n", "TypeError\nTrue\n")
