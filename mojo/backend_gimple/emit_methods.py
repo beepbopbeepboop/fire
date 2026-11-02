@@ -1708,6 +1708,11 @@ def _lower_re_dynamic_call(gen, node, recv, method):
     if method == 'sub':
         if subj_t == 'MojoBytes *':
             return 'MojoBytes *', gen._coerce_to_type('int64_t', 'MojoBytes *', r)
+        # A runtime-kinded subject (unknown static type) produces a result whose
+        # kind is only known at run time: a word, not a fixed char *.
+        if subj_t == 'int64_t':
+            gen._dyn_word_vals.add(r)
+            return 'int64_t', r
         return 'char *', gen._coerce_to_type('int64_t', 'char *', r)
     if method in ('groups', 'findall', 'split'):
         lt = gen._coerce_to_type('int64_t', 'MojoList *', r)
