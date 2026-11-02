@@ -1,4 +1,4 @@
-"""Regression for nested class attribute reads of enclosing locals.
+"""Regression for bugs/mid/CODEGEN_nested_class_attr_reads_enclosing_local_silently_zero.md.
 A function-scoped class's non-constant class attribute is per EXECUTION of its
 `class` statement: an instance built in one call keeps that call's value when
 it is read after a later call of the same function. Before the per-execution

@@ -83,7 +83,7 @@ def closure_lifted_name(outer_name: str, inner_name: str) -> str:
     return f"{outer_name}_{inner_name}"
 
 
-def _gmi_all_stmts_nonfunc(stmts: list) -> list:
+def _gmi_all_stmts_nonfunc(stmts) -> list:
     """Hoisted out of `gen_module_impl._scan_for_closures` (was a
     2-level-deep nested closure) — see `_gmi_prefold_toplevel_comptime`'s
     docstring. Recursive, pure. Returns a list of statements recursively
@@ -245,7 +245,7 @@ def _lambda_free_names(body) -> set:
     return out
 
 
-def discover_closures(ctx: 'GimpleGen', stmts: list) -> dict:
+def discover_closures(ctx: 'GimpleGen', stmts) -> dict:
     """Discover every nested FunctionDef under `stmts`; fill `ctx._all_closures`.
 
     Returns `ctx._all_closures`: outer_name -> {inner_name -> ClosureInfo}.

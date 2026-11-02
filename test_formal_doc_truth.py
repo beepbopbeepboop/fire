@@ -272,7 +272,7 @@ def group_constants():
     # document that publishes a stale bound is worse than one that publishes
     # none -- an operator sizing a decision against it reads the wrong number.
     for name, want in (('PROOF_WALL_S', 1500), ('PROOF_CPU_S', 1500),
-                       ('LIBRARY_WALL_S', 3600), ('LIBRARY_CPU_S', 3600)):
+                       ('LIBRARY_WALL_S', 1800), ('LIBRARY_CPU_S', 1800)):
         got = getattr(L, name)
         check(got == want,
               f'formal/lean.py::{name} is {got}, FORMAL.md §12 publishes {want}')

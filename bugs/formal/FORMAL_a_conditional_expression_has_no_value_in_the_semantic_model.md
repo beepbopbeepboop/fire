@@ -11,8 +11,8 @@ construct instead of fabricating `MojoExpr.int 0`, so both generators drop the
 bridge with the gap named rather than emitting a mirror of a different program.
 **What is left is the two halves below, and they are not this model's to
 close:** the machine half is a `CSEL` step lemma
-(`FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`, deleted;
-it also carried the certificate-bound blocker) and the cross-check half is a
+(`bugs/formal/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`,
+which also carries the certificate-bound blocker) and the cross-check half is a
 `MojoExpr` constructor in `lib/ProofLib.lean`. §0 is the measurement of what
 changed and §"What is left" is the residue. **The arm64 refusal COUNT is
 unchanged** (41 of 60), because on arm64 a conditional expression is one
@@ -34,7 +34,7 @@ proof-refusals 13 name `CSEL` and 39 name a DIFFERENT universal-theorem shape
 are codegen-refused (`getrlimit` binds nothing) — the generator's mix has moved
 past §0's 19/38/3 split; x86-64 60 of 60 reach a proof. Neither remaining half
 has moved: `arm64_step` still has no `CSEL` branch
-(`FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`, deleted) and
+(`FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`) and
 `MojoExpr`'s constructors still carry no conditional form, so this doc stays
 open for both. The test file's one other red row —
 `TestTheNestedExprRoutes.test_the_COMBINED_recursor_takes_a_motive_for_the_
@@ -132,7 +132,7 @@ BEFORE the `simp only` that unfolds `arm64_subs_flags` /
 landed is
 unaffected: the CSEL/`_ternary_go` model half is still the residue this doc is
 about, and the machine half is still
-`FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md` (deleted).
+`FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`.
 
 ## What was run
 
@@ -223,8 +223,8 @@ whole of what §0 landed:
    the gap named, and the model is proved on its own; the constructor itself is
    still missing.
 2. **the machine half.** arm64's codegen emits `CSEL` for the pure case, and
-   `FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md` (deleted)
-   was the measured statement that `arm64_step` has no arm for it. **NOT DONE**,
+   `bugs/formal/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`
+   is the measured statement that `arm64_step` has no arm for it. **NOT DONE**,
    and it is the one that decides the count. **Its order is also the reverse of
    what this section assumed**: the `CSEL` branch is a three-line Lean change
    blocked behind the certificate bound in
@@ -239,8 +239,8 @@ whole of what §0 landed:
 ## What is left, in the order a taker should do it
 
 1. **`arm64_step` + `_STEP_CONDS` for `CSEL`**, i.e.
-   `FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md` (deleted),
-   whose own next step said the certificate bound must be fixed first. That is
+   `bugs/formal/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`,
+   whose own next step says the certificate bound must be fixed first. That is
    another lane's claim; it is what makes a conditional expression worth having
    on arm64 and nothing here substitutes for it.
 2. **`MojoExpr`'s conditional form** in `lib/ProofLib.lean` plus the matching

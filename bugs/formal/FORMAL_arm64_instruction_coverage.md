@@ -25,7 +25,7 @@ Preserved from the root `BUG.md` (deleted 2026-09-26) so the survey and its
 measurements are not lost. Not a bug report: a **survey**, kept because the
 answer is not guessable and the tooling to re-derive it should not be written
 twice. Bugs found *by* this work have their own documents — see
-signed dec-while loop model (fixed) for the spill-displacement sign
+`CODEGEN_arm64_cmp_flags_and_loop_signedness.md` for the spill-displacement sign
 and the loop-exit bugs, and `FORMAL_arm64_known_proof_gaps.md` for the unproved
 examples. The one gap the `TBZ`/`TBNZ` wiring left behind — a bit-test
 condition that compiled and ran but could not be PROVED — was closed after this
@@ -496,7 +496,7 @@ was one of them until 2026-10-03 and no longer is; `CSEL`'s three neighbours
   occurrences). `if a < b` was `cmp` + `cset` + `cbz` + a branch: three
   instructions, one materialising a boolean the branch immediately reads back.
   Now wired at every site; see
-  signed dec-while loop model (fixed) for the two bugs that wiring
+  `CODEGEN_arm64_cmp_flags_and_loop_signedness.md` for the two bugs that wiring
   uncovered (the displacement never patched, and `for` loops having no exit).
 - **`CSEL` / `CSINC` / `CSINV` / `CSNEG`** (~40k) — a conditional *expression*
   should not become a branch. With Rn = Rm = XZR, CSEL is exactly CSET, which

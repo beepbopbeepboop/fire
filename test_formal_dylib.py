@@ -2243,7 +2243,7 @@ def test_a_conditional_value_is_not_a_branch(tmpdir, shared):
         accepting `b.cond` would be a theorem about a machine this path does not
         step, which is the shape
         `FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`
-        (deleted) was about.
+        is about.
     """
     import re as _re
     from formal.lean import find_lean

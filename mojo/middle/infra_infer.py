@@ -961,7 +961,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                 for arg in expr.args:
                     scan_expr(arg)
 
-        def scan_nodes(node_list: list):
+        def scan_nodes(node_list):
             """Recursively scan a list of statements."""
             def _track_derivation(target, value):
                 """`x = <subscript/slice of something already known to
@@ -2175,7 +2175,7 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
             # s` printed the pointer's decimal address instead of "abc"
             # until this case was added; the container literals below
             # already had an identical fix.
-            cand = 'MojoBytes *' if getattr(n.value, 'is_bytes', False) else 'char *'
+            cand = 'MojoBytes *' if n.value.is_bytes else 'char *'
         elif isinstance(n.value, gimple_ctypes.FloatLiteral):
             # A `double` local, which is the ONE scalar this map used to
             # have no answer for at all — the docstring above calls scalars
@@ -3028,7 +3028,7 @@ def _is_free_eligible_function(fn) -> bool:
                            # of its own is_async/is_generator flags
     return True
 
-def _build_analysis_funcs(stmts: list) -> dict:
+def _build_analysis_funcs(stmts) -> dict:
     """The module-level functions the ownership analysis may resolve a call
     to, `{name: FunctionDef}`. A name is included only if the analysis can
     be sure a call spelled `name(...)` in this module reaches THAT body:
@@ -3060,7 +3060,7 @@ def _build_analysis_funcs(stmts: list) -> dict:
             out[s.name] = s
     return out
 
-def _build_analysis_structs(stmts: list) -> dict:
+def _build_analysis_structs(stmts) -> dict:
     """The module's structs the ownership analysis may reason about,
     `{struct name: {method name: FunctionDef}}`. A struct is included only if a
     constructor call `Name(...)` provably builds a fresh instance and its

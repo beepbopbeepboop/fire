@@ -262,8 +262,8 @@ from tools import procrun  # noqa: E402 — the tree walk and the kill, shared
 # every launcher that never got here.
 PROOF_WALL_S = 1500.0
 PROOF_CPU_S = 1500.0
-LIBRARY_WALL_S = 3600.0
-LIBRARY_CPU_S = 3600.0
+LIBRARY_WALL_S = 1800.0
+LIBRARY_CPU_S = 1800.0
 # Lean's own bounds.  `-M` is Lean's own memory ceiling and it is NOT the
 # project's 4 GB line: that line is a DEBT standard for what a job should cost
 # (`doc/POLICY_memory_over_4gb.md`), and enforcing it by capping Lean is

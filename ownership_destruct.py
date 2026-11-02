@@ -2146,7 +2146,7 @@ def _collect_key_views(node, name: str, keyvars: list) -> bool:
     return True
 
 
-def analyze_module(stmts: list):
+def analyze_module(stmts):
     """Returns {qualified_name: set(candidate_local_names)} for every
     function and struct method in a parsed module, where qualified_name
     is the bare function name or "Struct.method"."""
