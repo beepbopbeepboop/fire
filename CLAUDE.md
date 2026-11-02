@@ -417,7 +417,7 @@ cheap (0.0-0.2 GB, 1.2-11.6 s each) and all in `coroutine` and `x86`, each
 measured one at a time before being named, with the measurement at its
 registration. (A FANOUT can state a count too, checked against the per-item
 verdicts rather than a summary line; see `observed_fanout_failures` in
-`tools/suite.py`.) `bugs/CODEGEN_ab_native_fails.md` §4 carries the full inventory
+`tools/suite.py`.) `bugs/mid/CODEGEN_ab_native_fails.md` §4 carries the full inventory
 and the reasoning for `expect=` rather than `disabled=` on each.
 
 | test | marker | subject | cost it charges every gate |

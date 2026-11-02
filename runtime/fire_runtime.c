@@ -3421,7 +3421,7 @@ char *mojo_cstr_slice(char *s, int64_t start, int64_t stop)
          * the first NUL within s[0..stop), or `stop` when there is none)
          * and is what every libc already vectorises. Measured on the exact
          * scanning shape above (see
-         * bugs/CODEGEN_selfhost_tokenize_region_eq_quadratic.md): 14x on
+         * bugs/mid/CODEGEN_selfhost_tokenize_region_eq_quadratic.md): 14x on
          * the same inputs, with a byte-for-byte equality check over every
          * position confirming the two agree.
          *

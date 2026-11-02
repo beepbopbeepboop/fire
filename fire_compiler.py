@@ -2452,7 +2452,7 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
                 # of every quote's offset - measured at 1.0e9 byte reads
                 # self-hosted on this file's own 349KB source, and quadratic
                 # in it (see
-                # bugs/CODEGEN_selfhost_tokenize_region_eq_quadratic.md,
+                # bugs/mid/CODEGEN_selfhost_tokenize_region_eq_quadratic.md,
                 # which is where the runtime side of the same cost is
                 # measured).
                 is_triple = False

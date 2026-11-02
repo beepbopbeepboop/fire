@@ -3,7 +3,7 @@
 Every generator of CPython's `Lib/enum.py` (`Flag._iter_member_`, `_iter_member_by_value_`,
 `_iter_member_by_def_`, for `Flag` and `IntFlag`) now compiles. The module must STILL be refused
 as a whole - it builds its classes with the 3-argument `type(name, bases, namespace)` at run
-time, which the compiled path does not model yet (bugs/CODEGEN_enum_runtime_class_creation.md) -
+time, which the compiled path does not model yet (bugs/mid/CODEGEN_enum_runtime_class_creation.md) -
 and the refusal must name THAT, not a generator: compiling `enum` with its metaclass-created
 attributes missing would iterate every Flag as empty. When run-time class creation lands this
 test is the one to turn around (compile succeeds, program output equals CPython's).
