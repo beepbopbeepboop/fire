@@ -244,46 +244,60 @@ static inline double mojo_bound_method_call_d4(MojoBoundMethod *bm, int64_t a, i
 
 
 
+/* run-time classes (`type(name, bases, ns)`): a call on a class handle makes an instance */
+int mojo_is_classobj(int64_t w);
+int64_t mojo_classobj_call(int64_t cls, int64_t n, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6);
+int mojo_instobj_class_lookup(void *obj, char *attr, int64_t *out);
+int mojo_is_instobj(int64_t w);
+
 static inline int64_t mojo_fnptr_call_0(void *fp) {
     if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_0(fp, 0);
+    if (mojo_is_classobj((int64_t)(intptr_t)fp)) return mojo_classobj_call((int64_t)(intptr_t)fp, 0, 0, 0, 0, 0, 0, 0, 0);
     if (mojo_is_bound_method(fp)) return mojo_bound_method_call_0((MojoBoundMethod *)fp);
     return ((int64_t (*)(void))fp)();
 }
 static inline int64_t mojo_fnptr_call_1(void *fp, int64_t a) {
     if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_1(fp, 0, a);
+    if (mojo_is_classobj((int64_t)(intptr_t)fp)) return mojo_classobj_call((int64_t)(intptr_t)fp, 1, a, 0, 0, 0, 0, 0, 0);
     if (mojo_is_bound_method(fp)) return mojo_bound_method_call_1((MojoBoundMethod *)fp, a);
     return ((int64_t (*)(int64_t))fp)(a);
 }
 static inline int64_t mojo_fnptr_call_2(void *fp, int64_t a, int64_t b) {
     if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_2(fp, 0, a, b);
+    if (mojo_is_classobj((int64_t)(intptr_t)fp)) return mojo_classobj_call((int64_t)(intptr_t)fp, 2, a, b, 0, 0, 0, 0, 0);
     if (mojo_is_bound_method(fp)) return mojo_bound_method_call_2((MojoBoundMethod *)fp, a, b);
     return ((int64_t (*)(int64_t, int64_t))fp)(a, b);
 }
 static inline int64_t mojo_fnptr_call_3(void *fp, int64_t a, int64_t b, int64_t c) {
     if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_3(fp, 0, a, b, c);
+    if (mojo_is_classobj((int64_t)(intptr_t)fp)) return mojo_classobj_call((int64_t)(intptr_t)fp, 3, a, b, c, 0, 0, 0, 0);
     if (mojo_is_bound_method(fp)) return mojo_bound_method_call_3((MojoBoundMethod *)fp, a, b, c);
     return ((int64_t (*)(int64_t, int64_t, int64_t))fp)(a, b, c);
 }
 static inline int64_t mojo_fnptr_call_4(void *fp, int64_t a, int64_t b, int64_t c, int64_t d) {
     if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_4(fp, 0, a, b, c, d);
+    if (mojo_is_classobj((int64_t)(intptr_t)fp)) return mojo_classobj_call((int64_t)(intptr_t)fp, 4, a, b, c, d, 0, 0, 0);
     if (mojo_is_bound_method(fp)) return mojo_bound_method_call_4((MojoBoundMethod *)fp, a, b, c, d);
     return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t))fp)(a, b, c, d);
 }
 
 static inline int64_t mojo_fnptr_call_5(void *fp, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4) {
     if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_5(fp, 0, _a0, _a1, _a2, _a3, _a4);
+    if (mojo_is_classobj((int64_t)(intptr_t)fp)) return mojo_classobj_call((int64_t)(intptr_t)fp, 5, _a0, _a1, _a2, _a3, _a4, 0, 0);
     if (mojo_is_bound_method(fp)) return mojo_bound_method_call_5((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4);
     return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t, int64_t))fp)(_a0, _a1, _a2, _a3, _a4);
 }
 
 static inline int64_t mojo_fnptr_call_6(void *fp, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5) {
     if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_6(fp, 0, _a0, _a1, _a2, _a3, _a4, _a5);
+    if (mojo_is_classobj((int64_t)(intptr_t)fp)) return mojo_classobj_call((int64_t)(intptr_t)fp, 6, _a0, _a1, _a2, _a3, _a4, _a5, 0);
     if (mojo_is_bound_method(fp)) return mojo_bound_method_call_6((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4, _a5);
     return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t))fp)(_a0, _a1, _a2, _a3, _a4, _a5);
 }
 
 static inline int64_t mojo_fnptr_call_7(void *fp, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5, int64_t _a6) {
     if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_7(fp, 0, _a0, _a1, _a2, _a3, _a4, _a5, _a6);
+    if (mojo_is_classobj((int64_t)(intptr_t)fp)) return mojo_classobj_call((int64_t)(intptr_t)fp, 7, _a0, _a1, _a2, _a3, _a4, _a5, _a6);
     if (mojo_is_bound_method(fp)) return mojo_bound_method_call_7((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4, _a5, _a6);
     return ((int64_t (*)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t))fp)(_a0, _a1, _a2, _a3, _a4, _a5, _a6);
 }
@@ -429,18 +443,21 @@ static inline int64_t mojo_maybe_bound_call_4(void *f, int64_t a, int64_t b, int
 
 static inline int64_t mojo_maybe_bound_call_5(void *fp, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4) {
     if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_5(fp, 0, _a0, _a1, _a2, _a3, _a4);
+    if (mojo_is_classobj((int64_t)(intptr_t)fp)) return mojo_classobj_call((int64_t)(intptr_t)fp, 5, _a0, _a1, _a2, _a3, _a4, 0, 0);
     if (mojo_is_bound_method(fp)) return mojo_bound_method_call_5((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4);
     return mojo_fnptr_call_5(fp, _a0, _a1, _a2, _a3, _a4);
 }
 
 static inline int64_t mojo_maybe_bound_call_6(void *fp, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5) {
     if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_6(fp, 0, _a0, _a1, _a2, _a3, _a4, _a5);
+    if (mojo_is_classobj((int64_t)(intptr_t)fp)) return mojo_classobj_call((int64_t)(intptr_t)fp, 6, _a0, _a1, _a2, _a3, _a4, _a5, 0);
     if (mojo_is_bound_method(fp)) return mojo_bound_method_call_6((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4, _a5);
     return mojo_fnptr_call_6(fp, _a0, _a1, _a2, _a3, _a4, _a5);
 }
 
 static inline int64_t mojo_maybe_bound_call_7(void *fp, int64_t _a0, int64_t _a1, int64_t _a2, int64_t _a3, int64_t _a4, int64_t _a5, int64_t _a6) {
     if (mojo_is_vararg_fn(fp)) return mojo_vararg_call_7(fp, 0, _a0, _a1, _a2, _a3, _a4, _a5, _a6);
+    if (mojo_is_classobj((int64_t)(intptr_t)fp)) return mojo_classobj_call((int64_t)(intptr_t)fp, 7, _a0, _a1, _a2, _a3, _a4, _a5, _a6);
     if (mojo_is_bound_method(fp)) return mojo_bound_method_call_7((MojoBoundMethod *)fp, _a0, _a1, _a2, _a3, _a4, _a5, _a6);
     return mojo_fnptr_call_7(fp, _a0, _a1, _a2, _a3, _a4, _a5, _a6);
 }
@@ -591,6 +608,23 @@ void mojo_cleanup_push_cattr(void **slot, void *saved);
  * immediately at a point that is itself about to (or just did) free those
  * same `n` locals inline. */
 void mojo_cleanup_cancel_n(int64_t n);
+/* Python-level frames: sys._getframe / f_back / f_lineno / f_code.co_name for functions the compiler
+ * instrumented (see runtime/fire_runtime.c, "Python-level frames"). A frame is a word (0 is None). */
+void    mojo_frame_enter(char *name, char *file, int64_t firstlineno);
+void    mojo_frame_leave(void);
+void    mojo_frame_set_line(int64_t line);
+int64_t mojo_getframe(int64_t depth);
+int64_t mojo_frame_back(int64_t w);
+int64_t mojo_frame_lineno(int64_t w);
+int64_t mojo_frame_firstlineno(int64_t w);
+char *  mojo_frame_name(int64_t w);
+char *  mojo_frame_file(int64_t w);
+int64_t mojo_frame_depth(void);
+/* Tracebacks: `e.__traceback__` is mojo_traceback(<current depth>); tb_frame / tb_next / tb_lineno read an entry. */
+int64_t mojo_traceback(int64_t catcher_depth);
+int64_t mojo_tb_frame(int64_t t);
+int64_t mojo_tb_next(int64_t t);
+int64_t mojo_tb_lineno(int64_t t);
 /* Snapshot the current cleanup-stack depth as the level `_mojo_exc_top`
  * (already incremented) should unwind back down to. Call immediately
  * after bumping `_mojo_exc_top` for a new try/except level, before its
@@ -811,7 +845,10 @@ int64_t     mojo_box_int(int64_t v);
  * is the word. mojo_repr_boxed / mojo_box_double read it back. */
 int64_t     mojo_box_from_double(double v);
 int64_t     mojo_box_from_bool(int64_t v);   /* a bool in a tagged word: renders True/False */
+int64_t     mojo_box_from_str(char *s);      /* a str in a tagged word: a kind-'p' box, renders the string */
+int64_t     mojo_box_none(void);             /* None in a tagged word: renders None (one shared box) */
 void        mojo_list_append_word(MojoList *l, int64_t w);   /* append a tagged word under the kind it carries */
+void        mojo_list_append_str_kinded(MojoList *l, const char *v);   /* a string slot under the 'p' kind */
 void        mojo_list_append_double_kinded(MojoList *l, double v, char prior);   /* append a double under kind 'd'; `prior` describes the slots already there */
 /* The result of `+`, `-` or `*` where one operand is a float-possible
  * parameter (see `_float_param_arith` in emit_infra.py): `ires` is the integer
@@ -819,6 +856,10 @@ void        mojo_list_append_double_kinded(MojoList *l, double v, char prior);  
  * double box holding `dres` when either raw operand word is a double box, and
  * `ires` otherwise, so the caller never allocates on the integer path. */
 int64_t     mojo_float_arith_select(int64_t a, int64_t b, int64_t ires, double dres);
+/* The result of `<`/`<=`/`>`/`>=` where either operand is a float box: `ires`
+ * is the integer comparison's `_Bool` answer and `dres` the double one's.
+ * Returns `dres` when either raw operand word is a double box, else `ires`. */
+int     mojo_float_cmp_select(int64_t a, int64_t b, int ires, int dres);
 /* The box's OWN word for every kind that has one — a str/bytes/list box gives
  * back its pointer, a None box the NULL word that IS None in this value model,
  * an int/bool box its integer — and the box itself, unchanged, for a float
@@ -827,6 +868,28 @@ int64_t     mojo_float_arith_select(int64_t a, int64_t b, int64_t ires, double d
  * kept the box answered `is None` false for a None slot and handed every
  * consumer the box's address instead of the value. */
 int64_t     mojo_box_word(int64_t v);
+/* `x == None` / `x != None` on a possibly-boxed value (a tagged-word None is
+ * the one shared kind-'n' box, which `mojo_box_word` unwraps to the NULL word
+ * and an int 0 shares that word, so the kind is read from the box itself).
+ * Returns 1 only for that box; any other word answers 0, which is what the
+ * constant comparison answered before this existed. */
+int         mojo_word_is_none(int64_t v);
+/* Arithmetic on a possibly-boxed operand (`x + 1` on a None received by
+ * `x = yield`): a None box raises a catchable TypeError, as CPython does,
+ * instead of being unwrapped to its word (0) and computed with. `op` is the
+ * operator text ("+", "//", ...); `other` is the type name of the other
+ * operand ("int" or "float"); `none_is_left` says which side the None is,
+ * for CPython's message order. Any other word is returned unchanged. */
+int64_t     mojo_none_arith_guard(int64_t v, const char *op, const char *other, int none_is_left);
+/* The same check for a coroutine body, which must not longjmp: a None box
+ * marks the TypeError pending (mojo_exc_pending_set) and returns; the
+ * generated code rethrows it as a catchable _MojoCppExc. */
+int64_t     mojo_none_arith_guard_pending(int64_t v, const char *op, const char *other, int none_is_left);
+/* Unary `-` on a possibly-boxed operand: the same check, with CPython's
+ * "bad operand type for unary -" message. */
+int64_t     mojo_none_unary_guard(int64_t v, const char *op);
+/* The pending-flag form of mojo_none_unary_guard. */
+int64_t     mojo_none_unary_guard_pending(int64_t v, const char *op);
 /* Python truthiness of a word whose kind only the runtime knows (an
  * unannotated parameter, an untyped attribute read): an empty container or
  * string is false, None is false, 0 is false, anything else is true. */
@@ -1069,7 +1132,7 @@ int64_t      mojo_list_count_bytes(MojoList *l, MojoBytes *v);
 MojoBytes *mojo_bytes_empty(void);
 MojoBytes *mojo_bytes_zeros(int64_t n);
 MojoBytes *mojo_bytes_from_list(MojoList *l);      /* list of ints 0-255 */
-MojoBytes *mojo_bytes_from_str(char *s, char *encoding); /* 'utf-8'/'ascii' */
+MojoBytes *mojo_bytes_from_str(char *s, char *encoding, char *errors); /* 'utf-8'/'ascii' */
 MojoBytes *mojo_bytes_from_cstr(const char *s);   /* NUL-terminated copy */
 int64_t    mojo_bytes_len(MojoBytes *b);
 int64_t    mojo_bytes_get(MojoBytes *b, int64_t i); /* -> int 0-255, neg idx ok */
@@ -1111,7 +1174,7 @@ int64_t    mojo_bytes_count(MojoBytes *hay, MojoBytes *needle);
 int64_t    mojo_bytes_count_from(MojoBytes *hay, MojoBytes *needle, int64_t start, int64_t stop);
 int        mojo_bytes_startswith(MojoBytes *b, MojoBytes *p);
 int        mojo_bytes_endswith(MojoBytes *b, MojoBytes *p);
-char      *mojo_bytes_decode(MojoBytes *b, char *encoding);
+char      *mojo_bytes_decode(MojoBytes *b, char *encoding, char *errors);
 char      *mojo_bytes_hex(MojoBytes *b);
 char      *mojo_bytes_hash_hexdigest(MojoBytes *b);  /* hashlib(...).hexdigest() backing */
 MojoBytes *mojo_bytes_removeprefix(MojoBytes *b, MojoBytes *p);
@@ -1411,15 +1474,23 @@ void    mojo_register_getattr_dispatch(int64_t (*fn)(void *, char *));
 int64_t mojo_getattr_any(void *obj, char *attr);   /* obj.attr on a word: struct reflection of any module */
 void    mojo_class_register(int64_t tag, int64_t base_tag, char *name);
 void    mojo_class_setattr(int64_t tag, char *name, int64_t word);
+void    mojo_register_classattr_reader(int (*fn)(int64_t, char *, int64_t *));
 int     mojo_class_hasattr(int64_t tag, char *name);
 int64_t mojo_class_getattr(int64_t tag, char *name);                       /* AttributeError when absent */
 int64_t mojo_class_getattr_default(int64_t tag, char *name, int64_t dflt);
 void    mojo_class_delattr(int64_t tag, char *name);
 /* a class made at run time (`type(name, bases, ns)`): a handle word, see mojo_type_new */
+#define MOJO_INSTOBJ_MAGIC 0x4d494e31LL   /* an instance of a run-time class */
 #define MOJO_CLASSOBJ_MAGIC 0x4d434f31LL   /* inside the 31-bit range mojo_read_type_tag_safe accepts */
 int64_t mojo_type_new(char *name);
 void    mojo_type_add_base(int64_t cls, int64_t base);
+void    mojo_type_set_meta(int64_t cls, int64_t meta);
+void    mojo_type_add_bases_from_list(int64_t cls, MojoList *bases);
 int     mojo_is_classobj(int64_t w);
+int64_t mojo_rtobj_method_call(int64_t recv, char *name, int64_t n, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6);
+int     mojo_isinstance_rtclass(int64_t obj, int64_t cls);
+int     mojo_isinstance_type(int64_t w);
+int64_t mojo_type_of(int64_t w);
 int64_t mojo_classobj_tag(int64_t w);
 void    mojo_classobj_setattr(int64_t cls, char *name, int64_t word);
 void    mojo_type_fill_from_dict(int64_t cls, MojoDict *ns);

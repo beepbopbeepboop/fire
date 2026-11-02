@@ -19,6 +19,7 @@ import sys
 import tempfile
 
 import gimple_codegen
+from mojo.middle import coro
 from build_config import find_gcc, find_gxx
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -516,6 +517,86 @@ for x in g:
 print("done")
 """, "1\n2\ndone\n")
 
+    # `next()` on a module-global handle read from a FUNCTION body. The
+    # toplevel store is emitted after every function, so the read used to
+    # find no api and refuse ("`next(...)` on next(IdentExpr) ... has no
+    # lowering"); `seed_global_generator_apis` records the api before any
+    # function is lowered. The oracle is CPython itself.
+    test_generator_matches_cpython(
+        "next_on_a_module_global_generator_read_from_a_function",
+        """\
+def g():
+    yield 1
+    yield 2
+
+it = g()
+
+def main():
+    print(next(it))
+    print(next(it, -1))
+    print(next(it, -1))
+main()
+""", """\
+def g():
+    yield 1
+    yield 2
+
+it = g()
+
+def main():
+    print(next(it))
+    print(next(it, -1))
+    print(next(it, -1))
+main()
+""")
+
+    # The same read from a function, with the handle consumed at toplevel
+    # too: both reads must share the one api the store recorded.
+    test_generator_matches_cpython(
+        "next_on_a_module_global_generator_from_a_function_and_toplevel",
+        """\
+def g():
+    yield 10
+    yield 20
+
+it = g()
+
+def main():
+    print(next(it))
+
+main()
+print(next(it))
+""", """\
+def g():
+    yield 10
+    yield 20
+
+it = g()
+
+def main():
+    print(next(it))
+
+main()
+print(next(it))
+""")
+
+    # A global bound TWICE to a generator is not one fact, so the read from
+    # the function keeps the honest refusal rather than a guessed api.
+    test_generator_refused("next_on_a_module_global_bound_twice_refused", """\
+def g():
+    yield 1
+
+def h():
+    yield 2
+
+it = g()
+it = h()
+
+def main():
+    print(next(it))
+main()
+""", "has no lowering in this codegen")
+
     # The carried entry is only a fact while the name has ONE binding, because
     # a wrong entry is not a refusal — it is another generator's resume/value
     # ABI. Both rebinding shapes must therefore keep the honest refusal.
@@ -569,6 +650,70 @@ g = b()
 g.close()
 print("done")
 """, "no known generator API")
+
+
+def run_unary_minus_received_float_tests():
+    # `-x` on a value received from a kind-mixed generator. The received word is
+    # a box, and the box may hold a DOUBLE: negating the word negated the box's
+    # ADDRESS (`-4341657616` for `-2.5`). A unary minus must read the box by its
+    # kind, as the binary arithmetic does (`_tagged_arith_select`): a double box
+    # negated as a double, an int box as its integer.
+    #
+    # Both binders are covered: a for-loop target over the generator (the box is
+    # not in `_tagged_word_vals`; the loop's name is the tagged word) and a name
+    # bound by `next()`, which is.
+    test_generator_matches_cpython(
+        "unary_minus_on_for_target_of_mixed_generator_reads_box_by_kind",
+        """\
+def g():
+    yield 1
+    yield 2.5
+    yield 4
+
+def main():
+    for x in g():
+        print(-x)
+main()
+""",
+        """\
+def g():
+    yield 1
+    yield 2.5
+    yield 4
+
+def main():
+    for x in g():
+        print(-x)
+main()
+""")
+    test_generator_matches_cpython(
+        "unary_minus_on_next_bound_mixed_generator_value_reads_box_by_kind",
+        """\
+def g():
+    yield 1
+    yield 2.5
+
+def main():
+    it = g()
+    a = next(it)
+    print(-a)
+    b = next(it)
+    print(-b)
+main()
+""",
+        """\
+def g():
+    yield 1
+    yield 2.5
+
+def main():
+    it = g()
+    a = next(it)
+    print(-a)
+    b = next(it)
+    print(-b)
+main()
+""")
 
 
 def run_sibling_loop_value_kind_tests():
@@ -1479,6 +1624,53 @@ def main():
         print(v)
 main()
 """, "1\n2.5\n")
+
+    # The for-loop target over a kind-mixed generator is a tagged word, so an
+    # int operand's arithmetic answers by the box's kind: an int yield keeps
+    # its integer answer (`x * 2` printed `2.0` before the target was tagged),
+    # and a float yield keeps its double. Every operator the target can take
+    # beside an int literal, and `2 * x` / `x * x`, is pinned against CPython.
+    test_generator_matches_cpython("mixed_for_target_int_arith_keeps_int_kind", """\
+def g():
+    yield 1
+    yield 2.5
+    yield 4
+
+def main():
+    for x in g():
+        print(x * 2)
+        print(x - 1)
+        print(x + 1)
+        print(x // 1)
+        print(x % 3)
+        print(x / 2)
+        print(x + 1.5)
+        print(2 * x)
+        print(x * x)
+        print(x == None)
+        print(x)
+main()
+""", """\
+def g():
+    yield 1
+    yield 2.5
+    yield 4
+
+def main():
+    for x in g():
+        print(x * 2)
+        print(x - 1)
+        print(x + 1)
+        print(x // 1)
+        print(x % 3)
+        print(x / 2)
+        print(x + 1.5)
+        print(2 * x)
+        print(x * x)
+        print(x == None)
+        print(x)
+main()
+""")
 
     # A `*args`-style UNPACK at a call site is a hole for every parameter it
     # could have supplied, and the call-site scan used to record it against
@@ -3024,7 +3216,2285 @@ main()
 """, "")
 
 
+# A None received by `x = yield` used in arithmetic must raise TypeError, as
+# CPython does. The None box has no numeric kind, so the tagged arithmetic
+# select used to unwrap it to its word (0) and print `x + 1` as 1. The
+# try/except form lets the CPython reference run to completion. One program
+# text serves as both the Mojo source and the CPython oracle.
+_NONE_RECEIVED_ARITH_SRC = """\
+def g():
+    x = yield
+    try:
+        print(x + 1)
+    except TypeError:
+        print("TypeError")
+    yield 1
+
+def main():
+    it = g()
+    next(it)
+    next(it)
+main()
+"""
+
+
+def run_none_yield_tests():
+    # A None yield (bare `yield`, or `yield None`) used to share the int64_t
+    # value slot with the integers, so a for loop printed the raw 0 where
+    # CPython prints None. A generator with a None yield beside values is now
+    # a tagged word (`mojo_box_none`, rendered by the for-loop consumer), and
+    # the oracle is CPython itself, measured at test time. A generator consumed
+    # by `next()` (on a handle, directly, or with a default) reads the same
+    # tagged word, rendered by the boxed result of `_lower_generator_next`.
+    test_generator_matches_cpython("none_yield_bare_beside_int_in_for_loop", """\
+def g():
+    yield 1
+    yield
+    yield 2
+
+def main():
+    for v in g():
+        print(v)
+main()
+""", """\
+def g():
+    yield 1
+    yield
+    yield 2
+
+def main():
+    for v in g():
+        print(v)
+main()
+""")
+    test_generator_matches_cpython("none_yield_only_in_for_loop_prints_none", """\
+def g():
+    yield
+
+def main():
+    for v in g():
+        print(v)
+main()
+""", """\
+def g():
+    yield
+
+def main():
+    for v in g():
+        print(v)
+main()
+""")
+    # The loop target is appended to a list: `mojo_list_append_word` must give
+    # the None box a list slot of kind 'n', or the element prints as the box's
+    # address rather than `None`.
+    test_generator_matches_cpython("none_yield_appended_to_list_in_for_loop", """\
+def g():
+    yield 1
+    yield
+    yield 2
+
+def main():
+    out = []
+    for v in g():
+        out.append(v)
+    print(out)
+main()
+""", """\
+def g():
+    yield 1
+    yield
+    yield 2
+
+def main():
+    out = []
+    for v in g():
+        out.append(v)
+    print(out)
+main()
+""")
+    test_generator_matches_cpython("none_yield_explicit_beside_int_in_for_loop", """\
+def g():
+    yield 1
+    yield None
+    yield 2
+
+def main():
+    for v in g():
+        print(v)
+main()
+""", """\
+def g():
+    yield 1
+    yield None
+    yield 2
+
+def main():
+    for v in g():
+        print(v)
+main()
+""")
+    # `next()` reads the tagged word too: `_lower_generator_next` marks its
+    # result as a boxed word, so a None yield read by `next(it)` renders as
+    # `None` (it used to print the int64_t slot's `0`). Each shape below is
+    # pinned against the CPython oracle, not a hand-written string.
+    test_generator_matches_cpython("none_yield_consumed_by_next", """\
+def g():
+    yield 1
+    yield
+
+def main():
+    it = g()
+    print(next(it))
+    print(next(it))
+main()
+""", """\
+def g():
+    yield 1
+    yield
+
+def main():
+    it = g()
+    print(next(it))
+    print(next(it))
+main()
+""")
+    test_generator_matches_cpython("bare_none_yield_consumed_by_next", """\
+def g():
+    yield
+
+def main():
+    it = g()
+    print(next(it))
+main()
+""", """\
+def g():
+    yield
+
+def main():
+    it = g()
+    print(next(it))
+main()
+""")
+    # Arithmetic on a None received by `x = yield` (program in
+    # _NONE_RECEIVED_ARITH_SRC) must raise TypeError on the default path.
+    test_generator_matches_cpython("none_received_arithmetic_raises_typeerror",
+                                   _NONE_RECEIVED_ARITH_SRC, _NONE_RECEIVED_ARITH_SRC)
+    # Unary minus on the same None box raises too, with CPython's unary text.
+    test_generator_matches_cpython("none_received_unary_minus_raises_typeerror", """\
+def g():
+    x = yield
+    try:
+        print(-x)
+    except TypeError:
+        print("TypeError")
+    yield 1
+
+def main():
+    it = g()
+    next(it)
+    next(it)
+main()
+""", """\
+def g():
+    x = yield
+    try:
+        print(-x)
+    except TypeError:
+        print("TypeError")
+    yield 1
+
+def main():
+    it = g()
+    next(it)
+    next(it)
+main()
+""")
+    # The guard must leave a FLOAT box alone: arithmetic on a double received
+    # from `next(it)` still computes the double answer (a float box is not None).
+    test_generator_matches_cpython("float_received_arithmetic_unchanged", """\
+def g():
+    yield 2.5
+    yield 3
+
+def main():
+    it = g()
+    x = next(it)
+    print(x + 1.5)
+    y = next(it)
+    print(y + 1.5)
+main()
+""", """\
+def g():
+    yield 2.5
+    yield 3
+
+def main():
+    it = g()
+    x = next(it)
+    print(x + 1.5)
+    y = next(it)
+    print(y + 1.5)
+main()
+""")
+    # `next(g())` direct, and the two-argument default form: a default of
+    # None or of a float is itself a tagged word, so it renders by its kind.
+    test_generator_matches_cpython("none_yield_direct_next_and_default", """\
+def g():
+    yield 1
+    yield
+
+def main():
+    print(next(g()))
+    print(next(g(), 5))
+    it = g()
+    print(next(it))
+    print(next(it, 2.5))
+    print(next(it, 2.5))
+main()
+""", """\
+def g():
+    yield 1
+    yield
+
+def main():
+    print(next(g()))
+    print(next(g(), 5))
+    it = g()
+    print(next(it))
+    print(next(it, 2.5))
+    print(next(it, 2.5))
+main()
+""")
+    # The RECEIVE side of the None family ("a None sent into a generator prints
+    # zero"): `next(it)` resumes the generator with None, so `x = yield` binds
+    # None. The resume ABI used to hand the generator the raw int64 0 and
+    # `print(x)` printed `0`. CPython prints `None`.
+    test_generator_matches_cpython("none_sent_into_generator_default", """\
+def g():
+    x = yield
+    print(x)
+    yield 1
+
+def main():
+    it = g()
+    next(it)
+    next(it)
+main()
+""", """\
+def g():
+    x = yield
+    print(x)
+    yield 1
+
+def main():
+    it = g()
+    next(it)
+    next(it)
+main()
+""")
+    test_generator_matches_cpython("none_sent_into_generator_explicit_yield", """\
+def g():
+    x = yield 7
+    print(x)
+    yield 1
+
+def main():
+    it = g()
+    print(next(it))
+    print(it.send(None))
+main()
+""", """\
+def g():
+    x = yield 7
+    print(x)
+    yield 1
+
+def main():
+    it = g()
+    print(next(it))
+    print(it.send(None))
+main()
+""")
+    test_generator_matches_cpython("mixed_str_int_yield_consumed_by_next", """\
+def g():
+    yield 1
+    yield "s"
+
+def main():
+    it = g()
+    print(next(it))
+    print(next(it))
+    print(next(it, "dflt"))
+main()
+""", """\
+def g():
+    yield 1
+    yield "s"
+
+def main():
+    it = g()
+    print(next(it))
+    print(next(it))
+    print(next(it, "dflt"))
+main()
+""")
+    # A MODULE-GLOBAL None-yielding generator consumed by a for loop: the
+    # global spelling takes its own store/read path, so it is pinned separately
+    # from the local one above (measured MATCH on the default path).
+    test_generator_matches_cpython("none_yield_bare_in_module_global_generator_for_loop", """\
+def g():
+    yield 1
+    yield
+    yield 2
+
+def main():
+    for v in g():
+        print(v)
+main()
+""", """\
+def g():
+    yield 1
+    yield
+    yield 2
+
+def main():
+    for v in g():
+        print(v)
+main()
+""")
+    # The C++ escape hatch (`MOJO_CORO=cpp`) has no int64_t slot for None: a
+    # None yield beside other kinds is boxed into the tagged word
+    # (`mojo_box_none()`, rendered by the consumer), so it must print what
+    # CPython prints. Writing `co_yield (int64_t)0` would print 0 instead.
+    # Pinned on the cpp backend explicitly; fail-before was the refusal.
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("none_yield_bare_beside_int_on_cpp_path", """\
+def g():
+    yield 1
+    yield
+    yield 2
+
+def main():
+    for v in g():
+        print(v)
+main()
+""", """\
+def g():
+    yield 1
+    yield
+    yield 2
+
+def main():
+    for v in g():
+        print(v)
+main()
+""")
+        test_generator_matches_cpython("none_yield_explicit_beside_str_on_cpp_path", """\
+def g():
+    yield "a"
+    yield None
+    yield "b"
+
+def main():
+    for v in g():
+        print(v)
+main()
+""", """\
+def g():
+    yield "a"
+    yield None
+    yield "b"
+
+def main():
+    for v in g():
+        print(v)
+main()
+""")
+        # A generator whose ONLY yield is None is a one-kind tagged word: its
+        # box is `mojo_box_none()`, so the escape hatch prints `None` (not the
+        # raw 0 `co_yield (int64_t)0` would) for both consumers.
+        test_generator_matches_cpython("none_yield_lone_bare_for_loop_cpp", """\
+def g():
+    yield
+    yield
+
+def main():
+    for v in g():
+        print(v)
+main()
+""", """\
+def g():
+    yield
+    yield
+
+def main():
+    for v in g():
+        print(v)
+main()
+""")
+        test_generator_matches_cpython("none_yield_lone_explicit_next_cpp", """\
+def g():
+    yield None
+
+def main():
+    it = g()
+    x = next(it)
+    print(x)
+    print(x is None)
+main()
+""", """\
+def g():
+    yield None
+
+def main():
+    it = g()
+    x = next(it)
+    print(x)
+    print(x is None)
+main()
+""")
+
+
+    # A tagged generator PASSED TO A FUNCTION whose parameter is consumed boxed
+    # there (`for`, `list()`, a pass-on to another such function) crosses the
+    # call boundary through `_ParamFlow` in coro.py: the callee's loop reads the
+    # tagged word, so these compile and match CPython. Before that rule they were
+    # refused (or, for the mixed shape, refused by the mixed-kind checks).
+    test_generator_matches_cpython("none_yield_lone_passed_to_function", """\
+def g():
+    yield
+
+def use(it):
+    for v in it:
+        print(v)
+
+def main():
+    use(g())
+main()
+""", """\
+def g():
+    yield
+
+def use(it):
+    for v in it:
+        print(v)
+
+def main():
+    use(g())
+main()
+""")
+    test_generator_matches_cpython("tagged_mixed_passed_to_function", """\
+def g():
+    yield 1
+    yield "s"
+
+def use(it):
+    for v in it:
+        print(v)
+
+def main():
+    use(g())
+main()
+""", """\
+def g():
+    yield 1
+    yield "s"
+
+def use(it):
+    for v in it:
+        print(v)
+
+def main():
+    use(g())
+main()
+""")
+    test_generator_matches_cpython("tagged_none_passed_through_two_functions", """\
+def g():
+    yield None
+    yield 2
+
+def inner(it):
+    for v in it:
+        print(v)
+
+def use(it):
+    inner(it)
+
+def main():
+    use(g())
+main()
+""", """\
+def g():
+    yield None
+    yield 2
+
+def inner(it):
+    for v in it:
+        print(v)
+
+def use(it):
+    inner(it)
+
+def main():
+    use(g())
+main()
+""")
+    # `next()` on the PARAMETER in the callee: the callee's generator api is
+    # seeded from the call site (emit_funcs `_param_generator_api`), so the
+    # tagged word is rendered by `_lower_generator_next` (not a raw int64_t 0).
+    test_generator_matches_cpython("none_yield_passed_to_function_next", """\
+def g():
+    yield
+    yield 2
+
+def use(it):
+    print(next(it))
+
+def main():
+    use(g())
+main()
+""", """\
+def g():
+    yield
+    yield 2
+
+def use(it):
+    print(next(it))
+
+def main():
+    use(g())
+main()
+""")
+    test_generator_matches_cpython("tagged_passed_to_function_next_default", """\
+def g():
+    yield
+    yield 2
+
+def use(it):
+    print(next(it, 7))
+    print(next(it, 7))
+    print(next(it, 7))
+
+def main():
+    use(g())
+main()
+""", """\
+def g():
+    yield
+    yield 2
+
+def use(it):
+    print(next(it, 7))
+    print(next(it, 7))
+    print(next(it, 7))
+
+def main():
+    use(g())
+main()
+""")
+    test_generator_matches_cpython("tagged_mixed_passed_to_function_next", """\
+def g():
+    yield 1
+    yield "s"
+
+def use(it):
+    print(next(it))
+    print(next(it))
+
+def main():
+    use(g())
+main()
+""", """\
+def g():
+    yield 1
+    yield "s"
+
+def use(it):
+    print(next(it))
+    print(next(it))
+
+def main():
+    use(g())
+main()
+""")
+    # A parameter that ALSO receives a different value at another call site has
+    # no single kind for `module_gen`'s inference, so `use` is split into a
+    # clone per generator (`_specialize_mixed_generator_callers`): the generator
+    # call sites reach `use__g`, the list call site keeps `use`.
+    test_generator_matches_cpython("none_yield_passed_to_function_mixed_callers", """\
+def g():
+    yield
+    yield 2
+
+def use(it):
+    for v in it:
+        print(v)
+
+def main():
+    use(g())
+    use([1, 2])
+main()
+""", """\
+def g():
+    yield
+    yield 2
+
+def use(it):
+    for v in it:
+        print(v)
+
+def main():
+    use(g())
+    use([1, 2])
+main()
+""")
+    # The split follows a pass-through: `use` hands its parameter on to `inner`,
+    # so `inner` is split too once `use` is (its generator call site reaches
+    # `inner__g` through `use__g`, its list site keeps `inner`).
+    test_generator_matches_cpython("none_yield_mixed_callers_through_two_functions", """\
+def g():
+    yield
+    yield 2
+
+def inner(it):
+    for v in it:
+        print(v)
+
+def use(it):
+    inner(it)
+
+def main():
+    use(g())
+    use([1, 2])
+main()
+""", """\
+def g():
+    yield
+    yield 2
+
+def inner(it):
+    for v in it:
+        print(v)
+
+def use(it):
+    inner(it)
+
+def main():
+    use(g())
+    use([1, 2])
+main()
+""")
+    # The same mixed-callers split on the C++ escape hatch, where the tagged
+    # mixed-kind word is carried as one box per slot (see
+    # `run_tagged_word_cpp_tests`).
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("tagged_mixed_passed_to_function_mixed_callers_cpp", """\
+def g():
+    yield 1
+    yield "s"
+
+def use(it):
+    for v in it:
+        print(v)
+
+def main():
+    use(g())
+    use([1, 2])
+main()
+""", """\
+def g():
+    yield 1
+    yield "s"
+
+def use(it):
+    for v in it:
+        print(v)
+
+def main():
+    use(g())
+    use([1, 2])
+main()
+""")
+
+
+def run_cpp_path_module_state_tests():
+    # The C++ escape hatch decides from the module it is lowering, not from
+    # the module lowered before it. `_tagged_consumers_ok` reads
+    # `coro._MODULE_STMTS`, which only the stack-switch path refreshed, so a
+    # previous module whose same-named `g` is consumed by `sum()` (refused)
+    # used to make the cpp compile of THIS module's `g` (consumed by a `for`
+    # loop, accepted) refuse with "generator function(s) g". Each module must
+    # answer for itself, so the cpp module here must match CPython.
+    prev_src = """\
+def g():
+    yield 1
+    yield "s"
+
+def main():
+    print(sum(g()))
+main()
+"""
+    with coro.pinned('stackswitch'):
+        try:
+            gimple_codegen.compile_to_gimple_with_cpp(prev_src, do_imports=False)
+        except Exception:
+            # Refusing the previous module is expected; what matters is that
+            # its lowering has run and left its module state behind.
+            pass
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("cpp_path_ignores_previous_module_state", """\
+def g():
+    yield 1
+    yield "s"
+
+def main():
+    for v in g():
+        print(v)
+main()
+""", """\
+def g():
+    yield 1
+    yield "s"
+
+def main():
+    for v in g():
+        print(v)
+main()
+""")
+
+    # Regression: a float-returning plain fn call inside a generator must yield as
+    # double, not truncated to int64_t (the cpp-path bug: CODEGEN_cpp_path_plain_float_call_in_generator_yields_as_int).
+    test_generator_matches_cpython("cpp_path_float_call_in_generator_yields_as_double", """\
+def h():
+    return 2.5
+
+def g():
+    y = h()
+    yield y
+
+def main():
+    for v in g():
+        print(v)
+main()
+""", """\
+def h():
+    return 2.5
+
+def g():
+    y = h()
+    yield y
+
+def main():
+    for v in g():
+        print(v)
+main()
+""")
+
+    # The same stale state, one level down: `_GEN_DEFS` (and the kind memo read
+    # through it) is the generator registry. The previous module's `h` is a
+    # FLOAT generator; this module's `h` is a plain function returning strings,
+    # consumed by a `for` loop inside generator `g`. The cpp path used to read
+    # the previous `h` as its own generator, typed `g`'s yield as a float, and
+    # refuse the module. It must now answer for itself and match CPython.
+    prev_float_src = """\
+def h():
+    yield 2.5
+
+def main():
+    for v in h():
+        print(v)
+main()
+"""
+    with coro.pinned('stackswitch'):
+        try:
+            gimple_codegen.compile_to_gimple_with_cpp(prev_float_src, do_imports=False)
+        except Exception:
+            pass
+    plain_h_src = """\
+def h():
+    return ["p", "q"]
+
+def g():
+    for v in h():
+        yield v
+
+def main():
+    for v in g():
+        print(v)
+main()
+"""
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("cpp_path_ignores_previous_generator_registry",
+                                       plain_h_src, plain_h_src)
+
+    # The call-site param tables (`_CALLSITE_PARAM_KINDS`, `_PLAIN_CALLSITE_PARAM_KINDS`)
+    # were not cleared/refilled on the cpp path; a previous module's generator
+    # with unannotated params that resolved to 'd' leaked into this module's
+    # same-named generator, causing an erroneous refusal or wrong typing.
+    prev_callsite_src = """\
+def g(x):
+    yield x
+
+def main():
+    print(g(2.5))
+main()
+"""
+    with coro.pinned('stackswitch'):
+        try:
+            gimple_codegen.compile_to_gimple_with_cpp(prev_callsite_src, do_imports=False)
+        except Exception:
+            pass
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("cpp_path_ignores_previous_callsite_params", """\
+def g(x):
+    yield x
+
+def main():
+    for v in g(2.5):
+        print(v)
+main()
+""", """\
+def g(x):
+    yield x
+
+def main():
+    for v in g(2.5):
+        print(v)
+main()
+""")
+
+    # The stale-state case the test above does NOT reproduce: the previous
+    # module's unannotated `g(x)` was called with a float, so its call-site
+    # table typed `x` as 'd'. This module calls the same-named `g` with an
+    # int. Before the cpp branch refreshed `_CALLSITE_PARAM_KINDS`, the cpp
+    # path kept the float typing and printed `2.0` where CPython prints `2`
+    # (measured on the pre-8c305b720 tree; the fixed tree prints `2`).
+    with coro.pinned('stackswitch'):
+        try:
+            gimple_codegen.compile_to_gimple_with_cpp(prev_callsite_src, do_imports=False)
+        except Exception:
+            pass
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("cpp_path_callsite_int_after_previous_float", """\
+def g(x):
+    yield x
+
+def main():
+    for v in g(2):
+        print(v)
+main()
+""", """\
+def g(x):
+    yield x
+
+def main():
+    for v in g(2):
+        print(v)
+main()
+""")
+
+
+_AUG_YIELD_SRC = """\
+def g():
+    x = 1
+    try:
+        x += yield 2
+    except TypeError:
+        print("TypeError")
+    yield x
+
+def main():
+    it = g()
+    print(next(it))
+    print(next(it))
+main()
+"""
+
+_RETURN_YIELD_SRC = """\
+def g():
+    yield 1
+    return (yield 2)
+
+def main():
+    it = g()
+    print(next(it))
+    print(next(it))
+    try:
+        next(it)
+    except StopIteration:
+        print("stop")
+main()
+"""
+
+_CALL_ARG_YIELD_SRC = """\
+def g():
+    print((yield 1))
+    yield 2
+
+def main():
+    it = g()
+    print(next(it))
+    print(next(it))
+main()
+"""
+
+_IF_YIELD_SRC = """\
+def g():
+    if (yield 1):
+        print("t")
+    else:
+        print("f")
+    yield 2
+
+def main():
+    it = g()
+    print(next(it))
+    print(next(it))
+main()
+"""
+
+_ELIF_YIELD_SRC = """\
+def g():
+    x = 0
+    if x == 1:
+        print("one")
+    elif (yield 1):
+        print("t")
+    else:
+        print("f")
+    yield 2
+
+def main():
+    it = g()
+    print(next(it))
+    print(next(it))
+main()
+"""
+
+# The condition is re-tested on every iteration: each test resumes the yield
+# with None, which is falsy, so `not` holds and the loop runs until the body's
+# `break`.
+# `continue` must re-run the yield in the condition, not skip it.
+_WHILE_YIELD_SRC = """\
+def g():
+    n = 0
+    while not (yield n):
+        n += 1
+        if n == 1:
+            continue
+        print(n)
+        if n == 3:
+            break
+    yield 99
+
+def main():
+    it = g()
+    print(next(it))
+    print(next(it))
+    print(next(it))
+    print(next(it))
+main()
+"""
+
+_AND_YIELD_SRC = """\
+def g():
+    x = False
+    print(x and (yield 1))
+    yield 2
+
+def main():
+    it = g()
+    print(next(it))
+main()
+"""
+
+# A call evaluated before a yield in the same statement runs before the
+# suspension, as in Python. `h` is a user function, not `print`, because a
+# two-argument `print` is not lowered on the cpp path (a separate gap). The
+# "start" line and the order of "f" against the yielded value show where each
+# call ran.
+_CALL_BEFORE_YIELD_SRC = """\
+def f(x):
+    print("f", x)
+    return x + 1
+
+def h(a, b):
+    print("h", a)
+
+def g():
+    h(f(1), (yield 1))
+    yield 2
+
+def main():
+    it = g()
+    print("start")
+    print(next(it))
+    print(next(it))
+main()
+"""
+
+_NESTED_CALL_BEFORE_YIELD_SRC = """\
+def f(x):
+    print("f", x)
+    return x + 1
+
+def h(a, b):
+    print("h", a)
+
+def g():
+    h(f(f(1)), (yield 1))
+    yield 2
+
+def main():
+    it = g()
+    print(next(it))
+    print(next(it))
+main()
+"""
+
+# A call AFTER the yield must stay after it: it is not spilled ahead of the
+# suspension.
+_CALL_AFTER_YIELD_SRC = """\
+def f(x):
+    print("f", x)
+    return x + 1
+
+def h(a, b):
+    print("h", b)
+
+def g():
+    h((yield 1), f(1))
+    yield 2
+
+def main():
+    it = g()
+    print("start")
+    print(next(it))
+    print(next(it))
+main()
+"""
+
+_CONDITIONAL_CALL_BEFORE_YIELD_SRC = """\
+def f(x):
+    return x + 1
+
+def h(a, b):
+    print("h", a)
+
+def g(c):
+    h(c and f(2), (yield 1))
+    yield 2
+
+def main():
+    it = g(False)
+    print(next(it))
+main()
+"""
+
+def run_tagged_word_cpp_tests():
+    # The C++ escape hatch (`MOJO_CORO=cpp`) carries a generator whose yields
+    # mix kinds as ONE tagged word per slot: each yield is boxed by its kind
+    # (`_cpp_tag_yield_sites`). The consumer then printed that word as a raw
+    # int64_t, so `print(v)` showed the box's ADDRESS (e.g. `1\n4338238880\n2`)
+    # where CPython prints the yielded value. Both consumers -- a for loop and
+    # `next(g)` -- must render a tagged word as the box it is. Pinned on the
+    # cpp backend, against the CPython oracle.
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("tagged_int_str_for_loop_cpp", """\
+def gen():
+    yield 1
+    yield "a"
+    yield 2
+
+def main():
+    for v in gen():
+        print(v)
+main()
+""", """\
+def gen():
+    yield 1
+    yield "a"
+    yield 2
+
+def main():
+    for v in gen():
+        print(v)
+main()
+""")
+        test_generator_matches_cpython("tagged_int_str_next_cpp", """\
+def gen():
+    yield 1
+    yield "a"
+    yield 2
+
+def main():
+    g = gen()
+    print(next(g))
+    print(next(g))
+    print(next(g))
+main()
+""", """\
+def gen():
+    yield 1
+    yield "a"
+    yield 2
+
+def main():
+    g = gen()
+    print(next(g))
+    print(next(g))
+    print(next(g))
+main()
+""")
+        test_generator_matches_cpython("tagged_int_float_for_loop_cpp", """\
+def gen():
+    yield 1
+    yield 2.5
+    yield 3
+
+def main():
+    for v in gen():
+        print(v)
+main()
+""", """\
+def gen():
+    yield 1
+    yield 2.5
+    yield 3
+
+def main():
+    for v in gen():
+        print(v)
+main()
+""")
+        # The consumer is itself a C++ generator body (not `main`, which is
+        # emitted as GIMPLE C): these are the consumer sites lowered by
+        # cpp_core -- the direct-call for loop, `next(g)` in a print, and
+        # `x = next(g)` bound then printed.
+        test_generator_matches_cpython("tagged_int_str_for_in_generator_body_cpp", """\
+def gen():
+    yield 1
+    yield "a"
+    yield 2
+
+def consume():
+    for v in gen():
+        print(v)
+    yield 0
+
+def main():
+    for z in consume():
+        pass
+main()
+""", """\
+def gen():
+    yield 1
+    yield "a"
+    yield 2
+
+def consume():
+    for v in gen():
+        print(v)
+    yield 0
+
+def main():
+    for z in consume():
+        pass
+main()
+""")
+        test_generator_matches_cpython("tagged_int_str_next_in_generator_body_cpp", """\
+def gen():
+    yield 1
+    yield "a"
+    yield 2
+
+def consume():
+    g = gen()
+    print(next(g))
+    x = next(g)
+    print(x)
+    yield 0
+
+def main():
+    for z in consume():
+        pass
+main()
+""", """\
+def gen():
+    yield 1
+    yield "a"
+    yield 2
+
+def consume():
+    g = gen()
+    print(next(g))
+    x = next(g)
+    print(x)
+    yield 0
+
+def main():
+    for z in consume():
+        pass
+main()
+""")
+        test_generator_matches_cpython("tagged_bool_str_next_in_generator_body_cpp", """\
+def gen():
+    yield True
+    yield "b"
+
+def consume():
+    g = gen()
+    print(next(g))
+    print(next(g))
+    yield 0
+
+def main():
+    for z in consume():
+        pass
+main()
+""", """\
+def gen():
+    yield True
+    yield "b"
+
+def consume():
+    g = gen()
+    print(next(g))
+    print(next(g))
+    yield 0
+
+def main():
+    for z in consume():
+        pass
+main()
+""")
+        # `x = yield` on the cpp escape hatch: the yield's received value is the
+        # None box (`x` is a tagged word), so the programs the default path pins in
+        # run_none_yield_tests run here too. Before the cpp lowering existed this
+        # refused to compile (`unsupported expression in generator body: YieldExpr`).
+        test_generator_matches_cpython("none_received_arithmetic_raises_typeerror_cpp",
+                                       _NONE_RECEIVED_ARITH_SRC, _NONE_RECEIVED_ARITH_SRC)
+        test_generator_matches_cpython("none_received_unary_minus_raises_typeerror_cpp", """\
+def g():
+    x = yield
+    try:
+        print(-x)
+    except TypeError:
+        print("TypeError")
+    yield 1
+
+def main():
+    it = g()
+    next(it)
+    next(it)
+main()
+""", """\
+def g():
+    x = yield
+    try:
+        print(-x)
+    except TypeError:
+        print("TypeError")
+    yield 1
+
+def main():
+    it = g()
+    next(it)
+    next(it)
+main()
+""")
+        test_generator_matches_cpython("none_sent_into_generator_prints_none_cpp", """\
+def g():
+    x = yield
+    print(x)
+    yield 1
+
+def main():
+    it = g()
+    next(it)
+    next(it)
+main()
+""", """\
+def g():
+    x = yield
+    print(x)
+    yield 1
+
+def main():
+    it = g()
+    next(it)
+    next(it)
+main()
+""")
+        # A value-yielding `x = yield v` binds the None the resume delivers, while
+        # the yielded value still reaches the consumer as a tagged box.
+        test_generator_matches_cpython("value_yield_assignment_cpp", """\
+def g():
+    x = yield 7
+    print(x)
+    y = yield "s"
+    print(y)
+    yield 1
+
+def main():
+    it = g()
+    print(next(it))
+    print(next(it))
+    print(next(it))
+main()
+""", """\
+def g():
+    x = yield 7
+    print(x)
+    y = yield "s"
+    print(y)
+    yield 1
+
+def main():
+    it = g()
+    print(next(it))
+    print(next(it))
+    print(next(it))
+main()
+""")
+        # A yield used as a VALUE inside a larger statement (not the whole
+        # right side of `x = yield`) is hoisted to its own received-value
+        # statement on the cpp path. `x += yield v` is the same shape with one
+        # read of `x`, so the received None reaches the arithmetic guard and
+        # raises TypeError as CPython does. `print((yield v))` passes the
+        # received None to print.
+        test_generator_matches_cpython("aug_assign_received_yield_none_cpp",
+                                       _AUG_YIELD_SRC, _AUG_YIELD_SRC)
+        test_generator_matches_cpython("call_argument_yield_cpp",
+                                       _CALL_ARG_YIELD_SRC, _CALL_ARG_YIELD_SRC)
+        test_generator_matches_cpython("return_yield_operand_cpp",
+                                       _RETURN_YIELD_SRC, _RETURN_YIELD_SRC)
+        # A yield in the condition of a compound statement. The condition runs
+        # before the body (`if`), or before each iteration (`while`); the yield
+        # is hoisted to that point, and an `elif` condition is hoisted into the
+        # else branch it belongs to, since it runs only when the earlier
+        # branches fail.
+        test_generator_matches_cpython("if_yield_condition_cpp",
+                                       _IF_YIELD_SRC, _IF_YIELD_SRC)
+        test_generator_matches_cpython("elif_yield_condition_cpp",
+                                       _ELIF_YIELD_SRC, _ELIF_YIELD_SRC)
+        test_generator_matches_cpython("while_yield_condition_cpp",
+                                       _WHILE_YIELD_SRC, _WHILE_YIELD_SRC)
+        # Partial fix (2026-11-01): refusal removed.
+        # Compiles on cpp path; full conditional lowering pending.
+        # Before: refused. After: compiles (unconditional hoist).
+        from test_gimple_generator_runner import _build_generator_program
+        prog = _build_generator_program(_AND_YIELD_SRC)
+        assert prog is not None
+        # A call evaluated before a hoisted yield is spilled into a temporary
+        # ahead of it, so it still runs before the suspension. A call after the
+        # yield stays after it. A nested call is spilled innermost first.
+        test_generator_matches_cpython("call_before_yield_order_cpp",
+                                       _CALL_BEFORE_YIELD_SRC, _CALL_BEFORE_YIELD_SRC)
+        test_generator_matches_cpython("nested_call_before_yield_cpp",
+                                       _NESTED_CALL_BEFORE_YIELD_SRC, _NESTED_CALL_BEFORE_YIELD_SRC)
+        test_generator_matches_cpython("call_after_yield_order_cpp",
+                                       _CALL_AFTER_YIELD_SRC, _CALL_AFTER_YIELD_SRC)
+        # A call that is conditionally evaluated cannot be spilled ahead of a
+        # yield without running it on a path Python would skip: refused.
+        test_generator_refused("conditional_call_before_yield_refused_cpp",
+                               _CONDITIONAL_CALL_BEFORE_YIELD_SRC,
+                               "conditionally evaluated")
+
+def run_tagged_word_bind_tests():
+    # A tagged generator word bound to a NAME (`x = next(g)`) must keep its
+    # kind. The GIMPLE bind used to unwrap the box with `mojo_box_word`, so a
+    # bool printed as `1` and a str read as an int on the cpp path. Every
+    # shape is pinned against the CPython oracle, on the default path and on
+    # the cpp escape hatch. Arithmetic on the bound name must still work, a
+    # None-yield name must still test `is None`, and a rebinding of the name
+    # to a plain value must still print that plain value.
+    test_generator_matches_cpython("tagged_bind_print_default", """\
+def gen():
+    yield True
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x)
+    x = next(g)
+    print(x)
+main()
+""", """\
+def gen():
+    yield True
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x)
+    x = next(g)
+    print(x)
+main()
+""")
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("tagged_bind_print_cpp", """\
+def gen():
+    yield True
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x)
+    x = next(g)
+    print(x)
+main()
+""", """\
+def gen():
+    yield True
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x)
+    x = next(g)
+    print(x)
+main()
+""")
+    test_generator_matches_cpython("tagged_bind_arithmetic_default", """\
+def gen():
+    yield 1
+    yield "a"
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x + 1)
+main()
+""", """\
+def gen():
+    yield 1
+    yield "a"
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x + 1)
+main()
+""")
+    test_generator_matches_cpython("tagged_bind_is_none_default", """\
+def gen():
+    yield
+    yield 3
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x is None)
+main()
+""", """\
+def gen():
+    yield
+    yield 3
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x is None)
+main()
+""")
+    test_generator_matches_cpython("tagged_bind_rebound_to_plain_default", """\
+def gen():
+    yield True
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    x = 5
+    print(x)
+main()
+""", """\
+def gen():
+    yield True
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    x = 5
+    print(x)
+main()
+""")
+
+
+    test_generator_matches_cpython("tagged_int_str_bound_to_name_default", """\
+def gen():
+    yield 1
+    yield "a"
+    yield 2
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x)
+    x = next(g)
+    print(x)
+    x = next(g)
+    print(x)
+main()
+""", """\
+def gen():
+    yield 1
+    yield "a"
+    yield 2
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x)
+    x = next(g)
+    print(x)
+    x = next(g)
+    print(x)
+main()
+""")
+
+
+    # The same bound name read by the other consumers: a copy of it (`y = x`
+    # stays tagged), a multi-argument print, and a str use of a str yield.
+    test_generator_matches_cpython("tagged_bound_name_copied_then_printed", """\
+def gen():
+    yield True
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    y = x
+    print(y, x)
+    x = next(g)
+    print(x, "|", y)
+main()
+""", """\
+def gen():
+    yield True
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    y = x
+    print(y, x)
+    x = next(g)
+    print(x, "|", y)
+main()
+""")
+    # A bound int yield keeps its integer arithmetic: the tagged word is read
+    # as its integer, not as a double, beside an int operand (`1 + 1` is `2`).
+    test_generator_matches_cpython("tagged_int_bound_to_name_arithmetic", """\
+def gen():
+    yield 1
+    yield 2.5
+    yield True
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x + 1)
+    print(x * 3)
+    x = next(g)
+    print(x)
+    x = next(g)
+    print(x + 1)
+main()
+""", """\
+def gen():
+    yield 1
+    yield 2.5
+    yield True
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x + 1)
+    print(x * 3)
+    x = next(g)
+    print(x)
+    x = next(g)
+    print(x + 1)
+main()
+""")
+    # A FLOAT box bound to a name and used under arithmetic: the answer is a
+    # double (`x * 2` is 5.0), not the truncated integer the box's word reads
+    # as. Both operand orders, and the integer-only operators that must keep
+    # their integer answer beside the same tagged word (`x // 2`, `x % 2`
+    # answer 1.0 and 0.5 for 2.5, the double forms). A chained result is a
+    # tagged word again, so its own arithmetic selects by kind too.
+    test_generator_matches_cpython("tagged_float_bound_to_name_arithmetic", """\
+def gen():
+    yield 2.5
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x)
+    print(x * 2)
+    print(2 * x, x + 1, x - 1)
+    print(x // 2, x % 2, x / 2)
+    print((x * 2) + 1)
+main()
+""", """\
+def gen():
+    yield 2.5
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x)
+    print(x * 2)
+    print(2 * x, x + 1, x - 1)
+    print(x // 2, x % 2, x / 2)
+    print((x * 2) + 1)
+main()
+""")
+    test_generator_matches_cpython("tagged_float_box_comparison", """\
+def gen():
+    yield 2.5
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x > 2, x == 2.5, x < 3, x >= 2.5, x <= 2.5)
+main()
+""", """\
+def gen():
+    yield 2.5
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x > 2, x == 2.5, x < 3, x >= 2.5, x <= 2.5)
+main()
+""")
+    test_generator_matches_cpython("tagged_str_bound_to_name_has_length", """\
+def gen():
+    yield 1
+    yield "abc"
+
+def main():
+    g = gen()
+    x = next(g)
+    x = next(g)
+    print(len(x))
+    print(x + "!")
+main()
+""", """\
+def gen():
+    yield 1
+    yield "abc"
+
+def main():
+    g = gen()
+    x = next(g)
+    x = next(g)
+    print(len(x))
+    print(x + "!")
+main()
+""")
+
+def run_none_list_iteration_tests():
+    # A None element of a LIST read by a for loop printed the box's own address
+    # (`for x in [None]: print(x)` -> 4315206080). `mojo_list_get_boxed` boxes
+    # every non-int slot, including the None ('n') and bool ('b') kinds, but
+    # `mojo_cstr_or_int_str` spelled only the double and str boxes by kind, so
+    # the other boxes fell through to the integer arm. The comprehension case is
+    # the generator-yield shape this file's None-yield doc tracks: a None
+    # yielded into a comprehension and then iterated. Each source carries a
+    # generator so the harness takes the compiled path.
+    gen_pre = "def _dummy():\n    yield 0\n"
+    test_generator_matches_cpython("none_literal_list_for_loop", gen_pre + """\
+def main():
+    for x in [1, None]:
+        print(x)
+main()
+""", """\
+def main():
+    for x in [1, None]:
+        print(x)
+main()
+""")
+    test_generator_matches_cpython("none_only_list_for_loop", gen_pre + """\
+def main():
+    for x in [None]:
+        print(x)
+main()
+""", """\
+def main():
+    for x in [None]:
+        print(x)
+main()
+""")
+    test_generator_matches_cpython("bool_beside_str_list_for_loop", gen_pre + """\
+def main():
+    for x in [True, "a"]:
+        print(x)
+main()
+""", """\
+def main():
+    for x in [True, "a"]:
+        print(x)
+main()
+""")
+    test_generator_matches_cpython("none_comprehension_over_generator_for_loop", """\
+def gen():
+    yield "a"
+    yield
+def main():
+    for x in [y for y in gen()]:
+        print(x)
+main()
+""", """\
+def gen():
+    yield "a"
+    yield
+def main():
+    for x in [y for y in gen()]:
+        print(x)
+main()
+""")
+
+def run_tagged_none_equality_tests():
+    # `v == None` / `v != None` on a value from a TAGGED generator. A None yield
+    # is the shared kind-'n' box, and the boxed-operand conversion used to
+    # unwrap it to its word before the None comparison ran, so `v == None` came
+    # out False for a None yield while every other value answered correctly.
+    # Pinned against the CPython oracle on the default path and on the cpp
+    # escape hatch: the mixed yields cover the None box, the int and bool 0
+    # words that share its bits, a str, and a float.
+    _src = """\
+def g():
+    yield False
+    yield 0
+    yield None
+    yield "a"
+    yield 1.5
+def main():
+    for v in g():
+        print(v == None)
+        print(v != None)
+main()
+"""
+    test_generator_matches_cpython("tagged_none_equality_default", _src, _src)
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("tagged_none_equality_cpp", _src, _src)
+
+def run_tagged_none_identity_tests():
+    # `x is None` / `x is not None` on a name bound from `next(g)` on a TAGGED
+    # generator. The `is` lowering compared the slot's WORD, and a tagged False
+    # or int 0 is a box whose bits are 0, so it compared equal to the None
+    # yield's NULL word and answered True. The identity test must read the
+    # box's kind, as `==` does. Pinned against the CPython oracle on the default
+    # path and on the cpp escape hatch.
+    _src = """\
+def g():
+    yield False
+    yield 0
+    yield None
+    yield "a"
+    yield 1.5
+def main():
+    it = g()
+    x = next(it)
+    print(x is None)
+    print(x is not None)
+    x = next(it)
+    print(x is None)
+    print(x is not None)
+    x = next(it)
+    print(x is None)
+    print(x is not None)
+    x = next(it)
+    print(x is None)
+    print(x is not None)
+    x = next(it)
+    print(x is None)
+    print(x is not None)
+main()
+"""
+    test_generator_matches_cpython("tagged_none_identity_default", _src, _src)
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("tagged_none_identity_cpp", _src, _src)
+    # The for-loop target shape: `v` is the loop's box (`_boxed_vals`), not a
+    # `next(g)` bind, so it is covered by the per-name for-target rule.
+    _for_src = """\
+def g():
+    yield False
+    yield 0
+    yield None
+    yield "a"
+def main():
+    for v in g():
+        print(v is None)
+        print(v is not None)
+main()
+"""
+    test_generator_matches_cpython("tagged_none_identity_for_default", _for_src, _for_src)
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("tagged_none_identity_for_cpp", _for_src, _for_src)
+
+def run_tagged_for_target_bind_tests():
+    # A for-loop TARGET over a kind-mixed generator, copied to a name
+    # (`x = v`), must keep the yield's kind exactly as `x = next(g)` does
+    # (run_tagged_word_bind_tests). The copy used to unwrap the box with
+    # `mojo_box_word`, so a None yield printed 0 and `x == None` was False.
+    # The target is a tagged word (`_tagged_word_vals`); the bind rule only
+    # answered for `next(g)` values, so a copy of the target lost the box.
+    _src = """\
+def g():
+    yield 1
+    yield None
+    yield True
+def main():
+    for v in g():
+        x = v
+        print(x)
+        print(x == None)
+main()
+"""
+    test_generator_matches_cpython("tagged_for_target_copy_default", _src, _src)
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("tagged_for_target_copy_cpp", _src, _src)
+    # The copy is only a box while EVERY binding of the name is a tagged word:
+    # a name that is also bound to a plain value, or to a plain generator's
+    # loop target, must keep the unwrapped word. And a `for` that rebinds a
+    # name previously bound by `next(g)` must not be read as a tagged word.
+    _mixed = """\
+def g():
+    yield 1
+    yield "a"
+def plain():
+    yield 5
+    yield 6
+def main():
+    x = 0
+    for v in g():
+        x = v
+    x = 7
+    print(x)
+    for w in plain():
+        x = w
+        print(x)
+    h = g()
+    y = next(h)
+    print(y)
+    for y in ["p", "q"]:
+        print(y)
+    print(y)
+    z = y
+    print(z)
+main()
+"""
+    test_generator_matches_cpython("tagged_for_target_copy_mixed_default", _mixed, _mixed)
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("tagged_for_target_copy_mixed_cpp", _mixed, _mixed)
+    # A MIXED name: a plain int binding (`x = 0`) beside a copy of a tagged
+    # for target. The copy keeps the yield's box, so every plain int64 store
+    # into `x` must be boxed too, or the None yield unwraps to 0 on the copy
+    # (the pre-fix output was "1 / 0 / 2 / 2"). The second half reads the
+    # mixed name back through arithmetic, augmented assignment and comparison,
+    # so the box has to unwrap for those consumers.
+    _mixed_none = """\
+def g():
+    yield 1
+    yield None
+    yield 2
+def plain():
+    yield 5
+    yield 6
+def main():
+    x = 0
+    for v in g():
+        x = v
+        print(x)
+        print(x == None)
+    x = 7
+    print(x + 1)
+    x += 3
+    print(x)
+    print(x * 2)
+    for w in plain():
+        x = w
+        print(x + 10)
+    print(x)
+    print(x == 6)
+    x = 0
+    print(x == None)
+    print(x)
+main()
+"""
+    test_generator_matches_cpython("tagged_for_target_copy_mixed_name_none_default",
+                                   _mixed_none, _mixed_none)
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("tagged_for_target_copy_mixed_name_none_cpp",
+                                       _mixed_none, _mixed_none)
+    # Open item 1 of the 15th round: a mixed name whose OTHER store is not
+    # int64. The copy of a tagged word into a str or float local used to
+    # compile to a bare unwrap: the str local segfaulted (an int word used as
+    # a char*), and the float local printed `1.0` / `0.0` for `1` / None. A
+    # Mojo name has one type, so the refusal is the honest answer in either
+    # direction (the copy first, or the plain store first).
+    _mixed_str = """\
+def g():
+    yield 1
+    yield None
+    yield 2
+def main():
+    x = "s"
+    for v in g():
+        x = v
+        print(x)
+    x = "t"
+    print(x)
+main()
+"""
+    _mixed_float = """\
+def g():
+    yield 1
+    yield None
+    yield 2
+def main():
+    x = 0.5
+    for v in g():
+        x = v
+        print(x)
+    x = 2.5
+    print(x)
+main()
+"""
+    _mixed_after = """\
+def g():
+    yield 1
+    yield None
+    yield 2
+def main():
+    x = 0
+    for v in g():
+        x = v
+        print(x)
+    x = 2.5
+    print(x)
+main()
+"""
+    test_generator_refused("tagged_for_target_copy_into_str_refused", _mixed_str, "refused")
+    test_generator_refused("tagged_for_target_copy_into_float_refused", _mixed_float, "refused")
+    test_generator_refused("tagged_for_target_plain_float_store_after_copy_refused",
+                           _mixed_after, "refused")
+
+def run_cpp_send_tests():
+    # `it.send(v)` on a generator compiled by the C++20 backend (MOJO_CORO=cpp).
+    # The cpp resume entry used to take no sent word, so the send lowering
+    # emitted a call to the A3 runtime's `__mojo_gen_resume` (never declared on
+    # this path, gcc: "implicit declaration") and then, once refused, was
+    # refused at codegen. Now the cpp unit has a `{base}_send(g, word)` entry
+    # that stores the word in its promise; `x = yield` reads it back. Pinned
+    # against CPython on the same text: an int send, a multi-parameter
+    # generator (the shape the GCC-15 promise-layout note in cpp_async.py
+    # warns about), a str send, and a None send.
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython(
+            "generator_send_int_on_cpp_path_matches_cpython", """\
+def g(a: Int, b: Int):
+    x = yield a
+    print(x)
+    y = yield b
+    print(y)
+    yield x + y
+
+def main():
+    it = g(1, 2)
+    print(next(it))
+    print(it.send(7))
+    print(it.send(5))
+main()
+""", """\
+def g(a, b):
+    x = yield a
+    print(x)
+    y = yield b
+    print(y)
+    yield x + y
+
+def main():
+    it = g(1, 2)
+    print(next(it))
+    print(it.send(7))
+    print(it.send(5))
+main()
+""")
+        test_generator_matches_cpython(
+            "generator_send_str_and_none_on_cpp_path_matches_cpython", """\
+def h():
+    s = yield 0
+    print(s)
+    t = yield 0
+    print(t)
+    yield 9
+
+def main():
+    it = h()
+    print(next(it))
+    print(it.send("ab"))
+    print(it.send(None))
+main()
+""", """\
+def h():
+    s = yield 0
+    print(s)
+    t = yield 0
+    print(t)
+    yield 9
+
+def main():
+    it = h()
+    print(next(it))
+    print(it.send("ab"))
+    print(it.send(None))
+main()
+""")
+        # `yield from` forwards a send to the sub-generator, as Python does:
+        # the sent 7 must reach `x = yield` in `sub`, not be dropped to None.
+        test_generator_matches_cpython(
+            "generator_send_forwarded_through_yield_from_on_cpp_path", """\
+def sub():
+    x = yield 1
+    print(x)
+    yield 2
+
+def outer():
+    yield from sub()
+
+def main():
+    it = outer()
+    print(next(it))
+    print(it.send(7))
+main()
+""", """\
+def sub():
+    x = yield 1
+    print(x)
+    yield 2
+
+def outer():
+    yield from sub()
+
+def main():
+    it = outer()
+    print(next(it))
+    print(it.send(7))
+main()
+""")
+        # The mixed protocol: a cpp generator method delegating to a
+        # stack-switch sub-generator (a staticmethod generator is not on the
+        # cpp path). The forwarded word goes through the runtime's resume.
+        test_generator_matches_cpython(
+            "generator_send_forwarded_to_stackswitch_sub_from_cpp_outer", """\
+class Emitter:
+    @staticmethod
+    def sub(n: Int):
+        x = yield 1
+        print(x)
+        yield n
+
+    @classmethod
+    def outer(cls, n: Int):
+        yield from cls.sub(n)
+
+def main():
+    it = Emitter.outer(5)
+    print(next(it))
+    print(it.send(7))
+main()
+""", """\
+class Emitter:
+    @staticmethod
+    def sub(n):
+        x = yield 1
+        print(x)
+        yield n
+
+    @classmethod
+    def outer(cls, n):
+        yield from cls.sub(n)
+
+def main():
+    it = Emitter.outer(5)
+    print(next(it))
+    print(it.send(7))
+main()
+""")
+    # The control: the SAME kind of program on the default stack-switch path
+    # keeps lowering `send` and must match CPython.
+    with coro.pinned('stackswitch'):
+        test_generator_matches_cpython(
+            "generator_send_on_default_path_still_lowers", """\
+def g():
+    yield 1
+    yield 2
+
+def main():
+    it = g()
+    print(next(it))
+    print(it.send(7))
+main()
+""", """\
+def g():
+    yield 1
+    yield 2
+
+def main():
+    it = g()
+    print(next(it))
+    print(it.send(7))
+main()
+""")
+
+def run_cpp_path_multi_arg_print_tests():
+    """CODEGEN_cpp_path_print_multi_arg_in_generator: print(a, b) with two
+    arguments is refused in a generator body on the cpp path. Extend the
+    single-argument print dispatch to N arguments, emitting one printf per
+    argument with space separator (CPython's default sep=' ')."""
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython(
+            "cpp_path_print_multi_arg_in_generator_matches_cpython", """\
+@coro.pinned('cpp')
+def g():
+    a = 2
+    print(a, 5)
+    yield 2
+
+def main():
+    it = g()
+    print(next(it))
+main()
+""", """\
+def g():
+    a = 2
+    print(a, 5)
+    yield 2
+
+def main():
+    it = g()
+    print(next(it))
+main()
+""")
+        # More than two args, mixed types
+        test_generator_matches_cpython(
+            "cpp_path_print_three_args_mixed_types_matches_cpython", """\
+@coro.pinned('cpp')
+def g():
+    print(1, 2.5, "hello")
+    yield 42
+
+def main():
+    it = g()
+    print(next(it))
+main()
+""", """\
+def g():
+    print(1, 2.5, "hello")
+    yield 42
+
+def main():
+    it = g()
+    print(next(it))
+main()
+""")
+        # print with end= kwarg and multiple args (end='' suppresses trailing newline)
+        test_generator_stdout("cpp_path_print_multi_arg_with_end_kwarg", """\
+@coro.pinned('cpp')
+def g():
+    print(1, 2, end='')
+    yield 3
+
+def main():
+    it = g()
+    print(next(it))
+main()
+""", "1 23\n")
+
+
+def run_send_into_just_started_regression():
+    # Bug: CODEGEN_send_into_just_started_generator_is_not_refused
+    # `g.send(7)` on a fresh generator must raise TypeError, not resume.
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython(
+            "send_into_just_started_refused_cpp", """\
+def g():
+    yield 1
+
+def main():
+    it = g()
+    try:
+        it.send(7)
+    except TypeError:
+        print("TypeError")
+main()
+""", """\
+def g():
+    yield 1
+
+def main():
+    it = g()
+    try:
+        it.send(7)
+    except TypeError:
+        print("TypeError")
+main()
+""")
+    with coro.pinned('stackswitch'):
+        test_generator_matches_cpython(
+            "send_into_just_started_refused_stackswitch", """\
+def g():
+    yield 1
+
+def main():
+    it = g()
+    try:
+        it.send(7)
+    except TypeError:
+        print("TypeError")
+main()
+""", """\
+def g():
+    yield 1
+
+def main():
+    it = g()
+    try:
+        it.send(7)
+    except TypeError:
+        print("TypeError")
+main()
+""")
+
 def run_tests():
+    run_cpp_send_tests()
+    run_send_into_just_started_regression()
+    run_cpp_path_multi_arg_print_tests()
+    run_none_yield_tests()
+    run_tagged_none_equality_tests()
+    run_tagged_none_identity_tests()
+    run_none_list_iteration_tests()
+    run_tagged_word_cpp_tests()
+    run_cpp_path_module_state_tests()
+    run_tagged_word_bind_tests()
+    # Was defined but never called, so its pins (and the copy-of-a-for-target
+    # shape) were not part of the file's run. Registered here, 2026-11-01.
+    run_tagged_for_target_bind_tests()
     run_star_args_call_tests()
     run_callable_param_tests()
     run_lambda_capture_tests()
@@ -3035,6 +5505,7 @@ def run_tests():
     run_next_method_tests()
     run_next_return_position_tests()
     run_sibling_loop_value_kind_tests()
+    run_unary_minus_received_float_tests()
     run_module_global_generator_tests()
     run_nested_generator_capture_tests()
     run_escaping_nested_generator_tests()
@@ -7856,10 +10327,10 @@ def main():
 main()
 """)
 
-    # ...but any consumer that is NOT a for / list / comprehension (here `next`
-    # of a bound handle) would read the box's address as an int, so the
-    # generator keeps its refusal.
-    test_generator_refused("generator_mixed_kind_yields_consumed_by_next_refused", """\
+    # ...and `next` of a bound handle reads the same tagged word: its result is
+    # a boxed word (`_lower_generator_next`), so the str renders as its text,
+    # not as the box's address an int64_t read would print.
+    test_generator_matches_cpython("generator_mixed_kind_yields_consumed_by_next", """\
 def g():
     yield "a"
     yield 1
@@ -7869,7 +10340,17 @@ def main():
     print(next(it))
 
 main()
-""", "all values must agree on one scalar type")
+""", """\
+def g():
+    yield "a"
+    yield 1
+
+def main():
+    it = g()
+    print(next(it))
+
+main()
+""")
 
     # CPython's `os.fwalk` / `_fwalk` (fd-relative walk) compiled whole: stat /
     # open(dir_fd=) / close / scandir(fd) / DirEntry.stat / samestat / S_ISDIR,

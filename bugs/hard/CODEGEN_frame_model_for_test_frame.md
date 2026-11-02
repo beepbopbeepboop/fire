@@ -84,3 +84,84 @@ epilogue emission in `emit_funcs.py`, the per-statement line store in `emit_stmt
 printing `sys._getframe(0..2).f_code.co_name` and `f_lineno`, run-compared with CPython (the
 `test_interp_oracle.py` pattern), plus one program with no frame use whose `.ci` must `cmp` identical to
 master's.
+
+## Status (2026-11-01) — stage 1 LANDED: shadow frame stack for sys._getframe / f_back / f_lineno / f_code.co_name
+
+Implemented the design above, first slice, for plain functions and methods of any module that says `_getframe`:
+
+- **Runtime** (`runtime/fire_runtime.[ch]`, "Python-level frames"): a frame stack of `{name, file, firstlineno, lineno}`;
+  `mojo_frame_enter/leave/set_line`, `mojo_getframe(depth)` (raises `ValueError: call stack is not deep enough`), and
+  `mojo_frame_back/lineno/firstlineno/name/file`. A frame "object" is a word (its 1-based stack index, 0 is None). Enter pushes a
+  `MOJO_CLEANUP_FRAME` record on the existing cleanup stack, so an exception unwinding past a frame pops it too (exact pairing with
+  `mojo_frame_leave`, same discipline as the class-attribute cell records).
+- **Compiler**: `module_gen` marks a module that mentions `_getframe` (`gen._frames_mods`); `emit_methods._frame_enter` runs before
+  `_cattr_restore_begin` and `_frame_leave` rides `_cattr_leave` (every `return`, and fall-off-the-end); `emit_stmts.gen_stmt` sets
+  the line per statement; `emit_methods._lower_method_call` lowers `sys._getframe(n)`; `emit_exprs._lower_MemberExpr` lowers
+  `f_code`/`f_back`/`f_lineno`/`co_name`/`co_qualname`/`co_filename`/`co_firstlineno`; `resolve_shared._quick_type` types the string
+  attributes. A module that never says `_getframe` emits nothing new: `compile_stdlib.py` GCC CAS 610/610 with the compiler change
+  reversed (generated C unchanged for every stdlib module).
+- **Tests**: `gimple_sys_getframe_names_lines_and_callers` (test_gimple_runner.py: names, lines, callers through a raise/catch, recursion,
+  branches that return from two places) matches CPython; `test_selfhost.py` 3/3.
+
+**Not done (stage 2+)**: the `<module>` frame (module-level code is not a frame, so a walk up `f_back` ends one frame earlier than
+CPython); generators/coroutines (`gi_frame`, `f_generator`, `cr_frame`; their frames are not pushed); exception tracebacks
+(`__traceback__`, `tb_frame`, `tb_next`: `mojo_raise` does not snapshot the chain yet); `frame.clear()` and its executing/suspended
+checks; a frame word kept past its function's return (it names whatever frame reuses the slot); a read-only `f_locals` snapshot;
+frames in modules that do not themselves mention `_getframe` (their functions are invisible, like C frames in CPython).
+Next step: the exception snapshot (heap frame records captured in `mojo_raise`, attached as `__traceback__`), which `tb_frame`,
+`tb_next`, `tb_lineno` and test_frame's `clear()` cases need.
+
+## Status (2026-11-01, later) — stage 2 LANDED: tracebacks and the `<module>` frame
+
+- **`<module>` is a frame** (`emit_methods._frame_enter_module`, emitted around `_gen_toplevel`'s statements), so a walk up `f_back` or a
+  traceback ends where CPython's does.
+- **Tracebacks**: `mojo_raise` snapshots the live frame stack once per exception (keyed by the exception's message/object pointers, so a bare
+  `raise` keeps the original), before the unwind pops it. `e.__traceback__` lowers to `mojo_traceback(<current depth>)`, which builds the
+  chain from the catching frame down to the raising one; `tb_frame`, `tb_next`, `tb_lineno` read an entry, and the heap snapshot records
+  are valid frames for `f_code`/`f_lineno`/`f_back`. Test `gimple_traceback_chain_names_and_lines` matches CPython (names and lines through
+  a re-raise).
+- **Statement lines**: the parser built `if`/`while`/`raise`/`def`/... with `line=0`, so those statements carried no line (neither for
+  `f_lineno` nor for the `#line` directives of the generated C). `Parser._parse_stmt_into` now stamps the line the statement starts on
+  (`_stamp_stmt_line`). This is global: every module's C gains `#line` directives for those statements (semantics unchanged;
+  `compile_stdlib.py` 0 failed, `test_selfhost` 3/3, `test_gimple.py` 421 pass with the same 2 failures as before).
+
+Still open: generator/coroutine frames (`gi_frame`, `f_generator`, `cr_frame`, the suspended/executing flags `frame.clear()` checks),
+`frame.clear()` itself, `__traceback__` on an exception object other than the one currently handled (it reads the last snapshot),
+`f_locals`, `f_trace`, and instrumented-module-only visibility (a module that never mentions `_getframe`/`__traceback__`/`tb_frame`/`f_back`/
+`f_lineno` has no frames). Run `Lib/test/test_frame.py` through the compiler next to see which of its cases now compile and which refusal is first.
+
+## Status (2026-11-01, stage 3 first slice): a suspended generator no longer leaves its frame live
+
+Measured first: `test_frame.py` does not compile yet (`fire.py build` refuses: generator functions with `nonlocal`/try-finally yields,
+`async def t3`, `frame.f_generator`), and while looking for the first refusal a stage-1 defect turned up: the generator body's frame
+(`__mgco_g_body`) stayed on the shadow frame stack across a `yield`, so `sys._getframe()` in the consuming loop named the generator,
+and the resumer's `mojo_frame_leave` cancelled the generator's cleanup record instead of its own.
+
+Landed: `mojo_coro_slice_save/restore` (`runtime/fire_runtime.c`) called from `__mojo_coro_yield`/`coro_run` (`runtime/fire_coro.c`):
+a yield detaches the frame and cleanup records the body pushed since it was resumed, the next resume re-pushes them above the
+resumer's current depth (so it also covers async coroutines, and the cleanup records of any kind the body holds across a yield).
+`_frame_enter` names the frame after the source function (`g`, not `__mgco_g_body`; a method generator drops its struct prefix).
+Test `gimple_generator_frame_is_live_only_while_running`; the stage 1/2 frame tests unchanged.
+
+Still open: `f_generator`/`gi_frame`/`cr_frame`, `frame.clear()` and its executing/suspended checks, `f_locals`, `f_trace`, and the
+generator shapes above that make test_frame.py refuse at the module level (nonlocal + try/finally yield, nested async def).
+Also fixed, because master's self-host was red on it: `mojo_bytes_from_str` gained an `errors` parameter (a492e9c71) and three
+callers still passed two arguments (`bytearray(text)`, `_coerce_to_bytes`, the cpp path's `bytes(text, enc)`).
+
+## Status (2026-11-01, stage 3 second slice): the generator walls test_frame.py hits, measured
+
+`MOJO_DEBUG=1 python3 fire.py build test_frame.py` now names every generator/async refusal. One was a bug, FIXED: the
+tagged-consumer scan (`coro._tagged_consumers_ok`) is keyed by NAME, so a local `g = gen()` in one method counted as a consumer of
+a nested generator `def g` in another and refused a compilable module; a function that binds the name as a local without defining
+its own nested `def` of it is now skipped (test `gimple_local_named_like_a_generator_elsewhere`). `MOJO_DEBUG` also prints why a
+nested generator stayed out of the stack-switch hoist (`_hoist_note`).
+
+What remains, each a feature rather than a bug:
+1. `test_clear_generator`: `gen = g(); next(gen); gen.gi_frame.clear()`. The bare-`yield` generator's handle has a use beyond
+   `next()`/`close()` (`gi_frame`), so the None-yield tagging refuses it. Needs the generator frame object (`gi_frame`, built from the
+   frame slice the runtime now saves per coroutine) and `frame.clear()` with its suspended/executing checks.
+2. `test_clear_executing_generator`: `yield f` where `f` is assigned inside an `except` block of the generator (capture plan None).
+3. `test_f_generator`: `async def t3(): return frame.f_generator` returns a frame object, not a scalar (the async return kind rule), and
+   `gen` there calls an ordinary nested helper (`nested()`), which the C++ companion cannot resolve.
+Next step: model a frame object as a first-class value (a heap record shared by `sys._getframe`, `gi_frame`, `__traceback__`) so
+`gi_frame`, `f_generator` and `clear()` have something to return; the per-coroutine slice in `fire_coro.c` is where the saved frame lives.

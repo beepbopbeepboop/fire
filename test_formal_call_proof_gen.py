@@ -5143,8 +5143,12 @@ class TestTheStackFloorGuardLeavesNoCallOnTheWalkedPath(unittest.TestCase):
     (`formal/arm64_codegen.py::_emit_stack_floor_init`), and this pins the two
     halves the bug docs name as the anti-rot: `formal/examples/either.mojo`
     (a source conditional) regenerates its value theorem, and
-    `formal/examples/mod_by_var.mojo` still takes the ordinary run-test path
-    (its div0 `fflush` is a compiler trap, not a program call).
+    `formal/examples/mod_by_var.mojo` no longer has its universal refused by
+    the div0 `fflush` — 2026-10-31 the walk closes that trap path instead
+    (`bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s step
+    2), and for this example the branch is dead anyway (the divisor register
+    holds 4, which the terminal value flow proves), so the example regenerates
+    its value theorem too.
     """
 
     def _proof(self, filename):
@@ -5167,12 +5171,19 @@ class TestTheStackFloorGuardLeavesNoCallOnTheWalkedPath(unittest.TestCase):
             "the guard's `getrlimit` is back on the walked path, so a program "
             "with a source conditional has no value theorem")
 
-    def test_the_div0_example_still_takes_the_run_test_path(self):
+    def test_the_div0_example_gets_the_value_theorem(self):
         text = self._proof("mod_by_var.mojo")
-        self.assertNotIn(
+        self.assertIn(
             "theorem mod_by_var_compiles_correctly_universal", text,
-            "the div0 guard's `fflush` is being followed, which is the "
-            "opaque-call boundary the run test exists to stop at")
+            "the div0 `BL fflush` is an opaque-call boundary again: a program "
+            "whose only out-of-image call is the compiler's trap has no value "
+            "theorem, so the walk-side closure "
+            "(`bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s "
+            "step 2) has been undone")
+        self.assertNotRegex(
+            text, r"theorem mod_by_var_reaches_call_at_",
+            "the walk substituted a reachability theorem for `mod_by_var`, "
+            "so the trap path is not closed by the value theorem")
         self.assertRegex(text, r"theorem mod_by_var_runs_\d+",
                          "the example's ordinary run test is gone")
 
@@ -7317,15 +7328,18 @@ class TestTheZeroDivisorGuardIsAFalseGoal(unittest.TestCase):
            substitutes rather than refusing), and the emitted note says so by
            naming `q_compiles_correctly_universal` as NOT emitted.
 
-        Outcome 3 is the state on this tree and is why this row was RED before
-        it was taught about it: it demanded outcome 1 or 2, and the generator had
-        moved to a third state it does not take silently.  Outcome 3 still
-        leaves `_ADMIT not in tail`, which is exactly what makes the class set
-        `cls.blind` and fail its Lean row by NAME — so accepting it here is not
-        acceptance of a blind class, it is acceptance that the blindness is
-        ANNOUNCED.  What this row forbids is the fourth state: an empty tail with
-        no announcement at all, which is `bugs/formal/FORMAL_the_div0_guard_measurement_
-        class_traces_nothing_any_more.md`'s subject.
+        Outcome 3 was the state on this tree until 2026-10-31 and is why this
+        row was RED before it was taught about it: it demanded outcome 1 or 2,
+        and the generator had moved to a third state it does not take silently.
+        Outcome 3 still left `_ADMIT not in tail`, which is exactly what makes
+        the class set `cls.blind` and fail its Lean row by NAME — so accepting
+        it here is not acceptance of a blind class, it is acceptance that the
+        blindness is ANNOUNCED.  The walk-side fix landed since
+        (`bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
+        step 2) and the fixture is back on outcome 1.  What this row still
+        forbids is the fourth state: an empty tail with no announcement at
+        all, which is `bugs/formal/FORMAL_the_div0_guard_measurement_class_
+        traces_nothing_any_more.md`'s subject.
         """
         from formal.build import FormalBuildError
         try:
@@ -7668,9 +7682,13 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
                     f"{label}: {self.blind.get(label)}")
 
     def test_the_false_goal_survives_the_documented_next_step(self):
-        """Both spellings leave `⊢ 1 =`, and adding `hc_N` changes nothing.
+        """Both spellings leave the guard's false goal, and adding `hc_N`
+        changes nothing.
 
-        The two assertions are the refutation: the goal is there as emitted, and
+        The goal is the div0 guard's own arithmetic, now implication-shaped:
+        `⊢ n1 = 0 → sdiv64 n n1 - (…) = 0` — the `n1 = 0` arm of the guard is
+        the false half, and the kernel refuses to reduce it any further.  The
+        two assertions are the refutation: the goal is there as emitted, and
         it is there after the doc's next step is applied verbatim, so the next
         step is not a smaller version of the fix — it is not a version of it.
         """
@@ -7683,14 +7701,32 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
                 # stopped generating the theorem.
                 self.assertIsNone(self.blind.get(label),
                                   f"{label}: {self.blind.get(label)}")
-                self.assertIn("⊢ 1 =", self.out[label],
+                self.assertIn("⊢ n1 = 0", self.out[label],
                               f"{label}: the div0 path's residual is no longer "
-                              f"the `1 = …` goal — fdiv64's div0 arm or the "
-                              f"div0 path's exit status may have been "
+                              f"the guard's false goal — fdiv64's div0 arm or "
+                              f"the div0 path's exit status may have been "
                               f"corrected, which is the fix this doc wants")
 
     def test_the_residual_is_the_same_with_and_without_the_branch_fact(self):
-        """The doc's next step, measured: identical goals, byte for byte."""
+        """The doc's next step, measured: the residual GOAL is unchanged.
+
+        The set is the right comparison now, because the walk-side closure
+        (`bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
+        step 2) put a SECOND terminal value flow in the file: the
+        `q_compiles_correctly_universal` walk runs the divisor-nonzero path
+        once per visit to the guard block, and the `hc_N` patch below reaches
+        the second terminal too, where the in-scope branch fact is the
+        NEGATION, so its `simp` leaves the same goal open that the first
+        terminal always leaves.  Measured 2026-10-31: `as_emitted` traces
+        `[goal]` and `doc_next_step` traces `[goal, goal]` — the goal the
+        sibling row pins above, byte for byte, twice.  The survival itself —
+        that adding the branch fact does not resolve the false goal — is
+        pinned by `test_the_false_goal_survives_the_documented_next_step`;
+        this row pins that the patch produces the SAME goal, nothing new and
+        nothing different.  If the fix the sibling doc names lands,
+        `as_emitted` loses its goal and the `assertTrue` below goes red with
+        the survival row at the same time.
+        """
         goals = {}
         for label, _patch in self.SPELLINGS:
             self.assertIsNone(self.blind.get(label),
@@ -7709,44 +7745,37 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
         self.assertTrue(goals.get("as_emitted"),
                         "no residual goal was traced at all, so the measurement "
                         "this class exists for did not happen")
-        self.assertEqual(goals["doc_next_step"], goals["as_emitted"],
+        self.assertEqual(sorted(set(goals["doc_next_step"])),
+                         sorted(set(goals["as_emitted"])),
                          "adding the enclosing by_cases hypothesis to the "
-                         "terminal value flow's simp only list CHANGED the "
-                         "residual — which means the fix is further along than "
-                         "bugs/formal/FORMAL_a_division_by_a_symbolic_value_leaves_"
-                         "the_zero_guard_open.md records, and its next step "
-                         "and its Status both need re-reading")
+                         "terminal value flow's simp only list produced a "
+                         "DIFFERENT goal — which means the fix is further "
+                         "along than bugs/formal/FORMAL_a_division_by_a_symbolic_"
+                         "value_leaves_the_zero_guard_open.md records, and its "
+                         "next step and its Status both need re-reading")
 
 
 class TestTheDiv0FixtureHaltsAtTheCompilerTrap(unittest.TestCase):
-    """Why `TestTheZeroDivisorGuardAgainstLean` cannot trace the residual — the
-    root cause, pinned with no Lean at all.
+    """The `q(a, b)` fixture is measurable again — the flip, pinned here.
 
-    That class measures the div0 path's terminal value flow by replacing the
-    walk's admission with `trace_state`; the mechanism is a no-op when the
-    fixture stops emitting a theorem that carries the admission.  On this tree
-    it does not refuse and it does not emit an empty file: it SUBSTITUTES a
-    reachability theorem, and the substitution is the compiler's own trap.
-
-    `formal/arm64_codegen.py::_emit_div_shift_pow`'s divide-by-zero arm ends in
-    `BL fflush`, which the emitter records in `info["compiler_traps"]` for the
-    RUN tests' benefit (`_program_extern_calls` subtracts it) but which the
-    UNIVERSAL theorem's walk does not subtract: `_unfollowable_calls` sees it as
-    a call out of the image, so the halt address becomes that call and the
-    theorem becomes `q_reaches_call_at_0x…` rather than
-    `q_compiles_correctly_universal`.  With no value theorem there is no
-    terminal value flow, so no `⊢ 1 =` residual and nothing for the class above
-    to see.
-
-    Pinning the substitution rather than only the class's failure is what makes
-    the failure a direction: when the walk can discharge a call on a
-    conditional path (`bugs/formal/FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_
-    conditional_path.md`), this test goes red and says the fixture is measur-
-    able again — and the class above starts looking at the residual it exists
-    for, instead of reporting a drift nobody can act on.
+    This class used to pin the state `TestTheZeroDivisorGuardAgainstLean`'s
+    `blind` reported: the walk could not discharge the divide-by-zero arm's
+    `BL fflush` (a call on a conditional path, `_unfollowable_calls` counting
+    it as a call out of the image), so `q_compiles_correctly_universal` was
+    SUBSTITUTED by `q_reaches_call_at_0x…` and the class above had nothing to
+    trace.  The pin said the test would go red and say the fixture is
+    measurable again when the walk could discharge a call on a conditional
+    path.  It did — 2026-10-31, `bugs/formal/FORMAL_integer_overflow_at_run_time_is_
+    still_untrapped.md`'s step 2: the `BL`'s target sits just past the code
+    slice, where the map (`_gen_code_defs` appends the terminal `ret`) answers
+    a word no decode arm matches, so the model runs one step and halts there,
+    `hnone` states the halt, and the walk closes the branch with it.  The
+    residual the class above exists for is reachable again, and this row pins
+    the flip: the universal is emitted, no reachability substitution, and a
+    terminal value flow carrying the admission the class traces.
     """
 
-    def test_the_fixture_substitutes_a_reachability_theorem(self):
+    def test_the_fixture_emits_the_universal_with_the_trap_closure(self):
         import formal.build as fb
         tmp = tempfile.mkdtemp(prefix="a2-div0-subst-")
         try:
@@ -7757,26 +7786,30 @@ class TestTheDiv0FixtureHaltsAtTheCompilerTrap(unittest.TestCase):
             r = fb.compile_formal(src, arch="arm64", output=out, prove=True,
                                   check=False)
             text = open(r["proof_path"]).read()
-            # The universal theorem is ABSENT, and the reachability statement
-            # that took its place is present.  The partition (rather than an
-            # `assertNotIn`) is what keeps the long explanatory comment above
-            # the theorem — which names `q_compiles_correctly_universal` in
-            # prose — from reading as the declaration itself.
-            self.assertEqual(
+            # The universal theorem is PRESENT, and the reachability statement
+            # it used to be substituted by is absent.  The partition (rather
+            # than an `assertIn`) is what keeps the long explanatory comment
+            # above the theorem — which names `q_compiles_correctly_universal`
+            # in prose — from reading as the declaration itself.
+            self.assertNotEqual(
                 text.partition("theorem q_compiles_correctly_universal")[1], "",
-                "the fixture now emits the universal theorem again, so the "
-                "residual the class above exists for is reachable and its "
-                "`blind` report is the wrong answer: re-measure the class")
+                "the universal theorem is gone again: if the walk refuses "
+                "`q(a, b)` once more, the class above is blind and its "
+                "`blind` report must be read before anything else")
+            self.assertNotRegex(
+                text, r"theorem q_reaches_call_at_",
+                "the walk SUBSTITUTED a reachability theorem for "
+                "`q(a, b)` again: the trap path is no longer closed by "
+                "`hnone`, and the class above is blind for that reason")
             self.assertIn(
-                "theorem q_reaches_call_at_0x100000504", text,
-                "the walk no longer substitutes a reachability theorem for "
-                "`q(a, b)`; the class above is blind for some OTHER reason now, "
-                "and its `blind` message must be re-read before it is trusted")
-            self.assertEqual(
-                text.count(_ADMIT), 0,
-                f"`{_ADMIT}` is emitted again, so there IS a terminal value "
-                f"flow for this fixture and the class above should be tracing "
-                f"it")
+                "have hnone_", text,
+                "no `hnone` halt fact in the walk: the trap branch is closed "
+                "some other way (or not at all), and the `none => True` "
+                "statement needs re-reading")
+            self.assertGreaterEqual(
+                text.count(_ADMIT), 1,
+                f"no `{_ADMIT}` in the tail, so there is no terminal value "
+                f"flow for the class above to trace")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -9081,8 +9114,22 @@ class TestTheOneOpaqueCallIsAnnounced(unittest.TestCase):
     visible or invisible.
     """
 
+    #: A GENUINE out-of-image call.  The div0 fixture this class used to
+    #: measure (`return a // b`) is no longer one: its `BL fflush` is the
+    #: compiler's trap, and the walk closes that path at its `hnone` instead
+    #: of substituting a reachability theorem — the flip
+    #: `TestTheDiv0FixtureHaltsAtTheCompilerTrap` pins, and
+    #: `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
+    #: step 2.  `printf` with an UNUSED return value is the corpus's other
+    #: single-opaque-call shape (`formal/examples/printf_int.mojo`'s body,
+    #: named `q`): one `BL` out of the image, no source conditional, and the
+    #: AST bridge states the body — the value is discarded, so `callFunc`'s 0
+    #: for `printf` never sits in a position to disagree with the model.
+    #: Measured 2026-10-31: the substitution and the note are emitted exactly
+    #: as the rows below pin, with no trap involvement (`hnone` absent).
     PROGRAM = ("def q(a, b):\n"
-               "    return a // b\n")
+               "    printf(\"hi\")\n"
+               "    return 7\n")
 
     @classmethod
     def setUpClass(cls):

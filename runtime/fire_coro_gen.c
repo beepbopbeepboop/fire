@@ -25,6 +25,13 @@
 #include <string.h>
 #include <unistd.h>
 
+extern int64_t mojo_box_none(void);
+extern void mojo_exc_type_set(int64_t);
+extern void mojo_exc_msg_set(char *);
+extern void mojo_exc_obj_set(void *);
+extern void mojo_exc_pending_set(int);
+extern void mojo_raise(void);
+
 /* The generated-code exception frame stack (runtime/fire_runtime.h), needed
    by __mojo_gen_close's local landing pad below. fire_coro.h declares neither,
    and this translation unit deliberately does not include fire_runtime.h (it
@@ -50,6 +57,7 @@ typedef struct MojoGen {
     int64_t   value;      /* last yielded box */
     int64_t   retval;     /* return box once done */
     int       done;
+    int       started;
     int       pending_exc;
 } MojoGen;
 
@@ -303,12 +311,18 @@ __mojo_gen_send_d(int64_t bits)
    bits to the yield as one int64_t. */
 extern void   *mojo_list_new(void);
 extern void    mojo_list_append_int(void *, int64_t);
+extern void    mojo_list_append_word(void *, int64_t);
 
+/* Each slot goes in through `mojo_list_append_word`: the stored word is the same raw bits
+   `mojo_list_append_int` stored, but the slot's KIND is recorded as well (a string pointer, a
+   None / bool / float box), so a consumer that reads the yielded tuple dynamically -- a loop over the
+   result of a call through a function value, or a generator that re-yields what it was given --
+   spells a None as None and a string as a string instead of as an integer. */
 static int64_t
 tuple_box(const int64_t *slots, int n)
 {
     void *l = mojo_list_new();
-    for (int i = 0; i < n; i++) mojo_list_append_int(l, slots[i]);
+    for (int i = 0; i < n; i++) mojo_list_append_word(l, slots[i]);
     return (int64_t)(uintptr_t)l;
 }
 
@@ -424,6 +438,17 @@ __mojo_gen_resume(int64_t gen, int64_t send)
 {
     MojoGen *g = (MojoGen *)(uintptr_t)gen;
     if (!g || g->done) return 0;
+    extern int64_t mojo_box_none(void);
+    if (!g->started) {
+        if (send != mojo_box_none()) {
+            mojo_exc_type_set(348628165);
+            mojo_exc_msg_set((char *)"can't send non-None value to a just-started generator");
+            mojo_exc_pending_set(1);
+            mojo_raise();
+            return 0;
+        }
+        g->started = 1;
+    }
     int64_t out = 0;
     int r = __mojo_coro_resume(g->coro, send, &out);
     if (r == 1) { g->value = out; return 1; }
@@ -806,9 +831,10 @@ typedef struct MojoFutureCB {
     struct MojoFutureCB *next;
 } MojoFutureCB;
 
-/* Mirror of runtime/fire_runtime.h's MojoBoundMethod -- a method or
-   capturing closure referenced as a value: { fn, self }. Kept local so
-   this TU needn't pull in the whole runtime header. */
+/* Prefix mirror of runtime/fire_runtime.h's MojoBoundMethod -- a method or
+   capturing closure referenced as a value: { fn, self, boxes, nboxes }. This
+   TU only reads fn and self (the leading fields, same layout), so it needs
+   neither the trailing box list nor the whole runtime header. */
 typedef struct { void *fn; void *self; } MojoCoroBoundMethod;
 
 typedef struct MojoFuture {

@@ -104,8 +104,8 @@ _FIXED_ARRAY_ANN_RE = re.compile(
 # processing into `self.struct_field_types`, which is mutable/extensible:
 # a not-yet-seen field on a USER struct legitimately grows the struct, see
 # `_collect_self_assigns`). A fixed-layout runtime struct has no such
-# extensibility (`MojoBoundMethod` is exactly `{ void *fn; void *self; }`,
-# hardcoded in fire_runtime.h, forever) — an attribute name that isn't one
+# extensibility (`MojoBoundMethod` is exactly `{ void *fn; void *self;
+# void **boxes; int64_t nboxes; }`, hardcoded in fire_runtime.h, forever) — an attribute name that isn't one
 # of its real C fields must route through the same dynamic-attribute
 # dispatch (`_mojo_dispatch_getattr`/`_mojo_dispatch_setattr` ->
 # `mojo_obj_getattr`/`mojo_setattr`'s real per-object storage, see
@@ -1064,6 +1064,7 @@ class GimpleGen:
         # safe for any code path that reaches `_cpp_for_stmt` without going
         # through gen_module first.
         self._all_generator_names: set = set()
+        self._has_double_generator: bool = False
         # Side channel: _gen_cpp_generator_unit/_gen_cpp_async_generator_unit
         # stash their just-computed _generator_tuple_yield_slot_ctypes
         # result here (list[str] for a tuple-yielding generator, None for
@@ -2700,6 +2701,14 @@ class GimpleGen:
         # write back on exit: `[gname, saved temp]` pairs, set by
         # emit_methods._cattr_restore_begin and cleared by _cattr_restore_end.
         self._cattr_restores: list = []
+        # Python-level frames (sys._getframe & co): the module names whose functions are
+        # instrumented with a frame record (a module that mentions `_getframe`), and the
+        # name of the function currently being emitted when it is one of them (''
+        # otherwise). See emit_methods._frame_enter.
+        self._frames_mods: set = set()
+        # True while the body of a stack-switch (A3) coroutine is being lowered; see emit_loops.
+        self._cur_func_is_coro: bool = False
+        self._frame_func: str = ''
         self._owned_free_candidates: set = set()
         self._owned_free_pushed: set = set()
         self._owned_stack_allocated: set = set()
@@ -3204,6 +3213,9 @@ class GimpleGen:
         if gimple_gen_coro.enabled():
             self.BUILTIN_VALUE_MAP['_coro_resume_fn'] = '__mojo_gen_resume_once'
             self.BUILTIN_VALUE_MAP['_coro_destroy_fn'] = '__mojo_gen_destroy'
+        # MODULE-wide, not per function (so not in `_reset_func`): once any `type(n, bases, ns)`
+        # is lowered, a later function's `isinstance` / `type(x)` must consult the class table.
+        self._rt_classes_made: bool = False
         self._reset_func()
 
     # Builtin exception names (mirrors myinterpreter.py's _setup_builtins plus
@@ -3277,7 +3289,12 @@ class GimpleGen:
         'mojo_class_delattr':  ('void', ['int64_t', 'char *']),
         'mojo_type_new':       ('int64_t', ['char *']),
         'mojo_type_add_base':  ('void', ['int64_t', 'int64_t']),
+        'mojo_type_add_bases_from_list': ('void', ['int64_t', 'MojoList *']),
         'mojo_classobj_tag':   ('int64_t', ['int64_t']),
+        'mojo_rtobj_method_call': ('int64_t', ['int64_t', 'char *'] + ['int64_t'] * 8),
+        'mojo_isinstance_rtclass': ('int', ['int64_t', 'int64_t']),
+        'mojo_isinstance_type': ('int', ['int64_t']),
+        'mojo_type_of':        ('int64_t', ['int64_t']),
         'mojo_classobj_setattr': ('void', ['int64_t', 'char *', 'int64_t']),
         'mojo_type_fill_from_dict': ('void', ['int64_t', 'MojoDict *']),
         'mojo_chain_extend':   ('void', ['MojoList *', 'int64_t']),
@@ -3559,6 +3576,7 @@ class GimpleGen:
         'mojo_dict_new':         ('MojoDict *', []),
         'mojo_dict_set_str': ('void',      ['MojoDict *', 'char *', 'char *']),
         'mojo_dict_set_int': ('void',      ['MojoDict *', 'char *', 'int64_t']),
+        'mojo_dict_set_double': ('void',   ['MojoDict *', 'char *', 'double']),
         'mojo_dict_get_str':     ('char *',    ['MojoDict *', 'char *']),
         'mojo_dict_get_int':     ('int64_t',   ['MojoDict *', 'char *']),
         'mojo_dict_setdefault_int': ('int64_t', ['MojoDict *', 'char *', 'int64_t']),
@@ -4450,6 +4468,12 @@ class GimpleGen:
     def _lower_pointer_alloc(self, node: CallExpr) -> tuple[str, str]:
         return ggc._lower_pointer_alloc(self, node)
 
+    def _lower_alloc_single_leak(self, node: CallExpr):
+        return ggc._lower_alloc_single_leak(self, node)
+
+    def _lower_dealloc_thin_allocation(self, node: CallExpr):
+        return ggc._lower_dealloc_thin_allocation(self, node)
+
     def _lower_builtin_len(self, node: CallExpr) -> tuple[str, str]:
         return ggc._lower_builtin_len(self, node)
 
@@ -4549,6 +4573,9 @@ class GimpleGen:
 
     def _default_expr_to_pair(self, _dflt, cxx: bool = False, param_ctype=None) -> tuple:
         return ggc._default_expr_to_pair(self, _dflt, cxx=cxx, param_ctype=param_ctype)
+
+    def _pack_kwargs_slot_call(self, fname, fname_raw, arg_pairs, kwarg_dict, call_has_spread=False):
+        return ggc._pack_kwargs_slot_call(self, fname, fname_raw, arg_pairs, kwarg_dict, call_has_spread)
 
     def _pack_vararg_trailing_params(self, fname, fname_raw, arg_pairs, kwarg_dict, call_has_spread=False):
         return ggc._pack_vararg_trailing_params(self, fname, fname_raw, arg_pairs, kwarg_dict, call_has_spread)
@@ -5700,6 +5727,8 @@ class GimpleGen:
         return grsl._closure_value_locals(self, body)
     def _quick_type(self, node) -> str:
         return grsl._quick_type(self, node)
+    def _module_attr_call_return_type(self, node):
+        return grsl._module_attr_call_return_type(self, node)
     def _infer_list_elem_type(self, elements: list) -> str:
         return grsl._infer_list_elem_type(self, elements)
     def _prepass_callee_key(self, node) -> str | None:

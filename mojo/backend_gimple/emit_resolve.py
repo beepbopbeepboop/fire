@@ -58,7 +58,7 @@ from mojo.middle.resolve_shared import (
     _as_assignstmt_node, _as_multiassignstmt_node, _as_str, _as_vardecl_node, _calls_in_stmts, _closure_value_locals,
     _collect_calls_in_stmt, _collect_local_container_elems, _collect_return_elems, _decode_str_literal_text, _dtrace, _eval_const,
     _infer_list_elem_type, _infer_local_var_types, _infer_return_elem_type, _scratch_dict_copy, _is_none_literal, _is_sys_stderr, _lbn_target_names,
-    _lbn_walk, _module_const_int, _operand_is_dict, _parse_fstring_parts, _prepass_callee_key, _quick_type, _record_closure_alias,
+    _lbn_walk, _module_const_int, _operand_is_dict, _parse_fstring_parts, _prepass_callee_key, _quick_type, _module_attr_call_return_type, _record_closure_alias,
     _refine_generic_return_type, _sms_key, _str_literal_to_slit, _subst_idents, _type_expr_to_ann
 )
 from mojo.middle.calls_shared import user_dunder_repr_call
@@ -4061,8 +4061,8 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         # repr printed those address bytes, `{'\xef\xac\x99f': 1, ...}`. The
         # literal spelling `{k: 1 for k in pairs}` reached `_repr_value` and
         # keyed by content, so the two spellings of one key disagreed. See
-        # bugs/CODEGEN_dict_comprehension_repr_is_separately_broken.md, and
-        # CODEGEN_tuple_dict_key_hashed_by_address for the subscript
+        # CODEGEN_dict_comprehension_repr_is_separately_broken (tuple key
+        # hashed by address) and CODEGEN_tuple_dict_key_hashed_by_address for
         # spelling that was fixed the same way.
         #
         # `_emit_dict_pair_store` lowers both operands itself, so the values

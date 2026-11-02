@@ -10,7 +10,7 @@ module-level constants are byte-identical to their originals.
 """
 from __future__ import annotations
 import re
-from mojo.middle.types import _C_RESERVED_FUNCS, _FORCE_RENAME_RESERVED, _split_top_level_commas, _used_idents_node, _CPP_CALLABLE_CTYPE, _CPP_CALLABLE_CTYPE_1ARG, _CPP_CALLABLE_CTYPE_STARARGS, _CPP_CALLABLE_CTYPE_KWARGS, _CPP_CALLABLE_CTYPE_STAR_KW, _FLOAT_TYPES
+from mojo.middle.types import _C_RESERVED_FUNCS, _FORCE_RENAME_RESERVED, _split_top_level_commas, _used_idents_node, _CPP_CALLABLE_CTYPE, _CPP_CALLABLE_CTYPE_1ARG, _CPP_CALLABLE_CTYPE_STARARGS, _CPP_CALLABLE_CTYPE_KWARGS, _CPP_CALLABLE_CTYPE_STAR_KW, _FLOAT_TYPES, _SIGNED_INT_TRUE_DIV_TYPES
 import dataclasses
 from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _as_set, _signed_int64, ForStmt, IfStmt, MatchStmt, StructDef, AssignStmt
 _WALK_FIELD_NAMES_CACHE: dict[type, tuple] = {}
@@ -995,6 +995,8 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
             return 'char *'
         if 'double' in (lt, rt):
             return 'double'
+        if e.op == '/' and lt in _SIGNED_INT_TRUE_DIV_TYPES and rt in _SIGNED_INT_TRUE_DIV_TYPES:
+            return 'double'
         return 'int64_t'
     if isinstance(e, CallExpr) and isinstance(e.func, IdentExpr):
         if e.func.name in ('str', 'String', 'repr', 'os.path.join', 'os.path.basename', 'os.path.dirname', 'os.path.splitext', 'mojo_dirent_name', 'mojo_dirent_path'):
@@ -1044,7 +1046,7 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
             return known[e.func.name]
         if fn_return_types is not None:
             _frt = fn_return_types.get(e.func.name)
-            if isinstance(_frt, str) and (_frt in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *') or (_frt.endswith(' *') and known_structs is not None and (_frt[:-2] in known_structs))):
+            if isinstance(_frt, str) and (_frt in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *', 'double', 'int64_t', '_Bool') or (_frt.endswith(' *') and known_structs is not None and (_frt[:-2] in known_structs))):
                 return _frt
     if isinstance(e, CallExpr) and isinstance(e.func, MemberExpr):
         if isinstance(e.func.obj, MemberExpr) and isinstance(e.func.obj.obj, IdentExpr) and (e.func.obj.obj.name == 'os') and (e.func.obj.member == 'path'):
@@ -2060,7 +2062,7 @@ def _gmi_nested_struct_defs(body, enclosing, out: list, top: bool = False,
     innermost enclosing function or method, or None at module level. It is
     carried so a class-level attribute whose value is a bare parameter name
     can take its C type from that parameter's annotation
-    (bugs/CODEGEN_nested_class_attr_from_str_param_typed_as_int.md).
+    (a `str` parameter used to read back as a pointer-sized int).
     """
     for _nc in (body or []):
         if isinstance(_nc, StructDef):

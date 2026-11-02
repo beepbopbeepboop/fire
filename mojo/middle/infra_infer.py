@@ -1531,6 +1531,19 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
             if pname not in inferred and is_string_method and len(_struct_evidence_list) == 0:
                 inferred[pname] = 'char *'
 
+    # An UNANNOTATED parameter whose declared default is a float literal IS a
+    # float parameter, by the default-as-evidence rule `_param_ctype` applies
+    # to its definition. Recorded here too so the body's return-type inference
+    # (which seeds `var_types` from this table, not from `_param_ctype`) agrees
+    # with the signature: `def keep(scale=0.5): return scale` inferred
+    # `int64_t` and printed 0 for 0.5. Weaker than any usage evidence above.
+    _fdefaults = getattr(func, 'param_defaults', None) or {}
+    for _fp in func.params:
+        _fpn = _as_str(_fp[0]).lstrip('*')
+        if (_fp[1] is None and _fpn not in inferred
+                and isinstance(_fdefaults.get(_fpn), FloatLiteral)):
+            inferred[_fpn] = 'double'
+
     # A container guess is only as good as the body's own use of the name. A
     # parameter the body REBINDS to a container of another kind (`live =
     # set(live)` after a `for x in live`, or after `set(live)` alone) has one
@@ -1776,6 +1789,13 @@ def _collect_return_types(gen, stmts: list, acc: list):
                 gen._collect_return_types(node.else_body, acc)
         elif isinstance(node, (gimple_ctypes.WhileStmt, gimple_ctypes.ForStmt)):
             gen._collect_return_types(node.body, acc)
+            if node.else_body:
+                gen._collect_return_types(node.else_body, acc)
+        elif isinstance(node, gimple_ctypes.MatchStmt):
+            # A function whose `return`s are all inside `match` arms had NO return statement as
+            # far as this scan could see, so it was typed `void` (or `int64_t`) and handed back 0.
+            for _mc in node.cases:
+                gen._collect_return_types(_mc.body, acc)
         elif isinstance(node, gimple_ctypes.TryStmt):
             gen._collect_return_types(node.body, acc)
             for h in node.handlers:
@@ -2228,6 +2248,17 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
                     # generator api, and only when `next` is not shadowed, so
                     # nothing about a scalar- or opaque-class-valued call
                     # changes.
+                    elif (isinstance(_v.func, gimple_ctypes.MemberExpr)
+                          and _vt in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *')
+                          and gen._module_attr_call_return_type(_v) == _vt):
+                        # `c = m.f(...)` through a bare-import module binding
+                        # whose defining unit published a pointer return: a
+                        # local bound to it is that pointer, so `return c`
+                        # must not infer the int64_t default (the string
+                        # printed as its address). Gated on the SAME helper
+                        # `_quick_type` answers the call with, never on the
+                        # member name alone.
+                        cand = _vt
                     elif (isinstance(_v.func, gimple_ctypes.IdentExpr)
                           and _as_str(_v.func.name) == 'next'
                           and not gen._locally_binds_name('next')):
