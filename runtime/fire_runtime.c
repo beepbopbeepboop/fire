@@ -1566,6 +1566,10 @@ int mojo_truthy_word(int64_t w)
     if (mojo_is_registered_list(w)) return mojo_list_len((MojoList *)(intptr_t)w) != 0;
     if (mojo_is_registered_dict(w)) return mojo_dict_len((MojoDict *)(intptr_t)w) != 0;
     if (mojo_is_registered_set(w)) return mojo_set_len((MojoSet *)(intptr_t)w) != 0;
+    /* A bytes object is a registered pointer word: its truth is its length, not
+     * the non-NULL test every other pointer-shaped word would answer. Must come
+     * before the str test, which would read its data as a C string. */
+    if (mojo_is_registered_bytes(w)) return mojo_bytes_truthy((MojoBytes *)(intptr_t)w);
     if (mojo_is_boxed(w)) {
         MojoBox *bx = (MojoBox *)(intptr_t)w;
         if (bx->kind == 'n') return 0;
@@ -12020,10 +12024,44 @@ MojoList *mojo_glob(char *pattern) {
 }
 int64_t mojo_glob_w(int64_t pattern) { return (int64_t)(intptr_t)mojo_glob((char *)(intptr_t)pattern); }
 
+/* os.path.join / os.path.split on a runtime WORD. A registered bytes object is a
+ * bytes path: its parts are bytes and the result is bytes, mirroring posixpath
+ * verbatim (the same rules the str twins above follow). Anything else is a str
+ * (a heap C string), exactly as before. Mixing the two is CPython's TypeError. */
+static MojoBytes *_bytes_path_join(MojoBytes *a, MojoBytes *b)
+{
+    static const char sep_c = '/';
+    if (b->len > 0 && b->data[0] == '/') return b;             /* absolute b wins */
+    if (a->len == 0 || a->data[a->len - 1] == '/') return mojo_bytes_concat(a, b);
+    MojoBytes *sep = mojo_bytes_new_lit(&sep_c, 1);
+    return mojo_bytes_concat(mojo_bytes_concat(a, sep), b);
+}
 /* os.path.<fn> as function VALUES (int64_t ABI, see mojo_fnptr_call_N): the
  * addresses `x = os.path.islink` / `join = path.join` evaluate to. */
 int64_t mojo_os_path_join_w(int64_t a, int64_t b) {
+    int ab = mojo_is_registered_bytes(a), bb = mojo_is_registered_bytes(b);
+    if (ab && bb) return (int64_t)(intptr_t)_bytes_path_join((MojoBytes *)(intptr_t)a, (MojoBytes *)(intptr_t)b);
+    if (ab || bb) { mojo_raise_type_error("Can't mix strings and bytes in path components"); return 0; }
     return (int64_t)(intptr_t)mojo_path_join((char *)(intptr_t)a, (char *)(intptr_t)b);
+}
+MojoList *mojo_os_path_split_w(int64_t p) {
+    if (!mojo_is_registered_bytes(p))
+        return int64_t_path_split((char *)(intptr_t)p);
+    /* posixpath.split for bytes: split after the last b'/', then strip the
+     * head's trailing slashes unless the head is nothing but slashes. */
+    MojoBytes *b = (MojoBytes *)(intptr_t)p;
+    int64_t i = 0;
+    for (int64_t k = 0; k < b->len; k++)
+        if (b->data[k] == '/') i = k + 1;
+    int64_t end = i;
+    while (end > 0 && b->data[end - 1] == '/') end--;
+    int64_t hlen = end == 0 ? i : end;
+    MojoBytes *head = mojo_bytes_new_lit((const char *)b->data, hlen);
+    MojoBytes *tail = mojo_bytes_new_lit((const char *)b->data + i, b->len - i);
+    MojoList *l = mojo_list_new();
+    mojo_list_append_word(l, (int64_t)(intptr_t)head);
+    mojo_list_append_word(l, (int64_t)(intptr_t)tail);
+    return l;
 }
 int64_t mojo_os_path_islink_w(int64_t p) {
     struct stat st;

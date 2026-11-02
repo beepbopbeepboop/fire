@@ -2424,7 +2424,8 @@ MojoList *int64_t_path_splitdrive(char *path);         /* os.path.splitdrive(pat
 MojoList *int64_t_path_splitroot(char *path);          /* os.path.splitroot(path) -> [drive, root, tail] */
 MojoList *mojo_os_walk(char *top);                      /* os.walk(top) -> list[(str, list, list)] */
 int64_t   mojo_os_walk_w(int64_t top);                  /* the same, as a callable VALUE (int64_t ABI) */
-int64_t   mojo_os_path_join_w(int64_t a, int64_t b);  /* os.path.<fn> as callable VALUES (int64_t ABI) */
+int64_t   mojo_os_path_join_w(int64_t a, int64_t b);  /* os.path.<fn> as callable VALUES (int64_t ABI); bytes-aware (see the .c) */
+MojoList *mojo_os_path_split_w(int64_t p);            /* os.path.split(p) -> [head, tail]; bytes-aware: a bytes p gives bytes parts */
 int64_t   mojo_os_path_islink_w(int64_t p);
 int64_t   mojo_os_path_isdir_w(int64_t p);
 int64_t   mojo_os_path_isfile_w(int64_t p);
