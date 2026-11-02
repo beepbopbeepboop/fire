@@ -81,5 +81,17 @@ finally:
     F._unlanded = _real_unlanded
     C.load = _real_load
 
+
+# _unlanded: a gone branch is landed only when its recorded tip is on master
+F._unlanded = _real_unlanded
+_head = C.git("rev-parse", "master")
+_off = "c07b5c0634d6060f17029f85229fa2477c8ed232"   # an integration merge that never reached master
+check("a gone branch whose recorded tip is on master counts as landed",
+      F._unlanded({"branch": "work/no-such-branch-xyz", "tip": _head}) is False)
+check("a gone branch whose recorded tip is off master counts as unlanded",
+      F._unlanded({"branch": "work/no-such-branch-xyz", "tip": _off}) is True)
+check("a gone branch with no recorded tip counts as unlanded",
+      F._unlanded({"branch": "work/no-such-branch-xyz"}) is True)
+
 print("%d passed, %d failed" % (len(PASSES), len(FAILS)))
 sys.exit(1 if FAILS else 0)

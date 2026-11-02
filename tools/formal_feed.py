@@ -65,16 +65,41 @@ def running_claims(tasks):
 
 
 def _unlanded(t):
-    """True when the task's branch still has commits master lacks. Releasing the claim of such a task is how the same
-    bug got fixed five times over: the work sat unmerged for days, the doc looked open, and a new worker re-did it."""
+    """True when the task's work is not on master. A live branch: it has commits master lacks. A branch that is gone
+    (`cleanup --branches` deletes only merged ones, but a task can also lose its branch some other way): the tip the
+    registry recorded while the branch existed must be an ancestor of master. No recorded tip means nothing proves the
+    work landed, so it counts as unlanded. Releasing the claim of such a task is how the same bug got fixed five times
+    over: the work sat unmerged for days, the doc looked open, and a new worker re-did it."""
     br = t.get("branch")
     if not br:
         return False
-    r = subprocess.run(["git", "-C", C.MAIN, "rev-list", "--count", "master.." + br], capture_output=True, text=True)
-    return r.returncode == 0 and int(r.stdout.strip() or 0) > 0
+    if subprocess.run(["git", "-C", C.MAIN, "rev-parse", "--verify", "-q", "refs/heads/" + br],
+                      capture_output=True).returncode == 0:
+        r = subprocess.run(["git", "-C", C.MAIN, "rev-list", "--count", "master.." + br], capture_output=True, text=True)
+        return r.returncode == 0 and int(r.stdout.strip() or 0) > 0
+    tip = t.get("tip")
+    if not tip:
+        return True
+    return subprocess.run(["git", "-C", C.MAIN, "merge-base", "--is-ancestor", tip, "master"],
+                          capture_output=True).returncode != 0
+
+
+def _record_tips():
+    """Remember each finished task's branch tip while its branch still exists, so a later deletion of the branch
+    cannot make its work look landed or lost."""
+    with C.registry() as reg:
+        for name, t in reg.items():
+            br = t.get("branch")
+            if not br or t.get("tip") or C.state_of(t) not in ("exited-ok", "exited-err"):
+                continue
+            r = subprocess.run(["git", "-C", C.MAIN, "rev-parse", "--verify", "-q", "refs/heads/" + br],
+                               capture_output=True, text=True)
+            if r.returncode == 0:
+                t["tip"] = r.stdout.strip()
 
 
 def release_finished():
+    _record_tips()
     n = 0
     for name, t in C.load().items():
         st = C.state_of(t)
