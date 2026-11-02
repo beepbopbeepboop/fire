@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The light-gate swarm: keep N workers on bugs/ docs, land what they finish, verify after landing.
 
-    CONTROL_MODEL=openrouter/openrouter/free python3 tools/swarm.py [--target 2] [--interval 120]
+    python3 tools/swarm.py [--target N] [--interval 120]   # --target defaults to the pool total (tools/pool.json)
 
 One pass, repeated:
   1. FEED    keep the queue stocked: each missing worker slot gets the next free bugs/ doc (not FORMAL_*, which
@@ -11,7 +11,7 @@ One pass, repeated:
              count. Each re-feed logs what the previous attempt produced (commits, or none).
   2. REFILL  `control.py refill --target N --prefix bug-,fix-` -- a worker that finishes frees its slot at once.
   3. LAND    finished bug-*/fix-* branches are merged by `integrate.py --stdlib` (gate = the stdlib compile only); a
-             conflicting branch is handed to a merge-fixer worker on the same model (CONTROL_MODEL).
+             conflicting branch is handed to a merge-fixer task (integrate.enqueue_merge_fix).
   4. VERIFY  after a landing, `verify_landed.py` (make check + stdlib-dylib) runs in the background on master; red files a
              fix-landed-* task that the next REFILL starts.
 The integrator and the verifier each take their own flock, so only one of each ever runs."""

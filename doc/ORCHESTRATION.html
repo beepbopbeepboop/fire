@@ -88,9 +88,10 @@ mojo-reference/.claude/worktrees/agent-*   isolated worktrees of Claude Code sub
 
 <h2 id="env">2. Environment, paths, python, models</h2>
 <h3>Python</h3>
-<p><b>Use python 3.14, and do it by absolute path.</b> This box has three: <code>/usr/bin/python3</code> is 3.9, <code>/opt/homebrew/bin/python3</code> became <b>3.15.0</b> on 2026-10-18, and <code>/opt/local/bin/python3</code> is the <b>3.14.8</b> the project runs on. So put <code>export PATH=/opt/local/bin:$PATH</code> first, <b>not</b> <code>/opt/homebrew/bin</code> — the old instruction there was correct only while homebrew happened to point at 3.14, and following it now runs everything on 3.15.</p>
-<p>Why it matters, measured on master at 15a260a3: <code>test_formal_run.py</code> reports <code>FAIL=18</code> under 3.14 and <code>FAIL=32</code> under 3.15 on the <i>same commit</i>, because CPython 3.15 reworded the <code>%</code> <code>TypeError</code> that tests assert on. Fourteen failures that do not exist. <code>tools/suite.py</code> resolves its jobs with <code>PY = sys.executable</code>, so the whole check inherits whichever interpreter launched it — the suite does not protect you here.</p>
-<p>Check with <code>python3 --version</code> before believing ANY failure, and after any brew upgrade. The swarm does <b>not</b> check the interpreter. On 2026-11-02 at 12:30 the running <code>tools/swarm.py</code> was started from <code>/opt/homebrew/Cellar/python@3.15</code>, i.e. the wrong one; launch it with <code>/opt/local/bin/python3</code>.</p>
+<p><b>Interpreter.</b> Use <code>/opt/local/bin/python3</code> (3.14.8) or the homebrew 3.15 (<code>/opt/homebrew/bin/python3</code>, 3.15.0 since 2026-10-18). <b>3.15 is fine for the fleet.</b> The project moves everything to it later, not yet. <code>/usr/bin/python3</code> is 3.9 and is not usable.</p>
+
+<p>Known difference, measured on master at 15a260a3: <code>test_formal_run.py</code> reports <code>FAIL=18</code> under 3.14 and <code>FAIL=32</code> under 3.15 on the <i>same commit</i>, because CPython 3.15 reworded the <code>%</code> <code>TypeError</code> that tests assert on. Those fourteen extra failures come from the interpreter, not the code. Keep this in mind when a formal test goes red after a python change. <code>tools/suite.py</code> resolves its jobs with <code>PY = sys.executable</code>, so the whole check inherits whichever interpreter launched it.</p>
+<p>Check with <code>python3 --version</code> before believing ANY formal-test failure, and after any brew upgrade.</p>
 <h3>opencode (v2.0.26 syntax: this changed and broke everything once)</h3>
 <pre><code># a worker is launched as (control.py does this for you; cwd = the worktree):
 opencode run --model PROVIDER/MODEL --auto --title NAME "Your complete instructions are in /path/work-N/TASK.md. Read it now and follow it exactly."
@@ -112,6 +113,7 @@ probably using the old form. The background service is <code>opencode serve --se
 <tr><td><code>opus</code></td><td><code>claude-opus-5-5</code></td><td>0</td><td>hard</td><td>Defined, not running (count 0).</td></tr>
 <tr><td><code>llama-work</code></td><td><code>llama-local/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS</code></td><td>0</td><td>easy</td><td>Defined, not running (count 0).</td></tr>
 </table>
+<p><b>The two DeepSeek slots are different models.</b> <code>opencode-free</code> runs the <b>free</b> DeepSeek model, <code>opencode/deepseek-v4.1-flash-free</code>. <code>opencode-paid</code> runs the <b>paid</b> DeepSeek model, <code>opencode-go/deepseek-v4.1-flash</code>. The model ids differ, so limits, bans and the ledger (<code>dead_models.json</code>, keyed by model id) apply to each separately. Do not treat one as a fallback for the other.</p>
 <p><b>Classes.</b> A doc's class is the directory it sits in: <code>easy</code> = <code>bugs/*.md</code>, <code>mid</code> = <code>bugs/mid/</code>, <code>hard</code> = <code>bugs/hard/</code>. Every doc starts easy; a doc that gets <code>escalate_after</code> (2) no-commit attempts moves up one class. Each class has its own queue, sized to the count of its live slots.</p>
 <p><b>Limits.</b> A usage limit bans that model for its slot's <code>recover_hours</code> (ledger: <code>.git/control/dead_models.json</code>). A second limit within a day uses <code>long_recover_days</code> where the slot has one. Banned daily free tiers are asked one word at most every 12 h (<code>control.py probe-free</code>, which the swarm runs each pass). A task prefers the slot it was queued for and takes the first free, unbanned slot of its class otherwise.</p>
 <p>To pick a model for one restarted worker: <code>restart NAME --model M</code>. A bare model outside the pool, for hand-run experiments only: <code>spawn --model M</code>.</p>
@@ -314,7 +316,7 @@ awk '/--- output: last 40 lines of JOBNAME ---/{f=1} f' build/suite.log | head -
 <ul>
 <li><b>Running at 12:30:</b> one <code>tools/swarm.py</code> (up since about 02:20), pool total 26, roughly 20 <code>iceman</code> opencode workers, most on <code>bugs/mid/</code> docs. Recent workers that ended with <code>exited-err</code> include <code>bug-mid-gate-red-recover-land-2026-11-02</code> and <code>bug-mid-test-suite-self-test-8-assertion-446</code>; read their <code>work.log</code> before re-feeding.</li>
 <li><b>Retired, do not trust:</b> <code>keepfull.sh</code> and its <code>keepfull.log</code> in the parent directory (the log stops at 12:07 today, target 41 from an older pool), and <code>feed.log</code> in the parent directory (last written 2026-10-06, from a loop that no longer exists).</li>
-<li><b>Interpreter:</b> the running swarm is on the 3.15 python from homebrew (see §2). Restart it on <code>/opt/local/bin/python3</code> at the next quiet point.</li>
+<li><b>Interpreter:</b> the swarm runs on homebrew 3.15, which is accepted for now (§2).</li>
 </ul>
 Keep §15 short and dated. Related docs: <code>CLAUDE.md</code> (binding project rules), <code>CONTROL.html</code> (generated task record), <code>tools/control_prompt.md</code> (worker prompt),
 <code>bugs/OPEN_WORK.md</code> (triage index), <code>doc/MEMORY.html</code> (memory classes).</p>
