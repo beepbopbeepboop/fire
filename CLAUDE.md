@@ -84,6 +84,10 @@ anywhere else), these rules override any instinct to move on quickly:
   when the intent was always to gate once at the end anyway.
 
 ## Bug rounds — every round must move us closer to the end
+Base directive (user, 2026-10-31): one work round handles ONE bug, fully
+finished (including its commit) before the next round starts. Earlier batches
+of three were relaxed away on 2026-11-01: the extra scope is where rounds die
+mid-flight and leave in-flight state for the next session to reconstruct.
 Base directive (user, 2026-10-29): every work round on a bug must move the work
 forward. A round's output may not be "re-verified, still open" with no tree or
 doc change. The valid outputs of a round, in descending order of preference:
