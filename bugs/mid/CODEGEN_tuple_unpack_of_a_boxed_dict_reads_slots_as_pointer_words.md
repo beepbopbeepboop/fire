@@ -66,3 +66,20 @@ fix, the two failures that remain are this doc's symptom
 `ctor_of_a_container_reaches_the_comprehension`, which is a separate red
 (the compiled stdout stops before the last line the CPython oracle prints)
 also present on master, not investigated here.
+
+## Status 2026-11-02 (partial: a regression from this bug's own first fix is closed; the symptom above is not)
+
+`1bfc82a09` ("tuple unpack of boxed dict reads keys via boxed accessor") routed every unpacked slot
+through `mojo_list_get_boxed`. That boxes list slots, so `out, nested, maps = f(...)` with
+`f` returning `(list, list, dict)` bound `out` to a box header and the self-hosted compiler
+crashed in `coro.lower`. Landed: `mojo_list_get_boxed` returns a list slot's own word
+(runtime/fire_runtime.c) and `_safe_coerce_emit` unwraps a boxed word stored into a
+pointer-typed slot (emit_resolve.py). Regression test
+`gimple_unpack_of_a_returned_list_list_dict_tuple` (test_gimple_runner.py, run built-and-compared
+by hand against CPython: iteration, print and len now match; before: box addresses and
+"unsupported iterable").
+
+Still open: the dict-key symptom at the top of this doc, and the follow-up
+`CODEGEN_list_plus_on_unpacked_call_result_drops_elements.md` (`out + nested` drops elements).
+The self-host rebuild (`make mojoc`) with this fix was never seen to finish (killed by an
+external SIGTERM four times); verify it first.
