@@ -238,7 +238,7 @@ Three things are needed together, and none is a one-liner:
    different question — a value KIND for a yield slot, not a C signature.
 2. The returned ITERATOR's element type, for the same reason the
    `for`-over-a-callable refusal is (see
-   `bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md` — the same
+   `bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md` — the same
    blocker one function over, where the refusal now NAMES
    `_get_reader(...)` instead of reporting an undifferentiated
    `CallExpr`).

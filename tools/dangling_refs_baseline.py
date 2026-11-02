@@ -40,7 +40,7 @@ BASELINE = {
     'bugs/formal/FORMAL_len_of_a_readdir_name_is_refused_and_needs_a_bytes_kind.md': 1,
     'bugs/formal/FORMAL_sweep_work_map.md': 1,
     'bugs/formal/FORMAL_the_last_dylib_exports_exportEnd_includes_the_interned_strings.md': 1,
-    'bugs/mid/COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md': 1,
+    'bugs/hard/COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md': 1,
     'bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__.md': 2,
     'elaborate.py': 1,
     'formal/imports.py': 1,
