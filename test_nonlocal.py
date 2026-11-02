@@ -55,6 +55,7 @@ import sys
 import tempfile
 
 import driver
+from exec_budget import RUN_TIMEOUT_S
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -84,7 +85,7 @@ def _build_and_run_compiled(mojo_src: str) -> str:
     rc = driver.compile_program(src_path, mojo_src, output=exe, run=False)
     if rc is None:
         raise RuntimeError("driver.compile_program failed to build")
-    r = subprocess.run([exe], capture_output=True, text=True, timeout=60)
+    r = subprocess.run([exe], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
     if r.returncode != 0:
         raise RuntimeError(f"program exited {r.returncode}, stderr={r.stderr}")
     return r.stdout
@@ -98,7 +99,7 @@ def _run_interpreted(mojo_src: str) -> str:
     with open(src_path, 'w') as f:
         f.write(mojo_src)
     r = subprocess.run([sys.executable, os.path.join(HERE, 'fire.py'), 'run', src_path],
-                       capture_output=True, text=True, timeout=60)
+                       capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
     if r.returncode != 0:
         raise RuntimeError(f"interpreter run exited {r.returncode}, stderr={r.stderr}")
     return r.stdout

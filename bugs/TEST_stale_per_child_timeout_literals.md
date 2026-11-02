@@ -2,6 +2,30 @@
 
 ## Status
 
+**Two more files landed 2026-11-01 (`work/bug-test-stale-per-child-timeout-literal-4685`), three sites.**
+`test_nonlocal.py` (2: the compiled program's run and the `fire.py run`
+interpreter run, both `RUN_TIMEOUT_S`) and `test_coro_runtime.py` (1: the
+compiled runtime test's run, `RUN_TIMEOUT_S`). Both now import `exec_budget`,
+and their rows are gone from `STALE_PER_CHILD_BUDGETS` in `test_suite.py`.
+`test_nonlocal.py` re-runs 18/18 green. `test_coro_runtime.py` is 16/20 both
+before and after the edit: its four `layer1-shim` cases fail with
+`can't send non-None value to a just-started generator` on HEAD too, so that is
+a separate pre-existing defect, not a timeout, and it is not in this doc's scope.
+
+**The census check is red on this branch before this change, and it is red for
+reasons this doc's rows do not explain.** Running
+`test_no_stale_per_child_budget_is_left_as_a_literal` reports, among others:
+`test_gimple.py:7979` and `:7981` (literals in a file that already imports
+`exec_budget`), `test_selfhost.py` at 3 vs a census of 2, and about a dozen
+files that carry literals with no census row (`test_nonascii_len_regression.py`,
+`test_regression_fire_tag_string.py`, ...). The total reads 121 literals in 58
+files against a census of 46. The function reports these through `check()` and
+does not raise, so a bare run prints `census OK` regardless of the result —
+read the `FAIL` lines, not the trailing message. Next step for whoever picks
+this up: reconcile the census with the walk (add the newly-arrived files with
+their counts, and convert `test_gimple.py`'s two named sites), and make the
+function fail the run instead of printing it.
+
 **Six more files landed 2026-10-07, 30 sites; the census now reads 105 over 48
 files.** The six are the ones the 2026-10-05 entry named as "cheapest first":
 `test_async_void_return.py`, `test_async_with_lock_guard.py`,

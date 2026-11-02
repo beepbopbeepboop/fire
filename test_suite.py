@@ -2148,7 +2148,6 @@ STALE_PER_CHILD_BUDGETS = {
     'test_container_ordering.py': 3,
     'test_coro_detached_async.py': 4,
     'test_coro_future_await.py': 4,
-        'test_coro_runtime.py': 1,
     'test_coro_scoreboard.py': 2,
     'test_dict_tuple_key.py': 3,
     # `test_formal_admitted.py`'s row (5, 2026-10-26's c20bdf09e "5 remain as
@@ -2193,7 +2192,6 @@ STALE_PER_CHILD_BUDGETS = {
                             # test_nested_def_is_not_a_module_level_fn_export re-runs the built binary to read its refusal message off stderr
     'test_metal_codegen.py': 9,
     'test_mixed_cpp_link.py': 1,
-            'test_nonlocal.py': 2,
     'test_ptr_registry.py': 2,
     'test_python_source_mut_capture.py': 1,
     'test_runtime_dylib.py': 1,
