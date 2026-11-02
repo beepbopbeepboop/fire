@@ -398,6 +398,12 @@ def _record_bool_valued(gen, name: str, value) -> None:
     consulted only by the print dispatch, so this adds no claim to the type
     lattice itself."""
     try:
+        # A local captured by a nested def is boxed: its first binding became
+        # `__mojo_box_new_i64(<init>)`, so look through the box to the value.
+        if (isinstance(value, gimple_ctypes.CallExpr)
+                and isinstance(value.func, gimple_ctypes.IdentExpr)
+                and value.func.name == '__mojo_box_new_i64' and len(value.args) == 1):
+            value = value.args[0]
         if isinstance(value, gimple_ctypes.BoolLiteral):
             gen._bool_valued.add(name)
         elif gen._quick_type(value) == '_Bool':

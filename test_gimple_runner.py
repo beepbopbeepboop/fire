@@ -2370,6 +2370,25 @@ def main():
     t.test2()
 """, "1\n5\n")
 
+    # A bool local captured by a nested def is boxed (`__mojo_box_new_i64`),
+    # which hid its bool-ness from `print`: `print(done)` answered `1`.
+    test_gimple_stdout("gimple_boxed_bool_local_prints_as_bool", """\
+def outer():
+    n = 0
+    done = False
+    def bump():
+        nonlocal n, done
+        n += 1
+        done = True
+    bump()
+    bump()
+    print(n, done)
+    print(done)
+
+def main():
+    outer()
+""", "2 True\nTrue\n")
+
     test_gimple_stdout("gimple_nested_class_in_every_body", """\
 class WithAttrs:
     tag = 7
