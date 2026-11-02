@@ -23008,7 +23008,7 @@ TYPE_ARGUMENT_LIST_CASES = [
     # (`type_argument_list_of_two_type_arguments_answers`, further down), and the
     # discriminator is exact: a VALUE in a MULTI-element bracket over a TEMPLATE
     # struct declared by this unit.
-    ("type_argument_list_on_a_generic_struct_of_this_unit_is_read_as_a_container",
+    ("type_argument_list_with_a_frame_in_the_bracket_refuses_at_the_escape_check",
      "struct S:\n"
      "    var a: Int\n"
      "    var b: Int\n\n"

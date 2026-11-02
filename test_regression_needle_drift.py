@@ -1,5 +1,7 @@
-# Regression test for needle-drift cases 2 and 3 from
-# bugs/RUN_four_run_suite_failures_that_are_needle_drift_not_regressions.md
+# Regression test for the needle-drift cases 2 and 3 of the test_formal_run.py
+# "four run-suite failures" bug (needle drift, not regressions). Its doc is
+# deleted; case 3 was fixed by building the row, case 2 by renaming the row to
+# the frame-escape sentence it really draws, and case 1 needed no change.
 #
 # Each check runs the named row of test_formal_run.py through the real
 # build-and-run harness and reads its verdict line. A row that refuses where
@@ -25,12 +27,13 @@ def _row_output(name):
 
 
 def test_case_two_refusal_message():
-    # type_argument_list_on_a_generic_struct_of_this_unit_is_read_as_a_container
-    # Pinned to the wide-receiver sentence the construct measures today.
-    out = _row_output(
-        "type_argument_list_on_a_generic_struct_of_this_unit_is_read_as_a_container")
-    assert ("PASS  type_argument_list_on_a_generic_struct_of_this_unit_is_read_as_a_container"
-            in out), out[-2000:]
+    # type_argument_list_with_a_frame_in_the_bracket_refuses_at_the_escape_check
+    # The row was renamed from `..._is_read_as_a_container`: a frame value in
+    # the bracket draws the frame-escape sentence (the wide-receiver one), which
+    # is the verdict this program really gets, so the name now says that.
+    name = "type_argument_list_with_a_frame_in_the_bracket_refuses_at_the_escape_check"
+    out = _row_output(name)
+    assert ("PASS  " + name in out), out[-2000:]
 
 
 def test_case_three_builds_and_prints_the_constant():
