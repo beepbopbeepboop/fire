@@ -11085,6 +11085,14 @@ def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
                              f"{_he}, {_ev}, {_stepv})")
         else:
             t = gen._new_val('MojoList *', f"mojo_list_slice ({ov}, {start_v}, {stop_v})")
+        if ov in getattr(gen, '_maybe_kinds_vals', ()):
+            gen._maybe_kinds_vals.add(t)
+            if ov in getattr(gen, '_struct_slot_kinds', {}):
+                gen._struct_slot_kinds[t] = gen._struct_slot_kinds[ov]
+            else:
+                gen._struct_slot_kinds.pop(t, None)
+            gen._elem_types.pop(t, None)
+            return 'MojoList *', t
         # propagate elem type
         if ov in gen._elem_types:
             gen._elem_types[t] = gen._elem_types[ov]

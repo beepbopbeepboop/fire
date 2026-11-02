@@ -1242,7 +1242,15 @@ def _gen_stmt_AssignStmt(gen, node):
             n_after64 = gen._new_val('int64_t', f"(int64_t){n_after}")
             star_stop = gen._new_val('int64_t', f"{total} - {n_after64}")
             star_v = gen._new_val('MojoList *', f"mojo_list_slice ({lp}, {star_start}, {star_stop})")
-            gen._elem_types[star_v] = elem_type
+            if lp in getattr(gen, '_maybe_kinds_vals', ()):
+                gen._maybe_kinds_vals.add(star_v)
+                if lp in getattr(gen, '_struct_slot_kinds', {}):
+                    gen._struct_slot_kinds[star_v] = gen._struct_slot_kinds[lp]
+                else:
+                    gen._struct_slot_kinds.pop(star_v, None)
+                gen._elem_types.pop(star_v, None)
+            else:
+                gen._elem_types[star_v] = elem_type
             gen._assign_target(star_target, 'MojoList *', star_v)
             for j, tgt in enumerate(after):
                 j64 = gen._new_val('int64_t', f"(int64_t){j}")

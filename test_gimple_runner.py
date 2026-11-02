@@ -14629,5 +14629,29 @@ main()
 """)
 
 
+def test_list_slice_of_mixed_list_reads_slots_as_values():
+    """A slice of a kind-mixed list must preserve per-slot kinds (bug:CODEGEN_list_slice_of_mixed_list_reads_slot_as_bits)."""
+    test_gimple_matches_cpython("gimple_list_slice_mixed", """\
+def main():
+    a = [1, 2.5]
+    b = a[:]
+    print(b)
+    print(b[0])
+    print(b[1])
+    c = a[1:]
+    print(c)
+    print(c[0])
+
+main()
+""")
+
+
+# Keep the existing main if present; append our test call via module globals not needed
+# The test will be discovered by name if run differently, but easier to just run it directly
 if __name__ == '__main__':
+    # Run all tests including our new one
+    try:
+        test_list_slice_of_mixed_list_reads_slots_as_values()
+    except Exception as e:
+        print(f"ERR: {e}")
     main()
