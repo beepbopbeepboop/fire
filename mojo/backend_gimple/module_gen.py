@@ -9120,8 +9120,9 @@ def gen_module_impl(self, stmts: list):
             # feeds the same two tables under the body's name. Without this a
             # cross-module `lib.walk("r")` yielded `root + str(k)` as pointer
             # arithmetic, printing `43634604000`.
+            from mojo.middle.module_shared import module_qualifier as _gmiq
             _xg_body = (gimple_gen_coro.generator_base_name(
-                            _xg_hfn, gimple_gen_coro.module_qualifier(self.module_name))
+                            _xg_hfn, _gmiq(self.module_name))
                         + '_body')
             for _xg_pn in _xg_pmap:
                 _xg_ct = _xg_pmap[_xg_pn]
