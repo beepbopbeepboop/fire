@@ -63,7 +63,8 @@ void mojo_exc_pop(void)
  * frame's return names whatever frame later reuses the slot. Frames of uninstrumented
  * functions are invisible, as C frames are in CPython. */
 #define MOJO_FRAME_MAX 4096
-typedef struct MojoFrameRec { const char *name; const char *file; int64_t firstlineno; int64_t lineno; struct MojoFrameRec *back; } MojoFrameRec;
+typedef struct MojoFrameRec { const char *name; const char *file; int64_t firstlineno; int64_t lineno; struct MojoFrameRec *back; int64_t id; } MojoFrameRec;
+static int64_t _mojo_frame_next_id = 1;
 static MojoFrameRec _mojo_frames[MOJO_FRAME_MAX];
 int _mojo_frame_depth = 0;
 extern char *_mojo_exc_msg;
@@ -195,7 +196,9 @@ void mojo_frame_enter(char *name, char *file, int64_t firstlineno)
     if (_mojo_frame_depth < MOJO_FRAME_MAX) {
         MojoFrameRec *f = &_mojo_frames[_mojo_frame_depth];
         f->name = name; f->file = file; f->firstlineno = firstlineno; f->lineno = firstlineno; f->back = NULL;
+        f->id = _mojo_frame_next_id;
     }
+    ++_mojo_frame_next_id;              /* every activation has its own identity (snapshots copy it) */
     ++_mojo_frame_depth;                /* keeps pairing even past the table's end */
     _mojo_cleanup_push(MOJO_CLEANUP_FRAME, NULL);
 }
@@ -238,6 +241,26 @@ int64_t mojo_frame_back(int64_t w)
     return (w > 1 && w <= _mojo_frame_depth) ? w - 1 : 0;
 }
 int64_t mojo_frame_depth(void)            { return _mojo_frame_depth; }
+
+/* frame.clear(): CPython refuses a frame that is still executing ("cannot clear an executing
+ * frame"); any other frame (finished, or a kept traceback frame) clears, which here has nothing
+ * to release. A frame is executing when an activation with its identity is on the live stack. */
+void mojo_frame_clear(int64_t w)
+{
+    MojoFrameRec *f = _frame_of(w);
+    if (!f) return;
+    int n = _mojo_frame_depth < MOJO_FRAME_MAX ? _mojo_frame_depth : MOJO_FRAME_MAX;
+    for (int i = 0; i < n; i++) {
+        if (_mojo_frames[i].id == f->id) {
+            char *m = strdup("RuntimeError: cannot clear an executing frame");
+            mojo_exc_type_set(1631794787);
+            mojo_exc_msg_set(m);
+            mojo_exc_obj_set(m);
+            mojo_raise();
+            return;
+        }
+    }
+}
 
 /* ── Tracebacks ──────────────────────────────────────────────────────────────
  * `mojo_raise` snapshots the live frame stack once per exception (keyed by the exception's

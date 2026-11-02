@@ -2756,6 +2756,9 @@ class GimpleGen:
         # a NULL set -- the SIGSEGV that ended every `mojoc --dump-full
         # fire.py` in `mojo_set_add_str`.
         self._bool_valued: set = set()
+        # Names bound to a Python-level frame word (`f = sys._getframe()`, `f = e.__traceback__.tb_frame`):
+        # `f.clear()` on one of them is a frame clear, not a list/dict clear (emit_methods._is_frame_expr).
+        self._frame_vars: set = set()
         # Parameter names whose ANNOTATION says `bool`, for the struct method
         # `_gmi_collect_self_assigns` is scanning RIGHT NOW (module_gen.py
         # rebuilds it per method). That walk is the one place that knows both

@@ -165,3 +165,16 @@ What remains, each a feature rather than a bug:
    `gen` there calls an ordinary nested helper (`nested()`), which the C++ companion cannot resolve.
 Next step: model a frame object as a first-class value (a heap record shared by `sys._getframe`, `gi_frame`, `__traceback__`) so
 `gi_frame`, `f_generator` and `clear()` have something to return; the per-coroutine slice in `fire_coro.c` is where the saved frame lives.
+
+## Status (2026-11-01, stage 3 third slice): `frame.clear()` refuses an executing frame
+
+`mojo_frame_clear(word)` (runtime/fire_runtime.c): every frame activation now carries an identity (`MojoFrameRec.id`, copied by the
+traceback snapshot); `clear()` raises `RuntimeError: cannot clear an executing frame` when an activation with that identity is on the live
+stack, else it is a no-op (a finished frame, e.g. a traceback frame kept past its function's return). Compile side: a frame is an int64
+word, so `x.clear()` cannot be told from `list.clear()` by type; `emit_methods._is_frame_expr` decides by origin (`sys._getframe(...)`, a
+`f_back`/`tb_frame`/`gi_frame`/`cr_frame` attribute, or a name bound to one: `gen._frame_vars`, filled by `_gen_stmt_AssignStmt`).
+Test `gimple_frame_clear_refuses_an_executing_frame` matches CPython. This covers test_frame's `test_clear_executing`.
+
+Still open: `gi_frame`/`f_generator`/`cr_frame` VALUES (the `.clear()` receiver recognition already accepts the attribute names, but nothing
+produces the frame yet), the suspended-generator refusal ("cannot clear a suspended frame": needs a snapshot of the coroutine's saved
+slice marked suspended), `f_locals`, `f_trace`.

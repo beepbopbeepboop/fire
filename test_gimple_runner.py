@@ -3692,6 +3692,43 @@ def main():
 main()
 """, "in g caller\n1 caller main\nin g caller\n2 caller main\n")
 
+    # `frame.clear()`: an EXECUTING frame refuses (RuntimeError); a finished
+    # one (a traceback frame kept past its function's return) clears. A frame
+    # is an int64 word, so `.clear()` is recognised by where the receiver came
+    # from (`sys._getframe`, `tb_frame`, `f_back`, a name bound to one).
+    test_gimple_stdout("gimple_frame_clear_refuses_an_executing_frame", """\
+import sys
+
+def keep():
+    try:
+        1/0
+    except ZeroDivisionError as e:
+        fr = e.__traceback__.tb_frame
+    try:
+        fr.clear()
+        print("cleared")
+    except RuntimeError:
+        print("executing")
+    return fr
+
+def after():
+    f = keep()
+    f.clear()
+    print("finished frame clears")
+
+def caller():
+    try:
+        sys._getframe(1).clear()
+    except RuntimeError:
+        print("caller executing")
+
+def main():
+    after()
+    caller()
+
+main()
+""", "executing\nfinished frame clears\ncaller executing\n")
+
     test_gimple_stdout("gimple_traceback_chain_names_and_lines", """\
 import sys
 

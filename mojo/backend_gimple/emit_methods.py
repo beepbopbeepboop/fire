@@ -1754,6 +1754,28 @@ def _lower_re_module_call(gen, node, method):
     return 'int64_t', r
 
 
+_FRAME_VALUED_MEMBERS = frozenset(('f_back', 'tb_frame', 'gi_frame', 'cr_frame', 'ag_frame'))
+
+
+def _is_frame_expr(gen, node) -> bool:
+    """Is this expression statically a Python-level frame word? A frame is an int64 word, so
+    `x.clear()` cannot be told from `list.clear()` by type; the evidence is where the value came
+    from: `sys._getframe(...)`, a frame-valued attribute (`f_back`, `tb_frame`, `gi_frame`), or a
+    name bound to one of those (`_frame_vars`, filled by `_gen_stmt_AssignStmt`). Only consulted in
+    a compile where some module uses frames."""
+    if len(gen._frames_mods) == 0:
+        return False
+    if isinstance(node, gimple_ctypes.IdentExpr):
+        return _as_str(node.name) in gen._frame_vars
+    if isinstance(node, gimple_ctypes.MemberExpr):
+        return _as_str(node.member) in _FRAME_VALUED_MEMBERS
+    if isinstance(node, gimple_ctypes.CallExpr):
+        f = node.func
+        return (isinstance(f, gimple_ctypes.MemberExpr) and _as_str(f.member) == '_getframe'
+                and isinstance(f.obj, gimple_ctypes.IdentExpr) and _as_str(f.obj.name) == 'sys')
+    return False
+
+
 def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """Lower obj.method(args) — handles module calls, raw C pointers (UnsafePointer) and structs."""
     func = node.func  # MemberExpr
@@ -1770,6 +1792,13 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         else:
             _gf_d = gen._new_val('int64_t', '(int64_t)0')
         return 'int64_t', gen._call_expr('int64_t', 'mojo_getframe', [('int64_t', _gf_d)])
+
+    # `frame.clear()` on a frame word: refuses an executing frame (RuntimeError), else a no-op.
+    if (func.member == 'clear' and not node.args and not getattr(node, 'kwargs', None)
+            and _is_frame_expr(gen, func.obj)):
+        _fc_t, _fc_v = gen.lower_expr(func.obj)
+        gen._void_call('mojo_frame_clear', [('int64_t', gen._to_int64(_fc_t, _fc_v))])
+        return 'int64_t', gen._new_val('int64_t', '(int64_t)0')
 
     # `mod_a.Dialog(...)` — a QUALIFIED CONSTRUCTOR CALL: the receiver names
     # a real module marker and the member names a real, already-inlined

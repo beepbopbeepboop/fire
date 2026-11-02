@@ -1177,6 +1177,12 @@ def _gen_stmt_AssignStmt(gen, node):
             and getattr(node, 'value', None) is not None:
         _record_bool_valued(gen, node.target.name, node.value)
     if (isinstance(node.target, gimple_ctypes.IdentExpr)
+            and getattr(node, 'value', None) is not None and len(gen._frames_mods) > 0):
+        if gmp._is_frame_expr(gen, node.value):
+            gen._frame_vars.add(_as_str(node.target.name))
+        else:
+            gen._frame_vars.discard(_as_str(node.target.name))
+    if (isinstance(node.target, gimple_ctypes.IdentExpr)
             and getattr(node, 'value', None) is not None
             and _try_bind_iter_cursor(gen, node.target.name, node.value)):
         return
