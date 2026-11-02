@@ -1111,6 +1111,7 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # generator slots; the module's own statements are appended
                 # for ITS imports, so a generator reached through a chain of
                 # imports sees every call site compiled before it.
+                gimple_codegen.gimple_gen_coro._PY_SRC[0] = str(_abspath).endswith('.py')
                 stmts, _ss_meta = gimple_codegen.gimple_gen_coro.lower(
                     stmts, gen._closure_call_stmts, module_name)
                 temp_gen._closure_call_stmts = gen._closure_call_stmts + [stmts]

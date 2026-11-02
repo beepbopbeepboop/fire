@@ -1378,6 +1378,11 @@ def _tagged_consumers_ok(name: str, module_stmts=None) -> bool:
                     and n.func.name == 'next' and len(n.args) >= 1
                     and isinstance(n.args[0], N.IdentExpr) and n.args[0].name in handles):
                 ok_uses.add(id(n.args[0]))
+            elif (isinstance(n, N.MemberExpr) and isinstance(n.obj, N.IdentExpr)
+                    and n.obj.name in handles
+                    and n.member in ('gi_frame', 'gi_running', 'gi_code', 'gi_suspended')):
+                # an attribute of the generator OBJECT: never reads the value slot
+                ok_uses.add(id(n.obj))
         for hn in handles:
             if len(handles[hn]) != 1:
                 continue
@@ -1400,10 +1405,18 @@ def _tagged_consumers_ok(name: str, module_stmts=None) -> bool:
         if fd.name == name:
             continue
         _defines = False
+        _plain_def = False
         for _x in fd.body:
             if isinstance(_x, N.FunctionDef) and _x.name == name:
-                _defines = True
+                if getattr(_x, 'is_generator', False):
+                    _defines = True
+                else:
+                    _plain_def = True    # an ordinary nested `def name`: its calls are not this generator's
         if _defines:
+            continue
+        if _plain_def:
+            for _sn in _walk(fd):
+                shadowed.add(id(_sn))
             continue
         _bnd = set()
         for _pn, _pa in fd.params:
@@ -1414,6 +1427,8 @@ def _tagged_consumers_ok(name: str, module_stmts=None) -> bool:
             for _sn in _walk(fd):
                 shadowed.add(id(_sn))
     flow = None     # built only when a generator call is passed as an argument
+    bare_lines: list = []
+    call_lines: dict = {}
     for st in mod:
         for n in _walk(st):
             if id(n) in shadowed:
@@ -1451,17 +1466,25 @@ def _tagged_consumers_ok(name: str, module_stmts=None) -> bool:
             if isinstance(n, N.CallExpr) and isinstance(n.func, N.IdentExpr) \
                     and n.func.name == name:
                 refs.append(id(n))
+                call_lines[id(n)] = getattr(n, 'line', 0)
             elif isinstance(n, N.IdentExpr) and n.name == name:
                 refs.append(None)           # a bare reference (not a call)
+                bare_lines.append(getattr(n, 'line', 0))
     for r in refs:
         if r is None:
             continue
         if r not in for_iters:
+            from mojo.middle.types import _debug_note
+            _debug_note('[coro] generator ' + repr(name) + ' has a call at line ' + repr(call_lines.get(r)) + ' that is not a tagged-word consumer')
             return False
     # bare IdentExprs: the func IdentExpr of every call is also an IdentExpr
     bare = 0
     calls = sum(1 for r in refs if r is not None)
     idents = sum(1 for r in refs if r is None)
+    if idents != calls:
+        from mojo.middle.types import _debug_note
+        _debug_note('[coro] generator ' + repr(name) + ' is referenced other than by a consumed call; '
+                    'bare references at lines ' + repr(bare_lines[:12]))
     return idents == calls
 
 
@@ -6084,6 +6107,10 @@ def _lower_escaping_generators(stmts: list) -> None:
     stmts.extend(moved)
 
 
+# True while lowering a module read from a `.py` file (see `_nested_async_free_vars`).
+_PY_SRC: list = [False]
+
+
 def lower(stmts: list, closure_stmts=(),
           module_name: str | None = None) -> tuple[list, list]:
     """Returns (new_stmts, coro_meta). coro_meta entries are dicts:
@@ -6741,6 +6768,24 @@ def _nested_async_free_vars(inner: N.FunctionDef, outer: N.FunctionDef) -> set:
         _inner_pnames.add(_pn)
     inner_declared = (_inner_pnames
                        | gimple_ctypes._declared_vars_body(inner.body))
+    # A plain `f = ...` (also inside an `except`/`with` body) binds a LOCAL of
+    # `inner` in Python even when `outer` binds the same name; `_declared_vars_body`
+    # only sees `var` declarations. Names `inner` declares `nonlocal`/`global` are
+    # the exception: those stay the enclosing function's.
+    _own_bound = set()
+    for _bn in gimple_exprtypes._walk_own_body(inner.body):
+        _own_bound |= _ca_binding_names(_bn)
+    _declared_outer = set()
+    for _nz in gimple_exprtypes._walk_own_body(inner.body):
+        if isinstance(_nz, N.NonlocalStmt) or isinstance(_nz, N.GlobalStmt):
+            for _nzn in _nz.names:
+                _declared_outer.add(_nzn)
+    # In Mojo source a plain `x += 1` / `x = v` in a nested def mutates the CAPTURED
+    # variable (by-reference capture, no `nonlocal` keyword); the Python rule (an
+    # assignment makes a local) holds only for Python source (`_PY_SRC`, set by the
+    # callers of `lower` from the module's file name).
+    if _PY_SRC[0]:
+        inner_declared = inner_declared | (_own_bound - _declared_outer)
     return (used - inner_declared) & all_outer
 
 
@@ -7330,7 +7375,8 @@ def _generator_result_escapes(outer: N.FunctionDef, name: str) -> bool:
         elif _is_next_of(n) and isinstance(n.args[0], N.IdentExpr):
             safe_names.add(id(n.args[0]))
         elif (isinstance(n, N.MemberExpr) and isinstance(n.obj, N.IdentExpr)
-                and n.member in ('close', 'send', 'throw')):
+                and n.member in ('close', 'send', 'throw', 'gi_frame', 'gi_running',
+                                 'gi_code', 'gi_suspended')):
             # `gen.close()` / `gen.send(v)` / `gen.throw(e)` drive the
             # generator in place; the object does not leave the frame.
             safe_names.add(id(n.obj))

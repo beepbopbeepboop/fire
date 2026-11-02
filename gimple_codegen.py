@@ -6291,6 +6291,7 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     # MOJO_CORO=stackswitch. Replaces eligible generator FunctionDefs with a
     # plain `__mgco_<g>_body` the ordinary codegen lowers; ineligible ones
     # fall through to the gimple_cpp_* C++20-coroutine path unchanged.
+    gimple_gen_coro._PY_SRC[0] = bool(filename) and str(filename).endswith('.py')
     stmts, _coro_meta = gimple_gen_coro.lower(stmts)
     gen = GimpleGen(do_imports=do_imports, link_imports=link_mode,
                     auto_gpu=auto_gpu)

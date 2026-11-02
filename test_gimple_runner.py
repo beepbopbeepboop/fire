@@ -31,13 +31,15 @@ _FAIL = 0
 _TIMEOUT = 0
 
 
-def compile_mojo_to_gimple_exe(mojo_src: str) -> str:
-    """Compile mojo source to GIMPLE executable, return path to executable."""
+def compile_mojo_to_gimple_exe(mojo_src: str, filename: str = '') -> str:
+    """Compile mojo source to GIMPLE executable, return path to executable. A
+    `filename` ending in `.py` compiles the text as Python source (Python scoping
+    rules apply to nested defs)."""
     from gimple_codegen import compile_to_gimple
 
     with tempfile.NamedTemporaryFile(mode='w', suffix='.c', delete=False) as f:
         # Compile mojo to GIMPLE C code
-        c_code = compile_to_gimple(mojo_src)
+        c_code = compile_to_gimple(mojo_src, filename=filename) if filename else compile_to_gimple(mojo_src)
         f.write(c_code)
         c_file = f.name
 
@@ -240,7 +242,7 @@ def dict_param_reader_is_str(name: str, mojo_src: str, fn: str, want: bool):
     return reads
 
 
-def test_gimple_stdout(name: str, mojo_src: str, expected_stdout: str):
+def test_gimple_stdout(name: str, mojo_src: str, expected_stdout: str, filename: str = ''):
     """Test that mojo code compiles to GIMPLE, executes, and prints exactly
     `expected_stdout`. Unlike test_gimple_execution's exit-code check, this
     verifies the ACTUAL printed value — needed for bugs where the compiled
@@ -250,7 +252,7 @@ def test_gimple_stdout(name: str, mojo_src: str, expected_stdout: str):
     global _PASS, _FAIL, _TIMEOUT
     exe_path = None
     try:
-        exe_path = compile_mojo_to_gimple_exe(mojo_src)
+        exe_path = compile_mojo_to_gimple_exe(mojo_src, filename)
         out = run_executable_stdout(exe_path)
         if out == expected_stdout:
             print(f"PASS  {name}")
@@ -3778,6 +3780,59 @@ def main():
 
 main()
 """, "True\nTrue True\nTrue\n")
+
+    # A nested bare-`yield` generator that holds `self` and a `nonlocal` is
+    # still hoisted when its handle is only advanced with `next()` and asked
+    # for `gi_frame` (test_frame.py's test_clear_generator): `gi_frame` never
+    # reads the value slot and never hands the receiver out of the method.
+    test_gimple_stdout("gimple_nested_generator_gi_frame_use_is_not_an_escape", """\
+class T:
+    def inner(self):
+        print("inner")
+    def test_clear_generator(self):
+        endly = False
+        def g():
+            nonlocal endly
+            try:
+                yield
+                self.inner()
+            finally:
+                endly = True
+        gen = g()
+        next(gen)
+        print(1 if endly else 0)
+        try:
+            gen.gi_frame.clear()
+            print("cleared")
+        except RuntimeError:
+            print("suspended refuses")
+        print(1 if endly else 0)
+
+def main():
+    T().test_clear_generator()
+""", "0\nsuspended refuses\n0\n")
+
+    # A nested generator that assigns a name its enclosing function also
+    # binds has its OWN local of that name (Python scoping), not a capture of
+    # the outer one: the capture analysis only counted `var` declarations as
+    # inner-local, so `f = 1` inside `g` aliased the outer `f`'s box and the
+    # outer `f` printed 2 instead of 10.
+    test_gimple_stdout("gimple_nested_generator_local_shadowing_an_outer_name", """\
+def outer():
+    f = 10
+    n = 0
+    def g():
+        f = 1
+        yield f + n
+        f = 2
+        yield f + n
+    for x in g():
+        print(x)
+    print(f)
+
+def main():
+    outer()
+""", "1\n2\n10\n", filename='shadow.py')
 
     test_gimple_stdout("gimple_traceback_chain_names_and_lines", """\
 import sys

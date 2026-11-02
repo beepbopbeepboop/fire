@@ -203,3 +203,21 @@ since 18f122b7c, unrelated).
 
 Still open: `f_locals`, `f_trace`, a not-yet-started generator's real name (placeholder `<generator>`), and frame objects for C++20-coroutine
 generators and async functions (`cr_frame` of an `async def`, whose return kind is not a scalar: test_frame's `t3`).
+
+## Status (2026-11-01, stage 3 sixth slice): three generator walls test_frame.py hit are gone; two remain
+
+`MOJO_DEBUG=1 python3 fire.py build test_frame.py` now refuses only `gen` and `t3` (was: g, g, gen, t3). Fixed:
+1. A nested generator's handle used as `gen.gi_frame...` (or `gi_running`/`gi_code`/`gi_suspended`) no longer counts as a non-consumer of its
+   None-yield (`_tagged_consumers_ok`) nor as the generator escaping the method (`_generator_result_escapes`): test_clear_generator.
+2. `_tagged_consumers_ok` is keyed by NAME; calls of an ordinary nested `def g` (or a local `g` binding) in another function are skipped.
+3. REAL silent-wrong bug, found on the way: `_nested_async_free_vars` counted only `var` declarations as the inner function's locals, so in
+   Python source `f = 1` inside a nested generator whose enclosing function also binds `f` aliased the outer `f`'s box (outer printed 2, CPython
+   10). Python scoping now holds for `.py` sources (`coro._PY_SRC`, set by the root compile and each imported module); Mojo source keeps by-reference
+   capture (a plain `x += 1` in a nested `def` mutates the captured variable: `nested_async_*` runner cases). Names declared `nonlocal`/`global` stay captures.
+   Gate: `test_gimple_generator_runner.py` 438 passed / 5 failed, identical failures to master's (star_args x3, cpp_coroutine_unpack_boxed_source_refused,
+   async_for_over_nonparking_await); `compile_stdlib.py` 0 unexpected. Tests: gimple_nested_generator_local_shadowing_an_outer_name (filename='shadow.py'),
+   gimple_nested_generator_gi_frame_use_is_not_an_escape.
+`MOJO_DEBUG` now names why a nested generator missed the stack-switch hoist and which call/reference blocks the tagged-word consumer decision.
+
+Still refused: `gen` (calls an ordinary nested helper `nested()` -- the hoist leaves such generators alone, and the C++ companion cannot resolve the callee) and
+`t3` (`async def` returning `frame.f_generator`, not a scalar kind).
