@@ -32,11 +32,6 @@ honestly bound.
 """
 BASELINE = {
     'FORMAL.md': 1,
-    'bugs/mid/COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md': 1,
-    'bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__.md': 2,
-    'bugs/mid/COMPILE_FAIL_ctypes_util.md': 1,
-    'bugs/mid/COMPILE_FAIL_importlib_resources_readers.md': 2,
-    'bugs/mid/TEST_scalar_arity_min_max_link_mode_prints_nothing.md': 1,
     'bugs/formal/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md': 1,
     'bugs/formal/FORMAL_dataclass_runtime_reflection.md': 1,
     'bugs/formal/FORMAL_dylib_export_loops_and_frame_bounds.md': 1,
@@ -44,6 +39,10 @@ BASELINE = {
     'bugs/formal/FORMAL_len_of_a_readdir_name_is_refused_and_needs_a_bytes_kind.md': 1,
     'bugs/formal/FORMAL_sweep_work_map.md': 1,
     'bugs/formal/FORMAL_the_last_dylib_exports_exportEnd_includes_the_interned_strings.md': 1,
+    'bugs/mid/COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md': 1,
+    'bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__.md': 2,
+    'bugs/mid/COMPILE_FAIL_ctypes_util.md': 1,
+    'bugs/mid/COMPILE_FAIL_importlib_resources_readers.md': 2,
     'elaborate.py': 1,
     'formal/imports.py': 1,
     'gimple_codegen.py': 2,
@@ -71,11 +70,10 @@ BASELINE = {
     'test_runtime_diff.py': 1,
     'test_silent_noop_iter.py': 1,
     'test_suite.py': 9,
-    # test_swarm_feed.py names two throwaway docs (CODEGEN_x / CODEGEN_y) in a temp repo to prove the reclass moves,
-    # rewrites citations, and that a task names its branch's doc path; they are fixtures, not citations of real docs.
-    'tools/test_swarm_feed.py': 13,
     'test_zip_loop_target_rebind_regress.py': 1,
     'tools/suite.py': 2,
+    'tools/task_text.py': 4,
+    'tools/test_swarm_feed.py': 13,
 }
 
 # `BARE_BASELINE`: the same per-file ceilings for the BARE class — a citation
@@ -96,13 +94,7 @@ BASELINE = {
 # .py` is out of the walk entirely, and `test_suite.py` is in both tables for the
 # reason the header above gives for its prefixed entry.
 BARE_BASELINE = {
-    # test_swarm_feed.py's throwaway fixture docs (see BASELINE above).
-    'tools/test_swarm_feed.py': 6,
     'CRASH.md': 1,
-    'bugs/mid/CODEGEN_nested_container_as_dict_key_or_tuple_slot.md': 2,
-    'bugs/mid/CODEGEN_selfhost_tokenize_region_eq_quadratic.md': 1,
-    'bugs/mid/COMPILE_FAIL_Tools_cases_generator_analyzer.md': 3,
-    'bugs/mid/COMPILE_FAIL_importlib_resources_readers.md': 2,
     'bugs/formal/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md': 1,
     'bugs/formal/FORMAL_arm64_known_proof_gaps.md': 1,
     'bugs/formal/FORMAL_arm64_step_cannot_step_nine_wired_encodings.md': 1,
@@ -118,6 +110,10 @@ BARE_BASELINE = {
     'bugs/formal/FORMAL_sweep_singles_second_half.md': 1,
     'bugs/formal/FORMAL_the_host_import_wall_is_at_its_honest_floor.md': 1,
     'bugs/formal/FORMAL_time_struct_shaped_answers.md': 1,
+    'bugs/mid/CODEGEN_nested_container_as_dict_key_or_tuple_slot.md': 2,
+    'bugs/mid/CODEGEN_selfhost_tokenize_region_eq_quadratic.md': 1,
+    'bugs/mid/COMPILE_FAIL_Tools_cases_generator_analyzer.md': 3,
+    'bugs/mid/COMPILE_FAIL_importlib_resources_readers.md': 2,
     'doc/POLICY_memory_over_4gb.md': 1,
     'fire.py': 1,
     'formal/model.py': 4,
@@ -139,6 +135,7 @@ BARE_BASELINE = {
     'test_coro_future_await.py': 1,
     'test_coro_nested_async_capture.py': 1,
     'test_dangling_doc_refs.py': 2,
+    'test_formal_dylib.py': 1,
     'test_gimple.py': 3,
     'test_gimple_async_runner.py': 1,
     'test_gimple_generator_runner.py': 1,
@@ -149,4 +146,5 @@ BARE_BASELINE = {
     'tools/dangling_doc_refs.py': 1,
     'tools/formal_fuzz.py': 1,
     'tools/formal_sweep_causes.py': 1,
+    'tools/test_swarm_feed.py': 6,
 }
