@@ -7605,6 +7605,7 @@ def _cpp_drain_generator_args(gen, fn):
                       line=line),
         ]
         call.args = [G.IdentExpr(name=acc, line=line)] + list(call.args[1:])
+        _walk_ast_invalidate(call)
         return pre
 
     def walk(body):
@@ -7614,6 +7615,7 @@ def _cpp_drain_generator_args(gen, fn):
                 sub = getattr(st, fld, None)
                 if isinstance(sub, list):
                     setattr(st, fld, walk(sub))
+                    _walk_ast_invalidate(st)
             if (isinstance(st, G.ExprStmt) and isinstance(st.value, G.YieldFromExpr)
                     and is_wrapped_gen_call(st.value.value)):
                 out.extend(drain(st.value.value, st.line))

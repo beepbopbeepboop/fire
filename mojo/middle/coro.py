@@ -1532,8 +1532,10 @@ def _specialize_mixed_generator_callers(stmts: list) -> list:
                 nf = _copy.copy(c.func)
                 nf.name = clone_name
                 c.func = nf
+                _walk_ast_invalidate(c)
             pos = next(i for i, s in enumerate(trial) if s is fd)
             trial.insert(pos + 1, clone)
+            _walk_ast_invalidate(trial)
             added.append(clone)
         if added and _tagged_consumers_ok(g, trial):
             out = trial
@@ -1541,6 +1543,7 @@ def _specialize_mixed_generator_callers(stmts: list) -> list:
         else:
             for c, f in reversed(undo):
                 c.func = f
+                _walk_ast_invalidate(c)
     return out
 
 
@@ -5660,6 +5663,7 @@ def _lower_callable_choices(stmts: list) -> None:
                 fs = good[st.target.name]
                 st.value = N.IntLiteral(value=fs.index(st.value.name),
                                         line=st.line, col=st.col)
+                _walk_ast_invalidate(st)
         for body, i in list(_walk_lists(fd.body)):
             st = body[i]
             if (isinstance(st, N.ForStmt) and isinstance(st.iterable, N.CallExpr)
@@ -5680,6 +5684,7 @@ def _lower_callable_choices(stmts: list) -> None:
                         then_body=[branches[k]], elifs=[], else_body=chain,
                         line=st.line, col=st.col)]
                 body[i] = chain[0]
+                _walk_ast_invalidate(body)
 
     for st in stmts:
         if isinstance(st, N.FunctionDef):
