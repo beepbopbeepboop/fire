@@ -4697,8 +4697,10 @@ UNREGISTERED = {
     'test_type_system.py': "That the invariant checker catches every bug from "
         "the session that produced it — i.e. the checker is tested against its "
         "own author's list of what it should reject.",
-    'test_type_system_integration.py': 'The type system catching violations '
-        'during a real compile, which is the half the fixture list above is not.',
+    'test_type_system_integration.py': 'Snippets compile through gimple_codegen '
+        '(the type checker was removed there, b05dc1111), but NOTHING in the '
+        'pipeline reports a violation, so these cannot detect one. Not a gate '
+        'until they are rewritten against a real check or deleted (UNTESTED.md).',
 
     # ── the batch's 46 standalone regression records, declared as a group ──
     # 2026-10-27, gate triage of the 53-job gate on 08e9229bf: the batch landed

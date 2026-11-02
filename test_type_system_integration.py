@@ -1,8 +1,12 @@
 """
-Integration tests: Type system catches violations during compilation.
+Integration tests: snippets run through the gimple_codegen.py compilation
+pipeline.
 
-These tests verify that the type system catches real violations when
-integrated into the gimple_codegen.py compilation pipeline.
+The type checker these were written for was removed from gimple_codegen.py
+(b05dc1111, its checks were inert), so nothing in the pipeline detects a
+type-system violation. What these tests DO establish is that each snippet
+compiles; they cannot fail on a violation, because no violation is reported.
+Whether they should be rewritten against a real check or deleted is open.
 """
 
 from gimple_codegen import GimpleGen

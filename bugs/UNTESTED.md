@@ -45,6 +45,13 @@ both exit 0.
   nothing in `gimple_codegen.py` checks one. Whether they should be rewritten
   against a real check or deleted is a decision for the owner of the type
   system, not this round.
+  **Follow-up, same day (honesty fix, no behaviour change):** the integration
+  file's docstring still said it verified that the type system "catches real
+  violations", and `test_suite.py`'s `UNREGISTERED` excuse for it said the same.
+  Both now say what the tests establish (snippets compile) and what they
+  cannot (detect a violation). The one open decision is unchanged: rewrite
+  against a real check or delete. `test_type_system_integration.py` stays
+  unregistered; `tools/suite.py` registration is integrator-owned.
 
 ## Status, 2026-11-01 (what landed since 2026-10-02; §3a and §3.1 below are closed, the rest stands)
 
