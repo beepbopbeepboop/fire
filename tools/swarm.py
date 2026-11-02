@@ -502,15 +502,13 @@ def main():
     ap.add_argument("--target", type=int, default=None, help="default: the pool's total slots (tools/pool.json)")
     ap.add_argument("--interval", type=int, default=120, help="seconds between passes (0: one pass)")
     a = ap.parse_args()
-    if a.target is None:
-        a.target = C.pool_total()
     while True:
         try:
             apply_moves(load_state())            # a class change is a file move, so it lands before the feed reads the tree
             fed = feed()
             cont = continue_partial(load_state())
             probe_free()
-            log("feed +%d, continued %d, abandoned %d; %s" % (fed, cont, retire_dead(), refill(a.target)))
+            log("feed +%d, continued %d, abandoned %d; %s" % (fed, cont, retire_dead(), refill(a.target if a.target is not None else C.pool_total())))
             subprocess.run([sys.executable, os.path.join(HERE, "cpu_cap.py"), "ratchet"], capture_output=True, cwd=C.MAIN)
             if land():
                 verify_async()
