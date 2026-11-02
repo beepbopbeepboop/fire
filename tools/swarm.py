@@ -42,8 +42,45 @@ def log(msg):
     print("%s %s" % (time.strftime("%T"), msg), flush=True)
 
 
+# The live-session guard, set once per pass by live_guard(). A task whose worktree an opencode session is still
+# driving is BUSY: its agent is working, whatever the registry says (the CLI process may be gone while the session
+# keeps running). Busy tasks are never retired, continued, landed, or cleaned, and their claims are held for the feed.
+BUSY = {"names": set(), "claims": set()}
+
+
+def live_guard():
+    """Refresh BUSY from the opencode sessions. Returns False when the listing cannot be read: the pass then changes
+    nothing that depends on knowing what is live (no feed, continue, retire, land)."""
+    try:
+        dirs = C.live_session_dirs()
+    except (RuntimeError, OSError, ValueError) as e:
+        log("guard: %s; this pass feeds, continues, retires and lands nothing" % e)
+        return False
+    tasks = C.load()
+    names = C.busy_task_names(dirs, tasks)
+    claims = set()
+    for n in names:
+        claims.update(tasks[n].get("claims", []))
+    BUSY["names"], BUSY["claims"] = names, claims
+    log("guard: %d task(s) with a live opencode session in their tree" % len(names))
+    return True
+
+
+def drop_queued_busy():
+    """A queued task that names a doc a busy session is working on would start a second worker on it: drop it."""
+    for f in os.listdir(C.qdir()):
+        if not f.endswith(".json"):
+            continue
+        path = os.path.join(C.qdir(), f)
+        item = json.load(open(path))
+        clash = sorted(set(item.get("claims", [])) & BUSY["claims"])
+        if clash:
+            os.remove(path)
+            log("dropped queued %s: %s is held by a live session" % (item.get("name", f), ", ".join(clash)))
+
+
 def held_claims():
-    held = set()
+    held = set(BUSY["claims"])                  # a live session holds its docs, whatever its registry state
     for t in C.load().values():
         if C.holds_claims(t):                   # the same rule spawn uses: live work, or commits not yet landed
             held.update(t.get("claims", []))
@@ -345,7 +382,7 @@ def continue_partial(st):
     track = st.setdefault("track", {})    # doc -> the branch tip its open round started from
     n = 0
     for name, t in C.load().items():
-        if not name.startswith(PREFIXES) or t.get("state") in C.TERMINAL:
+        if not name.startswith(PREFIXES) or t.get("state") in C.TERMINAL or name in BUSY["names"]:
             continue
         if C.state_of(t) not in ("exited-ok", "exited-err") or C.verdict(t) == "DONE" or not C.ahead(t):
             continue                       # still running, DONE (the integrator takes it), or no commits (retire_dead)
@@ -387,7 +424,7 @@ def retire_dead():
     # counted when they happened, so the backlog is retired WITHOUT counting them again (no mass reclass).
     backfill = not st.get("retire_backfilled")
     for name, t in C.load().items():
-        if not name.startswith(PREFIXES) or C.state_of(t) == "running" or C.holds_claims(t):
+        if not name.startswith(PREFIXES) or C.state_of(t) == "running" or C.holds_claims(t) or name in BUSY["names"]:
             continue
         if C.state_of(t) in C.TERMINAL:
             continue
@@ -446,7 +483,7 @@ def find_culprit(seq, failing):
 
 
 def land():
-    names = [n for n in I.pick_candidates(quiet=True) if n.startswith(PREFIXES)]
+    names = [n for n in I.pick_candidates(quiet=True) if n.startswith(PREFIXES) and n not in BUSY["names"]]
     names = fresh_first(names, C.load())
     dirty = set(C.git("diff", "--name-only", "HEAD", cwd=C.MAIN).split())
     if dirty:
@@ -561,14 +598,19 @@ def main():
     _lock = take_lock()     # held until this process exits
     while True:
         try:
+            guard_ok = live_guard()
             apply_moves(load_state())            # a class change is a file move, so it lands before the feed reads the tree
             subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "reap"], capture_output=True, cwd=C.MAIN)  # jobs of finished workers
-            fed = feed()
-            cont = continue_partial(load_state())
+            fed = cont = retired = 0
+            if guard_ok:
+                fed = feed()
+                cont = continue_partial(load_state())
+                retired = retire_dead()
             probe_free()
-            log("feed +%d, continued %d, abandoned %d; %s" % (fed, cont, retire_dead(), refill(a.target if a.target is not None else C.pool_total())))
+            drop_queued_busy()
+            log("feed +%d, continued %d, abandoned %d; %s" % (fed, cont, retired, refill(a.target if a.target is not None else C.pool_total())))
             subprocess.run([sys.executable, os.path.join(HERE, "cpu_cap.py"), "ratchet"], capture_output=True, cwd=C.MAIN)
-            if land():
+            if guard_ok and land():
                 verify_async()
                 subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "cleanup"], capture_output=True, cwd=C.MAIN)  # landed trees go
                 log("landed; post-landing verifier started")
