@@ -255,3 +255,33 @@ runner 440 passed with master's 5 failures, `compile_stdlib.py` 0 unexpected (no
 lowered as a `dict` display). Beyond that wall the file still needs `TestCase` / `assertRaises*` / `support` / `threading_helper` compiled, `f_locals`, `f_trace`,
 and `FrameLocalsProxy`. So the frame MODEL (frames, `f_back`, tracebacks, `gi_frame`, `f_generator`, `clear()`, per-coroutine frame slices) is done for the
 shapes test_frame.py exercises; the doc's remaining scope is `f_locals` / `f_trace` and running the file through its real imports.
+
+## Plan (2026-11-01): `f_locals` and `f_trace` — decisions, mechanism, ordering, tests
+
+State measured: both are unlowered (`frame.f_locals` reads fall to the generic attribute path; `f_trace` assignment is an attribute store on an int64 word).
+Everything else test_frame.py needs from the frame model is landed (slices 1-9 above). What these two need is a mechanism, because compiled C locals have no
+runtime names or addresses: `-fgimple` rejects address-taken locals, so a frame record cannot simply point at the function's variables.
+
+### `f_locals` (a dict of the frame's locals, read through `frame.f_locals` / `f_back.f_locals[...]`)
+Decision needed, with the readings laid out:
+- (A) **Box-all-locals for functions that can be observed.** Reuse the capture machinery (`coro._apply_nested_async_capture` / `__mojo_box_new_*`): when a compile
+  mentions `f_locals` anywhere (same trigger family as `gen._frames_mods`), every instrumented function boxes its locals, and `mojo_frame_enter` takes a
+  descriptor array `{name, kind, box handle}` built at entry. `f_locals` builds a dict from the live boxes (`mojo_frame_locals(word)`), kinds drive the
+  value spelling (`mojo_box_*`). Cost: slower and larger C for modules that use frames; zero cost for every other module (the trigger gates it).
+  Writes through the returned dict are a CPython 3.13 `FrameLocalsProxy` feature (write-through): with boxes it is a store into the box, which is exact.
+- (B) **Snapshot at call sites.** Spill named locals to a table before each call that could reach `f_locals`. Needs interprocedural knowledge of who reads
+  `f_locals`; rejected: unsound for `f_back.f_locals` from any callee.
+- (C) **Refuse** (`NotImplementedError`) until (A). Today it silently answers garbage, so refusal is the minimum.
+Recommendation: land (C) first (one lowering arm in `emit_exprs._lower_MemberExpr` raising a named compile error, so nothing answers silently), then (A).
+Plan for (A): `emit_methods._frame_enter` emits the descriptor build after the prologue; a new pass `coro`-style `_box_all_locals(fn)` (reuse `_cap_rewrite_stmts`)
+rewrites reads/writes of every local; runtime `MojoFrameRec` gains `locals`/`nlocals`; generator frames keep them in the per-coroutine slice (already copied
+by value; the boxes are heap, so they survive). Tests: `f_back.f_locals["xs"]` read and write (test_frame `test_overwrite_locals`), a generator's `gi_frame.f_locals`,
+and the byte-identical-C check that a module without `f_locals` is unchanged (`compile_stdlib.py` GCC CAS hit count).
+
+### `f_trace` / `sys.settrace`
+`mojo_frame_set_line` already runs once per statement. Add `_mojo_trace_fn` (the registered tracer) and a per-frame `f_trace` word; when either is set,
+`set_line` calls `mojo_trace_event(frame, "line")` (and enter/leave emit "call"/"return"), invoking the compiled callable through `mojo_dyn_call`. Cost is a
+branch on a global in `set_line`. Needs the callable-value ABI (`mojo_dyn_call`, landed) and a frame word the tracer can read (`f_lineno`, `f_code`, landed).
+Test: test_frame's `test_lineno_with_tracing` (`sys._getframe(0).f_trace = True` then three `record_line()` calls expecting `[1, 4, 5]`).
+
+Ordering: (C) refusal for f_locals -> f_trace -> (A). Neither needs the unittest closure; both can be tested with small programs first.
