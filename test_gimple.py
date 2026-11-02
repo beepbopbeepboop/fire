@@ -3516,19 +3516,21 @@ def f():
     # compile-only smoke test, and test_gimple_generator_runner.py for the
     # REAL behavioral (compile+link+run) coverage of this exact shape.
 
-    # Mixed yield-value types (int then float): passes the cheap
-    # _generator_quick_eligible pre-filter (no params/try/with/yield-from)
-    # but _gen_cpp_generator_unit's own _generator_yield_ctype check must
-    # still reject it (Milestone B requires one consistent scalar type
-    # across every `yield` in the body) and gen_module's pre-pass must fall
-    # back to the honest refusal cleanly — exercises the
-    # _UnsupportedGeneratorShape catch path itself, not just the cheap
-    # pre-filter.
-    _run_isolated(lambda: test_raises("generator_mixed_yield_types_honest_fallback", """\
+    # Mixed yield-value types (int then float). This used to be an honest
+    # refusal ("generator function"); it is now the TAGGED-word yield
+    # (mojo/middle/coro.py `_generator_value_kind`, commit 11eece66b): when
+    # the yield kinds are known and differ, the value slot is the boxed word,
+    # and a float yield is boxed by its static kind at the yield site
+    # (`mojo_box_from_double`). The refusal stays for every consumer that
+    # cannot read the box (`_tagged_consumers_ok`). This module's cases only
+    # pin that the shape COMPILES and boxes the float; that the for-loop
+    # consumer renders `1` / `1.5` correctly is run by
+    # test_gimple_generator_runner.py (generator_mixed_yield_kinds_int_double).
+    _run_isolated(lambda: test_c_shape("generator_mixed_yield_types_tagged_word", """\
 def f():
     yield 1
     yield 1.5
-""", "generator function"), 'generator_mixed_yield_types_honest_fallback')
+""", ["mojo_box_from_double"], []), 'generator_mixed_yield_types_tagged_word')
 
     # Mixed yield kinds whose EMITTED C++ can never share one promise type:
     # a tuple-yield site always co_yields a MojoList* pointer
@@ -5705,7 +5707,7 @@ async def f():
 """), 'async_function_no_return_value_now_supported')
 
     # Two `return`s that don't agree on one consistent scalar type — the
-    # async counterpart of generator_mixed_yield_types_honest_fallback.
+    # async counterpart of the (since-superseded) mixed-yield refusal test.
     with _force_cpp_coro():
         test_raises("async_function_mixed_return_types_honest_fallback", """\
 async def f():
