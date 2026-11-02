@@ -58,7 +58,6 @@ from mojo.middle.stmts_shared import (
 )
 from mojo.middle.types import _is_empty_container_literal
 from mojo.middle.calls_shared import _is_pointer_ctype
-from mojo.middle.calls_shared import FRAME_SETTABLE_IDS
 from mojo.middle.calls_shared import _py_box_expr
 # `ZipLongestFillRefusal` and nothing else from there: the class has to be the
 # SAME object `emit_loops.py` raises and this module's `zip_longest` arm
@@ -399,12 +398,6 @@ def _record_bool_valued(gen, name: str, value) -> None:
     consulted only by the print dispatch, so this adds no claim to the type
     lattice itself."""
     try:
-        # A local captured by a nested def is boxed: its first binding became
-        # `__mojo_box_new_i64(<init>)`, so look through the box to the value.
-        if (isinstance(value, gimple_ctypes.CallExpr)
-                and isinstance(value.func, gimple_ctypes.IdentExpr)
-                and value.func.name == '__mojo_box_new_i64' and len(value.args) == 1):
-            value = value.args[0]
         if isinstance(value, gimple_ctypes.BoolLiteral):
             gen._bool_valued.add(name)
         elif gen._quick_type(value) == '_Bool':
@@ -1178,12 +1171,6 @@ def _gen_stmt_AssignStmt(gen, node):
             and getattr(node, 'value', None) is not None:
         _record_bool_valued(gen, node.target.name, node.value)
     if (isinstance(node.target, gimple_ctypes.IdentExpr)
-            and getattr(node, 'value', None) is not None and len(gen._frames_mods) > 0):
-        if gmp._is_frame_expr(gen, node.value):
-            gen._frame_vars.add(_as_str(node.target.name))
-        else:
-            gen._frame_vars.discard(_as_str(node.target.name))
-    if (isinstance(node.target, gimple_ctypes.IdentExpr)
             and getattr(node, 'value', None) is not None
             and _try_bind_iter_cursor(gen, node.target.name, node.value)):
         return
@@ -1242,15 +1229,7 @@ def _gen_stmt_AssignStmt(gen, node):
             n_after64 = gen._new_val('int64_t', f"(int64_t){n_after}")
             star_stop = gen._new_val('int64_t', f"{total} - {n_after64}")
             star_v = gen._new_val('MojoList *', f"mojo_list_slice ({lp}, {star_start}, {star_stop})")
-            if lp in getattr(gen, '_maybe_kinds_vals', ()):
-                gen._maybe_kinds_vals.add(star_v)
-                if lp in getattr(gen, '_struct_slot_kinds', {}):
-                    gen._struct_slot_kinds[star_v] = gen._struct_slot_kinds[lp]
-                else:
-                    gen._struct_slot_kinds.pop(star_v, None)
-                gen._elem_types.pop(star_v, None)
-            else:
-                gen._elem_types[star_v] = elem_type
+            gen._elem_types[star_v] = elem_type
             gen._assign_target(star_target, 'MojoList *', star_v)
             for j, tgt in enumerate(after):
                 j64 = gen._new_val('int64_t', f"(int64_t){j}")
@@ -1336,35 +1315,9 @@ def _gen_stmt_AssignStmt(gen, node):
                         args=[node.value], line=node.line, col=node.col),
                     line=node.line, col=node.col))
                 return
-    # `frame.f_trace = x` / `f_trace_lines` / `f_trace_opcodes`: a stored word on the frame record.
-    if (isinstance(node.target, gimple_ctypes.MemberExpr) and len(gen._frames_mods) > 0
-            and _as_str(node.target.member) in ('f_trace', 'f_trace_lines', 'f_trace_opcodes')
-            and getattr(node, 'value', None) is not None):
-        _fo_t, _fo_v = gen.lower_expr(node.target.obj)
-        _fv_t, _fv_v = gen.lower_expr(node.value)
-        _ft_name = _as_str(node.target.member)
-        if _ft_name != 'f_trace' and not gimple_exprtypes.is_python_bool_expr(gen, node.value):
-            # CPython: `f_trace_lines` / `f_trace_opcodes` accept only a bool ("attribute value
-            # type must be bool"). Raise for any non-bool value (including variables holding ints).
-            gen._emit_call('void', '', 'mojo_raise_type_error',
-                           [('char *', gen._intern_string(
-                               gimple_ctypes._c_escape("attribute value type must be bool")))])
-            return
-        gen._void_call('mojo_frame_set_attr',
-                       [('int64_t', gen._to_int64(_fo_t, _fo_v)),
-                        ('int64_t', gen._new_val('int64_t', f"(int64_t){FRAME_SETTABLE_IDS[_as_str(node.target.member)]}")),
-                        ('int64_t', gen._to_int64(_fv_t, _fv_v))])
-        return
     vtype, v = gen.lower_expr(node.value)
     if isinstance(node.target, gimple_ctypes.IdentExpr):
         tname = node.target.name
-        # A name bound to a word of UNKNOWN kind (`d = os.path.split(b'a/b')[0]`,
-        # a list element of a bytes split) is one too: its later reads are the
-        # name itself, so its truthiness and its `or`/`and` ask the runtime
-        # (`_dyn_word_locals`) rather than `!= 0`, which called an empty bytes
-        # object true.
-        if vtype == 'int64_t' and v in gen._dyn_word_vals:
-            gen._dyn_word_locals.add(_as_str(tname))
         # A generator handle bound to a local whose slot is a plain word (it also
         # holds a list on another path: `dirs = _iglob(...)` / `dirs = [dirname]`,
         # then `for d in dirs`): the run time has to be told which generator it is
@@ -3558,16 +3511,6 @@ def _gen_stmt_DelStmt(gen, node):
     specifically.
     """
     for target in node.targets:
-        # `del frame.f_trace` / `f_trace_lines` / `f_trace_opcodes` in a frame-instrumented module:
-        # the runtime decides what a delete means for each (see mojo_frame_del_attr).
-        if (isinstance(target, gimple_ctypes.MemberExpr) and len(gen._frames_mods) > 0
-                and _as_str(target.member) in FRAME_SETTABLE_IDS):
-            _dt_t, _dt_v = gen.lower_expr(target.obj)
-            gen._void_call('mojo_frame_del_attr',
-                           [('int64_t', gen._to_int64(_dt_t, _dt_v)),
-                            ('int64_t', gen._new_val('int64_t',
-                                                     f"(int64_t){FRAME_SETTABLE_IDS[_as_str(target.member)]}"))])
-            continue
         # A bare single-slice subscript (`x[a:b]`) parses as a SliceExpr
         # with .obj attached directly, NOT wrapped in a SubscriptExpr —
         # see fire_compiler.py's own `_parse_postfix`: "if len(items) ==
@@ -4426,17 +4369,6 @@ def _gen_stmt_ExprStmt(gen, node):
         if raw_name in ('list', 'tuple') and len(node.value.args) <= 1:
             gen._lower_builtin_list(node.value)
             return
-        # A bare call to a Python builtin is value-discarding, but the builtin's
-        # dispatch lives in the value form (`_lower_call` -> `_lower_named_call`):
-        # the 2/3-arg `str(bytes, encoding[, errors])` decode, `pow`'s 3-arg form,
-        # `hasattr`, `sorted`, ... Lowering the call here through BUILTIN_VALUE_MAP
-        # alone emitted `mojo_str(b, enc)` for `str(b"\xff", "ascii")` as a
-        # statement ("too many arguments to function 'mojo_str'"). Route it through
-        # the one value-form builtin path and discard the result; the call is still
-        # emitted (every call lowers to a temp). `print` returned above.
-        if raw_name in ggc._PY_BUILTIN_NAMES and not gen._locally_binds_name(raw_name):
-            gen._lower_call(node.value)
-            return
         # A statement `setattr(obj, name, v)` / `delattr(obj, name)`: the same
         # lowering the expression form gets in `_lower_call`, which stores
         # through the struct's own field dispatch (`_mojo_dispatch_setattr`).
@@ -4882,23 +4814,20 @@ def _gen_stmt_RaiseStmt(gen, node):
 
     if exc_name:
         gen._emit(f"  mojo_exc_type_set ({gen._exc_type_id(exc_name)});")
-    if exc_name == 'StopIteration' and isinstance(val, gimple_ctypes.CallExpr) and len(val.args) == 1:
-        # `raise StopIteration(x)`: `ex.value` is x (set AFTER the type, which clears it).
-        _sv_t, _sv_v = gen.lower_expr(val.args[0])
-        if _sv_t != 'double':
-            gen._void_call('mojo_exc_value_set', [('int64_t', gen._to_int64(_sv_t, _sv_v))])
     if isinstance(msg_arg, (gimple_ctypes.StringLiteral, gimple_ctypes.IdentExpr)):
         mt, mv = gen.lower_expr(msg_arg)
         if mt == 'char *':
-            # Build exception object with args list (root cause: args must travel with object)
-            args_list = gen._new_temp('MojoList *')
-            gen._emit(f"  {args_list} = mojo_list_new ();")
-            gen._emit(f"  mojo_list_append_str ({args_list}, {mv});")
-            exc_obj = gen._new_temp('MojoExc *')
-            type_tag = gen._exc_type_id(exc_name) if exc_name else "0"
-            gen._emit(f"  {exc_obj} = mojo_exc_new ({type_tag}, {mv}, {args_list});")
-            gen._emit(f"  mojo_exc_obj_set ({exc_obj});")
             gen._emit(f"  mojo_exc_msg_set ({mv});")
+            # The object slot is what `except X as e:` actually binds
+            # (see _emit_handler_body) — without this, `e` reads back
+            # whatever was last there (frequently NULL), regardless of
+            # the message just set above. A bare string is the only
+            # payload shape raise-lowering supports right now (an
+            # arbitrary Int/Dict/struct payload would need real value
+            # construction here plus a way for the handler to know
+            # which of several possible C types to cast back to —
+            # tracked as a follow-up, not done here).
+            gen._emit(f"  mojo_exc_obj_set ({mv});")
 
     gen._emit("  mojo_raise ();")
 

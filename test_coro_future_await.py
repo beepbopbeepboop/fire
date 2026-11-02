@@ -16,7 +16,6 @@ import tempfile
 import gimple_codegen
 from mojo.middle import coro
 from build_config import find_gcc, find_gxx
-from exec_budget import COMPILE_TIMEOUT_S, LINK_TIMEOUT_S, RUN_TIMEOUT_S
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUNTIME_DIR = os.path.join(HERE, 'runtime')
@@ -78,8 +77,7 @@ def _build_and_run(mojo_src: str, require=_AWAITABLE_SHIMS) -> str:
     objs = []
     r = subprocess.run([GCC, '-fgimple', f'-I{RUNTIME_DIR}', '-w', '-c', '-o',
                         os.path.join(wd, 'prog.o'), c_path],
-                       capture_output=True, text=True,
-                       timeout=COMPILE_TIMEOUT_S)
+                       capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
         raise RuntimeError(f"gcc -fgimple compile failed: {r.stderr}\n---\n{c_code}")
     objs.append(os.path.join(wd, 'prog.o'))
@@ -90,20 +88,17 @@ def _build_and_run(mojo_src: str, require=_AWAITABLE_SHIMS) -> str:
         extra = ['-std=c++20'] if is_cpp else []
         o = os.path.join(wd, f'rt{i}.o')
         r = subprocess.run([cc, *extra, f'-I{RUNTIME_DIR}', '-c', '-o', o, src],
-                           capture_output=True, text=True,
-                           timeout=COMPILE_TIMEOUT_S)
+                           capture_output=True, text=True, timeout=60)
         if r.returncode != 0:
             raise RuntimeError(f"compile of {src} failed: {r.stderr}")
         objs.append(o)
 
     exe = os.path.join(wd, 'prog.exe')
-    r = subprocess.run([GXX, '-o', exe, *objs], capture_output=True, text=True,
-                       timeout=LINK_TIMEOUT_S)
+    r = subprocess.run([GXX, '-o', exe, *objs], capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
         raise RuntimeError(f"link failed: {r.stderr}")
     os.chmod(exe, 0o755)
-    r = subprocess.run([exe], capture_output=True, text=True,
-                       timeout=RUN_TIMEOUT_S)
+    r = subprocess.run([exe], capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
         raise RuntimeError(f"program exited {r.returncode}, stderr={r.stderr}")
     return r.stdout

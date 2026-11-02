@@ -7,8 +7,6 @@ here, with the measurements; the blowup itself is NOT fixed.** Found while
 landing the bit-test proof arm (whose doc is deleted with it) and re-measured
 2026-10-03 on this tree, with the measurement the earlier rounds did not take.
 
-**Status, 2026-11-01: the CSEL row lands (doc `FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`, deleted), and its walled export leaf is this doc's four-branch boundary — reached and recorded for a CSEL program.** f4, four conditional branches, a 1,063,840-byte proof, under the 12 GB slot: killed at 1501 s CPU against the 1500 s bound, peak 6.3 GB, `sorries=None` — "NOT a verdict on the proof". Where the 2026-10-05 entry measured the four-branch breach at an 8 GB ceiling (a memory verdict), this run under the 12 GB ceiling hit the CPU-time bound first. The boundary itself is unchanged by the CSEL row — the cost is the per-path value-flow facts, and §5's HOIST remains the next step. For the control: the three-branch CSEL program (f3) checks — wall 560.1 s, peak 5.6 GB — its only errors being the five `ast` ones of the separate emission defect recorded in the CSEL doc's Status.
-
 ## 2026-10-05 (`work/formal31-2`): the boundary has MOVED to four branches, the
 ## concrete theorem is NOT the cost, and `hprior` is 4% of the walk theorem
 

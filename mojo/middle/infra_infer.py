@@ -961,7 +961,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                 for arg in expr.args:
                     scan_expr(arg)
 
-        def scan_nodes(node_list: list):
+        def scan_nodes(node_list):
             """Recursively scan a list of statements."""
             def _track_derivation(target, value):
                 """`x = <subscript/slice of something already known to
@@ -2175,7 +2175,7 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
             # s` printed the pointer's decimal address instead of "abc"
             # until this case was added; the container literals below
             # already had an identical fix.
-            cand = 'MojoBytes *' if getattr(n.value, 'is_bytes', False) else 'char *'
+            cand = 'MojoBytes *' if n.value.is_bytes else 'char *'
         elif isinstance(n.value, gimple_ctypes.FloatLiteral):
             # A `double` local, which is the ONE scalar this map used to
             # have no answer for at all — the docstring above calls scalars
@@ -2268,25 +2268,6 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
                             _nv = gen._generator_value_ctype_for_next(_nargs[0])
                         if _nv:
                             cand = _nv
-                if cand is None and not isinstance(_v, (gimple_ctypes.IdentExpr, gimple_ctypes.StringLiteral)):
-                    # A STRING-valued expression bound to a local: `a = str(n)`,
-                    # `a = d + "x"`, `a = d.strip()`, `a = os.path.join(d, f)`.
-                    # `return a` from a function with no return annotation
-                    # inferred the int64_t default, so the function was
-                    # declared `int64_t`, the body laundered the `char *`
-                    # through it, and the caller's `print` formatted the
-                    # string's ADDRESS as a decimal number -- silently wrong
-                    # output with a clean build. `return d + "x"` directly
-                    # was already right: `_quick_type` types the returned
-                    # expression, but not a local that was bound from it,
-                    # because this map only accepted literals, containers,
-                    # struct constructors and `next()` as pointer evidence.
-                    # Asked through `gen._quick_type`, the SAME estimator the
-                    # `return` is typed with, so the two agree by
-                    # construction; only a `char *` answer is taken, so no
-                    # scalar, container or struct answer changes.
-                    if gen._quick_type(_v) == 'char *':
-                        cand = 'char *'
                 if cand is None:
                     # `q = p` -- a local bound from ANOTHER local this map
                     # already knows, which is the same value under a second
@@ -3047,7 +3028,7 @@ def _is_free_eligible_function(fn) -> bool:
                            # of its own is_async/is_generator flags
     return True
 
-def _build_analysis_funcs(stmts: list) -> dict:
+def _build_analysis_funcs(stmts) -> dict:
     """The module-level functions the ownership analysis may resolve a call
     to, `{name: FunctionDef}`. A name is included only if the analysis can
     be sure a call spelled `name(...)` in this module reaches THAT body:
@@ -3079,7 +3060,7 @@ def _build_analysis_funcs(stmts: list) -> dict:
             out[s.name] = s
     return out
 
-def _build_analysis_structs(stmts: list) -> dict:
+def _build_analysis_structs(stmts) -> dict:
     """The module's structs the ownership analysis may reason about,
     `{struct name: {method name: FunctionDef}}`. A struct is included only if a
     constructor call `Name(...)` provably builds a fresh instance and its
@@ -3130,23 +3111,6 @@ def _build_fresh_returning(funcs: dict, structs: dict = None) -> set:
     for name in funcs:
         try:
             if ownership_destruct.analyze_returns_fresh(funcs[name], funcs, {}, structs):
-                out.add(name)
-        except Exception:
-            pass
-    return out
-
-def _build_fresh_closure_returning(funcs: dict) -> set:
-    """Names in the analysis table whose every call provably returns a brand-
-    new CAPTURING closure (ownership_destruct.returns_fresh_closure) — a value
-    the caller can own and free with its environment and the `{mut}` boxes it
-    holds (mojo_closure_free). The escaping counterpart of `_build_fresh_
-    returning` (a fresh container). Same fail-open-to-"not proven" contract: a
-    failure inside the analysis drops the name, which keeps today's leak and
-    never a use-after-free."""
-    out = set()
-    for name in funcs:
-        try:
-            if ownership_destruct.returns_fresh_closure(funcs[name]):
                 out.add(name)
         except Exception:
             pass
@@ -3357,50 +3321,6 @@ def _compute_scoped_closure_candidates(fn, whole: set) -> set:
     except Exception:
         return set()
 
-def _is_fresh_closure_binding(stmt, fresh_closure_returning) -> bool:
-    """True iff `stmt` is a `var x = f(...)`/`x = f(...)` whose callee `f` is
-    proven to return a fresh closure (`fresh_closure_returning`) — the shape a
-    caller owns with `mojo_closure_free`. A shadowed name (a local of this
-    function named `f`) is not the module callee, so it is not a binding."""
-    val = getattr(stmt, 'value', None)
-    if val is None or not isinstance(val, CallExpr):
-        return False
-    if not isinstance(val.func, IdentExpr):
-        return False
-    return _as_str(val.func.name) in fresh_closure_returning
-
-def _compute_scoped_fresh_closure_candidates(fn, fresh_closure_returning) -> set:
-    """The locals of `fn` bound to a call that provably returns a fresh
-    closure, owned by a LOOP BODY (declared directly in it and only called,
-    `ownership_destruct.call_value_owned`), so the caller owns the value and
-    frees it with `mojo_closure_free` at the body's exit. The escaping
-    counterpart of `_compute_scoped_closure_candidates` (a local lambda). Same
-    fail-open-to-"free nothing" contract: a bug in this optional analysis must
-    never fail a build, and "not proven" keeps today's leak, never a use-after-
-    free. An empty `fresh_closure_returning` (no such callee in the module) is
-    the common case and costs one set lookup."""
-    if getattr(fn, 'is_async', False) or getattr(fn, 'is_generator', False):
-        return set()
-    if not fresh_closure_returning:
-        return set()
-    try:
-        out = set()
-        bodies = []
-        ownership_destruct._collect_loop_bodies(fn.body, bodies)
-        for body in bodies:
-            for st in body:
-                nm = ownership_destruct._decl_name(st)
-                if nm == '':
-                    continue
-                if not _is_fresh_closure_binding(st, fresh_closure_returning):
-                    continue
-                if not ownership_destruct.call_value_owned(fn.body, nm):
-                    continue
-                out.add(nm)
-        return out
-    except Exception:
-        return set()
-
 def _lambda_bindings(fn) -> set:
     """Every name `fn` binds to a `lambda` expression, however deeply — the
     whole-program node walk `exprtypes._walk_ast` already provides, not a
@@ -3434,18 +3354,6 @@ def _lambda_owned(body, name: str) -> bool:
     False, so an unanalysable body keeps the value alive."""
     try:
         return ownership_destruct.lambda_value_owned(body, name)
-    except Exception:
-        return False
-
-
-def _call_value_owned(body, name: str) -> bool:
-    """A local bound to the return value of a fresh-closure-returning call may
-    be freed at its end-of-scope only if the binding is a CallExpr whose callee
-    is such a fn, and the name is neither read nor written again afterwards
-    (see ownership_destruct.call_value_owned). A failure inside the check
-    answers False, so an unanalysable body keeps the value alive."""
-    try:
-        return ownership_destruct.call_value_owned(body, name)
     except Exception:
         return False
 

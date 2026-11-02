@@ -457,62 +457,6 @@ def _has_while(stmts) -> bool:
     return False
 
 
-def _ternary_count(e) -> int:
-    """The value-position ternaries in an expression, operands included.
-
-    `TernaryExpr` is the value-position `if` — the shape `arm64_step`'s CSEL
-    arm and `work_step_csel` model, and the one the untyped AST bridge has no
-    constructor for — and this counts them where `_ast_model_cannot_state`
-    only asked whether any exist: the certificate's cost row is keyed on HOW
-    MANY conditions a body carries, not whether it carries one. The walk is
-    over the node's dataclass fields rather than a hand list of expression
-    kinds, so an operand a hand list forgot is still counted.
-    """
-    if e is None:
-        return 0
-    if isinstance(e, F.TernaryExpr):
-        return (1 + _ternary_count(e.condition)
-                + _ternary_count(e.then_val) + _ternary_count(e.else_val))
-    n = 0
-    for name in getattr(e, "__dataclass_fields__", ()) or ():
-        if name in ("line", "col"):
-            continue
-        child = getattr(e, name, None)
-        if isinstance(child, list):
-            n += sum(_ternary_count(c) for c in child)
-        elif child is not None and not isinstance(
-                child, (str, int, float, bool)):
-            n += _ternary_count(child)
-    return n
-
-
-def _cond_branch_count(stmts) -> int:
-    """The conditional branches a statement list carries: one per `if` and
-    one per value-position ternary, recursing into the arms and operands.
-
-    This is the certificate's cost row: the walk theorem's per-path value-flow
-    facts grow with the number of source-level conditions, branch or not — a
-    value-position ternary is branchless on the machine (`cmp` + `CSEL`, no
-    branch instruction) yet it still doubles the paths the per-condition
-    `hcond` facts are stated over, which is the reading the `B.cond` control
-    in `bugs/formal/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.
-    md` gives for the statement-`if` shape and the measured ternary class
-    (one checks, three check at 560 s / 5.6 GB, four kill at the 1500 s CPU
-    bound) gives for this one.
-    """
-    n = 0
-    for st in stmts:
-        if isinstance(st, IfStmt):
-            _c, _tb, _eb = _if_expand(st)
-            n += (1 + _ternary_count(_c)
-                  + _cond_branch_count(_tb) + _cond_branch_count(_eb))
-        else:
-            # The value position the statement carries: `return`'s value,
-            # an `Assign`/`AugAssign`/`VarDecl` right-hand side, an `ExprStmt`.
-            n += _ternary_count(getattr(st, "value", None))
-    return n
-
-
 #: Node types that start a NESTED SCOPE.  A call inside one is not a call of
 #: the enclosing function: a nested `def`'s body runs when IT is called, and a
 #: lambda's body when the lambda object is called.  Every walker below stops at
@@ -686,120 +630,57 @@ class _Scope(dict):
 
 
 def _call_go(e, param: str, env: dict, scope, render) -> str:
-    """The model term for a call expression `f(a, b, …)`."""
+    """The model term for a call expression `f(a, b, …)`.
+
+    **Every** argument is rendered, not just the first.  The form this
+    replaces took `e.args[0]` and dropped the rest, so `f(a, b)` was modelled
+    as `f_go a` — a *different function's* model, silently, for every
+    two-argument call.  That is unsoundness, not incompleteness: the universal
+    theorem states the model's value is what the machine computes, and the
+    model was some other function.  Measured on `fn add2(a, b) = a + b`, the
+    model came out `a + 0` while the program returns `a + b`.
+
+    `scope` maps a function name to its AST node, and it is what makes `f_go`
+    resolvable at all.  The generator used to emit a model for the proved
+    function alone, so a call to a second function in the same program named
+    a `f_go` that was never defined — a Lean error about an unknown
+    identifier, hundreds of lines downstream of the call that caused it.
+
+    A callee with no model is **refused**, not guessed at — UNLESS it is an
+    admitted contract, in which case the contract IS its model and is named in
+    the term.  Those are the two cases `formal/admitted.py` exists to tell
+    apart.  Refusing is right for an extern: an extern's return value is not a
+    term this model can invent, and inventing one is precisely the fabrication
+    the model exists to avoid.  It is wrong for a callee whose return value is
+    a declared external contract, because the declaration is already the
+    answer: rendering the call as an application of the `sorry`-proved
+    `admitted_<module>_<name>` makes the model's value the contract's, which is
+    what the proof then says about the machine — and leaves the trust named,
+    counted and locatable instead of turning a program with a declared
+    dependency into one with no proof at all.
+    """
     sym = _call_name(e)
-    # Builtin: len() on strings/blobs
-    if sym == "len":
-        if len(getattr(e, 'args', []) or []) == 1:
-            arg = e.args[0]
-            # Try to get kind
-            try:
-                from formal import model as M
-                kind = None
-                if scope is not None:
-                    try:
-                        kind = scope._expr_str_kind(arg) if hasattr(scope, '_expr_str_kind') else M.kind_of(arg)
-                    except Exception:
-                        try:
-                            kind = M.kind_of(arg)
-                        except Exception:
-                            kind = None
-                else:
-                    try:
-                        kind = M.kind_of(arg)
-                    except Exception:
-                        kind = None
-                how = M.len_operand_lowering(kind, arg) if kind is not None else None
-                if how == M.LEN_FROM_STRLEN or kind == M.STR_KIND:
-                    return f"(strlen {render(arg, param, env)})"
-                if how == M.LEN_FROM_BLOB_FIELD or (isinstance(kind, str) and ('list' in kind or 'tuple' in kind or 'set' in kind or 'dict' in kind or 'blob' in kind)):
-                    # For blobs, len is count at offset 0
-                    base = render(arg, param, env)
-                    return f"(mem_read_u64 (fun _ => 0) {base})"  # placeholder? better read from model
-                # For strings even if kind detection tricky, try strlen
-                return f"(strlen {render(arg, param, env)})"
-            except Exception:
-                return f"(strlen {render(e.args[0], param, env)})"
-    # Check for struct constructors
-    structs_by_name = None
-    if scope is not None:
-        structs_by_name = getattr(scope, 'structs_by_name', None) or getattr(scope, 'structs', None)
-        # also check if stored differently
-        if structs_by_name is None and hasattr(scope, '__dict__'):
-            structs_by_name = scope.__dict__.get('structs_by_name') or scope.__dict__.get('structs')
-    # also check tc if passed differently - scope might contain tc
-    if structs_by_name is None and isinstance(scope, dict):
-        structs_by_name = scope.get('structs_by_name') or scope.get('structs')
-    # normalize
-    if structs_by_name is not None and isinstance(structs_by_name, dict):
-        # if values are lists of structs?
-        pass
-    # try to detect: if sym names a struct
-    if structs_by_name is not None:
-        # could be dict name->struct def
-        try:
-            import inspect
-            # check
-            pass
-        except Exception:
-            pass
-        # common forms
-        is_struct = False
-        if isinstance(structs_by_name, dict) and sym in structs_by_name:
-            is_struct = True
-        elif isinstance(structs_by_name, (list, tuple, set)):
-            if sym in structs_by_name:
-                is_struct = True
-        # also check by trying to get from scope attrs
-        if not is_struct and hasattr(scope, 'get_struct'):
-            try:
-                if scope.get_struct(sym):
-                    is_struct = True
-            except Exception:
-                pass
-        if is_struct:
-            # Struct constructor: return a value representing constructed struct
-            # For one-word/zero-field structs, typically 0 or first arg
-            # Based on codegen: for one-field/frame/zero cases, result is often 0 or passed value
-            from formal import model as M
-            # Try to find struct def
-            st = None
-            if isinstance(structs_by_name, dict):
-                st = structs_by_name.get(sym)
-            if st is not None:
-                # If it's a one-field struct or zero-field, constructor gives 0/default
-                try:
-                    if M.struct_field_count(st) == 0:
-                        return "(0 : UInt64)"
-                    if M.struct_field_count(st) == 1 and not M.struct_is_framed(st):
-                        # one word struct - might pass through first arg or be zero initialized
-                        if e.args:
-                            return render(e.args[0], param, env)
-                        return "(0 : UInt64)"
-                except Exception:
-                    pass
-            # Default for frame constructors - return address not directly representable as simple term
-            # but for proofs, often treated as 0 or the model may need adjustment
-            if e.args:
-                # Try to pass first meaningful arg
-                return render(e.args[0], param, env)
-            return "(0 : UInt64)"
-    if scope is not None and hasattr(scope, '__contains__') and sym in scope and not (isinstance(scope, dict) and sym in (getattr(scope,'structs_by_name') or {}) and sym not in {g for g in (getattr(scope,'keys')() if hasattr(scope,'keys') else [])}):  # rough check
-        pass  # fall through
     if scope is not None and sym in scope:
-        # Don't treat as function if it's a struct name
-        is_struct_name = False
-        if structs_by_name is not None:
-            if isinstance(structs_by_name, dict) and sym in structs_by_name:
-                is_struct_name = True
-            elif isinstance(structs_by_name, (list,tuple,set)) and sym in structs_by_name:
-                is_struct_name = True
-        if not is_struct_name:
-            args = " ".join(render(a, param, env) for a in e.args)
-            return f"({sym}_go{'' if not args else ' ' + args})"
+        args = " ".join(render(a, param, env) for a in e.args)
+        # SPACE-separated, not comma-separated: Lean reads `(f_go a, b)` as the
+        # PAIR `(f_go a, b)`, so a comma here silently gives the model the wrong
+        # TYPE for every multi-argument call -- and the programs that have one
+        # are refused before Lean is reached, so nothing downstream would have
+        # said so.
+        return f"({sym}_go{'' if not args else ' ' + args})"
     admitted = getattr(scope, "admitted", None) or {}
     lean = admitted.get(sym)
     if lean:
+        # ONE argument, and a call with any other number is refused rather than
+        # padded.  The arity is not a free choice: `MojoExpr.call` in
+        # `lib/ProofLib.lean` carries a single `UInt64` argument, so the AST
+        # layer of this same proof can only evaluate a call with one, and an
+        # admission applied to two arguments here and one there would make
+        # `eval_eq_mojo` — the statement that the two layers are the same
+        # function — false rather than merely unproved.  A hostmod's admitted
+        # operations are therefore written with ONE parameter (see
+        # `formal/hostmods/subprocess.mojo`), and a call that disagrees says so
+        # here, where the reader can see which call it was.
         if len(e.args) != 1:
             raise NotImplementedError(
                 f"model: `{sym}` is an ADMITTED contract and is declared over "
@@ -810,7 +691,6 @@ def _call_go(e, param: str, env: dict, scope, render) -> str:
                 f"the model cannot carry, and applying it to the first "
                 f"argument alone would silently drop the rest.")
         return f"({lean} {render(e.args[0], param, env)})"
-    # Last chance: check if it's a struct constructor by name pattern from structs passed differently
     raise NotImplementedError(
         f"model: call to `{sym or '?'}` has no model in this image (an "
         f"extern, or a function this generator emits no `_go` for); "
@@ -1527,31 +1407,6 @@ def _expr_go(e, param: str, env: dict, vtypes: dict = None,
             f"render; answering 0 would be a statement about the source "
             f"rather than a model of it")
     if isinstance(e, Call):
-        name = _call_name(e)
-        if name == "len":
-            # model len as strlen
-            if len(getattr(e, 'args', []) or []) == 1:
-                try:
-                    arg = e.args[0]
-                    from formal import model as M
-                    # Get string kind
-                    kind = None
-                    if scope is not None and hasattr(scope, '_expr_str_kind'):
-                        try:
-                            kind = scope._expr_str_kind(arg)
-                        except Exception:
-                            pass
-                    if kind is None:
-                        try:
-                            kind = M.kind_of(arg)
-                        except Exception:
-                            pass
-                    how = M.len_operand_lowering(kind, arg) if kind is not None else None
-                    if how == M.LEN_FROM_STRLEN or kind == M.STR_KIND or how == M.LEN_FROM_CODPOINT_FOLD:
-                        return f"(strlen {_expr_go(arg, param, env, vtypes, call_types, scope)})"
-                except Exception:
-                    pass
-                return f"(strlen {_expr_go(e.args[0], param, env, vtypes, call_types, scope)})"
         # The argument renderer must carry the SAME tables this call was
         # resolved with: `_call_go` renders every argument through `render`, so
         # passing `_expr_go` bare gives a nested call `scope=None` and it is
@@ -1571,25 +1426,9 @@ def _expr_go(e, param: str, env: dict, vtypes: dict = None,
         # (`_expr_bool_go`'s docstring is the measured `AttributeError`).
         return _ternary_go(e, param, env, vtypes or {}, call_types or {},
                            scope, _expr_go, _cmp_go)
-    if isinstance(e, F.MemberExpr):
-        try:
-            structs_by_name = None
-            if scope is not None:
-                if isinstance(scope, dict):
-                    structs_by_name = scope.get('structs_by_name') or scope.get('structs')
-                elif hasattr(scope, 'structs_by_name'):
-                    structs_by_name = getattr(scope, 'structs_by_name')
-                elif hasattr(scope, '__dict__'):
-                    structs_by_name = scope.__dict__.get('structs_by_name') or scope.__dict__.get('structs')
-            if isinstance(e.obj, F.IdentExpr):
-                obj_name = e.obj.name
-                if env and obj_name in env:
-                    return env[obj_name]
-        except Exception:
-            pass
-        _no_value_model(e, "struct field read")
-    if isinstance(e, F.SubscriptExpr):
-        _no_value_model(e, "list subscript")
+    if isinstance(e, (F.MemberExpr, F.SubscriptExpr)):
+        _no_value_model(e, "struct field read" if isinstance(e, F.MemberExpr)
+                        else "list subscript")
     raise NotImplementedError(
         f"model: a {type(e).__name__} has no value in the semantic model (a "
         f"`UInt64 → UInt64` function over the source's arithmetic); refusing "
@@ -1745,50 +1584,79 @@ def _stmts_go(stmts, param: str, env: dict, fname: str, loop_counter: list,
         # binds the same statement three lines above -- and no earlier example
         # could see it, because every loop in the 52-example corpus assigned
         # with `=`.
-        # Try to simulate body effects even if there are ifs/breaks/returns
-        # For now, be more permissive for if statements with only assignments
-        def _fold_stmt_list(stmts, env):
-            for b in stmts:
-                if isinstance(b, (Assign, AugAssign, VarDecl)):
-                    env = _bind_one(env, b, param, _expr_go, vtypes,
-                                     call_types, scope)
-                elif isinstance(b, IfStmt):
-                    raise NotImplementedError("model: this `while` loop's body is not a straight-line run "
-                                              f"of bindings (IfStmt), so the fold cannot "
-                                              "compute the next value of the loop's state"
-                                              + _loop_refusal_tail())
-                elif isinstance(b, (Break, Continue, Return)):
-                    # Allow for now in some cases? Maybe treat as not changing state further
-                    raise NotImplementedError("break/continue/return in loop body not fully supported")
-                elif isinstance(b, WhileStmt):
-                    # Nested loop - not supported
-                    raise NotImplementedError("nested while in loop body not supported")
-                else:
-                    raise NotImplementedError(f"unsupported statement in loop body: {type(b).__name__}")
-            return env
-
-        try:
-            body_env = _fold_stmt_list(st.body, body_env)
-        except NotImplementedError:
-            changed = sorted(name for name, term in body_env.items()
-                             if term != helper_env.get(name))
-            dropped = [n for n in changed if n != param]
-            shaped = [type(b).__name__ for b in st.body
-                      if not isinstance(b, (Assign, AugAssign, VarDecl))]
-            if shaped:
-                raise NotImplementedError(
-                    "model: this `while` loop's body is not a straight-line run "
-                    f"of bindings ({', '.join(shaped)}), so the fold cannot "
-                    "compute the next value of the loop's state"
-                    + (f" — the body changes {', '.join(changed)}" if changed
-                       else "")
-                    + _loop_refusal_tail())
-            raise
+        for b in st.body:
+            body_env = _bind_one(body_env, b, param, _expr_go, vtypes,
+                                 call_types, scope)
+        # **The loop's state is at most TWO words, and this fold says so.**
+        # The helper below takes the recursion's arguments — the induction
+        # variable, the word whose updates the loop's condition counts down to
+        # its exit, and, when the body changes a second word, that word, the
+        # accumulator — threaded the way the one-word helper threaded `n_0`:
+        # the entry's value at the call, the body's updated value at the
+        # recursion. So the only values that can cross an iteration are the
+        # ones the arguments carry. A body that changes a THIRD word has a
+        # loop the model cannot state: the update is dropped, so the term is
+        # not the source's arithmetic.
+        #
+        # What the one-word half of that rule used to cost is measured, and it
+        # is worse than a lost update. `formal/examples/accum_max.mojo`:
+        #
+        #     i = 0
+        #     best = 0
+        #     while i != n:
+        #         if i > best:
+        #             best = i
+        #         i = i + 1
+        #     return best
+        #
+        # has an induction variable (`i`) that is NOT the entry parameter, so
+        # `updated` was the parameter's own unchanged value and the emitted
+        # helper was
+        #
+        #     partial def accum_max_go_loop_0 (n_0 : UInt64) : UInt64 :=
+        #       (if ((UInt64.ofNat 1) ≠ n_0) then accum_max_go_loop_0 (n_0)
+        #        else (UInt64.ofNat 0))
+        #
+        # — a `partial def` that DIVERGES on every input that enters the loop,
+        # emitted as `mojo`. On arm64 that never reached a proof file (the
+        # `eval_eq_mojo` gate refuses the shape first). **On x86-64 it did**,
+        # because `x86_64_proof_gen` shares this fold, and the generator then
+        # emitted its run test over it:
+        #
+        #     theorem accum_max_runs_10 : accum_max_result 10 = mojo 10 := by
+        #       native_decide
+        #
+        # `mojo 10` diverges and `accum_max_result 10` is 9, so that obligation
+        # is FALSE, and `native_decide` does not report a false obligation — it
+        # runs the interpreter until the launcher's bound kills it. Measured on
+        # this tree: 7+ minutes with no verdict, against 25 s for the same
+        # proof's siblings.
+        #
+        # The rule is the honest one, with the state widened to the shape the
+        # census's seven `while` programs all write — `total += i` beside
+        # `i = i + 1` — and the shapes it still cannot state are refused by
+        # name rather than modelled as something that is not the program:
+        #
+        #   * a body that is not a straight-line run of bindings (an `if`, a
+        #     `break`, a `return`) — `accum_max`, `ret_in_loop`,
+        #     `loop_break`; the fold cannot compute a next value of the state
+        #     for a branch it does not follow;
+        #   * a state of MORE than the two words — `var_typed_loop` changes
+        #     three (`step`, `total`, `i`), `nested_loop` has a loop in the
+        #     body at all;
+        #   * a condition that does not test exactly one of the words the body
+        #     changes, so the fold cannot tell which word drives the exit.
+        #
+        # On x86-64 a refusal reaches the generator's own placeholder path
+        # (`_placeholder_model`), which emits the gap as a gap and omits the
+        # run tests instead of stating a false one — see
+        # `bugs/formal/FORMAL_a_loop_that_is_neither_a_decrement_nor_a_range_loop_has_
+        # no_contract.md`.
         changed = sorted(name for name, term in body_env.items()
                          if term != helper_env.get(name))
         dropped = [n for n in changed if n != param]
         shaped = [type(b).__name__ for b in st.body
-                  if not isinstance(b, (Assign, AugAssign, VarDecl, IfStmt))]
+                  if not isinstance(b, (Assign, AugAssign, VarDecl))]
         if shaped:
             raise NotImplementedError(
                 "model: this `while` loop's body is not a straight-line run "
@@ -2083,25 +1951,9 @@ def _expr_go_t(e, param: str, env: dict, vtypes: dict, call_types: dict,
                         infer_expr(e.else_val, vtypes, call_types))
         return _ternary_go(e, param, env, vtypes, call_types, scope,
                            _expr_go_t, _expr_bool_go_t, result_type=t)
-    if isinstance(e, F.MemberExpr):
-        try:
-            structs_by_name = None
-            if scope is not None:
-                if isinstance(scope, dict):
-                    structs_by_name = scope.get('structs_by_name') or scope.get('structs')
-                elif hasattr(scope, 'structs_by_name'):
-                    structs_by_name = getattr(scope, 'structs_by_name')
-                elif hasattr(scope, '__dict__'):
-                    structs_by_name = scope.__dict__.get('structs_by_name') or scope.__dict__.get('structs')
-            if isinstance(e.obj, F.IdentExpr):
-                obj_name = e.obj.name
-                if env and obj_name in env:
-                    return env[obj_name]
-        except Exception:
-            pass
-        _no_value_model(e, "struct field read")
-    if isinstance(e, F.SubscriptExpr):
-        _no_value_model(e, "list subscript")
+    if isinstance(e, (F.MemberExpr, F.SubscriptExpr)):
+        _no_value_model(e, "struct field read" if isinstance(e, F.MemberExpr)
+                        else "list subscript")
     return "(0 : UInt64)"
 
 def _expr_bool_go_t(e, param: str, env: dict, vtypes: dict, call_types: dict,
@@ -2268,9 +2120,9 @@ def _range_loop_pattern(fn):
             ...
         return acc
 
-    Returns a dict {"target","acc","param","body"} or None.  Accepts
-    1-arg `range(param)` and 2-arg `range(start, end)` where end is the
-    parameter bound (and start is a constant/int/literal or simple expr)."""
+    Returns a dict {"target","acc","param","body"} or None.  Only 1-arg
+    `range(param)` with an integer-literal/parameter bound is accepted (the
+    engine's contract advances the counter by exactly 1)."""
     if not fn.params or len(fn.params) != 1:
         return None
     param = fn.params[0][0]
@@ -2290,21 +2142,10 @@ def _range_loop_pattern(fn):
     if collect(fn.body) == "while" or len(fors) != 1:
         return None
     f = fors[0]
-    rargs = _range_args_of(f)
-    if len(rargs) not in (1, 2):
+    if len(_range_args_of(f)) != 1:
         return None
-    if len(rargs) == 1:
-        bound = rargs[0]
-        if not (isinstance(bound, Var) and bound.name == param):
-            return None
-        start = Int(value=0)
-    elif len(rargs) == 2:
-        start = rargs[0]
-        bound = rargs[1]
-        # For for_two_bounds: end is the parameter n
-        if not (isinstance(bound, Var) and bound.name == param):
-            return None
-    else:
+    bound = _range_args_of(f)[0]
+    if not (isinstance(bound, Var) and bound.name == param):
         return None
     target = f.target
 
@@ -2320,42 +2161,22 @@ def _range_loop_pattern(fn):
         return False
 
     acc = None
-    body_stmts = []
     for st in f.body:
-        if isinstance(st, AugAssign):
-            if acc is None:
-                acc = _target_name(st)
-            elif _target_name(st) != acc:
-                return None
-            if not refs(st.value, {acc, target}):
-                return None
-            body_stmts.append(st)
-        elif isinstance(st, Assign):
-            # Accept total = total + i style
-            tgt = _target_name(st)
-            if acc is None:
-                acc = tgt
-            elif tgt != acc:
-                return None
-            val = st.value
-            if isinstance(val, BinOp) and isinstance(val.left, Var) and val.left.name == acc:
-                if val.op in ('+', '-', '*', '&', '|', '^'):
-                    # Convert to AugAssign-like for processing
-                    aug = AugAssign(target=val.left, op=val.op + '=', value=val.right)
-                    if not refs(val.right, {acc, target}):
-                        return None
-                    body_stmts.append(aug)
-                    continue
+        if not isinstance(st, AugAssign):
             return None
-        else:
+        if acc is None:
+            acc = _target_name(st)
+        elif _target_name(st) != acc:
             return None
-    if acc is None or not body_stmts:
+        if not refs(st.value, {acc, target}):
+            return None
+    if acc is None:
         return None
     if not (isinstance(fn.body[-1], Return)
             and isinstance(fn.body[-1].value, Var)
             and fn.body[-1].value.name == acc):
         return None
-    return {"target": target, "acc": acc, "param": param, "body": body_stmts, "start": start, "range_args": rargs}
+    return {"target": target, "acc": acc, "param": param, "body": f.body}
 
 
 def _range_loop_step_lean(body, acc_name: str, target_name: str) -> str:
@@ -2400,7 +2221,7 @@ def _range_loop_head_info(fn, blocks):
 def _gen_range_loop_model(fn, info: dict, vregs: dict) -> str:
     """Emit the semantic model for a `for i in range(n)` accumulator loop:
     a total structural recursion `loop_go(rem, acc, i)` on the remaining
-    iteration count, the top-level `go n = loop_go (n.toNat) 0 start`, a
+    iteration count, the top-level `go n = loop_go (n.toNat) 0 0`, a
     state-indexed `loop_model`, and the one-step unfolding / zero lemmas the
     terminal value flow needs."""
     fname = fn.name
@@ -2412,13 +2233,6 @@ def _gen_range_loop_model(fn, info: dict, vregs: dict) -> str:
     reg_r = vregs[target]
     reg_a = vregs[acc]
     step = _range_loop_step_lean(info["body"], acc, target)
-    start = info.get("start", Int(value=0))
-    if isinstance(start, Int):
-        start_term = f"(UInt64.ofNat {start.value})"
-    elif isinstance(start, Var):
-        start_term = start.name
-    else:
-        start_term = _expr_go(start, "n", {param: param}) if param else "(UInt64.ofNat 0)"
     L = []
     A = L.append
     A(f"def {fname}_loop_go (rem : Nat) (acc : UInt64) (i : UInt64) : UInt64 :=\n"
@@ -2427,7 +2241,7 @@ def _gen_range_loop_model(fn, info: dict, vregs: dict) -> str:
       f"  | k + 1 => {fname}_loop_go k ({step}) (i + UInt64.ofNat 1)")
     A("")
     A(f"def {fname}_go ({param} : UInt64) : UInt64 :=\n"
-      f"  {fname}_loop_go ({param}.toNat - {start_term}.toNat) (0 : UInt64) {start_term}")
+      f"  {fname}_loop_go {param}.toNat (0 : UInt64) (0 : UInt64)")
     A("")
     # One-step unfolding: the model is invariant under one loop iteration
     # (remaining -> remaining-1, acc -> step, i -> i+1).
@@ -2511,17 +2325,13 @@ def _gen_go(fn, tc: dict = None) -> list:
     if _dec_while_pattern(fn) is not None:
         _require_one_param(fname, params)
         helpers.append(
-            f"def {fname}_go : Nat → UInt64 :=\n"
-            f"  fun m => if m < 9223372036854775808 then 0 else "
-            f"UInt64.ofNat (m % 18446744073709551616)\n\n"
-            f"theorem {fname}_go_zero (n : Nat) (h : n < 9223372036854775808) : "
-            f"{fname}_go n = 0 := by\n"
-            f"  simp [{fname}_go, h]\n\n"
-            f"theorem {fname}_go_neg (n : Nat) (h : 9223372036854775808 ≤ n) "
-            f"(hm : n < 18446744073709551616) :\n"
-            f"    {fname}_go n = UInt64.ofNat (n % 18446744073709551616) := by\n"
-            f"  have h' : ¬ n < 9223372036854775808 := by omega\n"
-            f"  simp [{fname}_go, h']"
+            f"def {fname}_go : Nat → UInt64\n"
+            f"  | 0 => 0\n"
+            f"  | k + 1 => {fname}_go k\n\n"
+            f"theorem {fname}_go_zero (n : Nat) : {fname}_go n = 0 := by\n"
+            f"  induction n with\n"
+            f"  | zero => rfl\n"
+            f"  | succ k ih => exact ih"
         )
         return helpers
     dec1 = _dec1_pattern(fn)
@@ -3072,51 +2882,19 @@ def _require_one_param(fname, params):
 
 def _scope_of(tc: dict):
     """The function-name → AST-node table the model resolves calls against."""
-    sc = (tc or {}).get("fns")
-    if sc is not None:
-        try:
-            # Attach struct info if available
-            if isinstance(tc, dict):
-                structs_by_name = tc.get('structs_by_name') or tc.get('structs')
-                if structs_by_name is not None and hasattr(sc, '__dict__'):
-                    sc.structs_by_name = structs_by_name
-            if isinstance(tc, dict) and (tc.get('str_addrs') is not None):
-                try:
-                    sc.str_addrs = dict(tc.get('str_addrs') or {})
-                except Exception:
-                    pass
-        except Exception:
-            pass
-    else:
-        sc = _Scope()
-        try:
-            if isinstance(tc, dict):
-                if tc.get('str_addrs') is not None:
-                    sc.str_addrs = dict(tc.get('str_addrs') or {})
-                structs_by_name = tc.get('structs_by_name') or tc.get('structs')
-                if structs_by_name is not None:
-                    sc.structs_by_name = structs_by_name
-        except Exception:
-            pass
-    return sc
+    return (tc or {}).get("fns")
 
 
 def _callees_of(fn) -> list:
-    """The names `fn` calls, in program order, self-calls included."""
-    out = []
-    for c in _calls_in(fn):
-        name = _call_name(c)
-        # Skip struct constructors - they're not functions we need to model as _go
-        # Try to detect by checking if it's a struct constructor call
-        try:
-            func_node = getattr(c, 'func', None)
-            # Could be just name; constructors are often called as Type() - but we need context
-            # For now, be conservative - if name starts with capital and is called as constructor in some cases
-            pass
-        except Exception:
-            pass
-        out.append(name)
-    return out
+    """The names `fn` calls, in program order, self-calls included.
+
+    `_calls_in` is the ONE walk the recursion and self-call questions use too,
+    so a call this graph can see is a call `_is_recursive` can see — and in
+    particular a callee nested in another call's ARGUMENT (`scale(shift(n))`)
+    is reachable, or `_go_defs_for` emits no `_go` for it and the model refuses
+    a program whose callee it could have stated.
+    """
+    return [_call_name(c) for c in _calls_in(fn)]
 
 
 def _go_defs_for(prog, fn, tc: dict) -> list:
@@ -3144,26 +2922,13 @@ def _go_defs_for(prog, fn, tc: dict) -> list:
         fns.setdefault(fn.name, fn)
     scope = _Scope({n: g for n, g in fns.items()
                     if n in set(_reachable(fns, fn.name if fn else ""))})
-    # The admitted contracts, keyed by the SPELLING a call site uses.
+    # The admitted contracts, keyed by the SPELLING a call site uses.  Read off
+    # `prog` because `formal/build.py` already resolved them through
+    # `formal/imports.py`'s `imported_bindings` — the same binding the emitted call
+    # uses, so the model cannot substitute one contract for the callee the code
+    # actually calls.
     scope.admitted = dict(getattr(prog, "admitted_calls", None) or {})
     scope.str_addrs = dict((tc or {}).get("str_addrs") or {})
-    # Attach structs if available
-    try:
-        sb = None
-        if hasattr(prog, 'structs_by_name') and getattr(prog, 'structs_by_name') is not None:
-            sb = getattr(prog, 'structs_by_name')
-        elif hasattr(prog, 'structs') and getattr(prog, 'structs') is not None:
-            structs = getattr(prog, 'structs')
-            if isinstance(structs, dict):
-                sb = structs
-            elif isinstance(structs, (list, tuple)):
-                sb = {getattr(s, 'name'): s for s in structs if getattr(s, 'name')}
-        if sb is None and isinstance(tc, dict):
-            sb = tc.get('structs_by_name') or tc.get('structs')
-        if sb is not None:
-            scope.structs_by_name = sb
-    except Exception:
-        pass
     tc = dict(tc or {})
     tc["fns"] = scope
     out = []
@@ -3314,11 +3079,8 @@ def _expr_ast(e, scope=None) -> str:
         return (f'(MojoExpr.binop "{_lean_op(e.op)}" '
                 f'({_expr_ast(left, scope)}) ({_expr_ast(right, scope)}))')
     if isinstance(e, Call):
-        name = _call_name(e)
-        if name == "len":
-            name = "strlen"  # normalize to strlen for AST/model
         args = ", ".join(_expr_ast(a, scope) for a in e.args)
-        return f'(MojoExpr.call "{name}" [{args}])' 
+        return f'(MojoExpr.call "{_call_name(e)}" [{args}])' 
     if isinstance(e, F.TernaryExpr):
         # `MojoExpr` has no conditional form, and this arm REFUSES rather than
         # falling through to the `MojoExpr.int 0` below: the bridge exists to
@@ -3408,9 +3170,7 @@ def _ast_bridge_gaps(fn, resolvable) -> list:
         # a binary operator — read as a body with no call at all.
         if isinstance(e, Call):
             name = _call_name(e)
-            # Builtins that are now modeled in both AST and model
-            builtin_ok = name in ("len", "str_len", "strlen", "print", "printf")
-            if len(e.args) != 1 and not (builtin_ok and name in ("printf", "print")):  # printf/print can take multiple args
+            if len(e.args) != 1:
                 gaps.append(
                     f"`{name or '?'}` with {len(e.args)} arguments — the AST "
                     f"carries all of them (`MojoExpr.call` is "
@@ -3420,7 +3180,7 @@ def _ast_bridge_gaps(fn, resolvable) -> list:
                     f"`callFunc` is handed that product, which is not what a "
                     f"callee of this arity takes, so `eval_eq_mojo` cannot be "
                     f"stated about this call")
-            elif used and name not in resolvable and not builtin_ok:
+            elif used and name not in resolvable:
                 gaps.append(
                     f"`{name}` — `callFunc` answers 0 for a name it does not "
                     f"know, and the model answers the callee's value, so "
@@ -3516,17 +3276,14 @@ def _ast_gap_message(gaps: list) -> str:
 def _ast_model_cannot_state(fn) -> str:
     """Why the untyped AST model cannot state `fn`'s body, or `''` when it can.
 
-    **One predicate for four decisions**, which used to be three reads of
+    **One predicate for three decisions**, which used to be three reads of
     `_range_loop_pattern` and could have been a fourth read of anything else:
-    whether `eval_eq_mojo` is emitted, whether `ast_def` is built at all,
-    whether the call-gap check runs, and whether the concrete
-    `eval_eq_mojo_N` instances are emitted. They are one decision — "is there
-    an AST to cross-check the model against" — and a caller that answers it
-    one way and another caller the other way produces a file whose `ast` value
-    is emitted and never used, or a theorem over an `ast` that was never
-    written (the concrete instances used to be exactly that fourth caller:
-    five theorems referring to an `ast` the file never declared, one Lean
-    `Expected type must not contain free variables` per theorem).
+    whether `eval_eq_mojo` is emitted, whether `ast_def` is built at all, and
+    whether the call-gap check runs. They are one decision — "is there an AST
+    to cross-check the model against" — and a caller that answers it one way
+    and another caller the other way produces a file whose `ast` value is
+    emitted and never used, or a bridge theorem over an `ast` that was never
+    written.
 
     Two shapes, and the second is new:
 
@@ -3898,24 +3655,35 @@ _STEP_CONDS = [
     # `formal/arm64.py` can produce.
     (0xffe00000, 0xab000000),  # 66 CMN Xn, Xm (SUBS XZR, Xn, Xm with the add flag)
     (0xffe00000, 0xea000000),  # 67 TST Xn, Xm (ANDS XZR, Xn, Xm)
-    # CSEL: EMITTED and, until 2026-11-01, UNMODELLED.  The row this comment
-    # once guarded was removed rather than left when it landed WITHOUT
-    # `arm64_step`'s branch (2026-10-03, `bugs/formal/FORMAL_arm64_csel_is_not_
-    # modelled_so_the_step_table_cannot_claim_it.md`): an entry here with no
-    # branch in the model is a generator that would describe a CSEL's effect
-    # while the function being proved takes no step at all for that word,
-    # which is a proof about a different function.  What blocked the branch
-    # was not the three lines of Lean — they build, with the `work_step_csel`
-    # the row needs — but the certificate: with CSEL in the model a
-    # CSEL-carrying export fails the same way a THREE-BRANCH FUNCTION fails,
-    # measured on both shapes (`bugs/formal/FORMAL_a_three_branch_certificate_
-    # exceeds_the_lean_bound.md`).  So the row came back ONLY with the branch
-    # and the lemma, in one commit — the table and the model move together —
-    # and the walled discharge is tracked in that certificate doc, whose
-    # measurement is why the order of the work was certificate first.
-    # `arm64_codegen.py` calls `encode_csel_xd_xm_cond` at six sites (a
-    # ternary is a CSEL), so a reader of this table cannot conclude from the
-    # row's position that the instruction is unused.
+    # CSEL is EMITTED and UNMODELLED, and saying so here is the point of this
+    # comment: `arm64_codegen.py` calls `encode_csel_xd_xm_cond` at six sites
+    # (6394, 6396, 6410, 6412, 8998, 9008 — a ternary is a CSEL), so a reader of
+    # this table cannot conclude from its absence that the instruction is unused.
+    #
+    # The row that was here is removed rather than left, and that is the correct
+    # direction: `arm64_step` has no CSEL branch either, and `check_step_conds`
+    # (called by `generate_arm64_proof`, so by EVERY proved arm64 build) requires
+    # the two to be the same set. An entry here with no branch in the model is not
+    # a gap in a check — it is a generator that would describe a CSEL's effect
+    # while the function being proved takes no step at all for that word, which
+    # is a proof about a different function. The check is right and the row was
+    # wrong. (`work/formal13-3`'s commit that added it violated its own stated
+    # premise in the very message that introduced it.)
+    #
+    # **WHAT IS STILL MISSING is the model branch, and what blocks it is not the
+    # three lines of Lean.** Measured 2026-10-03, both halves of the old reason
+    # re-measured rather than quoted: the three-line `arm64_step` branch BUILDS
+    # (the branch plus the `work_step_csel` the row needs), and with it a
+    # CSEL-carrying export fails the same way a THREE-BRANCH FUNCTION fails —
+    # `_gen_run_cert`'s certificate exceeds `formal/lean.py`'s `PROOF_WALL_S` —
+    # and the control is that the same three branches spelled as ordinary
+    # comparisons fail identically. So the wall is the certificate's size and not
+    # the instruction, which changes the ORDER of the work: the certificate is
+    # the defect to fix first (`bugs/formal/FORMAL_a_three_branch_certificate_exceeds_
+    # the_lean_bound.md` has the measurement and the next step), and the CSEL row
+    # is a three-line change once it is gone.
+    # `bugs/formal/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`
+    # carries the rest.
     #
     # 68 SMULH. APPENDED for the reason 51 was. The mask is the SAME VALUE
     # entry 4 (MUL) uses, `0xffe07c00`, and that is not a copy-paste: on the
@@ -3936,22 +3704,6 @@ _STEP_CONDS = [
     # `a * b` fit in 64 signed bits", which a wrapping MUL cannot answer), and
     # `test_arm64_encoders.py` checks the encoding against `as`.
     (0xffe07c00, 0x9b407c00),  # 68 SMULH Xd, Xn, Xm
-    # 69 CSEL Xd, Xn, Xm, cond: the branchless select, `Rd = if cond then Xn
-    # else Xm`, and nothing else moves (no flags, no `sp`).  APPENDED, last:
-    # the model's arm is the chain's last for the index hard-coding reason 68
-    # records, and this row's position is what decides `_step_branch_index`'s
-    # FIRST match — `check_step_conds` is a SET comparison and order does not
-    # matter there, but the first row that claims a word wins the decode.  The
-    # `work_step_csel` lemma's 69 `hne_*` facts are the measurement that no
-    # earlier row claims these words, including the two that share the mask
-    # (64/65, LDUR/STUR: `0xf8400000`/`0xf8000000`, disjoint in the base under
-    # it), and its statement is the model arm's own: the condition is the RAW
-    # field at bits 15:12, no inversion, which is what separates it from the
-    # CSET row's `field ± 1`.  `formal/arm64_codegen.py::encode_csel_xd_xm_
-    # cond` is the emitter's caller (a ternary), and the mask's kept bits as
-    # class separators are measured with the platform assembler in the arm's
-    # own comment.
-    (0xffe00c00, 0x9a800000),  # 69 CSEL Xd, Xn, Xm, cond
 ]
 
 
@@ -4277,18 +4029,6 @@ def _step_rhs(w: int, idx: int):
     if idx == 67:  # TST Xn, Xm: the logical flags of Xn & Xm, C and V clear
         return (f"some {{ s with nzcv := arm64_logic_flags (arm64_reg "
                 f"{(w >> 5) & 0x1f} s &&& arm64_reg {(w >> 16) & 0x1f} s) }}")
-    if idx == 69:  # CSEL Xd, Xn, Xm, cond: the branchless select, nothing else
-        # moves.  The step RESULT closes by `exact`-ing `work_step_csel` at
-        # this word, so this spelling has to be the lemma's conclusion defeq —
-        # which it is on the literal condition, the same way `_COND4`'s
-        # docstring records for B.cond: the concrete number and the word-
-        # relative `((w >>> 12) &&& 0xf).toNat` are the same term once `w` is
-        # the word.  The condition is the RAW field at bits 15:12, no
-        # inversion, which is what separates it from the CSET row's
-        # `field ± 1`.
-        cond = (w >> 12) & 0xf
-        return (f"some (arm64_set_reg {rd} s (if arm64_matches_condition "
-                f"{cond} s.nzcv then arm64_reg {rn} s else arm64_reg {rm} s))")
     if idx in (54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65):
         rn = (w >> 5) & 0x1f
         base = _base_of(rn)
@@ -4584,13 +4324,6 @@ def _step_rhs_generic(idx: int):
     if idx == 67:
         return (f"some {{ s with nzcv := arm64_logic_flags (arm64_reg {_RN} s "
                 f"&&& arm64_reg {_RM} s) }}")
-    if idx == 69:  # CSEL: `Rd = if cond then Xn else Xm`, nothing else moves
-        # and the condition is the RAW field at bits 15:12 — no inversion,
-        # which is what separates it from `_COND`'s `field ± 1` for CSET.
-        # `w` below is the Lean word the statement binds, as in `_COND4`.
-        return (f"some (arm64_set_reg {_RD} s (if arm64_matches_condition "
-                f"(((w >>> 12) &&& 0xf).toNat) s.nzcv then arm64_reg {_RN} s "
-                f"else arm64_reg {_RM} s))")
     if idx in (54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65):
         _I9G = "(((w >>> 12) &&& 0x1ff).toNat)"
         _IDX = "(((w >>> 10) &&& 0xfff).toNat)"
@@ -4713,12 +4446,6 @@ _WORK_STEP = [
     (66, "work_step_cmn", [(0xffe00000, 0xab000000)]),
     (67, "work_step_tst", [(0xffe00000, 0xea000000)]),
     (68, "work_step_smulh", [(0xffe07c00, 0x9b407c00)]),
-    # CSEL, APPENDED last in both lists: the lemma is `work_step_csel` in
-    # lib/ProofLib.lean, whose statement is the model arm's own (`Rd = if cond
-    # then Xn else Xm`, the RAW bits 15:12), and whose 69 `hne_*` facts are the
-    # measurement that no earlier row — including the two that share the mask,
-    # 64/65 — claims these words.
-    (69, "work_step_csel", [(0xffe00c00, 0x9a800000)]),
 ]
 
 _WORK_STEP_BY_IDX = {idx: (lemma, tests) for idx, lemma, tests in _WORK_STEP}
@@ -5509,10 +5236,10 @@ def _regs_written(w: int, idx: int):
         return set() if rd == 31 else {rd}
     if idx == 15:
         return {30}
-    # 68 (SMULH) and 69 (CSEL) are in the MUL row on purpose rather than in a
-    # row of their own: each writes `Rd` and no flags and no `sp`, which is the
-    # same fact MUL's membership states, and a second row saying the same
-    # thing is how `_regs_written` and the model's arm drift apart.
+    # 68 (SMULH) is in the MUL row on purpose rather than in a row of its own:
+    # it writes `Xd` and no flags and no `sp`, which is the same fact MUL's
+    # membership states, and a second row saying the same thing is how
+    # `_regs_written` and the model's arm drift apart.
     #
     # 6 (CMP/SUBS register) and 66 (CMN/ADDS) are here for the same reason 2/3
     # are: the classes also carry their register-writing spellings
@@ -5524,7 +5251,7 @@ def _regs_written(w: int, idx: int):
     # the plain `{rd}` the register-arithmetic rows use.
     if idx in (6, 66):
         return {rd} if rd != 31 else set()
-    if idx in (1, 2, 3, 4, 5, 7, 8, 20, 23, 24, 25, 26, 27, 28, 29, 30, 33, 68, 69):
+    if idx in (1, 2, 3, 4, 5, 7, 8, 20, 23, 24, 25, 26, 27, 28, 29, 30, 33, 68):
         return {rd}
     if idx in (9, 10, 11, 12):
         return {rd}
@@ -6585,8 +6312,7 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
             A(f"  rw [hchain]")
             A(f"  simp only [{name}_b{exit_bi}_qS0]")
             A(f"  rw [show arm64_reg 19 s = 0 from by simpa [arm64_reg] using hx19]")
-            A(f"  have hlt : (s.x19.toNat) < 9223372036854775808 := by rw [hx19]; simp")
-            A(f"  simp [mojo, {name}_go_zero, hlt]")
+            A(f"  simp [mojo, {name}_go_zero]")
         elif hname == f"{name}_loop_body_step":
             _w = words[body_last]
             _imm26 = _w & 0x03ffffff
@@ -6688,7 +6414,7 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
     # own post-state and the pc hypothesis is `rfl`.
     A(f"    (by intro s hs hq; exact {name}_loop_exit_x0 ({cqt} s) "
       f"(({name}_loop_cond_flag s hs).mp hq))")
-    A(f"    (by intro a _; have hlt : a.toNat < 9223372036854775808 := by omega; simp [mojo, {name}_go_zero, hlt])")
+    A(f"    (by intro a _; simp [mojo, {name}_go_zero])")
     A(f"    (by decide) (by decide) (by decide)")
     A(f"    arg st fuel (work_loop_fuel {mc} {mb} {me} arg.toNat fuel hfuel) hpc hx19 hframe")
     A("")
@@ -7377,15 +7103,7 @@ def _trap_terminating(blocks: list, words: dict) -> set:
         for b in blocks:
             if b["start"] in out:
                 continue
-            # A block's LAST word can be a data gap: when `len(code) % 4` is
-            # non-zero, the trailing partial word has no entry in `words`, and
-            # `_cfg_blocks` extends the block to it anyway (its loop reads
-            # `words.get`, so the gap is a non-branch the block simply ends
-            # in).  Read the tail the same way: a gap decodes to nothing in
-            # the model, so it is neither a `svc` tail nor a trap `BL`.
-            w = words.get(b["instrs"][-1])
-            if w is None:
-                continue
+            w = words[b["instrs"][-1]]
             if _is_svc(w):
                 out.add(b["start"])
                 changed = True
@@ -7407,11 +7125,7 @@ def _is_trap_bl(b: dict, words: dict, trap: set) -> bool:
     "the fall-through address is a start in `trap`" — an address that is not
     a block start is not in `trap`, and the rule does not fire on it.
     """
-    # `words.get`: the same block tail `_trap_terminating` reads — when the
-    # image's trailing word is partial it is a data gap with no entry, and a
-    # gap is not a `BL`, so it is not a trap `BL`.
-    w = words.get(b["instrs"][-1])
-    if w is None or _step_branch_index(w) != 15:
+    if _step_branch_index(words[b["instrs"][-1]]) != 15:
         return False
     return b["instrs"][-1] + 4 in trap
 
@@ -7725,8 +7439,13 @@ def _unmodelled_instruction(word: int):
     `_step_branch_index` has already rejected, so the question is which
     instruction it is, and A64's fixed fields answer that without a table.
 
-    The ones this emitter is measured to produce:
+    The three this emitter is measured to produce:
 
+      * **`CSEL`** — A64 "Conditional Select (register)" is `sf 110101000 0` in
+        bits 31..21, i.e. `(w >> 21) & 0x7ff == 0x4d4` (measured: the word
+        `arm64_codegen.py::_emit_csel_ternary` writes for `1 if n > 3 else 0` is
+        `0x9a801020`). `CSET` is the same instruction with Rn = Rm = XZR, which
+        the step table HAS at index 30, so it never reaches here.
       * **`STUR` / `LDUR`** — the unscaled forms, `(w & 0xffc00000)` equal to
         `0xf8000000` or `0xf8400000`: the 9-bit displacement a scaled
         12-bit-offset access cannot express, which in practice means a NEGATIVE
@@ -7745,15 +7464,15 @@ def _unmodelled_instruction(word: int):
         `0x8b0103e0`, `sub x0, xzr, x1` = `0xcb0103e0`) run as `0 + 1` and
         `0 - 1`.
       * anything else: `None`, and the caller says so rather than guessing.
-
-    `CSEL` used to be the first of these — and is not any more: the branchless
-    select is `arm64_step`'s last arm (`_STEP_CONDS`'s row 69 with
-    `work_step_csel`), so a CSEL word is claimed by `_step_branch_index` and
-    never reaches here.  What refuses a CSEL-carrying entry after the row
-    landed is the certificate's size rather than the select, and that refusal
-    is the branch-count gate in `generate_arm64_proof`, which names
-    `bugs/formal/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md`.
     """
+    if ((word >> 21) & 0x7ff) == 0x4d4:
+        return ("CSEL",
+                "the branchless select the code emitter uses for `a if c else "
+                "b`, and for a flag-preserving `and`/`or`. The semantic model "
+                "states the conditional expression (`_ternary_go`), so what is "
+                "missing here is the machine half, and the measurement is "
+                "`bugs/formal/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_"
+                "cannot_claim_it.md`.")
     if (((word >> 21) & 0x7) == 0x1 and ((word >> 24) & 0x1f) == 0x0b):
         which = ("SUBS/CMP extended" if (word >> 29) & 1 else
                  "SUB extended" if (word >> 30) & 1 else "ADD extended")
@@ -7805,11 +7524,7 @@ def _cfg_decomposition_refusal(name: str, code: bytes, base: int,
     table's gaps are not all the ternary's: an unscaled spill is the other one
     this emitter reaches, and it has nothing to do with a conditional
     expression. So each word is named off its own encoding
-    (`_unmodelled_instruction`) and no case re-derives the source construct.
-    (The CSEL case that used to mention `_ternary_go` is gone with the row:
-    the select is modelled now, so a CSEL word never reaches here, and the
-    ternary's refusal lives in the branch-count gate of `generate_arm64_proof`
-    rather than in a word the step table claims.)
+    (`_unmodelled_instruction`) and only the CSEL case mentions `_ternary_go`.
 
     The search is over the range the walk itself uses — the entry to the last
     `RET` — because that is the range whose words the certificates are built
@@ -8058,27 +7773,15 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     if fn is not None and fn.params:
         _p = fn.params[0][0]
         _typed_here = bool(tc and tc.get("typed"))
-        _scope_here = _Scope()
-        try:
-            _scope_here.str_addrs = dict((tc or {}).get("str_addrs") or {})
-            sb = None
-            if hasattr(prog, 'structs_by_name') and getattr(prog, 'structs_by_name') is not None:
-                sb = getattr(prog, 'structs_by_name')
-            elif isinstance(info, dict):
-                sb = info.get('structs_by_name') or info.get('structs')
-            if sb is not None:
-                _scope_here.structs_by_name = sb
-        except Exception:
-            pass
         _ast_conds = (
             _collect_conds_t(fn, _p,
                              _entry_env(fn, entry_arity, _typed_here,
                                         (tc or {}).get("vtypes")),
-                             tc["vtypes"], tc["call_types"], _scope_here)
+                             tc["vtypes"], tc["call_types"])
             if _typed_here else
             _collect_conds(fn, _p,
                            _entry_env(fn, entry_arity),
-                           tc["vtypes"], tc["call_types"], _scope_here))
+                           tc["vtypes"], tc["call_types"]))
     # Map each conditional-branch block to its source condition by block (pc
     # order), not by emission order: a block reached from several paths is
     # emitted once per path, so a running counter desyncs.
@@ -8138,13 +7841,8 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
         _senv = _entry_env(fn, entry_arity)
         _svt = tc["vtypes"] if tc else None
         _sct = tc["call_types"] if tc else None
-        _sscope = _Scope()
-        try:
-            _sscope.str_addrs = dict((tc or {}).get("str_addrs") or {})
-        except Exception:
-            pass
         for _i, (_node, _nenv) in enumerate(
-                _cond_nodes(fn, _sp, _senv, _svt, _sct, _sscope)):
+                _cond_nodes(fn, _sp, _senv, _svt, _sct)):
             if not (isinstance(_node, BinOp) and _node.op in ("and", "or")):
                 continue
             if _i >= len(_cond_pairs):
@@ -8158,8 +7856,8 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 "m": _merge_pc,
                 "s": _sblk["start"],
                 "kind": "and" if _node.op == "and" else "or",
-                "l": _norm_uint(_truth_go(_node.left, _sp, _nenv, _svt, _sct, _sscope)),
-                "r": _norm_uint(_truth_go(_node.right, _sp, _nenv, _svt, _sct, _sscope)),
+                "l": _norm_uint(_truth_go(_node.left, _sp, _nenv, _svt, _sct)),
+                "r": _norm_uint(_truth_go(_node.right, _sp, _nenv, _svt, _sct)),
                 "whole": _whole,
             }
 
@@ -8318,8 +8016,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 or (fn is not None and fn.params
                     and bool(_collect_conds(fn, fn.params[0][0],
                                             _entry_env(fn, entry_arity),
-                                            (tc or {}).get("vtypes"), (tc or {}).get("call_types"), _sscope)))):
-            entry_cond_needed = True
+                                            tc["vtypes"], tc["call_types"])))):
             entry_cond_needed = True
         # ...unless that branch is a B.cond.  The entry seed states a fact about
         # the materialised condition FLAG REGISTER, and the backend no longer
@@ -8395,14 +8092,9 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
         # entry condition must be the typed (sign-flipped) source condition.
         entry_condition = _cbz_src_map.get(_entry_bpc)
         if entry_condition is None and fn is not None and fn.params:
-            _scope_here2 = _Scope()
-            try:
-                _scope_here2.str_addrs = dict((tc or {}).get("str_addrs") or {})
-            except Exception:
-                pass
             _ec = _collect_conds(fn, fn.params[0][0],
                                  _entry_env(fn, entry_arity),
-                                 tc["vtypes"], tc["call_types"], _scope_here2)
+                                 tc["vtypes"], tc["call_types"])
             if _ec:
                 entry_condition = _ec[0]
         if entry_condition is None:
@@ -9007,12 +8699,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         A(f"{IND}rcases hlc_{bi} with ⟨sf_{bi}, heqf_{bi}, hx0f_{bi}⟩")
                         A(f"{IND}rw [heqf_{bi}]")
                         A(f"{IND}-- s.x0 = mojo (n-1) = 0 = mojo n")
-                        A(f"{IND}have hltc : (n - 1).toNat < 9223372036854775808 := by")
-                        A(f"{IND}  have hnz : n ≠ 0 := by intro h0; rw [h0] at {_bsrc}; simp at {_bsrc}")
-                        A(f"{IND}  have hnge1 : 1 ≤ n.toNat := Nat.pos_of_ne_zero (fun h0 => hnz (UInt64.toNat_inj.mp (by rw [h0]; rfl)))")
-                        A(f"{IND}  rw [toNat_sub_one n (by intro h; subst h; simp at {_bsrc})]")
-                        A(f"{IND}  omega")
-                        A(f"{IND}simp [hx0f_{bi}, mojo, {name}_go_zero, hltc]")
+                        A(f"{IND}simp [hx0f_{bi}, mojo, {name}_go_zero]")
                 else:
                     raise ValueError(
                         f"unsupported edge to {hex(tgt)} (loop back-edge / continuation; "
@@ -10102,22 +9789,10 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         A(f"{IND}  all_goals try "
                           f"rw [mem_read_write_pair_below _ st.sp (K := {_K}) "
                           f"(j := j) (by decide) hj (by omega) (by decide) _ _]")
-                        A(f"{IND}  all_goals try "
-                          f"rw [mem_read_write_pair_below_split _ st.sp (a := {_K} + 8) (b := 8) "
-                          f"(j := j) (by omega) (by decide) (by decide) hj (by omega) (by omega) _ _]")
-                        A(f"{IND}  all_goals try "
-                          f"rw [mem_read_write_pair_below_split _ st.sp (a := {_K} + 16) (b := 16) "
-                          f"(j := j) (by omega) (by decide) (by decide) hj (by omega) (by omega) _ _]")
                 for _K in _store_ks:
                     A(f"{IND}  all_goals try "
                       f"rw [mem_read_write_below _ st.sp (K := {_K}) (j := j) "
                       f"hj (by omega) (by decide) _]")
-                    A(f"{IND}  all_goals try "
-                      f"rw [mem_read_write_below_split _ st.sp (a := {_K} + 8) (b := 8) "
-                      f"(j := j) (by omega) (by decide) hj (by omega) (by omega) _]")
-                    A(f"{IND}  all_goals try "
-                      f"rw [mem_read_write_below_split _ st.sp (a := {_K} + 16) (b := 16) "
-                      f"(j := j) (by omega) (by decide) hj (by omega) (by omega) _]")
 
             # First round: the caller-frame goals (`sp - K` reads, and the
             # frame registers), which the window facts below cannot reach.
@@ -11726,9 +11401,9 @@ def _gen_dec_while_block(fname: str, param: str, cond_op: str = "GT") -> str:
     _op = {"GT": ">", "NE": "!=", "GE": ">="}[cond_op]
     _rhs = "1" if cond_op == "GE" else "0"
     cond = f'MojoExpr.binop "{_op}" (MojoExpr.var "{param}") (MojoExpr.int {_rhs})'
-    _PRED = {"GT": "m < 9223372036854775808 ∧ 0 < UInt64.ofNat m",
-             "NE": "m < 9223372036854775808 ∧ UInt64.ofNat m \u2260 0",
-             "GE": "m < 9223372036854775808 ∧ 1 \u2264 UInt64.ofNat m"}[cond_op]
+    _PRED = {"GT": "m < 9223372036854775808 → 0 < UInt64.ofNat m",
+             "NE": "m < 9223372036854775808 → UInt64.ofNat m \u2260 0",
+             "GE": "m < 9223372036854775808 → 1 \u2264 UInt64.ofNat m"}[cond_op]
     _HPRED = {
         "NE": "exact Iff.rfl",
         "GT": ("rw [UInt64.lt_iff_toNat_lt]\n"
@@ -11778,7 +11453,7 @@ theorem pred_iff (m : Nat) : @PRED@ \u2194 UInt64.ofNat m \u2260 0 := by
 /-- Loop condition holds iff counter value nonzero. -/
 theorem cond_val (m : Nat) :
     (evalExpr handler (@COND@)
-      (envOf m) \u2260 0) \u2194 (m % @S@ \u2260 0 \u2227 m % @S@ < 9223372036854775808) := by
+      (envOf m) \u2260 0) \u2194 m % @S@ \u2260 0 := by
   have hv : evalExpr handler (@COND@)
       (envOf m) = if @PRED@ then 1 else 0 := by
     simp [evalExpr, envOf]
@@ -11823,7 +11498,7 @@ theorem prog_correct : \u2200 (m : Nat) (fuel : Nat), fuel \u2265 m % @S@ + 2 �
       have hneg : \u00ac @PRED@ := by
         rw [pred_iff m]
         intro hne
-        exact hne.2 (by apply eq_of_toNat_eq; rw [ht2]; simp [hz])
+        exact hne (by apply eq_of_toNat_eq; rw [ht2]; simp [hz])
       have hce : evalExpr handler (@COND@) (envOf m) = 0 := by
         rw [hvz, if_neg hneg]
       have h1 := runF_while_false g handler (@COND@)
@@ -11841,10 +11516,7 @@ theorem prog_correct : \u2200 (m : Nat) (fuel : Nat), fuel \u2265 m % @S@ + 2 �
         rw [ht2]
         simp [hz]
       rw [hv0]
-      have hzlt : m % @S@ < 9223372036854775808 := by
-        rw [hz]
-        simp
-      simp [@FN@_go_zero, hzlt]
+      simp [@FN@_go_zero, hz]
     \u00b7 obtain \u27e8g, rfl\u27e9 : \u2203 g, fuel = g + 1 := \u27e8fuel - 1, by cases fuel <;> simp; omega\u27e9
       have hcond : evalExpr handler (@COND@) (envOf m) ≠ 0 :=
         (cond_val m).mpr (Nat.ne_of_gt hp)
@@ -11895,8 +11567,7 @@ theorem prog_correct : \u2200 (m : Nat) (fuel : Nat), fuel \u2265 m % @S@ + 2 �
       rw [hP] at hrec
       rw [hstep, henv, hrec]
       apply congrArg
-      have hltm : m % @S@ < 9223372036854775808 := (cond_val m).mp hcond |>.right
-      simp [@FN@_go_zero, hltm]
+      simp [@FN@_go_zero]
 
 /-- TRUST BOUNDARY eliminated: the fuel-bounded full interpreter applied to
 the formal AST equals the structural model, by strong induction. -/
@@ -12107,23 +11778,17 @@ def _call_func_lean(func_name: str, admitted: dict = None,
         # measured against HEAD over all 43 files in `formal/examples/`, both
         # arms are needed to make all of them identical.
         return ((f'(fun name arg =>\n'
-                 f'    if name = "{func_name}" then mojo arg else if name = "len" then strlen arg else if name = "str_len" then strlen arg else if name = "strlen" then strlen arg else 0)') if wrap else
-                (f'(fun name arg => if name = "{func_name}" then mojo arg else if name = "len" then strlen arg else if name = "str_len" then strlen arg else if name = "strlen" then strlen arg else 0)'))
+                 f'    if name = "{func_name}" then mojo arg else 0)') if wrap else
+                (f'(fun name arg => if name = "{func_name}" then mojo arg else 0)'))
     arms = "\n  ".join(
         [f'if name = "{spelling}" then {lean} arg else'
          for spelling, lean in sorted((exports or {}).items())]
         + [f'if name = "{spelling}" then {lean} arg else'
            for spelling, lean in sorted((admitted or {}).items()) if lean])
-    builtin_arms = 'if name = "len" then strlen arg else if name = "str_len" then strlen arg else if name = "strlen" then strlen arg else'
     if arity > 1:
-        if arms:
-            return f'(fun name arg =>\n  {arms}\n  {builtin_arms} 0)'
-        return f'(fun name arg =>\n  {builtin_arms}\n  0)' if not wrap else (
-            "(fun name arg => 0)" if not wrap else f"(fun name arg =>\n    {builtin_arms}\n    0)")
-    if arms:
-        return (f'(fun name arg =>\n  {arms}\n'
-                f'  {builtin_arms} if name = "{func_name}" then mojo arg else 0)')
-    return (f'(fun name arg =>\n  {builtin_arms}'
+        return f'(fun name arg =>\n  {arms}\n  0)' if arms else (
+            "(fun name arg => 0)" if not wrap else "(fun name arg =>\n    0)")
+    return (f'(fun name arg =>\n  {arms}\n'
             f'  if name = "{func_name}" then mojo arg else 0)')
 
 
@@ -12295,54 +11960,6 @@ def generate_arm64_proof(prog, code, info) -> str:
         fn = prog.functions[0]
         func_name = fn.name
     param = fn.params[0][0] if fn.params else "n"
-    # **The CSEL discharge is gated on the entry's conditional-branch count,
-    # and the gate is a refusal rather than a bigger bound.**  The entry's
-    # CSEL — the branchless select `a if c else b` lowers to — is what the
-    # step table's row 69 claims, and its certificate's per-path value-flow
-    # facts grow with the entry's conditional-branch count: the measured
-    # boundary is inside this class, one conditional expression checks,
-    # three check at 560 s / 5.6 GB under the 12 GB slot, and four are
-    # killed at the 1500 s CPU bound with "NOT a verdict on the proof".
-    # The select itself is modelled — `arm64_step`'s last arm and
-    # `work_step_csel` — so the cost is the certificate's size, not the
-    # instruction, and emitting a file whose only outcome is that kill buys
-    # nothing: a named refusal is what the class owes the reader, and the
-    # tracked leaf it names owns the four-branch boundary and the per-path
-    # hoist that closes it.
-    #
-    # The CSEL is asked of the entry's OWN walked range — the same
-    # `_walk_range` cut the walk decomposes — so a CSEL another function
-    # carries cannot wall THIS entry's certificate, and the branch count is
-    # the entry's body: the measured class is loop-free (a looped entry's
-    # walk is the loop-contract shape this doc did not measure), and the
-    # count is the source-level conditions, branch or not — a value-position
-    # ternary is branchless on the machine yet still doubles the paths the
-    # per-condition facts are stated over.
-    _gate_entry = info["labels"].get(func_name, base_addr)
-    _gate_words = {base_addr + i: int.from_bytes(code[i:i + 4], "little")
-                   for i in range(0, len(code) - len(code) % 4, 4)}
-    _gate_end = _walk_range(_gate_words, _gate_entry)
-    _entry_csel = any(_step_branch_index(w) == 69
-                      for pc, w in _gate_words.items()
-                      if _gate_entry <= pc < _gate_end)
-    _entry_branches = _cond_branch_count(fn.body) if fn is not None else 0
-    if _entry_csel and not _has_while(fn.body) and _entry_branches >= 4:
-        raise NotImplementedError(
-            "universal theorem: this entry carries a CSEL — the branchless "
-            "select `a if c else b` lowers to — and its body has "
-            f"{_entry_branches} conditional branches, which is at the "
-            "measured four-branch boundary where the certificate's per-path "
-            "value-flow facts stop checking: one conditional expression in "
-            "this class checks, three check at 560 s / 5.6 GB under the 12 "
-            "GB slot, and four are killed at the 1500 s CPU bound with "
-            "\"NOT a verdict on the proof\".  The select itself is modelled "
-            "— `arm64_step`'s last arm and `work_step_csel` — so the cost "
-            "is the certificate's size, not the instruction, and emitting a "
-            "file whose only outcome is that kill buys nothing.  The "
-            "tracked leaf for this shape is "
-            "`bugs/formal/FORMAL_a_three_branch_certificate_exceeds_the_lean_"
-            "bound.md`: it owns the four-branch boundary and the per-path "
-            "hoist that closes it.")
     # The INDEPENDENT specification this program asks to be checked against, or
     # None.  Read here rather than at the end of the function because it decides
     # the HEADER (the generated file imports `lib/Specs.lean` only when something
@@ -12353,10 +11970,9 @@ def generate_arm64_proof(prog, code, info) -> str:
     # program that carries a specification nobody checked.
     refines = SPECS.spec_refinement(fn, where=func_name)
     # WHY THE AST MODEL CANNOT STATE THIS BODY, or `''` when it can: read ONCE
-    # here because four decisions below are that one question (emit the bridge,
-    # build `ast`, run the call-gap check, emit the concrete `eval_eq_mojo_N`
-    # instances) and four reads of it is how they come to disagree.
-    # See `_ast_model_cannot_state`.
+    # here because three decisions below are that one question (emit the bridge,
+    # build `ast`, run the call-gap check) and three reads of it is how they
+    # come to disagree. See `_ast_model_cannot_state`.
     ast_cannot = _ast_model_cannot_state(fn)
     # The entry function's ARGUMENTS, as one fact read once.  `arity` is what
     # `mojo`, `eval_eq_mojo`, every run test and the universal theorem are
@@ -12420,30 +12036,8 @@ def generate_arm64_proof(prog, code, info) -> str:
     # is.
     tc = {"typed": is_typed, "vtypes": vtypes, "call_types": call_types,
           "str_addrs": dict(info.get("str_addrs") or {})}
-    # Attach structs
-    try:
-        sb = None
-        if hasattr(prog, 'structs_by_name') and getattr(prog, 'structs_by_name') is not None:
-            sb = getattr(prog, 'structs_by_name')
-        elif hasattr(prog, 'structs') and getattr(prog, 'structs') is not None:
-            structs = getattr(prog, 'structs')
-            if isinstance(structs, dict):
-                sb = structs
-            elif isinstance(structs, (list, tuple)):
-                sb = {getattr(s, 'name'): s for s in structs if getattr(s, 'name')}
-        if sb is None and isinstance(info, dict):
-            sb = info.get('structs_by_name') or info.get('structs')
-        if sb is not None:
-            tc['structs_by_name'] = sb
-    except Exception:
-        pass
     _vscope = _Scope()
     _vscope.str_addrs = tc["str_addrs"]
-    try:
-        if tc.get('structs_by_name'):
-            _vscope.structs_by_name = tc['structs_by_name']
-    except Exception:
-        pass
     # The fixed-width truncator helpers (t8u/t8s/.../t32s) and the
     # SXTW-after-SXTB/SXTH idempotency lemmas live in ProofLib (single source of
     # truth, shared definitionally by arm64_step and the typed model).  The
@@ -12542,7 +12136,7 @@ def generate_arm64_proof(prog, code, info) -> str:
         # `eval_split_conds`, not `_collect_conds`: the extra propositions it
         # appends for a chain NESTED inside a chain are what closes this
         # theorem for that shape, and its own docstring carries the measurement.
-        conds = eval_split_conds(fn, param, env, vtypes, call_types, _vscope)
+        conds = eval_split_conds(fn, param, env)
         by_cases = " ".join(f"by_cases h{i} : {c} <;>" for i, c in enumerate(conds))
         hs = ", ".join(f"h{i}" for i in range(len(conds)))
         hs_join = f"{hs}, " if hs else ""
@@ -12670,16 +12264,10 @@ def generate_arm64_proof(prog, code, info) -> str:
     # range of inputs, verified by native_decide instead of an admitted proof. Only valid
     # when every path returns (the ProofLib evalBody model returns `arg` on a
     # no-return fall-through, and it skips while loops entirely, so those
-    # programs would not satisfy the equality) AND only where the AST bridge is
-    # emitted at all: every instance evaluates `ast`, which the file declares
-    # only when the untyped AST model can state the body (`ast_cannot` empty).
-    # A loop-free conditional expression is the measured shape the other three
-    # decisions of that one predicate omit and this fourth used to emit: five
-    # theorems referencing an `ast` the file never wrote, each failing Lean
-    # with `Expected type must not contain free variables`.
+    # programs would not satisfy the equality).
     eval_test_block = ""
     _tac_eval = _decide_or_admit(_admitted_model)
-    if (not is_typed) and not ast_cannot and _always_returns(fn.body) and not _has_while(fn.body):
+    if (not is_typed) and _always_returns(fn.body) and not _has_while(fn.body):
         eval_tests = []
         if _admitted_model:
             # A `/- -/` block and NOT a docstring: the section header in the

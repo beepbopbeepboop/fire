@@ -1,4 +1,4 @@
-"""Stage 3 of bugs/mid/CODEGEN_enum_runtime_class_creation.md: the 3-argument
+"""Stage 3 of bugs/CODEGEN_enum_runtime_class_creation.md: the 3-argument
 `type(name, bases, namespace)` makes a class at run time.
 
 Each program is compiled, RUN, and its stdout compared with CPython's on the same text. The

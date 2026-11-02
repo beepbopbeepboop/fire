@@ -105,46 +105,6 @@ def land_on_master():
     sys.exit("master moved under the round (%s): cannot fast-forward; redo the round" % ", ".join(moved[:5]))
 
 
-def ungate_red(names, merged, why):
-    """A red landing gate does not hold the work: the failing jobs are turned OFF for the backlog, a GATE report
-    is filed for them, and both are committed on the `integ` branch so the fast-forward lands them with the round.
-    Returns the OFF pattern and the report's path. Each job comes back when its failure is fixed (`control.py gate on`)."""
-    pattern = "^(" + "|".join(re.escape(n) for n in sorted(set(names))) + ")$"
-    slug = merged[0] if merged else "round"
-    doc = "bugs/mid/GATE_red_%s_%s.md" % (slug, time.strftime("%F"))
-    body = ("# GATE red: %d landing-gate job(s) red on `%s` (%s)\n\n"
-            "## Status (%s, OPEN; jobs turned OFF to land the round)\n\n"
-            "The landing gate of round `%s` ran RED. The integrator turned these jobs OFF "
-            "(`tools/gates.json`, one anchored regex) so the round could land, and files each one here until it is fixed:\n\n"
-            "    %s\n\n"
-            "Tasks landed with this round: %s.\n\n"
-            "Evidence: `work-integ/gate.log` and `work-integ/confirm.log` (the failing jobs re-run alone), "
-            "`work-integ/build/suite.log` for the job output.\n\n"
-            "Consequence: these jobs are NOT covered by the gate for this landing. Re-enable each one when fixed with "
-            "`python3 tools/control.py gate on '<pattern>'` and remove this report in the same commit.\n"
-            % (len(set(names)), " ".join(merged), why, time.strftime("%F"), " ".join(merged), "\n    ".join(sorted(set(names))), ", ".join(merged)))
-    integ_doc = os.path.join(INTEG, doc)
-    os.makedirs(os.path.dirname(integ_doc), exist_ok=True)
-    open(integ_doc, "w").write(body)
-    C.gate_off_in(os.path.join(INTEG, "tools", "gates.json"), pattern,
-                  "landing gate red on %s (%s); see %s" % (" ".join(merged), why, doc), doc, "integrator")
-    C.git("add", doc, "tools/gates.json", cwd=INTEG)
-    C.git("commit", "-m", "gate: turn %d red landing-gate job(s) OFF for %s; file GATE report\n\n%s\n\n"
-          "Co-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>" % (len(set(names)), " ".join(merged), doc),
-          cwd=INTEG)
-    return pattern, doc
-
-
-def mark_landed(merged):
-    """Mark the merged tasks integrated, but only once every one of their commits is on master: the state means landed."""
-    with C.registry() as reg:
-        for n in merged:
-            left = C.ahead(reg[n])
-            if left:
-                sys.exit("refusing to mark %s integrated: %d commit(s) of %s are not on master" % (n, left, reg[n]["branch"]))
-            reg[n]["state"] = "integrated"
-
-
 def pick_candidates(only=None, allow_dirty=(), quiet=False, ignore_verdict=()):
     """Tasks whose worker has exited with commits, a clean tree and a DONE verdict: only a finished bug is integrated."""
     cands = []
@@ -309,7 +269,8 @@ def main():
                     for n in merged: reg[n]["state"] = "integration-failed"
                 print("RED in the fast lane: %s (see %s/fast.log); master untouched" % (" ".join(c[:4]), INTEG)); sys.exit(1)
         land_on_master()
-        mark_landed(merged)
+        with C.registry() as reg:
+            for n in merged: reg[n]["state"] = "integrated"
         print("GREEN (fast lane): master is now %s; integrated %s" % (C.git("rev-parse", "--short", "master"), merged))
         return
     if a.quick and not a.jobs and not a.stdlib:
@@ -341,7 +302,6 @@ def main():
     if a.jobs:
         print("--jobs run finished with exit %d; master NOT touched (only a full gate lands)" % rc)
         sys.exit(rc)
-    failed = []
     if rc != 0 and not a.jobs:
         # A red gate under load is often a timeout, not a verdict (2026-09-30: gimplegenerators 450-616 s, runner's
         # 10 s per-program limit, each spawning a pointless fixer). Confirm it the way a human would: re-run exactly
@@ -365,13 +325,6 @@ def main():
     if rc == 0 and bad:
         print("gate exited 0 but suite.log records:\n" + bad + "\ntreating the round as RED")
         rc = 1
-    if rc != 0 and not a.probe:
-        # The red does not hold the round: the failing jobs are ungated and filed (ungate_red), and the round lands.
-        names = failed or re.findall(r"\] (?:TIMEOUT|ERROR) (\S+)", bad)
-        if names:
-            pattern, doc = ungate_red(names, merged, "gate red")
-            print("UNGATED %s (report %s); the round lands without them" % (", ".join(sorted(set(names))), doc))
-            rc = 0
     if a.probe:
         jobs = failed_job_names(os.path.join(INTEG, "gate.log")) if rc else []
         files = []                                   # the stdlib sweep names each failing file under this heading
@@ -393,7 +346,8 @@ def main():
         sys.exit(rc)
     if rc == 0:
         land_on_master()
-        mark_landed(merged)
+        with C.registry() as reg:
+            for n in merged: reg[n]["state"] = "integrated"
         print("GREEN: master fast-forwarded to %s; integrated %s" % (C.git("rev-parse", "--short", "master"), merged))
     else:
         with C.registry() as reg:

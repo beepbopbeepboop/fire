@@ -74,9 +74,7 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from exec_budget import RUN_TIMEOUT_S
-
-PROOF_GEN =os.path.join(HERE, "formal", "arm64_proof_gen.py")
+PROOF_GEN = os.path.join(HERE, "formal", "arm64_proof_gen.py")
 
 # The programs, and what each one is here to pin.  `print` is the important
 # one: it is the commonest statement in the language, it is an extern, and it
@@ -918,108 +916,6 @@ class TestGeneratorSource(unittest.TestCase):
                       "the word-relative form (`lib/work.lean`) must name it "
                       "too, or the two right-hand sides disagree about the same "
                       "instruction")
-
-    def test_csel_is_modelled_and_disjoint_from_cset(self):
-        """The select the ternary is, and the bit that keeps it off CSET.
-
-        `arm64_codegen.py` calls `encode_csel_xd_xm_cond` at six sites (a
-        ternary is a CSEL), and until 2026-11-01 `arm64_step` had no arm for
-        the class, so every image with a conditional expression was
-        unsteppable and the step table deliberately had no row for a word it
-        emits. The row is 69 now, appended last with the model's arm and
-        `work_step_csel` (the table and the model move together, which
-        `check_step_conds` is the check for), and what this pins is the
-        wiring plus the one separation that is easy to get wrong: `CSET` is
-        the same opcode with its own fixed bits, and the two differ in bit 10
-        — CSET's encoder sets it, the CSEL class keeps it clear — so a mask
-        that dropped bit 10 would let the CSET words land on the select's row
-        and one of the two selects would mis-step silently.
-        """
-        import formal.arm64 as A
-        import formal.arm64_proof_gen as G
-
-        def word(fn, *args):
-            w = fn(*args)
-            return int.from_bytes(w, "little") if isinstance(w, (bytes, bytearray)) \
-                else w
-
-        csel = word(A.encode_csel_xd_xm_cond, 0, 1, 2, "ne")
-        cset = word(A.encode_cset_xd_cond, 0, "ne")
-        self.assertEqual(csel, 0x9a821020,
-                         "`csel x0, x1, x2, ne` is not the word the encoder "
-                         "produces, so every assertion below would be about a "
-                         "word no image contains")
-        self.assertEqual(
-            G._step_branch_index(csel), 69,
-            "the select no longer decodes to `_STEP_CONDS`'s row 69, so an "
-            "image with a conditional expression is unsteppable again")
-        self.assertEqual(
-            G._step_branch_index(cset), 30,
-            "CSET must still decode to its own row, not the select's")
-        mask, base = G._STEP_CONDS[69]
-        self.assertEqual((mask, base), (0xffe00c00, 0x9a800000))
-        self.assertTrue(mask & 0x400,
-                        "the row's mask must KEEP bit 10; clearing it would "
-                        "claim the CSET words, whose encoder sets it")
-        self.assertEqual(base & 0x400, 0,
-                         "the row's own base must clear bit 10, which is "
-                         "what the CSET encoder sets")
-        self.assertEqual(cset & 0x400, 0x400,
-                         "the CSET word must set bit 10 — that is the "
-                         "separation this row's mask keeps")
-        # the whole class, not a sample: every Rd the encoder produces, the
-        # `Rn`/`Rm` corners (0 and 31), and every condition code
-        for cond in ("eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc",
-                     "hi", "ls", "ge", "lt", "gt", "le"):
-            for xn in (0, 31):
-                for xm in (0, 31):
-                    for xd in range(31):
-                        w = word(A.encode_csel_xd_xm_cond, xd, xn, xm, cond)
-                        self.assertEqual(
-                            G._step_branch_index(w), 69,
-                            f"csel x{xd}, x{xn}, x{xm}, {cond} = "
-                            f"{w:#010x} does not decode to row 69")
-                        self.assertEqual(G._regs_written(w, 69), {xd},
-                                         "CSEL writes Rd and nothing else")
-            for xd in range(31):
-                w = word(A.encode_cset_xd_cond, xd, cond)
-                self.assertNotEqual(
-                    (w & 0xffe00c00), 0x9a800000,
-                    f"cset x{xd}, {cond} = {w:#010x} satisfies the CSEL row's "
-                    f"test, so a CSET would step as a select")
-        # `_WORK_STEP` is what makes the model's branch a fact a generated
-        # block can USE (the step-result lemma `exact`s the library lemma at
-        # this word).
-        self.assertIn(69, G._WORK_STEP_BY_IDX,
-                      "no `work_step_*` lemma is wired for row 69, so a "
-                      "program containing a select cannot get a step-result "
-                      "lemma")
-        lemma, tests = G._WORK_STEP_BY_IDX[69]
-        self.assertEqual(lemma, "work_step_csel")
-        self.assertIn((0xffe00c00, 0x9a800000), tests,
-                      "the library lemma must be stated at THIS row's word "
-                      "test, or the step-result lemma `exact`s a hypothesis "
-                      "it cannot prove")
-        # The spelling is the BARE ite — CSET's precedent — because
-        # `work_step_csel` states the step that way and the step-result lemma
-        # closes by `exact`-ing it at this word: the two right-hand sides have
-        # to be defeq, and the concrete number and the word-relative field are
-        # the same term once `w` is the word.  `= true` (B.cond's shape) would
-        # break the defeq, so the equality, not an `in`, is the pin.
-        self.assertEqual(
-            G._step_rhs(csel, 69),
-            "some (arm64_set_reg 0 s (if arm64_matches_condition 1 s.nzcv "
-            "then arm64_reg 1 s else arm64_reg 2 s))",
-            "the select's right-hand side is not the lemma's conclusion "
-            "defeq, so the step-result lemma would not `exact`")
-        self.assertEqual(
-            G._step_rhs_generic(69),
-            "some (arm64_set_reg ((w &&& 0x1f).toNat) s "
-            "(if arm64_matches_condition (((w >>> 12) &&& 0xf).toNat) s.nzcv "
-            "then arm64_reg (((w >>> 5) &&& 0x1f).toNat) s "
-            "else arm64_reg (((w >>> 16) &&& 0x1f).toNat) s))",
-            "the word-relative form disagrees with the statement, so the "
-            "two right-hand sides describe different steps")
 
     def test_the_flag_setting_compares_write_rd_and_the_imm12_arms_shift(self):
         """The two `arm64_step` defects of 2026-10-07, pinned at the table level.
@@ -3553,7 +3449,6 @@ class TestStepLemmasCoverTheExecutableRegionOnly(unittest.TestCase):
                                     prove=True, check=False)
         cls.code = r["code"]
         cls.info = r["info"]
-        cls.exports = r["exports"]
         cls.base = cls.info["base_addr"]
         with open(r["proof_path"], encoding="utf-8") as fh:
             cls.text = fh.read()
@@ -3616,37 +3511,6 @@ class TestStepLemmasCoverTheExecutableRegionOnly(unittest.TestCase):
         self.assertEqual(n_bytes, len(self.code) + 4,
                          "the code list lost bytes when the step lemmas "
                          "narrowed to the executable region")
-
-    def test_the_trap_decision_reads_a_block_tail_in_a_data_gap(self):
-        """The dylib block whose last word IS the gap is this round's regression.
-
-        The interned strings' odd tail leaves a PARTIAL word with no entry in
-        the dense `words` map, and `_cfg_blocks` extends the export region's
-        last block to it (its loop reads `words.get`, so the gap is a
-        non-branch the block simply ends in).  `_trap_terminating` and
-        `_is_trap_bl` read that tail the same way — before this fix the raw
-        `words[...]` index KeyErrors here, in this class's OWN `setUpClass`:
-        `prove=True` builds the export's total proof over exactly these blocks.
-        A gap decodes to nothing in the model, so the block is neither a `svc`
-        tail nor a trap `BL`, and the decision must skip it rather than raise.
-        """
-        base = self.base
-        entry = self.exports[0]["entry"]
-        func_end = self.G._export_extent(self.exports, entry, base, len(self.code))
-        words = {base + i: int.from_bytes(self.code[i:i + 4], "little")
-                 for i in range(0, len(self.code) - len(self.code) % 4, 4)}
-        blocks = self.G._cfg_blocks(words, entry, func_end)
-        gap_blocks = [b for b in blocks if b["instrs"][-1] not in words]
-        self.assertTrue(
-            gap_blocks,
-            "the fixture's export region no longer ends in a data gap, so "
-            "this class no longer exercises the trap reader's gap path -- "
-            "restore a source whose interned tail is not a multiple of four")
-        traps = self.G._trap_terminating(blocks, words)
-        for b in gap_blocks:
-            with self.subTest(block=hex(b["start"])):
-                self.assertNotIn(b["start"], traps)
-                self.assertFalse(self.G._is_trap_bl(b, words, traps))
 
 
 class TestCallProofs(unittest.TestCase):
@@ -7433,7 +7297,7 @@ class TestTheZeroDivisorGuardIsAFalseGoal(unittest.TestCase):
             argv = ([out] if backend == "arm64" or sys.platform != "darwin"
                     else ["arch", "-x86_64", out])
             p = subprocess.run(argv, capture_output=True, text=True,
-                               timeout=RUN_TIMEOUT_S)
+                               timeout=60)
             self.assertNotEqual(p.returncode, 0,
                                 f"{backend}: a zero divisor did not leave the "
                                 f"image — the div0 arm is reachable code, so "
@@ -8868,8 +8732,7 @@ class TestTheDivisionExamplesHaveNoProofToCheck(unittest.TestCase):
                         os.path.join(HERE, "formal", "examples", f"{stem}.mojo"),
                         arch=backend, output=out, prove=False, check=False)
                     proc = subprocess.run((runner or []) + [out],
-                                          capture_output=True,
-                                          timeout=RUN_TIMEOUT_S)
+                                          capture_output=True, timeout=30)
                     # The entry IS the function, so the exit status is its
                     # answer. `//` is CPython's own floor and both stems'
                     # remainder is CPython's, so ONE expectation covers both
@@ -9601,65 +9464,3 @@ class TestTheSignedOrderLemmaIsInTheLibrary(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
-
-class TestDecWhileSignedModelRegression(unittest.TestCase):
-    """The dec-while loop model assumes a non-negative counter.
-
-    With a signed `int`, `while n > 0` on `n = -3` exits immediately and
-    returns `-3` unchanged. The old model returned 0 unconditionally.
-    Regression for signed dec-while loop model (fixed).
-    """
-
-    SOURCE = "def countdown(n):\n    while n > 0:\n        n = n - 1\n    return n\n"
-
-    @classmethod
-    def setUpClass(cls):
-        cls.tmp = tempfile.mkdtemp(prefix="a2-decwhile-signed-")
-        cls.proof, cls.error = _generate(cls.tmp, cls.SOURCE, "decwhile_sig")
-
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls.tmp, ignore_errors=True)
-
-    def test_model_is_conditional_not_unconditional_zero(self):
-        self.assertIsNotNone(self.proof, "proof not generated")
-        text = open(self.proof).read()
-        # The new model uses an if/else, not structural recursion to 0.
-        self.assertIn("if m < 9223372036854775808 then 0 else", text,
-                      "model does not split on the sign bit (2^63); "
-                      "old unconditional-zero model likely still emitted")
-
-    def test_go_zero_has_hypothesis(self):
-        text = open(self.proof).read()
-        self.assertIn("countdown_go_zero (n : Nat) (h : n < 9223372036854775808)", text,
-                      "_go_zero must carry the < 2^63 hypothesis")
-
-    def test_go_neg_is_emitted(self):
-        text = open(self.proof).read()
-        self.assertIn("countdown_go_neg", text,
-                      "_go_neg theorem missing; signed negative case "
-                      "is not modelled")
-
-    def test_go_block_elaborates_in_lean(self):
-        """The emitted `_go` def and its two theorems must typecheck.
-
-        Text checks cannot see a tactic that makes no progress: `simp [h]`
-        did not unfold the def and `simp [h, hm]` made no progress, and both
-        lines passed every substring assertion above.  So run Lean on the
-        block alone -- it is self-contained, so this is seconds, not the
-        proof's own CPU budget."""
-        import shutil as _sh, subprocess
-        if _sh.which("lean") is None:
-            self.skipTest("lean not on PATH")
-        text = open(self.proof).read()
-        m = re.search(r"def countdown_go : .*?simp \[countdown_go, h'\]",
-                      text, re.S)
-        self.assertIsNotNone(m, "the _go block is not in the emitted proof")
-        path = os.path.join(self.tmp, "go_block.lean")
-        with open(path, "w") as f:
-            f.write(m.group(0) + "\n")
-        r = subprocess.run(["lean", path], capture_output=True, text=True,
-                           timeout=600, cwd=self.tmp)
-        self.assertEqual(r.returncode, 0,
-                         "emitted _go block does not typecheck:\n"
-                         + r.stdout + r.stderr)

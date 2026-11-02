@@ -387,7 +387,7 @@ def _frame_enter(gen, node) -> None:
     if (gen.module_name or '') not in gen._frames_mods:
         return
     gen._frame_func = _as_str(gen.current_func_name)
-    _fn_shown = _as_str(getattr(node, 'display_name', None) or node.name)
+    _fn_shown = _as_str(node.name)
     # A generator/coroutine body is lowered to `__mgco_<name>_body` (a method's
     # `<name>` is `<Struct>_<method>`); the frame is the SOURCE function's.
     if _fn_shown.startswith('__mgco_') and _fn_shown.endswith('_body'):
@@ -401,8 +401,6 @@ def _frame_enter(gen, node) -> None:
     _fline = gen._new_val('int64_t', f'(int64_t){int(getattr(node, "line", 0) or 0)}')
     gen._void_call('mojo_frame_enter',
                    [('char *', _fname), ('char *', _ffile), ('int64_t', _fline)])
-    if _as_str(node.name).startswith('__mgco_') and _as_str(node.name).endswith('_body'):
-        gen._emit('  mojo_frame_bind_gen ();')
 
 
 def _frame_enter_module(gen) -> None:
@@ -946,7 +944,7 @@ def _lower_bound_method_call_value(gen, bm: str, node: gimple_ctypes.CallExpr,
 _STRUCT_FMT_DATA_ATTRS = {'format': 'str', 'size': 'int'}
 
 
-def _struct_build_value_list(gen, arg_nodes: list, codes):
+def _struct_build_value_list(gen, arg_nodes, codes):
     """Lower `arg_nodes` into a fresh MojoList* suitable for
     mojo_struct_pack_list / mojo_struct_pack_h. `codes` (may be None)
     drives per-field coercion when the format is statically known."""
@@ -1645,24 +1643,13 @@ _RE_DYN_METHODS = frozenset(('match', 'search', 'fullmatch', 'findall', 'group',
                              'start', 'end', 'span', 'sub', 'split', 'finditer'))
 
 
-def _re_word_of(gen, t, v):
-    """A lowered value (type `t`, value `v`) as an int64_t word (a string as its pointer)."""
-    if t == 'double':
-        return gen._call_expr('int64_t', 'mojo_box_from_double', [('double', v)])
-    return gen._to_int64(t, v)
-
-
 def _re_word_arg(gen, expr):
     """Lower `expr` to an int64_t word (a string as its pointer)."""
     t, v = gen.lower_expr(expr)
-    return _re_word_of(gen, t, v)
-
-
-def _re_result_elem(subj_t):
-    """The element type of a pattern method's list result. The pieces are the
-    SUBJECT's kind (the runtime tags each one), so a bytes subject's are bytes
-    objects and anything else's are str."""
-    return 'MojoBytes *' if subj_t == 'MojoBytes *' else 'char *'
+    if t == 'double':
+        v = gen._call_expr('int64_t', 'mojo_box_from_double', [('double', v)])
+        return v
+    return gen._to_int64(t, v)
 
 
 def _lower_re_dynamic_call(gen, node, recv, method):
@@ -1670,26 +1657,15 @@ def _lower_re_dynamic_call(gen, node, recv, method):
     whether it is a pattern / match (`mojo_re_call`)."""
     if method == 'split' and len(node.args) <= 1 and not getattr(node, 'kwargs', None):
         # str.split and pattern.split share a name: the run time tells them apart.
-        if node.args:
-            at, av = gen.lower_expr(node.args[0])
-            a0 = _re_word_of(gen, at, av)
-        else:
-            at, a0 = 'int64_t', gen._new_val('int64_t', '0')
+        a0 = _re_word_arg(gen, node.args[0]) if node.args else gen._new_val('int64_t', '0')
         r = gen._call_expr('int64_t', 'mojo_split_dyn',
                            [('int64_t', gen._to_int64('int64_t', recv)), ('int64_t', a0)])
         lt = gen._coerce_to_type('int64_t', 'MojoList *', r)
-        gen._elem_types[lt] = _re_result_elem(at)
+        gen._elem_types[lt] = 'char *'
         return 'MojoList *', lt
     lst = gen._call_expr('MojoList *', 'mojo_list_new', [])
-    # The subject decides the kind of the result: the first argument of
-    # findall/split/finditer, the second of sub (repl, string, count).
-    subj_idx = 1 if method == 'sub' else 0
-    subj_t = 'int64_t'
-    for i, a in enumerate(node.args):
-        at, av = gen.lower_expr(a)
-        if i == subj_idx:
-            subj_t = at
-        w = _re_word_of(gen, at, av)
+    for a in node.args:
+        w = _re_word_arg(gen, a)
         gen._void_call('mojo_list_append_int', [('MojoList *', lst), ('int64_t', w)])
     for _kn, _kv in (getattr(node, 'kwargs', None) or []):
         gen.lower_expr(_kv)
@@ -1699,25 +1675,14 @@ def _lower_re_dynamic_call(gen, node, recv, method):
                         ('char *', gen._intern_string(_as_str(method))),
                         ('MojoList *', lst), ('MojoDict *', kw)])
     # The result kinds the methods have, so a consumer (a list of groups, a print)
-    # reads them as what they are rather than as an unknown word. A group's kind
-    # is the SUBJECT's, known only at run time (a str or a bytes), so it is a
-    # pointer word the runtime kinds, like DirEntry.name's.
+    # reads them as what they are rather than as an unknown word.
     if method == 'group':
-        gen._dyn_word_vals.add(r)
-        return 'int64_t', r
-    if method == 'sub':
-        if subj_t == 'MojoBytes *':
-            return 'MojoBytes *', gen._coerce_to_type('int64_t', 'MojoBytes *', r)
-        # A runtime-kinded subject (unknown static type) produces a result whose
-        # kind is only known at run time: a word, not a fixed char *.
-        if subj_t == 'int64_t':
-            gen._dyn_word_vals.add(r)
-            return 'int64_t', r
         return 'char *', gen._coerce_to_type('int64_t', 'char *', r)
-    if method in ('groups', 'findall', 'split'):
+    if method in ('groups', 'findall', 'split', 'sub'):
+        if method == 'sub':
+            return 'char *', gen._coerce_to_type('int64_t', 'char *', r)
         lt = gen._coerce_to_type('int64_t', 'MojoList *', r)
-        # A group's kind is the match's (not known statically): a str element.
-        gen._elem_types[lt] = 'char *' if method == 'groups' else _re_result_elem(subj_t)
+        gen._elem_types[lt] = 'char *'
         return 'MojoList *', lt
     if method == 'span':
         lt = gen._coerce_to_type('int64_t', 'MojoList *', r)
@@ -1746,8 +1711,9 @@ def _lower_re_module_call(gen, node, method):
         fl = gen._new_val('int64_t', '0')
     # Select bytes vs str compile based on argument static type
     if pat_t == 'MojoBytes *':
+        len_v = gen._call_expr('int64_t', 'mojo_bytes_len', [(pat_t, pat_v)])
         h = gen._call_expr('int64_t', 'mojo_re_compile_bytes',
-                           [('MojoBytes *', pat_v), ('int64_t', fl)])
+                           [('void *', pat_v), ('int64_t', len_v), ('int64_t', fl)])
     else:
         pat_s = gen._new_val('char *', f'(char *){pat_word}')
         h = gen._call_expr('int64_t', 'mojo_re_compile', [('char *', pat_s), ('int64_t', fl)])
@@ -1771,8 +1737,9 @@ def _lower_re_module_call(gen, node, method):
         neg1 = gen._new_val('int64_t', '-1')
         md = gen._new_val('int64_t', str(mode))
         if sw_t == 'MojoBytes *':
+            len_v = gen._call_expr('int64_t', 'mojo_bytes_len', [(sw_t, sw_v)])
             r = gen._call_expr('int64_t', 'mojo_re_exec_bytes',
-                               [('int64_t', h), ('MojoBytes *', sw_v),
+                               [('int64_t', h), ('void *', sw_v), ('int64_t', len_v),
                                 ('int64_t', zero), ('int64_t', neg1), ('int64_t', md)])
         else:
             s_s = gen._new_val('char *', f'(char *){sw_word}')
@@ -1785,28 +1752,6 @@ def _lower_re_module_call(gen, node, method):
         return 'MojoList *', lt
     gen._dyn_word_vals.add(r)
     return 'int64_t', r
-
-
-_FRAME_VALUED_MEMBERS = frozenset(('f_back', 'tb_frame', 'gi_frame', 'cr_frame', 'ag_frame'))
-
-
-def _is_frame_expr(gen, node) -> bool:
-    """Is this expression statically a Python-level frame word? A frame is an int64 word, so
-    `x.clear()` cannot be told from `list.clear()` by type; the evidence is where the value came
-    from: `sys._getframe(...)`, a frame-valued attribute (`f_back`, `tb_frame`, `gi_frame`), or a
-    name bound to one of those (`_frame_vars`, filled by `_gen_stmt_AssignStmt`). Only consulted in
-    a compile where some module uses frames."""
-    if len(gen._frames_mods) == 0:
-        return False
-    if isinstance(node, gimple_ctypes.IdentExpr):
-        return _as_str(node.name) in gen._frame_vars
-    if isinstance(node, gimple_ctypes.MemberExpr):
-        return _as_str(node.member) in _FRAME_VALUED_MEMBERS
-    if isinstance(node, gimple_ctypes.CallExpr):
-        f = node.func
-        return (isinstance(f, gimple_ctypes.MemberExpr) and _as_str(f.member) == '_getframe'
-                and isinstance(f.obj, gimple_ctypes.IdentExpr) and _as_str(f.obj.name) == 'sys')
-    return False
 
 
 def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
@@ -1825,13 +1770,6 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         else:
             _gf_d = gen._new_val('int64_t', '(int64_t)0')
         return 'int64_t', gen._call_expr('int64_t', 'mojo_getframe', [('int64_t', _gf_d)])
-
-    # `frame.clear()` on a frame word: refuses an executing frame (RuntimeError), else a no-op.
-    if (func.member == 'clear' and not node.args and not getattr(node, 'kwargs', None)
-            and _is_frame_expr(gen, func.obj)):
-        _fc_t, _fc_v = gen.lower_expr(func.obj)
-        gen._void_call('mojo_frame_clear', [('int64_t', gen._to_int64(_fc_t, _fc_v))])
-        return 'int64_t', gen._new_val('int64_t', '(int64_t)0')
 
     # `mod_a.Dialog(...)` — a QUALIFIED CONSTRUCTOR CALL: the receiver names
     # a real module marker and the member names a real, already-inlined
@@ -2579,23 +2517,10 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         if isinstance(inner_obj, gimple_ctypes.IdentExpr) and inner_obj.name == 'os' and inner_member == 'path':
             if outer_member == 'basename' and len(node.args) == 1:
                 arg_type, arg_val = gen.lower_expr(node.args[0])
-                if arg_type in ('int64_t', 'MojoBytes *'):
-                    t = gen._call_expr('int64_t', 'mojo_os_path_basename_w', [('int64_t', gen._to_int64(arg_type, arg_val))])
-                    # A str or bytes result by the argument's kind: a word the
-                    # runtime answers for (truthiness, len), not a plain int.
-                    gen._dyn_word_vals.add(t)
-                else:
-                    t = gen._call_expr('char *', 'int64_t_basename', [(arg_type, arg_val)])
-                return ('int64_t' if arg_type in ('int64_t', 'MojoBytes *') else 'char *'), t
+                t = gen._call_expr('char *', 'int64_t_basename', [(arg_type, arg_val)])
+                return 'char *', t
             elif outer_member == 'splitext' and len(node.args) == 1:
                 arg_type, arg_val = gen.lower_expr(node.args[0])
-                if arg_type == 'MojoBytes *':
-                    # Bytes parts: the (root, ext) pair is built by the runtime
-                    # (mojo_os_path_splitext_w) with unrecorded element kinds, so
-                    # the subscript reads each part as a word of unknown kind.
-                    return 'MojoList *', gen._call_expr(
-                        'MojoList *', 'mojo_os_path_splitext_w',
-                        [('int64_t', gen._to_int64(arg_type, arg_val))])
                 root = gen._call_expr('char *', 'int64_t_splitext', [(arg_type, arg_val)])
                 # Python splitext(p) is a (root, ext) pair; every call site does
                 # `splitext(p)[0]`. Model it as a 2-element string list so the
@@ -2622,20 +2547,6 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 # (usually out of range). Found via Tools/unicode/
                 # gencodec.py's convertdir(): `name = os.path.split(mapname)[1]`.
                 arg_type, arg_val = gen.lower_expr(node.args[0])
-                if arg_type == 'int64_t' or arg_type == 'MojoBytes *':
-                    if arg_type == 'MojoBytes *':
-                        t = gen._call_expr('MojoList *', 'mojo_os_path_split_w',
-                                            [('int64_t', f'(int64_t)(intptr_t){arg_val}')])
-                        # Bytes parts: the element kind is NOT recorded. An
-                        # unrecorded kind is a word of unknown kind to the
-                        # subscript (`_mark_unknown_list_elem`), which is what
-                        # the bytes-or-str word actually is; `int64_t` would
-                        # read as a plain number and lose the bytes kind.
-                        return 'MojoList *', t
-                    t = gen._call_expr('MojoList *', 'mojo_os_path_split_w',
-                                        [(arg_type, arg_val)])
-                    gen._elem_types[t] = 'int64_t'
-                    return 'MojoList *', t
                 t = gen._call_expr('MojoList *', 'int64_t_path_split',
                                     [(arg_type, arg_val)])
                 gen._elem_types[t] = 'char *'
@@ -2697,10 +2608,6 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 # Same boxed-int64_t-vs-declared-char* mismatch as abspath
                 # just above; identical fix.
                 arg_type, arg_val = gen.lower_expr(node.args[0])
-                if arg_type in ('int64_t', 'MojoBytes *'):
-                    t = gen._call_expr('int64_t', 'mojo_os_path_dirname_w', [('int64_t', gen._to_int64(arg_type, arg_val))])
-                    gen._dyn_word_vals.add(t)   # str or bytes, by the argument's kind
-                    return 'int64_t', t
                 t = gen._call_expr('int64_t', 'int_dirname', [('int64_t', '0'), (arg_type, arg_val)])
                 cast = gen._new_val('char *', f'(char *){t}')
                 return 'char *', cast
@@ -2716,9 +2623,6 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     arg_type, arg_val = gen.lower_expr(node.args[0])
                     if arg_type == 'MojoList *':
                         gen._emit_call('int64_t', t, 'int_join_list', [('int64_t', '0'), (arg_type, arg_val)])
-                    elif arg_type == 'int64_t':
-                        # might be word; try word join if unsure
-                        gen._emit_call('int64_t', t, 'mojo_os_path_join_w', [('int64_t', '0'), (arg_type, arg_val), ('int64_t', '0')])
                     else:
                         # Single non-list arg: just return it
                         gen._emit_call('int64_t', t, 'int_join', [('int64_t', '0'), (arg_type, arg_val), ('int64_t', '0')])
@@ -2758,33 +2662,15 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     # os.path.join(a, b) — two path args
                     arg_type, arg_val = gen.lower_expr(node.args[0])
                     arg2_type, arg2_val = gen.lower_expr(node.args[1])
-                    if arg_type == 'int64_t' or arg2_type == 'int64_t' or arg_type == 'MojoBytes *' or arg2_type == 'MojoBytes *':
-                        def _to_word(at, av):
-                            if at == 'int64_t':
-                                return av
-                            if at == 'MojoBytes *':
-                                return f'(int64_t)(intptr_t){av}'
-                            if at == 'char *':
-                                return f'(int64_t)(intptr_t){av}'
-                            # try to pass through as word
-                            return f'(int64_t)(intptr_t){av}'
-                        gen._emit_call('int64_t', t, 'mojo_os_path_join_w', [('int64_t', _to_word(arg_type, arg_val)), ('int64_t', _to_word(arg2_type, arg2_val))])
-                    else:
-                        gen._emit_call('int64_t', t, 'int_join', [('int64_t', '0'), (arg_type, arg_val), (arg2_type, arg2_val)])
+                    gen._emit_call('int64_t', t, 'int_join', [('int64_t', '0'), (arg_type, arg_val), (arg2_type, arg2_val)])
                 return 'int64_t', t
             elif outer_member == 'exists' and len(node.args) == 1:
                 arg_type, arg_val = gen.lower_expr(node.args[0])
-                if arg_type in ('int64_t', 'MojoBytes *'):
-                    t = gen._call_expr('int', 'mojo_os_path_exists_w', [('int64_t', gen._to_int64(arg_type, arg_val))])
-                else:
-                    t = gen._call_expr('int', 'int_exists', [('int64_t', '0'), (arg_type, arg_val)])
+                t = gen._call_expr('int', 'int_exists', [('int64_t', '0'), (arg_type, arg_val)])
                 return 'int', t
             elif outer_member == 'isdir' and len(node.args) == 1:
                 arg_type, arg_val = gen.lower_expr(node.args[0])
-                if arg_type in ('int64_t', 'MojoBytes *'):
-                    t = gen._call_expr('int', 'mojo_os_path_isdir_w', [('int64_t', gen._to_int64(arg_type, arg_val))])
-                else:
-                    t = gen._call_expr('int', 'int_isdir', [('int64_t', '0'), (arg_type, arg_val)])
+                t = gen._call_expr('int', 'int_isdir', [('int64_t', '0'), (arg_type, arg_val)])
                 return 'int', t
             elif outer_member == 'isabs' and len(node.args) == 1:
                 # os.path.isabs(p) → check if first char is '/'
@@ -2838,10 +2724,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 # every loop iteration silently skipped (found via
                 # Tools/unicode/gencodec.py's convertdir()).
                 arg_type, arg_val = gen.lower_expr(node.args[0])
-                if arg_type in ('int64_t', 'MojoBytes *'):
-                    t = gen._call_expr('int', 'mojo_os_path_isfile_w', [('int64_t', gen._to_int64(arg_type, arg_val))])
-                else:
-                    t = gen._call_expr('int', 'int_isfile', [('int64_t', '0'), (arg_type, arg_val)])
+                t = gen._call_expr('int', 'int_isfile', [('int64_t', '0'), (arg_type, arg_val)])
                 return 'int', t
             elif outer_member == 'relpath' and 1 <= len(node.args) <= 2:
                 # os.path.relpath(p[, start]) -- the real posixpath answer

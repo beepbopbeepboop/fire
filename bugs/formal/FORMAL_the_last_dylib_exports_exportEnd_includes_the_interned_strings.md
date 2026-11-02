@@ -103,10 +103,10 @@ bucket; the measurement above is what tells the two apart, and the two rows in
 
 ## What is NOT claimed
 
-This is not the CSEL row and not the certificate cost — those were
-`FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md` (deleted) and
-`FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md`; the latter is still
-open and still on the critical path for a `CSEL` model. It is also not the
+This is not the CSEL row and not the certificate cost — those are
+`FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md` and
+`FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md`, both still open
+and both still on the critical path for a `CSEL` model. It is also not the
 stack-floor guard being wrong: `TestTheStackFloorGuardLeavesNoCallOnTheWalkedPath`
 passes, the guard's `getrlimit` reads are in the startup stub, and there is no
 `bl` in the last export's extent (`_cfg_blocks`'s `bl` count for it is 0 — the

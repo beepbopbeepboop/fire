@@ -1,13 +1,10 @@
-"""Regression for the escaping half of the closure-env / boxed-local leak: a
-returned `{mut}`-capturing closure's environment, box and bound-method entry
-were never freed (the single-owner design now frees them with the closure at
-its owner's scope exit).
+"""Regression for bug:CODEGEN_closure_env_and_boxed_local_never_freed.
 
-Before the fix the slope was ~90 B/iter (10.55 MB at 100k, 36.39 MB at 400k).
-After the single-owner fix it is flat: the 100k/400k peaks both sit at ~2 MB
-with near-zero delta. This test is the tripwire that pins that flat profile —
-if the escaping half regresses (e.g. the fresh-closure ownership is disabled),
-the slope climbs again and this fails.
+The escaping half (a returned closure's captured box lives with it) is
+still open — measured slope is ~86 B/iter (10.55 MB at 100k, 36.38 MB at
+400k). This test documents that state and serves as a tripwire: if the
+single-owner design lands, the slope must go flat (within noise) and the
+100k/400k peaks must both sit well under 40 MB with near-zero delta.
 """
 import os, sys
 sys.path.insert(0, '.')

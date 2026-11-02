@@ -93,14 +93,7 @@ not this diff's: `TestStepLemmasCoverTheExecutableRegionOnly`'s `setUpClass`
 KeyErrors in `_trap_terminating`'s raw `words[...]` index on a dylib block
 whose last word is a data gap (doc-2's walk-side code, commit `63ee00af`),
 and it reproduces on pristine `efc54db5` in a clean worktree — a separate
-defect for its own round, upstream of every line this diff touches. That
-round landed 2026-11-02: the block-tail read in `_trap_terminating` /
-`_is_trap_bl` is now `words.get` — a tail in a data gap (the dylib image's
-partial trailing word when `len(code) % 4 != 0`) is skipped as a non-branch,
-the way `_cfg_blocks`' own extension loop reads it — and
-`TestStepLemmasCoverTheExecutableRegionOnly` is 6/6 with
-`test_the_trap_decision_reads_a_block_tail_in_a_data_gap` pinning the gap
-shape.
+defect for its own round, upstream of every line this diff touches.
 
 **Step 2 — two of the three leaves closed; the third is structural.**
 - print1 (`test_lean_accepts_both_probes_with_no_sorries`): GREEN, 462.7 s,

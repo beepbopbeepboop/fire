@@ -58,7 +58,6 @@ from mojo.middle.types import _BOXED_CONTAINER_CTYPES
 from mojo.middle.calls_shared import _callable_value_symbol
 from mojo.middle.calls_shared import _RUNTIME_CALLABLE_VALUES as _RUNTIME_CALLABLE_VALUES_NAMES
 from mojo.middle.calls_shared import _py_box_expr
-from mojo.middle.calls_shared import FRAME_SETTABLE_IDS
 
 def _lower_strided(gen, node, store: bool):
     """Scalar (SIMD-width-1) lowering of the strided_load/strided_store
@@ -517,27 +516,6 @@ def _closure_value(gen, name: str, _ci) -> tuple:
             return 'void *', _vft
         t = gen._call_expr('MojoBoundMethod *', 'mojo_bound_method_new',
                             [('void *', fp), ('void *', env_void)])
-        # The environment holds the heap boxes of its `{mut}`-captured locals as
-        # pointer fields (each a separate `malloc` the field only points at), so
-        # freeing the environment alone would leak them. Record each box on the
-        # bound method (`mojo_bound_method_add_box`) so `mojo_closure_free` frees
-        # them with the environment when THIS value is the one that dies. This is
-        # safe to do unconditionally for a value-read nested `def`: a value-read
-        # def is one that escapes, so the enclosing function's own exit frees are
-        # deliberately disabled for it (`nested_def_env_owned`/`_no_closure_
-        # escapes` both answer False), meaning the box is freed by exactly one
-        # path — the owner of this value — never by the creator's exit too.
-        # The field read is a GIMPLE temp of its own (`_new_val`) and the call
-        # takes that temp: an inline `env->field` inside the call's argument
-        # text is not valid GIMPLE and gcc rejects the whole statement.
-        _env_box_var = gen._closure_envs.get(name)
-        if _env_box_var:
-            for _bv, _bt in _ci.captures:
-                if _bv in _ci.mut_names:
-                    _box_val = gen._new_val(
-                        'void *', f"{_env_box_var}->{gimple_ctypes._c_field_name(_bv)}")
-                    gen._void_call('mojo_bound_method_add_box',
-                                   [('MojoBoundMethod *', t), ('void *', _box_val)])
         gen._bound_method_ret_types[t] = gen.func_return_types.get(lifted, 'int64_t')
         gen._func_value_names[t] = _repr_name
         return 'MojoBoundMethod *', t
@@ -672,7 +650,7 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
     if name in gen._struct_bases and name not in gen.var_types and name not in gen._global_var_types:
         # A static class named as a VALUE is its type tag -- the word the run-time class table
         # files it under (`type('C', (A, B), ns)` / `bases = (A, B)` hand it to
-        # `mojo_type_add_base`; bugs/mid/CODEGEN_enum_runtime_class_creation.md stage 3). Not the
+        # `mojo_type_add_base`; bugs/CODEGEN_enum_runtime_class_creation.md stage 3). Not the
         # zero placeholder below, which every class would share.
         t = gen._new_temp('int64_t')
         gen._emit(f'  {t} = (int64_t){gimple_exprtypes._struct_type_id(name)}LL;  /* class {name} as value */')
@@ -1503,8 +1481,7 @@ _OS_PATH_RUNTIME_CALLABLE_VALUES = {
 }
 
 
-# frame attributes that are plain stored words (ids: calls_shared.FRAME_SETTABLE_IDS)
-_FRAME_ATTRS = frozenset(('f_generator', 'gi_frame', 'cr_frame', 'ag_frame', 'f_code', 'f_back', 'f_lineno', 'co_name', 'co_qualname', 'co_filename', 'co_firstlineno',
+_FRAME_ATTRS = frozenset(('f_code', 'f_back', 'f_lineno', 'co_name', 'co_qualname', 'co_filename', 'co_firstlineno',
                           '__traceback__', 'tb_frame', 'tb_next', 'tb_lineno'))
 
 
@@ -1512,29 +1489,10 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     # Attributes of a Python-level frame word (`sys._getframe(n)`), in a module that uses
     # frames. The names are specific to frame/code objects, and nothing is lowered here
     # unless a module of this compile mentions `_getframe`.
-    if len(gen._frames_mods) > 0 and node.member in FRAME_SETTABLE_IDS:
-        _fa_t, _fa_v = gen.lower_expr(node.obj)
-        _fa_r = gen._call_expr('int64_t', 'mojo_frame_get_attr',
-                               [('int64_t', gen._to_int64(_fa_t, _fa_v)),
-                                ('int64_t', gen._new_val('int64_t', f'(int64_t){FRAME_SETTABLE_IDS[node.member]}'))])
-        gen._dyn_word_vals.add(_fa_r)
-        gen._boxed_vals.add(_fa_r)       # identity (`f.f_trace is None`) and printing read the box
-        return 'int64_t', _fa_r
-    if len(gen._frames_mods) > 0 and node.member == 'f_locals':
-        # A frame's locals and trace hook have no representation yet (compiled C locals have no
-        # runtime names or addresses): refuse by name rather than read the word as an object
-        # attribute and answer garbage (see bugs/mid/CODEGEN_frame_f_locals_and_settrace.md, Plan).
-        raise RuntimeError(
-            f"cannot compile module: frame attribute `{node.member}` is not modelled on the compiled "
-            "path (bugs/mid/CODEGEN_frame_f_locals_and_settrace.md)")
     if len(gen._frames_mods) > 0 and node.member in _FRAME_ATTRS:
         _fr_t, _fr_v = gen.lower_expr(node.obj)
         _fr_w = gen._to_int64(_fr_t, _fr_v)
         _fm = node.member
-        if _fm == 'f_generator':
-            return 'int64_t', gen._call_expr('int64_t', 'mojo_frame_generator', [('int64_t', _fr_w)])
-        if _fm in ('gi_frame', 'cr_frame', 'ag_frame'):
-            return 'int64_t', gen._call_expr('int64_t', '__mojo_gen_frame', [('int64_t', _fr_w)])
         if _fm == 'f_code':
             return 'int64_t', _fr_w
         if _fm == '__traceback__':
@@ -2593,14 +2551,6 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     if node.member == '_mlir_value' and not (ot.endswith(' *') and gimple_exprtypes._struct_name_of(ot) in gen.struct_field_types):
         return ot, ov
 
-    # `ex.value` of a name bound by `except ... as ex`: the value a StopIteration carries
-    # (`raise StopIteration(x)`, a generator's `return x`), None when it carries none.
-    if (node.member == 'value' and isinstance(node.obj, gimple_ctypes.IdentExpr)
-            and node.obj.name in gen._except_as_names):
-        _ev = gen._call_expr('int64_t', 'mojo_exc_value_get', [])
-        gen._dyn_word_vals.add(_ev)
-        return 'int64_t', _ev
-
     # .value on char * (StringLiteral.value, kgen.string.value) → identity, the string itself
     if node.member == 'value' and ot == 'char *':
         t = gen._new_val('char *', f"{ov}")
@@ -3387,11 +3337,6 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
         # gives the right operand's C type without evaluating it, so the
         # merged result type is fixed before either branch runs.
         ltype, lval = gen.lower_expr(node.left)
-        # A left operand NAMED as a word of unknown kind (`d or b'xy'` with `d`
-        # bound from a bytes split) is one at this temp too: its truthiness is
-        # the runtime's, which `_ensure_bool_cond` asks for a dyn-word temp.
-        if ltype == 'int64_t' and gen._is_dyn_word(node.left, lval):
-            gen._dyn_word_vals.add(lval)
         cond = gen._ensure_bool_cond(ltype, lval)
         _rq = gen._quick_type(node.right)
         res_type = gimple_ctypes.TypeLattice.join(ltype, _rq)
@@ -3451,20 +3396,8 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
                             or (ltype == 'int64_t' and _rq == 'char *')))
         if _mixed_word:
             res_type = 'int64_t'
-        # A BYTES operand against a str or a word (`os.path.split(b'a/b')[0] or
-        # b'xy'`): the join prefers the pointer side, so the result would be a
-        # `char *` and the bytes object would be read as text -- its `len` the
-        # NUL scan of its header. Python's result is whichever operand was
-        # selected, so it is a word of unknown kind, answered by the runtime.
-        # (A bytes against a bool or an int keeps the pointer join: those are
-        # the NULL / bool-merge cases handled above.)
-        _bytes_mix = (not _bool_merge and not _mixed_word and (
-            (ltype == 'MojoBytes *' and _rq in ('char *', 'int64_t'))
-            or (_rq == 'MojoBytes *' and ltype in ('char *', 'int64_t'))))
-        if _bytes_mix:
-            res_type = 'int64_t'
         result = gen._new_temp(res_type)
-        if _mixed_word or _bytes_mix:
+        if _mixed_word:
             gen._dyn_word_vals.add(result)
         bb_short = gen._new_bb()
         bb_eval_right = gen._new_bb()
@@ -4671,23 +4604,6 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # MojoBytes == / != → mojo_bytes_eq (bytewise; never conflated with str)
     if op in ('==', '!=') and lt == 'MojoBytes *' and rt == 'MojoBytes *':
         eq_t = gen._new_val('int', f"mojo_bytes_eq ({lv}, {rv})")
-        t = gen._new_temp('_Bool')
-        cmp = '!= 0' if op == '==' else '== 0'
-        gen._emit(f"  {t} = {eq_t} {cmp};")
-        return '_Bool', t
-
-    # A bytes literal against a value whose static type is NOT bytes: a
-    # `char *` the inference guessed (an element of a list a call returned is
-    # typed from the callee's body, and a bytes element is a `MojoBytes *` at
-    # run time), or an erased int64_t word. Falling through here compared the
-    # two as C strings, so `fnmatch.filter([b'a.py'], b'*.py')[0] == b'a.py'`
-    # was False: strcmp read the MojoBytes header, not its bytes. Python decides
-    # this by the object: only bytes can equal bytes, so the registry answers.
-    if op in ('==', '!=') and 'MojoBytes *' in (lt, rt) and lt != rt \
-            and (lt in ('char *', 'int64_t') or rt in ('char *', 'int64_t')):
-        bt, bv, wt, wv = (lt, lv, rt, rv) if lt == 'MojoBytes *' else (rt, rv, lt, lv)
-        _w = _as_str(gen._to_int64(wt, wv))
-        eq_t = gen._new_val('int', f"mojo_bytes_word_eq ({_w}, {_as_str(bv)})")
         t = gen._new_temp('_Bool')
         cmp = '!= 0' if op == '==' else '== 0'
         gen._emit(f"  {t} = {eq_t} {cmp};")

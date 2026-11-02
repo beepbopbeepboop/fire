@@ -96,7 +96,6 @@ struct MojoCoro {
     int           frame_base;
     int           cleanup_base;
     void         *slice;
-    int           ret_set;      /* the body called __mojo_coro_set_return (a valued `return`) */
 };
 
 /* The coroutine currently executing its body (NULL == a resumer context).
@@ -256,9 +255,6 @@ __mojo_coro_throw(MojoCoro *c, int64_t exc_type, char *exc_msg,
     return 0;
 }
 
-void *__mojo_coro_slice_of(MojoCoro *c) { return c ? c->slice : NULL; }
-int   __mojo_coro_is_running(MojoCoro *c) { return c && c->status == MOJO_CORO_RUNNING; }
-
 int64_t
 __mojo_coro_yield(MojoCoro *c, int64_t val_box)
 {
@@ -341,10 +337,7 @@ void
 __mojo_coro_set_return(MojoCoro *c, int64_t box)
 {
     c->ret_box = box;
-    c->ret_set = 1;
 }
-
-int __mojo_coro_has_return(MojoCoro *c) { return c && c->ret_set; }
 
 static void
 coro_free(MojoCoro *c)

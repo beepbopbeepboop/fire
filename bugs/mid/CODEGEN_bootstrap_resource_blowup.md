@@ -1,5 +1,117 @@
 # CODEGEN: bootstrap resource blowup and four remaining stage1/stage2 divergences
 
+## Status (2026-11-01 — planning round: two retainers ruled out by measurement, the native-heap census is the next step)
+
+Round type: planning (CLAUDE.md "Bug rounds", outcome 3). No code changed. The
+next measurement is a whole-closure NATIVE run (`./mojoc --dump-full`, 12-24+
+GB), which a light worker may not run, so this round narrows the candidate set
+with the reference (Python) path and writes down the census that decides the
+fix.
+
+### Measured: the Python reference path does not scale to the blowup
+
+Probe (`python3 -I` on the reference compile, `do_imports=False`), counting
+what `mojo/middle/exprtypes.py` retains after one `compile_to_gimple` call:
+
+```python
+import sys, os, resource, time
+sys.path.insert(0, os.getcwd())
+import gimple_codegen as G
+import mojo.middle.exprtypes as ET
+path = sys.argv[1]; src = open(path).read()
+G.compile_to_gimple(src, do_imports=False, filename=path)
+memo, par = ET._WALK_AST_MEMO, ET._WALK_AST_PARENTS
+print("memo entries", len(memo), "list refs", sum(len(v[1]) for v in memo.values()),
+      "parent entries", len(par), "edge refs", sum(len(v) for v in par.values()))
+print("ru_maxrss bytes", resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+```
+
+Input: N copies of a 9-line `def f{i}` with a nested for/if, plus `main`
+(generated, not committed). Results (macOS `ru_maxrss` is bytes; a bare
+`python3` is 14.07 MB):
+
+| source lines | memo entries | memo list refs | parent entries | parent edge refs | max RSS |
+|---:|---:|---:|---:|---:|---:|
+| 182 | 47 | 14,761 | 1,203 | 10,427 | 47.05 MB |
+| 722 | 167 | 58,261 | 4,630 | 41,095 | 48.15 MB |
+| 1442 | 327 | 116,261 | 9,208 | 81,983 | 52.31 MB |
+
+Reading: the memo grows linearly, about 80 list references per source line
+and about 6 parent-edge lists per line. Extrapolated to fire.py's 14.8 MB of
+source (order 10^5-10^6 lines) that is on the order of 10-100 MB of pointers,
+not the 58.6 GB and 670M objects of the native measurement. **So
+`_WALK_AST_MEMO` / `_WALK_AST_PARENTS` (`mojo/middle/exprtypes.py:67-68`) are
+ruled out as the dominant retainer on the evidence available.** This is a
+Python-path measurement; the native binary runs the same algorithm, but
+nothing here measured the native binary, so this is a magnitude argument.
+
+### Ruled out by reading: `_SELFHOST_PARSE_CACHE`
+
+`mojo/middle/funcs_shared.py:1971` holds one rewritten statement list per file
+of the COMPILER'S OWN sources (~60 files, keyed `path@mtime`). Its size is
+bounded by the compiler's source tree and does not grow with the module closure
+being compiled, so it cannot be the retainer of the closure's ASTs. The
+2026-10-01 section's first candidate is therefore not the answer. (Its
+retention is still real and bounded; it is not the lever.)
+
+### Decision needed: what owns the native heap
+
+The 2026-10-01 measurement (`./mojoc --dump-full fire_compiler.py`: 58.6 GB,
+11.4 GB live across 130,462,322 blocks in 953 mappings, 670M retained small
+objects) is a NATIVE heap fact. The runtime (`runtime/fire_runtime.c`) allocates
+boxed values, list/dict storage and strings with `malloc` (for example
+`MojoBox`, `MojoBoundMethod`, `char *` buffers at lines 654-1461 and 1789-2041).
+A native retention can therefore be an AST, or a temporary the generated code
+allocates and never frees. The two readings want different fixes:
+
+- (A) AST lifetime: a `module_gen.py` edit that drops a module's AST after its
+  `.ci` is emitted. Byte-identical `--dump-full` output is required before any
+  memory number is believed (`cmp`).
+- (B) Temporaries: frees on the runtime or codegen side for values whose
+  lifetime ends inside one statement.
+
+Choose by census, not by guess. The census is what the next round lands first.
+
+### Plan for the next round (executable without re-investigating this one)
+
+1. **Census by allocation site, on a bounded closure, under 8 GB.** Add a
+   per-call-site counter to the `malloc` wrappers in `runtime/fire_runtime.c`
+   behind a build flag (`-DMOJO_ALLOC_CENSUS`, off by default; no change to
+   the default build). Build a mid-size closure with `mojoc` (a 5-10 module
+   subset of `fire_compiler.py`'s imports, not the whole closure), wrapped
+   `python3 tools/memslot.py --gb 8 --label census -- ...`. Output: objects and
+   bytes per call site, live at exit (malloc count minus free count per site).
+2. **Attribute the top sites to a source owner.** Map each live-at-exit site to
+   either an AST node (`fire_compiler.py` node constructors) or a codegen
+   temporary (string/list built per statement). If the top site is AST, the
+   next step is (A); if temporaries, (B).
+3. **Scale check.** Repeat at 2 closure sizes. Retained bytes should be linear
+   in source lines (this doc's claim) or superlinear (a cache). Superlinear
+   means a cache to find; linear with the wrong constant means a lifetime bug.
+4. **Only then** the spread question from 2026-10-25 (address- or timing-
+   dependent allocation): compare the census at a low and a high run of the
+   same binary. Do not start on the spread before the census shows which site
+   is large.
+
+### Tests that prove a fix
+
+- Behaviour preservation for ANY lifetime change: `cmp` the `--dump-full`
+  output of `fire_compiler.py` before and after (byte-identical), per CLAUDE.md.
+- A quick regression test for the reference path: after `compile_to_gimple`,
+  `len(_WALK_AST_MEMO)` and the total list refs stay within a linear bound of
+  the source line count (a superlinear result fails). Fixture = the generated
+  N-function program above, N = 20 and 160.
+- The heavy proof (whole-closure RSS before/after, under the `program` class)
+  is an integrator job and is named here, not run here.
+
+### Surprises and limits of this round
+
+- `ru_maxrss` on macOS is bytes, not KB. Labelled in the table above.
+- The native census cannot run inside a light worker's 8 GB budget at fire.py
+  scale; the plan uses a bounded closure for exactly that reason.
+- Nothing in this round changed the tree. The next round's first output is
+  the census table, committed as a dated Status entry.
+
 ## Status (2026-10-25 — correctness CLOSED, resource cost OPEN)
 
 `make bootstrap` is green: stage1 == stage2 == stage3 for all 184 generated

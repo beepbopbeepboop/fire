@@ -853,7 +853,7 @@ BUILTIN_PROGRAMS = {
             # accessor (a container prints as a pointer decimal, a float as its
             # IEEE-754 bits). The kinds row fixes what a pair PRINTS with, not
             # what a subscript loop READS with, and that half is still open —
-            # `bugs/mid/CODEGEN_dict_slot_read_loses_its_value_kind.md`.
+            # `bugs/CODEGEN_dict_slot_read_loses_its_value_kind.md`.
             #
             # The keyed spec of the SAME value kinds, which was already right and
             # is the control that keeps this case from being satisfied by
@@ -1342,7 +1342,7 @@ BUILTIN_PROGRAMS = {
     # worst kind: the compiled path passes a receiver correctly, so a
     # compiled-path bug on this shape would have agreed with the wrong
     # answer instead of showing up as a diff. See
-    # bugs/mid/COMPILE_FAIL_importlib_resources_readers.md's
+    # bugs/COMPILE_FAIL_importlib_resources_readers.md's
     # `yield from cls.<sibling generator>(...)`, which is the real code
     # that needs it.
     #

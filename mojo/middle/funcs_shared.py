@@ -427,8 +427,6 @@ def _param_ctype(gen, pname: str, ptype, node: gimple_ctypes.FunctionDef,
         _ck = _coro._CALLSITE_PARAM_KINDS.get(node.name, {}).get(pname)
         if isinstance(_ck, str) and _ck in _coro._KIND_TO_SLOT_CTYPE:
             ctype = _coro._KIND_TO_SLOT_CTYPE[_ck]
-        elif isinstance(_ck, str) and _ck == 'w':
-            ctype = 'int64_t'
     if ctype is None:
         ctype = gen._resolve_type(ptype)
     # An UNANNOTATED parameter whose declared default value is a string

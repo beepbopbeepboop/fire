@@ -26,7 +26,6 @@ import tempfile
 
 import formal.x86_64 as X
 import formal.x86_64_decode as D
-from exec_budget import COMPILE_TIMEOUT_S
 
 FAILURES = []
 
@@ -488,7 +487,7 @@ def _formal_first_refusal(rel):
              f"--backend={backend}", "-o",
              os.path.join(HERE, "build", f"decode_sweep_{backend}"),
              os.path.join(HERE, rel)],
-            capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S, cwd=HERE)
+            capture_output=True, text=True, timeout=600, cwd=HERE)
         out.append("" if r.returncode == 0
                    else (r.stderr or r.stdout).strip())
     return out

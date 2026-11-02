@@ -66,7 +66,7 @@ from mojo.middle.infra_infer import *  # noqa: F401,F403
 from mojo.middle.infra_infer import (
     opaque_container_locals,
     _FC_SEP, _POINTER_CTOR_NAMES, _as_ident_node, _as_int, _as_member_node, _as_set,
-    _as_str, _block_terminates, _closure_info_for_ident, _generator_value_ctype_for_next, _collect_return_types, _build_analysis_funcs, _build_analysis_structs, _build_fresh_returning, _build_fresh_closure_returning, _string_uses_ok, _key_views_ok, _list_elements_ok, _lambda_owned, _call_value_owned, _no_closure_escapes, _compute_closure_candidates, _compute_scoped_closure_candidates, _compute_scoped_fresh_closure_candidates, _compute_owned_free_candidates, _compute_scoped_free_candidates, _compute_int_keyed_dicts, _scope_decl_name, _is_ctor_display, _empty_ctor_ctype,
+    _as_str, _block_terminates, _closure_info_for_ident, _generator_value_ctype_for_next, _collect_return_types, _build_analysis_funcs, _build_analysis_structs, _build_fresh_returning, _string_uses_ok, _key_views_ok, _list_elements_ok, _lambda_owned, _no_closure_escapes, _compute_closure_candidates, _compute_scoped_closure_candidates, _compute_owned_free_candidates, _compute_scoped_free_candidates, _compute_int_keyed_dicts, _scope_decl_name, _is_ctor_display, _empty_ctor_ctype,
     _function_has_reachable_fallthrough, _infer_param_types, _infer_return_type, _is_free_eligible_function, _is_known_field, _known_field_type,
     _pair_key, _prepass_list_elem, _ptr_slot_in_range, _resolve_member_expr_type, _resolve_type, _scan_container_elems,
     _seed_addressed_locals, _type_of
@@ -359,12 +359,6 @@ def _reset_func(gen, body: list = None, params: list = None,
     # safe to seed only where the answer is provable.
     gen._int_word_vals.clear()
     gen._fresh_vals.clear()   # per function: temp names repeat across functions
-    # (TEMPs holding a fresh closure, `_fresh_closure_vals`, reset by REBIND in
-    # the ownership-assignment section below, never in place: a nested lifted
-    # closure's `save_func_state` holds a reference to the current object, and
-    # an in-place `.clear()` here would empty the saved state the enclosing
-    # function is restored to. Rebinding detaches `gen` from the saved object
-    # first, exactly as `_fresh_vals`'s own reset does.)
     # The four the ownership work added are ASSIGNED here rather than cleared,
     # and the difference is not a style choice: they are not in
     # `GimpleGen.__init__`, so this is where they come into existence, and a
@@ -385,12 +379,6 @@ def _reset_func(gen, body: list = None, params: list = None,
     # is the malloc'd environment emit_calls' constructor paired with it, so
     # both are one allocation unit and one free.
     gen._closure_vals: set = set()
-    # The VALUES (temps) holding a FRESH CLOSURE a call returned: a callee
-    # proven to hand back a brand-new capturing closure (returns_fresh_closure),
-    # so the local bound to it may own the value — environment, `{mut}` boxes
-    # and bound method — and free it with `mojo_closure_free` at its scope exit.
-    # The caller-side counterpart of `_closure_vals` (a local lambda).
-    gen._fresh_closure_vals: set = set()
     # The NAMES of owned locals bound to a closure; the free is emitted for the
     # name at the scope exit.
     gen._owned_closure_names: set = set()
@@ -908,7 +896,6 @@ class FuncState:
         self.fs_owned_str_elem_vals: set = set()
         self.fs_owned_str_elem_names: set = set()
         self.fs_closure_vals: set = set()
-        self.fs_fresh_closure_vals: set = set()
         self.fs_owned_closure_names: set = set()
         self.fs_owned_env_names: set = set()
         self.fs_owned_box_names: set = set()
@@ -1012,7 +999,6 @@ def save_func_state(gen) -> FuncState:
     st.fs_owned_str_elem_vals = gen._owned_str_elem_vals
     st.fs_owned_str_elem_names = gen._owned_str_elem_names
     st.fs_closure_vals = gen._closure_vals
-    st.fs_fresh_closure_vals = gen._fresh_closure_vals
     st.fs_owned_closure_names = gen._owned_closure_names
     st.fs_owned_env_names = gen._owned_env_names
     st.fs_owned_box_names = gen._owned_box_names
@@ -1126,7 +1112,6 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._owned_str_elem_vals = st.fs_owned_str_elem_vals
     gen._owned_str_elem_names = st.fs_owned_str_elem_names
     gen._closure_vals = st.fs_closure_vals
-    gen._fresh_closure_vals = st.fs_fresh_closure_vals
     gen._owned_closure_names = st.fs_owned_closure_names
     gen._owned_env_names = st.fs_owned_env_names
     gen._owned_box_names = st.fs_owned_box_names
@@ -1335,7 +1320,7 @@ def _compile_link_inline_cpp_unit(gen, cpp_code: str):
         return None
 
 
-def _emit_stdlib_import_externs(gen, stmts: list) -> None:
+def _emit_stdlib_import_externs(gen, stmts) -> None:
     """Scan from-import stmts and emit extern declarations for concrete
     functions found via load_module (text-only extraction — no dylib builds,
     no recursion). Populates _link_import_decl_list and registers types so
@@ -1600,7 +1585,7 @@ def global_generator_key(module_safe: str, name: str) -> tuple:
     return f"{module_safe}.{name}"
 
 
-def seed_global_generator_apis(gen, stmts: list, mod_index) -> None:
+def seed_global_generator_apis(gen, stmts, mod_index) -> None:
     """Record, before ANY function body is emitted, which module globals are
     bound to one compiled generator for the whole module.
 
@@ -1649,7 +1634,7 @@ def seed_global_generator_apis(gen, stmts: list, mod_index) -> None:
         gen._global_generator_api[global_generator_key(key_mod, name)] = api
 
 
-def _emit_imported_global_accessors(gen, stmts: list) -> None:
+def _emit_imported_global_accessors(gen, stmts) -> None:
     """Bare `from X import <module_scope_var>` — BUG-2026-009. See
     `_imported_global_accessors`'s own docstring and module_loader.py's
     'kind': 'global_var' export entries (module_loader._VAR_GLOBAL_RE)
@@ -6288,7 +6273,7 @@ def _open_block_scope(gen):
     return frame
 
 
-def _close_block_scope(gen, frame: list):
+def _close_block_scope(gen, frame):
     """Close the block `_open_block_scope` opened: undo every shadow a `var`
     made inside it, innermost first, so a read after the block sees the
     binding it saw before the block."""
@@ -7930,7 +7915,7 @@ def _dedup_variadic_externs(parts: list) -> str:
         return True
 
     def _record_output_parse(out: str, out_parts: list,
-                             variadic_by_out_part: list) -> None:
+                             exact_concrete, variadic_by_out_part: list) -> None:
         """Publish `_DEDUP_EXTERN_PARTS_CACHE[out]` for the text JUST
         returned, with the parse its parts' own entries imply.
 
@@ -7944,59 +7929,34 @@ def _dedup_variadic_externs(parts: list) -> str:
         nothing is published (the parent level then parses the text itself,
         exactly as it did before this existed).
 
-        Every part of `out_parts` is already in the cache by the time this
-        runs (the caller read or filled its entry in the main pass), so
-        `entry` below is never absent; a missing one would be a programming
-        error here, not a case to paper over.
-
-        **Both components of the published value are LISTS, always** — the
-        same shape `_parse_part` returns, so the memo has exactly one value
-        shape however an entry got there. That is not cosmetic: the two
-        consumers iterate these components with a `for` loop, and the
-        compiled backend's `for x in <boxed>` lowering dispatches on the
-        RUNTIME type of the iterable and handles only a registered dict or
-        list (emit_loops.py:984-995). Anything else — a `set` included —
-        takes the `mojo_unsupported_iter` arm, which PRINTS and then runs
-        the body ZERO times (`runtime/fire_runtime.c:6331`). A derived
-        entry holding the caller's `concrete` set therefore made the first
-        level that read it fold nothing into its own `concrete`, take the
-        `if not concrete:` arm, and drop NOTHING for the rest of the compile:
-        in the self-hosted `mojoc` that is a silent no-op of the entire
-        function, so conflicting variadic/concrete `extern` declarations
-        survived into every artifact the binary produced (this is what broke
-        the `selfhost` step). So the union is built here, from the parts'
-        own entries, rather than handed over from the caller: one producer,
-        one shape, and the by-reference "provably exact" contract that
-        carried the wrong type is gone rather than patched.
-
-        The names go in first-seen order (part order, then order within a
-        part), deduplicated through a local set. Order is not observable —
-        every consumer only adds to a set or tests membership — but a
-        fixed one keeps the memo's contents reproducible run to run.
+        `exact_concrete` is the caller's already-computed set when it is
+        provably the exact name set of `out` (nothing was dropped) — passed
+        BY REFERENCE, so the common case allocates nothing; `None` asks for
+        it to be rebuilt from the parts. Every part of `out_parts` is already
+        in the cache by the time this runs (the caller read or filled its
+        entry in the main pass), so `entry` below is never absent; a missing
+        one would be a programming error here, not a case to paper over.
         """
         if not _boundaries_preserve_parse(out_parts):
             return
-        # Index, then `_as_list`, as the main pass does: a cached pair unpacked
-        # by `a, b = entry` (or iterated directly) boxes its slots on the
-        # self-hosted path. The published name collection is a LIST, as
-        # `_parse_part`'s entries are: the reader iterates `entry[0]`, and the
-        # self-hosted path cannot iterate a value that is sometimes a list and
-        # sometimes a set -- it read a published SET's slot words (0xffffffff)
-        # as string pointers.
-        out_concrete = []
-        seen = set()
-        for p in out_parts:
-            entry = _DEDUP_EXTERN_PARTS_CACHE.get(p)
-            for name in _as_list(entry[0]):
-                name = _as_str(name)
-                if name not in seen:
-                    seen.add(name)
-                    out_concrete.append(name)
+        if exact_concrete is None:
+            exact_concrete = set()
+            for p in out_parts:
+                entry = _DEDUP_EXTERN_PARTS_CACHE.get(p)
+                for name in _as_list(entry[0]):
+                    exact_concrete.add(_as_str(name))
         out_variadic = []
         for vl in variadic_by_out_part:
             for name in vl:
                 out_variadic.append(name)
-        _DEDUP_EXTERN_PARTS_CACHE[out] = (out_concrete, out_variadic)
+        # The cached name collection is a LIST here, as `_parse_part`'s entries
+        # are: the reader iterates `entry[0]` and the self-hosted path cannot
+        # iterate a value that is sometimes a list and sometimes a set -- it read
+        # a published SET's slot words (0xffffffff) as string pointers.
+        _out_concrete = []
+        for _cn in _as_set(exact_concrete):
+            _out_concrete.append(_as_str(_cn))
+        _DEDUP_EXTERN_PARTS_CACHE[out] = (_out_concrete, out_variadic)
 
 
     # ONE pass over `parts`, not two. The old shape scanned every fragment
@@ -8038,10 +7998,11 @@ def _dedup_variadic_externs(parts: list) -> str:
         variadic_by_part.append(part_variadic)
     if not concrete:
         out = '\n'.join(parts)
-        _record_output_parse(out, parts, variadic_by_part)
+        _record_output_parse(out, parts, concrete, variadic_by_part)
         return out
     kept = []
     kept_variadic = []
+    dropped = False
     for i in range(len(parts)):
         drop = False
         for name in variadic_by_part[i]:
@@ -8051,8 +8012,12 @@ def _dedup_variadic_externs(parts: list) -> str:
         if not drop:
             kept.append(parts[i])
             kept_variadic.append(variadic_by_part[i])
+        else:
+            dropped = True
     out = '\n'.join(kept)
-    _record_output_parse(out, kept, kept_variadic)
+    # Nothing dropped ⇒ the set just built IS the output's exact name set,
+    # so hand the same object over rather than rebuilding it.
+    _record_output_parse(out, kept, None if dropped else concrete, kept_variadic)
     return out
 
 
@@ -8252,29 +8217,6 @@ def maybe_push_owned_local(gen, name: str, value=None) -> None:
     if gen._decl_rhs_val != '' and gen._decl_rhs_val in gen._closure_vals:
         gen._closure_vals.discard(gen._decl_rhs_val)
         if not _lambda_owned(gen._cur_func_body, name):
-            _drop_owned_candidate(gen, name)
-            return
-        gen._owned_closure_names.add(name)
-        gen._emit(f"  mojo_cleanup_push_closure ({name});")
-        pushed.add(name)
-        if name in gen._scope_armed:
-            _scope_register(gen, name, 'mojo_closure_free')
-        return
-    # A FRESH CLOSURE returned by a vetted call: the same single-owner shape
-    # as the capturing lambda above, but the value comes back through a
-    # CALLEE (`var f = make_counter(r)`; the callee passed `returns_fresh_closure`
-    # and `_lower_call` credited its result temp into `_fresh_closure_vals`),
-    # so the ownership question is the caller-side usage one
-    # (`_call_value_owned`) and the free path is identical: `mojo_closure_free`
-    # tears down the bound method, the environment, and the `{mut}` boxes the
-    # environment holds — the escaping half of the closure-env leak: a
-    # returned `{mut}`-capturing closure whose env, boxes and bound method were
-    # never freed. If the value
-    # escaped the usage (an alias, a capture, a second holder) fail closed:
-    # nothing is freed, today's leak, never a wrong free.
-    if gen._decl_rhs_val != '' and gen._decl_rhs_val in gen._fresh_closure_vals:
-        gen._fresh_closure_vals.discard(gen._decl_rhs_val)
-        if not _call_value_owned(gen._cur_func_body, name):
             _drop_owned_candidate(gen, name)
             return
         gen._owned_closure_names.add(name)
@@ -8935,8 +8877,7 @@ def begin_function(gen, fn) -> None:
     # nowhere outside it), so the same arming and the same three exit points
     # apply. Computed from the same body, so the two sets cannot disagree.
     gen._scoped_free_candidates = (gen._scoped_free_candidates
-                                   | _compute_scoped_closure_candidates(fn, gen._owned_free_candidates)
-                                   | _compute_scoped_fresh_closure_candidates(fn, gen._fresh_closure_returning))
+                                   | _compute_scoped_closure_candidates(fn, gen._owned_free_candidates))
 
 
 def reset_no_candidates(gen) -> None:
@@ -8973,8 +8914,8 @@ def register_nested_env_free(gen, def_name: str, env_var: str,
 
     `_alloc_<name>_env()` is a `malloc` per nested `def` STATEMENT, and
     nothing freed it: `def helper(n): def inner(x): return x + n; return
-    inner(1)` measured +16 B/iteration (3.06 MB at 100k, 7.64 MB at 400k) in
-    that probe. There
+    inner(1)` measured +16 B/iteration (3.06 MB at 100k, 7.64 MB at 400k) —
+    bugs/CODEGEN_closure_env_and_boxed_local_never_freed.md's OPEN 1. There
     is no `MojoBoundMethod` and no `_reg_bound_method` entry here (the call
     sites are DIRECT — `helper_inner (_env_inner, 1)`), so the teardown is a
     bare `free` and the unwind entry is `mojo_cleanup_push_ptr`, NOT

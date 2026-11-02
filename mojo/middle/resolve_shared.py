@@ -795,11 +795,7 @@ def _quick_type(gen, node) -> str:
         elif (isinstance(node.func.obj, gimple_ctypes.MemberExpr)
                 and isinstance(node.func.obj.obj, gimple_ctypes.IdentExpr)
                 and node.func.obj.obj.name == 'os' and node.func.obj.member == 'path'):
-            if node.func.member in ('join', 'basename', 'expanduser', 'abspath', 'normpath', 'realpath'):
-                # (`abspath`/`normpath`/`realpath` lower to a `char *` too -- see
-                # their rows in emit_methods -- so a local bound from one is a
-                # string, not the int64_t default. `dirname` is deliberately
-                # absent: it answers a WORD for a bytes argument.)
+            if node.func.member in ('join', 'basename', 'expanduser'):
                 # `join` included (measured flip): without a row here the
                 # answer fell to the chained `.join` row below, which fires
                 # only while `_quick_type(os.path)` is `char *` — and that
@@ -1011,14 +1007,6 @@ def _quick_type(gen, node) -> str:
                 and isinstance(obj.func.obj.obj, gimple_ctypes.IdentExpr)
                 and obj.func.obj.obj.name == 'os' and obj.func.obj.member == 'path'
                 and obj.func.member in ('splitext', 'split', 'splitdrive', 'splitroot')):
-            # os.path.split / splitext of a BYTES argument yields bytes parts:
-            # the lowering builds them with the bytes runtime helpers and leaves
-            # the element kind unrecorded, so the subscript is a word of unknown
-            # kind -- a `char *` here cast the bytes pointer to text
-            # (`os.path.split(b'a/b')[0]`).
-            if (obj.func.member in ('split', 'splitext') and obj.args
-                    and gen._quick_type(obj.args[0]) == 'MojoBytes *'):
-                return 'int64_t'
             return 'char *'
         # struct.unpack("<f", buf)[0] / struct.unpack_from(fmt, buf, 0)[2]:
         # the callee's own type is 'MojoList *' (the CallExpr case above),
@@ -1205,7 +1193,7 @@ def _prepass_callee_key(gen, node) -> str | None:
             return f"{gen._prepass_struct}_{f.member}"
     return None
 
-def _collect_local_container_elems(gen, stmts: list) -> None:
+def _collect_local_container_elems(gen, stmts) -> None:
     """Populate self._prepass_local_elems from a function's assignments:
     a named local holding a container literal / container-returning call,
     or both halves of a `xt, xv = <container-returning call>` unpack."""
@@ -1252,7 +1240,7 @@ def _collect_local_container_elems(gen, stmts: list) -> None:
         elif isinstance(node, gimple_ctypes.WithStmt):
             gen._collect_local_container_elems(node.body)
 
-def _collect_return_elems(gen, stmts: list, acc) -> None:
+def _collect_return_elems(gen, stmts, acc) -> None:
     """Collect container element types of return values (structural walk
     mirroring _collect_return_types)."""
     for node in stmts:
@@ -1417,15 +1405,6 @@ def _infer_return_elem_type(gen, body, func_def=None,
         acc = []
         gen._collect_return_elems(body, acc)
         if not acc:
-            return None
-        # A heterogeneous tuple whose elements mix a float with a pointer
-        # has no single element type (TypeLattice.join would pick the
-        # pointer, which then mis-types every slot). Refuse to unify such
-        # a mix: leave the int64_t default. The doc that recorded this
-        # (DELETED). See commit that fixed the self-host tuple float+ptr mix.
-        _has_float = any(gimple_ctypes.TypeLattice.is_float(t) for t in acc)
-        _has_ptr = any(gimple_ctypes.TypeLattice.is_pointer(t) for t in acc)
-        if _has_float and _has_ptr:
             return None
         return gimple_ctypes.TypeLattice.join_all(acc)
     finally:
@@ -1901,7 +1880,7 @@ def _infer_local_var_types_core(gen, func: gimple_ctypes.FunctionDef) -> dict[st
 
     return result
 
-def _calls_in_stmts(gen, stmts: list, out):
+def _calls_in_stmts(gen, stmts, out):
     """Collect every CallExpr reachable from a statement list.
 
     Phase 4 (the `_walk_ast` re-scan bug,

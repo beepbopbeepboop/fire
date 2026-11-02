@@ -514,7 +514,7 @@ was effectively doing — is reading a register the callee never promised.
 specified one, and it was wrong about the current design: `setjmp` is emitted
 **directly into the generated function** by the try lowering
 (`mojo/backend_gimple/emit_stmts.py` sets `gen._func_used_setjmp` and emits the
-region there — `runtime/fire_runtime.h:544` says so in as many words: *"setjmp
+region there — `runtime/fire_runtime.h:512` says so in as many words: *"setjmp
 is emitted directly in generated functions"*). That is why
 `_mojo_exc_stack` and `_mojo_exc_top` are exported `extern` globals rather than
 reached through an accessor: the generated code indexes them itself. A client
@@ -525,13 +525,13 @@ the old macro had to be a macro.
 - **`mojo_exc_pop()`** — pops the topmost frame (`void`).
 - **`mojo_raise()`** — `longjmp`s to the current frame (`void`). A real function
   with no `setjmp` of its own, so it is safe to call from a wrapper — the header
-  says so beside its own declaration (`runtime/fire_runtime.h:545`, and the
-  declaration itself at `runtime/fire_runtime.h:552`).
+  says so beside its own declaration (`runtime/fire_runtime.h:513`, and the
+  declaration itself at `runtime/fire_runtime.h:520`).
 - **`mojo_exc_msg_set` / `mojo_exc_msg_get`** — set/get the string payload of a `raise` (`void` / `char *`).
 - **`mojo_exc_obj_set` / `mojo_exc_obj_get`** — set/get the opaque typed exception object (`void *`).
 - **`mojo_exc_type_set` / `mojo_exc_type_get`** — set/get the exception type tag
   (`void` / `int64_t`, over `extern int64_t _mojo_exc_type`;
-  `runtime/fire_runtime.h:566` context, 10 / 11 header comments). Added since this section was first
+  `runtime/fire_runtime.h:532-534`). Added since this section was first
   written and load-bearing for typed exceptions.
 
 **Cleanup-thunk registry.** `mojo_raise`'s `longjmp` skips every C statement
@@ -593,14 +593,14 @@ silently going undocumented:
 
 **Coroutine boundary.** `extern int _mojo_exc_pending` with
 `mojo_exc_pending_set` / `mojo_exc_pending_get`
-(`runtime/fire_runtime.h:661-663`). This is the one entry set a client must not
+(`runtime/fire_runtime.h:612-614`). This is the one entry set a client must not
 guess at: the generated C++ generator body calls it at the `extern "C"
 _resume()` boundary, because an ordinary `yield from` delegation loop re-throws
 as a C++ exception and gets unwound for real, while GIMPLE C code calls
 `mojo_raise()` itself. A callee on that boundary that is not a live GIMPLE C
 frame must not have its `longjmp` cross ordinary live C frames — the header's
 own comment on the set explains why in terms of a suspended frame no longer
-existing (`runtime/fire_runtime.h:661-663`).
+existing (`runtime/fire_runtime.h:585-613`).
 
 ### A `*rest` parameter: a fixed-arity SPECIALIZATION per call site, and no
 ### new calling convention

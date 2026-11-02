@@ -2551,7 +2551,7 @@ def _unpack_target_leaf_names(target: str) -> list:
     thing. It is also what knows about the trailing comma."""
     return for_target_names(target)
 
-def _declared_vars_body(stmts: list) -> set[str]:
+def _declared_vars_body(stmts) -> set[str]:
     """Variables declared in a statement list (does not cross FunctionDef boundaries)."""
     result: set = set()
     for node in stmts:

@@ -206,7 +206,7 @@ def _build_generator_program_from_code(c_code: str, cpp_code: str) -> str:
 #
 # Real: c_common/tables.py's `read_table` consuming
 # `strutil._iter_significant_lines(infile)` — see
-# bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md.
+# bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md.
 
 _FOREIGN_PKG_FILES = {
     '__init__.py': '',
@@ -1118,7 +1118,7 @@ def main():
 
 
 def _regression_read_table_callable_reader():
-    # Root-cause regression for bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md:
+    # Root-cause regression for bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md:
     # `_get_reader` is a callable-valued parameter (default csv.reader); the
     # loop `for row in _get_reader(lines, ...):` in `read_table` must be
     # refused honestly (not silently wrong) until callable-local loop typing
@@ -3237,52 +3237,6 @@ def main():
 main()
 """
 
-# `and`/`or` over a received (None-box) word: the operand is returned, not a
-# bool, and the result is again a tagged word, so it is printed, bound, tested
-# and used in arithmetic by what it is. One program text serves as both the
-# Mojo source and the CPython oracle.
-_RECEIVED_AND_OR_SRC = """\
-def g():
-    x = yield 1
-    print(x or 5)
-    print(x and 7)
-    y = x or 5
-    print(y)
-    if x or 5:
-        print("truthy")
-    print((x or 5) + 1)
-    yield 2
-
-def main():
-    it = g()
-    print(next(it))
-    print(next(it))
-main()
-"""
-
-# The str-right split: `(x or '') + 'z'` and `s = x or 'd'` keep their
-# `char *` typing (the `_W` lowering), while an int right operand takes the
-# tagged path (`-(x or 5)` is -5). Pins that the split does not change the
-# str consumers that worked before it.
-_RECEIVED_OR_STR_SRC = """\
-def g():
-    x = yield 1
-    print((x or '') + 'z')
-    print(x or 'd')
-    s = x or 'd'
-    print(s)
-    if not (x or 5):
-        print("f")
-    print(-(x or 5))
-    yield 2
-
-def main():
-    it = g()
-    print(next(it))
-    print(next(it))
-main()
-"""
-
 
 def run_none_yield_tests():
     # A None yield (bare `yield`, or `yield None`) used to share the int64_t
@@ -4547,56 +4501,6 @@ def main():
     it = g()
     next(it)
     next(it)
-main()
-""")
-        # `a or b` / `a and b` on a TAGGED left operand yield an OPERAND (Python
-        # returns the word itself, or the right operand), not a bool: the None
-        # box a received `x` holds is falsy, a yielded str/int is truthy by its
-        # own kind. Before the fix this lowered to a C `||`/`&&` and printed the
-        # truth as 1, so `x or 5` gave 1 where CPython gives 5.
-        test_generator_matches_cpython("received_and_or_operand_cpp",
-                                       _RECEIVED_AND_OR_SRC, _RECEIVED_AND_OR_SRC)
-        test_generator_matches_cpython("received_or_str_operand_cpp",
-                                       _RECEIVED_OR_STR_SRC, _RECEIVED_OR_STR_SRC)
-        test_generator_matches_cpython("tagged_next_and_or_operand_cpp", """\
-def gen():
-    yield 0
-    yield "a"
-    yield 3
-
-def consume():
-    g = gen()
-    x = next(g)
-    print(x or 5)
-    print(x and 7)
-    x = next(g)
-    print(x or 5)
-    print(x and 7)
-    yield 0
-
-def main():
-    for z in consume():
-        pass
-main()
-""", """\
-def gen():
-    yield 0
-    yield "a"
-    yield 3
-
-def consume():
-    g = gen()
-    x = next(g)
-    print(x or 5)
-    print(x and 7)
-    x = next(g)
-    print(x or 5)
-    print(x and 7)
-    yield 0
-
-def main():
-    for z in consume():
-        pass
 main()
 """)
         test_generator_matches_cpython("none_sent_into_generator_prints_none_cpp", """\
@@ -6828,7 +6732,7 @@ def main():
     # `cls.method(...)` call inside a compiled @classmethod generator —
     # resolved purely by NAME (the enclosing struct's own real compiled
     # classmethod), mirroring the `self.method(...)` call case's own
-    # mechanism. See bugs/mid/CODEGEN_enum_runtime_class_creation.md's
+    # mechanism. See bugs/CODEGEN_enum_runtime_class_creation.md's
     # 2026-08-21 update, point (2). Also called via an instance, for the
     # same call-site-gap reason noted above.
     test_generator_stdout("cls_classmethod_call_in_generator", """\
@@ -9055,57 +8959,6 @@ def main():
     # AT TEST TIME (`test_generator_matches_cpython`), because every
     # failure mode in this area is a silent wrong value and a
     # hand-transcribed "expected" string is exactly how one gets enshrined.
-    # A capture-free nested `def` that itself defines a generator, and the plain
-    # helper that generator calls, are lifted to module level: the generator was
-    # one level too deep for the nested-generator machinery and fell to the C++
-    # companion, which cannot call the helper (test_frame.py's `t0`).
-    test_generator_stdout("gimple_generator_two_levels_deep_calls_a_sibling_helper", """\
-import sys
-
-class T:
-    def test(self):
-        def t0():
-            def nested():
-                frame = sys._getframe()
-                return frame.f_generator
-
-            def gen():
-                yield nested()
-
-            g = gen()
-            try:
-                return next(g)
-            finally:
-                g.close()
-        print(t0() is None)
-
-def main():
-    T().test()
-""", "True\n")
-
-    # A nested `async def` of a METHOD whose result is the coroutine object itself
-    # (test_frame.py's `t3`): lifted to module level, it is an ordinary coroutine.
-    test_generator_stdout("method_nested_async_returns_its_own_coroutine", """\
-import sys
-
-class T:
-    def test(self):
-        async def t3():
-            frame = sys._getframe()
-            return frame.f_generator
-
-        c = t3()
-        try:
-            c.send(None)
-        except StopIteration as ex:
-            print(ex.value is c)
-        else:
-            raise AssertionError('coroutine did not exit')
-
-def main():
-    T().test()
-""", "True\n")
-
     test_generator_matches_cpython("nested_async_gen_driven_by_async_for", """\
 def outer() raises:
     var acc = 0
@@ -10369,7 +10222,7 @@ def main():
 main()
 """)
 
-    # Stage 1 of run-time class objects (bugs/mid/CODEGEN_enum_runtime_class_creation.md): an attribute
+    # Stage 1 of run-time class objects (bugs/CODEGEN_enum_runtime_class_creation.md): an attribute
     # the class body never declares - `setattr(cls, ..)`, `Cls.x = v`, what a metaclass installs -
     # lives in a run-time class table found through the bases, and a @classmethod generator (or
     # method) reads it as `cls.x`; getattr / hasattr on a class use the same table.

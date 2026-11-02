@@ -346,7 +346,7 @@ def _submodule_source_path(gen, module_name: str) -> str | None:
     return None
 
 
-def _register_closure_struct_inits(gen, stmts: list) -> None:
+def _register_closure_struct_inits(gen, stmts) -> None:
     """Populate `gen._struct_has_init` / `_struct_init_params` /
     `_struct_init_defaults` / `_struct_method_names` for every top-level
     StructDef in `stmts` that defines an `__init__`. Called for each module
@@ -407,7 +407,7 @@ def publish_a3_generators(gen, meta) -> None:
     (kwonly params → "kwonly params (v0)"), so `read_table` compiles
     through the cpp path and could not resolve the foreign handle,
     refusing the whole module with `a call to unresolved callee
-    'next(...)'`. See bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md.
+    'next(...)'`. See bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md.
 
     Must be called at the A3 registration site, not from gen_module: by the
     time gen_module runs, `mojo/middle/coro.py`'s `lower()` has already
@@ -1111,7 +1111,6 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # generator slots; the module's own statements are appended
                 # for ITS imports, so a generator reached through a chain of
                 # imports sees every call site compiled before it.
-                gimple_codegen.gimple_gen_coro._PY_SRC[0] = str(_abspath).endswith('.py')
                 stmts, _ss_meta = gimple_codegen.gimple_gen_coro.lower(
                     stmts, gen._closure_call_stmts, module_name)
                 temp_gen._closure_call_stmts = gen._closure_call_stmts + [stmts]
@@ -1463,7 +1462,7 @@ def _bare_import_bindings(stmt) -> list:
     return out
 
 
-def _module_marker_attribute_reads(stmts: list) -> dict:
+def _module_marker_attribute_reads(stmts) -> dict:
     """`{identifier: [attribute, ...]}` for every `ident.attr` anywhere in
     this module — ONE AST walk for the whole module, so a module with N bare
     imports costs one walk and not N (the walk is the expensive half of
@@ -1559,7 +1558,7 @@ def _inline_bare_import_struct(gen, stmt, marker_reads) -> None:
             _classify_unresolved_export(gen, _m, _m, _mod, _path, _text)
 
 
-def _register_link_imports(gen, stmts: list) -> list:
+def _register_link_imports(gen, stmts) -> list:
     """Link mode (MODULE_CACHE_DESIGN.md): `import` is the seam. For each
     imported symbol, resolve its signature from the module's dylib
     `__mojo_reflect` ABI (imports.import_exports → read_reflection), register
@@ -1638,7 +1637,7 @@ def _register_link_imports(gen, stmts: list) -> list:
     # `mojo/middle/module_shared.py::_collect_import_modules`'s docstring).
     _marker_reads = _module_marker_attribute_reads(stmts)
 
-    def scan(stmt_list: list):
+    def scan(stmt_list):
         for stmt in stmt_list:
             if isinstance(stmt, gimple_ctypes.ImportStmt):
                 # `import M` needs TWO things registered here, and they are
@@ -2598,13 +2597,6 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
                           and gimple_exprtypes.is_python_bool_expr(gen, enode)):
         return gen._call_expr('char *', 'mojo_repr_bool',
                               [('int', gen._new_val('int', f'(int){rav}'))])
-    # A WORD whose kind only the runtime knows (a regex group, a match, a
-    # DirEntry name): its repr is spelled by the kind the runtime reads off it.
-    if rat in ('int', 'int64_t') and (
-            rav in gen._dyn_word_vals
-            or (isinstance(enode, gimple_ctypes.IdentExpr)
-                and _as_str(enode.name) in gen._dyn_word_locals)):
-        return gen._call_expr('char *', 'mojo_repr_word', [('int64_t', rav)])
     # A BOXED CONTAINER — a module-global list/dict/set read back as an
     # `int64_t`, or a call result whose static type is the box but whose real
     # value, per `_get_actual_type`, is a container. `_stringify_value` (the
@@ -3720,7 +3712,7 @@ def _compr_str_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     cond_t = gen._new_val('_Bool', f"{idx64} < {len64}")
     gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
     gen._emit_label(bb_body)
-    gen._emit(f"  {gen._cname(gen0.target)} = mojo_char_at_str_cp (mojo_str_data({_iv}), {idx64});")
+    gen._emit(f"  {gen._cname(gen0.target)} = mojo_str_char_at ({_iv}, {idx64});")
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
     gen._emit(f"  goto {bb_post};")
     gen._emit_label(bb_post)

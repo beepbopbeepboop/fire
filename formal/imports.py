@@ -3010,13 +3010,13 @@ HOST_MODULE_ADVICE = {
         # reader to add a capability that exists. What actually stops a
         # `formal/hostmods/functools.mojo` is the DECORATOR half, which is a
         # different missing capability with a doc of its own
-        # (`bugs/mid/COMPILE_FAIL_decorator_application_dropped.md`).
+        # (`bugs/COMPILE_FAIL_decorator_application_dropped.md`).
         "the arithmetic `reduce`/`partial` wrap can be written OUT — a loop, or "
         "an ordinary leading argument — and that is the whole of what these "
         "files want. The module's decorator spellings (`@lru_cache`, `@wraps`) "
         "are the real gate and not a callable: this path parses a decorator and "
         "never APPLIES it, so a decorator from this module cannot be honoured "
-        "(`bugs/mid/COMPILE_FAIL_decorator_application_dropped.md`). Its other "
+        "(`bugs/COMPILE_FAIL_decorator_application_dropped.md`). Its other "
         "names build types or objects at run time (`itemgetter`, "
         "`MappingProxyType`, `RLock`), which this path has no word for",
 }
