@@ -6828,7 +6828,7 @@ def main():
     # `cls.method(...)` call inside a compiled @classmethod generator —
     # resolved purely by NAME (the enclosing struct's own real compiled
     # classmethod), mirroring the `self.method(...)` call case's own
-    # mechanism. See bugs/mid/CODEGEN_enum_runtime_class_creation.md's
+    # mechanism. See bugs/hard/CODEGEN_enum_runtime_class_creation.md's
     # 2026-08-21 update, point (2). Also called via an instance, for the
     # same call-site-gap reason noted above.
     test_generator_stdout("cls_classmethod_call_in_generator", """\
@@ -10369,7 +10369,7 @@ def main():
 main()
 """)
 
-    # Stage 1 of run-time class objects (bugs/mid/CODEGEN_enum_runtime_class_creation.md): an attribute
+    # Stage 1 of run-time class objects (bugs/hard/CODEGEN_enum_runtime_class_creation.md): an attribute
     # the class body never declares - `setattr(cls, ..)`, `Cls.x = v`, what a metaclass installs -
     # lives in a run-time class table found through the bases, and a @classmethod generator (or
     # method) reads it as `cls.x`; getattr / hasattr on a class use the same table.

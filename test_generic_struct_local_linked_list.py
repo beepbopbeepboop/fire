@@ -110,7 +110,7 @@ def test_repro_path_has_no_stub():
     """The repro's whole call path (ctor, `__iter__`, `__next__`, the Node
     allocation and links) is real code: no `stubbed` marker mentions any of
     those methods, and `main` has none at all. The only stubs left are the
-    off-path ones tracked in bugs/mid/CODEGEN_linked_list_reflection_and_struct_elements.md."""
+    off-path ones tracked in bugs/hard/CODEGEN_linked_list_reflection_and_struct_elements.md."""
     c = _compile()
     assert 'stubbed' not in _main_body(c)
     off_path = ('__hash__', 'IteratorOwnedType', 'write_sequence_to',
