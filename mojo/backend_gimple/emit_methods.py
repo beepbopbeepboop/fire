@@ -1645,13 +1645,24 @@ _RE_DYN_METHODS = frozenset(('match', 'search', 'fullmatch', 'findall', 'group',
                              'start', 'end', 'span', 'sub', 'split', 'finditer'))
 
 
+def _re_word_of(gen, t, v):
+    """A lowered value (type `t`, value `v`) as an int64_t word (a string as its pointer)."""
+    if t == 'double':
+        return gen._call_expr('int64_t', 'mojo_box_from_double', [('double', v)])
+    return gen._to_int64(t, v)
+
+
 def _re_word_arg(gen, expr):
     """Lower `expr` to an int64_t word (a string as its pointer)."""
     t, v = gen.lower_expr(expr)
-    if t == 'double':
-        v = gen._call_expr('int64_t', 'mojo_box_from_double', [('double', v)])
-        return v
-    return gen._to_int64(t, v)
+    return _re_word_of(gen, t, v)
+
+
+def _re_result_elem(subj_t):
+    """The element type of a pattern method's list result. The pieces are the
+    SUBJECT's kind (the runtime tags each one), so a bytes subject's are bytes
+    objects and anything else's are str."""
+    return 'MojoBytes *' if subj_t == 'MojoBytes *' else 'char *'
 
 
 def _lower_re_dynamic_call(gen, node, recv, method):
@@ -1659,15 +1670,26 @@ def _lower_re_dynamic_call(gen, node, recv, method):
     whether it is a pattern / match (`mojo_re_call`)."""
     if method == 'split' and len(node.args) <= 1 and not getattr(node, 'kwargs', None):
         # str.split and pattern.split share a name: the run time tells them apart.
-        a0 = _re_word_arg(gen, node.args[0]) if node.args else gen._new_val('int64_t', '0')
+        if node.args:
+            at, av = gen.lower_expr(node.args[0])
+            a0 = _re_word_of(gen, at, av)
+        else:
+            at, a0 = 'int64_t', gen._new_val('int64_t', '0')
         r = gen._call_expr('int64_t', 'mojo_split_dyn',
                            [('int64_t', gen._to_int64('int64_t', recv)), ('int64_t', a0)])
         lt = gen._coerce_to_type('int64_t', 'MojoList *', r)
-        gen._elem_types[lt] = 'char *'
+        gen._elem_types[lt] = _re_result_elem(at)
         return 'MojoList *', lt
     lst = gen._call_expr('MojoList *', 'mojo_list_new', [])
-    for a in node.args:
-        w = _re_word_arg(gen, a)
+    # The subject decides the kind of the result: the first argument of
+    # findall/split/finditer, the second of sub (repl, string, count).
+    subj_idx = 1 if method == 'sub' else 0
+    subj_t = 'int64_t'
+    for i, a in enumerate(node.args):
+        at, av = gen.lower_expr(a)
+        if i == subj_idx:
+            subj_t = at
+        w = _re_word_of(gen, at, av)
         gen._void_call('mojo_list_append_int', [('MojoList *', lst), ('int64_t', w)])
     for _kn, _kv in (getattr(node, 'kwargs', None) or []):
         gen.lower_expr(_kv)
@@ -1683,11 +1705,19 @@ def _lower_re_dynamic_call(gen, node, recv, method):
     if method == 'group':
         gen._dyn_word_vals.add(r)
         return 'int64_t', r
-    if method in ('groups', 'findall', 'split', 'sub'):
-        if method == 'sub':
-            return 'char *', gen._coerce_to_type('int64_t', 'char *', r)
+    if method == 'sub':
+        if subj_t == 'MojoBytes *':
+            return 'MojoBytes *', gen._coerce_to_type('int64_t', 'MojoBytes *', r)
+        # A runtime-kinded subject (unknown static type) produces a result whose
+        # kind is only known at run time: a word, not a fixed char *.
+        if subj_t == 'int64_t':
+            gen._dyn_word_vals.add(r)
+            return 'int64_t', r
+        return 'char *', gen._coerce_to_type('int64_t', 'char *', r)
+    if method in ('groups', 'findall', 'split'):
         lt = gen._coerce_to_type('int64_t', 'MojoList *', r)
-        gen._elem_types[lt] = 'char *'
+        # A group's kind is the match's (not known statically): a str element.
+        gen._elem_types[lt] = 'char *' if method == 'groups' else _re_result_elem(subj_t)
         return 'MojoList *', lt
     if method == 'span':
         lt = gen._coerce_to_type('int64_t', 'MojoList *', r)
