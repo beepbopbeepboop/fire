@@ -243,3 +243,15 @@ The one remaining refusal is `t3`: `async def t3(): ... return frame.f_generator
 (`bugs/CODEGEN_exception_object_attributes_args_and_stopiteration_value_are_none.md` has the mechanism and test). That is the exception half of
 test_frame's `t3`; the remaining half is a coroutine whose RESULT is its own frame/coroutine object (`StopIteration.value is c`): a non-scalar return kind
 for a bare `async def`, still refused by the C++ async path ("every return must carry a scalar").
+
+## Status (2026-11-01, stage 3 ninth slice): no generator/async wall left in test_frame.py itself
+
+The lift pass (`coro._lift_capture_free_nested_scopes`) now also lifts a capture-free nested `async def` of a METHOD (test_frame's `t3`): as a
+module-level coroutine it is ordinary, and `ex.value is c` holds (`method_nested_async_returns_its_own_coroutine`, generator runner). Gate: generator
+runner 440 passed with master's 5 failures, `compile_stdlib.py` 0 unexpected (not gated by `test_selfhost.py`, red on master since 18f122b7c).
+
+`MOJO_DEBUG=1 python3 fire.py build Lib/test/test_frame.py` no longer names a generator or async refusal in the file itself. The next refusal is in the
+`unittest` closure it imports: a module there uses a `match` MAPPING PATTERN (`case {"k": v}:`), which the compiler refuses by name (it would be
+lowered as a `dict` display). Beyond that wall the file still needs `TestCase` / `assertRaises*` / `support` / `threading_helper` compiled, `f_locals`, `f_trace`,
+and `FrameLocalsProxy`. So the frame MODEL (frames, `f_back`, tracebacks, `gi_frame`, `f_generator`, `clear()`, per-coroutine frame slices) is done for the
+shapes test_frame.py exercises; the doc's remaining scope is `f_locals` / `f_trace` and running the file through its real imports.

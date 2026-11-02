@@ -8987,6 +8987,29 @@ def main():
     T().test()
 """, "True\n")
 
+    # A nested `async def` of a METHOD whose result is the coroutine object itself
+    # (test_frame.py's `t3`): lifted to module level, it is an ordinary coroutine.
+    test_generator_stdout("method_nested_async_returns_its_own_coroutine", """\
+import sys
+
+class T:
+    def test(self):
+        async def t3():
+            frame = sys._getframe()
+            return frame.f_generator
+
+        c = t3()
+        try:
+            c.send(None)
+        except StopIteration as ex:
+            print(ex.value is c)
+        else:
+            raise AssertionError('coroutine did not exit')
+
+def main():
+    T().test()
+""", "True\n")
+
     test_generator_matches_cpython("nested_async_gen_driven_by_async_for", """\
 def outer() raises:
     var acc = 0
