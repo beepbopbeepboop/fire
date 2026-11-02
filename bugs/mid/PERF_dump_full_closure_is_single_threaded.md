@@ -349,3 +349,27 @@ once per function per scan), not from repeated whole-module passes. To find the 
 rather than per module; the earlier census (63k + 58k + 58k for ~3.9k functions) says each function is re-inferred ~15 times in those
 three loops, so the question is which outer loop re-enters them (`_mk_round` fixpoint iterations over the module's functions, or the
 retry passes `MOJO_DEBUG` reports for generators), measured with the call-site key above.
+
+## Found (2026-11-01): the repetition is STRUCTURAL — every importer re-infers its whole transitive closure
+
+Instrumented `_infer_local_var_types` and `emit_funcs.gen_func` on a 3-module chain (`a` imports `b` imports `c`; `c` defines `cf`, `cg`;
+`b` defines `bf`; `a` defines `main`), keyed by `(gen.module_name, function)`:
+
+- `gen_func` runs once per function, in its own module's gen: `('', main) ('b', bf) ('c', cf) ('c', cg)` — emission is NOT duplicated.
+- `_infer_local_var_types` runs at each of the three loops (`module_gen` ~8994, ~12683 and `_gmi_phase17_collect_appends`) for every
+  function in the module's `all_functions`, which includes the functions of everything it imports: module `c` infers `cf, cg`; module
+  `b` infers `bf, cf, cg`; the root infers all four. Total calls = 3 sites x (sum over modules of the transitive closure's function count).
+  With fire.py's import depth that is the ~15x repetition (290k calls / 3.9k functions).
+
+So the cost is not a retry loop to remove, it is import depth. Why a naive skip of imported functions is wrong: the readers of
+`_inferred_var_types[caller]` (`module_gen` ~9061, 9088, 9196, 9331, 10622, 12760: the call-site contract scans that type a callee's
+parameters from its callers' local types) treat imported functions as CALLERS too, so the importer needs their local types. Making the
+table lazy (infer on first read) changes WHEN the tables are read relative to the refinements that land between the eager point and the
+read, which is the soundness question the memo experiments above already failed.
+
+The sound direction is the module cache, not a memo: an imported module's per-function local-type table is a pure function of that
+module's source plus its own imports' public signatures, so it can be computed once when that module is compiled (`_compile_imported_module`)
+and handed to every importer instead of recomputed from scratch in each; the contract scans then read it. That is the same boundary the
+CAS module cache already draws (`module_cache`), so the work belongs with `bugs/mid/CODEGEN_cas_py_never_compiles_...` (the closure needs
+definitions there first). Expected effect: the 25 s drops by the closure-depth factor (most of it), but it needs the equivalence harness
+first (re-infer in assertion mode, compare to the handed-down table, expect 0 mismatches over the fire.py closure).
