@@ -144,7 +144,7 @@
         <ul>
             <li><strong>Model is less restricted than before</strong> - The ARM64 proof generator's semantic model has been strengthened to handle more cases (structs, lists/containers, interprocedural calls, loops/CFG, division/multi-arg calls). Some complex cases like wide receivers with certain struct field patterns may still be limited, but many previously impossible cases now have models.</li>
             <li><strong>Source-level correspondence is weak</strong> - Many proofs admit <code>eval_eq_mojo</code> ("AST evaluation agrees with the semantic model") with comments saying it's future work. The end-to-end theorems are often admitted.</li>
-            <li><strong>Fewer gaps for common features</strong> - Many cases that were previously in <code>test_formal.py</code> EXPECTED_FAILURES now pass (calls/cross-function, recursion/CFG, loops, division/multi-arg, lists/strings/structs). Remaining gaps are more targeted (e.g. some complex struct field patterns).</li>
+            <li><strong>Fewer gaps for common features</strong> - Many cases that were previously in <code>test_formal.py</code> EXPECTED_FAILURES now pass (calls/cross-function, recursion/CFG, loops, division/multi-arg, lists/strings/structs). Remaining gaps are more targeted (e.g. <code>wide_recv</code> with certain wide struct receiver patterns).</li>
             <li><strong>Model vs reality drift</strong> - x86_64 and ARM64 backends disagree on what they can prove/refuse for the same construct (<code>struct Point</code> refused by ARM64, x86_64 generates placeholder model). Not a unified formalism.</li>
         </ul>
     </div>
