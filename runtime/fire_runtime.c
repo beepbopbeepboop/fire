@@ -3540,7 +3540,7 @@ static void mojo_codepoint_escape(uint32_t cp, char *out, size_t cap)
     else snprintf(out, cap, "\\U%08x", (unsigned)cp);
 }
 
-MojoBytes *mojo_bytes_from_str(char *s, char *encoding)
+MojoBytes *mojo_bytes_from_str(char *s, char *encoding, char *errors)
 {
     MojoCodec codec = mojo_codec_lookup(encoding);
     const unsigned char *p = (const unsigned char *)s;
@@ -3550,25 +3550,44 @@ MojoBytes *mojo_bytes_from_str(char *s, char *encoding)
      * result length is the code-point count. Pass 1 counts it and refuses the
      * first character the codec cannot hold, before anything is allocated. */
     int64_t limit = codec == MOJO_CODEC_ASCII ? 0x80 : 0x100;
+    int use_strict = (!errors || strcmp(errors, "strict") == 0);
+    int use_replace = (errors && strcmp(errors, "replace") == 0);
+    int use_ignore = (errors && strcmp(errors, "ignore") == 0);
     int64_t count = 0;
-    for (int64_t i = 0; i < n; count++) {
+    for (int64_t i = 0; i < n; ) {
         int64_t at = count;
         uint32_t cp = mojo_utf8_next(p, n, &i);
         if ((int64_t)cp >= limit) {
-            char esc[16], detail[160];
-            mojo_codepoint_escape(cp, esc, sizeof esc);
-            snprintf(detail, sizeof detail,
-                     "'%s' codec can't encode character '%s' in position %lld: "
-                     "ordinal not in range(%lld)",
-                     _mojo_codec_name[codec], esc, (long long)at, (long long)limit);
-            mojo_raise_unicode_encode_error(detail);
+            if (use_strict) {
+                char esc[16], detail[160];
+                mojo_codepoint_escape(cp, esc, sizeof esc);
+                snprintf(detail, sizeof detail,
+                         "'%s' codec can't encode character '%s' in position %lld: "
+                         "ordinal not in range(%lld)",
+                         _mojo_codec_name[codec], esc, (long long)at, (long long)limit);
+                mojo_raise_unicode_encode_error(detail);
+            }
+            if (use_replace) count++;
+            /* ignore skips */
+        } else {
+            count++;
         }
     }
     MojoBytes *b = mojo_bytes_alloc(count);
     int64_t i = 0;
-    for (int64_t k = 0; k < count; k++) {
-        b->data[k] = (uint8_t)mojo_utf8_next(p, n, &i);
+    int64_t k = 0;
+    while (i < n && k < count) {
+        int64_t at = k;
+        uint32_t cp = mojo_utf8_next(p, n, &i);
+        int64_t limit = codec == MOJO_CODEC_ASCII ? 0x80 : 0x100;
+        if ((int64_t)cp >= limit) {
+            if (use_replace) b->data[k++] = (uint8_t)'?';
+            /* ignore skips */
+        } else {
+            b->data[k++] = (uint8_t)cp;
+        }
     }
+    b->len = k;
     return b;
 }
 
@@ -3838,7 +3857,7 @@ int mojo_bytes_endswith(MojoBytes *b, MojoBytes *p)
     return mojo_bytes_endswith_from(b, p, 0, MOJO_SLICE_STOP_OMITTED);
 }
 
-char *mojo_bytes_decode(MojoBytes *b, char *encoding)
+char *mojo_bytes_decode(MojoBytes *b, char *encoding, char *errors)
 {
     MojoCodec codec = mojo_codec_lookup(encoding);
     int64_t n = b ? b->len : 0;
@@ -3867,8 +3886,52 @@ char *mojo_bytes_decode(MojoBytes *b, char *encoding)
         s[k] = 0;
         return s;
     }
-    /* utf-8: the bytes are taken as they are, as they always were. Malformed
-     * UTF-8 is not yet rejected (see the codec note above mojo_bytes_from_str). */
+    /* utf-8: validate malformed bytes; report the three CPython reasons. */
+    if (codec == MOJO_CODEC_UTF8) {
+        int64_t i = 0;
+        while (i < n) {
+            unsigned char c = b->data[i];
+            int extra = c >= 0xF0 ? 3 : c >= 0xE0 ? 2 : c >= 0xC0 ? 1 : 0;
+            if (extra > 0) {
+                if (i + extra >= n) {
+                    char detail[160];
+                    snprintf(detail, sizeof detail,
+                             "invalid start byte at position %lld: unexpected end of data",
+                             (long long)i);
+                    mojo_raise_unicode_decode_error(detail);
+                }
+                for (int k = 1; k <= extra; k++) {
+                    unsigned char ch = b->data[i + k];
+                    if ((ch & 0xC0) != 0x80) {
+                        char detail[160];
+                        snprintf(detail, sizeof detail,
+                                 "invalid continuation byte at position %lld",
+                                 (long long)(i + k));
+                        mojo_raise_unicode_decode_error(detail);
+                    }
+                }
+                uint32_t cp = c & (0x1Fu >> (extra - 1));
+                for (int k = 1; k <= extra; k++) cp = (cp << 6) | (b->data[i + k] & 0x3Fu);
+                if (cp < 0x80 || (extra == 1 && cp < 0x80) ||
+                    (extra == 2 && cp < 0x800) ||
+                    (extra == 3 && cp < 0x10000)) {
+                    char detail[160];
+                    snprintf(detail, sizeof detail,
+                             "invalid start byte at position %lld",
+                             (long long)i);
+                    mojo_raise_unicode_decode_error(detail);
+                }
+                i += extra + 1;
+            } else if (c >= 0x80) {
+                char detail[160];
+                snprintf(detail, sizeof detail,
+                         "invalid start byte at position %lld", (long long)i);
+                mojo_raise_unicode_decode_error(detail);
+            } else {
+                i++;
+            }
+        }
+    }
     char *s = malloc((size_t)n + 1);
     if (n) memcpy(s, b->data, (size_t)n);
     s[n] = 0;
