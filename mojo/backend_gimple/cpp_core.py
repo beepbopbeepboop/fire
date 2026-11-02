@@ -10178,6 +10178,10 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
             _yf_accessor = 'mojo_list_get_boxed'
         elif _yf_elem_ctype is not None:
             _yf_accessor = 'mojo_list_get_int'
+        elif (isinstance(call, gimple_ctypes.CallExpr)
+              and isinstance(call.func, gimple_ctypes.IdentExpr)
+              and call.func.name in ('_glob1', 'filter', 'sorted')):
+            _yf_accessor = 'mojo_list_get_boxed'
         else:
             _yf_accessor = 'mojo_list_get_str'
         result_init = _cpp_as('MojoList *', coll_expr)
