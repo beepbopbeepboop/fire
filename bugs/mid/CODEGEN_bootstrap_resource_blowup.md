@@ -1,5 +1,37 @@
 # CODEGEN: bootstrap resource blowup and four remaining stage1/stage2 divergences
 
+## Status (2026-11-01 — partial: the allocation census instrument landed; the census RUN is not yet taken)
+
+Landed (infrastructure, no change to the default build):
+
+- `runtime/fire_alloc_census.h`, included last among the runtime's includes
+  from `runtime/fire_runtime.c`. Built with `-DMOJO_ALLOC_CENSUS`, it
+  attributes every `malloc`/`calloc`/`realloc`/`free` made by the runtime to
+  its file:line and prints, at exit, the live objects, live bytes and total
+  allocations per site, largest live bytes first (`alloc-census ...` lines on
+  stderr). Without the flag the header expands to nothing; the preprocessed
+  runtime is identical to HEAD's (`cc -E -P` md5 match).
+- The census keeps a side table keyed by address rather than a header in
+  front of each block, so `malloc_size()` (used by `mojo_boxed_is_str`) still
+  sees the real block.
+- `test_runtime_alloc_census.py` pins the counts for a harness with known live
+  allocations, including 40000 blocks with every odd one freed, which passes
+  the side table's growth step. It fails on the pre-change runtime.
+
+Not yet done (plan step 1's measurement, and what decides the fix):
+
+- The census has NOT been run on `mojoc`. That needs a self-host build, which
+  a light worker may not run. Integrator job: build `mojoc` with
+  `-DMOJO_ALLOC_CENSUS` on a 5-10 module closure under the `program` class,
+  record the top live-at-exit sites, then continue with plan steps 2-4 below.
+- Known gap: generated C calls `malloc` inline in a few places
+  (`gimple_codegen.py:783` describes a box allocation; also
+  `mojo/backend_gimple/module_gen.py`, `emit_calls.py`, `cpp_core.py`). Those
+  allocations are in the emitted translation unit, which does not include the
+  census header, so the census does not count them. If the top live site
+  turns out to be emitted code, the header has to be included in the emitted
+  prelude under the same flag before the numbers mean anything.
+
 ## Status (2026-11-01 — planning round: two retainers ruled out by measurement, the native-heap census is the next step)
 
 Round type: planning (CLAUDE.md "Bug rounds", outcome 3). No code changed. The

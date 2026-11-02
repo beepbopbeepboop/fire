@@ -32,6 +32,11 @@
 #include <Python.h>
 #endif
 
+/* Opt-in allocation census (-DMOJO_ALLOC_CENSUS). Must stay the last include
+   of the runtime's own headers: it redirects malloc/calloc/realloc/free for
+   the rest of this translation unit. A no-op in the default build. */
+#include "fire_alloc_census.h"
+
 /* Exception stack */
 jmp_buf _mojo_exc_stack[MOJO_EXC_STACK_MAX];
 int     _mojo_exc_top = -1;
