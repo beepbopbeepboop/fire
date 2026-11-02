@@ -505,6 +505,7 @@ def main():
     while True:
         try:
             apply_moves(load_state())            # a class change is a file move, so it lands before the feed reads the tree
+            subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "reap"], capture_output=True, cwd=C.MAIN)  # jobs of finished workers
             fed = feed()
             cont = continue_partial(load_state())
             probe_free()

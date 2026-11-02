@@ -14394,10 +14394,10 @@ def test_namedtuple_tuple_protocol_is_refused_by_name():
 
 
 def test_nested_class_attr_reads_enclosing_local_regression():
-    """Regression for bugs/mid/CODEGEN_nested_class_attr_reads_enclosing_local_silently_zero.md.
-    A class-level attribute whose value names an enclosing function's local
-    was lowered as a `class` statement no-op, so the attribute stayed 0 at
-    exit 0. The class statement must store the value when it executes. Each
+    """Regression: a class-level attribute whose value names an enclosing
+    function's local was lowered as a `class` statement no-op, so the
+    attribute stayed 0 at exit 0. The class statement must store the value
+    when it executes. Each
     call reads its own value right after its `class` statement, so the two
     calls must each print their own argument."""
     test_gimple_stdout("gimple_nested_class_attr_reads_local", """\
@@ -14493,7 +14493,7 @@ def main():
 
 def test_nested_class_attr_rebind_after_construction_regression():
     """Pins the answer any per-execution fix for
-    bugs/mid/CODEGEN_nested_class_attr_reads_enclosing_local_silently_zero.md
+    a nested class attribute reading an enclosing local (fixed)
     must keep. A class attribute rebound on the CLASS after an instance was
     built is seen by that instance (Python: the instance has no attribute of
     its own, so it reads the class's current value, 3). A per-instance copy of

@@ -7020,7 +7020,7 @@ def gen_module_impl(self, stmts):
                 # the CURRENT execution's cell pointer, and each instance keeps
                 # its own in a hidden field, so `a = make(5); b = make(7);
                 # a.attr` reads 5, not the later call's 7. See
-                # bugs/mid/CODEGEN_nested_class_attr_reads_enclosing_local_silently_zero.md.
+                # nested class attribute reading an enclosing local (fixed).
                 # Module-scope classes and constants keep the plain global.
                 if (s.name in getattr(self, '_fn_scoped_structs', ())
                         and v is not None and not _cattr_value_is_constant(v)):
