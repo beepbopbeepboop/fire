@@ -14327,6 +14327,7 @@ def main():
                   test_namedtuple_tuple_protocol_is_refused_by_name,
                   test_nested_class_attr_reads_enclosing_local_regression,
                   test_nested_class_attr_from_str_param_regression,
+                  test_nested_class_var_attr_from_str_param_regression,
                   test_nested_class_attr_expr_over_str_param_regression,
                   test_instance_write_shadows_class_attr_regression,
                   test_nested_class_attr_rebind_after_construction_regression,
@@ -14510,6 +14511,22 @@ def test_nested_class_attr_from_str_param_regression():
 def h(s: str):
     class C():
         name = s
+    return C()
+
+def main():
+    a = h("x")
+    b = h("y")
+    print(a.name)
+    print(b.name)
+""", "x\ny\n")
+
+
+def test_nested_class_var_attr_from_str_param_regression():
+    """Regression: `var` form of function-scoped class attribute from non-literal."""
+    test_gimple_stdout("gimple_nested_class_var_attr_from_str_param", """\
+def h(s: str):
+    class C():
+        var name = s
     return C()
 
 def main():
