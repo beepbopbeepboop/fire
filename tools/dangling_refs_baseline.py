@@ -72,6 +72,9 @@ BASELINE = {
     'test_runtime_diff.py': 1,
     'test_silent_noop_iter.py': 1,
     'test_suite.py': 9,
+    # test_swarm_feed.py names two throwaway docs (CODEGEN_x / CODEGEN_y) in a temp repo to prove the reclass moves
+    # and rewrites citations; they are fixtures, not citations of real docs.
+    'tools/test_swarm_feed.py': 8,
     'test_zip_loop_target_rebind_regress.py': 1,
     'tools/suite.py': 2,
 }
@@ -94,6 +97,8 @@ BASELINE = {
 # .py` is out of the walk entirely, and `test_suite.py` is in both tables for the
 # reason the header above gives for its prefixed entry.
 BARE_BASELINE = {
+    # test_swarm_feed.py's throwaway fixture docs (see BASELINE above).
+    'tools/test_swarm_feed.py': 6,
     'CRASH.md': 1,
     'bugs/mid/CODEGEN_nested_container_as_dict_key_or_tuple_slot.md': 2,
     'bugs/mid/CODEGEN_selfhost_tokenize_region_eq_quadratic.md': 1,
