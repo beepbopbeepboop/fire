@@ -3834,6 +3834,52 @@ def main():
     outer()
 """, "1\n2\n10\n", filename='shadow.py')
 
+    # A STRING-valued local returned from a function with no return annotation
+    # printed the string's ADDRESS as a number: `_prebound_local_ctypes` only
+    # accepted literals/containers/struct constructors as pointer evidence, so
+    # `return a` inferred int64_t for `a = d + "x"` (and str(), .strip(),
+    # os.path.join, ...) while `return d + "x"` directly was right.
+    test_gimple_stdout("gimple_string_local_returned_from_an_unannotated_function", """\
+import os
+
+def cat(d: str):
+    a = d + "x"
+    return a
+
+def num(n: int):
+    a = str(n)
+    return a
+
+def strip(d: str):
+    a = d.strip()
+    return a
+
+def join(d: str, f: str):
+    a = os.path.join(d, f)
+    return a
+
+def base(d: str):
+    a = os.path.basename(d)
+    return a
+
+def absp(d: str):
+    a = os.path.abspath(d)
+    return a
+
+def fstr(n: int):
+    a = f"{n}x"
+    return a
+
+def main():
+    print(cat("/t/a.c"))
+    print(num(3))
+    print(strip(" q "))
+    print(join("/t", "abc.c"))
+    print(base("/t/abc.c"))
+    print(absp("/t/abc.c"))
+    print(fstr(4))
+""", "/t/a.cx\n3\nq\n/t/abc.c\nabc.c\n/t/abc.c\n4x\n", filename='strlocal.py')
+
     # `StopIteration.value`: the generator's / coroutine's `return` value, the
     # argument of `raise StopIteration(x)`, None when there is none (it printed
     # None in every case).

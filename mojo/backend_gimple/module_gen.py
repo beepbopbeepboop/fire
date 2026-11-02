@@ -9120,8 +9120,9 @@ def gen_module_impl(self, stmts: list):
             # feeds the same two tables under the body's name. Without this a
             # cross-module `lib.walk("r")` yielded `root + str(k)` as pointer
             # arithmetic, printing `43634604000`.
+            from mojo.middle.module_shared import module_qualifier as _gmiq
             _xg_body = (gimple_gen_coro.generator_base_name(
-                            _xg_hfn, gimple_gen_coro.module_qualifier(self.module_name))
+                            _xg_hfn, _gmiq(self.module_name))
                         + '_body')
             for _xg_pn in _xg_pmap:
                 _xg_ct = _xg_pmap[_xg_pn]
@@ -17489,17 +17490,13 @@ def gen_module_impl(self, stmts: list):
         parts.append("static MojoDict * _mojo_dispatch_asdict (void *);")
     parts.append("static int _mojo_dispatch_is_dataclass (void *);")
     parts.append("static int64_t _mojo_dispatch_shallow_copy (void *);")
-    # The FOUR the ungated path needs, which is `REPR_CLUSTER_DECLS` without
-    # `_mojo_repr_pair` and `_mojo_repr_set`. Pair is the member no generated
-    # call site names directly, so only the `emit_struct_defs` module's
-    # `_emit_reflection_fwd_decls` pass declares it. Set IS named directly by
-    # a `repr(<set>)` call site, but every such site in a whole-program TU
-    # comes after the `emit_struct_defs` module's forward-declaration block
-    # (emitted at the top of the unit, before the imported modules' code is
-    # spliced in), so the ungated path gets its prototype from there too —
-    # the same way pair does. Sliced off the shared table rather than
-    # respelled, so the gate's table and this emission cannot drift.
-    parts.extend(REPR_CLUSTER_DECLS[:4])
+    # The ungated path needs all cluster declarations that may be called
+    # directly. `_mojo_repr_set` is named directly by `repr(<set>)` call sites
+    # (emit_infra/emit_resolve lower it to `_mojo_repr_set`), so without a
+    # forward declaration earlier in the TU a use can cause GCC to implicitly
+    # declare it as `int()` leading to conflicting types. Emit all cluster
+    # declarations in every module to ensure ordering is safe.
+    parts.extend(REPR_CLUSTER_DECLS)
     if 'type_name_table' in self._emitted_singletons:
         parts.append("static char * _mojo_type_name (int64_t);")
     parts.append('')
