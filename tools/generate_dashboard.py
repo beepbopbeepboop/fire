@@ -64,7 +64,6 @@ ENVIRONMENT = {
         {"id": "opencode/space-bunny-free", "use": "hard problems, hard merges", "note": "Free, replenishes daily. Rate limited only on explicit 429/Rate limit exceeded. A worker that stops with exit 0 and no error is NOT rate limited."},
         {"id": "omlx/Qwen3.8-27B-oQ4e-mtp", "use": "local, slow; light merging", "note": "Server http://127.0.0.1:8000. Has exited early and with 'oMLX memory guard abort'. Too slow for hard conflict merges."},
         {"id": "opencode/claude-* / openrouter/anthropic/*", "use": "—", "note": "Failed with 'Insufficient account funds' / 'Key limit exceeded'. Do not rely on them. (Claude Opus/Sonnet available only as Claude Code subagents when the controller is Claude Code.)"},
-        {"id": "opencode/fledge-alpha-free", "use": "—", "note": "Hung for hours once. Do not use unless the owner says it is back."},
     ],
 }
 

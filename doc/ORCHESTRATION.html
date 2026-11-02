@@ -105,7 +105,6 @@ probably using the old form. The background service is <code>opencode serve --se
 <tr><td><code>opencode/space-bunny-free</code></td><td>hard problems, hard merges (the owner calls it smarter than DeepSeek and Qwen)</td><td>Free, replenishes daily. Is genuinely rate limited only when the log shows an explicit <code>Rate limit exceeded</code>/429 line. A worker that simply stops with exit 0 and no error is <i>not</i> rate limited: restart it.</td></tr>
 <tr><td><code>omlx/Qwen3.8-27B-oQ4e-mtp</code></td><td>local, slow; light merging</td><td>Server <code>http://127.0.0.1:8000</code> (omlx). Has exited early ("waiting for a background run") and with "oMLX memory guard abort". Too slow for hard conflict merges.</td></tr>
 <tr><td><code>opencode/claude-*</code>, <code>openrouter/anthropic/*</code></td><td>—</td><td>Failed with "Insufficient account funds"/"Key limit exceeded". Do not rely on them. (Claude Opus/Sonnet are available only as Claude Code subagents, i.e. only when the controller is Claude Code.)</td></tr>
-<tr><td><code>opencode/fledge-alpha-free</code></td><td>—</td><td>Hung for hours once; do not use unless the owner says it is back.</td></tr>
 </table>
 <p>The default model for new workers is set by <code>control.py</code> (<code>CONTROL_MODEL</code> env var overrides; the keep-full loop exports it). <code>restart NAME --model M</code> changes a restarted worker's model.</p>
 <h3>Other tools in use</h3>
