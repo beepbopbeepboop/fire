@@ -2143,13 +2143,7 @@ STALE_PER_CHILD_BUDGETS = {
         # container-constructor pin) — a per-child wall on a run of a program
         # the case wrote itself, which is what a residue row is for; the file
         # does not import exec_budget, so it is residue, not subject.
-    'test_container_equality.py': 3,
-    'test_container_membership.py': 3,
-    'test_container_ordering.py': 3,
-    'test_coro_detached_async.py': 4,
-    'test_coro_future_await.py': 4,
     'test_coro_scoreboard.py': 2,
-    'test_dict_tuple_key.py': 3,
     # `test_formal_admitted.py`'s row (5, 2026-10-26's c20bdf09e "5 remain as
     # data-table examples") is dropped 2026-10-27: the conversion landed, and
     # the walk now finds 0 real literals — the "data-table examples" are
@@ -2197,7 +2191,6 @@ STALE_PER_CHILD_BUDGETS = {
     'test_runtime_dylib.py': 1,
     'test_selfhost_memory.py': 1,
     'test_stdlib.py': 1,
-    'test_taskgroup.py': 4,
         'test_x86_64_containers.py': 1,
     'test_x86_64_decode.py': 1,
 }

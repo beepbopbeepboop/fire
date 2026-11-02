@@ -2,6 +2,20 @@
 
 ## Status
 
+**`bug-test-stale-per-child-timeout-literal-8907` (2026-11-01): seven more files converted, 24 sites; residue now 77 literals in 38 files.**
+Each site was classified by its argv: `gcc -fgimple` / `cc -c` / `g++ -c` →
+`COMPILE_TIMEOUT_S`; a `g++ -o exe objs` link → `LINK_TIMEOUT_S`; a produced
+executable or `sys.executable` snippet run → `RUN_TIMEOUT_S`. Files:
+`test_container_equality.py`, `test_container_membership.py`,
+`test_container_ordering.py`, `test_dict_tuple_key.py` (3 sites each),
+`test_coro_detached_async.py`, `test_coro_future_await.py` (4 each),
+`test_taskgroup.py` (4, all compiles). Their rows are gone from
+`STALE_PER_CHILD_BUDGETS`; the census check passes with the walk equal to the census.
+Run: `test_taskgroup.py` 3/3 PASS; `test_dict_tuple_key.py` 16/17, and the one
+failure (`distinct-tuples`) is pre-existing on HEAD — filed as
+`bugs/CODEGEN_tuple_key_int_and_str_elements_collide.md`, not this doc's scope.
+The container and coroutine files were not run in this pass.
+
 **`bug-test-stale-per-child-timeout-literal-7848` (2026-11-01): the census is reconciled and green again.**
 The census check had gone red on this tree: the walk read 119 literals in 57
 files against a census of 46, because twelve files gained literals after the
