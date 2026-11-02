@@ -4020,14 +4020,15 @@ def main():
     # where the char-at helper takes an int64_t index, a hard g++ error for
     # every such subscript. Real shape: libpython.py's
     # items_from_keys_and_values, `ep['me_key']` on a gdb.Value entry.
+    # The fixture has NO call site: with one, the call-site contract for the
+    # yielded parameter `d` (`_ambiguous_yielded_params`) is refused first, for
+    # the untypable dict argument, and the str-keyed refusal below never runs.
+    # That refusal is also honest, so it is not what this case pins; this case
+    # pins that the subscript body itself is refused, not emitted.
     with _force_cpp_coro():
         test_raises("generator_str_key_subscript_honest_refusal", """\
 def gen(d):
     yield d['k']
-
-def main():
-    for x in gen({}):
-        print(x)
         """, "Unsupported shape(s): gen: a str-keyed subscript")
 
     # A str-keyed subscript on a local whose type is a USER STRUCT that defines
@@ -8672,6 +8673,56 @@ def main():
     print(len(list(enumerate(ident(["x", "y"])))))
     print(list(ident("abc")))
 main()
+'''
+        want = _cpython_stdout(src)
+        if want is None:
+            print(f"FAIL  {name}: CPython does not run the fixture")
+            _FAIL += 1
+            return
+        for mode in ('single-TU', 'link-mode'):
+            got = _compiled_stdout(src, mode)
+            if isinstance(got, tuple):
+                print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                      f"{got[1][:800]}")
+                _FAIL += 1
+                return
+            if got != want:
+                print(f"FAIL  {name} [{mode}]: compiled stdout {got!r} != "
+                      f"CPython {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_a_str_call_beside_a_list_call_does_not_make_the_parameter_a_list():
+        """A parameter passed a LIST at one call site and a STR at another is
+        not a list parameter, whatever its body does with it.
+
+        The container-kind contract (`_param_container_types`) only ever saw
+        the container call sites, so a `str` argument beside a list one left
+        the contract unanimous at `MojoList *`: the str was cast to a list
+        header and `print` or the loop read it as one, which is SIGSEGV (exit
+        -11) on ordinary Python, and the program's stdout was cut short with
+        exit 0 from the test's point of view. Measured before the fix: both
+        shapes below died with -11 after their first line.
+
+        The fix records a non-container call site as a disagreeing observer
+        (`_param_noncontainer_obs`), so the slot takes the `int64_t` box the
+        scalar pass already chose for a mixed slot, and each call site boxes
+        its own argument.
+
+        The shape here is one whose BODY only prints the parameter. A body that
+        ITERATES it (`for x in xs`) keeps a usage-derived `MojoList *` from
+        `_infer_param_types`, which no call-site contract overrides, so it still
+        segfaults. That is bugs/CODEGEN_mixed_list_and_str_call_sites_iterated_param.md.
+        """
+        global _PASS, _FAIL
+        name = "a_str_call_beside_a_list_call_does_not_make_the_parameter_a_list"
+        src = '''\
+def show(x):
+    print(x)
+show([1, 2, 3])
+show("abc")
 '''
         want = _cpython_stdout(src)
         if want is None:
@@ -13470,6 +13521,7 @@ print(run('x/y.txt'))
     _run_isolated(lambda: test_list_of_a_boxed_dict_materializes_keys_as_strings(), 'test_list_of_a_boxed_dict_materializes_keys_as_strings (line 12720a)')
     _run_isolated(lambda: test_tuple_unpack_of_a_boxed_dict_inside_a_method_builds(), 'test_tuple_unpack_of_a_boxed_dict_inside_a_method_builds (line 12720b)')
     _run_isolated(lambda: test_a_string_passthrough_beside_an_int_one_keeps_its_own_elements(), 'test_a_string_passthrough_beside_an_int_one_keeps_its_own_elements')
+    _run_isolated(lambda: test_a_str_call_beside_a_list_call_does_not_make_the_parameter_a_list(), 'test_a_str_call_beside_a_list_call_does_not_make_the_parameter_a_list')
     _run_isolated(lambda: test_a_returned_heterogeneous_list_keeps_its_slot_kinds(), 'test_a_returned_heterogeneous_list_keeps_its_slot_kinds (line 12721)')
     _run_isolated(lambda: test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not(), 'test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not (line 12722)')
     _run_isolated(lambda: test_the_generic_repr_cluster_is_emitted_only_where_it_is_reachable(), 'test_the_generic_repr_cluster_is_emitted_only_where_it_is_reachable (line 12723)')
