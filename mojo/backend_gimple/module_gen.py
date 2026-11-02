@@ -6951,18 +6951,14 @@ def gen_module_impl(self, stmts: list):
                     aname = field.target.name
                     v = field.value
                 elif isinstance(field, VarDecl) and field.name and field.value is not None:
-                    # Only for a value this block can actually INITIALIZE. A
-                    # bare `var x` (no value), or one whose value is not a
-                    # shape handled below, must NOT become a class
-                    # attribute: the field-init path further down owns
-                    # those, and minting a `_classattr_` global for them
-                    # would shadow the field exactly the way the `_CONV_KWS`
-                    # comment below describes.
-                    if not isinstance(field.value, (StringLiteral, IntLiteral,
-                                                    BoolLiteral, ListExpr, TupleExpr,
-                                                    DictExpr, SetExpr, FloatLiteral)) \
-                            and _class_attr_ctype(field.value) is None:
-                        continue
+                    # `var` and bare assignment are the same for class-body
+                    # attributes in Python; the `var` form used to be dropped
+                    # when the value was a bare name/expression (e.g. a
+                    # function parameter) because the guard below only
+                    # accepted literals/containers/_class_attr_ctype-known
+                    # values. Allow any non-None value through like the
+                    # AssignStmt branch does and let the later logic (fn-scoped
+                    # param/type resolution, cell registration) handle it.
                     aname = field.name
                     v = field.value
                 elif (isinstance(field, VarDecl) and field.name
