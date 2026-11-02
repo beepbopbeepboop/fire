@@ -98,9 +98,9 @@ key type wins a list-of-ints loop and `print(i)` calls `mojo_print((char *)10)`
 doc records why the obvious one-line default for the shared variable is a
 regression for the other arm.
 
-**The root cause (inference gap) is still open**: `_field_elem_types['Reader']` is empty, meaning the field's element type is never threaded when a container-typed ctor argument reaches a local or `self.<field>`.
-
-This gap is owned by another claim (`bug-codegen-container-constructor-argume-r2`), and it is distinct from the codegen dispatch arm (owned by `bug-codegen-dispatched-for-loop-shares-o-8985`).
+**Status 2026-11-01 — the two-hop container CTYPE gap is FIXED; the element-type half is still open.**
+What landed: `mojo/backend_gimple/module_gen.py`'s context-traced ctor-evidence pass (the `_ctxlit_*` block) now (a) reads a `self.<field> = <param>` hop through the enclosing `__init__`'s own call-site evidence (`<Struct>::<param>`), and (b) runs to a fixpoint, so a chain of any length is followed. `Owner([10, 20])` → `self._items = items` → `Reader(self._items)` now declares `Reader.items` as `MojoList *` and `for i in r.items` prints `10`/`20` (was SIGSEGV). Regression: `test_gimple_runner.py` `gimple_ctor_container_two_hops_field_iterates` (fails on HEAD, passes now) plus a scalar guard `gimple_ctor_scalar_two_hops_stays_scalar`.
+Still open: `_field_elem_types['Reader']` is still not populated by this route, so element-type threading for a container field reached through a ctor argument is not done (not measured against any shape beyond the repro). The codegen dispatch arm is its own doc: `bugs/CODEGEN_dispatched_for_loop_shares_one_var_between_dict_and_list_arms.md`.
 
 The stale advice to reorder passes in `module_gen.py` has been removed; the correct inference fix would populate `_ctor_lit_param_types` with container element types, analogous to how literal observers thread them.
 

@@ -11622,6 +11622,46 @@ for x in ['p', 'q']:
     print(x)
 """, "1\n2\np\nq\n")
 
+    # PARTIAL_WORK_HANDOFF §2.1: a container literal reaches a field through
+    # TWO constructor hops -- `Owner([10, 20])` binds Owner's param, then
+    # `Reader(self._items)` passes that field on. The call-site evidence was
+    # only ever read one hop deep, so `Reader.items` stayed `int64_t` and the
+    # loop took the dynamic dispatch path, which SIGSEGVed printing the
+    # integer as a `char *`. The one-hop shapes already worked and are kept
+    # here as the guard for the same field pass.
+    test_gimple_stdout("gimple_ctor_container_two_hops_field_iterates", """\
+class Reader:
+    def __init__(self, items):
+        self.items = items
+class Owner:
+    def __init__(self, items):
+        self._items = items
+    def read(self):
+        return Reader(self._items).items
+def main():
+    o = Owner([10, 20])
+    for i in o.read():
+        print(i)
+main()
+""", "10\n20\n")
+
+    # Negative guard for the same hop: a SCALAR forwarded through `self.<f>`
+    # must not be promoted to a container by the new route.
+    test_gimple_stdout("gimple_ctor_scalar_two_hops_stays_scalar", """\
+class Reader:
+    def __init__(self, items):
+        self.items = items
+class Owner:
+    def __init__(self, n):
+        self._n = n
+    def read(self):
+        return Reader(self._n).items
+def main():
+    o = Owner(7)
+    print(o.read() + 1)
+main()
+""", "8\n")
+
     test_gimple_stdout("gimple_for_loop_target_rebind_str_then_bytes", """\
 for x in "cd":
     print(x)

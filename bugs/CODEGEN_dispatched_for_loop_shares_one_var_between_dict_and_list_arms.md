@@ -106,7 +106,10 @@ loop body, before the arms, instead of a guess from whichever arm is lowered
 first. That is the change worth making, and it is in `emit_loops.py` plus the
 element-type bookkeeping, which is another claim's write set.
 
-## Why the field is `int64_t` at all (the upstream half, still open)
+## Why the field is `int64_t` at all (the upstream half)
+
+**2026-11-01:** the two-hop shape (`Owner([10, 20])` -> `self._items = items` -> `Reader(self._items)`) now types `Reader.items` as `MojoList *`, so the repro above no longer reaches the dispatch arm and prints `10`/`20` (see `PARTIAL_WORK_HANDOFF.md` §2.1). The dispatch-arm bug itself is unchanged; this only removes this repro's route into it, and the arm is still reached by any loop whose iterable is statically `int64_t`.
+
 
 `self.items = items` with an unannotated `__init__` parameter. The field's C
 type comes from `param_types.get('items')` in
