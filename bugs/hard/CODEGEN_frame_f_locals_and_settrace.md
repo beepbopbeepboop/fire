@@ -74,5 +74,8 @@ Ordering: (C) refusal for f_locals -> f_trace -> (A). Neither needs the unittest
 - Known difference: the `AttributeError` for `f_trace_opcodes` carries the attribute name through `mojo_raise_attribute_error`'s existing message format, not
   CPython's full text ("attribute 'f_trace_opcodes' of 'frame' objects cannot be deleted"). Only the type is asserted by the test.
 
-Remaining: (A) box-all-locals for a real `f_locals`; `sys.settrace`; the store-side `TypeError` for a non-literal non-bool value (item 11 limit above:
-`x = 1; f.f_trace_lines = x` still stores unchecked); and running test_frame.py through its real imports.
+## Status (2026-11-01, stage 3 thirteenth slice): non-bool values rejected for `f_trace_lines` / `f_trace_opcodes` even if not literals
+
+- `f.f_trace_lines = x` / `f.f_trace_opcodes = y` where `x`/`y` hold a non-bool value now raise `TypeError("attribute value type must be bool")` at runtime (using `is_python_bool_expr` so variables, params, fields recognized as bool are accepted; arbitrary ints/other values are rejected). `f_trace` still accepts any value. Tests: `gimple_frame_f_trace_lines_requires_bool` extended coverage and `reg_f_trace_lines_rejects_int_var`.
+
+Remaining: (A) box-all-locals for a real `f_locals`; `sys.settrace`; and running test_frame.py through its real imports.
