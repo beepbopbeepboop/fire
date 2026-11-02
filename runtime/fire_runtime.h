@@ -560,6 +560,11 @@ extern void *_mojo_exc_obj;
 void        mojo_exc_obj_set(void *obj);
 void *      mojo_exc_obj_get(void);
 
+/* Exception object with args (for e.args / StopIteration.value). */
+typedef struct { int64_t type; char *msg; MojoList *args; } MojoExc;
+MojoExc *mojo_exc_new(int64_t type, char *msg, MojoList *args);
+MojoList *mojo_exc_args(void *obj);
+
 /* Exception type tag (see fire_runtime.c for the dispatch rationale). */
 extern int64_t _mojo_exc_type;
 void    mojo_exc_type_set(int64_t type_id);
