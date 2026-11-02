@@ -8839,6 +8839,46 @@ main()
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_module_level_mixed_iterated_parameter_with_str_variable_still_refuses():
+        """Module-level version of the mixed iterated parameter test. A str passed
+        to an iterated parameter through a module-level variable, beside a list
+        literal, must still be refused rather than compiled to a binary that
+        reads the str as a list (SIGSEGV). The module-level caller slips
+        through because `_inferred_var_types` has no binding for a module-level
+        name, so `_arg_scalar_type` (consulted by `_is_noncontainer_arg`) did
+        not see the `char *` answer for a module-level str variable.
+        """
+        global _PASS, _FAIL
+        name = "test_module_level_mixed_iterated_parameter_with_str_variable_still_refuses"
+        src = '''\
+def each(xs):
+    for x in xs:
+        print(x)
+ys = "de"
+each([4, 5])
+each(ys)
+'''
+
+        for mode in ('single-TU', 'link-mode'):
+            kwargs = ({'do_imports': True} if mode == 'single-TU'
+                      else {'link_mode': True})
+            try:
+                gimple_codegen._run_pipeline(src, filename='case.py', **kwargs)
+            except RuntimeError as e:
+                msg = str(e)
+                if "'xs'" in msg and "'each'" in msg:
+                    continue
+                print(f"FAIL  {name} [{mode}]: refused, but not for the "
+                      f"mixed parameter: {msg[:300]}")
+                _FAIL += 1
+                return
+            print(f"FAIL  {name} [{mode}]: compiled, so the binary would read "
+                  "the str as a list (SIGSEGV)")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_a_string_passthrough_beside_an_int_one_keeps_its_own_elements():
         """`def ident(x): return x` called with a list of ints AND with a
         string, in one program, must give the string call site its own
@@ -13619,6 +13659,7 @@ print(run('x/y.txt'))
     _run_isolated(lambda: test_a_str_call_beside_a_list_call_does_not_make_the_parameter_a_list(), 'test_a_str_call_beside_a_list_call_does_not_make_the_parameter_a_list')
     _run_isolated(lambda: test_an_iterated_parameter_passed_a_list_and_a_str_compiles_per_kind(), 'test_an_iterated_parameter_passed_a_list_and_a_str_compiles_per_kind')
     _run_isolated(lambda: test_a_mixed_iterated_parameter_with_a_str_variable_still_refuses(), 'test_a_mixed_iterated_parameter_with_a_str_variable_still_refuses')
+    _run_isolated(lambda: test_module_level_mixed_iterated_parameter_with_str_variable_still_refuses(), 'test_module_level_mixed_iterated_parameter_with_str_variable_still_refuses')
     _run_isolated(lambda: test_a_returned_heterogeneous_list_keeps_its_slot_kinds(), 'test_a_returned_heterogeneous_list_keeps_its_slot_kinds (line 12721)')
     _run_isolated(lambda: test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not(), 'test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not (line 12722)')
     _run_isolated(lambda: test_the_generic_repr_cluster_is_emitted_only_where_it_is_reachable(), 'test_the_generic_repr_cluster_is_emitted_only_where_it_is_reachable (line 12723)')
