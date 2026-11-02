@@ -35,7 +35,7 @@
 
 <h1>Orchestration guide</h1>
 <p class="mut">How the mojo-reference fleet is run: workers, mergers, claims, the gate, and the monitoring loop.
-Written 2026-10-17 so that any capable agent (including an <code>opencode</code> model, with no Claude subagents available)
+Written 2026-10-17 and revised 2026-11-02 to match the code (<code>tools/swarm.py</code>, <code>tools/pool.json</code>, <code>tools/control.py</code>); so that any capable agent (including an <code>opencode</code> model, with no Claude subagents available)
 can read it, understand the system, and run it. Everything here was learned by running it; the incident list in §13 is the
 reason for most of the rules. When this file and the code disagree, the code (<code>tools/control.py</code>, <code>tools/suite.py</code>) wins:
 read it, then fix this file.</p>
@@ -50,7 +50,7 @@ a gate before you have done §12 steps 1-6. The owner (the user) gives standing 
 <li><a href="#env">Environment, paths, python, models</a></li>
 <li><a href="#control">control.py: the controller</a></li>
 <li><a href="#claims">Claims: how duplicate work is prevented</a></li>
-<li><a href="#keepfull">The keep-full loop</a></li>
+<li><a href="#keepfull">The swarm (feeder and landing loop)</a></li>
 <li><a href="#tasks">Writing a task (templates)</a></li>
 <li><a href="#integrate">Integration: landing branches on master</a></li>
 <li><a href="#gate">The gate and <code>check</code></a></li>
@@ -60,7 +60,7 @@ a gate before you have done §12 steps 1-6. The owner (the user) gives standing 
 <li><a href="#first20">Your first twenty minutes</a></li>
 <li><a href="#incidents">Incidents and the rules they produced</a></li>
 <li><a href="#standing">Standing instructions from the owner</a></li>
-<li><a href="#snapshot">State snapshot (2026-10-19, goes stale)</a></li>
+<li><a href="#snapshot">State snapshot (2026-11-02, goes stale)</a></li>
 </ol>
 </nav>
 
@@ -80,7 +80,7 @@ bug docs in <code>bugs/</code> (the queue) worked by many parallel AI workers.</
 work-N/                 one worktree per worker/merger. work.log = everything it printed. exitcode = written when it exits.
 gate-wt/                the gate worktree: a detached checkout where `suite.py gate|check` runs, so merges never disturb a running gate
 task-*.md               task files given to workers (scratch, outside the repo)
-keepfull.sh keepfull.log   the keep-full loop and its log
+.git/control/swarm.out      the live swarm's log (stdout of tools/swarm.py); swarm.json beside it is its state
 check-*.log gate-N.log  logs of suite runs (full detail in gate-wt/build/suite.log)
 mojo-reference/.claude/worktrees/agent-*   isolated worktrees of Claude Code subagents (branch worktree-agent-*)</code></pre>
 <p>The registry is <code>&lt;git-common-dir&gt;/control/tasks.json</code> (shared by every worktree); queued tasks live in <code>&lt;git-common-dir&gt;/control/queue/NAME.json</code>.
@@ -90,7 +90,7 @@ mojo-reference/.claude/worktrees/agent-*   isolated worktrees of Claude Code sub
 <h3>Python</h3>
 <p><b>Use python 3.14, and do it by absolute path.</b> This box has three: <code>/usr/bin/python3</code> is 3.9, <code>/opt/homebrew/bin/python3</code> became <b>3.15.0</b> on 2026-10-18, and <code>/opt/local/bin/python3</code> is the <b>3.14.8</b> the project runs on. So put <code>export PATH=/opt/local/bin:$PATH</code> first, <b>not</b> <code>/opt/homebrew/bin</code> — the old instruction there was correct only while homebrew happened to point at 3.14, and following it now runs everything on 3.15.</p>
 <p>Why it matters, measured on master at 15a260a3: <code>test_formal_run.py</code> reports <code>FAIL=18</code> under 3.14 and <code>FAIL=32</code> under 3.15 on the <i>same commit</i>, because CPython 3.15 reworded the <code>%</code> <code>TypeError</code> that tests assert on. Fourteen failures that do not exist. <code>tools/suite.py</code> resolves its jobs with <code>PY = sys.executable</code>, so the whole check inherits whichever interpreter launched it — the suite does not protect you here.</p>
-<p>Check with <code>python3 --version</code> before believing ANY failure, and after any brew upgrade. <code>keepfull.sh</code> now asserts the version and refuses to run on the wrong one.</p>
+<p>Check with <code>python3 --version</code> before believing ANY failure, and after any brew upgrade. The swarm does <b>not</b> check the interpreter. On 2026-11-02 at 12:30 the running <code>tools/swarm.py</code> was started from <code>/opt/homebrew/Cellar/python@3.15</code>, i.e. the wrong one; launch it with <code>/opt/local/bin/python3</code>.</p>
 <h3>opencode (v2.0.26 syntax: this changed and broke everything once)</h3>
 <pre><code># a worker is launched as (control.py does this for you; cwd = the worktree):
 opencode run --model PROVIDER/MODEL --auto --title NAME "Your complete instructions are in /path/work-N/TASK.md. Read it now and follow it exactly."
@@ -98,15 +98,23 @@ opencode run --model PROVIDER/MODEL --auto --title NAME "Your complete instructi
 opencode run --model opencode-go/deepseek-v4.1-flash "reply with the single word ok"</code></pre>
 <p class="warn">The OLD form <code>opencode --model M run --dir D</code> now prints a usage screen and exits. If you probe models and see nothing, you are
 probably using the old form. The background service is <code>opencode serve --service</code>; <code>opencode service status|restart</code> manages it.</p>
-<h3>Models (what works, what to use for what)</h3>
+<h3>Pool and models (tools/pool.json is the source of truth)</h3>
+<p>A <b>slot</b> is one named model with a fixed worker count, a work class, and a recovery rule. The slots below are what <code>tools/pool.json</code> says on 2026-11-02. The pool total (the sum of the counts) is the swarm's default target. Models that are not in <code>pool.json</code> are not started by the swarm, so the older model notes (space-bunny, big-pickle, Qwen as a merger, the DeepSeek-only rule) are gone from this table. Change the pool by editing that file; <code>control.py</code> reads it on every call.</p>
 <table>
-<tr><th>Model id</th><th>Use</th><th>Notes</th></tr>
-<tr><td><code>opencode-go/deepseek-v4.1-flash</code></td><td>default worker; also decent at merging</td><td>The owner wants exactly <b>one</b> DeepSeek worker running at a time (cost). <code>opencode/big-pickle</code> shares its quota bucket: do not use it as an alternative.</td></tr>
-<tr><td><code>opencode/space-bunny-free</code></td><td>hard problems, hard merges (the owner calls it smarter than DeepSeek and Qwen)</td><td>Free, replenishes daily. Is genuinely rate limited only when the log shows an explicit <code>Rate limit exceeded</code>/429 line. A worker that simply stops with exit 0 and no error is <i>not</i> rate limited: restart it.</td></tr>
-<tr><td><code>omlx/Qwen3.8-27B-oQ4e-mtp</code></td><td>local, slow; light merging</td><td>Server <code>http://127.0.0.1:8000</code> (omlx). Has exited early ("waiting for a background run") and with "oMLX memory guard abort". Too slow for hard conflict merges.</td></tr>
-<tr><td><code>opencode/claude-*</code>, <code>openrouter/anthropic/*</code></td><td>—</td><td>Failed with "Insufficient account funds"/"Key limit exceeded". Do not rely on them. (Claude Opus/Sonnet are available only as Claude Code subagents, i.e. only when the controller is Claude Code.)</td></tr>
+<tr><th>Slot</th><th>Model</th><th>Count</th><th>Class</th><th>Recovery and notes</th></tr>
+<tr><td><code>iceman</code></td><td><code>opencode-go/iceman-contributor-free</code></td><td>20</td><td>mid</td><td>The bulk of the pool. Recovers 2.5 h after a usage limit.</td></tr>
+<tr><td><code>opencode-paid</code></td><td><code>opencode-go/deepseek-v4.1-flash</code></td><td>1</td><td>easy</td><td>Paid Go plan. Recovers 2.5 h after a limit; a second limit within a day bans it 15 days (<code>long_recover_days</code>).</td></tr>
+<tr><td><code>openrouter-free</code></td><td><code>openrouter/openrouter/free</code></td><td>1</td><td>easy</td><td>Free tier with a daily replenish (00:00 UTC, 1 min margin). A limit bans it 24 h.</td></tr>
+<tr><td><code>opencode-free</code></td><td><code>opencode/deepseek-v4.1-flash-free</code></td><td>1</td><td>easy</td><td>Free tier with the same daily replenish. A limit bans it 2.5 h.</td></tr>
+<tr><td><code>qwen-local</code></td><td><code>omlx/Qwen3.8-27B-oQ4e-mtp</code></td><td>1</td><td>easy</td><td>Local server at <code>http://127.0.0.1:8000</code>; slow. Has exited early with "oMLX memory guard abort".</td></tr>
+<tr><td><code>haiku</code></td><td><code>claude-haiku-5-5</code></td><td>2</td><td>easy</td><td><code>kind: claude</code>. Recovers 4.23 h after a limit.</td></tr>
+<tr><td><code>sonnet</code></td><td><code>claude-sonnet-5-5</code></td><td>0</td><td>mid</td><td>Defined, not running (count 0).</td></tr>
+<tr><td><code>opus</code></td><td><code>claude-opus-5-5</code></td><td>0</td><td>hard</td><td>Defined, not running (count 0).</td></tr>
+<tr><td><code>llama-work</code></td><td><code>llama-local/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS</code></td><td>0</td><td>easy</td><td>Defined, not running (count 0).</td></tr>
 </table>
-<p>The default model for new workers is set by <code>control.py</code> (<code>CONTROL_MODEL</code> env var overrides; the keep-full loop exports it). <code>restart NAME --model M</code> changes a restarted worker's model.</p>
+<p><b>Classes.</b> A doc's class is the directory it sits in: <code>easy</code> = <code>bugs/*.md</code>, <code>mid</code> = <code>bugs/mid/</code>, <code>hard</code> = <code>bugs/hard/</code>. Every doc starts easy; a doc that gets <code>escalate_after</code> (2) no-commit attempts moves up one class. Each class has its own queue, sized to the count of its live slots.</p>
+<p><b>Limits.</b> A usage limit bans that model for its slot's <code>recover_hours</code> (ledger: <code>.git/control/dead_models.json</code>). A second limit within a day uses <code>long_recover_days</code> where the slot has one. Banned daily free tiers are asked one word at most every 12 h (<code>control.py probe-free</code>, which the swarm runs each pass). A task prefers the slot it was queued for and takes the first free, unbanned slot of its class otherwise.</p>
+<p>To pick a model for one restarted worker: <code>restart NAME --model M</code>. A bare model outside the pool, for hand-run experiments only: <code>spawn --model M</code>.</p>
 <h3>Other tools in use</h3>
 <p><code>lean</code> only via <code>formal/lean.py::run_lean</code> (bounded wall/CPU time). Local compiler binaries <code>./mojoc</code>. <code>gcc</code> with <code>-fgimple</code>. Rosetta 2 is installed, so x86-64 test binaries run (<code>arch -x86_64 /usr/bin/true</code> to verify); x86 rows that were once red for "Bad CPU type" are now real signal.</p>
 
@@ -123,12 +131,13 @@ its main-checkout paths from its own location, so always run the main checkout's
 <tr><td><code>unstick</code></td><td>Restarts workers whose log is idle AND whose tree uses no CPU.</td></tr>
 <tr><td><code>claims</code></td><td>All live claims.</td></tr>
 <tr><td><code>mark NAME STATE</code></td><td>Set a state by hand (<code>integrated</code> releases the claims; <code>abandoned</code>).</td></tr>
-<tr><td><code>guard [--once]</code></td><td>Watchdog: kills process trees of ours over 55 GB each / 90 GB total, Lean past 45 min wall / 90 min CPU, and runaway <code>fire.py build</code>/<code>test_*.py</code>/probes past 120 min. Does not cover native test binaries or CPU-burning opencode processes. The keep-full loop runs it with <code>--once</code> every pass.</td></tr>
+<tr><td><code>guard [--limit-gb 55] [--total-gb 90]</code></td><td>Watchdog: kills process trees of ours over 55 GB each / 90 GB total, Lean past 45 min wall / 90 min CPU, and runaway <code>fire.py build</code>/<code>test_*.py</code>/probes past 120 min. Does not cover native test binaries or CPU-burning opencode processes. Nothing in <code>tools/swarm.py</code> runs it; run it by hand or from a cron job.</td></tr>
 <tr><td><code>status [--all] [-v]</code>, <code>prune [--dry-run]</code></td><td><code>status</code> lists only tasks that still matter and ends with <code>+N finished tasks hidden</code>; a task is hidden when it is done-and-gone (terminal state, no worktree directory, no commits outside master). <code>prune</code> deletes exactly those entries from <code>tasks.json</code>; <code>cleanup</code> calls it at its end unless <code>--no-prune</code>.</td></tr>
 <tr><td><code>reap</code>, <code>cleanup [--dry-run] [--no-branches] [--no-prune] [-j N]</code></td><td><code>reap</code> kills leftover lean/gcc in finished workers' trees; <code>cleanup</code> removes worktrees whose HEAD is an ancestor of master, are clean and not running (parallel <code>git status</code>, no <code>--force</code>), then deletes the merged <code>work/*</code> branches left without a worktree (<code>git branch -d</code>; <code>--no-branches</code> keeps them). Run it every monitoring loop, not only when disk is above ~85%: 2026-10-23 found 1,923 worktrees (202 GB) and 2,383 branches accumulated.</td></tr>
 <tr><td><code>claim</code> / <code>release</code></td><td>For work NOT started by <code>control.py</code> &mdash; a Claude Code agent, a hand-run opencode, a local model. <code>control.py claim NAME --claim FORMAL_x [--who WHO] [--pid P | --hours H]</code> registers the claim (exit 1 and a <code>CONFLICT</code> line if a control worker or another outside session already holds it), so <code>spawn</code>, <code>refill</code> and <code>formal_feed.py</code> stay off that doc; <code>release NAME</code> drops it. A claim lapses when its <code>--pid</code> dies or after <code>--hours</code> (default 12), so a crashed session cannot hold a doc forever. This is how Claude and opencode share the queue whichever has tokens: either side registers what it works on, and either side's feeder avoids it. Check <code>control.py claims</code> before starting; <code>[external: ...]</code> rows are outside sessions.</td>
 </tr>
-<tr><td><code>refill</code> (circuit breaker)</td><td>A worker that dies on arrival (usage limit / API outage, no commits) is bounced back to the queue, worktree and branch removed, same name. A <em>limit</em> marks that model dead for its recovery time (paid Go: 15 days, any of its models, free models: 1 day) and the work moves to the next of <code>CONTROL_FALLBACKS</code> (free models); an <em>outage</em> pauses starts 30 min. Learned 2026-10-24: a limit made refill and <code>formal_feed.py</code> mint ~2,000 empty <code>work/formalNNNN-docs</code> branches.</td></tr>
+<tr><td><code>refill [--target N]</code> (circuit breaker)</td><td>Starts queued tasks oldest-first while fewer than N run (default: the pool total) and claims are free; every refused start is printed with its reason. A worker that dies on arrival (usage limit / API outage, no commits) is bounced back to the queue, worktree and branch removed, same name. A <em>limit</em> bans that model for its slot's recovery time (§2); an outage pauses starts for a few minutes.</td></tr>
+<tr><td><code>probe-free</code></td><td>Asks each banned daily free tier one word; the ban ends when it answers. The swarm runs it every pass.</td></tr>
 <tr><td><code>digest NAME</code>, <code>log NAME -n N</code>, <code>report</code></td><td>Read a worker's verdict/report block; tail its log; regenerate CONTROL.html's table.</td></tr>
 </table>
 <p>Workers finish by printing exactly one of <code>CONTROL-STATUS: DONE | PARTIAL | NEEDS-INFO | BLOCKED</code>. The worker prompt template is <code>tools/control_prompt.md</code>
@@ -148,23 +157,20 @@ The cure is to <b>land the finished branches</b> (§7), not to release claims by
 <p>Before dispatching new work on a topic, also search for overlap the claim system cannot see (different docs, same subject):
 <code>git branch --no-merged master | grep work/</code>, <code>git log master --oneline -S&lt;identifier&gt;</code>, <code>git cherry master BRANCH</code>.</p>
 
-<h2 id="keepfull">5. The keep-full loop</h2>
-<p><code>/Users/mrs/net/chatgpt/claude/keepfull.sh</code> (run detached: <code>nohup ./keepfull.sh &gt; keepfull.log 2&gt;&amp;1 &amp;</code>, kill with <code>pkill -f keepfull.sh</code>):</p>
-<pre><code>#!/bin/bash
-export PATH=/opt/homebrew/bin:$PATH
-export CONTROL_MODEL=opencode-go/deepseek-v4.1-flash
-cd /Users/mrs/net/chatgpt/claude/mojo-reference
-while true; do
-  python3 tools/formal_feed.py --min-ready 12      # release landed tasks' claims, enqueue more FORMAL docs / projects
-  total=$(python3 tools/control.py ps | tail -1 | awk '{print $1}')
-  ds=$(ps -axww -o args= | awk '$1 ~ /opencode$/ &amp;&amp; $2=="run" &amp;&amp; /opencode-go\/deepseek/' | wc -l)
-  python3 tools/control.py refill --target $(( total - ds + 1 ))   # exactly ONE DeepSeek worker; others (bunny, Qwen, mergers) don't count
-  python3 tools/control.py guard --once 2&gt;/dev/null
-  sleep 300
-done</code></pre>
-<p>It keeps the queue stocked from FORMAL docs nobody holds and from <code>tools/formal_projects.json</code> (each key enqueued once ever; used keys in <code>control/feed.json</code>; that backlog is exhausted),
-and starts workers only while claims are free. If it prints a Python error such as "No such file or directory", restart it (it caches command paths). Change the DeepSeek count by editing <code>+ 1</code>.</p>
-<p><code>refill</code> with a large <code>--target</code> is also how you start a specific queued task out of order for a moment (e.g. a merger stuck behind formal tasks).</p>
+<h2 id="keepfull">5. The swarm (feeder and landing loop)</h2>
+<p><code>tools/swarm.py</code> is the one long-lived loop. It replaced the old keep-full script (<code>keepfull.sh</code>, which is no longer started: its last log line is 2026-11-02 12:07 and it still names one model). Start it from the main checkout, detached, with the right interpreter:</p>
+<pre><code>cd /Users/mrs/net/chatgpt/claude/mojo-reference
+nohup /opt/local/bin/python3 tools/swarm.py --interval 120 > .git/control/swarm.out 2>&1 &
+# stop:  pkill -f tools/swarm.py      state: .git/control/swarm.json      --target defaults to the pool total</code></pre>
+<p>One pass, every <code>--interval</code> seconds:</p>
+<ol>
+<li><b>Class moves and reap.</b> A doc due a class move moves once nothing unlanded touches it; <code>control.py reap</code> kills leftovers of finished workers.</li>
+<li><b>Feed.</b> Each class gets enough queued tasks to keep its slots busy (running + 1). Candidates are the pool's <code>feed</code> globs in pool order, minus the pool's <code>skip</code> prefixes (<code>FORMAL_</code>, <code>OPEN_WORK</code>, <code>README</code>), minus any doc a live task, queued task or external claim holds, and minus any doc with a line <code>STOP: &lt;reason&gt;</code> in its body (the reason is logged each pass). A re-feed logs what its previous attempt produced.</li>
+<li><b>Continue and retire.</b> Partial work is continued; a dead-on-arrival attempt is retired.</li>
+<li><b>Refill.</b> <code>control.py refill --target N --prefix bug-,fix-</code>; a finished worker frees its slot at once.</li>
+<li><b>Land.</b> Finished <code>bug-*</code>/<code>fix-*</code> branches are merged by <code>tools/integrate.py --stdlib</code> (the stdlib compile is the gate). A conflicting branch goes to a merge-fixer task. After a landing, <code>tools/verify_landed.py</code> runs in the background on master: the full gate, at most once per <code>full_every_minutes</code>; each red job becomes a <code>fix-gate-&lt;job&gt;</code> task. Landed trees are removed by <code>control.py cleanup</code>.</li>
+</ol>
+<p>Two other feeders exist and are separate: <code>tools/formal_feed.py</code> owns the <code>FORMAL_</code> docs (the swarm never starts them), and <code>tools/autointegrate.py</code> is the integrator the swarm calls. Claims (§4) are what keeps the two from colliding, so spawn and enqueue work through <code>control.py</code>, never by editing <code>tasks.json</code> by hand.</p>
 
 <h2 id="tasks">6. Writing a task (templates)</h2>
 <p>A task file is plain text given to <code>spawn --task-file</code>. A good one: states the goal and the docs, names the exact narrow commands, states what must not be touched, and tells the worker to check master. Common closing rules for every worker task:</p>
@@ -234,7 +240,7 @@ awk '/--- output: last 40 lines of JOBNAME ---/{f=1} f' build/suite.log | head -
 <li><b>Fleet:</b> <code>control.py ps</code>; for each running worker compare <code>work.log</code> mtime to now and look at <code>git -C ../work-N rev-list --count master..HEAD</code> and <code>status --short | wc -l</code>. A log untouched for &gt;30 min with ~0% CPU = stalled (§10).</li>
 <li><b>Finished:</b> <code>status | grep -E 'exited|DONE|PARTIAL'</code> and the unmerged-branches list. Land what is finished (§7).</li>
 <li><b>Hard-problem agents:</b> their worktree (<code>.claude/worktrees/agent-*</code>): commits ahead, dirty, behind master. If they stopped on a session limit, try resuming once the stated reset time has passed.</li>
-<li><b>Queue and keep-full:</b> <code>tail -3 keepfull.log</code>. Starvation ("skip ... claim conflicts") means unmerged branches are holding claims: land them.</li>
+<li><b>Queue and swarm:</b> <code>tail -3 .git/control/swarm.out</code> (one line per pass, plus every refused start and every landing). Starvation ("skip ... claim conflicts") means unmerged branches are holding claims: land them.</li>
 <li><b>Verification:</b> any pending <code>check</code>/<code>gate</code> log? Read its FAILED section and act (§8).</li>
 <li><b>Resources:</b> <code>df -h /</code> (cleanup above ~85%), load average.</li>
 <li>Report to the owner in plain text: what changed, what landed, what is red and why. Never assert a cause without the log line that shows it.</li>
@@ -267,8 +273,8 @@ awk '/--- output: last 40 lines of JOBNAME ---/{f=1} f' build/suite.log | head -
 <li><code>git status --short</code> and <code>git log --oneline -15</code>. There may be untracked files that are the owner's (e.g. <code>tools/github_rebase.py</code>): leave them. Never <code>git checkout &lt;path&gt;</code> / <code>git restore &lt;path&gt;</code> / <code>git stash</code> (stash is shared by all worktrees).</li>
 <li><code>python3 tools/control.py ps</code> and <code>status | tail -40</code>: who is running, who finished.</li>
 <li><code>git for-each-ref --no-merged master --format='%(refname:short)' 'refs/heads/work/*' | wc -l</code> and look at the oldest: this is the integration backlog.</li>
-<li><code>pgrep -fl keepfull</code> and <code>tail -5 ../keepfull.log</code>: is the loop alive and healthy? If it prints errors, restart it (§5).</li>
-<li>Probe your models (§2). Decide who gets the hard merges (strongest model) and who runs formal work (one DeepSeek).</li>
+<li><code>pgrep -fl swarm.py</code> and <code>tail -5 .git/control/swarm.out</code>: is the swarm alive and passing? If it prints a traceback or stops logging, restart it (§5).</li>
+<li>Probe your models (§2). Compare <code>tools/pool.json</code> (§2) with what is running (<code>control.py ps</code>), and decide which slot gets the hard merges.</li>
 <li>Check for hard-problem agents and their worktrees: <code>ls .claude/worktrees/</code>, <code>git -C .claude/worktrees/agent-X log --oneline master..HEAD | wc -l</code>. If the controller you replace was Claude Code, those agents (Opus on bootstrap, etc.) may be unreachable: their branches still hold the work; you can merge them or spawn an opencode agent from that branch (<code>spawn --base worktree-agent-X</code>).</li>
 <li>Start the 50-minute loop (§9). Land finished branches; verify with <code>check</code> before/after big merges.</li>
 </ol>
@@ -299,22 +305,17 @@ awk '/--- output: last 40 lines of JOBNAME ---/{f=1} f' build/suite.log | head -
 <li>Never lose work. Never discard uncommitted work; no <code>git checkout &lt;path&gt;</code>/<code>git restore &lt;path&gt;</code>/<code>git stash</code>. Each bug is fixed once; check master and unmerged branches before dispatching.</li>
 <li>Workers are light (no gate, no heavy builds). The controller runs the gate once per batch. Formal work needs no gate, not even the usual formal gate. Formal rows that take unbounded time are marked, not waited on.</li>
 <li>No time-boxing of bug work. A fixed bug's doc is deleted in the same commit; run the citation ratchet.</li>
-<li>Model policy: exactly one DeepSeek worker; space-bunny for hard problems and hard merges; Qwen local is slow; big-pickle shares DeepSeek's bucket; a bunny that stops without an error line is restarted, not "rate limited". Bootstrap belongs to one hard-problem agent (do not duplicate it).</li>
+<li>Model policy (2026-10-17 wording; <code>tools/pool.json</code> now sets the slots and has two DeepSeek slots, <code>opencode-free</code> and <code>opencode-paid</code>: owner to confirm): exactly one DeepSeek worker; space-bunny for hard problems and hard merges; Qwen local is slow; big-pickle shares DeepSeek's bucket; a bunny that stops without an error line is restarted, not "rate limited". Bootstrap belongs to one hard-problem agent (do not duplicate it).</li>
 <li>Check workers every 50 minutes. Record the facts, not guesses. Do not claim a cause you have not seen in a log.</li>
 <li>Prefer production-quality fixes over quick ones; consolidate duplicates; keep leftover processes and disk under control.</li>
 </ul>
 
-<h2 id="snapshot">15. State snapshot (2026-10-20 ~03:30; goes stale: re-derive with §12)</h2>
+<h2 id="snapshot">15. State snapshot (2026-11-02; goes stale: re-derive with §12)</h2>
 <ul>
-<li><b>The three formal branches are LANDED (owner's choice a), and <code>check</code> is 53/53.</b> <code>9b848731</code> <code>formal636-docs</code> (three wrong answers at a call boundary, fixed at their roots &mdash; <code>formal/model.py</code> + arm64/x86 codegen; 3 docs deleted / 2 added), <code>fbdb4c7f</code> <code>formal637-docs</code> (one call walk, five straight-line specs, x86-64 shift projections &mdash; three theorems in <code>lib/X86.lean</code>), <code>2d132be9</code> <code>formal638-docs</code> (a typed bracket parameter is a parameter; delete the two already-fixed tuple docs). In between, <code>dce3ab13</code> checked in <code>tools/github_rebase.py</code> &mdash; the owner's graft-replay tool, which had been untracked. The only conflicts were the generated <code>bugs/OPEN_WORK.md</code> queue (&times;2), resolved with the sanctioned <code>tools/formal_doc_index.py --write</code>: the queue went 141 &rarr; 133 documents, <code>--check</code> is green, and the suite-self-test index check ran inside the 53.</li>
-<li><b>First check of the merged tree: 52/53, and the one red was a stale pin, not a merge bug.</b> 637's three shift-projection theorems moved the Lean closure census <code>formal-sweep-truth</code> enforces (the X86 row of <code>AXIOM_CLOSURE</code> in <code>test_formal_admitted.py</code>: 153 &rarr; 156 answered, all clean; the branch's worker had never re-pinned it, having verified without a Lean build). Re-pin <code>45673977</code> &rarr; <b><code>check</code> 53/53</b> (measured 2026-10-20, 741 s wall, peak 1.2 GB).</li>
-<li><b>Gate-side triage against the pre-merge baseline (c4cf116e): zero merge regressions.</b> The three red jobs are all pre-existing with byte-identical failure sets: <code>formal-os-backing</code> 76/82 (six <code>stat_*</code> <code>dev</code> signedness reds &mdash; the same stat family as the stdlib <code>getsize</code> push below), <code>formal-monomorph</code> (five template/comptime-value reds; 638's <code>fire_compiler.py</code> hunk is structurally inert and its 103 added tests all pass), <code>formal-run</code> with four reds &mdash; which the merge IMPROVED (1327/5 &rarr; 1332/4; the <code>interpolated-census</code> case went red &rarr; green). <code>formal-call-proofgen</code> stays the known red; it ran RESOURCE-capped at 4 GB, which is not a verdict.</li>
-<li><b>Fleet: 0 workers, by design.</b> Both CODEGEN turns finished 2026-10-19; the DeepSeek formal worker stays down &mdash; the owner's tokens are out for ~19 days and it is NOT to be restarted.</li>
-<li><b>Next: the stdlib-100% push.</b> 18 files / 2 root causes, measured in <code>compile_stdlib.py</code>'s <code>EXPECTED_FAILURES</code>: 17 on the <code>peekable</code>/<code>next</code> imported-generic family (overload selection by trait bound fails at <code>elaborate.py</code>'s exact-string <code>ptypes == arg_mojo</code>, and the dependent return type <code>_PeekableIterator[type_of(iterable).IteratorType[...]]</code> is never concretized), and 1 on <code>getsize</code>/<code>stat</code> out-parameter modelling (<code>stat</code> is in <code>_NEEDS_SELF_EXTERN</code> but NOT <code>_LIBC_SIGS</code>, so the self-extern carries the raw lowered argument types; the generic <code>stat[PathLike]</code> is never elaborated). The two bug docs named in the sweep's reason strings carry the history.</li>
-<li><b>Open red (unchanged, all outside the 53-job check bucket):</b> the bootstrap stage2/3 family behind <code>bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md</code> (Opus agent's worktree); the gate-bucket formal reds itemised above. Routine: the suite still reports 3 drifted measured peaks (<code>linkmode</code>, <code>nonlocal</code>, <code>runtimedylib</code>) &mdash; <code>tools/suite.py --apply-peaks build/suite.log</code> rewrites the table when convenient. The 20 pre-2026-10-05 archaeology branches still await the owner's triage decision.</li>
+<li><b>Running at 12:30:</b> one <code>tools/swarm.py</code> (up since about 02:20), pool total 26, roughly 20 <code>iceman</code> opencode workers, most on <code>bugs/mid/</code> docs. Recent workers that ended with <code>exited-err</code> include <code>bug-mid-gate-red-recover-land-2026-11-02</code> and <code>bug-mid-test-suite-self-test-8-assertion-446</code>; read their <code>work.log</code> before re-feeding.</li>
+<li><b>Retired, do not trust:</b> <code>keepfull.sh</code> and its <code>keepfull.log</code> in the parent directory (the log stops at 12:07 today, target 41 from an older pool), and <code>feed.log</code> in the parent directory (last written 2026-10-06, from a loop that no longer exists).</li>
+<li><b>Interpreter:</b> the running swarm is on the 3.15 python from homebrew (see §2). Restart it on <code>/opt/local/bin/python3</code> at the next quiet point.</li>
 </ul>
-
-<p class="mut">Maintaining this file: when you change a rule, a model's behaviour, a command, or find a new failure mode, edit the relevant section and add a row to §13.
 Keep §15 short and dated. Related docs: <code>CLAUDE.md</code> (binding project rules), <code>CONTROL.html</code> (generated task record), <code>tools/control_prompt.md</code> (worker prompt),
 <code>bugs/OPEN_WORK.md</code> (triage index), <code>doc/MEMORY.html</code> (memory classes).</p>
 
