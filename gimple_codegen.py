@@ -763,7 +763,7 @@ def _merge_struct_inheritance(all_struct_defs: list) -> None:
         own_names = set()
         for m in s.methods:
             own_names.add(_as_str(_as_funcdef_node(m).name))
-        inherited = [m for name, m in merged_methods.items() if name not in own_names]
+        inherited = [m for name, m in sorted(merged_methods.items()) if name not in own_names]
         s.fields = merged_fields + s.fields
         s.methods = inherited + s.methods
         # An in-place AST mutation, so `_walk_ast`'s memo — keyed on node
