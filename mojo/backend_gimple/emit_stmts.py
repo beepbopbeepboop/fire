@@ -1342,6 +1342,13 @@ def _gen_stmt_AssignStmt(gen, node):
     vtype, v = gen.lower_expr(node.value)
     if isinstance(node.target, gimple_ctypes.IdentExpr):
         tname = node.target.name
+        # A name bound to a word of UNKNOWN kind (`d = os.path.split(b'a/b')[0]`,
+        # a list element of a bytes split) is one too: its later reads are the
+        # name itself, so its truthiness and its `or`/`and` ask the runtime
+        # (`_dyn_word_locals`) rather than `!= 0`, which called an empty bytes
+        # object true.
+        if vtype == 'int64_t' and v in gen._dyn_word_vals:
+            gen._dyn_word_locals.add(_as_str(tname))
         # A generator handle bound to a local whose slot is a plain word (it also
         # holds a list on another path: `dirs = _iglob(...)` / `dirs = [dirname]`,
         # then `for d in dirs`): the run time has to be told which generator it is

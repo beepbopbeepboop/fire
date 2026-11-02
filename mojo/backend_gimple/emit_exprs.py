@@ -3387,6 +3387,11 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
         # gives the right operand's C type without evaluating it, so the
         # merged result type is fixed before either branch runs.
         ltype, lval = gen.lower_expr(node.left)
+        # A left operand NAMED as a word of unknown kind (`d or b'xy'` with `d`
+        # bound from a bytes split) is one at this temp too: its truthiness is
+        # the runtime's, which `_ensure_bool_cond` asks for a dyn-word temp.
+        if ltype == 'int64_t' and gen._is_dyn_word(node.left, lval):
+            gen._dyn_word_vals.add(lval)
         cond = gen._ensure_bool_cond(ltype, lval)
         _rq = gen._quick_type(node.right)
         res_type = gimple_ctypes.TypeLattice.join(ltype, _rq)
@@ -3446,8 +3451,20 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
                             or (ltype == 'int64_t' and _rq == 'char *')))
         if _mixed_word:
             res_type = 'int64_t'
+        # A BYTES operand against a str or a word (`os.path.split(b'a/b')[0] or
+        # b'xy'`): the join prefers the pointer side, so the result would be a
+        # `char *` and the bytes object would be read as text -- its `len` the
+        # NUL scan of its header. Python's result is whichever operand was
+        # selected, so it is a word of unknown kind, answered by the runtime.
+        # (A bytes against a bool or an int keeps the pointer join: those are
+        # the NULL / bool-merge cases handled above.)
+        _bytes_mix = (not _bool_merge and not _mixed_word and (
+            (ltype == 'MojoBytes *' and _rq in ('char *', 'int64_t'))
+            or (_rq == 'MojoBytes *' and ltype in ('char *', 'int64_t'))))
+        if _bytes_mix:
+            res_type = 'int64_t'
         result = gen._new_temp(res_type)
-        if _mixed_word:
+        if _mixed_word or _bytes_mix:
             gen._dyn_word_vals.add(result)
         bb_short = gen._new_bb()
         bb_eval_right = gen._new_bb()
