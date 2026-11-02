@@ -27,6 +27,9 @@ CASES = [
     ("len(os.path.splitext(b'a/b.py')[0])",       "len"),
     ("len(os.path.splitext(b'a/b.py')[1])",       "len"),
     ("len(os.path.splitext(b'noext')[0])",        "len"),
+    # Regression: splitext must split at last '.' in basename only.
+    ("len(os.path.splitext(b'a.d/b')[0])",        "len"),
+    ("len(os.path.splitext(b'.bashrc')[0])",      "len"),
     # The predicates answer for a bytes path.
     ("1 if os.path.exists(b'/') else 0",          "int"),
     ("1 if os.path.isdir(b'/') else 0",           "int"),
