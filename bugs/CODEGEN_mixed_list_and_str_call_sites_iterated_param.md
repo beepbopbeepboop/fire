@@ -224,3 +224,33 @@ Verification for that round: `test_gimple.py` (the repro as a positive test,
 single-TU and link-mode, plus the existing refusal-free print-only test) under
 `memslot --gb 8`; then the integrator's full `make gate`, because this touches
 the compiled path.
+
+## Status (2026-11-01, implementation round): step 1(a) landed for literal arguments
+
+Landed, as an AST pre-pass and not a codegen change: `_gmi_specialize_literal_kind_clones`
+(`mojo/backend_gimple/module_gen.py`, called from `gen_module_impl` right after
+`_gmi_decorator_pass`). A plain top-level, untyped, undecorated `def` with exactly
+one mixed parameter (every call passes it a literal, two or more literal kinds),
+iterated or subscripted in its body, is cloned per kind as `<name>_as_<kind>`, and
+each call site is renamed to the clone its literal argument selects. Each clone then
+has only one kind of caller, so its parameter types from ordinary call-site evidence
+with no pin table. The print-only mix still takes the `int64_t` box and gets no
+clones. This is the AST-level clone from the planning round; the codegen-level
+per-kind `gen_func` and `@@CSYM` rewrite the planning round warned about are not
+needed, because the clones are ordinary functions to every existing symbol site.
+
+Verified: the repro compiles and prints `4 5 d e` in single-TU and link-mode
+(`test_gimple.py`: `test_an_iterated_parameter_passed_a_list_and_a_str_compiles_per_kind`);
+the refusal is kept for a non-literal call (`test_a_mixed_iterated_parameter_with_a_str_variable_still_refuses`).
+
+Still open:
+
+- A str VARIABLE passed beside a list, to an iterated parameter, called at module
+  level, still segfaults and is not refused. Filed as
+  `bugs/CODEGEN_mixed_str_variable_at_module_level_segfaults.md`. Inside a function it
+  is refused correctly.
+- The clone pass does not cover a call whose argument is a name, a call, or a number:
+  those still take the refusal (or, at module level, the gap above). Widening it
+  to a name needs the caller's binding kind, which is the same question as the doc above.
+- Not run here: `make gate`. The integrator owes the full gate for this change,
+  since it touches `module_gen.py`, which is in the compiled path.
