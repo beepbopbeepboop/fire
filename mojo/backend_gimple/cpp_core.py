@@ -5051,7 +5051,7 @@ def _cpp_expr(gen, e) -> str:
                 # string; which one is only known now.
                 return f"mojo_getitem_word((int64_t)({obj}), (int64_t)({idx}))"
             _cpp_refuse_str_key_subscript(gen, e)
-            return f"mojo_char_at_str((char *)({obj}), {idx})"
+            return f"mojo_char_at_str_cp((char *)({obj}), {idx})"
         # Subscripting a CALL RESULT whose declared return type is a
         # container pointer: `detect_encoding(readline)[0]` where
         # detect_encoding returns MojoList * (tokenize.py's exact shape —

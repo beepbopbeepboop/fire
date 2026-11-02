@@ -3028,6 +3028,33 @@ char *mojo_cstr_slice(char *s, int64_t start, int64_t stop)
     return out;
 }
 
+char *mojo_cstr_slice_cp(char *s, int64_t start, int64_t stop)
+{
+    if (!s) { char *e = malloc(1); e[0] = '\0'; return e; }
+    int64_t slen = (int64_t)strlen(s);
+    int64_t ncp = mojo_str_codepoint_len(s);
+    if (stop == MOJO_SLICE_STOP_OMITTED) stop = ncp;
+    if (start < 0) start += ncp;
+    if (stop < 0) stop += ncp;
+    if (start < 0) start = 0;
+    if (stop > ncp) stop = ncp;
+    if (start >= stop) { char *e = malloc(1); e[0] = '\0'; return e; }
+    int64_t bstart = mojo_utf8_codepoint_to_byte_offset(s, start);
+    int64_t bstop;
+    /* Find byte offset at end of stop-th codepoint */
+    if (stop >= ncp) {
+        bstop = slen;
+    } else {
+        bstop = mojo_utf8_codepoint_to_byte_offset(s, stop);
+    }
+    int64_t n = bstop - bstart;
+    if (n < 0) n = 0;
+    char *out = malloc((size_t)n + 1);
+    memcpy(out, s + bstart, (size_t)n);
+    out[n] = '\0';
+    return out;
+}
+
 /* reversed(<str>) modeled as an eagerly reversed copy (see
  * _lower_builtin_reversed). */
 char *mojo_cstr_reverse(char *s)
@@ -3079,24 +3106,28 @@ int mojo_cstr_region_eq(char *s, int64_t start, int64_t stop, char *needle)
 
 MojoStr *mojo_str_slice(MojoStr *s, int64_t start, int64_t stop)
 {
-    /* See mojo_list_slice's identical fix: MOJO_SLICE_STOP_OMITTED (not a
-     * plain -1) means "no stop given" (`s[start:]`), distinct from a real
-     * `s[start:-1]`. */
-    if (stop == MOJO_SLICE_STOP_OMITTED) stop = s->len;
-    if (start < 0) start = s->len + start;
-    if (stop  < 0) stop  = s->len + stop;
+    /* Codepoint-aware slicing */
+    if (!s) { MojoStr *ms = malloc(sizeof(MojoStr)); ms->len = 0; ms->data = malloc(1); ms->data[0] = '\0'; return ms; }
+    int64_t ncp = mojo_str_codepoint_len(s->data);
+    int64_t slen = (int64_t)strlen(s->data);
+    if (stop == MOJO_SLICE_STOP_OMITTED) stop = ncp;
+    if (start < 0) start = ncp + start;
+    if (stop  < 0) stop  = ncp + stop;
     if (start < 0) start = 0;
-    if (stop > s->len) stop = s->len;
+    if (stop > ncp) stop = ncp;
     if (start >= stop) {
         MojoStr *ms = malloc(sizeof(MojoStr));
         ms->len = 0; ms->data = malloc(1); ms->data[0] = '\0';
         return ms;
     }
-    int64_t len = stop - start;
+    int64_t bstart = mojo_utf8_codepoint_to_byte_offset(s->data, start);
+    int64_t bstop = (stop >= ncp) ? slen : mojo_utf8_codepoint_to_byte_offset(s->data, stop);
+    int64_t len = bstop - bstart;
+    if (len < 0) len = 0;
     MojoStr *ms = malloc(sizeof(MojoStr));
     ms->len  = len;
     ms->data = malloc((size_t)len + 1);
-    memcpy(ms->data, s->data + start, (size_t)len);
+    memcpy(ms->data, s->data + bstart, (size_t)len);
     ms->data[len] = '\0';
     return ms;
 }
@@ -5309,7 +5340,9 @@ int64_t mojo_str_find(char *s, char *needle) {
     if (!s || !needle) return -1;
     char *found = strstr(s, needle);
     if (!found) return -1;
-    return (int64_t)(found - s);
+    int64_t byte_off = (int64_t)(found - s);
+    /* Return codepoint offset */
+    return mojo_utf8_codepoint_index(s, byte_off);
 }
 
 /* str.rfind(needle[, start[, end]]) over a window. An empty needle matches at
@@ -5320,12 +5353,27 @@ int64_t mojo_str_find(char *s, char *needle) {
 int64_t mojo_str_rfind_from(char *s, char *needle, int64_t start, int64_t stop) {
     if ((intptr_t)s < 65536 || (intptr_t)needle < 65536) return -1;
     if (!s || !needle) return -1;
-    mojo_str_clamp_range(s, &start, &stop);
-    if (stop < start) return -1;
+    int64_t byte_start = mojo_utf8_codepoint_to_byte_offset(s, start);
+    int64_t byte_stop;
+    if (stop == MOJO_SLICE_STOP_OMITTED) {
+        byte_stop = (int64_t)strlen(s);
+    } else {
+        byte_stop = mojo_utf8_codepoint_to_byte_offset(s, stop);
+    }
+    if (byte_stop < byte_start) return -1;
     int64_t nlen = (int64_t)strlen(needle);
-    if (nlen == 0) return stop;
-    for (int64_t i = stop - nlen; i >= start; i--) {
-        if (memcmp(s + i, needle, (size_t)nlen) == 0) return i;
+    if (nlen == 0) {
+        /* empty needle matches at end of window in codepoints */
+        /* return stop in codepoints */
+        if (stop == MOJO_SLICE_STOP_OMITTED) {
+            return mojo_str_codepoint_len(s);
+        }
+        return stop;
+    }
+    for (int64_t i = byte_stop - nlen; i >= byte_start; i--) {
+        if (memcmp(s + i, needle, (size_t)nlen) == 0) {
+            return mojo_utf8_codepoint_index(s, i);
+        }
     }
     return -1;
 }
@@ -5345,13 +5393,23 @@ int64_t mojo_str_rfind(char *s, char *needle) {
 int64_t mojo_str_find_from(char *s, char *needle, int64_t start, int64_t stop) {
     if ((intptr_t)s < 65536 || (intptr_t)needle < 65536) return -1;
     if (!s || !needle) return -1;
-    int64_t len = (int64_t)strlen(s);
-    mojo_str_clamp_range(s, &start, &stop);
-    if (start > len || stop < start) return -1;
+    /* start/stop are in codepoint units now */
+    int64_t byte_start = mojo_utf8_codepoint_to_byte_offset(s, start);
+    int64_t byte_stop;
+    if (stop == MOJO_SLICE_STOP_OMITTED) {
+        byte_stop = (int64_t)strlen(s);
+    } else {
+        /* stop is exclusive end in codepoints? Or we need to search within range */
+        byte_stop = mojo_utf8_codepoint_to_byte_offset(s, stop);
+    }
+    int64_t slen = (int64_t)strlen(s);
+    if (byte_start > slen || byte_stop < byte_start) return -1;
     int64_t nlen = (int64_t)strlen(needle);
     if (nlen == 0) return start;
-    for (int64_t i = start; i + nlen <= stop; i++) {
-        if (memcmp(s + i, needle, (size_t)nlen) == 0) return i;
+    for (int64_t i = byte_start; i + nlen <= byte_stop; i++) {
+        if (memcmp(s + i, needle, (size_t)nlen) == 0) {
+            return mojo_utf8_codepoint_index(s, i);
+        }
     }
     return -1;
 }
@@ -5454,23 +5512,95 @@ int64_t mojo_utf8_codepoint_index(char *s, int64_t byte_offset) {
 }
 
 /* len(s) on a UTF-8 char * — Python's len counts CODE POINTS, and a char *
- * here is a UTF-8 buffer, so strlen's byte count answers 2 for "é" and 4
- * for a 4-byte emoji where CPython (and the interpreter, and the formal
- * backends' len-from-decoded-text) say 1. Same non-continuation test
- * (10xxxxxx) mojo_utf8_codepoint_index uses for the regex offsets, run over
- * the whole buffer: exactly one lead byte per code point, so an ASCII string
- * is unchanged and the answer is the code-point count. This is the len-only
- * half of the string-model question on purpose: s[i]/find/slicing/printf
- * width still read a char * as bytes, and choosing code points everywhere is
- * the larger model change argued in FORMAL_string_value_model — so this is
- * the ONE place len() is right rather than a generic "length" to reach for
- * in the byte-indexed paths. MojoStr is wrapped, but its data is the same
- * UTF-8 buffer (mojo_str_new builds it from one), so its len goes through
- * here on s->data instead of on s->len, which the concat/char_at family
- * still read as bytes. */
+ * here is a UTF-8 buffer. Same non-continuation test
+ * (10xxxxxx) mojo_utf8_codepoint_index uses. */
 int64_t mojo_str_codepoint_len(char *s) {
     if (!s) return 0;
     return mojo_utf8_codepoint_index(s, (int64_t)strlen(s));
+}
+
+/* Convert a codepoint index to a byte offset in a UTF-8 string.
+ * For ASCII strings, codepoint index == byte index (fast path). */
+int64_t mojo_utf8_codepoint_to_byte_offset(char *s, int64_t cp_idx) {
+    if (!s) return 0;
+    if (cp_idx <= 0) return 0;
+    int64_t byte_off = 0;
+    int64_t cp_count = 0;
+    int64_t len = (int64_t)strlen(s);
+    while (byte_off < len && cp_count < cp_idx) {
+        unsigned char c = (unsigned char)s[byte_off];
+        if (c == 0) break;
+        if ((c & 0xC0) != 0x80) {
+            cp_count++;
+            if (cp_count == cp_idx) break;
+        }
+        byte_off++;
+    }
+    /* Advance past the start byte of the codepoint we just counted */
+    if (cp_count == cp_idx && byte_off < len) {
+        unsigned char c = (unsigned char)s[byte_off];
+        if ((c & 0xC0) != 0x80) {
+            /* This is the start byte of codepoint cp_idx; we need to return its byte offset */
+            /* Count up to but not including this position? Wait - let's trace: when we see
+             * a non-continuation byte and cp_count becomes cp_idx, we break. But byte_off
+             * is pointing at that start byte. So we need to return byte_off. */
+            /* Actually let us compute differently */
+        }
+    }
+    /* Better implementation: iterate and track */
+    byte_off = 0;
+    cp_count = 0;
+    while (byte_off < len) {
+        unsigned char c = (unsigned char)s[byte_off];
+        if (c == 0) break;
+        if ((c & 0xC0) != 0x80) {
+            if (cp_count == cp_idx) {
+                return byte_off;
+            }
+            cp_count++;
+        }
+        byte_off++;
+    }
+    /* If past end, return end of string */
+    return (int64_t)strlen(s);
+}
+
+/* Get a codepoint as a string at codepoint index i (not byte index) */
+char *mojo_char_at_str_cp(char *s, int64_t i) {
+    if (!s) return mojo_char_to_str(0);
+    if (i < 0) {
+        /* negative index from end in codepoints */
+        int64_t ncp = mojo_str_codepoint_len(s);
+        i += ncp;
+        if (i < 0) return mojo_char_to_str(0);
+    }
+    int64_t byte_off = mojo_utf8_codepoint_to_byte_offset(s, i);
+    int64_t len = (int64_t)strlen(s);
+    if (byte_off >= len) return mojo_char_to_str(0);
+    /* Check if at or past end */
+    /* Extract the UTF-8 codepoint starting at byte_off */
+    unsigned char c = (unsigned char)s[byte_off];
+    if (c == 0) return mojo_char_to_str(0);
+    int char_len = 1;
+    if ((c & 0x80) == 0) {
+        char_len = 1;
+    } else if ((c & 0xE0) == 0xC0) {
+        char_len = 2;
+    } else if ((c & 0xF0) == 0xE0) {
+        char_len = 3;
+    } else if ((c & 0xF8) == 0xF0) {
+        char_len = 4;
+    } else {
+        char_len = 1;
+    }
+    /* Use a cached approach similar to mojo_char_to_str but we need to return a string
+     * that contains the full multi-byte char. For now, build it. */
+    char *out = malloc((size_t)char_len + 1);
+    memcpy(out, s + byte_off, (size_t)char_len);
+    out[char_len] = '\0';
+    /* Register it so mojo_boxed_is_str can recognize it */
+    mojo_str_register(out);
+    return out;
 }
 
 /* PART 6 (2026-10-23, family S): decode the FIRST UTF-8 code point.
@@ -10224,7 +10354,7 @@ int64_t mojo_getitem_word(int64_t w, int64_t i)
         if (i < 0) i += mojo_list_len(l);
         return mojo_box_word(mojo_list_get_boxed(l, i));
     }
-    if (mojo_boxed_is_str(w)) return (int64_t)(intptr_t)mojo_char_at_str((char *)(intptr_t)w, i);
+    if (mojo_boxed_is_str(w)) return (int64_t)(intptr_t)mojo_char_at_str_cp((char *)(intptr_t)w, i);
     mojo_raise_type_error((char *)"object is not subscriptable");
     return 0;
 }
