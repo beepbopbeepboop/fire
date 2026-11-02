@@ -1523,10 +1523,10 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     if len(gen._frames_mods) > 0 and node.member == 'f_locals':
         # A frame's locals and trace hook have no representation yet (compiled C locals have no
         # runtime names or addresses): refuse by name rather than read the word as an object
-        # attribute and answer garbage (see bugs/hard/CODEGEN_frame_model_for_test_frame.md, Plan).
+        # attribute and answer garbage (see bugs/hard/CODEGEN_frame_f_locals_and_settrace.md, Plan).
         raise RuntimeError(
             f"cannot compile module: frame attribute `{node.member}` is not modelled on the compiled "
-            "path (bugs/hard/CODEGEN_frame_model_for_test_frame.md)")
+            "path (bugs/hard/CODEGEN_frame_f_locals_and_settrace.md)")
     if len(gen._frames_mods) > 0 and node.member in _FRAME_ATTRS:
         _fr_t, _fr_v = gen.lower_expr(node.obj)
         _fr_w = gen._to_int64(_fr_t, _fr_v)

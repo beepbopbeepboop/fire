@@ -1,6 +1,6 @@
 # CODEGEN: an exception object has no `args` (`StopIteration.value` rows FIXED 2026-11-01)
 
-Found 2026-11-01 while working `bugs/hard/CODEGEN_frame_model_for_test_frame.md` (test_frame's `t3`: `c.send(None)` raises
+Found 2026-11-01 while working `bugs/hard/CODEGEN_frame_f_locals_and_settrace.md` (test_frame's `t3`: `c.send(None)` raises
 `StopIteration` whose `.value` is the coroutine's result). Three silent or loud divergences, all measured on master with
 `python3 fire.py build x.py`:
 
@@ -26,7 +26,7 @@ Plan:
    `__mojo_gen_retval(handle)` as `args[0]` (kind-tagged like the generator's value slot).
 4. Tests (run-compare against CPython in `test_gimple_runner.py`): the four rows above, plus `str(e)`/`print(e)` unchanged for exceptions raised with
    several args (`raise ValueError("a", 2)` prints `('a', 2)`).
-Related: `bugs/hard/CODEGEN_frame_model_for_test_frame.md` (test_frame's `t3` needs row 3).
+Related: `bugs/hard/CODEGEN_frame_f_locals_and_settrace.md` (test_frame's `t3` needs row 3).
 
 
 ## Status (2026-11-01): rows 1-3 FIXED, row 4 (`e.args`) open
