@@ -225,7 +225,7 @@
         <li><strong>Unify backends</strong> - Eliminate ARM64/x86_64 divergence, share more code</li>
         <li><strong>Reduce sorry count</strong> - Systematically close CFG leaves and admitted theorems, or clearly mark what level of proof is provided</li>
         <li><strong>Strengthen semantic model</strong> - Extend to handle structs, lists properly so more programs can be proved</li>
-        <li><strong>Better documentation of proof guarantees</strong> - Distinguish "typechecks with structure" vs "fully proved" vs "refused". Users need to know what trust level they get.</li>
+        <li><strong>Document proof guarantees explicitly</strong> - Classify outcomes clearly: <em>refused</em> (unsupported shape, no proof generated), <em>structural</em> (proof skeleton/theorems emitted, typechecks but may contain <code>sorry</code>/admit at leaves), <em>hole-tracked partial</em> (admitted obligations are counted, bounded, and reported by <code>proof_census</code>), and <em>fully proved</em> (no holes; end-to-end correctness theorem established). Surface this trust level in build output and test results so users know exactly what is guaranteed.</li>
         <li><strong>Improve error messages</strong> - When proofs can't be generated, explain why and what needs to be done</li>
     </ul>
 
