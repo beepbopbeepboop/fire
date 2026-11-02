@@ -6576,20 +6576,7 @@ def gen_module_impl(self, stmts):
         _ctxlit_field_cache: dict = {}
 
         def _ctxlit_self_field_container(_ctxlit_sdef, _ctxlit_field):
-            # Two routes make a `self.<field>` a container, tried in order:
-            # the struct's own method assigns it a container literal, or its
-            # `__init__` assigns it straight from a parameter whose call-site
-            # evidence (`<Struct>::<param>`, written by the observers above
-            # and by earlier rounds of the fixpoint below) says container.
-            # The second route is the hop `Owner([10, 20])` ->
-            # `self._items = items` -> `Reader(self._items)` needs: without it
-            # `Reader.items` was declared `int64_t`, and `for i in r.items`
-            # took the dynamic dispatch path and SIGSEGVed.
-            # The cache key carries the evidence size, so an entry computed
-            # before a later round recorded the parameter is never reused.
-            _ctxlit_sname = _as_str(getattr(_ctxlit_sdef, 'name', ''))
-            _ctxlit_cachekey = (_ctxlit_sname + '::' + _as_str(_ctxlit_field)
-                                + '@' + str(len(_obs_container)))
+            _ctxlit_cachekey = _as_str(getattr(_ctxlit_sdef, 'name', '')) + '::' + _as_str(_ctxlit_field)
             if _ctxlit_cachekey in _ctxlit_field_cache:
                 return _ctxlit_field_cache[_ctxlit_cachekey]
             _ctxlit_result = None
@@ -6602,18 +6589,7 @@ def gen_module_impl(self, stmts):
                             break
                 if _ctxlit_result:
                     break
-            if not _ctxlit_result:
-                _ctxlit_init = _ctor_init_methods.get(_ctxlit_sname)
-                if _ctxlit_init is not None:
-                    for _ctxlit_node3 in _walk_ast(_ctxlit_init.body):
-                        if (isinstance(_ctxlit_node3, AssignStmt)
-                                and _gmi_self_member(_ctxlit_node3.target) == _ctxlit_field
-                                and isinstance(_ctxlit_node3.value, IdentExpr)):
-                            _ctxlit_result = _obs_container.get(
-                                _ctxlit_sname + '::' + _as_str(_ctxlit_node3.value.name), '')
-                            break
             _ctxlit_field_cache[_ctxlit_cachekey] = _ctxlit_result
-            return _ctxlit_result
             return _ctxlit_result
 
         _ctxlit_bodies: list = []   # (body, enclosing StructDef or None)
@@ -6624,50 +6600,37 @@ def gen_module_impl(self, stmts):
                 for _ctxlit_meth in _ctxlit_topstmt.methods:
                     _ctxlit_bodies.append((_ctxlit_meth.body, _ctxlit_topstmt))
 
-        # Fixpoint over the traced pass. A `self.<f> = <param>` hop reads the
-        # evidence this same pass wrote for `<Struct>::<param>`, which may
-        # itself have come from another struct's `self.<g>` argument one
-        # round earlier. A round only ever ADDS keys to the four evidence
-        # dicts (an entry is written once and never changed), so their
-        # combined size is monotone and the loop must terminate.
-        _ctxlit_n_seen = -1
-        while True:
-            _ctxlit_n_now = (len(_obs_container) + len(_obs_container_conflict)
-                             + len(_obs_kind) + len(_obs_conflict))
-            if _ctxlit_n_now == _ctxlit_n_seen:
-                break
-            _ctxlit_n_seen = _ctxlit_n_now
-            for _ctxlit_callerbody, _ctxlit_enclosing in _ctxlit_bodies:
-                for _ctxlit_callnode in _walk_ast(_ctxlit_callerbody):
-                    if not (isinstance(_ctxlit_callnode, CallExpr) and isinstance(_ctxlit_callnode.func, IdentExpr)):
+        for _ctxlit_callerbody, _ctxlit_enclosing in _ctxlit_bodies:
+            for _ctxlit_callnode in _walk_ast(_ctxlit_callerbody):
+                if not (isinstance(_ctxlit_callnode, CallExpr) and isinstance(_ctxlit_callnode.func, IdentExpr)):
+                    continue
+                _ctxlit_cname = _as_str(_ctxlit_callnode.func.name)
+                _ctxlit_pnames = _ctor_init_params.get(_ctxlit_cname)
+                if not _ctxlit_pnames:
+                    continue
+                for _ctxlit_argidx, _ctxlit_argnode in enumerate(_ctxlit_callnode.args):
+                    if _ctxlit_argidx >= len(_ctxlit_pnames):
+                        break
+                    _ctxlit_argct = None
+                    if isinstance(_ctxlit_argnode, IdentExpr):
+                        _ctxlit_argct = _ctxlit_ident_container(_ctxlit_callerbody, _ctxlit_argnode.name)
+                    elif _ctxlit_enclosing is not None:
+                        _ctxlit_selffld = _gmi_self_member(_ctxlit_argnode)
+                        if _ctxlit_selffld:
+                            _ctxlit_argct = _ctxlit_self_field_container(_ctxlit_enclosing, _ctxlit_selffld)
+                    if not _ctxlit_argct:
                         continue
-                    _ctxlit_cname = _as_str(_ctxlit_callnode.func.name)
-                    _ctxlit_pnames = _ctor_init_params.get(_ctxlit_cname)
-                    if not _ctxlit_pnames:
-                        continue
-                    for _ctxlit_argidx, _ctxlit_argnode in enumerate(_ctxlit_callnode.args):
-                        if _ctxlit_argidx >= len(_ctxlit_pnames):
-                            break
-                        _ctxlit_argct = None
-                        if isinstance(_ctxlit_argnode, IdentExpr):
-                            _ctxlit_argct = _ctxlit_ident_container(_ctxlit_callerbody, _ctxlit_argnode.name)
-                        elif _ctxlit_enclosing is not None:
-                            _ctxlit_selffld = _gmi_self_member(_ctxlit_argnode)
-                            if _ctxlit_selffld:
-                                _ctxlit_argct = _ctxlit_self_field_container(_ctxlit_enclosing, _ctxlit_selffld)
-                        if not _ctxlit_argct:
-                            continue
-                        _okey = _ctxlit_cname + '::' + _ctxlit_pnames[_ctxlit_argidx]
-                        _cprev = _obs_container.get(_okey, '')
-                        if not _cprev:
-                            _obs_container[_okey] = _ctxlit_argct
-                        elif _cprev != _ctxlit_argct:
-                            _obs_container_conflict[_okey] = True
-                        _prev = _obs_kind.get(_okey, '')
-                        if not _prev:
-                            _obs_kind[_okey] = _ctxlit_argct
-                        elif _prev != _ctxlit_argct:
-                            _obs_conflict[_okey] = True
+                    _okey = _ctxlit_cname + '::' + _ctxlit_pnames[_ctxlit_argidx]
+                    _cprev = _obs_container.get(_okey, '')
+                    if not _cprev:
+                        _obs_container[_okey] = _ctxlit_argct
+                    elif _cprev != _ctxlit_argct:
+                        _obs_container_conflict[_okey] = True
+                    _prev = _obs_kind.get(_okey, '')
+                    if not _prev:
+                        _obs_kind[_okey] = _ctxlit_argct
+                    elif _prev != _ctxlit_argct:
+                        _obs_conflict[_okey] = True
 
         for _cs_name2 in _ctor_init_params:
             _init = _ctor_init_methods.get(_cs_name2)

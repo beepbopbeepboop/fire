@@ -480,21 +480,6 @@ void *_mojo_exc_obj = NULL;
 void mojo_exc_obj_set(void *obj) { _mojo_exc_obj = obj; }
 void *mojo_exc_obj_get(void) { return _mojo_exc_obj; }
 
-MojoExc *mojo_exc_new(int64_t type, char *msg, MojoList *args) {
-    MojoExc *exc = (MojoExc *)malloc(sizeof(MojoExc));
-    if (!exc) return NULL;
-    exc->type = type;
-    exc->msg = msg ? strdup(msg) : NULL;
-    exc->args = args;
-    return exc;
-}
-
-MojoList *mojo_exc_args(void *obj) {
-    if (!obj) return NULL;
-    MojoExc *exc = (MojoExc *)obj;
-    return (MojoList *)exc->args;
-}
-
 /* Exception type tag: a small int id (assigned per exception class name at
  * compile time, see GimpleGen._exc_type_id) that lets a multi-handler
  * try/except dispatch on which exception was actually raised instead of

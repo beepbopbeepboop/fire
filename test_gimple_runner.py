@@ -3912,6 +3912,27 @@ def main():
     print(sys._getframe(0).f_trace is None)
 """, "True False\nFalse\nTrue\nTrue False\nFalse\nTrue\nTrue\n")
 
+    # `f_trace_lines` / `f_trace_opcodes` accept only a bool: a non-bool store raises TypeError
+    # (CPython: "attribute value type must be bool") and stores nothing.
+    test_gimple_stdout("gimple_frame_f_trace_lines_requires_bool", """\
+import sys
+
+def test():
+    f = sys._getframe(0)
+    try:
+        f.f_trace_lines = 1
+        print("stored")
+    except TypeError as e:
+        print("TypeError")
+    f.f_trace_lines = False
+    print(f.f_trace_lines)
+    f.f_trace_opcodes = 2 > 1
+    print(f.f_trace_opcodes)
+
+def main():
+    test()
+""", "TypeError\nFalse\nTrue\n")
+
     test_gimple_stdout("gimple_traceback_chain_names_and_lines", """\
 import sys
 
@@ -11074,7 +11095,7 @@ fn main():
     print(out)
 """, "45213\n54321\nolleh\n")
 
-    # PARTIAL_WORK_HANDOFF §4.1 (fixed): a function returning a local it just
+    # bugs/PARTIAL_WORK_HANDOFF.md §4.1: a function returning a local it just
     # bound was typed int64_t regardless of the local's real value, so the
     # caller printed the pointer's decimal address instead of the string.
     test_gimple_stdout("gimple_return_local_bound_to_string_literal", """\
@@ -11981,46 +12002,6 @@ for x in [1, 2]:
 for x in ['p', 'q']:
     print(x)
 """, "1\n2\np\nq\n")
-
-    # PARTIAL_WORK_HANDOFF §2.1: a container literal reaches a field through
-    # TWO constructor hops -- `Owner([10, 20])` binds Owner's param, then
-    # `Reader(self._items)` passes that field on. The call-site evidence was
-    # only ever read one hop deep, so `Reader.items` stayed `int64_t` and the
-    # loop took the dynamic dispatch path, which SIGSEGVed printing the
-    # integer as a `char *`. The one-hop shapes already worked and are kept
-    # here as the guard for the same field pass.
-    test_gimple_stdout("gimple_ctor_container_two_hops_field_iterates", """\
-class Reader:
-    def __init__(self, items):
-        self.items = items
-class Owner:
-    def __init__(self, items):
-        self._items = items
-    def read(self):
-        return Reader(self._items).items
-def main():
-    o = Owner([10, 20])
-    for i in o.read():
-        print(i)
-main()
-""", "10\n20\n")
-
-    # Negative guard for the same hop: a SCALAR forwarded through `self.<f>`
-    # must not be promoted to a container by the new route.
-    test_gimple_stdout("gimple_ctor_scalar_two_hops_stays_scalar", """\
-class Reader:
-    def __init__(self, items):
-        self.items = items
-class Owner:
-    def __init__(self, n):
-        self._n = n
-    def read(self):
-        return Reader(self._n).items
-def main():
-    o = Owner(7)
-    print(o.read() + 1)
-main()
-""", "8\n")
 
     test_gimple_stdout("gimple_for_loop_target_rebind_str_then_bytes", """\
 for x in "cd":

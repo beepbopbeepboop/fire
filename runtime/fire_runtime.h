@@ -685,11 +685,6 @@ typedef struct {
     int64_t  inl[MOJO_LIST_INLINE];
 } MojoList;
 
-/* Exception object with args (for e.args / StopIteration.value). */
-typedef struct { int64_t type; char *msg; MojoList *args; } MojoExc;
-MojoExc *mojo_exc_new(int64_t type, char *msg, MojoList *args);
-MojoList *mojo_exc_args(void *obj);
-
 MojoList *mojo_list_new(void);
 int mojo_is_registered_list(int64_t addr);
 int mojo_boxed_is_str(int64_t v);

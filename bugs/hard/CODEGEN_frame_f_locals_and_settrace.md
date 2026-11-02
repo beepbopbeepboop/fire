@@ -56,5 +56,16 @@ Ordering: (C) refusal for f_locals -> f_trace -> (A). Neither needs the unittest
   (`f_trace` None by default, `f_trace_lines` True, `f_trace_opcodes` False; `f.f_trace is None` and `True`/`False` printing work through boxed words).
   Test `gimple_frame_f_trace_attributes_read_back` matches CPython. Nothing CONSULTS them yet: there is no `sys.settrace` and `set_line` does not call a tracer, which
   is the next step of the f_trace plan above (test_lineno_with_tracing only needs the stored attribute). Gate: `compile_stdlib.py` 0 unexpected.
+## Status (2026-11-01, stage 3 eleventh slice): `f_trace_lines` / `f_trace_opcodes` require a bool
+
+- `f.f_trace_lines = <literal>` and `f.f_trace_opcodes = <literal>` with an int, float or str LITERAL raise `TypeError("attribute value type must be bool")`
+  at runtime and store nothing (`emit_stmts.py`, the frame-attribute store arm). `f_trace` itself still takes any value. Test
+  `gimple_frame_f_trace_lines_requires_bool` (matches CPython; `= False` and `= 2 > 1` still store).
+  Limit: the check is on the AST, not the type. Bool literals lower to the same `'int'` as `1`/`0` and there is no separate bool static type to test, so a
+  variable holding an int (`x = 1; f.f_trace_lines = x`) is still stored unchecked. Remaining piece: a bool tag on the value, or a bool static type for
+  comparisons/names, so the store can decide at compile time or at runtime.
+- Still open for this item: `del f.f_trace_lines` silently succeeds (verified 2026-11-01: exit 0, prints `deleted`); CPython raises
+  `TypeError: can't delete numeric/char attribute`. Not yet lowered.
+
 Remaining: (A) box-all-locals for a real `f_locals`; `sys.settrace`; the type/delete errors test_f_trace_lines_and_opcodes asserts (`TypeError` for a non-bool,
 `del f.f_trace_lines`); and running test_frame.py through its real imports.
