@@ -74,7 +74,9 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-PROOF_GEN = os.path.join(HERE, "formal", "arm64_proof_gen.py")
+from exec_budget import RUN_TIMEOUT_S
+
+PROOF_GEN =os.path.join(HERE, "formal", "arm64_proof_gen.py")
 
 # The programs, and what each one is here to pin.  `print` is the important
 # one: it is the commonest statement in the language, it is an extern, and it
@@ -7297,7 +7299,7 @@ class TestTheZeroDivisorGuardIsAFalseGoal(unittest.TestCase):
             argv = ([out] if backend == "arm64" or sys.platform != "darwin"
                     else ["arch", "-x86_64", out])
             p = subprocess.run(argv, capture_output=True, text=True,
-                               timeout=60)
+                               timeout=RUN_TIMEOUT_S)
             self.assertNotEqual(p.returncode, 0,
                                 f"{backend}: a zero divisor did not leave the "
                                 f"image — the div0 arm is reachable code, so "
@@ -8732,7 +8734,8 @@ class TestTheDivisionExamplesHaveNoProofToCheck(unittest.TestCase):
                         os.path.join(HERE, "formal", "examples", f"{stem}.mojo"),
                         arch=backend, output=out, prove=False, check=False)
                     proc = subprocess.run((runner or []) + [out],
-                                          capture_output=True, timeout=30)
+                                          capture_output=True,
+                                          timeout=RUN_TIMEOUT_S)
                     # The entry IS the function, so the exit status is its
                     # answer. `//` is CPython's own floor and both stems'
                     # remainder is CPython's, so ONE expectation covers both

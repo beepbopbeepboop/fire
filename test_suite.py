@@ -2146,10 +2146,8 @@ STALE_PER_CHILD_BUDGETS = {
     # image. Both are per-child walls on an image the case built itself, which is
     # what a residue row is for; neither is the SUBJECT of its test, so neither
     # moves to `BUDGET_IS_THE_SUBJECT`.
-    'test_formal_call_proof_gen.py': 2,
     'test_formal_dylib.py': 2,
     'test_formal_proof_breadth.py': 6,  # +1 with the bulk merge of the formal-worker branches
-    'test_formal_runtime_link.py': 1,
     'test_formal_specs.py': 1,  # +1 on 2026-10-05: work/formal36-contracts-language's
                                  # `lean` run of a generated spec proof
     'test_formal_sweep_cache_key.py': 2,
@@ -2160,7 +2158,6 @@ STALE_PER_CHILD_BUDGETS = {
     'test_ptr_registry.py': 2,
     'test_runtime_dylib.py': 1,
     'test_selfhost_memory.py': 1,
-    'test_stdlib.py': 1,
 }
 
 #: Files where a per-child literal is the SUBJECT rather than residue, with the
