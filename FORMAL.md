@@ -1463,7 +1463,7 @@ in `bugs/formal/FORMAL_dylib_export_loops_and_frame_bounds.md` §1).
 | what | bound | why that size |
 |---|---|---|
 | one generated proof | `PROOF_WALL_S` / `PROOF_CPU_S` = 1500 s | 5x the slowest legitimate proof measured (`formal/examples/udivmod.mojo`, 297.8 s wall / 219.2 s CPU) |
-| one `lib/*.olean` build or census | `LIBRARY_WALL_S` / `LIBRARY_CPU_S` = 1800 s | ~16x the slowest module build (`ProofLib`, 112.0 s / 83.1 s) |
+| one `lib/*.olean` build or census | `LIBRARY_WALL_S` / `LIBRARY_CPU_S` = 3600 s | ~32x the slowest module build (`ProofLib`, 112.0 s / 83.1 s) |
 | memory | `-M 6144` = 6.0 GB (proof), `-M 12288` = 12.0 GB (library) | above the measured peak of the largest of each — 3.00 GB and 7.82 GB, so **2.0x** and **1.53x**. **Not** the project's 4 GB line: with `-M 4096` the `ProofLib` build fails outright ("(kernel) excessive memory consumption detected"), so that ceiling is a red suite, not a policy. The over-4 GB fact is `prooflib`'s `memwhy`. This row used to say "2x the measured peak of the largest of each", which is right of the proof ceiling and a 30% overstatement of the library one — it is one ratio per ceiling, and a table row that gives one number for two is a row that cannot be checked |
 | threads | `-j 4` | one file is elaborated sequentially; the threads only decide how fast a runaway burns the machine |
 
