@@ -885,12 +885,6 @@ def user_dunder_repr_call(gen, struct_name: str, ctype: str, cval: str, prefer):
     return None
 
 
-# Frame attributes that are plain stored words on the frame record, and their runtime ids
-# (fire_runtime.c mojo_frame_get_attr / mojo_frame_set_attr / mojo_frame_del_attr). One table
-# for the read, store and `del` lowerings, so the three cannot disagree about an id.
-FRAME_SETTABLE_IDS = {'f_trace': 0, 'f_trace_lines': 1, 'f_trace_opcodes': 2}
-
-
 def _py_box_expr(gen, node):
     """Does this expression STATICALLY produce a PythonObject box word?
 

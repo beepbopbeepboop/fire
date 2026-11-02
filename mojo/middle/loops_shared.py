@@ -59,18 +59,6 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
             # MojoList* temp before the accessor call, or GIMPLE rejects
             # "passing int64_t where MojoList * expected".
             lp = gen._coerce_to_type('int64_t', 'MojoList *', v)
-        # If the list is marked as having per-slot kinds that must be read
-        # via mojo_list_get_boxed (e.g. a dict's keys materialized through
-        # the opaque boxed path), use the boxed reader for every slot.
-        _mkv = (v in getattr(gen, '_maybe_kinds_vals', ()) or
-                lp in getattr(gen, '_maybe_kinds_vals', ()) or
-                _as_str(v) in getattr(gen, '_maybe_kinds_vals', ()) or
-                _as_str(lp) in getattr(gen, '_maybe_kinds_vals', ()))
-        if _mkv:
-            _ev = gen._new_val('int64_t', f"mojo_list_get_boxed ({lp}, {idx64})")
-            gen._boxed_vals.add(_ev)
-            gen._dyn_word_vals.add(_ev)
-            return 'int64_t', _ev
         # A `struct.unpack(...)` result has ONE container ctype but a
         # per-slot real kind, statically known from the format string. The
         # subscript path already prefers that per-slot kind (emit_calls.py's
@@ -159,13 +147,6 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
     # R1/R5, shares _materialize_as_list with all()/any()/enumerate()/
     # *.join()/the list-pattern-target branch above in gimple_gen_stmts.py).
     lp = gen._materialize_as_list(vtype, v)
-    _mkv = (lp in getattr(gen, '_maybe_kinds_vals', ()) or
-            _as_str(lp) in getattr(gen, '_maybe_kinds_vals', ()))
-    if _mkv:
-        _ev = gen._new_val('int64_t', f"mojo_list_get_boxed ({lp}, {idx64})")
-        gen._boxed_vals.add(_ev)
-        gen._dyn_word_vals.add(_ev)
-        return 'int64_t', _ev
     elem = gen._elem_of(lp)
     suf = gimple_ctypes.TypeLattice.list_suffix(elem) if elem else 'int'
     if suf == 'str':
@@ -489,7 +470,7 @@ def _loop_else_flag_name() -> str:
     return '_loop_ok_' + str(_LOOP_ELSE_COUNTER[0])
 
 
-def _loop_else_rewrite_breaks(stmts: list, flag: str) -> list:
+def _loop_else_rewrite_breaks(stmts, flag: str) -> list:
     out: list = []
     for st in (stmts or []):
         out.append(_loop_else_rewrite_stmt(st, flag))

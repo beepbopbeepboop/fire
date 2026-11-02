@@ -3654,23 +3654,12 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # any side effects a real decode call would have), just discarded.
     if (fname_raw == 'str' and len(node.args) in (2, 3)
             and not gen._locally_binds_name('str')):
-        # str(data, encoding[, errors]): the DECODE of a bytes object. The
-        # encoding is the second argument, errors the third (default
-        # 'strict', as in CPython); both are threaded to the runtime decode.
         et, ev = gen.lower_expr(node.args[0])
-        enc_t, enc_v = gen.lower_expr(node.args[1])
-        enc = enc_v if enc_t == 'char *' else gen._coerce_to_type(enc_t, 'char *', enc_v)
-        if len(node.args) == 3:
-            err_t, err_v = gen.lower_expr(node.args[2])
-            err = err_v if err_t == 'char *' else gen._coerce_to_type(err_t, 'char *', err_v)
-        else:
-            err = gen._intern_string('strict')
-        if et == 'MojoBytes *':
-            return 'char *', gen._call_expr('char *', 'mojo_bytes_decode',
-                                            [('MojoBytes *', ev), ('char *', enc), ('char *', err)])
-        # a value whose kind only the runtime knows (a bytes or a str word)
-        return 'char *', gen._call_expr('char *', 'mojo_str_from_word',
-                                        [('int64_t', gen._to_int64(et, ev)), ('char *', enc), ('char *', err)])
+        for _extra in node.args[1:]:
+            gen.lower_expr(_extra)
+        if et != 'char *':
+            ev = gen._stringify_value(et, ev)
+        return 'char *', ev
 
     # pow(base, exp, mod): real Python's 3-arg modular-exponentiation
     # form -- integer semantics, entirely distinct from the ordinary
@@ -3778,34 +3767,6 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         vp = gen._new_val('void *', ov if ot == 'void *' else f'(void *){ov}')
         _isdc = gen._call_expr('int', '_mojo_dispatch_is_dataclass', [('void *', vp)])
         return '_Bool', gen._new_val('_Bool', f'{_isdc} != 0')
-    # Builtin containers (MojoList*, MojoDict*, MojoSet*, MojoStr*,
-    # MojoBytes*, MojoMemoryView*) have no fields registered in the static
-    # dispatch table, so the generic arm below answers False for every
-    # method name. Check known method names directly for these types.
-    if (fname_raw == 'hasattr' and len(node.args) == 2
-            and not gen._locally_binds_name('hasattr')):
-        _quick_type_result = gen._quick_type(node.args[0]) if hasattr(gen, '_quick_type') else None
-        _is_builtin_container = False
-        if _quick_type_result and _quick_type_result.endswith(' *'):
-            _base = _quick_type_result[:-2]
-            _is_builtin_container = _base in (
-                'MojoList', 'MojoDict', 'MojoSet', 'MojoStr',
-                'MojoBytes', 'MojoMemoryView',
-            )
-        if (_is_builtin_container
-                and isinstance(node.args[1], gimple_ctypes.StringLiteral)):
-            _attr_name = _as_str(node.args[1].value)
-            _container_methods = {
-                'append', 'extend', 'sort', 'reverse', 'clear',
-                'keys', 'values', 'items', 'get', 'update', 'pop',
-                'add', 'discard', 'remove',
-                'startswith', 'endswith', 'strip', 'lstrip', 'rstrip',
-                'split', 'join', 'replace', 'find', 'lower', 'upper',
-                'format', 'encode', 'count', 'index', 'rfind', 'rindex',
-                'insert', 'copy', 'popleft', 'appendleft',
-            }
-            if _attr_name in _container_methods:
-                return '_Bool', gen._new_val('_Bool', '1')
     if (fname_raw == 'hasattr' and len(node.args) == 2
             and not gen._locally_binds_name('hasattr')):
         ot, ov = gen.lower_expr(node.args[0])
@@ -4446,13 +4407,6 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 and not getattr(_lit, 'is_bytes', False)):
             _cp = len(gimple_ctypes.decode_c_escapes(_lit.value))
             return 'int64_t', gen._new_val('int64_t', str(_cp))
-        # A word of unknown kind (`'w'` — bytes value, or `or` of bytes that
-        # yields a word): dispatch at runtime through `mojo_len_word`.
-        if _is_dyn_word_operand(gen, node.args[0], av) or (
-                isinstance(node.args[0], gimple_ctypes.IdentExpr)
-                and _as_str(node.args[0].name) in getattr(gen, '_dyn_word_locals', ())):
-            return 'int64_t', gen._call_expr('int64_t', 'mojo_len_word',
-                                            [('int64_t', gen._to_int64('char *', av))])
         _len_t = gen._call_expr('int64_t', 'mojo_str_codepoint_len', [('char *', av)])
         if gen._is_fresh_container_operand(node.args[0], av):
             gen._free_fresh_container(av, at)
@@ -10608,8 +10562,8 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
 
     if ot == 'MojoStr *':
         idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
-        t = gen._new_val('char *', f"mojo_char_at_str_cp (mojo_str_data({ov}), {idx64})")
-        return 'char *', t
+        t = gen._new_val('char', f"mojo_str_char_at ({ov}, {idx64})")
+        return 'char', t
 
     if ot == 'MojoBytes *':
         # b[i] -> int 0-255 (never a 1-char str; bytes is not conflated
@@ -10705,7 +10659,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             # `_mojo_at_char` is not emitted here: it returns a pointer INTO
             # the string, which is not NUL-terminated and so is not a str.
             return 'char *', gen._new_val(
-                'char *', f"mojo_char_at_str_cp ({cp}, {idx64})")
+                'char *', f"mojo_char_at_str ({cp}, {idx64})")
         # A STRING index proves the container is a dict even when its own
         # type is opaque: no list is indexable by a string. `pat.fields`
         # in ast_rewriter.py is exactly this — the A5 boxed-member read
@@ -10895,9 +10849,16 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
     # in the generated C is a reader's false lead about what the subscript
     # costs (it is how the leak below survived a reading of the C).
     if et == 'char':
-        # Codepoint-aware indexing
+        # `mojo_char_at_str` rather than a `char`-taking helper: gimple
+        # rejects a `char` argument ("invalid argument to gimple call"),
+        # since a char is promoted to int64_t non-trivially. It is
+        # `mojo_char_to_str` reached through the string and the index, so it
+        # shares the immortal 256-entry table — a character costs no
+        # allocation. `mojo_cstr_slice(ov, i, i + 1)` was correct and leaked
+        # one malloc per character with no owner; see the boxed-receiver
+        # branch above, which is the same shape and the same fix.
         return 'char *', gen._new_val(
-            'char *', f"mojo_char_at_str_cp ({ov}, {idx64})")
+            'char *', f"mojo_char_at_str ({ov}, {idx64})")
     gen._ptr_helpers_needed.add(et)
     addr = gen._new_val(ot, f"_mojo_at_{cn} ({ov}, {idx64})")
     # Can't dereference void* (no element type); return the pointer itself
@@ -11080,6 +11041,14 @@ def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
                              f"{_he}, {_ev}, {_stepv})")
         else:
             t = gen._new_val('MojoList *', f"mojo_list_slice ({ov}, {start_v}, {stop_v})")
+        if ov in getattr(gen, '_maybe_kinds_vals', ()):
+            gen._maybe_kinds_vals.add(t)
+            if ov in getattr(gen, '_struct_slot_kinds', {}):
+                gen._struct_slot_kinds[t] = gen._struct_slot_kinds[ov]
+            else:
+                gen._struct_slot_kinds.pop(t, None)
+            gen._elem_types.pop(t, None)
+            return 'MojoList *', t
         # propagate elem type
         if ov in gen._elem_types:
             gen._elem_types[t] = gen._elem_types[ov]
@@ -11116,8 +11085,15 @@ def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
         return 'Span *', t
 
     if ot == 'char *':
-        # Codepoint-aware slicing for char* strings
-        t = gen._new_val('char *', f"mojo_cstr_slice_cp ({ov}, {start_v}, {stop_v})")
+        # A plain (non-MojoStr-wrapped) Python str, boxed as char* — a
+        # NUL-terminated C string has no length field to bound a slice
+        # copy against, unlike MojoStr's `->len`. The generic "plain
+        # pointer" fallback below just adds `start` to the pointer,
+        # which happens to look right for `s[start:]` (the tail reads
+        # correctly to the string's own real end) but silently drops
+        # `stop` entirely for `s[:stop]`/`s[start:stop]` — no truncation
+        # ever happens. See mojo_cstr_slice in runtime/fire_runtime.c.
+        t = gen._new_val('char *', f"mojo_cstr_slice ({ov}, {start_v}, {stop_v})")
         return 'char *', t
 
     if ot == 'int64_t':

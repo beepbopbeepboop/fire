@@ -221,7 +221,6 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_str_contains':          'int',
     'mojo_str_slice':             'MojoStr *',
     'mojo_cstr_slice':            'char *',
-    'mojo_cstr_slice_cp':         'char *',
     'mojo_cstr_reverse':          'char *',
     'mojo_cstr_region_eq':        'int',
     'mojo_str_from_char':         'MojoStr *',
@@ -269,7 +268,6 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_bytes_startswith':      'int',
     'mojo_bytes_endswith':        'int',
     'mojo_bytes_decode':          'char *',
-    'mojo_str_from_word':         'char *',
     'mojo_bytes_hex':             'char *',
     'mojo_bytes_removeprefix':    'MojoBytes *',
     'mojo_bytes_removesuffix':    'MojoBytes *',
@@ -3285,7 +3283,7 @@ class GimpleGen:
         'mojo_gen_note_a3':    ('int64_t', ['int64_t', 'int64_t']),
         'mojo_add_words':      ('int64_t', ['int64_t', 'int64_t']),
         'mojo_re_compile':     ('int64_t', ['char *', 'int64_t']),
-        'mojo_re_compile_bytes': ('int64_t', ['MojoBytes *', 'int64_t']),
+        'mojo_re_compile_bytes': ('int64_t', ['void *', 'int64_t', 'int64_t']),
         'mojo_split_dyn':      ('int64_t', ['int64_t', 'int64_t']),
         'mojo_class_getattr':  ('int64_t', ['int64_t', 'char *']),
         'mojo_getattr_any':    ('int64_t', ['void *', 'char *']),
@@ -3306,7 +3304,7 @@ class GimpleGen:
         'mojo_type_fill_from_dict': ('void', ['int64_t', 'MojoDict *']),
         'mojo_chain_extend':   ('void', ['MojoList *', 'int64_t']),
         'mojo_re_exec':        ('int64_t', ['int64_t', 'char *', 'int64_t', 'int64_t', 'int64_t']),
-        'mojo_re_exec_bytes':  ('int64_t', ['int64_t', 'MojoBytes *', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_re_exec_bytes':  ('int64_t', ['int64_t', 'void *', 'int64_t', 'int64_t', 'int64_t', 'int64_t']),
         'mojo_re_call':        ('int64_t', ['int64_t', 'char *', 'MojoList *', 'MojoDict *']),
         'mojo_re_getattr':     ('int64_t', ['int64_t', 'char *']),
         'mojo_is_re_pattern':  ('int', ['int64_t']),
@@ -3385,8 +3383,6 @@ class GimpleGen:
         'mojo_c_getenv':         ('char *',     ['char *']),
         'mojo_char_to_str':      ('char *',     ['char']),
         'mojo_char_at_str':      ('char *',     ['char *', 'int64_t']),
-        'mojo_char_at_str_cp':   ('char *',     ['char *', 'int64_t']),
-        'mojo_utf8_codepoint_to_byte_offset': ('int64_t', ['char *', 'int64_t']),
         'mojo_ord':              ('int64_t',    ['char *']),
         'mojo_chr':              ('char *',     ['int64_t']),
         'mojo_read_type_tag':    ('int64_t',    ['int64_t']),
@@ -4583,10 +4579,10 @@ class GimpleGen:
     def _default_expr_to_pair(self, _dflt, cxx: bool = False, param_ctype=None) -> tuple:
         return ggc._default_expr_to_pair(self, _dflt, cxx=cxx, param_ctype=param_ctype)
 
-    def _pack_kwargs_slot_call(self, fname, fname_raw, arg_pairs, kwarg_dict: dict, call_has_spread=False):
+    def _pack_kwargs_slot_call(self, fname, fname_raw, arg_pairs, kwarg_dict, call_has_spread=False):
         return ggc._pack_kwargs_slot_call(self, fname, fname_raw, arg_pairs, kwarg_dict, call_has_spread)
 
-    def _pack_vararg_trailing_params(self, fname, fname_raw, arg_pairs, kwarg_dict: dict, call_has_spread=False):
+    def _pack_vararg_trailing_params(self, fname, fname_raw, arg_pairs, kwarg_dict, call_has_spread=False):
         return ggc._pack_vararg_trailing_params(self, fname, fname_raw, arg_pairs, kwarg_dict, call_has_spread)
 
     def _expand_sole_spread_into_fixed_slots(self, node, fname, fname_raw, arg_pairs, expected_params):
@@ -5653,18 +5649,6 @@ class GimpleGen:
         return ggc._kwarg_param_names(self, fname_raw, fname, n_expected, kwarg_dict)
     def _begin_function(self, fn) -> None:
         return ginf.begin_function(self, fn)
-    def _frame_enter(self, fn) -> None:
-        return gmp._frame_enter(self, fn)
-    def _frame_enter_module(self) -> None:
-        return gmp._frame_enter_module(self)
-    def _frame_leave(self) -> None:
-        return gmp._frame_leave(self)
-    def _cattr_restore_begin(self, body) -> None:
-        return gmp._cattr_restore_begin(self, body)
-    def _cattr_restore_fallthrough(self, fn) -> None:
-        return gmp._cattr_restore_fallthrough(self, fn)
-    def _cattr_restore_end(self) -> None:
-        return gmp._cattr_restore_end(self)
     def _emit_fallthrough_frees(self, fn) -> None:
         return ginf.emit_fallthrough_frees(self, fn)
     def _reset_no_candidates(self) -> None:
@@ -5970,7 +5954,7 @@ def _selfhost_register_gimplegen(gen):
 # MOJO_NO_SHIM=1 convention) for the first time this surfaces a real false
 # positive on code broader than that sweep, so a single bad diagnostic can't
 # block an otherwise-working build while it's investigated.
-def _check_ownership(stmts: list, filename: str) -> None:
+def _check_ownership(stmts, filename: str) -> None:
     if os.environ.get('MOJO_SKIP_OWNERSHIP_CHECK'):
         return
     diags = ownership_check.check_module(stmts)
