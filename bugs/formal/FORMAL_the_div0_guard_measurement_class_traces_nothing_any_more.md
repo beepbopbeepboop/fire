@@ -450,8 +450,8 @@ The mechanism, step by step:
 So the three failures are not evidence about `fdiv64`'s div0 arm, and they are
 not evidence that anything was corrected. They are a doc-truth test that has
 gone blind while reporting a diagnosis about the wrong thing — the failure mode
-`bugs/formal/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`
-records for `bootstrap-stage2-dumps`, and the one CLAUDE.md calls "a check that
+`FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md` (deleted)
+recorded for `bootstrap-stage2-dumps`, and the one CLAUDE.md calls "a check that
 did not look at what it produced".
 
 ## Why it went blind, and it is not only the fixture

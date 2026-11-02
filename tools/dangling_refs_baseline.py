@@ -38,7 +38,6 @@ BASELINE = {
     'bugs/COMPILE_FAIL_importlib_resources_readers.md': 2,
     'bugs/TEST_scalar_arity_min_max_link_mode_prints_nothing.md': 1,
     'bugs/formal/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md': 1,
-    'bugs/formal/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md': 2,
     'bugs/formal/FORMAL_dataclass_runtime_reflection.md': 1,
     'bugs/formal/FORMAL_dylib_export_loops_and_frame_bounds.md': 1,
     'bugs/formal/FORMAL_known_limits.md': 1,

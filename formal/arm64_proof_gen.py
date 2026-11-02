@@ -457,6 +457,62 @@ def _has_while(stmts) -> bool:
     return False
 
 
+def _ternary_count(e) -> int:
+    """The value-position ternaries in an expression, operands included.
+
+    `TernaryExpr` is the value-position `if` — the shape `arm64_step`'s CSEL
+    arm and `work_step_csel` model, and the one the untyped AST bridge has no
+    constructor for — and this counts them where `_ast_model_cannot_state`
+    only asked whether any exist: the certificate's cost row is keyed on HOW
+    MANY conditions a body carries, not whether it carries one. The walk is
+    over the node's dataclass fields rather than a hand list of expression
+    kinds, so an operand a hand list forgot is still counted.
+    """
+    if e is None:
+        return 0
+    if isinstance(e, F.TernaryExpr):
+        return (1 + _ternary_count(e.condition)
+                + _ternary_count(e.then_val) + _ternary_count(e.else_val))
+    n = 0
+    for name in getattr(e, "__dataclass_fields__", ()) or ():
+        if name in ("line", "col"):
+            continue
+        child = getattr(e, name, None)
+        if isinstance(child, list):
+            n += sum(_ternary_count(c) for c in child)
+        elif child is not None and not isinstance(
+                child, (str, int, float, bool)):
+            n += _ternary_count(child)
+    return n
+
+
+def _cond_branch_count(stmts) -> int:
+    """The conditional branches a statement list carries: one per `if` and
+    one per value-position ternary, recursing into the arms and operands.
+
+    This is the certificate's cost row: the walk theorem's per-path value-flow
+    facts grow with the number of source-level conditions, branch or not — a
+    value-position ternary is branchless on the machine (`cmp` + `CSEL`, no
+    branch instruction) yet it still doubles the paths the per-condition
+    `hcond` facts are stated over, which is the reading the `B.cond` control
+    in `bugs/formal/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.
+    md` gives for the statement-`if` shape and the measured ternary class
+    (one checks, three check at 560 s / 5.6 GB, four kill at the 1500 s CPU
+    bound) gives for this one.
+    """
+    n = 0
+    for st in stmts:
+        if isinstance(st, IfStmt):
+            _c, _tb, _eb = _if_expand(st)
+            n += (1 + _ternary_count(_c)
+                  + _cond_branch_count(_tb) + _cond_branch_count(_eb))
+        else:
+            # The value position the statement carries: `return`'s value,
+            # an `Assign`/`AugAssign`/`VarDecl` right-hand side, an `ExprStmt`.
+            n += _ternary_count(getattr(st, "value", None))
+    return n
+
+
 #: Node types that start a NESTED SCOPE.  A call inside one is not a call of
 #: the enclosing function: a nested `def`'s body runs when IT is called, and a
 #: lambda's body when the lambda object is called.  Every walker below stops at
@@ -7469,13 +7525,8 @@ def _unmodelled_instruction(word: int):
     `_step_branch_index` has already rejected, so the question is which
     instruction it is, and A64's fixed fields answer that without a table.
 
-    The three this emitter is measured to produce:
+    The ones this emitter is measured to produce:
 
-      * **`CSEL`** — A64 "Conditional Select (register)" is `sf 110101000 0` in
-        bits 31..21, i.e. `(w >> 21) & 0x7ff == 0x4d4` (measured: the word
-        `arm64_codegen.py::_emit_csel_ternary` writes for `1 if n > 3 else 0` is
-        `0x9a801020`). `CSET` is the same instruction with Rn = Rm = XZR, which
-        the step table HAS at index 30, so it never reaches here.
       * **`STUR` / `LDUR`** — the unscaled forms, `(w & 0xffc00000)` equal to
         `0xf8000000` or `0xf8400000`: the 9-bit displacement a scaled
         12-bit-offset access cannot express, which in practice means a NEGATIVE
@@ -7494,15 +7545,15 @@ def _unmodelled_instruction(word: int):
         `0x8b0103e0`, `sub x0, xzr, x1` = `0xcb0103e0`) run as `0 + 1` and
         `0 - 1`.
       * anything else: `None`, and the caller says so rather than guessing.
+
+    `CSEL` used to be the first of these — and is not any more: the branchless
+    select is `arm64_step`'s last arm (`_STEP_CONDS`'s row 69 with
+    `work_step_csel`), so a CSEL word is claimed by `_step_branch_index` and
+    never reaches here.  What refuses a CSEL-carrying entry after the row
+    landed is the certificate's size rather than the select, and that refusal
+    is the branch-count gate in `generate_arm64_proof`, which names
+    `bugs/formal/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md`.
     """
-    if ((word >> 21) & 0x7ff) == 0x4d4:
-        return ("CSEL",
-                "the branchless select the code emitter uses for `a if c else "
-                "b`, and for a flag-preserving `and`/`or`. The semantic model "
-                "states the conditional expression (`_ternary_go`), so what is "
-                "missing here is the machine half, and the measurement is "
-                "`bugs/formal/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_"
-                "cannot_claim_it.md`.")
     if (((word >> 21) & 0x7) == 0x1 and ((word >> 24) & 0x1f) == 0x0b):
         which = ("SUBS/CMP extended" if (word >> 29) & 1 else
                  "SUB extended" if (word >> 30) & 1 else "ADD extended")
@@ -7554,7 +7605,11 @@ def _cfg_decomposition_refusal(name: str, code: bytes, base: int,
     table's gaps are not all the ternary's: an unscaled spill is the other one
     this emitter reaches, and it has nothing to do with a conditional
     expression. So each word is named off its own encoding
-    (`_unmodelled_instruction`) and only the CSEL case mentions `_ternary_go`.
+    (`_unmodelled_instruction`) and no case re-derives the source construct.
+    (The CSEL case that used to mention `_ternary_go` is gone with the row:
+    the select is modelled now, so a CSEL word never reaches here, and the
+    ternary's refusal lives in the branch-count gate of `generate_arm64_proof`
+    rather than in a word the step table claims.)
 
     The search is over the range the walk itself uses — the entry to the last
     `RET` — because that is the range whose words the certificates are built
@@ -11990,6 +12045,54 @@ def generate_arm64_proof(prog, code, info) -> str:
         fn = prog.functions[0]
         func_name = fn.name
     param = fn.params[0][0] if fn.params else "n"
+    # **The CSEL discharge is gated on the entry's conditional-branch count,
+    # and the gate is a refusal rather than a bigger bound.**  The entry's
+    # CSEL — the branchless select `a if c else b` lowers to — is what the
+    # step table's row 69 claims, and its certificate's per-path value-flow
+    # facts grow with the entry's conditional-branch count: the measured
+    # boundary is inside this class, one conditional expression checks,
+    # three check at 560 s / 5.6 GB under the 12 GB slot, and four are
+    # killed at the 1500 s CPU bound with "NOT a verdict on the proof".
+    # The select itself is modelled — `arm64_step`'s last arm and
+    # `work_step_csel` — so the cost is the certificate's size, not the
+    # instruction, and emitting a file whose only outcome is that kill buys
+    # nothing: a named refusal is what the class owes the reader, and the
+    # tracked leaf it names owns the four-branch boundary and the per-path
+    # hoist that closes it.
+    #
+    # The CSEL is asked of the entry's OWN walked range — the same
+    # `_walk_range` cut the walk decomposes — so a CSEL another function
+    # carries cannot wall THIS entry's certificate, and the branch count is
+    # the entry's body: the measured class is loop-free (a looped entry's
+    # walk is the loop-contract shape this doc did not measure), and the
+    # count is the source-level conditions, branch or not — a value-position
+    # ternary is branchless on the machine yet still doubles the paths the
+    # per-condition facts are stated over.
+    _gate_entry = info["labels"].get(func_name, base_addr)
+    _gate_words = {base_addr + i: int.from_bytes(code[i:i + 4], "little")
+                   for i in range(0, len(code) - len(code) % 4, 4)}
+    _gate_end = _walk_range(_gate_words, _gate_entry)
+    _entry_csel = any(_step_branch_index(w) == 69
+                      for pc, w in _gate_words.items()
+                      if _gate_entry <= pc < _gate_end)
+    _entry_branches = _cond_branch_count(fn.body) if fn is not None else 0
+    if _entry_csel and not _has_while(fn.body) and _entry_branches >= 4:
+        raise NotImplementedError(
+            "universal theorem: this entry carries a CSEL — the branchless "
+            "select `a if c else b` lowers to — and its body has "
+            f"{_entry_branches} conditional branches, which is at the "
+            "measured four-branch boundary where the certificate's per-path "
+            "value-flow facts stop checking: one conditional expression in "
+            "this class checks, three check at 560 s / 5.6 GB under the 12 "
+            "GB slot, and four are killed at the 1500 s CPU bound with "
+            "\"NOT a verdict on the proof\".  The select itself is modelled "
+            "— `arm64_step`'s last arm and `work_step_csel` — so the cost "
+            "is the certificate's size, not the instruction, and emitting a "
+            "file whose only outcome is that kill buys nothing.  The "
+            "tracked leaf for this shape is "
+            "`bugs/formal/FORMAL_a_three_branch_certificate_exceeds_the_lean_"
+            "bound.md`: it owns the four-branch boundary and the per-path "
+            "hoist that closes it.")
     # The INDEPENDENT specification this program asks to be checked against, or
     # None.  Read here rather than at the end of the function because it decides
     # the HEADER (the generated file imports `lib/Specs.lean` only when something

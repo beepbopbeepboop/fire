@@ -1,6 +1,6 @@
 # FORMAL_arm64_concrete_eval_eq_mojo_instances_are_emitted_when_the_ast_bridge_is_omitted: the fourth call site of `_ast_model_cannot_state` never consults the predicate, so five theorems reference an `ast` the file never wrote
 
-**Status, 2026-11-01: discovered in the CSEL round (whose doc, `FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`, carries the pointer in its Status entry). A separate defect — the CSEL diff does not touch this path (§3, last paragraph) — and this doc is its round. The fix is one line, and everything in §3 was measured to prove it.**
+**Status, 2026-11-01: discovered in the CSEL round (whose doc, `FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`, deleted, carried the pointer in its Status entry). A separate defect — the CSEL diff does not touch this path (§3, last paragraph) — and this doc is its round. The fix is one line, and everything in §3 was measured to prove it.**
 
 The arm64 e2e generator emits the concrete `eval_eq_mojo_N` theorems for a body the untyped AST model cannot state, and those theorems reference an `ast` the file never declared. Every generated proof for a loop-free conditional expression fails Lean with five `Expected type must not contain free variables` errors. Because a ternary compiles to CSEL, the defect sat across the whole CSEL class's Lean check. Measured on three programs: a ternary, a three-branch, a four-branch.
 
