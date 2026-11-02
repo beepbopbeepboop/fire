@@ -137,3 +137,47 @@ A driver that calls `collect(glob._iglob(b'*.py', root, None, False, False, Fals
 a `yield` generator bus-errors (`mojo_list_get_int` on a bad pointer, lldb). `HEAD` does the
 same, so it is not from this round. It is most likely the same `char *` coercion, reached in
 the generator's list result; step 1-3 should remove it, and it must be re-checked then.
+
+## Round 4 (2026-11-01): measured the word lowering; it is not yet correct
+
+Built and ran a monomorphic probe (`fire.py build`, compiled vs CPython) with the
+word-kinded split/join lowering in place (`emit_methods.py` split/join arms route a
+word or `MojoBytes *` argument to `mojo_os_path_split_w` / `mojo_os_path_join_w`;
+`gimple_codegen.py` prototypes; `coro.py` `_static_env` / `_yield_kind` give word kinds).
+Probe: `def split_bytes(p: bytes): d, b = os.path.split(p)`, `join_bytes(a: bytes, b: bytes)`,
+`first_dir(p: bytes)` with `if not d: return b'none'`.
+
+Measured (compiled vs CPython):
+- Split parts: the lowering now reaches the word path, but the returned list's
+  elements are printed as addresses (`[4377678240, ...]`), because nothing marks the
+  list elements as bytes for `print`.
+- Join: `os.path.join(bytes, bytes)` returns a word printed as an int (its return kind
+  stays `int64_t`).
+- Truthiness: `if not d:` on an EMPTY bytes part is false (`first_dir(b'*.py')`
+  returned `b''`); `mojo_truthy_word` is not what the word-kinded `not d` reaches.
+- Unannotated bytes parameter (`glob._iglob(pathname)`): still declared `char *` by
+  usage inference, and the caller casts the bytes object `(char *)`, so the word path is
+  never reached. This is the real root cause of `glob.glob(b'*.py', root_dir=...)` == `[]`.
+
+Not committed: the lowering alone prints wrong output for bytes, so it is not a fix.
+The diff is kept at `.tmp/glob_bytes_word_lowering_wip.patch` (git-ignored; scratch).
+
+### Next step (exact, in order)
+
+1. Parameter typing: an unannotated parameter that receives a `MojoBytes *` at a call
+   site (`_gmi_literal_ctype` answers `MojoBytes *` for a bytes literal, in
+   `mojo/backend_gimple/module_gen.py`) must be typed `int64_t` (word), not `char *`.
+   The body inference is `mojo/middle/infra_infer.py` `_infer_param_types`; the
+   call-site contract is `module_gen.py` (~line 4803, `_xg_record_scalar_args`).
+   Verify with the probe's unannotated `split_bytes(p)`.
+2. Element kind of word-split results: `print` / `_mojo_repr_list` must render a
+   bytes element as `b'...'` (the list elem kind must be bytes, not int).
+3. Return kind of word join: the function's return ctype must be a bytes/word value
+   that prints as bytes (`MojoBytes *`), not `int64_t`.
+4. Truthiness of an empty bytes word in `if not d` (the `'w'` path in emit_stmts /
+   `mojo_truthy_word`): an empty bytes must be false.
+5. Quick test: extend `test_glob_bytes_regress.py` with the probe lines above (the
+   CPython outputs are `[b'a', b'b.py']`, `[b'', b'*.py']`, `[b'/tmp/x']`, `b'none' b'x'`),
+   and keep `test_glob_compiled.py` line 8 as the end-to-end pin.
+6. When line 8 is green, delete this doc in that commit and run
+   `python3 tools/dangling_doc_refs.py --ratchet`.
