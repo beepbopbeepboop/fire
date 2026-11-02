@@ -8714,7 +8714,12 @@ main()
         The shape here is one whose BODY only prints the parameter. A body that
         ITERATES it (`for x in xs`) keeps a usage-derived `MojoList *` from
         `_infer_param_types`, which no call-site contract overrides, so it still
-        segfaults. That is bugs/CODEGEN_mixed_list_and_str_call_sites_iterated_param.md.
+        segfaults. That bug is fixed by the per-kind clone pass in commit
+        `51f9c69d6` (codegen: clone an iterated parameter per literal argument
+        kind, instead of refusing), which emits one definition per literal
+        kind and renames each call site to its argument's clone; the clone
+        pass is covered by
+        `test_an_iterated_parameter_passed_a_list_and_a_str_compiles_per_kind`.
         """
         global _PASS, _FAIL
         name = "a_str_call_beside_a_list_call_does_not_make_the_parameter_a_list"
@@ -8741,6 +8746,96 @@ show("abc")
                       f"CPython {want!r}")
                 _FAIL += 1
                 return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_an_iterated_parameter_passed_a_list_and_a_str_compiles_per_kind():
+        """A parameter the body ITERATES, passed a LIST at one call site and a
+        STR at another, must compile to one definition per argument kind, not
+        one `void each(MojoList *)` that reads the str as a list header.
+
+        `each([4, 5])` beside `each("de")` was SIGSEGV (exit -11) after the
+        list's output. `_gmi_specialize_literal_kind_clones` clones the
+        function per literal kind (`each_as_list`, `each_as_str`) and renames
+        each call site to its argument's clone, so every clone's parameter
+        takes the ordinary call-site evidence of one kind. The print-only
+        mix keeps its `int64_t` box and gets no clones (see
+        test_a_str_call_beside_a_list_call_does_not_make_the_parameter_a_list).
+        """
+        global _PASS, _FAIL
+        name = "an_iterated_parameter_passed_a_list_and_a_str_compiles_per_kind"
+        src = '''\
+def each(xs):
+    for x in xs:
+        print(x)
+each([4, 5])
+each("de")
+'''
+        want = _cpython_stdout(src)
+        if want is None:
+            print(f"FAIL  {name}: CPython does not run the fixture")
+            _FAIL += 1
+            return
+        for mode in ('single-TU', 'link-mode'):
+            kwargs = ({'do_imports': True} if mode == 'single-TU'
+                      else {'link_mode': True})
+            c_src = gimple_codegen._run_pipeline(src, filename='case.py', **kwargs)[0]
+            if ('void each_as_list_' not in c_src
+                    or 'void each_as_str_' not in c_src
+                    or 'void each (' in c_src):
+                print(f"FAIL  {name} [{mode}]: no per-kind definitions in C")
+                _FAIL += 1
+                return
+            got = _compiled_stdout(src, mode)
+            if isinstance(got, tuple):
+                print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                      f"{got[1][:800]}")
+                _FAIL += 1
+                return
+            if got != want:
+                print(f"FAIL  {name} [{mode}]: compiled stdout {got!r} != "
+                      f"CPython {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_a_mixed_iterated_parameter_with_a_str_variable_still_refuses():
+        """The per-kind clone pass takes only LITERAL arguments. A str passed
+        to an iterated parameter through a variable, beside a list literal,
+        is still the mixed case the clone pass does not cover, and must keep
+        the compile-time refusal rather than a binary that reads the str as a
+        list. The caller here is a function, where the binding is seen.
+        """
+        global _PASS, _FAIL
+        name = "a_mixed_iterated_parameter_with_a_str_variable_still_refuses"
+        src = '''\
+def each(xs):
+    for x in xs:
+        print(x)
+def main():
+    ys = "de"
+    each([4, 5])
+    each(ys)
+main()
+'''
+        for mode in ('single-TU', 'link-mode'):
+            kwargs = ({'do_imports': True} if mode == 'single-TU'
+                      else {'link_mode': True})
+            try:
+                gimple_codegen._run_pipeline(src, filename='case.py', **kwargs)
+            except RuntimeError as e:
+                msg = str(e)
+                if "'xs'" in msg and "'each'" in msg:
+                    continue
+                print(f"FAIL  {name} [{mode}]: refused, but not for the "
+                      f"mixed parameter: {msg[:300]}")
+                _FAIL += 1
+                return
+            print(f"FAIL  {name} [{mode}]: compiled, so the binary would read "
+                  "the str as a list (SIGSEGV)")
+            _FAIL += 1
+            return
         print(f"PASS  {name}")
         _PASS += 1
 
@@ -13522,6 +13617,8 @@ print(run('x/y.txt'))
     _run_isolated(lambda: test_tuple_unpack_of_a_boxed_dict_inside_a_method_builds(), 'test_tuple_unpack_of_a_boxed_dict_inside_a_method_builds (line 12720b)')
     _run_isolated(lambda: test_a_string_passthrough_beside_an_int_one_keeps_its_own_elements(), 'test_a_string_passthrough_beside_an_int_one_keeps_its_own_elements')
     _run_isolated(lambda: test_a_str_call_beside_a_list_call_does_not_make_the_parameter_a_list(), 'test_a_str_call_beside_a_list_call_does_not_make_the_parameter_a_list')
+    _run_isolated(lambda: test_an_iterated_parameter_passed_a_list_and_a_str_compiles_per_kind(), 'test_an_iterated_parameter_passed_a_list_and_a_str_compiles_per_kind')
+    _run_isolated(lambda: test_a_mixed_iterated_parameter_with_a_str_variable_still_refuses(), 'test_a_mixed_iterated_parameter_with_a_str_variable_still_refuses')
     _run_isolated(lambda: test_a_returned_heterogeneous_list_keeps_its_slot_kinds(), 'test_a_returned_heterogeneous_list_keeps_its_slot_kinds (line 12721)')
     _run_isolated(lambda: test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not(), 'test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not (line 12722)')
     _run_isolated(lambda: test_the_generic_repr_cluster_is_emitted_only_where_it_is_reachable(), 'test_the_generic_repr_cluster_is_emitted_only_where_it_is_reachable (line 12723)')
