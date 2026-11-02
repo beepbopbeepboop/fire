@@ -8,6 +8,7 @@ import os, sys, subprocess, concurrent.futures
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from module_loader import STDLIB_PATH as STDLIB  # single source of truth
+from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S
 MOJO = os.path.join(HERE, "fire.py")
 MAX_WORKERS = int(os.environ.get("TEST_STDLIB_MAX_WORKERS", "20"))
 
@@ -24,10 +25,13 @@ def find_files():
 
 
 def run_one(mode, fpath):
+    # `--jit` compiles AND runs, so it takes the compile budget (the larger);
+    # the interpreter run is a plain run.
     cmd = [sys.executable, MOJO, "run" if mode == "interp" else "--jit", fpath]
+    budget = RUN_TIMEOUT_S if mode == "interp" else COMPILE_TIMEOUT_S
     try:
         r = subprocess.run(cmd, capture_output=True, text=True,
-                           timeout=120, cwd=HERE)
+                           timeout=budget, cwd=HERE)
         out = (r.stdout or "") + (r.stderr or "")
         if r.returncode == 0:
             return True, ""

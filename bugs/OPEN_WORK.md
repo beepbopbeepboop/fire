@@ -76,7 +76,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md` | **unclaimed** | the cost is the per-PATH value-flow facts, and everything the earlier rounds blamed for it checks in 23 seconds |
 | `FORMAL_absval_proof_does_not_check.md` | **unclaimed** | `formal/examples/absval.mojo`'s arm64 proof no longer checks — a frame-slot peel's address does not match the goal |
 | `FORMAL_admitted_contract_is_one_word_wide.md` | **unclaimed** | An admitted host contract is one WORD wide, because `MojoExpr.call` is |
-| `FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md` | **unclaimed** | FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it |
+| `FORMAL_arm64_concrete_eval_eq_mojo_instances_are_emitted_when_the_ast_bridge_is_omitted.md` | **unclaimed** | the fourth call site of `_ast_model_cannot_state` never consults the predicate, so five theorems reference an `ast` the file never wrote |
 | `FORMAL_arm64_known_proof_gaps.md` | **unclaimed** | the arm64 examples whose proof is a documented gap |
 | `FORMAL_arm64_the_frame_method_finder_scans_the_guard_prologue_and_finds_no_method.md` | **unclaimed** | the arm64 frame-method finder scans the stack-floor GUARD prologue, so it finds no method and the by-reference receiver proof path is dead |
 | `FORMAL_arm64_the_shifted_register_arm_ignores_its_shift.md` | **unclaimed** | The shifted-REGISTER arms read `Rn` and `Rm` and drop the shift, so `add xD, xN, xM, lsl #3` models as `xN + xM` |

@@ -44,6 +44,7 @@ import sys
 import tempfile
 
 REPO = os.path.dirname(os.path.abspath(__file__))
+from exec_budget import RUN_TIMEOUT_S
 sys.path.insert(0, REPO)
 
 
@@ -68,7 +69,7 @@ def _build_and_run(pkg_files: dict, entry: str, td: str) -> tuple[int | None, st
         rc = driver.compile_program(entry_path, entry_src, output=out, run=False)
         if rc != 0 or not os.path.exists(out):
             return rc, ''
-        result = subprocess.run([out], capture_output=True, text=True, timeout=30)
+        result = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
         return result.returncode, result.stdout
     finally:
         os.chdir(cwd)
@@ -99,7 +100,7 @@ def _cpython_run(td: str, entry: str, as_module: bool = False) -> tuple[int, str
     argv = ([sys.executable, '-m', entry[:-3].replace('/', '.')]
             if as_module else [sys.executable, os.path.join(td, entry)])
     result = subprocess.run(argv,
-                            capture_output=True, text=True, timeout=60,
+                            capture_output=True, text=True, timeout=RUN_TIMEOUT_S,
                             cwd=td, env=env)
     return result.returncode, result.stdout
 
@@ -461,6 +462,79 @@ def test_generator_str_param_concat_cross_module_local_var_arg() -> bool:
         '    s = "r"\n'
         '    print(list(lib.walk(s)))\n'
         'main()\n',
+    )
+
+
+def _same_module_case(name: str, src: str, expected: str) -> bool:
+    """Build a one-module program and require CPython's output for it. Shared
+    by the same-module identifier-argument spellings below."""
+    root = os.path.join(REPO, 'build', 'test_link_mode')
+    os.makedirs(root, exist_ok=True)
+    td = tempfile.mkdtemp(prefix=f'{name}_', dir=root)
+    try:
+        rc, stdout = _build_and_run({'m.py': src}, 'm.py', td)
+        py_rc, py_stdout = _cpython_run(td, 'm.py')
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    ok = (rc == 0 and py_rc == 0 and stdout == py_stdout
+          and stdout.strip() == expected)
+    if not ok:
+        print(f"  ✗ {name}: "
+              f"rc={rc} stdout={stdout!r} (CPython rc={py_rc} {py_stdout!r})")
+    return ok
+
+
+def test_ordinary_def_str_var_arg_is_string_concatenation() -> bool:
+    """`def f(root): return root + str(0)` called as `f(s)` with `s = "r"` in the
+    same module. The call-site evidence read only literal arguments, so the
+    identifier recorded no ctype and `root` stayed a pointer-sized int: the
+    result printed as the pointer's decimal (`43104041840`, exit 0). The
+    argument's one binder is a literal, so the callee follows it as it does for
+    `f("r")`."""
+    return _same_module_case(
+        'ordinary_def_str_var_arg',
+        'def f(root):\n'
+        '    return root + str(0)\n'
+        's = "r"\n'
+        'print(f(s))\n',
+        'r0',
+    )
+
+
+def test_generator_str_var_arg_at_module_scope() -> bool:
+    """`walk(s)` at MODULE scope with `s = "r"`. The generator's call-site
+    evidence comes from coro's caller env, which was `None` for every call
+    outside a function, so the identifier was a hole and the build refused with
+    `whose call sites do not all pass the same statically-known type`. The same
+    call inside a function already worked."""
+    return _same_module_case(
+        'gen_str_var_module_scope',
+        'def walk(root):\n'
+        '    for k in range(3):\n'
+        '        yield root + str(k)\n'
+        's = "r"\n'
+        'print(list(walk(s)))\n',
+        "['r0', 'r1', 'r2']",
+    )
+
+
+def test_str_var_arg_not_shadowed_by_nested_def_literal() -> bool:
+    """The enclosing function's `s` is the MODULE `s = 1`; a NESTED def binds
+    its own `s = "r"`. The enclosing scope census must not count the nested
+    binding, or `f(s)` would take the nested string as its argument's type and
+    `str(root)` would stringify a pointer. CPython prints `1x`."""
+    return _same_module_case(
+        'str_var_nested_def_shadow',
+        'def f(root):\n'
+        '    return str(root) + "x"\n'
+        's = 1\n'
+        'def g():\n'
+        '    def inner():\n'
+        '        s = "r"\n'
+        '        return s\n'
+        '    print(f(s))\n'
+        'g()\n',
+        '1x',
     )
 
 
@@ -1705,7 +1779,7 @@ def test_failed_import_attempt_does_not_poison_later_spelling() -> bool:
     `parser__regexes__ind_0f1876` — implicit declaration plus seven
     dangling toplevels in the generated C (the fixed tree unifies all 35
     `_ind` references on 0f1876; see build/remes/r16fix3.log and
-    bugs/COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__.md).
+    bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__.md).
 
     The fix (mojo/backend_gimple/emit_resolve.py, `_compile_imported_module`
     except handler) snapshots the attempt's guard entries, its
@@ -2186,7 +2260,7 @@ def test_nested_def_is_not_a_module_level_fn_export() -> bool:
         rc_ns, stdout_ns = _build_and_run(pkg_ns, 'main_ns.py', td)
         result = subprocess.run([os.path.join(td, 'prog')],
                                 capture_output=True, text=True,
-                                timeout=60, cwd=td)
+                                timeout=RUN_TIMEOUT_S, cwd=td)
         err_ns = result.stderr
     refusal_ok = (rc_ns == 1 and stdout_ns.strip() == ''
                   and err_ns.startswith(
@@ -2441,6 +2515,9 @@ CASES = [
     test_module_attr_call_result_is_typed_by_the_callee_return,
     test_generator_str_param_concat_cross_module_variable_arg,
     test_generator_str_param_concat_cross_module_local_var_arg,
+    test_ordinary_def_str_var_arg_is_string_concatenation,
+    test_generator_str_var_arg_at_module_scope,
+    test_str_var_arg_not_shadowed_by_nested_def_literal,
     test_module_scoped_cross_module_struct_ctor_both_import_spellings,
     test_module_scoped_cross_module_ctor_arg_through_a_param,
     test_dotted_sibling_import_qualifier_agrees,

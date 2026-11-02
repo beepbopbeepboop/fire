@@ -1837,7 +1837,7 @@ test('runtimediff', [PY, 'test_runtime_diff.py'], mem='tiny', cache=True,
 # is then wrong in the same direction and every engine-vs-engine diff in the
 # tree stays clean. That is how `@classmethod`'s `cls` binding the first real
 # ARGUMENT, and `@deco` being parsed and then never applied at all, stayed
-# invisible (`bugs/UNTESTED.md` 3.2 -- and what `interporacle` was written for).
+# invisible (`bug:UNTESTED` 3.2 -- and what `interporacle` was written for).
 #
 # It ran by NOTHING until 2026-10-02: it loaded `mojo/ast_nodes.mojo`,
 # `mojo/tokenizer.mojo` and `mojo/parser.mojo`, none of which exists, and
@@ -2072,12 +2072,12 @@ test('examples-parse', [PY, 'test_examples_parse.py'], cache=True, mem='tiny',
      # so the 46th example is covered the day it is added and a rename moves
      # the key. Measured by [5]: this key read 48 repo files and 0 under
      # formal/examples/, so a SyntaxError in any of the 45 could not invalidate
-     # it and a recorded PASS replayed. See bugs/UNTESTED.md 3.1.
+     # it and a recorded PASS replayed. See bug:UNTESTED 3.1.
      extra=['test_examples_parse.py', 'formal/examples'],
      desc='every formal/examples/*.mojo parses; decorator arg shapes distinct')
 
 
-# ── the test estate, inventoried by [5] in bugs/UNTESTED.md ────────────────
+# ── the test estate, inventoried by [5] in bug:UNTESTED ────────────────
 #
 # 50 test files were named by no registered spec, and 21 of those exited
 # non-zero. Measured per file here rather than read out of a bug doc, because
@@ -2199,7 +2199,8 @@ test('coro-future-await', [PY, 'test_coro_future_await.py'], mem='tiny',
           'async struct-method calls (receiver + args)')
 test('async-void-return', [PY, 'test_async_void_return.py'], mem='tiny',
      deps=['preflight'],
-     desc='an async function with no return value')
+desc='void-returning async functions and the device_context-shaped '
+          'repro, on both coroutine backends')
 test('taskgroup', [PY, 'test_taskgroup.py'], mem='tiny',
      deps=['preflight'],
      desc='TaskGroup')
@@ -2326,7 +2327,7 @@ test('coro-nested-capture', [PY, 'test_coro_nested_async_capture.py'], cache=Tru
 # `native-dumpfull` was marked with this same reason until its bootstrap chain
 # went green (2026-10-25); its registration below says why it is not marked
 # any more. This constant is
-# also the whole of §4's subject matter: bugs/CODEGEN_ab_native_fails.md tables
+# also the whole of §4's subject matter: bugs/mid/CODEGEN_ab_native_fails.md tables
 # every `expect=` job in the registry with its measured peak, its class and its
 # reservation, and a recommendation each.
 # `small` (8 GB), not `stage` (96): `fire.py build fire.py` is the
@@ -2354,7 +2355,7 @@ test('mojoc', ['mojoc'], driver='make', mem='small', excl=True,
      artifact='mojoc', inputs=[MOJO_MAIN] + PY_FILES + [RUNTIME_SRC, RUNTIME_HDR],
      desc='build the one managed native compiler (-O2 -g0)')
 # ab-native's expect= reason. Named for the 15-30 GB self-host pre-pass
-# blowup it used to describe; the blowup is closed (bugs/CODEGEN_ab_native_fails.md,
+# blowup it used to describe; the blowup is closed (bugs/mid/CODEGEN_ab_native_fails.md,
 # 2026-10-26: 0.1 GB / ~10s), so the text now states the current 1-of-30
 # divergence. `2f75609d` turned the job back from disabled= to expect=
 # referencing the constant `58192261` had removed, so every import of this
@@ -2363,7 +2364,7 @@ test('mojoc', ['mojoc'], driver='make', mem='small', excl=True,
 # re-counts the run's "Results: N passed, M failed" line against it, so a
 # second divergence cannot be absorbed silently by the marker.
 SELFHOST_TOKENIZE_BLOWUP = (
-    'bugs/CODEGEN_ab_native_fails.md — 1 failing: match_stmt diverges '
+    'bugs/mid/CODEGEN_ab_native_fails.md — 1 failing: match_stmt diverges '
     '(29/30 byte-identical; the blowup this constant was named for is '
     'closed, the run is now 0.1 GB / ~10s)')
 # `program` (55 GB), UP from `module` (24) — the one job the ratchet moves up,
@@ -2393,7 +2394,7 @@ SELFHOST_TOKENIZE_BLOWUP = (
 # for it, which is the mechanism, and `tools/suite.py --dry-run native` prints
 # the 0.
 #
-# The bug doc IS the switch: bugs/CODEGEN_ab_native_fails.md is what the test
+# The bug doc IS the switch: bugs/mid/CODEGEN_ab_native_fails.md is what the test
 # is waiting on, the repo's rule is that a fixed bug's doc is DELETED, and
 # `disabled_problems` refuses to load this registry the moment that doc is
 # gone — naming the job and saying to turn the test back on. So the test cannot
@@ -2403,7 +2404,7 @@ SELFHOST_TOKENIZE_BLOWUP = (
 test('ab-native', [PY, 'test_ab_native.py'], driver='mem', mem='program',
      memwhy='measured 20.5 GB when it last ran: the self-hosting bootstrap '
             'pre-pass this corpus legitimately triggers (see '
-            'bugs/CODEGEN_ab_native_fails.md), and 1.5x is 30.75 GB, so '
+            'bugs/mid/CODEGEN_ab_native_fails.md), and 1.5x is 30.75 GB, so '
             '`module` (24) was 85% of what it uses. Recorded, not charged: the '
             'job is disabled, so this class is what it will cost the day it is '
             'turned back on, and it reserves 0 meanwhile. Over the 4 GB line '
@@ -2416,7 +2417,7 @@ test('ab-native', [PY, 'test_ab_native.py'], driver='mem', mem='program',
 # reason and is the owner's call, because it is also the job whose run produces
 # the measurements the blowup work is steered by — a marker that cannot be
 # observed going green is weak, and this is the case for not weakening it.
-# §4 of bugs/CODEGEN_ab_native_fails.md tables it with its peak, class and
+# §4 of bugs/mid/CODEGEN_ab_native_fails.md tables it with its peak, class and
 # reservation and a recommendation, so the choice is a line rather than an
 # investigation.
 # `native-dumpfull` needs `mojoc` built first: it runs `./mojoc --dump-full`
@@ -4530,8 +4531,8 @@ BUCKETS = {
     # were the fixed `mojo_repr_bool` spelling `True` all along, and all 39
     # cases pass (re-measured 41 s / 0.1 GB, below).
     #
-    # The three `expect=`-marked ones stay in `coroutine` rather than `check` for
-    # the reason stated once: an `expect` in `check` puts a permanently-EXPECTED
+    # The remaining `expect=`-marked job stays in `coroutine` rather than
+    # `check` for the reason stated once: an `expect` in `check` puts a permanently-EXPECTED
     # line in the tally a developer reads to know their tree is fine (the same
     # reasoning that keeps `formal-module-attr`, `formal-external-call` and
     # `formal-receiver-position` in `proofs` only). `coroutine` is in `gate`, so
@@ -4542,7 +4543,8 @@ BUCKETS = {
     # (0.0-0.2 GB each, against the `small`/8 GB they carried while ungated):
     #   gimple-async-runner  41.4 s  0.1 GB  39 passed   (green since 2026-10-28)
     #   coro-detached-async  2.2 s  0.1 GB   2 passed   (was red: stale mojo_coro.c paths)
-    #   async-void-return    3.3 s  0.1 GB   3 failing             (expect=)
+    #   async-void-return    3.3 s  0.1 GB  11 passed   (green 2026-10-29;
+    #                                       import-time MOJO_CORO leak fixed)
     #   coro-future-await   11.6 s  0.1 GB  2 failing              (expect=)
     #   async-with-lock-guard 2.7 s 0.1 GB   3 passed
     #   mutable-async-capture 2.7 s 0.1 GB   2 passed
@@ -5780,6 +5782,62 @@ def _line(job, res, done, total, active):
 # ── Reporting ────────────────────────────────────────────────────────────────
 # The screen gets the failures and one tally. Everything per-test — a PASS
 # line each, with argv, exit code, duration and measured peak — is in the log.
+def known_bugs(name):
+    """The bug docs that already track a failing job, so a red gate says whether it is a regression someone has
+    seen before (a doc exists) or a new one (none does). A doc matches when its file name carries every word of the
+    job's name (`gimple` -> GATE_check_gimple_selfhost_...), or when its title names the job in backticks. The
+    result is a list of bugs/ paths, possibly empty; it is a pointer for the reader, not a verdict on the failure."""
+    import re as _re
+    words = [w for w in _re.split(r'[-_]', name.lower()) if w]
+    hits = []
+    for root, _dirs, files in os.walk(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'bugs')):
+        for f in files:
+            if not f.endswith('.md') or f.startswith(('OPEN_WORK', 'README')):
+                continue
+            path = os.path.normpath(os.path.join(root, f))
+            tokens = set(_re.split(r'[-_.]', f[:-3].lower()))
+            if all(w in tokens for w in words):
+                hits.append(path)
+                continue
+            try:
+                title = open(path, encoding='utf-8', errors='replace').readline()
+            except OSError:
+                continue
+            if title.startswith('#') and f'`{name}`' in title:    # the title names the job, not a passing mention
+                hits.append(path)
+    rel = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+    return sorted(os.path.relpath(h, rel) for h in hits)
+
+
+def _hms(secs):
+    """Seconds as H:MM:SS (or M:SS under an hour), for the time line a reader compares run to run."""
+    secs = int(round(secs))
+    h, rem = divmod(secs, 3600)
+    m, sec = divmod(rem, 60)
+    return f'{h}:{m:02d}:{sec:02d}' if h else f'{m}:{sec:02d}'
+
+
+def _record_timing(wall, work, results, opts):
+    """Append this run's timing to build/suite-timings.jsonl: one line per run, with the revision and every job's
+    own time, so a slowdown can be traced to the job and the commit that caused it."""
+    import json as _json, subprocess as _sp, time as _time
+    try:
+        head = _sp.run(['git', 'rev-parse', '--short', 'HEAD'], capture_output=True, text=True, cwd=HERE).stdout.strip()
+    except OSError:
+        head = ''
+    rec = {'when': _time.strftime('%Y-%m-%dT%H:%M:%S'), 'head': head,
+           'wall_s': round(wall, 1), 'work_s': round(work, 1),
+           'jobs': {k: round(r.secs, 1) for k, r in sorted(results.items())},
+           'cached': sum(1 for r in results.values() if r.cached)}
+    path = os.path.join(HERE, '..', 'build', 'suite-timings.jsonl')
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'a') as f:
+            f.write(_json.dumps(rec) + '\n')
+    except OSError as e:
+        print(f'  (could not record timing: {e})')
+
+
 def report(names, state, results, wall, peak, opts, log: Log):
     # Group the run's tests into the tally's counters, one lookup per test, so
     # a test cannot end up in a bucket nobody reads.
@@ -5941,6 +5999,23 @@ def report(names, state, results, wall, peak, opts, log: Log):
                       + (f'  [{_TAG.get(status, "?")}]'
                          if status != row.statuses[0] else '')
                       + (f'  — {why}' if why else ''))
+                if row.count == 'failed':
+                    # Is this a regression someone has already filed? A gate reads this line to tell a repeat
+                    # from a new break: the bug doc that tracks the job, or NEW when no doc does.
+                    docs = known_bugs(name)
+                    print('      ' + (('previously seen: ' + ', '.join(docs)) if docs
+                                      else 'NEW: no bug doc tracks this job'))
+    # How long the gate took, and where the time went. The wall clock is what a person waits for; the sum of the jobs'
+    # own times is the work done (it exceeds the wall when jobs ran in parallel, and the gap is the parallelism). The
+    # slowest jobs are the first place to look when a gate gets slower. Each run is also appended to
+    # build/suite-timings.jsonl, so "how long does the gate take" has an answer over time, not just for this run.
+    work = sum(r.secs for r in results.values())
+    slow = sorted(((r.secs, k) for k, r in results.items() if not r.cached), reverse=True)[:8]
+    print(f'time: wall {_hms(wall)} | work {_hms(work)} across {len(results)} job(s) '
+          f'({sum(1 for r in results.values() if r.cached)} replayed from cache)')
+    for secs, key in slow:
+        print(f'  slowest  {_hms(secs):>9}  {key}')
+    _record_timing(wall, work, results, opts)
     print(tally + (f'   log: {log.path}' if log.path else ''))
     # Non-zero for any member of a counter that `fails`, and for a summary that
     # could not account for every test: a run that cannot count itself has not

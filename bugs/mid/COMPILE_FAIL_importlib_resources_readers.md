@@ -9,7 +9,7 @@ PASSES (both single-TU and link-mode). Two other tests fail and are owned
 elsewhere: `ctor_of_a_container_reaches_the_comprehension`
 (`list(ident("abc"))` printing nothing on the compiled path, fixed in the passthrough call-result lowering) and
 `test_print_of_a_function_value_is_not_a_decimal_address` (decorator
-application, `bugs/COMPILE_FAIL_decorator_application_dropped.md`).
+application, `bugs/mid/COMPILE_FAIL_decorator_application_dropped.md`).
 
 Still open, unchanged: the readers.py build's exit code has not been measured
 (the whole-closure build is a heavy integrator job, not run here). The doc

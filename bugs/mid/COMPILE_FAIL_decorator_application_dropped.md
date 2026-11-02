@@ -22,7 +22,7 @@
   2 failed. Both failures also occur on HEAD: the walk-memo census on
   `mojo/middle/coro.py` (commit fd64d710e)
   and `scalar_arity_min_max_params_are_not_containers` (filed as
-  `bugs/TEST_scalar_arity_min_max_link_mode_prints_nothing.md`).
+  `bugs/mid/TEST_scalar_arity_min_max_link_mode_prints_nothing.md`).
 
 **Still OPEN:**
 
@@ -352,9 +352,10 @@ value still has no repr and prints its address decimal where CPython prints
 still true for the closure spelling. That is filed, with its own next step, as
 the now-fixed closure-value repr bug (deleted with its fix). The wider gap the
 same measurement turned up — a module-scope global bound to a
-container-returning CALL is declared `int64_t` and does not compile — is
-`bugs/CODEGEN_a_module_scope_global_bound_to_a_container_returning_call_is_a_box.md`,
-and the two are separate: one is a repr, the other is a declaration.
+container-returning CALL was declared `int64_t` and did not compile — was
+fixed upstream (pinned by `test_gimple_runner.py`'s
+`gimple_module_scope_global_bound_to_container_returning_call`), and the two
+were separate: one is a repr, the other is a declaration.
 
 ## Status (2026-10-02 — re-measured: the compiled half is STILL wrong, and the two candidate fixes are now MEASURED, one of them ruled out)
 
