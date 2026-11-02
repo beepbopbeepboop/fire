@@ -9470,7 +9470,7 @@ class TestDecWhileSignedModelRegression(unittest.TestCase):
 
     With a signed `int`, `while n > 0` on `n = -3` exits immediately and
     returns `-3` unchanged. The old model returned 0 unconditionally.
-    Regression pinned by bugs/CODEGEN_arm64_cmp_flags_and_loop_signedness.md.
+    Regression for signed dec-while loop model (fixed).
     """
 
     SOURCE = "def countdown(n):\n    while n > 0:\n        n = n - 1\n    return n\n"
