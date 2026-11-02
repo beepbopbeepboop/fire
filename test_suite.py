@@ -2133,17 +2133,6 @@ STALE_PER_CHILD_BUDGETS = {
     'formal/x86_64_endtoend_test.py': 1,
     'formal/x86_64_model_test.py': 1,
     'scripts/bootstrap_full_test.py': 1,
-    'test_ab_native.py': 2,
-    'test_arm64_emission.py': 1,
-    'test_async_runtime_scaffold.py': 1,
-            'test_closure_capture_comptime_func_params.py': 2,
-    'test_comptime_bracket_params.py': 1,
-    'test_container_constructor_arg_um.py': 1,  # +1 2026-10-27: the pinning
-        # file's own `fire.py run` of the .mojo it writes (3e4501a42, the
-        # container-constructor pin) — a per-child wall on a run of a program
-        # the case wrote itself, which is what a residue row is for; the file
-        # does not import exec_budget, so it is residue, not subject.
-    'test_coro_scoreboard.py': 2,
     # `test_formal_admitted.py`'s row (5, 2026-10-26's c20bdf09e "5 remain as
     # data-table examples") is dropped 2026-10-27: the conversion landed, and
     # the walk now finds 0 real literals — the "data-table examples" are
@@ -2180,19 +2169,14 @@ STALE_PER_CHILD_BUDGETS = {
                                        # hostmod-dylib row's build of the reduced
                                        # program, the same 600 s wall the file's
                                        # other three build sites carry
-    'test_general_mutable_closure_capture.py': 2,
     'test_import_integration.py': 4,
     'test_link_mode.py': 3,  # +1 2026-10-24: the non-shadow stderr probe in
                             # test_nested_def_is_not_a_module_level_fn_export re-runs the built binary to read its refusal message off stderr
     'test_metal_codegen.py': 9,
-    'test_mixed_cpp_link.py': 1,
     'test_ptr_registry.py': 2,
-    'test_python_source_mut_capture.py': 1,
     'test_runtime_dylib.py': 1,
     'test_selfhost_memory.py': 1,
     'test_stdlib.py': 1,
-        'test_x86_64_containers.py': 1,
-    'test_x86_64_decode.py': 1,
 }
 
 #: Files where a per-child literal is the SUBJECT rather than residue, with the

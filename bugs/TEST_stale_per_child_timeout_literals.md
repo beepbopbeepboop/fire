@@ -2,6 +2,20 @@
 
 ## Status
 
+**`bug-test-stale-per-child-timeout-literal-9510` (2026-11-01): twelve more files converted, 19 sites; residue now 61 literals in 26 files.**
+Classified by argv as in the entries below. `RUN_TIMEOUT_S`: `test_general_mutable_closure_capture.py` (2),
+`test_closure_capture_comptime_func_params.py` (1 of 2; its `gcc -fgimple -fsyntax-only` is `COMPILE_TIMEOUT_S`),
+`test_comptime_bracket_params.py`, `test_arm64_emission.py` (120 -> 120 via the constant),
+`test_async_runtime_scaffold.py` (10 -> 120), `test_python_source_mut_capture.py`, `test_mixed_cpp_link.py` (10 -> 120),
+`test_coro_scoreboard.py` (its executable run, 90 -> 120), `test_container_constructor_arg_um.py` (30 -> 120),
+`test_x86_64_containers.py` (a CPython child of a generated case, 60 -> 120). `COMPILE_TIMEOUT_S`: `test_coro_scoreboard.py`'s
+`fire.py build` (600, unchanged), `test_x86_64_decode.py`'s `fire.py build --formal` (600, unchanged), `test_ab_native.py`'s two
+`--dump` children (60 and 120 -> 600). Widened from the old literal where the old value was below the constant; no site was narrowed.
+Each converted file gained `from exec_budget import …`, and its census row is gone from `STALE_PER_CHILD_BUDGETS`.
+Verified: the census test `test_no_stale_per_child_budget_is_left_as_a_literal` PASS (61 files on the shared constants, 0 stale
+literals, census equals walk); `test_container_constructor_arg_um.py` PINNING PASS. The other eleven edited files were only
+compile-checked (`py_compile`), not run.
+
 **`bug-test-stale-per-child-timeout-literal-8907` (2026-11-01): seven more files converted, 24 sites; residue now 77 literals in 38 files.**
 Each site was classified by its argv: `gcc -fgimple` / `cc -c` / `g++ -c` →
 `COMPILE_TIMEOUT_S`; a `g++ -o exe objs` link → `LINK_TIMEOUT_S`; a produced
