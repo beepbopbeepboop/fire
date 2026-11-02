@@ -526,13 +526,17 @@ def _closure_value(gen, name: str, _ci) -> tuple:
         # deliberately disabled for it (`nested_def_env_owned`/`_no_closure_
         # escapes` both answer False), meaning the box is freed by exactly one
         # path — the owner of this value — never by the creator's exit too.
+        # The field read is a GIMPLE temp of its own (`_new_val`) and the call
+        # takes that temp: an inline `env->field` inside the call's argument
+        # text is not valid GIMPLE and gcc rejects the whole statement.
         _env_box_var = gen._closure_envs.get(name)
         if _env_box_var:
             for _bv, _bt in _ci.captures:
                 if _bv in _ci.mut_names:
-                    gen._emit(
-                        f"  mojo_bound_method_add_box ({t}, "
-                        f"(void *) {_env_box_var}->{gimple_ctypes._c_field_name(_bv)});")
+                    _box_val = gen._new_val(
+                        'void *', f"{_env_box_var}->{gimple_ctypes._c_field_name(_bv)}")
+                    gen._void_call('mojo_bound_method_add_box',
+                                   [('MojoBoundMethod *', t), ('void *', _box_val)])
         gen._bound_method_ret_types[t] = gen.func_return_types.get(lifted, 'int64_t')
         gen._func_value_names[t] = _repr_name
         return 'MojoBoundMethod *', t
