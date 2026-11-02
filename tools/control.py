@@ -778,13 +778,20 @@ def cmd_gate(a):
             sys.exit("gate off needs --reason, --doc (an existing bugs/ doc) and --worker (who works the backlog)")
         if not os.path.exists(os.path.join(MAIN, a.doc)):
             sys.exit("no such doc: %s" % a.doc)
-        cfg.setdefault("off", {})[a.pattern] = dict(reason=a.reason, doc=a.doc, worker=a.worker,
-                                                  since=time.strftime("%F %T"))
+        gate_off_in(GATES_FILE, a.pattern, a.reason, a.doc, a.worker)
     else:
         if cfg.get("off", {}).pop(a.pattern, None) is None:
             sys.exit("no OFF gate %r" % a.pattern)
-    json.dump(cfg, open(GATES_FILE, "w"), indent=2)
+        json.dump(cfg, open(GATES_FILE, "w"), indent=2)
     print("gate %s %s" % (a.action, a.pattern))
+
+
+def gate_off_in(path, pattern, reason, doc, worker):
+    """Add one OFF entry to the gates file at PATH (the single writer of tools/gates.json: `gate off` and the
+    integrator's automatic ungate both come through here)."""
+    cfg = json.load(open(path))
+    cfg.setdefault("off", {})[pattern] = dict(reason=reason, doc=doc, worker=worker, since=time.strftime("%F %T"))
+    json.dump(cfg, open(path, "w"), indent=2)
 
 
 def priority_list():
