@@ -259,8 +259,7 @@ is not knowable at compile time: it depends on the caller's override, and
 this scalar body model has no representation for a dynamically-produced
 iterator (it needs the loop-variable types, which come from the iterator's
 element type). This is the same family as the `check_all` blocker in
-`c_analyzer/__init__.py:check_all` (now has a properly named callable-valued
-local/parameter refusal; structural inference remains) and the
+`bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___init__.md` and the
 `unsupported for-loop iterable type: CallExpr` family in
 `the (since-fixed) c_common/fsutil.py compile failure` — i.e. three of
 my files now share ONE remaining blocker, which is the right grouping for a

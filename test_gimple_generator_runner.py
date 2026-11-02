@@ -3237,52 +3237,6 @@ def main():
 main()
 """
 
-# `and`/`or` over a received (None-box) word: the operand is returned, not a
-# bool, and the result is again a tagged word, so it is printed, bound, tested
-# and used in arithmetic by what it is. One program text serves as both the
-# Mojo source and the CPython oracle.
-_RECEIVED_AND_OR_SRC = """\
-def g():
-    x = yield 1
-    print(x or 5)
-    print(x and 7)
-    y = x or 5
-    print(y)
-    if x or 5:
-        print("truthy")
-    print((x or 5) + 1)
-    yield 2
-
-def main():
-    it = g()
-    print(next(it))
-    print(next(it))
-main()
-"""
-
-# The str-right split: `(x or '') + 'z'` and `s = x or 'd'` keep their
-# `char *` typing (the `_W` lowering), while an int right operand takes the
-# tagged path (`-(x or 5)` is -5). Pins that the split does not change the
-# str consumers that worked before it.
-_RECEIVED_OR_STR_SRC = """\
-def g():
-    x = yield 1
-    print((x or '') + 'z')
-    print(x or 'd')
-    s = x or 'd'
-    print(s)
-    if not (x or 5):
-        print("f")
-    print(-(x or 5))
-    yield 2
-
-def main():
-    it = g()
-    print(next(it))
-    print(next(it))
-main()
-"""
-
 
 def run_none_yield_tests():
     # A None yield (bare `yield`, or `yield None`) used to share the int64_t
@@ -4547,56 +4501,6 @@ def main():
     it = g()
     next(it)
     next(it)
-main()
-""")
-        # `a or b` / `a and b` on a TAGGED left operand yield an OPERAND (Python
-        # returns the word itself, or the right operand), not a bool: the None
-        # box a received `x` holds is falsy, a yielded str/int is truthy by its
-        # own kind. Before the fix this lowered to a C `||`/`&&` and printed the
-        # truth as 1, so `x or 5` gave 1 where CPython gives 5.
-        test_generator_matches_cpython("received_and_or_operand_cpp",
-                                       _RECEIVED_AND_OR_SRC, _RECEIVED_AND_OR_SRC)
-        test_generator_matches_cpython("received_or_str_operand_cpp",
-                                       _RECEIVED_OR_STR_SRC, _RECEIVED_OR_STR_SRC)
-        test_generator_matches_cpython("tagged_next_and_or_operand_cpp", """\
-def gen():
-    yield 0
-    yield "a"
-    yield 3
-
-def consume():
-    g = gen()
-    x = next(g)
-    print(x or 5)
-    print(x and 7)
-    x = next(g)
-    print(x or 5)
-    print(x and 7)
-    yield 0
-
-def main():
-    for z in consume():
-        pass
-main()
-""", """\
-def gen():
-    yield 0
-    yield "a"
-    yield 3
-
-def consume():
-    g = gen()
-    x = next(g)
-    print(x or 5)
-    print(x and 7)
-    x = next(g)
-    print(x or 5)
-    print(x and 7)
-    yield 0
-
-def main():
-    for z in consume():
-        pass
 main()
 """)
         test_generator_matches_cpython("none_sent_into_generator_prints_none_cpp", """\

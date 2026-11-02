@@ -2598,13 +2598,6 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
                           and gimple_exprtypes.is_python_bool_expr(gen, enode)):
         return gen._call_expr('char *', 'mojo_repr_bool',
                               [('int', gen._new_val('int', f'(int){rav}'))])
-    # A WORD whose kind only the runtime knows (a regex group, a match, a
-    # DirEntry name): its repr is spelled by the kind the runtime reads off it.
-    if rat in ('int', 'int64_t') and (
-            rav in gen._dyn_word_vals
-            or (isinstance(enode, gimple_ctypes.IdentExpr)
-                and _as_str(enode.name) in gen._dyn_word_locals)):
-        return gen._call_expr('char *', 'mojo_repr_word', [('int64_t', rav)])
     # A BOXED CONTAINER — a module-global list/dict/set read back as an
     # `int64_t`, or a call result whose static type is the box but whose real
     # value, per `_get_actual_type`, is a container. `_stringify_value` (the
@@ -3720,7 +3713,7 @@ def _compr_str_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     cond_t = gen._new_val('_Bool', f"{idx64} < {len64}")
     gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
     gen._emit_label(bb_body)
-    gen._emit(f"  {gen._cname(gen0.target)} = mojo_char_at_str_cp (mojo_str_data({_iv}), {idx64});")
+    gen._emit(f"  {gen._cname(gen0.target)} = mojo_str_char_at ({_iv}, {idx64});")
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
     gen._emit(f"  goto {bb_post};")
     gen._emit_label(bb_post)

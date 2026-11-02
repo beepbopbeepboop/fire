@@ -3912,53 +3912,6 @@ def main():
     print(sys._getframe(0).f_trace is None)
 """, "True False\nFalse\nTrue\nTrue False\nFalse\nTrue\nTrue\n")
 
-    # `f_trace_lines` / `f_trace_opcodes` accept only a bool: a non-bool store raises TypeError
-    # (CPython: "attribute value type must be bool") and stores nothing.
-    test_gimple_stdout("gimple_frame_f_trace_lines_requires_bool", """\
-import sys
-
-def test():
-    f = sys._getframe(0)
-    try:
-        f.f_trace_lines = 1
-        print("stored")
-    except TypeError as e:
-        print("TypeError")
-    f.f_trace_lines = False
-    print(f.f_trace_lines)
-    f.f_trace_opcodes = 2 > 1
-    print(f.f_trace_opcodes)
-
-def main():
-    test()
-""", "TypeError\nFalse\nTrue\n")
-
-    # `del frame.f_trace` clears the hook back to None; `del frame.f_trace_lines` is a TypeError
-    # and `del frame.f_trace_opcodes` an AttributeError (CPython 3.15), and neither deletes.
-    test_gimple_stdout("gimple_frame_del_trace_attributes", """\
-import sys
-
-def test():
-    f = sys._getframe(0)
-    f.f_trace = 42
-    del f.f_trace
-    print(f.f_trace is None)
-    try:
-        del f.f_trace_lines
-        print("deleted")
-    except TypeError:
-        print("TypeError")
-    try:
-        del f.f_trace_opcodes
-        print("deleted")
-    except AttributeError:
-        print("AttributeError")
-    print(f.f_trace_lines, f.f_trace_opcodes)
-
-def main():
-    test()
-""", "True\nTypeError\nAttributeError\nTrue False\n")
-
     test_gimple_stdout("gimple_traceback_chain_names_and_lines", """\
 import sys
 

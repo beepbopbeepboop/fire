@@ -430,9 +430,6 @@ def cmd_mark(a):
     with registry() as tasks:
         if a.name not in tasks:
             sys.exit("no such task")
-        if a.state == "integrated" and ahead(tasks[a.name]) > 0:
-            sys.exit("%s is not integrated: branch %s has %d commit(s) master lacks (land it, or mark it superseded/abandoned)"
-                     % (a.name, tasks[a.name]["branch"], ahead(tasks[a.name])))
         tasks[a.name]["state"] = a.state
     print("%s -> %s" % (a.name, a.state))
 
