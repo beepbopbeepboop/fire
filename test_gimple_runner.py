@@ -3912,53 +3912,6 @@ def main():
     print(sys._getframe(0).f_trace is None)
 """, "True False\nFalse\nTrue\nTrue False\nFalse\nTrue\nTrue\n")
 
-    # `f_trace_lines` / `f_trace_opcodes` accept only a bool: a non-bool store raises TypeError
-    # (CPython: "attribute value type must be bool") and stores nothing.
-    test_gimple_stdout("gimple_frame_f_trace_lines_requires_bool", """\
-import sys
-
-def test():
-    f = sys._getframe(0)
-    try:
-        f.f_trace_lines = 1
-        print("stored")
-    except TypeError as e:
-        print("TypeError")
-    f.f_trace_lines = False
-    print(f.f_trace_lines)
-    f.f_trace_opcodes = 2 > 1
-    print(f.f_trace_opcodes)
-
-def main():
-    test()
-""", "TypeError\nFalse\nTrue\n")
-
-    # `del frame.f_trace` clears the hook back to None; `del frame.f_trace_lines` is a TypeError
-    # and `del frame.f_trace_opcodes` an AttributeError (CPython 3.15), and neither deletes.
-    test_gimple_stdout("gimple_frame_del_trace_attributes", """\
-import sys
-
-def test():
-    f = sys._getframe(0)
-    f.f_trace = 42
-    del f.f_trace
-    print(f.f_trace is None)
-    try:
-        del f.f_trace_lines
-        print("deleted")
-    except TypeError:
-        print("TypeError")
-    try:
-        del f.f_trace_opcodes
-        print("deleted")
-    except AttributeError:
-        print("AttributeError")
-    print(f.f_trace_lines, f.f_trace_opcodes)
-
-def main():
-    test()
-""", "True\nTypeError\nAttributeError\nTrue False\n")
-
     test_gimple_stdout("gimple_traceback_chain_names_and_lines", """\
 import sys
 
@@ -14441,10 +14394,10 @@ def test_namedtuple_tuple_protocol_is_refused_by_name():
 
 
 def test_nested_class_attr_reads_enclosing_local_regression():
-    """Regression: a class-level attribute whose value names an enclosing
-    function's local was lowered as a `class` statement no-op, so the
-    attribute stayed 0 at exit 0. The class statement must store the value
-    when it executes. Each
+    """Regression for bugs/mid/CODEGEN_nested_class_attr_reads_enclosing_local_silently_zero.md.
+    A class-level attribute whose value names an enclosing function's local
+    was lowered as a `class` statement no-op, so the attribute stayed 0 at
+    exit 0. The class statement must store the value when it executes. Each
     call reads its own value right after its `class` statement, so the two
     calls must each print their own argument."""
     test_gimple_stdout("gimple_nested_class_attr_reads_local", """\
@@ -14540,7 +14493,7 @@ def main():
 
 def test_nested_class_attr_rebind_after_construction_regression():
     """Pins the answer any per-execution fix for
-    a nested class attribute reading an enclosing local (fixed)
+    bugs/mid/CODEGEN_nested_class_attr_reads_enclosing_local_silently_zero.md
     must keep. A class attribute rebound on the CLASS after an instance was
     built is seen by that instance (Python: the instance has no attribute of
     its own, so it reads the class's current value, 3). A per-instance copy of

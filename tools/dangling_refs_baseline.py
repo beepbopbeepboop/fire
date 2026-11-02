@@ -43,6 +43,7 @@ BASELINE = {
     'bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__.md': 2,
     'bugs/mid/COMPILE_FAIL_ctypes_util.md': 1,
     'bugs/mid/COMPILE_FAIL_importlib_resources_readers.md': 2,
+    'bugs/mid/TEST_scalar_arity_min_max_link_mode_prints_nothing.md': 1,
     'elaborate.py': 1,
     'formal/imports.py': 1,
     'gimple_codegen.py': 2,

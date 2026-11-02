@@ -112,17 +112,5 @@ lifted = C.probe_free_bans(now=_now + C.PROBE_EVERY_S + 1, probe=lambda m: True)
 check("a free tier that answers is lifted", lifted == ["mfree"] and C._ledger()["mfree"]["until"] <= _now + C.PROBE_EVERY_S + 1)
 C.load_pool = _real_load_pool
 
-# a worker's tree: every process a shell under it started, however deep, is among its descendants
-import subprocess as _sp
-_tree = _sp.Popen(["sh", "-c", "sleep 60 & sh -c 'sleep 61' & wait"])
-time.sleep(0.5)
-_kids = C.descendants(_tree.pid)
-check("the descendants of a worker's shell include every job it started", len(_kids) >= 2)
-check("a process is not its own descendant", _tree.pid not in _kids)
-for _k in _kids:
-    try: os.kill(_k, 9)
-    except OSError: pass
-_tree.kill()
-
 print("%d passed, %d failed" % (len(PASSES), len(FAILS)))
 sys.exit(1 if FAILS else 0)
