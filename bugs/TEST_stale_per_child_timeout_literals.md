@@ -2,6 +2,49 @@
 
 ## Status
 
+**`bug-test-stale-per-child-timeout-literal-7848` (2026-11-01): the census is reconciled and green again.**
+The census check had gone red on this tree: the walk read 119 literals in 57
+files against a census of 46, because twelve files gained literals after the
+census was written. The census's own message says the sanctioned path is to read each call site
+and convert it, not to bump the count, so that is what landed. Each of the
+twelve sites was classified by its argv, the file gained `from exec_budget import …`, and the
+literal became the named constant:
+
+* `RUN_TIMEOUT_S` — a compiled executable or an interpreter run of a snippet:
+  `test_nonascii_len_regression.py` (2), `test_polymorphic_float_regress.py`,
+  `test_regress_none_false.py`, `test_regression_ctor_temp_field_read_loses_element_type.py`
+  (2), `test_regression_fire_tag_string.py`, `test_regression_socket_request_for_member.py`,
+  `test_selfhost.py` (1, the `[out]` run at :121).
+* `COMPILE_TIMEOUT_S` — a `fire.py build`, a `gcc -fgimple`, or the self-hosted
+  binary's `--dump-full`: `test_regress_compile_fail_tools_jit_targets.py`, the
+  `--jit` at `test_nonascii_len_regression.py`, the `gcc` at
+  `test_regression_ctor_temp_…` and the two `--dump-full`s in `test_selfhost.py`.
+  Rule applied where a child both compiles and runs: the compile budget, which
+  is the larger, so the child's wall covers both steps.
+* `test_regress_multi_kind_global_read_before_reassignment{,_quick}.py` — the
+  file-local `_run` helper carried one `timeout=300` for a build AND a run. The
+  helper now takes `timeout=` with default `RUN_TIMEOUT_S`, and the build call
+  passes `COMPILE_TIMEOUT_S`.
+* `test_regression_needle_drift.py` (900 s, one `test_formal_run.py` row, build
+  and run): `COMPILE_TIMEOUT_S`. This narrows 900 to 600 and is not measured on
+  this tree; if a row flakes, the honest fix is to measure it, not to restore 900.
+* `test_zipfile_init_regression.py` (300 s, one child that runs the whole
+  `test_nonlocal` suite, 18 cases each compiling): `SWEEP_TIMEOUT_S`.
+
+`test_selfhost.py` now imports `exec_budget`, so it leaves the census (its row
+is dropped) and is covered by the importer checks. The residue is 101 literals
+in 45 files, and the census equals the walk exactly. The estate check, run
+alone with `test_no_stale_per_child_budget_is_left_as_a_literal()`, reports
+`FAILURES: 0`. It fails the runner through `FAILURES`, so `test_suite.py`'s
+`main()` exits 1 on a red census.
+
+Verified: `test_regression_socket_request_for_member.py` PASS; `test_regress_none_false.py`
+PASS (exit 0, peak 0.6 GB); the census check PASS.
+
+**Already done, so the 2026-11-01 "next step" item about `test_gimple.py:7979/7981` is stale:**
+both sites read `COMPILE_TIMEOUT_S` / `RUN_TIMEOUT_S` on HEAD. The file has no
+`timeout=` literal left in the walk.
+
 **Two more files landed 2026-11-01 (`work/bug-test-stale-per-child-timeout-literal-4685`), three sites.**
 `test_nonlocal.py` (2: the compiled program's run and the `fire.py run`
 interpreter run, both `RUN_TIMEOUT_S`) and `test_coro_runtime.py` (1: the

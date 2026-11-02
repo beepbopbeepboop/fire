@@ -2195,8 +2195,6 @@ STALE_PER_CHILD_BUDGETS = {
     'test_ptr_registry.py': 2,
     'test_python_source_mut_capture.py': 1,
     'test_runtime_dylib.py': 1,
-    'test_selfhost.py': 2,  # +1 on 2026-10-04: work/bugs6-1's
-                                       # build_scratch_is_private_and_removed
     'test_selfhost_memory.py': 1,
     'test_stdlib.py': 1,
     'test_taskgroup.py': 4,
