@@ -53,8 +53,20 @@ equivalent for the 45 example files a cached test is *about*.
   returning `(cpu_seconds, max_bytes, n_procs)` but never accumulated CPU, so
   it always reported 0.0 CPU seconds. Fixed (one line in `tools/procrun.py`).
   No production caller reads that field yet, which is why nothing had noticed.
-* **Still open:** §3.2's general check, §5's registration of the 50 and the
-  21 red files.
+* **§3.3's general form — a file whose failure verdict is only printed — is
+  now a mechanism** (`test_untested_regression.py`,
+  `test_no_test_file_prints_a_failure_and_exits_zero`). It walks every
+  `test_*.py`, flags any that prints `FAIL`/`CFAIL`/`Failed`/`✗` with no exit
+  path (`sys.exit`, `exit(`, `raise`, `assert`, `unittest`, `pytest`,
+  `.fail(`), and is pinned by a detector test on a print-only shape. A planted
+  print-only probe file was flagged by name; the tree itself has **zero**
+  offenders (the one file that prints `FAIL` at all, `test_regression_randdec_tuple_yield.py`,
+  re-raises). It is a textual heuristic, not an execution trace: a file that
+  reaches a verdict only through a helper it imports is not seen, which is
+  the honest limit of the static form.
+* **Still open:** §3.2's general check (not statically decidable, §3.2), §5's
+  registration of the 50 and the 21 red files (`tools/suite.py` is
+  integrator-owned; the red files are behaviour work in other claims).
 
 ## Status, 2026-10-02 (this pass — §3.2's four dead-at-import tests are closed, one of them by becoming real coverage)
 
