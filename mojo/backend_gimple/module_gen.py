@@ -4184,7 +4184,7 @@ def gen_module_impl(self, stmts):
             _gf, gimple_gen_coro._static_env(_gf))[0] == 'd'
         or any(isinstance(_dv, FloatLiteral)
                for _dv in (getattr(_gf, 'param_defaults', None) or {}).values())
-        for _gf in _generator_fns.values())
+        for _gf in sorted(_generator_fns.values(), key=lambda _x: _as_str(getattr(_x, 'name', ''))))
     self._all_async_fn_names: set[str] = {n.name for n in _async_fns.values()}
 
     for _s in stmts:
@@ -12234,7 +12234,7 @@ def gen_module_impl(self, stmts):
         if not _generator_fns:
             break
         _registered_this_pass = 0
-        for _gm_id, s in list(_generator_fns.items()):
+        for _gm_id, s in sorted(list(_generator_fns.items()), key=lambda _x: (_as_str(getattr(_x[1], 'name', '')), _x[0])):
             if _gm_id in _async_fns:
                 continue
             if _gm_id in _struct_method_ids:
@@ -12290,7 +12290,7 @@ def gen_module_impl(self, stmts):
         _generator_fns.pop(id(s), None)
 
     if _async_fns:
-        for _gm_id, s in list(_async_fns.items()):
+        for _gm_id, s in sorted(list(_async_fns.items()), key=lambda _x: (_as_str(getattr(_x[1], 'name', '')), _x[0])):
             if _gm_id not in _generator_fns:
                 continue
             if not _async_gen_quick_eligible(s, frozenset(self._async_api.keys())):
@@ -12567,15 +12567,15 @@ def gen_module_impl(self, stmts):
                 _async_fns.pop(id(_inner), None)
 
     _gen_only_names: list = []
-    for _gm_id, _gm_fn in _generator_fns.items():
+    for _gm_id, _gm_fn in sorted(_generator_fns.items(), key=lambda _x: (_as_str(getattr(_x[1], 'name', '')), _x[0])):
         if _gm_id not in _async_fns:
             _gen_only_names.append(_gm_fn.name)
     _async_only_names: list = []
-    for _gm_id, _gm_fn in _async_fns.items():
+    for _gm_id, _gm_fn in sorted(_async_fns.items(), key=lambda _x: (_as_str(getattr(_x[1], 'name', '')), _x[0])):
         if _gm_id not in _generator_fns:
             _async_only_names.append(_gm_fn.name)
     _async_gen_names: list = []
-    for _gm_id, _gm_fn in _generator_fns.items():
+    for _gm_id, _gm_fn in sorted(_generator_fns.items(), key=lambda _x: (_as_str(getattr(_x[1], 'name', '')), _x[0])):
         if _gm_id in _async_fns:
             _async_gen_names.append(_gm_fn.name)
     _gen_only = sorted(_gen_only_names)
@@ -15044,9 +15044,9 @@ def gen_module_impl(self, stmts):
         _type_name_set = {}
         for _tnk in self.struct_field_types:
             _type_name_set[_as_str(_tnk)] = True
-        for _dspk in _STMT_DISPATCH.keys():
+        for _dspk in sorted(_STMT_DISPATCH.keys()):
             _type_name_set['' + _dspk] = True
-        for _dspk in _EXPR_DISPATCH.keys():
+        for _dspk in sorted(_EXPR_DISPATCH.keys()):
             _type_name_set['' + _dspk] = True
         for _tn in sorted(_type_name_set):
             _tn_s = '' + _tn
@@ -15054,7 +15054,7 @@ def gen_module_impl(self, stmts):
         parts.append("  return \"<type>\";")
         parts.append("}")
         parts.append('')
-    for mod_name in sorted(all_modules_to_declare):
+    for mod_name in sorted(list(all_modules_to_declare)):
         mod_s = '' + mod_name
         if mod_s == our_mod:
             continue
