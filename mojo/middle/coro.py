@@ -303,6 +303,9 @@ def _list_return_elem_kind(name: str):
                 and v.func.member == 'filter' and isinstance(v.func.obj, N.IdentExpr)
                 and v.func.obj.name == 'fnmatch'):
             k = 'w'
+        elif (isinstance(v, N.CallExpr) and isinstance(v.func, N.IdentExpr)
+                and v.func.name == '_glob1'):
+            k = 'w'
         elif isinstance(v, N.ListExpr) and len(v.elements) == 1:
             k = _yield_kind(v.elements[0], _static_env(fd))
         if k is None:
