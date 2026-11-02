@@ -13255,9 +13255,14 @@ static void _kbuf_put_word(char **buf, size_t *len, size_t *cap, const char *tag
 static void _tuple_key_elem(char **buf, size_t *len, size_t *cap, int64_t w,
                             char k, int ecode)
 {
-    if (ecode == MOJO_EQ_UNKNOWN) ecode = _kind_to_eq(k);
+    if (ecode == MOJO_EQ_UNKNOWN) {
+        if (k == 'p' && _pr_has(&_reg_str, (uint64_t)w)) ecode = MOJO_EQ_STR;
+        else if (k == 'p') ecode = MOJO_EQ_INT;
+        else ecode = _kind_to_eq(k);
+    }
     char tmp[_INT_STR_BLOCK];
     if (ecode == MOJO_EQ_DOUBLE) {
+        _kbuf_put_word(buf, len, cap, "D", 1);
         double d = _eq_as_double(w);
         int n = snprintf(tmp, sizeof tmp, "%.17g", d);
         _kbuf_put(buf, len, cap, tmp, (size_t)(n < 0 ? 0 : n));
@@ -13269,11 +13274,13 @@ static void _tuple_key_elem(char **buf, size_t *len, size_t *cap, int64_t w,
          * elements are not strings, and dereferencing a small integer here
          * would be a segfault rather than a wrong key. */
         if (w == 0) { _kbuf_put(buf, len, cap, "N", 1); return; }
-        if (!_mojo_ptr_shaped(w)) { _kbuf_put(buf, len, cap, "?", 1); return; }
+        if (!_mojo_ptr_shaped(w)) { _kbuf_put_word(buf, len, cap, "?", 1); return; }
+        _kbuf_put_word(buf, len, cap, "P", 1);
         _kbuf_put(buf, len, cap, (char *)(intptr_t)w,
                   strlen((char *)(intptr_t)w));
     } else if (ecode == MOJO_EQ_BYTES) {
-        if (!_mojo_ptr_shaped(w)) { _kbuf_put(buf, len, cap, "?", 1); return; }
+        _kbuf_put_word(buf, len, cap, "B", 1);
+        if (!_mojo_ptr_shaped(w)) { _kbuf_put_word(buf, len, cap, "?", 1); return; }
         MojoBytes *b = (MojoBytes *)(intptr_t)w;
         _kbuf_put(buf, len, cap, (const char *)(b ? b->data : NULL),
                   b && b->len > 0 ? (size_t)b->len : 0);
@@ -13303,7 +13310,12 @@ static void _tuple_key_elem(char **buf, size_t *len, size_t *cap, int64_t w,
             _tuple_key_elem(buf, len, cap, w, 'l', MOJO_EQ_GENERIC);
             return;
         }
-        char *p = _fmt_int(w, tmp);
+        _kbuf_put_word(buf, len, cap, "I", 1);
+        int64_t val = w;
+        if (_mojo_ptr_shaped(w) && mojo_is_boxed(w)) {
+            val = ((MojoBox *)(intptr_t)w)->bits;
+        }
+        char *p = _fmt_int(val, tmp);
         /* `- 1`: `_fmt_int` leaves the NUL inside the block, so the span it
          * returns INCLUDES it (which is what `_slot_key` wants — it copies the
          * NUL as part of the string). A length PREFIX counts content bytes, so
