@@ -2,7 +2,12 @@
 
 **Area:** `test_formal_run.py`'s build-and-run cases.
 
-**Status: PARTIAL — cases 1–3 measured and pinned; case 4 (tag-generator host-import wall) remains with `bugs/formal/FORMAL_the_host_import_wall_is_at_its_honest_floor.md`.** Cases 1 (`deref_refuse_a_binary64_value_store_of_an_integer`) already passes on master; cases 2 (`type_argument_list_on_a_generic_struct_of_this_unit_is_read_as_a_container`) and 3 (`comptime_binding_with_a_literal_value_still_builds`) had needle drift and are now pinned to their measured refusal messages (`refuse:the function which created it...` and `refuse:Refused rather than read as an index...` respectively), verified by `test_formal_run.py` and `test_regression_needle_drift.py`. Case 4 is out of scope per the doc's own instruction.
+**Status: PARTIAL (2026-11-01).** Case 3 fixed; case 1 resolved as "the needle is right" (no code change); case 2 still open, needs a judgement; case 4 out of scope (host-import wall, `bugs/formal/FORMAL_the_host_import_wall_is_at_its_honest_floor.md`).
+
+* **Case 3 (`comptime_binding_with_a_literal_value_still_builds`) — FIXED.** The row's program instantiated a non-generic `Box` with a type bracket, so it refused with the `size_of[type, target]` sentence and its name ("still_builds") could never be observed. The row now uses `var b = Box()`, as its own control comment describes, and pins stdout `3`, exit 0. Measured on both backends: `stdout='3' exit=0`.
+* **Case 1 (`deref_refuse_a_binary64_value_store_of_an_integer`) — needle is correct.** The check at `formal/model.py` (`pointer_store_refusal` / the binary64 kind check) draws the value-kind sentence ("would write 0x1, a denormal rather than 1.0") for this program, and the row passes on both architectures. The undeclared-pointee sentence is NOT what this program draws: the `Pointer[Float64]` annotation reaches the check. The earlier "either the annotation is not reaching the check or the two swapped" hypothesis is ruled out by the run.
+* **Case 2 (`type_argument_list_on_a_generic_struct_of_this_unit_is_read_as_a_container`) — OPEN.** The row passes pinned to the wide-receiver sentence ("the function which created it…"), which is the frame-escape sentence for a frame value (`s`) in the bracket. The row's name and its own comment ("a FRAME in the bracket … TWO DIFFERENT wrong sentences") disagree about which sentence is right for this subject. Decision needed: either (a) keep the frame-escape sentence and rename the row to a frame-in-bracket name, or (b) rewrite the row to use a non-frame value so the CONTAINER refusal is what it reaches, and pin that. The two spellings must be checked distinguishable before pinning.
+* `test_regression_needle_drift.py` was rewritten: it asserted `msg in msg` (tautological). It now runs the named rows through `test_formal_run.py -v` and reads each verdict line. Before the case-3 fix: case 3 FAIL; after: both PASS.
 
 ## What I ran
 
@@ -40,8 +45,7 @@ pointee — a parameter annotated `Pointer[UInt8]`, a local
 `var p: Pointer[Int32]`, or a pointer-valued `external_call[…]` — is what makes
 it answerable") — which is a DIFFERENT subject: the parameter IS annotated
 `Pointer[Float64]`, so either the annotation is not reaching the check or the
-two refusals have swapped places. **Next step:** decide which of the two the
-construct should draw, then pin that one. Until then the row is red for a reason
+two refusals have swapped places. **Resolved (2026-11-01):** the value-kind sentence is the right one; the row was already correct. Until then the row is red for a reason
 its needle does not describe, which is the state that is worth not leaving
 unexplained.
 
@@ -70,9 +74,7 @@ than read as an index — a binding for `size_of[type, target]` would have to co
 from a target description this backend does not have, and a plausible constant
 is a fabricated answer"). The row's name says "still_builds", so the row is
 about the build and the needle is about a refusal — one of the two is wrong.
-**Next step:** read the row's own comment above it and decide which, because a
-row whose name and needle disagree is a row that cannot fail for its own
-subject.
+**Resolved (2026-11-01):** the row now builds and prints `3` (see Status).
 
 ### 4. `tag-generator`
 

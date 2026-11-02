@@ -1169,9 +1169,9 @@ CASES = [
      "        return Self.length\n"
      "\n"
      "def main(n) -> Int:\n"
-     "    var b = Box[Int, [1, 2, 3]]()\n"
+     "    var b = Box()\n"
      "    printf(\"%d\", b.size())\n"
-     "    return 0\n", "refuse:Refused rather than read as an index — a binding for `size_of[type, target]`", None),
+     "    return 0\n", 0, "3"),
     # …and the generic spelling, pinned because it is a refusal with a real
     # cause and nothing else in the group names it. The message is the
     # no-home one, which is about `Box` as a NAME: a class-attribute read through
