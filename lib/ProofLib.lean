@@ -712,7 +712,11 @@ theorem mem_read_after_write_u64_high_nw (mem : Nat → UInt8) (sp : UInt64) {K 
     `sp.toNat + j < 2^64`, not by a separate `j < 2^63`, and bounds the store
     distance by `K ≤ sp.toNat`.  This is the no-wrap peel
     `mem_read_after_write_u64_high_nw` with those two bounds, taking `K` and the
-    store value *last* so a rewrite can supply them positionally. -/
+    store value *last* so a rewrite can supply them positionally.
+
+    Also accepts the split form produced by `u64_sub_add`:
+    `sp - (UInt64.ofNat a - UInt64.ofNat b)` is collapsed to
+    `sp - UInt64.ofNat (a - b)`. -/
 theorem mem_read_write_below (mem : Nat → UInt8) (sp : UInt64) {K j : Nat}
     (hjnw : sp.toNat + j < 2 ^ 64) (hKsp : K ≤ sp.toNat) (hK : 8 ≤ K)
     (val : UInt64) :
@@ -720,6 +724,24 @@ theorem mem_read_write_below (mem : Nat → UInt8) (sp : UInt64) {K j : Nat}
         ((sp + UInt64.ofNat j).toNat)
       = mem_read_u64 mem ((sp + UInt64.ofNat j).toNat) :=
   mem_read_after_write_u64_high_nw mem sp hK hKsp hjnw val
+
+/-- Variant of `mem_read_write_below` that accepts `sp - (UInt64.ofNat a - UInt64.ofNat b)`
+    (the form produced when `u64_sub_add` splits an offset). -/
+theorem mem_read_write_below_split (mem : Nat → UInt8) (sp : UInt64) {a b j : Nat}
+    (hba : b ≤ a) (haM : a < 2 ^ 64)
+    (hjnw : sp.toNat + j < 2 ^ 64)
+    (hKsp : (a - b) ≤ sp.toNat) (hK : 8 ≤ a - b)
+    (val : UInt64) :
+    mem_read_u64 (mem_write_u64 mem (sp - (UInt64.ofNat a - UInt64.ofNat b)).toNat val)
+        ((sp + UInt64.ofNat j).toNat)
+      = mem_read_u64 mem ((sp + UInt64.ofNat j).toNat) := by
+  have hK := a - b
+  have hK_eq : UInt64.ofNat a - UInt64.ofNat b = UInt64.ofNat hK := by
+    apply u64_ofNat_sub a b hba haM
+  have hsp : sp - (UInt64.ofNat a - UInt64.ofNat b) = sp - UInt64.ofNat hK := by
+    rw [hK_eq]
+  rw [hsp]
+  exact mem_read_write_below mem sp hjnw hKsp hK val
 
 
 /-! ## Canonicalising frame addresses
@@ -947,6 +969,12 @@ inductive MojoStmt where
 
 inductive MojoFunc where
   | mk (name : String) (params : List String) (body : List MojoStmt) : MojoFunc
+
+/-- strlen for C strings (null-terminated byte sequences). -/
+axiom strlen : UInt64 → UInt64
+
+/-- str_len is an alias for strlen -/
+def str_len := strlen
 
 /-- Binary exponentiation matching codegen's runtime `**` (result starts at 1;
     while exp > 0: if exp odd: acc *= base; base *= base; exp >>= 1).  Fuel 64
@@ -1198,6 +1226,9 @@ def evalExpr (callFunc : String → UInt64 → UInt64) (e : MojoExpr) (env : Str
   | MojoExpr.binop ">>" l r => asr64 (evalExpr callFunc l env) (evalExpr callFunc r env)
   | MojoExpr.binop "**" l r => u64pow (evalExpr callFunc l env) (evalExpr callFunc r env)
   | MojoExpr.binop _ l r => evalExpr callFunc l env
+  | MojoExpr.call "len" args => strlen (evalArgs callFunc args env)
+  | MojoExpr.call "str_len" args => strlen (evalArgs callFunc args env)
+  | MojoExpr.call "strlen" args => strlen (evalArgs callFunc args env)
   | MojoExpr.call name args => callFunc name (evalArgs callFunc args env)
 
 /-- PACK a call's arguments into the ONE value `callFunc` is handed.
@@ -7350,17 +7381,17 @@ theorem work_step_cbnz (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : U
   simp [h, cbz_off64, cbnz_off64]
 
 /-- **Peel one STP pair below `sp`.**
-
+ 
     The emitter writes a frame slot pair as two `mem_write_u64`s at
     `(sp - K)` and `(sp - K) + 8`.  Both are strictly below `sp` for `K ≥ 8`,
     so neither can affect a read at `sp + j`, and the pair peels in one step.
-
+ 
     Peeling per-distance instead would have to canonicalise `(sp - K) + 8` into
     `sp - UInt64.ofNat (K - 8)` first — the frame canonicalisation's
     `u64_sub_add` produces that split form, and folding it back needs a rewrite
     whose side conditions `simp` will not discharge on its own.  Matching the
     pair's shape directly keeps the generator from reshaping addresses at all.
-
+ 
     `16 ≤ K` is not decoration: the pair's second half lands at
     `sp - UInt64.ofNat (K - 8)`, so it clears `sp` only when `K - 8 ≥ 8`.  At
     `K = 8` that half sits *at* `sp` and overlaps a read at `sp + 0`, so the
@@ -7414,6 +7445,29 @@ theorem mem_read_write_pair_below (mem : Nat → UInt8) (sp : UInt64)
     mem_read_after_write_u64_ne _ _ _ _ (Or.inr hwrite8)
   rw [hne]
   exact mem_read_write_below mem sp hjnw hKsp (by omega) v1
+
+/-- Variant of `mem_read_write_pair_below` accepting the split form
+    `sp - (UInt64.ofNat a - UInt64.ofNat b)` from `u64_sub_add`. -/
+theorem mem_read_write_pair_below_split (mem : Nat → UInt8) (sp : UInt64)
+    {a b j : Nat} (hba : b ≤ a) (haM : a < 2 ^ 64) (hKlt : a < 2 ^ 64)
+    (hjnw : sp.toNat + j < 2 ^ 64)
+    (hKsp : (a - b) ≤ sp.toNat) (hK : 16 ≤ a - b)
+    (v1 v2 : UInt64) :
+    mem_read_u64
+        (mem_write_u64
+          (mem_write_u64 mem ((sp - (UInt64.ofNat a - UInt64.ofNat b)).toNat) v1)
+          ((sp - (UInt64.ofNat a - UInt64.ofNat b)) + UInt64.ofNat 8).toNat v2)
+        ((sp + UInt64.ofNat j).toNat)
+      = mem_read_u64 mem ((sp + UInt64.ofNat j).toNat) := by
+  have hK := a - b
+  have hK_eq : UInt64.ofNat a - UInt64.ofNat b = UInt64.ofNat hK := by
+    apply u64_ofNat_sub a b hba haM
+  have hsp : sp - (UInt64.ofNat a - UInt64.ofNat b) = sp - UInt64.ofNat hK := by
+    rw [hK_eq]
+  have hsp' : ((sp - (UInt64.ofNat a - UInt64.ofNat b)) + UInt64.ofNat 8) =
+      ((sp - UInt64.ofNat hK) + UInt64.ofNat 8) := by rw [hsp]
+  rw [hsp, hsp']
+  exact mem_read_write_pair_below mem sp hKlt hjnw hKsp hK v1 v2
 
 set_option maxHeartbeats 4000000 in
 /-- Per-instruction step: `work_step_smulh`.

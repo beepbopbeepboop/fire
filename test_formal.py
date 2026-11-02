@@ -111,17 +111,6 @@ def classify_stem(stem: str, passed: bool, detail: str,
 
 
 EXPECTED_FAILURES = {
-    # `fib(n) = fib(n-1) + fib(n-2)` — tree recursion, one goal left.  The
-    # caller's FrameOk window read sits over the callee's store stack, whose
-    # addresses the frame canonicalisation's `u64_sub_add` splits into
-    # `sp - (K - 8)`.  `mem_read_write_below` peels a single store at
-    # `sp - UInt64.ofNat K`, so the split has to be folded back first, and the
-    # nesting depth is data-dependent.  Per-depth collapse lemmas were tried
-    # and each exposed the next form; the right fix is to teach
-    # `mem_read_write_below` the split form so nothing needs collapsing.
-    "fib": "tree-recursion FrameOk window read over a store stack whose "
-           "addresses u64_sub_add splits into sp - (K - 8); the peel needs a "
-           "collapse at data-dependent nesting depth",
     # The two decrement-while shapes whose loop test is an ORDER on the counter
     # (`while n > 0`, `while n >= 1`), as opposed to `while n != 0`
     # (`wdiff`, which passes).  Both are sound CODEGEN now — a signed `int`
@@ -240,61 +229,27 @@ EXPECTED_FAILURES = {
     # (`bugs/formal/FORMAL_arm64_x30_is_reloaded_from_the_frame.md`,
     # `bugs/formal/FORMAL_dylib_export_loops_and_frame_bounds.md`) -- so this entry is
     # the declaration, not the fix.
-    #
-    # **Update 2026-10-12 (`work/formal270-docs-r2`):** the sp-tracker fix in
-    # `formal/arm64_proof_gen.py` (`_imm12_scaled`, the ADD/SUB immediate's `sh`
-    # bit — four readers dropped it) moved BOTH of these again, and differently:
-    #
-    #   * `count` is still a hard red but at a NEW site.  The proof now reaches
-    #     `count_proof.lean:4305:58: error: maximum recursion depth has been
-    #     reached`, the same `arm64_ext_imm12`/`work_step_add_imm64` kernel
-    #     reduction `mod_by_var` hits — `f7bd05ea`'s `first | simp <;> done |
-    #     rfl` at a block start, in place of the bare `rfl`.  It
-    #     also admits ONE `sorry`, at the x30 CFG leaf this comment describes,
-    #     which the corrected frame address now lets Lean reach instead of
-    #     stopping at the `rfl` below.
-    #   * `pow2` is NO LONGER a hard red: it TYPECHECKS with one admitted `sorry`
-    #     at the same x30 leaf, so it is out of this table and `test_formal.py`
-    #     reports its hole through `SORRY_CENSUS`.  The two markers'
-    #     `test_formal_call_proof_gen.py::TestTheReturnFrameReadsX30ThroughA_
-    #     MaterialisedAddress` still reads the x30 read and the adrp
-    #     materialisation off both generated proofs.
-    "count": "still red after the 2026-10-12 sp-tracker fix, but at a new site: "
-             "`maximum recursion depth` at count_proof.lean:4305:58, the same "
-             "`arm64_ext_imm12`/`work_step_add_imm64` reduction `mod_by_var` "
-             "hits (bugs/formal/FORMAL_call_proofgen_reds_after_the_arm64_model_merge"
-             ".md); the proof also ADMITS ONE `sorry` at the epilogue x30 leaf "
-             "this entry used to stop at (the ADRP/ADD-materialised read at "
-             "sp - 1984 that nothing emitted says is sp - K)",
-
-    # `fact`, `sum` and `sqsum` are the other three members of the dec1
-    # recursion family, and they were UNDECLARED reds of the `formal` job until
-    # 2026-10-12: nothing in either table named them, so a whole-corpus run
-    # reported three of the corpus's recursive examples as FAILURES with no
-    # document anywhere saying why.  That is `known_proof_gaps`' own argument --
-    # a gap outside this table is a failure -- and this is the entry it asks
-    # for.
-    #
-    # **What they hit is NOT what that doc recorded.**  It said they failed on
-    # the dec1 return frame's x30 read, which is `count`/`pow2`'s entry above.
-    # Measured on this tree (one Lean run each, through
-    # `formal.build.compile_formal(prove=True, check=True)`): all three GENERATE
-    # a proof carrying `_compiles_correctly_universal`, and Lean rejects it at
-    # `rfl` inside the `runs-ret-frame-ok-window` leaf -- the `FrameOk` WINDOW
-    # read at `st.sp + j`, whose left-hand side is a chain of the callee's frame
-    # stores that `rfl` cannot see through (`mem_read_u64 (… (st.sp + j) …)
-    # (st.sp + j)` is not definitionally equal to `mem_read_u64 st.mem
-    # (st.sp + j)`).  That is `fib`'s gap one shape over, and `fib`'s entry above
-    # names the fix.
-    "fact": "tree recursion whose FrameOk WINDOW read at `st.sp + j` sits over "
-            "the callee's frame stores, so `rfl` cannot see through the chain "
-            "(measured `fact_proof.lean:4858:16`, leaf "
-            "`runs-ret-frame-ok-window`) -- `fib`'s gap, and the fix is teaching "
-            "`mem_read_write_below` the split form",
-    "sum": "the same FrameOk window read as `fact`, on the sum example "
-           "(measured `sum_proof.lean:4858:16`)",
-    "sqsum": "the same FrameOk window read as `fact`, on the sum-of-squares "
-             "example (measured `sqsum_proof.lean:5227:16`)",
+    # The two decrement-while shapes whose loop test is an ORDER on the counter
+    # (`while n > 0`, `while n >= 1`), as opposed to `while n != 0`
+    # (`wdiff`, which passes).  Both are sound CODEGEN now — a signed `int`
+    # means a negative counter leaves the loop, which is what Python says —
+    # and both are refused because the generated MODEL still assumes the
+    # counter is a non-negative magnitude: `_gen_dec_while_block`'s
+    # `pred_iff` states the loop's "keep going" test as the UNSIGNED
+    # `0 < UInt64.ofNat m`, which is false for `m >= 2^63`, and the model
+    # itself returns 0 where a negative counter must be returned unchanged.
+    # So the obligation is genuinely unprovable, not merely unproved — which is
+    # the honest shape for a known gap and why the fix is a model change, not a
+    # tactic.  The SAME unsigned exit-side comparison is what a range loop's
+    # `loop_cond_flag` cannot close: `sum_range` reports it as an admitted hole
+    # whenever its contract is reached, and is refused before then for a
+    # different reason (a conditional back edge, its own entry below).
+    # See signed dec-while loop model (fixed).
+    "countdown": "the decrement-while runF model treats the counter as a "
+                 "non-negative magnitude; a signed `int` means `n <= 0` exits "
+                 "immediately and returns n unchanged, which pred_iff and the "
+                 "model both deny",
+    "wge": "same as countdown, for the `n >= 1` spelling",
 
     # ── The 19 examples added on 2026-10-05, by the gap each one hits ────────
     #
@@ -383,9 +338,6 @@ EXPECTED_FAILURES = {
                           "arithmetic), the same domain gap as `subscript_var`",
     "list_len": "`len` over a list is the same missing domain, reached through "
                 "the call rather than through a subscript",
-    "str_len": "`len` has no model in this image: a string is a bare "
-               "`char *` and its byte count is not an expression in the model "
-               "(`bugs/formal/FORMAL_string_value_model.md`)",
     "struct_point": "a struct CONSTRUCTION is a call, and the generator emits "
                     "no `_go` for it, so `Point()` has no model in this image "
                     "-- the same missing domain as `wide_recv`, one step before "
@@ -401,13 +353,6 @@ EXPECTED_FAILURES = {
     # `main_calls_helper` (the same image with the CALLER as the entry) is
     # refused -- the pair is the sharpest statement of the frontier in the
     # corpus.
-    "main_calls_helper": "the entry calls a second function in the same image, "
-                         "and the CFG walk cannot follow a call out of the "
-                         "entry; `call_helper` is the same image with the "
-                         "callee as the entry and it proves",
-    "multi_export": "three exports where the entry calls two of them, so two "
-                    "call SITES on one path -- more than the walk can follow, "
-                    "and the model refuses the inner callee first",
 
     # (5) A division helper is an OPAQUE call, which was the same walk refusal
     # seen from the other side and was the family `udivmod` and `floordiv` were
@@ -424,10 +369,6 @@ EXPECTED_FAILURES = {
                           "whose two-call-site refusal stopped firing",
 
     # (6) Two single gates, each its own sentence.
-    "printf_int": "`printf` with TWO arguments has no faithful AST: "
-                  "`MojoExpr.call` carries one `MojoExpr` and `callFunc` is "
-                  "`String -> UInt64 -> UInt64`, so the AST bridge refuses "
-                  "(`bugs/formal/FORMAL_ast_bridge_carries_one_argument_per_call.md`)",
     "dead_branch": "a branch on a CONSTANT condition emits no flag for the "
                    "proof layer to read, so the branch-condition value flow is "
                    "unavailable -- the generator refuses rather than state a "
