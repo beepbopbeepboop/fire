@@ -6111,6 +6111,124 @@ def _lower_escaping_generators(stmts: list) -> None:
 _PY_SRC: list = [False]
 
 
+def _contains_generator_scope(fn) -> bool:
+    """Does `fn` directly define a generator or an `async def`?"""
+    for x in fn.body:
+        if isinstance(x, N.FunctionDef) and (getattr(x, 'is_generator', False)
+                                             or getattr(x, 'is_async', False)):
+            return True
+    return False
+
+
+def _lift_capture_free_nested_scopes(stmts: list) -> None:
+    """Lift a nested plain `def h` out of its enclosing function `m` to module level
+    when it (a) defines a generator / `async def` of its own and (b) captures
+    nothing from `m`.
+
+    Why: the nested-generator machinery (`_hoist_nested_async`, the escaping-generator
+    mover) only reaches generators defined DIRECTLY in a top-level function or a method.
+    A generator one level deeper (test_frame.py's `t0`: a method defines `t0`, `t0`
+    defines `nested` and `gen`) fell through to the C++ companion, which cannot call
+    `t0`'s other nested helpers. A capture-free `h` IS a plain function (CPython
+    gives it no closure cells), so moving it to module scope changes no behaviour and
+    makes its nested generators direct children of a top-level function.
+
+    Conservative on purpose: `h` is lifted only when it has no decorators / star
+    parameters / non-literal defaults, is only ever CALLED (never passed as a value)
+    inside `m`, and every name it reads that `m` binds (parameters, assigned names
+    anywhere in `m`, nested def names) is bound inside `h` too. The lifted copy is
+    named `__lift_<owner>_<m>_<h>` and keeps `display_name = h` for frame names."""
+    changed = True
+    rounds = 0
+    while changed and rounds < 8:
+        changed = False
+        rounds += 1
+        owners: list = []
+        for st in stmts:
+            if isinstance(st, N.FunctionDef):
+                owners.append((st, ''))
+            elif isinstance(st, N.StructDef):
+                for mm in (st.methods or []):
+                    if isinstance(mm, N.FunctionDef):
+                        owners.append((mm, st.name))
+        lifted: list = []
+        for m, sname in owners:
+            if getattr(m, 'is_generator', False) or getattr(m, 'is_async', False):
+                continue
+            # plain helpers a nested generator / coroutine of `m` calls: the generator
+            # moves to module level (`_lower_escaping_generators`) and can then reach
+            # them only if they are module-level too.
+            _called_by_scopes = set()
+            for g in m.body:
+                if isinstance(g, N.FunctionDef) and (getattr(g, 'is_generator', False)
+                                                     or getattr(g, 'is_async', False)):
+                    for bn in _walk(g):
+                        if isinstance(bn, N.CallExpr) and isinstance(bn.func, N.IdentExpr):
+                            _called_by_scopes.add(bn.func.name)
+            for h in list(m.body):
+                if not (isinstance(h, N.FunctionDef) and not getattr(h, 'is_generator', False)
+                        and not getattr(h, 'is_async', False)
+                        and (_contains_generator_scope(h) or h.name in _called_by_scopes)):
+                    continue
+                if h.decorators or h.kwonly:
+                    continue
+                if any(pn.startswith('*') for pn, _pa in h.params):
+                    continue
+                if getattr(h, 'param_defaults', None):
+                    continue
+                # names `m` binds
+                m_bound = set()
+                for pn, _pa in m.params:
+                    m_bound.add(pn)
+                for bn in gimple_exprtypes._walk_own_body(m.body):
+                    m_bound |= _ca_binding_names(bn)
+                    if isinstance(bn, N.FunctionDef):
+                        m_bound.add(bn.name)
+                # names bound anywhere inside `h` (incl. its nested defs' names)
+                h_bound = set()
+                for pn, _pa in h.params:
+                    h_bound.add(pn)
+                for bn in _walk(h):
+                    if isinstance(bn, N.FunctionDef):
+                        h_bound.add(bn.name)
+                        for pn2, _pa2 in bn.params:
+                            h_bound.add(pn2)
+                    h_bound |= _ca_binding_names(bn)
+                h_used = set()
+                for bn in _walk(h):
+                    if isinstance(bn, N.IdentExpr):
+                        h_used.add(bn.name)
+                if (h_used - h_bound) & (m_bound - {h.name}):
+                    continue
+                # only ever called by name inside m (recursion inside h included)
+                calls = []
+                value_use = False
+                call_funcs = set()
+                for bn in _walk(m):
+                    if isinstance(bn, N.CallExpr) and isinstance(bn.func, N.IdentExpr) \
+                            and bn.func.name == h.name:
+                        calls.append(bn)
+                        call_funcs.add(id(bn.func))
+                for bn in _walk(m):
+                    if isinstance(bn, N.IdentExpr) and bn.name == h.name \
+                            and id(bn) not in call_funcs:
+                        # the def statement itself is not an IdentExpr; any other mention is a value use
+                        value_use = True
+                if value_use:
+                    continue
+                new_name = '__lift_' + (sname + '_' if sname else '') + m.name + '_' + h.name
+                for c in calls:
+                    c.func.name = new_name
+                    _walk_ast_invalidate(c)
+                m.body = [x for x in m.body if x is not h]
+                h.display_name = h.name
+                h.name = new_name
+                lifted.append(h)
+                _walk_ast_invalidate(m)
+                changed = True
+        stmts.extend(lifted)
+
+
 def lower(stmts: list, closure_stmts=(),
           module_name: str | None = None) -> tuple[list, list]:
     """Returns (new_stmts, coro_meta). coro_meta entries are dicts:
@@ -6139,6 +6257,7 @@ def lower(stmts: list, closure_stmts=(),
     _STRUCT_NAMES.clear()
     _UNTHREADABLE_NESTED_ASYNC_GENS.clear()
     _STRUCT_NAMES.update(s.name for s in stmts if isinstance(s, N.StructDef))
+    _lift_capture_free_nested_scopes(stmts)
     # Before anything reads the module's call sites or generator kinds: a
     # parameter that receives a tagged generator beside another value is split
     # into per-kind clones (see `_specialize_mixed_generator_callers`).

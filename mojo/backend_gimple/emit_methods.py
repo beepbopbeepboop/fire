@@ -387,7 +387,7 @@ def _frame_enter(gen, node) -> None:
     if (gen.module_name or '') not in gen._frames_mods:
         return
     gen._frame_func = _as_str(gen.current_func_name)
-    _fn_shown = _as_str(node.name)
+    _fn_shown = _as_str(getattr(node, 'display_name', None) or node.name)
     # A generator/coroutine body is lowered to `__mgco_<name>_body` (a method's
     # `<name>` is `<Struct>_<method>`); the frame is the SOURCE function's.
     if _fn_shown.startswith('__mgco_') and _fn_shown.endswith('_body'):

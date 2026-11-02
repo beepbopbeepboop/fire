@@ -8959,6 +8959,34 @@ def main():
     # AT TEST TIME (`test_generator_matches_cpython`), because every
     # failure mode in this area is a silent wrong value and a
     # hand-transcribed "expected" string is exactly how one gets enshrined.
+    # A capture-free nested `def` that itself defines a generator, and the plain
+    # helper that generator calls, are lifted to module level: the generator was
+    # one level too deep for the nested-generator machinery and fell to the C++
+    # companion, which cannot call the helper (test_frame.py's `t0`).
+    test_generator_stdout("gimple_generator_two_levels_deep_calls_a_sibling_helper", """\
+import sys
+
+class T:
+    def test(self):
+        def t0():
+            def nested():
+                frame = sys._getframe()
+                return frame.f_generator
+
+            def gen():
+                yield nested()
+
+            g = gen()
+            try:
+                return next(g)
+            finally:
+                g.close()
+        print(t0() is None)
+
+def main():
+    T().test()
+""", "True\n")
+
     test_generator_matches_cpython("nested_async_gen_driven_by_async_for", """\
 def outer() raises:
     var acc = 0

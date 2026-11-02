@@ -221,3 +221,18 @@ generators and async functions (`cr_frame` of an `async def`, whose return kind 
 
 Still refused: `gen` (calls an ordinary nested helper `nested()` -- the hoist leaves such generators alone, and the C++ companion cannot resolve the callee) and
 `t3` (`async def` returning `frame.f_generator`, not a scalar kind).
+
+## Status (2026-11-01, stage 3 seventh slice): `test_frame.py` now refuses ONLY `t3`
+
+`coro._lift_capture_free_nested_scopes` (runs first in `lower`): a nested plain `def h` of a top-level function/method that (a) defines a
+generator / `async def` of its own, or is called by one of the enclosing function's nested generators/coroutines, and (b) captures nothing
+from the enclosing function (every name it reads that the enclosing function binds is bound inside `h`), is only ever CALLED (never passed as a
+value), and has no decorators / star params / defaults, is lifted to module level as `__lift_<owner>_<m>_<h>` (frame records keep `display_name`).
+A capture-free nested function has no closure cells in CPython, so behaviour is unchanged, and its nested generators become direct children
+of a top-level function, which the existing hoist reaches (test_frame's `t0` / `nested` / `gen`). Test `generator_two_levels_deep_calls_a_sibling_helper`
+(generator runner, which links the companion). Gate: generator runner 439 passed, the same 5 failures as master; `compile_stdlib.py` 0 unexpected.
+
+The one remaining refusal is `t3`: `async def t3(): ... return frame.f_generator`, driven by hand (`c = t3(); c.send(None)` expecting
+`StopIteration` whose `value` is `c`). That needs the coroutine OBJECT protocol on a bare `async def` result (`send`, `StopIteration.value`,
+`cr_frame`) and a non-scalar return kind for coroutines, which is its own feature. After it, running test_frame.py end to end also needs
+`unittest` machinery (`TestCase`, `assertRaises*`) in the compiled closure and `f_locals` / `f_trace`.
