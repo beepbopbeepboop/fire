@@ -4850,9 +4850,9 @@ def _gen_stmt_RaiseStmt(gen, node):
             args_list = gen._new_temp('MojoList *')
             gen._emit(f"  {args_list} = mojo_list_new ();")
             gen._emit(f"  mojo_list_append_str ({args_list}, {mv});")
-            exc_obj = gen._new_temp('void *')
+            exc_obj = gen._new_temp('MojoExc *')
             type_tag = gen._exc_type_id(exc_name) if exc_name else "0"
-            gen._emit(f"  {exc_obj} = (void *) mojo_exc_new ({type_tag}, {mv}, {args_list});")
+            gen._emit(f"  {exc_obj} = mojo_exc_new ({type_tag}, {mv}, {args_list});")
             gen._emit(f"  mojo_exc_obj_set ({exc_obj});")
             gen._emit(f"  mojo_exc_msg_set ({mv});")
 
