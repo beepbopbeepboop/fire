@@ -672,7 +672,7 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
     if name in gen._struct_bases and name not in gen.var_types and name not in gen._global_var_types:
         # A static class named as a VALUE is its type tag -- the word the run-time class table
         # files it under (`type('C', (A, B), ns)` / `bases = (A, B)` hand it to
-        # `mojo_type_add_base`; bugs/CODEGEN_enum_runtime_class_creation.md stage 3). Not the
+        # `mojo_type_add_base`; bugs/mid/CODEGEN_enum_runtime_class_creation.md stage 3). Not the
         # zero placeholder below, which every class would share.
         t = gen._new_temp('int64_t')
         gen._emit(f'  {t} = (int64_t){gimple_exprtypes._struct_type_id(name)}LL;  /* class {name} as value */')
@@ -1523,10 +1523,10 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     if len(gen._frames_mods) > 0 and node.member == 'f_locals':
         # A frame's locals and trace hook have no representation yet (compiled C locals have no
         # runtime names or addresses): refuse by name rather than read the word as an object
-        # attribute and answer garbage (see bugs/hard/CODEGEN_frame_f_locals_and_settrace.md, Plan).
+        # attribute and answer garbage (see bugs/mid/CODEGEN_frame_f_locals_and_settrace.md, Plan).
         raise RuntimeError(
             f"cannot compile module: frame attribute `{node.member}` is not modelled on the compiled "
-            "path (bugs/hard/CODEGEN_frame_f_locals_and_settrace.md)")
+            "path (bugs/mid/CODEGEN_frame_f_locals_and_settrace.md)")
     if len(gen._frames_mods) > 0 and node.member in _FRAME_ATTRS:
         _fr_t, _fr_v = gen.lower_expr(node.obj)
         _fr_w = gen._to_int64(_fr_t, _fr_v)

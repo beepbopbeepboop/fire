@@ -11121,7 +11121,7 @@ fn main():
     print(out)
 """, "45213\n54321\nolleh\n")
 
-    # bugs/PARTIAL_WORK_HANDOFF.md §4.1: a function returning a local it just
+    # PARTIAL_WORK_HANDOFF §4.1 (fixed): a function returning a local it just
     # bound was typed int64_t regardless of the local's real value, so the
     # caller printed the pointer's decimal address instead of the string.
     test_gimple_stdout("gimple_return_local_bound_to_string_literal", """\
@@ -11724,7 +11724,7 @@ bytes_keyed()
     # what lets a kind-0 zero print `0` in the same dict where a `None` prints
     # `None`. `d['n']` still prints `0` where CPython says `None` — a READ
     # does not carry the slot kind anywhere — which is deliberately NOT pinned
-    # here; see bugs/CODEGEN_dict_slot_read_loses_its_value_kind.md.
+    # here; see bugs/mid/CODEGEN_dict_slot_read_loses_its_value_kind.md.
     # A `(key, value)` pair built by `mojo_dict_items` has to carry the dict
     # slot's kind, because a pair slot is a raw int64_t and the pair is built by
     # the runtime with nothing from the dict slot travelling with it. Without it
@@ -12028,6 +12028,46 @@ for x in [1, 2]:
 for x in ['p', 'q']:
     print(x)
 """, "1\n2\np\nq\n")
+
+    # PARTIAL_WORK_HANDOFF §2.1: a container literal reaches a field through
+    # TWO constructor hops -- `Owner([10, 20])` binds Owner's param, then
+    # `Reader(self._items)` passes that field on. The call-site evidence was
+    # only ever read one hop deep, so `Reader.items` stayed `int64_t` and the
+    # loop took the dynamic dispatch path, which SIGSEGVed printing the
+    # integer as a `char *`. The one-hop shapes already worked and are kept
+    # here as the guard for the same field pass.
+    test_gimple_stdout("gimple_ctor_container_two_hops_field_iterates", """\
+class Reader:
+    def __init__(self, items):
+        self.items = items
+class Owner:
+    def __init__(self, items):
+        self._items = items
+    def read(self):
+        return Reader(self._items).items
+def main():
+    o = Owner([10, 20])
+    for i in o.read():
+        print(i)
+main()
+""", "10\n20\n")
+
+    # Negative guard for the same hop: a SCALAR forwarded through `self.<f>`
+    # must not be promoted to a container by the new route.
+    test_gimple_stdout("gimple_ctor_scalar_two_hops_stays_scalar", """\
+class Reader:
+    def __init__(self, items):
+        self.items = items
+class Owner:
+    def __init__(self, n):
+        self._n = n
+    def read(self):
+        return Reader(self._n).items
+def main():
+    o = Owner(7)
+    print(o.read() + 1)
+main()
+""", "8\n")
 
     test_gimple_stdout("gimple_for_loop_target_rebind_str_then_bytes", """\
 for x in "cd":
@@ -14401,10 +14441,10 @@ def test_namedtuple_tuple_protocol_is_refused_by_name():
 
 
 def test_nested_class_attr_reads_enclosing_local_regression():
-    """Regression for bugs/CODEGEN_nested_class_attr_reads_enclosing_local_silently_zero.md.
-    A class-level attribute whose value names an enclosing function's local
-    was lowered as a `class` statement no-op, so the attribute stayed 0 at
-    exit 0. The class statement must store the value when it executes. Each
+    """Regression: a class-level attribute whose value names an enclosing
+    function's local was lowered as a `class` statement no-op, so the
+    attribute stayed 0 at exit 0. The class statement must store the value
+    when it executes. Each
     call reads its own value right after its `class` statement, so the two
     calls must each print their own argument."""
     test_gimple_stdout("gimple_nested_class_attr_reads_local", """\
@@ -14500,7 +14540,7 @@ def main():
 
 def test_nested_class_attr_rebind_after_construction_regression():
     """Pins the answer any per-execution fix for
-    bugs/CODEGEN_nested_class_attr_reads_enclosing_local_silently_zero.md
+    a nested class attribute reading an enclosing local (fixed)
     must keep. A class attribute rebound on the CLASS after an instance was
     built is seen by that instance (Python: the instance has no attribute of
     its own, so it reads the class's current value, 3). A per-instance copy of

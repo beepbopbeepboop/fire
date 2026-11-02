@@ -21,8 +21,7 @@
   `decorator_in_a_module_level_block_is_refused`. `test_gimple.py`: 414 passed,
   2 failed. Both failures also occur on HEAD: the walk-memo census on
   `mojo/middle/coro.py` (commit fd64d710e)
-  and `scalar_arity_min_max_params_are_not_containers` (filed as
-  `bugs/TEST_scalar_arity_min_max_link_mode_prints_nothing.md`).
+  and `scalar_arity_min_max_params_are_not_containers`.
 
 **Still OPEN:**
 

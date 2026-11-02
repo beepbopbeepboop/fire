@@ -54,7 +54,7 @@ reproducible on a two-line program. Signal is SIGSEGV (11), shell status 139.
 > **Historical.** The three EXPECTED rows below were the state when this was
 > written. Only the first has changed, and it changed because of the
 > `expect=`-vs-`disabled=` decision rather than because anything was fixed:
-> `ab-native` is now `disabled=bugs/CODEGEN_ab_native_fails.md` — registered,
+> `ab-native` is now `disabled=bugs/mid/CODEGEN_ab_native_fails.md` — registered,
 > and NOT RUN at all, because it measured 20.5 GB and held 55 of a 96 GB machine
 > budget exclusively in every run to be told what its own marker already said.
 > The other two are still `expect=`. The census is CLAUDE.md, "Known-failing

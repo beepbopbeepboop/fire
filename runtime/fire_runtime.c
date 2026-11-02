@@ -493,6 +493,21 @@ void *_mojo_exc_obj = NULL;
 void mojo_exc_obj_set(void *obj) { _mojo_exc_obj = obj; }
 void *mojo_exc_obj_get(void) { return _mojo_exc_obj; }
 
+MojoExc *mojo_exc_new(int64_t type, char *msg, MojoList *args) {
+    MojoExc *exc = (MojoExc *)malloc(sizeof(MojoExc));
+    if (!exc) return NULL;
+    exc->type = type;
+    exc->msg = msg ? strdup(msg) : NULL;
+    exc->args = args;
+    return exc;
+}
+
+MojoList *mojo_exc_args(void *obj) {
+    if (!obj) return NULL;
+    MojoExc *exc = (MojoExc *)obj;
+    return (MojoList *)exc->args;
+}
+
 /* Exception type tag: a small int id (assigned per exception class name at
  * compile time, see GimpleGen._exc_type_id) that lets a multi-handler
  * try/except dispatch on which exception was actually raised instead of
@@ -1605,10 +1620,14 @@ void mojo_list_append_word(MojoList *l, int64_t w)
             /* A None box (mojo_box_none): a slot of kind 'n' whose raw value
              * is ignored -- the same shape `None` takes in every other list. */
             case 'n': _list_word_push(l, MOJO_KIND_NONE, 0, 'i'); return;
+            case 's': _list_word_push(l, MOJO_KIND_BYTES, bx->bits, 'i'); return;
             default:  _list_word_push(l, 'i', bx->bits, 'i'); return;
         }
     }
     if (mojo_boxed_is_str(w)) { _list_word_push(l, 'p', w, 'i'); return; }
+    /* a bytes object is a pointer too, but not a str: its own slot kind, so the
+     * list reads and prints it as bytes (not as its address, an int) */
+    if (mojo_is_registered_bytes(w)) { _list_word_push(l, MOJO_KIND_BYTES, w, 'i'); return; }
     _list_word_push(l, 'i', w, 'i');
 }
 
@@ -1762,6 +1781,10 @@ int mojo_truthy_word(int64_t w)
     if (mojo_is_registered_list(w)) return mojo_list_len((MojoList *)(intptr_t)w) != 0;
     if (mojo_is_registered_dict(w)) return mojo_dict_len((MojoDict *)(intptr_t)w) != 0;
     if (mojo_is_registered_set(w)) return mojo_set_len((MojoSet *)(intptr_t)w) != 0;
+    /* A bytes object is a registered pointer word: its truth is its length, not
+     * the non-NULL test every other pointer-shaped word would answer. Must come
+     * before the str test, which would read its data as a C string. */
+    if (mojo_is_registered_bytes(w)) return mojo_bytes_truthy((MojoBytes *)(intptr_t)w);
     if (mojo_is_boxed(w)) {
         MojoBox *bx = (MojoBox *)(intptr_t)w;
         if (bx->kind == 'n') return 0;
@@ -1811,6 +1834,7 @@ char *mojo_repr_boxed(int64_t v)
      * word keeps its integer rendering. The caller strdup'd the box arms
      * above, so this arm hands back its own copy too. */
     if (mojo_boxed_is_str(v)) return strdup((char *)(intptr_t)v);
+    if (mojo_is_re_match(v)) return mojo_re_match_repr(v);
     return mojo_str_from_int(v);
 }
 
@@ -2047,7 +2071,8 @@ int mojo_boxed_is_str(int64_t v) {
     if (!(_mojo_ptr_shaped(v))) return 0;
     if (mojo_is_registered_list(v) || mojo_is_registered_dict(v)
         || mojo_is_registered_set(v) || mojo_is_boxed(v)
-        || mojo_is_registered_bytes(v)) return 0;
+        || mojo_is_registered_bytes(v)
+        || mojo_is_re_pattern(v) || mojo_is_re_match(v)) return 0;
     /* Pointer-shaped and not a container: the sound half the range test could
      * never give. A LIVE heap allocation is a real pointer and no bare integer
      * is one, and a registered non-heap string is the codegen's `__rodata`
@@ -3419,7 +3444,7 @@ char *mojo_cstr_slice(char *s, int64_t start, int64_t stop)
          * the first NUL within s[0..stop), or `stop` when there is none)
          * and is what every libc already vectorises. Measured on the exact
          * scanning shape above (see
-         * bugs/CODEGEN_selfhost_tokenize_region_eq_quadratic.md): 14x on
+         * bugs/mid/CODEGEN_selfhost_tokenize_region_eq_quadratic.md): 14x on
          * the same inputs, with a byte-for-byte equality check over every
          * position confirming the two agree.
          *
@@ -3445,6 +3470,33 @@ char *mojo_cstr_slice(char *s, int64_t start, int64_t stop)
     int64_t n = stop - start;
     char *out = malloc((size_t)n + 1);
     memcpy(out, s + start, (size_t)n);
+    out[n] = '\0';
+    return out;
+}
+
+char *mojo_cstr_slice_cp(char *s, int64_t start, int64_t stop)
+{
+    if (!s) { char *e = malloc(1); e[0] = '\0'; return e; }
+    int64_t slen = (int64_t)strlen(s);
+    int64_t ncp = mojo_str_codepoint_len(s);
+    if (stop == MOJO_SLICE_STOP_OMITTED) stop = ncp;
+    if (start < 0) start += ncp;
+    if (stop < 0) stop += ncp;
+    if (start < 0) start = 0;
+    if (stop > ncp) stop = ncp;
+    if (start >= stop) { char *e = malloc(1); e[0] = '\0'; return e; }
+    int64_t bstart = mojo_utf8_codepoint_to_byte_offset(s, start);
+    int64_t bstop;
+    /* Find byte offset at end of stop-th codepoint */
+    if (stop >= ncp) {
+        bstop = slen;
+    } else {
+        bstop = mojo_utf8_codepoint_to_byte_offset(s, stop);
+    }
+    int64_t n = bstop - bstart;
+    if (n < 0) n = 0;
+    char *out = malloc((size_t)n + 1);
+    memcpy(out, s + bstart, (size_t)n);
     out[n] = '\0';
     return out;
 }
@@ -3500,24 +3552,28 @@ int mojo_cstr_region_eq(char *s, int64_t start, int64_t stop, char *needle)
 
 MojoStr *mojo_str_slice(MojoStr *s, int64_t start, int64_t stop)
 {
-    /* See mojo_list_slice's identical fix: MOJO_SLICE_STOP_OMITTED (not a
-     * plain -1) means "no stop given" (`s[start:]`), distinct from a real
-     * `s[start:-1]`. */
-    if (stop == MOJO_SLICE_STOP_OMITTED) stop = s->len;
-    if (start < 0) start = s->len + start;
-    if (stop  < 0) stop  = s->len + stop;
+    /* Codepoint-aware slicing */
+    if (!s) { MojoStr *ms = malloc(sizeof(MojoStr)); ms->len = 0; ms->data = malloc(1); ms->data[0] = '\0'; return ms; }
+    int64_t ncp = mojo_str_codepoint_len(s->data);
+    int64_t slen = (int64_t)strlen(s->data);
+    if (stop == MOJO_SLICE_STOP_OMITTED) stop = ncp;
+    if (start < 0) start = ncp + start;
+    if (stop  < 0) stop  = ncp + stop;
     if (start < 0) start = 0;
-    if (stop > s->len) stop = s->len;
+    if (stop > ncp) stop = ncp;
     if (start >= stop) {
         MojoStr *ms = malloc(sizeof(MojoStr));
         ms->len = 0; ms->data = malloc(1); ms->data[0] = '\0';
         return ms;
     }
-    int64_t len = stop - start;
+    int64_t bstart = mojo_utf8_codepoint_to_byte_offset(s->data, start);
+    int64_t bstop = (stop >= ncp) ? slen : mojo_utf8_codepoint_to_byte_offset(s->data, stop);
+    int64_t len = bstop - bstart;
+    if (len < 0) len = 0;
     MojoStr *ms = malloc(sizeof(MojoStr));
     ms->len  = len;
     ms->data = malloc((size_t)len + 1);
-    memcpy(ms->data, s->data + start, (size_t)len);
+    memcpy(ms->data, s->data + bstart, (size_t)len);
     ms->data[len] = '\0';
     return ms;
 }
@@ -5655,19 +5711,36 @@ static void __attribute__((constructor)) _mojo_register_char_table(void) {
  * either — the invariant `mojo_char_to_str` already carries. */
 char *mojo_char_at_str(char *s, int64_t i) {
     if (!s) return mojo_char_to_str(0);
+    static char *_mojo_char_cache_ptr = NULL;
+    static int64_t _mojo_char_cache_len = -1;
     if (i < 0) {
-        i += (int64_t)strlen(s);
+        int64_t len = (_mojo_char_cache_ptr == s && _mojo_char_cache_len >= 0) ? _mojo_char_cache_len : (int64_t)strlen(s);
+        if (_mojo_char_cache_ptr != s || _mojo_char_cache_len < 0) {
+            _mojo_char_cache_ptr = s;
+            _mojo_char_cache_len = len;
+        }
+        i += len;
         if (i < 0) return mojo_char_to_str(0);
-    } else if (memchr(s, 0, (size_t)i + 1) != NULL) {
-        /* A NUL at or BEFORE i means the string ended at or before it, so
-           `s[i]` is past the end: "", which is what the slice returned. A NUL
-           exactly AT i is that same case (`mojo_cstr_slice(s, i, i+1)` stops at
-           the first NUL within `s[0..i]`, inclusive of `i`). `memchr` for the
-           non-negative case rather than a second `strlen`, for the reason
-           `mojo_cstr_slice` uses it: a scan over a long string must not re-scan
-           the whole thing once per character. */
+        if (i >= len) return mojo_char_to_str(0);
+        return mojo_char_to_str(s[i]);
+    }
+    if (_mojo_char_cache_ptr == s && _mojo_char_cache_len >= 0) {
+        if (i >= _mojo_char_cache_len) return mojo_char_to_str(0);
+        return mojo_char_to_str(s[i]);
+    }
+    /* Check if NUL is within or at i - if so, we need to know length */
+    const char *nul = (const char *)memchr(s, 0, (size_t)i + 1);
+    if (nul != NULL) {
+        int64_t len = (int64_t)(nul - s);
+        _mojo_char_cache_ptr = s;
+        _mojo_char_cache_len = len;
         return mojo_char_to_str(0);
     }
+    /* No NUL found in range [0..i], need full string length */
+    int64_t len = (int64_t)strlen(s);
+    _mojo_char_cache_ptr = s;
+    _mojo_char_cache_len = len;
+    if (i >= len) return mojo_char_to_str(0);
     return mojo_char_to_str(s[i]);
 }
 
@@ -5793,7 +5866,9 @@ int64_t mojo_str_find(char *s, char *needle) {
     if (!s || !needle) return -1;
     char *found = strstr(s, needle);
     if (!found) return -1;
-    return (int64_t)(found - s);
+    int64_t byte_off = (int64_t)(found - s);
+    /* Return codepoint offset */
+    return mojo_utf8_codepoint_index(s, byte_off);
 }
 
 /* str.rfind(needle[, start[, end]]) over a window. An empty needle matches at
@@ -5804,12 +5879,27 @@ int64_t mojo_str_find(char *s, char *needle) {
 int64_t mojo_str_rfind_from(char *s, char *needle, int64_t start, int64_t stop) {
     if ((intptr_t)s < 65536 || (intptr_t)needle < 65536) return -1;
     if (!s || !needle) return -1;
-    mojo_str_clamp_range(s, &start, &stop);
-    if (stop < start) return -1;
+    int64_t byte_start = mojo_utf8_codepoint_to_byte_offset(s, start);
+    int64_t byte_stop;
+    if (stop == MOJO_SLICE_STOP_OMITTED) {
+        byte_stop = (int64_t)strlen(s);
+    } else {
+        byte_stop = mojo_utf8_codepoint_to_byte_offset(s, stop);
+    }
+    if (byte_stop < byte_start) return -1;
     int64_t nlen = (int64_t)strlen(needle);
-    if (nlen == 0) return stop;
-    for (int64_t i = stop - nlen; i >= start; i--) {
-        if (memcmp(s + i, needle, (size_t)nlen) == 0) return i;
+    if (nlen == 0) {
+        /* empty needle matches at end of window in codepoints */
+        /* return stop in codepoints */
+        if (stop == MOJO_SLICE_STOP_OMITTED) {
+            return mojo_str_codepoint_len(s);
+        }
+        return stop;
+    }
+    for (int64_t i = byte_stop - nlen; i >= byte_start; i--) {
+        if (memcmp(s + i, needle, (size_t)nlen) == 0) {
+            return mojo_utf8_codepoint_index(s, i);
+        }
     }
     return -1;
 }
@@ -5829,13 +5919,23 @@ int64_t mojo_str_rfind(char *s, char *needle) {
 int64_t mojo_str_find_from(char *s, char *needle, int64_t start, int64_t stop) {
     if ((intptr_t)s < 65536 || (intptr_t)needle < 65536) return -1;
     if (!s || !needle) return -1;
-    int64_t len = (int64_t)strlen(s);
-    mojo_str_clamp_range(s, &start, &stop);
-    if (start > len || stop < start) return -1;
+    /* start/stop are in codepoint units now */
+    int64_t byte_start = mojo_utf8_codepoint_to_byte_offset(s, start);
+    int64_t byte_stop;
+    if (stop == MOJO_SLICE_STOP_OMITTED) {
+        byte_stop = (int64_t)strlen(s);
+    } else {
+        /* stop is exclusive end in codepoints? Or we need to search within range */
+        byte_stop = mojo_utf8_codepoint_to_byte_offset(s, stop);
+    }
+    int64_t slen = (int64_t)strlen(s);
+    if (byte_start > slen || byte_stop < byte_start) return -1;
     int64_t nlen = (int64_t)strlen(needle);
     if (nlen == 0) return start;
-    for (int64_t i = start; i + nlen <= stop; i++) {
-        if (memcmp(s + i, needle, (size_t)nlen) == 0) return i;
+    for (int64_t i = byte_start; i + nlen <= byte_stop; i++) {
+        if (memcmp(s + i, needle, (size_t)nlen) == 0) {
+            return mojo_utf8_codepoint_index(s, i);
+        }
     }
     return -1;
 }
@@ -5938,23 +6038,95 @@ int64_t mojo_utf8_codepoint_index(char *s, int64_t byte_offset) {
 }
 
 /* len(s) on a UTF-8 char * — Python's len counts CODE POINTS, and a char *
- * here is a UTF-8 buffer, so strlen's byte count answers 2 for "é" and 4
- * for a 4-byte emoji where CPython (and the interpreter, and the formal
- * backends' len-from-decoded-text) say 1. Same non-continuation test
- * (10xxxxxx) mojo_utf8_codepoint_index uses for the regex offsets, run over
- * the whole buffer: exactly one lead byte per code point, so an ASCII string
- * is unchanged and the answer is the code-point count. This is the len-only
- * half of the string-model question on purpose: s[i]/find/slicing/printf
- * width still read a char * as bytes, and choosing code points everywhere is
- * the larger model change argued in FORMAL_string_value_model — so this is
- * the ONE place len() is right rather than a generic "length" to reach for
- * in the byte-indexed paths. MojoStr is wrapped, but its data is the same
- * UTF-8 buffer (mojo_str_new builds it from one), so its len goes through
- * here on s->data instead of on s->len, which the concat/char_at family
- * still read as bytes. */
+ * here is a UTF-8 buffer. Same non-continuation test
+ * (10xxxxxx) mojo_utf8_codepoint_index uses. */
 int64_t mojo_str_codepoint_len(char *s) {
     if (!s) return 0;
     return mojo_utf8_codepoint_index(s, (int64_t)strlen(s));
+}
+
+/* Convert a codepoint index to a byte offset in a UTF-8 string.
+ * For ASCII strings, codepoint index == byte index (fast path). */
+int64_t mojo_utf8_codepoint_to_byte_offset(char *s, int64_t cp_idx) {
+    if (!s) return 0;
+    if (cp_idx <= 0) return 0;
+    int64_t byte_off = 0;
+    int64_t cp_count = 0;
+    int64_t len = (int64_t)strlen(s);
+    while (byte_off < len && cp_count < cp_idx) {
+        unsigned char c = (unsigned char)s[byte_off];
+        if (c == 0) break;
+        if ((c & 0xC0) != 0x80) {
+            cp_count++;
+            if (cp_count == cp_idx) break;
+        }
+        byte_off++;
+    }
+    /* Advance past the start byte of the codepoint we just counted */
+    if (cp_count == cp_idx && byte_off < len) {
+        unsigned char c = (unsigned char)s[byte_off];
+        if ((c & 0xC0) != 0x80) {
+            /* This is the start byte of codepoint cp_idx; we need to return its byte offset */
+            /* Count up to but not including this position? Wait - let's trace: when we see
+             * a non-continuation byte and cp_count becomes cp_idx, we break. But byte_off
+             * is pointing at that start byte. So we need to return byte_off. */
+            /* Actually let us compute differently */
+        }
+    }
+    /* Better implementation: iterate and track */
+    byte_off = 0;
+    cp_count = 0;
+    while (byte_off < len) {
+        unsigned char c = (unsigned char)s[byte_off];
+        if (c == 0) break;
+        if ((c & 0xC0) != 0x80) {
+            if (cp_count == cp_idx) {
+                return byte_off;
+            }
+            cp_count++;
+        }
+        byte_off++;
+    }
+    /* If past end, return end of string */
+    return (int64_t)strlen(s);
+}
+
+/* Get a codepoint as a string at codepoint index i (not byte index) */
+char *mojo_char_at_str_cp(char *s, int64_t i) {
+    if (!s) return mojo_char_to_str(0);
+    if (i < 0) {
+        /* negative index from end in codepoints */
+        int64_t ncp = mojo_str_codepoint_len(s);
+        i += ncp;
+        if (i < 0) return mojo_char_to_str(0);
+    }
+    int64_t byte_off = mojo_utf8_codepoint_to_byte_offset(s, i);
+    int64_t len = (int64_t)strlen(s);
+    if (byte_off >= len) return mojo_char_to_str(0);
+    /* Check if at or past end */
+    /* Extract the UTF-8 codepoint starting at byte_off */
+    unsigned char c = (unsigned char)s[byte_off];
+    if (c == 0) return mojo_char_to_str(0);
+    int char_len = 1;
+    if ((c & 0x80) == 0) {
+        char_len = 1;
+    } else if ((c & 0xE0) == 0xC0) {
+        char_len = 2;
+    } else if ((c & 0xF0) == 0xE0) {
+        char_len = 3;
+    } else if ((c & 0xF8) == 0xF0) {
+        char_len = 4;
+    } else {
+        char_len = 1;
+    }
+    /* Use a cached approach similar to mojo_char_to_str but we need to return a string
+     * that contains the full multi-byte char. For now, build it. */
+    char *out = malloc((size_t)char_len + 1);
+    memcpy(out, s + byte_off, (size_t)char_len);
+    out[char_len] = '\0';
+    /* Register it so mojo_boxed_is_str can recognize it */
+    mojo_str_register(out);
+    return out;
 }
 
 /* PART 6 (2026-10-23, family S): decode the FIRST UTF-8 code point.
@@ -10703,7 +10875,7 @@ int64_t mojo_getitem_word(int64_t w, int64_t i)
         if (i < 0) i += mojo_list_len(l);
         return mojo_box_word(mojo_list_get_boxed(l, i));
     }
-    if (mojo_boxed_is_str(w)) return (int64_t)(intptr_t)mojo_char_at_str((char *)(intptr_t)w, i);
+    if (mojo_boxed_is_str(w)) return (int64_t)(intptr_t)mojo_char_at_str_cp((char *)(intptr_t)w, i);
     mojo_raise_type_error((char *)"object is not subscriptable");
     return 0;
 }
@@ -12294,10 +12466,44 @@ MojoList *mojo_glob(char *pattern) {
 }
 int64_t mojo_glob_w(int64_t pattern) { return (int64_t)(intptr_t)mojo_glob((char *)(intptr_t)pattern); }
 
+/* os.path.join / os.path.split on a runtime WORD. A registered bytes object is a
+ * bytes path: its parts are bytes and the result is bytes, mirroring posixpath
+ * verbatim (the same rules the str twins above follow). Anything else is a str
+ * (a heap C string), exactly as before. Mixing the two is CPython's TypeError. */
+static MojoBytes *_bytes_path_join(MojoBytes *a, MojoBytes *b)
+{
+    static const char sep_c = '/';
+    if (b->len > 0 && b->data[0] == '/') return b;             /* absolute b wins */
+    if (a->len == 0 || a->data[a->len - 1] == '/') return mojo_bytes_concat(a, b);
+    MojoBytes *sep = mojo_bytes_new_lit(&sep_c, 1);
+    return mojo_bytes_concat(mojo_bytes_concat(a, sep), b);
+}
 /* os.path.<fn> as function VALUES (int64_t ABI, see mojo_fnptr_call_N): the
  * addresses `x = os.path.islink` / `join = path.join` evaluate to. */
 int64_t mojo_os_path_join_w(int64_t a, int64_t b) {
+    int ab = mojo_is_registered_bytes(a), bb = mojo_is_registered_bytes(b);
+    if (ab && bb) return (int64_t)(intptr_t)_bytes_path_join((MojoBytes *)(intptr_t)a, (MojoBytes *)(intptr_t)b);
+    if (ab || bb) { mojo_raise_type_error("Can't mix strings and bytes in path components"); return 0; }
     return (int64_t)(intptr_t)mojo_path_join((char *)(intptr_t)a, (char *)(intptr_t)b);
+}
+MojoList *mojo_os_path_split_w(int64_t p) {
+    if (!mojo_is_registered_bytes(p))
+        return int64_t_path_split((char *)(intptr_t)p);
+    /* posixpath.split for bytes: split after the last b'/', then strip the
+     * head's trailing slashes unless the head is nothing but slashes. */
+    MojoBytes *b = (MojoBytes *)(intptr_t)p;
+    int64_t i = 0;
+    for (int64_t k = 0; k < b->len; k++)
+        if (b->data[k] == '/') i = k + 1;
+    int64_t end = i;
+    while (end > 0 && b->data[end - 1] == '/') end--;
+    int64_t hlen = end == 0 ? i : end;
+    MojoBytes *head = mojo_bytes_new_lit((const char *)b->data, hlen);
+    MojoBytes *tail = mojo_bytes_new_lit((const char *)b->data + i, b->len - i);
+    MojoList *l = mojo_list_new();
+    mojo_list_append_word(l, (int64_t)(intptr_t)head);
+    mojo_list_append_word(l, (int64_t)(intptr_t)tail);
+    return l;
 }
 int64_t mojo_os_path_islink_w(int64_t p) {
     struct stat st;
@@ -12318,7 +12524,13 @@ int64_t mojo_os_path_dirname_w(int64_t p) { return int_dirname(0, p); }
  * Fails like CPython: a missing directory is FileNotFoundError, anything else
  * OSError (reported through the pending-exception flag; the coroutine body
  * rethrows it as a C++ exception, so `except OSError` catches both). Order is the directory's own. */
-typedef struct { char *name; char *path; int is_dir_nofollow; int is_symlink; int dirfd; } MojoDirEntry;
+/* `name`/`path` are the C strings every stat-family call reads. A scandir of a
+ * BYTES path (CPython: `os.scandir(b'...')` yields bytes names) also carries
+ * `bname`/`bpath` as MojoBytes objects, and `is_bytes` says which pair
+ * mojo_dirent_name/path hand back: the runtime, not the compiler, knows the
+ * kind, because a glob's `dirname` is an untyped parameter. */
+typedef struct { char *name; char *path; int is_dir_nofollow; int is_symlink; int dirfd;
+                 int is_bytes; MojoBytes *bname; MojoBytes *bpath; } MojoDirEntry;
 
 /* `w[a:b:c]` on a WORD whose kind only the runtime knows (a list or a string):
  * a registered list slices as a list, anything else as a string. */
@@ -12393,13 +12605,24 @@ MojoList *mojo_fnmatch_filter(MojoList *names, int64_t pat) {
 MojoList *mojo_os_scandir(char *top) {
     /* `scandir(fd)`: a word below the pointer range is an open directory fd */
     if ((intptr_t)top > 0 && (intptr_t)top < 65536) return mojo_os_scandir_fd((int64_t)(intptr_t)top);
-    DIR *d = top ? opendir(top) : NULL;
+    /* `scandir(b'...')`: a registered MojoBytes is a bytes path. The syscalls
+     * take a C string, so a NUL-terminated copy is made; the entries built
+     * below then answer `name`/`path` as bytes. */
+    int is_bytes = top && mojo_is_registered_bytes((int64_t)(intptr_t)top);
+    char *dpath = top;
+    if (is_bytes) {
+        MojoBytes *b = (MojoBytes *)top;
+        dpath = (char *)malloc((size_t)b->len + 1);
+        memcpy(dpath, b->data, (size_t)b->len);
+        dpath[b->len] = '\0';
+    }
+    DIR *d = dpath ? opendir(dpath) : NULL;
     if (!d) {
-        mojo_exc_type_set(top && errno == ENOENT ? _MOJO_EXC_TAG_FILENOTFOUND
-                                                 : _MOJO_EXC_TAG_OSERROR);
+        mojo_exc_type_set(dpath && errno == ENOENT ? _MOJO_EXC_TAG_FILENOTFOUND
+                                                   : _MOJO_EXC_TAG_OSERROR);
         char msg[512];
         snprintf(msg, sizeof msg, "[Errno %d] %s: '%s'", errno, strerror(errno),
-                 top ? top : "?");
+                 dpath ? dpath : "?");
         char *heap_msg = strdup(msg);
         mojo_exc_msg_set(heap_msg);
         mojo_exc_obj_set(heap_msg);
@@ -12407,29 +12630,61 @@ MojoList *mojo_os_scandir(char *top) {
          * is a C++20 coroutine body, which must never longjmp out of its
          * frame; it rethrows a real C++ exception when it sees the flag. */
         mojo_exc_pending_set(1);
+        if (is_bytes) free(dpath);
         return mojo_list_new();
     }
     MojoList *out = mojo_list_new();
-    size_t tl = strlen(top);
+    size_t tl = strlen(dpath);
     struct dirent *de;
     while ((de = readdir(d)) != NULL) {
         if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) continue;
-        MojoDirEntry *e = (MojoDirEntry *)malloc(sizeof *e);
+        MojoDirEntry *e = (MojoDirEntry *)calloc(1, sizeof *e);
         e->name = strdup(de->d_name);
         size_t n = tl + strlen(de->d_name) + 2;
         e->path = (char *)malloc(n);
-        snprintf(e->path, n, "%s%s%s", top, (tl && top[tl - 1] != '/') ? "/" : "", de->d_name);
+        snprintf(e->path, n, "%s%s%s", dpath, (tl && dpath[tl - 1] != '/') ? "/" : "", de->d_name);
         struct stat st;
         e->dirfd = -1;
         e->is_symlink = lstat(e->path, &st) == 0 && S_ISLNK(st.st_mode);
         e->is_dir_nofollow = (e->is_symlink ? 0 : (S_ISDIR(st.st_mode) ? 1 : 0));
+        if (is_bytes) {
+            e->is_bytes = 1;
+            e->bname = mojo_bytes_from_cstr(e->name);
+            e->bpath = mojo_bytes_from_cstr(e->path);
+        }
         mojo_list_append_int(out, (int64_t)(intptr_t)e);
     }
     closedir(d);
+    if (is_bytes) free(dpath);
     return out;
 }
-char *mojo_dirent_name(int64_t h) { return ((MojoDirEntry *)(intptr_t)h)->name; }
-char *mojo_dirent_path(int64_t h) { return ((MojoDirEntry *)(intptr_t)h)->path; }
+/* str(x, encoding) for a word whose kind is known only at run time: a bytes
+ * object decodes, anything else is already a str and is returned as it is. */
+char *mojo_str_from_word(int64_t w, char *encoding, char *errors)
+{
+    if (mojo_is_registered_bytes(w))
+        return mojo_bytes_decode((MojoBytes *)(intptr_t)w, encoding, errors);
+    return (char *)(intptr_t)w;
+}
+
+/* os.fsencode(x) for a str OR bytes word: bytes pass through unchanged (the
+ * object is its own encoding), a str is encoded to a new bytes object. */
+int64_t mojo_fsencode_w(int64_t w)
+{
+    if (mojo_is_registered_bytes(w)) return w;
+    return (int64_t)(intptr_t)mojo_bytes_from_cstr((char *)(intptr_t)w);
+}
+/* DirEntry.name / .path as a runtime-kinded WORD: a str (a heap C string) for
+ * a str scandir, a bytes object for a bytes scandir. Same kind convention as
+ * fspath/fsencode, so consumers dispatch with mojo_boxed_is_str. */
+int64_t mojo_dirent_name(int64_t h) {
+    MojoDirEntry *e = (MojoDirEntry *)(intptr_t)h;
+    return e->is_bytes ? (int64_t)(intptr_t)e->bname : (int64_t)(intptr_t)e->name;
+}
+int64_t mojo_dirent_path(int64_t h) {
+    MojoDirEntry *e = (MojoDirEntry *)(intptr_t)h;
+    return e->is_bytes ? (int64_t)(intptr_t)e->bpath : (int64_t)(intptr_t)e->path;
+}
 int64_t mojo_dirent_is_symlink(int64_t h) { return ((MojoDirEntry *)(intptr_t)h)->is_symlink; }
 int64_t mojo_dirent_is_dir(int64_t h, int64_t follow) {
     MojoDirEntry *e = (MojoDirEntry *)(intptr_t)h;
@@ -12505,7 +12760,7 @@ MojoList *mojo_os_scandir_fd(int64_t fd) {
     struct dirent *de;
     while ((de = readdir(d)) != NULL) {
         if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) continue;
-        MojoDirEntry *e = (MojoDirEntry *)malloc(sizeof *e);
+        MojoDirEntry *e = (MojoDirEntry *)calloc(1, sizeof *e);
         e->name = strdup(de->d_name);
         e->path = strdup(de->d_name);
         struct stat st;
@@ -13157,6 +13412,7 @@ char *mojo_cstr_or_int_str(int64_t v) {
     if (mojo_boxed_is_str(v)) return (char *)(intptr_t)v;
     if (mojo_is_registered_bytes(v))
         return mojo_bytes_repr((MojoBytes *)(intptr_t)v);
+    if (mojo_is_re_match(v)) return mojo_re_match_repr(v);
     if (mojo_is_registered_list(v)) return _container_key_str(v);
     return _int_str_transient(v);
 }
@@ -15269,16 +15525,25 @@ int mojo_cstr_region_eq_n(char *s, int64_t slen, int64_t start, int64_t stop,
 #include "fire_re_engine.inc"
 
 typedef struct { FreProg *pg; char *pattern; int64_t flags; } MojoRePat;
-typedef struct { MojoRePat *re; char *text; int64_t n; int64_t *caps; int64_t pos, endpos; } MojoReMatch;
+/* `is_bytes` is the subject's KIND, recorded at match time: a bytes subject's
+ * groups are bytes objects and its repr is spelled with bytes reprs (CPython:
+ * `m.group(1)` of `re.compile(b'a(b)').match(b'ab')` is `b'b'`). `text` is a
+ * NUL-terminated copy of the subject either way; groups copy by length. */
+typedef struct { MojoRePat *re; char *text; int64_t n; int64_t *caps; int64_t pos, endpos; int is_bytes; } MojoReMatch;
 static _PtrReg _reg_re_pat, _reg_re_match;
 
 int mojo_is_re_pattern(int64_t w) { return _mojo_ptr_shaped(w) && _pr_has(&_reg_re_pat, (uint64_t)w); }
 int mojo_is_re_match(int64_t w) { return _mojo_ptr_shaped(w) && _pr_has(&_reg_re_match, (uint64_t)w); }
 
 /* re.compile(pattern, flags): a handle, or 0 when the pattern is outside the supported syntax. */
+/* The str entry point also takes a bytes OBJECT, by the object's kind at run
+ * time: a pattern built as a value whose static type is unknown (fnmatch's
+ * `res = bytes(...)`) reaches here as a word, and must not be read as text. */
 int64_t mojo_re_compile(char *pat, int64_t flags)
 {
     if (!pat) return 0;
+    if (mojo_is_registered_bytes((int64_t)(intptr_t)pat))
+        return mojo_re_compile_bytes((MojoBytes *)(intptr_t)pat, flags);
     FreProg *pg = fre_compile(pat, (int)flags);
     if (pg->ncode < 0) { fre_free(pg); return 0; }
     MojoRePat *r = (MojoRePat *)malloc(sizeof *r);
@@ -15288,9 +15553,12 @@ int64_t mojo_re_compile(char *pat, int64_t flags)
 }
 
 /* mode 0 match / 1 search / 2 fullmatch.  A match handle or 0 (None). */
+/* Likewise a bytes subject, by its kind: see mojo_re_compile. */
 int64_t mojo_re_exec(int64_t h, char *s, int64_t pos, int64_t endpos, int64_t mode)
 {
     if (!mojo_is_re_pattern(h) || !s) return 0;
+    if (mojo_is_registered_bytes((int64_t)(intptr_t)s))
+        return mojo_re_exec_bytes(h, (MojoBytes *)(intptr_t)s, pos, endpos, mode);
     MojoRePat *r = (MojoRePat *)(intptr_t)h;
     int64_t n = (int64_t)strlen(s);
     if (endpos < 0 || endpos > n) endpos = n;
@@ -15298,33 +15566,38 @@ int64_t mojo_re_exec(int64_t h, char *s, int64_t pos, int64_t endpos, int64_t mo
     int64_t *caps = (int64_t *)malloc((size_t)nc * sizeof(int64_t));
     if (!fre_exec(r->pg, s, n, pos, endpos, (int)mode, caps)) { free(caps); return 0; }
     MojoReMatch *m = (MojoReMatch *)malloc(sizeof *m);
-    m->re = r; m->text = strdup(s); m->n = n; m->caps = caps; m->pos = pos; m->endpos = endpos;
+    m->re = r; m->text = strdup(s); m->n = n; m->caps = caps; m->pos = pos; m->endpos = endpos; m->is_bytes = 0;
     _pr_add(&_reg_re_match, (uint64_t)(uintptr_t)m);
     return (int64_t)(intptr_t)m;
 }
 
-int64_t mojo_re_compile_bytes(void *pat, int64_t len, int64_t flags)
+/* `pat` is the bytes OBJECT (a MojoBytes *): its data and length are read here,
+ * not passed in, so a caller cannot hand the engine the struct's own bytes. */
+int64_t mojo_re_compile_bytes(MojoBytes *pat, int64_t flags)
 {
-    if (!pat || len < 0) return 0;
-    FreProg *pg = fre_compile_bytes((char *)pat, (int)len, (int)flags);
+    if (!pat || !pat->data || pat->len < 0) return 0;
+    int64_t len = pat->len;
+    FreProg *pg = fre_compile_bytes((char *)pat->data, (int)len, (int)flags);
     if (pg->ncode < 0) { fre_free(pg); return 0; }
     MojoRePat *r = (MojoRePat *)malloc(sizeof *r);
-    r->pg = pg; r->pattern = (char *)malloc((size_t)len + 1); memcpy(r->pattern, pat, (size_t)len); r->pattern[len] = 0; r->flags = flags;
+    r->pg = pg; r->pattern = (char *)malloc((size_t)len + 1); memcpy(r->pattern, pat->data, (size_t)len); r->pattern[len] = 0; r->flags = flags;
     _pr_add(&_reg_re_pat, (uint64_t)(uintptr_t)r);
     return (int64_t)(intptr_t)r;
 }
 
-int64_t mojo_re_exec_bytes(int64_t h, void *s, int64_t len, int64_t pos, int64_t endpos, int64_t mode)
+/* `s` is the bytes OBJECT, as in mojo_re_compile_bytes. */
+int64_t mojo_re_exec_bytes(int64_t h, MojoBytes *s, int64_t pos, int64_t endpos, int64_t mode)
 {
-    if (!mojo_is_re_pattern(h) || !s || len < 0) return 0;
+    if (!mojo_is_re_pattern(h) || !s || !s->data || s->len < 0) return 0;
     MojoRePat *r = (MojoRePat *)(intptr_t)h;
+    int64_t len = s->len;
     int64_t n = len;
     if (endpos < 0 || endpos > n) endpos = n;
     int nc = 2 * (r->pg->ngroups + 1);
     int64_t *caps = (int64_t *)malloc((size_t)nc * sizeof(int64_t));
-    if (!fre_exec_bytes(r->pg, (char *)s, n, pos, endpos, (int)mode, caps)) { free(caps); return 0; }
+    if (!fre_exec_bytes(r->pg, (char *)s->data, n, pos, endpos, (int)mode, caps)) { free(caps); return 0; }
     MojoReMatch *m = (MojoReMatch *)malloc(sizeof *m);
-    m->re = r; m->text = (char *)malloc((size_t)len + 1); memcpy(m->text, s, (size_t)len); m->text[len] = 0; m->n = n; m->caps = caps; m->pos = pos; m->endpos = endpos;
+    m->re = r; m->text = (char *)malloc((size_t)len + 1); memcpy(m->text, s->data, (size_t)len); m->text[len] = 0; m->n = n; m->caps = caps; m->pos = pos; m->endpos = endpos; m->is_bytes = 1;
     _pr_add(&_reg_re_match, (uint64_t)(uintptr_t)m);
     return (int64_t)(intptr_t)m;
 }
@@ -15342,7 +15615,8 @@ static int _re_group_index(MojoReMatch *m, int64_t w, int *out)
     *out = (int)w; return 1;
 }
 
-/* m.group(n): the text of a group, or 0 (None) when it did not participate. */
+/* m.group(n): the text of a group, or 0 (None) when it did not participate.
+ * A bytes subject's group is a bytes object (the word's kind is the subject's). */
 int64_t mojo_re_m_group(int64_t mh, int64_t g)
 {
     if (!mojo_is_re_match(mh)) return 0;
@@ -15350,9 +15624,36 @@ int64_t mojo_re_m_group(int64_t mh, int64_t g)
     if (!_re_group_index(m, g, &i)) return 0;
     int64_t a = m->caps[2 * i], b = m->caps[2 * i + 1];
     if (a < 0 || b < 0) return 0;
+    if (m->is_bytes) return (int64_t)(intptr_t)mojo_bytes_new_lit(m->text + a, b - a);
     char *out = (char *)malloc((size_t)(b - a) + 1);
     memcpy(out, m->text + a, (size_t)(b - a)); out[b - a] = 0;
     return (int64_t)(intptr_t)out;
+}
+
+/* repr() of a word whose kind only the runtime knows (a str, a bytes, a match,
+ * or an integer). Unlike mojo_cstr_or_int_str, which is str(), a str is quoted. */
+char *mojo_repr_word(int64_t v)
+{
+    if (mojo_is_re_match(v)) return mojo_re_match_repr(v);
+    if (mojo_is_registered_bytes(v)) return mojo_bytes_repr((MojoBytes *)(intptr_t)v);
+    if (!mojo_is_boxed(v) && mojo_boxed_is_str(v)) return mojo_repr_str((char *)(intptr_t)v);
+    return mojo_repr_boxed(v);
+}
+
+/* repr(m): CPython's `<re.Match object; span=(s, e), match=REPR>`, where REPR is
+ * the repr of group 0 (a str or a bytes, by the subject's kind). A fresh string. */
+char *mojo_re_match_repr(int64_t mh)
+{
+    MojoReMatch *m = (MojoReMatch *)(intptr_t)mh;
+    int64_t a = m->caps[0], b = m->caps[1];
+    char *whole = (char *)malloc((size_t)(b - a) + 1);
+    memcpy(whole, m->text + a, (size_t)(b - a)); whole[b - a] = 0;
+    char *shown = m->is_bytes ? mojo_bytes_repr(mojo_bytes_new_lit(whole, b - a)) : mojo_repr_str(whole);
+    char *out = (char *)malloc(strlen(shown) + 64);
+    snprintf(out, strlen(shown) + 64, "<re.Match object; span=(%lld, %lld), match=%s>",
+             (long long)a, (long long)b, shown);
+    free(shown); free(whole);
+    return out;
 }
 int64_t mojo_re_m_start(int64_t mh, int64_t g)
 {

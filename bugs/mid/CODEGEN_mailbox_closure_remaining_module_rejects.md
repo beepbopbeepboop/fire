@@ -112,7 +112,7 @@ Compiling a copy of `functools.py` alone (`python3 fire.py build functools_copy.
    class is declared under the bound name and the repr shows the typename.
 3. NEXT WALL: `_CacheInfo(hits, misses, maxsize, currsize)` with non-literal arguments: the namedtuple lowering types a
    field only from literals. Untyped fields are NOT an answer: `maxsize` is `int | None` and the word ABI prints a None
-   as `0` (see bugs/CODEGEN_a_none_held_in_an_int64_local_is_indistinguishable_from_zero_in_membership.md). The route is
+   as `0` (see bugs/mid/CODEGEN_a_none_held_in_an_int64_local_is_indistinguishable_from_zero_in_membership.md). The route is
    typed fields from the call-site argument types, resolved by the codegen (not by `fire_compiler.desugar_namedtuples`,
    which runs before types exist).
 

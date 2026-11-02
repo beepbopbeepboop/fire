@@ -786,7 +786,8 @@ def _cpp_apply_fstring_spec(part_val: str, spec: str) -> str:
 # `os.path.<fn>` names a body may alias to a local -- the ones the `os.path.*`
 # call table in `_cpp_expr` lowers.
 _CPP_OS_PATH_ALIASABLE = ('join', 'islink', 'isdir', 'isfile', 'exists',
-                          'basename', 'dirname')
+                          'basename', 'dirname', 'split', 'splitext',
+                          'expanduser', 'abspath', 'normpath', 'relpath')
 
 
 def _cpp_collect_os_path_aliases(fn) -> dict:
@@ -1497,7 +1498,8 @@ def _cpp_exc_ctor_value(gen, node) -> bool:
 
 _CPP_RT_RETURN_CTYPE = {
     'mojo_path_join': 'char *', 'mojo_str_cat': 'char *', 'mojo_cstr_slice': 'char *',
-    'mojo_dirent_name': 'char *', 'mojo_dirent_path': 'char *',
+    'mojo_dirent_name': 'int64_t', 'mojo_dirent_path': 'int64_t',
+    'mojo_fsencode_w': 'int64_t',
     'mojo_list_new': 'MojoList *', 'mojo_list_slice_word': 'MojoList *',
     'mojo_bytes_from_str': 'MojoBytes *', 'mojo_bytes_from_cstr': 'MojoBytes *',
 }
@@ -2330,7 +2332,7 @@ def _cpp_expr(gen, e) -> str:
         # which `cls` structurally cannot have; an unrecognized name)
         # must refuse rather than silently emit `cls->member` (invalid
         # C++ on a scalar int64_t) or `cls.member` (equally invalid).
-        # See bugs/CODEGEN_enum_runtime_class_creation.md's 2026-08-21
+        # See bugs/mid/CODEGEN_enum_runtime_class_creation.md's 2026-08-21
         # update for the motivating `cls._flag_mask_`/`cls.
         # _value2member_map_` shapes (Flag._iter_member_by_value_).
         if struct_name and isinstance(e.obj, gimple_ctypes.IdentExpr) and e.obj.name == 'cls':
@@ -3089,6 +3091,19 @@ def _cpp_expr(gen, e) -> str:
                     for nxt in a[1:]:
                         acc = f"mojo_path_join((char *)({acc}), (char *)({nxt}))"
                     return acc
+                if e.func.member == 'split' and len(a) == 1:
+                    # os.path.split(p) → MojoList * [head, tail].
+                    # Word argument uses word-kinded runtime entry;
+                    # str argument uses int64_t_path_split.
+                    _arg_node = e.args[0]
+                    _arg_is_word = False
+                    if isinstance(_arg_node, gimple_ctypes.IdentExpr):
+                        decl = getattr(gen, '_cpp_declared', None) or {}
+                        if decl.get(_arg_node.name) in ('int64_t', 'MojoBytes *'):
+                            _arg_is_word = True
+                    if _arg_is_word:
+                        return f"mojo_os_path_split_w({a[0]})"
+                    return f"int64_t_path_split({a[0]})"
                 # os.path.isdir/exists(p) — the GIMPLE path's own
                 # os.path.* dispatch (_lower_call) already has these
                 # wired to real runtime helpers (`marker` is an unused
@@ -4153,7 +4168,7 @@ def _cpp_expr(gen, e) -> str:
                 # local at all — whether same-module or foreign — so any
                 # next() on one fell through to the unresolved-callee refusal
                 # below and refused the whole module (the last blocker on
-                # bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md).
+                # bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md).
                 _next_arg = e.args[0]
                 _next_gen_api = None
                 _next_gen_handle = None
@@ -4883,6 +4898,10 @@ def _cpp_expr(gen, e) -> str:
                     'mojo_os_close', 'mojo_list_slice_word', 'mojo_bytes_from_cstr',
                     'mojo_bytes_from_str'):
                 return f"{fname}({', '.join(args)})"
+            if fname == 'mojo_fsencode_w' and len(args) == 1:
+                # the argument is a str pointer or a bytes pointer or a word: the
+                # runtime tells them apart, so pass the bits as a word
+                return f"mojo_fsencode_w((int64_t)(intptr_t)({args[0]}))"
             # A call to a C-stdlib / POSIX function with a curated, known
             # signature (`_LIBC_SIGS`) — e.g. `close(fd)` inside a compiled
             # generator (Lib/os.py's `_fwalk`, reached via
@@ -5115,7 +5134,7 @@ def _cpp_expr(gen, e) -> str:
                 # string; which one is only known now.
                 return f"mojo_getitem_word((int64_t)({obj}), (int64_t)({idx}))"
             _cpp_refuse_str_key_subscript(gen, e)
-            return f"mojo_char_at_str((char *)({obj}), {idx})"
+            return f"mojo_char_at_str_cp((char *)({obj}), {idx})"
         # Subscripting a CALL RESULT whose declared return type is a
         # container pointer: `detect_encoding(readline)[0]` where
         # detect_encoding returns MojoList * (tokenize.py's exact shape —
@@ -6243,6 +6262,15 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 and isinstance(s.value.func, gimple_ctypes.IdentExpr)
                 and s.value.func.name in gen.func_return_types
                 and gen.func_return_types[s.value.func.name] == 'MojoList *')
+            # os.path.split(p) returns MojoList* [dirname, basename]; treat
+            # as list-valued for tuple unpacking like other MojoList* calls.
+            _tup_is_split_call = (isinstance(s.value, gimple_ctypes.CallExpr)
+                and isinstance(s.value.func, gimple_ctypes.MemberExpr)
+                and s.value.func.member == 'split'
+                and isinstance(s.value.func.obj, gimple_ctypes.MemberExpr)
+                and s.value.func.obj.member == 'path'
+                and isinstance(s.value.func.obj.obj, gimple_ctypes.IdentExpr)
+                and s.value.func.obj.obj.name == 'os')
             # A bare Comprehension as the RHS (`[tup] = [x for x in ...]`,
             # Lib/test/crashers/gc_inspection.py's own `g` generator) also
             # lowers, via _cpp_expr's own Comprehension case just above,
@@ -6270,7 +6298,8 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 and gen._cpp_declared.get(s.value.name) == 'MojoList *')
             _tup_is_list_val = (_tup_is_list_call
                 or isinstance(s.value, gimple_ctypes.Comprehension)
-                or _tup_is_list_ident)
+                or _tup_is_list_ident
+                or _tup_is_split_call)
             # Pop-time shape discrimination: unpacking a value popped off a
             # heterogeneous/tagged-union stack (`marker, value =
             # stack.pop()`, then a second-level `a, b, ... = value`). The
@@ -6343,6 +6372,8 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     if el.name not in declared:
                         declared[el.name] = 'int64_t'
                         lines.append(f"{indent}int64_t {el.name};")
+                    if _tup_is_split_call:
+                        _cpp_mark_tagged_word(gen, el.name)
                     if _tup_is_list_val:
                         lines.append(f"{indent}{el.name} = "
                                      f"mojo_list_get_int({_cpp_as('MojoList *', _tup_val)}, {i});")
@@ -7537,8 +7568,9 @@ def _cpp_lower_posix_idioms(gen, node, handles=None):
                                   line=new.line, col=new.col)
             if f.name == 'fsencode' and len(new.args) == 1 and not kw \
                     and 'fsencode' not in getattr(gen, 'func_return_types', {}):
-                # os.fsencode on a UTF-8 POSIX filesystem: the string's bytes
-                return G.CallExpr(func=G.IdentExpr(name='mojo_bytes_from_cstr'),
+                # os.fsencode of a str OR bytes word (a DirEntry name is either,
+                # by its scandir's kind): bytes pass through, a str is encoded
+                return G.CallExpr(func=G.IdentExpr(name='mojo_fsencode_w'),
                                   args=[new.args[0]], line=new.line, col=new.col)
             if f.name == 'bytes' and len(new.args) == 2 and not kw:
                 # `bytes(text, 'ASCII')`: the string's bytes
@@ -10175,6 +10207,10 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
             _yf_accessor = 'mojo_list_get_boxed'
         elif _yf_elem_ctype is not None:
             _yf_accessor = 'mojo_list_get_int'
+        elif (isinstance(call, gimple_ctypes.CallExpr)
+              and isinstance(call.func, gimple_ctypes.IdentExpr)
+              and call.func.name in ('_glob1', 'filter', 'sorted')):
+            _yf_accessor = 'mojo_list_get_boxed'
         else:
             _yf_accessor = 'mojo_list_get_str'
         result_init = _cpp_as('MojoList *', coll_expr)

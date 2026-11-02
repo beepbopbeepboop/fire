@@ -104,8 +104,8 @@ lemmas and generator rows, and both 300-case sweeps went from
 
 Every remaining `NOSTEP` is a **`CSEL`** — the one instruction here with its own
 document and its own blocker
-(`bugs/formal/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`,
-whose Status says the certificate is the expensive part and that the certificate
+(`FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`, deleted;
+its Status said the certificate is the expensive part and that the certificate
 belongs to another claim), so the reachable set this file names is now empty.
 
 **`WRONG 0` above is a row about the mixes as they were on 2026-10-05, and the
@@ -246,7 +246,7 @@ side of it a piece of work is on before anyone prices it:** a hypothesis or a
 peel in `lib/Refine.lean` is affordable to a bounded worker and something in
 `lib/ProofLib.lean` is not — every arm in this file, and every row of
 `FORMAL arm64 smulh has no model arm`, `FORMAL_arm64_ieee754_has_no_step_
-arms.md`, `FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`
+arms.md`, `FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md` (deleted)
 and `FORMAL_ast_bridge_carries_one_argument_per_call.md` §step 1, is in
 `ProofLib`.  `bugs/formal/FORMAL_arm64_x30_is_reloaded_from_the_frame.md` is on the
 cheap side of the line and is gated on a design decision rather than on memory.
@@ -335,10 +335,10 @@ $ python3 -c "import importlib.util as u; s=u.spec_from_file_location('a',
   0x8a000000, which is a DIFFERENT word from TST's 0xea000000 (the logical
   immediate group), so this is an addition and not an alias.
 * **`CSEL`** — the row `_STEP_CONDS` had and then lost; see
-  `bugs/formal/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`,
-  whose §4 already costs this at three Lean lines plus a `work_step_csel`, and
-  whose Status says the certificate is the expensive part. That doc's ordering
-  still stands and this one does not change it.
+  `FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md` (deleted),
+  whose §4 already cost this at three Lean lines plus a `work_step_csel`, and
+  whose Status said the certificate is the expensive part. That doc's ordering
+  stood and this one does not change it.
 * **The narrow-width and unscaled accesses** (`LDRB`/`STRB`, `LDRH`/`STRH`,
   `LDRSB`, `LDRSH`, `LDRSW`, `LDR Wt`, `STR Wt`, `LDUR`, `STUR`) — one arm
   each, and each needs a `mem_write`/`mem_read` at its own WIDTH: `mem_read_u64`

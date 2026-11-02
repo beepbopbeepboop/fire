@@ -464,7 +464,7 @@ def stale_baseline_entries(by_file, baseline=None):
     were the same observation.
 
     That is not hypothetical, and the entry it hid is this tree's
-    `bugs/CODEGEN_arm64_cmp_flags_and_loop_signedness.md: 1`, raised on purpose
+    `bugs/mid/CODEGEN_arm64_cmp_flags_and_loop_signedness.md: 1`, raised on purpose
     by `--write-baseline` for a citation that was since rewritten to name the
     symptom instead of the doc. It has been dead weight in the ledger since, and
     it inflated the corpus by one citation for every reader counting the baseline.

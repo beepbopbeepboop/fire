@@ -45,13 +45,14 @@ I did not re-run that file this round (no code touched); the 265/0 figure is the
 2. `for line in _render_table(...)` target not typed in `_cpp_for_stmt`
    (`cpp_core.py:6279`) → claimed nested-generator lane.
 3. Module-attribute value read stubbed to `0` in a generator body (shared with
-   `bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_scriptutil.md`, `iter_marks`).
+   `bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_scriptutil.md`, `iter_marks`).
 4. `_fix_write_default`, `_parse_next_local_static`, `_parse_struct_next`: yield
    sites agree INTERNALLY but call sites disagree on the yielded type. Unexamined
    third yield-typing shape. Measure with `MOJO_DEBUG=1` before designing.
 5. Imported-module floor `c_parser/info.py`, `c_parser/parser/_func_body.py`,
-   `c_parser/match.py` → `bugs/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___init__.md`
-   (claimed by another worker).
+   `c_parser/match.py` → callable-valued local/parameter loop refusal
+   in `c_analyzer/__init__.py:check_all` (fixed: refusal properly named;
+   structural callable-return inference remains shared with other files).
 
 **Decisions the capture model needs (recommendations).**
 - **D1, value vs cell.** Python closures read the enclosing VARIABLE, so a
@@ -158,7 +159,7 @@ at all:
     _parse_next_local_static:  the same shape, `yields ['srcinfo']`
     _parse_struct_next:        the same shape, `yields ['parent', 'srcinfo']`
     _iter_filenames:           a call to unresolved callee 'process(...)'  (shared with
-                               bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_scriptutil.md)
+                               bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_scriptutil.md)
 
 `yields [...], whose call sites do not all pass the same statically-known type` is a THIRD
 yield-typing answer, distinct from both this entry's `render` case ("the yields disagree")
@@ -245,7 +246,7 @@ body model to read a module constant's real value (the per-module globals
 structs already exist and are already emitted) and give
 `_infer_simple_expr_ctype` the matching row — clears both, and is the
 difference between an honest refusal and a program that computes `''` where
-CPython computes `'\n'`. See `bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_scriptutil.md`
+CPython computes `'\n'`. See `bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_scriptutil.md`
 for the detail and the "silent-wrong upstream" argument. **Start there**, not
 here: this doc's refusal is downstream of the same stub.
 
@@ -280,5 +281,5 @@ diagnosable, and treating it as an ordering bug would be chasing the
    once `render` compiles.
 3. Then re-check the imported-module floor — `c_parser/info.py`,
    `c_parser/parser/_func_body.py` and `c_parser/match.py` still fail in this
-   closure (see `bugs/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___init__.md`),
+   closure (callable-valued loop refusal fixed in `c_analyzer/__init__.py:check_all`),
    so clearing `render` alone will not make this file build.

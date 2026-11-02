@@ -1006,9 +1006,11 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
             return 'double'
         return 'int64_t'
     if isinstance(e, CallExpr) and isinstance(e.func, IdentExpr):
-        if e.func.name in ('str', 'String', 'repr', 'os.path.join', 'os.path.basename', 'os.path.dirname', 'os.path.splitext', 'mojo_dirent_name', 'mojo_dirent_path'):
+        if e.func.name in ('str', 'String', 'repr', 'os.path.join', 'os.path.basename', 'os.path.dirname', 'os.path.splitext'):
             return 'char *'
-        if e.func.name in ('len', 'ord'):
+        if e.func.name in ('len', 'ord', 'mojo_dirent_name', 'mojo_dirent_path', 'mojo_fsencode_w'):
+            # DirEntry.name/.path and os.fsencode: a pointer WORD (a str or a
+            # bytes, by the value's kind at run time) -- the runtime's int64_t
             return 'int64_t'
         if e.func.name in ('mojo_os_scandir', 'mojo_list_slice_word'):
             return 'MojoList *'
