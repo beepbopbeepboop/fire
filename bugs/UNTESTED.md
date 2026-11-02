@@ -17,6 +17,35 @@ equivalent for the 45 example files a cached test is *about*.
 
 ---
 
+## Status, 2026-11-01 (type-system tests: the Tier 3 pair, run for the first time)
+
+`test_type_system.py` and `test_type_system_integration.py` were the two
+Tier 3 rows that said "No module named 'pytest'". Both are now runnable and
+both exit 0.
+
+* **`test_type_system.py` is converted from pytest to `unittest`** (stdlib, no
+  new dependency). Running it for the first time surfaced three real failures,
+  all fixed at the source in `type_system.py`:
+  * `_infer_binary_op_result` tested the int64 branch before the double branch,
+    and `is_64bit()` is true for `double`, so `double + double` returned
+    `int64_t`. Reordered; the double branch now comes first.
+  * The OPAQUE_POINTER_TRACKING message said "converted back" where the
+    invariant and its tests say "cast". Message reworded to "cast back".
+  Pinned by `TestBitWidthPreservation.test_double_arithmetic_produces_double`
+  and the two `OPAQUE_POINTER` cast assertions; all three fail on the pre-fix
+  `type_system.py`.
+* **`test_type_system_integration.py` was failing for a reason its name does
+  not show.** Every compile reported `'GimpleGen' object has no attribute
+  'type_checker'`: the harness read `gen.type_checker`, which
+  `b05dc1111` removed when it stripped the checks as inert. The harness no
+  longer reads it; the file's `__main__` banner that claimed "5 invariants
+  integrated / production-ready" is replaced with a note that they are not
+  wired into codegen. **Still true and not fixed:** these tests now only
+  confirm that snippets compile. None of them can detect a violation, because
+  nothing in `gimple_codegen.py` checks one. Whether they should be rewritten
+  against a real check or deleted is a decision for the owner of the type
+  system, not this round.
+
 ## Status, 2026-11-01 (what landed since 2026-10-02; §3a and §3.1 below are closed, the rest stands)
 
 * **§3a — the mojo→fire rename fallout — is fixed** by `3bedbd824` (all
