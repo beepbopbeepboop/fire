@@ -3904,6 +3904,32 @@ def main():
 main()
 """, "/t/d/abc.c\nTrue\n", filename='joinword.py')
 
+    # Unpacking `(list, list, dict)` returned by a call read each slot with
+    # `mojo_list_get_boxed`, which boxed the list slots: `out` then pointed at a
+    # box header and the first `for s in out` crashed (the self-hosted compiler
+    # died in coro.lower this way). A container slot is its own word now.
+    test_gimple_stdout("gimple_unpack_of_a_returned_list_list_dict_tuple", """\
+def hoist(stmts: list):
+    hoisted = []
+    maps = {}
+    for s in stmts:
+        if len(s) > 1:
+            hoisted.append(s + "!")
+            maps[s] = len(s)
+    return stmts, hoisted, maps
+
+def main():
+    out, nested, maps = hoist(["a", "bb", "ccc"])
+    for s in out:
+        print("out", s)
+    for s in nested:
+        print("nested", s)
+    print(len(maps))
+    print(out)
+    print(nested)
+main()
+""", "out a\nout bb\nout ccc\nnested bb!\nnested ccc!\n2\n['a', 'bb', 'ccc']\n['bb!', 'ccc!']\n", filename='lld.py')
+
     # `StopIteration.value`: the generator's / coroutine's `return` value, the
     # argument of `raise StopIteration(x)`, None when there is none (it printed
     # None in every case).

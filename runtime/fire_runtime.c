@@ -1683,6 +1683,15 @@ int64_t mojo_list_get_boxed(MojoList *l, int64_t i)
      * pointer a consumer cannot tell from an int. */
     if (_k == 'i' || _k == MOJO_KIND_OBJ)
         return l->data[i];
+    /* A nested CONTAINER slot is its own answer too: its word is the list/dict
+     * pointer, which every consumer uses AS a container. Boxing it hands the
+     * consumer the box header where a MojoList is expected -- `a, b, c =
+     * f()` for an `f` returning `(list, list, dict)` (kinds "lll") read the
+     * first list's length out of the box, which crashed the self-hosted
+     * compiler in `coro.lower`. Nothing is lost: the box only ever carried the
+     * kind, and a container's repr needs no kind to be told apart. */
+    if (_k == MOJO_KIND_LIST)
+        return l->data[i];
     uint64_t addr = (uint64_t)(uintptr_t)l;
     int fresh = 0;
     _KindRow *r = _kinds_row_for_write(addr, &fresh);
