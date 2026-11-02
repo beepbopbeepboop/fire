@@ -4,7 +4,7 @@ shape (`next_opcode = 1` before a nested `def` that reassigns it), as
 opposed to the Mojo-source shape (`var counter = 0`) every earlier test in
 test_general_mutable_closure_capture.py exercises.
 
-Root cause fixed (bugs/COMPILE_FAIL_Tools_cases_generator_analyzer.md's
+Root cause fixed (bugs/mid/COMPILE_FAIL_Tools_cases_generator_analyzer.md's
 exit-time/mid-run segfault residual, analyzer.py:1066): the box for a
 by-reference-captured local used to be allocated by _gen_stmt_VarDecl at
 the local's `var x = ...` statement. Real Python source's first binding is

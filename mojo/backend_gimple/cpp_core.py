@@ -2330,7 +2330,7 @@ def _cpp_expr(gen, e) -> str:
         # which `cls` structurally cannot have; an unrecognized name)
         # must refuse rather than silently emit `cls->member` (invalid
         # C++ on a scalar int64_t) or `cls.member` (equally invalid).
-        # See bugs/CODEGEN_enum_runtime_class_creation.md's 2026-08-21
+        # See bugs/mid/CODEGEN_enum_runtime_class_creation.md's 2026-08-21
         # update for the motivating `cls._flag_mask_`/`cls.
         # _value2member_map_` shapes (Flag._iter_member_by_value_).
         if struct_name and isinstance(e.obj, gimple_ctypes.IdentExpr) and e.obj.name == 'cls':
@@ -4153,7 +4153,7 @@ def _cpp_expr(gen, e) -> str:
                 # local at all — whether same-module or foreign — so any
                 # next() on one fell through to the unresolved-callee refusal
                 # below and refused the whole module (the last blocker on
-                # bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md).
+                # bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md).
                 _next_arg = e.args[0]
                 _next_gen_api = None
                 _next_gen_handle = None

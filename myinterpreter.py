@@ -1456,7 +1456,7 @@ class BoundClassMethod:
     `cls.<attr>` then raised "'int' object has no attribute ..."). That made
     the ORACLE disagree with the compiled path, which does pass a receiver,
     on a shape real code uses (see
-    bugs/COMPILE_FAIL_importlib_resources_readers.md's
+    bugs/mid/COMPILE_FAIL_importlib_resources_readers.md's
     `yield from cls.<sibling generator>(...)`).
 
     A separate class rather than a second receiver kind inside `BoundMethod`:
@@ -4022,7 +4022,7 @@ class Interpreter:
         undecorated body. Because the interpreter is the documented oracle
         for "the compiled path is wrong", that made the whole class of
         decorator bugs invisible — the two engines agreed on the wrong
-        answer. See bugs/COMPILE_FAIL_decorator_application_dropped.md.
+        answer. See bugs/mid/COMPILE_FAIL_decorator_application_dropped.md.
 
         Bottom-up because that is Python's order: `@a` above `@b` above
         `def f` means `f = a(b(f))`. A decorator whose application raises is

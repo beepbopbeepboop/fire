@@ -407,7 +407,7 @@ def publish_a3_generators(gen, meta) -> None:
     (kwonly params → "kwonly params (v0)"), so `read_table` compiles
     through the cpp path and could not resolve the foreign handle,
     refusing the whole module with `a call to unresolved callee
-    'next(...)'`. See bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md.
+    'next(...)'`. See bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md.
 
     Must be called at the A3 registration site, not from gen_module: by the
     time gen_module runs, `mojo/middle/coro.py`'s `lower()` has already

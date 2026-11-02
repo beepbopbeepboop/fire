@@ -206,7 +206,7 @@ def _build_generator_program_from_code(c_code: str, cpp_code: str) -> str:
 #
 # Real: c_common/tables.py's `read_table` consuming
 # `strutil._iter_significant_lines(infile)` — see
-# bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md.
+# bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md.
 
 _FOREIGN_PKG_FILES = {
     '__init__.py': '',
@@ -1118,7 +1118,7 @@ def main():
 
 
 def _regression_read_table_callable_reader():
-    # Root-cause regression for bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md:
+    # Root-cause regression for bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md:
     # `_get_reader` is a callable-valued parameter (default csv.reader); the
     # loop `for row in _get_reader(lines, ...):` in `read_table` must be
     # refused honestly (not silently wrong) until callable-local loop typing
@@ -6732,7 +6732,7 @@ def main():
     # `cls.method(...)` call inside a compiled @classmethod generator —
     # resolved purely by NAME (the enclosing struct's own real compiled
     # classmethod), mirroring the `self.method(...)` call case's own
-    # mechanism. See bugs/CODEGEN_enum_runtime_class_creation.md's
+    # mechanism. See bugs/mid/CODEGEN_enum_runtime_class_creation.md's
     # 2026-08-21 update, point (2). Also called via an instance, for the
     # same call-site-gap reason noted above.
     test_generator_stdout("cls_classmethod_call_in_generator", """\
@@ -10273,7 +10273,7 @@ def main():
 main()
 """)
 
-    # Stage 1 of run-time class objects (bugs/CODEGEN_enum_runtime_class_creation.md): an attribute
+    # Stage 1 of run-time class objects (bugs/mid/CODEGEN_enum_runtime_class_creation.md): an attribute
     # the class body never declares - `setattr(cls, ..)`, `Cls.x = v`, what a metaclass installs -
     # lives in a run-time class table found through the bases, and a @classmethod generator (or
     # method) reads it as `cls.x`; getattr / hasattr on a class use the same table.

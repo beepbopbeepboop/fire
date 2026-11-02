@@ -65,7 +65,7 @@ Measured after the merge (`python3 test_suite.py`, 360 passed, 6 failed):
 - item 3 (estate): still red, 50 unregistered `test_*.py` files and
   `tools/test_control_pool.py`, `tools/test_swarm_feed.py`.
 - dangling refs, BARE class: red on master's new citation
-  `bugs/COMPILE_FAIL_Tools_cases_generator_analyzer.md` (3 vs ceiling 2). Needs
+  `bugs/mid/COMPILE_FAIL_Tools_cases_generator_analyzer.md` (3 vs ceiling 2). Needs
   `python3 tools/dangling_doc_refs.py --write-baseline` only after the citation
   is checked, not as a bulk bump.
 - item 7 (expect count): still red, the reader sees

@@ -22,7 +22,7 @@
   2 failed. Both failures also occur on HEAD: the walk-memo census on
   `mojo/middle/coro.py` (commit fd64d710e)
   and `scalar_arity_min_max_params_are_not_containers` (filed as
-  `bugs/TEST_scalar_arity_min_max_link_mode_prints_nothing.md`).
+  `bugs/mid/TEST_scalar_arity_min_max_link_mode_prints_nothing.md`).
 
 **Still OPEN:**
 

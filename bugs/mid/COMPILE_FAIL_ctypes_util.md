@@ -333,7 +333,7 @@ in this translation unit, so the calls become implicit declarations
 returning `int`. `_TemporaryFileWrapper` is a `tempfile`-defined CLASS, so
 this is a cross-module struct-method + free-function visibility gap in
 the same shape as the `_itertools_only` hash mismatch documented in
-`bugs/COMPILE_FAIL_importlib_resources_readers.md`.
+`bugs/mid/COMPILE_FAIL_importlib_resources_readers.md`.
 
 **Gaps #1/#2/#3 from the 2026-08-24/26 entries are all confirmed fixed and
 not re-attempted:** no `util.py`-attributed coercion/`declared void` error

@@ -11677,7 +11677,7 @@ bytes_keyed()
     # what lets a kind-0 zero print `0` in the same dict where a `None` prints
     # `None`. `d['n']` still prints `0` where CPython says `None` — a READ
     # does not carry the slot kind anywhere — which is deliberately NOT pinned
-    # here; see bugs/CODEGEN_dict_slot_read_loses_its_value_kind.md.
+    # here; see bugs/mid/CODEGEN_dict_slot_read_loses_its_value_kind.md.
     # A `(key, value)` pair built by `mojo_dict_items` has to carry the dict
     # slot's kind, because a pair slot is a raw int64_t and the pair is built by
     # the runtime with nothing from the dict slot travelling with it. Without it
@@ -14394,7 +14394,7 @@ def test_namedtuple_tuple_protocol_is_refused_by_name():
 
 
 def test_nested_class_attr_reads_enclosing_local_regression():
-    """Regression for bugs/CODEGEN_nested_class_attr_reads_enclosing_local_silently_zero.md.
+    """Regression for bugs/mid/CODEGEN_nested_class_attr_reads_enclosing_local_silently_zero.md.
     A class-level attribute whose value names an enclosing function's local
     was lowered as a `class` statement no-op, so the attribute stayed 0 at
     exit 0. The class statement must store the value when it executes. Each
@@ -14493,7 +14493,7 @@ def main():
 
 def test_nested_class_attr_rebind_after_construction_regression():
     """Pins the answer any per-execution fix for
-    bugs/CODEGEN_nested_class_attr_reads_enclosing_local_silently_zero.md
+    bugs/mid/CODEGEN_nested_class_attr_reads_enclosing_local_silently_zero.md
     must keep. A class attribute rebound on the CLASS after an instance was
     built is seen by that instance (Python: the instance has no attribute of
     its own, so it reads the class's current value, 3). A per-instance copy of

@@ -32,11 +32,11 @@ honestly bound.
 """
 BASELINE = {
     'FORMAL.md': 1,
-    'bugs/COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md': 1,
-    'bugs/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__.md': 2,
-    'bugs/COMPILE_FAIL_ctypes_util.md': 1,
-    'bugs/COMPILE_FAIL_importlib_resources_readers.md': 2,
-    'bugs/TEST_scalar_arity_min_max_link_mode_prints_nothing.md': 1,
+    'bugs/mid/COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md': 1,
+    'bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___main__.md': 2,
+    'bugs/mid/COMPILE_FAIL_ctypes_util.md': 1,
+    'bugs/mid/COMPILE_FAIL_importlib_resources_readers.md': 2,
+    'bugs/mid/TEST_scalar_arity_min_max_link_mode_prints_nothing.md': 1,
     'bugs/formal/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md': 1,
     'bugs/formal/FORMAL_dataclass_runtime_reflection.md': 1,
     'bugs/formal/FORMAL_dylib_export_loops_and_frame_bounds.md': 1,
@@ -94,10 +94,10 @@ BASELINE = {
 # reason the header above gives for its prefixed entry.
 BARE_BASELINE = {
     'CRASH.md': 1,
-    'bugs/CODEGEN_nested_container_as_dict_key_or_tuple_slot.md': 2,
-    'bugs/CODEGEN_selfhost_tokenize_region_eq_quadratic.md': 1,
-    'bugs/COMPILE_FAIL_Tools_cases_generator_analyzer.md': 3,
-    'bugs/COMPILE_FAIL_importlib_resources_readers.md': 2,
+    'bugs/mid/CODEGEN_nested_container_as_dict_key_or_tuple_slot.md': 2,
+    'bugs/mid/CODEGEN_selfhost_tokenize_region_eq_quadratic.md': 1,
+    'bugs/mid/COMPILE_FAIL_Tools_cases_generator_analyzer.md': 3,
+    'bugs/mid/COMPILE_FAIL_importlib_resources_readers.md': 2,
     'bugs/formal/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md': 1,
     'bugs/formal/FORMAL_arm64_known_proof_gaps.md': 1,
     'bugs/formal/FORMAL_arm64_step_cannot_step_nine_wired_encodings.md': 1,
