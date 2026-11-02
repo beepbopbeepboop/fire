@@ -31,6 +31,8 @@ extern void mojo_exc_msg_set(char *);
 extern void mojo_exc_obj_set(void *);
 extern void mojo_exc_pending_set(int);
 extern void mojo_raise(void);
+extern void mojo_exc_value_set(int64_t w);
+extern int __mojo_coro_has_return(MojoCoro *c);
 extern void mojo_frame_set_resuming(int64_t gen);
 
 /* The generated-code exception frame stack (runtime/fire_runtime.h), needed
@@ -494,6 +496,17 @@ __mojo_gen_frame(int64_t gen)
     g->frame = mojo_frame_for_gen(gen, g->frame, name, file, first, line);
     _mojo_gen_state_hook = __mojo_gen_state;
     return g->frame;
+}
+
+
+/* A finished generator/coroutine is about to raise StopIteration: attach its `return` value (when
+   the body had a valued return) so `ex.value` reads it. Called right after mojo_exc_type_set. */
+void
+__mojo_gen_stop_value(int64_t gen)
+{
+    MojoGen *g = (MojoGen *)(uintptr_t)gen;
+    if (g && __mojo_coro_has_return(g->coro))
+        mojo_exc_value_set(g->retval);
 }
 
 int64_t __mojo_gen_value(int64_t gen)

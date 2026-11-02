@@ -96,6 +96,7 @@ struct MojoCoro {
     int           frame_base;
     int           cleanup_base;
     void         *slice;
+    int           ret_set;      /* the body called __mojo_coro_set_return (a valued `return`) */
 };
 
 /* The coroutine currently executing its body (NULL == a resumer context).
@@ -340,7 +341,10 @@ void
 __mojo_coro_set_return(MojoCoro *c, int64_t box)
 {
     c->ret_box = box;
+    c->ret_set = 1;
 }
+
+int __mojo_coro_has_return(MojoCoro *c) { return c && c->ret_set; }
 
 static void
 coro_free(MojoCoro *c)

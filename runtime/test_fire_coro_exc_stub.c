@@ -68,3 +68,4 @@ int64_t mojo_frame_for_gen(int64_t g, int64_t o, const char *n, const char *f, i
 int mojo_coro_slice_peek(void *s, const char **n, const char **f, int64_t *a, int64_t *b)
 { (void)s; (void)n; (void)f; (void)a; (void)b; return 0; }
 void mojo_frame_set_resuming(int64_t g) { (void)g; }
+void mojo_exc_value_set(int64_t w) { (void)w; }

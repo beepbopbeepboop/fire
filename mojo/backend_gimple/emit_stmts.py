@@ -4826,6 +4826,11 @@ def _gen_stmt_RaiseStmt(gen, node):
 
     if exc_name:
         gen._emit(f"  mojo_exc_type_set ({gen._exc_type_id(exc_name)});")
+    if exc_name == 'StopIteration' and isinstance(val, gimple_ctypes.CallExpr) and len(val.args) == 1:
+        # `raise StopIteration(x)`: `ex.value` is x (set AFTER the type, which clears it).
+        _sv_t, _sv_v = gen.lower_expr(val.args[0])
+        if _sv_t != 'double':
+            gen._void_call('mojo_exc_value_set', [('int64_t', gen._to_int64(_sv_t, _sv_v))])
     if isinstance(msg_arg, (gimple_ctypes.StringLiteral, gimple_ctypes.IdentExpr)):
         mt, mv = gen.lower_expr(msg_arg)
         if mt == 'char *':
