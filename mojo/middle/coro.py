@@ -393,12 +393,14 @@ _OS_PATH_FN_KINDS = {'join': 'p', 'basename': 'p', 'dirname': 'p',
 
 # `os.path.<fn>` runtime functions whose result is a PAIR of strings for a str
 # argument (`d, b = os.path.split(p)`). Their unpacked elements are str-kinded.
+# For a bytes/word argument the word-kinded runtime (`mojo_os_path_split_w`)
+# returns bytes parts; the elements are words then, not char * strings.
 _OS_PATH_PAIR_FNS = ('split', 'splitext')
 
 
 def _os_path_pair_call(v) -> bool:
     """True when `v` is a direct call to one of `_OS_PATH_PAIR_FNS` through
-    `os.path` / `posixpath` / `path`, i.e. a 2-tuple-of-str result."""
+    `os.path` / `posixpath` / `path`, i.e. a 2-tuple-of-str/bytes result."""
     if not isinstance(v, N.CallExpr):
         return False
     fn = v.func
@@ -469,6 +471,8 @@ def _literal_kind(expr) -> str | None:
     """Kind of a bare literal expression, or ('list', elem_kind) for a list
     display of homogeneous literal elements. None when not a literal."""
     if isinstance(expr, (N.StringLiteral, N.TstringLiteral)):
+        if getattr(expr, 'is_bytes', False):
+            return 'w'
         return 'p'
     if isinstance(expr, N.FloatLiteral):
         return 'd'
@@ -595,10 +599,15 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
         # `_iglob`/`_glob2` refusal in Lib/glob.py).
         if (isinstance(n, N.AssignStmt) and isinstance(n.target, N.TupleExpr)
                 and _os_path_pair_call(n.value)):
+            _pair_arg = n.value.args[0] if getattr(n.value, 'args', None) else None
+            _pair_arg_k = _yield_kind(_pair_arg, env) if _pair_arg is not None else None
+            if _pair_arg_k is None and isinstance(_pair_arg, N.IdentExpr):
+                _pair_arg_k = env.get(_pair_arg.name)
+            _pair_k = 'w' if _pair_arg_k == 'w' else 'p'
             for _t in n.target.elements:
                 if isinstance(_t, N.IdentExpr):
-                    str_kinds.setdefault(_t.name, set()).add('p')
-                    env.setdefault(_t.name, 'p')
+                    str_kinds.setdefault(_t.name, set()).add(_pair_k)
+                    env.setdefault(_t.name, _pair_k)
         if tgt is not None:
             k = _ann_kind(ann)
             if k is None:
@@ -887,6 +896,23 @@ def _yield_kind(expr, env: dict | None = None) -> str | None:
     _opk = _os_path_call_kind(expr)
     if _opk is not None:
         return _opk
+    # os.path.split/join via word runtime when args are words
+    if (isinstance(expr, N.CallExpr) and isinstance(expr.func, N.MemberExpr)
+            and expr.func.member == 'split' and isinstance(expr.args, (list, tuple)) and len(expr.args) == 1):
+        _pk = _yield_kind(expr.args[0], env)
+        if _pk == 'w':
+            return ('list', 'w')
+        if env and isinstance(expr.args[0], N.IdentExpr) and env.get(expr.args[0].name) == 'w':
+            return ('list', 'w')
+    if (isinstance(expr, N.CallExpr) and isinstance(expr.func, N.MemberExpr)
+            and expr.func.member == 'join'):
+        for _ja in getattr(expr, 'args', []) or []:
+            _jk = _yield_kind(_ja, env)
+            if _jk == 'w':
+                return 'w'
+        for _ja in getattr(expr, 'args', []) or []:
+            if isinstance(_ja, N.IdentExpr) and env and env.get(_ja.name) == 'w':
+                return 'w'
     if (isinstance(expr, N.MemberExpr) and isinstance(expr.obj, N.IdentExpr)
             and expr.member in ('name', 'path')
             and env.get(expr.obj.name) == ('dirent',)):
@@ -950,6 +976,8 @@ def _yield_kind(expr, env: dict | None = None) -> str | None:
         tk, ek = _yield_kind(expr.then_val, env), _yield_kind(expr.else_val, env)
         if tk == ek:
             return tk
+        if 'w' in (tk, ek):
+            return 'w'
         if 'p' in (tk, ek):
             return 'p'
         if 'd' in (tk, ek):

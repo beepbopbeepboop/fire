@@ -2536,6 +2536,15 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 # (usually out of range). Found via Tools/unicode/
                 # gencodec.py's convertdir(): `name = os.path.split(mapname)[1]`.
                 arg_type, arg_val = gen.lower_expr(node.args[0])
+                if arg_type == 'int64_t' or arg_type == 'MojoBytes *':
+                    if arg_type == 'MojoBytes *':
+                        t = gen._call_expr('MojoList *', 'mojo_os_path_split_w',
+                                            [('int64_t', f'(int64_t)(intptr_t){arg_val}')])
+                    else:
+                        t = gen._call_expr('MojoList *', 'mojo_os_path_split_w',
+                                            [(arg_type, arg_val)])
+                    gen._elem_types[t] = 'int64_t'
+                    return 'MojoList *', t
                 t = gen._call_expr('MojoList *', 'int64_t_path_split',
                                     [(arg_type, arg_val)])
                 gen._elem_types[t] = 'char *'
@@ -2612,6 +2621,9 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     arg_type, arg_val = gen.lower_expr(node.args[0])
                     if arg_type == 'MojoList *':
                         gen._emit_call('int64_t', t, 'int_join_list', [('int64_t', '0'), (arg_type, arg_val)])
+                    elif arg_type == 'int64_t':
+                        # might be word; try word join if unsure
+                        gen._emit_call('int64_t', t, 'mojo_os_path_join_w', [('int64_t', '0'), (arg_type, arg_val), ('int64_t', '0')])
                     else:
                         # Single non-list arg: just return it
                         gen._emit_call('int64_t', t, 'int_join', [('int64_t', '0'), (arg_type, arg_val), ('int64_t', '0')])
@@ -2651,7 +2663,19 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     # os.path.join(a, b) — two path args
                     arg_type, arg_val = gen.lower_expr(node.args[0])
                     arg2_type, arg2_val = gen.lower_expr(node.args[1])
-                    gen._emit_call('int64_t', t, 'int_join', [('int64_t', '0'), (arg_type, arg_val), (arg2_type, arg2_val)])
+                    if arg_type == 'int64_t' or arg2_type == 'int64_t' or arg_type == 'MojoBytes *' or arg2_type == 'MojoBytes *':
+                        def _to_word(at, av):
+                            if at == 'int64_t':
+                                return av
+                            if at == 'MojoBytes *':
+                                return f'(int64_t)(intptr_t){av}'
+                            if at == 'char *':
+                                return f'(int64_t)(intptr_t){av}'
+                            # try to pass through as word
+                            return f'(int64_t)(intptr_t){av}'
+                        gen._emit_call('int64_t', t, 'mojo_os_path_join_w', [('int64_t', _to_word(arg_type, arg_val)), ('int64_t', _to_word(arg2_type, arg2_val))])
+                    else:
+                        gen._emit_call('int64_t', t, 'int_join', [('int64_t', '0'), (arg_type, arg_val), (arg2_type, arg2_val)])
                 return 'int64_t', t
             elif outer_member == 'exists' and len(node.args) == 1:
                 arg_type, arg_val = gen.lower_expr(node.args[0])

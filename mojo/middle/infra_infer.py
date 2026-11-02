@@ -2175,7 +2175,7 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
             # s` printed the pointer's decimal address instead of "abc"
             # until this case was added; the container literals below
             # already had an identical fix.
-            cand = 'MojoBytes *' if n.value.is_bytes else 'char *'
+            cand = 'MojoBytes *' if getattr(n.value, 'is_bytes', False) else 'char *'
         elif isinstance(n.value, gimple_ctypes.FloatLiteral):
             # A `double` local, which is the ONE scalar this map used to
             # have no answer for at all — the docstring above calls scalars
