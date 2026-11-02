@@ -2147,7 +2147,6 @@ STALE_PER_CHILD_BUDGETS = {
     # what a residue row is for; neither is the SUBJECT of its test, so neither
     # moves to `BUDGET_IS_THE_SUBJECT`.
     'test_formal_call_proof_gen.py': 2,
-    'test_formal_cross_module.py': 2,
     'test_formal_dylib.py': 2,
     'test_formal_external_call.py': 1,
     'test_formal_frame_return_overloads.py': 1,
@@ -2169,9 +2168,6 @@ STALE_PER_CHILD_BUDGETS = {
                                        # hostmod-dylib row's build of the reduced
                                        # program, the same 600 s wall the file's
                                        # other three build sites carry
-    'test_import_integration.py': 4,
-    'test_link_mode.py': 3,  # +1 2026-10-24: the non-shadow stderr probe in
-                            # test_nested_def_is_not_a_module_level_fn_export re-runs the built binary to read its refusal message off stderr
     'test_metal_codegen.py': 9,
     'test_ptr_registry.py': 2,
     'test_runtime_dylib.py': 1,

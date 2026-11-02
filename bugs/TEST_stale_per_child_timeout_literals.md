@@ -2,6 +2,18 @@
 
 ## Status
 
+**`bug-test-stale-per-child-timeout-literal-9845` (2026-11-01): three more files converted, nine sites; residue now 52 literals in 23 files.**
+`test_import_integration.py` (4: two `gcc` compiles → `COMPILE_TIMEOUT_S`, the `g++`/`gcc` link → `LINK_TIMEOUT_S`, the produced
+executable's run → `RUN_TIMEOUT_S`), `test_link_mode.py` (3: two produced-executable runs and the CPython `_cpython_run` child, all
+`RUN_TIMEOUT_S`), `test_formal_cross_module.py` (2: a produced-image run and a CPython child, both `RUN_TIMEOUT_S`, values unchanged).
+All widenings except the two 120 s sites, which are equal. Their rows are gone from `STALE_PER_CHILD_BUDGETS`.
+Verified: the census check PASS (64 files on the constants, 0 stale literals, residue equals census, residue not grown);
+`test_import_integration.py` passes; `test_link_mode.py` run under memslot; `test_formal_cross_module.py` imports cleanly (its
+formal run was not executed: it builds dylibs and is not a quick test).
+Left in place, with a reason: `test_ptr_registry.py`'s two `RUN` sites are `timeout=60` and `timeout=300`, and the 300 would
+NARROW to `RUN_TIMEOUT_S` (120). Converting it needs a decision about the 300 s harness run (the one child that runs a group of cases),
+not a substitution, so it is not done here.
+
 **`bug-test-stale-per-child-timeout-literal-9510` (2026-11-01): twelve more files converted, 19 sites; residue now 61 literals in 26 files.**
 Classified by argv as in the entries below. `RUN_TIMEOUT_S`: `test_general_mutable_closure_capture.py` (2),
 `test_closure_capture_comptime_func_params.py` (1 of 2; its `gcc -fgimple -fsyntax-only` is `COMPILE_TIMEOUT_S`),
