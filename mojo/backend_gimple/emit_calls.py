@@ -3654,12 +3654,20 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # any side effects a real decode call would have), just discarded.
     if (fname_raw == 'str' and len(node.args) in (2, 3)
             and not gen._locally_binds_name('str')):
+        # str(data, encoding[, errors]): the DECODE of a bytes object. The
+        # encoding is the second argument; `errors` is not modelled (a decode
+        # is always strict here), and is lowered only for its side effects.
         et, ev = gen.lower_expr(node.args[0])
-        for _extra in node.args[1:]:
+        enc_t, enc_v = gen.lower_expr(node.args[1])
+        for _extra in node.args[2:]:
             gen.lower_expr(_extra)
-        if et != 'char *':
-            ev = gen._stringify_value(et, ev)
-        return 'char *', ev
+        enc = enc_v if enc_t == 'char *' else gen._coerce_to_type(enc_t, 'char *', enc_v)
+        if et == 'MojoBytes *':
+            return 'char *', gen._call_expr('char *', 'mojo_bytes_decode',
+                                            [('MojoBytes *', ev), ('char *', enc)])
+        # a value whose kind only the runtime knows (a bytes or a str word)
+        return 'char *', gen._call_expr('char *', 'mojo_str_from_word',
+                                        [('int64_t', gen._to_int64(et, ev)), ('char *', enc)])
 
     # pow(base, exp, mod): real Python's 3-arg modular-exponentiation
     # form -- integer semantics, entirely distinct from the ordinary

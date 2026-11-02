@@ -395,7 +395,7 @@ def _gmi_apply_call_site_param_evidence(gen, stmts):
             # which is `test_gimple.py`'s
             # `a_forwarded_string_argument_keeps_its_type`. So the veto is on
             # the member's shape, not on how many members there are.
-            if call_type not in ('char *', 'double'):
+            if call_type not in ('char *', 'double', 'MojoBytes *'):
                 continue
             ipt.setdefault(fname, {})[pname] = call_type
             continue
@@ -9089,6 +9089,8 @@ def gen_module_impl(self, stmts):
                     _xg_tgt[_xg_pn] = _xg_ct
                 if _xg_ct == 'char *':
                     self._coro_str_params.setdefault(_xg_body, set()).add(_xg_pn)
+                    self._int64_may_hold_str.setdefault(_xg_body, set()).add(_xg_pn)
+                if _xg_ct == 'MojoBytes *':
                     self._int64_may_hold_str.setdefault(_xg_body, set()).add(_xg_pn)
     # Companion list-ELEMENT hints merge: same qualifier match as the scalar
     # hints above, applied into this gen's own _param_list_elem_types for
