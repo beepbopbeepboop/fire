@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Formal Subsystem Review (Proof-Carrying Compiler)</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif; line-height: 1.6; color: #333; max-width: 1100px; margin: 0 auto; padding: 20px; }
+        h1 { color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; }
+        h2 { color: #34495e; border-bottom: 2px solid #bdc3c7; padding-bottom: 8px; margin-top: 40px; }
+        h3 { color: #2c3e50; margin-top: 30px; }
+        h4 { color: #34495e; margin-top: 25px; }
+        .executive-summary { background-color: #f8f9fa; border-left: 4px solid #3498db; padding: 15px 20px; margin: 20px 0; }
+        .status-badge { display: inline-block; padding: 3px 8px; border-radius: 4px; font-size: 0.85em; font-weight: 600; }
+        .status-good { background-color: #d5f4e6; color: #27ae60; }
+        .status-partial { background-color: #fef5e7; color: #f39c12; }
+        .status-bad { background-color: #fadbd8; color: #e74c3c; }
+        .status-unknown { background-color: #ebedef; color: #7f8c8d; }
+        table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+        th, td { border: 1px solid #ddd; padding: 10px 12px; text-align: left; }
+        th { background-color: #f2f2f2; font-weight: 600; }
+        tr:nth-child(even) { background-color: #f9f9f9; }
+        code { background-color: #f4f4f4; padding: 2px 6px; border-radius: 3px; font-family: 'Monaco', 'Consolas', monospace; font-size: 0.9em; }
+        pre { background-color: #f4f4f4; padding: 15px; overflow-x: auto; border-radius: 5px; border: 1px solid #ddd; }
+        .warning-box { background-color: #fdf2e9; border: 1px solid #f5b041; padding: 15px 20px; margin: 15px 0; border-radius: 4px; }
+        .danger-box { background-color: #fdedec; border: 1px solid #ec7063; padding: 15px 20px; margin: 15px 0; border-radius: 4px; }
+        .info-box { background-color: #ebf5fb; border: 1px solid #85c1e9; padding: 15px 20px; margin: 15px 0; border-radius: 4px; }
+        ul li { margin: 5px 0; }
+    </style>
+</head>
+<body>
+    <h1>Formal Subsystem Review: Proof-Carrying Compiler (CompCert-Style)</h1>
+    <p><strong>Date:</strong> 2026-11-02 | <strong>Repository:</strong> /Users/mrs/net/gcc/gcc/.mojo/fire/.fire-fire | <strong>Reviewer:</strong> AI Analysis</p>
+    
+    <div class="executive-summary">
+        <h3>Executive Summary</h3>
+        <p>The formal subsystem (<code>formal/</code>) is an ambitious attempt at a CompCert-style proof-carrying compiler that compiles Python/Mojo source to ARM64/x86_64 machine code and generates Lean 4 proofs of correctness. It is substantially more advanced than a toy, with real machine code generation, Mach-O/ELF linking, runtime integration, and a growing proof infrastructure. However, it is far from complete - many features are admitted/sorry'd, the semantic model is limited, and there are significant gaps between the "proof-carrying" claim and reality.</p>
+        <p><strong>Overall Assessment:</strong> <span class="status-badge status-partial">Partially Implemented / Work in Progress</span></p>
+    </div>
+
+    <h2>1. What It Is Supposed To Do</h2>
+    <p>Based on <code>FORMAL.md</code> and code inspection, the formal subsystem aims to be:</p>
+    <ul>
+        <li><strong>Proof-carrying compilation (PCC)</strong> in the style of CompCert - generate machine code along with a machine-checkable proof that it correctly implements the source semantics</li>
+        <li><strong>Multi-target codegen</strong> - ARM64 (primary) and x86_64 backends generating native Mach-O (macOS) or ELF (Linux) executables</li>
+        <li><strong>Python/Mojo source compilation</strong> - Uses the real <code>fire_compiler.py</code> frontend (tokenizer/parser/AST), not a toy parser</li>
+        <li><strong>Lean 4 proof generation</strong> - Generates <code>*_proof.lean</code> files checked with Lean 4 (toolchain pinned in <code>lean-toolchain</code>)</li>
+        <li><strong>Runtime integration</strong> - Can link against system libraries (libSystem) and a runtime dylib for <code>mojo_*</code> functions</li>
+        <li><strong>Contracts</strong> - Supports <code>@requires</code>/<code>@ensures</code> with verification and optional runtime checking</li>
+        <li><strong>Formal verification of compilation</strong> - Attempts to show <code>eval_mojo(semantics) = eval_machine(code)</code> or end-to-end correctness</li>
+    </ul>
+    <p>Usage as observed: <code>./fire.py --formal /path/to/file.py</code> compiles and runs, producing executable + proof. <code>--backend=arm64</code> or <code>--backend=x86_64</code> selects target. <code>--no-prove</code> skips proof generation/checking.</p>
+
+    <h2>2. Architecture Overview</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Component</th>
+                <th>Purpose</th>
+                <th>Status</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><code>formal/build.py</code></td>
+                <td>Orchestrates formal build pipeline (1916+ LOC), links, proofs</td>
+                <td><span class="status-badge status-good">Substantial</span></td>
+            </tr>
+            <tr>
+                <td><code>formal/arm64.py</code> / <code>formal/arm64_codegen.py</code></td>
+                <td>ARM64 instruction encoding and code generation</td>
+                <td><span class="status-badge status-good">Mature</span></td>
+            </tr>
+            <tr>
+                <td><code>formal/x86_64*.py</code></td>
+                <td>x86_64 backend (model, encode, decode, codegen, proofgen)</td>
+                <td><span class="status-badge status-partial">Substantial but separate</span></td>
+            </tr>
+            <tr>
+                <td><code>formal/arm64_proof_gen.py</code></td>
+                <td>ARM64 Lean proof generation (14690 LOC!)</td>
+                <td><span class="status-badge status-partial">Massive but admits a lot</span></td>
+            </tr>
+            <tr>
+                <td><code>formal/x86_64_proof_gen.py</code></td>
+                <td>x86_64 proof generation</td>
+                <td><span class="status-badge status-partial">Parallel implementation</span></td>
+            </tr>
+            <tr>
+                <td><code>formal/model.py</code></td>
+                <td>Shared value model, calling convention, layout rules (55908 LOC!)</td>
+                <td><span class="status-badge status-partial">Enormous but complex</span></td>
+            </tr>
+            <tr>
+                <td><code>formal/macho*.py</code>, <code>formal/elf.py</code></td>
+                <td>Binary format emission and linking</td>
+                <td><span class="status-badge status-good">Functional</span></td>
+            </tr>
+            <tr>
+                <td><code>formal/lean.py</code></td>
+                <td>Lean invocation with time/memory/CPU bounds, caching</td>
+                <td><span class="status-badge status-good">Well-designed</span></td>
+            </tr>
+            <tr>
+                <td><code>lib/ProofLib.lean</code></td>
+                <td>Shared proof infrastructure (x86-64 machine model, etc.)</td>
+                <td><span class="status-badge status-partial">Exists</span></td>
+            </tr>
+        </tbody>
+    </table>
+
+    <h2>3. What It Does Right</h2>
+    <div class="info-box">
+        <h4>Strong Points</h4>
+        <ul>
+            <li><strong>Uses real frontend</strong> - No toy parser; consumes <code>fire_compiler</code> AST directly. This is crucial for correctness.</li>
+            <li><strong>Actually generates working native code</strong> - The formal path produces real Mach-O/ELF executables that run (as confirmed by <code>test_formal_run.py</code> and manual test with hello world). This is rare for PCC research prototypes.</li>
+            <li><strong>Sophisticated binary handling</strong> - Proper Mach-O layout, stubs/GOT, dyld binding, code signing, handling of extern calls to libSystem. Cross-module dylib linking works (<code>test_formal_dylib.py</code> exists).</li>
+            <li><strong>Careful about correctness details</strong> - Handles signedness properly now (big fix noted in comments), division/flooring semantics, signed comparisons, spill offsets fixed, frame handling etc. Many bugs have been tracked and fixed.</li>
+            <li><strong>Proof infrastructure is serious</strong> - Bounded Lean execution with CPU/wall/memory limits, CAS caching, hole/sorry counting, census tools. The team clearly learned from runaway proofs.</li>
+            <li><strong>Runtime integration model</strong> - Only links runtime when needed, shape-aware refusal for non-word-shaped calls, reads dylib export tables. Reasonable ABI design.</li>
+            <li><strong>Good testing culture</strong> - Extensive test suite (<code>test_formal*.py</code> files galore), execution tests (<code>test_formal_run.py</code> actually runs binaries), proof census, fuzzing tools.</li>
+            <li><strong>Contracts support</strong> - <code>@requires</code>/<code>@ensures</code> with search/verification, runtime checking option. Goes beyond basic compilation.</li>
+            <li><strong>Honest about limitations</strong> - <code>FORMAL.md</code> is very detailed about known gaps, phases, and what doesn't work. The codebase has extensive comments about what's admitted/sorry'd and why.</li>
+        </ul>
+    </div>
+
+    <h2>4. What It Does Wrong / Bugs, Flaws, Shortcomings</h2>
+    
+    <h3>4.1 Semantic Model Limitations (Critical)</h3>
+    <div class="danger-box">
+        <ul>
+            <li><strong>Model is extremely restricted</strong> - ARM64 proof generator's semantic model <code>mojo</code> is often a function of a single <code>UInt64</code> input only. As noted in comments, structs, lists with runtime indexing, wide receivers/struct fields often have "no value in the semantic model".</li>
+            <li><strong>Source-level correspondence is weak</strong> - Many proofs admit <code>eval_eq_mojo</code> ("AST evaluation agrees with the semantic model") with comments saying it's future work. The end-to-end theorems are often admitted.</li>
+            <li><strong>Large gaps for common features</strong> - From <code>test_formal.py</code> EXPECTED_FAILURES: <code>fib</code> (tree recursion), <code>countdown</code>/<code>wge</code> (signed decrement-while issues in model), <code>subscript_var</code> (runtime-indexed lists), <code>struct Point</code> field access. These are fundamental features.</li>
+            <li><strong>Model vs reality drift</strong> - x86_64 and ARM64 backends disagree on what they can prove/refuse for the same construct (<code>struct Point</code> refused by ARM64, x86_64 generates placeholder model). Not a unified formalism.</li>
+        </ul>
+    </div>
+
+    <h3>4.2 Proof Generation Issues</h3>
+    <div class="warning-box">
+        <ul>
+            <li><strong>Massive use of <code>sorry</code>/<code>admit</code></strong> - <code>arm64_proof_gen.py</code> has 162 occurrences of <code>sorry</code>/<code>admit</code> according to grep. The CFG leaves have 15 registered admission sites that fall back to <code>sorry</code>. Dylib contracts have open obligations. Many theorems end with <code>by sorry</code>.</li>
+            <li><strong>Structure-first approach</strong> - Per <code>FORMAL.md</code> §11.3: "Land the full STRUCTURE of a proof mechanism — the theorems, their statements, the induction shape, the wiring in the generators — even with <code>sorry</code>/admit at the leaves". This is pragmatic but means "proof-carrying" is aspirational in many cases.</li>
+            <li><strong>Proofs can be vacuously true or false claims</strong> - The dylib contract fix mentioned catching cases where proofs elaborated but proved false things like <code>n * 243</code> instead of <code>n * 3</code>. Need to be careful about <code>sorry</code> over false claims.</li>
+            <li><strong>Per-instruction vs end-to-end</strong> - ARM64 generates per-instruction step lemmas and block certificates, but composing into full end-to-end correctness is often admitted as "future work".</li>
+            <li><strong>Slow and memory-heavy</strong> - Some proofs take 300s CPU, need 3-8GB RAM. The library build can need 12GB. This limits practicality.</li>
+        </ul>
+    </div>
+
+    <h3>4.3 Codebase Health & Design Issues</h3>
+    <div class="warning-box">
+        <ul>
+            <li><strong>Extreme file sizes</strong> - <code>formal/model.py</code> is 55KB+ (55908 lines), <code>formal/arm64_proof_gen.py</code> is ~147KB (14690 lines), <code>formal/build.py</code> is ~240KB (23937 lines). These are nearly unmaintainable monoliths.</li>
+            <li><strong>Duplication between backends</strong> - ARM64 and x86_64 have parallel implementations (<code>*_proof_gen.py</code>, <code>*_codegen.py</code>) that diverge in behavior (different refusal patterns, different proof styles). Not truly "one language, two generators" as intended.</li>
+            <li><strong>Complexity and hackery</strong> - Comments mention many workarounds, special cases, fixes for subtle bugs. The codebase has accumulated layers of fixes over time.</li>
+            <li><strong>Testing is ad-hoc</strong> - Huge number of <code>test_formal_*.py</code> files (150+ mentioned in directory listing), many seem like regression pins. Hard to get full picture of coverage.</li>
+            <li><strong>Unclear what's actually verified</strong> - Between <code>--no-prove</code>, admitted contracts, sorry's, and different proof levels, it's hard to tell if a given build has real machine-checked proofs or just structure.</li>
+        </ul>
+    </div>
+
+    <h3>4.4 Functional Gaps</h3>
+    <div class="warning-box">
+        <ul>
+            <li><strong>Limited language coverage</strong> - Many Python features may not work or aren't proved. The examples in <code>formal/examples/</code> show basic features; complex features like generators, async, many stdlib modules have issues.</li>
+            <li><strong>Runtime surface is mostly not word-shaped</strong> - Only ~44% of runtime ABI is provably handleable in the simple word-in/word-out model. The rest either refuses or requires special handling.</li>
+            <li><strong>Floats are problematic</strong> - Comments say floats are handled specially, truncation issues. Division behavior differs from Python in some cases.</li>
+            <li><strong>Heap/allocator needs work</strong> - Phase 6 mentioned as gated behind frame-address work. Many heap-allocated objects problematic.</li>
+            <li><strong>Comptime evaluation</strong> - Has issues, <code>comptime_nofold_is_rerun</code> test suggests subtleties.</li>
+        </ul>
+    </div>
+
+    <h2>5. Failed Promises & Misconceptions</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Claim/Promise</th>
+                <th>Reality</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><strong>"proof-carrying compiler, a la CompCert style"</strong></td>
+                <td>More accurately "proof-generating compiler with aspirational proofs". Many proofs have <code>sorry</code>, admitted theorems, or only verify limited properties. Not CompCert-level end-to-end verified.</td>
+            </tr>
+            <tr>
+                <td><strong>"create a lean 4 proof of that transformation to ensure the code matches the source code"</strong></td>
+                <td>Partially true for simple programs. For many constructs (structs, runtime indexing, recursion in complex forms), the proof either refuses to generate, generates with admitted holes, or proves something weak/vacuous. The correspondence is often not established.</td>
+            </tr>
+            <tr>
+                <td><strong>"compile python source code"</strong></td>
+                <td>Compiles Mojo/Python-like source using the fire_compiler frontend. Works for tested subset. But many Python features unsupported; the language is effectively a subset.</td>
+            </tr>
+            <tr>
+                <td><strong>Two backends are "one language with one runtime, and a proof about it"</strong> (stated goal in FORMAL.md)</td>
+                <td>Not achieved - they have different capabilities, different refusal behaviors, different proof generators. Still treated as separate implementations with shared bits.</td>
+            </tr>
+            <tr>
+                <td><strong>Proofs are "checked by default"</strong></td>
+                <td>Checked by default in <code>build --formal</code>, but proofs may contain <code>sorry</code> and still typecheck. Typechecking ≠ fully proven without holes. The census tools track holes separately.</td>
+            </tr>
+            <tr>
+                <td><strong>Runtime written in Mojo, provable in same sense</strong> (long-term goal)</td>
+                <td>Still mostly C runtime (<code>runtime/fire_runtime.c</code> is 645KB). The goal is stated as "programme, not a bug" in FORMAL.md - not yet realized.</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <h2>6. Quick Assessment of "It Works"</h2>
+    <p>I tested with <code>printf 'hello world'</code> in Python: <code>./fire.py --formal /tmp/hello.py</code> produced output <code>hello world</code> successfully. The binary ran correctly. Proof file was likely generated too (though I didn't inspect it). So the basic path works end-to-end.</p>
+    <p>The formal examples directory has many compiled artifacts (<code>.aout</code> files) suggesting the system is regularly used. Tests like <code>test_formal_run.py</code> do actual execution testing.</p>
+
+    <h2>7. Recommendations</h2>
+    <h3>For Understanding</h3>
+    <ul>
+        <li>Start with <code>FORMAL.md</code> - it's surprisingly honest and detailed about the state</li>
+        <li>Look at <code>test_formal_run.py</code> to see what actually works in practice</li>
+        <li>Check <code>formal/examples/*.mojo</code> for simple working cases</li>
+        <li>Read <code>formal/build.py</code> docstring and early parts for pipeline overview</li>
+    </ul>
+    
+    <h3>For Improvement</h3>
+    <ul>
+        <li><strong>Refactor monoliths</strong> - Break up model.py, arm64_proof_gen.py, build.py into manageable modules</li>
+        <li><strong>Unify backends</strong> - Eliminate ARM64/x86_64 divergence, share more code</li>
+        <li><strong>Reduce sorry count</strong> - Systematically close CFG leaves and admitted theorems, or clearly mark what level of proof is provided</li>
+        <li><strong>Strengthen semantic model</strong> - Extend to handle structs, lists properly so more programs can be proved</li>
+        <li><strong>Better documentation of proof guarantees</strong> - Distinguish "typechecks with structure" vs "fully proved" vs "refused". Users need to know what trust level they get.</li>
+        <li><strong>Improve error messages</strong> - When proofs can't be generated, explain why and what needs to be done</li>
+    </ul>
+
+    <h2>Conclusion</h2>
+    <p>This is a genuinely impressive piece of engineering - a working proof-carrying compiler that generates native code and real Lean proofs, not just a demo. The attention to detail (signedness, calling conventions, binary formats, proof caching with timeouts to prevent runaway proofs) shows deep systems knowledge.</p>
+    <p>However, the "proof-carrying" aspect is only partially realized. For simple programs it may generate meaningful proofs; for complex programs you're likely to hit admitted holes, refused constructs, or weak models. It's best described as <strong>"a native code generator with Lean proof generation infrastructure and partial correctness proofs"</strong> rather than a fully verified compiler in the CompCert sense.</p>
+    <p>The project is honest about its state in documentation, which is refreshing. It's a work in progress moving in the right direction, but with substantial gaps remaining. Treat the formal path as experimental/beta for anything beyond simple cases.</p>
+
+    <hr>
+    <p style="text-align: center; color: #7f8c8d; font-size: 0.9em;">
+        Review based on codebase inspection, documentation (FORMAL.md), tests, and manual testing
+    </p>
+</body>
+</html>

@@ -272,6 +272,19 @@ void mojo_frame_set_attr(int64_t w, int64_t id, int64_t v)
     if (!f) return;
     if (id == 0) f->f_trace = v; else if (id == 1) f->trace_lines = v; else f->trace_opcodes = v;
 }
+/* `del frame.<attr>` for the stored frame attributes, with CPython 3.15's answers: `f_trace` deletes
+ * (it reads back None); `f_trace_lines` is a TypeError and `f_trace_opcodes` an AttributeError, and
+ * neither is removed. */
+void mojo_frame_del_attr(int64_t w, int64_t id)
+{
+    if (id == 0) {
+        MojoFrameRec *f = _frame_of(w);
+        if (f) f->f_trace = mojo_box_none();
+        return;
+    }
+    if (id == 1) { mojo_raise_type_error((char *)"can't delete numeric/char attribute"); return; }
+    mojo_raise_attribute_error((char *)"f_trace_opcodes");
+}
 
 /* frame.clear(): CPython refuses a frame that is still executing ("cannot clear an executing
  * frame"); any other frame (finished, or a kept traceback frame) clears, which here has nothing
@@ -1821,6 +1834,7 @@ char *mojo_repr_boxed(int64_t v)
      * word keeps its integer rendering. The caller strdup'd the box arms
      * above, so this arm hands back its own copy too. */
     if (mojo_boxed_is_str(v)) return strdup((char *)(intptr_t)v);
+    if (mojo_is_re_match(v)) return mojo_re_match_repr(v);
     return mojo_str_from_int(v);
 }
 
@@ -2057,7 +2071,8 @@ int mojo_boxed_is_str(int64_t v) {
     if (!(_mojo_ptr_shaped(v))) return 0;
     if (mojo_is_registered_list(v) || mojo_is_registered_dict(v)
         || mojo_is_registered_set(v) || mojo_is_boxed(v)
-        || mojo_is_registered_bytes(v)) return 0;
+        || mojo_is_registered_bytes(v)
+        || mojo_is_re_pattern(v) || mojo_is_re_match(v)) return 0;
     /* Pointer-shaped and not a container: the sound half the range test could
      * never give. A LIVE heap allocation is a real pointer and no bare integer
      * is one, and a registered non-heap string is the codegen's `__rodata`
@@ -12705,10 +12720,10 @@ MojoList *mojo_os_scandir(char *top) {
 }
 /* str(x, encoding) for a word whose kind is known only at run time: a bytes
  * object decodes, anything else is already a str and is returned as it is. */
-char *mojo_str_from_word(int64_t w, char *encoding)
+char *mojo_str_from_word(int64_t w, char *encoding, char *errors)
 {
     if (mojo_is_registered_bytes(w))
-        return mojo_bytes_decode((MojoBytes *)(intptr_t)w, encoding, "strict");
+        return mojo_bytes_decode((MojoBytes *)(intptr_t)w, encoding, errors);
     return (char *)(intptr_t)w;
 }
 
@@ -13457,6 +13472,7 @@ char *mojo_cstr_or_int_str(int64_t v) {
     if (mojo_boxed_is_str(v)) return (char *)(intptr_t)v;
     if (mojo_is_registered_bytes(v))
         return mojo_bytes_repr((MojoBytes *)(intptr_t)v);
+    if (mojo_is_re_match(v)) return mojo_re_match_repr(v);
     if (mojo_is_registered_list(v)) return _container_key_str(v);
     return _int_str_transient(v);
 }
@@ -15569,7 +15585,11 @@ int mojo_cstr_region_eq_n(char *s, int64_t slen, int64_t start, int64_t stop,
 #include "fire_re_engine.inc"
 
 typedef struct { FreProg *pg; char *pattern; int64_t flags; } MojoRePat;
-typedef struct { MojoRePat *re; char *text; int64_t n; int64_t *caps; int64_t pos, endpos; } MojoReMatch;
+/* `is_bytes` is the subject's KIND, recorded at match time: a bytes subject's
+ * groups are bytes objects and its repr is spelled with bytes reprs (CPython:
+ * `m.group(1)` of `re.compile(b'a(b)').match(b'ab')` is `b'b'`). `text` is a
+ * NUL-terminated copy of the subject either way; groups copy by length. */
+typedef struct { MojoRePat *re; char *text; int64_t n; int64_t *caps; int64_t pos, endpos; int is_bytes; } MojoReMatch;
 static _PtrReg _reg_re_pat, _reg_re_match;
 
 int mojo_is_re_pattern(int64_t w) { return _mojo_ptr_shaped(w) && _pr_has(&_reg_re_pat, (uint64_t)w); }
@@ -15592,23 +15612,79 @@ int64_t mojo_re_compile(char *pat, int64_t flags)
     return (int64_t)(intptr_t)r;
 }
 
+/* A subject of a pattern method, read by its KIND (see mojo_re_compile): a bytes
+ * object is its `len` bytes (a NUL is data), a str is read to its NUL. */
+typedef struct { const char *p; int64_t n; int is_bytes; } ReSubj;
+
+static ReSubj _re_subj_bytes(MojoBytes *b)
+{
+    ReSubj sb;
+    sb.p = b->data ? (const char *)b->data : "";
+    sb.n = b->len < 0 ? 0 : b->len;
+    sb.is_bytes = 1;
+    return sb;
+}
+
+/* A subject WORD: a registered bytes object, or a str pointer. None (0) is a TypeError. */
+static ReSubj _re_subj_word(int64_t w)
+{
+    if (mojo_is_registered_bytes(w)) return _re_subj_bytes((MojoBytes *)(intptr_t)w);
+    ReSubj sb;
+    if (!w) { mojo_raise_type_error((char *)"expected a string or bytes-like object"); sb.p = ""; sb.n = 0; sb.is_bytes = 0; return sb; }
+    sb.p = (const char *)(intptr_t)w; sb.n = (int64_t)strlen(sb.p); sb.is_bytes = 0;
+    return sb;
+}
+
+/* The piece [a, b) of a text as a word of its kind: a bytes object, or a fresh str. */
+static int64_t _re_piece(const char *text, int is_bytes, int64_t a, int64_t b)
+{
+    if (is_bytes) return (int64_t)(intptr_t)mojo_bytes_new_lit(text + a, b - a);
+    char *out = (char *)malloc((size_t)(b - a) + 1);
+    memcpy(out, text + a, (size_t)(b - a)); out[b - a] = 0;
+    return (int64_t)(intptr_t)out;
+}
+
+/* Group i of a raw match (caps) as a word of the subject's kind; a group that did
+ * not participate is the empty piece (what findall and split give for it). */
+static int64_t _re_cap_piece(ReSubj sb, const int64_t *caps, int i)
+{
+    int64_t a = caps[2 * i], b = caps[2 * i + 1];
+    if (a < 0 || b < 0) a = b = 0;
+    return _re_piece(sb.p, sb.is_bytes, a, b);
+}
+
+/* One raw search over a subject of either kind: fills caps, returns 1 on a match. */
+static int _re_exec_raw(const FreProg *pg, ReSubj sb, int64_t pos, int64_t endpos, int mode, int64_t *caps)
+{
+    return sb.is_bytes
+        ? fre_exec_bytes(pg, sb.p, sb.n, pos, endpos, mode, caps)
+        : fre_exec(pg, sb.p, sb.n, pos, endpos, mode, caps);
+}
+
+/* A match record over a subject of either kind (the match keeps its own copy of the
+ * text, and the subject's kind). NULL when the pattern does not match. */
+static MojoReMatch *_re_search(MojoRePat *r, ReSubj sb, int64_t pos, int64_t endpos, int mode)
+{
+    if (endpos < 0 || endpos > sb.n) endpos = sb.n;
+    int nc = 2 * (r->pg->ngroups + 1);
+    int64_t *caps = (int64_t *)malloc((size_t)nc * sizeof(int64_t));
+    if (!_re_exec_raw(r->pg, sb, pos, endpos, mode, caps)) { free(caps); return NULL; }
+    MojoReMatch *m = (MojoReMatch *)malloc(sizeof *m);
+    m->re = r; m->text = (char *)malloc((size_t)sb.n + 1);
+    memcpy(m->text, sb.p, (size_t)sb.n); m->text[sb.n] = 0;
+    m->n = sb.n; m->caps = caps; m->pos = pos; m->endpos = endpos; m->is_bytes = sb.is_bytes;
+    _pr_add(&_reg_re_match, (uint64_t)(uintptr_t)m);
+    return m;
+}
+
 /* mode 0 match / 1 search / 2 fullmatch.  A match handle or 0 (None). */
 /* Likewise a bytes subject, by its kind: see mojo_re_compile. */
 int64_t mojo_re_exec(int64_t h, char *s, int64_t pos, int64_t endpos, int64_t mode)
 {
     if (!mojo_is_re_pattern(h) || !s) return 0;
-    if (mojo_is_registered_bytes((int64_t)(intptr_t)s))
-        return mojo_re_exec_bytes(h, (MojoBytes *)(intptr_t)s, pos, endpos, mode);
-    MojoRePat *r = (MojoRePat *)(intptr_t)h;
-    int64_t n = (int64_t)strlen(s);
-    if (endpos < 0 || endpos > n) endpos = n;
-    int nc = 2 * (r->pg->ngroups + 1);
-    int64_t *caps = (int64_t *)malloc((size_t)nc * sizeof(int64_t));
-    if (!fre_exec(r->pg, s, n, pos, endpos, (int)mode, caps)) { free(caps); return 0; }
-    MojoReMatch *m = (MojoReMatch *)malloc(sizeof *m);
-    m->re = r; m->text = strdup(s); m->n = n; m->caps = caps; m->pos = pos; m->endpos = endpos;
-    _pr_add(&_reg_re_match, (uint64_t)(uintptr_t)m);
-    return (int64_t)(intptr_t)m;
+    MojoReMatch *m = _re_search((MojoRePat *)(intptr_t)h, _re_subj_word((int64_t)(intptr_t)s),
+                                pos, endpos, (int)mode);
+    return m ? (int64_t)(intptr_t)m : 0;
 }
 
 /* `pat` is the bytes OBJECT (a MojoBytes *): its data and length are read here,
@@ -15628,20 +15704,10 @@ int64_t mojo_re_compile_bytes(MojoBytes *pat, int64_t flags)
 /* `s` is the bytes OBJECT, as in mojo_re_compile_bytes. */
 int64_t mojo_re_exec_bytes(int64_t h, MojoBytes *s, int64_t pos, int64_t endpos, int64_t mode)
 {
-    if (!mojo_is_re_pattern(h) || !s || !s->data || s->len < 0) return 0;
-    MojoRePat *r = (MojoRePat *)(intptr_t)h;
-    int64_t len = s->len;
-    int64_t n = len;
-    if (endpos < 0 || endpos > n) endpos = n;
-    int nc = 2 * (r->pg->ngroups + 1);
-    int64_t *caps = (int64_t *)malloc((size_t)nc * sizeof(int64_t));
-    if (!fre_exec_bytes(r->pg, (char *)s->data, n, pos, endpos, (int)mode, caps)) { free(caps); return 0; }
-    MojoReMatch *m = (MojoReMatch *)malloc(sizeof *m);
-    m->re = r; m->text = (char *)malloc((size_t)len + 1); memcpy(m->text, s->data, (size_t)len); m->text[len] = 0; m->n = n; m->caps = caps; m->pos = pos; m->endpos = endpos;
-    _pr_add(&_reg_re_match, (uint64_t)(uintptr_t)m);
-    return (int64_t)(intptr_t)m;
+    if (!mojo_is_re_pattern(h) || !s) return 0;
+    MojoReMatch *m = _re_search((MojoRePat *)(intptr_t)h, _re_subj_bytes(s), pos, endpos, (int)mode);
+    return m ? (int64_t)(intptr_t)m : 0;
 }
-
 static int _re_group_index(MojoReMatch *m, int64_t w, int *out)
 {
     if (mojo_boxed_is_str(w)) {
@@ -15655,7 +15721,8 @@ static int _re_group_index(MojoReMatch *m, int64_t w, int *out)
     *out = (int)w; return 1;
 }
 
-/* m.group(n): the text of a group, or 0 (None) when it did not participate. */
+/* m.group(n): the text of a group, or 0 (None) when it did not participate.
+ * A bytes subject's group is a bytes object (the word's kind is the subject's). */
 int64_t mojo_re_m_group(int64_t mh, int64_t g)
 {
     if (!mojo_is_re_match(mh)) return 0;
@@ -15663,9 +15730,33 @@ int64_t mojo_re_m_group(int64_t mh, int64_t g)
     if (!_re_group_index(m, g, &i)) return 0;
     int64_t a = m->caps[2 * i], b = m->caps[2 * i + 1];
     if (a < 0 || b < 0) return 0;
-    char *out = (char *)malloc((size_t)(b - a) + 1);
-    memcpy(out, m->text + a, (size_t)(b - a)); out[b - a] = 0;
-    return (int64_t)(intptr_t)out;
+    return _re_piece(m->text, m->is_bytes, a, b);
+}
+
+/* repr() of a word whose kind only the runtime knows (a str, a bytes, a match,
+ * or an integer). Unlike mojo_cstr_or_int_str, which is str(), a str is quoted. */
+char *mojo_repr_word(int64_t v)
+{
+    if (mojo_is_re_match(v)) return mojo_re_match_repr(v);
+    if (mojo_is_registered_bytes(v)) return mojo_bytes_repr((MojoBytes *)(intptr_t)v);
+    if (!mojo_is_boxed(v) && mojo_boxed_is_str(v)) return mojo_repr_str((char *)(intptr_t)v);
+    return mojo_repr_boxed(v);
+}
+
+/* repr(m): CPython's `<re.Match object; span=(s, e), match=REPR>`, where REPR is
+ * the repr of group 0 (a str or a bytes, by the subject's kind). A fresh string. */
+char *mojo_re_match_repr(int64_t mh)
+{
+    MojoReMatch *m = (MojoReMatch *)(intptr_t)mh;
+    int64_t a = m->caps[0], b = m->caps[1];
+    char *whole = (char *)malloc((size_t)(b - a) + 1);
+    memcpy(whole, m->text + a, (size_t)(b - a)); whole[b - a] = 0;
+    char *shown = m->is_bytes ? mojo_bytes_repr(mojo_bytes_new_lit(whole, b - a)) : mojo_repr_str(whole);
+    char *out = (char *)malloc(strlen(shown) + 64);
+    snprintf(out, strlen(shown) + 64, "<re.Match object; span=(%lld, %lld), match=%s>",
+             (long long)a, (long long)b, shown);
+    free(shown); free(whole);
+    return out;
 }
 int64_t mojo_re_m_start(int64_t mh, int64_t g)
 {
@@ -15680,38 +15771,38 @@ int64_t mojo_re_m_end(int64_t mh, int64_t g)
     return _re_group_index(m, g, &i) ? m->caps[2 * i + 1] : -1;
 }
 
-/* A word-valued result list: [item0, ...] as plain words (strings as pointers). */
+/* A group's word, pushed onto a result list under its kind; a group that did not
+ * participate is `dflt` (CPython's None is the integer 0 in these lists). */
+static void _re_push_group(MojoList *l, int64_t g, int64_t dflt)
+{
+    if (g) mojo_list_append_word(l, g);
+    else mojo_list_append_int(l, dflt);
+}
+
+/* A word-valued result list: [group1, ...] as words of the match's kind. */
 static MojoList *_re_groups_list(MojoReMatch *m, int64_t dflt)
 {
     MojoList *l = mojo_list_new();
-    for (int i = 1; i <= m->re->pg->ngroups; i++) {
-        int64_t g = mojo_re_m_group((int64_t)(intptr_t)m, i);
-        mojo_list_append_int(l, g ? g : dflt);
-    }
+    for (int i = 1; i <= m->re->pg->ngroups; i++)
+        _re_push_group(l, mojo_re_m_group((int64_t)(intptr_t)m, i), dflt);
     return l;
 }
 
-static int64_t _re_findall(MojoRePat *r, char *s)
+/* pattern.findall(subject): the whole match, the one group, or a tuple of groups. */
+static int64_t _re_findall(MojoRePat *r, int64_t subj)
 {
+    ReSubj sb = _re_subj_word(subj);
     MojoList *out = mojo_list_new();
-    int64_t n = (int64_t)strlen(s), pos = 0;
-    int nc = 2 * (r->pg->ngroups + 1);
-    int64_t *caps = (int64_t *)malloc((size_t)nc * sizeof(int64_t));
-    while (pos <= n && fre_exec(r->pg, s, n, pos, n, 1, caps)) {
+    int ng = r->pg->ngroups;
+    int64_t *caps = (int64_t *)malloc((size_t)(2 * (ng + 1)) * sizeof(int64_t));
+    int64_t pos = 0;
+    while (pos <= sb.n && _re_exec_raw(r->pg, sb, pos, sb.n, 1, caps)) {
         int64_t a = caps[0], b = caps[1];
-        char *piece;
-        if (r->pg->ngroups == 0) { piece = (char *)malloc((size_t)(b - a) + 1); memcpy(piece, s + a, (size_t)(b - a)); piece[b - a] = 0; mojo_list_append_int(out, (int64_t)(intptr_t)piece); }
-        else if (r->pg->ngroups == 1) {
-            int64_t ga = caps[2], gb = caps[3]; int64_t ln = (ga >= 0 && gb >= 0) ? gb - ga : 0;
-            piece = (char *)malloc((size_t)ln + 1); if (ln) memcpy(piece, s + ga, (size_t)ln); piece[ln] = 0;
-            mojo_list_append_int(out, (int64_t)(intptr_t)piece);
-        } else {
+        if (ng == 0) mojo_list_append_word(out, _re_cap_piece(sb, caps, 0));
+        else if (ng == 1) mojo_list_append_word(out, _re_cap_piece(sb, caps, 1));
+        else {
             MojoList *tup = mojo_list_new();
-            for (int i = 1; i <= r->pg->ngroups; i++) {
-                int64_t ga = caps[2 * i], gb = caps[2 * i + 1]; int64_t ln = (ga >= 0 && gb >= 0) ? gb - ga : 0;
-                piece = (char *)malloc((size_t)ln + 1); if (ln) memcpy(piece, s + ga, (size_t)ln); piece[ln] = 0;
-                mojo_list_append_int(tup, (int64_t)(intptr_t)piece);
-            }
+            for (int i = 1; i <= ng; i++) mojo_list_append_word(tup, _re_cap_piece(sb, caps, i));
             mojo_mark_as_tuple(tup);
             mojo_list_append_int(out, (int64_t)(intptr_t)tup);
         }
@@ -15721,25 +15812,33 @@ static int64_t _re_findall(MojoRePat *r, char *s)
     return (int64_t)(intptr_t)out;
 }
 
-/* Expand a replacement template (\1, \g<1>, \g<name>, \n, \\) for one match. */
-static char *_re_expand(MojoReMatch *m, const char *tpl)
+/* Expand a replacement template (\1, \g<1>, \g<name>, \n, \t, \\) for one match.
+ * The template is `tlen` bytes (a bytes template may hold NULs); the expansion is
+ * returned NUL-terminated, its length in *outlen. */
+static char *_re_expand(MojoReMatch *m, const char *tpl, int64_t tlen, int64_t *outlen)
 {
-    size_t cap = strlen(tpl) + 64, len = 0; char *out = (char *)malloc(cap);
+    size_t cap = (size_t)tlen + 64, len = 0; char *out = (char *)malloc(cap);
+    const char *end = tpl + tlen;
+    int ng = m->re->pg->ngroups;
     #define PUTS(str, ln) do { size_t _l = (ln); while (len + _l + 1 > cap) { cap *= 2; out = (char *)realloc(out, cap); } memcpy(out + len, (str), _l); len += _l; } while (0)
-    for (const char *p = tpl; *p; p++) {
-        if (*p != '\\' || !p[1]) { PUTS(p, 1); continue; }
+    for (const char *p = tpl; p < end; p++) {
+        if (*p != '\\' || p + 1 >= end) { PUTS(p, 1); continue; }
         p++;
         if (*p >= '0' && *p <= '9') {
-            int g = *p - '0'; int64_t a = m->caps[2 * g], b = m->caps[2 * g + 1];
-            if (g <= m->re->pg->ngroups && a >= 0 && b >= 0) PUTS(m->text + a, (size_t)(b - a));
-        } else if (*p == 'g' && p[1] == '<') {
-            const char *e = strchr(p + 2, '>'); if (!e) { PUTS("\\g", 2); continue; }
+            int g = *p - '0';
+            if (g <= ng) {
+                int64_t a = m->caps[2 * g], b = m->caps[2 * g + 1];
+                if (a >= 0 && b >= 0) PUTS(m->text + a, b - a);
+            }
+        } else if (*p == 'g' && p + 1 < end && p[1] == '<') {
+            const char *e = (const char *)memchr(p + 2, '>', (size_t)(end - (p + 2)));
+            if (!e) { PUTS("\\g", 2); continue; }
             char nm[64]; size_t nl = (size_t)(e - (p + 2)); if (nl >= sizeof nm) nl = sizeof nm - 1;
             memcpy(nm, p + 2, nl); nm[nl] = 0;
             int g = -1;
             if (nm[0] >= '0' && nm[0] <= '9') g = atoi(nm);
-            else for (int i = 1; i <= m->re->pg->ngroups; i++) if (m->re->pg->gnames[i] && !strcmp(m->re->pg->gnames[i], nm)) g = i;
-            if (g >= 0 && g <= m->re->pg->ngroups) { int64_t a = m->caps[2 * g], b = m->caps[2 * g + 1]; if (a >= 0 && b >= 0) PUTS(m->text + a, (size_t)(b - a)); }
+            else for (int i = 1; i <= ng; i++) if (m->re->pg->gnames[i] && !strcmp(m->re->pg->gnames[i], nm)) g = i;
+            if (g >= 0 && g <= ng) { int64_t a = m->caps[2 * g], b = m->caps[2 * g + 1]; if (a >= 0 && b >= 0) PUTS(m->text + a, b - a); }
             p = e;
         } else if (*p == 'n') PUTS("\n", 1);
         else if (*p == 't') PUTS("\t", 1);
@@ -15747,70 +15846,81 @@ static char *_re_expand(MojoReMatch *m, const char *tpl)
         else { PUTS("\\", 1); PUTS(p, 1); }
     }
     out[len] = 0;
+    *outlen = (int64_t)len;
     #undef PUTS
     return out;
 }
 
-/* pattern.sub(repl, string, count): repl is a template string or a callable taking the match. */
-static int64_t _re_sub(MojoRePat *r, int64_t repl, char *s, int64_t count, int64_t *nsubs)
+/* pattern.sub(repl, subject, count): repl is a template or a callable taking the
+ * match. A bytes subject gives a bytes result; a str subject a str. */
+static int64_t _re_sub(MojoRePat *r, int64_t repl, int64_t subj, int64_t count, int64_t *nsubs)
 {
-    int64_t n = (int64_t)strlen(s), pos = 0, last = 0, done = 0;
+    ReSubj sb = _re_subj_word(subj);
+    int64_t n = sb.n, pos = 0, last = 0, done = 0;
     size_t cap = (size_t)n + 64, len = 0; char *out = (char *)malloc(cap);
     #define APPEND(str, ln) do { size_t _l = (ln); while (len + _l + 1 > cap) { cap *= 2; out = (char *)realloc(out, cap); } memcpy(out + len, (str), _l); len += _l; } while (0)
     int is_call = mojo_is_callable_word(repl);
+    ReSubj tpl = {"", 0, 0};
+    if (!is_call) tpl = _re_subj_word(repl);
     while (pos <= n && (count <= 0 || done < count)) {
-        int64_t mh = mojo_re_exec((int64_t)(intptr_t)r, s, pos, -1, 1);
-        if (!mh) break;
-        MojoReMatch *m = (MojoReMatch *)(intptr_t)mh;
+        MojoReMatch *m = _re_search(r, sb, pos, -1, 1);
+        if (!m) break;
         int64_t a = m->caps[0], b = m->caps[1];
-        APPEND(s + last, (size_t)(a - last));
+        APPEND(sb.p + last, (size_t)(a - last));
         if (is_call) {
-            int64_t res = mojo_fnptr_call_1((void *)(intptr_t)repl, mh);
-            if (res) APPEND((char *)(intptr_t)res, strlen((char *)(intptr_t)res));
+            int64_t res = mojo_fnptr_call_1((void *)(intptr_t)repl, (int64_t)(intptr_t)m);
+            if (res) { ReSubj rs = _re_subj_word(res); APPEND(rs.p, (size_t)rs.n); }
         } else {
-            char *ex = _re_expand(m, (const char *)(intptr_t)repl);
-            APPEND(ex, strlen(ex)); free(ex);
+            int64_t exl = 0;
+            char *ex = _re_expand(m, tpl.p, tpl.n, &exl);
+            APPEND(ex, (size_t)exl); free(ex);
         }
         done++; last = b;
         pos = b > a ? b : b + 1;
-        if (b == a && a < n) { APPEND(s + a, 1); last = a + 1; }
+        if (b == a && a < n) { APPEND(sb.p + a, 1); last = a + 1; }
     }
-    if (last < n) APPEND(s + last, (size_t)(n - last));
+    if (last < n) APPEND(sb.p + last, (size_t)(n - last));
     out[len] = 0;
     #undef APPEND
     if (nsubs) *nsubs = done;
+    if (sb.is_bytes) {
+        MojoBytes *bo = mojo_bytes_new_lit(out, (int64_t)len);
+        free(out);
+        return (int64_t)(intptr_t)bo;
+    }
     return (int64_t)(intptr_t)out;
 }
 
-static int64_t _re_split(MojoRePat *r, char *s, int64_t maxsplit)
+/* pattern.split(subject, maxsplit): the pieces and the groups of each match. */
+static int64_t _re_split(MojoRePat *r, int64_t subj, int64_t maxsplit)
 {
+    ReSubj sb = _re_subj_word(subj);
     MojoList *out = mojo_list_new();
-    int64_t n = (int64_t)strlen(s), pos = 0, last = 0, done = 0;
+    int64_t n = sb.n, pos = 0, last = 0, done = 0;
     while (pos <= n && (maxsplit <= 0 || done < maxsplit)) {
-        int64_t mh = mojo_re_exec((int64_t)(intptr_t)r, s, pos, -1, 1);
-        if (!mh) break;
-        MojoReMatch *m = (MojoReMatch *)(intptr_t)mh;
+        MojoReMatch *m = _re_search(r, sb, pos, -1, 1);
+        if (!m) break;
+        int64_t mh = (int64_t)(intptr_t)m;
         int64_t a = m->caps[0], b = m->caps[1];
         if (b == a) { pos = a + 1; if (a >= n) break; continue; }
-        char *piece = (char *)malloc((size_t)(a - last) + 1); memcpy(piece, s + last, (size_t)(a - last)); piece[a - last] = 0;
-        mojo_list_append_int(out, (int64_t)(intptr_t)piece);
-        for (int i = 1; i <= r->pg->ngroups; i++) mojo_list_append_int(out, mojo_re_m_group(mh, i));
+        mojo_list_append_word(out, _re_piece(sb.p, sb.is_bytes, last, a));
+        for (int i = 1; i <= r->pg->ngroups; i++) _re_push_group(out, mojo_re_m_group(mh, i), 0);
         done++; last = b; pos = b;
     }
-    char *tail = strdup(s + last);
-    mojo_list_append_int(out, (int64_t)(intptr_t)tail);
+    mojo_list_append_word(out, _re_piece(sb.p, sb.is_bytes, last, n));
     return (int64_t)(intptr_t)out;
 }
 
-static int64_t _re_finditer(MojoRePat *r, char *s)
+/* pattern.finditer(subject): the match records, in order. */
+static int64_t _re_finditer(MojoRePat *r, int64_t subj)
 {
+    ReSubj sb = _re_subj_word(subj);
     MojoList *out = mojo_list_new();
-    int64_t n = (int64_t)strlen(s), pos = 0;
-    while (pos <= n) {
-        int64_t mh = mojo_re_exec((int64_t)(intptr_t)r, s, pos, -1, 1);
-        if (!mh) break;
-        MojoReMatch *m = (MojoReMatch *)(intptr_t)mh;
-        mojo_list_append_int(out, mh);
+    int64_t pos = 0;
+    while (pos <= sb.n) {
+        MojoReMatch *m = _re_search(r, sb, pos, -1, 1);
+        if (!m) break;
+        mojo_list_append_int(out, (int64_t)(intptr_t)m);
         pos = m->caps[1] > m->caps[0] ? m->caps[1] : m->caps[1] + 1;
     }
     return (int64_t)(intptr_t)out;
@@ -15826,10 +15936,10 @@ int64_t mojo_re_call(int64_t obj, char *name, MojoList *args, MojoDict *kw)
         MojoRePat *r = (MojoRePat *)(intptr_t)obj;
         int mode = !strcmp(name, "match") ? 0 : !strcmp(name, "search") ? 1 : !strcmp(name, "fullmatch") ? 2 : -1;
         if (mode >= 0) return mojo_re_exec(obj, (char *)(intptr_t)a0, n > 1 ? a1 : 0, n > 2 ? a2 : -1, mode);
-        if (!strcmp(name, "findall")) return _re_findall(r, (char *)(intptr_t)a0);
-        if (!strcmp(name, "sub")) return _re_sub(r, a0, (char *)(intptr_t)a1, n > 2 ? a2 : 0, 0);
-        if (!strcmp(name, "split")) return _re_split(r, (char *)(intptr_t)a0, n > 1 ? a1 : 0);
-        if (!strcmp(name, "finditer")) return _re_finditer(r, (char *)(intptr_t)a0);
+        if (!strcmp(name, "findall")) return _re_findall(r, a0);
+        if (!strcmp(name, "sub")) return _re_sub(r, a0, a1, n > 2 ? a2 : 0, 0);
+        if (!strcmp(name, "split")) return _re_split(r, a0, n > 1 ? a1 : 0);
+        if (!strcmp(name, "finditer")) return _re_finditer(r, a0);
     } else if (mojo_is_re_match(obj)) {
         MojoReMatch *m = (MojoReMatch *)(intptr_t)obj;
         if (!strcmp(name, "group")) return mojo_re_m_group(obj, n > 0 ? a0 : 0);
@@ -15901,7 +16011,7 @@ int64_t mojo_re_escape_w(int64_t s) { return (int64_t)(intptr_t)mojo_re_escape((
  * a string splits on `arg` (whitespace when `arg` is 0). */
 int64_t mojo_split_dyn(int64_t recv, int64_t arg)
 {
-    if (mojo_is_re_pattern(recv)) return _re_split((MojoRePat *)(intptr_t)recv, (char *)(intptr_t)arg, 0);
+    if (mojo_is_re_pattern(recv)) return _re_split((MojoRePat *)(intptr_t)recv, arg, 0);
     return (int64_t)(intptr_t)mojo_str_split((char *)(intptr_t)recv, (char *)(intptr_t)arg);
 }
 

@@ -786,7 +786,8 @@ def _cpp_apply_fstring_spec(part_val: str, spec: str) -> str:
 # `os.path.<fn>` names a body may alias to a local -- the ones the `os.path.*`
 # call table in `_cpp_expr` lowers.
 _CPP_OS_PATH_ALIASABLE = ('join', 'islink', 'isdir', 'isfile', 'exists',
-                          'basename', 'dirname')
+                          'basename', 'dirname', 'split', 'splitext',
+                          'expanduser', 'abspath', 'normpath', 'relpath')
 
 
 def _cpp_collect_os_path_aliases(fn) -> dict:
@@ -1955,10 +1956,58 @@ def _cpp_is_tagged_word_expr(gen, expr) -> bool:
     """True when `expr` yields a TAGGED word that must be printed as a box:
     a local bound from a tagged generator (`gen._cpp_tagged_word_names`, set
     by the for-loop binding and `x = next(g)`), or a direct `next(g)` on a
-    tagged generator. Every other scalar is left to its ordinary spelling."""
+    tagged generator. An `and`/`or` whose LEFT operand is a tagged word is
+    one too: Python returns an operand, so the result is the left word or the
+    right operand boxed by its kind (`_cpp_tagged_operand_word`). Every other
+    scalar is left to its ordinary spelling."""
     if isinstance(expr, gimple_ctypes.IdentExpr):
         return expr.name in getattr(gen, '_cpp_tagged_word_names', ())
+    if isinstance(expr, gimple_ctypes.BinaryOp) and expr.op in ('and', 'or'):
+        return _cpp_and_or_is_tagged(gen, expr)
     return _cpp_tagged_next_api(gen, expr) is not None
+
+
+def _cpp_is_str_expr(gen, node) -> bool:
+    """True when `node` is a str: a string literal, or an expression whose
+    inferred C++ type is `char *`. Shared by the `*` string-repetition lowering
+    and the tagged `and`/`or` split (`_cpp_and_or_is_tagged`)."""
+    if isinstance(node, gimple_ctypes.StringLiteral):
+        return True
+    try:
+        return gimple_exprtypes._infer_simple_expr_ctype(
+            node, gen._cpp_declared,
+            getattr(gen, '_cpp_gen_self_fields', None),
+            gen._async_api,
+            fn_return_types=_cpp_trusted_fn_return_types(gen),
+        ) == 'char *'
+    except Exception:
+        return False
+
+
+def _cpp_and_or_is_tagged(gen, e) -> bool:
+    """True when the `and`/`or` BinaryOp `e` lowers to a TAGGED word: its left
+    operand is a tagged word. A str right operand now goes through the
+    tagged-word-carrying `_W` path as well (with the result marked tagged
+    only where the declared type is not `char *`)."""
+    return _cpp_is_tagged_word_expr(gen, e.left)
+
+
+def _cpp_tagged_operand_word(gen, node) -> str:
+    """`node` as a TAGGED int64_t word, the form every consumer renders by
+    kind: None is `mojo_box_none()`, a tagged word is itself, and any other
+    scalar is boxed by its static C++ type (`cpp_async._cpp_word_of_kind`), so
+    a str operand of `x or 'a'` is a `mojo_box_from_str` box, not a raw
+    pointer the consumer would print as an address."""
+    from mojo.backend_gimple import cpp_async as _ca
+    if (isinstance(node, gimple_ctypes.NoneLiteral)
+            or (isinstance(node, gimple_ctypes.IdentExpr) and node.name == 'None')):
+        return "mojo_box_none()"
+    if _cpp_is_tagged_word_expr(gen, node):
+        return f"(int64_t)(intptr_t)({gen._cpp_expr(node)})"
+    ctype = gimple_exprtypes._infer_simple_expr_ctype(
+        node, gen._cpp_declared or {},
+        getattr(gen, '_cpp_gen_self_fields', None), gen._async_api) or 'int64_t'
+    return _ca._cpp_word_of_kind(ctype, gen._cpp_expr(node))
 
 
 def _cpp_rethrow_pending(ctype: str, call: str) -> str:
@@ -2764,24 +2813,36 @@ def _cpp_expr(gen, e) -> str:
             # side string-typed", not inspect both sides' exact types.
             # Falls through to the plain `*` below for a genuinely
             # all-numeric multiply (the overwhelmingly common case).
-            def _cpp_is_str(node):
-                if isinstance(node, gimple_ctypes.StringLiteral):
-                    return True
-                try:
-                    return gimple_exprtypes._infer_simple_expr_ctype(
-                        node, gen._cpp_declared,
-                        getattr(gen, '_cpp_gen_self_fields', None),
-                        gen._async_api,
-                        fn_return_types=_cpp_trusted_fn_return_types(gen),
-                    ) == 'char *'
-                except Exception:
-                    return False
-            if _cpp_is_str(e.left) and not _cpp_is_str(e.right):
+            if _cpp_is_str_expr(gen, e.left) and not _cpp_is_str_expr(gen, e.right):
                 return (f"mojo_cstr_repeat((char *)({gen._cpp_expr(e.left)}), "
                         f"(int64_t)({gen._cpp_expr(e.right)}))")
-            if _cpp_is_str(e.right) and not _cpp_is_str(e.left):
+            if _cpp_is_str_expr(gen, e.right) and not _cpp_is_str_expr(gen, e.left):
                 return (f"mojo_cstr_repeat((char *)({gen._cpp_expr(e.right)}), "
                         f"(int64_t)({gen._cpp_expr(e.left)}))")
+        if e.op in ('and', 'or') and _cpp_and_or_is_tagged(gen, e):
+            # Python's `and`/`or` yields an OPERAND. A tagged left operand is
+            # tested by its kind (`mojo_truthy_word`: None is falsy, a box by
+            # its payload), and the result is the operand word on the side
+            # Python picks, so the result is again a tagged word the consumer
+            # renders (`_cpp_is_tagged_word_expr`). The right operand is
+            # evaluated only on the side that returns it. The names are
+            # prefixed so no user local can capture them inside the lambda.
+            _lw = f"(int64_t)(intptr_t)({gen._cpp_expr(e.left)})"
+            if _cpp_is_str_expr(gen, e.right):
+                _rw_str = gen._cpp_expr(e.right)
+                if e.op == 'or':
+                    _pick = f"mojo_truthy_word(_mojo_ao_l) ? _mojo_ao_l : (int64_t)(intptr_t)mojo_box_from_str((char *)({_rw_str}))"
+                else:
+                    _pick = f"mojo_truthy_word(_mojo_ao_l) ? (int64_t)(intptr_t)mojo_box_from_str((char *)({_rw_str})) : _mojo_ao_l"
+                return (f"[&]() {{ struct _W {{ int64_t w; "
+                        f"operator int64_t() const {{ return w; }} "
+                        f"operator char *() const {{ return (char *)mojo_box_word(w); }} }}; "
+                        f"int64_t _mojo_ao_l = {_lw}; "
+                        f"return _W{{{_pick}}}; }}()")
+            _rw = _cpp_tagged_operand_word(gen, e.right)
+            _pick = (f"mojo_truthy_word(_mojo_ao_l) ? _mojo_ao_l : ({_rw})" if e.op == 'or'
+                     else f"mojo_truthy_word(_mojo_ao_l) ? ({_rw}) : _mojo_ao_l")
+            return f"[&]() -> int64_t {{ int64_t _mojo_ao_l = {_lw}; return {_pick}; }}()"
         if e.op == 'or' and not isinstance(e.right, gimple_ctypes.BoolLiteral):
             # Python's `a or b` yields an OPERAND, not a bool: `suffix or ''`
             # is `suffix` when it is truthy and the string otherwise. Lowered
@@ -3090,6 +3151,19 @@ def _cpp_expr(gen, e) -> str:
                     for nxt in a[1:]:
                         acc = f"mojo_path_join((char *)({acc}), (char *)({nxt}))"
                     return acc
+                if e.func.member == 'split' and len(a) == 1:
+                    # os.path.split(p) → MojoList * [head, tail].
+                    # Word argument uses word-kinded runtime entry;
+                    # str argument uses int64_t_path_split.
+                    _arg_node = e.args[0]
+                    _arg_is_word = False
+                    if isinstance(_arg_node, gimple_ctypes.IdentExpr):
+                        decl = getattr(gen, '_cpp_declared', None) or {}
+                        if decl.get(_arg_node.name) in ('int64_t', 'MojoBytes *'):
+                            _arg_is_word = True
+                    if _arg_is_word:
+                        return f"mojo_os_path_split_w({a[0]})"
+                    return f"int64_t_path_split({a[0]})"
                 # os.path.isdir/exists(p) — the GIMPLE path's own
                 # os.path.* dispatch (_lower_call) already has these
                 # wired to real runtime helpers (`marker` is an unused
@@ -6248,6 +6322,15 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 and isinstance(s.value.func, gimple_ctypes.IdentExpr)
                 and s.value.func.name in gen.func_return_types
                 and gen.func_return_types[s.value.func.name] == 'MojoList *')
+            # os.path.split(p) returns MojoList* [dirname, basename]; treat
+            # as list-valued for tuple unpacking like other MojoList* calls.
+            _tup_is_split_call = (isinstance(s.value, gimple_ctypes.CallExpr)
+                and isinstance(s.value.func, gimple_ctypes.MemberExpr)
+                and s.value.func.member == 'split'
+                and isinstance(s.value.func.obj, gimple_ctypes.MemberExpr)
+                and s.value.func.obj.member == 'path'
+                and isinstance(s.value.func.obj.obj, gimple_ctypes.IdentExpr)
+                and s.value.func.obj.obj.name == 'os')
             # A bare Comprehension as the RHS (`[tup] = [x for x in ...]`,
             # Lib/test/crashers/gc_inspection.py's own `g` generator) also
             # lowers, via _cpp_expr's own Comprehension case just above,
@@ -6275,7 +6358,8 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 and gen._cpp_declared.get(s.value.name) == 'MojoList *')
             _tup_is_list_val = (_tup_is_list_call
                 or isinstance(s.value, gimple_ctypes.Comprehension)
-                or _tup_is_list_ident)
+                or _tup_is_list_ident
+                or _tup_is_split_call)
             # Pop-time shape discrimination: unpacking a value popped off a
             # heterogeneous/tagged-union stack (`marker, value =
             # stack.pop()`, then a second-level `a, b, ... = value`). The
@@ -6348,6 +6432,8 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     if el.name not in declared:
                         declared[el.name] = 'int64_t'
                         lines.append(f"{indent}int64_t {el.name};")
+                    if _tup_is_split_call:
+                        _cpp_mark_tagged_word(gen, el.name)
                     if _tup_is_list_val:
                         lines.append(f"{indent}{el.name} = "
                                      f"mojo_list_get_int({_cpp_as('MojoList *', _tup_val)}, {i});")
@@ -6689,10 +6775,7 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                                                   gimple_ctypes.DictExpr,
                                                   gimple_ctypes.SetExpr))
         val = gen._cpp_expr(s.value)
-        if _cpp_tagged_next_api(gen, s.value) is not None:
-            # `x = next(g)` on a tagged generator: `x` holds a box from every
-            # assignment on, so `print(x)` renders the yielded value.
-            _cpp_mark_tagged_word(gen, name)
+        _rhs_tagged = _cpp_is_tagged_word_expr(gen, s.value)
         if name not in declared:
             # `x = StructName(args)` — see `_cpp_expr`'s CallExpr
             # struct-constructor branch just above, which already
@@ -6831,6 +6914,8 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             if gen._cpp_func_scope_decls is not None:
                 gen._cpp_func_scope_decls.append(
                     f"{gimple_exprtypes._c_to_cpp_scalar_type(ctype)} {cpp_name};")
+            if _rhs_tagged and ctype != 'char *':
+                _cpp_mark_tagged_word(gen, name)
             if _container_literal and ctype in ('MojoList *', 'MojoDict *', 'MojoSet *'):
                 init = _cpp_container_literal_init(gen, cpp_name, s.value, indent)
                 if init is not None:
@@ -6841,6 +6926,8 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             if _acast0 is not None and ctype == 'int64_t' and _acast0 != ctype:
                 return [f"{indent}{cpp_name} = (int64_t)(intptr_t)({val});"]
             return [f"{indent}{cpp_name} = {val};"]
+        if _rhs_tagged and declared.get(name) != 'char *':
+            _cpp_mark_tagged_word(gen, name)
         if _container_literal and declared.get(name) in ('MojoList *', 'MojoDict *', 'MojoSet *'):
             init = _cpp_container_literal_init(gen, cpp_name, s.value, indent)
             if init is not None:

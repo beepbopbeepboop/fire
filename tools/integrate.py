@@ -105,6 +105,16 @@ def land_on_master():
     sys.exit("master moved under the round (%s): cannot fast-forward; redo the round" % ", ".join(moved[:5]))
 
 
+def mark_landed(merged):
+    """Mark the merged tasks integrated, but only once every one of their commits is on master: the state means landed."""
+    with C.registry() as reg:
+        for n in merged:
+            left = C.ahead(reg[n])
+            if left:
+                sys.exit("refusing to mark %s integrated: %d commit(s) of %s are not on master" % (n, left, reg[n]["branch"]))
+            reg[n]["state"] = "integrated"
+
+
 def pick_candidates(only=None, allow_dirty=(), quiet=False, ignore_verdict=()):
     """Tasks whose worker has exited with commits, a clean tree and a DONE verdict: only a finished bug is integrated."""
     cands = []
@@ -269,8 +279,7 @@ def main():
                     for n in merged: reg[n]["state"] = "integration-failed"
                 print("RED in the fast lane: %s (see %s/fast.log); master untouched" % (" ".join(c[:4]), INTEG)); sys.exit(1)
         land_on_master()
-        with C.registry() as reg:
-            for n in merged: reg[n]["state"] = "integrated"
+        mark_landed(merged)
         print("GREEN (fast lane): master is now %s; integrated %s" % (C.git("rev-parse", "--short", "master"), merged))
         return
     if a.quick and not a.jobs and not a.stdlib:
@@ -346,8 +355,7 @@ def main():
         sys.exit(rc)
     if rc == 0:
         land_on_master()
-        with C.registry() as reg:
-            for n in merged: reg[n]["state"] = "integrated"
+        mark_landed(merged)
         print("GREEN: master fast-forwarded to %s; integrated %s" % (C.git("rev-parse", "--short", "master"), merged))
     else:
         with C.registry() as reg:
