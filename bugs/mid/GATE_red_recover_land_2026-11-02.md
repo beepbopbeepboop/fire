@@ -52,12 +52,3 @@ compiled-path changes; this landing does not meet that requirement, by the owner
 4. Explain why `doc-refs` went red in the gate and not on rerun.
 5. Rerun the recovery round's landing on current master once the OFF jobs are triaged, so the gate on the merged
    tree is not the one that was red here.
-
-## Status 2026-11-02 (item 3 closed, rest open)
-
-Item 3 root cause: `module_qualifier` lived in `module_shared` and `coro.py` imported it lazily inside
-`lower()` to dodge the import cycle; a function-local import is not resolvable on the compiled
-(self-hosted) path (252 closure errors). Fixed by moving `module_qualifier` to the leaf
-`mojo/middle/exprtypes.py` (re-exported from `module_shared`) and importing it at module scope in
-`coro.py`; this replaces the `286eca819` wrapper. The same commit fixes two `os.path` word-ABI GIMPLE
-errors (`join` operands via `_to_int64`; `exists/isdir/isfile` return int64_t). Items 1, 2, 4, 5 remain.
