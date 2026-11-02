@@ -187,6 +187,15 @@ def feed():
     return made
 
 
+def probe_free():
+    """Ask every banned daily free tier one word (control.py probe-free), so its ban ends when it answers."""
+    r = subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "probe-free"],
+                       capture_output=True, text=True, cwd=C.MAIN)
+    for l in r.stdout.splitlines():
+        if l.strip():
+            log(l)
+
+
 def refill(target):
     """Run one refill and log every line it prints: each refused start carries its reason (a held claim, a banned slot,
     a breaker), so a stuck bug is visible in the log rather than silent."""
@@ -388,6 +397,7 @@ def main():
         try:
             fed = feed()
             cont = continue_partial(load_state())
+            probe_free()
             log("feed +%d, continued %d, abandoned %d; %s" % (fed, cont, retire_dead(), refill(a.target)))
             subprocess.run([sys.executable, os.path.join(HERE, "cpu_cap.py"), "ratchet"], capture_output=True, cwd=C.MAIN)
             if land():
