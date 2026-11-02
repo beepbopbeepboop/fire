@@ -672,7 +672,7 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
     if name in gen._struct_bases and name not in gen.var_types and name not in gen._global_var_types:
         # A static class named as a VALUE is its type tag -- the word the run-time class table
         # files it under (`type('C', (A, B), ns)` / `bases = (A, B)` hand it to
-        # `mojo_type_add_base`; bugs/hard/CODEGEN_enum_runtime_class_creation.md stage 3). Not the
+        # `mojo_type_add_base`; bugs/mid/CODEGEN_enum_runtime_class_creation.md stage 3). Not the
         # zero placeholder below, which every class would share.
         t = gen._new_temp('int64_t')
         gen._emit(f'  {t} = (int64_t){gimple_exprtypes._struct_type_id(name)}LL;  /* class {name} as value */')

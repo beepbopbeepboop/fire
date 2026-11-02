@@ -80,7 +80,7 @@ WHAT IS NOT HERE, AND WHY
     member's value on every member).
   * `unique`, `verify`, `global_enum`, `show_flag_values` — DECORATORS. Measured
     on this tree, a decorator on a function OR a class is DROPPED, silently, by
-    both backends (`bugs/hard/COMPILE_FAIL_decorator_application_dropped.md`), so
+    both backends (`bugs/mid/COMPILE_FAIL_decorator_application_dropped.md`), so
     exporting them would make `@unique` build and enforce nothing. That is the
     worst outcome available and it is why none of them is here.
   * `EnumMeta`, `EnumType`, `EnumDict`, `EnumCheck` — TYPES. A type is not a value
