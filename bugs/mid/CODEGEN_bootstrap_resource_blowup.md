@@ -1,5 +1,86 @@
 # CODEGEN: bootstrap resource blowup and four remaining stage1/stage2 divergences
 
+## Status (2026-11-01 — planning round 2: the census must see emitted-TU allocations, and the obvious way to get that is wrong)
+
+Round type: planning (CLAUDE.md "Bug rounds", outcome 3). No change to the
+default build. Light worker: the census run itself is still the integrator's
+job (see the next Status entry's plan, unchanged).
+
+### The gap, and why the naive fix miscounts
+
+The census header (`runtime/fire_alloc_census.h`) only covers
+`runtime/fire_runtime.c`. The emitted `.ci` translation units include
+`fire_runtime.h` (`mojo/backend_gimple/module_gen.py:14536`, and the emitted
+preamble at `gimple_codegen.py` ~10885), and they call `malloc` directly in
+many places (`mojo/backend_gimple/emit_calls.py:7782,7860,8750`,
+`elab_intu.py:2603-2791`). Those allocations are invisible to the census.
+
+The tempting fix is to `#include "fire_alloc_census.h"` at the end of
+`fire_runtime.h` under `#ifdef MOJO_ALLOC_CENSUS`. **That is wrong**, and it
+was checked: the header defines its tables and functions `static`, so every
+translation unit gets its own live table. A block allocated in one `.ci` and
+freed in another is then missed by the free's table. Measured with a two-TU
+harness (`.tmp/xtu/`, a counter in the same shape as the census): alloc in
+`a.c`, free in `b.c`, live count printed as **-1** from the free side, and
+each TU's own report would show an unbalanced count. Per-TU reports at exit
+would also fragment the one table the measurement needs.
+
+### Decision: one definition, many declarations
+
+Not a choice to make at the integrator's bench; this is the design:
+
+- `runtime/fire_alloc_census.h` keeps the macros and the prototypes only
+  (`void *mojo_census_malloc(size_t, const char *, int)`, and the
+  calloc/realloc/free equivalents), all `extern`. No `static` state in it.
+- `runtime/fire_runtime.c` holds the one definition of the state and of the
+  functions, as now. It includes the header LAST, as now, so its own calls
+  redirect too.
+- `runtime/fire_runtime.h`: at its end, `#ifdef MOJO_ALLOC_CENSUS` includes
+  the header. Emitted `.ci` files get the macros through the header they
+  already include, so `__FILE__`/`__LINE__` name the emitted file. Without the
+  flag nothing changes.
+- The definitions must not be redirected inside their own file: the header's
+  macros come after the definitions, as they do now.
+- `atexit` report: one per process (the state is in one TU now).
+
+### Tests that prove it
+
+1. Extend `test_runtime_alloc_census.py` with a two-TU case: the same
+   `a.c`/`b.c` split as `.tmp/xtu/`, built with `-DMOJO_ALLOC_CENSUS` against
+   `runtime/fire_runtime.c`. Required result: live count 0 after the cross-TU
+   free, and the site row attributes the allocation to `a.c:<line>`. This test
+   FAILS on the current tree (the emitted-TU allocation is not counted at all)
+   and must pass after.
+2. Default build unchanged: `cc -E -P` md5 of an emitted-style TU that includes
+   `fire_runtime.h`, before and after, must match (the header expands to
+   nothing without the flag). Record the md5 in the commit message.
+3. Integrator, once: rebuild `mojoc` with `-DMOJO_ALLOC_CENSUS` and check that
+   the emitted-TU sites appear in the census rows (the `.ci` file names in
+   `alloc-census ... <file>:<line>`).
+
+### Risks to check when implementing
+
+- Function-like `malloc`/`free` macros inside `-fgimple` (`__GIMPLE`) bodies
+  in emitted code: expansion happens in the preprocessor, so the GIMPLE
+  parser should see plain calls, but the flag build is the only place this
+  runs. Check with a small emitted-style `__GIMPLE` function under the flag.
+- `malloc_size()` (used by `mojo_boxed_is_str`) must still see the real block:
+  unchanged, since the side table is keyed by address, not a prefix header.
+
+### Implementation order
+
+1. Split `fire_alloc_census.h` into extern declarations plus the macros; move
+   the state and the bodies into `fire_runtime.c` (after its includes, before
+   the header-included macros).
+2. Add the `#ifdef MOJO_ALLOC_CENSUS` include at the end of `fire_runtime.h`.
+3. Add the two-TU test and run it: `python3 tools/memslot.py --gb 8 --label
+   census -- python3 test_runtime_alloc_census.py`.
+4. Record the `cc -E -P` md5 before/after.
+
+The census run (plan step 1 below) is still the decision that picks (A) or (B).
+This entry only makes the instrument able to see emitted code, so that run's
+numbers mean something.
+
 ## Status (2026-11-01 — partial: the allocation census instrument landed; the census RUN is not yet taken)
 
 Landed (infrastructure, no change to the default build):
