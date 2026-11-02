@@ -16,22 +16,16 @@ def check(name, cond):
     return cond
 
 
-def test_holds():
-    """Only work holds a claim: a live worker, or commits not yet landed. A dead entry with no commits holds nothing."""
+def test_hold():
     ok = True
-    real_ahead = C.ahead
-    try:
-        C.ahead = lambda t: t["_ahead"]
-        live = {"state": "running", "pid": os.getpid(), "_ahead": 0}
-        ok &= check("a live worker holds its claims", C.holds_claims(live))
-        dead0 = {"state": "integration-failed", "pid": 0, "worktree": "/nowhere", "_ahead": 0}
-        ok &= check("an integration-failed entry with no commits holds nothing", not C.holds_claims(dead0))
-        deadw = {"state": "integration-failed", "pid": 0, "worktree": "/nowhere", "_ahead": 2}
-        ok &= check("a dead entry with commits holds until they land", C.holds_claims(deadw))
-        done = {"state": "integrated", "pid": 0, "worktree": "/nowhere", "_ahead": 3}
-        ok &= check("an integrated entry holds nothing", not C.holds_claims(done))
-    finally:
-        C.ahead = real_ahead
+    H = "a" * 40
+    ok &= check("no record: not held", not S.hold_active(None, H, 3600))
+    ok &= check("same doc inside the retry window: held",
+                S.hold_active({"hash": H, "at": 1000.0}, H, 3600, now=2000.0))
+    ok &= check("same doc after the retry window: released",
+                not S.hold_active({"hash": H, "at": 1000.0}, H, 3600, now=1000.0 + 3600))
+    ok &= check("doc changed inside the window: released",
+                not S.hold_active({"hash": H, "at": 1000.0}, "b" * 40, 3600, now=2000.0))
     return ok
 
 
@@ -79,17 +73,18 @@ def test_classes():
         S.reclass_on_failure(st, "CODEGEN_x", "CODEGEN_x")
     ok &= check("one no-commit attempt at easy boosts the doc to mid", st["cls"]["CODEGEN_x"] == "mid")
     ok &= check("the failure count restarts after a reclass", st["fails"]["CODEGEN_x"] == 0)
-    st2 = {"fails": {}}
+    st2 = {"fails": {}, "no_progress": {"CODEGEN_y": {"hash": "h", "at": 0}}}
     st2["cls"] = {"CODEGEN_y": "hard"}
     for _ in range(S.ESCALATE_AFTER):
         S.reclass_on_failure(st2, "CODEGEN_y", "hard/CODEGEN_y")
-    ok &= check("a hard doc stays hard", st2["cls"]["CODEGEN_y"] == "hard")
+    ok &= check("a hard doc stays hard and keeps its hold", st2["cls"]["CODEGEN_y"] == "hard"
+                and "CODEGEN_y" in st2["no_progress"])
     return ok
 
 
 def main():
     ok = True
-    ok &= test_holds()
+    ok &= test_hold()
     ok &= test_classes()
     with tempfile.TemporaryDirectory() as tmp:
         ok &= test_limit_detection(tmp)

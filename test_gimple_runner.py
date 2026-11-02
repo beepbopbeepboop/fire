@@ -518,27 +518,6 @@ def test_gimple_runtime_error(name: str, mojo_src: str, expected_substr: str):
                 pass
 
 
-def test_gimple_no_poly_dispatch(name: str, mojo_src: str, expected_stdout: str):
-    """`test_gimple_stdout`, plus: the generated C must contain no
-    `_mojo_poly_*` dispatch. For a slot the constructor observation resolves
-    to ONE type, a dispatch would mean the polymorphic record widened to a
-    unanimous slot — the right answer is still correct, but the static call is
-    the contract this pins."""
-    global _PASS, _FAIL, _TIMEOUT
-    from gimple_codegen import compile_to_gimple
-    try:
-        c_code = compile_to_gimple(mojo_src)
-        if "_mojo_poly_" in c_code:
-            print(f"FAIL  {name}: unanimous slot lowered to a polymorphic dispatch")
-            _FAIL += 1
-            return
-    except Exception as e:
-        print(f"FAIL  {name}: {e}")
-        _FAIL += 1
-        return
-    test_gimple_stdout(name, mojo_src, expected_stdout)
-
-
 def run_tests():
     """Run GIMPLE-specific tests."""
 
@@ -2192,45 +2171,25 @@ main()
     # exactly that reason: moving the statement out of the body would silently
     # withdraw the folded field.
     # A method of a class declared inside a function cannot reach that
-    # function's frame in the shapes refused below.
-    # Reads of an enclosing name are captured (the `functools.cmp_to_key`
-    # shape, a CALLED capture, included); a rebound one and a method with no
-    # `self` are still refused instead of answering 0.
-    test_gimple_stdout("gimple_nested_class_method_calls_enclosing_param", """\
-def mkpair(mycmp: int, a: int, b: int):
-    class K:
-        def __init__(self, obj: int):
-            self.obj = obj
-        def __lt__(self, other: K):
+    # function's frame yet (bugs/CODEGEN_nested_class_method_cannot_reach_an_enclosing_local.md).
+    # The full fix threads the environment; until then the
+    # build refuses the read instead of answering 0. The first is the
+    # `functools.cmp_to_key` shape, the second a parameter read, the third a
+    # local read.
+    test_gimple_build_refusal(
+        "gimple_nested_class_method_reads_enclosing_param_is_refused", """\
+def cmp_to_key(mycmp):
+    class K(object):
+        def __lt__(self, other):
             return mycmp(self.obj, other.obj) < 0
-    return K(a) < K(b)
-
-def c(x: int, y: int) -> int:
-    return x - y
+    return K
 
 def main():
-    print(mkpair(c, 1, 2), mkpair(c, 5, 2))
-""", "True False\n")
+    return 0
+""", "cannot reach its enclosing function's frame")
 
-    # A user struct's ordering dunder is what `<`/`>=` call, with Python's
-    # reflection when only the opposite one exists; it was a heap-address
-    # comparison (True for every pair).
-    test_gimple_stdout("gimple_user_struct_ordering_dunders", """\
-class K:
-    def __init__(self, obj: int):
-        self.obj = obj
-    def __lt__(self, other: K):
-        return self.obj < other.obj
-    def __ge__(self, other: K):
-        return self.obj >= other.obj
-
-def main():
-    print(K(1) < K(2), K(5) < K(2), K(5) > K(2), K(2) > K(5), K(3) >= K(3), K(1) <= K(3))
-""", "True False True False True True\n")
-
-    # A read of a plain (non-called, bound-once) enclosing name is captured:
-    # the class body gains `_cap_t = t` and the method reads `self._cap_t`.
-    test_gimple_stdout("gimple_nested_class_method_reads_enclosing_local", """\
+    test_gimple_build_refusal(
+        "gimple_nested_class_method_reads_enclosing_local_is_refused", """\
 def mk(n: int):
     t = n + 1
     class C:
@@ -2240,39 +2199,6 @@ def mk(n: int):
 
 def main():
     print(mk(10))
-""", "11\n")
-
-    # Each execution of the `class` statement has its own captured values.
-    test_gimple_stdout("gimple_nested_class_captures_are_per_execution", """\
-def mk(n: int, s: str):
-    class C:
-        def __init__(self, k: int):
-            self.v = n + k
-        def get(self):
-            return self.v + n
-        def tag(self):
-            return s + "!"
-    return C(1)
-
-def main():
-    a = mk(10, "x")
-    b = mk(100, "yy")
-    print(a.get(), b.get(), a.tag(), b.tag())
-""", "21 201 x! yy!\n")
-
-    # A name the enclosing function rebinds is late-bound in Python; the
-    # snapshot would differ, so it is refused.
-    test_gimple_build_refusal(
-        "gimple_nested_class_method_reads_rebound_enclosing_local_is_refused", """\
-def mk(n: int):
-    class C:
-        def get(self):
-            return n
-    n = n + 1
-    return C().get()
-
-def main():
-    print(mk(1))
 """, "cannot reach its enclosing function's frame")
 
     # A method that reads only its own names and a module-level global is not
@@ -2290,29 +2216,6 @@ def mk(n: int):
 def main():
     print(mk(4))
 """, "12\n")
-
-    # A `@property` read is the getter's result (it printed the bound-method
-    # pointer, and `==` compared two such pointers), and `@x.setter` is a
-    # call of the setter on assignment, not a second overload of `x`.
-    test_gimple_stdout("gimple_property_getter_and_setter", """\
-class S:
-    def __init__(self, a: int):
-        self._v = a
-    @property
-    def val(self) -> int:
-        return self._v
-    @val.setter
-    def val(self, value: int):
-        self._v = value * 2
-    def __eq__(self, o: S):
-        return self.val == o.val
-
-def main():
-    s = S(3)
-    print(s.val, s.val + 1, s == S(3))
-    s.val = 5
-    print(s.val, s == S(10))
-""", "3 4 True\n10 True\n")
 
     test_gimple_stdout("gimple_nested_class_in_every_body", """\
 class WithAttrs:
@@ -3515,282 +3418,6 @@ def main():
 main()
 """, "10\n99\n20\n7\n")
 
-    # A capturing nested function handed on AS A VALUE from inside another nested function:
-    # its env used to be NULL, so the callee crashed on its first capture read.
-    test_gimple_stdout("gimple_capturing_closure_value_passed_from_a_closure", """\
-def outer(base, items):
-    seen = {}
-    gen_names = {"a": 1}
-    def visit_call(node, env, callee):
-        seen[node] = base + gen_names["a"]
-    def visit_main(node, env):
-        visit_call(node, env, None)
-    def collect_from(src, visit, closure):
-        for n in src:
-            visit(n, None)
-    def collect():
-        collect_from(items, visit_main, False)
-    collect()
-    return len(seen) + base
-print(outer(10, [1, 2, 3]))
-""", "13\n")
-
-    # Python-level frames (stage 1): `sys._getframe(n)`, `.f_back`, `.f_lineno`,
-    # `.f_code.co_name`, in a module that says `_getframe`. A frame record is pushed per
-    # function and popped by `return`, by falling off the end, and by an exception
-    # unwinding past it. Module-level code is not a frame (CPython's `<module>`).
-    test_gimple_stdout("gimple_sys_getframe_names_lines_and_callers", """\
-import sys
-
-def where():
-    return sys._getframe(1).f_code.co_name + ":" + str(sys._getframe(1).f_lineno)
-
-def boom(n):
-    if n == 0:
-        raise ValueError("x")
-    return boom(n - 1)
-
-def catcher():
-    try:
-        boom(3)
-    except ValueError:
-        pass
-    return where()
-
-def rec(n):
-    if n == 0:
-        return sys._getframe(0).f_back.f_code.co_name
-    return rec(n - 1)
-
-def branches(a):
-    if a:
-        return where()
-    x = 2
-    return where()
-
-def inner():
-    f = sys._getframe(0)
-    print(f.f_code.co_name, f.f_lineno)
-    g = sys._getframe(1)
-    print(g.f_code.co_name, g.f_lineno)
-
-def middle():
-    x = 1
-    inner()
-
-def top():
-    print(catcher())
-    print(rec(3))
-    print(branches(True), branches(False))
-    middle()
-
-top()
-""", "catcher:16\nrec\nbranches:25 branches:27\ninner 31\nmiddle 37\n")
-
-    # Tracebacks (frames stage 2): `e.__traceback__` walks tb_next from the frame that caught the
-    # exception down to the one that raised it, each entry with the line it was executing at the
-    # raise; a bare `raise` keeps the original traceback. `<module>` is a frame.
-    test_gimple_stdout("gimple_traceback_chain_names_and_lines", """\
-import sys
-
-def leaf(n):
-    if n == 0:
-        raise KeyError("k")
-    leaf(n - 1)
-
-def mid():
-    try:
-        leaf(2)
-    except KeyError as e:
-        tb = e.__traceback__
-        names = []
-        while tb is not None:
-            names.append(tb.tb_frame.f_code.co_name + ":" + str(tb.tb_lineno))
-            tb = tb.tb_next
-        print(names)
-        raise
-
-def top():
-    try:
-        mid()
-    except KeyError as e:
-        tb = e.__traceback__
-        names = []
-        while tb is not None:
-            names.append(tb.tb_frame.f_code.co_name + ":" + str(tb.tb_lineno))
-            tb = tb.tb_next
-        print(names)
-        fb = e.__traceback__.tb_frame.f_back
-        print(fb.f_code.co_name if fb is not None else None)
-
-top()
-print(sys._getframe(0).f_code.co_name, sys._getframe(0).f_lineno)
-""", "['mid:10', 'leaf:6', 'leaf:6', 'leaf:5']\n['top:22', 'mid:10', 'leaf:6', 'leaf:6', 'leaf:5']\n<module>\n<module> 34\n")
-
-    # `for d, e in f(xs):` where `f` is a callable PARAMETER or a loop variable over a list of
-    # generator functions: dispatched through mojo_dyn_call and drained, the tuple targets read
-    # boxed so a None / a string beside an int keep their kinds. The generators record the
-    # per-slot kinds of the tuple they yield. (This used to print mojo_unsupported_iter and run the
-    # body zero times.)
-    test_gimple_stdout("gimple_for_over_a_call_through_a_function_value", """\
-def ga(xs):
-    for x in xs:
-        yield x, None
-def gb(xs):
-    for x in xs:
-        if x > 1:
-            yield x, "big"
-def run(f, xs):
-    for d, e in f(xs):
-        print(d, e)
-def run2(fs, xs):
-    for f in fs:
-        for d, e in f(xs):
-            print(d, e)
-run(ga, [1, 2])
-run(gb, [1, 2, 3])
-run2([ga, gb], [1, 2])
-""", "1 None\n2 None\n2 big\n3 big\n1 None\n2 None\n2 big\n")
-
-    # The `else` clause of a loop (runs when the loop ends without a `break`) used to be dropped by
-    # every loop lowering. Desugared to a flag + loop + `if flag:`; a `break` in a nested loop's own
-    # `else` belongs to the OUTER loop, and `else: continue` / `break` pairs (itertools-style
-    # nested-break idiom) behave.
-    test_gimple_stdout("gimple_loop_else_clauses", """\
-def a(ys):
-    for b in ys:
-        print(b)
-    else:
-        print("else-a")
-def b2(ys):
-    for b in ys:
-        if b == 9:
-            break
-    else:
-        print("else-b")
-def c(ys, zs):
-    for q in zs:
-        for b in ys:
-            print(q, b)
-        else:
-            print("else-c", q)
-def d(xs, ys):
-    for a in xs:
-        for b in ys:
-            print(a, b)
-        else:
-            continue
-        break
-def e(n):
-    i = 0
-    while i < n:
-        i += 1
-        if i == 7:
-            break
-    else:
-        print("while-else", i)
-def f(n):
-    for i in range(n):
-        if i == 3:
-            break
-    else:
-        print("range-else")
-def g(xs, ys):
-    for a in xs:
-        for b in ys:
-            pass
-        else:
-            break
-    print("g done")
-a([1]); a([])
-b2([1]); b2([9])
-c([1], [0, 5])
-d([1, 2], [3, 4])
-e(3); e(10)
-f(2); f(5)
-g([1, 2], [3])
-""", '1\nelse-a\nelse-a\nelse-b\n0 1\nelse-c 0\n5 1\nelse-c 5\n1 3\n1 4\n2 3\n2 4\nwhile-else 3\nrange-else\ng done\n')
-
-    # A callable chain as `itertools`/c-analyzer's `check_all` writes it: a generator that loops over
-    # `check(analysis)` for each callable in `checks or ()` and re-yields the (data, failure) pair,
-    # with the `for ... else: continue` / `break` fail-fast idiom.
-    test_gimple_stdout("gimple_check_all_idiom", """\
-def check_a(analysis):
-    for x in analysis:
-        yield x, None
-
-def check_b(analysis):
-    for x in analysis:
-        if x > 1:
-            yield x, "big"
-
-def check_all(analysis, checks, failfast=False):
-    for check in checks or ():
-        for data, failure in check(analysis):
-            if failure is None:
-                continue
-            yield data, failure
-            if failfast:
-                yield None, None
-                break
-        else:
-            continue
-        break
-
-for d, f in check_all([1, 2, 3], [check_a, check_b]):
-    print(d, f)
-for d, f in check_all([1, 2, 3], [check_a, check_b], True):
-    print(d, f)
-""", '2 big\n3 big\n2 big\nNone None\n')
-
-    # `case A | B | C:` in a Python source is an OR-PATTERN (PEP 634); the lowering refused it (and read
-    # `case 1 | 2` as the number 3 elsewhere). The alternatives are flattened into the comma list the
-    # arm chain already tests one block at a time.
-    test_gimple_stdout("gimple_match_or_pattern", """\
-import enum
-
-class Fmt(enum.IntEnum):
-    VALUE = 1
-    FORWARDREF = 2
-    STRING = 3
-    OTHER = 4
-
-def name(f):
-    match f:
-        case Fmt.VALUE | Fmt.FORWARDREF | Fmt.STRING:
-            return "one-of-three"
-        case Fmt.OTHER:
-            return "other"
-        case _:
-            return "none"
-
-def num(n):
-    match n:
-        case 1 | 2:
-            return "small"
-        case 3 | 4 | 5:
-            return "mid"
-        case _:
-            return "big"
-
-print(name(Fmt.VALUE), name(Fmt.STRING), name(Fmt.OTHER), name(9))
-print(num(1), num(2), num(4), num(7), num(10))
-""", 'one-of-three one-of-three other none\nsmall small mid big big\n')
-
-    # A function whose only `return`s are inside `match` arms was typed from NO return statement and
-    # handed back 0 for a string.
-    test_gimple_stdout("gimple_return_type_through_match_arms", """\
-def num(n):
-    match n:
-        case 1:
-            return "small"
-        case 3:
-            return "mid"
-        case _:
-            return "big"
-print(num(1), num(3), num(10))
-""", 'small mid big\n')
-
     # String site FIRST, int site second (an int list records no contract, so
     # it used to be invisible as a disagreeing call site).
     test_gimple_stdout("gimple_mixed_kind_flat_list_param_str_first", """\
@@ -4051,26 +3678,6 @@ try:
     print(b"\\xe9".decode("ascii"))
 except UnicodeDecodeError:
     print("ascii decode refused")
-""")
-
-    # Pinning regression for CODEGEN_str_encode_compiles_to_the_identity_char_ptr:
-    # `str.encode()` must return bytes (MojoBytes*), not an identity char*.
-    test_gimple_matches_cpython("gimple_str_encode_identity_fixed", """\
-s = "abc"
-b = s.encode()
-print(b)
-print(type(b) == bytes, len(b) == 3, b == b'abc')
-""")
-
-    test_gimple_matches_cpython("gimple_str_encode_errors_and_decode_remaining", """\
-s = "é"
-print(s.encode("ascii", "replace"))
-print(s.encode("ascii", "ignore"))
-print(b"\xff".decode("ascii", "replace"))
-try:
-    b"\xff\xfe".decode("utf-8")
-except UnicodeDecodeError:
-    print("utf-8 decode refused malformed")
 """)
 
     test_gimple_stdout("gimple_set_str_rehash_unchanged", """\
@@ -5151,8 +4758,8 @@ def main():
 
     # ── A nested `def`'s ENVIRONMENT, which is a bare `malloc` block and NOT a
     # bound method, so its teardown is `free` and not `mojo_closure_free` --
-    # measured at +16 B/iteration (3.06 MB at 100k, 7.64 MB at 400k) in
-    # bugs/CODEGEN_closure_env_and_boxed_local_never_freed.md's OPEN 1. One
+    # measured at +16 B/iteration (3.06 MB at 100k, 7.64 MB at 400k) in that
+    # nested-def env-leak probe. One
     # environment is shared by BOTH of `callee`'s call sites, which is why it
     # must be freed once at the enclosing function's scope exit rather than at
     # each call. The last two consumers are the ones that make it an ownership
@@ -6067,27 +5674,9 @@ main()
     # (`4621537642612260864`, `4372406328` on the same tree). The record is
     # now also keyed by the source name (`_note_global_dict_store`), which
     # `_lower_IdentExpr` carries onto each read. Both halves are read in the
-    # same scope as the store, which is the case this covers; the cross-function
-    # READ is `gimple_module_dict_value_type_read_in_other_function`.
-    # The READ in a function other than the one holding the store: an empty
-    # module dict gets its value type from the Phase 1.7 store pre-scan
-    # (`_gmi_phase17_collect_appends`'s `_store_hits`), not from a literal.
-    test_gimple_stdout("gimple_module_dict_value_type_read_in_other_function", """\
-d = {}
-d["a"] = "R"
-f = {}
-f[(1, 2)] = 9.5
-b = {}
-b["t"] = True
-def show():
-    print(d["a"], len(d))
-    print(f[(1, 2)], len(f))
-    print(b["t"], len(b))
-def main():
-    show()
-main()
-""", "R 1\n9.5 1\nTrue 1\n")
-
+    # same scope as the store, which is the case this covers; a READ from a
+    # different function is a separate gap (empty-literal module dicts are
+    # not seeded from their stores in the Phase 1.7 pre-scan).
     test_gimple_stdout("gimple_module_scope_dict_value_type_survives_read", """\
 d = {}
 d[(1, 2)] = 9.5
@@ -6942,9 +6531,8 @@ for a, b in itertools.zip_longest([1.5, 2.5, 3.5], [9.0]):
     print(a, b)
 """, "a padded `double` slot has no value that means `absent`")
 
-    # Regression (a padded zip_longest struct slot was a NULL the body
-    # dereferenced: SIGSEGV on a member write, fixed by the `_nullable_ptrs`
-    # recording in emit_loops.py): a member read through a padded struct-pointer slot must take the None-aware
+    # Regression for CODEGEN_a_padded_zip_longest_struct_slot_is_a_null_dereference:
+    # a member read through a padded struct-pointer slot must take the None-aware
     # dynamic path (not a raw -> dereference) when the slot can hold NULL.
     test_gimple_runtime_error(
         "gimple_zip_longest_struct_padded_slot_member_read_is_none_aware", """\
@@ -6956,25 +6544,6 @@ def main():
     var outputs = [StackItem()]
     for input, output in itertools.zip_longest(inputs, outputs):
         input.peek = output.peek = True
-    print("done")
-main()
-""", "AttributeError")
-
-    # The READ twin of the case above: `output.peek` on a padded struct slot
-    # is a member read through a NULL pointer, which must take the None-aware
-    # dynamic dispatch (AttributeError), not a raw `->` dereference (SIGSEGV).
-    # The write-only program above never reads the slot, so it could not see
-    # a read path that had lost its guard.
-    test_gimple_runtime_error(
-        "gimple_zip_longest_struct_padded_slot_member_read_is_none_aware_read", """\
-struct StackItem:
-    var peek: Bool = False
-import itertools
-def main():
-    var inputs = [StackItem(), StackItem(), StackItem()]
-    var outputs = [StackItem()]
-    for input, output in itertools.zip_longest(inputs, outputs):
-        print(input.peek, output.peek)
     print("done")
 main()
 """, "AttributeError")
@@ -7037,32 +6606,6 @@ def mk():
 f = mk()
 print(f["a"])
 """, "1\n")
-    # The container-returning-call globals in ONE program, against CPython.
-    # `mk` (dict) and `mkl` (list) are the two fixtures the bug doc named;
-    # `pick` returns a dict on one path and a list on the other, so its
-    # return type is not a single container and its global must keep the
-    # boxed `int64_t` field rather than being narrowed to either pointer.
-    # Each of the four globals is stored and read back through its field
-    # (`_root_globals.NAME`), so a store that is not boxed to match the
-    # declared field fails here at gcc, not silently at runtime.
-    test_gimple_stdout("gimple_module_scope_global_bound_to_container_returning_calls_one_program", """\
-def mk():
-    return {"a": 1}
-def mkl():
-    return [1, 2]
-def pick(n):
-    if n:
-        return {"a": 7}
-    return [9, 8]
-f = mk()
-g = mkl()
-h = pick(1)
-k = pick(0)
-print(f["a"])
-print(g[1])
-print(h["a"])
-print(k[0])
-""", "1\n2\n7\n9\n")
 
     test_gimple_stdout("gimple_dict_items_value_kinds_survive", """\
 def c() -> dict:
@@ -10289,9 +9832,8 @@ main()
     # read the field, so a resolved `T *` would still print `0 0` here and the
     # test would pass either way — which is exactly why the receiver-reading
     # variant lives in
-    # the receiver-reading regression that distinguishes resolved (`2/2`)
-    # from unresolved (garbage pointer bits) — see `gimple_ctor_param_`
-    # `polymorphic_slot_reads_receiver` for the pinned case.
+    # bugs/CODEGEN_unresolved_method_receiver_returns_its_own_pointer.md
+    # instead, where the two outcomes are actually distinguishable.
     test_gimple_stdout("gimple_ctor_param_polymorphic_slot_stays_unresolved", """\
 class T:
     def __init__(self, n):
@@ -10345,119 +9887,6 @@ def main():
 
 main()
 """, "2\n2\n")
-
-    # A slot that received ONE struct type everywhere still resolves statically:
-    # the receiver is a typed `T *` call, not a `_mojo_poly_*` dispatch. Pins
-    # that the polymorphic record does not widen to unanimous slots.
-    test_gimple_no_poly_dispatch("gimple_ctor_param_unanimous_slot_has_no_poly_dispatch", """\
-class T:
-    def __init__(self, n):
-        self.n = n
-    def numel(self):
-        return self.n
-
-class L:
-    def __init__(self, w):
-        self.w = w
-    def numel(self):
-        return self.w.numel()
-
-def main():
-    print(L(T(2)).numel(), L(T(5)).numel())
-
-main()
-""", "2 5\n")
-
-    # Three candidates for one zero-argument method, each answering differently:
-    # every candidate's own method must be reached through the tag switch, not
-    # only the first two. CPython's answer is the reference.
-    test_gimple_stdout("gimple_ctor_param_three_candidate_poly_dispatch", """\
-class T:
-    def __init__(self, n):
-        self.n = n
-    def numel(self):
-        return self.n
-
-class U:
-    def __init__(self, n):
-        self.n = n
-    def numel(self):
-        return self.n * 10
-
-class V:
-    def __init__(self, n):
-        self.n = n
-    def numel(self):
-        return self.n + 100
-
-class L:
-    def __init__(self, w):
-        self.w = w
-    def numel(self):
-        return self.w.numel()
-
-def main():
-    print(L(T(2)).numel(), L(U(2)).numel(), L(V(2)).numel())
-
-main()
-""", "2 20 102\n")
-
-    # Candidates that disagree on the method's RETURN TYPE cannot share one
-    # dispatch: the plan must refuse, naming the polymorphic receiver, rather than
-    # fall back to the scalar no-op stub that answers the receiver's own bits.
-    test_gimple_build_refusal("gimple_poly_dispatch_refuses_return_type_disagreement", """\
-class T:
-    def __init__(self, n):
-        self.n = n
-    def numel(self):
-        return self.n
-
-class U:
-    def __init__(self, n):
-        self.n = n
-    def numel(self):
-        return 2.5
-
-class L:
-    def __init__(self, w):
-        self.w = w
-    def numel(self):
-        return self.w.numel()
-
-def main():
-    print(L(T(2)).numel())
-    print(L(U(1)).numel())
-
-main()
-""", "polymorphic receiver")
-
-    # Same refusal for a disagreement on ARITY: one candidate takes an extra
-    # argument, so no single dispatch call shape exists for both.
-    test_gimple_build_refusal("gimple_poly_dispatch_refuses_arity_disagreement", """\
-class T:
-    def __init__(self, n):
-        self.n = n
-    def numel(self):
-        return self.n
-
-class U:
-    def __init__(self, n):
-        self.n = n
-    def numel(self, k):
-        return self.n * k
-
-class L:
-    def __init__(self, w):
-        self.w = w
-    def numel(self):
-        return self.w.numel()
-
-def main():
-    print(L(T(2)).numel())
-    print(L(U(1)).numel())
-
-main()
-""", "polymorphic receiver")
 
 
     # A container SHARED ACROSS FUNCTIONS — a module global, populated by a
@@ -13814,35 +13243,6 @@ struct Color:
             print('other')
 """, "ENUM CASE")
 
-    # A `__match` arm with several patterns, or a guard, inside a struct method
-    # (a `__GIMPLE` body): `||` / `&&` on a condition are not GIMPLE, so each
-    # pattern is its own test block and the guard its own block after them.
-    test_gimple_stdout("gimple_match_multi_pattern_and_guard_in_method", """\
-struct K:
-    var _v: Int
-    def __init__(out self, v: Int):
-        self._v = v
-    def pick(self, n: Int):
-        __match self._v:
-        case 1, 2:
-            print('low')
-        case 3 if n > 0:
-            print('three-guarded')
-        case 4, 5 if n > 0:
-            print('four-five-guarded')
-        case _:
-            print('other')
-
-def main():
-    K(1).pick(0)
-    K(2).pick(0)
-    K(3).pick(1)
-    K(3).pick(0)
-    K(5).pick(1)
-    K(5).pick(0)
-    K(9).pick(1)
-""", "low\nlow\nthree-guarded\nother\nfour-five-guarded\nother\nother\n")
-
     test_gimple_stdout("gimple_module_attribute_value_and_alias", """\
 import sys
 import sys as s
@@ -13880,7 +13280,6 @@ def main():
                   test_namedtuple_tuple_protocol_is_refused_by_name,
                   test_nested_class_attr_reads_enclosing_local_regression,
                   test_nested_class_attr_from_str_param_regression,
-                  test_nested_class_attr_expr_over_str_param_regression,
                   test_instance_write_shadows_class_attr_regression,
                   test_nested_class_attr_rebind_after_construction_regression,
                   test_namedtuple_shaped_class_runs_regression,
@@ -14053,7 +13452,7 @@ main()
 
 
 def test_nested_class_attr_from_str_param_regression():
-    """Regression: a function-scoped class attribute taken from a `str` parameter.
+    """Regression for bugs/CODEGEN_nested_class_attr_from_str_param_typed_as_int.md.
     A function-scoped class attribute whose value is a bare name of the
     enclosing function's parameter was typed `int64_t` (the fallback for a
     value with no literal type), so a `str` argument read back as a pointer-
@@ -14071,24 +13470,6 @@ def main():
     print(a.name)
     print(b.name)
 """, "x\ny\n")
-
-
-def test_nested_class_attr_expr_over_str_param_regression():
-    """Companion to the bare-name case above:
-    an EXPRESSION over the enclosing function's parameters is typed from the
-    parameters' annotations, not the int64_t fallback."""
-    test_gimple_stdout("gimple_nested_class_attr_expr_over_str_param", """\
-def h(s: str):
-    class C():
-        name = s + "!"
-    return C()
-
-def main():
-    a = h("x")
-    b = h("y")
-    print(a.name)
-    print(b.name)
-""", "x!\ny!\n")
 
 
 def test_nested_class_attr_rebind_after_construction_regression():

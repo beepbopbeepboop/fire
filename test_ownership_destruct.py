@@ -11,7 +11,8 @@ import fire_compiler as N
 import mojo.middle.infra_infer as II
 from ownership_destruct import (analyze_module, analyze_function, analyze_scoped_locals,
                                 analyze_returns_fresh, receiver_results_consumed,
-                                key_views_consumed, list_elements_owned, lambda_value_owned)
+                                key_views_consumed, list_elements_owned, lambda_value_owned,
+                                returns_fresh_closure, call_value_owned)
 
 
 def _candidates(src, fname):
@@ -1297,6 +1298,171 @@ def _lambda_owned(src, name):
     return lambda_value_owned(f.body, name)
 
 
+# returns_fresh_closure: the CREATOR side of the escaping-closure ownership — a
+# callee whose EVERY call provably hands back a brand-new capturing closure the
+# caller may own and free (with its environment and the `{mut}` boxes it holds)
+# via mojo_closure_free. Takes the whole FunctionDef, not a body.
+def _returns_fresh_closure(src, fname):
+    stmts = N.Parser(N.py_tokenize(src)).with_filename("<test>").parse_module()
+    for st in stmts:
+        if isinstance(st, N.FunctionDef) and st.name == fname:
+            return returns_fresh_closure(st)
+    return None
+
+
+# (name, source, function, expected). True means every call returns a fresh
+# capturing closure the caller owns; each False case is a shape where the free
+# would misread the value, double-free a box another holder still reads, or
+# otherwise be a use-after-free — the fail-closed contract.
+FRESH_CLOSURE_RETURN_CASES = [
+    ("returns_a_capturing_nested_def", """
+def mk(n: Int):
+    var x = n
+    def bump() -> Int:
+        nonlocal x
+        x = x + 1
+        return x
+    return bump
+""", "mk", True),
+
+    ("returns_an_int_not_a_def", """
+def mk(n: Int) -> Int:
+    var x = n
+    return x
+""", "mk", False),
+
+    ("non_capturing_def_is_a_bare_function_pointer", """
+def mk() -> Int:
+    def f() -> Int:
+        return 1
+    return f
+""", "mk", False),
+
+    ("two_distinct_returned_closures", """
+def mk(c: Bool):
+    var x = 0
+    var y = 1
+    def a() -> Int:
+        nonlocal x
+        return x
+    def b() -> Int:
+        nonlocal y
+        return y
+    if c:
+        return a
+    else:
+        return b
+""", "mk", False),
+
+    ("sibling_closure_shares_the_box", """
+def mk() -> Int:
+    var x = 0
+    def a() -> Int:
+        nonlocal x
+        return x
+    def b() -> Int:
+        nonlocal x
+        return x + 1
+    return a
+""", "mk", False),
+
+    ("box_named_outside_the_returned_def", """
+def mk(n: Int):
+    var x = n
+    def bump() -> Int:
+        nonlocal x
+        x = x + 1
+        return x
+    var y = x
+    return bump
+""", "mk", False),
+
+    ("returns_a_call_result_not_the_def", """
+def mk(n: Int) -> Int:
+    var x = n
+    def bump() -> Int:
+        nonlocal x
+        return x
+    return bump()
+""", "mk", False),
+]
+
+
+# call_value_owned: the CALLER side — the local bound to a CALL RESULT (a
+# callee proven to return a fresh closure) is owned by the caller only if the
+# only mention after the binding is the call it is made for. Mirrors
+# LAMBDA_CASES, but the binding is a `var g = f(...)` rather than a `lambda`.
+def _call_owned(src, var):
+    stmts = N.Parser(N.py_tokenize(src)).with_filename("<test>").parse_module()
+    fns = [st for st in stmts if isinstance(st, N.FunctionDef)]
+    f = fns[-1]
+    return call_value_owned(f.body, var)
+
+
+CALL_VALUE_CASES = [
+    ("called_in_place_is_owned", """
+def f(n: Int) -> Int:
+    var t = 0
+    for i in range(n):
+        var g = make_counter(i)
+        t += g()
+    return t
+""", "g", True),
+    ("called_in_place_at_function_level_is_owned", """
+def f() -> Int:
+    var g = make_counter(1)
+    return g()
+""", "g", True),
+    ("stored_in_a_container_escapes", """
+def f(kept: List) -> Int:
+    var t = 0
+    for i in range(4):
+        var g = make_counter(i)
+        kept.append(g)
+        t += g()
+    return t
+""", "g", False),
+    ("aliased_to_another_name_escapes", """
+def f() -> Int:
+    var g = make_counter(1)
+    var h = g
+    return h()
+""", "g", False),
+    ("returned_escapes", """
+def f() -> Int:
+    var g = make_counter(1)
+    return g
+""", "g", False),
+    ("passed_as_an_argument_escapes", """
+def use(cb: Int) -> Int:
+    return 0
+
+def f() -> Int:
+    var g = make_counter(1)
+    return use(g)
+""", "g", False),
+    ("captured_by_a_nested_def_escapes", """
+def f() -> Int:
+    var g = make_counter(1)
+    def use_it() -> Int:
+        return g()
+    return use_it()
+""", "g", False),
+    ("a_rebinding_is_a_second_value", """
+def f() -> Int:
+    var g = make_counter(1)
+    g = make_counter(2)
+    return g()
+""", "g", False),
+    ("bound_to_another_local_not_a_call_result", """
+def f() -> Int:
+    var h = make_counter(1)
+    var g = h
+    return g()
+""", "g", False),
+]
+
+
 def run():
     failures = []
     for name, body, fname, exp_whole, exp_scoped in STRUCT_CASES:
@@ -1322,6 +1488,14 @@ def run():
         got = _lambda_owned(src, var)
         if got != expected:
             failures.append(f"{name!r}: expected lambda_value_owned={expected}, got {got}")
+    for name, src, fname, expected in FRESH_CLOSURE_RETURN_CASES:
+        got = _returns_fresh_closure(src, fname)
+        if got != expected:
+            failures.append(f"{name!r}: expected returns_fresh_closure={expected}, got {got}")
+    for name, src, var, expected in CALL_VALUE_CASES:
+        got = _call_owned(src, var)
+        if got != expected:
+            failures.append(f"{name!r}: expected call_value_owned={expected}, got {got}")
     for name, src, var, expected in LIST_ELEM_CASES:
         got = _listelems(src, var)
         if got != expected:
@@ -1335,7 +1509,8 @@ def run():
         if got != expected:
             failures.append(f"{name!r}: expected key_views_consumed={expected}, got {got}")
     total = (len(CASES) + len(SCOPED_CASES) + len(FRESH_RETURN_CASES) + len(STRUCT_CASES)
-             + len(RECEIVER_CASES) + len(KEYVIEW_CASES) + len(LIST_ELEM_CASES) + len(LAMBDA_CASES))
+             + len(RECEIVER_CASES) + len(KEYVIEW_CASES) + len(LIST_ELEM_CASES) + len(LAMBDA_CASES)
+             + len(FRESH_CLOSURE_RETURN_CASES) + len(CALL_VALUE_CASES))
     passed = total - len(failures)
     for f in failures:
         print("FAIL:", f)

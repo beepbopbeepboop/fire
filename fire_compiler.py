@@ -872,18 +872,6 @@ class StructDef:
     # `BytesIter[origin]` refused compilation on precisely these bodies
     # (2026-10-21).
     type_param_names: list = field(default_factory=list)  # all bracket names
-    # Fields the COMPILER minted (a member read or assigned on an instance
-    # but declared by no annotation, class-body default or `__init__`
-    # self-assignment: `p.b = 5` in `main` for `class P: def __init__(self):
-    # self.a = 1`). Every instance of the struct carries the storage, so
-    # `hasattr(q, 'b')` on an instance that never had `b` set would otherwise
-    # answer True. Each name here gets a bit in the hidden
-    # `__mojo_present[]` word array of the C struct (see
-    # mojo/middle/types.py `presence_set_stmt`), set by every codegen store
-    # and read by the generated getattr dispatch. Order is the bit index, so
-    # it is append-only and lives on the SHARED StructDef: every generator
-    # that lays out or stores into this struct must agree on it.
-    presence_fields: list = field(default_factory=list)
 
 @dataclass
 class TraitDef:
@@ -7969,25 +7957,13 @@ class Parser:
         that collect statements, keeps every `_parse_stmt` branch free to return
         either without each caller having to know which it got.
         """
-        _stmt_line = self._peek().line
         produced = self._parse_stmt()
         if produced is None:
             return
         if isinstance(produced, list):
-            for _pn in produced:
-                self._stamp_stmt_line(_pn, _stmt_line)
             stmts.extend(produced)
         else:
-            self._stamp_stmt_line(produced, _stmt_line)
             stmts.append(produced)
-
-    def _stamp_stmt_line(self, node, line):
-        """Give a statement the source line it STARTS on when its own parse did not (`if`,
-        `while`, `raise`, `def`, ... were built with `line` left 0). `f_lineno` and a
-        traceback's `tb_lineno` are statement lines, and the `#line` directives of the
-        generated C were missing for these statements."""
-        if getattr(node, 'line', 1) == 0 and line > 0:
-            node.line = line
 
     def _parse_block(self) -> list:
         # Support inline single-statement body: "def foo(): return x" on one line

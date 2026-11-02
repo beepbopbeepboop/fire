@@ -269,14 +269,12 @@ beside the existing `MojoDict *`/`MojoBytes *` arms — it simply had none).
 Verified via `test_gimple_runner.py`'s `gimple_print_bool_list`/
 `gimple_print_set_literal`.
 
-Was open at the time of this section: `print(B4([i for i in range(3)]).v)`
-→ `[None, 1, 2]`, element tracking lost on a field read off a **constructor
-temporary**. FIXED upstream by the per-list element repr
-(`mojo_list_set_elem_repr` on comprehension / `list(range)` results, commit
-`331ddc2f7`); pinned by `test_regression_ctor_temp_field_read_loses_element_type.py`.
-The remaining call-boundary case (an untyped function parameter receiving a
-list) is fixed by the container-observer fix in module_gen.py / funcs_shared.py
-(see regression test `test_regress_untyped_param_container.py`).
+Still open, own doc:
+`bugs/CODEGEN_ctor_temp_field_read_loses_element_type.md` —
+`print(B4([i for i in range(3)]).v)` → `[None, 1, 2]`, element tracking lost
+on a field read off a **constructor temporary** (through a local it is
+exactly right). Needs a new call-site-to-field ELEMENT-type tracer, one
+level deeper than the container-TYPE tracer §2.1 just landed.
 
 ### 4.3 A loop target that rebinds across domains — FIXED 2026-09-27
     for x in [1, 2]: ...

@@ -191,18 +191,6 @@ def questions(t):
     return re.findall(r"^\s*QUESTION:\s*(.+)$", txt, re.M)
 
 
-def holds_claims(t):
-    """Whether task T still holds its bug claims. Only work holds: a live worker, or commits that have not landed. A
-    dead worker that committed nothing holds nothing, so a retry of the same bug is never refused by it (2026-11-01:
-    23 such entries, all with no commits, refused every retry for days)."""
-    st = state_of(t)
-    if st in TERMINAL:
-        return False
-    if st == "running":
-        return True
-    return ahead(t) > 0
-
-
 def ahead(t):
     r = subprocess.run(["git", "rev-list", "--count", "master.." + t["branch"]],
                        cwd=MAIN, capture_output=True, text=True)
@@ -229,13 +217,12 @@ def cmd_spawn(a):
         if a.name in tasks:
             sys.exit("task %s already exists" % a.name)
         for other, t in tasks.items():
-            if not holds_claims(t):
+            if state_of(t) in TERMINAL:
                 continue
             for c in a.claim:
                 for oc in t["claims"]:
                     if conflicts(c, oc):
-                        sys.exit("claim %r conflicts with %r held by task %s (%s, %d commits)" % (
-                            c, oc, other, state_of(t), ahead(t)))
+                        sys.exit("claim %r conflicts with %r held by task %s" % (c, oc, other))
         ext = external_conflicts(a.claim)
         if ext:
             sys.exit("claim %r conflicts with %r held by external session %s" % (ext[0][1], ext[0][2], ext[0][0]))
@@ -506,109 +493,15 @@ def dead_models():
     return {m: e["until"] for m, e in _ledger().items() if e["until"] > time.time()}
 
 
-RESET_MARGIN_S = 300   # a ban that ends at the printed reset time lifts five minutes after it, so the limit has really cleared
-RESET_RE = re.compile(r"resets (\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(([A-Za-z_/+-]+)\)", re.I)
-
-
-def next_wall_time(hour, minute, tz, now=None):
-    """The epoch time of the next HH:MM in zone TZ strictly after NOW (tomorrow if today's has passed)."""
-    from datetime import datetime, timedelta
-    from zoneinfo import ZoneInfo
-    now = time.time() if now is None else now
-    t = datetime.fromtimestamp(now, ZoneInfo(tz)).replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if t.timestamp() <= now:
-        t += timedelta(days=1)
-    return t.timestamp()
-
-
-def replenish_at(sl, now=None):
-    """When a daily free tier gets its tokens back: the slot's `replenish` time plus its margin, or None when the slot
-    has no daily replenish. pool.json: "replenish": {"tz": "UTC", "at": "00:00", "margin_min": 1}."""
-    r = sl.get("replenish")
-    if not r:
-        return None
-    hh, mm = (int(x) for x in r["at"].split(":"))
-    return next_wall_time(hh, mm, r["tz"], now) + r.get("margin_min", 1) * 60
-
-
-def reset_at(text, now=None):
-    """The epoch time of the NEXT reset the claude CLI printed in a limit line ("resets 11am (America/Los_Angeles)"),
-    or None when the text carries no reset. The next occurrence of that wall-clock time in that zone, strictly after now."""
-    m = RESET_RE.search(text or "")
-    if not m:
-        return None
-    hour, minute = int(m.group(1)) % 12 + (12 if m.group(3).lower() == "pm" else 0), int(m.group(2) or 0)
-    return next_wall_time(hour, minute, m.group(4), now)
-
-
-def limit_reset(t):
-    """The reset time of the limit that stopped worker T, read from its own log; None if its log names none."""
-    lp = os.path.join(t["worktree"], "work.log")
-    if not os.path.exists(lp):
-        return None
-    return reset_at(re.sub(r"\x1b\[[0-9;]*m", "", open(lp, errors="replace").read()[-3000:]))
-
-
-def mark_dead(model, sl, until=None, now=None):
-    """Ban MODEL until UNTIL (a limit's printed reset) when given, else for the slot SL's recovery time. Without a reset,
-    the second limit inside a day uses the long window."""
-    d, now = _ledger(), time.time() if now is None else now
+def mark_dead(model, sl):
+    """Ban MODEL for the slot SL's recovery time; the second limit inside a day uses the long window."""
+    d, now = _ledger(), time.time()
     prev = d.get(model, {})
     strikes = prev.get("strikes", 0) + 1 if now - prev.get("last", 0) < 86400 else 1
-    if until and until > now:
-        end = until + RESET_MARGIN_S
-    elif replenish_at(sl, now):
-        end = replenish_at(sl, now)     # a daily free tier: back when its tokens come back, not a fixed block
-    else:
-        hours = sl.get("long_recover_days", 0) * 24 if strikes >= 2 and sl.get("long_recover_days") else sl["recover_hours"]
-        end = now + hours * 3600
-    hours = (end - now) / 3600
-    d[model] = {"until": end, "strikes": strikes, "last": now}
+    hours = sl.get("long_recover_days", 0) * 24 if strikes >= 2 and sl.get("long_recover_days") else sl["recover_hours"]
+    d[model] = {"until": now + hours * 3600, "strikes": strikes, "last": now}
     json.dump(d, open(os.path.join(ctl_dir(), LEDGER), "w"), indent=1)
     return hours
-
-
-PROBE_EVERY_S = 12 * 3600   # a banned daily free tier is asked one word at most this often: they refill once a day
-PROBE_TIMEOUT_S = 180
-
-
-def probe_model(model):
-    """True when MODEL answers a one-word prompt. A limit's refusal, a timeout or a missing CLI is no answer."""
-    try:
-        r = subprocess.run(["opencode", "run", "--model", model, "Reply with the single word PONG."],
-                           capture_output=True, text=True, timeout=PROBE_TIMEOUT_S)
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    out = re.sub(r"\x1b\[[0-9;]*m", "", r.stdout + r.stderr)
-    return r.returncode == 0 and "PONG" in out and not LIMIT_ERR.search(out)
-
-
-def probe_free_bans(now=None, probe=probe_model):
-    """Lift the ban on each banned daily free tier that answers. A free tier's ban is a guess (its replenish time),
-    and a limit can land minutes after a replenish, so the tier's own answer decides: the ban is lifted at once when
-    the tier answers, and otherwise re-asked every PROBE_EVERY_S. Returns the models it lifted."""
-    now = time.time() if now is None else now
-    d = _ledger()
-    daily = {sl["model"] for sl in load_pool()["slots"] if sl.get("replenish")}
-    lifted, changed = [], False
-    for m, e in d.items():
-        if m not in daily or e["until"] <= now or now - e.get("probed", 0) < PROBE_EVERY_S:
-            continue
-        e["probed"] = now
-        changed = True
-        if probe(m):
-            e["until"] = now
-            lifted.append(m)
-            print("probe: %s answers; its ban is lifted" % m, flush=True)
-        else:
-            print("probe: %s still refuses; next probe in %d s" % (m, PROBE_EVERY_S), flush=True)
-    if changed:
-        json.dump(d, open(os.path.join(ctl_dir(), LEDGER), "w"), indent=1)
-    return lifted
-
-
-def cmd_probe_free(a):
-    probe_free_bans()
 
 
 def running_by_slot(tasks=None):
@@ -666,7 +559,7 @@ def bounce(name, t):
     if extra:
         return False
     if t.get("pool") and limit_hit(t):
-        mark_dead(t["model"], pool_slot(t["pool"]), limit_reset(t))   # the ban ends at the printed reset, else the recovery time
+        mark_dead(t["model"], pool_slot(t["pool"]))   # the task stays on its slot; refill waits for the ban to lift
     git("worktree", "remove", "--force", wt, check=False)
     git("branch", "-D", t["branch"], check=False)
     with registry() as reg:
@@ -1249,7 +1142,6 @@ def main():
     s.add_argument("--only", action="store_true", help="the task runs ONLY on its --pool slot (waits for it, never moves)")
     s.add_argument("--cls", choices=CLASSES, default=None, help="the work class: only slots of this class take it")
     s.set_defaults(f=cmd_enqueue)
-    sub.add_parser("probe-free", help="lift the ban on any daily free tier that answers a one-word prompt").set_defaults(f=cmd_probe_free)
     s = sub.add_parser("refill"); s.add_argument("--target", type=int, default=None, help="default: the pool's total slots")
     s.add_argument("--prefix", default="", help="start only queued tasks whose name begins with this"); s.set_defaults(f=cmd_refill)
     s = sub.add_parser("priority"); s.add_argument("names", nargs="*"); s.set_defaults(f=cmd_priority)

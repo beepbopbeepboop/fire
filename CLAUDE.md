@@ -419,6 +419,7 @@ and the reasoning for `expect=` rather than `disabled=` on each.
 | test | marker | subject | cost it charges every gate |
 |---|---|---|---|
 | `ab-native` | `expect=`, count checked (1) | python vs native codegen over the A/B corpus | 0.1 GB / ~10 s measured, `program` (reserves 55 GB); `native` |
+| `async-void-return` | `expect=`, count checked (3) | an async function with no return value | `tiny`; `coroutine` |
 | `coro-future-await` | `expect=`, count checked (17) | `await` on a Future in the coroutine runtime | `tiny`; `coroutine` |
 
 `formal-toplevel` and `formal-module-attr` were in this table and are not any

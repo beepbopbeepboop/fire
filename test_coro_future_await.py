@@ -61,7 +61,7 @@ def _build_and_run(mojo_src: str, require=_AWAITABLE_SHIMS) -> str:
     with open(src_path, 'w') as f:
         f.write(mojo_src)
 
-# Pinned per compile, not at import: a module-level MOJO_CORO assignment
+    # Pinned per compile, not at import: a module-level MOJO_CORO assignment
     # here also rewrote the backend for every test file that imports this
     # harness (test_async_void_return.py's cpp-path tests among them).
     with coro.pinned('stackswitch'):

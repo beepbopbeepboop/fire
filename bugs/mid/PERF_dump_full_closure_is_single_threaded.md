@@ -75,27 +75,6 @@ Third win: `methods_shared._cached_realpath` memoises the `os.path.realpath` cal
 samples, compile 155 s. Its first version was an unannotated helper and BROKE the self-host build (`methods_shared.py:141:
 invalid operands to binary + (have 'double' and 'char *')`), caught by `test_selfhost.py`; it is annotated now and
 `test_selfhost.py` passes 3/3 and `compile_stdlib.py` GCC CAS stays 610/610. Any edit under `mojo/middle` needs `test_selfhost.py`.
-Measured and REJECTED: memoising f-string field tokenization. `py_tokenize` is called 17,696 times, but 17,141 of those are
-tiny f-string field texts; with the memo the calls drop to 2,884 and the time does not move (19.1 s -> 22.2 s, whole compile
-167 s vs 171 s at the same low load). The 19 s is the ~550 real module sources, every one distinct, so only a faster tokenizer
-(or caching tokens across processes) would help. Call count is not time: measure before building.
-Fourth win: `module_gen._xg_record_scalar_args` called `_gmi_identifier_literal_ctype`, which rebuilt the ENCLOSING function's binding
-index (`_gmi_binding_index`, a whole-function walk) for every identifier argument of every call in it. The index is now built once per
-function (`_xg_enc_index`) and passed in. `fire.py` compile 167 s -> 151 s at load ~3; generated C byte-identical for all 610 stdlib
-modules (GCC CAS 610/610 with the change reversed), `test_selfhost` 3/3.
-Fifth win: `module_gen._mk_round` reuses round 1's `_infer_return_maybe_kinds` answer, in the fixpoint's later rounds, for any body that
-calls nothing in the grown callee set (the answer depends on the set only through call names); the call spellings of each body are
-recorded once in round 1. Sampled share of `_mk_round` 13.8% -> 8.8%; sampled whole compile 168 s -> 153 s (both under the sampler);
-generated C byte-identical for all 610 stdlib modules, `test_selfhost` 3/3.
-Measured, not changed: `_infer_local_var_types` is called 278,673 times for 3,801 distinct functions (one function up to 308 times) and costs
-11.6 s of a 146 s compile (8%). A per-function memo is NOT safe as it stands: the inference reads `_quick_type`, which reads `gen` tables
-(`func_return_types`, `var_types`, struct field types) that GROW during the compile, so two calls on one function can legitimately differ. The
-safe form keys the memo on a version stamp of exactly the tables it read (or finds the passes that re-ask with unchanged tables); do that
-measurement first -- count how many of the 308 repeats return an identical dict -- before writing any cache.
-MEASURED (same run, results hashed per function): 278,673 calls yield only 4,081 distinct (function, result) pairs, at most 8 per function, so 98.5% of the
-calls recompute a result already seen. The cache is worth ~11 s (7%) but needs an invalidation key; count-only fingerprints (`len(table)`) miss a
-REFINED entry, so the table writes themselves have to bump a version (the tables are plain dicts written from many places -- a ~dozen
-write sites per table must be found first). Not attempted: a stale entry here is a silent wrong C type.
 Remaining, in order of share: the other `_walk` users in `_scan_callsite_param_kinds` (cache per function across
 the two `_one_pass` rounds and the six `lower` calls: needs an invalidation story because the contract maps evolve);
 `realpath` memo for the constant `_SELFHOST_DIR`; `_infer_return_maybe_kinds`; `_gmi_binding_index`.

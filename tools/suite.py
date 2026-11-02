@@ -2199,8 +2199,7 @@ test('coro-future-await', [PY, 'test_coro_future_await.py'], mem='tiny',
           'async struct-method calls (receiver + args)')
 test('async-void-return', [PY, 'test_async_void_return.py'], mem='tiny',
      deps=['preflight'],
-desc='void-returning async functions and the device_context-shaped '
-          'repro, on both coroutine backends')
+     desc='an async function with no return value')
 test('taskgroup', [PY, 'test_taskgroup.py'], mem='tiny',
      deps=['preflight'],
      desc='TaskGroup')
@@ -4531,8 +4530,8 @@ BUCKETS = {
     # were the fixed `mojo_repr_bool` spelling `True` all along, and all 39
     # cases pass (re-measured 41 s / 0.1 GB, below).
     #
-    # The remaining `expect=`-marked job stays in `coroutine` rather than
-    # `check` for the reason stated once: an `expect` in `check` puts a permanently-EXPECTED
+    # The three `expect=`-marked ones stay in `coroutine` rather than `check` for
+    # the reason stated once: an `expect` in `check` puts a permanently-EXPECTED
     # line in the tally a developer reads to know their tree is fine (the same
     # reasoning that keeps `formal-module-attr`, `formal-external-call` and
     # `formal-receiver-position` in `proofs` only). `coroutine` is in `gate`, so
@@ -4543,8 +4542,7 @@ BUCKETS = {
     # (0.0-0.2 GB each, against the `small`/8 GB they carried while ungated):
     #   gimple-async-runner  41.4 s  0.1 GB  39 passed   (green since 2026-10-28)
     #   coro-detached-async  2.2 s  0.1 GB   2 passed   (was red: stale mojo_coro.c paths)
-    #   async-void-return    3.3 s  0.1 GB  11 passed   (green 2026-10-29;
-    #                                       import-time MOJO_CORO leak fixed)
+    #   async-void-return    3.3 s  0.1 GB   3 failing             (expect=)
     #   coro-future-await   11.6 s  0.1 GB  2 failing              (expect=)
     #   async-with-lock-guard 2.7 s 0.1 GB   3 passed
     #   mutable-async-capture 2.7 s 0.1 GB   2 passed
@@ -5782,62 +5780,6 @@ def _line(job, res, done, total, active):
 # ── Reporting ────────────────────────────────────────────────────────────────
 # The screen gets the failures and one tally. Everything per-test — a PASS
 # line each, with argv, exit code, duration and measured peak — is in the log.
-def known_bugs(name):
-    """The bug docs that already track a failing job, so a red gate says whether it is a regression someone has
-    seen before (a doc exists) or a new one (none does). A doc matches when its file name carries every word of the
-    job's name (`gimple` -> GATE_check_gimple_selfhost_...), or when its title names the job in backticks. The
-    result is a list of bugs/ paths, possibly empty; it is a pointer for the reader, not a verdict on the failure."""
-    import re as _re
-    words = [w for w in _re.split(r'[-_]', name.lower()) if w]
-    hits = []
-    for root, _dirs, files in os.walk(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'bugs')):
-        for f in files:
-            if not f.endswith('.md') or f.startswith(('OPEN_WORK', 'README')):
-                continue
-            path = os.path.normpath(os.path.join(root, f))
-            tokens = set(_re.split(r'[-_.]', f[:-3].lower()))
-            if all(w in tokens for w in words):
-                hits.append(path)
-                continue
-            try:
-                title = open(path, encoding='utf-8', errors='replace').readline()
-            except OSError:
-                continue
-            if title.startswith('#') and f'`{name}`' in title:    # the title names the job, not a passing mention
-                hits.append(path)
-    rel = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
-    return sorted(os.path.relpath(h, rel) for h in hits)
-
-
-def _hms(secs):
-    """Seconds as H:MM:SS (or M:SS under an hour), for the time line a reader compares run to run."""
-    secs = int(round(secs))
-    h, rem = divmod(secs, 3600)
-    m, sec = divmod(rem, 60)
-    return f'{h}:{m:02d}:{sec:02d}' if h else f'{m}:{sec:02d}'
-
-
-def _record_timing(wall, work, results, opts):
-    """Append this run's timing to build/suite-timings.jsonl: one line per run, with the revision and every job's
-    own time, so a slowdown can be traced to the job and the commit that caused it."""
-    import json as _json, subprocess as _sp, time as _time
-    try:
-        head = _sp.run(['git', 'rev-parse', '--short', 'HEAD'], capture_output=True, text=True, cwd=HERE).stdout.strip()
-    except OSError:
-        head = ''
-    rec = {'when': _time.strftime('%Y-%m-%dT%H:%M:%S'), 'head': head,
-           'wall_s': round(wall, 1), 'work_s': round(work, 1),
-           'jobs': {k: round(r.secs, 1) for k, r in sorted(results.items())},
-           'cached': sum(1 for r in results.values() if r.cached)}
-    path = os.path.join(HERE, '..', 'build', 'suite-timings.jsonl')
-    try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, 'a') as f:
-            f.write(_json.dumps(rec) + '\n')
-    except OSError as e:
-        print(f'  (could not record timing: {e})')
-
-
 def report(names, state, results, wall, peak, opts, log: Log):
     # Group the run's tests into the tally's counters, one lookup per test, so
     # a test cannot end up in a bucket nobody reads.
@@ -5999,23 +5941,6 @@ def report(names, state, results, wall, peak, opts, log: Log):
                       + (f'  [{_TAG.get(status, "?")}]'
                          if status != row.statuses[0] else '')
                       + (f'  — {why}' if why else ''))
-                if row.count == 'failed':
-                    # Is this a regression someone has already filed? A gate reads this line to tell a repeat
-                    # from a new break: the bug doc that tracks the job, or NEW when no doc does.
-                    docs = known_bugs(name)
-                    print('      ' + (('previously seen: ' + ', '.join(docs)) if docs
-                                      else 'NEW: no bug doc tracks this job'))
-    # How long the gate took, and where the time went. The wall clock is what a person waits for; the sum of the jobs'
-    # own times is the work done (it exceeds the wall when jobs ran in parallel, and the gap is the parallelism). The
-    # slowest jobs are the first place to look when a gate gets slower. Each run is also appended to
-    # build/suite-timings.jsonl, so "how long does the gate take" has an answer over time, not just for this run.
-    work = sum(r.secs for r in results.values())
-    slow = sorted(((r.secs, k) for k, r in results.items() if not r.cached), reverse=True)[:8]
-    print(f'time: wall {_hms(wall)} | work {_hms(work)} across {len(results)} job(s) '
-          f'({sum(1 for r in results.values() if r.cached)} replayed from cache)')
-    for secs, key in slow:
-        print(f'  slowest  {_hms(secs):>9}  {key}')
-    _record_timing(wall, work, results, opts)
     print(tally + (f'   log: {log.path}' if log.path else ''))
     # Non-zero for any member of a counter that `fails`, and for a summary that
     # could not account for every test: a run that cannot count itself has not

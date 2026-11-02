@@ -1064,7 +1064,6 @@ class GimpleGen:
         # safe for any code path that reaches `_cpp_for_stmt` without going
         # through gen_module first.
         self._all_generator_names: set = set()
-        self._has_double_generator: bool = False
         # Side channel: _gen_cpp_generator_unit/_gen_cpp_async_generator_unit
         # stash their just-computed _generator_tuple_yield_slot_ctypes
         # result here (list[str] for a tuple-yielding generator, None for
@@ -2701,14 +2700,6 @@ class GimpleGen:
         # write back on exit: `[gname, saved temp]` pairs, set by
         # emit_methods._cattr_restore_begin and cleared by _cattr_restore_end.
         self._cattr_restores: list = []
-        # Python-level frames (sys._getframe & co): the module names whose functions are
-        # instrumented with a frame record (a module that mentions `_getframe`), and the
-        # name of the function currently being emitted when it is one of them (''
-        # otherwise). See emit_methods._frame_enter.
-        self._frames_mods: set = set()
-        # True while the body of a stack-switch (A3) coroutine is being lowered; see emit_loops.
-        self._cur_func_is_coro: bool = False
-        self._frame_func: str = ''
         self._owned_free_candidates: set = set()
         self._owned_free_pushed: set = set()
         self._owned_stack_allocated: set = set()
@@ -2730,6 +2721,17 @@ class GimpleGen:
         self._int_word_vals: set = set()
         self._fresh_str_tmps: set = set()  # see emit_infra._emit_str_cat
         self._fresh_vals: set = set()  # see emit_infra.is_fresh_container_operand
+        # TEMP names holding a FRESH CLOSURE a vetted call returned (the
+        # caller-side counterpart of `_closure_vals`'s local lambdas): the callee
+        # passed returns_fresh_closure, so the local bound to the result may own
+        # the value — environment, `{mut}` boxes, bound method — and free it with
+        # `mojo_closure_free` at its scope exit. Same per-function reset terms as
+        # `_fresh_vals` above (declared here, reset by REBIND in `_reset_func`
+        # — never in place, because a nested lifted closure's saved state holds
+        # a reference to the current object — and saved/restored by reference in
+        # FuncState), because a stale "this temp holds a fresh closure" entry
+        # would be a wrong free, not a missed one.
+        self._fresh_closure_vals: set = set()  # see emit_infra.maybe_push_owned_local
         # Field names whose recorded element type (`_field_elem_types`) belongs to
         # a SET rather than a list. An element type says "this field is a
         # container of X", not which container, so `_lower_MemberExpr`'s boxed
@@ -2781,6 +2783,7 @@ class GimpleGen:
         # Block-scoped destruction state — see emit_infra's block-scope section.
         self._analysis_funcs: dict = {}   # see infra_infer._build_analysis_funcs
         self._fresh_returning: set = set()   # names whose calls return a fresh container
+        self._fresh_closure_returning: set = set()  # names whose calls return a fresh capturing closure
         self._analysis_structs: dict = {}    # see infra_infer._build_analysis_structs
         self._cur_func_body: list = []  # the AST body being lowered (see _reset_func)
         self._decl_value_node = None   # see lower_expr: the decl statement's RHS node
@@ -3201,9 +3204,6 @@ class GimpleGen:
         if gimple_gen_coro.enabled():
             self.BUILTIN_VALUE_MAP['_coro_resume_fn'] = '__mojo_gen_resume_once'
             self.BUILTIN_VALUE_MAP['_coro_destroy_fn'] = '__mojo_gen_destroy'
-        # MODULE-wide, not per function (so not in `_reset_func`): once any `type(n, bases, ns)`
-        # is lowered, a later function's `isinstance` / `type(x)` must consult the class table.
-        self._rt_classes_made: bool = False
         self._reset_func()
 
     # Builtin exception names (mirrors myinterpreter.py's _setup_builtins plus
@@ -3277,12 +3277,7 @@ class GimpleGen:
         'mojo_class_delattr':  ('void', ['int64_t', 'char *']),
         'mojo_type_new':       ('int64_t', ['char *']),
         'mojo_type_add_base':  ('void', ['int64_t', 'int64_t']),
-        'mojo_type_add_bases_from_list': ('void', ['int64_t', 'MojoList *']),
         'mojo_classobj_tag':   ('int64_t', ['int64_t']),
-        'mojo_rtobj_method_call': ('int64_t', ['int64_t', 'char *'] + ['int64_t'] * 8),
-        'mojo_isinstance_rtclass': ('int', ['int64_t', 'int64_t']),
-        'mojo_isinstance_type': ('int', ['int64_t']),
-        'mojo_type_of':        ('int64_t', ['int64_t']),
         'mojo_classobj_setattr': ('void', ['int64_t', 'char *', 'int64_t']),
         'mojo_type_fill_from_dict': ('void', ['int64_t', 'MojoDict *']),
         'mojo_chain_extend':   ('void', ['MojoList *', 'int64_t']),
@@ -3564,7 +3559,6 @@ class GimpleGen:
         'mojo_dict_new':         ('MojoDict *', []),
         'mojo_dict_set_str': ('void',      ['MojoDict *', 'char *', 'char *']),
         'mojo_dict_set_int': ('void',      ['MojoDict *', 'char *', 'int64_t']),
-        'mojo_dict_set_double': ('void',   ['MojoDict *', 'char *', 'double']),
         'mojo_dict_get_str':     ('char *',    ['MojoDict *', 'char *']),
         'mojo_dict_get_int':     ('int64_t',   ['MojoDict *', 'char *']),
         'mojo_dict_setdefault_int': ('int64_t', ['MojoDict *', 'char *', 'int64_t']),
@@ -4441,16 +4435,20 @@ class GimpleGen:
         if (isinstance(node.func, IdentExpr) and node.func.name in self._analysis_structs
                 and node.func.name not in self.var_types):
             self._fresh_vals.add(_cv)
+        # A call to a function proven to hand back a FRESH capturing closure
+        # (infra_infer._build_fresh_closure_returning / returns_fresh_closure):
+        # the result is a brand-new bound method whose environment and `{mut}`
+        # boxes are owned by whoever binds it, and may be torn down with
+        # `mojo_closure_free` at that binder's scope exit. Same local-shadow
+        # guard as the two creditors above: a local of this function named like
+        # the module fn (a function pointer / parameter) is a different value.
+        if (isinstance(node.func, IdentExpr) and node.func.name in self._fresh_closure_returning
+                and node.func.name not in self.var_types):
+            self._fresh_closure_vals.add(_cv)
         return _ct, _cv
 
     def _lower_pointer_alloc(self, node: CallExpr) -> tuple[str, str]:
         return ggc._lower_pointer_alloc(self, node)
-
-    def _lower_alloc_single_leak(self, node: CallExpr):
-        return ggc._lower_alloc_single_leak(self, node)
-
-    def _lower_dealloc_thin_allocation(self, node: CallExpr):
-        return ggc._lower_dealloc_thin_allocation(self, node)
 
     def _lower_builtin_len(self, node: CallExpr) -> tuple[str, str]:
         return ggc._lower_builtin_len(self, node)
@@ -4551,9 +4549,6 @@ class GimpleGen:
 
     def _default_expr_to_pair(self, _dflt, cxx: bool = False, param_ctype=None) -> tuple:
         return ggc._default_expr_to_pair(self, _dflt, cxx=cxx, param_ctype=param_ctype)
-
-    def _pack_kwargs_slot_call(self, fname, fname_raw, arg_pairs, kwarg_dict, call_has_spread=False):
-        return ggc._pack_kwargs_slot_call(self, fname, fname_raw, arg_pairs, kwarg_dict, call_has_spread)
 
     def _pack_vararg_trailing_params(self, fname, fname_raw, arg_pairs, kwarg_dict, call_has_spread=False):
         return ggc._pack_vararg_trailing_params(self, fname, fname_raw, arg_pairs, kwarg_dict, call_has_spread)
@@ -5394,6 +5389,12 @@ class GimpleGen:
         self._analysis_funcs = ginf._build_analysis_funcs(stmts)
         self._analysis_structs = ginf._build_analysis_structs(stmts)
         self._fresh_returning = ginf._build_fresh_returning(self._analysis_funcs, self._analysis_structs)
+        # Names whose calls return a FRESH CLOSURE (see infra_infer's
+        # returns_fresh_closure): `_lower_call` credits the result temp into
+        # `_fresh_closure_vals` so the binding's declaration can own — and free
+        # with `mojo_closure_free` — the environment, `{mut}` boxes and bound
+        # method the call handed back.
+        self._fresh_closure_returning = ginf._build_fresh_closure_returning(self._analysis_funcs)
     def _emit_container_new(self, t: str, ctype: str) -> None:
         return ginf.emit_container_new(self, t, ctype)
     def _note_fresh_result(self, t: str) -> None:
@@ -5699,8 +5700,6 @@ class GimpleGen:
         return grsl._closure_value_locals(self, body)
     def _quick_type(self, node) -> str:
         return grsl._quick_type(self, node)
-    def _module_attr_call_return_type(self, node):
-        return grsl._module_attr_call_return_type(self, node)
     def _infer_list_elem_type(self, elements: list) -> str:
         return grsl._infer_list_elem_type(self, elements)
     def _prepass_callee_key(self, node) -> str | None:

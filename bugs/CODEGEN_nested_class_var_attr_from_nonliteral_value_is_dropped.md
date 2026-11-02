@@ -2,7 +2,7 @@
 
 ## Status (2026-10-29)
 
-Found while fixing the str-parameter class-attribute typing bug (doc deleted with its fix).
+Found while fixing `CODEGEN_nested_class_attr_from_str_param_typed_as_int.md`.
 The plain assignment form (`name = s`) reaches the per-execution cell path;
 the `var` form never gets there.
 
