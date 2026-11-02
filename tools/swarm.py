@@ -497,11 +497,68 @@ def verify_async():
                      stdout=open(os.path.join(C.ctl_dir(), "verify.out"), "a"), stderr=subprocess.STDOUT)
 
 
+def pid_path():
+    return os.path.join(C.ctl_dir(), "swarm.pid")
+
+
+def take_lock(path=None):
+    """Become the one swarm. An exclusive flock on the pid file is the ownership proof: the kernel releases it when the
+    holder dies, so the file's contents can be stale but the lock cannot. The fd stays open for the life of the process
+    (subprocess closes inherited fds, so no child holds the lock). Exits if another live swarm holds it."""
+    path = path or pid_path()
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        holder = os.read(fd, 65536).decode(errors="replace").strip()
+        os.close(fd)
+        sys.exit("another swarm holds %s (run: python3 tools/swarm.py --who): %s" % (path, holder))
+    me = {"pid": os.getpid(), "ppid": os.getppid(), "started": time.strftime("%FT%T"),
+          "cwd": os.getcwd(), "argv": sys.argv}
+    os.ftruncate(fd, 0)
+    os.write(fd, (json.dumps(me) + "\n").encode())
+    return fd
+
+
+def who(path=None):
+    """Print the lock holder, verified: the pid in the lock file must still be alive, and its command line must be this
+    script. Stop it with `kill -TERM <pid>` only after this has printed it."""
+    path = path or pid_path()
+    if not os.path.exists(path):
+        print("no swarm has ever taken %s" % path)
+        return 0
+    fd = os.open(path, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raw = os.read(fd, 65536).decode(errors="replace")
+        os.close(fd)
+        info = json.loads(raw)
+        ps = subprocess.run(["ps", "-o", "pid=,ppid=,lstart=,command=", "-p", str(info["pid"])],
+                            capture_output=True, text=True).stdout.strip()
+        print("LOCK HELD by the swarm recorded in %s:" % path)
+        print(raw.strip())
+        if not ps:
+            print("live process: NOT FOUND (the lock is held but the recorded pid is gone: report it)")
+        else:
+            print("live process: %s" % ps)
+            print("command is tools/swarm.py: %s" % ("yes" if "swarm.py" in ps else "NO: do not kill it"))
+        return 0
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    os.close(fd)
+    print("lock is free: no swarm is running (last recorded in %s)" % path)
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--target", type=int, default=None, help="default: the pool's total slots (tools/pool.json)")
     ap.add_argument("--interval", type=int, default=120, help="seconds between passes (0: one pass)")
+    ap.add_argument("--who", action="store_true", help="print the verified lock holder and exit")
     a = ap.parse_args()
+    if a.who:
+        sys.exit(who())
+    _lock = take_lock()     # held until this process exits
     while True:
         try:
             apply_moves(load_state())            # a class change is a file move, so it lands before the feed reads the tree

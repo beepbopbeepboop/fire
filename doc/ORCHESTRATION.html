@@ -163,7 +163,10 @@ The cure is to <b>land the finished branches</b> (§7), not to release claims by
 <p><code>tools/swarm.py</code> is the one long-lived loop. It replaced the old keep-full script (<code>keepfull.sh</code>, which is no longer started: its last log line is 2026-11-02 12:07 and it still names one model). Start it from the main checkout, detached, with the right interpreter:</p>
 <pre><code>cd /Users/mrs/net/chatgpt/claude/mojo-reference
 nohup /opt/local/bin/python3 tools/swarm.py --interval 120 > .git/control/swarm.out 2>&1 &
-# stop:  pkill -f tools/swarm.py      state: .git/control/swarm.json      --target defaults to the pool total</code></pre>
+# who holds it (proved by the flock, not by a name match):  python3 tools/swarm.py --who
+# stop ONLY the pid --who prints, and only if it says 'command is tools/swarm.py: yes':  kill -TERM <pid>
+# never `pkill -f`: it matches every process whose command line contains the text, not only the swarm.
+# state: .git/control/swarm.json   pid record and lock: .git/control/swarm.pid   --target defaults to the pool total</code></pre>
 <p>One pass, every <code>--interval</code> seconds:</p>
 <ol>
 <li><b>Class moves and reap.</b> A doc due a class move moves once nothing unlanded touches it; <code>control.py reap</code> kills leftovers of finished workers.</li>
