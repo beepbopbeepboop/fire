@@ -67,7 +67,8 @@ def _cm_as_str(x) -> str:
 from mojo.middle.exprtypes import _is_asyncio_sleep_call, _is_asyncio_sock_recv_call, _walk_ast_invalidate, _gmi_nested_struct_defs
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.exprtypes as gimple_exprtypes
-from mojo.middle.exprtypes import module_qualifier
+# module_qualifier imported lazily inside lower() to break import cycle
+# (mojo.middle.coro -> mojo.middle.module_shared -> mojo.middle.funcs_shared -> mojo.middle.coro)
 from mojo.middle.literal_bindings import binding_index, unique_literal_value
 _ENV = 'MOJO_CORO'
 _MODE = 'stackswitch'
@@ -6290,6 +6291,7 @@ def lower(stmts: list, closure_stmts: list = (),
     # `module_qualifier` strips leading dots per-compile via the gen instance
     # normally, here straight from the literal module_name arg.
     global _MODULE_QUALIFIER
+    from mojo.middle.module_shared import module_qualifier
     _MODULE_QUALIFIER = module_qualifier(module_name or '')
     _PARAM_NAMES.clear()
     _ASYNC_METHOD_NAMES.clear()

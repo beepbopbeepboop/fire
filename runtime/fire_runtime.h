@@ -2578,15 +2578,6 @@ char *mojo_regex_sub_fn(const ReNode *prog, const ReRange *ranges, const ReClass
 char *mojo_regex_sub_str(const ReNode *prog, const ReRange *ranges, const ReClassInfo *classinfo,
                           int root, int ngroups, char *repl, char *src);
 
-/* Opt-in allocation census (-DMOJO_ALLOC_CENSUS). Included here, last, so that
-   every emitted translation unit that includes this header counts its own
-   malloc/free calls against the one census table in fire_runtime.c. The
-   runtime's own translation unit defines FIRE_RUNTIME_C_TU and includes the
-   census itself, after its system headers. A no-op without the flag. */
-#if defined(MOJO_ALLOC_CENSUS) && !defined(FIRE_RUNTIME_C_TU)
-#include "fire_alloc_census.h"
-#endif
-
 #ifdef __cplusplus
 }
 #endif

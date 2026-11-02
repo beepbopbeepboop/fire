@@ -2425,9 +2425,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                     self._emit_receiver_writeback()
                 self._emit_mov_imm(Reg.RAX, 0)
             else:
-                callee = self._vkinds.no_value_callee_of(stmt.value)
-                if callee is not None:
-                    raise CodegenError(M.returnless_value_refusal(callee))
                 # A double returned under an INTEGER annotation. Asked before
                 # the value is emitted, because the answer is about the
                 # FUNCTION's declaration rather than about the return
@@ -5150,18 +5147,17 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         a.label("L_chk")
         mvz(RAX, RDI, 0)
         t64(RAX, RAX)
-        jc("jz", "L_add_dot0")
+        jc("jz", "L_nul")
         cpi(RAX, 0x2E)
-        jc("je", "fr_ret")
+        jc("je", "L_nul")
         cpi(RAX, 0x65)
-        jc("je", "fr_ret")
+        jc("je", "L_nul")
         cpi(RAX, 0x2D)
         jc("je", "L_chk")  # '-' might be in "1e-04"
         ai(RDI, 1)
         jp("L_chk")
-        a.label("L_add_dot0")
-        # No '.' or 'e' found: add ".0" (overwrite the NUL terminator from the copy)
-        ai(RSI, -1)
+        a.label("L_nul")
+        # No '.' or 'e' found: add ".0"
         mi(RDX, 0x2E)
         mvb(RSI, 0, RDX)
         ai(RSI, 1)
@@ -8849,47 +8845,21 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # program is byte-identical to what it was.
             scale = (M.pointer_offset_scale(self._cur_fn, e)
                      if op in ("+", "-") else None)
-            # `model.int_overflow_traps`'s two halves, asked in the order the
-            # value exists, with the same shared predicate arm64's ALU arm asks
-            # it with: the build-time half — a `+`, `-` or `*` whose operands
-            # the build can FOLD is decided now, and a refusal carrying the
-            # exact CPython value is a better answer than a wrapped number or
-            # a status code — and the run-time half, the same predicate over a
-            # value the build CANNOT know, which a plain `ADD`/`SUB`/`IMUL`
-            # used to answer with the hardware's modulo-2^64 wrap (on `//`'s
-            # neighbour the two machines did not even fail the same way —
-            # `bugs/formal/
-            # FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
-            # `VARIABLE_ROWS` table is the measurement that pinned it). That
-            # half is the flag the ALU leaves plus `_emit_int_overflow_trap`,
-            # the branch into the trap block. The build-decidable case that
-            # FITS stays on the plain instruction for the reason arm64's arm
-            # gives: the branch the run can never take is a bigger proof for
-            # the same theorem. "The build knows" is the SAME test
-            # `fold_overflow` applies to its own tuple — both operands fold to
-            # a NON-BOOL int — because a folded `True` is unknown to IT, and a
-            # `True + n` that the build does not refuse must be the one the
-            # run checks.
+            # The build-time half of `model.int_overflow_traps`, asked here for
+            # the same reason and with the same shared predicate arm64's ALU arm
+            # asks it with: a `+`, `-` or `*` whose operands the build can FOLD
+            # is decided now, and a refusal carrying the exact CPython value is
+            # a better answer than a wrapped number or a status code. The
+            # run-time half over a value the build cannot know is
+            # `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`.
             result_t = common_type(self._ttype(e.left), self._ttype(e.right))
-            checked = False
             if M.int_overflow_traps(op, result_t, pointer_arith=bool(scale)):
                 reason = M.fold_overflow(op, e.left, e.right, result_t,
                                          pointer_arith=bool(scale))
                 if reason:
                     raise CodegenError(reason)
-                decided = all(isinstance(v, int) and not isinstance(v, bool)
-                              for v in (M.fold_literal_expr(e.left),
-                                        M.fold_literal_expr(e.right)))
-                checked = not decided
             self._emit_two_sided(e.left, e.right, _ALU_RR[op], Reg.R11,
                                  scale=scale)
-            if checked:
-                # `scale` is None here by construction: a pointer offset scales
-                # its right operand with its own `IMUL`, and
-                # `int_overflow_traps` answers False for `pointer_arith`, so
-                # the OF the `JO` below reads is the ALU's and not the scaling
-                # multiply's.
-                self._emit_int_overflow_trap(op)
             if op in ("+", "-", "*"):
                 self._emit_trunc(result_t)
             return
@@ -8931,46 +8901,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self.asm.emit(encode_imul_r64_r64_imm(scratch, scratch, scale))
         self._pop_slot(Reg.RAX)
         self.asm.emit(alu(Reg.RAX, scratch))
-
-    def _emit_int_overflow_trap(self, op: str) -> None:
-        """The `JO` into an inline overflow trap, and the trap itself.
-
-        The instruction-level twin of arm64's `_emit_int_overflow_trap`, and
-        one `JO` where arm64's check is a `B.vs` or a `CBNZ`, because here the
-        flag IS the test: `ADD` and `SUB` set OF on a signed overflow, and the
-        two-operand `IMUL` sets OF and CF when the 64-bit product does not
-        fit — the fact `lib/X86.lean`'s flag models carry, and the reason
-        arm64 (whose `MUL` writes no flag at all) has to compute the high
-        half with `SMULH` and compare it where this reads one flag. The
-        caller has just emitted the ALU into RAX with the right operand in
-        the scratch, and nothing here preserves a register: the block ends
-        in an exit, so the value the operation was computing is not live on
-        the far side.
-
-        Not `_record_cond_branch`: no AST condition is behind the branch, and
-        recording it would claim a source-level `if` the program never wrote
-        — the reading arm64 applies to its own guards, and the one this
-        branch's proof consumer needs before it maps recorded branches to
-        source conditions.
-
-        Both calls in the block are recorded as compiler traps, the way
-        `_emit_stack_floor_guard` records its own: an unrecorded `write` or
-        `exit` reads as a call the PROGRAM makes and suppresses every run
-        test in the image.
-        """
-        self._if_counter += 1
-        tid = self._if_counter
-        fn = self.func_name
-        trap = f"{fn}_ovf{tid}_t"
-        ok = f"{fn}_ovf{tid}_k"
-        self._emit_jcc(COND_O, trap)
-        self._emit_jmp(ok)
-        self.asm.label(trap)
-        self._compiler_trap_addrs.append(
-            self._emit_overflow_diagnostic_call(M.int_overflow_trap_message(op)))
-        self._compiler_trap_addrs.append(
-            self._emit_call_exit(M.INT_OVERFLOW_TRAP_STATUS))
-        self.asm.label(ok)
 
     def _emit_strcmp(self, l, r, op: str) -> bool:
         """`l == r` / `l != r` on two STRINGS as `strcmp(l, r) == 0`.

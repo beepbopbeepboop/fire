@@ -125,26 +125,14 @@
         </ul>
     </div>
 
-    <h2>4. Proof Guarantees (Explicit Classification)</h2>
-    <div class="info-box">
-        <p>The formal pipeline classifies proof outcomes explicitly so users know the trust level:</p>
-        <ul>
-            <li><strong>Refused</strong> — The generator does not emit a proof because the construct/shape is unsupported (e.g. certain struct field patterns, unsupported call shapes). Build continues without a proof artifact.</li>
-            <li><strong>Structural</strong> — A proof skeleton/theorems are emitted and the Lean file typechecks, but it may contain <code>sorry</code>/<code>admit</code> at leaves. The structure is in place (induction/CFG/block certificates) even if obligations remain.</li>
-            <li><strong>Hole-tracked partial</strong> — Admitted obligations are explicitly counted and bounded. <code>proof_census</code> tracks holes/sorries, enforces time/memory limits, and reports trust level in build/test output. Vacuous or false claims are rejected by checks (e.g. dylib contract verification).</li>
-            <li><strong>Fully proved</strong> — The proof typechecks with zero holes and establishes the relevant end-to-end/correctness theorem (no <code>sorry</code>/<code>admit</code> remaining).</li>
-        </ul>
-        <p>Build output and test results report which category applies, making the "proof-carrying" guarantee explicit rather than implied.</p>
-    </div>
-
-    <h2>5. What It Does Wrong / Bugs, Flaws, Shortcomings</h2>
+    <h2>4. What It Does Wrong / Bugs, Flaws, Shortcomings</h2>
     
     <h3>4.1 Semantic Model Limitations (Critical)</h3>
     <div class="danger-box">
         <ul>
-            <li><strong>Model is less restricted than before</strong> - The ARM64 proof generator's semantic model has been strengthened to handle more cases (structs, lists/containers, interprocedural calls, loops/CFG, division/multi-arg calls). Some complex cases like wide receivers with certain struct field patterns may still be limited, but many previously impossible cases now have models.</li>
+            <li><strong>Model is extremely restricted</strong> - ARM64 proof generator's semantic model <code>mojo</code> is often a function of a single <code>UInt64</code> input only. As noted in comments, structs, lists with runtime indexing, wide receivers/struct fields often have "no value in the semantic model".</li>
             <li><strong>Source-level correspondence is weak</strong> - Many proofs admit <code>eval_eq_mojo</code> ("AST evaluation agrees with the semantic model") with comments saying it's future work. The end-to-end theorems are often admitted.</li>
-            <li><strong>Fewer gaps for common features</strong> - Many cases that were previously in <code>test_formal.py</code> EXPECTED_FAILURES now pass (calls/cross-function, recursion/CFG, loops, division/multi-arg, lists/strings/structs). Remaining gaps are more targeted (e.g. <code>wide_recv</code> with certain wide struct receiver patterns).</li>
+            <li><strong>Large gaps for common features</strong> - From <code>test_formal.py</code> EXPECTED_FAILURES: <code>fib</code> (tree recursion), <code>countdown</code>/<code>wge</code> (signed decrement-while issues in model), <code>subscript_var</code> (runtime-indexed lists), <code>struct Point</code> field access. These are fundamental features.</li>
             <li><strong>Model vs reality drift</strong> - x86_64 and ARM64 backends disagree on what they can prove/refuse for the same construct (<code>struct Point</code> refused by ARM64, x86_64 generates placeholder model). Not a unified formalism.</li>
         </ul>
     </div>
@@ -237,7 +225,7 @@
         <li><strong>Unify backends</strong> - Eliminate ARM64/x86_64 divergence, share more code</li>
         <li><strong>Reduce sorry count</strong> - Systematically close CFG leaves and admitted theorems, or clearly mark what level of proof is provided</li>
         <li><strong>Strengthen semantic model</strong> - Extend to handle structs, lists properly so more programs can be proved</li>
-        <li><strong>Document proof guarantees explicitly</strong> - Classify outcomes clearly: <em>refused</em> (unsupported shape, no proof generated), <em>structural</em> (proof skeleton/theorems emitted, typechecks but may contain <code>sorry</code>/admit at leaves), <em>hole-tracked partial</em> (admitted obligations are counted, bounded, and reported by <code>proof_census</code>), and <em>fully proved</em> (no holes; end-to-end correctness theorem established). Surface this trust level in build output and test results so users know exactly what is guaranteed.</li>
+        <li><strong>Better documentation of proof guarantees</strong> - Distinguish "typechecks with structure" vs "fully proved" vs "refused". Users need to know what trust level they get.</li>
         <li><strong>Improve error messages</strong> - When proofs can't be generated, explain why and what needs to be done</li>
     </ul>
 

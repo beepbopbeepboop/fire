@@ -4124,7 +4124,7 @@ def _plan_mut_captured_params(gen, node, func_name: str):
     already a pointer in its own right, and boxing one would change the
     function's ABI for no gain (its captured type is the container, and a
     `MojoList *`/`MojoDict *` box holds it correctly without one)."""
-    for _ci in sorted(getattr(gen, '_all_closures', {}).get(func_name, {}).values(), key=lambda _x: (_as_str(getattr(_x, 'lifted_name', '')), _as_str(getattr(getattr(_x, 'inner_def', None), 'name', '')))):
+    for _ci in getattr(gen, '_all_closures', {}).get(func_name, {}).values():
         _cap_types = dict(_ci.captures)
         for _mn in _ci.mut_names:
             if _mn not in _cap_types or _mn in gen._mut_boxed_param_c:
@@ -4174,7 +4174,7 @@ def _seed_mut_captured_local_types(gen, func_name: str):
     recorded `var_types` entry with the pointer ctype, because that
     entry is what `_type_of`'s own boxed-local branch exists to
     correct. See `_plan_mut_captured_params`."""
-    for ci in sorted(getattr(gen, '_all_closures', {}).get(func_name, {}).values(), key=lambda _x: (_as_str(getattr(_x, 'lifted_name', '')), _as_str(getattr(getattr(_x, 'inner_def', None), 'name', '')))):
+    for ci in getattr(gen, '_all_closures', {}).get(func_name, {}).values():
         cap_types = dict(ci.captures)
         # SORTED, and load-bearing. `ci.mut_names` is a frozenset, so
         # iterating it directly emitted the boxed-pointer declarations in

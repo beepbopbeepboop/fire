@@ -206,7 +206,7 @@ def _build_generator_program_from_code(c_code: str, cpp_code: str) -> str:
 #
 # Real: c_common/tables.py's `read_table` consuming
 # `strutil._iter_significant_lines(infile)` — see
-# bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md.
+# bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md.
 
 _FOREIGN_PKG_FILES = {
     '__init__.py': '',
@@ -1118,7 +1118,7 @@ def main():
 
 
 def _regression_read_table_callable_reader():
-    # Root-cause regression for bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md:
+    # Root-cause regression for bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md:
     # `_get_reader` is a callable-valued parameter (default csv.reader); the
     # loop `for row in _get_reader(lines, ...):` in `read_table` must be
     # refused honestly (not silently wrong) until callable-local loop typing

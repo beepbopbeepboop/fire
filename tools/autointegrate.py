@@ -194,7 +194,8 @@ def fix_forward(merged, failed, gate_log, attempts=2, timeout_min=180):
         family = sorted((n for n in tasks if n == name or n.startswith(name + "-r")), key=lambda n: tasks[n]["slot"])
         for n in family:
             if C.state_of(tasks[n]) == "running":
-                C.fleet_ledger.kill_group(C.ctl_dir(), n, "fixer exited with a running worker")
+                try: os.killpg(tasks[n]["pid"], 15)
+                except OSError: pass
             snapshot_tree(tasks[n], "the fixer exited with uncommitted work")
         done = [n for n in family if C.ahead(tasks[n]) > 0 and tasks[n].get("state") != "abandoned"]
         qtext = " ".join(q for n in family for q in C.questions(tasks[n]))
@@ -317,7 +318,8 @@ def merge_conflicts(M, X, timeout_min=180):
     family = sorted((n for n in tasks if n == name or n.startswith(name + "-r")), key=lambda n: tasks[n]["slot"])
     for n in family:
         if C.state_of(tasks[n]) == "running":
-            C.fleet_ledger.kill_group(C.ctl_dir(), n, "merger exited with a running worker")
+            try: os.killpg(tasks[n]["pid"], 15)
+            except OSError: pass
         snapshot_tree(tasks[n], "the merger exited with uncommitted work")
     done = [n for n in family if C.ahead(tasks[n]) > 0]
     if not done:

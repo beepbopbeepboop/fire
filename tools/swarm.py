@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """The light-gate swarm: keep N workers on bugs/ docs, land what they finish, verify after landing.
 
-    python3 tools/swarm.py [--target N] [--interval 120]   # --target defaults to the pool total (tools/pool.json)
+    CONTROL_MODEL=openrouter/openrouter/free python3 tools/swarm.py [--target 2] [--interval 120]
 
 One pass, repeated:
-  1. FEED    keep the queue stocked: each missing worker slot gets the next free bugs/ doc, formal docs included
-             (bugs/formal/ is easy class); not a doc any live task, queued task or external `control.py claim` holds. A doc
+  1. FEED    keep the queue stocked: each missing worker slot gets the next free bugs/ doc (not FORMAL_*, which
+             formal_feed.py owns; not a doc any live task, queued task or external `control.py claim` holds). A doc
              is re-fed as long as nothing says stop. A doc whose bug report carries a line `STOP: <reason>` is NOT fed:
              the feeder logs the reason every pass it reaches that doc. That line is the only stop: there is no retry
              count. Each re-feed logs what the previous attempt produced (commits, or none).
   2. REFILL  `control.py refill --target N --prefix bug-,fix-` -- a worker that finishes frees its slot at once.
   3. LAND    finished bug-*/fix-* branches are merged by `integrate.py --stdlib` (gate = the stdlib compile only); a
-             conflicting branch is handed to a merge-fixer task (integrate.enqueue_merge_fix).
+             conflicting branch is handed to a merge-fixer worker on the same model (CONTROL_MODEL).
   4. VERIFY  after a landing, `verify_landed.py` (make check + stdlib-dylib) runs in the background on master; red files a
              fix-landed-* task that the next REFILL starts.
 The integrator and the verifier each take their own flock, so only one of each ever runs."""
@@ -22,6 +22,7 @@ import control as C
 import integrate as I
 import task_text as T
 
+SKIP = re.compile(r"^(FORMAL_|COMPILE_FAIL_|MERGE_|OPEN_WORK|PERF_memory_over|DOCS_)")
 PREFIXES = ("bug-", "fix-")
 STOP = re.compile(r"^STOP:[ \t]*(.+?)[ \t]*$", re.M)   # the stop indicator: a line `STOP: <reason>` in the bug doc
 
@@ -41,58 +42,8 @@ def log(msg):
     print("%s %s" % (time.strftime("%T"), msg), flush=True)
 
 
-# The live-session guard, set once per pass by live_guard(). A task whose worktree an opencode session is still
-# driving is BUSY: its agent is working, whatever the registry says (the CLI process may be gone while the session
-# keeps running). Busy tasks are never retired, continued, landed, or cleaned, and their claims are held for the feed.
-BUSY = {"names": set(), "claims": set()}
-
-
-def live_guard():
-    """Refresh BUSY from the opencode sessions. Returns False when the listing cannot be read: the pass then changes
-    nothing that depends on knowing what is live (no feed, continue, retire, land)."""
-    try:
-        dirs = C.live_session_dirs()
-    except (RuntimeError, OSError, ValueError) as e:
-        log("guard: %s; this pass feeds, continues, retires and lands nothing" % e)
-        return False
-    tasks = C.load()
-    names = C.busy_task_names(dirs, tasks)
-    claims = set()
-    for n in names:
-        claims.update(tasks[n].get("claims", []))
-    BUSY["names"], BUSY["claims"] = names, claims
-    log("guard: %d task(s) with a live opencode session in their tree" % len(names))
-    return True
-
-
-def drop_queued_busy():
-    """A queued task that names a doc a busy session is working on would start a second worker on it: drop it."""
-    for f in os.listdir(C.qdir()):
-        if not f.endswith(".json"):
-            continue
-        path = os.path.join(C.qdir(), f)
-        item = json.load(open(path))
-        clash = sorted(set(item.get("claims", [])) & BUSY["claims"])
-        if clash:
-            os.remove(path)
-            log("dropped queued %s: %s is held by a live session" % (item.get("name", f), ", ".join(clash)))
-
-
-def busy_by_class():
-    """Running workers per task class: a task counts in its own class (its `cls`), whichever slot it runs on, so a
-    slot that also takes another class does not hide that class's load."""
-    pool = C.load_pool()
-    slot_cls = {sl["name"]: C.slot_class(sl) for sl in pool["slots"]}
-    busy = {c: 0 for c in C.CLASSES}
-    for t in C.load().values():
-        if C.state_of(t) != "running":
-            continue
-        busy[t.get("cls") or slot_cls.get(t.get("pool"), "easy")] += 1
-    return busy
-
-
 def held_claims():
-    held = set(BUSY["claims"])                  # a live session holds its docs, whatever its registry state
+    held = set()
     for t in C.load().values():
         if C.holds_claims(t):                   # the same rule spawn uses: live work, or commits not yet landed
             held.update(t.get("claims", []))
@@ -193,8 +144,10 @@ def feed():
     held, made = held_claims(), 0
     slot_cls = {sl["name"]: C.slot_class(sl) for sl in pool["slots"]}
     # Each class keeps its own queue: capacity of its live slots, plus one, less what runs and what waits in it.
-    cap = {c: sum(sl["count"] for sl in pool["slots"] if C.accepts(sl, c)) for c in C.CLASSES}
-    busy = busy_by_class()
+    cap = {c: sum(sl["count"] for sl in pool["slots"] if C.slot_class(sl) == c) for c in C.CLASSES}
+    busy = {c: 0 for c in C.CLASSES}
+    for slot, n in C.running_by_slot().items():
+        busy[slot_cls.get(slot, "easy")] += n
     queued = {c: 0 for c in C.CLASSES}
     for f in os.listdir(C.qdir()):
         if f.endswith(".json") and f.startswith(PREFIXES):
@@ -292,11 +245,6 @@ def _git(*a):
     return r.returncode, r.stdout
 
 
-def move_busy_bases():
-    """Docs a live opencode session is working on: a move would leave that session on a path that no longer exists."""
-    return {c[4:] for c in BUSY["claims"] if c.startswith("bug:")}
-
-
 def apply_moves(st):
     """Move each doc due a class into its class's directory (git mv), rewrite the path citations to it, and commit the
     move to master as one docs-only commit. A doc waits (and is retried next pass) while a worker holds it, while a branch
@@ -317,7 +265,7 @@ def apply_moves(st):
             if _git("diff", "--cached", "--name-only")[1].split():
                 log("reclass waits: the main checkout has staged changes")
                 return
-            busy = _busy_bases(C.load()) | move_busy_bases()
+            busy = _busy_bases(C.load())
             plan = []     # (base, old_rel, new_rel, cited_files)
             for base, to in sorted(pend.items()):
                 if base in busy:
@@ -397,7 +345,7 @@ def continue_partial(st):
     track = st.setdefault("track", {})    # doc -> the branch tip its open round started from
     n = 0
     for name, t in C.load().items():
-        if not name.startswith(PREFIXES) or t.get("state") in C.TERMINAL or name in BUSY["names"]:
+        if not name.startswith(PREFIXES) or t.get("state") in C.TERMINAL:
             continue
         if C.state_of(t) not in ("exited-ok", "exited-err") or C.verdict(t) == "DONE" or not C.ahead(t):
             continue                       # still running, DONE (the integrator takes it), or no commits (retire_dead)
@@ -439,7 +387,7 @@ def retire_dead():
     # counted when they happened, so the backlog is retired WITHOUT counting them again (no mass reclass).
     backfill = not st.get("retire_backfilled")
     for name, t in C.load().items():
-        if not name.startswith(PREFIXES) or C.state_of(t) == "running" or C.holds_claims(t) or name in BUSY["names"]:
+        if not name.startswith(PREFIXES) or C.state_of(t) == "running" or C.holds_claims(t):
             continue
         if C.state_of(t) in C.TERMINAL:
             continue
@@ -498,7 +446,7 @@ def find_culprit(seq, failing):
 
 
 def land():
-    names = [n for n in I.pick_candidates(quiet=True) if n.startswith(PREFIXES) and n not in BUSY["names"]]
+    names = [n for n in I.pick_candidates(quiet=True) if n.startswith(PREFIXES)]
     names = fresh_first(names, C.load())
     dirty = set(C.git("diff", "--name-only", "HEAD", cwd=C.MAIN).split())
     if dirty:
@@ -549,84 +497,21 @@ def verify_async():
                      stdout=open(os.path.join(C.ctl_dir(), "verify.out"), "a"), stderr=subprocess.STDOUT)
 
 
-def pid_path():
-    return os.path.join(C.ctl_dir(), "swarm.pid")
-
-
-def take_lock(path=None):
-    """Become the one swarm. An exclusive flock on the pid file is the ownership proof: the kernel releases it when the
-    holder dies, so the file's contents can be stale but the lock cannot. The fd stays open for the life of the process
-    (subprocess closes inherited fds, so no child holds the lock). Exits if another live swarm holds it."""
-    path = path or pid_path()
-    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        holder = os.read(fd, 65536).decode(errors="replace").strip()
-        os.close(fd)
-        sys.exit("another swarm holds %s (run: python3 tools/swarm.py --who): %s" % (path, holder))
-    me = {"pid": os.getpid(), "ppid": os.getppid(), "started": time.strftime("%FT%T"),
-          "cwd": os.getcwd(), "argv": sys.argv}
-    os.ftruncate(fd, 0)
-    os.write(fd, (json.dumps(me) + "\n").encode())
-    return fd
-
-
-def who(path=None):
-    """Print the lock holder, verified: the pid in the lock file must still be alive, and its command line must be this
-    script. Stop it with `kill -TERM <pid>` only after this has printed it."""
-    path = path or pid_path()
-    if not os.path.exists(path):
-        print("no swarm has ever taken %s" % path)
-        return 0
-    fd = os.open(path, os.O_RDWR)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        raw = os.read(fd, 65536).decode(errors="replace")
-        os.close(fd)
-        info = json.loads(raw)
-        ps = subprocess.run(["ps", "-o", "pid=,ppid=,lstart=,command=", "-p", str(info["pid"])],
-                            capture_output=True, text=True).stdout.strip()
-        print("LOCK HELD by the swarm recorded in %s:" % path)
-        print(raw.strip())
-        if not ps:
-            print("live process: NOT FOUND (the lock is held but the recorded pid is gone: report it)")
-        else:
-            print("live process: %s" % ps)
-            print("command is tools/swarm.py: %s" % ("yes" if "swarm.py" in ps else "NO: do not kill it"))
-        return 0
-    fcntl.flock(fd, fcntl.LOCK_UN)
-    os.close(fd)
-    print("lock is free: no swarm is running (last recorded in %s)" % path)
-    return 0
-
-
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--target", type=int, default=None, help="default: the pool's total slots (tools/pool.json)")
     ap.add_argument("--interval", type=int, default=120, help="seconds between passes (0: one pass)")
-    ap.add_argument("--who", action="store_true", help="print the verified lock holder and exit")
     a = ap.parse_args()
-    if a.who:
-        sys.exit(who())
-    _lock = take_lock()     # held until this process exits
     while True:
         try:
-            guard_ok = live_guard()
-            if guard_ok:
-                apply_moves(load_state())        # a class change is a file move, so it lands before the feed reads the tree
+            apply_moves(load_state())            # a class change is a file move, so it lands before the feed reads the tree
             subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "reap"], capture_output=True, cwd=C.MAIN)  # jobs of finished workers
-            fed = cont = retired = 0
-            if guard_ok:
-                fed = feed()
-                cont = continue_partial(load_state())
-                retired = retire_dead()
+            fed = feed()
+            cont = continue_partial(load_state())
             probe_free()
-            drop_queued_busy()
-            log("feed +%d, continued %d, abandoned %d; %s" % (fed, cont, retired, refill(a.target if a.target is not None else C.pool_total())))
+            log("feed +%d, continued %d, abandoned %d; %s" % (fed, cont, retire_dead(), refill(a.target if a.target is not None else C.pool_total())))
             subprocess.run([sys.executable, os.path.join(HERE, "cpu_cap.py"), "ratchet"], capture_output=True, cwd=C.MAIN)
-            if guard_ok and land():
+            if land():
                 verify_async()
                 subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "cleanup"], capture_output=True, cwd=C.MAIN)  # landed trees go
                 log("landed; post-landing verifier started")

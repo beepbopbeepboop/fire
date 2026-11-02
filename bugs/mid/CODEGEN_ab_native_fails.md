@@ -24,7 +24,7 @@ That is the policy in CLAUDE.md, "Known-failing tests": an expensive known
 failure must not be run, and it must be `disabled=<bug doc>` with the doc as
 the switch.
 
-**It is now `disabled='bugs/hard/CODEGEN_ab_native_fails.md'`** — this file. Still
+**It is now `disabled='bugs/mid/CODEGEN_ab_native_fails.md'`** — this file. Still
 registered, still in the `native` and `gate` buckets, still carrying its
 measured peak (20.5 GB) and the class the ratchet assigns that peak
 (`program`), so the day it is turned back on the numbers are already sized. Not
@@ -38,7 +38,7 @@ event "the bug is fixed". `tools/suite.py`'s `disabled_problems()` refuses to
 load the registry while this file is gone and says so by name:
 
 ```
-disabled test ab-native: its bug doc bugs/hard/CODEGEN_ab_native_fails.md is gone,
+disabled test ab-native: its bug doc bugs/mid/CODEGEN_ab_native_fails.md is gone,
 so the bug is fixed: turn the test back on
 ```
 
@@ -88,7 +88,7 @@ matters for what to do next:
   scratch directory under the worktree rather than the repo root since the
   2026-09-29 flake fix — see `test_ab_native.py`'s module docstring), and that
   pre-pass costs ~15-30 GB / ~15-25 s per call. It is localised, not fixed:
-  `bugs/hard/CODEGEN_bootstrap_resource_blowup.md` and BLOW.md §0.
+  `bugs/mid/CODEGEN_bootstrap_resource_blowup.md` and BLOW.md §0.
 
 ## 2. What would make it pass
 
@@ -119,7 +119,7 @@ Two independent conditions, and the cheap one is worth doing first:
    the python reference's. Every instance found so far is documented in
    commit e8a7135b8 (its per-class
    list, "A/B divergence list" and the dated entries) — that doc, plus
-   `bugs/hard/CODEGEN_bootstrap_resource_blowup.md` for the cost that makes the
+   `bugs/mid/CODEGEN_bootstrap_resource_blowup.md` for the cost that makes the
    corpus expensive, is where the next step belongs.
 
 Lowering the pre-pass cost is worth doing on its own account (it is
@@ -133,7 +133,7 @@ the test cheap enough to stop guessing about it.
 While the divergence is still open, in one line in `tools/suite.py`:
 
 ```python
-     disabled='bugs/hard/CODEGEN_ab_native_fails.md',   →    expect=SELFHOST_TOKENIZE_BLOWUP,
+     disabled='bugs/mid/CODEGEN_ab_native_fails.md',   →    expect=SELFHOST_TOKENIZE_BLOWUP,
 ```
 
 …plus a reason that names the failing case(s) once they are known. That is

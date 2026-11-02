@@ -49,7 +49,7 @@ WHAT IS NOT HERE, AND WHY
     a compiler-generated descriptor table; the formal front end's
     `dataclass_transform` is the only thing that turns a class declaration into
     fields, and it refuses a base class it does not know
-    (`bugs/hard/COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md`
+    (`bugs/mid/COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md`
     is the same refusal seen from the other side).  What IS here is the SIZE and
     ALIGNMENT arithmetic such a struct needs, as functions over its field list,
     because that half is pure and the half that is not is the subclass.

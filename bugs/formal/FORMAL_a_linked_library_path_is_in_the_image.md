@@ -192,4 +192,3 @@ Checked here and not a hole. The `fmt` argument of `compile_formal` is not in
 the key either, and needs no clause: `fmt` is `default_format(arch)`, a pure
 function of the platform, and `toolchain_fingerprint` folds
 `platform.system()/platform.machine()`.
-

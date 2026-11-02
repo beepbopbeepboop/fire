@@ -407,7 +407,7 @@ def publish_a3_generators(gen, meta) -> None:
     (kwonly params → "kwonly params (v0)"), so `read_table` compiles
     through the cpp path and could not resolve the foreign handle,
     refusing the whole module with `a call to unresolved callee
-    'next(...)'`. See bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md.
+    'next(...)'`. See bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md.
 
     Must be called at the A3 registration site, not from gen_module: by the
     time gen_module runs, `mojo/middle/coro.py`'s `lower()` has already
@@ -2250,20 +2250,6 @@ def _safe_coerce_emit(gen, src: str, dst: str, val: str, lhs: str) -> None:
         src = 'int64_t'
     if not dst:
         dst = 'int64_t'
-
-    # A BOXED word stored into a pointer-typed slot. `mojo_list_get_boxed` hands
-    # back a box (a heap cell, kind 'l'/'p'/...) for every slot kind but a plain
-    # int, and the tuple-unpack reader tags the word as such (`_boxed_vals`).
-    # Cast straight to `MojoList *` it is the BOX, not the list the slot holds:
-    # `out, nested, maps = hoist(out)` then read `out`'s length out of the box
-    # header and crashed the self-hosted compiler (and, in a plain program,
-    # dropped elements silently). `mojo_box_word` returns the slot's own word
-    # for every box that has one and the input unchanged for a non-box.
-    if (src == 'int64_t' and dst.endswith(' *') and not dst.startswith('void')
-            and val in getattr(gen, '_boxed_vals', ())):
-        _uw = gen._new_temp('int64_t')
-        gen._emit(f"  {_uw} = mojo_box_word ({val});")
-        val = _uw
 
     # A dot-accessed struct member (e.g. a non-pointer module-globals
     # instance's own field, `_typing_globals.some_field`) needs the exact

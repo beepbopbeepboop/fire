@@ -2879,7 +2879,7 @@ def _gmi_emit_closure_recursive(self, func_parts: list, _emitted_closures: set,
     if ci.lifted_name in _emitted_closures:
         return
     _emitted_closures.add(ci.lifted_name)
-    for sub_ci in sorted(self._all_closures.get(ci.lifted_name, {}).values(), key=lambda _x: (_as_str(getattr(_x, 'lifted_name', '')), _as_str(getattr(getattr(_x, 'inner_def', None), 'name', '')))):
+    for sub_ci in self._all_closures.get(ci.lifted_name, {}).values():
         _gmi_emit_closure_recursive(self, func_parts, _emitted_closures,
                                     _emitted_env_allocs, sub_ci, ci.lifted_name)
     if ci.env_struct and ci.env_struct not in _emitted_env_allocs:
@@ -3663,7 +3663,7 @@ def _gmi_decorator_pass(self, stmts: list, outer_defs: dict, at_module: bool) ->
                             f"decorator {_gmi_decorator_head(_rb_dec)!r} on {_rb_d.name!r} is inside a "
                             f"module-level block, which the compiled path cannot rebind yet; it would "
                             f"silently call the undecorated function (see "
-                            f"bugs/hard/COMPILE_FAIL_decorator_application_dropped.md)")
+                            f"bugs/mid/COMPILE_FAIL_decorator_application_dropped.md)")
     return _gmi_rebind_block(self, stmts, _rb_scope, at_module)
 
 
@@ -3822,7 +3822,7 @@ def _gmi_refuse_scalar_decorator_rebind(self, stmts: list, scope: dict) -> None:
     statement list plus every enclosing scope's defs) to its FunctionDef.
 
     A same-module decorator on a `def` is applied by rebinding the name
-    (`_gmi_decorator_pass`, the bugs/hard/COMPILE_FAIL_decorator_application_dropped.md
+    (`_gmi_decorator_pass`, the bugs/mid/COMPILE_FAIL_decorator_application_dropped.md
     fix). That rebinding is only meaningful for a CALLABLE decorator result:
     a scalar-returning decorator rebinds `step` to a non-callable, which
     CPython raises on as `TypeError: 'int' object is not callable`. So that
@@ -3911,7 +3911,7 @@ def _gmi_refuse_scalar_decorator_rebind(self, stmts: list, scope: dict) -> None:
                     f"(not callable), so {_rd_fn.name!r} is rebound to a scalar; "
                     f"the compiled path does not apply decorators to a def yet and "
                     f"would silently call the undecorated function (see "
-                    f"bugs/hard/COMPILE_FAIL_decorator_application_dropped.md)")
+                    f"bugs/mid/COMPILE_FAIL_decorator_application_dropped.md)")
 
 
 def _declare_posthoc_class_attrs(stmts: list) -> None:
@@ -4440,7 +4440,7 @@ def gen_module_impl(self, stmts: list):
             _gf, gimple_gen_coro._static_env(_gf))[0] == 'd'
         or any(isinstance(_dv, FloatLiteral)
                for _dv in (getattr(_gf, 'param_defaults', None) or {}).values())
-        for _gf in sorted(_generator_fns.values(), key=lambda _x: _as_str(getattr(_x, 'name', ''))))
+        for _gf in _generator_fns.values())
     self._all_async_fn_names: set[str] = {n.name for n in _async_fns.values()}
 
     for _s in stmts:
@@ -12556,7 +12556,7 @@ def gen_module_impl(self, stmts: list):
         if not _generator_fns:
             break
         _registered_this_pass = 0
-        for _gm_id, s in sorted(list(_generator_fns.items()), key=lambda _x: (_as_str(getattr(_x[1], 'name', '')), _x[0])):
+        for _gm_id, s in list(_generator_fns.items()):
             if _gm_id in _async_fns:
                 continue
             if _gm_id in _struct_method_ids:
@@ -12612,7 +12612,7 @@ def gen_module_impl(self, stmts: list):
         _generator_fns.pop(id(s), None)
 
     if _async_fns:
-        for _gm_id, s in sorted(list(_async_fns.items()), key=lambda _x: (_as_str(getattr(_x[1], 'name', '')), _x[0])):
+        for _gm_id, s in list(_async_fns.items()):
             if _gm_id not in _generator_fns:
                 continue
             if not _async_gen_quick_eligible(s, frozenset(self._async_api.keys())):
@@ -12688,7 +12688,7 @@ def gen_module_impl(self, stmts: list):
                 if isinstance(_nf, FunctionDef):
                     _nested_in_fn_ids.add(id(_nf))
     if _async_fns:
-        for _gm_id, s in sorted(list(_async_fns.items()), key=lambda _x: (_as_str(getattr(_x[1], 'name', '')), _x[0])):
+        for _gm_id, s in list(_async_fns.items()):
             if _gm_id in _generator_fns:
                 continue  # async generator — separate path
             if _gm_id in _nested_in_fn_ids:
@@ -12889,15 +12889,15 @@ def gen_module_impl(self, stmts: list):
                 _async_fns.pop(id(_inner), None)
 
     _gen_only_names: list = []
-    for _gm_id, _gm_fn in sorted(_generator_fns.items(), key=lambda _x: (_as_str(getattr(_x[1], 'name', '')), _x[0])):
+    for _gm_id, _gm_fn in _generator_fns.items():
         if _gm_id not in _async_fns:
             _gen_only_names.append(_gm_fn.name)
     _async_only_names: list = []
-    for _gm_id, _gm_fn in sorted(_async_fns.items(), key=lambda _x: (_as_str(getattr(_x[1], 'name', '')), _x[0])):
+    for _gm_id, _gm_fn in _async_fns.items():
         if _gm_id not in _generator_fns:
             _async_only_names.append(_gm_fn.name)
     _async_gen_names: list = []
-    for _gm_id, _gm_fn in sorted(_generator_fns.items(), key=lambda _x: (_as_str(getattr(_x[1], 'name', '')), _x[0])):
+    for _gm_id, _gm_fn in _generator_fns.items():
         if _gm_id in _async_fns:
             _async_gen_names.append(_gm_fn.name)
     _gen_only = sorted(_gen_only_names)
@@ -13343,9 +13343,9 @@ def gen_module_impl(self, stmts: list):
         # site gives: the SECOND unpack target boxes on the self-hosted path
         # and its attributes then read off a mis-typed handle.
         _mkrf_bare: dict = {}
-        for _outer_name in sorted(self._all_closures):
+        for _outer_name in self._all_closures:
             _inner_map = self._all_closures[_outer_name]
-            for _bare in sorted(_inner_map):
+            for _bare in _inner_map:
                 _mkrf_bare[_bare] = _inner_map[_bare].lifted_name
         for s in all_functions:
             if not _is_foreign_main(s) and isinstance(s, FunctionDef):
@@ -13361,9 +13361,9 @@ def gen_module_impl(self, stmts: list):
         # `lifted`, and `emit_stmts`' `gen.current_func_name`) -- a different
         # spelling from the free-function `s.name` above, which is why this is
         # its own arm and not the same call.
-        for _outer_name in sorted(self._all_closures):
+        for _outer_name in self._all_closures:
             _inner_map = self._all_closures[_outer_name]
-            for _ci in sorted(_inner_map.values(), key=lambda _x: (_as_str(getattr(_x, 'lifted_name', '')), _as_str(getattr(getattr(_x, 'inner_def', None), 'name', '')))):
+            for _ci in _inner_map.values():
                 _mkrf(_ci.lifted_name, _ci.inner_def.body,
                       _ci.inner_def.params, _mkrf_bare)
         _mkrf_callee_kinds.clear()
@@ -14509,7 +14509,7 @@ def gen_module_impl(self, stmts: list):
             _func_outer_scope = self._push_import_scope()
             self._collect_body_import_bindings(stmt.body, _func_outer_scope)
             try:
-                for ci in sorted(self._all_closures.get(stmt.name, {}).values(), key=lambda _x: (_as_str(getattr(_x, 'lifted_name', '')), _as_str(getattr(getattr(_x, 'inner_def', None), 'name', '')))):
+                for ci in self._all_closures.get(stmt.name, {}).values():
                     _gmi_emit_closure_recursive(self, func_parts, _emitted_closures, _emitted_env_allocs, ci, stmt.name)
                 self._lambda_parts = []
                 func_parts.append(self.gen_func(stmt))
@@ -14544,7 +14544,7 @@ def gen_module_impl(self, stmts: list):
                 method_outer_name = f"{stmt.name}_{m.name}{overload_id}"
                 _method_outer_scope = self._push_import_scope()
                 self._collect_body_import_bindings(m.body, _method_outer_scope)
-                for ci in sorted(self._all_closures.get(method_outer_name, {}).values(), key=lambda _x: (_as_str(getattr(_x, 'lifted_name', '')), _as_str(getattr(getattr(_x, 'inner_def', None), 'name', '')))):
+                for ci in self._all_closures.get(method_outer_name, {}).values():
                     _gmi_emit_closure_recursive(self, func_parts, _emitted_closures, _emitted_env_allocs, ci, method_outer_name)
                 self._lambda_parts = []
                 # An INHERITED method body physically belongs to the base
@@ -15368,9 +15368,9 @@ def gen_module_impl(self, stmts: list):
         _type_name_set = {}
         for _tnk in self.struct_field_types:
             _type_name_set[_as_str(_tnk)] = True
-        for _dspk in sorted(_STMT_DISPATCH.keys()):
+        for _dspk in _STMT_DISPATCH.keys():
             _type_name_set['' + _dspk] = True
-        for _dspk in sorted(_EXPR_DISPATCH.keys()):
+        for _dspk in _EXPR_DISPATCH.keys():
             _type_name_set['' + _dspk] = True
         for _tn in sorted(_type_name_set):
             _tn_s = '' + _tn
@@ -15378,7 +15378,7 @@ def gen_module_impl(self, stmts: list):
         parts.append("  return \"<type>\";")
         parts.append("}")
         parts.append('')
-    for mod_name in sorted(list(all_modules_to_declare)):
+    for mod_name in sorted(all_modules_to_declare):
         mod_s = '' + mod_name
         if mod_s == our_mod:
             continue
@@ -16720,8 +16720,8 @@ def gen_module_impl(self, stmts: list):
                 parts.append('')
                 self._emitted_structs.add(sd.name)
 
-        for inner_map in (self._all_closures[_k] for _k in sorted(self._all_closures)):
-            for ci in sorted(inner_map.values(), key=lambda _x: (_as_str(getattr(_x, 'env_struct', '')), _as_str(getattr(_x, 'lifted_name', '')))):
+        for inner_map in self._all_closures.values():
+            for ci in inner_map.values():
                 if ci.env_struct and ci.env_struct not in self._emitted_structs:
                     parts.append(f"typedef struct {ci.env_struct} {{")
                     for vname, vtype in ci.captures:
@@ -17502,8 +17502,8 @@ def gen_module_impl(self, stmts: list):
     parts.append('')
 
     if not self.emit_struct_defs:
-        for inner_map in (self._all_closures[_k] for _k in sorted(self._all_closures)):
-            for ci in sorted(inner_map.values(), key=lambda _x: (_as_str(getattr(_x, 'env_struct', '')), _as_str(getattr(_x, 'lifted_name', '')))):
+        for inner_map in self._all_closures.values():
+            for ci in inner_map.values():
                 if ci.env_struct and ci.env_struct not in self._emitted_structs:
                     parts.append(f"typedef struct {ci.env_struct} {{")
                     for vname, vtype in ci.captures:
@@ -17531,9 +17531,9 @@ def gen_module_impl(self, stmts: list):
     # .ci (real: `T\xf3\xcc0` in place of a struct name). The sibling
     # typedef-emission loop just above this one avoids the bug by using
     # a single-target `for ci in inner_map.values():` — mirror that here.
-    for outer_name in sorted(self._all_closures):
+    for outer_name in self._all_closures:
         inner_map = self._all_closures[outer_name]
-        for inner_name in sorted(inner_map):
+        for inner_name in inner_map:
             ci = inner_map[inner_name]
             if ci.env_struct:
                 alloc_fn = f"_alloc_{ci.env_struct}"

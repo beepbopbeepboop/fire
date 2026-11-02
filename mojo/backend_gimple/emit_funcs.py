@@ -126,9 +126,8 @@ def _gen_stmt_FunctionDef(gen, node: FunctionDef):
     # through _nested_generator_api, keyed (current_func_name, name).
     if node.is_generator and (gen.current_func_name, node.name) in gen._nested_generator_api:
         return
-    _outer_closures_map = getattr(gen, '_all_closures', {}).get(
+    outer_closures = getattr(gen, '_all_closures', {}).get(
         gen.current_func_name, {})
-    outer_closures = dict(sorted(_outer_closures_map.items(), key=lambda _x: _as_str(_x[0])))
     ci = outer_closures.get(node.name)
     if ci is None:
         gen._emit(f"  /* TODO: closure '{node.name}' (no pre-pass info) */")

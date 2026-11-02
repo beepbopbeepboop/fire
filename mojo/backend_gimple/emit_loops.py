@@ -4470,9 +4470,9 @@ def _gen_for_struct_iter(gen, var: str, struct_type: str,
         # Loop back straight to `__next__`: the frame at bb_cond already
         # ran once and stays live (a second push here would leak a level
         # off _mojo_exc_top every iteration).
-        ginf._emit_raw(gen, f"  goto {bb_body};")
+        gen._emit(f"  goto {bb_body};")
         gen._emit_label(bb_exc)
-        ginf._emit_raw(gen, "  mojo_exc_pop ();")
+        gen._emit("  mojo_exc_pop ();")
         # StopIteration is the loop exit; any other exception raised inside
         # the body or by `__next__` is NOT consumed by this loop — the pop
         # above already restored _mojo_exc_top to the enclosing frame, so

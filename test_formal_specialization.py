@@ -1270,7 +1270,7 @@ def test_the_reduce_shape_runs_on_both_architectures(tmpdir):
 
     It is here rather than in a host-module suite because no `functools` module
     exists and may not until decorator application lands
-    (`bugs/hard/COMPILE_FAIL_decorator_application_dropped.md`), so without a row
+    (`bugs/mid/COMPILE_FAIL_decorator_application_dropped.md`), so without a row
     nothing would notice the capability this doc's census is waiting on
     regressing.
     """

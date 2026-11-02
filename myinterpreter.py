@@ -4022,7 +4022,7 @@ class Interpreter:
         undecorated body. Because the interpreter is the documented oracle
         for "the compiled path is wrong", that made the whole class of
         decorator bugs invisible — the two engines agreed on the wrong
-        answer. See bugs/hard/COMPILE_FAIL_decorator_application_dropped.md.
+        answer. See bugs/mid/COMPILE_FAIL_decorator_application_dropped.md.
 
         Bottom-up because that is Python's order: `@a` above `@b` above
         `def f` means `f = a(b(f))`. A decorator whose application raises is

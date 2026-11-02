@@ -95,8 +95,9 @@ write):
 `f7bd05ea`'s half, but anything still red under that name is this census's row
 to re-measure; the
 declared families keep their `EXPECTED_FAILURES` markers and their owners
-(`sum_range` — its signed range-loop contract is generated since `635f34955`;
-`udivmod`/`floordiv`; `countdown`; `wge`; `fib`; `count`).
+(`sum_range` — which the generator now DECLINES rather than emitting the false
+contract, `bugs/formal/FORMAL_a_range_loop_contract_states_the_unsigned_order_against_a_
+signed_flag.md`; `udivmod`/`floordiv`; `countdown`; `wge`; `fib`; `count`).
 `both`/`either` are `too-large`, which is not a verdict on the proof. Nothing
 here is newly marked: an entry needs a measured reason and an owner, and every
 one already has an owner.

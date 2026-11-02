@@ -4228,7 +4228,7 @@ def _cpp_expr(gen, e) -> str:
                 # local at all — whether same-module or foreign — so any
                 # next() on one fell through to the unresolved-callee refusal
                 # below and refused the whole module (the last blocker on
-                # bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md).
+                # bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md).
                 _next_arg = e.args[0]
                 _next_gen_api = None
                 _next_gen_handle = None
