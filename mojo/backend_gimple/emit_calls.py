@@ -3655,22 +3655,19 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if (fname_raw == 'str' and len(node.args) in (2, 3)
             and not gen._locally_binds_name('str')):
         # str(data, encoding[, errors]): the DECODE of a bytes object. The
-        # encoding is the second argument, errors the third (default
-        # 'strict', as in CPython); both are threaded to the runtime decode.
+        # encoding is the second argument; `errors` is not modelled (a decode
+        # is always strict here), and is lowered only for its side effects.
         et, ev = gen.lower_expr(node.args[0])
         enc_t, enc_v = gen.lower_expr(node.args[1])
+        for _extra in node.args[2:]:
+            gen.lower_expr(_extra)
         enc = enc_v if enc_t == 'char *' else gen._coerce_to_type(enc_t, 'char *', enc_v)
-        if len(node.args) == 3:
-            err_t, err_v = gen.lower_expr(node.args[2])
-            err = err_v if err_t == 'char *' else gen._coerce_to_type(err_t, 'char *', err_v)
-        else:
-            err = gen._intern_string('strict')
         if et == 'MojoBytes *':
             return 'char *', gen._call_expr('char *', 'mojo_bytes_decode',
-                                            [('MojoBytes *', ev), ('char *', enc), ('char *', err)])
+                                            [('MojoBytes *', ev), ('char *', enc)])
         # a value whose kind only the runtime knows (a bytes or a str word)
         return 'char *', gen._call_expr('char *', 'mojo_str_from_word',
-                                        [('int64_t', gen._to_int64(et, ev)), ('char *', enc), ('char *', err)])
+                                        [('int64_t', gen._to_int64(et, ev)), ('char *', enc)])
 
     # pow(base, exp, mod): real Python's 3-arg modular-exponentiation
     # form -- integer semantics, entirely distinct from the ordinary
@@ -3778,34 +3775,6 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         vp = gen._new_val('void *', ov if ot == 'void *' else f'(void *){ov}')
         _isdc = gen._call_expr('int', '_mojo_dispatch_is_dataclass', [('void *', vp)])
         return '_Bool', gen._new_val('_Bool', f'{_isdc} != 0')
-    # Builtin containers (MojoList*, MojoDict*, MojoSet*, MojoStr*,
-    # MojoBytes*, MojoMemoryView*) have no fields registered in the static
-    # dispatch table, so the generic arm below answers False for every
-    # method name. Check known method names directly for these types.
-    if (fname_raw == 'hasattr' and len(node.args) == 2
-            and not gen._locally_binds_name('hasattr')):
-        _quick_type_result = gen._quick_type(node.args[0]) if hasattr(gen, '_quick_type') else None
-        _is_builtin_container = False
-        if _quick_type_result and _quick_type_result.endswith(' *'):
-            _base = _quick_type_result[:-2]
-            _is_builtin_container = _base in (
-                'MojoList', 'MojoDict', 'MojoSet', 'MojoStr',
-                'MojoBytes', 'MojoMemoryView',
-            )
-        if (_is_builtin_container
-                and isinstance(node.args[1], gimple_ctypes.StringLiteral)):
-            _attr_name = _as_str(node.args[1].value)
-            _container_methods = {
-                'append', 'extend', 'sort', 'reverse', 'clear',
-                'keys', 'values', 'items', 'get', 'update', 'pop',
-                'add', 'discard', 'remove',
-                'startswith', 'endswith', 'strip', 'lstrip', 'rstrip',
-                'split', 'join', 'replace', 'find', 'lower', 'upper',
-                'format', 'encode', 'count', 'index', 'rfind', 'rindex',
-                'insert', 'copy', 'popleft', 'appendleft',
-            }
-            if _attr_name in _container_methods:
-                return '_Bool', gen._new_val('_Bool', '1')
     if (fname_raw == 'hasattr' and len(node.args) == 2
             and not gen._locally_binds_name('hasattr')):
         ot, ov = gen.lower_expr(node.args[0])
@@ -4446,6 +4415,13 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 and not getattr(_lit, 'is_bytes', False)):
             _cp = len(gimple_ctypes.decode_c_escapes(_lit.value))
             return 'int64_t', gen._new_val('int64_t', str(_cp))
+        # A word of unknown kind (`'w'` — bytes value, or `or` of bytes that
+        # yields a word): dispatch at runtime through `mojo_len_word`.
+        if _is_dyn_word_operand(gen, node.args[0], av) or (
+                isinstance(node.args[0], gimple_ctypes.IdentExpr)
+                and _as_str(node.args[0].name) in getattr(gen, '_dyn_word_locals', ())):
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_len_word',
+                                            [('int64_t', gen._to_int64('char *', av))])
         _len_t = gen._call_expr('int64_t', 'mojo_str_codepoint_len', [('char *', av)])
         if gen._is_fresh_container_operand(node.args[0], av):
             gen._free_fresh_container(av, at)

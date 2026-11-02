@@ -2598,13 +2598,6 @@ def _repr_value(gen, rat: str, rav: str, enode=None) -> str:
                           and gimple_exprtypes.is_python_bool_expr(gen, enode)):
         return gen._call_expr('char *', 'mojo_repr_bool',
                               [('int', gen._new_val('int', f'(int){rav}'))])
-    # A WORD whose kind only the runtime knows (a regex group, a match, a
-    # DirEntry name): its repr is spelled by the kind the runtime reads off it.
-    if rat in ('int', 'int64_t') and (
-            rav in gen._dyn_word_vals
-            or (isinstance(enode, gimple_ctypes.IdentExpr)
-                and _as_str(enode.name) in gen._dyn_word_locals)):
-        return gen._call_expr('char *', 'mojo_repr_word', [('int64_t', rav)])
     # A BOXED CONTAINER — a module-global list/dict/set read back as an
     # `int64_t`, or a call result whose static type is the box but whose real
     # value, per `_get_actual_type`, is a container. `_stringify_value` (the
