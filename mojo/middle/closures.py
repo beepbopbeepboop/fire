@@ -813,7 +813,7 @@ def discover_closures(ctx: 'GimpleGen', stmts: list) -> dict:
         # (raw heap-garbage bytes in place of a closure-env struct name
         # in the generated .ci, a hard GCC parse failure). Mirrors the
         # closure-typedef-emission loops' identical fix.
-        for _outer_name in list(ctx._all_closures):
+        for _outer_name in sorted(list(ctx._all_closures)):
             # `_as_dict`: `ctx` is an untyped parameter, so `ctx._all_closures` has
             # no recorded value type on the self-hosted path and its subscript
             # was lowered as a LIST read (`mojo_list_get_int` with a string
