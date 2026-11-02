@@ -5657,19 +5657,36 @@ static void __attribute__((constructor)) _mojo_register_char_table(void) {
  * either — the invariant `mojo_char_to_str` already carries. */
 char *mojo_char_at_str(char *s, int64_t i) {
     if (!s) return mojo_char_to_str(0);
+    static char *_mojo_char_cache_ptr = NULL;
+    static int64_t _mojo_char_cache_len = -1;
     if (i < 0) {
-        i += (int64_t)strlen(s);
+        int64_t len = (_mojo_char_cache_ptr == s && _mojo_char_cache_len >= 0) ? _mojo_char_cache_len : (int64_t)strlen(s);
+        if (_mojo_char_cache_ptr != s || _mojo_char_cache_len < 0) {
+            _mojo_char_cache_ptr = s;
+            _mojo_char_cache_len = len;
+        }
+        i += len;
         if (i < 0) return mojo_char_to_str(0);
-    } else if (memchr(s, 0, (size_t)i + 1) != NULL) {
-        /* A NUL at or BEFORE i means the string ended at or before it, so
-           `s[i]` is past the end: "", which is what the slice returned. A NUL
-           exactly AT i is that same case (`mojo_cstr_slice(s, i, i+1)` stops at
-           the first NUL within `s[0..i]`, inclusive of `i`). `memchr` for the
-           non-negative case rather than a second `strlen`, for the reason
-           `mojo_cstr_slice` uses it: a scan over a long string must not re-scan
-           the whole thing once per character. */
+        if (i >= len) return mojo_char_to_str(0);
+        return mojo_char_to_str(s[i]);
+    }
+    if (_mojo_char_cache_ptr == s && _mojo_char_cache_len >= 0) {
+        if (i >= _mojo_char_cache_len) return mojo_char_to_str(0);
+        return mojo_char_to_str(s[i]);
+    }
+    /* Check if NUL is within or at i - if so, we need to know length */
+    const char *nul = (const char *)memchr(s, 0, (size_t)i + 1);
+    if (nul != NULL) {
+        int64_t len = (int64_t)(nul - s);
+        _mojo_char_cache_ptr = s;
+        _mojo_char_cache_len = len;
         return mojo_char_to_str(0);
     }
+    /* No NUL found in range [0..i], need full string length */
+    int64_t len = (int64_t)strlen(s);
+    _mojo_char_cache_ptr = s;
+    _mojo_char_cache_len = len;
+    if (i >= len) return mojo_char_to_str(0);
     return mojo_char_to_str(s[i]);
 }
 
