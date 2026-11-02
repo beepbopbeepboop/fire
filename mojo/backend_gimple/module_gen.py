@@ -4088,6 +4088,7 @@ def _gmi_specialize_literal_kind_clones(stmts: list) -> list:
     for _cn, (_pi, _kind_per_call, _kinds) in _plans.items():
         for _call, _kd in zip(_calls_of[_cn], _kind_per_call):
             _call.func.name = _clone_names[_cn][_kd]
+            _walk_ast_invalidate(_call)
 
     _out = []
     for _s in stmts:
@@ -4096,6 +4097,7 @@ def _gmi_specialize_literal_kind_clones(stmts: list) -> list:
             for _kd in sorted(_clone_names[_cn]):
                 _clone = copy.deepcopy(_s)
                 _clone.name = _clone_names[_cn][_kd]
+                _walk_ast_invalidate(_clone)
                 _out.append(_clone)
             continue
         _out.append(_s)
