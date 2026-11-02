@@ -43,7 +43,7 @@ here is a recorded string. What is compared is:
     `mkdtemp(3)` writes (`NAME_RANDOM_LEN`, `NAME_ALPHABET`) rather than against
     this interpreter's own alphabet, and the `mkdtemp3` group exercises the
     binding directly — it had no caller at all until this change, which is the
-    state `bugs/UNTESTED.md` is about.
+    state `bug:UNTESTED` is about.
 
 WHAT THIS GROUP DOES NOT CLAIM, and why it is in the docstring rather than
 only here: `TemporaryDirectory` is 64 of the 111 files the ranking counts and
@@ -594,7 +594,7 @@ def group_mkdtemp3(tmpdir, archs, verbose):
 
     This is the group the fix needed and did not have. `fs_mkdtemp` landed with
     the `os` host module and had NO CALLER: an unused binding is a capability
-    with no evidence behind it, which is the state `bugs/UNTESTED.md` is about,
+    with no evidence behind it, which is the state `bug:UNTESTED` is about,
     and it stayed that way because switching `tempfile.mojo` onto it was a
     rewrite of a measured module and its four assertions rather than a commit
     (fixed 2026-10-03 in 8c311e87, which is that rewrite).

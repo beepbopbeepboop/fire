@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regressions for bug:UNTESTED (bugs/UNTESTED.md)."""
+"""Regressions for bug:UNTESTED (bug:UNTESTED)."""
 import sys, importlib.util
 
 
@@ -11,6 +11,30 @@ def test_link_executable_default_still_gcc():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     mod.test_link_executable_default_still_gcc()
+
+
+# --- §3a: all eight files the rename hit must spell fire. (not stale mojo.)
+def test_no_file_calls_stale_mojo_link_executable():
+    # bugs/UNTESTED.md §3a: nine files still spelled `mojo.link_executable`
+    # after the mojo→fire rename, eight of them hidden behind an `expect=`
+    # marker that reported a false failure count. The fix is one word per
+    # site; this pins that none of them regresses.
+    import glob, re
+    # Match an actual call/attribute access, not a comment or a docstring
+    # mentioning the old name. A use is `mojo.<attr>` followed by `(` or
+    # `.`; a citation in prose is followed by a space or punctuation.
+    stale = re.compile(
+        r"mojo\.(?:link_executable|_GCC_BIN|_GXX_BIN)(?:\(|\.|['\"])"
+        r"|mock\.patch\('mojo\.subprocess\.run'\)"
+    )
+    bad = []
+    for f in sorted(glob.glob("test_*.py")):
+        src = open(f, encoding="utf-8").read()
+        for lineno, line in enumerate(src.splitlines(), 1):
+            code = line.split("#", 1)[0]  # strip trailing comments
+            if stale.search(code):
+                bad.append(f"{f}:{lineno}")
+    assert not bad, f"files still calling the renamed module by its old name: {bad}"
 
 
 # --- §3.3: test_coro_bugs.py, a diagnostic whose exit code was its only verdict
@@ -68,6 +92,7 @@ def test_no_test_file_prints_a_failure_and_exits_zero():
 
 
 TESTS = [test_link_executable_default_still_gcc,
+         test_no_file_calls_stale_mojo_link_executable,
          test_coro_bugs_source_line_accepts_backticked_path,
          test_coro_bugs_exit_code_is_the_verdict,
          test_silent_verdict_detector_flags_a_print_only_failure,

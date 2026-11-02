@@ -32,7 +32,7 @@ What is pinned, and why each one matters:
   reporting    one tally at the end, and the log file gets the detail the
                screen does not.
 
-Three more, added after the audit in `bugs/UNTESTED.md`, and they are about the
+Three more, added after the audit in `bug:UNTESTED`, and they are about the
 cache in front of the runner rather than the runner:
 
   cache keys   `checked_run.check_key` covers what `--extra` names, including a
@@ -3008,7 +3008,7 @@ def test_selfhost_key_hashes_nothing_dead():
         here: an unstated exception is the thing this check exists to end.
 
     Each half is mutation-tested below, because a check that cannot be shown to
-    fail is the trap `bugs/UNTESTED.md` §4 documents.
+    fail is the trap `bug:UNTESTED` §4 documents.
     """
     import cas
     missing, unreached, reached = cas.selfhost_extra_is_justified()
@@ -3675,7 +3675,7 @@ def test_log_has_passes_screen_does_not():
 # and 12 of the specs in `check` and `gate` are `cache=True`. A wrong answer
 # there is not one red test: a replayed PASS is a green test that never ran, and
 # a replayed FAILURE is a red that no fix can clear. Nothing imported this file
-# before `bugs/UNTESTED.md`, so the properties below were documented and never
+# before `bug:UNTESTED`, so the properties below were documented and never
 # executed.
 
 def _key_tree(tag):
@@ -3703,7 +3703,7 @@ def test_checked_run_key_covers_what_it_names():
     editing a file inside it, adding one, or removing one all left the key
     still. That is not a theoretical gap — `examples-parse` is `cache=True` and
     guards the 45 files of `formal/examples/`, which its `extra` cannot name
-    without a list that rots on the 46th. Measured in `bugs/UNTESTED.md`.
+    without a list that rots on the 46th. Measured in `bug:UNTESTED`.
     """
     import checked_run
     d = _key_tree(os.getpid())
@@ -4029,7 +4029,7 @@ def test_checked_run_replays_a_pass_and_reruns_a_failure():
 # below are what keep it honest in the other direction, so an entry cannot
 # outlive the file it excuses or the registration that supersedes it.
 #
-# This IS the inventory from `bugs/UNTESTED.md`, in a form that runs. The shape
+# This IS the inventory from `bug:UNTESTED`, in a form that runs. The shape
 # when the check was written: 50 of 81 test files named by nothing, 5 of those
 # RED, so 25 known-failing assertions no gate, tally or coverage number
 # reported. What is left after the registrations that have since landed is 38
@@ -4559,7 +4559,7 @@ UNREGISTERED = {
     # `fire_compiler.py` and `ast_nodes` was deleted outright. They died at
     # their first `open()` and reported success while doing it — the `coro`
     # story from CLAUDE.md, one file over. The doc that catalogued them
-    # (`bugs/UNTESTED.md` Tier 3) named both options and said deletion was the
+    # (`bug:UNTESTED` Tier 3) named both options and said deletion was the
     # defensible one: a test of a module that no longer exists is not a slow
     # test, it is a wrong claim.
     #
@@ -4976,7 +4976,7 @@ def test_cached_spec_names_its_own_test():
     old verdict is served. Measured on this tree: all 12 cached specs name their
     own script, so this is the regression guard for the property, not a fix for
     a live hole. The live hole is what `extra` does NOT name, and
-    `bugs/UNTESTED.md` records that one.
+    `bug:UNTESTED` records that one.
     """
     cached = [n for n, s in suite.REGISTRY.items()
               if getattr(s, 'cache', False) and not isinstance(s, suite.Fanout)]
@@ -5007,7 +5007,7 @@ def test_every_test_file_is_registered():
     Measured before it existed: 50 of 81, of which 5 are RED. They were
     declared with a reason each rather than left failing, because a check that
     failed 50 times on its first day is a check nobody runs — and the
-    declarations are the inventory from `bugs/UNTESTED.md`, in a form that
+    declarations are the inventory from `bug:UNTESTED`, in a form that
     executes. The declarations SHRINK as tests get registered (a registration
     supersedes an excuse, and the anti-rot assertion below says so), so the
     count here is the residue, not the original measurement.
