@@ -2576,6 +2576,14 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     if node.member == '_mlir_value' and not (ot.endswith(' *') and gimple_exprtypes._struct_name_of(ot) in gen.struct_field_types):
         return ot, ov
 
+    # `ex.value` of a name bound by `except ... as ex`: the value a StopIteration carries
+    # (`raise StopIteration(x)`, a generator's `return x`), None when it carries none.
+    if (node.member == 'value' and isinstance(node.obj, gimple_ctypes.IdentExpr)
+            and node.obj.name in gen._except_as_names):
+        _ev = gen._call_expr('int64_t', 'mojo_exc_value_get', [])
+        gen._dyn_word_vals.add(_ev)
+        return 'int64_t', _ev
+
     # .value on char * (StringLiteral.value, kgen.string.value) → identity, the string itself
     if node.member == 'value' and ot == 'char *':
         t = gen._new_val('char *', f"{ov}")

@@ -8203,6 +8203,8 @@ def register(gen, meta: list) -> None:
     gen.func_return_types.setdefault('__mojo_gen_throw', 'int64_t')
     gen.func_param_types.setdefault('__mojo_gen_close', ['int64_t', 'int64_t'])
     gen.func_return_types.setdefault('__mojo_gen_close', 'int64_t')
+    gen.func_param_types.setdefault('__mojo_gen_stop_value', ['int64_t'])
+    gen.func_return_types.setdefault('__mojo_gen_stop_value', 'void')
     gen.func_param_types.setdefault('__mojo_gen_frame', ['int64_t'])
     gen.func_return_types.setdefault('__mojo_gen_frame', 'int64_t')
     gen.func_param_types.setdefault('__mojo_gen_destroy', ['int64_t'])

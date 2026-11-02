@@ -236,3 +236,10 @@ The one remaining refusal is `t3`: `async def t3(): ... return frame.f_generator
 `StopIteration` whose `value` is `c`). That needs the coroutine OBJECT protocol on a bare `async def` result (`send`, `StopIteration.value`,
 `cr_frame`) and a non-scalar return kind for coroutines, which is its own feature. After it, running test_frame.py end to end also needs
 `unittest` machinery (`TestCase`, `assertRaises*`) in the compiled closure and `f_locals` / `f_trace`.
+
+## Status (2026-11-01, stage 3 eighth slice): `StopIteration.value` (what `t3` needs from the coroutine protocol)
+
+`ex.value` after `c.send(None)` on a coroutine (and after a generator's `return x`, and `raise StopIteration(x)`) is now the value, not None
+(`bugs/CODEGEN_exception_object_attributes_args_and_stopiteration_value_are_none.md` has the mechanism and test). That is the exception half of
+test_frame's `t3`; the remaining half is a coroutine whose RESULT is its own frame/coroutine object (`StopIteration.value is c`): a non-scalar return kind
+for a bare `async def`, still refused by the C++ async path ("every return must carry a scalar").

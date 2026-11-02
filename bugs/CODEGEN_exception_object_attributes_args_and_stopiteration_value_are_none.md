@@ -1,4 +1,4 @@
-# CODEGEN: an exception object has no `args`; `StopIteration.value` is None (generator return value, coroutine result)
+# CODEGEN: an exception object has no `args` (`StopIteration.value` rows FIXED 2026-11-01)
 
 Found 2026-11-01 while working `bugs/hard/CODEGEN_frame_model_for_test_frame.md` (test_frame's `t3`: `c.send(None)` raises
 `StopIteration` whose `.value` is the coroutine's result). Three silent or loud divergences, all measured on master with
@@ -27,3 +27,14 @@ Plan:
 4. Tests (run-compare against CPython in `test_gimple_runner.py`): the four rows above, plus `str(e)`/`print(e)` unchanged for exceptions raised with
    several args (`raise ValueError("a", 2)` prints `('a', 2)`).
 Related: `bugs/hard/CODEGEN_frame_model_for_test_frame.md` (test_frame's `t3` needs row 3).
+
+
+## Status (2026-11-01): rows 1-3 FIXED, row 4 (`e.args`) open
+
+`StopIteration.value` now works: `mojo_exc_value_set/get` (runtime/fire_runtime.c; cleared by `mojo_exc_type_set`, so a later unrelated raise never
+inherits it), `__mojo_gen_stop_value(handle)` (fire_coro_gen.c; attaches a stack-switch generator's / coroutine's return value only when its body made a
+valued `return`, tracked by `MojoCoro.ret_set`) called at the three exhaustion sites in `emit_calls.py`, `raise StopIteration(x)` sets it, and `ex.value` on an
+`except ... as ex` name reads it (`None` when absent). Test `gimple_stopiteration_value` matches CPython (generator return int/str, bare return, fall-off,
+coroutine result via `c.send(None)`, `raise StopIteration(9)`, bare `raise StopIteration`). Gate: generator runner 439 passed with master's 5 failures,
+`compile_stdlib.py` 0 unexpected (not gated by `test_selfhost.py`, red on master since 18f122b7c). Not covered: a C++20-coroutine generator (`_mojogen_*`) still answers None.
+Open: row 4 and the `MojoExc` object of steps 1-3 above (`e.args`, `str(e)` of a multi-argument exception).

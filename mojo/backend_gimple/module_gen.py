@@ -14817,6 +14817,7 @@ def gen_module_impl(self, stmts):
             'extern int64_t __mojo_gen_throw (int64_t, int64_t, int64_t, int64_t);',
             'extern int64_t __mojo_gen_close (int64_t, int64_t);',
             'extern int64_t __mojo_gen_frame (int64_t);',
+            'extern void __mojo_gen_stop_value (int64_t);',
             'extern int64_t __mojo_tuple_box_2 (int64_t, int64_t);',
             'extern int64_t __mojo_tuple_box_3 (int64_t, int64_t, int64_t);',
             'extern int64_t __mojo_tuple_box_4 (int64_t, int64_t, int64_t, int64_t);',

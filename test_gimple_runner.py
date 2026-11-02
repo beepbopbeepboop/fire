@@ -3834,6 +3834,50 @@ def main():
     outer()
 """, "1\n2\n10\n", filename='shadow.py')
 
+    # `StopIteration.value`: the generator's / coroutine's `return` value, the
+    # argument of `raise StopIteration(x)`, None when there is none (it printed
+    # None in every case).
+    test_gimple_stdout("gimple_stopiteration_value", """\
+def g():
+    yield 1
+    return 5
+
+def h():
+    yield 1
+
+def k():
+    yield 1
+    return "done"
+
+async def co():
+    return 7
+
+def run(it):
+    for _ in range(2):
+        try:
+            next(it)
+        except StopIteration as ex:
+            print(ex.value)
+
+def main():
+    run(g())
+    run(h())
+    run(k())
+    c = co()
+    try:
+        c.send(None)
+    except StopIteration as ex:
+        print(ex.value)
+    try:
+        raise StopIteration(9)
+    except StopIteration as ex:
+        print(ex.value)
+    try:
+        raise StopIteration
+    except StopIteration as ex:
+        print(ex.value)
+""", "5\nNone\ndone\n7\n9\nNone\n")
+
     test_gimple_stdout("gimple_traceback_chain_names_and_lines", """\
 import sys
 

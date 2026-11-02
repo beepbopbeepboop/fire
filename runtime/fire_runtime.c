@@ -480,7 +480,14 @@ void *mojo_exc_obj_get(void) { return _mojo_exc_obj; }
 #define _MOJO_EXC_TAG_ZERODIVISIONERROR 1715583614
 
 int64_t _mojo_exc_type = 0;
-void mojo_exc_type_set(int64_t type_id) { _mojo_exc_type = type_id; }
+/* The value a `StopIteration` carries (`raise StopIteration(5)`, a generator's `return 5`, a
+ * coroutine's result): a word set AFTER mojo_exc_type_set (which clears it, so a later unrelated
+ * raise never inherits it). `ex.value` reads it; absent means None. */
+static int64_t _mojo_exc_value_word = 0;
+static int _mojo_exc_value_present = 0;
+void mojo_exc_type_set(int64_t type_id) { _mojo_exc_type = type_id; _mojo_exc_value_present = 0; }
+void mojo_exc_value_set(int64_t w) { _mojo_exc_value_word = w; _mojo_exc_value_present = 1; }
+int64_t mojo_exc_value_get(void) { return _mojo_exc_value_present ? _mojo_exc_value_word : mojo_box_none(); }
 int64_t mojo_exc_type_get(void) { return _mojo_exc_type; }
 
 /* Compiled-generator (C++20 coroutine) exception-boundary flag — see the
