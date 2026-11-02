@@ -177,3 +177,50 @@ they land. Steps 1-4 change behaviour together (the clone is emitted and
 selected), so they must land as one round with the positive test from above;
 landing step 1 alone would only record kinds and change nothing, which is not
 a valid round output.
+
+## Status (2026-11-01, planning round 2): step 5 is under-scoped — missing anchors
+
+Re-read at HEAD 887cb82cf before any edit (no code changed this round). Step 5
+of the plan above assumes the user-call arm in `emit_calls.py` (~8902,
+`fname = gen.BUILTIN_VALUE_MAP.get(fname_raw, gen._func_csym(fname_raw))`) is
+the only place a call picks a symbol. It is not. Facts the next round needs:
+
+- `_func_csym` is called by bare name at ~34 sites with NO argument in hand:
+  cpp_core.py:415, :1533, :2240, :4665; emit_calls.py:8865, :8897, :8902;
+  emit_exprs.py:1806; emit_funcs.py:648, :1991, :3165; emit_infra.py:1540;
+  emit_methods.py:3220; emit_resolve.py:1947; emit_stmts.py:4545, :4550;
+  module_gen.py:7912, :7935, :7958, :12642, :16747, :17157, :17324, :17782.
+  Forward declarations, the definition, the weak-stub/reflection exports and
+  the `func_return_types` / `_func_param_defaults` lookups all key on the
+  bare-name symbol. A per-kind clone has to be emitted by EVERY one of these
+  sites, or the prototype, definition and reflection table disagree.
+- `module_gen.py:17935`: after all codegen, `@@CSYM:<name>@@` placeholders in
+  `generated_cpp` are resolved with `self._func_csym(name)` by bare name. A
+  generator body that calls a cloned function gets the wrong (un-cloned)
+  symbol here. The placeholder must carry the kind, or the clone must be
+  selected before the placeholder is emitted.
+- Consequence: step 4 (one `gen_func` per kind) is also larger than written.
+  `gen_func` is called once per FunctionDef from `module_gen.py:14233`, and
+  the body pass keeps per-function state on `gen` (var_types, closures,
+  `_inlined_lambdas`, label/temp counters). Running it twice on one `gen`
+  needs that state reset per clone, or the clone pass must run in a fresh
+  per-clone generator. Pick one of those before writing step 4.
+
+Recommended shape for the next round (replaces the step-5 plan): specialize at
+the AST, not in codegen. A pre-pass after `_resolve_param_containers` and
+before `gen_func` clones the FunctionDef per distinct kind under a
+deterministic name (`<name>__<kindtag>`), pins each clone's parameter type
+through the annotation-free pin table, and rewrites the matching call sites'
+callee name by the argument's statically known kind. Every existing symbol
+site then sees ordinary distinct functions and needs no change, and
+`@@CSYM` / reflection / passthrough keep working unmodified. The rewrite
+must leave a call whose argument kind is unknown or matches no clone as the
+existing refusal (no silent fallback to the wrong clone). Interactions still
+to verify: `_passthrough_param_idx` and `_return_elem_types` (they key by
+name, so they see the clone names, which is correct), and the print-only mix
+(must keep the int64_t box, with no clones).
+
+Verification for that round: `test_gimple.py` (the repro as a positive test,
+single-TU and link-mode, plus the existing refusal-free print-only test) under
+`memslot --gb 8`; then the integrator's full `make gate`, because this touches
+the compiled path.
