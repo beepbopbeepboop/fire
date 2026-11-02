@@ -25,14 +25,29 @@ the results are built with `strdup`/`malloc` of str pieces. `mojo_re_exec` and
 The `sub` replacement is also taken as a str (`_re_expand` / `APPEND` on `strlen`), so a bytes
 template must be read by its kind too.
 
-## Next step
+## Status (2026-11-02): partial fix landed
 
-1. Give `_re_findall`, `_re_split`, `_re_sub`, `_re_finditer` the same subject-kind dispatch as
-   `mojo_re_exec`: a bytes subject runs `fre_exec_bytes` on `s->data`/`s->len`, builds bytes pieces
-   with `mojo_bytes_new_lit`, and returns a list of bytes words. `_re_sub` returns a bytes object for
-   a bytes subject; its template and callable result are read by kind as well.
-2. The result kinds the codegen assigns (`_lower_re_dynamic_call` in
-   `mojo/backend_gimple/emit_methods.py`, `_elem_types[lt] = 'char *'` for findall/split) must stop
-   claiming `char *` elements for a bytes subject; `groups()` already works with word elements.
-3. Test: add `print(re.compile(b"a").findall(b"aa"))`, the split and sub lines above to
-   `test_glob_bytes_regress.py`, each compared to CPython; each must fail on the current tree first.
+Landed:
+
+- Runtime (`runtime/fire_runtime.c`): `findall`, `split`, `sub`, `finditer` (and `mojo_split_dyn`)
+  take the subject as a WORD and read it by kind (`_re_subj_word`): a bytes object by its length
+  (a NUL is data), a str to its NUL; a None subject raises TypeError. One search path
+  (`_re_search`) now serves `mojo_re_exec` and `mojo_re_exec_bytes`, which were duplicates.
+  Pieces are built by `_re_piece` and pushed with `mojo_list_append_word`, so each element carries
+  its kind. `sub` returns a bytes object for a bytes subject; a bytes template and a callable's
+  bytes result are read by length (`_re_expand` takes a length).
+- Codegen (`mojo/backend_gimple/emit_methods.py`, `_lower_re_dynamic_call`): the subject's STATIC
+  type picks the result kind. A `MojoBytes *` subject gives a `MojoBytes *` `sub` result and
+  `MojoBytes *` list elements; a str subject is unchanged.
+- Regression: `test_glob_bytes_regress.py` compares findall / split (incl. a NUL in the subject) /
+  sub (incl. `\g<0>`) / finditer on bytes, plus str lines, to CPython. It failed on the prior tree
+  and passes now.
+
+Still open (the next step):
+
+- A subject whose static type is NOT known (a runtime-kinded word, e.g. an untyped parameter that
+  holds bytes) still takes `char *` results from `_lower_re_dynamic_call`, so `sub` on such a
+  subject reads the bytes object as a C string. The fix is a runtime-kinded result for that case,
+  which needs `sub`'s str users (`re.sub(...) + x`) checked first: the result cannot be a plain word
+  for every str subject without regressing them. Next step: probe an untyped bytes parameter, then
+  decide between a dyn-word `sub` result for unknown subjects and a type-directed specialisation.

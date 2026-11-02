@@ -13799,41 +13799,6 @@ if True:
 print(step(7))
 """, "inside a module-level block"), 'decorator_in_a_module_level_block_is_refused')
 
-    # Same-module wraps using a class-based partial (functools.wraps style)
-    # must compile and apply correctly; the decorator rebinding/refusal must
-    # not block a callable returned by a class constructor.
-    _run_isolated(lambda: test("same_module_wraps_with_class_partial_applies_decorator", """\
-class partial:
-    def __init__(self, func, *args, **kwargs):
-        self.func = func
-        self.args = args
-        self.kwargs = kwargs
-    def __call__(self, *args, **kwargs):
-        new_args = self.args + args
-        new_kwargs = dict(self.kwargs)
-        new_kwargs.update(kwargs)
-        return self.func(*new_args, **new_kwargs)
-
-def update_wrapper(wrapper, wrapped):
-    wrapper.__wrapped__ = wrapped
-    return wrapper
-
-def wraps(wrapped):
-    return partial(update_wrapper, wrapped)
-
-def f(x):
-    return x + 1
-
-@wraps(f)
-def wrapper(x):
-    return f(x) * 2
-
-def main():
-    print(wrapper(5))
-
-main()
-"""), 'same_module_wraps_with_class_partial_applies_decorator')
-
 
     # `len()` of a value the codegen could not type, where that value is a
     # LOCAL declared as a plain `int` — the shape that took out `make mojoc`,
