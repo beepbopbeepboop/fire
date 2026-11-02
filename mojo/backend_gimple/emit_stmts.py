@@ -4846,17 +4846,15 @@ def _gen_stmt_RaiseStmt(gen, node):
     if isinstance(msg_arg, (gimple_ctypes.StringLiteral, gimple_ctypes.IdentExpr)):
         mt, mv = gen.lower_expr(msg_arg)
         if mt == 'char *':
+            # Build exception object with args list (root cause: args must travel with object)
+            args_list = gen._new_temp('MojoList *')
+            gen._emit(f"  {args_list} = mojo_list_new ();")
+            gen._emit(f"  mojo_list_append_str ({args_list}, {mv});")
+            exc_obj = gen._new_temp('MojoExc *')
+            type_tag = gen._exc_type_id(exc_name) if exc_name else "0"
+            gen._emit(f"  {exc_obj} = mojo_exc_new ({type_tag}, {mv}, {args_list});")
+            gen._emit(f"  mojo_exc_obj_set ({exc_obj});")
             gen._emit(f"  mojo_exc_msg_set ({mv});")
-            # The object slot is what `except X as e:` actually binds
-            # (see _emit_handler_body) — without this, `e` reads back
-            # whatever was last there (frequently NULL), regardless of
-            # the message just set above. A bare string is the only
-            # payload shape raise-lowering supports right now (an
-            # arbitrary Int/Dict/struct payload would need real value
-            # construction here plus a way for the handler to know
-            # which of several possible C types to cast back to —
-            # tracked as a follow-up, not done here).
-            gen._emit(f"  mojo_exc_obj_set ({mv});")
 
     gen._emit("  mojo_raise ();")
 

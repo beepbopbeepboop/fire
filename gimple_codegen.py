@@ -136,6 +136,8 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_raise':                 'void',
     'mojo_exc_msg_set':           'void',
     'mojo_exc_msg_get':           'char *',
+    'mojo_exc_args':              'MojoList *',
+    'mojo_exc_new':              'MojoExc *',
     # list
     'mojo_list_new':              'MojoList *',
     'mojo_list_len':              'int64_t',
