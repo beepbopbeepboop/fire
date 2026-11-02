@@ -9260,6 +9260,9 @@ def gen_module_impl(self, stmts):
                 if _pt in ('char *', 'double'):
                     return _pt
                 return t or _pt
+            t_global = self._global_var_types.get(_an)
+            if t_global is not None:
+                return t_global
             return t or self._inferred_param_types.get(_cn, {}).get(_an)
         if isinstance(a, MemberExpr):
             # `self.<field>` / `<local>.<field>` — the shape a constructor
