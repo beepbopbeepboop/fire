@@ -38,8 +38,23 @@ equivalent for the 45 example files a cached test is *about*.
   diagnostic is now red for a real reason. Pinned by
   `test_untested_regression.py`. The general form of §3.3 (every
   stdout-verdict file) is still not a mechanism.
+* **§5's `tools/procrun.py` / `tools/memcap.py` with no test — closed
+  (`test_procrun.py`, 19 cases).** The only prior test was an unregistered
+  stray (`test_procrun_regression.py`, one max-vs-sum assertion), now folded
+  into it and removed; `test_suite.py`'s undeclared table names the new file
+  with its own reason. The new tests pin `ps_time`, `ps_snapshot` parsing
+  (including `ps` unavailable → empty, not zero), `tree_usage` /
+  `tree_usage_unique` / `tree_pids` / `group_pids` over injected tables,
+  `memcap_verdict` / `memcap_accounted` / `memcap_wrapper_died`, the real
+  tree kill (`kill_tree` reaches a grandchild), `spawn`'s timeout, and
+  `memcap` end to end (a passing child's exit code passes through; a breach
+  kills and reports RESOURCE, exit 125).
+  **It found a real defect on its first run:** `tree_usage_unique` documents
+  returning `(cpu_seconds, max_bytes, n_procs)` but never accumulated CPU, so
+  it always reported 0.0 CPU seconds. Fixed (one line in `tools/procrun.py`).
+  No production caller reads that field yet, which is why nothing had noticed.
 * **Still open:** §3.2's general check, §5's registration of the 50 and the
-  21 red files, and `tools/memcap.py` / `tools/procrun.py` with no test.
+  21 red files.
 
 ## Status, 2026-10-02 (this pass — §3.2's four dead-at-import tests are closed, one of them by becoming real coverage)
 

@@ -4730,7 +4730,6 @@ UNREGISTERED = {
     'test_perf_lean_lib_memory_regression.py': _BATCH_REGRESSION_REASON,
     'test_perf_memory_leak_pin.py': _BATCH_REGRESSION_REASON,
     'test_pin_dict_content_key_aliases.py': _BATCH_REGRESSION_REASON,
-    'test_procrun_regression.py': _BATCH_REGRESSION_REASON,
     'test_reg_dispatched_for_loop.py': _BATCH_REGRESSION_REASON,
     'test_regress_bytes_erased.py': _BATCH_REGRESSION_REASON,
     'test_regress_interface_request_1.py': _BATCH_REGRESSION_REASON,
@@ -4751,6 +4750,11 @@ UNREGISTERED = {
     'test_regression_unpack_spread.py': _BATCH_REGRESSION_REASON,
     'test_spread_string_regression.py': _BATCH_REGRESSION_REASON,
     'test_untested_regression.py': _BATCH_REGRESSION_REASON,
+    # bug:UNTESTED §5: tools/procrun.py and tools/memcap.py had no test. Pure
+    # parsing/accounting against injected process tables, plus the kill path and
+    # the ceiling against real short-lived processes (a few seconds, no compiler).
+    'test_procrun.py': 'tools/procrun.py and tools/memcap.py: the RSS measurement, '
+        'the tree kill and memcap\'s printed verdict, tested directly.',
     'test_zip_loop_target_rebind_regress.py': _BATCH_REGRESSION_REASON,
 
     # Landed with 313513c45 (2026-10-28, while this gate triage was running —
