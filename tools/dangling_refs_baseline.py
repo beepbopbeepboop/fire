@@ -63,7 +63,7 @@ BASELINE = {
     'test_formal_monomorph.py': 1,
     'test_formal_sweep_truth.py': 1,
     'test_getattr_default_miss_reg.py': 1,
-    'test_gimple.py': 4,
+    'test_gimple.py': 5,
     'test_gimple_generator_runner.py': 3,
     'test_gimple_runner.py': 3,
     'test_ptr_registry.py': 1,
@@ -71,7 +71,7 @@ BASELINE = {
     'test_regression_smulh.py': 1,
     'test_runtime_diff.py': 1,
     'test_silent_noop_iter.py': 1,
-    'test_suite.py': 6,
+    'test_suite.py': 9,
     'test_zip_loop_target_rebind_regress.py': 1,
     'tools/suite.py': 2,
 }
@@ -95,10 +95,8 @@ BASELINE = {
 # reason the header above gives for its prefixed entry.
 BARE_BASELINE = {
     'CRASH.md': 1,
-    'bugs/CODEGEN_dict_comprehension_repr_is_separately_broken.md': 3,
     'bugs/CODEGEN_nested_container_as_dict_key_or_tuple_slot.md': 2,
     'bugs/CODEGEN_selfhost_tokenize_region_eq_quadratic.md': 1,
-    'bugs/CODEGEN_unresolved_method_receiver_returns_its_own_pointer.md': 2,
     'bugs/COMPILE_FAIL_Tools_cases_generator_analyzer.md': 3,
     'bugs/COMPILE_FAIL_importlib_resources_readers.md': 2,
     'bugs/formal/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md': 1,
