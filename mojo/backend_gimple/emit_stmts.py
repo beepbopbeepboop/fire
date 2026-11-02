@@ -58,6 +58,7 @@ from mojo.middle.stmts_shared import (
 )
 from mojo.middle.types import _is_empty_container_literal
 from mojo.middle.calls_shared import _is_pointer_ctype
+from mojo.middle.calls_shared import FRAME_SETTABLE_IDS
 from mojo.middle.calls_shared import _py_box_expr
 # `ZipLongestFillRefusal` and nothing else from there: the class has to be the
 # SAME object `emit_loops.py` raises and this module's `zip_longest` arm
@@ -1331,7 +1332,6 @@ def _gen_stmt_AssignStmt(gen, node):
     if (isinstance(node.target, gimple_ctypes.MemberExpr) and len(gen._frames_mods) > 0
             and _as_str(node.target.member) in ('f_trace', 'f_trace_lines', 'f_trace_opcodes')
             and getattr(node, 'value', None) is not None):
-        _ft_ids = {'f_trace': 0, 'f_trace_lines': 1, 'f_trace_opcodes': 2}
         _fo_t, _fo_v = gen.lower_expr(node.target.obj)
         _fv_t, _fv_v = gen.lower_expr(node.value)
         _ft_name = _as_str(node.target.member)
@@ -1346,7 +1346,7 @@ def _gen_stmt_AssignStmt(gen, node):
             return
         gen._void_call('mojo_frame_set_attr',
                        [('int64_t', gen._to_int64(_fo_t, _fo_v)),
-                        ('int64_t', gen._new_val('int64_t', f"(int64_t){_ft_ids[_as_str(node.target.member)]}")),
+                        ('int64_t', gen._new_val('int64_t', f"(int64_t){FRAME_SETTABLE_IDS[_as_str(node.target.member)]}")),
                         ('int64_t', gen._to_int64(_fv_t, _fv_v))])
         return
     vtype, v = gen.lower_expr(node.value)
@@ -3545,6 +3545,16 @@ def _gen_stmt_DelStmt(gen, node):
     specifically.
     """
     for target in node.targets:
+        # `del frame.f_trace` / `f_trace_lines` / `f_trace_opcodes` in a frame-instrumented module:
+        # the runtime decides what a delete means for each (see mojo_frame_del_attr).
+        if (isinstance(target, gimple_ctypes.MemberExpr) and len(gen._frames_mods) > 0
+                and _as_str(target.member) in FRAME_SETTABLE_IDS):
+            _dt_t, _dt_v = gen.lower_expr(target.obj)
+            gen._void_call('mojo_frame_del_attr',
+                           [('int64_t', gen._to_int64(_dt_t, _dt_v)),
+                            ('int64_t', gen._new_val('int64_t',
+                                                     f"(int64_t){FRAME_SETTABLE_IDS[_as_str(target.member)]}"))])
+            continue
         # A bare single-slice subscript (`x[a:b]`) parses as a SliceExpr
         # with .obj attached directly, NOT wrapped in a SubscriptExpr —
         # see fire_compiler.py's own `_parse_postfix`: "if len(items) ==

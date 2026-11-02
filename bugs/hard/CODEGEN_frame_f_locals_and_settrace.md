@@ -64,8 +64,15 @@ Ordering: (C) refusal for f_locals -> f_trace -> (A). Neither needs the unittest
   Limit: the check is on the AST, not the type. Bool literals lower to the same `'int'` as `1`/`0` and there is no separate bool static type to test, so a
   variable holding an int (`x = 1; f.f_trace_lines = x`) is still stored unchecked. Remaining piece: a bool tag on the value, or a bool static type for
   comparisons/names, so the store can decide at compile time or at runtime.
-- Still open for this item: `del f.f_trace_lines` silently succeeds (verified 2026-11-01: exit 0, prints `deleted`); CPython raises
-  `TypeError: can't delete numeric/char attribute`. Not yet lowered.
+## Status (2026-11-01, stage 3 twelfth slice): `del` on the frame attributes
 
-Remaining: (A) box-all-locals for a real `f_locals`; `sys.settrace`; the type/delete errors test_f_trace_lines_and_opcodes asserts (`TypeError` for a non-bool,
-`del f.f_trace_lines`); and running test_frame.py through its real imports.
+- `del f.f_trace` clears the hook back to None; `del f.f_trace_lines` raises `TypeError: can't delete numeric/char attribute`; `del f.f_trace_opcodes`
+  raises `AttributeError` (CPython 3.15, measured). Neither of the two raising forms removes the stored value. Lowered in `emit_stmts._gen_stmt_DelStmt` to
+  `mojo_frame_del_attr` (runtime/fire_runtime.c), which holds the three answers in one place. Test `gimple_frame_del_trace_attributes`.
+- The id table `f_trace`/`f_trace_lines`/`f_trace_opcodes` -> 0/1/2 was duplicated between the read lowering and the store arm; it is now one definition,
+  `mojo/middle/calls_shared.FRAME_SETTABLE_IDS`, used by all three.
+- Known difference: the `AttributeError` for `f_trace_opcodes` carries the attribute name through `mojo_raise_attribute_error`'s existing message format, not
+  CPython's full text ("attribute 'f_trace_opcodes' of 'frame' objects cannot be deleted"). Only the type is asserted by the test.
+
+Remaining: (A) box-all-locals for a real `f_locals`; `sys.settrace`; the store-side `TypeError` for a non-literal non-bool value (item 11 limit above:
+`x = 1; f.f_trace_lines = x` still stores unchecked); and running test_frame.py through its real imports.
