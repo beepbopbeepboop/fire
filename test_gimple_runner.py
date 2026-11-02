@@ -10278,8 +10278,9 @@ main()
     # read the field, so a resolved `T *` would still print `0 0` here and the
     # test would pass either way — which is exactly why the receiver-reading
     # variant lives in
-    # bugs/CODEGEN_unresolved_method_receiver_returns_its_own_pointer.md
-    # instead, where the two outcomes are actually distinguishable.
+    # the receiver-reading regression that distinguishes resolved (`2/2`)
+    # from unresolved (garbage pointer bits) — see `gimple_ctor_param_`
+    # `polymorphic_slot_reads_receiver` for the pinned case.
     test_gimple_stdout("gimple_ctor_param_polymorphic_slot_stays_unresolved", """\
 class T:
     def __init__(self, n):
@@ -10355,6 +10356,97 @@ def main():
 
 main()
 """, "2 5\n")
+
+    # Three candidates for one zero-argument method, each answering differently:
+    # every candidate's own method must be reached through the tag switch, not
+    # only the first two. CPython's answer is the reference.
+    test_gimple_stdout("gimple_ctor_param_three_candidate_poly_dispatch", """\
+class T:
+    def __init__(self, n):
+        self.n = n
+    def numel(self):
+        return self.n
+
+class U:
+    def __init__(self, n):
+        self.n = n
+    def numel(self):
+        return self.n * 10
+
+class V:
+    def __init__(self, n):
+        self.n = n
+    def numel(self):
+        return self.n + 100
+
+class L:
+    def __init__(self, w):
+        self.w = w
+    def numel(self):
+        return self.w.numel()
+
+def main():
+    print(L(T(2)).numel(), L(U(2)).numel(), L(V(2)).numel())
+
+main()
+""", "2 20 102\n")
+
+    # Candidates that disagree on the method's RETURN TYPE cannot share one
+    # dispatch: the plan must refuse, naming the polymorphic receiver, rather than
+    # fall back to the scalar no-op stub that answers the receiver's own bits.
+    test_gimple_build_refusal("gimple_poly_dispatch_refuses_return_type_disagreement", """\
+class T:
+    def __init__(self, n):
+        self.n = n
+    def numel(self):
+        return self.n
+
+class U:
+    def __init__(self, n):
+        self.n = n
+    def numel(self):
+        return 2.5
+
+class L:
+    def __init__(self, w):
+        self.w = w
+    def numel(self):
+        return self.w.numel()
+
+def main():
+    print(L(T(2)).numel())
+    print(L(U(1)).numel())
+
+main()
+""", "polymorphic receiver")
+
+    # Same refusal for a disagreement on ARITY: one candidate takes an extra
+    # argument, so no single dispatch call shape exists for both.
+    test_gimple_build_refusal("gimple_poly_dispatch_refuses_arity_disagreement", """\
+class T:
+    def __init__(self, n):
+        self.n = n
+    def numel(self):
+        return self.n
+
+class U:
+    def __init__(self, n):
+        self.n = n
+    def numel(self, k):
+        return self.n * k
+
+class L:
+    def __init__(self, w):
+        self.w = w
+    def numel(self):
+        return self.w.numel()
+
+def main():
+    print(L(T(2)).numel())
+    print(L(U(1)).numel())
+
+main()
+""", "polymorphic receiver")
 
 
     # A container SHARED ACROSS FUNCTIONS — a module global, populated by a
