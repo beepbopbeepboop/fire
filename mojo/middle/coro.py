@@ -7886,7 +7886,7 @@ def emit_c(meta_entry: dict) -> str:
     # consumer renders as None (see emit_infra's tagged_recv_name). The other
     # kinds keep 0: their receive slot is a pointer / double / bool, to which a
     # box word would be a wild value.
-    resume_word = 'mojo_box_none ()' if vct == 'int64_t' else '0'
+    resume_word = 'mojo_box_none ()'
     return _C_TRAMPOLINE_TMPL.format(
         name=meta_entry['name'], base=meta_entry['base'], last_yield_fn=last_yield_fn,
         body_name=meta_entry['body_name'], new_fn=new_fn, value_kind=kind,
