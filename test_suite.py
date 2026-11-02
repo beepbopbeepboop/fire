@@ -4600,8 +4600,10 @@ UNREGISTERED = {
         'output IS the measurement, so there is no assertion to fail and it is '
         'inert unless something reads it.',
     'test_coro_bugs.py': 'Per-bug diagnostic for the A3 stack-switch backend. '
-        'Exits 0 while its own output reads CFAIL=1 COMPILE=1 — see UNTESTED.md '
-        '§3: a green exit that reports a failure in its own text.',
+        'Exits 1 on any CFAIL (generated C that does not syntax-check) and 2 when '
+        'it diagnosed nothing; RAISE stays informational. Not gated: it reads '
+        'generator bug docs, which are few now, and a CFAIL is a real codegen '
+        'defect tracked in its own bug doc.',
     'test_closure_capture_shadows_function.py': 'The scoping rule behind a '
         'closure capture: a free name the ENCLOSING function also binds is a '
         'capture even when another module of the same compile defines a '

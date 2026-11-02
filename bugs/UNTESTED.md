@@ -17,6 +17,30 @@ equivalent for the 45 example files a cached test is *about*.
 
 ---
 
+## Status, 2026-11-01 (what landed since 2026-10-02; §3a and §3.1 below are closed, the rest stands)
+
+* **§3a — the mojo→fire rename fallout — is fixed** by `3bedbd824` (all
+  `mojo.` call sites in `test_mixed_cpp_link.py` moved to `fire.`), and the
+  eight `expect=`-marked files were fixed and re-measured in `tools/suite.py`
+  (six green, one marker dropped, three counts re-measured). The §3a table
+  above is the pre-fix state. Pinned by `test_untested_regression.py`.
+* **§3.1 — the cached test that could not see its subject — is fixed**: the
+  registry now says `extra=['test_examples_parse.py', 'formal/examples']`
+  (`tools/suite.py`, `examples-parse`).
+* **§3.3 — `test_coro_bugs.py` exited 0 on its own CFAIL — is fixed.** Two
+  defects, both real. (a) Its `Source file:` pattern kept the backticks the bug
+  docs write, so `os.path.exists` was false for every doc and it diagnosed
+  nothing while exiting 0. (b) Its exit status ignored `CFAIL`. Now it exits 1
+  on any CFAIL, 2 when it diagnosed nothing, and 0 otherwise (`exit_code()`).
+  On the first run after the fix it found a real CFAIL:
+  `COMPILE_FAIL_Tools_cases_generator_analyzer` (`analyzer.py:194`, "expected
+  expression before '('"), which is a codegen defect with its own doc, so the
+  diagnostic is now red for a real reason. Pinned by
+  `test_untested_regression.py`. The general form of §3.3 (every
+  stdout-verdict file) is still not a mechanism.
+* **Still open:** §3.2's general check, §5's registration of the 50 and the
+  21 red files, and `tools/memcap.py` / `tools/procrun.py` with no test.
+
 ## Status, 2026-10-02 (this pass — §3.2's four dead-at-import tests are closed, one of them by becoming real coverage)
 
 §3.2 said four tests die at import naming `mojo/ast_nodes.mojo` and
