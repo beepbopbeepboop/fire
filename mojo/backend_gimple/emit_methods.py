@@ -387,11 +387,22 @@ def _frame_enter(gen, node) -> None:
     if (gen.module_name or '') not in gen._frames_mods:
         return
     gen._frame_func = _as_str(gen.current_func_name)
-    _fname = gen._new_val('char *', f'{gen._intern_string(gimple_ctypes._c_escape(_as_str(node.name)))}')
+    _fn_shown = _as_str(getattr(node, 'display_name', None) or node.name)
+    # A generator/coroutine body is lowered to `__mgco_<name>_body` (a method's
+    # `<name>` is `<Struct>_<method>`); the frame is the SOURCE function's.
+    if _fn_shown.startswith('__mgco_') and _fn_shown.endswith('_body'):
+        _fn_shown = _fn_shown[len('__mgco_'):-len('_body')]
+        for _sn in gen.struct_field_types:
+            if _fn_shown.startswith(_as_str(_sn) + '_'):
+                _fn_shown = _fn_shown[len(_as_str(_sn)) + 1:]
+                break
+    _fname = gen._new_val('char *', f'{gen._intern_string(gimple_ctypes._c_escape(_fn_shown))}')
     _ffile = gen._new_val('char *', f'{gen._intern_string(gimple_ctypes._c_escape(_as_str(getattr(gen, "_current_filename", "") or "")))}')
     _fline = gen._new_val('int64_t', f'(int64_t){int(getattr(node, "line", 0) or 0)}')
     gen._void_call('mojo_frame_enter',
                    [('char *', _fname), ('char *', _ffile), ('int64_t', _fline)])
+    if _as_str(node.name).startswith('__mgco_') and _as_str(node.name).endswith('_body'):
+        gen._emit('  mojo_frame_bind_gen ();')
 
 
 def _frame_enter_module(gen) -> None:
@@ -1745,6 +1756,28 @@ def _lower_re_module_call(gen, node, method):
     return 'int64_t', r
 
 
+_FRAME_VALUED_MEMBERS = frozenset(('f_back', 'tb_frame', 'gi_frame', 'cr_frame', 'ag_frame'))
+
+
+def _is_frame_expr(gen, node) -> bool:
+    """Is this expression statically a Python-level frame word? A frame is an int64 word, so
+    `x.clear()` cannot be told from `list.clear()` by type; the evidence is where the value came
+    from: `sys._getframe(...)`, a frame-valued attribute (`f_back`, `tb_frame`, `gi_frame`), or a
+    name bound to one of those (`_frame_vars`, filled by `_gen_stmt_AssignStmt`). Only consulted in
+    a compile where some module uses frames."""
+    if len(gen._frames_mods) == 0:
+        return False
+    if isinstance(node, gimple_ctypes.IdentExpr):
+        return _as_str(node.name) in gen._frame_vars
+    if isinstance(node, gimple_ctypes.MemberExpr):
+        return _as_str(node.member) in _FRAME_VALUED_MEMBERS
+    if isinstance(node, gimple_ctypes.CallExpr):
+        f = node.func
+        return (isinstance(f, gimple_ctypes.MemberExpr) and _as_str(f.member) == '_getframe'
+                and isinstance(f.obj, gimple_ctypes.IdentExpr) and _as_str(f.obj.name) == 'sys')
+    return False
+
+
 def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """Lower obj.method(args) — handles module calls, raw C pointers (UnsafePointer) and structs."""
     func = node.func  # MemberExpr
@@ -1761,6 +1794,13 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         else:
             _gf_d = gen._new_val('int64_t', '(int64_t)0')
         return 'int64_t', gen._call_expr('int64_t', 'mojo_getframe', [('int64_t', _gf_d)])
+
+    # `frame.clear()` on a frame word: refuses an executing frame (RuntimeError), else a no-op.
+    if (func.member == 'clear' and not node.args and not getattr(node, 'kwargs', None)
+            and _is_frame_expr(gen, func.obj)):
+        _fc_t, _fc_v = gen.lower_expr(func.obj)
+        gen._void_call('mojo_frame_clear', [('int64_t', gen._to_int64(_fc_t, _fc_v))])
+        return 'int64_t', gen._new_val('int64_t', '(int64_t)0')
 
     # `mod_a.Dialog(...)` — a QUALIFIED CONSTRUCTOR CALL: the receiver names
     # a real module marker and the member names a real, already-inlined
@@ -6625,7 +6665,7 @@ def _coerce_to_bytes(gen, t: str, v: str) -> str:
         return v
     if t == 'char *':
         return gen._call_expr('MojoBytes *', 'mojo_bytes_from_str',
-                              [('char *', v), ('char *', '"utf-8"')])
+                              [('char *', v), ('char *', '"utf-8"'), ('char *', '"strict"')])
     # narrow scalar: widen through int64_t then route through the
     # chokepoint (safe - a scalar can never be a different container kind).
     if t in ('int', 'char', '_Bool', 'int64_t'):

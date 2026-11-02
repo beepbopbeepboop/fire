@@ -7543,7 +7543,8 @@ def _cpp_lower_posix_idioms(gen, node, handles=None):
             if f.name == 'bytes' and len(new.args) == 2 and not kw:
                 # `bytes(text, 'ASCII')`: the string's bytes
                 return G.CallExpr(func=G.IdentExpr(name='mojo_bytes_from_str'),
-                                  args=list(new.args), line=new.line, col=new.col)
+                                  args=list(new.args) + [G.StringLiteral(value='strict', line=new.line, col=new.col)],
+                                  line=new.line, col=new.col)
             if f.name == 'close' and len(new.args) == 1 and not kw:
                 return G.CallExpr(func=G.IdentExpr(name='mojo_os_close'),
                                   args=list(new.args), line=new.line, col=new.col)
@@ -7605,6 +7606,7 @@ def _cpp_drain_generator_args(gen, fn):
                       line=line),
         ]
         call.args = [G.IdentExpr(name=acc, line=line)] + list(call.args[1:])
+        _walk_ast_invalidate(call)
         return pre
 
     def walk(body):
@@ -7614,6 +7616,7 @@ def _cpp_drain_generator_args(gen, fn):
                 sub = getattr(st, fld, None)
                 if isinstance(sub, list):
                     setattr(st, fld, walk(sub))
+                    _walk_ast_invalidate(st)
             if (isinstance(st, G.ExprStmt) and isinstance(st.value, G.YieldFromExpr)
                     and is_wrapped_gen_call(st.value.value)):
                 out.extend(drain(st.value.value, st.line))

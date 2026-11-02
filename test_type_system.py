@@ -5,14 +5,14 @@ This demonstrates how the comprehensive type system would have prevented
 every bug we spent the session fixing.
 """
 
-import pytest
+import unittest
 from type_system import (
     Type, TypeOrigin, InvariantChecker, TypeSystemError,
     make_int64_type, make_double_type, make_mojolist_type, make_opaque_pointer_type
 )
 
 
-class TestTemporalMonotonicity:
+class TestTemporalMonotonicity(unittest.TestCase):
     """Test TEMPORAL_MONOTONICITY invariant"""
 
     def test_variable_type_consistency(self):
@@ -39,11 +39,11 @@ class TestTemporalMonotonicity:
         x_type_32 = Type(base='int', bit_width=32, origin=TypeOrigin.INFERRED,
                         origin_loc=("test.py", 2))
 
-        with pytest.raises(TypeSystemError) as exc_info:
+        with self.assertRaises(TypeSystemError) as exc_info:
             checker.check_temporal_monotonicity("x", x_type_32, ("test.py", 2))
 
-        assert exc_info.value.invariant == "TEMPORAL_MONOTONICITY"
-        assert "64-bit" in exc_info.value.message or "type" in exc_info.value.message.lower()
+        assert exc_info.exception.invariant == "TEMPORAL_MONOTONICITY"
+        assert "64-bit" in exc_info.exception.message or "type" in exc_info.exception.message.lower()
 
     def test_widening_is_ok(self):
         """Widening from 32-bit to 64-bit should be allowed"""
@@ -61,7 +61,7 @@ class TestTemporalMonotonicity:
         assert not checker.has_errors()
 
 
-class TestBitWidthPreservation:
+class TestBitWidthPreservation(unittest.TestCase):
     """Test BIT_WIDTH_PRESERVATION invariant"""
 
     def test_64bit_arithmetic_produces_64bit(self):
@@ -83,11 +83,11 @@ class TestBitWidthPreservation:
         left = make_int64_type()
         right = Type(base='int', bit_width=32, origin=TypeOrigin.DEFAULT)
 
-        with pytest.raises(TypeSystemError) as exc_info:
+        with self.assertRaises(TypeSystemError) as exc_info:
             checker.check_bit_width_preservation(left, '+', right, ("test.py", 10))
 
-        assert exc_info.value.invariant == "BIT_WIDTH_PRESERVATION"
-        assert "bit" in exc_info.value.message.lower()
+        assert exc_info.exception.invariant == "BIT_WIDTH_PRESERVATION"
+        assert "bit" in exc_info.exception.message.lower()
 
     def test_double_arithmetic_produces_double(self):
         """double + double should produce double"""
@@ -102,7 +102,7 @@ class TestBitWidthPreservation:
         assert result.is_64bit()
 
 
-class TestOpaquePointerTracking:
+class TestOpaquePointerTracking(unittest.TestCase):
     """Test OPAQUE_POINTER_TRACKING invariant"""
 
     def test_opaque_pointer_to_explicit_pointer_needs_cast(self):
@@ -115,13 +115,13 @@ class TestOpaquePointerTracking:
         # Parameter expects explicit MojoList* pointer
         param_type = make_mojolist_type(make_double_type())
 
-        with pytest.raises(TypeSystemError) as exc_info:
+        with self.assertRaises(TypeSystemError) as exc_info:
             checker.check_opaque_pointer_tracking(
                 arg_type, param_type, 0, "advance", ("test.py", 20)
             )
 
-        assert exc_info.value.invariant == "OPAQUE_POINTER_TRACKING"
-        assert "cast" in exc_info.value.message.lower()
+        assert exc_info.exception.invariant == "OPAQUE_POINTER_TRACKING"
+        assert "cast" in exc_info.exception.message.lower()
 
     def test_matching_opaque_pointer_ok(self):
         """Passing opaque pointer to opaque pointer parameter is OK"""
@@ -141,7 +141,7 @@ class TestOpaquePointerTracking:
         )
 
 
-class TestElementTypePreservation:
+class TestElementTypePreservation(unittest.TestCase):
     """Test ELEMENT_TYPE_PRESERVATION invariant"""
 
     def test_subscript_requires_element_type(self):
@@ -151,11 +151,11 @@ class TestElementTypePreservation:
         # MojoList without element type
         container = Type(base='MojoList', is_pointer=True, element_type=None)
 
-        with pytest.raises(TypeSystemError) as exc_info:
+        with self.assertRaises(TypeSystemError) as exc_info:
             checker.check_element_type_preservation(container, ("test.py", 30))
 
-        assert exc_info.value.invariant == "ELEMENT_TYPE_PRESERVATION"
-        assert "element type" in exc_info.value.message.lower()
+        assert exc_info.exception.invariant == "ELEMENT_TYPE_PRESERVATION"
+        assert "element type" in exc_info.exception.message.lower()
 
     def test_element_type_propagation(self):
         """Subscripting should return element type"""
@@ -197,7 +197,7 @@ class TestElementTypePreservation:
         assert result2.base == 'double'
 
 
-class TestInferenceIdempotence:
+class TestInferenceIdempotence(unittest.TestCase):
     """Test INFERENCE_IDEMPOTENCE invariant"""
 
     def test_type_locking(self):
@@ -211,11 +211,11 @@ class TestInferenceIdempotence:
         # Later, try to infer it as different type in Pass 1.3
         param_type_2 = make_int64_type()
 
-        with pytest.raises(TypeSystemError) as exc_info:
+        with self.assertRaises(TypeSystemError) as exc_info:
             checker.lock_inferred_type("bodies", param_type_2, "1.3", ("test.py", 15))
 
-        assert exc_info.value.invariant == "INFERENCE_IDEMPOTENCE"
-        assert "different" in exc_info.value.message.lower()
+        assert exc_info.exception.invariant == "INFERENCE_IDEMPOTENCE"
+        assert "different" in exc_info.exception.message.lower()
 
     def test_consistent_inference_ok(self):
         """Inferring same type multiple times is OK"""
@@ -232,7 +232,7 @@ class TestInferenceIdempotence:
         assert not checker.has_errors()
 
 
-class TestRealWorldBugs:
+class TestRealWorldBugs(unittest.TestCase):
     """
     Test that the type system would have caught real bugs from the session.
     """
@@ -261,7 +261,7 @@ class TestRealWorldBugs:
 
         # Would catch if someone tried to assign int instead
         int_type = Type(base='int', bit_width=32)
-        with pytest.raises(TypeSystemError):
+        with self.assertRaises(TypeSystemError):
             checker.check_temporal_monotonicity("i", int_type, ("benchmark.py", 7))
 
     def test_bug_float_conversion_from_int64t(self):
@@ -300,12 +300,12 @@ class TestRealWorldBugs:
         advance_param = make_mojolist_type(make_double_type())
 
         # Type system catches the mismatch
-        with pytest.raises(TypeSystemError) as exc_info:
+        with self.assertRaises(TypeSystemError) as exc_info:
             checker.check_opaque_pointer_tracking(
                 bodies_arg, advance_param, 0, "advance", ("benchmark.py", 100)
             )
 
-        assert "cast" in exc_info.value.message.lower()
+        assert "cast" in exc_info.exception.message.lower()
 
     def test_bug_nested_list_element_type_loss(self):
         """
@@ -334,7 +334,7 @@ class TestRealWorldBugs:
 
 if __name__ == "__main__":
     # Run tests with verbose output
-    pytest.main([__file__, "-v", "-s"])
+    unittest.main(verbosity=2)
 
     # Also print a summary
     print("\n" + "=" * 70)

@@ -74,7 +74,9 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-PROOF_GEN = os.path.join(HERE, "formal", "arm64_proof_gen.py")
+from exec_budget import RUN_TIMEOUT_S
+
+PROOF_GEN =os.path.join(HERE, "formal", "arm64_proof_gen.py")
 
 # The programs, and what each one is here to pin.  `print` is the important
 # one: it is the commonest statement in the language, it is an extern, and it
@@ -5247,7 +5249,7 @@ class TestTheStackFloorGuardLeavesNoCallOnTheWalkedPath(unittest.TestCase):
     (a source conditional) regenerates its value theorem, and
     `formal/examples/mod_by_var.mojo` no longer has its universal refused by
     the div0 `fflush` — 2026-10-31 the walk closes that trap path instead
-    (`bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s step
+    (`bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s step
     2), and for this example the branch is dead anyway (the divisor register
     holds 4, which the terminal value flow proves), so the example regenerates
     its value theorem too.
@@ -5280,7 +5282,7 @@ class TestTheStackFloorGuardLeavesNoCallOnTheWalkedPath(unittest.TestCase):
             "the div0 `BL fflush` is an opaque-call boundary again: a program "
             "whose only out-of-image call is the compiler's trap has no value "
             "theorem, so the walk-side closure "
-            "(`bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s "
+            "(`bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s "
             "step 2) has been undone")
         self.assertNotRegex(
             text, r"theorem mod_by_var_reaches_call_at_",
@@ -7399,7 +7401,7 @@ class TestTheZeroDivisorGuardIsAFalseGoal(unittest.TestCase):
             argv = ([out] if backend == "arm64" or sys.platform != "darwin"
                     else ["arch", "-x86_64", out])
             p = subprocess.run(argv, capture_output=True, text=True,
-                               timeout=60)
+                               timeout=RUN_TIMEOUT_S)
             self.assertNotEqual(p.returncode, 0,
                                 f"{backend}: a zero divisor did not leave the "
                                 f"image — the div0 arm is reachable code, so "
@@ -7437,7 +7439,7 @@ class TestTheZeroDivisorGuardIsAFalseGoal(unittest.TestCase):
         the class set `cls.blind` and fail its Lean row by NAME — so accepting
         it here is not acceptance of a blind class, it is acceptance that the
         blindness is ANNOUNCED.  The walk-side fix landed since
-        (`bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
+        (`bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
         step 2) and the fixture is back on outcome 1.  What this row still
         forbids is the fourth state: an empty tail with no announcement at
         all, which is `bugs/formal/FORMAL_the_div0_guard_measurement_class_
@@ -7867,7 +7869,7 @@ class TestTheDiv0FixtureHaltsAtTheCompilerTrap(unittest.TestCase):
     SUBSTITUTED by `q_reaches_call_at_0x…` and the class above had nothing to
     trace.  The pin said the test would go red and say the fixture is
     measurable again when the walk could discharge a call on a conditional
-    path.  It did — 2026-10-31, `bugs/FORMAL_integer_overflow_at_run_time_is_
+    path.  It did — 2026-10-31, `bugs/formal/FORMAL_integer_overflow_at_run_time_is_
     still_untrapped.md`'s step 2: the `BL`'s target sits just past the code
     slice, where the map (`_gen_code_defs` appends the terminal `ret`) answers
     a word no decode arm matches, so the model runs one step and halts there,
@@ -8834,7 +8836,8 @@ class TestTheDivisionExamplesHaveNoProofToCheck(unittest.TestCase):
                         os.path.join(HERE, "formal", "examples", f"{stem}.mojo"),
                         arch=backend, output=out, prove=False, check=False)
                     proc = subprocess.run((runner or []) + [out],
-                                          capture_output=True, timeout=30)
+                                          capture_output=True,
+                                          timeout=RUN_TIMEOUT_S)
                     # The entry IS the function, so the exit status is its
                     # answer. `//` is CPython's own floor and both stems'
                     # remainder is CPython's, so ONE expectation covers both

@@ -97,3 +97,24 @@ compiles "OK" at 0.1 GB because nothing is resolved; that is not a clean closure
 - `tokenize`, `annotationlib`, `dataclasses`, `traceback`: `No module named 'formal'` / missing `fire_compiler.py` —
   the probe's cwd/path, not a compiler defect (run it from the repo root).
 Next: the `@wraps(...)` decorator wall, then `namedtuple` from non-literals, then 3-arg `type()`.
+
+## Update (2026-11-01, functools: walls found by bypassing each refusal in turn)
+
+Compiling a copy of `functools.py` alone (`python3 fire.py build functools_copy.py`), bypassing one refusal at a time:
+
+1. `@wraps(f) def wrapper` refusal (`_gmi_refuse_scalar_decorator_rebind`: `wraps` returns `partial(update_wrapper, ...)`,
+   inferred int64_t). Using `functools.wraps` from USER code already works (`g(5)` -> 11); this is only the same-module
+   `wraps`. Real fix = apply `wraps(f)(wrapper)` as a decorator whose factory returns a `partial` object, which needs
+   (a) the module's own `class partial` (`__new__`/`__call__` with `*args, **kwargs`) compiled, and (b) `update_wrapper`'s
+   attribute copying (`setattr` on a function: `_func_attrs`). Treating `wraps` as identity was rejected: it drops
+   `__wrapped__`/`__name__`/`__doc__` silently.
+2. FIXED here: `_CacheInfo = namedtuple("CacheInfo", (...))` (typename != bound name, tuple of literals) now lowers; the
+   class is declared under the bound name and the repr shows the typename.
+3. NEXT WALL: `_CacheInfo(hits, misses, maxsize, currsize)` with non-literal arguments: the namedtuple lowering types a
+   field only from literals. Untyped fields are NOT an answer: `maxsize` is `int | None` and the word ABI prints a None
+   as `0` (see bugs/CODEGEN_a_none_held_in_an_int64_local_is_indistinguishable_from_zero_in_membership.md). The route is
+   typed fields from the call-site argument types, resolved by the codegen (not by `fire_compiler.desugar_namedtuples`,
+   which runs before types exist).
+
+Also fixed on the way: `print(x)` of a user struct printed its address as a decimal; it is now `__str__`, else
+`__repr__` (test `gimple_print_user_struct_dunder_repr`).

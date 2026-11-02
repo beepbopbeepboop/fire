@@ -22,6 +22,7 @@ sys.path.insert(0, HERE)
 
 import gimple_codegen  # noqa: E402
 from build_config import find_gcc  # noqa: E402
+from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S
 
 RUNTIME = os.path.join(HERE, 'runtime')
 
@@ -51,7 +52,7 @@ def _cpython_stdout(tmp):
     with open(p, 'w') as f:
         f.write(SRC)
     r = subprocess.run([sys.executable, '-I', p], capture_output=True,
-                       text=True, timeout=60)
+                       text=True, timeout=RUN_TIMEOUT_S)
     assert r.returncode == 0, f'CPython oracle failed: {r.stderr}'
     return r.stdout
 
@@ -71,9 +72,9 @@ def _compiled_stdout(tmp):
     b = subprocess.run(
         [gcc, '-fgimple', '-fPIC', f'-I{RUNTIME}', '-O0', '-w', '-o', exe,
          c_path, os.path.join(RUNTIME, 'fire_runtime.c'), '-lm'],
-        capture_output=True, text=True, timeout=600)
+        capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
     assert b.returncode == 0, f'gcc -fgimple failed:\n{b.stderr[:2000]}'
-    r = subprocess.run([exe], capture_output=True, text=True, timeout=60)
+    r = subprocess.run([exe], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
     return r.returncode, r.stdout
 
 

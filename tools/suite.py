@@ -1837,7 +1837,7 @@ test('runtimediff', [PY, 'test_runtime_diff.py'], mem='tiny', cache=True,
 # is then wrong in the same direction and every engine-vs-engine diff in the
 # tree stays clean. That is how `@classmethod`'s `cls` binding the first real
 # ARGUMENT, and `@deco` being parsed and then never applied at all, stayed
-# invisible (`bugs/UNTESTED.md` 3.2 -- and what `interporacle` was written for).
+# invisible (`bug:UNTESTED` 3.2 -- and what `interporacle` was written for).
 #
 # It ran by NOTHING until 2026-10-02: it loaded `mojo/ast_nodes.mojo`,
 # `mojo/tokenizer.mojo` and `mojo/parser.mojo`, none of which exists, and
@@ -2072,12 +2072,12 @@ test('examples-parse', [PY, 'test_examples_parse.py'], cache=True, mem='tiny',
      # so the 46th example is covered the day it is added and a rename moves
      # the key. Measured by [5]: this key read 48 repo files and 0 under
      # formal/examples/, so a SyntaxError in any of the 45 could not invalidate
-     # it and a recorded PASS replayed. See bugs/UNTESTED.md 3.1.
+     # it and a recorded PASS replayed. See bug:UNTESTED 3.1.
      extra=['test_examples_parse.py', 'formal/examples'],
      desc='every formal/examples/*.mojo parses; decorator arg shapes distinct')
 
 
-# ── the test estate, inventoried by [5] in bugs/UNTESTED.md ────────────────
+# ── the test estate, inventoried by [5] in bug:UNTESTED ────────────────
 #
 # 50 test files were named by no registered spec, and 21 of those exited
 # non-zero. Measured per file here rather than read out of a bug doc, because

@@ -75,6 +75,11 @@ sys.path.insert(0, HERE)
 
 import formal.build as B
 import formal.model as M
+from exec_budget import RUN_TIMEOUT_S
+
+# `otool -L` is a host-tool probe, not a child of this file's build or run; it
+# is not a stale budget, and it is named so the census does not read it as one.
+OTOOL_TIMEOUT_S = 60
 
 RESULTS = []
 
@@ -129,7 +134,7 @@ def build_expecting_refusal(source, name, **kw):
     return ''
 
 
-def run(result, timeout=60):
+def run(result, timeout=RUN_TIMEOUT_S):
     """(exit code, stdout) for a built image, or (None, detail) if it would not
     start at all -- which is its own answer and has to be distinguishable from
     a wrong one."""
@@ -201,7 +206,7 @@ def test_image_carries_the_load_command():
     r = build(STR_CALL, 'otool')
     try:
         p = subprocess.run(['otool', '-L', r["path"]], capture_output=True,
-                           text=True, timeout=60)
+                           text=True, timeout=OTOOL_TIMEOUT_S)
     except OSError:
         report('otool is unavailable; the load-command check is skipped')
         return

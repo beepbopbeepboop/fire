@@ -87,7 +87,15 @@ typedef void* mojo_generic_func;
  * re-supplies `self` as the method's implicit first argument — the same
  * "self, then N ordinary args" convention every compiled struct method
  * already uses. See bugs/CODEGEN_bound_method_as_value_not_resolved.md. */
-typedef struct { void *fn; void *self; } MojoBoundMethod;
+/* A capturing closure's `self` is its environment, and that environment can
+   hold the heap boxes of the `{mut}`-captured locals it closes over (a box is
+   a separate `malloc` the environment field merely POINTS at, so freeing the
+   environment alone would leak it). `boxes`/`nboxes` record those box
+   pointers so `mojo_closure_free` can free them with the environment; they are
+   NULL/0 for a method-taken-as-a-value and for a closure that captured no box,
+   and `mojo_bound_method_add_box` (called from the generated closure
+   constructor) appends one box at a time, growing the list. */
+typedef struct { void *fn; void *self; void **boxes; int64_t nboxes; } MojoBoundMethod;
 
 /* Real (non-inline) so the single bound-method registry lives in one TU
  * (fire_runtime.c) — mojo_is_bound_method below consults it to tell a
@@ -96,6 +104,12 @@ typedef struct { void *fn; void *self; } MojoBoundMethod;
  * self.m; f()`). */
 MojoBoundMethod *mojo_bound_method_new(void *fn, void *self);
 int mojo_is_bound_method(void *p);
+/* Append one `{mut}` box the environment holds to `bm`, so `mojo_closure_free`
+ * frees it with the environment. The list is grown with `realloc` (a `NULL`
+ * start is a `malloc`), and `bm` owns it: `mojo_closure_free` frees every box
+ * in it, then the list itself. Called only from the generated closure
+ * constructor, once per box the environment field points at. */
+void mojo_bound_method_add_box(MojoBoundMethod *bm, void *box);
 
 /* ── Variadic callables ───────────────────────────────────────────────────
  * A `lambda *a, **k: ...` (or any function whose real C signature is
@@ -670,6 +684,11 @@ typedef struct {
     int64_t  cap;
     int64_t  inl[MOJO_LIST_INLINE];
 } MojoList;
+
+/* Exception object with args (for e.args / StopIteration.value). */
+typedef struct { int64_t type; char *msg; MojoList *args; } MojoExc;
+MojoExc *mojo_exc_new(int64_t type, char *msg, MojoList *args);
+MojoList *mojo_exc_args(void *obj);
 
 MojoList *mojo_list_new(void);
 int mojo_is_registered_list(int64_t addr);
@@ -1649,6 +1668,17 @@ void        mojo_raise_type_error(char *detail);
  * operation rejects its ARGUMENT rather than failing to find something
  * (mojo_bytes_partition's empty separator). */
 void        mojo_raise_value_error(char *detail);
+void        mojo_frame_clear(int64_t w);
+int64_t     mojo_frame_get_attr(int64_t w, int64_t id);
+void        mojo_frame_set_attr(int64_t w, int64_t id, int64_t v);
+void        mojo_exc_value_set(int64_t w);
+int64_t     mojo_exc_value_get(void);
+void        mojo_frame_set_resuming(int64_t gen);
+void        mojo_frame_bind_gen(void);
+int64_t     mojo_frame_generator(int64_t w);
+int64_t     mojo_frame_for_gen(int64_t gen, int64_t old_word, const char *name, const char *file, int64_t firstlineno, int64_t lineno);
+int         mojo_coro_slice_peek(void *snap, const char **name, const char **file, int64_t *first, int64_t *line);
+extern int64_t (*_mojo_gen_state_hook)(int64_t);
 void        mojo_raise_index_error(char *detail);
 /* The codec raisers behind str.encode(codec) / bytes.decode(codec): a
  * character or byte the codec cannot hold, and an unknown codec name. */
