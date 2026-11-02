@@ -1,5 +1,5 @@
 # Regression for bug-codegen-dylib-generic-inline-copies-370
-import inspect, os, sys
+import os, sys
 sys.path.insert(0, '.')
 
 def test_source_has_new_branch():
