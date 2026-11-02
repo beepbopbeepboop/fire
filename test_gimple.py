@@ -8927,24 +8927,7 @@ main()
 
     def test_tuple_unpack_of_a_boxed_dict_inside_a_method_builds():
         """Unpacking an opaque value that turns out to be a dict, from a METHOD
-        body, must pass gcc -fgimple.
-
-        `a, b = ident(self._d)` materializes the value through
-        _materialize_as_list's dict arm, which records the slot kind with
-        `mojo_list_set_kinds_uniform(result, 'p')`. That char argument was
-        emitted as `_new_val('char', "'p'")`, i.e. `_t9 = 'p';` into a `char`
-        temp. A character literal is an `int` in C, and GCC's -fgimple refuses
-        a bare int constant assigned to a char temp ("non-trivial conversion
-        in 'integer_cst'"). Only a method body is GIMPLE-tagged, so a plain
-        top-level `a, b = ident(d)` (the sibling test above) never reached it.
-        The fix is the explicit `(char)` cast every other char constant in
-        the emitters carries.
-
-        This pins the BUILD, not the printed keys: the unpacked slots are
-        still read as raw pointer words, which is a separate, pre-existing
-        defect (the same symptom `list_of_a_boxed_dict_materializes_keys_as_
-        strings` already fails on). Asserting the values here would make this
-        test red for a reason this fix does not touch.
+        body, must print the dict keys correctly.
         """
         global _PASS, _FAIL
         name = "tuple_unpack_of_a_boxed_dict_inside_a_method_builds"
@@ -8962,11 +8945,21 @@ def main():
     Box({"k": 1, "j": 2}).show()
 main()
 '''
+        want = _cpython_stdout(src)
+        if want is None:
+            print(f"FAIL  {name}: CPython does not run the fixture")
+            _FAIL += 1
+            return
         for mode in ('single-TU', 'link-mode'):
             got = _compiled_stdout(src, mode)
             if isinstance(got, tuple):
                 print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
                       f"{got[1][:800]}")
+                _FAIL += 1
+                return
+            if got != want:
+                print(f"FAIL  {name} [{mode}]: compiled stdout {got!r} != "
+                      f"CPython {want!r}")
                 _FAIL += 1
                 return
         print(f"PASS  {name}")
