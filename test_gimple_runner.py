@@ -3891,6 +3891,27 @@ def main():
     print(f())
 """, "frame attribute `f_locals` is not modelled")
 
+    # `frame.f_trace` / `f_trace_lines` / `f_trace_opcodes` are plain settable frame
+    # attributes: None / True / False by default, reading back what was stored.
+    test_gimple_stdout("gimple_frame_f_trace_attributes_read_back", """\
+import sys
+
+def test(trace):
+    if trace:
+        sys._getframe(0).f_trace = True
+    f = sys._getframe(0)
+    print(f.f_trace_lines, f.f_trace_opcodes)
+    f.f_trace_lines = False
+    print(f.f_trace_lines)
+    f.f_trace = 42
+    print(f.f_trace == 42)
+
+def main():
+    test(False)
+    test(True)
+    print(sys._getframe(0).f_trace is None)
+""", "True False\nFalse\nTrue\nTrue False\nFalse\nTrue\nTrue\n")
+
     test_gimple_stdout("gimple_traceback_chain_names_and_lines", """\
 import sys
 

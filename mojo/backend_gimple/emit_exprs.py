@@ -1502,6 +1502,8 @@ _OS_PATH_RUNTIME_CALLABLE_VALUES = {
 }
 
 
+# frame attributes that are plain stored words (runtime mojo_frame_get_attr/set_attr ids)
+_FRAME_SETTABLE = {'f_trace': 0, 'f_trace_lines': 1, 'f_trace_opcodes': 2}
 _FRAME_ATTRS = frozenset(('f_generator', 'gi_frame', 'cr_frame', 'ag_frame', 'f_code', 'f_back', 'f_lineno', 'co_name', 'co_qualname', 'co_filename', 'co_firstlineno',
                           '__traceback__', 'tb_frame', 'tb_next', 'tb_lineno'))
 
@@ -1510,7 +1512,15 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     # Attributes of a Python-level frame word (`sys._getframe(n)`), in a module that uses
     # frames. The names are specific to frame/code objects, and nothing is lowered here
     # unless a module of this compile mentions `_getframe`.
-    if len(gen._frames_mods) > 0 and node.member in ('f_locals', 'f_trace'):
+    if len(gen._frames_mods) > 0 and node.member in _FRAME_SETTABLE:
+        _fa_t, _fa_v = gen.lower_expr(node.obj)
+        _fa_r = gen._call_expr('int64_t', 'mojo_frame_get_attr',
+                               [('int64_t', gen._to_int64(_fa_t, _fa_v)),
+                                ('int64_t', gen._new_val('int64_t', f'(int64_t){_FRAME_SETTABLE[node.member]}'))])
+        gen._dyn_word_vals.add(_fa_r)
+        gen._boxed_vals.add(_fa_r)       # identity (`f.f_trace is None`) and printing read the box
+        return 'int64_t', _fa_r
+    if len(gen._frames_mods) > 0 and node.member == 'f_locals':
         # A frame's locals and trace hook have no representation yet (compiled C locals have no
         # runtime names or addresses): refuse by name rather than read the word as an object
         # attribute and answer garbage (see bugs/hard/CODEGEN_frame_model_for_test_frame.md, Plan).

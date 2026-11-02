@@ -285,3 +285,14 @@ branch on a global in `set_line`. Needs the callable-value ABI (`mojo_dyn_call`,
 Test: test_frame's `test_lineno_with_tracing` (`sys._getframe(0).f_trace = True` then three `record_line()` calls expecting `[1, 4, 5]`).
 
 Ordering: (C) refusal for f_locals -> f_trace -> (A). Neither needs the unittest closure; both can be tested with small programs first.
+
+## Status (2026-11-01, stage 3 tenth slice): `f_locals` refused by name; `f_trace` / `f_trace_lines` / `f_trace_opcodes` are stored attributes
+
+- `frame.f_locals` in a frame-instrumented module is a named compile error (was: read as a generic attribute of an int64 word, garbage at exit 0).
+  Test `gimple_frame_f_locals_is_refused`. This is step (C) of the Plan above.
+- `f.f_trace = x`, `f.f_trace_lines = b`, `f.f_trace_opcodes = b` store a word on the frame record (`mojo_frame_set_attr`), and reading them returns it
+  (`f_trace` None by default, `f_trace_lines` True, `f_trace_opcodes` False; `f.f_trace is None` and `True`/`False` printing work through boxed words).
+  Test `gimple_frame_f_trace_attributes_read_back` matches CPython. Nothing CONSULTS them yet: there is no `sys.settrace` and `set_line` does not call a tracer, which
+  is the next step of the f_trace plan above (test_lineno_with_tracing only needs the stored attribute). Gate: `compile_stdlib.py` 0 unexpected.
+Remaining: (A) box-all-locals for a real `f_locals`; `sys.settrace`; the type/delete errors test_f_trace_lines_and_opcodes asserts (`TypeError` for a non-bool,
+`del f.f_trace_lines`); and running test_frame.py through its real imports.
