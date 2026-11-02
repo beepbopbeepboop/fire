@@ -24,7 +24,7 @@ into this repository, which made it a process rather than a test: measured on
 it. `tools/suite.py` launches jobs in parallel from a common checkout, so two
 runs racing on the same category file, or one killed half-way leaving a
 truncated doc that the dedup then treats as complete, are both quiet.
-`bugs/UNTESTED.md` §4.1 records the finding.
+`bug:UNTESTED` §4.1 records the finding.
 
 So: `--root` names the tree to scan (a missing one is a loud non-zero exit, not
 a silent zero-file pass), `--out` names where reports go and defaults to a
@@ -75,7 +75,7 @@ def parse_args(argv):
                     help="write into this repository's bugs/ -- the ORIGINAL "
                          "behaviour, for a deliberate manual run. Off by "
                          "default because a test that writes into a shared "
-                         "tree is a process, not a test (bugs/UNTESTED.md 4.1)")
+                         "tree is a process, not a test (bug:UNTESTED 4.1)")
     ap.add_argument("max_files", nargs="?", default=None,
                     help="stop after N files")
     return ap.parse_args(argv)
