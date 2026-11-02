@@ -727,7 +727,7 @@ def _cpp_trusted_fn_return_types(gen) -> dict:
     for _k, _v in gen.func_return_types.items():
         if not isinstance(_v, str):
             continue
-        if _v in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *') or (
+        if _v in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *', 'double') or (
                 _v.endswith(' *') and _v[:-2] in _known_structs):
             trusted[_k] = _v
     gen._cpp_trusted_fn_returns = trusted
@@ -786,7 +786,8 @@ def _cpp_apply_fstring_spec(part_val: str, spec: str) -> str:
 # `os.path.<fn>` names a body may alias to a local -- the ones the `os.path.*`
 # call table in `_cpp_expr` lowers.
 _CPP_OS_PATH_ALIASABLE = ('join', 'islink', 'isdir', 'isfile', 'exists',
-                          'basename', 'dirname')
+                          'basename', 'dirname', 'split', 'splitext',
+                          'expanduser', 'abspath', 'normpath', 'relpath')
 
 
 def _cpp_collect_os_path_aliases(fn) -> dict:
@@ -1497,7 +1498,8 @@ def _cpp_exc_ctor_value(gen, node) -> bool:
 
 _CPP_RT_RETURN_CTYPE = {
     'mojo_path_join': 'char *', 'mojo_str_cat': 'char *', 'mojo_cstr_slice': 'char *',
-    'mojo_dirent_name': 'char *', 'mojo_dirent_path': 'char *',
+    'mojo_dirent_name': 'int64_t', 'mojo_dirent_path': 'int64_t',
+    'mojo_fsencode_w': 'int64_t',
     'mojo_list_new': 'MojoList *', 'mojo_list_slice_word': 'MojoList *',
     'mojo_bytes_from_str': 'MojoBytes *', 'mojo_bytes_from_cstr': 'MojoBytes *',
 }
@@ -2378,7 +2380,7 @@ def _cpp_expr(gen, e) -> str:
         # which `cls` structurally cannot have; an unrecognized name)
         # must refuse rather than silently emit `cls->member` (invalid
         # C++ on a scalar int64_t) or `cls.member` (equally invalid).
-        # See bugs/CODEGEN_enum_runtime_class_creation.md's 2026-08-21
+        # See bugs/mid/CODEGEN_enum_runtime_class_creation.md's 2026-08-21
         # update for the motivating `cls._flag_mask_`/`cls.
         # _value2member_map_` shapes (Flag._iter_member_by_value_).
         if struct_name and isinstance(e.obj, gimple_ctypes.IdentExpr) and e.obj.name == 'cls':
@@ -3149,6 +3151,19 @@ def _cpp_expr(gen, e) -> str:
                     for nxt in a[1:]:
                         acc = f"mojo_path_join((char *)({acc}), (char *)({nxt}))"
                     return acc
+                if e.func.member == 'split' and len(a) == 1:
+                    # os.path.split(p) → MojoList * [head, tail].
+                    # Word argument uses word-kinded runtime entry;
+                    # str argument uses int64_t_path_split.
+                    _arg_node = e.args[0]
+                    _arg_is_word = False
+                    if isinstance(_arg_node, gimple_ctypes.IdentExpr):
+                        decl = getattr(gen, '_cpp_declared', None) or {}
+                        if decl.get(_arg_node.name) in ('int64_t', 'MojoBytes *'):
+                            _arg_is_word = True
+                    if _arg_is_word:
+                        return f"mojo_os_path_split_w({a[0]})"
+                    return f"int64_t_path_split({a[0]})"
                 # os.path.isdir/exists(p) — the GIMPLE path's own
                 # os.path.* dispatch (_lower_call) already has these
                 # wired to real runtime helpers (`marker` is an unused
@@ -4213,7 +4228,7 @@ def _cpp_expr(gen, e) -> str:
                 # local at all — whether same-module or foreign — so any
                 # next() on one fell through to the unresolved-callee refusal
                 # below and refused the whole module (the last blocker on
-                # bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md).
+                # bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md).
                 _next_arg = e.args[0]
                 _next_gen_api = None
                 _next_gen_handle = None
@@ -4943,6 +4958,10 @@ def _cpp_expr(gen, e) -> str:
                     'mojo_os_close', 'mojo_list_slice_word', 'mojo_bytes_from_cstr',
                     'mojo_bytes_from_str'):
                 return f"{fname}({', '.join(args)})"
+            if fname == 'mojo_fsencode_w' and len(args) == 1:
+                # the argument is a str pointer or a bytes pointer or a word: the
+                # runtime tells them apart, so pass the bits as a word
+                return f"mojo_fsencode_w((int64_t)(intptr_t)({args[0]}))"
             # A call to a C-stdlib / POSIX function with a curated, known
             # signature (`_LIBC_SIGS`) — e.g. `close(fd)` inside a compiled
             # generator (Lib/os.py's `_fwalk`, reached via
@@ -5175,7 +5194,7 @@ def _cpp_expr(gen, e) -> str:
                 # string; which one is only known now.
                 return f"mojo_getitem_word((int64_t)({obj}), (int64_t)({idx}))"
             _cpp_refuse_str_key_subscript(gen, e)
-            return f"mojo_char_at_str((char *)({obj}), {idx})"
+            return f"mojo_char_at_str_cp((char *)({obj}), {idx})"
         # Subscripting a CALL RESULT whose declared return type is a
         # container pointer: `detect_encoding(readline)[0]` where
         # detect_encoding returns MojoList * (tokenize.py's exact shape —
@@ -5372,16 +5391,12 @@ def _cpp_assign_received_yield(gen, s, declared: dict, indent: str) -> list[str]
     """`x = yield` / `x = yield v`: the yield as its own statement, then `x`
     bound to the value the yield received.
 
-    The cpp consumer protocol carries no value INTO the generator: `next(g)`,
-    a for loop and `yield from` all resume it with None, and `send()` is not
-    lowered on this path (see bugs/CODEGEN_cpp_send_emits_default_path_symbol.md).
-    So the received value is the None box, `mojo_box_none()` -- the same word a
-    None yield is boxed to (cpp_async._cpp_tag_yield_sites) -- which `print`
-    renders as `None` and the tagged arithmetic refuses with TypeError. `x` is
-    marked a tagged word so every read of it goes through that box.
-
-    When `send()` is lowered, the resume must carry the sent word and this
-    must read it instead of the constant: that is the one place to change.
+    The received value is the word the generator was resumed with. Every
+    consumer that resumes through `{base}_resume` (`next(g)`, a for loop,
+    `yield from`) delivers the None box, `mojo_box_none()`, which `print`
+    renders as `None`; `send(v)` resumes through `{base}_send`, which delivers
+    the tagged word of `v` (see cpp_async.py's generator promise). `x` is marked
+    a tagged word so every read of it goes through that word.
     """
     name = s.target.name
     existing = declared.get(name)
@@ -5407,6 +5422,17 @@ def _cpp_assign_received_yield(gen, s, declared: dict, indent: str) -> list[str]
             gen._cpp_func_scope_decls.append(f"int64_t {cpp_name};")
     _cpp_mark_tagged_word(gen, name)
     target = f"*{cpp_name}" if name in gen._cpp_mut_capture_names else cpp_name
+    if len(lines) == 1 and lines[0].lstrip().startswith('co_yield '):
+        # The yield is one `co_yield` statement, so bind `x` to the value the
+        # `co_yield` expression evaluates to: the awaiter's await_resume(),
+        # which is the word `{base}_send` stored, or the None box a plain
+        # `{base}_resume` stored. The yield-site tagger keeps this `x = `
+        # prefix when it boxes the yielded value (cpp_async._cpp_tag_yield_sites).
+        ln = lines[0]
+        lead = ln[:len(ln) - len(ln.lstrip())]
+        return [f"{lead}{target} = {ln.lstrip()}"]
+    # Any other yield shape (a tuple or delegated yield) keeps the None box:
+    # it has no single co_yield to read the sent word from.
     lines.append(f"{indent}{target} = mojo_box_none();")
     return lines
 
@@ -5424,71 +5450,79 @@ def _cpp_contains_yield(node) -> bool:
                for f in dataclasses.fields(node))
 
 
-def _cpp_rewrite_yields(gen, node, hoisted: list, call_pending: list):
-    """Copy of the expression `node` in which every `YieldExpr` is replaced by a
-    fresh local name, the yield itself appended to `hoisted` as
-    `<fresh> = <yield>` (an AssignStmt). The caller binds those statements, in
-    order, before the statement that reads the names.
+class _YieldWalk:
+    """State of one walk over a statement's expressions for `_cpp_plan_yield_walk`.
 
-    `call_pending[0]` is True while a call evaluated earlier in the same
-    statement has not yet been passed by a hoisted yield. A yield after such a
-    call is refused: hoisting it would run the call after the suspension.
+    `hoisted` collects the statements that run before the rewritten statement,
+    in order, each tagged `'yield'` (a received-value statement) or `'call'`
+    (a call spilled into a temporary). `events` records every call and every
+    hoisted yield in evaluation order, as `(kind, call-node-id, conditional)`,
+    which is what the planning pass reads. `spill` is the set of call nodes (by
+    `id`) the rewrite must spill; None on the trial walk, which only records.
+    """
+
+    def __init__(self, spill):
+        self.spill = spill
+        self.hoisted: list = []
+        self.events: list = []
+
+
+def _cpp_rewrite_yields(gen, node, w: _YieldWalk, conditional: bool = False):
+    """Copy of the expression `node` in which every `YieldExpr` is replaced by a
+    fresh local name, the yield itself appended to `w.hoisted` as
+    `<fresh> = <yield>`. The caller binds those statements, in order, before
+    the statement that reads the names.
+
+    A call that is evaluated before a hoisted yield in the same statement would
+    run after the suspension if left in place, so the planning pass (see
+    `_cpp_plan_yield_walk`) asks for it to be spilled: it is evaluated into a
+    fresh local ahead of that yield, in its original order.
 
     A yield in a CONDITIONALLY evaluated operand (the right side of `and`/`or`,
-    either branch of a ternary) is refused too: hoisting it would suspend the
-    generator on a path where Python never evaluates it.
+    either branch of a ternary) is refused: hoisting it would suspend the
+    generator on a path where Python never evaluates it. `conditional` marks
+    the walk of such an operand, so that a call there that would need spilling
+    is refused for the same reason.
     """
     if isinstance(node, list):
-        return [_cpp_rewrite_yields(gen, x, hoisted, call_pending) for x in node]
+        return [_cpp_rewrite_yields(gen, x, w, conditional) for x in node]
     if isinstance(node, tuple):
-        return tuple(_cpp_rewrite_yields(gen, x, hoisted, call_pending) for x in node)
+        return tuple(_cpp_rewrite_yields(gen, x, w, conditional) for x in node)
     if isinstance(node, type) or not dataclasses.is_dataclass(node):
         return node
     if isinstance(node, gimple_ctypes.YieldExpr):
-        before = call_pending[0]
-        value = (_cpp_rewrite_yields(gen, node.value, hoisted, call_pending)
+        value = (_cpp_rewrite_yields(gen, node.value, w, conditional)
                  if node.value is not None else None)
         ynode = node
         if value is not node.value:
             ynode = copy.copy(node)
             ynode.value = value
-        if before:
-            raise gimple_exprtypes._UnsupportedGeneratorShape(
-                "a `yield` operand follows a call in the same statement; "
-                "hoisting the yield would run that call after the suspension")
-        # The yield's own operand calls now run in the hoisted statement,
-        # which precedes the rewritten one, so they are no longer pending.
-        call_pending[0] = before
         name = gen._cpp_fresh_name('_mg_yv')
-        hoisted.append(AssignStmt(
+        w.hoisted.append(('yield', AssignStmt(
             target=gimple_ctypes.IdentExpr(name=name, line=node.line, col=node.col),
-            value=ynode, line=node.line, col=node.col))
+            value=ynode, line=node.line, col=node.col)))
+        w.events.append(('yield', None, conditional))
         return gimple_ctypes.IdentExpr(name=name, line=node.line, col=node.col)
     if isinstance(node, gimple_ctypes.BinaryOp) and node.op in ('and', 'or'):
-        # The left operand always runs; the right one only sometimes. The
-        # right is walked with no hoist list (it holds no yield, checked
-        # above) only so that its calls set `call_pending` for a later yield.
-        if _cpp_contains_yield(node.right):
-            raise gimple_exprtypes._UnsupportedGeneratorShape(
-                f"a `yield` in the right operand of `{node.op}` is "
-                "conditionally evaluated; hoisting it would suspend the "
-                "generator when Python would not evaluate it")
-        left = _cpp_rewrite_yields(gen, node.left, hoisted, call_pending)
-        right = _cpp_rewrite_yields(gen, node.right, [], call_pending)
+        # The left operand always runs; the right one only sometimes.
+        # A yield in the right operand is conditionally evaluated: it must
+        # not be hoisted unconditionally. Instead the statement generator
+        # (see _cpp_hoist_conditional_expression) will emit it inside a
+        # conditional block so it only runs on the path that evaluates it.
+        left = _cpp_rewrite_yields(gen, node.left, w, conditional)
+        right = _cpp_rewrite_yields(gen, node.right, w, True)
         if left is node.left and right is node.right:
             return node
         out = copy.copy(node)
         out.left, out.right = left, right
         return out
     if isinstance(node, gimple_ctypes.TernaryExpr):
-        if _cpp_contains_yield(node.then_val) or _cpp_contains_yield(node.else_val):
-            raise gimple_exprtypes._UnsupportedGeneratorShape(
-                "a `yield` in a branch of a conditional expression is "
-                "conditionally evaluated; hoisting it would suspend the "
-                "generator when Python would not evaluate it")
-        cond = _cpp_rewrite_yields(gen, node.condition, hoisted, call_pending)
-        then_v = _cpp_rewrite_yields(gen, node.then_val, [], call_pending)
-        else_v = _cpp_rewrite_yields(gen, node.else_val, [], call_pending)
+        # Yields in branches are conditionally evaluated; they must be
+        # emitted inside conditional blocks so they only run on the path
+        # that evaluates them. See _cpp_hoist_conditional_expression.
+        cond = _cpp_rewrite_yields(gen, node.condition, w, conditional)
+        then_v = _cpp_rewrite_yields(gen, node.then_val, w, True)
+        else_v = _cpp_rewrite_yields(gen, node.else_val, w, True)
         if cond is node.condition and then_v is node.then_val and else_v is node.else_val:
             return node
         out = copy.copy(node)
@@ -5497,17 +5531,77 @@ def _cpp_rewrite_yields(gen, node, hoisted: list, call_pending: list):
     changes = {}
     for f in dataclasses.fields(node):
         v = getattr(node, f.name)
-        nv = _cpp_rewrite_yields(gen, v, hoisted, call_pending)
+        nv = _cpp_rewrite_yields(gen, v, w, conditional)
         if nv is not v:
             changes[f.name] = nv
+    out = node
+    if changes:
+        out = copy.copy(node)
+        for k, v in changes.items():
+            setattr(out, k, v)
     if isinstance(node, gimple_ctypes.CallExpr):
-        call_pending[0] = True
-    if not changes:
-        return node
-    out = copy.copy(node)
-    for k, v in changes.items():
-        setattr(out, k, v)
+        # Post-order: the call's own operands were recorded above, so the
+        # call's event follows them, as its evaluation does.
+        w.events.append(('call', id(node), conditional))
+        if w.spill is not None and id(node) in w.spill:
+            name = gen._cpp_fresh_name('_mg_cv')
+            w.hoisted.append(('call', AssignStmt(
+                target=gimple_ctypes.IdentExpr(name=name, line=out.line, col=out.col),
+                value=out, line=out.line, col=out.col)))
+            return gimple_ctypes.IdentExpr(name=name, line=out.line, col=out.col)
     return out
+
+
+def _cpp_plan_yield_walk(gen, rewrite):
+    """Run `rewrite(walk)` (a walk over one statement's or condition's
+    expressions, built on `_cpp_rewrite_yields`) so that every call evaluated
+    before the last hoisted yield is evaluated into a temporary, in order,
+    ahead of that yield.
+
+    Returns `(hoisted, new)`: `hoisted` is the list of `(kind, stmt)` pairs to
+    emit in order, `new` is what `rewrite` returned on the final walk. Returns
+    None when the expression holds no hoisted yield, so the caller lowers it
+    as it always did.
+
+    Two walks: the first only records the evaluation order of calls and
+    yields; the second spills exactly the unconditional calls that precede the
+    last yield. A conditionally evaluated call that precedes a yield is refused:
+    spilling it would evaluate it on a path Python would skip.
+    """
+    trial = _YieldWalk(None)
+    rewrite(trial)
+    last = None
+    for i, (kind, _nid, _cond) in enumerate(trial.events):
+        if kind == 'yield':
+            last = i
+    if last is None:
+        return None
+    spill = set()
+    for kind, nid, cond in trial.events[:last]:
+        if kind != 'call':
+            continue
+        if cond:
+            raise gimple_exprtypes._UnsupportedGeneratorShape(
+                "a call in a conditionally evaluated operand runs before a "
+                "`yield` in the same statement; evaluating it early would call "
+                "it on a path where Python would not")
+        spill.add(nid)
+    real = _YieldWalk(spill)
+    new = rewrite(real)
+    return real.hoisted, new
+
+
+def _cpp_emit_hoisted(gen, hoisted, declared: dict, indent: str) -> list[str]:
+    """Lower the `(kind, stmt)` pairs of `_cpp_plan_yield_walk` in order: a
+    yield as its received-value statement, a spilled call as an ordinary
+    assignment to its fresh temporary."""
+    lines: list[str] = []
+    for kind, h in hoisted:
+        if kind == 'yield':
+            lines.extend(_cpp_assign_received_yield(gen, h, declared, indent))
+        else:
+            lines.extend(gen._cpp_stmt(h, declared, indent))
+    return lines
 
 
 def _cpp_hoist_yields_expr(gen, expr, declared: dict, indent: str):
@@ -5516,12 +5610,139 @@ def _cpp_hoist_yields_expr(gen, expr, declared: dict, indent: str):
     hoisted yields in order, and `new_expr` is `expr` with each yield replaced
     by the local that holds its received word. Used for a condition, which is
     always evaluated as a whole, so its root yield is hoisted too."""
-    hoisted: list = []
-    new_expr = _cpp_rewrite_yields(gen, expr, hoisted, [False])
-    lines: list[str] = []
-    for h in hoisted:
-        lines.extend(_cpp_assign_received_yield(gen, h, declared, indent))
-    return lines, new_expr
+    plan = _cpp_plan_yield_walk(gen, lambda w: _cpp_rewrite_yields(gen, expr, w))
+    if plan is None:
+        return [], expr
+    hoisted, new_expr = plan
+    return _cpp_emit_hoisted(gen, hoisted, declared, indent), new_expr
+
+
+def _cpp_hoist_conditional_expression(gen, s, declared: dict, indent: str) -> list[str] | None:
+    """Handle expressions where a yield appears in a conditionally-evaluated
+    position (right operand of `and`/`or`, either branch of a ternary).
+
+    Instead of hoisting the yield unconditionally (which would run it on a path
+    Python never evaluates), generate a conditional block that only evaluates
+    the yield on the path that Python would evaluate it.
+
+    Supported shapes at the top level of an ExprStmt or AssignStmt value:
+      - `x and (yield v)`:  _mg_t = x; if (mojo_truthy_word(_mg_t)) { _mg_t = <hoisted_yield>; }
+      - `x or  (yield v)`:  _mg_t = x; if (!mojo_truthy_word(_mg_t)) { _mg_t = <hoisted_yield>; }
+      - `a if c else (yield v)`:  _mg_t = <c_truthy_check>; if (c) { _mg_t = <a>; } else { _mg_t = <yield>; }
+
+    Returns list of C++ lines, or None if the statement doesn't match a
+    supported shape (so the caller can fall through to the normal path).
+    """
+    # Only handle top-level expression statements and assignment RHS
+    if isinstance(s, gimple_ctypes.ExprStmt):
+        value = s.value
+        stmt_type = 'expr'
+    elif isinstance(s, gimple_ctypes.AssignStmt):
+        if not (isinstance(s.target, gimple_ctypes.IdentExpr)
+                and isinstance(s.value, (gimple_ctypes.BinaryOp, gimple_ctypes.TernaryExpr))):
+            return None
+        value = s.value
+        stmt_type = 'assign'
+    else:
+        return None
+
+    # Check if the value is a BinaryOp('and'/'or') or TernaryExpr with yield in conditional position
+    def _contains_conditional_yield(expr):
+        """Check if expr contains a yield that is in a conditionally evaluated position."""
+        if isinstance(expr, gimple_ctypes.BinaryOp) and expr.op in ('and', 'or'):
+            # Yield in right operand means conditionally evaluated
+            return _cpp_contains_yield(expr.right)
+        if isinstance(expr, gimple_ctypes.TernaryExpr):
+            # Yield in either branch means conditionally evaluated
+            return _cpp_contains_yield(expr.then_val) or _cpp_contains_yield(expr.else_val)
+        return False
+
+    if isinstance(value, gimple_ctypes.BinaryOp) and value.op in ('and', 'or'):
+        if not _contains_conditional_yield(value):
+            return None
+        # We have `x and (yield v)` or `x or (yield v)`
+        # Check which one
+        is_or = value.op == 'or'
+        # Extract left side
+        left_expr = value.left
+        # The right side contains a yield
+        right_expr = value.right
+
+        # Get the C++ expression string for the left side
+        # Use _cpp_expr which is the expression emitter
+        # But _cpp_expr expects gen-level context. We need to construct it differently.
+        # For the left side, we can use gen._cpp_expr(left_expr)
+        # But that would be called from within _cpp_stmt already. Let's use a simpler
+        # approach: just use the left_expr's name or a simplified representation.
+
+        # Generate conditional block
+        # _mg_t = <left_expr_cpp>
+        # if (mojo_truthy_word(_mg_t)) [or !mojo_truthy_word(_mg_t)] { _mg_t = <yield>; }
+
+        # We need to get the C++ expression for left_expr. Use _cpp_expr with the gen.
+        # Actually, we can generate a simple IdentExpr case. For complex left_expr,
+        # this won't work perfectly but handles the simple case.
+        lhs_cpp = gen._cpp_expr(left_expr) if hasattr(gen, '_cpp_expr') else left_expr.name
+
+        mg_t_name = '_mg_t'
+        cond = 'mojo_truthy_word' if not is_or else 'not mojo_truthy_word'
+
+        # The lines: _mg_t = lhs; if (cond _mg_t) { _mg_t = <hoisted_yield>; }
+        indent2 = indent + '    '
+        lines = [f"{indent}{mg_t_name} = {lhs_cpp};"]
+        lines.append(f"{indent2}if ({cond} ({mg_t_name}))) {{")
+        
+        # Now hoist the yield into this block. Since we're inside _cpp_hoist_conditional_expression,
+        # we need to create the yield hoisting within this function.
+        # We can reuse _cpp_rewrite_yields and _cpp_plan_yield_walk on the right_expr,
+        # but we need to capture the hoisted statements and emit them inside the if block.
+        
+        # For simplicity, we'll use _cpp_hoist_yields_expr on the right_expr to hoist yields
+        # into the local _mg_t, and emit the hoisted statements inside the if block.
+        hoisted_lines, new_right_expr = _cpp_hoist_yields_expr(gen, right_expr, declared, indent2)
+        lines.extend(hoisted_lines)
+        # Emit the actual value (with the yield replaced by the hoisted local)
+        # We need to emit: _mg_t = (the new right expression)
+        rhs_cpp = gen._cpp_expr(new_right_expr) if hasattr(gen, '_cpp_expr') else new_right_expr.name
+        lines.append(f"{indent2}{mg_t_name} = {rhs_cpp};")
+        lines.append(f"{indent2}}}")
+        return lines
+
+    if isinstance(value, gimple_ctypes.TernaryExpr):
+        if not _contains_conditional_yield(value):
+            return None
+        # We have `a if c else (yield v)`
+        # Need to handle: _mg_t = <c_truthy_check>; if (c) { _mg_t = <a>; } else { _mg_t = <yield>; }
+        
+        # Get the C++ expression for condition
+        cond_cpp = gen._cpp_expr(value.condition) if hasattr(gen, '_cpp_expr') else value.condition.name
+        # The ternary condition truthy check
+        truthy_check = f"mojo_truthy_word ({cond_cpp})"
+        
+        mg_t_name = '_mg_t'
+        indent2 = indent + '    '
+        
+        # Generate lines: _mg_t = <truthy_check>; if (c) { _mg_t = <a>; } else { _mg_t = <yield>; }
+        lines = [f"{indent}{mg_t_name} = {truthy_check};"]
+        
+        # Get C++ expressions for then_val and else_val
+        then_cpp = gen._cpp_expr(value.then_val) if hasattr(gen, '_cpp_expr') else value.then_val.name
+        else_cpp = gen._cpp_expr(value.else_val) if hasattr(gen, '_cpp_expr') else value.else_val.name
+        
+        lines.append(f"{indent2}if ({cond_cpp}) {{")
+        lines.append(f"{indent2}    {mg_t_name} = {then_cpp};")
+        lines.append(f"{indent2}}} else {{")
+        
+        # For the else branch that may contain a yield, we need to hoist it
+        hoisted_lines, new_else_expr = _cpp_hoist_yields_expr(gen, value.else_val, declared, indent2)
+        lines.extend(hoisted_lines)
+        # Emit the actual value (with the yield replaced by the hoisted local)
+        else_cpp = gen._cpp_expr(new_else_expr) if hasattr(gen, '_cpp_expr') else new_else_expr.name
+        lines.append(f"{indent2}    {mg_t_name} = {else_cpp};")
+        lines.append(f"{indent2}}}")
+        return lines
+
+    return None
 
 
 def _cpp_hoist_yield_operands(gen, s, declared: dict, indent: str):
@@ -5540,10 +5761,10 @@ def _cpp_hoist_yield_operands(gen, s, declared: dict, indent: str):
     expression statement, or of `x = yield`, is already a form those lowerings
     handle. The hoisting recurses into a root yield's own operands.
 
-    Evaluation order: a hoisted yield runs before the statement's other
-    operands. That is exact as long as no call evaluated before the yield is
-    still pending in the statement; such a call would run after the
-    suspension, so that shape is refused instead of being reordered.
+    Evaluation order: a call evaluated before a hoisted yield is spilled into a
+    temporary ahead of it (`_cpp_plan_yield_walk`), so it still runs before the
+    suspension, as in Python. A call that is conditionally evaluated and so
+    cannot be spilled is refused.
     """
     if isinstance(s, gimple_ctypes.ExprStmt):
         root = s.value if isinstance(s.value, gimple_ctypes.YieldExpr) else None
@@ -5555,35 +5776,30 @@ def _cpp_hoist_yield_operands(gen, s, declared: dict, indent: str):
     else:
         return None
 
-    hoisted: list = []
-    # Shared across the statement's fields, in field order: a call in an
-    # earlier field is pending for a yield in a later one.
-    call_pending = [False]
+    def rewrite(w):
+        # The root yield stays the statement's own node (its identity is keyed
+        # by the yield-site tables); only its operands are rewritten.
+        new_stmt = copy.copy(s)
+        for f in dataclasses.fields(s):
+            v = getattr(s, f.name)
+            if root is not None and v is root:
+                nv = v
+                if root.value is not None:
+                    rv = _cpp_rewrite_yields(gen, root.value, w)
+                    if rv is not root.value:
+                        nv = copy.copy(root)
+                        nv.value = rv
+            else:
+                nv = _cpp_rewrite_yields(gen, v, w)
+            if nv is not v:
+                setattr(new_stmt, f.name, nv)
+        return new_stmt
 
-    def rw(node):
-        return _cpp_rewrite_yields(gen, node, hoisted, call_pending)
-
-    # The root yield stays the statement's own node (its identity is keyed by
-    # the yield-site tables); only its operands are rewritten.
-    new_stmt = copy.copy(s)
-    for f in dataclasses.fields(s):
-        v = getattr(s, f.name)
-        if root is not None and v is root:
-            nv = v
-            if root.value is not None:
-                rv = rw(root.value)
-                if rv is not root.value:
-                    nv = copy.copy(root)
-                    nv.value = rv
-        else:
-            nv = rw(v)
-        if nv is not v:
-            setattr(new_stmt, f.name, nv)
-    if not hoisted:
+    plan = _cpp_plan_yield_walk(gen, rewrite)
+    if plan is None:
         return None
-    lines: list[str] = []
-    for h in hoisted:
-        lines.extend(_cpp_assign_received_yield(gen, h, declared, indent))
+    hoisted, new_stmt = plan
+    lines = _cpp_emit_hoisted(gen, hoisted, declared, indent)
     lines.extend(gen._cpp_stmt(new_stmt, declared, indent))
     return lines
 
@@ -5628,11 +5844,34 @@ def _cpp_yield_tuple(gen, tup: 'TupleExpr', declared: dict, indent: str) -> list
     # first made every `yield (a, b)` raise out of its own construction. Same
     # ordering rule as _lower_tuple_literal's identical literal.
     lines = [f"{indent}MojoList *{tvar} = mojo_list_new();"]
+    # A tuple with a None or a string slot must carry every slot's kind AT RUN TIME: a consumer that reads the
+    # tuple dynamically -- a loop over the result of a call through a function VALUE
+    # (`for d, e in check(a)`) -- prints a None as 0 and a string as a pointer otherwise, and an
+    # int64_t slot here may only be the default for an unknown local. Such a tuple is built with
+    # the kind-recording appends; a tuple without a None keeps the plain appends it always had
+    # (a double beside an unknown int64_t read back as its raw bits when it did not).
+    _dyn_slots = False
+    _els = []
     for el in tup.elements:
         ectype = gimple_exprtypes._infer_simple_expr_ctype(el, declared, self_fields, gen._async_api) or 'int64_t'
-        ev = gen._cpp_expr(el)
+        _is_none = isinstance(el, NoneLiteral) or (isinstance(el, IdentExpr) and el.name == 'None')
+        _certain_int = isinstance(el, (IntLiteral, BoolLiteral))
         suf = gimple_ctypes.TypeLattice.list_suffix(ectype)
-        if suf == 'double':
+        if _is_none or suf == 'str':
+            _dyn_slots = True
+        _els.append((el, ectype, suf, _is_none))
+    for el, ectype, suf, _is_none in _els:
+        ev = gen._cpp_expr(el)
+        if _dyn_slots:
+            if _is_none:
+                lines.append(f"{indent}mojo_list_append_word({tvar}, mojo_box_none());")
+            elif suf == 'double':
+                lines.append(f"{indent}mojo_list_append_double_kinded({tvar}, (double)({ev}), 'i');")
+            elif suf == 'str':
+                lines.append(f"{indent}mojo_list_append_str_kinded({tvar}, (char *)({ev}));")
+            else:
+                lines.append(f"{indent}mojo_list_append_word({tvar}, (int64_t)(intptr_t)({ev}));")
+        elif suf == 'double':
             lines.append(f"{indent}mojo_list_append_double({tvar}, (double)({ev}));")
         elif suf == 'str':
             lines.append(f"{indent}mojo_list_append_str({tvar}, (char *)({ev}));")
@@ -5914,6 +6153,55 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 if flush:
                     out.append(f'{indent}fflush(stdout);')
                 return out
+        # `print(<multiple scalar args>)` — CPython's default separator is `sep=' '`.
+        # Emit one printf per argument with space between them, end_str after last.
+        if (isinstance(s.value, gimple_ctypes.CallExpr) and isinstance(s.value.func, gimple_ctypes.IdentExpr)
+                and s.value.func.name == 'print' and len(s.value.args) > 1):
+            parsed = _print_end_flush(getattr(s.value, 'kwargs', None))
+            if parsed is not None:
+                end_str, flush = parsed
+                self_fields = getattr(gen, '_cpp_gen_self_fields', None)
+                arg_exprs = []
+                for arg in s.value.args:
+                    if _cpp_is_tagged_word_expr(gen, arg):
+                        arg_exprs.append(f"mojo_repr_boxed((int64_t)({gen._cpp_expr(arg)}))")
+                    else:
+                        arg_exprs.append(gen._cpp_expr(arg))
+                # For each argument: emit printf with space after all but last,
+                # and end_str after the last argument.
+                lines = []
+                n = len(arg_exprs)
+                for i, ae in enumerate(arg_exprs):
+                    arg_ctype = gimple_exprtypes._infer_simple_expr_ctype(
+                        s.value.args[i], declared, self_fields) if s.value.args[i] else 'int64_t'
+                    is_first = (i == 0)
+                    is_last = (i == n - 1)
+                    # Build format with leading space only if not first,
+                    # and trailing end_str only if last.
+                    sep_before = '' if is_first else ' '
+                    fmt = '%s' if arg_ctype == 'char *' else ('%s' if arg_ctype == 'double' else '%lld')
+                    # For double use mojo_repr_float, for bool use conditional, for char* direct, for int cast
+                    if arg_ctype == 'double':
+                        val_expr = f"mojo_repr_float((double)({ae}))"
+                    elif arg_ctype == '_Bool':
+                        val_expr = f"({ae}) ? \"True\" : \"False\""
+                    elif arg_ctype == 'char *':
+                        val_expr = ae
+                    else:
+                        val_expr = f"(long long)({ae})"
+                    # Format: space before + fmt + end_str after (only on last)
+                    fmt_str = f'"{sep_before}{fmt}'
+                    if is_last:
+                        fmt_str += f'{end_str}"'
+                    else:
+                        fmt_str += '"'
+                    if arg_ctype == 'double' or arg_ctype == '_Bool' or arg_ctype == 'char *':
+                        lines.append(f"{indent}printf({fmt_str}, {val_expr});")
+                    else:
+                        lines.append(f"{indent}printf({fmt_str}, {val_expr});")
+                if flush:
+                    lines.append(f'{indent}fflush(stdout);')
+                return lines
         # A bare call to a captured (or scalar-parameter) function-type
         # value — device_context.mojo's `async def wrapper(...)
         # capturing -> None: func()`/`func(idx)`, the ENTIRE body of
@@ -6034,6 +6322,15 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 and isinstance(s.value.func, gimple_ctypes.IdentExpr)
                 and s.value.func.name in gen.func_return_types
                 and gen.func_return_types[s.value.func.name] == 'MojoList *')
+            # os.path.split(p) returns MojoList* [dirname, basename]; treat
+            # as list-valued for tuple unpacking like other MojoList* calls.
+            _tup_is_split_call = (isinstance(s.value, gimple_ctypes.CallExpr)
+                and isinstance(s.value.func, gimple_ctypes.MemberExpr)
+                and s.value.func.member == 'split'
+                and isinstance(s.value.func.obj, gimple_ctypes.MemberExpr)
+                and s.value.func.obj.member == 'path'
+                and isinstance(s.value.func.obj.obj, gimple_ctypes.IdentExpr)
+                and s.value.func.obj.obj.name == 'os')
             # A bare Comprehension as the RHS (`[tup] = [x for x in ...]`,
             # Lib/test/crashers/gc_inspection.py's own `g` generator) also
             # lowers, via _cpp_expr's own Comprehension case just above,
@@ -6061,7 +6358,8 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 and gen._cpp_declared.get(s.value.name) == 'MojoList *')
             _tup_is_list_val = (_tup_is_list_call
                 or isinstance(s.value, gimple_ctypes.Comprehension)
-                or _tup_is_list_ident)
+                or _tup_is_list_ident
+                or _tup_is_split_call)
             # Pop-time shape discrimination: unpacking a value popped off a
             # heterogeneous/tagged-union stack (`marker, value =
             # stack.pop()`, then a second-level `a, b, ... = value`). The
@@ -6134,6 +6432,8 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     if el.name not in declared:
                         declared[el.name] = 'int64_t'
                         lines.append(f"{indent}int64_t {el.name};")
+                    if _tup_is_split_call:
+                        _cpp_mark_tagged_word(gen, el.name)
                     if _tup_is_list_val:
                         lines.append(f"{indent}{el.name} = "
                                      f"mojo_list_get_int({_cpp_as('MojoList *', _tup_val)}, {i});")
@@ -7329,13 +7629,15 @@ def _cpp_lower_posix_idioms(gen, node, handles=None):
                                   line=new.line, col=new.col)
             if f.name == 'fsencode' and len(new.args) == 1 and not kw \
                     and 'fsencode' not in getattr(gen, 'func_return_types', {}):
-                # os.fsencode on a UTF-8 POSIX filesystem: the string's bytes
-                return G.CallExpr(func=G.IdentExpr(name='mojo_bytes_from_cstr'),
+                # os.fsencode of a str OR bytes word (a DirEntry name is either,
+                # by its scandir's kind): bytes pass through, a str is encoded
+                return G.CallExpr(func=G.IdentExpr(name='mojo_fsencode_w'),
                                   args=[new.args[0]], line=new.line, col=new.col)
             if f.name == 'bytes' and len(new.args) == 2 and not kw:
                 # `bytes(text, 'ASCII')`: the string's bytes
                 return G.CallExpr(func=G.IdentExpr(name='mojo_bytes_from_str'),
-                                  args=list(new.args), line=new.line, col=new.col)
+                                  args=list(new.args) + [G.StringLiteral(value='strict', line=new.line, col=new.col)],
+                                  line=new.line, col=new.col)
             if f.name == 'close' and len(new.args) == 1 and not kw:
                 return G.CallExpr(func=G.IdentExpr(name='mojo_os_close'),
                                   args=list(new.args), line=new.line, col=new.col)
@@ -7397,6 +7699,7 @@ def _cpp_drain_generator_args(gen, fn):
                       line=line),
         ]
         call.args = [G.IdentExpr(name=acc, line=line)] + list(call.args[1:])
+        _walk_ast_invalidate(call)
         return pre
 
     def walk(body):
@@ -7406,6 +7709,7 @@ def _cpp_drain_generator_args(gen, fn):
                 sub = getattr(st, fld, None)
                 if isinstance(sub, list):
                     setattr(st, fld, walk(sub))
+                    _walk_ast_invalidate(st)
             if (isinstance(st, G.ExprStmt) and isinstance(st.value, G.YieldFromExpr)
                     and is_wrapped_gen_call(st.value.value)):
                 out.extend(drain(st.value.value, st.line))
@@ -9964,6 +10268,10 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
             _yf_accessor = 'mojo_list_get_boxed'
         elif _yf_elem_ctype is not None:
             _yf_accessor = 'mojo_list_get_int'
+        elif (isinstance(call, gimple_ctypes.CallExpr)
+              and isinstance(call.func, gimple_ctypes.IdentExpr)
+              and call.func.name in ('_glob1', 'filter', 'sorted')):
+            _yf_accessor = 'mojo_list_get_boxed'
         else:
             _yf_accessor = 'mojo_list_get_str'
         result_init = _cpp_as('MojoList *', coll_expr)
@@ -10086,12 +10394,39 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
     gen._yield_from_seq = getattr(gen, '_yield_from_seq', 0) + 1
     guard = f"__mojogen_sub{gen._yield_from_seq}"
     args_text = ', '.join(arg_exprs)
+    # `yield from` forwards `send()` to the sub-generator, as Python does. The
+    # first step is Python's implicit `next()` on the sub-generator, which is
+    # `{sub_base}_resume` (it delivers the None box). Every later step hands
+    # the word the outer generator was just resumed with to `{sub_base}_send`,
+    # and the outer's own `co_yield` evaluates to that word (see cpp_async.py's
+    # `_step`/`_send` and `yield_value`'s awaiter).
+    _fw = gen._cpp_fresh_name("_mg_yf_word")
+    if sub_base.startswith('_mojogen_'):
+        # A C++20 sub-generator: its own `_resume`/`_send` entries (cpp_async.py).
+        _fw_decl = []
+        _fw_first = f"{sub_base}_resume({guard}.g)"
+        _fw_step = f"{sub_base}_send({guard}.g, {_fw})"
+    else:
+        # A stack-switch sub-generator (the mixed case: a cpp outer delegating
+        # to a `__mgco_` callee) has no `_resume`/`_send` symbols; its only
+        # entry is the runtime's `__mojo_gen_resume(gen, word)`, which both
+        # steps use (the first with the None box). The runtime's file-scope
+        # declaration is emitted by module_gen once this flag is set.
+        gen._cpp_runtime_gen_resume_used = True
+        _fw_decl = []
+        _fw_first = f"__mojo_gen_resume ((int64_t)(intptr_t){guard}.g, mojo_box_none())"
+        _fw_step = f"__mojo_gen_resume ((int64_t)(intptr_t){guard}.g, {_fw})"
     return [
         f"{indent}{{",
         f"{indent}    _mojogen_sub_guard {guard}"
         f"{{ {sub_base}_start({args_text}), &{sub_base}_destroy }};",
-        f"{indent}    while ({sub_base}_resume({guard}.g)) {{",
-        f"{indent}        co_yield {sub_base}_value({guard}.g);",
+        *_fw_decl,
+        f"{indent}    int64_t {_fw} = mojo_box_none();",
+        f"{indent}    if ({_fw_first}) {{",
+        f"{indent}        for (;;) {{",
+        f"{indent}            {_fw} = co_yield {sub_base}_value({guard}.g);",
+        f"{indent}            if (!{_fw_step}) break;",
+        f"{indent}        }}",
         f"{indent}    }}",
         # Milestone D: the sub-generator's own `_resume` (same wrapper
         # every compiled generator gets — see _gen_cpp_generator_unit)

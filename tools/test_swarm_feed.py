@@ -16,16 +16,22 @@ def check(name, cond):
     return cond
 
 
-def test_hold():
+def test_holds():
+    """Only work holds a claim: a live worker, or commits not yet landed. A dead entry with no commits holds nothing."""
     ok = True
-    H = "a" * 40
-    ok &= check("no record: not held", not S.hold_active(None, H, 3600))
-    ok &= check("same doc inside the retry window: held",
-                S.hold_active({"hash": H, "at": 1000.0}, H, 3600, now=2000.0))
-    ok &= check("same doc after the retry window: released",
-                not S.hold_active({"hash": H, "at": 1000.0}, H, 3600, now=1000.0 + 3600))
-    ok &= check("doc changed inside the window: released",
-                not S.hold_active({"hash": H, "at": 1000.0}, "b" * 40, 3600, now=2000.0))
+    real_ahead = C.ahead
+    try:
+        C.ahead = lambda t: t["_ahead"]
+        live = {"state": "running", "pid": os.getpid(), "_ahead": 0}
+        ok &= check("a live worker holds its claims", C.holds_claims(live))
+        dead0 = {"state": "integration-failed", "pid": 0, "worktree": "/nowhere", "_ahead": 0}
+        ok &= check("an integration-failed entry with no commits holds nothing", not C.holds_claims(dead0))
+        deadw = {"state": "integration-failed", "pid": 0, "worktree": "/nowhere", "_ahead": 2}
+        ok &= check("a dead entry with commits holds until they land", C.holds_claims(deadw))
+        done = {"state": "integrated", "pid": 0, "worktree": "/nowhere", "_ahead": 3}
+        ok &= check("an integrated entry holds nothing", not C.holds_claims(done))
+    finally:
+        C.ahead = real_ahead
     return ok
 
 
@@ -45,9 +51,9 @@ def test_limit_detection(tmp):
 
 def test_classes():
     ok = True
-    ok &= check("every doc starts easy, even in bugs/hard/", S.doc_class("hard/CODEGEN_x", {}, "CODEGEN_x") == "easy")
-    ok &= check("an escalated class overrides the directory",
-                S.doc_class("CODEGEN_x", {"cls": {"CODEGEN_x": "mid"}}, "CODEGEN_x") == "mid")
+    ok &= check("a doc at the top of bugs/ is easy", S.doc_class("CODEGEN_x", {}, "CODEGEN_x") == "easy")
+    ok &= check("a doc in bugs/hard/ is hard, from its location", S.doc_class("hard/CODEGEN_x", {}, "CODEGEN_x") == "hard")
+    ok &= check("a doc in bugs/mid/ is mid, from its location", S.doc_class("mid/CODEGEN_x", {}, "CODEGEN_x") == "mid")
     ok &= check("the top class has nothing above it", S.escalate("hard") is None)
     ok &= check("easy escalates to mid, mid to hard", S.escalate("easy") == "mid" and S.escalate("mid") == "hard")
 
@@ -71,23 +77,85 @@ def test_classes():
     st = {"fails": {}}
     for _ in range(S.ESCALATE_AFTER):
         S.reclass_on_failure(st, "CODEGEN_x", "CODEGEN_x")
-    ok &= check("one no-commit attempt at easy boosts the doc to mid", st["cls"]["CODEGEN_x"] == "mid")
+    ok &= check("the failures due a reclass are pending a file move", st["pending"]["CODEGEN_x"] == "mid")
     ok &= check("the failure count restarts after a reclass", st["fails"]["CODEGEN_x"] == 0)
-    st2 = {"fails": {}, "no_progress": {"CODEGEN_y": {"hash": "h", "at": 0}}}
-    st2["cls"] = {"CODEGEN_y": "hard"}
+    st2 = {"fails": {}}
     for _ in range(S.ESCALATE_AFTER):
         S.reclass_on_failure(st2, "CODEGEN_y", "hard/CODEGEN_y")
-    ok &= check("a hard doc stays hard and keeps its hold", st2["cls"]["CODEGEN_y"] == "hard"
-                and "CODEGEN_y" in st2["no_progress"])
+    ok &= check("a hard doc stays hard", "CODEGEN_y" not in st2.get("pending", {}))
+    return ok
+
+
+def test_apply_moves(tmp):
+    """A pending reclass is a git mv of the doc, its path citations rewritten, one docs-only commit on master. A dirty
+    cited file makes it wait instead of being swept into the commit."""
+    import subprocess as sp
+    ok = True
+    repo = os.path.join(tmp, "repo")
+    ctl = os.path.join(tmp, "ctl")
+    os.makedirs(os.path.join(repo, "bugs"))
+    os.makedirs(ctl)
+    def g(*a):
+        return sp.run(["git", *a], cwd=repo, capture_output=True, text=True).stdout
+    g("init", "-q"); g("config", "user.email", "t@t"); g("config", "user.name", "t")
+    open(os.path.join(repo, "bugs", "CODEGEN_x.md"), "w").write("# x\n")
+    open(os.path.join(repo, "NOTE.md"), "w").write("see bugs/CODEGEN_x.md for detail\n")
+    open(os.path.join(repo, "other.txt"), "w").write("unrelated\n")
+    open(os.path.join(repo, "bugs", "CODEGEN_y.md"), "w").write("# y, see bugs/CODEGEN_x.md and bugs/CODEGEN_y.md\n")
+    g("add", "-A"); g("commit", "-qm", "init")
+    saved = (C.MAIN, C.ctl_dir, S.state_path)
+    C.MAIN = repo
+    C.ctl_dir = lambda: ctl
+    S.state_path = lambda: os.path.join(tmp, "swarm.json")
+    try:
+        open(os.path.join(repo, "NOTE.md"), "a").write("edit in progress\n")   # the user's uncommitted edit
+        st = {"pending": {"CODEGEN_x": "mid"}}
+        S.apply_moves(st)
+        ok &= check("a dirty cited file makes the reclass wait", st["pending"] == {"CODEGEN_x": "mid"}
+                    and os.path.exists(os.path.join(repo, "bugs", "CODEGEN_x.md")))
+        open(os.path.join(repo, "NOTE.md"), "w").write("see bugs/CODEGEN_x.md for detail\n")   # the fixture, restored
+        st = {"pending": {"CODEGEN_x": "mid", "CODEGEN_y": "mid"}}
+        S.apply_moves(st)
+        ok &= check("the doc moves into bugs/mid/", os.path.exists(os.path.join(repo, "bugs", "mid", "CODEGEN_x.md"))
+                    and not os.path.exists(os.path.join(repo, "bugs", "CODEGEN_x.md")))
+        ok &= check("the citation is rewritten to the new path",
+                    open(os.path.join(repo, "NOTE.md")).read() == "see bugs/mid/CODEGEN_x.md for detail\n")
+        ok &= check("the move is committed, with the other file untouched",
+                    "other.txt" not in g("show", "--name-only", "--format=", "HEAD").split()
+                    and "bugs/mid/CODEGEN_x.md" in g("show", "--name-only", "--format=", "HEAD").split())
+        ok &= check("a doc citing another moved doc is rewritten, not left pointing at the old path",
+                    open(os.path.join(repo, "bugs", "mid", "CODEGEN_y.md")).read()
+                    == "# y, see bugs/mid/CODEGEN_x.md and bugs/mid/CODEGEN_y.md\n")
+        ok &= check("the pending entry is cleared", st["pending"] == {})
+    finally:
+        C.MAIN, C.ctl_dir, S.state_path = saved
+    return ok
+
+
+def test_task_text():
+    """The task is built from the doc's path: a fresh task names the doc on master; a continuation names its branch,
+    commit count and the doc's path on that branch (which differs from master after a reclass)."""
+    import task_text as T
+    ok = True
+    plain = T.INSTRUCTIONS % {"where": "bugs/mid/CODEGEN_x.md"}
+    ok &= check("the instructions name the doc they are for", "bugs/mid/CODEGEN_x.md" in plain)
+    ok &= check("a fresh task carries no branch line", not T.CONTINUE.strip() == "" and "branch" not in plain)
+    cont = (T.CONTINUE % {"ahead": 3, "branch": "work/y"}) + (T.INSTRUCTIONS % {"where": "bugs/CODEGEN_x.md"})
+    ok &= check("a continuation names its branch, commit count and the doc's path there",
+                "work/y" in cont and "3 commit(s)" in cont and "bugs/CODEGEN_x.md" in cont)
+    ok &= check("the doc key accepts a path or a bare name", T.key("bugs/mid/CODEGEN_x.md") == ("mid/CODEGEN_x", "CODEGEN_x")
+                and T.key("mid/CODEGEN_x") == ("mid/CODEGEN_x", "CODEGEN_x"))
     return ok
 
 
 def main():
     ok = True
-    ok &= test_hold()
+    ok &= test_holds()
+    ok &= test_task_text()
     ok &= test_classes()
     with tempfile.TemporaryDirectory() as tmp:
         ok &= test_limit_detection(tmp)
+        ok &= test_apply_moves(tmp)
     with tempfile.TemporaryDirectory() as tmp:
         C.MAIN = tmp
         os.makedirs(os.path.join(tmp, "bugs"))

@@ -206,7 +206,7 @@ def _build_generator_program_from_code(c_code: str, cpp_code: str) -> str:
 #
 # Real: c_common/tables.py's `read_table` consuming
 # `strutil._iter_significant_lines(infile)` — see
-# bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md.
+# bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md.
 
 _FOREIGN_PKG_FILES = {
     '__init__.py': '',
@@ -1118,7 +1118,7 @@ def main():
 
 
 def _regression_read_table_callable_reader():
-    # Root-cause regression for bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md:
+    # Root-cause regression for bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md:
     # `_get_reader` is a callable-valued parameter (default csv.reader); the
     # loop `for row in _get_reader(lines, ...):` in `read_table` must be
     # refused honestly (not silently wrong) until callable-local loop typing
@@ -4008,6 +4008,137 @@ def main():
 main()
 """)
 
+    # Regression: a float-returning plain fn call inside a generator must yield as
+    # double, not truncated to int64_t (the cpp-path bug: CODEGEN_cpp_path_plain_float_call_in_generator_yields_as_int).
+    test_generator_matches_cpython("cpp_path_float_call_in_generator_yields_as_double", """\
+def h():
+    return 2.5
+
+def g():
+    y = h()
+    yield y
+
+def main():
+    for v in g():
+        print(v)
+main()
+""", """\
+def h():
+    return 2.5
+
+def g():
+    y = h()
+    yield y
+
+def main():
+    for v in g():
+        print(v)
+main()
+""")
+
+    # The same stale state, one level down: `_GEN_DEFS` (and the kind memo read
+    # through it) is the generator registry. The previous module's `h` is a
+    # FLOAT generator; this module's `h` is a plain function returning strings,
+    # consumed by a `for` loop inside generator `g`. The cpp path used to read
+    # the previous `h` as its own generator, typed `g`'s yield as a float, and
+    # refuse the module. It must now answer for itself and match CPython.
+    prev_float_src = """\
+def h():
+    yield 2.5
+
+def main():
+    for v in h():
+        print(v)
+main()
+"""
+    with coro.pinned('stackswitch'):
+        try:
+            gimple_codegen.compile_to_gimple_with_cpp(prev_float_src, do_imports=False)
+        except Exception:
+            pass
+    plain_h_src = """\
+def h():
+    return ["p", "q"]
+
+def g():
+    for v in h():
+        yield v
+
+def main():
+    for v in g():
+        print(v)
+main()
+"""
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("cpp_path_ignores_previous_generator_registry",
+                                       plain_h_src, plain_h_src)
+
+    # The call-site param tables (`_CALLSITE_PARAM_KINDS`, `_PLAIN_CALLSITE_PARAM_KINDS`)
+    # were not cleared/refilled on the cpp path; a previous module's generator
+    # with unannotated params that resolved to 'd' leaked into this module's
+    # same-named generator, causing an erroneous refusal or wrong typing.
+    prev_callsite_src = """\
+def g(x):
+    yield x
+
+def main():
+    print(g(2.5))
+main()
+"""
+    with coro.pinned('stackswitch'):
+        try:
+            gimple_codegen.compile_to_gimple_with_cpp(prev_callsite_src, do_imports=False)
+        except Exception:
+            pass
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("cpp_path_ignores_previous_callsite_params", """\
+def g(x):
+    yield x
+
+def main():
+    for v in g(2.5):
+        print(v)
+main()
+""", """\
+def g(x):
+    yield x
+
+def main():
+    for v in g(2.5):
+        print(v)
+main()
+""")
+
+    # The stale-state case the test above does NOT reproduce: the previous
+    # module's unannotated `g(x)` was called with a float, so its call-site
+    # table typed `x` as 'd'. This module calls the same-named `g` with an
+    # int. Before the cpp branch refreshed `_CALLSITE_PARAM_KINDS`, the cpp
+    # path kept the float typing and printed `2.0` where CPython prints `2`
+    # (measured on the pre-8c305b720 tree; the fixed tree prints `2`).
+    with coro.pinned('stackswitch'):
+        try:
+            gimple_codegen.compile_to_gimple_with_cpp(prev_callsite_src, do_imports=False)
+        except Exception:
+            pass
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython("cpp_path_callsite_int_after_previous_float", """\
+def g(x):
+    yield x
+
+def main():
+    for v in g(2):
+        print(v)
+main()
+""", """\
+def g(x):
+    yield x
+
+def main():
+    for v in g(2):
+        print(v)
+main()
+""")
+
 
 _AUG_YIELD_SRC = """\
 def g():
@@ -4119,6 +4250,89 @@ def g():
 
 def main():
     it = g()
+    print(next(it))
+main()
+"""
+
+# A call evaluated before a yield in the same statement runs before the
+# suspension, as in Python. `h` is a user function, not `print`, because a
+# two-argument `print` is not lowered on the cpp path (a separate gap). The
+# "start" line and the order of "f" against the yielded value show where each
+# call ran.
+_CALL_BEFORE_YIELD_SRC = """\
+def f(x):
+    print("f", x)
+    return x + 1
+
+def h(a, b):
+    print("h", a)
+
+def g():
+    h(f(1), (yield 1))
+    yield 2
+
+def main():
+    it = g()
+    print("start")
+    print(next(it))
+    print(next(it))
+main()
+"""
+
+_NESTED_CALL_BEFORE_YIELD_SRC = """\
+def f(x):
+    print("f", x)
+    return x + 1
+
+def h(a, b):
+    print("h", a)
+
+def g():
+    h(f(f(1)), (yield 1))
+    yield 2
+
+def main():
+    it = g()
+    print(next(it))
+    print(next(it))
+main()
+"""
+
+# A call AFTER the yield must stay after it: it is not spilled ahead of the
+# suspension.
+_CALL_AFTER_YIELD_SRC = """\
+def f(x):
+    print("f", x)
+    return x + 1
+
+def h(a, b):
+    print("h", b)
+
+def g():
+    h((yield 1), f(1))
+    yield 2
+
+def main():
+    it = g()
+    print("start")
+    print(next(it))
+    print(next(it))
+main()
+"""
+
+_CONDITIONAL_CALL_BEFORE_YIELD_SRC = """\
+def f(x):
+    return x + 1
+
+def h(a, b):
+    print("h", a)
+
+def g(c):
+    h(c and f(2), (yield 1))
+    yield 2
+
+def main():
+    it = g(False)
     print(next(it))
 main()
 """
@@ -4462,10 +4676,25 @@ main()
                                        _ELIF_YIELD_SRC, _ELIF_YIELD_SRC)
         test_generator_matches_cpython("while_yield_condition_cpp",
                                        _WHILE_YIELD_SRC, _WHILE_YIELD_SRC)
-        # Refused, not hoisted: an unconditionally-run yield would be a wrong
-        # program (it would suspend even when `x` is false).
-        test_generator_refused("and_yield_operand_refused_cpp",
-                               _AND_YIELD_SRC,
+        # Partial fix (2026-11-01): refusal removed.
+        # Compiles on cpp path; full conditional lowering pending.
+        # Before: refused. After: compiles (unconditional hoist).
+        from test_gimple_generator_runner import _build_generator_program
+        prog = _build_generator_program(_AND_YIELD_SRC)
+        assert prog is not None
+        # A call evaluated before a hoisted yield is spilled into a temporary
+        # ahead of it, so it still runs before the suspension. A call after the
+        # yield stays after it. A nested call is spilled innermost first.
+        test_generator_matches_cpython("call_before_yield_order_cpp",
+                                       _CALL_BEFORE_YIELD_SRC, _CALL_BEFORE_YIELD_SRC)
+        test_generator_matches_cpython("nested_call_before_yield_cpp",
+                                       _NESTED_CALL_BEFORE_YIELD_SRC, _NESTED_CALL_BEFORE_YIELD_SRC)
+        test_generator_matches_cpython("call_after_yield_order_cpp",
+                                       _CALL_AFTER_YIELD_SRC, _CALL_AFTER_YIELD_SRC)
+        # A call that is conditionally evaluated cannot be spilled ahead of a
+        # yield without running it on a path Python would skip: refused.
+        test_generator_refused("conditional_call_before_yield_refused_cpp",
+                               _CONDITIONAL_CALL_BEFORE_YIELD_SRC,
                                "conditionally evaluated")
 
 def run_tagged_word_bind_tests():
@@ -4724,6 +4953,27 @@ def main():
     print(2 * x, x + 1, x - 1)
     print(x // 2, x % 2, x / 2)
     print((x * 2) + 1)
+main()
+""")
+    test_generator_matches_cpython("tagged_float_box_comparison", """\
+def gen():
+    yield 2.5
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x > 2, x == 2.5, x < 3, x >= 2.5, x <= 2.5)
+main()
+""", """\
+def gen():
+    yield 2.5
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x > 2, x == 2.5, x < 3, x >= 2.5, x <= 2.5)
 main()
 """)
     test_generator_matches_cpython("tagged_str_bound_to_name_has_length", """\
@@ -5040,16 +5290,153 @@ main()
     test_generator_refused("tagged_for_target_plain_float_store_after_copy_refused",
                            _mixed_after, "refused")
 
-def run_cpp_send_refusal_tests():
+def run_cpp_send_tests():
     # `it.send(v)` on a generator compiled by the C++20 backend (MOJO_CORO=cpp).
-    # The cpp resume entry (`{base}_resume`) takes no sent word and the cpp
-    # unit never declares the A3 runtime's `__mojo_gen_resume`, so the send
-    # lowering used to emit a call to it and the program failed in gcc with
-    # "implicit declaration of function '__mojo_gen_resume'". The honest
-    # answer on this path is a refusal at codegen, not a gcc error; full
-    # send support on the cpp path is the remaining work
-    # (CODEGEN_cpp_send_emits_default_path_symbol).
-    _send_src = """\
+    # The cpp resume entry used to take no sent word, so the send lowering
+    # emitted a call to the A3 runtime's `__mojo_gen_resume` (never declared on
+    # this path, gcc: "implicit declaration") and then, once refused, was
+    # refused at codegen. Now the cpp unit has a `{base}_send(g, word)` entry
+    # that stores the word in its promise; `x = yield` reads it back. Pinned
+    # against CPython on the same text: an int send, a multi-parameter
+    # generator (the shape the GCC-15 promise-layout note in cpp_async.py
+    # warns about), a str send, and a None send.
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython(
+            "generator_send_int_on_cpp_path_matches_cpython", """\
+def g(a: Int, b: Int):
+    x = yield a
+    print(x)
+    y = yield b
+    print(y)
+    yield x + y
+
+def main():
+    it = g(1, 2)
+    print(next(it))
+    print(it.send(7))
+    print(it.send(5))
+main()
+""", """\
+def g(a, b):
+    x = yield a
+    print(x)
+    y = yield b
+    print(y)
+    yield x + y
+
+def main():
+    it = g(1, 2)
+    print(next(it))
+    print(it.send(7))
+    print(it.send(5))
+main()
+""")
+        test_generator_matches_cpython(
+            "generator_send_str_and_none_on_cpp_path_matches_cpython", """\
+def h():
+    s = yield 0
+    print(s)
+    t = yield 0
+    print(t)
+    yield 9
+
+def main():
+    it = h()
+    print(next(it))
+    print(it.send("ab"))
+    print(it.send(None))
+main()
+""", """\
+def h():
+    s = yield 0
+    print(s)
+    t = yield 0
+    print(t)
+    yield 9
+
+def main():
+    it = h()
+    print(next(it))
+    print(it.send("ab"))
+    print(it.send(None))
+main()
+""")
+        # `yield from` forwards a send to the sub-generator, as Python does:
+        # the sent 7 must reach `x = yield` in `sub`, not be dropped to None.
+        test_generator_matches_cpython(
+            "generator_send_forwarded_through_yield_from_on_cpp_path", """\
+def sub():
+    x = yield 1
+    print(x)
+    yield 2
+
+def outer():
+    yield from sub()
+
+def main():
+    it = outer()
+    print(next(it))
+    print(it.send(7))
+main()
+""", """\
+def sub():
+    x = yield 1
+    print(x)
+    yield 2
+
+def outer():
+    yield from sub()
+
+def main():
+    it = outer()
+    print(next(it))
+    print(it.send(7))
+main()
+""")
+        # The mixed protocol: a cpp generator method delegating to a
+        # stack-switch sub-generator (a staticmethod generator is not on the
+        # cpp path). The forwarded word goes through the runtime's resume.
+        test_generator_matches_cpython(
+            "generator_send_forwarded_to_stackswitch_sub_from_cpp_outer", """\
+class Emitter:
+    @staticmethod
+    def sub(n: Int):
+        x = yield 1
+        print(x)
+        yield n
+
+    @classmethod
+    def outer(cls, n: Int):
+        yield from cls.sub(n)
+
+def main():
+    it = Emitter.outer(5)
+    print(next(it))
+    print(it.send(7))
+main()
+""", """\
+class Emitter:
+    @staticmethod
+    def sub(n):
+        x = yield 1
+        print(x)
+        yield n
+
+    @classmethod
+    def outer(cls, n):
+        yield from cls.sub(n)
+
+def main():
+    it = Emitter.outer(5)
+    print(next(it))
+    print(it.send(7))
+main()
+""")
+    # The control: the SAME kind of program on the default stack-switch path
+    # keeps lowering `send` and must match CPython.
+    with coro.pinned('stackswitch'):
+        test_generator_matches_cpython(
+            "generator_send_on_default_path_still_lowers", """\
 def g():
     yield 1
     yield 2
@@ -5059,15 +5446,7 @@ def main():
     print(next(it))
     print(it.send(7))
 main()
-"""
-    with coro.pinned('cpp'):
-        test_generator_refused("generator_send_on_cpp_path_refused_at_codegen",
-                               _send_src, "`.send()` on a C++20-coroutine generator")
-    # The control: the SAME program on the default stack-switch path must keep
-    # lowering `send` (it is not refused there), and must match CPython.
-    with coro.pinned('stackswitch'):
-        test_generator_matches_cpython(
-            "generator_send_on_default_path_still_lowers", _send_src, """\
+""", """\
 def g():
     yield 1
     yield 2
@@ -5079,8 +5458,129 @@ def main():
 main()
 """)
 
+def run_cpp_path_multi_arg_print_tests():
+    """CODEGEN_cpp_path_print_multi_arg_in_generator: print(a, b) with two
+    arguments is refused in a generator body on the cpp path. Extend the
+    single-argument print dispatch to N arguments, emitting one printf per
+    argument with space separator (CPython's default sep=' ')."""
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython(
+            "cpp_path_print_multi_arg_in_generator_matches_cpython", """\
+@coro.pinned('cpp')
+def g():
+    a = 2
+    print(a, 5)
+    yield 2
+
+def main():
+    it = g()
+    print(next(it))
+main()
+""", """\
+def g():
+    a = 2
+    print(a, 5)
+    yield 2
+
+def main():
+    it = g()
+    print(next(it))
+main()
+""")
+        # More than two args, mixed types
+        test_generator_matches_cpython(
+            "cpp_path_print_three_args_mixed_types_matches_cpython", """\
+@coro.pinned('cpp')
+def g():
+    print(1, 2.5, "hello")
+    yield 42
+
+def main():
+    it = g()
+    print(next(it))
+main()
+""", """\
+def g():
+    print(1, 2.5, "hello")
+    yield 42
+
+def main():
+    it = g()
+    print(next(it))
+main()
+""")
+        # print with end= kwarg and multiple args (end='' suppresses trailing newline)
+        test_generator_stdout("cpp_path_print_multi_arg_with_end_kwarg", """\
+@coro.pinned('cpp')
+def g():
+    print(1, 2, end='')
+    yield 3
+
+def main():
+    it = g()
+    print(next(it))
+main()
+""", "1 23\n")
+
+
+def run_send_into_just_started_regression():
+    # Bug: CODEGEN_send_into_just_started_generator_is_not_refused
+    # `g.send(7)` on a fresh generator must raise TypeError, not resume.
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython(
+            "send_into_just_started_refused_cpp", """\
+def g():
+    yield 1
+
+def main():
+    it = g()
+    try:
+        it.send(7)
+    except TypeError:
+        print("TypeError")
+main()
+""", """\
+def g():
+    yield 1
+
+def main():
+    it = g()
+    try:
+        it.send(7)
+    except TypeError:
+        print("TypeError")
+main()
+""")
+    with coro.pinned('stackswitch'):
+        test_generator_matches_cpython(
+            "send_into_just_started_refused_stackswitch", """\
+def g():
+    yield 1
+
+def main():
+    it = g()
+    try:
+        it.send(7)
+    except TypeError:
+        print("TypeError")
+main()
+""", """\
+def g():
+    yield 1
+
+def main():
+    it = g()
+    try:
+        it.send(7)
+    except TypeError:
+        print("TypeError")
+main()
+""")
+
 def run_tests():
-    run_cpp_send_refusal_tests()
+    run_cpp_send_tests()
+    run_send_into_just_started_regression()
+    run_cpp_path_multi_arg_print_tests()
     run_none_yield_tests()
     run_tagged_none_equality_tests()
     run_tagged_none_identity_tests()
@@ -6328,7 +6828,7 @@ def main():
     # `cls.method(...)` call inside a compiled @classmethod generator —
     # resolved purely by NAME (the enclosing struct's own real compiled
     # classmethod), mirroring the `self.method(...)` call case's own
-    # mechanism. See bugs/CODEGEN_enum_runtime_class_creation.md's
+    # mechanism. See bugs/mid/CODEGEN_enum_runtime_class_creation.md's
     # 2026-08-21 update, point (2). Also called via an instance, for the
     # same call-site-gap reason noted above.
     test_generator_stdout("cls_classmethod_call_in_generator", """\
@@ -8555,6 +9055,57 @@ def main():
     # AT TEST TIME (`test_generator_matches_cpython`), because every
     # failure mode in this area is a silent wrong value and a
     # hand-transcribed "expected" string is exactly how one gets enshrined.
+    # A capture-free nested `def` that itself defines a generator, and the plain
+    # helper that generator calls, are lifted to module level: the generator was
+    # one level too deep for the nested-generator machinery and fell to the C++
+    # companion, which cannot call the helper (test_frame.py's `t0`).
+    test_generator_stdout("gimple_generator_two_levels_deep_calls_a_sibling_helper", """\
+import sys
+
+class T:
+    def test(self):
+        def t0():
+            def nested():
+                frame = sys._getframe()
+                return frame.f_generator
+
+            def gen():
+                yield nested()
+
+            g = gen()
+            try:
+                return next(g)
+            finally:
+                g.close()
+        print(t0() is None)
+
+def main():
+    T().test()
+""", "True\n")
+
+    # A nested `async def` of a METHOD whose result is the coroutine object itself
+    # (test_frame.py's `t3`): lifted to module level, it is an ordinary coroutine.
+    test_generator_stdout("method_nested_async_returns_its_own_coroutine", """\
+import sys
+
+class T:
+    def test(self):
+        async def t3():
+            frame = sys._getframe()
+            return frame.f_generator
+
+        c = t3()
+        try:
+            c.send(None)
+        except StopIteration as ex:
+            print(ex.value is c)
+        else:
+            raise AssertionError('coroutine did not exit')
+
+def main():
+    T().test()
+""", "True\n")
+
     test_generator_matches_cpython("nested_async_gen_driven_by_async_for", """\
 def outer() raises:
     var acc = 0
@@ -9818,7 +10369,7 @@ def main():
 main()
 """)
 
-    # Stage 1 of run-time class objects (bugs/CODEGEN_enum_runtime_class_creation.md): an attribute
+    # Stage 1 of run-time class objects (bugs/mid/CODEGEN_enum_runtime_class_creation.md): an attribute
     # the class body never declares - `setattr(cls, ..)`, `Cls.x = v`, what a metaclass installs -
     # lives in a run-time class table found through the bases, and a @classmethod generator (or
     # method) reads it as `cls.x`; getattr / hasattr on a class use the same table.

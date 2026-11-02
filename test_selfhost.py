@@ -32,6 +32,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S
 
 REPO = os.path.dirname(os.path.abspath(__file__))
 
@@ -119,7 +120,7 @@ def build_scratch_is_private_and_removed() -> bool:
                       "just the source and the executable")
                 return False
             r = subprocess.run([out], capture_output=True, text=True,
-                               timeout=120)
+                               timeout=RUN_TIMEOUT_S)
             if r.returncode != 0 or r.stdout.strip() != want:
                 print(f"  ✗ {out} printed {r.stdout.strip()!r} "
                       f"(rc={r.returncode}), want {want!r} — the two "
@@ -379,7 +380,7 @@ def run_produced_binary(exe: str, td: str) -> tuple:
     with open(prog, "w") as f:
         f.write(TWO_LINE)
     r = subprocess.run([exe, "--dump-full", prog], cwd=td,
-                       capture_output=True, text=True, timeout=300)
+                       capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
     ci = os.path.join(td, "probe.ci")
     text = ""
     if os.path.exists(ci):
@@ -390,7 +391,7 @@ def run_produced_binary(exe: str, td: str) -> tuple:
     with open(prog2, "w") as f:
         f.write(CALL_PROGRAM)
     r2 = subprocess.run([exe, "--dump-full", prog2], cwd=td,
-                        capture_output=True, text=True, timeout=300)
+                        capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
     ci2 = os.path.join(td, "probe_call.ci")
     text2 = ""
     if os.path.exists(ci2):

@@ -2520,7 +2520,7 @@ def _seed_direct_ctor(gen, work, mm, base, node, fsrc, home, scope, stmts,
         pnames = [f'_direct_arg_{i}' for i in range(len(args_nodes))]
     wrapper_mangled = mm.mangle(base, dict(zip(tparams, targs)))
     _register_named(gen, home, [base])
-    records[iter_factory.factory_call_key(base, node)] = {
+    rec = {
         'name': base, 'wrapper': base, 'wrapper_param': None,
         'wrapper_mangled': wrapper_mangled, 'inner_mangled': None,
         'inner_mention': None, 'kind': 'direct', 'elem': None,
@@ -2534,8 +2534,9 @@ def _seed_direct_ctor(gen, work, mm, base, node, fsrc, home, scope, stmts,
         # constructor-based field copy, not the identity aliasing the old
         # gate left in place.
         'local_inner': targs}
+    records[iter_factory.factory_call_key(base, node)] = rec
     work.enqueue(('struct', base, tuple(targs)), 0, queue)
-    return wrapper_mangled
+    return rec
 
 
 # ── PART 6 (2026-10-23, family S — test/collections/string/test_iterators)

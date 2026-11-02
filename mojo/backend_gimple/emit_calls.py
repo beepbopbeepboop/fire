@@ -328,6 +328,14 @@ def _tagged_word_value(gen, node) -> str:
     return w
 
 
+def _stop_value_attach(gen, av, base) -> None:
+    """Right after the exhaustion `mojo_exc_type_set(StopIteration)`: hand the finished generator's
+    `return` value to the exception (`ex.value`). Only a stack-switch generator (`__mgco_`) has the
+    runtime handle that holds it; a C++20-coroutine generator keeps the old (None) answer."""
+    if _as_str(base).startswith('__mgco_'):
+        gen._void_call('__mojo_gen_stop_value', [('int64_t', gen._to_int64('MojoGenerator *', av))])
+
+
 def _lower_generator_next(gen, av: str, api: dict) -> tuple[str, str]:
     # An async GENERATOR's yield channel carries a wait-descriptor
     # (is_wd=1) for every parking `await` as well as a real value (is_wd=0)
@@ -359,6 +367,7 @@ def _lower_generator_next(gen, av: str, api: dict) -> tuple[str, str]:
     gen._emit_generator_pending_exc_check(av, base, False, bb_stopiter)
     gen._emit_label(bb_stopiter)
     gen._emit(f"  mojo_exc_type_set ({gen._exc_type_id('StopIteration')});")
+    _stop_value_attach(gen, av, base)
     gen._emit("  mojo_raise ();")
     gen._emit(f"  goto {bb_merge};")
     gen._emit_label(bb_ok)
@@ -394,24 +403,23 @@ def _lower_generator_send(gen, node, av: str, api: dict) -> tuple[str, str]:
     including the StopIteration on exhaustion (the generator protocol's
     uniform "ran out of values" signal, not a silent end).
 
-    This is the SAME resume the `<base>_resume` trampoline performs, with a
-    non-zero send payload: `__mojo_gen_resume(gen, send)` is the runtime
-    entry both funnel into, so no new ABI is involved. The per-generator
-    `<base>_resume(g)` wrapper hardcodes a 0 send, which is why this calls
-    the runtime function directly rather than through the trampoline."""
-    if _as_str(api.get('base', '')).startswith('_mojogen_'):
-        # A C++20-coroutine generator (MOJO_CORO=cpp): its resume entry
-        # (`{base}_resume`) takes no sent word, and the cpp unit never
-        # declares the stack-switch runtime's `__mojo_gen_resume` that this
-        # lowering calls, so the program failed in gcc with an implicit
-        # declaration. Refused honestly here until the cpp resume carries the
-        # sent word (CODEGEN_cpp_send_emits_default_path_symbol). Same prefix
-        # test `_lower_generator_close` uses to tell the two protocols apart.
+    Two resume entries carry the sent word, one per backend:
+    - the default stack-switch path: `__mojo_gen_resume(gen, send)`, the
+      runtime entry the `<base>_resume(g)` trampoline also funnels into (it
+      hardcodes a 0 send, which is why this calls the runtime directly);
+    - the C++20 path (`_mojogen_` base): `{base}_send(g, send)`, the unit's
+      own entry, which stores the word where the suspended `x = yield` reads
+      it (cpp_async.py's generator promise). `{base}_resume` is the same
+      resume with the None box."""
+    is_cpp = _as_str(api.get('base', '')).startswith('_mojogen_')
+    if is_cpp and api.get('is_async_gen'):
+        # An async generator's yield channel carries wait-descriptors as well
+        # as values (see _lower_generator_next), so a sent word has no
+        # consumer-side protocol to ride on yet on the cpp path.
         raise gimple_exprtypes._UnsupportedGeneratorShape(
-            "`.send()` on a C++20-coroutine generator is not supported: the "
-            "cpp resume entry takes no sent value, so the send cannot reach "
-            "the generator's `yield` (MOJO_CORO=cpp; the default stack-switch "
-            "path supports send)")
+            "`.send()` on a C++20-coroutine async generator is not supported: "
+            "its yield channel carries wait-descriptors, so the sent word has "
+            "no protocol on that path (MOJO_CORO=cpp)")
     vct = api['value_ctype']
     if len(node.args) == 1:
         arg = node.args[0]
@@ -427,8 +435,11 @@ def _lower_generator_send(gen, node, av: str, api: dict) -> tuple[str, str]:
             send = _gen_slot_box(gen, st, sv, vct)
     else:
         send = '0'
-    handle = gen._to_int64('MojoGenerator *', av)
-    resumed = gen._new_val('_Bool', f"__mojo_gen_resume ({handle}, {send})")
+    if is_cpp:
+        resumed = gen._new_val('_Bool', f"{api['base']}_send ({av}, {send})")
+    else:
+        handle = gen._to_int64('MojoGenerator *', av)
+        resumed = gen._new_val('_Bool', f"__mojo_gen_resume ({handle}, {send})")
     bb_ok = gen._new_bb(); bb_exhausted = gen._new_bb(); bb_merge = gen._new_bb()
     bb_stopiter = gen._new_bb()
     gen._emit(f"  if ({resumed}) goto {bb_ok}; else goto {bb_exhausted};")
@@ -436,6 +447,7 @@ def _lower_generator_send(gen, node, av: str, api: dict) -> tuple[str, str]:
     gen._emit_generator_pending_exc_check(av, api['base'], False, bb_stopiter)
     gen._emit_label(bb_stopiter)
     gen._emit(f"  mojo_exc_type_set ({gen._exc_type_id('StopIteration')});")
+    _stop_value_attach(gen, av, api['base'])
     gen._emit("  mojo_raise ();")
     gen._emit(f"  goto {bb_merge};")
     gen._emit_label(bb_ok)
@@ -495,6 +507,7 @@ def _lower_generator_throw(gen, node, av: str, api: dict) -> tuple[str, str]:
     gen._emit_generator_pending_exc_check(av, api['base'], False, bb_stopiter)
     gen._emit_label(bb_stopiter)
     gen._emit(f"  mojo_exc_type_set ({gen._exc_type_id('StopIteration')});")
+    _stop_value_attach(gen, av, api['base'])
     gen._emit("  mojo_raise ();")
     gen._emit(f"  goto {bb_merge};")
     gen._emit_label(bb_ok)
@@ -1562,7 +1575,7 @@ def _lower_class_attr_builtin(gen, node, fn):
 def _lower_type_new(gen, node, args=None, meta=None):
     """`type(name, (Base, ..), {'attr': value, ..})` with a literal base tuple/list and a literal
     dict of string keys: a class made at run time (stage 3 of
-    bugs/CODEGEN_enum_runtime_class_creation.md). It is a class-table entry (`mojo_type_new`) whose
+    bugs/mid/CODEGEN_enum_runtime_class_creation.md). It is a class-table entry (`mojo_type_new`) whose
     bases are the listed classes and whose dict starts from the namespace; the value is a class
     handle word that `Foo.x`, `Foo.x = v` and `getattr(Foo, ..)` read through the class table.
     None when the arguments are not that literal shape (the caller refuses by name).
@@ -3526,9 +3539,10 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         if at in ('char *', 'MojoStr *'):
             sv = av if at == 'char *' else gen._stringify_value(at, av)
             enc = gen._new_val('char *', gen._intern_string('utf-8'))
+            err = gen._new_val('char *', gen._intern_string('strict'))
             return 'MojoBytes *', gen._call_expr(
                 'MojoBytes *', 'mojo_bytes_from_str',
-                [('char *', sv), ('char *', enc)])
+                [('char *', sv), ('char *', enc), ('char *', err)])
         if at in ('MojoList *', 'MojoDict *', 'MojoSet *', 'void *'):
             # `bytes(a_dict)`/`bytes(a_set)` of ints is real Python (an
             # iterable of ints is a valid bytes() source; a dict's own
@@ -3565,8 +3579,9 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         elif at in ('char *', 'MojoStr *'):
             sv = av if at == 'char *' else gen._stringify_value(at, av)
             enc = gen._new_val('char *', gen._intern_string('utf-8'))
+            err = gen._new_val('char *', gen._intern_string('strict'))
             _b = gen._call_expr('MojoBytes *', 'mojo_bytes_from_str',
-                                [('char *', sv), ('char *', enc)])
+                                [('char *', sv), ('char *', enc), ('char *', err)])
         elif at in ('MojoList *', 'MojoDict *', 'MojoSet *', 'void *'):
             # `bytearray(a_dict)`/`bytearray(a_set)` of ints - same real
             # Python shape as bytes() above.
@@ -3639,12 +3654,23 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # any side effects a real decode call would have), just discarded.
     if (fname_raw == 'str' and len(node.args) in (2, 3)
             and not gen._locally_binds_name('str')):
+        # str(data, encoding[, errors]): the DECODE of a bytes object. The
+        # encoding is the second argument, errors the third (default
+        # 'strict', as in CPython); both are threaded to the runtime decode.
         et, ev = gen.lower_expr(node.args[0])
-        for _extra in node.args[1:]:
-            gen.lower_expr(_extra)
-        if et != 'char *':
-            ev = gen._stringify_value(et, ev)
-        return 'char *', ev
+        enc_t, enc_v = gen.lower_expr(node.args[1])
+        enc = enc_v if enc_t == 'char *' else gen._coerce_to_type(enc_t, 'char *', enc_v)
+        if len(node.args) == 3:
+            err_t, err_v = gen.lower_expr(node.args[2])
+            err = err_v if err_t == 'char *' else gen._coerce_to_type(err_t, 'char *', err_v)
+        else:
+            err = gen._intern_string('strict')
+        if et == 'MojoBytes *':
+            return 'char *', gen._call_expr('char *', 'mojo_bytes_decode',
+                                            [('MojoBytes *', ev), ('char *', enc), ('char *', err)])
+        # a value whose kind only the runtime knows (a bytes or a str word)
+        return 'char *', gen._call_expr('char *', 'mojo_str_from_word',
+                                        [('int64_t', gen._to_int64(et, ev)), ('char *', enc), ('char *', err)])
 
     # pow(base, exp, mod): real Python's 3-arg modular-exponentiation
     # form -- integer semantics, entirely distinct from the ordinary
@@ -4070,6 +4096,9 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         # safe's own type); the old 'int' boxed the 64-bit tag into a 32-bit
         # temp, a hard gcc "invalid conversion in gimple call" error.
         av64 = gen._new_val('int64_t', f"(int64_t){av}")
+        if gen._rt_classes_made:
+            # a run-time class's metaclass / an instance's class, else the struct tag
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_type_of', [('int64_t', av64)])
         return 'int64_t', gen._new_val('int64_t', f"mojo_read_type_tag_safe ({av64})")
     if fname_raw == 'setattr' and len(node.args) >= 3:
         pairs = [gen.lower_expr(a) for a in node.args[:3]]
@@ -4496,7 +4525,12 @@ def _isinstance_one_type(gen, obj_type: str, obj_val: str, type_name: str) -> st
                            [('int64_t', gen._to_int64(obj_type, obj_val)), ('int64_t', cw)])
         return gen._new_val('_Bool', f'(_Bool){r}')
     if type_name == 'type':
-        return gen._new_val('_Bool', '0')  # isinstance(x, type) always false in C
+        if gen._rt_classes_made:
+            # a class made at run time is an instance of `type`
+            r = gen._call_expr('int', 'mojo_isinstance_type',
+                               [('int64_t', gen._to_int64(obj_type, obj_val))])
+            return gen._new_val('_Bool', f'(_Bool){r}')
+        return gen._new_val('_Bool', '0')  # no run-time class in this module: nothing is a `type`
     if type_name == 'tuple':
         # A tuple's runtime representation is a MojoList carrying the
         # `mojo_mark_as_tuple` marker (see _lower_tuple_literal). Neither
@@ -10539,8 +10573,8 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
 
     if ot == 'MojoStr *':
         idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
-        t = gen._new_val('char', f"mojo_str_char_at ({ov}, {idx64})")
-        return 'char', t
+        t = gen._new_val('char *', f"mojo_char_at_str_cp (mojo_str_data({ov}), {idx64})")
+        return 'char *', t
 
     if ot == 'MojoBytes *':
         # b[i] -> int 0-255 (never a 1-char str; bytes is not conflated
@@ -10636,7 +10670,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             # `_mojo_at_char` is not emitted here: it returns a pointer INTO
             # the string, which is not NUL-terminated and so is not a str.
             return 'char *', gen._new_val(
-                'char *', f"mojo_char_at_str ({cp}, {idx64})")
+                'char *', f"mojo_char_at_str_cp ({cp}, {idx64})")
         # A STRING index proves the container is a dict even when its own
         # type is opaque: no list is indexable by a string. `pat.fields`
         # in ast_rewriter.py is exactly this — the A5 boxed-member read
@@ -10826,16 +10860,9 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
     # in the generated C is a reader's false lead about what the subscript
     # costs (it is how the leak below survived a reading of the C).
     if et == 'char':
-        # `mojo_char_at_str` rather than a `char`-taking helper: gimple
-        # rejects a `char` argument ("invalid argument to gimple call"),
-        # since a char is promoted to int64_t non-trivially. It is
-        # `mojo_char_to_str` reached through the string and the index, so it
-        # shares the immortal 256-entry table — a character costs no
-        # allocation. `mojo_cstr_slice(ov, i, i + 1)` was correct and leaked
-        # one malloc per character with no owner; see the boxed-receiver
-        # branch above, which is the same shape and the same fix.
+        # Codepoint-aware indexing
         return 'char *', gen._new_val(
-            'char *', f"mojo_char_at_str ({ov}, {idx64})")
+            'char *', f"mojo_char_at_str_cp ({ov}, {idx64})")
     gen._ptr_helpers_needed.add(et)
     addr = gen._new_val(ot, f"_mojo_at_{cn} ({ov}, {idx64})")
     # Can't dereference void* (no element type); return the pointer itself
@@ -11054,15 +11081,8 @@ def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
         return 'Span *', t
 
     if ot == 'char *':
-        # A plain (non-MojoStr-wrapped) Python str, boxed as char* — a
-        # NUL-terminated C string has no length field to bound a slice
-        # copy against, unlike MojoStr's `->len`. The generic "plain
-        # pointer" fallback below just adds `start` to the pointer,
-        # which happens to look right for `s[start:]` (the tail reads
-        # correctly to the string's own real end) but silently drops
-        # `stop` entirely for `s[:stop]`/`s[start:stop]` — no truncation
-        # ever happens. See mojo_cstr_slice in runtime/fire_runtime.c.
-        t = gen._new_val('char *', f"mojo_cstr_slice ({ov}, {start_v}, {stop_v})")
+        # Codepoint-aware slicing for char* strings
+        t = gen._new_val('char *', f"mojo_cstr_slice_cp ({ov}, {start_v}, {stop_v})")
         return 'char *', t
 
     if ot == 'int64_t':

@@ -34,6 +34,7 @@ def main():
     print(sorted(glob.glob(ROOT + '/**', recursive=True)))
     print(sorted(glob.glob(ROOT + '/**/*.py', recursive=True)))
     print(sorted(glob.glob('*.py', root_dir=ROOT)))
+    print(sorted(glob.glob(b'*.py', root_dir=ROOT.encode())))
     print(sorted(glob.glob('**/*.py', root_dir=ROOT, recursive=True)))
     print(sorted(glob.glob('**/', root_dir=ROOT, recursive=True)))
     print(sorted(glob.glob(ROOT + '/nothing*')))

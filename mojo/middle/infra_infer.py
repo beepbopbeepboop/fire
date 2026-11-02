@@ -1789,6 +1789,13 @@ def _collect_return_types(gen, stmts: list, acc: list):
                 gen._collect_return_types(node.else_body, acc)
         elif isinstance(node, (gimple_ctypes.WhileStmt, gimple_ctypes.ForStmt)):
             gen._collect_return_types(node.body, acc)
+            if node.else_body:
+                gen._collect_return_types(node.else_body, acc)
+        elif isinstance(node, gimple_ctypes.MatchStmt):
+            # A function whose `return`s are all inside `match` arms had NO return statement as
+            # far as this scan could see, so it was typed `void` (or `int64_t`) and handed back 0.
+            for _mc in node.cases:
+                gen._collect_return_types(_mc.body, acc)
         elif isinstance(node, gimple_ctypes.TryStmt):
             gen._collect_return_types(node.body, acc)
             for h in node.handlers:
@@ -2168,7 +2175,7 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
             # s` printed the pointer's decimal address instead of "abc"
             # until this case was added; the container literals below
             # already had an identical fix.
-            cand = 'MojoBytes *' if n.value.is_bytes else 'char *'
+            cand = 'MojoBytes *' if getattr(n.value, 'is_bytes', False) else 'char *'
         elif isinstance(n.value, gimple_ctypes.FloatLiteral):
             # A `double` local, which is the ONE scalar this map used to
             # have no answer for at all — the docstring above calls scalars
@@ -3109,6 +3116,23 @@ def _build_fresh_returning(funcs: dict, structs: dict = None) -> set:
             pass
     return out
 
+def _build_fresh_closure_returning(funcs: dict) -> set:
+    """Names in the analysis table whose every call provably returns a brand-
+    new CAPTURING closure (ownership_destruct.returns_fresh_closure) — a value
+    the caller can own and free with its environment and the `{mut}` boxes it
+    holds (mojo_closure_free). The escaping counterpart of `_build_fresh_
+    returning` (a fresh container). Same fail-open-to-"not proven" contract: a
+    failure inside the analysis drops the name, which keeps today's leak and
+    never a use-after-free."""
+    out = set()
+    for name in funcs:
+        try:
+            if ownership_destruct.returns_fresh_closure(funcs[name]):
+                out.add(name)
+        except Exception:
+            pass
+    return out
+
 def _compute_owned_free_candidates(fn, funcs: dict = None, structs: dict = None) -> set:
     """Returns the set of local names in `fn` safe to `mojo_*_free` at
     every return/fallthrough point, or an empty set if `fn` isn't eligible
@@ -3314,6 +3338,50 @@ def _compute_scoped_closure_candidates(fn, whole: set) -> set:
     except Exception:
         return set()
 
+def _is_fresh_closure_binding(stmt, fresh_closure_returning) -> bool:
+    """True iff `stmt` is a `var x = f(...)`/`x = f(...)` whose callee `f` is
+    proven to return a fresh closure (`fresh_closure_returning`) — the shape a
+    caller owns with `mojo_closure_free`. A shadowed name (a local of this
+    function named `f`) is not the module callee, so it is not a binding."""
+    val = getattr(stmt, 'value', None)
+    if val is None or not isinstance(val, CallExpr):
+        return False
+    if not isinstance(val.func, IdentExpr):
+        return False
+    return _as_str(val.func.name) in fresh_closure_returning
+
+def _compute_scoped_fresh_closure_candidates(fn, fresh_closure_returning) -> set:
+    """The locals of `fn` bound to a call that provably returns a fresh
+    closure, owned by a LOOP BODY (declared directly in it and only called,
+    `ownership_destruct.call_value_owned`), so the caller owns the value and
+    frees it with `mojo_closure_free` at the body's exit. The escaping
+    counterpart of `_compute_scoped_closure_candidates` (a local lambda). Same
+    fail-open-to-"free nothing" contract: a bug in this optional analysis must
+    never fail a build, and "not proven" keeps today's leak, never a use-after-
+    free. An empty `fresh_closure_returning` (no such callee in the module) is
+    the common case and costs one set lookup."""
+    if getattr(fn, 'is_async', False) or getattr(fn, 'is_generator', False):
+        return set()
+    if not fresh_closure_returning:
+        return set()
+    try:
+        out = set()
+        bodies = []
+        ownership_destruct._collect_loop_bodies(fn.body, bodies)
+        for body in bodies:
+            for st in body:
+                nm = ownership_destruct._decl_name(st)
+                if nm == '':
+                    continue
+                if not _is_fresh_closure_binding(st, fresh_closure_returning):
+                    continue
+                if not ownership_destruct.call_value_owned(fn.body, nm):
+                    continue
+                out.add(nm)
+        return out
+    except Exception:
+        return set()
+
 def _lambda_bindings(fn) -> set:
     """Every name `fn` binds to a `lambda` expression, however deeply — the
     whole-program node walk `exprtypes._walk_ast` already provides, not a
@@ -3347,6 +3415,18 @@ def _lambda_owned(body, name: str) -> bool:
     False, so an unanalysable body keeps the value alive."""
     try:
         return ownership_destruct.lambda_value_owned(body, name)
+    except Exception:
+        return False
+
+
+def _call_value_owned(body, name: str) -> bool:
+    """A local bound to the return value of a fresh-closure-returning call may
+    be freed at its end-of-scope only if the binding is a CallExpr whose callee
+    is such a fn, and the name is neither read nor written again afterwards
+    (see ownership_destruct.call_value_owned). A failure inside the check
+    answers False, so an unanalysable body keeps the value alive."""
+    try:
+        return ownership_destruct.call_value_owned(body, name)
     except Exception:
         return False
 

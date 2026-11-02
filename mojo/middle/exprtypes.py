@@ -749,6 +749,13 @@ def is_python_bool_expr(gen, node) -> bool:
     if isinstance(node, MemberExpr):
         return _is_python_bool_field(gen, node)
     if isinstance(node, CallExpr):
+        # The read of a boxed (nested-def captured) local: `__mojo_box_get_i64(n)`
+        # holds the bool iff `n` was bound to one (`_record_bool_valued` looks
+        # through the `__mojo_box_new_i64(...)` of the first binding).
+        if (isinstance(node.func, IdentExpr) and node.func.name == '__mojo_box_get_i64'
+                and len(node.args) == 1 and isinstance(node.args[0], IdentExpr)
+                and node.args[0].name in getattr(gen, '_bool_valued', ())):
+            return True
         return _is_python_bool_method(gen, node)
     try:
         return gen._quick_type(node) == '_Bool'
@@ -999,9 +1006,11 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
             return 'double'
         return 'int64_t'
     if isinstance(e, CallExpr) and isinstance(e.func, IdentExpr):
-        if e.func.name in ('str', 'String', 'repr', 'os.path.join', 'os.path.basename', 'os.path.dirname', 'os.path.splitext', 'mojo_dirent_name', 'mojo_dirent_path'):
+        if e.func.name in ('str', 'String', 'repr', 'os.path.join', 'os.path.basename', 'os.path.dirname', 'os.path.splitext'):
             return 'char *'
-        if e.func.name in ('len', 'ord'):
+        if e.func.name in ('len', 'ord', 'mojo_dirent_name', 'mojo_dirent_path', 'mojo_fsencode_w'):
+            # DirEntry.name/.path and os.fsencode: a pointer WORD (a str or a
+            # bytes, by the value's kind at run time) -- the runtime's int64_t
             return 'int64_t'
         if e.func.name in ('mojo_os_scandir', 'mojo_list_slice_word'):
             return 'MojoList *'
@@ -1046,7 +1055,7 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
             return known[e.func.name]
         if fn_return_types is not None:
             _frt = fn_return_types.get(e.func.name)
-            if isinstance(_frt, str) and (_frt in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *') or (_frt.endswith(' *') and known_structs is not None and (_frt[:-2] in known_structs))):
+            if isinstance(_frt, str) and (_frt in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *', 'double', 'int64_t', '_Bool') or (_frt.endswith(' *') and known_structs is not None and (_frt[:-2] in known_structs))):
                 return _frt
     if isinstance(e, CallExpr) and isinstance(e.func, MemberExpr):
         if isinstance(e.func.obj, MemberExpr) and isinstance(e.func.obj.obj, IdentExpr) and (e.func.obj.obj.name == 'os') and (e.func.obj.member == 'path'):
