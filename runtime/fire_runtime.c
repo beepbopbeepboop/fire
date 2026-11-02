@@ -63,7 +63,7 @@ void mojo_exc_pop(void)
  * frame's return names whatever frame later reuses the slot. Frames of uninstrumented
  * functions are invisible, as C frames are in CPython. */
 #define MOJO_FRAME_MAX 4096
-typedef struct MojoFrameRec { const char *name; const char *file; int64_t firstlineno; int64_t lineno; struct MojoFrameRec *back; int64_t id; } MojoFrameRec;
+typedef struct MojoFrameRec { const char *name; const char *file; int64_t firstlineno; int64_t lineno; struct MojoFrameRec *back; int64_t id; int64_t gen; } MojoFrameRec;
 static int64_t _mojo_frame_next_id = 1;
 static MojoFrameRec _mojo_frames[MOJO_FRAME_MAX];
 int _mojo_frame_depth = 0;
@@ -172,6 +172,16 @@ void *mojo_coro_slice_save(int frame_base, int cleanup_base)
     return sl;
 }
 
+/* Name/file/lines of the outermost frame a parked coroutine holds (the generator's own). */
+int mojo_coro_slice_peek(void *snap, const char **name, const char **file, int64_t *first, int64_t *line)
+{
+    MojoCoroSlice *sl = (MojoCoroSlice *)snap;
+    if (!sl || sl->nsaved < 1) return 0;
+    *name = sl->frames[0].name; *file = sl->frames[0].file;
+    *first = sl->frames[0].firstlineno; *line = sl->frames[0].lineno;
+    return 1;
+}
+
 /* Re-push a snapshot above the current depths and free it. */
 void mojo_coro_slice_restore(void *snap)
 {
@@ -197,6 +207,7 @@ void mojo_frame_enter(char *name, char *file, int64_t firstlineno)
         MojoFrameRec *f = &_mojo_frames[_mojo_frame_depth];
         f->name = name; f->file = file; f->firstlineno = firstlineno; f->lineno = firstlineno; f->back = NULL;
         f->id = _mojo_frame_next_id;
+        f->gen = 0;
     }
     ++_mojo_frame_next_id;              /* every activation has its own identity (snapshots copy it) */
     ++_mojo_frame_depth;                /* keeps pairing even past the table's end */
@@ -245,10 +256,45 @@ int64_t mojo_frame_depth(void)            { return _mojo_frame_depth; }
 /* frame.clear(): CPython refuses a frame that is still executing ("cannot clear an executing
  * frame"); any other frame (finished, or a kept traceback frame) clears, which here has nothing
  * to release. A frame is executing when an activation with its identity is on the live stack. */
+/* A generator's frame object (`gen.gi_frame`) is a heap record that names its generator;
+ * `hook` (registered by fire_coro_gen.c) answers the generator's state: 0 not started, 1 suspended,
+ * 2 running, 3 finished. */
+int64_t (*_mojo_gen_state_hook)(int64_t) = NULL;
+
+int64_t mojo_frame_for_gen(int64_t gen, int64_t old_word, const char *name, const char *file,
+                           int64_t firstlineno, int64_t lineno)
+{
+    MojoFrameRec *f = (MojoFrameRec *)(intptr_t)old_word;
+    if (!f) {
+        f = (MojoFrameRec *)calloc(1, sizeof(MojoFrameRec));
+        if (!f) return 0;
+        f->id = -gen;                       /* never equals a live activation's (positive) id */
+        f->gen = gen;
+        f->name = "<generator>"; f->file = ""; f->back = NULL;
+    }
+    if (name) { f->name = name; f->file = file ? file : ""; f->firstlineno = firstlineno; f->lineno = lineno; }
+    return (int64_t)(intptr_t)f;
+}
+
+static void _raise_runtime_error(const char *msg)
+{
+    char *m = strdup(msg);
+    mojo_exc_type_set(1631794787);
+    mojo_exc_msg_set(m);
+    mojo_exc_obj_set(m);
+    mojo_raise();
+}
+
 void mojo_frame_clear(int64_t w)
 {
     MojoFrameRec *f = _frame_of(w);
     if (!f) return;
+    if (f->gen && _mojo_gen_state_hook) {
+        int64_t st = _mojo_gen_state_hook(f->gen);
+        if (st == 2) _raise_runtime_error("RuntimeError: cannot clear an executing frame");
+        if (st == 1) _raise_runtime_error("RuntimeError: cannot clear an suspended frame");
+        return;
+    }
     int n = _mojo_frame_depth < MOJO_FRAME_MAX ? _mojo_frame_depth : MOJO_FRAME_MAX;
     for (int i = 0; i < n; i++) {
         if (_mojo_frames[i].id == f->id) {

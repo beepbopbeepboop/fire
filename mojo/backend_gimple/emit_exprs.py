@@ -1502,7 +1502,7 @@ _OS_PATH_RUNTIME_CALLABLE_VALUES = {
 }
 
 
-_FRAME_ATTRS = frozenset(('f_code', 'f_back', 'f_lineno', 'co_name', 'co_qualname', 'co_filename', 'co_firstlineno',
+_FRAME_ATTRS = frozenset(('gi_frame', 'cr_frame', 'ag_frame', 'f_code', 'f_back', 'f_lineno', 'co_name', 'co_qualname', 'co_filename', 'co_firstlineno',
                           '__traceback__', 'tb_frame', 'tb_next', 'tb_lineno'))
 
 
@@ -1514,6 +1514,8 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
         _fr_t, _fr_v = gen.lower_expr(node.obj)
         _fr_w = gen._to_int64(_fr_t, _fr_v)
         _fm = node.member
+        if _fm in ('gi_frame', 'cr_frame', 'ag_frame'):
+            return 'int64_t', gen._call_expr('int64_t', '__mojo_gen_frame', [('int64_t', _fr_w)])
         if _fm == 'f_code':
             return 'int64_t', _fr_w
         if _fm == '__traceback__':

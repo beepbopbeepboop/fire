@@ -1664,6 +1664,9 @@ void        mojo_raise_type_error(char *detail);
  * (mojo_bytes_partition's empty separator). */
 void        mojo_raise_value_error(char *detail);
 void        mojo_frame_clear(int64_t w);
+int64_t     mojo_frame_for_gen(int64_t gen, int64_t old_word, const char *name, const char *file, int64_t firstlineno, int64_t lineno);
+int         mojo_coro_slice_peek(void *snap, const char **name, const char **file, int64_t *first, int64_t *line);
+extern int64_t (*_mojo_gen_state_hook)(int64_t);
 void        mojo_raise_index_error(char *detail);
 /* The codec raisers behind str.encode(codec) / bytes.decode(codec): a
  * character or byte the codec cannot hold, and an unknown codec name. */

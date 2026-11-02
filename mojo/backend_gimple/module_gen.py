@@ -4125,7 +4125,8 @@ def gen_module_impl(self, stmts):
     # module's own statements; every other module's C is unchanged.
     for _fr_nd in _walk_ast(stmts):
         if ((isinstance(_fr_nd, gimple_ctypes.MemberExpr)
-                and _fr_nd.member in ('_getframe', '__traceback__', 'tb_frame', 'f_back', 'f_lineno'))
+                and _fr_nd.member in ('_getframe', '__traceback__', 'tb_frame', 'f_back', 'f_lineno',
+                                    'gi_frame', 'cr_frame', 'ag_frame'))
                 or (isinstance(_fr_nd, gimple_ctypes.IdentExpr) and _fr_nd.name == '_getframe')):
             self._frames_mods.add(self.module_name or '')
             break
@@ -14815,6 +14816,7 @@ def gen_module_impl(self, stmts):
             # _lower_generator_close in emit_calls.py.
             'extern int64_t __mojo_gen_throw (int64_t, int64_t, int64_t, int64_t);',
             'extern int64_t __mojo_gen_close (int64_t, int64_t);',
+            'extern int64_t __mojo_gen_frame (int64_t);',
             'extern int64_t __mojo_tuple_box_2 (int64_t, int64_t);',
             'extern int64_t __mojo_tuple_box_3 (int64_t, int64_t, int64_t);',
             'extern int64_t __mojo_tuple_box_4 (int64_t, int64_t, int64_t, int64_t);',

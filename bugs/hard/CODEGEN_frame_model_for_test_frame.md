@@ -178,3 +178,16 @@ Test `gimple_frame_clear_refuses_an_executing_frame` matches CPython. This cover
 Still open: `gi_frame`/`f_generator`/`cr_frame` VALUES (the `.clear()` receiver recognition already accepts the attribute names, but nothing
 produces the frame yet), the suspended-generator refusal ("cannot clear a suspended frame": needs a snapshot of the coroutine's saved
 slice marked suspended), `f_locals`, `f_trace`.
+
+## Status (2026-11-01, stage 3 fourth slice): `gen.gi_frame` is a frame object
+
+`gen.gi_frame` / `cr_frame` / `ag_frame` on a stack-switch generator handle lowers to `__mojo_gen_frame(handle)` (runtime/fire_coro_gen.c): a
+heap frame record (`mojo_frame_for_gen`, runtime/fire_runtime.c) that names the generator, refreshed from the frame records its parked
+coroutine holds, with the generator's state answered through `_mojo_gen_state_hook` (0 not started, 1 suspended, 2 running, 3 finished).
+`frame.clear()` on it raises `RuntimeError: cannot clear an executing frame` (running) or `cannot clear an suspended frame` (suspended,
+CPython's own wording) and is a no-op otherwise. A module that only mentions `gi_frame`/`cr_frame`/`ag_frame` is now instrumented too.
+Test `gimple_generator_gi_frame_clear_refuses_suspended` matches CPython; `test_coro_runtime.py` is 16/20, the same 4 layer1-shim failures as master.
+
+Differences from CPython that remain: `gi_frame` should be `None` once the generator is exhausted; a generator that has not started
+reports the placeholder name `<generator>`; `f_generator`, `f_locals`, `f_trace`; C++20-coroutine generators (`_mojogen_*`) have no frame
+object. NOT gated by `test_selfhost.py`: master's self-host closure compile has been red since 18f122b7c (see the note in the commit).

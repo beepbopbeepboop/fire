@@ -3729,6 +3729,28 @@ def main():
 main()
 """, "executing\nfinished frame clears\ncaller executing\n")
 
+    # `gen.gi_frame` is the generator's frame object: it names the generator
+    # (`f_code.co_name`) and `clear()` refuses a SUSPENDED one.
+    test_gimple_stdout("gimple_generator_gi_frame_clear_refuses_suspended", """\
+def g():
+    yield 1
+    yield 2
+
+def main():
+    gen = g()
+    next(gen)
+    f = gen.gi_frame
+    print(f.f_code.co_name)
+    try:
+        f.clear()
+        print("cleared")
+    except RuntimeError:
+        print("suspended refuses")
+    print(next(gen))
+
+main()
+""", "g\nsuspended refuses\n2\n")
+
     test_gimple_stdout("gimple_traceback_chain_names_and_lines", """\
 import sys
 

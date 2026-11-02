@@ -59,6 +59,7 @@ typedef struct MojoGen {
     int       done;
     int       started;
     int       pending_exc;
+    int64_t   frame;       /* heap frame object handed out as `gi_frame` (0 until asked for) */
 } MojoGen;
 
 /* The trampoline Layer 2 actually enters (void(MojoCoro*, void*)); it
@@ -455,6 +456,40 @@ __mojo_gen_resume(int64_t gen, int64_t send)
     g->retval = out;
     g->done = 1;
     return 0;
+}
+
+
+/* ── gi_frame ─────────────────────────────────────────────────────────────
+   The generator's frame object (runtime/fire_runtime.c, mojo_frame_for_gen): a heap record
+   naming this generator, refreshed from the frame records the parked coroutine holds. State for
+   `frame.clear()`: 0 not started, 1 suspended, 2 running, 3 finished. */
+extern int64_t (*_mojo_gen_state_hook)(int64_t);
+extern int64_t mojo_frame_for_gen(int64_t gen, int64_t old_word, const char *name, const char *file,
+                                  int64_t firstlineno, int64_t lineno);
+extern int     mojo_coro_slice_peek(void *snap, const char **name, const char **file, int64_t *first, int64_t *line);
+extern void   *__mojo_coro_slice_of(MojoCoro *c);
+extern int     __mojo_coro_is_running(MojoCoro *c);
+
+int64_t
+__mojo_gen_state(int64_t gen)
+{
+    MojoGen *g = (MojoGen *)(uintptr_t)gen;
+    if (!g || g->done) return 3;
+    if (!g->started) return 0;
+    return __mojo_coro_is_running(g->coro) ? 2 : 1;
+}
+
+int64_t
+__mojo_gen_frame(int64_t gen)
+{
+    MojoGen *g = (MojoGen *)(uintptr_t)gen;
+    if (!g) return 0;
+    const char *name = 0, *file = 0; int64_t first = 0, line = 0;
+    if (!mojo_coro_slice_peek(__mojo_coro_slice_of(g->coro), &name, &file, &first, &line))
+        name = 0;
+    g->frame = mojo_frame_for_gen(gen, g->frame, name, file, first, line);
+    _mojo_gen_state_hook = __mojo_gen_state;
+    return g->frame;
 }
 
 int64_t __mojo_gen_value(int64_t gen)

@@ -255,6 +255,9 @@ __mojo_coro_throw(MojoCoro *c, int64_t exc_type, char *exc_msg,
     return 0;
 }
 
+void *__mojo_coro_slice_of(MojoCoro *c) { return c ? c->slice : NULL; }
+int   __mojo_coro_is_running(MojoCoro *c) { return c && c->status == MOJO_CORO_RUNNING; }
+
 int64_t
 __mojo_coro_yield(MojoCoro *c, int64_t val_box)
 {
