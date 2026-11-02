@@ -2314,6 +2314,28 @@ def main():
     print(s.val, s == S(10))
 """, "3 4 True\n10 True\n")
 
+    # `print(x)` of a user struct is its `__str__`, else `__repr__` (it printed
+    # the object's address as a decimal), and a namedtuple whose typename
+    # differs from the bound name keeps the typename in its repr.
+    test_gimple_stdout("gimple_print_user_struct_dunder_repr", """\
+from collections import namedtuple
+
+class P:
+    def __init__(self, a: int):
+        self.a = a
+    def __repr__(self) -> str:
+        return "P(a=" + repr(self.a) + ")"
+
+_CI = namedtuple("CacheInfo", ("hits", "misses"))
+
+def main():
+    c = P(1)
+    print(c)
+    print(c, 5)
+    k = _CI(1, 2)
+    print(k, k.hits)
+""", "P(a=1)\nP(a=1) 5\nCacheInfo(hits=1, misses=2) 1\n")
+
     test_gimple_stdout("gimple_nested_class_in_every_body", """\
 class WithAttrs:
     tag = 7

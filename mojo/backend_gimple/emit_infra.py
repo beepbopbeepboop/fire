@@ -7379,6 +7379,19 @@ def _gen_print(gen, args: list, kwargs: list = None):
             _wout = gen._materialize_in_tu_wrapper(_wct[:-2], aval)
             resolved_parts.append(('MojoList *', _wout))
             continue
+        # A user struct value: `print(x)` is `print(str(x))`, which is the
+        # struct's `__str__`, else its `__repr__` (the same lookup `str(x)`
+        # uses). With neither the value falls through as it did. This arm did
+        # not exist, so `print(p)` printed the object's ADDRESS as a decimal
+        # while `str(p)` / `repr(p)` were right.
+        if isinstance(atype, str) and atype.endswith(' *') and atype != 'void *':
+            _psn = atype[:-2].strip()
+            if _psn in gen.struct_field_types:
+                _pcall = user_dunder_repr_call(gen, _psn, atype, aval,
+                                               ('__str__', '__repr__'))
+                if _pcall is not None:
+                    resolved_parts.append(('char *', _pcall))
+                    continue
         resolved_parts.append((atype, aval))
     parts = resolved_parts
     for i, (atype, aval) in enumerate(parts):
