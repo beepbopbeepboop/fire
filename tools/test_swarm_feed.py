@@ -132,9 +132,22 @@ def test_apply_moves(tmp):
     return ok
 
 
+def test_task_text():
+    """A fresh worker is told the doc's path; one that starts from an earlier attempt is told the branch, its commit
+    count and the path the doc has on that branch (which differs from master after a reclass)."""
+    ok = True
+    plain = S.task_text("mid/CODEGEN_x")
+    ok &= check("a fresh task names the doc on master", "bugs/mid/CODEGEN_x.md" in plain and "branch" not in plain)
+    cont = S.task_text("mid/CODEGEN_x", branch="work/y", path="bugs/CODEGEN_x.md", ahead=3)
+    ok &= check("a continuation names its branch, commit count and the doc's path there",
+                "work/y" in cont and "3 commit(s)" in cont and "bugs/CODEGEN_x.md" in cont)
+    return ok
+
+
 def main():
     ok = True
     ok &= test_holds()
+    ok &= test_task_text()
     ok &= test_classes()
     with tempfile.TemporaryDirectory() as tmp:
         ok &= test_limit_detection(tmp)
