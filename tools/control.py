@@ -1192,6 +1192,34 @@ def descendants(pid):
     return found
 
 
+SESSION_WINDOW_S = 900   # an opencode session updated this recently is still working
+
+
+def live_session_dirs(window_s=SESSION_WINDOW_S, listing=None):
+    """Directories of opencode sessions updated within `window_s`: an agent that is still driving a worktree, even when
+    the registry task that owns the tree has exited (its CLI process is gone but the session on the service keeps
+    running). `listing` is the parsed `opencode session list --format json` (injectable for tests); raises if the
+    listing cannot be read, so the caller can refuse to act rather than guess."""
+    if listing is None:
+        r = subprocess.run(["opencode", "session", "list", "--format", "json"], capture_output=True, text=True, timeout=120)
+        if r.returncode != 0:
+            raise RuntimeError("opencode session list failed: " + (r.stderr or r.stdout).strip()[:200])
+        listing = json.loads(r.stdout)
+    now_ms = time.time() * 1000
+    return {os.path.realpath(s["directory"]) for s in listing
+            if s.get("directory") and now_ms - s.get("updated", 0) <= window_s * 1000}
+
+
+def busy_task_names(dirs, tasks):
+    """The names of tasks whose worktree contains (or is) one of the live session directories."""
+    busy = set()
+    for n, t in tasks.items():
+        root = os.path.realpath(t.get("worktree", "/nonexistent"))
+        if any(d == root or d.startswith(root + os.sep) for d in dirs):
+            busy.add(n)
+    return busy
+
+
 def cmd_reap(a):
     """Kill processes still running with their cwd inside the worktree of a task whose worker has exited.
 
@@ -1200,7 +1228,17 @@ def cmd_reap(a):
     processes, 4-6 h old, from three long-finished workers, took a third of the machine and pushed the gate's
     jobs past their timeouts). Only trees of tasks that are NOT running are touched; anything else on the
     machine (another session's processes) is left alone."""
-    dead = {os.path.realpath(t["worktree"]): n for n, t in load().items() if state_of(t) != "running"}
+    try:
+        dirs = live_session_dirs()
+    except (RuntimeError, OSError, ValueError) as e:
+        # Cannot tell which trees an agent is still driving: kill nothing, and say so.
+        print("reap: %s; killing nothing this pass" % e)
+        return
+    tasks = load()
+    busy = busy_task_names(dirs, tasks)
+    for n in sorted(busy):
+        print("reap: spare %s: an opencode session is still active in its tree" % n)
+    dead = {os.path.realpath(t["worktree"]): n for n, t in tasks.items() if state_of(t) != "running" and n not in busy}
     out = subprocess.run(["lsof", "-d", "cwd", "-Fpn"], capture_output=True, text=True).stdout
     pid, victims = None, []
     for line in out.splitlines():
@@ -1212,8 +1250,8 @@ def cmd_reap(a):
                 if (cwd == root or cwd.startswith(root + os.sep)) and pid != os.getpid():
                     victims.append((pid, name))
     # the tree of each dead task's worker: a job its shell started, in any directory, while the worker still lived
-    for n, t in load().items():
-        if state_of(t) == "running" or not t.get("pid"):
+    for n, t in tasks.items():
+        if state_of(t) == "running" or not t.get("pid") or n in busy:
             continue
         for k in descendants(int(t["pid"])):
             if k != os.getpid():
