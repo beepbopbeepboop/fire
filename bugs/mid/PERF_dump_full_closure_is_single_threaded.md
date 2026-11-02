@@ -318,3 +318,21 @@ per-write hook); (3) re-infer a function only if a changed entry is reachable fr
 (changed struct S is relevant if the body mentions S or any struct whose field types name S). Gate it on a full-compile assertion
 mode that re-infers anyway and compares (expect 0 mismatches over the fire.py closure) BEFORE the skip is enabled. Expected gain
 ~15-20 s of 258 (6-8%). Not started: needs the assertion harness first.
+
+## Measured (2026-11-01, later): the "fingerprint the mentioned names" skip is NOT sound and would not pay — drop the `_infer_local_var_types` memo line of work
+
+Assertion harness (`/tmp`-style script in this commit message: wrap `_infer_local_var_types`, key each call on `(function, hash of
+func_return_types / struct_field_types / var_types entries for every name the body mentions + its params + the three table sizes)`, and
+compare the result whenever a key repeats), run over the same `fire.py` compile (wall 268 s, 290,494 calls):
+
+- repeated keys: only 40,811 of 290,494 calls (14%). The tables' SIZES move between the rounds, so most calls have a new key.
+  A skip could therefore save at most ~3.5 s (14% of the 25 s), and
+- 20 of those 40,811 repeats returned a DIFFERENT result (`selfhost_fingerprint`, `_refine_generic_return_type`, `scan_expr`,
+  `collect_assigned_types`, `_factory_return_for`, ...): a mentioned-names fingerprint misses inputs (types reached through a callee's
+  return type, per the analysis above), i.e. it would have served a stale local type from cache.
+
+So: unsound AND small. Removed from the plan. What is left in this doc is the part that actually scales: the parallel work-unit plan
+(parse the closure's modules in worker processes, then emit from a frozen snapshot), plus the tokenizer (12% parse of imports) and the
+`coro.lower`/`_gmi_binding_index` walks listed above. Do not revisit a per-function type-inference memo without a way to enumerate
+every table the inference reads; the call-count (290k for 3.9k functions) is better attacked by running fewer `gen_module` rounds per
+module than by caching their bodies.
