@@ -59,6 +59,17 @@ defect that sits across the class's full-file Lean check.**
   above). It is in HEAD before this round (the gate at L12270 of `d376fad2`;
   the diff here is only the step-table hunks), its next step is one line, and
   its round re-runs the ternary and f3 for the full-file green.
+* **A known red in the round's quick tests is not the round's: `test_arm64_emission.py`
+  is 6 PASS / 3 FAIL, byte-identical on pristine `097b6818` (measured on a
+  `git archive` copy).** The three are the RUNTIME half's bit-test emission
+  shapes — `TBZ is emitted, tests the right bit, and its displacement is
+  patched` (the bit-3 image disassembles as a test of bits 3, 5, 6 and 13),
+  `TST and CMN are emitted and answer CPython` (a one-bit test emits a TBZ
+  alongside the TST), and `a mask that is not one bit keeps the general path`
+  (a non-power-of-two mask takes the bit-test path). The round lands in the
+  proof half — the model, the step table, the generated certificate — and does
+  not touch the emitter, so the failures predate it; they are the bit-test
+  emitter's own, unfiled here.
 
 **Status, 2026-10-03 (`work/formal16-2`): the REGRESSION is fixed and pinned; the
 MODEL ROW is not, and the measurement says the order of the remaining work is the

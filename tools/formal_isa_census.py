@@ -583,11 +583,14 @@ BACKLOG = {
     # now `(0xffe07c00, 0x9b407c00)` with `work_step_smulh`, and the row's LEAN
     # column reads `yes` — measured, `formal_model_fuzz.py --mix flagged
     # --cases 400 --length 1 --seed 11` reports 400/400 AGREE with no NOSTEP.
-    "encode_csel_xd_xm_cond": (
-        "bugs/formal/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md",
-        "six call sites emit it and `arm64_step` has no branch; the blocked "
-        "reason is measured in that doc (the certificate size, not the "
-        "instruction)"),
+    # `encode_csel_xd_xm_cond` WAS here until 2026-11-01 and is not any more:
+    # the six call sites (a ternary is a CSEL) emitted it modelled nowhere, so
+    # every image with a conditional expression was unsteppable.  `arm64_step`'s
+    # last arm is now `(0xffe00c00, 0x9a800000)` with `work_step_csel`, and the
+    # whole class is measured in rather than sampled: all 444,416 words the
+    # encoder can produce (every `Rn`/`Rm` including 31, every condition code)
+    # decode to that row, and no CSET word does — its encoder sets bit 10,
+    # which the class keeps clear — with the row's LEAN column reading `yes`.
     "encode_fadd_dd_dn_dm": (
         "bugs/formal/FORMAL_arm64_ieee754_has_no_step_arms.md",
         "IEEE-754 binary64, scalar: ten encoders the emitter calls, no arm in "
