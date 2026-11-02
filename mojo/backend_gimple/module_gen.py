@@ -10954,6 +10954,46 @@ def gen_module_impl(self, stmts):
             break
     _propagate_forwarded_container_kinds()
 
+    # ── a container parameter that is ALSO passed a non-container refuses ──
+    #
+    # `_record_param_noncontainer` marks a parameter whose call sites disagree
+    # with a container observation: `each([4, 5])` beside `each("de")`. The
+    # container-kind contract then correctly declines to name a kind (its
+    # `''` marker), but when the BODY also uses the parameter as a container
+    # (`for x in xs` leaves `_infer_param_types`'s `MojoList *` guess in
+    # place, and nothing overrides a guess the contract declined), the slot
+    # is still lowered as that container: the str is cast to a list header
+    # and the loop reads its bytes as a list. That is SIGSEGV on a program
+    # CPython runs fine.
+    #
+    # No representation exists yet that serves both kinds (the `int64_t`
+    # box cannot tell a `MojoList *` from a `char *`), so the honest move is
+    # a compile-time refusal: `fire.py <file>` falls back to the interpreter
+    # on any build failure, which gives the right answer, where the compiled
+    # binary gave a crash. The representation is the open next step in
+    # bugs/CODEGEN_mixed_list_and_str_call_sites_iterated_param.md.
+    #
+    # Narrow on purpose. A mixed parameter the body only PRINTS never
+    # reaches a container guess, so it keeps the int64_t box that
+    # `_param_noncontainer_obs` exists to choose, and is not refused.
+    def _refuse_mixed_container_params():
+        for _mc_callee, _mc_pm in list(self._param_container_obs.items()):
+            _mc_ck = _as_str(_mc_callee)
+            _mc_nc = self._param_noncontainer_obs.get(_mc_ck) or set()
+            _mc_inf = self._inferred_param_types.get(_mc_ck) or {}
+            for _mc_pname, _mc_types in list(_mc_pm.items()):
+                _mc_pk = _as_str(_mc_pname)
+                if not _mc_types or _mc_pk not in _mc_nc:
+                    continue
+                if _as_str(_mc_inf.get(_mc_pk)) in ('MojoList *', 'MojoDict *', 'MojoSet *'):
+                    raise RuntimeError(
+                        f"parameter {_mc_pk!r} of {_mc_ck!r} is passed a "
+                        "container at one call site and a str or number at "
+                        "another, and the body uses it as a container; the "
+                        "compiled path has no representation for that yet "
+                        "(bugs/CODEGEN_mixed_list_and_str_call_sites_iterated_param.md)")
+    _refuse_mixed_container_params()
+
     # A container param whose ELEMENTS the callee `isinstance()`-checks
     # against struct types (`for s in stmts: if isinstance(s, FunctionDef)`)
     # holds boxed AST-node handles, never strings — retract any `char *`

@@ -50,3 +50,27 @@ still reach that guess unchallenged:
 3. Test: the repro above, as a `test_gimple.py` case through `_compiled_stdout`
    on single-TU and link-mode, next to
    `test_a_str_call_beside_a_list_call_does_not_make_the_parameter_a_list`.
+
+## Status (2026-11-01): partial fix — the silent SIGSEGV is now a loud refusal
+
+Landed (`mojo/backend_gimple/module_gen.py`, `_refuse_mixed_container_params`,
+after `_propagate_forwarded_container_kinds`): a parameter that has BOTH a
+container observation and a non-container observation (`_param_noncontainer_obs`),
+and whose final inferred type is `MojoList *` / `MojoDict *` / `MojoSet *`,
+raises `RuntimeError` at compile time instead of emitting a binary that casts
+the str to a list header. Narrow on purpose: the print-only mix (no container
+guess) keeps its `int64_t` box and is not refused.
+
+Verified: the repro's `_run_pipeline` now raises (it returned C before);
+`python3 fire.py <repro>` prints `4 5 d e` via the interpreter fallback,
+matching CPython. Regression test:
+`test_an_iterated_parameter_passed_a_list_and_a_str_refuses_to_compile`
+in `test_gimple.py`.
+
+Still open (the actual compile of this program): step 1(a) — a representation
+that serves both kinds. The `int64_t` box cannot tell `MojoList *` from
+`char *` (`mojo_cstr_or_int_str` only separates str from int), so (a) needs
+either a container kind tag carried in the box, or per-kind specialization of
+the function (one clone per call-site kind). Step 2 (the `for` lowering of an
+`int64_t` iterable) is not needed while the refusal holds, and becomes
+relevant only once (a) lands.

@@ -8744,6 +8744,50 @@ show("abc")
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_an_iterated_parameter_passed_a_list_and_a_str_refuses_to_compile():
+        """A parameter the body ITERATES, passed a LIST at one call site and a
+        STR at another, must not compile to a binary that reads the str as a
+        list. `each([4, 5])` beside `each("de")` gave `void each(MojoList *)`
+        and the str was cast to a list header: SIGSEGV (exit -11) after the
+        list's output, on a program CPython runs fine.
+
+        The print-only shape of the same mix is fine (an `int64_t` box), so
+        the refusal is narrow: it fires only when the body uses the parameter
+        as a container, which is the one case with no representation yet.
+        The refusal is a loud build failure, and `fire.py <file>` falls back to
+        the interpreter on a build failure, so the program still runs
+        correctly. The representation that compiles it is the open next step in
+        bugs/CODEGEN_mixed_list_and_str_call_sites_iterated_param.md.
+        """
+        global _PASS, _FAIL
+        name = "an_iterated_parameter_passed_a_list_and_a_str_refuses_to_compile"
+        src = '''\
+def each(xs):
+    for x in xs:
+        print(x)
+each([4, 5])
+each("de")
+'''
+        for mode in ('single-TU', 'link-mode'):
+            kwargs = ({'do_imports': True} if mode == 'single-TU'
+                      else {'link_mode': True})
+            try:
+                gimple_codegen._run_pipeline(src, filename='case.py', **kwargs)
+            except RuntimeError as e:
+                msg = str(e)
+                if "'xs'" in msg and "'each'" in msg:
+                    continue
+                print(f"FAIL  {name} [{mode}]: refused, but not for the "
+                      f"mixed parameter: {msg[:300]}")
+                _FAIL += 1
+                return
+            print(f"FAIL  {name} [{mode}]: compiled, so the binary would read "
+                  "the str as a list (SIGSEGV)")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_a_string_passthrough_beside_an_int_one_keeps_its_own_elements():
         """`def ident(x): return x` called with a list of ints AND with a
         string, in one program, must give the string call site its own
@@ -13522,6 +13566,7 @@ print(run('x/y.txt'))
     _run_isolated(lambda: test_tuple_unpack_of_a_boxed_dict_inside_a_method_builds(), 'test_tuple_unpack_of_a_boxed_dict_inside_a_method_builds (line 12720b)')
     _run_isolated(lambda: test_a_string_passthrough_beside_an_int_one_keeps_its_own_elements(), 'test_a_string_passthrough_beside_an_int_one_keeps_its_own_elements')
     _run_isolated(lambda: test_a_str_call_beside_a_list_call_does_not_make_the_parameter_a_list(), 'test_a_str_call_beside_a_list_call_does_not_make_the_parameter_a_list')
+    _run_isolated(lambda: test_an_iterated_parameter_passed_a_list_and_a_str_refuses_to_compile(), 'test_an_iterated_parameter_passed_a_list_and_a_str_refuses_to_compile')
     _run_isolated(lambda: test_a_returned_heterogeneous_list_keeps_its_slot_kinds(), 'test_a_returned_heterogeneous_list_keeps_its_slot_kinds (line 12721)')
     _run_isolated(lambda: test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not(), 'test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not (line 12722)')
     _run_isolated(lambda: test_the_generic_repr_cluster_is_emitted_only_where_it_is_reachable(), 'test_the_generic_repr_cluster_is_emitted_only_where_it_is_reachable (line 12723)')
