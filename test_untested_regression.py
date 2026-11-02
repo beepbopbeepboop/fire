@@ -15,7 +15,7 @@ def test_link_executable_default_still_gcc():
 
 # --- §3a: all eight files the rename hit must spell fire. (not stale mojo.)
 def test_no_file_calls_stale_mojo_link_executable():
-    # bugs/UNTESTED.md §3a: nine files still spelled `mojo.link_executable`
+    # bug:UNTESTED §3a: nine files still spelled `mojo.link_executable`
     # after the mojo→fire rename, eight of them hidden behind an `expect=`
     # marker that reported a false failure count. The fix is one word per
     # site; this pins that none of them regresses.
