@@ -272,6 +272,19 @@ void mojo_frame_set_attr(int64_t w, int64_t id, int64_t v)
     if (!f) return;
     if (id == 0) f->f_trace = v; else if (id == 1) f->trace_lines = v; else f->trace_opcodes = v;
 }
+/* `del frame.<attr>` for the stored frame attributes, with CPython 3.15's answers: `f_trace` deletes
+ * (it reads back None); `f_trace_lines` is a TypeError and `f_trace_opcodes` an AttributeError, and
+ * neither is removed. */
+void mojo_frame_del_attr(int64_t w, int64_t id)
+{
+    if (id == 0) {
+        MojoFrameRec *f = _frame_of(w);
+        if (f) f->f_trace = mojo_box_none();
+        return;
+    }
+    if (id == 1) { mojo_raise_type_error((char *)"can't delete numeric/char attribute"); return; }
+    mojo_raise_attribute_error((char *)"f_trace_opcodes");
+}
 
 /* frame.clear(): CPython refuses a frame that is still executing ("cannot clear an executing
  * frame"); any other frame (finished, or a kept traceback frame) clears, which here has nothing

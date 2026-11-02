@@ -1677,6 +1677,7 @@ void        mojo_raise_value_error(char *detail);
 void        mojo_frame_clear(int64_t w);
 int64_t     mojo_frame_get_attr(int64_t w, int64_t id);
 void        mojo_frame_set_attr(int64_t w, int64_t id, int64_t v);
+void        mojo_frame_del_attr(int64_t w, int64_t id);
 void        mojo_exc_value_set(int64_t w);
 int64_t     mojo_exc_value_get(void);
 void        mojo_frame_set_resuming(int64_t gen);
