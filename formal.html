@@ -125,7 +125,19 @@
         </ul>
     </div>
 
-    <h2>4. What It Does Wrong / Bugs, Flaws, Shortcomings</h2>
+    <h2>4. Proof Guarantees (Explicit Classification)</h2>
+    <div class="info-box">
+        <p>The formal pipeline classifies proof outcomes explicitly so users know the trust level:</p>
+        <ul>
+            <li><strong>Refused</strong> — The generator does not emit a proof because the construct/shape is unsupported (e.g. certain struct field patterns, unsupported call shapes). Build continues without a proof artifact.</li>
+            <li><strong>Structural</strong> — A proof skeleton/theorems are emitted and the Lean file typechecks, but it may contain <code>sorry</code>/<code>admit</code> at leaves. The structure is in place (induction/CFG/block certificates) even if obligations remain.</li>
+            <li><strong>Hole-tracked partial</strong> — Admitted obligations are explicitly counted and bounded. <code>proof_census</code> tracks holes/sorries, enforces time/memory limits, and reports trust level in build/test output. Vacuous or false claims are rejected by checks (e.g. dylib contract verification).</li>
+            <li><strong>Fully proved</strong> — The proof typechecks with zero holes and establishes the relevant end-to-end/correctness theorem (no <code>sorry</code>/<code>admit</code> remaining).</li>
+        </ul>
+        <p>Build output and test results report which category applies, making the "proof-carrying" guarantee explicit rather than implied.</p>
+    </div>
+
+    <h2>5. What It Does Wrong / Bugs, Flaws, Shortcomings</h2>
     
     <h3>4.1 Semantic Model Limitations (Critical)</h3>
     <div class="danger-box">
