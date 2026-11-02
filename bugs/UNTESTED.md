@@ -64,6 +64,7 @@ equivalent for the 45 example files a cached test is *about*.
   re-raises). It is a textual heuristic, not an execution trace: a file that
   reaches a verdict only through a helper it imports is not seen, which is
   the honest limit of the static form.
+* **`test_dispatch_phase_c.py` (the Tier 2 row below) is fixed — the test was stale, not the codegen.** It asserted that the self-host fixture gets a `DispatchSolver`. `mojo/backend_gimple/module_gen.py` has skipped dispatch solving for this compiler's own sources since the self-host divergence fix (`not _is_selfhost_file`), so the assertion contradicted a deliberate policy. The file now pins that policy in both directions on one source text: an ordinary program's table is planned, emitted and ordered before its callers, and two dispatch families get two tables; a self-host source plans no solver run and no table. 4/4 pass. It is still unregistered (`tools/suite.py` is integrator-owned), and its `UNREGISTERED` reason still describes it accurately. Noted, not changed: `DispatchSolver(allow_assume_all_methods=_is_selfhost_file)` sits inside the `not _is_selfhost_file` branch, so that flag is always False and the self-host getattr heuristic it gates is unreachable from a real compile. Dead, not wrong, so it is not filed as a bug.
 * **Still open:** §3.2's general check (not statically decidable, §3.2), §5's
   registration of the 50 and the 21 red files (`tools/suite.py` is
   integrator-owned; the red files are behaviour work in other claims).
@@ -275,7 +276,7 @@ All measured by running the file. Counts are the file's own.
 | `test_transitive_closure_capture.py` | 2 | also tier 1 |
 | `test_async_runtime_scaffold.py` | 1 | step A of compiled-path async/await |
 | `test_x86_64_containers.py` | 1 | also tier 1 |
-| `test_dispatch_phase_c.py` | — | `AssertionError: DispatchSolver should have been instantiated`, in 0.1 s. A broken test, not a behaviour gap. |
+| `test_dispatch_phase_c.py` | — | Was `AssertionError: DispatchSolver should have been instantiated`. Fixed 2026-11-01: the test asserted a self-host policy the codegen had deliberately dropped (see Status). |
 
 **`test_coro_future_await.py` is also the naming casualty.** Its siblings were
 renamed from `test_mojo_*` to `test_fire_*` in the round that broke the `coro`
