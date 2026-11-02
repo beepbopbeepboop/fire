@@ -50,8 +50,9 @@ I did not re-run that file this round (no code touched); the 265/0 figure is the
    sites agree INTERNALLY but call sites disagree on the yielded type. Unexamined
    third yield-typing shape. Measure with `MOJO_DEBUG=1` before designing.
 5. Imported-module floor `c_parser/info.py`, `c_parser/parser/_func_body.py`,
-   `c_parser/match.py` → `bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___init__.md`
-   (claimed by another worker).
+   `c_parser/match.py` → callable-valued local/parameter loop refusal
+   in `c_analyzer/__init__.py:check_all` (fixed: refusal properly named;
+   structural callable-return inference remains shared with other files).
 
 **Decisions the capture model needs (recommendations).**
 - **D1, value vs cell.** Python closures read the enclosing VARIABLE, so a
@@ -280,5 +281,5 @@ diagnosable, and treating it as an ordering bug would be chasing the
    once `render` compiles.
 3. Then re-check the imported-module floor — `c_parser/info.py`,
    `c_parser/parser/_func_body.py` and `c_parser/match.py` still fail in this
-   closure (see `bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_analyzer___init__.md`),
+   closure (callable-valued loop refusal fixed in `c_analyzer/__init__.py:check_all`),
    so clearing `render` alone will not make this file build.
