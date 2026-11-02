@@ -6419,7 +6419,7 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
     # own post-state and the pc hypothesis is `rfl`.
     A(f"    (by intro s hs hq; exact {name}_loop_exit_x0 ({cqt} s) "
       f"(({name}_loop_cond_flag s hs).mp hq))")
-    A(f"    (by intro a _; simp [mojo, {name}_go_zero])")
+    A(f"    (by intro a _; have hlt : a.toNat < 9223372036854775808 := by omega; simp [mojo, {name}_go_zero, hlt])")
     A(f"    (by decide) (by decide) (by decide)")
     A(f"    arg st fuel (work_loop_fuel {mc} {mb} {me} arg.toNat fuel hfuel) hpc hx19 hframe")
     A("")
@@ -8704,7 +8704,12 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         A(f"{IND}rcases hlc_{bi} with âŸ¨sf_{bi}, heqf_{bi}, hx0f_{bi}âŸ©")
                         A(f"{IND}rw [heqf_{bi}]")
                         A(f"{IND}-- s.x0 = mojo (n-1) = 0 = mojo n")
-                        A(f"{IND}simp [hx0f_{bi}, mojo, {name}_go_zero]")
+                        A(f"{IND}have hltc : (n - 1).toNat < 9223372036854775808 := by")
+                        A(f"{IND}  have hnz : n â‰  0 := by intro h0; rw [h0] at {_bsrc}; simp at {_bsrc}")
+                        A(f"{IND}  have hnge1 : 1 â‰¤ n.toNat := Nat.pos_of_ne_zero (fun h0 => hnz (UInt64.toNat_inj.mp (by rw [h0]; rfl)))")
+                        A(f"{IND}  rw [toNat_sub_one n (by intro h; subst h; simp at {_bsrc})]")
+                        A(f"{IND}  omega")
+                        A(f"{IND}simp [hx0f_{bi}, mojo, {name}_go_zero, hltc]")
                 else:
                     raise ValueError(
                         f"unsupported edge to {hex(tgt)} (loop back-edge / continuation; "
@@ -11503,7 +11508,7 @@ theorem prog_correct : \u2200 (m : Nat) (fuel : Nat), fuel \u2265 m % @S@ + 2 â†
       have hneg : \u00ac @PRED@ := by
         rw [pred_iff m]
         intro hne
-        exact hne (by apply eq_of_toNat_eq; rw [ht2]; simp [hz])
+        exact hne.2 (by apply eq_of_toNat_eq; rw [ht2]; simp [hz])
       have hce : evalExpr handler (@COND@) (envOf m) = 0 := by
         rw [hvz, if_neg hneg]
       have h1 := runF_while_false g handler (@COND@)
@@ -11521,7 +11526,10 @@ theorem prog_correct : \u2200 (m : Nat) (fuel : Nat), fuel \u2265 m % @S@ + 2 â†
         rw [ht2]
         simp [hz]
       rw [hv0]
-      simp [@FN@_go_zero, hz]
+      have hzlt : m % @S@ < 9223372036854775808 := by
+        rw [hz]
+        simp
+      simp [@FN@_go_zero, hzlt]
     \u00b7 obtain \u27e8g, rfl\u27e9 : \u2203 g, fuel = g + 1 := \u27e8fuel - 1, by cases fuel <;> simp; omega\u27e9
       have hcond : evalExpr handler (@COND@) (envOf m) â‰  0 :=
         (cond_val m).mpr (Nat.ne_of_gt hp)
@@ -11572,7 +11580,8 @@ theorem prog_correct : \u2200 (m : Nat) (fuel : Nat), fuel \u2265 m % @S@ + 2 â†
       rw [hP] at hrec
       rw [hstep, henv, hrec]
       apply congrArg
-      simp [@FN@_go_zero]
+      have hltm : m % @S@ < 9223372036854775808 := (cond_val m).mp hcond |>.right
+      simp [@FN@_go_zero, hltm]
 
 /-- TRUST BOUNDARY eliminated: the fuel-bounded full interpreter applied to
 the formal AST equals the structural model, by strong induction. -/
