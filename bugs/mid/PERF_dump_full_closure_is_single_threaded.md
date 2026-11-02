@@ -288,3 +288,33 @@ What does work under self-host, in order of preference:
    check running alongside as an assertion for a full `fire.py` compile (expect 0 mismatches).
 Tests that will prove it: the generated `.ci` of the `fire.py` closure byte-identical before/after (`cmp`), `compile_stdlib.py` GCC CAS
 610/610 hits, `test_selfhost.py` 3/3, and a unit test that mutates a table entry between two calls and sees the cache miss.
+
+## Measured (2026-11-01): who calls `_infer_local_var_types`, and why the read-set cache above is not buildable either
+
+Wrapper around `rs._infer_local_var_types` on the same `compile_to_gimple(fire.py, do_imports=True)` (wall 258 s with the wrapper;
+289,513 calls, 3,905 distinct functions, up to 313 calls for one function; 25.5 s inside = ~10%, more than the 8% above). By call site:
+
+| calls | seconds | site |
+|---|---|---|
+| 63,406 | 6.2 | `module_shared._gmi_phase17_collect_appends` (the `isinstance(_n, FunctionDef)` branch) |
+| 58,141 | 9.9 | `module_gen.gen_module_impl` ~8994 (`self._inferred_var_types[name] = ...` over `all_functions`) |
+| 58,141 | 6.8 | `module_gen.gen_module_impl` ~12683 (the same loop again, after the return-type fixpoint) |
+| 35,459 + 35,459 | 0.5 + 0.6 | the two struct-method twins of those loops |
+| 26,321 / 11,734 | 0.5 / 0.2 | `gen_module_impl` ~8286 / ~8571 |
+
+So 22.9 s of the 25.5 s is three loops, each of which re-infers every function of the module being compiled once per `gen_module`
+call (the `_mk_round` fixpoint's 4 rounds x several `gen_module` calls per module) although the answer almost never changes.
+
+Why the read-set cache is dropped: `_infer_local_var_types_core` seeds a scratch copy of the WHOLE `var_types` table and calls
+`_quick_type` / `_local_value_type`, which read `func_return_types`, `struct_field_types`, `_struct_method_signatures`, class
+attrs, generator tables, ... transitively (a struct name comes from a callee's return type, not from any identifier in the body).
+Reads are as numerous and as scattered as the 280 writes counted above, so neither a write version nor a read set can be audited.
+
+Direction that CAN be sound, by analogy with `_mk_round`'s fifth win: skip a re-inference only when the INPUT TABLES' relevant
+slice is unchanged, where "relevant" is computed by a closed set, not guessed: (1) per function, record in round 1 the set of
+callee names, struct names and global names its body mentions plus the types of its parameters; (2) between rounds, track which
+`func_return_types` / `struct_field_types` entries CHANGED (diff the two snapshots once per round: a cheap dict compare, not a
+per-write hook); (3) re-infer a function only if a changed entry is reachable from its mention set through the struct graph
+(changed struct S is relevant if the body mentions S or any struct whose field types name S). Gate it on a full-compile assertion
+mode that re-infers anyway and compares (expect 0 mismatches over the fire.py closure) BEFORE the skip is enabled. Expected gain
+~15-20 s of 258 (6-8%). Not started: needs the assertion harness first.
