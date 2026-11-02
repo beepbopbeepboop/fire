@@ -284,7 +284,7 @@ Twenty-two rows. Against them:
 * **2 are decorators and are refused on purpose**: `functools.lru_cache` on
   `version()`, and `unittest.skipUnless`. A decorator on a function OR a class is
   DROPPED, silently, by both backends
-  (`bugs/COMPILE_FAIL_decorator_application_dropped.md`), so exporting the name
+  (`bugs/mid/COMPILE_FAIL_decorator_application_dropped.md`), so exporting the name
   would make the program build and enforce nothing. `version.py`'s is cited by
   name in `mojo/backend_gimple/device_select.py::_decorator_names`'s docstring as
   the worked example that function's `CallExpr` branch exists for, so removing

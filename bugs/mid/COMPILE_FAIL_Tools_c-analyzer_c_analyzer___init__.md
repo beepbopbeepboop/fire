@@ -56,7 +56,7 @@ the guide; the check_all fix alone closes no file end-to-end.
 
 ## Status 2026-10-29 — refusal naming verified; structural blockers remain (worker's scope)
 
-Quick verification run (`python3 -c "import test_regress_check_all; test_regress_check_all.test_check_all_refusal_named()"` — PASS). The `check_all` refusal is now correctly named (`callable-valued local/parameter 'check(...)'`) rather than a flat `CallExpr`; that naming was landed by `c89f69f3c`. The file's own blocker (`for data, failure in check(analysis)`) is a structural gap — the callable's return type depends on which callable the caller passes — which requires shared callable-return-type-inference machinery (see `bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md`'s "Next step"). The imported-module floor (`c_common/iterutil.py` `next(...)` and `c_parser/info.py` `next(...)` on CallExpr) is owned by other workers (`bug:CODEGEN_next_on_bound_list_iter_cursor_off_by_one` / `c_parser_parser___init__`). No change to compiler code is possible without affecting those shared paths; tree stays clean with existing regression test.
+Quick verification run (`python3 -c "import test_regress_check_all; test_regress_check_all.test_check_all_refusal_named()"` — PASS). The `check_all` refusal is now correctly named (`callable-valued local/parameter 'check(...)'`) rather than a flat `CallExpr`; that naming was landed by `c89f69f3c`. The file's own blocker (`for data, failure in check(analysis)`) is a structural gap — the callable's return type depends on which callable the caller passes — which requires shared callable-return-type-inference machinery (see `bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md`'s "Next step"). The imported-module floor (`c_common/iterutil.py` `next(...)` and `c_parser/info.py` `next(...)` on CallExpr) is owned by other workers (`bug:CODEGEN_next_on_bound_list_iter_cursor_off_by_one` / `c_parser_parser___init__`). No change to compiler code is possible without affecting those shared paths; tree stays clean with existing regression test.
 
 ## Status 2026-10-04 — same blocker (`check_all`), and the imported-module floor is the two `next(...)` shapes
 
@@ -73,7 +73,7 @@ the sibling entries now name theirs — "a `for` over a call through the callabl
 local/parameter `'check(...)'` is not supported in a compiled generator/coroutine body" —
 so the entry below's "the refusal does not even name which call it could not type" is
 answered; what is not answered is what the call RETURNS, which is what
-`bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md`'s "Next step" lists as its three
+`bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md`'s "Next step" lists as its three
 sub-problems, and that doc is still the one to read.
 
 **The imported-module floor is down to two modules and both are `next(...)`** — the three
@@ -140,7 +140,7 @@ c_parser/parser/_common.py:50:7: error: assignment to 'char *' from 'int'
 calls a helper from `_regexes.py` whose generated symbol has no forward
 declaration in this translation unit — a different defect (a declaration gap,
 not a type gap), in an area two other docs already carry
-(`bugs/COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__.md`).
+(`bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__.md`).
 
 ### What is left, sized
 
@@ -155,7 +155,7 @@ not a type gap), in an area two other docs already carry
 3. **`check_all`** (this file's own): `for data, failure in check(analysis)`,
    a call through a callable-value loop variable whose RESULT is the iterable.
    The same blocker as
-   `bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md`'s
+   `bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md`'s
    `for row in _get_reader(lines, ...)`; that doc's "Next step" still names the
    three things the shape needs.
 
@@ -185,7 +185,7 @@ def check_all(analysis, checks, *, failfast=False):
 ```
 
 This is the SAME blocker now in front of
-`bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md` (`read_table`'s
+`bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md` (`read_table`'s
 `for row in _get_reader(lines, ...)`, where `_get_reader` is a
 default-valued callable parameter). One fix, three files — that doc's
 "Next step" still names the three things the shape needs.
@@ -238,7 +238,7 @@ def check_all(analysis, checks, *, failfast=False):
 `check` is a CALLABLE-VALUE LOCAL bound by the outer loop, and `check(analysis)`
 is a dynamic call whose return is the iterable — a generator, in real code.
 This is the SAME blocker now in front of
-`bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md` (`read_table`'s
+`bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md` (`read_table`'s
 `for row in _get_reader(lines, ...)`, where `_get_reader` is a
 default-valued callable parameter). One fix, three files — see that doc's
 "Next step" for the three things that shape needs.
@@ -264,7 +264,7 @@ Three imported modules still fail in every closure that reaches them, and
 (`c_parser/preprocessor` was the fourth and is now fixed.) So even a perfect
 `check_all` would not make THIS file build — the floor has to go first. The
 `c_parser.info` one is understood and is the same `rendered, = rendered`
-shape described in `bugs/COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__.md`
+shape described in `bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__.md`
 (it unpacks the first value out of a classmethod GENERATOR,
 `cls._format_data(...)`, whose return the ordinary path types
 `MojoGenerator *` but whose api it never records).

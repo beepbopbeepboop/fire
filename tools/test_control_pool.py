@@ -61,8 +61,8 @@ _free = {"name": "free", "model": "free-model", "recover_hours": 2.5,
 _rp = C.replenish_at(_free, _utc)
 check("a daily tier replenishes at its time plus the margin", datetime.fromtimestamp(_rp, ZoneInfo("UTC")).strftime("%F %H:%M") == "2026-11-02 00:01")
 check("a slot without a replenish time has none", C.replenish_at({"name": "x", "model": "x", "recover_hours": 1}, _utc) is None)
-C.mark_dead("free-model", _free)
-check("a limit on a daily tier bans until the next replenish", abs(C.dead_models()["free-model"] - _rp) < 1)
+C.mark_dead("free-model", _free, now=_utc)
+check("a limit on a daily tier bans until the next replenish", abs(C._ledger()["free-model"]["until"] - _rp) < 1)
 
 # holds: only work holds a claim; a dead entry with no commits holds nothing and cannot block a retry
 _real_ahead = C.ahead
@@ -93,6 +93,36 @@ check("a task takes its preferred slot when that is free", C.pick_slot({"pool": 
 check("a task whose preferred slot is busy moves to a free one", C.pick_slot({"pool": "a"}, {"a": 1})["name"] == "b")
 check("with every slot full the task waits", C.pick_slot({"pool": "a"}, {"a": 1, "b": 1}) is None)
 C.load_pool = _real_load_pool
+
+# free-tier probe: a daily free tier's ban ends when the tier answers a one-word prompt, not at a guessed reset.
+_real_load_pool = C.load_pool
+C.load_pool = lambda: {"slots": [dict(name="free", model="mfree", count=1, kind="opencode", replenish={"tz": "UTC", "at": "00:00", "margin_min": 1}),
+                                 dict(name="paid", model="mpaid", count=1, kind="opencode")]}
+_now = time.time()
+C.mark_dead("mfree", {"name": "free", "replenish": {"tz": "UTC", "at": "00:00", "margin_min": 1}}, until=_now + 2 * C.PROBE_EVERY_S, now=_now)
+C.mark_dead("mpaid", {"name": "paid", "recover_hours": 2.5}, until=_now + 3600, now=_now)
+asked = []
+C.probe_free_bans(now=_now, probe=lambda m: asked.append(m) or False)
+check("a refusing free tier is asked", asked == ["mfree"])
+check("a refusing free tier stays banned", C._ledger()["mfree"]["until"] > _now)
+check("a paid model is never probed", "mpaid" not in asked)
+C.probe_free_bans(now=_now + 60, probe=lambda m: asked.append(m) or False)
+check("a free tier is not re-asked inside the probe interval", asked == ["mfree"])
+lifted = C.probe_free_bans(now=_now + C.PROBE_EVERY_S + 1, probe=lambda m: True)
+check("a free tier that answers is lifted", lifted == ["mfree"] and C._ledger()["mfree"]["until"] <= _now + C.PROBE_EVERY_S + 1)
+C.load_pool = _real_load_pool
+
+# a worker's tree: every process a shell under it started, however deep, is among its descendants
+import subprocess as _sp
+_tree = _sp.Popen(["sh", "-c", "sleep 60 & sh -c 'sleep 61' & wait"])
+time.sleep(0.5)
+_kids = C.descendants(_tree.pid)
+check("the descendants of a worker's shell include every job it started", len(_kids) >= 2)
+check("a process is not its own descendant", _tree.pid not in _kids)
+for _k in _kids:
+    try: os.kill(_k, 9)
+    except OSError: pass
+_tree.kill()
 
 print("%d passed, %d failed" % (len(PASSES), len(FAILS)))
 sys.exit(1 if FAILS else 0)

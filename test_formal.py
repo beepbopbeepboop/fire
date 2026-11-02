@@ -137,7 +137,7 @@ EXPECTED_FAILURES = {
     # `loop_cond_flag` cannot close: `sum_range` reports it as an admitted hole
     # whenever its contract is reached, and is refused before then for a
     # different reason (a conditional back edge, its own entry below).
-    # See bugs/CODEGEN_arm64_cmp_flags_and_loop_signedness.md.
+    # See bugs/mid/CODEGEN_arm64_cmp_flags_and_loop_signedness.md.
     "countdown": "the decrement-while runF model treats the counter as a "
                  "non-negative magnitude; a signed `int` means `n <= 0` exits "
                  "immediately and returns n unchanged, which pred_iff and the "

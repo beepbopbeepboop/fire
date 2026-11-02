@@ -66,6 +66,10 @@ import mojo.middle.coro as gimple_gen_coro
 # `emit_funcs._struct_method_qualifier`'s function-local
 # `from mojo.middle.module_shared import module_qualifier`.
 from mojo.middle.exprtypes import _walk_ast, _walk_ast_invalidate, expr_provably_str as _gmi_expr_provably_str
+from mojo.middle.literal_bindings import (
+    binding_index as _gmi_binding_index, scope_index as _gmi_scope_index,
+    scoped_calls as _gmi_scoped_calls, unique_literal_value as _gmi_unique_literal_value,
+)
 from mojo.middle.exprtypes import _gmi_nested_struct_defs
 import gimple_codegen
 import mojo.backend_gimple.emit_funcs as _ggf_dup
@@ -164,128 +168,20 @@ def _gmi_literal_ctype(node):
     return None
 
 
-def _gmi_target_names(target, out) -> None:
-    """Append to `out` every bare name an assignment target binds: an
-    identifier, or an identifier inside a tuple/list target. Attribute and
-    subscript targets bind no name. A plain str (a `with ... as name` alias
-    spelled as a string) binds itself."""
-    if isinstance(target, str):
-        if target:
-            out.append(target)
-        return
-    if isinstance(target, gimple_ctypes.IdentExpr):
-        out.append(target.name)
-        return
-    if isinstance(target, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
-        for el in target.elements:
-            _gmi_target_names(el, out)
+def _gmi_arg_literal_ctype(arg, enc_idx: dict, mod_index: dict):
+    """The unambiguous ctype a call ARGUMENT passes, else None.
 
-
-def _gmi_bound_names(nd) -> list:
-    """Every name the single AST node `nd` binds in the scope that contains
-    it, as a list (empty for nodes that bind nothing). A wildcard
-    `from m import *` binds an unknown set and reports `'*'`.
-
-    This is the binder census `_gmi_identifier_literal_ctype` reads, so it
-    must cover every construct that can rebind a name. Anything it misses
-    lets a rebound name look like a single literal binding, which is the
-    one way that lookup can be wrong.
+    A literal argument answers for itself. An IDENTIFIER answers only when its
+    one binder in the call's scope is a literal (`s = "r"; f(s)`): the callee
+    receives that literal's value, so its parameter follows the literal just
+    as it does for `f("r")`. `enc_idx` is the call's enclosing scope census
+    (`scope_index`, empty at module scope) and `mod_index` the module-wide
+    census (`binding_index`).
     """
-    out: list = []
-    if isinstance(nd, (gimple_ctypes.AssignStmt, gimple_ctypes.AugAssignStmt,
-                       gimple_ctypes.ForStmt)):
-        _gmi_target_names(nd.target, out)
-    elif isinstance(nd, gimple_ctypes.MultiAssignStmt):
-        for t in nd.targets:
-            _gmi_target_names(t, out)
-    elif isinstance(nd, WithItem):
-        if nd.alias is not None:
-            _gmi_target_names(nd.alias, out)
-    elif isinstance(nd, gimple_ctypes.DelStmt):
-        for t in nd.targets:
-            _gmi_target_names(t, out)
-    elif isinstance(nd, (gimple_ctypes.GlobalStmt, gimple_ctypes.NonlocalStmt)):
-        for n in nd.names:
-            out.append(n)
-    elif isinstance(nd, gimple_ctypes.FunctionDef):
-        out.append(nd.name)
-        for pn in gimple_ctypes._param_names_stripped(nd.params):
-            out.append(pn)
-    elif isinstance(nd, (gimple_ctypes.StructDef, gimple_ctypes.TraitDef,
-                         gimple_ctypes.VarDecl, gimple_ctypes.WalrusExpr,
-                         ExceptHandler)):
-        if nd.name:
-            out.append(nd.name)
-    elif isinstance(nd, (gimple_ctypes.Generator, gimple_ctypes.ComptimeForStmt,
-                         gimple_ctypes.ComptimeVarStmt)):
-        if nd.target:
-            out.append(nd.target)
-    elif isinstance(nd, gimple_ctypes.ImportStmt):
-        if nd.alias:
-            out.append(nd.alias)
-        else:
-            out.append(nd.module.split('.')[0])
-        for ent in nd.extra or []:
-            mod_e, al_e = ent
-            out.append(al_e if al_e else mod_e.split('.')[0])
-    elif isinstance(nd, gimple_ctypes.FromImportStmt):
-        if nd.wildcard:
-            out.append('*')
-        for s in nd.name_alias_strs:
-            al = gimple_ctypes._fi_alias(s)
-            out.append(al if al else gimple_ctypes._fi_name(s))
-    return out
-
-
-def _gmi_binding_index(scopes) -> dict:
-    """name -> list of the nodes in `scopes` (a statement list, or one AST node
-    such as a FunctionDef; walked whole, nested functions included) that bind
-    that name. One walk; the per-name lookups are then dict reads."""
-    idx: dict = {}
-    for nd in _walk_ast(scopes):
-        for nm in _gmi_bound_names(nd):
-            if nm in idx:
-                idx[nm].append(nd)
-            else:
-                idx[nm] = [nd]
-    return idx
-
-
-def _gmi_identifier_literal_ctype(name, enc_idx: dict, mod_index: dict):
-    """The ctype of an IDENTIFIER argument whose only binding is a literal.
-
-    A call `lib.walk(s)` where `s = "r"` is the one binding of `s` in scope
-    passes a string, and the callee's parameter types should follow it just as
-    they follow `lib.walk("r")`. `_gmi_literal_ctype` answers None for a name,
-    so without this the argument recorded no evidence and the callee's body
-    lowered `root + str(k)` as pointer arithmetic.
-
-    The lookup is sound only because it demands EXACTLY ONE binder of the name
-    in scope, and that binder is `name = <literal>` (or `var name = <literal>`).
-    Two bindings, a non-literal binding, a parameter, a global declaration or a
-    wildcard import all return None. The scope is the enclosing function when
-    it binds the name at all (a local shadows a global), otherwise the whole
-    module, which is a superset of every binder that could reach the name.
-    `mod_index` is `_gmi_binding_index` over the module's statements and
-    `enc_idx` the same over the ENCLOSING function (an empty dict for a
-    module-level call). The caller builds `enc_idx` once per function: building
-    it here walked the whole function for every identifier argument of every
-    call in it, which was 8% of `fire.py --dump-full`.
-    """
-    sites: list = []
-    if len(enc_idx) > 0:
-        sites = list(enc_idx.get(name, [])) + list(enc_idx.get('*', []))
-    if not sites:
-        sites = list(mod_index.get(name, [])) + list(mod_index.get('*', []))
-    if len(sites) != 1:
-        return None
-    site = sites[0]
-    if isinstance(site, gimple_ctypes.AssignStmt) \
-            and isinstance(site.target, gimple_ctypes.IdentExpr):
-        return _gmi_literal_ctype(site.value)
-    if isinstance(site, gimple_ctypes.VarDecl) and site.value is not None:
-        return _gmi_literal_ctype(site.value)
-    return None
+    if isinstance(arg, gimple_ctypes.IdentExpr):
+        return _gmi_literal_ctype(
+            _gmi_unique_literal_value(arg.name, enc_idx, mod_index))
+    return _gmi_literal_ctype(arg)
 
 
 def _gmi_iter_calls(stmts, _seen=None) -> list:
@@ -368,7 +264,13 @@ def _gmi_apply_call_site_param_evidence(gen, stmts):
     # `evidence_keys` keeps the first-seen order the dict had.
     evidence: dict = {}
     evidence_keys: list = []
-    for call in _gmi_iter_calls(stmts):
+    # The module-wide binder census, and one scope census per enclosing
+    # function (built on first use, keyed by the function's id). An
+    # IDENTIFIER argument is resolved in the scope of the call that passes it
+    # (see `literal_bindings.unique_literal_value`).
+    mod_index = _gmi_binding_index(stmts)
+    scope_cache: dict = {}
+    for call, enc in _gmi_scoped_calls(stmts):
         if not isinstance(call.func, gimple_ctypes.IdentExpr):
             continue
         fname = _as_str(call.func.name)
@@ -380,8 +282,14 @@ def _gmi_apply_call_site_param_evidence(gen, stmts):
             # Arity mismatch means positional alignment (an optional or
             # defaulted param, a *args call) is not trustworthy here.
             continue
+        enc_idx: dict = {}
+        if enc is not None:
+            _ek_scope = id(enc)
+            if _ek_scope not in scope_cache:
+                scope_cache[_ek_scope] = _gmi_scope_index(enc)
+            enc_idx = scope_cache[_ek_scope]
         for pname, arg in zip(params, args):
-            ctype = _gmi_literal_ctype(arg)
+            ctype = _gmi_arg_literal_ctype(arg, enc_idx, mod_index)
             if ctype is not None:
                 _ek = fname + '\x1f' + _as_str(pname)
                 if _ek not in evidence:
@@ -1472,6 +1380,7 @@ def _mark_presence_field(sdef, fname):
                             and _as_str(_lf.member) == fname):
                         return
     sdef.presence_fields.append(fname)
+    _walk_ast_invalidate(sdef)
 
 
 def _render_struct_typedef_body(struct_name: str, fields: dict, optional_tags=None,
@@ -3489,6 +3398,35 @@ def _gmi_hoist_nested_structs(self, stmts: list) -> list:
 
 
 
+def _gmi_rename_property_setters(stmts: list) -> None:
+    """`@x.setter def x(self, v)` shares its NAME with the `@property` getter
+    `x`, so the struct pipeline saw two overloads of one method and refused the
+    module ("method has 2 overloads and is referenced as a plain value" --
+    `importlib._bootstrap.ModuleSpec.has_location`). The setter is renamed
+    `__setprop_x` and loses the decorator; `obj.x = v` on a receiver whose
+    struct has it lowers to a call (`_gen_stmt_AssignStmt`). Idempotent: a
+    renamed method no longer carries the decorator."""
+    for _ps in _walk_ast(stmts):
+        if not isinstance(_ps, StructDef):
+            continue
+        for _pm in (_ps.methods or []):
+            if not isinstance(_pm, FunctionDef):
+                continue
+            _pd = getattr(_pm, 'decorators', None) or []
+            _keep: list = []
+            _prop = ''
+            for _pdd in _pd:
+                _pds = _pdd if isinstance(_pdd, str) else ''
+                if _pds.endswith('.setter'):
+                    _prop = _pds[:-len('.setter')]
+                else:
+                    _keep.append(_pdd)
+            if _prop != '' and _as_str(_pm.name) == _prop:
+                _pm.name = '__setprop_' + _prop
+                _pm.decorators = _keep
+                _walk_ast_invalidate(_pm)
+
+
 def _gmi_capture_nested_class_enclosing_reads(stmts: list) -> None:
     """Give a class declared inside a function body access to the enclosing
     function's parameters and locals that its methods read.
@@ -3624,10 +3562,12 @@ def _gmi_capture_nested_class_enclosing_reads(stmts: list) -> None:
                             target=IdentExpr(name=_attr, line=_ec.line, col=_ec.col),
                             value=IdentExpr(name=_cn2, line=_ec.line, col=_ec.col),
                             line=_ec.line, col=_ec.col))
+                        _walk_ast_invalidate(_ec)
                 _new_body: list = list(_prologue)
                 for _bs in _ecm.body:
                     _new_body.append(_subst_ident_tree(_bs, _map))
                 _ecm.body = _new_body
+                _walk_ast_invalidate(_ecm)
 
 
 def _subst_ident_tree(node, mapping: dict):
@@ -3720,7 +3660,7 @@ def _gmi_decorator_pass(self, stmts: list, outer_defs: dict, at_module: bool) ->
                             f"decorator {_gmi_decorator_head(_rb_dec)!r} on {_rb_d.name!r} is inside a "
                             f"module-level block, which the compiled path cannot rebind yet; it would "
                             f"silently call the undecorated function (see "
-                            f"bugs/COMPILE_FAIL_decorator_application_dropped.md)")
+                            f"bugs/mid/COMPILE_FAIL_decorator_application_dropped.md)")
     return _gmi_rebind_block(self, stmts, _rb_scope, at_module)
 
 
@@ -3868,7 +3808,7 @@ def _gmi_refuse_scalar_decorator_rebind(self, stmts: list, scope: dict) -> None:
     statement list plus every enclosing scope's defs) to its FunctionDef.
 
     A same-module decorator on a `def` is applied by rebinding the name
-    (`_gmi_decorator_pass`, the bugs/COMPILE_FAIL_decorator_application_dropped.md
+    (`_gmi_decorator_pass`, the bugs/mid/COMPILE_FAIL_decorator_application_dropped.md
     fix). That rebinding is only meaningful for a CALLABLE decorator result:
     a scalar-returning decorator rebinds `step` to a non-callable, which
     CPython raises on as `TypeError: 'int' object is not callable`. So that
@@ -3928,7 +3868,7 @@ def _gmi_refuse_scalar_decorator_rebind(self, stmts: list, scope: dict) -> None:
                     f"(not callable), so {_rd_fn.name!r} is rebound to a scalar; "
                     f"the compiled path does not apply decorators to a def yet and "
                     f"would silently call the undecorated function (see "
-                    f"bugs/COMPILE_FAIL_decorator_application_dropped.md)")
+                    f"bugs/mid/COMPILE_FAIL_decorator_application_dropped.md)")
 
 
 def _declare_posthoc_class_attrs(stmts) -> None:
@@ -3969,6 +3909,199 @@ def _declare_posthoc_class_attrs(stmts) -> None:
             continue
         sd.fields.append(AssignStmt(target=IdentExpr(name=attr, line=n.line, col=n.col),
                                     value=n.value, line=n.line, col=n.col))
+        _walk_ast_invalidate(sd)
+
+
+_LITERAL_KIND_CLONE_CTYPE = {
+    'str': 'char *',
+    'list': 'MojoList *',
+    'dict': 'MojoDict *',
+    'set': 'MojoSet *',
+}
+
+
+def _literal_arg_kind(a):
+    """The container-or-str kind a call argument PROVABLY is, or None.
+
+    Only literals qualify: a string literal is `str`, a list/tuple, dict or set
+    display is its container. Anything else (a name, a call, a number) is
+    None, and a call site whose argument is None blocks the clone pass for its
+    function, so the existing behaviour stands for it.
+    """
+    if isinstance(a, gimple_ctypes.StringLiteral):
+        return 'str'
+    if isinstance(a, (gimple_ctypes.ListExpr, gimple_ctypes.TupleExpr)):
+        return 'list'
+    if isinstance(a, gimple_ctypes.DictExpr):
+        return 'dict'
+    if isinstance(a, gimple_ctypes.SetExpr):
+        return 'set'
+    return None
+
+
+def _gmi_specialize_literal_kind_clones(stmts: list) -> list:
+    """Clone a top-level function per kind of argument it is called with.
+
+    `def each(xs): for x in xs: print(x)` called as `each([4, 5])` and
+    `each("de")` has one parameter that is a list at one site and a str at the
+    other. The body iterates it, so `_infer_param_types` keeps the `MojoList *`
+    usage guess, and the one definition reads the str as a list header: a
+    SIGSEGV on a program CPython runs fine. The `int64_t` box the print-only
+    mix takes cannot tell the two kinds apart, so this pass gives each kind its
+    own definition instead. Each clone then has only callers of one kind, which
+    is the ordinary call-site evidence the compiler already reads, so the
+    clone's parameter types itself with no pin. The clone's name is
+    `<name>_as_<kind>`, and every call site is renamed to the clone its
+    argument's kind selects.
+
+    The pass is deliberately narrow, and anything outside it is left exactly
+    as it was (so the existing refusal in `_refuse_mixed_container_params`
+    still applies to it):
+
+    * the function is a plain top-level `def` with no decorators, no default
+      values, no keyword-only or comptime parameters, no annotations, and is
+      neither a generator nor async;
+    * it has exactly one parameter that is mixed: every call passes it a
+      literal, and two or more different literal kinds appear;
+    * the body uses that parameter as a container (iterates it or subscripts
+      it). A parameter only printed keeps the `int64_t` box and gets no clones;
+    * the function is called ONLY by direct calls with that many positional
+      arguments and no keywords. Any other use of its name (a value use, a
+      keyword call) blocks it, since the name would no longer exist.
+
+    Calls from inside an imported module cannot name this module's function,
+    so only `stmts` is scanned and rewritten.
+
+    Returns a NEW list; the function definitions that get clones are replaced
+    by them in place, and every other statement is kept as it was.
+    """
+    _top = {}
+    _dup = set()
+    for _s in stmts:
+        if isinstance(_s, FunctionDef):
+            if _s.name in _top:
+                _dup.add(_as_str(_s.name))
+            _top[_as_str(_s.name)] = _s
+    if not _top:
+        return stmts
+
+    _nodes = _walk_ast(stmts)
+    _callee_ids = set()
+    _calls_of = {}          # callee name -> [CallExpr]
+    for _n in _nodes:
+        if isinstance(_n, CallExpr) and isinstance(_n.func, IdentExpr):
+            _cn = _as_str(_n.func.name)
+            if _cn in _top:
+                _callee_ids.add(id(_n.func))
+                _calls_of.setdefault(_cn, []).append(_n)
+    _blocked = set(_dup)
+    for _n in _nodes:
+        if (isinstance(_n, IdentExpr) and _as_str(_n.name) in _top
+                and id(_n) not in _callee_ids):
+            _blocked.add(_as_str(_n.name))   # a value use of the name
+
+    _plans = {}   # callee name -> (param index, [kind per call], kinds set)
+    for _cn, _fn in _top.items():
+        if _cn in _blocked or _cn not in _calls_of:
+            continue
+        if (_fn.decorators or _fn.kwonly or _fn.comptime_params
+                or _fn.is_generator or getattr(_fn, 'is_async', False)
+                or _fn.param_has_default or _fn.param_defaults):
+            continue
+        _pnames = []
+        _annotated = False
+        for _p in _fn.params:
+            _pnames.append(_as_str(_p[0]))
+            if _p[1] is not None:
+                _annotated = True
+        if _annotated:
+            continue
+        _nparams = len(_pnames)
+        _ok = True
+        _per_call = []      # one list of literal kinds per call, per param
+        for _call in _calls_of[_cn]:
+            if _call.kwargs or len(_call.args) != _nparams:
+                _ok = False
+                break
+            _per_call.append([_literal_arg_kind(_a) for _a in _call.args])
+        if not _ok:
+            continue
+        _mixed = []         # param indexes with >= 2 distinct literal kinds
+        for _pi in range(_nparams):
+            _kinds = set()
+            _unknown = False
+            for _row in _per_call:
+                if _row[_pi] is None:
+                    _unknown = True
+                    break
+                _kinds.add(_row[_pi])
+            if _unknown:
+                continue
+            if len(_kinds) >= 2:
+                _mixed.append((_pi, _kinds))
+        if len(_mixed) != 1:
+            continue
+        _pi, _kinds = _mixed[0]
+        # Only a parameter the body uses AS A CONTAINER is worth a clone; a
+        # print-only parameter keeps the `int64_t` box, which handles it.
+        _pname = _pnames[_pi]
+        _iterated = False
+        for _bn in _walk_ast(_fn.body):
+            if (isinstance(_bn, ForStmt) and isinstance(_bn.iterable, IdentExpr)
+                    and _as_str(_bn.iterable.name) == _pname):
+                _iterated = True
+                break
+            if (isinstance(_bn, SubscriptExpr) and isinstance(_bn.obj, IdentExpr)
+                    and _as_str(_bn.obj.name) == _pname):
+                _iterated = True
+                break
+        if not _iterated:
+            continue
+        _plans[_cn] = (_pi, [_row[_pi] for _row in _per_call], _kinds)
+
+    if not _plans:
+        return stmts
+
+    # A clone name that collides with a real definition blocks that function:
+    # it is left alone rather than shadowing the user's name.
+    _existing = set(_top.keys())
+    _clone_names = {}   # callee -> {kind: clone name}
+    for _cn in list(_plans.keys()):
+        _names = {}
+        _collides = False
+        for _kd in sorted(_plans[_cn][2]):
+            _cname = f"{_cn}_as_{_kd}"
+            if _cname in _existing:
+                _collides = True
+            _names[_kd] = _cname
+        if _collides:
+            del _plans[_cn]
+        else:
+            _clone_names[_cn] = _names
+    if not _plans:
+        return stmts
+
+    # Rewrite every call site's callee to the clone its argument's kind selects.
+    # The rename is in place on the call's own IdentExpr: each call site owns
+    # its func node, and the clones are copied AFTER this, so they carry the
+    # already-renamed inner calls (a literal recursive call names its clone).
+    for _cn, (_pi, _kind_per_call, _kinds) in _plans.items():
+        for _call, _kd in zip(_calls_of[_cn], _kind_per_call):
+            _call.func.name = _clone_names[_cn][_kd]
+            _walk_ast_invalidate(_call)
+
+    _out = []
+    for _s in stmts:
+        if isinstance(_s, FunctionDef) and _as_str(_s.name) in _plans:
+            _cn = _as_str(_s.name)
+            for _kd in sorted(_clone_names[_cn]):
+                _clone = copy.deepcopy(_s)
+                _clone.name = _clone_names[_cn][_kd]
+                _walk_ast_invalidate(_clone)
+                _out.append(_clone)
+            continue
+        _out.append(_s)
+    return _out
 
 
 def gen_module_impl(self, stmts):
@@ -3977,17 +4110,24 @@ def gen_module_impl(self, stmts):
     # other, and the struct pipeline reads the module-level statement list, so
     # it is hoisted there before anything consumes the list. See
     # `_gmi_hoist_nested_structs` for why it appends rather than moves.
+    _gmi_rename_property_setters(stmts)
     stmts = _gmi_hoist_nested_structs(self, stmts)
     _declare_posthoc_class_attrs(stmts)
     _gmi_capture_nested_class_enclosing_reads(stmts)
     stmts = _gmi_decorator_pass(self, stmts, {}, True)
+    # A function called with a list at one site and a str at another, and
+    # iterated in its body, gets one clone per argument kind before any
+    # call-site analysis runs, so each clone sees one kind of caller.
+    stmts = _gmi_specialize_literal_kind_clones(stmts)
 
     # Python-level frames: a module that says `_getframe` gets a frame record on every
     # function it defines (see emit_methods._frame_enter). Decided here, once, from the
     # module's own statements; every other module's C is unchanged.
     for _fr_nd in _walk_ast(stmts):
         if ((isinstance(_fr_nd, gimple_ctypes.MemberExpr)
-                and _fr_nd.member in ('_getframe', '__traceback__', 'tb_frame', 'f_back', 'f_lineno'))
+                and _fr_nd.member in ('_getframe', '__traceback__', 'tb_frame', 'f_back', 'f_lineno',
+                                    'gi_frame', 'cr_frame', 'ag_frame', 'f_generator',
+                                    'f_trace', 'f_trace_lines', 'f_trace_opcodes'))
                 or (isinstance(_fr_nd, gimple_ctypes.IdentExpr) and _fr_nd.name == '_getframe')):
             self._frames_mods.add(self.module_name or '')
             break
@@ -4796,8 +4936,8 @@ def gen_module_impl(self, stmts):
                         return _xs
                 return None
 
-            # The enclosing function's binder census, built ONCE per function
-            # (see `_gmi_identifier_literal_ctype`), keyed by the function's id.
+            # The enclosing function's scope census, built ONCE per function
+            # (see `_gmi_arg_literal_ctype`), keyed by the function's id.
             _xg_enc_index: dict = {}
             def _xg_record_scalar_args(_xkey, _xpnames, _xargs, _xenc):
                 """Record the unanimous literal SCALAR-ish ctype of each
@@ -4805,24 +4945,19 @@ def gen_module_impl(self, stmts):
                 Pass 1.3d's same-module literal contract, see
                 `_gmi_apply_call_site_param_evidence`). An IDENTIFIER argument
                 counts when its one binding in scope is a literal
-                (`_gmi_identifier_literal_ctype`). A parameter whose call sites
+                (`_gmi_arg_literal_ctype`). A parameter whose call sites
                 disagree records None, and the merge below then leaves it at
                 the body-derived type."""
                 for _xi, _xa in enumerate(_xargs):
                     if _xi >= len(_xpnames):
                         break
-                    _xct = _gmi_literal_ctype(_xa)
-                    if _xct is None and isinstance(_xa, gimple_ctypes.IdentExpr):
-                        _xenc_idx: dict = {}
-                        if _xenc is not None:
-                            _xek = id(_xenc)
-                            if _xek in _xg_enc_index:
-                                _xenc_idx = _as_dict(_xg_enc_index[_xek])
-                            else:
-                                _xenc_idx = _gmi_binding_index(_xenc)
-                                _xg_enc_index[_xek] = _xenc_idx
-                        _xct = _gmi_identifier_literal_ctype(
-                            _xa.name, _xenc_idx, _xg_bind_index)
+                    _xenc_idx: dict = {}
+                    if _xenc is not None:
+                        _xek = id(_xenc)
+                        if _xek not in _xg_enc_index:
+                            _xg_enc_index[_xek] = _gmi_scope_index(_xenc)
+                        _xenc_idx = _as_dict(_xg_enc_index[_xek])
+                    _xct = _gmi_arg_literal_ctype(_xa, _xenc_idx, _xg_bind_index)
                     if not _xct or not _xpnames[_xi]:
                         continue
                     _xs_map = self._xmod_gen_param_hints.setdefault(_xkey, {})
@@ -6441,7 +6576,20 @@ def gen_module_impl(self, stmts):
         _ctxlit_field_cache: dict = {}
 
         def _ctxlit_self_field_container(_ctxlit_sdef, _ctxlit_field):
-            _ctxlit_cachekey = _as_str(getattr(_ctxlit_sdef, 'name', '')) + '::' + _as_str(_ctxlit_field)
+            # Two routes make a `self.<field>` a container, tried in order:
+            # the struct's own method assigns it a container literal, or its
+            # `__init__` assigns it straight from a parameter whose call-site
+            # evidence (`<Struct>::<param>`, written by the observers above
+            # and by earlier rounds of the fixpoint below) says container.
+            # The second route is the hop `Owner([10, 20])` ->
+            # `self._items = items` -> `Reader(self._items)` needs: without it
+            # `Reader.items` was declared `int64_t`, and `for i in r.items`
+            # took the dynamic dispatch path and SIGSEGVed.
+            # The cache key carries the evidence size, so an entry computed
+            # before a later round recorded the parameter is never reused.
+            _ctxlit_sname = _as_str(getattr(_ctxlit_sdef, 'name', ''))
+            _ctxlit_cachekey = (_ctxlit_sname + '::' + _as_str(_ctxlit_field)
+                                + '@' + str(len(_obs_container)))
             if _ctxlit_cachekey in _ctxlit_field_cache:
                 return _ctxlit_field_cache[_ctxlit_cachekey]
             _ctxlit_result = None
@@ -6454,7 +6602,18 @@ def gen_module_impl(self, stmts):
                             break
                 if _ctxlit_result:
                     break
+            if not _ctxlit_result:
+                _ctxlit_init = _ctor_init_methods.get(_ctxlit_sname)
+                if _ctxlit_init is not None:
+                    for _ctxlit_node3 in _walk_ast(_ctxlit_init.body):
+                        if (isinstance(_ctxlit_node3, AssignStmt)
+                                and _gmi_self_member(_ctxlit_node3.target) == _ctxlit_field
+                                and isinstance(_ctxlit_node3.value, IdentExpr)):
+                            _ctxlit_result = _obs_container.get(
+                                _ctxlit_sname + '::' + _as_str(_ctxlit_node3.value.name), '')
+                            break
             _ctxlit_field_cache[_ctxlit_cachekey] = _ctxlit_result
+            return _ctxlit_result
             return _ctxlit_result
 
         _ctxlit_bodies: list = []   # (body, enclosing StructDef or None)
@@ -6465,37 +6624,50 @@ def gen_module_impl(self, stmts):
                 for _ctxlit_meth in _ctxlit_topstmt.methods:
                     _ctxlit_bodies.append((_ctxlit_meth.body, _ctxlit_topstmt))
 
-        for _ctxlit_callerbody, _ctxlit_enclosing in _ctxlit_bodies:
-            for _ctxlit_callnode in _walk_ast(_ctxlit_callerbody):
-                if not (isinstance(_ctxlit_callnode, CallExpr) and isinstance(_ctxlit_callnode.func, IdentExpr)):
-                    continue
-                _ctxlit_cname = _as_str(_ctxlit_callnode.func.name)
-                _ctxlit_pnames = _ctor_init_params.get(_ctxlit_cname)
-                if not _ctxlit_pnames:
-                    continue
-                for _ctxlit_argidx, _ctxlit_argnode in enumerate(_ctxlit_callnode.args):
-                    if _ctxlit_argidx >= len(_ctxlit_pnames):
-                        break
-                    _ctxlit_argct = None
-                    if isinstance(_ctxlit_argnode, IdentExpr):
-                        _ctxlit_argct = _ctxlit_ident_container(_ctxlit_callerbody, _ctxlit_argnode.name)
-                    elif _ctxlit_enclosing is not None:
-                        _ctxlit_selffld = _gmi_self_member(_ctxlit_argnode)
-                        if _ctxlit_selffld:
-                            _ctxlit_argct = _ctxlit_self_field_container(_ctxlit_enclosing, _ctxlit_selffld)
-                    if not _ctxlit_argct:
+        # Fixpoint over the traced pass. A `self.<f> = <param>` hop reads the
+        # evidence this same pass wrote for `<Struct>::<param>`, which may
+        # itself have come from another struct's `self.<g>` argument one
+        # round earlier. A round only ever ADDS keys to the four evidence
+        # dicts (an entry is written once and never changed), so their
+        # combined size is monotone and the loop must terminate.
+        _ctxlit_n_seen = -1
+        while True:
+            _ctxlit_n_now = (len(_obs_container) + len(_obs_container_conflict)
+                             + len(_obs_kind) + len(_obs_conflict))
+            if _ctxlit_n_now == _ctxlit_n_seen:
+                break
+            _ctxlit_n_seen = _ctxlit_n_now
+            for _ctxlit_callerbody, _ctxlit_enclosing in _ctxlit_bodies:
+                for _ctxlit_callnode in _walk_ast(_ctxlit_callerbody):
+                    if not (isinstance(_ctxlit_callnode, CallExpr) and isinstance(_ctxlit_callnode.func, IdentExpr)):
                         continue
-                    _okey = _ctxlit_cname + '::' + _ctxlit_pnames[_ctxlit_argidx]
-                    _cprev = _obs_container.get(_okey, '')
-                    if not _cprev:
-                        _obs_container[_okey] = _ctxlit_argct
-                    elif _cprev != _ctxlit_argct:
-                        _obs_container_conflict[_okey] = True
-                    _prev = _obs_kind.get(_okey, '')
-                    if not _prev:
-                        _obs_kind[_okey] = _ctxlit_argct
-                    elif _prev != _ctxlit_argct:
-                        _obs_conflict[_okey] = True
+                    _ctxlit_cname = _as_str(_ctxlit_callnode.func.name)
+                    _ctxlit_pnames = _ctor_init_params.get(_ctxlit_cname)
+                    if not _ctxlit_pnames:
+                        continue
+                    for _ctxlit_argidx, _ctxlit_argnode in enumerate(_ctxlit_callnode.args):
+                        if _ctxlit_argidx >= len(_ctxlit_pnames):
+                            break
+                        _ctxlit_argct = None
+                        if isinstance(_ctxlit_argnode, IdentExpr):
+                            _ctxlit_argct = _ctxlit_ident_container(_ctxlit_callerbody, _ctxlit_argnode.name)
+                        elif _ctxlit_enclosing is not None:
+                            _ctxlit_selffld = _gmi_self_member(_ctxlit_argnode)
+                            if _ctxlit_selffld:
+                                _ctxlit_argct = _ctxlit_self_field_container(_ctxlit_enclosing, _ctxlit_selffld)
+                        if not _ctxlit_argct:
+                            continue
+                        _okey = _ctxlit_cname + '::' + _ctxlit_pnames[_ctxlit_argidx]
+                        _cprev = _obs_container.get(_okey, '')
+                        if not _cprev:
+                            _obs_container[_okey] = _ctxlit_argct
+                        elif _cprev != _ctxlit_argct:
+                            _obs_container_conflict[_okey] = True
+                        _prev = _obs_kind.get(_okey, '')
+                        if not _prev:
+                            _obs_kind[_okey] = _ctxlit_argct
+                        elif _prev != _ctxlit_argct:
+                            _obs_conflict[_okey] = True
 
         for _cs_name2 in _ctor_init_params:
             _init = _ctor_init_methods.get(_cs_name2)
@@ -6848,7 +7020,7 @@ def gen_module_impl(self, stmts):
                 # the CURRENT execution's cell pointer, and each instance keeps
                 # its own in a hidden field, so `a = make(5); b = make(7);
                 # a.attr` reads 5, not the later call's 7. See
-                # bugs/CODEGEN_nested_class_attr_reads_enclosing_local_silently_zero.md.
+                # nested class attribute reading an enclosing local (fixed).
                 # Module-scope classes and constants keep the plain global.
                 if (s.name in getattr(self, '_fn_scoped_structs', ())
                         and v is not None and not _cattr_value_is_constant(v)):
@@ -9012,14 +9184,29 @@ def gen_module_impl(self, stmts):
         signature is emitted, which is why it is called from both of that
         table's population loops rather than from one of them.
         """
+        # Process functions with usage-derived parameter types
         for _rn in list(getattr(self, '_inferred_var_types', None) or {}):
             _rp = self._inferred_param_types.get(_rn)
             if not _rp:
-                continue
+                _rp = {}
+                self._inferred_param_types[_rn] = _rp
             for _rpn in list(_rp.keys()):
                 _fixed = funcs_shared.param_binding_ctype(self, _rn, _rpn, _rp[_rpn])
                 if _fixed != _rp[_rpn]:
                     _rp[_rpn] = _fixed
+        # Also apply unanimous container evidence to parameters that had no
+        # usage-derived evidence at all (e.g. pure-forwarders, or bodies that
+        # only call print() so inference never resolves a container kind).
+        _pct = getattr(self, '_param_container_types', None) or {}
+        for _fn, _pmap in _pct.items():
+            if _fn not in self._inferred_param_types:
+                self._inferred_param_types[_fn] = {}
+            for _pname, _ctype in _pmap.items():
+                if _ctype not in ('MojoDict *', 'MojoList *', 'MojoSet *'):
+                    continue
+                _cur = self._inferred_param_types[_fn].get(_pname)
+                if _cur in (None, 'int64_t', 'int', ''):
+                    self._inferred_param_types[_fn][_pname] = _ctype
 
     for s in all_functions:
         if isinstance(s, FunctionDef):
@@ -9112,6 +9299,9 @@ def gen_module_impl(self, stmts):
                 if _pt in ('char *', 'double'):
                     return _pt
                 return t or _pt
+            t_global = self._global_var_types.get(_an)
+            if t_global is not None:
+                return t_global
             return t or self._inferred_param_types.get(_cn, {}).get(_an)
         if isinstance(a, MemberExpr):
             # `self.<field>` / `<local>.<field>` — the shape a constructor
@@ -9831,6 +10021,16 @@ def gen_module_impl(self, stmts):
     # `_param_dict_val_obs` keeps its own: collapsing at collection time is
     # what lets one observing site outvote a disagreeing sibling.
     self._param_container_obs: dict[str, dict[str, set]] = {}
+    # The call sites that passed a provably NON-container value (a str, a
+    # number, a bool) into each parameter. A container contract is a claim
+    # that EVERY observer is a container, and `_param_container_obs` only
+    # holds the containers, so a str call beside a list call was invisible to
+    # it: `ident([1, 2, 3])` plus `ident("abc")` made `ident`'s parameter
+    # `MojoList *`, and the str was cast to a list header and segfaulted.
+    # Recorded here so `_resolve_param_containers` can answer "disagreeing"
+    # (`''`) for that slot, which leaves it at the `int64_t` box the scalar
+    # pass already chose for a mixed slot (see `_int64_may_hold_str`).
+    self._param_noncontainer_obs: dict[str, set] = {}   # callee -> {pname}
     _free_params: dict = {}
     for _fp_s in all_functions:
         if not isinstance(_fp_s, FunctionDef):
@@ -9991,18 +10191,51 @@ def gen_module_impl(self, stmts):
         _pc_set = _pc_inner.setdefault(pname, set())
         _pc_set.add(_as_str(ctype))
 
+    def _record_param_noncontainer(callee, pname):
+        """Record that one call site passed a non-container into `pname`.
+
+        The counterpart of `_record_param_container` for the observers the
+        container table cannot hold. One such site is enough to make the
+        container contract disagree: a parameter cannot be a list at one call
+        and a string at another.
+        """
+        callee = _as_str(callee)
+        pname = _as_str(pname)
+        _nc_set = self._param_noncontainer_obs.setdefault(callee, set())
+        _nc_set.add(pname)
+
+    def _is_noncontainer_arg(a, caller_name, st):
+        """Is call argument `a` provably NOT a container?
+
+        `st` is `_arg_scalar_type`'s answer for it, already computed by the
+        caller. A container literal is never counted here, even though the
+        scalar walk gives it `void *`: it is a container and is recorded as one
+        by `_static_arg_container`. An argument that is merely untyped (None)
+        is not counted either, because "not known yet" is not "not a
+        container", and the conservative answer for it is the old one.
+        """
+        if isinstance(a, (gimple_ctypes.IntLiteral, gimple_ctypes.FloatLiteral,
+                          gimple_ctypes.BoolLiteral, gimple_ctypes.StringLiteral)):
+            return True
+        if not st:
+            return False
+        return _as_str(st) in ('char *', 'double', 'int64_t', 'int', 'bool')
+
     def _resolve_param_containers():
         """Turn the collected container observations into the contract.
 
         Same unanimity rule and the same `''`-means-disagreement marker as
         `_resolve_param_dict_vals`, for the same reason, and the same
         `sorted(...)` + index rather than `next(iter(...))` for the
-        self-hosted reason spelled there.
+        self-hosted reason spelled there. A parameter that ALSO has a
+        non-container observer is disagreeing whatever its container
+        observers say (`_param_noncontainer_obs`).
         """
         for _callee, _pm in self._param_container_obs.items():
             _dst = self._param_container_types.setdefault(_callee, {})
+            _ncm = self._param_noncontainer_obs.get(_callee) or set()
             for _pname, _types in _pm.items():
-                if len(_types) == 1:
+                if len(_types) == 1 and _as_str(_pname) not in _ncm:
                     _sole = sorted(_types)
                     _dst[_pname] = _as_str(_sole[0])
                 else:
@@ -10414,6 +10647,8 @@ def gen_module_impl(self, stmts):
                     _record_param_container(callee, pnames[i], _pc)
 
                 st = _arg_scalar_type(caller_name, a)
+                if _pc is None and _is_noncontainer_arg(a, caller_name, st):
+                    _record_param_noncontainer(callee, pnames[i])
                 if not st:
                     # An int/bool/None literal contributes NOTHING above, and
                     # that silence is the bug this records against: `f(1)`
@@ -10550,6 +10785,10 @@ def gen_module_impl(self, stmts):
                         _kwpc = _static_arg_container(_kw[1], caller_name)
                         if _kwpc is not None:
                             _record_param_container(callee, _kwn, _kwpc)
+                        elif _is_noncontainer_arg(
+                                _kw[1], caller_name,
+                                _arg_scalar_type(caller_name, _kw[1])):
+                            _record_param_noncontainer(callee, _kwn)
                         break
 
     # A CONSTRUCTOR call is a `CallExpr` whose callee is a bare `IdentExpr`
@@ -10795,6 +11034,10 @@ def gen_module_impl(self, stmts):
                         self._param_elem_mixed.setdefault(callee, set()).add(pnames[i])
         _resolve_param_dict_vals()
         _resolve_param_containers()
+        # After resolving container observations, apply them to parameter
+        # inference so untyped parameters that only receive container
+        # arguments (e.g. `show(x)` with `x = [1,2,3]`) get typed correctly.
+        _reconcile_param_container_kinds()
         _em_now = sum(len(_v) for _v in self._param_elem_mixed.values())
         if _em_now != _em_before:
             _em_before = _em_now
@@ -10948,6 +11191,47 @@ def gen_module_impl(self, stmts):
           if not _fk_changed:
             break
     _propagate_forwarded_container_kinds()
+
+    # ── a container parameter that is ALSO passed a non-container refuses ──
+    #
+    # `_record_param_noncontainer` marks a parameter whose call sites disagree
+    # with a container observation: `each([4, 5])` beside `each("de")`. The
+    # container-kind contract then correctly declines to name a kind (its
+    # `''` marker), but when the BODY also uses the parameter as a container
+    # (`for x in xs` leaves `_infer_param_types`'s `MojoList *` guess in
+    # place, and nothing overrides a guess the contract declined), the slot
+    # is still lowered as that container: the str is cast to a list header
+    # and the loop reads its bytes as a list. That is SIGSEGV on a program
+    # CPython runs fine.
+    #
+    # No representation exists yet that serves both kinds (the `int64_t`
+    # box cannot tell a `MojoList *` from a `char *`), so the honest move is
+    # a compile-time refusal: `fire.py <file>` falls back to the interpreter
+    # on any build failure, which gives the right answer, where the compiled
+    # binary gave a crash. The representation is the open next step in
+    # the per-kind clone pass (`_gmi_specialize_literal_kind_clones`).
+    #
+    # Narrow on purpose. A mixed parameter the body only PRINTS never
+    # reaches a container guess, so it keeps the int64_t box that
+    # `_param_noncontainer_obs` exists to choose, and is not refused.
+    def _refuse_mixed_container_params():
+        for _mc_callee, _mc_pm in list(self._param_container_obs.items()):
+            _mc_ck = _as_str(_mc_callee)
+            _mc_nc = self._param_noncontainer_obs.get(_mc_ck) or set()
+            _mc_inf = self._inferred_param_types.get(_mc_ck) or {}
+            for _mc_pname, _mc_types in list(_mc_pm.items()):
+                _mc_pk = _as_str(_mc_pname)
+                if not _mc_types or _mc_pk not in _mc_nc:
+                    continue
+                if _as_str(_mc_inf.get(_mc_pk)) in ('MojoList *', 'MojoDict *', 'MojoSet *'):
+                    raise RuntimeError(
+                        f"parameter {_mc_pk!r} of {_mc_ck!r} is passed a "
+                        "container at one call site and a str or number at "
+                        "another, and the body uses it as a container; the "
+                        "compiled path has no representation for that yet "
+                        "(the per-kind clone pass only covers literal "
+                        "arguments)")
+    _refuse_mixed_container_params()
 
     # A container param whose ELEMENTS the callee `isinstance()`-checks
     # against struct types (`for s in stmts: if isinstance(s, FunctionDef)`)
@@ -14570,6 +14854,8 @@ def gen_module_impl(self, stmts):
             # _lower_generator_close in emit_calls.py.
             'extern int64_t __mojo_gen_throw (int64_t, int64_t, int64_t, int64_t);',
             'extern int64_t __mojo_gen_close (int64_t, int64_t);',
+            'extern int64_t __mojo_gen_frame (int64_t);',
+            'extern void __mojo_gen_stop_value (int64_t);',
             'extern int64_t __mojo_tuple_box_2 (int64_t, int64_t);',
             'extern int64_t __mojo_tuple_box_3 (int64_t, int64_t, int64_t);',
             'extern int64_t __mojo_tuple_box_4 (int64_t, int64_t, int64_t, int64_t);',

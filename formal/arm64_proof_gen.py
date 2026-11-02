@@ -457,6 +457,62 @@ def _has_while(stmts) -> bool:
     return False
 
 
+def _ternary_count(e) -> int:
+    """The value-position ternaries in an expression, operands included.
+
+    `TernaryExpr` is the value-position `if` — the shape `arm64_step`'s CSEL
+    arm and `work_step_csel` model, and the one the untyped AST bridge has no
+    constructor for — and this counts them where `_ast_model_cannot_state`
+    only asked whether any exist: the certificate's cost row is keyed on HOW
+    MANY conditions a body carries, not whether it carries one. The walk is
+    over the node's dataclass fields rather than a hand list of expression
+    kinds, so an operand a hand list forgot is still counted.
+    """
+    if e is None:
+        return 0
+    if isinstance(e, F.TernaryExpr):
+        return (1 + _ternary_count(e.condition)
+                + _ternary_count(e.then_val) + _ternary_count(e.else_val))
+    n = 0
+    for name in getattr(e, "__dataclass_fields__", ()) or ():
+        if name in ("line", "col"):
+            continue
+        child = getattr(e, name, None)
+        if isinstance(child, list):
+            n += sum(_ternary_count(c) for c in child)
+        elif child is not None and not isinstance(
+                child, (str, int, float, bool)):
+            n += _ternary_count(child)
+    return n
+
+
+def _cond_branch_count(stmts) -> int:
+    """The conditional branches a statement list carries: one per `if` and
+    one per value-position ternary, recursing into the arms and operands.
+
+    This is the certificate's cost row: the walk theorem's per-path value-flow
+    facts grow with the number of source-level conditions, branch or not — a
+    value-position ternary is branchless on the machine (`cmp` + `CSEL`, no
+    branch instruction) yet it still doubles the paths the per-condition
+    `hcond` facts are stated over, which is the reading the `B.cond` control
+    in `bugs/formal/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.
+    md` gives for the statement-`if` shape and the measured ternary class
+    (one checks, three check at 560 s / 5.6 GB, four kill at the 1500 s CPU
+    bound) gives for this one.
+    """
+    n = 0
+    for st in stmts:
+        if isinstance(st, IfStmt):
+            _c, _tb, _eb = _if_expand(st)
+            n += (1 + _ternary_count(_c)
+                  + _cond_branch_count(_tb) + _cond_branch_count(_eb))
+        else:
+            # The value position the statement carries: `return`'s value,
+            # an `Assign`/`AugAssign`/`VarDecl` right-hand side, an `ExprStmt`.
+            n += _ternary_count(getattr(st, "value", None))
+    return n
+
+
 #: Node types that start a NESTED SCOPE.  A call inside one is not a call of
 #: the enclosing function: a nested `def`'s body runs when IT is called, and a
 #: lambda's body when the lambda object is called.  Every walker below stops at
@@ -3655,35 +3711,24 @@ _STEP_CONDS = [
     # `formal/arm64.py` can produce.
     (0xffe00000, 0xab000000),  # 66 CMN Xn, Xm (SUBS XZR, Xn, Xm with the add flag)
     (0xffe00000, 0xea000000),  # 67 TST Xn, Xm (ANDS XZR, Xn, Xm)
-    # CSEL is EMITTED and UNMODELLED, and saying so here is the point of this
-    # comment: `arm64_codegen.py` calls `encode_csel_xd_xm_cond` at six sites
-    # (6394, 6396, 6410, 6412, 8998, 9008 — a ternary is a CSEL), so a reader of
-    # this table cannot conclude from its absence that the instruction is unused.
-    #
-    # The row that was here is removed rather than left, and that is the correct
-    # direction: `arm64_step` has no CSEL branch either, and `check_step_conds`
-    # (called by `generate_arm64_proof`, so by EVERY proved arm64 build) requires
-    # the two to be the same set. An entry here with no branch in the model is not
-    # a gap in a check — it is a generator that would describe a CSEL's effect
-    # while the function being proved takes no step at all for that word, which
-    # is a proof about a different function. The check is right and the row was
-    # wrong. (`work/formal13-3`'s commit that added it violated its own stated
-    # premise in the very message that introduced it.)
-    #
-    # **WHAT IS STILL MISSING is the model branch, and what blocks it is not the
-    # three lines of Lean.** Measured 2026-10-03, both halves of the old reason
-    # re-measured rather than quoted: the three-line `arm64_step` branch BUILDS
-    # (the branch plus the `work_step_csel` the row needs), and with it a
-    # CSEL-carrying export fails the same way a THREE-BRANCH FUNCTION fails —
-    # `_gen_run_cert`'s certificate exceeds `formal/lean.py`'s `PROOF_WALL_S` —
-    # and the control is that the same three branches spelled as ordinary
-    # comparisons fail identically. So the wall is the certificate's size and not
-    # the instruction, which changes the ORDER of the work: the certificate is
-    # the defect to fix first (`bugs/formal/FORMAL_a_three_branch_certificate_exceeds_
-    # the_lean_bound.md` has the measurement and the next step), and the CSEL row
-    # is a three-line change once it is gone.
-    # `bugs/formal/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`
-    # carries the rest.
+    # CSEL: EMITTED and, until 2026-11-01, UNMODELLED.  The row this comment
+    # once guarded was removed rather than left when it landed WITHOUT
+    # `arm64_step`'s branch (2026-10-03, `bugs/formal/FORMAL_arm64_csel_is_not_
+    # modelled_so_the_step_table_cannot_claim_it.md`): an entry here with no
+    # branch in the model is a generator that would describe a CSEL's effect
+    # while the function being proved takes no step at all for that word,
+    # which is a proof about a different function.  What blocked the branch
+    # was not the three lines of Lean — they build, with the `work_step_csel`
+    # the row needs — but the certificate: with CSEL in the model a
+    # CSEL-carrying export fails the same way a THREE-BRANCH FUNCTION fails,
+    # measured on both shapes (`bugs/formal/FORMAL_a_three_branch_certificate_
+    # exceeds_the_lean_bound.md`).  So the row came back ONLY with the branch
+    # and the lemma, in one commit — the table and the model move together —
+    # and the walled discharge is tracked in that certificate doc, whose
+    # measurement is why the order of the work was certificate first.
+    # `arm64_codegen.py` calls `encode_csel_xd_xm_cond` at six sites (a
+    # ternary is a CSEL), so a reader of this table cannot conclude from the
+    # row's position that the instruction is unused.
     #
     # 68 SMULH. APPENDED for the reason 51 was. The mask is the SAME VALUE
     # entry 4 (MUL) uses, `0xffe07c00`, and that is not a copy-paste: on the
@@ -3704,6 +3749,22 @@ _STEP_CONDS = [
     # `a * b` fit in 64 signed bits", which a wrapping MUL cannot answer), and
     # `test_arm64_encoders.py` checks the encoding against `as`.
     (0xffe07c00, 0x9b407c00),  # 68 SMULH Xd, Xn, Xm
+    # 69 CSEL Xd, Xn, Xm, cond: the branchless select, `Rd = if cond then Xn
+    # else Xm`, and nothing else moves (no flags, no `sp`).  APPENDED, last:
+    # the model's arm is the chain's last for the index hard-coding reason 68
+    # records, and this row's position is what decides `_step_branch_index`'s
+    # FIRST match — `check_step_conds` is a SET comparison and order does not
+    # matter there, but the first row that claims a word wins the decode.  The
+    # `work_step_csel` lemma's 69 `hne_*` facts are the measurement that no
+    # earlier row claims these words, including the two that share the mask
+    # (64/65, LDUR/STUR: `0xf8400000`/`0xf8000000`, disjoint in the base under
+    # it), and its statement is the model arm's own: the condition is the RAW
+    # field at bits 15:12, no inversion, which is what separates it from the
+    # CSET row's `field ± 1`.  `formal/arm64_codegen.py::encode_csel_xd_xm_
+    # cond` is the emitter's caller (a ternary), and the mask's kept bits as
+    # class separators are measured with the platform assembler in the arm's
+    # own comment.
+    (0xffe00c00, 0x9a800000),  # 69 CSEL Xd, Xn, Xm, cond
 ]
 
 
@@ -4029,6 +4090,18 @@ def _step_rhs(w: int, idx: int):
     if idx == 67:  # TST Xn, Xm: the logical flags of Xn & Xm, C and V clear
         return (f"some {{ s with nzcv := arm64_logic_flags (arm64_reg "
                 f"{(w >> 5) & 0x1f} s &&& arm64_reg {(w >> 16) & 0x1f} s) }}")
+    if idx == 69:  # CSEL Xd, Xn, Xm, cond: the branchless select, nothing else
+        # moves.  The step RESULT closes by `exact`-ing `work_step_csel` at
+        # this word, so this spelling has to be the lemma's conclusion defeq —
+        # which it is on the literal condition, the same way `_COND4`'s
+        # docstring records for B.cond: the concrete number and the word-
+        # relative `((w >>> 12) &&& 0xf).toNat` are the same term once `w` is
+        # the word.  The condition is the RAW field at bits 15:12, no
+        # inversion, which is what separates it from the CSET row's
+        # `field ± 1`.
+        cond = (w >> 12) & 0xf
+        return (f"some (arm64_set_reg {rd} s (if arm64_matches_condition "
+                f"{cond} s.nzcv then arm64_reg {rn} s else arm64_reg {rm} s))")
     if idx in (54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65):
         rn = (w >> 5) & 0x1f
         base = _base_of(rn)
@@ -4324,6 +4397,13 @@ def _step_rhs_generic(idx: int):
     if idx == 67:
         return (f"some {{ s with nzcv := arm64_logic_flags (arm64_reg {_RN} s "
                 f"&&& arm64_reg {_RM} s) }}")
+    if idx == 69:  # CSEL: `Rd = if cond then Xn else Xm`, nothing else moves
+        # and the condition is the RAW field at bits 15:12 — no inversion,
+        # which is what separates it from `_COND`'s `field ± 1` for CSET.
+        # `w` below is the Lean word the statement binds, as in `_COND4`.
+        return (f"some (arm64_set_reg {_RD} s (if arm64_matches_condition "
+                f"(((w >>> 12) &&& 0xf).toNat) s.nzcv then arm64_reg {_RN} s "
+                f"else arm64_reg {_RM} s))")
     if idx in (54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65):
         _I9G = "(((w >>> 12) &&& 0x1ff).toNat)"
         _IDX = "(((w >>> 10) &&& 0xfff).toNat)"
@@ -4446,6 +4526,12 @@ _WORK_STEP = [
     (66, "work_step_cmn", [(0xffe00000, 0xab000000)]),
     (67, "work_step_tst", [(0xffe00000, 0xea000000)]),
     (68, "work_step_smulh", [(0xffe07c00, 0x9b407c00)]),
+    # CSEL, APPENDED last in both lists: the lemma is `work_step_csel` in
+    # lib/ProofLib.lean, whose statement is the model arm's own (`Rd = if cond
+    # then Xn else Xm`, the RAW bits 15:12), and whose 69 `hne_*` facts are the
+    # measurement that no earlier row — including the two that share the mask,
+    # 64/65 — claims these words.
+    (69, "work_step_csel", [(0xffe00c00, 0x9a800000)]),
 ]
 
 _WORK_STEP_BY_IDX = {idx: (lemma, tests) for idx, lemma, tests in _WORK_STEP}
@@ -5236,10 +5322,10 @@ def _regs_written(w: int, idx: int):
         return set() if rd == 31 else {rd}
     if idx == 15:
         return {30}
-    # 68 (SMULH) is in the MUL row on purpose rather than in a row of its own:
-    # it writes `Xd` and no flags and no `sp`, which is the same fact MUL's
-    # membership states, and a second row saying the same thing is how
-    # `_regs_written` and the model's arm drift apart.
+    # 68 (SMULH) and 69 (CSEL) are in the MUL row on purpose rather than in a
+    # row of their own: each writes `Rd` and no flags and no `sp`, which is the
+    # same fact MUL's membership states, and a second row saying the same
+    # thing is how `_regs_written` and the model's arm drift apart.
     #
     # 6 (CMP/SUBS register) and 66 (CMN/ADDS) are here for the same reason 2/3
     # are: the classes also carry their register-writing spellings
@@ -5251,7 +5337,7 @@ def _regs_written(w: int, idx: int):
     # the plain `{rd}` the register-arithmetic rows use.
     if idx in (6, 66):
         return {rd} if rd != 31 else set()
-    if idx in (1, 2, 3, 4, 5, 7, 8, 20, 23, 24, 25, 26, 27, 28, 29, 30, 33, 68):
+    if idx in (1, 2, 3, 4, 5, 7, 8, 20, 23, 24, 25, 26, 27, 28, 29, 30, 33, 68, 69):
         return {rd}
     if idx in (9, 10, 11, 12):
         return {rd}
@@ -7084,7 +7170,7 @@ def _trap_terminating(blocks: list, words: dict) -> set:
     block that ENDS in the raw `SYS_exit` the emitter ends every bounded stop
     with (`_is_svc`), or a block that ends in a `BL` whose fall-through block
     is itself such a block.  The second is the shape of the compiler's own
-    trap — `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
+    trap — `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
     `def q(a, b): return a // b` divides by zero into a block that ends in
     `BL fflush` and then that tail — and it is the shape a `BL` "cannot
     return" means in `_unfollowable_calls`'s terminal rule a few lines below:
@@ -7166,7 +7252,7 @@ def _unfollowable_calls(code: bytes, base: int, func_entry: int,
     the model steps as a no-op but which is the machine's own `SYS_exit`), and a
     block that ends in `svc` has no `RET`, so the call returns nowhere.  The
     compiler's own trap is the measured case: `def q(a, b): return a // b`
-    (`bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
+    (`bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
     fixture) ends its divide-by-zero arm in `BL fflush` followed by that tail,
     and counting the `BL` made the halt address a call the concrete run never
     takes, which is the false `main_pre_0.pc = …` premise the doc names.  The
@@ -7439,13 +7525,8 @@ def _unmodelled_instruction(word: int):
     `_step_branch_index` has already rejected, so the question is which
     instruction it is, and A64's fixed fields answer that without a table.
 
-    The three this emitter is measured to produce:
+    The ones this emitter is measured to produce:
 
-      * **`CSEL`** — A64 "Conditional Select (register)" is `sf 110101000 0` in
-        bits 31..21, i.e. `(w >> 21) & 0x7ff == 0x4d4` (measured: the word
-        `arm64_codegen.py::_emit_csel_ternary` writes for `1 if n > 3 else 0` is
-        `0x9a801020`). `CSET` is the same instruction with Rn = Rm = XZR, which
-        the step table HAS at index 30, so it never reaches here.
       * **`STUR` / `LDUR`** — the unscaled forms, `(w & 0xffc00000)` equal to
         `0xf8000000` or `0xf8400000`: the 9-bit displacement a scaled
         12-bit-offset access cannot express, which in practice means a NEGATIVE
@@ -7464,15 +7545,15 @@ def _unmodelled_instruction(word: int):
         `0x8b0103e0`, `sub x0, xzr, x1` = `0xcb0103e0`) run as `0 + 1` and
         `0 - 1`.
       * anything else: `None`, and the caller says so rather than guessing.
+
+    `CSEL` used to be the first of these — and is not any more: the branchless
+    select is `arm64_step`'s last arm (`_STEP_CONDS`'s row 69 with
+    `work_step_csel`), so a CSEL word is claimed by `_step_branch_index` and
+    never reaches here.  What refuses a CSEL-carrying entry after the row
+    landed is the certificate's size rather than the select, and that refusal
+    is the branch-count gate in `generate_arm64_proof`, which names
+    `bugs/formal/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md`.
     """
-    if ((word >> 21) & 0x7ff) == 0x4d4:
-        return ("CSEL",
-                "the branchless select the code emitter uses for `a if c else "
-                "b`, and for a flag-preserving `and`/`or`. The semantic model "
-                "states the conditional expression (`_ternary_go`), so what is "
-                "missing here is the machine half, and the measurement is "
-                "`bugs/formal/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_"
-                "cannot_claim_it.md`.")
     if (((word >> 21) & 0x7) == 0x1 and ((word >> 24) & 0x1f) == 0x0b):
         which = ("SUBS/CMP extended" if (word >> 29) & 1 else
                  "SUB extended" if (word >> 30) & 1 else "ADD extended")
@@ -7524,7 +7605,11 @@ def _cfg_decomposition_refusal(name: str, code: bytes, base: int,
     table's gaps are not all the ternary's: an unscaled spill is the other one
     this emitter reaches, and it has nothing to do with a conditional
     expression. So each word is named off its own encoding
-    (`_unmodelled_instruction`) and only the CSEL case mentions `_ternary_go`.
+    (`_unmodelled_instruction`) and no case re-derives the source construct.
+    (The CSEL case that used to mention `_ternary_go` is gone with the row:
+    the select is modelled now, so a CSEL word never reaches here, and the
+    ternary's refusal lives in the branch-count gate of `generate_arm64_proof`
+    rather than in a word the step table claims.)
 
     The search is over the range the walk itself uses — the entry to the last
     `RET` — because that is the range whose words the certificates are built
@@ -8786,7 +8871,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 # and `trivial` discharges it) rather than certifying a block
                 # the model cannot step — which is the walk's own half of the
                 # rule `_unfollowable_calls` states a few functions up, and the
-                # thing `bugs/FORMAL_integer_overflow_at_run_time_is_still_
+                # thing `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_
                 # untrapped.md`'s step 2 asks for: the divide-by-zero arm's
                 # `BL fflush` is no longer an unfollowable call, it is a
                 # terminus the walk closes.
@@ -11960,6 +12045,54 @@ def generate_arm64_proof(prog, code, info) -> str:
         fn = prog.functions[0]
         func_name = fn.name
     param = fn.params[0][0] if fn.params else "n"
+    # **The CSEL discharge is gated on the entry's conditional-branch count,
+    # and the gate is a refusal rather than a bigger bound.**  The entry's
+    # CSEL — the branchless select `a if c else b` lowers to — is what the
+    # step table's row 69 claims, and its certificate's per-path value-flow
+    # facts grow with the entry's conditional-branch count: the measured
+    # boundary is inside this class, one conditional expression checks,
+    # three check at 560 s / 5.6 GB under the 12 GB slot, and four are
+    # killed at the 1500 s CPU bound with "NOT a verdict on the proof".
+    # The select itself is modelled — `arm64_step`'s last arm and
+    # `work_step_csel` — so the cost is the certificate's size, not the
+    # instruction, and emitting a file whose only outcome is that kill buys
+    # nothing: a named refusal is what the class owes the reader, and the
+    # tracked leaf it names owns the four-branch boundary and the per-path
+    # hoist that closes it.
+    #
+    # The CSEL is asked of the entry's OWN walked range — the same
+    # `_walk_range` cut the walk decomposes — so a CSEL another function
+    # carries cannot wall THIS entry's certificate, and the branch count is
+    # the entry's body: the measured class is loop-free (a looped entry's
+    # walk is the loop-contract shape this doc did not measure), and the
+    # count is the source-level conditions, branch or not — a value-position
+    # ternary is branchless on the machine yet still doubles the paths the
+    # per-condition facts are stated over.
+    _gate_entry = info["labels"].get(func_name, base_addr)
+    _gate_words = {base_addr + i: int.from_bytes(code[i:i + 4], "little")
+                   for i in range(0, len(code) - len(code) % 4, 4)}
+    _gate_end = _walk_range(_gate_words, _gate_entry)
+    _entry_csel = any(_step_branch_index(w) == 69
+                      for pc, w in _gate_words.items()
+                      if _gate_entry <= pc < _gate_end)
+    _entry_branches = _cond_branch_count(fn.body) if fn is not None else 0
+    if _entry_csel and not _has_while(fn.body) and _entry_branches >= 4:
+        raise NotImplementedError(
+            "universal theorem: this entry carries a CSEL — the branchless "
+            "select `a if c else b` lowers to — and its body has "
+            f"{_entry_branches} conditional branches, which is at the "
+            "measured four-branch boundary where the certificate's per-path "
+            "value-flow facts stop checking: one conditional expression in "
+            "this class checks, three check at 560 s / 5.6 GB under the 12 "
+            "GB slot, and four are killed at the 1500 s CPU bound with "
+            "\"NOT a verdict on the proof\".  The select itself is modelled "
+            "— `arm64_step`'s last arm and `work_step_csel` — so the cost "
+            "is the certificate's size, not the instruction, and emitting a "
+            "file whose only outcome is that kill buys nothing.  The "
+            "tracked leaf for this shape is "
+            "`bugs/formal/FORMAL_a_three_branch_certificate_exceeds_the_lean_"
+            "bound.md`: it owns the four-branch boundary and the per-path "
+            "hoist that closes it.")
     # The INDEPENDENT specification this program asks to be checked against, or
     # None.  Read here rather than at the end of the function because it decides
     # the HEADER (the generated file imports `lib/Specs.lean` only when something
@@ -12316,7 +12449,7 @@ def generate_arm64_proof(prog, code, info) -> str:
     # is the stack-floor guard every compiled function carries, and the model
     # steps through that tail rather than halting in it, so the statement
     # would weaken for a program whose run never does.  See
-    # `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s step
+    # `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s step
     # 2 for the shape: `def q(a, b): return a // b`'s divide-by-zero arm ends
     # in `BL fflush` and the `movz`/`svc` tail.
     _trap_words = {base_addr + i: int.from_bytes(code[i:i + 4], "little")
@@ -12558,7 +12691,7 @@ def generate_arm64_proof(prog, code, info) -> str:
         concrete_test = (
             f"/- NO CONCRETE RUN TEST for {func_name}: the function ends a "
             f"path in the\n"
-            f"   compiler's bounded-stop trap (`bugs/FORMAL_integer_overflow_"
+            f"   compiler's bounded-stop trap (`bugs/formal/FORMAL_integer_overflow_"
             f"at_run_time_is_still_\nuntrapped.md`: a guard branch into a "
             f"block ending in `BL fflush` and the\n"
             f"   `movz`/`svc` tail), and the model ends it earlier — its `BL` "

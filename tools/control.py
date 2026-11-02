@@ -549,10 +549,10 @@ def limit_reset(t):
     return reset_at(re.sub(r"\x1b\[[0-9;]*m", "", open(lp, errors="replace").read()[-3000:]))
 
 
-def mark_dead(model, sl, until=None):
+def mark_dead(model, sl, until=None, now=None):
     """Ban MODEL until UNTIL (a limit's printed reset) when given, else for the slot SL's recovery time. Without a reset,
     the second limit inside a day uses the long window."""
-    d, now = _ledger(), time.time()
+    d, now = _ledger(), time.time() if now is None else now
     prev = d.get(model, {})
     strikes = prev.get("strikes", 0) + 1 if now - prev.get("last", 0) < 86400 else 1
     if until and until > now:
@@ -566,6 +566,49 @@ def mark_dead(model, sl, until=None):
     d[model] = {"until": end, "strikes": strikes, "last": now}
     json.dump(d, open(os.path.join(ctl_dir(), LEDGER), "w"), indent=1)
     return hours
+
+
+PROBE_EVERY_S = 12 * 3600   # a banned daily free tier is asked one word at most this often: they refill once a day
+PROBE_TIMEOUT_S = 180
+
+
+def probe_model(model):
+    """True when MODEL answers a one-word prompt. A limit's refusal, a timeout or a missing CLI is no answer."""
+    try:
+        r = subprocess.run(["opencode", "run", "--model", model, "Reply with the single word PONG."],
+                           capture_output=True, text=True, timeout=PROBE_TIMEOUT_S)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    out = re.sub(r"\x1b\[[0-9;]*m", "", r.stdout + r.stderr)
+    return r.returncode == 0 and "PONG" in out and not LIMIT_ERR.search(out)
+
+
+def probe_free_bans(now=None, probe=probe_model):
+    """Lift the ban on each banned daily free tier that answers. A free tier's ban is a guess (its replenish time),
+    and a limit can land minutes after a replenish, so the tier's own answer decides: the ban is lifted at once when
+    the tier answers, and otherwise re-asked every PROBE_EVERY_S. Returns the models it lifted."""
+    now = time.time() if now is None else now
+    d = _ledger()
+    daily = {sl["model"] for sl in load_pool()["slots"] if sl.get("replenish")}
+    lifted, changed = [], False
+    for m, e in d.items():
+        if m not in daily or e["until"] <= now or now - e.get("probed", 0) < PROBE_EVERY_S:
+            continue
+        e["probed"] = now
+        changed = True
+        if probe(m):
+            e["until"] = now
+            lifted.append(m)
+            print("probe: %s answers; its ban is lifted" % m, flush=True)
+        else:
+            print("probe: %s still refuses; next probe in %d s" % (m, PROBE_EVERY_S), flush=True)
+    if changed:
+        json.dump(d, open(os.path.join(ctl_dir(), LEDGER), "w"), indent=1)
+    return lifted
+
+
+def cmd_probe_free(a):
+    probe_free_bans()
 
 
 def running_by_slot(tasks=None):
@@ -1120,6 +1163,25 @@ def cmd_unstick_dead(a):
                 print("   restarted as", restart(name, "died of a network error"))
 
 
+def descendants(pid):
+    """Every process under PID (its children, their children, and so on), from the live process table. A job a worker's
+    shell started (a test, a build) is one of these while the worker lives; once its parent dies the job is reparented
+    to launchd and the walk loses it, which is why reap also matches on the worktree (below)."""
+    out = subprocess.run(["ps", "-axo", "pid=,ppid="], capture_output=True, text=True).stdout
+    kids = {}
+    for line in out.splitlines():
+        f = line.split()
+        if len(f) == 2 and f[0].isdigit() and f[1].isdigit():
+            kids.setdefault(int(f[1]), []).append(int(f[0]))
+    found, todo = [], [pid]
+    while todo:
+        for k in kids.get(todo.pop(), []):
+            if k not in found:
+                found.append(k)
+                todo.append(k)
+    return found
+
+
 def cmd_reap(a):
     """Kill processes still running with their cwd inside the worktree of a task whose worker has exited.
 
@@ -1128,7 +1190,6 @@ def cmd_reap(a):
     processes, 4-6 h old, from three long-finished workers, took a third of the machine and pushed the gate's
     jobs past their timeouts). Only trees of tasks that are NOT running are touched; anything else on the
     machine (another session's processes) is left alone."""
-    live = {os.path.realpath(t["worktree"]) for t in load().values() if state_of(t) == "running"}
     dead = {os.path.realpath(t["worktree"]): n for n, t in load().items() if state_of(t) != "running"}
     out = subprocess.run(["lsof", "-d", "cwd", "-Fpn"], capture_output=True, text=True).stdout
     pid, victims = None, []
@@ -1140,6 +1201,14 @@ def cmd_reap(a):
             for root, name in dead.items():
                 if (cwd == root or cwd.startswith(root + os.sep)) and pid != os.getpid():
                     victims.append((pid, name))
+    # the tree of each dead task's worker: a job its shell started, in any directory, while the worker still lived
+    for n, t in load().items():
+        if state_of(t) == "running" or not t.get("pid"):
+            continue
+        for k in descendants(int(t["pid"])):
+            if k != os.getpid():
+                victims.append((k, n))
+    victims = list(dict.fromkeys(victims))
     for pid, name in victims:
         cmd = subprocess.run(["ps", "-o", "etime=,command=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()[:110]
         print("%s pid %d: %s" % ("would kill" if a.dry_run else "kill", pid, name + " | " + cmd))
@@ -1206,6 +1275,7 @@ def main():
     s.add_argument("--only", action="store_true", help="the task runs ONLY on its --pool slot (waits for it, never moves)")
     s.add_argument("--cls", choices=CLASSES, default=None, help="the work class: only slots of this class take it")
     s.set_defaults(f=cmd_enqueue)
+    sub.add_parser("probe-free", help="lift the ban on any daily free tier that answers a one-word prompt").set_defaults(f=cmd_probe_free)
     s = sub.add_parser("refill"); s.add_argument("--target", type=int, default=None, help="default: the pool's total slots")
     s.add_argument("--prefix", default="", help="start only queued tasks whose name begins with this"); s.set_defaults(f=cmd_refill)
     s = sub.add_parser("priority"); s.add_argument("names", nargs="*"); s.set_defaults(f=cmd_priority)

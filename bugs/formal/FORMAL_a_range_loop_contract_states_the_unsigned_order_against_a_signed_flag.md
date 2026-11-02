@@ -26,7 +26,7 @@ is still not landed, so `sum_range` is a refusal rather than a proof. §"What
 landed" has the measurement; §"The next step" is unchanged and is now the
 ONLY thing left.**
 
-`bugs/CODEGEN_arm64_cmp_flags_and_loop_signedness.md` §"What is left" already
+`bugs/mid/CODEGEN_arm64_cmp_flags_and_loop_signedness.md` §"What is left" already
 names this as `sum_range`'s second hole ("`sum_range`'s `loop_cond_flag` states
 the exit condition as the UNSIGNED `¬ (i < bound)`, so for a negative bound it
 is false and the leaf falls to the `sorry`"). **This document does not
