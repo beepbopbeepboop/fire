@@ -3651,7 +3651,12 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # 'mojo_str'; expected 1, have 2/3" -- found via encodings/idna.py's
     # `str(label, "ascii")` and encodings/punycode.py's `str(text[:pos],
     # "ascii", errors)`. `encoding`/`errors` are still evaluated (for
-    # any side effects a real decode call would have), just discarded.
+    # any side effects a real decode call would have) and now threaded
+    # through to the runtime decode (default 'strict', as in CPython).
+    # Lowered to the same runtime decode `bytes.decode` uses, with
+    # `errors` threaded through (default 'strict', as in CPython). A
+    # value whose kind only the runtime knows (a bytes or a str word)
+    # goes through mojo_str_from_word, which returns a str word unchanged.
     if (fname_raw == 'str' and len(node.args) in (2, 3)
             and not gen._locally_binds_name('str')):
         # str(data, encoding[, errors]): the DECODE of a bytes object. The

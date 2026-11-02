@@ -3913,6 +3913,18 @@ int mojo_bytes_eq(MojoBytes *a, MojoBytes *b)
     return a->len == b->len && memcmp(a->data, b->data, (size_t)a->len) == 0;
 }
 
+/* `w == b` where `w` is a word whose static type the codegen only GUESSED
+ * (an element of a list returned from a call is typed `char *` by inference,
+ * and is a bytes object at run time). Python decides this by the object, not
+ * by any static type: only a bytes object can equal a bytes literal. The
+ * registry is what tells a bytes word from a str word, so a str word (or an
+ * int) is never read as a MojoBytes, and answers unequal. */
+int mojo_bytes_word_eq(int64_t w, MojoBytes *b)
+{
+    if (!mojo_is_registered_bytes(w)) return 0;
+    return mojo_bytes_eq((MojoBytes *)(intptr_t)w, b);
+}
+
 /* The three-way sibling of mojo_bytes_eq, for `b'a' < b'b'` and for a bytes
  * ELEMENT of an ordered container (`[b'a'] < [b'b']`, which is what _slot_cmp
  * asks). A prefix orders first, same as every other sequence here. Defined

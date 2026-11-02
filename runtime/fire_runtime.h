@@ -1152,6 +1152,7 @@ int64_t    mojo_bytes_get(MojoBytes *b, int64_t i); /* -> int 0-255, neg idx ok 
  * kept for the iteration loop, which bounds its own index. */
 int64_t    mojo_bytes_get_checked(MojoBytes *b, int64_t i);
 int        mojo_bytes_eq(MojoBytes *a, MojoBytes *b);
+int        mojo_bytes_word_eq(int64_t w, MojoBytes *b);  /* w == b for a word of unknown static kind */
 /* The three-way sibling, for `b'a' < b'b'` and for a bytes ELEMENT of an
  * ordered container. A prefix orders first. */
 int        mojo_bytes_cmp(MojoBytes *a, MojoBytes *b);
@@ -2478,7 +2479,7 @@ MojoList *mojo_list_slice_word(int64_t w, int has_start, int64_t start, int has_
 MojoList *mojo_fnmatch_filter(MojoList *names, int64_t pat);
 MojoList *mojo_os_scandir(char *top);            /* os.scandir(top): eager list of DirEntry handles */
 int64_t   mojo_fsencode_w(int64_t w);            /* os.fsencode(str or bytes word) -> bytes word */
-char     *mojo_str_from_word(int64_t w, char *encoding, char *errors);  /* str(x, enc) for a str-or-bytes word */
+char     *mojo_str_from_word(int64_t w, char *encoding, char *errors);  /* str(x, enc, errors) for a str-or-bytes word */
 int64_t   mojo_dirent_name(int64_t h);            /* DirEntry.name: a str word, or a bytes word for a bytes scandir */
 int64_t   mojo_dirent_path(int64_t h);            /* DirEntry.path: likewise */
 int64_t   mojo_dirent_is_symlink(int64_t h);      /* DirEntry.is_symlink() */

@@ -4676,6 +4676,23 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         gen._emit(f"  {t} = {eq_t} {cmp};")
         return '_Bool', t
 
+    # A bytes literal against a value whose static type is NOT bytes: a
+    # `char *` the inference guessed (an element of a list a call returned is
+    # typed from the callee's body, and a bytes element is a `MojoBytes *` at
+    # run time), or an erased int64_t word. Falling through here compared the
+    # two as C strings, so `fnmatch.filter([b'a.py'], b'*.py')[0] == b'a.py'`
+    # was False: strcmp read the MojoBytes header, not its bytes. Python decides
+    # this by the object: only bytes can equal bytes, so the registry answers.
+    if op in ('==', '!=') and 'MojoBytes *' in (lt, rt) and lt != rt \
+            and (lt in ('char *', 'int64_t') or rt in ('char *', 'int64_t')):
+        bt, bv, wt, wv = (lt, lv, rt, rv) if lt == 'MojoBytes *' else (rt, rv, lt, lv)
+        _w = _as_str(gen._to_int64(wt, wv))
+        eq_t = gen._new_val('int', f"mojo_bytes_word_eq ({_w}, {_as_str(bv)})")
+        t = gen._new_temp('_Bool')
+        cmp = '!= 0' if op == '==' else '== 0'
+        gen._emit(f"  {t} = {eq_t} {cmp};")
+        return '_Bool', t
+
     # MojoList == / != (lists AND tuples — same representation, see
     # _lower_tuple_literal) → mojo_list_eq, by VALUE. This fell through to
     # the generic pointer comparison below, which is IDENTITY: two
