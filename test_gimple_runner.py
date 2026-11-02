@@ -2336,6 +2336,40 @@ def main():
     print(k, k.hits)
 """, "P(a=1)\nP(a=1) 5\nCacheInfo(hits=1, misses=2) 1\n")
 
+    # A local named like a nested generator in ANOTHER method (`g = gen()` in
+    # `test2`, `def g()` in `test`) made every `next(g)` there a "consumer" of
+    # the generator (the tagged-consumer scan is keyed by name) and refused a
+    # compilable module.
+    test_gimple_stdout("gimple_local_named_like_a_generator_elsewhere", """\
+class T:
+    def inner(self):
+        print("inner")
+    def test(self):
+        endly = False
+        def g():
+            nonlocal endly
+            try:
+                yield
+                self.inner()
+            finally:
+                endly = True
+        it = g()
+        next(it)
+        it.close()
+        print(1 if endly else 0)
+    def test2(self):
+        n = 5
+        def gen():
+            yield n
+        g = gen()
+        print(next(g))
+
+def main():
+    t = T()
+    t.test()
+    t.test2()
+""", "1\n5\n")
+
     test_gimple_stdout("gimple_nested_class_in_every_body", """\
 class WithAttrs:
     tag = 7

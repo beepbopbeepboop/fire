@@ -1322,6 +1322,11 @@ class _ParamFlow:
         return out
 
 
+def _ca_binding_names(node) -> set:
+    from mojo.backend_gimple import cpp_async as _ca
+    return _ca._binding_node_names(node)
+
+
 def _tagged_consumers_ok(name: str, module_stmts=None) -> bool:
     """True when every reference to the module-level generator `name` in the
     module being lowered is a consumer that reads a tagged-word value slot as a
@@ -1384,9 +1389,35 @@ def _tagged_consumers_ok(name: str, module_stmts=None) -> bool:
             if n_bad == n_targets:
                 for cid in handles[hn]:
                     for_iters.add(cid)
+    # A function that binds `name` as an ordinary LOCAL (`g = gen()`, a
+    # parameter, a loop target) and does not itself define a nested `def name`
+    # is talking about its own variable, not about this generator: its `next(g)`
+    # is a read of a different object. The scan is keyed by name, so without
+    # this a local of the same name in an unrelated method made every `next(g)`
+    # there a "consumer" of the generator and refused a compilable program.
+    shadowed = set()
+    for fd in _scope_defs(mod):
+        if fd.name == name:
+            continue
+        _defines = False
+        for _x in fd.body:
+            if isinstance(_x, N.FunctionDef) and _x.name == name:
+                _defines = True
+        if _defines:
+            continue
+        _bnd = set()
+        for _pn, _pa in fd.params:
+            _bnd.add(_pn)
+        for _bn in gimple_exprtypes._walk_own_body(fd.body):
+            _bnd |= _ca_binding_names(_bn)
+        if name in _bnd:
+            for _sn in _walk(fd):
+                shadowed.add(id(_sn))
     flow = None     # built only when a generator call is passed as an argument
     for st in mod:
         for n in _walk(st):
+            if id(n) in shadowed:
+                continue
             if isinstance(n, N.CallExpr) and any(_is_gcall(a) for a in n.args):
                 # `use(g())`: the generator is handed to a plain def, whose
                 # parameter must be a boxed consumer at every call site
@@ -7358,6 +7389,14 @@ def _calls_in_nested_defs(outer: N.FunctionDef, inner: N.FunctionDef) -> bool:
     return False
 
 
+def _hoist_note(inner, why: str) -> None:
+    """MOJO_DEBUG note naming why a nested generator stayed out of the
+    stack-switch hoist (it then falls to the C++ path, which has no capture
+    model and refuses the module)."""
+    from mojo.middle.types import _debug_note
+    _debug_note('[coro] nested generator ' + repr(inner.name) + ' ' + why)
+
+
 def _hoist_nested_sync_generator(s: N.FunctionDef, inner: N.FunctionDef,
                                  meta: list, base: str, struct_name):
     """Lowers one nested SYNC generator `inner` of enclosing def `s` (a plain
@@ -7374,16 +7413,20 @@ def _hoist_nested_sync_generator(s: N.FunctionDef, inner: N.FunctionDef,
     the generator takes the box handle as a trailing hidden parameter that
     every call site in the enclosing function forwards. A method's `self`
     is the one capture that is not boxed: see `_capture_self_into_generator`."""
-    if not _eligible(inner)[0]:
+    _el = _eligible(inner)
+    if not _el[0]:
+        _hoist_note(inner, 'is not eligible for the stack-switch lowering: ' + _el[1])
         return None
     # The box handle travels as a hidden argument that only the enclosing
     # function's own CALL sites can supply. A generator that escapes as a
     # value (`return render`) would be called later with no handle, so it
     # stays on the C++ path.
     if not _only_called_in(s, inner.name):
+        _hoist_note(inner, 'escapes as a value, so the capture handle cannot be supplied')
         return None
     cap_map = _nested_async_capture_plan(inner, s, self_struct=struct_name)
     if cap_map is None:
+        _hoist_note(inner, 'has a capture the box machinery cannot take (no capture plan)')
         return None
     uses_self = struct_name is not None and 'self' in _nested_async_free_vars(inner, s)
     if not cap_map and not uses_self:
@@ -7393,6 +7436,7 @@ def _hoist_nested_sync_generator(s: N.FunctionDef, inner: N.FunctionDef,
         # a generator that outlives it, or that a sibling def drives, cannot
         # be given it honestly.
         if _generator_result_escapes(s, inner.name) or _calls_in_nested_defs(s, inner):
+            _hoist_note(inner, 'holds `self` but its result escapes the method or a sibling def drives it')
             return None
     if cap_map:
         _apply_nested_async_capture(inner, s, cap_map)

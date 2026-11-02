@@ -147,3 +147,21 @@ Still open: `f_generator`/`gi_frame`/`cr_frame`, `frame.clear()` and its executi
 generator shapes above that make test_frame.py refuse at the module level (nonlocal + try/finally yield, nested async def).
 Also fixed, because master's self-host was red on it: `mojo_bytes_from_str` gained an `errors` parameter (a492e9c71) and three
 callers still passed two arguments (`bytearray(text)`, `_coerce_to_bytes`, the cpp path's `bytes(text, enc)`).
+
+## Status (2026-11-01, stage 3 second slice): the generator walls test_frame.py hits, measured
+
+`MOJO_DEBUG=1 python3 fire.py build test_frame.py` now names every generator/async refusal. One was a bug, FIXED: the
+tagged-consumer scan (`coro._tagged_consumers_ok`) is keyed by NAME, so a local `g = gen()` in one method counted as a consumer of
+a nested generator `def g` in another and refused a compilable module; a function that binds the name as a local without defining
+its own nested `def` of it is now skipped (test `gimple_local_named_like_a_generator_elsewhere`). `MOJO_DEBUG` also prints why a
+nested generator stayed out of the stack-switch hoist (`_hoist_note`).
+
+What remains, each a feature rather than a bug:
+1. `test_clear_generator`: `gen = g(); next(gen); gen.gi_frame.clear()`. The bare-`yield` generator's handle has a use beyond
+   `next()`/`close()` (`gi_frame`), so the None-yield tagging refuses it. Needs the generator frame object (`gi_frame`, built from the
+   frame slice the runtime now saves per coroutine) and `frame.clear()` with its suspended/executing checks.
+2. `test_clear_executing_generator`: `yield f` where `f` is assigned inside an `except` block of the generator (capture plan None).
+3. `test_f_generator`: `async def t3(): return frame.f_generator` returns a frame object, not a scalar (the async return kind rule), and
+   `gen` there calls an ordinary nested helper (`nested()`), which the C++ companion cannot resolve.
+Next step: model a frame object as a first-class value (a heap record shared by `sys._getframe`, `gi_frame`, `__traceback__`) so
+`gi_frame`, `f_generator` and `clear()` have something to return; the per-coroutine slice in `fire_coro.c` is where the saved frame lives.
