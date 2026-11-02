@@ -7,7 +7,7 @@ library, and because the honest state of that goal is currently spread across fi
 bug documents that each know one piece of it. Per-phase evidence belongs in that
 phase's commit and, where a phase produces a standing fact, in the `bugs/formal/FORMAL_*`
 documents this one defers to. What lives *here* is the thesis, the measured current
-state, the decisions taken, and the order. **Recent (2026-11-02):** the semantic model and arm64 proof generator were strengthened (frame canonicalization via split-form lemmas in `lib/ProofLib.lean`, interprocedural call following, struct/array/list improvements), and many previously expected-failing cases now pass and were removed from `test_formal.py`'s `EXPECTED_FAILURES` (calls, loops/CFG, recursion, division/multi-arg, lists/strings/structs among them); `wide_recv` remains a known gap.
+state, the decisions taken, and the order.
 
 Read with: `doc/ABI.md` (the boundary contract this must not contradict),
 `bugs/formal/FORMAL_known_limits.md` (the audited codegen residue),

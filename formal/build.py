@@ -2393,28 +2393,10 @@ def compile_formal(source_path: str, output: str = None,
         else:
             from formal.arm64_proof_gen import generate_arm64_proof
             generate_proof = generate_arm64_proof
-        # Build structs_by_name if not in scope
-        try:
-            _sb = locals().get('structs_by_name') or globals().get('structs_by_name')
-            if _sb is None and 'structs' in locals() and structs is not None:
-                _sb = {getattr(s, 'name', None): s for s in structs if getattr(s, 'name', None)}
-        except Exception:
-            _sb = None
         prog = SimpleNamespace(functions=ordered, externs=[],
                                admitted=result["admitted"],
                                admitted_calls=_admitted_calls(
-                                   source_path, result["admitted"]),
-                               structs=(locals().get('structs') or None),
-                               structs_by_name=_sb)
-        # Also attach to info for convenience
-        try:
-            info = dict(info) if info is not None else {}
-            if not info.get('structs'):
-                info['structs'] = getattr(prog, 'structs', None)
-            if not info.get('structs_by_name'):
-                info['structs_by_name'] = getattr(prog, 'structs_by_name', None)
-        except Exception:
-            pass
+                                   source_path, result["admitted"]))
         try:
             proof = generate_proof(prog, code, info)
         except NotImplementedError as e:
