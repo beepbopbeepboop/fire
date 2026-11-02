@@ -38,7 +38,7 @@
     {
       "name": "llama-work",
       "model": "llama-local/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS",
-      "count": 1,
+      "count": 0,
       "kind": "opencode",
       "recover_hours": 0,
       "class": "easy"
