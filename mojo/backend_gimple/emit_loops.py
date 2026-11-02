@@ -2769,7 +2769,7 @@ def _gen_for_str(gen, var: str, it_val: str, body: list, shadow_name: str | None
     len64 = gen._new_temp('int64_t')
     len_t = gen._new_temp('int64_t')
     idx_t = gen._new_temp('int64_t')
-    gen._emit(f"  {len64} = mojo_str_len ({it_val});")
+    gen._emit(f"  {len64} = mojo_str_codepoint_len (mojo_str_data({it_val}));")
     gen._emit(f"  {len_t} = {len64};")
     gen._emit(f"  {idx_t} = (int64_t)0;")
 
@@ -2782,7 +2782,7 @@ def _gen_for_str(gen, var: str, it_val: str, body: list, shadow_name: str | None
 
     gen._loop_depth += 1
     gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
-    gen._emit(f"  {gen._cname(var)} = mojo_str_char_at ({it_val}, {idx_t});")
+    gen._emit(f"  {gen._cname(var)} = mojo_char_at_str_cp (mojo_str_data({it_val}), {idx_t});")
     gen.loop_stack.append((bb_post, bb_after))
     gen._gen_loop_body(body)
     gen.loop_stack.pop()
@@ -2914,18 +2914,7 @@ def _gen_for_cstr(gen, var: str, it_val: str, body: list):
 
     gen._loop_depth += 1
     gen._emit_label(bb_body, f'count(guessed_local({10 ** gen._loop_depth}))')
-    # `mojo_char_at_str(s, i)` rather than
-    # `mojo_char_to_str(*_mojo_at_char(s, i))`: gimple REFUSES a `char`-typed
-    # argument ("invalid argument to gimple call" / "non-trivial conversion in
-    # 'integer_cst'") because a char is promoted to int64_t and the conversion
-    # is not trivial to it, so the two-step spelling is not available at all.
-    # `mojo_cstr_slice(s, i, i+1)` was the workaround that did lower — and it
-    # allocated a 1-char string per character that nobody freed, which was the
-    # whole of the char-scan residual (1226 bytes a pass, measured).
-    # The helper takes a pointer and an index instead, so it lowers cleanly AND
-    # lands in the immortal table `mojo_char_to_str` already keeps. As above,
-    # no `_mojo_at_char` is requested: the helper is not called from here.
-    gen._emit(f"  {gen._cname(var)} = mojo_char_at_str ({it_val}, {idx_t});")
+    gen._emit(f"  {gen._cname(var)} = mojo_char_at_str_cp ({it_val}, {idx_t});")
     gen.loop_stack.append((bb_post, bb_after))
     gen._gen_loop_body(body)
     gen.loop_stack.pop()

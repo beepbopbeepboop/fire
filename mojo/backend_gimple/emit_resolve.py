@@ -3713,7 +3713,7 @@ def _compr_str_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     cond_t = gen._new_val('_Bool', f"{idx64} < {len64}")
     gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
     gen._emit_label(bb_body)
-    gen._emit(f"  {gen._cname(gen0.target)} = mojo_str_char_at ({_iv}, {idx64});")
+    gen._emit(f"  {gen._cname(gen0.target)} = mojo_char_at_str_cp (mojo_str_data({_iv}), {idx64});")
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
     gen._emit(f"  goto {bb_post};")
     gen._emit_label(bb_post)

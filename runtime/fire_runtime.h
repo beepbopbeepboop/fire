@@ -1003,6 +1003,7 @@ char       *mojo_chr(int64_t code);
 /* New string operations */
 MojoStr    *mojo_str_slice(MojoStr *s, int64_t start, int64_t stop);
 char       *mojo_cstr_slice(char *s, int64_t start, int64_t stop);
+char       *mojo_cstr_slice_cp(char *s, int64_t start, int64_t stop);
 char       *mojo_cstr_slice_n(char *s, int64_t slen, int64_t start, int64_t stop);
 int         mojo_cstr_region_eq_n(char *s, int64_t slen, int64_t start, int64_t stop, char *needle);
 /* `w[start:stop]` on a WORD of unknown kind: a list, a string or a bytes
@@ -1086,7 +1087,9 @@ int64_t mojo_pyobject_pow(int64_t a, int64_t b, int a_dbl);
 int mojo_pyobject_cmp(char op, int64_t a, int64_t b);
 int64_t mojo_strlen(char *s);
 int64_t mojo_utf8_codepoint_index(char *s, int64_t byte_offset);
+int64_t mojo_utf8_codepoint_to_byte_offset(char *s, int64_t cp_idx);
 int64_t mojo_str_codepoint_len(char *s);
+char *mojo_char_at_str_cp(char *s, int64_t i);
 /* PART 6 (2026-10-23, family S): the first UTF-8 CODE POINT of s, decoded
  * (not its first byte — mojo_ord's byte read answers 0xE0 for "߷" where
  * the real `Codepoint.ord` is 2295; test_iterators pins that equality
