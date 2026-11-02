@@ -73,7 +73,7 @@ BASELINE = {
     'test_suite.py': 9,
     # test_swarm_feed.py names two throwaway docs (CODEGEN_x / CODEGEN_y) in a temp repo to prove the reclass moves,
     # rewrites citations, and that a task names its branch's doc path; they are fixtures, not citations of real docs.
-    'tools/test_swarm_feed.py': 11,
+    'tools/test_swarm_feed.py': 13,
     'test_zip_loop_target_rebind_regress.py': 1,
     'tools/suite.py': 2,
 }

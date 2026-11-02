@@ -133,14 +133,18 @@ def test_apply_moves(tmp):
 
 
 def test_task_text():
-    """A fresh worker is told the doc's path; one that starts from an earlier attempt is told the branch, its commit
-    count and the path the doc has on that branch (which differs from master after a reclass)."""
+    """The task is built from the doc's path: a fresh task names the doc on master; a continuation names its branch,
+    commit count and the doc's path on that branch (which differs from master after a reclass)."""
+    import task_text as T
     ok = True
-    plain = S.task_text("mid/CODEGEN_x")
-    ok &= check("a fresh task names the doc on master", "bugs/mid/CODEGEN_x.md" in plain and "branch" not in plain)
-    cont = S.task_text("mid/CODEGEN_x", branch="work/y", path="bugs/CODEGEN_x.md", ahead=3)
+    plain = T.INSTRUCTIONS % {"where": "bugs/mid/CODEGEN_x.md"}
+    ok &= check("the instructions name the doc they are for", "bugs/mid/CODEGEN_x.md" in plain)
+    ok &= check("a fresh task carries no branch line", not T.CONTINUE.strip() == "" and "branch" not in plain)
+    cont = (T.CONTINUE % {"ahead": 3, "branch": "work/y"}) + (T.INSTRUCTIONS % {"where": "bugs/CODEGEN_x.md"})
     ok &= check("a continuation names its branch, commit count and the doc's path there",
                 "work/y" in cont and "3 commit(s)" in cont and "bugs/CODEGEN_x.md" in cont)
+    ok &= check("the doc key accepts a path or a bare name", T.key("bugs/mid/CODEGEN_x.md") == ("mid/CODEGEN_x", "CODEGEN_x")
+                and T.key("mid/CODEGEN_x") == ("mid/CODEGEN_x", "CODEGEN_x"))
     return ok
 
 

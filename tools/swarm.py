@@ -20,6 +20,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import control as C
 import integrate as I
+import task_text as T
 
 SKIP = re.compile(r"^(FORMAL_|COMPILE_FAIL_|MERGE_|OPEN_WORK|PERF_memory_over|DOCS_)")
 PREFIXES = ("bug-", "fix-")
@@ -119,66 +120,17 @@ def escalate(c):
     return C.CLASSES[i + 1] if i + 1 < len(C.CLASSES) else None
 
 
-def task_text(doc, branch=None, path=None, ahead=0):
-    """The instruction a worker gets for one bug doc. `branch` names an earlier attempt the worker starts from (its
-    `ahead` commits are not on master); `path` is where the doc sits on that branch, which may differ from where it sits
-    on master after a reclass. Kept short: the history is found by the worker from these two facts, not restated here."""
-    where = doc_path(doc) if not path else path
-    lead = ""
-    if branch:
-        lead = ("An earlier attempt left %d commit(s) on branch %s, which you start from. Read `git log master..HEAD` and "
-                "`git diff master...HEAD` first. " % (ahead, branch))
-    return (lead + "Fix the bug in %s at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed "
-            "on master (then delete the doc with a pinning test, or report). QUICK tests only: write a small regression "
-            "test that FAILS before your fix and passes after (next to the existing tests for that area), and run just "
-            "that test plus the one existing test file that covers the code you touched, each wrapped in python3 "
-            "tools/memslot.py --gb 8 --label x --. No gate, no stdlib sweep, no self-host build: an integrator gates on "
-            "the stdlib compile after you land. If the bug is fully fixed, git rm its doc in the same commit and run "
-            "python3 tools/dangling_doc_refs.py --ratchet. Commit, end with a clean tree and the CONTROL-STATUS line."
-            % where)
-
-
-def unlanded_attempt(base):
-    """The newest task on this doc whose branch has commits not on master and is not integrated: the work a fresh
-    attempt should build on. None when every attempt has landed or there are no attempts."""
-    best = None
-    for t in C.load().values():
-        if "bug:" + base not in t.get("claims", []) or not t.get("branch"):
-            continue
-        if C.state_of(t) == "integrated" or C.ahead(t) <= 0:
-            continue
-        if best is None or t.get("started", "") > best.get("started", ""):
-            best = t
-    return best
-
-
-def doc_on(branch, base):
-    """Where the doc sits on BRANCH (bugs/<dir>/<base>.md, not formal's), or None when the branch no longer has it."""
-    r = subprocess.run(["git", "ls-tree", "-r", "--name-only", branch, "--", "bugs"], capture_output=True, text=True,
-                       cwd=C.MAIN)
-    for p in r.stdout.split():
-        if (p == "bugs/%s.md" % base or p.endswith("/%s.md" % base)) and not p.startswith("bugs/formal/"):
-            return p
-    return None
-
-
 def enqueue_doc(doc, base, cls, name, start=None):
-    """Queue one worker on DOC in class CLS. START names the branch the worker continues from (a continuation). With no
-    START, a doc that has an unlanded attempt is started from that attempt's branch, so the worker builds on its
-    commits; a doc with none starts from master. Returns True when the queue took it."""
-    if start is None:
-        att = unlanded_attempt(base)
-        if att:
-            start = att["branch"]
-    path = doc_on(start, base) if start else None
-    if start and not path:                 # the branch no longer has the doc (it was fixed there): start from master
+    """Queue one worker on DOC in class CLS. START names the branch a continuation resumes; otherwise the doc's newest
+    unlanded attempt decides where the worker starts (tools/task_text.py), and master when there is none. Returns True
+    when the queue took it."""
+    p = T.plan(doc, continue_from=start)
+    if start and not p["start_branch"]:        # the branch no longer has the doc (it was fixed there): start from master
         log("%s: its branch %s has no doc; starting from master" % (doc, start))
-        start, path = None, None
-    ahead = C.ahead({"branch": start}) if start else 0
     cmd = [sys.executable, os.path.join(HERE, "control.py"), "enqueue", name, "--claim", "bug:" + base,
-           "--task", task_text(doc, branch=start, path=path, ahead=ahead), "--cls", cls]
-    if start:
-        cmd += ["--base", start]
+           "--task", p["text"], "--cls", cls]
+    if p["start_branch"]:
+        cmd += ["--base", p["start_branch"]]
     return subprocess.run(cmd, capture_output=True, text=True, cwd=C.MAIN).returncode == 0
 
 
