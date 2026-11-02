@@ -4600,8 +4600,10 @@ UNREGISTERED = {
         'output IS the measurement, so there is no assertion to fail and it is '
         'inert unless something reads it.',
     'test_coro_bugs.py': 'Per-bug diagnostic for the A3 stack-switch backend. '
-        'Exits 0 while its own output reads CFAIL=1 COMPILE=1 — see UNTESTED.md '
-        '§3: a green exit that reports a failure in its own text.',
+        'Exits 1 on any CFAIL (generated C that does not syntax-check) and 2 when '
+        'it diagnosed nothing; RAISE stays informational. Not gated: it reads '
+        'generator bug docs, which are few now, and a CFAIL is a real codegen '
+        'defect tracked in its own bug doc.',
     'test_closure_capture_shadows_function.py': 'The scoping rule behind a '
         'closure capture: a free name the ENCLOSING function also binds is a '
         'capture even when another module of the same compile defines a '
@@ -4728,7 +4730,6 @@ UNREGISTERED = {
     'test_perf_lean_lib_memory_regression.py': _BATCH_REGRESSION_REASON,
     'test_perf_memory_leak_pin.py': _BATCH_REGRESSION_REASON,
     'test_pin_dict_content_key_aliases.py': _BATCH_REGRESSION_REASON,
-    'test_procrun_regression.py': _BATCH_REGRESSION_REASON,
     'test_reg_dispatched_for_loop.py': _BATCH_REGRESSION_REASON,
     'test_regress_bytes_erased.py': _BATCH_REGRESSION_REASON,
     'test_regress_interface_request_1.py': _BATCH_REGRESSION_REASON,
@@ -4749,6 +4750,11 @@ UNREGISTERED = {
     'test_regression_unpack_spread.py': _BATCH_REGRESSION_REASON,
     'test_spread_string_regression.py': _BATCH_REGRESSION_REASON,
     'test_untested_regression.py': _BATCH_REGRESSION_REASON,
+    # bug:UNTESTED §5: tools/procrun.py and tools/memcap.py had no test. Pure
+    # parsing/accounting against injected process tables, plus the kill path and
+    # the ceiling against real short-lived processes (a few seconds, no compiler).
+    'test_procrun.py': 'tools/procrun.py and tools/memcap.py: the RSS measurement, '
+        'the tree kill and memcap\'s printed verdict, tested directly.',
     'test_zip_loop_target_rebind_regress.py': _BATCH_REGRESSION_REASON,
 
     # Landed with 313513c45 (2026-10-28, while this gate triage was running —

@@ -17,6 +17,57 @@ equivalent for the 45 example files a cached test is *about*.
 
 ---
 
+## Status, 2026-11-01 (what landed since 2026-10-02; §3a and §3.1 below are closed, the rest stands)
+
+* **§3a — the mojo→fire rename fallout — is fixed** by `3bedbd824` (all
+  `mojo.` call sites in `test_mixed_cpp_link.py` moved to `fire.`), and the
+  eight `expect=`-marked files were fixed and re-measured in `tools/suite.py`
+  (six green, one marker dropped, three counts re-measured). The §3a table
+  above is the pre-fix state. Pinned by `test_untested_regression.py`.
+* **§3.1 — the cached test that could not see its subject — is fixed**: the
+  registry now says `extra=['test_examples_parse.py', 'formal/examples']`
+  (`tools/suite.py`, `examples-parse`).
+* **§3.3 — `test_coro_bugs.py` exited 0 on its own CFAIL — is fixed.** Two
+  defects, both real. (a) Its `Source file:` pattern kept the backticks the bug
+  docs write, so `os.path.exists` was false for every doc and it diagnosed
+  nothing while exiting 0. (b) Its exit status ignored `CFAIL`. Now it exits 1
+  on any CFAIL, 2 when it diagnosed nothing, and 0 otherwise (`exit_code()`).
+  On the first run after the fix it found a real CFAIL:
+  `COMPILE_FAIL_Tools_cases_generator_analyzer` (`analyzer.py:194`, "expected
+  expression before '('"), which is a codegen defect with its own doc, so the
+  diagnostic is now red for a real reason. Pinned by
+  `test_untested_regression.py`. The general form of §3.3 (every
+  stdout-verdict file) is still not a mechanism.
+* **§5's `tools/procrun.py` / `tools/memcap.py` with no test — closed
+  (`test_procrun.py`, 19 cases).** The only prior test was an unregistered
+  stray (`test_procrun_regression.py`, one max-vs-sum assertion), now folded
+  into it and removed; `test_suite.py`'s undeclared table names the new file
+  with its own reason. The new tests pin `ps_time`, `ps_snapshot` parsing
+  (including `ps` unavailable → empty, not zero), `tree_usage` /
+  `tree_usage_unique` / `tree_pids` / `group_pids` over injected tables,
+  `memcap_verdict` / `memcap_accounted` / `memcap_wrapper_died`, the real
+  tree kill (`kill_tree` reaches a grandchild), `spawn`'s timeout, and
+  `memcap` end to end (a passing child's exit code passes through; a breach
+  kills and reports RESOURCE, exit 125).
+  **It found a real defect on its first run:** `tree_usage_unique` documents
+  returning `(cpu_seconds, max_bytes, n_procs)` but never accumulated CPU, so
+  it always reported 0.0 CPU seconds. Fixed (one line in `tools/procrun.py`).
+  No production caller reads that field yet, which is why nothing had noticed.
+* **§3.3's general form — a file whose failure verdict is only printed — is
+  now a mechanism** (`test_untested_regression.py`,
+  `test_no_test_file_prints_a_failure_and_exits_zero`). It walks every
+  `test_*.py`, flags any that prints `FAIL`/`CFAIL`/`Failed`/`✗` with no exit
+  path (`sys.exit`, `exit(`, `raise`, `assert`, `unittest`, `pytest`,
+  `.fail(`), and is pinned by a detector test on a print-only shape. A planted
+  print-only probe file was flagged by name; the tree itself has **zero**
+  offenders (the one file that prints `FAIL` at all, `test_regression_randdec_tuple_yield.py`,
+  re-raises). It is a textual heuristic, not an execution trace: a file that
+  reaches a verdict only through a helper it imports is not seen, which is
+  the honest limit of the static form.
+* **Still open:** §3.2's general check (not statically decidable, §3.2), §5's
+  registration of the 50 and the 21 red files (`tools/suite.py` is
+  integrator-owned; the red files are behaviour work in other claims).
+
 ## Status, 2026-10-02 (this pass — §3.2's four dead-at-import tests are closed, one of them by becoming real coverage)
 
 §3.2 said four tests die at import naming `mojo/ast_nodes.mojo` and
