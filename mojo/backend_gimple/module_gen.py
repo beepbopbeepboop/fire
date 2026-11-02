@@ -1380,6 +1380,7 @@ def _mark_presence_field(sdef, fname):
                             and _as_str(_lf.member) == fname):
                         return
     sdef.presence_fields.append(fname)
+    _walk_ast_invalidate(sdef)
 
 
 def _render_struct_typedef_body(struct_name: str, fields: dict, optional_tags=None,
@@ -3423,6 +3424,7 @@ def _gmi_rename_property_setters(stmts: list) -> None:
             if _prop != '' and _as_str(_pm.name) == _prop:
                 _pm.name = '__setprop_' + _prop
                 _pm.decorators = _keep
+                _walk_ast_invalidate(_pm)
 
 
 def _gmi_capture_nested_class_enclosing_reads(stmts: list) -> None:
@@ -3560,10 +3562,12 @@ def _gmi_capture_nested_class_enclosing_reads(stmts: list) -> None:
                             target=IdentExpr(name=_attr, line=_ec.line, col=_ec.col),
                             value=IdentExpr(name=_cn2, line=_ec.line, col=_ec.col),
                             line=_ec.line, col=_ec.col))
+                        _walk_ast_invalidate(_ec)
                 _new_body: list = list(_prologue)
                 for _bs in _ecm.body:
                     _new_body.append(_subst_ident_tree(_bs, _map))
                 _ecm.body = _new_body
+                _walk_ast_invalidate(_ecm)
 
 
 def _subst_ident_tree(node, mapping: dict):
@@ -3905,6 +3909,7 @@ def _declare_posthoc_class_attrs(stmts) -> None:
             continue
         sd.fields.append(AssignStmt(target=IdentExpr(name=attr, line=n.line, col=n.col),
                                     value=n.value, line=n.line, col=n.col))
+        _walk_ast_invalidate(sd)
 
 
 def gen_module_impl(self, stmts):

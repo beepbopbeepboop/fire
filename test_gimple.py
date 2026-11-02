@@ -73,7 +73,9 @@ _WALK_AST_MUTATION_ALLOWLIST = {
     "ast_rewriter.py::Seq.__init__": "ditto",
     "ast_rewriter.py::Var.__init__": "ditto",
     "ast_rewriter.py::_rewrite_assign_stmt": "runs inside `rewrite`, on a tree no walk has seen",
-    "mojo/backend_gimple/elab_intu.py::_Work.__init__": "`_Work.alias`/`_Work.extra` are the elaborator's own scratch",
+    "mojo/backend_gimple/cpp_core.py::_cpp_rewrite_yields": "writes `value` on a `copy.copy` of the yield node it is hoisting (`ynode`), a fresh node the original tree never sees; the copy is consumed only by the C++ emitter",
+    "mojo/backend_gimple/cpp_core.py::rewrite": "writes `value` on `copy.copy` of the root yield (`nv`) and `setattr`s the fields of `copy.copy(s)` (`new_stmt`): both are fresh nodes the emitter consumes, and the original statement is left untouched",
+    "mojo/backend_gimple/elab_intu.py::_Work.__init__":"`_Work.alias`/`_Work.extra` are the elaborator's own scratch",
     "mojo/backend_gimple/elab_intu.py::_Work.enqueue": "ditto",
     "mojo/backend_gimple/elab_intu.py::run": "ditto",
     "mojo/backend_gimple/emit_exprs.py::_lower_comprehension": "`Comprehension.target` is a str and `for_target_single_name` returns a str — a scalar write",
@@ -86,6 +88,7 @@ _WALK_AST_MUTATION_ALLOWLIST = {
     "mojo/middle/closures.py::_scan_for_closures": "`ClosureInfo.captures` is the closure scanner's own record",
     "mojo/middle/closures.py::discover_closures": "ditto",
     "mojo/middle/coro.py::_Capture.__init__": "the capture record's own dataclass",
+    "mojo/middle/coro.py::_ParamFlow.__init__": "the parameter-flow record's own class (`name` is its own attribute), not an AST node",
     "mojo/middle/coro.py::_append_box_arg": "appends to a call this same rewrite just built",
     "mojo/middle/coro.py::_apply_nested_async_capture": "`lower()` only, before `gen_module` walks anything",
     "mojo/middle/coro.py::_cap_rewrite_stmts": "ditto",
@@ -11124,6 +11127,53 @@ print("%r" % p)
         print("PASS  %s (%d write sites in %d functions, each invalidating "
               "or classified)" % (name, n_sites, len(found)))
         _PASS += 1
+    def test_posthoc_class_attr_write_invalidates_the_walk_memo():
+        """`_declare_posthoc_class_attrs` appends a field to a StructDef in
+        place. The module list was already walked (so the memo holds its
+        answer), and the NEXT walk of that same list must see the new field,
+        not the memoised pre-write answer. Before the invalidation at the
+        append site, this walk returned the stale list and `extra` was
+        missing. This is the behavioural half of
+        `every_ast_mutation_site_invalidates_the_walk_memo`."""
+        global _PASS, _FAIL
+        name = "posthoc_class_attr_write_invalidates_the_walk_memo"
+        import mojo.middle.exprtypes as ET
+        import mojo.backend_gimple.module_gen as MG
+        from fire_compiler import py_tokenize, Parser, AssignStmt, IdentExpr
+        import ast_rewriter
+
+        err = None
+        try:
+            ET._walk_ast_reset()
+            src = ("class A:\n"
+                   "    def __init__(self):\n"
+                   "        self.x = 1\n"
+                   "def f():\n"
+                   "    A.extra = 7\n")
+            stmts = ast_rewriter.rewrite(
+                Parser(py_tokenize(src)).parse_module()) or []
+            before = ET._walk_ast(stmts)
+            MG._declare_posthoc_class_attrs(stmts)
+            after = ET._walk_ast(stmts)
+            declared = [n.target.name for n in after
+                        if isinstance(n, AssignStmt)
+                        and isinstance(n.target, IdentExpr)]
+            if 'extra' not in declared:
+                err = ('the walk after the write still answers from the memo: '
+                       'the declared `extra` field is missing')
+            elif after is before:
+                err = 'the memo entry for the module list was not dropped'
+        except Exception as e:  # noqa: BLE001
+            err = "%s: %s" % (type(e).__name__, e)
+        finally:
+            ET._walk_ast_reset()
+        if err:
+            print(f"FAIL  {name}: {err}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_struct_unpack_computed_format_compiles():
         """`struct.unpack(fmt, buf)` whose format is a VARIABLE must not
         crash the compiler.
@@ -13363,6 +13413,7 @@ print(run('x/y.txt'))
     _run_isolated(lambda: test_walk_ast_memo_is_transparent_and_honours_invalidation(), 'test_walk_ast_memo_is_transparent_and_honours_invalidation (line 12670)')
     _run_isolated(lambda: test_walk_ast_memo_never_answers_stale_over_real_compiles(), 'test_walk_ast_memo_never_answers_stale_over_real_compiles (line 12671)')
     _run_isolated(lambda: test_every_ast_mutation_site_invalidates_the_walk_memo(), 'test_every_ast_mutation_site_invalidates_the_walk_memo (line 12672)')
+    _run_isolated(lambda: test_posthoc_class_attr_write_invalidates_the_walk_memo(), 'test_posthoc_class_attr_write_invalidates_the_walk_memo (line 13416)')
     _run_isolated(lambda: test_walk_ast_memo_survives_the_sync_generator_hoist_writes(), 'test_walk_ast_memo_survives_the_sync_generator_hoist_writes (line 12672)')
     _run_isolated(lambda: test_scalar_arity_min_max_params_are_not_containers(), 'test_scalar_arity_min_max_params_are_not_containers (line 12673)')
     _run_isolated(lambda: test_a_forwarded_string_argument_keeps_its_type(), 'test_a_forwarded_string_argument_keeps_its_type (line 12674)')
