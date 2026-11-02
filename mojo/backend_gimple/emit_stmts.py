@@ -1327,6 +1327,18 @@ def _gen_stmt_AssignStmt(gen, node):
                         args=[node.value], line=node.line, col=node.col),
                     line=node.line, col=node.col))
                 return
+    # `frame.f_trace = x` / `f_trace_lines` / `f_trace_opcodes`: a stored word on the frame record.
+    if (isinstance(node.target, gimple_ctypes.MemberExpr) and len(gen._frames_mods) > 0
+            and _as_str(node.target.member) in ('f_trace', 'f_trace_lines', 'f_trace_opcodes')
+            and getattr(node, 'value', None) is not None):
+        _ft_ids = {'f_trace': 0, 'f_trace_lines': 1, 'f_trace_opcodes': 2}
+        _fo_t, _fo_v = gen.lower_expr(node.target.obj)
+        _fv_t, _fv_v = gen.lower_expr(node.value)
+        gen._void_call('mojo_frame_set_attr',
+                       [('int64_t', gen._to_int64(_fo_t, _fo_v)),
+                        ('int64_t', gen._new_val('int64_t', f"(int64_t){_ft_ids[_as_str(node.target.member)]}")),
+                        ('int64_t', gen._to_int64(_fv_t, _fv_v))])
+        return
     vtype, v = gen.lower_expr(node.value)
     if isinstance(node.target, gimple_ctypes.IdentExpr):
         tname = node.target.name

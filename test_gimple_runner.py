@@ -3878,6 +3878,40 @@ def main():
         print(ex.value)
 """, "5\nNone\ndone\n7\n9\nNone\n")
 
+    # `frame.f_locals` has no compiled representation yet: it is refused by name,
+    # not read as an object attribute of an int64 frame word (garbage at exit 0).
+    test_gimple_build_refusal("gimple_frame_f_locals_is_refused", """\
+import sys
+
+def f():
+    x = 1
+    return sys._getframe().f_locals
+
+def main():
+    print(f())
+""", "frame attribute `f_locals` is not modelled")
+
+    # `frame.f_trace` / `f_trace_lines` / `f_trace_opcodes` are plain settable frame
+    # attributes: None / True / False by default, reading back what was stored.
+    test_gimple_stdout("gimple_frame_f_trace_attributes_read_back", """\
+import sys
+
+def test(trace):
+    if trace:
+        sys._getframe(0).f_trace = True
+    f = sys._getframe(0)
+    print(f.f_trace_lines, f.f_trace_opcodes)
+    f.f_trace_lines = False
+    print(f.f_trace_lines)
+    f.f_trace = 42
+    print(f.f_trace == 42)
+
+def main():
+    test(False)
+    test(True)
+    print(sys._getframe(0).f_trace is None)
+""", "True False\nFalse\nTrue\nTrue False\nFalse\nTrue\nTrue\n")
+
     test_gimple_stdout("gimple_traceback_chain_names_and_lines", """\
 import sys
 

@@ -63,7 +63,9 @@ void mojo_exc_pop(void)
  * frame's return names whatever frame later reuses the slot. Frames of uninstrumented
  * functions are invisible, as C frames are in CPython. */
 #define MOJO_FRAME_MAX 4096
-typedef struct MojoFrameRec { const char *name; const char *file; int64_t firstlineno; int64_t lineno; struct MojoFrameRec *back; int64_t id; int64_t gen; } MojoFrameRec;
+extern int64_t mojo_box_none(void);
+extern int64_t mojo_box_from_bool(int64_t v);
+typedef struct MojoFrameRec { const char *name; const char *file; int64_t firstlineno; int64_t lineno; struct MojoFrameRec *back; int64_t id; int64_t gen; int64_t f_trace; int64_t trace_lines; int64_t trace_opcodes; } MojoFrameRec;
 static int64_t _mojo_frame_next_id = 1;
 static MojoFrameRec _mojo_frames[MOJO_FRAME_MAX];
 int _mojo_frame_depth = 0;
@@ -208,6 +210,7 @@ void mojo_frame_enter(char *name, char *file, int64_t firstlineno)
         f->name = name; f->file = file; f->firstlineno = firstlineno; f->lineno = firstlineno; f->back = NULL;
         f->id = _mojo_frame_next_id;
         f->gen = 0;
+        f->f_trace = mojo_box_none(); f->trace_lines = 1; f->trace_opcodes = 0;
     }
     ++_mojo_frame_next_id;              /* every activation has its own identity (snapshots copy it) */
     ++_mojo_frame_depth;                /* keeps pairing even past the table's end */
@@ -253,6 +256,23 @@ int64_t mojo_frame_back(int64_t w)
 }
 int64_t mojo_frame_depth(void)            { return _mojo_frame_depth; }
 
+/* Settable frame attributes (`f.f_trace = tracer`, `f.f_trace_lines = False`): plain stored words.
+ * id 0 f_trace (None by default), 1 f_trace_lines (True), 2 f_trace_opcodes (False). Nothing consults
+ * them yet (no sys.settrace); they only read back what was stored, as CPython does for an untraced frame. */
+int64_t mojo_frame_get_attr(int64_t w, int64_t id)
+{
+    MojoFrameRec *f = _frame_of(w);
+    if (!f) return id == 0 ? mojo_box_none() : mojo_box_from_bool(0);
+    if (id == 0) return f->f_trace;
+    return mojo_box_from_bool((int)(id == 1 ? f->trace_lines : f->trace_opcodes));
+}
+void mojo_frame_set_attr(int64_t w, int64_t id, int64_t v)
+{
+    MojoFrameRec *f = _frame_of(w);
+    if (!f) return;
+    if (id == 0) f->f_trace = v; else if (id == 1) f->trace_lines = v; else f->trace_opcodes = v;
+}
+
 /* frame.clear(): CPython refuses a frame that is still executing ("cannot clear an executing
  * frame"); any other frame (finished, or a kept traceback frame) clears, which here has nothing
  * to release. A frame is executing when an activation with its identity is on the live stack. */
@@ -283,6 +303,7 @@ int64_t mojo_frame_for_gen(int64_t gen, int64_t old_word, const char *name, cons
         f->id = -gen;                       /* never equals a live activation's (positive) id */
         f->gen = gen;
         f->name = "<generator>"; f->file = ""; f->back = NULL;
+        f->f_trace = mojo_box_none(); f->trace_lines = 1; f->trace_opcodes = 0;
     }
     if (name) { f->name = name; f->file = file ? file : ""; f->firstlineno = firstlineno; f->lineno = lineno; }
     return (int64_t)(intptr_t)f;

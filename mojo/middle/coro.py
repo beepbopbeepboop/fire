@@ -6166,9 +6166,16 @@ def _lift_capture_free_nested_scopes(stmts: list) -> None:
                         if isinstance(bn, N.CallExpr) and isinstance(bn.func, N.IdentExpr):
                             _called_by_scopes.add(bn.func.name)
             for h in list(m.body):
-                if not (isinstance(h, N.FunctionDef) and not getattr(h, 'is_generator', False)
-                        and not getattr(h, 'is_async', False)
-                        and (_contains_generator_scope(h) or h.name in _called_by_scopes)):
+                if not (isinstance(h, N.FunctionDef) and not getattr(h, 'is_generator', False)):
+                    continue
+                # a nested `async def` of a METHOD is reached by no stack-switch hoist (only the
+                # C++ closure path, which refuses a non-scalar result): as a module-level
+                # coroutine it is an ordinary one.
+                _async_in_method = bool(getattr(h, 'is_async', False)) and sname != ''
+                if getattr(h, 'is_async', False) and not _async_in_method:
+                    continue
+                if not (_async_in_method or _contains_generator_scope(h)
+                        or h.name in _called_by_scopes):
                     continue
                 if h.decorators or h.kwonly:
                     continue
