@@ -2381,13 +2381,17 @@ def _gen_go(fn, tc: dict = None) -> list:
     if _dec_while_pattern(fn) is not None:
         _require_one_param(fname, params)
         helpers.append(
-            f"def {fname}_go : Nat → UInt64\n"
-            f"  | 0 => 0\n"
-            f"  | k + 1 => {fname}_go k\n\n"
-            f"theorem {fname}_go_zero (n : Nat) : {fname}_go n = 0 := by\n"
-            f"  induction n with\n"
-            f"  | zero => rfl\n"
-            f"  | succ k ih => exact ih"
+            f"def {fname}_go : Nat → UInt64 :=\n"
+            f"  fun m => if m < 9223372036854775808 then 0 else "
+            f"UInt64.ofNat (m % 18446744073709551616)\n\n"
+            f"theorem {fname}_go_zero (n : Nat) (h : n < 9223372036854775808) : "
+            f"{fname}_go n = 0 := by\n"
+            f"  simp [{fname}_go, h]\n\n"
+            f"theorem {fname}_go_neg (n : Nat) (h : 9223372036854775808 ≤ n) "
+            f"(hm : n < 18446744073709551616) :\n"
+            f"    {fname}_go n = UInt64.ofNat (n % 18446744073709551616) := by\n"
+            f"  have h' : ¬ n < 9223372036854775808 := by omega\n"
+            f"  simp [{fname}_go, h']"
         )
         return helpers
     dec1 = _dec1_pattern(fn)
@@ -6398,7 +6402,8 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
             A(f"  rw [hchain]")
             A(f"  simp only [{name}_b{exit_bi}_qS0]")
             A(f"  rw [show arm64_reg 19 s = 0 from by simpa [arm64_reg] using hx19]")
-            A(f"  simp [mojo, {name}_go_zero]")
+            A(f"  have hlt : (s.x19.toNat) < 9223372036854775808 := by rw [hx19]; simp")
+            A(f"  simp [mojo, {name}_go_zero, hlt]")
         elif hname == f"{name}_loop_body_step":
             _w = words[body_last]
             _imm26 = _w & 0x03ffffff
@@ -6500,7 +6505,7 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
     # own post-state and the pc hypothesis is `rfl`.
     A(f"    (by intro s hs hq; exact {name}_loop_exit_x0 ({cqt} s) "
       f"(({name}_loop_cond_flag s hs).mp hq))")
-    A(f"    (by intro a _; simp [mojo, {name}_go_zero])")
+    A(f"    (by intro a _; have hlt : a.toNat < 9223372036854775808 := by omega; simp [mojo, {name}_go_zero, hlt])")
     A(f"    (by decide) (by decide) (by decide)")
     A(f"    arg st fuel (work_loop_fuel {mc} {mb} {me} arg.toNat fuel hfuel) hpc hx19 hframe")
     A("")
@@ -8784,7 +8789,12 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         A(f"{IND}rcases hlc_{bi} with ⟨sf_{bi}, heqf_{bi}, hx0f_{bi}⟩")
                         A(f"{IND}rw [heqf_{bi}]")
                         A(f"{IND}-- s.x0 = mojo (n-1) = 0 = mojo n")
-                        A(f"{IND}simp [hx0f_{bi}, mojo, {name}_go_zero]")
+                        A(f"{IND}have hltc : (n - 1).toNat < 9223372036854775808 := by")
+                        A(f"{IND}  have hnz : n ≠ 0 := by intro h0; rw [h0] at {_bsrc}; simp at {_bsrc}")
+                        A(f"{IND}  have hnge1 : 1 ≤ n.toNat := Nat.pos_of_ne_zero (fun h0 => hnz (UInt64.toNat_inj.mp (by rw [h0]; rfl)))")
+                        A(f"{IND}  rw [toNat_sub_one n (by intro h; subst h; simp at {_bsrc})]")
+                        A(f"{IND}  omega")
+                        A(f"{IND}simp [hx0f_{bi}, mojo, {name}_go_zero, hltc]")
                 else:
                     raise ValueError(
                         f"unsupported edge to {hex(tgt)} (loop back-edge / continuation; "
@@ -11486,9 +11496,9 @@ def _gen_dec_while_block(fname: str, param: str, cond_op: str = "GT") -> str:
     _op = {"GT": ">", "NE": "!=", "GE": ">="}[cond_op]
     _rhs = "1" if cond_op == "GE" else "0"
     cond = f'MojoExpr.binop "{_op}" (MojoExpr.var "{param}") (MojoExpr.int {_rhs})'
-    _PRED = {"GT": "m < 9223372036854775808 → 0 < UInt64.ofNat m",
-             "NE": "m < 9223372036854775808 → UInt64.ofNat m \u2260 0",
-             "GE": "m < 9223372036854775808 → 1 \u2264 UInt64.ofNat m"}[cond_op]
+    _PRED = {"GT": "m < 9223372036854775808 ∧ 0 < UInt64.ofNat m",
+             "NE": "m < 9223372036854775808 ∧ UInt64.ofNat m \u2260 0",
+             "GE": "m < 9223372036854775808 ∧ 1 \u2264 UInt64.ofNat m"}[cond_op]
     _HPRED = {
         "NE": "exact Iff.rfl",
         "GT": ("rw [UInt64.lt_iff_toNat_lt]\n"
@@ -11538,7 +11548,7 @@ theorem pred_iff (m : Nat) : @PRED@ \u2194 UInt64.ofNat m \u2260 0 := by
 /-- Loop condition holds iff counter value nonzero. -/
 theorem cond_val (m : Nat) :
     (evalExpr handler (@COND@)
-      (envOf m) \u2260 0) \u2194 m % @S@ \u2260 0 := by
+      (envOf m) \u2260 0) \u2194 (m % @S@ \u2260 0 \u2227 m % @S@ < 9223372036854775808) := by
   have hv : evalExpr handler (@COND@)
       (envOf m) = if @PRED@ then 1 else 0 := by
     simp [evalExpr, envOf]
@@ -11583,7 +11593,7 @@ theorem prog_correct : \u2200 (m : Nat) (fuel : Nat), fuel \u2265 m % @S@ + 2 �
       have hneg : \u00ac @PRED@ := by
         rw [pred_iff m]
         intro hne
-        exact hne (by apply eq_of_toNat_eq; rw [ht2]; simp [hz])
+        exact hne.2 (by apply eq_of_toNat_eq; rw [ht2]; simp [hz])
       have hce : evalExpr handler (@COND@) (envOf m) = 0 := by
         rw [hvz, if_neg hneg]
       have h1 := runF_while_false g handler (@COND@)
@@ -11601,7 +11611,10 @@ theorem prog_correct : \u2200 (m : Nat) (fuel : Nat), fuel \u2265 m % @S@ + 2 �
         rw [ht2]
         simp [hz]
       rw [hv0]
-      simp [@FN@_go_zero, hz]
+      have hzlt : m % @S@ < 9223372036854775808 := by
+        rw [hz]
+        simp
+      simp [@FN@_go_zero, hzlt]
     \u00b7 obtain \u27e8g, rfl\u27e9 : \u2203 g, fuel = g + 1 := \u27e8fuel - 1, by cases fuel <;> simp; omega\u27e9
       have hcond : evalExpr handler (@COND@) (envOf m) ≠ 0 :=
         (cond_val m).mpr (Nat.ne_of_gt hp)
@@ -11652,7 +11665,8 @@ theorem prog_correct : \u2200 (m : Nat) (fuel : Nat), fuel \u2265 m % @S@ + 2 �
       rw [hP] at hrec
       rw [hstep, henv, hrec]
       apply congrArg
-      simp [@FN@_go_zero]
+      have hltm : m % @S@ < 9223372036854775808 := (cond_val m).mp hcond |>.right
+      simp [@FN@_go_zero, hltm]
 
 /-- TRUST BOUNDARY eliminated: the fuel-bounded full interpreter applied to
 the formal AST equals the structural model, by strong induction. -/
