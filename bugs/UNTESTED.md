@@ -17,6 +17,35 @@ equivalent for the 45 example files a cached test is *about*.
 
 ---
 
+## Status, 2026-11-01 (type-system tests: the Tier 3 pair, run for the first time)
+
+`test_type_system.py` and `test_type_system_integration.py` were the two
+Tier 3 rows that said "No module named 'pytest'". Both are now runnable and
+both exit 0.
+
+* **`test_type_system.py` is converted from pytest to `unittest`** (stdlib, no
+  new dependency). Running it for the first time surfaced three real failures,
+  all fixed at the source in `type_system.py`:
+  * `_infer_binary_op_result` tested the int64 branch before the double branch,
+    and `is_64bit()` is true for `double`, so `double + double` returned
+    `int64_t`. Reordered; the double branch now comes first.
+  * The OPAQUE_POINTER_TRACKING message said "converted back" where the
+    invariant and its tests say "cast". Message reworded to "cast back".
+  Pinned by `TestBitWidthPreservation.test_double_arithmetic_produces_double`
+  and the two `OPAQUE_POINTER` cast assertions; all three fail on the pre-fix
+  `type_system.py`.
+* **`test_type_system_integration.py` was failing for a reason its name does
+  not show.** Every compile reported `'GimpleGen' object has no attribute
+  'type_checker'`: the harness read `gen.type_checker`, which
+  `b05dc1111` removed when it stripped the checks as inert. The harness no
+  longer reads it; the file's `__main__` banner that claimed "5 invariants
+  integrated / production-ready" is replaced with a note that they are not
+  wired into codegen. **Still true and not fixed:** these tests now only
+  confirm that snippets compile. None of them can detect a violation, because
+  nothing in `gimple_codegen.py` checks one. Whether they should be rewritten
+  against a real check or deleted is a decision for the owner of the type
+  system, not this round.
+
 ## Status, 2026-11-01 (what landed since 2026-10-02; §3a and §3.1 below are closed, the rest stands)
 
 * **§3a — the mojo→fire rename fallout — is fixed** by `3bedbd824` (all
@@ -64,6 +93,7 @@ equivalent for the 45 example files a cached test is *about*.
   re-raises). It is a textual heuristic, not an execution trace: a file that
   reaches a verdict only through a helper it imports is not seen, which is
   the honest limit of the static form.
+* **`test_dispatch_phase_c.py` (the Tier 2 row below) is fixed — the test was stale, not the codegen.** It asserted that the self-host fixture gets a `DispatchSolver`. `mojo/backend_gimple/module_gen.py` has skipped dispatch solving for this compiler's own sources since the self-host divergence fix (`not _is_selfhost_file`), so the assertion contradicted a deliberate policy. The file now pins that policy in both directions on one source text: an ordinary program's table is planned, emitted and ordered before its callers, and two dispatch families get two tables; a self-host source plans no solver run and no table. 4/4 pass. It is still unregistered (`tools/suite.py` is integrator-owned), and its `UNREGISTERED` reason still describes it accurately. Noted, not changed: `DispatchSolver(allow_assume_all_methods=_is_selfhost_file)` sits inside the `not _is_selfhost_file` branch, so that flag is always False and the self-host getattr heuristic it gates is unreachable from a real compile. Dead, not wrong, so it is not filed as a bug.
 * **Still open:** §3.2's general check (not statically decidable, §3.2), §5's
   registration of the 50 and the 21 red files (`tools/suite.py` is
   integrator-owned; the red files are behaviour work in other claims).
@@ -275,7 +305,7 @@ All measured by running the file. Counts are the file's own.
 | `test_transitive_closure_capture.py` | 2 | also tier 1 |
 | `test_async_runtime_scaffold.py` | 1 | step A of compiled-path async/await |
 | `test_x86_64_containers.py` | 1 | also tier 1 |
-| `test_dispatch_phase_c.py` | — | `AssertionError: DispatchSolver should have been instantiated`, in 0.1 s. A broken test, not a behaviour gap. |
+| `test_dispatch_phase_c.py` | — | Was `AssertionError: DispatchSolver should have been instantiated`. Fixed 2026-11-01: the test asserted a self-host policy the codegen had deliberately dropped (see Status). |
 
 **`test_coro_future_await.py` is also the naming casualty.** Its siblings were
 renamed from `test_mojo_*` to `test_fire_*` in the round that broke the `coro`
