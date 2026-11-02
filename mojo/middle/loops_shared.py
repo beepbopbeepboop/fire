@@ -489,7 +489,7 @@ def _loop_else_flag_name() -> str:
     return '_loop_ok_' + str(_LOOP_ELSE_COUNTER[0])
 
 
-def _loop_else_rewrite_breaks(stmts, flag: str) -> list:
+def _loop_else_rewrite_breaks(stmts: list, flag: str) -> list:
     out: list = []
     for st in (stmts or []):
         out.append(_loop_else_rewrite_stmt(st, flag))

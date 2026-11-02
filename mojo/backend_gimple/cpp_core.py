@@ -1098,7 +1098,7 @@ def _cfcs_shape_of(gen, depth: int, _cfcs_shapes: set, expr, locals_shape: dict)
     return None
 
 
-def _cfcs_scan(gen, depth: int, _cfcs_shapes: set, stmts, locals_shape: dict) -> None:
+def _cfcs_scan(gen, depth: int, _cfcs_shapes: set, stmts: list, locals_shape: dict) -> None:
     """Hoisted out of `_cpp_fn_container_shape` — see `_cfcs_shape_of`."""
     for st in stmts:
         if isinstance(st, gimple_ctypes.AssignStmt) and isinstance(st.target, gimple_ctypes.IdentExpr):

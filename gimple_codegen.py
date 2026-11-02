@@ -4583,10 +4583,10 @@ class GimpleGen:
     def _default_expr_to_pair(self, _dflt, cxx: bool = False, param_ctype=None) -> tuple:
         return ggc._default_expr_to_pair(self, _dflt, cxx=cxx, param_ctype=param_ctype)
 
-    def _pack_kwargs_slot_call(self, fname, fname_raw, arg_pairs, kwarg_dict, call_has_spread=False):
+    def _pack_kwargs_slot_call(self, fname, fname_raw, arg_pairs, kwarg_dict: dict, call_has_spread=False):
         return ggc._pack_kwargs_slot_call(self, fname, fname_raw, arg_pairs, kwarg_dict, call_has_spread)
 
-    def _pack_vararg_trailing_params(self, fname, fname_raw, arg_pairs, kwarg_dict, call_has_spread=False):
+    def _pack_vararg_trailing_params(self, fname, fname_raw, arg_pairs, kwarg_dict: dict, call_has_spread=False):
         return ggc._pack_vararg_trailing_params(self, fname, fname_raw, arg_pairs, kwarg_dict, call_has_spread)
 
     def _expand_sole_spread_into_fixed_slots(self, node, fname, fname_raw, arg_pairs, expected_params):
@@ -5958,7 +5958,7 @@ def _selfhost_register_gimplegen(gen):
 # MOJO_NO_SHIM=1 convention) for the first time this surfaces a real false
 # positive on code broader than that sweep, so a single bad diagnostic can't
 # block an otherwise-working build while it's investigated.
-def _check_ownership(stmts, filename: str) -> None:
+def _check_ownership(stmts: list, filename: str) -> None:
     if os.environ.get('MOJO_SKIP_OWNERSHIP_CHECK'):
         return
     diags = ownership_check.check_module(stmts)

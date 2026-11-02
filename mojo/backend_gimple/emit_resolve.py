@@ -346,7 +346,7 @@ def _submodule_source_path(gen, module_name: str) -> str | None:
     return None
 
 
-def _register_closure_struct_inits(gen, stmts) -> None:
+def _register_closure_struct_inits(gen, stmts: list) -> None:
     """Populate `gen._struct_has_init` / `_struct_init_params` /
     `_struct_init_defaults` / `_struct_method_names` for every top-level
     StructDef in `stmts` that defines an `__init__`. Called for each module
@@ -1463,7 +1463,7 @@ def _bare_import_bindings(stmt) -> list:
     return out
 
 
-def _module_marker_attribute_reads(stmts) -> dict:
+def _module_marker_attribute_reads(stmts: list) -> dict:
     """`{identifier: [attribute, ...]}` for every `ident.attr` anywhere in
     this module — ONE AST walk for the whole module, so a module with N bare
     imports costs one walk and not N (the walk is the expensive half of
@@ -1559,7 +1559,7 @@ def _inline_bare_import_struct(gen, stmt, marker_reads) -> None:
             _classify_unresolved_export(gen, _m, _m, _mod, _path, _text)
 
 
-def _register_link_imports(gen, stmts) -> list:
+def _register_link_imports(gen, stmts: list) -> list:
     """Link mode (MODULE_CACHE_DESIGN.md): `import` is the seam. For each
     imported symbol, resolve its signature from the module's dylib
     `__mojo_reflect` ABI (imports.import_exports → read_reflection), register
@@ -1638,7 +1638,7 @@ def _register_link_imports(gen, stmts) -> list:
     # `mojo/middle/module_shared.py::_collect_import_modules`'s docstring).
     _marker_reads = _module_marker_attribute_reads(stmts)
 
-    def scan(stmt_list):
+    def scan(stmt_list: list):
         for stmt in stmt_list:
             if isinstance(stmt, gimple_ctypes.ImportStmt):
                 # `import M` needs TWO things registered here, and they are

@@ -895,7 +895,7 @@ def _abs_module_ref(ref: str, base: str) -> str:
     return '.'.join(keep + ([leaf] if leaf else []))
 
 
-def _import_name_map(stmts) -> dict:
+def _import_name_map(stmts: list) -> dict:
     """local name -> importing module for every `from X import ...`, at
     module level AND inside function bodies. The function-level scan is
     load-bearing: test_drop's `test_drop_then_take_composition` imports
@@ -950,7 +950,7 @@ _BUILTIN_FACTORY_HOME = {
 }
 
 
-def _factory_home(gen, import_map, base):
+def _factory_home(gen, import_map: dict, base):
     """The path of the module that DEFINES `def base`, or None. Generic
     factories (`def take[...](...)`) are already in `_imported_generics`; the
     non-generic overload (`def peekable(...)`) is not, so resolve it from the
@@ -1119,7 +1119,7 @@ def _collect_locals(node, out):
             stack.append(c)
 
 
-def _walk_scoped(stmts, visit):
+def _walk_scoped(stmts: list, visit):
     """`visit(call, scope)` for every CallExpr, where `scope` is the
     innermost enclosing function's `(name, func_node, locals_map)` (None at
     module level) — `locals_map` is that function's local VarDecls. The
@@ -1266,7 +1266,7 @@ def _wrapper_iter_params(fsrc: str, wrapper: str) -> list | None:
     return out
 
 
-def _find_fn_def(name, scope, stmts):
+def _find_fn_def(name, scope, stmts: list):
     """The FunctionDef `name` refers to — a NESTED def of the innermost
     enclosing function (the scope's func-node body), else a MODULE-level def,
     else None. The positional-argument subpath's safety gate: the bare
@@ -1284,7 +1284,7 @@ def _find_fn_def(name, scope, stmts):
     return None
 
 
-def _fn_return_annot(name, scope, stmts):
+def _fn_return_annot(name, scope, stmts: list):
     """The bound function value's OWN `-> T` annotation, as single-spaced
     source text, or (None, refusal). Measured 2026-10-21 (further):
     `def add_one(x: Int) -> Int` nested in test_map — the wrapper's derived
@@ -1300,7 +1300,7 @@ def _fn_return_annot(name, scope, stmts):
     return ' '.join(ann.split()), None
 
 
-def _fn_returns_map(stmts) -> dict:
+def _fn_returns_map(stmts: list) -> dict:
     """Every MODULE-LEVEL `def` in this module, mapped to its `-> T` return
     annotation as single-spaced source text (an annotationless def maps to
     ''). Measured 2026-10-22 part 5: `cycle(_owned3(1, 2, 3))` — the
@@ -1405,7 +1405,7 @@ def _fn_value_name(fn_name, scope):
     return closure_lifted_name(_func_name, fn_name), None
 
 
-def _seed_one_factory(gen, work, mm, base, node, scope, stmts, import_map,
+def _seed_one_factory(gen, work, mm, base, node, scope, stmts: list, import_map,
                       queue, records, depth=0):
     """Evaluate ONE factory call site. Returns the record (filed in `records`
     and its wrapper enqueued as a root) or None for every refusal — in which
@@ -1840,7 +1840,7 @@ def _seed_one_factory(gen, work, mm, base, node, scope, stmts, import_map,
     return rec
 
 
-def _seed_multi_factory(gen, work, mm, base, node, scope, stmts, import_map,
+def _seed_multi_factory(gen, work, mm, base, node, scope, stmts: list, import_map,
                         queue, records, fsrc, home, depth):
     """The MULTI-CONTAINER dependent-return factory subpath (measured
     2026-10-21, part 4: `product(a, b[, c[, d]])` — `-> _ProductN[
@@ -2057,7 +2057,7 @@ def _seed_multi_factory(gen, work, mm, base, node, scope, stmts, import_map,
     return rec
 
 
-def _seed_out_res_factory(gen, work, mm, base, node, scope, stmts, import_map,
+def _seed_out_res_factory(gen, work, mm, base, node, scope, stmts: list, import_map,
                           queue, records, fsrc, home, depth=0):
     """The OUT-PARAMETER dependent-return factory subpath (measured
     2026-10-21, part 4: `chain(l1, l2)` / `zip(l, l2)` — `def chain[*Ts:
@@ -2405,7 +2405,7 @@ def _seed_direct_factory(gen, work, mm, base, node, fsrc, home, queue, records):
     return rec
 
 
-def _seed_direct_ctor(gen, work, mm, base, node, fsrc, home, scope, stmts,
+def _seed_direct_ctor(gen, work, mm, base, node, fsrc, home, scope, stmts: list,
                       import_map, queue, records):
     """The DIRECT-WRAPPER-CONSTRUCTOR subpath (part 6 family D, 2026-10-23,
     measured on test_product's test_product2_copies):
@@ -2869,7 +2869,7 @@ def _siter_register(gen, name):
         _mc[name] = _SITER_C[name]
 
 
-def _seed_factories(gen, work, stmts, queue):
+def _seed_factories(gen, work, stmts: list, queue):
     """Entry: find every factory call, evaluate it, register + enqueue its
     wrapper, and file the record the emit side reconstructs from. Lazy-imports
     `monomorphize` (which imports `gimple_codegen` at module level — the cycle
@@ -3651,7 +3651,7 @@ def _materialize(work, key):
 
 # ── the entry point ────────────────────────────────────────────────────────
 
-def run(gen, stmts):
+def run(gen, stmts: list):
     """Materialize in-TU instantiations for `stmts`; returns the extra
     top-level statements to append to them, and fills `gen._intu_funcs` /
     `_intu_structs` (what this compile DEFINES) and `gen._intu_func_args` /
@@ -3880,7 +3880,7 @@ def _skip(gen) -> bool:
         os.path.join('mojo', 'backend_gimple', 'elab_intu.py'))
 
 
-def _synthesize_inner_defaults(work, stmts):
+def _synthesize_inner_defaults(work, stmts: list):
     """A materialized wrapper's SPLICED body calls the inner's protocol
     methods; for a LOCAL inner struct (this module's own StructDef) that does
     not override one, the call must reach the TRAIT'S DEFAULT implementation.
@@ -3989,7 +3989,7 @@ def _rewrite_ann(work, ann, mangled_raw):
     return ann
 
 
-def _rewrite_callees(work, stmts):
+def _rewrite_callees(work, stmts: list):
     """Point every call site of a materialized generic at the concrete name.
 
     Both spellings need it. `Base[Args](...)` and bare `Base(...)` both route
@@ -4049,7 +4049,7 @@ def _rewrite_callees(work, stmts):
         _walk(rec['parsed'], visit)
 
 
-def _rewrite_local_struct_anns(work, stmts):
+def _rewrite_local_struct_anns(work, stmts: list):
     """Rewrite LOCAL-struct field annotations naming a materialized in-TU
     base to the base's MANGLED name alone (part 6 family D piece 2,
     2026-10-23, measured on test_product's local TestCopyIterator:
@@ -4091,7 +4091,7 @@ def _rewrite_local_struct_anns(work, stmts):
                     break
 
 
-def _rewrite_ctor_calls(work, stmts):
+def _rewrite_ctor_calls(work, stmts: list):
     """Rewrite a module function's OWN bare `Base(args)` constructor call to
     the base's in-TU MANGLED name (part 5, 2026-10-22, measured on
     test_cycle/test_product: `def _owned3(...) -> _CopyableOwned[3]` whose

@@ -1682,7 +1682,7 @@ _FSTRING_QUOTED_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
 _FSTRING_NAME_RE = re.compile(r"(?<![\w.])([A-Za-z_]\w*)")
 
 
-def _fstring_field_names(node_list) -> set[str]:
+def _fstring_field_names(node_list: list) -> set[str]:
     """Identifiers an f-string in `node_list` reads from its `{...}` fields.
 
     The parser keeps an f-string as one raw `StringLiteral` (see
@@ -1702,7 +1702,7 @@ def _fstring_field_names(node_list) -> set[str]:
     return out
 
 
-def _nested_generator_captures(stmts) -> dict[int, list[str]]:
+def _nested_generator_captures(stmts: list) -> dict[int, list[str]]:
     """Map `id(g)` -> the sorted enclosing-scope names a NESTED generator
     `g` reads, for every generator `g` that is defined inside another `def`
     in `stmts` and reads a parameter or local of that enclosing `def`.
@@ -1864,7 +1864,7 @@ def _compile_nested_generator_closures(gen, outer_fn: gimple_ctypes.FunctionDef,
         generator_fns.pop(id(inner), None)
 
 
-def _nested_generator_sibling_defs(stmts) -> dict[int, list]:
+def _nested_generator_sibling_defs(stmts: list) -> dict[int, list]:
     """Map `id(g)` -> the `def`s that sit beside a NESTED generator `g` in
     the enclosing `def`'s own body (`g`'s siblings, excluding `g` itself),
     for every generator `g` defined inside another `def` in `stmts`.

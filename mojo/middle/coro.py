@@ -1978,7 +1978,7 @@ _STR_EVIDENCE_METHODS = ('startswith', 'endswith', 'strip', 'lstrip', 'rstrip', 
                          'decode', 'join')
 
 
-def _compute_pointer_evidence(stmts) -> None:
+def _compute_pointer_evidence(stmts: list) -> None:
     """For every same-module function (generator or plain): the unannotated
     parameters its body uses as a PATH / SEQUENCE WORD -- sliced, tested
     `isinstance(p, str|bytes)`, a str-method receiver, passed to `os.scandir` /
@@ -2063,7 +2063,7 @@ def _compute_pointer_evidence(stmts) -> None:
         fd._ptr_forwarded = frozenset(_PTR_FORWARDED.get(nm, ()))
 
 
-def _index_generator_defs(stmts) -> None:
+def _index_generator_defs(stmts: list) -> None:
     """Refill `_GEN_DEFS` with this module's top-level generator defs. A pure
     function of `stmts`: it touches no kind memo and no ret-kind table, so it
     is safe on BOTH backends. The cpp escape hatch runs it too (see `lower`),
@@ -2076,7 +2076,7 @@ def _index_generator_defs(stmts) -> None:
             _GEN_DEFS[s.name] = s
 
 
-def _populate_gen_rec_assume(stmts) -> None:
+def _populate_gen_rec_assume(stmts: list) -> None:
     _GEN_REC_ASSUME.clear()
     for name, fd in list(_GEN_DEFS.items()):
         targets = set()
@@ -2099,7 +2099,7 @@ def _populate_gen_rec_assume(stmts) -> None:
             _GEN_REC_ASSUME[name] = 'w'
 
 
-def _register_generator_defs(stmts) -> None:
+def _register_generator_defs(stmts: list) -> None:
     """Register this module's top-level generator defs, and drop the
     previous module's kind answers.
 
@@ -2224,7 +2224,7 @@ def _sibling_gen_kind(iterable, fn: N.FunctionDef = None):
     return k if k in _SCALAR_GEN_KINDS else None
 
 
-def _register_generator_value_kinds(stmts) -> None:
+def _register_generator_value_kinds(stmts: list) -> None:
     """Resolve the value kind of every module-level generator in this
     module through `_GEN_DEFS` (registered by `_register_generator_defs`),
     memoizing into `_GEN_VALUE_KINDS` for `_generator_value_kind` to
@@ -2487,7 +2487,7 @@ def _note_async_kind(table: dict, name: str, kind) -> None:
         table[name] = kind
 
 
-def _register_async_result_kinds(stmts, closure_stmts=()) -> None:
+def _register_async_result_kinds(stmts: list, closure_stmts=()) -> None:
     """Fill `_ASYNC_RESULT_KIND` and `_ASYNC_HANDLE_KIND` for this module (see
     their comments), and also for any imported modules in the closure so
     awaited handles whose origin is not in this module resolve the right
@@ -3056,7 +3056,7 @@ def _is_standard_await_generator(m) -> bool:
     return False
 
 
-def _detect_native_future_classes(stmts) -> None:
+def _detect_native_future_classes(stmts: list) -> None:
     _NATIVE_FUTURE_CLASSES.clear()
     for s in stmts:
         if isinstance(s, N.StructDef) and any(
@@ -3064,7 +3064,7 @@ def _detect_native_future_classes(stmts) -> None:
             _NATIVE_FUTURE_CLASSES.add(s.name)
 
 
-def _rewrite_native_future_refs(stmts) -> list:
+def _rewrite_native_future_refs(stmts: list) -> list:
     """In-place: drop native-future StructDefs, rewrite `: <Cls>`
     annotations to `Int`, rewrite `<Cls>(...)` construction to
     `create_future()`."""
@@ -5065,7 +5065,7 @@ def _dotted_name(expr) -> str | None:
     return None
 
 
-def _module_literal_env(stmts) -> dict:
+def _module_literal_env(stmts: list) -> dict:
     """name -> literal kind for every module-level name whose ONE binder in the
     module is a literal, as the caller env of a module-level call.
 
@@ -5606,7 +5606,7 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
 _VALUE_USED_FUNCS: set = set()
 
 
-def _scan_value_used_functions(stmts) -> None:
+def _scan_value_used_functions(stmts: list) -> None:
     _VALUE_USED_FUNCS.clear()
     fn_names = {s.name for s in stmts if isinstance(s, N.FunctionDef)}
     if not fn_names:

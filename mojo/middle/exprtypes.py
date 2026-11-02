@@ -410,7 +410,7 @@ def _generator_quick_eligible(fn: FunctionDef) -> bool:
         return False
     return True
 
-def _trailing_default_at(dflts, n_params: int, pos: int):
+def _trailing_default_at(dflts: list, n_params: int, pos: int):
     """Default-arg AST node for call slot `pos` out of `n_params` total
     params, given `dflts` = [(param_name, default_ast), ...] covering ONLY
     the params that HAVE a default (`FunctionDef.param_defaults`'s shape).

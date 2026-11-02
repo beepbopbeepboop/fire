@@ -1201,7 +1201,7 @@ def _prepass_callee_key(gen, node) -> str | None:
             return f"{gen._prepass_struct}_{f.member}"
     return None
 
-def _collect_local_container_elems(gen, stmts) -> None:
+def _collect_local_container_elems(gen, stmts: list) -> None:
     """Populate self._prepass_local_elems from a function's assignments:
     a named local holding a container literal / container-returning call,
     or both halves of a `xt, xv = <container-returning call>` unpack."""
@@ -1248,7 +1248,7 @@ def _collect_local_container_elems(gen, stmts) -> None:
         elif isinstance(node, gimple_ctypes.WithStmt):
             gen._collect_local_container_elems(node.body)
 
-def _collect_return_elems(gen, stmts, acc) -> None:
+def _collect_return_elems(gen, stmts: list, acc) -> None:
     """Collect container element types of return values (structural walk
     mirroring _collect_return_types)."""
     for node in stmts:
@@ -1888,7 +1888,7 @@ def _infer_local_var_types_core(gen, func: gimple_ctypes.FunctionDef) -> dict[st
 
     return result
 
-def _calls_in_stmts(gen, stmts, out):
+def _calls_in_stmts(gen, stmts: list, out):
     """Collect every CallExpr reachable from a statement list.
 
     Phase 4 (the `_walk_ast` re-scan bug,

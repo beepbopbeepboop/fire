@@ -946,7 +946,7 @@ def _lower_bound_method_call_value(gen, bm: str, node: gimple_ctypes.CallExpr,
 _STRUCT_FMT_DATA_ATTRS = {'format': 'str', 'size': 'int'}
 
 
-def _struct_build_value_list(gen, arg_nodes, codes):
+def _struct_build_value_list(gen, arg_nodes: list, codes):
     """Lower `arg_nodes` into a fresh MojoList* suitable for
     mojo_struct_pack_list / mojo_struct_pack_h. `codes` (may be None)
     drives per-field coercion when the format is statically known."""

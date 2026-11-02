@@ -184,7 +184,7 @@ def _gmi_arg_literal_ctype(arg, enc_idx: dict, mod_index: dict):
     return _gmi_literal_ctype(arg)
 
 
-def _gmi_iter_calls(stmts, _seen=None) -> list:
+def _gmi_iter_calls(stmts: list, _seen=None) -> list:
     """Every CallExpr in the tree, via a generic walk over node attributes,
     as a LIST in walk order.
 
@@ -220,7 +220,7 @@ def _gmi_iter_calls(stmts, _seen=None) -> list:
     return out
 
 
-def _gmi_apply_call_site_param_evidence(gen, stmts):
+def _gmi_apply_call_site_param_evidence(gen, stmts: list):
     """Ground an unannotated parameter in what its CALLERS actually pass.
 
     `_infer_param_types` infers a parameter's type from how the body USES it,
@@ -407,7 +407,7 @@ def _gmi_apply_call_site_param_evidence(gen, stmts):
         ipt.setdefault(fname, {})[pname] = call_type
 
 
-def _gmi_closure_call_site_param_evidence(gen, stmts) -> None:
+def _gmi_closure_call_site_param_evidence(gen, stmts: list) -> None:
     """Ground an UNANNOTATED parameter of a nested `def` in what its callers
     pass, the closure counterpart of `_gmi_apply_call_site_param_evidence`.
 
@@ -2951,7 +2951,7 @@ def _is_dispatch_name(_n) -> bool:
     return dispatch_table_global_ctype(_as_str(_n)) is not None
 
 
-def _gmi_assigns_global_at_toplevel(stmt_list, gname: str) -> bool:
+def _gmi_assigns_global_at_toplevel(stmt_list: list, gname: str) -> bool:
     """True when the module body `stmt_list` binds `gname` itself at top
     level (a plain/annotated assignment, a `var`, or one target of a chained
     assignment), looking through top-level try/if blocks the way
@@ -3125,7 +3125,7 @@ def _gmi_target_leaf_names(target, out: set) -> None:
         out.add(_tname)
 
 
-def _gmi_local_binding_names(stmts, out: set) -> None:
+def _gmi_local_binding_names(stmts: list, out: set) -> None:
     """Every name a LOCAL binding can introduce anywhere in `stmts` — the
     parameters of every function and method, and every `VarDecl`,
     assignment target, `for`/`with`/`except`/comprehension target, at any
@@ -3736,7 +3736,7 @@ def _gmi_with_blocks(stmt, blocks):
     return new
 
 
-def _gmi_scope_defs(stmts) -> list:
+def _gmi_scope_defs(stmts: list) -> list:
     """Every `def` bound in this scope: a direct statement, or one inside a
     compound statement's block at any depth (see `_gmi_child_blocks`)."""
     out = []
@@ -3750,7 +3750,7 @@ def _gmi_scope_defs(stmts) -> list:
     return out
 
 
-def _gmi_rebind_block(self, stmts, scope: dict, at_module: bool):
+def _gmi_rebind_block(self, stmts: list, scope: dict, at_module: bool):
     """Rebind the decorated defs of one statement list, in the scope `scope`
     (every name a decorator may resolve to, see `_gmi_decorator_pass`), and
     recurse into its compound blocks and function bodies. Returns `stmts`
@@ -3914,7 +3914,7 @@ def _gmi_refuse_scalar_decorator_rebind(self, stmts: list, scope: dict) -> None:
                     f"bugs/mid/COMPILE_FAIL_decorator_application_dropped.md)")
 
 
-def _declare_posthoc_class_attrs(stmts) -> None:
+def _declare_posthoc_class_attrs(stmts: list) -> None:
     """`A.extra = 7` (anywhere in the module: at top level or inside a function)
     on a class `A` the module defines declares the class attribute `extra`, just
     as a class-body `extra = 7` would. Without the declaration a READ of
@@ -4147,7 +4147,7 @@ def _gmi_specialize_literal_kind_clones(stmts: list) -> list:
     return _out
 
 
-def gen_module_impl(self, stmts):
+def gen_module_impl(self, stmts: list):
 
     # A class written INSIDE a function body is a type declaration like any
     # other, and the struct pipeline reads the module-level statement list, so
@@ -6215,7 +6215,7 @@ def gen_module_impl(self, stmts):
     # resolves identically — every site runs before the emission loop's
     # module-level comptime registrations, the one write that could change
     # a resolution verdict mid-function).
-    def _flatten_resolved_conditionals(_root_list):
+    def _flatten_resolved_conditionals(_root_list: list):
         _out = []
         _stack = [(_root_list, 0)]
         while _stack:
@@ -13429,7 +13429,7 @@ def gen_module_impl(self, stmts):
             _ggf_dup._record_home_def_return_type(
                 self, _p3b_raw, _p3b_s.name, inferred)
 
-    def _flatten_resolved_conditionals(_root_list):
+    def _flatten_resolved_conditionals(_root_list: list):
         _out = []
         _stack = [(_root_list, 0)]
         while _stack:

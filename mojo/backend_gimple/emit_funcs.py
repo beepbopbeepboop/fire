@@ -1149,7 +1149,7 @@ def _selfhost_merge_field(_fields: dict[str, str], _name: str, _ct: str):
         _fields[_name] = _ct
 
 
-def _selfhost_walk_stmts_for_assign_targets(stmts, p0, fields):
+def _selfhost_walk_stmts_for_assign_targets(stmts: list, p0, fields):
     """Narrow, statement-only recursive walker used ONLY by
     `_selfhost_scan_gimplegen_extra_fields` — deliberately NOT the shared
     `gimple_exprtypes._walk_ast` (a full generic-dataclass-reflection
@@ -1365,7 +1365,7 @@ def _selfhost_gimplegen_field_types(gg_cls, _src_dir=None) -> dict:
     return _fields
 
 
-def _selfhost_walk_stmts_for_self_assigns(stmts, fields, init_param_ct):
+def _selfhost_walk_stmts_for_self_assigns(stmts: list, fields, init_param_ct):
     """Narrow, statement-only recursive walker for `self.X = <literal>`
     assignments inside a GimpleGen method body — the sibling of
     `_selfhost_walk_stmts_for_assign_targets` (same rationale: avoids
@@ -3791,7 +3791,7 @@ def _resolve_sibling_param_ctype(gen, module: str, raw_ptype) -> str | None:
 
 
 
-def _register_imported_structs(gen, stmts) -> None:
+def _register_imported_structs(gen, stmts: list) -> None:
     """dylib mode: register a concrete imported struct's field layout + queue
     its typedef, for a struct used as a parameter type whose field is
     actually accessed here (so e.g. `info: CompiledFunctionInfo` +
@@ -4006,7 +4006,7 @@ def _abs_module(ref: str, base: str) -> str:
 
 
 
-def _register_imported_generics(gen, stmts) -> None:
+def _register_imported_generics(gen, stmts: list) -> None:
     """Register `from M import gen` where gen is a generic free function
     (following re-export chains) so its call sites elaborate a concrete
     instantiation. This runs in the inline do_imports=True path too: there a
@@ -4034,7 +4034,7 @@ def _register_imported_generics(gen, stmts) -> None:
             gen._imported_generics.setdefault(name, src)
 
 
-def _register_imported_generic_structs(gen, stmts) -> None:
+def _register_imported_generic_structs(gen, stmts: list) -> None:
     """Register `from M import GenericStruct` (following re-export chains,
     same as _register_imported_generics does for free functions) so both
     `Struct[Args](...)` constructor call sites and a nested generic-struct
