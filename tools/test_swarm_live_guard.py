@@ -66,6 +66,12 @@ class Guard(unittest.TestCase):
             S.retire_dead()
         self.assertEqual(marks, [["bug-idle", "abandoned"]])
 
+    def test_moves_skip_docs_a_live_session_is_working_on(self):
+        S.BUSY["claims"] = {"bug:CODEGEN_x", "bug:COMPILE_FAIL_y"}
+        self.assertEqual(S.move_busy_bases(), {"CODEGEN_x", "COMPILE_FAIL_y"})
+        S.BUSY["claims"] = {"fix:unrelated"}
+        self.assertEqual(S.move_busy_bases(), set())
+
 
 if __name__ == "__main__":
     unittest.main()

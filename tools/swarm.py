@@ -282,6 +282,11 @@ def _git(*a):
     return r.returncode, r.stdout
 
 
+def move_busy_bases():
+    """Docs a live opencode session is working on: a move would leave that session on a path that no longer exists."""
+    return {c[4:] for c in BUSY["claims"] if c.startswith("bug:")}
+
+
 def apply_moves(st):
     """Move each doc due a class into its class's directory (git mv), rewrite the path citations to it, and commit the
     move to master as one docs-only commit. A doc waits (and is retried next pass) while a worker holds it, while a branch
@@ -302,7 +307,7 @@ def apply_moves(st):
             if _git("diff", "--cached", "--name-only")[1].split():
                 log("reclass waits: the main checkout has staged changes")
                 return
-            busy = _busy_bases(C.load())
+            busy = _busy_bases(C.load()) | move_busy_bases()
             plan = []     # (base, old_rel, new_rel, cited_files)
             for base, to in sorted(pend.items()):
                 if base in busy:
@@ -599,7 +604,8 @@ def main():
     while True:
         try:
             guard_ok = live_guard()
-            apply_moves(load_state())            # a class change is a file move, so it lands before the feed reads the tree
+            if guard_ok:
+                apply_moves(load_state())        # a class change is a file move, so it lands before the feed reads the tree
             subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "reap"], capture_output=True, cwd=C.MAIN)  # jobs of finished workers
             fed = cont = retired = 0
             if guard_ok:
