@@ -786,7 +786,8 @@ def _cpp_apply_fstring_spec(part_val: str, spec: str) -> str:
 # `os.path.<fn>` names a body may alias to a local -- the ones the `os.path.*`
 # call table in `_cpp_expr` lowers.
 _CPP_OS_PATH_ALIASABLE = ('join', 'islink', 'isdir', 'isfile', 'exists',
-                          'basename', 'dirname')
+                          'basename', 'dirname', 'split', 'splitext',
+                          'expanduser', 'abspath', 'normpath', 'relpath')
 
 
 def _cpp_collect_os_path_aliases(fn) -> dict:
@@ -3090,6 +3091,19 @@ def _cpp_expr(gen, e) -> str:
                     for nxt in a[1:]:
                         acc = f"mojo_path_join((char *)({acc}), (char *)({nxt}))"
                     return acc
+                if e.func.member == 'split' and len(a) == 1:
+                    # os.path.split(p) → MojoList * [head, tail].
+                    # Word argument uses word-kinded runtime entry;
+                    # str argument uses int64_t_path_split.
+                    _arg_node = e.args[0]
+                    _arg_is_word = False
+                    if isinstance(_arg_node, gimple_ctypes.IdentExpr):
+                        decl = getattr(gen, '_cpp_declared', None) or {}
+                        if decl.get(_arg_node.name) in ('int64_t', 'MojoBytes *'):
+                            _arg_is_word = True
+                    if _arg_is_word:
+                        return f"mojo_os_path_split_w({a[0]})"
+                    return f"int64_t_path_split({a[0]})"
                 # os.path.isdir/exists(p) — the GIMPLE path's own
                 # os.path.* dispatch (_lower_call) already has these
                 # wired to real runtime helpers (`marker` is an unused
@@ -6248,6 +6262,15 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 and isinstance(s.value.func, gimple_ctypes.IdentExpr)
                 and s.value.func.name in gen.func_return_types
                 and gen.func_return_types[s.value.func.name] == 'MojoList *')
+            # os.path.split(p) returns MojoList* [dirname, basename]; treat
+            # as list-valued for tuple unpacking like other MojoList* calls.
+            _tup_is_split_call = (isinstance(s.value, gimple_ctypes.CallExpr)
+                and isinstance(s.value.func, gimple_ctypes.MemberExpr)
+                and s.value.func.member == 'split'
+                and isinstance(s.value.func.obj, gimple_ctypes.MemberExpr)
+                and s.value.func.obj.member == 'path'
+                and isinstance(s.value.func.obj.obj, gimple_ctypes.IdentExpr)
+                and s.value.func.obj.obj.name == 'os')
             # A bare Comprehension as the RHS (`[tup] = [x for x in ...]`,
             # Lib/test/crashers/gc_inspection.py's own `g` generator) also
             # lowers, via _cpp_expr's own Comprehension case just above,
@@ -6275,7 +6298,8 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                 and gen._cpp_declared.get(s.value.name) == 'MojoList *')
             _tup_is_list_val = (_tup_is_list_call
                 or isinstance(s.value, gimple_ctypes.Comprehension)
-                or _tup_is_list_ident)
+                or _tup_is_list_ident
+                or _tup_is_split_call)
             # Pop-time shape discrimination: unpacking a value popped off a
             # heterogeneous/tagged-union stack (`marker, value =
             # stack.pop()`, then a second-level `a, b, ... = value`). The
@@ -6348,6 +6372,8 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                     if el.name not in declared:
                         declared[el.name] = 'int64_t'
                         lines.append(f"{indent}int64_t {el.name};")
+                    if _tup_is_split_call:
+                        _cpp_mark_tagged_word(gen, el.name)
                     if _tup_is_list_val:
                         lines.append(f"{indent}{el.name} = "
                                      f"mojo_list_get_int({_cpp_as('MojoList *', _tup_val)}, {i});")
