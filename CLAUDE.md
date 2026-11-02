@@ -83,6 +83,17 @@ anywhere else), these rules override any instinct to move on quickly:
   interim gate runs and interim check-ins were seen as wasted tokens/time
   when the intent was always to gate once at the end anyway.
 
+## Process safety — NEVER kill processes (`pkill`/`kill` are forbidden)
+The user's machine runs many other worktrees and lanes at the same time.
+Agents in this tree must NEVER run `pkill`, `kill`, `killall`, or any
+process-kill — not on `fire`/`python`/`lean` processes, not on orphaned
+processes from a previous session, not "to free memory". A still-running
+process belongs to someone (the user, another lane, a verification the user
+is watching): wait on it, work around it, or REPORT it in the round's
+output. The only sanctioned killing mechanism is `tools/memcap.py`'s own
+ceiling, and only inside the `tools/memslot.py` wrappers the tree's tests
+use. Recorded 2026-11-02 after a near-miss report.
+
 ## Bug rounds — every round must move us closer to the end
 Base directive (user, 2026-10-31): one work round handles ONE bug, fully
 finished (including its commit) before the next round starts. Earlier batches
