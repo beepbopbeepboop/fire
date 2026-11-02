@@ -3612,6 +3612,33 @@ top()
     # Tracebacks (frames stage 2): `e.__traceback__` walks tb_next from the frame that caught the
     # exception down to the one that raised it, each entry with the line it was executing at the
     # raise; a bare `raise` keeps the original traceback. `<module>` is a frame.
+    # A generator's frame is live only while it RUNS: after a yield the
+    # resumer sees its own frame again (the generator's frame stayed on the
+    # shadow stack, so `sys._getframe()` in the consuming loop named the
+    # generator, and the resumer's frame pop cancelled the wrong cleanup
+    # record), and inside the body `f_code.co_name` is the source name, not
+    # the lowered `__mgco_g_body`.
+    test_gimple_stdout("gimple_generator_frame_is_live_only_while_running", """\
+import sys
+
+def g():
+    f = sys._getframe()
+    print("in", f.f_code.co_name, f.f_back.f_code.co_name)
+    yield 1
+    f = sys._getframe()
+    print("in", f.f_code.co_name, f.f_back.f_code.co_name)
+    yield 2
+
+def caller():
+    for x in g():
+        print(x, sys._getframe().f_code.co_name, sys._getframe().f_back.f_code.co_name)
+
+def main():
+    caller()
+
+main()
+""", "in g caller\n1 caller main\nin g caller\n2 caller main\n")
+
     test_gimple_stdout("gimple_traceback_chain_names_and_lines", """\
 import sys
 

@@ -122,6 +122,74 @@ void mojo_cleanup_push_cattr(void **slot, void *saved)
         _mojo_cleanup_aux[_mojo_cleanup_top] = saved;
 }
 
+/* A coroutine (generator) body parks in the middle of a call: the frame records and cleanup
+ * records it pushed since it was entered are still "live" on the GLOBAL stacks while it is
+ * suspended, which leaves the generator's frame visible as the resumer's own (`sys._getframe()`
+ * in the loop that drives a generator named the generator) and lets the resumer's
+ * `mojo_frame_leave` cancel the generator's cleanup record instead of its own. So a yield
+ * DETACHES that slice into a snapshot and the next resume re-pushes it above the resumer's
+ * (possibly different) depth. `mojo_coro_*_base` read the depths at resume time. */
+typedef struct MojoCoroSlice {
+    int nframes;                 /* frame depth delta (may exceed the table; only min() are saved) */
+    int nsaved;
+    MojoFrameRec frames[1];      /* nsaved records, then the cleanup records */
+} MojoCoroSlice;
+typedef struct MojoCoroCleanupRec { mojo_cleanup_kind_t kind; void *ptr; void *aux; } MojoCoroCleanupRec;
+
+int mojo_coro_frame_base(void)   { return _mojo_frame_depth; }
+int mojo_coro_cleanup_base(void) { return _mojo_cleanup_top; }
+
+/* Detach everything above the two bases; returns a malloc'd snapshot (NULL when empty). */
+void *mojo_coro_slice_save(int frame_base, int cleanup_base)
+{
+    int nf = _mojo_frame_depth - frame_base;
+    int nc = _mojo_cleanup_top - cleanup_base;
+    if (nf < 0) nf = 0;
+    if (nc < 0) nc = 0;
+    if (nf == 0 && nc == 0) return NULL;
+    int ns = nf;
+    if (frame_base + ns > MOJO_FRAME_MAX) ns = MOJO_FRAME_MAX - frame_base;
+    if (ns < 0) ns = 0;
+    size_t bytes = sizeof(MojoCoroSlice) + (size_t)ns * sizeof(MojoFrameRec)
+                 + (size_t)nc * sizeof(MojoCoroCleanupRec) + sizeof(int);
+    MojoCoroSlice *sl = (MojoCoroSlice *)malloc(bytes);
+    if (!sl) return NULL;
+    sl->nframes = nf;
+    sl->nsaved = ns;
+    if (ns > 0) memcpy(sl->frames, &_mojo_frames[frame_base], (size_t)ns * sizeof(MojoFrameRec));
+    char *tail = (char *)(sl->frames) + (size_t)ns * sizeof(MojoFrameRec);
+    memcpy(tail, &nc, sizeof(int));
+    MojoCoroCleanupRec *cr = (MojoCoroCleanupRec *)(tail + sizeof(int));
+    for (int i = 0; i < nc; i++) {
+        int k = cleanup_base + 1 + i;
+        cr[i].kind = _mojo_cleanup_kind[k];
+        cr[i].ptr = _mojo_cleanup_ptr[k];
+        cr[i].aux = _mojo_cleanup_aux[k];
+    }
+    _mojo_frame_depth = frame_base;
+    _mojo_cleanup_top = cleanup_base;
+    return sl;
+}
+
+/* Re-push a snapshot above the current depths and free it. */
+void mojo_coro_slice_restore(void *snap)
+{
+    if (!snap) return;
+    MojoCoroSlice *sl = (MojoCoroSlice *)snap;
+    int base = _mojo_frame_depth;
+    for (int i = 0; i < sl->nsaved && base + i < MOJO_FRAME_MAX; i++)
+        _mojo_frames[base + i] = sl->frames[i];
+    _mojo_frame_depth = base + sl->nframes;
+    char *tail = (char *)(sl->frames) + (size_t)sl->nsaved * sizeof(MojoFrameRec);
+    int nc; memcpy(&nc, tail, sizeof(int));
+    MojoCoroCleanupRec *cr = (MojoCoroCleanupRec *)(tail + sizeof(int));
+    for (int i = 0; i < nc; i++) {
+        if (_mojo_cleanup_push(cr[i].kind, cr[i].ptr))
+            _mojo_cleanup_aux[_mojo_cleanup_top] = cr[i].aux;
+    }
+    free(sl);
+}
+
 void mojo_frame_enter(char *name, char *file, int64_t firstlineno)
 {
     if (_mojo_frame_depth < MOJO_FRAME_MAX) {

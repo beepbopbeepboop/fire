@@ -387,7 +387,16 @@ def _frame_enter(gen, node) -> None:
     if (gen.module_name or '') not in gen._frames_mods:
         return
     gen._frame_func = _as_str(gen.current_func_name)
-    _fname = gen._new_val('char *', f'{gen._intern_string(gimple_ctypes._c_escape(_as_str(node.name)))}')
+    _fn_shown = _as_str(node.name)
+    # A generator/coroutine body is lowered to `__mgco_<name>_body` (a method's
+    # `<name>` is `<Struct>_<method>`); the frame is the SOURCE function's.
+    if _fn_shown.startswith('__mgco_') and _fn_shown.endswith('_body'):
+        _fn_shown = _fn_shown[len('__mgco_'):-len('_body')]
+        for _sn in gen.struct_field_types:
+            if _fn_shown.startswith(_as_str(_sn) + '_'):
+                _fn_shown = _fn_shown[len(_as_str(_sn)) + 1:]
+                break
+    _fname = gen._new_val('char *', f'{gen._intern_string(gimple_ctypes._c_escape(_fn_shown))}')
     _ffile = gen._new_val('char *', f'{gen._intern_string(gimple_ctypes._c_escape(_as_str(getattr(gen, "_current_filename", "") or "")))}')
     _fline = gen._new_val('int64_t', f'(int64_t){int(getattr(node, "line", 0) or 0)}')
     gen._void_call('mojo_frame_enter',
