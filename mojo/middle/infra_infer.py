@@ -961,7 +961,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                 for arg in expr.args:
                     scan_expr(arg)
 
-        def scan_nodes(node_list):
+        def scan_nodes(node_list: list):
             """Recursively scan a list of statements."""
             def _track_derivation(target, value):
                 """`x = <subscript/slice of something already known to
@@ -2175,7 +2175,7 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
             # s` printed the pointer's decimal address instead of "abc"
             # until this case was added; the container literals below
             # already had an identical fix.
-            cand = 'MojoBytes *' if n.value.is_bytes else 'char *'
+            cand = 'MojoBytes *' if getattr(n.value, 'is_bytes', False) else 'char *'
         elif isinstance(n.value, gimple_ctypes.FloatLiteral):
             # A `double` local, which is the ONE scalar this map used to
             # have no answer for at all — the docstring above calls scalars
@@ -2268,6 +2268,25 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
                             _nv = gen._generator_value_ctype_for_next(_nargs[0])
                         if _nv:
                             cand = _nv
+                if cand is None and not isinstance(_v, (gimple_ctypes.IdentExpr, gimple_ctypes.StringLiteral)):
+                    # A STRING-valued expression bound to a local: `a = str(n)`,
+                    # `a = d + "x"`, `a = d.strip()`, `a = os.path.join(d, f)`.
+                    # `return a` from a function with no return annotation
+                    # inferred the int64_t default, so the function was
+                    # declared `int64_t`, the body laundered the `char *`
+                    # through it, and the caller's `print` formatted the
+                    # string's ADDRESS as a decimal number -- silently wrong
+                    # output with a clean build. `return d + "x"` directly
+                    # was already right: `_quick_type` types the returned
+                    # expression, but not a local that was bound from it,
+                    # because this map only accepted literals, containers,
+                    # struct constructors and `next()` as pointer evidence.
+                    # Asked through `gen._quick_type`, the SAME estimator the
+                    # `return` is typed with, so the two agree by
+                    # construction; only a `char *` answer is taken, so no
+                    # scalar, container or struct answer changes.
+                    if gen._quick_type(_v) == 'char *':
+                        cand = 'char *'
                 if cand is None:
                     # `q = p` -- a local bound from ANOTHER local this map
                     # already knows, which is the same value under a second
@@ -3028,7 +3047,7 @@ def _is_free_eligible_function(fn) -> bool:
                            # of its own is_async/is_generator flags
     return True
 
-def _build_analysis_funcs(stmts) -> dict:
+def _build_analysis_funcs(stmts: list) -> dict:
     """The module-level functions the ownership analysis may resolve a call
     to, `{name: FunctionDef}`. A name is included only if the analysis can
     be sure a call spelled `name(...)` in this module reaches THAT body:
@@ -3060,7 +3079,7 @@ def _build_analysis_funcs(stmts) -> dict:
             out[s.name] = s
     return out
 
-def _build_analysis_structs(stmts) -> dict:
+def _build_analysis_structs(stmts: list) -> dict:
     """The module's structs the ownership analysis may reason about,
     `{struct name: {method name: FunctionDef}}`. A struct is included only if a
     constructor call `Name(...)` provably builds a fresh instance and its

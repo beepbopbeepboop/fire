@@ -736,10 +736,10 @@ int64_t mojo_split_dyn(int64_t recv, int64_t arg);   /* pattern.split(s) or str.
 int     mojo_is_re_pattern(int64_t w);
 int     mojo_is_re_match(int64_t w);
 int64_t mojo_re_compile(char *pat, int64_t flags);                      /* handle, 0 if unsupported */
-int64_t mojo_re_compile_bytes(void *pat, int64_t len, int64_t flags);     /* handle, 0 if unsupported */
 int64_t mojo_re_exec(int64_t h, char *s, int64_t pos, int64_t endpos, int64_t mode);  /* 0 match 1 search 2 fullmatch */
-int64_t mojo_re_exec_bytes(int64_t h, void *s, int64_t len, int64_t pos, int64_t endpos, int64_t mode);
 int64_t mojo_re_m_group(int64_t m, int64_t g);
+char   *mojo_re_match_repr(int64_t m);   /* repr(m): <re.Match object; span=..., match=...> */
+char   *mojo_repr_word(int64_t v);       /* repr() of a word of unknown kind (str quoted, bytes, match, int) */
 int64_t mojo_re_m_start(int64_t m, int64_t g);
 int64_t mojo_re_m_end(int64_t m, int64_t g);
 int64_t mojo_re_getattr(int64_t obj, char *name);
@@ -1003,6 +1003,7 @@ char       *mojo_chr(int64_t code);
 /* New string operations */
 MojoStr    *mojo_str_slice(MojoStr *s, int64_t start, int64_t stop);
 char       *mojo_cstr_slice(char *s, int64_t start, int64_t stop);
+char       *mojo_cstr_slice_cp(char *s, int64_t start, int64_t stop);
 char       *mojo_cstr_slice_n(char *s, int64_t slen, int64_t start, int64_t stop);
 int         mojo_cstr_region_eq_n(char *s, int64_t slen, int64_t start, int64_t stop, char *needle);
 /* `w[start:stop]` on a WORD of unknown kind: a list, a string or a bytes
@@ -1086,7 +1087,9 @@ int64_t mojo_pyobject_pow(int64_t a, int64_t b, int a_dbl);
 int mojo_pyobject_cmp(char op, int64_t a, int64_t b);
 int64_t mojo_strlen(char *s);
 int64_t mojo_utf8_codepoint_index(char *s, int64_t byte_offset);
+int64_t mojo_utf8_codepoint_to_byte_offset(char *s, int64_t cp_idx);
 int64_t mojo_str_codepoint_len(char *s);
+char *mojo_char_at_str_cp(char *s, int64_t i);
 /* PART 6 (2026-10-23, family S): the first UTF-8 CODE POINT of s, decoded
  * (not its first byte — mojo_ord's byte read answers 0xE0 for "߷" where
  * the real `Codepoint.ord` is 2295; test_iterators pins that equality
@@ -1128,6 +1131,9 @@ typedef struct {
     int64_t  len;
     int      readonly;
 } MojoBytes;
+/* The bytes regex entry points take the bytes OBJECT and read data/len themselves. */
+int64_t mojo_re_compile_bytes(MojoBytes *pat, int64_t flags);             /* handle, 0 if unsupported */
+int64_t mojo_re_exec_bytes(int64_t h, MojoBytes *s, int64_t pos, int64_t endpos, int64_t mode);
 
 MojoBytes *mojo_bytes_new_lit(const char *data, int64_t len); /* copies `len` bytes */
 /* `x in <list of bytes>`: elements are boxed MojoBytes * pointers, so plain
@@ -1146,6 +1152,7 @@ int64_t    mojo_bytes_get(MojoBytes *b, int64_t i); /* -> int 0-255, neg idx ok 
  * kept for the iteration loop, which bounds its own index. */
 int64_t    mojo_bytes_get_checked(MojoBytes *b, int64_t i);
 int        mojo_bytes_eq(MojoBytes *a, MojoBytes *b);
+int        mojo_bytes_word_eq(int64_t w, MojoBytes *b);  /* w == b for a word of unknown static kind */
 /* The three-way sibling, for `b'a' < b'b'` and for a bytes ELEMENT of an
  * ordered container. A prefix orders first. */
 int        mojo_bytes_cmp(MojoBytes *a, MojoBytes *b);
@@ -1671,6 +1678,7 @@ void        mojo_raise_value_error(char *detail);
 void        mojo_frame_clear(int64_t w);
 int64_t     mojo_frame_get_attr(int64_t w, int64_t id);
 void        mojo_frame_set_attr(int64_t w, int64_t id, int64_t v);
+void        mojo_frame_del_attr(int64_t w, int64_t id);
 void        mojo_exc_value_set(int64_t w);
 int64_t     mojo_exc_value_get(void);
 void        mojo_frame_set_resuming(int64_t gen);
@@ -2457,7 +2465,9 @@ MojoList *int64_t_path_splitdrive(char *path);         /* os.path.splitdrive(pat
 MojoList *int64_t_path_splitroot(char *path);          /* os.path.splitroot(path) -> [drive, root, tail] */
 MojoList *mojo_os_walk(char *top);                      /* os.walk(top) -> list[(str, list, list)] */
 int64_t   mojo_os_walk_w(int64_t top);                  /* the same, as a callable VALUE (int64_t ABI) */
-int64_t   mojo_os_path_join_w(int64_t a, int64_t b);  /* os.path.<fn> as callable VALUES (int64_t ABI) */
+int64_t   mojo_os_path_join_w(int64_t a, int64_t b);  /* os.path.<fn> as callable VALUES (int64_t ABI); bytes-aware (see the .c) */
+MojoList *mojo_os_path_split_w(int64_t p);            /* os.path.split(p) -> [head, tail]; bytes-aware: a bytes p gives bytes parts */
+MojoList *mojo_os_path_splitext_w(int64_t p);         /* os.path.splitext(p) -> [root, ext] for a BYTES p (bytes parts) */
 int64_t   mojo_os_path_islink_w(int64_t p);
 int64_t   mojo_os_path_isdir_w(int64_t p);
 int64_t   mojo_os_path_isfile_w(int64_t p);
@@ -2468,8 +2478,10 @@ int64_t   mojo_word_slice_step(int64_t w, int has_start, int64_t start, int has_
 MojoList *mojo_list_slice_word(int64_t w, int has_start, int64_t start, int has_stop, int64_t stop, int64_t step);
 MojoList *mojo_fnmatch_filter(MojoList *names, int64_t pat);
 MojoList *mojo_os_scandir(char *top);            /* os.scandir(top): eager list of DirEntry handles */
-char     *mojo_dirent_name(int64_t h);            /* DirEntry.name */
-char     *mojo_dirent_path(int64_t h);            /* DirEntry.path */
+int64_t   mojo_fsencode_w(int64_t w);            /* os.fsencode(str or bytes word) -> bytes word */
+char     *mojo_str_from_word(int64_t w, char *encoding, char *errors);  /* str(x, enc, errors) for a str-or-bytes word */
+int64_t   mojo_dirent_name(int64_t h);            /* DirEntry.name: a str word, or a bytes word for a bytes scandir */
+int64_t   mojo_dirent_path(int64_t h);            /* DirEntry.path: likewise */
 int64_t   mojo_dirent_is_symlink(int64_t h);      /* DirEntry.is_symlink() */
 int64_t   mojo_dirent_is_dir(int64_t h, int64_t follow);   /* DirEntry.is_dir(follow_symlinks=) */
 int64_t   mojo_dirent_is_file(int64_t h, int64_t follow);  /* DirEntry.is_file(follow_symlinks=) */

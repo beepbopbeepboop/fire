@@ -488,7 +488,7 @@ def module_qualifier(q) -> str:
     return q.lstrip('.').replace('.', '_').replace('-', '_')
 
 
-def _collect_import_modules(modules_to_compile: dict, node_list):
+def _collect_import_modules(modules_to_compile: dict, node_list: list):
     """Populate `modules_to_compile` with every module named by an import
     anywhere in `node_list` — top level and nested inside function bodies,
     if/try/loop blocks. Deliberately a module-level function taking the
@@ -510,7 +510,7 @@ def _collect_import_modules(modules_to_compile: dict, node_list):
     index) -> SIGBUS, wildly out of bounds. The annotation pins the ctype."""
     _collect_import_modules_rec(modules_to_compile, node_list, 0)
 
-def _collect_import_modules_rec(modules_to_compile: dict, node_list, _depth: int):
+def _collect_import_modules_rec(modules_to_compile: dict, node_list: list, _depth: int):
     # Depth cap: on the self-hosted path a mis-lowered `isinstance(stmt,
     # (WhileStmt, ForStmt, TryStmt))` tuple-isinstance or an aliased `.body`
     # can make this recurse without bound (observed as a multi-GB memory
@@ -917,7 +917,7 @@ def _register_sym(self, s, sym_name: str, orig_name: str, sym_info,
             self._imported_home_param_types[_pair_key(_qual, _sk)] = list(_pts_snap)
         self._note_own_func_home(_sk, _qual)
 
-def _gmi_prefold_toplevel_comptime(self, _node_list):
+def _gmi_prefold_toplevel_comptime(self, _node_list: list):
     """Hoisted out of `gen_module_impl` (module-level, not a nested,
     RECURSIVE closure) — a real --dump-full fire.py determinism diff
     showed this closure (and several siblings in the same ~8000-line
@@ -944,7 +944,7 @@ def _gmi_prefold_toplevel_comptime(self, _node_list):
             for _h in (_cn.handlers or []):
                 _gmi_prefold_toplevel_comptime(self, getattr(_h, 'body', None) or [])
 
-def _gmi_find_comptime_one(self, _node_list, _target, _out: dict):
+def _gmi_find_comptime_one(self, _node_list: list, _target, _out: dict):
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
     comptime`'s docstring. This one had DEFAULT PARAMETERS bound to
     captured values (`_target=_iname, _out=_found`) — exactly the shape
@@ -1477,7 +1477,7 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict,
     # AFTER the descent, so the cache holds the full answer for this body.
     _SELF_ASSIGN_MEMO[_key] = (_updates, _bool_hits, _dv_hits, _et_hits)
 
-def _gmi_scan_import_modules(mod_stmts, all_modules: dict) -> None:
+def _gmi_scan_import_modules(mod_stmts: list, all_modules: dict) -> None:
     """Record every module named by `import m` / `import m as a, m2` /
     `from m import ...` in `mod_stmts` into `all_modules` (a str->bool
     dict). Hoisted out of `gen_module_impl` (see its call site) so the
@@ -1604,7 +1604,7 @@ def _gmi_tuple_target_rows(tgt, value, out: list) -> None:
             _gmi_tuple_target_rows(e, v, out)
 
 
-def _gmi_collect_global_stmts(stmt_list) -> list:
+def _gmi_collect_global_stmts(stmt_list: list) -> list:
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
     comptime`'s docstring. Recursive; pure (no captured state)."""
     result = []
@@ -1668,7 +1668,7 @@ def _gmi_collect_return_values(acc_rt: list, stmts2) -> None:
                 if isinstance(hb, list):
                     _gmi_collect_return_values(acc_rt, hb)
 
-def _gmi_scan_try_imports(self, _phase17_mod, stmt_list):
+def _gmi_scan_try_imports(self, _phase17_mod, stmt_list: list):
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
     comptime`'s docstring."""
     for _s in stmt_list:
@@ -1897,7 +1897,7 @@ def bare_global_read_plan(self, name):
         _global_owner_mod)
 
 
-def _gmi_scan_imported_global_homes(self, stmt_list) -> None:
+def _gmi_scan_imported_global_homes(self, stmt_list: list) -> None:
     """Record every bare name THIS module's own top-level `from b import K`
     binds, together with the module whose `_<mod>_globals` struct declares
     the field, so a later BARE read of that name loads the OWNER's field
@@ -2025,7 +2025,7 @@ def _gmi_scan_imported_global_homes(self, stmt_list) -> None:
             fields[_local] = _iname
 
 
-def _gmi_scan_cpp_nested_imports(self, stmt_list):
+def _gmi_scan_cpp_nested_imports(self, stmt_list: list):
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
     comptime`'s docstring."""
     for _gi in stmt_list:

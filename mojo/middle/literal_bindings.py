@@ -136,7 +136,7 @@ def _add_binders(idx: dict, nd, names) -> None:
             idx[nm] = [nd]
 
 
-def binding_index(stmts) -> dict:
+def binding_index(stmts: list) -> dict:
     """MODULE-WIDE census: name -> list of the nodes anywhere in `stmts`
     (nested functions included) that bind it. One walk."""
     idx: dict = {}
@@ -195,7 +195,7 @@ def scope_index(fd) -> dict:
     return idx
 
 
-def scoped_calls(stmts) -> list:
+def scoped_calls(stmts: list) -> list:
     """Every CallExpr in `stmts` as a list of `(call, enc)` pairs, where
     `enc` is the INNERMOST FunctionDef whose own scope contains the call, or
     None for a call at module scope. A method's calls are attributed to the

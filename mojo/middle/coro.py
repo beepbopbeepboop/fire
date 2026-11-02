@@ -67,7 +67,8 @@ def _cm_as_str(x) -> str:
 from mojo.middle.exprtypes import _is_asyncio_sleep_call, _is_asyncio_sock_recv_call, _walk_ast_invalidate, _gmi_nested_struct_defs
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.exprtypes as gimple_exprtypes
-from mojo.middle.module_shared import module_qualifier
+# module_qualifier imported lazily inside lower() to break import cycle
+# (mojo.middle.coro -> mojo.middle.module_shared -> mojo.middle.funcs_shared -> mojo.middle.coro)
 from mojo.middle.literal_bindings import binding_index, unique_literal_value
 _ENV = 'MOJO_CORO'
 _MODE = 'stackswitch'
@@ -304,6 +305,9 @@ def _list_return_elem_kind(name: str):
                 and v.func.member == 'filter' and isinstance(v.func.obj, N.IdentExpr)
                 and v.func.obj.name == 'fnmatch'):
             k = 'w'
+        elif (isinstance(v, N.CallExpr) and isinstance(v.func, N.IdentExpr)
+                and v.func.name == '_glob1'):
+            k = 'w'
         elif isinstance(v, N.ListExpr) and len(v.elements) == 1:
             k = _yield_kind(v.elements[0], _static_env(fd))
         if k is None:
@@ -391,12 +395,14 @@ _OS_PATH_FN_KINDS = {'join': 'p', 'basename': 'p', 'dirname': 'p',
 
 # `os.path.<fn>` runtime functions whose result is a PAIR of strings for a str
 # argument (`d, b = os.path.split(p)`). Their unpacked elements are str-kinded.
+# For a bytes/word argument the word-kinded runtime (`mojo_os_path_split_w`)
+# returns bytes parts; the elements are words then, not char * strings.
 _OS_PATH_PAIR_FNS = ('split', 'splitext')
 
 
 def _os_path_pair_call(v) -> bool:
     """True when `v` is a direct call to one of `_OS_PATH_PAIR_FNS` through
-    `os.path` / `posixpath` / `path`, i.e. a 2-tuple-of-str result."""
+    `os.path` / `posixpath` / `path`, i.e. a 2-tuple-of-str/bytes result."""
     if not isinstance(v, N.CallExpr):
         return False
     fn = v.func
@@ -467,6 +473,8 @@ def _literal_kind(expr) -> str | None:
     """Kind of a bare literal expression, or ('list', elem_kind) for a list
     display of homogeneous literal elements. None when not a literal."""
     if isinstance(expr, (N.StringLiteral, N.TstringLiteral)):
+        if getattr(expr, 'is_bytes', False):
+            return 'w'
         return 'p'
     if isinstance(expr, N.FloatLiteral):
         return 'd'
@@ -593,10 +601,15 @@ def _static_env(fn: N.FunctionDef, struct_def=None) -> dict:
         # `_iglob`/`_glob2` refusal in Lib/glob.py).
         if (isinstance(n, N.AssignStmt) and isinstance(n.target, N.TupleExpr)
                 and _os_path_pair_call(n.value)):
+            _pair_arg = n.value.args[0] if getattr(n.value, 'args', None) else None
+            _pair_arg_k = _yield_kind(_pair_arg, env) if _pair_arg is not None else None
+            if _pair_arg_k is None and isinstance(_pair_arg, N.IdentExpr):
+                _pair_arg_k = env.get(_pair_arg.name)
+            _pair_k = 'w' if _pair_arg_k == 'w' else 'p'
             for _t in n.target.elements:
                 if isinstance(_t, N.IdentExpr):
-                    str_kinds.setdefault(_t.name, set()).add('p')
-                    env.setdefault(_t.name, 'p')
+                    str_kinds.setdefault(_t.name, set()).add(_pair_k)
+                    env.setdefault(_t.name, _pair_k)
         if tgt is not None:
             k = _ann_kind(ann)
             if k is None:
@@ -871,10 +884,13 @@ def _yield_kind(expr, env: dict | None = None) -> str | None:
             return v[1]
         return None
     # `entry.name` / `entry.path` after the DirEntry lowering
-    # (`cpp_core._cpp_dirent_rewrite`) are these runtime calls: strings.
+    # (`cpp_core._cpp_dirent_rewrite`) are these runtime calls. The runtime
+    # answers a str for a str scandir and a bytes for a bytes scandir (the
+    # path's kind is not known statically: a glob's `dirname` is a parameter),
+    # so the value is a pointer word, like `fsencode`'s.
     if (isinstance(expr, N.CallExpr) and isinstance(expr.func, N.IdentExpr)
             and expr.func.name in ('mojo_dirent_name', 'mojo_dirent_path')):
-        return 'p'
+        return 'w'
     if (isinstance(expr, N.CallExpr) and isinstance(expr.func, N.IdentExpr)
             and expr.func.name in ('mojo_bytes_from_cstr', 'mojo_bytes_from_str')):
         return 'w'          # bytes: a pointer word
@@ -882,10 +898,27 @@ def _yield_kind(expr, env: dict | None = None) -> str | None:
     _opk = _os_path_call_kind(expr)
     if _opk is not None:
         return _opk
+    # os.path.split/join via word runtime when args are words
+    if (isinstance(expr, N.CallExpr) and isinstance(expr.func, N.MemberExpr)
+            and expr.func.member == 'split' and isinstance(expr.args, (list, tuple)) and len(expr.args) == 1):
+        _pk = _yield_kind(expr.args[0], env)
+        if _pk == 'w':
+            return ('list', 'w')
+        if env and isinstance(expr.args[0], N.IdentExpr) and env.get(expr.args[0].name) == 'w':
+            return ('list', 'w')
+    if (isinstance(expr, N.CallExpr) and isinstance(expr.func, N.MemberExpr)
+            and expr.func.member == 'join'):
+        for _ja in getattr(expr, 'args', []) or []:
+            _jk = _yield_kind(_ja, env)
+            if _jk == 'w':
+                return 'w'
+        for _ja in getattr(expr, 'args', []) or []:
+            if isinstance(_ja, N.IdentExpr) and env and env.get(_ja.name) == 'w':
+                return 'w'
     if (isinstance(expr, N.MemberExpr) and isinstance(expr.obj, N.IdentExpr)
             and expr.member in ('name', 'path')
             and env.get(expr.obj.name) == ('dirent',)):
-        return 'p'
+        return 'w'          # a str or a bytes word, as the runtime call is (see above)
     if isinstance(expr, N.MemberExpr) and isinstance(expr.obj, N.IdentExpr) \
             and expr.obj.name == 'self':
         return env.get(f'self.{expr.member}')
@@ -945,6 +978,8 @@ def _yield_kind(expr, env: dict | None = None) -> str | None:
         tk, ek = _yield_kind(expr.then_val, env), _yield_kind(expr.else_val, env)
         if tk == ek:
             return tk
+        if 'w' in (tk, ek):
+            return 'w'
         if 'p' in (tk, ek):
             return 'p'
         if 'd' in (tk, ek):
@@ -1323,8 +1358,7 @@ class _ParamFlow:
 
 
 def _ca_binding_names(node) -> set:
-    from mojo.backend_gimple import cpp_async as _ca
-    return _ca._binding_node_names(node)
+    return gimple_exprtypes._binding_node_names(node)
 
 
 def _tagged_consumers_ok(name: str, module_stmts=None) -> bool:
@@ -1944,7 +1978,7 @@ _STR_EVIDENCE_METHODS = ('startswith', 'endswith', 'strip', 'lstrip', 'rstrip', 
                          'decode', 'join')
 
 
-def _compute_pointer_evidence(stmts) -> None:
+def _compute_pointer_evidence(stmts: list) -> None:
     """For every same-module function (generator or plain): the unannotated
     parameters its body uses as a PATH / SEQUENCE WORD -- sliced, tested
     `isinstance(p, str|bytes)`, a str-method receiver, passed to `os.scandir` /
@@ -2029,7 +2063,7 @@ def _compute_pointer_evidence(stmts) -> None:
         fd._ptr_forwarded = frozenset(_PTR_FORWARDED.get(nm, ()))
 
 
-def _index_generator_defs(stmts) -> None:
+def _index_generator_defs(stmts: list) -> None:
     """Refill `_GEN_DEFS` with this module's top-level generator defs. A pure
     function of `stmts`: it touches no kind memo and no ret-kind table, so it
     is safe on BOTH backends. The cpp escape hatch runs it too (see `lower`),
@@ -2042,7 +2076,7 @@ def _index_generator_defs(stmts) -> None:
             _GEN_DEFS[s.name] = s
 
 
-def _populate_gen_rec_assume(stmts) -> None:
+def _populate_gen_rec_assume(stmts: list) -> None:
     _GEN_REC_ASSUME.clear()
     for name, fd in list(_GEN_DEFS.items()):
         targets = set()
@@ -2065,7 +2099,7 @@ def _populate_gen_rec_assume(stmts) -> None:
             _GEN_REC_ASSUME[name] = 'w'
 
 
-def _register_generator_defs(stmts) -> None:
+def _register_generator_defs(stmts: list) -> None:
     """Register this module's top-level generator defs, and drop the
     previous module's kind answers.
 
@@ -2190,7 +2224,7 @@ def _sibling_gen_kind(iterable, fn: N.FunctionDef = None):
     return k if k in _SCALAR_GEN_KINDS else None
 
 
-def _register_generator_value_kinds(stmts) -> None:
+def _register_generator_value_kinds(stmts: list) -> None:
     """Resolve the value kind of every module-level generator in this
     module through `_GEN_DEFS` (registered by `_register_generator_defs`),
     memoizing into `_GEN_VALUE_KINDS` for `_generator_value_kind` to
@@ -2453,7 +2487,7 @@ def _note_async_kind(table: dict, name: str, kind) -> None:
         table[name] = kind
 
 
-def _register_async_result_kinds(stmts, closure_stmts=()) -> None:
+def _register_async_result_kinds(stmts: list, closure_stmts: list = ()) -> None:
     """Fill `_ASYNC_RESULT_KIND` and `_ASYNC_HANDLE_KIND` for this module (see
     their comments), and also for any imported modules in the closure so
     awaited handles whose origin is not in this module resolve the right
@@ -3022,7 +3056,7 @@ def _is_standard_await_generator(m) -> bool:
     return False
 
 
-def _detect_native_future_classes(stmts) -> None:
+def _detect_native_future_classes(stmts: list) -> None:
     _NATIVE_FUTURE_CLASSES.clear()
     for s in stmts:
         if isinstance(s, N.StructDef) and any(
@@ -3030,7 +3064,7 @@ def _detect_native_future_classes(stmts) -> None:
             _NATIVE_FUTURE_CLASSES.add(s.name)
 
 
-def _rewrite_native_future_refs(stmts) -> list:
+def _rewrite_native_future_refs(stmts: list) -> list:
     """In-place: drop native-future StructDefs, rewrite `: <Cls>`
     annotations to `Int`, rewrite `<Cls>(...)` construction to
     `create_future()`."""
@@ -5031,7 +5065,7 @@ def _dotted_name(expr) -> str | None:
     return None
 
 
-def _module_literal_env(stmts) -> dict:
+def _module_literal_env(stmts: list) -> dict:
     """name -> literal kind for every module-level name whose ONE binder in the
     module is a literal, as the caller env of a module-level call.
 
@@ -5101,7 +5135,7 @@ def _argkind(expr, caller_env: dict | None = None) -> str | tuple | None:
     return _yield_kind(expr, caller_env)
 
 
-def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
+def _scan_callsite_param_kinds(stmts: list, closure_stmts: list = (),
                                module_name: str | None = None) -> None:
     """Populate `_CALLSITE_PARAM_KINDS` (generators / async defs),
     `_CALLSITE_PARAM_CONFLICTS` (the same, minus the resolvable cases) and
@@ -5572,7 +5606,7 @@ def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
 _VALUE_USED_FUNCS: set = set()
 
 
-def _scan_value_used_functions(stmts) -> None:
+def _scan_value_used_functions(stmts: list) -> None:
     _VALUE_USED_FUNCS.clear()
     fn_names = {s.name for s in stmts if isinstance(s, N.FunctionDef)}
     if not fn_names:
@@ -5898,7 +5932,7 @@ def _lower_escaping_generators(stmts: list) -> None:
         for _pn, _pa in outer.params:
             _bound.add(_pn)
         for _bn in gimple_exprtypes._walk_own_body(outer.body):
-            _bound |= _ca._binding_node_names(_bn)
+            _bound |= gimple_exprtypes._binding_node_names(_bn)
         sibling_defs = {}
         for _d in outer.body:
             if isinstance(_d, N.FunctionDef):
@@ -5993,7 +6027,7 @@ def _lower_escaping_generators(stmts: list) -> None:
             after = outer.body[c['ix'] + 1:]
             rebound = False
             for cn in caps:
-                if any(cn in _ca._binding_node_names(n) for n in gimple_exprtypes._walk_ast(after)):
+                if any(cn in gimple_exprtypes._binding_node_names(n) for n in gimple_exprtypes._walk_ast(after)):
                     rebound = True
             if not caps or rebound:
                 del cand[nm]
@@ -6236,7 +6270,7 @@ def _lift_capture_free_nested_scopes(stmts: list) -> None:
         stmts.extend(lifted)
 
 
-def lower(stmts: list, closure_stmts=(),
+def lower(stmts: list, closure_stmts: list = (),
           module_name: str | None = None) -> tuple[list, list]:
     """Returns (new_stmts, coro_meta). coro_meta entries are dicts:
         {'name', 'base', 'params' (list of C types), 'value_ctype',
@@ -6257,6 +6291,7 @@ def lower(stmts: list, closure_stmts=(),
     # `module_qualifier` strips leading dots per-compile via the gen instance
     # normally, here straight from the literal module_name arg.
     global _MODULE_QUALIFIER
+    from mojo.middle.module_shared import module_qualifier
     _MODULE_QUALIFIER = module_qualifier(module_name or '')
     _PARAM_NAMES.clear()
     _ASYNC_METHOD_NAMES.clear()

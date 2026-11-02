@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from mojo.middle.types import _C_RESERVED_FUNCS, _FORCE_RENAME_RESERVED, _split_top_level_commas, _used_idents_node, _CPP_CALLABLE_CTYPE, _CPP_CALLABLE_CTYPE_1ARG, _CPP_CALLABLE_CTYPE_STARARGS, _CPP_CALLABLE_CTYPE_KWARGS, _CPP_CALLABLE_CTYPE_STAR_KW, _FLOAT_TYPES, _SIGNED_INT_TRUE_DIV_TYPES
 import dataclasses
-from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _as_set, _signed_int64, ForStmt, IfStmt, MatchStmt, StructDef, AssignStmt
+from fire_compiler import for_target_names, AugAssignStmt, MultiAssignStmt, WalrusExpr, VarDecl, WithStmt, TryStmt, IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _as_set, _signed_int64, ForStmt, IfStmt, MatchStmt, StructDef, AssignStmt
 _WALK_FIELD_NAMES_CACHE: dict[type, tuple] = {}
 # Whether a node's CLASS is a dataclass, cached beside the field names for
 # the same reason and on the same key. `dataclasses.is_dataclass` is a pure
@@ -410,7 +410,7 @@ def _generator_quick_eligible(fn: FunctionDef) -> bool:
         return False
     return True
 
-def _trailing_default_at(dflts, n_params: int, pos: int):
+def _trailing_default_at(dflts: list, n_params: int, pos: int):
     """Default-arg AST node for call slot `pos` out of `n_params` total
     params, given `dflts` = [(param_name, default_ast), ...] covering ONLY
     the params that HAVE a default (`FunctionDef.param_defaults`'s shape).
@@ -1006,9 +1006,11 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
             return 'double'
         return 'int64_t'
     if isinstance(e, CallExpr) and isinstance(e.func, IdentExpr):
-        if e.func.name in ('str', 'String', 'repr', 'os.path.join', 'os.path.basename', 'os.path.dirname', 'os.path.splitext', 'mojo_dirent_name', 'mojo_dirent_path'):
+        if e.func.name in ('str', 'String', 'repr', 'os.path.join', 'os.path.basename', 'os.path.dirname', 'os.path.splitext'):
             return 'char *'
-        if e.func.name in ('len', 'ord'):
+        if e.func.name in ('len', 'ord', 'mojo_dirent_name', 'mojo_dirent_path', 'mojo_fsencode_w'):
+            # DirEntry.name/.path and os.fsencode: a pointer WORD (a str or a
+            # bytes, by the value's kind at run time) -- the runtime's int64_t
             return 'int64_t'
         if e.func.name in ('mojo_os_scandir', 'mojo_list_slice_word'):
             return 'MojoList *'
@@ -2114,3 +2116,59 @@ def _gmi_nested_struct_defs(body, enclosing, out: list, top: bool = False,
         for _slot in _NESTED_CLASS_BODY_SLOTS:
             _gmi_nested_struct_defs(
                 getattr(_nc, _slot, None), enclosing, out, False, params)
+
+
+def _hbn_add_target(bound: set, t) -> None:
+    """Hoisted out of `_helper_bound_names` (was a recursive nested
+    closure) — the lifted-closure-env determinism fix. `bound` (set)
+    threaded and annotated.
+
+    Bound NAMES, not slots, so this is `for_target_names` (the shared leaf
+    walk) with the `*` stripped — the same shape
+    `mojo/middle/boundnames.py::_lbn_target_names` needs, and the same
+    reason: the previous private copy did a bare `s[1:-1].split(',')`, which
+    tore a nested target into paren-carrying fragments and — because it
+    recursed on the paren branch only — could not tell `'(a)'` from a
+    1-tuple `'(a,)'`."""
+    if isinstance(t, str):
+        for name in for_target_names(t):
+            if name:
+                bound.add(name.lstrip('*').strip())
+        return
+    if isinstance(t, IdentExpr):
+        bound.add(t.name)
+        return
+    if isinstance(t, (TupleExpr, ListExpr)):
+        for e in t.elements:
+            _hbn_add_target(bound, e)
+
+
+def _binding_node_names(n) -> set:
+    """Names that ONE node of a helper's own body binds (see
+    `_helper_bound_names` for the full list of binding forms). Per-node so
+    a caller can count binding SITES, not just the set of names."""
+    bound: set = set()
+    if isinstance(n, AssignStmt):
+        _hbn_add_target(bound, n.target)
+    elif isinstance(n, AugAssignStmt):
+        _hbn_add_target(bound, n.target)
+    elif isinstance(n, MultiAssignStmt):
+        for t in (n.targets or []):
+            _hbn_add_target(bound, t)
+    elif isinstance(n, WalrusExpr):
+        bound.add(n.name)
+    elif isinstance(n, ForStmt):
+        _hbn_add_target(bound, n.target)
+    elif isinstance(n, VarDecl):
+        bound.add(n.name)
+    elif isinstance(n, WithStmt):
+        for it in n.items:
+            if isinstance(it.alias, str):
+                bound.add(it.alias)
+            elif isinstance(it.alias, IdentExpr):
+                bound.add(it.alias.name)
+    elif isinstance(n, TryStmt):
+        for h in (n.handlers or []):
+            if getattr(h, 'name', None):
+                bound.add(h.name)
+    return bound

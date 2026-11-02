@@ -319,6 +319,28 @@ def _cpp_except_handler_body(gen, handler, caught_var: str, declared: dict,
 _Y_SITE = re.compile(r'^(.*?)co_yield /\*Y:([^*]*)\*/ \((.*)\);$')
 
 
+def _cpp_word_of_kind(ctype: str, expr: str) -> str:
+    """`expr` (of scalar C++ type `ctype`) as ONE tagged int64_t word, the form
+    every consumer renders by the kind the box carries: a double as
+    `mojo_box_from_double`, a bool as `mojo_box_from_bool`, a string as
+    `mojo_box_from_str`, None as `mojo_box_none()`, and an int as itself. The
+    single mapping both a tagged yield slot (`_cpp_tag_yield_sites`) and a
+    tagged operand of `and`/`or` (`cpp_core._cpp_tagged_operand_word`) use."""
+    if ctype == 'None':
+        return "mojo_box_none()"
+    if ctype == 'double':
+        return f"mojo_box_from_double((double)({expr}))"
+    if ctype == '_Bool':
+        return f"mojo_box_from_bool((int64_t)({expr}))"
+    if ctype == 'char *':
+        # boxed by kind like the others: a raw pointer is only read as a
+        # string when the runtime registered it (a C++ literal is not)
+        return f"mojo_box_from_str((char *)({expr}))"
+    if ctype == 'MojoBytes *':
+        return f"(int64_t)(intptr_t)({expr})"
+    return f"(int64_t)({expr})"
+
+
 def _cpp_tag_yield_sites(body_lines: list):
     """The body lines with every `co_yield /*Y:<ctype>*/ (<expr>);` site boxed
     into one int64_t word by its marked ctype (a double as `mojo_box_from_double`,
@@ -347,21 +369,7 @@ def _cpp_tag_yield_sites(body_lines: list):
         kinds.add(ct)
         indent = ln[:len(ln) - len(ln.lstrip())]
         expr = m.group(3)
-        if ct == 'None':
-            # the None box: renders `None` wherever a tagged word is printed
-            w = "mojo_box_none()"
-        elif ct == 'double':
-            w = f"mojo_box_from_double((double)({expr}))"
-        elif ct == '_Bool':
-            w = f"mojo_box_from_bool((int64_t)({expr}))"
-        elif ct == 'char *':
-            # boxed by kind like the others: a raw pointer is only read as a
-            # string when the runtime registered it (a C++ literal is not)
-            w = f"mojo_box_from_str((char *)({expr}))"
-        elif ct == 'MojoBytes *':
-            w = f"(int64_t)(intptr_t)({expr})"
-        else:
-            w = f"(int64_t)({expr})"
+        w = _cpp_word_of_kind(ct, expr)
         out.append(f"{indent}{prefix}co_yield {w};")
     if kinds == {'None'}:
         return out
@@ -1593,62 +1601,6 @@ _HELPER_FREE_BUILTINS = frozenset({
 })
 
 
-def _hbn_add_target(bound: set, t) -> None:
-    """Hoisted out of `_helper_bound_names` (was a recursive nested
-    closure) — the lifted-closure-env determinism fix. `bound` (set)
-    threaded and annotated.
-
-    Bound NAMES, not slots, so this is `for_target_names` (the shared leaf
-    walk) with the `*` stripped — the same shape
-    `mojo/middle/boundnames.py::_lbn_target_names` needs, and the same
-    reason: the previous private copy did a bare `s[1:-1].split(',')`, which
-    tore a nested target into paren-carrying fragments and — because it
-    recursed on the paren branch only — could not tell `'(a)'` from a
-    1-tuple `'(a,)'`."""
-    if isinstance(t, str):
-        for name in for_target_names(t):
-            if name:
-                bound.add(name.lstrip('*').strip())
-        return
-    if isinstance(t, gimple_ctypes.IdentExpr):
-        bound.add(t.name)
-        return
-    if isinstance(t, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
-        for e in t.elements:
-            _hbn_add_target(bound, e)
-
-
-def _binding_node_names(n) -> set:
-    """Names that ONE node of a helper's own body binds (see
-    `_helper_bound_names` for the full list of binding forms). Per-node so
-    a caller can count binding SITES, not just the set of names."""
-    bound: set = set()
-    if isinstance(n, gimple_ctypes.AssignStmt):
-        _hbn_add_target(bound, n.target)
-    elif isinstance(n, gimple_ctypes.AugAssignStmt):
-        _hbn_add_target(bound, n.target)
-    elif isinstance(n, gimple_ctypes.MultiAssignStmt):
-        for t in (n.targets or []):
-            _hbn_add_target(bound, t)
-    elif isinstance(n, gimple_ctypes.WalrusExpr):
-        bound.add(n.name)
-    elif isinstance(n, gimple_ctypes.ForStmt):
-        _hbn_add_target(bound, n.target)
-    elif isinstance(n, gimple_ctypes.VarDecl):
-        bound.add(n.name)
-    elif isinstance(n, gimple_ctypes.WithStmt):
-        for it in n.items:
-            if isinstance(it.alias, str):
-                bound.add(it.alias)
-            elif isinstance(it.alias, gimple_ctypes.IdentExpr):
-                bound.add(it.alias.name)
-    elif isinstance(n, gimple_ctypes.TryStmt):
-        for h in (n.handlers or []):
-            if getattr(h, 'name', None):
-                bound.add(h.name)
-    return bound
-
-
 def _helper_bound_names(body: list) -> set:
     """Names locally bound anywhere in `body` (a nested helper's own body,
     not crossing into deeper `def`s) — assignment / augmented-assignment /
@@ -1657,7 +1609,7 @@ def _helper_bound_names(body: list) -> set:
     captures."""
     bound: set = set()
     for n in gimple_exprtypes._walk_own_body(body):
-        bound |= _binding_node_names(n)
+        bound |= gimple_exprtypes._binding_node_names(n)
     return bound
 
 
@@ -1666,7 +1618,7 @@ def _binding_site_count(body: list, name: str) -> int:
     bind `name`. A parameter must have none, a local exactly its one `var`
     declaration; anything else is a rebinding."""
     return sum(1 for n in gimple_exprtypes._walk_own_body(body)
-               if name in _binding_node_names(n))
+               if name in gimple_exprtypes._binding_node_names(n))
 
 
 _FSTRING_FIELD_RE = re.compile(r"\{([^{}]*)\}")
@@ -1674,7 +1626,7 @@ _FSTRING_QUOTED_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
 _FSTRING_NAME_RE = re.compile(r"(?<![\w.])([A-Za-z_]\w*)")
 
 
-def _fstring_field_names(node_list) -> set[str]:
+def _fstring_field_names(node_list: list) -> set[str]:
     """Identifiers an f-string in `node_list` reads from its `{...}` fields.
 
     The parser keeps an f-string as one raw `StringLiteral` (see
@@ -1694,7 +1646,7 @@ def _fstring_field_names(node_list) -> set[str]:
     return out
 
 
-def _nested_generator_captures(stmts) -> dict[int, list[str]]:
+def _nested_generator_captures(stmts: list) -> dict[int, list[str]]:
     """Map `id(g)` -> the sorted enclosing-scope names a NESTED generator
     `g` reads, for every generator `g` that is defined inside another `def`
     in `stmts` and reads a parameter or local of that enclosing `def`.
@@ -1856,7 +1808,7 @@ def _compile_nested_generator_closures(gen, outer_fn: gimple_ctypes.FunctionDef,
         generator_fns.pop(id(inner), None)
 
 
-def _nested_generator_sibling_defs(stmts) -> dict[int, list]:
+def _nested_generator_sibling_defs(stmts: list) -> dict[int, list]:
     """Map `id(g)` -> the `def`s that sit beside a NESTED generator `g` in
     the enclosing `def`'s own body (`g`'s siblings, excluding `g` itself),
     for every generator `g` defined inside another `def` in `stmts`.

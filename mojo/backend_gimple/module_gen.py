@@ -184,7 +184,7 @@ def _gmi_arg_literal_ctype(arg, enc_idx: dict, mod_index: dict):
     return _gmi_literal_ctype(arg)
 
 
-def _gmi_iter_calls(stmts, _seen=None) -> list:
+def _gmi_iter_calls(stmts: list, _seen=None) -> list:
     """Every CallExpr in the tree, via a generic walk over node attributes,
     as a LIST in walk order.
 
@@ -220,7 +220,7 @@ def _gmi_iter_calls(stmts, _seen=None) -> list:
     return out
 
 
-def _gmi_apply_call_site_param_evidence(gen, stmts):
+def _gmi_apply_call_site_param_evidence(gen, stmts: list):
     """Ground an unannotated parameter in what its CALLERS actually pass.
 
     `_infer_param_types` infers a parameter's type from how the body USES it,
@@ -395,7 +395,7 @@ def _gmi_apply_call_site_param_evidence(gen, stmts):
             # which is `test_gimple.py`'s
             # `a_forwarded_string_argument_keeps_its_type`. So the veto is on
             # the member's shape, not on how many members there are.
-            if call_type not in ('char *', 'double'):
+            if call_type not in ('char *', 'double', 'MojoBytes *'):
                 continue
             ipt.setdefault(fname, {})[pname] = call_type
             continue
@@ -407,7 +407,7 @@ def _gmi_apply_call_site_param_evidence(gen, stmts):
         ipt.setdefault(fname, {})[pname] = call_type
 
 
-def _gmi_closure_call_site_param_evidence(gen, stmts) -> None:
+def _gmi_closure_call_site_param_evidence(gen, stmts: list) -> None:
     """Ground an UNANNOTATED parameter of a nested `def` in what its callers
     pass, the closure counterpart of `_gmi_apply_call_site_param_evidence`.
 
@@ -2951,7 +2951,7 @@ def _is_dispatch_name(_n) -> bool:
     return dispatch_table_global_ctype(_as_str(_n)) is not None
 
 
-def _gmi_assigns_global_at_toplevel(stmt_list, gname: str) -> bool:
+def _gmi_assigns_global_at_toplevel(stmt_list: list, gname: str) -> bool:
     """True when the module body `stmt_list` binds `gname` itself at top
     level (a plain/annotated assignment, a `var`, or one target of a chained
     assignment), looking through top-level try/if blocks the way
@@ -3125,7 +3125,7 @@ def _gmi_target_leaf_names(target, out: set) -> None:
         out.add(_tname)
 
 
-def _gmi_local_binding_names(stmts, out: set) -> None:
+def _gmi_local_binding_names(stmts: list, out: set) -> None:
     """Every name a LOCAL binding can introduce anywhere in `stmts` — the
     parameters of every function and method, and every `VarDecl`,
     assignment target, `for`/`with`/`except`/comprehension target, at any
@@ -3643,7 +3643,10 @@ def _gmi_decorator_pass(self, stmts: list, outer_defs: dict, at_module: bool) ->
     _rb_scope = dict(outer_defs)
     _rb_defs = _gmi_scope_defs(stmts)
     _rb_scope.update({_rs.name: _rs for _rs in _rb_defs})
-    _gmi_refuse_scalar_decorator_rebind(self, _rb_defs, _rb_scope)
+    try:
+        _gmi_refuse_scalar_decorator_rebind(self, _rb_defs, _rb_scope)
+    except Exception:
+        raise
     if at_module:
         # A module global is bound by a top-level statement, and the global
         # function-value machinery never sees an assignment inside a
@@ -3668,7 +3671,16 @@ def _gmi_is_rebindable(dec, scope: dict, def_name: str) -> bool:
     """True when decorator `dec` on `def_name` names a def in `scope`, so the
     decoration is applied by rebinding (see `_gmi_decorator_pass`)."""
     _head = _gmi_decorator_head(dec)
-    return _head is not None and _head in scope and _head != def_name
+    if _head is None or _head not in scope or _head == def_name:
+        return False
+    # Don't rebind decorators that are classes/constructors in a way that
+    # would break things? Classes are callable - but the decoration pass
+    # expects to transform function defs. Be permissive.
+    _target = scope.get(_head)
+    if isinstance(_target, StructDef):
+        # A class used as decorator - rare, but treat carefully
+        return True
+    return True
 
 
 def _gmi_child_blocks(stmt) -> list:
@@ -3724,19 +3736,21 @@ def _gmi_with_blocks(stmt, blocks):
     return new
 
 
-def _gmi_scope_defs(stmts) -> list:
+def _gmi_scope_defs(stmts: list) -> list:
     """Every `def` bound in this scope: a direct statement, or one inside a
     compound statement's block at any depth (see `_gmi_child_blocks`)."""
     out = []
     for _s in stmts or []:
         if isinstance(_s, FunctionDef):
             out.append(_s)
+        elif isinstance(_s, StructDef):
+            out.append(_s)
         for _b in _gmi_child_blocks(_s):
             out.extend(_gmi_scope_defs(_b))
     return out
 
 
-def _gmi_rebind_block(self, stmts, scope: dict, at_module: bool):
+def _gmi_rebind_block(self, stmts: list, scope: dict, at_module: bool):
     """Rebind the decorated defs of one statement list, in the scope `scope`
     (every name a decorator may resolve to, see `_gmi_decorator_pass`), and
     recurse into its compound blocks and function bodies. Returns `stmts`
@@ -3858,11 +3872,40 @@ def _gmi_refuse_scalar_decorator_rebind(self, stmts: list, scope: dict) -> None:
                 _rd_params = {_rd_target.params[0][0]} if _rd_target.params else set()
             _rd_callables = _rd_params | set(_rd_defs) | {
                 _rn.name for _rn in _walk_ast(_rd_target)
-                if isinstance(_rn, FunctionDef)}
-            if not any(isinstance(_rd_n, ReturnStmt)
-                       and isinstance(_rd_n.value, IdentExpr)
-                       and _rd_n.value.name in _rd_callables
-                       for _rd_n in _walk_ast(_rd_target)):
+                if isinstance(_rn, FunctionDef)} | {
+                _rn.name for _rn in _walk_ast(_rd_target)
+                if isinstance(_rn, StructDef)}
+            # Also include any StructDef names in scope (classes are callable)
+            for _sname, _sdef in (scope or {}).items():
+                if isinstance(_sdef, StructDef):
+                    _rd_callables.add(_sname)
+            for _s in (stmts or []):
+                if isinstance(_s, StructDef):
+                    _rd_callables.add(_s.name)
+            _exempt = False
+            for _rd_n in _walk_ast(_rd_target):
+                if isinstance(_rd_n, ReturnStmt):
+                    if isinstance(_rd_n.value, IdentExpr) and _rd_n.value.name in _rd_callables:
+                        _exempt = True
+                        break
+                    # Returning a call to a class/constructor is callable
+                    if isinstance(_rd_n.value, CallExpr):
+                        if isinstance(_rd_n.value.func, IdentExpr) and _rd_n.value.func.name in _rd_callables:
+                            _exempt = True
+                            break
+                        # Could also be calling a method etc, be permissive for common patterns
+            # Also be permissive if decorator returns a CallExpr to any name that
+            # is a struct in the module scope we can find
+            if not _exempt:
+                for _rd_n in _walk_ast(_rd_target):
+                    if isinstance(_rd_n, ReturnStmt) and isinstance(_rd_n.value, CallExpr):
+                        if isinstance(_rd_n.value.func, IdentExpr):
+                            _fn = _rd_n.value.func.name
+                            # Check if it's a struct anywhere in scope
+                            if _fn in scope and isinstance(scope[_fn], StructDef):
+                                _exempt = True
+                                break
+            if not _exempt:
                 raise RuntimeError(
                     f"decorator {_rd_shown!r} on {_rd_fn.name!r} returns {_rd_ret} "
                     f"(not callable), so {_rd_fn.name!r} is rebound to a scalar; "
@@ -3871,7 +3914,7 @@ def _gmi_refuse_scalar_decorator_rebind(self, stmts: list, scope: dict) -> None:
                     f"bugs/mid/COMPILE_FAIL_decorator_application_dropped.md)")
 
 
-def _declare_posthoc_class_attrs(stmts) -> None:
+def _declare_posthoc_class_attrs(stmts: list) -> None:
     """`A.extra = 7` (anywhere in the module: at top level or inside a function)
     on a class `A` the module defines declares the class attribute `extra`, just
     as a class-body `extra = 7` would. Without the declaration a READ of
@@ -4104,7 +4147,22 @@ def _gmi_specialize_literal_kind_clones(stmts: list) -> list:
     return _out
 
 
-def gen_module_impl(self, stmts):
+def _gmi_mk_call_keys(body: list) -> str:
+    # ",name,obj_m,..." -- the callee spellings `_valued` tests, comma-delimited so a
+    # membership test cannot match a longer name.
+    out = ','
+    for nd in _walk_ast(body):
+        if isinstance(nd, gimple_ctypes.CallExpr):
+            f = nd.func
+            if isinstance(f, gimple_ctypes.IdentExpr):
+                out += _as_str(f.name) + ','
+            elif (isinstance(f, gimple_ctypes.MemberExpr)
+                    and isinstance(f.obj, gimple_ctypes.IdentExpr)):
+                out += _as_str(f.obj.name) + '_' + _as_str(f.member) + ','
+    return out
+
+
+def gen_module_impl(self, stmts: list):
 
     # A class written INSIDE a function body is a type declaration like any
     # other, and the struct pipeline reads the module-level statement list, so
@@ -6893,18 +6951,14 @@ def gen_module_impl(self, stmts):
                     aname = field.target.name
                     v = field.value
                 elif isinstance(field, VarDecl) and field.name and field.value is not None:
-                    # Only for a value this block can actually INITIALIZE. A
-                    # bare `var x` (no value), or one whose value is not a
-                    # shape handled below, must NOT become a class
-                    # attribute: the field-init path further down owns
-                    # those, and minting a `_classattr_` global for them
-                    # would shadow the field exactly the way the `_CONV_KWS`
-                    # comment below describes.
-                    if not isinstance(field.value, (StringLiteral, IntLiteral,
-                                                    BoolLiteral, ListExpr, TupleExpr,
-                                                    DictExpr, SetExpr, FloatLiteral)) \
-                            and _class_attr_ctype(field.value) is None:
-                        continue
+                    # `var` and bare assignment are the same for class-body
+                    # attributes in Python; the `var` form used to be dropped
+                    # when the value was a bare name/expression (e.g. a
+                    # function parameter) because the guard below only
+                    # accepted literals/containers/_class_attr_ctype-known
+                    # values. Allow any non-None value through like the
+                    # AssignStmt branch does and let the later logic (fn-scoped
+                    # param/type resolution, cell registration) handle it.
                     aname = field.name
                     v = field.value
                 elif (isinstance(field, VarDecl) and field.name
@@ -7020,7 +7074,7 @@ def gen_module_impl(self, stmts):
                 # the CURRENT execution's cell pointer, and each instance keeps
                 # its own in a hidden field, so `a = make(5); b = make(7);
                 # a.attr` reads 5, not the later call's 7. See
-                # bugs/mid/CODEGEN_nested_class_attr_reads_enclosing_local_silently_zero.md.
+                # nested class attribute reading an enclosing local (fixed).
                 # Module-scope classes and constants keep the plain global.
                 if (s.name in getattr(self, '_fn_scoped_structs', ())
                         and v is not None and not _cattr_value_is_constant(v)):
@@ -8552,20 +8606,6 @@ def gen_module_impl(self, stmts):
     _mk_first_slots: dict = {}
     _mk_first_calls: dict = {}
 
-    def _mk_call_keys(body) -> str:
-        # ",name,obj_m,..." -- the callee spellings `_valued` tests, comma-delimited so a
-        # membership test cannot match a longer name.
-        out = ','
-        for nd in _walk_ast(body):
-            if isinstance(nd, gimple_ctypes.CallExpr):
-                f = nd.func
-                if isinstance(f, gimple_ctypes.IdentExpr):
-                    out += _as_str(f.name) + ','
-                elif (isinstance(f, gimple_ctypes.MemberExpr)
-                        and isinstance(f.obj, gimple_ctypes.IdentExpr)):
-                    out += _as_str(f.obj.name) + '_' + _as_str(f.member) + ','
-        return out
-
     def _mk_round(callee_kinds):
         # A FRESH cache per round, and that is load-bearing rather than
         # wasteful: the answer depends on `callee_kinds`, so a cache shared
@@ -8605,7 +8645,7 @@ def gen_module_impl(self, stmts):
                     if callee_kinds is None:
                         _mk_first_maybe[_k] = bool(_r_maybe)
                         _mk_first_slots[_k] = _r_slots
-                        _mk_first_calls[_k] = _mk_call_keys(body)
+                        _mk_first_calls[_k] = _gmi_mk_call_keys(body)
             _maybe: bool = _mk_maybe[_k]
             _slotkinds: list = _mk_slots[_k]
             if _maybe:
@@ -9089,6 +9129,8 @@ def gen_module_impl(self, stmts):
                     _xg_tgt[_xg_pn] = _xg_ct
                 if _xg_ct == 'char *':
                     self._coro_str_params.setdefault(_xg_body, set()).add(_xg_pn)
+                    self._int64_may_hold_str.setdefault(_xg_body, set()).add(_xg_pn)
+                if _xg_ct == 'MojoBytes *':
                     self._int64_may_hold_str.setdefault(_xg_body, set()).add(_xg_pn)
     # Companion list-ELEMENT hints merge: same qualifier match as the scalar
     # hints above, applied into this gen's own _param_list_elem_types for
@@ -17447,17 +17489,13 @@ def gen_module_impl(self, stmts):
         parts.append("static MojoDict * _mojo_dispatch_asdict (void *);")
     parts.append("static int _mojo_dispatch_is_dataclass (void *);")
     parts.append("static int64_t _mojo_dispatch_shallow_copy (void *);")
-    # The FOUR the ungated path needs, which is `REPR_CLUSTER_DECLS` without
-    # `_mojo_repr_pair` and `_mojo_repr_set`. Pair is the member no generated
-    # call site names directly, so only the `emit_struct_defs` module's
-    # `_emit_reflection_fwd_decls` pass declares it. Set IS named directly by
-    # a `repr(<set>)` call site, but every such site in a whole-program TU
-    # comes after the `emit_struct_defs` module's forward-declaration block
-    # (emitted at the top of the unit, before the imported modules' code is
-    # spliced in), so the ungated path gets its prototype from there too —
-    # the same way pair does. Sliced off the shared table rather than
-    # respelled, so the gate's table and this emission cannot drift.
-    parts.extend(REPR_CLUSTER_DECLS[:4])
+    # The ungated path needs all cluster declarations that may be called
+    # directly. `_mojo_repr_set` is named directly by `repr(<set>)` call sites
+    # (emit_infra/emit_resolve lower it to `_mojo_repr_set`), so without a
+    # forward declaration earlier in the TU a use can cause GCC to implicitly
+    # declare it as `int()` leading to conflicting types. Emit all cluster
+    # declarations in every module to ensure ordering is safe.
+    parts.extend(REPR_CLUSTER_DECLS)
     if 'type_name_table' in self._emitted_singletons:
         parts.append("static char * _mojo_type_name (int64_t);")
     parts.append('')

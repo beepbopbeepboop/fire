@@ -457,6 +457,62 @@ def _has_while(stmts) -> bool:
     return False
 
 
+def _ternary_count(e) -> int:
+    """The value-position ternaries in an expression, operands included.
+
+    `TernaryExpr` is the value-position `if` — the shape `arm64_step`'s CSEL
+    arm and `work_step_csel` model, and the one the untyped AST bridge has no
+    constructor for — and this counts them where `_ast_model_cannot_state`
+    only asked whether any exist: the certificate's cost row is keyed on HOW
+    MANY conditions a body carries, not whether it carries one. The walk is
+    over the node's dataclass fields rather than a hand list of expression
+    kinds, so an operand a hand list forgot is still counted.
+    """
+    if e is None:
+        return 0
+    if isinstance(e, F.TernaryExpr):
+        return (1 + _ternary_count(e.condition)
+                + _ternary_count(e.then_val) + _ternary_count(e.else_val))
+    n = 0
+    for name in getattr(e, "__dataclass_fields__", ()) or ():
+        if name in ("line", "col"):
+            continue
+        child = getattr(e, name, None)
+        if isinstance(child, list):
+            n += sum(_ternary_count(c) for c in child)
+        elif child is not None and not isinstance(
+                child, (str, int, float, bool)):
+            n += _ternary_count(child)
+    return n
+
+
+def _cond_branch_count(stmts) -> int:
+    """The conditional branches a statement list carries: one per `if` and
+    one per value-position ternary, recursing into the arms and operands.
+
+    This is the certificate's cost row: the walk theorem's per-path value-flow
+    facts grow with the number of source-level conditions, branch or not — a
+    value-position ternary is branchless on the machine (`cmp` + `CSEL`, no
+    branch instruction) yet it still doubles the paths the per-condition
+    `hcond` facts are stated over, which is the reading the `B.cond` control
+    in `bugs/formal/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.
+    md` gives for the statement-`if` shape and the measured ternary class
+    (one checks, three check at 560 s / 5.6 GB, four kill at the 1500 s CPU
+    bound) gives for this one.
+    """
+    n = 0
+    for st in stmts:
+        if isinstance(st, IfStmt):
+            _c, _tb, _eb = _if_expand(st)
+            n += (1 + _ternary_count(_c)
+                  + _cond_branch_count(_tb) + _cond_branch_count(_eb))
+        else:
+            # The value position the statement carries: `return`'s value,
+            # an `Assign`/`AugAssign`/`VarDecl` right-hand side, an `ExprStmt`.
+            n += _ternary_count(getattr(st, "value", None))
+    return n
+
+
 #: Node types that start a NESTED SCOPE.  A call inside one is not a call of
 #: the enclosing function: a nested `def`'s body runs when IT is called, and a
 #: lambda's body when the lambda object is called.  Every walker below stops at
@@ -2325,13 +2381,17 @@ def _gen_go(fn, tc: dict = None) -> list:
     if _dec_while_pattern(fn) is not None:
         _require_one_param(fname, params)
         helpers.append(
-            f"def {fname}_go : Nat → UInt64\n"
-            f"  | 0 => 0\n"
-            f"  | k + 1 => {fname}_go k\n\n"
-            f"theorem {fname}_go_zero (n : Nat) : {fname}_go n = 0 := by\n"
-            f"  induction n with\n"
-            f"  | zero => rfl\n"
-            f"  | succ k ih => exact ih"
+            f"def {fname}_go : Nat → UInt64 :=\n"
+            f"  fun m => if m < 9223372036854775808 then 0 else "
+            f"UInt64.ofNat (m % 18446744073709551616)\n\n"
+            f"theorem {fname}_go_zero (n : Nat) (h : n < 9223372036854775808) : "
+            f"{fname}_go n = 0 := by\n"
+            f"  simp [{fname}_go, h]\n\n"
+            f"theorem {fname}_go_neg (n : Nat) (h : 9223372036854775808 ≤ n) "
+            f"(hm : n < 18446744073709551616) :\n"
+            f"    {fname}_go n = UInt64.ofNat (n % 18446744073709551616) := by\n"
+            f"  have h' : ¬ n < 9223372036854775808 := by omega\n"
+            f"  simp [{fname}_go, h']"
         )
         return helpers
     dec1 = _dec1_pattern(fn)
@@ -3276,14 +3336,17 @@ def _ast_gap_message(gaps: list) -> str:
 def _ast_model_cannot_state(fn) -> str:
     """Why the untyped AST model cannot state `fn`'s body, or `''` when it can.
 
-    **One predicate for three decisions**, which used to be three reads of
+    **One predicate for four decisions**, which used to be three reads of
     `_range_loop_pattern` and could have been a fourth read of anything else:
-    whether `eval_eq_mojo` is emitted, whether `ast_def` is built at all, and
-    whether the call-gap check runs. They are one decision — "is there an AST
-    to cross-check the model against" — and a caller that answers it one way
-    and another caller the other way produces a file whose `ast` value is
-    emitted and never used, or a bridge theorem over an `ast` that was never
-    written.
+    whether `eval_eq_mojo` is emitted, whether `ast_def` is built at all,
+    whether the call-gap check runs, and whether the concrete
+    `eval_eq_mojo_N` instances are emitted. They are one decision — "is there
+    an AST to cross-check the model against" — and a caller that answers it
+    one way and another caller the other way produces a file whose `ast` value
+    is emitted and never used, or a theorem over an `ast` that was never
+    written (the concrete instances used to be exactly that fourth caller:
+    five theorems referring to an `ast` the file never declared, one Lean
+    `Expected type must not contain free variables` per theorem).
 
     Two shapes, and the second is new:
 
@@ -6342,7 +6405,8 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
             A(f"  rw [hchain]")
             A(f"  simp only [{name}_b{exit_bi}_qS0]")
             A(f"  rw [show arm64_reg 19 s = 0 from by simpa [arm64_reg] using hx19]")
-            A(f"  simp [mojo, {name}_go_zero]")
+            A(f"  have hlt : (s.x19.toNat) < 9223372036854775808 := by rw [hx19]; simp")
+            A(f"  simp [mojo, {name}_go_zero, hlt]")
         elif hname == f"{name}_loop_body_step":
             _w = words[body_last]
             _imm26 = _w & 0x03ffffff
@@ -6444,7 +6508,7 @@ def _gen_countdown_loop(name: str, code: bytes, base: int, func_entry: int,
     # own post-state and the pc hypothesis is `rfl`.
     A(f"    (by intro s hs hq; exact {name}_loop_exit_x0 ({cqt} s) "
       f"(({name}_loop_cond_flag s hs).mp hq))")
-    A(f"    (by intro a _; simp [mojo, {name}_go_zero])")
+    A(f"    (by intro a _; have hlt : a.toNat < 9223372036854775808 := by omega; simp [mojo, {name}_go_zero, hlt])")
     A(f"    (by decide) (by decide) (by decide)")
     A(f"    arg st fuel (work_loop_fuel {mc} {mb} {me} arg.toNat fuel hfuel) hpc hx19 hframe")
     A("")
@@ -7469,13 +7533,8 @@ def _unmodelled_instruction(word: int):
     `_step_branch_index` has already rejected, so the question is which
     instruction it is, and A64's fixed fields answer that without a table.
 
-    The three this emitter is measured to produce:
+    The ones this emitter is measured to produce:
 
-      * **`CSEL`** — A64 "Conditional Select (register)" is `sf 110101000 0` in
-        bits 31..21, i.e. `(w >> 21) & 0x7ff == 0x4d4` (measured: the word
-        `arm64_codegen.py::_emit_csel_ternary` writes for `1 if n > 3 else 0` is
-        `0x9a801020`). `CSET` is the same instruction with Rn = Rm = XZR, which
-        the step table HAS at index 30, so it never reaches here.
       * **`STUR` / `LDUR`** — the unscaled forms, `(w & 0xffc00000)` equal to
         `0xf8000000` or `0xf8400000`: the 9-bit displacement a scaled
         12-bit-offset access cannot express, which in practice means a NEGATIVE
@@ -7494,15 +7553,15 @@ def _unmodelled_instruction(word: int):
         `0x8b0103e0`, `sub x0, xzr, x1` = `0xcb0103e0`) run as `0 + 1` and
         `0 - 1`.
       * anything else: `None`, and the caller says so rather than guessing.
+
+    `CSEL` used to be the first of these — and is not any more: the branchless
+    select is `arm64_step`'s last arm (`_STEP_CONDS`'s row 69 with
+    `work_step_csel`), so a CSEL word is claimed by `_step_branch_index` and
+    never reaches here.  What refuses a CSEL-carrying entry after the row
+    landed is the certificate's size rather than the select, and that refusal
+    is the branch-count gate in `generate_arm64_proof`, which names
+    `bugs/formal/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md`.
     """
-    if ((word >> 21) & 0x7ff) == 0x4d4:
-        return ("CSEL",
-                "the branchless select the code emitter uses for `a if c else "
-                "b`, and for a flag-preserving `and`/`or`. The semantic model "
-                "states the conditional expression (`_ternary_go`), so what is "
-                "missing here is the machine half, and the measurement is "
-                "`bugs/formal/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_"
-                "cannot_claim_it.md`.")
     if (((word >> 21) & 0x7) == 0x1 and ((word >> 24) & 0x1f) == 0x0b):
         which = ("SUBS/CMP extended" if (word >> 29) & 1 else
                  "SUB extended" if (word >> 30) & 1 else "ADD extended")
@@ -7554,7 +7613,11 @@ def _cfg_decomposition_refusal(name: str, code: bytes, base: int,
     table's gaps are not all the ternary's: an unscaled spill is the other one
     this emitter reaches, and it has nothing to do with a conditional
     expression. So each word is named off its own encoding
-    (`_unmodelled_instruction`) and only the CSEL case mentions `_ternary_go`.
+    (`_unmodelled_instruction`) and no case re-derives the source construct.
+    (The CSEL case that used to mention `_ternary_go` is gone with the row:
+    the select is modelled now, so a CSEL word never reaches here, and the
+    ternary's refusal lives in the branch-count gate of `generate_arm64_proof`
+    rather than in a word the step table claims.)
 
     The search is over the range the walk itself uses — the entry to the last
     `RET` — because that is the range whose words the certificates are built
@@ -8729,7 +8792,12 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         A(f"{IND}rcases hlc_{bi} with ⟨sf_{bi}, heqf_{bi}, hx0f_{bi}⟩")
                         A(f"{IND}rw [heqf_{bi}]")
                         A(f"{IND}-- s.x0 = mojo (n-1) = 0 = mojo n")
-                        A(f"{IND}simp [hx0f_{bi}, mojo, {name}_go_zero]")
+                        A(f"{IND}have hltc : (n - 1).toNat < 9223372036854775808 := by")
+                        A(f"{IND}  have hnz : n ≠ 0 := by intro h0; rw [h0] at {_bsrc}; simp at {_bsrc}")
+                        A(f"{IND}  have hnge1 : 1 ≤ n.toNat := Nat.pos_of_ne_zero (fun h0 => hnz (UInt64.toNat_inj.mp (by rw [h0]; rfl)))")
+                        A(f"{IND}  rw [toNat_sub_one n (by intro h; subst h; simp at {_bsrc})]")
+                        A(f"{IND}  omega")
+                        A(f"{IND}simp [hx0f_{bi}, mojo, {name}_go_zero, hltc]")
                 else:
                     raise ValueError(
                         f"unsupported edge to {hex(tgt)} (loop back-edge / continuation; "
@@ -11431,9 +11499,9 @@ def _gen_dec_while_block(fname: str, param: str, cond_op: str = "GT") -> str:
     _op = {"GT": ">", "NE": "!=", "GE": ">="}[cond_op]
     _rhs = "1" if cond_op == "GE" else "0"
     cond = f'MojoExpr.binop "{_op}" (MojoExpr.var "{param}") (MojoExpr.int {_rhs})'
-    _PRED = {"GT": "m < 9223372036854775808 → 0 < UInt64.ofNat m",
-             "NE": "m < 9223372036854775808 → UInt64.ofNat m \u2260 0",
-             "GE": "m < 9223372036854775808 → 1 \u2264 UInt64.ofNat m"}[cond_op]
+    _PRED = {"GT": "m < 9223372036854775808 ∧ 0 < UInt64.ofNat m",
+             "NE": "m < 9223372036854775808 ∧ UInt64.ofNat m \u2260 0",
+             "GE": "m < 9223372036854775808 ∧ 1 \u2264 UInt64.ofNat m"}[cond_op]
     _HPRED = {
         "NE": "exact Iff.rfl",
         "GT": ("rw [UInt64.lt_iff_toNat_lt]\n"
@@ -11483,7 +11551,7 @@ theorem pred_iff (m : Nat) : @PRED@ \u2194 UInt64.ofNat m \u2260 0 := by
 /-- Loop condition holds iff counter value nonzero. -/
 theorem cond_val (m : Nat) :
     (evalExpr handler (@COND@)
-      (envOf m) \u2260 0) \u2194 m % @S@ \u2260 0 := by
+      (envOf m) \u2260 0) \u2194 (m % @S@ \u2260 0 \u2227 m % @S@ < 9223372036854775808) := by
   have hv : evalExpr handler (@COND@)
       (envOf m) = if @PRED@ then 1 else 0 := by
     simp [evalExpr, envOf]
@@ -11528,7 +11596,7 @@ theorem prog_correct : \u2200 (m : Nat) (fuel : Nat), fuel \u2265 m % @S@ + 2 �
       have hneg : \u00ac @PRED@ := by
         rw [pred_iff m]
         intro hne
-        exact hne (by apply eq_of_toNat_eq; rw [ht2]; simp [hz])
+        exact hne.2 (by apply eq_of_toNat_eq; rw [ht2]; simp [hz])
       have hce : evalExpr handler (@COND@) (envOf m) = 0 := by
         rw [hvz, if_neg hneg]
       have h1 := runF_while_false g handler (@COND@)
@@ -11546,7 +11614,10 @@ theorem prog_correct : \u2200 (m : Nat) (fuel : Nat), fuel \u2265 m % @S@ + 2 �
         rw [ht2]
         simp [hz]
       rw [hv0]
-      simp [@FN@_go_zero, hz]
+      have hzlt : m % @S@ < 9223372036854775808 := by
+        rw [hz]
+        simp
+      simp [@FN@_go_zero, hzlt]
     \u00b7 obtain \u27e8g, rfl\u27e9 : \u2203 g, fuel = g + 1 := \u27e8fuel - 1, by cases fuel <;> simp; omega\u27e9
       have hcond : evalExpr handler (@COND@) (envOf m) ≠ 0 :=
         (cond_val m).mpr (Nat.ne_of_gt hp)
@@ -11597,7 +11668,8 @@ theorem prog_correct : \u2200 (m : Nat) (fuel : Nat), fuel \u2265 m % @S@ + 2 �
       rw [hP] at hrec
       rw [hstep, henv, hrec]
       apply congrArg
-      simp [@FN@_go_zero]
+      have hltm : m % @S@ < 9223372036854775808 := (cond_val m).mp hcond |>.right
+      simp [@FN@_go_zero, hltm]
 
 /-- TRUST BOUNDARY eliminated: the fuel-bounded full interpreter applied to
 the formal AST equals the structural model, by strong induction. -/
@@ -11990,6 +12062,54 @@ def generate_arm64_proof(prog, code, info) -> str:
         fn = prog.functions[0]
         func_name = fn.name
     param = fn.params[0][0] if fn.params else "n"
+    # **The CSEL discharge is gated on the entry's conditional-branch count,
+    # and the gate is a refusal rather than a bigger bound.**  The entry's
+    # CSEL — the branchless select `a if c else b` lowers to — is what the
+    # step table's row 69 claims, and its certificate's per-path value-flow
+    # facts grow with the entry's conditional-branch count: the measured
+    # boundary is inside this class, one conditional expression checks,
+    # three check at 560 s / 5.6 GB under the 12 GB slot, and four are
+    # killed at the 1500 s CPU bound with "NOT a verdict on the proof".
+    # The select itself is modelled — `arm64_step`'s last arm and
+    # `work_step_csel` — so the cost is the certificate's size, not the
+    # instruction, and emitting a file whose only outcome is that kill buys
+    # nothing: a named refusal is what the class owes the reader, and the
+    # tracked leaf it names owns the four-branch boundary and the per-path
+    # hoist that closes it.
+    #
+    # The CSEL is asked of the entry's OWN walked range — the same
+    # `_walk_range` cut the walk decomposes — so a CSEL another function
+    # carries cannot wall THIS entry's certificate, and the branch count is
+    # the entry's body: the measured class is loop-free (a looped entry's
+    # walk is the loop-contract shape this doc did not measure), and the
+    # count is the source-level conditions, branch or not — a value-position
+    # ternary is branchless on the machine yet still doubles the paths the
+    # per-condition facts are stated over.
+    _gate_entry = info["labels"].get(func_name, base_addr)
+    _gate_words = {base_addr + i: int.from_bytes(code[i:i + 4], "little")
+                   for i in range(0, len(code) - len(code) % 4, 4)}
+    _gate_end = _walk_range(_gate_words, _gate_entry)
+    _entry_csel = any(_step_branch_index(w) == 69
+                      for pc, w in _gate_words.items()
+                      if _gate_entry <= pc < _gate_end)
+    _entry_branches = _cond_branch_count(fn.body) if fn is not None else 0
+    if _entry_csel and not _has_while(fn.body) and _entry_branches >= 4:
+        raise NotImplementedError(
+            "universal theorem: this entry carries a CSEL — the branchless "
+            "select `a if c else b` lowers to — and its body has "
+            f"{_entry_branches} conditional branches, which is at the "
+            "measured four-branch boundary where the certificate's per-path "
+            "value-flow facts stop checking: one conditional expression in "
+            "this class checks, three check at 560 s / 5.6 GB under the 12 "
+            "GB slot, and four are killed at the 1500 s CPU bound with "
+            "\"NOT a verdict on the proof\".  The select itself is modelled "
+            "— `arm64_step`'s last arm and `work_step_csel` — so the cost "
+            "is the certificate's size, not the instruction, and emitting a "
+            "file whose only outcome is that kill buys nothing.  The "
+            "tracked leaf for this shape is "
+            "`bugs/formal/FORMAL_a_three_branch_certificate_exceeds_the_lean_"
+            "bound.md`: it owns the four-branch boundary and the per-path "
+            "hoist that closes it.")
     # The INDEPENDENT specification this program asks to be checked against, or
     # None.  Read here rather than at the end of the function because it decides
     # the HEADER (the generated file imports `lib/Specs.lean` only when something
@@ -12000,9 +12120,10 @@ def generate_arm64_proof(prog, code, info) -> str:
     # program that carries a specification nobody checked.
     refines = SPECS.spec_refinement(fn, where=func_name)
     # WHY THE AST MODEL CANNOT STATE THIS BODY, or `''` when it can: read ONCE
-    # here because three decisions below are that one question (emit the bridge,
-    # build `ast`, run the call-gap check) and three reads of it is how they
-    # come to disagree. See `_ast_model_cannot_state`.
+    # here because four decisions below are that one question (emit the bridge,
+    # build `ast`, run the call-gap check, emit the concrete `eval_eq_mojo_N`
+    # instances) and four reads of it is how they come to disagree.
+    # See `_ast_model_cannot_state`.
     ast_cannot = _ast_model_cannot_state(fn)
     # The entry function's ARGUMENTS, as one fact read once.  `arity` is what
     # `mojo`, `eval_eq_mojo`, every run test and the universal theorem are
@@ -12294,10 +12415,16 @@ def generate_arm64_proof(prog, code, info) -> str:
     # range of inputs, verified by native_decide instead of an admitted proof. Only valid
     # when every path returns (the ProofLib evalBody model returns `arg` on a
     # no-return fall-through, and it skips while loops entirely, so those
-    # programs would not satisfy the equality).
+    # programs would not satisfy the equality) AND only where the AST bridge is
+    # emitted at all: every instance evaluates `ast`, which the file declares
+    # only when the untyped AST model can state the body (`ast_cannot` empty).
+    # A loop-free conditional expression is the measured shape the other three
+    # decisions of that one predicate omit and this fourth used to emit: five
+    # theorems referencing an `ast` the file never wrote, each failing Lean
+    # with `Expected type must not contain free variables`.
     eval_test_block = ""
     _tac_eval = _decide_or_admit(_admitted_model)
-    if (not is_typed) and _always_returns(fn.body) and not _has_while(fn.body):
+    if (not is_typed) and not ast_cannot and _always_returns(fn.body) and not _has_while(fn.body):
         eval_tests = []
         if _admitted_model:
             # A `/- -/` block and NOT a docstring: the section header in the

@@ -58,6 +58,7 @@ from mojo.middle.types import _BOXED_CONTAINER_CTYPES
 from mojo.middle.calls_shared import _callable_value_symbol
 from mojo.middle.calls_shared import _RUNTIME_CALLABLE_VALUES as _RUNTIME_CALLABLE_VALUES_NAMES
 from mojo.middle.calls_shared import _py_box_expr
+from mojo.middle.calls_shared import FRAME_SETTABLE_IDS
 
 def _lower_strided(gen, node, store: bool):
     """Scalar (SIMD-width-1) lowering of the strided_load/strided_store
@@ -1502,8 +1503,7 @@ _OS_PATH_RUNTIME_CALLABLE_VALUES = {
 }
 
 
-# frame attributes that are plain stored words (runtime mojo_frame_get_attr/set_attr ids)
-_FRAME_SETTABLE = {'f_trace': 0, 'f_trace_lines': 1, 'f_trace_opcodes': 2}
+# frame attributes that are plain stored words (ids: calls_shared.FRAME_SETTABLE_IDS)
 _FRAME_ATTRS = frozenset(('f_generator', 'gi_frame', 'cr_frame', 'ag_frame', 'f_code', 'f_back', 'f_lineno', 'co_name', 'co_qualname', 'co_filename', 'co_firstlineno',
                           '__traceback__', 'tb_frame', 'tb_next', 'tb_lineno'))
 
@@ -1512,11 +1512,11 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     # Attributes of a Python-level frame word (`sys._getframe(n)`), in a module that uses
     # frames. The names are specific to frame/code objects, and nothing is lowered here
     # unless a module of this compile mentions `_getframe`.
-    if len(gen._frames_mods) > 0 and node.member in _FRAME_SETTABLE:
+    if len(gen._frames_mods) > 0 and node.member in FRAME_SETTABLE_IDS:
         _fa_t, _fa_v = gen.lower_expr(node.obj)
         _fa_r = gen._call_expr('int64_t', 'mojo_frame_get_attr',
                                [('int64_t', gen._to_int64(_fa_t, _fa_v)),
-                                ('int64_t', gen._new_val('int64_t', f'(int64_t){_FRAME_SETTABLE[node.member]}'))])
+                                ('int64_t', gen._new_val('int64_t', f'(int64_t){FRAME_SETTABLE_IDS[node.member]}'))])
         gen._dyn_word_vals.add(_fa_r)
         gen._boxed_vals.add(_fa_r)       # identity (`f.f_trace is None`) and printing read the box
         return 'int64_t', _fa_r
@@ -3387,6 +3387,11 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
         # gives the right operand's C type without evaluating it, so the
         # merged result type is fixed before either branch runs.
         ltype, lval = gen.lower_expr(node.left)
+        # A left operand NAMED as a word of unknown kind (`d or b'xy'` with `d`
+        # bound from a bytes split) is one at this temp too: its truthiness is
+        # the runtime's, which `_ensure_bool_cond` asks for a dyn-word temp.
+        if ltype == 'int64_t' and gen._is_dyn_word(node.left, lval):
+            gen._dyn_word_vals.add(lval)
         cond = gen._ensure_bool_cond(ltype, lval)
         _rq = gen._quick_type(node.right)
         res_type = gimple_ctypes.TypeLattice.join(ltype, _rq)
@@ -3446,8 +3451,20 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
                             or (ltype == 'int64_t' and _rq == 'char *')))
         if _mixed_word:
             res_type = 'int64_t'
+        # A BYTES operand against a str or a word (`os.path.split(b'a/b')[0] or
+        # b'xy'`): the join prefers the pointer side, so the result would be a
+        # `char *` and the bytes object would be read as text -- its `len` the
+        # NUL scan of its header. Python's result is whichever operand was
+        # selected, so it is a word of unknown kind, answered by the runtime.
+        # (A bytes against a bool or an int keeps the pointer join: those are
+        # the NULL / bool-merge cases handled above.)
+        _bytes_mix = (not _bool_merge and not _mixed_word and (
+            (ltype == 'MojoBytes *' and _rq in ('char *', 'int64_t'))
+            or (_rq == 'MojoBytes *' and ltype in ('char *', 'int64_t'))))
+        if _bytes_mix:
+            res_type = 'int64_t'
         result = gen._new_temp(res_type)
-        if _mixed_word:
+        if _mixed_word or _bytes_mix:
             gen._dyn_word_vals.add(result)
         bb_short = gen._new_bb()
         bb_eval_right = gen._new_bb()
@@ -4654,6 +4671,23 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
     # MojoBytes == / != → mojo_bytes_eq (bytewise; never conflated with str)
     if op in ('==', '!=') and lt == 'MojoBytes *' and rt == 'MojoBytes *':
         eq_t = gen._new_val('int', f"mojo_bytes_eq ({lv}, {rv})")
+        t = gen._new_temp('_Bool')
+        cmp = '!= 0' if op == '==' else '== 0'
+        gen._emit(f"  {t} = {eq_t} {cmp};")
+        return '_Bool', t
+
+    # A bytes literal against a value whose static type is NOT bytes: a
+    # `char *` the inference guessed (an element of a list a call returned is
+    # typed from the callee's body, and a bytes element is a `MojoBytes *` at
+    # run time), or an erased int64_t word. Falling through here compared the
+    # two as C strings, so `fnmatch.filter([b'a.py'], b'*.py')[0] == b'a.py'`
+    # was False: strcmp read the MojoBytes header, not its bytes. Python decides
+    # this by the object: only bytes can equal bytes, so the registry answers.
+    if op in ('==', '!=') and 'MojoBytes *' in (lt, rt) and lt != rt \
+            and (lt in ('char *', 'int64_t') or rt in ('char *', 'int64_t')):
+        bt, bv, wt, wv = (lt, lv, rt, rv) if lt == 'MojoBytes *' else (rt, rv, lt, lv)
+        _w = _as_str(gen._to_int64(wt, wv))
+        eq_t = gen._new_val('int', f"mojo_bytes_word_eq ({_w}, {_as_str(bv)})")
         t = gen._new_temp('_Bool')
         cmp = '!= 0' if op == '==' else '== 0'
         gen._emit(f"  {t} = {eq_t} {cmp};")

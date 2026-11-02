@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Regression for bugs/mid/CODEGEN_arm64_cmp_flags_and_loop_signedness.md —
-loop MODEL must treat a negative counter as already exited."""
+"""Regression for signed dec-while loop model —
+loop MODEL must treat a negative counter as already exited (fixed)."""
 import os, subprocess, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 

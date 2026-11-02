@@ -430,6 +430,9 @@ def cmd_mark(a):
     with registry() as tasks:
         if a.name not in tasks:
             sys.exit("no such task")
+        if a.state == "integrated" and ahead(tasks[a.name]) > 0:
+            sys.exit("%s is not integrated: branch %s has %d commit(s) master lacks (land it, or mark it superseded/abandoned)"
+                     % (a.name, tasks[a.name]["branch"], ahead(tasks[a.name])))
         tasks[a.name]["state"] = a.state
     print("%s -> %s" % (a.name, a.state))
 
@@ -1163,6 +1166,25 @@ def cmd_unstick_dead(a):
                 print("   restarted as", restart(name, "died of a network error"))
 
 
+def descendants(pid):
+    """Every process under PID (its children, their children, and so on), from the live process table. A job a worker's
+    shell started (a test, a build) is one of these while the worker lives; once its parent dies the job is reparented
+    to launchd and the walk loses it, which is why reap also matches on the worktree (below)."""
+    out = subprocess.run(["ps", "-axo", "pid=,ppid="], capture_output=True, text=True).stdout
+    kids = {}
+    for line in out.splitlines():
+        f = line.split()
+        if len(f) == 2 and f[0].isdigit() and f[1].isdigit():
+            kids.setdefault(int(f[1]), []).append(int(f[0]))
+    found, todo = [], [pid]
+    while todo:
+        for k in kids.get(todo.pop(), []):
+            if k not in found:
+                found.append(k)
+                todo.append(k)
+    return found
+
+
 def cmd_reap(a):
     """Kill processes still running with their cwd inside the worktree of a task whose worker has exited.
 
@@ -1171,7 +1193,6 @@ def cmd_reap(a):
     processes, 4-6 h old, from three long-finished workers, took a third of the machine and pushed the gate's
     jobs past their timeouts). Only trees of tasks that are NOT running are touched; anything else on the
     machine (another session's processes) is left alone."""
-    live = {os.path.realpath(t["worktree"]) for t in load().values() if state_of(t) == "running"}
     dead = {os.path.realpath(t["worktree"]): n for n, t in load().items() if state_of(t) != "running"}
     out = subprocess.run(["lsof", "-d", "cwd", "-Fpn"], capture_output=True, text=True).stdout
     pid, victims = None, []
@@ -1183,6 +1204,14 @@ def cmd_reap(a):
             for root, name in dead.items():
                 if (cwd == root or cwd.startswith(root + os.sep)) and pid != os.getpid():
                     victims.append((pid, name))
+    # the tree of each dead task's worker: a job its shell started, in any directory, while the worker still lived
+    for n, t in load().items():
+        if state_of(t) == "running" or not t.get("pid"):
+            continue
+        for k in descendants(int(t["pid"])):
+            if k != os.getpid():
+                victims.append((k, n))
+    victims = list(dict.fromkeys(victims))
     for pid, name in victims:
         cmd = subprocess.run(["ps", "-o", "etime=,command=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()[:110]
         print("%s pid %d: %s" % ("would kill" if a.dry_run else "kill", pid, name + " | " + cmd))

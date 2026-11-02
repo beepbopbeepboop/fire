@@ -69,6 +69,14 @@
       "recover_hours": 4.23
     },
     {
+      "name": "iceman",
+      "model": "opencode-go/iceman-contributor-free",
+      "count": 20,
+      "kind": "opencode",
+      "recover_hours": 2.5,
+      "class": "mid"
+    },
+    {
       "name": "opus",
       "model": "claude-opus-5-5",
       "count": 0,

@@ -1335,7 +1335,7 @@ def _compile_link_inline_cpp_unit(gen, cpp_code: str):
         return None
 
 
-def _emit_stdlib_import_externs(gen, stmts) -> None:
+def _emit_stdlib_import_externs(gen, stmts: list) -> None:
     """Scan from-import stmts and emit extern declarations for concrete
     functions found via load_module (text-only extraction — no dylib builds,
     no recursion). Populates _link_import_decl_list and registers types so
@@ -1600,7 +1600,7 @@ def global_generator_key(module_safe: str, name: str) -> tuple:
     return f"{module_safe}.{name}"
 
 
-def seed_global_generator_apis(gen, stmts, mod_index) -> None:
+def seed_global_generator_apis(gen, stmts: list, mod_index) -> None:
     """Record, before ANY function body is emitted, which module globals are
     bound to one compiled generator for the whole module.
 
@@ -1649,7 +1649,7 @@ def seed_global_generator_apis(gen, stmts, mod_index) -> None:
         gen._global_generator_api[global_generator_key(key_mod, name)] = api
 
 
-def _emit_imported_global_accessors(gen, stmts) -> None:
+def _emit_imported_global_accessors(gen, stmts: list) -> None:
     """Bare `from X import <module_scope_var>` — BUG-2026-009. See
     `_imported_global_accessors`'s own docstring and module_loader.py's
     'kind': 'global_var' export entries (module_loader._VAR_GLOBAL_RE)
@@ -6288,7 +6288,7 @@ def _open_block_scope(gen):
     return frame
 
 
-def _close_block_scope(gen, frame):
+def _close_block_scope(gen, frame: list):
     """Close the block `_open_block_scope` opened: undo every shadow a `var`
     made inside it, innermost first, so a read after the block sees the
     binding it saw before the block."""

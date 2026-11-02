@@ -9569,3 +9569,65 @@ class TestTheSignedOrderLemmaIsInTheLibrary(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+class TestDecWhileSignedModelRegression(unittest.TestCase):
+    """The dec-while loop model assumes a non-negative counter.
+
+    With a signed `int`, `while n > 0` on `n = -3` exits immediately and
+    returns `-3` unchanged. The old model returned 0 unconditionally.
+    Regression for signed dec-while loop model (fixed).
+    """
+
+    SOURCE = "def countdown(n):\n    while n > 0:\n        n = n - 1\n    return n\n"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="a2-decwhile-signed-")
+        cls.proof, cls.error = _generate(cls.tmp, cls.SOURCE, "decwhile_sig")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_model_is_conditional_not_unconditional_zero(self):
+        self.assertIsNotNone(self.proof, "proof not generated")
+        text = open(self.proof).read()
+        # The new model uses an if/else, not structural recursion to 0.
+        self.assertIn("if m < 9223372036854775808 then 0 else", text,
+                      "model does not split on the sign bit (2^63); "
+                      "old unconditional-zero model likely still emitted")
+
+    def test_go_zero_has_hypothesis(self):
+        text = open(self.proof).read()
+        self.assertIn("countdown_go_zero (n : Nat) (h : n < 9223372036854775808)", text,
+                      "_go_zero must carry the < 2^63 hypothesis")
+
+    def test_go_neg_is_emitted(self):
+        text = open(self.proof).read()
+        self.assertIn("countdown_go_neg", text,
+                      "_go_neg theorem missing; signed negative case "
+                      "is not modelled")
+
+    def test_go_block_elaborates_in_lean(self):
+        """The emitted `_go` def and its two theorems must typecheck.
+
+        Text checks cannot see a tactic that makes no progress: `simp [h]`
+        did not unfold the def and `simp [h, hm]` made no progress, and both
+        lines passed every substring assertion above.  So run Lean on the
+        block alone -- it is self-contained, so this is seconds, not the
+        proof's own CPU budget."""
+        import shutil as _sh, subprocess
+        if _sh.which("lean") is None:
+            self.skipTest("lean not on PATH")
+        text = open(self.proof).read()
+        m = re.search(r"def countdown_go : .*?simp \[countdown_go, h'\]",
+                      text, re.S)
+        self.assertIsNotNone(m, "the _go block is not in the emitted proof")
+        path = os.path.join(self.tmp, "go_block.lean")
+        with open(path, "w") as f:
+            f.write(m.group(0) + "\n")
+        r = subprocess.run(["lean", path], capture_output=True, text=True,
+                           timeout=600, cwd=self.tmp)
+        self.assertEqual(r.returncode, 0,
+                         "emitted _go block does not typecheck:\n"
+                         + r.stdout + r.stderr)
