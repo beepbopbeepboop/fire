@@ -82,7 +82,10 @@ def release_finished():
             continue   # died of a limit/outage before doing anything: `refill` bounces it to the queue, it is not "integrated"
         if st in ("exited-ok", "exited-err") and _unlanded(t):
             continue   # its fix is on a branch master does not have yet: the doc is NOT free, or the next worker re-fixes it
-        if st in ("exited-ok", "exited-err", "superseded"):
+        if st in ("exited-ok", "exited-err") and not _unlanded(t):
+            # Done, and nothing left to land: "integrated" is true. A superseded task is NOT integrated: it was handed to
+            # a fixer because its branch failed to merge or broke the gate, so its state stays superseded (2026-11-02:
+            # this loop relabelled five such tasks integrated while their commits were still off master).
             r = subprocess.run([sys.executable, os.path.join(HERE, "control.py"), "mark", name, "integrated"],
                                capture_output=True, text=True)
             n += r.returncode == 0
