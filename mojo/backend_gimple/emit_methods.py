@@ -1677,9 +1677,12 @@ def _lower_re_dynamic_call(gen, node, recv, method):
                         ('char *', gen._intern_string(_as_str(method))),
                         ('MojoList *', lst), ('MojoDict *', kw)])
     # The result kinds the methods have, so a consumer (a list of groups, a print)
-    # reads them as what they are rather than as an unknown word.
+    # reads them as what they are rather than as an unknown word. A group's kind
+    # is the SUBJECT's, known only at run time (a str or a bytes), so it is a
+    # pointer word the runtime kinds, like DirEntry.name's.
     if method == 'group':
-        return 'char *', gen._coerce_to_type('int64_t', 'char *', r)
+        gen._dyn_word_vals.add(r)
+        return 'int64_t', r
     if method in ('groups', 'findall', 'split', 'sub'):
         if method == 'sub':
             return 'char *', gen._coerce_to_type('int64_t', 'char *', r)

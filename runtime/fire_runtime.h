@@ -738,6 +738,8 @@ int     mojo_is_re_match(int64_t w);
 int64_t mojo_re_compile(char *pat, int64_t flags);                      /* handle, 0 if unsupported */
 int64_t mojo_re_exec(int64_t h, char *s, int64_t pos, int64_t endpos, int64_t mode);  /* 0 match 1 search 2 fullmatch */
 int64_t mojo_re_m_group(int64_t m, int64_t g);
+char   *mojo_re_match_repr(int64_t m);   /* repr(m): <re.Match object; span=..., match=...> */
+char   *mojo_repr_word(int64_t v);       /* repr() of a word of unknown kind (str quoted, bytes, match, int) */
 int64_t mojo_re_m_start(int64_t m, int64_t g);
 int64_t mojo_re_m_end(int64_t m, int64_t g);
 int64_t mojo_re_getattr(int64_t obj, char *name);
@@ -2474,7 +2476,7 @@ MojoList *mojo_list_slice_word(int64_t w, int has_start, int64_t start, int has_
 MojoList *mojo_fnmatch_filter(MojoList *names, int64_t pat);
 MojoList *mojo_os_scandir(char *top);            /* os.scandir(top): eager list of DirEntry handles */
 int64_t   mojo_fsencode_w(int64_t w);            /* os.fsencode(str or bytes word) -> bytes word */
-char     *mojo_str_from_word(int64_t w, char *encoding);  /* str(x, enc) for a str-or-bytes word */
+char     *mojo_str_from_word(int64_t w, char *encoding, char *errors);  /* str(x, enc) for a str-or-bytes word */
 int64_t   mojo_dirent_name(int64_t h);            /* DirEntry.name: a str word, or a bytes word for a bytes scandir */
 int64_t   mojo_dirent_path(int64_t h);            /* DirEntry.path: likewise */
 int64_t   mojo_dirent_is_symlink(int64_t h);      /* DirEntry.is_symlink() */

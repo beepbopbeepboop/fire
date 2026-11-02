@@ -22,6 +22,22 @@ print(re.compile(b".*").match(b"abc").span())
 print(re.compile(b".*").fullmatch(b"abc").span())
 print(re.compile(b"a").match(b"a") is not None, re.compile(b"a").match(b"b") is not None)
 print(re.compile(b"(?s:.*\\.py)\\z").match(b"a.py") is not None)
+# A match's group is the SUBJECT's kind (bytes for a bytes subject), and a match
+# prints as CPython's <re.Match object; span=..., match=REPR>.
+print(re.compile(b"a(b)").match(b"ab").group(1))
+print(re.compile("a(b)").match("ab").group(1) + "!")
+print(re.compile(".*").search("abc"))
+print(re.compile(b".*").search(b"abc"))
+print(repr(re.compile(b"a(b)").match(b"ab")))
+print(repr(re.compile("a(b)").match("ab").group(1)))
+g = re.compile(b"a(b)").match(b"ab").group(1)
+print(repr(g), g)
+# str(bytes, encoding, errors): the errors argument is threaded to the runtime decode
+print(str(b"ab", "ascii"), str(b"\xe9", "latin-1"), str(b"\xe9", "latin-1", "strict"))
+try:
+    _refused = str(b"\xff", "ascii")
+except UnicodeDecodeError:
+    print("ascii decode refused")
 print(sorted(names(ROOT)))
 print(sorted(names(ROOT.encode())))
 '''

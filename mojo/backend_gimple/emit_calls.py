@@ -3655,19 +3655,22 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if (fname_raw == 'str' and len(node.args) in (2, 3)
             and not gen._locally_binds_name('str')):
         # str(data, encoding[, errors]): the DECODE of a bytes object. The
-        # encoding is the second argument; `errors` is not modelled (a decode
-        # is always strict here), and is lowered only for its side effects.
+        # encoding is the second argument, errors the third (default
+        # 'strict', as in CPython); both are threaded to the runtime decode.
         et, ev = gen.lower_expr(node.args[0])
         enc_t, enc_v = gen.lower_expr(node.args[1])
-        for _extra in node.args[2:]:
-            gen.lower_expr(_extra)
         enc = enc_v if enc_t == 'char *' else gen._coerce_to_type(enc_t, 'char *', enc_v)
+        if len(node.args) == 3:
+            err_t, err_v = gen.lower_expr(node.args[2])
+            err = err_v if err_t == 'char *' else gen._coerce_to_type(err_t, 'char *', err_v)
+        else:
+            err = gen._intern_string('strict')
         if et == 'MojoBytes *':
             return 'char *', gen._call_expr('char *', 'mojo_bytes_decode',
-                                            [('MojoBytes *', ev), ('char *', enc)])
+                                            [('MojoBytes *', ev), ('char *', enc), ('char *', err)])
         # a value whose kind only the runtime knows (a bytes or a str word)
         return 'char *', gen._call_expr('char *', 'mojo_str_from_word',
-                                        [('int64_t', gen._to_int64(et, ev)), ('char *', enc)])
+                                        [('int64_t', gen._to_int64(et, ev)), ('char *', enc), ('char *', err)])
 
     # pow(base, exp, mod): real Python's 3-arg modular-exponentiation
     # form -- integer semantics, entirely distinct from the ordinary
