@@ -2327,7 +2327,7 @@ test('coro-nested-capture', [PY, 'test_coro_nested_async_capture.py'], cache=Tru
 # `native-dumpfull` was marked with this same reason until its bootstrap chain
 # went green (2026-10-25); its registration below says why it is not marked
 # any more. This constant is
-# also the whole of §4's subject matter: bugs/mid/CODEGEN_ab_native_fails.md tables
+# also the whole of §4's subject matter: bugs/hard/CODEGEN_ab_native_fails.md tables
 # every `expect=` job in the registry with its measured peak, its class and its
 # reservation, and a recommendation each.
 # `small` (8 GB), not `stage` (96): `fire.py build fire.py` is the
@@ -2355,7 +2355,7 @@ test('mojoc', ['mojoc'], driver='make', mem='small', excl=True,
      artifact='mojoc', inputs=[MOJO_MAIN] + PY_FILES + [RUNTIME_SRC, RUNTIME_HDR],
      desc='build the one managed native compiler (-O2 -g0)')
 # ab-native's expect= reason. Named for the 15-30 GB self-host pre-pass
-# blowup it used to describe; the blowup is closed (bugs/mid/CODEGEN_ab_native_fails.md,
+# blowup it used to describe; the blowup is closed (bugs/hard/CODEGEN_ab_native_fails.md,
 # 2026-10-26: 0.1 GB / ~10s), so the text now states the current 1-of-30
 # divergence. `2f75609d` turned the job back from disabled= to expect=
 # referencing the constant `58192261` had removed, so every import of this
@@ -2364,7 +2364,7 @@ test('mojoc', ['mojoc'], driver='make', mem='small', excl=True,
 # re-counts the run's "Results: N passed, M failed" line against it, so a
 # second divergence cannot be absorbed silently by the marker.
 SELFHOST_TOKENIZE_BLOWUP = (
-    'bugs/mid/CODEGEN_ab_native_fails.md — 1 failing: match_stmt diverges '
+    'bugs/hard/CODEGEN_ab_native_fails.md — 1 failing: match_stmt diverges '
     '(29/30 byte-identical; the blowup this constant was named for is '
     'closed, the run is now 0.1 GB / ~10s)')
 # `program` (55 GB), UP from `module` (24) — the one job the ratchet moves up,
@@ -2394,7 +2394,7 @@ SELFHOST_TOKENIZE_BLOWUP = (
 # for it, which is the mechanism, and `tools/suite.py --dry-run native` prints
 # the 0.
 #
-# The bug doc IS the switch: bugs/mid/CODEGEN_ab_native_fails.md is what the test
+# The bug doc IS the switch: bugs/hard/CODEGEN_ab_native_fails.md is what the test
 # is waiting on, the repo's rule is that a fixed bug's doc is DELETED, and
 # `disabled_problems` refuses to load this registry the moment that doc is
 # gone — naming the job and saying to turn the test back on. So the test cannot
@@ -2404,7 +2404,7 @@ SELFHOST_TOKENIZE_BLOWUP = (
 test('ab-native', [PY, 'test_ab_native.py'], driver='mem', mem='program',
      memwhy='measured 20.5 GB when it last ran: the self-hosting bootstrap '
             'pre-pass this corpus legitimately triggers (see '
-            'bugs/mid/CODEGEN_ab_native_fails.md), and 1.5x is 30.75 GB, so '
+            'bugs/hard/CODEGEN_ab_native_fails.md), and 1.5x is 30.75 GB, so '
             '`module` (24) was 85% of what it uses. Recorded, not charged: the '
             'job is disabled, so this class is what it will cost the day it is '
             'turned back on, and it reserves 0 meanwhile. Over the 4 GB line '
@@ -2417,7 +2417,7 @@ test('ab-native', [PY, 'test_ab_native.py'], driver='mem', mem='program',
 # reason and is the owner's call, because it is also the job whose run produces
 # the measurements the blowup work is steered by — a marker that cannot be
 # observed going green is weak, and this is the case for not weakening it.
-# §4 of bugs/mid/CODEGEN_ab_native_fails.md tables it with its peak, class and
+# §4 of bugs/hard/CODEGEN_ab_native_fails.md tables it with its peak, class and
 # reservation and a recommendation, so the choice is a line rather than an
 # investigation.
 # `native-dumpfull` needs `mojoc` built first: it runs `./mojoc --dump-full`

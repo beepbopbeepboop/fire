@@ -24,7 +24,7 @@ That is the policy in CLAUDE.md, "Known-failing tests": an expensive known
 failure must not be run, and it must be `disabled=<bug doc>` with the doc as
 the switch.
 
-**It is now `disabled='bugs/mid/CODEGEN_ab_native_fails.md'`** — this file. Still
+**It is now `disabled='bugs/hard/CODEGEN_ab_native_fails.md'`** — this file. Still
 registered, still in the `native` and `gate` buckets, still carrying its
 measured peak (20.5 GB) and the class the ratchet assigns that peak
 (`program`), so the day it is turned back on the numbers are already sized. Not
@@ -38,7 +38,7 @@ event "the bug is fixed". `tools/suite.py`'s `disabled_problems()` refuses to
 load the registry while this file is gone and says so by name:
 
 ```
-disabled test ab-native: its bug doc bugs/mid/CODEGEN_ab_native_fails.md is gone,
+disabled test ab-native: its bug doc bugs/hard/CODEGEN_ab_native_fails.md is gone,
 so the bug is fixed: turn the test back on
 ```
 
@@ -133,7 +133,7 @@ the test cheap enough to stop guessing about it.
 While the divergence is still open, in one line in `tools/suite.py`:
 
 ```python
-     disabled='bugs/mid/CODEGEN_ab_native_fails.md',   →    expect=SELFHOST_TOKENIZE_BLOWUP,
+     disabled='bugs/hard/CODEGEN_ab_native_fails.md',   →    expect=SELFHOST_TOKENIZE_BLOWUP,
 ```
 
 …plus a reason that names the failing case(s) once they are known. That is

@@ -1313,7 +1313,7 @@ def test_an_expect_marker_count_is_checked_against_the_run():
      # while it was DISABLED (a disabled job never runs, so it states no count
      # and the check has nothing to read from its output) and `2f75609d` turned
      # it back to `expect=SELFHOST_TOKENIZE_BLOWUP` once the blowup the marker
-     # was named for closed (bugs/mid/CODEGEN_ab_native_fails.md, 2026-10-26: the
+     # was named for closed (bugs/hard/CODEGEN_ab_native_fails.md, 2026-10-26: the
      # run is 0.1 GB / ~10 s). The marker states "1 failing: match_stmt
      # diverges (29/30 byte-identical)", so the count is 1, read the same way
      # as the other entries — against the run's "Results: N passed, M failed"
@@ -2048,7 +2048,7 @@ def test_the_ab_native_writer_keeps_its_scratch_out_of_the_repo_root():
 
     It is checked HERE, and not left to `ab-native`, because `ab-native` cannot
     check it: that spec needs the self-hosted binary, measured 20.5 GB, and is
-    `disabled=`-marked against bugs/mid/CODEGEN_ab_native_fails.md — registered,
+    `disabled=`-marked against bugs/hard/CODEGEN_ab_native_fails.md — registered,
     not run, because a known red bought at 55 GB of a 96 GB machine budget,
     exclusive, every gate, is the machine paying twice. (Its marker is no
     longer "the binary segfaults on any input" either: that was measured false
@@ -2658,7 +2658,7 @@ def test_a_disabled_test_is_registered_but_never_runs():
     # reproduces at the same class ceiling, which is why the reserves-0
     # property is still covered with no live case. `2f75609d` (2026-10-26)
     # turned it back to `expect=` once the blowup its marker waited on closed
-    # (bugs/mid/CODEGEN_ab_native_fails.md: the run is 0.1 GB / ~10 s now), and the
+    # (bugs/hard/CODEGEN_ab_native_fails.md: the run is 0.1 GB / ~10 s now), and the
     # reason `disabled=` existed in the first place — a known outcome bought
     # at a machine-sized price — is gone with it. So the state this half pins
     # is the ABSENCE, stated rather than assumed: a disabled job that appears
@@ -2829,7 +2829,7 @@ def test_the_disabled_markers_in_the_registry_are_honest():
         src = f.read()
     anchor = '_disabled_problems = disabled_problems()'
     injected = ("test('zz_guard_disabled', [PY, 'test_ab_native.py'], "
-                "disabled='bugs/mid/CODEGEN_ab_native_fails.md')\n")
+                "disabled='bugs/hard/CODEGEN_ab_native_fails.md')\n")
     spliced = src.replace(anchor, injected + anchor, 1)
     doctored, n = re.subn(
         r"(?m)^(\s*test\('zz_guard_disabled'.*?)disabled='bugs/[A-Za-z0-9_./-]+\.md'",
