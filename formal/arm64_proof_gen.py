@@ -3336,14 +3336,17 @@ def _ast_gap_message(gaps: list) -> str:
 def _ast_model_cannot_state(fn) -> str:
     """Why the untyped AST model cannot state `fn`'s body, or `''` when it can.
 
-    **One predicate for three decisions**, which used to be three reads of
+    **One predicate for four decisions**, which used to be three reads of
     `_range_loop_pattern` and could have been a fourth read of anything else:
-    whether `eval_eq_mojo` is emitted, whether `ast_def` is built at all, and
-    whether the call-gap check runs. They are one decision — "is there an AST
-    to cross-check the model against" — and a caller that answers it one way
-    and another caller the other way produces a file whose `ast` value is
-    emitted and never used, or a bridge theorem over an `ast` that was never
-    written.
+    whether `eval_eq_mojo` is emitted, whether `ast_def` is built at all,
+    whether the call-gap check runs, and whether the concrete
+    `eval_eq_mojo_N` instances are emitted. They are one decision — "is there
+    an AST to cross-check the model against" — and a caller that answers it
+    one way and another caller the other way produces a file whose `ast` value
+    is emitted and never used, or a theorem over an `ast` that was never
+    written (the concrete instances used to be exactly that fourth caller:
+    five theorems referring to an `ast` the file never declared, one Lean
+    `Expected type must not contain free variables` per theorem).
 
     Two shapes, and the second is new:
 
@@ -12117,9 +12120,10 @@ def generate_arm64_proof(prog, code, info) -> str:
     # program that carries a specification nobody checked.
     refines = SPECS.spec_refinement(fn, where=func_name)
     # WHY THE AST MODEL CANNOT STATE THIS BODY, or `''` when it can: read ONCE
-    # here because three decisions below are that one question (emit the bridge,
-    # build `ast`, run the call-gap check) and three reads of it is how they
-    # come to disagree. See `_ast_model_cannot_state`.
+    # here because four decisions below are that one question (emit the bridge,
+    # build `ast`, run the call-gap check, emit the concrete `eval_eq_mojo_N`
+    # instances) and four reads of it is how they come to disagree.
+    # See `_ast_model_cannot_state`.
     ast_cannot = _ast_model_cannot_state(fn)
     # The entry function's ARGUMENTS, as one fact read once.  `arity` is what
     # `mojo`, `eval_eq_mojo`, every run test and the universal theorem are
@@ -12411,10 +12415,16 @@ def generate_arm64_proof(prog, code, info) -> str:
     # range of inputs, verified by native_decide instead of an admitted proof. Only valid
     # when every path returns (the ProofLib evalBody model returns `arg` on a
     # no-return fall-through, and it skips while loops entirely, so those
-    # programs would not satisfy the equality).
+    # programs would not satisfy the equality) AND only where the AST bridge is
+    # emitted at all: every instance evaluates `ast`, which the file declares
+    # only when the untyped AST model can state the body (`ast_cannot` empty).
+    # A loop-free conditional expression is the measured shape the other three
+    # decisions of that one predicate omit and this fourth used to emit: five
+    # theorems referencing an `ast` the file never wrote, each failing Lean
+    # with `Expected type must not contain free variables`.
     eval_test_block = ""
     _tac_eval = _decide_or_admit(_admitted_model)
-    if (not is_typed) and _always_returns(fn.body) and not _has_while(fn.body):
+    if (not is_typed) and not ast_cannot and _always_returns(fn.body) and not _has_while(fn.body):
         eval_tests = []
         if _admitted_model:
             # A `/- -/` block and NOT a docstring: the section header in the
