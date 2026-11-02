@@ -5234,8 +5234,8 @@ def main():
 
     # ── A nested `def`'s ENVIRONMENT, which is a bare `malloc` block and NOT a
     # bound method, so its teardown is `free` and not `mojo_closure_free` --
-    # measured at +16 B/iteration (3.06 MB at 100k, 7.64 MB at 400k) in
-    # bugs/CODEGEN_closure_env_and_boxed_local_never_freed.md's OPEN 1. One
+    # measured at +16 B/iteration (3.06 MB at 100k, 7.64 MB at 400k) in that
+    # nested-def env-leak probe. One
     # environment is shared by BOTH of `callee`'s call sites, which is why it
     # must be freed once at the enclosing function's scope exit rather than at
     # each call. The last two consumers are the ones that make it an ownership
@@ -5444,6 +5444,44 @@ def main():
     # `nonlocal` box must keep it alive. `make_counter`'s `bump` outlives the
     # call, so the box must not be freed at `make_counter`'s exit; calling it
     # afterwards is a use-after-free if the rule is not fail-closed.
+    # A `{mut}` nested `def` READ AS A VALUE (passed to a call) builds a bound
+    # method that records its env's box with `mojo_bound_method_add_box`. The
+    # box is a struct-field read, which must be a GIMPLE temp of its own: the
+    # inline `env->field` form made gcc reject the whole statement (every
+    # stdlib method passing a `{mut}` closure to `fmt.write_sequence_to` failed).
+    test_gimple_stdout("gimple_boxed_mut_nested_def_passed_as_value", """\
+struct It:
+    var i: Int
+    def __init__(out self):
+        self.i = 0
+    def next(mut self) -> Int:
+        self.i += 1
+        return self.i
+
+def consume(element_fn: def(mut Int) raises StopIteration):
+    var k = 0
+    try:
+        for _ in range(3):
+            element_fn(k)
+    except:
+        pass
+
+struct D:
+    var base: Int
+    def __init__(out self):
+        self.base = 10
+    def go(self):
+        var iterator = It()
+        def iterate(mut w: Int) raises StopIteration {mut iterator}:
+            w = iterator.next() + self.base
+        consume(iterate)
+        print(iterator.i)
+
+def main():
+    var d = D()
+    d.go()
+""", "3\n")
+
     test_gimple_stdout("gimple_boxed_mut_local_escapes_is_kept", """\
 def make_counter(n: Int):
     var x = n

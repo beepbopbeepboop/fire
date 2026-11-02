@@ -831,9 +831,10 @@ typedef struct MojoFutureCB {
     struct MojoFutureCB *next;
 } MojoFutureCB;
 
-/* Mirror of runtime/fire_runtime.h's MojoBoundMethod -- a method or
-   capturing closure referenced as a value: { fn, self }. Kept local so
-   this TU needn't pull in the whole runtime header. */
+/* Prefix mirror of runtime/fire_runtime.h's MojoBoundMethod -- a method or
+   capturing closure referenced as a value: { fn, self, boxes, nboxes }. This
+   TU only reads fn and self (the leading fields, same layout), so it needs
+   neither the trailing box list nor the whole runtime header. */
 typedef struct { void *fn; void *self; } MojoCoroBoundMethod;
 
 typedef struct MojoFuture {

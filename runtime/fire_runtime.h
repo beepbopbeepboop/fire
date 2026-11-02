@@ -87,7 +87,15 @@ typedef void* mojo_generic_func;
  * re-supplies `self` as the method's implicit first argument — the same
  * "self, then N ordinary args" convention every compiled struct method
  * already uses. See bugs/CODEGEN_bound_method_as_value_not_resolved.md. */
-typedef struct { void *fn; void *self; } MojoBoundMethod;
+/* A capturing closure's `self` is its environment, and that environment can
+   hold the heap boxes of the `{mut}`-captured locals it closes over (a box is
+   a separate `malloc` the environment field merely POINTS at, so freeing the
+   environment alone would leak it). `boxes`/`nboxes` record those box
+   pointers so `mojo_closure_free` can free them with the environment; they are
+   NULL/0 for a method-taken-as-a-value and for a closure that captured no box,
+   and `mojo_bound_method_add_box` (called from the generated closure
+   constructor) appends one box at a time, growing the list. */
+typedef struct { void *fn; void *self; void **boxes; int64_t nboxes; } MojoBoundMethod;
 
 /* Real (non-inline) so the single bound-method registry lives in one TU
  * (fire_runtime.c) — mojo_is_bound_method below consults it to tell a
@@ -96,6 +104,12 @@ typedef struct { void *fn; void *self; } MojoBoundMethod;
  * self.m; f()`). */
 MojoBoundMethod *mojo_bound_method_new(void *fn, void *self);
 int mojo_is_bound_method(void *p);
+/* Append one `{mut}` box the environment holds to `bm`, so `mojo_closure_free`
+ * frees it with the environment. The list is grown with `realloc` (a `NULL`
+ * start is a `malloc`), and `bm` owns it: `mojo_closure_free` frees every box
+ * in it, then the list itself. Called only from the generated closure
+ * constructor, once per box the environment field points at. */
+void mojo_bound_method_add_box(MojoBoundMethod *bm, void *box);
 
 /* ── Variadic callables ───────────────────────────────────────────────────
  * A `lambda *a, **k: ...` (or any function whose real C signature is

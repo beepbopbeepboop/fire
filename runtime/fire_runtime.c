@@ -2012,8 +2012,16 @@ MojoBoundMethod *mojo_bound_method_new(void *fn, void *self) {
     MojoBoundMethod *bm = (MojoBoundMethod *)malloc(sizeof(MojoBoundMethod));
     bm->fn = fn;
     bm->self = self;
+    bm->boxes = NULL;
+    bm->nboxes = 0;
     _pr_add(&_reg_bound_method, (uint64_t)(uintptr_t)bm);
     return bm;
+}
+
+void mojo_bound_method_add_box(MojoBoundMethod *bm, void *box) {
+    if (!bm || !box) return;
+    bm->boxes = (void **)realloc(bm->boxes, (size_t)(bm->nboxes + 1) * sizeof(void *));
+    bm->boxes[bm->nboxes++] = box;
 }
 
 int mojo_is_bound_method(void *p) {
@@ -2535,6 +2543,13 @@ void mojo_closure_free(void *bmv)
 {
     MojoBoundMethod *bm = (MojoBoundMethod *)bmv;
     if (!bm) return;
+    /* The environment's `{mut}` boxes are separate allocations it only points
+     * at (recorded by mojo_bound_method_add_box); free each, then the list,
+     * before the environment itself. */
+    if (bm->boxes) {
+        for (int64_t i = 0; i < bm->nboxes; i++) free(bm->boxes[i]);
+        free(bm->boxes);
+    }
     free(bm->self);
     mojo_bound_method_free(bm);
 }
