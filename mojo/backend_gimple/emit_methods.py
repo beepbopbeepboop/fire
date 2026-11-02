@@ -2546,8 +2546,11 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         if isinstance(inner_obj, gimple_ctypes.IdentExpr) and inner_obj.name == 'os' and inner_member == 'path':
             if outer_member == 'basename' and len(node.args) == 1:
                 arg_type, arg_val = gen.lower_expr(node.args[0])
-                t = gen._call_expr('char *', 'int64_t_basename', [(arg_type, arg_val)])
-                return 'char *', t
+                if arg_type in ('int64_t', 'MojoBytes *'):
+                    t = gen._call_expr('int64_t', 'mojo_os_path_basename_w', [(arg_type, arg_val)])
+                else:
+                    t = gen._call_expr('char *', 'int64_t_basename', [(arg_type, arg_val)])
+                return ('int64_t' if arg_type in ('int64_t', 'MojoBytes *') else 'char *'), t
             elif outer_member == 'splitext' and len(node.args) == 1:
                 arg_type, arg_val = gen.lower_expr(node.args[0])
                 root = gen._call_expr('char *', 'int64_t_splitext', [(arg_type, arg_val)])
@@ -2646,6 +2649,9 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 # Same boxed-int64_t-vs-declared-char* mismatch as abspath
                 # just above; identical fix.
                 arg_type, arg_val = gen.lower_expr(node.args[0])
+                if arg_type in ('int64_t', 'MojoBytes *'):
+                    t = gen._call_expr('int64_t', 'mojo_os_path_dirname_w', [(arg_type, arg_val)])
+                    return 'int64_t', t
                 t = gen._call_expr('int64_t', 'int_dirname', [('int64_t', '0'), (arg_type, arg_val)])
                 cast = gen._new_val('char *', f'(char *){t}')
                 return 'char *', cast
@@ -2719,11 +2725,17 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 return 'int64_t', t
             elif outer_member == 'exists' and len(node.args) == 1:
                 arg_type, arg_val = gen.lower_expr(node.args[0])
-                t = gen._call_expr('int', 'int_exists', [('int64_t', '0'), (arg_type, arg_val)])
+                if arg_type in ('int64_t', 'MojoBytes *'):
+                    t = gen._call_expr('int', 'mojo_os_path_exists_w', [(arg_type, arg_val)])
+                else:
+                    t = gen._call_expr('int', 'int_exists', [('int64_t', '0'), (arg_type, arg_val)])
                 return 'int', t
             elif outer_member == 'isdir' and len(node.args) == 1:
                 arg_type, arg_val = gen.lower_expr(node.args[0])
-                t = gen._call_expr('int', 'int_isdir', [('int64_t', '0'), (arg_type, arg_val)])
+                if arg_type in ('int64_t', 'MojoBytes *'):
+                    t = gen._call_expr('int', 'mojo_os_path_isdir_w', [(arg_type, arg_val)])
+                else:
+                    t = gen._call_expr('int', 'int_isdir', [('int64_t', '0'), (arg_type, arg_val)])
                 return 'int', t
             elif outer_member == 'isabs' and len(node.args) == 1:
                 # os.path.isabs(p) → check if first char is '/'
@@ -2777,7 +2789,10 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 # every loop iteration silently skipped (found via
                 # Tools/unicode/gencodec.py's convertdir()).
                 arg_type, arg_val = gen.lower_expr(node.args[0])
-                t = gen._call_expr('int', 'int_isfile', [('int64_t', '0'), (arg_type, arg_val)])
+                if arg_type in ('int64_t', 'MojoBytes *'):
+                    t = gen._call_expr('int', 'mojo_os_path_isfile_w', [(arg_type, arg_val)])
+                else:
+                    t = gen._call_expr('int', 'int_isfile', [('int64_t', '0'), (arg_type, arg_val)])
                 return 'int', t
             elif outer_member == 'relpath' and 1 <= len(node.args) <= 2:
                 # os.path.relpath(p[, start]) -- the real posixpath answer

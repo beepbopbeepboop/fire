@@ -12648,7 +12648,7 @@ MojoList *mojo_os_scandir(char *top) {
 char *mojo_str_from_word(int64_t w, char *encoding)
 {
     if (mojo_is_registered_bytes(w))
-        return mojo_bytes_decode((MojoBytes *)(intptr_t)w, encoding);
+        return mojo_bytes_decode((MojoBytes *)(intptr_t)w, encoding, "strict");
     return (char *)(intptr_t)w;
 }
 

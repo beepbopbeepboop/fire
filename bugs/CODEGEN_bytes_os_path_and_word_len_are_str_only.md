@@ -26,10 +26,10 @@ bytes is right, so the bytes is not corrupted by `split`; the length read is.
 
 ## Status (2026-11-02)
 
-- Step 1 `len`: PARTIAL FIX LANDED on branch — `emit_calls.py` routes `'w'`-kinded `len` through `mojo_len_word`. Runtime `mojo_len_word` exists; lowering matches doc. Could not verify with full build because unrelated pre-existing `runtime/fire_runtime.c:12651` error (`mojo_str_from_word` calls `mojo_bytes_decode` with 2 args, needs 3) breaks all `fire.py build`.
-- Step 2 `os.path.*` (`join`, `basename`, `dirname`, `exists`, `splitext`): NOT DONE; lowerings in `emit_methods.py` / `gimple_codegen.py` still use `char *` entries for most except `split` (which already has `mojo_os_path_split_w`).
-- Step 3 tests: `test_bytes_os_path_regress.py` written (3 assertions against CPython); could not run end-to-end due to runtime build failure above.
-- Next: fix `mojo_str_from_word` (unrelated, filed separately if needed), then complete `os.path.join`/`basename` word lowering, then run regression.
+- Step 1 `len`: FIX LANDED (emit_calls.py routes `'w'`-kinded `len` through `mojo_len_word`; runtime `mojo_len_word` verified; build break fixed).
+- Step 2 `os.path.*` (`basename`, `dirname`, `exists`, `isfile`, `isdir`): PARTIAL — lowerings updated to dispatch to `_w` variants for `int64_t`/`MojoBytes *` args (emit_methods.py); runtime `_w` entries for basename/dirname/exists/isfile/isdir need full bytes-aware implementation (currently cast to char*) — not completed.
+- Step 3 tests: regression `test_bytes_os_path_regress.py` runs; `test_path_word_runtime.py` PASS (split/join match CPython); `len` on direct split result passes; `len` on `or`-combined word/subscript result still diverges (subscript/retrieval of list elements for bytes words needs separate fix).
+- Next (after this branch): complete bytes-aware runtime for basename/dirname/exists/isfile/isdir/splitext; fix bytes-word subscript/retrieval on MojoList elements; full end-to-end regression.
 
 ## Next step
 
