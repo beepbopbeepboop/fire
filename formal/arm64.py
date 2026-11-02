@@ -1047,7 +1047,7 @@ class Assembler:
                 # loop, and `test_arm64_encoders.py` was 424/424 green
                 # throughout because it compares the encoder's four bytes and
                 # says nothing about a relocation. That is the lesson in
-                # `bugs/FORMAL_arm64_instruction_coverage.md` §"Comparing
+                # `bugs/formal/FORMAL_arm64_instruction_coverage.md` §"Comparing
                 # instruction bytes is not comparing instructions", and
                 # `test_arm64_emission.py`'s self-branch check is what caught it
                 # here.

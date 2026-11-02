@@ -9,6 +9,7 @@ pins the exact refusal so a future change that accidentally silences
 or moves the failure is caught.
 """
 import os, subprocess, sys, tempfile
+from exec_budget import COMPILE_TIMEOUT_S
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MOJO = os.path.join(HERE, 'fire.py')
@@ -21,7 +22,7 @@ def main():
         sys.exit(0)
     b = subprocess.run(
         [sys.executable, MOJO, 'build', TARGET],
-        capture_output=True, text=True, errors='replace', timeout=300,
+        capture_output=True, text=True, errors='replace', timeout=COMPILE_TIMEOUT_S,
         cwd=HERE)
     stderr = (b.stderr or '') + (b.stdout or '')
     # The refusal must mention the three functions and the `with` guard.

@@ -326,7 +326,7 @@ def type_param_kinds(template_src: str):
     not enough for it: `Tagged[T, origin: Int]` is `['type', 'value']`, so a
     literal supplied for `origin` is a comptime VALUE argument, while
     `Pair[T]` is `['type']` and a literal supplied for `T` is a value in a
-    type's position — `bugs/FORMAL_an_explicit_parameter_list_naming_a_comptime_
+    type's position — `bugs/formal/FORMAL_an_explicit_parameter_list_naming_a_comptime_
     value.md` is the wall this exists to tell apart.
 
     A parameter with NO annotation (`[T]`) is a type, and one annotated with a

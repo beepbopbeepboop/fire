@@ -18,7 +18,7 @@ from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S
 
 # This file's 51 per-child budgets were 60, 120, 300 and 30 seconds, spelled at
 # the call site, and every one of them is now a named constant — a quarter of the
-# residue `bugs/TEST_stale_per_child_timeout_literals.md` measured, and the file
+# residue `bugs/TEST_stale_per_child_timeout_literals.md` (DELETED) measured, and the file
 # the doc names first. The classification is five shapes, and it was read off the
 # argv at each site rather than off the number:
 #
@@ -73,7 +73,9 @@ _WALK_AST_MUTATION_ALLOWLIST = {
     "ast_rewriter.py::Seq.__init__": "ditto",
     "ast_rewriter.py::Var.__init__": "ditto",
     "ast_rewriter.py::_rewrite_assign_stmt": "runs inside `rewrite`, on a tree no walk has seen",
-    "mojo/backend_gimple/elab_intu.py::_Work.__init__": "`_Work.alias`/`_Work.extra` are the elaborator's own scratch",
+    "mojo/backend_gimple/cpp_core.py::_cpp_rewrite_yields": "writes `value` on a `copy.copy` of the yield node it is hoisting (`ynode`), a fresh node the original tree never sees; the copy is consumed only by the C++ emitter",
+    "mojo/backend_gimple/cpp_core.py::rewrite": "writes `value` on `copy.copy` of the root yield (`nv`) and `setattr`s the fields of `copy.copy(s)` (`new_stmt`): both are fresh nodes the emitter consumes, and the original statement is left untouched",
+    "mojo/backend_gimple/elab_intu.py::_Work.__init__":"`_Work.alias`/`_Work.extra` are the elaborator's own scratch",
     "mojo/backend_gimple/elab_intu.py::_Work.enqueue": "ditto",
     "mojo/backend_gimple/elab_intu.py::run": "ditto",
     "mojo/backend_gimple/emit_exprs.py::_lower_comprehension": "`Comprehension.target` is a str and `for_target_single_name` returns a str — a scalar write",
@@ -86,6 +88,7 @@ _WALK_AST_MUTATION_ALLOWLIST = {
     "mojo/middle/closures.py::_scan_for_closures": "`ClosureInfo.captures` is the closure scanner's own record",
     "mojo/middle/closures.py::discover_closures": "ditto",
     "mojo/middle/coro.py::_Capture.__init__": "the capture record's own dataclass",
+    "mojo/middle/coro.py::_ParamFlow.__init__": "the parameter-flow record's own class (`name` is its own attribute), not an AST node",
     "mojo/middle/coro.py::_append_box_arg": "appends to a call this same rewrite just built",
     "mojo/middle/coro.py::_apply_nested_async_capture": "`lower()` only, before `gen_module` walks anything",
     "mojo/middle/coro.py::_cap_rewrite_stmts": "ditto",
@@ -3516,19 +3519,21 @@ def f():
     # compile-only smoke test, and test_gimple_generator_runner.py for the
     # REAL behavioral (compile+link+run) coverage of this exact shape.
 
-    # Mixed yield-value types (int then float): passes the cheap
-    # _generator_quick_eligible pre-filter (no params/try/with/yield-from)
-    # but _gen_cpp_generator_unit's own _generator_yield_ctype check must
-    # still reject it (Milestone B requires one consistent scalar type
-    # across every `yield` in the body) and gen_module's pre-pass must fall
-    # back to the honest refusal cleanly — exercises the
-    # _UnsupportedGeneratorShape catch path itself, not just the cheap
-    # pre-filter.
-    _run_isolated(lambda: test_raises("generator_mixed_yield_types_honest_fallback", """\
+    # Mixed yield-value types (int then float). This used to be an honest
+    # refusal ("generator function"); it is now the TAGGED-word yield
+    # (mojo/middle/coro.py `_generator_value_kind`, commit 11eece66b): when
+    # the yield kinds are known and differ, the value slot is the boxed word,
+    # and a float yield is boxed by its static kind at the yield site
+    # (`mojo_box_from_double`). The refusal stays for every consumer that
+    # cannot read the box (`_tagged_consumers_ok`). This module's cases only
+    # pin that the shape COMPILES and boxes the float; that the for-loop
+    # consumer renders `1` / `1.5` correctly is run by
+    # test_gimple_generator_runner.py (generator_mixed_yield_kinds_int_double).
+    _run_isolated(lambda: test_c_shape("generator_mixed_yield_types_tagged_word", """\
 def f():
     yield 1
     yield 1.5
-""", "generator function"), 'generator_mixed_yield_types_honest_fallback')
+""", ["mojo_box_from_double"], []), 'generator_mixed_yield_types_tagged_word')
 
     # Mixed yield kinds whose EMITTED C++ can never share one promise type:
     # a tuple-yield site always co_yields a MojoList* pointer
@@ -4015,15 +4020,59 @@ def main():
     # where the char-at helper takes an int64_t index, a hard g++ error for
     # every such subscript. Real shape: libpython.py's
     # items_from_keys_and_values, `ep['me_key']` on a gdb.Value entry.
+    # The fixture has NO call site: with one, the call-site contract for the
+    # yielded parameter `d` (`_ambiguous_yielded_params`) is refused first, for
+    # the untypable dict argument, and the str-keyed refusal below never runs.
+    # That refusal is also honest, so it is not what this case pins; this case
+    # pins that the subscript body itself is refused, not emitted.
     with _force_cpp_coro():
         test_raises("generator_str_key_subscript_honest_refusal", """\
 def gen(d):
     yield d['k']
+        """, "Unsupported shape(s): gen: a str-keyed subscript")
+
+    # A str-keyed subscript on a local whose type is a USER STRUCT that defines
+    # `__getitem__` is the dunder protocol, not a mapping this model refuses:
+    # the coroutine emitter must call the struct's own `__getitem__` C method
+    # (the same dispatch the ordinary path makes). Real shape: libpython.py's
+    # `ep['me_key']`, where `ep` is a gdb.Value-shaped struct entry.
+    def test_generator_struct_getitem_dispatch_via_cpp_path():
+        global _PASS, _FAIL
+        import gimple_codegen
+        src = """\
+struct Value:
+    var _k: String
+    def __init__(out self, k: String):
+        self._k = k
+    def __getitem__(self, name: String) -> Int:
+        return 7
+
+def gen():
+    v = Value("a")
+    yield v["me_key"]
 
 def main():
-    for x in gen({}):
+    for x in gen():
         print(x)
-        """, "Unsupported shape(s): gen: a str-keyed subscript")
+"""
+        try:
+            with _force_cpp_coro():
+                _c_code, cpp_code = gimple_codegen.compile_to_gimple_with_cpp(
+                    src, do_imports=False, filename="gen_struct_getitem.py")
+        except Exception as e:
+            print(f"FAIL  generator_struct_getitem_dispatch_via_cpp_path: "
+                  f"raised {type(e).__name__}: {e}")
+            _FAIL += 1
+            return
+        if "Value___getitem__(v, " not in cpp_code or "mojo_char_at_str" in cpp_code:
+            print("FAIL  generator_struct_getitem_dispatch_via_cpp_path: expected a "
+                  "direct `Value___getitem__(v, ...)` call, not a string-index read")
+            _FAIL += 1
+            return
+        print("PASS  generator_struct_getitem_dispatch_via_cpp_path")
+        _PASS += 1
+    _run_isolated(lambda: test_generator_struct_getitem_dispatch_via_cpp_path(),
+                  'test_generator_struct_getitem_dispatch_via_cpp_path')
 
     # A nested NON-capturing sync `def` referenced as a callee inside a
     # generator body IS compiled — as a standalone `static` C++ function
@@ -5662,7 +5711,7 @@ async def f():
 """), 'async_function_no_return_value_now_supported')
 
     # Two `return`s that don't agree on one consistent scalar type — the
-    # async counterpart of generator_mixed_yield_types_honest_fallback.
+    # async counterpart of the (since-superseded) mixed-yield refusal test.
     with _force_cpp_coro():
         test_raises("async_function_mixed_return_types_honest_fallback", """\
 async def f():
@@ -7904,26 +7953,100 @@ def main():
 
     def test_flagged_re_compile_is_not_lowered_as_the_bare_pattern():
         """`P = re.compile(p, re.MULTILINE)` is a different pattern than `p`
-        and the regex engine has no flag input, so a loop over `P.findall` /
-        `P.finditer` must stay refused (loudly) instead of scanning `p` with
-        the flags silently dropped -- which matched nothing for a `^` pattern
-        and made the compiled `_dep_sources_texts` find no dependencies."""
+        and the compile-time regex engine has no flag input, so `P.findall`
+        must NOT be scanned as the bare `p` with the flags silently dropped
+        -- which matched nothing for a `^` pattern and made the compiled
+        `_dep_sources_texts` find no dependencies. The call used to stay a
+        loud `mojo_unsupported_iter`; it now goes through the runtime `re`
+        (`mojo_re_compile(pat, flags)`), which honours the flag, so what is
+        pinned is the ANSWER: the built binary prints what CPython prints
+        (both lines match `^a`; the bare pattern would match only the first)."""
         global _PASS, _FAIL
         name = "flagged_re_compile_is_not_lowered_as_the_bare_pattern"
-        import gimple_codegen as _g
+        import subprocess as _sp, tempfile as _tf
         src = ("import re\n"
                "_R = re.compile(r'^(a)', re.MULTILINE)\n"
                "def main():\n"
                "    for m in _R.findall('a\\na'):\n"
                "        print(m)\n"
                "main()\n")
-        c = _g.compile_to_gimple(src)
-        if 'mojo_regex_search' in c or 'mojo_unsupported_iter' not in c:
-            print(f"FAIL  {name}")
+        with _tf.TemporaryDirectory() as d:
+            sp = os.path.join(d, 'flagged.py')
+            with open(sp, 'w') as fh:
+                fh.write(src)
+            want = _sp.run([sys.executable, sp], capture_output=True, text=True).stdout
+            exe = os.path.join(d, 'flagged')
+            b = _sp.run([sys.executable, os.path.join(_PROJECT_DIR, 'fire.py'), 'build',
+                         '-o', exe, sp], capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
+            got = (_sp.run([exe], capture_output=True, text=True, timeout=RUN_TIMEOUT_S).stdout
+                   if b.returncode == 0 and os.path.exists(exe) else None)
+        if got != want or want != 'a\na\n':
+            print(f"FAIL  {name}: got {got!r}, want {want!r}")
             _FAIL += 1
         else:
             print(f"PASS  {name}")
             _PASS += 1
+
+    def test_set_field_read_off_a_boxed_receiver_is_a_set_not_a_list():
+        """`st.fs_x = gen._fresh_vals` (a `set` field read off an untyped
+        `gen`) was lowered as a `MojoList *` -- the boxed-field fallback took
+        "has a recorded element type" to mean "list" -- and refused with
+        `cannot coerce MojoList * to MojoSet *`, so the self-host closure
+        compiled emit_infra.py twice (the refused attempt, then source
+        inclusion)."""
+        global _PASS, _FAIL
+        name = "set_field_read_off_a_boxed_receiver_is_a_set_not_a_list"
+        import gimple_codegen as _g
+        src = ("class FS:\n"
+               "    def __init__(self):\n"
+               "        self.a: set = set()\n"
+               "\n"
+               "def save(gen):\n"
+               "    st = FS()\n"
+               "    st.a = gen._fresh_vals\n"
+               "    return st\n")
+        try:
+            _g.compile_to_gimple(src)
+            print(f"PASS  {name}")
+            _PASS += 1
+        except Exception as e:
+            print(f"FAIL  {name}: {e}")
+            _FAIL += 1
+
+    def test_recompiling_a_struct_does_not_multiply_its_method_overloads():
+        """A struct whose module is compiled again against the same gen (the import
+        fallback retries after a rollback) re-registered every method with a bare
+        `.append`, so `Repr.repr` became "2 overloads" and `repr = aRepr.repr`
+        refused as "referenced as a plain value". Registration is now idempotent
+        per overload id."""
+        global _PASS, _FAIL
+        name = "recompiling_a_struct_does_not_multiply_its_method_overloads"
+        import gimple_codegen as _g
+        src = ("class R:\n"
+               "    def m(self, x):\n"
+               "        return x\n"
+               "r = R()\n"
+               "f = r.m\n"
+               "def main():\n"
+               "    print(f(1))\n"
+               "main()\n")
+        gen = _g.GimpleGen(do_imports=False, module_name='t')
+        _g.compile_to_gimple(src)
+        # register the same struct twice on one gen, as a retried module does
+        from fire_compiler import Parser, py_tokenize
+        stmts = Parser(py_tokenize(src)).parse_module()
+        gen.gen_module(stmts)
+        try:
+            gen.gen_module(stmts)
+        except Exception:
+            pass
+        n = max([len(v) for k, v in gen._struct_method_signatures.items() if k.endswith('m')] or [0])
+        if n <= 1:
+            print(f"PASS  {name}")
+            _PASS += 1
+        else:
+            print(f"FAIL  {name}: {n} candidates for R.m")
+            _FAIL += 1
 
     def test_bracket_mentions_matches_the_regex_it_replaced():
         """`elab_intu._bracket_mentions` is the run-time-regex-free form of
@@ -8324,11 +8447,28 @@ def mk_bool():
 def use_bool_factory():
     print(mk_bool()())
 use_bool_factory()
-def mk_str():
-    return lambda: "hi"
+def mk_str(p: str):
+    def inner(x: str) -> str:
+        return p + x
+    return inner
 def use_str_factory():
-    print(mk_str()())
+    g = mk_str("<")
+    print(g(">"))
+    print(mk_str("[")("]"))
 use_str_factory()
+# Capturing nested def with float return (CODEGEN fix regression)
+def use_capturing_float():
+    n = 2
+    def inner(x: int) -> float:
+        return n + 0.5
+    h = inner
+    print(h(0))
+use_capturing_float()
+def mk_str_lambda():
+    return lambda: "hi"
+def use_str_lambda_factory():
+    print(mk_str_lambda()())
+use_str_lambda_factory()
 '''
         want = _cpython_stdout(src)
         if want is None:
@@ -8554,6 +8694,191 @@ main()
         print(f"PASS  {name}")
         _PASS += 1
 
+    def test_a_str_call_beside_a_list_call_does_not_make_the_parameter_a_list():
+        """A parameter passed a LIST at one call site and a STR at another is
+        not a list parameter, whatever its body does with it.
+
+        The container-kind contract (`_param_container_types`) only ever saw
+        the container call sites, so a `str` argument beside a list one left
+        the contract unanimous at `MojoList *`: the str was cast to a list
+        header and `print` or the loop read it as one, which is SIGSEGV (exit
+        -11) on ordinary Python, and the program's stdout was cut short with
+        exit 0 from the test's point of view. Measured before the fix: both
+        shapes below died with -11 after their first line.
+
+        The fix records a non-container call site as a disagreeing observer
+        (`_param_noncontainer_obs`), so the slot takes the `int64_t` box the
+        scalar pass already chose for a mixed slot, and each call site boxes
+        its own argument.
+
+        The shape here is one whose BODY only prints the parameter. A body that
+        ITERATES it (`for x in xs`) keeps a usage-derived `MojoList *` from
+        `_infer_param_types`, which no call-site contract overrides, so it still
+        segfaults. That bug is fixed by the per-kind clone pass in commit
+        `51f9c69d6` (codegen: clone an iterated parameter per literal argument
+        kind, instead of refusing), which emits one definition per literal
+        kind and renames each call site to its argument's clone; the clone
+        pass is covered by
+        `test_an_iterated_parameter_passed_a_list_and_a_str_compiles_per_kind`.
+        """
+        global _PASS, _FAIL
+        name = "a_str_call_beside_a_list_call_does_not_make_the_parameter_a_list"
+        src = '''\
+def show(x):
+    print(x)
+show([1, 2, 3])
+show("abc")
+'''
+        want = _cpython_stdout(src)
+        if want is None:
+            print(f"FAIL  {name}: CPython does not run the fixture")
+            _FAIL += 1
+            return
+        for mode in ('single-TU', 'link-mode'):
+            got = _compiled_stdout(src, mode)
+            if isinstance(got, tuple):
+                print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                      f"{got[1][:800]}")
+                _FAIL += 1
+                return
+            if got != want:
+                print(f"FAIL  {name} [{mode}]: compiled stdout {got!r} != "
+                      f"CPython {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_an_iterated_parameter_passed_a_list_and_a_str_compiles_per_kind():
+        """A parameter the body ITERATES, passed a LIST at one call site and a
+        STR at another, must compile to one definition per argument kind, not
+        one `void each(MojoList *)` that reads the str as a list header.
+
+        `each([4, 5])` beside `each("de")` was SIGSEGV (exit -11) after the
+        list's output. `_gmi_specialize_literal_kind_clones` clones the
+        function per literal kind (`each_as_list`, `each_as_str`) and renames
+        each call site to its argument's clone, so every clone's parameter
+        takes the ordinary call-site evidence of one kind. The print-only
+        mix keeps its `int64_t` box and gets no clones (see
+        test_a_str_call_beside_a_list_call_does_not_make_the_parameter_a_list).
+        """
+        global _PASS, _FAIL
+        name = "an_iterated_parameter_passed_a_list_and_a_str_compiles_per_kind"
+        src = '''\
+def each(xs):
+    for x in xs:
+        print(x)
+each([4, 5])
+each("de")
+'''
+        want = _cpython_stdout(src)
+        if want is None:
+            print(f"FAIL  {name}: CPython does not run the fixture")
+            _FAIL += 1
+            return
+        for mode in ('single-TU', 'link-mode'):
+            kwargs = ({'do_imports': True} if mode == 'single-TU'
+                      else {'link_mode': True})
+            c_src = gimple_codegen._run_pipeline(src, filename='case.py', **kwargs)[0]
+            if ('void each_as_list_' not in c_src
+                    or 'void each_as_str_' not in c_src
+                    or 'void each (' in c_src):
+                print(f"FAIL  {name} [{mode}]: no per-kind definitions in C")
+                _FAIL += 1
+                return
+            got = _compiled_stdout(src, mode)
+            if isinstance(got, tuple):
+                print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
+                      f"{got[1][:800]}")
+                _FAIL += 1
+                return
+            if got != want:
+                print(f"FAIL  {name} [{mode}]: compiled stdout {got!r} != "
+                      f"CPython {want!r}")
+                _FAIL += 1
+                return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_a_mixed_iterated_parameter_with_a_str_variable_still_refuses():
+        """The per-kind clone pass takes only LITERAL arguments. A str passed
+        to an iterated parameter through a variable, beside a list literal,
+        is still the mixed case the clone pass does not cover, and must keep
+        the compile-time refusal rather than a binary that reads the str as a
+        list. The caller here is a function, where the binding is seen.
+        """
+        global _PASS, _FAIL
+        name = "a_mixed_iterated_parameter_with_a_str_variable_still_refuses"
+        src = '''\
+def each(xs):
+    for x in xs:
+        print(x)
+def main():
+    ys = "de"
+    each([4, 5])
+    each(ys)
+main()
+'''
+        for mode in ('single-TU', 'link-mode'):
+            kwargs = ({'do_imports': True} if mode == 'single-TU'
+                      else {'link_mode': True})
+            try:
+                gimple_codegen._run_pipeline(src, filename='case.py', **kwargs)
+            except RuntimeError as e:
+                msg = str(e)
+                if "'xs'" in msg and "'each'" in msg:
+                    continue
+                print(f"FAIL  {name} [{mode}]: refused, but not for the "
+                      f"mixed parameter: {msg[:300]}")
+                _FAIL += 1
+                return
+            print(f"FAIL  {name} [{mode}]: compiled, so the binary would read "
+                  "the str as a list (SIGSEGV)")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
+    def test_module_level_mixed_iterated_parameter_with_str_variable_still_refuses():
+        """Module-level version of the mixed iterated parameter test. A str passed
+        to an iterated parameter through a module-level variable, beside a list
+        literal, must still be refused rather than compiled to a binary that
+        reads the str as a list (SIGSEGV). The module-level caller slips
+        through because `_inferred_var_types` has no binding for a module-level
+        name, so `_arg_scalar_type` (consulted by `_is_noncontainer_arg`) did
+        not see the `char *` answer for a module-level str variable.
+        """
+        global _PASS, _FAIL
+        name = "test_module_level_mixed_iterated_parameter_with_str_variable_still_refuses"
+        src = '''\
+def each(xs):
+    for x in xs:
+        print(x)
+ys = "de"
+each([4, 5])
+each(ys)
+'''
+
+        for mode in ('single-TU', 'link-mode'):
+            kwargs = ({'do_imports': True} if mode == 'single-TU'
+                      else {'link_mode': True})
+            try:
+                gimple_codegen._run_pipeline(src, filename='case.py', **kwargs)
+            except RuntimeError as e:
+                msg = str(e)
+                if "'xs'" in msg and "'each'" in msg:
+                    continue
+                print(f"FAIL  {name} [{mode}]: refused, but not for the "
+                      f"mixed parameter: {msg[:300]}")
+                _FAIL += 1
+                return
+            print(f"FAIL  {name} [{mode}]: compiled, so the binary would read "
+                  "the str as a list (SIGSEGV)")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_a_string_passthrough_beside_an_int_one_keeps_its_own_elements():
         """`def ident(x): return x` called with a list of ints AND with a
         string, in one program, must give the string call site its own
@@ -8602,24 +8927,7 @@ main()
 
     def test_tuple_unpack_of_a_boxed_dict_inside_a_method_builds():
         """Unpacking an opaque value that turns out to be a dict, from a METHOD
-        body, must pass gcc -fgimple.
-
-        `a, b = ident(self._d)` materializes the value through
-        _materialize_as_list's dict arm, which records the slot kind with
-        `mojo_list_set_kinds_uniform(result, 'p')`. That char argument was
-        emitted as `_new_val('char', "'p'")`, i.e. `_t9 = 'p';` into a `char`
-        temp. A character literal is an `int` in C, and GCC's -fgimple refuses
-        a bare int constant assigned to a char temp ("non-trivial conversion
-        in 'integer_cst'"). Only a method body is GIMPLE-tagged, so a plain
-        top-level `a, b = ident(d)` (the sibling test above) never reached it.
-        The fix is the explicit `(char)` cast every other char constant in
-        the emitters carries.
-
-        This pins the BUILD, not the printed keys: the unpacked slots are
-        still read as raw pointer words, which is a separate, pre-existing
-        defect (the same symptom `list_of_a_boxed_dict_materializes_keys_as_
-        strings` already fails on). Asserting the values here would make this
-        test red for a reason this fix does not touch.
+        body, must print the dict keys correctly.
         """
         global _PASS, _FAIL
         name = "tuple_unpack_of_a_boxed_dict_inside_a_method_builds"
@@ -8637,11 +8945,21 @@ def main():
     Box({"k": 1, "j": 2}).show()
 main()
 '''
+        want = _cpython_stdout(src)
+        if want is None:
+            print(f"FAIL  {name}: CPython does not run the fixture")
+            _FAIL += 1
+            return
         for mode in ('single-TU', 'link-mode'):
             got = _compiled_stdout(src, mode)
             if isinstance(got, tuple):
                 print(f"FAIL  {name} [{mode}]: gcc -fgimple failed:\n"
                       f"{got[1][:800]}")
+                _FAIL += 1
+                return
+            if got != want:
+                print(f"FAIL  {name} [{mode}]: compiled stdout {got!r} != "
+                      f"CPython {want!r}")
                 _FAIL += 1
                 return
         print(f"PASS  {name}")
@@ -8865,7 +9183,7 @@ main()
         The ADDRESS was never the wrong answer — CPython prints
         `<function step at 0x...>` — so the `%d` was the whole bug, and it is
         independent of the decorator-application defect (see
-        bugs/COMPILE_FAIL_decorator_application_dropped.md, whose defect 2
+        bugs/mid/COMPILE_FAIL_decorator_application_dropped.md, whose defect 2
         names it as separable). The decorator is a pass-through, not the
         scalar-returning `deco` the doc reduces from: a scalar decorator
         rebinds `step` to a non-callable, which the compiled path now refuses
@@ -10990,6 +11308,53 @@ print("%r" % p)
         print("PASS  %s (%d write sites in %d functions, each invalidating "
               "or classified)" % (name, n_sites, len(found)))
         _PASS += 1
+    def test_posthoc_class_attr_write_invalidates_the_walk_memo():
+        """`_declare_posthoc_class_attrs` appends a field to a StructDef in
+        place. The module list was already walked (so the memo holds its
+        answer), and the NEXT walk of that same list must see the new field,
+        not the memoised pre-write answer. Before the invalidation at the
+        append site, this walk returned the stale list and `extra` was
+        missing. This is the behavioural half of
+        `every_ast_mutation_site_invalidates_the_walk_memo`."""
+        global _PASS, _FAIL
+        name = "posthoc_class_attr_write_invalidates_the_walk_memo"
+        import mojo.middle.exprtypes as ET
+        import mojo.backend_gimple.module_gen as MG
+        from fire_compiler import py_tokenize, Parser, AssignStmt, IdentExpr
+        import ast_rewriter
+
+        err = None
+        try:
+            ET._walk_ast_reset()
+            src = ("class A:\n"
+                   "    def __init__(self):\n"
+                   "        self.x = 1\n"
+                   "def f():\n"
+                   "    A.extra = 7\n")
+            stmts = ast_rewriter.rewrite(
+                Parser(py_tokenize(src)).parse_module()) or []
+            before = ET._walk_ast(stmts)
+            MG._declare_posthoc_class_attrs(stmts)
+            after = ET._walk_ast(stmts)
+            declared = [n.target.name for n in after
+                        if isinstance(n, AssignStmt)
+                        and isinstance(n.target, IdentExpr)]
+            if 'extra' not in declared:
+                err = ('the walk after the write still answers from the memo: '
+                       'the declared `extra` field is missing')
+            elif after is before:
+                err = 'the memo entry for the module list was not dropped'
+        except Exception as e:  # noqa: BLE001
+            err = "%s: %s" % (type(e).__name__, e)
+        finally:
+            ET._walk_ast_reset()
+        if err:
+            print(f"FAIL  {name}: {err}")
+            _FAIL += 1
+            return
+        print(f"PASS  {name}")
+        _PASS += 1
+
     def test_struct_unpack_computed_format_compiles():
         """`struct.unpack(fmt, buf)` whose format is a VARIABLE must not
         crash the compiler.
@@ -11003,7 +11368,7 @@ print("%r" % p)
         writes it, and it is what refused Lib/zipfile/__init__.py,
         Lib/shutil.py, Lib/tempfile.py and four Lib/importlib/resources/
         modules from the readers.py closure (see
-        bugs/COMPILE_FAIL_importlib_resources_readers.md). Its own
+        bugs/mid/COMPILE_FAIL_importlib_resources_readers.md). Its own
         docstring already said "only literal formats answer"; the code did
         not.
 
@@ -13229,6 +13594,7 @@ print(run('x/y.txt'))
     _run_isolated(lambda: test_walk_ast_memo_is_transparent_and_honours_invalidation(), 'test_walk_ast_memo_is_transparent_and_honours_invalidation (line 12670)')
     _run_isolated(lambda: test_walk_ast_memo_never_answers_stale_over_real_compiles(), 'test_walk_ast_memo_never_answers_stale_over_real_compiles (line 12671)')
     _run_isolated(lambda: test_every_ast_mutation_site_invalidates_the_walk_memo(), 'test_every_ast_mutation_site_invalidates_the_walk_memo (line 12672)')
+    _run_isolated(lambda: test_posthoc_class_attr_write_invalidates_the_walk_memo(), 'test_posthoc_class_attr_write_invalidates_the_walk_memo (line 13416)')
     _run_isolated(lambda: test_walk_ast_memo_survives_the_sync_generator_hoist_writes(), 'test_walk_ast_memo_survives_the_sync_generator_hoist_writes (line 12672)')
     _run_isolated(lambda: test_scalar_arity_min_max_params_are_not_containers(), 'test_scalar_arity_min_max_params_are_not_containers (line 12673)')
     _run_isolated(lambda: test_a_forwarded_string_argument_keeps_its_type(), 'test_a_forwarded_string_argument_keeps_its_type (line 12674)')
@@ -13270,6 +13636,8 @@ print(run('x/y.txt'))
     _run_isolated(lambda: test_no_compiler_module_defines_a_function_twice(), 'test_no_compiler_module_defines_a_function_twice (line 12710)')
     _run_isolated(lambda: test_import_line_modules_matches_the_regex_it_replaced(), 'test_import_line_modules_matches_the_regex_it_replaced (line 12711)')
     _run_isolated(lambda: test_flagged_re_compile_is_not_lowered_as_the_bare_pattern(), 'test_flagged_re_compile_is_not_lowered_as_the_bare_pattern (line 12712)')
+    _run_isolated(lambda: test_set_field_read_off_a_boxed_receiver_is_a_set_not_a_list(), 'test_set_field_read_off_a_boxed_receiver_is_a_set_not_a_list')
+    _run_isolated(lambda: test_recompiling_a_struct_does_not_multiply_its_method_overloads(), 'test_recompiling_a_struct_does_not_multiply_its_method_overloads')
     _run_isolated(lambda: test_bracket_mentions_matches_the_regex_it_replaced(), 'test_bracket_mentions_matches_the_regex_it_replaced (line 12713)')
     _run_isolated(lambda: test_func_state_snapshot_covers_reset_func(), 'test_func_state_snapshot_covers_reset_func (line 12714)')
     _run_isolated(lambda: test_every_funcptr_initializer_has_a_definition(), 'test_every_funcptr_initializer_has_a_definition (line 12715)')
@@ -13281,6 +13649,10 @@ print(run('x/y.txt'))
     _run_isolated(lambda: test_list_of_a_boxed_dict_materializes_keys_as_strings(), 'test_list_of_a_boxed_dict_materializes_keys_as_strings (line 12720a)')
     _run_isolated(lambda: test_tuple_unpack_of_a_boxed_dict_inside_a_method_builds(), 'test_tuple_unpack_of_a_boxed_dict_inside_a_method_builds (line 12720b)')
     _run_isolated(lambda: test_a_string_passthrough_beside_an_int_one_keeps_its_own_elements(), 'test_a_string_passthrough_beside_an_int_one_keeps_its_own_elements')
+    _run_isolated(lambda: test_a_str_call_beside_a_list_call_does_not_make_the_parameter_a_list(), 'test_a_str_call_beside_a_list_call_does_not_make_the_parameter_a_list')
+    _run_isolated(lambda: test_an_iterated_parameter_passed_a_list_and_a_str_compiles_per_kind(), 'test_an_iterated_parameter_passed_a_list_and_a_str_compiles_per_kind')
+    _run_isolated(lambda: test_a_mixed_iterated_parameter_with_a_str_variable_still_refuses(), 'test_a_mixed_iterated_parameter_with_a_str_variable_still_refuses')
+    _run_isolated(lambda: test_module_level_mixed_iterated_parameter_with_str_variable_still_refuses(), 'test_module_level_mixed_iterated_parameter_with_str_variable_still_refuses')
     _run_isolated(lambda: test_a_returned_heterogeneous_list_keeps_its_slot_kinds(), 'test_a_returned_heterogeneous_list_keeps_its_slot_kinds (line 12721)')
     _run_isolated(lambda: test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not(), 'test_next_on_a_user_struct_lowers_and_its_for_loop_says_why_not (line 12722)')
     _run_isolated(lambda: test_the_generic_repr_cluster_is_emitted_only_where_it_is_reachable(), 'test_the_generic_repr_cluster_is_emitted_only_where_it_is_reachable (line 12723)')
@@ -13362,7 +13734,7 @@ def main():
     print(step(7))
 """), 'nested_decorator_factory_still_compiles')
     # A decorated `def` NESTED in a function body is rebound like a top-level
-    # one (bugs/COMPILE_FAIL_decorator_application_dropped.md): before this,
+    # one (bugs/mid/COMPILE_FAIL_decorator_application_dropped.md): before this,
     # `step(n)` silently called the undecorated body and printed 8, not 16.
     # A module-level decorator and a factory are both in scope from inside.
     _run_isolated(lambda: test("nested_decorator_is_applied_at_runtime", """\
@@ -13419,6 +13791,41 @@ if True:
 
 print(step(7))
 """, "inside a module-level block"), 'decorator_in_a_module_level_block_is_refused')
+
+    # Same-module wraps using a class-based partial (functools.wraps style)
+    # must compile and apply correctly; the decorator rebinding/refusal must
+    # not block a callable returned by a class constructor.
+    _run_isolated(lambda: test("same_module_wraps_with_class_partial_applies_decorator", """\
+class partial:
+    def __init__(self, func, *args, **kwargs):
+        self.func = func
+        self.args = args
+        self.kwargs = kwargs
+    def __call__(self, *args, **kwargs):
+        new_args = self.args + args
+        new_kwargs = dict(self.kwargs)
+        new_kwargs.update(kwargs)
+        return self.func(*new_args, **new_kwargs)
+
+def update_wrapper(wrapper, wrapped):
+    wrapper.__wrapped__ = wrapped
+    return wrapper
+
+def wraps(wrapped):
+    return partial(update_wrapper, wrapped)
+
+def f(x):
+    return x + 1
+
+@wraps(f)
+def wrapper(x):
+    return f(x) * 2
+
+def main():
+    print(wrapper(5))
+
+main()
+"""), 'same_module_wraps_with_class_partial_applies_decorator')
 
 
     # `len()` of a value the codegen could not type, where that value is a

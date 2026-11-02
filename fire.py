@@ -242,7 +242,7 @@ def _extract_formal_flags(args: list):
     but a proved rewrite is only as good as the pass's ability to decide the
     rewrite's side conditions, and the flag is how the corpus and the
     differential fuzzer are run both ways so the OUTPUT can be compared.
-    `bugs/FORMAL_peephole_rules_without_proofs.md` has what is enabled and what
+    `bugs/formal/FORMAL_peephole_rules_without_proofs.md` has what is enabled and what
     is not.
     """
     formal = False
@@ -1382,7 +1382,7 @@ def main():
         # linked shared library arm64`.  That is the silent-wrong-answer shape,
         # and it is worse on this command than elsewhere because the whole
         # subject is a PER-EXPORT contract: a reader measuring the x86-64
-        # boundary (bugs/FORMAL_dylib_export_loops_and_frame_bounds.md §OPUS-6)
+        # boundary (bugs/formal/FORMAL_dylib_export_loops_and_frame_bounds.md §OPUS-6)
         # would get an arm64 answer and conclude "the same argument applies",
         # which is precisely the hypothesis the document says must not be
         # assumed.  So refuse it, and name what is missing.
@@ -1472,6 +1472,7 @@ def main():
 
     dump_full = '--dump-full' in sys.argv
     dump = '--dump' in sys.argv
+    dump_serial = '--serial' in sys.argv
     # Strip flags from sys.argv so input_file = sys.argv[1] works.
     # sys.argv.remove() is broken in the compiled binary (list method
     # dispatch fails), so rebuild the list instead -- via an explicit
@@ -1490,7 +1491,7 @@ def main():
     if dump_full or dump:
         _filtered_argv = []
         for a in sys.argv:
-            if a not in ('--dump-full', '--dump'):
+            if a not in ('--dump-full', '--dump', '--serial'):
                 _filtered_argv.append(a)
         sys.argv = _filtered_argv
 
@@ -1567,12 +1568,23 @@ def main():
             print("✓ Generated " + basename + ".ci (arm64 backend listing)", file=sys.stderr)
             return
         import gimple_codegen
-        c_code = gimple_codegen.compile_to_gimple(
-            src, do_imports=True, filename=input_file, auto_gpu=auto_gpu)
-        f_out = open(basename + ".ci", "w")
-        f_out.write(c_code)
-        f_out.close()
-        print("✓ Generated " + basename + ".ci (transitive closure)", file=sys.stderr)
+        if dump_serial:
+            c_code = gimple_codegen.compile_to_gimple(
+                src, do_imports=True, filename=input_file, auto_gpu=auto_gpu)
+            f_out = open(basename + ".ci", "w")
+            f_out.write(c_code)
+            f_out.close()
+            print("✓ Generated " + basename + ".ci (serial, --serial)", file=sys.stderr)
+        else:
+            # Phase A/B: frozen-snapshot emission (parallel parse, frozen snapshot emission)
+            # The C11 lock-free mmap queue is deferred; multiprocessing.Pool is used instead.
+            # See bugs/mid/PERF_dump_full_closure_is_single_threaded.md steps 1-4.
+            c_code = gimple_codegen.compile_to_gimple_parallel_frozen(
+                src, do_imports=True, filename=input_file, auto_gpu=auto_gpu)
+            f_out = open(basename + ".ci", "w")
+            f_out.write(c_code)
+            f_out.close()
+            print("✓ Generated " + basename + ".ci (parallel frozen-snapshot, queue deferred)", file=sys.stderr)
         return
 
     # If --dump requested, generate .tok, .ast, .ci, .pyi files

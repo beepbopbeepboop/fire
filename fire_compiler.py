@@ -872,6 +872,18 @@ class StructDef:
     # `BytesIter[origin]` refused compilation on precisely these bodies
     # (2026-10-21).
     type_param_names: list = field(default_factory=list)  # all bracket names
+    # Fields the COMPILER minted (a member read or assigned on an instance
+    # but declared by no annotation, class-body default or `__init__`
+    # self-assignment: `p.b = 5` in `main` for `class P: def __init__(self):
+    # self.a = 1`). Every instance of the struct carries the storage, so
+    # `hasattr(q, 'b')` on an instance that never had `b` set would otherwise
+    # answer True. Each name here gets a bit in the hidden
+    # `__mojo_present[]` word array of the C struct (see
+    # mojo/middle/types.py `presence_set_stmt`), set by every codegen store
+    # and read by the generated getattr dispatch. Order is the bit index, so
+    # it is append-only and lives on the SHARED StructDef: every generator
+    # that lays out or stores into this struct must agree on it.
+    presence_fields: list = field(default_factory=list)
 
 @dataclass
 class TraitDef:
@@ -1317,7 +1329,7 @@ def _prefix_is_interpolated(prefix: str) -> bool:
     field spans **lines**, which `test_formal_libc_symbol.py` was the one
     file in the 2026-10-04 sweep to meet (its refusal read `unterminated
     string literal`). It is fixed — at `cca2a17f`, recorded at
-    `bugs/FORMAL_sweep_work_map.md` §3.1's `b13` row and §1.13's `#### 1.5` —
+    `bugs/formal/FORMAL_sweep_work_map.md` §3.1's `b13` row and §1.13's `#### 1.5` —
     and `test_string_literal_lexing.py`'s `LITERALS` block is what holds it
     there. With no shared predicate the scanner asked "is there a line end
     here?" without ever asking "am I inside code?", and CPython's rule for
@@ -2440,9 +2452,7 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
                 # of every quote's offset - measured at 1.0e9 byte reads
                 # self-hosted on this file's own 349KB source, and quadratic
                 # in it (see
-                # bugs/CODEGEN_selfhost_tokenize_region_eq_quadratic.md,
-                # which is where the runtime side of the same cost is
-                # measured).
+                # fixed: cached char access in `mojo_char_at_str`).
                 is_triple = False
                 if i + 2 < n:
                     if src[i + 1] == c:
@@ -2498,7 +2508,7 @@ def py_tokenize_named(src: str, filename: str) -> list[Token]:
                     # depth; without that this branch is dead code, which is the
                     # shape the bug had — the first of the two halves was
                     # missing and this is the second. Fixed at `cca2a17f` (the
-                    # `b13` round's §5, now `bugs/FORMAL_sweep_work_map.md`
+                    # `b13` round's §5, now `bugs/formal/FORMAL_sweep_work_map.md`
                     # §3.1's `b13` row), and held by
                     # `test_string_literal_lexing.py`.
                     interpolated = _prefix_is_interpolated(src[start:i])
@@ -3495,10 +3505,13 @@ def _namedtuple_spec(call, target: str):
     lowers (the caller then leaves it for the compiled path's refusal).
 
     Lowered: `Name = namedtuple('Name', ['x', 'y'])` (or the `'x y'` / `'x, y'`
-    string spelling, or a tuple of literals), with the typename equal to the
-    bound name, no keyword arguments, and plain identifier field names. Any
-    other shape (a different typename, `rename=`/`defaults=`, a computed field
-    list) is not guessed at: None, and it is refused by name."""
+    string spelling, or a tuple of literals), no keyword arguments, and plain
+    identifier field names. The typename may differ from the bound name
+    (`_CacheInfo = namedtuple("CacheInfo", ...)`): the class is declared under
+    the BOUND name, which is what the program refers to, and the typename is
+    only the text its repr shows. Any other shape (`rename=`/`defaults=`, a
+    computed field list) is not guessed at: None, and it is refused by name.
+    Returns `(bound name, field names, typename)`."""
     func = call.func
     if isinstance(func, IdentExpr):
         if func.name != 'namedtuple':
@@ -3512,7 +3525,7 @@ def _namedtuple_spec(call, target: str):
     if call.kwargs or len(call.args) != 2:
         return None
     typename, spec = call.args
-    if not isinstance(typename, StringLiteral) or typename.value != target:
+    if not isinstance(typename, StringLiteral) or not typename.value.isidentifier():
         return None
     if isinstance(spec, StringLiteral):
         names = spec.value.replace(',', ' ').split()
@@ -3528,7 +3541,7 @@ def _namedtuple_spec(call, target: str):
             return None
     if len(set(names)) != len(names):
         return None
-    return typename.value, names
+    return target, names, typename.value
 
 
 def _namedtuple_arg_type(e):
@@ -3606,11 +3619,13 @@ def _namedtuple_field_types(nodes: list, name: str, fields: list) -> list:
     return [k or 'int' for k in kinds]
 
 
-def _namedtuple_class_source(name: str, fields: list, types: list) -> str:
+def _namedtuple_class_source(name: str, fields: list, types: list, shown: str) -> str:
     """Source text of the static class a literal namedtuple lowers to: typed
     `__init__`, `_replace` returning a fresh instance, and a `__repr__` in the
     namedtuple's `Name(x=1, y='a')` spelling (`repr()` of each field gives the
-    quoting its type needs). `types` comes from `_namedtuple_field_types`."""
+    quoting its type needs). `types` comes from `_namedtuple_field_types`;
+    `shown` is the typename the repr prints (the bound name unless the
+    program's `namedtuple("Typename", ...)` argument differs)."""
     params = ', '.join(f'{f}: {t}' for f, t in zip(fields, types))
     names = ', '.join(fields)
     lines = [f'class {name}:']
@@ -3625,9 +3640,9 @@ def _namedtuple_class_source(name: str, fields: list, types: list) -> str:
     lines.append('    def __repr__(self) -> str:')
     if fields:
         pieces = [f'"{f}=" + repr(self.{f})' for f in fields]
-        body = '"' + name + '(" + ' + ' + ", " + '.join(pieces) + ' + ")"'
+        body = '"' + shown + '(" + ' + ' + ", " + '.join(pieces) + ' + ")"'
     else:
-        body = '"' + name + '()"'
+        body = '"' + shown + '()"'
     lines.append(f'        return {body}')
     return '\n'.join(lines) + '\n'
 
@@ -3722,7 +3737,9 @@ def desugar_namedtuples(stmts: list) -> list:
         spec = _namedtuple_spec(st.value, st.target.name)
         if spec is None:
             continue
-        name, fields = spec
+        name = spec[0]
+        fields = spec[1]
+        shown = spec[2]
         types = _namedtuple_field_types(nodes, name, fields)
         use = _namedtuple_tuple_use(nodes, name)
         if use is not None:
@@ -3730,7 +3747,7 @@ def desugar_namedtuples(stmts: list) -> list:
                 f'cannot compile module: {use} a namedtuple {name} value; the compiled '
                 'path lowers it as a class with named fields and has no tuple protocol '
                 '(bug:COMPILE_FAIL_collections___init__)')
-        cls = Parser(py_tokenize(_namedtuple_class_source(name, fields, types))).parse_module()
+        cls = Parser(py_tokenize(_namedtuple_class_source(name, fields, types, shown))).parse_module()
         if len(cls) != 1 or not isinstance(cls[0], StructDef):
             raise RuntimeError('namedtuple lowering did not produce a class: ' + name)
         cls[0].line = st.line
@@ -5202,7 +5219,7 @@ class Parser:
                 # The compiled path no longer requires the rename — a
                 # comprehension's target gets its own binding and the enclosing
                 # one is restored afterwards, in `emit_infra.py`'s
-                # `_compr_bind_target` / `_compr_restore_target`, regression
+                # `_compr_bind_target` / `_restore_binding`, regression
                 # `comprehension_target_shadows_struct_local` in
                 # `test_gimple_runner.py`. The rename stays: it is free, and it
                 # keeps this function's own C output identical to what the
@@ -6206,7 +6223,22 @@ class Parser:
             return StringLiteral(_val, line=line, col=col, is_raw=_all_raw)
         _merged = ''
         for _r in raws:
-            _merged += self._string_literal_inner(_r)
+            _inner = self._string_literal_inner(_r)
+            if not self._raw_string_is_ftstring(_r):
+                # A plain piece is LITERAL text, but the merged body is an
+                # f-string, where `{...}` is an interpolation and a backslash
+                # is decoded. Without escaping, `f"[{a}]" "{ q }"` interpolated
+                # `q` (CPython: `[A]{ q }`), and the compiled path lowered the
+                # `{ mojo_exc_pending_set(0); ` in cpp_core's C-text emitter as
+                # a call. Double the braces, except a `\N{NAME}` escape, which
+                # is one token; a raw piece's backslashes are doubled too.
+                if self._raw_string_is_raw(_r):
+                    _inner = _inner.replace('\\', '\\\\')
+                _inner = re.sub(r'(\\N\{[^{}]*\})|([{}])',
+                                lambda _m: _m.group(1) if _m.group(1)
+                                else _m.group(2) * 2,
+                                _inner)
+            _merged += _inner
         _dq3 = '"' * 3
         _sq3 = "'" * 3
         # `is_interpolated=True` on all three returns, and the evidence is the
@@ -7942,13 +7974,25 @@ class Parser:
         that collect statements, keeps every `_parse_stmt` branch free to return
         either without each caller having to know which it got.
         """
+        _stmt_line = self._peek().line
         produced = self._parse_stmt()
         if produced is None:
             return
         if isinstance(produced, list):
+            for _pn in produced:
+                self._stamp_stmt_line(_pn, _stmt_line)
             stmts.extend(produced)
         else:
+            self._stamp_stmt_line(produced, _stmt_line)
             stmts.append(produced)
+
+    def _stamp_stmt_line(self, node, line):
+        """Give a statement the source line it STARTS on when its own parse did not (`if`,
+        `while`, `raise`, `def`, ... were built with `line` left 0). `f_lineno` and a
+        traceback's `tb_lineno` are statement lines, and the `#line` directives of the
+        generated C were missing for these statements."""
+        if getattr(node, 'line', 1) == 0 and line > 0:
+            node.line = line
 
     def _parse_block(self) -> list:
         # Support inline single-statement body: "def foo(): return x" on one line

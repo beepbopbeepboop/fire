@@ -1,0 +1,880 @@
+# FORMAL_generic_monomorph_scope: what a generic's instantiation does NOT cover
+
+**Area:** `formal/monomorph.py` · **Status:** OPEN — the mechanism landed
+2026-10-03 on `work/formal15-generic-monomorph` and these are its measured
+remainders, not a proposal · **Layer:** 1/5 of the formal work
+
+**Status 2026-10-12 (`work/formal296-docs`): §2's ALIASED half is FIXED, and it
+is places 1 and 2 in ONE table rather than the three the `formal19-3-r2`
+measurement named — place 3 never has to be decided.**
+
+`from pairlib import Pair as P` then `P[Int]()` now builds and RUNS on both
+architectures (measured: a `Pair[Int]` + `Pair[Bool]` program through the alias
+prints 7 / 1 / 3, CPython's own answers). What landed is one reader,
+`formal/monomorph.py::_import_aliases` — a `from … import … as …` local spelling
+to the DEFINING name, read off `model.import_bindings`, `FromImportStmt` only
+because `import m as n` binds a MODULE and a module is not a template spelling —
+asked by BOTH readers the two spellings have to agree on:
+`all_instantiation_calls` keys the demand on the defining name, and
+`rewrite_instantiation_calls` resolves the call site's base the same way before
+its `demap` lookup. The guard is the shadow rule both readers already had: a
+name the reading scope binds by VALUE is not an alias (`_shadowed_here` at the
+module level, `_names_bound_in` inside a function), so `var P = 5` beside
+`P[Int]()` keeps its brackets and is not rewritten into a struct constructor.
+
+**Why place 3 is not needed, which is where `formal19-3-r2` stopped.** That
+round's place 2 rewrote the call's BASE (`P` → `Pair`) in the AST, so the call
+arrived at the bracketed-callee scan as `Pair[Int]()` and the scan then asked
+the module symbol table for a name the source never bound a value to. This fix
+never produces that intermediate: the alias mapping is internal to the two
+monomorph readers, and `rewrite_instantiation_calls` rewrites the aliased call
+STRAIGHT to the mangled boundary symbol (`Pair_1_T_3_Int`) — the same rewrite
+the unaliased spelling takes. The call the scan finally sees is a bare call to a
+struct this image has a declaration for, so the scan has nothing to refuse; and
+`collect_module_symbols` is untouched, which is exactly what keeps a bare read
+of the defining name (a name the source never bound) refused rather than
+resolving through the import's other spelling.
+
+Pinned by `test_formal_monomorph.py`'s `an aliased import of a template is
+instantiated` (both architectures, two instantiations through the alias, a
+CPython differential) and `an aliased bracket is attributed to the template`
+(the decision without a build: the demand, the rewrite, the shadow guard, and
+that `import m as n` is not an alias). Measured after: `test_formal_monomorph.py`
+40/40, `test_formal_run.py` 1209/1209, `test_formal_imports.py` 91/91,
+`test_formal_specialization.py` 23/23, `test_refusal_taxonomy.py` 362/362;
+`test_formal_dylib.py`'s two failures are pre-existing and measured identical
+with this change reverse-applied.
+
+**What is still open in §2 is the DOTTED half (`L.Pair[Int]()`), and §1a, §3,
+§4 and §8 below are unchanged.**
+
+**§9 and §9a are DONE (2026-10-03 `formal25-3`, 2026-10-04 `formal18-4`), so
+read §9a before §1**: §1a says §1's construct was unmeasurable until §9 was
+fixed, and §1a is still true — §9a removed the LIBRARY half of the same wall,
+which was a third bug underneath it and is named there. What is left is §1a
+itself (a name resolution, and an ABI decision), §2's dotted application, §3
+(comptime-valued parameters), §4 (a type declared in the consumer), §8 (trait
+bounds). The cross-module-library half — a LIBRARY that applies ANOTHER
+module's template — is FIXED (`build_module_dylib` now hands the imported
+templates' demap and declarations to `compile_formal_dylib`, beside §9a's own
+half; `test_formal_monomorph.py`'s "a library that applies another module's
+template instantiation").
+
+**Status 2026-10-12 (`work/formal310-docs`): §2's ALIASED half is FIXED, and it
+did NOT need the place-3 name-resolution decision the 2026-10-05 block below
+left as its finding.** `from pairlib import Pair as P` then `P[Int]()` now
+builds and RUNS on both architectures and agrees with CPython — a struct
+template with two `T`s, two instantiations (`Int` and `Bool`), a field write, a
+field read and a method call, all through the alias
+(`test_formal_monomorph.py::test_an_aliased_import_of_a_template_is_instantiated`);
+a `def twice[T]` imported as `t` and applied as `t[Int](21)` answers 42 too.
+
+The cause was the one the block measured: `all_instantiation_calls` keys a
+demand on the name AS SPELLED, so `P[Int]()` asked for a template called `P`
+that no module declares, the instantiation was never requested, and the call was
+refused by the bracketed-callee scan. **The fix is a NAME MAPPING in the two
+readers that already have to agree about the bracket, and it is not the tree
+rewrite the block proposed** — `formal/monomorph.py::_import_aliases` folds
+`model.import_bindings`' DEFINING name in front of `all_instantiation_calls`
+(so the demand is asked under `Pair`) AND in front of
+`rewrite_instantiation_calls` (so the call site is rewritten to the mangled
+name, including the single-instantiation `Base.<member>` read). Two readers of
+one bracket, one alias table, and the rewrite reaches the scan already spelled
+`Pair_1_T_3_Int()` — which is why the block's place 3,
+`collect_module_symbols` publishing the DEFINING name, was **not needed**: a
+tree rewrite placed beside `_substitute_module_constants` (which runs AFTER
+`_imported_structs`) could not reach the demand walk, which re-parses the source
+TEXT, so the demand stayed empty and only the spelling changed — exactly the
+measurement the block recorded. Doing the mapping in the demand walk and the
+rewrite instead makes the places the block named 1 and 2 sufficient, and it
+never touches the name-resolution table the block declined to change.
+
+`dotted_specialization_refusal`'s docstring is corrected with it (it claimed the
+aliased form does not work); the emitted sentence's "ALIASED form" clause is
+about the MODULE alias (`import … as L`), which is a different construct and is
+still refused.
+
+**What is still open is §2's DOTTED half** (`L.Pair[Int]()`), unchanged: the
+recogniser/ABI decision the section opens with, because
+`mojo/middle/comptime.specialization_name` answers `None` for a dotted base BY
+DESIGN. Verified: `test_formal_monomorph.py` 39/39 (one new row),
+`test_formal_specialization.py` 23/23, `test_formal_imports.py` 91/91,
+`test_formal_run.py` 1209/0, `test_refusal_taxonomy.py` 362/362.
+
+The mechanism itself is `formal/monomorph.py` and its two call sites in
+`formal/imports.py` (`instantiation_demands`, `imported_instantiations`); the
+contract it implements is `doc/ABI.md` §Generics. What follows is what it
+covers, ordered by how many real files each item is likely to be worth, with
+the reason each is not merely unimplemented but **refused or inert today** — so
+a reader knows which of them is a wrong answer waiting to happen and which is
+simply a gap.
+
+None of these is a regression: before 2026-10-03 the whole class was one
+refusal (`formal/build.py::no_public_api_reason`, "a parametric type has no
+single boundary layout either"), so every item below was already refused.
+
+---
+
+## 1. A type argument in a NON-CALL position is not a demand
+
+**Status 2026-10-08 (`work/formal168-docs`): the LOCAL `VarDecl`-annotation half
+is FIXED.** A `var m: Marker[Int] = Marker(…)` now writes a demand from the
+annotation and rewrites the bare construction, so the local non-call position is
+no longer the reason such a program is refused;
+`test_formal_monomorph.py`'s `a type argument in a local annotation is a demand`
+and `a library with an annotated construction publishes it` pin it. What the
+paragraph below still describes is the CROSS-IMAGE half (`keep(p: Pair[Int])` in
+a library the consumer applies), and that is the name-resolution/ABI decision
+§1a records — not the local case. The reader is
+`formal/monomorph.py::annotated_construction_demands` (plus
+`own_annotation_demands`, the own-template table both demand sets merge).
+
+**The construct.** `def keep(p: Pair[Int]) -> Int` , `var xs: List[Pair[Int]]`,
+a `Pair[Int]` field's annotation, a `Pair[Int]` in a `return_type`. The
+instantiation exists — `Pair_1_T_3_Int` is what the boundary symbol has to be,
+because `monomorphize.mangle` is the one mangler and it is injective (§6) — and
+nothing looks for it, so the program is refused with
+`formal/model.py::specialization_call_refusal` at the constructor that has to
+bind it.
+
+**Why it is not a third fix in the same commit.** `formal/monomorph.py`'s demand
+walk reads CALL SITES because that is the only place the type arguments are
+written as a bracket. A parameter annotation is a STRING in
+`fire_compiler.FunctionDef.params` (`(name, type)`), a field's is a string on
+`F.VarDecl`, and a `return_type` is an expression — three different shapes, none
+of them a subscript node, so recognising them means recognising
+`Pair[Int]`-shaped text in a type position, which is a second spelling rule
+beside the AST one rather than an extension of it. It is the right next step and
+it is a step, not a line.
+
+**What it costs to measure.** `grep -c 'Pair\[' ` over a stdlib module is not
+the measurement; `formal_declared_param_census.py`'s harness is, and it already
+walks parameter annotations.
+
+### 1a MEASURED 2026-10-04 (`formal25-3`): §1 is not a DEMAND question, and the
+### wall in front of it is bigger than §1
+
+**Status 2026-10-13 (`work/formal361-docs`): the wall is the FRAME case and only
+the frame case, and both halves are PINNED now** —
+`test_formal_monomorph.py`'s "a parameter annotation of an imported
+instantiation", both architectures. Re-measured, `def keep(p: Pair[Int])`:
+
+| `Pair` | what the parameter is | today |
+|---|---|---|
+| **one field** | a VALUE (one word) | **builds and answers CPython** — nothing is compared across the boundary, so the type POSITION resolves for free |
+| **two fields** | a FRAME address | **refused**, exactly the sentence §1a quotes: the contract says the parameter is a holder of `Pair` (the TEMPLATE) and the caller hands it `Pair_1_T_3_Int` (the INSTANTIATION) |
+
+So this is narrower than "the annotation is unresolved": it is unresolved only
+where the layout is compared, which is a FRAME. §1a's ABI question ("a library
+asked for both `Pair[Int]` and `Pair[Bool]` has ONE `keep`") is likewise
+answered for value parameters — a library with `keep_int(p: Pair[Int])` and
+`keep_bool(p: Pair[Bool])` builds and answers CPython on both architectures,
+because the library is compiled per DEMAND SET and a one-word parameter crosses
+with no name to compare. The frame case is the remainder, and the refusal is
+true of the tree as written.
+
+**The one reader that has to change is `model.parameter_declared_structs`.** It
+answers `decls.get(annotation_base_name(ann))`, and `annotation_base_name` drops
+the type ARGUMENTS deliberately (`List[Int]`/`List[String]` are one
+representation here), so `p: Pair[Int]` resolves to the template and the contract
+publishes the template's name. The instantiation's mangled name already exists in
+the compilation (`decls` holds it, and the call-site rewrite is driven from
+`formal/monomorph.py`'s `{(base, args): mangled}` demap), so the resolution is a
+LOOKUP and not a second recogniser — but the demap is not in `_prepare_functions`'
+scope, and FIVE callers ask `parameter_declared_structs` (the frame contract and
+the library's own field accesses among them), so threading it in changes what the
+whole frame analysis answers about one instantiated parameter. That is a
+corpus-wide change and not a patch, which is why this session pinned the boundary
+instead of taking it.
+
+The cost-to-measure line above was followed, and the measurement moves the item.
+**The demand is recorded and the layout crosses; what is missing is that a type
+POSITION is not RESOLVED to the instantiation's name**, and the first place that
+shows is the cross-image frame-holder contract, which compares names.
+
+Four programs, each built on both architectures with
+`fire.py build --formal --no-prove`:
+
+| # | shape | before |
+|---|---|---|
+| 1 | `struct Box[T]: var v: T` + `Box[Int]()` in ONE file | **refused by name** — §9, FIXED 2026-10-04 |
+| 2 | `def twice[T]` + `twice[Int](n)` in ONE file | **builds** (the local specialisation machinery) |
+| 3 | library declares `struct Pair[T]` + a method; program applies `Pair[Int]()` and calls the method | **refused by name** — §9, FIXED 2026-10-04 |
+| 4 | library declares `struct Pair[T]` **and** `def keep(p: Pair[Int]) -> Int`; program applies `Pair[Int]()` and passes it to `keep` | **refused, and the message is the point** |
+
+Row 4's message, verbatim:
+
+```
+build: a Pair receiver is passed to keep() at argument position 0, and keep's own
+manifest says the parameter in that position is a frame holder of Pair: the module
+that defines keep() compiled it that way, so a field re…
+```
+
+`Pair` is the TEMPLATE and `Pair_1_T_3_Int` is the instantiation. `keep` is
+compiled inside the library, where its parameter annotation reads `Pair[Int]` and
+resolves to the template's own name; the caller holds the instantiation, because
+that is the only name it was given. So the demand, the mangling and the layout
+all worked — row 3 gets as far as a method call — and what refuses is two
+spellings of one type.
+
+**So §1's next step is not a second spelling rule; it is a NAME RESOLUTION, and
+it carries a question this document has not asked.** `libA` is compiled ONCE per
+demand set (`demands_key` is part of the artifact's CAS key), and `keep`'s
+annotation names a type whose instantiated name depends on that set. A library
+asked for both `Pair[Int]` and `Pair[String]` has ONE `keep`, so either it is
+compiled per instantiation of the types in its signature — i.e. a function whose
+signature mentions an instantiated type is itself a template — or the annotation
+resolves to a set-independent name and the per-parameter contract carries the
+instantiation rather than a name. **Both are ABI decisions, which is why this
+document is where they belong and a patch is not.**
+
+And the measurement §1 asked for is **0 programs today**, for a reason worth
+recording: a program that needs an instantiation has to write the bracket
+somewhere it can be seen. The only way to obtain a `Pair[Int]` value without
+writing `Pair[Int]()` is a function that returns one — and a function that
+CONSTRUCTS one writes the bracket in the module that declares the template, which
+is row 1's shape. **§1 was unmeasurable until §9 was fixed**, which is the order
+the two were in.
+
+---
+
+## 2. A DOTTED application — `mod.Pair[Int]()`
+
+**Status 2026-10-13 (`work/formal377-docs`): the ALIASED IMPORT half is FIXED,
+and §2a's paragraph saying that spelling does not work is now STALE. What is
+left is the module-alias DOTTED spelling this section is named for.**
+
+Two spellings were called "the aliased form" and only one of them was the
+module alias. `from pairlib import Pair as P` then `P[Int]()` was REFUSED
+because the demand walk read `P` where the template is `Pair`; it now builds,
+runs and answers CPython on both architectures, because the call site's own
+spelling is resolved to the DEFINING module's name through the same import
+table both backends already resolve a call site through
+(`formal/imports.py::imported_bindings`): `formal/monomorph.py`'s
+`local_defining_names` is asked by the demand walk (`all_instantiation_calls`)
+and by the rewrite (`rewrite_instantiation_calls`), so the name the library is
+asked to instantiate and the name the call site is rewritten to cannot
+disagree. The dotted refusal's message and its docstring are corrected with it.
+
+What is still refused is the DOTTED base: `import pairlib as L` then
+`L.Pair[Int]()`. That is not a name resolution — the recogniser itself
+(`mojo/middle/comptime.specialization_name`) answers `None` for a dotted base,
+and it cannot simply answer `Pair`, because the demand would then be attributed
+to whichever imported module declares a `Pair` rather than to the module `L`
+names. So the recorded next step is unchanged: a `specialization_name` that
+answers the TEMPLATE for a dotted base and leaves the module to its caller, a
+`demands` that attributes it to the module the chain names, and §1a's ABI
+decision for the library's own signature. Pinned by
+`test_formal_monomorph.py`'s `an aliased import of a template is instantiated`
+(both spellings of a struct AND a function template, both architectures,
+against CPython) whose subject is the half that landed, and by
+`a dotted application says which word is the module` for the half that did not.
+
+**Status 2026-10-04 (`work/formal19-3`): STILL REFUSED, and the refusal was
+FALSE about correct code in three separate ways until this round. That is what
+landed; the recogniser is unchanged and the item stays.** *(2026-10-12: the
+ALIASED half of this item is fixed — see the Status at the head of the file; the
+DOTTED half this paragraph is about is unchanged.)*
+
+**The construct.** `import std.collections.binary_heap as bh`, then
+`bh.BinaryHeap[Int]()`.
+
+**Why it is refused rather than demanded.**
+`mojo/middle/comptime.specialization_name` — the one recogniser of the shape,
+which `formal/model.py::subscript_callee_names` and both backends'
+`_specialization_of` already ask — answers `None` for a dotted base, BY DESIGN
+(`formal/model.py::refuse_a_dotted_specialized_callee_names` is what depends on
+it). Widening it here would mean a second recogniser that disagrees with the
+one every backend consults, and the disagreement's failure mode is a call bound
+to the wrong module's instantiation. **That reasoning is unchanged and is the
+whole of why §2 is still open.**
+
+### 2a MEASURED: the refusal named the MODULE as the template
+
+**What was run.** `fire.py build --formal --no-prove` on both architectures, over
+a two-file tree — `pairlib.mojo` declaring `struct Pair[T]` and a
+non-template function so the library itself builds, `main.mojo` with
+`import pairlib as L` then `L.Pair[Int]()`. Both machines refused:
+
+```
+build: L[…](…) calls a name this unit does not compile, so the brackets cannot
+be bound. If `L` is a generic of another module then its instantiation is the
+boundary symbol … so a call arriving here asked for none: its brackets named no
+type argument, named a value rather than a type, or spelled the template as
+`module.L`. Write it as `L[<a type>](…)` and the library will carry the
+instantiation …
+```
+
+**Three claims, and every one of them is false about the program in front of the
+reader.** `formal/build.py`'s bracketed-callee scan names a call by the ROOT of
+its dotted chain (`base_name = root_ident.name`), so `L.Pair[Int]()` arrived as
+the name `L`:
+
+1. **`L` is the MODULE**, not a template, so "If `L` is a generic of another
+   module" describes a word that is one;
+2. **`L[<a type>](…)` is not a spelling of anything** — it is a subscript of a
+   module object, which is the storage-less construct
+   `module_state_no_storage` exists for;
+3. **"the call arriving here asked for none" is exactly the diagnosis this case
+   must not give.** The brackets named a type argument perfectly well. The
+   reason the call arrived here is that the recogniser cannot see a dotted base
+   — the opposite of a missing demand.
+
+**And there was a second, worse one behind it**, which is the reason this was
+worth a session rather than a reword:
+`formal/build.py::_bracketed_export_gap` asks `doc/ABI.md`'s export rule about
+that same root name, and `L` resolves to `pairlib` and is not in
+`pairlib`'s own published set — **because a module never publishes its own
+NAME**. So the reader was told the library exports no such symbol, which is a
+sentence about a LIBRARY's boundary on a program whose problem is in the
+consumer. That half is now `None` for any dotted base, with the reason in its
+docstring.
+
+**What landed.** `formal/model.py::dotted_specialization_refusal` is a whole
+function, not a clause of `specialization_call_refusal`, because every sentence
+of the bare-name text is false here. It names the module, the template, the
+REASON (`specialization_name` answers `None` for a dotted base BY DESIGN, and a
+second recogniser that disagreed with it would bind the call to the wrong
+module's instantiation), and a spelling that is measured to work. The sweep
+tables gained a row for it in BOTH directions — a family and a cause, each
+above `"would bind"`, because the new text contains "cannot bind" and that row
+would otherwise file a recogniser's gap under the link line (measured: it did,
+before the marker was added). The bare-name spelling of the same construct also
+gained its missing FAMILY row; it had a CAUSE row and classified as
+`other refusal` — the bucket `tools/formal_sweep.py`'s own docstring calls
+"nobody has looked" — for one of the corpus's larger single rows.
+
+**The ALIASED IMPORT form was NOT unaffected, and the paragraph above was wrong
+about it.** Measured on this tree (2026-10-04): `from pairlib import Pair as P`
+then `P[Int]()` was REFUSED with `specialization_call_refusal` naming `P`,
+because the demand walk read `P` where the template is `Pair` and a struct
+template's instantiation is emitted under the mangled name.
+`formal/imports.py::imported_bindings` maps an alias back to its defining name,
+and the demand walk was not consulting it for a bracket argument; the demand
+half and the rewrite half are both fixed as of 2026-10-13 (see the Status at the
+head of this section), so this paragraph describes the gap as it was measured
+rather than the tree. It is kept because the measurement is what identified the
+table that fixes it: the alias mapping already existed for the emitters, and the
+missing caller was the demand walk.
+
+**Measured:**
+
+```
+python3 test_formal_monomorph.py     PASS=24 FAIL=0   (22 rows, two of them new)
+python3 test_refusal_taxonomy.py     PASS (271/271 checks, 47 families, 67 causes)
+python3 test_formal_specialization.py PASS=18 FAIL=0
+python3 test_formal_dylib.py         PASS=24 FAIL=0
+```
+
+**What is still open is the recogniser, and it is an ABI decision rather than a
+patch** — unchanged from the section above. What a fix needs, in order: a
+`specialization_name` that answers the TEMPLATE for a dotted base and leaves the
+module to its caller (which is what keeps it one recogniser rather than two);
+`formal/monomorph.py::demands` able to attribute that demand to the module the
+chain names; and the decision §1a's paragraph records, because the library's own
+signature is compiled once per demand set. §1a is upstream of this for the same
+reason it is upstream of the library half.
+
+---
+
+## 3. A comptime specialization of an IMPORTED template — `tile[2, 3](…)`
+
+**The construct.** `std/algorithm/backend/tile.mojo`'s four `def tile[…]`
+overloads, called with a bracket of VALUES. This is the `uses:` row in
+the `b8` round of `bugs/formal/FORMAL_sweep_work_map.md` §3.1: 4 files, all of them using
+`tile`.
+
+**Why it is a different feature with a different ABI.** A `T` is a type and the
+mangling is `safe_suffix(type)`; a comptime parameter is a VALUE and its identity
+belongs in the CAS key as a comptime param (`doc/ABI.md` §Generics says
+`hash(template-id, concrete type args, comptime params)` — the third component is
+this case and nothing in the current key carries it). Admitting it now would
+publish `tile_2_3` for a specialization of a value parameter and put two
+different notions of identity in one mangled name.
+
+**What closes it.** `elaborate.elaborate_generic_call`'s own `ArgC` fold is the
+precedent for folding a non-type argument into the instantiation identity;
+`formal/monomorph.py::instantiate` would grow a `comptime` mapping beside
+`type_args`, and `demands_key` would carry both.
+
+---
+
+## 4. A type argument that is a type declared in the CONSUMER's own file
+
+`formal/monomorph.py::type_arg_text` accepts a bare identifier when the reading
+scope does not bind it as a VALUE — `formal/build.py::_names_bound_in` for a
+function, `formal/model.py::collect_module_symbols` for the module level. A
+struct the consumer's OWN file declares is therefore not accepted as an
+instantiation's type argument, so:
+
+    # lib.mojo
+    struct Pair[T]:
+        var first: T
+    # prog.mojo
+    struct Colour:
+        var rgb: Int
+    def main():
+        var a = Pair[Colour]()      # refused
+
+**Measured 2026-10-12 (`work/formal281-docs`): the consumer's type IS accepted
+now, and the refusal this section names is gone — the example above refuses for a
+DIFFERENT reason.** Two facts, both measured arm64 (the build is the same on
+x86-64):
+
+  * the exact shape above — `lib` declares only `struct Pair[T]: var first: T` —
+    refuses with the **export gate**, not with `specialization_call_refusal`:
+    *"formal dylib has no public functions … only the struct type(s)
+    `Pair_1_T_6_Colour`"*; and
+  * add one method to `Pair` (`def get_first(self) -> T: return self.first`) and
+    the SAME program **BUILDS on both architectures**, with `lib`'s own library
+    emitting `struct Pair_1_T_6_Colour: var first: Colour` (read out of the cached
+    `formal-mono` source) and exporting `lib_Pair_1_T_6_Colour_get_first` (read
+    out of its manifest).
+
+So `type_arg_text` does not reject `Colour`, and the defining module compiles the
+instantiation with `Colour` undeclared — exactly the shape §5 warns about. What
+still refuses is the first USE that needs the layout: `var c = a.get_first(); var
+v: Int = c.rgb` refuses with *"this path has no way to say what `c` holds"*. That
+is §5's hazard deferred to first use rather than a refusal at the demand, and no
+test pins either half (neither the constructor's acceptance nor the use's
+refusal). Nothing here is fixed; what is corrected is which sentence is true.
+
+**Why the conservative direction is right.** The instantiation is compiled into
+`lib`'s library, and `lib` does not declare `Colour`, so `Pair_1_T_6_Colour`
+would be a body whose field layout the defining module cannot compute. Accepting
+it would mean threading the layout across the boundary — which is a layout
+question, not a mangling one, and belongs with whoever grows the reflection
+table.
+
+**What it costs.** `formal/model.py::struct_is_framed` counts FIELDS and does not
+read a declared type, which is why item §5 below is a wrong answer rather than a
+refusal. Reading a field's declared type is a value-model question with a doc
+(`bugs/formal/FORMAL_string_value_model.md` is the measured instance of it).
+
+---
+
+## 5. (not a gap — the reason §4 is conservative, recorded so it is not
+## rediscovered) A field's DECLARED type is not read by the framing decision
+
+`formal/model.py::struct_is_framed` asks `struct_field_count(st) > 1`. It does
+not look at `st.fields[i].type_ann`. So a generated `struct Pair2_t: var first:
+t` frames as two words and compiles, whatever `t` meant.
+
+That is load-bearing for §4 and for the whole argument in
+`formal/monomorph.py::type_arg_text`: **a substitution that produces a
+nonexistent type produces no diagnostic anywhere in the build.** Measured, on the
+case §4 is built from:
+
+    # lib.mojo
+    struct Pair2[T]:
+        var first: T
+        var second: T
+        def scaled(self) -> T:
+            return self.first + self.second
+    # prog.mojo
+    def main():
+        var t = Float64
+        var a = Pair2[t]()
+        a.first = 1.5
+        a.second = 2.5
+        print(a.scaled())        # CPython 4.0, the formal path 3
+
+and `test_formal_monomorph.py`'s `a non-concrete type argument is still refused`
+now asserts the build REFUSES it, so a regression to the silent version fails a
+test rather than a program.
+
+---
+
+## 6. The mangling spelling, and `doc/ABI.md`'s example
+
+**Corrected 2026-10-04.** This section used to assert that `monomorphize.mangle`
+emits `Pair_Int`; it emits `Pair_1_T_3_Int`, and it has emitted that since the
+encoding was made injective — 1512 collisions over 1752 generated
+`(name, type_args)` pairs under the flat scheme, measured in
+`monomorphize.py::safe_suffix`'s docstring, and
+`bugs/imported-generic-elaboration-defect` is the
+defect that motivated the change. Every spelling in `doc/ABI.md` §Generics and in
+this document now states the injective one and names `monomorphize.mangle` as
+where it is stated, and `test_formal_monomorph.py::a_stated_mangled_spelling_is_the_one_the_mangler_produces`
+reads every `doc/` and `bugs/` file so a stale one cannot be written again — the
+`refuse_without:` class of defect, in prose: a document that names a repair the
+tree has already replaced sends a reader to build the thing that exists.
+
+`doc/ABI.md` §Generics illustrates `Generic__method__<mangled-type-args>`. That
+is illustrative and not wrong, and it is why the section says so explicitly;
+`Pair[Int]`'s real spelling is stated beside it. The tree has one mangler, which
+is the correct number, and the two documents that could each be read as mandating
+their own now agree.
+
+The choice was made by reuse rather than by decision: `monomorphize.mangle` is
+what `elaborate.Elaborator` puts in `info['symbol']` and what the compiled
+path's objects are named, so a second spelling would make the two backends'
+symbols disagree for one source — and nothing on either side would notice until
+a link failed. `doc/ABI.md` §Generics is the load-bearing citation for the
+*decision* (a generic is not one symbol) and its illustration is illustrative;
+it has been amended in place to say so, which is the resolution the two
+sentences can have.
+
+**What would make it a decision rather than a deferral:** an ABI version bump
+plus a change to the spelling itself, with the CAS key folding the version —
+`cas.ABI_VERSION` is the mechanism and the gimple path already invalidates on
+it. Not worth doing for a spelling nothing consumes yet, and note that a change
+to the encoding is now a change to every cached artifact by construction.
+
+---
+
+---
+
+## 7. MEASURED 2026-10-03: what the stdlib's own generic struct templates look
+## like, and why none of them is a one-line widening of this
+
+Four probes, all `fire.py build --formal --no-prove` on a program that APPLIES a
+template from the stdlib, because "it works on a fixture" and "it works on the
+codebase it exists for" are different claims and only the second one is worth
+anything.
+
+| what was tried | what happened |
+|---|---|
+| `from std.collections.binary_heap import BinaryHeap` + `BinaryHeap[Int]()` | `binary_heap.mojo: BinaryHeap.pop() both changes its receiver and returns a value` — `mutating_receiver_return_refusal`, a PREP-time refusal that pre-empts everything else in the file. **This is the FIRST wall and it is not this mechanism's.** It is `formal13-5`'s `receiver_writeback_name` area and `formal15-mutator-return-abi`'s row |
+| `from std.collections import Deque` / `from std.collections.deque import Deque` + `Deque[Int]()` | the same refusal, reached through `deque.mojo:20`'s `from std.collections import Deque`. **Every module in `std/collections` imports the package `__init__`, which re-exports `BinaryHeap`** — which is the `b8` round's "162 of the 165 name nothing `binary_heap.mojo` declares" (`bugs/formal/FORMAL_sweep_work_map.md` §3, the round index that replaced the per-round maps), restated as an import |
+| `from stat import S_ISREG` + `S_ISREG[Int](1)` | `S_ISREG[…](…) calls a name this unit does not compile`. **Not a gap in this module**: `resolve_module_path` prefers Mojo source over the stdlib loader, so `stat` resolved to `formal/hostmods/stat.mojo`, which declares no templates. The stdlib's `std/stat/stat.mojo` was never reached |
+| `std/complex/complex.mojo`'s `ComplexSIMD[dtype: DType, length: SIMDLength]` | its arguments are written `.float32` — a `F.DottedLiteral` — and `type_arg_text` has no arm for one. Same class as §3: a parameter whose identity is a VALUE, not a type. `std/utils/static_tuple.mojo`'s `StaticTuple[element_type, size]` is worse for a different reason (`__mlir_type[…]` in a `comptime` field) |
+
+So the shape that is actually common in the stdlib is §3 (a comptime-valued
+parameter) and §7's trait bound, and the shape §1–§2 leave alone is the one
+these fixtures exercise. **That is the finding, and it is a statement about
+what to widen rather than an excuse:** widening to `DType`/comptime parameters
+(§3) is worth more stdlib files than anything else in this list, and it is a
+different ABI question because the third component of `doc/ABI.md` §Generics'
+CAS key — `comptime params` — is exactly that case and nothing in the current
+`demands_key` carries it.
+
+Until `binary_heap.mojo`'s `pop()` lowers, no measurement of *file coverage* is
+possible from here at all: the terminal refusal is upstream of every template in
+`std/collections`. Removing the export gate (this branch) and removing that
+refusal (`formal15-mutator-return-abi`) are both necessary and neither is
+sufficient.
+
+---
+
+## 8. What is NOT here, deliberately
+
+* **A generic with a trait bound — FIXED 2026-10-13 (`work/formal343-docs`).**
+  `formal/monomorph.py::instantiate` used to substitute without checking
+  conformance, where `elaborate.check_bounds` does. `std/collections/
+  binary_heap.mojo`'s `BinaryHeap[T: Copyable & Comparable & Deinitable]` is the
+  shape, and the substituted body is checked by the ordinary build for whatever
+  it can check — but a conformance VIOLATION was a field type the build does not
+  read, which is §5's failure mode. **Measured, and it was a WRONG ANSWER, not a
+  latent one:** a single file declaring `trait Greet`, a `Cat` with no `hello`,
+  and `struct Box[T: Greet]` applied as `Box[Cat]()` **built and ran on both
+  architectures**, a program the language rejects accepted by the formal path.
+
+  **What landed.** `instantiate` asks `elaborate.check_bounds(src,
+  template_src, targs)` before anything is substituted — the ONE conformance
+  reader the compiled path already asks (slice 6), so this is the same rule on
+  the one path that was not asking it, not a second implementation. The
+  direction is what makes it safe: `check_conformance` ACCEPTS an unknown trait
+  or a type with no source in the defining module, so wiring it here can only
+  turn a build into a refusal, and only where the trait, the concrete type and
+  the template are all in the module's own source. A dependency's bounded
+  template whose argument is the CONSUMER's type stays accepted, which is §4's
+  question and not this one's.
+
+  **The reason has to reach the reader, and that is the second half.** A failed
+  demand leaves the call site carrying its brackets, and the bracketed-callee
+  scan (`formal/build.py::check_module_symbols`) is what refuses it — with
+  `specialization_call_refusal`, whose "a call arriving here asked for none" is
+  FALSE of a call whose bracket named a type argument and whose demand failed
+  for a stated reason. So `instantiate_all(record=True)` publishes the failure
+  (`monomorph._FAILED_DEMANDS`, one entry per template, cleared per unit beside
+  `model._MODULE_SYMBOLS`) and the scan asks it first, which is why the reader
+  now sees `type 'Cat' does not conform to trait 'Greet' (required by parameter
+  'T'): missing method 'hello'`.
+
+  **Tests.** `test_formal_monomorph.py`'s
+  `a trait bound violation is refused by name` (both architectures, asserts the
+  refusal names the trait AND the missing method AND does not fall through to
+  "asked for none") and its control
+  `a conforming type argument is still instantiated` — a CPython differential,
+  because a check that refused every bounded template would pass the violation
+  row and remove the feature.
+* **Instantiating a template from inside the template.** `Pair[T]` whose body
+  says `Pair[T]()` is not a recursion here — `instantiate` substitutes text and
+  does not descend — and the result is correct, because `Pair_1_T_3_Int` is a
+  struct in the same module. Worth knowing rather than worth a guard.
+* **Lean.** `DylibExport` is stated over arm64 machine code with (name, address)
+  rows read from the manifest, and an instantiation adds rows of that shape. No
+  instruction, no calling convention, no model change; `formal/dylib`'s proved
+  path is exercised unchanged.
+
+---
+
+## 9. FIXED 2026-10-04 (`formal25-3`): a STRUCT template the module DECLARES can
+## itself apply — it was refused by name
+
+**Found while measuring §1** (§1a), and it was not in this document: the one
+demand set no caller could see was a module's OWN.
+
+`formal/monomorph.py::demands` skips a consumer's own templates on purpose, and
+`formal/imports.py::instantiation_demands` passes `own_templates` for the same
+reason — `demands`'s own docstring gives it, and the reason is **true of a
+FUNCTION template and false of a STRUCT template**:
+
+| shape | before | why |
+|---|---|---|
+| `def twice[T]` beside `twice[Int](n)` | builds | `_specialization_of` → `comptime.specialization_name` is a CALL specialisation and needs no declaration |
+| `struct Box[T]` beside `Box[Int]()` | **refused on both architectures** | a call to a name this unit does not compile: `_callee_defs(functions)` is a table of FUNCTIONS, and the instantiation is emitted under a mangled name nothing had emitted |
+
+```
+build: Box[…](…) calls a name this unit does not compile, so the brackets cannot
+be bound. If `Box` is a generic of another module then its instantiation is the
+boundary symbol … so a call arriving here asked for none …
+```
+
+The sentence is true of the file and the file is not wrong: it asks an importer's
+question of a module's own body. One field or two, executable or library — the
+same refusal in all four shapes.
+
+**What landed.** `formal/imports.py::imported_instantiations` asks for the
+module's own demands as well (`own=()`, this file's own templates) and
+`_own_instantiations` runs them through the same `instantiate_all` /
+`rewrite_instantiation_calls` the imported half uses, so the declaration and the
+rewrite stay one table — the property that function is built around. **The
+instantiated source is APPENDED to `stmts`,** and that is the half the imported
+set does not need: an imported template's body is compiled into the library that
+declares it, while an executable IS the whole compilation unit. The intermediate
+state is worth recording because it is the trap: with the declaration but not the
+body, a program constructed the struct, read and wrote its fields, and then failed
+the first METHOD call with the link audit's sentence — a message about the link
+line where the construct is `a.get()`. **A declaration without its body makes the
+diagnostic worse, so the body is not optional to this change.**
+
+Measured after: the one-file case builds and RUNS on both architectures, and so
+does the cross-module case with a method (§1a's rows 1 and 3).
+`test_formal_monomorph.py`'s `a struct template the module declares can itself
+apply` is the differential on both, with TWO instantiations in one file (prints 7
+then 1) because the failure this must not have is the two collapsing onto one
+symbol; its `lib=None` option is the one-file shape, which no case had.
+
+### 9a FIXED 2026-10-04 (`formal18-4`): the LIBRARY half, and the two things behind it
+
+**Status: DONE.** `016d938f` and `c466b3ee` on `work/formal18-4`. The measured
+refusal, on both architectures and with the message this section quotes:
+
+```
+build: main.mojo imports 'pairlib', which cannot be built either: pairlib.mojo:
+`Pair[…](…) calls a name this unit does not compile, so the brackets cannot be
+bound … so a call arriving here asked for none
+```
+
+is gone, and `pairlib.mojo` — which declares `struct Pair[T]`, applies it at
+`Pair[Int]`, and publishes `make_pair` — builds as a dylib, runs, and answers
+7 on arm64 and on x86-64. The three changes, one per reader, and each of them a
+function that already existed for the executable path:
+
+  * **`monomorph.own_demands`** is the own demand set as a NAME, and
+    `build_module_dylib` merges it into `mine` **before `demands_key`**. That
+    position is the substance of the first half: the own instantiations change
+    what the library publishes, so they belong in the artifact's identity
+    exactly as an importer's demand does, and a library built for its own
+    `Pair[Int]` must not share a path with one built for its own `Pair[Bool]`.
+    `test_formal_monomorph.py`'s "two demand sets are two libraries" is what
+    that key is for, and the own half now feeds it.
+  * **`compile_formal_dylib(statements={path: stmts})`** — the same seam
+    `compile_formal`'s own `stmts` parameter is, and for the same reason: the
+    rewrite is on the AST (`rewrite_instantiation_calls`), and publishing a
+    rewritten COPY of the module would have had to reproduce its prefix, its
+    line numbers and its error text, and the file on disk would stop being what
+    the library was built from. `build_module_dylib` parses ONCE and hands the
+    result over, so a module that needs the rewrite pays no second parse and
+    `{}` means "parse here" for every other caller.
+  * **the library's sources are a MERGED struct table for every source's
+    preparation**, which this section did not know about and which is a bug in
+    its own right — see below.
+
+**The thing behind it, and it is the reason this was not a two-line change: a
+library compiled from SEVERAL sources could not use a struct declared in another
+one.** `_prepare_functions` runs once per source with that source's own
+declarations, which is right for an executable (there is only one) and wrong
+here for every fact that is a property of the IMAGE — the frame-holder analysis
+that writes `fn._frame_slots`, and the method dispatch table. Measured, both
+architectures, `libx.mojo` declaring `Thing` and `liby.mojo` writing `t.v = 7`:
+
+```
+formal dylib: use_it: 't.v' is a field access through 't', and this path has no
+way to say what 't' holds … Bind the base from a constructor whose declaration
+THIS IMAGE can see (`x = S()`)
+```
+
+— with `libx.mojo` one file above it on the same command line. The emitter was
+meanwhile handed the MERGED `library_structs`, so two halves of one build
+disagreed about one image. The instantiated declaration arrives as a SECOND
+source of the library, so §9a could not land without this.
+
+The merge is dropped again the moment the analysis has had it, PER FILE, and
+that is not tidiness: `_method_exports` derives a method's module qualifier from
+the file its struct was declared in, so a per-file table carrying its siblings'
+declarations publishes `Thing.get` under the prefix of the file that USES it —
+a library that builds, links, and then fails to load with "Symbol not found"
+for a method it does export. A ONE-source library is untouched: the merge is
+empty and the filter a no-op, so every module dylib `build_module_dylib` builds
+is byte-identical to what it was until it has an instantiation to publish.
+
+**Tests.** `test_formal_dylib.py`'s "a library source can use a sibling
+source's struct" is the merge on its own — both architectures, both field
+shapes (one field is the value, two is a frame address), and the export
+qualifier pinned per file. `test_formal_monomorph.py`'s "a module that applies
+its own template publishes it" is §9a — a CPython differential, TWO
+instantiations in one library so the two cannot collapse onto one symbol, plus
+the manifest's `pairlib_Pair_1_T_3_Int_get_first`, which is the half that says
+the mechanism ran rather than having been inlined.
+
+**Two stale rows this fixed, which is the other half of the answer.**
+`test_formal_run.py` was RED on `master` over `struct Box[T: AnyType, U:
+AnyType]` + `Box[Int, Int](7)`: §9 — the module that both DECLARES and APPLIES
+a template — made that program build, and two rows still expected the refusal
+it no longer owes. Measured RED with this change reverse-applied, so they were
+this change's consequence and not a second defect. One is now an answer row (7,
+both backends), and one is deleted because `refuse_without:` cannot be said
+about a program that builds; its twin assertion survives on the row that puts a
+VALUE in the bracket, which still refuses and still asserts the absence of the
+same two sentences. `test_formal_run.py` is 997/997.
+
+**What is still open on the LIBRARY side, and it is a different piece of work:**
+a library that applies ANOTHER module's template (`libb` calling `liba`'s
+`Pair[Int]`) WAS refused, and the refusal's last sentence — "so this call is one
+that asked for none" — was FALSE about it: the demand is computed, the
+dependency publishes the instantiation, and only the call-site rewrite and the
+declaration were missing. **Both are now done** — the imported half of
+`imported_instantiations` returns its demap ALONGSIDE its declarations
+(`imported_template_instantiations`, one `made`, two readers) and
+`build_module_dylib` hands both to `compile_formal_dylib(statements=…,
+borrowed_structs=…)` — and the case is
+`test_formal_monomorph.py`'s "a library that applies another module's template
+instantiation": three files, two instantiations, both architectures, and the
+manifest assertion that `libb` publishes `libb_make_int`/`libb_make_bool` and
+NOT `Pair_1_T_3_Int`'s methods, which is the half a right answer cannot see.
+
+**The original text, which is what the fix had to satisfy:** a module that
+applies its own template **and is built as a dylib** is refused, with the same
+message. `compile_formal_dylib` re-parses each source and never calls
+`_imported_structs`, so `imported_instantiations` — which mutates `stmts` — is
+not on that path at all; the two halves that would fix it are
+`build_module_dylib`'s `mine` (the demand set, which `own_templates` empties)
+and a rewrite of the call sites in the statements `compile_formal_dylib` parses
+itself. Compiling the instantiation into the library **without** the rewrite is
+the trap above with a stranger message, which is why it is not done here.
+
+§1a is upstream of it for a library, because §1a is the name resolution and the
+library's own body needs the same one: `keep(p: Pair[Int])` inside `libA` names
+the template whatever the demand set is.
+
+### 9b The measurement that put §1a and §9 in this order
+
+`--mix` corpus aside, the ordering is not a preference: §1's construct is
+unreachable until a value of an instantiated type can be obtained at all, and the
+only source of one is a function that constructs it, which writes the bracket in
+the module that declares the template. **Anything that measures §1 has to fix
+§9 first**, and a planner reading this document in the other order will measure
+zero and conclude the item is worth nothing.
+
+## 2026-10-05 (`work/formal19-3-r2`): §2's ALIASED half is three places, not one,
+## and the third is a name-resolution DECISION — measured, and not taken
+
+**§2's remaining item is the aliased import** — `from pairlib import Pair as P`
+then `P[Int]()` — and §2's own Status says it is refused, with the message
+recommending the module's own name and saying the aliased form was measured not
+to work. That message is TRUE today. **This round implemented the aliased half and
+it does not close, for a reason that is a decision rather than a patch, so nothing
+landed.** What follows is the measurement, because the doc currently says "a
+STRUCT template's bracket is not such a name" and the truth is that it is three
+places and the third is not a lookup.
+
+**Place 1 — the demand walk. FIXED and measured.** `formal/monomorph.py::
+all_instantiation_calls` keys each demand on the name AS SPELLED and
+`demands_from_calls` filters by the DEFINING name, so for an aliased import the
+two never met and the demand was silently dropped. Mapping the base through
+`formal/imports.py::import_bindings` — the reader both emitters already hold as
+`_import_aliases` — makes it:
+
+```python
+>>> formal.monomorph.all_instantiation_calls("from pairlib import Pair as P\n"
+...                                          "def main():\n    var a = P[Int]()\n")
+{'Pair': [('Int',)]}          # was {'P': [('Int',)]}
+>>> formal.monomorph.demands(src, templates=['Pair'])
+{'Pair': [('Int',)]}          # was {}
+```
+
+**Place 2 — the call site. FIXED and measured.** Both backends' `_specialization_of`
+forwards to `comptime.specialization_name`, which answers the bare name, and
+`specialization_name`'s own docstring gives the reason not to teach it about
+aliases: a second place deciding what a bracketed callee's base NAME is is a
+second recogniser, and two disagree by binding the call to the wrong module's
+instantiation. So this is a TREE rewrite rather than a second rule —
+`formal/build.py::_rewrite_aliased_specialization_base`, beside
+`_substitute_module_constants` and for its reason: every reader downstream (the
+demand walk, the bracketed-callee scan, both `_specialization_of`s) then sees ONE
+spelling. Only a bracket's base is touched, and only an imported alias, so a bare
+read of the same name and a local that shadows the alias are unaffected.
+
+**Place 3 — the imported-symbol table. NOT FIXED, and this is the finding.**
+
+With 1 and 2 in place the call arrives as `Pair[Int]()` and is STILL refused, and
+the message has moved from naming `P` to naming `Pair`:
+
+```
+build: … the library will carry the instantiation; the ways this can still be
+reached are in bugs/formal/FORMAL_generic_monomorph_scope.md. If `Pair` is instead an
+ordinary value then the brackets are a subscript, which is not a call this path
+can name at all.
+```
+
+**So the third place is `formal/model.py::collect_module_symbols`, and it is not
+a lookup.** `_imported_names` yields the BOUND name, so `from pairlib import Pair
+as P` publishes `P` and **not** `Pair` — which is why the non-aliased spelling
+works (its bound name IS the defining name) and the aliased one does not, and it
+is why rewriting the tree alone is not enough. Publishing `Pair` as well would
+close the case, and it is exactly the kind of change this repository refuses by
+default: `module_symbol` is consulted by name resolution for BARE reads, so a
+module that imports `Pair` under the name `P` and then reads a bare `Pair` — a
+name its source never bound — would resolve. **That is a wrong answer waiting to
+happen, and "an undeclared bare read resolves to an import that is present under
+another spelling" is not a change to make from a bug doc.** The decision is
+whether the imported-symbol table should carry the DEFINING name at all, and if
+so what stops the bare read; a narrower answer (publish the defining name only
+for a name a bracketed callee actually uses, which is decidable here because the
+rewrite knows the site) trades a global fact for a local one and belongs to
+whoever owns the name-resolution table rather than to this row.
+
+**The message got WORSE with place 1 alone, which is why nothing landed.** The
+aliased case's text now says "Spelling it `Pair[<a type>](…)` will carry the
+instantiation" about a program that already spells it that way — the same class of
+defect §2's own Status records for the dotted spelling ("the refusal named the
+MODULE as the template"). Shipping place 1 alone would trade a refusal whose text
+is true for one whose text is false, which is the direction
+`bugs/formal/FORMAL_eval_eq_mojo_is_undecidable_over_a_free_n.md`'s `refuse_without:`
+class of defect names and which this repository deletes sentences out of rather
+than ships. The tree was left at `HEAD` and `test_formal_monomorph.py` is 24/24.
+
+**So §2's next step, stated as the measurement gives it**, is not "a
+`specialization_name` that answers the TEMPLATE for a dotted base" — that half is
+unchanged and remains the recogniser question §2 opens with. It is:
+
+1. decide whether `collect_module_symbols` publishes an import's DEFINING name as
+   well as its bound name, and what stops a bare read of that name in a module
+   that only imported it under another spelling (the decision this round declined);
+2. then places 1 and 2 above, which are each a few lines and each measured to be
+   necessary and sufficient for everything except that table;
+3. §2's dotted half (`L.Pair[Int]()`) is a SEPARATE piece and is untouched by all
+   of the above — a dotted base's recogniser question, not an alias one.
+
+**2026-10-12 (`work/formal296-docs`): items 1 and 2 above are DONE, and item 3
+is the only one still open — and item 1 was not needed after all.** Places 1 and
+2 landed as one reader (`formal/monomorph.py::_import_aliases`) asked by the
+demand walk and the call-site rewrite, and the rewrite targets the MANGLED name
+rather than producing the `Pair[Int]()` intermediate this section was built
+around, so `collect_module_symbols` is untouched and the bare-read question this
+section declined never arises. §2's aliased half builds and runs on both
+architectures; the Status at the head of the file has the mechanism, the tests
+and the numbers. §2's DOTTED half (item 3) is unchanged.
