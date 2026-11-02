@@ -4446,6 +4446,13 @@ def _lower_builtin_len(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 and not getattr(_lit, 'is_bytes', False)):
             _cp = len(gimple_ctypes.decode_c_escapes(_lit.value))
             return 'int64_t', gen._new_val('int64_t', str(_cp))
+        # A word of unknown kind (`'w'` — bytes value, or `or` of bytes that
+        # yields a word): dispatch at runtime through `mojo_len_word`.
+        if _is_dyn_word_operand(gen, node.args[0], av) or (
+                isinstance(node.args[0], gimple_ctypes.IdentExpr)
+                and _as_str(node.args[0].name) in getattr(gen, '_dyn_word_locals', ())):
+            return 'int64_t', gen._call_expr('int64_t', 'mojo_len_word',
+                                            [('int64_t', gen._to_int64('char *', av))])
         _len_t = gen._call_expr('int64_t', 'mojo_str_codepoint_len', [('char *', av)])
         if gen._is_fresh_container_operand(node.args[0], av):
             gen._free_fresh_container(av, at)

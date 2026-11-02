@@ -1007,6 +1007,14 @@ def _quick_type(gen, node) -> str:
                 and isinstance(obj.func.obj.obj, gimple_ctypes.IdentExpr)
                 and obj.func.obj.obj.name == 'os' and obj.func.obj.member == 'path'
                 and obj.func.member in ('splitext', 'split', 'splitdrive', 'splitroot')):
+            # os.path.split / splitext of a BYTES argument yields bytes parts:
+            # the lowering builds them with the bytes runtime helpers and leaves
+            # the element kind unrecorded, so the subscript is a word of unknown
+            # kind -- a `char *` here cast the bytes pointer to text
+            # (`os.path.split(b'a/b')[0]`).
+            if (obj.func.member in ('split', 'splitext') and obj.args
+                    and gen._quick_type(obj.args[0]) == 'MojoBytes *'):
+                return 'int64_t'
             return 'char *'
         # struct.unpack("<f", buf)[0] / struct.unpack_from(fmt, buf, 0)[2]:
         # the callee's own type is 'MojoList *' (the CallExpr case above),

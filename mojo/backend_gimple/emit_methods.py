@@ -2579,10 +2579,23 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         if isinstance(inner_obj, gimple_ctypes.IdentExpr) and inner_obj.name == 'os' and inner_member == 'path':
             if outer_member == 'basename' and len(node.args) == 1:
                 arg_type, arg_val = gen.lower_expr(node.args[0])
-                t = gen._call_expr('char *', 'int64_t_basename', [(arg_type, arg_val)])
-                return 'char *', t
+                if arg_type in ('int64_t', 'MojoBytes *'):
+                    t = gen._call_expr('int64_t', 'mojo_os_path_basename_w', [('int64_t', gen._to_int64(arg_type, arg_val))])
+                    # A str or bytes result by the argument's kind: a word the
+                    # runtime answers for (truthiness, len), not a plain int.
+                    gen._dyn_word_vals.add(t)
+                else:
+                    t = gen._call_expr('char *', 'int64_t_basename', [(arg_type, arg_val)])
+                return ('int64_t' if arg_type in ('int64_t', 'MojoBytes *') else 'char *'), t
             elif outer_member == 'splitext' and len(node.args) == 1:
                 arg_type, arg_val = gen.lower_expr(node.args[0])
+                if arg_type == 'MojoBytes *':
+                    # Bytes parts: the (root, ext) pair is built by the runtime
+                    # (mojo_os_path_splitext_w) with unrecorded element kinds, so
+                    # the subscript reads each part as a word of unknown kind.
+                    return 'MojoList *', gen._call_expr(
+                        'MojoList *', 'mojo_os_path_splitext_w',
+                        [('int64_t', gen._to_int64(arg_type, arg_val))])
                 root = gen._call_expr('char *', 'int64_t_splitext', [(arg_type, arg_val)])
                 # Python splitext(p) is a (root, ext) pair; every call site does
                 # `splitext(p)[0]`. Model it as a 2-element string list so the
@@ -2613,9 +2626,14 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     if arg_type == 'MojoBytes *':
                         t = gen._call_expr('MojoList *', 'mojo_os_path_split_w',
                                             [('int64_t', f'(int64_t)(intptr_t){arg_val}')])
-                    else:
-                        t = gen._call_expr('MojoList *', 'mojo_os_path_split_w',
-                                            [(arg_type, arg_val)])
+                        # Bytes parts: the element kind is NOT recorded. An
+                        # unrecorded kind is a word of unknown kind to the
+                        # subscript (`_mark_unknown_list_elem`), which is what
+                        # the bytes-or-str word actually is; `int64_t` would
+                        # read as a plain number and lose the bytes kind.
+                        return 'MojoList *', t
+                    t = gen._call_expr('MojoList *', 'mojo_os_path_split_w',
+                                        [(arg_type, arg_val)])
                     gen._elem_types[t] = 'int64_t'
                     return 'MojoList *', t
                 t = gen._call_expr('MojoList *', 'int64_t_path_split',
@@ -2679,6 +2697,10 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 # Same boxed-int64_t-vs-declared-char* mismatch as abspath
                 # just above; identical fix.
                 arg_type, arg_val = gen.lower_expr(node.args[0])
+                if arg_type in ('int64_t', 'MojoBytes *'):
+                    t = gen._call_expr('int64_t', 'mojo_os_path_dirname_w', [('int64_t', gen._to_int64(arg_type, arg_val))])
+                    gen._dyn_word_vals.add(t)   # str or bytes, by the argument's kind
+                    return 'int64_t', t
                 t = gen._call_expr('int64_t', 'int_dirname', [('int64_t', '0'), (arg_type, arg_val)])
                 cast = gen._new_val('char *', f'(char *){t}')
                 return 'char *', cast
@@ -2752,11 +2774,17 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 return 'int64_t', t
             elif outer_member == 'exists' and len(node.args) == 1:
                 arg_type, arg_val = gen.lower_expr(node.args[0])
-                t = gen._call_expr('int', 'int_exists', [('int64_t', '0'), (arg_type, arg_val)])
+                if arg_type in ('int64_t', 'MojoBytes *'):
+                    t = gen._call_expr('int', 'mojo_os_path_exists_w', [('int64_t', gen._to_int64(arg_type, arg_val))])
+                else:
+                    t = gen._call_expr('int', 'int_exists', [('int64_t', '0'), (arg_type, arg_val)])
                 return 'int', t
             elif outer_member == 'isdir' and len(node.args) == 1:
                 arg_type, arg_val = gen.lower_expr(node.args[0])
-                t = gen._call_expr('int', 'int_isdir', [('int64_t', '0'), (arg_type, arg_val)])
+                if arg_type in ('int64_t', 'MojoBytes *'):
+                    t = gen._call_expr('int', 'mojo_os_path_isdir_w', [('int64_t', gen._to_int64(arg_type, arg_val))])
+                else:
+                    t = gen._call_expr('int', 'int_isdir', [('int64_t', '0'), (arg_type, arg_val)])
                 return 'int', t
             elif outer_member == 'isabs' and len(node.args) == 1:
                 # os.path.isabs(p) → check if first char is '/'
@@ -2810,7 +2838,10 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 # every loop iteration silently skipped (found via
                 # Tools/unicode/gencodec.py's convertdir()).
                 arg_type, arg_val = gen.lower_expr(node.args[0])
-                t = gen._call_expr('int', 'int_isfile', [('int64_t', '0'), (arg_type, arg_val)])
+                if arg_type in ('int64_t', 'MojoBytes *'):
+                    t = gen._call_expr('int', 'mojo_os_path_isfile_w', [('int64_t', gen._to_int64(arg_type, arg_val))])
+                else:
+                    t = gen._call_expr('int', 'int_isfile', [('int64_t', '0'), (arg_type, arg_val)])
                 return 'int', t
             elif outer_member == 'relpath' and 1 <= len(node.args) <= 2:
                 # os.path.relpath(p[, start]) -- the real posixpath answer

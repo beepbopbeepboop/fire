@@ -12509,13 +12509,73 @@ int64_t mojo_os_path_islink_w(int64_t p) {
     struct stat st;
     return p && lstat((char *)(intptr_t)p, &st) == 0 && S_ISLNK(st.st_mode);
 }
-int64_t mojo_os_path_isdir_w(int64_t p) { return int_isdir(0, p); }
-int64_t mojo_os_path_isfile_w(int64_t p) { return int_isfile(0, p); }
-int64_t mojo_os_path_exists_w(int64_t p) { return int_exists(0, p); }
-int64_t mojo_os_path_basename_w(int64_t p) {
-    return (int64_t)(intptr_t)int64_t_basename((char *)(intptr_t)p);
+/* A bytes path as a NUL-terminated copy the str-path helpers can read (the
+ * syscalls take a C string; the same copy `mojo_os_scandir` makes). The caller
+ * frees it. */
+static char *_bytes_path_cstr(int64_t p)
+{
+    MojoBytes *b = (MojoBytes *)(intptr_t)p;
+    char *c = (char *)malloc((size_t)b->len + 1);
+    memcpy(c, b->data, (size_t)b->len);
+    c[b->len] = '\0';
+    return c;
 }
-int64_t mojo_os_path_dirname_w(int64_t p) { return int_dirname(0, p); }
+/* The os.path predicates and path-returning functions for a str OR bytes word:
+ * a bytes argument is answered through its C-string copy, and a bytes result is
+ * a bytes object (its own kind), a str one stays a heap C string. */
+int64_t mojo_os_path_isdir_w(int64_t p)
+{
+    if (!mojo_is_registered_bytes(p)) return int_isdir(0, p);
+    char *c = _bytes_path_cstr(p);
+    int64_t r = int_isdir(0, (int64_t)(intptr_t)c);
+    free(c);
+    return r;
+}
+int64_t mojo_os_path_isfile_w(int64_t p)
+{
+    if (!mojo_is_registered_bytes(p)) return int_isfile(0, p);
+    char *c = _bytes_path_cstr(p);
+    int64_t r = int_isfile(0, (int64_t)(intptr_t)c);
+    free(c);
+    return r;
+}
+int64_t mojo_os_path_exists_w(int64_t p)
+{
+    if (!mojo_is_registered_bytes(p)) return int_exists(0, p);
+    char *c = _bytes_path_cstr(p);
+    int64_t r = int_exists(0, (int64_t)(intptr_t)c);
+    free(c);
+    return r;
+}
+/* basename / dirname of bytes are the tail and head of posixpath.split for
+ * bytes (mojo_os_path_split_w), so they cannot disagree with os.path.split. */
+/* splitext of bytes: the same rule as int64_t_splitext (the root ends at the
+ * last '.'), as a (root, ext) pair of bytes words. */
+MojoList *mojo_os_path_splitext_w(int64_t p)
+{
+    MojoBytes *b = (MojoBytes *)(intptr_t)p;
+    int64_t dot = -1;
+    for (int64_t k = 0; k < b->len; k++)
+        if (b->data[k] == '.') dot = k;
+    MojoBytes *root = dot < 0 ? b : mojo_bytes_new_lit((const char *)b->data, dot);
+    MojoBytes *ext = dot < 0 ? mojo_bytes_new_lit("", 0)
+                             : mojo_bytes_new_lit((const char *)b->data + dot, b->len - dot);
+    MojoList *l = mojo_list_new();
+    mojo_list_append_word(l, (int64_t)(intptr_t)root);
+    mojo_list_append_word(l, (int64_t)(intptr_t)ext);
+    return l;
+}
+int64_t mojo_os_path_basename_w(int64_t p)
+{
+    if (!mojo_is_registered_bytes(p))
+        return (int64_t)(intptr_t)int64_t_basename((char *)(intptr_t)p);
+    return mojo_list_get_int(mojo_os_path_split_w(p), 1);
+}
+int64_t mojo_os_path_dirname_w(int64_t p)
+{
+    if (!mojo_is_registered_bytes(p)) return int_dirname(0, p);
+    return mojo_list_get_int(mojo_os_path_split_w(p), 0);
+}
 
 /* os.scandir(path) as an eager list of DirEntry HANDLES (the int64_t words are
  * `MojoDirEntry *`). `with scandir(top) as entries:` is lowered to one call of
