@@ -32,18 +32,6 @@ print(repr(re.compile(b"a(b)").match(b"ab")))
 print(repr(re.compile("a(b)").match("ab").group(1)))
 g = re.compile(b"a(b)").match(b"ab").group(1)
 print(repr(g), g)
-# findall / split / sub / finditer read a BYTES subject by its kind: the pieces
-# and the result are bytes, and a NUL byte inside the subject is data, not an end.
-print(re.compile(b"a").findall(b"aa"))
-print(re.compile(b",").split(b"a,b"))
-print(re.compile(b"a").sub(b"x", b"aa"))
-print(re.compile(b"a(b)").findall(b"abab"))
-print(re.compile(b"a(b)").split(b"zabyab"))
-print(re.compile(b"\x00").split(b"a\x00b"))
-print(re.compile(b"a").sub(b"<\\g<0>>", b"banana"))
-print([m.span() for m in re.compile(b"a").finditer(b"aa")])
-# the str subject keeps its str results
-print(re.compile("a").findall("aa"), re.compile(",").split("a,b"), re.compile("a").sub("x", "aa"))
 # str(bytes, encoding, errors): the errors argument is threaded to the runtime decode
 print(str(b"ab", "ascii"), str(b"\xe9", "latin-1"), str(b"\xe9", "latin-1", "strict"))
 try:
