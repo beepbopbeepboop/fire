@@ -54,12 +54,31 @@ void mojo_exc_pop(void)
  * must tear down only its internal buffers (`mojo_*_destroy`) and never
  * call `free()` on the struct pointer itself (`mojo_*_free` would free a
  * stack address — undefined behavior, corrupting the heap allocator). */
+/* ── Python-level frames (sys._getframe, f_back, f_lineno, f_code.co_name) ───────
+ * A shadow stack, maintained ONLY by functions the compiler instrumented (a module that
+ * mentions `_getframe`; see emit_methods._frame_enter). Entry/exit pair with a cleanup
+ * record (MOJO_CLEANUP_FRAME) so an exception unwinding past a frame pops it too. A frame
+ * "object" is a word: its 1-based index in the stack (0 is None). It stays valid while that
+ * frame is live, which is what `sys._getframe(n)` callers use it for; a word kept past the
+ * frame's return names whatever frame later reuses the slot. Frames of uninstrumented
+ * functions are invisible, as C frames are in CPython. */
+#define MOJO_FRAME_MAX 4096
+extern int64_t mojo_box_none(void);
+extern int64_t mojo_box_from_bool(int64_t v);
+typedef struct MojoFrameRec { const char *name; const char *file; int64_t firstlineno; int64_t lineno; struct MojoFrameRec *back; int64_t id; int64_t gen; int64_t f_trace; int64_t trace_lines; int64_t trace_opcodes; } MojoFrameRec;
+static int64_t _mojo_frame_next_id = 1;
+static MojoFrameRec _mojo_frames[MOJO_FRAME_MAX];
+int _mojo_frame_depth = 0;
+extern char *_mojo_exc_msg;
+extern void *_mojo_exc_obj;
+
 typedef enum { MOJO_CLEANUP_DICT, MOJO_CLEANUP_LIST, MOJO_CLEANUP_SET,
                MOJO_CLEANUP_DICT_STACK, MOJO_CLEANUP_LIST_STACK, MOJO_CLEANUP_SET_STACK,
                MOJO_CLEANUP_PTR,   /* a plain malloc/calloc block: a struct instance */
                MOJO_CLEANUP_LIST_STRS, /* a list that owns its string elements */
                MOJO_CLEANUP_CLOSURE,  /* a bound method plus the env it owns */
-               MOJO_CLEANUP_CATTR     /* a class-attribute cell global: unwinding writes its saved value back */
+               MOJO_CLEANUP_CATTR,    /* a class-attribute cell global: unwinding writes its saved value back */
+               MOJO_CLEANUP_FRAME     /* a Python-level frame record: unwinding pops it from the frame stack */
              } mojo_cleanup_kind_t;
 #define MOJO_CLEANUP_STACK_MAX 8192
 static mojo_cleanup_kind_t _mojo_cleanup_kind[MOJO_CLEANUP_STACK_MAX];
@@ -105,6 +124,271 @@ void mojo_cleanup_push_cattr(void **slot, void *saved)
     if (_mojo_cleanup_push(MOJO_CLEANUP_CATTR, slot))
         _mojo_cleanup_aux[_mojo_cleanup_top] = saved;
 }
+
+/* A coroutine (generator) body parks in the middle of a call: the frame records and cleanup
+ * records it pushed since it was entered are still "live" on the GLOBAL stacks while it is
+ * suspended, which leaves the generator's frame visible as the resumer's own (`sys._getframe()`
+ * in the loop that drives a generator named the generator) and lets the resumer's
+ * `mojo_frame_leave` cancel the generator's cleanup record instead of its own. So a yield
+ * DETACHES that slice into a snapshot and the next resume re-pushes it above the resumer's
+ * (possibly different) depth. `mojo_coro_*_base` read the depths at resume time. */
+typedef struct MojoCoroSlice {
+    int nframes;                 /* frame depth delta (may exceed the table; only min() are saved) */
+    int nsaved;
+    MojoFrameRec frames[1];      /* nsaved records, then the cleanup records */
+} MojoCoroSlice;
+typedef struct MojoCoroCleanupRec { mojo_cleanup_kind_t kind; void *ptr; void *aux; } MojoCoroCleanupRec;
+
+int mojo_coro_frame_base(void)   { return _mojo_frame_depth; }
+int mojo_coro_cleanup_base(void) { return _mojo_cleanup_top; }
+
+/* Detach everything above the two bases; returns a malloc'd snapshot (NULL when empty). */
+void *mojo_coro_slice_save(int frame_base, int cleanup_base)
+{
+    int nf = _mojo_frame_depth - frame_base;
+    int nc = _mojo_cleanup_top - cleanup_base;
+    if (nf < 0) nf = 0;
+    if (nc < 0) nc = 0;
+    if (nf == 0 && nc == 0) return NULL;
+    int ns = nf;
+    if (frame_base + ns > MOJO_FRAME_MAX) ns = MOJO_FRAME_MAX - frame_base;
+    if (ns < 0) ns = 0;
+    size_t bytes = sizeof(MojoCoroSlice) + (size_t)ns * sizeof(MojoFrameRec)
+                 + (size_t)nc * sizeof(MojoCoroCleanupRec) + sizeof(int);
+    MojoCoroSlice *sl = (MojoCoroSlice *)malloc(bytes);
+    if (!sl) return NULL;
+    sl->nframes = nf;
+    sl->nsaved = ns;
+    if (ns > 0) memcpy(sl->frames, &_mojo_frames[frame_base], (size_t)ns * sizeof(MojoFrameRec));
+    char *tail = (char *)(sl->frames) + (size_t)ns * sizeof(MojoFrameRec);
+    memcpy(tail, &nc, sizeof(int));
+    MojoCoroCleanupRec *cr = (MojoCoroCleanupRec *)(tail + sizeof(int));
+    for (int i = 0; i < nc; i++) {
+        int k = cleanup_base + 1 + i;
+        cr[i].kind = _mojo_cleanup_kind[k];
+        cr[i].ptr = _mojo_cleanup_ptr[k];
+        cr[i].aux = _mojo_cleanup_aux[k];
+    }
+    _mojo_frame_depth = frame_base;
+    _mojo_cleanup_top = cleanup_base;
+    return sl;
+}
+
+/* Name/file/lines of the outermost frame a parked coroutine holds (the generator's own). */
+int mojo_coro_slice_peek(void *snap, const char **name, const char **file, int64_t *first, int64_t *line)
+{
+    MojoCoroSlice *sl = (MojoCoroSlice *)snap;
+    if (!sl || sl->nsaved < 1) return 0;
+    *name = sl->frames[0].name; *file = sl->frames[0].file;
+    *first = sl->frames[0].firstlineno; *line = sl->frames[0].lineno;
+    return 1;
+}
+
+/* Re-push a snapshot above the current depths and free it. */
+void mojo_coro_slice_restore(void *snap)
+{
+    if (!snap) return;
+    MojoCoroSlice *sl = (MojoCoroSlice *)snap;
+    int base = _mojo_frame_depth;
+    for (int i = 0; i < sl->nsaved && base + i < MOJO_FRAME_MAX; i++)
+        _mojo_frames[base + i] = sl->frames[i];
+    _mojo_frame_depth = base + sl->nframes;
+    char *tail = (char *)(sl->frames) + (size_t)sl->nsaved * sizeof(MojoFrameRec);
+    int nc; memcpy(&nc, tail, sizeof(int));
+    MojoCoroCleanupRec *cr = (MojoCoroCleanupRec *)(tail + sizeof(int));
+    for (int i = 0; i < nc; i++) {
+        if (_mojo_cleanup_push(cr[i].kind, cr[i].ptr))
+            _mojo_cleanup_aux[_mojo_cleanup_top] = cr[i].aux;
+    }
+    free(sl);
+}
+
+void mojo_frame_enter(char *name, char *file, int64_t firstlineno)
+{
+    if (_mojo_frame_depth < MOJO_FRAME_MAX) {
+        MojoFrameRec *f = &_mojo_frames[_mojo_frame_depth];
+        f->name = name; f->file = file; f->firstlineno = firstlineno; f->lineno = firstlineno; f->back = NULL;
+        f->id = _mojo_frame_next_id;
+        f->gen = 0;
+        f->f_trace = mojo_box_none(); f->trace_lines = 1; f->trace_opcodes = 0;
+    }
+    ++_mojo_frame_next_id;              /* every activation has its own identity (snapshots copy it) */
+    ++_mojo_frame_depth;                /* keeps pairing even past the table's end */
+    _mojo_cleanup_push(MOJO_CLEANUP_FRAME, NULL);
+}
+
+void mojo_frame_leave(void)
+{
+    if (_mojo_frame_depth > 0) --_mojo_frame_depth;
+    mojo_cleanup_cancel_n(1);
+}
+
+void mojo_frame_set_line(int64_t line)
+{
+    if (_mojo_frame_depth > 0 && _mojo_frame_depth <= MOJO_FRAME_MAX)
+        _mojo_frames[_mojo_frame_depth - 1].lineno = line;
+}
+
+/* sys._getframe(depth): the word of the frame `depth` callers up (0 = the caller of this
+ * runtime function, i.e. the instrumented function that wrote `sys._getframe`). */
+int64_t mojo_getframe(int64_t depth)
+{
+    int64_t idx = (int64_t)_mojo_frame_depth - depth;       /* 1-based */
+    if (depth < 0 || idx < 1 || idx > MOJO_FRAME_MAX) {
+        mojo_raise_value_error((char *)"call stack is not deep enough");
+        return 0;
+    }
+    return idx;
+}
+
+/* A frame word is either a live-stack index (1..MOJO_FRAME_MAX) or, for a frame reached through a
+ * traceback (`tb_frame`), the address of a heap snapshot record (always far above MOJO_FRAME_MAX). */
+static MojoFrameRec *_frame_of(int64_t w)
+{
+    if (w > MOJO_FRAME_MAX) return (MojoFrameRec *)(intptr_t)w;
+    if (w < 1 || w > _mojo_frame_depth) return NULL;
+    return &_mojo_frames[w - 1];
+}
+int64_t mojo_frame_back(int64_t w)
+{
+    if (w > MOJO_FRAME_MAX) return (int64_t)(intptr_t)((MojoFrameRec *)(intptr_t)w)->back;
+    return (w > 1 && w <= _mojo_frame_depth) ? w - 1 : 0;
+}
+int64_t mojo_frame_depth(void)            { return _mojo_frame_depth; }
+
+/* Settable frame attributes (`f.f_trace = tracer`, `f.f_trace_lines = False`): plain stored words.
+ * id 0 f_trace (None by default), 1 f_trace_lines (True), 2 f_trace_opcodes (False). Nothing consults
+ * them yet (no sys.settrace); they only read back what was stored, as CPython does for an untraced frame. */
+int64_t mojo_frame_get_attr(int64_t w, int64_t id)
+{
+    MojoFrameRec *f = _frame_of(w);
+    if (!f) return id == 0 ? mojo_box_none() : mojo_box_from_bool(0);
+    if (id == 0) return f->f_trace;
+    return mojo_box_from_bool((int)(id == 1 ? f->trace_lines : f->trace_opcodes));
+}
+void mojo_frame_set_attr(int64_t w, int64_t id, int64_t v)
+{
+    MojoFrameRec *f = _frame_of(w);
+    if (!f) return;
+    if (id == 0) f->f_trace = v; else if (id == 1) f->trace_lines = v; else f->trace_opcodes = v;
+}
+
+/* frame.clear(): CPython refuses a frame that is still executing ("cannot clear an executing
+ * frame"); any other frame (finished, or a kept traceback frame) clears, which here has nothing
+ * to release. A frame is executing when an activation with its identity is on the live stack. */
+/* A generator's frame object (`gen.gi_frame`) is a heap record that names its generator;
+ * `hook` (registered by fire_coro_gen.c) answers the generator's state: 0 not started, 1 suspended,
+ * 2 running, 3 finished. */
+int64_t (*_mojo_gen_state_hook)(int64_t) = NULL;
+/* The generator whose body is being entered for the first time: set by __mojo_gen_resume before
+ * it switches in, consumed by the body's own `mojo_frame_bind_gen` so its frame knows which
+ * generator it belongs to (`f_generator`, and `clear()` on the live frame). */
+int64_t _mojo_resuming_gen = 0;
+void mojo_frame_set_resuming(int64_t gen) { _mojo_resuming_gen = gen; }
+void mojo_frame_bind_gen(void)
+{
+    if (_mojo_frame_depth > 0 && _mojo_frame_depth <= MOJO_FRAME_MAX)
+        _mojo_frames[_mojo_frame_depth - 1].gen = _mojo_resuming_gen;
+    _mojo_resuming_gen = 0;
+}
+int64_t mojo_frame_generator(int64_t w) { MojoFrameRec *f = _frame_of(w); return f ? f->gen : 0; }
+
+int64_t mojo_frame_for_gen(int64_t gen, int64_t old_word, const char *name, const char *file,
+                           int64_t firstlineno, int64_t lineno)
+{
+    MojoFrameRec *f = (MojoFrameRec *)(intptr_t)old_word;
+    if (!f) {
+        f = (MojoFrameRec *)calloc(1, sizeof(MojoFrameRec));
+        if (!f) return 0;
+        f->id = -gen;                       /* never equals a live activation's (positive) id */
+        f->gen = gen;
+        f->name = "<generator>"; f->file = ""; f->back = NULL;
+        f->f_trace = mojo_box_none(); f->trace_lines = 1; f->trace_opcodes = 0;
+    }
+    if (name) { f->name = name; f->file = file ? file : ""; f->firstlineno = firstlineno; f->lineno = lineno; }
+    return (int64_t)(intptr_t)f;
+}
+
+static void _raise_runtime_error(const char *msg)
+{
+    char *m = strdup(msg);
+    mojo_exc_type_set(1631794787);
+    mojo_exc_msg_set(m);
+    mojo_exc_obj_set(m);
+    mojo_raise();
+}
+
+void mojo_frame_clear(int64_t w)
+{
+    MojoFrameRec *f = _frame_of(w);
+    if (!f) return;
+    if (f->gen && _mojo_gen_state_hook) {
+        int64_t st = _mojo_gen_state_hook(f->gen);
+        if (st == 2) _raise_runtime_error("RuntimeError: cannot clear an executing frame");
+        if (st == 1) _raise_runtime_error("RuntimeError: cannot clear an suspended frame");
+        return;
+    }
+    int n = _mojo_frame_depth < MOJO_FRAME_MAX ? _mojo_frame_depth : MOJO_FRAME_MAX;
+    for (int i = 0; i < n; i++) {
+        if (_mojo_frames[i].id == f->id) {
+            char *m = strdup("RuntimeError: cannot clear an executing frame");
+            mojo_exc_type_set(1631794787);
+            mojo_exc_msg_set(m);
+            mojo_exc_obj_set(m);
+            mojo_raise();
+            return;
+        }
+    }
+}
+
+/* ── Tracebacks ──────────────────────────────────────────────────────────────
+ * `mojo_raise` snapshots the live frame stack once per exception (keyed by the exception's
+ * message/object pointers, so a bare re-raise keeps the original), BEFORE the unwind pops it.
+ * `e.__traceback__` (mojo_traceback) then builds the chain CPython shows: from the frame that
+ * caught it (the current depth) down to the frame that raised, each entry carrying the line that
+ * frame was executing at the raise. Frame objects of the chain are the heap snapshot records. */
+typedef struct MojoTb { MojoFrameRec *frame; struct MojoTb *next; } MojoTb;
+static MojoFrameRec *_mojo_tb_snap = NULL;
+static int _mojo_tb_snap_n = 0;
+static void *_mojo_tb_key_obj = NULL;
+static char *_mojo_tb_key_msg = NULL;
+
+void _mojo_tb_snapshot(void)
+{
+    if (_mojo_tb_snap && _mojo_exc_obj == _mojo_tb_key_obj && _mojo_exc_msg == _mojo_tb_key_msg)
+        return;                                   /* the same exception passing through again */
+    int n = _mojo_frame_depth < MOJO_FRAME_MAX ? _mojo_frame_depth : MOJO_FRAME_MAX;
+    MojoFrameRec *snap = n > 0 ? (MojoFrameRec *)malloc(sizeof(MojoFrameRec) * (size_t)n) : NULL;
+    for (int i = 0; i < n; i++) {
+        snap[i] = _mojo_frames[i];
+        snap[i].back = i > 0 ? &snap[i - 1] : NULL;
+    }
+    _mojo_tb_snap = snap;                         /* the previous snapshot is leaked: a traceback may outlive its handler */
+    _mojo_tb_snap_n = n;
+    _mojo_tb_key_obj = _mojo_exc_obj;
+    _mojo_tb_key_msg = _mojo_exc_msg;
+}
+
+int64_t mojo_traceback(int64_t catcher_depth)
+{
+    if (!_mojo_tb_snap || catcher_depth < 1) return 0;
+    MojoTb *head = NULL, *tail = NULL;
+    for (int i = (int)catcher_depth - 1; i < _mojo_tb_snap_n; i++) {
+        MojoTb *t = (MojoTb *)malloc(sizeof(MojoTb));
+        t->frame = &_mojo_tb_snap[i];
+        t->next = NULL;
+        if (tail) tail->next = t; else head = t;
+        tail = t;
+    }
+    return (int64_t)(intptr_t)head;
+}
+int64_t mojo_tb_frame(int64_t t)  { return t ? (int64_t)(intptr_t)((MojoTb *)(intptr_t)t)->frame : 0; }
+int64_t mojo_tb_next(int64_t t)   { return t ? (int64_t)(intptr_t)((MojoTb *)(intptr_t)t)->next : 0; }
+int64_t mojo_tb_lineno(int64_t t) { return t ? ((MojoTb *)(intptr_t)t)->frame->lineno : 0; }
+int64_t mojo_frame_lineno(int64_t w)      { MojoFrameRec *f = _frame_of(w); return f ? f->lineno : 0; }
+int64_t mojo_frame_firstlineno(int64_t w) { MojoFrameRec *f = _frame_of(w); return f ? f->firstlineno : 0; }
+char *mojo_frame_name(int64_t w)          { MojoFrameRec *f = _frame_of(w); return (char *)(f ? f->name : "<unknown>"); }
+char *mojo_frame_file(int64_t w)          { MojoFrameRec *f = _frame_of(w); return (char *)(f ? f->file : ""); }
 
 void mojo_cleanup_cancel_n(int64_t n)
 {
@@ -154,9 +438,14 @@ static void _mojo_cleanup_unwind_to(int chk)
             case MOJO_CLEANUP_LIST_STRS:  mojo_list_free_owned_strs((MojoList *)ptr); break;
             case MOJO_CLEANUP_CLOSURE:    mojo_closure_free(ptr);            break;
             case MOJO_CLEANUP_CATTR:      *(void **)ptr = aux;               break;
+            case MOJO_CLEANUP_FRAME:      if (_mojo_frame_depth > 0) --_mojo_frame_depth; break;
         }
     }
 }
+
+extern char *_mojo_exc_msg;
+extern void *_mojo_exc_obj;
+void _mojo_tb_snapshot(void);
 
 void mojo_raise(void)
 {
@@ -177,6 +466,7 @@ void mojo_raise(void)
                 MOJO_EXC_STACK_MAX);
         exit(1);
     }
+    _mojo_tb_snapshot();
     _mojo_cleanup_unwind_to(_mojo_cleanup_checkpoint[_mojo_exc_top]);
     longjmp((void *)&_mojo_exc_stack[_mojo_exc_top], 1);
 }
@@ -189,6 +479,21 @@ char *mojo_exc_msg_get(void) { return _mojo_exc_msg ? _mojo_exc_msg : ""; }
 void *_mojo_exc_obj = NULL;
 void mojo_exc_obj_set(void *obj) { _mojo_exc_obj = obj; }
 void *mojo_exc_obj_get(void) { return _mojo_exc_obj; }
+
+MojoExc *mojo_exc_new(int64_t type, char *msg, MojoList *args) {
+    MojoExc *exc = (MojoExc *)malloc(sizeof(MojoExc));
+    if (!exc) return NULL;
+    exc->type = type;
+    exc->msg = msg ? strdup(msg) : NULL;
+    exc->args = args;
+    return exc;
+}
+
+MojoList *mojo_exc_args(void *obj) {
+    if (!obj) return NULL;
+    MojoExc *exc = (MojoExc *)obj;
+    return (MojoList *)exc->args;
+}
 
 /* Exception type tag: a small int id (assigned per exception class name at
  * compile time, see GimpleGen._exc_type_id) that lets a multi-handler
@@ -211,7 +516,14 @@ void *mojo_exc_obj_get(void) { return _mojo_exc_obj; }
 #define _MOJO_EXC_TAG_ZERODIVISIONERROR 1715583614
 
 int64_t _mojo_exc_type = 0;
-void mojo_exc_type_set(int64_t type_id) { _mojo_exc_type = type_id; }
+/* The value a `StopIteration` carries (`raise StopIteration(5)`, a generator's `return 5`, a
+ * coroutine's result): a word set AFTER mojo_exc_type_set (which clears it, so a later unrelated
+ * raise never inherits it). `ex.value` reads it; absent means None. */
+static int64_t _mojo_exc_value_word = 0;
+static int _mojo_exc_value_present = 0;
+void mojo_exc_type_set(int64_t type_id) { _mojo_exc_type = type_id; _mojo_exc_value_present = 0; }
+void mojo_exc_value_set(int64_t w) { _mojo_exc_value_word = w; _mojo_exc_value_present = 1; }
+int64_t mojo_exc_value_get(void) { return _mojo_exc_value_present ? _mojo_exc_value_word : mojo_box_none(); }
 int64_t mojo_exc_type_get(void) { return _mojo_exc_type; }
 
 /* Compiled-generator (C++20 coroutine) exception-boundary flag — see the
@@ -1302,6 +1614,14 @@ void mojo_list_append_word(MojoList *l, int64_t w)
     _list_word_push(l, 'i', w, 'i');
 }
 
+/* A string slot appended under the 'p' kind: the codegen KNOWS this slot is a string (a literal or a
+ * str-typed value), including a literal that lives in a C++ coroutine unit and is not in the
+ * runtime's registered string pool, which `mojo_list_append_word` could only classify as an integer. */
+void mojo_list_append_str_kinded(MojoList *l, const char *v)
+{
+    _list_word_push(l, 'p', (int64_t)(uintptr_t)v, 'i');
+}
+
 /* `lst.append(<float>)` where the list's static element kind is `prior` (see
  * `_list_word_push`): the double's bits under the 'd' kind, so the element
  * stays a double and is not truncated to its int value by the int64_t slot. */
@@ -1321,6 +1641,16 @@ int64_t mojo_float_arith_select(int64_t a, int64_t b, int64_t ires, double dres)
 {
     if (mojo_is_boxed(a) && ((MojoBox *)(intptr_t)a)->kind == 'd') return mojo_box_from_double(dres);
     if (mojo_is_boxed(b) && ((MojoBox *)(intptr_t)b)->kind == 'd') return mojo_box_from_double(dres);
+    return ires;
+}
+
+/* The comparison counterpart to `mojo_float_arith_select`: selects the
+ * double comparison answer `dres` when either operand word is a double box,
+ * else the integer comparison answer `ires`. */
+int mojo_float_cmp_select(int64_t a, int64_t b, int ires, int dres)
+{
+    if (mojo_is_boxed(a) && ((MojoBox *)(intptr_t)a)->kind == 'd') return dres;
+    if (mojo_is_boxed(b) && ((MojoBox *)(intptr_t)b)->kind == 'd') return dres;
     return ires;
 }
 
@@ -1344,6 +1674,84 @@ int64_t mojo_box_word(int64_t v)
     MojoBox *bx = (MojoBox *)(intptr_t)v;
     if (bx->kind == 'd') return v;
     return bx->bits;
+}
+
+/* See the header. The shared kind-'n' box is the only word that IS None when
+ * it is still boxed; a bare word cannot say so (an int 0 has the same bits). */
+int mojo_word_is_none(int64_t v)
+{
+    if (!mojo_is_boxed(v)) return 0;
+    return ((MojoBox *)(intptr_t)v)->kind == 'n';
+}
+
+/* Sets the TypeError slots (tag, message, object) for `detail` WITHOUT
+ * raising. Both the raising TypeError helpers and the pending-flag guards
+ * below share it, so the message and tag have one definition. */
+static void _mojo_type_error_set(const char *detail)
+{
+    char msg[256];
+    snprintf(msg, sizeof msg, "TypeError: %s", detail ? detail : "?");
+    char *heap_msg = strdup(msg);
+    mojo_exc_type_set(_MOJO_EXC_TAG_TYPEERROR);
+    mojo_exc_msg_set(heap_msg);
+    mojo_exc_obj_set(heap_msg);
+}
+
+/* The None check behind the arithmetic guards: 1 (with the TypeError slots
+ * set) when `v` is the None box, 0 for every other word. The detail names the
+ * operator and the two types in CPython's order. */
+static int _mojo_none_arith_check(int64_t v, const char *op, const char *other, int none_is_left)
+{
+    if (!mojo_word_is_none(v)) return 0;
+    char m[128];
+    if (none_is_left)
+        snprintf(m, sizeof m, "unsupported operand type(s) for %s: 'NoneType' and '%s'", op, other);
+    else
+        snprintf(m, sizeof m, "unsupported operand type(s) for %s: '%s' and 'NoneType'", op, other);
+    _mojo_type_error_set(m);
+    return 1;
+}
+
+/* See the header. Arithmetic on a possibly-boxed operand: a None box has no
+ * numeric kind, so CPython raises TypeError where the unwrap would compute
+ * with its word (0). Any other word comes back unchanged. */
+int64_t mojo_none_arith_guard(int64_t v, const char *op, const char *other, int none_is_left)
+{
+    if (_mojo_none_arith_check(v, op, other, none_is_left)) mojo_raise();
+    return v;
+}
+
+/* See the header. The pending-flag form of mojo_none_arith_guard, for a
+ * coroutine body, which must not longjmp: it marks the TypeError pending and
+ * returns, and the generated code rethrows it. */
+int64_t mojo_none_arith_guard_pending(int64_t v, const char *op, const char *other, int none_is_left)
+{
+    if (_mojo_none_arith_check(v, op, other, none_is_left)) mojo_exc_pending_set(1);
+    return v;
+}
+
+/* See the header. Unary `-` on a possibly-boxed operand: the same None check,
+ * with CPython's unary message. */
+static int _mojo_none_unary_check(int64_t v, const char *op)
+{
+    if (!mojo_word_is_none(v)) return 0;
+    char m[128];
+    snprintf(m, sizeof m, "bad operand type for unary %s: 'NoneType'", op);
+    _mojo_type_error_set(m);
+    return 1;
+}
+
+int64_t mojo_none_unary_guard(int64_t v, const char *op)
+{
+    if (_mojo_none_unary_check(v, op)) mojo_raise();
+    return v;
+}
+
+/* The pending-flag form of mojo_none_unary_guard (see the arithmetic one). */
+int64_t mojo_none_unary_guard_pending(int64_t v, const char *op)
+{
+    if (_mojo_none_unary_check(v, op)) mojo_exc_pending_set(1);
+    return v;
 }
 
 /* Python truthiness of a word of unknown kind (see the header). Containers
@@ -1728,8 +2136,16 @@ MojoBoundMethod *mojo_bound_method_new(void *fn, void *self) {
     MojoBoundMethod *bm = (MojoBoundMethod *)malloc(sizeof(MojoBoundMethod));
     bm->fn = fn;
     bm->self = self;
+    bm->boxes = NULL;
+    bm->nboxes = 0;
     _pr_add(&_reg_bound_method, (uint64_t)(uintptr_t)bm);
     return bm;
+}
+
+void mojo_bound_method_add_box(MojoBoundMethod *bm, void *box) {
+    if (!bm || !box) return;
+    bm->boxes = (void **)realloc(bm->boxes, (size_t)(bm->nboxes + 1) * sizeof(void *));
+    bm->boxes[bm->nboxes++] = box;
 }
 
 int mojo_is_bound_method(void *p) {
@@ -2251,6 +2667,13 @@ void mojo_closure_free(void *bmv)
 {
     MojoBoundMethod *bm = (MojoBoundMethod *)bmv;
     if (!bm) return;
+    /* The environment's `{mut}` boxes are separate allocations it only points
+     * at (recorded by mojo_bound_method_add_box); free each, then the list,
+     * before the environment itself. */
+    if (bm->boxes) {
+        for (int64_t i = 0; i < bm->nboxes; i++) free(bm->boxes[i]);
+        free(bm->boxes);
+    }
     free(bm->self);
     mojo_bound_method_free(bm);
 }
@@ -2998,7 +3421,7 @@ char *mojo_cstr_slice(char *s, int64_t start, int64_t stop)
          * the first NUL within s[0..stop), or `stop` when there is none)
          * and is what every libc already vectorises. Measured on the exact
          * scanning shape above (see
-         * bugs/CODEGEN_selfhost_tokenize_region_eq_quadratic.md): 14x on
+         * bugs/mid/CODEGEN_selfhost_tokenize_region_eq_quadratic.md): 14x on
          * the same inputs, with a byte-for-byte equality check over every
          * position confirming the two agree.
          *
@@ -3355,7 +3778,7 @@ static void mojo_codepoint_escape(uint32_t cp, char *out, size_t cap)
     else snprintf(out, cap, "\\U%08x", (unsigned)cp);
 }
 
-MojoBytes *mojo_bytes_from_str(char *s, char *encoding)
+MojoBytes *mojo_bytes_from_str(char *s, char *encoding, char *errors)
 {
     MojoCodec codec = mojo_codec_lookup(encoding);
     const unsigned char *p = (const unsigned char *)s;
@@ -3365,25 +3788,44 @@ MojoBytes *mojo_bytes_from_str(char *s, char *encoding)
      * result length is the code-point count. Pass 1 counts it and refuses the
      * first character the codec cannot hold, before anything is allocated. */
     int64_t limit = codec == MOJO_CODEC_ASCII ? 0x80 : 0x100;
+    int use_strict = (!errors || strcmp(errors, "strict") == 0);
+    int use_replace = (errors && strcmp(errors, "replace") == 0);
+    int use_ignore = (errors && strcmp(errors, "ignore") == 0);
     int64_t count = 0;
-    for (int64_t i = 0; i < n; count++) {
+    for (int64_t i = 0; i < n; ) {
         int64_t at = count;
         uint32_t cp = mojo_utf8_next(p, n, &i);
         if ((int64_t)cp >= limit) {
-            char esc[16], detail[160];
-            mojo_codepoint_escape(cp, esc, sizeof esc);
-            snprintf(detail, sizeof detail,
-                     "'%s' codec can't encode character '%s' in position %lld: "
-                     "ordinal not in range(%lld)",
-                     _mojo_codec_name[codec], esc, (long long)at, (long long)limit);
-            mojo_raise_unicode_encode_error(detail);
+            if (use_strict) {
+                char esc[16], detail[160];
+                mojo_codepoint_escape(cp, esc, sizeof esc);
+                snprintf(detail, sizeof detail,
+                         "'%s' codec can't encode character '%s' in position %lld: "
+                         "ordinal not in range(%lld)",
+                         _mojo_codec_name[codec], esc, (long long)at, (long long)limit);
+                mojo_raise_unicode_encode_error(detail);
+            }
+            if (use_replace) count++;
+            /* ignore skips */
+        } else {
+            count++;
         }
     }
     MojoBytes *b = mojo_bytes_alloc(count);
     int64_t i = 0;
-    for (int64_t k = 0; k < count; k++) {
-        b->data[k] = (uint8_t)mojo_utf8_next(p, n, &i);
+    int64_t k = 0;
+    while (i < n && k < count) {
+        int64_t at = k;
+        uint32_t cp = mojo_utf8_next(p, n, &i);
+        int64_t limit = codec == MOJO_CODEC_ASCII ? 0x80 : 0x100;
+        if ((int64_t)cp >= limit) {
+            if (use_replace) b->data[k++] = (uint8_t)'?';
+            /* ignore skips */
+        } else {
+            b->data[k++] = (uint8_t)cp;
+        }
     }
+    b->len = k;
     return b;
 }
 
@@ -3653,7 +4095,7 @@ int mojo_bytes_endswith(MojoBytes *b, MojoBytes *p)
     return mojo_bytes_endswith_from(b, p, 0, MOJO_SLICE_STOP_OMITTED);
 }
 
-char *mojo_bytes_decode(MojoBytes *b, char *encoding)
+char *mojo_bytes_decode(MojoBytes *b, char *encoding, char *errors)
 {
     MojoCodec codec = mojo_codec_lookup(encoding);
     int64_t n = b ? b->len : 0;
@@ -3682,8 +4124,52 @@ char *mojo_bytes_decode(MojoBytes *b, char *encoding)
         s[k] = 0;
         return s;
     }
-    /* utf-8: the bytes are taken as they are, as they always were. Malformed
-     * UTF-8 is not yet rejected (see the codec note above mojo_bytes_from_str). */
+    /* utf-8: validate malformed bytes; report the three CPython reasons. */
+    if (codec == MOJO_CODEC_UTF8) {
+        int64_t i = 0;
+        while (i < n) {
+            unsigned char c = b->data[i];
+            int extra = c >= 0xF0 ? 3 : c >= 0xE0 ? 2 : c >= 0xC0 ? 1 : 0;
+            if (extra > 0) {
+                if (i + extra >= n) {
+                    char detail[160];
+                    snprintf(detail, sizeof detail,
+                             "invalid start byte at position %lld: unexpected end of data",
+                             (long long)i);
+                    mojo_raise_unicode_decode_error(detail);
+                }
+                for (int k = 1; k <= extra; k++) {
+                    unsigned char ch = b->data[i + k];
+                    if ((ch & 0xC0) != 0x80) {
+                        char detail[160];
+                        snprintf(detail, sizeof detail,
+                                 "invalid continuation byte at position %lld",
+                                 (long long)(i + k));
+                        mojo_raise_unicode_decode_error(detail);
+                    }
+                }
+                uint32_t cp = c & (0x1Fu >> (extra - 1));
+                for (int k = 1; k <= extra; k++) cp = (cp << 6) | (b->data[i + k] & 0x3Fu);
+                if (cp < 0x80 || (extra == 1 && cp < 0x80) ||
+                    (extra == 2 && cp < 0x800) ||
+                    (extra == 3 && cp < 0x10000)) {
+                    char detail[160];
+                    snprintf(detail, sizeof detail,
+                             "invalid start byte at position %lld",
+                             (long long)i);
+                    mojo_raise_unicode_decode_error(detail);
+                }
+                i += extra + 1;
+            } else if (c >= 0x80) {
+                char detail[160];
+                snprintf(detail, sizeof detail,
+                         "invalid start byte at position %lld", (long long)i);
+                mojo_raise_unicode_decode_error(detail);
+            } else {
+                i++;
+            }
+        }
+    }
     char *s = malloc((size_t)n + 1);
     if (n) memcpy(s, b->data, (size_t)n);
     s[n] = 0;
@@ -10167,12 +10653,7 @@ void mojo_raise_key_error(char *key) {
  * 0. `detail` is the tail CPython puts after "TypeError: ", e.g. "'str' object
  * is not callable". */
 void mojo_raise_type_error(char *detail) {
-    char msg[256];
-    snprintf(msg, sizeof msg, "TypeError: %s", detail ? detail : "?");
-    char *heap_msg = strdup(msg);
-    mojo_exc_type_set(_MOJO_EXC_TAG_TYPEERROR);
-    mojo_exc_msg_set(heap_msg);
-    mojo_exc_obj_set(heap_msg);
+    _mojo_type_error_set(detail);
     mojo_raise();
 }
 
@@ -13005,9 +13486,14 @@ static void _kbuf_put_word(char **buf, size_t *len, size_t *cap, const char *tag
 static void _tuple_key_elem(char **buf, size_t *len, size_t *cap, int64_t w,
                             char k, int ecode)
 {
-    if (ecode == MOJO_EQ_UNKNOWN) ecode = _kind_to_eq(k);
+    if (ecode == MOJO_EQ_UNKNOWN) {
+        if (k == 'p' && _pr_has(&_reg_str, (uint64_t)w)) ecode = MOJO_EQ_STR;
+        else if (k == 'p') ecode = MOJO_EQ_INT;
+        else ecode = _kind_to_eq(k);
+    }
     char tmp[_INT_STR_BLOCK];
     if (ecode == MOJO_EQ_DOUBLE) {
+        _kbuf_put_word(buf, len, cap, "D", 1);
         double d = _eq_as_double(w);
         int n = snprintf(tmp, sizeof tmp, "%.17g", d);
         _kbuf_put(buf, len, cap, tmp, (size_t)(n < 0 ? 0 : n));
@@ -13019,11 +13505,13 @@ static void _tuple_key_elem(char **buf, size_t *len, size_t *cap, int64_t w,
          * elements are not strings, and dereferencing a small integer here
          * would be a segfault rather than a wrong key. */
         if (w == 0) { _kbuf_put(buf, len, cap, "N", 1); return; }
-        if (!_mojo_ptr_shaped(w)) { _kbuf_put(buf, len, cap, "?", 1); return; }
+        if (!_mojo_ptr_shaped(w)) { _kbuf_put_word(buf, len, cap, "?", 1); return; }
+        _kbuf_put_word(buf, len, cap, "P", 1);
         _kbuf_put(buf, len, cap, (char *)(intptr_t)w,
                   strlen((char *)(intptr_t)w));
     } else if (ecode == MOJO_EQ_BYTES) {
-        if (!_mojo_ptr_shaped(w)) { _kbuf_put(buf, len, cap, "?", 1); return; }
+        _kbuf_put_word(buf, len, cap, "B", 1);
+        if (!_mojo_ptr_shaped(w)) { _kbuf_put_word(buf, len, cap, "?", 1); return; }
         MojoBytes *b = (MojoBytes *)(intptr_t)w;
         _kbuf_put(buf, len, cap, (const char *)(b ? b->data : NULL),
                   b && b->len > 0 ? (size_t)b->len : 0);
@@ -13053,7 +13541,12 @@ static void _tuple_key_elem(char **buf, size_t *len, size_t *cap, int64_t w,
             _tuple_key_elem(buf, len, cap, w, 'l', MOJO_EQ_GENERIC);
             return;
         }
-        char *p = _fmt_int(w, tmp);
+        _kbuf_put_word(buf, len, cap, "I", 1);
+        int64_t val = w;
+        if (_mojo_ptr_shaped(w) && mojo_is_boxed(w)) {
+            val = ((MojoBox *)(intptr_t)w)->bits;
+        }
+        char *p = _fmt_int(val, tmp);
         /* `- 1`: `_fmt_int` leaves the NUL inside the block, so the span it
          * returns INCLUDES it (which is what `_slot_key` wants — it copies the
          * NUL as part of the string). A length PREFIX counts content bytes, so
@@ -15252,6 +15745,8 @@ void mojo_chain_extend(MojoList *dst, int64_t src)
 typedef struct MojoClassRec {
     int64_t tag; char *name;
     int64_t bases[8]; int nbases;
+    int64_t meta;               /* tag of the metaclass (a run-time class), 0 = plain `type` */
+    int64_t handle;             /* the class handle `mojo_type_new` made for this tag, 0 = a static class */
     MojoDict *attrs;
     struct MojoClassRec *next;
 } MojoClassRec;
@@ -15354,6 +15849,7 @@ int64_t mojo_type_new(char *name)
     MojoClassObj *o = (MojoClassObj *)malloc(sizeof *o);
     o->magic = MOJO_CLASSOBJ_MAGIC; o->tag = tag;
     _pr_add(&_reg_classobj, (uint64_t)(uintptr_t)o);
+    _class_get(tag)->handle = (int64_t)(intptr_t)o;
     return (int64_t)(intptr_t)o;
 }
 /* A registry, not a magic-number read: `mojo_fnptr_call_N` asks this of EVERY dynamically
@@ -15373,24 +15869,107 @@ int mojo_is_instobj(int64_t w)
 }
 /* `Foo(args..)` on a class handle. A class made at run time has no `__init__` unless its
  * namespace names one, and a namespace function is called with the new instance first. */
-int64_t mojo_classobj_call(int64_t cls, int64_t n, int64_t a0, int64_t a1, int64_t a2, int64_t a3)
+/* call the function word `fn` with the first `n` (0..8) of `a` */
+static int64_t _call_words(int64_t fn, int64_t n, const int64_t *a)
+{
+    void *fp = (void *)(intptr_t)fn;
+    switch (n) {
+    case 0: return mojo_fnptr_call_0(fp);
+    case 1: return mojo_fnptr_call_1(fp, a[0]);
+    case 2: return mojo_fnptr_call_2(fp, a[0], a[1]);
+    case 3: return mojo_fnptr_call_3(fp, a[0], a[1], a[2]);
+    case 4: return mojo_fnptr_call_4(fp, a[0], a[1], a[2], a[3]);
+    case 5: return mojo_fnptr_call_5(fp, a[0], a[1], a[2], a[3], a[4]);
+    case 6: return mojo_fnptr_call_6(fp, a[0], a[1], a[2], a[3], a[4], a[5]);
+    case 7: return mojo_fnptr_call_7(fp, a[0], a[1], a[2], a[3], a[4], a[5], a[6]);
+    default: return mojo_fnptr_call_8(fp, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]);
+    }
+}
+int64_t mojo_classobj_call(int64_t cls, int64_t n, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6)
 {
     MojoInstObj *o = (MojoInstObj *)malloc(sizeof *o);
     o->magic = MOJO_INSTOBJ_MAGIC; o->tag = ((MojoClassObj *)(intptr_t)cls)->tag;
     _pr_add(&_reg_instobj, (uint64_t)(uintptr_t)o);
     int64_t self = (int64_t)(intptr_t)o, init;
     if (_class_lookup(o->tag, "__init__", &init, 0)) {
-        switch (n) {
-        case 0: mojo_fnptr_call_1((void *)(intptr_t)init, self); break;
-        case 1: mojo_fnptr_call_2((void *)(intptr_t)init, self, a0); break;
-        case 2: mojo_fnptr_call_3((void *)(intptr_t)init, self, a0, a1); break;
-        case 3: mojo_fnptr_call_4((void *)(intptr_t)init, self, a0, a1, a2); break;
-        default: mojo_fnptr_call_5((void *)(intptr_t)init, self, a0, a1, a2, a3); break;
-        }
+        int64_t a[8] = { self, a0, a1, a2, a3, a4, a5, a6 };
+        _call_words(init, n + 1, a);
     } else if (n) {
         mojo_raise_type_error((char *)"this class takes no arguments");
     }
     return self;
+}
+/* `recv.name(args..)` where `recv` is an instance of a run-time class (the instance goes first,
+ * as `self`) or the class handle itself (a plain call, as `Foo.m(x)`). The function is looked up
+ * in the class table through the bases; a miss is an AttributeError. */
+int64_t mojo_rtobj_method_call(int64_t recv, char *name, int64_t n, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6)
+{
+    int64_t fn, a[8];
+    if (mojo_is_instobj(recv)) {
+        if (!_class_lookup(((MojoInstObj *)(intptr_t)recv)->tag, name, &fn, 0)) {
+            mojo_raise_attribute_error(name);
+            return 0;
+        }
+        a[0] = recv; a[1] = a0; a[2] = a1; a[3] = a2; a[4] = a3; a[5] = a4; a[6] = a5; a[7] = a6;
+        return _call_words(fn, n + 1, a);
+    }
+    if (mojo_is_classobj(recv)) {
+        if (!_class_lookup(((MojoClassObj *)(intptr_t)recv)->tag, name, &fn, 0)) {
+            /* a method of the METACLASS: bound to the class, which goes first as `self` */
+            MojoClassRec *rc = _class_find(((MojoClassObj *)(intptr_t)recv)->tag);
+            if (rc && rc->meta && _class_lookup(rc->meta, name, &fn, 0)) {
+                a[0] = recv; a[1] = a0; a[2] = a1; a[3] = a2; a[4] = a3; a[5] = a4; a[6] = a5; a[7] = a6;
+                return _call_words(fn, n + 1, a);
+            }
+            mojo_raise_attribute_error(name);
+            return 0;
+        }
+        a[0] = a0; a[1] = a1; a[2] = a2; a[3] = a3; a[4] = a4; a[5] = a5; a[6] = a6;
+        return _call_words(fn, n, a);
+    }
+    mojo_raise_attribute_error(name);
+    return 0;
+}
+static int _class_derives(int64_t tag, int64_t want, int depth)
+{
+    if (tag == want) return 1;
+    MojoClassRec *c = _class_find(tag);
+    if (!c || depth > 32) return 0;
+    for (int i = 0; i < c->nbases; i++) if (_class_derives(c->bases[i], want, depth + 1)) return 1;
+    return 0;
+}
+/* `isinstance(obj, Cls)` where `Cls` is a class made at run time: `obj` is an instance whose
+ * class is `Cls` or derives from it. */
+int mojo_isinstance_rtclass(int64_t obj, int64_t cls)
+{
+    if (mojo_is_classobj(obj)) {
+        /* a class is an instance of its metaclass (and of that metaclass's bases) */
+        MojoClassRec *c = _class_find(((MojoClassObj *)(intptr_t)obj)->tag);
+        return c && c->meta && _class_derives(c->meta, mojo_classobj_tag(cls), 0);
+    }
+    if (!mojo_is_instobj(obj)) return 0;
+    return _class_derives(((MojoInstObj *)(intptr_t)obj)->tag, mojo_classobj_tag(cls), 0);
+}
+/* `isinstance(x, type)`: every class made at run time is one */
+int mojo_isinstance_type(int64_t w)
+{
+    return mojo_is_classobj(w);
+}
+/* `type(x)` for a word that may be a run-time class or an instance of one: a class is an
+ * instance of its metaclass (plain `type` when it has none), an instance's type is its class;
+ * anything else is the struct tag `type(x)` has always been. */
+int64_t mojo_type_of(int64_t w)
+{
+    if (mojo_is_classobj(w)) {
+        MojoClassRec *c = _class_find(((MojoClassObj *)(intptr_t)w)->tag);
+        MojoClassRec *m = c && c->meta ? _class_find(c->meta) : 0;
+        return m && m->handle ? m->handle : (int64_t)(intptr_t)mojo_type;
+    }
+    if (mojo_is_instobj(w)) {
+        MojoClassRec *c = _class_find(((MojoInstObj *)(intptr_t)w)->tag);
+        if (c && c->handle) return c->handle;
+    }
+    return mojo_read_type_tag_safe(w);
 }
 /* 1 and *out set when `obj` is an instance whose class (or a base) has `attr` */
 int mojo_instobj_class_lookup(void *obj, char *attr, int64_t *out)
@@ -15439,7 +16018,24 @@ int mojo_classobj_lookup(void *obj, char *attr, int64_t *out)
     if (!mojo_is_classobj((int64_t)(intptr_t)obj)) return 0;
     MojoClassRec *c = _class_find(((MojoClassObj *)obj)->tag);
     if (c && c->name && !strcmp(attr, "__name__")) { *out = (int64_t)(intptr_t)c->name; return 1; }
-    return _class_lookup(((MojoClassObj *)obj)->tag, attr, out, 0);
+    if (_class_lookup(((MojoClassObj *)obj)->tag, attr, out, 0)) return 1;
+    /* a miss on the class and its bases: the METACLASS answers - its own attributes first,
+     * then `Meta.__getattr__(cls, name)` (CPython's `type.__getattribute__` order). */
+    if (c && c->meta) {
+        if (_class_lookup(c->meta, attr, out, 0)) return 1;
+        int64_t ga, a[2] = { (int64_t)(intptr_t)obj, (int64_t)(intptr_t)attr };
+        if (strcmp(attr, "__getattr__") && _class_lookup(c->meta, "__getattr__", &ga, 0)) {
+            *out = _call_words(ga, 2, a);
+            return 1;
+        }
+    }
+    return 0;
+}
+/* `type.__new__(Meta, name, bases, ns)` with a run-time class `Meta`: the new class is an
+ * instance of `Meta`. */
+void mojo_type_set_meta(int64_t cls, int64_t meta)
+{
+    _class_get(mojo_classobj_tag(cls))->meta = mojo_classobj_tag(meta);
 }
 
 /* Struct reflection across modules: every translation unit registers its own

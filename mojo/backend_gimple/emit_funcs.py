@@ -1930,7 +1930,7 @@ def _record_home_def_pts(gen, bare_name: str, pts: list) -> None:
     '_common_set_capture_groups_6aabcf'?` (that 37bd8e suffix happened to
     coincide with an unrelated `_global._parse_next`), which refused
     c_parser/parser/__init__.py outright — see
-    bugs/COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__.md.
+    bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__.md.
 
     The spelling RULE is `module_qualifier` (one copy, see its docstring);
     this call is about picking the RIGHT module, not sanitizing a fifth way.
@@ -2835,6 +2835,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     # cannot be used to detect this. Read off the node rather than inferred
     # from the name: `*_body` is a legal user function name.
     _is_coro_body = bool(getattr(node, '_mojo_coro_body', False))
+    gen._cur_func_is_coro = _is_coro_body
     gen._reset_func(node.body, node.params,
                     allow_lambda_reduction=not _is_coro_body)
     # Per-FUNCTION record of which locals hold a beta-reducible
@@ -3201,6 +3202,7 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     gen._emitting_plain_func = True
     try:
         gen._begin_function(node)
+        gmp._frame_enter(gen, node)
         gmp._cattr_restore_begin(gen, node.body)
         for stmt in node.body:
             gen.gen_stmt(stmt)
@@ -3350,11 +3352,14 @@ def _gen_toplevel(gen, toplevel_stmts: list) -> str:
 
     # Generate code for each top-level statement
     gen._in_toplevel_gen = True
+    gmp._frame_enter_module(gen)
     try:
         for stmt in toplevel_stmts:
             gen.gen_stmt(stmt)
     finally:
         gen._in_toplevel_gen = False
+    gmp._frame_leave(gen)
+    gen._frame_func = ''
 
     # Dependency-init prelude: a `fire dylib` build compiles every
     # module SEPARATELY (see gen_module's population of
@@ -4460,6 +4465,7 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     # knows. The candidates computed here replace the empty set
     # `reset_no_candidates` left above.
     gen._begin_function(node)
+    gmp._frame_enter(gen, node)
     gmp._cattr_restore_begin(gen, node.body)
     for stmt in node.body:
         gen.gen_stmt(stmt)

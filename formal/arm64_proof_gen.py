@@ -457,6 +457,62 @@ def _has_while(stmts) -> bool:
     return False
 
 
+def _ternary_count(e) -> int:
+    """The value-position ternaries in an expression, operands included.
+
+    `TernaryExpr` is the value-position `if` — the shape `arm64_step`'s CSEL
+    arm and `work_step_csel` model, and the one the untyped AST bridge has no
+    constructor for — and this counts them where `_ast_model_cannot_state`
+    only asked whether any exist: the certificate's cost row is keyed on HOW
+    MANY conditions a body carries, not whether it carries one. The walk is
+    over the node's dataclass fields rather than a hand list of expression
+    kinds, so an operand a hand list forgot is still counted.
+    """
+    if e is None:
+        return 0
+    if isinstance(e, F.TernaryExpr):
+        return (1 + _ternary_count(e.condition)
+                + _ternary_count(e.then_val) + _ternary_count(e.else_val))
+    n = 0
+    for name in getattr(e, "__dataclass_fields__", ()) or ():
+        if name in ("line", "col"):
+            continue
+        child = getattr(e, name, None)
+        if isinstance(child, list):
+            n += sum(_ternary_count(c) for c in child)
+        elif child is not None and not isinstance(
+                child, (str, int, float, bool)):
+            n += _ternary_count(child)
+    return n
+
+
+def _cond_branch_count(stmts) -> int:
+    """The conditional branches a statement list carries: one per `if` and
+    one per value-position ternary, recursing into the arms and operands.
+
+    This is the certificate's cost row: the walk theorem's per-path value-flow
+    facts grow with the number of source-level conditions, branch or not — a
+    value-position ternary is branchless on the machine (`cmp` + `CSEL`, no
+    branch instruction) yet it still doubles the paths the per-condition
+    `hcond` facts are stated over, which is the reading the `B.cond` control
+    in `bugs/formal/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.
+    md` gives for the statement-`if` shape and the measured ternary class
+    (one checks, three check at 560 s / 5.6 GB, four kill at the 1500 s CPU
+    bound) gives for this one.
+    """
+    n = 0
+    for st in stmts:
+        if isinstance(st, IfStmt):
+            _c, _tb, _eb = _if_expand(st)
+            n += (1 + _ternary_count(_c)
+                  + _cond_branch_count(_tb) + _cond_branch_count(_eb))
+        else:
+            # The value position the statement carries: `return`'s value,
+            # an `Assign`/`AugAssign`/`VarDecl` right-hand side, an `ExprStmt`.
+            n += _ternary_count(getattr(st, "value", None))
+    return n
+
+
 #: Node types that start a NESTED SCOPE.  A call inside one is not a call of
 #: the enclosing function: a nested `def`'s body runs when IT is called, and a
 #: lambda's body when the lambda object is called.  Every walker below stops at
@@ -3655,35 +3711,24 @@ _STEP_CONDS = [
     # `formal/arm64.py` can produce.
     (0xffe00000, 0xab000000),  # 66 CMN Xn, Xm (SUBS XZR, Xn, Xm with the add flag)
     (0xffe00000, 0xea000000),  # 67 TST Xn, Xm (ANDS XZR, Xn, Xm)
-    # CSEL is EMITTED and UNMODELLED, and saying so here is the point of this
-    # comment: `arm64_codegen.py` calls `encode_csel_xd_xm_cond` at six sites
-    # (6394, 6396, 6410, 6412, 8998, 9008 — a ternary is a CSEL), so a reader of
-    # this table cannot conclude from its absence that the instruction is unused.
-    #
-    # The row that was here is removed rather than left, and that is the correct
-    # direction: `arm64_step` has no CSEL branch either, and `check_step_conds`
-    # (called by `generate_arm64_proof`, so by EVERY proved arm64 build) requires
-    # the two to be the same set. An entry here with no branch in the model is not
-    # a gap in a check — it is a generator that would describe a CSEL's effect
-    # while the function being proved takes no step at all for that word, which
-    # is a proof about a different function. The check is right and the row was
-    # wrong. (`work/formal13-3`'s commit that added it violated its own stated
-    # premise in the very message that introduced it.)
-    #
-    # **WHAT IS STILL MISSING is the model branch, and what blocks it is not the
-    # three lines of Lean.** Measured 2026-10-03, both halves of the old reason
-    # re-measured rather than quoted: the three-line `arm64_step` branch BUILDS
-    # (the branch plus the `work_step_csel` the row needs), and with it a
-    # CSEL-carrying export fails the same way a THREE-BRANCH FUNCTION fails —
-    # `_gen_run_cert`'s certificate exceeds `formal/lean.py`'s `PROOF_WALL_S` —
-    # and the control is that the same three branches spelled as ordinary
-    # comparisons fail identically. So the wall is the certificate's size and not
-    # the instruction, which changes the ORDER of the work: the certificate is
-    # the defect to fix first (`bugs/formal/FORMAL_a_three_branch_certificate_exceeds_
-    # the_lean_bound.md` has the measurement and the next step), and the CSEL row
-    # is a three-line change once it is gone.
-    # `bugs/formal/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_cannot_claim_it.md`
-    # carries the rest.
+    # CSEL: EMITTED and, until 2026-11-01, UNMODELLED.  The row this comment
+    # once guarded was removed rather than left when it landed WITHOUT
+    # `arm64_step`'s branch (2026-10-03, `bugs/formal/FORMAL_arm64_csel_is_not_
+    # modelled_so_the_step_table_cannot_claim_it.md`): an entry here with no
+    # branch in the model is a generator that would describe a CSEL's effect
+    # while the function being proved takes no step at all for that word,
+    # which is a proof about a different function.  What blocked the branch
+    # was not the three lines of Lean — they build, with the `work_step_csel`
+    # the row needs — but the certificate: with CSEL in the model a
+    # CSEL-carrying export fails the same way a THREE-BRANCH FUNCTION fails,
+    # measured on both shapes (`bugs/formal/FORMAL_a_three_branch_certificate_
+    # exceeds_the_lean_bound.md`).  So the row came back ONLY with the branch
+    # and the lemma, in one commit — the table and the model move together —
+    # and the walled discharge is tracked in that certificate doc, whose
+    # measurement is why the order of the work was certificate first.
+    # `arm64_codegen.py` calls `encode_csel_xd_xm_cond` at six sites (a
+    # ternary is a CSEL), so a reader of this table cannot conclude from the
+    # row's position that the instruction is unused.
     #
     # 68 SMULH. APPENDED for the reason 51 was. The mask is the SAME VALUE
     # entry 4 (MUL) uses, `0xffe07c00`, and that is not a copy-paste: on the
@@ -3704,6 +3749,22 @@ _STEP_CONDS = [
     # `a * b` fit in 64 signed bits", which a wrapping MUL cannot answer), and
     # `test_arm64_encoders.py` checks the encoding against `as`.
     (0xffe07c00, 0x9b407c00),  # 68 SMULH Xd, Xn, Xm
+    # 69 CSEL Xd, Xn, Xm, cond: the branchless select, `Rd = if cond then Xn
+    # else Xm`, and nothing else moves (no flags, no `sp`).  APPENDED, last:
+    # the model's arm is the chain's last for the index hard-coding reason 68
+    # records, and this row's position is what decides `_step_branch_index`'s
+    # FIRST match — `check_step_conds` is a SET comparison and order does not
+    # matter there, but the first row that claims a word wins the decode.  The
+    # `work_step_csel` lemma's 69 `hne_*` facts are the measurement that no
+    # earlier row claims these words, including the two that share the mask
+    # (64/65, LDUR/STUR: `0xf8400000`/`0xf8000000`, disjoint in the base under
+    # it), and its statement is the model arm's own: the condition is the RAW
+    # field at bits 15:12, no inversion, which is what separates it from the
+    # CSET row's `field ± 1`.  `formal/arm64_codegen.py::encode_csel_xd_xm_
+    # cond` is the emitter's caller (a ternary), and the mask's kept bits as
+    # class separators are measured with the platform assembler in the arm's
+    # own comment.
+    (0xffe00c00, 0x9a800000),  # 69 CSEL Xd, Xn, Xm, cond
 ]
 
 
@@ -4029,6 +4090,18 @@ def _step_rhs(w: int, idx: int):
     if idx == 67:  # TST Xn, Xm: the logical flags of Xn & Xm, C and V clear
         return (f"some {{ s with nzcv := arm64_logic_flags (arm64_reg "
                 f"{(w >> 5) & 0x1f} s &&& arm64_reg {(w >> 16) & 0x1f} s) }}")
+    if idx == 69:  # CSEL Xd, Xn, Xm, cond: the branchless select, nothing else
+        # moves.  The step RESULT closes by `exact`-ing `work_step_csel` at
+        # this word, so this spelling has to be the lemma's conclusion defeq —
+        # which it is on the literal condition, the same way `_COND4`'s
+        # docstring records for B.cond: the concrete number and the word-
+        # relative `((w >>> 12) &&& 0xf).toNat` are the same term once `w` is
+        # the word.  The condition is the RAW field at bits 15:12, no
+        # inversion, which is what separates it from the CSET row's
+        # `field ± 1`.
+        cond = (w >> 12) & 0xf
+        return (f"some (arm64_set_reg {rd} s (if arm64_matches_condition "
+                f"{cond} s.nzcv then arm64_reg {rn} s else arm64_reg {rm} s))")
     if idx in (54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65):
         rn = (w >> 5) & 0x1f
         base = _base_of(rn)
@@ -4324,6 +4397,13 @@ def _step_rhs_generic(idx: int):
     if idx == 67:
         return (f"some {{ s with nzcv := arm64_logic_flags (arm64_reg {_RN} s "
                 f"&&& arm64_reg {_RM} s) }}")
+    if idx == 69:  # CSEL: `Rd = if cond then Xn else Xm`, nothing else moves
+        # and the condition is the RAW field at bits 15:12 — no inversion,
+        # which is what separates it from `_COND`'s `field ± 1` for CSET.
+        # `w` below is the Lean word the statement binds, as in `_COND4`.
+        return (f"some (arm64_set_reg {_RD} s (if arm64_matches_condition "
+                f"(((w >>> 12) &&& 0xf).toNat) s.nzcv then arm64_reg {_RN} s "
+                f"else arm64_reg {_RM} s))")
     if idx in (54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65):
         _I9G = "(((w >>> 12) &&& 0x1ff).toNat)"
         _IDX = "(((w >>> 10) &&& 0xfff).toNat)"
@@ -4446,6 +4526,12 @@ _WORK_STEP = [
     (66, "work_step_cmn", [(0xffe00000, 0xab000000)]),
     (67, "work_step_tst", [(0xffe00000, 0xea000000)]),
     (68, "work_step_smulh", [(0xffe07c00, 0x9b407c00)]),
+    # CSEL, APPENDED last in both lists: the lemma is `work_step_csel` in
+    # lib/ProofLib.lean, whose statement is the model arm's own (`Rd = if cond
+    # then Xn else Xm`, the RAW bits 15:12), and whose 69 `hne_*` facts are the
+    # measurement that no earlier row — including the two that share the mask,
+    # 64/65 — claims these words.
+    (69, "work_step_csel", [(0xffe00c00, 0x9a800000)]),
 ]
 
 _WORK_STEP_BY_IDX = {idx: (lemma, tests) for idx, lemma, tests in _WORK_STEP}
@@ -5236,10 +5322,10 @@ def _regs_written(w: int, idx: int):
         return set() if rd == 31 else {rd}
     if idx == 15:
         return {30}
-    # 68 (SMULH) is in the MUL row on purpose rather than in a row of its own:
-    # it writes `Xd` and no flags and no `sp`, which is the same fact MUL's
-    # membership states, and a second row saying the same thing is how
-    # `_regs_written` and the model's arm drift apart.
+    # 68 (SMULH) and 69 (CSEL) are in the MUL row on purpose rather than in a
+    # row of their own: each writes `Rd` and no flags and no `sp`, which is the
+    # same fact MUL's membership states, and a second row saying the same
+    # thing is how `_regs_written` and the model's arm drift apart.
     #
     # 6 (CMP/SUBS register) and 66 (CMN/ADDS) are here for the same reason 2/3
     # are: the classes also carry their register-writing spellings
@@ -5251,7 +5337,7 @@ def _regs_written(w: int, idx: int):
     # the plain `{rd}` the register-arithmetic rows use.
     if idx in (6, 66):
         return {rd} if rd != 31 else set()
-    if idx in (1, 2, 3, 4, 5, 7, 8, 20, 23, 24, 25, 26, 27, 28, 29, 30, 33, 68):
+    if idx in (1, 2, 3, 4, 5, 7, 8, 20, 23, 24, 25, 26, 27, 28, 29, 30, 33, 68, 69):
         return {rd}
     if idx in (9, 10, 11, 12):
         return {rd}
@@ -7063,6 +7149,73 @@ def _call_boundary(code: bytes, base: int, func_entry: int,
     return out[0] if out else None
 
 
+def _is_svc(w: int) -> bool:
+    """Whether the word is `SVC #imm16` — the raw `SYS_exit` that ends every
+    bounded-stop block the emitter lays down.
+
+    The mask is `arm64_step`'s own (the `0xD4000001` arm of
+    `lib/ProofLib.lean`, proved by `work_step_svc`): bits 31..21 are the fixed
+    `110101000 0`, bits 4..0 are `00001`, and `imm16` sits in between.  Naming
+    the encoding rather than a mnemonic table keeps this reader in lockstep
+    with the model: a word the model steps as the no-op `svc` is a word this
+    reader sees as a bounded stop, and the two cannot drift.
+    """
+    return (w & 0xffe0001f) == 0xd4000001
+
+
+def _trap_terminating(blocks: list, words: dict) -> set:
+    """The start addresses of the blocks the machine CANNOT return from.
+
+    One of two shapes, decided on the machine rather than on the symbol: a
+    block that ENDS in the raw `SYS_exit` the emitter ends every bounded stop
+    with (`_is_svc`), or a block that ends in a `BL` whose fall-through block
+    is itself such a block.  The second is the shape of the compiler's own
+    trap — `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
+    `def q(a, b): return a // b` divides by zero into a block that ends in
+    `BL fflush` and then that tail — and it is the shape a `BL` "cannot
+    return" means in `_unfollowable_calls`'s terminal rule a few lines below:
+    the call returns to its fall-through, and the fall-through ends in
+    `SYS_exit`, so the run ends.
+
+    Iterated to a fixpoint rather than one pass, so a trap tail that is
+    followed by another trap block (a diagnostic that flushes and then a
+    second guard) is closed under the same rule.
+    """
+    by_start = {b["start"]: b for b in blocks}
+    out = set()
+    changed = True
+    while changed:
+        changed = False
+        for b in blocks:
+            if b["start"] in out:
+                continue
+            w = words[b["instrs"][-1]]
+            if _is_svc(w):
+                out.add(b["start"])
+                changed = True
+            elif _step_branch_index(w) == 15:        # BL
+                cont = by_start.get(b["instrs"][-1] + 4)
+                if cont is not None and cont["start"] in out:
+                    out.add(b["start"])
+                    changed = True
+    return out
+
+
+def _is_trap_bl(b: dict, words: dict, trap: set) -> bool:
+    """A block ending in a `BL` whose fall-through block cannot return.
+
+    The one block shape the walk closes at a trap stop, and the same shape
+    `_unfollowable_calls` stops counting: a `BL` in a block that cannot
+    return is not an unfollowable call, because the run ends there anyway.
+    `trap` is `_trap_terminating` over this block's siblings, so the test is
+    "the fall-through address is a start in `trap`" — an address that is not
+    a block start is not in `trap`, and the rule does not fire on it.
+    """
+    if _step_branch_index(words[b["instrs"][-1]]) != 15:
+        return False
+    return b["instrs"][-1] + 4 in trap
+
+
 def _unfollowable_calls(code: bytes, base: int, func_entry: int,
                         func_end: int) -> list:
     """Every `BL` in `[func_entry, func_end)` the CFG walk cannot follow, in
@@ -7091,6 +7244,21 @@ def _unfollowable_calls(code: bytes, base: int, func_entry: int,
     Turning that into a named refusal is `generate_arm64_proof`'s job (it knows
     whether the caller can say anything better); this function's job is only to
     be able to tell it there are two.
+
+    **A `BL` in a block that cannot return is not here at all**, and the rule is
+    stated on the machine rather than on the symbol: the call's continuation is
+    the straight-line tail the emitter ends every bounded stop with
+    (`formal/arm64_codegen.py::_emit_exit` — the `movz`/`svc` pair, whose `svc`
+    the model steps as a no-op but which is the machine's own `SYS_exit`), and a
+    block that ends in `svc` has no `RET`, so the call returns nowhere.  The
+    compiler's own trap is the measured case: `def q(a, b): return a // b`
+    (`bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
+    fixture) ends its divide-by-zero arm in `BL fflush` followed by that tail,
+    and counting the `BL` made the halt address a call the concrete run never
+    takes, which is the false `main_pre_0.pc = …` premise the doc names.  The
+    walk's own half of the rule is the `bl` arm's trap stop in
+    `_gen_universal_e2e_cfg`, which closes the trap path at the call rather than
+    certifying a block whose `arm64_step` returns `none` past it.
     """
     words = {base + i: int.from_bytes(code[i:i + 4], "little")
              for i in range(0, len(code) - len(code) % 4, 4)}
@@ -7098,6 +7266,8 @@ def _unfollowable_calls(code: bytes, base: int, func_entry: int,
     end = max(rets) + 4 if rets else base + len(code)
     if func_end is not None:
         end = func_end
+    blocks = _cfg_blocks(words, func_entry, end)
+    by_start = {b["start"]: b for b in blocks}
     out = []
     for pc in sorted(p for p in words if func_entry <= p < end - 4):
         if _step_branch_index(words[pc]) != 15:       # 15 = BL
@@ -7105,6 +7275,9 @@ def _unfollowable_calls(code: bytes, base: int, func_entry: int,
         tgt = _branch_target(words, pc)
         if tgt is None or tgt == func_entry:
             continue                                   # self-call: contracted
+        nxt = by_start.get(pc + 4)
+        if nxt is not None and _is_svc(words[nxt["instrs"][-1]]):
+            continue                                   # bounded stop: no return
         kind = ("opaque" if not (func_entry <= tgt < end) else "intralocal")
         out.append({"kind": kind, "pc": pc, "target": tgt, "func_end": end})
     return out
@@ -7352,13 +7525,8 @@ def _unmodelled_instruction(word: int):
     `_step_branch_index` has already rejected, so the question is which
     instruction it is, and A64's fixed fields answer that without a table.
 
-    The three this emitter is measured to produce:
+    The ones this emitter is measured to produce:
 
-      * **`CSEL`** — A64 "Conditional Select (register)" is `sf 110101000 0` in
-        bits 31..21, i.e. `(w >> 21) & 0x7ff == 0x4d4` (measured: the word
-        `arm64_codegen.py::_emit_csel_ternary` writes for `1 if n > 3 else 0` is
-        `0x9a801020`). `CSET` is the same instruction with Rn = Rm = XZR, which
-        the step table HAS at index 30, so it never reaches here.
       * **`STUR` / `LDUR`** — the unscaled forms, `(w & 0xffc00000)` equal to
         `0xf8000000` or `0xf8400000`: the 9-bit displacement a scaled
         12-bit-offset access cannot express, which in practice means a NEGATIVE
@@ -7377,15 +7545,15 @@ def _unmodelled_instruction(word: int):
         `0x8b0103e0`, `sub x0, xzr, x1` = `0xcb0103e0`) run as `0 + 1` and
         `0 - 1`.
       * anything else: `None`, and the caller says so rather than guessing.
+
+    `CSEL` used to be the first of these — and is not any more: the branchless
+    select is `arm64_step`'s last arm (`_STEP_CONDS`'s row 69 with
+    `work_step_csel`), so a CSEL word is claimed by `_step_branch_index` and
+    never reaches here.  What refuses a CSEL-carrying entry after the row
+    landed is the certificate's size rather than the select, and that refusal
+    is the branch-count gate in `generate_arm64_proof`, which names
+    `bugs/formal/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md`.
     """
-    if ((word >> 21) & 0x7ff) == 0x4d4:
-        return ("CSEL",
-                "the branchless select the code emitter uses for `a if c else "
-                "b`, and for a flag-preserving `and`/`or`. The semantic model "
-                "states the conditional expression (`_ternary_go`), so what is "
-                "missing here is the machine half, and the measurement is "
-                "`bugs/formal/FORMAL_arm64_csel_is_not_modelled_so_the_step_table_"
-                "cannot_claim_it.md`.")
     if (((word >> 21) & 0x7) == 0x1 and ((word >> 24) & 0x1f) == 0x0b):
         which = ("SUBS/CMP extended" if (word >> 29) & 1 else
                  "SUB extended" if (word >> 30) & 1 else "ADD extended")
@@ -7437,7 +7605,11 @@ def _cfg_decomposition_refusal(name: str, code: bytes, base: int,
     table's gaps are not all the ternary's: an unscaled spill is the other one
     this emitter reaches, and it has nothing to do with a conditional
     expression. So each word is named off its own encoding
-    (`_unmodelled_instruction`) and only the CSEL case mentions `_ternary_go`.
+    (`_unmodelled_instruction`) and no case re-derives the source construct.
+    (The CSEL case that used to mention `_ternary_go` is gone with the row:
+    the select is modelled now, so a CSEL word never reaches here, and the
+    ternary's refusal lives in the branch-count gate of `generate_arm64_proof`
+    rather than in a word the step table claims.)
 
     The search is over the range the walk itself uses — the entry to the last
     `RET` — because that is the range whose words the certificates are built
@@ -7539,6 +7711,33 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     blocks = _cfg_blocks(words, func_entry, func_end)
     if not blocks:
         return None
+    # The bounded-stop blocks, and the one flag the STATEMENT needs.
+    #
+    # `_trap` marks every block the machine cannot return from (a `svc` tail,
+    # or a `BL` that lands in one — see `_trap_terminating`).  Of the two cuts
+    # of that set the two consumers here need, the sharper is the one for the
+    # statement: there is a path the walk closes at a trap `BL`, which is a
+    # block ENDING in a `BL` whose fall-through is in `_trap`.  The weaker
+    # "any block in `_trap`" would fire for every compiled function, because
+    # every one carries the stack-floor guard's `svc` tail, and the model
+    # steps through that tail rather than halting in it — so `none => True`
+    # would be stated for a program whose model run never halts early, a
+    # weakening of every universal theorem in the corpus for nothing.
+    _trap = _trap_terminating(blocks, words)
+    _trap_stop = any(_is_trap_bl(b, words, _trap) for b in blocks)
+
+    def _trap_branch(b) -> bool:
+        """A conditional block that reaches a bounded stop on either edge.
+
+        Excluded from the source-condition mapping below, where the fallback
+        (an empty `cond_branches` recording keeps the old behaviour) takes
+        EVERY `cbz`-kinded block and would hand the emitter's own
+        overflow/stack-floor guards a SOURCE condition they do not test — the
+        mis-attribution the `either`/`both` comment above warns about, and
+        the doc's step 2 names for the overflow case.
+        """
+        return any(t in _trap for t in b["targets"])
+
     # The calls into the SAME IMAGE this walk can follow, as `{call_pc:
     # return_pc}`.  Decided by the one rule that also writes the refusal a
     # reader sees (`_same_image_call_plan`), so the walk and the message cannot
@@ -7560,42 +7759,63 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 and entry != func_entry)
 
     _TOTAL = max(1, sum(len(b["instrs"]) for b in blocks))
-    _reach_i = None
+    # The blocks REACHABLE from `func_entry` -- not every block `_cfg_blocks`
+    # finds in `[func_entry, func_end)`.  Computed UNCONDITIONALLY (it used to
+    # be computed only under `fuel is not None`, so every ordinary walk took
+    # the `None` branch and the guards below were inert on exactly the walks
+    # that needed them):
+    #
+    # The per-block certificate loop emits a `bN_selfN` / `bN_runs` / `bN_mid`
+    # certificate for every block in the partition, and for an ordinary
+    # program the partition spans the whole image -- so the float-repr
+    # helper's blocks, emitted UNCONDITIONALLY after every function body, got
+    # the full treatment although no path from `func_entry` reaches them for a
+    # program that never formats a float.  The kernel -- not `native_decide`
+    # -- evaluates `code addr` as `List.getD` over the whole byte list on
+    # every certificate, so the helper's blocks put its ~2.4 KB of dead code
+    # into every generated proof's kernel working set: the whnf timeout at
+    # `print1_b4_self1` and the excessive-memory in `mod_proof`'s b6/b7 chain
+    # (b7 is the helper's `fr_copy1` byte-copy loop) are those certificates
+    # (`bugs/formal/FORMAL_call_proofgen_red_on_head.md`, 2026-10-31).  The
+    # loop now skips them to the placeholder, and the loop-discovery passes
+    # below skip them the same way, so the helper's own loops can no longer
+    # shadow a real one (the `sum_range` symptom in the same doc).
+    #
+    # The constant-fuel guard below judges the same set for a sharper reason:
+    # the LAST export of an image has the end of the image as its extent
+    # (`_export_extent`), so it also spans whatever the emitter laid down
+    # after the last export's own code (the stack-floor handler, the runtime
+    # routines), and those carry back edges of their own.  Counting them made
+    # `_acyclic` False for a run that is a DAG, so the last export's
+    # `semantics_total` was a named `sorry` over a true termination claim --
+    # measured on `test_formal_dylib.py`'s `pick` (`def pick(n): if n > 3:
+    # return 1; return 0`), whose own extent ends in a `ret` and whose three
+    # forward branches are all inside it.
+    #
+    # A back edge is any branch whose target is at or before the branch
+    # itself; `_cfg_blocks` orders blocks by start pc, so forward-only
+    # targets mean the walk is a DAG and each instruction runs at most once.
+    # `func_entry` is always a block start (`_cfg_blocks` seeds it), so the
+    # seed below cannot miss.
+    _by_start = {b["start"]: i for i, b in enumerate(blocks)}
+    _order = sorted(range(len(blocks)), key=lambda i: blocks[i]["start"])
+    _fall = {_order[k]: _order[k + 1] for k in range(len(_order) - 1)}
+    _reach_i, _stack = set(), [_by_start[func_entry]]
+    while _stack:
+        _i0 = _stack.pop()
+        if _i0 in _reach_i:
+            continue
+        _reach_i.add(_i0)
+        _b0 = blocks[_i0]
+        _succ = [_by_start[t] for t in _b0["targets"] if t in _by_start]
+        # A `seq` block has no `targets` of its own: its successor is the
+        # next block in pc order, which is the fall-through the machine
+        # takes.  A `ret` has none.
+        if _b0["kind"] == "seq" and _i0 in _fall:
+            _succ.append(_fall[_i0])
+        _stack.extend(_j for _j in _succ if _j not in _reach_i)
+    _reach = [blocks[i] for i in _order if i in _reach_i]
     if fuel is not None:
-        # The constant-fuel guard judges the CFG the RUN uses, which is the
-        # blocks REACHABLE from `func_entry` -- not every block `_cfg_blocks`
-        # finds in `[func_entry, func_end)`.  The two differ for the LAST
-        # export of an image: its extent is the end of the image
-        # (`_export_extent`), so it also spans whatever the emitter laid down
-        # after the last export's own code (the stack-floor handler, the
-        # runtime routines), and those carry back edges of their own.  Counting
-        # them made `_acyclic` False for a run that is a DAG, so the last
-        # export's `semantics_total` was a named `sorry` over a true
-        # termination claim -- measured on `test_formal_dylib.py`'s `pick`
-        # (`def pick(n): if n > 3: return 1; return 0`), whose own extent ends
-        # in a `ret` and whose three forward branches are all inside it.
-        #
-        # A back edge is any branch whose target is at or before the branch
-        # itself; `_cfg_blocks` orders blocks by start pc, so forward-only
-        # targets mean the walk is a DAG and each instruction runs at most once.
-        _by_start = {b["start"]: i for i, b in enumerate(blocks)}
-        _order = sorted(range(len(blocks)), key=lambda i: blocks[i]["start"])
-        _fall = {_order[k]: _order[k + 1] for k in range(len(_order) - 1)}
-        _reach_i, _stack = set(), [_by_start[func_entry]]
-        while _stack:
-            _i0 = _stack.pop()
-            if _i0 in _reach_i:
-                continue
-            _reach_i.add(_i0)
-            _b0 = blocks[_i0]
-            _succ = [_by_start[t] for t in _b0["targets"] if t in _by_start]
-            # A `seq` block has no `targets` of its own: its successor is the
-            # next block in pc order, which is the fall-through the machine
-            # takes.  A `ret` has none.
-            if _b0["kind"] == "seq" and _i0 in _fall:
-                _succ.append(_fall[_i0])
-            _stack.extend(_j for _j in _succ if _j not in _reach_i)
-        _reach = [blocks[i] for i in _order if i in _reach_i]
         _acyclic = all(t > b["instrs"][-1] for b in _reach for t in b["targets"])
         if (recursive or not _acyclic or fuel < _TOTAL
                 or any(b["kind"] == "bl" for b in _reach)):
@@ -7666,12 +7886,18 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     #
     # `cond_branches` is a strict filter and the fallback keeps the old
     # behaviour, because an empty recording must degrade to weaker proofs
-    # rather than to wrongly attributed ones.
+    # rather than to wrongly attributed ones.  The trap exclusion applies to
+    # BOTH: the filter already keeps the emitter's guards out of a correct
+    # recording, and the fallback — which is the one that can take every
+    # `cbz`-kinded block, guards included — is where a mis-attribution would
+    # actually be born.
     _cond_blocks = [b for b in blocks
                     if b["kind"] == "cbz" and cond_branches
-                    and b["instrs"][-1] in cond_branches]
+                    and b["instrs"][-1] in cond_branches
+                    and not _trap_branch(b)]
     if not _cond_blocks and cond_branches:
-        _cond_blocks = [b for b in blocks if b["kind"] == "cbz"]
+        _cond_blocks = [b for b in blocks
+                        if b["kind"] == "cbz" and not _trap_branch(b)]
     _cond_pairs = []
     _cbz_src_map = {}
     for _i, _b in enumerate(sorted(_cond_blocks, key=lambda b: b["start"])):
@@ -7770,10 +7996,15 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     loop_check = None
     for _bi0, b in enumerate(blocks):
         # A loop the RUN cannot reach is not a loop this walk has to contract:
-        # the fixed-fuel export case is why this matters (see the guard above),
-        # where the LAST export's extent spans the image's runtime tail and that
-        # tail has back edges of its own.  A contract generated over them would
-        # be a lemma about code no argument reaches.
+        # the fixed-fuel export case is where the guard was measured (see the
+        # BFS above), where the LAST export's extent spans the image's runtime
+        # tail and that tail has back edges of its own; and since the BFS is
+        # unconditional, on EVERY walk the float-repr helper's byte-copy loop,
+        # emitted after every function body and unreachable for a program that
+        # never formats a float.  A contract generated over them would be a
+        # lemma about code no argument reaches -- and the helper's epilogue
+        # was exactly the `b` onto a `cbz` that used to be found first here,
+        # shadowing the real loop the walk then had no contract for.
         if _reach_i is not None and _bi0 not in _reach_i:
             continue
         if b["kind"] == "b" and start_to_bi.get(b["targets"][0]) is not None:
@@ -8625,8 +8856,138 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 # `by_cases` at the sequence's own column is fine -- block 2's
                 # is -- so the callee's own branches need no extra level.
                 emit_block(entry_bi, call_state, fuel_1, depth, path, _ct)
+            elif ret in _trap:
+                # --- the trap stop: a `BL` whose fall-through CANNOT RETURN ---
+                #
+                # `ret` is the block after the `BL`, and it is in `_trap`: the
+                # machine executes the call, returns into a block that ends in
+                # the emitter's `movz`/`svc` tail, and the run ends there.  The
+                # model ends EARLIER: the `BL`'s target sits past the code
+                # slice, where the map answers the tail of the appended
+                # terminal `ret` — a word no decode arm matches — so
+                # `arm64_step` answers `none` there and the rest of the run is
+                # one step and a halt, and `hnone` states it.  The walk closes the
+                # path there (the goal becomes `match none with … | none => True`
+                # and `trivial` discharges it) rather than certifying a block
+                # the model cannot step — which is the walk's own half of the
+                # rule `_unfollowable_calls` states a few functions up, and the
+                # thing `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_
+                # untrapped.md`'s step 2 asks for: the divide-by-zero arm's
+                # `BL fflush` is no longer an unfollowable call, it is a
+                # terminus the walk closes.
+                if _fr.get("halt_only"):
+                    # `halt_only`'s statement is `none => False` — "the run
+                    # REACHES the halt address" — and the trap path is a second
+                    # terminal a reachability statement cannot cover.  The
+                    # caller that pairs the two is refused by name in
+                    # `generate_arm64_proof` before the walk runs; this is the
+                    # walk's own half of that refusal, for a caller that builds
+                    # its own `halt_only` statement.
+                    raise NotImplementedError(
+                        f"trap stop: the `BL` at {bl_pc:#x} falls through a "
+                        f"bounded stop, so the run ends at the trap, and a "
+                        f"halt-only statement ends at one OTHER address: two "
+                        f"terminals, one halt address.")
+                # The one-step halt is stated over the model's own bytes, and
+                # the guard and the proof read the SAME map the generator
+                # emits: the raw slice plus `_gen_code_defs`' appended terminal
+                # `ret`.  Out-of-slice addresses answer zero by the map's
+                # definition and a zero word matches no decode arm, so the
+                # only words the guard admits are zero padding or the tail of
+                # the appended `ret` — and `hinsn`'s `native_decide` re-checks
+                # the word in Lean, so a map that ever grows past that shape
+                # fails the `have` loudly (and, for in-slice targets, the
+                # named leaf admits what the proof could not decide).
+                # The code map appends the emitter's terminal `ret` after the
+                # slice (`_gen_code_defs`: `code + [0xc0, 0x03, 0x5f, 0xd6]`),
+                # so the map's bytes are NOT the raw slice: a target just past
+                # the slice reads the TAIL of that word, not zero.  `hinsn`
+                # states the word the map really answers, and `hstep` reduces
+                # the whole decode chain against it — the Lean side is the
+                # check, so a word that DID match a decode arm fails the `have`
+                # rather than proving a false statement.  The generator's guard
+                # admits only targets OUTSIDE the raw slice: there every word
+                # is zero padding or the tail of the appended `ret`
+                # (`0x00d65f03`, `0x0000d65f`, … — none of which matches any
+                # decode arm), and `entry == EXIT` is excluded because at the
+                # exit address `go_exit` answers `some st`, not `none`.  A
+                # target INSIDE the slice goes to the named leaf instead: the
+                # generator cannot mirror the model's decode, so it does not
+                # decide which in-slice word would halt.
+                _hnone_ok = entry != EXIT and not (base <= entry < base + len(code))
+                _none_word = 0
+                if _hnone_ok:
+                    _ext = code + bytes.fromhex("c0035fd6")  # _gen_code_defs's ret suffix
+                    _off = entry - base
+                    for _k in range(4):
+                        if 0 <= _off + _k < len(_ext):
+                            _none_word |= _ext[_off + _k] << (8 * _k)
+                A(f"{IND}have hnone_{bi} : arm64_go_exit {call_state} {C} "
+                  f"{EXIT} {fuel_1} = none := by")
+                if _hnone_ok:
+                    A(f"{IND}  -- the `BL` lands past the code slice, where the "
+                      f"map answers the tail of the appended terminal `ret`; "
+                      f"`native_decide` needs a CLOSED goal, so the pc "
+                      f"projection is rewritten out first")
+                    A(f"{IND}  have hpc_{bi} : ({call_state}).pc = {entry} "
+                      f":= by rfl")
+                    A(f"{IND}  have hinsn_{bi} : arm64_read_insn {C} "
+                      f"({call_state}).pc = (0x{_none_word:08x} : UInt32) := by")
+                    A(f"{IND}    rw [hpc_{bi}]")
+                    A(f"{IND}    native_decide")
+                    A(f"{IND}  have hstep_{bi} : arm64_step {call_state} {C} "
+                      f"= none := by")
+                    A(f"{IND}    unfold arm64_step")
+                    A(f"{IND}    rw [hinsn_{bi}]")
+                    # every decode condition is now a closed `UInt32`
+                    # computation and the taken arm is the bare `none`, so the
+                    # kernel reduces the whole chain; `simp` would not (its
+                    # pass leaves the prop-ite standing) and `native_decide`
+                    # cannot (the untaken arms still carry the state)
+                    A(f"{IND}    rfl")
+                    A(f"{IND}  have hne_{bi} : {entry} ≠ {EXIT} := by")
+                    A(f"{IND}    omega")
+                    A(f"{IND}  unfold arm64_go_exit")
+                    # `split_ifs` is Mathlib and `lib/ProofLib.lean` imports
+                    # only `Lean`; `by_cases` branches are the core spelling.
+                    # The outer ites do not reduce (the fuel carries `n`), so
+                    # the third branch discharges them with `if_neg`.  `rw
+                    # [hstep]` then rewrites the step scrutinee to `none` AND
+                    # CLOSES the goal itself: the `match` reduces syntactically,
+                    # which is the goal shape `rw`'s own close-check accepts,
+                    # while the first branch's `if 0 = 0` ite needs the
+                    # decidable-instance evaluation only `rfl` performs — which
+                    # is why the first branch keeps its `rfl` and a trailing one
+                    # here is "No goals to be solved" (measured: the generated
+                    # q proof, error at the branch's `rfl` line in both paths
+                    # into block 4).
+                    A(f"{IND}  by_cases hfuel_{bi} : {fuel_1} = 0")
+                    A(f"{IND}  ·")
+                    A(f"{IND}    rw [hfuel_{bi}]")
+                    A(f"{IND}    rfl")
+                    A(f"{IND}  ·")
+                    A(f"{IND}    by_cases hexit_{bi} : ({call_state}).pc = {EXIT}")
+                    A(f"{IND}    ·")
+                    A(f"{IND}      exact False.elim "
+                      f"(hne_{bi} (hpc_{bi}.symm.trans hexit_{bi}))")
+                    A(f"{IND}    ·")
+                    A(f"{IND}      rw [if_neg hfuel_{bi}]")
+                    A(f"{IND}      rw [if_neg hexit_{bi}]")
+                    A(f"{IND}      rw [hstep_{bi}]")
+                else:
+                    _cfg_leaf(A, IND + "  ", "trap-stop-hnone",
+                              "first | done | sorry",
+                              note="the `BL`'s target decodes to a real "
+                                   "instruction in the code slice, so the "
+                                   "one-step halt above is not the shape the "
+                                   "bytes have; the statement is still true "
+                                   "(the model ends at the trap) and the gap "
+                                   "is this named leaf")
+                A(f"{IND}rw [hnone_{bi}]")
+                # the statement's `none` arm is `True` (`| none => True` in the
+                # emitted match); after `rw [hnone]` the goal reduces to it
+                A(f"{IND}exact True.intro")
             else:
-                # The UNFOLD SET for the two goals below (`hargeq_{bi}` and
                 # `hspd`) is the PATH-SCOPED one — every `hsid_i` and every block
                 # state function the walk has emitted so far, in reverse order —
                 # and not "block 0's defs plus this block's defs".  That shortcut
@@ -10139,14 +10500,24 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     # that takes a value argument is stated over `arm64_exec_go_exit` directly.
     # For a method that takes none the statement could go through `runProg`;
     # both forms are emitted so the framework's `Prog` is exercised either way.
+    #
+    # The none branch of the statement.  `none => True` is the honest universal
+    # claim for a function the walk closes at a trap `BL` (`_trap_stop`): the
+    # run HALTS at the trap, or returns the model — both are stated, and the
+    # trap path is the one the walk discharges with `hnone` rather than a value
+    # flow, because the model cannot return from the trap (its `BL` targets a
+    # trampoline outside the code slice, where `arm64_step` answers `none`).
+    # For a function without such a path the run never halts early, and
+    # `none => False` stays — the stronger claim, unchanged byte for byte.
+    _none_br = "True" if _trap_stop else "False"
     if not _via_prog:
         A(f"    (match arm64_exec_go_exit {init} {C} {exit_pc} ({FUEL0}) with")
         A(f"     | some s => {_prop}")
-        A("     | none => False) := by")
+        A(f"     | none => {_none_br}) := by")
     else:
         A(f"    (match runProg {name}_prog n with")
         A(f"     | some s => {_prop}")
-        A("     | none => False) := by")
+        A(f"     | none => {_none_br}) := by")
     for _h in (_fr.get("hyps") or []):
         if _h[2]:
             A(f"  have {_h[0]} : {_h[1]} := {_h[2]}")
@@ -10157,7 +10528,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     if _via_prog:
         A(f"  change (match arm64_exec_go_exit {init} {C} {exit_pc} ({FUEL0}) with")
         A(f"     | some s => {_prop}")
-        A("     | none => False)")
+        A(f"     | none => {_none_br})")
     A(f"  rw [arm64_exec_go_exit]")
     _init_ctx = {"loop_contract": _loop_contract} if _loop_contract else {}
     # The narrow-parameter `simp` arguments, from the SAME pair that produced
@@ -11674,6 +12045,54 @@ def generate_arm64_proof(prog, code, info) -> str:
         fn = prog.functions[0]
         func_name = fn.name
     param = fn.params[0][0] if fn.params else "n"
+    # **The CSEL discharge is gated on the entry's conditional-branch count,
+    # and the gate is a refusal rather than a bigger bound.**  The entry's
+    # CSEL — the branchless select `a if c else b` lowers to — is what the
+    # step table's row 69 claims, and its certificate's per-path value-flow
+    # facts grow with the entry's conditional-branch count: the measured
+    # boundary is inside this class, one conditional expression checks,
+    # three check at 560 s / 5.6 GB under the 12 GB slot, and four are
+    # killed at the 1500 s CPU bound with "NOT a verdict on the proof".
+    # The select itself is modelled — `arm64_step`'s last arm and
+    # `work_step_csel` — so the cost is the certificate's size, not the
+    # instruction, and emitting a file whose only outcome is that kill buys
+    # nothing: a named refusal is what the class owes the reader, and the
+    # tracked leaf it names owns the four-branch boundary and the per-path
+    # hoist that closes it.
+    #
+    # The CSEL is asked of the entry's OWN walked range — the same
+    # `_walk_range` cut the walk decomposes — so a CSEL another function
+    # carries cannot wall THIS entry's certificate, and the branch count is
+    # the entry's body: the measured class is loop-free (a looped entry's
+    # walk is the loop-contract shape this doc did not measure), and the
+    # count is the source-level conditions, branch or not — a value-position
+    # ternary is branchless on the machine yet still doubles the paths the
+    # per-condition facts are stated over.
+    _gate_entry = info["labels"].get(func_name, base_addr)
+    _gate_words = {base_addr + i: int.from_bytes(code[i:i + 4], "little")
+                   for i in range(0, len(code) - len(code) % 4, 4)}
+    _gate_end = _walk_range(_gate_words, _gate_entry)
+    _entry_csel = any(_step_branch_index(w) == 69
+                      for pc, w in _gate_words.items()
+                      if _gate_entry <= pc < _gate_end)
+    _entry_branches = _cond_branch_count(fn.body) if fn is not None else 0
+    if _entry_csel and not _has_while(fn.body) and _entry_branches >= 4:
+        raise NotImplementedError(
+            "universal theorem: this entry carries a CSEL — the branchless "
+            "select `a if c else b` lowers to — and its body has "
+            f"{_entry_branches} conditional branches, which is at the "
+            "measured four-branch boundary where the certificate's per-path "
+            "value-flow facts stop checking: one conditional expression in "
+            "this class checks, three check at 560 s / 5.6 GB under the 12 "
+            "GB slot, and four are killed at the 1500 s CPU bound with "
+            "\"NOT a verdict on the proof\".  The select itself is modelled "
+            "— `arm64_step`'s last arm and `work_step_csel` — so the cost "
+            "is the certificate's size, not the instruction, and emitting a "
+            "file whose only outcome is that kill buys nothing.  The "
+            "tracked leaf for this shape is "
+            "`bugs/formal/FORMAL_a_three_branch_certificate_exceeds_the_lean_"
+            "bound.md`: it owns the four-branch boundary and the per-path "
+            "hoist that closes it.")
     # The INDEPENDENT specification this program asks to be checked against, or
     # None.  Read here rather than at the end of the function because it decides
     # the HEADER (the generated file imports `lib/Specs.lean` only when something
@@ -12021,6 +12440,27 @@ def generate_arm64_proof(prog, code, info) -> str:
     # (recursion); the statement is still machine-honest, unlike the
     # old bare-init form which executed with x30 = 0 and always returned none.
     func_entry_addr = info["labels"].get(func_name, base_addr)
+    # Does the walk close a path at a trap `BL`?  The same cut the walk itself
+    # uses (`_gen_universal_e2e_cfg`'s `_trap`/`_is_trap_bl` over the same
+    # blocks), asked here because three decisions below need it before the
+    # walk runs: the statement's none branch, the concrete run test, and the
+    # refinement's machine half.  The cut is "a block ends in a `BL` whose
+    # fall-through cannot return", NOT "any block ends in `svc`" — the latter
+    # is the stack-floor guard every compiled function carries, and the model
+    # steps through that tail rather than halting in it, so the statement
+    # would weaken for a program whose run never does.  See
+    # `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s step
+    # 2 for the shape: `def q(a, b): return a // b`'s divide-by-zero arm ends
+    # in `BL fflush` and the `movz`/`svc` tail.
+    _trap_words = {base_addr + i: int.from_bytes(code[i:i + 4], "little")
+                   for i in range(0, len(code) - len(code) % 4, 4)}
+    _trap_end = _walk_range(_trap_words, func_entry_addr)
+    _trap_stop = False
+    if _trap_end:
+        _trap_blocks = _cfg_blocks(_trap_words, func_entry_addr, _trap_end)
+        _trap_stop = any(
+            _is_trap_bl(b, _trap_words, _trap_terminating(_trap_blocks, _trap_words))
+            for b in _trap_blocks)
 
     # A call out of the image changes what the universal theorem can SAY, not
     # just how it is proved: the model has no bytes for the callee, so the run
@@ -12079,6 +12519,28 @@ def generate_arm64_proof(prog, code, info) -> str:
             f"correct for all of them; what is missing is the machine half.  "
             f"Raised here rather than left to the walk, which reported this as "
             f"a recursion problem.")
+    if _opaque is not None and _trap_stop:
+        # TWO terminals, one halt address: the out-of-image call the
+        # reachability statement halts at, AND a trap block the walk closes
+        # at its own call.  The reachability statement (`none => False` —
+        # "the run REACHES the halt address") cannot cover the trap path, and
+        # the trap statement (`none => True` — "the run halts at the trap, or
+        # returns the model") cannot claim the call is reached: one `match`
+        # is one shape.  The trap's `BL` is not counted as an unfollowable
+        # call (the terminal rule in `_unfollowable_calls`), so without this
+        # check the two terminals would silently share one halt address and
+        # the theorem would state one of them while proving the other.
+        raise NotImplementedError(
+            f"universal theorem: this function reaches TWO places no run "
+            f"completes from — the out-of-image call at {_opaque['pc']:#x} "
+            f"and a bounded-stop trap block whose `BL` the walk closes at its "
+            f"own call — and the framework's halt address is ONE address.  The "
+            f"reachability statement a call needs ends `none => False` "
+            f"(\"the run reaches the call\"); the statement the trap needs "
+            f"ends `none => True` (\"the run halts at the trap, or returns "
+            f"the model\"); one `match` cannot be both.  The semantic model is "
+            f"emitted and correct; what is missing is a two-terminal machine "
+            f"statement.")
     if _opaque is not None and not _reached_without_a_condition(
             code, base_addr, func_entry_addr, _opaque["func_end"], _opaque["pc"],
             cond_branches=set(info.get("cond_branches") or ())):
@@ -12214,6 +12676,39 @@ def generate_arm64_proof(prog, code, info) -> str:
             f"   What IS proved below is the whole of what the model supports: "
             f"the run\n"
             f"   from the function entry reaches the call, for every input. -/")
+    elif _trap_stop:
+        # The trap's own half of the "worth nothing" class above: the concrete
+        # run HALTS at the bounded-stop trap, so `run_result_exit` answers 0,
+        # and the model's trap arm answers 0 for the same input — the concrete
+        # theorem below would be `0 = mojo …`, TRUE, and `native_decide` would
+        # prove it, passing because the machine stopped and the model agreed
+        # the answer is 0, saying nothing about either.  Measured on this
+        # tree: `def q(a, b): return a // b` with entry args `10, 0` divides
+        # by zero, the machine exits 1, and both sides of the concrete
+        # theorem are 0.  Suppressed for the same reason the out-of-image
+        # case is; the universal theorem above states the honest claim —
+        # `none => True` — over EVERY input instead.
+        concrete_test = (
+            f"/- NO CONCRETE RUN TEST for {func_name}: the function ends a "
+            f"path in the\n"
+            f"   compiler's bounded-stop trap (`bugs/formal/FORMAL_integer_overflow_"
+            f"at_run_time_is_still_\nuntrapped.md`: a guard branch into a "
+            f"block ending in `BL fflush` and the\n"
+            f"   `movz`/`svc` tail), and the model ends it earlier — its `BL` "
+            f"targets a trampoline\n"
+            f"   outside the code slice, where `arm64_step` answers `none`, "
+            f"so the run\n"
+            f"   HALTS there and `run_result_exit` answers 0.  A concrete "
+            f"theorem would be\n"
+            f"   `0 = mojo {tinput}`, TRUE, and would pass for the wrong "
+            f"reason: the machine\n"
+            f"   left the image with a status the model does not model, and "
+            f"the model's trap\n"
+            f"   arm answers 0 for the same input.\n\n"
+            f"   The universal theorem below is the honest claim instead: "
+            f"over EVERY input the run\n"
+            f"   either halts at the trap (`none => True`) or returns the "
+            f"model. -/")
     else:
         # The concrete run's entry ARGUMENTS as Lean literals: the words the
         # startup stub materialized into x0..x(arity-1), which
@@ -12278,18 +12773,28 @@ def generate_arm64_proof(prog, code, info) -> str:
     # run test above exists.  `machine_half` is False for a function that calls
     # out of the image: its universal theorem states reachability of the call
     # rather than a result value, so there is no run to say anything about and
-    # only the model-level half is claimed.
+    # only the model-level half is claimed.  It is also False for a function
+    # the walk closes at a trap `BL`: the machine half claims a RETURN for
+    # every input in the range, and the generator cannot tell which inputs of
+    # the range end in the bounded-stop trap, so claiming it for all of them
+    # would state a falsehood for the ones that do.
     refines_text = ""
     if refines is not None:
         refines_text = ("\n\n" + SPECS.refines_section(
             func_name, f"{func_name}_prog", refines,
-            machine_half=_opaque is None,
+            machine_half=_opaque is None and not _trap_stop,
             go_defs=go_defs,
             missing_reason=(
                 "this function calls out of the image, so `arm64_step` "
                 "returns `none` at the call and no execution in this file "
                 "completes — the universal theorem above states reachability "
-                "of the call instead of a result value.")))
+                "of the call instead of a result value."
+                if _opaque is not None else
+                "this function can end in the compiler's bounded-stop "
+                "trap, so a run halts there instead of returning — the "
+                "universal theorem above states `none => True` (the run "
+                "halts at the trap, or returns the model) rather than a "
+                "return for every input.")))
 
     if trunc_defs:
         trunc_defs_section = (

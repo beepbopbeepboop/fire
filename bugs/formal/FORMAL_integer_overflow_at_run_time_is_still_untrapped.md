@@ -186,6 +186,137 @@ than a better diagnostic. The `VARIABLE_ROWS` table in
 `test_formal_int_semantics.py` still asserts the current (wrong) answer, and it
 is still the table that has to change.
 
+## Status, 2026-10-31: step 2 LANDED — the trap block is terminal, the walk
+## closes it at its own `BL`, and the residual is measured again
+
+Step 2's rule landed whole, in both halves the doc names, and it is measured on
+`def q(a, b): return a // b`, the corpus's one program whose trap `BL` was the
+walk's problem.
+
+1. **A `BL` in a block that cannot return is not an unfollowable call.**
+   `_unfollowable_calls` ends its count with that rule, decided on the machine
+   rather than on the symbol: `_trap_terminating` is the set of blocks the
+   machine cannot return from (a block that ENDS in the `movz`/`svc` tail, or
+   one that ends in a `BL` whose fall-through is in the set, iterated to a
+   fixpoint), and `_is_trap_bl` is the cut the two consumers need — a block
+   that ends in a `BL` whose fall-through is in that set.  The sharper cut is
+   deliberate: the weaker "any block in `_trap`" fires for EVERY compiled
+   function (the stack-floor guard), and the statement would weaken for a
+   program whose run never halts early.
+
+2. **The walk closes the trap path at the call, under a `none => True`
+   statement** (`_gen_universal_e2e_cfg`'s `bl` arm trap stop, the
+   `generate_arm64_proof` gate, the concrete run test's suppression, the
+   refinement's machine half).  The measured shape, on `q` (base
+   `0x1000003c0`, slice 2391 bytes, EXIT `0x100000d17`): the divide-by-zero
+   arm's `BL` at `0x100000504` targets `0x100000d18` — just PAST the slice,
+   where the map the generator EMITS (`_gen_code_defs` appends the terminal
+   `ret`) answers `0x00d65f03` — the tail of that word.  The word matches
+   no decode arm, so the model runs one step and halts, and `hnone` states
+   exactly that: the pc projection (`rfl`), the word (`native_decide` against
+   the REAL word — the Lean side is the check, so a map that ever grows past
+   the shape fails the `have` loudly), and the decode chain (`unfold` + `rw` +
+   `rfl` — the kernel reduces it, `simp` would not, and `native_decide` cannot:
+   the untaken arms still carry the state).  One measurement the emission
+   cost: `rw [hstep]` closes its OWN goal (the `match none` reduces
+   syntactically), while the first branch's `if 0 = 0` ite only reduces under
+   `rfl` — so a trailing `rfl` after the step rewrite is "No goals to be
+   solved" (measured in the generated proof, both paths into block 4), and the
+   two branches end differently by design.
+
+3. **The trap branch is excluded from the source-condition mapping.**
+   `_trap_branch` (a conditional block that reaches a bounded stop on either
+   edge) is cut out of `_cond_blocks` — the mis-attribution the doc's second
+   sub-decision names: the emitter's own overflow guard must not be handed a
+   SOURCE condition it does not test.
+
+**Lean verdict on the generated `q` proof** (whole file, v4.32.2): clean —
+the only error is the PRE-EXISTING `q_b7_self1` `isDefEq` timeout at
+`q_proof.lean:7791/7792` (the same line and column in the pre-change file, and
+out of scope), and the universal's two terminal value-flow admissions are the
+two `all_goals (first | done | sorry)` named leaves — the residual this doc's
+measurement exists for.
+
+**The measurement class sees the residual again** (`TestTheZeroDivisorGuard
+AgainstLean`, both spellings byte-identical): the fixture emits
+`q_compiles_correctly_universal` once more (no `q_reaches_call_at_`
+substitution), and the residual is the guard's false goal, now
+implication-shaped —
+
+    ⊢ n1 = 0 → sdiv64 n n1 − ((if n − sdiv64 n n1 * n1 = 0 then 0 else 1) &&&
+        if n − sdiv64 n n1 * n1 ^^^ n1 ^^^ 9223372036854775808
+        < 9223372036854775808 then 1 else 0) = 0
+
+— and the doc's next step (adding the enclosing branch fact to the terminal
+flow) changes nothing measured, so it is still not a version of the fix.  The
+pin moved with it.
+
+**Corpus: one verdict moved, in the direction this doc wants.**  `mod_by_var`
+(the other example whose trap `BL` fell into the old one-call substitution)
+now generates its universal: its trap branch is DEAD by value flow — the
+divisor register holds the constant `4`, the zero case closes by `hne_2`
+(`simp` over the block states) + `absurd` — so there is no `hnone` there at
+all, and the concrete run test is suppressed with the named note.  `floordiv`
+and `udivmod` are unchanged (still the two-call refusal).  The quick test —
+the `VARIABLE_ROWS` table — is green (16/16) and asserts the CURRENT answer,
+which step 2 does not change: flipping the EMISSION is step 3.
+
+**What is still missing is step 3**: `M.int_overflow_traps` becomes `emit`
+rather than `refuse-if-foldable` in both backends (the check sequences are
+written and measured and the Lean model is ready, section above), the
+`VARIABLE_ROWS` table flips to the trap answers, and this doc is deleted in
+the same commit.
+
+## Status, 2026-11-01: the verification completed — the class ran to the end,
+## and the two pins the flip left stale moved with the measurement
+
+The round above committed the walk-side half before the class's own Lean
+lines had run to completion on the new state.  This round ran them, and the
+two pins the flip left stale are fixed and measured; nothing in the entry
+above changes, except one sentence's precision.
+
+- **The Lean lines ran, 3/3** (`TestTheZeroDivisorGuardAgainstLean`, under
+  the 12 GB ceiling, peak 5.8 GB).  The entry's "both spellings
+  byte-identical" was the GOAL's identity, not the trace count's: the walk
+  runs the divisor-nonzero path once per visit to the guard block, so the
+  file carries a SECOND terminal value flow, and the `hc_N` patch reaches
+  the second terminal, where the in-scope branch fact is the NEGATION, so
+  its `simp` leaves the same goal the first terminal always leaves.
+  Measured: `as_emitted` traces `[goal]`, `doc_next_step` traces
+  `[goal, goal]` — the implication-shaped false goal above, byte for byte,
+  twice.  The line now compares the residual's goal (the set); the
+  survival itself is the sibling line's pin, and the walk-terminal's own
+  `done` at the second terminal as emitted is what says the divisor-nonzero
+  path is fully closed there.  With the old list-identity assertion the
+  line was red on the committed state — the first real run of the class
+  since the flip.
+- **`TestTheOneOpaqueCallIsAnnounced`'s fixture was this doc's own.**  It
+  measured the substitution the walk no longer makes for `a // b` — three
+  of its four lines red on the committed state, the fourth (the no-opaque
+  control) the only survivor.  It now measures the note with a GENUINE
+  single out-of-image call — `printf` with an unused return value, the
+  corpus's other shape (`formal/examples/printf_int.mojo`'s body, named
+  `q`): the substitution and the note are emitted exactly as its lines
+  pin, Lean-free, 4/4.  The flip its div0 fixture pinned is
+  `TestTheDiv0FixtureHaltsAtTheCompilerTrap`'s to own now.
+- **The rest of the round, re-measured on this tree:** the quick test
+  16/16 (the `VARIABLE_ROWS` rows asserting the current answer — the table
+  step 3 must flip); the 13 Lean-free affected classes green (the four
+  above plus `TestCompilerTrapIsNotAProgramCall`, `TestCfgLeafCensus`,
+  `TestTheDivisionExamplesHaveNoProofToCheck`, `TestTheReachedWalkIsPerPath`,
+  `TestACallOnAnUntakenPathIsARefusalNotALeanError`,
+  `TestTheRecursionFamiliesStillGenerate`,
+  `TestTheStackFloorGuardReadsTheLimitInTheStartupStub`,
+  `TestAPlaceholderModelClaimsNothing`,
+  `TestTheDivideByZeroGuardIsEmittedOnlyWhenItCanFire`); and the
+  regenerated `q` proof checks clean in Lean (peak 6.5 GB under 12 GB) —
+  the entry above's verdict, confirmed on the file the current source
+  generates, the two `hnone` branches included.
+
+What is still missing is step 3, unchanged: the emission flip in both
+backends, the `VARIABLE_ROWS` flip, and this doc's deletion in the same
+commit.
+
 ## The next step, in order
 
 1. **Name the limit, so it is a refusal rather than a Lean error.** In
