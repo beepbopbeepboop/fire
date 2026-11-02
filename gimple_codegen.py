@@ -251,6 +251,7 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_bytes_len':             'int64_t',
     'mojo_bytes_get':             'int64_t',
     'mojo_bytes_eq':              'int',
+    'mojo_bytes_word_eq':         'int',
     'mojo_bytes_truthy':          'int',
     'mojo_bytes_repr':            'char *',
     'mojo_bytes_concat':          'MojoBytes *',

@@ -59,6 +59,17 @@ except UnicodeDecodeError:
 str(b"ab", "ascii", "strict")
 print(sorted(names(ROOT)))
 print(sorted(names(ROOT.encode())))
+# an element of a list a call returned compares as the bytes it is (the list's
+# static element type is only inferred, so the comparison must go by the object)
+hits = fnmatch.filter([b"a.py", b"b.txt"], b"*.py")
+print(hits[0] == b"a.py")
+print(hits[0] != b"a.py")
+print(hits[0] == b"b.txt")
+print([b"a.py"] == [b"a.py"])
+# a str never equals bytes, whatever the bytes' text
+s = "a.py"
+print(s == b"a.py")
+print(s != b"a.py")
 '''
 
 def main():
