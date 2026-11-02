@@ -129,3 +129,21 @@ Still open: generator/coroutine frames (`gi_frame`, `f_generator`, `cr_frame`, t
 `frame.clear()` itself, `__traceback__` on an exception object other than the one currently handled (it reads the last snapshot),
 `f_locals`, `f_trace`, and instrumented-module-only visibility (a module that never mentions `_getframe`/`__traceback__`/`tb_frame`/`f_back`/
 `f_lineno` has no frames). Run `Lib/test/test_frame.py` through the compiler next to see which of its cases now compile and which refusal is first.
+
+## Status (2026-11-01, stage 3 first slice): a suspended generator no longer leaves its frame live
+
+Measured first: `test_frame.py` does not compile yet (`fire.py build` refuses: generator functions with `nonlocal`/try-finally yields,
+`async def t3`, `frame.f_generator`), and while looking for the first refusal a stage-1 defect turned up: the generator body's frame
+(`__mgco_g_body`) stayed on the shadow frame stack across a `yield`, so `sys._getframe()` in the consuming loop named the generator,
+and the resumer's `mojo_frame_leave` cancelled the generator's cleanup record instead of its own.
+
+Landed: `mojo_coro_slice_save/restore` (`runtime/fire_runtime.c`) called from `__mojo_coro_yield`/`coro_run` (`runtime/fire_coro.c`):
+a yield detaches the frame and cleanup records the body pushed since it was resumed, the next resume re-pushes them above the
+resumer's current depth (so it also covers async coroutines, and the cleanup records of any kind the body holds across a yield).
+`_frame_enter` names the frame after the source function (`g`, not `__mgco_g_body`; a method generator drops its struct prefix).
+Test `gimple_generator_frame_is_live_only_while_running`; the stage 1/2 frame tests unchanged.
+
+Still open: `f_generator`/`gi_frame`/`cr_frame`, `frame.clear()` and its executing/suspended checks, `f_locals`, `f_trace`, and the
+generator shapes above that make test_frame.py refuse at the module level (nonlocal + try/finally yield, nested async def).
+Also fixed, because master's self-host was red on it: `mojo_bytes_from_str` gained an `errors` parameter (a492e9c71) and three
+callers still passed two arguments (`bytearray(text)`, `_coerce_to_bytes`, the cpp path's `bytes(text, enc)`).

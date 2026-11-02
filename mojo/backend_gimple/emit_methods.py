@@ -6634,7 +6634,7 @@ def _coerce_to_bytes(gen, t: str, v: str) -> str:
         return v
     if t == 'char *':
         return gen._call_expr('MojoBytes *', 'mojo_bytes_from_str',
-                              [('char *', v), ('char *', '"utf-8"')])
+                              [('char *', v), ('char *', '"utf-8"'), ('char *', '"strict"')])
     # narrow scalar: widen through int64_t then route through the
     # chokepoint (safe - a scalar can never be a different container kind).
     if t in ('int', 'char', '_Bool', 'int64_t'):

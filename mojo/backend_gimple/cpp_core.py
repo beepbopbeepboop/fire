@@ -7543,7 +7543,8 @@ def _cpp_lower_posix_idioms(gen, node, handles=None):
             if f.name == 'bytes' and len(new.args) == 2 and not kw:
                 # `bytes(text, 'ASCII')`: the string's bytes
                 return G.CallExpr(func=G.IdentExpr(name='mojo_bytes_from_str'),
-                                  args=list(new.args), line=new.line, col=new.col)
+                                  args=list(new.args) + [G.StringLiteral(value='strict', line=new.line, col=new.col)],
+                                  line=new.line, col=new.col)
             if f.name == 'close' and len(new.args) == 1 and not kw:
                 return G.CallExpr(func=G.IdentExpr(name='mojo_os_close'),
                                   args=list(new.args), line=new.line, col=new.col)
