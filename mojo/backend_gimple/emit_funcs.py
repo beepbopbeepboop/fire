@@ -3202,13 +3202,13 @@ def gen_func(gen, node: gimple_ctypes.FunctionDef) -> str:
     gen._emitting_plain_func = True
     try:
         gen._begin_function(node)
-        gmp._frame_enter(gen, node)
-        gmp._cattr_restore_begin(gen, node.body)
+        gen._frame_enter(node)
+        gen._cattr_restore_begin(node.body)
         for stmt in node.body:
             gen.gen_stmt(stmt)
         gen._emit_fallthrough_frees(node)
-        gmp._cattr_restore_fallthrough(gen, node)
-        gmp._cattr_restore_end(gen)
+        gen._cattr_restore_fallthrough(node)
+        gen._cattr_restore_end()
     finally:
         gen._emitting_plain_func = False
 
@@ -3352,13 +3352,13 @@ def _gen_toplevel(gen, toplevel_stmts: list) -> str:
 
     # Generate code for each top-level statement
     gen._in_toplevel_gen = True
-    gmp._frame_enter_module(gen)
+    gen._frame_enter_module()
     try:
         for stmt in toplevel_stmts:
             gen.gen_stmt(stmt)
     finally:
         gen._in_toplevel_gen = False
-    gmp._frame_leave(gen)
+    gen._frame_leave()
     gen._frame_func = ''
 
     # Dependency-init prelude: a `fire dylib` build compiles every
@@ -4465,13 +4465,13 @@ def _gen_struct_method(gen, struct_name: str, node: gimple_ctypes.FunctionDef, o
     # knows. The candidates computed here replace the empty set
     # `reset_no_candidates` left above.
     gen._begin_function(node)
-    gmp._frame_enter(gen, node)
-    gmp._cattr_restore_begin(gen, node.body)
+    gen._frame_enter(node)
+    gen._cattr_restore_begin(node.body)
     for stmt in node.body:
         gen.gen_stmt(stmt)
     gen._emit_fallthrough_frees(node)
-    gmp._cattr_restore_fallthrough(gen, node)
-    gmp._cattr_restore_end(gen)
+    gen._cattr_restore_fallthrough(node)
+    gen._cattr_restore_end()
 
     # Store per-overload param types so forward declarations can match definitions exactly
     param_ctypes_only = [s.rsplit(' ', 1)[0].strip() for s in param_strs]

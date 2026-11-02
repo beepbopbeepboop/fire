@@ -1357,8 +1357,7 @@ class _ParamFlow:
 
 
 def _ca_binding_names(node) -> set:
-    from mojo.backend_gimple import cpp_async as _ca
-    return _ca._binding_node_names(node)
+    return gimple_exprtypes._binding_node_names(node)
 
 
 def _tagged_consumers_ok(name: str, module_stmts=None) -> bool:
@@ -2487,7 +2486,7 @@ def _note_async_kind(table: dict, name: str, kind) -> None:
         table[name] = kind
 
 
-def _register_async_result_kinds(stmts: list, closure_stmts=()) -> None:
+def _register_async_result_kinds(stmts: list, closure_stmts: list = ()) -> None:
     """Fill `_ASYNC_RESULT_KIND` and `_ASYNC_HANDLE_KIND` for this module (see
     their comments), and also for any imported modules in the closure so
     awaited handles whose origin is not in this module resolve the right
@@ -5135,7 +5134,7 @@ def _argkind(expr, caller_env: dict | None = None) -> str | tuple | None:
     return _yield_kind(expr, caller_env)
 
 
-def _scan_callsite_param_kinds(stmts: list, closure_stmts=(),
+def _scan_callsite_param_kinds(stmts: list, closure_stmts: list = (),
                                module_name: str | None = None) -> None:
     """Populate `_CALLSITE_PARAM_KINDS` (generators / async defs),
     `_CALLSITE_PARAM_CONFLICTS` (the same, minus the resolvable cases) and
@@ -5932,7 +5931,7 @@ def _lower_escaping_generators(stmts: list) -> None:
         for _pn, _pa in outer.params:
             _bound.add(_pn)
         for _bn in gimple_exprtypes._walk_own_body(outer.body):
-            _bound |= _ca._binding_node_names(_bn)
+            _bound |= gimple_exprtypes._binding_node_names(_bn)
         sibling_defs = {}
         for _d in outer.body:
             if isinstance(_d, N.FunctionDef):
@@ -6027,7 +6026,7 @@ def _lower_escaping_generators(stmts: list) -> None:
             after = outer.body[c['ix'] + 1:]
             rebound = False
             for cn in caps:
-                if any(cn in _ca._binding_node_names(n) for n in gimple_exprtypes._walk_ast(after)):
+                if any(cn in gimple_exprtypes._binding_node_names(n) for n in gimple_exprtypes._walk_ast(after)):
                     rebound = True
             if not caps or rebound:
                 del cand[nm]
@@ -6270,7 +6269,7 @@ def _lift_capture_free_nested_scopes(stmts: list) -> None:
         stmts.extend(lifted)
 
 
-def lower(stmts: list, closure_stmts=(),
+def lower(stmts: list, closure_stmts: list = (),
           module_name: str | None = None) -> tuple[list, list]:
     """Returns (new_stmts, coro_meta). coro_meta entries are dicts:
         {'name', 'base', 'params' (list of C types), 'value_ctype',

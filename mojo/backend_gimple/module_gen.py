@@ -4147,6 +4147,21 @@ def _gmi_specialize_literal_kind_clones(stmts: list) -> list:
     return _out
 
 
+def _gmi_mk_call_keys(body: list) -> str:
+    # ",name,obj_m,..." -- the callee spellings `_valued` tests, comma-delimited so a
+    # membership test cannot match a longer name.
+    out = ','
+    for nd in _walk_ast(body):
+        if isinstance(nd, gimple_ctypes.CallExpr):
+            f = nd.func
+            if isinstance(f, gimple_ctypes.IdentExpr):
+                out += _as_str(f.name) + ','
+            elif (isinstance(f, gimple_ctypes.MemberExpr)
+                    and isinstance(f.obj, gimple_ctypes.IdentExpr)):
+                out += _as_str(f.obj.name) + '_' + _as_str(f.member) + ','
+    return out
+
+
 def gen_module_impl(self, stmts: list):
 
     # A class written INSIDE a function body is a type declaration like any
@@ -6215,7 +6230,7 @@ def gen_module_impl(self, stmts: list):
     # resolves identically — every site runs before the emission loop's
     # module-level comptime registrations, the one write that could change
     # a resolution verdict mid-function).
-    def _flatten_resolved_conditionals(_root_list: list):
+    def _flatten_resolved_conditionals(_root_list):
         _out = []
         _stack = [(_root_list, 0)]
         while _stack:
@@ -8595,20 +8610,6 @@ def gen_module_impl(self, stmts: list):
     _mk_first_slots: dict = {}
     _mk_first_calls: dict = {}
 
-    def _mk_call_keys(body) -> str:
-        # ",name,obj_m,..." -- the callee spellings `_valued` tests, comma-delimited so a
-        # membership test cannot match a longer name.
-        out = ','
-        for nd in _walk_ast(body):
-            if isinstance(nd, gimple_ctypes.CallExpr):
-                f = nd.func
-                if isinstance(f, gimple_ctypes.IdentExpr):
-                    out += _as_str(f.name) + ','
-                elif (isinstance(f, gimple_ctypes.MemberExpr)
-                        and isinstance(f.obj, gimple_ctypes.IdentExpr)):
-                    out += _as_str(f.obj.name) + '_' + _as_str(f.member) + ','
-        return out
-
     def _mk_round(callee_kinds):
         # A FRESH cache per round, and that is load-bearing rather than
         # wasteful: the answer depends on `callee_kinds`, so a cache shared
@@ -8648,7 +8649,7 @@ def gen_module_impl(self, stmts: list):
                     if callee_kinds is None:
                         _mk_first_maybe[_k] = bool(_r_maybe)
                         _mk_first_slots[_k] = _r_slots
-                        _mk_first_calls[_k] = _mk_call_keys(body)
+                        _mk_first_calls[_k] = _gmi_mk_call_keys(body)
             _maybe: bool = _mk_maybe[_k]
             _slotkinds: list = _mk_slots[_k]
             if _maybe:
@@ -13429,7 +13430,7 @@ def gen_module_impl(self, stmts: list):
             _ggf_dup._record_home_def_return_type(
                 self, _p3b_raw, _p3b_s.name, inferred)
 
-    def _flatten_resolved_conditionals(_root_list: list):
+    def _flatten_resolved_conditionals(_root_list):
         _out = []
         _stack = [(_root_list, 0)]
         while _stack:

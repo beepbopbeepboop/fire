@@ -5653,6 +5653,18 @@ class GimpleGen:
         return ggc._kwarg_param_names(self, fname_raw, fname, n_expected, kwarg_dict)
     def _begin_function(self, fn) -> None:
         return ginf.begin_function(self, fn)
+    def _frame_enter(self, fn) -> None:
+        return gmp._frame_enter(self, fn)
+    def _frame_enter_module(self) -> None:
+        return gmp._frame_enter_module(self)
+    def _frame_leave(self) -> None:
+        return gmp._frame_leave(self)
+    def _cattr_restore_begin(self, body) -> None:
+        return gmp._cattr_restore_begin(self, body)
+    def _cattr_restore_fallthrough(self, fn) -> None:
+        return gmp._cattr_restore_fallthrough(self, fn)
+    def _cattr_restore_end(self) -> None:
+        return gmp._cattr_restore_end(self)
     def _emit_fallthrough_frees(self, fn) -> None:
         return ginf.emit_fallthrough_frees(self, fn)
     def _reset_no_candidates(self) -> None:

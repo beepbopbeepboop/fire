@@ -1601,62 +1601,6 @@ _HELPER_FREE_BUILTINS = frozenset({
 })
 
 
-def _hbn_add_target(bound: set, t) -> None:
-    """Hoisted out of `_helper_bound_names` (was a recursive nested
-    closure) — the lifted-closure-env determinism fix. `bound` (set)
-    threaded and annotated.
-
-    Bound NAMES, not slots, so this is `for_target_names` (the shared leaf
-    walk) with the `*` stripped — the same shape
-    `mojo/middle/boundnames.py::_lbn_target_names` needs, and the same
-    reason: the previous private copy did a bare `s[1:-1].split(',')`, which
-    tore a nested target into paren-carrying fragments and — because it
-    recursed on the paren branch only — could not tell `'(a)'` from a
-    1-tuple `'(a,)'`."""
-    if isinstance(t, str):
-        for name in for_target_names(t):
-            if name:
-                bound.add(name.lstrip('*').strip())
-        return
-    if isinstance(t, gimple_ctypes.IdentExpr):
-        bound.add(t.name)
-        return
-    if isinstance(t, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
-        for e in t.elements:
-            _hbn_add_target(bound, e)
-
-
-def _binding_node_names(n) -> set:
-    """Names that ONE node of a helper's own body binds (see
-    `_helper_bound_names` for the full list of binding forms). Per-node so
-    a caller can count binding SITES, not just the set of names."""
-    bound: set = set()
-    if isinstance(n, gimple_ctypes.AssignStmt):
-        _hbn_add_target(bound, n.target)
-    elif isinstance(n, gimple_ctypes.AugAssignStmt):
-        _hbn_add_target(bound, n.target)
-    elif isinstance(n, gimple_ctypes.MultiAssignStmt):
-        for t in (n.targets or []):
-            _hbn_add_target(bound, t)
-    elif isinstance(n, gimple_ctypes.WalrusExpr):
-        bound.add(n.name)
-    elif isinstance(n, gimple_ctypes.ForStmt):
-        _hbn_add_target(bound, n.target)
-    elif isinstance(n, gimple_ctypes.VarDecl):
-        bound.add(n.name)
-    elif isinstance(n, gimple_ctypes.WithStmt):
-        for it in n.items:
-            if isinstance(it.alias, str):
-                bound.add(it.alias)
-            elif isinstance(it.alias, gimple_ctypes.IdentExpr):
-                bound.add(it.alias.name)
-    elif isinstance(n, gimple_ctypes.TryStmt):
-        for h in (n.handlers or []):
-            if getattr(h, 'name', None):
-                bound.add(h.name)
-    return bound
-
-
 def _helper_bound_names(body: list) -> set:
     """Names locally bound anywhere in `body` (a nested helper's own body,
     not crossing into deeper `def`s) — assignment / augmented-assignment /
@@ -1665,7 +1609,7 @@ def _helper_bound_names(body: list) -> set:
     captures."""
     bound: set = set()
     for n in gimple_exprtypes._walk_own_body(body):
-        bound |= _binding_node_names(n)
+        bound |= gimple_exprtypes._binding_node_names(n)
     return bound
 
 
@@ -1674,7 +1618,7 @@ def _binding_site_count(body: list, name: str) -> int:
     bind `name`. A parameter must have none, a local exactly its one `var`
     declaration; anything else is a rebinding."""
     return sum(1 for n in gimple_exprtypes._walk_own_body(body)
-               if name in _binding_node_names(n))
+               if name in gimple_exprtypes._binding_node_names(n))
 
 
 _FSTRING_FIELD_RE = re.compile(r"\{([^{}]*)\}")
