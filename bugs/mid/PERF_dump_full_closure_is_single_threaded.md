@@ -336,3 +336,16 @@ So: unsound AND small. Removed from the plan. What is left in this doc is the pa
 `coro.lower`/`_gmi_binding_index` walks listed above. Do not revisit a per-function type-inference memo without a way to enumerate
 every table the inference reads; the call-count (290k for 3.9k functions) is better attacked by running fewer `gen_module` rounds per
 module than by caching their bodies.
+
+## Correction (2026-11-01): there is no "several gen_module calls per module"
+
+Counted `module_gen.gen_module_impl` calls per `self.module_name` over the same fire.py compile (wall 269 s): 61 calls, 61 distinct
+modules, every one called exactly ONCE (the histogram is `[(1, 61)]`). The "4 fixpoint rounds x 6 `gen_module` calls" arithmetic
+earlier in this doc, and the advice just above to "run fewer `gen_module` rounds per module", are wrong: imported modules are not
+`gen_module`d one by one, they are compiled inside the importer's call (`_compile_imported_module`; inclusive times nest, e.g.
+root 261 s > build_config 242 s > reflect 238 s > ...). The 290k `_infer_local_var_types` calls therefore come from loops INSIDE one
+`gen_module_impl` (the ~8994 / ~12683 loops over `all_functions` run per imported module's own pass, and `_gmi_phase17_collect_appends`
+once per function per scan), not from repeated whole-module passes. To find the repetition factor: count calls per (module, call site)
+rather than per module; the earlier census (63k + 58k + 58k for ~3.9k functions) says each function is re-inferred ~15 times in those
+three loops, so the question is which outer loop re-enters them (`_mk_round` fixpoint iterations over the module's functions, or the
+retry passes `MOJO_DEBUG` reports for generators), measured with the call-site key above.
