@@ -260,6 +260,18 @@ int64_t mojo_frame_depth(void)            { return _mojo_frame_depth; }
  * `hook` (registered by fire_coro_gen.c) answers the generator's state: 0 not started, 1 suspended,
  * 2 running, 3 finished. */
 int64_t (*_mojo_gen_state_hook)(int64_t) = NULL;
+/* The generator whose body is being entered for the first time: set by __mojo_gen_resume before
+ * it switches in, consumed by the body's own `mojo_frame_bind_gen` so its frame knows which
+ * generator it belongs to (`f_generator`, and `clear()` on the live frame). */
+int64_t _mojo_resuming_gen = 0;
+void mojo_frame_set_resuming(int64_t gen) { _mojo_resuming_gen = gen; }
+void mojo_frame_bind_gen(void)
+{
+    if (_mojo_frame_depth > 0 && _mojo_frame_depth <= MOJO_FRAME_MAX)
+        _mojo_frames[_mojo_frame_depth - 1].gen = _mojo_resuming_gen;
+    _mojo_resuming_gen = 0;
+}
+int64_t mojo_frame_generator(int64_t w) { MojoFrameRec *f = _frame_of(w); return f ? f->gen : 0; }
 
 int64_t mojo_frame_for_gen(int64_t gen, int64_t old_word, const char *name, const char *file,
                            int64_t firstlineno, int64_t lineno)

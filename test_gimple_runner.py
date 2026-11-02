@@ -3751,6 +3751,34 @@ def main():
 main()
 """, "g\nsuspended refuses\n2\n")
 
+    # `frame.f_generator` is the generator the frame belongs to (None for a
+    # plain function's frame), and `gi_frame` of an exhausted generator is None.
+    test_gimple_stdout("gimple_frame_f_generator_and_exhausted_gi_frame", """\
+import sys
+
+def t1():
+    frame = sys._getframe()
+    return frame.f_generator
+
+def t2():
+    frame = sys._getframe()
+    yield frame.f_generator
+    frame = sys._getframe()
+    yield frame.f_generator
+
+def main():
+    print(t1() is None)
+    g = t2()
+    a = next(g)
+    b = next(g)
+    print(a == g, b == g)
+    for _ in g:
+        pass
+    print(g.gi_frame is None)
+
+main()
+""", "True\nTrue True\nTrue\n")
+
     test_gimple_stdout("gimple_traceback_chain_names_and_lines", """\
 import sys
 

@@ -31,6 +31,7 @@ extern void mojo_exc_msg_set(char *);
 extern void mojo_exc_obj_set(void *);
 extern void mojo_exc_pending_set(int);
 extern void mojo_raise(void);
+extern void mojo_frame_set_resuming(int64_t gen);
 
 /* The generated-code exception frame stack (runtime/fire_runtime.h), needed
    by __mojo_gen_close's local landing pad below. fire_coro.h declares neither,
@@ -59,6 +60,7 @@ typedef struct MojoGen {
     int       done;
     int       started;
     int       pending_exc;
+    int       started_once; /* the body has been entered (its first frame bound to this generator) */
     int64_t   frame;       /* heap frame object handed out as `gi_frame` (0 until asked for) */
 } MojoGen;
 
@@ -451,7 +453,9 @@ __mojo_gen_resume(int64_t gen, int64_t send)
         g->started = 1;
     }
     int64_t out = 0;
+    if (!g->started_once) { g->started_once = 1; mojo_frame_set_resuming(gen); }
     int r = __mojo_coro_resume(g->coro, send, &out);
+    mojo_frame_set_resuming(0);
     if (r == 1) { g->value = out; return 1; }
     g->retval = out;
     g->done = 1;
@@ -483,7 +487,7 @@ int64_t
 __mojo_gen_frame(int64_t gen)
 {
     MojoGen *g = (MojoGen *)(uintptr_t)gen;
-    if (!g) return 0;
+    if (!g || g->done) return 0;        /* an exhausted generator's gi_frame is None */
     const char *name = 0, *file = 0; int64_t first = 0, line = 0;
     if (!mojo_coro_slice_peek(__mojo_coro_slice_of(g->coro), &name, &file, &first, &line))
         name = 0;

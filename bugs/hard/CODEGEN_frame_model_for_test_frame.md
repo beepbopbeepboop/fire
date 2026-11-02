@@ -191,3 +191,15 @@ Test `gimple_generator_gi_frame_clear_refuses_suspended` matches CPython; `test_
 Differences from CPython that remain: `gi_frame` should be `None` once the generator is exhausted; a generator that has not started
 reports the placeholder name `<generator>`; `f_generator`, `f_locals`, `f_trace`; C++20-coroutine generators (`_mojogen_*`) have no frame
 object. NOT gated by `test_selfhost.py`: master's self-host closure compile has been red since 18f122b7c (see the note in the commit).
+
+## Status (2026-11-01, stage 3 fifth slice): `f_generator`, and `gi_frame` is None once exhausted
+
+`frame.f_generator` lowers to `mojo_frame_generator(word)`: a generator body's own frame is bound to its generator on first entry
+(`__mojo_gen_resume` sets `_mojo_resuming_gen`, the body's `mojo_frame_bind_gen()` -- emitted for `__mgco_*_body` functions right after
+`mojo_frame_enter` -- stores it in the frame record), and the binding survives yields because the per-coroutine slice copies the record.
+A plain function's frame answers None. `gen.gi_frame` of a finished generator is None. Test
+`gimple_frame_f_generator_and_exhausted_gi_frame` matches CPython. Not gated by `test_selfhost.py` (master's self-host closure compile is red
+since 18f122b7c, unrelated).
+
+Still open: `f_locals`, `f_trace`, a not-yet-started generator's real name (placeholder `<generator>`), and frame objects for C++20-coroutine
+generators and async functions (`cr_frame` of an `async def`, whose return kind is not a scalar: test_frame's `t3`).

@@ -401,6 +401,8 @@ def _frame_enter(gen, node) -> None:
     _fline = gen._new_val('int64_t', f'(int64_t){int(getattr(node, "line", 0) or 0)}')
     gen._void_call('mojo_frame_enter',
                    [('char *', _fname), ('char *', _ffile), ('int64_t', _fline)])
+    if _as_str(node.name).startswith('__mgco_') and _as_str(node.name).endswith('_body'):
+        gen._emit('  mojo_frame_bind_gen ();')
 
 
 def _frame_enter_module(gen) -> None:
