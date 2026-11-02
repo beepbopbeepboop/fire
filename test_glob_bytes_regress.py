@@ -38,6 +38,13 @@ try:
     _refused = str(b"\xff", "ascii")
 except UnicodeDecodeError:
     print("ascii decode refused")
+# the same decode as a bare expression statement (value discarded): it must lower
+# through the value-form str() dispatch, not the one-argument mojo_str
+try:
+    str(b"\xff", "ascii")
+except UnicodeDecodeError:
+    print("bare ascii decode refused")
+str(b"ab", "ascii", "strict")
 print(sorted(names(ROOT)))
 print(sorted(names(ROOT.encode())))
 '''

@@ -4411,6 +4411,17 @@ def _gen_stmt_ExprStmt(gen, node):
         if raw_name in ('list', 'tuple') and len(node.value.args) <= 1:
             gen._lower_builtin_list(node.value)
             return
+        # A bare call to a Python builtin is value-discarding, but the builtin's
+        # dispatch lives in the value form (`_lower_call` -> `_lower_named_call`):
+        # the 2/3-arg `str(bytes, encoding[, errors])` decode, `pow`'s 3-arg form,
+        # `hasattr`, `sorted`, ... Lowering the call here through BUILTIN_VALUE_MAP
+        # alone emitted `mojo_str(b, enc)` for `str(b"\xff", "ascii")` as a
+        # statement ("too many arguments to function 'mojo_str'"). Route it through
+        # the one value-form builtin path and discard the result; the call is still
+        # emitted (every call lowers to a temp). `print` returned above.
+        if raw_name in ggc._PY_BUILTIN_NAMES and not gen._locally_binds_name(raw_name):
+            gen._lower_call(node.value)
+            return
         # A statement `setattr(obj, name, v)` / `delattr(obj, name)`: the same
         # lowering the expression form gets in `_lower_call`, which stores
         # through the struct's own field dispatch (`_mojo_dispatch_setattr`).
