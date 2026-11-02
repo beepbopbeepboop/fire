@@ -319,28 +319,6 @@ def _cpp_except_handler_body(gen, handler, caught_var: str, declared: dict,
 _Y_SITE = re.compile(r'^(.*?)co_yield /\*Y:([^*]*)\*/ \((.*)\);$')
 
 
-def _cpp_word_of_kind(ctype: str, expr: str) -> str:
-    """`expr` (of scalar C++ type `ctype`) as ONE tagged int64_t word, the form
-    every consumer renders by the kind the box carries: a double as
-    `mojo_box_from_double`, a bool as `mojo_box_from_bool`, a string as
-    `mojo_box_from_str`, None as `mojo_box_none()`, and an int as itself. The
-    single mapping both a tagged yield slot (`_cpp_tag_yield_sites`) and a
-    tagged operand of `and`/`or` (`cpp_core._cpp_tagged_operand_word`) use."""
-    if ctype == 'None':
-        return "mojo_box_none()"
-    if ctype == 'double':
-        return f"mojo_box_from_double((double)({expr}))"
-    if ctype == '_Bool':
-        return f"mojo_box_from_bool((int64_t)({expr}))"
-    if ctype == 'char *':
-        # boxed by kind like the others: a raw pointer is only read as a
-        # string when the runtime registered it (a C++ literal is not)
-        return f"mojo_box_from_str((char *)({expr}))"
-    if ctype == 'MojoBytes *':
-        return f"(int64_t)(intptr_t)({expr})"
-    return f"(int64_t)({expr})"
-
-
 def _cpp_tag_yield_sites(body_lines: list):
     """The body lines with every `co_yield /*Y:<ctype>*/ (<expr>);` site boxed
     into one int64_t word by its marked ctype (a double as `mojo_box_from_double`,
@@ -369,7 +347,21 @@ def _cpp_tag_yield_sites(body_lines: list):
         kinds.add(ct)
         indent = ln[:len(ln) - len(ln.lstrip())]
         expr = m.group(3)
-        w = _cpp_word_of_kind(ct, expr)
+        if ct == 'None':
+            # the None box: renders `None` wherever a tagged word is printed
+            w = "mojo_box_none()"
+        elif ct == 'double':
+            w = f"mojo_box_from_double((double)({expr}))"
+        elif ct == '_Bool':
+            w = f"mojo_box_from_bool((int64_t)({expr}))"
+        elif ct == 'char *':
+            # boxed by kind like the others: a raw pointer is only read as a
+            # string when the runtime registered it (a C++ literal is not)
+            w = f"mojo_box_from_str((char *)({expr}))"
+        elif ct == 'MojoBytes *':
+            w = f"(int64_t)(intptr_t)({expr})"
+        else:
+            w = f"(int64_t)({expr})"
         out.append(f"{indent}{prefix}co_yield {w};")
     if kinds == {'None'}:
         return out

@@ -3778,6 +3778,34 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         vp = gen._new_val('void *', ov if ot == 'void *' else f'(void *){ov}')
         _isdc = gen._call_expr('int', '_mojo_dispatch_is_dataclass', [('void *', vp)])
         return '_Bool', gen._new_val('_Bool', f'{_isdc} != 0')
+    # Builtin containers (MojoList*, MojoDict*, MojoSet*, MojoStr*,
+    # MojoBytes*, MojoMemoryView*) have no fields registered in the static
+    # dispatch table, so the generic arm below answers False for every
+    # method name. Check known method names directly for these types.
+    if (fname_raw == 'hasattr' and len(node.args) == 2
+            and not gen._locally_binds_name('hasattr')):
+        _quick_type_result = gen._quick_type(node.args[0]) if hasattr(gen, '_quick_type') else None
+        _is_builtin_container = False
+        if _quick_type_result and _quick_type_result.endswith(' *'):
+            _base = _quick_type_result[:-2]
+            _is_builtin_container = _base in (
+                'MojoList', 'MojoDict', 'MojoSet', 'MojoStr',
+                'MojoBytes', 'MojoMemoryView',
+            )
+        if (_is_builtin_container
+                and isinstance(node.args[1], gimple_ctypes.StringLiteral)):
+            _attr_name = _as_str(node.args[1].value)
+            _container_methods = {
+                'append', 'extend', 'sort', 'reverse', 'clear',
+                'keys', 'values', 'items', 'get', 'update', 'pop',
+                'add', 'discard', 'remove',
+                'startswith', 'endswith', 'strip', 'lstrip', 'rstrip',
+                'split', 'join', 'replace', 'find', 'lower', 'upper',
+                'format', 'encode', 'count', 'index', 'rfind', 'rindex',
+                'insert', 'copy', 'popleft', 'appendleft',
+            }
+            if _attr_name in _container_methods:
+                return '_Bool', gen._new_val('_Bool', '1')
     if (fname_raw == 'hasattr' and len(node.args) == 2
             and not gen._locally_binds_name('hasattr')):
         ot, ov = gen.lower_expr(node.args[0])

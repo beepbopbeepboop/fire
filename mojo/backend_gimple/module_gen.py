@@ -3643,10 +3643,7 @@ def _gmi_decorator_pass(self, stmts: list, outer_defs: dict, at_module: bool) ->
     _rb_scope = dict(outer_defs)
     _rb_defs = _gmi_scope_defs(stmts)
     _rb_scope.update({_rs.name: _rs for _rs in _rb_defs})
-    try:
-        _gmi_refuse_scalar_decorator_rebind(self, _rb_defs, _rb_scope)
-    except Exception:
-        raise
+    _gmi_refuse_scalar_decorator_rebind(self, _rb_defs, _rb_scope)
     if at_module:
         # A module global is bound by a top-level statement, and the global
         # function-value machinery never sees an assignment inside a
@@ -3671,16 +3668,7 @@ def _gmi_is_rebindable(dec, scope: dict, def_name: str) -> bool:
     """True when decorator `dec` on `def_name` names a def in `scope`, so the
     decoration is applied by rebinding (see `_gmi_decorator_pass`)."""
     _head = _gmi_decorator_head(dec)
-    if _head is None or _head not in scope or _head == def_name:
-        return False
-    # Don't rebind decorators that are classes/constructors in a way that
-    # would break things? Classes are callable - but the decoration pass
-    # expects to transform function defs. Be permissive.
-    _target = scope.get(_head)
-    if isinstance(_target, StructDef):
-        # A class used as decorator - rare, but treat carefully
-        return True
-    return True
+    return _head is not None and _head in scope and _head != def_name
 
 
 def _gmi_child_blocks(stmt) -> list:
@@ -3742,8 +3730,6 @@ def _gmi_scope_defs(stmts) -> list:
     out = []
     for _s in stmts or []:
         if isinstance(_s, FunctionDef):
-            out.append(_s)
-        elif isinstance(_s, StructDef):
             out.append(_s)
         for _b in _gmi_child_blocks(_s):
             out.extend(_gmi_scope_defs(_b))
@@ -3872,40 +3858,11 @@ def _gmi_refuse_scalar_decorator_rebind(self, stmts: list, scope: dict) -> None:
                 _rd_params = {_rd_target.params[0][0]} if _rd_target.params else set()
             _rd_callables = _rd_params | set(_rd_defs) | {
                 _rn.name for _rn in _walk_ast(_rd_target)
-                if isinstance(_rn, FunctionDef)} | {
-                _rn.name for _rn in _walk_ast(_rd_target)
-                if isinstance(_rn, StructDef)}
-            # Also include any StructDef names in scope (classes are callable)
-            for _sname, _sdef in (scope or {}).items():
-                if isinstance(_sdef, StructDef):
-                    _rd_callables.add(_sname)
-            for _s in (stmts or []):
-                if isinstance(_s, StructDef):
-                    _rd_callables.add(_s.name)
-            _exempt = False
-            for _rd_n in _walk_ast(_rd_target):
-                if isinstance(_rd_n, ReturnStmt):
-                    if isinstance(_rd_n.value, IdentExpr) and _rd_n.value.name in _rd_callables:
-                        _exempt = True
-                        break
-                    # Returning a call to a class/constructor is callable
-                    if isinstance(_rd_n.value, CallExpr):
-                        if isinstance(_rd_n.value.func, IdentExpr) and _rd_n.value.func.name in _rd_callables:
-                            _exempt = True
-                            break
-                        # Could also be calling a method etc, be permissive for common patterns
-            # Also be permissive if decorator returns a CallExpr to any name that
-            # is a struct in the module scope we can find
-            if not _exempt:
-                for _rd_n in _walk_ast(_rd_target):
-                    if isinstance(_rd_n, ReturnStmt) and isinstance(_rd_n.value, CallExpr):
-                        if isinstance(_rd_n.value.func, IdentExpr):
-                            _fn = _rd_n.value.func.name
-                            # Check if it's a struct anywhere in scope
-                            if _fn in scope and isinstance(scope[_fn], StructDef):
-                                _exempt = True
-                                break
-            if not _exempt:
+                if isinstance(_rn, FunctionDef)}
+            if not any(isinstance(_rd_n, ReturnStmt)
+                       and isinstance(_rd_n.value, IdentExpr)
+                       and _rd_n.value.name in _rd_callables
+                       for _rd_n in _walk_ast(_rd_target)):
                 raise RuntimeError(
                     f"decorator {_rd_shown!r} on {_rd_fn.name!r} returns {_rd_ret} "
                     f"(not callable), so {_rd_fn.name!r} is rebound to a scalar; "
