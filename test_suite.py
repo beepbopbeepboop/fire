@@ -2148,26 +2148,14 @@ STALE_PER_CHILD_BUDGETS = {
     # moves to `BUDGET_IS_THE_SUBJECT`.
     'test_formal_call_proof_gen.py': 2,
     'test_formal_dylib.py': 2,
-    'test_formal_external_call.py': 1,
-    'test_formal_frame_return_overloads.py': 1,
-    'test_formal_link_accounting.py': 4,  # +2 with 515fe237's printf-of-a-container cases (per-child walls on images the case builds)
-    'test_formal_peephole.py': 1,  # +1 on 2026-10-05: work/formal36-verified-peephole's
-                                   # image-run of an emitted artifact
     'test_formal_proof_breadth.py': 6,  # +1 with the bulk merge of the formal-worker branches
     'test_formal_runtime_link.py': 1,
     'test_formal_specs.py': 1,  # +1 on 2026-10-05: work/formal36-contracts-language's
                                  # `lean` run of a generated spec proof
-    'test_formal_specialization.py': 2,
     'test_formal_sweep_cache_key.py': 2,
     'test_formal_sweep_truth.py': 1,  # +1 on 2026-10-04 (76143aaa), a row the
                                       # census missed when that file's literal
                                       # arrived with the derived host-import rows
-    'test_formal_sys.py': 2,
-    'test_formal_tempfile.py': 3,
-    'test_formal_x86_64_dylib.py': 6,  # +2 with the bulk merge of the formal-worker branches (more per-child build walls); earlier +1 on 2026-10-08: the os.path.getsize
-                                       # hostmod-dylib row's build of the reduced
-                                       # program, the same 600 s wall the file's
-                                       # other three build sites carry
     'test_metal_codegen.py': 9,
     'test_ptr_registry.py': 2,
     'test_runtime_dylib.py': 1,
