@@ -18,6 +18,7 @@ from mojo.middle.types import *  # noqa: F401,F403
 from mojo.middle.types import _body_builds_struct_tuple  # noqa: F401
 from mojo.middle.exprtypes import *  # noqa: F401,F403
 from mojo.middle.solvers import *  # noqa: F401,F403
+import mojo.middle.coro as _coro
 # NO module-level `import gimple_codegen` here, and that is the layering rule
 # rather than an omission: the edge middle-tier -> `gimple_codegen` (which
 # imports the whole `mojo/backend_gimple/*` tier at its own top level,
@@ -407,6 +408,20 @@ def _param_ctype(gen, pname: str, ptype, node: gimple_ctypes.FunctionDef,
         _ipt_fn = gen._inferred_param_types.get(func_key)
         if _ipt_fn is not None and pname in _ipt_fn:
             ctype = _ipt_fn[pname]
+    # An UNANNOTATED generator parameter that usage inference could not type
+    # takes the unanimous kind its call sites pass, when the whole-module
+    # scan recorded one, instead of the generic int64_t box. coro's
+    # `_static_env` reads that same registry to type the yield slot, so the C
+    # signature and the yield slot must agree on it or the generator is
+    # refused with "yields do not agree". Real: Lib/ctypes/macholib/dyld.py's
+    # `dyld_default_search(name, env)` -- `name` was declared int64_t while
+    # `os.path.join` yields were char *. Usage inference that DID type the
+    # param wins (ctype is set above); a conflicted or untypable slot is
+    # absent from the registry and keeps the box.
+    if ctype is None and ptype is None:
+        _ck = _coro._CALLSITE_PARAM_KINDS.get(node.name, {}).get(pname)
+        if isinstance(_ck, str) and _ck in _coro._KIND_TO_SLOT_CTYPE:
+            ctype = _coro._KIND_TO_SLOT_CTYPE[_ck]
     if ctype is None:
         ctype = gen._resolve_type(ptype)
     # An UNANNOTATED parameter whose declared default value is a string
@@ -1731,7 +1746,9 @@ def _selfhost_gen_self_param_ctype(gen, pname, ptype, node) -> str | None:
     # build directly gives ~1.5s for 448 entries, so the real win is ~1.5s
     # per process, paid once. Small but free, and a larger fraction of a
     # quick `fire.py build small.mojo` than of a whole-stdlib sweep. See
-    # bugs/hard/PERF_nested_module_compile_walk_ast_quadratic_rescan.md.)
+    # the `_walk_ast` re-scan bug (fixed; the remaining per-level costs are
+    # the struct self-assign scan memo and the text join, both landed in
+    # the same commit).)
     #
     # The flag itself: set once the GimpleGen registry pre-pass has run for
     # this (shared) compile — see _selfhost_register_gimplegen in

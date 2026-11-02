@@ -286,7 +286,17 @@ def main() -> int:
     files = [os.path.join(EXAMPLES, f) for f in examples()]
     workers = args.j or max(2, min(os.cpu_count() or 4, 8))
     results = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+    # PROCESSES, not threads. `formal/build.py` and `formal/model.py` keep
+    # process-global state across a build (the libsystem handle and its
+    # memo, the per-program symbol and home tables), so two builds in one
+    # interpreter race on it: measured, a thread that loses the first
+    # libsystem load memoises "unavailable" for every later build (93/93
+    # SKIP, exit 0), and a build inherits the previous example's module
+    # constants (`LIMIT` from toplevel_accum, read by toplevel_const, which
+    # then refuses with "'LIMIT' has no home"). A process per build gives
+    # each one a fresh compiler, which is the isolation the compiler does
+    # not provide for itself.
+    with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(check_one, p, args.n, verbose): p
                    for p in files}
         for fut in concurrent.futures.as_completed(futures):

@@ -5,7 +5,7 @@
 test_a_spill_is_not_attributed_to_the_conditional_expression` — a suite that is
 **not registered** in `tools/suite.py` (it is in `test_suite.py`'s
 `UNREGISTERED`, see
-`bugs/COMPILE_FAIL_estate_check_red_for_eleven_formal_suites.md`), so no gate
+commit d8ef058d4), so no gate
 reports it.
 
 **Status: OPEN, measured 2026-10-13 (`work/formal394-docs`), found while

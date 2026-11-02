@@ -8,7 +8,11 @@ recurrence NEEDS — the image, kept — is what the harness now does. As of
 2026-10-07 the harness also ANSWERS the two-way branch rather than offering it:
 the timeout message now carries the child's own CPU seconds, which rules the
 SPINNING reading in or out (§0b). The hang itself is still unexplained and this
-document stays open for it.**
+document stays open for it. Re-verified 2026-10-27 on this tree: the harness
+is intact (`_preserve_a_hung_image`, `_child_cpu_seconds` and `_hang_reading`
+are all present and pinned by the self-test), `test_struct_formal.py` reports
+`196/196 checks passed`, and the hang did not reproduce; it remains unexplained
+and stays open for the next recurrence.**
 
 Found 2026-10-01 while re-running `test_struct_formal.py` to settle
 `“CODEGEN_test_struct_formal: the struct suite is FLAKY”`. **NOT MINE and NOT FIXED** —

@@ -271,6 +271,25 @@ def _collect_var_names(f: F.FunctionDef) -> list:
         names = [n for n in names if n not in module_globals]
     seen = set(names)
 
+    # Loop-bound flags, one per name `model.loop_bound_flags` flags: a `for`
+    # whose range is a run-time fact binds its target only if it runs, so the
+    # image carries a word per such name — zero at entry, set by every store
+    # of the name, and branched on at a read that may be unbound. Backend-local
+    # like the loop temps: the name is not in the source, so it goes through
+    # the same append-only path rather than the bound-name walk. The ORDER is
+    # `sorted` because `_emit_function` derives the same name from the same
+    # call, and a name whose position depends on set iteration order would be
+    # a different local on the two reads of the same function. The arm64
+    # allocator appends the same names after its own locals, so the two
+    # architectures flag the same loops from the same shared reader.
+    flags = M.loop_bound_flags(f)
+    if flags:
+        for i, name in enumerate(sorted(flags)):
+            lb = f"_lb{i}"
+            if lb not in seen:
+                seen.add(lb)
+                names.append(lb)
+
     def walk(stmts, depth: int, acc: list) -> None:
         """Track the deepest loop nesting, whatever kind.
 
@@ -792,6 +811,29 @@ class X86_64Codegen:
         self._var_spills = {}
         self._spill_bytes = 0
         self._frame_bytes = 0
+        # `{name: "_lb{i}"}` — the loop-bound flag of each name
+        # `model.loop_bound_flags` flags in THIS function: the target of a
+        # `for` whose range is a run-time fact, read where it may be unbound.
+        # Zero at entry, set by every store of the name (the flag SETS are the
+        # stores, through `_store_var`), read as a `TEST`/`JZ` at a load whose
+        # position `_mub` says may be unbound. Empty unless the function has
+        # one; reset per function. The x86-64 twin of arm64's, reading the
+        # same shared model function, so the two flag the same loops.
+        self._lb_flags: dict = {}
+        # The flagged names whose flag may be ZERO at the point of emission:
+        # the "may be unbound" state the `JZ` check is gated on. One mutable
+        # set with save/restore + OR-at-join discipline, because a branch forks
+        # the paths and a store on one arm is not a store on the other.
+        # `_store_var` clears a name as it stores it, loops and if-arms save
+        # and restore around their bodies, and a join unions the arms. Reset
+        # per function.
+        self._mub: set = set()
+        # The one label every unbound check in the CURRENT function branches
+        # to (keyed on its per-definition label; None when the function has no
+        # flagged name). Set in `_emit_function`; the body's checks emit
+        # forward `JZ` references to it before the label is defined, the same
+        # forward reference every branch in this file makes.
+        self._lb_unbound_label: str = None
         # PCs of the conditional branches that test an `if`/`elif`/`while`/
         # ternary condition, so a later proof generator can tell an `if`'s own
         # branch from a short-circuit `and`/`or`'s (same reason, and the same
@@ -1053,6 +1095,9 @@ class X86_64Codegen:
             self._def_labels.append(label)
             self._entry_labels[f.name] = label
 
+        # Float-repr helper labels are internal.
+        self._internal_labels.add(M.FLOAT_REPR_SYMBOL)
+
         self.asm.org(base_addr)
 
         first_func_name = functions[0].name
@@ -1139,6 +1184,9 @@ class X86_64Codegen:
         for f, label in zip(functions, self._def_labels):
             self._emit_function(f, label)
 
+        # Float-repr helper, once, after all function bodies.
+        self._emit_float_repr_helper()
+
         # Every body is out, so a NAME can be bound to the one a call reaches.
         # Before `resolve()`, so the startup `call` above and every `call` in a
         # body are patched out of it, and with the per-definition labels kept
@@ -1173,6 +1221,12 @@ class X86_64Codegen:
             "func_offset": self.asm.labels.get(first_func_name, 0),
             "labels": {n: a for n, a in self.asm.labels.items()
                        if n not in self._internal_labels},
+            # The float-repr helper's entry, published separately because it is
+            # internal and so absent from `labels`. It is emitted after every
+            # function body, so a consumer that decodes a body linearly from its
+            # entry must stop here or it walks into the helper. Consumer:
+            # `_body` in `formal/x86_64_endtoend_test.py`.
+            "float_repr_addr": self.asm.labels[M.FLOAT_REPR_SYMBOL],
             "func_name": first_func_name,
             "external_syms": external_syms,
             "extern_calls": extern_calls,
@@ -1228,6 +1282,29 @@ class X86_64Codegen:
     def _emit_function(self, f: F.FunctionDef, label: str = None) -> None:
         self._current_function = f.name
         self._cur_fn = f
+        # The loop-bound flags of this body, BEFORE any store or load can
+        # happen in it: the prologue's own `_store_var` calls (argument homes)
+        # run through the flag hook, and a flag table that is set later would
+        # miss a store of a flagged name that the prologue makes.
+        # `model.loop_bound_flags` is the one reader, shared with arm64's
+        # `_emit_function` and the allocator's `_collect_var_names`, so the
+        # name, the `_lb{i}` home and the check cannot disagree about which
+        # loops are flagged.
+        self._lb_flags = {name: f"_lb{i}"
+                          for i, name in enumerate(sorted(
+                              M.loop_bound_flags(f)))}
+        self._mub = set(self._lb_flags)
+        # The error label every check in this body branches to, keyed on the
+        # per-DEFINITION label: two overloads of one name are two bodies, and
+        # a shared `{name}_unbound` label would be a second binding the moment
+        # the second flagged body emitted it, which `Assembler.label` refuses
+        # — the same reason every control label in this file carries a
+        # per-site counter or a per-definition prefix.
+        if self._lb_flags:
+            _entry = label if label is not None else f"{f.name}__def1"
+            self._lb_unbound_label = f"{_entry}_unbound"
+        else:
+            self._lb_unbound_label = None
         # The by-reference RECEIVER locals and the statement-call ids, BEFORE the
         # allocation: `_allocation_split` reads `f._address_taken` to decide which
         # names get a register, and `_address_taken_for` asks
@@ -1410,6 +1487,14 @@ class X86_64Codegen:
         self._list_cursor = (self._blob_base + self._frame_recv_bytes
                              + self._ret_frame_bytes)
         self._materialised = {}
+        # The comprehension-element RELOCATION context: `(res_offset, cap)`
+        # pushed by `_emit_compr_gen`'s leaf around an element
+        # `model.comprehension_element_is_relocatable` accepts, so the
+        # container literals the element builds reserve a `cap`-slot array
+        # and recompute their base from the result's count
+        # (`_emit_relocated_blob_base`) instead of one shared blob the
+        # per-iteration copy would alias. Empty otherwise; arm64's twin.
+        self._compr_reloc = []
         # Blocks for CONTAINERS this function RECEIVES from a callee that
         # returns one, and the COPY after each such call that fills them.  The
         # third kind of block in the same region as the constructor frames and
@@ -1601,8 +1686,29 @@ class X86_64Codegen:
             self.asm.emit(encode_mov_r64_r64(Reg.R11, ARG_REGS[sret_arg]))
             self._store_var(_SRET_LOCAL, Reg.R11)
 
+        # A loop-bound flag starts UNBOUND, the state the function entry has:
+        # nothing has stored the name yet, so the read after an empty range
+        # must take the error edge. Emitted after the frame is reserved,
+        # because a flag in a spill slot is addressed from the frame pointer,
+        # and after the argument stores above, which R11 moves through.
+        for _lb_name in self._lb_flags.values():
+            self._emit_mov_imm(Reg.R11, 0)
+            self._store_var(_lb_name, Reg.R11)
+
         for stmt in f.body:
             self._emit_stmt(stmt)
+
+        # The one place every unbound check branches to: the image has no way
+        # to mean "unbound", so the read takes an error exit rather than
+        # answering the caller's leftover — the same `TEST`/`JZ` → exit(1)
+        # shape the divide-by-zero guard emits, which is what keeps the proof
+        # generators' walk from meeting an instruction it has no step for. It
+        # sits after the body so the branch is forward everywhere, and before
+        # the fall-through epilogue so a body that falls off its end still
+        # reaches its own return.
+        if self._lb_flags:
+            self.asm.label(self._lb_unbound_label)
+            self._emit_call_exit(1)
 
         if not _always_returns(f.body):
             if self._recv_ref_receiver is not None:
@@ -1737,6 +1843,22 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         intercepted here, and not at the read sites, because every read of a
         field on this path already funnels through this one function — the
         same interception, and the same reason for it, as arm64's."""
+        # A loop-bound flag gates the read: `name` is a `for` target whose
+        # range is a run-time fact, the build-time state says the flag may be
+        # ZERO here, so ask at run time — load the flag, test it, branch on
+        # zero to the function's one unbound exit. The same `TEST`/`JZ` →
+        # `exit(1)` shape the divide-by-zero guard emits, recorded as a
+        # cond-branch for it. Every read of a local funnels through here,
+        # which is what makes this one branch and the flag SET (in
+        # `_store_var`) the whole discipline. A name not flagged in this body
+        # skips it; a flag home (`_lb{i}`) is never a key of `_lb_flags`, so
+        # the recursion terminates on the first step.
+        lb = self._lb_flags.get(name)
+        if lb is not None and name in self._mub:
+            self._load_var(lb, Reg.R11)
+            self.asm.emit(encode_test_r64_r64(Reg.R11, Reg.R11))
+            self._record_cond_branch()
+            self._emit_jcc(COND_E, self._lb_unbound_label)
         slot = self._frame_slots.get(name)
         if slot is not None:
             self._load_var(name.rsplit(".", 1)[0], Reg.R11)
@@ -2182,6 +2304,36 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         return M.module_slot_for(name, self._fn_local_names)
 
 
+    def _lb_note_store(self, name: str) -> None:
+        """The loop-bound flag of `name` goes 0 → 1 the moment `name` is
+        STORED, and only from here, so that a read can never take its `JZ`
+        error edge on a path that stored it: the flag and the store are two
+        halves of one binding, and the store is the half that always runs.
+
+        Every store of a local is one of the two home branches of
+        `_store_var` (a name bound in this body is a local by
+        `model.module_slot_for`'s rule, so the frame-slot and global branches
+        never see a flagged name), which is why the hook lives there rather
+        than at the assignment sites: a loop's `init:` store, a comprehension's
+        per-element store and a plain assignment all funnel through it, and a
+        store spelling added later is flagged without a second hook.
+
+        The build-time half — `self._mub` — is narrowed the same way, because
+        the state at the NEXT read is what decides whether that read asks. A
+        register home is one materializer in place; a spill home parks 1 in
+        R11 and stores it, R11 being the address scratch this backend
+        reserves for exactly such writes. `lb` is never a key of
+        `_lb_flags`, so the recursive store does not re-enter the hook."""
+        lb = self._lb_flags.get(name)
+        if lb is None:
+            return
+        self._mub.discard(name)
+        if lb in self._var_regs:
+            self._emit_mov_imm(self._var_regs[lb], 1)
+        else:
+            self._emit_mov_imm(Reg.R11, 1)
+            self._store_var(lb, Reg.R11)
+
     def _store_var(self, name: str, src: Reg) -> None:
         """local `name` = src. Register homes MOV; spill slots store to
         [RBP + off]. A frame slot is a store into the receiver's frame, and
@@ -2221,10 +2373,12 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             r = self._var_regs[name]
             if src != r:
                 self.asm.emit(encode_mov_r64_r64(r, src))
+            self._lb_note_store(name)
             return
         if name in self._var_spills:
             self.asm.emit(encode_mov_rm64_r64(Reg.RBP, self._spill_off(name),
                                               src))
+            self._lb_note_store(name)
             return
         raise CodegenError(self._no_home(name))
 
@@ -3426,21 +3580,46 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         has_else = stmt.else_body is not None or bool(stmt.elifs)
         else_label = f"{fn}_else_{if_id}"
 
+        # The flagged names that may be unbound BEFORE this if: every arm
+        # forks from that state, so each arm — condition first, because an
+        # elif's condition runs in the pre-if state, not in the previous
+        # arm's body state — is walked on a copy of it, and the join after the
+        # if unions the arms' end states. With no else, the fall-through is a
+        # third arm that ends where it started. A store one arm made is not a
+        # store the other arm made, which is the whole reason the sets fork.
+        # The x86-64 twin of arm64's, over the same `self._mub` state.
+        if_base = set(self._mub) if self._lb_flags else None
+        arm_ends = []
         for i, (cond, body) in enumerate(tests):
             self.asm.label(f"{fn}_if{if_id}_alt_{i}")
+            if if_base is not None:
+                self._mub = set(if_base)
             self._emit_truthy_word(cond)
             fail = f"{fn}_if{if_id}_alt_{i + 1}" if i + 1 < len(tests) else (
                 else_label if has_else else end_label)
             self._emit_branch_if_false(fail)
             for s in body:
                 self._emit_stmt(s)
+            if if_base is not None:
+                arm_ends.append(set(self._mub))
             if i < len(tests) - 1 or stmt.else_body is not None:
                 self._emit_jmp(end_label)
 
         if has_else:
             self.asm.label(else_label)
+            if if_base is not None:
+                self._mub = set(if_base)
             for s in (stmt.else_body or []):
                 self._emit_stmt(s)
+            if if_base is not None:
+                arm_ends.append(set(self._mub))
+        elif if_base is not None:
+            arm_ends.append(set(if_base))
+        if if_base is not None:
+            joined = set()
+            for e in arm_ends:
+                joined |= e
+            self._mub = joined
         self.asm.label(end_label)
 
     def _emit_loop(self, cond, body, else_body, for_info) -> None:
@@ -3536,6 +3715,20 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 self._store_var(target, Reg.RAX)
             self._for_depth += 1
 
+        # The flagged names that may be unbound BEFORE the loop: the exit path
+        # — and the join after it — arrives where the body never ran, so the
+        # state there is the pre-loop one, and the restore below is what hands
+        # it to the else body and to the code after the loop. Taken AFTER the
+        # prologue store above because with `bind_after_test` false that store
+        # runs on every path, empty range included: the target is bound there
+        # wherever the loop goes, and the flag its hook sets says so, so a
+        # check after such a loop would be dead code in the image. The body
+        # needs no save of its own: the target's `init:` store (or the
+        # prologue's) has already narrowed it out, and a name the body stores
+        # is a name the flag SETS, through the same hook. The x86-64 twin of
+        # arm64's, over the same `self._mub` state.
+        saved_mub = set(self._mub) if self._lb_flags else None
+
         self._loops.append({"start": start_label, "step": step_label,
                             "break": end_label,
                             "fin_depth": len(self._pending_finally)})
@@ -3573,6 +3766,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 self._emit_jmp(start_label)
 
             self.asm.label(false_label)
+            if saved_mub is not None:
+                self._mub = saved_mub
             for s in (else_body or []):
                 self._emit_stmt(s)
             self.asm.label(end_label)
@@ -3705,6 +3900,25 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             f"a comprehension in {self.func_name or '<module>'}", element,
             cap, bytes_))
 
+    def _emit_relocated_blob_base(self, res_offset: int, array_off: int,
+                                  slot_size: int) -> None:
+        """R11 = slot i of the element array, where i is the result's count.
+
+        The x86-64 twin of arm64's `_emit_relocated_list_base` over the same
+        arithmetic: the slot is `array_off + i * slot_size` and i is the
+        result blob's count word — the number of elements appended so far —
+        read into R10 from `res_offset`, because the element is built before
+        the append that increments it. The size goes through RDI and the
+        caller's count store overwrites R10 next, so the sequence touches
+        only R10, R11 and RDI besides computing R11.
+        """
+        self._emit_blob_base(res_offset, Reg.R11)
+        self.asm.emit(encode_mov_r64_rm64(Reg.R10, Reg.R11, 0))
+        self._emit_blob_base(array_off, Reg.R11)
+        self._emit_mov_imm(Reg.RDI, slot_size)
+        self.asm.emit(encode_imul_r64_r64(Reg.R10, Reg.RDI))
+        self.asm.emit(encode_add_r64_r64(Reg.R11, Reg.R10))
+
     def _materialize_compr_element(self, element, res_offset: int, cap: int,
                                    before: int) -> None:
         """Give the element its OWN container per iteration, or refuse.
@@ -3743,6 +3957,14 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         elif M.comprehension_result_is_flat(element) \
                 and self._last_compr_result_size > 0:
             blob_size = self._last_compr_result_size
+        elif M.comprehension_element_is_relocatable(element):
+            # A container literal that holds containers of its own (a list of
+            # lists among them): each such container reserved its OWN
+            # per-iteration array at the element's own site (see
+            # `_emit_relocated_blob_base`), and the element's emission left
+            # RAX on the slot this iteration owns, so the append appends it
+            # as-is and nothing here moves.
+            return
         else:
             raise CodegenError(M.comprehension_element_blob_refusal(
                 f"a comprehension in {self.func_name or '<module>'}", element,
@@ -4028,6 +4250,25 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             flat.append(el)
         n = len(flat)
         cap = max(n, self._list_caps.get(id(expr), n))
+        if self._compr_reloc:
+            # The per-iteration base in place of a fixed blob: the same slot
+            # arithmetic arm64's `_emit_list` emits, recomputed after every
+            # element emission the way the fixed path recomputes after one.
+            res_offset, slots = self._compr_reloc[-1]
+            size = 8 * (1 + cap)
+            array_off = self._reserve_blob(slots * size,
+                                           "comprehension element array")
+            self._materialised[id(expr)] = (array_off, size)
+            self._emit_relocated_blob_base(res_offset, array_off, size)
+            self._emit_mov_imm(Reg.R10, n)
+            self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
+            for i, el in enumerate(flat):
+                self._emit_expr(el)
+                self._emit_relocated_blob_base(res_offset, array_off, size)
+                self.asm.emit(encode_mov_rm64_r64(Reg.R11, 8 * (i + 1), Reg.RAX))
+            self._emit_relocated_blob_base(res_offset, array_off, size)
+            self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R11))
+            return
         offset = self._reserve_blob(8 * (1 + cap), "a list literal")
         self._materialised[id(expr)] = (offset, 8 * (1 + cap))
         self._emit_blob_base(offset, Reg.R11)
@@ -4633,9 +4874,287 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         sep, end, flush = self._print_kwargs(e)
         frags, operands = self._print_call(list(e.args))
         fmt = M.print_format(frags, sep, end)
+        n_floats = sum(1 for o in operands if isinstance(o, M.FloatPrintOperand))
+        if n_floats:
+            self.asm.emit(encode_sub_r64_imm32(Reg.RSP, 64 * n_floats))
         self._emit_call(_call("printf", [F.StringLiteral(fmt)] + operands))
         if flush:
             self._emit_call(_call("fflush", [F.IntLiteral(0)]))
+        if n_floats:
+            self.asm.emit(encode_add_r64_imm32(Reg.RSP, 64 * n_floats))
+
+    # ── `print` of a float: the x86-64 half ──────────────────────────
+
+    def _emit_float_print_operand(self, fp) -> None:
+        """The `FloatPrintOperand` arm: the value's bits to the helper, the
+        helper's buffer back as the `%s`'s argument.
+
+        SysV: RDI=bits, RSI=buffer; returns RAX=buffer (out).
+        The buffer is the 64-byte slot in the block `_emit_print` reserved.
+        Each earlier printf arg spills one 16-byte `_push_slot`, so the
+        offset is `16*(1+position) + 64*index` from the current RSP.
+        """
+        self._emit_expr(fp.expr)
+        imm = 16 * (1 + fp.position) + 64 * fp.index
+        self.asm.emit(encode_lea_r64_rm64(Reg.RSI, Reg.RSP, imm))
+        self.asm.emit(encode_mov_r64_r64(Reg.RDI, Reg.RAX))
+        self.asm.emit(encode_call_rel32(0))
+        self.asm.emit_label_rel32(M.FLOAT_REPR_SYMBOL, here_offset=-4)
+
+    def _emit_float_repr_helper(self) -> None:
+        """Emit the `FLOAT_REPR_SYMBOL` helper, once, after the function bodies.
+        `char *f(double_bits RDI, char *out RSI) -> RAX=out`.
+        """
+        from formal.x86_64 import (
+            encode_push_r64, encode_pop_r64, encode_ret,
+            encode_mov_r64_r64, encode_mov_r64_rm64, encode_mov_rm64_r64,
+            encode_mov_r64_imm32, encode_lea_r64_rm64,
+            encode_sub_r64_imm32, encode_add_r64_imm32,
+            encode_shift_r64_imm8, encode_and_r64_imm32,
+            encode_cmp_r64_imm32, encode_cmp_r64_r64,
+            encode_jcc_rel32, encode_jmp_rel32,
+            encode_neg_r64, encode_xor_r64_r64, encode_test_r64_r64,
+            encode_imul_r64_r64,
+            encode_movzx_r64_rm8, encode_movzx_r64_rm8_idx,
+            encode_mov_rm8_r8, encode_mov_rm8_r8_idx,
+            encode_movq_r64_xmm, encode_or_r64_imm32,
+            encode_lea_r64_rip,
+        )
+        from formal.x86_64 import Reg
+        RAX, RCX, RDX, RSI, RDI = (Reg.RAX, Reg.RCX, Reg.RDX, Reg.RSI, Reg.RDI)
+        R8, R9, R10, R11, R12 = (Reg.R8, Reg.R9, Reg.R10, Reg.R11, Reg.R12)
+        RBP = Reg.RBP
+        a = self.asm
+        _CC = {"jb": 0x2, "jae": 0x3, "je": 0x4, "jz": 0x4,
+               "jne": 0x5, "jnz": 0x5, "ja": 0x7, "jl": 0xC,
+               "jge": 0xD, "jle": 0xE, "jg": 0xF, "js": 0x8}
+        def shr64(r, n): a.emit(encode_shift_r64_imm8(">>", r, n))
+        def shl64(r, n): a.emit(encode_shift_r64_imm8("<<", r, n))
+        def m64(d, s): a.emit(encode_mov_r64_r64(d, s))
+        def mm64(r, b, o): a.emit(encode_mov_r64_rm64(r, b, o))
+        def mmr64(b, o, s): a.emit(encode_mov_rm64_r64(b, o, s))
+        def lea64(d, b, o): a.emit(encode_lea_r64_rm64(d, b, o))
+        def si(r, v): a.emit(encode_sub_r64_imm32(r, v))
+        def ai(r, v): a.emit(encode_add_r64_imm32(r, v))
+        def mi(r, v): a.emit(encode_mov_r64_imm32(r, v))
+        def cpi(r, v): a.emit(encode_cmp_r64_imm32(r, v))
+        def cpr(x, y): a.emit(encode_cmp_r64_r64(x, y))
+        def jc(c, l): a.emit(encode_jcc_rel32(_CC[c], 0)); a.emit_label_rel32(l, -4)
+        def jp(l): a.emit(encode_jmp_rel32(0)); a.emit_label_rel32(l, -4)
+        def t64(x, y): a.emit(encode_test_r64_r64(x, y))
+        def x64(x, y): a.emit(encode_xor_r64_r64(x, y))
+        def neg64(r): a.emit(encode_neg_r64(r))
+        def mvz(d, b, o): a.emit(encode_movzx_r64_rm8(d, b, o))
+        def mvbi(d, b, s): a.emit(encode_mov_rm8_r8_idx(d, b, s))
+        def mvzbi(d, b, i): a.emit(encode_movzx_r64_rm8_idx(d, b, i))
+        def mvb(d, o, s): a.emit(encode_mov_rm8_r8(d, o, s))
+        def lea_rip(d, lbl):
+            a.emit(encode_lea_r64_rip(d, 0))
+            a.emit_label_rip(lbl, here_offset=-4)
+        def subrr(d, s): a.emit(encode_sub_r64_r64(d, s))
+        def addrr(d, s): a.emit(encode_mov_r64_r64(d, d))
+
+        a.label(M.FLOAT_REPR_SYMBOL)
+        # prologue
+        a.emit(encode_push_r64(RBP))
+        m64(RBP, Reg.RSP)
+        a.emit(encode_push_r64(R12))
+        si(Reg.RSP, 104)
+        mmr64(RBP, -24, RDI)
+        mmr64(RBP, -32, RSI)
+        m64(RAX, RDI); shr64(RAX, 63)
+        mmr64(RBP, -16, RAX)
+        m64(R12, RAX)
+        m64(RAX, RDI); m64(RCX, R12); shl64(RCX, 63)
+        x64(RAX, RCX)
+        mmr64(RBP, -40, RAX)
+        m64(R11, RAX)
+        # specials
+        m64(RAX, R11); shr64(RAX, 52)
+        cpi(RAX, 0x7FF)
+        jc("jb", "fr_zero_or_general")
+        m64(RCX, R11); m64(RDX, R11)
+        shr64(RDX, 52); shl64(RDX, 52)
+        x64(RCX, RDX)
+        t64(RCX, RCX)
+        jc("jz", "fr_inf")
+        lea_rip(RSI, self._intern_string("nan"))
+        jp("fr_copy")
+        a.label("fr_zero_or_general")
+        cpi(R11, 0)
+        jc("jz", "fr_zero")
+        jp("fr_general")
+        a.label("fr_inf")
+        t64(R12, R12)
+        jc("jz", "fr_inf_pos")
+        lea_rip(RSI, self._intern_string("-inf"))
+        jp("fr_copy")
+        a.label("fr_inf_pos")
+        lea_rip(RSI, self._intern_string("inf"))
+        jp("fr_copy")
+        a.label("fr_zero")
+        t64(R12, R12)
+        jc("jz", "fr_zero_pos")
+        lea_rip(RSI, self._intern_string("-0.0"))
+        jp("fr_copy")
+        a.label("fr_zero_pos")
+        lea_rip(RSI, self._intern_string("0.0"))
+        a.label("fr_copy")
+        mm64(RDI, RBP, -32)
+        a.label("fr_copy1")
+        mvz(RAX, RSI, 0)
+        mvb(RDI, 0, RAX)
+        t64(RAX, RAX)
+        jc("jz", "fr_ret")
+        ai(RDI, 1); ai(RSI, 1)
+        jp("fr_copy1")
+        a.label("fr_ret")
+        mm64(RAX, RBP, -32)
+        ai(Reg.RSP, 104)
+        a.emit(encode_pop_r64(R12))
+        a.emit(encode_pop_r64(RBP))
+        a.emit(encode_ret())
+
+        # scan: n = 1..17
+        a.label("fr_general")
+        mi(R12, 1)
+        a.label("fr_scan")
+        lea64(RDI, RBP, -96)
+        mi(RSI, 32)
+        mm64(RDX, RBP, -40)     # a_bits → RDX
+        # Load a_bits into XMM0 as a double (movq xmm0, rdx) BEFORE the format
+        # takes RDX — the SysV snprintf hands the double in XMM0 and the format
+        # in RDX, and loading the format first left RDX = the raw bits, so
+        # snprintf dereferenced them and died (the 5-row x86-64 segfault).
+        a.emit(encode_movq_xmm_rm64(0, RDX))
+        lea_rip(RDX, self._intern_string("%.*g"))
+        m64(RCX, R12)           # n → RCX (4th int arg)
+        mi(RAX, 1)              # 1 XMM register used
+        self._emit_extern_call("snprintf")
+        lea64(RDI, RBP, -96)
+        lea64(RSI, RBP, -48)
+        self._emit_extern_call("strtod")
+        a.emit(encode_movq_r64_xmm(RAX, 0))
+        mm64(RCX, RBP, -40)
+        cpr(RAX, RCX)
+        jc("je", "fr_found")
+        ai(R12, 1)
+        cpi(R12, 18)
+        jc("jne", "fr_scan")
+
+        # parse: collect digits, q, p, n_dot_before, has_e, E10, sign_e
+        # R8=cursor, R9=c, R10=buf, R11=digits, RCX=n_sig, RDX=q,
+        # RSI=p, RDI=n_dot_before/sign_e, RAX=E10, [rbp-56]=has_e
+        a.label("fr_found")
+        lea64(R10, RBP, -96)
+        lea64(R11, RBP, -64)
+        m64(R8, R10)
+        mi(RAX, 0)  # E10
+        mi(RCX, 0)  # n_sig
+        mi(RDX, 0)  # q
+        mi(RSI, 0)  # p
+        mi(RDI, 0)  # n_dot_before / sign_e
+        mi(R9, 0)   # has_e
+        a.label("fr_parse")
+        mvz(R9, R8, 0)
+        t64(R9, R9)
+        jc("jz", "fr_parse_done")
+        cpi(R9, 0x65)
+        jc("je", "fr_set_e")
+        cpi(R9, 0x2E)
+        jc("je", "fr_set_dot")
+        cpi(R9, 0x30)
+        jc("jb", "fr_pnxt")
+        cpi(R9, 0x39)
+        jc("ja", "fr_pnxt")
+        t64(RDX, RDX)
+        jc("jz", "fr_inc_dot")
+        a.label("fr_sig_test")
+        cpi(R9, 0x30)
+        jc("jne", "fr_store")
+        t64(RCX, RCX)
+        jc("jz", "fr_pnxt")
+        a.label("fr_store")
+        t64(RCX, RCX)
+        jc("jz", "fr_set_p")
+        mvbi(R11, RCX, R9)
+        ai(RCX, 1)
+        jp("fr_pnxt")
+        a.label("fr_set_p")
+        m64(RDX, R8); subrr(RDX, R10)
+        m64(RSI, RDX)
+        mvbi(R11, RCX, R9)
+        ai(RCX, 1)
+        jp("fr_pnxt")
+        a.label("fr_inc_dot")
+        ai(RDI, 1)
+        jp("fr_sig_test")
+        a.label("fr_set_e")
+        mi(RDX, 1)
+        mmr64(RBP, -56, RDX)
+        jp("fr_pnxt")
+        a.label("fr_set_dot")
+        t64(RDX, RDX)
+        jc("jz", "fr_set_q")
+        jp("fr_pnxt")
+        a.label("fr_set_q")
+        m64(RDX, R8); subrr(RDX, R10)
+        jp("fr_pnxt")
+        a.label("fr_pnxt")
+        ai(R8, 1)
+        jp("fr_parse")
+
+        # layout
+        # Simplified layout: copy the snprintf buffer to out, with sign
+        # prepended and ".0" appended if the buffer has no dot or 'e'.
+        a.label("fr_parse_done")
+        mm64(RSI, RBP, -32)   # cursor = out
+        mm64(R12, RBP, -16)   # sign
+        # Write sign
+        t64(R12, R12)
+        jc("jz", "L_nosign")
+        mi(RDX, 0x2D)
+        mvb(RSI, 0, RDX)
+        ai(RSI, 1)
+        a.label("L_nosign")
+        # Copy snprintf buffer to out
+        lea64(RDI, RBP, -96)  # buf
+        a.label("L_cpy")
+        mvz(RAX, RDI, 0)
+        mvb(RSI, 0, RAX)
+        ai(RDI, 1)
+        ai(RSI, 1)
+        t64(RAX, RAX)
+        jc("jz", "L_after")
+        jp("L_cpy")
+        a.label("L_after")
+        # Check if buffer has '.' or 'e': scan the buffer
+        lea64(RDI, RBP, -96)
+        a.label("L_chk")
+        mvz(RAX, RDI, 0)
+        t64(RAX, RAX)
+        jc("jz", "L_nul")
+        cpi(RAX, 0x2E)
+        jc("je", "L_nul")
+        cpi(RAX, 0x65)
+        jc("je", "L_nul")
+        cpi(RAX, 0x2D)
+        jc("je", "L_chk")  # '-' might be in "1e-04"
+        ai(RDI, 1)
+        jp("L_chk")
+        a.label("L_nul")
+        # No '.' or 'e' found: add ".0"
+        mi(RDX, 0x2E)
+        mvb(RSI, 0, RDX)
+        ai(RSI, 1)
+        mi(RDX, 0x30)
+        mvb(RSI, 0, RDX)
+        ai(RSI, 1)
+        mi(RAX, 0)
+        mvb(RSI, 0, RAX)
+        jp("fr_ret")
+
+        jp("fr_ret")
 
     def _emit_debug_assert(self, e) -> None:
         """`debug_assert(cond, *messages)` — evaluate `cond`, and on falsy exit.
@@ -7277,6 +7796,12 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._emit_mov_imm(Reg.RAX, 0)
             self._store_var(fi_name, Reg.RAX)
 
+            # The `_emit_loop` twin: the body runs only past the count test,
+            # where the per-element store has already bound the target (and
+            # set its flag through the same hook), so the pre-loop state is
+            # the one the false path and the join after the loop carry.
+            saved_mub = set(self._mub) if self._lb_flags else None
+
             self._loops.append({"start": start_label, "step": step_label,
                                 "break": end_label,
                                 "fin_depth": len(self._pending_finally)})
@@ -7338,6 +7863,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 self._emit_jmp(start_label)
 
                 self.asm.label(false_label)
+                if saved_mub is not None:
+                    self._mub = saved_mub
                 for s in (else_body or []):
                     self._emit_stmt(s)
                 self.asm.label(end_label)
@@ -7372,6 +7899,31 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # word holds only `pairs_written`. arm64's `_emit_dict` has the same
         # arrangement and the same reason (`model.dict_store_capacity`).
         reserved = self._dict_caps.get(id(expr), n)
+        if self._compr_reloc:
+            # The per-iteration base for a dict pair literal in a relocated
+            # element: the same slot as the list path, over the pair blob.
+            res_offset, slots = self._compr_reloc[-1]
+            size = 8 + 16 * reserved
+            array_off = self._reserve_blob(slots * size,
+                                           "comprehension element array")
+            self._materialised[id(expr)] = (array_off, size)
+            self._emit_relocated_blob_base(res_offset, array_off, size)
+            self._emit_mov_imm(Reg.R10, n)
+            self.asm.emit(encode_mov_rm64_r64(Reg.R11, 0, Reg.R10))
+            for i, (k, v) in enumerate(pairs):
+                self._emit_expr(k)
+                self._emit_relocated_blob_base(res_offset, array_off, size)
+                self.asm.emit(encode_mov_rm64_r64(Reg.R11, 8 + 16 * i, Reg.RAX))
+                if v is not None:
+                    self._emit_expr(v)
+                else:
+                    self._emit_mov_imm(Reg.RAX, 0)
+                self._emit_relocated_blob_base(res_offset, array_off, size)
+                self.asm.emit(encode_mov_rm64_r64(Reg.R11, 16 + 16 * i,
+                                                  Reg.RAX))
+            self._emit_relocated_blob_base(res_offset, array_off, size)
+            self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R11))
+            return
         offset = self._reserve_blob(8 + 16 * reserved, "a dict literal")
         self._materialised[id(expr)] = (offset, 8 + 16 * reserved)
         self._emit_blob_base(offset, Reg.R11)
@@ -7737,6 +8289,9 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # — is the code a method call has always run on this backend too.
         if isinstance(expr, (M.CtorReceiver, M.CtorField)):
             self._emit_ctor_receiver(expr)
+            return
+        if isinstance(expr, M.FloatPrintOperand):
+            self._emit_float_print_operand(expr)
             return
         if isinstance(expr, F.IntLiteral):
             self._emit_mov_imm(Reg.RAX, expr.value)
@@ -8593,6 +9148,57 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 self.asm.emit(encode_setp(Reg.RCX))
                 self.asm.emit(encode_or_r8_r8(Reg.RAX, Reg.RCX))
         self.asm.emit(encode_movzx_r64_r8(Reg.RAX, Reg.RAX))
+
+    def _emit_float_to_int_range_trap(self) -> None:
+        """Trap if the double in XMM0 does not fit in an `Int64` after truncation.
+
+        The run-time twin of the build's `float_to_int_refusal`, and the
+        instruction-level twin of arm64's `_emit_float_to_int_range_trap`: the
+        same two constants (`model.FLOAT_TO_INT_HI` / `FLOAT_TO_INT_LO`), the
+        same inequality, and the same status as the integer overflow trap, so
+        a reader who has seen an overflow stop does not learn a second way a
+        program with no answer leaves. The caller has already moved the word
+        into XMM0 (the CVTTSD2SI that follows does the same thing), so the
+        tests compare against the constants in XMM1; R11 carries each
+        constant's bits there. Nothing is preserved: no call happens in the
+        sequence, and the only live value at this point in the type-constructor
+        path is the double being converted.
+
+        **Both tests read `jae` (CF=0) in a form an UNORDERED compare cannot
+        set.** UCOMISD leaves a NaN at `CF=ZF=PF=1`, and `jae` is taken only
+        on CF=0, so a NaN falls through to CVTTSD2SI and gets the saturation
+        `model.float_int_conversion_note` records rather than a trap — the one
+        input CPython raises ValueError for and the range test cannot take. The upper test is the straight `x >= 2^63` CPython's
+        OverflowError is: `UCOMISD x, HI ; JAE`. The lower test — `x <= LO`,
+        LO being `-2^63 - 2048`, the largest double whose truncation does not
+        fit below the range — is written with the operand order reversed,
+        `UCOMISD LO, x ; JAE`, which reads `LO >= x`; the forward spelling has
+        no NaN-safe flag form, because `x < LO` and the unordered case both
+        leave CF=1.
+        """
+        self._if_counter += 1
+        sid = self._if_counter
+        fn = self.func_name
+        trap = f"{fn}_dovf{sid}_t"
+        ok = f"{fn}_dovf{sid}_k"
+        self._emit_mov_imm(Reg.R11, M.float_literal_bits(M.FLOAT_TO_INT_HI))
+        self.asm.emit(encode_movq_xmm_rm64(1, Reg.R11))
+        self.asm.emit(encode_ucomisd_xmm(0, 1))
+        self._record_cond_branch()
+        self._emit_jcc(COND_AE, trap)
+        self._emit_mov_imm(Reg.R11, M.float_literal_bits(M.FLOAT_TO_INT_LO))
+        self.asm.emit(encode_movq_xmm_rm64(1, Reg.R11))
+        self.asm.emit(encode_ucomisd_xmm(1, 0))
+        self._record_cond_branch()
+        self._emit_jcc(COND_AE, trap)
+        # In range: skip the block — without it an in-range value falls into
+        # the trap, which is how the first measurement of the arm64 twin
+        # answered `OverflowError` for 3.9.
+        self._emit_jmp(ok)
+        self.asm.label(trap)
+        self._emit_stop_diagnostic(M.float_to_int_trap_message())
+        self._emit_call_exit(M.INT_OVERFLOW_TRAP_STATUS)
+        self.asm.label(ok)
 
     def _emit_cmp(self, l, r, unsigned_mnem: str, signed_mnem: str) -> None:
         """l <op> r as 0/1 in RAX, at the signedness of the operands' type."""
@@ -10022,7 +10628,22 @@ preference.
                                              self._list_cursor - _before)
                 self._compr_append_pair(res_offset, cap)
             else:
-                self._emit_expr(expr.element)
+                # An element the relocation accepts builds each container it
+                # opens in the slot its own iteration owns (see
+                # `_emit_relocated_blob_base`): the context tells the literal
+                # emitters that this element is that shape, and the decision
+                # is `model.comprehension_element_is_relocatable`'s so both
+                # backends relocate the same elements.
+                reloc = (cap > 1
+                         and M.comprehension_element_is_relocatable(
+                             expr.element))
+                if reloc:
+                    self._compr_reloc.append((res_offset, cap))
+                try:
+                    self._emit_expr(expr.element)
+                finally:
+                    if reloc:
+                        self._compr_reloc.pop()
                 self._materialize_compr_element(
                     expr.element, res_offset, cap, _before)
                 self._compr_append_elem(res_offset, cap)
@@ -12155,7 +12776,7 @@ ctor_field_value=self._ctor_field_value_for(name),
                     f"({[k for k, _ in e.kwargs]})")
             return list(e.args or []), []
         slots, dropped, err = M.bind_call_arguments(
-            name, fdef, e.args, e.kwargs)
+            name, fdef, e.args, e.kwargs, self._spread_mappings)
         if err is not None:
             raise CodegenError(err)
         return slots, dropped
@@ -12258,7 +12879,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         if operands and kind in (M.FLOAT_FROM_INT, M.FLOAT_TO_INT, "int"):
             direction, why = M.float_conversion_lowering(
                 name, self._expr_str_kind(operands[0]),
-                f"{name}({M.spelled(operands[0])})")
+                f"{name}({M.spelled(operands[0])})",
+                value=M.float_literal_value(operands[0]))
             if why is not None:
                 raise CodegenError(why)
             if direction is not None:
@@ -12319,12 +12941,15 @@ ctor_field_value=self._ctor_field_value_for(name),
             # The `T` matters: `CVTSD2SI` consults MXCSR's rounding mode, which
             # this backend cannot read or write, so it is the only form whose
             # answer does not depend on state nothing here can see.  A plain
-            # `MOV` of the bits would be the exponent field as an integer;
-            # `model.float_int_conversion_note` records the one input where this
-            # differs from CPython — a NaN or an infinity, where the hardware
-            # saturates and CPython raises — and why no static check can tell
-            # them apart.
+            # `MOV` of the bits would be the exponent field as an integer.
+            # The range the truncation must fit is checked BEFORE the
+            # conversion — `_emit_float_to_int_range_trap` stops with
+            # `INT_OVERFLOW_TRAP_STATUS` where CPython raises `OverflowError`,
+            # and the build already refused the literals for the same reason;
+            # `model.float_int_conversion_note` records the one input the
+            # check cannot take (a NaN) and what happens to it.
             self.asm.emit(encode_movq_xmm_rm64(0, Reg.RAX))
+            self._emit_float_to_int_range_trap()
             self.asm.emit(encode_cvttsd2si_r64_xmm(Reg.RAX, 0))
             info = M.INT_TYPE_CTORS[name]
         width, signed = info

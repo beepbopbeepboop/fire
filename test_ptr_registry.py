@@ -747,7 +747,7 @@ static void test_dict_container_keys(void) {
  * Measured on the self-hosted compiler's own AST walk: `type(node)` over a
  * plain `str` field of a node returned the bytes of "print"
  * (0x746e697270) and `_WALK_DATACLASS_CACHE.get(...)` SIGSEGVed
- * (bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md).
+ * (the stage2 empty-dump bug (its doc was deleted with the fix)).
  *
  * A tag is 31 bits by construction (`_struct_type_id` is
  * `h * 31 + c & 2147483647`), so this group pins the shape directly: a real

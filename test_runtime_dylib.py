@@ -345,7 +345,7 @@ def test_export_table_entries_are_all_real_definitions():
     tbl = Table.in_dll(lib, '__mojo_reflect')
     check(tbl.magic == 0x4D4F4A4F, 'the dylib exports a real __mojo_reflect table',
           hex(tbl.magic))
-    exported = bsd._defined_symbols(bsd.find_gcc(), path)
+    exported = bsd._defined_symbols(bsd.find_gcc(), path, include_weak=True)
     n = orphans = nulls = 0
     for i in range(tbl.n):
         s = tbl.syms[i]
@@ -386,7 +386,7 @@ def test_every_defined_entry_point_is_advertised():
     unadvertised — does not move at all."""
     arch = bsd.normalize_arch()
     path = runtime_for(arch)
-    defined = bsd._defined_symbols(bsd.find_gcc(), path)
+    defined = bsd._defined_symbols(bsd.find_gcc(), path, include_weak=True)
     lib = ctypes.CDLL(path)
 
     class Sym(ctypes.Structure):
@@ -438,7 +438,7 @@ def test_export_table_is_the_intersection_and_says_why():
     # for exactly the difference.
     defined = set()
     for o in objs:
-        defined |= bsd._defined_symbols(bsd.find_gcc(), o)
+        defined |= bsd._defined_symbols(bsd.find_gcc(), o, include_weak=True)
     header_names = set()
     for hdr in bsd._RUNTIME_HEADERS:
         for e in reflect.collect_runtime_exports_h(os.path.join(RUNTIME, hdr)):
@@ -481,7 +481,7 @@ def test_word_shaped_surface_is_reachable_by_its_documented_name():
     pass while the rest is broken."""
     arch = bsd.normalize_arch()
     path = runtime_for(arch)
-    exported = bsd._defined_symbols(bsd.find_gcc(), path)
+    exported = bsd._defined_symbols(bsd.find_gcc(), path, include_weak=True)
     word = ('void', 'int', 'int64_t', 'uint64_t', 'double', 'char *', 'void *',
             '_Bool', 'size_t')
     checked = missing = 0
@@ -598,7 +598,7 @@ def test_no_declaration_without_a_definition():
     arch = bsd.normalize_arch()
     defined = set()
     for o in objects_for(arch):
-        defined |= bsd._defined_symbols(bsd.find_gcc(), o)
+        defined |= bsd._defined_symbols(bsd.find_gcc(), o, include_weak=True)
     declared = set()
     for hdr in bsd._RUNTIME_HEADERS:
         for e in reflect.collect_runtime_exports_h(os.path.join(RUNTIME, hdr)):
@@ -1133,7 +1133,7 @@ def test_no_unit_namespace_catches_a_runtime_symbol():
     # headers declare: the probe matches against generated C, which can name
     # either.
     for o in objects_for(arch):
-        runtime_syms |= set(s.lstrip('_') for s in bsd._defined_symbols(bsd.find_gcc(), o))
+        runtime_syms |= set(s.lstrip('_') for s in bsd._defined_symbols(bsd.find_gcc(), o, include_weak=True))
     for u in _OPTIONAL_UNITS:
         ns, _syms = _unit_namespace(u)
         caught = sorted(s for s in runtime_syms if s.startswith(ns))
@@ -1171,7 +1171,7 @@ def test_declared_symbols_are_real_definitions_where_the_unit_compiles():
                       f"unchecked — {why}")
                 continue
             defined = set(s.lstrip('_')
-                          for s in bsd._defined_symbols(cc, o))
+                          for s in bsd._defined_symbols(cc, o, include_weak=True))
             missing = sorted(s for s in syms if s not in defined)
             check(not missing,
                   f'{u}: every one of the {len(syms)} symbols its header declares '

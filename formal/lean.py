@@ -266,7 +266,7 @@ LIBRARY_WALL_S = 1800.0
 LIBRARY_CPU_S = 1800.0
 # Lean's own bounds.  `-M` is Lean's own memory ceiling and it is NOT the
 # project's 4 GB line: that line is a DEBT standard for what a job should cost
-# (`bugs/PERF_memory_over_4gb_is_a_bug.md`), and enforcing it by capping Lean is
+# (`doc/POLICY_memory_over_4gb.md`), and enforcing it by capping Lean is
 # not paying the debt, it is breaking the build — measured, not assumed: with
 # `-M 4096` the `lib/ProofLib.lean` build fails at line 3808 with "(kernel)
 # excessive memory consumption detected" and peaks at 7.8 GB, so a 4 GB ceiling

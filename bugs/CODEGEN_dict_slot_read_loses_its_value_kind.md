@@ -1,8 +1,10 @@
 # A dict READ never carries the slot's kind, so `d['k']` cannot say `None`, `True` or `1.5`
 
-## Status: the RENDER half is FIXED (the `.items()` / `.values()` half by
-## `work/bugs6-1`, the pair half by `work/bugs7-1`); the SUBSCRIPT read
-## `d['k']` is what is left
+## Status: PARTIAL — root-cause runtime accessors (`mojo_dict_slot_kind`,
+## `mojo_dict_repr_slot`) added in `runtime/fire_runtime.c` + header;
+## regression `test_dict_slot_read_regression.py` passes (compile/link).
+## Still open: codegen temp-tracking (`d[k]` -> recall `(dict,key)` for
+## `_repr_value`) and missing-key behaviour (`0` vs KeyError). `d['n']` still 0.
 
 Landed, and each item says which half of this doc it was:
 

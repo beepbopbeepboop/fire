@@ -74,6 +74,13 @@ def slot_ctype(elem):
         return 'double'
     if elem == 'char *':
         return 'char *'
+    # Container elements (pair-lists from enumerate/zip, nested lists/dicts)
+    # store their pointer as an int64_t word; the cursor must present them
+    # typed as the container, not as a bare integer.
+    if elem and ('MojoList *' in elem or 'MojoDict *' in elem or
+                 'MojoSet *' in elem or 'MojoBytes *' in elem or
+                 'MojoStr *' in elem or elem.endswith(' *')):
+        return elem
     return 'int64_t'
 
 
@@ -120,8 +127,31 @@ def read_at(gen, rec, idx):
         return vct, gen._new_val(vct, f"(*{_as_str(addr)})")
     _src2 = _as_str(rec['src'])
     _idx2 = _as_str(idx)
-    suf = (gimple_ctypes.TypeLattice.list_suffix(rec['elem'])
-           if rec.get('elem') else 'int')
+    elem = rec.get('elem')
+    suf = (gimple_ctypes.TypeLattice.list_suffix(elem)
+           if elem else 'int')
+    # Container elements (MojoList *, MojoDict *, etc.) store their pointer as
+    # an int64_t word. `mojo_list_get_int` reads the word, and a cast applied
+    # directly to a call result in an assignment RHS is rejected by
+    # gcc -fgimple, so read through a temp: first grab the int word, then cast
+    # the temp (not a call rhs).
+    #
+    # `suf == 'int'` is the guard that keeps the branch honest: it fires
+    # exactly when the per-slot getter reads a WORD. `char *` is a pointer
+    # element that ends in ` *` but is NOT a container — its slots hold the
+    # string pointer itself and `list_suffix` gives it the 'str' getter
+    # (`mojo_list_get_str`), which returns the pointer, not a word. Letting
+    # `endswith(' *')` route it here declared the word temp `int64_t` and
+    # gcc refused the `char *`-into-`int64_t` assignment (measured 2026-10-27
+    # on test/iter/test_next.mojo's `assert_equal(next(it2), "hi")` over
+    # `l2 = ["hi", "hey", "hello"]` — the sweep's only next()-over-a-string-
+    # list; the pre-merge build read it as a plain `char *` via the final
+    # return below). Every container the branch was written for (MojoList *,
+    # MojoDict *, MojoSet *, MojoBytes *, MojoStr *, struct pointers) has
+    # `suf == 'int'`, so this changes nothing for them.
+    if elem and elem.endswith(' *') and suf == 'int':
+        raw = gen._new_val('int64_t', f"mojo_list_get_{suf} ({_src2}, {_idx2})")
+        return elem, gen._new_val(elem, f"({elem}){raw}")
     return vct, gen._new_val(vct, f"mojo_list_get_{suf} ({_src2}, {_idx2})")
 
 

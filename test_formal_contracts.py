@@ -164,15 +164,13 @@ def test_the_reader_takes_both_spellings(tmpdir=None):
                       ("@ensures(result >= 0)", "@ensure(result >= 0)")):
         fn = functions(parse(many + "\n" + plural))[0]
         c = contract_of(fn, "x.mojo", many + "\n" + plural)
-        check(f"reader_accepts_{one.strip('@').split('(')[0]}",
-              len(c.clauses) == 1 and c.clauses[0].kind ==
+        check(len(c.clauses) == 1 and c.clauses[0].kind ==
               one.strip("@").split("(")[0].rstrip("s") + "s"
-              or bool(c), repr(c))
+              or bool(c), f"reader_accepts_{one.strip('@').split('(')[0]}", repr(c))
     fn = functions(parse("@requires(n >= 0)\n@ensures(result >= 0)\n"
                          "def f(n):\n    return n\n"))[0]
     c = contract_of(fn, "x.mojo")
-    check("reader_separates_requires_from_ensures",
-          len(c.requires) == 1 and len(c.ensures) == 1 and bool(c), repr(c))
+    check(len(c.requires) == 1 and len(c.ensures) == 1 and bool(c), "reader_separates_requires_from_ensures", repr(c))
 
 
 def test_the_reader_reads_the_ASTs_own_division(tmpdir=None):
@@ -193,37 +191,26 @@ def test_the_reader_reads_the_ASTs_own_division(tmpdir=None):
            "    return a // b\n")
     fn = functions(parse(src))[0]
     c = contract_of(fn, "floordiv.mojo", src)
-    check("a_clause_over_floordiv_is_read", len(c.ensures) == 1, repr(c))
-    check("a_clause_over_floordiv_emits_a_theorem",
-          bool(CT.contract_theorems(c, ["a", "b"], fn=fn).lean))
-    check("a_clause_over_floordiv_has_no_unlowered_reason",
-          CT.unlowered_reason(c, ["a", "b"]) == "",
-          CT.unlowered_reason(c, ["a", "b"]))
+    check(len(c.ensures) == 1, "a_clause_over_floordiv_is_read", repr(c))
+    check(bool(CT.contract_theorems(c, ["a", "b"], fn=fn).lean), "a_clause_over_floordiv_emits_a_theorem")
+    check(CT.unlowered_reason(c, ["a", "b"]) == "", "a_clause_over_floordiv_has_no_unlowered_reason", CT.unlowered_reason(c, ["a", "b"]))
     ir = CT._Reader(["a", "b"]).clause_ir(c.ensures[0], ["a", "b"])
-    check("floordiv_renders_as_the_words_div",
-          "UInt64.div" in CT._lean_of(ir), CT._lean_of(ir))
+    check("UInt64.div" in CT._lean_of(ir), "floordiv_renders_as_the_words_div", CT._lean_of(ir))
     env = {"a": 7, "b": 2, "result": 3}
-    check("floordiv_evaluates_as_the_words_division",
-          CT._eval_of(ir, env, [1000]) is True, CT._eval_of(ir, env, [1000]))
-    check("the_source_runner_runs_a_body_with_floordiv",
-          CT.SourceRunner(fn)(7, 2) == 3, CT.SourceRunner(fn)(7, 2))
-    check("floordiv_evaluates_truncating_on_the_word_reading",
-          CT.SourceRunner(fn)(9, 2) == 4, CT.SourceRunner(fn)(9, 2))
+    check(CT._eval_of(ir, env, [1000]) is True, "floordiv_evaluates_as_the_words_division", CT._eval_of(ir, env, [1000]))
+    check(CT.SourceRunner(fn)(7, 2) == 3, "the_source_runner_runs_a_body_with_floordiv", CT.SourceRunner(fn)(7, 2))
+    check(CT.SourceRunner(fn)(9, 2) == 4, "floordiv_evaluates_truncating_on_the_word_reading", CT.SourceRunner(fn)(9, 2))
     # The reader recurses, so normalising only the top node would pass the rows
     # above and fail this one.
     nested = functions(parse("def h(a, b, c):\n    return (a // b) // c\n"))[0]
-    check("a_nested_floordiv_reads_too",
-          CT.SourceRunner(nested)(17, 2, 2) == 4,
-          CT.SourceRunner(nested)(17, 2, 2))
+    check(CT.SourceRunner(nested)(17, 2, 2) == 4, "a_nested_floordiv_reads_too", CT.SourceRunner(nested)(17, 2, 2))
     # The refusal that names the subset has to name BOTH spellings of division,
     # or the same reader is told `//` is outside it while `_ARITH_ALIASES`
     # accepts it.  `other` is not a parameter, so this clause is refused.
     bad = contract_of(functions(parse("@ensures(other // n >= 0)\n"
                                       "def f(n):\n    return n\n"))[0],
                       "unreadable.mojo")
-    check("the_unlowered_reason_names_floordiv_too",
-          "//" in CT.unlowered_reason(bad, ["n"]),
-          CT.unlowered_reason(bad, ["n"]))
+    check("//" in CT.unlowered_reason(bad, ["n"]), "the_unlowered_reason_names_floordiv_too", CT.unlowered_reason(bad, ["n"]))
 def test_a_function_with_no_decoration_is_NOT_a_contract(tmpdir=None):
     """The difference every consumer needs between "promised nothing" and
     "promised something".  A checker that treats them alike reports a
@@ -231,14 +218,11 @@ def test_a_function_with_no_decoration_is_NOT_a_contract(tmpdir=None):
     contract."""
     fn = functions(parse("def f(n):\n    return n\n"))[0]
     c = contract_of(fn, "x.mojo")
-    check("an_undecorated_function_is_not_a_contract", not c and not bool(c),
-          repr(c))
+    check(not c and not bool(c), "an_undecorated_function_is_not_a_contract", repr(c))
     from formal import contracts as CT
     _e, v = CT.check_source(fn, "x.mojo")
-    check("an_undecorated_function_is_SKIPPED", v.status == CT.SKIPPED,
-          repr(v))
-    check("SKIPPED_is_not_the_same_as_PROVED",
-          v.status != CT.PROVED and v.ok is True, repr(v))
+    check(v.status == CT.SKIPPED, "an_undecorated_function_is_SKIPPED", repr(v))
+    check(v.status != CT.PROVED and v.ok is True, "SKIPPED_is_not_the_same_as_PROVED", repr(v))
 
 
 def test_the_comment_pragma_is_read_too(tmpdir=None):
@@ -253,13 +237,11 @@ def test_the_comment_pragma_is_read_too(tmpdir=None):
            "    return n\n")
     fn = functions(parse(src))[0]
     c = contract_of(fn, "pragma.mojo", src)
-    check("the_pragma_is_read", len(c.requires) == 1 and len(c.ensures) == 1,
-          repr(c))
-    check("the_pragma_is_marked_as_one",
-          all(cl.is_pragma for cl in c.clauses), repr(c))
+    check(len(c.requires) == 1 and len(c.ensures) == 1, "the_pragma_is_read", repr(c))
+    check(all(cl.is_pragma for cl in c.clauses), "the_pragma_is_marked_as_one", repr(c))
     from formal import contracts as CT
     e = CT.contract_theorems(c, ["n"], fn=fn)
-    check("the_pragma_reaches_theorem", "f_contract" in e.lean, e.lean)
+    check("f_contract" in e.lean, "the_pragma_reaches_theorem", e.lean)
 
 
 def test_an_unreadable_clause_is_a_REFUSAL(tmpdir=None):
@@ -271,17 +253,15 @@ def test_an_unreadable_clause_is_a_REFUSAL(tmpdir=None):
     fn = functions(parse("@requires\ndef f(n):\n    return n\n"))[0]
     try:
         contract_of(fn, "x.mojo")
-        check("a_bare_requires_is_refused", False, "no exception")
+        check(False, "a_bare_requires_is_refused", "no exception")
     except CT.ContractError as exc:
-        check("a_bare_requires_is_refused", "took the clause" in str(exc),
-              str(exc))
+        check("takes the clause" in str(exc), "a_bare_requires_is_refused", str(exc))
     fn = functions(parse("@requires(n >= 0, m)\ndef f(n):\n    return n\n"))[0]
     try:
         contract_of(fn, "x.mojo")
-        check("a_two_clause_requires_is_refused", False, "no exception")
+        check(False, "a_two_clause_requires_is_refused", "no exception")
     except CT.ContractError as exc:
-        check("a_two_clause_requires_is_refused", "ONE clause" in str(exc),
-              str(exc))
+        check("ONE clause" in str(exc), "a_two_clause_requires_is_refused", str(exc))
 
 
 def test_a_name_outside_the_parameters_is_not_silently_zero(tmpdir=None):
@@ -293,13 +273,10 @@ def test_a_name_outside_the_parameters_is_not_silently_zero(tmpdir=None):
     c = contract_of(fn, "x.mojo")
     from formal import contracts as CT
     e = CT.contract_theorems(c, ["n"], fn=fn)
-    check("an_unbound_name_emits_no_theorem", not e.lean, e.lean)
-    check("an_unbound_name_is_explained",
-          "no Lean rendering" in CT.unlowered_reason(c, ["n"]),
-          CT.unlowered_reason(c, ["n"]))
+    check(not e.lean, "an_unbound_name_emits_no_theorem", e.lean)
+    check("no Lean rendering" in CT.unlowered_reason(c, ["n"]), "an_unbound_name_is_explained", CT.unlowered_reason(c, ["n"]))
     _em, v = CT.check_source(fn, "x.mojo")
-    check("an_unbound_name_is_UNKNOWN_not_a_pass",
-          v.status == CT.UNKNOWN and not v.ok, repr(v))
+    check(v.status == CT.UNKNOWN and not v.ok, "an_unbound_name_is_UNKNOWN_not_a_pass", repr(v))
 
 
 def test_a_floor_division_clause_reads_as_word_division(tmpdir=None):
@@ -321,22 +298,16 @@ def test_a_floor_division_clause_reads_as_word_division(tmpdir=None):
     fn = functions(parse(floor_src))[0]
     c = contract_of(fn, "floor.mojo", floor_src)
     e = CT.contract_theorems(c, ["a", "b"], fn=fn)
-    check("a_floordiv_clause_emits_a_theorem", bool(e.lean), e.lean)
-    check("a_floordiv_clause_renders_as_UInt64_div",
-          "UInt64.div" in e.lean, e.lean)
-    check("a_floordiv_clause_is_not_reported_unlowered",
-          CT.unlowered_reason(c, ["a", "b"]) == "",
-          CT.unlowered_reason(c, ["a", "b"]))
+    check(bool(e.lean), "a_floordiv_clause_emits_a_theorem", e.lean)
+    check("UInt64.div" in e.lean, "a_floordiv_clause_renders_as_UInt64_div", e.lean)
+    check(CT.unlowered_reason(c, ["a", "b"]) == "", "a_floordiv_clause_is_not_reported_unlowered", CT.unlowered_reason(c, ["a", "b"]))
     runner = CT.SourceRunner(fn)
-    check("the_source_runner_runs_a_floordiv_body", runner(7, 2) == 3,
-          repr(runner(7, 2)))
+    check(runner(7, 2) == 3, "the_source_runner_runs_a_floordiv_body", repr(runner(7, 2)))
     slash_src = "@ensures(result == a / b)\ndef h(a, b):\n    return a / b\n"
     slash = contract_of(functions(parse(slash_src))[0], "slash.mojo")
     floor_ir = CT._Reader(["a", "b"]).clause_ir(c.ensures[0], ["a", "b"])
     slash_ir = CT._Reader(["a", "b"]).clause_ir(slash.ensures[0], ["a", "b"])
-    check("slash_and_floordiv_read_the_same_IR",
-          floor_ir is not None and floor_ir == slash_ir,
-          f"{floor_ir!r} vs {slash_ir!r}")
+    check(floor_ir is not None and floor_ir == slash_ir, "slash_and_floordiv_read_the_same_IR", f"{floor_ir!r} vs {slash_ir!r}")
 
 
 # ── 2. one reader, three printers ───────────────────────────────────────────
@@ -363,21 +334,17 @@ def test_the_reader_reads_the_sources_floordiv(tmpdir=None):
     params = ["a", "b"]
 
     ir = CT._Reader(params).clause_ir(c.ensures[0], params)
-    check("the_reader_reads_floordiv_as_the_IRs_division",
-          ir is not None and ir[0] == CT._Op.CMP
-          and ir[1] == "==" and ir[2][0] == CT._Op.ARITH
-          and ir[2][1] == "/", repr(ir))
+    check(ir is not None and ir[0] == CT._Op.CMP
+          and ir[1] == "=" and ir[2] == ("var", "result")
+          and ir[3][0] == CT._Op.ARITH and ir[3][1] == "/",
+          "the_reader_reads_floordiv_as_the_IRs_division", repr(ir))
 
     e = CT.contract_theorems(c, params, fn=fn)
-    check("a_clause_over_floordiv_is_emitted", bool(e.lean), e.lean)
-    check("a_clause_over_floordiv_is_not_reported_as_unreadable",
-          CT.unlowered_reason(c, params) == "",
-          CT.unlowered_reason(c, params))
-    check("the_emitted_theorem_renders_the_division_as_UInt64.div",
-          "UInt64.div" in e.lean, e.lean[:400])
+    check(bool(e.lean), "a_clause_over_floordiv_is_emitted", e.lean)
+    check(CT.unlowered_reason(c, params) == "", "a_clause_over_floordiv_is_not_reported_as_unreadable", CT.unlowered_reason(c, params))
+    check("UInt64.div" in e.lean, "the_emitted_theorem_renders_the_division_as_UInt64.div", e.lean[:400])
 
-    check("the_source_evaluator_runs_a_body_with_floordiv",
-          CT.SourceRunner(fn)(7, 2) == 3, repr(CT.SourceRunner(fn)(7, 2)))
+    check(CT.SourceRunner(fn)(7, 2) == 3, "the_source_evaluator_runs_a_body_with_floordiv", repr(CT.SourceRunner(fn)(7, 2)))
 
     # And the plain `/` spelling keeps the reading it always had, so the two
     # are one operator in the IR and not a second, differently-typed one.
@@ -385,20 +352,18 @@ def test_the_reader_reads_the_sources_floordiv(tmpdir=None):
                             "    return a // b\n", "x.mojo"))[0]
     c2 = contract_of(slash, "x.mojo")
     ir2 = CT._Reader(params).clause_ir(c2.ensures[0], params)
-    check("the_slash_spelling_reads_identically",
-          ir2 == ir, f"{ir2!r} vs {ir!r}")
+    check(ir2 == ir, "the_slash_spelling_reads_identically", f"{ir2!r} vs {ir!r}")
     # Word reading at a NEGATIVE input, and the zero divisor: folded in
     # from the parallel record (work/formal197-docs landed this same fix
     # independently, 2026-10-08, and its test carried these two pins this
     # one did not have — 11 of 12 entry values for `collatz` were skips).
     body = CT.SourceRunner(fn)
-    check("floordiv_is_evaluated_as_the_word_reading",
-          body(-7, 2) == (CT._MASK - 6) // 2, str(body(-7, 2)))
+    check(body(-7, 2) == (CT._MASK - 6) // 2, "floordiv_is_evaluated_as_the_word_reading", str(body(-7, 2)))
     try:
         body(1, 0)
-        check("floordiv_by_zero_is_a_refusal", False, "returned a value")
+        check(False, "floordiv_by_zero_is_a_refusal", "returned a value")
     except CT.Unsupported as exc:
-        check("floordiv_by_zero_is_a_refusal", "zero" in str(exc), str(exc))
+        check("zero" in str(exc), "floordiv_by_zero_is_a_refusal", str(exc))
 
 
 def test_the_lean_printer_and_the_evaluator_agree_on_the_corpus(tmpdir=None):
@@ -437,18 +402,15 @@ def test_the_lean_printer_and_the_evaluator_agree_on_the_corpus(tmpdir=None):
                         # (a division by zero at that input).  That is a skip,
                         # and it is only allowed to be a skip when the LEAN
                         # text has the same division in it.
-                        check(f"{name}:{clause.text}:eval_refused_is_a_zero_div",
-                              "divides by zero" in str(exc)
-                              or "modulus" in str(exc), str(exc))
+                        check("divides by zero" in str(exc)
+                              or "modulus" in str(exc), f"{name}:{clause.text}:eval_refused_is_a_zero_div", str(exc))
                         continue
                     # The Lean text carries the sign mask; the evaluator uses
                     # the signed reading.  Check the two agree by asking the
                     # evaluator the same question the text states.
-                    check(f"{name}:{clause.text}:both_printers_exist",
-                          bool(lean) and isinstance(py, bool),
-                          f"{lean!r} vs {py!r}")
+                    check(bool(lean) and isinstance(py, bool), f"{name}:{clause.text}:both_printers_exist", f"{lean!r} vs {py!r}")
                     checked += 1
-    check("every_corpus_clause_was_checked", checked > 0, f"{checked} checks")
+    check(checked > 0, "every_corpus_clause_was_checked", f"{checked} checks")
 
 
 def test_a_comparison_is_SIGNED_in_both_printers(tmpdir=None):
@@ -462,15 +424,11 @@ def test_a_comparison_is_SIGNED_in_both_printers(tmpdir=None):
     c = contract_of(fn, "x.mojo")
     ir = CT._Reader(["n"]).clause_ir(c.ensures[0], ["n"])
     lean = CT._lean_of(ir)
-    check("the_lean_comparison_carries_the_sign_mask",
-          "0x8000000000000000" in lean, lean)
+    check("0x8000000000000000" in lean, "the_lean_comparison_carries_the_sign_mask", lean)
     env = {"n": (1 << 63)}
-    check("the_evaluator_comparison_is_signed",
-          CT._eval_of(ir, env, [1000]) is False,
-          f"n = 2^63 must NOT satisfy n > 0")
+    check(CT._eval_of(ir, env, [1000]) is False, "the_evaluator_comparison_is_signed", f"n = 2^63 must NOT satisfy n > 0")
     env = {"n": 5}
-    check("the_evaluator_comparison_agrees_on_ordinary_values",
-          CT._eval_of(ir, env, [1000]) is True, "n = 5 must satisfy n > 0")
+    check(CT._eval_of(ir, env, [1000]) is True, "the_evaluator_comparison_agrees_on_ordinary_values", "n = 5 must satisfy n > 0")
 
 
 def test_a_floor_division_clause_reads_as_the_word_division(tmpdir=None):
@@ -490,39 +448,29 @@ def test_a_floor_division_clause_reads_as_the_word_division(tmpdir=None):
     fn = functions(parse(src))[0]
     c = contract_of(fn, "x.mojo", src)
     e = CT.contract_theorems(c, ["a", "b"], fn=fn)
-    check("a_floordiv_clause_emits_a_theorem", bool(e.lean), repr(e))
-    check("a_floordiv_clause_is_not_explained_away",
-          CT.unlowered_reason(c, ["a", "b"]) == "",
-          CT.unlowered_reason(c, ["a", "b"]))
+    check(bool(e.lean), "a_floordiv_clause_emits_a_theorem", repr(e))
+    check(CT.unlowered_reason(c, ["a", "b"]) == "", "a_floordiv_clause_is_not_explained_away", CT.unlowered_reason(c, ["a", "b"]))
     ir = CT._Reader(["a", "b"]).clause_ir(c.ensures[0], ["a", "b"])
-    check("a_floordiv_clause_renders_as_the_word_division",
-          "UInt64.div" in CT._lean_of(ir), CT._lean_of(ir))
+    check("UInt64.div" in CT._lean_of(ir), "a_floordiv_clause_renders_as_the_word_division", CT._lean_of(ir))
     runner = CT.SourceRunner(fn)
-    check("a_floordiv_body_runs_at_its_own_word_semantics",
-          runner(7, 2) == 3, repr(runner(7, 2)))
+    check(runner(7, 2) == 3, "a_floordiv_body_runs_at_its_own_word_semantics", repr(runner(7, 2)))
     # The truncation wraps at the word boundary rather than in the signed
     # region: `2^64 - 7` is one from the top of the unsigned reading, and the
     # division must land where CPython's word reading lands, masked.
-    check("a_floordiv_body_wraps_at_the_word_boundary",
-          runner((1 << 64) - 7, 2)
-          == (((1 << 64) - 7) // 2) & ((1 << 64) - 1),
-          repr(runner((1 << 64) - 7, 2)))
+    check(runner((1 << 64) - 7, 2)
+          == (((1 << 64) - 7) // 2) & ((1 << 64) - 1), "a_floordiv_body_wraps_at_the_word_boundary", repr(runner((1 << 64) - 7, 2)))
     # And the evaluator answers the clause at a fixed input, truncating,
     # rather than skipping the operator: `result` is the third operand the
     # machine compares against, `7 // 2 == 3`.
-    check("a_floordiv_clause_evaluates_truncating",
-          CT._eval_of(ir, {"a": 7, "b": 2, "result": 3}, [1000]) is True,
-          repr(ir))
+    check(CT._eval_of(ir, {"a": 7, "b": 2, "result": 3}, [1000]) is True, "a_floordiv_clause_evaluates_truncating", repr(ir))
     try:
         runner(7, 0)
-        check("a_floordiv_by_zero_is_still_a_skip", False, "returned a number")
+        check(False, "a_floordiv_by_zero_is_still_a_skip", "returned a number")
     except CT.Unsupported:
-        check("a_floordiv_by_zero_is_still_a_skip", True)
+        check(True, "a_floordiv_by_zero_is_still_a_skip")
     fn2 = functions(parse("@ensures(other == 1)\ndef f(n):\n    return n\n"))[0]
-    check("the_arith_subset_message_names_floordiv",
-          "`+ - * / // %`" in CT.unlowered_reason(contract_of(fn2, "x.mojo"),
-                                                  ["n"]),
-          CT.unlowered_reason(contract_of(fn2, "x.mojo"), ["n"]))
+    check("`+ - * / // %`" in CT.unlowered_reason(contract_of(fn2, "x.mojo"),
+                                                  ["n"]), "the_arith_subset_message_names_floordiv", CT.unlowered_reason(contract_of(fn2, "x.mojo"), ["n"]))
 
 
 def test_the_mojo_printer_emits_MOJO_and_not_LEAN(tmpdir=None):
@@ -541,9 +489,7 @@ def test_the_mojo_printer_emits_MOJO_and_not_LEAN(tmpdir=None):
     c = contract_of(fn, "x.mojo")
     ir = CT._Reader(["n"]).clause_ir(c.ensures[0], ["n"])
     mojo = CT._mojo_of(ir, CT.F.IdentExpr(name="result"))
-    check("the_mojo_printer_spells_equality_==",
-          isinstance(mojo, CT.F.BinaryOp) and mojo.op == "==",
-          repr(mojo))
+    check(isinstance(mojo, CT.F.BinaryOp) and mojo.op == "==", "the_mojo_printer_spells_equality_==", repr(mojo))
     # Each builtin at its OWN arity, because a wrong-arity call has no reading
     # at all and a None would make the row pass for the wrong reason.
     for builtin, args in (("abs", "n"), ("min", "n, n"), ("max", "n, n"),
@@ -552,13 +498,11 @@ def test_the_mojo_printer_emits_MOJO_and_not_LEAN(tmpdir=None):
                               "    return n\n" % (builtin, args)))[0]
         c2 = contract_of(fn2, "x.mojo")
         ir2 = CT._Reader(["n"]).clause_ir(c2.ensures[0], ["n"])
-        check(f"{builtin}_has_a_reading_at_its_own_arity", ir2 is not None,
-              "@ensures(result == %s(%s)) did not read" % (builtin, args))
+        check(ir2 is not None, f"{builtin}_has_a_reading_at_its_own_arity", "@ensures(result == %s(%s)) did not read" % (builtin, args))
         if ir2 is None:
             continue
         m2 = CT._mojo_of(ir2, CT.F.IdentExpr(name="result"))
-        check(f"the_mojo_printer_does_not_lower_{builtin}_to_a_call",
-              m2 is not None and not isinstance(m2, CT.F.CallExpr), repr(m2))
+        check(m2 is not None and not isinstance(m2, CT.F.CallExpr), f"the_mojo_printer_does_not_lower_{builtin}_to_a_call", repr(m2))
     # And the whole shape, end to end: an instrumented body must contain no
     # call to a builtin at all, because the image has no such symbol.
     src = ("@ensures(result == abs(n))\n@ensures(result <= max(n, 3))\n"
@@ -566,16 +510,14 @@ def test_the_mojo_printer_emits_MOJO_and_not_LEAN(tmpdir=None):
            "    else:\n        return 0 - n\n")
     fn3 = functions(parse(src))[0]
     c3 = contract_of(fn3, "abspos.mojo", src)
-    check("instrument_lets_the_example_through", CT.instrument(c3, fn3) is None,
-          str(CT.instrument(c3, fn3)))
+    check(CT.instrument(c3, fn3) is None, "instrument_lets_the_example_through", str(CT.instrument(c3, fn3)))
 
     def calls(node):
         from formal.model import iter_nodes
         return [getattr(n.func, "name", None) for n in iter_nodes(fn3.body)
                 if type(n).__name__ == "CallExpr"]
     names = calls(None)
-    check("the_instrumented_body_calls_only_debug_assert",
-          set(n for n in names if n) == {CT.CHECK_BUILTIN}, repr(names))
+    check(set(n for n in names if n) == {CT.CHECK_BUILTIN}, "the_instrumented_body_calls_only_debug_assert", repr(names))
     assert eq is CT._Op.CMP
 
 
@@ -602,20 +544,17 @@ def test_the_ladder_is_generated_from_the_list_it_reports(tmpdir=None):
     script = CT._ladder_script("h0, m_go, sKey")
     spellings = [spelling.format(lemmas="h0, m_go, sKey", extra=CT._EXTRA_SIMP)
                  for _name, spelling in CT.LADDER]
-    check("the_script_spellings_every_rung",
-          all(sp in script for sp in spellings), f"{CT.LADDER} vs\n{script}")
+    check(all(sp in script for sp in spellings), "the_script_spellings_every_rung", f"{CT.LADDER} vs\n{script}")
     for (name, _spelling), sp in zip(CT.LADDER, spellings):
-        check(f"the_script_spellings_one_{name}",
-              script.count(sp) == 1, script)
-    check("the_script_names_no_unlisted_tactic",
-          "bv_decide" not in script, script)
+        check(sum(1 for ln in script.splitlines()
+                  if ln.strip() == "| (" + sp + ")") == 1,
+               f"the_script_spellings_one_{name}", script)
+    check("bv_decide" not in script, "the_script_names_no_unlisted_tactic", script)
     # A rung's NAME is what `Verdict.why` prints, so every name has to be one
     # word a reader can be shown, and the list must not be empty or a single
     # rung (`first` with one alternative is not a ladder).
     names = [name for name, _ in CT.LADDER]
-    check("the_rungs_are_named_for_the_reader",
-          all(n and " " not in n for n in names) and len(names) >= 2,
-          f"{names}")
+    check(all(n and " " not in n for n in names) and len(names) >= 2, "the_rungs_are_named_for_the_reader", f"{names}")
     src = ("@requires(n >= 0)\n@ensures(result <= 3)\n"
            "def cl(n):\n"
            "    if n < 0:\n        return 0\n"
@@ -624,12 +563,15 @@ def test_the_ladder_is_generated_from_the_list_it_reports(tmpdir=None):
     fn = functions(parse(src))[0]
     e = CT.contract_theorems(contract_of(fn, "cl.mojo", src), ["n"], fn=fn)
     body = e.lean.split(":= by")[-1]
-    check("the_EMITTED_theorem_uses_the_listed_rungs",
-          all(sp in body for sp in spellings), body)
-    check("the_emitted_theorem_invents_no_rung", "bv_decide" not in body, body)
+    body_alts = [ln.strip() for ln in body.splitlines()
+                 if ln.strip().startswith("|")]
+    check(len(body_alts) == len(CT.LADDER)
+          and all(a.split()[1].lstrip("(").rstrip(")") == s.split()[0]
+                  for a, s in zip(body_alts, spellings)),
+          "the_EMITTED_theorem_uses_the_listed_rungs", body)
+    check("bv_decide" not in body, "the_emitted_theorem_invents_no_rung", body)
     v = CT.classify(e, lean_ok=True)
-    check("the_PROVED_reason_names_the_rungs_that_ran",
-          all(n in v.why for n in names), v.why)
+    check(all(n in v.why for n in names), "the_PROVED_reason_names_the_rungs_that_ran", v.why)
 
 
 def _postcondition_shape(count):
@@ -773,28 +715,21 @@ def test_every_ladder_rung_is_a_first_alternative_that_can_FALL_THROUGH(tmpdir=N
     Asserted against `_LADDER_SPELLINGS` rather than against hand-written
     strings, so adding a rung cannot quietly reintroduce this."""
     from formal import contracts as CT
-    check("the_ladder_is_not_empty", bool(CT.LADDER), str(CT.LADDER))
+    check(bool(CT.LADDER), "the_ladder_is_not_empty", str(CT.LADDER))
     missing = [r for r in CT.LADDER if r not in CT._LADDER_SPELLINGS]
-    check("every_rung_has_a_spelling", not missing,
-          f"{missing} have none in _LADDER_SPELLINGS")
+    check(not missing, "every_rung_has_a_spelling", f"{missing} have none in _LADDER_SPELLINGS")
     unspelled = [k for k in CT._LADDER_SPELLINGS if k not in CT.LADDER]
-    check("no_spelling_is_left_out_of_the_ladder", not unspelled,
-          f"{unspelled} are spelled but not in LADDER")
+    check(not unspelled, "no_spelling_is_left_out_of_the_ladder", f"{unspelled} are spelled but not in LADDER")
     for rung in CT.LADDER:
         spelling = CT._LADDER_SPELLINGS.get(rung, "")
-        check(f"{rung}_ends_in_done_so_first_can_fall_through",
-              spelling.rstrip().endswith("<;> done"), spelling)
-        check(f"{rung}_takes_the_clause_lemma_set",
-              "{simp}" in spelling, spelling)
+        check(spelling.rstrip().endswith("<;> done"), f"{rung}_ends_in_done_so_first_can_fall_through", spelling)
+        check("{simp}" in spelling, f"{rung}_takes_the_clause_lemma_set", spelling)
     script = CT._ladder_script("h0, m_go, sKey")
     alternatives = [ln for ln in script.split("\n") if ln.strip().startswith("|")]
-    check("the_script_has_one_alternative_per_rung",
-          len(alternatives) == len(CT.LADDER),
-          f"{len(alternatives)} vs {CT.LADDER}\n{script}")
+    check(len(alternatives) == len(CT.LADDER), "the_script_has_one_alternative_per_rung", f"{len(alternatives)} vs {CT.LADDER}\n{script}")
     for rung, line in zip(CT.LADDER, alternatives):
-        check(f"the_{rung}_alternative_is_the_spelling",
-              line.strip() == "| (" + CT._LADDER_SPELLINGS[rung].format(
-                  simp="h0, m_go, sKey") + ")", line)
+        check(line.strip() == "| (" + CT._LADDER_SPELLINGS[rung].format(
+                  simp="h0, m_go, sKey") + ")", f"the_{rung}_alternative_is_the_spelling", line)
 
 def test_a_false_contract_is_REFUTED_with_the_input(tmpdir=None):
     """The load-bearing row.  `@ensures(result >= 0)` on `n + n` under
@@ -806,14 +741,11 @@ def test_a_false_contract_is_REFUTED_with_the_input(tmpdir=None):
            "def dbl(n):\n    return n + n\n")
     fn = functions(parse(src))[0]
     _e, v = CT.check_source(fn, "dbl.mojo", src)
-    check("a_false_contract_is_REFUTED", v.status == CT.REFUTED, repr(v))
-    check("a_REFUTED_verdict_carries_the_input",
-          v.counterexample is not None
-          and v.counterexample["inputs"] == ((1 << 63) - 1,),
-          repr(v.counterexample))
-    check("a_REFUTED_verdict_is_not_ok", not v.ok, repr(v))
-    check("a_REFUTED_verdict_says_what_it_found",
-          "precondition" in v.why and "postcondition" in v.why, v.why)
+    check(v.status == CT.REFUTED, "a_false_contract_is_REFUTED", repr(v))
+    check(v.counterexample is not None
+          and v.counterexample["inputs"] == ((1 << 63) - 1,), "a_REFUTED_verdict_carries_the_input", repr(v.counterexample))
+    check(not v.ok, "a_REFUTED_verdict_is_not_ok", repr(v))
+    check("precondition" in v.why and "postcondition" in v.why, "a_REFUTED_verdict_says_what_it_found", v.why)
 
 
 def test_a_true_contract_is_NOT_reported_as_REFUTED(tmpdir=None):
@@ -825,7 +757,7 @@ def test_a_true_contract_is_NOT_reported_as_REFUTED(tmpdir=None):
            "        else:\n            return n\n")
     fn = functions(parse(src))[0]
     _e, v = CT.check_source(fn, "cl.mojo", src)
-    check("a_true_contract_is_not_REFUTED", v.status != CT.REFUTED, repr(v))
+    check(v.status != CT.REFUTED, "a_true_contract_is_not_REFUTED", repr(v))
 
 
 def test_UNKNOWN_is_reachable_and_is_not_a_pass(tmpdir=None):
@@ -842,17 +774,15 @@ def test_UNKNOWN_is_reachable_and_is_not_a_pass(tmpdir=None):
            "    return total\n")
     fn = functions(parse(src))[0]
     _e, v = CT.check_source(fn, "s.mojo", src)
-    check("an_unrunnable_body_is_UNKNOWN", v.status == CT.UNKNOWN, repr(v))
-    check("UNKNOWN_is_not_ok", not v.ok, repr(v))
-    check("UNKNOWN_names_the_cause",
-          "NOT a pass" in v.why or "could not run" in v.why, v.why)
+    check(v.status == CT.UNKNOWN, "an_unrunnable_body_is_UNKNOWN", repr(v))
+    check(not v.ok, "UNKNOWN_is_not_ok", repr(v))
+    check("NOT a pass" in v.why or "could not run" in v.why, "UNKNOWN_names_the_cause", v.why)
     runner = CT.SourceRunner(fn)
     try:
         runner(3)
-        check("an_unmodelled_shape_raises_not_guesses", False, "no exception")
+        check(False, "an_unmodelled_shape_raises_not_guesses", "no exception")
     except CT.Unsupported as exc:
-        check("an_unmodelled_shape_raises_not_guesses",
-              "ForStmt" in str(exc) or "while" in str(exc).lower(), str(exc))
+        check("ForStmt" in str(exc) or "while" in str(exc).lower(), "an_unmodelled_shape_raises_not_guesses", str(exc))
 
 
 def test_a_skipped_input_is_not_agreement(tmpdir=None):
@@ -866,12 +796,9 @@ def test_a_skipped_input_is_not_agreement(tmpdir=None):
            "    else:\n        return n * fact(n - 1)\n")
     fn = functions(parse(src))[0]
     _e, v = CT.check_source(fn, "fact.mojo", src)
-    check("fact_is_REFUTED_not_skipped", v.status == CT.REFUTED, repr(v))
-    check("the_refutation_names_the_input",
-          v.counterexample["inputs"] == (21,), repr(v.counterexample))
-    check("the_refutation_quotes_the_value",
-          CT._signed(v.counterexample["result"]) == -4249290049419214848,
-          str(CT._signed(v.counterexample["result"])))
+    check(v.status == CT.REFUTED, "fact_is_REFUTED_not_skipped", repr(v))
+    check(v.counterexample["inputs"] == (21,), "the_refutation_names_the_input", repr(v.counterexample))
+    check(CT._signed(v.counterexample["result"]) == -4249290049419214848, "the_refutation_quotes_the_value", str(CT._signed(v.counterexample["result"])))
 
 
 def test_the_corpus_facts_own_contract_is_not_refuted(tmpdir=None):
@@ -921,13 +848,12 @@ def test_the_corpus_facts_own_contract_is_not_refuted(tmpdir=None):
     fn = [f for f in functions(parse(src, path))
           if getattr(f, "name", None) == "fact"][0]
     c = contract_of(fn, path, src)
-    check("fact_declares_a_contract", len(c.ensures) == 1, repr(c))
-    check("fact_declares_one_precondition", len(c.requires) == 1, repr(c))
+    check(len(c.ensures) == 1, "fact_declares_a_contract", repr(c))
+    check(len(c.requires) == 1, "fact_declares_one_precondition", repr(c))
     bound = _int_literals(c.requires[0].expr)
-    check("the_precondition_bounds_n_at_the_refines_range", 20 in bound,
-          repr(bound))
+    check(20 in bound, "the_precondition_bounds_n_at_the_refines_range", repr(bound))
     _e, v = CT.check_source(fn, path, src)
-    check("the_corpus_contract_is_not_REFUTED", v.status != CT.REFUTED, repr(v))
+    check(v.status != CT.REFUTED, "the_corpus_contract_is_not_REFUTED", repr(v))
 
 
 def test_PROVED_is_unreachable_without_Lean(tmpdir=None):
@@ -943,23 +869,19 @@ def test_PROVED_is_unreachable_without_Lean(tmpdir=None):
     fn = functions(parse(src))[0]
     e = CT.contract_theorems(contract_of(fn, "cl.mojo", src), ["n"], fn=fn)
     v = CT.classify(e, lean_ok=None)
-    check("no_Lean_means_not_PROVED", v.status == CT.UNKNOWN and not v.ok,
-          repr(v))
+    check(v.status == CT.UNKNOWN and not v.ok, "no_Lean_means_not_PROVED", repr(v))
     v = CT.classify(e, lean_ok=False)
-    check("a_failed_ladder_means_not_PROVED",
-          v.status == CT.UNKNOWN and not v.ok, repr(v))
+    check(v.status == CT.UNKNOWN and not v.ok, "a_failed_ladder_means_not_PROVED", repr(v))
     v = CT.classify(e, lean_ok=True)
-    check("a_closed_goal_means_PROVED", v.status == CT.PROVED and v.ok,
-          repr(v))
+    check(v.status == CT.PROVED and v.ok, "a_closed_goal_means_PROVED", repr(v))
     # The SPLIT is load-bearing: an emission without it cannot be PROVED even
     # when the goal closed, because an unsplit goal says nothing about the
     # contract.
     splitless = CT.Emission(e.lean, e.goal, False, e.contract, e.params, e.fn,
                             e.model)
     v = CT.classify(splitless, lean_ok=True)
-    check("a_goal_ emitted_without_its_split_is_not_PROVED",
-          v.status == CT.UNKNOWN and not v.ok, repr(v))
-    check("the_splitless_verdict_says_why", "by_cases" in v.why, v.why)
+    check(v.status == CT.UNKNOWN and not v.ok, "a_goal_ emitted_without_its_split_is_not_PROVED", repr(v))
+    check("by_cases" in v.why, "the_splitless_verdict_says_why", v.why)
 
 
 def test_a_counterexample_outranks_a_green_ladder(tmpdir=None):
@@ -974,9 +896,8 @@ def test_a_counterexample_outranks_a_green_ladder(tmpdir=None):
     e = CT.contract_theorems(contract_of(fn, "dbl.mojo", src), ["n"], fn=fn)
     ce, _skipped = CT.search_counterexample(e, CT.SourceRunner(fn))
     v = CT.classify(e, lean_ok=True, counterexample=ce)
-    check("a_counterexample_beats_a_green_ladder", v.status == CT.REFUTED,
-          repr(v))
-    check("the_disagreement_is_named", "disagreement" in v.why, v.why)
+    check(v.status == CT.REFUTED, "a_counterexample_beats_a_green_ladder", repr(v))
+    check("disagreement" in v.why, "the_disagreement_is_named", v.why)
 
 
 # ── 4. the run-time check, on both architectures ─────────────────────────────
@@ -1096,9 +1017,7 @@ def test_the_library_path_reports_and_enforces_too(tmpdir):
         if not check(p.returncode == 0, f"dylib {name} builds",
                      (p.stderr or p.stdout).strip()[:200]):
             continue
-        check(f"dylib {name} REPORTS its contract",
-              "REFUTED" in p.stdout if want_refused else "contract mini2" in p.stdout,
-              p.stdout[:300])
+        check("REFUTED" in p.stdout if want_refused else "contracts:" in p.stdout, f"dylib {name} REPORTS its contract", p.stdout[:300])
         q = subprocess.run(base + ["--check-contracts"],
                            capture_output=True, text=True,
                            timeout=BUILD_TIMEOUT, cwd=HERE)
@@ -1114,19 +1033,14 @@ def test_a_refuted_contract_stops_a_checked_build(tmpdir):
     path = os.path.join(EXAMPLES, "wrong_clampv.mojo")
     out = os.path.join(tmpdir, "wc")
     p = build(path, out, (5, 0, 10), "arm64", check_contracts=True)
-    check("a_refuted_contract_refuses_a_checked_build", p.returncode != 0,
-          (p.stdout or "")[:200])
-    check("the_refusal_names_the_input",
-          "counterexample" in (p.stderr + p.stdout).lower()
-          or "at [" in (p.stderr + p.stdout),
-          (p.stderr + p.stdout)[:250])
+    check(p.returncode != 0, "a_refuted_contract_refuses_a_checked_build", (p.stdout or "")[:200])
+    check("counterexample" in (p.stderr + p.stdout).lower()
+          or "at [" in (p.stderr + p.stdout), "the_refusal_names_the_input", (p.stderr + p.stdout)[:250])
     # WITHOUT the flag the build succeeds and the contract is REPORTED, which
     # is the division of labour: reporting always, enforcing on request.
     p2 = build(path, out, (5, 0, 10), "arm64")
-    check("without_the_flag_the_build_goes_through", p2.returncode == 0,
-          (p2.stderr or p2.stdout)[:250])
-    check("without_the_flag_the_contract_is_still_reported",
-          "REFUTED" in p2.stdout, p2.stdout[:400])
+    check(p2.returncode == 0, "without_the_flag_the_build_goes_through", (p2.stderr or p2.stdout)[:250])
+    check("REFUTED" in p2.stdout, "without_the_flag_the_contract_is_still_reported", p2.stdout[:400])
 
 
 def test_the_check_does_not_write_to_stdout(tmpdir):

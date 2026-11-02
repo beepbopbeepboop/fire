@@ -272,6 +272,40 @@ def test_every_loop_answers_even_when_nothing_was_derived(tmpdir=None):
                   f"{stem} loop {v.index}: every obligation has a status")
 
 
+def test_a_range_with_a_step_argument_names_the_step_not_its_absence(tmpdir=None):
+    """A 3-argument `range` is unreadable, and the row must say which fact.
+
+    The synthesis reads only the 1- and 2-argument `range`, whose step is the
+    implicit +1, so a loop spelled with a step argument is refused by name —
+    and the refusal must name the STEP as the unsupported fact.  The sentence
+    once said the loop had "no step argument", false about the source it
+    printed: for `range(n - 1, -1, -1)` the third ARGUMENT IS the step.  The
+    old words are asserted absent, which is the half a reword otherwise
+    passes without.
+    """
+    import fire_compiler as F
+    from formal import loop_invariants as LI
+    src = ("def rev(n):\n"
+           "    s = 0\n"
+           "    for i in range(n - 1, -1, -1):\n"
+           "        s = s * 10 + i\n"
+           "    return s\n")
+    fn = [s for s in F.Parser(F.py_tokenize(src)).parse_module()
+          if type(s).__name__ == "FunctionDef"][0]
+    v = LI.check_function(fn, "<inline>", lean=None)[0]
+    check(v.family == "unreadable",
+          "a 3-argument `range` is unreadable to the layer", v.family)
+    check(len(v.obligations) >= 1,
+          "the unreadable loop still owes the reader a row", str(v.obligations))
+    why = v.obligations[0].why if v.obligations else ""
+    check("step argument" in why and "does not read" in why,
+          "the row names the STEP argument as the fact this layer does not "
+          "read", why)
+    check("no step argument" not in why,
+          "the row does not say the step argument is absent — the third "
+          "argument IS the step", why)
+
+
 def test_a_refusal_row_can_never_be_proved(tmpdir=None):
     """A row that says the obligation CANNOT BE STATED is UNKNOWN forever.
 
@@ -751,6 +785,7 @@ ALL = [
     test_every_loop_answers_even_when_nothing_was_derived,
     test_a_refusal_row_can_never_be_proved,
     test_the_synthesis_derives_what_the_table_says,
+    test_a_range_with_a_step_argument_names_the_step_not_its_absence,
     test_a_wrong_claim_is_refuted_and_the_right_one_is_not,
     test_a_variant_that_goes_negative_is_refuted,
     test_a_division_in_the_loop_body_is_read_not_skipped,

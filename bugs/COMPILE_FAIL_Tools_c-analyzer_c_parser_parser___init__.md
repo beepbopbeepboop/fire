@@ -4,6 +4,69 @@ Source file: `/Users/mrs/net/Python-3.14.6/Tools/c-analyzer/c_parser/parser/__in
 
 (Found via full Python-3.14.6 source tree scan, not the earlier 100-file Lib/ sample.)
 
+## Status 2026-10-29 — the companion's constructor-call lowering landed; 11 g++ errors are 8
+
+Re-measured from a copy of the upstream tree (`.tmp/ca/` from
+`Python-3.14.6/Tools/c-analyzer/`, `python3 fire.py build -o .tmp/out/r3
+.tmp/ca/c_parser/parser/__init__.py`, arm64). The C side is unchanged
+and clean; the build's rc=1 is still the C++20 companion `__init___gen.cpp`.
+
+### What landed
+
+The companion's struct-constructor call (`SourceInfo(filename)` inside
+`_iter_source`) lowered its arguments verbatim, so the omitted defaulted
+`_current=None` reached g++ as a call with too few arguments, and a field read off the
+constructor result (`Box(2, 10).x`) used `.` on a `Struct *`. Two fixes in
+`mojo/backend_gimple/cpp_core.py`:
+
+1. The constructor branch of `_cpp_expr` now pads its arguments through the same
+   `_cpp_pad_struct_method_call_args` helper every struct-method call branch already
+   uses, so the trailing default is filled from the declared `__init__` signature.
+2. The guard `StructName(args)` (`fname in struct_field_types`, has `__init__`, no
+   kwargs) is `_cpp_is_struct_ctor_call`, shared by the constructor branch and by the
+   attribute-read fallback, which emits `->` for a constructor result.
+
+Regression: `test_gimple_generator_runner.py::generator_struct_ctor_fills_a_trailing_default`
+(in `run_ctor_default_arg_in_generator_tests`). It is a package fixture (`box.py` is
+now in `_FOREIGN_PKG_FILES`): a consumer with `*, start=[]` is forced onto the cpp path,
+and `Box` is imported from a sibling module as `SourceInfo` is in the real case. The
+single-file shape does NOT reach the cpp path (the suite's A3 backend takes simple
+generators), so a single-file test would pass before and after; this one fails before
+the fix (`too few arguments to function 'box_Box___init__'` and `request for member 'x'
+... of pointer type 'Box*'`) and passes after, verified by reverting the `cpp_core.py`
+hunk and restoring it.
+
+### Measured: before → after
+
+* `__init___gen.cpp` g++ errors: 11 → 8. The `:149:167` (too few arguments), `:149:172`
+  and `:149:195` conversions on the `_info_SourceInfo___init__` call are gone from the
+  list (line `:149` now has one error, at `:149:219`).
+* C side: unchanged, clean. Imported-module floor unchanged (`.iterutil`'s `next(...)`,
+  `..info`'s `rendered, = rendered`).
+
+### What is still open, in the order it appears in the companion
+
+1. `__init___gen.cpp:149:219` — `invalid conversion from 'SourceInfo*' to 'int64_t'`:
+   a struct pointer stored into `allinfo` (a dict) through an int64 slot in the
+   companion's dict-store lowering.
+2. `:165`–`:169` — `filename = ({0, 0, 0})[0]` / `lno = ({0, 0, 0})[1]` /
+   `text = ({0, 0, 0})[2]`: the `for fileinfo, line in lines` target and the
+   following tuple unpack are emitted as placeholders, plus `expected ';' before '}'`
+   on each. This is the "tuple target" half of the companion's generator-body
+   lowering; the generator body also still carries `0;` / `while (0)` /
+   `if (0)` for several method-call statements (`srcinfo._add_line`,
+   `srcinfo.too_much`, `srcinfo._used()`), i.e. the body lowering stubs whole
+   statements to `0` (`_debug_note` "stubbed operation") and this is the real size of
+   the feature. Confirm with `_debug_note` output before choosing an order.
+3. `:171:28` — `char*` → `int64_t` on the `text` slot (same tuple-target family).
+4. The two imported-module floors (`.iterutil`, `..info`) are unchanged; they still
+   decide whether `_iter_source`'s module compiles at all under the full import chain.
+
+Next step: (2) first — the `for`/tuple target lowering in the companion, since it
+accounts for six of the remaining eight errors (`:165`–`:169`) and the stubbed statements
+are the same family. Do not start from the `:149` dict-store error; it is downstream of the same
+generator body.
+
 ## Status 2026-10-23 — the `_ind` pair is GONE (the failed-attempt rollback landed); the new first error is a proven pre-existing companion `.cpp`
 
 Re-measured the c-analyzer cluster from the copied tree (`build/remes/ca/`, `python3

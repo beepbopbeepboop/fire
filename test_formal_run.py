@@ -1171,7 +1171,7 @@ CASES = [
      "def main(n) -> Int:\n"
      "    var b = Box[Int, [1, 2, 3]]()\n"
      "    printf(\"%d\", b.size())\n"
-     "    return 0\n", 0, "3"),
+     "    return 0\n", "refuse:Refused rather than read as an index — a binding for `size_of[type, target]`", None),
     # …and the generic spelling, pinned because it is a refusal with a real
     # cause and nothing else in the group names it. The message is the
     # no-home one, which is about `Box` as a NAME: a class-attribute read through
@@ -9127,6 +9127,112 @@ BOTH_ARCH_CASES = [
      "    var q = Two(4, 9)\n"
      "    printf(\"%d\", p.v * 100 + q.a * 10 + q.b)\n"
      "    return 0\n", 0, "349"),
+    # ── a default EXPRESSION, and the f-string the walker never reached it ──
+    #
+    # A parameter default sits in a FunctionDef's `param_defaults` DICT, which the
+    # shared walker `iter_nodes` does not descend: the two interpolated-literal
+    # passes the module statements get (fold the field-less one to its text,
+    # refuse the field-bearing one with the buffer sentence) never reached a
+    # default, so the emitter materialized the whole token the parser kept and
+    # `def f(x=f"n=7")` printed `f"n=7"` where CPython prints `n=7`, on both
+    # backends. The corpus writes none (`= f"` in a parameter list finds no row
+    # in this repository or the stdlib), which is why these are a correctness
+    # pair and not a sweep row. Both ride this group: the answered one must agree
+    # on the architecture it runs on and `run_case` refuses on both backends
+    # by construction.
+    ("both_arch_a_fieldless_fstring_parameter_default_folds_to_its_text",
+     "def f(x=f\"n=7\"):\n"
+     "    return x\n"
+     "\n"
+     "def main():\n"
+     "    printf(\"[%s]\", f())\n"
+     "    return 0\n", 0, "[n=7]"),
+    ("fstring_parameter_default_with_a_field_is_refused_like_a_statement_site",
+     "def f(x=f\"n={5}\"):\n"
+     "    return x\n"
+     "\n"
+     "def main():\n"
+     "    print(f())\n"
+     "    return 0\n",
+     "refuse:is refused on this path: its value is its INTERPOLATED text, and "
+     "this path has no buffer to compose one in", None),
+    # ── a double at the `Int` conversion, where the two machines once
+    #    answered with two different programs ──────────────────────────────────
+    #
+    # The run-time half of the double→int decision the literal rows in
+    # `FLOAT_REFUSALS` state: a double the build cannot read (bound to a name
+    # rather than spelled at the conversion) is checked against the same two
+    # constants at run time and stops with the integer overflow's status —
+    # `model.float_to_int_refusal` and `model.float_to_int_trap_message` are
+    # the two halves of one decision, and these rows are the two machines'
+    # agreement about it. The marker before the conversion keeps each trap row
+    # about the conversion rather than about startup. Measured on both
+    # architectures before the fix, exit 0: `Int(1e300)` bound to a name
+    # printed `9223372036854775807` on arm64 and `-9223372036854775808` on
+    # x86-64 — the two saturations, one each, and the divergence the trap
+    # takes off the table.
+    ("both_arch_a_double_past_the_int64_range_traps",
+     "def main() -> Int:\n"
+     "    var x = 1e300\n"
+     "    printf(\"converting\\n\")\n"
+     "    printf(\"%d\\n\", Int(x))\n"
+     "    return 0\n", 1, "converting"),
+    # …and the LOWER direction, the same trap from the side whose boundary is
+    # not the range's own minimum: `-1e300` is a double the build can read
+    # (`model.float_literal_value` reads the `UnaryOp`), but bound to a name it
+    # is a value only the run-time test can see, and past `FLOAT_TO_INT_LO`
+    # (`-2**63 - 2048`, the largest double whose truncation does not fit
+    # below the range) it stops.
+    ("both_arch_a_double_below_the_int64_range_traps",
+     "def main() -> Int:\n"
+     "    var y = -1e300\n"
+     "    printf(\"converting\\n\")\n"
+     "    printf(\"%d\\n\", Int(y))\n"
+     "    return 0\n", 1, "converting"),
+    # An INFINITY is the other double CPython's `int()` refuses with an
+    # `OverflowError`, and the same trap takes it: it is past
+    # `FLOAT_TO_INT_HI` in exactly the way `2**63` is. Reached by overflow
+    # rather than a literal, because `1.0 / 0.0` is a program CPython does not
+    # run (a `ZeroDivisionError`), and this path now agrees.
+    ("both_arch_an_infinity_does_not_fit_in_an_int64_either",
+     "def main() -> Int:\n"
+     "    var w = 1e308 * 1e308\n"
+     "    printf(\"converting\\n\")\n"
+     "    printf(\"%d\\n\", Int(w))\n"
+     "    return 0\n", 1, "converting"),
+    # THE BOUNDARIES the trap must NOT take: the largest double below `2**63`
+    # is `2**63 - 2048` (binary64's spacing there is 2048) and it is IN range,
+    # and `-2**63`'s truncation IS `INT64_MIN`, which fits. A range test one
+    # step too wide traps these; the in-range `B`/`JMP` skip in the helper is
+    # what keeps them out, and a test that missed it answered `OverflowError`
+    # for 3.9 on the first measurement. `Int(3.9)` is the truncation-toward-
+    # zero row: 3, not 4, and not `-1`.
+    ("both_arch_the_int64_edges_of_a_double_convert_exactly",
+     "def main() -> Int:\n"
+     "    var x = 9223372036854774784.0\n"
+     "    printf(\"a=%d \", Int(x))\n"
+     "    var b = -9223372036854775808.0\n"
+     "    printf(\"b=%d \", Int(b))\n"
+     "    printf(\"c=%d\", Int(3.9))\n"
+     "    return 0\n", 0, "a=9223372036854774784 b=-9223372036854775808 c=3"),
+    # …and a NaN is NOT a range trap, on either machine: both comparisons the
+    # range test is built from are unordered for one, and CPython's `ValueError`
+    # for `int(nan)` is a different error than the `OverflowError` this trap is,
+    # so the trap the range test states must not fire for it. The assertion is
+    # the one both machines can make — it does not stop — and the answer each
+    # prints is its OWN hardware's saturation (measured: `FCVTZS` converts a
+    # NaN to 0, `CVTTSD2SI` to `INT64_MIN`), which `model.float_int_
+    # conversion_note` records rather than a row that would have to carry two
+    # answers in one. Before the arm64 NaN pre-check this row was red: an
+    # unordered FCMP on this machine leaves `C = 1, V = 0` — the "greater"
+    # pattern — so the `B.ge` of the upper test was taken for a NaN and the
+    # program stopped with an OverflowError.
+    ("both_arch_a_nan_is_not_a_range_trap",
+     "def main() -> Int:\n"
+     "    var w = 1e308 * 1e308\n"
+     "    var z = w * 0.0\n"
+     "    printf(\"n=%d\", Int(z))\n"
+     "    return 0\n", 0, "n="),
 ]
 
 # `print`'s KEYWORDS, and the rule that a keyword is dispatched BY NAME before
@@ -12283,6 +12389,56 @@ SPREAD_CONSTRUCTION_CASES = [
      "import sys\n"
      "def main():\n"
      "    sys.stdout.write(\"%d\" % f(a=1, **{'b': 2, 'b': 3}))\n"),
+    # The LOCAL half of the capability, the clause of the doc's "The exact
+    # next step" that landed 2026-10-12: the operand is a NAME whose only
+    # binding is a dict literal, so the keys are as knowable as a literal's.
+    # The evidence is `ValueKinds.dict_inits` — "the local whose every binding
+    # is this same dict literal" — and `_unspread_keyword_mappings` resolves
+    # the name through it before `literal_dict_items` sees it. A name bound
+    # twice, or to a non-dict, is absent from that table and keeps the refusal
+    # pinned in `SPREAD_REFUSALS` below. These rows were dropped when the two
+    # 2026-10-12 lanes merged — with the CALL path's `mappings` plumbing, which
+    # is the half that silently regressed with them — and are restored here
+    # 2026-10-28 under the names the doc carries.
+    ("a_spread_through_a_local_dict_literal_is_answered",
+     "struct P:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var d = {'b': 2}\n"
+     "    var p = P(a=1, **d)\n"
+     "    printf(\"%d %d\", p.a, p.b)\n"
+     "    return 0\n",
+     "import sys\n"
+     "class P:\n"
+     "    def __init__(self, a, b):\n"
+     "        self.a = a\n"
+     "        self.b = b\n"
+     "def main():\n"
+     "    d = {'b': 2}\n"
+     "    p = P(a=1, **d)\n"
+     "    sys.stdout.write(\"%d %d\" % (p.a, p.b))\n"),
+    # …and on the ordinary CALL, which is the other reader of `args`
+    # (`bind_call_arguments`). It is a separate row because it is the half
+    # that regressed when its `mappings` argument was lost from that reader:
+    # a fix that only taught the construction path leaves the call refusing a
+    # program CPython runs, with the same false sentence the literal rows above
+    # exist to keep out.
+    ("a_spread_through_a_local_dict_literal_is_answered_at_a_call",
+     "def f(a: Int, b: Int) -> Int:\n"
+     "    return a * 10 + b\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var d = {'b': 2}\n"
+     "    printf(\"%d\", f(a=1, **d))\n"
+     "    return 0\n",
+     "def f(a, b):\n"
+     "    return a * 10 + b\n"
+     "import sys\n"
+     "def main():\n"
+     "    d = {'b': 2}\n"
+     "    sys.stdout.write(\"%d\" % f(a=1, **d))\n"),
 ]
 
 SPREAD_REFUSALS = [
@@ -15427,6 +15583,66 @@ WAVE6_TRUTHY_CASES = [
      "    printf(\"i=%d\", i)\n"
      "    return 0\n", 0, "i=3"),
 
+    # ── a `for` target whose range is a RUN-TIME fact ──────────────────────
+    #
+    # The residual of
+    # `bugs/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`:
+    # the target of a `for` whose range is empty at run time is not bound, and
+    # the image has no word for "unbound", so the emitter allocates a bound
+    # flag per such target — zero at entry, set by every store of the name,
+    # branched on at a read the build-time state says may be unbound — and the
+    # read takes the error exit where CPython raises `UnboundLocalError`.
+    # `model.loop_bound_flags` is the one reader both backends ask, so the
+    # group is a two-architecture one: the flag and its check are emitted by
+    # two machines, and a machine that missed the flag answers the caller's
+    # leftover, the same word for a different number.
+    # The entry argument is the default 10, so `n - n` is 0 in every row.
+    # The error rows assert the exit only: the error exit prints nothing, and
+    # CPython's counterpart is a raise, which the form of an answered case
+    # cannot express.
+    # The doc's residual with a bound that is empty: nothing stores `q`, so
+    # the read after the loop takes the error edge on both architectures
+    # (was: the caller's leftover, a word that changed with the build).
+    ("both_arch_for_range_empty_target_read_after_loop_exits",
+     "def main(n):\n"
+     "    for q in range(0, n - n):\n"
+     "        x = 1\n"
+     "    return q\n", 1, None),
+    # …and the same emptiness through a local, where the loop here runs and
+    # the flag must NOT fire: `k` is 3, the range yields, `q` is bound, and
+    # the answer is the last value the loop held. A flag that fired on a
+    # loop that ran would exit 1 where the source says 2.
+    ("both_arch_for_range_runtime_bound_target_holds_the_last_value",
+     "def main(n):\n"
+     "    k = n - n + 3\n"
+     "    for q in range(0, k):\n"
+     "        x = 1\n"
+     "    return q\n", 2, None),
+    # The doc's residual, parameter-bound and non-empty: the loop runs `n`
+    # times, so the read after it is the LAST value the loop bound, not an
+    # unbound name. This is the false-positive guard for the flag — with the
+    # default entry argument it runs ten times and answers 9 — and the row
+    # the 2026-10-28 re-measurement of the doc recorded as the divergence
+    # (`q=9` where CPython said `q=2`, for a different reason: the flag
+    # existed nowhere, so the `n = 0` half printed the same leftover the
+    # `n = 3` half did).
+    ("both_arch_for_range_nonempty_target_prints_the_last_value",
+     "def main(n):\n"
+     "    for q in range(0, n):\n"
+     "        x = 1\n"
+     "    printf(\"q=%d\", q)\n"
+     "    return 0\n", 0, "q=9"),
+    # The read inside an arm: the branch forks the paths, and the arm that
+    # stores is not the arm that reads, so the join keeps the flag and the
+    # reading arm's read takes the error edge when the range was empty.
+    ("both_arch_for_range_empty_target_read_in_a_branch_exits",
+     "def main(n):\n"
+     "    for q in range(0, n - n):\n"
+     "        x = 1\n"
+     "    if n:\n"
+     "        return q\n"
+     "    return 0\n", 1, None),
+
     # ── a FLEXIBLE type is not an UNSIGNED one ─────────────────────────────
     #
     # Found by `tools/formal_fuzz.py` (its seed 206 reduces to the last row
@@ -18442,11 +18658,11 @@ COMPREHENSION_ELEMENT_CASES = [
     # lists_…`, `a_slice_element_is_a_distinct_object_per_iteration`) sit beside
     # the nested ones. The rows after them are the shapes whose per-iteration
     # materialisation is still refused — a nested comprehension whose own result
-    # holds containers, a list of lists, a slice whose base carries a scratch
-    # address, and (see `bugs/FORMAL_a_comprehension_container_element_needs_a_
-    # runtime_blob_base.md`) a constructor call, whose runtime blob base is
-    # genuinely needed. The refusal needle is the CONSTRUCT and not the remedy,
-    # so a refusal about anything else fails the case.
+    # holds containers and a slice whose base carries a scratch address — and
+    # the list-of-lists rows are the shape the relocation answers instead of a
+    # byte copy: each container the element builds is written in the slot its
+    # own iteration owns. The refusal needle is the CONSTRUCT and not the
+    # remedy, so a refusal about anything else fails the case.
     # same copy over the shared predicate. A SLICE whose base is a NAME is
     # accepted by the same copy and no relocation at all
     # (`a_slice_element_of_a_name_is_per_iteration`): a slice copies its base's
@@ -18458,13 +18674,12 @@ COMPREHENSION_ELEMENT_CASES = [
     # fact about the call SITE, and `test_formal_value_model.py`'s
     # `a_comprehension_whose_element_is_a_call_returning_a_container_gives_each_
     # one` is the row that decides it. The rows after the accepted shapes are the
-    # ones whose per-iteration materialisation is still refused \u2014 a nested
-    # comprehension whose own result holds containers, a list of lists, and a
-    # slice whose BASE builds a container (see
-    # `bugs/FORMAL_a_comprehension_container_element_needs_a_runtime_blob_base.md`),
-    # whose runtime blob base is genuinely needed. The refusal needle is the
-    # CONSTRUCT and not the remedy, so a refusal about anything else fails the
-    # case.
+    # ones whose per-iteration materialisation is still refused — a nested
+    # comprehension whose own result holds containers and a slice whose BASE
+    # builds a container that itself holds one; a list of lists is the shape
+    # the relocation answers (the rows below) rather than one of them. The
+    # refusal needle is the CONSTRUCT and not the remedy, so a refusal about
+    # anything else fails the case.
     #
     # `r[i][j]` reads the ELEMENT and not `len`, because three copies of the
     # last iteration and one element per iteration have the SAME COUNT — a
@@ -18677,15 +18892,59 @@ COMPREHENSION_ELEMENT_CASES = [
      "    printf(\"%d\", len(d))\n"
      "    return 0\n",
      "refuse:opens a container", None),
-    # A container built inside a container LITERAL is the shallow-copy boundary
-    # the flat predicate refuses: copying `[[y]]` per iteration would carry the
-    # INNER list's address and every iteration would share it.
-    ("a_list_of_lists_as_the_element_is_refused",
+    # A container built inside a container LITERAL, which the byte copy cannot
+    # make per-iteration — the copy would carry the INNER list's address and
+    # every iteration would share it — and the shape the RELOCATION answers
+    # instead: each container the element builds is written in the slot its own
+    # iteration owns, a `cap`-slot array indexed by the result count (the
+    # element is built before the append that increments it, so the count is
+    # this iteration's ordinal). The write-through-read below is the read a
+    # shared inner blob would answer `9 9 9` to and the slots answer `9 20 30`;
+    # CPython 3.14 answers the same. Refused on both architectures before, with
+    # the needle this row used to pin.
+    ("a_list_of_lists_as_the_element_is_per_iteration",
      "def main() -> Int:\n"
      "    var r = [[[y]] for y in [10, 20, 30]]\n"
-     "    printf(\"%d\", r[0][0][0])\n"
+     "    r[0][0][0] = 9\n"
+     "    printf(\"%d %d %d\", r[0][0][0], r[1][0][0], r[2][0][0])\n"
      "    return 0\n",
-     "refuse:the element `[[y]]` opens a container", None),
+     0, "9 20 30"),
+    # …and the same relocation one slot deeper: three nested literal lists,
+    # each with its own per-iteration slot, and the read that a shared inner
+    # blob would answer with the last iteration's value three times.
+    ("a_list_of_a_list_of_a_list_as_the_element_is_per_iteration",
+     "def main() -> Int:\n"
+     "    var r = [[[[y]]] for y in [10, 20, 30]]\n"
+     "    printf(\"%d %d %d\", r[0][0][0][0], r[1][0][0][0], r[2][0][0][0])\n"
+     "    return 0\n",
+     0, "10 20 30"),
+    # …and through the TUPLE emitter, which lowers to the same list blob: a
+    # tuple holding a list is the same relocation and a fix scoped to
+    # `ListExpr` alone would leave it aliasing.
+    ("a_comprehension_element_that_is_a_tuple_holding_a_list_is_per_iteration",
+     "def main() -> Int:\n"
+     "    var r = [(y, [y]) for y in [10, 20, 30]]\n"
+     "    printf(\"%d %d %d\", r[0][1][0], r[1][1][0], r[2][1][0])\n"
+     "    return 0\n",
+     0, "10 20 30"),
+    # …and through the DICT emitter: a pair literal whose value holds a list
+    # gets its per-iteration slot in the pair blob, and the inner list its own
+    # slot. The read is over the KEYS, because a subscript of a comprehension
+    # result does not yet classify its dict element for a key lookup — and the
+    # key sum is the read that separates the slots from one shared pair blob:
+    # a shared blob holds the LAST pair, so both elements would sum to 20 and
+    # the total to 40, where CPython sums 10 + 20.
+    ("a_comprehension_element_that_is_a_dict_holding_a_list_is_per_iteration",
+     "def main() -> Int:\n"
+     "    var r = [{y: [y, y + 1]} for y in [10, 20]]\n"
+     "    var s = 0\n"
+     "    for k in r[0]:\n"
+     "        s = s + k\n"
+     "    for k in r[1]:\n"
+     "        s = s + k\n"
+     "    printf(\"%d\", s)\n"
+     "    return 0\n",
+     0, "30"),
     # The SAME shallow-copy boundary one level in: a nested comprehension whose
     # own ELEMENT builds a container is not `comprehension_result_is_flat`, so
     # copying its result would carry the address of the inner container the
@@ -19731,7 +19990,37 @@ FLOAT_REFUSALS = [
     # from `PRINTF_NUMBER_CONVERSIONS` — a blob does have an address, and
     # Darwin's `%p` renders it. Neither is asserted to build here because a
     # `%s` of a container is a different (unfixed) shape and `%p`'s output is an
-    # address that is not stable to compare; the row above is the control.
+    # ── A double past the `Int64` range, at the `Int` conversion ─────────────
+    #
+    # The other half of the double value model, one row per direction, on BOTH
+    # machines: the build can read a literal, and a literal whose truncated
+    # value does not fit in an `Int64` is a program CPython raises
+    # `OverflowError` for, while the hardware would answer the same source with
+    # two different programs — `FCVTZS` clamping at `9223372036854775807` and
+    # `CVTTSD2SI` at `-9223372036854775808` — which is the divergence this
+    # refusal closes at the place it is decidable. Measured on both
+    # architectures before `model.float_to_int_refusal`: `Int(1e300)` printed
+    # `9223372036854775807` on arm64 and `-9223372036854775808` on x86-64,
+    # exit 0 (the bug doc that recorded it,
+    # `FORMAL_int_of_an_out_of_range_double_saturates_the_other_way_on_each_
+    # backend`, is deleted with its fix; these rows are the record).
+    #
+    # The needle is the FIT clause rather than a value, because the value the
+    # message states is the spelled operand and a value needle would assert a
+    # spelling rather than a decision.
+    ("float_to_int_a_double_literal_past_the_range_is_refused",
+     "def main() -> Int:\n"
+     "    return Int(1e300)\n",
+     "refuse:does not fit in an Int64", None),
+    # …and the LOWER edge, which is a different double, not a sign flip: a
+    # double cannot name a value between `-2**63` and `-2**63 - 2048` (binary64's
+    # spacing there is 2048), and `-2**63` itself FITS — its truncation is
+    # `INT64_MIN`. A rule that tested the sign rather than the value would take
+    # one of the two rows and miss the other's arithmetic.
+    ("float_to_int_a_negative_double_literal_past_the_range_is_refused",
+     "def main() -> Int:\n"
+     "    return Int(-1e300)\n",
+     "refuse:does not fit in an Int64", None),
 ]
 
 # The CONTAINER family, the other half of the same "the conversion and the
@@ -23079,7 +23368,7 @@ TYPE_ARGUMENT_LIST_CASES = [
      "    s.b = 4\n"
      "    var m = Triple[Int, s, False](5)\n"
      "    return m.v + s.a\n",
-     "refuse:compile-time explicit-parameter list", None),
+     "refuse:the function which created it, so it can only be read, written, copied, or passed as a method's receiver", None),
     # The construct this row used to reach INSTEAD of the answer — the
     # explicit-parameter-list refusal — no longer displaces the row above it:
     # `Triple[Int, s, False]` now draws that sentence too, because the

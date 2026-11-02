@@ -187,7 +187,7 @@ is not a fact:
    unchanged), and a gate that fired on it would be fired at every step of it.
 3. **It does not have a memory gate.** Peak is recorded per example and the
    corpus maximum is printed, because `>3-4 GB` is a project debt standard
-   (`bugs/PERF_memory_over_4gb_is_a_bug.md`) and a ratchet that watched it would
+   (`doc/POLICY_memory_over_4gb.md`) and a ratchet that watched it would
    be useful — but an unrequested fourth gate on a number this tool has only
    measured on one machine is not this change's business. The data is here for
    whoever wants it.

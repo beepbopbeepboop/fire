@@ -1,5 +1,24 @@
 # CODEGEN: bootstrap resource blowup and four remaining stage1/stage2 divergences
 
+## Status (2026-10-25 — correctness CLOSED, resource cost OPEN)
+
+`make bootstrap` is green: stage1 == stage2 == stage3 for all 184 generated
+files (`tools/bootstrap_verify.py`: 0 stage1-vs-stage2 diffs, 0 stage2-vs-stage3
+diffs), so the four `.ci` divergences recorded below are gone. What remains of
+this doc is the RESOURCE cost, measured on the same run: `stage2-transitive`
+448 s / 12.2 GB peak and `stage3-transitive` 450 s / 14.6 GB peak (whole bucket
+1052 s wall) in one run, and THE SAME BINARY on an identical tree later hit the
+24 GB ceiling (stage2-transitive and stage3-transitive each killed at 24.0-24.1
+GB, in two further runs). The peak is therefore not a number but a spread of at
+least 12-24+ GB, run to run, for byte-identical inputs: something address- or
+timing-dependent (hash order over pointer keys is the first suspect) decides how
+much the compiled compiler allocates, which is why the two jobs keep the
+`program` class (55 GB) rather than the 1.5x-of-one-run class. Next step:
+bisect the spread (`MOJO_` allocation counters per phase on a low and a high
+run) before trying to bring the mean down, against the 3-4 GB standard of
+`doc/POLICY_memory_over_4gb.md`. The historical text below (45 GB /
+32 min) is the pre-fix measurement.
+
 ## Status (2026-09-25 — OPEN, measured; print/comptime fixes landed, native Stage 2 remains unstable)
 
 A full `make bootstrap` completed after approximately 32 minutes. Peak memory
@@ -34,7 +53,7 @@ This document records the measurement and the remaining divergence set. It does
 not claim that the four `.ci` files have the same root cause; they must be
 compared independently after the resource issue is understood. The earlier
 divergence investigation remains in
-`CODEGEN_noshim_dumpfull_preexisting_divergence.md`.
+commit e8a7135b8.
 
 ## Status (2026-09-27 — the SIGTRAP is currently UNREACHABLE, and it is NOT the same root cause as the three expected failures)
 
@@ -75,7 +94,7 @@ binary survives a two-line program.
 The SIGSEGV that masks it is now root-caused to one runtime predicate and
 written up in full — three-link chain, lldb frames, measured faulting
 address, and the candidate one-place fix — in
-`CODEGEN_noshim_dumpfull_preexisting_divergence.md`'s 2026-09-27 entry.
+commit e8a7135b8's 2026-09-27 entry.
 Summary: `exprtypes.py:61`'s `_WALK_FIELD_NAMES_CACHE.get(type(node))`
 lowers to a dict lookup whose KEY is `mojo_cstr_or_int_str(tag)`, and
 `mojo_boxed_is_str`'s `v > 65536` threshold is far below the 2GiB
@@ -273,7 +292,7 @@ The obvious reading of "silent death, enormous memory, no core file" is OOM. It
 has now been wrong twice here, and both times it was wrong *in the same way* —
 by inferring the cause from the symptom rather than establishing it:
 
-1. `CODEGEN_noshim_dumpfull_preexisting_divergence.md` session 4 concluded OOM
+1. commit e8a7135b8 session 4 concluded OOM
    for a **single-module** repro and blamed the never-frees allocator. Session 5
    corrected it: the real cause was a NULL-pointer SIGSEGV (139), and the
    apparent silent death was an artifact of explicit `(…&)` backgrounding
@@ -392,12 +411,12 @@ forward:
   **`exit -9`**. The `exit -9` was a **manual** kill (see the top of this
   section); the `exit 0` variant is not what it is now.
 - It called the failure "the documented-in-wrong-direction" version of the
-  SIGBUS in `CODEGEN_noshim_dumpfull_preexisting_divergence.md`. That SIGBUS is
+  SIGBUS in commit e8a7135b8. That SIGBUS is
   fixed, and an absent file here is a resource failure instead.
 
 `make bootstrap`'s `verify` step failing on ~14 files is **not** re-recorded
 here: it is already tracked, with the set shrinking over time, in
-`CODEGEN_noshim_dumpfull_preexisting_divergence.md`. The only useful detail the
+commit e8a7135b8. The only useful detail the
 old entry added is that the set is not expected to be stable, because that doc
 records `PYTHONHASHSEED`-dependent nondeterminism in the reference path itself.
 

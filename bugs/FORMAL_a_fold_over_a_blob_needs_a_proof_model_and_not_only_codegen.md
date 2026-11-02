@@ -7,6 +7,41 @@ what lowering `sum`/`any`/`all`/`min`/`max` over a container would COST, written
 down because the cost is the interesting part and because the obvious
 implementation would make the proving path worse.
 
+**Step 1 finding (2026-10-28) — the proof model is BLOCKED on the model's
+memory-free signature, and that is the finding this step exists to surface.**
+Step 1 ("land the PROOF model for a fold first, with no codegen change") cannot
+be landed as a one-line `_go`, because the layer that would carry it — the
+per-program SEMANTIC model the proof generator emits — has no domain for a blob
+element, and a fold is a walk over exactly those:
+
+  * The model is `UInt64 → UInt64` and carries no memory. The per-function model
+    is emitted as `def {fname}_go ({param} : UInt64) : UInt64`
+    (`arm64_proof_gen.py:2083`), and `mojo` the same (`:2662`). ProofLib DOES have
+    a memory (`mem_read_u64 (mem : Nat → UInt8) (addr : Nat)`, `lib/ProofLib.lean:83`),
+    so the vocabulary could read a blob — but the generated model never takes a
+    `mem` argument, so it can reach no blob byte.
+  * Even the LOOP model is memory-free. The range/dec loop's helper is
+    `def {fname}_loop_go (rem : Nat) (acc : UInt64) (i : UInt64) : UInt64`
+    (`arm64_proof_gen.py:2078`): it iterates a `Nat` count and carries ONE
+    accumulator word, but has no `mem_read_u64` to pull element `i` of the blob
+    into the accumulator. A fold's body is precisely that read-and-combine, so
+    the loop model can state the *shape* of the fold and not its *value*.
+  * The model already REFUSES a single element read by name. `_no_value_model`
+    (`arm64_proof_gen.py:2245`) raises for `a[i]` ("a list element, … the same
+    absence of a list domain") and `p.x` ("The model is `UInt64 → UInt64`; a field
+    has no value in it"), measured against a false model that said `0`. A fold is
+    a walk over `a[0..n)`, so it is refused at the granularity of one step.
+
+So the expression-language gap is real and is the blocker: carrying a fold `_go`
+needs a `mem` (or list/blob) argument threaded through the model's signature, the
+universal theorem, the `eval_eq_mojo` gate, the run tests, and BOTH backends — the
+foundational signature change, not a `_go` added to the existing memory-free one.
+No codegen was touched, so the `folds` group still reads `0 answered, 8 refused,
+0 failed` (every refusal names the builtin), i.e. the census is unchanged: step 1
+ended in its documented, anticipated finding rather than a moved row. Steps 2–4
+(sum alone on arm64; any/all; min/max) are unchanged in scope and all descend on
+this signature change first.
+
 **The measurement.** `test_formal_builtins_conformance.py`'s `folds` group
 holds eight cases and every one is a refusal today:
 

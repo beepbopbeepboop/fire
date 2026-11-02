@@ -77,7 +77,7 @@ Per-file, the ones that moved (full table in `.tmp/cost-arm64-{base,fix1}.csv`):
 
 **Nothing here is a memory problem and that is the first result.** The largest
 peak over the whole spread is **98.9 MB**, on `gimple_codegen.py`, and every one
-of the 43 rows sits between 45 and 99 MB. `bugs/PERF_memory_over_4gb_is_a_bug.md` sets
+of the 43 rows sits between 45 and 99 MB. `doc/POLICY_memory_over_4gb.md` sets
 3-4 GB as the standard and nothing in the formal build is within two orders of
 magnitude of it, so this doc is entirely about TIME. (It also means the formal
 suite's memory classes are honest: `formal-*` jobs measured at 0.1-0.2 GB.)

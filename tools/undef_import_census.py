@@ -36,7 +36,7 @@ involved, so this section cannot inherit `_bare_call`'s judgement calls — it i
 
 Both sections are CENSUS, not gate steps: turning either into one is a separate
 decision (see the measurement in
-bugs/CODEGEN_imported_generic_never_elaborated_calls_nothing_defines.md — the
+bugs/imported-generic-elaboration-defect — the
 count is large enough that it must not be sprung on the suite).
 
 Usage:

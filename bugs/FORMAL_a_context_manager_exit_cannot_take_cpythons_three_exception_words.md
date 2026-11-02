@@ -1,6 +1,33 @@
 # A context manager's `__exit__` cannot take CPython's own three exception
 # words, so every context manager written the way CPython writes one is refused
 
+**Status 2026-10-27 (this tree): the 2026-10-12 slice below was measured MISSING
+and is re-landed — the bulk merge of `work/formal318-docs` (2026-10-16,
+`c3ed827a`) had kept the doc change and dropped the source commit (`08e5c803`),
+keeping the prose and losing the fix.
+Measured before: `context_exit_variadic_ignores` absent from `formal/model.py`,
+`struct_is_context_manager` accepting arity 1 or 4 only, and
+`test_formal_with.py` still carrying the pre-2026-10-12 `a_variadic_exit_is_
+refused_by_name` row (the ignoring `*args` shape refused on a "1 parameters
+after the receiver" sentence the parser's star-in-the-NAME made look like
+arity 2). Re-landed, ported to the current tree: `formal/model.py` (`_dunder_
+receiver_params` now reads the star through `function_param_shape`, the one
+reader of the parameter list — `fire_compiler.py::_parse_funcdef` keeps the star
+in the NAME and no `FunctionDef` has the `vararg` attribute the old code asked;
+`context_exit_variadic_ignores` accepts the catch-all the body never reads; the
+gate's `-1` arm; the named READ refusal for the catch-all, with `**kw` alone and
+`(self, exc_type, *rest)` staying refused for the structural reason their
+docstring states), `formal/build.py` (the exit-call comment: the variadic shape
+is arity 1, its catch-all binding the empty tuple), and `test_formal_with.py`
+(the two new ANSWERED rows, the re-worded refusal row
+`a_variadic_exit_that_reads_its_catch_all_is_refused_by_name`, and the four
+in-process gate checks). Measured 2026-10-27 in this tree:
+`python3 tools/memslot.py --gb 8 --label t -- python3 test_formal_with.py` is
+**PASS=506 FAIL=0** (489 before the re-land; the 17 are the two rows plus the
+five in-process checks), the two ANSWERED rows agree with CPython on both
+engines, and the catch-all READ is refused by name on both backends. The
+READING half — either spelling — is still §3's unwinder, unchanged.**
+
 **Status 2026-10-12 (`work/formal318-docs`): the SECOND spelling of the ignoring
 shape is now accepted too — `__exit__(self, *exc)` whose body never reads `exc`
 lowers, because the catch-all was being refused for a reason that was never

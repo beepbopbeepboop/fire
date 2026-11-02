@@ -7,7 +7,7 @@ behind with a Status history: a fixed bug still listed is indistinguishable
 from an open one to whoever reads the queue next. That is the right rule and
 it has a cost this tool exists to measure — every citation of a deleted doc
 becomes a reference to nothing, in a file that exists to be believed. The
-first instance found (`bugs/DOCS_deleted_bug_doc_still_cited_in_three_places.md`)
+first instance found (commit c1494d989)
 was a test file's module docstring, which is documentation a reader trusts
 sending them to a file that is not there.
 
@@ -938,7 +938,7 @@ def main() -> int:
     print('\nThe fix for one of these is to name the BUG rather than the doc — '
           'the\nsymptom, or the commit that fixed it — which is what '
           'test_arm64_encoders.py\nsays at its shift sweep. See '
-          'bugs/DOCS_deleted_bug_doc_still_cited_in_three_places.md.')
+          'commit c1494d989.')
     stale = stale_verdicts(skip=set(args.skip))
     if stale:
         print(f'\n{stale_verdict_heading()} — {len(stale)} row(s), in '

@@ -83,6 +83,41 @@ anywhere else), these rules override any instinct to move on quickly:
   interim gate runs and interim check-ins were seen as wasted tokens/time
   when the intent was always to gate once at the end anyway.
 
+## Bug rounds — every round must move us closer to the end
+Base directive (user, 2026-10-29): every work round on a bug must move the work
+forward. A round's output may not be "re-verified, still open" with no tree or
+doc change. The valid outputs of a round, in descending order of preference:
+
+1. **A full fix.** The defect the doc describes is resolved and the doc's own
+   named quick test passes. Delete the doc in the same commit (see `## Bug
+   docs` below); if it was already fixed upstream, verify with the named test
+   and delete with a commit saying so.
+2. **A real partial fix.** Real code that lands the doc's own next step (or a
+   self-contained piece of it), with the doc's quick test passing, committed
+   with a dated Status entry stating exactly what landed and what remains. A
+   partial fix must change behaviour or coverage, not just the doc.
+3. **A planning round: a full design and implementation guide.** When the next
+   step is blocked (a decision, a build wall, another lane's work) or is a real
+   program, the round's output is a guide committed into the doc's Status: the
+   measurement that establishes the current state, the decision(s) needed with
+   the readings laid out, the implementation plan (exact files, functions,
+   ordering, interfaces), and the tests that will prove it. It must be
+   complete enough that the next round can execute without re-investigating
+   anything this round established.
+
+A round that only re-reads a doc and re-measures its status without landing
+one of the three above is a failed round. This extends the Bug-fixing-sessions
+rule above: the fourth outcome ("confirmed still broken, nothing landed") is
+not an output, however many "re-verified" entries already sit in the doc.
+
+**Formal lane — structure first, soundness later.** For the formal proof
+machinery (step lemmas, contracts, theorems, proof generators, the Lean model),
+land the FULL STRUCTURE first — statements, induction shapes, the wiring in the
+generators — even with `sorry`/`admit` at the leaves; only once the structure
+is in, close the sorries and admits. A round that lands structural theorems
+whose leaves are named sorries, or discharges sorries an already-landed
+structure carries, is forward progress either way (see `FORMAL.md` §11.3).
+
 ## Running the checks — one runner, named buckets
 `tools/suite.py` runs everything: the buckets, each test's driver, the memory
 ceilings, the ordering, and one pass/fail count. The Makefile's targets are
@@ -102,6 +137,13 @@ one-line recipes that call it, so `make check-<x>` and
 `check` is a strict subset of `gate`, so `make check && make gate` is the
 same work twice — see the gate section. Pick one per intent: `check` while
 iterating, `gate` once at the end.
+
+**Interpreter floor:** every recipe here is bare `python3`; the tree needs
+3.12+ (`str | None` annotations in `gimple_codegen.py`/`formal/` are evaluated
+at def time = PEP 604, and `formal/arm64_proof_gen.py` uses PEP 701 f-string
+backslashes). Use `/opt/homebrew/bin/python3` (3.14) or `python3.12+`; a 3.9–3.11
+host gets a raw `TypeError` at `formal/model.py:1668` instead of a clear
+interpreter message.
 
 Reading a run: the screen shows only failures, skips, a resource breach, a
 30-second heartbeat, and the final tally. **Everything else — a PASS line per
@@ -133,7 +175,7 @@ which is which). **Each class is assigned from the job's MEASURED peak**
 (`MEASURED_PEAK_GB`, read off a real run's log by the same wrapper that does
 the killing), never from the shape of the workload it resembles, and a class
 over 4 GB carries a one-line `memwhy` pointing at
-`bugs/PERF_memory_over_4gb_is_a_bug.md` — over 4 GB is a debt, not a fact.
+`doc/POLICY_memory_over_4gb.md` — over 4 GB is a debt, not a fact.
 `python3 tools/suite.py --list` prints peak, class, ceiling and ratio per job,
 plus the over-provisioned (>8x) and unmeasured lists. `MEMLIMIT_GB=96` raises
 every ceiling and is also the answer to a class that no longer fits;
@@ -369,20 +411,16 @@ against CPython. The remaining `expect=` jobs besides the two heavyweight steps
 and the formal host-module rows are the compiled-path async/await cluster, all
 cheap (0.0-0.2 GB, 1.2-11.6 s each) and all in `coroutine` and `x86`, each
 measured one at a time before being named, with the measurement at its
-registration — plus, since 2026-10-04, `bootstrap-stage2-dumps`, which is the
-one count a FANOUT states (40 of its 46 items exit non-zero) and is therefore
-checked against the per-item verdicts rather than against a summary line; see
-`observed_fanout_failures` in `tools/suite.py`. `bugs/CODEGEN_ab_native_fails.md` §4 carries the full inventory
+registration. (A FANOUT can state a count too, checked against the per-item
+verdicts rather than a summary line; see `observed_fanout_failures` in
+`tools/suite.py`.) `bugs/CODEGEN_ab_native_fails.md` §4 carries the full inventory
 and the reasoning for `expect=` rather than `disabled=` on each.
 
 | test | marker | subject | cost it charges every gate |
 |---|---|---|---|
-| `ab-native` | `disabled=bugs/CODEGEN_ab_native_fails.md` | python vs native codegen over the A/B corpus | **nothing** — registered, not run |
-| `native-dumpfull` | `expect=` (`SELFHOST_TOKENIZE_BLOWUP`) | the native `--dump-full` artifact vs the reference | 31.3 GB, `program` (55 GB) |
-| `bootstrap-verify` | `expect=` (`SELFHOST_STAGE2_EMPTY_DUMP`) | the three stage trees, byte for byte | 0.6 s, default class; its cost is all in `bootstrap-stage3-transitive` |
-| `bootstrap-validate` | `expect=` (`SELFHOST_STAGE2_EMPTY_DUMP`) | the same comparison in the Mojo driver's vocabulary | 0.6 s, default class |
-| `bootstrap-stage2-dumps` | `expect=`, count checked (40 of 46) | the compiled binary's per-file `--dump` | 4 s, `tiny`; `bootstrap` |
-| the async/coroutine ones | `expect=`, count checked | compiled-path async/await, coroutine and closure capture | 1.4-15.4 s each, `tiny`; `coroutine` |
+| `ab-native` | `expect=`, count checked (1) | python vs native codegen over the A/B corpus | 0.1 GB / ~10 s measured, `program` (reserves 55 GB); `native` |
+| `async-void-return` | `expect=`, count checked (3) | an async function with no return value | `tiny`; `coroutine` |
+| `coro-future-await` | `expect=`, count checked (17) | `await` on a Future in the coroutine runtime | `tiny`; `coroutine` |
 
 `formal-toplevel` and `formal-module-attr` were in this table and are not any
 more: both markers were dropped on this tree, so `--list` reports neither and a
@@ -402,33 +440,16 @@ checks are what keeps it that way — a registration that is in no bucket fails
 the self-test unless it declares `dep=True`, which is `prooflib` and nothing
 else.
 
-The `native-dumpfull` `expect=` is the old "the binary segfaults on any input"
-claim, which was **measured false on 2026-09-27 and corrected rather than left
-to rot**: `./mojoc --dump-full` on a two-line program is now exit 0 / 12.1 MB
-/ 94.6 M instructions. What is left there is the self-hosting bootstrap
-pre-pass's cost (~15-30 GB / ~15-25 s per call, localised in
-`bugs/CODEGEN_bootstrap_resource_blowup.md` and BLOW.md §0).
-
-**A marker on this class has moved twice, and both moves are the anti-rot
-discipline rather than bookkeeping** — read this before adding one back.
-`bootstrap-stage2-dumps` carried `SELFHOST_SEGV` ("segfaults on any input"),
-which was measured false on 2026-09-27; it was replaced with
-`SELFHOST_STAGE2_STALL`, on the reasoning that a marker saying "segfault" would
-hide the real class. That marker then went **stale** and the runner reported it
-as a failure, because the class it named (`mojo_unsupported_iter`) is gone — and
-the class underneath it is not: `--dump` on the compiled binary writes a correct
-`.pyi`, an **empty** `.ci` and no `.tok`/`.ast`, and exits 0. That fanout
-**cannot see it**, because `reject=` is a regex over a child's output and a
-child that writes nothing prints nothing, so it passes. The marker therefore
-lives on `bootstrap-verify`/`bootstrap-validate`, which compare the stage trees
-and do see it (87 stage1-vs-stage2 diffs, 0 stage2-vs-stage3 — the binary is a
-fixed point of itself, computing something other than the reference). **So a
-passing `bootstrap-stage2-dumps` is not evidence that the self-hosted binary
-dumps correctly**; it is evidence that the row does not look at what it
-produced. Divergences themselves:
-`bugs/CODEGEN_noshim_dumpfull_preexisting_divergence.md`; the empty-dump class,
-with its reproduction and its per-artifact shape:
-`bugs/CODEGEN_bootstrap_stage2_dump_is_empty.md`.
+**The bootstrap chain is green (2026-10-25) and carries no marker.**
+`bootstrap-verify` / `bootstrap-validate` compare the three stage trees byte
+for byte (184 files identical, stage1 == stage2 == stage3) and are the ONLY
+jobs that can see a compiled-codegen divergence: `bootstrap-stage2-dumps`
+passing is not evidence the binary dumps correctly, because `reject=` is a
+regex over a child's output and a child that writes a wrong artifact prints
+nothing. Residual divergence class, if one reappears:
+commit e8a7135b8; the whole-closure
+compile costs 12-15 GB and ~7.5 min per stage
+(`bugs/CODEGEN_bootstrap_resource_blowup.md`).
 
 **The gate is otherwise clean, and deliberately no file here says how many.**
 Every `expect=` and `disabled=` registration in the registry is accounted for
@@ -465,7 +486,7 @@ why* — and the only thing that decides between them is what running it costs.
    — reported as its own `DISABLED` status with the doc, counted in the tally,
    listed on screen and in `--list` and `--dry-run`, and it reserves **0** from
    the memslot ledger whatever class it carries. **The threshold is the
-   3-4 GB memory standard in `bugs/PERF_memory_over_4gb_is_a_bug.md`**, applied
+   3-4 GB memory standard in `doc/POLICY_memory_over_4gb.md`**, applied
    to time as well: a class over that line is a debt, so a job carrying one is
    too expensive to spend on a known answer; so is one that takes more than a
    few minutes. Measured, not guessed — `ab-native` was `expect=` while using

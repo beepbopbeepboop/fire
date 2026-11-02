@@ -98,16 +98,11 @@ key type wins a list-of-ints loop and `print(i)` calls `mojo_print((char *)10)`
 doc records why the obvious one-line default for the shared variable is a
 regression for the other arm.
 
-**The next step recorded below is stale advice**: move the context observation
-after `_inferred_var_types` is populated (`module_gen.py:3808`, `:3813`,
-`:5394`) and before the `pm`/field pass (`:2807`-`:2843`), writing
-`_ctor_lit_param_types` exactly as the literal observer does. It is a
-reordering of two delicate passes, and the original prescribed fix (a
-`ListExpr` case in `_arg_scalar_type`) broke selfhost — do not use it. What
-today's measurement adds is that the ordering is no longer the whole answer:
-the field's ELEMENT type is still never threaded at all
-(`_field_elem_types['Reader']` is empty), which is why the loop falls to
-runtime dispatch in the first place.
+**The root cause (inference gap) is still open**: `_field_elem_types['Reader']` is empty, meaning the field's element type is never threaded when a container-typed ctor argument reaches a local or `self.<field>`.
+
+This gap is owned by another claim (`bug-codegen-container-constructor-argume-r2`), and it is distinct from the codegen dispatch arm (owned by `bug-codegen-dispatched-for-loop-shares-o-8985`).
+
+The stale advice to reorder passes in `module_gen.py` has been removed; the correct inference fix would populate `_ctor_lit_param_types` with container element types, analogous to how literal observers thread them.
 
 ### 2.2 Variadic lambda call sites are not packed
 Doc: `bugs/hard/CODEGEN_generator_lambda_expr_unsupported.md`
@@ -309,13 +304,12 @@ to COMPILE as a side effect of this session's fixes — not independently
 chased down further, since COMPILE is already a clean outcome). The
 `ipaddress` CFAIL (77 `__mgco_` refs, then `gcc -fgimple -fsyntax-only`
 fails with `expected expression before 'sizeof'` at
-`Lib/ipaddress.py:1548`, `self.hosts = self.__iter__`) is attributed: its
-own doc, `bugs/CODEGEN_generator_function_Lib_ipaddress.md`, already scopes
-the remaining blocker as needing "a dynamic-class-object-as-callable-value
-model", explicitly "genuinely feature-sized, not attempted" — the SAME
-missing first-class-callable-value representation §2.2 (variadic lambda
-call sites) and §2.3 (kw-only param invoked as callee) are blocked on, just
-a third symptom of it. Not a fresh mystery; no new doc needed.
+`Lib/ipaddress.py:1548`, `self.hosts = self.__iter__`) is attributed: the
+callable-value gap (requiring a dynamic-class-object-as-callable-value
+model, "genuinely feature-sized, not attempted") is already known as
+the SAME missing first-class-callable-value representation §2.2 (variadic lambda
+call sites) and §2.3 (kw-only param invoked as callee) — a third symptom of it.
+Not a fresh mystery; no new doc needed.
 
 Generator value cycles (`q1`↔`q2`) bus-error (138) on unbounded mutual
 recursion. A recursion-depth gap, not a value-typing gap; out of scope, and

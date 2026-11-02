@@ -610,7 +610,15 @@ def _load_formal_build():
     there — same status as before this fix, when the path did not
     link at all."""
     import importlib as _importlib
-    return _importlib.import_module('formal.build')
+    try:
+        return _importlib.import_module('formal.build')
+    except TypeError as e:
+        # Python < 3.10 (PEP 604 annotations like 'str | None') raises TypeError
+        # at definition-time import; formal/arm64_proof_gen.py also needs 3.12+.
+        raise ImportError(
+            "formal.build requires Python 3.12+ (PEP 604 / PEP 701); "
+            "this interpreter raised TypeError: " + str(e)
+        ) from e
 
 
 def _parse_arm64_module(src: str, filename: str) -> list:
