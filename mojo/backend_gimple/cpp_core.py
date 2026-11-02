@@ -1984,12 +1984,10 @@ def _cpp_is_str_expr(gen, node) -> bool:
 
 def _cpp_and_or_is_tagged(gen, e) -> bool:
     """True when the `and`/`or` BinaryOp `e` lowers to a TAGGED word: its left
-    operand is a tagged word and its right is not a str. A str right operand
-    keeps the `_W` string lowering (`_cpp_expr`'s `or` branch), whose result is
-    a `char *`-typed value every str consumer already reads; boxing that result
-    as a tagged word would change the type each consumer sees."""
-    return (_cpp_is_tagged_word_expr(gen, e.left)
-            and not _cpp_is_str_expr(gen, e.right))
+    operand is a tagged word. A str right operand now goes through the
+    tagged-word-carrying `_W` path as well (with the result marked tagged
+    only where the declared type is not `char *`)."""
+    return _cpp_is_tagged_word_expr(gen, e.left)
 
 
 def _cpp_tagged_operand_word(gen, node) -> str:
@@ -2828,6 +2826,17 @@ def _cpp_expr(gen, e) -> str:
             # evaluated only on the side that returns it. The names are
             # prefixed so no user local can capture them inside the lambda.
             _lw = f"(int64_t)(intptr_t)({gen._cpp_expr(e.left)})"
+            if _cpp_is_str_expr(gen, e.right):
+                _rw_str = gen._cpp_expr(e.right)
+                if e.op == 'or':
+                    _pick = f"mojo_truthy_word(_mojo_ao_l) ? _mojo_ao_l : (int64_t)(intptr_t)mojo_box_from_str((char *)({_rw_str}))"
+                else:
+                    _pick = f"mojo_truthy_word(_mojo_ao_l) ? (int64_t)(intptr_t)mojo_box_from_str((char *)({_rw_str})) : _mojo_ao_l"
+                return (f"[&]() {{ struct _W {{ int64_t w; "
+                        f"operator int64_t() const {{ return w; }} "
+                        f"operator char *() const {{ return (char *)mojo_box_word(w); }} }}; "
+                        f"int64_t _mojo_ao_l = {_lw}; "
+                        f"return _W{{{_pick}}}; }}()")
             _rw = _cpp_tagged_operand_word(gen, e.right)
             _pick = (f"mojo_truthy_word(_mojo_ao_l) ? _mojo_ao_l : ({_rw})" if e.op == 'or'
                      else f"mojo_truthy_word(_mojo_ao_l) ? ({_rw}) : _mojo_ao_l")
@@ -6466,11 +6475,7 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
                                                   gimple_ctypes.DictExpr,
                                                   gimple_ctypes.SetExpr))
         val = gen._cpp_expr(s.value)
-        if _cpp_is_tagged_word_expr(gen, s.value):
-            # `x = next(g)` on a tagged generator, or `x = y or 5` on a tagged
-            # `y`: `x` holds a box from every assignment on, so `print(x)`
-            # renders the value the word carries.
-            _cpp_mark_tagged_word(gen, name)
+        _rhs_tagged = _cpp_is_tagged_word_expr(gen, s.value)
         if name not in declared:
             # `x = StructName(args)` — see `_cpp_expr`'s CallExpr
             # struct-constructor branch just above, which already
@@ -6609,6 +6614,8 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             if gen._cpp_func_scope_decls is not None:
                 gen._cpp_func_scope_decls.append(
                     f"{gimple_exprtypes._c_to_cpp_scalar_type(ctype)} {cpp_name};")
+            if _rhs_tagged and ctype != 'char *':
+                _cpp_mark_tagged_word(gen, name)
             if _container_literal and ctype in ('MojoList *', 'MojoDict *', 'MojoSet *'):
                 init = _cpp_container_literal_init(gen, cpp_name, s.value, indent)
                 if init is not None:
@@ -6619,6 +6626,8 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
             if _acast0 is not None and ctype == 'int64_t' and _acast0 != ctype:
                 return [f"{indent}{cpp_name} = (int64_t)(intptr_t)({val});"]
             return [f"{indent}{cpp_name} = {val};"]
+        if _rhs_tagged and declared.get(name) != 'char *':
+            _cpp_mark_tagged_word(gen, name)
         if _container_literal and declared.get(name) in ('MojoList *', 'MojoDict *', 'MojoSet *'):
             init = _cpp_container_literal_init(gen, cpp_name, s.value, indent)
             if init is not None:
