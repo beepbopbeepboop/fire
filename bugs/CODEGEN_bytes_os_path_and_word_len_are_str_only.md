@@ -24,6 +24,13 @@ bytes is right, so the bytes is not corrupted by `split`; the length read is.
 - `len(x)` on a value whose kind is a word is `strlen`, so a bytes word counts to its NUL. The
   `or` of two bytes values returns a word (`'w'`), and `len` of that word is not dispatched.
 
+## Status (2026-11-02)
+
+- Step 1 `len`: PARTIAL FIX LANDED on branch — `emit_calls.py` routes `'w'`-kinded `len` through `mojo_len_word`. Runtime `mojo_len_word` exists; lowering matches doc. Could not verify with full build because unrelated pre-existing `runtime/fire_runtime.c:12651` error (`mojo_str_from_word` calls `mojo_bytes_decode` with 2 args, needs 3) breaks all `fire.py build`.
+- Step 2 `os.path.*` (`join`, `basename`, `dirname`, `exists`, `splitext`): NOT DONE; lowerings in `emit_methods.py` / `gimple_codegen.py` still use `char *` entries for most except `split` (which already has `mojo_os_path_split_w`).
+- Step 3 tests: `test_bytes_os_path_regress.py` written (3 assertions against CPython); could not run end-to-end due to runtime build failure above.
+- Next: fix `mojo_str_from_word` (unrelated, filed separately if needed), then complete `os.path.join`/`basename` word lowering, then run regression.
+
 ## Next step
 
 1. `len`: dispatch on the value's kind at run time for a word (`mojo_len_word`: a registered
