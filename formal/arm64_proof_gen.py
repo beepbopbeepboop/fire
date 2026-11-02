@@ -7084,7 +7084,7 @@ def _trap_terminating(blocks: list, words: dict) -> set:
     block that ENDS in the raw `SYS_exit` the emitter ends every bounded stop
     with (`_is_svc`), or a block that ends in a `BL` whose fall-through block
     is itself such a block.  The second is the shape of the compiler's own
-    trap — `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
+    trap — `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
     `def q(a, b): return a // b` divides by zero into a block that ends in
     `BL fflush` and then that tail — and it is the shape a `BL` "cannot
     return" means in `_unfollowable_calls`'s terminal rule a few lines below:
@@ -7166,7 +7166,7 @@ def _unfollowable_calls(code: bytes, base: int, func_entry: int,
     the model steps as a no-op but which is the machine's own `SYS_exit`), and a
     block that ends in `svc` has no `RET`, so the call returns nowhere.  The
     compiler's own trap is the measured case: `def q(a, b): return a // b`
-    (`bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
+    (`bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
     fixture) ends its divide-by-zero arm in `BL fflush` followed by that tail,
     and counting the `BL` made the halt address a call the concrete run never
     takes, which is the false `main_pre_0.pc = …` premise the doc names.  The
@@ -8786,7 +8786,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 # and `trivial` discharges it) rather than certifying a block
                 # the model cannot step — which is the walk's own half of the
                 # rule `_unfollowable_calls` states a few functions up, and the
-                # thing `bugs/FORMAL_integer_overflow_at_run_time_is_still_
+                # thing `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_
                 # untrapped.md`'s step 2 asks for: the divide-by-zero arm's
                 # `BL fflush` is no longer an unfollowable call, it is a
                 # terminus the walk closes.
@@ -12316,7 +12316,7 @@ def generate_arm64_proof(prog, code, info) -> str:
     # is the stack-floor guard every compiled function carries, and the model
     # steps through that tail rather than halting in it, so the statement
     # would weaken for a program whose run never does.  See
-    # `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s step
+    # `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s step
     # 2 for the shape: `def q(a, b): return a // b`'s divide-by-zero arm ends
     # in `BL fflush` and the `movz`/`svc` tail.
     _trap_words = {base_addr + i: int.from_bytes(code[i:i + 4], "little")
@@ -12558,7 +12558,7 @@ def generate_arm64_proof(prog, code, info) -> str:
         concrete_test = (
             f"/- NO CONCRETE RUN TEST for {func_name}: the function ends a "
             f"path in the\n"
-            f"   compiler's bounded-stop trap (`bugs/FORMAL_integer_overflow_"
+            f"   compiler's bounded-stop trap (`bugs/formal/FORMAL_integer_overflow_"
             f"at_run_time_is_still_\nuntrapped.md`: a guard branch into a "
             f"block ending in `BL fflush` and the\n"
             f"   `movz`/`svc` tail), and the model ends it earlier — its `BL` "
