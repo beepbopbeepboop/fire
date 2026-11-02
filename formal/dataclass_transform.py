@@ -28,7 +28,7 @@ three measurements that settle it:
 
   So a `dataclasses.mojo` exporting `def dataclass(cls): ...` would be a symbol
   nothing calls: the decorator is dropped before the front end ever looks at it.
-  This is `bugs/COMPILE_FAIL_decorator_application_dropped.md`, and it is why
+  This is `bugs/mid/COMPILE_FAIL_decorator_application_dropped.md`, and it is why
   `@dataclass` has to be handled where the class is, not where a function is.
 
     # 2. what a decorator DOES change is the class's own layout and equality,

@@ -31,13 +31,15 @@ _FAIL = 0
 _TIMEOUT = 0
 
 
-def compile_mojo_to_gimple_exe(mojo_src: str) -> str:
-    """Compile mojo source to GIMPLE executable, return path to executable."""
+def compile_mojo_to_gimple_exe(mojo_src: str, filename: str = '') -> str:
+    """Compile mojo source to GIMPLE executable, return path to executable. A
+    `filename` ending in `.py` compiles the text as Python source (Python scoping
+    rules apply to nested defs)."""
     from gimple_codegen import compile_to_gimple
 
     with tempfile.NamedTemporaryFile(mode='w', suffix='.c', delete=False) as f:
         # Compile mojo to GIMPLE C code
-        c_code = compile_to_gimple(mojo_src)
+        c_code = compile_to_gimple(mojo_src, filename=filename) if filename else compile_to_gimple(mojo_src)
         f.write(c_code)
         c_file = f.name
 
@@ -240,7 +242,7 @@ def dict_param_reader_is_str(name: str, mojo_src: str, fn: str, want: bool):
     return reads
 
 
-def test_gimple_stdout(name: str, mojo_src: str, expected_stdout: str):
+def test_gimple_stdout(name: str, mojo_src: str, expected_stdout: str, filename: str = ''):
     """Test that mojo code compiles to GIMPLE, executes, and prints exactly
     `expected_stdout`. Unlike test_gimple_execution's exit-code check, this
     verifies the ACTUAL printed value — needed for bugs where the compiled
@@ -250,7 +252,7 @@ def test_gimple_stdout(name: str, mojo_src: str, expected_stdout: str):
     global _PASS, _FAIL, _TIMEOUT
     exe_path = None
     try:
-        exe_path = compile_mojo_to_gimple_exe(mojo_src)
+        exe_path = compile_mojo_to_gimple_exe(mojo_src, filename)
         out = run_executable_stdout(exe_path)
         if out == expected_stdout:
             print(f"PASS  {name}")
@@ -2291,6 +2293,104 @@ def main():
     print(mk(4))
 """, "12\n")
 
+    # A `@property` read is the getter's result (it printed the bound-method
+    # pointer, and `==` compared two such pointers), and `@x.setter` is a
+    # call of the setter on assignment, not a second overload of `x`.
+    test_gimple_stdout("gimple_property_getter_and_setter", """\
+class S:
+    def __init__(self, a: int):
+        self._v = a
+    @property
+    def val(self) -> int:
+        return self._v
+    @val.setter
+    def val(self, value: int):
+        self._v = value * 2
+    def __eq__(self, o: S):
+        return self.val == o.val
+
+def main():
+    s = S(3)
+    print(s.val, s.val + 1, s == S(3))
+    s.val = 5
+    print(s.val, s == S(10))
+""", "3 4 True\n10 True\n")
+
+    # `print(x)` of a user struct is its `__str__`, else `__repr__` (it printed
+    # the object's address as a decimal), and a namedtuple whose typename
+    # differs from the bound name keeps the typename in its repr.
+    test_gimple_stdout("gimple_print_user_struct_dunder_repr", """\
+from collections import namedtuple
+
+class P:
+    def __init__(self, a: int):
+        self.a = a
+    def __repr__(self) -> str:
+        return "P(a=" + repr(self.a) + ")"
+
+_CI = namedtuple("CacheInfo", ("hits", "misses"))
+
+def main():
+    c = P(1)
+    print(c)
+    print(c, 5)
+    k = _CI(1, 2)
+    print(k, k.hits)
+""", "P(a=1)\nP(a=1) 5\nCacheInfo(hits=1, misses=2) 1\n")
+
+    # A local named like a nested generator in ANOTHER method (`g = gen()` in
+    # `test2`, `def g()` in `test`) made every `next(g)` there a "consumer" of
+    # the generator (the tagged-consumer scan is keyed by name) and refused a
+    # compilable module.
+    test_gimple_stdout("gimple_local_named_like_a_generator_elsewhere", """\
+class T:
+    def inner(self):
+        print("inner")
+    def test(self):
+        endly = False
+        def g():
+            nonlocal endly
+            try:
+                yield
+                self.inner()
+            finally:
+                endly = True
+        it = g()
+        next(it)
+        it.close()
+        print(1 if endly else 0)
+    def test2(self):
+        n = 5
+        def gen():
+            yield n
+        g = gen()
+        print(next(g))
+
+def main():
+    t = T()
+    t.test()
+    t.test2()
+""", "1\n5\n")
+
+    # A bool local captured by a nested def is boxed (`__mojo_box_new_i64`),
+    # which hid its bool-ness from `print`: `print(done)` answered `1`.
+    test_gimple_stdout("gimple_boxed_bool_local_prints_as_bool", """\
+def outer():
+    n = 0
+    done = False
+    def bump():
+        nonlocal n, done
+        n += 1
+        done = True
+    bump()
+    bump()
+    print(n, done)
+    print(done)
+
+def main():
+    outer()
+""", "2 True\nTrue\n")
+
     test_gimple_stdout("gimple_nested_class_in_every_body", """\
 class WithAttrs:
     tag = 7
@@ -3567,6 +3667,251 @@ top()
     # Tracebacks (frames stage 2): `e.__traceback__` walks tb_next from the frame that caught the
     # exception down to the one that raised it, each entry with the line it was executing at the
     # raise; a bare `raise` keeps the original traceback. `<module>` is a frame.
+    # A generator's frame is live only while it RUNS: after a yield the
+    # resumer sees its own frame again (the generator's frame stayed on the
+    # shadow stack, so `sys._getframe()` in the consuming loop named the
+    # generator, and the resumer's frame pop cancelled the wrong cleanup
+    # record), and inside the body `f_code.co_name` is the source name, not
+    # the lowered `__mgco_g_body`.
+    test_gimple_stdout("gimple_generator_frame_is_live_only_while_running", """\
+import sys
+
+def g():
+    f = sys._getframe()
+    print("in", f.f_code.co_name, f.f_back.f_code.co_name)
+    yield 1
+    f = sys._getframe()
+    print("in", f.f_code.co_name, f.f_back.f_code.co_name)
+    yield 2
+
+def caller():
+    for x in g():
+        print(x, sys._getframe().f_code.co_name, sys._getframe().f_back.f_code.co_name)
+
+def main():
+    caller()
+
+main()
+""", "in g caller\n1 caller main\nin g caller\n2 caller main\n")
+
+    # `frame.clear()`: an EXECUTING frame refuses (RuntimeError); a finished
+    # one (a traceback frame kept past its function's return) clears. A frame
+    # is an int64 word, so `.clear()` is recognised by where the receiver came
+    # from (`sys._getframe`, `tb_frame`, `f_back`, a name bound to one).
+    test_gimple_stdout("gimple_frame_clear_refuses_an_executing_frame", """\
+import sys
+
+def keep():
+    try:
+        1/0
+    except ZeroDivisionError as e:
+        fr = e.__traceback__.tb_frame
+    try:
+        fr.clear()
+        print("cleared")
+    except RuntimeError:
+        print("executing")
+    return fr
+
+def after():
+    f = keep()
+    f.clear()
+    print("finished frame clears")
+
+def caller():
+    try:
+        sys._getframe(1).clear()
+    except RuntimeError:
+        print("caller executing")
+
+def main():
+    after()
+    caller()
+
+main()
+""", "executing\nfinished frame clears\ncaller executing\n")
+
+    # `gen.gi_frame` is the generator's frame object: it names the generator
+    # (`f_code.co_name`) and `clear()` refuses a SUSPENDED one.
+    test_gimple_stdout("gimple_generator_gi_frame_clear_refuses_suspended", """\
+def g():
+    yield 1
+    yield 2
+
+def main():
+    gen = g()
+    next(gen)
+    f = gen.gi_frame
+    print(f.f_code.co_name)
+    try:
+        f.clear()
+        print("cleared")
+    except RuntimeError:
+        print("suspended refuses")
+    print(next(gen))
+
+main()
+""", "g\nsuspended refuses\n2\n")
+
+    # `frame.f_generator` is the generator the frame belongs to (None for a
+    # plain function's frame), and `gi_frame` of an exhausted generator is None.
+    test_gimple_stdout("gimple_frame_f_generator_and_exhausted_gi_frame", """\
+import sys
+
+def t1():
+    frame = sys._getframe()
+    return frame.f_generator
+
+def t2():
+    frame = sys._getframe()
+    yield frame.f_generator
+    frame = sys._getframe()
+    yield frame.f_generator
+
+def main():
+    print(t1() is None)
+    g = t2()
+    a = next(g)
+    b = next(g)
+    print(a == g, b == g)
+    for _ in g:
+        pass
+    print(g.gi_frame is None)
+
+main()
+""", "True\nTrue True\nTrue\n")
+
+    # A nested bare-`yield` generator that holds `self` and a `nonlocal` is
+    # still hoisted when its handle is only advanced with `next()` and asked
+    # for `gi_frame` (test_frame.py's test_clear_generator): `gi_frame` never
+    # reads the value slot and never hands the receiver out of the method.
+    test_gimple_stdout("gimple_nested_generator_gi_frame_use_is_not_an_escape", """\
+class T:
+    def inner(self):
+        print("inner")
+    def test_clear_generator(self):
+        endly = False
+        def g():
+            nonlocal endly
+            try:
+                yield
+                self.inner()
+            finally:
+                endly = True
+        gen = g()
+        next(gen)
+        print(1 if endly else 0)
+        try:
+            gen.gi_frame.clear()
+            print("cleared")
+        except RuntimeError:
+            print("suspended refuses")
+        print(1 if endly else 0)
+
+def main():
+    T().test_clear_generator()
+""", "0\nsuspended refuses\n0\n")
+
+    # A nested generator that assigns a name its enclosing function also
+    # binds has its OWN local of that name (Python scoping), not a capture of
+    # the outer one: the capture analysis only counted `var` declarations as
+    # inner-local, so `f = 1` inside `g` aliased the outer `f`'s box and the
+    # outer `f` printed 2 instead of 10.
+    test_gimple_stdout("gimple_nested_generator_local_shadowing_an_outer_name", """\
+def outer():
+    f = 10
+    n = 0
+    def g():
+        f = 1
+        yield f + n
+        f = 2
+        yield f + n
+    for x in g():
+        print(x)
+    print(f)
+
+def main():
+    outer()
+""", "1\n2\n10\n", filename='shadow.py')
+
+    # `StopIteration.value`: the generator's / coroutine's `return` value, the
+    # argument of `raise StopIteration(x)`, None when there is none (it printed
+    # None in every case).
+    test_gimple_stdout("gimple_stopiteration_value", """\
+def g():
+    yield 1
+    return 5
+
+def h():
+    yield 1
+
+def k():
+    yield 1
+    return "done"
+
+async def co():
+    return 7
+
+def run(it):
+    for _ in range(2):
+        try:
+            next(it)
+        except StopIteration as ex:
+            print(ex.value)
+
+def main():
+    run(g())
+    run(h())
+    run(k())
+    c = co()
+    try:
+        c.send(None)
+    except StopIteration as ex:
+        print(ex.value)
+    try:
+        raise StopIteration(9)
+    except StopIteration as ex:
+        print(ex.value)
+    try:
+        raise StopIteration
+    except StopIteration as ex:
+        print(ex.value)
+""", "5\nNone\ndone\n7\n9\nNone\n")
+
+    # `frame.f_locals` has no compiled representation yet: it is refused by name,
+    # not read as an object attribute of an int64 frame word (garbage at exit 0).
+    test_gimple_build_refusal("gimple_frame_f_locals_is_refused", """\
+import sys
+
+def f():
+    x = 1
+    return sys._getframe().f_locals
+
+def main():
+    print(f())
+""", "frame attribute `f_locals` is not modelled")
+
+    # `frame.f_trace` / `f_trace_lines` / `f_trace_opcodes` are plain settable frame
+    # attributes: None / True / False by default, reading back what was stored.
+    test_gimple_stdout("gimple_frame_f_trace_attributes_read_back", """\
+import sys
+
+def test(trace):
+    if trace:
+        sys._getframe(0).f_trace = True
+    f = sys._getframe(0)
+    print(f.f_trace_lines, f.f_trace_opcodes)
+    f.f_trace_lines = False
+    print(f.f_trace_lines)
+    f.f_trace = 42
+    print(f.f_trace == 42)
+
+def main():
+    test(False)
+    test(True)
+    print(sys._getframe(0).f_trace is None)
+""", "True False\nFalse\nTrue\nTrue False\nFalse\nTrue\nTrue\n")
+
     test_gimple_stdout("gimple_traceback_chain_names_and_lines", """\
 import sys
 
@@ -4028,6 +4373,26 @@ try:
     print(b"\\xe9".decode("ascii"))
 except UnicodeDecodeError:
     print("ascii decode refused")
+""")
+
+    # Pinning regression for CODEGEN_str_encode_compiles_to_the_identity_char_ptr:
+    # `str.encode()` must return bytes (MojoBytes*), not an identity char*.
+    test_gimple_matches_cpython("gimple_str_encode_identity_fixed", """\
+s = "abc"
+b = s.encode()
+print(b)
+print(type(b) == bytes, len(b) == 3, b == b'abc')
+""")
+
+    test_gimple_matches_cpython("gimple_str_encode_errors_and_decode_remaining", """\
+s = "é"
+print(s.encode("ascii", "replace"))
+print(s.encode("ascii", "ignore"))
+print(b"\xff".decode("ascii", "replace"))
+try:
+    b"\xff\xfe".decode("utf-8")
+except UnicodeDecodeError:
+    print("utf-8 decode refused malformed")
 """)
 
     test_gimple_stdout("gimple_set_str_rehash_unchanged", """\
@@ -5108,8 +5473,8 @@ def main():
 
     # ── A nested `def`'s ENVIRONMENT, which is a bare `malloc` block and NOT a
     # bound method, so its teardown is `free` and not `mojo_closure_free` --
-    # measured at +16 B/iteration (3.06 MB at 100k, 7.64 MB at 400k) in
-    # bugs/CODEGEN_closure_env_and_boxed_local_never_freed.md's OPEN 1. One
+    # measured at +16 B/iteration (3.06 MB at 100k, 7.64 MB at 400k) in that
+    # nested-def env-leak probe. One
     # environment is shared by BOTH of `callee`'s call sites, which is why it
     # must be freed once at the enclosing function's scope exit rather than at
     # each call. The last two consumers are the ones that make it an ownership
@@ -5318,6 +5683,44 @@ def main():
     # `nonlocal` box must keep it alive. `make_counter`'s `bump` outlives the
     # call, so the box must not be freed at `make_counter`'s exit; calling it
     # afterwards is a use-after-free if the rule is not fail-closed.
+    # A `{mut}` nested `def` READ AS A VALUE (passed to a call) builds a bound
+    # method that records its env's box with `mojo_bound_method_add_box`. The
+    # box is a struct-field read, which must be a GIMPLE temp of its own: the
+    # inline `env->field` form made gcc reject the whole statement (every
+    # stdlib method passing a `{mut}` closure to `fmt.write_sequence_to` failed).
+    test_gimple_stdout("gimple_boxed_mut_nested_def_passed_as_value", """\
+struct It:
+    var i: Int
+    def __init__(out self):
+        self.i = 0
+    def next(mut self) -> Int:
+        self.i += 1
+        return self.i
+
+def consume(element_fn: def(mut Int) raises StopIteration):
+    var k = 0
+    try:
+        for _ in range(3):
+            element_fn(k)
+    except:
+        pass
+
+struct D:
+    var base: Int
+    def __init__(out self):
+        self.base = 10
+    def go(self):
+        var iterator = It()
+        def iterate(mut w: Int) raises StopIteration {mut iterator}:
+            w = iterator.next() + self.base
+        consume(iterate)
+        print(iterator.i)
+
+def main():
+    var d = D()
+    d.go()
+""", "3\n")
+
     test_gimple_stdout("gimple_boxed_mut_local_escapes_is_kept", """\
 def make_counter(n: Int):
     var x = n
@@ -10246,8 +10649,9 @@ main()
     # read the field, so a resolved `T *` would still print `0 0` here and the
     # test would pass either way — which is exactly why the receiver-reading
     # variant lives in
-    # bugs/CODEGEN_unresolved_method_receiver_returns_its_own_pointer.md
-    # instead, where the two outcomes are actually distinguishable.
+    # the receiver-reading regression that distinguishes resolved (`2/2`)
+    # from unresolved (garbage pointer bits) — see `gimple_ctor_param_`
+    # `polymorphic_slot_reads_receiver` for the pinned case.
     test_gimple_stdout("gimple_ctor_param_polymorphic_slot_stays_unresolved", """\
 class T:
     def __init__(self, n):
@@ -10323,6 +10727,97 @@ def main():
 
 main()
 """, "2 5\n")
+
+    # Three candidates for one zero-argument method, each answering differently:
+    # every candidate's own method must be reached through the tag switch, not
+    # only the first two. CPython's answer is the reference.
+    test_gimple_stdout("gimple_ctor_param_three_candidate_poly_dispatch", """\
+class T:
+    def __init__(self, n):
+        self.n = n
+    def numel(self):
+        return self.n
+
+class U:
+    def __init__(self, n):
+        self.n = n
+    def numel(self):
+        return self.n * 10
+
+class V:
+    def __init__(self, n):
+        self.n = n
+    def numel(self):
+        return self.n + 100
+
+class L:
+    def __init__(self, w):
+        self.w = w
+    def numel(self):
+        return self.w.numel()
+
+def main():
+    print(L(T(2)).numel(), L(U(2)).numel(), L(V(2)).numel())
+
+main()
+""", "2 20 102\n")
+
+    # Candidates that disagree on the method's RETURN TYPE cannot share one
+    # dispatch: the plan must refuse, naming the polymorphic receiver, rather than
+    # fall back to the scalar no-op stub that answers the receiver's own bits.
+    test_gimple_build_refusal("gimple_poly_dispatch_refuses_return_type_disagreement", """\
+class T:
+    def __init__(self, n):
+        self.n = n
+    def numel(self):
+        return self.n
+
+class U:
+    def __init__(self, n):
+        self.n = n
+    def numel(self):
+        return 2.5
+
+class L:
+    def __init__(self, w):
+        self.w = w
+    def numel(self):
+        return self.w.numel()
+
+def main():
+    print(L(T(2)).numel())
+    print(L(U(1)).numel())
+
+main()
+""", "polymorphic receiver")
+
+    # Same refusal for a disagreement on ARITY: one candidate takes an extra
+    # argument, so no single dispatch call shape exists for both.
+    test_gimple_build_refusal("gimple_poly_dispatch_refuses_arity_disagreement", """\
+class T:
+    def __init__(self, n):
+        self.n = n
+    def numel(self):
+        return self.n
+
+class U:
+    def __init__(self, n):
+        self.n = n
+    def numel(self, k):
+        return self.n * k
+
+class L:
+    def __init__(self, w):
+        self.w = w
+    def numel(self):
+        return self.w.numel()
+
+def main():
+    print(L(T(2)).numel())
+    print(L(U(1)).numel())
+
+main()
+""", "polymorphic receiver")
 
 
     # A container SHARED ACROSS FUNCTIONS — a module global, populated by a
@@ -10579,7 +11074,7 @@ fn main():
     print(out)
 """, "45213\n54321\nolleh\n")
 
-    # bugs/PARTIAL_WORK_HANDOFF.md §4.1: a function returning a local it just
+    # PARTIAL_WORK_HANDOFF §4.1 (fixed): a function returning a local it just
     # bound was typed int64_t regardless of the local's real value, so the
     # caller printed the pointer's decimal address instead of the string.
     test_gimple_stdout("gimple_return_local_bound_to_string_literal", """\
@@ -11182,7 +11677,7 @@ bytes_keyed()
     # what lets a kind-0 zero print `0` in the same dict where a `None` prints
     # `None`. `d['n']` still prints `0` where CPython says `None` — a READ
     # does not carry the slot kind anywhere — which is deliberately NOT pinned
-    # here; see bugs/CODEGEN_dict_slot_read_loses_its_value_kind.md.
+    # here; see bugs/mid/CODEGEN_dict_slot_read_loses_its_value_kind.md.
     # A `(key, value)` pair built by `mojo_dict_items` has to carry the dict
     # slot's kind, because a pair slot is a raw int64_t and the pair is built by
     # the runtime with nothing from the dict slot travelling with it. Without it
@@ -11486,6 +11981,46 @@ for x in [1, 2]:
 for x in ['p', 'q']:
     print(x)
 """, "1\n2\np\nq\n")
+
+    # PARTIAL_WORK_HANDOFF §2.1: a container literal reaches a field through
+    # TWO constructor hops -- `Owner([10, 20])` binds Owner's param, then
+    # `Reader(self._items)` passes that field on. The call-site evidence was
+    # only ever read one hop deep, so `Reader.items` stayed `int64_t` and the
+    # loop took the dynamic dispatch path, which SIGSEGVed printing the
+    # integer as a `char *`. The one-hop shapes already worked and are kept
+    # here as the guard for the same field pass.
+    test_gimple_stdout("gimple_ctor_container_two_hops_field_iterates", """\
+class Reader:
+    def __init__(self, items):
+        self.items = items
+class Owner:
+    def __init__(self, items):
+        self._items = items
+    def read(self):
+        return Reader(self._items).items
+def main():
+    o = Owner([10, 20])
+    for i in o.read():
+        print(i)
+main()
+""", "10\n20\n")
+
+    # Negative guard for the same hop: a SCALAR forwarded through `self.<f>`
+    # must not be promoted to a container by the new route.
+    test_gimple_stdout("gimple_ctor_scalar_two_hops_stays_scalar", """\
+class Reader:
+    def __init__(self, items):
+        self.items = items
+class Owner:
+    def __init__(self, n):
+        self._n = n
+    def read(self):
+        return Reader(self._n).items
+def main():
+    o = Owner(7)
+    print(o.read() + 1)
+main()
+""", "8\n")
 
     test_gimple_stdout("gimple_for_loop_target_rebind_str_then_bytes", """\
 for x in "cd":
@@ -13859,10 +14394,10 @@ def test_namedtuple_tuple_protocol_is_refused_by_name():
 
 
 def test_nested_class_attr_reads_enclosing_local_regression():
-    """Regression for bugs/CODEGEN_nested_class_attr_reads_enclosing_local_silently_zero.md.
-    A class-level attribute whose value names an enclosing function's local
-    was lowered as a `class` statement no-op, so the attribute stayed 0 at
-    exit 0. The class statement must store the value when it executes. Each
+    """Regression: a class-level attribute whose value names an enclosing
+    function's local was lowered as a `class` statement no-op, so the
+    attribute stayed 0 at exit 0. The class statement must store the value
+    when it executes. Each
     call reads its own value right after its `class` statement, so the two
     calls must each print their own argument."""
     test_gimple_stdout("gimple_nested_class_attr_reads_local", """\
@@ -13958,7 +14493,7 @@ def main():
 
 def test_nested_class_attr_rebind_after_construction_regression():
     """Pins the answer any per-execution fix for
-    bugs/CODEGEN_nested_class_attr_reads_enclosing_local_silently_zero.md
+    a nested class attribute reading an enclosing local (fixed)
     must keep. A class attribute rebound on the CLASS after an instance was
     built is seen by that instance (Python: the instance has no attribute of
     its own, so it reads the class's current value, 3). A per-instance copy of

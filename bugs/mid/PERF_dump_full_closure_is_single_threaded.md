@@ -262,3 +262,114 @@ read-only part from the emitting part so a function is a pure function of a froz
   methods of one class only if phase B shows the shared-struct lookups dominate.
 - Is `runtime/fire_queue.c` acceptable as the one C shim, or should the queue be written in Mojo once Mojo can express
   the atomics directly? The recommendation is the C shim now, Mojo later.
+
+## Plan (2026-11-01): the `_infer_local_var_types` cache — what the write-site census says, and why a dict subclass is not the way
+
+Question left open above: which write sites must bump a version before `_infer_local_var_types` (278,673 calls, 4,081 distinct
+(function, result) pairs, ~11 s of a 146 s compile) can be memoised. Census (`grep` of `self.|gen.<table>[...] =` and
+`.update/.setdefault/.pop/.clear`, this tree): `func_return_types` 100 write sites in 11 files, `struct_field_types` 98 in 5,
+`var_types` 83 in 11 (`_struct_method_signatures` 1; `global_var_types` 0). So instrumenting the writes by hand is ~280 edits across
+the middle and backend tiers, each one a place a future write can forget to bump: not acceptable for a cache whose failure mode is a
+silent wrong C type.
+
+The tempting alternative, a `dict` subclass whose mutators bump a counter (assign it to those three tables in `GimpleGen.__init__`),
+does NOT work here: this compiler is self-hosted, and the compiled path has no dict subclassing (a `dict` is a `MojoDict *` runtime
+object; `class V(dict)` is a struct with no dict protocol), so the change would pass the interpreted reference and break
+`test_selfhost.py`. Verify that first with a 10-line probe before any further design.
+
+What does work under self-host, in order of preference:
+1. Key the memo on a CONTENT stamp of exactly what the inference read, not on write events: record the (table, key) pairs
+   `_quick_type` consults during one call (a per-call read set, collected by a thread-global list the three lookups append to when it
+   is non-None), store the values read alongside the result, and reuse the cached result only when every recorded read still
+   returns the same value. Cost: a handful of dict lookups per hit instead of a function walk. Sound by construction (a stale entry
+   cannot survive a changed read), needs no write-site audit, and uses only plain dicts/lists.
+2. Cheaper and unsound-looking: a per-pass epoch (6 `gen_module` calls x 4 fixpoint rounds = 24 epochs) — only valid if the tables are
+   frozen within a round, which the 8-results-per-function maximum suggests but does not prove. Do not do this without 1's read-set
+   check running alongside as an assertion for a full `fire.py` compile (expect 0 mismatches).
+Tests that will prove it: the generated `.ci` of the `fire.py` closure byte-identical before/after (`cmp`), `compile_stdlib.py` GCC CAS
+610/610 hits, `test_selfhost.py` 3/3, and a unit test that mutates a table entry between two calls and sees the cache miss.
+
+## Measured (2026-11-01): who calls `_infer_local_var_types`, and why the read-set cache above is not buildable either
+
+Wrapper around `rs._infer_local_var_types` on the same `compile_to_gimple(fire.py, do_imports=True)` (wall 258 s with the wrapper;
+289,513 calls, 3,905 distinct functions, up to 313 calls for one function; 25.5 s inside = ~10%, more than the 8% above). By call site:
+
+| calls | seconds | site |
+|---|---|---|
+| 63,406 | 6.2 | `module_shared._gmi_phase17_collect_appends` (the `isinstance(_n, FunctionDef)` branch) |
+| 58,141 | 9.9 | `module_gen.gen_module_impl` ~8994 (`self._inferred_var_types[name] = ...` over `all_functions`) |
+| 58,141 | 6.8 | `module_gen.gen_module_impl` ~12683 (the same loop again, after the return-type fixpoint) |
+| 35,459 + 35,459 | 0.5 + 0.6 | the two struct-method twins of those loops |
+| 26,321 / 11,734 | 0.5 / 0.2 | `gen_module_impl` ~8286 / ~8571 |
+
+So 22.9 s of the 25.5 s is three loops, each of which re-infers every function of the module being compiled once per `gen_module`
+call (the `_mk_round` fixpoint's 4 rounds x several `gen_module` calls per module) although the answer almost never changes.
+
+Why the read-set cache is dropped: `_infer_local_var_types_core` seeds a scratch copy of the WHOLE `var_types` table and calls
+`_quick_type` / `_local_value_type`, which read `func_return_types`, `struct_field_types`, `_struct_method_signatures`, class
+attrs, generator tables, ... transitively (a struct name comes from a callee's return type, not from any identifier in the body).
+Reads are as numerous and as scattered as the 280 writes counted above, so neither a write version nor a read set can be audited.
+
+Direction that CAN be sound, by analogy with `_mk_round`'s fifth win: skip a re-inference only when the INPUT TABLES' relevant
+slice is unchanged, where "relevant" is computed by a closed set, not guessed: (1) per function, record in round 1 the set of
+callee names, struct names and global names its body mentions plus the types of its parameters; (2) between rounds, track which
+`func_return_types` / `struct_field_types` entries CHANGED (diff the two snapshots once per round: a cheap dict compare, not a
+per-write hook); (3) re-infer a function only if a changed entry is reachable from its mention set through the struct graph
+(changed struct S is relevant if the body mentions S or any struct whose field types name S). Gate it on a full-compile assertion
+mode that re-infers anyway and compares (expect 0 mismatches over the fire.py closure) BEFORE the skip is enabled. Expected gain
+~15-20 s of 258 (6-8%). Not started: needs the assertion harness first.
+
+## Measured (2026-11-01, later): the "fingerprint the mentioned names" skip is NOT sound and would not pay — drop the `_infer_local_var_types` memo line of work
+
+Assertion harness (`/tmp`-style script in this commit message: wrap `_infer_local_var_types`, key each call on `(function, hash of
+func_return_types / struct_field_types / var_types entries for every name the body mentions + its params + the three table sizes)`, and
+compare the result whenever a key repeats), run over the same `fire.py` compile (wall 268 s, 290,494 calls):
+
+- repeated keys: only 40,811 of 290,494 calls (14%). The tables' SIZES move between the rounds, so most calls have a new key.
+  A skip could therefore save at most ~3.5 s (14% of the 25 s), and
+- 20 of those 40,811 repeats returned a DIFFERENT result (`selfhost_fingerprint`, `_refine_generic_return_type`, `scan_expr`,
+  `collect_assigned_types`, `_factory_return_for`, ...): a mentioned-names fingerprint misses inputs (types reached through a callee's
+  return type, per the analysis above), i.e. it would have served a stale local type from cache.
+
+So: unsound AND small. Removed from the plan. What is left in this doc is the part that actually scales: the parallel work-unit plan
+(parse the closure's modules in worker processes, then emit from a frozen snapshot), plus the tokenizer (12% parse of imports) and the
+`coro.lower`/`_gmi_binding_index` walks listed above. Do not revisit a per-function type-inference memo without a way to enumerate
+every table the inference reads; the call-count (290k for 3.9k functions) is better attacked by running fewer `gen_module` rounds per
+module than by caching their bodies.
+
+## Correction (2026-11-01): there is no "several gen_module calls per module"
+
+Counted `module_gen.gen_module_impl` calls per `self.module_name` over the same fire.py compile (wall 269 s): 61 calls, 61 distinct
+modules, every one called exactly ONCE (the histogram is `[(1, 61)]`). The "4 fixpoint rounds x 6 `gen_module` calls" arithmetic
+earlier in this doc, and the advice just above to "run fewer `gen_module` rounds per module", are wrong: imported modules are not
+`gen_module`d one by one, they are compiled inside the importer's call (`_compile_imported_module`; inclusive times nest, e.g.
+root 261 s > build_config 242 s > reflect 238 s > ...). The 290k `_infer_local_var_types` calls therefore come from loops INSIDE one
+`gen_module_impl` (the ~8994 / ~12683 loops over `all_functions` run per imported module's own pass, and `_gmi_phase17_collect_appends`
+once per function per scan), not from repeated whole-module passes. To find the repetition factor: count calls per (module, call site)
+rather than per module; the earlier census (63k + 58k + 58k for ~3.9k functions) says each function is re-inferred ~15 times in those
+three loops, so the question is which outer loop re-enters them (`_mk_round` fixpoint iterations over the module's functions, or the
+retry passes `MOJO_DEBUG` reports for generators), measured with the call-site key above.
+
+## Found (2026-11-01): the repetition is STRUCTURAL — every importer re-infers its whole transitive closure
+
+Instrumented `_infer_local_var_types` and `emit_funcs.gen_func` on a 3-module chain (`a` imports `b` imports `c`; `c` defines `cf`, `cg`;
+`b` defines `bf`; `a` defines `main`), keyed by `(gen.module_name, function)`:
+
+- `gen_func` runs once per function, in its own module's gen: `('', main) ('b', bf) ('c', cf) ('c', cg)` — emission is NOT duplicated.
+- `_infer_local_var_types` runs at each of the three loops (`module_gen` ~8994, ~12683 and `_gmi_phase17_collect_appends`) for every
+  function in the module's `all_functions`, which includes the functions of everything it imports: module `c` infers `cf, cg`; module
+  `b` infers `bf, cf, cg`; the root infers all four. Total calls = 3 sites x (sum over modules of the transitive closure's function count).
+  With fire.py's import depth that is the ~15x repetition (290k calls / 3.9k functions).
+
+So the cost is not a retry loop to remove, it is import depth. Why a naive skip of imported functions is wrong: the readers of
+`_inferred_var_types[caller]` (`module_gen` ~9061, 9088, 9196, 9331, 10622, 12760: the call-site contract scans that type a callee's
+parameters from its callers' local types) treat imported functions as CALLERS too, so the importer needs their local types. Making the
+table lazy (infer on first read) changes WHEN the tables are read relative to the refinements that land between the eager point and the
+read, which is the soundness question the memo experiments above already failed.
+
+The sound direction is the module cache, not a memo: an imported module's per-function local-type table is a pure function of that
+module's source plus its own imports' public signatures, so it can be computed once when that module is compiled (`_compile_imported_module`)
+and handed to every importer instead of recomputed from scratch in each; the contract scans then read it. That is the same boundary the
+CAS module cache already draws (`module_cache`), so the work belongs with `bugs/mid/CODEGEN_cas_py_never_compiles_...` (the closure needs
+definitions there first). Expected effect: the 25 s drops by the closure-depth factor (most of it), but it needs the equivalence harness
+first (re-infer in assertion mode, compare to the handed-down table, expect 0 mismatches over the fire.py closure).

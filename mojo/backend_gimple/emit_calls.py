@@ -328,6 +328,14 @@ def _tagged_word_value(gen, node) -> str:
     return w
 
 
+def _stop_value_attach(gen, av, base) -> None:
+    """Right after the exhaustion `mojo_exc_type_set(StopIteration)`: hand the finished generator's
+    `return` value to the exception (`ex.value`). Only a stack-switch generator (`__mgco_`) has the
+    runtime handle that holds it; a C++20-coroutine generator keeps the old (None) answer."""
+    if _as_str(base).startswith('__mgco_'):
+        gen._void_call('__mojo_gen_stop_value', [('int64_t', gen._to_int64('MojoGenerator *', av))])
+
+
 def _lower_generator_next(gen, av: str, api: dict) -> tuple[str, str]:
     # An async GENERATOR's yield channel carries a wait-descriptor
     # (is_wd=1) for every parking `await` as well as a real value (is_wd=0)
@@ -359,6 +367,7 @@ def _lower_generator_next(gen, av: str, api: dict) -> tuple[str, str]:
     gen._emit_generator_pending_exc_check(av, base, False, bb_stopiter)
     gen._emit_label(bb_stopiter)
     gen._emit(f"  mojo_exc_type_set ({gen._exc_type_id('StopIteration')});")
+    _stop_value_attach(gen, av, base)
     gen._emit("  mojo_raise ();")
     gen._emit(f"  goto {bb_merge};")
     gen._emit_label(bb_ok)
@@ -438,6 +447,7 @@ def _lower_generator_send(gen, node, av: str, api: dict) -> tuple[str, str]:
     gen._emit_generator_pending_exc_check(av, api['base'], False, bb_stopiter)
     gen._emit_label(bb_stopiter)
     gen._emit(f"  mojo_exc_type_set ({gen._exc_type_id('StopIteration')});")
+    _stop_value_attach(gen, av, api['base'])
     gen._emit("  mojo_raise ();")
     gen._emit(f"  goto {bb_merge};")
     gen._emit_label(bb_ok)
@@ -497,6 +507,7 @@ def _lower_generator_throw(gen, node, av: str, api: dict) -> tuple[str, str]:
     gen._emit_generator_pending_exc_check(av, api['base'], False, bb_stopiter)
     gen._emit_label(bb_stopiter)
     gen._emit(f"  mojo_exc_type_set ({gen._exc_type_id('StopIteration')});")
+    _stop_value_attach(gen, av, api['base'])
     gen._emit("  mojo_raise ();")
     gen._emit(f"  goto {bb_merge};")
     gen._emit_label(bb_ok)
@@ -1564,7 +1575,7 @@ def _lower_class_attr_builtin(gen, node, fn):
 def _lower_type_new(gen, node, args=None, meta=None):
     """`type(name, (Base, ..), {'attr': value, ..})` with a literal base tuple/list and a literal
     dict of string keys: a class made at run time (stage 3 of
-    bugs/CODEGEN_enum_runtime_class_creation.md). It is a class-table entry (`mojo_type_new`) whose
+    bugs/mid/CODEGEN_enum_runtime_class_creation.md). It is a class-table entry (`mojo_type_new`) whose
     bases are the listed classes and whose dict starts from the namespace; the value is a class
     handle word that `Foo.x`, `Foo.x = v` and `getattr(Foo, ..)` read through the class table.
     None when the arguments are not that literal shape (the caller refuses by name).
@@ -3528,9 +3539,10 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         if at in ('char *', 'MojoStr *'):
             sv = av if at == 'char *' else gen._stringify_value(at, av)
             enc = gen._new_val('char *', gen._intern_string('utf-8'))
+            err = gen._new_val('char *', gen._intern_string('strict'))
             return 'MojoBytes *', gen._call_expr(
                 'MojoBytes *', 'mojo_bytes_from_str',
-                [('char *', sv), ('char *', enc)])
+                [('char *', sv), ('char *', enc), ('char *', err)])
         if at in ('MojoList *', 'MojoDict *', 'MojoSet *', 'void *'):
             # `bytes(a_dict)`/`bytes(a_set)` of ints is real Python (an
             # iterable of ints is a valid bytes() source; a dict's own
@@ -3567,8 +3579,9 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         elif at in ('char *', 'MojoStr *'):
             sv = av if at == 'char *' else gen._stringify_value(at, av)
             enc = gen._new_val('char *', gen._intern_string('utf-8'))
+            err = gen._new_val('char *', gen._intern_string('strict'))
             _b = gen._call_expr('MojoBytes *', 'mojo_bytes_from_str',
-                                [('char *', sv), ('char *', enc)])
+                                [('char *', sv), ('char *', enc), ('char *', err)])
         elif at in ('MojoList *', 'MojoDict *', 'MojoSet *', 'void *'):
             # `bytearray(a_dict)`/`bytearray(a_set)` of ints - same real
             # Python shape as bytes() above.
@@ -10557,8 +10570,8 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
 
     if ot == 'MojoStr *':
         idx64 = gen._new_val('int64_t', f"(int64_t) {iv}")
-        t = gen._new_val('char', f"mojo_str_char_at ({ov}, {idx64})")
-        return 'char', t
+        t = gen._new_val('char *', f"mojo_char_at_str_cp (mojo_str_data({ov}), {idx64})")
+        return 'char *', t
 
     if ot == 'MojoBytes *':
         # b[i] -> int 0-255 (never a 1-char str; bytes is not conflated
@@ -10654,7 +10667,7 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
             # `_mojo_at_char` is not emitted here: it returns a pointer INTO
             # the string, which is not NUL-terminated and so is not a str.
             return 'char *', gen._new_val(
-                'char *', f"mojo_char_at_str ({cp}, {idx64})")
+                'char *', f"mojo_char_at_str_cp ({cp}, {idx64})")
         # A STRING index proves the container is a dict even when its own
         # type is opaque: no list is indexable by a string. `pat.fields`
         # in ast_rewriter.py is exactly this — the A5 boxed-member read
@@ -10844,16 +10857,9 @@ def _lower_subscript(gen, node: gimple_ctypes.SubscriptExpr) -> tuple[str, str]:
     # in the generated C is a reader's false lead about what the subscript
     # costs (it is how the leak below survived a reading of the C).
     if et == 'char':
-        # `mojo_char_at_str` rather than a `char`-taking helper: gimple
-        # rejects a `char` argument ("invalid argument to gimple call"),
-        # since a char is promoted to int64_t non-trivially. It is
-        # `mojo_char_to_str` reached through the string and the index, so it
-        # shares the immortal 256-entry table — a character costs no
-        # allocation. `mojo_cstr_slice(ov, i, i + 1)` was correct and leaked
-        # one malloc per character with no owner; see the boxed-receiver
-        # branch above, which is the same shape and the same fix.
+        # Codepoint-aware indexing
         return 'char *', gen._new_val(
-            'char *', f"mojo_char_at_str ({ov}, {idx64})")
+            'char *', f"mojo_char_at_str_cp ({ov}, {idx64})")
     gen._ptr_helpers_needed.add(et)
     addr = gen._new_val(ot, f"_mojo_at_{cn} ({ov}, {idx64})")
     # Can't dereference void* (no element type); return the pointer itself
@@ -11072,15 +11078,8 @@ def _lower_slice(gen, node: gimple_ctypes.SliceExpr) -> tuple[str, str]:
         return 'Span *', t
 
     if ot == 'char *':
-        # A plain (non-MojoStr-wrapped) Python str, boxed as char* — a
-        # NUL-terminated C string has no length field to bound a slice
-        # copy against, unlike MojoStr's `->len`. The generic "plain
-        # pointer" fallback below just adds `start` to the pointer,
-        # which happens to look right for `s[start:]` (the tail reads
-        # correctly to the string's own real end) but silently drops
-        # `stop` entirely for `s[:stop]`/`s[start:stop]` — no truncation
-        # ever happens. See mojo_cstr_slice in runtime/fire_runtime.c.
-        t = gen._new_val('char *', f"mojo_cstr_slice ({ov}, {start_v}, {stop_v})")
+        # Codepoint-aware slicing for char* strings
+        t = gen._new_val('char *', f"mojo_cstr_slice_cp ({ov}, {start_v}, {stop_v})")
         return 'char *', t
 
     if ot == 'int64_t':

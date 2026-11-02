@@ -206,7 +206,7 @@ def _build_generator_program_from_code(c_code: str, cpp_code: str) -> str:
 #
 # Real: c_common/tables.py's `read_table` consuming
 # `strutil._iter_significant_lines(infile)` — see
-# bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md.
+# bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md.
 
 _FOREIGN_PKG_FILES = {
     '__init__.py': '',
@@ -1118,7 +1118,7 @@ def main():
 
 
 def _regression_read_table_callable_reader():
-    # Root-cause regression for bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md:
+    # Root-cause regression for bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md:
     # `_get_reader` is a callable-valued parameter (default csv.reader); the
     # loop `for row in _get_reader(lines, ...):` in `read_table` must be
     # refused honestly (not silently wrong) until callable-local loop typing
@@ -4859,6 +4859,27 @@ def main():
     print((x * 2) + 1)
 main()
 """)
+    test_generator_matches_cpython("tagged_float_box_comparison", """\
+def gen():
+    yield 2.5
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x > 2, x == 2.5, x < 3, x >= 2.5, x <= 2.5)
+main()
+""", """\
+def gen():
+    yield 2.5
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x > 2, x == 2.5, x < 3, x >= 2.5, x <= 2.5)
+main()
+""")
     test_generator_matches_cpython("tagged_str_bound_to_name_has_length", """\
 def gen():
     yield 1
@@ -5406,8 +5427,63 @@ main()
 """, "1 23\n")
 
 
+def run_send_into_just_started_regression():
+    # Bug: CODEGEN_send_into_just_started_generator_is_not_refused
+    # `g.send(7)` on a fresh generator must raise TypeError, not resume.
+    with coro.pinned('cpp'):
+        test_generator_matches_cpython(
+            "send_into_just_started_refused_cpp", """\
+def g():
+    yield 1
+
+def main():
+    it = g()
+    try:
+        it.send(7)
+    except TypeError:
+        print("TypeError")
+main()
+""", """\
+def g():
+    yield 1
+
+def main():
+    it = g()
+    try:
+        it.send(7)
+    except TypeError:
+        print("TypeError")
+main()
+""")
+    with coro.pinned('stackswitch'):
+        test_generator_matches_cpython(
+            "send_into_just_started_refused_stackswitch", """\
+def g():
+    yield 1
+
+def main():
+    it = g()
+    try:
+        it.send(7)
+    except TypeError:
+        print("TypeError")
+main()
+""", """\
+def g():
+    yield 1
+
+def main():
+    it = g()
+    try:
+        it.send(7)
+    except TypeError:
+        print("TypeError")
+main()
+""")
+
 def run_tests():
     run_cpp_send_tests()
+    run_send_into_just_started_regression()
     run_cpp_path_multi_arg_print_tests()
     run_none_yield_tests()
     run_tagged_none_equality_tests()
@@ -6656,7 +6732,7 @@ def main():
     # `cls.method(...)` call inside a compiled @classmethod generator —
     # resolved purely by NAME (the enclosing struct's own real compiled
     # classmethod), mirroring the `self.method(...)` call case's own
-    # mechanism. See bugs/CODEGEN_enum_runtime_class_creation.md's
+    # mechanism. See bugs/mid/CODEGEN_enum_runtime_class_creation.md's
     # 2026-08-21 update, point (2). Also called via an instance, for the
     # same call-site-gap reason noted above.
     test_generator_stdout("cls_classmethod_call_in_generator", """\
@@ -8883,6 +8959,57 @@ def main():
     # AT TEST TIME (`test_generator_matches_cpython`), because every
     # failure mode in this area is a silent wrong value and a
     # hand-transcribed "expected" string is exactly how one gets enshrined.
+    # A capture-free nested `def` that itself defines a generator, and the plain
+    # helper that generator calls, are lifted to module level: the generator was
+    # one level too deep for the nested-generator machinery and fell to the C++
+    # companion, which cannot call the helper (test_frame.py's `t0`).
+    test_generator_stdout("gimple_generator_two_levels_deep_calls_a_sibling_helper", """\
+import sys
+
+class T:
+    def test(self):
+        def t0():
+            def nested():
+                frame = sys._getframe()
+                return frame.f_generator
+
+            def gen():
+                yield nested()
+
+            g = gen()
+            try:
+                return next(g)
+            finally:
+                g.close()
+        print(t0() is None)
+
+def main():
+    T().test()
+""", "True\n")
+
+    # A nested `async def` of a METHOD whose result is the coroutine object itself
+    # (test_frame.py's `t3`): lifted to module level, it is an ordinary coroutine.
+    test_generator_stdout("method_nested_async_returns_its_own_coroutine", """\
+import sys
+
+class T:
+    def test(self):
+        async def t3():
+            frame = sys._getframe()
+            return frame.f_generator
+
+        c = t3()
+        try:
+            c.send(None)
+        except StopIteration as ex:
+            print(ex.value is c)
+        else:
+            raise AssertionError('coroutine did not exit')
+
+def main():
+    T().test()
+""", "True\n")
+
     test_generator_matches_cpython("nested_async_gen_driven_by_async_for", """\
 def outer() raises:
     var acc = 0
@@ -10146,7 +10273,7 @@ def main():
 main()
 """)
 
-    # Stage 1 of run-time class objects (bugs/CODEGEN_enum_runtime_class_creation.md): an attribute
+    # Stage 1 of run-time class objects (bugs/mid/CODEGEN_enum_runtime_class_creation.md): an attribute
     # the class body never declares - `setattr(cls, ..)`, `Cls.x = v`, what a metaclass installs -
     # lives in a run-time class table found through the bases, and a @classmethod generator (or
     # method) reads it as `cls.x`; getattr / hasattr on a class use the same table.

@@ -84,6 +84,10 @@ anywhere else), these rules override any instinct to move on quickly:
   when the intent was always to gate once at the end anyway.
 
 ## Bug rounds — every round must move us closer to the end
+Base directive (user, 2026-10-31): one work round handles ONE bug, fully
+finished (including its commit) before the next round starts. Earlier batches
+of three were relaxed away on 2026-11-01: the extra scope is where rounds die
+mid-flight and leave in-flight state for the next session to reconstruct.
 Base directive (user, 2026-10-29): every work round on a bug must move the work
 forward. A round's output may not be "re-verified, still open" with no tree or
 doc change. The valid outputs of a round, in descending order of preference:
@@ -413,7 +417,7 @@ cheap (0.0-0.2 GB, 1.2-11.6 s each) and all in `coroutine` and `x86`, each
 measured one at a time before being named, with the measurement at its
 registration. (A FANOUT can state a count too, checked against the per-item
 verdicts rather than a summary line; see `observed_fanout_failures` in
-`tools/suite.py`.) `bugs/CODEGEN_ab_native_fails.md` §4 carries the full inventory
+`tools/suite.py`.) `bugs/mid/CODEGEN_ab_native_fails.md` §4 carries the full inventory
 and the reasoning for `expect=` rather than `disabled=` on each.
 
 | test | marker | subject | cost it charges every gate |

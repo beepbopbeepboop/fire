@@ -38,7 +38,7 @@
     {
       "name": "llama-work",
       "model": "llama-local/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS",
-      "count": 1,
+      "count": 0,
       "kind": "opencode",
       "recover_hours": 0,
       "class": "easy"
@@ -67,6 +67,14 @@
       "kind": "claude",
       "class": "mid",
       "recover_hours": 4.23
+    },
+    {
+      "name": "iceman",
+      "model": "opencode-go/iceman-contributor-free",
+      "count": 20,
+      "kind": "opencode",
+      "recover_hours": 2.5,
+      "class": "mid"
     },
     {
       "name": "opus",

@@ -62,7 +62,8 @@ class MojoError(Exception):
     self-hosting compiler doesn't know what to do with `super()` at all
     (tries to call it as a plain undefined function named `_super`)."""
     def __init__(self, *args):
-        Exception.__init__(self, ' '.join(str(a) for a in args))
+        self.args = args
+        Exception.__init__(self, *args)
 
 
 class MojoRaisedException(Exception):
@@ -1455,7 +1456,7 @@ class BoundClassMethod:
     `cls.<attr>` then raised "'int' object has no attribute ..."). That made
     the ORACLE disagree with the compiled path, which does pass a receiver,
     on a shape real code uses (see
-    bugs/COMPILE_FAIL_importlib_resources_readers.md's
+    bugs/mid/COMPILE_FAIL_importlib_resources_readers.md's
     `yield from cls.<sibling generator>(...)`).
 
     A separate class rather than a second receiver kind inside `BoundMethod`:
@@ -4021,7 +4022,7 @@ class Interpreter:
         undecorated body. Because the interpreter is the documented oracle
         for "the compiled path is wrong", that made the whole class of
         decorator bugs invisible — the two engines agreed on the wrong
-        answer. See bugs/COMPILE_FAIL_decorator_application_dropped.md.
+        answer. See bugs/mid/COMPILE_FAIL_decorator_application_dropped.md.
 
         Bottom-up because that is Python's order: `@a` above `@b` above
         `def f` means `f = a(b(f))`. A decorator whose application raises is

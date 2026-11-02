@@ -407,7 +407,7 @@ def publish_a3_generators(gen, meta) -> None:
     (kwonly params → "kwonly params (v0)"), so `read_table` compiles
     through the cpp path and could not resolve the foreign handle,
     refusing the whole module with `a call to unresolved callee
-    'next(...)'`. See bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md.
+    'next(...)'`. See bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md.
 
     Must be called at the A3 registration site, not from gen_module: by the
     time gen_module runs, `mojo/middle/coro.py`'s `lower()` has already
@@ -1111,6 +1111,7 @@ def _compile_imported_module(gen, module_name: str) -> tuple:
                 # generator slots; the module's own statements are appended
                 # for ITS imports, so a generator reached through a chain of
                 # imports sees every call site compiled before it.
+                gimple_codegen.gimple_gen_coro._PY_SRC[0] = str(_abspath).endswith('.py')
                 stmts, _ss_meta = gimple_codegen.gimple_gen_coro.lower(
                     stmts, gen._closure_call_stmts, module_name)
                 temp_gen._closure_call_stmts = gen._closure_call_stmts + [stmts]
@@ -3712,7 +3713,7 @@ def _compr_str_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     cond_t = gen._new_val('_Bool', f"{idx64} < {len64}")
     gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
     gen._emit_label(bb_body)
-    gen._emit(f"  {gen._cname(gen0.target)} = mojo_str_char_at ({_iv}, {idx64});")
+    gen._emit(f"  {gen._cname(gen0.target)} = mojo_char_at_str_cp (mojo_str_data({_iv}), {idx64});")
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
     gen._emit(f"  goto {bb_post};")
     gen._emit_label(bb_post)
@@ -4061,8 +4062,8 @@ def _gen_compr_append(gen, node: gimple_ctypes.Comprehension, gen0, res: str,
         # repr printed those address bytes, `{'\xef\xac\x99f': 1, ...}`. The
         # literal spelling `{k: 1 for k in pairs}` reached `_repr_value` and
         # keyed by content, so the two spellings of one key disagreed. See
-        # bugs/CODEGEN_dict_comprehension_repr_is_separately_broken.md, and
-        # CODEGEN_tuple_dict_key_hashed_by_address for the subscript
+        # CODEGEN_dict_comprehension_repr_is_separately_broken (tuple key
+        # hashed by address) and CODEGEN_tuple_dict_key_hashed_by_address for
         # spelling that was fixed the same way.
         #
         # `_emit_dict_pair_store` lowers both operands itself, so the values
