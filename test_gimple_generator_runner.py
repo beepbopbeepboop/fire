@@ -4859,6 +4859,27 @@ def main():
     print((x * 2) + 1)
 main()
 """)
+    test_generator_matches_cpython("tagged_float_box_comparison", """\
+def gen():
+    yield 2.5
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x > 2, x == 2.5, x < 3, x >= 2.5, x <= 2.5)
+main()
+""", """\
+def gen():
+    yield 2.5
+    yield "b"
+
+def main():
+    g = gen()
+    x = next(g)
+    print(x > 2, x == 2.5, x < 3, x >= 2.5, x <= 2.5)
+main()
+""")
     test_generator_matches_cpython("tagged_str_bound_to_name_has_length", """\
 def gen():
     yield 1

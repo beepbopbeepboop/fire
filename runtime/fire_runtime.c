@@ -1452,6 +1452,16 @@ int64_t mojo_float_arith_select(int64_t a, int64_t b, int64_t ires, double dres)
     return ires;
 }
 
+/* The comparison counterpart to `mojo_float_arith_select`: selects the
+ * double comparison answer `dres` when either operand word is a double box,
+ * else the integer comparison answer `ires`. */
+int mojo_float_cmp_select(int64_t a, int64_t b, int ires, int dres)
+{
+    if (mojo_is_boxed(a) && ((MojoBox *)(intptr_t)a)->kind == 'd') return dres;
+    if (mojo_is_boxed(b) && ((MojoBox *)(intptr_t)b)->kind == 'd') return dres;
+    return ires;
+}
+
 /* The box read as an integer: Python's own conversion (truncation toward
  * zero) of a DOUBLE box, and the raw word for anything else — including a
  * non-double box, whose slot is not a number at all and whose word is what
