@@ -1,7 +1,8 @@
 # CODEGEN: a str VARIABLE passed beside a list to an iterated parameter, called at module level, is not refused
 
-Found 2026-11-01 while landing the per-kind clone pass for
-`bugs/CODEGEN_mixed_list_and_str_call_sites_iterated_param.md`.
+Found 2026-11-01 while landing the per-kind clone pass for an iterated
+parameter (the bug doc for that is DELETED — fixed by commit `51f9c69d6`).
+
 
 ## Repro (compiled path, exit -11; CPython prints `4 5 d e`)
 

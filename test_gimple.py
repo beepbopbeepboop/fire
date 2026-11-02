@@ -8714,7 +8714,12 @@ main()
         The shape here is one whose BODY only prints the parameter. A body that
         ITERATES it (`for x in xs`) keeps a usage-derived `MojoList *` from
         `_infer_param_types`, which no call-site contract overrides, so it still
-        segfaults. That is bugs/CODEGEN_mixed_list_and_str_call_sites_iterated_param.md.
+        segfaults. That bug is fixed by the per-kind clone pass in commit
+        `51f9c69d6` (codegen: clone an iterated parameter per literal argument
+        kind, instead of refusing), which emits one definition per literal
+        kind and renames each call site to its argument's clone; the clone
+        pass is covered by
+        `test_an_iterated_parameter_passed_a_list_and_a_str_compiles_per_kind`.
         """
         global _PASS, _FAIL
         name = "a_str_call_beside_a_list_call_does_not_make_the_parameter_a_list"

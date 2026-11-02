@@ -11167,7 +11167,7 @@ def gen_module_impl(self, stmts):
     # a compile-time refusal: `fire.py <file>` falls back to the interpreter
     # on any build failure, which gives the right answer, where the compiled
     # binary gave a crash. The representation is the open next step in
-    # bugs/CODEGEN_mixed_list_and_str_call_sites_iterated_param.md.
+    # the per-kind clone pass (`_gmi_specialize_literal_kind_clones`).
     #
     # Narrow on purpose. A mixed parameter the body only PRINTS never
     # reaches a container guess, so it keeps the int64_t box that
@@ -11187,7 +11187,8 @@ def gen_module_impl(self, stmts):
                         "container at one call site and a str or number at "
                         "another, and the body uses it as a container; the "
                         "compiled path has no representation for that yet "
-                        "(bugs/CODEGEN_mixed_list_and_str_call_sites_iterated_param.md)")
+                        "(the per-kind clone pass only covers literal "
+                        "arguments)")
     _refuse_mixed_container_params()
 
     # A container param whose ELEMENTS the callee `isinstance()`-checks
