@@ -3880,6 +3880,30 @@ def main():
     print(fstr(4))
 """, "/t/a.cx\n3\nq\n/t/abc.c\nabc.c\n/t/abc.c\n4x\n", filename='strlocal.py')
 
+    # `os.path.join(<word-typed attribute>, <str expression>)` took the
+    # word-ABI join, which passed `(int64_t)(intptr_t)tN` -- not a GIMPLE call
+    # operand -- as the second argument: "invalid argument to gimple call".
+    # `self.temp_dir` is a word because it starts None and is later bound from
+    # a call; jit/arm64.py's `_compile_to_so` is the real instance.
+    test_gimple_stdout("gimple_os_path_join_of_a_word_attribute_and_an_fstring", """\
+import os
+
+class J:
+    def __init__(self):
+        self.temp_dir = None
+    def go(self, so_name: str) -> bool:
+        if self.temp_dir is None:
+            self.temp_dir = os.path.join("/t", "d")
+        c_file = os.path.join(self.temp_dir, f"{so_name}.c")
+        print(c_file)
+        return len(c_file) > 0
+
+def main():
+    j = J()
+    print(j.go("abc"))
+main()
+""", "/t/d/abc.c\nTrue\n", filename='joinword.py')
+
     # `StopIteration.value`: the generator's / coroutine's `return` value, the
     # argument of `raise StopIteration(x)`, None when there is none (it printed
     # None in every case).
