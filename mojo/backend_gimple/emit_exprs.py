@@ -1510,6 +1510,13 @@ def _lower_MemberExpr(gen, node) -> tuple[str, str]:
     # Attributes of a Python-level frame word (`sys._getframe(n)`), in a module that uses
     # frames. The names are specific to frame/code objects, and nothing is lowered here
     # unless a module of this compile mentions `_getframe`.
+    if len(gen._frames_mods) > 0 and node.member in ('f_locals', 'f_trace'):
+        # A frame's locals and trace hook have no representation yet (compiled C locals have no
+        # runtime names or addresses): refuse by name rather than read the word as an object
+        # attribute and answer garbage (see bugs/hard/CODEGEN_frame_model_for_test_frame.md, Plan).
+        raise RuntimeError(
+            f"cannot compile module: frame attribute `{node.member}` is not modelled on the compiled "
+            "path (bugs/hard/CODEGEN_frame_model_for_test_frame.md)")
     if len(gen._frames_mods) > 0 and node.member in _FRAME_ATTRS:
         _fr_t, _fr_v = gen.lower_expr(node.obj)
         _fr_w = gen._to_int64(_fr_t, _fr_v)

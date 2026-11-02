@@ -3878,6 +3878,19 @@ def main():
         print(ex.value)
 """, "5\nNone\ndone\n7\n9\nNone\n")
 
+    # `frame.f_locals` has no compiled representation yet: it is refused by name,
+    # not read as an object attribute of an int64 frame word (garbage at exit 0).
+    test_gimple_build_refusal("gimple_frame_f_locals_is_refused", """\
+import sys
+
+def f():
+    x = 1
+    return sys._getframe().f_locals
+
+def main():
+    print(f())
+""", "frame attribute `f_locals` is not modelled")
+
     test_gimple_stdout("gimple_traceback_chain_names_and_lines", """\
 import sys
 
