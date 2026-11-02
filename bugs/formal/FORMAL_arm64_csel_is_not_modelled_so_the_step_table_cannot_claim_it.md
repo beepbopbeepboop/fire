@@ -11,6 +11,55 @@ the certificate (`FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md`,
 another claim) is what makes the row worth landing, and the build is what stops
 a bounded worker landing it. Both have to be gone.
 
+**Status, 2026-11-01: the table row and the model are IN together — the arm,
+`work_step_csel`, and the generator's five entries land in one commit — and the
+class is measured end to end. What remains is step 0's four-branch certificate
+(the named walled leaf, reached and recorded below) and one recorded separate
+defect that sits across the class's full-file Lean check.**
+
+* **The pairing lands in §4 step 2's order.** `lib/ProofLib.lean`'s diff is
+  exactly two hunks, neither in HEAD `d376fad2`: the `arm64_step` CSEL arm
+  (34 lines, chain-last — `_STEP_CONDS` hard-codes indices, so a new
+  instruction goes last; the arm's comment records the platform-assembler
+  measurement that the mask's kept bits separate this class from CSET/CSINC/
+  CSNEG/CSINV) and the `work_step_csel` lemma it needs (100 lines, after
+  `work_step_smulh`, `hne_ret` plus 68 `bv_decide` exclusion facts). The tree
+  had arrived unpaired — the arm WIP, the row absent, and every proved arm64
+  build raising in `check_step_conds` — so both land here, in the same commit
+  as the generator's five entries, table and model moving together: the
+  `_STEP_CONDS` row `(0xffe00c00, 0x9a800000)` (idx 69), the
+  `_step_rhs`/`_step_rhs_generic` arms, `_regs_written`, and the `_WORK_STEP`
+  entry. `check_step_conds` passes; `audit_step_table` passes with exactly the
+  three pre-existing overlap notes.
+* **Verification, Lean-free:** `test_formal_proof_breadth.py` 33/33 (wall
+  435.6 s, peak 7.7 GB — the doc's two original regressions,
+  `test_a_call_to_a_second_function_is_a_proof_refusal` and
+  `test_a_list_literal_is_a_proof_refusal_not_a_crash`, now pass; the run also
+  rebuilt `lib/ProofLib.olean` with arm and lemma, so the arm builds). Wiring
+  9/9 (`test_the_step_table_and_the_model_are_the_same_set` +
+  `TestRegister31`), `test_arm64_encoders.py` green; csinc/csneg → idx 42,
+  csinv → None (pre-existing), ldur/stur → 64/65, all disjoint.
+* **The class, measured under the 12 GB slot** (`check_proof_cached`): the
+  ternary (`1 if n > 0 else 2`, one CSEL word `0x1000004d8`) closes
+  `tern_sr_70` on `exact work_step_csel …` with the model's own conclusion;
+  f3 (three branches, 772,883 bytes) checks at wall 560.1 s / peak 5.6 GB with
+  the errors EXACTLY the five `ast` ones of the defect below — all three
+  `work_step_csel` closers, the walk, the run tests check; f4 (four branches,
+  1,063,840 bytes) is killed at 1501 s CPU against the 1500 s bound (peak
+  6.3 GB, "NOT a verdict on the proof") — **step 0's four-branch boundary
+  reached for a CSEL program: the named walled leaf, unchanged by the row.**
+  The cost is the certificate, not CSEL: the same reading the 2026-10-03
+  Status got from the `B.cond` control, now with the arm in the model.
+* **Recorded, not fixed here: a separate defect in the emission path.**
+  `FORMAL_arm64_concrete_eval_eq_mojo_instances_are_emitted_when_the_ast_bridge_is_omitted.md`:
+  the concrete `eval_eq_mojo_N` instances are emitted for a body the AST model
+  cannot state, referencing an `ast` the file never declared — five
+  `Expected type must not contain free variables` errors per file, and every
+  loop-free conditional expression hits it (the ternary and both f-fixtures
+  above). It is in HEAD before this round (the gate at L12270 of `d376fad2`;
+  the diff here is only the step-table hunks), its next step is one line, and
+  its round re-runs the ternary and f3 for the full-file green.
+
 **Status, 2026-10-03 (`work/formal16-2`): the REGRESSION is fixed and pinned; the
 MODEL ROW is not, and the measurement says the order of the remaining work is the
 opposite of what §4 assumed.**
