@@ -13,6 +13,7 @@
 import os
 import subprocess
 import sys
+from exec_budget import COMPILE_TIMEOUT_S
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FORMAL_RUN = os.path.join(HERE, "test_formal_run.py")
@@ -21,7 +22,7 @@ FORMAL_RUN = os.path.join(HERE, "test_formal_run.py")
 def _row_output(name):
     proc = subprocess.run(
         [sys.executable, FORMAL_RUN, "-v", name],
-        cwd=HERE, capture_output=True, text=True, timeout=900,
+        cwd=HERE, capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S,
     )
     return proc.stdout + proc.stderr
 

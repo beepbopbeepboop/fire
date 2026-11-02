@@ -44,6 +44,7 @@ import sys
 import tempfile
 
 REPO = os.path.dirname(os.path.abspath(__file__))
+from exec_budget import RUN_TIMEOUT_S
 sys.path.insert(0, REPO)
 
 
@@ -68,7 +69,7 @@ def _build_and_run(pkg_files: dict, entry: str, td: str) -> tuple[int | None, st
         rc = driver.compile_program(entry_path, entry_src, output=out, run=False)
         if rc != 0 or not os.path.exists(out):
             return rc, ''
-        result = subprocess.run([out], capture_output=True, text=True, timeout=30)
+        result = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
         return result.returncode, result.stdout
     finally:
         os.chdir(cwd)
@@ -99,7 +100,7 @@ def _cpython_run(td: str, entry: str, as_module: bool = False) -> tuple[int, str
     argv = ([sys.executable, '-m', entry[:-3].replace('/', '.')]
             if as_module else [sys.executable, os.path.join(td, entry)])
     result = subprocess.run(argv,
-                            capture_output=True, text=True, timeout=60,
+                            capture_output=True, text=True, timeout=RUN_TIMEOUT_S,
                             cwd=td, env=env)
     return result.returncode, result.stdout
 
@@ -2259,7 +2260,7 @@ def test_nested_def_is_not_a_module_level_fn_export() -> bool:
         rc_ns, stdout_ns = _build_and_run(pkg_ns, 'main_ns.py', td)
         result = subprocess.run([os.path.join(td, 'prog')],
                                 capture_output=True, text=True,
-                                timeout=60, cwd=td)
+                                timeout=RUN_TIMEOUT_S, cwd=td)
         err_ns = result.stderr
     refusal_ok = (rc_ns == 1 and stdout_ns.strip() == ''
                   and err_ns.startswith(

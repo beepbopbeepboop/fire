@@ -56,6 +56,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 from test_formal_dylib import TestFailure, check, run_fire
+from exec_budget import RUN_TIMEOUT_S  # per-child budgets
 
 FIRE = os.path.join(HERE, "fire.py")
 
@@ -707,7 +708,7 @@ def text_of(result):
 
 def run_image(root, arch="arm64"):
     out = os.path.join(root, "prog.aout")
-    r = subprocess.run([out], capture_output=True, text=True, timeout=120)
+    r = subprocess.run([out], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
     return r.returncode, (r.stderr or r.stdout).strip()
 
 
@@ -718,7 +719,7 @@ def cpython(root, sources=("prog.mojo",)):
         [sys.executable, "-c",
          "import sys,runpy;sys.argv=['prog'];runpy.run_path(sys.argv[0])",
          os.path.join(root, sources[0])],
-        capture_output=True, text=True, timeout=120)
+        capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
     return r.returncode, (r.stderr or r.stdout).strip()
 
 

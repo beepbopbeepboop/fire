@@ -2107,7 +2107,7 @@ def test_the_ab_native_writer_keeps_its_scratch_out_of_the_repo_root():
 # The census `test_no_stale_per_child_budget_is_left_as_a_literal` walks, kept
 # as DATA so the check that reads it can be a ratchet instead of a prohibition.
 # Read the reasoning there and the per-file reading in
-# `bugs/TEST_stale_per_child_timeout_literals.md`; converting a file means
+# `bugs/TEST_stale_per_child_timeout_literals.md` (DELETED); converting a file means
 # deleting its row here in the same commit, which is the only thing that makes
 # the number a measure of progress rather than a number.
 #
@@ -2133,24 +2133,6 @@ STALE_PER_CHILD_BUDGETS = {
     'formal/x86_64_endtoend_test.py': 1,
     'formal/x86_64_model_test.py': 1,
     'scripts/bootstrap_full_test.py': 1,
-    'test_ab_native.py': 2,
-    'test_arm64_emission.py': 1,
-    'test_async_runtime_scaffold.py': 1,
-            'test_closure_capture_comptime_func_params.py': 2,
-    'test_comptime_bracket_params.py': 1,
-    'test_container_constructor_arg_um.py': 1,  # +1 2026-10-27: the pinning
-        # file's own `fire.py run` of the .mojo it writes (3e4501a42, the
-        # container-constructor pin) — a per-child wall on a run of a program
-        # the case wrote itself, which is what a residue row is for; the file
-        # does not import exec_budget, so it is residue, not subject.
-    'test_container_equality.py': 3,
-    'test_container_membership.py': 3,
-    'test_container_ordering.py': 3,
-    'test_coro_detached_async.py': 4,
-    'test_coro_future_await.py': 4,
-        'test_coro_runtime.py': 1,
-    'test_coro_scoreboard.py': 2,
-    'test_dict_tuple_key.py': 3,
     # `test_formal_admitted.py`'s row (5, 2026-10-26's c20bdf09e "5 remain as
     # data-table examples") is dropped 2026-10-27: the conversion landed, and
     # the walk now finds 0 real literals — the "data-table examples" are
@@ -2164,46 +2146,18 @@ STALE_PER_CHILD_BUDGETS = {
     # image. Both are per-child walls on an image the case built itself, which is
     # what a residue row is for; neither is the SUBJECT of its test, so neither
     # moves to `BUDGET_IS_THE_SUBJECT`.
-    'test_formal_call_proof_gen.py': 2,
-    'test_formal_cross_module.py': 2,
     'test_formal_dylib.py': 2,
-    'test_formal_external_call.py': 1,
-    'test_formal_frame_return_overloads.py': 1,
-    'test_formal_link_accounting.py': 4,  # +2 with 515fe237's printf-of-a-container cases (per-child walls on images the case builds)
-    'test_formal_peephole.py': 1,  # +1 on 2026-10-05: work/formal36-verified-peephole's
-                                   # image-run of an emitted artifact
     'test_formal_proof_breadth.py': 6,  # +1 with the bulk merge of the formal-worker branches
-    'test_formal_runtime_link.py': 1,
     'test_formal_specs.py': 1,  # +1 on 2026-10-05: work/formal36-contracts-language's
                                  # `lean` run of a generated spec proof
-    'test_formal_specialization.py': 2,
     'test_formal_sweep_cache_key.py': 2,
     'test_formal_sweep_truth.py': 1,  # +1 on 2026-10-04 (76143aaa), a row the
                                       # census missed when that file's literal
                                       # arrived with the derived host-import rows
-    'test_formal_sys.py': 2,
-    'test_formal_tempfile.py': 3,
-    'test_formal_x86_64_dylib.py': 6,  # +2 with the bulk merge of the formal-worker branches (more per-child build walls); earlier +1 on 2026-10-08: the os.path.getsize
-                                       # hostmod-dylib row's build of the reduced
-                                       # program, the same 600 s wall the file's
-                                       # other three build sites carry
-    'test_general_mutable_closure_capture.py': 2,
-    'test_import_integration.py': 4,
-    'test_link_mode.py': 3,  # +1 2026-10-24: the non-shadow stderr probe in
-                            # test_nested_def_is_not_a_module_level_fn_export re-runs the built binary to read its refusal message off stderr
     'test_metal_codegen.py': 9,
-    'test_mixed_cpp_link.py': 1,
-            'test_nonlocal.py': 2,
     'test_ptr_registry.py': 2,
-    'test_python_source_mut_capture.py': 1,
     'test_runtime_dylib.py': 1,
-    'test_selfhost.py': 2,  # +1 on 2026-10-04: work/bugs6-1's
-                                       # build_scratch_is_private_and_removed
     'test_selfhost_memory.py': 1,
-    'test_stdlib.py': 1,
-    'test_taskgroup.py': 4,
-        'test_x86_64_containers.py': 1,
-    'test_x86_64_decode.py': 1,
 }
 
 #: Files where a per-child literal is the SUBJECT rather than residue, with the
@@ -2250,7 +2204,7 @@ def test_no_stale_per_child_budget_is_left_as_a_literal():
     declared that its budgets are shared — and it is what makes this a check
     rather than a sweep of every `timeout=NN` in the repo, which is a different
     piece of work over 40 other files.  The census of that residue is in
-    `bugs/TEST_stale_per_child_timeout_literals.md`; extending this check to
+    `bugs/TEST_stale_per_child_timeout_literals.md` (DELETED); extending this check to
     cover a file that has NOT opted in is the step that doc describes, and it is
     deliberately not taken here because the mapping from "this child" to "which
     budget" is a per-file judgement.
@@ -2335,7 +2289,7 @@ def test_no_stale_per_child_budget_is_left_as_a_literal():
     # SIGTERM drain window, a host-tool probe) is named at the site rather than
     # forced into a constant that does not describe it. The census, the
     # exemptions and that reasoning are in
-    # `bugs/TEST_stale_per_child_timeout_literals.md`.
+    # `bugs/TEST_stale_per_child_timeout_literals.md` (DELETED).
     residue, subject = {}, {}
     for rel in _test_files_in_repo():
         path = os.path.join(HERE, rel)

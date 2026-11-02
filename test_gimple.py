@@ -18,7 +18,7 @@ from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S
 
 # This file's 51 per-child budgets were 60, 120, 300 and 30 seconds, spelled at
 # the call site, and every one of them is now a named constant — a quarter of the
-# residue `bugs/TEST_stale_per_child_timeout_literals.md` measured, and the file
+# residue `bugs/TEST_stale_per_child_timeout_literals.md` (DELETED) measured, and the file
 # the doc names first. The classification is five shapes, and it was read off the
 # argv at each site rather than off the number:
 #
@@ -7977,8 +7977,8 @@ def main():
             want = _sp.run([sys.executable, sp], capture_output=True, text=True).stdout
             exe = os.path.join(d, 'flagged')
             b = _sp.run([sys.executable, os.path.join(_PROJECT_DIR, 'fire.py'), 'build',
-                         '-o', exe, sp], capture_output=True, text=True, timeout=600)
-            got = (_sp.run([exe], capture_output=True, text=True, timeout=60).stdout
+                         '-o', exe, sp], capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
+            got = (_sp.run([exe], capture_output=True, text=True, timeout=RUN_TIMEOUT_S).stdout
                    if b.returncode == 0 and os.path.exists(exe) else None)
         if got != want or want != 'a\na\n':
             print(f"FAIL  {name}: got {got!r}, want {want!r}")
