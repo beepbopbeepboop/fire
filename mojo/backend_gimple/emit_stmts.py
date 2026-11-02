@@ -1335,11 +1335,9 @@ def _gen_stmt_AssignStmt(gen, node):
         _fo_t, _fo_v = gen.lower_expr(node.target.obj)
         _fv_t, _fv_v = gen.lower_expr(node.value)
         _ft_name = _as_str(node.target.member)
-        if _ft_name != 'f_trace' and isinstance(node.value, (IntLiteral, FloatLiteral, StringLiteral)):
+        if _ft_name != 'f_trace' and not gimple_exprtypes.is_python_bool_expr(gen, node.value):
             # CPython: `f_trace_lines` / `f_trace_opcodes` accept only a bool ("attribute value
-            # type must be bool"). A literal int/float/str is never a bool, so it raises here and is
-            # never stored. (Not decided by static type: bool literals lower to the same 'int' as
-            # 1 and 0, so a type test would refuse `= False`.)
+            # type must be bool"). Raise for any non-bool value (including variables holding ints).
             gen._emit_call('void', '', 'mojo_raise_type_error',
                            [('char *', gen._intern_string(
                                gimple_ctypes._c_escape("attribute value type must be bool")))])
