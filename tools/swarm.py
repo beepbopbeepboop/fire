@@ -15,7 +15,7 @@ One pass, repeated:
   4. VERIFY  after a landing, `verify_landed.py` (make check + stdlib-dylib) runs in the background on master; red files a
              fix-landed-* task that the next REFILL starts.
 The integrator and the verifier each take their own flock, so only one of each ever runs."""
-import argparse, glob, hashlib, json, os, re, subprocess, sys, time
+import argparse, fcntl, glob, hashlib, json, os, re, subprocess, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import control as C
@@ -98,14 +98,20 @@ def doc_path(doc):
 ESCALATE_AFTER = C.load_pool().get("classes", {}).get("escalate_after", 1)   # no-commit attempts before a doc moves up a class (pool.json)
 
 
+CLASS_DIR = {"easy": "", "mid": "mid/", "hard": "hard/"}   # the class IS the directory: bugs/, bugs/mid/, bugs/hard/
+
+
 def dir_class(doc):
-    """Every doc starts at the easy tier, wherever it sits; only failures move it up (reclass_on_failure)."""
-    return "easy"
+    """A doc's class is where its file sits: bugs/<doc>.md is easy, bugs/mid/ mid, bugs/hard/ hard. bugs/formal/ is the
+    formal lane's and is not in the swarm's feed globs, so it has no class here."""
+    head = doc.split("/", 1)[0] if "/" in doc else ""
+    return {"mid": "mid", "hard": "hard"}.get(head, "easy")
 
 
 def doc_class(doc, st, base):
-    """The class a doc is queued in: its escalated class if it has been reclassed, else its directory's."""
-    return st.get("cls", {}).get(base) or dir_class(doc)
+    """The class a doc is queued in: where its file is. A reclass moves the file (apply_moves), so there is no second
+    record to disagree with the location."""
+    return dir_class(doc)
 
 
 def escalate(c):
@@ -208,16 +214,128 @@ def refill(target):
 
 
 def reclass_on_failure(st, base, doc):
-    """Count a no-commit attempt at the doc's class; after ESCALATE_AFTER of them the doc moves up one class and its hold
-    is cleared, so the stronger slot can take it at once. The top class keeps its docs (they wait for a hard slot)."""
+    """Count a no-commit attempt at the doc's class; after ESCALATE_AFTER of them the doc is due one class up. The move
+    itself is apply_moves': the doc's file goes to the new class's directory once nothing unlanded touches it. The top
+    class keeps its docs (they wait for a hard slot)."""
     fails = st.setdefault("fails", {})
     fails[base] = fails.get(base, 0) + 1
     cur = doc_class(doc, st, base)
     nxt = escalate(cur)
     if nxt and fails[base] >= ESCALATE_AFTER:
-        st.setdefault("cls", {})[base] = nxt
+        st.setdefault("pending", {})[base] = nxt
         fails[base] = 0
-        log("reclass %s: %s -> %s after %d no-commit attempts" % (doc, cur, nxt, ESCALATE_AFTER))
+        log("reclass %s: %s -> %s after %d no-commit attempts (moves when nothing unlanded touches it)"
+            % (doc, cur, nxt, ESCALATE_AFTER))
+
+
+def _busy_bases(tasks):
+    """Bug bases a live or unlanded task holds: a running worker, or a live task with commits not on master. Its branch
+    carries the doc at its old path, so moving the doc under it would conflict."""
+    busy = set()
+    for t in tasks.values():
+        if C.state_of(t) in C.TERMINAL:
+            continue
+        if C.state_of(t) == "running" or C.ahead(t) > 0:
+            busy |= {c[4:] for c in t.get("claims", []) if c.startswith("bug:")}
+    return busy
+
+
+def _move_citations(old, new):
+    """Rewrite the tracked files that cite the doc's old path to its new one, so no citation dangles after the move."""
+    r = subprocess.run(["git", "grep", "-l", "-F", old], capture_output=True, text=True, cwd=C.MAIN)
+    return [f for f in r.stdout.split() if f]
+
+
+def _git(*a):
+    """(returncode, stdout) for a git command in the main checkout. Never exits: a pass must survive a failed move."""
+    r = subprocess.run(["git", *a], cwd=C.MAIN, capture_output=True, text=True)
+    return r.returncode, r.stdout
+
+
+def apply_moves(st):
+    """Move each doc due a class into its class's directory (git mv), rewrite the path citations to it, and commit the
+    move to master as one docs-only commit. A doc waits (and is retried next pass) while a worker holds it, while a branch
+    with unlanded commits touches it, while the integrator runs, or while anything it would commit is dirty in the main
+    checkout. The commit names only the paths it moves, so the user's uncommitted edits are never swept in."""
+    for base, c in st.pop("cls", {}).items():        # migration: escalations used to be a second record of the class
+        st.setdefault("pending", {}).setdefault(base, c)
+    if not st.get("pending"):
+        return
+    pend = st["pending"]
+    try:
+        with open(os.path.join(C.ctl_dir(), "integrator.lock"), "a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                log("reclass waits: the integrator is running (it holds the lock)")
+                return
+            if _git("diff", "--cached", "--name-only")[1].split():
+                log("reclass waits: the main checkout has staged changes")
+                return
+            busy = _busy_bases(C.load())
+            plan = []     # (base, old_rel, new_rel, cited_files)
+            for base, to in sorted(pend.items()):
+                if base in busy:
+                    continue
+                cands = [d for d in bug_docs(base) if "/" not in d or d.split("/", 1)[0] in ("mid", "hard")]
+                if not cands:
+                    del pend[base]               # the doc is gone or fixed: nothing to move
+                    continue
+                cur = cands[0]
+                if dir_class(cur) == to:
+                    del pend[base]
+                    continue
+                old, new = "bugs/%s.md" % cur, "bugs/%s%s.md" % (CLASS_DIR[to], base)
+                plan.append((base, old, new, _move_citations(old, new)))
+            if not plan:
+                return
+            dirty = {l[3:] for l in _git("status", "--porcelain", "--untracked-files=no")[1].splitlines()}
+            touched = {p for _, o, n, cited in plan for p in [o, n] + cited}
+            hit = sorted(touched & dirty)
+            if hit:
+                log("reclass waits: uncommitted edits to %s" % ", ".join(hit[:3]))
+                return
+            paths = sorted(touched)
+            # Every citation is rewritten in memory first, across all the moves at once: a doc may cite another doc that
+            # moves in the same pass, so a file can be both a citer and a moved doc. Then the writes, then the moves.
+            text = {}
+            for base, old, new, cited in plan:
+                for f in cited:
+                    text.setdefault(f, open(os.path.join(C.MAIN, f), encoding="utf-8").read())
+                    text[f] = text[f].replace(old, new)
+            originals = {f: open(os.path.join(C.MAIN, f), encoding="utf-8").read() for f in text}
+            done = []
+            try:
+                for f, body in text.items():
+                    open(os.path.join(C.MAIN, f), "w", encoding="utf-8").write(body)
+                for base, old, new, cited in plan:
+                    os.makedirs(os.path.dirname(os.path.join(C.MAIN, new)), exist_ok=True)
+                    rc, _ = _git("mv", old, new)
+                    if rc:
+                        raise RuntimeError("git mv %s %s failed" % (old, new))
+                    done.append((old, new))
+            except Exception:                    # put back what this pass changed, then report it
+                for old, new in reversed(done):
+                    _git("mv", new, old)
+                for f, body in originals.items():
+                    open(os.path.join(C.MAIN, f), "w", encoding="utf-8").write(body)
+                raise
+            _git("add", "--", *sorted(text))
+            msg = ("bugs: %s\n\nThe swarm moved %d doc(s) to the directory of their class (the class is the location).\n\n"
+                   "Co-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>\n") % (
+                ", ".join(sorted(b for b, *_ in plan)), len(plan))
+            mpath = os.path.join(C.ctl_dir(), "reclass-msg.txt")
+            open(mpath, "w").write(msg)
+            rc, _ = _git("commit", "-q", "-F", mpath, "--", *paths)
+            if rc:
+                raise RuntimeError("commit of the reclass failed; the moves are staged in the main checkout")
+            for base, *_ in plan:
+                del pend[base]
+            log("reclass: moved %s" % ", ".join("%s -> %s" % (o, n) for _, o, n, _ in plan))
+    except Exception as e:
+        log("reclass failed: %r" % (e,))
+    finally:
+        json.dump(st, open(state_path(), "w"), indent=1)
 
 
 def branch_head(branch):
@@ -395,6 +513,7 @@ def main():
         a.target = C.pool_total()
     while True:
         try:
+            apply_moves(load_state())            # a class change is a file move, so it lands before the feed reads the tree
             fed = feed()
             cont = continue_partial(load_state())
             probe_free()
