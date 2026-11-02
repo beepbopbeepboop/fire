@@ -9783,6 +9783,16 @@ def gen_module_impl(self, stmts):
     # `_param_dict_val_obs` keeps its own: collapsing at collection time is
     # what lets one observing site outvote a disagreeing sibling.
     self._param_container_obs: dict[str, dict[str, set]] = {}
+    # The call sites that passed a provably NON-container value (a str, a
+    # number, a bool) into each parameter. A container contract is a claim
+    # that EVERY observer is a container, and `_param_container_obs` only
+    # holds the containers, so a str call beside a list call was invisible to
+    # it: `ident([1, 2, 3])` plus `ident("abc")` made `ident`'s parameter
+    # `MojoList *`, and the str was cast to a list header and segfaulted.
+    # Recorded here so `_resolve_param_containers` can answer "disagreeing"
+    # (`''`) for that slot, which leaves it at the `int64_t` box the scalar
+    # pass already chose for a mixed slot (see `_int64_may_hold_str`).
+    self._param_noncontainer_obs: dict[str, set] = {}   # callee -> {pname}
     _free_params: dict = {}
     for _fp_s in all_functions:
         if not isinstance(_fp_s, FunctionDef):
@@ -9943,18 +9953,51 @@ def gen_module_impl(self, stmts):
         _pc_set = _pc_inner.setdefault(pname, set())
         _pc_set.add(_as_str(ctype))
 
+    def _record_param_noncontainer(callee, pname):
+        """Record that one call site passed a non-container into `pname`.
+
+        The counterpart of `_record_param_container` for the observers the
+        container table cannot hold. One such site is enough to make the
+        container contract disagree: a parameter cannot be a list at one call
+        and a string at another.
+        """
+        callee = _as_str(callee)
+        pname = _as_str(pname)
+        _nc_set = self._param_noncontainer_obs.setdefault(callee, set())
+        _nc_set.add(pname)
+
+    def _is_noncontainer_arg(a, caller_name, st):
+        """Is call argument `a` provably NOT a container?
+
+        `st` is `_arg_scalar_type`'s answer for it, already computed by the
+        caller. A container literal is never counted here, even though the
+        scalar walk gives it `void *`: it is a container and is recorded as one
+        by `_static_arg_container`. An argument that is merely untyped (None)
+        is not counted either, because "not known yet" is not "not a
+        container", and the conservative answer for it is the old one.
+        """
+        if isinstance(a, (gimple_ctypes.IntLiteral, gimple_ctypes.FloatLiteral,
+                          gimple_ctypes.BoolLiteral, gimple_ctypes.StringLiteral)):
+            return True
+        if not st:
+            return False
+        return _as_str(st) in ('char *', 'double', 'int64_t', 'int', 'bool')
+
     def _resolve_param_containers():
         """Turn the collected container observations into the contract.
 
         Same unanimity rule and the same `''`-means-disagreement marker as
         `_resolve_param_dict_vals`, for the same reason, and the same
         `sorted(...)` + index rather than `next(iter(...))` for the
-        self-hosted reason spelled there.
+        self-hosted reason spelled there. A parameter that ALSO has a
+        non-container observer is disagreeing whatever its container
+        observers say (`_param_noncontainer_obs`).
         """
         for _callee, _pm in self._param_container_obs.items():
             _dst = self._param_container_types.setdefault(_callee, {})
+            _ncm = self._param_noncontainer_obs.get(_callee) or set()
             for _pname, _types in _pm.items():
-                if len(_types) == 1:
+                if len(_types) == 1 and _as_str(_pname) not in _ncm:
                     _sole = sorted(_types)
                     _dst[_pname] = _as_str(_sole[0])
                 else:
@@ -10366,6 +10409,8 @@ def gen_module_impl(self, stmts):
                     _record_param_container(callee, pnames[i], _pc)
 
                 st = _arg_scalar_type(caller_name, a)
+                if _pc is None and _is_noncontainer_arg(a, caller_name, st):
+                    _record_param_noncontainer(callee, pnames[i])
                 if not st:
                     # An int/bool/None literal contributes NOTHING above, and
                     # that silence is the bug this records against: `f(1)`
@@ -10502,6 +10547,10 @@ def gen_module_impl(self, stmts):
                         _kwpc = _static_arg_container(_kw[1], caller_name)
                         if _kwpc is not None:
                             _record_param_container(callee, _kwn, _kwpc)
+                        elif _is_noncontainer_arg(
+                                _kw[1], caller_name,
+                                _arg_scalar_type(caller_name, _kw[1])):
+                            _record_param_noncontainer(callee, _kwn)
                         break
 
     # A CONSTRUCTOR call is a `CallExpr` whose callee is a bare `IdentExpr`
