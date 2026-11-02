@@ -12554,12 +12554,28 @@ int64_t mojo_os_path_exists_w(int64_t p)
 MojoList *mojo_os_path_splitext_w(int64_t p)
 {
     MojoBytes *b = (MojoBytes *)(intptr_t)p;
-    int64_t dot = -1;
+    /* CPython rule: split at last '.' in basename (after last '/'),
+     * only when basename has a non-dot char before that '.'. */
+    int64_t last_slash = -1;
     for (int64_t k = 0; k < b->len; k++)
+        if (b->data[k] == '/') last_slash = k;
+    int64_t base = last_slash >= 0 ? last_slash + 1 : 0;
+    int64_t dot = -1;
+    for (int64_t k = base; k < b->len; k++)
         if (b->data[k] == '.') dot = k;
-    MojoBytes *root = dot < 0 ? b : mojo_bytes_new_lit((const char *)b->data, dot);
-    MojoBytes *ext = dot < 0 ? mojo_bytes_new_lit("", 0)
-                             : mojo_bytes_new_lit((const char *)b->data + dot, b->len - dot);
+    int has_non_dot_before = 0;
+    for (int64_t k = base; k < dot; k++)
+        if (b->data[k] != '.') { has_non_dot_before = 1; break; }
+    if (dot < 0 || !has_non_dot_before) {
+        MojoBytes *root = b;
+        MojoBytes *ext = mojo_bytes_new_lit("", 0);
+        MojoList *l = mojo_list_new();
+        mojo_list_append_word(l, (int64_t)(intptr_t)root);
+        mojo_list_append_word(l, (int64_t)(intptr_t)ext);
+        return l;
+    }
+    MojoBytes *root = mojo_bytes_new_lit((const char *)b->data, dot);
+    MojoBytes *ext = mojo_bytes_new_lit((const char *)b->data + dot, b->len - dot);
     MojoList *l = mojo_list_new();
     mojo_list_append_word(l, (int64_t)(intptr_t)root);
     mojo_list_append_word(l, (int64_t)(intptr_t)ext);
@@ -12972,11 +12988,24 @@ int int_samefile(char *a, char *b) {
  * to strip the .mojo extension) returned ".mojo" itself instead. */
 char *int64_t_splitext(char *path) {
     if (!path) return "";
-    const char *dot = NULL;
+    /* CPython rule: split at last '.' in basename (after last '/'),
+     * only when basename has a non-dot char before that '.'. */
+    const char *last_slash = NULL;
     for (const char *p = path; *p; p++) {
+        if (*p == '/') last_slash = p;
+    }
+    const char *base = last_slash ? last_slash + 1 : path;
+    const char *dot = NULL;
+    for (const char *p = base; *p; p++) {
         if (*p == '.') dot = p;
     }
     if (!dot) return path;
+    /* Leading-dot rule: must have at least one non-'.' char before dot in basename */
+    int has_non_dot_before = 0;
+    for (const char *p = base; p < dot; p++) {
+        if (*p != '.') { has_non_dot_before = 1; break; }
+    }
+    if (!has_non_dot_before) return path;
     size_t root_len = (size_t)(dot - path);
     char *root = malloc(root_len + 1);
     memcpy(root, path, root_len);
