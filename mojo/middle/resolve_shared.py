@@ -1414,6 +1414,15 @@ def _infer_return_elem_type(gen, body, func_def=None,
         gen._collect_return_elems(body, acc)
         if not acc:
             return None
+        # A heterogeneous tuple whose elements mix a float with a pointer
+        # has no single element type (TypeLattice.join would pick the
+        # pointer, which then mis-types every slot). Refuse to unify such
+        # a mix: leave the int64_t default. The doc that recorded this
+        # (DELETED). See commit that fixed the self-host tuple float+ptr mix.
+        _has_float = any(gimple_ctypes.TypeLattice.is_float(t) for t in acc)
+        _has_ptr = any(gimple_ctypes.TypeLattice.is_pointer(t) for t in acc)
+        if _has_float and _has_ptr:
+            return None
         return gimple_ctypes.TypeLattice.join_all(acc)
     finally:
         gen.var_types, gen._elem_types, gen._dict_val_types, \
