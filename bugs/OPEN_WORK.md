@@ -405,7 +405,7 @@ Two causes now measured, both fixed at their call sites or worked around, and
 both worth knowing before the next bisect because they produce the same
 "it got slower and bigger" symptom by different means:
 
-- `CODEGEN_selfhost_tokenize_region_eq_quadratic.md` — the self-hosted
+- `CODEGEN_selfhost_tokenize_region_eq_quadratic` (fixed) — the self-hosted
   tokenizer's own closing-triple-quote scan is quadratic in each string
   literal (a runtime length check rescans from byte 0 on every character):
   0.05 s under python3, 2.5 minutes self-hosted, for `myinterpreter.py`,
