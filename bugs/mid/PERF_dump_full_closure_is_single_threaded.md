@@ -262,3 +262,29 @@ read-only part from the emitting part so a function is a pure function of a froz
   methods of one class only if phase B shows the shared-struct lookups dominate.
 - Is `runtime/fire_queue.c` acceptable as the one C shim, or should the queue be written in Mojo once Mojo can express
   the atomics directly? The recommendation is the C shim now, Mojo later.
+
+## Plan (2026-11-01): the `_infer_local_var_types` cache — what the write-site census says, and why a dict subclass is not the way
+
+Question left open above: which write sites must bump a version before `_infer_local_var_types` (278,673 calls, 4,081 distinct
+(function, result) pairs, ~11 s of a 146 s compile) can be memoised. Census (`grep` of `self.|gen.<table>[...] =` and
+`.update/.setdefault/.pop/.clear`, this tree): `func_return_types` 100 write sites in 11 files, `struct_field_types` 98 in 5,
+`var_types` 83 in 11 (`_struct_method_signatures` 1; `global_var_types` 0). So instrumenting the writes by hand is ~280 edits across
+the middle and backend tiers, each one a place a future write can forget to bump: not acceptable for a cache whose failure mode is a
+silent wrong C type.
+
+The tempting alternative, a `dict` subclass whose mutators bump a counter (assign it to those three tables in `GimpleGen.__init__`),
+does NOT work here: this compiler is self-hosted, and the compiled path has no dict subclassing (a `dict` is a `MojoDict *` runtime
+object; `class V(dict)` is a struct with no dict protocol), so the change would pass the interpreted reference and break
+`test_selfhost.py`. Verify that first with a 10-line probe before any further design.
+
+What does work under self-host, in order of preference:
+1. Key the memo on a CONTENT stamp of exactly what the inference read, not on write events: record the (table, key) pairs
+   `_quick_type` consults during one call (a per-call read set, collected by a thread-global list the three lookups append to when it
+   is non-None), store the values read alongside the result, and reuse the cached result only when every recorded read still
+   returns the same value. Cost: a handful of dict lookups per hit instead of a function walk. Sound by construction (a stale entry
+   cannot survive a changed read), needs no write-site audit, and uses only plain dicts/lists.
+2. Cheaper and unsound-looking: a per-pass epoch (6 `gen_module` calls x 4 fixpoint rounds = 24 epochs) — only valid if the tables are
+   frozen within a round, which the 8-results-per-function maximum suggests but does not prove. Do not do this without 1's read-set
+   check running alongside as an assertion for a full `fire.py` compile (expect 0 mismatches).
+Tests that will prove it: the generated `.ci` of the `fire.py` closure byte-identical before/after (`cmp`), `compile_stdlib.py` GCC CAS
+610/610 hits, `test_selfhost.py` 3/3, and a unit test that mutates a table entry between two calls and sees the cache miss.
