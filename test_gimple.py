@@ -18,7 +18,7 @@ from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S
 
 # This file's 51 per-child budgets were 60, 120, 300 and 30 seconds, spelled at
 # the call site, and every one of them is now a named constant — a quarter of the
-# residue `bugs/TEST_stale_per_child_timeout_literals.md` measured, and the file
+# residue `bugs/TEST_stale_per_child_timeout_literals.md` (DELETED) measured, and the file
 # the doc names first. The classification is five shapes, and it was read off the
 # argv at each site rather than off the number:
 #

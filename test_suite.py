@@ -2107,7 +2107,7 @@ def test_the_ab_native_writer_keeps_its_scratch_out_of_the_repo_root():
 # The census `test_no_stale_per_child_budget_is_left_as_a_literal` walks, kept
 # as DATA so the check that reads it can be a ratchet instead of a prohibition.
 # Read the reasoning there and the per-file reading in
-# `bugs/TEST_stale_per_child_timeout_literals.md`; converting a file means
+# `bugs/TEST_stale_per_child_timeout_literals.md` (DELETED); converting a file means
 # deleting its row here in the same commit, which is the only thing that makes
 # the number a measure of progress rather than a number.
 #
@@ -2248,7 +2248,7 @@ def test_no_stale_per_child_budget_is_left_as_a_literal():
     declared that its budgets are shared — and it is what makes this a check
     rather than a sweep of every `timeout=NN` in the repo, which is a different
     piece of work over 40 other files.  The census of that residue is in
-    `bugs/TEST_stale_per_child_timeout_literals.md`; extending this check to
+    `bugs/TEST_stale_per_child_timeout_literals.md` (DELETED); extending this check to
     cover a file that has NOT opted in is the step that doc describes, and it is
     deliberately not taken here because the mapping from "this child" to "which
     budget" is a per-file judgement.
@@ -2333,7 +2333,7 @@ def test_no_stale_per_child_budget_is_left_as_a_literal():
     # SIGTERM drain window, a host-tool probe) is named at the site rather than
     # forced into a constant that does not describe it. The census, the
     # exemptions and that reasoning are in
-    # `bugs/TEST_stale_per_child_timeout_literals.md`.
+    # `bugs/TEST_stale_per_child_timeout_literals.md` (DELETED).
     residue, subject = {}, {}
     for rel in _test_files_in_repo():
         path = os.path.join(HERE, rel)
