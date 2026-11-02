@@ -7197,7 +7197,15 @@ def _trap_terminating(blocks: list, words: dict) -> set:
         for b in blocks:
             if b["start"] in out:
                 continue
-            w = words[b["instrs"][-1]]
+            # A block's LAST word can be a data gap: when `len(code) % 4` is
+            # non-zero, the trailing partial word has no entry in `words`, and
+            # `_cfg_blocks` extends the block to it anyway (its loop reads
+            # `words.get`, so the gap is a non-branch the block simply ends
+            # in).  Read the tail the same way: a gap decodes to nothing in
+            # the model, so it is neither a `svc` tail nor a trap `BL`.
+            w = words.get(b["instrs"][-1])
+            if w is None:
+                continue
             if _is_svc(w):
                 out.add(b["start"])
                 changed = True
@@ -7219,7 +7227,11 @@ def _is_trap_bl(b: dict, words: dict, trap: set) -> bool:
     "the fall-through address is a start in `trap`" — an address that is not
     a block start is not in `trap`, and the rule does not fire on it.
     """
-    if _step_branch_index(words[b["instrs"][-1]]) != 15:
+    # `words.get`: the same block tail `_trap_terminating` reads — when the
+    # image's trailing word is partial it is a data gap with no entry, and a
+    # gap is not a `BL`, so it is not a trap `BL`.
+    w = words.get(b["instrs"][-1])
+    if w is None or _step_branch_index(w) != 15:
         return False
     return b["instrs"][-1] + 4 in trap
 
