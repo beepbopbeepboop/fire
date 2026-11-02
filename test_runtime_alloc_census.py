@@ -74,8 +74,81 @@ def _rows(stderr):
     return out
 
 
+# The emitted translation units (the .ci files the self-hosted compiler writes)
+# include fire_runtime.h and call malloc/free directly, so the census must see
+# them too. This is a two-TU case: a.c allocates, b.c frees, and the runtime is
+# its own object file. The census state must be ONE definition, in the runtime
+# object; a per-TU copy would miss the cross-TU free (live count -1 from the
+# free side) and print one report per translation unit.
+TWO_TU_A = [
+    '#include "fire_runtime.h"',
+    'void *make_crossing(void) { return malloc(64); }   /*@X*/',
+    'void *make_kept(void) { return malloc(16); }       /*@K*/',
+]
+TWO_TU_B = [
+    '#include "fire_runtime.h"',
+    'void *make_crossing(void);',
+    'void *make_kept(void);',
+    'void release(void *p) { free(p); }                 /*@FREE_X*/',
+    'int main(void) {',
+    '    void *x = make_crossing();',
+    '    void *k = make_kept();',
+    '    release(x);',
+    '    (void)k;',
+    '    return 0;',
+    '}',
+]
+
+
+def _run_two_tu(failures):
+    with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as td:
+        a_c = os.path.join(td, 'a.c')
+        b_c = os.path.join(td, 'b.c')
+        exe = os.path.join(td, 'two_tu')
+        with open(a_c, 'w') as f:
+            f.write('\n'.join(TWO_TU_A) + '\n')
+        with open(b_c, 'w') as f:
+            f.write('\n'.join(TWO_TU_B) + '\n')
+        flags = ['-O0', '-DMOJO_ALLOC_CENSUS', '-I', RUNTIME_DIR]
+        cmds = [
+            ['cc', *flags, '-c', a_c, '-o', os.path.join(td, 'a.o')],
+            ['cc', *flags, '-c', b_c, '-o', os.path.join(td, 'b.o')],
+            ['cc', *flags, '-c', os.path.join(RUNTIME_DIR, 'fire_runtime.c'),
+             '-o', os.path.join(td, 'rt.o')],
+            ['cc', os.path.join(td, 'a.o'), os.path.join(td, 'b.o'),
+             os.path.join(td, 'rt.o'), '-o', exe, '-lm'],
+        ]
+        for cmd in cmds:
+            build = subprocess.run(cmd, capture_output=True, text=True)
+            if build.returncode != 0:
+                failures.append(f'two-TU build failed: {" ".join(cmd[-3:])}: '
+                                f'{build.stderr[:800]}')
+                return
+        run = subprocess.run([exe], capture_output=True, text=True)
+        if run.returncode != 0:
+            failures.append(f'two-TU program exited {run.returncode}')
+            return
+
+    summaries = [t for t in run.stderr.splitlines()
+                 if t.startswith('alloc-census sites=')]
+    if len(summaries) != 1:
+        failures.append(f'two-TU: want one census report, got {len(summaries)}')
+    rows = _rows(run.stderr)
+
+    def expect(tag, want, note):
+        line = _marker_line(TWO_TU_A, tag)
+        got = rows.get(('a.c', line))
+        if got != want:
+            failures.append(f'two-TU {note} (a.c:{line}): got {got}, want {want}')
+
+    # The cross-TU free must drop a.c's allocation out of the live table.
+    expect('X', (0, 0, 1), 'a.c malloc freed in b.c')
+    expect('K', (1, 16, 1), 'a.c malloc kept live')
+
+
 def main() -> int:
     failures = []
+    _run_two_tu(failures)
     with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as td:
         harness_c = os.path.join(td, 'harness.c')
         exe = os.path.join(td, 'harness')

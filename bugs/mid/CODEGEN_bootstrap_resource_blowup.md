@@ -1,5 +1,41 @@
 # CODEGEN: bootstrap resource blowup and four remaining stage1/stage2 divergences
 
+## Status (2026-11-01 — partial: the census now sees emitted translation units; the census RUN is still not taken)
+
+Landed (the planning round 2 design below, implemented as written; outcome 2):
+
+- `runtime/fire_alloc_census.h` is declarations and redirect macros only (no
+  `static` state). The one definition of the table and the four bodies is in
+  `runtime/fire_runtime.c`, after its own census include, with the libc
+  allocator reached as `(malloc)(n)` and friends.
+- `runtime/fire_runtime.h` includes the census at its end under
+  `-DMOJO_ALLOC_CENSUS`, so every emitted `.ci` that includes it counts its own
+  `malloc`/`free` with `__FILE__`/`__LINE__` of the emitted file.
+  `fire_runtime.c` defines `FIRE_RUNTIME_C_TU` first, so its own system headers
+  still come before the redirect macros.
+- The redirect macros are C only. A C++ translation unit gets the prototypes,
+  not the redirect (its own calls stay uncounted, by design).
+- Test: `test_runtime_alloc_census.py` gains a two-TU case (`a.c` allocates,
+  `b.c` frees, runtime as its own object). It FAILED on the previous tree
+  (`a.c:2` got None, want `(0, 0, 1)`) and passes now, with exactly one
+  `alloc-census sites=` report per process.
+- Default build unchanged: `cc -E -P` md5 of an emitted-style TU including
+  `fire_runtime.h` is `8ac47ffdd7a439e94db1c8eaba6c06f8` before and after;
+  `cc -E -P runtime/fire_runtime.c` is `428e00ea1d26f58c692d436dd55e1944` before
+  and after.
+- C++ (`c++ -fsyntax-only`) compiles with and without the flag; the runtime
+  compiles with and without the flag.
+
+Not done (integrator jobs, and one check I could not run here):
+
+- Plan step 3's census RUN on `mojoc` (`-DMOJO_ALLOC_CENSUS`, 5-10 module closure,
+  `program` class). That decides (A) or (B). Look for `.ci` names among the
+  `alloc-census ... <file>:<line>` rows.
+- The `-fgimple` risk: function-like `malloc`/`free` macros inside `__GIMPLE`
+  bodies in emitted code. No GCC with `-fgimple` is installed on this machine
+  (`/usr/bin/gcc` is Apple clang), so this is unverified. The flag build is the
+  only place it runs.
+
 ## Status (2026-11-01 — planning round 2: the census must see emitted-TU allocations, and the obvious way to get that is wrong)
 
 Round type: planning (CLAUDE.md "Bug rounds", outcome 3). No change to the
