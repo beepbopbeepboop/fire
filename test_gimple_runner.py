@@ -10714,7 +10714,7 @@ fn main():
     print(out)
 """, "45213\n54321\nolleh\n")
 
-    # bugs/PARTIAL_WORK_HANDOFF.md §4.1: a function returning a local it just
+    # PARTIAL_WORK_HANDOFF §4.1 (fixed): a function returning a local it just
     # bound was typed int64_t regardless of the local's real value, so the
     # caller printed the pointer's decimal address instead of the string.
     test_gimple_stdout("gimple_return_local_bound_to_string_literal", """\
