@@ -5145,7 +5145,7 @@ class TestTheStackFloorGuardLeavesNoCallOnTheWalkedPath(unittest.TestCase):
     (a source conditional) regenerates its value theorem, and
     `formal/examples/mod_by_var.mojo` no longer has its universal refused by
     the div0 `fflush` — 2026-10-31 the walk closes that trap path instead
-    (`bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s step
+    (`bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s step
     2), and for this example the branch is dead anyway (the divisor register
     holds 4, which the terminal value flow proves), so the example regenerates
     its value theorem too.
@@ -5178,7 +5178,7 @@ class TestTheStackFloorGuardLeavesNoCallOnTheWalkedPath(unittest.TestCase):
             "the div0 `BL fflush` is an opaque-call boundary again: a program "
             "whose only out-of-image call is the compiler's trap has no value "
             "theorem, so the walk-side closure "
-            "(`bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s "
+            "(`bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s "
             "step 2) has been undone")
         self.assertNotRegex(
             text, r"theorem mod_by_var_reaches_call_at_",
@@ -7335,7 +7335,7 @@ class TestTheZeroDivisorGuardIsAFalseGoal(unittest.TestCase):
         the class set `cls.blind` and fail its Lean row by NAME — so accepting
         it here is not acceptance of a blind class, it is acceptance that the
         blindness is ANNOUNCED.  The walk-side fix landed since
-        (`bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
+        (`bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
         step 2) and the fixture is back on outcome 1.  What this row still
         forbids is the fourth state: an empty tail with no announcement at
         all, which is `bugs/formal/FORMAL_the_div0_guard_measurement_class_
@@ -7765,7 +7765,7 @@ class TestTheDiv0FixtureHaltsAtTheCompilerTrap(unittest.TestCase):
     SUBSTITUTED by `q_reaches_call_at_0x…` and the class above had nothing to
     trace.  The pin said the test would go red and say the fixture is
     measurable again when the walk could discharge a call on a conditional
-    path.  It did — 2026-10-31, `bugs/FORMAL_integer_overflow_at_run_time_is_
+    path.  It did — 2026-10-31, `bugs/formal/FORMAL_integer_overflow_at_run_time_is_
     still_untrapped.md`'s step 2: the `BL`'s target sits just past the code
     slice, where the map (`_gen_code_defs` appends the terminal `ret`) answers
     a word no decode arm matches, so the model runs one step and halts there,
