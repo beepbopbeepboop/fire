@@ -2240,81 +2240,31 @@ def refuse_module_level_mlir_templates(stmts) -> None:
 def subscript_index_is_a_comptime_parameter_list(e, structs_by_name=None,
                                                  callee_defs=None,
                                                  own_template_structs=None) -> bool:
-    """True when `e`'s bracketed comma list is a COMPILE-TIME PARAMETER list.
-
-    `x[a, b]` and `Foo[A, B]` are ONE node shape and not the same construct,
-    and the difference is not cosmetic: the first stores two words in a
-    container at run time and the second stores nothing anywhere, because the
-    brackets select an instantiation. So every consumer that would otherwise
-    read a bracket list as a container has to ask this before it does, and the
-    two answers in this file that were false about the second kind are what
-    cost it: the escape check's container branch in `formal/build.py`, and
-    `multi_index_kind` below, which answered "a subscript whose index is a
-    tuple" about a type application. Both were false diagnoses counted in map
-    rows 7 and 8 of the sweep work map; `formal/build.py`'s container branch
-    and this `multi_index_kind` were two readers of the same wrong question,
-    which is why they are one function now.
-
-    THE ONE ANSWER, for the same reason `multi_index_refusal_for` is the one
-    reader of the multi-index question: two functions deciding "is this bracket
-    list a comptime parameter list" would be two chances to disagree, and the
-    disagreement is silent — one of them skips a check the other still runs.
-
-    **Only a base this image can CLASSIFY gets a yes**, and all three classes
-    are facts the model already holds rather than readings of the spelling:
-
-      * a bare name in one of the type-constructor tables —
-        `type_constructor_kind(name) is not None`, which is `Pointer`,
-        `UnsafePointer`, `List`, `Dict`, `Tuple`, `Set`, `Optional`, `SIMD`,
-        `Int` and the rest — or in `POINTER_TYPE_CTORS`. These are the
-        composite types, and every one of them is spelled with brackets;
-      * a bare name `structs_by_name` says THIS MODULE declares. A struct has
-        no runtime container representation on this path at all, so a
-        subscript on its name cannot be a lookup into one — and this is the
-        half that covers a module's OWN generics, which the tables above do not
-        name (`_DequeIter[Self.ElementType, origin_of(self), False]` in
-        `std/collections/deque.mojo`, `Pair[A, B]`);
-      * a bare name `callee_defs` holds a GENERIC `FunctionDef` for, which is
-        `multi_index_kind`'s own `generic_callee` test, kept here as well
-        because the escape check has no `generic_callee` and would otherwise
-        have to re-ask this question without it (`tag[Self.T, origin_of(self)]`);
-      * a bare name in `own_template_structs`, THIS unit's own generic struct
-        TEMPLATES. They are not in `structs_by_name`, and that is not an
-        oversight: `monomorph.without_template_bodies` removes each template
-        DECLARATION from the statement list before the pipeline that builds
-        `structs` runs, because a template's body has no instantiation in scope
-        and analysing it turns a correct generic into a `len(Self.keys)`
-        refusal. The declaration has to go, but the NAME is still a
-        compile-time parameter list here, so it is handed over separately: the
-        document-string claim that `structs_by_name` "covers a module's OWN
-        generics" was false for exactly these, and `Tagged[Int, 0]()` in the
-        file that declares `Tagged` was answered with the tuple-index sentence —
-        about a container lookup the source never wrote.
-
-    Everything else answers **no**, and the caller keeps today's behaviour.
-    That includes every dotted base — `Self.IteratorType[origin_of(self)]` is
-    a comptime parameter list, and it is also the case that cannot be decided
-    from this unit alone because deciding it needs the IMPORTED module's
-    declarations, which is `formal/imports.py`'s question. Guessing it is the
-    one direction that could turn a refusal into a wrong image, so it stays
-    refused. It costs nothing here: `Self.IteratorType[…]` has a SINGLE index,
-    so the container check never sees a bracket list to mistake.
-
-    A single-element index answers no as well, and that is not a gap: a
-    one-element bracket is never a container literal, so there is nothing for
-    a caller to confuse it with. The multi-element gate lives in
-    `is_multi_index` and both callers honour it."""
+    """True when `e`'s bracketed comma list is a COMPILE-TIME PARAMETER list."""
     if not isinstance(e, F.SubscriptExpr) or not is_multi_index(e.index):
         return False
     name = _base_name(e.obj)
-    if name is None:
+    if name is not None:
+        if (type_constructor_kind(name) is not None or name in POINTER_TYPE_CTORS
+                or ((callee_defs or {}).get(name) is not None
+                    and is_generic(callee_defs[name]))
+                or (own_template_structs and name in own_template_structs)):
+            return True
+        return bool(structs_by_name) and name in structs_by_name
+    if isinstance(e.obj, F.MemberExpr) and isinstance(e.obj.obj, F.IdentExpr):
+        base_ident = e.obj.obj.name
+        if base_ident in MLIR_SELF_TYPE_NAMES:
+            return True
+        if structs_by_name and base_ident in structs_by_name:
+            return True
+        if own_template_structs and base_ident in own_template_structs:
+            return True
+        if type_constructor_kind(base_ident) is not None or base_ident in POINTER_TYPE_CTORS:
+            return True
+        if callee_defs and base_ident in callee_defs and is_generic(callee_defs[base_ident]):
+            return True
         return False
-    if (type_constructor_kind(name) is not None or name in POINTER_TYPE_CTORS
-            or ((callee_defs or {}).get(name) is not None
-                and is_generic(callee_defs[name]))
-            or (own_template_structs and name in own_template_structs)):
-        return True
-    return bool(structs_by_name) and name in structs_by_name
+    return False
 
 
 def subscript_is_a_type_application(e, structs_by_name=None,
@@ -2367,7 +2317,7 @@ def type_position_nodes(root, structs_by_name=None, callee_defs=None) -> set:
     exempt a subscript whose BASE is a value: `h.tag[Int, s]` is a genuine index
     of a genuine value, it is not in a type position, and answering "type
     application" for it would drop a real frame-escape check
-    (`bugs/formal/FORMAL_dotted_base_bracket_list_is_not_classified.md`). Every
+    (dotted base bracket lists). Every
     bracket list that is not one of the two compile-time ones keeps today's
     answer, refusal included — "possibly wrong" is the direction this backend
     refuses in everywhere else."""

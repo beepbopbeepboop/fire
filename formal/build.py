@@ -10969,7 +10969,7 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
     # this image can classify, so a bracket list over a name it cannot — a
     # dotted `h.tag[…]`, an unknown name, a local — takes the refusal below
     # exactly as before, and that limit is written down in
-    # `bugs/formal/FORMAL_dotted_base_bracket_list_is_not_classified.md`. Every escape
+    # dotted base bracket list classification (fixed). Every escape
     # the branch is really for (`d[s, 1] = 5`, `var k = l[s, 1]`, `[s, 1]`) has a
     # base that is a dict or a list, and no type name is either.
     type_index_ids = {
