@@ -105,7 +105,6 @@ BASELINE = {
 # reason the header above gives for its prefixed entry.
 BARE_BASELINE = {
     'CRASH.md': 1,
-    'bugs/FORMAL_arm64_proof_gen_sp_tracking_drops_the_imm_shift.md': 1,
     'bugs/OPEN_WORK.md': 1,
     'bugs/formal/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md': 1,
     'bugs/formal/FORMAL_arm64_known_proof_gaps.md': 7,
