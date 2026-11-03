@@ -6,7 +6,7 @@ pinned — case by case, on sources with known answers.
 
 `tools/formal_declared_param_census.py` is the instrument behind row B of
 `“FORMAL_receiver_stored_in_a_field: a frame address in a struct field”` and behind
-`bugs/FORMAL_declared_parameter_against_its_call_sites.md`: it reads one `.mojo`
+`bugs/formal/FORMAL_declared_parameter_against_its_call_sites.md`: it reads one `.mojo`
 file, finds the parameters whose declared type is a struct of that file, and
 reports the ones where EVERY call site in that file hands over something else —
 which is exactly the shape `model.frame_declared_parameter_refusal` refuses.

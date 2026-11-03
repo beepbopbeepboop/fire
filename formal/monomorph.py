@@ -16,7 +16,7 @@ of any kind and was refused by the dylib export gate with
 `formal/build.py::no_public_api_reason`'s "a parametric type has no single
 boundary layout either".  That refusal is correct about the file and it is also
 the second wall behind the 165-file row in
-the `b8` round of `bugs/FORMAL_sweep_work_map.md` §4.1: past every codegen refusal
+the `b8` round of `bugs/formal/FORMAL_sweep_work_map.md` §4.1: past every codegen refusal
 in `binary_heap.mojo`, the module-dylib build still failed there.
 
 THE SHAPE OF THE ANSWER, and why it is a generated source file rather than a
@@ -70,7 +70,7 @@ be built first.  A comptime specialization of a template defined in ANOTHER
 module (`tile[2, 3](…)`) is likewise not a demand here — its bracket items are
 values rather than types, and the local-specialization machinery
 (`mojo/middle/comptime.specialization_args` on both backends) already owns the
-answer for a template this unit compiles.  `bugs/FORMAL_generic_monomorph_scope.md`
+answer for a template this unit compiles.  `bugs/formal/FORMAL_generic_monomorph_scope.md`
 records what that leaves.
 """
 
@@ -798,7 +798,7 @@ def type_arg_text(expr, values=()) -> str:
     so asking it would refuse `Pair2[Float32]()`, which is correct Mojo.  A name that nothing
     binds is a type; a name something binds is a value unless a type is
     declared with that spelling, and the second half of that sentence is the
-    documented limit (`bugs/FORMAL_generic_monomorph_scope.md`): a type
+    documented limit (`bugs/formal/FORMAL_generic_monomorph_scope.md`): a type
     declared in the CONSUMER's own file is refused rather than instantiated.
 
     `F.IntLiteral` and every expression form are refused at the TOP LEVEL, which
@@ -810,7 +810,8 @@ def type_arg_text(expr, values=()) -> str:
     **A bare literal is nevertheless read as a VALUE argument when the same
     bracket also names a TYPE, and `_bracket_type_args` is where that rule
     lives.** `Tagged[Int, 0]()` on `struct Tagged[T, origin: Int]` is
-    `bugs/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md` §2 row 4:
+    `FORMAL_an_explicit_parameter_list_naming_a_comptime_value` (literal
+    comptime-value argument on a mixed bracket, fixed 2026-10-08) §2 row 4:
     the second element is a comptime VALUE and every other element is a type, so
     the bracket is a cross-module instantiation rather than the all-values
     comptime specialization `tile[2, 3]` is. The substitution itself already
@@ -926,7 +927,15 @@ def _bracketed_calls_pair(consumer_src: str) -> tuple:
         from formal import model as M                  # lazy — cycle
         from formal.build import _names_bound_in       # lazy — cycle
         stmts = _consumer_statements(consumer_src)
-        module_level = set(M.collect_module_symbols(stmts) or {})
+        syms = M.collect_module_symbols(stmts) or {}
+        module_level = set()
+        for name, sym in syms.items():
+            # Module-level comptime aliases with no literal (e.g. ImmStaticOrigin)
+            # must remain passable as value arguments when the declaration expects
+            # a value parameter; do not treat them as bound values.
+            if getattr(sym, "site", None) == "comptime" and getattr(sym, "literal", None) is None:
+                continue
+            module_level.add(name)
         typed: dict = {}
         permissive: dict = {}
         for st in stmts:
@@ -1127,7 +1136,7 @@ def demands(consumer_src: str, templates, own=()) -> dict:
 
     An argument that is not a concrete type spelling is DROPPED, not refused,
     and the distinction is worth stating: the consumer is not wrong, this module
-    simply does not cover that construct (`bugs/FORMAL_generic_monomorph_scope.md`
+    simply does not cover that construct (`bugs/formal/FORMAL_generic_monomorph_scope.md`
     names what it is), and a build that refused here would refuse correct Mojo.
     The gap is reported by the export gate or by the bracketed-callee check, both
     of which ask a better question than this one.
@@ -1370,7 +1379,7 @@ def rewrite_instantiation_uses(stmts, demap: dict) -> int:
     `formal/model.py::subscript_callee_names` exists to make — see its own
     docstring for why exempting by NAME rather than by position exempts every
     read of that name in the function.  What a bare type ANNOTATION binds to is
-    not covered here; `bugs/FORMAL_generic_monomorph_scope.md` records it.
+    not covered here; `bugs/formal/FORMAL_generic_monomorph_scope.md` records it.
 
     The position copied onto the replacement is the SUBSCRIPT'S BASE's, not the
     subscript's: `fire_compiler.Parser` leaves `SubscriptExpr.line`/`col` at 0
@@ -1565,37 +1574,16 @@ def _bracket_type_args(sub, values=()) -> list:
     a name no importer computed.  `bracket_items` is that decision, in one place
     both readers of this bracket now share.
 
-    **A bare literal survives only in a MIXED bracket.**  `type_arg_text` refuses
-    a top-level literal because a bracket of values alone is the comptime
-    specialization (`tile[2, 3]`) the local machinery already answers, and
-    demanding `tile_2_3` for it would publish a second symbol for a body the
-    build already emits.  But a bracket that writes a TYPE as well is not that
-    shape: `Tagged[Int, 0]` on `struct Tagged[T, origin: Int]` is a boundary
-    instantiation whose second element is a value, and before this rule it was
-    dropped here and then refused downstream as a "compile-time
-    explicit-parameter list" the model cannot bind.  So a literal (`0`, `-3`,
-    `"x"`, `True`, `None`) is read through `_value_literal_arg_text` only when at
-    least one OTHER item spelled a type; an all-values bracket is returned `[]`
-    exactly as before.  The substitution end needs no kind table:
-    `monomorphize_source` replaces the parameter's name whole-word whether the
-    parameter was declared a type or a value.
+    **A bare literal is dropped entirely here.**  Literal admission goes through
+    the permissive reader (`_bracket_all_args`) plus declaration-aware
+    `value_demands_for`/`instantiate` — the strict reader must not see bare
+    literals at all.
     """
     items = bracket_items(sub)
     spelled = [type_arg_text(i, values) for i in items]
-    if not spelled or all(spelled):
-        return spelled
-    if not any(spelled):
+    if not spelled or any(s == "" for s in spelled):
         return []
-    mixed = []
-    for item, sp in zip(items, spelled):
-        if sp:
-            mixed.append(sp)
-            continue
-        value = _value_literal_arg_text(item)
-        if not value:
-            return []
-        mixed.append(value)
-    return mixed
+    return spelled
 
 
 def _value_literal_arg_text(expr) -> str:

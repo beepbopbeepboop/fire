@@ -52,7 +52,7 @@ rather than of this module, and every function below is shaped by them.
     with a `struct tm` or a named tuple, and a struct is a frame blob (see
     `os/_syscalls.mojo`'s note on `stat`), so they are absent rather than
     answered with a plausible number — and each one is named in
-    `bugs/FORMAL_time_struct_shaped_answers.md`.
+    `bugs/formal/FORMAL_time_struct_shaped_answers.md`.
 
     What that doc has since MEASURED is worth stating here, because it is what a
     reader has to check before deciding what the fix is: **reading** a C
@@ -76,7 +76,7 @@ rather than of this module, and every function below is shaped by them.
     module-level name is not exported as a word across a dylib boundary —
     there is no storage for one, because every value a formal program can name
     lives in a function's own stack scratch
-    (`bugs/FORMAL_module_state_no_storage.md`). So each is a zero-argument
+    (`bugs/formal/FORMAL_module_state_no_storage.md`). So each is a zero-argument
     function and `time.CLOCK_REALTIME` is spelled `CLOCK_REALTIME()`. This is
     the same rule `os` follows for `os.sep`, and the same reason.
 

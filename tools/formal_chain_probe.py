@@ -8,7 +8,7 @@ answer to "what is the FIRST thing this file cannot build" and the wrong answer
 to "what is wrong with this file", and the sweep's own work map says so in one
 line — *"FILES BLOCKED IS AN UPPER BOUND: a file's terminal cause is the first
 refusal its build walk reaches, so fixing one moves the file to the next with the
-count unchanged"* (the `b7` round of `bugs/FORMAL_sweep_work_map.md` §3). This tool
+count unchanged"* (the `b7` round of `bugs/formal/FORMAL_sweep_work_map.md` §3). This tool
 measures the rest of the chain, one link per round.
 
 WHAT IT DOES, per round
@@ -37,7 +37,7 @@ whose largest group was 37 of 46 files (measured 2026-10-04 on
     PROSE (`... it is imported from `std.format._utils`, so the call has to bind
     a symbol `std.format._utils` exports`) rather than in that prefix. It is
     also the single largest cause in the tree: 123 files, per
-    `bugs/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`
+    `bugs/formal/FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md`
     §1.
 
 That second shape used to fall into the catch-all `<no module named>` group,
@@ -113,7 +113,7 @@ import argparse
 # missing one and costs the same. `tools/formal_host_import_shapes.py`
 # reads it as `DEAD` and `formal_sweep_causes.py`'s `mentions` column is
 # the older measure of the same thing; see
-# `bugs/FORMAL_a_call_result_field_access_has_no_representation.md` §3.
+# `bugs/formal/FORMAL_a_call_result_field_access_has_no_representation.md` §3.
 import os
 import pathlib
 import re

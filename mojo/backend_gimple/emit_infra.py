@@ -37,13 +37,14 @@ import mojo.backend_gimple.device_glue as _gmi_glue
 # re-export is invisible to the self-hosted call lowering while this module is
 # inside the compiler's own import cycle, and the call became a weak
 # "unavailable in compiled mode" stub returning 0.
-from fire_compiler import for_target_is_tuple, target_slots, _as_list
+from fire_compiler import for_target_is_tuple, for_target_single_name, target_slots, _as_list
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.lambdareduce as gimple_lambdareduce
 import mojo.middle.comptime as comptime_eval
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 import gimple_codegen
+from build_config import find_gxx, runtime_dir as _bc_runtime_dir
 import mojo.backend_gimple.emit_methods as gmp
 import mojo.backend_gimple.emit_calls as ggc
 import ownership_destruct
@@ -65,7 +66,7 @@ from mojo.middle.infra_infer import *  # noqa: F401,F403
 from mojo.middle.infra_infer import (
     opaque_container_locals,
     _FC_SEP, _POINTER_CTOR_NAMES, _as_ident_node, _as_int, _as_member_node, _as_set,
-    _as_str, _block_terminates, _closure_info_for_ident, _generator_value_ctype_for_next, _collect_return_types, _build_analysis_funcs, _build_analysis_structs, _build_fresh_returning, _string_uses_ok, _key_views_ok, _list_elements_ok, _lambda_owned, _no_closure_escapes, _compute_closure_candidates, _compute_scoped_closure_candidates, _compute_owned_free_candidates, _compute_scoped_free_candidates, _compute_int_keyed_dicts, _scope_decl_name, _is_ctor_display, _empty_ctor_ctype,
+    _as_str, _block_terminates, _closure_info_for_ident, _generator_value_ctype_for_next, _collect_return_types, _build_analysis_funcs, _build_analysis_structs, _build_fresh_returning, _build_fresh_closure_returning, _string_uses_ok, _key_views_ok, _list_elements_ok, _lambda_owned, _call_value_owned, _no_closure_escapes, _compute_closure_candidates, _compute_scoped_closure_candidates, _compute_scoped_fresh_closure_candidates, _compute_owned_free_candidates, _compute_scoped_free_candidates, _compute_int_keyed_dicts, _scope_decl_name, _is_ctor_display, _empty_ctor_ctype,
     _function_has_reachable_fallthrough, _infer_param_types, _infer_return_type, _is_free_eligible_function, _is_known_field, _known_field_type,
     _pair_key, _prepass_list_elem, _ptr_slot_in_range, _resolve_member_expr_type, _resolve_type, _scan_container_elems,
     _seed_addressed_locals, _type_of
@@ -77,7 +78,7 @@ from mojo.middle.infra_infer import (
 from mojo.middle.calls_shared import user_dunder_repr_call
 import mojo.middle.module_shared as msh
 import mojo.middle.itcursor as itc
-from mojo.middle.stmts_shared import _annotation_container_elem_type
+from mojo.middle.stmts_shared import _annotation_container_elem_type, _iter_ast
 # The extended-unpacking (`*rest`) slot arithmetic, shared with the
 # for-loop lowering that has the same per-slot walk — see
 # `_compr_list_loop`'s own comment and `starred_slot_index`'s docstring.
@@ -237,6 +238,11 @@ def _reset_func(gen, body: list = None, params: list = None,
     # per-function is not merely safe, it is the only scope in which the
     # name means anything.
     gen._boxed_vals = set()
+    # `_tagged_word_vals` is the subset of `_boxed_vals` temps that are a
+    # TAGGED generator word (a yield-kind box from `next(g)` on a mixed-kind
+    # generator). Same scope and reason as `_boxed_vals`: temp names restart
+    # per function, so a stale entry would tag an unrelated temp.
+    gen._tagged_word_vals = set()
     # Same scope and same reason as `_boxed_vals` above: the writers are
     # `_lower_IdentExpr`'s two function-value branches and the sole reader is
     # `print`, all inside one function's lowering, and the keys are SSA temp
@@ -353,6 +359,12 @@ def _reset_func(gen, body: list = None, params: list = None,
     # safe to seed only where the answer is provable.
     gen._int_word_vals.clear()
     gen._fresh_vals.clear()   # per function: temp names repeat across functions
+    # (TEMPs holding a fresh closure, `_fresh_closure_vals`, reset by REBIND in
+    # the ownership-assignment section below, never in place: a nested lifted
+    # closure's `save_func_state` holds a reference to the current object, and
+    # an in-place `.clear()` here would empty the saved state the enclosing
+    # function is restored to. Rebinding detaches `gen` from the saved object
+    # first, exactly as `_fresh_vals`'s own reset does.)
     # The four the ownership work added are ASSIGNED here rather than cleared,
     # and the difference is not a style choice: they are not in
     # `GimpleGen.__init__`, so this is where they come into existence, and a
@@ -373,6 +385,12 @@ def _reset_func(gen, body: list = None, params: list = None,
     # is the malloc'd environment emit_calls' constructor paired with it, so
     # both are one allocation unit and one free.
     gen._closure_vals: set = set()
+    # The VALUES (temps) holding a FRESH CLOSURE a call returned: a callee
+    # proven to hand back a brand-new capturing closure (returns_fresh_closure),
+    # so the local bound to it may own the value — environment, `{mut}` boxes
+    # and bound method — and free it with `mojo_closure_free` at its scope exit.
+    # The caller-side counterpart of `_closure_vals` (a local lambda).
+    gen._fresh_closure_vals: set = set()
     # The NAMES of owned locals bound to a closure; the free is emitted for the
     # name at the scope exit.
     gen._owned_closure_names: set = set()
@@ -400,6 +418,11 @@ def _reset_func(gen, body: list = None, params: list = None,
     # unpack whose source carries no element type): same question, asked of
     # the name, because a later read of the local is the local itself.
     gen._dyn_word_locals: set = set()
+    # Values and locals known to hold a CLASS made at run time (`type(n, bases, ns)`) or an
+    # INSTANCE of one (a call of such a class): `('v', temp)` / `('l', local)` -> 'class' |
+    # 'inst'. A method call or `isinstance` on them goes to the class table, never to the
+    # container/struct method guesses an untyped word otherwise gets.
+    gen._rtobj_kinds: dict = {}
     # A parameter ANNOTATED `object` is such a word by declaration: whatever
     # the call sites pass, the function's own code may not assume a kind.
     if params is not None:
@@ -480,6 +503,7 @@ def _reset_func(gen, body: list = None, params: list = None,
     # self-hosted compiler, so it is emptied where every other per-function
     # table is.
     gen._boxed_vals.clear()
+    gen._tagged_word_vals.clear()
     gen._func_value_names.clear()
     # The per-slot kind of a `struct.unpack` result (and of a local bound
     # from one), in the long-form spelling the statically-indexed MojoList
@@ -771,6 +795,10 @@ def _reset_func(gen, body: list = None, params: list = None,
     # in this function sets to the literal `None`. Per function, because local
     # names recycle.
     gen._none_bound_names = None
+    # Lazily filled by `emit_exprs.none_only_locals`: the locals that hold
+    # `None` at every read (a membership needle). Per function, for the same
+    # reason.
+    gen._none_only_names = None
     # Pre-seed known global dicts with their value types so .get() uses the right function.
     # Also seeded from self._global_dict_val_types (Phase 1.7, never
     # reset) for the same reason _elem_types is seeded from
@@ -863,6 +891,7 @@ class FuncState:
         self.fs_fresh_vals: set = set()
         self.fs_fresh_str_tmps: set = set()
         self.fs_boxed_vals: set = set()
+        self.fs_tagged_word_vals: set = set()
         self.fs_func_value_names: dict = {}
         self.fsdecls: list = []
         self.fsbody_lines: list = []
@@ -879,12 +908,15 @@ class FuncState:
         self.fs_owned_str_elem_vals: set = set()
         self.fs_owned_str_elem_names: set = set()
         self.fs_closure_vals: set = set()
+        self.fs_fresh_closure_vals: set = set()
         self.fs_owned_closure_names: set = set()
         self.fs_owned_env_names: set = set()
         self.fs_owned_box_names: set = set()
         self.fs_emit_frames: list = []
         self.fs_dyn_word_vals: set = set()
         self.fs_dyn_word_locals: set = set()
+        self.fs_rtobj_kinds: dict = {}
+        self.fs_tagged_word_vals: set = set()
         self.fs_maybe_kinds_vals: set = set()
         self.fs_nested_mixed_names: set = set()
         self.fsloop_stack: list = []
@@ -918,6 +950,7 @@ class FuncState:
         self.fs_pybox_vars: object = None
         self.fs_tagged_opt_read: object = None
         self.fs_none_bound_names: object = None
+        self.fs_none_only_names: object = None
         self.fs_dict_val_types: dict = {}
         self.fs_dict_nested_val_types: dict = {}
         self.fs_struct_layout: dict = {}
@@ -943,6 +976,7 @@ class FuncState:
         self.fs_int_word_vals_items: set = set()
         self.fs_fresh_vals_items: set = set()
         self.fs_boxed_vals_items: set = set()
+        self.fs_tagged_word_vals_items: set = set()
         self.fs_func_value_names_items: dict = {}
         self.fs_fresh_str_tmps_items: set = set()
         self.fs_struct_field_owners_items: dict = {}
@@ -961,6 +995,7 @@ def save_func_state(gen) -> FuncState:
     st.fs_fresh_vals = gen._fresh_vals
     st.fs_fresh_str_tmps = gen._fresh_str_tmps
     st.fs_boxed_vals = gen._boxed_vals
+    st.fs_tagged_word_vals = gen._tagged_word_vals
     st.fs_func_value_names = gen._func_value_names
     st.fsdecls = gen.decls
     st.fsbody_lines = gen.body_lines
@@ -977,12 +1012,15 @@ def save_func_state(gen) -> FuncState:
     st.fs_owned_str_elem_vals = gen._owned_str_elem_vals
     st.fs_owned_str_elem_names = gen._owned_str_elem_names
     st.fs_closure_vals = gen._closure_vals
+    st.fs_fresh_closure_vals = gen._fresh_closure_vals
     st.fs_owned_closure_names = gen._owned_closure_names
     st.fs_owned_env_names = gen._owned_env_names
     st.fs_owned_box_names = gen._owned_box_names
     st.fs_emit_frames = gen._emit_frames
     st.fs_dyn_word_vals = gen._dyn_word_vals
     st.fs_dyn_word_locals = gen._dyn_word_locals
+    st.fs_rtobj_kinds = gen._rtobj_kinds
+    st.fs_tagged_word_vals = gen._tagged_word_vals
     st.fs_maybe_kinds_vals = gen._maybe_kinds_vals
     st.fs_nested_mixed_names = gen._nested_mixed_names
     st.fsloop_stack = gen.loop_stack
@@ -1016,6 +1054,7 @@ def save_func_state(gen) -> FuncState:
     st.fs_pybox_vars = gen._pybox_vars
     st.fs_tagged_opt_read = gen._tagged_opt_read
     st.fs_none_bound_names = gen._none_bound_names
+    st.fs_none_only_names = gen._none_only_names
     st.fs_dict_val_types = gen._dict_val_types
     st.fs_dict_nested_val_types = gen._dict_nested_val_types
     st.fs_struct_layout = gen._struct_layout
@@ -1044,6 +1083,8 @@ def save_func_state(gen) -> FuncState:
         st.fs_fresh_vals_items.add(_k)
     for _k in gen._boxed_vals:
         st.fs_boxed_vals_items.add(_k)
+    for _k in gen._tagged_word_vals:
+        st.fs_tagged_word_vals_items.add(_k)
     for _k in gen._func_value_names:
         st.fs_func_value_names_items[_k] = gen._func_value_names[_k]
     for _k in gen._fresh_str_tmps:
@@ -1068,6 +1109,7 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._fresh_vals = st.fs_fresh_vals
     gen._fresh_str_tmps = st.fs_fresh_str_tmps
     gen._boxed_vals = st.fs_boxed_vals
+    gen._tagged_word_vals = st.fs_tagged_word_vals
     gen._func_value_names = st.fs_func_value_names
     gen.decls = st.fsdecls
     gen.body_lines = st.fsbody_lines
@@ -1084,12 +1126,15 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._owned_str_elem_vals = st.fs_owned_str_elem_vals
     gen._owned_str_elem_names = st.fs_owned_str_elem_names
     gen._closure_vals = st.fs_closure_vals
+    gen._fresh_closure_vals = st.fs_fresh_closure_vals
     gen._owned_closure_names = st.fs_owned_closure_names
     gen._owned_env_names = st.fs_owned_env_names
     gen._owned_box_names = st.fs_owned_box_names
     gen._emit_frames = st.fs_emit_frames
     gen._dyn_word_vals = st.fs_dyn_word_vals
     gen._dyn_word_locals = st.fs_dyn_word_locals
+    gen._rtobj_kinds = st.fs_rtobj_kinds
+    gen._tagged_word_vals = st.fs_tagged_word_vals
     gen._maybe_kinds_vals = st.fs_maybe_kinds_vals
     gen._nested_mixed_names = st.fs_nested_mixed_names
     gen.loop_stack = st.fsloop_stack
@@ -1123,6 +1168,7 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._pybox_vars = st.fs_pybox_vars
     gen._tagged_opt_read = st.fs_tagged_opt_read
     gen._none_bound_names = st.fs_none_bound_names
+    gen._none_only_names = st.fs_none_only_names
     gen._dict_val_types = st.fs_dict_val_types
     gen._dict_nested_val_types = st.fs_dict_nested_val_types
     gen._struct_layout = st.fs_struct_layout
@@ -1156,6 +1202,9 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._boxed_vals.clear()
     for _k in st.fs_boxed_vals_items:
         gen._boxed_vals.add(_k)
+    gen._tagged_word_vals.clear()
+    for _k in st.fs_tagged_word_vals_items:
+        gen._tagged_word_vals.add(_k)
     gen._func_value_names.clear()
     for _k in st.fs_func_value_names_items:
         gen._func_value_names[_k] = st.fs_func_value_names_items[_k]
@@ -1252,7 +1301,6 @@ def _compile_link_inline_cpp_unit(gen, cpp_code: str):
         import cas
         import subprocess
         import tempfile
-        from build_config import find_gxx, runtime_dir as _bc_runtime_dir
     except Exception as e:
         gimple_ctypes._debug_note('cannot compile link-mode inline-module cpp unit '
                     '(import failure)', e)
@@ -1287,7 +1335,7 @@ def _compile_link_inline_cpp_unit(gen, cpp_code: str):
         return None
 
 
-def _emit_stdlib_import_externs(gen, stmts) -> None:
+def _emit_stdlib_import_externs(gen, stmts: list) -> None:
     """Scan from-import stmts and emit extern declarations for concrete
     functions found via load_module (text-only extraction — no dylib builds,
     no recursion). Populates _link_import_decl_list and registers types so
@@ -1552,7 +1600,56 @@ def global_generator_key(module_safe: str, name: str) -> tuple:
     return f"{module_safe}.{name}"
 
 
-def _emit_imported_global_accessors(gen, stmts) -> None:
+def seed_global_generator_apis(gen, stmts: list, mod_index) -> None:
+    """Record, before ANY function body is emitted, which module globals are
+    bound to one compiled generator for the whole module.
+
+    `_note_global_generator_store` learns a global's generator api from the
+    TOPLEVEL store, and the toplevel body is emitted last (after every
+    function, because `_toplevel` is the one that runs them). So a function
+    that reads the global (`def main(): print(next(it))`) was lowered against
+    an empty `_global_generator_api`, found no api, and refused. The read
+    arm of `_lower_IdentExpr` can only carry what is already recorded.
+
+    The fix is to record the store's api up front, from the one place it is
+    statically certain: a DIRECT top-level `name = <generator>(...)` statement
+    whose name has exactly one binder in the whole module. `mod_index` is
+    `literal_bindings.binding_index(stmts)`, the binder census that already
+    counts every binding (nested functions included, `global` declarations
+    and wildcard imports too) of every name, so "exactly one binder, and it
+    is this statement" is the same test the literal-argument lookup uses. A
+    name with any other binder is not seeded, and keeps the honest refusal.
+
+    The generator itself must be a compiled generator defined in THIS module
+    (`gen._generator_api`) and not rebound (exactly one binder), so the api
+    recorded is the one the call lowering would attach to the value.
+    Nothing is recorded for a store nested in a block or a conditional: that
+    shape keeps the existing (toplevel-ordered) path and its refusal.
+    """
+    key_mod = gimple_ctypes._c_field_name(gen._current_module_ctx or "root")
+    for st in stmts or []:
+        if not (isinstance(st, AssignStmt) and isinstance(st.target, IdentExpr)
+                and isinstance(st.value, CallExpr)
+                and isinstance(st.value.func, IdentExpr)):
+            continue
+        api = gen._generator_api.get(st.value.func.name)
+        if api is None:
+            continue
+        # The generator's own `def` may be rewritten away by the stack-switch
+        # lowering (its body becomes `__mgco_<name>_body`), so zero FunctionDef
+        # binders is normal. What must NOT be there is any other binder kind:
+        # a rebinding of the function name to something else.
+        if not all(isinstance(_fs, FunctionDef)
+                   for _fs in mod_index.get(st.value.func.name, [])):
+            continue
+        name = st.target.name
+        sites = list(mod_index.get(name, [])) + list(mod_index.get('*', []))
+        if len(sites) != 1 or sites[0] is not st:
+            continue
+        gen._global_generator_api[global_generator_key(key_mod, name)] = api
+
+
+def _emit_imported_global_accessors(gen, stmts: list) -> None:
     """Bare `from X import <module_scope_var>` — BUG-2026-009. See
     `_imported_global_accessors`'s own docstring and module_loader.py's
     'kind': 'global_var' export entries (module_loader._VAR_GLOBAL_RE)
@@ -2723,6 +2820,10 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
                 else:
                     _iv = (aval if atype == 'int64_t'
                            else gen._new_val('int64_t', f'(int64_t){aval}'))
+                    if aval in getattr(gen, '_boxed_vals', ()):
+                        # a runtime-kinded list element read as a BOX: the string
+                        # is the word inside it (a box's own address is not one)
+                        _iv = gen._call_expr('int64_t', 'mojo_box_word', [('int64_t', _iv)])
                     coerced_args.append(gen._call_expr(
                         'char *', 'mojo_cstr_or_int_str', [('int64_t', _iv)]))
 
@@ -3440,6 +3541,248 @@ def _char_to_cstr(gen, typ: str, val: str, transient: bool = False, word_ok: boo
 
 
 
+def _local_bindings(gen, name) -> list:
+    """Every binding of `name` in THIS function's body, as a list of the
+    `value` expression for a plain `name = <value>` assignment, or `None` for
+    any other binder form (an augmented or multi-assign, a for or with target,
+    a comprehension generator, a walrus, an except name, a nested def or a
+    declaration). A form that is ambiguous is counted as a binder: an
+    over-count only refuses the caller's optimisation, which is the safe
+    answer. Computed on demand from `gen._cur_func_body`, so nothing new has
+    to be saved or restored per function."""
+    def idents_named(root):
+        return [n for n in _iter_ast(root)
+                if isinstance(n, gimple_ctypes.IdentExpr) and n.name == name]
+
+    found = []
+    for stmt in (gen._cur_func_body or []):
+        for n in _iter_ast(stmt):
+            if isinstance(n, gimple_ctypes.AssignStmt):
+                if isinstance(n.target, gimple_ctypes.IdentExpr) and n.target.name == name:
+                    found.append(n.value)
+                else:
+                    found.extend([None] * len(idents_named(n.target)))
+            elif isinstance(n, gimple_ctypes.AugAssignStmt):
+                found.extend([None] * len(idents_named(n.target)))
+            elif isinstance(n, gimple_ctypes.MultiAssignStmt):
+                for t in (n.targets or []):
+                    found.extend([None] * len(idents_named(t)))
+            elif isinstance(n, gimple_ctypes.ForStmt):
+                # The parser keeps a for target as its source TEXT (a str,
+                # `for_target_single_name`), not an IdentExpr, so
+                # `idents_named` cannot see it. Count the name as a word of the
+                # target text: an over-count only refuses an optimisation.
+                if isinstance(n.target, str):
+                    if re.search(r'\b%s\b' % re.escape(name), n.target):
+                        found.append(None)
+                else:
+                    found.extend([None] * len(idents_named(n.target)))
+            elif isinstance(n, gimple_ctypes.WithStmt):
+                for it in (n.items or []):
+                    found.extend([None] * len(idents_named(getattr(it, 'alias', None))))
+            elif isinstance(n, gimple_ctypes.Comprehension):
+                for gn in (n.generators or []):
+                    found.extend([None] * len(idents_named(gn)))
+            elif not isinstance(n, gimple_ctypes.IdentExpr):
+                if getattr(n, 'name', None) == name:
+                    found.append(None)
+    return found
+
+
+def tagged_next_bind_name(gen, name, _seen=frozenset()) -> bool:
+    """True iff every binding of `name` in THIS function is a tagged word:
+    either `name = next(g)` for one and the same generator local `g`, where
+    `g` itself is bound exactly once (so it is one generator, whose yields are
+    tagged the same way every time), or a copy `name = x` of another local
+    that is itself such a name (`y = x` stays tagged, and `_seen` breaks a
+    copy cycle). `name` must not be a parameter.
+
+    This is the rule a tagged-word bind needs. A local that keeps a yield's
+    box is read as a box by every consumer, so it must never be stored a bare
+    word: the rule guarantees every store into `name` is the same tagged
+    word. Anything else (a rebinding to a plain value, a second generator, a
+    for target) answers False, and the caller unwraps as it always did."""
+    params = getattr(gen, '_cur_func_params', None) or ()
+    if name in params:
+        return False
+    values = _local_bindings(gen, name)
+    if not values:
+        return False
+    gen_names = set()
+    copies = 0
+    for v in values:
+        if isinstance(v, gimple_ctypes.IdentExpr):
+            src = v.name
+            if src == name or src in _seen:
+                return False
+            # A copy of a for-loop target over a tagged generator is itself a
+            # tagged word (the loop's box, see `tagged_for_target_name`).
+            if not (tagged_for_target_name(gen, src)
+                    or tagged_next_bind_name(gen, src, _seen | {name})):
+                return False
+            copies += 1
+            continue
+        if not (isinstance(v, gimple_ctypes.CallExpr)
+                and isinstance(v.func, gimple_ctypes.IdentExpr)
+                and v.func.name == 'next'
+                and v.args
+                and isinstance(v.args[0], gimple_ctypes.IdentExpr)):
+            return False
+        gen_names.add(v.args[0].name)
+    if len(gen_names) > 1:
+        return False
+    if gen_names:
+        (gname,) = gen_names
+        if gname in params:
+            return False
+        if len(_local_bindings(gen, gname)) != 1:
+            return False
+    return bool(gen_names) or copies > 0
+
+
+# The refusal for a tagged generator word stored into a name whose type is not
+# int64, or a non-int64 store into a name that holds a tagged word. A Mojo name
+# has one type, and a box-holding local cannot be given a str or float store
+# (a bare word is read as a box, and an int word is not a char* or a double),
+# so the copy used to compile to a segfault (str) or to `1.0` / `0.0` (float).
+MIXED_NAME_NON_INT64_REFUSAL = (
+    "a name bound to a tagged generator word (a yield of more than one kind) "
+    "cannot also hold a value of another C type (str or float): the box "
+    "cannot carry it; refused")
+
+
+def is_non_int_c_type(ctype) -> bool:
+    """True for a C type a tagged word cannot be unwrapped into: a float/double
+    or a pointer (a str is a `char *`, a container a `Mojo... *`). An integer
+    type, bool included, is the word's own kind and is not refused here."""
+    return ctype is not None and (
+        ctype in gimple_ctypes._SCALAR_FLOAT_TYPES or ctype.endswith(' *'))
+
+
+def tagged_mixed_name(gen, name) -> bool:
+    """True iff `name` is bound to a tagged word somewhere in THIS function
+    (a copy of a tagged for-loop target, a copy of a tagged `next()` name, or
+    `next(g)` over a tagged generator) AND also to plain values elsewhere, so
+    `tagged_next_bind_name` answers False for it.
+
+    Such a name is a box-holding local whose every store must be a box: a
+    plain int64 store (`x = 0`, `x = 7`, `x = w` over a plain generator) is
+    boxed with `mojo_box_int` at the bind site, so `print(x)` and `x == None`
+    see the kind of the value last stored. Without this, a store of a bare
+    word unwrapped the tagged box's payload, and a None yield copied into `x`
+    printed `0` (`x = 0; for v in g(): x = v`)."""
+    # Cheap exit first: this runs for every int64 simple-name bind, and the
+    # body walk below is linear in the function. A module with no tagged
+    # generator (no `mixed_slots` API) has no tagged word to mix in.
+    if not any((api or {}).get('mixed_slots')
+               for api in (getattr(gen, '_generator_api', None) or {}).values()):
+        return False
+    params = getattr(gen, '_cur_func_params', None) or ()
+    if name in params:
+        return False
+    values = _local_bindings(gen, name)
+    if not values:
+        return False
+    tagged = False
+    for v in values:
+        if isinstance(v, gimple_ctypes.IdentExpr):
+            if (v.name != name and
+                    (tagged_for_target_name(gen, v.name)
+                     or tagged_next_bind_name(gen, v.name))):
+                tagged = True
+        elif (isinstance(v, gimple_ctypes.CallExpr)
+              and isinstance(v.func, gimple_ctypes.IdentExpr)
+              and v.func.name == 'next' and v.args
+              and isinstance(v.args[0], gimple_ctypes.IdentExpr)
+              and _tagged_generator_iterable(gen, v.args[0])):
+            tagged = True
+    return tagged and not tagged_next_bind_name(gen, name)
+
+
+def _tagged_generator_iterable(gen, node) -> bool:
+    """True iff the `for` iterable `node` is a call of a generator whose value
+    slot is a TAGGED word (`mixed_slots`: its yields are of more than one
+    kind, so each is boxed), either spelled directly (`for v in g():`) or
+    through a local bound once to such a call (`g = gen(); for v in g:`).
+    Resolved from `gen._generator_api`, which is built before any body is
+    emitted, so the answer does not depend on the order of the lowering."""
+    fname = None
+    if (isinstance(node, gimple_ctypes.CallExpr)
+            and isinstance(node.func, gimple_ctypes.IdentExpr)):
+        fname = node.func.name
+    elif isinstance(node, gimple_ctypes.IdentExpr):
+        params = getattr(gen, '_cur_func_params', None) or ()
+        if node.name in params:
+            return False
+        bound = _local_bindings(gen, node.name)
+        if (len(bound) == 1
+                and isinstance(bound[0], gimple_ctypes.CallExpr)
+                and isinstance(bound[0].func, gimple_ctypes.IdentExpr)):
+            fname = bound[0].func.name
+    if fname is None:
+        return False
+    api = (getattr(gen, '_generator_api', None) or {}).get(fname)
+    return bool(api) and bool(api.get('mixed_slots')) and api.get('value_ctype') == 'int64_t'
+
+
+def tagged_for_target_name(gen, name) -> bool:
+    """True iff every binding of `name` in THIS function is a `for name in
+    <tagged generator>` loop target (`_tagged_generator_iterable`), so every
+    value the name holds is the loop's box, the same tagged word a
+    `next(g)` bind holds. Such a name is a copy source for
+    `tagged_next_bind_name`: `x = v` inside the loop keeps the box, so
+    `print(x)` and `x == None` see the yield's kind (a None yield prints
+    None, not 0).
+
+    Sound against a later rebinding: the count of loop targets over `name`
+    must equal every binder of `name` (`_local_bindings` answers None for each
+    of them, and any plain assignment, tuple target or other binder makes the
+    answer False). The loops are found by walking the whole body, so a loop
+    emitted after the copy counts too."""
+    params = getattr(gen, '_cur_func_params', None) or ()
+    if name in params:
+        return False
+    values = _local_bindings(gen, name)
+    if not values or any(v is not None for v in values):
+        return False
+    loops = 0
+    for stmt in (gen._cur_func_body or []):
+        for n in _iter_ast(stmt):
+            if (isinstance(n, gimple_ctypes.ForStmt)
+                    and isinstance(n.target, str)
+                    and not for_target_is_tuple(n.target)
+                    and for_target_single_name(n.target) == name):
+                if not _tagged_generator_iterable(gen, n.iterable):
+                    return False
+                loops += 1
+    return loops == len(values)
+
+
+def tagged_recv_name(gen, name) -> bool:
+    """True iff every binding of `name` in THIS function is `name = yield`
+    (an int-valued `yield` used as a value, `__mojo_coro_yield_i`), so every
+    value the name holds is the generator's resume word: the None box when the
+    generator was resumed by `next()` / `send(None)`, or a bare integer when it
+    was sent one. Such a name keeps the box (the caller registers it in
+    `_boxed_vals` / `_tagged_word_vals`), so `print(x)` and `x == None` see the
+    resume's kind, and `x = yield` after `next(it)` prints None, not 0.
+
+    A bare word and a box are both legal here: a consumer of a tagged name
+    renders an unboxed integer as itself (`mojo_repr_boxed`). A name with any
+    other binder (a plain store, a copy, a loop target) answers False and the
+    bind unwraps as it always did."""
+    params = getattr(gen, '_cur_func_params', None) or ()
+    if name in params:
+        return False
+    values = _local_bindings(gen, name)
+    if not values:
+        return False
+    return all(isinstance(v, gimple_ctypes.CallExpr)
+               and isinstance(v.func, gimple_ctypes.IdentExpr)
+               and v.func.name == '__mojo_coro_yield_i'
+               for v in values)
+
+
 def mixed_container_locals(gen) -> set:
     """The names in THIS function's body that are assigned values of more
     than one distinct container kind (`MojoDict *` / `MojoList *` /
@@ -3781,7 +4124,7 @@ def _plan_mut_captured_params(gen, node, func_name: str):
     already a pointer in its own right, and boxing one would change the
     function's ABI for no gain (its captured type is the container, and a
     `MojoList *`/`MojoDict *` box holds it correctly without one)."""
-    for _ci in getattr(gen, '_all_closures', {}).get(func_name, {}).values():
+    for _ci in sorted(getattr(gen, '_all_closures', {}).get(func_name, {}).values(), key=lambda _x: (_as_str(getattr(_x, 'lifted_name', '')), _as_str(getattr(getattr(_x, 'inner_def', None), 'name', '')))):
         _cap_types = dict(_ci.captures)
         for _mn in _ci.mut_names:
             if _mn not in _cap_types or _mn in gen._mut_boxed_param_c:
@@ -3831,7 +4174,7 @@ def _seed_mut_captured_local_types(gen, func_name: str):
     recorded `var_types` entry with the pointer ctype, because that
     entry is what `_type_of`'s own boxed-local branch exists to
     correct. See `_plan_mut_captured_params`."""
-    for ci in getattr(gen, '_all_closures', {}).get(func_name, {}).values():
+    for ci in sorted(getattr(gen, '_all_closures', {}).get(func_name, {}).values(), key=lambda _x: (_as_str(getattr(_x, 'lifted_name', '')), _as_str(getattr(getattr(_x, 'inner_def', None), 'name', '')))):
         cap_types = dict(ci.captures)
         # SORTED, and load-bearing. `ci.mut_names` is a frozenset, so
         # iterating it directly emitted the boxed-pointer declarations in
@@ -4049,7 +4392,15 @@ def _generator_to_list(gen, value: str) -> str:
     gen._emit(f"  if ({more}) goto {bb_body}; else goto {bb_after};")
     gen._emit_label(bb_body)
     val = gen._new_val(vct, f"{base}_value ({_iv})")
-    if vct in ('char *', 'MojoStr *'):
+    if api.get('mixed_slots') and vct == 'int64_t':
+        # a TAGGED-word generator: each value is appended under the kind it
+        # carries (a float box as a double, a bool box as a bool, a string as a
+        # string), so the list renders and iterates right.
+        gen._void_call('mojo_list_append_word',
+                       [('MojoList *', res), ('int64_t', val)])
+        gen._struct_slot_kinds[res] = _RuntimeKinded(['int', 'str'])
+        gen._maybe_kinds_vals.add(res)
+    elif vct in ('char *', 'MojoStr *'):
         gen._void_call('mojo_list_append_str',
                        [('MojoList *', res), ('const char *', val)])
         gen._elem_types[res] = 'char *'
@@ -4391,6 +4742,9 @@ def _list_repr_fn(gen, rav: str) -> str:
     no None-sentinel check) whenever the element type is known to be
     int64_t.
     """
+    # A list drained from a tagged-word generator carries its own per-slot kinds.
+    if isinstance(gen._struct_slot_kinds.get(rav), _RuntimeKinded):
+        return 'mojo_repr_list_kinds'
     # A list of 2-element PAIR lists (what `enumerate(x)` and `zip(a, b)`
     # build): the generic repr reads each inner slot through the
     # None-sentinel heuristic, so the index 0 of the first pair printed as
@@ -4501,10 +4855,21 @@ _TUPLE_SLOT_KIND_BYTE = {'int': 'i', 'int64_t': 'i', 'char': 'i', '_Bool': 'i',
                          'MojoDict *': 'l', 'MojoSet *': 'l'}
 
 
+class _RuntimeKinded(list):
+    """The `_struct_slot_kinds` row of a list whose slot kinds are only known at
+    RUN time (a list drained from a tagged-word generator): the list carries its
+    own per-slot kinds string (`mojo_list_append_word`), so the repr reads THAT
+    (`mojo_repr_list_kinds` handed the value's own row) instead of a static kinds
+    string. Two distinct entries, so every `len(set(kinds)) > 1` "this list is
+    mixed" test classifies it as mixed."""
+
+
 def _struct_slot_kind_bytes(gen, rav: str) -> str | None:
     kinds = gen._struct_slot_kinds.get(rav)
     if not kinds or len(set(kinds)) == 1:
         return None
+    if isinstance(kinds, _RuntimeKinded):
+        return None          # no static table: the value's own row (see the args builder)
     return ''.join(_STRUCT_KIND_BYTE[k] for k in kinds)
 
 
@@ -5569,7 +5934,15 @@ def _compr_list_loop(gen, node, gen0, res: str, res_type: str, it_val: str):
     gen._emit(f"  if ({cond_t}) goto {bb_body}; else goto {bb_after};")
     gen._emit_label(bb_body)
     suf = gimple_ctypes.TypeLattice.list_suffix(elem)
-    if suf == 'double':
+    if _iv in getattr(gen, '_maybe_kinds_vals', ()) and gen._type_of(_as_str(gen0.target)) == 'int64_t':
+        # a list that carries its own per-slot kinds: read each slot as the box
+        # the runtime hands back (a float / str slot is boxed), exactly as the
+        # `for` statement over such a list does, so the target IS the element
+        # and a comprehension over it keeps each element's kind.
+        elem64 = gen._new_val('int64_t', f"mojo_list_get_boxed ({_iv}, {idx64})")
+        gen._boxed_vals.add(_tgt)
+        gen._emit(f"  {_tgt} = (int64_t) {elem64};")
+    elif suf == 'double':
         gen._emit(f"  {_tgt} = mojo_list_get_double ({_iv}, {idx64});")
     elif suf == 'str':
         # mojo_list_get_str returns char*, handle type mismatch with target variable
@@ -5703,6 +6076,11 @@ def _compr_generator_loop(gen, node, gen0, res: str, res_type: str, it_val: str)
         # reserved-identifier comment (`index` et al. are renamed by
         # _declare_var; body reads resolve through _c_names).
         gen._emit(f"  {gen._cname(_tgt)} = {val};")
+        if api.get('mixed_slots') and vct == 'int64_t':
+            gen._boxed_vals.add(gen._cname(_tgt))
+            if not hasattr(gen, '_tagged_gen_vals'):
+                gen._tagged_gen_vals = set()
+            gen._tagged_gen_vals.add(gen._cname(_tgt))
     gen._gen_compr_append(node, gen0, res, res_type, bb_post)
     gen._emit(f"  goto {bb_post};")
     gen._emit_label(bb_post)
@@ -5910,7 +6288,7 @@ def _open_block_scope(gen):
     return frame
 
 
-def _close_block_scope(gen, frame):
+def _close_block_scope(gen, frame: list):
     """Close the block `_open_block_scope` opened: undo every shadow a `var`
     made inside it, innermost first, so a read after the block sees the
     binding it saw before the block."""
@@ -6519,20 +6897,27 @@ def _float_param_arith_applies(gen, op: str, lnode, lt: str, rnode, rt: str) -> 
     return _is_may_hold_float_param(gen, lnode) or _is_may_hold_float_param(gen, rnode)
 
 
-def _float_operand_as_double(gen, node, ctype: str, val: str) -> str:
-    """An operand of a float-aware arithmetic operator, as a C double. A
-    float-possible parameter's word is read with `mojo_box_double` (a double
-    box's double, or a plain integer promoted); a `double` operand is already
-    one; any other integer is converted."""
-    if _is_may_hold_float_param(gen, node):
+def _float_operand_as_double(gen, ctype: str, val: str, maybe_box: bool) -> str:
+    """An operand of a float-aware arithmetic operator, as a C double. A word
+    that may be a float box (`maybe_box`) is read with `mojo_box_double` (a
+    double box's double, or a plain integer promoted); a `double` operand is
+    already one; any other integer is converted."""
+    if maybe_box:
         return _as_str(gen._call_expr('double', 'mojo_box_double', [('int64_t', val)]))
     if ctype == 'double':
         return _as_str(val)
     return _as_str(gen._new_val('double', f'(double) ({_as_str(val)})'))
 
 
-def _float_param_arith(gen, op: str, lnode, lt: str, lv: str, rnode, rt: str, rv: str) -> str:
+def _float_param_arith(gen, op: str, lnode, lt: str, lv: str, rnode, rt: str, rv: str,
+                       *, lmaybe=None, rmaybe=None) -> str:
     """`lnode op rnode` where an operand is a float-possible parameter.
+
+    `lmaybe` / `rmaybe` say whether that operand's word may be a float box.
+    None (the default) asks `_is_may_hold_float_param` about the AST node,
+    which is the float-possible parameter case; the tagged-generator-word
+    arm passes True/False from the temp's own kind tracking instead, since
+    there is no parameter to name.
 
     Beside an INTEGER the answer is the integer one every operator gave before
     the box existed, or a double box holding the DOUBLE answer when either
@@ -6549,8 +6934,10 @@ def _float_param_arith(gen, op: str, lnode, lt: str, lv: str, rnode, rt: str, rv
     `mojo_div_double`: gcc -fgimple ICEs on an inline double `/`, and that
     helper raises ZeroDivisionError on a zero divisor. No integer answer is
     computed, so the integer divide never runs."""
-    dl = _float_operand_as_double(gen, lnode, lt, lv)
-    dr = _float_operand_as_double(gen, rnode, rt, rv)
+    lp = _is_may_hold_float_param(gen, lnode) if lmaybe is None else bool(lmaybe)
+    rp = _is_may_hold_float_param(gen, rnode) if rmaybe is None else bool(rmaybe)
+    dl = _float_operand_as_double(gen, lt, lv, lp)
+    dr = _float_operand_as_double(gen, rt, rv, rp)
     if op == _FLOAT_DIV_OP:
         dres = gen._call_expr('double', 'mojo_div_double',
                               [('double', _as_str(dl)), ('double', _as_str(dr))])
@@ -6563,10 +6950,10 @@ def _float_param_arith(gen, op: str, lnode, lt: str, lv: str, rnode, rt: str, rv
         dres = gen._new_val('double', f'({dl}) {op} ({dr})')
     if lt == 'double' or rt == 'double':
         return gen._call_expr('int64_t', 'mojo_box_from_double', [('double', _as_str(dres))])
-    lp = _is_may_hold_float_param(gen, lnode)
-    rp = _is_may_hold_float_param(gen, rnode)
-    _, ilv = _unbox_float_param_operand(gen, lnode, 'int64_t', lv)
-    _, irv = _unbox_float_param_operand(gen, rnode, 'int64_t', rv)
+    # The integer answer reads a maybe-box operand as its integer
+    # (`mojo_box_int`), exactly as `_unbox_float_param_operand` does.
+    ilv = gen._call_expr('int64_t', 'mojo_box_int', [('int64_t', lv)]) if lp else lv
+    irv = gen._call_expr('int64_t', 'mojo_box_int', [('int64_t', rv)]) if rp else rv
     if op == '//':
         ires = gen._new_val('int64_t', f'__mojo_floordiv ({_as_str(ilv)}, {_as_str(irv)})')
     else:
@@ -6938,7 +7325,9 @@ def _gen_print(gen, args: list, kwargs: list = None):
                                                [('int64_t', aval)]), _owned_reprs)
                 resolved_parts.append(('char *', _rv))
                 continue
-            if _pi < len(args) and _is_may_hold_str_param(gen, args[_pi]):
+            if (_pi < len(args) and _is_may_hold_str_param(gen, args[_pi])) or aval in gen._dyn_word_vals \
+                    or (_pi < len(args) and isinstance(args[_pi], IdentExpr)
+                        and _as_str(args[_pi].name) in gen._dyn_word_locals):
                 _rv = gen._call_expr('char *', 'mojo_cstr_or_int_str',
                                      [('int64_t', aval)])
                 # CONVERT, do not print. This branch used to emit
@@ -7005,6 +7394,19 @@ def _gen_print(gen, args: list, kwargs: list = None):
             _wout = gen._materialize_in_tu_wrapper(_wct[:-2], aval)
             resolved_parts.append(('MojoList *', _wout))
             continue
+        # A user struct value: `print(x)` is `print(str(x))`, which is the
+        # struct's `__str__`, else its `__repr__` (the same lookup `str(x)`
+        # uses). With neither the value falls through as it did. This arm did
+        # not exist, so `print(p)` printed the object's ADDRESS as a decimal
+        # while `str(p)` / `repr(p)` were right.
+        if isinstance(atype, str) and atype.endswith(' *') and atype != 'void *':
+            _psn = atype[:-2].strip()
+            if _psn in gen.struct_field_types:
+                _pcall = user_dunder_repr_call(gen, _psn, atype, aval,
+                                               ('__str__', '__repr__'))
+                if _pcall is not None:
+                    resolved_parts.append(('char *', _pcall))
+                    continue
         resolved_parts.append((atype, aval))
     parts = resolved_parts
     for i, (atype, aval) in enumerate(parts):
@@ -7528,7 +7930,7 @@ def _dedup_variadic_externs(parts: list) -> str:
         return True
 
     def _record_output_parse(out: str, out_parts: list,
-                             exact_concrete, variadic_by_out_part: list) -> None:
+                             variadic_by_out_part: list) -> None:
         """Publish `_DEDUP_EXTERN_PARTS_CACHE[out]` for the text JUST
         returned, with the parse its parts' own entries imply.
 
@@ -7542,34 +7944,59 @@ def _dedup_variadic_externs(parts: list) -> str:
         nothing is published (the parent level then parses the text itself,
         exactly as it did before this existed).
 
-        `exact_concrete` is the caller's already-computed set when it is
-        provably the exact name set of `out` (nothing was dropped) — passed
-        BY REFERENCE, so the common case allocates nothing; `None` asks for
-        it to be rebuilt from the parts. Every part of `out_parts` is already
-        in the cache by the time this runs (the caller read or filled its
-        entry in the main pass), so `entry` below is never absent; a missing
-        one would be a programming error here, not a case to paper over.
+        Every part of `out_parts` is already in the cache by the time this
+        runs (the caller read or filled its entry in the main pass), so
+        `entry` below is never absent; a missing one would be a programming
+        error here, not a case to paper over.
+
+        **Both components of the published value are LISTS, always** — the
+        same shape `_parse_part` returns, so the memo has exactly one value
+        shape however an entry got there. That is not cosmetic: the two
+        consumers iterate these components with a `for` loop, and the
+        compiled backend's `for x in <boxed>` lowering dispatches on the
+        RUNTIME type of the iterable and handles only a registered dict or
+        list (emit_loops.py:984-995). Anything else — a `set` included —
+        takes the `mojo_unsupported_iter` arm, which PRINTS and then runs
+        the body ZERO times (`runtime/fire_runtime.c:6331`). A derived
+        entry holding the caller's `concrete` set therefore made the first
+        level that read it fold nothing into its own `concrete`, take the
+        `if not concrete:` arm, and drop NOTHING for the rest of the compile:
+        in the self-hosted `mojoc` that is a silent no-op of the entire
+        function, so conflicting variadic/concrete `extern` declarations
+        survived into every artifact the binary produced (this is what broke
+        the `selfhost` step). So the union is built here, from the parts'
+        own entries, rather than handed over from the caller: one producer,
+        one shape, and the by-reference "provably exact" contract that
+        carried the wrong type is gone rather than patched.
+
+        The names go in first-seen order (part order, then order within a
+        part), deduplicated through a local set. Order is not observable —
+        every consumer only adds to a set or tests membership — but a
+        fixed one keeps the memo's contents reproducible run to run.
         """
         if not _boundaries_preserve_parse(out_parts):
             return
-        if exact_concrete is None:
-            exact_concrete = set()
-            for p in out_parts:
-                entry = _DEDUP_EXTERN_PARTS_CACHE.get(p)
-                for name in _as_list(entry[0]):
-                    exact_concrete.add(_as_str(name))
+        # Index, then `_as_list`, as the main pass does: a cached pair unpacked
+        # by `a, b = entry` (or iterated directly) boxes its slots on the
+        # self-hosted path. The published name collection is a LIST, as
+        # `_parse_part`'s entries are: the reader iterates `entry[0]`, and the
+        # self-hosted path cannot iterate a value that is sometimes a list and
+        # sometimes a set -- it read a published SET's slot words (0xffffffff)
+        # as string pointers.
+        out_concrete = []
+        seen = set()
+        for p in out_parts:
+            entry = _DEDUP_EXTERN_PARTS_CACHE.get(p)
+            for name in _as_list(entry[0]):
+                name = _as_str(name)
+                if name not in seen:
+                    seen.add(name)
+                    out_concrete.append(name)
         out_variadic = []
         for vl in variadic_by_out_part:
             for name in vl:
                 out_variadic.append(name)
-        # The cached name collection is a LIST here, as `_parse_part`'s entries
-        # are: the reader iterates `entry[0]` and the self-hosted path cannot
-        # iterate a value that is sometimes a list and sometimes a set -- it read
-        # a published SET's slot words (0xffffffff) as string pointers.
-        _out_concrete = []
-        for _cn in _as_set(exact_concrete):
-            _out_concrete.append(_as_str(_cn))
-        _DEDUP_EXTERN_PARTS_CACHE[out] = (_out_concrete, out_variadic)
+        _DEDUP_EXTERN_PARTS_CACHE[out] = (out_concrete, out_variadic)
 
 
     # ONE pass over `parts`, not two. The old shape scanned every fragment
@@ -7611,11 +8038,10 @@ def _dedup_variadic_externs(parts: list) -> str:
         variadic_by_part.append(part_variadic)
     if not concrete:
         out = '\n'.join(parts)
-        _record_output_parse(out, parts, concrete, variadic_by_part)
+        _record_output_parse(out, parts, variadic_by_part)
         return out
     kept = []
     kept_variadic = []
-    dropped = False
     for i in range(len(parts)):
         drop = False
         for name in variadic_by_part[i]:
@@ -7625,12 +8051,8 @@ def _dedup_variadic_externs(parts: list) -> str:
         if not drop:
             kept.append(parts[i])
             kept_variadic.append(variadic_by_part[i])
-        else:
-            dropped = True
     out = '\n'.join(kept)
-    # Nothing dropped ⇒ the set just built IS the output's exact name set,
-    # so hand the same object over rather than rebuilding it.
-    _record_output_parse(out, kept, None if dropped else concrete, kept_variadic)
+    _record_output_parse(out, kept, kept_variadic)
     return out
 
 
@@ -7830,6 +8252,29 @@ def maybe_push_owned_local(gen, name: str, value=None) -> None:
     if gen._decl_rhs_val != '' and gen._decl_rhs_val in gen._closure_vals:
         gen._closure_vals.discard(gen._decl_rhs_val)
         if not _lambda_owned(gen._cur_func_body, name):
+            _drop_owned_candidate(gen, name)
+            return
+        gen._owned_closure_names.add(name)
+        gen._emit(f"  mojo_cleanup_push_closure ({name});")
+        pushed.add(name)
+        if name in gen._scope_armed:
+            _scope_register(gen, name, 'mojo_closure_free')
+        return
+    # A FRESH CLOSURE returned by a vetted call: the same single-owner shape
+    # as the capturing lambda above, but the value comes back through a
+    # CALLEE (`var f = make_counter(r)`; the callee passed `returns_fresh_closure`
+    # and `_lower_call` credited its result temp into `_fresh_closure_vals`),
+    # so the ownership question is the caller-side usage one
+    # (`_call_value_owned`) and the free path is identical: `mojo_closure_free`
+    # tears down the bound method, the environment, and the `{mut}` boxes the
+    # environment holds — the escaping half of the closure-env leak: a
+    # returned `{mut}`-capturing closure whose env, boxes and bound method were
+    # never freed. If the value
+    # escaped the usage (an alias, a capture, a second holder) fail closed:
+    # nothing is freed, today's leak, never a wrong free.
+    if gen._decl_rhs_val != '' and gen._decl_rhs_val in gen._fresh_closure_vals:
+        gen._fresh_closure_vals.discard(gen._decl_rhs_val)
+        if not _call_value_owned(gen._cur_func_body, name):
             _drop_owned_candidate(gen, name)
             return
         gen._owned_closure_names.add(name)
@@ -8095,6 +8540,12 @@ def _reset_scope_state(gen) -> None:
     _fet['_fresh_vals'] = 'char *'
     _fet['_fresh_str_tmps'] = 'char *'
     _fet['_boxed_vals'] = 'char *'
+    _fet['_tagged_word_vals'] = 'char *'
+    # Which of the above are SETS (the rest are lists): see `_set_elem_fields`.
+    for _sf in ('_scoped_free_candidates', '_scope_armed', '_owned_str_elem_names',
+                '_owned_str_elem_vals', '_owned_closure_names', '_owned_env_names',
+                '_fresh_vals', '_fresh_str_tmps', '_boxed_vals', '_tagged_word_vals'):
+        gen._set_elem_fields.add(_sf)
 
 
 def _scope_register(gen, name: str, fn: str) -> None:
@@ -8484,7 +8935,8 @@ def begin_function(gen, fn) -> None:
     # nowhere outside it), so the same arming and the same three exit points
     # apply. Computed from the same body, so the two sets cannot disagree.
     gen._scoped_free_candidates = (gen._scoped_free_candidates
-                                   | _compute_scoped_closure_candidates(fn, gen._owned_free_candidates))
+                                   | _compute_scoped_closure_candidates(fn, gen._owned_free_candidates)
+                                   | _compute_scoped_fresh_closure_candidates(fn, gen._fresh_closure_returning))
 
 
 def reset_no_candidates(gen) -> None:
@@ -8521,8 +8973,8 @@ def register_nested_env_free(gen, def_name: str, env_var: str,
 
     `_alloc_<name>_env()` is a `malloc` per nested `def` STATEMENT, and
     nothing freed it: `def helper(n): def inner(x): return x + n; return
-    inner(1)` measured +16 B/iteration (3.06 MB at 100k, 7.64 MB at 400k) —
-    bugs/CODEGEN_closure_env_and_boxed_local_never_freed.md's OPEN 1. There
+    inner(1)` measured +16 B/iteration (3.06 MB at 100k, 7.64 MB at 400k) in
+    that probe. There
     is no `MojoBoundMethod` and no `_reg_bound_method` entry here (the call
     sites are DIRECT — `helper_inner (_env_inner, 1)`), so the teardown is a
     bare `free` and the unwind entry is `mojo_cleanup_push_ptr`, NOT

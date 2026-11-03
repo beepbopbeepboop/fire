@@ -34,7 +34,7 @@ rather than an oversight:
 
   * **An encoder no lowering emits** — and this exclusion is the tool's second
     method step, because it is the same mistake as the pointer-auth one and it
-    was invisible until it was looked for. `bugs/FORMAL_arm64_instruction_coverage.md`
+    was invisible until it was looked for. `bugs/formal/FORMAL_arm64_instruction_coverage.md`
     records the lesson at its sharpest: `Assembler.resolve()` had no `B.cond`
     case, so `imm19` stayed 0, every conditional branch pointed at itself, and a
     fully green byte-exact encoder suite coexisted with a compiler that hung on

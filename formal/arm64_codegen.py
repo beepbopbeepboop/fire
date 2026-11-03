@@ -733,6 +733,21 @@ dylib_exports: list = None, globals_base: int = None,
         # instead.  See `_emit_exit` for why the subtraction is the difference
         # between a proof and a `lean-rejected` row.
         self._compiler_trap_addrs: set = set()
+        # The ADDRESSES of the extern calls the float-repr helper made — its
+        # `snprintf` and `strtod`, in the helper's general path.  The helper is
+        # this emitter's own, emitted once per image after every function body
+        # when a float is printed, so its sites are in `extern_calls` at or
+        # above `func_offset` and are NOT calls the program makes:
+        # `formal/arm64_proof_gen.py::_program_extern_calls` subtracts them
+        # for the same reason the traps are subtracted, and not doing so turns
+        # every image on this backend into an opaque-call image.  Published in
+        # `compile()`'s `info` as `float_repr_calls`.
+        self._float_repr_call_addrs: list = []
+        # Set by `_emit_float_print_operand`, the only thing that branches to
+        # the helper. The helper is emitted only when this is set, so an image
+        # whose program formats no float carries no helper, no helper calls and
+        # no `snprintf`/`strtod` in `extern_calls`.
+        self._float_repr_used: bool = False
         self._if_counter = 0
         self._while_counter = 0
         self._assert_counter = 0
@@ -1142,14 +1157,16 @@ dylib_exports: list = None, globals_base: int = None,
         for f, label in zip(functions, self._def_labels):
             self._emit_function(f, label)
 
-        # The float-repr helper, once per image, after every body: a `print`
-        # of a float branches to it from any of them, so it has to be out
+        # The float-repr helper, once per image, after every body, and only
+        # when a float is printed (`_float_repr_used`): a `print` of a float
+        # branches to it from any of them, so it has to be out
         # before `resolve()` patches those `bl`s, and its label joins
         # `_internal_labels` the same way the per-definition labels do, so a
         # reader of `info["labels"]` sees one address per program name only.
-        self._emit_float_repr_helper()
-        self._internal_labels.add(M.FLOAT_REPR_SYMBOL)
-        self._internal_labels.update(_FLOAT_REPR_HELPER_LABELS)
+        if self._float_repr_used:
+            self._emit_float_repr_helper()
+            self._internal_labels.add(M.FLOAT_REPR_SYMBOL)
+            self._internal_labels.update(_FLOAT_REPR_HELPER_LABELS)
 
         # Every body is out, so a NAME can be bound to the one a call reaches.
         # One binding per name, at one place, after every definition — which is
@@ -1195,6 +1212,13 @@ dylib_exports: list = None, globals_base: int = None,
             # `formal/arm64_proof_gen.py::_program_extern_calls`, which is the
             # arm64 twin of x86-64's `_program_externs`.
             "compiler_traps": sorted(self._compiler_trap_addrs),
+            # The float-repr helper's OWN extern calls (`snprintf`, `strtod`),
+            # by address — the helper is emitted once per image after every
+            # function body when a float is printed, so the sites are at or
+            # above `func_offset` and `_program_extern_calls` subtracts them
+            # there, the same subtraction `compiler_traps` is for the guard's
+            # `fflush`.
+            "float_repr_calls": sorted(self._float_repr_call_addrs),
             "test_input": self.test_input,
             # EVERY entry argument's value, in order — the proof generator's
             # entry state is built from this list, so a two-parameter entry has
@@ -1220,7 +1244,7 @@ dylib_exports: list = None, globals_base: int = None,
             # in `info` for both proof generators to read, because the word an
             # unwinder writes on one side has to mean the same integer on the
             # other (`model.exception_kind_table`'s docstring). Nothing reads it
-            # yet — see `bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md`
+            # yet — see `bugs/formal/FORMAL_a_try_handler_arm_is_still_never_emitted.md`
             # §5, where this is step 2 of 6. `info` rather than a re-derivation
             # here is the point: x86-64's `info` carries the same table from the
             # same publisher, so a proof that reads one cannot drift from the
@@ -1410,7 +1434,7 @@ dylib_exports: list = None, globals_base: int = None,
         # `SP + k` is INSIDE it and a method that writes its receiver does not
         # satisfy `FrameOk` — which is why the callee contract for a method is
         # `Refine.FrameOk_except`, the predicate
-        # `bugs/FORMAL_wide_receiver_by_reference.md` lands for exactly this.
+        # `bugs/formal/FORMAL_wide_receiver_by_reference.md` lands for exactly this.
         # The layout itself is `formal/model.py`'s, so the x86-64 backend
         # reserves the same bytes in the same order.
         self._frame_sites = M.struct_constructor_sites(f, self._structs)
@@ -1744,7 +1768,7 @@ dylib_exports: list = None, globals_base: int = None,
         # right about the ABI and wrong about the consequence: `pack(fmt, v0..v7)`
         # is nine arguments, and it is `formal/hostmods/struct.mojo`'s OWN
         # documented "a format I cannot serve returns an empty list" contract
-        # that the caller could never reach.  `bugs/FORMAL_struct_pack_over_eight_
+        # that the caller could never reach.  `bugs/formal/FORMAL_struct_pack_over_eight_
         # arguments.md` has the measurement and both halves of the mechanism.
         for i, (pname, ptype) in enumerate(incoming):
             if i >= _ABI_ARG_REGS:
@@ -2626,6 +2650,9 @@ dylib_exports: list = None, globals_base: int = None,
                     self._emit_receiver_writeback()
                 self.asm.emit(encode_movz_wd_imm(0, 0))
             else:
+                callee = self._vkinds.no_value_callee_of(stmt.value)
+                if callee is not None:
+                    raise CodegenError(M.returnless_value_refusal(callee))
                 # A double returned under an INTEGER annotation. Asked before the
                 # value is emitted, because the answer is about the FUNCTION's
                 # declaration rather than about the return instruction, and
@@ -5600,7 +5627,11 @@ ctor_field_value=self._ctor_field_value_for(name),
             sl = e.index
             self._emit_slice_parts(e.obj, sl.start, sl.stop, sl.step)
             return
-        self._emit_subscript_addr(e)
+        # A READ: the element's kind is the pointee's, which `ValueKinds` answers
+        # (`pointee_kind_of`), so a float element is loaded here and answered as
+        # a double by every consumer. The flag is what admits it; the store and
+        # the augmented/del/tuple forms do not pass it.
+        self._emit_subscript_addr(e, element_kind_ok=True)
         self._emit_subscript_load(0, 0)
 
     def _emit_subscript_load(self, reg: int, base: int) -> None:
@@ -6084,7 +6115,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         shared text, so x86-64 cannot describe the same construct differently,
         and both backends ask it at BOTH comparison sites (`_emit_binop` for a
         value and `_emit_branch_unless_cmp` for a condition) — the choke-point
-        argument `bugs/FORMAL_string_value_model.md` makes for `if s < t:`
+        argument `bugs/formal/FORMAL_string_value_model.md` makes for `if s < t:`
         bypassing `_emit_binop`, which is exactly how a string comparison came
         to be a diagnostic in one context and a branch in the other.
         """
@@ -6199,7 +6230,8 @@ ctor_field_value=self._ctor_field_value_for(name),
             raise CodegenError(why)
 
     def _emit_subscript_addr(self, e: F.SubscriptExpr,
-                             for_store: bool = False) -> None:
+                             for_store: bool = False,
+                             element_kind_ok: bool = False) -> None:
         """X0 = &obj[index]. Blob path bounds-checks, loudly (exit 1 on OOB).
 
         The single choke point for a subscript: a read, a store
@@ -6324,7 +6356,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         # answered 4 where the frame held 3 in its first slot.
         self._refuse_frame_slot_element("a subscript", e.obj)
         shape, width, signed, sub_why = M.subscript_base_lowering(
-            self._cur_fn, e.obj, self._structs, self._functions, self._structs)
+            self._cur_fn, e.obj, self._structs, self._functions, self._structs,
+            element_kind_ok=element_kind_ok)
         if shape is None:
             raise CodegenError(sub_why)
         if shape == "load":
@@ -6437,12 +6470,28 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.label(end_label)
 
     def _emit_subscript_store(self, target: F.SubscriptExpr, value) -> None:
-        """`obj[index] = value` — evaluate addr once, then store."""
+        """`obj[index] = value` — evaluate addr once, then store.
+
+        A STORE through a FLOAT pointee's element is answered only when the
+        value's kind agrees with the pointee (`pointer_store_lowering`, the same
+        check `p.value() = v` makes): a double's bits are the element's word,
+        and an integer's are a denormal the element would read back as."""
+        if M.subscript_float_element(self._cur_fn, target.obj, self._structs,
+                                     self._functions):
+            how, why = M.pointer_store_lowering(
+                self._cur_fn, target, self._structs, self._functions,
+                self._structs, value=value,
+                class_of=self._printf_arg_conversion_class)
+            if how is None:
+                raise CodegenError(why)
+            self._emit_expr(value)              # X0 = value
+            self._emit_subscript_store_reg(target, 0, element_kind_ok=True)
+            return
         self._emit_expr(value)                  # X0 = value
         self._emit_subscript_store_reg(target, 0)
 
     def _emit_subscript_store_reg(self, target: F.SubscriptExpr,
-                                  reg: int) -> None:
+                                  reg: int, element_kind_ok: bool = False) -> None:
         """Store the value already in X{reg} into `target[index]`.
 
         Split from `_emit_subscript_store` so a caller that already HAS the
@@ -6482,7 +6531,8 @@ ctor_field_value=self._ctor_field_value_for(name),
             self.asm.emit(encode_ldp_sp_post(reg, 31))   # pop the value
             self.asm.emit(encode_mov_zr_xn(reg, 0))      # the assignment's None
             return
-        self._emit_subscript_addr(target)           # X0 = address
+        self._emit_subscript_addr(target, for_store=True,
+                                  element_kind_ok=element_kind_ok)  # X0 = address
         self.asm.emit(encode_stp_sp_pre(0, 2))      # save addr
         self.asm.emit(encode_mov_zr_xn(9, 0))       # X9 = addr
         # X5 is outside the set the address computation above uses, and
@@ -6494,10 +6544,56 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_ldr_xt_xn_imm(reg, 31, 0))  # value back in X{reg}
         self.asm.emit(encode_ldp_sp_post(0, 31))    # pop value
 
+    def _emit_float_subscript_aug(self, stmt, op: str) -> None:
+        """`p[i] <op>= v` on a FLOAT pointee: the element's own double operation.
+
+        The element is read as its bits, combined with the value through the FP
+        unit (`_emit_float_op_on_vregs`), and stored back at the same address.
+        The integer ALU is never used: it would add the PATTERNS, so `p[0] +=
+        1.0` on a double 2.0 would store a number nobody wrote. The address is
+        computed once, so an index with a call in it is evaluated once.
+
+        Both operands must be doubles. `float_binary_refusal` is the one table
+        that says which mixed pairs and which operators are refused, by name,
+        for every binary form, so the augmented form reads it rather than
+        keeping its own list.
+        """
+        target = stmt.target
+        spelled_expr = (f"{M.spelled(target)} {stmt.op} "
+                        f"{M.spelled(stmt.value)}")
+        reason = M.float_binary_refusal(
+            op, M.FLOAT_KIND, self._expr_str_kind(stmt.value), spelled_expr,
+            left=target, right=stmt.value)
+        if reason is not None:
+            raise CodegenError(reason)
+        # The element's own width, captured before the RHS can overwrite it (a
+        # subscript on the right has its own `_sub_width`), and restored for
+        # the store — the same discipline the integer form keeps.
+        self._emit_subscript_addr(target, element_kind_ok=True)  # X0 = address
+        width = self._sub_width
+        self.asm.emit(encode_stp_sp_pre(0, 31))           # push addr
+        self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 0))     # X9 = addr
+        self._emit_subscript_load(0, 9)                   # X0 = old bits
+        self.asm.emit(encode_stp_sp_pre(0, 31))           # push old
+        self._emit_expr_to(stmt.value, "X1")              # X1 = value bits
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))     # X0 = old (re-load)
+        self.asm.emit(encode_fmov_gpr_to_v(0, 0))         # D0 = old
+        self.asm.emit(encode_fmov_gpr_to_v(1, 1))         # D1 = value
+        self._emit_float_op_on_vregs(op)                  # X0 = old op value
+        self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 16))    # X9 = addr
+        self._sub_width = width
+        self._emit_subscript_store_at(9, 0)
+        self.asm.emit(encode_ldp_sp_post(0, 31))
+        self.asm.emit(encode_ldp_sp_post(0, 31))
+
     def _emit_subscript_aug(self, stmt) -> None:
         """`obj[index] <op>= value` — addr and old value evaluated once."""
         op = stmt.op[:-1] if stmt.op.endswith('=') and stmt.op != '==' \
             else stmt.op
+        if M.subscript_float_element(self._cur_fn, stmt.target.obj,
+                                     self._structs, self._functions):
+            self._emit_float_subscript_aug(stmt, op)
+            return
         ops = {"+": encode_add_xd_xn_xm,
                "-": encode_sub_xd_xn_xm,
                "*": encode_mul_xd_xn_xm,
@@ -7036,7 +7132,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         **Two lines of delegation**, and `M.print_kwargs`'s docstring is where
         the decision and its reasons are: `flush=` is answered there (the
         largest `codegen-refused` family in this repository's own source, per
-        `bugs/FORMAL_proof_coverage_census_2026-10-03.md` §0.2), and the rule
+        `bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md` §0.2), and the rule
         that the keyword is dispatched BEFORE its value is inspected is what
         stops a bool from being refused with a sentence about `sep`."""
         return M.print_kwargs(e, "arm64")
@@ -7096,7 +7192,7 @@ ctor_field_value=self._ctor_field_value_for(name),
     # computes CPython's spelling lives at `M.FLOAT_REPR_SYMBOL` — and this
     # method pair is the ARM half of the branch and the buffer, the machine
     # part only this backend can spell. The algorithm is the validated one
-    # (`bugs/FORMAL_a_float_has_no_print_spelling.md`'s next step): the
+    # (shortest-round-trip decimal spelling): the
     # specials from the bits, then `%.*g` at the smallest precision n that
     # parses back to the same 64 bits (a `snprintf`/`strtod` round trip),
     # laid out in CPython's own notation — scientific iff E >= 16 or
@@ -7215,10 +7311,12 @@ ctor_field_value=self._ctor_field_value_for(name),
         a.emit(encode_ldr_xt_xn_imm(11, 31, 136))    # a_bits, frame is +64
         a.emit(encode_str_xt_xn_imm(11, 31, 8))      # [area+8] = a
         a.emit_extern_bl("snprintf")
+        self._float_repr_call_addrs.append(a.extern_refs[-1][1])
         a.emit(encode_add_xd_xn_imm(31, 31, 64))
         a.emit(encode_add_xd_xn_imm(0, 31, 16))      # x0 = buf
         a.emit(encode_add_xd_xn_imm(1, 31, 64))      # x1 = &endptr
         a.emit_extern_bl("strtod")
+        self._float_repr_call_addrs.append(a.extern_refs[-1][1])
         a.emit(encode_fmov_v_to_gpr(14, 0))          # x14 = parsed bits
         a.emit(encode_ldr_xt_xn_imm(11, 31, 72))
         a.emit(encode_cmp_xn_xm(14, 11))
@@ -7612,6 +7710,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         self._emit_expr(fp.expr)
         self.asm.emit(encode_add_xd_xn_imm(
             1, 31, 16 * (1 + fp.position) + 64 * fp.index))
+        self._float_repr_used = True
         self.asm.emit(encode_bl(0))
         self.asm.emit_label_rel(M.FLOAT_REPR_SYMBOL, here_offset=-4)
 
@@ -7789,7 +7888,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         # are this backend's, and the plan needs them only for the five methods
         # whose arguments are read as `char *`.
         accept = None
-        if M.is_string_method(method):
+        recv_kind = self._method_recv_kind(e)
+        if M.is_string_method(method) and M.string_operand_is_string(recv_kind):
             args = list(e.args)
             plan, payload = M.string_method_call_plan(
                 method, _dotted(e.func), obj, args,
@@ -7804,7 +7904,7 @@ ctor_field_value=self._ctor_field_value_for(name),
                 return
             accept = payload
         reason = M.value_method_refusal(
-            method, self._method_recv_kind(e), _dotted(e.func),
+            method, recv_kind, _dotted(e.func),
             receiver_is_fd=self._expr_is_fd(obj),
             receiver_shape=M.receiver_shape(obj))
         if reason is not None:
@@ -7886,8 +7986,7 @@ ctor_field_value=self._ctor_field_value_for(name),
     # established from a declared type, or has refused.  There is no width this
     # emitter is allowed to choose, and that is the entire point: the pre-change
     # tree could only have emitted an 8-byte load, which over-reads a `UInt8`
-    # pointee by seven bytes and faults at a page edge (see the measurement in
-    # `bugs/FORMAL_pointer_value_model.md`).
+    # pointee by seven bytes and faults at a page edge.
     #
     # The two answers and the two instructions:
     #
@@ -8739,7 +8838,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         which is another C library call (`__error`) and therefore another
         unfollowable call in a block the proof framework has to cross — so the
         foldable case is refused here, precisely, and the rest is
-        `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`.
+        `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`.
         """
         reason = M.int_parse_overflow_refusal(
             M.fold_literal_expr(text_expr), base)
@@ -9327,20 +9426,44 @@ ctor_field_value=self._ctor_field_value_for(name),
                 self.asm.emit(encode_mul_xd_xn_xm(1, 1, 2))
             self.asm.emit(encode_ldp_sp_post(0, 2))
             result_t = common_type(self._ttype(e.left), self._ttype(e.right))
-            # The build-time half of `model.int_overflow_traps`: a `+`, `-` or
-            # `*` whose operands the build can FOLD is decided here, and a
-            # refusal carrying the exact CPython value is a better answer than
-            # a wrapped number or a status code. The run-time half — the same
-            # predicate over a value the build cannot know — is emitted by
-            # `_emit_int_alu_checked`, which is wired up but not yet reachable;
-            # `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`
-            # says why and what it needs.
+            # `model.int_overflow_traps`'s two halves, asked in the order the
+            # value exists: the build-time half — a `+`, `-` or `*` whose
+            # operands the build can FOLD is decided here, and a refusal
+            # carrying the exact CPython value is a better answer than a
+            # wrapped number or a status code — and the run-time half, the
+            # same predicate over a value the build CANNOT know, which a
+            # plain `ADD`/`SUB`/`MUL` used to answer with the hardware's
+            # modulo-2^64 wrap (exit 0, empty stderr, `bugs/formal/
+            # FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
+            # `VARIABLE_ROWS` table is the measurement that pinned it). That
+            # half is `_emit_int_alu_checked`: the flag-setting instruction
+            # and the branch into the trap block, with the trap the one
+            # answer this path has for a value the target cannot hold.
+            #
+            # The build-decidable case that FITS stays on the plain
+            # instruction: `fold_overflow` has just said the run-time answer
+            # is the exact one, so the checked sequence would be a branch
+            # the run can never take, and an image whose every constant
+            # `5 + 7` carries a trap block is a bigger proof for the same
+            # theorem. "The build knows" is the SAME test `fold_overflow`
+            # applies to its own tuple — both operands fold to a NON-BOOL
+            # int — because a folded `True` is unknown to IT, and a
+            # `True + n` that the build does not refuse must be the one the
+            # run checks.
             if M.int_overflow_traps(op, result_t, pointer_arith=bool(scale)):
                 reason = M.fold_overflow(op, e.left, e.right, result_t,
                                          pointer_arith=bool(scale))
                 if reason:
                     raise CodegenError(reason)
-            self.asm.emit(alu[op](0, 0, 1))
+                decided = all(isinstance(v, int) and not isinstance(v, bool)
+                              for v in (M.fold_literal_expr(e.left),
+                                        M.fold_literal_expr(e.right)))
+                if not decided:
+                    self._emit_int_alu_checked(op)
+                else:
+                    self.asm.emit(alu[op](0, 0, 1))
+            else:
+                self.asm.emit(alu[op](0, 0, 1))
             if op in ("+", "-", "*"):
                 self._emit_trunc(result_t)
             return
@@ -9677,13 +9800,25 @@ ctor_field_value=self._ctor_field_value_for(name),
         # column 0; x86-64 reads column 1.  One table decides what each operator
         # MEANS and each backend owns how it spells it, which is why adding an
         # operator is one row and not two.
+        self._emit_cmp_operands(l, r)
+        self.asm.emit(encode_fmov_gpr_to_v(0, 0))
+        self.asm.emit(encode_fmov_gpr_to_v(1, 1))
+        self._emit_float_op_on_vregs(op)
+
+    def _emit_float_op_on_vregs(self, op: str) -> None:
+        """The FP operation of `op` on D0 and D1, leaving the result in X0.
+
+        The shared tail of `_emit_float_binary` and the augmented subscript
+        store: the caller has put the left operand in D0 and the right in D1
+        (and so X1 still holds the right operand's bits, which is what the
+        divide-by-zero guard reads). One place for the operator's meaning
+        (`FLOAT_BINARY_MNEMONICS`) and its guard, so the two forms cannot
+        answer differently about the same operator.
+        """
         emit = {
             "fadd": encode_fadd_dd_dn_dm, "fsub": encode_fsub_dd_dn_dm,
             "fmul": encode_fmul_dd_dn_dm, "fdiv": encode_fdiv_dd_dn_dm,
         }[M.FLOAT_BINARY_MNEMONICS[op][0]]
-        self._emit_cmp_operands(l, r)
-        self.asm.emit(encode_fmov_gpr_to_v(0, 0))
-        self.asm.emit(encode_fmov_gpr_to_v(1, 1))
         if op == "/" and M.raise_float_divides_by_zero_is_an_exception():
             self._emit_float_divide_by_zero_guard()
         self.asm.emit(emit(0, 0, 1))
@@ -11380,7 +11515,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             # `struct Outer: n: Inner` with `o.n.d.x = 5` built, ran and died of
             # SIGSEGV (exit 139), while the depth-1 and depth-2 reads of the same
             # three structs answered correctly.
-            # `bugs/FORMAL_a_one_field_struct_whose_only_field_is_a_nested_
+            # `bugs/formal/FORMAL_a_one_field_struct_whose_only_field_is_a_nested_
             # frame.md` §2 has the disassembly.
             #
             # AFTER the defaults above, not before: the slot this stores into is
@@ -11617,7 +11752,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             # lives. `value_callee_can_hold_a_function` above reads the
             # DECLARATION; this reads the FLOW, and neither can see the other:
             # a local bound to `17` has no annotation to refuse on, and
-            # `bugs/FORMAL_function_value_calls_are_not_proved_to_be_calls.md`
+            # `bugs/formal/FORMAL_function_value_calls_are_not_proved_to_be_calls.md`
             # is the doc for what is left when neither has an answer.
             holds = M.callee_word_is_not_an_address(
                 self._cur_fn, name, self._vkinds)
@@ -13113,7 +13248,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             #
             # Both are decidable when the AMOUNT is a literal and the BASE is
             # not, and precisely decidable when both are; the variable-base case
-            # is `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`.
+            # is `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`.
             reason = M.shift_overflow_refusal(
                 op, M.fold_literal_expr(e.right), M.fold_literal_expr(e.left),
                 [e.left, e.right])
@@ -13209,7 +13344,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             #
             # All three are decidable here whenever both operands fold, which
             # is the case the corpus and a reader hit first. The variable-base
-            # case is `bugs/FORMAL_integer_overflow_at_run_time_is_still_
+            # case is `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_
             # untrapped.md`.
             reason = M.power_overflow_refusal(
                 M.fold_literal_expr(e.left), M.fold_literal_expr(exp),
@@ -14628,14 +14763,14 @@ ctor_field_value=self._ctor_field_value_for(name),
 
         `base_reg` points at the blob's COUNT word, so the elements start at
         `base_reg + 8` and each element is one 8-byte word -- a set lowers as a
-        list of words on this path (`bugs/FORMAL_set_value_model.md`).  This is
+        list of words on this path (`bugs/formal/FORMAL_set_value_model.md`).  This is
         the linear scan `_emit_set_op` runs per element of the other operand,
         lifted out so `&`, `-`, `^` and `|` share one implementation rather
         than four copies of the same loop.
 
         The comparison is element WORD to element WORD, which for a set of
         strings is a comparison of `char *` ADDRESSES; that is the same limit
-        the union's dedup always had, and `bugs/FORMAL_set_value_model.md`
+        the union's dedup always had, and `bugs/formal/FORMAL_set_value_model.md`
         owns it.
 
         Clobbers X10/X11/X12 and `out_reg`; X0-X9 and the caller's registers
@@ -14712,7 +14847,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         The scan is over `other[0..other_n)`, and the element is read as a whole
         8-byte slot, which is `_emit_set_union`'s dedup compare and the same
         thing CPython means by membership here — a set lowers as a list on this
-        path (`bugs/FORMAL_set_value_model.md`), so the elements are words and
+        path (`bugs/formal/FORMAL_set_value_model.md`), so the elements are words and
         the compare is a word compare."""
         self.asm.emit(encode_movz_wd_imm(5, 0))          # i = 0
         self._while_counter += 1

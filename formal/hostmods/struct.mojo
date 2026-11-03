@@ -101,7 +101,7 @@ FOUR LIMITS THIS FILE IS WRITTEN AROUND — all measured
    sound, and it is the form the tests below pin hardest. `pack` returns a
    list built in its own frame; the corpus consumes a `pack` result
    immediately (`.extend` into the buffer that is about to be returned), so
-   it is correct in that shape, and `bugs/FORMAL_known_limits.md` is where a
+   it is correct in that shape, and `bugs/formal/FORMAL_known_limits.md` is where a
    reader should look for the general case.
 
 ERRORS
@@ -265,6 +265,8 @@ def calcsize(fmt: String) -> int:
     reading of `p` is "length count-1" and this build answers `count`.
     """
     n = strlen(fmt)
+    if n > 4096:
+        return 0
     i = 0
     # NO PREFIX IS `@`. That is the one default in this function which is not
     # obvious, and CPython's own suite pins it twice over: `calcsize('l')` is 8
@@ -286,7 +288,11 @@ def calcsize(fmt: String) -> int:
             align = 0
         i = 1
     total = 0
+    steps = 0
     while i < n:
+        steps = steps + 1
+        if steps > 8192:
+            return 0
         # The item is [<count>] <code>, and this loop is both halves: a value
         # is ONE WORD on this path, so a helper that answered both "how many
         # bytes" and "how many characters of `fmt` did you read" would have to

@@ -537,8 +537,7 @@ CASES = [
     # as "a call to 'P'", found no frame there, and refused the program as a
     # declaration no call site agrees with — which is the opposite of what the
     # call site does.  `formal/types.py`'s `mask_of(IntType(w, False))` is the
-    # shipped instance (`bugs/FORMAL_declared_parameter_against_its_call_sites.md`
-    # §2), and `mask_of` is `formal/types.py` in this tree.
+    # shipped instance of a false refusal fixed by 3e8b0803's `_frame_valued_calls`
     #
     # `p.a * 10 + p.b` rather than a sum, so a read at the wrong SLOT says which
     # field moved: 34 for (3, 4), 43 if the two were transposed.
@@ -1528,7 +1527,7 @@ CASES = [
     # So the shape that now BUILDS gets its own EXECUTED rows, both against
     # CPython and both architectures, because a lowering that reads a setter's
     # frame at the wrong slot or from the wrong scratch computes a number and
-    # exits 0 — the failure `bugs/FORMAL_wide_receiver_by_reference.md` exists
+    # exits 0 — the failure `bugs/formal/FORMAL_wide_receiver_by_reference.md` exists
     # to prevent, and the only way to see it is to run it.
     ("a_delegating_setter_is_readable_through_the_field",
      "struct Opt:\n"

@@ -848,6 +848,18 @@ class X86_64Codegen:
         # run test, and `test_formal_call_proof_gen.py::
         # TestCompilerTrapIsNotAProgramCall` for what is asserted about it.
         self._compiler_trap_addrs: list = []
+        # ADDRESSES of the calls the float-repr helper made — its `snprintf`
+        # and `strtod`.  The helper is this emitter's own (emitted after the
+        # function bodies when a float is printed), so its call sites are not
+        # calls the PROGRAM makes: `formal/x86_64_proof_gen.py::_program_externs`
+        # subtracts them for the same reason it subtracts the traps, and not
+        # doing so suppresses the run tests of every image that prints a float.
+        # Published in `compile()`'s `info` as `float_repr_calls`.
+        self._float_repr_call_addrs: list = []
+        # Set by `_emit_float_print_operand`, the only thing that calls the
+        # helper. The helper is emitted only when this is set, so an image whose
+        # program formats no float carries no helper and no `snprintf`/`strtod`.
+        self._float_repr_used: bool = False
         # The functions whose prologue carries the stack-floor guard, filled by
         # `compile()` once the whole image's call graph is known — see
         # `model.stack_floor_guarded_names`. The x86-64 twin of arm64's, from the
@@ -1021,7 +1033,7 @@ class X86_64Codegen:
         both backends through one `_codegen_and_link` and hands both the same
         list). Accepting it here is what keeps `--backend=x86_64` from dying
         with a TypeError on a keyword meant for the other backend (see
-        bugs/FORMAL_arm64_instruction_coverage.md, "Landed alongside: dylib_syms"),
+        bugs/formal/FORMAL_arm64_instruction_coverage.md, "Landed alongside: dylib_syms"),
         and USING it is what keeps the two backends from disagreeing about
         which callee names are types: without it a struct constructor fell
         through to the extern path and became a `call _Point` against a symbol
@@ -1184,8 +1196,10 @@ class X86_64Codegen:
         for f, label in zip(functions, self._def_labels):
             self._emit_function(f, label)
 
-        # Float-repr helper, once, after all function bodies.
-        self._emit_float_repr_helper()
+        # Float-repr helper, once, after all function bodies, and only when a
+        # float is printed (see `_float_repr_used`).
+        if self._float_repr_used:
+            self._emit_float_repr_helper()
 
         # Every body is out, so a NAME can be bound to the one a call reaches.
         # Before `resolve()`, so the startup `call` above and every `call` in a
@@ -1223,10 +1237,14 @@ class X86_64Codegen:
                        if n not in self._internal_labels},
             # The float-repr helper's entry, published separately because it is
             # internal and so absent from `labels`. It is emitted after every
-            # function body, so a consumer that decodes a body linearly from its
-            # entry must stop here or it walks into the helper. Consumer:
-            # `_body` in `formal/x86_64_endtoend_test.py`.
-            "float_repr_addr": self.asm.labels[M.FLOAT_REPR_SYMBOL],
+            # function body when a float is printed, and `None` otherwise, so a
+            # consumer that decodes a body linearly from its entry must stop at
+            # it when it is present. `x86_64_decode.body_end` is the one reader.
+            "float_repr_addr": self.asm.labels.get(M.FLOAT_REPR_SYMBOL),
+            # One past the last byte of the image. The bound a body's linear
+            # decode stops at when the image has neither a string pool nor a
+            # float-repr helper after its bodies (`x86_64_decode.body_end`).
+            "image_end": base_addr + len(code),
             "func_name": first_func_name,
             "external_syms": external_syms,
             "extern_calls": extern_calls,
@@ -1238,6 +1256,13 @@ class X86_64Codegen:
             # the unreachability argument this is worth) is on
             # `_emit_stack_floor_guard`.
             "compiler_traps": sorted(self._compiler_trap_addrs),
+            # The float-repr helper's OWN extern calls (`snprintf`, `strtod`),
+            # by address — it is emitted once per image, after every function
+            # body, when a float is printed, so the sites are in `extern_calls`
+            # at or above the entry
+            # and `_program_externs` subtracts them there, the same subtraction
+            # `compiler_traps` is for the guard's `exit`.
+            "float_repr_calls": sorted(self._float_repr_call_addrs),
             "test_input": self.test_input,
             # EVERY entry argument's value, in order — the proof generator's
             # entry state is built from this list, so a two-parameter entry has
@@ -1259,7 +1284,7 @@ class X86_64Codegen:
             # side has to mean the same integer on the other, and `info` is how
             # both proof generators are handed one list instead of each
             # recomputing it. Nothing reads it yet
-            # (`bugs/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §5).
+            # (`bugs/formal/FORMAL_a_try_handler_arm_is_still_never_emitted.md` §5).
             "exception_kinds": M.exception_kinds(),
             # The INTERN TABLE, keyed by DECODED text — the same map, from the
             # same `_intern_string`, for the same reason as on arm64: a string
@@ -1803,7 +1828,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         `formal/x86_64_model_coverage_test.py`); what the disp32 form is NOT is
         reachable by a generated end-to-end proof yet, because the path through
         a call this wide does not close —
-        `bugs/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`.
+        `bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`.
         """
         self.asm.emit(encode_mov_r64_rm64(
             Reg.R11, Reg.RBP, _STACK_ARG_OFF + 8 * (index - len(ARG_REGS))))
@@ -2411,6 +2436,9 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                     self._emit_receiver_writeback()
                 self._emit_mov_imm(Reg.RAX, 0)
             else:
+                callee = self._vkinds.no_value_callee_of(stmt.value)
+                if callee is not None:
+                    raise CodegenError(M.returnless_value_refusal(callee))
                 # A double returned under an INTEGER annotation. Asked before
                 # the value is emitted, because the answer is about the
                 # FUNCTION's declaration rather than about the return
@@ -2814,7 +2842,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         rather than a runtime local, because a runtime local would give the
         program different behaviour than the source declares.
 
-        This is the refusal `bugs/FORMAL_known_limits.md` §3 records as ARCH
+        This is the refusal `bugs/formal/FORMAL_known_limits.md` §3 records as ARCH
         DRIFT. x86-64 used to refuse every `comptime` binding one layer up, at
         the statement dispatch, with "unsupported statement ComptimeVarStmt" —
         a different limit for the same construct on the two architectures, and
@@ -3276,7 +3304,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # premise is the BINDING OF THE BASE — and the same program written
             # `gen.temp_counter = 1` or `gen.temp_counter, x = 1, 2` already
             # produced arm64's sentence on BOTH machines. Filed as
-            # `bugs/FORMAL_the_two_backends_refuse_different_constructs_in_the_
+            # `bugs/formal/FORMAL_the_two_backends_refuse_different_constructs_in_the_
             # same_function.md`.
             key = self._frame_member_slot(stmt.target)
             if key is None:
@@ -4898,6 +4926,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         imm = 16 * (1 + fp.position) + 64 * fp.index
         self.asm.emit(encode_lea_r64_rm64(Reg.RSI, Reg.RSP, imm))
         self.asm.emit(encode_mov_r64_r64(Reg.RDI, Reg.RAX))
+        self._float_repr_used = True
         self.asm.emit(encode_call_rel32(0))
         self.asm.emit_label_rel32(M.FLOAT_REPR_SYMBOL, here_offset=-4)
 
@@ -5030,10 +5059,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         lea_rip(RDX, self._intern_string("%.*g"))
         m64(RCX, R12)           # n → RCX (4th int arg)
         mi(RAX, 1)              # 1 XMM register used
-        self._emit_extern_call("snprintf")
+        self._float_repr_call_addrs.append(self._emit_extern_call("snprintf"))
         lea64(RDI, RBP, -96)
         lea64(RSI, RBP, -48)
-        self._emit_extern_call("strtod")
+        self._float_repr_call_addrs.append(self._emit_extern_call("strtod"))
         a.emit(encode_movq_r64_xmm(RAX, 0))
         mm64(RCX, RBP, -40)
         cpr(RAX, RCX)
@@ -5133,17 +5162,18 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         a.label("L_chk")
         mvz(RAX, RDI, 0)
         t64(RAX, RAX)
-        jc("jz", "L_nul")
+        jc("jz", "L_add_dot0")
         cpi(RAX, 0x2E)
-        jc("je", "L_nul")
+        jc("je", "fr_ret")
         cpi(RAX, 0x65)
-        jc("je", "L_nul")
+        jc("je", "fr_ret")
         cpi(RAX, 0x2D)
         jc("je", "L_chk")  # '-' might be in "1e-04"
         ai(RDI, 1)
         jp("L_chk")
-        a.label("L_nul")
-        # No '.' or 'e' found: add ".0"
+        a.label("L_add_dot0")
+        # No '.' or 'e' found: add ".0" (overwrite the NUL terminator from the copy)
+        ai(RSI, -1)
         mi(RDX, 0x2E)
         mvb(RSI, 0, RDX)
         ai(RSI, 1)
@@ -5303,7 +5333,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # are this backend's, and the plan needs them only for the five methods
         # whose arguments are read as `char *`.
         accept = None
-        if M.is_string_method(method):
+        recv_kind = self._method_recv_kind(e)
+        if M.is_string_method(method) and M.string_operand_is_string(recv_kind):
             args = list(e.args)
             plan, payload = M.string_method_call_plan(
                 method, _dotted(e.func), obj, args,
@@ -5318,7 +5349,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 return
             accept = payload
         reason = M.value_method_refusal(
-            method, self._method_recv_kind(e), _dotted(e.func),
+            method, recv_kind, _dotted(e.func),
             receiver_is_fd=self._expr_is_fd(obj),
             receiver_shape=M.receiver_shape(obj))
         if reason is not None:
@@ -6740,7 +6771,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             raise CodegenError(why)
 
     def _emit_subscript_addr(self, e: F.SubscriptExpr,
-                             for_store: bool = False) -> None:
+                             for_store: bool = False,
+                             element_kind_ok: bool = False) -> None:
         """RAX = the ADDRESS of `obj[index]` (not its value).
 
         Split out so the same address computation serves a read, a store and
@@ -6851,7 +6883,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # where the frame held 3 in its first slot.
         self._refuse_frame_slot_element("a subscript", e.obj)
         shape, width, signed, sub_why = M.subscript_base_lowering(
-            self._cur_fn, e.obj, self._structs, self._functions, self._structs)
+            self._cur_fn, e.obj, self._structs, self._functions, self._structs,
+            element_kind_ok=element_kind_ok)
         if shape is None:
             raise CodegenError(sub_why)
         if shape == "load":
@@ -6958,7 +6991,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._emit_slice_parts(e.obj, e.index.start, e.index.stop,
                                    e.index.step)
             return
-        self._emit_subscript_addr(e)
+        # A READ: the element's kind is the pointee's (`pointee_kind_of`), so a
+        # float element is loaded and answered as a double. The flag is what
+        # admits it; the store and augmented/del/tuple forms do not pass it.
+        self._emit_subscript_addr(e, element_kind_ok=True)
         self._emit_subscript_load(Reg.RAX)
 
     def _emit_subscript_load(self, dst: Reg) -> None:
@@ -7350,7 +7386,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         a symmetric difference append into one result.
 
         The elements are read as whole 8-byte slots, which is what a set means
-        on this path (`bugs/FORMAL_set_value_model.md`: a set lowers as a
+        on this path (`bugs/formal/FORMAL_set_value_model.md`: a set lowers as a
         LIST), so an element is a word and `1 in {1, 2}` is a word compare.
 
         REGISTER PLAN.  src/other/src_n/other_n are the caller's; R10 is the
@@ -8649,7 +8685,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # value, x86-64 raised `unsupported unary operator '^' on the formal
             # x86-64 path`) for a construct with one meaning. It refused correct
             # stdlib Mojo: `std/builtin/swap.mojo` builds on arm64 and is refused
-            # here, and `bugs/FORMAL_known_limits.md` §6.5 has carried it as
+            # here, and `bugs/formal/FORMAL_known_limits.md` §6.5 has carried it as
             # "x86-64-side work of a sitting" since. It is the same shape as the
             # `~` case above, and for the same reason: the ARM side names both
             # operators it lowers rather than falling through to a refusal.
@@ -8831,21 +8867,47 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # program is byte-identical to what it was.
             scale = (M.pointer_offset_scale(self._cur_fn, e)
                      if op in ("+", "-") else None)
-            # The build-time half of `model.int_overflow_traps`, asked here for
-            # the same reason and with the same shared predicate arm64's ALU arm
-            # asks it with: a `+`, `-` or `*` whose operands the build can FOLD
-            # is decided now, and a refusal carrying the exact CPython value is
-            # a better answer than a wrapped number or a status code. The
-            # run-time half over a value the build cannot know is
-            # `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`.
+            # `model.int_overflow_traps`'s two halves, asked in the order the
+            # value exists, with the same shared predicate arm64's ALU arm asks
+            # it with: the build-time half — a `+`, `-` or `*` whose operands
+            # the build can FOLD is decided now, and a refusal carrying the
+            # exact CPython value is a better answer than a wrapped number or
+            # a status code — and the run-time half, the same predicate over a
+            # value the build CANNOT know, which a plain `ADD`/`SUB`/`IMUL`
+            # used to answer with the hardware's modulo-2^64 wrap (on `//`'s
+            # neighbour the two machines did not even fail the same way —
+            # `bugs/formal/
+            # FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
+            # `VARIABLE_ROWS` table is the measurement that pinned it). That
+            # half is the flag the ALU leaves plus `_emit_int_overflow_trap`,
+            # the branch into the trap block. The build-decidable case that
+            # FITS stays on the plain instruction for the reason arm64's arm
+            # gives: the branch the run can never take is a bigger proof for
+            # the same theorem. "The build knows" is the SAME test
+            # `fold_overflow` applies to its own tuple — both operands fold to
+            # a NON-BOOL int — because a folded `True` is unknown to IT, and a
+            # `True + n` that the build does not refuse must be the one the
+            # run checks.
             result_t = common_type(self._ttype(e.left), self._ttype(e.right))
+            checked = False
             if M.int_overflow_traps(op, result_t, pointer_arith=bool(scale)):
                 reason = M.fold_overflow(op, e.left, e.right, result_t,
                                          pointer_arith=bool(scale))
                 if reason:
                     raise CodegenError(reason)
+                decided = all(isinstance(v, int) and not isinstance(v, bool)
+                              for v in (M.fold_literal_expr(e.left),
+                                        M.fold_literal_expr(e.right)))
+                checked = not decided
             self._emit_two_sided(e.left, e.right, _ALU_RR[op], Reg.R11,
                                  scale=scale)
+            if checked:
+                # `scale` is None here by construction: a pointer offset scales
+                # its right operand with its own `IMUL`, and
+                # `int_overflow_traps` answers False for `pointer_arith`, so
+                # the OF the `JO` below reads is the ALU's and not the scaling
+                # multiply's.
+                self._emit_int_overflow_trap(op)
             if op in ("+", "-", "*"):
                 self._emit_trunc(result_t)
             return
@@ -8887,6 +8949,46 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self.asm.emit(encode_imul_r64_r64_imm(scratch, scratch, scale))
         self._pop_slot(Reg.RAX)
         self.asm.emit(alu(Reg.RAX, scratch))
+
+    def _emit_int_overflow_trap(self, op: str) -> None:
+        """The `JO` into an inline overflow trap, and the trap itself.
+
+        The instruction-level twin of arm64's `_emit_int_overflow_trap`, and
+        one `JO` where arm64's check is a `B.vs` or a `CBNZ`, because here the
+        flag IS the test: `ADD` and `SUB` set OF on a signed overflow, and the
+        two-operand `IMUL` sets OF and CF when the 64-bit product does not
+        fit — the fact `lib/X86.lean`'s flag models carry, and the reason
+        arm64 (whose `MUL` writes no flag at all) has to compute the high
+        half with `SMULH` and compare it where this reads one flag. The
+        caller has just emitted the ALU into RAX with the right operand in
+        the scratch, and nothing here preserves a register: the block ends
+        in an exit, so the value the operation was computing is not live on
+        the far side.
+
+        Not `_record_cond_branch`: no AST condition is behind the branch, and
+        recording it would claim a source-level `if` the program never wrote
+        — the reading arm64 applies to its own guards, and the one this
+        branch's proof consumer needs before it maps recorded branches to
+        source conditions.
+
+        Both calls in the block are recorded as compiler traps, the way
+        `_emit_stack_floor_guard` records its own: an unrecorded `write` or
+        `exit` reads as a call the PROGRAM makes and suppresses every run
+        test in the image.
+        """
+        self._if_counter += 1
+        tid = self._if_counter
+        fn = self.func_name
+        trap = f"{fn}_ovf{tid}_t"
+        ok = f"{fn}_ovf{tid}_k"
+        self._emit_jcc(COND_O, trap)
+        self._emit_jmp(ok)
+        self.asm.label(trap)
+        self._compiler_trap_addrs.append(
+            self._emit_overflow_diagnostic_call(M.int_overflow_trap_message(op)))
+        self._compiler_trap_addrs.append(
+            self._emit_call_exit(M.INT_OVERFLOW_TRAP_STATUS))
+        self.asm.label(ok)
 
     def _emit_strcmp(self, l, r, op: str) -> bool:
         """`l == r` / `l != r` on two STRINGS as `strcmp(l, r) == 0`.
@@ -8964,11 +9066,22 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         No truncation follows, and that is the difference from the integer ALU's
         tail: a `double` has no declared narrower width to be cut to.
         """
+        self._emit_float_operands(l, r)
+        self._emit_float_op_on_xmm(op)
+
+    def _emit_float_op_on_xmm(self, op: str) -> None:
+        """The FP operation of `op` on XMM0 and XMM1, leaving the result in RAX.
+
+        The shared tail of `_emit_float_binary` and the augmented subscript
+        store: the caller has put the left operand in XMM0 and the right in
+        XMM1, and R11 holds the right operand's bits, which is what the
+        divide-by-zero guard tests. One place for the operator's meaning
+        (`FLOAT_BINARY_MNEMONICS`) and its guard on both forms.
+        """
         emit = {
             "addsd": encode_addsd_xmm, "subsd": encode_subsd_xmm,
             "mulsd": encode_mulsd_xmm, "divsd": encode_divsd_xmm,
         }[M.FLOAT_BINARY_MNEMONICS[op][1]]
-        self._emit_float_operands(l, r)
         if op == "/" and M.raise_float_divides_by_zero_is_an_exception():
             self._emit_float_divide_by_zero_guard()
         self.asm.emit(emit(0, 1))
@@ -9473,7 +9586,7 @@ preference.
         # (`8 >> 64` is 0; `1 << 64` is 18446744073709551616 and the saturating
         # arm answered 0), and an amount in range can still overflow the RESULT
         # (`1 << 63`), so the `0..63` test is not a safety test. The variable
-        # base is `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.
+        # base is `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.
         # md`.
         reason = M.shift_overflow_refusal(
             op, M.fold_literal_expr(e.right), M.fold_literal_expr(e.left),
@@ -9730,12 +9843,28 @@ preference.
         """`obj[index] = value` — the address is computed once, then stored.
 
         The index expression is evaluated exactly once (it can contain calls),
-        and the value after it, so the two evaluate in source order."""
+        and the value after it, so the two evaluate in source order.
+
+        A STORE through a FLOAT pointee's element is answered only when the
+        value's kind agrees with the pointee (`pointer_store_lowering`, the same
+        check `p.value() = v` makes): arm64's `_emit_subscript_store` is the twin."""
+        if M.subscript_float_element(self._cur_fn, target.obj, self._structs,
+                                     self._functions):
+            how, why = M.pointer_store_lowering(
+                self._cur_fn, target, self._structs, self._functions,
+                self._structs, value=value,
+                class_of=self._printf_arg_conversion_class)
+            if how is None:
+                raise CodegenError(why)
+            self._emit_expr(value)                 # RAX = value
+            self._emit_subscript_store_reg(target, Reg.RAX,
+                                           element_kind_ok=True)
+            return
         self._emit_expr(value)                     # RAX = value
         self._emit_subscript_store_reg(target, Reg.RAX)
 
     def _emit_subscript_store_reg(self, target: F.SubscriptExpr,
-                                  src: Reg) -> None:
+                                  src: Reg, element_kind_ok: bool = False) -> None:
         """Store the value already in `src` into `target[index]`.
 
         Split out of `_emit_subscript_store` so a caller that already HAS the
@@ -9772,7 +9901,8 @@ preference.
             self._pop_slot(Reg.R11)                # the value, discarded
             self._emit_mov_imm(src, 0)            # the assignment's None
             return
-        self._emit_subscript_addr(target)          # RAX = address
+        self._emit_subscript_addr(target, for_store=True,
+                                  element_kind_ok=element_kind_ok)  # RAX = address
         self._pop_slot(Reg.R11)                    # R11 = value
         # A width-aware store, and the two-branch form it replaces had one bug
         # twice: both branches of the old `if` were a 64-bit `MOV` for anything
@@ -9782,6 +9912,41 @@ preference.
         # the pointee, so the overwrite became a silent corruption of a
         # `malloc`'d buffer rather than a fault on a read-only `__TEXT` page.
         self._emit_subscript_store_at(Reg.RAX, Reg.R11)
+
+    def _emit_float_subscript_aug(self, stmt, op: str) -> None:
+        """`p[i] <op>= v` on a FLOAT pointee: the element's own double operation.
+
+        The mirror of arm64's `_emit_float_subscript_aug` and it has the same
+        contract: the element is read as its bits, combined with the value on
+        SSE2 (`_emit_float_op_on_xmm`), and stored back at the same address,
+        never through the integer ALU, which would add the patterns. The
+        address is computed once and held in a slot across both evaluations,
+        exactly as the integer form holds it.
+        """
+        target = stmt.target
+        spelled_expr = (f"{M.spelled(target)} {stmt.op} "
+                        f"{M.spelled(stmt.value)}")
+        reason = M.float_binary_refusal(
+            op, M.FLOAT_KIND, self._expr_str_kind(stmt.value), spelled_expr,
+            left=target, right=stmt.value)
+        if reason is not None:
+            raise CodegenError(reason)
+        self._emit_subscript_addr(target, element_kind_ok=True)  # RAX = address
+        # The element's width, captured before the RHS can overwrite it, and
+        # restored for the store — the same discipline the integer form keeps.
+        width = self._sub_width
+        self._push_slot(Reg.RAX)                      # [rsp] = address
+        self._emit_subscript_load(Reg.RAX)            # old element bits
+        self._push_slot(Reg.RAX)                      # [rsp] = old, [rsp+16] = addr
+        self._emit_expr(stmt.value)                   # RAX = value bits
+        self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.RAX))  # R11 = value
+        self._pop_slot(Reg.RAX)                       # RAX = old
+        self.asm.emit(encode_movq_xmm_rm64(0, Reg.RAX))      # XMM0 = old
+        self.asm.emit(encode_movq_xmm_rm64(1, Reg.R11))      # XMM1 = value
+        self._emit_float_op_on_xmm(op)                # RAX = old op value
+        self._pop_slot(Reg.R10)                       # R10 = address
+        self._sub_width = width
+        self._emit_subscript_store_at(Reg.R10, Reg.RAX)
 
     def _emit_subscript_aug(self, stmt, op: str) -> None:
         """`obj[index] <op>= value` — one address, one read, one write.
@@ -9812,6 +9977,10 @@ preference.
         one is how `q[0] += 5` and `q[0] = q[0] + 5` come to answer differently
         about the same source.
         """
+        if M.subscript_float_element(self._cur_fn, stmt.target.obj,
+                                     self._structs, self._functions):
+            self._emit_float_subscript_aug(stmt, op)
+            return
         reason = M.string_binary_refusal(
             op, self._expr_str_kind(stmt.target),
             self._expr_str_kind(stmt.value), spelled_op=stmt.op)
@@ -11905,7 +12074,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             # carried a `SubscriptExpr` arm for a long time and this copy has
             # not, so a bracketed call target reaches the refusal below on this
             # architecture alone — a pre-existing x86-64 gap, listed in
-            # `bugs/FORMAL_wide_receiver_by_reference.md` §5.1 among the
+            # `bugs/formal/FORMAL_wide_receiver_by_reference.md` §5.1 among the
             # architecture gaps, and NOT closed here: closing it means teaching
             # this backend a comptime-specialization call convention it does not
             # have, which is a change of far more than this construct.
@@ -13403,7 +13572,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             # `struct Outer: n: Inner` with `o.n.d.x = 5` built, ran and died of
             # SIGSEGV (exit 139), while the depth-1 and depth-2 reads of the same
             # three structs answered correctly.
-            # `bugs/FORMAL_a_one_field_struct_whose_only_field_is_a_nested_
+            # `bugs/formal/FORMAL_a_one_field_struct_whose_only_field_is_a_nested_
             # frame.md` §2 has the disassembly.
             #
             # AFTER the defaults above and for the framed path's reason

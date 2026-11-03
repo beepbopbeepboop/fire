@@ -603,7 +603,8 @@ def body_end(info: dict) -> int:
     """The offset into `code` at which a linear sweep of a body must stop.
 
     Every function body comes before the string pool and before the float-repr
-    helper, and the helper follows the bodies. Neither is an instruction a
+    helper (present only when a float is printed), and the helper follows the
+    bodies. With neither after them the image's end is the bound. Neither is an instruction a
     body's chain reaches (a body calls the helper, and the chain does not follow
     a `call`), and the helper's SIB-indexed byte stores are not a form this
     decoder reads. So the sweep ends at the first of them. Both consumers of a
@@ -613,7 +614,9 @@ def body_end(info: dict) -> int:
     base = info["base_addr"]
     ends = [a for name, a in (info.get("labels") or {}).items()
             if name.startswith("str_")]
-    ends.append(info["float_repr_addr"])
+    if info.get("float_repr_addr") is not None:
+        ends.append(info["float_repr_addr"])
+    ends.append(info["image_end"])
     return min(ends) - base
 
 

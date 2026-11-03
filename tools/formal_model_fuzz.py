@@ -595,16 +595,20 @@ def gen_memreg(rng, free):
     base = _base(rng)
     off = OFF_REG
     d = _dst(rng, free)
-    if rng.random() < 0.5:
+    r = rng.random()
+    if r < 1/3.0:
         return ("ldr x%d, [%s, x%d]" % (d, _rn(base), off),
                 A.encode_ldr_xt_xn_xm(d, base, off))
-    return ("str x%d, [%s, x%d]" % (d, _rn(base), off),
-            A.encode_str_xt_xn_xm(d, base, off))
+    elif r < 2/3.0:
+        return ("str x%d, [%s, x%d]" % (d, _rn(base), off),
+                A.encode_str_xt_xn_xm(d, base, off))
+    return ("strb w%d, [%s, x%d]" % (d, _rn(base), off),
+            A.encode_strb_wd_wn_xm(d, base, off))
 
 
 #: The mixes, and what each one is for. `MIXES` is a NAME → generators map
-#: rather than one generator list because a mix is also a row in
-#: `bugs/FORMAL_model_fuzz_ledger.md`, and a row that cannot be named cannot be
+#: rather than one generator list because a mix is also a row of the sweep
+#: ledger (`ledger_row` writes it), and a row that cannot be named cannot be
 #: written down.
 #:
 #: Two forms are deliberately NOT here, and both absences are recorded rather
@@ -1270,10 +1274,11 @@ def compare(hw, md):
 
 # ── sweeps ──────────────────────────────────────────────────────────────
 #
-# A mix is a name, a corpus and a ledger row. The ledger is in
-# `bugs/FORMAL_model_fuzz_ledger.md`: a tally is a fact about one run and stops
-# being true the moment an instruction stops being generated, so what a sweep
-# COVERED is written down beside what it found.
+# A mix is a name, a corpus and a ledger row. The ledger is the sequence of
+# rows `ledger_row` prints, recorded in the commit that makes each sweep: a
+# tally is a fact about one run and stops being true the moment an instruction
+# stops being generated, so what a sweep COVERED is written down beside what it
+# found.
 def build_cases(mix, count, seed, length=None):
     rng = random.Random("%s/%s" % (mix, seed))
     out = [gen_case(rng, mix, length) for _ in range(count)]
@@ -1451,14 +1456,14 @@ def report(tally, findings, cases, limit=12):
         print("  ... and %d more finding(s)" % (len(findings) - limit))
 
 
-#: The verdict columns of `bugs/FORMAL_model_fuzz_ledger.md` §2, in the order
-#: that file writes them.
+#: The verdict columns of a sweep-ledger row, in the order the ledger writes
+#: them.
 LEDGER_VERDICTS = ("AGREE", "WRONG", "NOSTEP", "FAULT", "ENC-MISMATCH",
                    "ENC-FAIL", "NO-REPORT", "NO-EVAL")
 
 
 def ledger_row(tally, n_cases, seed, mixes):
-    """One §2 row of `bugs/FORMAL_model_fuzz_ledger.md`, from a run's tally.
+    """One sweep-ledger row, from a run's tally.
 
     The ledger's numbers were copied by hand from stdout and drifted (§2.1 was
     re-measured and found stale), so the row is produced from the same tally
@@ -1542,8 +1547,8 @@ def main(argv):
     ap.add_argument("--lean-chunk", type=int, default=25, metavar="N",
                     help="cases per lean process (default 25; see run_model)")
     ap.add_argument("--ledger-row", action="store_true",
-                    help="also print this run as a row of "
-                         "bugs/FORMAL_model_fuzz_ledger.md §2")
+                    help="also print this run as one sweep-ledger row, "
+                         "for the commit that records the sweep")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
     verbose_report = args.verbose
