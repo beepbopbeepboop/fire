@@ -80,7 +80,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md` | `bug-formal-formal-a-module-that-exports-8121` | `std/collections/string/_unicode_lookups.mojo` blocks `_unicode.mojo`, and there are TWO walls behind it |
 | `FORMAL_a_variadic_parameter_read_has_no_abi.md` | `bug-formal-formal-a-variadic-parameter-r` | the row was unowned, and the refusal in it is CORRECT |
 | `FORMAL_a_with_exit_whose_value_is_computed_can_suppress.md` | **unclaimed** | A `__exit__` whose RETURN VALUE is computed can still suppress, and the gate that catches the foldable half cannot see this one |
-| `FORMAL_eq_dispatch_on_a_frame_receiver.md` | **unclaimed** | what `==` still does not reach |
+| (removed) | — | bug fixed and doc deleted |
 | `FORMAL_module_state_no_storage.md` | **unclaimed** | a module cannot hold state, so `sys.argv`, `sys.path` and the stream objects cannot exist on this path |
 | `FORMAL_optional_needs_a_niche.md` | **unclaimed** | `Optional[T]` has a representation now, and the payloads it cannot answer are exactly the ones with no word left |
 | `FORMAL_pointer_value_model.md` | **unclaimed** | what a pointer IS on the formal path, and why the 54-file group was never about that |
