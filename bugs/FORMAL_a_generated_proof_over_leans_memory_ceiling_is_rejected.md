@@ -35,7 +35,7 @@ this tree) reported, pre-fix, TWO things at once for `either`/`both`/
 * `Unknown identifier f_sr_144` / `f_sr_148` at `:5939`/`:5946` in each file —
   a generator defect, not a kernel bound. The float-repr helper
   (`formal/arm64_codegen.py::_emit_float_repr_helper`, emitted once per image
-  after every body for `FORMAL_a_float_has_no_print_spelling.md`) ends in a
+  after every body for float print spelling) ends in a
   `RET` that is the image's LAST one, and its general path — the
   `snprintf`/`strtod` `BL`s at code indices 144/148 — follows it. So
   `_exec_code_limit` ends at the helper's MIDDLE, those two call sites sit

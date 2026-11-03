@@ -156,7 +156,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_type_name_as_a_value.md` | `formal2033-docs` | a bare TYPE name in a value position is refused as a name with no register |
 | `FORMAL_a_callee_that_is_an_expression_in_a_try_cannot_be_placed.md` | **unclaimed** | A callee that is an EXPRESSION inside a `try` is the whole of what is left of the unplaceable tier |
 | `FORMAL_a_comptime_origin_alias_is_an_mlir_attribute_template.md` | **unclaimed** | `Span[StaticString, ImmStaticOrigin]` is two links behind an MLIR template, and neither link says so |
-| `FORMAL_a_float_has_no_print_spelling.md` | **unclaimed** | `print(<a float>)` is refused: CPython's spelling is the shortest decimal that round-trips, and no libc conversion is that |
+| `FORMAL_a_float_has_no_print_spelling.md` | **fixed (x86-64 .0 append, removed doc)** | `print(<a float>)` — x86-64 integer-valued float formatting fixed; doc removed |
 | `FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md` | **unclaimed** | FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty |
 | `FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md` | **unclaimed** | FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None |
 | `FORMAL_a_print_of_a_container_needs_a_text_loop.md` | **unclaimed** | `print(<a container>)` is refused: rendering one is a loop emitting text, and `_print_call` builds ONE format |
