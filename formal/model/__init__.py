@@ -21783,11 +21783,12 @@ def pointer_store_lowering(fn, target, decls: dict, functions: dict = None,
     `printf_kind_conversion_refusal` state at the other two boundaries — the
     stored value's KIND must agree with the pointee's — asked with the SAME
     three-way evidence (`printf_arg_float_evidence`, which each backend already
-    hands its `printf` refusal) and with the SAME permissive direction: **None
-    never refuses**, so an unannotated parameter, a name bound from a call this
-    build cannot classify, and a value of a kind it has no spelling for are all
-    stored as before. Only a stated disagreement is reported, and it can only be
-    stated where the source says one thing and the declaration says another.
+    hands its `printf` refusal). For an INTEGER pointee the direction is
+    permissive: **None never refuses**, so an unannotated parameter stored into
+    an integer slot is stored as before. For a DOUBLE pointee it is not: an
+    unestablished value there is refused by name, because its word may be an
+    integer's bits and nothing in the source rules that out (see
+    `pointer_store_kind_disagreement`).
     """
     # A SUBSCRIPT target (`p[i] = v`) is the same store at `base + i*width`, and
     # the caller scales the index it supplies — `dereference_lowering`'s
@@ -21820,12 +21821,11 @@ def pointer_store_lowering(fn, target, decls: dict, functions: dict = None,
         # is what decides it — `pointer_store_kind_disagreement` refuses a
         # stated disagreement in BOTH directions with the same evidence — so this
         # arm only has to answer the agreeing case at the load's own width.
-        # A value whose kind this path cannot establish is not a disagreement
-        # and is answered here, which is the permissive direction the two
-        # sibling boundaries (`call_argument_kind_refusal`,
-        # `printf_kind_conversion_refusal`) also take; the wrong answer that
-        # direction permits — `p.value() = 1` writing 0x1 — is the stated case
-        # the check above refuses, not this one.
+        # A value whose kind this path cannot establish is refused by the check
+        # above, not answered here: into a double slot an unestablished word
+        # may be an integer's bits, and the store cannot say which. This arm
+        # answers only a value the check has established as a double (or a
+        # literal/name it can see is one), at the load's own width.
         width, signed = 8, False
         if not index_scaled:
             scaled, scale_why = _offset_scale(fn, obj, width)
@@ -21889,9 +21889,12 @@ def pointer_store_kind_disagreement(pointee, value, class_of) -> str | None:
     pointee and an `"int"` into a double pointee are both disagreements, and
     `None` — which is what an unannotated parameter, a name bound from an
     unclassified call and a kind this model has no spelling for all answer —
-    is silence. The permissive direction is what makes the rule safe to add
-    beside 664 stdlib files: it can only fire where the source contradicts
-    itself.
+    is silence into an INTEGER pointee, and a refusal into a DOUBLE one: an
+    integer slot reads any word back as a number, while a double slot reads an
+    integer's bits as a denormal, so only the double case is unsafe to leave
+    open. No `.mojo` file in the tree names `Pointer[Float64]` (checked with
+    `git grep` at the tree root), so the refusal cannot reach the stdlib
+    through that spelling; the integrator's stdlib gate confirms it.
 
     The advice is the source's own decision in both directions, and it is the
     conversion this path already has: `float(x)` is `SCVTF` and `Int(x)` is
@@ -21901,7 +21904,25 @@ def pointer_store_kind_disagreement(pointee, value, class_of) -> str | None:
     pointee_is_float = pointee_kind(pointee) == FLOAT_KIND
     got = class_of(value)
     if got is None:
-        return None
+        # SILENCE for an integer pointee, and that is the permissive direction
+        # the sibling boundaries take. A DOUBLE pointee is different: the store
+        # moves one 64-bit word, so an unestablished value whose bits are an
+        # integer lands in a double slot and reads back as a denormal, and
+        # nothing the source says rules that out. An unannotated parameter is
+        # the usual case. So a double slot refuses an unestablished value by
+        # name, and the advice is to state the kind, which is what the reader
+        # can actually do.
+        if not pointee_is_float:
+            return None
+        return (
+            f"the pointee is `{pointee}` and this store writes {spelled(value)}, "
+            f"whose kind this model cannot establish, so nothing in the source "
+            f"says the word is a double. A store moves one 64-bit word, and if "
+            f"that word is an integer's bits it reads back as a denormal "
+            f"(`p.value() = 1` writes 0x1, not 1.0). State the kind where the "
+            f"value is bound: annotate it (`n: Float64`), or write the conversion "
+            f"`float(x)` so the store's kind is decided at its source"
+        )
     if pointee_is_float and got == "float":
         return None
     if not pointee_is_float and got == "int":
