@@ -1251,6 +1251,19 @@ REFUSALS = [
      "    return 0\n",
      "a bare `except:` is a handler arm with a body this path cannot put in "
      "the image"),
+    ("a_try_calling_a_raiser_through_a_local_alias_is_refused",
+     "def boom():\n"
+     "    raise ValueError('x')\n"
+     "\n"
+     "def main(n):\n"
+     "    f = boom\n"
+     "    try:\n"
+     "        f()\n"
+     "    except:\n"
+     "        pass\n"
+     "    print(2)\n"
+     "    return 1\n",
+     "the `try` body calls `boom(…)`"),
 ]
 
 
