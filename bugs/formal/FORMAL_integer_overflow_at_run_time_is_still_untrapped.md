@@ -402,9 +402,24 @@ above measured.
   in its place: the `count` proof minus exactly those 39cd95d4 lines (the six
   `strlen` arms and the split-lemma `rw` lines — byte for byte, every other
   line including both entry==EXIT trap-stop closes is the generated file)
-  checks against the pre-39cd95d4 library: exit 0, zero errors, and both
-  trap-branch terminals close genuinely, `0 = 0` by the unconditional
-  `count_go_zero`, no `sorry` at either.
+  checks against the pre-39cd95d4 library.  **Verdict: exit 1, 12 errors —
+  and all 12 are pre-existing.**  A control run of the pristine
+  pre-39cd95d4 generated file — whose walk section had never been
+  Lean-checked before this round — reproduces the same 12 errors, same
+  messages, same regions: one in `eval_eq_mojo` (a `rw [hsub]` failure),
+  seven in `count_contract` (two invalid rewrites of a disjunctive `pc`
+  hypothesis, three `rfl` failures, one `omega` bound, one `mem_read_u64`
+  `rfl`), and four "maximum recursion depth" failures in
+  `count_compiles_correctly_universal`'s block-8 run-certificate
+  (`count_b8_runs`) region, one pair per visit.  The two entry==EXIT closes
+  introduce **zero** new errors: their regions are elaboration-clean, and
+  both trap-branch terminals close genuinely — the terminal goal
+  `0 = count_go n.toNat` reduces to `0 = 0` by the unconditional
+  `count_go_zero`, and a `trace_state` instrumentation of both terminal
+  leaves printed no open goal (the recursion-depth errors reported after
+  each close confirm elaboration ran through both).  The walk section's
+  twelve pre-existing errors are the next round's work, alongside the
+  39cd95d4 library repair.
 - **`wdiff`'s Lean verdict is strictly better than its pre-flip baseline.**
   The pre-flip file (the 2026-11-02 measurement, 15 errors) carried the ten
   model-section errors below PLUS five walk-section errors: the
