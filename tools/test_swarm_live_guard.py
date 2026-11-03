@@ -72,6 +72,26 @@ class Guard(unittest.TestCase):
         S.BUSY["claims"] = {"fix:unrelated"}
         self.assertEqual(S.move_busy_bases(), set())
 
+    def test_accepts_own_class_and_also_list(self):
+        import control as C2
+        iceman = {"name": "iceman", "class": "mid", "also": ["easy"]}
+        easy = {"name": "free", "class": "easy"}
+        self.assertTrue(C2.accepts(iceman, "mid"))
+        self.assertTrue(C2.accepts(iceman, "easy"))
+        self.assertFalse(C2.accepts(iceman, "hard"))
+        self.assertTrue(C2.accepts(easy, "easy"))
+        self.assertFalse(C2.accepts(easy, "mid"))
+
+    def test_busy_counts_a_task_in_its_own_class_not_its_slot(self):
+        tasks = {
+            "f1": {"state": "running", "cls": "easy", "pool": "iceman"},   # a formal doc on iceman: easy load
+            "m1": {"state": "running", "cls": "mid", "pool": "iceman"},
+        }
+        pool = {"slots": [{"name": "iceman", "class": "mid", "also": ["easy"], "count": 20}]}
+        with mock.patch.object(C, "load", return_value=tasks), mock.patch.object(C, "load_pool", return_value=pool), \
+             mock.patch.object(C, "state_of", side_effect=lambda t: t["state"]):
+            self.assertEqual(S.busy_by_class(), {"easy": 1, "mid": 1, "hard": 0})
+
 
 if __name__ == "__main__":
     unittest.main()
