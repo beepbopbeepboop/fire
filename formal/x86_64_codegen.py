@@ -6740,7 +6740,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             raise CodegenError(why)
 
     def _emit_subscript_addr(self, e: F.SubscriptExpr,
-                             for_store: bool = False) -> None:
+                             for_store: bool = False,
+                             element_kind_ok: bool = False) -> None:
         """RAX = the ADDRESS of `obj[index]` (not its value).
 
         Split out so the same address computation serves a read, a store and
@@ -6851,7 +6852,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # where the frame held 3 in its first slot.
         self._refuse_frame_slot_element("a subscript", e.obj)
         shape, width, signed, sub_why = M.subscript_base_lowering(
-            self._cur_fn, e.obj, self._structs, self._functions, self._structs)
+            self._cur_fn, e.obj, self._structs, self._functions, self._structs,
+            element_kind_ok=element_kind_ok)
         if shape is None:
             raise CodegenError(sub_why)
         if shape == "load":
@@ -6958,7 +6960,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._emit_slice_parts(e.obj, e.index.start, e.index.stop,
                                    e.index.step)
             return
-        self._emit_subscript_addr(e)
+        # A READ: the element's kind is the pointee's (`pointee_kind_of`), so a
+        # float element is loaded and answered as a double. The flag is what
+        # admits it; the store and augmented/del/tuple forms do not pass it.
+        self._emit_subscript_addr(e, element_kind_ok=True)
         self._emit_subscript_load(Reg.RAX)
 
     def _emit_subscript_load(self, dst: Reg) -> None:
@@ -9730,12 +9735,28 @@ preference.
         """`obj[index] = value` — the address is computed once, then stored.
 
         The index expression is evaluated exactly once (it can contain calls),
-        and the value after it, so the two evaluate in source order."""
+        and the value after it, so the two evaluate in source order.
+
+        A STORE through a FLOAT pointee's element is answered only when the
+        value's kind agrees with the pointee (`pointer_store_lowering`, the same
+        check `p.value() = v` makes): arm64's `_emit_subscript_store` is the twin."""
+        if M.subscript_float_element(self._cur_fn, target.obj, self._structs,
+                                     self._functions):
+            how, why = M.pointer_store_lowering(
+                self._cur_fn, target, self._structs, self._functions,
+                self._structs, value=value,
+                class_of=self._printf_arg_conversion_class)
+            if how is None:
+                raise CodegenError(why)
+            self._emit_expr(value)                 # RAX = value
+            self._emit_subscript_store_reg(target, Reg.RAX,
+                                           element_kind_ok=True)
+            return
         self._emit_expr(value)                     # RAX = value
         self._emit_subscript_store_reg(target, Reg.RAX)
 
     def _emit_subscript_store_reg(self, target: F.SubscriptExpr,
-                                  src: Reg) -> None:
+                                  src: Reg, element_kind_ok: bool = False) -> None:
         """Store the value already in `src` into `target[index]`.
 
         Split out of `_emit_subscript_store` so a caller that already HAS the
@@ -9772,7 +9793,8 @@ preference.
             self._pop_slot(Reg.R11)                # the value, discarded
             self._emit_mov_imm(src, 0)            # the assignment's None
             return
-        self._emit_subscript_addr(target)          # RAX = address
+        self._emit_subscript_addr(target, for_store=True,
+                                  element_kind_ok=element_kind_ok)  # RAX = address
         self._pop_slot(Reg.R11)                    # R11 = value
         # A width-aware store, and the two-branch form it replaces had one bug
         # twice: both branches of the old `if` were a 64-bit `MOV` for anything
