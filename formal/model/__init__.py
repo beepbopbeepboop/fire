@@ -21266,7 +21266,8 @@ def parameter_pointee_disagreement_refusal(callee, name, groups) -> str:
 
 
 def subscript_base_lowering(fn, obj, decls: dict, functions: dict = None,
-                            structs_by_name: dict = None, seen=()):
+                            structs_by_name: dict = None, seen=(),
+                            element_kind_ok: bool = False):
     """`(shape, width, signed, why)` — `(None, None, None, why)` to refuse.
 
     WHAT `obj[i]` READS, for a base that is not a string and not a dict key —
@@ -56150,3 +56151,9 @@ def _constructor_argument_for(fields, name, args, kwargs):
 
 
 
+
+
+def subscript_float_element(fn, obj, decls: dict, functions: dict = None) -> bool:
+    """True when `obj[i]` is an element of a FLOAT pointee."""
+    inner, _why = pointer_pointee(fn, obj, decls, functions)
+    return inner in POINTEE_FLOAT_NAMES
