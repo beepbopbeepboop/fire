@@ -849,13 +849,17 @@ class X86_64Codegen:
         # TestCompilerTrapIsNotAProgramCall` for what is asserted about it.
         self._compiler_trap_addrs: list = []
         # ADDRESSES of the calls the float-repr helper made — its `snprintf`
-        # and `strtod`.  The helper is this emitter's own (every image carries
-        # it, after the function bodies), so its call sites are not calls the
-        # PROGRAM makes: `formal/x86_64_proof_gen.py::_program_externs`
+        # and `strtod`.  The helper is this emitter's own (emitted after the
+        # function bodies when a float is printed), so its call sites are not
+        # calls the PROGRAM makes: `formal/x86_64_proof_gen.py::_program_externs`
         # subtracts them for the same reason it subtracts the traps, and not
-        # doing so suppresses the run tests of every image on this backend.
+        # doing so suppresses the run tests of every image that prints a float.
         # Published in `compile()`'s `info` as `float_repr_calls`.
         self._float_repr_call_addrs: list = []
+        # Set by `_emit_float_print_operand`, the only thing that calls the
+        # helper. The helper is emitted only when this is set, so an image whose
+        # program formats no float carries no helper and no `snprintf`/`strtod`.
+        self._float_repr_used: bool = False
         # The functions whose prologue carries the stack-floor guard, filled by
         # `compile()` once the whole image's call graph is known — see
         # `model.stack_floor_guarded_names`. The x86-64 twin of arm64's, from the
@@ -1192,8 +1196,10 @@ class X86_64Codegen:
         for f, label in zip(functions, self._def_labels):
             self._emit_function(f, label)
 
-        # Float-repr helper, once, after all function bodies.
-        self._emit_float_repr_helper()
+        # Float-repr helper, once, after all function bodies, and only when a
+        # float is printed (see `_float_repr_used`).
+        if self._float_repr_used:
+            self._emit_float_repr_helper()
 
         # Every body is out, so a NAME can be bound to the one a call reaches.
         # Before `resolve()`, so the startup `call` above and every `call` in a
@@ -1231,10 +1237,14 @@ class X86_64Codegen:
                        if n not in self._internal_labels},
             # The float-repr helper's entry, published separately because it is
             # internal and so absent from `labels`. It is emitted after every
-            # function body, so a consumer that decodes a body linearly from its
-            # entry must stop here or it walks into the helper. Consumer:
-            # `_body` in `formal/x86_64_endtoend_test.py`.
-            "float_repr_addr": self.asm.labels[M.FLOAT_REPR_SYMBOL],
+            # function body when a float is printed, and `None` otherwise, so a
+            # consumer that decodes a body linearly from its entry must stop at
+            # it when it is present. `x86_64_decode.body_end` is the one reader.
+            "float_repr_addr": self.asm.labels.get(M.FLOAT_REPR_SYMBOL),
+            # One past the last byte of the image. The bound a body's linear
+            # decode stops at when the image has neither a string pool nor a
+            # float-repr helper after its bodies (`x86_64_decode.body_end`).
+            "image_end": base_addr + len(code),
             "func_name": first_func_name,
             "external_syms": external_syms,
             "extern_calls": extern_calls,
@@ -1247,8 +1257,9 @@ class X86_64Codegen:
             # `_emit_stack_floor_guard`.
             "compiler_traps": sorted(self._compiler_trap_addrs),
             # The float-repr helper's OWN extern calls (`snprintf`, `strtod`),
-            # by address — it is emitted once per image after every function
-            # body, so the sites are in `extern_calls` at or above the entry
+            # by address — it is emitted once per image, after every function
+            # body, when a float is printed, so the sites are in `extern_calls`
+            # at or above the entry
             # and `_program_externs` subtracts them there, the same subtraction
             # `compiler_traps` is for the guard's `exit`.
             "float_repr_calls": sorted(self._float_repr_call_addrs),
@@ -4915,6 +4926,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         imm = 16 * (1 + fp.position) + 64 * fp.index
         self.asm.emit(encode_lea_r64_rm64(Reg.RSI, Reg.RSP, imm))
         self.asm.emit(encode_mov_r64_r64(Reg.RDI, Reg.RAX))
+        self._float_repr_used = True
         self.asm.emit(encode_call_rel32(0))
         self.asm.emit_label_rel32(M.FLOAT_REPR_SYMBOL, here_offset=-4)
 

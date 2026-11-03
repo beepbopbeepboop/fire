@@ -735,14 +735,19 @@ dylib_exports: list = None, globals_base: int = None,
         self._compiler_trap_addrs: set = set()
         # The ADDRESSES of the extern calls the float-repr helper made — its
         # `snprintf` and `strtod`, in the helper's general path.  The helper is
-        # this emitter's own, emitted once per image after every function
-        # body, so its sites are in `extern_calls` at or above `func_offset`
-        # and are NOT calls the program makes:
+        # this emitter's own, emitted once per image after every function body
+        # when a float is printed, so its sites are in `extern_calls` at or
+        # above `func_offset` and are NOT calls the program makes:
         # `formal/arm64_proof_gen.py::_program_extern_calls` subtracts them
         # for the same reason the traps are subtracted, and not doing so turns
         # every image on this backend into an opaque-call image.  Published in
         # `compile()`'s `info` as `float_repr_calls`.
         self._float_repr_call_addrs: list = []
+        # Set by `_emit_float_print_operand`, the only thing that branches to
+        # the helper. The helper is emitted only when this is set, so an image
+        # whose program formats no float carries no helper, no helper calls and
+        # no `snprintf`/`strtod` in `extern_calls`.
+        self._float_repr_used: bool = False
         self._if_counter = 0
         self._while_counter = 0
         self._assert_counter = 0
@@ -1152,14 +1157,16 @@ dylib_exports: list = None, globals_base: int = None,
         for f, label in zip(functions, self._def_labels):
             self._emit_function(f, label)
 
-        # The float-repr helper, once per image, after every body: a `print`
-        # of a float branches to it from any of them, so it has to be out
+        # The float-repr helper, once per image, after every body, and only
+        # when a float is printed (`_float_repr_used`): a `print` of a float
+        # branches to it from any of them, so it has to be out
         # before `resolve()` patches those `bl`s, and its label joins
         # `_internal_labels` the same way the per-definition labels do, so a
         # reader of `info["labels"]` sees one address per program name only.
-        self._emit_float_repr_helper()
-        self._internal_labels.add(M.FLOAT_REPR_SYMBOL)
-        self._internal_labels.update(_FLOAT_REPR_HELPER_LABELS)
+        if self._float_repr_used:
+            self._emit_float_repr_helper()
+            self._internal_labels.add(M.FLOAT_REPR_SYMBOL)
+            self._internal_labels.update(_FLOAT_REPR_HELPER_LABELS)
 
         # Every body is out, so a NAME can be bound to the one a call reaches.
         # One binding per name, at one place, after every definition — which is
@@ -1207,9 +1214,10 @@ dylib_exports: list = None, globals_base: int = None,
             "compiler_traps": sorted(self._compiler_trap_addrs),
             # The float-repr helper's OWN extern calls (`snprintf`, `strtod`),
             # by address — the helper is emitted once per image after every
-            # function body, so the sites are at or above `func_offset` and
-            # `_program_extern_calls` subtracts them there, the same
-            # subtraction `compiler_traps` is for the guard's `fflush`.
+            # function body when a float is printed, so the sites are at or
+            # above `func_offset` and `_program_extern_calls` subtracts them
+            # there, the same subtraction `compiler_traps` is for the guard's
+            # `fflush`.
             "float_repr_calls": sorted(self._float_repr_call_addrs),
             "test_input": self.test_input,
             # EVERY entry argument's value, in order — the proof generator's
@@ -7633,6 +7641,7 @@ ctor_field_value=self._ctor_field_value_for(name),
         self._emit_expr(fp.expr)
         self.asm.emit(encode_add_xd_xn_imm(
             1, 31, 16 * (1 + fp.position) + 64 * fp.index))
+        self._float_repr_used = True
         self.asm.emit(encode_bl(0))
         self.asm.emit_label_rel(M.FLOAT_REPR_SYMBOL, here_offset=-4)
 
