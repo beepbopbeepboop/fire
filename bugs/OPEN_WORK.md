@@ -44,7 +44,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_arm64_instruction_coverage.md` | `bug-formal-formal-arm64-instruction-cove-548` | the arm64 encoder survey, and what wiring the new instructions actually bought |
-| `FORMAL_model_fuzz_ledger.md` | **unclaimed** | what `tools/formal_model_fuzz.py` has measured |
 
 ### `formal/arm64_codegen` — 4 documents, 2 claimed
 

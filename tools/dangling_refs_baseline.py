@@ -168,7 +168,6 @@ BARE_BASELINE = {
     'bugs/formal/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md': 1,
     'bugs/formal/FORMAL_arm64_instruction_coverage.md': 1,
     'bugs/formal/FORMAL_fuzz_ledger.md': 2,
-    'bugs/formal/FORMAL_model_fuzz_ledger.md': 1,
     'bugs/formal/FORMAL_module_state_no_storage.md': 5,
     'bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md': 3,
     'bugs/formal/FORMAL_string_composition_has_no_buffer.md': 1,
