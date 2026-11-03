@@ -41,8 +41,9 @@ unchanged and is §2's project**: the buffer that answers a run-time value, so
 this doc stays open with only the constant half closed.
 
 Found 2026-10-04 while re-measuring
-`bugs/FORMAL_a_keyword_construction_with_a_star_star_spread.md`'s witness, whose
-file used to be refused at the `**kw` spread and is now refused here instead.
+the spread witness (now fixed; the `**`-spread false refusals were corrected
+in the shared model), whose file used to be refused at the `**kw` spread and is
+now refused here instead.
 
 ## What landed 2026-10-13 (`work/formal363-docs`): a field-less f-string is not a composition, and is no longer refused
 
@@ -129,8 +130,8 @@ knowable at the construction site: …
 ```
 
 **So editing that file's 13 f-strings buys nothing**: it lands on the `**kw`
-spread, which is `bugs/FORMAL_a_keyword_construction_with_a_star_star_spread.md`
-(`formal27-1`), and it would have cost 13 diagnostics their detail to get there.
+spread (now fixed in the shared model; the remaining spread cases are a
+separate issue), and it would have cost 13 diagnostics their detail to get there.
 That is why no call site was rewritten, and it is the same measurement the
 2026-10-04 sweep map made for its own 115-file row (`§5.3`): the row is a
 priority to KNOW ABOUT, not the first one to implement.
@@ -174,9 +175,8 @@ not a change.
 
 * **The cheap half is the caller's spelling, and the refusal now names the one
   that WORKS:** `print(f"v={v}")` becomes `printf("v=%d", v)`. That is a
-  per-site edit and it is what
-  `bugs/FORMAL_a_keyword_construction_with_a_star_star_spread.md`'s option 1 is
-  for its own construct. **`print("v=", v)` is NOT the rewrite and the landed
+  per-site edit (the spread/keyword-argument construction case it pointed to
+  was fixed separately). **`print("v=", v)` is NOT the rewrite and the landed
   refusal no longer offers it** — `print` inserts a space between operands, so
   it prints `v= 7` where the f-string prints `v=7`, which is a different answer
   with exit status 0; see "What landed" above and

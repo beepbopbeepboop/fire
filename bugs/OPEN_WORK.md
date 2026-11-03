@@ -206,7 +206,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
-| `FORMAL_a_keyword_construction_with_a_star_star_spread.md` | `formal1988-docs` | `S(a=1, **kw)` is refused because the spread MIGHT duplicate a keyword |
 | `FORMAL_an_f_string_literal_is_refused_and_is_the_first_refusal_in_x86_64_decode.md` | `formal2026-docs` | An f-string literal is refused with "this path has no buffer to compose one in", and it is now the FIRST refusal in `formal/x86_64_decode.py` |
 
 ### `formal/x86_64_endtoend_test` — 2 documents, 2 claimed

@@ -651,9 +651,11 @@ builds and computes the wrong answer rather than one that fails:
   function's extras, are the two shapes; both already have a refusal and both
   keep it.
 * **`**kwargs` is NOT this.** A keyword collection's KEYS are not knowable at
-  the call site, so there is no arity to specialize on; `**kwargs` stays refused
-  (`bugs/FORMAL_a_keyword_construction_with_a_star_star_spread.md`), and the two
-  refusers are separate for that reason.
+  the call site, so there is no arity to specialize on; `**kwargs` spread
+  construction/call paths through literals/locals are now answered in the
+  shared model, and a `**` parameter that a callee would need to read remains
+  a separate question (`bugs/FORMAL_a_variadic_parameter_read_has_no_abi.md`),
+  with the two refusers separate for that reason.
 * **The mangling is `monomorphize.mangle`'s, not a new spelling.** It is
   INJECTIVE, and `test_formal_monomorph.py::a_stated_mangled_spelling_is_the_one_
   the_mangler_produces` reads every `doc/` and `bugs/` file for a stated
