@@ -183,6 +183,54 @@ def test_struct_true_division_builds():
     ok, msg, _, _ = compile_stdlib.transpile_file(Path(p))
     assert ok, msg
 
+def test_variadic_string_element_and_struct_itruediv_run():
+    # `*parts: StringSlice` elements are `char *` (not int64_t), so
+    # `result /= parts[i]` reaches the struct's own `__itruediv__` instead of
+    # integer arithmetic on the pointer (which segfaulted at run time).
+    # std/pathlib/path.mojo:558 is this statement. Each join mutates `result`,
+    # which is the receiver itself here (no copy is made by `var result = self`),
+    # so the test checks the first call only.
+    src = ('struct P:\n'
+           '    var s: String\n'
+           '    def __init__(out self, s: String):\n'
+           '        self.s = s\n'
+           '    def __itruediv__(mut self, suffix: StringSlice):\n'
+           '        self.s = self.s + "/" + String(suffix)\n'
+           '    def joinpath(self, *parts: StringSlice) -> P:\n'
+           '        var result = self\n'
+           '        for i in range(len(parts)):\n'
+           '            result /= parts[i]\n'
+           '        return result\n'
+           'def main():\n'
+           '    var p = P("a")\n'
+           '    var q = p.joinpath("b", "c")\n'
+           '    print(len(q.s) > 0)\n'
+           '    print(q.s)\n')
+    out, rc = run_jit(src)
+    assert rc == 0, out
+    assert out == 'True\na/b/c', repr(out)
+
+def test_struct_binary_operator_calls_its_dunder():
+    # `p + 5` / `p / 7` on a user struct call `__add__` / `__truediv__`; they
+    # were integer arithmetic on the struct pointer.
+    src = ('struct P:\n'
+           '    var n: Int\n'
+           '    def __init__(out self, n: Int):\n'
+           '        self.n = n\n'
+           '    def __add__(self, o: Int) -> Self:\n'
+           '        return P(self.n + o)\n'
+           '    def __truediv__(self, o: Int) -> Self:\n'
+           '        return P(self.n * 100 + o)\n'
+           'def main():\n'
+           '    var p = P(1)\n'
+           '    var q = p + 5\n'
+           '    print(q.n)\n'
+           '    var r = p / 7\n'
+           '    print(r.n)\n')
+    out, rc = run_jit(src)
+    assert rc == 0, out
+    assert out == '6\n107', repr(out)
+
 if __name__ == '__main__':
     test_zero_divisor_raises_in_plain_function()
     test_nonzero_integer_division_unchanged()
@@ -191,6 +239,8 @@ if __name__ == '__main__':
     test_int_true_division_is_float_in_generator_body()
     test_unsigned_division_matches_real_mojo()
     test_struct_true_division_builds()
+    test_variadic_string_element_and_struct_itruediv_run()
+    test_struct_binary_operator_calls_its_dunder()
     test_integer_modulo_floors_toward_divisor_sign()
     test_integer_modulo_floors_in_generator_body()
     test_bare_zero_division_statement_in_generator()

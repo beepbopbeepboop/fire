@@ -58,6 +58,7 @@ from mojo.middle.types import _BOXED_CONTAINER_CTYPES
 from mojo.middle.calls_shared import _callable_value_symbol
 from mojo.middle.calls_shared import _RUNTIME_CALLABLE_VALUES as _RUNTIME_CALLABLE_VALUES_NAMES
 from mojo.middle.calls_shared import _py_box_expr
+from mojo.middle.calls_shared import _struct_operator_receiver
 from mojo.middle.calls_shared import FRAME_SETTABLE_IDS
 
 def _lower_strided(gen, node, store: bool):
@@ -3537,6 +3538,11 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
         if fast is not None:
             return fast
 
+    _sop = _struct_operator_receiver(gen, node.op, node.left, False)
+    if _sop is not None:
+        return gen.lower_expr(gimple_ctypes.CallExpr(
+            gimple_ctypes.MemberExpr(node.left, _sop, node.line, node.col),
+            [node.right], [], node.line, node.col))
     lt, lv = gen.lower_expr(node.left)
     rt, rv = gen.lower_expr(node.right)
     if ginf._float_param_arith_applies(gen, node.op, node.left, lt, node.right, rt):
