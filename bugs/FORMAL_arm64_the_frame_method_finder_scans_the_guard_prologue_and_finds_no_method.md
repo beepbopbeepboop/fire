@@ -6,7 +6,7 @@
 (the arm64 data-word bug, whose ordinary and DYLIB halves are fixed; the frame
 half is unreachable because of THIS).
 
-**Status: PARTIAL FIX, verified 2026-11-02. Root-cause fix (finder extent + body scan) verified by `test_formal_frame_method_finder.py` (passes; fails on pre-fix generator per doc). Master does NOT yet have the fix (branch carries commits `6fbc15ac6`, `c39e0c8c1`, `8bc66b37f`). Step 1 (bind scalar non-receiver params in `_generate_frame_proof` model so `set_x` gets a contract) and Step 2 (`prooflib` Lean check over emitted frame proofs) remain open. Doc stays until end-to-end verified over corpus.** The finder is live. Root cause, as
+**Status: PARTIAL FIX, verified 2026-11-02; re-verified 2026-11-03 (regression test passes). Root-cause fix (finder extent + body scan) confirmed. Master does NOT yet have the fix (branch carries commits `6fbc15ac6`, `c39e0c8c1`, `8bc66b37f`). Step 1 (bind scalar non-receiver params in `_generate_frame_proof` model so `set_x` gets a contract) and Step 2 (`prooflib` Lean check over emitted frame proofs) remain open. Doc stays until end-to-end verified over corpus.** The finder is live. Root cause, as
 measured: `_frame_methods` took a method's extent as "up to the NEXT LABEL in
 address order", and the codegen also labels points inside a body
 (`{fname}_sf{k}_ok`, the stack-floor guard's `_ok`). So `Point_get_x`'s extent
