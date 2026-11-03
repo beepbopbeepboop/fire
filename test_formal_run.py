@@ -17472,18 +17472,46 @@ POINTER_DEREF_REFUSALS = [
      "    var b: Pointer[Float64] = malloc(8)\n"
      "    return store(b)\n",
      "refuse:would write 0x1, a denormal rather than 1.0", None),
-    # The AUGMENTED subscript store stays refused: `p[0] += 1.0` combines the
-    # element with a value through a path that does not check it as a double, so
-    # it is refused by the element sentence rather than written as an integer.
-    # Pinned so a change that lowers it cannot do so silently.
-    ("deref_refuse_a_binary64_subscript_augmented_store",
+    # The AUGMENTED subscript store, answered. `p[i] op= v` on a double element
+    # is the element's own double operation: the element is read as its bits,
+    # combined with the value through the FP unit (`FADD`/`FSUB`/`FMUL`/`FDIV`,
+    # never the integer ALU, which would add the patterns), and stored back at
+    # the same address. The address is computed once, so the index is evaluated
+    # once. Measured on both architectures.
+    ("deref_a_binary64_subscript_augmented_is_exact",
+     "def fill(p: Pointer[Float64]) -> Int:\n"
+     "    p[0] = 2.0\n"
+     "    p[1] = 1.0\n"
+     "    p[2] = 2.0\n"
+     "    p[3] = 1.0\n"
+     "    return 0\n"
      "def bump(p: Pointer[Float64]) -> Int:\n"
      "    p[0] += 1.0\n"
+     "    p[1] -= 0.5\n"
+     "    p[2] *= 3.0\n"
+     "    p[3] /= 4.0\n"
+     "    return 0\n"
+     "def show(p: Pointer[Float64]) -> Int:\n"
+     "    printf(\"[%g %g %g %g]\", p[0], p[1], p[2], p[3])\n"
+     "    return 0\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b: Pointer[Float64] = malloc(32)\n"
+     "    fill(b)\n"
+     "    bump(b)\n"
+     "    show(b)\n"
+     "    return 0\n",
+     0, "[3 0.5 6 0.25]"),
+    # An INTEGER on the right of a double element's augmented store is the mixed
+    # pair `float_binary_refusal` refuses for every binary operator, so it is
+    # refused by that sentence and not written as the integer's bits.
+    ("deref_refuse_a_binary64_subscript_augmented_with_an_integer",
+     "def bump(p: Pointer[Float64]) -> Int:\n"
+     "    p[0] += 1\n"
      "    return 0\n"
      "def main(n: Int) -> Int:\n"
      "    var b: Pointer[Float64] = malloc(8)\n"
      "    return bump(b)\n",
-     "refuse:reads an element of a FLOAT pointee", None),
+     "refuse:mixes types this path does not promote", None),
     # THE TWO CONSUMERS the pointer load's kind reaches, and both are
     # reachable WITHOUT the pointer, which is what makes them rows here rather
     # than a note beside the pointer rows.  They are the
@@ -27277,7 +27305,8 @@ def main():
                          "origin_of_in_a_local_type_annotation_is_still_a_type"}
                       | {c[0] for c in POINTER_DEREF_CASES + POINTER_DEREF_REFUSALS
                          if c[0].startswith(("deref_struct_pointee",
-                                             "deref_a_binary64_pointee"))}
+                                             "deref_a_binary64_pointee",
+                                             "deref_a_binary64_subscript"))}
                       # `fd_write_on_an_open_result_writes` reaches
                       # `os.path.getsize` through the `os_path` hostmod dylib,
                       # and the x86-64 image of that chain once jumped to
