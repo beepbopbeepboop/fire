@@ -724,8 +724,9 @@ def _program_externs(info: dict) -> list:
 
     **And the float-repr helper's calls are not the program's, either.** The
     helper (`formal/x86_64_codegen.py::_emit_float_repr_helper`) is emitted
-    once per image after every function body, so its `snprintf`/`strtod` are
-    in `extern_calls` at or above the entry for EVERY image on this backend,
+    once per image after every function body, and only when a float is
+    printed, so its `snprintf`/`strtod` are in `extern_calls` at or above the
+    entry for EVERY image that prints one,
     and reading them as program calls suppresses every run test — the same
     failure arriving with the helper instead of the guard. The emitter
     publishes their sites in `info["float_repr_calls"]` and they are

@@ -11493,9 +11493,10 @@ def _program_extern_calls(info: dict) -> list:
 
     **And the float-repr helper's calls are not the program's, either.** The
     helper (`formal/arm64_codegen.py::_emit_float_repr_helper`) is emitted
-    once per image after every function body, so its `snprintf`/`strtod` are
-    in `extern_calls` at or above `func_offset` for EVERY image on this
-    backend, and reading them as program calls turns every image into an
+    once per image after every function body, and only when a float is
+    printed, so its `snprintf`/`strtod` are in `extern_calls` at or above
+    `func_offset` for EVERY image that prints one, and reading them as program
+    calls turns every such image into an
     opaque-call image whose run is stated to reach a call the concrete run
     never takes. The emitter publishes their sites in
     `info["float_repr_calls"]` and they are subtracted by address, the way
