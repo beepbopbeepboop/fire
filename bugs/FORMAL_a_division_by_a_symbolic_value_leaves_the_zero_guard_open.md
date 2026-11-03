@@ -16,14 +16,14 @@ Predates the floor correction; found 2026-10-04 on `work/formal16-4`,
 re-measured 2026-10-04 on `work/formal27-1`. **§0 is no longer REACHABLE
 through `a // b` on the current tree, and the defect is not fixed — the route
 is gone.** `_emit_exit` opens with `fflush(NULL)` (`e77131d5`), the div0 arm is
-its one exit, and ONE unfollowable call silently restates the universal theorem
-as `q_reaches_call_at_…` with `prop := True` instead of raising — so the walk
-emits no terminal value flow and there is no residual to read. The three rows of
+its one exit, and ONE unfollowable call (now announced) restates the universal
+theorem as `q_reaches_call_at_…` with a reachability proposition instead of
+raising silently — so the walk emits no terminal value flow and there is no
+residual to read. The three rows of
 `test_formal_call_proof_gen.py::TestTheZeroDivisorGuardAgainstLean` that measured
-this are red for exactly that reason, and
-`bugs/FORMAL_one_opaque_flush_silently_replaces_the_universal_theorem.md` has the
-measurement, the three-way taxonomy of what the generator does with 0 / 1 / ≥2
-opaque calls, and the next step. Read that one first; the three options in "The
+this are red for exactly that reason; the original "silent replacement" bug doc
+(`bugs/FORMAL_one_opaque_flush_silently_replaces_the_universal_theorem.md`) was
+deleted after item 2 made the substitution announced. The three options in "The
 exact next step" below are still the right three, but option 1 is now a claim
 about a block the walk does not walk at all, which moves option 2 from third to
 first.

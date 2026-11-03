@@ -9058,8 +9058,9 @@ def _generate_dir(tmp, src_path, name, out):
 class TestTheOneOpaqueCallIsAnnounced(unittest.TestCase):
     """One out-of-image call must SAY that it replaced the theorem it owed.
 
-    `bugs/FORMAL_one_opaque_flush_silently_replaces_the_universal_theorem.md`'s
-    item 2, and it is the half of that gap which is silent. Two out-of-image
+    the bug doc that was deleted (item 2 of
+    `bugs/FORMAL_one_opaque_flush_silently_replaces_the_universal_theorem.md`),
+    and it is the half of that gap which was silent. Two out-of-image
     calls are REFUSED by name (`_cfg_decomposition_refusal`), because the walk
     halts at one address and a program with two of them has a path reaching the
     second without passing the first. ONE does not raise: the walk is given
