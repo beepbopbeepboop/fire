@@ -1,8 +1,12 @@
 # Integer overflow at RUN TIME is still a silent wrap on a variable operand
 
-**Status: open, with the decision made, the decision shared, the instruction
-sequences written and measured, and exactly one obstacle left — which is in the
-proof framework, not in the arithmetic.**
+**Status: open.** Steps 1 and 2 (the refusal, then the terminal trap block the
+walk closes at its own `BL`) and step 3's EMISSION for `+ - *` have landed —
+both backends trap a variable-operand `+`, `-` or `*` the build cannot fold,
+and the generated proofs close the trap's own `BL` (2026-11-02, below). What
+keeps this doc open: the four remaining `VARIABLE_ROWS` (`<<`, `//`, string
+conversion, `**`) still wrap, and the `wdiff` residual below — the signed
+counter model 3dbec27a pins does not state `while n != 0`.
 
 Found and mostly fixed by `work/formal33-int-semantics` (`project33:
 int-semantics`). What landed with it is the build-time half and is not the
@@ -316,6 +320,111 @@ above changes, except one sentence's precision.
 What is still missing is step 3, unchanged: the emission flip in both
 backends, the `VARIABLE_ROWS` flip, and this doc's deletion in the same
 commit.
+
+## Status, 2026-11-02: step 3 LANDED for `+ - *` on both backends, the walk
+## closes the trap's own `BL`, and the doc stays open on four rows plus one
+## model
+
+The emission flip is in, and it is the flip this doc's "The next step, in
+order" names — with one deliberate narrowing that the measurements forced: it
+covers `+`, `-` and `*`, the three rows whose checked sequences the section
+above measured.
+
+**What landed.**
+
+1. **Both backends emit the trap when the build cannot fold.** The checked
+   sequences the section above measured (`ADDS`/`SUBS` + `B.vs` and the
+   `SMULH`/`MUL`/`EOR`/`LSR`/`CBNZ` multiply; `ADD`/`SUB`/`IMUL` + `JO` over an
+   inline trap on x86-64) are now what the variable-operand `+ - *` emits
+   instead of a bare wrap; a folded constant expression emits exactly the
+   bytes it did before, so no program whose arithmetic the build can fold
+   moves a byte. `test_formal_int_semantics.py`'s `VARIABLE_ROWS` flips the
+   three rows to `("trapped", INT_OVERFLOW_TRAP_STATUS)` — the CPython answer
+   stays in each row's comment — and the two control rows (the signed
+   multiply that FITS, the unsigned control) do not move.
+2. **The walk closes the trap's own `BL`, and the close is a STATEMENT close.**
+   The overflow trap ends in a `BL` whose target is the program's exit stub —
+   the address `arm64_go_exit` was given as `exit` — so at the call state the
+   model answers `some st`, not `none`, and the trap stop's `hnone` would be a
+   false statement. The walk closes the statement instead: `unfold
+   arm64_go_exit`, split on the fuel, `if_neg`/`if_pos` the two ites, and the
+   goal is `call_state.x0 = mojo n` over the executed path, which the ret
+   block's own terminal flow discharges.
+3. **wdiff's back edge is a named leaf, and that is the honest answer.** The
+   only loop contract this generator states is the single-block countdown one;
+   the flip splits the body the overflow branch crosses into several blocks,
+   so a `while n != 0` loop has no contract whose `hbodyRun` the machine
+   actually runs — and the contract's statement would be false on this model
+   regardless (the `B.vs` trap plus the signed counter, below). The walk
+   admits the rest of the run at the new `loop-back-edge-no-contract` leaf
+   rather than walk an unbounded number of iterations, and the registry is
+   17: the fifteen plus `trap-stop-hnone` (the trap stop whose `BL` targets a
+   word INSIDE the slice, where the generator does not mirror the model's
+   decode) and the back-edge leaf.
+
+**Measured, on this tree.**
+
+- The quick test is 16/16 (8 rows x 2 backends); the full
+  `test_formal_int_semantics.py` is 182/182.
+- The named suites are green: `TestTheRecursionFamiliesStillGenerate`
+  (eleven generate, including `count` and `wdiff`; `sum_range` still refuses
+  with the pinned needles), `TestCfgLeafCensus` 3/3 (the registry is exactly
+  the pinned seventeen; the three-stem slice reaches seven of the seventeen —
+  the two `dec-while` back edges and `loop-cond-step` left it when the flip
+  split the `while`'s body, and `loop-back-edge-no-contract` is what the test
+  pins instead), `TestTheZeroDivisorGuardAgainstLean` 3/3,
+  `TestTheDiv0FixtureHaltsAtTheCompilerTrap` 1/1,
+  `TestTheStackFloorGuardLeavesNoCallOnTheWalkedPath` 2/2,
+  `TestCompilerTrapIsNotAProgramCall` 11/11,
+  `TestTheDivisionExamplesHaveNoProofToCheck` 3/3,
+  `TestTheZeroDivisorGuardIsAFalseGoal` 4/4, and
+  `TestDecWhileSignedModelRegression` (the model itself is unchanged — the
+  flip did not move a byte of it).
+- **The `q` proof is byte-identical** to the file the 2026-11-01 entry
+  checked: the trap stop's out-of-slice `hnone` machinery and the walk are
+  untouched, so its verdict stands.
+- **`count` regenerates with exactly two changes** — the two trap stops the
+  walk closes — and its Lean verdict is clean under the 12 GB ceiling
+  (peak 9.4 GB, exit 0): both trap-branch terminals close genuinely, `0 = 0`
+  by the unconditional `count_go_zero`, no `sorry` at either.
+- **`wdiff`'s Lean verdict is strictly better than its pre-flip baseline.**
+  The pre-flip file (the 2026-11-02 measurement, 15 errors) carried the ten
+  model-section errors below PLUS five walk-section errors: the
+  `wdiff_loop_body_dec` grind failure, the `wdiff_cd_loop` refine tail, and
+  the two unsolved `⊢ 0 = wdiff_go n.toNat` at the back-edge tails. The
+  post-flip file has the same ten model-section errors at the same lines and
+  **zero** walk-section errors: the countdown contract is gone (the flip's
+  `B.vs` is a bare ite the contract's run certificate cannot state), its back
+  edge is the named leaf, and the trap-branch terminal is the walk-terminal
+  leaf. 10 errors, all of them the pre-existing class, none of them new.
+
+**The residual the doc now owns.**
+
+1. **Four `VARIABLE_ROWS` still wrap.** `<<` (the shift-count overflow at
+   `1 << 63`), `//` (the `n = -2^63, m = -1` division), the string-conversion
+   row and the negative-exponent `**` row: their check sequences are not
+   emitted, and each row asserts the current wrap with the CPython answer in
+   its comment. The next step for each is the same shape as step 3's — write
+   the sequence, measure it, emit it — and the multiply's `high == sext(low)`
+   identity is the precedent for the `**` row's `smpy`-shaped overflow test.
+   That is four sequences, not one, which is why the flip landed in the
+   narrow form it did and this doc is not deleted.
+2. **The `wdiff` model mismatch.** `3dbec27a` ("arm64 dec-while model assumes
+   signed counter") states the `while n > 0` shape as `wdiff_go m = if m < 2^63
+   then 0 else ofNat (m % 2^64)`, and that statement is false for the `while
+   n != 0` shape wdiff actually is: the loop iterates for negative `n`, and
+   the machine returns `0` for every `n`, so `s.x0 = mojo n` is false for
+   negative `n` — measured pre- AND post-flip, which is the pre-existing red
+   this round did not introduce. The model is pinned by
+   `TestDecWhileSignedModelRegression` and stays; closing the residual is a
+   per-shape model (a `while n != 0` statement with its own `go`), which is
+   work for its own round. The trap-branch terminal and the back edge are
+   where the walk admits it, at named leaves, until then.
+
+What is still missing, in order: the four remaining rows' check sequences
+(each one a step-3-shaped round), and the per-shape `while n != 0` model.
+Steps 1-3 of the plan below are done for `+ - *`; the doc's deletion, which
+step 3 promised, waits on the four rows and the model.
 
 ## The next step, in order
 

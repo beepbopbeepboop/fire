@@ -7063,7 +7063,8 @@ class TestDec1PathContext(unittest.TestCase):
 # registry is pinned by NAME, an admission added without a name fails, and the
 # instrument that says which leaf is live is itself pinned.
 
-#: The fifteen, spelled out.  A CEILING and not an equality would be the modern
+#: The fifteen, spelled out, plus the two the overflow flip (2026-11-02) added.
+#: A CEILING and not an equality would be the modern
 #: thing to want, but an equality is stronger here and is what makes a removal
 #: deliberate: dropping a name is the visible act that closes a leaf, and the
 #: corpus figures in the class docstring say which ones are still live.
@@ -7094,6 +7095,13 @@ EXPECTED_CFG_LEAF_SITES = {
     # the two closers both loop contracts share
     "loop-cond-flag",
     "loop-cond-step",
+    # the two the overflow flip (2026-11-02) added: the trap stop whose `BL`
+    # targets a word INSIDE the slice (the generator does not mirror the
+    # model's decode), and the loop back edge the walk revisits with no loop
+    # contract in hand — the body the flip split across blocks is not the
+    # single-block shape the countdown contract states.
+    "trap-stop-hnone",
+    "loop-back-edge-no-contract",
 }
 
 
@@ -7110,7 +7118,7 @@ class TestCfgLeafCensus(unittest.TestCase):
     bit dropped by every `sp` tracker, fixed by 37ae3718.
     """
 
-    def test_the_registry_is_exactly_the_pinned_fifteen(self):
+    def test_the_registry_is_exactly_the_pinned_seventeen(self):
         import formal.arm64_proof_gen as G
         self.assertEqual(set(G.cfg_leaf_sites()),
                          EXPECTED_CFG_LEAF_SITES)
@@ -7174,10 +7182,15 @@ class TestCfgLeafCensus(unittest.TestCase):
 
         `formal/examples` as a whole is 50 files and each build compiles and
         links an image; this takes the shapes that are cheap and that between
-        them reach nine of the fifteen sites -- a recursion (every `runs-*`
-        site), a `while` (both `dec-while` back edges and both loop-contract
-        closers), and a plain leaf (the frame-contract terminal).  The point is
-        not coverage of the sites but that a census nobody has checked is not a
+        them reach seven of the seventeen sites -- a recursion (the `runs-*`
+        sites and the terminal), a `while n != 0` (the back edge the overflow
+        flip left without a loop contract, plus its terminals), and a plain
+        leaf (the frame-contract terminal).  Before the flip the `while`
+        shape was the one that reached the two `dec-while` back edges and both
+        loop-contract closers; the flip splits its body across blocks, the
+        single-block countdown contract no longer states it, and the back
+        edge is the named leaf the flip added instead.  The point is not
+        coverage of the sites but that a census nobody has checked is not a
         census.
         """
         import formal.arm64_proof_gen as G
@@ -7201,10 +7214,13 @@ class TestCfgLeafCensus(unittest.TestCase):
                 reached |= set(census)
         # The three shapes are chosen so that this is a real assertion: a
         # generator that stopped reaching the recursion or loop leaves would
-        # otherwise pass every test above.
+        # otherwise pass every test above.  The two `dec-while` back edges and
+        # `loop-cond-step` left the slice when the overflow flip (2026-11-02)
+        # split the `while`'s body across blocks: its back edge is
+        # `loop-back-edge-no-contract` now, and that one is what this pins.
         self.assertLessEqual(
             {"runs-bl-step", "runs-cbz-condition", "runs-ret-x0",
-             "dec-while-back-edge-decrement", "loop-cond-step",
+             "loop-back-edge-no-contract",
              "walk-terminal"} - reached, set(),
             "the corpus slice no longer reaches the leaves it was chosen for")
 

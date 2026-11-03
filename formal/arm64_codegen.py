@@ -9345,20 +9345,44 @@ ctor_field_value=self._ctor_field_value_for(name),
                 self.asm.emit(encode_mul_xd_xn_xm(1, 1, 2))
             self.asm.emit(encode_ldp_sp_post(0, 2))
             result_t = common_type(self._ttype(e.left), self._ttype(e.right))
-            # The build-time half of `model.int_overflow_traps`: a `+`, `-` or
-            # `*` whose operands the build can FOLD is decided here, and a
-            # refusal carrying the exact CPython value is a better answer than
-            # a wrapped number or a status code. The run-time half — the same
-            # predicate over a value the build cannot know — is emitted by
-            # `_emit_int_alu_checked`, which is wired up but not yet reachable;
-            # `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`
-            # says why and what it needs.
+            # `model.int_overflow_traps`'s two halves, asked in the order the
+            # value exists: the build-time half — a `+`, `-` or `*` whose
+            # operands the build can FOLD is decided here, and a refusal
+            # carrying the exact CPython value is a better answer than a
+            # wrapped number or a status code — and the run-time half, the
+            # same predicate over a value the build CANNOT know, which a
+            # plain `ADD`/`SUB`/`MUL` used to answer with the hardware's
+            # modulo-2^64 wrap (exit 0, empty stderr, `bugs/formal/
+            # FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
+            # `VARIABLE_ROWS` table is the measurement that pinned it). That
+            # half is `_emit_int_alu_checked`: the flag-setting instruction
+            # and the branch into the trap block, with the trap the one
+            # answer this path has for a value the target cannot hold.
+            #
+            # The build-decidable case that FITS stays on the plain
+            # instruction: `fold_overflow` has just said the run-time answer
+            # is the exact one, so the checked sequence would be a branch
+            # the run can never take, and an image whose every constant
+            # `5 + 7` carries a trap block is a bigger proof for the same
+            # theorem. "The build knows" is the SAME test `fold_overflow`
+            # applies to its own tuple — both operands fold to a NON-BOOL
+            # int — because a folded `True` is unknown to IT, and a
+            # `True + n` that the build does not refuse must be the one the
+            # run checks.
             if M.int_overflow_traps(op, result_t, pointer_arith=bool(scale)):
                 reason = M.fold_overflow(op, e.left, e.right, result_t,
                                          pointer_arith=bool(scale))
                 if reason:
                     raise CodegenError(reason)
-            self.asm.emit(alu[op](0, 0, 1))
+                decided = all(isinstance(v, int) and not isinstance(v, bool)
+                              for v in (M.fold_literal_expr(e.left),
+                                        M.fold_literal_expr(e.right)))
+                if not decided:
+                    self._emit_int_alu_checked(op)
+                else:
+                    self.asm.emit(alu[op](0, 0, 1))
+            else:
+                self.asm.emit(alu[op](0, 0, 1))
             if op in ("+", "-", "*"):
                 self._emit_trunc(result_t)
             return
