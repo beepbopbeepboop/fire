@@ -10585,7 +10585,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
         A(f"    (hpc : st.pc = {func_entry}) (hx0 : st.x0 = arg)")
         A(f"    (hbnd : FrameBound {stride} st arg)")
         A(f"    (hx30ret : ∀ pc, pc ∈ {name}_prog.rets → pc ≠ st.x30.toNat) :")
-        A(f"    Post {name}_prog fuel mojo st arg := by")
+        A(f"    Post {name}_prog fuel (mojo arg) st arg := by")
         if _tree:
             A(f"  refine contract_sound_tree {name}_prog mojo {BASE} {PATH} {stride} ?_ ?_ arg st "
               f"fuel hfuel hpc hx0 hbnd hx30ret")
@@ -10628,7 +10628,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             A(f"    ({tree_init}) (by omega) rfl rfl hbnd hret")
             A(f"  change (match arm64_go_exit ({tree_init}) {C} {exit_pc} ({FUEL0}) with")
             A("    | some s => s.x0 = mojo n | none => False)")
-            A(f"  exact Post.exit_correct {name}_prog _ _ mojo _ n hc rfl (by omega)")
+            A(f"  exact Post.exit_correct {name}_prog _ _ (mojo n) _ n hc rfl (by omega)")
             return "\n".join(L)
         A(f"  refine contract_sound {name}_prog mojo {BASE} {PATH} {stride} ?_ ?_ arg st fuel "
           f"hfuel hpc hx0 hbnd hx30ret")
