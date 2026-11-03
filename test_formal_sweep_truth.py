@@ -1565,7 +1565,7 @@ class TestInterpreterGuard(unittest.TestCase):
         S.importlib.import_module = refuse
         err = io.StringIO()
         try:
-            sys.argv = ["formal_sweep.py", "--no-stdlib", "formal/model.py"]
+            sys.argv = ["formal_sweep.py", "--no-stdlib", "formal/model/__init__.py"]
             with redirect_stderr(err):
                 with self.assertRaises(SystemExit) as caught:
                     S.main()
