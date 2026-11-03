@@ -96,7 +96,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_a_call_result_field_access_has_no_representation.md` | **unclaimed** | every remaining host-import row is one capability, and it is not a module |
-| `FORMAL_a_context_manager_exit_cannot_take_cpythons_three_exception_words.md` | **unclaimed** | A context manager's `__exit__` cannot take CPython's own three exception words, so every context manager written the way CPython writes one is refused |
 | `FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md` | **unclaimed** | `std/collections/string/_unicode_lookups.mojo` blocks `_unicode.mojo`, and there are TWO walls behind it |
 | `FORMAL_a_variadic_parameter_read_has_no_abi.md` | **unclaimed** | the row was unowned, and the refusal in it is CORRECT |
 | `FORMAL_a_with_exit_whose_value_is_computed_can_suppress.md` | **unclaimed** | A `__exit__` whose RETURN VALUE is computed can still suppress, and the gate that catches the foldable half cannot see this one |
