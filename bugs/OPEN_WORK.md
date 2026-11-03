@@ -43,7 +43,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
-| `FORMAL_float_pointer_subscript.md` | **unclaimed** | A `Pointer[Float64]` subscript is still refused, and so is its `.value()` store — while the load is answered |
+| `FORMAL_float_pointer_augmented_subscript.md` | `formal1835-docs` | `p[i] op= v` on a `Pointer[Float64]` is still refused — the subscript load and plain store are answered (doc removed) |
 
 ### `formal/arm64` — 2 documents, 0 claimed
 

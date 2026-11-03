@@ -5627,7 +5627,11 @@ ctor_field_value=self._ctor_field_value_for(name),
             sl = e.index
             self._emit_slice_parts(e.obj, sl.start, sl.stop, sl.step)
             return
-        self._emit_subscript_addr(e)
+        # A READ: the element's kind is the pointee's, which `ValueKinds` answers
+        # (`pointee_kind_of`), so a float element is loaded here and answered as
+        # a double by every consumer. The flag is what admits it; the store and
+        # the augmented/del/tuple forms do not pass it.
+        self._emit_subscript_addr(e, element_kind_ok=True)
         self._emit_subscript_load(0, 0)
 
     def _emit_subscript_load(self, reg: int, base: int) -> None:
@@ -6226,7 +6230,8 @@ ctor_field_value=self._ctor_field_value_for(name),
             raise CodegenError(why)
 
     def _emit_subscript_addr(self, e: F.SubscriptExpr,
-                             for_store: bool = False) -> None:
+                             for_store: bool = False,
+                             element_kind_ok: bool = False) -> None:
         """X0 = &obj[index]. Blob path bounds-checks, loudly (exit 1 on OOB).
 
         The single choke point for a subscript: a read, a store
@@ -6351,7 +6356,8 @@ ctor_field_value=self._ctor_field_value_for(name),
         # answered 4 where the frame held 3 in its first slot.
         self._refuse_frame_slot_element("a subscript", e.obj)
         shape, width, signed, sub_why = M.subscript_base_lowering(
-            self._cur_fn, e.obj, self._structs, self._functions, self._structs)
+            self._cur_fn, e.obj, self._structs, self._functions, self._structs,
+            element_kind_ok=element_kind_ok)
         if shape is None:
             raise CodegenError(sub_why)
         if shape == "load":
@@ -6464,12 +6470,28 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.label(end_label)
 
     def _emit_subscript_store(self, target: F.SubscriptExpr, value) -> None:
-        """`obj[index] = value` — evaluate addr once, then store."""
+        """`obj[index] = value` — evaluate addr once, then store.
+
+        A STORE through a FLOAT pointee's element is answered only when the
+        value's kind agrees with the pointee (`pointer_store_lowering`, the same
+        check `p.value() = v` makes): a double's bits are the element's word,
+        and an integer's are a denormal the element would read back as."""
+        if M.subscript_float_element(self._cur_fn, target.obj, self._structs,
+                                     self._functions):
+            how, why = M.pointer_store_lowering(
+                self._cur_fn, target, self._structs, self._functions,
+                self._structs, value=value,
+                class_of=self._printf_arg_conversion_class)
+            if how is None:
+                raise CodegenError(why)
+            self._emit_expr(value)              # X0 = value
+            self._emit_subscript_store_reg(target, 0, element_kind_ok=True)
+            return
         self._emit_expr(value)                  # X0 = value
         self._emit_subscript_store_reg(target, 0)
 
     def _emit_subscript_store_reg(self, target: F.SubscriptExpr,
-                                  reg: int) -> None:
+                                  reg: int, element_kind_ok: bool = False) -> None:
         """Store the value already in X{reg} into `target[index]`.
 
         Split from `_emit_subscript_store` so a caller that already HAS the
@@ -6509,7 +6531,8 @@ ctor_field_value=self._ctor_field_value_for(name),
             self.asm.emit(encode_ldp_sp_post(reg, 31))   # pop the value
             self.asm.emit(encode_mov_zr_xn(reg, 0))      # the assignment's None
             return
-        self._emit_subscript_addr(target)           # X0 = address
+        self._emit_subscript_addr(target, for_store=True,
+                                  element_kind_ok=element_kind_ok)  # X0 = address
         self.asm.emit(encode_stp_sp_pre(0, 2))      # save addr
         self.asm.emit(encode_mov_zr_xn(9, 0))       # X9 = addr
         # X5 is outside the set the address computation above uses, and
