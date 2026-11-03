@@ -1568,23 +1568,12 @@ def main():
             print("✓ Generated " + basename + ".ci (arm64 backend listing)", file=sys.stderr)
             return
         import gimple_codegen
-        if dump_serial:
-            c_code = gimple_codegen.compile_to_gimple(
-                src, do_imports=True, filename=input_file, auto_gpu=auto_gpu)
-            f_out = open(basename + ".ci", "w")
-            f_out.write(c_code)
-            f_out.close()
-            print("✓ Generated " + basename + ".ci (serial, --serial)", file=sys.stderr)
-        else:
-            # Phase A/B: frozen-snapshot emission (parallel parse, frozen snapshot emission)
-            # The C11 lock-free mmap queue is deferred; multiprocessing.Pool is used instead.
-            # See bugs/mid/PERF_dump_full_closure_is_single_threaded.md steps 1-4.
-            c_code = gimple_codegen.compile_to_gimple_parallel_frozen(
-                src, do_imports=True, filename=input_file, auto_gpu=auto_gpu)
-            f_out = open(basename + ".ci", "w")
-            f_out.write(c_code)
-            f_out.close()
-            print("✓ Generated " + basename + ".ci (parallel frozen-snapshot, queue deferred)", file=sys.stderr)
+        c_code = gimple_codegen.compile_to_gimple_parallel_frozen(
+            src, do_imports=True, filename=input_file, auto_gpu=auto_gpu)
+        f_out = open(basename + ".ci", "w")
+        f_out.write(c_code)
+        f_out.close()
+        print("✓ Generated " + basename + ".ci", file=sys.stderr)
         return
 
     # If --dump requested, generate .tok, .ast, .ci, .pyi files
