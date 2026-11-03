@@ -104,8 +104,8 @@ _FIXED_ARRAY_ANN_RE = re.compile(
 # processing into `self.struct_field_types`, which is mutable/extensible:
 # a not-yet-seen field on a USER struct legitimately grows the struct, see
 # `_collect_self_assigns`). A fixed-layout runtime struct has no such
-# extensibility (`MojoBoundMethod` is exactly `{ void *fn; void *self; }`,
-# hardcoded in fire_runtime.h, forever) — an attribute name that isn't one
+# extensibility (`MojoBoundMethod` is exactly `{ void *fn; void *self;
+# void **boxes; int64_t nboxes; }`, hardcoded in fire_runtime.h, forever) — an attribute name that isn't one
 # of its real C fields must route through the same dynamic-attribute
 # dispatch (`_mojo_dispatch_getattr`/`_mojo_dispatch_setattr` ->
 # `mojo_obj_getattr`/`mojo_setattr`'s real per-object storage, see
@@ -136,6 +136,8 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_raise':                 'void',
     'mojo_exc_msg_set':           'void',
     'mojo_exc_msg_get':           'char *',
+    'mojo_exc_args':              'MojoList *',
+    'mojo_exc_new':              'MojoExc *',
     # list
     'mojo_list_new':              'MojoList *',
     'mojo_list_len':              'int64_t',
@@ -219,6 +221,7 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_str_contains':          'int',
     'mojo_str_slice':             'MojoStr *',
     'mojo_cstr_slice':            'char *',
+    'mojo_cstr_slice_cp':         'char *',
     'mojo_cstr_reverse':          'char *',
     'mojo_cstr_region_eq':        'int',
     'mojo_str_from_char':         'MojoStr *',
@@ -248,6 +251,7 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_bytes_len':             'int64_t',
     'mojo_bytes_get':             'int64_t',
     'mojo_bytes_eq':              'int',
+    'mojo_bytes_word_eq':         'int',
     'mojo_bytes_truthy':          'int',
     'mojo_bytes_repr':            'char *',
     'mojo_bytes_concat':          'MojoBytes *',
@@ -266,6 +270,7 @@ _RUNTIME_FUNCS: dict[str, str] = {
     'mojo_bytes_startswith':      'int',
     'mojo_bytes_endswith':        'int',
     'mojo_bytes_decode':          'char *',
+    'mojo_str_from_word':         'char *',
     'mojo_bytes_hex':             'char *',
     'mojo_bytes_removeprefix':    'MojoBytes *',
     'mojo_bytes_removesuffix':    'MojoBytes *',
@@ -763,7 +768,7 @@ def _merge_struct_inheritance(all_struct_defs: list) -> None:
         own_names = set()
         for m in s.methods:
             own_names.add(_as_str(_as_funcdef_node(m).name))
-        inherited = [m for name, m in merged_methods.items() if name not in own_names]
+        inherited = [m for name, m in sorted(merged_methods.items()) if name not in own_names]
         s.fields = merged_fields + s.fields
         s.methods = inherited + s.methods
         # An in-place AST mutation, so `_walk_ast`'s memo — keyed on node
@@ -1064,6 +1069,7 @@ class GimpleGen:
         # safe for any code path that reaches `_cpp_for_stmt` without going
         # through gen_module first.
         self._all_generator_names: set = set()
+        self._has_double_generator: bool = False
         # Side channel: _gen_cpp_generator_unit/_gen_cpp_async_generator_unit
         # stash their just-computed _generator_tuple_yield_slot_ctypes
         # result here (list[str] for a tuple-yielding generator, None for
@@ -1335,7 +1341,7 @@ class GimpleGen:
         # `_cpp_param_struct_names`/`_cpp_ctor_struct_names`, just triggered
         # by the YIELDED value's type instead of a parameter/constructor —
         # merged into the same typedef-emission loop (gen_module) rather
-        # than a separate one. See CODEGEN_generator_function_Lib_enum.md's
+        # than a separate one. See CODEGEN_enum_runtime_class_creation.md's
         # 2026-08-20 update.
         self._cpp_value_struct_names: set[str] = set()
         # Module-level function names (for variadic-unmangled calls like os.py's
@@ -2700,6 +2706,14 @@ class GimpleGen:
         # write back on exit: `[gname, saved temp]` pairs, set by
         # emit_methods._cattr_restore_begin and cleared by _cattr_restore_end.
         self._cattr_restores: list = []
+        # Python-level frames (sys._getframe & co): the module names whose functions are
+        # instrumented with a frame record (a module that mentions `_getframe`), and the
+        # name of the function currently being emitted when it is one of them (''
+        # otherwise). See emit_methods._frame_enter.
+        self._frames_mods: set = set()
+        # True while the body of a stack-switch (A3) coroutine is being lowered; see emit_loops.
+        self._cur_func_is_coro: bool = False
+        self._frame_func: str = ''
         self._owned_free_candidates: set = set()
         self._owned_free_pushed: set = set()
         self._owned_stack_allocated: set = set()
@@ -2721,6 +2735,24 @@ class GimpleGen:
         self._int_word_vals: set = set()
         self._fresh_str_tmps: set = set()  # see emit_infra._emit_str_cat
         self._fresh_vals: set = set()  # see emit_infra.is_fresh_container_operand
+        # TEMP names holding a FRESH CLOSURE a vetted call returned (the
+        # caller-side counterpart of `_closure_vals`'s local lambdas): the callee
+        # passed returns_fresh_closure, so the local bound to the result may own
+        # the value — environment, `{mut}` boxes, bound method — and free it with
+        # `mojo_closure_free` at its scope exit. Same per-function reset terms as
+        # `_fresh_vals` above (declared here, reset by REBIND in `_reset_func`
+        # — never in place, because a nested lifted closure's saved state holds
+        # a reference to the current object — and saved/restored by reference in
+        # FuncState), because a stale "this temp holds a fresh closure" entry
+        # would be a wrong free, not a missed one.
+        self._fresh_closure_vals: set = set()  # see emit_infra.maybe_push_owned_local
+        # Field names whose recorded element type (`_field_elem_types`) belongs to
+        # a SET rather than a list. An element type says "this field is a
+        # container of X", not which container, so `_lower_MemberExpr`'s boxed
+        # fallback used to call every such field a `MojoList *` and
+        # `st.fs_x = gen._fresh_vals` refused with "cannot coerce MojoList * to
+        # MojoSet *" (the self-host closure then compiled emit_infra twice).
+        self._set_elem_fields: set = set()
         # Names bound to a bool, keyed by NAME across functions (see
         # emit_stmts._record_bool_valued). Declared HERE, not created lazily
         # behind `if not hasattr(gen, '_bool_valued')`: self-hosted, the field
@@ -2729,6 +2761,9 @@ class GimpleGen:
         # a NULL set -- the SIGSEGV that ended every `mojoc --dump-full
         # fire.py` in `mojo_set_add_str`.
         self._bool_valued: set = set()
+        # Names bound to a Python-level frame word (`f = sys._getframe()`, `f = e.__traceback__.tb_frame`):
+        # `f.clear()` on one of them is a frame clear, not a list/dict clear (emit_methods._is_frame_expr).
+        self._frame_vars: set = set()
         # Parameter names whose ANNOTATION says `bool`, for the struct method
         # `_gmi_collect_self_assigns` is scanning RIGHT NOW (module_gen.py
         # rebuilds it per method). That walk is the one place that knows both
@@ -2765,6 +2800,7 @@ class GimpleGen:
         # Block-scoped destruction state — see emit_infra's block-scope section.
         self._analysis_funcs: dict = {}   # see infra_infer._build_analysis_funcs
         self._fresh_returning: set = set()   # names whose calls return a fresh container
+        self._fresh_closure_returning: set = set()  # names whose calls return a fresh capturing closure
         self._analysis_structs: dict = {}    # see infra_infer._build_analysis_structs
         self._cur_func_body: list = []  # the AST body being lowered (see _reset_func)
         self._decl_value_node = None   # see lower_expr: the decl statement's RHS node
@@ -3185,6 +3221,9 @@ class GimpleGen:
         if gimple_gen_coro.enabled():
             self.BUILTIN_VALUE_MAP['_coro_resume_fn'] = '__mojo_gen_resume_once'
             self.BUILTIN_VALUE_MAP['_coro_destroy_fn'] = '__mojo_gen_destroy'
+        # MODULE-wide, not per function (so not in `_reset_func`): once any `type(n, bases, ns)`
+        # is lowered, a later function's `isinstance` / `type(x)` must consult the class table.
+        self._rt_classes_made: bool = False
         self._reset_func()
 
     # Builtin exception names (mirrors myinterpreter.py's _setup_builtins plus
@@ -3243,6 +3282,38 @@ class GimpleGen:
         # mojo_fnptr_call_N / mojo_maybe_bound_call_N can tell it apart
         # from a bare function pointer at a dynamically-dispatched call.
         'mojo_vararg_fn_new':  ('MojoVarargFn *', ['void *', 'void *', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_gen_note':       ('int64_t', ['int64_t', 'void *']),
+        'mojo_gen_note_a3':    ('int64_t', ['int64_t', 'int64_t']),
+        'mojo_add_words':      ('int64_t', ['int64_t', 'int64_t']),
+        'mojo_re_compile':     ('int64_t', ['char *', 'int64_t']),
+        'mojo_re_compile_bytes': ('int64_t', ['MojoBytes *', 'int64_t']),
+        'mojo_split_dyn':      ('int64_t', ['int64_t', 'int64_t']),
+        'mojo_class_getattr':  ('int64_t', ['int64_t', 'char *']),
+        'mojo_getattr_any':    ('int64_t', ['void *', 'char *']),
+        'mojo_next_word':      ('int64_t', ['int64_t', 'int', 'int64_t']),
+        'mojo_class_setattr':  ('void', ['int64_t', 'char *', 'int64_t']),
+        'mojo_class_hasattr':  ('int', ['int64_t', 'char *']),
+        'mojo_class_getattr_default': ('int64_t', ['int64_t', 'char *', 'int64_t']),
+        'mojo_class_delattr':  ('void', ['int64_t', 'char *']),
+        'mojo_type_new':       ('int64_t', ['char *']),
+        'mojo_type_add_base':  ('void', ['int64_t', 'int64_t']),
+        'mojo_type_add_bases_from_list': ('void', ['int64_t', 'MojoList *']),
+        'mojo_classobj_tag':   ('int64_t', ['int64_t']),
+        'mojo_rtobj_method_call': ('int64_t', ['int64_t', 'char *'] + ['int64_t'] * 8),
+        'mojo_isinstance_rtclass': ('int', ['int64_t', 'int64_t']),
+        'mojo_isinstance_type': ('int', ['int64_t']),
+        'mojo_type_of':        ('int64_t', ['int64_t']),
+        'mojo_classobj_setattr': ('void', ['int64_t', 'char *', 'int64_t']),
+        'mojo_type_fill_from_dict': ('void', ['int64_t', 'MojoDict *']),
+        'mojo_chain_extend':   ('void', ['MojoList *', 'int64_t']),
+        'mojo_re_exec':        ('int64_t', ['int64_t', 'char *', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_re_exec_bytes':  ('int64_t', ['int64_t', 'MojoBytes *', 'int64_t', 'int64_t', 'int64_t']),
+        'mojo_re_call':        ('int64_t', ['int64_t', 'char *', 'MojoList *', 'MojoDict *']),
+        'mojo_re_getattr':     ('int64_t', ['int64_t', 'char *']),
+        'mojo_is_re_pattern':  ('int', ['int64_t']),
+        'mojo_is_re_match':    ('int', ['int64_t']),
+        'mojo_getitem_word':   ('int64_t', ['int64_t', 'int64_t']),
+        'mojo_gen_call_with':  ('int64_t', ['void *', 'MojoList *', 'MojoList *', 'MojoDict *']),
         'mojo_is_vararg_fn':   ('int', ['void *']),
         'mojo_vararg_call_0':  ('int64_t', ['void *', 'void *']),
         'mojo_vararg_call_1':  ('int64_t', ['void *', 'void *', 'int64_t']),
@@ -3315,6 +3386,8 @@ class GimpleGen:
         'mojo_c_getenv':         ('char *',     ['char *']),
         'mojo_char_to_str':      ('char *',     ['char']),
         'mojo_char_at_str':      ('char *',     ['char *', 'int64_t']),
+        'mojo_char_at_str_cp':   ('char *',     ['char *', 'int64_t']),
+        'mojo_utf8_codepoint_to_byte_offset': ('int64_t', ['char *', 'int64_t']),
         'mojo_ord':              ('int64_t',    ['char *']),
         'mojo_chr':              ('char *',     ['int64_t']),
         'mojo_read_type_tag':    ('int64_t',    ['int64_t']),
@@ -3513,6 +3586,7 @@ class GimpleGen:
         'mojo_dict_new':         ('MojoDict *', []),
         'mojo_dict_set_str': ('void',      ['MojoDict *', 'char *', 'char *']),
         'mojo_dict_set_int': ('void',      ['MojoDict *', 'char *', 'int64_t']),
+        'mojo_dict_set_double': ('void',   ['MojoDict *', 'char *', 'double']),
         'mojo_dict_get_str':     ('char *',    ['MojoDict *', 'char *']),
         'mojo_dict_get_int':     ('int64_t',   ['MojoDict *', 'char *']),
         'mojo_dict_setdefault_int': ('int64_t', ['MojoDict *', 'char *', 'int64_t']),
@@ -4389,10 +4463,26 @@ class GimpleGen:
         if (isinstance(node.func, IdentExpr) and node.func.name in self._analysis_structs
                 and node.func.name not in self.var_types):
             self._fresh_vals.add(_cv)
+        # A call to a function proven to hand back a FRESH capturing closure
+        # (infra_infer._build_fresh_closure_returning / returns_fresh_closure):
+        # the result is a brand-new bound method whose environment and `{mut}`
+        # boxes are owned by whoever binds it, and may be torn down with
+        # `mojo_closure_free` at that binder's scope exit. Same local-shadow
+        # guard as the two creditors above: a local of this function named like
+        # the module fn (a function pointer / parameter) is a different value.
+        if (isinstance(node.func, IdentExpr) and node.func.name in self._fresh_closure_returning
+                and node.func.name not in self.var_types):
+            self._fresh_closure_vals.add(_cv)
         return _ct, _cv
 
     def _lower_pointer_alloc(self, node: CallExpr) -> tuple[str, str]:
         return ggc._lower_pointer_alloc(self, node)
+
+    def _lower_alloc_single_leak(self, node: CallExpr):
+        return ggc._lower_alloc_single_leak(self, node)
+
+    def _lower_dealloc_thin_allocation(self, node: CallExpr):
+        return ggc._lower_dealloc_thin_allocation(self, node)
 
     def _lower_builtin_len(self, node: CallExpr) -> tuple[str, str]:
         return ggc._lower_builtin_len(self, node)
@@ -4494,7 +4584,10 @@ class GimpleGen:
     def _default_expr_to_pair(self, _dflt, cxx: bool = False, param_ctype=None) -> tuple:
         return ggc._default_expr_to_pair(self, _dflt, cxx=cxx, param_ctype=param_ctype)
 
-    def _pack_vararg_trailing_params(self, fname, fname_raw, arg_pairs, kwarg_dict, call_has_spread=False):
+    def _pack_kwargs_slot_call(self, fname, fname_raw, arg_pairs, kwarg_dict: dict, call_has_spread=False):
+        return ggc._pack_kwargs_slot_call(self, fname, fname_raw, arg_pairs, kwarg_dict, call_has_spread)
+
+    def _pack_vararg_trailing_params(self, fname, fname_raw, arg_pairs, kwarg_dict: dict, call_has_spread=False):
         return ggc._pack_vararg_trailing_params(self, fname, fname_raw, arg_pairs, kwarg_dict, call_has_spread)
 
     def _expand_sole_spread_into_fixed_slots(self, node, fname, fname_raw, arg_pairs, expected_params):
@@ -5184,10 +5277,14 @@ class GimpleGen:
         return gex._lower_in_range(self, x_val, range_args, negate)
     def _lower_in_impl(self, node: BinaryOp, negate: bool) -> tuple[str, str]:
         return gex._lower_in_impl(self, node, negate)
-    def _lower_in_impl_values(self, xt: str, xv: str, right_node, negate: bool) -> tuple[str, str]:
-        return gex._lower_in_impl_values(self, xt, xv, right_node, negate)
-    def _lower_in_dispatch(self, xt: str, xv: str, rt: str, rv: str, negate: bool) -> tuple[str, str]:
-        return gex._lower_in_dispatch(self, xt, xv, rt, rv, negate)
+    def _lower_in_impl_values(self, xt: str, xv: str, right_node, negate: bool,
+                              x_is_none: bool = False) -> tuple[str, str]:
+        return gex._lower_in_impl_values(self, xt, xv, right_node, negate,
+                                         x_is_none=x_is_none)
+    def _lower_in_dispatch(self, xt: str, xv: str, rt: str, rv: str, negate: bool,
+                           x_is_none: bool = False) -> tuple[str, str]:
+        return gex._lower_in_dispatch(self, xt, xv, rt, rv, negate,
+                                      x_is_none=x_is_none)
     def _lower_external_call(self, node: CallExpr) -> tuple[str, str]:
         return gex._lower_external_call(self, node)
     def _lower_mlir_mem(self, kind: str, arg_pairs: list) -> tuple[str, str]:
@@ -5329,6 +5426,12 @@ class GimpleGen:
         self._analysis_funcs = ginf._build_analysis_funcs(stmts)
         self._analysis_structs = ginf._build_analysis_structs(stmts)
         self._fresh_returning = ginf._build_fresh_returning(self._analysis_funcs, self._analysis_structs)
+        # Names whose calls return a FRESH CLOSURE (see infra_infer's
+        # returns_fresh_closure): `_lower_call` credits the result temp into
+        # `_fresh_closure_vals` so the binding's declaration can own — and free
+        # with `mojo_closure_free` — the environment, `{mut}` boxes and bound
+        # method the call handed back.
+        self._fresh_closure_returning = ginf._build_fresh_closure_returning(self._analysis_funcs)
     def _emit_container_new(self, t: str, ctype: str) -> None:
         return ginf.emit_container_new(self, t, ctype)
     def _note_fresh_result(self, t: str) -> None:
@@ -5459,6 +5562,12 @@ class GimpleGen:
         return ginf._collect_return_types(self, stmts, acc)
     def _coerce_to_type(self, src_type: str, dst_type: str, value: str) -> str:
         return ginf._coerce_to_type(self, src_type, dst_type, value)
+    def _cpp_container_cast_prefix(self, kind: str, via_intptr: bool) -> str:
+        return grsl.cpp_container_cast_prefix(kind, via_intptr)
+    def _container_null(self, kind: str) -> str:
+        return grsl.container_null(kind)
+    def _cpp_word_container_operator(self, kind: str, via_intptr: bool) -> str:
+        return grsl.cpp_word_container_operator(kind, via_intptr)
     def _materialize_as_list(self, src_type: str, value: str) -> str:
         return ginf._materialize_as_list(self, src_type, value)
     def _infer_return_type(self, body: list) -> str:
@@ -5545,6 +5654,18 @@ class GimpleGen:
         return ggc._kwarg_param_names(self, fname_raw, fname, n_expected, kwarg_dict)
     def _begin_function(self, fn) -> None:
         return ginf.begin_function(self, fn)
+    def _frame_enter(self, fn) -> None:
+        return gmp._frame_enter(self, fn)
+    def _frame_enter_module(self) -> None:
+        return gmp._frame_enter_module(self)
+    def _frame_leave(self) -> None:
+        return gmp._frame_leave(self)
+    def _cattr_restore_begin(self, body) -> None:
+        return gmp._cattr_restore_begin(self, body)
+    def _cattr_restore_fallthrough(self, fn) -> None:
+        return gmp._cattr_restore_fallthrough(self, fn)
+    def _cattr_restore_end(self) -> None:
+        return gmp._cattr_restore_end(self)
     def _emit_fallthrough_frees(self, fn) -> None:
         return ginf.emit_fallthrough_frees(self, fn)
     def _reset_no_candidates(self) -> None:
@@ -5628,6 +5749,8 @@ class GimpleGen:
         return grsl._closure_value_locals(self, body)
     def _quick_type(self, node) -> str:
         return grsl._quick_type(self, node)
+    def _module_attr_call_return_type(self, node):
+        return grsl._module_attr_call_return_type(self, node)
     def _infer_list_elem_type(self, elements: list) -> str:
         return grsl._infer_list_elem_type(self, elements)
     def _prepass_callee_key(self, node) -> str | None:
@@ -5848,7 +5971,7 @@ def _selfhost_register_gimplegen(gen):
 # MOJO_NO_SHIM=1 convention) for the first time this surfaces a real false
 # positive on code broader than that sweep, so a single bad diagnostic can't
 # block an otherwise-working build while it's investigated.
-def _check_ownership(stmts, filename: str) -> None:
+def _check_ownership(stmts: list, filename: str) -> None:
     if os.environ.get('MOJO_SKIP_OWNERSHIP_CHECK'):
         return
     diags = ownership_check.check_module(stmts)
@@ -6187,6 +6310,7 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     # MOJO_CORO=stackswitch. Replaces eligible generator FunctionDefs with a
     # plain `__mgco_<g>_body` the ordinary codegen lowers; ineligible ones
     # fall through to the gimple_cpp_* C++20-coroutine path unchanged.
+    gimple_gen_coro._PY_SRC[0] = bool(filename) and str(filename).endswith('.py')
     stmts, _coro_meta = gimple_gen_coro.lower(stmts)
     gen = GimpleGen(do_imports=do_imports, link_imports=link_mode,
                     auto_gpu=auto_gpu)

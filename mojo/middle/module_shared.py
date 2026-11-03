@@ -146,7 +146,7 @@ def _selfhost_parsed_modules(sd: str) -> list:
     tokenized and parsed three times AND all three AST copies stayed live
     for the life of the process. That is both the repeated work and a
     contributor to the never-frees accumulation measured in
-    `bugs/CODEGEN_bootstrap_resource_blowup.md`: one shared parse is ~1/3
+    `bugs/hard/CODEGEN_bootstrap_resource_blowup.md`: one shared parse is ~1/3
     the instructions and ~1/3 the retained AST nodes.
 
     The cache is keyed PER FILE on `(path, mtime)`, not on the whole file
@@ -385,7 +385,7 @@ def _selfhost_homogeneous_tuple_ret_funcs(self, sd: str) -> dict:
 # `os.linesep` to `0` (an empty string) while the ordinary path in the same
 # program read `'\n'`, and the only thing that kept the coroutine body off
 # the compiled path was the mixed-yield refusal that difference caused
-# (bugs/COMPILE_FAIL_Tools_c-analyzer_c_common_scriptutil.md).
+# (bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_common_scriptutil.md).
 #
 # The POSIX-only half of `signal` is deliberate: only the numbers identical
 # across every POSIX platform this runtime targets are listed, so a
@@ -445,50 +445,13 @@ def builtin_module_constant_names(module: str) -> tuple:
 
 import re as _re
 
-def module_qualifier(q) -> str:
-    """The ONE module-string -> C-qualifier sanitization every cross-module
-    registry key and symbol prefix in this codegen must agree on.
-
-    Every one of these keys is written by ONE half of the compiler and read
-    by the OTHER (a defining module registering its own signature/struct/-
-    generator under a `(home, name)` key; an importing module looking that
-    same key up to mangle its call site to the same symbol). Two internally
-    consistent but MUTUALLY DISAGREEING spellings of one module therefore
-    do not fail loudly — they make a lookup MISS, and a miss silently
-    falls through to a worse tier (the shared bare-name slot, all-int64_t
-    param types) whose overload hash then differs from the definition's,
-    producing `implicit declaration of function '<name>_<suffixA>'; did you
-    mean '<name>_<suffixB>'?` at g++ time.
-
-    That is exactly what happened for every module whose name carries a
-    leading depth dot AND an underscore of its own — the overwhelmingly
-    common `from . import _common` / `from ._regexes import ...` shape.
-    The leading-dot strip is load-bearing, NOT cosmetic:
-      `'._common'` -> lstrip-then-substitute -> `_common`   (correct)
-                   -> substitute-only        -> `__common`  (a key nothing
-                                                     will ever look up)
-    `._regexes` happens to agree under both (`_regexes` either way), which
-    is why the bug read as "sometimes it works" rather than "always
-    broken".
-
-    Callers that additionally need the per-compile `_inline_module_qualifiers`
-    remap keep doing that lookup themselves (it needs a `gen`; this is a pure
-    string function on purpose, so both the reference side and the defining
-    side can call it without one).
-
-    Consolidated out of four near-identical private copies
-    (`_func_qualifier._sanitize_qualifier`,
-    `_struct_method_qualifier._sanitize_qualifier`,
-    `_cpp_sanitize_module_qualifier`, and the inline chain in `_local_def_pts`
-    / `_imported_def_pts`), two of which omitted the lstrip. One
-    implementation, so the halves cannot drift again.
-    """
-    if not q:
-        return q
-    return q.lstrip('.').replace('.', '_').replace('-', '_')
+# `module_qualifier` lives in mojo/middle/exprtypes.py (a leaf both coro and
+# funcs_shared can import at module scope without the coro <-> module_shared <->
+# funcs_shared cycle); re-exported here for the callers that import it from here.
+from mojo.middle.exprtypes import module_qualifier
 
 
-def _collect_import_modules(modules_to_compile: dict, node_list):
+def _collect_import_modules(modules_to_compile: dict, node_list: list):
     """Populate `modules_to_compile` with every module named by an import
     anywhere in `node_list` — top level and nested inside function bodies,
     if/try/loop blocks. Deliberately a module-level function taking the
@@ -510,7 +473,7 @@ def _collect_import_modules(modules_to_compile: dict, node_list):
     index) -> SIGBUS, wildly out of bounds. The annotation pins the ctype."""
     _collect_import_modules_rec(modules_to_compile, node_list, 0)
 
-def _collect_import_modules_rec(modules_to_compile: dict, node_list, _depth: int):
+def _collect_import_modules_rec(modules_to_compile: dict, node_list: list, _depth: int):
     # Depth cap: on the self-hosted path a mis-lowered `isinstance(stmt,
     # (WhileStmt, ForStmt, TryStmt))` tuple-isinstance or an aliased `.body`
     # can make this recurse without bound (observed as a multi-GB memory
@@ -917,7 +880,7 @@ def _register_sym(self, s, sym_name: str, orig_name: str, sym_info,
             self._imported_home_param_types[_pair_key(_qual, _sk)] = list(_pts_snap)
         self._note_own_func_home(_sk, _qual)
 
-def _gmi_prefold_toplevel_comptime(self, _node_list):
+def _gmi_prefold_toplevel_comptime(self, _node_list: list):
     """Hoisted out of `gen_module_impl` (module-level, not a nested,
     RECURSIVE closure) — a real --dump-full fire.py determinism diff
     showed this closure (and several siblings in the same ~8000-line
@@ -944,7 +907,7 @@ def _gmi_prefold_toplevel_comptime(self, _node_list):
             for _h in (_cn.handlers or []):
                 _gmi_prefold_toplevel_comptime(self, getattr(_h, 'body', None) or [])
 
-def _gmi_find_comptime_one(self, _node_list, _target, _out: dict):
+def _gmi_find_comptime_one(self, _node_list: list, _target, _out: dict):
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
     comptime`'s docstring. This one had DEFAULT PARAMETERS bound to
     captured values (`_target=_iname, _out=_found`) — exactly the shape
@@ -971,7 +934,8 @@ def _gmi_find_comptime_one(self, _node_list, _target, _out: dict):
             for _h in (_cn.handlers or []):
                 _gmi_find_comptime_one(self, getattr(_h, 'body', None) or [], _target, _out)
 
-def _gmi_phase17_collect_appends(self, _node_list: list, _append_hits: dict) -> None:
+def _gmi_phase17_collect_appends(self, _node_list: list, _append_hits: dict,
+                                 _store_hits: dict) -> None:
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
     comptime`'s docstring. Recursive; `_append_hits` (dict) threaded and
     annotated per the hoist GOTCHA.
@@ -1007,6 +971,17 @@ def _gmi_phase17_collect_appends(self, _node_list: list, _append_hits: dict) -> 
     argument resolves the same way it does in every other method.
     """
     for _n in _node_list:
+        if (isinstance(_n, AssignStmt)
+                and isinstance(_n.target, SubscriptExpr)
+                and isinstance(_n.target.obj, IdentExpr)):
+            # `d[k] = v` into a bare name: the dict analogue of the append
+            # record below, keyed on the same bare name. A name this
+            # function binds locally (parameter or local) is a different
+            # variable and is not the module global, so it records nothing.
+            _p17_dname = _as_str(_n.target.obj.name)
+            if _p17_dname not in self.var_types:
+                _store_hits.setdefault(_p17_dname, []).append(
+                    self._quick_type(_n.value))
         if (isinstance(_n, ExprStmt)
                 and isinstance(_n.value, CallExpr)
                 and isinstance(_n.value.func, MemberExpr)
@@ -1057,7 +1032,7 @@ def _gmi_phase17_collect_appends(self, _node_list: list, _append_hits: dict) -> 
                     if _p17_pt:
                         self.var_types[_as_str(_p17_pn)] = _mojo_type(_p17_pt)
                 _gmi_phase17_collect_appends(
-                    self, _p17_m.body or [], _append_hits)
+                    self, _p17_m.body or [], _append_hits, _store_hits)
                 self.var_types = _p17_saved
                 self._scan_scratch_top = _p17_mark
             continue
@@ -1071,29 +1046,29 @@ def _gmi_phase17_collect_appends(self, _node_list: list, _append_hits: dict) -> 
             for _lname, _ltype in self._infer_local_var_types(_as_funcdef_node(_n)).items():
                 if _lname not in self.var_types:
                     self.var_types[_lname] = _ltype
-            _gmi_phase17_collect_appends(self, _n.body or [], _append_hits)
+            _gmi_phase17_collect_appends(self, _n.body or [], _append_hits, _store_hits)
             self.var_types = _saved
             self._scan_scratch_top = _scratch_mark_17
         elif isinstance(_n, IfStmt):
-            _gmi_phase17_collect_appends(self, _n.then_body or [], _append_hits)
+            _gmi_phase17_collect_appends(self, _n.then_body or [], _append_hits, _store_hits)
             if _n.else_body:
-                _gmi_phase17_collect_appends(self, _n.else_body, _append_hits)
+                _gmi_phase17_collect_appends(self, _n.else_body, _append_hits, _store_hits)
             for _cond2, _ebody2 in (_n.elifs or []):
-                _gmi_phase17_collect_appends(self, _ebody2 or [], _append_hits)
+                _gmi_phase17_collect_appends(self, _ebody2 or [], _append_hits, _store_hits)
         elif isinstance(_n, (WhileStmt, ForStmt)):
-            _gmi_phase17_collect_appends(self, _n.body or [], _append_hits)
+            _gmi_phase17_collect_appends(self, _n.body or [], _append_hits, _store_hits)
             if getattr(_n, 'else_body', None):
-                _gmi_phase17_collect_appends(self, _n.else_body, _append_hits)
+                _gmi_phase17_collect_appends(self, _n.else_body, _append_hits, _store_hits)
         elif isinstance(_n, TryStmt):
-            _gmi_phase17_collect_appends(self, _n.body or [], _append_hits)
+            _gmi_phase17_collect_appends(self, _n.body or [], _append_hits, _store_hits)
             for _h in (_n.handlers or []):
-                _gmi_phase17_collect_appends(self, getattr(_h, 'body', None) or [], _append_hits)
+                _gmi_phase17_collect_appends(self, getattr(_h, 'body', None) or [], _append_hits, _store_hits)
             if isinstance(_n.else_body, list):
-                _gmi_phase17_collect_appends(self, _n.else_body, _append_hits)
+                _gmi_phase17_collect_appends(self, _n.else_body, _append_hits, _store_hits)
             if isinstance(getattr(_n, 'finally_body', None), list):
-                _gmi_phase17_collect_appends(self, _n.finally_body, _append_hits)
+                _gmi_phase17_collect_appends(self, _n.finally_body, _append_hits, _store_hits)
         elif isinstance(_n, WithStmt):
-            _gmi_phase17_collect_appends(self, _n.body or [], _append_hits)
+            _gmi_phase17_collect_appends(self, _n.body or [], _append_hits, _store_hits)
 
 def _gmi_container_ctype(v):
     """Container C type a container LITERAL expression provably evaluates
@@ -1465,7 +1440,7 @@ def _gmi_collect_self_assigns(self, _sname: str, body, param_types: dict,
     # AFTER the descent, so the cache holds the full answer for this body.
     _SELF_ASSIGN_MEMO[_key] = (_updates, _bool_hits, _dv_hits, _et_hits)
 
-def _gmi_scan_import_modules(mod_stmts, all_modules: dict) -> None:
+def _gmi_scan_import_modules(mod_stmts: list, all_modules: dict) -> None:
     """Record every module named by `import m` / `import m as a, m2` /
     `from m import ...` in `mod_stmts` into `all_modules` (a str->bool
     dict). Hoisted out of `gen_module_impl` (see its call site) so the
@@ -1592,7 +1567,7 @@ def _gmi_tuple_target_rows(tgt, value, out: list) -> None:
             _gmi_tuple_target_rows(e, v, out)
 
 
-def _gmi_collect_global_stmts(stmt_list) -> list:
+def _gmi_collect_global_stmts(stmt_list: list) -> list:
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
     comptime`'s docstring. Recursive; pure (no captured state)."""
     result = []
@@ -1656,7 +1631,7 @@ def _gmi_collect_return_values(acc_rt: list, stmts2) -> None:
                 if isinstance(hb, list):
                     _gmi_collect_return_values(acc_rt, hb)
 
-def _gmi_scan_try_imports(self, _phase17_mod, stmt_list):
+def _gmi_scan_try_imports(self, _phase17_mod, stmt_list: list):
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
     comptime`'s docstring."""
     for _s in stmt_list:
@@ -1885,7 +1860,7 @@ def bare_global_read_plan(self, name):
         _global_owner_mod)
 
 
-def _gmi_scan_imported_global_homes(self, stmt_list) -> None:
+def _gmi_scan_imported_global_homes(self, stmt_list: list) -> None:
     """Record every bare name THIS module's own top-level `from b import K`
     binds, together with the module whose `_<mod>_globals` struct declares
     the field, so a later BARE read of that name loads the OWNER's field
@@ -2013,7 +1988,7 @@ def _gmi_scan_imported_global_homes(self, stmt_list) -> None:
             fields[_local] = _iname
 
 
-def _gmi_scan_cpp_nested_imports(self, stmt_list):
+def _gmi_scan_cpp_nested_imports(self, stmt_list: list):
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
     comptime`'s docstring."""
     for _gi in stmt_list:

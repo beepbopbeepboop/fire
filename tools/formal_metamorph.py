@@ -132,7 +132,7 @@ CPython oracle are `formal_fuzz`'s, imported and never re-spelled, for the
 reason `formal_proof_fuzz.py` gives.
 
 It is also not a proof of anything.  A sweep over N programs says "the backend
-was right about N × T pairs"; `bugs/FORMAL_metamorphic_ledger.md` says which
+was right about N × T pairs"; `bugs/formal/FORMAL_metamorphic_ledger.md` says which
 pairs those were, so the next session can see what stopped being covered.
 """
 
@@ -2507,7 +2507,7 @@ TRANSFORM_WHY = {
 # `class` of bare annotations has no attributes, so `p.get_y()` would read a name
 # that was never assigned while the struct's field reads `0` — a disagreement
 # with CPython the translation would manufacture rather than find.  The decision
-# (§6 item 1 of `bugs/FORMAL_metamorphic_ledger.md`) is to translate exactly the
+# (§6 item 1 of `bugs/formal/FORMAL_metamorphic_ledger.md`) is to translate exactly the
 # struct whose every field is declared an INTEGER type, giving each field the
 # initialiser this path's own semantics already give it (a zero), and to leave
 # every other struct unmeasured naming the construct — so `wide_recv.mojo`,
@@ -2577,7 +2577,7 @@ def _blocking_keyword(text):
 #: class the normaliser builds.  Any OTHER field type is a value this tool will
 #: not guess at, and a file that declares one stays unmeasured naming `struct`
 #: rather than being translated with an invented initialiser.  This is the
-#: DECISION §6 item 1 of `bugs/FORMAL_metamorphic_ledger.md` asked for, and this
+#: DECISION §6 item 1 of `bugs/formal/FORMAL_metamorphic_ledger.md` asked for, and this
 #: table is where it is spelled.
 _STRUCT_ZERO_TYPE_RE = re.compile(r"U?Int(?:8|16|32|64)?\Z")
 _STRUCT_HEAD_RE = re.compile(r"struct\s+([A-Za-z_]\w*)\s*:\s*$")

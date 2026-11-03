@@ -5,7 +5,7 @@ case per rule that decides a row, including the rules that REMOVE one.
     python3 test_formal_returnless_census.py [-v]
 
 `tools/formal_returnless_census.py` answers the question
-`bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md`
+`bugs/formal/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md`
 §4 step 0 asks for: how many call sites in this repository and the stdlib
 CONSUME the value of a function that returns nothing. Its number is quoted in
 that doc and decides whether a `None` refusal is affordable, so the rules that
@@ -18,7 +18,7 @@ inventing direction:**
     result. The AST evaluator's `MojoStmt.exprstmt` arm does not evaluate the
     expression at all, which is why `fn main(): print(42)` proved with no
     holes, and a census that counted those rows would report the shape
-    `bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md`'s
+    `bugs/formal/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md`'s
     own reproducer as a divergence when the answer is never observed;
   * a GENERATOR's "return value" is the generator object, and a STRUCT's is a
     frame. Counting either put 456 rows in `formal/hostmods/argparse.mojo` on
@@ -172,7 +172,7 @@ class TestWhatCounts(unittest.TestCase):
         DECLARES nothing — is not "a function that returns nothing", and filing
         its call sites as candidates is what put **456 rows in
         `formal/hostmods/argparse.mojo`** into the report §0a of
-        `bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md`
+        `bugs/formal/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md`
         quotes: `_fld`, `_cp`, `_alpha_index` and `_name_ptr` are all of this
         shape and that file is a host module the gate compiles. The rule is a
         DISJUNCTION — a candidate is a site whose callee has neither a

@@ -12,6 +12,7 @@ from gimple_codegen import compile_to_gimple, GimpleGen
 from fire_compiler import py_tokenize, Parser
 import ast_rewriter
 from build_config import find_gcc
+from exec_budget import COMPILE_TIMEOUT_S, LINK_TIMEOUT_S, RUN_TIMEOUT_S
 
 def compile_and_link(main_src: str, helper_srcs: dict) -> str:
     """Compile Mojo code with imports and link against helper modules.
@@ -53,7 +54,7 @@ def compile_and_link(main_src: str, helper_srcs: dict) -> str:
                  '-o', helper_obj, helper_c_file],
                 capture_output=True,
                 text=True,
-                timeout=30
+                timeout=COMPILE_TIMEOUT_S
             )
             if result.returncode != 0:
                 print(f"Failed to compile {module_name}:")
@@ -80,7 +81,7 @@ def compile_and_link(main_src: str, helper_srcs: dict) -> str:
         rt_result = subprocess.run(
             [find_gcc(), '-fPIC', '-c', f'-I{HERE}/runtime', '-o', runtime_obj,
              f'{HERE}/runtime/fire_runtime.c'],
-            capture_output=True, text=True, timeout=30
+            capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S
         )
         if rt_result.returncode != 0:
             print("Failed to compile fire_runtime.c:")
@@ -96,7 +97,7 @@ def compile_and_link(main_src: str, helper_srcs: dict) -> str:
                     f'-I{HERE}/runtime',
                     '-o', exe_file, main_c_file] + helper_objs + [runtime_obj]
 
-        result = subprocess.run(link_cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(link_cmd, capture_output=True, text=True, timeout=LINK_TIMEOUT_S)
         if result.returncode != 0:
             print("Failed to link:")
             print(result.stderr)
@@ -214,7 +215,7 @@ def main() -> Int:
         print("✗ Failed to compile and link the import-integration program")
         return False
 
-    run_result = subprocess.run([exe], capture_output=True, text=True, timeout=10)
+    run_result = subprocess.run([exe], capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
     if run_result.returncode != 0:
         print(f"✗ Program exited with code {run_result.returncode}: {run_result.stderr}")
         return False

@@ -7,7 +7,7 @@
 #
 # This is the smallest program that reaches the widened convention: it calls
 # nothing, so the one remaining AST-bridge limit (`MojoExpr.call` carries a
-# single argument -- `bugs/FORMAL_ast_bridge_carries_one_argument_per_call.md`)
+# single argument -- `bugs/formal/FORMAL_ast_bridge_carries_one_argument_per_call.md`)
 # is not in its way, and every parameter past the first is exercised: the model
 # binds both, `eval_eq_mojo` hands the bridge both, the universal theorem sets
 # `x1`, and the run test starts from the same `x1` the startup stub put there.

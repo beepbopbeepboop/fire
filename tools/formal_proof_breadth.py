@@ -178,7 +178,7 @@ SKIP_DIRS = {".git", ".tmp", "__pycache__", "cas", "output", "lib", "build",
 #
 # **It is a set of NAMES and not a claim that the backend lowers them, and the
 # two are different facts**, which is the whole of
-# `bugs/FORMAL_the_proof_census_allow_list_names_builtins_the_path_does_not_
+# `bugs/formal/FORMAL_the_proof_census_allow_list_names_builtins_the_path_does_not_
 # lower.md`: of the 33 names below, the formal path lowers 11 and refuses 22,
 # and a reader of the ledger could not tell which was which — the 6 items this
 # census refused through the LINK AUDIT read as one bucket with a message about
@@ -1547,7 +1547,7 @@ def disagreements(results, arch_list):
 
     Only rows where BOTH machines REFUSED are listed, and that word is doing the
     work. An arm64 refusal beside an x86-64 `proof-emitted` is x86-64's
-    documented degradation (`bugs/FORMAL_proof_coverage_census_2026-10-03.md`
+    documented degradation (`bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md`
     §6's last bullet), which is expected and is not a disagreement about a
     construct; and two `proof-emitted` rows differ in their detail because the
     two generators wrote proofs of different LENGTHS (`--no-check`'s own line
@@ -1575,7 +1575,7 @@ def disagreements(results, arch_list):
                 "refused on both")
     out = [f"\n== {len(rows)} item(s) refused DIFFERENT CONSTRUCTS on the two "
            f"architectures (same class, different subject — see "
-           f"bugs/FORMAL_the_two_backends_refuse_different_constructs_in_the_"
+           f"bugs/formal/FORMAL_the_two_backends_refuse_different_constructs_in_the_"
            f"same_function.md)"]
     for ident, va, vb in rows:
         out.append(f"   {ident}")

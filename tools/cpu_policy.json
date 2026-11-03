@@ -1,5 +1,5 @@
 {
-  "default_hours": 2.0,
+  "default_hours": 0.1667,
   "floor_hours": 0.1667,
   "ceiling_hours": 168.0
 }

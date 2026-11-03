@@ -54,7 +54,7 @@ runs in both directions — `python3 test_runtime_header_scan.py --fix` writes t
 live census into every one of those quotes from the same table the check reads,
 so the two ends of this file cannot drift apart, and a commit that adds a
 runtime declaration does not have to remember which six sentences quoted the
-number it changed. (`bugs/FORMAL_known_limits.md` quotes the census in more
+number it changed. (`bugs/formal/FORMAL_known_limits.md` quotes the census in more
 sentences than the five above; every one of them is in the table, which is why
 a change to that document's wording can now fail this file.)
 
@@ -360,7 +360,7 @@ def test_every_declaration_is_seen():
     #
     # 544 -> 546: `mojo_open` and `mojo_close`, declared under the same
     # `#ifndef __MOJO_STDLIB_MODE__` guard `mojo_write` uses
-    # (`runtime/fire_runtime.h`, and `bugs/FORMAL_runtime_library_on_the_link_line.md`
+    # (`runtime/fire_runtime.h`, and `bugs/formal/FORMAL_runtime_library_on_the_link_line.md`
     # §0.2 for why they were left out and what decided it). Both are DEFINED by
     # `fire_runtime.c` in both arms of its `#if USE_PYTHON`, with the signature
     # declared here, so both cross the export-trie intersection and both are
@@ -491,7 +491,13 @@ def test_every_declaration_is_seen():
     # got exactly one of them.
     # `gimple_len_of_param_called_with_list_and_str` is the row that is run
     # REPEATED, because the old answer was heap-dependent.
-    for header, want in (('fire_runtime.h', 623),   # --fix writes the live figure
+    # 740 -> 742 (2026-11-01, merging master into the closure-env branch): the
+    # branch adds ONE name, `mojo_bound_method_add_box` (records a `{mut}` box
+    # on a bound method so `mojo_closure_free` frees it). Master had grown the
+    # header by one more name since the 740 rung without bumping it (the
+    # scanner read 741 on master), so the figure is read off the MERGED header
+    # and not added up from the two sides.
+    for header, want in (('fire_runtime.h', 765),   # --fix writes the live figure
     # 622 -> 623 (2026-10-30, merging master in): ONE name, read off the call
     # on the MERGED header, which is the whole delta — the two sides of this
     # merge share the other 622, and the branch's 616 -> 622 rung above already
@@ -613,7 +619,7 @@ def test_every_declaration_is_seen():
     # This rung is the one `bugs/CODEGEN_the_runtime_export_ladder_is_five_
     # behind.md` filed for, together with the five PROSE copies of the census
     # in `formal/model.py`, `build_stdlib_dylib.py` and
-    # `bugs/FORMAL_known_limits.md`. Both are closed by the same thing: this
+    # `bugs/formal/FORMAL_known_limits.md`. Both are closed by the same thing: this
     # entry, its ladder rung, and `--fix`, which writes the live scan into
     # every quote from the table above rather than leaving five hand-typed
     # copies of a computed number to agree with each other. The doc went with
@@ -709,29 +715,29 @@ CENSUS_QUOTES = (
     ('formal/model.py',
      r'a rule that refuses all (\d+) entry points for that reason',
      ('total',)),
-    ('bugs/FORMAL_known_limits.md',
+    ('bugs/formal/FORMAL_known_limits.md',
      r'\| entry points declared \| (\d+) \|',
      ('total',)),
-    ('bugs/FORMAL_known_limits.md',
+    ('bugs/formal/FORMAL_known_limits.md',
      r'\| every type crossing the boundary is one word \| \*\*(\d+)\*\* \|',
      ('word',)),
-    ('bugs/FORMAL_known_limits.md',
+    ('bugs/formal/FORMAL_known_limits.md',
      r'\| a box in an argument or the return \| (\d+) \|',
      ('box',)),
-    ('bugs/FORMAL_known_limits.md',
+    ('bugs/formal/FORMAL_known_limits.md',
      r'\*\*(\d+) of (\d+) is what a link line converts',
      ('word', 'total')),
-    ('bugs/FORMAL_known_limits.md',
+    ('bugs/formal/FORMAL_known_limits.md',
      r'For `mojo_sqlite3_\*` it is \*\*(\d+) of (\d+)\*\*',
      ('sqlite_word', 'sqlite_total')),
-    ('bugs/FORMAL_known_limits.md',
+    ('bugs/formal/FORMAL_known_limits.md',
      r'\| of the (\d+), refused only for want of a linked library \| (\d+) \|',
      ('word', 'word')),
-    ('bugs/FORMAL_known_limits.md',
+    ('bugs/formal/FORMAL_known_limits.md',
      r'the shape answers the same question for all (\d+)\n'
      r'entry points instead of',
      ('total',)),
-    ('bugs/FORMAL_known_limits.md',
+    ('bugs/formal/FORMAL_known_limits.md',
      r'repeating this table: (\d+)\s*\nentry points, (\d+) word-shaped, '
      r'(\d+) with a box',
      ('total', 'word', 'box')),
@@ -739,13 +745,13 @@ CENSUS_QUOTES = (
     # different question from the table's (every type crossing the boundary)
     # and so a different pair of figures -- quoted here because the doc quotes
     # it, and derived with `model`'s own word rule rather than by arithmetic.
-    ('bugs/FORMAL_known_limits.md',
+    ('bugs/formal/FORMAL_known_limits.md',
      r'I measure (\d+) / (\d+) / (\d+) by return type alone, and (\d+)\s*\n',
      ('total', 'return_word', 'return_box', 'word')),
-    ('bugs/FORMAL_known_limits.md',
+    ('bugs/formal/FORMAL_known_limits.md',
      r'So today the (\d+) are refused',
      ('word',)),
-    ('bugs/FORMAL_known_limits.md',
+    ('bugs/formal/FORMAL_known_limits.md',
      r'it is the only thing between the (\d+) and working code',
      ('word',)),
     # `FORMAL.md` §2.2's census table and its `N of M` sentence. **This is the
@@ -808,7 +814,7 @@ def live_census():
     """Every figure the prose quotes, read off the headers exactly once.
 
     `return_word`/`return_box` are the split the round-1 correction in
-    `bugs/FORMAL_known_limits.md` quotes: the RETURN type alone, with the
+    `bugs/formal/FORMAL_known_limits.md` quotes: the RETURN type alone, with the
     argument list not counted. That is a different question from the table's
     ("every type crossing the boundary"), so it is a different pair of numbers
     from the same table -- asked with `model`'s own word rule rather than by
