@@ -475,25 +475,15 @@ examples corpus is **93 of 93 driven**. The remaining items:
    ledger's; the honest reading is that **these two transforms are measured on the
    examples corpus and barely measured on the generated one**, which is the
    opposite of what §2's twenty-mix sweep implied by its tally.
-3. **`Analysis.int_only` is still a lower bound, and §0a has now MEASURED where
-   it stops (2026-10-13).** §2a raised `swap_add` reach from 133 to 275 of 440
-   programs; on this tree it reached 351 of 540, and 376 once the operand
-   predicate stopped requiring a bare name or a literal (`int_only` itself did
-   not move — see §0a for the census and the 12 mixes that gained). The
-   remaining decline reasons, measured rather than guessed, are §0a's list: a
-   `BinOp`/name/subscript/attribute operand that is not provably an int, a call
-   refused on purity, and 83 programs with no `+` at all. **The advice this item
-   carried — "MEASURE the remaining decline reasons as §2a did rather than guess
-   at them" — is what §0a did, so read it there rather than here.**
-
-   `work/formal402-docs` measured this item independently the same day, on a
-   narrower subset (27 mixes at `--stmts 10 30`, seed `x402`: `swap_add` reach
-   146 → 156 of 216 programs, with the remainder spread over `environ` 6/20,
-   `unpack` 4/20, `strfmt` 3/20, `limits` 2/20 and `slicing` 7/20). Both
-   numbers agree on the answer to the item's own question — the operand
-   predicate was the narrow thing, and after it was widened what is left is
-   operands no operand predicate can reach — so the two measurements are kept
-   as two scopes of one measurement rather than as a disagreement.
+3. **`Analysis.int_only` lower bound.** §2a raised `swap_add` reach from 133 to
+   275 of 440 programs; on this tree it reached 351 of 540, and 376 once the
+   operand predicate stopped requiring a bare name or a literal. The remaining
+   decline reasons are operands not provably integer (subscripts/attributes/
+   containers/comprehensions), calls refused on purity, or programs with no `+`.
+   `work/formal402-docs` measured on a narrower subset (27 mixes at `--stmts 10 30`,
+   seed `x402`: `swap_add` reach 146 → 156 of 216 programs) and the two
+   measurements agree: broadening the operand predicate was the thing that moved,
+   and what remains is not reachable by that predicate.
 
 ## 7. What sweep 7 did NOT settle, and it is the honest end of this ledger
 
