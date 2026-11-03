@@ -2982,6 +2982,23 @@ def main():
     for v in g(4):
         print(v)
 """, "3\n2\n4\n0\n")
+    test_generator_stdout("kwargs_generator_method_packs_keywords", """\
+struct Box:
+    var k: Int
+    def __init__(out self, k: Int):
+        self.k = k
+
+    def g(self, n, **kw):
+        yield n + self.k
+        yield len(kw)
+
+def main():
+    var b = Box(10)
+    for v in b.g(3, b=5, c=6):
+        print(v)
+    for v in b.g(4):
+        print(v)
+""", "13\n2\n14\n0\n")
     test_generator_stdout("star_args_generator_no_positionals", """\
 def gen_var(*xs):
     for x in xs:
