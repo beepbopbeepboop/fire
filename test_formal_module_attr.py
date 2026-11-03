@@ -735,8 +735,7 @@ def test_a_module_object_read_is_still_refused(tmpdir, _shared, verbose):
 # formal `os` published the file was reported as a STRING COMPARISON, because the
 # spine exemption was unconditional and the diagnostic raised during emission
 # beat the one raised at the end of the symbol walk. `formal/hostmods/os`
-# publishes `environ` and a dozen operations on it now
-# (`bugs/formal/FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md`), which
+# publishes `environ` and a dozen operations on it now (the environ view), which
 # moved this shape from the middle case to the third one: the parent publishes
 # the link, so the chain is a call through a VALUE and the answer has to say
 # that and name the functions that are the operations.
