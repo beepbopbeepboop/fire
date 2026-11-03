@@ -143,7 +143,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md` | `bug-formal-formal-a-function-with-no-ret` | FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None |
 | `FORMAL_a_try_handler_arm_is_still_never_emitted.md` | `bug-formal-formal-a-try-handler-arm-is-s-8121` | A `try` handler arm is still never emitted, and the reason it is not worth fixing in one function is that EVERY arm in this repository calls something |
 | `FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md` | `bug-formal-formal-a-type-cannot-be-const-9849` | `collections.namedtuple` and `copy.deepcopy` are one missing capability, and it is a reflection table |
-| `FORMAL_type_name_as_a_value.md` | `bug-formal-formal-type-name-as-a-value-6184` | a bare TYPE name in a value position is refused as a name with no register |
 | `FORMAL_a_print_of_a_container_needs_a_text_loop.md` | **unclaimed** | `print(<a container>)` is refused: rendering one is a loop emitting text, and `_print_call` builds ONE format |
 | `FORMAL_float_binary64_only.md` | **unclaimed** | binary64 only: `Float32` and the narrow formats are refused by name, and `float32` arithmetic is the next slice |
 | `FORMAL_function_value_calls_are_not_proved_to_be_calls.md` | **unclaimed** | A call through a VALUE is not proved to be a call: the word might not be an address |
@@ -164,6 +163,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_sweep_singles_second_half.md` | **unclaimed** | four of §3.2's eight remaining single-file causes are not patches, measured |
 | `FORMAL_sweep_work_map.md` | **unclaimed** | the formal sweep series — the current census, the measurements that outlived their round, and the index of the twenty-one rounds it replaces |
 | `FORMAL_time_struct_shaped_answers.md` | **unclaimed** | five `time` names are absent because their answer is a struct |
+| `FORMAL_dtype_object_as_a_value.md` | **unclaimed** | the runtime type object of `DType` (`t = DType`, `DType(Int32)`) has no representation; the old bare-TYPE-name defect is fixed |
 
 ### `formal/monomorph` — 3 documents, 1 claimed
 

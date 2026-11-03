@@ -744,7 +744,7 @@ def subscript_callee_names(call) -> list:
 # hold — which is why every name in the tables above used to be refused with
 # "'Int32' has no home", a sentence that is false about the program: `Int32` is
 # not a name that was left without a register, it is a TYPE, and the source
-# says so in the position it stands in. `bugs/formal/FORMAL_type_name_as_a_value.md`
+# says so in the position it stands in. `bugs/formal/FORMAL_dtype_object_as_a_value.md`
 # is the long form.
 #
 # The answer here is that a type IS a word on this path, and the word is a TAG:

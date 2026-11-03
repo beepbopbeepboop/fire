@@ -154,7 +154,6 @@ BARE_BASELINE = {
     'bugs/formal/FORMAL_sweep_work_map.md': 1,
     'bugs/formal/FORMAL_the_host_import_wall_is_at_its_honest_floor.md': 1,
     'bugs/formal/FORMAL_time_struct_shaped_answers.md': 1,
-    'bugs/formal/FORMAL_type_name_as_a_value.md': 1,
     'bugs/hard/COMPILE_FAIL_Tools_cases_generator_analyzer.md': 3,
     'bugs/hard/README.md': 1,
     'bugs/mid/CODEGEN_tuple_unpack_of_a_boxed_dict_reads_slots_as_pointer_words.md': 1,
