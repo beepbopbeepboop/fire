@@ -525,7 +525,7 @@ def _admitted(what: str) -> int:
 
 @admitted("the child's exit status word: 0..255 for a normal exit, or -N for a death by signal N")
 def run(args, capture_output=0, text=0, timeout=0, check=0, input=0, cwd="",
-        env="", stdout=0, stderr=0, stdin=0, shell=0, errors="") -> int:
+        env="", stdout=0, stderr=0, stdin=0, shell=0, errors="", encoding="") -> int:
     """`subprocess.run(argv, capture_output=…)`: run a program, wait, report.
 
     The return word is the exit status, which is what `run` is called for in
