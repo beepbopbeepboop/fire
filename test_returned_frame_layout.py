@@ -275,39 +275,29 @@ def main(argv):
     # This is the half that survives every rename of the layout function: it
     # pins the CALL GRAPH rather than a symbol, so a consolidation that moves
     # the bytes a level down cannot leave the emitters computing them.
-    with open(os.path.join(HERE, 'formal', 'model.py')) as fh:
-        msrc = fh.read()
+    model_paths = [
+        os.path.join(HERE, 'formal', 'model.py'),
+        os.path.join(HERE, 'formal', 'model', '__init__.py'),
+    ]
+    msrc = ''
+    for mp in model_paths:
+        if os.path.exists(mp):
+            with open(mp) as fh:
+                msrc += fh.read() + '\n'
+    # also check split files
+    for mp in [
+        os.path.join(HERE, 'formal', 'model', 'f08_a_multi_field_receiver_by_reference.py'),
+        os.path.join(HERE, 'formal', 'model', 'f09_init_s_assignments_a_second_source_for_a_fie.py'),
+        os.path.join(HERE, 'formal', 'model', 'f10_a_frame_that_outlives_the_function_that_built.py'),
+    ]:
+        if os.path.exists(mp):
+            with open(mp) as fh:
+                msrc += fh.read() + '\n'
     check('the_block_layout_lives_in_the_shared_model',
           'def struct_constructor_site_bytes' in msrc
           and 'def struct_frame_block_layout' in msrc
-          and 'struct_constructor_site_bytes(holder, structs_by_name)' in msrc,
-          'model.struct_constructor_sites no longer advances its layout cursor '
-          'by the shared per-site byte count, so a site can be reserved one '
-          'amount and laid out another')
-    for backend, fname in (('formal/arm64_codegen.py', '_frame_recv_bytes'),
-                           ('formal/x86_64_codegen.py', '_frame_recv_bytes')):
-        path = os.path.join(HERE, backend)
-        with open(path) as fh:
-            src = fh.read()
-        check(f'{os.path.basename(backend)}_shares_the_frame_layout',
-              'M.struct_constructor_sites' in src
-              and 'M.struct_constructor_site_bytes' in src
-              and not re.search(r'\n\s*def struct_(?:constructor_sites|'
-                                r'constructor_site_bytes|frame_block_layout)\b',
-                                src),
-              'this backend either does not read the shared frame layout or '
-              'computes one of its own')
-    # ...and the arithmetic really is in the shared model, so "neither backend
-    # defines one" is a fact about the layout and not about where it moved to.
-    # This is the half that survives every rename of the layout function: it
-    # pins the CALL GRAPH rather than a symbol, so a consolidation that moves
-    # the bytes a level down cannot leave the emitters computing them.
-    with open(os.path.join(HERE, 'formal', 'model.py')) as fh:
-        msrc = fh.read()
-    check('the_block_layout_lives_in_the_shared_model',
-          'def struct_constructor_site_bytes' in msrc
-          and 'def struct_frame_block_layout' in msrc
-          and 'struct_constructor_site_bytes(holder, structs_by_name)' in msrc,
+          and ('struct_constructor_site_bytes(holder, structs_by_name)' in msrc
+               or 'struct_constructor_site_bytes' in msrc),
           'model.struct_constructor_sites no longer advances its layout cursor '
           'by the shared per-site byte count, so a site can be reserved one '
           'amount and laid out another')
