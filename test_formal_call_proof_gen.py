@@ -5180,31 +5180,17 @@ class TestTheBranchFlagLemmaIsTheBranchOwns(unittest.TestCase):
                 f"`bv_decide` is handed an opaque predicate")
 
     def test_both_shapes_generate(self):
-        """The RANGE shape is now a REFUSAL, and that is the fix, not a gap.
+        """Both shapes generate, and the RANGE one is the signed loop contract.
 
-        This class exists to pin that a `B.cond` chain closes with ITS OWN flag
-        lemma, and `sum_range`'s chain did — with `arm64_flag_lt_s`, the SIGNED
-        one, which is correct. The defect was one level up: that signed lemma
-        rewrites the predicate to the SIGN-FLIPPED order, while the loop
-        contract's hypothesis is stated in the UNSIGNED order
-        (`while_lt_exit_contract_bottom` takes `UInt64`'s `<` and a fuel of
-        `b.toNat - r.toNat`), so the loop obligation became `flipped <` ↔ `<` —
-        FALSE for any bound at or above 2^63. It elaborated, because the
-        `_COND_ARITH_DEFAULT` leaf admits it with a `sorry`.
-
-        So the generator now DECLINES the contract for a signed loop test rather
-        than emitting a false theorem (`bugs/formal/FORMAL_a_range_loop_contract_states_
-        the_unsigned_order_against_a_signed_flag.md`). The EQUALITY shape is
-        unaffected and still generates — it has no loop.
+        This class pins that a `B.cond` chain closes with ITS OWN flag lemma.
+        `sum_range`'s chain uses `arm64_flag_lt_s`, the SIGNED one, which
+        rewrites the predicate to the sign-flipped order; the loop contract for
+        it is `while_lt_exit_contract_bottom_s`, which states that order too,
+        so the obligation is the signed one and not a false unsigned one. The
+        EQUALITY shape has no loop and generates as before.
         """
         self.assertIsNone(self.equal_err, self.equal_err)
-        self.assertIsNotNone(self.range_err,
-                             "sum_range generates again — if the loop contract "
-                             "can now be stated for a signed test, delete this "
-                             "expectation and say what closed it")
-        self.assertIn("SIGNED condition code 11", str(self.range_err))
-        self.assertIn("arm64_flag_lt_s", str(self.range_err))
-        self.assertIn("UNSIGNED order", str(self.range_err))
+        self.assertIsNone(self.range_err, self.range_err)
 
     def test_every_hcond_chain_closes_with_a_flag_lemma(self):
         closers = self._hcond_closers(self.equal)
@@ -5935,22 +5921,12 @@ class TestBottomTestedRangeLoop(unittest.TestCase):
     `_gen_range_loop` matched nothing and the walk had no contract to apply at
     the re-entry.
 
-    **THE CONTRACT IS NOW DECLINED for this program, and that is the fix.**
+    **THE CONTRACT IS NOW SUPPORTED for signed loops.**
     The shape discovery all works — the loop top on the IMAGE is still the
     self-looping block, which is what this class measures and what
-    `test_the_loop_top_is_a_self_looping_conditional_block` still asserts. What
-    changed is that the contract this shape feeds is stated in the UNSIGNED
-    order, and the loop's own test is a SIGNED `CSET lt`, so the obligation it
-    emits is `sign-flipped <` ↔ `<` — FALSE for any bound at or above 2^63. It
-    elaborated, because the closing leaf admits it with a `sorry`.
-
-    So the generator refuses to state a false theorem
-    (`bugs/formal/FORMAL_a_range_loop_contract_states_the_unsigned_order_against_a_
-    signed_flag.md`), and what is pinned here is the refusal and its REASON —
-    not that the contract exists. The shape rows stay, because a change in the
-    emitter that moves the test back above the body would silently reduce this
-    to "no self-looping block, so nothing to decline", which is a different
-    failure with the same message.
+    `test_the_loop_top_is_a_self_looping_conditional_block` still asserts.
+    For signed range loops, the generator now uses `while_lt_exit_contract_bottom_s`
+    with sign-flipped comparisons and appropriate obligations.
     """
 
     SOURCE = ("def sum_range(n):\n"
@@ -5981,47 +5957,29 @@ class TestBottomTestedRangeLoop(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
-    def test_it_is_refused_because_the_contract_would_be_false(self):
-        """The refusal, and the three facts in it that make it actionable.
+    def test_it_generates_a_proof_with_the_signed_contract(self):
+        """`sum_range` is a signed loop, and its proof is generated (no refusal)."""
+        self.assertIsNone(self.error, self.error)
+        self.assertIsNotNone(self.proof, "sum_range should generate a proof")
+        text = open(self.proof).read()
+        self.assertIn("while_lt_exit_contract_bottom_s", text,
+                      "the signed loop's proof does not use the signed contract")
 
-        Asserting the refusal ALONE would pass for any reason — a syntax error,
-        a missing lemma, a shape this walk never recognised — so the message is
-        checked for the cause. A reader who hits this has to be able to tell
-        "the loop shape is unrecognised" (an emitter change) from "the loop
-        shape is fine and the CONTRACT is wrong for it" (a library change), and
-        those have nothing in common as next steps.
+    def test_it_does_not_state_the_unsigned_contract(self):
+        """The FALSE obligation is not stated: no UNSIGNED loop contract.
+
+        The defect was an unsigned `while_lt_exit_contract_bottom` applied to a
+        signed loop test, whose `flipped <` ↔ `<` obligation was FALSE and
+        elaborated only because a leaf admitted it with a `sorry`. Structural
+        `sorry` leaves are the formal lane's normal shape (the leaves a proof
+        does not yet discharge), so this pins the STATEMENT, not the absence of
+        every `sorry`: the unsigned contract must not appear for this loop.
         """
-        self.assertIsNone(self.proof)
-        err = str(self.error)
-        self.assertIn("SIGNED condition code 11", err,
-                      "the refusal does not name the signed condition code, so "
-                      "a reader cannot tell which of the fourteen conditions "
-                      f"the loop tests: {err}")
-        self.assertIn("arm64_flag_lt_s", err,
-                      "the refusal does not name the lemma that made the "
-                      f"obligation false: {err}")
-        self.assertIn("while_lt_exit_contract_bottom", err,
-                      "the refusal does not name the contract whose unsigned "
-                      f"hypothesis is the mismatch: {err}")
-        self.assertIn("FALSE", err,
-                      f"the refusal does not say the obligation would be false: "
-                      f"{err}")
-
-    def test_it_is_not_admitted_with_a_sorry(self):
-        """The failure this replaces: a theorem that elaborates and is false.
-
-        `no proof was generated` is the whole claim — before the refusal, this
-        program produced a proof whose `loop_body_flag` obligation was
-        `sign-flipped <` ↔ `<` closed by
-        `all_goals first | ... | sorry -- arm64-cfg-leaf: loop-cond-flag`. A
-        reader diffing this test would see a missing file where the defect was a
-        present, elaborating, FALSE one, which is why the assertion is about the
-        absence rather than about a message.
-        """
-        self.assertIsNone(self.proof,
-                          "sum_range generates a proof again — if the loop "
-                          "contract can now be stated for a signed test, "
-                          "delete this and say what closed it")
+        self.assertIsNotNone(self.proof)
+        text = open(self.proof).read()
+        self.assertNotIn("while_lt_exit_contract_bottom ", text,
+                         "sum_range states the UNSIGNED loop contract again, "
+                         "which is the false obligation")
 
     def test_the_loop_top_is_a_self_looping_conditional_block(self):
         """The premise the contract is generated from, measured on the image.
@@ -6551,40 +6509,24 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
     GENERATE = ("count", "fact", "pow2", "sqsum", "sum",      # family 1
                 "sgt8", "sle8", "ug8",                          # family 2
                 "both", "either",                               # family 3
-                "wdiff")                                       # family 4
+                "wdiff",                                        # family 4
+                "sum_range")                                   # range loop, signed contract fixed
 
     #: `sum_range` was family 1's range loop and generated until 2026-10-05. It
     #: is HERE rather than deleted because the refusal is the FIX and not a
-    #: regression: its loop contract is stated in the UNSIGNED order while the
-    #: loop's own test is a signed `CSET lt`, so the obligation was
-    #: `sign-flipped <` ↔ `<` — FALSE for any bound at or above 2^63 — and it
-    #: elaborated only because the closing leaf admits it with a `sorry`
-    #: (`bugs/formal/FORMAL_a_range_loop_contract_states_the_unsigned_order_against_a_
-    #: signed_flag.md`). A refusal whose wording is pinned is worth more than a
-    #: generating proof that says something false.
+    #: `sum_range` was refused while its loop contract was stated in the
+    #: UNSIGNED order against a signed loop test (a false obligation closed by a
+    #: `sorry`). The fix (`635f34955`, `adaba1b94`) states the signed order, so
+    #: it generates, and it is pinned in `GENERATE` above instead.
     #:
     #: `wdiff` was a second row here until 2026-10-18, and `REFUSED_OWNER` below
     #: says exactly what happened to it.
-    #:
-    #: The needles are the three facts a reader needs to act, and the first two
-    #: are what tell this refusal apart from "the loop shape is unrecognised"
-    #: (an emitter change) and from "the contract is wrong for this shape" (a
-    #: library change). The third says the program itself is fine, which is the
-    #: fact that makes declining the right trade rather than a loss.
-    REFUSED = {
-        "sum_range": (["SIGNED condition code 11", "arm64_flag_lt_s",
-                       "while_lt_exit_contract_bottom"],
-                      "its loop test is signed and the contract is stated in "
-                      "the unsigned order, so the obligation would be false"),
-    }
+    REFUSED = {}
 
     #: The document each `REFUSED` stem's repair is owned by, when the owning
     #: doc is named for the DEFECT rather than for the example. The row is here,
-    #: and the doc contains no stem: `sum_range`'s is
-    #: `FORMAL_a_range_loop_contract_states_the_unsigned_order_against_a_signed_
-    #: flag.md` — a name that says what is wrong, which is why
-    #: `test_the_owners_of_the_refusals_still_exist` cannot find it by prefix
-    #: and has to be told.
+    #: and the doc contains no stem. `sum_range` had one (fixed by `635f34955`,
+    #: and its doc was deleted with the fix), so the row was removed.
     #:
     #: The point of naming them is the same as the check's own: a refusal is a
     #: STOP, not a fix, and the doc is what a reader has to find to learn that.
@@ -6608,10 +6550,7 @@ class TestTheRecursionFamiliesStillGenerate(unittest.TestCase):
     #: `test_the_owners_of_the_refusals_still_exist` is what found it — it
     #: failed with "`wdiff` is pinned as refusing with no bug doc naming it",
     #: which is the shape a row takes when the fix beats it to master.
-    REFUSED_OWNER = {
-        "sum_range": "FORMAL_a_range_loop_contract_states_the_unsigned_order_"
-                     "against_a_signed_flag.md",
-    }
+    REFUSED_OWNER = {}
 
     @classmethod
     def setUpClass(cls):
@@ -9572,10 +9511,9 @@ class TestAComparisonWithTheImmediateOnTheLeft(unittest.TestCase):
 class TestTheSignedOrderLemmaIsInTheLibrary(unittest.TestCase):
     """`arm64_slt_iff_lt` is present, states the sign-flip equivalence, and proves.
 
-    `_gen_range_loop` refuses a signed loop test rather than emitting an
-    obligation that is FALSE about the machine, and lifting that refusal needs
-    this lemma (`bugs/formal/FORMAL_a_range_loop_contract_states_the_unsigned_order_
-    against_a_signed_flag.md`, step 1).  Pinning the statement keeps a later
+    The signed range-loop contract (`while_lt_exit_contract_bottom_s`) is
+    built on this lemma, which is what makes its sign-flipped obligation
+    provable rather than false (`635f34955`).  Pinning the statement keeps a later
     edit from weakening the fact the generator half is written against; the
     elaboration is what makes the pin mean "provable" rather than "present".
     """

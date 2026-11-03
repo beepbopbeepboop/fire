@@ -4488,9 +4488,9 @@ theorem arm64_flag_le_s (a b : UInt64) :
     keeps `a < b` true exactly when it was.  This is the OTHER direction from
     `arm64_flag_lt_s` (flag → flipped order); a loop contract whose flag lemma
     produced the flipped order states its hypothesis in that order, and this
-    turns it back into the plain `UInt64` order.  The reusable library fact
-    `bugs/formal/FORMAL_a_range_loop_contract_states_the_unsigned_order_against_a_
-    signed_flag.md` names as step 1. -/
+    turns it back into the plain `UInt64` order.  It is the library fact the
+    signed range-loop contract (`while_lt_exit_contract_bottom_s`) is built on
+    (`635f34955`). -/
 theorem arm64_slt_iff_lt (a b : UInt64)
     (hr : a < 0x8000000000000000) (hb : b < 0x8000000000000000) :
     (a ^^^ 0x8000000000000000) < (b ^^^ 0x8000000000000000) ↔ a < b := by
@@ -4971,6 +4971,178 @@ theorem while_lt_exit_contract_bottom
         ((arm64_reg b st).toNat - (arm64_reg r st).toNat) + (mb + me + 3) ≤ fuel →
       st.pc = checkPc → (arm64_reg r st < arm64_reg b st) → P st →
       ∃ s, arm64_go_exit st code exit fuel = some s ∧ s.x0 = model st := by
+
+/-- Bottom-tested loop contract for signed comparisons: the test is rewritten by
+    a signed condition flag lemma so the loop predicate holds when the
+    sign-flipped operands satisfy `slt`. We require both registers to be below the
+    sign bit so that `arm64_slt_iff_lt` converts between signed and unsigned
+    order. -/
+theorem while_lt_exit_contract_bottom_s
+    (code : Nat → UInt8) (exit checkPc cbzPc exitBpc : Nat)
+    (q : Arm64State → Bool) (r b : Nat)
+    (model : Arm64State → UInt64)
+    (bodyex ex : Arm64State → Arm64State)
+    (mb me : Nat)
+    (P : Arm64State → Prop)
+    (hP_pc : ∀ (st : Arm64State) (pc : Nat), P st → P { st with pc := pc })
+    (hP_body : ∀ st, st.pc = checkPc → P st → P (bodyex st))
+    (hstep : ∀ st, st.pc = cbzPc →
+      arm64_step st code = some (if q st then
+        ({ st with pc := checkPc } : Arm64State) else ({ st with pc := exitBpc } : Arm64State)))
+    (hbodyRun : ∀ st, st.pc = checkPc → arm64_runs code mb st = some (bodyex st))
+    (hbodyMid : ∀ st, st.pc = checkPc →
+      ∀ u, u < mb → ∀ su, arm64_runs code u st = some su → su.pc ≠ exit)
+    (hbodyPc : ∀ st, st.pc = checkPc → (bodyex st).pc = cbzPc)
+    (hbodyR : ∀ st, st.pc = checkPc → arm64_reg r (bodyex st) = arm64_reg r st + 1)
+    (hbodyB : ∀ st, st.pc = checkPc → arm64_reg b (bodyex st) = arm64_reg b st)
+    (hbodyFlag : ∀ st, st.pc = checkPc →
+      (q (bodyex st) = true ↔ ((arm64_reg r (bodyex st) ^^^ 0x8000000000000000) <
+                                (arm64_reg b (bodyex st) ^^^ 0x8000000000000000))))
+    (hbodyModel : ∀ st, st.pc = checkPc →
+      ((arm64_reg r st ^^^ 0x8000000000000000) < (arm64_reg b st ^^^ 0x8000000000000000)) →
+      model (bodyex st) = model st)
+    (hexRun : ∀ st, st.pc = exitBpc → P st → arm64_runs code me st = some (ex st))
+    (hexMid : ∀ st, st.pc = exitBpc →
+      ∀ u, u < me → ∀ su, arm64_runs code u st = some su → su.pc ≠ exit)
+    (hexPc : ∀ st, st.pc = exitBpc → P st → (ex st).pc = exit)
+    (hexX0 : ∀ st, st.pc = exitBpc →
+      ¬ ((arm64_reg r st ^^^ 0x8000000000000000) < (arm64_reg b st ^^^ 0x8000000000000000)) →
+      (ex st).x0 = model st)
+    (hmodelPc : ∀ st pc, model { st with pc := pc } = model st)
+    (hcbzExit : cbzPc ≠ exit) (hCheckPc : checkPc ≠ cbzPc) (hExitBpc : exitBpc ≠ cbzPc) :
+    ∀ (st : Arm64State) (fuel : Nat),
+      (mb + me + 3) *
+        ((arm64_reg b st).toNat - (arm64_reg r st).toNat) + (mb + me + 3) ≤ fuel →
+      st.pc = checkPc →
+      (arm64_reg r st < 0x8000000000000000) →
+      (arm64_reg b st < 0x8000000000000000) →
+      P st →
+      ∃ s, arm64_go_exit st code exit fuel = some s ∧ s.x0 = model st := by
+  have u64_lt_toNat {a c : UInt64} (h : a < c) : a.toNat < c.toNat := by
+    rw [UInt64.lt_iff_toNat_lt] at h
+    exact h
+  have toNat_lt_u64 {a c : UInt64} (h : a.toNat < c.toNat) : a < c := by
+    rw [UInt64.lt_iff_toNat_lt]
+    exact h
+  have key : ∀ (k : Nat) (st : Arm64State), st.pc = checkPc →
+      1 ≤ k → (arm64_reg b st).toNat - (arm64_reg r st).toNat = k → P st →
+      (arm64_reg r st < 0x8000000000000000) →
+      (arm64_reg b st < 0x8000000000000000) →
+      ∀ fuel, (mb + me + 3) * k + (mb + me + 3) ≤ fuel →
+      ∃ s, arm64_go_exit st code exit fuel = some s ∧ s.x0 = model st := by
+    intro k
+    induction k with
+    | zero =>
+      intro st hpc hk1 hk hPst hr hb fuel hfuel
+      omega
+    | succ k ih =>
+      intro st hpc hk1 hk hPst hr hb fuel hfuel
+      have hltst_flipped : (arm64_reg r st ^^^ 0x8000000000000000) < (arm64_reg b st ^^^ 0x8000000000000000) :=
+        (arm64_slt_iff_lt (arm64_reg r st) (arm64_reg b st) hr hb).mpr
+          (toNat_lt_u64 (show (arm64_reg r st).toNat < (arm64_reg b st).toNat by omega))
+      have hglue1 := rec1_glue_gen code exit mb (fuel - mb) st (bodyex st)
+        (hbodyRun st hpc) (hbodyMid st hpc)
+      rw [show mb + (fuel - mb) = fuel from by omega] at hglue1
+      rw [hglue1]
+      have hbp : (bodyex st).pc = cbzPc := hbodyPc st hpc
+      have hpcne : (bodyex st).pc ≠ exit := by rw [hbp]; exact hcbzExit
+      by_cases hgo : ¬ q (bodyex st) = true
+      · have hstep' := hstep (bodyex st) hbp
+        have hjump : ({ bodyex st with pc := exitBpc } : Arm64State).pc ≠ (bodyex st).pc := by rw [hbp]; exact hExitBpc
+        have hcbz := go_exit_cbz_fall (bodyex st) code exit (fuel - mb - 1)
+          (q (bodyex st) = true)
+          ({ bodyex st with pc := checkPc }) ({ bodyex st with pc := exitBpc })
+          hstep' hgo hjump hpcne
+        rw [show (fuel - mb - 1) + 1 = fuel - mb from by omega] at hcbz
+        rw [hcbz]
+        have hPe : P ({ bodyex st with pc := exitBpc } : Arm64State) :=
+          hP_pc (bodyex st) exitBpc (hP_body st hpc hPst)
+        have hglue3 := rec1_glue_gen code exit me (fuel - mb - 1 - me)
+          ({ bodyex st with pc := exitBpc }) (ex { bodyex st with pc := exitBpc })
+          (hexRun _ (by rfl) hPe) (hexMid _ (by rfl))
+        rw [show me + (fuel - mb - 1 - me) = fuel - mb - 1 from by omega] at hglue3
+        rw [hglue3]
+        have hexpc : (ex { bodyex st with pc := exitBpc }).pc = exit :=
+          hexPc _ (by rfl) hPe
+        rw [arm64_go_exit_hit _ code exit (fuel - mb - 1 - me) (by omega) hexpc]
+        refine ⟨ex { bodyex st with pc := exitBpc }, rfl, ?_⟩
+        have hge_flipped : ¬ ((arm64_reg r { bodyex st with pc := exitBpc } ^^^ 0x8000000000000000) <
+                                (arm64_reg b { bodyex st with pc := exitBpc } ^^^ 0x8000000000000000)) := by
+          rw [arm64_reg_pc, arm64_reg_pc]
+          rw [hbodyB st hpc, hbodyR st hpc]
+          intro hlt_e
+          apply hgo
+          have hlt_e' := (arm64_slt_iff_lt (arm64_reg r { bodyex st with pc := exitBpc }) (arm64_reg b { bodyex st with pc := exitBpc })
+                            (by rw [arm64_reg_pc]; exact hr) (by rw [arm64_reg_pc]; exact hb)).mp hlt_e
+          apply (hbodyFlag st hpc).mpr hlt_e'
+        have hex0 := hexX0 _ (by rfl) hge_flipped
+        rw [hex0, hmodelPc (bodyex st) exitBpc, hbodyModel st hpc hltst_flipped]
+      · have hq : q (bodyex st) = true := Classical.byContradiction hgo
+        have hstep' := hstep (bodyex st) hbp
+        have hjump : ({ bodyex st with pc := checkPc } : Arm64State).pc ≠ (bodyex st).pc := by rw [hbp]; exact hCheckPc
+        have hcbz := go_exit_cbz_taken (bodyex st) code exit (fuel - mb - 1)
+          (q (bodyex st) = true)
+          ({ bodyex st with pc := checkPc }) ({ bodyex st with pc := exitBpc })
+          hstep' hq hjump hpcne
+        rw [show (fuel - mb - 1) + 1 = fuel - mb from by omega] at hcbz
+        rw [hcbz]
+        have hltstnat : (arm64_reg r st).toNat < (arm64_reg b st).toNat := u64_lt_toNat
+          ((arm64_slt_iff_lt (arm64_reg r st) (arm64_reg b st) hr hb).mp hltst_flipped)
+        have hb264 : (arm64_reg b st).toNat < 2^64 := UInt64.toNat_lt (arm64_reg b st)
+        have hlt264 : (arm64_reg r st).toNat + 1 < 2^64 := by omega
+        have hrb : arm64_reg r (bodyex st) = arm64_reg r st + 1 := hbodyR st hpc
+        have hbb : arm64_reg b (bodyex st) = arm64_reg b st := hbodyB st hpc
+        have hadd : (arm64_reg r st + 1).toNat = (arm64_reg r st).toNat + 1 := by
+          rw [UInt64.toNat_add, show (1 : UInt64).toNat = 1 from by rfl]
+          exact Nat.mod_eq_of_lt hlt264
+        have hrb2 : (arm64_reg r (bodyex st)).toNat = (arm64_reg r st).toNat + 1 := by
+          rw [hrb, hadd]
+        have hltb_flipped : ((arm64_reg r (bodyex st) ^^^ 0x8000000000000000) <
+                             (arm64_reg b (bodyex st) ^^^ 0x8000000000000000)) := by
+          rw [hbb, hrb]
+          apply (hbodyFlag st hpc).mp hq
+        have hltstnat' : (arm64_reg r (bodyex st)).toNat < (arm64_reg b (bodyex st)).toNat :=
+          u64_lt_toNat ((arm64_slt_iff_lt (arm64_reg r (bodyex st)) (arm64_reg b (bodyex st))
+                           (by rw [hrb]; exact hr) (by rw [hbb]; exact hb)).mp hltb_flipped)
+        have hk1' : 1 ≤ k := by
+          have hB : (arm64_reg b st).toNat = k + 1 + (arm64_reg r st).toNat :=
+            (Nat.sub_eq_iff_eq_add (a := (arm64_reg b st).toNat)
+              (b := (arm64_reg r st).toNat) (c := k + 1)
+              (Nat.le_of_lt hltstnat)).mp hk
+          have hltb' : (arm64_reg r st).toNat + 1 < k + 1 + (arm64_reg r st).toNat := by
+            rw [← hB]
+            exact hltstnat'
+          omega
+        have hrem0 : (arm64_reg b (bodyex st)).toNat - (arm64_reg r (bodyex st)).toNat = k := by
+          rw [hbb, hrb2, ← Nat.sub_sub, hk]
+          omega
+        have hrem : (arm64_reg b { bodyex st with pc := checkPc }).toNat -
+            (arm64_reg r { bodyex st with pc := checkPc }).toNat = k := by
+          simp only [arm64_reg_pc]
+          exact hrem0
+        have hfuel'' : (mb + me + 3) * k + (mb + me + 3) + (mb + me + 3) ≤ fuel := by
+          have hx := hfuel
+          rw [Nat.mul_succ] at hx
+          exact hx
+        have hfuel' : (mb + me + 3) * k + (mb + me + 3) ≤ fuel - mb - 1 := by omega
+        have hPb : P { bodyex st with pc := checkPc } :=
+          hP_pc (bodyex st) checkPc (hP_body st hpc hPst)
+        obtain ⟨s, hs, hx0⟩ := ih _ (by rfl) hk1' hrem hPb hr hb _ hfuel'
+        refine ⟨s, hs, ?_⟩
+        rw [hx0, hmodelPc (bodyex st) checkPc, hbodyModel st hpc hltb_flipped]
+  intro st fuel hfuel hpc hr hb hPst
+  have hk1 : 1 ≤ (arm64_reg b st).toNat - (arm64_reg r st).toNat := by
+    have hltst_flipped : (arm64_reg r st ^^^ 0x8000000000000000) < (arm64_reg b st ^^^ 0x8000000000000000) :=
+      (arm64_slt_iff_lt (arm64_reg r st) (arm64_reg b st) hr hb).mpr
+        (toNat_lt_u64 (show (arm64_reg r st).toNat < (arm64_reg b st).toNat by
+          have := UInt64.toNat_lt (arm64_reg r st)
+          have := UInt64.toNat_lt (arm64_reg b st)
+          omega))
+    have hltnat : (arm64_reg r st).toNat < (arm64_reg b st).toNat :=
+      u64_lt_toNat ((arm64_slt_iff_lt (arm64_reg r st) (arm64_reg b st) hr hb).mp hltst_flipped)
+    omega
+  simpa using key ((arm64_reg b st).toNat - (arm64_reg r st).toNat) st hpc
+    hk1 (by rfl) hPst hr hb fuel hfuel
   have u64_lt_toNat {a c : UInt64} (h : a < c) : a.toNat < c.toNat := by
     rw [UInt64.lt_iff_toNat_lt] at h
     exact h
