@@ -22,7 +22,6 @@ import control as C
 import integrate as I
 import task_text as T
 
-SKIP = re.compile(r"^(FORMAL_|COMPILE_FAIL_|MERGE_|OPEN_WORK|PERF_memory_over|DOCS_)")
 PREFIXES = ("bug-", "fix-")
 STOP = re.compile(r"^STOP:[ \t]*(.+?)[ \t]*$", re.M)   # the stop indicator: a line `STOP: <reason>` in the bug doc
 
@@ -77,6 +76,19 @@ def drop_queued_busy():
         if clash:
             os.remove(path)
             log("dropped queued %s: %s is held by a live session" % (item.get("name", f), ", ".join(clash)))
+
+
+def busy_by_class():
+    """Running workers per task class: a task counts in its own class (its `cls`), whichever slot it runs on, so a
+    slot that also takes another class does not hide that class's load."""
+    pool = C.load_pool()
+    slot_cls = {sl["name"]: C.slot_class(sl) for sl in pool["slots"]}
+    busy = {c: 0 for c in C.CLASSES}
+    for t in C.load().values():
+        if C.state_of(t) != "running":
+            continue
+        busy[t.get("cls") or slot_cls.get(t.get("pool"), "easy")] += 1
+    return busy
 
 
 def held_claims():
@@ -181,10 +193,8 @@ def feed():
     held, made = held_claims(), 0
     slot_cls = {sl["name"]: C.slot_class(sl) for sl in pool["slots"]}
     # Each class keeps its own queue: capacity of its live slots, plus one, less what runs and what waits in it.
-    cap = {c: sum(sl["count"] for sl in pool["slots"] if C.slot_class(sl) == c) for c in C.CLASSES}
-    busy = {c: 0 for c in C.CLASSES}
-    for slot, n in C.running_by_slot().items():
-        busy[slot_cls.get(slot, "easy")] += n
+    cap = {c: sum(sl["count"] for sl in pool["slots"] if C.accepts(sl, c)) for c in C.CLASSES}
+    busy = busy_by_class()
     queued = {c: 0 for c in C.CLASSES}
     for f in os.listdir(C.qdir()):
         if f.endswith(".json") and f.startswith(PREFIXES):

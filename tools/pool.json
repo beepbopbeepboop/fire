@@ -74,7 +74,10 @@
       "count": 20,
       "kind": "opencode",
       "recover_hours": 2.5,
-      "class": "mid"
+      "class": "mid",
+      "also": [
+        "easy"
+      ]
     },
     {
       "name": "opus",
@@ -88,10 +91,10 @@
   "feed": [
     "bugs/*.md",
     "bugs/mid/*.md",
-    "bugs/hard/*.md"
+    "bugs/hard/*.md",
+    "bugs/formal/*.md"
   ],
   "skip": [
-    "FORMAL_",
     "OPEN_WORK",
     "README"
   ],
