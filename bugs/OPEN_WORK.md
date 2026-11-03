@@ -131,7 +131,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_metamorphic_ledger.md` | **unclaimed** | what `tools/formal_metamorph.py` has measured, and what came of it |
 | `FORMAL_model_package_split_left_duplicate_copies.md` | **unclaimed** | formal/model/ holds the module three times |
 
-| `FORMAL_printf_s_of_a_container_walks_the_blob_header.md` | **unclaimed** | `printf("%s", <a container>)` prints the blob's COUNT byte, where CPython prints the container |
 | `FORMAL_runtime_library_on_the_link_line.md` | **unclaimed** | the phase-2 payoff is landed and the header gap is CLOSED; three measured ceilings are open |
 | `FORMAL_set_value_model.md` | **unclaimed** | A set is a LIST here: insertion order, no hashing, and `for x in s` disagrees with CPython |
 | `FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md` | **unclaimed** | CLOSED for programs — every prologue of an image that has an entry carries the guard |
