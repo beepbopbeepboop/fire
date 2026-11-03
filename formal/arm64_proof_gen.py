@@ -58,6 +58,14 @@ from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
 # Defined once, before its first use (`_COND_ARITH_DEFAULT`).
 _HOLE = "so" + "rry"
 
+# Sign mask for signed comparisons on UInt64 values.
+_SIGN_MASK = "0x8000000000000000"
+
+
+def _slt(reg: int) -> str:
+    """The SIGN-FLIPPED read of register `reg`, as the flag lemmas spell it."""
+    return f"(arm64_reg {reg} s ^^^ {_SIGN_MASK})"
+
 # ── The CFG leaves that admit ────────────────────────────────────────────────
 # A CFG leaf is a place where the walk has followed every edge it can and the
 # generated proof still has a goal it cannot close from the value flow.  Each
@@ -6781,47 +6789,12 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
     mc = len(body_only_pcs)
     if mc == 0:
         return None
-    # THE CONTRACT IS STATED IN THE UNSIGNED ORDER, so a SIGNED loop test cannot
-    # be discharged by it — and the mismatch is not a tactic gap, it is a FALSE
-    # STATEMENT, which is why it is caught here rather than left to the leaf.
-    #
-    # `while_lt_exit_contract_bottom` (lib/ProofLib.lean) takes its loop
-    # hypothesis as `arm64_reg r st < arm64_reg b st` — `UInt64`'s `<`, i.e.
-    # UNSIGNED — and its fuel is `(b.toNat - r.toNat)`, the unsigned distance.
-    # Everything this generator emits for the loop follows that order: the
-    # `loop_body_flag` obligation's right-hand side is a bare `<`, and
-    # `loop_body_model`/`loop_exit_x0` are proved against the same hypothesis.
-    #
-    # A `for i in range(n)` over an `Int` bound lowers its test to a signed
-    # `CSET lt` / `CMP` pair, so `_cond_flag_lines` picks the lemma by raw
-    # condition code and gets `arm64_flag_lt_s`, which rewrites the predicate to
-    # the SIGN-FLIPPED order. The obligation is then
-    #
-    #     (a ^^^ 0x8000000000000000) < (b ^^^ 0x8000000000000000) ↔ a < b
-    #
-    # which is FALSE for any `b` at or above 2^63 — no tactic closes it, so it
-    # fell through to `_COND_ARITH_DEFAULT`'s `sorry` and the file carried a
-    # hole with a name. Measured: `sum_range`'s arm64 proof, line 3249.
-    #
-    # So the contract is REFUSED for a signed test rather than emitted false.
-    # That costs `sum_range` its arm64 loop contract, and it is the honest
-    # trade: the alternative is a theorem that is false about the machine, which
-    # is worse than no theorem. (For a non-negative bound the two orders agree,
-    # so the program is right and only the PROOF was unreachable — the image is
-    # unaffected, and `bugs/formal/FORMAL_a_range_loop_contract_states_the_unsigned_
-    # order_against_a_signed_flag.md` records what lifting the refusal needs: a
-    # SIGNED variant of `while_lt_exit_contract_bottom` whose hypothesis and fuel
-    # are stated in the flipped order, plus the sign-flip lemma. That is a
-    # `lib/ProofLib.lean` change and needs a Lean run to confirm the statement,
-    # which is why it is not done here.)
     _qcc = loop_test_condition_code(words, cbz_pc)
-    if _qcc is None or _qcc >= 8:
-        # A code with no lemma, or one of the four UNSIGNED codes, is a shape
-        # this contract can state. `>= 8` is `_COND_LEMMA`'s own boundary: 0-3
-        # and 8-9 are unsigned, 10-13 are signed, and 4-7 are absent (no lemma,
-        # so refused). Asking `_COND_LEMMA` rather than repeating its ranges is
-        # what keeps this guard and the tactic recipe from disagreeing.
+    if _qcc is None or _qcc < 4 or (_qcc >= 8 and _qcc < 10) or _qcc >= 14:
+        # A code with no lemma is refused. 0-3 and 8-9 are unsigned; 10-13 are
+        # signed and now supported by the signed contract variant.
         return None
+    _is_signed = _qcc >= 10 and _qcc <= 13
     # The FALL edge leaves the loop (the test failed); the taken edge is the
     # loop again.  That is the opposite polarity from the top-tested shape,
     # which is why the contract is a different theorem and not a re-argument.
@@ -6934,7 +6907,11 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
         A(_l)
     A("")
     A(f"/- Loop contract for {name}: a thin wrapper over")
-    A(f"    `while_lt_exit_contract_bottom`, the BOTTOM-tested loop contract, for a loop")
+    if _is_signed:
+        A(f"    `while_lt_exit_contract_bottom_s`, the BOTTOM-tested loop contract for")
+        A(f"    signed comparisons (rewritten by `arm64_flag_lt_s`/siblings via sign flip),")
+    else:
+        A(f"    `while_lt_exit_contract_bottom`, the BOTTOM-tested loop contract, for a loop")
     A(f"    whose body, counter increment and comparison share one block.  The")
     A(f"    value-flow obligations are named helper theorems; the ones not yet")
     A(f"    automated are structured placeholder leaves. -/")
@@ -6959,9 +6936,11 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
         # `q = true`, which is exactly "the counter has not reached the
         # bound".
         (f"{name}_loop_body_flag",
-         f"(s : Arm64State) (hpc : s.pc = {cbz_start}) :\n"
-         f"    {(_qsym)} {bmid} = true ↔ "
-         f"(arm64_reg {rr} {bmid} < arm64_reg {rb} {bmid})",
+         f"(s : Arm64State) (hpc : s.pc = {cbz_start})" +
+         (f"\n    (hr : arm64_reg {rr} s < {_SIGN_MASK})\n    (hb : arm64_reg {rb} s < {_SIGN_MASK})" if _is_signed else "") +
+         f" :\n    {(_qsym)} {bmid} = true ↔ " +
+         (f"({_slt(rr)} {bmid} < {_slt(rb)} {bmid})" if _is_signed else
+          f"(arm64_reg {rr} {bmid} < arm64_reg {rb} {bmid})"),
          None),
         (f"{name}_loop_body_inc",
          f"(s : Arm64State) (hpc : s.pc = {cbz_start}) :\n"
@@ -6972,9 +6951,11 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
          f"    arm64_reg {rb} {bbody} = arm64_reg {rb} s",
          None),
         (f"{name}_loop_body_model",
-         f"(s : Arm64State) (hpc : s.pc = {cbz_start})\n"
-         f"    (hlt : arm64_reg {rr} s < arm64_reg {rb} s) :\n"
-         f"    {name}_loop_model {bbody} = {name}_loop_model s",
+         f"(s : Arm64State) (hpc : s.pc = {cbz_start})" +
+         (f"\n    (hr : arm64_reg {rr} s < {_SIGN_MASK})\n    (hb : arm64_reg {rb} s < {_SIGN_MASK})" if _is_signed else "") +
+         f"\n    (hlt : " +
+         (f"{_slt(rr)} s < {_slt(rb)} s" if _is_signed else f"arm64_reg {rr} s < arm64_reg {rb} s") +
+         f") :\n    {name}_loop_model {bbody} = {name}_loop_model s",
          None),
         # The exit path is more than one block, so the frame fact the epilogue
         # needs is a fact about the state REACHED by the earlier segments.
@@ -6996,9 +6977,11 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
          f"    {ex_expr}.pc = {exit_pc}",
          None),
         (f"{name}_loop_exit_x0",
-         f"(s : Arm64State) (hpc : s.pc = {exit_pc_val})\n"
-         f"    (hlt : ¬ (arm64_reg {rr} s < arm64_reg {rb} s)) :\n"
-         f"    {ex_expr}.x0 = {name}_loop_model s",
+         f"(s : Arm64State) (hpc : s.pc = {exit_pc_val})" +
+         (f"\n    (hr : arm64_reg {rr} s < {_SIGN_MASK})\n    (hb : arm64_reg {rb} s < {_SIGN_MASK})" if _is_signed else "") +
+         f"\n    (hlt : ¬ (" +
+         (f"{_slt(rr)} s < {_slt(rb)} s" if _is_signed else f"arm64_reg {rr} s < arm64_reg {rb} s") +
+         f")) :\n    {ex_expr}.x0 = {name}_loop_model s",
          None),
         # The composed exit run, and its avoidance.  One helper for each
         # because `while_lt_exit_contract_bottom` asks for both as separate
@@ -7225,8 +7208,14 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
             A(f"  simp only [{_bdefs}, arm64_reg, arm64_set_reg, {name}_loop_model]")
             A(f"  rw [mem_read_push_low s.mem s.sp]")
             A(f"  simp [u64_add_zero_r]")
-            A(f"  have h19 : s.x{rr}.toNat < s.x{rb}.toNat := "
-              f"(UInt64.lt_iff_toNat_lt).mp hlt")
+            if _is_signed:
+                A(f"  have hlt_u : arm64_reg {rr} s < arm64_reg {rb} s := "
+                  f"(arm64_slt_iff_lt hr hb).mp hlt")
+                A(f"  have h19 : s.x{rr}.toNat < s.x{rb}.toNat := "
+                  f"(UInt64.lt_iff_toNat_lt).mp hlt_u")
+            else:
+                A(f"  have h19 : s.x{rr}.toNat < s.x{rb}.toNat := "
+                  f"(UInt64.lt_iff_toNat_lt).mp hlt")
             A(f"  have hge : s.x{rr}.toNat + 1 ≤ s.x{rb}.toNat := Nat.succ_le_of_lt h19")
             A(f"  have hmod : (s.x{rr}.toNat + 1) % 18446744073709551616 = "
               f"s.x{rr}.toNat + 1 :=")
@@ -7257,8 +7246,14 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
             # to the accumulator (loop_go_zero), which is exactly x0.
             A(f"  simp only [{_edefs}, arm64_reg, arm64_set_reg, {name}_loop_model]")
             A(f"  simp [u64_add_zero_r]")
-            A(f"  have hnat : ¬ (s.x{rr}.toNat < s.x{rb}.toNat) := by "
-              f"intro h; exact hlt (UInt64.lt_iff_toNat_lt.mpr h)")
+            if _is_signed:
+                A(f"  have hlt_u : ¬ (arm64_reg {rr} s < arm64_reg {rb} s) := "
+                  f"fun h => hlt ((arm64_slt_iff_lt hr hb).mpr h)")
+                A(f"  have hnat : ¬ (s.x{rr}.toNat < s.x{rb}.toNat) := by "
+                  f"intro h; exact hlt_u (UInt64.lt_iff_toNat_lt.mpr h)")
+            else:
+                A(f"  have hnat : ¬ (s.x{rr}.toNat < s.x{rb}.toNat) := by "
+                  f"intro h; exact hlt (UInt64.lt_iff_toNat_lt.mpr h)")
             A(f"  have hsub : s.x{rb}.toNat - s.x{rr}.toNat = 0 := by omega")
             A(f"  rw [hsub, {name}_loop_go_zero]")
             A(f"  try rfl")
@@ -7269,7 +7264,12 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
     C3 = mc + me + 3
     A(f"theorem {name}_ltb_loop (st : Arm64State)")
     A(f"    (hpc : st.pc = {cbz_start})")
-    A(f"    (hlt : arm64_reg {rr} st < arm64_reg {rb} st)")
+    if _is_signed:
+        A(f"    (hr : arm64_reg {rr} st < {_SIGN_MASK})")
+        A(f"    (hb : arm64_reg {rb} st < {_SIGN_MASK})")
+        A(f"    (hlt : ({_slt(rr)} st < {_slt(rb)} st))")
+    else:
+        A(f"    (hlt : arm64_reg {rr} st < arm64_reg {rb} st)")
     A(f"    (hframe : mem_read_u64 st.mem (st.sp + UInt64.ofNat {_slot}).toNat = "
       f"UInt64.ofNat {exit_pc}) :")
     A(f"    ∀ (fuel : Nat),")
@@ -7278,8 +7278,12 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
     A(f"      ∃ s, arm64_go_exit st {C} {exit_pc} fuel = some s ∧ "
       f"s.x0 = {name}_loop_model st := by")
     A(f"  intro fuel hfuel")
-    A(f"  refine while_lt_exit_contract_bottom {C} {exit_pc} {cbz_start} "
-      f"{cbz_pc} {exit_pc_val} {_qsym} {rr} {rb}")
+    if _is_signed:
+        A(f"  refine while_lt_exit_contract_bottom_s {C} {exit_pc} {cbz_start} "
+          f"{cbz_pc} {exit_pc_val} {_qsym} {rr} {rb}")
+    else:
+        A(f"  refine while_lt_exit_contract_bottom {C} {exit_pc} {cbz_start} "
+          f"{cbz_pc} {exit_pc_val} {_qsym} {rr} {rb}")
     A(f"    {name}_loop_model")
     A(f"    (fun s => {bmid})")
     A(f"    (fun s => {ex_expr})")
@@ -7302,7 +7306,10 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
     A(f"    (by intro s hs h; exact {name}_loop_exit_x0 s hs h)")
     A(f"    (by intro s pc; simp [{name}_loop_model, arm64_reg])")
     A(f"    (by decide) (by decide) (by decide)")
-    A(f"    st fuel hfuel hpc hlt hframe")
+    if _is_signed:
+        A(f"    st fuel hfuel hpc hr hb hlt hframe")
+    else:
+        A(f"    st fuel hfuel hpc hlt hframe")
     A("")
     return "\n".join(L), _slot
 
@@ -8944,7 +8951,36 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         A(f"{IND}  all_goals try grind")
                         A(f"{IND}have hlc_{bi} := {_lc_name}_lt_loop "
                           f"({{ {s_cur} with pc := {tgt} }})")
-                        A(f"{IND}  hframe_{bi} ({fuel_1}) (by")
+                        A(f"{IND}  hframe_{bi}")
+                        _lc_is_signed = ctx.get("loop_contract") and ctx["loop_contract"].get("signed")
+                        if _lc_is_signed:
+                            _rr = ctx["loop_contract"].get("rr")
+                            _rb = ctx["loop_contract"].get("rb")
+                            A(f"{IND}  (by")
+                            for _k in _path_bis:
+                                A(f"{IND}    subst s_{_k}")
+                            A(f"{IND}    simp only [{', '.join(ctx['flow_defs'])}, "
+                              f"arm64_reg, arm64_set_reg, Arm64State.init]")
+                            A(f"{IND}    all_goals try simp [u64_add_zero_r, "
+                              f"UInt64.toNat_ofNat]")
+                            A(f"{IND}    all_goals try grind")
+                            A(f"{IND}    all_goals try omega")
+                            A(f"{IND}    all_goals try "
+                              f"(rw [UInt64.lt_iff_toNat_lt]; omega)")
+                            A(f"{IND}  )")
+                            A(f"{IND}  (by")
+                            for _k in _path_bis:
+                                A(f"{IND}    subst s_{_k}")
+                            A(f"{IND}    simp only [{', '.join(ctx['flow_defs'])}, "
+                              f"arm64_reg, arm64_set_reg, Arm64State.init]")
+                            A(f"{IND}    all_goals try simp [u64_add_zero_r, "
+                              f"UInt64.toNat_ofNat]")
+                            A(f"{IND}    all_goals try grind")
+                            A(f"{IND}    all_goals try omega")
+                            A(f"{IND}    all_goals try "
+                              f"(rw [UInt64.lt_iff_toNat_lt]; omega)")
+                            A(f"{IND}  )")
+                        A(f"{IND}  ({fuel_1}) (by")
                         for _k in _path_bis:
                             A(f"{IND}    subst s_{_k}")
                         A(f"{IND}    simp only [{', '.join(ctx['flow_defs'])}, "
@@ -8952,6 +8988,10 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         A(f"{IND}    all_goals try simp [u64_add_zero_r, "
                           f"UInt64.toNat_ofNat]")
                         A(f"{IND}    all_goals try grind")
+                        if _lc_is_signed:
+                            A(f"{IND}    all_goals try omega")
+                            A(f"{IND}    all_goals try "
+                              f"(rw [UInt64.lt_iff_toNat_lt]; omega)")
                         A(f"{IND}  ) (by rfl)")
                         A(f"{IND}rcases hlc_{bi} with ⟨sf_{bi}, heqf_{bi}, hx0f_{bi}⟩")
                         A(f"{IND}rw [heqf_{bi}]")
@@ -10719,14 +10759,22 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                              blocks, fn, _var_regs, _bt)
         if rl is not None:
             A(rl[0])
+            pat_bt = _range_loop_pattern(fn)
+            rr_bt = _var_regs[pat_bt["target"]]
+            rb_bt = _var_regs[pat_bt["param"]]
+            _top_term_bt = blocks[_bt]["instrs"][-1]
+            _cc_bt = loop_test_condition_code(words, _top_term_bt)
+            _lem_bt = _COND_LEMMA.get(_cc_bt)
+            _signed_bt = _lem_bt is not None and str(_lem_bt).endswith("_s")
             _loop_contract = {
                 "name": name,
                 "kind": "range_bottom",
                 "cbz_start": loop_check_bottom[1],
                 "exit_pc": exit_pc,
                 "slot": rl[1],
-                "rr": _var_regs[_range_loop_pattern(fn)["target"]],
-                "rb": _var_regs[_range_loop_pattern(fn)["param"]],
+                "rr": rr_bt,
+                "rb": rb_bt,
+                "signed": bool(_signed_bt),
             }
         elif _range_declined:
             # No contract, and the walk is about to refuse this loop's re-entry
