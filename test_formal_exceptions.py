@@ -1251,6 +1251,19 @@ REFUSALS = [
      "    return 0\n",
      "a bare `except:` is a handler arm with a body this path cannot put in "
      "the image"),
+    ("a_try_calling_a_raiser_through_a_local_alias_is_refused",
+     "def boom():\n"
+     "    raise ValueError('x')\n"
+     "\n"
+     "def main(n):\n"
+     "    f = boom\n"
+     "    try:\n"
+     "        f()\n"
+     "    except:\n"
+     "        pass\n"
+     "    print(2)\n"
+     "    return 1\n",
+     "the `try` body calls `boom(…)`"),
 ]
 
 
@@ -1565,21 +1578,3 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-
-def test_try_around_local_alias_of_raising_function_is_refused():
-    src = '''\
-def boom():
-    raise ValueError("x")
-
-def main():
-    f = boom
-    try:
-        f()
-    except:
-        print(1)
-        return 0
-    print(2)
-    return 1
-'''
-    s = formal_compile_string(src)
-    _assert_has_refusal(s, "uncatchable_raise", "boom")

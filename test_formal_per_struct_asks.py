@@ -48,8 +48,8 @@ deletes a table makes them grow too, because the fallback path is the predicate.
 The counts are the assertion rather than a wall clock on purpose — the cost of a
 redundant ask is proportional to the struct's body, so whether it shows up in
 seconds depends on the file, and an ask count is the same fact on every file.
-(`bugs/formal/FORMAL_build_cost_2026-10-03.md` §6.1 has the clock numbers, and they are
-a wash outside the outlier.)
+(The clock numbers for the one-field threading are in the 2026-10-03 build-cost
+measurement, whose doc is in git history; they are a wash outside the outlier.)
 
 No Lean, no build, no sweep: a parse and `_prepare_functions`.
 """

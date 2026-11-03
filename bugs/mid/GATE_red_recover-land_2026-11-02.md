@@ -32,3 +32,25 @@ coercion to the lifted function's parameter type. Next step: coerce each `full_a
 uses; then `make mojoc`, re-enable `mojoc` (`python3 tools/control.py gate on mojoc`), then the three bootstrap jobs.
 Checks run: `compile_stdlib.py` 610 passed / 0 unexpected; `test_gimple_runner.py` 553 passed / 15 failed, the same
 15 as pristine master (551 / 15). The four jobs are still OFF; nothing was re-enabled.
+
+## Status 2026-11-02 (later: `mojoc` builds; the binary then crashes)
+
+The two remaining gcc errors are fixed. Cause: a lifted closure registers its parameter types
+(`func_param_types`) only when its OWN body is generated, and the parent generated its nested closures in plain
+name order, so `_phase17_scan_if_branches` / `_phase17_scan_try_branches` (which sort before the helper they call)
+were lowered before `_phase17_value_type` had a registered signature and passed a `char *` into its `int64_t`
+parameter. `module_gen._gmi_closures_callee_first` now generates a sibling that another sibling calls first (name
+order otherwise, a cycle falls back to name order); the three identical inline `sorted(...)` sites share it.
+`make mojoc` now completes with 0 gcc errors. `compile_stdlib.py` 610 passed / 0 unexpected;
+`test_gimple_runner.py` 554 passed / 15 failed, the same 15 as pristine master.
+
+`mojoc` is re-enabled in THIS doc's OFF entry (`tools/gates.json`). It is still named by the separate underscore
+entry (`GATE_red_recover_land_2026-11-02.md`, the 23-job one), which another worker holds; turn it on there with
+`control.py gate on` when that doc lands.
+
+NEXT (the real remaining blocker for the three bootstrap jobs, which stay OFF): the built binary segfaults on the
+simplest use, `./mojoc FILE.py --dump` on a 20-line program: `EXC_BAD_ACCESS (address=0x9)` in `mojo_dict_len`
+(the `-O2 -g0` binary gives lldb a single frame). That is the corrupt-dict-value class recorded in CLAUDE.md's
+DEBUGGING METHOD. Next step: build with `-g` frame pointers (`MOJO_OPT`), get the caller chain, and bisect the dict
+whose value is a non-dict. The earlier unpack fix (a list slot returns its own word) is a plausible neighbour, not a
+confirmed cause: master's `mojoc` never built, so there is no baseline binary to compare against.

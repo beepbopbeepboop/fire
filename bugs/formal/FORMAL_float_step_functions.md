@@ -128,8 +128,9 @@ three, and every reading in it is a function the two machines' compare
 instructions are asked to implement — but "the model's order is not yet proved to
 be an order" is a statement about the model's completeness and belongs in the file
 rather than in a reader's head.
-## Status, 2026-10-05 (`formal29-2-r2`): the refusal is a REFUSAL now, and the
-## traceback was the whole of what was wrong with it
+## Status, 2026-10-05 (`formal29-2-r2`): the refusal is a REFUSAL now (not traceback) — see 2026-10-31 update below for what's open
+
+**Status 2026-10-31 (this session):** the refusal is a clean `CodegenError` (fixed in master); `lib/IEEE754.lean` present (24 decls, 5 `decide` / 19 `native_decide`, 0 sorry/axiom); `test_formal_admitted.py` documents `NATIVE_DECIDE_ALLOWED`. Step functions (register fields V0..V7 / XMM0..XMM15, decode arms, proof lemmas, float kind in model) remain unimplemented. `FLOAT_CASES` 22/22 == CPython on both backends; proof ON raises `NotImplementedError` at `_expr_go`.
 
 The section above reports the reproducer's ending as "it escapes as a traceback
 rather than a `CodegenError`". **That is fixed, and it was a defect in its own

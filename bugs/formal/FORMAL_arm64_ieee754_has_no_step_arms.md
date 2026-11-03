@@ -5,8 +5,7 @@
 does not fit a bounded worker** — `memcap: BREACH 8.0 GB > 8.0 GB ceiling
 (100%)` at the tree's own `-j 4`, against `lib/Refine.lean`'s 1.2 GB from the
 same call in the same minute (measurement, method and control in
-`FORMAL_arm64_step_cannot_step_nine_wired_encodings.md` §"the build wall is
-CONFIRMED"). Nothing else in this file is blocked and §"The exact next step"
+`lib/ProofLib.lean`'s build: 8.0 GB breach at `-j 4`, vs `lib/Refine.lean`'s 1.2 GB). Nothing else in this file is blocked and §"The exact next step"
 below is unchanged; it needs a worker who can afford the build.
 
 **Status: OPEN. NOT fixed, and the order §"The exact next step" gives is

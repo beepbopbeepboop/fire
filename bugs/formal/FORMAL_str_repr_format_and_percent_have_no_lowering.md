@@ -67,7 +67,7 @@ the five questions above:
   build knows. So for an `Int` or a `String` operand the machinery exists and
   the only thing missing is the CALL. For any other kind it does not: `repr` of
   a `Bool` is `True`/`False`, of a `None` is `None`, of a `float` is
-  shortest-round-trip (`bugs/formal/FORMAL_a_float_has_no_print_spelling.md`), of a
+shortest-round-trip, of a
   container is its elements' (`FORMAL_a_print_of_a_container_needs_a_text_loop.md`),
   of a type is `<class 'int'>`. **`print`'s own per-kind table is therefore the
   right first step for `str`/`repr`, and it is already written** — which is the

@@ -496,7 +496,7 @@ def main(n):
 # The ONE-FIELD half of the same thing, and a different path: a struct of one
 # field has no frame at all, so its value is a word and the dispatch reaches it
 # through the one-word table rather than the holder table.  The old
-# `FORMAL_eq_dispatch_on_a_frame_receiver.md` §1 is the measurement that the
+# eq dispatch behavior is the measurement that the
 # frame-only version of this answer was 0 where CPython says 1.
 #
 # THE COMPARISON IS IN `main`, not behind a call, and that is deliberate rather

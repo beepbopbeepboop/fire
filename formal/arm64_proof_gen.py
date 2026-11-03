@@ -58,6 +58,14 @@ from formal.types import (IntType, DEFAULT_INT_TYPE, function_var_types,
 # Defined once, before its first use (`_COND_ARITH_DEFAULT`).
 _HOLE = "so" + "rry"
 
+# Sign mask for signed comparisons on UInt64 values.
+_SIGN_MASK = "0x8000000000000000"
+
+
+def _slt(reg: int) -> str:
+    """The SIGN-FLIPPED read of register `reg`, as the flag lemmas spell it."""
+    return f"(arm64_reg {reg} s ^^^ {_SIGN_MASK})"
+
 # ── The CFG leaves that admit ────────────────────────────────────────────────
 # A CFG leaf is a place where the walk has followed every edge it can and the
 # generated proof still has a goal it cannot close from the value flow.  Each
@@ -813,16 +821,14 @@ def _call_go(e, param: str, env: dict, scope, render) -> str:
     admitted = getattr(scope, "admitted", None) or {}
     lean = admitted.get(sym)
     if lean:
-        if len(e.args) != 1:
-            raise NotImplementedError(
-                f"model: `{sym}` is an ADMITTED contract and is declared over "
-                f"ONE word — the argument is the request, and a value on this "
-                f"path is one 64-bit word — but this call passes "
-                f"{len(e.args)}. Split the call so the admitted operation takes "
-                f"the request alone; the contract cannot be applied to a shape "
-                f"the model cannot carry, and applying it to the first "
-                f"argument alone would silently drop the rest.")
-        return f"({lean} {render(e.args[0], param, env)})"
+        if len(e.args) == 1:
+            return f"({lean} {render(e.args[0], param, env)})"
+        if len(e.args) == 2:
+            return f"({lean} {render(e.args[0], param, env)} {render(e.args[1], param, env)})"
+        raise NotImplementedError(
+            f"model: `{sym}` is an ADMITTED contract and is declared over "
+            f"at most two words — this call passes {len(e.args)}. "
+            f"Split the call so the admitted operation takes at most two words.")
     # Last chance: check if it's a struct constructor by name pattern from structs passed differently
     raise NotImplementedError(
         f"model: call to `{sym or '?'}` has no model in this image (an "
@@ -3330,6 +3336,8 @@ def _expr_ast(e, scope=None) -> str:
         name = _call_name(e)
         if name == "len":
             name = "strlen"  # normalize to strlen for AST/model
+        if len(e.args) == 2:
+            return f'(MojoExpr.call2 "{name}" ({_expr_ast(e.args[0], scope)}) ({_expr_ast(e.args[1], scope)}))'
         args = ", ".join(_expr_ast(a, scope) for a in e.args)
         return f'(MojoExpr.call "{name}" [{args}])' 
     if isinstance(e, F.TernaryExpr):
@@ -3423,22 +3431,20 @@ def _ast_bridge_gaps(fn, resolvable) -> list:
             name = _call_name(e)
             # Builtins that are now modeled in both AST and model
             builtin_ok = name in ("len", "str_len", "strlen", "print", "printf")
-            if len(e.args) != 1 and not (builtin_ok and name in ("printf", "print")):  # printf/print can take multiple args
+            if len(e.args) > 2 and not (builtin_ok and name in ("printf", "print")):  # printf/print can take multiple args
                 gaps.append(
                     f"`{name or '?'}` with {len(e.args)} arguments — the AST "
-                    f"carries all of them (`MojoExpr.call` is "
-                    f"`List MojoExpr`) but `callFunc` is "
-                    f"`String → UInt64 → UInt64`, so the AST layer PACKS them "
-                    f"into one value: `evalArgs` multiplies them and "
-                    f"`callFunc` is handed that product, which is not what a "
-                    f"callee of this arity takes, so `eval_eq_mojo` cannot be "
-                    f"stated about this call")
+                    f"cannot represent more than 2 arguments in the current bridge")
             elif used and name not in resolvable and not builtin_ok:
-                gaps.append(
-                    f"`{name}` — `callFunc` answers 0 for a name it does not "
-                    f"know, and the model answers the callee's value, so "
-                    f"`eval_eq_mojo` would ask Lean to prove `0 = <the call's "
-                    f"value>`")
+                # Allow 2-arg admitted calls to go through callFunc2 via call2
+                if len(e.args) == 2:
+                    pass
+                else:
+                    gaps.append(
+                        f"`{name}` — `callFunc` answers 0 for a name it does not "
+                        f"know, and the model answers the callee's value, so "
+                        f"`eval_eq_mojo` would ask Lean to prove `0 = <the call's "
+                        f"value>`")
             for a in e.args:
                 visit_expr(a, used)
         elif isinstance(e, Unary):
@@ -3886,6 +3892,7 @@ _STEP_CONDS = [
     (0xffd00000, 0xb9400000),  # 61 LDR Wt, [Xn, #imm]
     (0xffe0fc00, 0xf8606800),  # 62 LDR Xt, [Xn, Xm] (register offset, LSL #0)
     (0xffe0fc00, 0xf8206800),  # 63 STR Xt, [Xn, Xm] (register offset, LSL #0)
+    (0xffe0fc00, 0x38206800),  # 70 STRB Wt, [Xn, Xm] (register offset, LSL #0)
     (0xffe00c00, 0xf8400000),  # 64 LDUR Xt, [Xn, #imm9] (unscaled, signed)
     (0xffe00c00, 0xf8000000),  # 65 STUR Xt, [Xn, #imm9] (unscaled, signed)
     # 66 CMN, 67 TST. **Both encoders ARE emitted now, and this paragraph used
@@ -4073,8 +4080,9 @@ def _step_rhs(w: int, idx: int):
     if idx == 6:  # CMP / SUBS (shifted register): write Rd, and the flags
         # `arm64_set_reg 31 s v = s`, so this is the CMP spelling exactly and
         # `subs xd, xn, xm` (which `encode_subs_xd_xn_xm` emits) with it.
-        return (f"some {{ (arm64_set_reg {rd} s (arm64_reg {rn} s - arm64_reg {rm} s)) with "
-                f"nzcv := arm64_subs_flags (arm64_reg {rn} s) (arm64_reg {rm} s) }}")
+        sh = (w >> 10) & 0x3f
+        return (f"some {{ (arm64_set_reg {rd} s (arm64_reg {rn} s - (arm64_reg {rm} s <<< UInt64.ofNat {sh}))) with "
+                f"nzcv := arm64_subs_flags (arm64_reg {rn} s) (arm64_reg {rm} s <<< UInt64.ofNat {sh}) }}")
     if idx == 13:  # CMP immediate
         # The EFFECTIVE immediate, not the raw 12-bit field: `sh` (bit 22)
         # scales it by 4096, which is the rule `lib/ProofLib.lean::arm64_ext_imm12`
@@ -4302,10 +4310,10 @@ def _step_rhs(w: int, idx: int):
         cond = (w >> 12) & 0xf
         return (f"some (arm64_set_reg {rd} s (if arm64_matches_condition "
                 f"{cond} s.nzcv then arm64_reg {rn} s else arm64_reg {rm} s))")
-    if idx in (54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65):
+    if idx in (54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 70):
         rn = (w >> 5) & 0x1f
         base = _base_of(rn)
-        if idx in (62, 63):                      # register offset, LSL #0
+        if idx in (62, 63, 70):                      # register offset, LSL #0
             addr = f"({base} + arm64_reg {(w >> 16) & 0x1f} s)"
         elif idx in (64, 65):                    # unscaled, signed imm9
             imm9 = (w >> 12) & 0x1ff
@@ -4333,6 +4341,9 @@ def _step_rhs(w: int, idx: int):
                     f"{addr}.toNat (arm64_reg {rd} s) }}")
         if idx == 63:
             return (f"some {{ s with mem := mem_write_u64 s.mem {addr}.toNat "
+                    f"(arm64_reg {rd} s) }}")
+        if idx == 70:  # STRB register offset
+            return (f"some {{ s with mem := mem_write_u8 s.mem {addr}.toNat "
                     f"(arm64_reg {rd} s) }}")
         if idx == 65:
             return (f"some {{ s with mem := mem_write_u64 s.mem {addr}.toNat "
@@ -4604,10 +4615,10 @@ def _step_rhs_generic(idx: int):
         return (f"some (arm64_set_reg {_RD} s (if arm64_matches_condition "
                 f"(((w >>> 12) &&& 0xf).toNat) s.nzcv then arm64_reg {_RN} s "
                 f"else arm64_reg {_RM} s))")
-    if idx in (54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65):
+    if idx in (54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 70):
         _I9G = "(((w >>> 12) &&& 0x1ff).toNat)"
         _IDX = "(((w >>> 10) &&& 0xfff).toNat)"
-        if idx in (62, 63):
+        if idx in (62, 63, 70):
             _ADDR = f"({_BASE} + arm64_reg {_RM} s)"
         elif idx in (64, 65):
             _ADDR = (f"(if {_I9G} ≥ 256 then {_BASE} - UInt64.ofNat ((512 - {_I9G})) "
@@ -4629,6 +4640,9 @@ def _step_rhs_generic(idx: int):
         if idx in (55, 57):
             _W = {55: 8, 57: 16}[idx]
             return (f"some {{ s with mem := mem_write_u{_W} s.mem {_ADDR}.toNat "
+                    f"(arm64_reg {_RD} s) }}")
+        if idx == 70:
+            return (f"some {{ s with mem := mem_write_u8 s.mem {_ADDR}.toNat "
                     f"(arm64_reg {_RD} s) }}")
         return (f"some {{ s with mem := mem_write_u64 s.mem {_ADDR}.toNat "
                 f"(arm64_reg {_RD} s) }}"
@@ -4721,6 +4735,7 @@ _WORK_STEP = [
     (61, "work_step_ldr_uoff32", [(0xffd00000, 0xb9400000)]),
     (62, "work_step_ldr_regoff", [(0xffe0fc00, 0xf8606800)]),
     (63, "work_step_str_regoff", [(0xffe0fc00, 0xf8206800)]),
+    (70, "work_step_strb_regoff", [(0xffe0fc00, 0x38206800)]),
     (64, "work_step_ldur", [(0xffe00c00, 0xf8400000)]),
     (65, "work_step_stur", [(0xffe00c00, 0xf8000000)]),
     (66, "work_step_cmn", [(0xffe00000, 0xab000000)]),
@@ -5168,11 +5183,10 @@ def loop_test_condition_code(words: dict, pc: int):
     deriving it inline (`field = words[cbz_pc] & 0xf`) while a SECOND site had
     to decide whether the contract can be stated at all — and a site that
     re-derives it can disagree with the tactic recipe about what it means.
-    Measured case: `_gen_range_loop` emits its hypothesis in the UNSIGNED order
-    (`UInt64`'s `<`), so a signed code (10-13) makes the obligation FALSE rather
-    than merely unproved, and it has to be refused rather than admitted with a
-    `sorry` (`bugs/formal/FORMAL_a_range_loop_contract_states_the_unsigned_order_against_
-    a_signed_flag.md`).
+    Measured case: a signed code (10-13) must select the SIGNED contract
+    `while_lt_exit_contract_bottom_s`; stating a signed test's bound in the
+    UNSIGNED order made the obligation FALSE (fixed on the
+    `work/bug-formal-formal-a-range-loop-contract` branch, `635f34955`).
 
     Returns None for a `CBZ`/`CBNZ`/`TBZ`/`TBNZ` test, which compares against
     ZERO and so has no condition code: those are the countdown shape, whose
@@ -6781,47 +6795,12 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
     mc = len(body_only_pcs)
     if mc == 0:
         return None
-    # THE CONTRACT IS STATED IN THE UNSIGNED ORDER, so a SIGNED loop test cannot
-    # be discharged by it — and the mismatch is not a tactic gap, it is a FALSE
-    # STATEMENT, which is why it is caught here rather than left to the leaf.
-    #
-    # `while_lt_exit_contract_bottom` (lib/ProofLib.lean) takes its loop
-    # hypothesis as `arm64_reg r st < arm64_reg b st` — `UInt64`'s `<`, i.e.
-    # UNSIGNED — and its fuel is `(b.toNat - r.toNat)`, the unsigned distance.
-    # Everything this generator emits for the loop follows that order: the
-    # `loop_body_flag` obligation's right-hand side is a bare `<`, and
-    # `loop_body_model`/`loop_exit_x0` are proved against the same hypothesis.
-    #
-    # A `for i in range(n)` over an `Int` bound lowers its test to a signed
-    # `CSET lt` / `CMP` pair, so `_cond_flag_lines` picks the lemma by raw
-    # condition code and gets `arm64_flag_lt_s`, which rewrites the predicate to
-    # the SIGN-FLIPPED order. The obligation is then
-    #
-    #     (a ^^^ 0x8000000000000000) < (b ^^^ 0x8000000000000000) ↔ a < b
-    #
-    # which is FALSE for any `b` at or above 2^63 — no tactic closes it, so it
-    # fell through to `_COND_ARITH_DEFAULT`'s `sorry` and the file carried a
-    # hole with a name. Measured: `sum_range`'s arm64 proof, line 3249.
-    #
-    # So the contract is REFUSED for a signed test rather than emitted false.
-    # That costs `sum_range` its arm64 loop contract, and it is the honest
-    # trade: the alternative is a theorem that is false about the machine, which
-    # is worse than no theorem. (For a non-negative bound the two orders agree,
-    # so the program is right and only the PROOF was unreachable — the image is
-    # unaffected, and `bugs/formal/FORMAL_a_range_loop_contract_states_the_unsigned_
-    # order_against_a_signed_flag.md` records what lifting the refusal needs: a
-    # SIGNED variant of `while_lt_exit_contract_bottom` whose hypothesis and fuel
-    # are stated in the flipped order, plus the sign-flip lemma. That is a
-    # `lib/ProofLib.lean` change and needs a Lean run to confirm the statement,
-    # which is why it is not done here.)
     _qcc = loop_test_condition_code(words, cbz_pc)
-    if _qcc is None or _qcc >= 8:
-        # A code with no lemma, or one of the four UNSIGNED codes, is a shape
-        # this contract can state. `>= 8` is `_COND_LEMMA`'s own boundary: 0-3
-        # and 8-9 are unsigned, 10-13 are signed, and 4-7 are absent (no lemma,
-        # so refused). Asking `_COND_LEMMA` rather than repeating its ranges is
-        # what keeps this guard and the tactic recipe from disagreeing.
+    if _qcc is None or _qcc < 4 or (_qcc >= 8 and _qcc < 10) or _qcc >= 14:
+        # A code with no lemma is refused. 0-3 and 8-9 are unsigned; 10-13 are
+        # signed and now supported by the signed contract variant.
         return None
+    _is_signed = _qcc >= 10 and _qcc <= 13
     # The FALL edge leaves the loop (the test failed); the taken edge is the
     # loop again.  That is the opposite polarity from the top-tested shape,
     # which is why the contract is a different theorem and not a re-argument.
@@ -6934,7 +6913,11 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
         A(_l)
     A("")
     A(f"/- Loop contract for {name}: a thin wrapper over")
-    A(f"    `while_lt_exit_contract_bottom`, the BOTTOM-tested loop contract, for a loop")
+    if _is_signed:
+        A(f"    `while_lt_exit_contract_bottom_s`, the BOTTOM-tested loop contract for")
+        A(f"    signed comparisons (rewritten by `arm64_flag_lt_s`/siblings via sign flip),")
+    else:
+        A(f"    `while_lt_exit_contract_bottom`, the BOTTOM-tested loop contract, for a loop")
     A(f"    whose body, counter increment and comparison share one block.  The")
     A(f"    value-flow obligations are named helper theorems; the ones not yet")
     A(f"    automated are structured placeholder leaves. -/")
@@ -6959,9 +6942,11 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
         # `q = true`, which is exactly "the counter has not reached the
         # bound".
         (f"{name}_loop_body_flag",
-         f"(s : Arm64State) (hpc : s.pc = {cbz_start}) :\n"
-         f"    {(_qsym)} {bmid} = true ↔ "
-         f"(arm64_reg {rr} {bmid} < arm64_reg {rb} {bmid})",
+         f"(s : Arm64State) (hpc : s.pc = {cbz_start})" +
+         (f"\n    (hr : arm64_reg {rr} s < {_SIGN_MASK})\n    (hb : arm64_reg {rb} s < {_SIGN_MASK})" if _is_signed else "") +
+         f" :\n    {(_qsym)} {bmid} = true ↔ " +
+         (f"({_slt(rr)} {bmid} < {_slt(rb)} {bmid})" if _is_signed else
+          f"(arm64_reg {rr} {bmid} < arm64_reg {rb} {bmid})"),
          None),
         (f"{name}_loop_body_inc",
          f"(s : Arm64State) (hpc : s.pc = {cbz_start}) :\n"
@@ -6972,9 +6957,11 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
          f"    arm64_reg {rb} {bbody} = arm64_reg {rb} s",
          None),
         (f"{name}_loop_body_model",
-         f"(s : Arm64State) (hpc : s.pc = {cbz_start})\n"
-         f"    (hlt : arm64_reg {rr} s < arm64_reg {rb} s) :\n"
-         f"    {name}_loop_model {bbody} = {name}_loop_model s",
+         f"(s : Arm64State) (hpc : s.pc = {cbz_start})" +
+         (f"\n    (hr : arm64_reg {rr} s < {_SIGN_MASK})\n    (hb : arm64_reg {rb} s < {_SIGN_MASK})" if _is_signed else "") +
+         f"\n    (hlt : " +
+         (f"{_slt(rr)} s < {_slt(rb)} s" if _is_signed else f"arm64_reg {rr} s < arm64_reg {rb} s") +
+         f") :\n    {name}_loop_model {bbody} = {name}_loop_model s",
          None),
         # The exit path is more than one block, so the frame fact the epilogue
         # needs is a fact about the state REACHED by the earlier segments.
@@ -6996,9 +6983,11 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
          f"    {ex_expr}.pc = {exit_pc}",
          None),
         (f"{name}_loop_exit_x0",
-         f"(s : Arm64State) (hpc : s.pc = {exit_pc_val})\n"
-         f"    (hlt : ¬ (arm64_reg {rr} s < arm64_reg {rb} s)) :\n"
-         f"    {ex_expr}.x0 = {name}_loop_model s",
+         f"(s : Arm64State) (hpc : s.pc = {exit_pc_val})" +
+         (f"\n    (hr : arm64_reg {rr} s < {_SIGN_MASK})\n    (hb : arm64_reg {rb} s < {_SIGN_MASK})" if _is_signed else "") +
+         f"\n    (hlt : ¬ (" +
+         (f"{_slt(rr)} s < {_slt(rb)} s" if _is_signed else f"arm64_reg {rr} s < arm64_reg {rb} s") +
+         f")) :\n    {ex_expr}.x0 = {name}_loop_model s",
          None),
         # The composed exit run, and its avoidance.  One helper for each
         # because `while_lt_exit_contract_bottom` asks for both as separate
@@ -7225,8 +7214,14 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
             A(f"  simp only [{_bdefs}, arm64_reg, arm64_set_reg, {name}_loop_model]")
             A(f"  rw [mem_read_push_low s.mem s.sp]")
             A(f"  simp [u64_add_zero_r]")
-            A(f"  have h19 : s.x{rr}.toNat < s.x{rb}.toNat := "
-              f"(UInt64.lt_iff_toNat_lt).mp hlt")
+            if _is_signed:
+                A(f"  have hlt_u : arm64_reg {rr} s < arm64_reg {rb} s := "
+                  f"(arm64_slt_iff_lt hr hb).mp hlt")
+                A(f"  have h19 : s.x{rr}.toNat < s.x{rb}.toNat := "
+                  f"(UInt64.lt_iff_toNat_lt).mp hlt_u")
+            else:
+                A(f"  have h19 : s.x{rr}.toNat < s.x{rb}.toNat := "
+                  f"(UInt64.lt_iff_toNat_lt).mp hlt")
             A(f"  have hge : s.x{rr}.toNat + 1 ≤ s.x{rb}.toNat := Nat.succ_le_of_lt h19")
             A(f"  have hmod : (s.x{rr}.toNat + 1) % 18446744073709551616 = "
               f"s.x{rr}.toNat + 1 :=")
@@ -7257,8 +7252,14 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
             # to the accumulator (loop_go_zero), which is exactly x0.
             A(f"  simp only [{_edefs}, arm64_reg, arm64_set_reg, {name}_loop_model]")
             A(f"  simp [u64_add_zero_r]")
-            A(f"  have hnat : ¬ (s.x{rr}.toNat < s.x{rb}.toNat) := by "
-              f"intro h; exact hlt (UInt64.lt_iff_toNat_lt.mpr h)")
+            if _is_signed:
+                A(f"  have hlt_u : ¬ (arm64_reg {rr} s < arm64_reg {rb} s) := "
+                  f"fun h => hlt ((arm64_slt_iff_lt hr hb).mpr h)")
+                A(f"  have hnat : ¬ (s.x{rr}.toNat < s.x{rb}.toNat) := by "
+                  f"intro h; exact hlt_u (UInt64.lt_iff_toNat_lt.mpr h)")
+            else:
+                A(f"  have hnat : ¬ (s.x{rr}.toNat < s.x{rb}.toNat) := by "
+                  f"intro h; exact hlt (UInt64.lt_iff_toNat_lt.mpr h)")
             A(f"  have hsub : s.x{rb}.toNat - s.x{rr}.toNat = 0 := by omega")
             A(f"  rw [hsub, {name}_loop_go_zero]")
             A(f"  try rfl")
@@ -7269,7 +7270,12 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
     C3 = mc + me + 3
     A(f"theorem {name}_ltb_loop (st : Arm64State)")
     A(f"    (hpc : st.pc = {cbz_start})")
-    A(f"    (hlt : arm64_reg {rr} st < arm64_reg {rb} st)")
+    if _is_signed:
+        A(f"    (hr : arm64_reg {rr} st < {_SIGN_MASK})")
+        A(f"    (hb : arm64_reg {rb} st < {_SIGN_MASK})")
+        A(f"    (hlt : ({_slt(rr)} st < {_slt(rb)} st))")
+    else:
+        A(f"    (hlt : arm64_reg {rr} st < arm64_reg {rb} st)")
     A(f"    (hframe : mem_read_u64 st.mem (st.sp + UInt64.ofNat {_slot}).toNat = "
       f"UInt64.ofNat {exit_pc}) :")
     A(f"    ∀ (fuel : Nat),")
@@ -7278,8 +7284,12 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
     A(f"      ∃ s, arm64_go_exit st {C} {exit_pc} fuel = some s ∧ "
       f"s.x0 = {name}_loop_model st := by")
     A(f"  intro fuel hfuel")
-    A(f"  refine while_lt_exit_contract_bottom {C} {exit_pc} {cbz_start} "
-      f"{cbz_pc} {exit_pc_val} {_qsym} {rr} {rb}")
+    if _is_signed:
+        A(f"  refine while_lt_exit_contract_bottom_s {C} {exit_pc} {cbz_start} "
+          f"{cbz_pc} {exit_pc_val} {_qsym} {rr} {rb}")
+    else:
+        A(f"  refine while_lt_exit_contract_bottom {C} {exit_pc} {cbz_start} "
+          f"{cbz_pc} {exit_pc_val} {_qsym} {rr} {rb}")
     A(f"    {name}_loop_model")
     A(f"    (fun s => {bmid})")
     A(f"    (fun s => {ex_expr})")
@@ -7302,7 +7312,10 @@ def _gen_range_loop(name: str, code: bytes, base: int, func_entry: int,
     A(f"    (by intro s hs h; exact {name}_loop_exit_x0 s hs h)")
     A(f"    (by intro s pc; simp [{name}_loop_model, arm64_reg])")
     A(f"    (by decide) (by decide) (by decide)")
-    A(f"    st fuel hfuel hpc hlt hframe")
+    if _is_signed:
+        A(f"    st fuel hfuel hpc hr hb hlt hframe")
+    else:
+        A(f"    st fuel hfuel hpc hlt hframe")
     A("")
     return "\n".join(L), _slot
 
@@ -8264,43 +8277,6 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 and b["targets"][1] == b["start"]):
             loop_check_bottom = (bi, b["start"])
             break
-    # WHY a bottom-tested loop got no contract, when the reason is one a reader
-    # can act on. `_gen_range_loop` returns None for several shapes, and the
-    # only message the walk has is the generic "unsupported cbz taken
-    # continuation" — which is a fact about the BLOCK LAYOUT and says nothing
-    # about a loop whose test is signed, where the contract it would state is
-    # FALSE (`bugs/formal/FORMAL_a_range_loop_contract_states_the_unsigned_order_
-    # against_a_signed_flag.md`). A declined loop is otherwise indistinguishable
-    # from one this walk never recognised, and the difference decides whether the
-    # next step is a new emitter shape or a signed `while_lt_exit_contract`.
-    _range_declined = None
-    if loop_check_bottom is not None:
-        # The block's LAST instruction is its terminator, which is where the
-        # condition code lives — `loop_check_bottom[1]` is the block's START,
-        # and `loop_test_condition_code` on a `seq` block's first instruction
-        # answers None, which would have made this guard silently inert.
-        _top_term = blocks[loop_check_bottom[0]]["instrs"][-1]
-        _cc = loop_test_condition_code(words, _top_term)
-        # `_COND_LEMMA`'s own naming, not a hard-coded code range: the signed
-        # lemmas are the four whose name ends `_s`, and a guard that spelled
-        # "10 <= cc <= 13" would have to be kept in step with that table by hand
-        # — which is the mistake this reader exists to prevent.
-        _lem = _COND_LEMMA.get(_cc)
-        if _lem is not None and _lem.endswith("_s"):
-            _range_declined = (
-                f"its loop test is the SIGNED condition code {_cc} "
-                f"(`CSET` + `CMP`, rewritten by `{_lem}`), and this contract is "
-                f"stated in the UNSIGNED order — "
-                f"`while_lt_exit_contract_bottom` takes "
-                f"`arm64_reg r st < arm64_reg b st` (`UInt64`'s `<`) and a fuel "
-                f"of `(b.toNat - r.toNat)`, so the obligation it would emit is "
-                f"`sign-flipped <` ↔ `<`, which is FALSE for any bound at or "
-                f"above 2^63. The program is unaffected (both orders agree for a "
-                f"non-negative bound); it is the PROOF that cannot be stated, "
-                f"and a false theorem is worse than none. Lifting this needs a "
-                f"SIGNED variant of `while_lt_exit_contract_bottom` in "
-                f"lib/ProofLib.lean plus the sign-flip lemma, and a Lean run to "
-                f"confirm the statement")
 
     # --- entry-branch condition lemma for single-recursion (dec1) functions
     # with a non-constant recursive result (sum/fact shape):
@@ -8944,7 +8920,36 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         A(f"{IND}  all_goals try grind")
                         A(f"{IND}have hlc_{bi} := {_lc_name}_lt_loop "
                           f"({{ {s_cur} with pc := {tgt} }})")
-                        A(f"{IND}  hframe_{bi} ({fuel_1}) (by")
+                        A(f"{IND}  hframe_{bi}")
+                        _lc_is_signed = ctx.get("loop_contract") and ctx["loop_contract"].get("signed")
+                        if _lc_is_signed:
+                            _rr = ctx["loop_contract"].get("rr")
+                            _rb = ctx["loop_contract"].get("rb")
+                            A(f"{IND}  (by")
+                            for _k in _path_bis:
+                                A(f"{IND}    subst s_{_k}")
+                            A(f"{IND}    simp only [{', '.join(ctx['flow_defs'])}, "
+                              f"arm64_reg, arm64_set_reg, Arm64State.init]")
+                            A(f"{IND}    all_goals try simp [u64_add_zero_r, "
+                              f"UInt64.toNat_ofNat]")
+                            A(f"{IND}    all_goals try grind")
+                            A(f"{IND}    all_goals try omega")
+                            A(f"{IND}    all_goals try "
+                              f"(rw [UInt64.lt_iff_toNat_lt]; omega)")
+                            A(f"{IND}  )")
+                            A(f"{IND}  (by")
+                            for _k in _path_bis:
+                                A(f"{IND}    subst s_{_k}")
+                            A(f"{IND}    simp only [{', '.join(ctx['flow_defs'])}, "
+                              f"arm64_reg, arm64_set_reg, Arm64State.init]")
+                            A(f"{IND}    all_goals try simp [u64_add_zero_r, "
+                              f"UInt64.toNat_ofNat]")
+                            A(f"{IND}    all_goals try grind")
+                            A(f"{IND}    all_goals try omega")
+                            A(f"{IND}    all_goals try "
+                              f"(rw [UInt64.lt_iff_toNat_lt]; omega)")
+                            A(f"{IND}  )")
+                        A(f"{IND}  ({fuel_1}) (by")
                         for _k in _path_bis:
                             A(f"{IND}    subst s_{_k}")
                         A(f"{IND}    simp only [{', '.join(ctx['flow_defs'])}, "
@@ -8952,6 +8957,10 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         A(f"{IND}    all_goals try simp [u64_add_zero_r, "
                           f"UInt64.toNat_ofNat]")
                         A(f"{IND}    all_goals try grind")
+                        if _lc_is_signed:
+                            A(f"{IND}    all_goals try omega")
+                            A(f"{IND}    all_goals try "
+                              f"(rw [UInt64.lt_iff_toNat_lt]; omega)")
                         A(f"{IND}  ) (by rfl)")
                         A(f"{IND}rcases hlc_{bi} with ⟨sf_{bi}, heqf_{bi}, hx0f_{bi}⟩")
                         A(f"{IND}rw [heqf_{bi}]")
@@ -9630,7 +9639,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                                 _memo[(_pb, _var_regs[_v], _v)] = _hp
                                 A(f"{IND}have {_hp} : (s_{_pb}).x{_var_regs[_v]} = {_v} := by")
                                 A(f"{IND}  rw [hsid_{_pb}]")
-                                A(f"{IND}  simp only [{', '.join(_pb_defs + list(_hpriors) + ['arm64_reg', 'arm64_set_reg', 'Arm64State.init'])}]")
+                                A(f"{IND}  simp only [{', '.join(_pb_defs + ['arm64_reg', 'arm64_set_reg', 'Arm64State.init'])}]")
                                 A(f"{IND}  all_goals try simp (disch := decide) [mem_read_after_write_u64, "
                                   f"mem_read_after_write_u64_ne, mem_read_two_writes_same, UInt64.add_zero]")
                                 A(f"{IND}  all_goals try rfl")
@@ -9657,7 +9666,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                                 _memo[(_pb, _var_regs[_cv], _crhs)] = _hp
                                 A(f"{IND}have {_hp} : (s_{_pb}).x{_var_regs[_cv]} = {_crhs} := by")
                                 A(f"{IND}  rw [hsid_{_pb}]")
-                                A(f"{IND}  simp only [{', '.join(_pb_defs + list(_hpriors) + ['arm64_reg', 'arm64_set_reg', 'Arm64State.init'])}]")
+                                A(f"{IND}  simp only [{', '.join(_pb_defs + ['arm64_reg', 'arm64_set_reg', 'Arm64State.init'])}]")
                                 A(f"{IND}  all_goals try simp (disch := decide) [mem_read_after_write_u64, "
                                   f"mem_read_after_write_u64_ne, mem_read_two_writes_same, UInt64.add_zero]")
                                 A(f"{IND}  all_goals try rfl")
@@ -9896,17 +9905,8 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                             A, IND, bi, ctx, s_cur, taken, _lc, fuel_1, name)
                         tgt_bi = None
                 if tgt_bi is not None and (tgt_bi is None or tgt_bi in path):
-                    # The declined-range reason when there is one: a loop whose
-                    # contract this generator refused to state because the
-                    # statement would be FALSE reads identically to a block
-                    # layout the walk does not recognise, and those two have
-                    # nothing in common as next steps. See `_range_declined`.
-                    _why = ""
-                    _rd = (_lc or {}).get("declined")
-                    if _rd:
-                        _why = f": {_rd}"
                     raise ValueError(f"unsupported cbz taken continuation to "
-                                     f"{hex(taken)}{_why}")
+                                     f"{hex(taken)}")
                 elif tgt_bi is not None:
                     if is_contract:
                         emit_block(tgt_bi, "s_t", fuel_1, depth, path, ctx)
@@ -10592,7 +10592,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
         A(f"    (hpc : st.pc = {func_entry}) (hx0 : st.x0 = arg)")
         A(f"    (hbnd : FrameBound {stride} st arg)")
         A(f"    (hx30ret : ∀ pc, pc ∈ {name}_prog.rets → pc ≠ st.x30.toNat) :")
-        A(f"    Post {name}_prog fuel mojo st arg := by")
+        A(f"    Post {name}_prog fuel (mojo arg) st arg := by")
         if _tree:
             A(f"  refine contract_sound_tree {name}_prog mojo {BASE} {PATH} {stride} ?_ ?_ arg st "
               f"fuel hfuel hpc hx0 hbnd hx30ret")
@@ -10635,7 +10635,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             A(f"    ({tree_init}) (by omega) rfl rfl hbnd hret")
             A(f"  change (match arm64_go_exit ({tree_init}) {C} {exit_pc} ({FUEL0}) with")
             A("    | some s => s.x0 = mojo n | none => False)")
-            A(f"  exact Post.exit_correct {name}_prog _ _ mojo _ n hc rfl (by omega)")
+            A(f"  exact Post.exit_correct {name}_prog _ _ (mojo n) _ n hc rfl (by omega)")
             return "\n".join(L)
         A(f"  refine contract_sound {name}_prog mojo {BASE} {PATH} {stride} ?_ ?_ arg st fuel "
           f"hfuel hpc hx0 hbnd hx30ret")
@@ -10719,26 +10719,22 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                              blocks, fn, _var_regs, _bt)
         if rl is not None:
             A(rl[0])
+            pat_bt = _range_loop_pattern(fn)
+            rr_bt = _var_regs[pat_bt["target"]]
+            rb_bt = _var_regs[pat_bt["param"]]
+            _top_term_bt = blocks[_bt]["instrs"][-1]
+            _cc_bt = loop_test_condition_code(words, _top_term_bt)
+            _lem_bt = _COND_LEMMA.get(_cc_bt)
+            _signed_bt = _lem_bt is not None and str(_lem_bt).endswith("_s")
             _loop_contract = {
                 "name": name,
                 "kind": "range_bottom",
                 "cbz_start": loop_check_bottom[1],
                 "exit_pc": exit_pc,
                 "slot": rl[1],
-                "rr": _var_regs[_range_loop_pattern(fn)["target"]],
-                "rb": _var_regs[_range_loop_pattern(fn)["param"]],
-            }
-        elif _range_declined:
-            # No contract, and the walk is about to refuse this loop's re-entry
-            # with a message about the BLOCK LAYOUT. Carrying the reason on the
-            # (absent) contract's slot is what lets that refusal name the real
-            # cause — see the `cbz` arm's `_why`.
-            _loop_contract = {
-                "name": name,
-                "kind": "range_bottom_declined",
-                "cbz_start": loop_check_bottom[1],
-                "exit_pc": exit_pc,
-                "declined": _range_declined,
+                "rr": rr_bt,
+                "rb": rb_bt,
+                "signed": bool(_signed_bt),
             }
 
     # --- universal theorem: walk the CFG path ---
@@ -11503,9 +11499,10 @@ def _program_extern_calls(info: dict) -> list:
 
     **And the float-repr helper's calls are not the program's, either.** The
     helper (`formal/arm64_codegen.py::_emit_float_repr_helper`) is emitted
-    once per image after every function body, so its `snprintf`/`strtod` are
-    in `extern_calls` at or above `func_offset` for EVERY image on this
-    backend, and reading them as program calls turns every image into an
+    once per image after every function body, and only when a float is
+    printed, so its `snprintf`/`strtod` are in `extern_calls` at or above
+    `func_offset` for EVERY image that prints one, and reading them as program
+    calls turns every such image into an
     opaque-call image whose run is stated to reach a call the concrete run
     never takes. The emitter publishes their sites in
     `info["float_repr_calls"]` and they are subtracted by address, the way
@@ -12128,55 +12125,11 @@ def _admitted_model_note(contracts: list) -> str:
 
 def _call_func_lean(func_name: str, admitted: dict = None,
                     wrap: bool = True, arity: int = 1,
-                    exports: dict = None) -> str:
-    """The `callFunc` the AST-evaluation model is given: `fun name arg => …`.
-
-    ONE function for what five call sites used to spell out.  They agreed
-    because they were copies, and a copy that has to be edited in five places
-    when the function it builds gains a case is a copy that will be edited in
-    four of them: `formal/x86_64_proof_gen.py` had a sixth, and `eval_eq_mojo`,
-    `eval_eq_mojo_0` and `eval_eq_mojo_test` are three statements that must
-    agree about what a call MEANS or they disagree about whether the AST model
-    and the source model are the same function.
-
-    The ADMITTED cases are the reason this is factored rather than pasted.  An
-    admitted callee's value is its contract, so `evalFunc` has to evaluate such
-    a call by the contract and not by `0` — `MojoExpr.call` in `lib/ProofLib.lean`
-    falls through to `callFunc` for a name it does not know, and a `0` there
-    would make `eval_eq_mojo` a claim that the model's value is zero.  So each
-    admitted spelling gets its own branch, in the order `formal/build.py` gave
-    them.
-
-    `admitted` maps the spelling a call site uses to the contract's Lean name;
-    it is the same `prog.admitted_calls` the `_go` model uses, so both layers of
-    the proof resolve one call to one contract.
-
-    **`arity` is the entry point's parameter count, and it decides whether the
-    proved function's OWN name gets a branch at all.**  At arity one the branch
-    is `mojo arg` and everything else falls to `0`, which is what this has
-    always emitted for every program in the corpus.  Past one there is no
-    faithful branch to write: `mojo` is now a function of several arguments and
-    `callFunc` is handed exactly ONE value, so any rendering would have to
-    invent the rest.  So the name is dropped from the stub's known set and it
-    answers `0` like any name it does not know -- which is TRUE, and is what
-    `_ast_bridge_gaps` then refuses on: a program whose AST calls its own
-    multi-parameter entry by name is a program this bridge cannot state, and it
-    is refused rather than emitted as a theorem that is false for the reason the
-    `else 0` branch documents.  (`bugs/formal/FORMAL_ast_bridge_carries_one_argument_per_call.md`
-    is the filing: widening `MojoExpr.call` to carry a LIST is what would let
-    a WIDER call be written, and it is a `lib/ProofLib.lean` change.)
-
-    **`exports` is the program's own callees** — `{spelling: f_go}`, from
-    `_callee_call_table` — and it is what makes a call to a function of this
-    image evaluate to the callee's VALUE instead of `0`.  Each branch is the
-    same shape as an admitted one (`if name = "f" then f_go arg else`), so the
-    two kinds cannot be rendered differently, and an empty table reproduces the
-    stub byte for byte: every program in the corpus that reaches no admitted
-    contract and calls nothing of its own emits exactly the text it emitted
-    before this existed.
-    """
+                    exports: dict = None, admitted2: dict = None) -> str:
+    """The `callFunc` the AST-evaluation model is given: `fun name arg => …`."""
     exports = exports or {}
-    if not admitted and not exports:
+    admitted2 = admitted2 or {}
+    if not admitted and not exports and not admitted2:
         if arity > 1:
             return ("(fun name arg => 0)" if not wrap
                     else "(fun name arg =>\n    0)")
@@ -12208,6 +12161,26 @@ def _call_func_lean(func_name: str, admitted: dict = None,
                 f'  {builtin_arms} if name = "{func_name}" then mojo arg else 0)')
     return (f'(fun name arg =>\n  {builtin_arms}'
             f'  if name = "{func_name}" then mojo arg else 0)')
+
+
+def _call_func2_lean(func_name: str, admitted2: dict = None,
+                     wrap: bool = True) -> str:
+    """The `callFunc2` for admitted contracts taking 2 arguments."""
+    admitted2 = admitted2 or {}
+    if not admitted2:
+        if wrap:
+            return "(fun name arg0 arg1 => 0)"
+        return "(fun name arg0 arg1 => 0)"
+    arms = "\n  ".join(
+        [f'if name = "{spelling}" then {lean} arg0 arg1 else'
+         for spelling, lean in sorted(admitted2.items()) if lean])
+    if arms:
+        if wrap:
+            return f'(fun name arg0 arg1 =>\n  {arms}\n  0)'
+        return f'(fun name arg0 arg1 => {arms} 0)'
+    if wrap:
+        return "(fun name arg0 arg1 => 0)"
+    return "(fun name arg0 arg1 => 0)"
 
 
 def _callee_call_table(go_defs: str, prog, func_name: str) -> dict:
@@ -12351,6 +12324,15 @@ def generate_arm64_proof(prog, code, info) -> str:
     # spellings as well as the proved function — see `_call_func_lean`.
     _admitted_calls_map = dict(getattr(prog, "admitted_calls", None) or {})
 
+    # The entry function, resolved before either branch below reads it: the
+    # frame branch reads its `@refines` annotation, and that read used to sit
+    # ahead of this lookup, so any frame-shaped image hit an UnboundLocalError
+    # the moment the frame finder found a method.
+    fn = next((f for f in prog.functions if f.name == func_name), None)
+    if fn is None and prog.functions:
+        fn = prog.functions[0]
+        func_name = fn.name
+
     _fmethods = _frame_methods(prog, code, info)
     if _fmethods:
         text = _generate_frame_proof(prog, code, info, _fmethods, func_name,
@@ -12373,10 +12355,6 @@ def generate_arm64_proof(prog, code, info) -> str:
                 f"range.md`. -/\n")
         return text
 
-    fn = next((f for f in prog.functions if f.name == func_name), None)
-    if fn is None and prog.functions:
-        fn = prog.functions[0]
-        func_name = fn.name
     param = fn.params[0][0] if fn.params else "n"
     # **The CSEL discharge is gated on the entry's conditional-branch count,
     # and the gate is a refusal rather than a bigger bound.**  The entry's
@@ -12544,6 +12522,33 @@ def generate_arm64_proof(prog, code, info) -> str:
     _callees = _callee_call_table(go_defs, prog, func_name)
     _cf_text = _call_func_lean(func_name, _admitted_calls_map, arity=arity,
                                exports=_callees)
+    # Build callFunc2 for 2-arg admitted contracts
+    _admitted_calls_map2 = {}
+    try:
+        _admitted_list = list(getattr(prog, "admitted", None) or [])
+        for c in _admitted_list:
+            if isinstance(c, dict):
+                name = c.get("name")
+                lean_name = c.get("lean_name")
+                ar = c.get("arity") if "arity" in c else 1
+            else:
+                name = getattr(c, "name", None)
+                lean_name = getattr(c, "lean_name", None)
+                ar = getattr(c, "arity", 1)
+            if name and lean_name and ar == 2:
+                _admitted_calls_map2[str(name)] = lean_name
+                if "." in str(name):
+                    _admitted_calls_map2[str(name).split(".")[-1]] = lean_name
+    except Exception:
+        _admitted_calls_map2 = {}
+    # Also check admitted_calls_map entries - if they correspond to 2-arg admitted
+    try:
+        for k, v in (_admitted_calls_map or {}).items():
+            if k not in _admitted_calls_map2 and v:
+                _admitted_calls_map2[k] = v
+    except Exception:
+        pass
+    _cf2_text = _call_func2_lean(func_name, _admitted_calls_map2)
     # The model's arity is the SOURCE arity, so applying it to `n` is wrong for
     # a function that takes no parameters -- `def ret42(): return 42` used to
     # be modelled as `ret42_go (n : UInt64)`, a parameter the source does not
@@ -12568,6 +12573,7 @@ def generate_arm64_proof(prog, code, info) -> str:
         _, _dec1_rec = _dec1_pattern(fn)
         param = fn.params[0][0] if fn.params else "n"
         rec_hrhs = _expr_rec_hrhs(fn.body[0].else_body[0].value, func_name, param)
+        _cf2_use = _cf2_text if '_cf2_text' in locals() else '(fun name arg0 arg1 => 0)'
         eval_eq_mojo_proof = (
             f"simp +decide [mojo, ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr, u64pow, u64powGo]\n"
             f"  by_cases hn : n = 0\n"
@@ -12601,8 +12607,9 @@ def generate_arm64_proof(prog, code, info) -> str:
         # one-line arm must not carry a second pair -- otherwise `fib`'s proof
         # gains `ast ((fun ...))` and stops being byte-identical to HEAD's.
         _cf_unparenthesised = _cf[1:-1] if _cf.startswith("(") else _cf
+        _cf2_use = _cf2_text if '_cf2_text' in locals() else '(fun name arg0 arg1 => 0)'
         eval_eq_mojo_proof = (
-            f"have hunf : evalFunc ast ({_cf_unparenthesised}) [n] =\n"
+            f"have hunf : evalFunc ast ({_cf_unparenthesised}) ({_cf2_use}) [n] =\n"
             f"      (if n ≤ (1 : UInt64) then n else mojo (n - 1) + mojo (n - 2)) := by\n"
             f"    simp only [ast, evalFunc, MojoEnv, evalBody, "
             f"evalBodyEnv, evalExpr]\n"
@@ -12688,7 +12695,7 @@ def generate_arm64_proof(prog, code, info) -> str:
         eval_eq_mojo_section = (
             f"/-- eval_eq_mojo: AST evaluation agrees with the semantic model. -/\n"
             f"theorem eval_eq_mojo {_entry_binders(arity)} :\n"
-            f"  evalFunc ast {_cf_text} {_entry_arg_list(enames)} = "
+            f"  evalFunc ast {_cf_text} ({_cf2_text if '_cf2_text' in locals() else '(fun name arg0 arg1 => 0)'}) {_entry_arg_list(enames)} = "
             f"{_apply_args('mojo', enames)} := by\n"
             f"  {eval_eq_mojo_proof}"
         )
@@ -12790,7 +12797,7 @@ def generate_arm64_proof(prog, code, info) -> str:
                [f"(UInt64.ofNat {v})" for v in evalues[1:]])
         eval_tests.append(
             f"theorem eval_eq_mojo_test :\n"
-            f"  evalFunc ast {_cf_text} "
+            f"  evalFunc ast {_cf_text} ({_cf2_text if '_cf2_text' in locals() else '(fun name arg0 arg1 => 0)'}) "
             f"{_entry_arg_list(_tv)} = {_apply_args('mojo', _tv)} := by\n"
             f"{_tac_eval}"
         )
@@ -13236,10 +13243,18 @@ set_option linter.unusedVariables false
 # is a theorem about the wrong address.
 
 
-def _frame_slot_accesses(words: dict, entry: int, end: int):
+def _frame_slot_accesses(words: dict, entry: int, end: int, body: int = None):
     """`(slot, is_store)` per receiver-relative access, in program order.
 
-    None if any access's base register cannot be traced to the receiver."""
+    None if any access's base register cannot be traced to the receiver.
+
+    `body` (default `entry`) is where the method's own code starts, after the
+    stack-floor guard in front of it.  The prologue before it is the compiler's:
+    it is walked only to carry the receiver's register copies forward (the
+    method body reads the receiver through `x19`, which the prologue sets with
+    `ADD x19, x0, #0`), and its loads and branches are not accesses of the
+    method, so they cannot fail the scan."""
+    body = entry if body is None else body
     recv = {0: 0}                       # register -> byte offset from receiver
     out = []
     pc = entry
@@ -13251,19 +13266,26 @@ def _frame_slot_accesses(words: dict, entry: int, end: int):
         if idx is None:
             return None
         rd, rn = w & 0x1f, (w >> 5) & 0x1f
+        in_body = pc >= body
         if idx in (9, 10):              # ADD Xd, Xn, #imm (32- and 64-bit)
             if rn in recv:
                 # The immediate is a BYTE offset from the receiver: `_imm12_
                 # scaled` (the `sh` bit, no `* 8` — that scale belongs to the
                 # LDR/STR access size in the arm below, not to an ADD).
                 recv[rd] = recv[rn] + _imm12_scaled(w)
+            else:
+                recv.pop(rd, None)
         elif idx == 1:                  # MOV Xd, Xn
             if rn in recv:
                 recv[rd] = recv[rn]
-        elif idx in (18, 31):           # LDR/STR Xt, [Xn, #imm]
+            else:
+                recv.pop(rd, None)
+        elif idx in (18, 31) and in_body:   # LDR/STR Xt, [Xn, #imm]
             if rn not in recv:
                 return None
             out.append(((recv[rn] + ((w >> 10) & 0xfff) * 8) // 8, idx == 31))
+        elif idx == 31:                 # a prologue STR writes no register
+            pass
         else:
             recv.pop(rd, None)
         pc += 4
@@ -13411,9 +13433,19 @@ def _frame_methods(prog, code: bytes, info: dict):
     labels = dict(info.get("labels") or {})
     if not labels:
         return None
-    ordered = sorted(labels.items(), key=lambda kv: kv[1])
+    # Every label in address order, and the function entries among them.  The
+    # extent of a function is NOT "up to the next label": the generator also
+    # labels the function's own internal points (`{fname}_sf{k}_ok`,
+    # `{fname}_assert{k}_ok`, ...), so the next label can be a point INSIDE the
+    # body.  The stack-floor guard's `_ok` label is exactly that — the first
+    # internal label after the entry — and cutting the extent there left the
+    # body's RET outside it, which is why no frame method was ever found.
+    by_addr = sorted(labels.items(), key=lambda kv: kv[1])
+    fnames = {g.name for g in prog.functions}
     out = []
-    for i, (fname, entry) in enumerate(ordered):
+    for fname, entry in by_addr:
+        if fname not in fnames:
+            continue
         f = next((g for g in prog.functions if g.name == fname), None)
         if f is None or not f.params or f.params[0][0] != "self":
             continue
@@ -13424,16 +13456,33 @@ def _frame_methods(prog, code: bytes, info: dict):
         src = _self_accesses(f.body)
         if not src:
             continue
-        nxt = ordered[i + 1][1] if i + 1 < len(ordered) else None
+        # The function ends where the next FUNCTION begins, or where code
+        # that belongs to no function begins (a label not named `{fname}_…`).
+        nxt = next((a for lbl, a in by_addr
+                    if a > entry and (lbl in fnames
+                                      or not lbl.startswith(fname + "_"))),
+                   None)
+        # The body starts at the stack-floor guard's own `_ok` label, which the
+        # codegen publishes as `{fname}_sf{k}_ok` (arm64_codegen.py `ok_label`).
+        # The guard (STP/ADRP/LDR/CMP/B.cond) is the compiler's prologue, not
+        # the method's, so the leaf-shape scan starts past it.  No such label
+        # means no guard: the body is the entry.
+        ok_re = re.compile(rf"{re.escape(fname)}_sf\d+_ok\Z")
+        body_entry = min((a for lbl, a in labels.items()
+                          if ok_re.match(lbl) and entry <= a
+                          and (nxt is None or a < nxt)), default=entry)
         rets = [pc for pc, w in words.items()
-                if w == 0xd65f03c0 and pc >= entry and (nxt is None or pc < nxt)]
+                if w == 0xd65f03c0 and pc >= body_entry and (nxt is None or pc < nxt)]
         if not rets:
             continue
-        end = max(rets) + 4
+        # The leaf method ends at its FIRST return: any branch before it is
+        # refused below, so a straight-line body has exactly one RET, and a
+        # later RET belongs to the next code, not to this method.
+        end = min(rets) + 4
         if any(_step_branch_index(words[pc]) in (14, 15, 16, 17, 51, 52, 53)
-               for pc in words if entry <= pc < end):
+               for pc in words if body_entry <= pc < end):
             continue                      # a branch: not the leaf shape
-        mach = _frame_slot_accesses(words, entry, end)
+        mach = _frame_slot_accesses(words, entry, end, body=body_entry)
         if mach is None or len(mach) != len(src):
             continue
         pairs, stores = [], []

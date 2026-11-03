@@ -2828,7 +2828,8 @@ def _admitted_summary(source_path: str) -> list:
                  "source": source_path, "line": 0,
                  "error": f"{type(e).__name__}: {e}"}]
     return [{"name": c.qualified, "assumes": c.assumes,
-             "lean_name": c.lean_name, "source": c.source, "line": c.line}
+             "lean_name": c.lean_name, "source": c.source, "line": c.line,
+             "arity": getattr(c, "arity", 1)}
             for c in contracts]
 
 
@@ -4424,8 +4425,8 @@ def _frame_receivers(functions: list, structs_by_name: dict,
     # 1 031 times on `myinterpreter.py` — 2.9 s of that file's build. Derived
     # here when the caller has none, threaded when it has: `_prepare_functions`
     # derives the same table beside its own `framed`, for the same reason it
-    # derives that. `bugs/formal/FORMAL_build_cost_2026-10-03.md` §3.1 is the drift
-    # measurement that makes reading a module-level table sound here — 0 of
+    # derives that. the 2026-10-03 build-cost measurement (§3.1, doc in
+    # git history) is the drift measurement that makes reading a module-level table sound here — 0 of
     # 7 788 (question, struct) pairs changed its answer inside one call.
     if one_field is None:
         one_field = M.one_field_struct_names(structs)
@@ -5859,7 +5860,7 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         # `a == b` on two such names stayed a compare of two FIELD VALUES while
         # the class's own `__eq__` was reachable by name — measured, a one-field
         # class whose `__eq__` returns True answering 0 where CPython says 1.
-        # `bugs/formal/FORMAL_eq_dispatch_on_a_frame_receiver.md` §1.
+        # (deleted doc; fixes recorded in tests) §1.
         fn._one_word_candidates = dict(
             one_word.get(_fn_key(fn)) or {})
         # A ONE-word struct held in a HOLDER'S FIELD, which is a depth-2 chain
@@ -10968,7 +10969,7 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
     # this image can classify, so a bracket list over a name it cannot — a
     # dotted `h.tag[…]`, an unknown name, a local — takes the refusal below
     # exactly as before, and that limit is written down in
-    # `bugs/formal/FORMAL_dotted_base_bracket_list_is_not_classified.md`. Every escape
+    # dotted base bracket list classification (fixed). Every escape
     # the branch is really for (`d[s, 1] = 5`, `var k = l[s, 1]`, `[s, 1]`) has a
     # base that is a dict or a list, and no type name is either.
     type_index_ids = {
@@ -12015,7 +12016,7 @@ def _bound_receiver_structs(fn, framed, functions=(), owner=None,
     `_split_declaration`), so each ask was a whole-struct walk; on
     `myinterpreter.py` this line made 43 508 of them for 275 structs and 1 031
     functions, which was 33.6 s of `struct_receiver_stores` inside a 97 s build
-    (`bugs/formal/FORMAL_build_cost_2026-10-03.md` has the measurement). `_prepare_functions`
+    (the 2026-10-03 build-cost measurement has the numbers; doc in git history). `_prepare_functions`
     derives it once and threads it, like `wide` and `dispatch_owners`. Passing
     the table rather than a predicate keeps this function free of the question
     entirely: it cannot answer a different one by accident, because it no longer
@@ -16455,7 +16456,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         # is the type's TAG, so it has a home — the same one a folded
         # module-level constant has, which is the fourth of the four this walk
         # already accepts, and both backends materialise it where they
-        # materialise the others. `bugs/formal/FORMAL_type_name_as_a_value.md` is the
+        # materialise the others. `bugs/formal/FORMAL_dtype_object_as_a_value.md` is the
         # long form; `model.TYPE_VALUE_NAMES` is the name space and
         # `model.type_value_tag` the one reader both backends ask, so the two
         # architectures cannot disagree about what a type is.
@@ -16740,7 +16741,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
             # not a value, so that sentence is false about the file and sends
             # the reader to the register allocator for a fact about the
             # language. The census behind this is in
-            # bugs/formal/FORMAL_type_name_as_a_value.md.
+            # bugs/formal/FORMAL_dtype_object_as_a_value.md.
             #
             # Asked AFTER the module-symbol question, not before, and the
             # ordering is not a compromise — it is what the measurement forced.
@@ -17356,7 +17357,7 @@ def _enum_member_sites(structs_by_name: dict, bound: set,
     file. `bound` is the only per-function input left, which is why it is the
     only thing this function still asks. `_prepare_functions` derives the table
     once, beside the framed one, and threads it here for the same reason and by
-    the same mechanism (`bugs/formal/FORMAL_build_cost_2026-10-03.md`).
+    the same mechanism (the 2026-10-03 build-cost measurement; doc in git history).
 
     Deriving it here instead is kept as the `None` default so that a caller with
     no module context — a test, a tool reading one function's census — still gets
@@ -18788,7 +18789,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # 43 508 asks of `M.struct_is_framed` from `_bound_receiver_structs` alone,
     # out of 46 512 asks of the field set in the whole build, and
     # `formal/model.py`'s `struct_receiver_stores` was 33.6 s of a 97 s build
-    # inside them. See `bugs/formal/FORMAL_build_cost_2026-10-03.md`.
+    # inside them. See the 2026-10-03 build-cost measurement (doc in git history).
     #
     # So the answer is computed here, once, and THREADED — the same way
     # `dispatch_owners`, `method_owners` and `wide` are, and for the same
@@ -18834,7 +18835,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # file's 3.8 s), `_one_word_field_map` once per function, and
     # `model.one_field_mutating_methods` once per method (389). Derived here
     # beside the other two and threaded, on the measurement that makes it sound:
-    # §3.1 of `bugs/formal/FORMAL_build_cost_2026-10-03.md`, 0 of 7 788 (question,
+    # §3.1 of the 2026-10-03 build-cost measurement (doc in git history), 0 of 7 788 (question,
     # struct) pairs changing their answer inside one call, `struct_is_one_field`
     # one of the four it covered.
     one_field = M.one_field_struct_names(structs_by_name.values())
@@ -20529,7 +20530,7 @@ def _rewrite_with_statements(fn, structs_by_name: dict,
     and almost no function in this repository has a `with`: computing it
     eagerly would put that walk on the whole image to serve the few functions
     that read it, which is the same cost argument
-    `bugs/formal/FORMAL_build_cost_2026-10-03.md` measures.  It is called with
+    the 2026-10-03 build-cost measurement (doc in git history) measures.  It is called with
     `own_scope=True`, because a binding made inside a nested `def` is not a
     binding of this function's name and entering the wrong frame address is a
     protocol call, not a field-slot slip.

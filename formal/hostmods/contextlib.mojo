@@ -50,7 +50,7 @@ WHAT IS NOT HERE, AND WHY
     caller would read an empty buffer as "the program printed nothing".
   * `contextmanager` — a DECORATOR over a generator function. Both halves are
     refused here: a decorator on a function OR a class is silently DROPPED by
-    both backends (`bugs/mid/COMPILE_FAIL_decorator_application_dropped.md`), so
+    both backends (`bugs/hard/COMPILE_FAIL_decorator_application_dropped.md`), so
     `@contextmanager` would build and turn the generator function into an ordinary
     one that returns a generator nobody consumes.
   * `closing` — LOOKED LIKE `nullcontext` AND IS NOT, which is why it is worth

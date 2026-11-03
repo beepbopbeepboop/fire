@@ -878,3 +878,6 @@ around, so `collect_module_symbols` is untouched and the bare-read question this
 section declined never arises. §2's aliased half builds and runs on both
 architectures; the Status at the head of the file has the mechanism, the tests
 and the numbers. §2's DOTTED half (item 3) is unchanged.
+
+## Status 2026-10-31 (this session): ALIASED half verified; DOTTED half (`L.Pair[Int]()`) open — partial progress
+Verified: `_import_aliases` present; `P[Int]()` builds and answers CPython (Pair[Int]/Pair[Bool]); alias shadow rules work; cross-module library template applied. DOTTED application (`L.Pair[Int]()`) remains open; §1a, §3, §4, §8 unchanged.
