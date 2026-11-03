@@ -4813,6 +4813,7 @@ def _merge_reads(into: dict, more: dict) -> None:
 
 
 
+
 # ── the CFG, and the "definitely stored" fixpoint over it ──────────────────
 #
 # `read_before_store` is a DOMINANCE question wearing a walk's clothes: the
@@ -9420,6 +9421,7 @@ def len_refusal(kind, spelled: str, slot_ann: str = None,
 
 
 
+
 # ── TEXT ENCODING: when is a BYTE count a CODE POINT count? ─────────────────
 #
 # `strlen` is the length of a NUL-terminated `char *`. A Python `str` is a
@@ -13464,6 +13466,7 @@ def refuse_interpolated_literals(stmts) -> None:
 
 
 
+
 # ── Everything else that reaches an INTEGER path holding a `char *` ───────
 #
 # `string_concat_refusal` above is one operator out of a table, and the reason
@@ -17238,7 +17241,7 @@ def one_word_receiver_kind(struct_def, int_names=(), string_names=(),
     derives the field set by walking every method body of the struct twice, and
     so does `struct_sole_field_name`, so the guard doubled the price of the
     question it was guarding.  This is the same provably-dead filter
-    `bugs/formal/FORMAL_build_cost_2026-10-03.md` §4.1 removed from
+    the 2026-10-03 build-cost measurement's §4.1 (doc in git history) removed from
     `struct_derived_names`, and the reason it is worth writing down rather than
     leaving as an unexplained simplification: a reader who deletes the `None`
     test on the strength of "the count already said so" would be deleting the
@@ -17972,6 +17975,7 @@ def pointer_bounded_method(method: str):
     """The lowering name of a pointer-bounded string method, or None."""
     entry = POINTER_BOUNDED_METHODS.get(method)
     return entry[0] if entry else None
+
 
 
 
@@ -22398,6 +22402,7 @@ def extremum_call_is_a_select(name, nargs: int, nkwargs: int) -> bool:
     return (name in ("max", "min")
             and not nkwargs
             and nargs >= 2)
+
 
 
 
@@ -26944,6 +26949,7 @@ def _kind_of_simple(e) -> str | None:
         # commit f0df70b2's row 3.
         return TYPE_KIND
     return None
+
 
 
 
@@ -31660,6 +31666,7 @@ def scope_lookup(scopes, name: str):
 
 
 
+
 # ── Constructs that are no-ops in the value flow ──────────────────────────
 #
 # These name source constructs whose only meaning is to the compiler, so a
@@ -36084,6 +36091,7 @@ def struct_width_cost(struct_def) -> str:
 
 
 
+
 # ── A multi-field receiver, BY REFERENCE ───────────────────────────────
 #
 # A value on this path is one 64-bit word, and a struct of two fields has
@@ -36365,8 +36373,8 @@ def one_field_mutating_methods(functions, method_owners: dict,
     asks the predicate once per METHOD — 377 of them on `myinterpreter.py`, each
     one a whole-struct walk of bodies. `None` keeps the per-method ask, which is
     the same answer at the cost of the walk; see
-    `bugs/formal/FORMAL_build_cost_2026-10-03.md` §6 for the measurement and §3.1 for
-    why reading the table is sound.
+    the 2026-10-03 build-cost measurement (doc in git history: §6 for the
+    measurement, §3.1 for why reading the table is sound).
     """
     out = {}
     for fn in (functions or ()):
@@ -38640,7 +38648,7 @@ def _binding_sites_index(fn) -> dict:
     locals: measured on `formal/hostmods/os/__init__.mojo`, arm64,
     `fire.py build --formal --no-prove` went 2.19 s → 2.72 s with the per-name
     walk and 2.24 s with this one (best of three each), and the standard this is
-    measured against is `bugs/formal/FORMAL_build_cost_2026-10-03.md`'s — where the two
+    measured against is the 2026-10-03 build-cost measurement's (doc in git history) — where the two
     residues left open were 0.094 s and 0.003 s on the largest file in the
     repository, and both were declined rather than taken.  There is one dispatch
     below and `_binding_values` reads it, so the two cannot disagree about which
@@ -40453,6 +40461,7 @@ def struct_frame_depth_exceeded(struct_def, decls: dict, past) -> str:
 # `struct_frame_block_bytes`, which is where the reservation is computed and so
 # the one place a truncation could become a fault.
 MAX_NESTED_FRAME_DEPTH = 4
+
 
 
 
@@ -44319,7 +44328,7 @@ def one_field_struct_names(structs) -> dict:
 
     **Sound by the measurement the framed table's threading was sound by**, not
     by an invalidation argument: `formal/model.py`'s `read_before_store`
-    derivation and `bugs/formal/FORMAL_build_cost_2026-10-03.md` §3.1 walked
+    derivation and the 2026-10-03 build-cost measurement's §3.1 (doc in git history) walked
     146 779 asks of the four predicates over 7 788 (question, struct) pairs
     across 14 files and NOT ONE pair changed its answer between two asks inside
     one `_prepare_functions` call — `struct_is_one_field` was one of the four.
@@ -45102,6 +45111,7 @@ def struct_frame_block_layout(struct_def, decls: dict, depth=None):
     """
     return (struct_block_children(struct_def, decls, 0, depth),
             struct_frame_block_bytes(struct_def, decls, depth))
+
 
 
 
@@ -48201,6 +48211,7 @@ def module_binding_literal(folded, value):
                            line=getattr(value, "line", 0) or 0,
                            col=getattr(value, "col", 0) or 0)
     return folded_literal_node(folded, value)
+
 
 
 
@@ -56142,5 +56153,6 @@ def _constructor_argument_for(fields, name, args, kwargs):
     if index < len(args):
         return args[index]
     return None
+
 
 
