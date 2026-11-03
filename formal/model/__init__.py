@@ -56203,3 +56203,9 @@ def _constructor_argument_for(fields, name, args, kwargs):
 
 
 
+
+
+def subscript_float_element(fn, obj, decls: dict, functions: dict = None) -> bool:
+    """True when `obj[i]` is an element of a FLOAT pointee."""
+    inner, _why = pointer_pointee(fn, obj, decls, functions)
+    return inner in POINTEE_FLOAT_NAMES
