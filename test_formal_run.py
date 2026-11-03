@@ -6704,8 +6704,10 @@ BOTH_ARCH_CASES = [
     # legitimately disagree, and that saturation is the documented conversion
     # note rather than this row's subject.  (Kept from `work/formal150-docs` on
     # the 2026-10-12 merge; measured green on the merged tree, both backends.
-    # The branch's companion STORE row is not merged: this tree refuses a store
-    # through a float pointee, see `bugs/formal/FORMAL_float_pointer_subscript.md`.)
+    # The `.value()` STORE is answered by
+    # `deref_a_binary64_pointee_store_of_a_double_is_exact`; the load and
+    # plain store subscript spellings are the rows below. (Bug
+    # FORMAL_float_pointer_subscript fixed — doc removed.)
     ("a_binary64_pointer_load_reaches_int_and_the_format",
      "def read_f(p: Pointer[Float64]) -> Int:\n"
      "    return Int(p.value())\n"
@@ -15585,10 +15587,9 @@ WAVE6_TRUTHY_CASES = [
 
     # ── a `for` target whose range is a RUN-TIME fact ──────────────────────
     #
-    # The residual of
-    # `bugs/formal/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`:
-    # the target of a `for` whose range is empty at run time is not bound, and
-    # the image has no word for "unbound", so the emitter allocates a bound
+    # The residual of the for-range empty-target bug:
+    # The target of a `for` whose range is empty at run time is not bound,
+    # and the image has no word for "unbound", so the emitter allocates a bound
     # flag per such target — zero at entry, set by every store of the name,
     # branched on at a read the build-time state says may be unbound — and the
     # read takes the error exit where CPython raises `UnboundLocalError`.
@@ -17443,23 +17444,74 @@ POINTER_DEREF_REFUSALS = [
      "    printf(\"%d\", g(p.value()))\n"
      "    return 0\n",
      "refuse:is an IEEE double", None),
-    # The STORE subscript: `p[0] = 3.9` on a `Pointer[Float64]` is refused by
-    # the same sentence the LOAD subscript row `deref_refuse_a_float_pointee_
-    # subscript` further down in this group pins, because the store's base goes
-    # through the same subscript reader (`subscript_base_lowering`), which
-    # carries a dereference's kind but not a SUBSCRIPT's.  `work/formal150-docs`
-    # measured a subscript store that had written the value's bits: `p[0] = 1`
-    # came back `4.94066e-324` on both architectures, a denormal.  Kept on the
-    # 2026-10-12 merge with the merged tree's needle; it holds the STORE
-    # spelling to the refusal so a later change cannot lower it silently.
-    ("deref_refuse_a_binary64_subscript_store",
-     "def f(p: Pointer[Float64]) -> Int:\n"
-     "    p[0] = 3.9\n"
+    # The STORE subscript, answered. `p[i] = v` is the `.value() = v` store at
+    # `base + i*8`, and it goes through the SAME kind check: a double's bits are
+    # the element's word. Measured on both architectures; the store is the one
+    # the subscript-store path lowers, and the read back is the subscript load.
+    ("deref_a_binary64_subscript_store_of_a_double_is_exact",
+     "def store(p: Pointer[Float64]) -> Int:\n"
+     "    p[0] = 1.5\n"
+     "    return 0\n"
+     "def show(p: Pointer[Float64]) -> Int:\n"
+     "    printf(\"[%g]\", p[0])\n"
      "    return 0\n"
      "def main(n: Int) -> Int:\n"
      "    var b: Pointer[Float64] = malloc(8)\n"
-     "    return f(b)\n",
-     "refuse:reads an element of a FLOAT pointee", None),
+     "    store(b)\n"
+     "    show(b)\n"
+     "    return 0\n",
+     0, "[1.5]"),
+    # The subscript STORE of an INTEGER into a double pointee: the refusal the
+    # `.value()` store makes (`deref_refuse_a_binary64_value_store_of_an_integer`),
+    # reached through the subscript spelling. `p[0] = 1` would write 0x1.
+    ("deref_refuse_a_binary64_subscript_store_of_an_integer",
+     "def store(p: Pointer[Float64]) -> Int:\n"
+     "    p[0] = 1\n"
+     "    return 0\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b: Pointer[Float64] = malloc(8)\n"
+     "    return store(b)\n",
+     "refuse:would write 0x1, a denormal rather than 1.0", None),
+    # The AUGMENTED subscript store, answered. `p[i] op= v` on a double element
+    # is the element's own double operation: the element is read as its bits,
+    # combined with the value through the FP unit (`FADD`/`FSUB`/`FMUL`/`FDIV`,
+    # never the integer ALU, which would add the patterns), and stored back at
+    # the same address. The address is computed once, so the index is evaluated
+    # once. Measured on both architectures.
+    ("deref_a_binary64_subscript_augmented_is_exact",
+     "def fill(p: Pointer[Float64]) -> Int:\n"
+     "    p[0] = 2.0\n"
+     "    p[1] = 1.0\n"
+     "    p[2] = 2.0\n"
+     "    p[3] = 1.0\n"
+     "    return 0\n"
+     "def bump(p: Pointer[Float64]) -> Int:\n"
+     "    p[0] += 1.0\n"
+     "    p[1] -= 0.5\n"
+     "    p[2] *= 3.0\n"
+     "    p[3] /= 4.0\n"
+     "    return 0\n"
+     "def show(p: Pointer[Float64]) -> Int:\n"
+     "    printf(\"[%g %g %g %g]\", p[0], p[1], p[2], p[3])\n"
+     "    return 0\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b: Pointer[Float64] = malloc(32)\n"
+     "    fill(b)\n"
+     "    bump(b)\n"
+     "    show(b)\n"
+     "    return 0\n",
+     0, "[3 0.5 6 0.25]"),
+    # An INTEGER on the right of a double element's augmented store is the mixed
+    # pair `float_binary_refusal` refuses for every binary operator, so it is
+    # refused by that sentence and not written as the integer's bits.
+    ("deref_refuse_a_binary64_subscript_augmented_with_an_integer",
+     "def bump(p: Pointer[Float64]) -> Int:\n"
+     "    p[0] += 1\n"
+     "    return 0\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b: Pointer[Float64] = malloc(8)\n"
+     "    return bump(b)\n",
+     "refuse:mixes types this path does not promote", None),
     # THE TWO CONSUMERS the pointer load's kind reaches, and both are
     # reachable WITHOUT the pointer, which is what makes them rows here rather
     # than a note beside the pointer rows.  They are the
@@ -17867,19 +17919,22 @@ POINTER_DEREF_REFUSALS = [
      "def main(n: Int) -> Int:\n"
      "    return read_it(7)\n",
      "refuse:The receiver is not established to be a pointer here", None),
-    # A `Pointer[Float64]` SUBSCRIPT is refused while its `.value()` LOAD lowers,
-    # and the asymmetry is the KIND: a dereference's kind is carried by
-    # `model.pointer_deref_kind`, but a subscript's element kind is the
-    # POINTER's own kind (an integer), so `p[i]` would load the right eight
-    # bytes and every context would read them as the wrong number.  The row
-    # exists so a later change that lowers the subscript cannot do it silently.
-    ("deref_refuse_a_float_pointee_subscript",
-     "def at(p: Pointer[Float64], i: Int) -> Int:\n"
-     "    return Int(p[i])\n"
+    # A `Pointer[Float64]` SUBSCRIPT load, answered. The element's KIND is the
+    # pointee's: `pointee_kind_of` answers FLOAT for `p[i]` exactly as for
+    # `p.value()`, so the eight bytes are a double in every context — `printf`
+    # and `Int(...)`, the same two consumers the `.value()` row above pins. The
+    # old refusal was right only while the subscript had no kind.
+    ("a_binary64_subscript_load_reaches_int_and_the_format",
+     "def read_f(p: Pointer[Float64]) -> Int:\n"
+     "    return Int(p[0])\n"
+     "def show(p: Pointer[Float64]) -> Int:\n"
+     "    printf(\"%g\", p[0])\n"
+     "    return 0\n"
      "def main(n: Int) -> Int:\n"
-     "    var s = \"ABCDEFGH\"\n"
-     "    return at(s, 0)\n",
-     "refuse:reads an element of a FLOAT pointee", None),
+     "    var s = \"ABCDEFG@\"\n"
+     "    show(s)\n"
+     "    printf(\" %d\", read_f(s))\n"
+     "    return 0\n", 0, "46.549 46"),
     # The `.value()` STORE of a value this path cannot establish as a double:
     # `p.value() = 1` writes 0x1, a denormal rather than 1.0, and the refusal
     # names the value's own kind. Its answering twin is
@@ -17895,6 +17950,27 @@ POINTER_DEREF_REFUSALS = [
      "    var b: Pointer[Float64] = malloc(8)\n"
      "    return store(b)\n",
      "refuse:would write 0x1, a denormal rather than 1.0", None),
+    # The UNESTABLISHED half of the same check. An unannotated parameter has no
+    # kind this model can state, so the old check answered None and the store
+    # went through: `n`'s integer bits were written into a double slot. Both
+    # spellings are refused by name, with the value's own spelling in the
+    # message; a store into a `Float64` pointee is never silent about its kind.
+    ("deref_refuse_a_binary64_value_store_of_an_unestablished_value",
+     "def store(p: Pointer[Float64], n) -> Int:\n"
+     "    p.value() = n\n"
+     "    return 0\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b: Pointer[Float64] = malloc(8)\n"
+     "    return store(b, 1)\n",
+     "refuse:whose kind this model cannot establish", None),
+    ("deref_refuse_a_binary64_subscript_store_of_an_unestablished_value",
+     "def store(p: Pointer[Float64], n) -> Int:\n"
+     "    p[0] = n\n"
+     "    return 0\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b: Pointer[Float64] = malloc(8)\n"
+     "    return store(b, 1)\n",
+     "refuse:whose kind this model cannot establish", None),
 ]
 
 # The x86-64 wrong answer this used to pin, and what replaced it.  A
@@ -24991,7 +25067,7 @@ TYPE_APPLICATION_REFUSALS = [
 
 # ── a TYPE as a VALUE ──────────────────────────────────────────────────────
 #
-# `bugs/formal/FORMAL_type_name_as_a_value.md` is the long form. A type on this path
+# `bugs/formal/FORMAL_dtype_object_as_a_value.md` is the long form. A type on this path
 # is a word, and the word is a TAG: one number per type, computed from the
 # type's name by `model.type_tag`, the same number in every unit of the image
 # and on both architectures. So `t == Int32` is an integer comparison, a type
@@ -27250,7 +27326,8 @@ def main():
                          "origin_of_in_a_local_type_annotation_is_still_a_type"}
                       | {c[0] for c in POINTER_DEREF_CASES + POINTER_DEREF_REFUSALS
                          if c[0].startswith(("deref_struct_pointee",
-                                             "deref_a_binary64_pointee"))}
+                                             "deref_a_binary64_pointee",
+                                             "deref_a_binary64_subscript"))}
                       # `fd_write_on_an_open_result_writes` reaches
                       # `os.path.getsize` through the `os_path` hostmod dylib,
                       # and the x86-64 image of that chain once jumped to

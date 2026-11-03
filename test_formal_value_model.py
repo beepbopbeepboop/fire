@@ -1860,7 +1860,7 @@ MODULE_GLOBAL_CASES = [
 # paragraph until 2026-10-05 — it told a reader to "give each name one binding,
 # or give every candidate the same `__eq__`", neither of which can fix a program
 # whose names are already bound once each. See
-# `bugs/formal/FORMAL_eq_dispatch_on_a_frame_receiver.md`.
+# eq dispatch behavior is covered by tests.
 REFUSALS = [
     # THE GENERAL RULE, with NO module-level binding of the name anywhere, and
     # its sibling two entries below this list apart is the case where there IS

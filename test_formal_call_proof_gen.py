@@ -657,9 +657,11 @@ class TestGeneratorSource(unittest.TestCase):
         for gen, entry in ((X, "generate_x86_64_proof"),
                            (G, "generate_arm64_proof")):
             # An empty image: the float-repr helper is at the base, so a body
-            # has no bytes before it (the compiler always publishes this key).
+            # has no bytes before it (the compiler publishes both keys; the
+            # helper's is None when no float is printed).
             info = {"func_name": "f", "base_addr": 0x1000, "labels": {},
-                    "float_repr_addr": 0x1000, "test_input": 10}
+                    "float_repr_addr": 0x1000, "image_end": 0x1000,
+                    "test_input": 10}
             try:
                 out = getattr(gen, entry)(prog, b"", dict(info))
             except NotImplementedError as e:
@@ -5433,10 +5435,9 @@ class TestStructFieldHasNoValueInTheModel(unittest.TestCase):
     `formal/examples/wide_recv.mojo` is the two-field receiver example, and the
     arm64 proof generator refuses it at GENERATION time:
 
-        NotImplementedError: model: a struct field read has no value in the
-        semantic model (a `UInt64 → UInt64` function over the source's
-        arithmetic); refusing rather than modelling it as 0, which would be a
-        false statement about the source
+        NotImplementedError: model: `v` is read here and this generator binds
+        it to nothing (the model's environment is ['self']); answering 0 would
+        be a statement about the source rather than a model of it
 
     The model is a function of the ENTRY ARGUMENT and nothing else, so a
     struct's field is not a term in it: `p.x` is 4 and `p.y` is 0 whatever `n`
@@ -5444,6 +5445,16 @@ class TestStructFieldHasNoValueInTheModel(unittest.TestCase):
     the arm refuses rather than defaulting — and it is the same gap as
     `subscript_var`'s ("the semantic model `mojo : UInt64 -> UInt64` has no
     domain for a list, so `a[i]` has no value in it"), one type further.
+
+    WHICH REFUSAL, since the frame finder went live.  `_frame_methods` used to
+    find no method for this image, so the refusal came from the ordinary model
+    and read "a struct field read has no value".  It now finds `set_x`, `get_x`
+    and `get_y`, and the by-reference frame emitter (`_generate_frame_proof`)
+    refuses the first of them: its contract binds only `self`, so `set_x`'s
+    scalar parameter `v` has no value.  That is the same struct-domain family
+    (a frame method's environment is not a value model), one step earlier.
+    `bugs/FORMAL_arm64_the_frame_method_finder_scans_the_guard_prologue_and_finds_no_method.md`
+    names it as the next step.
 
     So `wide_recv` is in `test_formal.py`'s `EXPECTED_FAILURES` with that reason,
     and this class is what keeps the marker honest in both directions:
@@ -5472,7 +5483,7 @@ class TestStructFieldHasNoValueInTheModel(unittest.TestCase):
               "    return p.get_x() + p.get_y()\n")
 
     #: The phrase the refusal must contain, and the phrase the marker states.
-    NEEDLE = "struct field read"
+    NEEDLE = "binds it to nothing"
 
     @classmethod
     def setUpClass(cls):
@@ -6018,6 +6029,89 @@ class TestBottomTestedRangeLoop(unittest.TestCase):
                          "the loop top's terminator is no longer the signed "
                          "`lt`, so the refusal above is about something else "
                          "and this class is no longer measuring what it says")
+class TestTheFloatReprHelperIsEmittedOnlyForAFloatPrint(unittest.TestCase):
+    """The float-repr helper is in an image because a float is printed, and
+    for no other reason.
+
+    It used to be emitted unconditionally after every function body on both
+    backends, so every image carried its ~2.4 KB and its `snprintf`/`strtod`
+    calls, including a program that never formats a float. Those calls are
+    `extern_calls` the PROGRAM did not make: on x86-64 they made
+    `_run_tests_section` refuse every run test (`NO RUN TESTS`), and the
+    helper's bytes are the wall the kernel hits in every step certificate
+    (`bugs/formal/FORMAL_call_proofgen_red_on_head.md`). The emitter now records
+    a float print (`_float_repr_used`) and emits the helper only then.
+
+    Cheap: proof-free compiles, no Lean.
+    """
+
+    PLAIN = "def main(n: Int) -> Int:\n    return 7\n"
+    PRINTS_A_FLOAT = "def main(n: Int) -> Int:\n    print(1.5)\n    return 7\n"
+    ARCHES = ("arm64", "x86_64")
+
+    @classmethod
+    def setUpClass(cls):
+        import formal.build as fb
+        cls.tmp = tempfile.mkdtemp(prefix="a3-floatrepr-")
+        cls.info = {}
+        for name, src in (("plain", cls.PLAIN),
+                          ("float", cls.PRINTS_A_FLOAT)):
+            path = os.path.join(cls.tmp, f"{name}.mojo")
+            with open(path, "w") as f:
+                f.write(src)
+            for arch in cls.ARCHES:
+                out = os.path.join(cls.tmp, f"{name}-{arch}.aout")
+                r = fb.compile_formal(path, arch=arch, output=out,
+                                      prove=False, check=False)
+                cls.info[(arch, name)] = r["info"]
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_a_program_that_formats_no_float_carries_no_helper(self):
+        for arch in self.ARCHES:
+            info = self.info[(arch, "plain")]
+            syms = [e["sym"] for e in info.get("extern_calls") or []]
+            with self.subTest(arch=arch):
+                self.assertEqual(info.get("float_repr_calls"), [],
+                                 "the helper's own calls are published for an "
+                                 "image that formats no float")
+                self.assertIsNone(info.get("float_repr_addr"),
+                                  "the helper's entry is published for an image "
+                                  "that formats no float")
+                self.assertNotIn("snprintf", syms)
+                self.assertNotIn("strtod", syms)
+
+    def test_the_float_repr_helper_calls_are_subtracted_from_the_program(self):
+        """On arm64 the helper's `snprintf`/`strtod` are the emitter's, so
+        `_program_extern_calls` must not read them as the program's; the
+        program's own `printf` (the `%s` of the float print) must stay. This is
+        the census `TestCompilerTrapIsNotAProgramCall` relies on."""
+        from formal.arm64_proof_gen import _program_extern_calls
+        info = self.info[("arm64", "float")]
+        helper = set(info.get("float_repr_calls") or ())
+        program = _program_extern_calls(info)
+        self.assertEqual(sorted(e["sym"] for e in program), ["printf"],
+                         "the helper's calls were read as the program's")
+        self.assertTrue(helper.isdisjoint(e["addr"] for e in program))
+
+    def test_a_program_that_prints_a_float_carries_the_helper(self):
+        for arch in self.ARCHES:
+            info = self.info[(arch, "float")]
+            syms = [e["sym"] for e in info.get("extern_calls") or []]
+            with self.subTest(arch=arch):
+                self.assertEqual(len(info.get("float_repr_calls") or []), 2,
+                                 "a float print must publish the helper's two "
+                                 "extern calls (snprintf, strtod)")
+                self.assertIn("snprintf", syms)
+                self.assertIn("strtod", syms)
+                if arch == "x86_64":
+                    self.assertIsNotNone(info.get("float_repr_addr"))
+                    self.assertGreater(info["float_repr_addr"],
+                                       info["base_addr"])
+
+
 class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
     """An `exit` the COMPILER emits is not an `exit` the PROGRAM makes.
 
@@ -6270,12 +6364,13 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
         a program with a bounded stop — see the rows below, which are the other
         half and which this row used to contradict.
 
-        The float-repr helper is emitted after every body, so its own
-        `snprintf`/`strtod` are at or ABOVE the entry in every image; they are
-        the emitter's calls, published in `info["float_repr_calls"]` and
-        subtracted by `_program_extern_calls`, and this row pins that they are
-        the ONLY unbound calls at or above the entry — a guard `BL` in a
-        prologue would sit there too and would show up here.
+        The float-repr helper is emitted only when a float is printed, so a
+        plain image has no helper and NO call at or above the entry: the
+        helper's `snprintf`/`strtod` used to sit there in every image, and this
+        row pins that the only unbound call left below the entry is the
+        startup stub's. A float print puts them back, published in
+        `info["float_repr_calls"]` and subtracted by `_program_extern_calls`
+        (`TestTheFloatReprHelperIsEmittedOnlyForAFloatPrint.test_the_float_repr_helper_calls_are_subtracted_from_the_program`).
         """
         from formal.arm64_proof_gen import _program_extern_calls
         info = self._info("arm64", "plain")
@@ -6291,13 +6386,10 @@ class TestCompilerTrapIsNotAProgramCall(unittest.TestCase):
                         "the stub's `getrlimit` must be BELOW the entry, or no "
                         "run test can subtract it by address")
         self.assertEqual(
-            [e["addr"] for e in above], info.get("float_repr_calls"),
-            "a call at or above the entry that is not the float-repr helper's "
-            f"own published site: {[e['sym'] for e in above]}")
-        self.assertEqual(
-            sorted(e["sym"] for e in above), ["snprintf", "strtod"],
-            "the helper's own calls are the only unbound calls at or above "
-            f"the entry: {[e['sym'] for e in above]}")
+            [e["sym"] for e in above], [],
+            "a call at or above the entry in an image that formats no float: "
+            f"{[e['sym'] for e in above]}")
+        self.assertEqual(info.get("float_repr_calls"), [])
         self.assertEqual(_program_extern_calls(info), [],
                          "the startup limit read or the helper's calls are "
                          "being read as a call the PROGRAM makes, so every "
@@ -6912,23 +7004,31 @@ def main(n: Int) -> Int:
                 self.assertNotIn("NO RUN TESTS", text)
                 self.assertIn("theorem eval_eq_mojo", text)
 
-    def test_arm64_refuses_the_shape_and_x86_64_disclaims_it(self):
+    def test_arm64_frame_proof_and_x86_64_placeholder_diverge(self):
         """The divergence, stated, because a reader meets it.
 
-        `wide_recv` is refused on arm64 at GENERATION time — the shared model's
-        `NotImplementedError` is not caught there — and emitted with a disclaimed
-        placeholder on x86-64.  Neither claims the program is proved, which is
-        the property that matters; the difference is what a caller sees, and a
-        caller reading `compile_formal`'s return value has to know which it is.
+        `wide_recv` is a by-reference receiver: its `get_x`/`get_y` are frame
+        methods.  arm64 proves each of them as a frame CONTRACT (the by-reference
+        proof path, `_generate_frame_proof`), which says there is no `mojo` and
+        no end-to-end theorem.  x86-64 emits the disclaimed placeholder model.
+        Neither claims the program is proved end to end, which is the property
+        that matters; a caller reading `compile_formal`'s return value has to
+        know which of the two it is looking at.
+
+        This row was "arm64 refuses it" until the frame-method finder found
+        these methods (`test_formal_frame_method_finder.py`); the old refusal was
+        the ordinary model's, and the frame path now answers instead.
         """
-        self.assertIsNone(self.built.get(("arm64", "wide_recv")),
-                          "arm64 now emits a proof for this shape; if it does, "
-                          "this row is stale and the divergence is gone")
-        err = self.built.get(("arm64", "wide_recv", "error"), "")
-        self.assertIn("struct field read has no value in the semantic model",
-                      err,
-                      f"arm64 refused it, but not with the shared model's own "
-                      f"reason: {err}")
+        arm = self.built.get(("arm64", "wide_recv"))
+        self.assertIsNotNone(arm, "arm64 refused the frame shape: %s" %
+                             self.built.get(("arm64", "wide_recv", "error")))
+        self.assertIn("by-reference receiver", arm,
+                      "arm64 emitted a proof, but not the by-reference frame "
+                      "proof this row describes")
+        self.assertNotIn("PLACEHOLDER", arm)
+        self.assertNotIn("theorem main_compiles_correctly", arm,
+                         "a frame proof states an end-to-end theorem, which "
+                         "has no `mojo` to be equal to")
         self.assertIsNotNone(
             self.built.get(("x86_64", "wide_recv")),
             "x86_64 refused the shape too, so the two backends now agree and "
@@ -6943,8 +7043,8 @@ class TestDec1PathContext(unittest.TestCase):
     `s_6`'s definition is written in terms of `s_4` — and to cite a literal
     `hsrc_0`, which no emitted proof ever defines. Both produced Lean errors
     hundreds of lines downstream of the call that wanted them, on
-    `formal/examples/count.mojo` (`bugs/formal/FORMAL_arm64_x30_is_reloaded_from_the_
-    frame.md` carries the measurement and what is still open there)."""
+    `formal/examples/count.mojo` (the `hx30fr` false-theorem site in
+    `formal/arm64_proof_gen.py::_gen_universal_e2e_cfg`, fixed upstream)."""
 
     DEC1 = ("def dec1(n):\n"
             "    if n == 0:\n"
@@ -7180,7 +7280,7 @@ class TestCfgLeafCensus(unittest.TestCase):
         which is FALSE for an arbitrary `st.mem` -- `Arm64State.init` is the only
         place that says memory is zero, and the universal theorem's `st` is a
         free state. So this test pins the REDUCTION and not a pass, and the doc
-        that says so is `bugs/formal/FORMAL_arm64_x30_is_reloaded_from_the_frame.md` \u2014 the
+        that says so is the `hx30fr` finding (fixed upstream, doc deleted)
         `st.mem`-free finding outlived the CBZ doc that used to carry it, and
         37ae3718 is the commit that retired that doc.
         """

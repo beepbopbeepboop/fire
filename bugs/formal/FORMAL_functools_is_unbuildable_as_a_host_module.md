@@ -423,3 +423,6 @@ would. The hole is closed by
 which pins all four decorator shapes on source the test supplies; deleting the
 `CallExpr` arm fails it. Both docstrings that cited `version.py` are updated to
 name the test instead of the file.
+
+## Status 2026-10-31 (this session): census updated; decorator gate is real blocker — partial progress
+Verified: reduce writable (both arch, answers CPython); HOST_MODULE_ADVICE false diagnosis removed; function-value-as-address landed. Module still refused because decorator application dropped (separate bug). No new capability missing.

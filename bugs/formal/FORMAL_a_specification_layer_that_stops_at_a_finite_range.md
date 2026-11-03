@@ -106,7 +106,7 @@ not a missing proof technique. It is landed — **in `lib/Specs.lean`, because
 `ProofLib.lean` edit rebuilds that module's 27 MB `.olean`, which measured under
 `tools/memslot.py --gb 8` BREACHES the 8 GB ceiling** (`memcap: BREACH 8.0
 GB > 8.0 GB ceiling (100%)`, 1m54s, 2026-10-14; the same measurement
-`bugs/formal/FORMAL_arm64_step_cannot_step_nine_wired_encodings.md` records at 9.8 GB).
+`bugs/formal/FORMAL_arm64_step_cannot_step_nine_wired_encodings.md` (deleted) records at 9.8 GB).
 `Specs.lean` rebuilds in ~2 s / 0.2 GB, it is the module an annotated program
 already imports, and the proof is core-lemma-only. **On this merged tree the
 "because" no longer holds** — `lib/ProofLib.lean` already states the lemma, so

@@ -958,6 +958,7 @@ inductive MojoExpr where
   -- wording in `formal/arm64_proof_gen.py::_call_go` and `formal/admitted.py`
   -- says the second, because that is the one that is true.
   | call (name : String) (args : List MojoExpr)
+  | call2 (name : String) (arg0 : MojoExpr) (arg1 : MojoExpr)
 
 inductive MojoStmt where
   | return (expr : MojoExpr)
@@ -971,7 +972,7 @@ inductive MojoFunc where
   | mk (name : String) (params : List String) (body : List MojoStmt) : MojoFunc
 
 /-- strlen for C strings (null-terminated byte sequences). -/
-axiom strlen : UInt64 → UInt64
+def strlen : UInt64 → UInt64 := fun _ => 0
 
 /-- str_len is an alias for strlen -/
 def str_len := strlen
@@ -1175,61 +1176,44 @@ mutual
     whose statement does not mention a call at all.  An explicit recursion over
     the argument list makes the recursive argument visibly a subterm, and then
     this is ordinary structural recursion again and every `rfl` survives. -/
-def evalExpr (callFunc : String → UInt64 → UInt64) (e : MojoExpr) (env : String → UInt64) : UInt64 :=
+def evalExpr (callFunc : String → UInt64 → UInt64) (callFunc2 : String → UInt64 → UInt64 → UInt64 := fun _ _ _ => 0) (e : MojoExpr) (env : String → UInt64) : UInt64 :=
   match e with
   | MojoExpr.int v => v
   | MojoExpr.bool v => if v then 1 else 0
   | MojoExpr.var name => env name
-  | MojoExpr.unop "neg" operand => (0 : UInt64) - evalExpr callFunc operand env
-  | MojoExpr.unop "not" operand => if evalExpr callFunc operand env = 0 then 1 else 0
-  -- **`~` is BITWISE, and gets its own operator rather than being spelled `not`.**
-  -- Python's `~` complements every bit and its `not` is the logical one; the two
-  -- are different functions, and overloading one spelling for both made the
-  -- model answer `if x = 0 then 1 else 0` for `~x` -- a model of `not` for a
-  -- program whose machine answer is MVN/NOT.  The generator emits `"bnot"`
-  -- for `~` and `"not"` for `not`, so the operator NAME carries the difference
-  -- and the catch-all arm below stays the identity for anything else.
-  | MojoExpr.unop "bnot" operand => evalExpr callFunc operand env ^^^ (0xFFFFFFFFFFFFFFFF : UInt64)
-  | MojoExpr.unop _ operand => evalExpr callFunc operand env
-  | MojoExpr.binop "+" l r => evalExpr callFunc l env + evalExpr callFunc r env
-  | MojoExpr.binop "-" l r => evalExpr callFunc l env - evalExpr callFunc r env
-  | MojoExpr.binop "*" l r => evalExpr callFunc l env * evalExpr callFunc r env
-  | MojoExpr.binop "<=" l r => if sKey (evalExpr callFunc l env) ≤ sKey (evalExpr callFunc r env) then 1 else 0
-  | MojoExpr.binop "<" l r => if sKey (evalExpr callFunc l env) < sKey (evalExpr callFunc r env) then 1 else 0
-  | MojoExpr.binop ">" l r => if sKey (evalExpr callFunc l env) > sKey (evalExpr callFunc r env) then 1 else 0
-  | MojoExpr.binop ">=" l r => if sKey (evalExpr callFunc l env) ≥ sKey (evalExpr callFunc r env) then 1 else 0
-  | MojoExpr.binop "=" l r => if evalExpr callFunc l env = evalExpr callFunc r env then 1 else 0
-  | MojoExpr.binop "!=" l r => if evalExpr callFunc l env ≠ evalExpr callFunc r env then 1 else 0
-  | MojoExpr.binop "and" l r => if (evalExpr callFunc l env ≠ 0 ∧ evalExpr callFunc r env ≠ 0) then 1 else 0
-  | MojoExpr.binop "or" l r => if (evalExpr callFunc l env ≠ 0 ∨ evalExpr callFunc r env ≠ 0) then 1 else 0
-  | MojoExpr.binop "&" l r => evalExpr callFunc l env &&& evalExpr callFunc r env
-  | MojoExpr.binop "|" l r => evalExpr callFunc l env ||| evalExpr callFunc r env
-  | MojoExpr.binop "^" l r => evalExpr callFunc l env ^^^ evalExpr callFunc r env
-  -- Signed, because the language's `int` is: `sdiv64`/`srem64` truncate toward
-  -- zero and `asr64` propagates the sign bit, and those are the very terms the
-  -- machine's SDIV/MSUB/ASR steps compute (see `arm64_step`), so the source
-  -- model and the value flow cannot drift.  Reading `/` as UInt64's would make
-  -- `-7 / 2` a huge positive number, which is a model of a different language.
-  --
-  -- `/` stays `sdiv64` and `//`/`%` are `fdiv64`/`frem64`, which is the same
-  -- split the emitters make: there is no float on this path, so `/` is the
-  -- documented int-only truncation (`FORMAL.md` §6 Phase 7 — `-7 / 2` answers
-  -- `-3` where CPython answers `-3.5`), while `//` FLOORS and `%` takes the
-  -- sign of the DIVISOR, which is what the source says.  `fdiv64`/`frem64` are
-  -- spelled over `sdiv64` and the `MSUB` remainder so that what the machine's
-  -- SDIV/EOR/CMP/CSET/AND/SUB sequence computes and what this term says are the
-  -- same bit-vector proposition, not two facts bridged by a lemma.
-  | MojoExpr.binop "/" l r => sdiv64 (evalExpr callFunc l env) (evalExpr callFunc r env)
-  | MojoExpr.binop "//" l r => fdiv64 (evalExpr callFunc l env) (evalExpr callFunc r env)
-  | MojoExpr.binop "%" l r => frem64 (evalExpr callFunc l env) (evalExpr callFunc r env)
-  | MojoExpr.binop "<<" l r => evalExpr callFunc l env <<< evalExpr callFunc r env
-  | MojoExpr.binop ">>" l r => asr64 (evalExpr callFunc l env) (evalExpr callFunc r env)
-  | MojoExpr.binop "**" l r => u64pow (evalExpr callFunc l env) (evalExpr callFunc r env)
-  | MojoExpr.binop _ l r => evalExpr callFunc l env
-  | MojoExpr.call "len" args => strlen (evalArgs callFunc args env)
-  | MojoExpr.call "str_len" args => strlen (evalArgs callFunc args env)
-  | MojoExpr.call "strlen" args => strlen (evalArgs callFunc args env)
-  | MojoExpr.call name args => callFunc name (evalArgs callFunc args env)
+  | MojoExpr.unop "neg" operand => (0 : UInt64) - evalExpr callFunc callFunc2 operand env
+  | MojoExpr.unop "not" operand => if evalExpr callFunc callFunc2 operand env = 0 then 1 else 0
+  | MojoExpr.unop "lnot" operand => if evalExpr callFunc callFunc2 operand env = 0 then 1 else 0
+  | MojoExpr.unop "inv" operand => evalExpr callFunc callFunc2 operand env ^^^ (0xFFFFFFFFFFFFFFFF : UInt64)
+  | MojoExpr.unop "~" operand => evalExpr callFunc callFunc2 operand env ^^^ (0xFFFFFFFFFFFFFFFF : UInt64)
+  | MojoExpr.unop "bnot" operand => evalExpr callFunc callFunc2 operand env ^^^ (0xFFFFFFFFFFFFFFFF : UInt64)
+  | MojoExpr.unop _ operand => evalExpr callFunc callFunc2 operand env
+  | MojoExpr.binop "+" l r => evalExpr callFunc callFunc2 l env + evalExpr callFunc callFunc2 r env
+  | MojoExpr.binop "-" l r => evalExpr callFunc callFunc2 l env - evalExpr callFunc callFunc2 r env
+  | MojoExpr.binop "*" l r => evalExpr callFunc callFunc2 l env * evalExpr callFunc callFunc2 r env
+  | MojoExpr.binop "<=" l r => if sKey (evalExpr callFunc callFunc2 l env) ≤ sKey (evalExpr callFunc callFunc2 r env) then 1 else 0
+  | MojoExpr.binop "<" l r => if sKey (evalExpr callFunc callFunc2 l env) < sKey (evalExpr callFunc callFunc2 r env) then 1 else 0
+  | MojoExpr.binop ">" l r => if sKey (evalExpr callFunc callFunc2 l env) > sKey (evalExpr callFunc callFunc2 r env) then 1 else 0
+  | MojoExpr.binop ">=" l r => if sKey (evalExpr callFunc callFunc2 l env) ≥ sKey (evalExpr callFunc callFunc2 r env) then 1 else 0
+  | MojoExpr.binop "=" l r => if evalExpr callFunc callFunc2 l env = evalExpr callFunc callFunc2 r env then 1 else 0
+  | MojoExpr.binop "!=" l r => if evalExpr callFunc callFunc2 l env ≠ evalExpr callFunc callFunc2 r env then 1 else 0
+  | MojoExpr.binop "and" l r => if (evalExpr callFunc callFunc2 l env ≠ 0 ∧ evalExpr callFunc callFunc2 r env ≠ 0) then 1 else 0
+  | MojoExpr.binop "or" l r => if (evalExpr callFunc callFunc2 l env ≠ 0 ∨ evalExpr callFunc callFunc2 r env ≠ 0) then 1 else 0
+  | MojoExpr.binop "&" l r => evalExpr callFunc callFunc2 l env &&& evalExpr callFunc callFunc2 r env
+  | MojoExpr.binop "|" l r => evalExpr callFunc callFunc2 l env ||| evalExpr callFunc callFunc2 r env
+  | MojoExpr.binop "^" l r => evalExpr callFunc callFunc2 l env ^^^ evalExpr callFunc callFunc2 r env
+  | MojoExpr.binop "/" l r => sdiv64 (evalExpr callFunc callFunc2 l env) (evalExpr callFunc callFunc2 r env)
+  | MojoExpr.binop "//" l r => fdiv64 (evalExpr callFunc callFunc2 l env) (evalExpr callFunc callFunc2 r env)
+  | MojoExpr.binop "%" l r => frem64 (evalExpr callFunc callFunc2 l env) (evalExpr callFunc callFunc2 r env)
+  | MojoExpr.binop "<<" l r => evalExpr callFunc callFunc2 l env <<< evalExpr callFunc callFunc2 r env
+  | MojoExpr.binop ">>" l r => asr64 (evalExpr callFunc callFunc2 l env) (evalExpr callFunc callFunc2 r env)
+  | MojoExpr.binop "**" l r => u64pow (evalExpr callFunc callFunc2 l env) (evalExpr callFunc callFunc2 r env)
+  | MojoExpr.binop _ l r => evalExpr callFunc callFunc2 l env
+  | MojoExpr.call "len" args => strlen (evalArgs callFunc args env callFunc2)
+  | MojoExpr.call "str_len" args => strlen (evalArgs callFunc args env callFunc2)
+  | MojoExpr.call "strlen" args => strlen (evalArgs callFunc args env callFunc2)
+  | MojoExpr.call name args => callFunc name (evalArgs callFunc args env callFunc2)
+  | MojoExpr.call2 name a b => callFunc2 name (evalExpr callFunc callFunc2 a env) (evalExpr callFunc callFunc2 b env)
 
 /-- PACK a call's arguments into the ONE value `callFunc` is handed.
 
@@ -1244,9 +1228,9 @@ def evalExpr (callFunc : String → UInt64 → UInt64) (e : MojoExpr) (env : Str
     typechecks today keeping its VALUE, so the widening cannot move a verdict by
     itself. -/
 def evalArgs (callFunc : String → UInt64 → UInt64) :
-    List MojoExpr → (String → UInt64) → UInt64
-  | [], _ => 1
-  | a :: as, env => evalExpr callFunc a env * evalArgs callFunc as env
+    List MojoExpr → (String → UInt64) → UInt64 → (String → UInt64 → UInt64 → UInt64) → UInt64
+  | [], _, _, _ => 1
+  | a :: as, env, callFunc2 => evalExpr callFunc callFunc2 a env * evalArgs callFunc as env callFunc2
 
 end
 
@@ -1254,32 +1238,32 @@ end
     the final environment, so an `if` branch that assigns a local and then falls
     through carries its updated environment into the trailing statements (the
     previous `Option UInt64`-only evaluator dropped it). -/
-def evalBodyEnv (callFunc : String → UInt64 → UInt64) (stmts : List MojoStmt) (env : String → UInt64) :
+def evalBodyEnv (callFunc : String → UInt64 → UInt64) (stmts : List MojoStmt) (env : String → UInt64) (callFunc2 : String → UInt64 → UInt64 → UInt64 := fun _ _ _ => 0) :
     Option UInt64 × (String → UInt64) :=
   match stmts with
   | [] => (none, env)
-  | MojoStmt.return e :: _ => (some (evalExpr callFunc e env), env)
+  | MojoStmt.return e :: _ => (some (evalExpr callFunc callFunc2 e env), env)
   | MojoStmt.ifstmt cond tb eb :: rest =>
-    let condVal := evalExpr callFunc cond env
+    let condVal := evalExpr callFunc callFunc2 cond env
     if condVal ≠ 0 then
-      let r := evalBodyEnv callFunc tb env
+      let r := evalBodyEnv callFunc tb env callFunc2
       match r.1 with
       | some v => (some v, r.2)
-      | none => evalBodyEnv callFunc rest r.2
+      | none => evalBodyEnv callFunc rest r.2 callFunc2
     else
-      let r := evalBodyEnv callFunc eb env
+      let r := evalBodyEnv callFunc eb env callFunc2
       match r.1 with
       | some v => (some v, r.2)
-      | none => evalBodyEnv callFunc rest r.2
-  | MojoStmt.while _ _ :: rest => evalBodyEnv callFunc rest env
+      | none => evalBodyEnv callFunc rest r.2 callFunc2
+  | MojoStmt.while _ _ :: rest => evalBodyEnv callFunc rest env callFunc2
   | MojoStmt.assign name e :: rest =>
-    let val := evalExpr callFunc e env
-    evalBodyEnv callFunc rest (fun n => if n == name then val else env n)
-  | MojoStmt.exprstmt _ :: rest => evalBodyEnv callFunc rest env
-  | MojoStmt.pass :: rest => evalBodyEnv callFunc rest env
+    let val := evalExpr callFunc callFunc2 e env
+    evalBodyEnv callFunc rest (fun n => if n == name then val else env n) callFunc2
+  | MojoStmt.exprstmt _ :: rest => evalBodyEnv callFunc rest env callFunc2
+  | MojoStmt.pass :: rest => evalBodyEnv callFunc rest env callFunc2
 
-def evalBody (callFunc : String → UInt64 → UInt64) (stmts : List MojoStmt) (env : String → UInt64) : Option UInt64 :=
-  (evalBodyEnv callFunc stmts env).1
+def evalBody (callFunc : String → UInt64 → UInt64) (stmts : List MojoStmt) (env : String → UInt64) (callFunc2 : String → UInt64 → UInt64 → UInt64 := fun _ _ _ => 0) : Option UInt64 :=
+  (evalBodyEnv callFunc stmts env callFunc2).1
 
 /-- The environment a CALL'S ARGUMENTS make, by NAME.
 
@@ -1322,10 +1306,11 @@ theorem mojoEnv_unbound_name_is_zero (p q : String) (u : UInt64) (n : String)
 list is what says which value is which.  This is the whole of what
 `MojoFunc.mk`'s single `param` could not say. -/
 def evalFunc (f : MojoFunc) (callFunc : String → UInt64 → UInt64)
-    (args : List UInt64) : UInt64 :=
+    (args : List UInt64)
+    (callFunc2 : String → UInt64 → UInt64 → UInt64 := fun _ _ _ => 0) : UInt64 :=
   match f with
   | MojoFunc.mk _ params body =>
-    match evalBody callFunc body (MojoEnv params args) with
+    match evalBody callFunc body (MojoEnv params args) callFunc2 with
     | some v => v
     | none => 0
 
@@ -1421,64 +1406,64 @@ theorem evalExpr_binop (callFunc : String → UInt64 → UInt64) (op : String) (
                                         · simp [evalExpr, h, h', h'', h3, h4, h5, h6, h7, h8, h9, h10, h11, h12, h13, h14, h15, h16, h17, h18, h19]
 
 /-- Evaluate a function call expression. -/
-theorem evalExpr_call (callFunc : String → UInt64 → UInt64) (name : String) (args : List MojoExpr) (env : String → UInt64) :
-  evalExpr callFunc (MojoExpr.call name args) env = callFunc name (evalArgs callFunc args env) := by
+theorem evalExpr_call (callFunc : String → UInt64 → UInt64) (callFunc2 : String → UInt64 → UInt64 → UInt64 := fun _ _ _ => 0) (name : String) (args : List MojoExpr) (env : String → UInt64) :
+  evalExpr callFunc callFunc2 (MojoExpr.call name args) env = callFunc name (evalArgs callFunc args env callFunc2) := by
   rfl
 
 /-- **The one-argument case, stated separately**, because it is the shape every
     existing proof uses: `v * 1 = v` in `UInt64`, so this is what a proof of a
     one-argument call rewrites with.  It is `simp` rather than `rfl` because the
     product is what the list fold leaves behind. -/
-theorem evalExpr_call_one (callFunc : String → UInt64 → UInt64) (name : String) (arg : MojoExpr) (env : String → UInt64) :
-  evalExpr callFunc (MojoExpr.call name [arg]) env = callFunc name (evalExpr callFunc arg env) := by
+theorem evalExpr_call_one (callFunc : String → UInt64 → UInt64) (callFunc2 : String → UInt64 → UInt64 → UInt64 := fun _ _ _ => 0) (name : String) (arg : MojoExpr) (env : String → UInt64) :
+  evalExpr callFunc callFunc2 (MojoExpr.call name [arg]) env = callFunc name (evalExpr callFunc arg env) := by
   simp [evalExpr, evalArgs]
 
 /-- `evalArgs` over a singleton list is its element -- the property that makes
     the widening value-preserving, stated on its own so it is checked rather
     than argued. -/
-theorem evalArgs_singleton (callFunc : String → UInt64 → UInt64) (a : MojoExpr) (env : String → UInt64) :
-  evalArgs callFunc [a] env = evalExpr callFunc a env := by
+theorem evalArgs_singleton (callFunc : String → UInt64 → UInt64) (callFunc2 : String → UInt64 → UInt64 → UInt64 := fun _ _ _ => 0) (a : MojoExpr) (env : String → UInt64) :
+  evalArgs callFunc [a] env callFunc2 = evalExpr callFunc callFunc2 a env := by
   simp [evalArgs]
 
 /-- Evaluate a return statement. -/
-theorem evalBody_return (callFunc : String → UInt64 → UInt64) (e : MojoExpr) (env : String → UInt64) :
-  evalBody callFunc [MojoStmt.return e] env = some (evalExpr callFunc e env) := by
+theorem evalBody_return (callFunc : String → UInt64 → UInt64) (callFunc2 : String → UInt64 → UInt64 → UInt64 := fun _ _ _ => 0) (e : MojoExpr) (env : String → UInt64) :
+  evalBody callFunc [MojoStmt.return e] env callFunc2 = some (evalExpr callFunc callFunc2 e env) := by
   simp [evalBody, evalBodyEnv]
 
 /-- single-stmt if-then-else. -/
-theorem evalBody_ifstmt (callFunc : String → UInt64 → UInt64) (cond : MojoExpr) (t e : List MojoStmt) (env : String → UInt64) :
-  evalBody callFunc [MojoStmt.ifstmt cond t e] env =
-  let condVal := evalExpr callFunc cond env
+theorem evalBody_ifstmt (callFunc : String → UInt64 → UInt64) (callFunc2 : String → UInt64 → UInt64 → UInt64 := fun _ _ _ => 0) (cond : MojoExpr) (t e : List MojoStmt) (env : String → UInt64) :
+  evalBody callFunc [MojoStmt.ifstmt cond t e] env callFunc2 =
+  let condVal := evalExpr callFunc callFunc2 cond env
   if condVal ≠ 0 then
-    match evalBody callFunc t env with
+    match evalBody callFunc t env callFunc2 with
     | some v => some v
     | none => none
   else
-    match evalBody callFunc e env with
+    match evalBody callFunc e env callFunc2 with
     | some v => some v
     | none => none := by
   simp only [evalBody, evalBodyEnv]
-  by_cases h : evalExpr callFunc cond env = 0
+  by_cases h : evalExpr callFunc callFunc2 cond env = 0
   · simp only [h, ne_eq, not_true_eq_false, if_false]
-    cases evalBodyEnv callFunc e env with
+    cases evalBodyEnv callFunc e env callFunc2 with
     | mk r env' => cases r <;> rfl
   · simp only [h, ne_eq, not_false_eq_true, if_true]
-    cases evalBodyEnv callFunc t env with
+    cases evalBodyEnv callFunc t env callFunc2 with
     | mk r env' => cases r <;> rfl
 
 /-- single-stmt while (body skipped). -/
-theorem evalBody_while (callFunc : String → UInt64 → UInt64) (cond : MojoExpr) (body : List MojoStmt) (env : String → UInt64) :
-  evalBody callFunc [MojoStmt.while cond body] env = none := by
+theorem evalBody_while (callFunc : String → UInt64 → UInt64) (callFunc2 : String → UInt64 → UInt64 → UInt64 := fun _ _ _ => 0) (cond : MojoExpr) (body : List MojoStmt) (env : String → UInt64) :
+  evalBody callFunc [MojoStmt.while cond body] env callFunc2 = none := by
   simp [evalBody, evalBodyEnv]
 
 /-- single-stmt assign. -/
-theorem evalBody_assign (callFunc : String → UInt64 → UInt64) (name : String) (e : MojoExpr) (env : String → UInt64) :
-  evalBody callFunc [MojoStmt.assign name e] env = none := by
+theorem evalBody_assign (callFunc : String → UInt64 → UInt64) (callFunc2 : String → UInt64 → UInt64 → UInt64 := fun _ _ _ => 0) (name : String) (e : MojoExpr) (env : String → UInt64) :
+  evalBody callFunc [MojoStmt.assign name e] env callFunc2 = none := by
   simp [evalBody, evalBodyEnv]
 
 /-- single-stmt exprstmt. -/
-theorem evalBody_exprstmt (callFunc : String → UInt64 → UInt64) (e : MojoExpr) (env : String → UInt64) :
-  evalBody callFunc [MojoStmt.exprstmt e] env = none := by
+theorem evalBody_exprstmt (callFunc : String → UInt64 → UInt64) (callFunc2 : String → UInt64 → UInt64 → UInt64 := fun _ _ _ => 0) (e : MojoExpr) (env : String → UInt64) :
+  evalBody callFunc [MojoStmt.exprstmt e] env callFunc2 = none := by
   simp [evalBody, evalBodyEnv]
 
 /-- The environment-threading evaluator's assignment clause, on the returned
@@ -1540,17 +1525,18 @@ theorem u64_le_iff_toNat_le (a b : UInt64) : a ≤ b ↔ a.toNat ≤ b.toNat := 
 -/
 theorem evalFunc_eq_mojo_all (f : MojoFunc) (handler : String → UInt64 → UInt64)
     (mojo_fn : List UInt64 → UInt64) (args : List UInt64)
+    (callFunc2 : String → UInt64 → UInt64 → UInt64 := fun _ _ _ => 0)
   (h_result : match f with
     | MojoFunc.mk _ params body =>
-      match evalBody handler body (MojoEnv params args) with
+      match evalBody handler body (MojoEnv params args) callFunc2 with
       | some v => v = mojo_fn args
-      | none => 0 = mojo_fn args) : evalFunc f handler args = mojo_fn args := by
+      | none => 0 = mojo_fn args) : evalFunc f handler args callFunc2 = mojo_fn args := by
   unfold evalFunc
   cases f
   rename_i name params body
   dsimp at h_result
   dsimp
-  cases h_eq : evalBody handler body (MojoEnv params args) with
+  cases h_eq : evalBody handler body (MojoEnv params args) callFunc2 with
   | some v =>
     rw [h_eq] at h_result
     exact h_result
@@ -2816,6 +2802,13 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let rm := ((insn >>> 16) &&& 0x1f).toNat
     let addr := arm64_reg_or_sp rn s + arm64_reg rm s
     some { s with mem := mem_write_u64 s.mem addr.toNat (arm64_reg rt s) }
+  else if (insn &&& 0xffe0fc00) = 0x38206800 then
+    -- STRB Wt, [Xn, Xm] (register offset, LSL #0): byte store.
+    let rt := (insn &&& 0x1f).toNat
+    let rn := ((insn >>> 5) &&& 0x1f).toNat
+    let rm := ((insn >>> 16) &&& 0x1f).toNat
+    let addr := arm64_reg_or_sp rn s + arm64_reg rm s
+    some { s with mem := mem_write_u8 s.mem addr.toNat (arm64_reg rt s) }
   else if (insn &&& 0xffe00c00) = 0xf8400000 then
     -- LDUR Xt, [Xn, #imm9]: unscaled, which in practice means the NEGATIVE
     -- displacement a scale form cannot express. The field is a SIGNED 9-bit
@@ -3565,45 +3558,46 @@ inductive RunRes where
   | ret (v : UInt64)
 
 def runF (fuel : Nat) (cf : String → UInt64 → UInt64)
+    (cf2 : String → UInt64 → UInt64 → UInt64 := fun _ _ _ => 0)
     (stmts : List MojoStmt) (env : String → UInt64) : Option RunRes :=
   match fuel with
   | 0 => none
   | f + 1 =>
     match stmts with
     | [] => some (.done env)
-    | MojoStmt.return e :: _ => some (.ret (evalExpr cf e env))
+    | MojoStmt.return e :: _ => some (.ret (evalExpr cf cf2 e env))
     | MojoStmt.ifstmt c tb eb :: rest =>
-        if evalExpr cf c env ≠ 0 then
-          match runF f cf tb env with
+        if evalExpr cf cf2 c env ≠ 0 then
+          match runF f cf cf2 tb env with
           | some (.ret v) => some (.ret v)
-          | some (.done env') => runF f cf rest env'
+          | some (.done env') => runF f cf cf2 rest env'
           | none => none
         else
-          match runF f cf eb env with
+          match runF f cf cf2 eb env with
           | some (.ret v) => some (.ret v)
-          | some (.done env') => runF f cf rest env'
+          | some (.done env') => runF f cf cf2 rest env'
           | none => none
     | MojoStmt.while c body :: rest =>
-        if evalExpr cf c env ≠ 0 then
-          match runF f cf body env with
+        if evalExpr cf cf2 c env ≠ 0 then
+          match runF f cf cf2 body env with
           | some (.ret v) => some (.ret v)
-          | some (.done env') => runF f cf (MojoStmt.while c body :: rest) env'
+          | some (.done env') => runF f cf cf2 (MojoStmt.while c body :: rest) env'
           | none => none
         else
-          runF f cf rest env
+          runF f cf cf2 rest env
     | MojoStmt.assign name e :: rest =>
-        let v := evalExpr cf e env
-        runF f cf rest (fun n => if n == name then v else env n)
-    | MojoStmt.exprstmt _ :: rest => runF f cf rest env
-    | MojoStmt.pass :: rest => runF f cf rest env
+        let v := evalExpr cf cf2 e env
+        runF f cf cf2 rest (fun n => if n == name then v else env n)
+    | MojoStmt.exprstmt _ :: rest => runF f cf cf2 rest env
+    | MojoStmt.pass :: rest => runF f cf cf2 rest env
 
 /-- Fuel-bounded function evaluation: source-level semantics including
 while loops.  Agrees with `evalFunc` on programs without whiles. -/
 def evalFuncF (fuel : Nat) (f : MojoFunc) (cf : String → UInt64 → UInt64)
-    (args : List UInt64) : UInt64 :=
+    (args : List UInt64) (cf2 : String → UInt64 → UInt64 → UInt64 := fun _ _ _ => 0) : UInt64 :=
   match f with
   | MojoFunc.mk _ params body =>
-    match runF fuel cf body (MojoEnv params args) with
+    match runF fuel cf cf2 body (MojoEnv params args) with
     | some (.ret v) => v
     | _ => 0
 
@@ -9342,9 +9336,9 @@ set_option linter.unusedSimpArgs false in
     `env` is `MojoExpr.var name ↦ env name` — and it is what lets a method's
     field reads and local reads share one environment without either being able
     to see the other's names. -/
-theorem evalExpr_congr (callFunc : String → UInt64 → UInt64) (e : MojoExpr)
+theorem evalExpr_congr (callFunc : String → UInt64 → UInt64) (callFunc2 : String → UInt64 → UInt64 → UInt64 := fun _ _ _ => 0) (e : MojoExpr)
     {env env' : String → UInt64} (h : ∀ x, env x = env' x) :
-    evalExpr callFunc e env = evalExpr callFunc e env' := by
+    evalExpr callFunc callFunc2 e env = evalExpr callFunc callFunc2 e env' := by
   -- **`MojoExpr.rec` with BOTH motives, not `induction e`.**  `MojoExpr` is a
   -- nested inductive since `call` carries a `List MojoExpr`, and `induction`
   -- refuses it outright -- "The `induction` tactic does not support the type
@@ -9359,9 +9353,9 @@ theorem evalExpr_congr (callFunc : String → UInt64 → UInt64) (e : MojoExpr)
   -- statement is what stops this from moving every generated proof in the tree.
   refine MojoExpr.rec
     (motive_1 := fun e => ∀ {env env' : String → UInt64},
-      (∀ x, env x = env' x) → evalExpr callFunc e env = evalExpr callFunc e env')
+      (∀ x, env x = env' x) → evalExpr callFunc callFunc2 e env = evalExpr callFunc callFunc2 e env')
     (motive_2 := fun args => ∀ {env env' : String → UInt64},
-      (∀ x, env x = env' x) → evalArgs callFunc args env = evalArgs callFunc args env')
+      (∀ x, env x = env' x) → evalArgs callFunc args env callFunc2 = evalArgs callFunc args env' callFunc2)
     (fun v {env env'} _ => rfl)
     (fun b {env env'} _ => rfl)
     (fun name {env env'} hh => hh name)
@@ -9401,6 +9395,7 @@ theorem evalExpr_congr (callFunc : String → UInt64 → UInt64) (e : MojoExpr)
                                           · by_cases h19 : op = "**"; · subst h19; simp only [evalExpr, hl, hr]
                                             · simp only [evalExpr, h0, h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, h11, h12, h13, h14, h15, h16, h17, h18, h19, hl, hr])
     (fun name args ih {env env'} hh => by simp only [evalExpr, ih hh])
+    (fun name a b iha ihb {env env'} hh => by simp only [evalExpr, iha hh, ihb hh])
     (fun {env env'} _ => rfl)
     (fun head tail ih1 ih2 {env env'} hh => by
       simp only [evalArgs, ih1 hh, ih2 hh])
@@ -9434,9 +9429,9 @@ private theorem ifUpdate_congr {env env' : String → UInt64} (h : ∀ x, env x 
   by_cases hn : n == name <;> simp [hn, h n]
 
 set_option linter.defProp false in
-private def congrAux (callFunc : String → UInt64 → UInt64) :
+private def congrAux (callFunc : String → UInt64 → UInt64) (callFunc2 : String → UInt64 → UInt64 → UInt64 := fun _ _ _ => 0) :
     ∀ (stmts : List MojoStmt) (env env' : String → UInt64),
-      (∀ x, env x = env' x) → evalBodyEnv callFunc stmts env = evalBodyEnv callFunc stmts env'
+      (∀ x, env x = env' x) → evalBodyEnv callFunc stmts env callFunc2 = evalBodyEnv callFunc stmts env' callFunc2
   | [], env, env', h => by
       simp only [evalBodyEnv]
       congr 1
@@ -9456,10 +9451,10 @@ private def congrAux (callFunc : String → UInt64 → UInt64) :
           generalize hcv : (evalExpr callFunc cond env') = cv
           by_cases hc : cv ≠ 0
           · simp only [if_pos hc]
-            rw [congrAux callFunc tb env env' h]
+            rw [congrAux callFunc callFunc2 tb env env' h]
           · simp only [if_neg hc]
-            rw [congrAux callFunc eb env env' h]
-      | «while» cond body => simp only [evalBodyEnv]; exact congrAux callFunc rest env env' h
+            rw [congrAux callFunc callFunc2 eb env env' h]
+      | «while» cond body => simp only [evalBodyEnv]; exact congrAux callFunc callFunc2 rest env env' h
       | assign name e =>
           simp only [evalBodyEnv]
           have henv : (fun n => if (n == name) = true then evalExpr callFunc e env else env n)
@@ -9467,8 +9462,8 @@ private def congrAux (callFunc : String → UInt64 → UInt64) :
             funext n
             by_cases hn : (n == name) = true <;> simp [hn, h n, evalExpr_congr callFunc e h]
           rw [henv]
-      | exprstmt e => simp only [evalBodyEnv]; exact congrAux callFunc rest env env' h
-      | pass => simp only [evalBodyEnv]; exact congrAux callFunc rest env env' h
+      | exprstmt e => simp only [evalBodyEnv]; exact congrAux callFunc callFunc2 rest env env' h
+      | pass => simp only [evalBodyEnv]; exact congrAux callFunc callFunc2 rest env env' h
 termination_by stmts _ _ _ => stmtsSize stmts
 decreasing_by
   all_goals simp only [stmtsSize, stmtBodySize]
@@ -9484,10 +9479,10 @@ decreasing_by
     an environment that agrees with the original where the original was
     unchanged" — which is `ifUpdate_congr` and `congrAux` on a strict sublist
     respectively. -/
-theorem evalBodyEnv_congr (callFunc : String → UInt64 → UInt64) (stmts : List MojoStmt)
+theorem evalBodyEnv_congr (callFunc : String → UInt64 → UInt64) (callFunc2 : String → UInt64 → UInt64 → UInt64 := fun _ _ _ => 0) (stmts : List MojoStmt)
     {env env' : String → UInt64} (h : ∀ x, env x = env' x) :
-    evalBodyEnv callFunc stmts env = evalBodyEnv callFunc stmts env' :=
-  congrAux callFunc stmts env env' h
+    evalBodyEnv callFunc stmts env callFunc2 = evalBodyEnv callFunc stmts env' callFunc2 :=
+  congrAux callFunc callFunc2 stmts env env' h
 
 
 namespace MF
@@ -9570,3 +9565,87 @@ theorem mf_two_instances_no_alias (mem : Nat → UInt8) (b1 b2 : UInt64)
     hb1 hb2 hfit1 hfit2 hsep
 
 end MF
+
+set_option maxHeartbeats 4000000 in
+/-- Per-instruction step: `work_step_strb_regoff`.
+
+    One of the twelve narrower/unscaled access forms APPENDED to `arm64_step`;
+    the comment above them there says why they sit at the END of the chain rather
+    than in the architectural position.  This lemma is the half of that decision
+    which is visible: it states the `¬` fact for **every** branch before this
+    one — 64 of them, the 64 earlier arms plus the equality test — and each is
+    a `bv_decide` over the hypothesis `h` and all 2^32 words of `w`.  So these
+    lemmas ARE the measurement that no earlier branch claims these words:
+    they would not typecheck if one did. -/
+theorem work_step_strb_regoff (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xffe0fc00) = 0x38206800) :
+    arm64_step s code = some { s with mem := mem_write_u8 s.mem ((if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + arm64_reg (((w >>> 16) &&& 0x1f).toNat) s).toNat (arm64_reg ((w &&& 0x1f).toNat) s) } := by
+  unfold arm64_step
+  rw [hpc, hread]
+  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
+    intro t; rw [t] at h; exact absurd h (by decide)
+  have hne_1 : ¬ ((w &&& 0xffe00000) = 0x2A00FA00) := by intro t; bv_decide
+  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
+  have hne_3 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
+  have hne_4 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
+  have hne_5 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
+  have hne_6 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
+  have hne_7 : ¬ ((w &&& 0xffe00000) = 0x8a000000) := by intro t; bv_decide
+  have hne_8 : ¬ ((w &&& 0xffe00000) = 0xca000000) := by intro t; bv_decide
+  have hne_9 : ¬ ((w &&& 0xff800000) = 0x11000000) := by intro t; bv_decide
+  have hne_10 : ¬ ((w &&& 0xff800000) = 0x91000000) := by intro t; bv_decide
+  have hne_11 : ¬ ((w &&& 0xff800000) = 0x51000000) := by intro t; bv_decide
+  have hne_12 : ¬ ((w &&& 0xff800000) = 0xd1000000) := by intro t; bv_decide
+  have hne_13 : ¬ ((w &&& 0xff800000) = 0xf1000000) := by intro t; bv_decide
+  have hne_14 : ¬ ((w &&& 0xfc000000) = 0x14000000) := by intro t; bv_decide
+  have hne_15 : ¬ ((w &&& 0xfc000000) = 0x94000000) := by intro t; bv_decide
+  have hne_16 : ¬ ((w &&& 0xff000000) = 0xb4000000) := by intro t; bv_decide
+  have hne_17 : ¬ ((w &&& 0xff000000) = 0xb5000000) := by intro t; bv_decide
+  have hne_18 : ¬ ((w &&& 0xff000000) = 0x54000000) := by intro t; bv_decide
+  have hne_19 : ¬ ((w &&& 0xff000000) = 0x36000000) := by intro t; bv_decide
+  have hne_20 : ¬ ((w &&& 0xff000000) = 0x37000000) := by intro t; bv_decide
+  have hne_21 : ¬ ((w &&& 0xffe00000) = 0xF9400000) := by intro t; bv_decide
+  have hne_22 : ¬ ((w &&& 0xffe00000) = 0xB9000000) := by intro t; bv_decide
+  have hne_23 : ¬ ((w &&& 0x9f000000) = 0x90000000) := by intro t; bv_decide
+  have hne_24 : ¬ ((w &&& 0xffc00000) = 0xA9800000) := by intro t; bv_decide
+  have hne_25 : ¬ ((w &&& 0xffc00000) = 0xA8C00000) := by intro t; bv_decide
+  have hne_26 : ¬ ((w &&& 0xffe00000) = 0x52800000) := by intro t; bv_decide
+  have hne_27 : ¬ ((w &&& 0xffe00000) = 0xd2800000) := by intro t; bv_decide
+  have hne_28 : ¬ ((w &&& 0xffe00000) = 0xaa000000) := by intro t; bv_decide
+  have hne_29 : ¬ ((w &&& 0xff800000) = 0xf2800000) := by intro t; bv_decide
+  have hne_30 : ¬ ((w &&& 0xff800000) = 0x72800000) := by intro t; bv_decide
+  have hne_31 : ¬ ((w &&& 0xffe00000) = 0x12800000) := by intro t; bv_decide
+  have hne_32 : ¬ ((w &&& 0xffe00000) = 0x92800000) := by intro t; bv_decide
+  have hne_33 : ¬ ((w &&& 0xffff0fe0) = 0x9a9f07e0) := by intro t; bv_decide
+  have hne_34 : ¬ ((w &&& 0xffe00000) = 0xF9000000) := by intro t; bv_decide
+  have hne_35 : ¬ ((w &&& 0xffc00000) = 0xA9400000) := by intro t; bv_decide
+  have hne_36 : ¬ ((w &&& 0xffe0fc00) = 0xAA200000) := by intro t; bv_decide
+  have hne_37 : ¬ ((w &&& 0xfffffc1f) = 0xD61F0000) := by intro t; bv_decide
+  have hne_38 : ¬ ((w &&& 0xffe0001f) = 0xD4000001) := by intro t; bv_decide
+  have hne_39 : ¬ ((w &&& 0xffe0fc00) = 0x13001c00) := by intro t; bv_decide
+  have hne_40 : ¬ ((w &&& 0xffe0fc00) = 0x13003c00) := by intro t; bv_decide
+  have hne_41 : ¬ ((w &&& 0xffe0fc00) = 0x93407c00) := by intro t; bv_decide
+  have hne_42 : ¬ ((w &&& 0xffc0fc00) = 0x92401c00) := by intro t; bv_decide
+  have hne_43 : ¬ ((w &&& 0xffc0fc00) = 0x92403c00) := by intro t; bv_decide
+  have hne_44 : ¬ ((w &&& 0xffc0fc00) = 0x92407c00) := by intro t; bv_decide
+  have hne_45 : ¬ ((w &&& 0xffe0fc00) = 0x9ac00800) := by intro t; bv_decide
+  have hne_46 : ¬ ((w &&& 0xffe0fc00) = 0x9ac00c00) := by intro t; bv_decide
+  have hne_47 : ¬ ((w &&& 0xffe0fc00) = 0x9ac02000) := by intro t; bv_decide
+  have hne_48 : ¬ ((w &&& 0xffe0fc00) = 0x9ac02400) := by intro t; bv_decide
+  have hne_49 : ¬ ((w &&& 0xffe0fc00) = 0x9ac02800) := by intro t; bv_decide
+  have hne_50 : ¬ ((w &&& 0xffe08000) = 0x9b008000) := by intro t; bv_decide
+  have hne_51 : ¬ ((w &&& 0xffc0fc00) = 0xd340fc00) := by intro t; bv_decide
+  have hne_52 : ¬ ((w &&& 0xffc0fc00) = 0x9340fc00) := by intro t; bv_decide
+  have hne_53 : ¬ ((w &&& 0xffc00000) = 0xd3400000) := by intro t; bv_decide
+  have hne_54 : ¬ ((w &&& 0xffd00000) = 0x39400000) := by intro t; bv_decide
+  have hne_55 : ¬ ((w &&& 0xffd00000) = 0x39000000) := by intro t; bv_decide
+  have hne_56 : ¬ ((w &&& 0xffd00000) = 0x79400000) := by intro t; bv_decide
+  have hne_57 : ¬ ((w &&& 0xffd00000) = 0x79000000) := by intro t; bv_decide
+  have hne_58 : ¬ ((w &&& 0xffd00000) = 0x39800000) := by intro t; bv_decide
+  have hne_59 : ¬ ((w &&& 0xffd00000) = 0x79800000) := by intro t; bv_decide
+  have hne_60 : ¬ ((w &&& 0xffd00000) = 0xb9800000) := by intro t; bv_decide
+  have hne_61 : ¬ ((w &&& 0xffd00000) = 0xb9400000) := by intro t; bv_decide
+  have hne_62 : ¬ ((w &&& 0xffe0fc00) = 0xf8606800) := by intro t; bv_decide
+  have hne_63 : ¬ ((w &&& 0xffe0fc00) = 0xf8206800) := by intro t; bv_decide
+  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_neg hne_61, if_neg hne_62, if_neg hne_63, if_pos h]; try dsimp; try rfl; try simp

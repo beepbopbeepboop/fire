@@ -425,13 +425,14 @@ except D.DecodeError:
 # forms above, so a decoder that refused those forms made this whole region
 # undecodable -- which is how `bugs/formal/FORMAL_x86_64_decoder_refuses_sib_indexed_
 # forms.md` was seen.  The region runs from `float_repr_addr` to the first string
-# label (the data pool the decode must NOT walk into).
+# label (the data pool the decode must NOT walk into). The helper is emitted
+# only when a float is printed, so the program prints one.
 import formal.build as _FB
 
 with tempfile.TemporaryDirectory(prefix="decode-helper-") as _td:
     _src = os.path.join(_td, "prog.mojo")
     with open(_src, "w") as _f:
-        _f.write("def main(n) -> Int:\n    return n * 2 + 1\n")
+        _f.write("def main(n) -> Int:\n    print(1.5)\n    return n * 2 + 1\n")
     _r = _FB.compile_formal(_src, prove=False, check=False, arch="x86_64")
     _code, _info = _r["code"], _r["info"]
     _base = _info["base_addr"]

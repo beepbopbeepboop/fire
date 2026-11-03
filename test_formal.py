@@ -127,30 +127,35 @@ EXPECTED_FAILURES = {
     # whenever its contract is reached, and is refused before then for a
     # different reason (a conditional back edge, its own entry below).
     # See signed dec-while loop model (fixed).
+    "countdown": "the decrement-while runF model treats the counter as a "
+                 "non-negative magnitude; a signed `int` means `n <= 0` exits "
+                 "immediately and returns n unchanged, which pred_iff and the "
+                 "model both deny",
+    "wge": "same as countdown, for the `n >= 1` spelling",
 
+    # `a = [10,20,30]; i = 1; return a[i]` -- a subscript with a
+    # runtime-variable index. The semantic model has no list domain and the
+    # list blob's memory image is not derived from the source literal.
+    "subscript_var": "runtime-indexed list subscript: the semantic model has "
+                     "no list domain and the list blob's memory image is not "
+                     "derived from the source literal",
 
+    # `struct Point: var x: Int; var y: Int` and `return p.get_x() + p.get_y()`.
+    # Refused at GENERATION time: the frame-receiver proof generator raises
+    # `NotImplementedError: model: a struct field read has no value in the
+    # semantic model` while TRANSLATING, so no proof is generated at all.
+    "wide_recv": "the frame-receiver proof generator refuses it at GENERATION "
+                 "time: a struct field read has no value in the semantic model "
+                 "(the model's environment/domain is not extended for struct fields)",
 
+    # `fib(n) = fib(n-1) + fib(n-2)` -- tree recursion, one goal left.
+    "fib": "tree-recursion FrameOk window read over a store stack whose "
+           "addresses u64_sub_add splits into sp - (K - 8); the peel needs a "
+           "collapse at data-dependent nesting depth",
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    # `count(n) = count(n-1)` -- tree recursion.
+    "count": "tree recursion whose FrameOk/window obligations cannot be closed "
+             "by the current frame model",
 
 }
 

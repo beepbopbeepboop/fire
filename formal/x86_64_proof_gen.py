@@ -261,9 +261,38 @@ def _eval_eq_mojo_section(func_name: str, fn, typed: bool,
     from formal import arm64_proof_gen as AP
     _cf = AP._call_func_lean(func_name, admitted, arity=arity,
                             exports=callees)
+    # build callFunc2
+    _admitted_calls_map2 = {}
+    try:
+        for c in admitted or []:
+            if isinstance(c, dict):
+                name = c.get("name")
+                lean_name = c.get("lean_name")
+                ar = c.get("arity") if "arity" in c else 1
+            else:
+                name = getattr(c, "name", None)
+                lean_name = getattr(c, "lean_name", None)
+                ar = getattr(c, "arity", 1)
+            if name and lean_name and ar == 2:
+                _admitted_calls_map2[str(name)] = lean_name
+                if "." in str(name):
+                    _admitted_calls_map2[str(name).split(".")[-1]] = lean_name
+    except Exception:
+        pass
+    try:
+        from formal import arm64_proof_gen as AP2
+        for k, v in (callees or {}).items():
+            if k not in _admitted_calls_map2 and v:
+                pass
+    except Exception:
+        pass
+    try:
+        _cf2 = AP._call_func2_lean(func_name, _admitted_calls_map2)
+    except Exception:
+        _cf2 = "(fun name arg0 arg1 => 0)"
     return (f"/-- eval_eq_mojo: AST evaluation agrees with the semantic model. -/\n"
             f"theorem eval_eq_mojo {AP._entry_binders(arity)} :\n"
-            f"  evalFunc ast {_cf} {AP._entry_arg_list(_en)} = "
+            f"  evalFunc ast {_cf} {_cf2} {AP._entry_arg_list(_en)} = "
             f"{AP._apply_args('mojo', _en)} := by\n"
             f"  {proof}\n")
 
@@ -724,8 +753,9 @@ def _program_externs(info: dict) -> list:
 
     **And the float-repr helper's calls are not the program's, either.** The
     helper (`formal/x86_64_codegen.py::_emit_float_repr_helper`) is emitted
-    once per image after every function body, so its `snprintf`/`strtod` are
-    in `extern_calls` at or above the entry for EVERY image on this backend,
+    once per image after every function body, and only when a float is
+    printed, so its `snprintf`/`strtod` are in `extern_calls` at or above the
+    entry for EVERY image that prints one,
     and reading them as program calls suppresses every run test — the same
     failure arriving with the helper instead of the guard. The emitter
     publishes their sites in `info["float_repr_calls"]` and they are

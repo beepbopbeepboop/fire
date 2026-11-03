@@ -849,13 +849,17 @@ class X86_64Codegen:
         # TestCompilerTrapIsNotAProgramCall` for what is asserted about it.
         self._compiler_trap_addrs: list = []
         # ADDRESSES of the calls the float-repr helper made — its `snprintf`
-        # and `strtod`.  The helper is this emitter's own (every image carries
-        # it, after the function bodies), so its call sites are not calls the
-        # PROGRAM makes: `formal/x86_64_proof_gen.py::_program_externs`
+        # and `strtod`.  The helper is this emitter's own (emitted after the
+        # function bodies when a float is printed), so its call sites are not
+        # calls the PROGRAM makes: `formal/x86_64_proof_gen.py::_program_externs`
         # subtracts them for the same reason it subtracts the traps, and not
-        # doing so suppresses the run tests of every image on this backend.
+        # doing so suppresses the run tests of every image that prints a float.
         # Published in `compile()`'s `info` as `float_repr_calls`.
         self._float_repr_call_addrs: list = []
+        # Set by `_emit_float_print_operand`, the only thing that calls the
+        # helper. The helper is emitted only when this is set, so an image whose
+        # program formats no float carries no helper and no `snprintf`/`strtod`.
+        self._float_repr_used: bool = False
         # The functions whose prologue carries the stack-floor guard, filled by
         # `compile()` once the whole image's call graph is known — see
         # `model.stack_floor_guarded_names`. The x86-64 twin of arm64's, from the
@@ -1192,8 +1196,10 @@ class X86_64Codegen:
         for f, label in zip(functions, self._def_labels):
             self._emit_function(f, label)
 
-        # Float-repr helper, once, after all function bodies.
-        self._emit_float_repr_helper()
+        # Float-repr helper, once, after all function bodies, and only when a
+        # float is printed (see `_float_repr_used`).
+        if self._float_repr_used:
+            self._emit_float_repr_helper()
 
         # Every body is out, so a NAME can be bound to the one a call reaches.
         # Before `resolve()`, so the startup `call` above and every `call` in a
@@ -1231,10 +1237,14 @@ class X86_64Codegen:
                        if n not in self._internal_labels},
             # The float-repr helper's entry, published separately because it is
             # internal and so absent from `labels`. It is emitted after every
-            # function body, so a consumer that decodes a body linearly from its
-            # entry must stop here or it walks into the helper. Consumer:
-            # `_body` in `formal/x86_64_endtoend_test.py`.
-            "float_repr_addr": self.asm.labels[M.FLOAT_REPR_SYMBOL],
+            # function body when a float is printed, and `None` otherwise, so a
+            # consumer that decodes a body linearly from its entry must stop at
+            # it when it is present. `x86_64_decode.body_end` is the one reader.
+            "float_repr_addr": self.asm.labels.get(M.FLOAT_REPR_SYMBOL),
+            # One past the last byte of the image. The bound a body's linear
+            # decode stops at when the image has neither a string pool nor a
+            # float-repr helper after its bodies (`x86_64_decode.body_end`).
+            "image_end": base_addr + len(code),
             "func_name": first_func_name,
             "external_syms": external_syms,
             "extern_calls": extern_calls,
@@ -1247,8 +1257,9 @@ class X86_64Codegen:
             # `_emit_stack_floor_guard`.
             "compiler_traps": sorted(self._compiler_trap_addrs),
             # The float-repr helper's OWN extern calls (`snprintf`, `strtod`),
-            # by address — it is emitted once per image after every function
-            # body, so the sites are in `extern_calls` at or above the entry
+            # by address — it is emitted once per image, after every function
+            # body, when a float is printed, so the sites are in `extern_calls`
+            # at or above the entry
             # and `_program_externs` subtracts them there, the same subtraction
             # `compiler_traps` is for the guard's `exit`.
             "float_repr_calls": sorted(self._float_repr_call_addrs),
@@ -4915,6 +4926,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         imm = 16 * (1 + fp.position) + 64 * fp.index
         self.asm.emit(encode_lea_r64_rm64(Reg.RSI, Reg.RSP, imm))
         self.asm.emit(encode_mov_r64_r64(Reg.RDI, Reg.RAX))
+        self._float_repr_used = True
         self.asm.emit(encode_call_rel32(0))
         self.asm.emit_label_rel32(M.FLOAT_REPR_SYMBOL, here_offset=-4)
 
@@ -5321,7 +5333,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # are this backend's, and the plan needs them only for the five methods
         # whose arguments are read as `char *`.
         accept = None
-        if M.is_string_method(method):
+        recv_kind = self._method_recv_kind(e)
+        if M.is_string_method(method) and M.string_operand_is_string(recv_kind):
             args = list(e.args)
             plan, payload = M.string_method_call_plan(
                 method, _dotted(e.func), obj, args,
@@ -5336,7 +5349,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 return
             accept = payload
         reason = M.value_method_refusal(
-            method, self._method_recv_kind(e), _dotted(e.func),
+            method, recv_kind, _dotted(e.func),
             receiver_is_fd=self._expr_is_fd(obj),
             receiver_shape=M.receiver_shape(obj))
         if reason is not None:
@@ -6758,7 +6771,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             raise CodegenError(why)
 
     def _emit_subscript_addr(self, e: F.SubscriptExpr,
-                             for_store: bool = False) -> None:
+                             for_store: bool = False,
+                             element_kind_ok: bool = False) -> None:
         """RAX = the ADDRESS of `obj[index]` (not its value).
 
         Split out so the same address computation serves a read, a store and
@@ -6869,7 +6883,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # where the frame held 3 in its first slot.
         self._refuse_frame_slot_element("a subscript", e.obj)
         shape, width, signed, sub_why = M.subscript_base_lowering(
-            self._cur_fn, e.obj, self._structs, self._functions, self._structs)
+            self._cur_fn, e.obj, self._structs, self._functions, self._structs,
+            element_kind_ok=element_kind_ok)
         if shape is None:
             raise CodegenError(sub_why)
         if shape == "load":
@@ -6976,7 +6991,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._emit_slice_parts(e.obj, e.index.start, e.index.stop,
                                    e.index.step)
             return
-        self._emit_subscript_addr(e)
+        # A READ: the element's kind is the pointee's (`pointee_kind_of`), so a
+        # float element is loaded and answered as a double. The flag is what
+        # admits it; the store and augmented/del/tuple forms do not pass it.
+        self._emit_subscript_addr(e, element_kind_ok=True)
         self._emit_subscript_load(Reg.RAX)
 
     def _emit_subscript_load(self, dst: Reg) -> None:
@@ -9048,11 +9066,22 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         No truncation follows, and that is the difference from the integer ALU's
         tail: a `double` has no declared narrower width to be cut to.
         """
+        self._emit_float_operands(l, r)
+        self._emit_float_op_on_xmm(op)
+
+    def _emit_float_op_on_xmm(self, op: str) -> None:
+        """The FP operation of `op` on XMM0 and XMM1, leaving the result in RAX.
+
+        The shared tail of `_emit_float_binary` and the augmented subscript
+        store: the caller has put the left operand in XMM0 and the right in
+        XMM1, and R11 holds the right operand's bits, which is what the
+        divide-by-zero guard tests. One place for the operator's meaning
+        (`FLOAT_BINARY_MNEMONICS`) and its guard on both forms.
+        """
         emit = {
             "addsd": encode_addsd_xmm, "subsd": encode_subsd_xmm,
             "mulsd": encode_mulsd_xmm, "divsd": encode_divsd_xmm,
         }[M.FLOAT_BINARY_MNEMONICS[op][1]]
-        self._emit_float_operands(l, r)
         if op == "/" and M.raise_float_divides_by_zero_is_an_exception():
             self._emit_float_divide_by_zero_guard()
         self.asm.emit(emit(0, 1))
@@ -9814,12 +9843,28 @@ preference.
         """`obj[index] = value` — the address is computed once, then stored.
 
         The index expression is evaluated exactly once (it can contain calls),
-        and the value after it, so the two evaluate in source order."""
+        and the value after it, so the two evaluate in source order.
+
+        A STORE through a FLOAT pointee's element is answered only when the
+        value's kind agrees with the pointee (`pointer_store_lowering`, the same
+        check `p.value() = v` makes): arm64's `_emit_subscript_store` is the twin."""
+        if M.subscript_float_element(self._cur_fn, target.obj, self._structs,
+                                     self._functions):
+            how, why = M.pointer_store_lowering(
+                self._cur_fn, target, self._structs, self._functions,
+                self._structs, value=value,
+                class_of=self._printf_arg_conversion_class)
+            if how is None:
+                raise CodegenError(why)
+            self._emit_expr(value)                 # RAX = value
+            self._emit_subscript_store_reg(target, Reg.RAX,
+                                           element_kind_ok=True)
+            return
         self._emit_expr(value)                     # RAX = value
         self._emit_subscript_store_reg(target, Reg.RAX)
 
     def _emit_subscript_store_reg(self, target: F.SubscriptExpr,
-                                  src: Reg) -> None:
+                                  src: Reg, element_kind_ok: bool = False) -> None:
         """Store the value already in `src` into `target[index]`.
 
         Split out of `_emit_subscript_store` so a caller that already HAS the
@@ -9856,7 +9901,8 @@ preference.
             self._pop_slot(Reg.R11)                # the value, discarded
             self._emit_mov_imm(src, 0)            # the assignment's None
             return
-        self._emit_subscript_addr(target)          # RAX = address
+        self._emit_subscript_addr(target, for_store=True,
+                                  element_kind_ok=element_kind_ok)  # RAX = address
         self._pop_slot(Reg.R11)                    # R11 = value
         # A width-aware store, and the two-branch form it replaces had one bug
         # twice: both branches of the old `if` were a 64-bit `MOV` for anything
@@ -9866,6 +9912,41 @@ preference.
         # the pointee, so the overwrite became a silent corruption of a
         # `malloc`'d buffer rather than a fault on a read-only `__TEXT` page.
         self._emit_subscript_store_at(Reg.RAX, Reg.R11)
+
+    def _emit_float_subscript_aug(self, stmt, op: str) -> None:
+        """`p[i] <op>= v` on a FLOAT pointee: the element's own double operation.
+
+        The mirror of arm64's `_emit_float_subscript_aug` and it has the same
+        contract: the element is read as its bits, combined with the value on
+        SSE2 (`_emit_float_op_on_xmm`), and stored back at the same address,
+        never through the integer ALU, which would add the patterns. The
+        address is computed once and held in a slot across both evaluations,
+        exactly as the integer form holds it.
+        """
+        target = stmt.target
+        spelled_expr = (f"{M.spelled(target)} {stmt.op} "
+                        f"{M.spelled(stmt.value)}")
+        reason = M.float_binary_refusal(
+            op, M.FLOAT_KIND, self._expr_str_kind(stmt.value), spelled_expr,
+            left=target, right=stmt.value)
+        if reason is not None:
+            raise CodegenError(reason)
+        self._emit_subscript_addr(target, element_kind_ok=True)  # RAX = address
+        # The element's width, captured before the RHS can overwrite it, and
+        # restored for the store — the same discipline the integer form keeps.
+        width = self._sub_width
+        self._push_slot(Reg.RAX)                      # [rsp] = address
+        self._emit_subscript_load(Reg.RAX)            # old element bits
+        self._push_slot(Reg.RAX)                      # [rsp] = old, [rsp+16] = addr
+        self._emit_expr(stmt.value)                   # RAX = value bits
+        self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.RAX))  # R11 = value
+        self._pop_slot(Reg.RAX)                       # RAX = old
+        self.asm.emit(encode_movq_xmm_rm64(0, Reg.RAX))      # XMM0 = old
+        self.asm.emit(encode_movq_xmm_rm64(1, Reg.R11))      # XMM1 = value
+        self._emit_float_op_on_xmm(op)                # RAX = old op value
+        self._pop_slot(Reg.R10)                       # R10 = address
+        self._sub_width = width
+        self._emit_subscript_store_at(Reg.R10, Reg.RAX)
 
     def _emit_subscript_aug(self, stmt, op: str) -> None:
         """`obj[index] <op>= value` — one address, one read, one write.
@@ -9896,6 +9977,10 @@ preference.
         one is how `q[0] += 5` and `q[0] = q[0] + 5` come to answer differently
         about the same source.
         """
+        if M.subscript_float_element(self._cur_fn, stmt.target.obj,
+                                     self._structs, self._functions):
+            self._emit_float_subscript_aug(stmt, op)
+            return
         reason = M.string_binary_refusal(
             op, self._expr_str_kind(stmt.target),
             self._expr_str_kind(stmt.value), spelled_op=stmt.op)

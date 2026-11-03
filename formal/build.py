@@ -2828,7 +2828,8 @@ def _admitted_summary(source_path: str) -> list:
                  "source": source_path, "line": 0,
                  "error": f"{type(e).__name__}: {e}"}]
     return [{"name": c.qualified, "assumes": c.assumes,
-             "lean_name": c.lean_name, "source": c.source, "line": c.line}
+             "lean_name": c.lean_name, "source": c.source, "line": c.line,
+             "arity": getattr(c, "arity", 1)}
             for c in contracts]
 
 
@@ -5859,7 +5860,7 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         # `a == b` on two such names stayed a compare of two FIELD VALUES while
         # the class's own `__eq__` was reachable by name — measured, a one-field
         # class whose `__eq__` returns True answering 0 where CPython says 1.
-        # `bugs/formal/FORMAL_eq_dispatch_on_a_frame_receiver.md` §1.
+        # (deleted doc; fixes recorded in tests) §1.
         fn._one_word_candidates = dict(
             one_word.get(_fn_key(fn)) or {})
         # A ONE-word struct held in a HOLDER'S FIELD, which is a depth-2 chain
@@ -10968,7 +10969,7 @@ def _check_frame_escapes(fn, holders, by_name, param0, owners=None,
     # this image can classify, so a bracket list over a name it cannot — a
     # dotted `h.tag[…]`, an unknown name, a local — takes the refusal below
     # exactly as before, and that limit is written down in
-    # `bugs/formal/FORMAL_dotted_base_bracket_list_is_not_classified.md`. Every escape
+    # dotted base bracket list classification (fixed). Every escape
     # the branch is really for (`d[s, 1] = 5`, `var k = l[s, 1]`, `[s, 1]`) has a
     # base that is a dict or a list, and no type name is either.
     type_index_ids = {
@@ -16455,7 +16456,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         # is the type's TAG, so it has a home — the same one a folded
         # module-level constant has, which is the fourth of the four this walk
         # already accepts, and both backends materialise it where they
-        # materialise the others. `bugs/formal/FORMAL_type_name_as_a_value.md` is the
+        # materialise the others. `bugs/formal/FORMAL_dtype_object_as_a_value.md` is the
         # long form; `model.TYPE_VALUE_NAMES` is the name space and
         # `model.type_value_tag` the one reader both backends ask, so the two
         # architectures cannot disagree about what a type is.
@@ -16740,7 +16741,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
             # not a value, so that sentence is false about the file and sends
             # the reader to the register allocator for a fact about the
             # language. The census behind this is in
-            # bugs/formal/FORMAL_type_name_as_a_value.md.
+            # bugs/formal/FORMAL_dtype_object_as_a_value.md.
             #
             # Asked AFTER the module-symbol question, not before, and the
             # ordering is not a compromise — it is what the measurement forced.
