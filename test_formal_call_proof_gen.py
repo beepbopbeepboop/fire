@@ -6943,8 +6943,8 @@ class TestDec1PathContext(unittest.TestCase):
     `s_6`'s definition is written in terms of `s_4` — and to cite a literal
     `hsrc_0`, which no emitted proof ever defines. Both produced Lean errors
     hundreds of lines downstream of the call that wanted them, on
-    `formal/examples/count.mojo` (`bugs/formal/FORMAL_arm64_x30_is_reloaded_from_the_
-    frame.md` carries the measurement and what is still open there)."""
+    `formal/examples/count.mojo` (the `hx30fr` false-theorem site in
+    `formal/arm64_proof_gen.py::_gen_universal_e2e_cfg`, fixed upstream)."""
 
     DEC1 = ("def dec1(n):\n"
             "    if n == 0:\n"
@@ -7180,7 +7180,7 @@ class TestCfgLeafCensus(unittest.TestCase):
         which is FALSE for an arbitrary `st.mem` -- `Arm64State.init` is the only
         place that says memory is zero, and the universal theorem's `st` is a
         free state. So this test pins the REDUCTION and not a pass, and the doc
-        that says so is `bugs/formal/FORMAL_arm64_x30_is_reloaded_from_the_frame.md` \u2014 the
+        that says so is the `hx30fr` finding (fixed upstream, doc deleted)
         `st.mem`-free finding outlived the CBZ doc that used to carry it, and
         37ae3718 is the commit that retired that doc.
         """
