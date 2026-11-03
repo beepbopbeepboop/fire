@@ -112,3 +112,5 @@ CONVERSION — is a different question and is already answered:
 `print`.** `print` of a float is the case where the backend is RIGHT to build a
 `printf` and wrong about which conversion to use, and the fix is a conversion
 that does not exist on this target rather than a diagnosis.
+--- 2026-10-30 verification (this session) ---
+Re-ran `python3 tools/memslot.py --gb 8 --label float -- python3 test_formal_format_conformance.py -v -k float`: 11/12 PASS; sole failure is x86_64 `float_int_val` (`123` vs `123.0`), matching the doc's residual. arm64 `float_int_val` PASS. No new progress; full CPython-repr port for x86-64 remains the root-cause fix.
