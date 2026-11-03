@@ -94,7 +94,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_a_variadic_parameter_read_has_no_abi.md` | `bug-formal-formal-a-variadic-parameter-r` | the row was unowned, and the refusal in it is CORRECT |
 | `FORMAL_a_with_exit_whose_value_is_computed_can_suppress.md` | `bug-formal-formal-a-with-exit-whose-valu` | A `__exit__` whose RETURN VALUE is computed can still suppress, and the gate that catches the foldable half cannot see this one |
 | `FORMAL_wide_receiver_by_reference.md` | `bug-formal-formal-wide-receiver-by-refer` | the one-word value model, and the by-reference receiver that fits inside it |
-| `FORMAL_build_cost_2026-10-03.md` | **unclaimed** | FORMAL_build_cost_2026-10-03: what `build --formal` costs, measured over 43 files, and the two module-level tables a per-function pass was deriving for itself |
 | `FORMAL_dialect_operations_with_no_lowering.md` | **unclaimed** | what is left of `__mlir_op` once the refusal stopped being false |
 | `FORMAL_env_family_next_terminal.md` | **unclaimed** | where the 55-file family stands, and what the next reader needs |
 | `FORMAL_eq_dispatch_on_a_frame_receiver.md` | **unclaimed** | what `==` still does not reach |
