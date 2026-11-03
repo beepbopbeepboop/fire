@@ -391,9 +391,6 @@ ALL_INPUTS = {
     "Specs.factorial64": AllInputs(
         word="Specs.factorial64", nat="Specs.factorial", kind="recursive",
         op="*", succ="Specs.factorial_succ", lemma="u64_ofNat_mul"),
-    "Specs.sumThrough64": AllInputs(
-        word="Specs.sumThrough64", nat="Specs.sumThrough", kind="recursive",
-        op="+", succ="Specs.sumThrough_succ", lemma="u64_ofNat_add"),
     # ── the STRAIGHT-LINE shapes ────────────────────────────────────────────
     #
     # A straight-line program's model is one closed word expression, so the
