@@ -55,8 +55,8 @@ have seen" would have been set at 93 s and would have fired on a legitimate
 proof.
 
 So `PROOF_WALL_S = 1500` / `PROOF_CPU_S = 1500` is **5x the slowest legitimate
-proof measured** (6.8x its CPU), and `LIBRARY_WALL_S = 3600` /
-`LIBRARY_CPU_S = 3600` is **16x the slowest module build** — both far below
+proof measured** (6.8x its CPU), and `LIBRARY_WALL_S = 1800` /
+`LIBRARY_CPU_S = 1800` is **16x the slowest module build** — both far below
 `tools/control.py guard`'s 45 min wall / 90 min CPU net, which exists to catch a
 launcher that was never taught these bounds, not to be the bound.
 

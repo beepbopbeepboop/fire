@@ -38493,6 +38493,46 @@ def _binding_sites_index(fn) -> dict:
     return out
 
 
+def _resolve_local_alias_to_function(fn, name: str, defined_set):
+    """Resolve a local alias `name` in `fn` to function names defined in this image.
+
+    Looks through all assignments/initializations of `name` and returns
+    function names from `defined_set` that it is bound to. If any binding
+    is unknown/unresolvable or binds to something that isn't a known function,
+    return empty set (conservative) to avoid false positives.
+    """
+    if fn is None or not name or not defined_set:
+        return set()
+    try:
+        sites = _syntactic_write_values(fn, name)
+    except Exception:
+        return set()
+    if not sites or any(v is None for v in sites):
+        return set()
+    resolved = set()
+    for v in sites:
+        if isinstance(v, F.IdentExpr):
+            vname = getattr(v, "name", None)
+            if isinstance(vname, str) and vname in defined_set:
+                resolved.add(vname)
+                continue
+        # If it's assigned from something else that's also a local alias,
+        # try to resolve recursively (conservative depth limit)
+        if isinstance(v, F.IdentExpr):
+            vname = getattr(v, "name", None)
+            if isinstance(vname, str):
+                # Avoid cycles by checking simple case
+                try:
+                    sub = _resolve_local_alias_to_function(fn, vname, defined_set)
+                    if sub:
+                        resolved |= sub
+                        continue
+                except Exception:
+                    pass
+        return set()
+    return resolved if resolved else set()
+
+
 def _sole_target_leaf(target) -> list:
     """`[name]` when the target binds exactly one name, else `[]`.
 
@@ -48399,7 +48439,7 @@ def _emitted_regions(try_stmt) -> tuple:
             getattr(try_stmt, "finally_body", None))
 
 
-def _call_keys(node, bound_modules=None) -> tuple:
+def _call_keys(node, bound_modules=None, caller_fn=None, defined=None) -> tuple:
     """The distinct callee KEYS of an emitted subtree.
 
     `(kind, name, module)`: `("plain", "boom", "")` for `boom(…)`,
@@ -48426,6 +48466,7 @@ def _call_keys(node, bound_modules=None) -> tuple:
     answer it always got.
     """
     out = set()
+    defined_set = defined if defined is not None else set()
     for n in _emitted_nodes(node):
         if not isinstance(n, F.CallExpr):
             continue
@@ -48433,8 +48474,19 @@ def _call_keys(node, bound_modules=None) -> tuple:
         if is_external_call_template(func):
             continue
         if isinstance(func, F.IdentExpr):
-            out.add(("plain", func.name,
-                     (bound_modules or {}).get(func.name, "")))
+            name = func.name
+            module = (bound_modules or {}).get(name, "")
+            if module:
+                out.add(("plain", name, module))
+                continue
+            # Try to resolve a bare local alias holding a function from this image
+            if caller_fn is not None and name not in defined_set:
+                resolved = _resolve_local_alias_to_function(caller_fn, name, defined_set)
+                if resolved:
+                    for rname in resolved:
+                        out.add(("plain", rname, ""))
+                    continue
+            out.add(("plain", name, module))
         elif isinstance(func, F.MemberExpr):
             # The receiver decides. A `MemberExpr` whose object is a plain name
             # is a MODULE call when that name is a module this unit imported and
@@ -48555,7 +48607,9 @@ class RaiseGraph:
         for name, fn in by_name.items():
             plain, method, other = set(), set(), False
             for kind, callee, module in _call_keys(getattr(fn, "body", None),
-                                                   self.bound_modules):
+                                                   self.bound_modules,
+                                                   caller_fn=fn,
+                                                   defined=self.defined):
                 if module:
                     # A call into ANOTHER module of this image. It cannot be an
                     # edge to one of this unit's functions, and it is answered
@@ -48631,7 +48685,9 @@ class RaiseGraph:
         the edge set.
         """
         for kind, callee, module in _call_keys(getattr(fn, "body", None),
-                                               self.bound_modules):
+                                               self.bound_modules,
+                                               caller_fn=fn,
+                                               defined=self.defined):
             if module:
                 if self._cross is not None:
                     if self._cross.function(module, callee):
@@ -48689,16 +48745,24 @@ class RaiseGraph:
             # around a raising method of a LINKED struct build, print nothing
             # and exit 1 where CPython catches and continues.
             return bool(self._cross is not None and self._cross.method(name))
+        if kind == "other":
+            # A callee that is an EXPRESSION we cannot resolve is unknown.
+            # Refuse on the unknown (conservative) rather than assuming it
+            # cannot raise - this is the fix for the bug where expression
+            # callees in try blocks were missed.
+            return True
         return False
 
-    def may_reach_raise(self, node) -> tuple:
+    def may_reach_raise(self, node, caller_fn=None) -> tuple:
         """`(kind, name, module)` for a callee in `node` that can end the process,
         else None.
 
         The first one found, in the region's own order, so the message can name
         the call the reader wrote rather than the callee set.
         """
-        for key in _call_keys(node, self.bound_modules):
+        for key in _call_keys(node, self.bound_modules,
+                              caller_fn=caller_fn,
+                              defined=getattr(self, "defined", None)):
             if self._callee_raises(*key):
                 return key
         return None
@@ -48848,7 +48912,10 @@ def uncatchable_raise(fn, graph=None) -> tuple:
                 if isinstance(inner, F.RaiseStmt):
                     return (inner, node, handlers[0], None)
             if graph is not None:
-                hit = graph.may_reach_raise(region)
+                try:
+                    hit = graph.may_reach_raise(region, caller_fn=fn)
+                except TypeError:
+                    hit = graph.may_reach_raise(region)
                 if hit is not None:
                     return (None, node, handlers[0], hit)
     return None

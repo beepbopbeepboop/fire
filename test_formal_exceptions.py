@@ -1565,3 +1565,21 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
+def test_try_around_local_alias_of_raising_function_is_refused():
+    src = '''\
+def boom():
+    raise ValueError("x")
+
+def main():
+    f = boom
+    try:
+        f()
+    except:
+        print(1)
+        return 0
+    print(2)
+    return 1
+'''
+    s = formal_compile_string(src)
+    _assert_has_refusal(s, "uncatchable_raise", "boom")

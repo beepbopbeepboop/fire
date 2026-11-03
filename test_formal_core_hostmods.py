@@ -539,7 +539,7 @@ def group_functools_absent(tmpdir, verbose):
       * a DECORATOR on this path is parsed and then never applied. `@tag` on a
         function and `@unique` on a class both BUILD, and neither the decorator
         body nor anything it was supposed to enforce ever runs — measured in
-        `bugs/hard/COMPILE_FAIL_decorator_application_dropped.md`, and re-measured
+        `bugs/mid/COMPILE_FAIL_decorator_application_dropped.md`, and re-measured
         here in the doc's terms: a `printf` inside the decorator prints
         nothing. So an `lru_cache` that exported successfully would build a
         program that caches nothing, which is answer-preserving for `version()`

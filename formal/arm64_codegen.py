@@ -2642,9 +2642,6 @@ dylib_exports: list = None, globals_base: int = None,
                     self._emit_receiver_writeback()
                 self.asm.emit(encode_movz_wd_imm(0, 0))
             else:
-                callee = self._vkinds.no_value_callee_of(stmt.value)
-                if callee is not None:
-                    raise CodegenError(M.returnless_value_refusal(callee))
                 # A double returned under an INTEGER annotation. Asked before the
                 # value is emitted, because the answer is about the FUNCTION's
                 # declaration rather than about the return instruction, and
@@ -7115,7 +7112,7 @@ ctor_field_value=self._ctor_field_value_for(name),
     # computes CPython's spelling lives at `M.FLOAT_REPR_SYMBOL` — and this
     # method pair is the ARM half of the branch and the buffer, the machine
     # part only this backend can spell. The algorithm is the validated one
-    # (shortest-round-trip decimal spelling): the
+    # (`bugs/formal/FORMAL_a_float_has_no_print_spelling.md`'s next step): the
     # specials from the bits, then `%.*g` at the smallest precision n that
     # parses back to the same 64 bits (a `snprintf`/`strtod` round trip),
     # laid out in CPython's own notation — scientific iff E >= 16 or
