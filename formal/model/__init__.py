@@ -21266,7 +21266,8 @@ def parameter_pointee_disagreement_refusal(callee, name, groups) -> str:
 
 
 def subscript_base_lowering(fn, obj, decls: dict, functions: dict = None,
-                            structs_by_name: dict = None, seen=()):
+                            structs_by_name: dict = None, seen=(),
+                            element_kind_ok: bool = False):
     """`(shape, width, signed, why)` — `(None, None, None, why)` to refuse.
 
     WHAT `obj[i]` READS, for a base that is not a string and not a dict key —
@@ -21370,15 +21371,26 @@ def subscript_base_lowering(fn, obj, decls: dict, functions: dict = None,
                     f"Read through `p.value()[i]` once the unwrap is written "
                     f"out, which is the same program with the check spelled out")
         if _shape == "float":
+            if element_kind_ok:
+                # The caller has established the ELEMENT's kind: a READ, whose
+                # kind `pointee_kind_of` answers FLOAT for a subscript exactly
+                # as it does for `p.value()`, or a STORE whose value's kind
+                # `pointer_store_lowering` has checked against the pointee. The
+                # eight bytes are the element's own word either way, so this is
+                # the same width the dereference loads at.
+                return ("load", 8, False, why)
             return (None, None, None,
                     f"`{spelled(obj)}[i]` reads an element of a FLOAT pointee, "
-                    f"and this path carries a dereference's kind but not a "
-                    f"SUBSCRIPT's: the eight bytes would be loaded right and the "
-                    f"element would then be read as an integer, so `Int(...)` of "
-                    f"it would answer the bit pattern rather than the value. "
-                    f"Read the element through `{spelled(obj)}.value()` and index "
-                    f"the result, which is the same address with the kind the "
-                    f"pointee declared")
+                    f"and an element of this kind is answered only for a read "
+                    f"or for a plain store of a double: an augmented assignment "
+                    f"combines the element with integer arithmetic, and a `del` "
+                    f"or a tuple-unpack target has no value whose kind this path "
+                    f"can check as a double, so the eight bytes would be read or "
+                    f"written as an integer. "
+                    f"Read the element through `{spelled(obj)}[i]` into a local "
+                    f"and combine it there, or read `{spelled(obj)}.value()` and "
+                    f"index the result, which is the same address with the kind "
+                    f"the pointee declared")
         if _shape != "load":
             return (None, None, None,
                     f"the base is a pointer to a STRUCT, and a struct's value "
@@ -21777,7 +21789,14 @@ def pointer_store_lowering(fn, target, decls: dict, functions: dict = None,
     stored as before. Only a stated disagreement is reported, and it can only be
     stated where the source says one thing and the declaration says another.
     """
-    obj = pointer_store_receiver(target)
+    # A SUBSCRIPT target (`p[i] = v`) is the same store at `base + i*width`, and
+    # the caller scales the index it supplies — `dereference_lowering`'s
+    # `index_scaled`, so the two readers ask the same width question about the
+    # same address. Only the base is judged here.
+    if isinstance(target, F.SubscriptExpr):
+        obj, index_scaled = target.obj, True
+    else:
+        obj, index_scaled = pointer_store_receiver(target), False
     inner, why = pointer_pointee(fn, obj, decls, functions)
     if inner is None:
         return (None, why)
@@ -21808,15 +21827,17 @@ def pointer_store_lowering(fn, target, decls: dict, functions: dict = None,
         # direction permits — `p.value() = 1` writing 0x1 — is the stated case
         # the check above refuses, not this one.
         width, signed = 8, False
-        scaled, scale_why = _offset_scale(fn, obj, width)
-        if not scaled:
-            return (None, scale_why)
+        if not index_scaled:
+            scaled, scale_why = _offset_scale(fn, obj, width)
+            if not scaled:
+                return (None, scale_why)
         return (("store", width, signed), why)
     if inner in POINTEE_WIDTHS:
         width, signed = POINTEE_WIDTHS[inner]
-        scaled, scale_why = _offset_scale(fn, obj, width)
-        if not scaled:
-            return (None, scale_why)
+        if not index_scaled:
+            scaled, scale_why = _offset_scale(fn, obj, width)
+            if not scaled:
+                return (None, scale_why)
         return (("store", width, signed), why)
     st = (structs_by_name or {}).get(inner)
     if st is not None:
@@ -21833,6 +21854,17 @@ def pointer_store_lowering(fn, target, decls: dict, functions: dict = None,
                   f"1-byte pointee overwrites seven bytes the program never "
                   f"wrote, and that is silent corruption rather than a fault. "
                   f"{_declared_note(why)}")
+
+
+def subscript_float_element(fn, obj, decls: dict, functions: dict = None) -> bool:
+    """True when `obj[i]` is an element of a FLOAT pointee — the one base whose
+    subscript STORE needs the value's kind checked (`pointer_store_lowering`).
+
+    The same `pointer_pointee` reader the load and the `.value()` store ask, so
+    the three cannot disagree about which pointers hold doubles.
+    """
+    inner, _why = pointer_pointee(fn, obj, decls, functions)
+    return inner in POINTEE_FLOAT_NAMES
 
 
 def pointer_store_kind_disagreement(pointee, value, class_of) -> str | None:
