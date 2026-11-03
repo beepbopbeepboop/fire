@@ -203,7 +203,7 @@ def mojo_string(s):
 # a literal. `@@` is two bytes that a real newline cannot collide with, so every
 # program in this file emits its records back to back and this token is what
 # separates them. The `printf` string-escape question behind the old wording is
-# recorded in `bugs/formal/FORMAL_pointer_value_model.md`, and `test_formal_run.py`'s
+# recorded in the pointer value model work (see commits), and `test_formal_run.py`'s
 # harness cases avoid line-structured output for the same reason.
 REC = "@@"
 
