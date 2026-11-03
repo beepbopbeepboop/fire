@@ -48506,7 +48506,11 @@ class RaiseGraph:
 
     The rule the pair of them obeys is unchanged and is what the second half of
     the 82 still rests on: **refuse on a FACT, and say so where the fact is
-    missing.**
+    missing.** The expression tier (`("other", "")`) is the one whose answer
+    changed with this fix: it used to be `False`, i.e. "cannot raise", which is
+    the one direction a refusal must never be wrong in. It is now `True` —
+    unknown, so refuse — and the cost is measured at the files it now refuses
+    rather than the files it used to let through.
     """
 
     def __init__(self, functions, externs=(), bound_modules=None,
@@ -48648,11 +48652,6 @@ class RaiseGraph:
     def _callee_raises(self, kind, name, module="") -> bool:
         """Can this callee end the process? `False` for everything unresolved.
 
-        `False` for a name this pass cannot place is the decision the class
-        docstring measures: a refusal on an unresolvable callee would take 82 of
-        this repository's files against a possibility, and the 14 it can prove
-        are worth having on their own.
-
         **`module` is the third term and it is what makes that 82 smaller.**
         A callee this image COMPILED is not unresolved: `publish_module_raisers`
         recorded which of its functions reach a `raise` when it was built, so
@@ -48670,6 +48669,20 @@ class RaiseGraph:
         So the third case is the doc's residual and the first two are what it
         said had to be built; the measurement to watch is the third falling
         towards 0 while the certain tier is unchanged.
+
+        **`("other", "")` is the one tier that is NOT a fact and NOT a residual
+        of the above.** It is a callee that is an EXPRESSION rather than a name
+        — `f(…)` where `f` is a local holding a function value, `self.callbacks[k]()`,
+        a `__getitem__`-dispatched call. `_call_keys` cannot see a binding, but
+        the image can: this function's local `f` holds a function VALUE, and
+        that value may be this image's own raiser. The class's own refusal
+        (`call_result_frame_struct`) exists precisely because calling one is
+        ordinary on this path. So `("other", "")` is the one case where the
+        answer is not "cannot raise" but "unknown", and unknown is the one
+        direction a refusal must never be wrong in: a `try` whose body calls
+        `handlers[i](x)` where `handlers` is a list of this image's functions
+        is a program whose arm is unreachable, and it builds. It therefore
+        answers `True` here, which is what makes the `try` refuse.
         """
         if module:
             raisers = module_raisers(module)
@@ -48689,7 +48702,8 @@ class RaiseGraph:
             # around a raising method of a LINKED struct build, print nothing
             # and exit 1 where CPython catches and continues.
             return bool(self._cross is not None and self._cross.method(name))
-        return False
+        # A callee that is an EXPRESSION rather than a name: unknown, so refuse.
+        return True
 
     def may_reach_raise(self, node) -> tuple:
         """`(kind, name, module)` for a callee in `node` that can end the process,
