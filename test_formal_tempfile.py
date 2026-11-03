@@ -43,7 +43,7 @@ here is a recorded string. What is compared is:
     `mkdtemp(3)` writes (`NAME_RANDOM_LEN`, `NAME_ALPHABET`) rather than against
     this interpreter's own alphabet, and the `mkdtemp3` group exercises the
     binding directly — it had no caller at all until this change, which is the
-    state `bug:UNTESTED` is about.
+    state `bugs/UNTESTED.md` is about.
 
 WHAT THIS GROUP DOES NOT CLAIM, and why it is in the docstring rather than
 only here: `TemporaryDirectory` is 64 of the 111 files the ranking counts and
@@ -85,17 +85,11 @@ import tempfile as CPY_TEMPFILE     # the oracle. Not shadowed below: every
                                     # name, so a reader cannot mistake it for
                                     # the module under test.
 import test_formal_dylib as D        # noqa: E402  (shared two-backend runner)
-from exec_budget import RUN_TIMEOUT_S  # per-child budgets
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIRE = os.path.join(HERE, "fire.py")
 BUILD_TIMEOUT = 900
 REC = "@@"
-# `hdiutil` is the macOS disk-image tool that creates, attaches and detaches the
-# volume a group fills. It is not a child of this suite's build or its run, so
-# none of exec_budget's three constants describes it; 300 s is the value this
-# call has always carried, named here so the reason is at the declaration.
-HDIUTIL_TIMEOUT_S = 300
 
 # `0o700`, the mode both sides create the directory with: CPython passes it to
 # `mkdir(2)` and `mkdtemp(3)` uses it itself, and both are masked by the same
@@ -347,7 +341,7 @@ def _cpy_gettempdir(tmpdir_value):
               "    print('raised:' + type(e).__name__)\n"
               % tmpdir_value)
     p = subprocess.run([sys.executable, "-c", script], capture_output=True,
-                       text=True, timeout=RUN_TIMEOUT_S)
+                       text=True, timeout=120)
     check(p.returncode == 0,
           f"this interpreter's tempfile refused TMPDIR={tmpdir_value!r}: "
           f"{p.stderr.strip()[-200:]}")
@@ -504,7 +498,7 @@ def _cpy_mkdtemp(prefix):
     script = ("import tempfile;"
               "print('ok:' + tempfile.mkdtemp(prefix=%r))" % prefix)
     p = subprocess.run([sys.executable, "-c", script], capture_output=True,
-                       text=True, timeout=RUN_TIMEOUT_S)
+                       text=True, timeout=120)
     if p.returncode == 0:
         return p.stdout.strip()
     last = [ln for ln in p.stderr.strip().splitlines() if ln][-1]
@@ -600,7 +594,7 @@ def group_mkdtemp3(tmpdir, archs, verbose):
 
     This is the group the fix needed and did not have. `fs_mkdtemp` landed with
     the `os` host module and had NO CALLER: an unused binding is a capability
-    with no evidence behind it, which is the state `bug:UNTESTED` is about,
+    with no evidence behind it, which is the state `bugs/UNTESTED.md` is about,
     and it stayed that way because switching `tempfile.mojo` onto it was a
     rewrite of a measured module and its four assertions rather than a commit
     (fixed 2026-10-03 in 8c311e87, which is that rewrite).
@@ -753,7 +747,7 @@ def _full_filesystem_base(scratch, label="FORMALFULL"):
 
     def hdi(*args):
         return subprocess.run(["hdiutil"] + list(args), capture_output=True,
-                              text=True, timeout=HDIUTIL_TIMEOUT_S)
+                              text=True, timeout=300)
 
     def detach():
         hdi("detach", vol)

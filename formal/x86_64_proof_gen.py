@@ -721,27 +721,13 @@ def _program_externs(info: dict) -> list:
     The subtraction is by ADDRESS against `func_offset` rather than by symbol,
     for the same reason as above: a program can call `getrlimit` itself, and
     dropping the symbol would drop that call too.
-
-    **And the float-repr helper's calls are not the program's, either.** The
-    helper (`formal/x86_64_codegen.py::_emit_float_repr_helper`) is emitted
-    once per image after every function body, so its `snprintf`/`strtod` are
-    in `extern_calls` at or above the entry for EVERY image on this backend,
-    and reading them as program calls suppresses every run test — the same
-    failure arriving with the helper instead of the guard. The emitter
-    publishes their sites in `info["float_repr_calls"]` and they are
-    subtracted by address, the way the traps are: a program that never
-    formats a float must not lose its run tests over code its run never
-    takes, and a program that does is handled by the helper's own path.
     """
     traps = set(info.get("compiler_traps") or ())
-    helper = set(info.get("float_repr_calls") or ())
     entry = info.get("func_offset")
     out = []
     for e in (info.get("extern_calls") or ()):
         addr = e.get("addr")
         if addr in traps:
-            continue
-        if addr in helper:
             continue
         if entry is not None and addr is not None and addr < entry:
             continue

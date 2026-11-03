@@ -9,7 +9,7 @@ from __future__ import annotations
 from __future__ import annotations
 import os
 import re
-from fire_compiler import ExceptHandler, MatchCase, IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _pair_key
+from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, EllipsisLiteral, NoneLiteral, IdentExpr, BinaryOp, CompareChain, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, WalrusExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, VarDecl, AssignStmt, AugAssignStmt, MultiAssignStmt, ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt, PassStmt, AssertStmt, ExprStmt, ImportStmt, FromImportStmt, IfStmt, WhileStmt, ForStmt, FunctionDef, TryStmt, WithStmt, ComptimeIfStmt, ComptimeForStmt, ComptimeVarStmt, GlobalStmt, NonlocalStmt, DelStmt, MatchStmt, StructDef, TraitDef, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _pair_key
 import regex_compile
 import mlir
 from mojo.middle.types import *  # noqa: F401,F403
@@ -59,18 +59,6 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
             # MojoList* temp before the accessor call, or GIMPLE rejects
             # "passing int64_t where MojoList * expected".
             lp = gen._coerce_to_type('int64_t', 'MojoList *', v)
-        # If the list is marked as having per-slot kinds that must be read
-        # via mojo_list_get_boxed (e.g. a dict's keys materialized through
-        # the opaque boxed path), use the boxed reader for every slot.
-        _mkv = (v in getattr(gen, '_maybe_kinds_vals', ()) or
-                lp in getattr(gen, '_maybe_kinds_vals', ()) or
-                _as_str(v) in getattr(gen, '_maybe_kinds_vals', ()) or
-                _as_str(lp) in getattr(gen, '_maybe_kinds_vals', ()))
-        if _mkv:
-            _ev = gen._new_val('int64_t', f"mojo_list_get_boxed ({lp}, {idx64})")
-            gen._boxed_vals.add(_ev)
-            gen._dyn_word_vals.add(_ev)
-            return 'int64_t', _ev
         # A `struct.unpack(...)` result has ONE container ctype but a
         # per-slot real kind, statically known from the format string. The
         # subscript path already prefers that per-slot kind (emit_calls.py's
@@ -159,13 +147,6 @@ def _tuple_elem_value(gen, vtype: str, v: str, idx: int) -> tuple[str, str]:
     # R1/R5, shares _materialize_as_list with all()/any()/enumerate()/
     # *.join()/the list-pattern-target branch above in gimple_gen_stmts.py).
     lp = gen._materialize_as_list(vtype, v)
-    _mkv = (lp in getattr(gen, '_maybe_kinds_vals', ()) or
-            _as_str(lp) in getattr(gen, '_maybe_kinds_vals', ()))
-    if _mkv:
-        _ev = gen._new_val('int64_t', f"mojo_list_get_boxed ({lp}, {idx64})")
-        gen._boxed_vals.add(_ev)
-        gen._dyn_word_vals.add(_ev)
-        return 'int64_t', _ev
     elem = gen._elem_of(lp)
     suf = gimple_ctypes.TypeLattice.list_suffix(elem) if elem else 'int'
     if suf == 'str':
@@ -462,108 +443,3 @@ class ZipLongestFillRefusal(ValueError):
     `emit_loops.py`), so a slot whose own sequence is long enough that the
     fill is never selected raises nothing.
     """
-
-
-# ── `for ... else` / `while ... else` ─────────────────────────────────────────
-# The `else` clause of a loop runs when the loop ends WITHOUT a `break`. The lowerings of
-# the loop forms never emitted it (a list/dict/str/range/while loop with an `else` ran its
-# body and silently dropped the clause), so it is desugared here, once, ahead of all of
-# them:
-#
-#     ok = True
-#     for x in it:            # every `break` OWNED by this loop becomes `ok = False; break`
-#         ...
-#     if ok:
-#         <else clause>
-#
-# `break`s owned by this loop are those not inside a nested loop's BODY (they belong to
-# that loop), a nested def, or a lambda; a `break` in a nested loop's own `else` clause
-# does belong to this loop. The original nodes are never mutated (a module can be compiled
-# twice): new statement nodes are built.
-
-_LOOP_ELSE_COUNTER: list = [0]
-
-
-def _loop_else_flag_name() -> str:
-    _LOOP_ELSE_COUNTER[0] = _LOOP_ELSE_COUNTER[0] + 1
-    return '_loop_ok_' + str(_LOOP_ELSE_COUNTER[0])
-
-
-def _loop_else_rewrite_breaks(stmts: list, flag: str) -> list:
-    out: list = []
-    for st in (stmts or []):
-        out.append(_loop_else_rewrite_stmt(st, flag))
-    return out
-
-
-def _loop_else_rewrite_stmt(st, flag: str):
-    if isinstance(st, BreakStmt):
-        return IfStmt(condition=BoolLiteral(value=True, line=st.line, col=st.col),
-                      then_body=[AssignStmt(target=IdentExpr(name=flag, line=st.line, col=st.col),
-                                            value=BoolLiteral(value=False, line=st.line, col=st.col),
-                                            line=st.line, col=st.col),
-                                 BreakStmt(line=st.line, col=st.col)],
-                      elifs=[], else_body=None, line=st.line, col=st.col)
-    if isinstance(st, IfStmt):
-        new_elifs: list = []
-        for _el in (st.elifs or []):
-            new_elifs.append((_el[0], _loop_else_rewrite_breaks(_el[1], flag)))
-        return IfStmt(condition=st.condition,
-                      then_body=_loop_else_rewrite_breaks(st.then_body, flag),
-                      elifs=new_elifs,
-                      else_body=(_loop_else_rewrite_breaks(st.else_body, flag)
-                                 if st.else_body else st.else_body),
-                      line=st.line, col=st.col)
-    if isinstance(st, TryStmt):
-        new_handlers: list = []
-        for _h in (st.handlers or []):
-            new_handlers.append(ExceptHandler(exc_type=_h.exc_type, name=_h.name,
-                                              body=_loop_else_rewrite_breaks(_h.body, flag),
-                                              line=_h.line, col=_h.col))
-        return TryStmt(body=_loop_else_rewrite_breaks(st.body, flag), handlers=new_handlers,
-                       else_body=(_loop_else_rewrite_breaks(st.else_body, flag)
-                                  if st.else_body else st.else_body),
-                       finally_body=(_loop_else_rewrite_breaks(st.finally_body, flag)
-                                     if st.finally_body else st.finally_body),
-                       line=st.line, col=st.col)
-    if isinstance(st, WithStmt):
-        return WithStmt(items=st.items, body=_loop_else_rewrite_breaks(st.body, flag),
-                        is_async=st.is_async, line=st.line, col=st.col)
-    if isinstance(st, MatchStmt):
-        new_cases: list = []
-        for _c in (st.cases or []):
-            new_cases.append(MatchCase(patterns=_c.patterns,
-                                       body=_loop_else_rewrite_breaks(_c.body, flag),
-                                       guard=_c.guard, line=_c.line, col=_c.col))
-        return MatchStmt(subject=st.subject, cases=new_cases, line=st.line, col=st.col)
-    if isinstance(st, ForStmt):
-        # its body's breaks are its own; a break in its ELSE clause is ours
-        return ForStmt(target=st.target, iterable=st.iterable, body=st.body,
-                       else_body=(_loop_else_rewrite_breaks(st.else_body, flag)
-                                  if st.else_body else st.else_body),
-                       is_async=st.is_async, line=st.line, col=st.col)
-    if isinstance(st, WhileStmt):
-        return WhileStmt(condition=st.condition, body=st.body,
-                         else_body=(_loop_else_rewrite_breaks(st.else_body, flag)
-                                    if st.else_body else st.else_body),
-                         line=st.line, col=st.col)
-    return st
-
-
-def desugar_loop_else(node) -> list:
-    """The statements a `for`/`while` WITH an `else` clause stands for (see above); the loop
-    inside has no `else` of its own."""
-    flag = _loop_else_flag_name()
-    line = node.line
-    col = node.col
-    body = _loop_else_rewrite_breaks(node.body, flag)
-    if isinstance(node, ForStmt):
-        loop = ForStmt(target=node.target, iterable=node.iterable, body=body, else_body=None,
-                       is_async=node.is_async, line=line, col=col)
-    else:
-        loop = WhileStmt(condition=node.condition, body=body, else_body=None, line=line, col=col)
-    return [AssignStmt(target=IdentExpr(name=flag, line=line, col=col),
-                       value=BoolLiteral(value=True, line=line, col=col), line=line, col=col),
-            loop,
-            IfStmt(condition=IdentExpr(name=flag, line=line, col=col),
-                   then_body=node.else_body, elifs=[], else_body=None, line=line, col=col)]

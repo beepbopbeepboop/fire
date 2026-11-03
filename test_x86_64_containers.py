@@ -33,7 +33,6 @@ import os
 import subprocess
 import sys
 import tempfile
-from exec_budget import RUN_TIMEOUT_S
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -529,7 +528,7 @@ def cpython_answer(source: str, test_input: int = 5):
         with open(path, "w") as f:
             f.write(source + driver)
         r = subprocess.run([sys.executable, path], capture_output=True,
-                           text=True, cwd=td, timeout=RUN_TIMEOUT_S)
+                           text=True, cwd=td, timeout=60)
     if r.returncode != 0:
         return None
     out = r.stdout.strip()
