@@ -16,16 +16,14 @@ Predates the floor correction; found 2026-10-04 on `work/formal16-4`,
 re-measured 2026-10-04 on `work/formal27-1`. **§0 is no longer REACHABLE
 through `a // b` on the current tree, and the defect is not fixed — the route
 is gone.** `_emit_exit` opens with `fflush(NULL)` (`e77131d5`), the div0 arm is
-its one exit, and ONE unfollowable call (now announced) restates the universal
-theorem as `q_reaches_call_at_…` with a reachability proposition instead of
-raising silently — so the walk emits no terminal value flow and there is no
-residual to read. The three rows of
+its one exit, and ONE unfollowable call silently restates the universal theorem
+as `q_reaches_call_at_…` with `prop := True` instead of raising — so the walk
+emits no terminal value flow and there is no residual to read. The three rows of
 `test_formal_call_proof_gen.py::TestTheZeroDivisorGuardAgainstLean` that measured
-this are red for exactly that reason. The bug "one opaque flush silently
-replaces the universal theorem" had the measurement, the three-way taxonomy of
-what the generator does with 0 / 1 / ≥2 opaque calls, and the next step; its doc
-was deleted in a9daacdd1 once item 2 announced the substitution, so that
-measurement is in the history of that commit's parent. The three options in "The
+this are red for exactly that reason, and
+`bugs/formal/FORMAL_one_opaque_flush_silently_replaces_the_universal_theorem.md` has the
+measurement, the three-way taxonomy of what the generator does with 0 / 1 / ≥2
+opaque calls, and the next step. Read that one first; the three options in "The
 exact next step" below are still the right three, but option 1 is now a claim
 about a block the walk does not walk at all, which moves option 2 from third to
 first.
@@ -64,9 +62,9 @@ keeps the substitution pinned (no universal theorem,
 `theorem q_reaches_call_at_0x100000504`, zero `_ADMIT`). Nothing in "The exact
 next step" moves: item 1 of the sibling's step list — this doc's option 2, the
 divergence treatment, a change to the theorem's shape — is still the step, and
-it is still held by the arm64 walk bug "cannot discharge a call on a conditional
-path", through the bug "one opaque flush silently replaces the universal theorem"
-(its doc was deleted in a9daacdd1).
+it is still held by
+`FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_conditional_path.md`
+through `FORMAL_one_opaque_flush_silently_replaces_the_universal_theorem.md`.
 The three rows stay red and unmarked on purpose.
 
 ## Status 2026-10-13 (`work/formal295-docs`): the unreached-residual doc is absorbed here
@@ -88,8 +86,9 @@ stops at
 `0x100000504` is this doc's own div0 arm (`_emit_div_shift_pow`'s `fflush` on the
 raise path), so the answer is **UNREACHED**: no terminal value flow is emitted,
 no `⊢ 1 = …` residual exists to be read, and nothing about the false theorem has
-changed. That is this doc's §0 and the three-way taxonomy of the
-"one opaque flush" bug (doc deleted in a9daacdd1); the earlier doc's cause hypothesis was wrong, and its doc is
+changed. That is this doc's §0 and
+`bugs/formal/FORMAL_one_opaque_flush_silently_replaces_the_universal_theorem.md`'s
+three-way taxonomy; the earlier doc's cause hypothesis was wrong, and its doc is
 deleted with this note, exactly as its own step 3 (fail on UNREACHED → fold into
 this doc) instructed.
 

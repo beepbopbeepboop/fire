@@ -480,7 +480,7 @@ Two DIFFERENT methods on two different receivers (`write_repr_to` takes a
 writer object; `p.unsafe_load()` is a pointer load), so they are one row and not
 one fix. The map's own next step is right: a `repr` model for a non-string
 receiver, which means deciding what `repr` means for a struct whose value is a
-frame address — the same question as the pointer value model (fixed here) and
+frame address — the same question `FORMAL_pointer_value_model.md` and
 `FORMAL_frame_receiver_handoff.md` each answer for their own receiver kind, and
 neither of those is a `repr`. **Also note both files are stdlib, so the probe
 is a stdlib edit and not makeable from a repository worktree.**

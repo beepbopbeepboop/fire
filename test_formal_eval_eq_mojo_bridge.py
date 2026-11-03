@@ -1072,12 +1072,11 @@ class TestBitwiseNotTheRunTestTypechecks(unittest.TestCase):
 
 # ── the ROUTE the AST bridge's own doc measured, pinned against the toolchain ──
 #
-# The AST node is `MojoExpr.call name (args : List MojoExpr)` now, and the
-# bridge refuses a call whose arguments no handler takes
-# (`bugs/formal/FORMAL_ast_bridge_cannot_state_a_user_call_of_two_or_more_arguments.md`).
-# The widening named three routes, and the first was a "0.3-second experiment"
-# (route 1, the one `lib/ProofLib.lean` uses). This class is those experiments:
-# three Lean files, each answering one question, all of them
+# `MojoExpr.call` carries ONE `MojoExpr`, so a call with two arguments has no
+# faithful AST and `eval_eq_mojo` is false for it
+# (`bugs/formal/FORMAL_ast_bridge_carries_one_argument_per_call.md`).  That doc names
+# three ways to widen it and says the first is a "0.3-second experiment", which
+# is this class: three Lean files, each answering one question, all of them
 # things the NEXT worker would otherwise re-derive by hand.
 #
 # Why a test and not a paragraph in the bug doc.  All three answers are facts

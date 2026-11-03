@@ -7986,7 +7986,8 @@ ctor_field_value=self._ctor_field_value_for(name),
     # established from a declared type, or has refused.  There is no width this
     # emitter is allowed to choose, and that is the entire point: the pre-change
     # tree could only have emitted an 8-byte load, which over-reads a `UInt8`
-    # pointee by seven bytes and faults at a page edge.
+    # pointee by seven bytes and faults at a page edge (see the measurement in
+    # `bugs/formal/FORMAL_pointer_value_model.md`).
     #
     # The two answers and the two instructions:
     #

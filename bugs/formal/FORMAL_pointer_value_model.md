@@ -104,13 +104,22 @@ case is a candidate list of two. **The copy edge did not MERGE, and that was
   rather than a half-answer: its value is its own field, so there is nothing at
   the address and the identity would be wrong rather than right
   (`deref_refuse_one_field_struct_pointee`). A struct of ANOTHER module is
-  refused too — no layout here to read its fields through. And
-  `p.value().b += 5` is still refused on both architectures: the augmented arm
-  works from a NAME, so a base that is an expression has none to key on, and the
-  two backends refuse it with different words, which is a pre-existing
-  divergence in that diagnostic and is pinned as such
-  (`deref_refuse_augmented_through_a_pointer_frame`, `refuse_either:` with both
-  needles) rather than papered over.
+  refused too — no layout here to read its fields through. **`p.value().b += 5`
+  was refused and is ANSWERED as of 2026-10-13 (`work/formal410-docs`).** The
+  augmented arm keyed on a NAME, so a base that is an expression had none — but
+  the plain store `p.value().b = 41` already resolves that same base
+  (`model.pointer_frame_expression`), so the augmented form DESUGARS onto the
+  read and that store (`p.value().b = p.value().b + 5`) in
+  `arm64_codegen.py::_try_member_frame_aug` and its x86-64 twin, rather than
+  growing a third read-modify-write. It is offered only when the dereference's
+  receiver is a NAME, because the desugaring emits the base once for the read
+  and once for the store and a receiver that is a CALL would run twice. Pinned
+  by `deref_struct_pointee_augmented_directly_is_one_slot_read_modify_write`
+  (5 on both architectures, and the caller's `t.b` sees it), which replaced the
+  `deref_refuse_augmented_through_a_pointer_frame` refusal row — the row whose
+  `refuse_either:` had already been collapsed to one sentence when arm64 caught
+  up, so the paragraph's "the two backends refuse it with different words" was
+  stale as well as the refusal itself.
 
 **What it was worth in this corpus's units: nothing measurable, and that is the
 same answer §3 gives for the 54-file group.** There is not one `.value().` in
@@ -154,7 +163,7 @@ Three of those BUILD, and the artifacts are the stronger check:
 `tools/formal_sweep.py` over all 710 files, and the Lean half. The twelve above
 are a sample chosen for size and for the fact that three of them build at all;
 they are not a census, and the doc that would settle the question is
-the `b10` round of `bugs/FORMAL_sweep_work_map.md`'s next round.
+the `b10` round of `bugs/formal/FORMAL_sweep_work_map.md`'s next round.
 
 **What it costs: 0.10 s on `formal/model.py`, 3 runs each, best of three.**
 1.86 s before, 1.96 s after — about 5 %, and it is one extra body walk per
@@ -203,7 +212,7 @@ scale, which is a types question and stays a types question.
 ## §9's second item is CLOSED: the pointee travels with the parameter, when the
 ## image agrees about it
 
-`bugs/FORMAL_pointer_value_model.md` §9's second item asked for "a
+`bugs/formal/FORMAL_pointer_value_model.md` §9's second item asked for "a
 `fn._param_pointees` table published by the same build pass that publishes
 `_frame_candidates`, and `pointer_pointee` consulting it". It is landed, and it
 did not need a table: the walk is over the image's own `functions` dict, which
@@ -402,7 +411,7 @@ count corrections rather than features:
    Zero of the 54 became buildable, and the reason is measured, not argued
    (§3). **Both halves of this are now superseded**: the tuple subscript itself
    was closed on 2026-09-29 (`4ad34f3`), and the 54-file group has moved on to
-   `bugs/FORMAL_env_family_next_terminal.md`, which records where it lands.
+   `bugs/formal/FORMAL_env_family_next_terminal.md`, which records where it lands.
 2. **`DEREFERENCE_METHODS` was a FALSE refusal about 527 of the 528 `value` sites
    in the stdlib.** `value` is spelled the same for an enum's integral value, an
    iterator's current item, a `SIMD`'s scalar and a pointer's pointee; the table
@@ -418,7 +427,7 @@ pointer need beyond that?
 
 **Nothing is stored.** The pointee is a *computation* over the pointer's
 declared static type, exactly as a string's length is a computation over a
-NUL-terminated `char *`. This is `bugs/FORMAL_string_value_model.md`'s move and
+NUL-terminated `char *`. This is `bugs/formal/FORMAL_string_value_model.md`'s move and
 it transfers — with one difference that is the whole of the answer, and it cuts
 in the pointer's favour.
 
@@ -564,7 +573,7 @@ CODEGEN/DEPENDENCY: /tmp/env_noderef.mojo  (build: env_noderef.mojo imports 'std
 
 `env.mojo` imports `std.ffi` → `std.sys` → `info.mojo`, and `info.mojo` is
 refused by wave 5's `__mlir_type` template — **family 2 of
-`bugs/FORMAL_known_limits.md`, "there is no MLIR in a freestanding image for the
+`bugs/formal/FORMAL_known_limits.md`, "there is no MLIR in a freestanding image for the
 template to become", permanent by construction.** With `ptr.value()` deleted
 from the file outright it still fails.
 
@@ -582,9 +591,9 @@ That is `env.mojo:42`, not `:85` — a different construct, in the
 DEREFERENCE` over the whole stdlib sweep is **0** on both architectures.
 
 > **Superseded 2026-09-29.** `env.mojo:42` is closed (`4ad34f3`; see
-> `bugs/FORMAL_known_limits.md` §6.2.1 for why it was never a monomorphization
+> `bugs/formal/FORMAL_known_limits.md` §6.2.1 for why it was never a monomorphization
 > problem) and the group has moved on — see
-> `bugs/FORMAL_env_family_next_terminal.md` for where. This block is left as
+> `bugs/formal/FORMAL_env_family_next_terminal.md` for where. This block is left as
 > the record of what the measurement said at the time, which is the only reason
 > it is still worth reading.
 
@@ -613,7 +622,7 @@ A one-byte unsigned load, which is the correct answer and not an approximation
 of it. What then stops the *file* is `String(unsafe_from_utf8_ptr=…)`: a
 `String` is a three-field struct whose value on this path is a frame address,
 and constructing one here is refused. That is
-`bugs/FORMAL_string_value_model.md`'s §"NOT the string value model" — the same
+`bugs/formal/FORMAL_string_value_model.md`'s §"NOT the string value model" — the same
 16-file family — and it is **not** a pointer question.
 
 ---
@@ -705,7 +714,7 @@ DEREFERENCE_METHODS = {
 ```
 
 That is **false about 469 of the 470 `value` sites** and conflates an unwrap
-with a load for `unsafe_value`. `bugs/FORMAL_known_limits.md` opens with the
+with a load for `unsafe_value`. `bugs/formal/FORMAL_known_limits.md` opens with the
 rule this breaks: "a claim that is false about a file is worse than no claim".
 
 After, three tables and a three-valued guard:
