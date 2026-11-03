@@ -2492,6 +2492,14 @@ REFUSALS = [
      "    printf(\"[%s]\\n\", g(1, 2))\n"
      "    return 0\n",
      "printf() is asked to render the value of g(…)"),
+    ("a_binop_operand_of_a_return_less_call_is_refused",
+     "def g(a, b):\n"
+     "    w = 1\n"
+     "\n"
+     "def main():\n"
+     "    x = g(1, 2) + 1\n"
+     "    return 0\n",
+     "print() is asked to render the value of g(…)"),
 ]
 
 # ── the builtin allow-list, one differential case per name ──

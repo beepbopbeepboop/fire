@@ -2411,6 +2411,9 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                     self._emit_receiver_writeback()
                 self._emit_mov_imm(Reg.RAX, 0)
             else:
+                callee = self._vkinds.no_value_callee_of(stmt.value)
+                if callee is not None:
+                    raise CodegenError(M.returnless_value_refusal(callee))
                 # A double returned under an INTEGER annotation. Asked before
                 # the value is emitted, because the answer is about the
                 # FUNCTION's declaration rather than about the return
@@ -2550,10 +2553,16 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 f"`__enter__`/`__exit__` before codegen")
 
         if isinstance(stmt, F.IfStmt):
+            callee = self._vkinds.no_value_callee_of(stmt.condition)
+            if callee is not None:
+                raise CodegenError(M.returnless_value_refusal(callee))
             self._emit_if(stmt)
             return
 
         if isinstance(stmt, F.WhileStmt):
+            callee = self._vkinds.no_value_callee_of(stmt.condition)
+            if callee is not None:
+                raise CodegenError(M.returnless_value_refusal(callee))
             self._blob_loop_push(None, stmt.body)
             try:
                 self._emit_loop(cond=stmt.condition, body=stmt.body,
@@ -2608,9 +2617,15 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
 
         if isinstance(stmt, F.AssignStmt):
             if isinstance(stmt.target, F.SubscriptExpr):
+                callee = self._vkinds.no_value_callee_of(stmt.value)
+                if callee is not None:
+                    raise CodegenError(M.returnless_value_refusal(callee))
                 self._emit_subscript_store(stmt.target, stmt.value)
                 return
             if isinstance(stmt.target, F.SliceExpr):
+                callee = self._vkinds.no_value_callee_of(stmt.value)
+                if callee is not None:
+                    raise CodegenError(M.returnless_value_refusal(callee))
                 self._emit_slice_store(stmt.target, stmt.value)
                 return
             # A STORE through a pointer's pointee, `p.value() = v`, and the
@@ -3230,6 +3245,9 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             node, self.func_name, self._frame_holders))
 
     def _emit_aug_assign(self, stmt) -> None:
+        callee = self._vkinds.no_value_callee_of(stmt.value)
+        if callee is not None:
+            raise CodegenError(M.returnless_value_refusal(callee))
         op = stmt.op[:-1] if stmt.op.endswith("=") and stmt.op != "==" \
             else stmt.op
         # A SUBSCRIPT target is a read-modify-write through a computed address,
@@ -8404,6 +8422,12 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             return
 
         if isinstance(expr, F.SubscriptExpr):
+            callee = self._vkinds.no_value_callee_of(expr.index)
+            if callee is not None:
+                raise CodegenError(M.returnless_value_refusal(callee))
+            callee = self._vkinds.no_value_callee_of(expr.obj)
+            if callee is not None:
+                raise CodegenError(M.returnless_value_refusal(callee))
             self._emit_subscript(expr)
             return
 
@@ -8582,6 +8606,9 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 f"container and string values are not")
 
     def _emit_unary(self, expr) -> None:
+        callee = self._vkinds.no_value_callee_of(expr.operand)
+        if callee is not None:
+            raise CodegenError(M.returnless_value_refusal(callee))
         # `-s` is negation of an address and `~s` is a bit complement of one,
         # and both are refused with `model.string_unary_refusal`, which holds
         # the message and the measurements; asking here is what makes the two
@@ -8672,6 +8699,10 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
 
     def _emit_binop(self, e: F.BinaryOp) -> None:
         op = e.op
+        for operand in (e.left, e.right):
+            callee = self._vkinds.no_value_callee_of(operand)
+            if callee is not None:
+                raise CodegenError(M.returnless_value_refusal(callee))
         # Any operator that reaches the integer ALU or the flag-setting compare
         # with a `char *` operand is refused, and this is the only place that
         # knows both operand kinds before that happens. Measured on the
@@ -9260,6 +9291,12 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # would, so each link asks the same frame-ordering question.
             self._refuse_frame_order_operand(op, operands[i])
             self._refuse_frame_order_operand(op, operands[i + 1])
+            callee = self._vkinds.no_value_callee_of(operands[i])
+            if callee is not None:
+                raise CodegenError(M.returnless_value_refusal(callee))
+            callee = self._vkinds.no_value_callee_of(operands[i + 1])
+            if callee is not None:
+                raise CodegenError(M.returnless_value_refusal(callee))
             unsigned, signed = _CMP_CONDS[op]
             self.asm.emit(encode_mov_r64_rm64(Reg.RAX, Reg.RSP,
                                               _SLOT * (n - 1 - i)))
@@ -12429,8 +12466,14 @@ ctor_field_value=self._ctor_field_value_for(name),
         # call, so every argument is in memory before the next one is evaluated.
         for j, (c, slot) in enumerate(placement):
             if j == recv_arg:
+                callee = self._vkinds.no_value_callee_of(args[j])
+                if callee is not None:
+                    raise CodegenError(M.returnless_value_refusal(callee))
                 self._emit_receiver_argument(args[j], name)
             else:
+                callee = self._vkinds.no_value_callee_of(args[j])
+                if callee is not None:
+                    raise CodegenError(M.returnless_value_refusal(callee))
                 self._emit_expr(args[j])
             if c == "stack":
                 self.asm.emit(encode_mov_rm64_r64(Reg.RSP,
@@ -12480,8 +12523,14 @@ ctor_field_value=self._ctor_field_value_for(name),
         # markers are unwrapped exactly as the arm64 twin does.
         for _d in dropped:
             if isinstance(_d, F.UnaryOp) and _d.op in ("*", "**"):
+                callee = self._vkinds.no_value_callee_of(_d.operand)
+                if callee is not None:
+                    raise CodegenError(M.returnless_value_refusal(callee))
                 self._emit_expr(_d.operand)
             else:
+                callee = self._vkinds.no_value_callee_of(_d)
+                if callee is not None:
+                    raise CodegenError(M.returnless_value_refusal(callee))
                 self._emit_expr(_d)
         # Evaluate left to right onto the stack, then pop in reverse into the
         # argument registers: evaluating argument i+1 clobbers RAX and every

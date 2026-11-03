@@ -2626,6 +2626,9 @@ dylib_exports: list = None, globals_base: int = None,
                     self._emit_receiver_writeback()
                 self.asm.emit(encode_movz_wd_imm(0, 0))
             else:
+                callee = self._vkinds.no_value_callee_of(stmt.value)
+                if callee is not None:
+                    raise CodegenError(M.returnless_value_refusal(callee))
                 # A double returned under an INTEGER annotation. Asked before the
                 # value is emitted, because the answer is about the FUNCTION's
                 # declaration rather than about the return instruction, and
@@ -2645,6 +2648,9 @@ dylib_exports: list = None, globals_base: int = None,
             return
 
         if isinstance(stmt, F.IfStmt):
+            callee = self._vkinds.no_value_callee_of(stmt.condition)
+            if callee is not None:
+                raise CodegenError(M.returnless_value_refusal(callee))
             self._emit_if(stmt)
             return
 
@@ -2745,6 +2751,9 @@ dylib_exports: list = None, globals_base: int = None,
             return
 
         if isinstance(stmt, F.WhileStmt):
+            callee = self._vkinds.no_value_callee_of(stmt.condition)
+            if callee is not None:
+                raise CodegenError(M.returnless_value_refusal(callee))
             self._blob_loop_push(None, stmt.body)
             try:
                 self._emit_loop(cond=stmt.condition, body=stmt.body,
@@ -2792,6 +2801,9 @@ dylib_exports: list = None, globals_base: int = None,
             return
 
         if isinstance(stmt, F.AugAssignStmt):
+            callee = self._vkinds.no_value_callee_of(stmt.value)
+            if callee is not None:
+                raise CodegenError(M.returnless_value_refusal(callee))
             if isinstance(stmt.target, F.SubscriptExpr):
                 self._emit_subscript_aug(stmt)
                 return
@@ -2920,6 +2932,9 @@ dylib_exports: list = None, globals_base: int = None,
                 return
             self._load_var(name, 0)
             self.asm.emit(encode_stp_sp_pre(0, 2))
+            callee = self._vkinds.no_value_callee_of(stmt.value)
+            if callee is not None:
+                raise CodegenError(M.returnless_value_refusal(callee))
             self._emit_expr_to(stmt.value, "X1")
             self.asm.emit(encode_ldp_sp_post(0, 2))
             self.asm.emit(ops[op](0, 0, 1))
@@ -2933,9 +2948,15 @@ dylib_exports: list = None, globals_base: int = None,
                 self._emit_tuple_assign(stmt)
                 return
             if isinstance(stmt.target, F.SubscriptExpr):
+                callee = self._vkinds.no_value_callee_of(stmt.value)
+                if callee is not None:
+                    raise CodegenError(M.returnless_value_refusal(callee))
                 self._emit_subscript_store(stmt.target, stmt.value)
                 return
             if isinstance(stmt.target, F.SliceExpr):
+                callee = self._vkinds.no_value_callee_of(stmt.value)
+                if callee is not None:
+                    raise CodegenError(M.returnless_value_refusal(callee))
                 self._emit_slice_store(stmt.target, stmt.value)
                 return
             # A STORE through a pointer's pointee, `p.value() = v`. Asked
@@ -4305,6 +4326,9 @@ dylib_exports: list = None, globals_base: int = None,
             return
 
         if isinstance(expr, F.UnaryOp):
+            callee = self._vkinds.no_value_callee_of(expr.operand)
+            if callee is not None:
+                raise CodegenError(M.returnless_value_refusal(callee))
             # `-s` is negation of an address and `~s` is a bit complement of
             # one, and both are refused with `model.string_unary_refusal`,
             # which holds the message and the measurements; asking here is what
@@ -4581,6 +4605,12 @@ dylib_exports: list = None, globals_base: int = None,
             return
 
         if isinstance(expr, F.SubscriptExpr):
+            callee = self._vkinds.no_value_callee_of(expr.index)
+            if callee is not None:
+                raise CodegenError(M.returnless_value_refusal(callee))
+            callee = self._vkinds.no_value_callee_of(expr.obj)
+            if callee is not None:
+                raise CodegenError(M.returnless_value_refusal(callee))
             self._emit_subscript(expr)
             return
 
@@ -9148,6 +9178,10 @@ ctor_field_value=self._ctor_field_value_for(name),
 
     def _emit_binop(self, e: F.BinaryOp) -> None:
         op = e.op
+        for operand in (e.left, e.right):
+            callee = self._vkinds.no_value_callee_of(operand)
+            if callee is not None:
+                raise CodegenError(M.returnless_value_refusal(callee))
         # `&`, `^` and `-` between two SETS are lowered here; everything else
         # with a blob operand goes to the shared gate below.
         if self._maybe_emit_set_binop(e.left, e.right, op):
@@ -11947,12 +11981,28 @@ ctor_field_value=self._ctor_field_value_for(name),
                 continue
             flat.append(a)
         args = flat
+        # Check arguments for returnless calls (except maybe some builtins)
+        # Print/printf handled separately; but other calls passing returnless results
+        is_print_like = name == "print" or name == "printf" or \
+                        (isinstance(e.func, F.IdentExpr) and e.func.name in ("print", "printf"))
+        if not is_print_like and not M.emitter_lowers(name) or name not in ("len", "range", "ord", "chr", "hash") and not is_print_like:
+            # Be more specific - check if it's a builtin we handle specially
+            pass
+        # More general: check all args
+        for a in args:
+            # skip starred expansions that became elements
+            callee = self._vkinds.no_value_callee_of(a)
+            if callee is not None:
+                raise CodegenError(M.returnless_value_refusal(callee))
         # Side-effect-only operands must still run, but AFTER real args are
         # evaluated would reorder observably — evaluate them first into a
         # pushed slot, then the real args on top, then pop in reverse.
         # Simpler and order-preserving enough for compile: run them first
         # (they don't produce call arguments).
         for se in side_effects:
+            callee = self._vkinds.no_value_callee_of(se)
+            if callee is not None:
+                raise CodegenError(M.returnless_value_refusal(callee))
             self._emit_expr(se)
         sret_site = self._ret_frame_sites.get(id(e))
         blob_site = self._ret_blob_sites.get(id(e))
@@ -12040,6 +12090,9 @@ ctor_field_value=self._ctor_field_value_for(name),
         # call in a stack argument safe: with the area reserved and nothing else
         # pushed yet, that nested call pushes strictly below it.
         for k in range(n_stack):
+            callee = self._vkinds.no_value_callee_of(args[_ABI_ARG_REGS + k])
+            if callee is not None:
+                raise CodegenError(M.returnless_value_refusal(callee))
             self._emit_expr(args[_ABI_ARG_REGS + k])
             self.asm.emit(encode_str_xt_xn_imm(0, 31, 8 * k))
         # The register arguments. Evaluate left-to-right, spilling each result
@@ -12075,6 +12128,9 @@ ctor_field_value=self._ctor_field_value_for(name),
             if i == recv_arg:
                 self._emit_receiver_argument(arg, name)
             else:
+                callee = self._vkinds.no_value_callee_of(arg)
+                if callee is not None:
+                    raise CodegenError(M.returnless_value_refusal(callee))
                 self._emit_expr(arg)
             self.asm.emit(encode_stp_sp_pre(0, 31))
         if sret_site is not None:
