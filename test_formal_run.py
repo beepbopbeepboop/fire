@@ -17950,6 +17950,27 @@ POINTER_DEREF_REFUSALS = [
      "    var b: Pointer[Float64] = malloc(8)\n"
      "    return store(b)\n",
      "refuse:would write 0x1, a denormal rather than 1.0", None),
+    # The UNESTABLISHED half of the same check. An unannotated parameter has no
+    # kind this model can state, so the old check answered None and the store
+    # went through: `n`'s integer bits were written into a double slot. Both
+    # spellings are refused by name, with the value's own spelling in the
+    # message; a store into a `Float64` pointee is never silent about its kind.
+    ("deref_refuse_a_binary64_value_store_of_an_unestablished_value",
+     "def store(p: Pointer[Float64], n) -> Int:\n"
+     "    p.value() = n\n"
+     "    return 0\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b: Pointer[Float64] = malloc(8)\n"
+     "    return store(b, 1)\n",
+     "refuse:whose kind this model cannot establish", None),
+    ("deref_refuse_a_binary64_subscript_store_of_an_unestablished_value",
+     "def store(p: Pointer[Float64], n) -> Int:\n"
+     "    p[0] = n\n"
+     "    return 0\n"
+     "def main(n: Int) -> Int:\n"
+     "    var b: Pointer[Float64] = malloc(8)\n"
+     "    return store(b, 1)\n",
+     "refuse:whose kind this model cannot establish", None),
 ]
 
 # The x86-64 wrong answer this used to pin, and what replaced it.  A
