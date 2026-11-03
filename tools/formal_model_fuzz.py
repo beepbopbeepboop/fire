@@ -595,11 +595,15 @@ def gen_memreg(rng, free):
     base = _base(rng)
     off = OFF_REG
     d = _dst(rng, free)
-    if rng.random() < 0.5:
+    r = rng.random()
+    if r < 1/3.0:
         return ("ldr x%d, [%s, x%d]" % (d, _rn(base), off),
                 A.encode_ldr_xt_xn_xm(d, base, off))
-    return ("str x%d, [%s, x%d]" % (d, _rn(base), off),
-            A.encode_str_xt_xn_xm(d, base, off))
+    elif r < 2/3.0:
+        return ("str x%d, [%s, x%d]" % (d, _rn(base), off),
+                A.encode_str_xt_xn_xm(d, base, off))
+    return ("strb w%d, [%s, x%d]" % (d, _rn(base), off),
+            A.encode_strb_wd_wn_xm(d, base, off))
 
 
 #: The mixes, and what each one is for. `MIXES` is a NAME → generators map

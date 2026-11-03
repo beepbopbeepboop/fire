@@ -3894,6 +3894,7 @@ _STEP_CONDS = [
     (0xffd00000, 0xb9400000),  # 61 LDR Wt, [Xn, #imm]
     (0xffe0fc00, 0xf8606800),  # 62 LDR Xt, [Xn, Xm] (register offset, LSL #0)
     (0xffe0fc00, 0xf8206800),  # 63 STR Xt, [Xn, Xm] (register offset, LSL #0)
+    (0xffe0fc00, 0x38206800),  # 70 STRB Wt, [Xn, Xm] (register offset, LSL #0)
     (0xffe00c00, 0xf8400000),  # 64 LDUR Xt, [Xn, #imm9] (unscaled, signed)
     (0xffe00c00, 0xf8000000),  # 65 STUR Xt, [Xn, #imm9] (unscaled, signed)
     # 66 CMN, 67 TST. **Both encoders ARE emitted now, and this paragraph used
@@ -4311,10 +4312,10 @@ def _step_rhs(w: int, idx: int):
         cond = (w >> 12) & 0xf
         return (f"some (arm64_set_reg {rd} s (if arm64_matches_condition "
                 f"{cond} s.nzcv then arm64_reg {rn} s else arm64_reg {rm} s))")
-    if idx in (54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65):
+    if idx in (54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 70):
         rn = (w >> 5) & 0x1f
         base = _base_of(rn)
-        if idx in (62, 63):                      # register offset, LSL #0
+        if idx in (62, 63, 70):                      # register offset, LSL #0
             addr = f"({base} + arm64_reg {(w >> 16) & 0x1f} s)"
         elif idx in (64, 65):                    # unscaled, signed imm9
             imm9 = (w >> 12) & 0x1ff
@@ -4342,6 +4343,9 @@ def _step_rhs(w: int, idx: int):
                     f"{addr}.toNat (arm64_reg {rd} s) }}")
         if idx == 63:
             return (f"some {{ s with mem := mem_write_u64 s.mem {addr}.toNat "
+                    f"(arm64_reg {rd} s) }}")
+        if idx == 70:  # STRB register offset
+            return (f"some {{ s with mem := mem_write_u8 s.mem {addr}.toNat "
                     f"(arm64_reg {rd} s) }}")
         if idx == 65:
             return (f"some {{ s with mem := mem_write_u64 s.mem {addr}.toNat "
@@ -4613,10 +4617,10 @@ def _step_rhs_generic(idx: int):
         return (f"some (arm64_set_reg {_RD} s (if arm64_matches_condition "
                 f"(((w >>> 12) &&& 0xf).toNat) s.nzcv then arm64_reg {_RN} s "
                 f"else arm64_reg {_RM} s))")
-    if idx in (54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65):
+    if idx in (54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 70):
         _I9G = "(((w >>> 12) &&& 0x1ff).toNat)"
         _IDX = "(((w >>> 10) &&& 0xfff).toNat)"
-        if idx in (62, 63):
+        if idx in (62, 63, 70):
             _ADDR = f"({_BASE} + arm64_reg {_RM} s)"
         elif idx in (64, 65):
             _ADDR = (f"(if {_I9G} ≥ 256 then {_BASE} - UInt64.ofNat ((512 - {_I9G})) "
@@ -4638,6 +4642,9 @@ def _step_rhs_generic(idx: int):
         if idx in (55, 57):
             _W = {55: 8, 57: 16}[idx]
             return (f"some {{ s with mem := mem_write_u{_W} s.mem {_ADDR}.toNat "
+                    f"(arm64_reg {_RD} s) }}")
+        if idx == 70:
+            return (f"some {{ s with mem := mem_write_u8 s.mem {_ADDR}.toNat "
                     f"(arm64_reg {_RD} s) }}")
         return (f"some {{ s with mem := mem_write_u64 s.mem {_ADDR}.toNat "
                 f"(arm64_reg {_RD} s) }}"
@@ -4730,6 +4737,7 @@ _WORK_STEP = [
     (61, "work_step_ldr_uoff32", [(0xffd00000, 0xb9400000)]),
     (62, "work_step_ldr_regoff", [(0xffe0fc00, 0xf8606800)]),
     (63, "work_step_str_regoff", [(0xffe0fc00, 0xf8206800)]),
+    (70, "work_step_strb_regoff", [(0xffe0fc00, 0x38206800)]),
     (64, "work_step_ldur", [(0xffe00c00, 0xf8400000)]),
     (65, "work_step_stur", [(0xffe00c00, 0xf8000000)]),
     (66, "work_step_cmn", [(0xffe00000, 0xab000000)]),
