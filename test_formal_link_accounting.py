@@ -8,7 +8,7 @@ silently change verdicts if they broke:
 1. **Relative import resolution.** `from .. import X` in a module used to
    resolve to the importer's OWN package, because `module_name.replace(".",
    os.sep)` turned `".."` into `"/"` and the candidate list degenerated to two
-   filesystem-root paths. Recorded in `bugs/FORMAL_known_limits.md` 1.3.
+   filesystem-root paths. Recorded in `bugs/formal/FORMAL_known_limits.md` 1.3.
 
 2. **The host-module tier split is a partition of what it replaced.**
    `formal/imports.py`'s `HOST_MODULES` was one 77-name list; it is now
@@ -63,6 +63,7 @@ sys.path.insert(0, REPO)
 import formal.build as B
 import formal.imports as I
 import formal.model as M
+from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S  # per-child budgets
 
 RESULTS = []
 
@@ -605,7 +606,7 @@ HOST_SET_ADDED_TIERS = {
     "sysconfig": "unreachable",
     # A clock `formal/hostmods/time.mojo` already reads, plus calendar
     # arithmetic.  The answer is a shaped record, which is
-    # `bugs/FORMAL_time_struct_shaped_answers.md`'s to design.
+    # `bugs/formal/FORMAL_time_struct_shaped_answers.md`'s to design.
     "datetime": "modelled",
     # `getrusage(2)` is libSystem and `struct rusage` is a fixed layout.
     "resource": "modelled",
@@ -640,7 +641,7 @@ HOST_SET_ADDED_TIERS = {
     # string, and `posix` needs the libSystem calls
     # `formal/hostmods/os/_syscalls.mojo` already makes -- THIS is a POSIX
     # target.  So nothing is missing and only the module is unwritten, which is
-    # `modelled`.  `bugs/FORMAL_stdlib_module_names_are_not_classified.md` §"The
+    # `modelled`.  `bugs/formal/FORMAL_stdlib_module_names_are_not_classified.md` §"The
     # next step" listed all four with `msvcrt` as "not this host's", and for
     # `posix` that was false outright.
     "posix": "modelled",
@@ -1197,7 +1198,7 @@ def test_audit_fires_on_a_real_build():
             [sys.executable, os.path.join(REPO, 'fire.py'), 'build', '--formal',
              '--no-prove', '--backend=arm64', '-o', os.path.join(d, 'sound'),
              sound],
-            capture_output=True, text=True, timeout=600, cwd=REPO)
+            capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S, cwd=REPO)
         check(r.returncode == 0, 'a sound program still builds',
               (r.stdout + r.stderr)[-300:])
         check('nothing provides' not in (r.stdout + r.stderr),
@@ -1210,7 +1211,7 @@ def test_audit_fires_on_a_real_build():
         r2 = subprocess.run(
             [sys.executable, os.path.join(REPO, 'fire.py'), 'build', '--formal',
              '--no-prove', '--backend=arm64', '-o', os.path.join(d, 'bad'), bad],
-            capture_output=True, text=True, timeout=600, cwd=REPO)
+            capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S, cwd=REPO)
         out = r2.stdout + r2.stderr
         check(r2.returncode != 0,
               'an image binding an unprovided symbol is REFUSED, not built', out)
@@ -1442,7 +1443,7 @@ def test_hostmod_cross_references():
     to be is really there — a source, a test. This asks the same question about
     the module's own sentences, and it is here because four of them were not.
 
-    `bugs/FORMAL_no_exceptions.md` was cited by `json.mojo` and did not exist,
+    `bugs/formal/FORMAL_no_exceptions.md` was cited by `json.mojo` and did not exist,
     and `test_formal_io.py` / `test_formal_typing.py` were cited by the two
     modules whose real test is `test_formal_small_hosts.py` — four readers sent
     to a file that is not there. That is the `coro` failure mode CLAUDE.md
@@ -1523,13 +1524,13 @@ def test_raise_flushes_stdout():
                     [sys.executable, os.path.join(REPO, 'fire.py'), 'build',
                      '--formal', '--no-prove', f'--backend={backend}',
                      '-o', out, program],
-                    capture_output=True, text=True, timeout=600, cwd=REPO)
+                    capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S, cwd=REPO)
                 check(r.returncode == 0,
                       f'{name} builds on {backend}', (r.stdout + r.stderr)[-300:])
                 if r.returncode != 0:
                     continue
                 run = subprocess.run([out], capture_output=True, text=True,
-                                     timeout=60)
+                                     timeout=RUN_TIMEOUT_S)
                 check(run.stdout == 'before@@',
                       f'a `{name}` on {backend} keeps the bytes it printed '
                       f'(got {run.stdout!r})', run.stdout)

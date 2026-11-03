@@ -491,7 +491,7 @@ def export_exclusions(src: str, parsed=None) -> dict:
     table and the export table are two views of one decision rather than two
     implementations that can drift, which is what let a refusal come to name
     "every declaration in it is private" about a file with fifteen public
-    functions in it (bugs/FORMAL_known_limits.md §1.3).
+    functions in it (bugs/formal/FORMAL_known_limits.md §1.3).
 
     The generic test is `collect_exports_src`'s own, regex over source text and
     keyed by NAME, and it stays that way here: a per-definition test would

@@ -203,7 +203,7 @@ def mojo_string(s):
 # a literal. `@@` is two bytes that a real newline cannot collide with, so every
 # program in this file emits its records back to back and this token is what
 # separates them. The `printf` string-escape question behind the old wording is
-# recorded in `bugs/FORMAL_pointer_value_model.md`, and `test_formal_run.py`'s
+# recorded in `bugs/formal/FORMAL_pointer_value_model.md`, and `test_formal_run.py`'s
 # harness cases avoid line-structured output for the same reason.
 REC = "@@"
 
@@ -1040,7 +1040,7 @@ def main() -> Int:
 # the manifest said `int64_t *` and this was refused "for the same reason and
 # with the same repair".  It is `-> List[String]` now: one word pointing at
 # `[count][element]…`, which is item 1 of
-# `bugs/FORMAL_listdir_no_run_time_sequence.md`, so the word HAS a kind and the
+# `bugs/formal/FORMAL_listdir_no_run_time_sequence.md`, so the word HAS a kind and the
 # subscript lowers.  The refusal it asserted could not survive that, and it did
 # not have to: it went red against `test_formal_os_backing.py`'s
 # `listdir_is_a_python_level_list`, which is the row that pins the answer.
@@ -1171,7 +1171,7 @@ def group_blob(tmpdir, verbose):
             return False, (f"os_blob_untyped_listdir [{backend}]: refused, and "
                            f"the callee is declared `-> List[String]`, so the "
                            f"word has a kind and `names[0]` lowers "
-                           f"(`bugs/FORMAL_listdir_no_run_time_sequence.md`'s "
+                           f"(`bugs/formal/FORMAL_listdir_no_run_time_sequence.md`'s "
                            f"item 1): {text.strip()[-300:]}")
         # Run through the SAME wrapper `run_case` uses for the other
         # architecture, because this file's `run` executes an image directly
@@ -1226,7 +1226,7 @@ def group_inplace(tmpdir, verbose):
     off the source: `strcat` is the one write in `formal/hostmods/` that does
     not size what it writes, so it has to have no caller, and the
     `str_append(str_dup(…))` shape that was the bug must not be able to come
-    back. (`bugs/FORMAL_os_path_join_overran_its_buffer_on_the_trailing_
+    back. (`bugs/formal/FORMAL_os_path_join_overran_its_buffer_on_the_trailing_
     separator_branch.md` carried the measurement and is deleted with this.)
     """
     root = os.path.join(os.path.dirname(os.path.abspath(__file__)),

@@ -125,7 +125,7 @@ class TestFrameMethodFinder(unittest.TestCase):
                  for i in range(0, len(self.code) - len(self.code) % 4, 4)}
         labels = self.info["labels"]
         entry = labels["Point_get_x"]
-        body = labels["Point_get_x_sf3_ok"]
+        body = labels["Point_get_x_sf4_ok"]
         end = labels["Point_get_y"]         # the next function: exclusive bound
         self.assertEqual(G._frame_slot_accesses(words, entry, end, body=body),
                          [(0, False)])

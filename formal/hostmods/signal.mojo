@@ -32,7 +32,7 @@ the first because it is the one a program READS.
     literals — that they "are NOT importable from it" — and that is still true
     of a module that does not also declare a public function: a dylib with
     nothing but constants cannot be linked at all
-    (`bugs/FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md`), and
+    (`bugs/formal/FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md`), and
     `strsignal` below is what makes this one linkable.
   * `strsignal(sig)` is the C library's own `strsignal(3)`, called through the
     same extern-call path `formal/hostmods/sys.mojo` documents for `exit`. It is
@@ -76,7 +76,7 @@ WHAT IS NOT HERE, AND WHY
   * `alarm`, `setitimer`, `getitimer` — an ITIMER the kernel arms against this
     process. `getitimer` is the sharpest omission: its answer is a
     `(delay, interval)` PAIR, and a pair is a frame-allocated blob that dies on
-    return (`bugs/FORMAL_time_struct_shaped_answers.md` says the same about
+    return (`bugs/formal/FORMAL_time_struct_shaped_answers.md` says the same about
     `time.get_clock_info`). `alarm(seconds)` alone would return a scalar and be
     the more useful of the two, and is left out for a reason of its own that is
     not capability: the name `alarm` is also the C library function that

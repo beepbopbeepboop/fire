@@ -59,7 +59,7 @@ def group_io(tmpdir, verbose):
 
     `%lld` and not `%d` for the same reason every other test in this tree uses
     it: a `%d` conversion is 32 bits wide on this path
-    (`bugs/FORMAL_string_value_model.md` §2), and `DEFAULT_BUFFER_SIZE` is
+    (`bugs/formal/FORMAL_string_value_model.md` §2), and `DEFAULT_BUFFER_SIZE` is
     small enough that it would not have shown — which is worth saying, because
     the first version of this group printed it with `%d` and passed.
     """

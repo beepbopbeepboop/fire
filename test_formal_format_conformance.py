@@ -347,7 +347,7 @@ DIVERGENT_ROWS = [
     # `test_formal_run.py`'s `TYPE_VALUE_NUMBER_CASES` pins the tag). CPython's
     # `<class 'int'>` is a NAME chosen by the tag, which is a table this path
     # does not have. Named in
-    # `bugs/FORMAL_a_print_of_a_container_needs_a_text_loop.md`'s last section,
+    # `bugs/formal/FORMAL_a_print_of_a_container_needs_a_text_loop.md`'s last section,
     # with the instance row below it.
     ("type_value", prog('print(int)'),
      ("divergent", "3143511548502526014\n", "<class 'int'>\n")),
