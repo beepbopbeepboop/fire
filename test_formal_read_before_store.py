@@ -254,8 +254,7 @@ CASES = [
     # emptiness decided at RUN time (`range(0, n)` with `n <= 0`) still counts
     # the target as defined, and a read of it then returns whatever the caller
     # left in the register. CPython raises for `n == 0`. Deciding it needs the
-    # value of `n`, which is what
-    # is the residual case (now handled by loop-bound flags).
+    # value of `n`, which is the residual case now handled by loop-bound flags.
     ("unknown_bound_keeps_the_target_defined",
      "    for i in range(0, n):\n        pass\n    return i\n", "ok",
      "CPython leaves the target unbound when a runtime-empty range is read"),
@@ -2016,7 +2015,7 @@ def check_loop_bound_flags() -> list:
     read where it may be unbound. Both backends read this one function — the
     flag word, the set-on-store and the check-on-read in
     `formal/arm64_codegen.py` and `formal/x86_64_codegen.py` are the emitter
-    fixed for-range empty-target half
+    half of the for-range empty-target fix
     — so these cases are the build-time half of the same fix. The direction
     of every error matters: a flag the loop never takes is dead code in the
     image, but a flag a loop misses is the old garbage answer, which is the

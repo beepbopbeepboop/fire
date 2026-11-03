@@ -66,7 +66,7 @@ while `from os import isfile` WORKS, because that spelling binds the name in the
 IMPORTER rather than asking the exporter for it. So the difference is the export
 rule, not a bug to route around, and the fix that keeps BOTH spellings working
 is a real `def` per name. `doc/ABI.md`'s export rule is what that refusal
-quotes and `bugs/FORMAL_known_limits.md` §1.1 is where the rule is measured.
+quotes and `bugs/formal/FORMAL_known_limits.md` §1.1 is where the rule is measured.
 
 **The call inside a forward is spelled `os.path.f(…)`, not a bare `f(…)` and
 not an aliased import.** Both alternatives were built and run:

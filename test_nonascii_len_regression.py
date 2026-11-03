@@ -6,6 +6,7 @@ After the fix, len(s) counts UTF-8 code points (mojo_str_codepoint_len).
 """
 
 import sys, os, subprocess, tempfile
+from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S
 HERE = os.path.dirname(__file__)
 _FIRE = os.path.join(os.path.dirname(HERE), 'fire.py')
 
@@ -27,19 +28,19 @@ def run_test():
         # 1. Get CPython reference output
         cp = subprocess.run(
             [sys.executable, tmp],
-            capture_output=True, text=True, timeout=30)
+            capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
         want = cp.stdout.strip()
         
         # 2. Run via interpreter (fire.py run)
         ri = subprocess.run(
             [sys.executable, _FIRE, 'run', tmp],
-            capture_output=True, text=True, timeout=30)
+            capture_output=True, text=True, timeout=RUN_TIMEOUT_S)
         got_i = ri.stdout.strip()
         
         # 3. Run via JIT (fire.py --jit)
         rj = subprocess.run(
             [sys.executable, _FIRE, '--jit', tmp],
-            capture_output=True, text=True, timeout=30)
+            capture_output=True, text=True, timeout=COMPILE_TIMEOUT_S)
         got_j = rj.stdout.strip()
         
         # Both should match CPython: four lines of "1"

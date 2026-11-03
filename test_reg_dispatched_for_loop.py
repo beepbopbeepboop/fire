@@ -1,5 +1,5 @@
 # Regression for bug:CODEGEN_dispatched_for_loop_shares_one_var_between_dict_and_list_arms
-# Repro from bugs/CODEGEN_dispatched_for_loop_shares_one_var_between_dict_and_list_arms.md
+# Repro from bugs/mid/CODEGEN_dispatched_for_loop_shares_one_var_between_dict_and_list_arms.md
 # Expected: for i in o.read(): print(i) produces 10 / 20, not SIGSEGV.
 # Status: FAILS (SIGSEGV on compiled path) — blocked on representation choice.
 

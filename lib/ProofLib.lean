@@ -712,7 +712,11 @@ theorem mem_read_after_write_u64_high_nw (mem : Nat → UInt8) (sp : UInt64) {K 
     `sp.toNat + j < 2^64`, not by a separate `j < 2^63`, and bounds the store
     distance by `K ≤ sp.toNat`.  This is the no-wrap peel
     `mem_read_after_write_u64_high_nw` with those two bounds, taking `K` and the
-    store value *last* so a rewrite can supply them positionally. -/
+    store value *last* so a rewrite can supply them positionally.
+
+    Also accepts the split form produced by `u64_sub_add`:
+    `sp - (UInt64.ofNat a - UInt64.ofNat b)` is collapsed to
+    `sp - UInt64.ofNat (a - b)`. -/
 theorem mem_read_write_below (mem : Nat → UInt8) (sp : UInt64) {K j : Nat}
     (hjnw : sp.toNat + j < 2 ^ 64) (hKsp : K ≤ sp.toNat) (hK : 8 ≤ K)
     (val : UInt64) :
@@ -720,6 +724,24 @@ theorem mem_read_write_below (mem : Nat → UInt8) (sp : UInt64) {K j : Nat}
         ((sp + UInt64.ofNat j).toNat)
       = mem_read_u64 mem ((sp + UInt64.ofNat j).toNat) :=
   mem_read_after_write_u64_high_nw mem sp hK hKsp hjnw val
+
+/-- Variant of `mem_read_write_below` that accepts `sp - (UInt64.ofNat a - UInt64.ofNat b)`
+    (the form produced when `u64_sub_add` splits an offset). -/
+theorem mem_read_write_below_split (mem : Nat → UInt8) (sp : UInt64) {a b j : Nat}
+    (hba : b ≤ a) (haM : a < 2 ^ 64)
+    (hjnw : sp.toNat + j < 2 ^ 64)
+    (hKsp : (a - b) ≤ sp.toNat) (hK : 8 ≤ a - b)
+    (val : UInt64) :
+    mem_read_u64 (mem_write_u64 mem (sp - (UInt64.ofNat a - UInt64.ofNat b)).toNat val)
+        ((sp + UInt64.ofNat j).toNat)
+      = mem_read_u64 mem ((sp + UInt64.ofNat j).toNat) := by
+  have hK := a - b
+  have hK_eq : UInt64.ofNat a - UInt64.ofNat b = UInt64.ofNat hK := by
+    apply u64_ofNat_sub a b hba haM
+  have hsp : sp - (UInt64.ofNat a - UInt64.ofNat b) = sp - UInt64.ofNat hK := by
+    rw [hK_eq]
+  rw [hsp]
+  exact mem_read_write_below mem sp hjnw hKsp hK val
 
 
 /-! ## Canonicalising frame addresses
@@ -762,7 +784,7 @@ theorem u64_ofNat_sub (a b : Nat) (h : b ≤ a) (hM : a < 2^64) :
 
     The analogue of `u64_ofNat_add`/`u64_ofNat_sub` for a product, and the
     library fact the ALL-INPUTS refinement of
-    `bugs/FORMAL_a_specification_layer_that_stops_at_a_finite_range.md` is
+    `bugs/formal/FORMAL_a_specification_layer_that_stops_at_a_finite_range.md` is
     waiting on: an induction over the emitted model's own recursion has a
     `UInt64` multiplication as its arithmetic goal, and this is what reduces it
     to the specification's `Nat` form.  Unconditional, exactly as
@@ -947,6 +969,12 @@ inductive MojoStmt where
 
 inductive MojoFunc where
   | mk (name : String) (params : List String) (body : List MojoStmt) : MojoFunc
+
+/-- strlen for C strings (null-terminated byte sequences). -/
+axiom strlen : UInt64 → UInt64
+
+/-- str_len is an alias for strlen -/
+def str_len := strlen
 
 /-- Binary exponentiation matching codegen's runtime `**` (result starts at 1;
     while exp > 0: if exp odd: acc *= base; base *= base; exp >>= 1).  Fuel 64
@@ -1198,6 +1226,9 @@ def evalExpr (callFunc : String → UInt64 → UInt64) (e : MojoExpr) (env : Str
   | MojoExpr.binop ">>" l r => asr64 (evalExpr callFunc l env) (evalExpr callFunc r env)
   | MojoExpr.binop "**" l r => u64pow (evalExpr callFunc l env) (evalExpr callFunc r env)
   | MojoExpr.binop _ l r => evalExpr callFunc l env
+  | MojoExpr.call "len" args => strlen (evalArgs callFunc args env)
+  | MojoExpr.call "str_len" args => strlen (evalArgs callFunc args env)
+  | MojoExpr.call "strlen" args => strlen (evalArgs callFunc args env)
   | MojoExpr.call name args => callFunc name (evalArgs callFunc args env)
 
 /-- PACK a call's arguments into the ONE value `callFunc` is handed.
@@ -1494,7 +1525,7 @@ theorem u64_le_iff_false_of_lt {a b : UInt64} (h : b < a) : (a ≤ b) ↔ False 
     Measured on `formal/contracts/bounds_index.mojo` (`@requires(i >= 0)
     @requires(i < n) @ensures(result <= n)`), whose goal is
     `sKey i ≤ sKey n` from `sKey i < sKey n` and nothing else: exit 1 without
-    them, exit 0 with.  See `bugs/FORMAL_contract_ladder_reach.md`. -/
+    them, exit 0 with.  See `bugs/formal/FORMAL_contract_ladder_reach.md`. -/
 theorem u64_lt_iff_toNat_lt (a b : UInt64) : a < b ↔ a.toNat < b.toNat := by
   show a.toBitVec < b.toBitVec ↔ _
   constructor <;> intro h <;> exact h
@@ -1782,7 +1813,7 @@ word, which is why reading `Rn` as SP there modelled `-x` as `sp - x`.
 model**: nothing in `arm64_step` decodes the extended-register class, so
 `add x0, sp, x16` assembles to a word this function answers nothing about.  That
 is a coverage gap rather than a wrong answer (the generator refuses such a word
-rather than mis-reading it), and `bugs/FORMAL_arm64_instruction_coverage.md` is
+rather than mis-reading it), and `bugs/formal/FORMAL_arm64_instruction_coverage.md` is
 where the census of it belongs.
 
 The 7 spellings this replaces were `if rn = 31 then s.sp else arm64_reg rn s`
@@ -2182,9 +2213,9 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let rd := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let xm := ((insn >>> 16) &&& 0x1f).toNat
-    let diff := arm64_reg rn s - arm64_reg xm s
+    let diff := arm64_reg rn s - arm64_shifted_reg insn s xm
     some { (arm64_set_reg rd s diff) with
-           nzcv := arm64_subs_flags (arm64_reg rn s) (arm64_reg xm s) }
+           nzcv := arm64_subs_flags (arm64_reg rn s) (arm64_shifted_reg insn s xm) }
   -- AND Xd, Xn, Xm: 0x8a000000
   else if (insn &&& 0xffe00000) = 0x8a000000 then
     let rd := (insn &&& 0x1f).toNat
@@ -2343,7 +2374,7 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
   -- Nothing in `formal/examples/*.mojo` contains this encoding, which is why
   -- the 40-example suite stayed green throughout: the mis-modelled form is
   -- reachable only from a program that touches memory through a non-SP base,
-  -- and the examples are register-only.  `bugs/FORMAL_wide_receiver_by_reference.md`
+  -- and the examples are register-only.  `bugs/formal/FORMAL_wide_receiver_by_reference.md`
   -- records the measurement and what it gates.
   else if (insn &&& 0xffe00000) = 0xF9400000 then
     let rt := (insn &&& 0x1f).toNat
@@ -2813,7 +2844,7 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let rd := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let xm := ((insn >>> 16) &&& 0x1f).toNat
-    some (arm64_set_reg rd { s with nzcv := arm64_adds_flags (arm64_reg rn s) (arm64_reg xm s) } (arm64_reg rn s + arm64_reg xm s))
+    some (arm64_set_reg rd { s with nzcv := arm64_adds_flags (arm64_reg rn s) (arm64_shifted_reg insn s xm) } (arm64_reg rn s + arm64_shifted_reg insn s xm))
   else if (insn &&& 0xffe00000) = 0xea000000 then
     -- TST Xn, Xm: `ANDS XZR, Xn, Xm`, the logical sibling of CMP. The mask is
     -- 0xffe00000 and NOT 0x8a000000 (the AND shifted-register arm) because the
@@ -2825,7 +2856,7 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     -- reason a `TST` before an unsigned or equality branch is the idiom it is.
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let xm := ((insn >>> 16) &&& 0x1f).toNat
-    some { s with nzcv := arm64_logic_flags (arm64_reg rn s &&& arm64_reg xm s) }
+    some { s with nzcv := arm64_logic_flags (arm64_reg rn s &&& arm64_shifted_reg insn s xm) }
   else if (insn &&& 0xffe00c00) = 0xf8000000 then
     -- STUR Xt, [Xn, #imm9]: the unscaled store.
     let rt := (insn &&& 0x1f).toNat
@@ -2848,7 +2879,7 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     -- MUL's words as well, and whichever arm came first in this chain would
     -- answer for both — a proof about a different instruction, which is the
     -- failure `check_step_conds` exists to make loud and what
-    -- `bugs/FORMAL_arm64_smulh_has_no_model_arm.md` was filed about.
+    -- `bugs/formal/FORMAL_arm64_smulh_has_no_model_arm.md` was filed about.
     --
     -- APPENDED at the end of the chain for the reason every arm after the
     -- twelve access forms is: `_STEP_CONDS` and `_step_rhs` hard-code indices,
@@ -2860,6 +2891,40 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let rm := ((insn >>> 16) &&& 0x1f).toNat
     some (arm64_set_reg rd s (smulh64 (arm64_reg rn s) (arm64_reg rm s)))
+  else if (insn &&& 0xffe00c00) = 0x9a800000 then
+    -- CSEL Xd, Xn, Xm, cond: the branchless select, `Rd = if cond then Xn
+    -- else Xm`.  Flags and `pc` are left alone (the loop's `pc + 4` rule
+    -- advances it), and the condition is the RAW field at bits 15:12 — no
+    -- inversion, which is what separates this from the CSET arm's `field ± 1`
+    -- (that one is a different word: its encoder sets bit 10, which this class
+    -- keeps clear, and the CSINC/CSNEG/CSINV encoders do the same).
+    --
+    -- **The emitter's `a if c else b`.** `arm64_codegen.py` calls
+    -- `encode_csel_xd_xm_cond` at six sites (a ternary is a CSEL), so every
+    -- image with a conditional expression carries these words, and until this
+    -- arm existed the whole class was `NOSTEP` for the model.
+    --
+    -- APPENDED at the end of the chain for the reason every arm after the
+    -- twelve access forms is: `_STEP_CONDS` and `_step_rhs` hard-code indices,
+    -- so a new instruction goes last. It is cheap that way as well —
+    -- `work_step_csel` below is the only `work_step_*` lemma this arm changes,
+    -- and it negates one MORE branch (the SMULH's) than `work_step_smulh` does.
+    --
+    -- **The mask is `0xffe00c00`, and the bits it keeps beyond byte 3 are the
+    -- ones that separate this class from its neighbours.** Measured with the
+    -- platform assembler (`as`, Apple clang 21): the CSEL encoder's full range
+    -- — every `Rn` and `Rm` including 31, and every condition code — satisfies
+    -- `(w &&& 0xffe00c00) = 0x9a800000`, and no other emitted class does: the
+    -- CSET words (this file's own `encode_cset_*` and `as`'s `cset`) set bit 10
+    -- where this class has it clear, and every other arm's byte 3 differs.
+    -- `work_step_csel`'s 68 `bv_decide` facts are the standing check of all of
+    -- it, and a false one fails the build.
+    let rd := (insn &&& 0x1f).toNat
+    let rn := ((insn >>> 5) &&& 0x1f).toNat
+    let rm := ((insn >>> 16) &&& 0x1f).toNat
+    let cond := ((insn >>> 12) &&& 0xf).toNat
+    some (arm64_set_reg rd s (if arm64_matches_condition cond s.nzcv
+                              then arm64_reg rn s else arm64_reg rm s))
   else
     none
 
@@ -4423,9 +4488,9 @@ theorem arm64_flag_le_s (a b : UInt64) :
     keeps `a < b` true exactly when it was.  This is the OTHER direction from
     `arm64_flag_lt_s` (flag → flipped order); a loop contract whose flag lemma
     produced the flipped order states its hypothesis in that order, and this
-    turns it back into the plain `UInt64` order.  The reusable library fact
-    `bugs/FORMAL_a_range_loop_contract_states_the_unsigned_order_against_a_
-    signed_flag.md` names as step 1. -/
+    turns it back into the plain `UInt64` order.  It is the library fact the
+    signed range-loop contract (`while_lt_exit_contract_bottom_s`) is built on
+    (`635f34955`). -/
 theorem arm64_slt_iff_lt (a b : UInt64)
     (hr : a < 0x8000000000000000) (hb : b < 0x8000000000000000) :
     (a ^^^ 0x8000000000000000) < (b ^^^ 0x8000000000000000) ↔ a < b := by
@@ -4906,6 +4971,178 @@ theorem while_lt_exit_contract_bottom
         ((arm64_reg b st).toNat - (arm64_reg r st).toNat) + (mb + me + 3) ≤ fuel →
       st.pc = checkPc → (arm64_reg r st < arm64_reg b st) → P st →
       ∃ s, arm64_go_exit st code exit fuel = some s ∧ s.x0 = model st := by
+
+/-- Bottom-tested loop contract for signed comparisons: the test is rewritten by
+    a signed condition flag lemma so the loop predicate holds when the
+    sign-flipped operands satisfy `slt`. We require both registers to be below the
+    sign bit so that `arm64_slt_iff_lt` converts between signed and unsigned
+    order. -/
+theorem while_lt_exit_contract_bottom_s
+    (code : Nat → UInt8) (exit checkPc cbzPc exitBpc : Nat)
+    (q : Arm64State → Bool) (r b : Nat)
+    (model : Arm64State → UInt64)
+    (bodyex ex : Arm64State → Arm64State)
+    (mb me : Nat)
+    (P : Arm64State → Prop)
+    (hP_pc : ∀ (st : Arm64State) (pc : Nat), P st → P { st with pc := pc })
+    (hP_body : ∀ st, st.pc = checkPc → P st → P (bodyex st))
+    (hstep : ∀ st, st.pc = cbzPc →
+      arm64_step st code = some (if q st then
+        ({ st with pc := checkPc } : Arm64State) else ({ st with pc := exitBpc } : Arm64State)))
+    (hbodyRun : ∀ st, st.pc = checkPc → arm64_runs code mb st = some (bodyex st))
+    (hbodyMid : ∀ st, st.pc = checkPc →
+      ∀ u, u < mb → ∀ su, arm64_runs code u st = some su → su.pc ≠ exit)
+    (hbodyPc : ∀ st, st.pc = checkPc → (bodyex st).pc = cbzPc)
+    (hbodyR : ∀ st, st.pc = checkPc → arm64_reg r (bodyex st) = arm64_reg r st + 1)
+    (hbodyB : ∀ st, st.pc = checkPc → arm64_reg b (bodyex st) = arm64_reg b st)
+    (hbodyFlag : ∀ st, st.pc = checkPc →
+      (q (bodyex st) = true ↔ ((arm64_reg r (bodyex st) ^^^ 0x8000000000000000) <
+                                (arm64_reg b (bodyex st) ^^^ 0x8000000000000000))))
+    (hbodyModel : ∀ st, st.pc = checkPc →
+      ((arm64_reg r st ^^^ 0x8000000000000000) < (arm64_reg b st ^^^ 0x8000000000000000)) →
+      model (bodyex st) = model st)
+    (hexRun : ∀ st, st.pc = exitBpc → P st → arm64_runs code me st = some (ex st))
+    (hexMid : ∀ st, st.pc = exitBpc →
+      ∀ u, u < me → ∀ su, arm64_runs code u st = some su → su.pc ≠ exit)
+    (hexPc : ∀ st, st.pc = exitBpc → P st → (ex st).pc = exit)
+    (hexX0 : ∀ st, st.pc = exitBpc →
+      ¬ ((arm64_reg r st ^^^ 0x8000000000000000) < (arm64_reg b st ^^^ 0x8000000000000000)) →
+      (ex st).x0 = model st)
+    (hmodelPc : ∀ st pc, model { st with pc := pc } = model st)
+    (hcbzExit : cbzPc ≠ exit) (hCheckPc : checkPc ≠ cbzPc) (hExitBpc : exitBpc ≠ cbzPc) :
+    ∀ (st : Arm64State) (fuel : Nat),
+      (mb + me + 3) *
+        ((arm64_reg b st).toNat - (arm64_reg r st).toNat) + (mb + me + 3) ≤ fuel →
+      st.pc = checkPc →
+      (arm64_reg r st < 0x8000000000000000) →
+      (arm64_reg b st < 0x8000000000000000) →
+      P st →
+      ∃ s, arm64_go_exit st code exit fuel = some s ∧ s.x0 = model st := by
+  have u64_lt_toNat {a c : UInt64} (h : a < c) : a.toNat < c.toNat := by
+    rw [UInt64.lt_iff_toNat_lt] at h
+    exact h
+  have toNat_lt_u64 {a c : UInt64} (h : a.toNat < c.toNat) : a < c := by
+    rw [UInt64.lt_iff_toNat_lt]
+    exact h
+  have key : ∀ (k : Nat) (st : Arm64State), st.pc = checkPc →
+      1 ≤ k → (arm64_reg b st).toNat - (arm64_reg r st).toNat = k → P st →
+      (arm64_reg r st < 0x8000000000000000) →
+      (arm64_reg b st < 0x8000000000000000) →
+      ∀ fuel, (mb + me + 3) * k + (mb + me + 3) ≤ fuel →
+      ∃ s, arm64_go_exit st code exit fuel = some s ∧ s.x0 = model st := by
+    intro k
+    induction k with
+    | zero =>
+      intro st hpc hk1 hk hPst hr hb fuel hfuel
+      omega
+    | succ k ih =>
+      intro st hpc hk1 hk hPst hr hb fuel hfuel
+      have hltst_flipped : (arm64_reg r st ^^^ 0x8000000000000000) < (arm64_reg b st ^^^ 0x8000000000000000) :=
+        (arm64_slt_iff_lt (arm64_reg r st) (arm64_reg b st) hr hb).mpr
+          (toNat_lt_u64 (show (arm64_reg r st).toNat < (arm64_reg b st).toNat by omega))
+      have hglue1 := rec1_glue_gen code exit mb (fuel - mb) st (bodyex st)
+        (hbodyRun st hpc) (hbodyMid st hpc)
+      rw [show mb + (fuel - mb) = fuel from by omega] at hglue1
+      rw [hglue1]
+      have hbp : (bodyex st).pc = cbzPc := hbodyPc st hpc
+      have hpcne : (bodyex st).pc ≠ exit := by rw [hbp]; exact hcbzExit
+      by_cases hgo : ¬ q (bodyex st) = true
+      · have hstep' := hstep (bodyex st) hbp
+        have hjump : ({ bodyex st with pc := exitBpc } : Arm64State).pc ≠ (bodyex st).pc := by rw [hbp]; exact hExitBpc
+        have hcbz := go_exit_cbz_fall (bodyex st) code exit (fuel - mb - 1)
+          (q (bodyex st) = true)
+          ({ bodyex st with pc := checkPc }) ({ bodyex st with pc := exitBpc })
+          hstep' hgo hjump hpcne
+        rw [show (fuel - mb - 1) + 1 = fuel - mb from by omega] at hcbz
+        rw [hcbz]
+        have hPe : P ({ bodyex st with pc := exitBpc } : Arm64State) :=
+          hP_pc (bodyex st) exitBpc (hP_body st hpc hPst)
+        have hglue3 := rec1_glue_gen code exit me (fuel - mb - 1 - me)
+          ({ bodyex st with pc := exitBpc }) (ex { bodyex st with pc := exitBpc })
+          (hexRun _ (by rfl) hPe) (hexMid _ (by rfl))
+        rw [show me + (fuel - mb - 1 - me) = fuel - mb - 1 from by omega] at hglue3
+        rw [hglue3]
+        have hexpc : (ex { bodyex st with pc := exitBpc }).pc = exit :=
+          hexPc _ (by rfl) hPe
+        rw [arm64_go_exit_hit _ code exit (fuel - mb - 1 - me) (by omega) hexpc]
+        refine ⟨ex { bodyex st with pc := exitBpc }, rfl, ?_⟩
+        have hge_flipped : ¬ ((arm64_reg r { bodyex st with pc := exitBpc } ^^^ 0x8000000000000000) <
+                                (arm64_reg b { bodyex st with pc := exitBpc } ^^^ 0x8000000000000000)) := by
+          rw [arm64_reg_pc, arm64_reg_pc]
+          rw [hbodyB st hpc, hbodyR st hpc]
+          intro hlt_e
+          apply hgo
+          have hlt_e' := (arm64_slt_iff_lt (arm64_reg r { bodyex st with pc := exitBpc }) (arm64_reg b { bodyex st with pc := exitBpc })
+                            (by rw [arm64_reg_pc]; exact hr) (by rw [arm64_reg_pc]; exact hb)).mp hlt_e
+          apply (hbodyFlag st hpc).mpr hlt_e'
+        have hex0 := hexX0 _ (by rfl) hge_flipped
+        rw [hex0, hmodelPc (bodyex st) exitBpc, hbodyModel st hpc hltst_flipped]
+      · have hq : q (bodyex st) = true := Classical.byContradiction hgo
+        have hstep' := hstep (bodyex st) hbp
+        have hjump : ({ bodyex st with pc := checkPc } : Arm64State).pc ≠ (bodyex st).pc := by rw [hbp]; exact hCheckPc
+        have hcbz := go_exit_cbz_taken (bodyex st) code exit (fuel - mb - 1)
+          (q (bodyex st) = true)
+          ({ bodyex st with pc := checkPc }) ({ bodyex st with pc := exitBpc })
+          hstep' hq hjump hpcne
+        rw [show (fuel - mb - 1) + 1 = fuel - mb from by omega] at hcbz
+        rw [hcbz]
+        have hltstnat : (arm64_reg r st).toNat < (arm64_reg b st).toNat := u64_lt_toNat
+          ((arm64_slt_iff_lt (arm64_reg r st) (arm64_reg b st) hr hb).mp hltst_flipped)
+        have hb264 : (arm64_reg b st).toNat < 2^64 := UInt64.toNat_lt (arm64_reg b st)
+        have hlt264 : (arm64_reg r st).toNat + 1 < 2^64 := by omega
+        have hrb : arm64_reg r (bodyex st) = arm64_reg r st + 1 := hbodyR st hpc
+        have hbb : arm64_reg b (bodyex st) = arm64_reg b st := hbodyB st hpc
+        have hadd : (arm64_reg r st + 1).toNat = (arm64_reg r st).toNat + 1 := by
+          rw [UInt64.toNat_add, show (1 : UInt64).toNat = 1 from by rfl]
+          exact Nat.mod_eq_of_lt hlt264
+        have hrb2 : (arm64_reg r (bodyex st)).toNat = (arm64_reg r st).toNat + 1 := by
+          rw [hrb, hadd]
+        have hltb_flipped : ((arm64_reg r (bodyex st) ^^^ 0x8000000000000000) <
+                             (arm64_reg b (bodyex st) ^^^ 0x8000000000000000)) := by
+          rw [hbb, hrb]
+          apply (hbodyFlag st hpc).mp hq
+        have hltstnat' : (arm64_reg r (bodyex st)).toNat < (arm64_reg b (bodyex st)).toNat :=
+          u64_lt_toNat ((arm64_slt_iff_lt (arm64_reg r (bodyex st)) (arm64_reg b (bodyex st))
+                           (by rw [hrb]; exact hr) (by rw [hbb]; exact hb)).mp hltb_flipped)
+        have hk1' : 1 ≤ k := by
+          have hB : (arm64_reg b st).toNat = k + 1 + (arm64_reg r st).toNat :=
+            (Nat.sub_eq_iff_eq_add (a := (arm64_reg b st).toNat)
+              (b := (arm64_reg r st).toNat) (c := k + 1)
+              (Nat.le_of_lt hltstnat)).mp hk
+          have hltb' : (arm64_reg r st).toNat + 1 < k + 1 + (arm64_reg r st).toNat := by
+            rw [← hB]
+            exact hltstnat'
+          omega
+        have hrem0 : (arm64_reg b (bodyex st)).toNat - (arm64_reg r (bodyex st)).toNat = k := by
+          rw [hbb, hrb2, ← Nat.sub_sub, hk]
+          omega
+        have hrem : (arm64_reg b { bodyex st with pc := checkPc }).toNat -
+            (arm64_reg r { bodyex st with pc := checkPc }).toNat = k := by
+          simp only [arm64_reg_pc]
+          exact hrem0
+        have hfuel'' : (mb + me + 3) * k + (mb + me + 3) + (mb + me + 3) ≤ fuel := by
+          have hx := hfuel
+          rw [Nat.mul_succ] at hx
+          exact hx
+        have hfuel' : (mb + me + 3) * k + (mb + me + 3) ≤ fuel - mb - 1 := by omega
+        have hPb : P { bodyex st with pc := checkPc } :=
+          hP_pc (bodyex st) checkPc (hP_body st hpc hPst)
+        obtain ⟨s, hs, hx0⟩ := ih _ (by rfl) hk1' hrem hPb hr hb _ hfuel'
+        refine ⟨s, hs, ?_⟩
+        rw [hx0, hmodelPc (bodyex st) checkPc, hbodyModel st hpc hltb_flipped]
+  intro st fuel hfuel hpc hr hb hPst
+  have hk1 : 1 ≤ (arm64_reg b st).toNat - (arm64_reg r st).toNat := by
+    have hltst_flipped : (arm64_reg r st ^^^ 0x8000000000000000) < (arm64_reg b st ^^^ 0x8000000000000000) :=
+      (arm64_slt_iff_lt (arm64_reg r st) (arm64_reg b st) hr hb).mpr
+        (toNat_lt_u64 (show (arm64_reg r st).toNat < (arm64_reg b st).toNat by
+          have := UInt64.toNat_lt (arm64_reg r st)
+          have := UInt64.toNat_lt (arm64_reg b st)
+          omega))
+    have hltnat : (arm64_reg r st).toNat < (arm64_reg b st).toNat :=
+      u64_lt_toNat ((arm64_slt_iff_lt (arm64_reg r st) (arm64_reg b st) hr hb).mp hltst_flipped)
+    omega
+  simpa using key ((arm64_reg b st).toNat - (arm64_reg r st).toNat) st hpc
+    hk1 (by rfl) hPst hr hb fuel hfuel
   have u64_lt_toNat {a c : UInt64} (h : a < c) : a.toNat < c.toNat := by
     rw [UInt64.lt_iff_toNat_lt] at h
     exact h
@@ -5187,8 +5424,8 @@ theorem work_step_neg (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UI
 theorem work_step_cmp_reg (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe00000) = 0xeb000000) :
-arm64_step s code = some { (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s - arm64_reg (((w >>> 16) &&& 0x1f).toNat) s)) with
-      nzcv := arm64_subs_flags (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) (arm64_reg (((w >>> 16) &&& 0x1f).toNat) s) } := by
+arm64_step s code = some { (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s - arm64_shifted_reg w s (((w >>> 16) &&& 0x1f).toNat))) with
+      nzcv := arm64_subs_flags (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) (arm64_shifted_reg w s (((w >>> 16) &&& 0x1f).toNat)) } := by
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
@@ -6091,7 +6328,7 @@ set_option maxHeartbeats 4000000 in
 theorem work_step_cmn (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe00000) = 0xab000000) :
-    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) { s with nzcv := arm64_adds_flags (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) (arm64_reg (((w >>> 16) &&& 0x1f).toNat) s) } (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s + arm64_reg (((w >>> 16) &&& 0x1f).toNat) s)) := by
+    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) { s with nzcv := arm64_adds_flags (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) (arm64_shifted_reg w s (((w >>> 16) &&& 0x1f).toNat)) } (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s + arm64_shifted_reg w s (((w >>> 16) &&& 0x1f).toNat))) := by
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
@@ -6175,7 +6412,7 @@ set_option maxHeartbeats 4000000 in
 theorem work_step_tst (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe00000) = 0xea000000) :
-    arm64_step s code = some { s with nzcv := arm64_logic_flags (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s &&& arm64_reg (((w >>> 16) &&& 0x1f).toNat) s) } := by
+    arm64_step s code = some { s with nzcv := arm64_logic_flags (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s &&& arm64_shifted_reg w s (((w >>> 16) &&& 0x1f).toNat)) } := by
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
@@ -7316,17 +7553,17 @@ theorem work_step_cbnz (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : U
   simp [h, cbz_off64, cbnz_off64]
 
 /-- **Peel one STP pair below `sp`.**
-
+ 
     The emitter writes a frame slot pair as two `mem_write_u64`s at
     `(sp - K)` and `(sp - K) + 8`.  Both are strictly below `sp` for `K ≥ 8`,
     so neither can affect a read at `sp + j`, and the pair peels in one step.
-
+ 
     Peeling per-distance instead would have to canonicalise `(sp - K) + 8` into
     `sp - UInt64.ofNat (K - 8)` first — the frame canonicalisation's
     `u64_sub_add` produces that split form, and folding it back needs a rewrite
     whose side conditions `simp` will not discharge on its own.  Matching the
     pair's shape directly keeps the generator from reshaping addresses at all.
-
+ 
     `16 ≤ K` is not decoration: the pair's second half lands at
     `sp - UInt64.ofNat (K - 8)`, so it clears `sp` only when `K - 8 ≥ 8`.  At
     `K = 8` that half sits *at* `sp` and overlaps a read at `sp + 0`, so the
@@ -7380,6 +7617,29 @@ theorem mem_read_write_pair_below (mem : Nat → UInt8) (sp : UInt64)
     mem_read_after_write_u64_ne _ _ _ _ (Or.inr hwrite8)
   rw [hne]
   exact mem_read_write_below mem sp hjnw hKsp (by omega) v1
+
+/-- Variant of `mem_read_write_pair_below` accepting the split form
+    `sp - (UInt64.ofNat a - UInt64.ofNat b)` from `u64_sub_add`. -/
+theorem mem_read_write_pair_below_split (mem : Nat → UInt8) (sp : UInt64)
+    {a b j : Nat} (hba : b ≤ a) (haM : a < 2 ^ 64) (hKlt : a < 2 ^ 64)
+    (hjnw : sp.toNat + j < 2 ^ 64)
+    (hKsp : (a - b) ≤ sp.toNat) (hK : 16 ≤ a - b)
+    (v1 v2 : UInt64) :
+    mem_read_u64
+        (mem_write_u64
+          (mem_write_u64 mem ((sp - (UInt64.ofNat a - UInt64.ofNat b)).toNat) v1)
+          ((sp - (UInt64.ofNat a - UInt64.ofNat b)) + UInt64.ofNat 8).toNat v2)
+        ((sp + UInt64.ofNat j).toNat)
+      = mem_read_u64 mem ((sp + UInt64.ofNat j).toNat) := by
+  have hK := a - b
+  have hK_eq : UInt64.ofNat a - UInt64.ofNat b = UInt64.ofNat hK := by
+    apply u64_ofNat_sub a b hba haM
+  have hsp : sp - (UInt64.ofNat a - UInt64.ofNat b) = sp - UInt64.ofNat hK := by
+    rw [hK_eq]
+  have hsp' : ((sp - (UInt64.ofNat a - UInt64.ofNat b)) + UInt64.ofNat 8) =
+      ((sp - UInt64.ofNat hK) + UInt64.ofNat 8) := by rw [hsp]
+  rw [hsp, hsp']
+  exact mem_read_write_pair_below mem sp hKlt hjnw hKsp hK v1 v2
 
 set_option maxHeartbeats 4000000 in
 /-- Per-instruction step: `work_step_smulh`.
@@ -7479,6 +7739,106 @@ theorem work_step_smulh (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : 
   have hne_66 : ¬ ((w &&& 0xffe00000) = 0xea000000) := by intro t; bv_decide
   have hne_67 : ¬ ((w &&& 0xffe00c00) = 0xf8000000) := by intro t; bv_decide
   rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_neg hne_61, if_neg hne_62, if_neg hne_63, if_neg hne_64, if_neg hne_65, if_neg hne_66, if_neg hne_67, if_pos h]
+  try dsimp; try rfl; try simp
+
+set_option maxHeartbeats 4000000 in
+/-- Per-instruction step: `work_step_csel`.
+
+    `CSEL` — the branchless select, `a if c else b` — APPENDED to `arm64_step`
+    as its last arm, after the SMULH one, with the comment in that chain giving
+    the reason it sits there and the measurement that the mask's kept bits are
+    the class separators.  The condition is the RAW field at bits 15:12: no
+    inversion, unlike the CSET arm's `field ± 1`, and the select keeps the
+    flags it is told to keep — the statement is `Rd = if cond then Xn else Xm`
+    and nothing else moves.
+
+    **This is the only `work_step_*` lemma the arm changes.**  It is the SMULH
+    lemma with the SMULH branch's own test added as the 68th exclusion: this
+    arm is the last one, so every earlier lemma's rewrite chain is untouched,
+    and the 69 `if_neg` facts here are the measurement that no earlier branch
+    claims these words.  The two that share the CSEL mask with the arm
+    (`hne_64`, `hne_67`) are closed by the same `h`, which pins the mask's
+    value; a false one of the other 67 would fail the build. -/
+theorem work_step_csel (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
+    (h : (w &&& 0xffe00c00) = 0x9a800000) :
+    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s
+      (if arm64_matches_condition (((w >>> 12) &&& 0xf).toNat) s.nzcv
+       then arm64_reg (((w >>> 5) &&& 0x1f).toNat) s
+       else arm64_reg (((w >>> 16) &&& 0x1f).toNat) s)) := by
+  unfold arm64_step
+  rw [hpc, hread]
+  have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
+    intro t; rw [t] at h; exact absurd h (by decide)
+  have hne_1 : ¬ ((w &&& 0xffe00000) = 0x2A00FA00) := by intro t; bv_decide
+  have hne_2 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
+  have hne_3 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
+  have hne_4 : ¬ ((w &&& 0xffe07c00) = 0x9b007c00) := by intro t; bv_decide
+  have hne_5 : ¬ ((w &&& 0xfffffc1f) = 0xcb0003e0) := by intro t; bv_decide
+  have hne_6 : ¬ ((w &&& 0xffe00000) = 0xeb000000) := by intro t; bv_decide
+  have hne_7 : ¬ ((w &&& 0xffe00000) = 0x8a000000) := by intro t; bv_decide
+  have hne_8 : ¬ ((w &&& 0xffe00000) = 0xca000000) := by intro t; bv_decide
+  have hne_9 : ¬ ((w &&& 0xff800000) = 0x11000000) := by intro t; bv_decide
+  have hne_10 : ¬ ((w &&& 0xff800000) = 0x91000000) := by intro t; bv_decide
+  have hne_11 : ¬ ((w &&& 0xff800000) = 0x51000000) := by intro t; bv_decide
+  have hne_12 : ¬ ((w &&& 0xff800000) = 0xd1000000) := by intro t; bv_decide
+  have hne_13 : ¬ ((w &&& 0xff800000) = 0xf1000000) := by intro t; bv_decide
+  have hne_14 : ¬ ((w &&& 0xfc000000) = 0x14000000) := by intro t; bv_decide
+  have hne_15 : ¬ ((w &&& 0xfc000000) = 0x94000000) := by intro t; bv_decide
+  have hne_16 : ¬ ((w &&& 0xff000000) = 0xb4000000) := by intro t; bv_decide
+  have hne_17 : ¬ ((w &&& 0xff000000) = 0xb5000000) := by intro t; bv_decide
+  have hne_18 : ¬ ((w &&& 0xff000000) = 0x54000000) := by intro t; bv_decide
+  have hne_19 : ¬ ((w &&& 0xff000000) = 0x36000000) := by intro t; bv_decide
+  have hne_20 : ¬ ((w &&& 0xff000000) = 0x37000000) := by intro t; bv_decide
+  have hne_21 : ¬ ((w &&& 0xffe00000) = 0xF9400000) := by intro t; bv_decide
+  have hne_22 : ¬ ((w &&& 0xffe00000) = 0xB9000000) := by intro t; bv_decide
+  have hne_23 : ¬ ((w &&& 0x9f000000) = 0x90000000) := by intro t; bv_decide
+  have hne_24 : ¬ ((w &&& 0xffc00000) = 0xA9800000) := by intro t; bv_decide
+  have hne_25 : ¬ ((w &&& 0xffc00000) = 0xA8C00000) := by intro t; bv_decide
+  have hne_26 : ¬ ((w &&& 0xffe00000) = 0x52800000) := by intro t; bv_decide
+  have hne_27 : ¬ ((w &&& 0xffe00000) = 0xd2800000) := by intro t; bv_decide
+  have hne_28 : ¬ ((w &&& 0xffe00000) = 0xaa000000) := by intro t; bv_decide
+  have hne_29 : ¬ ((w &&& 0xff800000) = 0xf2800000) := by intro t; bv_decide
+  have hne_30 : ¬ ((w &&& 0xff800000) = 0x72800000) := by intro t; bv_decide
+  have hne_31 : ¬ ((w &&& 0xffe00000) = 0x12800000) := by intro t; bv_decide
+  have hne_32 : ¬ ((w &&& 0xffe00000) = 0x92800000) := by intro t; bv_decide
+  have hne_33 : ¬ ((w &&& 0xffff0fe0) = 0x9a9f07e0) := by intro t; bv_decide
+  have hne_34 : ¬ ((w &&& 0xffe00000) = 0xF9000000) := by intro t; bv_decide
+  have hne_35 : ¬ ((w &&& 0xffc00000) = 0xA9400000) := by intro t; bv_decide
+  have hne_36 : ¬ ((w &&& 0xffe0fc00) = 0xAA200000) := by intro t; bv_decide
+  have hne_37 : ¬ ((w &&& 0xfffffc1f) = 0xD61F0000) := by intro t; bv_decide
+  have hne_38 : ¬ ((w &&& 0xffe0001f) = 0xD4000001) := by intro t; bv_decide
+  have hne_39 : ¬ ((w &&& 0xffe0fc00) = 0x13001c00) := by intro t; bv_decide
+  have hne_40 : ¬ ((w &&& 0xffe0fc00) = 0x13003c00) := by intro t; bv_decide
+  have hne_41 : ¬ ((w &&& 0xffe0fc00) = 0x93407c00) := by intro t; bv_decide
+  have hne_42 : ¬ ((w &&& 0xffc0fc00) = 0x92401c00) := by intro t; bv_decide
+  have hne_43 : ¬ ((w &&& 0xffc0fc00) = 0x92403c00) := by intro t; bv_decide
+  have hne_44 : ¬ ((w &&& 0xffc0fc00) = 0x92407c00) := by intro t; bv_decide
+  have hne_45 : ¬ ((w &&& 0xffe0fc00) = 0x9ac00800) := by intro t; bv_decide
+  have hne_46 : ¬ ((w &&& 0xffe0fc00) = 0x9ac00c00) := by intro t; bv_decide
+  have hne_47 : ¬ ((w &&& 0xffe0fc00) = 0x9ac02000) := by intro t; bv_decide
+  have hne_48 : ¬ ((w &&& 0xffe0fc00) = 0x9ac02400) := by intro t; bv_decide
+  have hne_49 : ¬ ((w &&& 0xffe0fc00) = 0x9ac02800) := by intro t; bv_decide
+  have hne_50 : ¬ ((w &&& 0xffe08000) = 0x9b008000) := by intro t; bv_decide
+  have hne_51 : ¬ ((w &&& 0xffc0fc00) = 0xd340fc00) := by intro t; bv_decide
+  have hne_52 : ¬ ((w &&& 0xffc0fc00) = 0x9340fc00) := by intro t; bv_decide
+  have hne_53 : ¬ ((w &&& 0xffc00000) = 0xd3400000) := by intro t; bv_decide
+  have hne_54 : ¬ ((w &&& 0xffd00000) = 0x39400000) := by intro t; bv_decide
+  have hne_55 : ¬ ((w &&& 0xffd00000) = 0x39000000) := by intro t; bv_decide
+  have hne_56 : ¬ ((w &&& 0xffd00000) = 0x79400000) := by intro t; bv_decide
+  have hne_57 : ¬ ((w &&& 0xffd00000) = 0x79000000) := by intro t; bv_decide
+  have hne_58 : ¬ ((w &&& 0xffd00000) = 0x39800000) := by intro t; bv_decide
+  have hne_59 : ¬ ((w &&& 0xffd00000) = 0x79800000) := by intro t; bv_decide
+  have hne_60 : ¬ ((w &&& 0xffd00000) = 0xb9800000) := by intro t; bv_decide
+  have hne_61 : ¬ ((w &&& 0xffd00000) = 0xb9400000) := by intro t; bv_decide
+  have hne_62 : ¬ ((w &&& 0xffe0fc00) = 0xf8606800) := by intro t; bv_decide
+  have hne_63 : ¬ ((w &&& 0xffe0fc00) = 0xf8206800) := by intro t; bv_decide
+  have hne_64 : ¬ ((w &&& 0xffe00c00) = 0xf8400000) := by intro t; bv_decide
+  have hne_65 : ¬ ((w &&& 0xffe00000) = 0xab000000) := by intro t; bv_decide
+  have hne_66 : ¬ ((w &&& 0xffe00000) = 0xea000000) := by intro t; bv_decide
+  have hne_67 : ¬ ((w &&& 0xffe00c00) = 0xf8000000) := by intro t; bv_decide
+  have hne_68 : ¬ ((w &&& 0xffe07c00) = 0x9b407c00) := by intro t; bv_decide
+  rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_neg hne_61, if_neg hne_62, if_neg hne_63, if_neg hne_64, if_neg hne_65, if_neg hne_66, if_neg hne_67, if_neg hne_68, if_pos h]
   try dsimp; try rfl; try simp
 
 /-- **Split offset back into an STP pair's shape.**  `u64_sub_add` rewrites an
@@ -7976,7 +8336,7 @@ evaluator, not a change to `evalExpr`) and on the *callee contract* side
 `FrameOk`'s "caller's slots preserved" clause by construction).  Both are
 additions beside the existing definitions.
 
-`bugs/FORMAL_wide_receiver_by_reference.md` has the full design, the cost, and
+`bugs/formal/FORMAL_wide_receiver_by_reference.md` has the full design, the cost, and
 what is not done.
 -/
 
@@ -8545,7 +8905,7 @@ theorem frameRead_in_range (b : UInt64) (n k : Nat)
 
 /-! ### A NESTED receiver: a field whose agreed declared type is a framed struct
 
-`bugs/FORMAL_wide_receiver_by_reference.md`'s next step is a field's DECLARED
+`bugs/formal/FORMAL_wide_receiver_by_reference.md`'s next step is a field's DECLARED
 type, used only when every binding of the name agrees on it
 (`formal/model.py`'s `frame_field_type_candidates`).  When the agreed type is a
 framed struct of the same module, the slot holds the ADDRESS of that struct's

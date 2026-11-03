@@ -1434,7 +1434,7 @@ def build_macho_dylib(code: bytes, base_addr: int, exports: list,
     same treatment an executable gets and for the same reason: a `global NAME`
     inside a library function writes a word that a LATER call has to read, and
     a word in that library's frames would be gone by then. It is deliberately
-    NOT exported in the trie — see `bugs/FORMAL_module_state_no_storage.md` for
+    NOT exported in the trie — see `bugs/formal/FORMAL_module_state_no_storage.md` for
     why a cross-module global is a separate capability and not this one: an
     exporting module's slot would need the importing module's GOT to carry a
     POINTER-TO-DATA symbol, and this backend's export/bind machinery is

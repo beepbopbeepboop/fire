@@ -153,7 +153,7 @@ def save_results(results):
     The first is that `datetime` is a `HOST_MODELLED` row this file was ALONE
     in, and the module cannot answer it: a `datetime` is a record of six
     fields, which is the same limit that keeps `time.localtime` out of
-    `formal/hostmods/time.mojo` (`bugs/FORMAL_time_struct_shaped_answers.md`),
+    `formal/hostmods/time.mojo` (`bugs/formal/FORMAL_time_struct_shaped_answers.md`),
     and `datetime.now().isoformat()` is a FORMATTED record on top of that. A
     report's timestamp is not calendar arithmetic -- it identifies a run -- and
     `time` is a module this tree HAS (`formal/hostmods/time.mojo`, checked

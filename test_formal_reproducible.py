@@ -306,7 +306,7 @@ def codesign_identifier(path: str) -> str:
 
 # ── the cases ──────────────────────────────────────────────────────────────
 
-def test_two_processes_everything_else_varied(tmp):
+def test_two_processes_everything_else_varied(tmp_path):
     """Case 1+2: cwd, TMPDIR, env order, hash seed, name, dir, cold CAS, load."""
     ok = True
     for arch in ("arm64", "x86_64"):
@@ -314,12 +314,12 @@ def test_two_processes_everything_else_varied(tmp):
         # different GMOJO_HOME is a different absolute path in LC_LOAD_DYLIB),
         # wiped between the two builds, and a different source directory,
         # output directory and output NAME for each side.
-        cas_home = os.path.join(tmp, f"cas-{arch}")
-        tmpdir = os.path.join(tmp, f"tmp-{arch}")
+        cas_home = os.path.join(tmp_path, f"cas-{arch}")
+        tmpdir = os.path.join(tmp_path, f"tmp_path-{arch}")
         for d in (cas_home, tmpdir):
             os.makedirs(d, exist_ok=True)
-        even_root = os.path.join(tmp, f"even-{arch}")
-        odd_root = os.path.join(tmp, f"odd-{arch}")
+        even_root = os.path.join(tmp_path, f"even-{arch}")
+        odd_root = os.path.join(tmp_path, f"odd-{arch}")
         for d in (even_root, odd_root):
             os.makedirs(d, exist_ok=True)
         load = min(4, (os.cpu_count() or 2))
@@ -410,20 +410,20 @@ def _path_and_digest_ranges(data: bytes) -> list:
     return out
 
 
-def test_two_names_in_one_process(tmp):
+def test_two_names_in_one_process(tmp_path):
     """Case 3: the axis that WAS broken, in one process, two names."""
     import formal.build as FB
     ok = True
     saved = os.environ.get("GMOJO_HOME")
     try:
         for arch in ("arm64", "x86_64"):
-            cas_home = os.path.join(tmp, f"inproc-cas-{arch}")
+            cas_home = os.path.join(tmp_path, f"inproc-cas-{arch}")
             os.makedirs(cas_home, exist_ok=True)
             os.environ["GMOJO_HOME"] = cas_home
-            src = write(os.path.join(tmp, f"inproc-{arch}.mojo"), RUNNABLE)
+            src = write(os.path.join(tmp_path, f"inproc-{arch}.mojo"), RUNNABLE)
             images = []
             for name in ("one.aout", "two.aout"):
-                out = os.path.join(tmp, f"inproc-{arch}-{name}")
+                out = os.path.join(tmp_path, f"inproc-{arch}-{name}")
                 cold(cas_home)
                 result = FB.compile_formal(src, output=out, test_input=10,
                                           prove=False, check=False, arch=arch)
@@ -445,7 +445,7 @@ def test_two_names_in_one_process(tmp):
                 # `one.aout` would have passed on exactly the code it was
                 # written for.
                 idents = [codesign_identifier(
-                    os.path.join(tmp, f"inproc-{arch}-{n}")) for n in
+                    os.path.join(tmp_path, f"inproc-{arch}-{n}")) for n in
                     ("one.aout", "two.aout")]
                 ok &= check(f"{arch}: the ad-hoc identifier is the same for "
                             f"both names", idents[0] and idents[0] == idents[1],
@@ -458,17 +458,17 @@ def test_two_names_in_one_process(tmp):
     return ok
 
 
-def test_a_program_that_imports_a_module(tmp):
+def test_a_program_that_imports_a_module(tmp_path):
     """Case 4: the executable AND the library it links, both rebuilt."""
     ok = True
     for arch in ("arm64", "x86_64"):
-        cas_home = os.path.join(tmp, f"imp-cas-{arch}")
-        tmpdir = os.path.join(tmp, f"imp-tmp-{arch}")
+        cas_home = os.path.join(tmp_path, f"imp-cas-{arch}")
+        tmpdir = os.path.join(tmp_path, f"imp-tmp_path-{arch}")
         for d in (cas_home, tmpdir):
             os.makedirs(d, exist_ok=True)
         images, libs = [], []
-        for side, root in enumerate((os.path.join(tmp, f"imp-a-{arch}"),
-                                     os.path.join(tmp, f"imp-b-{arch}"))):
+        for side, root in enumerate((os.path.join(tmp_path, f"imp-a-{arch}"),
+                                     os.path.join(tmp_path, f"imp-b-{arch}"))):
             os.makedirs(root, exist_ok=True)
             write(os.path.join(root, "libmod.mojo"), LIB_MODULE)
             images.append(build_executable(
@@ -492,7 +492,7 @@ def test_a_program_that_imports_a_module(tmp):
     return ok
 
 
-def test_two_cas_roots_differ_only_by_the_library_path(tmp):
+def test_two_cas_roots_differ_only_by_the_library_path(tmp_path):
     """Case 9: two `GMOJO_HOME` roots — what moves is the PATH, and its digests.
 
     `FORMAL_a_linked_library_path_is_in_the_image.md`: an image records the
@@ -515,9 +515,9 @@ def test_two_cas_roots_differ_only_by_the_library_path(tmp):
     for arch in ("arm64", "x86_64"):
         images, libnames = [], []
         for side in (0, 1):
-            root = os.path.join(tmp, f"twocas-{arch}-{side}")
-            cas_home = os.path.join(tmp, f"twocas-cas-{arch}-{side}")
-            tmpdir = os.path.join(tmp, f"twocas-tmp-{arch}-{side}")
+            root = os.path.join(tmp_path, f"twocas-{arch}-{side}")
+            cas_home = os.path.join(tmp_path, f"twocas-cas-{arch}-{side}")
+            tmpdir = os.path.join(tmp_path, f"twocas-tmp_path-{arch}-{side}")
             for d in (root, cas_home, tmpdir):
                 os.makedirs(d, exist_ok=True)
             write(os.path.join(root, "libmod.mojo"), LIB_MODULE)
@@ -550,19 +550,19 @@ def test_two_cas_roots_differ_only_by_the_library_path(tmp):
     return ok
 
 
-def test_the_dylib_driver(tmp):
+def test_the_dylib_driver(tmp_path):
     """Case 5: `fire.py dylib --formal`, which is the other publishing path."""
     ok = True
-    src = write(os.path.join(tmp, "dylibsrc", "lib.mojo"), DYLIB_MODULE)
+    src = write(os.path.join(tmp_path, "dylibsrc", "lib.mojo"), DYLIB_MODULE)
     images = []
     for side in (0, 1):
-        cas_home = os.path.join(tmp, f"dylib-cas-{side}")
+        cas_home = os.path.join(tmp_path, f"dylib-cas-{side}")
         os.makedirs(cas_home, exist_ok=True)
         cold(cas_home)
-        out = os.path.join(tmp, f"dylib-out-{side}", "lib.dylib")
+        out = os.path.join(tmp_path, f"dylib-out-{side}", "lib.dylib")
         rc, _, err = build(["dylib", "--formal", "--no-prove", "-o", out, src],
                            cwd=os.path.dirname(src),
-                           env=build_env(cas_home, tmp, odd=bool(side),
+                           env=build_env(cas_home, tmp_path, odd=bool(side),
                                          reversed_order=bool(side)))
         if rc != 0:
             ok = check("the dylib build succeeded", False, err)
@@ -577,17 +577,17 @@ def test_the_dylib_driver(tmp):
     return ok
 
 
-def test_the_uuid_is_the_content(tmp):
+def test_the_uuid_is_the_content(tmp_path):
     """Case 6: equal content ⇒ equal uuid; different content ⇒ different."""
     if platform.system() != "Darwin":
         print("SKIP  the LC_UUID cases (Mach-O only)")
         return True
     ok = True
-    cas_home = os.path.join(tmp, "uuid-cas")
-    tmpdir = os.path.join(tmp, "uuid-tmp")
+    cas_home = os.path.join(tmp_path, "uuid-cas")
+    tmpdir = os.path.join(tmp_path, "uuid-tmp_path")
     for d in (cas_home, tmpdir):
         os.makedirs(d, exist_ok=True)
-    root = os.path.join(tmp, "uuid-src")
+    root = os.path.join(tmp_path, "uuid-src")
     os.makedirs(root, exist_ok=True)
     a, err_a = build_executable(root, "a", "arm64", cas_home, tmpdir, REPO,
                                 odd=False)
@@ -610,7 +610,7 @@ def test_the_uuid_is_the_content(tmp):
     return ok
 
 
-def test_the_image_still_runs(tmp):
+def test_the_image_still_runs(tmp_path):
     """Case 7: reproducible AND runnable, on both backends."""
     ok = True
     n = 6
@@ -619,11 +619,11 @@ def test_the_image_still_runs(tmp):
     # program above has to change this line too and cannot silently pass.
     want = 21
     for arch in ("arm64", "x86_64"):
-        cas_home = os.path.join(tmp, f"run-cas-{arch}")
-        tmpdir = os.path.join(tmp, f"run-tmp-{arch}")
+        cas_home = os.path.join(tmp_path, f"run-cas-{arch}")
+        tmpdir = os.path.join(tmp_path, f"run-tmp_path-{arch}")
         for d in (cas_home, tmpdir):
             os.makedirs(d, exist_ok=True)
-        root = os.path.join(tmp, f"run-src-{arch}")
+        root = os.path.join(tmp_path, f"run-src-{arch}")
         os.makedirs(root, exist_ok=True)
         src = write(os.path.join(root, "prog.mojo"), RUNNABLE)
         out = os.path.join(root, "prog.aout")
@@ -651,7 +651,7 @@ def test_the_image_still_runs(tmp):
     return ok
 
 
-def test_the_cache_key_does_not_carry_the_output_path(tmp):
+def test_the_cache_key_does_not_carry_the_output_path(tmp_path):
     """Case 8: the "nothing that does not" half of `formal_build_key`.
 
     It is only sound because of case 3: a key that had to name the output file
@@ -660,10 +660,10 @@ def test_the_cache_key_does_not_carry_the_output_path(tmp):
     """
     import cas
     from formal import imports as FI
-    src = write(os.path.join(tmp, "key", "prog.mojo"), RUNNABLE)
+    src = write(os.path.join(tmp_path, "key", "prog.mojo"), RUNNABLE)
     source = open(src).read()
     flags = ("--formal", "--no-prove", "--backend=arm64")
-    here = os.path.join(tmp, "key")
+    here = os.path.join(tmp_path, "key")
     write(os.path.join(here, "one.aout"), "")
     write(os.path.join(here, "two.aout"), "")
     a = cas.formal_build_key(source, os.path.join(here, "one.aout"), flags,
@@ -707,11 +707,11 @@ def main():
 
     npass = nfail = 0
     t0 = time.time()
-    with tempfile.TemporaryDirectory(prefix="formal-repro-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="formal-repro-") as tmp_path:
         for name, fn in cases:
             print(f"\n-- {name}")
             try:
-                ok = fn(tmp)
+                ok = fn(tmp_path)
             except Exception as e:  # noqa: BLE001 — reported, not raised
                 ok = check(name, False, f"{type(e).__name__}: {e}")
             npass += 1 if ok else 0
