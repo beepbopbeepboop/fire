@@ -9632,7 +9632,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                                 _memo[(_pb, _var_regs[_v], _v)] = _hp
                                 A(f"{IND}have {_hp} : (s_{_pb}).x{_var_regs[_v]} = {_v} := by")
                                 A(f"{IND}  rw [hsid_{_pb}]")
-                                A(f"{IND}  simp only [{', '.join(_pb_defs + list(_hpriors) + ['arm64_reg', 'arm64_set_reg', 'Arm64State.init'])}]")
+                                A(f"{IND}  simp only [{', '.join(_pb_defs + ['arm64_reg', 'arm64_set_reg', 'Arm64State.init'])}]")
                                 A(f"{IND}  all_goals try simp (disch := decide) [mem_read_after_write_u64, "
                                   f"mem_read_after_write_u64_ne, mem_read_two_writes_same, UInt64.add_zero]")
                                 A(f"{IND}  all_goals try rfl")
@@ -9659,7 +9659,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                                 _memo[(_pb, _var_regs[_cv], _crhs)] = _hp
                                 A(f"{IND}have {_hp} : (s_{_pb}).x{_var_regs[_cv]} = {_crhs} := by")
                                 A(f"{IND}  rw [hsid_{_pb}]")
-                                A(f"{IND}  simp only [{', '.join(_pb_defs + list(_hpriors) + ['arm64_reg', 'arm64_set_reg', 'Arm64State.init'])}]")
+                                A(f"{IND}  simp only [{', '.join(_pb_defs + ['arm64_reg', 'arm64_set_reg', 'Arm64State.init'])}]")
                                 A(f"{IND}  all_goals try simp (disch := decide) [mem_read_after_write_u64, "
                                   f"mem_read_after_write_u64_ne, mem_read_two_writes_same, UInt64.add_zero]")
                                 A(f"{IND}  all_goals try rfl")
