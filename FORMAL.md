@@ -12,7 +12,7 @@ state, the decisions taken, and the order. **Recent (2026-11-02):** the semantic
 Read with: `doc/ABI.md` (the boundary contract this must not contradict),
 `bugs/formal/FORMAL_known_limits.md` (the audited codegen residue),
 `bugs/formal/FORMAL_arm64_known_proof_gaps.md` (the proof census),
-`bugs/mid/CODEGEN_bootstrap_resource_blowup.md` (the upstream cause of the
+`bugs/hard/CODEGEN_bootstrap_resource_blowup.md` (the upstream cause of the
 self-host divergence), and `bugs/OPEN_WORK.md` A1 (the x86-64 `call_rel32`,
 which [3] needs). **§11 is the operating contract** — the five agents, their
 exclusive write sets, the isolation rules, the interface-request mechanism and

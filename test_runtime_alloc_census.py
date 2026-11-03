@@ -4,7 +4,7 @@
 The census (built with -DMOJO_ALLOC_CENSUS) attributes every malloc/calloc/
 realloc/free made by fire_runtime.c to its call site and reports, at exit,
 how many objects and bytes each site still holds live. It is the measurement
-bugs/mid/CODEGEN_bootstrap_resource_blowup.md needs before choosing an AST-
+bugs/hard/CODEGEN_bootstrap_resource_blowup.md needs before choosing an AST-
 lifetime fix over a temporaries fix.
 
 The harness below includes fire_runtime.c itself (so the redirects apply to
