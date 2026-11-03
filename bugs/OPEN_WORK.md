@@ -130,7 +130,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_listdir_no_run_time_sequence.md` | **unclaimed** | a run-time-length blob is answerable; a run-time-length LIST is not |
 | `FORMAL_metamorphic_ledger.md` | **unclaimed** | what `tools/formal_metamorph.py` has measured, and what came of it |
 | `FORMAL_model_package_split_left_duplicate_copies.md` | **unclaimed** | formal/model/ holds the module three times |
-| `FORMAL_pointer_store_permits_unestablished_kind.md` | **unclaimed** | A `Pointer[Float64]` store of an unestablished-kind value is permitted |
+
 | `FORMAL_printf_s_of_a_container_walks_the_blob_header.md` | **unclaimed** | `printf("%s", <a container>)` prints the blob's COUNT byte, where CPython prints the container |
 | `FORMAL_runtime_library_on_the_link_line.md` | **unclaimed** | the phase-2 payoff is landed and the header gap is CLOSED; three measured ceilings are open |
 | `FORMAL_set_value_model.md` | **unclaimed** | A set is a LIST here: insertion order, no hashing, and `for x in s` disagrees with CPython |
