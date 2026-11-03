@@ -4,7 +4,7 @@
    Built only with -DMOJO_ALLOC_CENSUS. Without that flag this header expands
    to nothing and every translation unit is the same as it was.
 
-   Purpose: bugs/hard/CODEGEN_bootstrap_resource_blowup.md, plan step 1. The
+   Purpose: bugs/mid/CODEGEN_bootstrap_resource_blowup.md, plan step 1. The
    self-hosted compiler never frees, so "what is still live" is the question
    that decides between an AST-lifetime fix and a temporaries fix. This census
    answers it per CALL SITE: for every malloc/calloc/realloc/free made from any

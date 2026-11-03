@@ -44,7 +44,7 @@ without it (both verified with Mojo's own `{mut}` spelling in place of
     reason: they are about the CELL, not about the value's representation.
   * `nonlocal` reached through a module-level `@decorator`: a plain
     `@deco` on a `def` is not applied on either path (see the new bug doc
-    `bugs/hard/COMPILE_FAIL_decorator_application_dropped.md`), so the decorated
+    `bugs/mid/COMPILE_FAIL_decorator_application_dropped.md`), so the decorated
     name is still the undecorated function. `Tools/wasm/wasi/__main__.py`
     reaches `nonlocal working_dir` exactly that way, which is why its
     `subdir`-shaped case is exercised here through a direct call instead.

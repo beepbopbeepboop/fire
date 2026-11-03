@@ -94,9 +94,9 @@ the reason this document exists instead of a patch.
     layer_that_stops_at_a_finite_range.md` are the two places to read first;
   * a LOOP CONTRACT. A fold is a loop over a run-time count, and this backend
     has a measured history of getting the loop contract wrong rather than
-    absent: the signed range-loop contract stated in the unsigned order
-    (fixed `635f34955`) and the loop that is neither a decrement nor a range
-    loop (no contract) are two shapes of the same gap, and
+    absent: `bugs/formal/FORMAL_a_range_loop_contract_states_the_unsigned_order_
+    against_a_signed_flag.md` and `bugs/formal/FORMAL_a_loop_that_is_neither_a_decrement_
+    nor_a_range_loop_has_no_contract.md` are two shapes of the same gap, and
     the ladder's reach was a third shape of the same gap, and `f801d013` closed
     it (its doc is deleted; the measurement is still the one a reader wants, so
     it is named here). A fold's

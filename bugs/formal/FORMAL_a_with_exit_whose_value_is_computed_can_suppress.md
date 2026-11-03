@@ -254,7 +254,7 @@ Three steps, in this order, and none of them is a signature change:
    doing it first is what would break `nullcontext`.
 
 Steps 1 and 2 are the same work as
-the fixed context manager exit case (both spellings accepted when ignoring), §3 of the closed doc context,
+`FORMAL_a_context_manager_exit_cannot_take_cpythons_three_exception_words.md` §3,
 which is the other half of the missing unwinder: that one needs an exception
 VALUE to pass the three words, this one needs only the status and the resume, so
 this one is the smaller of the two and is the one to build first.
