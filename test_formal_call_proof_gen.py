@@ -4824,33 +4824,69 @@ class TestAstBridgeCallLimit(unittest.TestCase):
         self.assertEqual(len(gaps), 1, gaps)
         self.assertIn("2 arguments", gaps[0],
                       f"the arity is the whole fact: {gaps[0]}")
-        self.assertIn("MojoExpr.call", gaps[0])
+        self.assertIn("callFunc2", gaps[0],
+                      "a two-argument call is answered by the two-argument "
+                      f"handler, so the gap must name that one: {gaps[0]}")
 
-    def test_the_ARITY_gap_names_the_HANDLER_and_not_the_node(self):
-        """The node was widened (2026-10-05) and the handler was not, so the
-        reason has to name the one that is still the limit.
+    def test_the_ARITY_gap_names_the_HANDLERS_and_not_the_node(self):
+        """A call of three arguments is refused by the handlers, not the node.
 
-        The gap used to say "`MojoExpr.call` carries ONE `MojoExpr`", which
-        stopped being true when the node became `List MojoExpr` — and a refusal
-        that points at a fact which is gone sends the next reader to widen the
-        wrong thing.  The node now carries every argument; what cannot be
-        stated is a `callFunc` handed one value, so `evalArgs` PACKS them into a
-        single product.  That is the fact the message has to carry.
+        The node carries every argument (`MojoExpr.call` takes a list). What
+        cannot be stated is a call whose arity no handler answers: `callFunc`
+        takes one value and `callFunc2` takes two. The gap has to say that, and
+        must not point at the node as the limit, or the next reader widens the
+        wrong thing.
         """
-        gaps = self._gaps(self.ONE_ARG, {"main", "_scalar_max2"})
+        three = ("def _scalar_max3(a, b, c):\n"
+                 "    return a\n"
+                 "def main(x):\n"
+                 "    return _scalar_max3(x, x, x)\n")
+        gaps = self._gaps(three, {"main", "_scalar_max3"})
         self.assertEqual(len(gaps), 1, gaps)
-        self.assertIn("PACKS", gaps[0],
-                      "the arity gap must name the HANDLER's unary shape:\n"
-                      + gaps[0])
-        self.assertIn("List MojoExpr", gaps[0],
-                      "and it must say the node carries a list, so a reader "
-                      "does not go and widen it again:\n" + gaps[0])
+        self.assertIn("3 arguments", gaps[0], gaps[0])
+        self.assertIn("callFunc", gaps[0], gaps[0])
         self.assertNotIn("carries ONE `MojoExpr`", gaps[0])
 
     def test_a_call_with_no_arguments_is_named_by_its_arity(self):
         gaps = self._gaps(self.NO_ARG, {"main", "zero"})
         self.assertEqual(len(gaps), 1, gaps)
         self.assertIn("0 arguments", gaps[0], gaps[0])
+
+    def test_the_ast_node_carries_every_argument_of_a_wider_call(self):
+        """The root defect, pinned: `_expr_ast` renders EVERY argument.
+
+        The bridge used to render `e.args[0]` only, so `g(x, 2, 3)` became
+        `MojoExpr.call "g" x` and the other two arguments vanished from the
+        AST, which made `eval_eq_mojo` false for the call. The node is
+        `MojoExpr.call name (args : List MojoExpr)` now, so a three-argument
+        call carries all three in source order. A two-argument call is the
+        `call2` node, which carries both (its handler is `callFunc2`). The gap
+        that still refuses a call of three or more is the HANDLER's limit and
+        is pinned above; this pins that the node itself has lost nothing.
+        """
+        import formal.arm64_proof_gen as G
+        fn = _functions("def g(a, b, c):\n    return a + b + c\n"
+                        "def main(x):\n    return g(x, 2, 3)\n")[-1]
+        rendered = G._expr_ast(fn.body[0].value, G._Scope())
+        self.assertTrue(
+            rendered.startswith('(MojoExpr.call "g" ['),
+            f"a three-argument call is not the list-carrying node: {rendered}")
+        spots = [rendered.index(t) for t in
+                 ('MojoExpr.var "x"', f"MojoExpr.int {G._uint64_lit(2)}",
+                  f"MojoExpr.int {G._uint64_lit(3)}")]
+        self.assertEqual(spots, sorted(spots),
+                         f"the arguments are out of source order: {rendered}")
+
+    def test_the_two_argument_node_carries_both_arguments_in_order(self):
+        import formal.arm64_proof_gen as G
+        fn = _functions("def g(a, b):\n    return a + b\n"
+                        "def main(x):\n    return g(x, 2)\n")[-1]
+        rendered = G._expr_ast(fn.body[0].value, G._Scope())
+        self.assertTrue(
+            rendered.startswith('(MojoExpr.call2 "g" (MojoExpr.var "x")'),
+            f"the two-argument call is not the call2 node: {rendered}")
+        self.assertIn(f"(MojoExpr.int {G._uint64_lit(2)}))", rendered,
+                      f"the second argument was dropped: {rendered}")
 
     def test_arm64_names_the_machine_half_before_the_bridge_when_it_is_missing(self):
         """The two gaps, and which one a reader should be shown first.
@@ -4957,8 +4993,9 @@ class TestAstBridgeCallLimit(unittest.TestCase):
         faithful branch and the omission is right.  With ONE parameter there IS
         one — `_gen_go` already emitted `_bump1_go` — and the bridge used to be
         omitted anyway, which is the gap
-        `bugs/formal/FORMAL_ast_bridge_carries_one_argument_per_call.md` names as step
-        2: `eval_eq_mojo` was FALSE for this program, not unproved.
+        the one-parameter callee table closed (`bugs/formal/FORMAL_ast_bridge_cannot_state_a_user_call_of_two_or_more_arguments.md`
+        is the open two-parameter case): `eval_eq_mojo` was FALSE for this
+        program, not unproved.
 
         Three assertions, and the middle one is the one that would catch a
         branch naming something Lean has not heard of: the `callFunc` text, the

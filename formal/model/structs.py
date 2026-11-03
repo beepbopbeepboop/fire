@@ -2600,6 +2600,46 @@ def _binding_sites_index(fn) -> dict:
     return out
 
 
+def _resolve_local_alias_to_function(fn, name: str, defined_set):
+    """Resolve a local alias `name` in `fn` to function names defined in this image.
+
+    Looks through all assignments/initializations of `name` and returns
+    function names from `defined_set` that it is bound to. If any binding
+    is unknown/unresolvable or binds to something that isn't a known function,
+    return empty set (conservative) to avoid false positives.
+    """
+    if fn is None or not name or not defined_set:
+        return set()
+    try:
+        sites = _syntactic_write_values(fn, name)
+    except Exception:
+        return set()
+    if not sites or any(v is None for v in sites):
+        return set()
+    resolved = set()
+    for v in sites:
+        if isinstance(v, F.IdentExpr):
+            vname = getattr(v, "name", None)
+            if isinstance(vname, str) and vname in defined_set:
+                resolved.add(vname)
+                continue
+        # If it's assigned from something else that's also a local alias,
+        # try to resolve recursively (conservative depth limit)
+        if isinstance(v, F.IdentExpr):
+            vname = getattr(v, "name", None)
+            if isinstance(vname, str):
+                # Avoid cycles by checking simple case
+                try:
+                    sub = _resolve_local_alias_to_function(fn, vname, defined_set)
+                    if sub:
+                        resolved |= sub
+                        continue
+                except Exception:
+                    pass
+        return set()
+    return resolved if resolved else set()
+
+
 def _sole_target_leaf(target) -> list:
     """`[name]` when the target binds exactly one name, else `[]`.
 

@@ -1307,7 +1307,7 @@ one cause with two symptoms, so the counts are items, not verdicts.
 
 | items | arm64 | x86-64 | cause |
 |---|---|---|---|
-| **4** | `proof-refused` | **`admitted` — was `lean-rejected`** | **a call to a second function in the same image.** arm64: `universal theorem: the call at 0x… targets 0x…, a second function in the same image … That is interprocedural walking: a return-address map in the framework`. x86-64 used to emit the bridge anyway and get `⊢ False` at its own line 44 — **the emitted theorem was false**. **Fixed on this branch** (§5.2): x86-64 now omits the bridge and names the call. `bugs/formal/FORMAL_ast_bridge_carries_one_argument_per_call.md` has the rest. |
+| **4** | `proof-refused` | **`admitted` — was `lean-rejected`** | **a call to a second function in the same image.** arm64: `universal theorem: the call at 0x… targets 0x…, a second function in the same image … That is interprocedural walking: a return-address map in the framework`. x86-64 used to emit the bridge anyway and get `⊢ False` at its own line 44 — **the emitted theorem was false**. **Fixed on this branch** (§5.2): x86-64 now omits the bridge and names the call. `bugs/formal/FORMAL_ast_bridge_cannot_state_a_user_call_of_two_or_more_arguments.md` has the rest. |
 | **4** | `lean-rejected` | `admitted` | **the dec1 recursion family** — `count`, `pow2`, `sqsum` (and `fact`, `sum`, which the stride did not select). One cause, measured on all five: the code generator now **reloads x30 from the frame**, so the generator's "x30 is unchanged here" obligation is true and no longer `rfl`. `bugs/formal/FORMAL_arm64_x30_is_reloaded_from_the_frame.md`. |
 | 1 | `lean-rejected` | `admitted` | `fib` — a documented gap (`test_formal.py`'s `EXPECTED_FAILURES`), tree recursion's `FrameOk` window. |
 | 1 | `proof-refused` | `admitted` | `model: a TernaryExpr has no value in the semantic model` — `formal/arm64_proof_gen.py::_no_value_model` refusing by name, and **the x86-64 generator CATCHING the same refusal and emitting its documented placeholder**, so the program builds there against a model that is not the source's. The two architectures degrade differently for one gap. |
@@ -1373,7 +1373,7 @@ are unchanged.
   21 items. The limit is one limit with two ends (`MojoExpr.call` carries one
   argument; `callFunc` is a unary stub rather than the model's function table),
   and the work is measured, including the Lean limitation that blocks the
-  obvious route: `bugs/formal/FORMAL_ast_bridge_carries_one_argument_per_call.md`. This
+  obvious route: `bugs/formal/FORMAL_ast_bridge_cannot_state_a_user_call_of_two_or_more_arguments.md`. This
   census adds the breadth number (4 of 21, both architectures) and the
   observation that **no example in `formal/examples` calls anything but itself**,
   which is why the whole corpus was blind to it.
