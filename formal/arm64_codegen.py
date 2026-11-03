@@ -7112,7 +7112,7 @@ ctor_field_value=self._ctor_field_value_for(name),
     # computes CPython's spelling lives at `M.FLOAT_REPR_SYMBOL` — and this
     # method pair is the ARM half of the branch and the buffer, the machine
     # part only this backend can spell. The algorithm is the validated one
-    # (`bugs/formal/FORMAL_a_float_has_no_print_spelling.md`'s next step): the
+    # (shortest-round-trip decimal spelling): the
     # specials from the bits, then `%.*g` at the smallest precision n that
     # parses back to the same 64 bits (a `snprintf`/`strtod` round trip),
     # laid out in CPython's own notation — scientific iff E >= 16 or

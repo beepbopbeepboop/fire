@@ -3663,7 +3663,7 @@ def _gmi_decorator_pass(self, stmts: list, outer_defs: dict, at_module: bool) ->
                             f"decorator {_gmi_decorator_head(_rb_dec)!r} on {_rb_d.name!r} is inside a "
                             f"module-level block, which the compiled path cannot rebind yet; it would "
                             f"silently call the undecorated function (see "
-                            f"bugs/mid/COMPILE_FAIL_decorator_application_dropped.md)")
+                            f"bugs/hard/COMPILE_FAIL_decorator_application_dropped.md)")
     return _gmi_rebind_block(self, stmts, _rb_scope, at_module)
 
 
@@ -3822,7 +3822,7 @@ def _gmi_refuse_scalar_decorator_rebind(self, stmts: list, scope: dict) -> None:
     statement list plus every enclosing scope's defs) to its FunctionDef.
 
     A same-module decorator on a `def` is applied by rebinding the name
-    (`_gmi_decorator_pass`, the bugs/mid/COMPILE_FAIL_decorator_application_dropped.md
+    (`_gmi_decorator_pass`, the bugs/hard/COMPILE_FAIL_decorator_application_dropped.md
     fix). That rebinding is only meaningful for a CALLABLE decorator result:
     a scalar-returning decorator rebinds `step` to a non-callable, which
     CPython raises on as `TypeError: 'int' object is not callable`. So that
@@ -3911,7 +3911,7 @@ def _gmi_refuse_scalar_decorator_rebind(self, stmts: list, scope: dict) -> None:
                     f"(not callable), so {_rd_fn.name!r} is rebound to a scalar; "
                     f"the compiled path does not apply decorators to a def yet and "
                     f"would silently call the undecorated function (see "
-                    f"bugs/mid/COMPILE_FAIL_decorator_application_dropped.md)")
+                    f"bugs/hard/COMPILE_FAIL_decorator_application_dropped.md)")
 
 
 def _declare_posthoc_class_attrs(stmts: list) -> None:

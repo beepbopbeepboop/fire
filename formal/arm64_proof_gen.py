@@ -5176,11 +5176,10 @@ def loop_test_condition_code(words: dict, pc: int):
     deriving it inline (`field = words[cbz_pc] & 0xf`) while a SECOND site had
     to decide whether the contract can be stated at all — and a site that
     re-derives it can disagree with the tactic recipe about what it means.
-    Measured case: `_gen_range_loop` emits its hypothesis in the UNSIGNED order
-    (`UInt64`'s `<`), so a signed code (10-13) makes the obligation FALSE rather
-    than merely unproved, and it has to be refused rather than admitted with a
-    `sorry` (`bugs/formal/FORMAL_a_range_loop_contract_states_the_unsigned_order_against_
-    a_signed_flag.md`).
+    Measured case: a signed code (10-13) must select the SIGNED contract
+    `while_lt_exit_contract_bottom_s`; stating a signed test's bound in the
+    UNSIGNED order made the obligation FALSE (fixed on the
+    `work/bug-formal-formal-a-range-loop-contract` branch, `635f34955`).
 
     Returns None for a `CBZ`/`CBNZ`/`TBZ`/`TBNZ` test, which compares against
     ZERO and so has no condition code: those are the countdown shape, whose
@@ -8271,43 +8270,6 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 and b["targets"][1] == b["start"]):
             loop_check_bottom = (bi, b["start"])
             break
-    # WHY a bottom-tested loop got no contract, when the reason is one a reader
-    # can act on. `_gen_range_loop` returns None for several shapes, and the
-    # only message the walk has is the generic "unsupported cbz taken
-    # continuation" — which is a fact about the BLOCK LAYOUT and says nothing
-    # about a loop whose test is signed, where the contract it would state is
-    # FALSE (`bugs/formal/FORMAL_a_range_loop_contract_states_the_unsigned_order_
-    # against_a_signed_flag.md`). A declined loop is otherwise indistinguishable
-    # from one this walk never recognised, and the difference decides whether the
-    # next step is a new emitter shape or a signed `while_lt_exit_contract`.
-    _range_declined = None
-    if loop_check_bottom is not None:
-        # The block's LAST instruction is its terminator, which is where the
-        # condition code lives — `loop_check_bottom[1]` is the block's START,
-        # and `loop_test_condition_code` on a `seq` block's first instruction
-        # answers None, which would have made this guard silently inert.
-        _top_term = blocks[loop_check_bottom[0]]["instrs"][-1]
-        _cc = loop_test_condition_code(words, _top_term)
-        # `_COND_LEMMA`'s own naming, not a hard-coded code range: the signed
-        # lemmas are the four whose name ends `_s`, and a guard that spelled
-        # "10 <= cc <= 13" would have to be kept in step with that table by hand
-        # — which is the mistake this reader exists to prevent.
-        _lem = _COND_LEMMA.get(_cc)
-        if _lem is not None and _lem.endswith("_s"):
-            _range_declined = (
-                f"its loop test is the SIGNED condition code {_cc} "
-                f"(`CSET` + `CMP`, rewritten by `{_lem}`), and this contract is "
-                f"stated in the UNSIGNED order — "
-                f"`while_lt_exit_contract_bottom` takes "
-                f"`arm64_reg r st < arm64_reg b st` (`UInt64`'s `<`) and a fuel "
-                f"of `(b.toNat - r.toNat)`, so the obligation it would emit is "
-                f"`sign-flipped <` ↔ `<`, which is FALSE for any bound at or "
-                f"above 2^63. The program is unaffected (both orders agree for a "
-                f"non-negative bound); it is the PROOF that cannot be stated, "
-                f"and a false theorem is worse than none. Lifting this needs a "
-                f"SIGNED variant of `while_lt_exit_contract_bottom` in "
-                f"lib/ProofLib.lean plus the sign-flip lemma, and a Lean run to "
-                f"confirm the statement")
 
     # --- entry-branch condition lemma for single-recursion (dec1) functions
     # with a non-constant recursive result (sum/fact shape):
@@ -9936,17 +9898,8 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                             A, IND, bi, ctx, s_cur, taken, _lc, fuel_1, name)
                         tgt_bi = None
                 if tgt_bi is not None and (tgt_bi is None or tgt_bi in path):
-                    # The declined-range reason when there is one: a loop whose
-                    # contract this generator refused to state because the
-                    # statement would be FALSE reads identically to a block
-                    # layout the walk does not recognise, and those two have
-                    # nothing in common as next steps. See `_range_declined`.
-                    _why = ""
-                    _rd = (_lc or {}).get("declined")
-                    if _rd:
-                        _why = f": {_rd}"
                     raise ValueError(f"unsupported cbz taken continuation to "
-                                     f"{hex(taken)}{_why}")
+                                     f"{hex(taken)}")
                 elif tgt_bi is not None:
                     if is_contract:
                         emit_block(tgt_bi, "s_t", fuel_1, depth, path, ctx)
@@ -10775,18 +10728,6 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 "rr": rr_bt,
                 "rb": rb_bt,
                 "signed": bool(_signed_bt),
-            }
-        elif _range_declined:
-            # No contract, and the walk is about to refuse this loop's re-entry
-            # with a message about the BLOCK LAYOUT. Carrying the reason on the
-            # (absent) contract's slot is what lets that refusal name the real
-            # cause — see the `cbz` arm's `_why`.
-            _loop_contract = {
-                "name": name,
-                "kind": "range_bottom_declined",
-                "cbz_start": loop_check_bottom[1],
-                "exit_pc": exit_pc,
-                "declined": _range_declined,
             }
 
     # --- universal theorem: walk the CFG path ---

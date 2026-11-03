@@ -9183,7 +9183,7 @@ main()
         The ADDRESS was never the wrong answer — CPython prints
         `<function step at 0x...>` — so the `%d` was the whole bug, and it is
         independent of the decorator-application defect (see
-        bugs/mid/COMPILE_FAIL_decorator_application_dropped.md, whose defect 2
+        bugs/hard/COMPILE_FAIL_decorator_application_dropped.md, whose defect 2
         names it as separable). The decorator is a pass-through, not the
         scalar-returning `deco` the doc reduces from: a scalar decorator
         rebinds `step` to a non-callable, which the compiled path now refuses
@@ -13745,7 +13745,7 @@ def main():
     print(step(7))
 """), 'nested_decorator_factory_still_compiles')
     # A decorated `def` NESTED in a function body is rebound like a top-level
-    # one (bugs/mid/COMPILE_FAIL_decorator_application_dropped.md): before this,
+    # one (bugs/hard/COMPILE_FAIL_decorator_application_dropped.md): before this,
     # `step(n)` silently called the undecorated body and printed 8, not 16.
     # A module-level decorator and a factory are both in scope from inside.
     _run_isolated(lambda: test("nested_decorator_is_applied_at_runtime", """\

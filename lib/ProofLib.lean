@@ -4488,9 +4488,9 @@ theorem arm64_flag_le_s (a b : UInt64) :
     keeps `a < b` true exactly when it was.  This is the OTHER direction from
     `arm64_flag_lt_s` (flag → flipped order); a loop contract whose flag lemma
     produced the flipped order states its hypothesis in that order, and this
-    turns it back into the plain `UInt64` order.  The reusable library fact
-    `bugs/formal/FORMAL_a_range_loop_contract_states_the_unsigned_order_against_a_
-    signed_flag.md` names as step 1. -/
+    turns it back into the plain `UInt64` order.  It is the library fact the
+    signed range-loop contract (`while_lt_exit_contract_bottom_s`) is built on
+    (`635f34955`). -/
 theorem arm64_slt_iff_lt (a b : UInt64)
     (hr : a < 0x8000000000000000) (hb : b < 0x8000000000000000) :
     (a ^^^ 0x8000000000000000) < (b ^^^ 0x8000000000000000) ↔ a < b := by
