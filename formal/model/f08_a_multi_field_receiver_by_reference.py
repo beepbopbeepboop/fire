@@ -1001,8 +1001,7 @@ def eq_dispatch_candidates_disagree(spelled: str, struct_names, rows,
             "Changing which frame a name holds will NOT fix this, and giving "
             "both structs a `__eq__` will not either: two owners is the case "
             "that refuses. Compare the fields, or make the two sides the same "
-            "struct so the comparison names one `__eq__` — "
-            None)
+            "struct so the comparison names one `__eq__`.")
     return lead + (
         "Each name holds a different frame on each path that binds it, and "
         "this analysis has no path sensitivity to say which one is live at "
