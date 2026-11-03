@@ -1113,7 +1113,7 @@ def test_a_bare_call_to_an_imported_generic_is_still_refused(tmpdir):
 def test_an_inferred_parameter_function_is_called_without_the_bracket(tmpdir):
     """`def unbox(t: Box[T]) -> T`: `unbox[Int](b)` is refused, `unbox(b)` builds.
 
-    `bugs/formal/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md` §2 row 3
+    `FORMAL_an_explicit_parameter_list_naming_a_comptime_value (deleted 2026-11-03)` §2 row 3
     and §3: the function's `T` is INFERRED from its parameter's type, so it is
     not one of the module's BRACKETED templates (`formal/monomorph.py::
     template_names` reads `def name[…]`/`struct name[…]`), and `instantiate`
@@ -1273,7 +1273,7 @@ def test_an_own_struct_template_with_a_comptime_value_is_diagnosed_as_one(tmpdir
     PARAMETER LIST, and the refusal must say so — not call it a tuple index.
 
     The construct is the one
-    `bugs/formal/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md` §2 row 4
+    `FORMAL_an_explicit_parameter_list_naming_a_comptime_value (deleted 2026-11-03)` §2 row 4
     measures: a generic applied with a TYPE argument and a comptime VALUE, which
     this path cannot instantiate (`formal/monomorph.py::type_arg_text` answers
     `""` for a top-level literal, by design, so no demand is computed). What is
@@ -2052,7 +2052,7 @@ def main():
 """
 
 # The bare-literal half of the same construct — §2 row 4 of
-# `bugs/formal/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md`. `n` is a
+# `FORMAL_an_explicit_parameter_list_naming_a_comptime_value (deleted 2026-11-03)`. `n` is a
 # comptime VALUE declared `n: Int`, the bracket mixes it with the type `Int`, and
 # the literal is what proves the value was substituted (a collapsed mangling, or
 # a body that read the parameter as a type, would print a different number). The
