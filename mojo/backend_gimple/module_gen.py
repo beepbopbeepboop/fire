@@ -13839,7 +13839,7 @@ def gen_module_impl(self, stmts: list):
                 for _pi in range(len(_pairs)):
                     _gname = _as_str(_pairs[_pi][0])
                     _gvalue = _pairs[_pi][1]
-                    _t = _phase17_value_type((int64_t)(void *)_gvalue)
+                    _t = _phase17_value_type(_gvalue)
                     _joined[_gname] = (TypeLattice.join(_joined[_gname], _t)
                                        if _gname in _joined else _t)
         return _joined
@@ -13902,7 +13902,7 @@ def gen_module_impl(self, stmts: list):
                 for _pi in range(len(_pairs)):
                     _gname = _as_str(_pairs[_pi][0])
                     _gvalue = _pairs[_pi][1]
-                    _t = _phase17_value_type((int64_t)(void *)_gvalue)
+                    _t = _phase17_value_type(_gvalue)
                     _joined[_gname] = (TypeLattice.join(_joined[_gname], _t)
                                        if _gname in _joined else _t)
         return _joined
