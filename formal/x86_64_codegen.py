@@ -9066,11 +9066,22 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         No truncation follows, and that is the difference from the integer ALU's
         tail: a `double` has no declared narrower width to be cut to.
         """
+        self._emit_float_operands(l, r)
+        self._emit_float_op_on_xmm(op)
+
+    def _emit_float_op_on_xmm(self, op: str) -> None:
+        """The FP operation of `op` on XMM0 and XMM1, leaving the result in RAX.
+
+        The shared tail of `_emit_float_binary` and the augmented subscript
+        store: the caller has put the left operand in XMM0 and the right in
+        XMM1, and R11 holds the right operand's bits, which is what the
+        divide-by-zero guard tests. One place for the operator's meaning
+        (`FLOAT_BINARY_MNEMONICS`) and its guard on both forms.
+        """
         emit = {
             "addsd": encode_addsd_xmm, "subsd": encode_subsd_xmm,
             "mulsd": encode_mulsd_xmm, "divsd": encode_divsd_xmm,
         }[M.FLOAT_BINARY_MNEMONICS[op][1]]
-        self._emit_float_operands(l, r)
         if op == "/" and M.raise_float_divides_by_zero_is_an_exception():
             self._emit_float_divide_by_zero_guard()
         self.asm.emit(emit(0, 1))
@@ -9902,6 +9913,41 @@ preference.
         # `malloc`'d buffer rather than a fault on a read-only `__TEXT` page.
         self._emit_subscript_store_at(Reg.RAX, Reg.R11)
 
+    def _emit_float_subscript_aug(self, stmt, op: str) -> None:
+        """`p[i] <op>= v` on a FLOAT pointee: the element's own double operation.
+
+        The mirror of arm64's `_emit_float_subscript_aug` and it has the same
+        contract: the element is read as its bits, combined with the value on
+        SSE2 (`_emit_float_op_on_xmm`), and stored back at the same address,
+        never through the integer ALU, which would add the patterns. The
+        address is computed once and held in a slot across both evaluations,
+        exactly as the integer form holds it.
+        """
+        target = stmt.target
+        spelled_expr = (f"{M.spelled(target)} {stmt.op} "
+                        f"{M.spelled(stmt.value)}")
+        reason = M.float_binary_refusal(
+            op, M.FLOAT_KIND, self._expr_str_kind(stmt.value), spelled_expr,
+            left=target, right=stmt.value)
+        if reason is not None:
+            raise CodegenError(reason)
+        self._emit_subscript_addr(target, element_kind_ok=True)  # RAX = address
+        # The element's width, captured before the RHS can overwrite it, and
+        # restored for the store — the same discipline the integer form keeps.
+        width = self._sub_width
+        self._push_slot(Reg.RAX)                      # [rsp] = address
+        self._emit_subscript_load(Reg.RAX)            # old element bits
+        self._push_slot(Reg.RAX)                      # [rsp] = old, [rsp+16] = addr
+        self._emit_expr(stmt.value)                   # RAX = value bits
+        self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.RAX))  # R11 = value
+        self._pop_slot(Reg.RAX)                       # RAX = old
+        self.asm.emit(encode_movq_xmm_rm64(0, Reg.RAX))      # XMM0 = old
+        self.asm.emit(encode_movq_xmm_rm64(1, Reg.R11))      # XMM1 = value
+        self._emit_float_op_on_xmm(op)                # RAX = old op value
+        self._pop_slot(Reg.R10)                       # R10 = address
+        self._sub_width = width
+        self._emit_subscript_store_at(Reg.R10, Reg.RAX)
+
     def _emit_subscript_aug(self, stmt, op: str) -> None:
         """`obj[index] <op>= value` — one address, one read, one write.
 
@@ -9931,6 +9977,10 @@ preference.
         one is how `q[0] += 5` and `q[0] = q[0] + 5` come to answer differently
         about the same source.
         """
+        if M.subscript_float_element(self._cur_fn, stmt.target.obj,
+                                     self._structs, self._functions):
+            self._emit_float_subscript_aug(stmt, op)
+            return
         reason = M.string_binary_refusal(
             op, self._expr_str_kind(stmt.target),
             self._expr_str_kind(stmt.value), spelled_op=stmt.op)

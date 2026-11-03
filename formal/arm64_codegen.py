@@ -6544,10 +6544,56 @@ ctor_field_value=self._ctor_field_value_for(name),
         self.asm.emit(encode_ldr_xt_xn_imm(reg, 31, 0))  # value back in X{reg}
         self.asm.emit(encode_ldp_sp_post(0, 31))    # pop value
 
+    def _emit_float_subscript_aug(self, stmt, op: str) -> None:
+        """`p[i] <op>= v` on a FLOAT pointee: the element's own double operation.
+
+        The element is read as its bits, combined with the value through the FP
+        unit (`_emit_float_op_on_vregs`), and stored back at the same address.
+        The integer ALU is never used: it would add the PATTERNS, so `p[0] +=
+        1.0` on a double 2.0 would store a number nobody wrote. The address is
+        computed once, so an index with a call in it is evaluated once.
+
+        Both operands must be doubles. `float_binary_refusal` is the one table
+        that says which mixed pairs and which operators are refused, by name,
+        for every binary form, so the augmented form reads it rather than
+        keeping its own list.
+        """
+        target = stmt.target
+        spelled_expr = (f"{M.spelled(target)} {stmt.op} "
+                        f"{M.spelled(stmt.value)}")
+        reason = M.float_binary_refusal(
+            op, M.FLOAT_KIND, self._expr_str_kind(stmt.value), spelled_expr,
+            left=target, right=stmt.value)
+        if reason is not None:
+            raise CodegenError(reason)
+        # The element's own width, captured before the RHS can overwrite it (a
+        # subscript on the right has its own `_sub_width`), and restored for
+        # the store — the same discipline the integer form keeps.
+        self._emit_subscript_addr(target, element_kind_ok=True)  # X0 = address
+        width = self._sub_width
+        self.asm.emit(encode_stp_sp_pre(0, 31))           # push addr
+        self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 0))     # X9 = addr
+        self._emit_subscript_load(0, 9)                   # X0 = old bits
+        self.asm.emit(encode_stp_sp_pre(0, 31))           # push old
+        self._emit_expr_to(stmt.value, "X1")              # X1 = value bits
+        self.asm.emit(encode_ldr_xt_xn_imm(0, 31, 0))     # X0 = old (re-load)
+        self.asm.emit(encode_fmov_gpr_to_v(0, 0))         # D0 = old
+        self.asm.emit(encode_fmov_gpr_to_v(1, 1))         # D1 = value
+        self._emit_float_op_on_vregs(op)                  # X0 = old op value
+        self.asm.emit(encode_ldr_xt_xn_imm(9, 31, 16))    # X9 = addr
+        self._sub_width = width
+        self._emit_subscript_store_at(9, 0)
+        self.asm.emit(encode_ldp_sp_post(0, 31))
+        self.asm.emit(encode_ldp_sp_post(0, 31))
+
     def _emit_subscript_aug(self, stmt) -> None:
         """`obj[index] <op>= value` — addr and old value evaluated once."""
         op = stmt.op[:-1] if stmt.op.endswith('=') and stmt.op != '==' \
             else stmt.op
+        if M.subscript_float_element(self._cur_fn, stmt.target.obj,
+                                     self._structs, self._functions):
+            self._emit_float_subscript_aug(stmt, op)
+            return
         ops = {"+": encode_add_xd_xn_xm,
                "-": encode_sub_xd_xn_xm,
                "*": encode_mul_xd_xn_xm,
@@ -9755,13 +9801,25 @@ ctor_field_value=self._ctor_field_value_for(name),
         # column 0; x86-64 reads column 1.  One table decides what each operator
         # MEANS and each backend owns how it spells it, which is why adding an
         # operator is one row and not two.
+        self._emit_cmp_operands(l, r)
+        self.asm.emit(encode_fmov_gpr_to_v(0, 0))
+        self.asm.emit(encode_fmov_gpr_to_v(1, 1))
+        self._emit_float_op_on_vregs(op)
+
+    def _emit_float_op_on_vregs(self, op: str) -> None:
+        """The FP operation of `op` on D0 and D1, leaving the result in X0.
+
+        The shared tail of `_emit_float_binary` and the augmented subscript
+        store: the caller has put the left operand in D0 and the right in D1
+        (and so X1 still holds the right operand's bits, which is what the
+        divide-by-zero guard reads). One place for the operator's meaning
+        (`FLOAT_BINARY_MNEMONICS`) and its guard, so the two forms cannot
+        answer differently about the same operator.
+        """
         emit = {
             "fadd": encode_fadd_dd_dn_dm, "fsub": encode_fsub_dd_dn_dm,
             "fmul": encode_fmul_dd_dn_dm, "fdiv": encode_fdiv_dd_dn_dm,
         }[M.FLOAT_BINARY_MNEMONICS[op][0]]
-        self._emit_cmp_operands(l, r)
-        self.asm.emit(encode_fmov_gpr_to_v(0, 0))
-        self.asm.emit(encode_fmov_gpr_to_v(1, 1))
         if op == "/" and M.raise_float_divides_by_zero_is_an_exception():
             self._emit_float_divide_by_zero_guard()
         self.asm.emit(emit(0, 0, 1))

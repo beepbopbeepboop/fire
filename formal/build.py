@@ -2828,7 +2828,8 @@ def _admitted_summary(source_path: str) -> list:
                  "source": source_path, "line": 0,
                  "error": f"{type(e).__name__}: {e}"}]
     return [{"name": c.qualified, "assumes": c.assumes,
-             "lean_name": c.lean_name, "source": c.source, "line": c.line}
+             "lean_name": c.lean_name, "source": c.source, "line": c.line,
+             "arity": getattr(c, "arity", 1)}
             for c in contracts]
 
 
@@ -5859,7 +5860,7 @@ def _frame_receivers(functions: list, structs_by_name: dict,
         # `a == b` on two such names stayed a compare of two FIELD VALUES while
         # the class's own `__eq__` was reachable by name — measured, a one-field
         # class whose `__eq__` returns True answering 0 where CPython says 1.
-        # `bugs/formal/FORMAL_eq_dispatch_on_a_frame_receiver.md` §1.
+        # (deleted doc; fixes recorded in tests) §1.
         fn._one_word_candidates = dict(
             one_word.get(_fn_key(fn)) or {})
         # A ONE-word struct held in a HOLDER'S FIELD, which is a depth-2 chain
