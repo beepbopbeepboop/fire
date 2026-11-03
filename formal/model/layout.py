@@ -1,6 +1,5 @@
 from . import *
 
-# # ── Aggregate layout ──────────────────────────────────────────────────────
 # ── Aggregate layout ──────────────────────────────────────────────────────
 #
 # A list/tuple is a blob:  [count:i64][elem0][elem1]…   (8-byte slots)
@@ -2292,14 +2291,6 @@ def subscript_index_is_a_comptime_parameter_list(e, structs_by_name=None,
         about a container lookup the source never wrote.
 
     Everything else answers **no**, and the caller keeps today's behaviour.
-    That includes every dotted base — `Self.IteratorType[origin_of(self)]` is
-    a comptime parameter list, and it is also the case that cannot be decided
-    from this unit alone because deciding it needs the IMPORTED module's
-    declarations, which is `formal/imports.py`'s question. Guessing it is the
-    one direction that could turn a refusal into a wrong image, so it stays
-    refused. It costs nothing here: `Self.IteratorType[…]` has a SINGLE index,
-    so the container check never sees a bracket list to mistake.
-
     A single-element index answers no as well, and that is not a gap: a
     one-element bracket is never a container literal, so there is nothing for
     a caller to confuse it with. The multi-element gate lives in
@@ -2307,14 +2298,32 @@ def subscript_index_is_a_comptime_parameter_list(e, structs_by_name=None,
     if not isinstance(e, F.SubscriptExpr) or not is_multi_index(e.index):
         return False
     name = _base_name(e.obj)
-    if name is None:
+    if name is not None:
+        if (type_constructor_kind(name) is not None or name in POINTER_TYPE_CTORS
+                or ((callee_defs or {}).get(name) is not None
+                    and is_generic(callee_defs[name]))
+                or (own_template_structs and name in own_template_structs)):
+            return True
+        return bool(structs_by_name) and name in structs_by_name
+    # Dotted base: e.g. Type.Member[...] or Self.Member[...] or h.tag[...] 
+    # where h is an instance (must not be classified). Only classify when the
+    # leftmost identifier is a type name this image can classify (declared struct
+    # in this module) or is Self (the current type).
+    if isinstance(e.obj, F.MemberExpr) and isinstance(e.obj.obj, F.IdentExpr):
+        base_ident = e.obj.obj.name
+        # Do NOT classify if base is a local/instance variable (not a known type name)
+        if base_ident in MLIR_SELF_TYPE_NAMES:
+            return True
+        if structs_by_name and base_ident in structs_by_name:
+            return True
+        if own_template_structs and base_ident in own_template_structs:
+            return True
+        if type_constructor_kind(base_ident) is not None or base_ident in POINTER_TYPE_CTORS:
+            return True
+        if callee_defs and base_ident in callee_defs and is_generic(callee_defs[base_ident]):
+            return True
         return False
-    if (type_constructor_kind(name) is not None or name in POINTER_TYPE_CTORS
-            or ((callee_defs or {}).get(name) is not None
-                and is_generic(callee_defs[name]))
-            or (own_template_structs and name in own_template_structs)):
-        return True
-    return bool(structs_by_name) and name in structs_by_name
+    return False
 
 
 def subscript_is_a_type_application(e, structs_by_name=None,
@@ -2367,7 +2376,7 @@ def type_position_nodes(root, structs_by_name=None, callee_defs=None) -> set:
     exempt a subscript whose BASE is a value: `h.tag[Int, s]` is a genuine index
     of a genuine value, it is not in a type position, and answering "type
     application" for it would drop a real frame-escape check
-    (`bugs/formal/FORMAL_dotted_base_bracket_list_is_not_classified.md`). Every
+    (dotted base bracket lists). Every
     bracket list that is not one of the two compile-time ones keeps today's
     answer, refusal included — "possibly wrong" is the direction this backend
     refuses in everywhere else."""
@@ -4760,7 +4769,3 @@ def _merge_reads(into: dict, more: dict) -> None:
     """Union two read maps, keeping the FIRST line seen for a name."""
     for name, ln in more.items():
         into.setdefault(name, ln)
-
-
-
-

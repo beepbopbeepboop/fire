@@ -1,6 +1,5 @@
 from . import *
 
-# # ── The module BODY: the top-level statements that are not declarations ──
 # ── The module BODY: the top-level statements that are not declarations ──
 #
 # Everything above decides what a module-level NAME means. This decides which
@@ -5391,8 +5390,7 @@ def module_entry_literal_facts() -> dict:
     (`_for_emptiness`). It is deliberately NOT `_module_constant_sites`: that
     table excludes a container constant because a blob has no literal to put at
     a READ, and this asks the weaker question "what is the value", which a blob
-    answers. See
-    `bugs/formal/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`."""
+    answers."""
     slots = module_slots()
     out: dict = {}
     for name, sym in module_symbols().items():
@@ -7938,5 +7936,3 @@ def _constructor_argument_for(fields, name, args, kwargs):
     if index < len(args):
         return args[index]
     return None
-
-

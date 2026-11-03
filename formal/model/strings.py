@@ -1,6 +1,5 @@
 from . import *
 
-# # ── TEXT ENCODING: when is a BYTE count a CODE POINT count? ─────────────────
 # ── TEXT ENCODING: when is a BYTE count a CODE POINT count? ─────────────────
 #
 # `strlen` is the length of a NUL-terminated `char *`. A Python `str` is a
@@ -4041,7 +4040,3 @@ def refuse_interpolated_literals(stmts) -> None:
         if is_interpolated_literal(node) and not fold_interpolated_literal(node):
             raise CodegenError(interpolated_literal_refusal(
                 node, getattr(node, "line", "")))
-
-
-
-
