@@ -45,7 +45,7 @@ Workers are told (see tools/control_prompt.md) NOT to run the quality gate: that
 is the integrator's job (tools/integrate.py), which merges finished branches
 together and gates them once.
 """
-import argparse, fcntl, json, os, re, shutil, subprocess, sys, time
+import argparse, fcntl, glob, json, os, re, shutil, subprocess, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fleet_ledger
 from contextlib import contextmanager
@@ -684,6 +684,20 @@ def bounce(name, t):
     return True
 
 
+def doc_class_now(item):
+    """The class of the bug doc a queued item works on, read from where its file sits NOW: bugs/ is easy, bugs/mid/ is
+    mid, bugs/hard/ is hard (the same rule as swarm.dir_class). A queued item carries the class it was queued in, and a
+    reclass moves the file while that item is still waiting, so the stored class goes stale; refill must ask the file.
+    An item with no bug claim, or whose doc is gone, keeps the class it was queued with."""
+    for c in item.get("claims", []):
+        if c.startswith("bug:"):
+            hits = sorted(glob.glob(os.path.join(MAIN, "bugs", "**", c[4:] + ".md"), recursive=True))
+            if hits:
+                parts = os.path.relpath(hits[0], os.path.join(MAIN, "bugs")).split(os.sep)
+                return "easy" if len(parts) == 1 else {"mid": "mid", "hard": "hard"}.get(parts[0], "easy")
+    return item.get("cls")
+
+
 def pick_slot(item, busy):
     """The slot a queued task starts on now: its preferred slot if that is free, else the first free, unbanned slot in
     pool order; None if every slot is full or banned. `busy` is running_by_slot() plus this pass's starts."""
@@ -750,6 +764,13 @@ def cmd_refill(a):
             continue
         # A task is not tied to a model: its enqueue slot (`pool`) is only the PREFERRED one. It takes that slot if it is
         # free, else the first free, unbanned slot in pool order. Every slot runs the same kind of work.
+        # The class comes from the doc's file NOW, not from the queue entry: a reclass moves the doc while its task is
+        # still queued, and a stale "mid" started a hard doc on the mid-only iceman slot (2026-11-03, 46 attempts).
+        cls = doc_class_now(it)
+        if cls != it.get("cls"):
+            print("%s refill: %s is now %s (queued as %s); it takes a %s slot" % (
+                time.strftime("%T"), it["name"], cls, it.get("cls"), cls), flush=True)
+            it = dict(it, cls=cls)
         sl = pick_slot(it, busy)
         if sl is None:
             continue                      # every slot is full or banned: the task waits
