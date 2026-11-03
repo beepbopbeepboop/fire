@@ -1,6 +1,5 @@
 from . import *
 
-# # ── A multi-field receiver, BY REFERENCE ───────────────────────────────
 # ── A multi-field receiver, BY REFERENCE ───────────────────────────────
 #
 # A value on this path is one 64-bit word, and a struct of two fields has
@@ -1001,8 +1000,7 @@ def eq_dispatch_candidates_disagree(spelled: str, struct_names, rows,
             "Changing which frame a name holds will NOT fix this, and giving "
             "both structs a `__eq__` will not either: two owners is the case "
             "that refuses. Compare the fields, or make the two sides the same "
-            "struct so the comparison names one `__eq__` — "
-            None)
+            "struct so the comparison names one `__eq__`")
     return lead + (
         "Each name holds a different frame on each path that binds it, and "
         "this analysis has no path sensitivity to say which one is live at "
@@ -2600,6 +2598,46 @@ def _binding_sites_index(fn) -> dict:
                     add(name, None)
     fn._binding_sites_index = out
     return out
+
+
+def _resolve_local_alias_to_function(fn, name: str, defined_set):
+    """Resolve a local alias `name` in `fn` to function names defined in this image.
+
+    Looks through all assignments/initializations of `name` and returns
+    function names from `defined_set` that it is bound to. If any binding
+    is unknown/unresolvable or binds to something that isn't a known function,
+    return empty set (conservative) to avoid false positives.
+    """
+    if fn is None or not name or not defined_set:
+        return set()
+    try:
+        sites = _syntactic_write_values(fn, name)
+    except Exception:
+        return set()
+    if not sites or any(v is None for v in sites):
+        return set()
+    resolved = set()
+    for v in sites:
+        if isinstance(v, F.IdentExpr):
+            vname = getattr(v, "name", None)
+            if isinstance(vname, str) and vname in defined_set:
+                resolved.add(vname)
+                continue
+        # If it's assigned from something else that's also a local alias,
+        # try to resolve recursively (conservative depth limit)
+        if isinstance(v, F.IdentExpr):
+            vname = getattr(v, "name", None)
+            if isinstance(vname, str):
+                # Avoid cycles by checking simple case
+                try:
+                    sub = _resolve_local_alias_to_function(fn, vname, defined_set)
+                    if sub:
+                        resolved |= sub
+                        continue
+                except Exception:
+                    pass
+        return set()
+    return resolved if resolved else set()
 
 
 def _sole_target_leaf(target) -> list:
@@ -4370,7 +4408,3 @@ def struct_frame_depth_exceeded(struct_def, decls: dict, past) -> str:
 # `struct_frame_block_bytes`, which is where the reservation is computed and so
 # the one place a truncation could become a fault.
 MAX_NESTED_FRAME_DEPTH = 4
-
-
-
-

@@ -1787,7 +1787,7 @@ test('rthdrscan', [PY, 'test_runtime_header_scan.py'], mem='tiny', cache=True,
             RUNTIME_HDR, 'runtime/fire_sqlite3.h', 'runtime/fire_zlib.h',
             'runtime/fire_ssl.h', 'runtime/fire_ncurses.h',
             'runtime/fire_python.h',
-            'formal/model.py', 'bugs/formal/FORMAL_known_limits.md',
+            'formal/model', 'bugs/formal/FORMAL_known_limits.md',
             'build_stdlib_dylib.py'],
      desc='runtime header export scan sees every declaration')
 # `mem='small'` (8 GB), down from `stage` (96) — the single biggest change in
@@ -1927,7 +1927,7 @@ test('doc-refs', [PY, 'tools/dangling_doc_refs.py', '--ratchet'], cache=True,
 # `lib/` because two of its groups read them.
 test('formal-doc-truth', [PY, 'test_formal_doc_truth.py'], mem='tiny', cache=True,
      extra=['test_formal_doc_truth.py', 'FORMAL.md', 'OPUS.md',
-            'doc/ABI.md', 'runtime', 'lib', 'formal/model.py',
+            'doc/ABI.md', 'runtime', 'lib', 'formal/model',
             'formal/lean.py', 'formal/build.py',
             'formal/arm64_proof_gen.py',
             'formal/x86_64_proof_gen.py', 'build_stdlib_dylib.py',
@@ -2880,7 +2880,7 @@ test('formal-imports', [PY, 'test_formal_imports.py'],
 test('formal-interop', [PY, 'test_formal_interop.py'],
      deps=['preflight', 'prooflib'],
      mem='tiny', timeout=1800,
-     extra=['test_formal_interop.py', 'formal/model.py', 'formal/build.py',
+     extra=['test_formal_interop.py', 'formal/model', 'formal/build.py',
             'formal/macho_linker.py', 'reflect.py', 'exec_budget.py',
             'doc/ABI.md'],
      desc='the formal dylib boundary, bound and called on both architectures')
@@ -3239,7 +3239,7 @@ test('formal-dataclasses', [PY, 'test_dataclasses_formal.py'],
      mem='tiny', deps=['preflight'],
      extra=['test_dataclasses_formal.py', 'formal/dataclass_transform.py',
             'formal/build.py', 'formal/imports.py', 'formal/arm64.py',
-            'formal/arm64_codegen.py', 'formal/model.py'] + FORMAL_BUILD_INPUTS,
+            'formal/arm64_codegen.py', 'formal/model'] + FORMAL_BUILD_INPUTS,
      desc='@dataclass as a compile-time transform, against CPython')
 # `typing.NamedTuple` on both architectures, each execution case run under
 # CPython and both images and required to agree; refusals pinned by message.
@@ -3248,7 +3248,7 @@ test('formal-namedtuple', [PY, 'test_namedtuple_formal.py'],
      mem='tiny', deps=['preflight'],
      extra=['test_namedtuple_formal.py', 'formal/dataclass_transform.py',
             'formal/build.py', 'formal/imports.py', 'formal/arm64.py',
-            'formal/arm64_codegen.py', 'formal/model.py'] + FORMAL_BUILD_INPUTS,
+            'formal/arm64_codegen.py', 'formal/model'] + FORMAL_BUILD_INPUTS,
      desc='typing.NamedTuple on the formal backend, against CPython')
 # `mod.NAME`: a call, a RE-EXPORTED call, a submodule chain, and a module-level
 # constant, each built for both architectures and run — plus the three shapes
@@ -3265,7 +3265,7 @@ test('formal-namedtuple', [PY, 'test_namedtuple_formal.py'],
 # sentence that is true of it.
 test('formal-module-attr', [PY, 'test_formal_module_attr.py'], mem='tiny',
      deps=['preflight'],
-     extra=['test_formal_module_attr.py', 'formal/model.py',
+     extra=['test_formal_module_attr.py', 'formal/model',
             'formal/imports.py'] + FORMAL_BUILD_INPUTS,
      desc='mod.NAME: calls, re-exports, chains, constants and attribute '
           'reads, on both backends')
@@ -3283,7 +3283,7 @@ test('formal-module-attr', [PY, 'test_formal_module_attr.py'], mem='tiny',
 test('formal-os-backing', [PY, 'test_formal_os_backing.py'], mem='tiny',
      deps=['preflight'],
      extra=['test_formal_os_backing.py', 'formal/hostmods/os/_syscalls.mojo',
-            'formal/model.py', 'formal/imports.py'] + FORMAL_BUILD_INPUTS,
+            'formal/model', 'formal/imports.py'] + FORMAL_BUILD_INPUTS,
      # 72 of 72, and the `expect=` this carried is gone with its bug doc. The
      # 2026-10-07 six reds (three cases x two backends) are all closed on
      # master: the 32-bit pointer-subscript class (`pointer_subscript_i32`,
@@ -3349,7 +3349,7 @@ test('formal-os-backing', [PY, 'test_formal_os_backing.py'], mem='tiny',
 test('formal-external-call', [PY, 'test_formal_external_call.py'],
      mem='tiny', deps=['preflight'],
      extra=['test_formal_external_call.py', 'formal/build.py',
-            'formal/model.py', 'formal/imports.py'] + FORMAL_BUILD_INPUTS,
+            'formal/model', 'formal/imports.py'] + FORMAL_BUILD_INPUTS,
      desc='external_call[sym, RetType]: both the answers and the refusals')
 # The ELEVENTH of the section above, and the first one to arrive with a merge
 # rather than with a batch: `work/formal8-4` added `test_formal_typed_flag.py`
@@ -3369,7 +3369,7 @@ test('formal-external-call', [PY, 'test_formal_external_call.py'],
 # cheap enough that either is defensible and it is not worth the second argument.
 test('formal-typed-flag', [PY, 'test_formal_typed_flag.py'],
      mem='tiny', deps=['preflight'],
-     extra=['test_formal_typed_flag.py', 'formal/model.py', 'formal/types.py',
+     extra=['test_formal_typed_flag.py', 'formal/model', 'formal/types.py',
             'formal/build.py'],
      desc="the `typed` model flag: one definition, and not vacuous")
 # `json`: RFC 8259 on the formal backend, every case computed twice — once
@@ -3381,7 +3381,7 @@ test('formal-typed-flag', [PY, 'test_formal_typed_flag.py'],
 test('formal-json', [PY, 'test_formal_json.py'], mem='tiny',
      deps=['preflight'],
      extra=['test_formal_json.py', 'formal/hostmods/json.mojo',
-            'formal/build.py', 'formal/model.py',
+            'formal/build.py', 'formal/model',
             'formal/imports.py'] + FORMAL_BUILD_INPUTS,
      desc='json: RFC 8259 built, run, and diffed against CPython\'s json')
 # `pathlib`, and the `PurePosixPath` half of it: a module whose every answer is
@@ -3392,7 +3392,7 @@ test('formal-pathlib', [PY, 'test_formal_pathlib.py'], mem='tiny',
      deps=['preflight'],
      extra=['test_formal_pathlib.py', 'formal/hostmods/pathlib.mojo',
             'test_formal_json.py', 'formal/build.py',
-            'formal/model.py'] + FORMAL_BUILD_INPUTS,
+            'formal/model'] + FORMAL_BUILD_INPUTS,
      desc='pathlib: the pure half of PurePosixPath, against CPython\'s pathlib')
 # A method parameter's field, established by its DECLARED type and nothing else.
 # A method's other parameters were never seeded as frame holders, so
@@ -3402,7 +3402,7 @@ test('formal-pathlib', [PY, 'test_formal_pathlib.py'], mem='tiny',
 test('formal-method-param-field', [PY, 'test_formal_method_param_field.py'],
      mem='tiny', deps=['preflight'],
      extra=['test_formal_method_param_field.py', 'formal/build.py',
-            'formal/model.py'] + FORMAL_BUILD_INPUTS,
+            'formal/model'] + FORMAL_BUILD_INPUTS,
      desc='a method parameter\'s field, from its declared type')
 # A frame address at an ARGUMENT position of a comptime-specialized call —
 # `f[T](r)` — which is not a method call at all, so none of the receiver-handoff
@@ -3470,7 +3470,7 @@ test('formal-method-param-field', [PY, 'test_formal_method_param_field.py'],
 test('formal-receiver-position', [PY, 'test_formal_receiver_position.py'],
      mem='tiny', deps=['preflight'],
      extra=['test_formal_receiver_position.py', 'formal/build.py',
-            'formal/model.py'] + FORMAL_BUILD_INPUTS,
+            'formal/model'] + FORMAL_BUILD_INPUTS,
      desc='a frame address at a specialization\'s argument position, refused')
 # `io` and `typing`: four numeric constants and one function, which is the
 # measurement behind why `typing` is one function — the formal backends ERASE
@@ -3480,7 +3480,7 @@ test('formal-small-hosts', [PY, 'test_formal_small_hosts.py'], mem='tiny',
      deps=['preflight'],
      extra=['test_formal_small_hosts.py', 'test_formal_json.py',
             'formal/hostmods/io.mojo', 'formal/hostmods/typing.mojo',
-            'formal/build.py', 'formal/model.py'] + FORMAL_BUILD_INPUTS,
+            'formal/build.py', 'formal/model'] + FORMAL_BUILD_INPUTS,
      desc='io and typing, and the 38 names that must stay absent')
 # A comptime SPECIALIZATION, `f[a, b](...)`, on both formal paths. The bracket
 # is spelled like a subscript and both backends resolve it by flattening the
@@ -3499,7 +3499,7 @@ test('formal-specialization', [PY, 'test_formal_specialization.py'],
      mem='tiny', deps=['preflight'],
      extra=['test_formal_specialization.py', 'formal/arm64_codegen.py',
             'formal/x86_64_codegen.py', 'formal/build.py',
-            'formal/model.py'] + FORMAL_BUILD_INPUTS,
+            'formal/model'] + FORMAL_BUILD_INPUTS,
      desc='f[a, b](...): a specialization, and what must stay refused')
 # `#kgen.param.expr<…>`: the family whose meaning is not an MLIR object at all
 # but a QUESTION the build can answer. `std/sys/info.mojo` is built out of them
@@ -3507,7 +3507,7 @@ test('formal-specialization', [PY, 'test_formal_specialization.py'],
 test('formal-target-queries', [PY, 'test_formal_target_queries.py'],
      mem='tiny', deps=['preflight'],
      extra=['test_formal_target_queries.py', 'formal/build.py',
-            'formal/model.py'] + FORMAL_BUILD_INPUTS,
+            'formal/model'] + FORMAL_BUILD_INPUTS,
      desc='#kgen.param.expr<…>: a build-time question, answered and executed')
 # The value model's shapes, measured against CPython rather than pinned. Its
 # `global`-write case is the one worth naming here: it was a REFUSAL until the
@@ -3517,7 +3517,7 @@ test('formal-target-queries', [PY, 'test_formal_target_queries.py'],
 test('formal-value-model', [PY, 'test_formal_value_model.py'], mem='tiny',
      deps=['preflight'],
      extra=['test_formal_value_model.py', 'formal/build.py',
-            'formal/model.py'] + FORMAL_BUILD_INPUTS,
+            'formal/model'] + FORMAL_BUILD_INPUTS,
      desc='the value model\'s shapes, against CPython on both backends')
 # `enum` and `contextlib`, the two host modules whose whole content is one or two
 # names whose answers are CPython's to give. Registered because
@@ -3534,7 +3534,7 @@ test('formal-core-hostmods', [PY, 'test_formal_core_hostmods.py'], mem='tiny',
      deps=['preflight'],
      extra=['test_formal_core_hostmods.py', 'formal/hostmods/enum.mojo',
             'formal/hostmods/contextlib.mojo', 'formal/build.py',
-            'formal/model.py', 'formal/imports.py'] + FORMAL_BUILD_INPUTS,
+            'formal/model', 'formal/imports.py'] + FORMAL_BUILD_INPUTS,
      desc='enum and contextlib: S.NAME.value/.name and nullcontext, against CPython')
 # An x86-64 MODULE dylib that calls out: it must build, sign, load and RUN.
 # Module dylibs are how every cross-module call reaches its definition on this
@@ -3543,7 +3543,7 @@ test('formal-x86-dylib', [PY, 'test_formal_x86_64_dylib.py'], mem='tiny',
      deps=['preflight'],
      extra=['test_formal_x86_64_dylib.py', 'formal/macho_linker.py',
             'formal/elf.py', 'formal/build.py',
-            'formal/model.py'] + FORMAL_BUILD_INPUTS,
+            'formal/model'] + FORMAL_BUILD_INPUTS,
      desc='an x86-64 module dylib that calls out, built, signed and run')
 
 # ── the two the estate check caught on master, 2026-10-02 ──────────────────
@@ -3567,7 +3567,7 @@ test('formal-x86-dylib', [PY, 'test_formal_x86_64_dylib.py'], mem='tiny',
 # that a build-and-run row would each cost a compiler invocation to reach.
 test('formal-read-before-store', [PY, 'test_formal_read_before_store.py'],
      mem='tiny', deps=['preflight'],
-     extra=['test_formal_read_before_store.py', 'formal/model.py'],
+     extra=['test_formal_read_before_store.py', 'formal/model'],
      desc='read-before-store dominance, against CPython in both directions')
 # `iter_statement_nodes` against the full `iter_nodes`, over the three node
 # shapes that hid a store from a walk without `_STATEMENT_CONSTRUCTS`: a class
@@ -3610,7 +3610,7 @@ test('formal-read-before-store', [PY, 'test_formal_read_before_store.py'],
 test('formal-bracketed-method-field-set',
      [PY, 'test_formal_bracketed_method_field_set.py'], mem='tiny',
      deps=['preflight'],
-     extra=['test_formal_bracketed_method_field_set.py', 'formal/model.py',
+     extra=['test_formal_bracketed_method_field_set.py', 'formal/model',
             'formal/build.py'] + FORMAL_BUILD_INPUTS,
      desc='a struct\'s field set, and the one store census it is derived from')
 # Every case is DIFFERENTIAL and each `this` case has a `self` twin that has
@@ -3620,7 +3620,7 @@ test('formal-bracketed-method-field-set',
 # and runs on both backends, so `FORMAL_BUILD_INPUTS` is in its key.
 test('formal-receiver-spelling', [PY, 'test_formal_receiver_spelling.py'],
      mem='tiny', deps=['preflight'],
-     extra=['test_formal_receiver_spelling.py', 'formal/model.py',
+     extra=['test_formal_receiver_spelling.py', 'formal/model',
             'formal/build.py'] + FORMAL_BUILD_INPUTS,
      desc='a receiver spelled `this`, diffed against a `self` twin and CPython')
 # `formal/imports.py`'s `HOST_OWNED_BLOBS` is the one place this tree says what
@@ -3778,7 +3778,7 @@ test('formal-proof-census', [PY, 'tools/formal_proof_census.py'],
      extra=['tools/formal_proof_census.py',
             'tools/formal_proof_census_baseline.json',
             'test_formal_proof_census.py', 'formal/lean.py', 'formal/build.py',
-            'formal/admitted.py', 'formal/model.py', 'formal/imports.py',
+            'formal/admitted.py', 'formal/model', 'formal/imports.py',
             'formal/arm64.py', 'formal/arm64_proof_gen.py',
             'formal/macho_linker.py', 'formal/macho.py', 'formal/elf.py',
             'formal/types.py', 'lib/ProofLib.lean', 'lib/Refine.lean',
@@ -3808,7 +3808,7 @@ test('formal-proof-census-tool', [PY, 'test_formal_proof_census.py'],
 test('formal-monomorph', [PY, 'test_formal_monomorph.py'],
      mem='tiny', deps=['preflight'],
      extra=['test_formal_monomorph.py', 'formal/monomorph.py',
-            'formal/imports.py', 'formal/build.py', 'formal/model.py',
+            'formal/imports.py', 'formal/build.py', 'formal/model',
             'monomorphize.py', 'elaborate.py', 'reflect.py'] + FORMAL_BUILD_INPUTS,
      desc="a generic's instantiations are its boundary symbols, differentially")
 
@@ -3828,7 +3828,7 @@ test('formal-monomorph', [PY, 'test_formal_monomorph.py'],
 # Measured 2026-10-04 under `tools/memslot.py --gb 8`: 11.4-13.0 s, 0.1 GB peak.
 test('formal-optional', [PY, 'test_formal_optional.py'], mem='tiny',
      deps=['preflight'],
-     extra=['test_formal_optional.py', 'formal/model.py', 'formal/build.py',
+     extra=['test_formal_optional.py', 'formal/model', 'formal/build.py',
             'formal/arm64_codegen.py', 'formal/x86_64_codegen.py',
             'lib/ProofLib.lean'] + FORMAL_BUILD_INPUTS,
      desc="Optional[T]'s niche: truthiness, unwrap and the calls that refuse")
@@ -3888,7 +3888,7 @@ test('formal-admitted', [PY, 'test_formal_admitted.py'], mem='tiny',
 # and it is in `proofs` too, so the bucket is the whole formal picture.
 test('formal-field-walk', [PY, 'test_formal_field_walk.py'], mem='tiny',
      deps=['preflight'],
-     extra=['test_formal_field_walk.py', 'formal/model.py',
+     extra=['test_formal_field_walk.py', 'formal/model',
             'formal/imports.py', 'formal/build.py',
             'tools/formal_field_walk_differential.py'] + FORMAL_BUILD_INPUTS,
      desc='iter_statement_nodes against the full walk, 61 statement shapes')
@@ -3941,7 +3941,7 @@ test('formal-host-import-shapes', [PY, 'test_formal_host_import_shapes.py'],
 test('formal-per-struct-asks', [PY, 'test_formal_per_struct_asks.py'],
      mem='tiny', cache=True,
      deps=['preflight'],
-     extra=['test_formal_per_struct_asks.py', 'formal/model.py',
+     extra=['test_formal_per_struct_asks.py', 'formal/model',
             'formal/build.py'] + FORMAL_BUILD_INPUTS,
      desc='a per-struct predicate is asked once per struct, not once per function')
 # `glob`, differential against CPython's own. Registered rather than excused
@@ -3957,13 +3957,13 @@ test('formal-fcntl', [PY, 'test_formal_fcntl.py'], mem='tiny',
      extra=['test_formal_fcntl.py', 'test_formal_dylib.py',
             'formal/hostmods/fcntl.mojo',
             'formal/hostmods/os/_syscalls.mojo',   # `fs_open_ro`, `fs_close`
-            'formal/build.py', 'formal/model.py',
+            'formal/build.py', 'formal/model',
             'formal/imports.py'] + FORMAL_BUILD_INPUTS,
      desc='fcntl: flock(2) and CPython\'s whole constant surface, both backends')
 test('formal-math', [PY, 'test_formal_math.py'], mem='tiny',
      deps=['preflight'],
      extra=['test_formal_math.py', 'test_formal_dylib.py',
-            'formal/hostmods/math.mojo', 'formal/build.py', 'formal/model.py',
+            'formal/hostmods/math.mojo', 'formal/build.py', 'formal/model',
             'formal/imports.py'] + FORMAL_BUILD_INPUTS,
      desc='math: the integer-valued surface, against CPython on both backends')
 test('formal-shutil', [PY, 'test_formal_shutil.py'], mem='tiny',
@@ -3971,13 +3971,13 @@ test('formal-shutil', [PY, 'test_formal_shutil.py'], mem='tiny',
      extra=['test_formal_shutil.py', 'test_formal_dylib.py',
             'formal/hostmods/shutil.mojo',
             'formal/hostmods/os/_syscalls.mojo',   # the 8 fs_* it calls
-            'formal/build.py', 'formal/model.py',
+            'formal/build.py', 'formal/model',
             'formal/imports.py'] + FORMAL_BUILD_INPUTS,
      desc='shutil: copy, move, rmtree, copytree and which, over the real filesystem')
 test('formal-stat', [PY, 'test_formal_stat.py'], mem='tiny',
      deps=['preflight'],
      extra=['test_formal_stat.py', 'formal/hostmods/stat.mojo',
-            'formal/build.py', 'formal/model.py',
+            'formal/build.py', 'formal/model',
             'formal/imports.py'] + FORMAL_BUILD_INPUTS,
      desc='stat: the mode vocabulary, all 65547 modes against CPython')
 # `glob`, differential against CPython's own, over a fixture tree this file
@@ -3996,7 +3996,7 @@ test('formal-glob', [PY, 'test_formal_glob.py'], mem='tiny',
      deps=['preflight'],
      extra=['test_formal_glob.py', 'formal/hostmods/glob.mojo',
             'test_formal_dylib.py', 'formal/hostmods/os/__init__.mojo',
-            'formal/build.py', 'formal/model.py',
+            'formal/build.py', 'formal/model',
             'formal/imports.py'] + FORMAL_BUILD_INPUTS,
      desc='glob: has_magic, hidden files, symlinks and escapes, against CPython')
 
@@ -4018,7 +4018,7 @@ test('formal-glob', [PY, 'test_formal_glob.py'], mem='tiny',
 test('formal-shlex', [PY, 'test_formal_shlex.py'], mem='tiny',
      deps=['preflight'],
      extra=['test_formal_shlex.py', 'test_formal_dylib.py',
-            'formal/hostmods/shlex.mojo', 'formal/build.py', 'formal/model.py',
+            'formal/hostmods/shlex.mojo', 'formal/build.py', 'formal/model',
             'formal/imports.py'] + FORMAL_BUILD_INPUTS,
      desc='shlex.quote against CPython, both backends, 5 groups')
 

@@ -4162,6 +4162,13 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             _gm_kwarg_values = list(_gm_kwarg_dict.values())
             _gm_dflts = gen._func_param_defaults.get(f"{_gm_api['base']}_start", [])
             while len(all_args) < _gm_nfixed:
+                # The callee's own `**kwargs` slot (receiver included in the
+                # index): pack every keyword into a MojoDict, an empty one
+                # when there are none -- see ggc._emit_generator_start_call.
+                if _gm_api.get('kwargs_slot') is not None and len(all_args) == _gm_api['kwargs_slot']:
+                    all_args.append(('MojoDict *', ggc._pack_kwargs_dict(gen, _gm_kwarg_dict)))
+                    _gm_kwarg_values = []
+                    continue
                 if _gm_kwarg_values:
                     all_args.append(_gm_kwarg_values.pop(0))
                     continue
