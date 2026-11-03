@@ -14,7 +14,56 @@ ended at its own body label, and the body's `RET` lay outside it. A second,
 independent defect sat behind it: the body-only scan lost the receiver's
 register copy (`ADD x19, x0, #0`), which the PROLOGUE sets and the body reads.
 
-Landed in `formal/arm64_proof_gen.py`:
+**Round 2026-11-03 (planning, step 1 measured; nothing new landed in code).**
+Step 1 is blocked on a Lean-side check the light-worker cap cannot run, so
+this round records the measured fix and its exact edits.
+
+Measured on this branch (`python3` probe of `_generate_frame_proof` on
+`wide_recv`, image captured with the spy in `test_formal_frame_method_finder.py`):
+the refusal is `model: \`v\` is read here ... (the model's environment is
+['self'])`, raised from `_expr_go` inside `_gen_universal_e2e_cfg(fn=f)` for
+`Point_set_x`, because the setter's entry env binds only `self`.
+
+Planned edit (`formal/arm64_proof_gen.py::_frame_section`), tried and generated
+cleanly (579 KB, no `sorry`/`admit`, `wide_recv` now emits `main_Point_set_x_frame_contract`):
+
+```diff
+-        init_extra = (f"sp := UInt64.ofNat {sp0}, mem := hmem"
+-                      + (", x1 := v" if m["kind"] == "set" else ""))
++        init_extra = f"sp := UInt64.ofNat {sp0}, mem := hmem"
+ ...
+-            conj = [f"Frame.frameRead s.mem n {slot} = v"]
++            conj = [f"Frame.frameRead s.mem n {slot} = n1"]
+ ...
+-            params = "n v : UInt64) (hmem : Nat → UInt8"
++            params = "n n1 : UInt64) (hmem : Nat → UInt8"
+ ...
+             fn=f, tw_extra="", tc=..., cond_branches=set(), code_name=..., sr_name=stem,
++            entry_arity=max(1, len(f.params or [])),   # binds v to n1 via _entry_arg_names
+             frame={"func_end": m["end"], ...
+```
+
+Why each line: `_entry_env` binds the source parameter `v` to the theorem binder
+at its position, which `_entry_arg_names` names `n1`; `_entry_arg_with` already
+emits `x1 := n1` in the CFG's entry state, so keeping `x1 := v` in `init_extra`
+writes the field twice (`{ … with x1 := n1, …, x1 := n1 }`), which Lean rejects.
+
+**Not verified, and why:** Lean has not accepted the generated set proof.
+`formal.lean.check_proof` on the generated file under `memslot --gb 8` was
+killed by the cap (no output, exit 1); `lib/ProofLib.olean` does not exist in
+this worktree, so the check first builds it (`ensure_library`, ~80 s, 27 MB)
+and then typechecks a 579 KB file. The integrator needs to run it with a larger
+budget:
+
+    python3 -c "import sys; sys.path.insert(0,'.'); from formal import lean; print(lean.check_proof('<generated.lean>', repo_root='.'))"
+
+Pins that flip when the edit lands, and must be updated in the same commit
+with the Lean verdict: `test_formal_call_proof_gen.py::TestStructFieldHasNoValueInTheModel::test_the_refusal_is_the_model_domain_one`
+(asserts the refusal, now absent), and `test_formal.py`'s `wide_recv`
+`EXPECTED_FAILURES` marker (if Lean accepts, the marker must be dropped; if it
+rejects, the marker's reason must name the Lean error).
+
+Landed in `formal/arm64_proof_gen.py` (earlier rounds):
 
 * the extent is now `[entry, next FUNCTION entry)`, cut also at any label that
   is not named `{fname}_…` (code belonging to no function); the leaf method ends
