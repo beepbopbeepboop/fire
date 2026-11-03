@@ -6,7 +6,51 @@
 (the arm64 data-word bug, whose ordinary and DYLIB halves are fixed; the frame
 half is unreachable because of THIS).
 
-**Status: PARTIAL FIX, 2026-10-31 (`work/formal2064-docs`).** `formal/arm64_proof_gen.py::_frame_methods` now detects the guard's conditional branch (`B.cond` at idx 51/52/53) in the first 32 words after the function label, resolves its target label, and scans from `body_entry = guard_target` rather than the guard's start. The `rets`, `end`, branch-check and `_frame_slot_accesses` ranges all use `body_entry`. Committed as partial progress; the full by-reference receiver proof path (`_generate_frame_proof`) is still unreachable until the method finder actually produces methods, which this change enables but which is not yet verified green over the example corpus. Not a documented limit.
+**Status: PARTIAL FIX, 2026-11-02.** The finder is live. Root cause, as
+measured: `_frame_methods` took a method's extent as "up to the NEXT LABEL in
+address order", and the codegen also labels points inside a body
+(`{fname}_sf{k}_ok`, the stack-floor guard's `_ok`). So `Point_get_x`'s extent
+ended at its own body label, and the body's `RET` lay outside it. A second,
+independent defect sat behind it: the body-only scan lost the receiver's
+register copy (`ADD x19, x0, #0`), which the PROLOGUE sets and the body reads.
+
+Landed in `formal/arm64_proof_gen.py`:
+
+* the extent is now `[entry, next FUNCTION entry)`, cut also at any label that
+  is not named `{fname}_…` (code belonging to no function); the leaf method ends
+  at its FIRST `RET`;
+* the body starts at the guard's own `{fname}_sf{k}_ok` label (the
+  `ok_label` `arm64_codegen.py` publishes); the earlier B.cond scan is gone;
+* `_frame_slot_accesses(words, entry, end, body=)` walks the prologue only to
+  carry the receiver's register copies forward; its loads are not accesses;
+* `generate_arm64_proof` resolves `fn` before the frame branch. The branch reads
+  `fn` for its `@refines` note; the lookup used to come after it, so any image
+  the finder now reports hit `UnboundLocalError`. This was the exposed defect of
+  the finder going live, not a separate one.
+
+Verified: `test_formal_frame_method_finder.py` (new) returns
+`Point_set_x: set`, `Point_get_x: get`, `Point_get_y: get` on `wide_recv`; it
+FAILS on the pre-fix generator (finder returns `None`) and passes now.
+
+Consequences, measured, and NOT Lean-checked:
+
+* `wide_recv`'s get-only variant (the `test_formal_call_proof_gen.py`
+  divergence row) now gets a by-reference frame proof on arm64 instead of an
+  ordinary-model refusal. Its pin was rewritten to the new fact.
+* `wide_recv` as written (with `set_x`) is still refused, now by
+  `_generate_frame_proof`: `v` (Point_set_x's scalar parameter) is read and the
+  frame model binds only `self`. The `test_formal.py` `wide_recv` marker and the
+  `TestStructFieldHasNoValueInTheModel` pin were rewritten to that refusal.
+
+Remaining, in order:
+
+1. Bind a frame method's scalar (non-receiver) parameters in the frame model
+   (`_generate_frame_proof`'s environment), so `set_x` gets a contract.
+2. Lean-check the frame proofs that are now emitted (`prooflib` job). Until then
+   they are generated, not accepted. `_frame_methods` is the only change that
+   turns the frame path on for a new image, so this is what to check first.
+3. Only then delete this doc: the frame proof path must be verified end to end
+   over the example corpus, not just the finder.
 
 ## What I ran
 
@@ -66,28 +110,9 @@ model-domain gap rather than as this wiring.
 its own docstring says and as it did before the guard rework. A guard `B.cond`
 above the body is not a branch in the METHOD.
 
-## Exact next step
+## Exact next step (2026-11-02)
 
-Scope the leaf-shape scan to the method's BODY, not its entry label: the
-generator already publishes the body's label as `{fname}_sf{k}_ok`
-(`formal/arm64_codegen.py`, `ok_label`), so `_frame_methods` should start the
-`rets`/branch/`_frame_slot_accesses` walk at that label when it is present
-(the guard's own code is the compiler's, not the method's, and
-`_frame_slot_accesses` would return `None` on the guard's `ADRP`/`LDR` anyway).
-
-**Do NOT land this alone.** Re-activating the path changes what the frame
-proofs SAY for every frame-shaped image, and the emitted proofs must be
-Lean-checked before it is trusted (`lib/ProofLib.olean` is absent on a light
-worktree, so this is an integrator/`prooflib` job). Two things it must be
-checked against first:
-
-1. The step-lemma domain. `_generate_frame_proof` passes the WHOLE `code` to
-   `_gen_step_result_lemmas`/`_gen_step_lemmas`; the data-word fix reads
-   `formal/arm64_proof_gen.py::_executable_code`, and the frame emitter now
-   uses it, but the re-activated proofs have not been generated from a real
-   frame image end to end.
-2. `_frame_slot_accesses` / `_frame_store_depths` must be correct over the
-   body-only range (they were written when the label WAS the body).
-
-A generation-only check that the finder is live (`_frame_methods(...)` returns
-the wide_recv methods) is cheap and Lean-free; the proof check is not.
+The finder step is done (see Status). The next step is Status item 1: bind a
+frame method's scalar parameters in `_generate_frame_proof`'s model, then the
+`prooflib` Lean check of the emitted frame proofs (Status item 2). The check
+that the finder is live is `python3 test_formal_frame_method_finder.py`.

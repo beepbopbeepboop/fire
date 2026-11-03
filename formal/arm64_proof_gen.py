@@ -11616,6 +11616,15 @@ def generate_arm64_proof(prog, code, info) -> str:
     # spellings as well as the proved function — see `_call_func_lean`.
     _admitted_calls_map = dict(getattr(prog, "admitted_calls", None) or {})
 
+    # The entry function, resolved before either branch below reads it: the
+    # frame branch reads its `@refines` annotation, and that read used to sit
+    # ahead of this lookup, so any frame-shaped image hit an UnboundLocalError
+    # the moment the frame finder found a method.
+    fn = next((f for f in prog.functions if f.name == func_name), None)
+    if fn is None and prog.functions:
+        fn = prog.functions[0]
+        func_name = fn.name
+
     _fmethods = _frame_methods(prog, code, info)
     if _fmethods:
         text = _generate_frame_proof(prog, code, info, _fmethods, func_name,
@@ -11638,10 +11647,6 @@ def generate_arm64_proof(prog, code, info) -> str:
                 f"range.md`. -/\n")
         return text
 
-    fn = next((f for f in prog.functions if f.name == func_name), None)
-    if fn is None and prog.functions:
-        fn = prog.functions[0]
-        func_name = fn.name
     param = fn.params[0][0] if fn.params else "n"
     # The INDEPENDENT specification this program asks to be checked against, or
     # None.  Read here rather than at the end of the function because it decides
@@ -12338,10 +12343,18 @@ set_option linter.unusedVariables false
 # is a theorem about the wrong address.
 
 
-def _frame_slot_accesses(words: dict, entry: int, end: int):
+def _frame_slot_accesses(words: dict, entry: int, end: int, body: int = None):
     """`(slot, is_store)` per receiver-relative access, in program order.
 
-    None if any access's base register cannot be traced to the receiver."""
+    None if any access's base register cannot be traced to the receiver.
+
+    `body` (default `entry`) is where the method's own code starts, after the
+    stack-floor guard in front of it.  The prologue before it is the compiler's:
+    it is walked only to carry the receiver's register copies forward (the
+    method body reads the receiver through `x19`, which the prologue sets with
+    `ADD x19, x0, #0`), and its loads and branches are not accesses of the
+    method, so they cannot fail the scan."""
+    body = entry if body is None else body
     recv = {0: 0}                       # register -> byte offset from receiver
     out = []
     pc = entry
@@ -12353,19 +12366,26 @@ def _frame_slot_accesses(words: dict, entry: int, end: int):
         if idx is None:
             return None
         rd, rn = w & 0x1f, (w >> 5) & 0x1f
+        in_body = pc >= body
         if idx in (9, 10):              # ADD Xd, Xn, #imm (32- and 64-bit)
             if rn in recv:
                 # The immediate is a BYTE offset from the receiver: `_imm12_
                 # scaled` (the `sh` bit, no `* 8` — that scale belongs to the
                 # LDR/STR access size in the arm below, not to an ADD).
                 recv[rd] = recv[rn] + _imm12_scaled(w)
+            else:
+                recv.pop(rd, None)
         elif idx == 1:                  # MOV Xd, Xn
             if rn in recv:
                 recv[rd] = recv[rn]
-        elif idx in (18, 31):           # LDR/STR Xt, [Xn, #imm]
+            else:
+                recv.pop(rd, None)
+        elif idx in (18, 31) and in_body:   # LDR/STR Xt, [Xn, #imm]
             if rn not in recv:
                 return None
             out.append(((recv[rn] + ((w >> 10) & 0xfff) * 8) // 8, idx == 31))
+        elif idx == 31:                 # a prologue STR writes no register
+            pass
         else:
             recv.pop(rd, None)
         pc += 4
@@ -12513,9 +12533,19 @@ def _frame_methods(prog, code: bytes, info: dict):
     labels = dict(info.get("labels") or {})
     if not labels:
         return None
-    ordered = sorted(labels.items(), key=lambda kv: kv[1])
+    # Every label in address order, and the function entries among them.  The
+    # extent of a function is NOT "up to the next label": the generator also
+    # labels the function's own internal points (`{fname}_sf{k}_ok`,
+    # `{fname}_assert{k}_ok`, ...), so the next label can be a point INSIDE the
+    # body.  The stack-floor guard's `_ok` label is exactly that — the first
+    # internal label after the entry — and cutting the extent there left the
+    # body's RET outside it, which is why no frame method was ever found.
+    by_addr = sorted(labels.items(), key=lambda kv: kv[1])
+    fnames = {g.name for g in prog.functions}
     out = []
-    for i, (fname, entry) in enumerate(ordered):
+    for fname, entry in by_addr:
+        if fname not in fnames:
+            continue
         f = next((g for g in prog.functions if g.name == fname), None)
         if f is None or not f.params or f.params[0][0] != "self":
             continue
@@ -12526,40 +12556,33 @@ def _frame_methods(prog, code: bytes, info: dict):
         src = _self_accesses(f.body)
         if not src:
             continue
-        nxt = ordered[i + 1][1] if i + 1 < len(ordered) else None
-
-        # The stack-floor guard (STP/ADRP/LDR/CMP/B.cond to body) lives in the
-        # prologue since bfeec991; skip it when scanning for frame methods.
-        # See bugs/FORMAL_arm64_the_frame_method_finder_scans_the_guard_prologue_and_finds_no_method.md
-        body_entry = entry
-        guard_target = None
-        for pc in range(entry, min(entry + 32, nxt or len(code))):
-            w = words.get(pc)
-            if w is None:
-                continue
-            idx = _step_branch_index(w)
-            if idx in (51, 52, 53):  # B.cond / B / BL — guard branch
-                imm26 = (w >> 6) & 0x3ffffff
-                if imm26 & 0x02000000:
-                    imm26 |= ~0x3ffffff
-                target_pc = pc + 4 + imm26 * 4
-                for lbl, lbl_addr in labels.items():
-                    if lbl_addr == target_pc and lbl_addr >= entry:
-                        guard_target = lbl_addr
-                        break
-                if guard_target is not None:
-                    break
-        if guard_target is not None and guard_target < (nxt or float('inf')):
-            body_entry = guard_target
+        # The function ends where the next FUNCTION begins, or where code
+        # that belongs to no function begins (a label not named `{fname}_…`).
+        nxt = next((a for lbl, a in by_addr
+                    if a > entry and (lbl in fnames
+                                      or not lbl.startswith(fname + "_"))),
+                   None)
+        # The body starts at the stack-floor guard's own `_ok` label, which the
+        # codegen publishes as `{fname}_sf{k}_ok` (arm64_codegen.py `ok_label`).
+        # The guard (STP/ADRP/LDR/CMP/B.cond) is the compiler's prologue, not
+        # the method's, so the leaf-shape scan starts past it.  No such label
+        # means no guard: the body is the entry.
+        ok_re = re.compile(rf"{re.escape(fname)}_sf\d+_ok\Z")
+        body_entry = min((a for lbl, a in labels.items()
+                          if ok_re.match(lbl) and entry <= a
+                          and (nxt is None or a < nxt)), default=entry)
         rets = [pc for pc, w in words.items()
                 if w == 0xd65f03c0 and pc >= body_entry and (nxt is None or pc < nxt)]
         if not rets:
             continue
-        end = max(rets) + 4
+        # The leaf method ends at its FIRST return: any branch before it is
+        # refused below, so a straight-line body has exactly one RET, and a
+        # later RET belongs to the next code, not to this method.
+        end = min(rets) + 4
         if any(_step_branch_index(words[pc]) in (14, 15, 16, 17, 51, 52, 53)
                for pc in words if body_entry <= pc < end):
             continue                      # a branch: not the leaf shape
-        mach = _frame_slot_accesses(words, body_entry, end)
+        mach = _frame_slot_accesses(words, entry, end, body=body_entry)
         if mach is None or len(mach) != len(src):
             continue
         pairs, stores = [], []

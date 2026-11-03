@@ -204,13 +204,16 @@ EXPECTED_FAILURES = {
     # and by the Lean proof, and it is the tagged-value convergence
     # `bugs/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md`
     # describes.  Not a light worker's row, and not this file's to decide.
-    "wide_recv": "a struct field read has no value in the semantic model, whose "
-                 "domain is UInt64 -> UInt64 -- a function of the ENTRY argument, "
-                 "and p.x is 4 whatever n is; arm64 refuses it at GENERATION "
-                 "time and x86-64 emits a disclaimed placeholder model with a "
-                 "sorry end-to-end theorem. The fix is a struct domain in the "
-                 "value model (an environment rather than one word), shared by "
-                 "both backends and by the Lean proof",
+    "wide_recv": "the frame-receiver proof generator refuses it at GENERATION "
+                 "time: `v` (Point_set_x's scalar parameter) is read here and "
+                 "this generator binds it to nothing (the model's environment is "
+                 "['self']), because the frame model has no value for a struct "
+                 "method's non-receiver arguments; the ordinary model's struct "
+                 "domain (p.x is 4 whatever n is) is the same gap one layer "
+                 "down. x86-64 emits a disclaimed placeholder model with a sorry "
+                 "end-to-end theorem. The fix is a struct domain in the value "
+                 "model (an environment rather than one word), shared by both "
+                 "backends and by the Lean proof",
 
     # `count(n) = count(n-1)` and `pow2(n) = 2 * pow2(n-1)`: TREE RECURSION,
     # like `fib` above, and both were UNDECLARED reds until 2026-10-04 -- three

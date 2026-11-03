@@ -5300,10 +5300,9 @@ class TestStructFieldHasNoValueInTheModel(unittest.TestCase):
     `formal/examples/wide_recv.mojo` is the two-field receiver example, and the
     arm64 proof generator refuses it at GENERATION time:
 
-        NotImplementedError: model: a struct field read has no value in the
-        semantic model (a `UInt64 → UInt64` function over the source's
-        arithmetic); refusing rather than modelling it as 0, which would be a
-        false statement about the source
+        NotImplementedError: model: `v` is read here and this generator binds
+        it to nothing (the model's environment is ['self']); answering 0 would
+        be a statement about the source rather than a model of it
 
     The model is a function of the ENTRY ARGUMENT and nothing else, so a
     struct's field is not a term in it: `p.x` is 4 and `p.y` is 0 whatever `n`
@@ -5311,6 +5310,16 @@ class TestStructFieldHasNoValueInTheModel(unittest.TestCase):
     the arm refuses rather than defaulting — and it is the same gap as
     `subscript_var`'s ("the semantic model `mojo : UInt64 -> UInt64` has no
     domain for a list, so `a[i]` has no value in it"), one type further.
+
+    WHICH REFUSAL, since the frame finder went live.  `_frame_methods` used to
+    find no method for this image, so the refusal came from the ordinary model
+    and read "a struct field read has no value".  It now finds `set_x`, `get_x`
+    and `get_y`, and the by-reference frame emitter (`_generate_frame_proof`)
+    refuses the first of them: its contract binds only `self`, so `set_x`'s
+    scalar parameter `v` has no value.  That is the same struct-domain family
+    (a frame method's environment is not a value model), one step earlier.
+    `bugs/FORMAL_arm64_the_frame_method_finder_scans_the_guard_prologue_and_finds_no_method.md`
+    names it as the next step.
 
     So `wide_recv` is in `test_formal.py`'s `EXPECTED_FAILURES` with that reason,
     and this class is what keeps the marker honest in both directions:
@@ -5339,7 +5348,7 @@ class TestStructFieldHasNoValueInTheModel(unittest.TestCase):
               "    return p.get_x() + p.get_y()\n")
 
     #: The phrase the refusal must contain, and the phrase the marker states.
-    NEEDLE = "struct field read"
+    NEEDLE = "binds it to nothing"
 
     @classmethod
     def setUpClass(cls):
@@ -6822,23 +6831,31 @@ def main(n: Int) -> Int:
                 self.assertNotIn("NO RUN TESTS", text)
                 self.assertIn("theorem eval_eq_mojo", text)
 
-    def test_arm64_refuses_the_shape_and_x86_64_disclaims_it(self):
+    def test_arm64_frame_proof_and_x86_64_placeholder_diverge(self):
         """The divergence, stated, because a reader meets it.
 
-        `wide_recv` is refused on arm64 at GENERATION time — the shared model's
-        `NotImplementedError` is not caught there — and emitted with a disclaimed
-        placeholder on x86-64.  Neither claims the program is proved, which is
-        the property that matters; the difference is what a caller sees, and a
-        caller reading `compile_formal`'s return value has to know which it is.
+        `wide_recv` is a by-reference receiver: its `get_x`/`get_y` are frame
+        methods.  arm64 proves each of them as a frame CONTRACT (the by-reference
+        proof path, `_generate_frame_proof`), which says there is no `mojo` and
+        no end-to-end theorem.  x86-64 emits the disclaimed placeholder model.
+        Neither claims the program is proved end to end, which is the property
+        that matters; a caller reading `compile_formal`'s return value has to
+        know which of the two it is looking at.
+
+        This row was "arm64 refuses it" until the frame-method finder found
+        these methods (`test_formal_frame_method_finder.py`); the old refusal was
+        the ordinary model's, and the frame path now answers instead.
         """
-        self.assertIsNone(self.built.get(("arm64", "wide_recv")),
-                          "arm64 now emits a proof for this shape; if it does, "
-                          "this row is stale and the divergence is gone")
-        err = self.built.get(("arm64", "wide_recv", "error"), "")
-        self.assertIn("struct field read has no value in the semantic model",
-                      err,
-                      f"arm64 refused it, but not with the shared model's own "
-                      f"reason: {err}")
+        arm = self.built.get(("arm64", "wide_recv"))
+        self.assertIsNotNone(arm, "arm64 refused the frame shape: %s" %
+                             self.built.get(("arm64", "wide_recv", "error")))
+        self.assertIn("by-reference receiver", arm,
+                      "arm64 emitted a proof, but not the by-reference frame "
+                      "proof this row describes")
+        self.assertNotIn("PLACEHOLDER", arm)
+        self.assertNotIn("theorem main_compiles_correctly", arm,
+                         "a frame proof states an end-to-end theorem, which "
+                         "has no `mojo` to be equal to")
         self.assertIsNotNone(
             self.built.get(("x86_64", "wide_recv")),
             "x86_64 refused the shape too, so the two backends now agree and "
