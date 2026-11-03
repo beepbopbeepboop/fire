@@ -10,9 +10,9 @@ module-level constants are byte-identical to their originals.
 """
 from __future__ import annotations
 import re
-from mojo.middle.types import _C_RESERVED_FUNCS, _FORCE_RENAME_RESERVED, _split_top_level_commas, _used_idents_node, _CPP_CALLABLE_CTYPE, _CPP_CALLABLE_CTYPE_1ARG, _CPP_CALLABLE_CTYPE_STARARGS, _CPP_CALLABLE_CTYPE_KWARGS, _CPP_CALLABLE_CTYPE_STAR_KW, _FLOAT_TYPES, _SIGNED_INT_TRUE_DIV_TYPES
+from mojo.middle.types import _C_RESERVED_FUNCS, _FORCE_RENAME_RESERVED, _split_top_level_commas, _used_idents_node, _CPP_CALLABLE_CTYPE, _CPP_CALLABLE_CTYPE_1ARG, _CPP_CALLABLE_CTYPE_STARARGS, _CPP_CALLABLE_CTYPE_KWARGS, _CPP_CALLABLE_CTYPE_STAR_KW, _FLOAT_TYPES
 import dataclasses
-from fire_compiler import for_target_names, AugAssignStmt, MultiAssignStmt, WalrusExpr, VarDecl, WithStmt, TryStmt, IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _as_set, _signed_int64, ForStmt, IfStmt, MatchStmt, StructDef, AssignStmt
+from fire_compiler import IntLiteral, FloatLiteral, StringLiteral, TstringLiteral, BoolLiteral, IdentExpr, BinaryOp, UnaryOp, CallExpr, MemberExpr, SubscriptExpr, SliceExpr, TernaryExpr, LambdaExpr, ListExpr, DictExpr, SetExpr, TupleExpr, Comprehension, FunctionDef, ReturnStmt, YieldExpr, YieldFromExpr, AwaitExpr, _as_str, _as_set, _signed_int64, ForStmt, IfStmt, MatchStmt, StructDef
 _WALK_FIELD_NAMES_CACHE: dict[type, tuple] = {}
 # Whether a node's CLASS is a dataclass, cached beside the field names for
 # the same reason and on the same key. `dataclasses.is_dataclass` is a pure
@@ -410,7 +410,7 @@ def _generator_quick_eligible(fn: FunctionDef) -> bool:
         return False
     return True
 
-def _trailing_default_at(dflts: list, n_params: int, pos: int):
+def _trailing_default_at(dflts, n_params: int, pos: int):
     """Default-arg AST node for call slot `pos` out of `n_params` total
     params, given `dflts` = [(param_name, default_ast), ...] covering ONLY
     the params that HAVE a default (`FunctionDef.param_defaults`'s shape).
@@ -749,13 +749,6 @@ def is_python_bool_expr(gen, node) -> bool:
     if isinstance(node, MemberExpr):
         return _is_python_bool_field(gen, node)
     if isinstance(node, CallExpr):
-        # The read of a boxed (nested-def captured) local: `__mojo_box_get_i64(n)`
-        # holds the bool iff `n` was bound to one (`_record_bool_valued` looks
-        # through the `__mojo_box_new_i64(...)` of the first binding).
-        if (isinstance(node.func, IdentExpr) and node.func.name == '__mojo_box_get_i64'
-                and len(node.args) == 1 and isinstance(node.args[0], IdentExpr)
-                and node.args[0].name in getattr(gen, '_bool_valued', ())):
-            return True
         return _is_python_bool_method(gen, node)
     try:
         return gen._quick_type(node) == '_Bool'
@@ -937,7 +930,7 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
     like every other compiled struct-method call site already resolves it)
     is one. Reuses this codegen's ALREADY-established per-struct dict-value-
     type/method-return-type registries rather than inventing new tracking —
-    see CODEGEN_enum_runtime_class_creation.md's 2026-08-20 update.
+    see CODEGEN_generator_function_Lib_enum.md's 2026-08-20 update.
 
     `module_global_types` (optional, default None — every existing caller
     that doesn't pass it keeps this function's original behaviour) is a
@@ -1002,20 +995,12 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
             return 'char *'
         if 'double' in (lt, rt):
             return 'double'
-        if e.op == '/' and lt in _SIGNED_INT_TRUE_DIV_TYPES and rt in _SIGNED_INT_TRUE_DIV_TYPES:
-            return 'double'
         return 'int64_t'
     if isinstance(e, CallExpr) and isinstance(e.func, IdentExpr):
         if e.func.name in ('str', 'String', 'repr', 'os.path.join', 'os.path.basename', 'os.path.dirname', 'os.path.splitext'):
             return 'char *'
-        if e.func.name in ('len', 'ord', 'mojo_dirent_name', 'mojo_dirent_path', 'mojo_fsencode_w'):
-            # DirEntry.name/.path and os.fsencode: a pointer WORD (a str or a
-            # bytes, by the value's kind at run time) -- the runtime's int64_t
+        if e.func.name in ('len', 'ord'):
             return 'int64_t'
-        if e.func.name in ('mojo_os_scandir', 'mojo_list_slice_word'):
-            return 'MojoList *'
-        if e.func.name in ('mojo_bytes_from_cstr', 'mojo_bytes_from_str'):
-            return 'MojoBytes *'
         if e.func.name == 'sorted' and e.args:
             return 'MojoList *'
         if e.func.name in ('list', 'set') and len(e.args) == 1 and (len(e.kwargs or []) == 0):
@@ -1055,7 +1040,7 @@ def _infer_simple_expr_ctype(e, known: dict | None=None, self_fields: dict | Non
             return known[e.func.name]
         if fn_return_types is not None:
             _frt = fn_return_types.get(e.func.name)
-            if isinstance(_frt, str) and (_frt in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *', 'double', 'int64_t', '_Bool') or (_frt.endswith(' *') and known_structs is not None and (_frt[:-2] in known_structs))):
+            if isinstance(_frt, str) and (_frt in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *') or (_frt.endswith(' *') and known_structs is not None and (_frt[:-2] in known_structs))):
                 return _frt
     if isinstance(e, CallExpr) and isinstance(e.func, MemberExpr):
         if isinstance(e.func.obj, MemberExpr) and isinstance(e.func.obj.obj, IdentExpr) and (e.func.obj.obj.name == 'os') and (e.func.obj.member == 'path'):
@@ -1323,14 +1308,6 @@ def _generator_tuple_yield_slot_ctypes(fn: FunctionDef, known: dict | None=None,
     for n in _walk_own_body(fn.body):
         if isinstance(n, YieldExpr) and isinstance(n.value, TupleExpr):
             site = [_infer_simple_expr_ctype(el, known, self_fields, async_api, closure_api) or 'int64_t' for el in n.value.elements]
-            # A tuple slot that is a TAGGED word -- a name the body tests with
-            # `isinstance(<name>, tuple)` (so it is a boxed word that is
-            # sometimes a tuple) and otherwise uses as a string -- is a string
-            # in the non-tuple case this yield sits in.
-            for _si, _el in enumerate(n.value.elements):
-                if (site[_si] == 'int64_t' and isinstance(_el, IdentExpr)
-                        and _name_has_str_evidence(_el.name, fn)):
-                    site[_si] = 'char *'
         elif isinstance(n, YieldFromExpr) and generator_api is not None and isinstance(n.value, CallExpr) and isinstance(n.value.func, IdentExpr) and (n.value.func.name != fn.name):
             delegate_api = generator_api.get(n.value.func.name)
             delegate_slots = delegate_api.get('tuple_slot_ctypes') if delegate_api else None
@@ -1358,146 +1335,6 @@ def _generator_tuple_yield_slot_ctypes(fn: FunctionDef, known: dict | None=None,
                     return (True, None)
             slots = merged
     return (found, slots)
-
-
-def _tuple_tested_names(fn) -> set:
-    """Names `fn`'s own body tests with `isinstance(<name>, tuple)`."""
-    out: set = set()
-    for n in _walk_own_body(fn.body):
-        if (isinstance(n, CallExpr) and isinstance(n.func, IdentExpr)
-                and n.func.name == 'isinstance' and len(n.args) == 2
-                and isinstance(n.args[0], IdentExpr)
-                and isinstance(n.args[1], IdentExpr) and n.args[1].name == 'tuple'):
-            out.add(n.args[0].name)
-    return out
-
-
-def _str_evidence_names(fn) -> set:
-    """Every identifier of `fn` the body uses as a string, to a FIXPOINT: a name
-    with direct evidence (`_name_has_str_evidence`), plus the other operand of a
-    `+` whose one side is already known to be a string (`toppath + name` where
-    `toppath` is sliced makes `name` a string too -- `int + str` is a
-    TypeError)."""
-    names = set(n.name for n in _walk_own_body(fn.body) if isinstance(n, IdentExpr))
-    known = set(nm for nm in names if _name_has_str_evidence(nm, fn))
-    changed = True
-    while changed:
-        changed = False
-        for n in _walk_own_body(fn.body):
-            if isinstance(n, BinaryOp) and n.op == '+':
-                for a, b in ((n.left, n.right), (n.right, n.left)):
-                    if (isinstance(a, IdentExpr) and a.name in known
-                            and isinstance(b, IdentExpr) and b.name not in known):
-                        known.add(b.name)
-                        changed = True
-    return known
-
-
-def _name_has_str_evidence(name: str, fn) -> bool:
-    """True when `fn`'s body uses `name` in a way only a string supports:
-    subscripted / sliced, a str-method receiver, or the left/right operand of
-    `+` with a string literal."""
-    for n in _walk_own_body(fn.body):
-        if isinstance(n, (SubscriptExpr, SliceExpr)):
-            if isinstance(n.obj, IdentExpr) and n.obj.name == name:
-                return True
-        elif isinstance(n, CallExpr) and isinstance(n.func, MemberExpr):
-            if (n.func.member in ('strip', 'lstrip', 'rstrip', 'lower', 'upper',
-                                  'split', 'rsplit', 'join', 'replace',
-                                  'startswith', 'endswith')
-                    and isinstance(n.func.obj, IdentExpr) and n.func.obj.name == name):
-                return True
-        elif isinstance(n, BinaryOp) and n.op == '+':
-            for a, b in ((n.left, n.right), (n.right, n.left)):
-                if isinstance(a, IdentExpr) and a.name == name \
-                        and isinstance(b, StringLiteral):
-                    return True
-    return False
-
-
-def _list_method_names(fn) -> set:
-    """Identifiers `fn`'s body uses as a LIST through a list-only method: an
-    `append(x)` / `extend(x)` with one argument or a zero-argument `pop()`."""
-    out: set = set()
-    for n in _walk_own_body(fn.body):
-        if (isinstance(n, CallExpr) and isinstance(n.func, MemberExpr)
-                and isinstance(n.func.obj, IdentExpr)):
-            m = n.func.member
-            if m in ('append', 'extend') and len(n.args) == 1 or m == 'pop' and not n.args:
-                out.add(n.func.obj.name)
-    return out
-
-
-def _list_method_params(fn) -> set:
-    """Unannotated parameters of `fn` the body uses as a LIST: `p.append(x)`,
-    `p.extend(x)` or a zero-argument `p.pop()`. A parameter whose call sites
-    could not be typed (a forward call, `_fwalk(stack, ...)` before `stack` is
-    known) is an `int64_t` word otherwise, and `stack.pop()` then lowers to a
-    stub; these methods are lists' (a dict's `pop` takes a key, a set's `add`)."""
-    names = set(p[0] if isinstance(p, (tuple, list)) else p for p in (fn.params or []))
-    out: set = set()
-    for n in _walk_own_body(fn.body):
-        if (isinstance(n, CallExpr) and isinstance(n.func, MemberExpr)
-                and isinstance(n.func.obj, IdentExpr) and n.func.obj.name in names):
-            m = n.func.member
-            if m in ('append', 'extend') and len(n.args) == 1 or m == 'pop' and not n.args:
-                out.add(n.func.obj.name)
-    return out
-
-
-def _tagged_word_params(fn) -> set:
-    """Parameters of `fn` that the body REBINDS from `<list>.pop(...)` and also
-    tests with `isinstance(<name>, tuple)`: Lib/os.py's `walk(top, ...)` does
-    `top = stack.pop()` where the stack holds path strings AND pushed
-    `(top, dirs, nondirs)` tuples. Such a parameter cannot keep the one C type
-    its call sites gave it; it is the boxed WORD (`int64_t`), and each use
-    narrows it (cast to `char *` / `MojoList *`)."""
-    names = {p[0] if isinstance(p, (tuple, list)) else p for p in (fn.params or [])}
-    tested = _tuple_tested_names(fn) & names
-    if not tested:
-        return set()
-    out: set = set()
-    for n in _walk_own_body(fn.body):
-        if (isinstance(n, AssignStmt) and isinstance(n.target, IdentExpr)
-                and n.target.name in tested
-                and isinstance(n.value, CallExpr)
-                and isinstance(n.value.func, MemberExpr)
-                and n.value.func.member == 'pop'):
-            out.add(n.target.name)
-    return out
-
-
-def _tuple_guarded_bare_yields(fn) -> set:
-    """ids of the `yield <name>` nodes of `fn` that sit inside an
-    `if isinstance(<name>, tuple):` body (the same name), i.e. yields that are
-    known to hand out a tuple whatever type inference gave the name."""
-    out: set = set()
-    for n in _walk_own_body(fn.body):
-        if not isinstance(n, IfStmt):
-            continue
-        c = n.condition
-        if not (isinstance(c, CallExpr) and isinstance(c.func, IdentExpr)
-                and c.func.name == 'isinstance' and len(c.args) == 2
-                and isinstance(c.args[0], IdentExpr)
-                and isinstance(c.args[1], IdentExpr) and c.args[1].name == 'tuple'):
-            continue
-        name = c.args[0].name
-        for sub in _walk_own_body(n.then_body):
-            if (isinstance(sub, YieldExpr) and isinstance(sub.value, IdentExpr)
-                    and sub.value.name == name):
-                out.add(id(sub))
-    # A generator whose EVERY yield is either a tuple display or a bare name
-    # (`yield value` beside `yield toppath, dirs, nondirs, topfd` -- Lib/os.py's
-    # `_fwalk`, whose `value` is a 4-tuple popped off its own stack): the bare
-    # names are those tuples. A bare name that was anything else could not be
-    # unpacked by the consumers of the tuple yields in the first place.
-    sites = [n for n in _walk_own_body(fn.body) if isinstance(n, YieldExpr)]
-    if (sites and all(isinstance(x.value, (TupleExpr, IdentExpr)) for x in sites)
-            and any(isinstance(x.value, TupleExpr) for x in sites)):
-        for x in sites:
-            if isinstance(x.value, IdentExpr):
-                out.add(id(x))
-    return out
 
 
 def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_api: dict | None=None, self_fields: dict | None=None, async_api: dict | None=None, closure_api: dict | None=None, known_structs: frozenset | None=None, dict_val_types: dict | None=None, method_return_types: dict | None=None, fn_return_types: dict | None=None, field_elem_types: dict | None=None, local_elem_types: dict | None=None, include_returns: bool=True, self_struct_ctype: str | None=None, generator_method_api: dict | None=None, self_struct_name: str | None=None, module_global_types: dict | None=None) -> str | None:
@@ -1530,7 +1367,7 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
     function body (a generator can't `await`, an async function can't
     `yield` — see gen_module's combined-refusal category). `known_structs`/
     `dict_val_types`/`method_return_types` (struct-pointer-yield support —
-    see CODEGEN_enum_runtime_class_creation.md's 2026-08-20 update) are
+    see CODEGEN_generator_function_Lib_enum.md's 2026-08-20 update) are
     threaded straight through to every `_infer_simple_expr_ctype` call
     below unchanged — see that function's own docstring for what each
     widens. `field_elem_types`/`local_elem_types` (struct_name-scoped
@@ -1577,13 +1414,6 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
                 _vct = generator_api[iterable.func.name].get('value_ctype')
                 if _vct is not None:
                     known[target_name] = _vct
-    # `if isinstance(top, tuple): yield top` -- a bare `yield <name>` under an
-    # `isinstance(<name>, tuple)` guard yields a TUPLE (a boxed `MojoList *`)
-    # whatever the name's inferred type is: Lib/os.py's `walk` pops `top` off a
-    # heterogeneous stack (a path string or a pushed `(top, dirs, nondirs)`
-    # tuple), and its bottom-up path yields the popped tuple beside the
-    # top-down `yield top, dirs, nondirs`.
-    _tuple_guarded = _tuple_guarded_bare_yields(fn)
     ctype = None
     for n in _walk_own_body(fn.body):
         if isinstance(n, YieldExpr):
@@ -1591,9 +1421,7 @@ def _generator_yield_ctype(fn: FunctionDef, known: dict | None=None, generator_a
                 if ctype is None:
                     ctype = 'int64_t'
                 continue
-            if id(n) in _tuple_guarded:
-                t = 'MojoList *'
-            elif isinstance(n.value, TupleExpr):
+            if isinstance(n.value, TupleExpr):
                 if any((isinstance(el, (TupleExpr, ListExpr, DictExpr, SetExpr)) for el in n.value.elements)):
                     return None
                 t = 'MojoList *'
@@ -2071,7 +1899,7 @@ def _gmi_nested_struct_defs(body, enclosing, out: list, top: bool = False,
     innermost enclosing function or method, or None at module level. It is
     carried so a class-level attribute whose value is a bare parameter name
     can take its C type from that parameter's annotation
-    (a `str` parameter used to read back as a pointer-sized int).
+    (bugs/CODEGEN_nested_class_attr_from_str_param_typed_as_int.md).
     """
     for _nc in (body or []):
         if isinstance(_nc, StructDef):
@@ -2116,102 +1944,3 @@ def _gmi_nested_struct_defs(body, enclosing, out: list, top: bool = False,
         for _slot in _NESTED_CLASS_BODY_SLOTS:
             _gmi_nested_struct_defs(
                 getattr(_nc, _slot, None), enclosing, out, False, params)
-
-
-def _hbn_add_target(bound: set, t) -> None:
-    """Hoisted out of `_helper_bound_names` (was a recursive nested
-    closure) — the lifted-closure-env determinism fix. `bound` (set)
-    threaded and annotated.
-
-    Bound NAMES, not slots, so this is `for_target_names` (the shared leaf
-    walk) with the `*` stripped — the same shape
-    `mojo/middle/boundnames.py::_lbn_target_names` needs, and the same
-    reason: the previous private copy did a bare `s[1:-1].split(',')`, which
-    tore a nested target into paren-carrying fragments and — because it
-    recursed on the paren branch only — could not tell `'(a)'` from a
-    1-tuple `'(a,)'`."""
-    if isinstance(t, str):
-        for name in for_target_names(t):
-            if name:
-                bound.add(name.lstrip('*').strip())
-        return
-    if isinstance(t, IdentExpr):
-        bound.add(t.name)
-        return
-    if isinstance(t, (TupleExpr, ListExpr)):
-        for e in t.elements:
-            _hbn_add_target(bound, e)
-
-
-def _binding_node_names(n) -> set:
-    """Names that ONE node of a helper's own body binds (see
-    `_helper_bound_names` for the full list of binding forms). Per-node so
-    a caller can count binding SITES, not just the set of names."""
-    bound: set = set()
-    if isinstance(n, AssignStmt):
-        _hbn_add_target(bound, n.target)
-    elif isinstance(n, AugAssignStmt):
-        _hbn_add_target(bound, n.target)
-    elif isinstance(n, MultiAssignStmt):
-        for t in (n.targets or []):
-            _hbn_add_target(bound, t)
-    elif isinstance(n, WalrusExpr):
-        bound.add(n.name)
-    elif isinstance(n, ForStmt):
-        _hbn_add_target(bound, n.target)
-    elif isinstance(n, VarDecl):
-        bound.add(n.name)
-    elif isinstance(n, WithStmt):
-        for it in n.items:
-            if isinstance(it.alias, str):
-                bound.add(it.alias)
-            elif isinstance(it.alias, IdentExpr):
-                bound.add(it.alias.name)
-    elif isinstance(n, TryStmt):
-        for h in (n.handlers or []):
-            if getattr(h, 'name', None):
-                bound.add(h.name)
-    return bound
-
-
-def module_qualifier(q) -> str:
-    """The ONE module-string -> C-qualifier sanitization every cross-module
-    registry key and symbol prefix in this codegen must agree on.
-
-    Every one of these keys is written by ONE half of the compiler and read
-    by the OTHER (a defining module registering its own signature/struct/-
-    generator under a `(home, name)` key; an importing module looking that
-    same key up to mangle its call site to the same symbol). Two internally
-    consistent but MUTUALLY DISAGREEING spellings of one module therefore
-    do not fail loudly — they make a lookup MISS, and a miss silently
-    falls through to a worse tier (the shared bare-name slot, all-int64_t
-    param types) whose overload hash then differs from the definition's,
-    producing `implicit declaration of function '<name>_<suffixA>'; did you
-    mean '<name>_<suffixB>'?` at g++ time.
-
-    That is exactly what happened for every module whose name carries a
-    leading depth dot AND an underscore of its own — the overwhelmingly
-    common `from . import _common` / `from ._regexes import ...` shape.
-    The leading-dot strip is load-bearing, NOT cosmetic:
-      `'._common'` -> lstrip-then-substitute -> `_common`   (correct)
-                   -> substitute-only        -> `__common`  (a key nothing
-                                                     will ever look up)
-    `._regexes` happens to agree under both (`_regexes` either way), which
-    is why the bug read as "sometimes it works" rather than "always
-    broken".
-
-    Callers that additionally need the per-compile `_inline_module_qualifiers`
-    remap keep doing that lookup themselves (it needs a `gen`; this is a pure
-    string function on purpose, so both the reference side and the defining
-    side can call it without one).
-
-    Consolidated out of four near-identical private copies
-    (`_func_qualifier._sanitize_qualifier`,
-    `_struct_method_qualifier._sanitize_qualifier`,
-    `_cpp_sanitize_module_qualifier`, and the inline chain in `_local_def_pts`
-    / `_imported_def_pts`), two of which omitted the lstrip. One
-    implementation, so the halves cannot drift again.
-    """
-    if not q:
-        return q
-    return q.lstrip('.').replace('.', '_').replace('-', '_')

@@ -21,7 +21,7 @@ own stack scratch (`formal/model.py`, "What a value is") — so `getitem`,
 `itemgetter`, `attrgetter`, `methodcaller` and `call` want a first-class callable,
 which is REFUSED on this path whatever it is passed to (measured on both shapes,
 in `formal/hostmods/contextlib.mojo` and in
-`bugs/hard/COMPILE_FAIL_decorator_application_dropped.md`'s neighbourhood). Every one
+`bugs/COMPILE_FAIL_decorator_application_dropped.md`'s neighbourhood). Every one
 of those is named under "WHAT IS NOT HERE".
 
 **SO EVERY ANSWER HERE IS WORD ARITHMETIC AND WRAPS.** That is not a shortcut and

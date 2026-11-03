@@ -40,7 +40,6 @@ from fire_compiler import for_target_names
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
-import mojo.middle.coro as coro_mod
 from mojo.middle.exprtypes import _walk_ast_invalidate
 import gimple_codegen
 import mojo.backend_gimple.emit_methods as gmp
@@ -237,12 +236,8 @@ def _cpp_iterable_is_delegatable_generator_call(gen, iterable) -> bool:
         _self_struct = getattr(gen, '_cpp_gen_self_struct', None)
         return bool(_self_struct
                     and isinstance(iterable.func.obj, gimple_ctypes.IdentExpr)
-                    and iterable.func.obj.name in ('self', 'cls')
-                    and (iterable.func.member in gen._all_generator_names
-                         # a method the stack-switch path already compiled
-                         # (`__mgco_<S>_<m>_start/_resume/_value/_destroy`: the same four
-                         # entry points) is driven exactly like a coroutine one
-                         or (_self_struct, iterable.func.member) in gen._generator_method_api))
+                    and iterable.func.obj.name == 'self'
+                    and iterable.func.member in gen._all_generator_names)
     return False
 
 
@@ -314,108 +309,6 @@ def _cpp_except_handler_body(gen, handler, caught_var: str, declared: dict,
     finally:
         gen._cpp_reraise_stack.pop()
     return lines
-
-
-_Y_SITE = re.compile(r'^(.*?)co_yield /\*Y:([^*]*)\*/ \((.*)\);$')
-
-
-def _cpp_word_of_kind(ctype: str, expr: str) -> str:
-    """`expr` (of scalar C++ type `ctype`) as ONE tagged int64_t word, the form
-    every consumer renders by the kind the box carries: a double as
-    `mojo_box_from_double`, a bool as `mojo_box_from_bool`, a string as
-    `mojo_box_from_str`, None as `mojo_box_none()`, and an int as itself. The
-    single mapping both a tagged yield slot (`_cpp_tag_yield_sites`) and a
-    tagged operand of `and`/`or` (`cpp_core._cpp_tagged_operand_word`) use."""
-    if ctype == 'None':
-        return "mojo_box_none()"
-    if ctype == 'double':
-        return f"mojo_box_from_double((double)({expr}))"
-    if ctype == '_Bool':
-        return f"mojo_box_from_bool((int64_t)({expr}))"
-    if ctype == 'char *':
-        # boxed by kind like the others: a raw pointer is only read as a
-        # string when the runtime registered it (a C++ literal is not)
-        return f"mojo_box_from_str((char *)({expr}))"
-    if ctype == 'MojoBytes *':
-        return f"(int64_t)(intptr_t)({expr})"
-    return f"(int64_t)({expr})"
-
-
-def _cpp_tag_yield_sites(body_lines: list):
-    """The body lines with every `co_yield /*Y:<ctype>*/ (<expr>);` site boxed
-    into one int64_t word by its marked ctype (a double as `mojo_box_from_double`,
-    a bool as `mojo_box_from_bool`, a string as `mojo_box_from_str`, an int as itself),
-    or None when the sites do not form a TAGGED value slot: fewer than two
-    different ctypes (a generator whose ONLY yields are None is the one
-    single-kind word: its box is `mojo_box_none()`, which the consumers render
-    as `None`), a ctype that is not one of the scalar kinds, or a yield with no
-    marker (a tuple / delegated / bare yield)."""
-    kinds = set()
-    out = []
-    for ln in body_lines:
-        if 'co_yield' not in ln:
-            out.append(ln)
-            continue
-        m = _Y_SITE.search(ln.strip())
-        if m is None:
-            return None
-        # group 1 is any `x = ` prefix a received yield put in front of the
-        # co_yield; it is kept, so the sent word still lands in `x`.
-        prefix = m.group(1)
-        ct = {'int': 'int64_t', 'dbl': 'double', 'str': 'char *',
-              'bool': '_Bool', 'bytes': 'MojoBytes *', 'none': 'None'}.get(m.group(2).strip())
-        if ct is None:
-            return None
-        kinds.add(ct)
-        indent = ln[:len(ln) - len(ln.lstrip())]
-        expr = m.group(3)
-        w = _cpp_word_of_kind(ct, expr)
-        out.append(f"{indent}{prefix}co_yield {w};")
-    if kinds == {'None'}:
-        return out
-    if len(kinds) < 2 or kinds == {'int64_t', '_Bool'}:
-        return None
-    return out
-
-
-def _delegates_first(stmts: list, generator_ids) -> list:
-    """`stmts` reordered so a generator that `yield from`s a SIBLING generator of
-    the same module comes after it (stable otherwise). The consumer-visible shape
-    of a delegating generator (its tuple slots) is the delegate's, and it is only
-    known once the delegate has been compiled: Lib/os.py defines `fwalk` BEFORE
-    the `_fwalk` it delegates to. Plain loops: this module is self-compiled."""
-    by_name = {}
-    for st in stmts:
-        if isinstance(st, FunctionDef) and id(st) in generator_ids:
-            by_name[st.name] = st
-    out = []
-    placed = set()
-    visiting = set()
-
-    def place(st):
-        if id(st) in placed or id(st) in visiting:
-            return
-        visiting.add(id(st))
-        for n in gimple_exprtypes._walk_own_body(st.body):
-            if (isinstance(n, gimple_ctypes.YieldFromExpr)
-                    and isinstance(n.value, gimple_ctypes.CallExpr)
-                    and isinstance(n.value.func, gimple_ctypes.IdentExpr)
-                    and n.value.func.name in by_name
-                    and n.value.func.name != st.name):
-                place(by_name[n.value.func.name])
-        visiting.discard(id(st))
-        if id(st) not in placed:
-            placed.add(id(st))
-            out.append(st)
-
-    for st in stmts:
-        if isinstance(st, FunctionDef) and id(st) in generator_ids:
-            place(st)
-        else:
-            if id(st) not in placed:
-                placed.add(id(st))
-                out.append(st)
-    return out
 
 
 def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
@@ -492,31 +385,6 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
                                       same existing convention)
       <base>_destroy(MojoGenerator*) -> void  (coroutine_handle::destroy())
     """
-    _has_sd = False
-    for _n in gimple_exprtypes._walk_ast(fn):
-        if gcc_._cpp_scandir_item(gen, _n) is not None:
-            _has_sd = True
-    if _has_sd:
-        fn = gcc_._cpp_lower_scandir_withs(gen, fn)   # `with scandir(..) as e` -> a real list of DirEntry handles
-    gen.func_return_types.setdefault('mojo_list_slice_word', 'MojoList *')
-    _saved_self_struct = getattr(gen, '_cpp_gen_self_struct', None)
-    gen._cpp_gen_self_struct = struct_name   # the delegatable-call test reads it
-    try:
-        fn = gcc_._cpp_drain_generator_args(gen, fn)   # `yield from sorted(G(..))` -> drain G first
-    finally:
-        gen._cpp_gen_self_struct = _saved_self_struct
-    if gcc_._cpp_needs_posix_idioms(gen, fn):
-        fn = gcc_._cpp_lower_posix_idioms(gen, fn)   # fd-relative posix calls -> runtime calls
-    gen._cpp_str_evidence_names = gimple_exprtypes._str_evidence_names(fn)
-    gen._cpp_object_params = set()   # parameters declared `object`: dynamic words
-    for _opn, _opa in (fn.params or []):
-        if _opa == 'object':
-            gen._cpp_object_params.add(gimple_ctypes._as_str(_opn))
-    gen._cpp_list_word_names = gimple_exprtypes._list_method_names(fn)
-    _opa = gcc_._cpp_collect_os_path_aliases(fn)
-    if _opa:
-        fn = gcc_._cpp_lower_os_path_aliases(fn, _opa)   # `join(a, b)` -> `os.path.join(a, b)`
-
     # Reset the tuple-yield side channel up front (see its own
     # docstring at __init__) so an early exception/refusal in THIS
     # compile attempt can never leave a PRIOR generator's leftover
@@ -659,7 +527,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
             # shape, so nothing can reach _cpp_expr's MemberExpr
             # "non-self member access" fallback (invalid C++ on a
             # scalar) or silently read the placeholder as a real value.
-            # See bugs/mid/CODEGEN_enum_runtime_class_creation.md's
+            # See bugs/CODEGEN_generator_function_Lib_enum.md's
             # 2026-08-21 update for the motivating Lib/enum.py
             # `Flag._iter_member_by_value_` shape (previously refused
             # unconditionally here — see the
@@ -707,26 +575,6 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
             param_ctypes.append((pn[1:], 'MojoList *'))
             continue
         ctype = gen._param_ctype(pn, pt, fn)
-        if (ctype == 'char *' and (pt is None or pt == '')
-                and pn in coro_mod._PTR_EVIDENCE.get(fn.name, ())
-                and any(isinstance(_n, gimple_ctypes.CallExpr)
-                        and isinstance(_n.func, gimple_ctypes.IdentExpr)
-                        and _n.func.name == 'isinstance' and len(_n.args) == 2
-                        and isinstance(_n.args[0], gimple_ctypes.IdentExpr)
-                        and _n.args[0].name == pn
-                        and isinstance(_n.args[1], gimple_ctypes.IdentExpr)
-                        and _n.args[1].name in ('str', 'bytes')
-                        for _n in gimple_exprtypes._walk_ast(fn))):
-            # a path word the body asks `isinstance(p, bytes)` of: it may be a
-            # str OR a bytes at run time, so it is the word, not a `char *`
-            ctype = 'int64_t'
-        if (ctype == 'int64_t' and (pt is None or pt == '')
-                and pn in gimple_exprtypes._list_method_params(fn)):
-            ctype = 'MojoList *'     # used as a list: its call sites just were not typed yet
-        if ctype == 'char *' and pn in gimple_exprtypes._tagged_word_params(fn):
-            # rebound from a heterogeneous `pop()`: the boxed word, not the
-            # call sites' string (see `_tagged_word_params`).
-            ctype = 'int64_t'
         # A struct pointer is an ordinary trivially-copyable C type —
         # the compiler-generated coroutine frame copies it into itself
         # by value exactly like any scalar/container parameter, zero
@@ -918,7 +766,6 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         _self_cts.append(_sct0)
     gen._cpp_gen_self_params = _self_cts
     gen._cpp_os_path_aliases = gcc_._cpp_collect_os_path_aliases(fn)
-    gen._cpp_tuple_guarded_yields = gimple_exprtypes._tuple_guarded_bare_yields(fn)
     # Set True by _cpp_yield_from the moment it actually emits a
     # self-recursive delegation call — read back (into a local,
     # BEFORE `finally` below) to decide whether `{base}_start`/
@@ -1010,9 +857,6 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     gen._cpp_list_local_elem_types = {}
     gen._cpp_word_locals = set()
     gen._cpp_word_iter_locals = set()
-    # Locals of this unit that hold a TAGGED word (a generator's boxed slot
-    # bound by a for loop or `x = next(g)`); see cpp_core._cpp_is_tagged_word_expr.
-    gen._cpp_tagged_word_names = set()
     gen._cpp_param_names = set(gimple_ctypes._as_str(_p[0]) for _p in (fn.params or []))
     gen._cpp_mixed_list_params = set(
         getattr(gen, '_param_elem_mixed', {}).get(fn.name, ()))
@@ -1067,7 +911,6 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     nested_helper_lines: list[str] = _cpp_compile_nested_sync_helpers(
         gen, fn, base, declared, self_fields, struct_name)
     gcc_._cpp_reset_unit_state(gen)
-    _tagged_yield = False
     try:
         body_lines: list[str] = []
         for s in fn.body:
@@ -1134,32 +977,6 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
             value_ctype = None
         gen._cpp_last_tuple_slot_ctypes = tuple_slot_ctypes if has_tuple_yield else None
         gen._cpp_last_mixed_slots = bool(getattr(gen, '_cpp_mixed_list_params', None) or getattr(gen, '_cpp_word_iter_locals', None))
-        # TAGGED-word value slot: the yields' kinds are all KNOWN but not one
-        # type (the solver cannot keep it tight), and the module only ever
-        # consumes this generator through `for` loops, which bind the value as a
-        # boxed word. Box each site by its marked ctype.
-        _tagged_yield = False
-        if ((value_ctype is None
-                or (value_ctype == 'char *'
-                    and any('/*Y:bytes*/' in _bl for _bl in body_lines))
-                or any('/*Y:none*/' in _bl for _bl in body_lines))
-                and not has_tuple_yield
-                and coro_mod._generator_value_kind(
-                    fn, coro_mod._static_env(fn, struct_def))[0] == 'w'):
-            # the stack-switch kind analysis (which also checks the consumers)
-            # must agree: every yield has a KNOWN kind -- the cpp typer alone
-            # reads an unresolved name as int64_t, which would tag a hole.
-            _tag_body = _cpp_tag_yield_sites(body_lines)
-            if _tag_body is not None:
-                body_lines = _tag_body
-                value_ctype = 'int64_t'
-                gen._cpp_last_mixed_slots = True
-                _tagged_yield = True
-        # Published for the registrar (module_gen._register_free_generator,
-        # and the nested-generator api below): a consumer of a TAGGED slot
-        # must render it as a box (see cpp_core._cpp_is_tagged_word_expr),
-        # and the api dict is the only record that crosses modules.
-        gen._cpp_last_tagged_yield = _tagged_yield
         func_decls = list(gen._cpp_func_scope_decls)
         self_recursed = gen._cpp_gen_self_recursed
         fwd_delegates = list(gen._cpp_fwd_gen_delegates)
@@ -1179,9 +996,6 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         gen._cpp_gen_self_base = None
         gen._cpp_gen_self_params = None
         gen._cpp_os_path_aliases = None
-        gen._cpp_str_evidence_names = None
-        gen._cpp_list_word_names = None
-        gen._cpp_tuple_guarded_yields = None
         gen._cpp_gen_self_recursed = None
         gen._cpp_fwd_gen_delegates = None
     # The cpp typer types a yield it cannot resolve as int64_t, and that
@@ -1190,26 +1004,10 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     # whose slot cannot hold it (bugs/CODEGEN_generator_yield_kind_rebound_
     # name_silent_wrong_value.md, Shape 2). Checked only when a slot was
     # decided at all: an undecided slot is refused below with its own message.
-    if value_ctype is not None and not _tagged_yield:
+    if value_ctype is not None:
         _slot_why = gimple_gen_coro.cpp_value_slot_refusal(fn, value_ctype, struct_def)
         if _slot_why is not None:
             raise gimple_exprtypes._UnsupportedGeneratorShape(f"{fn.name}: {_slot_why}")
-    # A None yield (bare `yield` / `yield None`) that did not become a tagged
-    # word has no slot this path can carry: its marked site would otherwise
-    # be written as a 0. A mixed-kind generator was boxed above (`_tagged_yield`),
-    # so this refuses only the lone-None shape. Runs after the body is lowered
-    # and covers every shape, not just a statement-level bare yield.
-    if (value_ctype is not None and not _tagged_yield and any(
-            coro_mod._is_none_yield(_n) for _n in coro_mod._walk(fn))):
-        raise gimple_exprtypes._UnsupportedGeneratorShape(
-            f"{fn.name}: {coro_mod.NONE_YIELD_CPP_REFUSAL}")
-    if value_ctype is not None:
-        # A SELF-recursive generator's own extern declaration was registered while
-        # its value type was still unknown (the placeholder int64_t); now that it
-        # is decided, make the module-level declaration agree with the definition.
-        _xr = getattr(gen, '_cpp_xmod_generator_refs', None)
-        if _xr is not None and base in _xr:
-            _xr[base]['value_ctype'] = value_ctype
     if value_ctype is None:
         raise gimple_exprtypes._UnsupportedGeneratorShape(
             f"{fn.name}: every `yield` must carry a value, and all "
@@ -1261,21 +1059,8 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         f"    using promise_type = {promise};",
         f"    {handle_t} h;",
         f"}};",
-        # `x = yield` reads the word `send()` delivered (see `{base}_send`
-        # below). The awaiter is what `co_yield` evaluates to: a plain
-        # `co_yield` discards it, `x = co_yield ...` takes the sent word.
-        # It holds a pointer to the promise's own slot, so no reference to
-        # the promise type is needed here.
-        f"struct {promise}_sent_await {{",
-        f"    int64_t *slot;",
-        f"    bool await_ready() noexcept {{ return false; }}",
-        f"    void await_suspend(std::coroutine_handle<>) noexcept {{}}",
-        f"    int64_t await_resume() noexcept {{ return *slot; }}",
-        f"}};",
         f"struct {promise} {{",
         f"    {cpp_value_ctype} current_value{{}};",
-        f"    int64_t sent_word{{}};",
-        f"    bool started{{}};",
         f"    {task} get_return_object() {{ return {task}{{ {handle_t}::from_promise(*this) }}; }}",
         f"    std::suspend_always initial_suspend() noexcept {{ return {{}}; }}",
         f"    std::suspend_always final_suspend() noexcept {{ return {{}}; }}",
@@ -1320,7 +1105,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         f"            mojo_exc_pending_set(1);",
         f"        }}",
         f"    }}",
-        f"    {promise}_sent_await yield_value({cpp_value_ctype} v) {{ current_value = v; return {{ &sent_word }}; }}",
+        f"    std::suspend_always yield_value({cpp_value_ctype} v) {{ current_value = v; return {{}}; }}",
         f"    void return_void() {{}}",
         f"}};",
         # Self-recursion (see `self_recursed`/_cpp_yield_from's own
@@ -1338,7 +1123,6 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         # generated .cpp text depends on absence of a forward decl.
         *([f"extern \"C\" MojoGenerator *{base}_start ({cpp_sig});",
            f"extern \"C\" {cpp_bool} {base}_resume (MojoGenerator *g);",
-           f"extern \"C\" {cpp_bool} {base}_send (MojoGenerator *g, int64_t word);",
            f"extern \"C\" {cpp_value_ctype} {base}_value (MojoGenerator *g);",
            f"extern \"C\" void {base}_destroy (MojoGenerator *g);"]
           if self_recursed else []),
@@ -1351,7 +1135,6 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         *([d for _fd in fwd_delegates
            for d in (f"extern \"C\" MojoGenerator *{_fd[0]}_start ({_fd[1]});",
                      f"extern \"C\" {cpp_bool} {_fd[0]}_resume (MojoGenerator *g);",
-                     f"extern \"C\" {cpp_bool} {_fd[0]}_send (MojoGenerator *g, int64_t word);",
                      f"extern \"C\" {_fd[2]} {_fd[0]}_value (MojoGenerator *g);",
                      f"extern \"C\" void {_fd[0]}_destroy (MojoGenerator *g);")]),
         # Value-carrying `return` channel (see the eligibility
@@ -1376,25 +1159,9 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         f"    {task} __task = {impl} ({call_args});",
         f"    return reinterpret_cast<MojoGenerator *>(__task.h.address());",
         f"}}",
-        # One resume implementation for both entries. `word` is what the
-        # suspended `x = yield` reads on the way back in: `{base}_resume`
-        # (next(), a for loop, yield from) delivers the None box, the same
-        # word those consumers always meant; `{base}_send` delivers the sent
-        # value. It is stored before the handle resumes, so it is in place
-        # when the coroutine continues past its `co_yield`.
-        f"static {cpp_bool} {base}_step (MojoGenerator *g, int64_t word) {{",
+        f'extern "C" {cpp_bool} {base}_resume (MojoGenerator *g) {{',
         f"    {handle_t} h = {handle_t}::from_address(reinterpret_cast<void *>(g));",
         f"    if (h.done()) return false;",
-        f"    if (!h.promise().started) {{",
-        f"        if (word != mojo_box_none()) {{",
-        f"            mojo_exc_type_set(348628165);",
-        f"            mojo_exc_msg_set((char *)\"can't send non-None value to a just-started generator\");",
-        f"            mojo_exc_pending_set(1);",
-        f"            return false;",
-        f"        }}",
-        f"        h.promise().started = true;",
-        f"    }}",
-        f"    h.promise().sent_word = word;",
         # Cleared right before resuming (not after — see
         # mojo_exc_pending_get's docstring in fire_runtime.h): this
         # resume call is the only thing that could set it again before
@@ -1413,12 +1180,6 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
         # return false to tell real exhaustion apart from this.
         f"    if (mojo_exc_pending_get()) return false;",
         f"    return !h.done();",
-        f"}}",
-        f'extern "C" {cpp_bool} {base}_resume (MojoGenerator *g) {{',
-        f"    return {base}_step(g, mojo_box_none());",
-        f"}}",
-        f'extern "C" {cpp_bool} {base}_send (MojoGenerator *g, int64_t word) {{',
-        f"    return {base}_step(g, word);",
         f"}}",
         f'extern "C" {cpp_value_ctype} {base}_value (MojoGenerator *g) {{',
         f"    {handle_t} h = {handle_t}::from_address(reinterpret_cast<void *>(g));",
@@ -1443,24 +1204,12 @@ _SIG_WORD_CTYPES = frozenset({'int64_t', '_Bool', 'int', 'char *',
                               'MojoList *', 'MojoDict *', 'MojoSet *'})
 
 
-def _cpp_sig_default_word(gen, dv, is_double: bool = False) -> str | None:
+def _cpp_sig_default_word(gen, dv) -> str | None:
     """C++ text of a parameter DEFAULT as an int64_t word, for a generator's
     runtime signature (`mojo_gen_sig_register`); None when the default is not
     one this can spell, which leaves the generator unregistered (calling it by
     value with keywords then raises a catchable TypeError rather than guessing).
     """
-    if is_double:
-        # The word is the double's bit pattern (`mojo_double_from_bits`).
-        if dv is None:
-            return '0'
-        _num = None
-        if isinstance(dv, gimple_ctypes.IntLiteral):
-            _num = float(dv.value)
-        elif isinstance(dv, gimple_ctypes.FloatLiteral):
-            _num = float(dv.value)
-        if _num is None:
-            return None
-        return f'mojo_double_to_bits({_num!r})'
     if dv is None:
         return '0'
     if isinstance(dv, gimple_ctypes.BoolLiteral):
@@ -1509,12 +1258,9 @@ def _cpp_generator_sig_lines(gen, fn, base, param_ctypes, cpp_value_ctype,
     its yielded value is read) with `mojo_gen_sig_register`, so a call through
     the generator's `_start` ADDRESS used as a value (`mojo_dyn_call`) can bind
     keywords by name and a `for` over the returned handle can drain it.
-    Emitted only for a plain free generator whose every default is spellable
-    and whose parameters are words or doubles. A double travels in a float
-    register, so the signature carries a per-parameter `is_double` mask and
-    `_gen_sig_call` passes the integer and floating-point words separately
-    (the two register files are assigned independently on both supported
-    ABIs); that bounds a unit at 6 integer and 8 double parameters."""
+    Emitted only for a plain free generator whose parameters are all words
+    (a double would travel in a float register, which a word-typed call cannot
+    reproduce) and whose every default is spellable."""
     if extra_captures or struct_name is not None or len(param_ctypes) > 8:
         return []
     _vk = {'int64_t': 0, '_Bool': 1, 'double': 2, 'char *': 3}.get(cpp_value_ctype)
@@ -1524,28 +1270,7 @@ def _cpp_generator_sig_lines(gen, fn, base, param_ctypes, cpp_value_ctype,
         else:
             return []
     _names = [gimple_ctypes._as_str(_pn) for _pn, _ in param_ctypes]
-    # A generator that yields a parameter declared `object` (a dynamic word:
-    # an escaping closure generator's caller-supplied argument) yields words
-    # whose kind - string or integer - only the run time knows.
-    _obj_params = set()
-    for _pn0, _pa0 in (fn.params or []):
-        if _pa0 == 'object':
-            _obj_params.add(gimple_ctypes._as_str(_pn0))
-    if _vk == 0 and _obj_params:
-        for _yn in gimple_exprtypes._walk_ast(fn.body):
-            if (isinstance(_yn, gimple_ctypes.YieldExpr)
-                    and isinstance(_yn.value, gimple_ctypes.IdentExpr)
-                    and _yn.value.name in _obj_params):
-                _vk = 5
-                break
-    # A struct pointer travels in an integer register like any word (an
-    # escaping method generator takes its receiver this way).
-    for _pn, _ct in param_ctypes:
-        if _ct not in _SIG_WORD_CTYPES and _ct != 'double' and not (
-                _ct.endswith(' *') and _ct[:-2] in gen.struct_field_types):
-            return []
-    _isd = ['1' if _ct == 'double' else '0' for _pn, _ct in param_ctypes]
-    if len(_isd) - _isd.count('1') > 6:
+    if any(_ct not in _SIG_WORD_CTYPES for _, _ct in param_ctypes):
         return []
     if any(_n.startswith('*') for _n in _names):
         return []
@@ -1561,7 +1286,7 @@ def _cpp_generator_sig_lines(gen, fn, base, param_ctypes, cpp_value_ctype,
     for _n in _names:
         _has_def = bool(fn.param_has_default.get(_n)) if getattr(fn, 'param_has_default', None) else (_n in _defs)
         if _has_def:
-            _w = _cpp_sig_default_word(gen, _defs.get(_n), _isd[len(_words)] == '1')
+            _w = _cpp_sig_default_word(gen, _defs.get(_n))
             if _w is None:
                 return []
         else:
@@ -1575,12 +1300,11 @@ def _cpp_generator_sig_lines(gen, fn, base, param_ctypes, cpp_value_ctype,
         f"    static const char *const _nm[] = {{ {_namelist} }};",
         f"    static int64_t _df[{max(_np, 1)}];",
         f"    static const unsigned char _hd[{max(_np, 1)}] = {{ {', '.join(_has) or '0'} }};",
-        f"    static const unsigned char _id[{max(_np, 1)}] = {{ {', '.join(_isd) or '0'} }};",
     ]
     for _i, _w in enumerate(_words):
         out.append(f"    _df[{_i}] = {_w};")
     out.append(f"    mojo_gen_sig_register((void *){base}_start, (void *){base}_resume, "
-               f"(void *){base}_value, (void *){base}_destroy, {_vk}, {_np}, _nm, {_fk}, _df, _hd, _id);")
+               f"(void *){base}_value, (void *){base}_destroy, {_vk}, {_np}, _nm, {_fk}, _df, _hd);")
     out.append("}")
     return out
 
@@ -1601,6 +1325,62 @@ _HELPER_FREE_BUILTINS = frozenset({
 })
 
 
+def _hbn_add_target(bound: set, t) -> None:
+    """Hoisted out of `_helper_bound_names` (was a recursive nested
+    closure) — the lifted-closure-env determinism fix. `bound` (set)
+    threaded and annotated.
+
+    Bound NAMES, not slots, so this is `for_target_names` (the shared leaf
+    walk) with the `*` stripped — the same shape
+    `mojo/middle/boundnames.py::_lbn_target_names` needs, and the same
+    reason: the previous private copy did a bare `s[1:-1].split(',')`, which
+    tore a nested target into paren-carrying fragments and — because it
+    recursed on the paren branch only — could not tell `'(a)'` from a
+    1-tuple `'(a,)'`."""
+    if isinstance(t, str):
+        for name in for_target_names(t):
+            if name:
+                bound.add(name.lstrip('*').strip())
+        return
+    if isinstance(t, gimple_ctypes.IdentExpr):
+        bound.add(t.name)
+        return
+    if isinstance(t, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
+        for e in t.elements:
+            _hbn_add_target(bound, e)
+
+
+def _binding_node_names(n) -> set:
+    """Names that ONE node of a helper's own body binds (see
+    `_helper_bound_names` for the full list of binding forms). Per-node so
+    a caller can count binding SITES, not just the set of names."""
+    bound: set = set()
+    if isinstance(n, gimple_ctypes.AssignStmt):
+        _hbn_add_target(bound, n.target)
+    elif isinstance(n, gimple_ctypes.AugAssignStmt):
+        _hbn_add_target(bound, n.target)
+    elif isinstance(n, gimple_ctypes.MultiAssignStmt):
+        for t in (n.targets or []):
+            _hbn_add_target(bound, t)
+    elif isinstance(n, gimple_ctypes.WalrusExpr):
+        bound.add(n.name)
+    elif isinstance(n, gimple_ctypes.ForStmt):
+        _hbn_add_target(bound, n.target)
+    elif isinstance(n, gimple_ctypes.VarDecl):
+        bound.add(n.name)
+    elif isinstance(n, gimple_ctypes.WithStmt):
+        for it in n.items:
+            if isinstance(it.alias, str):
+                bound.add(it.alias)
+            elif isinstance(it.alias, gimple_ctypes.IdentExpr):
+                bound.add(it.alias.name)
+    elif isinstance(n, gimple_ctypes.TryStmt):
+        for h in (n.handlers or []):
+            if getattr(h, 'name', None):
+                bound.add(h.name)
+    return bound
+
+
 def _helper_bound_names(body: list) -> set:
     """Names locally bound anywhere in `body` (a nested helper's own body,
     not crossing into deeper `def`s) — assignment / augmented-assignment /
@@ -1609,7 +1389,7 @@ def _helper_bound_names(body: list) -> set:
     captures."""
     bound: set = set()
     for n in gimple_exprtypes._walk_own_body(body):
-        bound |= gimple_exprtypes._binding_node_names(n)
+        bound |= _binding_node_names(n)
     return bound
 
 
@@ -1618,7 +1398,7 @@ def _binding_site_count(body: list, name: str) -> int:
     bind `name`. A parameter must have none, a local exactly its one `var`
     declaration; anything else is a rebinding."""
     return sum(1 for n in gimple_exprtypes._walk_own_body(body)
-               if name in gimple_exprtypes._binding_node_names(n))
+               if name in _binding_node_names(n))
 
 
 _FSTRING_FIELD_RE = re.compile(r"\{([^{}]*)\}")
@@ -1626,7 +1406,7 @@ _FSTRING_QUOTED_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
 _FSTRING_NAME_RE = re.compile(r"(?<![\w.])([A-Za-z_]\w*)")
 
 
-def _fstring_field_names(node_list: list) -> set[str]:
+def _fstring_field_names(node_list) -> set[str]:
     """Identifiers an f-string in `node_list` reads from its `{...}` fields.
 
     The parser keeps an f-string as one raw `StringLiteral` (see
@@ -1646,7 +1426,7 @@ def _fstring_field_names(node_list: list) -> set[str]:
     return out
 
 
-def _nested_generator_captures(stmts: list) -> dict[int, list[str]]:
+def _nested_generator_captures(stmts) -> dict[int, list[str]]:
     """Map `id(g)` -> the sorted enclosing-scope names a NESTED generator
     `g` reads, for every generator `g` that is defined inside another `def`
     in `stmts` and reads a parameter or local of that enclosing `def`.
@@ -1726,19 +1506,12 @@ def _compile_nested_generator_closures(gen, outer_fn: gimple_ctypes.FunctionDef,
     `_gen_cpp_generator_unit` already gives:
       * the generator is a DIRECT top-level statement of `outer_fn` (the same
         scope `_compile_nested_async_functions` walks), not a method, and it
-        is only ever CALLED by name from `outer_fn` (`_only_directly_called`).
-        A generator RETURNED from `outer_fn` (the escaping shape) no longer
-        reaches this claim: `mojo/middle/coro.py`'s `_lower_escaping_
-        generators` moves it to module level before the backend runs, leaving
-        a variadic trampoline the ordinary nested-closure mechanism compiles;
-        the escapes that path leaves alone (a nonlocal write, a rebound
-        capture) keep the honest refusal from the generic pass below;
+        is only ever CALLED by name from `outer_fn` (`_only_directly_called`);
+        a generator returned or stored as a value is refused;
       * every enclosing name it reads is one `_compute_nested_closure_
         captures` resolves against `outer_fn`'s params and top-level locals
         (`_enclosing_scope_with_locals`) -- a read of anything else is not
-        claimed; that resolver seeds only scalar parameters and locals
-        (int64_t/double/_Bool), so a char * capture is not threaded yet and
-        keeps the honest refusal;
+        claimed;
       * no captured name is REBOUND in `outer_fn`'s own body: a parameter
         has no binding site and a local has exactly its one `var`
         declaration. Python reads an enclosing name at each resume, so a
@@ -1801,14 +1574,13 @@ def _compile_nested_generator_closures(gen, outer_fn: gimple_ctypes.FunctionDef,
             'base': base, 'value_ctype': value_ctype,
             'params': param_ctypes, 'captures': caps,
             'nested_name': inner.name,
-            'tagged': gen._cpp_last_tagged_yield,
         }
         gen.func_param_types[f"{base}_start"] = param_ctypes
         gen._generator_cpp_units.append(cpp_text)
         generator_fns.pop(id(inner), None)
 
 
-def _nested_generator_sibling_defs(stmts: list) -> dict[int, list]:
+def _nested_generator_sibling_defs(stmts) -> dict[int, list]:
     """Map `id(g)` -> the `def`s that sit beside a NESTED generator `g` in
     the enclosing `def`'s own body (`g`'s siblings, excluding `g` itself),
     for every generator `g` defined inside another `def` in `stmts`.
@@ -2342,18 +2114,7 @@ def _enclosing_scope_with_locals(gen, outer_fn: gimple_ctypes.FunctionDef) -> di
     scope: dict = {}
     for pname, ptype in (outer_fn.params or []):
         pname = pname.lstrip('*')
-        # THE SAME resolver the enclosing function's own C signature uses
-        # (_gen_cpp_generator_unit's own param loop calls it per param):
-        # an annotated param resolves through _resolve_type, an
-        # unannotated one through the usage inference and then the
-        # whole-module call-site-kind scan. Using it here keeps the
-        # capture's declared ctype and the enclosing param's real C ctype
-        # in agreement by construction — a second, independent guess is
-        # exactly how this method's earlier drafts disagreed with the real
-        # declaration. `_param_ctype` is a module function
-        # (mojo/middle/funcs_shared.py) exposed on the generator, so call
-        # it as a method.
-        ctype = gen._param_ctype(pname, ptype, outer_fn)
+        ctype = gen._resolve_type(ptype) if ptype is not None else None
         if ctype in ('int64_t', 'int', 'double', '_Bool'):
             scope[pname] = ctype
     widened = gen._inferred_var_types.get(outer_fn.name, {})
@@ -2848,7 +2609,6 @@ def _gen_cpp_async_unit(gen, fn: gimple_ctypes.FunctionDef, extra_captures: list
         # (parameter-less) kind.
         f"    _MojoCppExc exc{{}};",
         f"    bool exc_pending{{}};",
-        f"    bool started{{}};",
         # Type-erased (not `{handle_t}`): the coroutine AWAITING this
         # one may be an entirely different async function with its own
         # distinct promise type (e.g. `outer`'s promise stores a
@@ -3824,7 +3584,6 @@ def _gen_cpp_async_generator_unit(gen, fn: gimple_ctypes.FunctionDef) -> tuple[s
         f"    {cpp_value_ctype} current_value{{}};",
         f"    _MojoCppExc exc{{}};",
         f"    bool exc_pending{{}};",
-        f"    bool started{{}};",
         f"    std::coroutine_handle<> continuation{{}};",
         f"    {task} get_return_object() {{ return {task}{{ {handle_t}::from_promise(*this) }}; }}",
         f"    std::suspend_always initial_suspend() noexcept {{ return {{}}; }}",

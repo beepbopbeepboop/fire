@@ -1812,7 +1812,7 @@ def recognised_gemm_names(stmts: list) -> set:
     return names
 
 
-def _unfuse(stmts: list, lengths_sink, grids_sink):
+def _unfuse(stmts, lengths_sink, grids_sink):
     """Redo the module with fusion OFF.
 
     Reached when the fusion pass rewrote no loop even though the trip count

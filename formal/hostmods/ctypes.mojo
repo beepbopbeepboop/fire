@@ -49,7 +49,7 @@ WHAT IS NOT HERE, AND WHY
     a compiler-generated descriptor table; the formal front end's
     `dataclass_transform` is the only thing that turns a class declaration into
     fields, and it refuses a base class it does not know
-    (`bugs/hard/COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md`
+    (`bugs/COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md`
     is the same refusal seen from the other side).  What IS here is the SIZE and
     ALIGNMENT arithmetic such a struct needs, as functions over its field list,
     because that half is pure and the half that is not is the subclass.
@@ -135,7 +135,7 @@ def size_c_bool() -> int:
     C type is NARROWER than a value on this path.  That is not a problem here
     because nothing crossing a dylib boundary is a `c_bool`: `c_bool` is a field
     of a struct, and a struct is a frame blob
-    (`bugs/formal/FORMAL_module_state_no_storage.md`).
+    (`bugs/FORMAL_module_state_no_storage.md`).
     """
     return 1
 
@@ -276,7 +276,7 @@ def create_zeroed_buffer(size: int) -> str:
 def string_at(pointer: str) -> str:
     """`ctypes.string_at(addr)`: the NUL-terminated string AT an address.
 
-    Dereferences, which is the operation `bugs/formal/FORMAL_string_value_model.md`
+    Dereferences, which is the operation `bugs/FORMAL_string_value_model.md`
     describes: a string on this path is a bare `char *` into a read-only text
     section, and reading the bytes at an arbitrary word is a fact about the
     address rather than about the value.  It is real rather than admitted
