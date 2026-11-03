@@ -5972,7 +5972,8 @@ def test_the_formal_sweep_series_is_one_document_with_an_index_of_its_rounds():
 
     if not maps:
         return
-    index = open(os.path.join(HERE, 'bugs', canonical), encoding='utf-8').read()
+    index = open(os.path.join(HERE, 'bugs', 'formal', canonical),
+                 encoding='utf-8').read()
     # The tags §3 declares, read out of the index's own first column rather than
     # hand-listed here: a hand-maintained copy of an index is a second copy.
     tags = set()
@@ -5986,7 +5987,8 @@ def test_the_formal_sweep_series_is_one_document_with_an_index_of_its_rounds():
                                 recursive=True)) + \
             sorted(glob.glob(os.path.join(HERE, '**', '*.md'),
                              recursive=True)):
-        if not os.path.isfile(rel) or rel.endswith(os.path.join('bugs', canonical)):
+        if not os.path.isfile(rel) or rel.endswith(
+                os.path.join('bugs', 'formal', canonical)):
             continue
         if 'build/' in rel or '__pycache__' in rel:
             continue
