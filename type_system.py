@@ -242,12 +242,14 @@ Example fix:
         """Infer result type of binary operation"""
         # Arithmetic operations
         if op in ('+', '-', '*', '/'):
+            # double + double → double. Must be tested before the 64-bit
+            # branch: is_64bit() is true for double, so the int64 branch
+            # would otherwise swallow it and report int64_t.
+            if left.base == 'double' and right.base == 'double':
+                return Type(base='double', bit_width=64, origin=TypeOrigin.INFERRED)
             # int64_t + int64_t → int64_t
             if left.is_64bit() and right.is_64bit():
                 return Type(base='int64_t', bit_width=64, origin=TypeOrigin.INFERRED)
-            # double + double → double
-            if left.base == 'double' and right.base == 'double':
-                return Type(base='double', bit_width=64, origin=TypeOrigin.INFERRED)
 
         # Comparison operations → bool
         if op in ('<', '>', '==', '!=', '<=', '>='):
@@ -286,7 +288,7 @@ Argument {arg_index} of {func_name}():
 Cannot pass opaque pointer {arg_type} to parameter expecting {param_type}
 
 Opaque pointers (int64_t used to store pointer values) must be explicitly
-converted back to their proper pointer type before use.
+cast back to their proper pointer type before use.
 
 Generated code should include:
   _t_temp = ({param_type.base})(_t_arg_value);

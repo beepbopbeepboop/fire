@@ -1,158 +1,52 @@
 #!/usr/bin/env python3
-"""Test DispatchSolver Phase C: GimpleGen integration and dispatch table emission."""
+"""DispatchSolver phase C: GimpleGen integration and dispatch table emission.
+
+Phase C plans dispatch tables in `gen_module` and emits them into the generated
+C. `mojo/backend_gimple/module_gen.py` solves dispatch for ordinary programs
+only: for this compiler's OWN sources (`_is_selfhost_file`) it skips the solve
+entirely, because the python3 reference and the self-hosted binary would
+otherwise emit different tables (a stage1-vs-stage2 divergence). So this file
+pins both halves of that policy:
+
+  * an ordinary program gets its dispatch table planned, emitted, and ordered
+    before the functions that call through it;
+  * a self-host source gets no solver run and no table, even for a pattern
+    that would be planned for an ordinary program.
+
+Both are checked on the same source text, so the only variable is the path
+the compile claims to come from.
+"""
 
 import gimple_codegen
 from fire_compiler import py_tokenize, Parser
 from gimple_codegen import GimpleGen
 
 
-def _make_selfhost_gen(**kwargs) -> GimpleGen:
-    """Construct a GimpleGen configured as if compiling one of this
-    repo's own self-hosting source files.
+# A path that is not one of this compiler's own sources, so dispatch is solved.
+ORDINARY_PATH = '/not-the-compiler/user_program.py'
+# A path that IS one of this compiler's own sources, so dispatch is skipped.
+SELFHOST_PATH = gimple_codegen.__file__
 
-    This module's `myinterp_test`/`multi_pattern_test` sources are
-    deliberate, self-contained repros of THIS COMPILER'S OWN self-hosted
-    `Interpreter.execute`-style getattr-as-vtable-dispatch idiom (see the
-    module docstring below) — exactly the pattern
-    `DispatchSolver.allow_assume_all_methods` exists to recognize
-    (gimple_codegen.py, gated to self-hosting compiles only since commit
-    02b14c5's fix, to avoid misfiring on ordinary `getattr(self, attr)`
-    delegation elsewhere — see bugs/hard/CODEGEN_selfhost_getattr_
-    dispatch_heuristic_misfires_on_ordinary_code.md). `gen_module`'s
-    `_is_selfhost_file` gate is path-based (is `self._current_filename`
-    physically under this repo's own source directory?), so we opt in
-    explicitly here the same way a real self-hosting compile would,
-    rather than widening the production gate to cover non-self-host
-    callers too.
-    """
-    gen = GimpleGen(**kwargs)
-    gen._current_filename = gimple_codegen.__file__
-    return gen
-
-
-# Test case: myinterpreter pattern
-myinterp_test = """
-class Interpreter:
-    def execute(self, node):
-        method_name = f'execute_{type(node).__name__}'
-        method = getattr(self, method_name, None)
-        if method is None:
-            return 0
-        return method(node)
-
-    def execute_Module(self, node):
-        return 1
-
-    def execute_FunctionDef(self, node):
-        return 2
-
-    def execute_StructDef(self, node):
-        return 3
-"""
-
-
-def test_dispatch_table_emission_in_codegen():
-    """Test that dispatch tables are emitted in generated C code."""
-    print("Test 1: Dispatch table emission in GimpleGen...")
-
-    tokens = py_tokenize(myinterp_test)
-    stmts = Parser(tokens).parse_module()
-
-    # Generate GIMPLE code with dispatch solver enabled
-    gen = _make_selfhost_gen(do_imports=False, emit_str_pool=True, emit_struct_defs=True)
-    gimple_code = gen.gen_module(stmts)
-
-    print(f"  Generated code length: {len(gimple_code)} bytes")
-
-    # Verify dispatch solver was run
-    assert gen._dispatch_solver is not None, "DispatchSolver should have been instantiated"
-    print("  ✓ DispatchSolver instantiated")
-
-    # Verify dispatch tables were planned
-    assert len(gen._dispatch_tables) > 0, "Should have planned dispatch tables"
-    print(f"  ✓ Dispatch tables planned: {len(gen._dispatch_tables)}")
-
-    # Verify typedef appears in generated code
-    assert 'interpreter_execute_dispatch_t' in gimple_code, "Should have dispatch table typedef"
-    print("  ✓ Dispatch table typedef emitted")
-
-    # Verify initialization appears in generated code
-    assert 'interpreter_execute_dispatch' in gimple_code, "Should have dispatch table initialization"
-    print("  ✓ Dispatch table initialization emitted")
-
-    # Verify it's after struct definitions but before functions
-    typedef_pos = gimple_code.find('interpreter_execute_dispatch_t')
-    init_pos = gimple_code.find('static const interpreter_execute_dispatch_t')
-    main_pos = gimple_code.find('__GIMPLE')
-
-    assert typedef_pos < init_pos < main_pos, "Order should be: typedef, init, functions"
-    print("  ✓ Dispatch table definitions in correct order")
-
-    print("\n  Sample generated dispatch table code:")
-    # Find and print the dispatch table typedef
-    start = gimple_code.find('typedef struct')
-    if 'interpreter_execute' in gimple_code[start:start+500]:
-        end = gimple_code.find('};', start) + 2
-        sample = gimple_code[start:end]
-        for line in sample.split('\n')[:8]:
-            print(f"    {line}")
-        print("    ...")
-
-
-def test_dispatch_table_structure():
-    """Test that emitted dispatch tables have correct structure."""
-    print("\nTest 2: Dispatch table structure validation...")
-
-    tokens = py_tokenize(myinterp_test)
-    stmts = Parser(tokens).parse_module()
-
-    gen = _make_selfhost_gen()
-    gimple_code = gen.gen_module(stmts)
-
-    # Extract typedef section
-    typedef_start = gimple_code.find('typedef struct')
-    typedef_end = gimple_code.find('};', typedef_start)
-    typedef_section = gimple_code[typedef_start:typedef_end+2]
-
-    print("  Checking typedef structure...")
-
-    # Should have function pointers for each method
-    assert 'execute_Module' in typedef_section, "Should have execute_Module method"
-    assert 'execute_FunctionDef' in typedef_section, "Should have execute_FunctionDef method"
-    assert 'execute_StructDef' in typedef_section, "Should have execute_StructDef method"
-    print("  ✓ All methods present in typedef")
-
-    # Should have function pointer syntax
-    assert '(*' in typedef_section, "Should have function pointer syntax"
-    # Parameters can be typed (Interpreter *self, int node) or generic (void *self, void *node)
-    assert '*self' in typedef_section, "Should have self parameter"
-    print("  ✓ Function pointer syntax correct")
-
-    # Extract init section
-    init_start = gimple_code.find('static const interpreter_execute_dispatch_t')
-    init_end = gimple_code.find('};', init_start)
-    init_section = gimple_code[init_start:init_end+2]
-
-    print("  Checking initialization structure...")
-
-    # Should initialize each method
-    assert '.execute_Module' in init_section, "Should initialize execute_Module"
-    assert 'Interpreter_execute_Module' in init_section, "Should reference execute_Module implementation"
-    print("  ✓ Initialization assigns correct function pointers")
-
-    print("\n  Sample dispatch table typedef:")
-    for line in typedef_section.split('\n')[:10]:
-        print(f"    {line}")
-
-
-def test_multiple_dispatch_patterns():
-    """Test handling multiple dispatch patterns."""
-    print("\nTest 3: Multiple dispatch patterns...")
-
-    multi_pattern_test = """
+# A getattr-as-vtable dispatch with a concatenated name: the shape the solver
+# recognises for ordinary code (`_infer_getattr_targets` on `'prefix' + x`).
+DISPATCHER = """
 class Dispatcher:
     def dispatch_stmt(self, stmt):
-        method = getattr(self, f'stmt_{stmt.__class__.__name__}', None)
+        method = getattr(self, 'stmt_' + stmt.kind, None)
+        return method(stmt) if method else 0
+
+    def stmt_If(self, stmt):
+        return 1
+
+    def stmt_While(self, stmt):
+        return 2
+"""
+
+# Two dispatch families in one class: each gets its own table.
+TWO_FAMILIES = """
+class Dispatcher:
+    def dispatch_stmt(self, stmt):
+        method = getattr(self, 'stmt_' + stmt.kind, None)
         return method(stmt) if method else 0
 
     def stmt_If(self, stmt):
@@ -162,7 +56,7 @@ class Dispatcher:
         return 2
 
     def dispatch_expr(self, expr):
-        method = getattr(self, f'expr_{expr.__class__.__name__}', None)
+        method = getattr(self, 'expr_' + expr.kind, None)
         return method(expr) if method else 0
 
     def expr_BinOp(self, expr):
@@ -172,95 +66,94 @@ class Dispatcher:
         return 4
 """
 
-    tokens = py_tokenize(multi_pattern_test)
-    stmts = Parser(tokens).parse_module()
 
-    gen = _make_selfhost_gen()
-    gimple_code = gen.gen_module(stmts)
-
-    # Should have detected multiple patterns
-    assert len(gen._dispatch_tables) >= 1, "Should have planned dispatch tables"
-    print(f"  ✓ Found {len(gen._dispatch_tables)} dispatch pattern(s)")
-
-    # Both dispatch patterns might be merged or separate
-    # Check that code contains evidence of both stmt_ and expr_ methods
-    assert 'stmt_If' in gimple_code or 'Dispatcher_stmt_If' in gimple_code, "Should have stmt methods"
-    assert 'expr_BinOp' in gimple_code or 'Dispatcher_expr_BinOp' in gimple_code, "Should have expr methods"
-    print("  ✓ Both dispatch pattern families recognized")
+def _gen(path: str, source: str):
+    """Compile `source` as if it were the file at `path`; return (gen, C code)."""
+    gen = GimpleGen(do_imports=False, emit_str_pool=True, emit_struct_defs=True)
+    gen._current_filename = path
+    stmts = Parser(py_tokenize(source)).parse_module()
+    return gen, gen.gen_module(stmts)
 
 
-def test_gimple_syntax_validity():
-    """Test that generated dispatch table code is valid C syntax."""
-    print("\nTest 4: Generated C syntax validity...")
-
-    tokens = py_tokenize(myinterp_test)
-    stmts = Parser(tokens).parse_module()
-
-    gen = _make_selfhost_gen()
-    gimple_code = gen.gen_module(stmts)
-
-    # Check basic syntax elements
-    print("  Checking C syntax elements...")
-
-    # Should have proper typedef syntax
-    assert 'typedef struct' in gimple_code, "Should have struct typedef"
-    assert '};' in gimple_code, "Should have closing typedef"
-    print("  ✓ Typedef syntax valid")
-
-    # Should have static const
-    assert 'static const' in gimple_code, "Should have static const initializer"
-    print("  ✓ Static const initializer present")
-
-    # Should have balanced braces/parens in dispatch tables
-    typedef_start = gimple_code.find('typedef')
-    func_start = gimple_code.find('__GIMPLE')
-    dispatch_section = gimple_code[typedef_start:func_start]
-
-    open_braces = dispatch_section.count('{')
-    close_braces = dispatch_section.count('}')
-    assert open_braces == close_braces, "Braces should be balanced"
-    print("  ✓ Braces balanced")
-
-    # Should have at least one dispatch table
-    assert 'dispatch' in gimple_code.lower(), "Should contain dispatch table"
-    print("  ✓ Dispatch table present in output")
+def _init_target(code: str, field: str) -> str | None:
+    """The C function the dispatch initialiser binds `.field` to, or None."""
+    for line in code.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(f'.{field} = '):
+            # `.field = (int64_t (*)(...))Target,` -> `Target`
+            return stripped.rsplit(')', 1)[-1].rstrip(',')
+    return None
 
 
-def test_dispatch_tables_before_functions():
-    """Test that dispatch tables are emitted before __GIMPLE functions."""
-    print("\nTest 5: Dispatch tables positioned before functions...")
+def test_ordinary_program_plans_and_emits_dispatch_table():
+    """An ordinary program's table is planned, emitted, and ordered correctly."""
+    print("Test 1: ordinary program dispatch table...")
+    gen, code = _gen(ORDINARY_PATH, DISPATCHER)
 
-    tokens = py_tokenize(myinterp_test)
-    stmts = Parser(tokens).parse_module()
+    assert gen._dispatch_solver is not None, "DispatchSolver should have run"
+    assert len(gen._dispatch_tables) == 1, f"expected 1 table, got {len(gen._dispatch_tables)}"
+    (callees,) = gen._dispatch_tables.keys()
+    assert callees == frozenset({'Dispatcher_stmt_If', 'Dispatcher_stmt_While'}), callees
+    print("  ✓ table planned for both stmt_ methods")
 
-    gen = _make_selfhost_gen()
-    gimple_code = gen.gen_module(stmts)
+    typedef = 'dispatcher_stmt_dispatch_t'
+    init = 'static const dispatcher_stmt_dispatch_t dispatcher_stmt_dispatch'
+    assert f'}} {typedef};' in code, "typedef should be emitted"
+    assert init in code, "initialiser should be emitted"
+    assert _init_target(code, 'stmt_If') == 'Dispatcher_stmt_If', "initialiser should bind the If method"
+    assert _init_target(code, 'stmt_While') == 'Dispatcher_stmt_While', "initialiser should bind the While method"
+    print("  ✓ typedef and initialiser emitted")
 
-    # Find positions
-    typedef_pos = gimple_code.find('typedef struct')
-    init_pos = gimple_code.find('static const')
-    gimple_pos = gimple_code.find('__GIMPLE')
+    typedef_pos = code.find(f'}} {typedef};')
+    init_pos = code.find(init)
+    func_pos = code.find('__GIMPLE Dispatcher_dispatch_stmt')
+    assert 0 <= typedef_pos < init_pos < func_pos, "order should be typedef, init, functions"
+    print("  ✓ typedef, initialiser, then functions")
 
-    print(f"  Typedef position: {typedef_pos}")
-    print(f"  Initialization position: {init_pos}")
-    print(f"  First __GIMPLE position: {gimple_pos}")
 
-    if typedef_pos >= 0 and gimple_pos >= 0:
-        assert typedef_pos < gimple_pos, "Typedef should come before __GIMPLE functions"
-        print("  ✓ Typedef before functions")
+def test_dispatch_section_is_well_formed_c():
+    """The emitted dispatch section has balanced braces and a typedef on each table."""
+    print("Test 2: dispatch section is well-formed C...")
+    _, code = _gen(ORDINARY_PATH, DISPATCHER)
 
-    if init_pos >= 0 and gimple_pos >= 0:
-        assert init_pos < gimple_pos, "Initialization should come before __GIMPLE functions"
-        print("  ✓ Initialization before functions")
+    start = code.find('typedef struct')
+    end = code.find('__GIMPLE')
+    assert start >= 0 and end > start, "typedef struct should precede the functions"
+    section = code[start:end]
+    assert section.count('{') == section.count('}'), "braces should balance"
+    assert 'dispatcher_stmt_dispatch' in section, "table should be in that section"
+    print("  ✓ braces balanced and table present")
+
+
+def test_two_families_get_two_tables():
+    """Two independent dispatch families each produce their own table."""
+    print("Test 3: two dispatch families...")
+    gen, code = _gen(ORDINARY_PATH, TWO_FAMILIES)
+
+    assert len(gen._dispatch_tables) == 2, f"expected 2 tables, got {len(gen._dispatch_tables)}"
+    assert _init_target(code, 'stmt_If') == 'Dispatcher_stmt_If', "stmt family should be emitted"
+    assert _init_target(code, 'expr_BinOp') == 'Dispatcher_expr_BinOp', "expr family should be emitted"
+    print("  ✓ both families planned and emitted")
+
+
+def test_selfhost_source_plans_no_dispatch():
+    """A self-host source skips dispatch solving, even for a pattern that is
+    planned for an ordinary program (see the module docstring)."""
+    print("Test 4: self-host source skips dispatch...")
+    gen, code = _gen(SELFHOST_PATH, DISPATCHER)
+
+    assert gen._dispatch_solver is None, "DispatchSolver must not run on a self-host source"
+    assert gen._dispatch_tables == {}, "no table may be planned on a self-host source"
+    assert 'dispatcher_stmt_dispatch_t' not in code, "no dispatch typedef on a self-host source"
+    print("  ✓ solver skipped, no table, no typedef")
 
 
 if __name__ == '__main__':
     try:
-        test_dispatch_table_emission_in_codegen()
-        test_dispatch_table_structure()
-        test_multiple_dispatch_patterns()
-        test_gimple_syntax_validity()
-        test_dispatch_tables_before_functions()
+        test_ordinary_program_plans_and_emits_dispatch_table()
+        test_dispatch_section_is_well_formed_c()
+        test_two_families_get_two_tables()
+        test_selfhost_source_plans_no_dispatch()
         print("\n✓ All Phase C tests passed!")
     except Exception as e:
         print(f"\n✗ Test failed: {e}")

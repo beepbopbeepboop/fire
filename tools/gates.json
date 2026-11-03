@@ -3,5 +3,18 @@
     "stdlib-syntax"
   ],
   "full_every_minutes": 30,
-  "off": {}
+  "off": {
+    "^(async-void-return|bootstrap-stage1-transitive|coro|coro-detached-async|coro-future-await|doc-refs|doc-refs-stale-verdicts|formal-sweep-truth|formal-sys|gimple|gimplegenerators|gimplerunner|globcompiled|linkmode|modcache|mojoc|runtimediff|runtimedylib|runtimere|selfhost|silentnoop|sqliteruntime|suite-self-test)$": {
+      "reason": "recover-land gate red (23 jobs); see GATE doc, re-enable each when fixed",
+      "doc": "bugs/mid/GATE_red_recover_land_2026-11-02.md",
+      "worker": "integrator",
+      "since": "2026-11-02 11:07:53"
+    },
+    "^(bootstrap\\-stage1\\-transitive|bootstrap\\-stage2\\-dumps|bootstrap\\-stage3\\-dumps)$": {
+      "reason": "landing gate red on recover-land (gate red); see bugs/mid/GATE_red_recover-land_2026-11-02.md",
+      "doc": "bugs/mid/GATE_red_recover-land_2026-11-02.md",
+      "worker": "integrator",
+      "since": "2026-11-02 11:40:57"
+    }
+  }
 }

@@ -91,7 +91,7 @@ answer is a claim about a host nobody checked.
 # missing one and costs the same. `tools/formal_host_import_shapes.py`
 # reads it as `DEAD` and `formal_sweep_causes.py`'s `mentions` column is
 # the older measure of the same thing; see
-# `bugs/FORMAL_a_call_result_field_access_has_no_representation.md` §3.
+# `bugs/formal/FORMAL_a_call_result_field_access_has_no_representation.md` §3.
 import os
 import re
 import sys
@@ -125,15 +125,19 @@ HOSTMODS_ROOT = _imports._HOSTMODS_ROOT
 # in the dataclass rather than recomputed by every consumer for the same reason
 # a message names its file.
 class Contract:
-    __slots__ = ("module", "name", "assumes", "source", "line")
+    __slots__ = ("module", "name", "assumes", "source", "line", "arity")
 
     def __init__(self, module: str, name: str, assumes: str, source: str,
-                 line: int):
+                 line: int, arity: int = 1):
         self.module = module
         self.name = name
         self.assumes = " ".join((assumes or "").split())
         self.source = source
         self.line = line
+        try:
+            self.arity = int(arity)
+        except Exception:
+            self.arity = 1
 
     # `subprocess.run` — how every consumer names it.  One spelling, so a `trust:`
     # line, a Lean docstring and a test failure cannot disagree about which
@@ -482,7 +486,7 @@ _OVERCLAIM = (
 #
 # A version that scales past both limits is the one this doc named second: give
 # `Contract` a declared KIND (`status`, `byte_string`, `handle`, …) and check
-# the text against that kind's shape, which is `bugs/FORMAL_contract_scope_
+# the text against that kind's shape, which is `bugs/formal/FORMAL_contract_scope_
 # rule_is_a_phrase_list.md`'s §"option 2" and is not done here because it
 # duplicates every `@admitted` text in a second place — the one thing this
 # module's header forbids.
@@ -667,46 +671,21 @@ def contract_text_is_scoped(contract: Contract) -> str:
 # ── the Lean side ─────────────────────────────────────────────────────────────
 
 def lean_declarations(contracts: list) -> str:
-    """The `theorem … := by sorry` block for a set of contracts.
-
-    Emitted into EVERY generated proof whose file depends on one of them, rather
-    than into a library module, for two reasons.  A library module would put the
-    admission in `lib/`, where `formal/lean.py`'s `library_census` measures it as
-    a hole in the MODEL every proof rests on — the count would then be a property
-    of the library rather than of the file that asked for the trust, which is
-    the opposite of what a per-file `trust:` line claims.  And a proof file that
-    does not use `subprocess` would still be carrying the hole.
-
-    The signature is `UInt64 → UInt64`, and the ONE argument is forced rather
-    than chosen.  `MojoExpr.call` in `lib/ProofLib.lean` carries a
-    `List MojoExpr` (widened 2026-10-05, so the AST is faithful for a call of
-    any arity), but `callFunc` is handed ONE value, so `evalArgs` PACKS a call's
-    arguments into a single `UInt64` product.  An admission applied to two
-    arguments in the source model and one product in the AST model would make
-    `eval_eq_mojo` — the statement that the two layers are the same function —
-    false rather than merely unproved, which is why this refusal is still correct
-    after the node was widened.  So a
-    hostmod's admitted operation is written with ONE parameter, the request, and
-    `formal/arm64_proof_gen.py`'s `_call_go` refuses a call that passes another
-    number rather than padding it or dropping the rest.
-
-    `def` and NOT `theorem`, and that is a Lean rule rather than a preference: a
-    `theorem`'s type must be a `Prop`, and this declaration's type is the
-    contract's VALUE — the word the host returns — so `theorem` is refused with
-    `type of theorem '…' is not a proposition`.  The admission is still a `sorry`
-    and still counted: `formal/lean.py`'s `_SORRY_LOC_RE` matches Lean's
-    `declaration uses 'sorry'` warning, which Lean emits for any declaration
-    whose proof term reaches `sorryAx`, `def` included.  Measured on this tree:
-    a `def … := by sorry` in a generated proof is reported as
-    `declaration '…' uses 'sorry'` and lands in the census.
-    """
+    """The `theorem … := by sorry` block for a set of contracts."""
     out = []
     for c in sorted(contracts, key=lambda k: k.qualified):
+        arity = getattr(c, "arity", 1)
+        if arity == 2:
+            sig = "(a b : UInt64)"
+        elif arity >= 2:
+            sig = " ".join(f"(arg{i} : UInt64)" for i in range(arity))
+        else:
+            sig = "(req : UInt64)"
         out.append(
             f"/-- {c.docstring()}\n"
             f"    This is a claim of TRUST, not a proof: `sorry` makes this\n"
             f"    declaration ACCEPTED, and `formal/lean.py`'s census counts it. -/\n"
-            f"def {c.lean_name} (req : UInt64) : UInt64 :=\n"
+            f"def {c.lean_name} {sig} : UInt64 :=\n"
             f"  sorry")
     return "\n\n".join(out)
 

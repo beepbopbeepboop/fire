@@ -170,7 +170,8 @@ def _ast_value(fn, func_name: str, admitted: dict = None, scope=None,
     resolvable = ({func_name} | set(callees or ())
                   | {c["name"] for c in (admitted or [])
                      if isinstance(c, dict) and c.get("name")})
-    gaps = AP._ast_bridge_gaps(fn, resolvable)
+    gaps = AP._ast_bridge_gaps(fn, resolvable,
+                               frozenset(AP._admitted_arity2_map(admitted)))
     if gaps:
         raise NotImplementedError(AP._ast_gap_message(gaps))
     body = "[" + ", ".join(AP._stmts_ast(fn.body, scope)) + "]"
@@ -261,9 +262,13 @@ def _eval_eq_mojo_section(func_name: str, fn, typed: bool,
     from formal import arm64_proof_gen as AP
     _cf = AP._call_func_lean(func_name, admitted, arity=arity,
                             exports=callees)
+    # build callFunc2: the arity-2 contracts, the same table the arm64 generator
+    # builds (`AP._admitted_arity2_map`).
+    _admitted_calls_map2 = AP._admitted_arity2_map(admitted)
+    _cf2 = AP._call_func2_lean(func_name, _admitted_calls_map2)
     return (f"/-- eval_eq_mojo: AST evaluation agrees with the semantic model. -/\n"
             f"theorem eval_eq_mojo {AP._entry_binders(arity)} :\n"
-            f"  evalFunc ast {_cf} {AP._entry_arg_list(_en)} = "
+            f"  evalFunc ast {_cf} {_cf2} {AP._entry_arg_list(_en)} = "
             f"{AP._apply_args('mojo', _en)} := by\n"
             f"  {proof}\n")
 
@@ -721,13 +726,28 @@ def _program_externs(info: dict) -> list:
     The subtraction is by ADDRESS against `func_offset` rather than by symbol,
     for the same reason as above: a program can call `getrlimit` itself, and
     dropping the symbol would drop that call too.
+
+    **And the float-repr helper's calls are not the program's, either.** The
+    helper (`formal/x86_64_codegen.py::_emit_float_repr_helper`) is emitted
+    once per image after every function body, and only when a float is
+    printed, so its `snprintf`/`strtod` are in `extern_calls` at or above the
+    entry for EVERY image that prints one,
+    and reading them as program calls suppresses every run test — the same
+    failure arriving with the helper instead of the guard. The emitter
+    publishes their sites in `info["float_repr_calls"]` and they are
+    subtracted by address, the way the traps are: a program that never
+    formats a float must not lose its run tests over code its run never
+    takes, and a program that does is handled by the helper's own path.
     """
     traps = set(info.get("compiler_traps") or ())
+    helper = set(info.get("float_repr_calls") or ())
     entry = info.get("func_offset")
     out = []
     for e in (info.get("extern_calls") or ()):
         addr = e.get("addr")
         if addr in traps:
+            continue
+        if addr in helper:
             continue
         if entry is not None and addr is not None and addr < entry:
             continue

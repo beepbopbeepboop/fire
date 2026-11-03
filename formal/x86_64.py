@@ -1104,7 +1104,7 @@ class Assembler:
         or died
         (fixed 2026-10-03 in 68671a62). The
         `_emit_range_list` labels collided the same way before that
-        (`bugs/FORMAL_x86_64_end_to_end_proof.md`, "Nested comprehensions"). So
+        (`bugs/formal/FORMAL_x86_64_end_to_end_proof.md`, "Nested comprehensions"). So
         a name is required to be unique per emission site, and this is where
         that is enforced rather than remembered; `arm64.Assembler.label` carries
         the same check for the same reason.

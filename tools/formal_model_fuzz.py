@@ -595,16 +595,20 @@ def gen_memreg(rng, free):
     base = _base(rng)
     off = OFF_REG
     d = _dst(rng, free)
-    if rng.random() < 0.5:
+    r = rng.random()
+    if r < 1/3.0:
         return ("ldr x%d, [%s, x%d]" % (d, _rn(base), off),
                 A.encode_ldr_xt_xn_xm(d, base, off))
-    return ("str x%d, [%s, x%d]" % (d, _rn(base), off),
-            A.encode_str_xt_xn_xm(d, base, off))
+    elif r < 2/3.0:
+        return ("str x%d, [%s, x%d]" % (d, _rn(base), off),
+                A.encode_str_xt_xn_xm(d, base, off))
+    return ("strb w%d, [%s, x%d]" % (d, _rn(base), off),
+            A.encode_strb_wd_wn_xm(d, base, off))
 
 
 #: The mixes, and what each one is for. `MIXES` is a NAME → generators map
 #: rather than one generator list because a mix is also a row in
-#: `bugs/FORMAL_model_fuzz_ledger.md`, and a row that cannot be named cannot be
+#: `bugs/formal/FORMAL_model_fuzz_ledger.md`, and a row that cannot be named cannot be
 #: written down.
 #:
 #: Two forms are deliberately NOT here, and both absences are recorded rather
@@ -1271,7 +1275,7 @@ def compare(hw, md):
 # ── sweeps ──────────────────────────────────────────────────────────────
 #
 # A mix is a name, a corpus and a ledger row. The ledger is in
-# `bugs/FORMAL_model_fuzz_ledger.md`: a tally is a fact about one run and stops
+# `bugs/formal/FORMAL_model_fuzz_ledger.md`: a tally is a fact about one run and stops
 # being true the moment an instruction stops being generated, so what a sweep
 # COVERED is written down beside what it found.
 def build_cases(mix, count, seed, length=None):

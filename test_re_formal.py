@@ -213,7 +213,7 @@ CASES = [
     ("(?:→|->)", "a->b", 0, "module_spec_gen.py's split pattern"),
     ("\\s*-\\s+`?\\w+", " - name", 0, "module_spec_gen.py's second pattern"),
     # ── SCOPED INLINE FLAGS, `(?i: … )` ────────────────────────────────────
-    # The whole of what used to be `bugs/FORMAL_re_the_scoped_inline_flag_form
+    # The whole of what used to be `bugs/formal/FORMAL_re_the_scoped_inline_flag_form
     # _is_refused.md`, which is deleted with this fix.
     # Each case is one that the SCOPED spelling decides and the global one
     # cannot, so a parser that read the letters and then threw them away — or
@@ -504,7 +504,7 @@ def bat(p, i: Int) -> Int:
     list-blob path, which reads a COUNT from offset 0 and bounds-checks
     against it, so a program that indexes a returned string for a character
     gets a plausible number built out of adjacent bytes. `Pointer[UInt8]
-    .value()` is the load (bugs/FORMAL_subscript_of_a_pointer_reads_a_blob
+    .value()` is the load (bugs/formal/FORMAL_subscript_of_a_pointer_reads_a_blob
     _count.md), and it is spelled here once so the 40-odd read sites below
     are reads.
     """

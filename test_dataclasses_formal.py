@@ -33,7 +33,7 @@ compile-time transform rather than a `formal/hostmods/dataclasses.mojo`).
 
 **Deliberately not here.** `fields()` / `is_dataclass()` / `asdict()` /
 `replace()` — the runtime reflection half. They are refused by name, and
-`bugs/FORMAL_dataclass_runtime_reflection.md` records why they cannot be
+`bugs/formal/FORMAL_dataclass_runtime_reflection.md` records why they cannot be
 implemented at all on this path (a value is one 64-bit word with no type tag)
 and what the next step would be. Pinning "it is refused, with this reason" is
 in scope; making it work is a different project.
@@ -496,7 +496,7 @@ def main(n):
 # The ONE-FIELD half of the same thing, and a different path: a struct of one
 # field has no frame at all, so its value is a word and the dispatch reaches it
 # through the one-word table rather than the holder table.  The old
-# `FORMAL_eq_dispatch_on_a_frame_receiver.md` §1 is the measurement that the
+# eq dispatch behavior is the measurement that the
 # frame-only version of this answer was 0 where CPython says 1.
 #
 # THE COMPARISON IS IN `main`, not behind a call, and that is deliberate rather
