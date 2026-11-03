@@ -62,7 +62,7 @@ refusal text moves from "a Optional receiver is stored in the field 'self.start'
 to that unwrap.  So this change fixes the DERIVATION, which is what the 13-file
 row is blocked on and what 30 other struct layouts were getting wrong, and the
 row itself needs the representation change to finish.  Filed as
-`bugs/FORMAL_stdlib_optional_needs_a_representation.md`.
+`bugs/formal/FORMAL_stdlib_optional_needs_a_representation.md`.
 
 Every differential case is written twice, once as Mojo and once as plain Python,
 and the two are made to AGREE rather than the expectation being hand-written —
@@ -952,7 +952,7 @@ def run_per_module_table_case(case, tmpdir, verbose):
     Two runs of the SAME source, one with 8 padding functions and one without,
     and the assertion is on BOTH what was asked and what it said. The count is
     the regression this exists for — `#functions × #structs` whole-struct walks
-    is what `bugs/FORMAL_build_cost_2026-10-03.md` measures — and the answers are
+    is what `bugs/formal/FORMAL_build_cost_2026-10-03.md` measures — and the answers are
     what makes the count safe to assert: threading a table is only the same
     answer if the derivation does not move while the loop rewrites method bodies,
     so a table that changed under the loop would show up here as a differing
@@ -1019,7 +1019,7 @@ def run_per_module_table_case(case, tmpdir, verbose):
             return False, (f"{fn.name}: threaded enum sites {sorted(threaded)} "
                            f"are not the derived ones {sorted(derived)}")
     # The ONE-FIELD table, which is the third predicate of the same partition
-    # and was threaded on 2026-10-03 (`bugs/FORMAL_build_cost_2026-10-03.md`
+    # and was threaded on 2026-10-03 (`bugs/formal/FORMAL_build_cost_2026-10-03.md`
     # §6's first residue). The assertion is the same shape as the enum half
     # above and for the same reason: `one_field_answer(st, table)` is what the
     # per-function askers now read, so a table that disagreed with

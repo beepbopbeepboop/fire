@@ -20,7 +20,7 @@ that function can give, and nothing here re-implements a decision:
   * **ANSWERED** — every call site establishes a pointee and they agree, so the
     load is emitted at that width.  Before this the site was refused with the
     four-questions sentence, which is the 14-of-47 `unsafe_value` sites
-    `bugs/FORMAL_pointer_value_model.md` §9 names as "a pointer that crossed a
+    `bugs/formal/FORMAL_pointer_value_model.md` §9 names as "a pointer that crossed a
     call boundary and lost its pointee on the way".
   * **DISAGREE** — the sites establish two pointees, which is
     `frame_holder_disagreement_refusal`'s shape one layer down.

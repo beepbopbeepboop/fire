@@ -39,7 +39,7 @@ none of them is a missing feature that more work would supply:
     scratch is reclaimed when the function returns. A container is a
     frame-allocated blob of 8-byte slots, so a node list built inside a callee
     is a read of a frame the caller does not own (struct.mojo's limit 4, and
-    `bugs/FORMAL_known_limits.md` §6.1's frame-escape family).
+    `bugs/formal/FORMAL_known_limits.md` §6.1's frame-escape family).
   * **`isinstance` cannot be called.** `isinstance(x, int)` is refused BY NAME:
     "int has no home: the module-level symbol table is empty for this unit".
     `int` is a type, a type is not a word, and there is no storage for one.
@@ -71,7 +71,7 @@ WHAT THIS MODULE PROVIDES
 
 Every one of these is a FUNCTION. There is no module-level state (a name that
 outlives the frame that made it has nowhere to live —
-`bugs/FORMAL_module_state_no_storage.md`), so nothing here remembers anything
+`bugs/formal/FORMAL_module_state_no_storage.md`), so nothing here remembers anything
 between calls, and `ast.parse` is a call like every other. The kind-code
 constants at the top of this file are module-level literals, which means they
 are substituted HERE and are not readable from another module — `token_name` is

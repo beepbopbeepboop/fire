@@ -402,7 +402,7 @@ SCOPE_PROBES = (
     # `_EXPLANATORY` had no row, so removing any of them was a no-op and the
     # table could not tell a live connective from a dead one — which is the
     # defect `tools/formal_sweep_causes.py` was fixed for in
-    # the `b10` round of `bugs/FORMAL_sweep_work_map.md` §5.1, and the reason that
+    # the `b10` round of `bugs/formal/FORMAL_sweep_work_map.md` §5.1, and the reason that
     # map's `check_cause_table` asserts every label is reachable from a sample.
     # Generated, a connective added to `_EXPLANATORY` brings its row with it and
     # the row fails if the connective does not fire.
@@ -2861,7 +2861,7 @@ def model_const(module, name):
     that were both typed by the same person on the same afternoon.
 
     A module-level name on this path is FOLDED at every read
-    (`bugs/FORMAL_module_state_no_storage.md`), so there is no way to ask the
+    (`bugs/formal/FORMAL_module_state_no_storage.md`), so there is no way to ask the
     image for it; the declaration in the source is the only place the number
     exists, and reading it is what a caller would do too.
     """
@@ -3668,7 +3668,7 @@ def _spelled_surface():
     PIPE`, `except subprocess.SubprocessError:` — is answered by nothing the
     model can declare: a function is not a word and a class is a frame blob, so
     those sites need
-    `bugs/FORMAL_module_state_no_storage.md` rather than a parameter.  Counting
+    `bugs/formal/FORMAL_module_state_no_storage.md` rather than a parameter.  Counting
     both as "the tree spells this name" hid half the gap, which is the mistake
     this rewrite exists to remove.
 
@@ -3750,7 +3750,7 @@ def _modelled_subprocess_names():
 _SUBPROCESS_VALUE_ABSENT = {
     "PIPE": "the constant is a FUNCTION here (`PIPE()` binds); reading it as a "
             "value needs a module-level name that is a folded literal — "
-            "bugs/FORMAL_module_state_no_storage.md",
+            "bugs/formal/FORMAL_module_state_no_storage.md",
     "STDOUT": "as PIPE",
     "DEVNULL": "as PIPE",
     "SubprocessError": "a catchable TYPE, and a class on this path is a frame "
@@ -3830,7 +3830,7 @@ def test_the_modelled_surface_covers_what_the_tree_spells(tmpdir=None):
           "this tree READS `subprocess.` names as VALUES that nothing answers: "
           + ", ".join(unexplained) + "\n"
           "    A value read needs a folded module-level literal, not a "
-          "function (bugs/FORMAL_module_state_no_storage.md), so declaring one "
+          "function (bugs/formal/FORMAL_module_state_no_storage.md), so declaring one "
           "does not cover it. Record it in _SUBPROCESS_VALUE_ABSENT with the "
           "reason, or fix the module-state gap.")
     stale = sorted(n for n in _SUBPROCESS_VALUE_ABSENT if n not in value_reads)
@@ -3871,7 +3871,7 @@ def test_the_run_return_shape_decision_is_recorded(tmpdir=None):
     """`subprocess.mojo` records WHY `run` returns the status word.
 
     The decision is option 3 of the three costed in
-    `bugs/FORMAL_subprocess_run_is_modelled_as_returning_the_status_word.md`:
+    `bugs/formal/FORMAL_subprocess_run_is_modelled_as_returning_the_status_word.md`:
     a caller reads the status through `completed_process_returncode`, a shim
     both engines can agree on, rather than through `r.returncode`, which is a
     field read on a word.  This pins the recording, because the decision is

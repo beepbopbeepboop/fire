@@ -603,7 +603,7 @@ def _check_function(fn, diags, funcs, methods):
     _check_block(fn.body, state, diags, funcs, methods)
 
 
-def check_module(stmts):
+def check_module(stmts: list):
     """Run Phase 1 move-tracking + Phase 2 single-call borrow-exclusivity
     checking over every function and struct method in a parsed module's
     top-level statement list. Returns a list of Diagnostic, in the order

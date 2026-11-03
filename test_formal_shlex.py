@@ -640,7 +640,7 @@ def group_absent(tmpdir, verbose):
     nothing about it looks like a list until you notice that its ANSWER is one.
     `join` is a generator and a list; `shlex` is the class; `punct_chars` and
     `whitespace` and `commenters` are module-level SETS, which on this path have
-    no storage at all (`bugs/FORMAL_module_state_no_storage.md`).
+    no storage at all (`bugs/formal/FORMAL_module_state_no_storage.md`).
 
     Each is refused NAMING ITSELF, so a caller that wants one is told which one
     and why rather than getting a link error — and `_split` is checked to still

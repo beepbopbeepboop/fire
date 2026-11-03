@@ -105,8 +105,9 @@ ROWS = [
     ("mul_over", "print(4000000000 * 4000000000)",
      ("refuse", "16000000000000000000")),
     # A multiply by 0 and by 1 are the two that must NOT trap at the edge, and
-    # they are here because the run-time check that is still missing (see
-    # `bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`) is a
+    # they are here because the run-time check (`_emit_int_alu_checked`, landed
+    # with `bugs/formal/
+    # FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s step 3) is a
     # high-half compare, and `high == low` is not the test that gets it right.
     ("mul_by_one", "print(9223372036854775807 * 1)",
      ("value", 9223372036854775807)),
@@ -294,19 +295,34 @@ ROWS = [
 # failure never written down at all.
 #
 # Each of these asserts the CURRENT answer, with the CPython answer in the
-# comment, and each names the bug doc. When the run-time trap lands they become
-# `("trapped", TRAP)` and this section is deleted with the doc.
+# comment, and each names the bug doc. The `+`/`-`/`*` half of the table is no
+# longer this: the run-time check landed (the emission flip, 2026-11-02) and
+# those three rows now pin `("trapped", TRAP)` — the run takes the trap instead
+# of the hardware's wrapped word — while `var_mul_fits` stays the control that
+# keeps the check from trapping a product that FITS. What is left in this
+# section is the table's other half, the operators whose variable cases the
+# flip does not reach: `<<`, `//`, `**` and `int()` still answer, and the doc
+# names what each of them needs.
 # `INT64_MIN` is 2**63 past the small end, so these are the WRAPPED answers and
 # not zeros: an addition of 2**62 + 2**62 is 2**63, which lands on the
 # smallest word, and `3000000000 * 3000000000` FITS (9e18 < 9.223e18) so the
 # multiply row uses a base just past the boundary.
 VARIABLE_ROWS = [
+    # The three `+`/`-`/`*` rows the run-time check landed for (2026-11-02,
+    # the doc's step 3): the build cannot fold a name, so the image carries
+    # the flag-setting instruction and the branch into the trap, and the run
+    # that leaves the signed 64-bit range stops with `TRAP` instead of
+    # printing the wrapped word and exiting 0. Both backends, one status.
     ("var_add_over", "a = 4611686018427387904\nprint(a + a)",
-     ("value", -9223372036854775808), "9223372036854775808"),
+     ("trapped", TRAP), "9223372036854775808"),
     ("var_sub_over", "a = 9223372036854775807\nb = 5\nprint(0 - a - b)",
-     ("value", 9223372036854775804), "-9223372036854775809"),
+     ("trapped", TRAP), "-9223372036854775809"),
     ("var_mul_over", "a = 4000000001\nprint(a * a)",
-     ("value", -2446744065709551615), "16000000008000000001"),
+     ("trapped", TRAP), "16000000008000000001"),
+    # …and the control the flip must not break: the product FITS, so the check
+    # reads no overflow and the exact value prints. This is the row a
+    # `high == low` spelling of the multiply check fails (it traps here), and
+    # it is the doc's own measurement of "right on the edges".
     ("var_mul_fits", "a = 3000000000\nprint(a * a)",
      ("value", 9000000000000000000), "9000000000000000000"),
     ("var_shl_over", "a = 1\nb = 63\nprint(a << b)",
@@ -329,7 +345,7 @@ VARIABLE_ROWS = [
 ]
 
 STILL_UNTRAPPED_DOC = (
-    "bugs/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md")
+    "bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md")
 
 # ── `FORMAT_ROWS`: the OUTPUT spelling, with CPython as the oracle ──────────
 #

@@ -241,7 +241,7 @@ def case_refused_without(name, source, needle, forbidden, tmpdir,
     """REFUSED, still naming `needle`, and NO LONGER saying `forbidden`.
 
     `test_formal_run.py` has this mode for the whole formal suite and this file
-    did not, which is the gap `bugs/FORMAL_toplevel_test_asserts_a_refusal_the_
+    did not, which is the gap `bugs/formal/FORMAL_toplevel_test_asserts_a_refusal_the_
     backend_no_longer_owes.md` §4 found: it is the anti-rot direction for a
     REWORDING, and a needle-only assertion cannot see one. A refusal that has
     stopped being TRUE about the file it is reported against survives every
@@ -371,7 +371,7 @@ def test_exit_from_the_module_body(tmpdir, verbose):
     target. The source says `sys.exit(3)`, and that spelling is a settled
     refusal of its own (`doc/ABI.md`'s export rule excludes a C library
     name, so the `sys` module does not advertise `exit`; see
-    `bugs/FORMAL_known_limits.md` 1.1, pinned by `test_formal_sys.py`). What
+    `bugs/formal/FORMAL_known_limits.md` 1.1, pinned by `test_formal_sys.py`). What
     is new is that the call is REACHED at all: before the fix the whole line
     was dropped and the process exited 0."""
     return case_agrees_with_cpython(
@@ -603,7 +603,7 @@ def test_name_in_a_function_is_still_refused(tmpdir, verbose):
     and a function lifted out of an imported module has no answer this path
     can give — answering it would be a value that is right for this file and
     wrong for every other, which is the class of lie
-    `bugs/FORMAL_module_state_no_storage.md` is about. Pinned so a later
+    `bugs/formal/FORMAL_module_state_no_storage.md` is about. Pinned so a later
     change cannot widen the substitution into the function bodies."""
     # `refuse_without:`, and the needle is the REWORDED sentence rather than
     # the one this row used to pin.  A more specific check now answers this
@@ -918,7 +918,7 @@ print(len(n))
 # REFUSAL, which was wrong for the whole time the assertion existed: a declared
 # `__init__` whose body is a straight line of `self.<field> = <bare
 # parameter>` is inlined at the construction site, so this program builds, runs,
-# and prints what it says.  `bugs/FORMAL_toplevel_body_struct_construction_no_
+# and prints what it says.  `bugs/formal/FORMAL_toplevel_body_struct_construction_no_
 # longer_refused.md` is the record; what it asked for is a running case, which
 # is what this is.
 #

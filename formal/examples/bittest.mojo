@@ -20,7 +20,7 @@
 # branches spelled as ordinary COMPARISONS (`n > 8`, `not (n < 4)`, `16 < n`)
 # fail the same way — `lean exceeded 1500s wall`. So the limit is a property of
 # the certificate's size and not of the instruction, and it is written down in
-# `bugs/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md`.
+# `bugs/formal/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md`.
 def bittest(n):
     x = 0
     if n & 8:

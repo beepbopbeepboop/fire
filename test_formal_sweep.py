@@ -260,7 +260,7 @@ class TestClassify(unittest.TestCase):
         self.assertIn("cannot be lowered", reason)
 
     def test_a_method_of_this_files_own_struct_is_a_codegen_finding(self):
-        # The misclassification `bugs/FORMAL_env_family_next_terminal.md`
+        # The misclassification `bugs/formal/FORMAL_env_family_next_terminal.md`
         # measured: "nothing on the link line provides this symbol" is a fact
         # about the TARGET only when the definition is somewhere else. A missing
         # symbol that is a method of a struct in the file itself was never
@@ -2812,7 +2812,7 @@ class TestArmVsX86Parity(unittest.TestCase):
 
     # ── and the two logs this repository actually has ─────────────────────
     def test_the_committed_arms_classify_every_shared_file_identically(self):
-        # The claim in the `b7` round of `bugs/FORMAL_sweep_work_map.md` §2.5, read
+        # The claim in the `b7` round of `bugs/formal/FORMAL_sweep_work_map.md` §2.5, read
         # off the two committed logs rather than believed: 542 files classified
         # on both arms and NOT ONE of them with a different class. That is the
         # sentence which decided the x86-64 machine subset was not where the
@@ -3086,7 +3086,7 @@ class TestRoundOverRound(unittest.TestCase):
         "every value a formal program can name lives in a function's own stack "
         "scratch, which is reclaimed when the function returns. What `sys` "
         "publishes: api_version, byteorder, flush_output, … "
-        "`bugs/FORMAL_module_state_no_storage.md` records the design and what "
+        "`bugs/formal/FORMAL_module_state_no_storage.md` records the design and what "
         "would have to be true to close it, and §(2) is this shape")
     def _exports_message(self):
         """`no_public_api_reason`'s own sentence for a constants-only module,
@@ -3267,7 +3267,7 @@ class TestRoundOverRound(unittest.TestCase):
 
     # ── the two real rounds this repository has ───────────────────────────
     def test_the_committed_rounds_reproduce_the_map_they_were_derived_from(self):
-        # the `b11` round of `bugs/FORMAL_sweep_work_map.md` §2.1/§2.3/§3 were
+        # the `b11` round of `bugs/formal/FORMAL_sweep_work_map.md` §2.1/§2.3/§3 were
         # computed by hand from these two logs with a scratch script. The
         # numbers in the map are therefore a real expectation, and they are the
         # only test of this tool that uses no fixture: if a peel, a class or a
