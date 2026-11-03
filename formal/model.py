@@ -17163,7 +17163,7 @@ def one_word_receiver_kind(struct_def, int_names=(), string_names=(),
     derives the field set by walking every method body of the struct twice, and
     so does `struct_sole_field_name`, so the guard doubled the price of the
     question it was guarding.  This is the same provably-dead filter
-    `bugs/formal/FORMAL_build_cost_2026-10-03.md` §4.1 removed from
+    the 2026-10-03 build-cost measurement's §4.1 (doc in git history) removed from
     `struct_derived_names`, and the reason it is worth writing down rather than
     leaving as an unexplained simplification: a reader who deletes the `None`
     test on the strength of "the count already said so" would be deleting the
@@ -36183,8 +36183,8 @@ def one_field_mutating_methods(functions, method_owners: dict,
     asks the predicate once per METHOD — 377 of them on `myinterpreter.py`, each
     one a whole-struct walk of bodies. `None` keeps the per-method ask, which is
     the same answer at the cost of the walk; see
-    `bugs/formal/FORMAL_build_cost_2026-10-03.md` §6 for the measurement and §3.1 for
-    why reading the table is sound.
+    the 2026-10-03 build-cost measurement (doc in git history: §6 for the
+    measurement, §3.1 for why reading the table is sound).
     """
     out = {}
     for fn in (functions or ()):
@@ -38448,7 +38448,7 @@ def _binding_sites_index(fn) -> dict:
     locals: measured on `formal/hostmods/os/__init__.mojo`, arm64,
     `fire.py build --formal --no-prove` went 2.19 s → 2.72 s with the per-name
     walk and 2.24 s with this one (best of three each), and the standard this is
-    measured against is `bugs/formal/FORMAL_build_cost_2026-10-03.md`'s — where the two
+    measured against is the 2026-10-03 build-cost measurement's (doc in git history) — where the two
     residues left open were 0.094 s and 0.003 s on the largest file in the
     repository, and both were declined rather than taken.  There is one dispatch
     below and `_binding_values` reads it, so the two cannot disagree about which
@@ -44119,7 +44119,7 @@ def one_field_struct_names(structs) -> dict:
 
     **Sound by the measurement the framed table's threading was sound by**, not
     by an invalidation argument: `formal/model.py`'s `read_before_store`
-    derivation and `bugs/formal/FORMAL_build_cost_2026-10-03.md` §3.1 walked
+    derivation and the 2026-10-03 build-cost measurement's §3.1 (doc in git history) walked
     146 779 asks of the four predicates over 7 788 (question, struct) pairs
     across 14 files and NOT ONE pair changed its answer between two asks inside
     one `_prepare_functions` call — `struct_is_one_field` was one of the four.
@@ -48506,7 +48506,11 @@ class RaiseGraph:
 
     The rule the pair of them obeys is unchanged and is what the second half of
     the 82 still rests on: **refuse on a FACT, and say so where the fact is
-    missing.**
+    missing.** The expression tier (`("other", "")`) is the one whose answer
+    changed with this fix: it used to be `False`, i.e. "cannot raise", which is
+    the one direction a refusal must never be wrong in. It is now `True` —
+    unknown, so refuse — and the cost is measured at the files it now refuses
+    rather than the files it used to let through.
     """
 
     def __init__(self, functions, externs=(), bound_modules=None,
@@ -48648,11 +48652,6 @@ class RaiseGraph:
     def _callee_raises(self, kind, name, module="") -> bool:
         """Can this callee end the process? `False` for everything unresolved.
 
-        `False` for a name this pass cannot place is the decision the class
-        docstring measures: a refusal on an unresolvable callee would take 82 of
-        this repository's files against a possibility, and the 14 it can prove
-        are worth having on their own.
-
         **`module` is the third term and it is what makes that 82 smaller.**
         A callee this image COMPILED is not unresolved: `publish_module_raisers`
         recorded which of its functions reach a `raise` when it was built, so
@@ -48670,6 +48669,20 @@ class RaiseGraph:
         So the third case is the doc's residual and the first two are what it
         said had to be built; the measurement to watch is the third falling
         towards 0 while the certain tier is unchanged.
+
+        **`("other", "")` is the one tier that is NOT a fact and NOT a residual
+        of the above.** It is a callee that is an EXPRESSION rather than a name
+        — `f(…)` where `f` is a local holding a function value, `self.callbacks[k]()`,
+        a `__getitem__`-dispatched call. `_call_keys` cannot see a binding, but
+        the image can: this function's local `f` holds a function VALUE, and
+        that value may be this image's own raiser. The class's own refusal
+        (`call_result_frame_struct`) exists precisely because calling one is
+        ordinary on this path. So `("other", "")` is the one case where the
+        answer is not "cannot raise" but "unknown", and unknown is the one
+        direction a refusal must never be wrong in: a `try` whose body calls
+        `handlers[i](x)` where `handlers` is a list of this image's functions
+        is a program whose arm is unreachable, and it builds. It therefore
+        answers `True` here, which is what makes the `try` refuse.
         """
         if module:
             raisers = module_raisers(module)
@@ -48689,7 +48702,8 @@ class RaiseGraph:
             # around a raising method of a LINKED struct build, print nothing
             # and exit 1 where CPython catches and continues.
             return bool(self._cross is not None and self._cross.method(name))
-        return False
+        # A callee that is an EXPRESSION rather than a name: unknown, so refuse.
+        return True
 
     def may_reach_raise(self, node) -> tuple:
         """`(kind, name, module)` for a callee in `node` that can end the process,

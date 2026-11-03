@@ -4081,8 +4081,9 @@ def _step_rhs(w: int, idx: int):
     if idx == 6:  # CMP / SUBS (shifted register): write Rd, and the flags
         # `arm64_set_reg 31 s v = s`, so this is the CMP spelling exactly and
         # `subs xd, xn, xm` (which `encode_subs_xd_xn_xm` emits) with it.
-        return (f"some {{ (arm64_set_reg {rd} s (arm64_reg {rn} s - arm64_reg {rm} s)) with "
-                f"nzcv := arm64_subs_flags (arm64_reg {rn} s) (arm64_reg {rm} s) }}")
+        sh = (w >> 10) & 0x3f
+        return (f"some {{ (arm64_set_reg {rd} s (arm64_reg {rn} s - (arm64_reg {rm} s <<< UInt64.ofNat {sh}))) with "
+                f"nzcv := arm64_subs_flags (arm64_reg {rn} s) (arm64_reg {rm} s <<< UInt64.ofNat {sh}) }}")
     if idx == 13:  # CMP immediate
         # The EFFECTIVE immediate, not the raw 12-bit field: `sh` (bit 22)
         # scales it by 4096, which is the rule `lib/ProofLib.lean::arm64_ext_imm12`
@@ -9632,7 +9633,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                                 _memo[(_pb, _var_regs[_v], _v)] = _hp
                                 A(f"{IND}have {_hp} : (s_{_pb}).x{_var_regs[_v]} = {_v} := by")
                                 A(f"{IND}  rw [hsid_{_pb}]")
-                                A(f"{IND}  simp only [{', '.join(_pb_defs + list(_hpriors) + ['arm64_reg', 'arm64_set_reg', 'Arm64State.init'])}]")
+                                A(f"{IND}  simp only [{', '.join(_pb_defs + ['arm64_reg', 'arm64_set_reg', 'Arm64State.init'])}]")
                                 A(f"{IND}  all_goals try simp (disch := decide) [mem_read_after_write_u64, "
                                   f"mem_read_after_write_u64_ne, mem_read_two_writes_same, UInt64.add_zero]")
                                 A(f"{IND}  all_goals try rfl")
@@ -9659,7 +9660,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                                 _memo[(_pb, _var_regs[_cv], _crhs)] = _hp
                                 A(f"{IND}have {_hp} : (s_{_pb}).x{_var_regs[_cv]} = {_crhs} := by")
                                 A(f"{IND}  rw [hsid_{_pb}]")
-                                A(f"{IND}  simp only [{', '.join(_pb_defs + list(_hpriors) + ['arm64_reg', 'arm64_set_reg', 'Arm64State.init'])}]")
+                                A(f"{IND}  simp only [{', '.join(_pb_defs + ['arm64_reg', 'arm64_set_reg', 'Arm64State.init'])}]")
                                 A(f"{IND}  all_goals try simp (disch := decide) [mem_read_after_write_u64, "
                                   f"mem_read_after_write_u64_ne, mem_read_two_writes_same, UInt64.add_zero]")
                                 A(f"{IND}  all_goals try rfl")

@@ -3599,7 +3599,7 @@ test('formal-read-before-store', [PY, 'test_formal_read_before_store.py'],
 # another field's word.
 #
 # It was also the one file in the estate that no gate ran at all while
-# `bugs/formal/FORMAL_build_cost_2026-10-03.md` §3.1 rested on it, because
+# the 2026-10-03 build-cost measurement (§3.1, doc in git history) rested on it, because
 # `test_suite.py`'s `test_formal_*` FAMILY rule excused it on the cost rule
 # ("minutes of real compilation") — a rule made about the file rather than about
 # its expensive part, since only two of the 26 rows build. The `module table`
