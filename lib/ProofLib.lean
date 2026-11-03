@@ -2213,9 +2213,9 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let rd := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let xm := ((insn >>> 16) &&& 0x1f).toNat
-    let diff := arm64_reg rn s - arm64_reg xm s
+    let diff := arm64_reg rn s - arm64_shifted_reg insn s xm
     some { (arm64_set_reg rd s diff) with
-           nzcv := arm64_subs_flags (arm64_reg rn s) (arm64_reg xm s) }
+           nzcv := arm64_subs_flags (arm64_reg rn s) (arm64_shifted_reg insn s xm) }
   -- AND Xd, Xn, Xm: 0x8a000000
   else if (insn &&& 0xffe00000) = 0x8a000000 then
     let rd := (insn &&& 0x1f).toNat
@@ -2844,7 +2844,7 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     let rd := (insn &&& 0x1f).toNat
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let xm := ((insn >>> 16) &&& 0x1f).toNat
-    some (arm64_set_reg rd { s with nzcv := arm64_adds_flags (arm64_reg rn s) (arm64_reg xm s) } (arm64_reg rn s + arm64_reg xm s))
+    some (arm64_set_reg rd { s with nzcv := arm64_adds_flags (arm64_reg rn s) (arm64_shifted_reg insn s xm) } (arm64_reg rn s + arm64_shifted_reg insn s xm))
   else if (insn &&& 0xffe00000) = 0xea000000 then
     -- TST Xn, Xm: `ANDS XZR, Xn, Xm`, the logical sibling of CMP. The mask is
     -- 0xffe00000 and NOT 0x8a000000 (the AND shifted-register arm) because the
@@ -2856,7 +2856,7 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
     -- reason a `TST` before an unsigned or equality branch is the idiom it is.
     let rn := ((insn >>> 5) &&& 0x1f).toNat
     let xm := ((insn >>> 16) &&& 0x1f).toNat
-    some { s with nzcv := arm64_logic_flags (arm64_reg rn s &&& arm64_reg xm s) }
+    some { s with nzcv := arm64_logic_flags (arm64_reg rn s &&& arm64_shifted_reg insn s xm) }
   else if (insn &&& 0xffe00c00) = 0xf8000000 then
     -- STUR Xt, [Xn, #imm9]: the unscaled store.
     let rt := (insn &&& 0x1f).toNat
@@ -5424,8 +5424,8 @@ theorem work_step_neg (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UI
 theorem work_step_cmp_reg (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe00000) = 0xeb000000) :
-arm64_step s code = some { (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s - arm64_reg (((w >>> 16) &&& 0x1f).toNat) s)) with
-      nzcv := arm64_subs_flags (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) (arm64_reg (((w >>> 16) &&& 0x1f).toNat) s) } := by
+arm64_step s code = some { (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s - arm64_shifted_reg w s (((w >>> 16) &&& 0x1f).toNat))) with
+      nzcv := arm64_subs_flags (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) (arm64_shifted_reg w s (((w >>> 16) &&& 0x1f).toNat)) } := by
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
@@ -6328,7 +6328,7 @@ set_option maxHeartbeats 4000000 in
 theorem work_step_cmn (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe00000) = 0xab000000) :
-    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) { s with nzcv := arm64_adds_flags (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) (arm64_reg (((w >>> 16) &&& 0x1f).toNat) s) } (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s + arm64_reg (((w >>> 16) &&& 0x1f).toNat) s)) := by
+    arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) { s with nzcv := arm64_adds_flags (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) (arm64_shifted_reg w s (((w >>> 16) &&& 0x1f).toNat)) } (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s + arm64_shifted_reg w s (((w >>> 16) &&& 0x1f).toNat))) := by
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by
@@ -6412,7 +6412,7 @@ set_option maxHeartbeats 4000000 in
 theorem work_step_tst (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe00000) = 0xea000000) :
-    arm64_step s code = some { s with nzcv := arm64_logic_flags (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s &&& arm64_reg (((w >>> 16) &&& 0x1f).toNat) s) } := by
+    arm64_step s code = some { s with nzcv := arm64_logic_flags (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s &&& arm64_shifted_reg w s (((w >>> 16) &&& 0x1f).toNat)) } := by
   unfold arm64_step
   rw [hpc, hread]
   have hne_ret : w ≠ (0xd65f03c0 : UInt32) := by

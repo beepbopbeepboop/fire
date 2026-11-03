@@ -4081,8 +4081,9 @@ def _step_rhs(w: int, idx: int):
     if idx == 6:  # CMP / SUBS (shifted register): write Rd, and the flags
         # `arm64_set_reg 31 s v = s`, so this is the CMP spelling exactly and
         # `subs xd, xn, xm` (which `encode_subs_xd_xn_xm` emits) with it.
-        return (f"some {{ (arm64_set_reg {rd} s (arm64_reg {rn} s - arm64_reg {rm} s)) with "
-                f"nzcv := arm64_subs_flags (arm64_reg {rn} s) (arm64_reg {rm} s) }}")
+        sh = (w >> 10) & 0x3f
+        return (f"some {{ (arm64_set_reg {rd} s (arm64_reg {rn} s - (arm64_reg {rm} s <<< UInt64.ofNat {sh}))) with "
+                f"nzcv := arm64_subs_flags (arm64_reg {rn} s) (arm64_reg {rm} s <<< UInt64.ofNat {sh}) }}")
     if idx == 13:  # CMP immediate
         # The EFFECTIVE immediate, not the raw 12-bit field: `sh` (bit 22)
         # scales it by 4096, which is the rule `lib/ProofLib.lean::arm64_ext_imm12`
