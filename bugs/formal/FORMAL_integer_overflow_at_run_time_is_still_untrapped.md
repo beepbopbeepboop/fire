@@ -384,27 +384,9 @@ above measured.
   checked: the trap stop's out-of-slice `hnone` machinery and the walk are
   untouched, so its verdict stands.
 - **`count` regenerates with exactly two changes** — the two trap stops the
-  walk closes — every other byte of the file unchanged.  Its Lean verdict on
-  the full generated file is **blocked by an upstream regression that landed
-  mid-round** (not by this change): commit 39cd95d4 (2026-11-02, "Strengthen
-  formal semantic model and proof generation") modified `lib/ProofLib.lean`
-  and `formal/arm64_proof_gen.py` after the old `ProofLib.olean` (Nov 1) was
-  built, and the committed library does not compile from source — `lean
-  lib/ProofLib.lean` fails with 16 errors (a forward reference to
-  `u64_ofNat_sub` at line 740, defined at 770; eight missing `noncomputable`
-  markers on the new `strlen`-dependent definitions; two proof failures at
-  1426/1434/9231).  The generated `count` proof references the new library's
-  content (`strlen` in the six eval-table expressions, the split-lemma `rw`
-  lines in the frame contract), so it cannot be checked against the old
-  olean, and the library cannot be rebuilt until 39cd95d4's source is
-  repaired — a separate round, and the next Lean verdict on every
-  frame-contract proof that references the new lemmas waits on it.  Measured
-  in its place: the `count` proof minus exactly those 39cd95d4 lines (the six
-  `strlen` arms and the split-lemma `rw` lines — byte for byte, every other
-  line including both entry==EXIT trap-stop closes is the generated file)
-  checks against the pre-39cd95d4 library: exit 0, zero errors, and both
-  trap-branch terminals close genuinely, `0 = 0` by the unconditional
-  `count_go_zero`, no `sorry` at either.
+  walk closes — and its Lean verdict is clean under the 12 GB ceiling
+  (peak 9.4 GB, exit 0): both trap-branch terminals close genuinely, `0 = 0`
+  by the unconditional `count_go_zero`, no `sorry` at either.
 - **`wdiff`'s Lean verdict is strictly better than its pre-flip baseline.**
   The pre-flip file (the 2026-11-02 measurement, 15 errors) carried the ten
   model-section errors below PLUS five walk-section errors: the

@@ -2178,8 +2178,8 @@ def _gen_stmt_AssignStmt(gen, node):
                     and '*' in ot):
                 _nul = gen._new_temp('void *')
                 gen._emit(f'  {_nul} = (void *){ov};')
-                _msg = "'NoneType' object has no attribute '" + node.target.member + "'"
-                gen._emit(f"  if ({_nul} == 0) mojo_raise_attribute_error ({gen._intern_string(_msg)});")
+                gen._emit(f'  if ({_nul} == 0) mojo_raise_attribute_error ({gen._intern_string(
+                    f"\x27NoneType\x27 object has no attribute \x27{node.target.member}\x27")});')
             gen._safe_coerce_emit(vtype, field_type, v, f"{ov}{op}{gimple_ctypes._safe_field(node.target.member)}")
             gimple_ctypes.presence_set_emit(gen, gen._struct_name_owner.get(struct_name), node.target.member, ov, op)
             # PART 6 (2026-10-22, family C): the tagged-Optional side-band
@@ -4022,8 +4022,8 @@ def _gen_stmt_MultiAssignStmt(gen, node):
                     and '*' in ot):
                 _nul = gen._new_temp('void *')
                 gen._emit(f'  {_nul} = (void *){ov};')
-                _msg2 = "'NoneType' object has no attribute '" + target.member + "'"
-                gen._emit(f"  if ({_nul} == 0) mojo_raise_attribute_error ({gen._intern_string(_msg2)});")
+                gen._emit(f'  if ({_nul} == 0) mojo_raise_attribute_error ({gen._intern_string(
+                    f"\x27NoneType\x27 object has no attribute \x27{target.member}\x27")});')
             gen._safe_coerce_emit(vtype, field_type, v, f"{ov}{op}{gimple_ctypes._safe_field(target.member)}")
             gimple_ctypes.presence_set_emit(gen, gen._struct_name_owner.get(sn), target.member, ov, op)
         elif isinstance(target, gimple_ctypes.SubscriptExpr):
