@@ -926,7 +926,15 @@ def _bracketed_calls_pair(consumer_src: str) -> tuple:
         from formal import model as M                  # lazy — cycle
         from formal.build import _names_bound_in       # lazy — cycle
         stmts = _consumer_statements(consumer_src)
-        module_level = set(M.collect_module_symbols(stmts) or {})
+        syms = M.collect_module_symbols(stmts) or {}
+        module_level = set()
+        for name, sym in syms.items():
+            # Module-level comptime aliases with no literal (e.g. ImmStaticOrigin)
+            # must remain passable as value arguments when the declaration expects
+            # a value parameter; do not treat them as bound values.
+            if getattr(sym, "site", None) == "comptime" and getattr(sym, "literal", None) is None:
+                continue
+            module_level.add(name)
         typed: dict = {}
         permissive: dict = {}
         for st in stmts:
@@ -1565,37 +1573,16 @@ def _bracket_type_args(sub, values=()) -> list:
     a name no importer computed.  `bracket_items` is that decision, in one place
     both readers of this bracket now share.
 
-    **A bare literal survives only in a MIXED bracket.**  `type_arg_text` refuses
-    a top-level literal because a bracket of values alone is the comptime
-    specialization (`tile[2, 3]`) the local machinery already answers, and
-    demanding `tile_2_3` for it would publish a second symbol for a body the
-    build already emits.  But a bracket that writes a TYPE as well is not that
-    shape: `Tagged[Int, 0]` on `struct Tagged[T, origin: Int]` is a boundary
-    instantiation whose second element is a value, and before this rule it was
-    dropped here and then refused downstream as a "compile-time
-    explicit-parameter list" the model cannot bind.  So a literal (`0`, `-3`,
-    `"x"`, `True`, `None`) is read through `_value_literal_arg_text` only when at
-    least one OTHER item spelled a type; an all-values bracket is returned `[]`
-    exactly as before.  The substitution end needs no kind table:
-    `monomorphize_source` replaces the parameter's name whole-word whether the
-    parameter was declared a type or a value.
+    **A bare literal is dropped entirely here.**  Literal admission goes through
+    the permissive reader (`_bracket_all_args`) plus declaration-aware
+    `value_demands_for`/`instantiate` — the strict reader must not see bare
+    literals at all.
     """
     items = bracket_items(sub)
     spelled = [type_arg_text(i, values) for i in items]
-    if not spelled or all(spelled):
-        return spelled
-    if not any(spelled):
+    if not spelled or any(s == "" for s in spelled):
         return []
-    mixed = []
-    for item, sp in zip(items, spelled):
-        if sp:
-            mixed.append(sp)
-            continue
-        value = _value_literal_arg_text(item)
-        if not value:
-            return []
-        mixed.append(value)
-    return mixed
+    return spelled
 
 
 def _value_literal_arg_text(expr) -> str:
