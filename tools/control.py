@@ -691,7 +691,7 @@ def pick_slot(item, busy):
         return pool_slot(item["pool"]) if item.get("pool") and slot_free(pool_slot(item["pool"]), busy) else None
     slots = load_pool()["slots"]
     if item.get("cls"):                        # a classed task stays in its class: its slots or nothing
-        slots = [x for x in slots if accepts(x, item["cls"])]
+        slots = [x for x in slots if slot_class(x) == item["cls"]]
     pref = item.get("pool")
     order = [x for x in slots if x["name"] == pref] + [x for x in slots if x["name"] != pref]
     return next((x for x in order if slot_free(x, busy)), None)
@@ -703,11 +703,6 @@ CLASSES = ("easy", "mid", "hard")   # the work classes, weakest model first; a s
 
 def slot_class(sl):
     return sl.get("class", "easy")
-
-
-def accepts(sl, cls):
-    """A slot takes tasks of its own class and of any class in its `also` list (pool.json)."""
-    return slot_class(sl) == cls or cls in sl.get("also", [])
 
 
 def cmd_refill(a):
