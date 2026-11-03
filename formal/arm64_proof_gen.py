@@ -3383,8 +3383,38 @@ def _ternary_ast_gap_message() -> str:
             "`bugs/formal/FORMAL_a_conditional_expression_has_no_value_in_the_semantic_model.md`")
 
 
-def _ast_bridge_gaps(fn, resolvable) -> list:
+def _admitted_arity2_map(admitted) -> dict:
+    """`{spelling: lean}` for every admitted contract of arity two.
+
+    These are the entries `_call_func2_lean` answers, and the only names the
+    AST bridge may state a two-argument call of (`_ast_bridge_gaps`'s
+    `resolvable2`). Both generators read them through here, so the table that
+    decides which two-argument calls are stated and the table `callFunc2`
+    emits cannot be built two different ways.
+    """
+    out = {}
+    for c in admitted or []:
+        if isinstance(c, dict):
+            name = c.get("name")
+            lean_name = c.get("lean_name")
+            ar = c.get("arity") if "arity" in c else 1
+        else:
+            name = getattr(c, "name", None)
+            lean_name = getattr(c, "lean_name", None)
+            ar = getattr(c, "arity", 1)
+        if name and lean_name and ar == 2:
+            out[str(name)] = lean_name
+            if "." in str(name):
+                out[str(name).split(".")[-1]] = lean_name
+    return out
+
+
+def _ast_bridge_gaps(fn, resolvable, resolvable2=frozenset()) -> list:
     """The calls in `fn` that the AST bridge cannot state, most useful first.
+
+    `resolvable` names what the one-argument handler `callFunc` answers;
+    `resolvable2` names what the two-argument handler `callFunc2` answers.
+    A call is stated only when its arity's handler answers its name.
 
     `eval_eq_mojo` is the statement that the AST evaluation and the `_go` model
     are the same function, and it is stated against `callFunc` — the stub
@@ -3403,10 +3433,10 @@ def _ast_bridge_gaps(fn, resolvable) -> list:
     Two independent gaps, both consequences of `callFunc` being UNARY:
 
       * an UNRESOLVABLE callee — anything but the proved function and an
-        admitted contract. `bugs/formal/FORMAL_ast_bridge_carries_one_argument_per_call.md`
-        §"step 2" is the work: `callFunc` has to become the model's own
-        function table over the program's `_go` definitions, which `_gen_go`
-        already emits.
+        admitted contract. One-parameter callees are answered by the model's
+        own function table (`_callee_call_table`); a callee the table does not
+        cover is refused here by name. The two-parameter case is open:
+        `bugs/formal/FORMAL_ast_bridge_cannot_state_a_user_call_of_two_or_more_arguments.md`.
       * an ARITY other than one. `MojoExpr.call` carries a `List MojoExpr`, so
         the AST is FAITHFUL for any arity (widened 2026-10-05; before that a
         zero-argument call reached `e.args[0]` and raised `IndexError: list index
@@ -3434,17 +3464,33 @@ def _ast_bridge_gaps(fn, resolvable) -> list:
             if len(e.args) > 2 and not (builtin_ok and name in ("printf", "print")):  # printf/print can take multiple args
                 gaps.append(
                     f"`{name or '?'}` with {len(e.args)} arguments — the AST "
-                    f"cannot represent more than 2 arguments in the current bridge")
-            elif used and name not in resolvable and not builtin_ok:
-                # Allow 2-arg admitted calls to go through callFunc2 via call2
-                if len(e.args) == 2:
-                    pass
+                    f"node carries all of them, but no handler answers for "
+                    f"that many: `callFunc` takes one value and `callFunc2` "
+                    f"takes two")
+            elif used and not builtin_ok:
+                # A call's handler is chosen by its arity. One argument is
+                # `callFunc` (`MojoExpr.call`), two are `callFunc2` (`call2`),
+                # and a zero-argument call has no handler at all: `evalArgs`
+                # packs an empty list into the product 1, which a parameterless
+                # model does not take. A two-argument call answered by
+                # `callFunc` instead would reach `callFunc2`'s default 0, which
+                # is the false theorem this check exists to refuse, so the
+                # two-argument rule is "the name is an arity-2 contract", not
+                # "any name": `resolvable2` is exactly those names.
+                n = len(e.args)
+                if n == 1:
+                    answered, handler = name in resolvable, "callFunc"
+                elif n == 2:
+                    answered, handler = name in resolvable2, "callFunc2"
                 else:
+                    answered, handler = False, "no handler"
+                if not answered:
                     gaps.append(
-                        f"`{name}` — `callFunc` answers 0 for a name it does not "
-                        f"know, and the model answers the callee's value, so "
-                        f"`eval_eq_mojo` would ask Lean to prove `0 = <the call's "
-                        f"value>`")
+                        f"`{name}` with {n} argument{'' if n == 1 else 's'} — "
+                        f"`{handler}` answers 0 for a name it does not know, "
+                        f"and the model answers the callee's value, so "
+                        f"`eval_eq_mojo` would ask Lean to prove `0 = <the "
+                        f"call's value>`")
             for a in e.args:
                 visit_expr(a, used)
         elif isinstance(e, Unary):
@@ -3528,7 +3574,7 @@ def _ast_gap_message(gaps: list) -> str:
               "product is not what a callee of this arity returns -- until "
               "the handler is widened too, the bridge can only speak about a "
               "function that calls nothing but itself with one argument. "
-              "`bugs/formal/FORMAL_ast_bridge_carries_one_argument_per_call.md` has "
+              "`bugs/formal/FORMAL_ast_bridge_cannot_state_a_user_call_of_two_or_more_arguments.md` has "
               "the measurement and the two routes.")
 
 
@@ -12186,8 +12232,9 @@ def _call_func2_lean(func_name: str, admitted2: dict = None,
 def _callee_call_table(go_defs: str, prog, func_name: str) -> dict:
     """`{spelling: the `_go` definition to call}` for every callee with a model.
 
-    **This is step 2 of `bugs/formal/FORMAL_ast_bridge_carries_one_argument_per_call.md`
-    and the half that was never a `lib/ProofLib.lean` change**: `callFunc` is a
+    **The one-parameter callee table, and the half that was never a
+    `lib/ProofLib.lean` change** (its two-parameter analogue is open:
+    `bugs/formal/FORMAL_ast_bridge_cannot_state_a_user_call_of_two_or_more_arguments.md`): `callFunc` is a
     stub that answers `0` for every name it was not told about, so a call to a
     function of this image evaluated to `0` while `_gen_go`'s model evaluated it
     to the callee's value — and `eval_eq_mojo`, which says the AST and the model
@@ -12522,25 +12569,12 @@ def generate_arm64_proof(prog, code, info) -> str:
     _callees = _callee_call_table(go_defs, prog, func_name)
     _cf_text = _call_func_lean(func_name, _admitted_calls_map, arity=arity,
                                exports=_callees)
-    # Build callFunc2 for 2-arg admitted contracts
-    _admitted_calls_map2 = {}
-    try:
-        _admitted_list = list(getattr(prog, "admitted", None) or [])
-        for c in _admitted_list:
-            if isinstance(c, dict):
-                name = c.get("name")
-                lean_name = c.get("lean_name")
-                ar = c.get("arity") if "arity" in c else 1
-            else:
-                name = getattr(c, "name", None)
-                lean_name = getattr(c, "lean_name", None)
-                ar = getattr(c, "arity", 1)
-            if name and lean_name and ar == 2:
-                _admitted_calls_map2[str(name)] = lean_name
-                if "." in str(name):
-                    _admitted_calls_map2[str(name).split(".")[-1]] = lean_name
-    except Exception:
-        _admitted_calls_map2 = {}
+    # Build callFunc2 for 2-arg admitted contracts. The arity-2 table is ALSO
+    # the set the AST bridge may state a two-argument call of, so it is kept
+    # apart from the fallback merge below, which folds one-argument spellings
+    # in and must not make a two-argument call of them look answered.
+    _admitted_map2_own = _admitted_arity2_map(getattr(prog, "admitted", None))
+    _admitted_calls_map2 = dict(_admitted_map2_own)
     # Also check admitted_calls_map entries - if they correspond to 2-arg admitted
     try:
         for k, v in (_admitted_calls_map or {}).items():
@@ -12973,7 +13007,9 @@ def generate_arm64_proof(prog, code, info) -> str:
     # which is the opposite of what this check is for. `sum_range`'s `range(n)`
     # is the measured loop case: caught by the check, refused, and worth 2
     # holes on both architectures.
-    _gaps = [] if ast_cannot else _ast_bridge_gaps(fn, _resolvable)
+    _gaps = ([] if ast_cannot
+             else _ast_bridge_gaps(fn, _resolvable,
+                                   frozenset(_admitted_map2_own)))
     if _gaps:
         raise NotImplementedError(_ast_gap_message(_gaps))
 
