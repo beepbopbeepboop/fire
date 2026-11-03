@@ -58,7 +58,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 |---|---|---|
 | `FORMAL_a_calcsize_image_hangs_once_in_several.md` | `bug-formal-formal-a-calcsize-image-hangs` | a `calcsize` image hangs for 60 s about once in six suite runs, and is clean 10/10 standalone |
 | `FORMAL_arm64_ieee754_has_no_step_arms.md` | **unclaimed** | ten IEEE-754 encoders the emitter calls, and no `arm64_step` arm |
-| `FORMAL_arm64_step_cannot_step_nine_wired_encodings.md` | **unclaimed** | `arm64_step` cannot step nine of the encodings `formal/arm64.py` emits |
+| `FORMAL_arm64_step_cannot_step_nine_wired_encodings.md` | **DELETED** | pinned by `test_regression_formal_arm64_nine_wired.py`; `TestUnsignedOffsetAccess` verifies |
 | `FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_conditional_path.md` | **unclaimed** | The arm64 exit cannot flush without a call, and a call on any proof-walked path breaks proof generation — the precondition for `FORMAL_arm64_exit_trap_does_not_flush_so_a_program_that_prints_then_exits_1_prints_nothing` |
 | `FORMAL_container_operators_that_need_a_per_element_stride.md` | **unclaimed** | The container operators CPython answers and this path now refuses: element-wise equality, ordering, set algebra, and a length-changing slice store |
 | `FORMAL_no_exceptions.md` | **unclaimed** | a `raise` is a TERMINATION on this path, not a value the caller can catch |
