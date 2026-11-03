@@ -680,9 +680,8 @@ is what keeps it from claiming a function where there is none.
 
 Three cases measured on both architectures — `os.environ.get(k)`,
 `os.environ[k]` and `os.environ[k] = v`, all three after the from-import — were
-the false sentence and are now the call-through-a-value sentence. Full account,
-with both messages quoted and the cause-table correction:
-`bugs/formal/FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md` §5a.
+the false sentence and are now the call-through-a-value sentence (accounted for
+in the environ view bug fix).
 
 **What is left of this document is unchanged and is still two things**: an
 EXPORTED SLOT (item 2 of "the exact next step"), and `sys.argv`'s source. §(2)'s

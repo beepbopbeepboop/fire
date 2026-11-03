@@ -1381,15 +1381,14 @@ def main(n):
     #
     # Four things are being said at once, and the first is the point of the
     # function existing: the answer is ONE word — a blob's address — carrying
-    # BOTH halves of the pair, which is what
-    # `bugs/formal/FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md` §4 called
-    # "a genuine two-word limit" and is not. The second is that the count word
-    # says how many elements the blob has, so a caller reads it by subscript
-    # rather than trusting a convention. The third is that the removal happened:
-    # the view is one pair shorter and `getenv` no longer sees the variable,
-    # because CPython's `popitem` unsets it. The fourth is that the pair
-    # OUTLIVES the view entry it came from — a copy, not the alias `environ_pop`
-    # shows it must not be — and that it is released by its own release function.
+    # BOTH halves of the pair, which was once called "a genuine two-word limit"
+    # and is not. The second is that the count word says how many elements the
+    # blob has, so a caller reads it by subscript rather than trusting a
+    # convention. The third is that the removal happened: the view is one pair
+    # shorter and `getenv` no longer sees the variable, because CPython's
+    # `popitem` unsets it. The fourth is that the pair OUTLIVES the view entry
+    # it came from — a copy, not the alias `environ_pop` shows it must not be —
+    # and that it is released by its own release function.
     # `pair` is ANNOTATED, and that is not incidental: a subscript through an
     # unannotated word cannot read a buffer, which is the refusal this block
     # first hit and which `re.escape`'s own docstring records being measured
