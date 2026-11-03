@@ -5296,6 +5296,12 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                            'unsafe_take_pointee')
             and not node.args and not (getattr(node, 'kwargs', None) or [])
             and f'{_recv_struct}_{method}' not in gen.func_return_types
+            # A struct reflected from a module dylib has its methods under the
+            # MODULE-QUALIFIED symbol (`rs_cnt_Counter_value`), which the bare
+            # key above never names, so its own `value()` was read as the
+            # pointer-wrapper accessor and answered the receiver's address.
+            and gen._struct_method_csym(_recv_struct, method, '') not in gen.func_return_types
+            and method not in gen._struct_method_names.get(_recv_struct, ())
             and _gmm_sms_key(_recv_struct, method) not in getattr(gen, '_struct_method_signatures', {})):
         t = gen._new_temp(ot)
         gen._emit(f'  {t} = {ov};')

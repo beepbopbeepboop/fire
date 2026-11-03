@@ -1555,6 +1555,40 @@ def _repr_cluster_reachable(parts: list) -> bool:
     return False
 
 
+UNIMPL_STUB_NAMES = ('_ReflectTable_in_dll', '_Bool_items', 'id')
+
+
+def _drop_unreferenced_unimpl_stubs(parts: list) -> list:
+    """`parts` without the `static` unimplemented-helper stubs (`id`,
+    `_Bool_items`, `_ReflectTable_in_dll`) that nothing in the module names.
+
+    They are emitted for every module so that a call to one resolves, but a
+    `static` function nothing calls is dead weight in every object -- about
+    two hundred bytes of the reflection client the module-cache gate holds
+    to a size line. The decision is a whole-text search for the name as an
+    identifier: a stub kept by mistake costs bytes, a stub dropped by mistake
+    is an undeclared call, so the test errs toward keeping.
+    """
+    keep: list = []
+    for part in parts:
+        text = _as_str(part)
+        dropped = False
+        for name in UNIMPL_STUB_NAMES:
+            if text.startswith('static ') and (' ' + name + ' (') in text and text.endswith('}'):
+                used = False
+                pat = re.compile(r'(?<![A-Za-z0-9_])' + name + r'(?![A-Za-z0-9_])')
+                for other in parts:
+                    otext = _as_str(other)
+                    if otext is not text and otext != text and pat.search(otext):
+                        used = True
+                        break
+                if not used:
+                    dropped = True
+        if not dropped:
+            keep.append(part)
+    return keep
+
+
 def _drop_unreachable_repr_cluster(parts: list) -> list:
     """`parts` without the generic-repr cluster when nothing reaches it.
 
@@ -18318,7 +18352,7 @@ def gen_module_impl(self, stmts: list):
     # bodies exist — a `print(x)` of a list literal in an IMPORTED module is a
     # reference, and that module's text is spliced into this `parts` long after
     # this module's own code was written.
-    return self._dedup_variadic_externs(_drop_unreachable_repr_cluster(parts))
+    return self._dedup_variadic_externs(_drop_unreferenced_unimpl_stubs(_drop_unreachable_repr_cluster(parts)))
 
 def __getattr__(name):
     import gimple_codegen as _gc
