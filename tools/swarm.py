@@ -4,8 +4,8 @@
     python3 tools/swarm.py [--target N] [--interval 120]   # --target defaults to the pool total (tools/pool.json)
 
 One pass, repeated:
-  1. FEED    keep the queue stocked: each missing worker slot gets the next free bugs/ doc (not FORMAL_*, which
-             formal_feed.py owns; not a doc any live task, queued task or external `control.py claim` holds). A doc
+  1. FEED    keep the queue stocked: each missing worker slot gets the next free bugs/ doc, formal docs included
+             (bugs/formal/ is easy class); not a doc any live task, queued task or external `control.py claim` holds. A doc
              is re-fed as long as nothing says stop. A doc whose bug report carries a line `STOP: <reason>` is NOT fed:
              the feeder logs the reason every pass it reaches that doc. That line is the only stop: there is no retry
              count. Each re-feed logs what the previous attempt produced (commits, or none).
