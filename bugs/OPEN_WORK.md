@@ -169,7 +169,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
-| `FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md` | `bug-formal-formal-an-explicit-parameter` | a generic applied as `T[Type, comptime]` is refused, and three of the messages are wrong about the source |
+| `FORMAL_an_explicit_parameter_list_naming_a_comptime_value` | `bug-formal-formal-an-explicit-parameter` | a generic applied as `T[Type, comptime]` is refused, and three of the messages are wrong about the source (fixed 2026-11-03; literal half 2026-10-08, alias half 2026-11-03) |
 | `FORMAL_a_bare_call_to_a_template_whose_type_arguments_are_inferrable.md` | **unclaimed** | the row the per-edge export gate hands 98 of the 163 files to |
 | `FORMAL_generic_monomorph_scope.md` | **unclaimed** | what a generic's instantiation does NOT cover |
 

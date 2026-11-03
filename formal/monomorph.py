@@ -810,7 +810,8 @@ def type_arg_text(expr, values=()) -> str:
     **A bare literal is nevertheless read as a VALUE argument when the same
     bracket also names a TYPE, and `_bracket_type_args` is where that rule
     lives.** `Tagged[Int, 0]()` on `struct Tagged[T, origin: Int]` is
-    `bugs/formal/FORMAL_an_explicit_parameter_list_naming_a_comptime_value.md` §2 row 4:
+    `FORMAL_an_explicit_parameter_list_naming_a_comptime_value` (literal
+    comptime-value argument on a mixed bracket, fixed 2026-10-08) §2 row 4:
     the second element is a comptime VALUE and every other element is a type, so
     the bracket is a cross-module instantiation rather than the all-values
     comptime specialization `tile[2, 3]` is. The substitution itself already
