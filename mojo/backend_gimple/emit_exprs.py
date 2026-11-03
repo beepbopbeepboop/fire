@@ -4418,7 +4418,9 @@ def _lower_binary_tail(gen, op: str, left_node, lt: str, lv: str,
         return typ, val
     if (op == '+' and lt in ('int', 'int64_t') and rt in ('int', 'int64_t')
             and (ginf._is_may_hold_str_param(gen, left_node)
-                 or ginf._is_may_hold_str_param(gen, right_node))):
+                 or ginf._is_may_hold_str_param(gen, right_node)
+                 or gen._is_dyn_word(left_node, lv)
+                 or gen._is_dyn_word(right_node, rv))):
         # Operands that are words of unknown kind, one of them a PARAMETER some call
         # site passed a string for: `+` is string concatenation or integer
         # addition depending on what the words are, which only the run time

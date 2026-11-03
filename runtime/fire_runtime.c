@@ -11145,12 +11145,16 @@ int64_t mojo_getitem_word(int64_t w, int64_t i)
     return 0;
 }
 
-/* `a + b` where both are words of unknown kind: two strings concatenate, anything
- * else adds as integers (the word is its own value). */
+/* `a + b` where both are words of unknown kind: two strings concatenate, both
+ * lists concatenate via mojo_list_concat, otherwise adds as integers (the word
+ * is its own value). */
 int64_t mojo_add_words(int64_t a, int64_t b)
 {
     if (mojo_boxed_is_str(a) && mojo_boxed_is_str(b))
         return (int64_t)(intptr_t)mojo_str_cat((char *)(intptr_t)a, (char *)(intptr_t)b);
+    if (mojo_is_registered_list(a) && mojo_is_registered_list(b))
+        return (int64_t)(intptr_t)mojo_list_concat((MojoList *)(intptr_t)a,
+                                                  (MojoList *)(intptr_t)b);
     return a + b;
 }
 
