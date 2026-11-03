@@ -2425,9 +2425,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                     self._emit_receiver_writeback()
                 self._emit_mov_imm(Reg.RAX, 0)
             else:
-                callee = self._vkinds.no_value_callee_of(stmt.value)
-                if callee is not None:
-                    raise CodegenError(M.returnless_value_refusal(callee))
                 # A double returned under an INTEGER annotation. Asked before
                 # the value is emitted, because the answer is about the
                 # FUNCTION's declaration rather than about the return
@@ -5150,18 +5147,17 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         a.label("L_chk")
         mvz(RAX, RDI, 0)
         t64(RAX, RAX)
-        jc("jz", "L_add_dot0")
+        jc("jz", "L_nul")
         cpi(RAX, 0x2E)
-        jc("je", "fr_ret")
+        jc("je", "L_nul")
         cpi(RAX, 0x65)
-        jc("je", "fr_ret")
+        jc("je", "L_nul")
         cpi(RAX, 0x2D)
         jc("je", "L_chk")  # '-' might be in "1e-04"
         ai(RDI, 1)
         jp("L_chk")
-        a.label("L_add_dot0")
-        # No '.' or 'e' found: add ".0" (overwrite the NUL terminator from the copy)
-        ai(RSI, -1)
+        a.label("L_nul")
+        # No '.' or 'e' found: add ".0"
         mi(RDX, 0x2E)
         mvb(RSI, 0, RDX)
         ai(RSI, 1)

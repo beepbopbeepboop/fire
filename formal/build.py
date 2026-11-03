@@ -16455,7 +16455,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         # is the type's TAG, so it has a home — the same one a folded
         # module-level constant has, which is the fourth of the four this walk
         # already accepts, and both backends materialise it where they
-        # materialise the others. `bugs/formal/FORMAL_type_name_as_a_value.md` is the
+        # materialise the others. `bugs/formal/FORMAL_dtype_object_as_a_value.md` is the
         # long form; `model.TYPE_VALUE_NAMES` is the name space and
         # `model.type_value_tag` the one reader both backends ask, so the two
         # architectures cannot disagree about what a type is.
@@ -16740,7 +16740,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
             # not a value, so that sentence is false about the file and sends
             # the reader to the register allocator for a fact about the
             # language. The census behind this is in
-            # bugs/formal/FORMAL_type_name_as_a_value.md.
+            # bugs/formal/FORMAL_dtype_object_as_a_value.md.
             #
             # Asked AFTER the module-symbol question, not before, and the
             # ordering is not a compromise — it is what the measurement forced.

@@ -47,7 +47,7 @@ ImmStaticOrigin]`'s second element is a NAME bound to a `comptime` ALIAS
 (`std/origin/__init__.mojo`'s `ImmStaticOrigin = Origin[_mlir_attr[…]]()`),
 whose initializer does not fold because a module it names does not build. That
 is a value substitution of a *resolved alias*, and it is the CPython-vs-source
-half of the multi-index comptime-params message case (the `Span[StaticString, ImmStaticOrigin]` / `ImmStaticOrigin` chain; the doc was deleted when its message fix landed)
+half of `bugs/formal/FORMAL_a_comptime_origin_alias_is_an_mlir_attribute_template.md`
 (claimed elsewhere), not this one. So this doc stays open with §4.1's literal
 half closed.
 

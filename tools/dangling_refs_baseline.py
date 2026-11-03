@@ -34,6 +34,7 @@ BASELINE = {
     'FORMAL.md': 2,
     'bugs/FORMAL_os_stat_dev_is_sign_extended_in_cpython_and_unsigned_here.md': 1,
     'bugs/formal/FORMAL_a_division_by_a_symbolic_value_leaves_the_zero_guard_open.md': 1,
+    'bugs/formal/FORMAL_a_range_loop_contract_states_the_unsigned_order_against_a_signed_flag.md': 1,
     'bugs/formal/FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md': 1,
     'bugs/formal/FORMAL_dataclass_runtime_reflection.md': 1,
     'bugs/formal/FORMAL_dylib_export_loops_and_frame_bounds.md': 1,
@@ -104,6 +105,7 @@ BASELINE = {
 # reason the header above gives for its prefixed entry.
 BARE_BASELINE = {
     'CRASH.md': 1,
+    'bugs/FORMAL_arm64_proof_gen_sp_tracking_drops_the_imm_shift.md': 1,
     'bugs/OPEN_WORK.md': 1,
     'bugs/formal/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md': 1,
     'bugs/formal/FORMAL_arm64_known_proof_gaps.md': 7,

@@ -24991,7 +24991,7 @@ TYPE_APPLICATION_REFUSALS = [
 
 # ── a TYPE as a VALUE ──────────────────────────────────────────────────────
 #
-# `bugs/formal/FORMAL_type_name_as_a_value.md` is the long form. A type on this path
+# `bugs/formal/FORMAL_dtype_object_as_a_value.md` is the long form. A type on this path
 # is a word, and the word is a TAG: one number per type, computed from the
 # type's name by `model.type_tag`, the same number in every unit of the image
 # and on both architectures. So `t == Int32` is an integer comparison, a type
