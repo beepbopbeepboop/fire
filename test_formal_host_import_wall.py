@@ -6,7 +6,7 @@ case each, and each case a filter that is what separates.
 
 `tools/formal_host_import_wall.py` answers "what is left of the
 `not-answerable/host-import` row, and what would each name take", which had been
-described in prose three times over — `bugs/FORMAL_the_host_import_wall_is_at_its_honest_floor.md`
+described in prose three times over — `bugs/formal/FORMAL_the_host_import_wall_is_at_its_honest_floor.md`
 §5, and the thirteen-row `terminal`-vs-`closure` walk whose doc is deleted with
 this promotion, whose finding (eleven of thirteen names were CLOSURE rather than
 work, and a ranking that reads `reach` alone cannot tell the two) is what the
@@ -362,7 +362,7 @@ class TestTheSweepColumn(unittest.TestCase):
         them name a host module: a name a tier classifies, and a name CPython
         ships that no tier classifies. A pattern that knows only the first drops
         exactly the files that are in no tier, so the column would be silent
-        about the rows `bugs/FORMAL_stdlib_module_names_are_not_classified.md`
+        about the rows `bugs/formal/FORMAL_stdlib_module_names_are_not_classified.md`
         is about. Measured on `sweep-arm-11.txt`: 4 of 203 lines, all four of
         the second wording.
         """

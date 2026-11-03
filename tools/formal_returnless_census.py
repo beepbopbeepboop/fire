@@ -6,7 +6,7 @@ for.
     python3 tools/formal_returnless_census.py [--files N] [--rows 40]
     python3 tools/formal_returnless_census.py --paths DIR [DIR …]
 
-`bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md`
+`bugs/formal/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md`
 §0 asks for exactly this and explains why the census it ran is not the answer:
 that one was NAME-keyed per file, and every row it reported was an artefact of
 it. `utils/coord.mojo` declares `def value` three times (lines 59, 150, 395) and
@@ -220,7 +220,7 @@ def decided_names(index) -> dict:
     `_declares_a_return`'s docstring states the second half in its own words ("it
     states a type, so this path has said what it means even where the value is not
     what CPython's is"), and §0b of
-    `bugs/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md`
+    `bugs/formal/FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md`
     measures the rule with that half switched OFF, which is only a measurement if
     it is ON by default.
 

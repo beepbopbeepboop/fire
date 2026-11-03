@@ -83,7 +83,22 @@ anywhere else), these rules override any instinct to move on quickly:
   interim gate runs and interim check-ins were seen as wasted tokens/time
   when the intent was always to gate once at the end anyway.
 
+## Process safety — NEVER kill processes (`pkill`/`kill` are forbidden)
+The user's machine runs many other worktrees and lanes at the same time.
+Agents in this tree must NEVER run `pkill`, `kill`, `killall`, or any
+process-kill — not on `fire`/`python`/`lean` processes, not on orphaned
+processes from a previous session, not "to free memory". A still-running
+process belongs to someone (the user, another lane, a verification the user
+is watching): wait on it, work around it, or REPORT it in the round's
+output. The only sanctioned killing mechanism is `tools/memcap.py`'s own
+ceiling, and only inside the `tools/memslot.py` wrappers the tree's tests
+use. Recorded 2026-11-02 after a near-miss report.
+
 ## Bug rounds — every round must move us closer to the end
+Base directive (user, 2026-10-31): one work round handles ONE bug, fully
+finished (including its commit) before the next round starts. Earlier batches
+of three were relaxed away on 2026-11-01: the extra scope is where rounds die
+mid-flight and leave in-flight state for the next session to reconstruct.
 Base directive (user, 2026-10-29): every work round on a bug must move the work
 forward. A round's output may not be "re-verified, still open" with no tree or
 doc change. The valid outputs of a round, in descending order of preference:
@@ -236,7 +251,7 @@ different jobs:
   gate would pass by construction and stop detecting the byte-identity
   divergence it exists to detect. Do not "fix" this by adding a cache; if
   bootstrap is too slow, fix the memory blowup
-  (`bugs/CODEGEN_bootstrap_resource_blowup.md`), which is the actual cause.
+  (`bugs/hard/CODEGEN_bootstrap_resource_blowup.md`), which is the actual cause.
   For scale: the 45-file per-stage sweeps measure **1.8 s** in total, so all
   of bootstrap's ~32 minutes is the three whole-closure dumps plus the
   `gcc -O0` compile between them. Per-file caching would buy nothing.
@@ -413,13 +428,12 @@ cheap (0.0-0.2 GB, 1.2-11.6 s each) and all in `coroutine` and `x86`, each
 measured one at a time before being named, with the measurement at its
 registration. (A FANOUT can state a count too, checked against the per-item
 verdicts rather than a summary line; see `observed_fanout_failures` in
-`tools/suite.py`.) `bugs/CODEGEN_ab_native_fails.md` §4 carries the full inventory
+`tools/suite.py`.) `bugs/hard/CODEGEN_ab_native_fails.md` §4 carries the full inventory
 and the reasoning for `expect=` rather than `disabled=` on each.
 
 | test | marker | subject | cost it charges every gate |
 |---|---|---|---|
 | `ab-native` | `expect=`, count checked (1) | python vs native codegen over the A/B corpus | 0.1 GB / ~10 s measured, `program` (reserves 55 GB); `native` |
-| `async-void-return` | `expect=`, count checked (3) | an async function with no return value | `tiny`; `coroutine` |
 | `coro-future-await` | `expect=`, count checked (17) | `await` on a Future in the coroutine runtime | `tiny`; `coroutine` |
 
 `formal-toplevel` and `formal-module-attr` were in this table and are not any
@@ -449,7 +463,7 @@ regex over a child's output and a child that writes a wrong artifact prints
 nothing. Residual divergence class, if one reappears:
 commit e8a7135b8; the whole-closure
 compile costs 12-15 GB and ~7.5 min per stage
-(`bugs/CODEGEN_bootstrap_resource_blowup.md`).
+(`bugs/hard/CODEGEN_bootstrap_resource_blowup.md`).
 
 **The gate is otherwise clean, and deliberately no file here says how many.**
 Every `expect=` and `disabled=` registration in the registry is accounted for

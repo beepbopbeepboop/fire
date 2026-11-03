@@ -80,8 +80,8 @@ floor now (`formal/model.py::division_floors` and `lib/ProofLib.lean`'s
 dividend over a signed divisor through the RUNTIME half with 100/100 matches.
 It is here because of the PROOF half: a signed dividend over a free `n` reaches
 `eval_eq_mojo`, whose rewrite is not decidable over a free `UInt64`
-(`bugs/FORMAL_eval_eq_mojo_is_undecidable_over_a_free_n.md`, and the sweep
-ledger `bugs/FORMAL_fuzz_ledger.md` §2.1a for the runtime side).  Lifting the
+(`bugs/formal/FORMAL_eval_eq_mojo_is_undecidable_over_a_free_n.md`, and the sweep
+ledger `bugs/formal/FORMAL_fuzz_ledger.md` §2.1a for the runtime side).  Lifting the
 restriction is that doc's fix, not this file's.
 
 One thing is generated ON PURPOSE and is the reason a corpus of unsigned words
@@ -135,7 +135,7 @@ WHAT A FINDING IS, AND WHAT IT IS NOT
 EXIT STATUS: 1 when an unexplained `SOUNDNESS-MISMATCH` is reported.  A refusal,
 a rejection, a bound and a known divergence are all reported and counted, and
 none of them is a finding — a fuzzer that counted those would spend its whole
-budget re-discovering `bugs/FORMAL_known_limits.md`.
+budget re-discovering `bugs/formal/FORMAL_known_limits.md`.
 
 WHAT IS NOT HERE, so the next reader does not have to measure it
 ----------------------------------------------------------------
@@ -567,7 +567,7 @@ def _lean_memory_detail(detail):
 
     which is a statement about the MACHINE and not about the proof: the file was
     never finished with. It is its own class for the reason `run_lean`'s
-    `bound-exceeded` is one — `bugs/FORMAL_proof_coverage_census_2026-10-03.md`
+    `bound-exceeded` is one — `bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md`
     §0.3 measured Lean's memory ceiling as the binding constraint on this half —
     and a campaign that counted it as `lean-rejected` would report a resource
     outcome as a fact about the generator, which is the one inference this tool

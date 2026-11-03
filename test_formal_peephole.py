@@ -60,6 +60,7 @@ from formal.arm64 import (encode_add_xd_xn_imm, encode_b, encode_bl,        # no
                            encode_mul_xd_xn_xm, encode_ret)
 from formal.arm64_codegen import ARM64Codegen                  # noqa: E402
 from formal.build import compile_formal                        # noqa: E402
+from exec_budget import RUN_TIMEOUT_S  # per-child budgets
 
 
 EXAMPLES = sorted(
@@ -973,7 +974,7 @@ class TestTheCorpus(unittest.TestCase):
 
     def _run(self, path):
         try:
-            proc = subprocess.run([path], capture_output=True, timeout=30)
+            proc = subprocess.run([path], capture_output=True, timeout=RUN_TIMEOUT_S)
         except subprocess.TimeoutExpired:
             return ("timeout", b"")
         return (proc.returncode, proc.stdout)

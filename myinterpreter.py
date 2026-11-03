@@ -62,7 +62,8 @@ class MojoError(Exception):
     self-hosting compiler doesn't know what to do with `super()` at all
     (tries to call it as a plain undefined function named `_super`)."""
     def __init__(self, *args):
-        Exception.__init__(self, ' '.join(str(a) for a in args))
+        self.args = args
+        Exception.__init__(self, *args)
 
 
 class MojoRaisedException(Exception):
@@ -1291,7 +1292,7 @@ class _MojoWriter:
 
 class MojoInstance:
     """An instance of a Mojo-defined struct/class."""
-    def __init__(self, mojo_class):
+    def __init__(self, mojo_class: 'MojoClass'):
         self._mojo_class = mojo_class
 
     def __getattr__(self, name):
@@ -1455,7 +1456,7 @@ class BoundClassMethod:
     `cls.<attr>` then raised "'int' object has no attribute ..."). That made
     the ORACLE disagree with the compiled path, which does pass a receiver,
     on a shape real code uses (see
-    bugs/COMPILE_FAIL_importlib_resources_readers.md's
+    bugs/mid/COMPILE_FAIL_importlib_resources_readers.md's
     `yield from cls.<sibling generator>(...)`).
 
     A separate class rather than a second receiver kind inside `BoundMethod`:
@@ -1499,7 +1500,7 @@ class MojoClass:
         'Float16': 0.0, 'Float32': 0.0, 'Float64': 0.0,
     }
 
-    def __init__(self, name, fields, methods, interpreter, bases=None,
+    def __init__(self, name, fields, methods: dict, interpreter, bases=None,
                  comptime_aliases=None, static_methods=None, class_methods=None,
                  def_scope=None):
         self.name = name
@@ -2512,7 +2513,10 @@ def _mojo_iter(value):
     unchanged). Exhaustion is the Mojo `__next__` raising `StopIteration`,
     which is a real Python exception, so it propagates unchanged."""
     if isinstance(value, MojoInstance):
-        cls = value._mojo_class
+        # Annotated: `value` is unannotated, so `value._mojo_class` is typed as a
+        # word unless the local says what it is; `cls.methods.get` then lowered
+        # to `mojo_dict_get_int(<int64>, ...)` (gcc: "makes pointer from integer").
+        cls: 'MojoClass' = value._mojo_class
         method = cls.methods.get('__iter__')
         if method is not None:
             return _mojo_struct_iter_steps(cls, method(cls.interpreter, value))
@@ -2537,7 +2541,7 @@ def _mojo_next(iterator, *default):
     message for a non-iterator."""
     if not isinstance(iterator, MojoInstance):
         return next(iterator, *default)
-    cls = iterator._mojo_class
+    cls: 'MojoClass' = iterator._mojo_class
     method = cls.methods.get('__next__')
     if method is None:
         raise TypeError(f"'{cls.name}' object is not an iterator")
@@ -4018,7 +4022,7 @@ class Interpreter:
         undecorated body. Because the interpreter is the documented oracle
         for "the compiled path is wrong", that made the whole class of
         decorator bugs invisible — the two engines agreed on the wrong
-        answer. See bugs/COMPILE_FAIL_decorator_application_dropped.md.
+        answer. See bugs/mid/COMPILE_FAIL_decorator_application_dropped.md.
 
         Bottom-up because that is Python's order: `@a` above `@b` above
         `def f` means `f = a(b(f))`. A decorator whose application raises is

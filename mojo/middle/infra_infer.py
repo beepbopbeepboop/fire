@@ -382,7 +382,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
     # and `_SCALAR_ARITY_BUILTINS` below is what keeps that true — see its own
     # comment for why the arity test is not optional.
     _ITERABLE_CONSUMING_BUILTINS = {
-        'map', 'zip', 'enumerate', 'sorted', 'reversed', 'iter', 'next',
+        'map', 'zip', 'enumerate', 'sorted', 'reversed', 'iter',
         'list', 'tuple', 'set', 'frozenset', 'sum', 'any', 'all',
         'min', 'max', 'divmod', 'round',
     }
@@ -733,6 +733,19 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                         is_indirect = isinstance(a, gimple_ctypes.IdentExpr) and a.name in single_char_vars
                         if (is_direct or is_indirect) and _is_single_char_literal(b):
                             _F['is_char_compared'] = True
+                if expr.op == 'in' and isinstance(expr.right, (gimple_ctypes.TupleExpr, gimple_ctypes.ListExpr)):
+                    # `path[0] in ('.', ...)`: an element of the parameter tested
+                    # against single-character string literals is a character of a
+                    # string, exactly as `path[0] == '.'` is (Lib/glob.py's
+                    # `_ishidden`).
+                    _a_in = expr.left
+                    if (isinstance(_a_in, gimple_ctypes.SubscriptExpr)
+                            and not isinstance(_a_in.index, gimple_ctypes.SliceExpr)
+                            and isinstance(_a_in.obj, gimple_ctypes.IdentExpr)
+                            and _a_in.obj.name in derived_from_param):
+                        for _el in expr.right.elements:
+                            if _is_single_char_literal(_el):
+                                _F['is_char_compared'] = True
                 if expr.op == '+':
                     # `param + <string literal>` / `<string literal> +
                     # param` (directly, or through a local already known
@@ -948,7 +961,7 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                 for arg in expr.args:
                     scan_expr(arg)
 
-        def scan_nodes(node_list):
+        def scan_nodes(node_list: list):
             """Recursively scan a list of statements."""
             def _track_derivation(target, value):
                 """`x = <subscript/slice of something already known to
@@ -1363,10 +1376,38 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
                         # "cannot coerce MojoList * to MojoDict * ... value=
                         # 'binding'", which took `selfhost`, `mojoc` and
                         # `bootstrap-stage2-cc` down together.
+                        # A parameter handed to `os.path.*(...)` is a path (a
+                        # string or bytes pointer in this model): slicing it
+                        # (`pathname[:0]`) is a string slice, not a list's.
+                        _os_path_arg = False
+                        for _fcx in function_calls:
+                            _fcxp = _as_str(_fcx).split(_FC_SEP)
+                            if _fcxp[0] == '__os_path_arg':
+                                _os_path_arg = True
+                                continue
+                            # ...or forwarded to a function whose own parameter
+                            # was inferred a string.
+                            _fnames = getattr(gen, '_func_param_names', {}).get(_fcxp[0])
+                            if _fnames and len(_fcxp) > 1:
+                                try:
+                                    _fpn = _fnames[int(_fcxp[1])]
+                                except (ValueError, IndexError):
+                                    continue
+                                if gen._inferred_param_types.get(_fcxp[0], {}).get(_fpn) == 'char *':
+                                    _os_path_arg = True
+                        # ...or one handed on to another function's path-word
+                        # parameter (`iglob` -> `_iglob`, a generator this
+                        # inference never sees).
+                        import mojo.middle.coro as _coro
+                        if (pname in _coro._PTR_FORWARDED.get(_as_str(func.name), ())
+                                or pname in getattr(func, '_ptr_forwarded', ())):
+                            _os_path_arg = True
+                        _fallback = 'MojoList *'
                         inferred[pname] = (_returned_param_containers(func)
                                           .get(pname)
                                           or _rebound_param_containers(gen, func)
-                                          .get(pname) or 'MojoList *')
+                                          .get(pname)
+                                          or ('char *' if _os_path_arg else _fallback))
 
             # If not subscripted, try to infer from function calls
             elif function_calls:
@@ -1489,6 +1530,19 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
             # for the reason given where that list is built.
             if pname not in inferred and is_string_method and len(_struct_evidence_list) == 0:
                 inferred[pname] = 'char *'
+
+    # An UNANNOTATED parameter whose declared default is a float literal IS a
+    # float parameter, by the default-as-evidence rule `_param_ctype` applies
+    # to its definition. Recorded here too so the body's return-type inference
+    # (which seeds `var_types` from this table, not from `_param_ctype`) agrees
+    # with the signature: `def keep(scale=0.5): return scale` inferred
+    # `int64_t` and printed 0 for 0.5. Weaker than any usage evidence above.
+    _fdefaults = getattr(func, 'param_defaults', None) or {}
+    for _fp in func.params:
+        _fpn = _as_str(_fp[0]).lstrip('*')
+        if (_fp[1] is None and _fpn not in inferred
+                and isinstance(_fdefaults.get(_fpn), FloatLiteral)):
+            inferred[_fpn] = 'double'
 
     # A container guess is only as good as the body's own use of the name. A
     # parameter the body REBINDS to a container of another kind (`live =
@@ -1735,6 +1789,13 @@ def _collect_return_types(gen, stmts: list, acc: list):
                 gen._collect_return_types(node.else_body, acc)
         elif isinstance(node, (gimple_ctypes.WhileStmt, gimple_ctypes.ForStmt)):
             gen._collect_return_types(node.body, acc)
+            if node.else_body:
+                gen._collect_return_types(node.else_body, acc)
+        elif isinstance(node, gimple_ctypes.MatchStmt):
+            # A function whose `return`s are all inside `match` arms had NO return statement as
+            # far as this scan could see, so it was typed `void` (or `int64_t`) and handed back 0.
+            for _mc in node.cases:
+                gen._collect_return_types(_mc.body, acc)
         elif isinstance(node, gimple_ctypes.TryStmt):
             gen._collect_return_types(node.body, acc)
             for h in node.handlers:
@@ -1750,7 +1811,15 @@ def _infer_return_type_core(gen, body: list) -> str:
     """Infer return type by scanning body for ReturnStmt nodes."""
     acc: list[str] = []
     gen._collect_return_types(body, acc)
-    return gimple_ctypes.TypeLattice.join_all(acc) if acc else 'void'
+    if acc:
+        return gimple_ctypes.TypeLattice.join_all(acc)
+    # A function that can only RAISE (an abstract method: `raise
+    # NotImplementedError`) never produces a value, but a subclass overrides it
+    # and every call through the base reads one: a word, not `void`.
+    if (body and isinstance(body[-1], gimple_ctypes.RaiseStmt)
+            and not _as_str(gen.current_func_name or '').startswith('__mgco')):
+        return 'int64_t'
+    return 'void'
 
 # A local bound to a CONTAINER LITERAL, and the ctype that literal is.
 # Deliberately only these four node types: a container is a real pointer,
@@ -2106,7 +2175,7 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
             # s` printed the pointer's decimal address instead of "abc"
             # until this case was added; the container literals below
             # already had an identical fix.
-            cand = 'MojoBytes *' if n.value.is_bytes else 'char *'
+            cand = 'MojoBytes *' if getattr(n.value, 'is_bytes', False) else 'char *'
         elif isinstance(n.value, gimple_ctypes.FloatLiteral):
             # A `double` local, which is the ONE scalar this map used to
             # have no answer for at all — the docstring above calls scalars
@@ -2179,6 +2248,17 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
                     # generator api, and only when `next` is not shadowed, so
                     # nothing about a scalar- or opaque-class-valued call
                     # changes.
+                    elif (isinstance(_v.func, gimple_ctypes.MemberExpr)
+                          and _vt in ('char *', 'MojoList *', 'MojoDict *', 'MojoSet *')
+                          and gen._module_attr_call_return_type(_v) == _vt):
+                        # `c = m.f(...)` through a bare-import module binding
+                        # whose defining unit published a pointer return: a
+                        # local bound to it is that pointer, so `return c`
+                        # must not infer the int64_t default (the string
+                        # printed as its address). Gated on the SAME helper
+                        # `_quick_type` answers the call with, never on the
+                        # member name alone.
+                        cand = _vt
                     elif (isinstance(_v.func, gimple_ctypes.IdentExpr)
                           and _as_str(_v.func.name) == 'next'
                           and not gen._locally_binds_name('next')):
@@ -2188,6 +2268,25 @@ def _prebound_local_ctypes(gen, body: list) -> dict:
                             _nv = gen._generator_value_ctype_for_next(_nargs[0])
                         if _nv:
                             cand = _nv
+                if cand is None and not isinstance(_v, (gimple_ctypes.IdentExpr, gimple_ctypes.StringLiteral)):
+                    # A STRING-valued expression bound to a local: `a = str(n)`,
+                    # `a = d + "x"`, `a = d.strip()`, `a = os.path.join(d, f)`.
+                    # `return a` from a function with no return annotation
+                    # inferred the int64_t default, so the function was
+                    # declared `int64_t`, the body laundered the `char *`
+                    # through it, and the caller's `print` formatted the
+                    # string's ADDRESS as a decimal number -- silently wrong
+                    # output with a clean build. `return d + "x"` directly
+                    # was already right: `_quick_type` types the returned
+                    # expression, but not a local that was bound from it,
+                    # because this map only accepted literals, containers,
+                    # struct constructors and `next()` as pointer evidence.
+                    # Asked through `gen._quick_type`, the SAME estimator the
+                    # `return` is typed with, so the two agree by
+                    # construction; only a `char *` answer is taken, so no
+                    # scalar, container or struct answer changes.
+                    if gen._quick_type(_v) == 'char *':
+                        cand = 'char *'
                 if cand is None:
                     # `q = p` -- a local bound from ANOTHER local this map
                     # already knows, which is the same value under a second
@@ -2948,7 +3047,7 @@ def _is_free_eligible_function(fn) -> bool:
                            # of its own is_async/is_generator flags
     return True
 
-def _build_analysis_funcs(stmts) -> dict:
+def _build_analysis_funcs(stmts: list) -> dict:
     """The module-level functions the ownership analysis may resolve a call
     to, `{name: FunctionDef}`. A name is included only if the analysis can
     be sure a call spelled `name(...)` in this module reaches THAT body:
@@ -2980,7 +3079,7 @@ def _build_analysis_funcs(stmts) -> dict:
             out[s.name] = s
     return out
 
-def _build_analysis_structs(stmts) -> dict:
+def _build_analysis_structs(stmts: list) -> dict:
     """The module's structs the ownership analysis may reason about,
     `{struct name: {method name: FunctionDef}}`. A struct is included only if a
     constructor call `Name(...)` provably builds a fresh instance and its
@@ -3031,6 +3130,23 @@ def _build_fresh_returning(funcs: dict, structs: dict = None) -> set:
     for name in funcs:
         try:
             if ownership_destruct.analyze_returns_fresh(funcs[name], funcs, {}, structs):
+                out.add(name)
+        except Exception:
+            pass
+    return out
+
+def _build_fresh_closure_returning(funcs: dict) -> set:
+    """Names in the analysis table whose every call provably returns a brand-
+    new CAPTURING closure (ownership_destruct.returns_fresh_closure) — a value
+    the caller can own and free with its environment and the `{mut}` boxes it
+    holds (mojo_closure_free). The escaping counterpart of `_build_fresh_
+    returning` (a fresh container). Same fail-open-to-"not proven" contract: a
+    failure inside the analysis drops the name, which keeps today's leak and
+    never a use-after-free."""
+    out = set()
+    for name in funcs:
+        try:
+            if ownership_destruct.returns_fresh_closure(funcs[name]):
                 out.add(name)
         except Exception:
             pass
@@ -3241,6 +3357,50 @@ def _compute_scoped_closure_candidates(fn, whole: set) -> set:
     except Exception:
         return set()
 
+def _is_fresh_closure_binding(stmt, fresh_closure_returning) -> bool:
+    """True iff `stmt` is a `var x = f(...)`/`x = f(...)` whose callee `f` is
+    proven to return a fresh closure (`fresh_closure_returning`) — the shape a
+    caller owns with `mojo_closure_free`. A shadowed name (a local of this
+    function named `f`) is not the module callee, so it is not a binding."""
+    val = getattr(stmt, 'value', None)
+    if val is None or not isinstance(val, CallExpr):
+        return False
+    if not isinstance(val.func, IdentExpr):
+        return False
+    return _as_str(val.func.name) in fresh_closure_returning
+
+def _compute_scoped_fresh_closure_candidates(fn, fresh_closure_returning) -> set:
+    """The locals of `fn` bound to a call that provably returns a fresh
+    closure, owned by a LOOP BODY (declared directly in it and only called,
+    `ownership_destruct.call_value_owned`), so the caller owns the value and
+    frees it with `mojo_closure_free` at the body's exit. The escaping
+    counterpart of `_compute_scoped_closure_candidates` (a local lambda). Same
+    fail-open-to-"free nothing" contract: a bug in this optional analysis must
+    never fail a build, and "not proven" keeps today's leak, never a use-after-
+    free. An empty `fresh_closure_returning` (no such callee in the module) is
+    the common case and costs one set lookup."""
+    if getattr(fn, 'is_async', False) or getattr(fn, 'is_generator', False):
+        return set()
+    if not fresh_closure_returning:
+        return set()
+    try:
+        out = set()
+        bodies = []
+        ownership_destruct._collect_loop_bodies(fn.body, bodies)
+        for body in bodies:
+            for st in body:
+                nm = ownership_destruct._decl_name(st)
+                if nm == '':
+                    continue
+                if not _is_fresh_closure_binding(st, fresh_closure_returning):
+                    continue
+                if not ownership_destruct.call_value_owned(fn.body, nm):
+                    continue
+                out.add(nm)
+        return out
+    except Exception:
+        return set()
+
 def _lambda_bindings(fn) -> set:
     """Every name `fn` binds to a `lambda` expression, however deeply — the
     whole-program node walk `exprtypes._walk_ast` already provides, not a
@@ -3274,6 +3434,18 @@ def _lambda_owned(body, name: str) -> bool:
     False, so an unanalysable body keeps the value alive."""
     try:
         return ownership_destruct.lambda_value_owned(body, name)
+    except Exception:
+        return False
+
+
+def _call_value_owned(body, name: str) -> bool:
+    """A local bound to the return value of a fresh-closure-returning call may
+    be freed at its end-of-scope only if the binding is a CallExpr whose callee
+    is such a fn, and the name is neither read nor written again afterwards
+    (see ownership_destruct.call_value_owned). A failure inside the check
+    answers False, so an unanalysable body keeps the value alive."""
+    try:
+        return ownership_destruct.call_value_owned(body, name)
     except Exception:
         return False
 

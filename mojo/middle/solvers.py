@@ -1106,3 +1106,15 @@ class ClosureInfo:
         # `gen` — the value belongs to this lifted function, not to the
         # whole compile.
         self.call_site_param_types: dict = {}
+    def value_ctype(self) -> str:
+        """The C type of this closure when it is referenced as a VALUE: a
+        variadic def (`def gen(*a, **kw)`) is a `MojoVarargFn` (a word whose
+        call packs its arguments, like a variadic lambda), any other capturing
+        closure a `MojoBoundMethod *`, and a capture-free one a bare function
+        pointer."""
+        if not self.env_struct:
+            return 'void *'
+        for _pn, _pa in self.inner_def.params:
+            if _pn.startswith('*'):
+                return 'void *'
+        return 'MojoBoundMethod *'
