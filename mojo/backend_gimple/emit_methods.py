@@ -6202,6 +6202,9 @@ def _lower_set_method(gen, ov: str, method: str, args: list) -> tuple:
         gen._emit_label(bb_after)
         return 'int', gen._new_val('int', '0')
     if method == 'add' and args:
+        if (isinstance(args[0], gimple_ctypes.NoneLiteral)
+                or (isinstance(args[0], gimple_ctypes.IdentExpr) and args[0].name == 'None')):
+            return gen._void_call('mojo_set_add_none', [('MojoSet *', ov)])
         at, av = gen.lower_expr(args[0])
         # Record the set's element type on the RECEIVER the same way a
         # `{...}` literal does (`_lower_set_literal`) — `s = set()` then

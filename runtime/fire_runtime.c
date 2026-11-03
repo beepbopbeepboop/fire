@@ -7996,7 +7996,7 @@ static void _set_grow(MojoSet *s)
     for (int64_t i = 0; i < old_cap; i++) {
         if (old[i].tag == 0) {
             _set_replay_entry(s, 0, old[i].val_i, old[i].val_s, old[i].seq);
-        } else if (old[i].tag == 1 || old[i].tag == 2) {
+        } else if (old[i].tag == 1 || old[i].tag == 2 || old[i].tag == 3) {
             _set_replay_entry(s, old[i].tag, 0, old[i].val_s, old[i].seq);
             free(old[i].val_s);
         }
@@ -8072,6 +8072,42 @@ MojoBytes *mojo_set_val_bytes(MojoSet *s, int64_t idx)
     if (!s || idx < 0 || idx >= s->cap || s->slots[idx].tag != 2) return NULL;
     char *v = s->slots[idx].val_s;
     return mojo_bytes_from_cstr(v ? v : "");
+}
+
+/* A `None` member: its own slot tag (3) in the str-keyed domain, with an empty
+ * key, so `None in {0}` is False and `None in {None, 0}` is True -- the int 0 and
+ * None no longer share a slot. Iteration reads the slot as the int 0 (the
+ * word's view of None); the str/repr views name it. */
+static void _set_erase_slot(MojoSet *s, int64_t i);
+
+void mojo_set_add_none(MojoSet *s)
+{
+    if (!s) return;
+    if (s->used * 2 >= s->cap) _set_grow(s);
+    int64_t idx = _set_slot_str_tag(s, "", 3 /* None domain */);
+    if (idx < 0) { _set_grow(s); idx = _set_slot_str_tag(s, "", 3); }
+    if (s->slots[idx].tag == -1) {
+        s->slots[idx].tag   = 3;
+        s->slots[idx].val_s = strdup("");
+        s->slots[idx].val_i = 0;
+        s->slots[idx].seq   = s->next_seq++;
+        s->used++;
+    }
+}
+
+int mojo_set_contains_none(MojoSet *s)
+{
+    if (!s) return 0;
+    int64_t idx = _set_slot_str_tag(s, "", 3 /* None domain */);
+    return idx >= 0 && s->slots[idx].tag == 3;
+}
+
+void mojo_set_discard_none(MojoSet *s)
+{
+    if (!s) return;
+    int64_t idx = _set_slot_str_tag(s, "", 3);
+    if (idx < 0 || s->slots[idx].tag != 3) return;
+    _set_erase_slot(s, idx);
 }
 
 /* Home slot (the index its own hash probes from, before any collision
@@ -8227,6 +8263,7 @@ void mojo_set_print(MojoSet *s)
         if (sl->tag == -1) continue;
         if (!first) printf(", ");
         if (sl->tag == 0) printf("%lld", (long long)sl->val_i);
+        else if (sl->tag == 3) printf("None");
         else              printf("\"%s\"", sl->val_s);
         first = 0;
     }
@@ -8249,12 +8286,16 @@ MojoSet *mojo_set_union(MojoSet *a, MojoSet *b) {
             mojo_set_add_int(out, a->slots[i].val_i);
         else if (a->slots[i].tag == 1)
             mojo_set_add_str(out, a->slots[i].val_s);
+        else if (a->slots[i].tag == 3)
+            mojo_set_add_none(out);
     }
     if (b) for (int64_t i = 0; i < b->cap; i++) {
         if (b->slots[i].tag == 0)
             mojo_set_add_int(out, b->slots[i].val_i);
         else if (b->slots[i].tag == 1)
             mojo_set_add_str(out, b->slots[i].val_s);
+        else if (b->slots[i].tag == 3)
+            mojo_set_add_none(out);
     }
     return out;
 }
@@ -8291,6 +8332,8 @@ MojoSet *mojo_set_copy(MojoSet *s) {
             mojo_set_add_int(out, s->slots[i].val_i);
         else if (s->slots[i].tag == 1)
             mojo_set_add_str(out, s->slots[i].val_s);
+        else if (s->slots[i].tag == 3)
+            mojo_set_add_none(out);
     }
     return out;
 }
@@ -8313,6 +8356,8 @@ void mojo_set_update(MojoSet *dst, MojoSet *src) {
             mojo_set_add_int(dst, s->val_i);
         else if (s->tag == 1)
             mojo_set_add_str(dst, s->val_s);
+        else if (s->tag == 3)
+            mojo_set_add_none(dst);
     }
     free(order);
 }
@@ -8685,6 +8730,8 @@ static int _set_has_slot(MojoSet *b, MojoSet *a, int64_t i, int mixed)
         return mojo_set_contains_str(b, sl->val_s);
     if (sl->tag == 2)
         return mojo_set_contains_bytes(b, (MojoBytes *)(intptr_t)sl->val_s);
+    if (sl->tag == 3)
+        return mojo_set_contains_none(b);
     if (mixed)
         return _set_has_double(b, _eq_as_double(sl->val_i));
     return mojo_set_contains_int(b, sl->val_i);
