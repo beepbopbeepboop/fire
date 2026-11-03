@@ -185,7 +185,7 @@ That is NOT the `ValueError: unsupported: recursion argument bound` the bullet
 quotes, and the bullet's own parenthetical already says the walk "reports this as
 a recursion problem" — the walk has been fixed to refuse by name and this
 document was not updated with it. The wall is now the SECOND-call case, which is
-`bugs/formal/FORMAL_ast_bridge_carries_one_argument_per_call.md` (and it is one call,
+`bugs/formal/FORMAL_ast_bridge_cannot_state_a_user_call_of_two_or_more_arguments.md` (and it is one call,
 so `printf` contributes one and `mojo_strlen` the other). So: the link line is
 not what stands between a linked `mojo_*` call and a proof, and whoever takes
 that next should start from that doc rather than from this bullet.
@@ -742,7 +742,7 @@ change and not a separate cleanup. 219 → 207.
   argument bound` for ANY program containing a call, and it is now the
   second-call refusal the walk raises by name —
   "2 calls this walk cannot follow … ONE halt address cannot discharge them" —
-  which is `bugs/formal/FORMAL_ast_bridge_carries_one_argument_per_call.md`. The link
+  which is `bugs/formal/FORMAL_ast_bridge_cannot_state_a_user_call_of_two_or_more_arguments.md`. The link
   line is not the wall. `test_formal_runtime_link.py` still runs `prove=False`
   throughout, and still says so in its own docstring rather than asserting
   nothing quietly; that remains true and its reason is now the one above.
