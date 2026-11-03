@@ -17163,7 +17163,7 @@ def one_word_receiver_kind(struct_def, int_names=(), string_names=(),
     derives the field set by walking every method body of the struct twice, and
     so does `struct_sole_field_name`, so the guard doubled the price of the
     question it was guarding.  This is the same provably-dead filter
-    `bugs/formal/FORMAL_build_cost_2026-10-03.md` §4.1 removed from
+    the 2026-10-03 build-cost measurement's §4.1 (doc in git history) removed from
     `struct_derived_names`, and the reason it is worth writing down rather than
     leaving as an unexplained simplification: a reader who deletes the `None`
     test on the strength of "the count already said so" would be deleting the
@@ -36183,8 +36183,8 @@ def one_field_mutating_methods(functions, method_owners: dict,
     asks the predicate once per METHOD — 377 of them on `myinterpreter.py`, each
     one a whole-struct walk of bodies. `None` keeps the per-method ask, which is
     the same answer at the cost of the walk; see
-    `bugs/formal/FORMAL_build_cost_2026-10-03.md` §6 for the measurement and §3.1 for
-    why reading the table is sound.
+    the 2026-10-03 build-cost measurement (doc in git history: §6 for the
+    measurement, §3.1 for why reading the table is sound).
     """
     out = {}
     for fn in (functions or ()):
@@ -38448,7 +38448,7 @@ def _binding_sites_index(fn) -> dict:
     locals: measured on `formal/hostmods/os/__init__.mojo`, arm64,
     `fire.py build --formal --no-prove` went 2.19 s → 2.72 s with the per-name
     walk and 2.24 s with this one (best of three each), and the standard this is
-    measured against is `bugs/formal/FORMAL_build_cost_2026-10-03.md`'s — where the two
+    measured against is the 2026-10-03 build-cost measurement's (doc in git history) — where the two
     residues left open were 0.094 s and 0.003 s on the largest file in the
     repository, and both were declined rather than taken.  There is one dispatch
     below and `_binding_values` reads it, so the two cannot disagree about which
@@ -44119,7 +44119,7 @@ def one_field_struct_names(structs) -> dict:
 
     **Sound by the measurement the framed table's threading was sound by**, not
     by an invalidation argument: `formal/model.py`'s `read_before_store`
-    derivation and `bugs/formal/FORMAL_build_cost_2026-10-03.md` §3.1 walked
+    derivation and the 2026-10-03 build-cost measurement's §3.1 (doc in git history) walked
     146 779 asks of the four predicates over 7 788 (question, struct) pairs
     across 14 files and NOT ONE pair changed its answer between two asks inside
     one `_prepare_functions` call — `struct_is_one_field` was one of the four.
