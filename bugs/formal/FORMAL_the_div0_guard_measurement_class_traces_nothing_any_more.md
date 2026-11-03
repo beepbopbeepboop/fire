@@ -140,10 +140,10 @@ unreachable on this tree rather than merely unpicked.**
   universal theorem with the reachability theorem `q_reaches_call_at_0x100000504`
   (one out-of-image `BL`, so one halt address, so no refusal), and it ANNOUNCES
   the substitution in the emitted note — the one-opaque-call behaviour
-  the bug "one opaque flush silently replaces the universal theorem" (doc deleted
-  in a9daacdd1)'s item 2 landed. The pin now accepts that third state **only if**
-  the note names `q_compiles_correctly_universal` as `NOT emitted`, so a SILENTLY
-  empty tail is still forbidden. This is not a weakening: outcome 3 still leaves
+  `bugs/formal/FORMAL_one_opaque_flush_silently_replaces_the_universal_theorem.md`'s
+  item 2 landed. The pin now accepts that third state **only if** the note names
+  `q_compiles_correctly_universal` as `NOT emitted`, so a SILENTLY empty tail is
+  still forbidden. This is not a weakening: outcome 3 still leaves
   `_ADMIT not in tail`, which is exactly what makes the class set `cls.blind`
   and fail its Lean row by NAME. Measured, library absent:
   `python3 tools/memslot.py --gb 8 --label t -- python3
@@ -233,8 +233,7 @@ sorry)` admission: the universal theorem has been REPLACED by a reachability
 statement, which is precisely the silent half the FLUSH doc names. So option 1
 ("subtract `compiler_traps` in `_unfollowable_calls`") did not move this, and
 the live owner of what this class now measures is
-the bug "one opaque flush silently replaces the universal theorem" (doc deleted
-in a9daacdd1; it is the owner of what this class now measures)
+`bugs/formal/FORMAL_one_opaque_flush_silently_replaces_the_universal_theorem.md`
 (`formal267-docs`) — the three red rows that doc lists are these three. Step 1
 LANDED: `test_the_measurement_class_can_still_see_what_it_measures` is the
 blind-guard (present in the file) that reports this by NAME on a tree WITH

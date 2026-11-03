@@ -1,5 +1,6 @@
 from . import *
 
+# # ── a function that produces NO value, and what that is worth at a use ──────
 # ── a function that produces NO value, and what that is worth at a use ──────
 #
 # A `def` with no `return` returns NOTHING in CPython, and `None` is not a word:
@@ -4708,3 +4709,7 @@ def scope_lookup(scopes, name: str):
         if name in scope:
             return True, scope[name]
     return False, None
+
+
+
+
