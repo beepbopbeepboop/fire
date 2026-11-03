@@ -2407,7 +2407,7 @@ def type_position_nodes(root, structs_by_name=None, callee_defs=None) -> set:
     exempt a subscript whose BASE is a value: `h.tag[Int, s]` is a genuine index
     of a genuine value, it is not in a type position, and answering "type
     application" for it would drop a real frame-escape check
-    (`bugs/formal/FORMAL_dotted_base_bracket_list_is_not_classified.md`). Every
+    (dotted base bracket lists). Every
     bracket list that is not one of the two compile-time ones keeps today's
     answer, refusal included — "possibly wrong" is the direction this backend
     refuses in everywhere else."""

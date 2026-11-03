@@ -151,7 +151,7 @@ BARE_BASELINE = {
     'bugs/formal/FORMAL_a_module_that_exports_nothing_cannot_be_a_dylib.md': 1,
     'bugs/formal/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md': 1,
     'bugs/formal/FORMAL_arm64_instruction_coverage.md': 1,
-    'bugs/formal/FORMAL_dotted_base_bracket_list_is_not_classified.md': 2,
+
     'bugs/formal/FORMAL_eighteen_examples_have_no_accepted_proof_and_seven_are_declared.md': 7,
     'bugs/formal/FORMAL_float_binary64_only.md': 1,
     'bugs/formal/FORMAL_fuzz_ledger.md': 2,
