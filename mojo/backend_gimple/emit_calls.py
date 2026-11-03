@@ -171,8 +171,6 @@ def _emit_generator_start_call(gen, node: gimple_ctypes.CallExpr, api: dict,
     _gen_is_cpp = not _as_str(api['base']).startswith('__mgco_')
     _gen_kwslot = gen._func_kwargs_slot.get(
         fname_raw, gen._func_kwargs_slot.get(f"{api['base']}_start", -1))
-    if api.get('kwargs_slot') is not None:
-        _gen_kwslot = api['kwargs_slot']
     # A `*args` callee: the fixed slots before it are padded here, and the
     # positional arguments from its own slot on are packed into one list
     # below. `_gen_nfixed` is therefore the count of FIXED slots, which is

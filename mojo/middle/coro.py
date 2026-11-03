@@ -4291,20 +4291,6 @@ def _star_slot(real_params, lead: int) -> int | None:
     return None
 
 
-def _kwargs_slot(real_params, lead: int) -> int | None:
-    """C-signature slot of a coroutine's `**kwargs` parameter, or None.
-
-    Same indexing as `_star_slot`: the caller packs its keyword arguments into
-    a `MojoDict *` at this slot. A generator is registered under its
-    `__mgco_<name>_start` symbol, which the module pre-pass's
-    `_func_kwargs_slot` table (keyed by source name) does not cover, so the
-    meta carries the slot itself."""
-    for _i, (_pn, _pa) in enumerate(real_params):
-        if _cm_as_str(_pn).startswith('**'):
-            return lead + _i
-    return None
-
-
 def _async_receiver_kind(fn, is_method: bool) -> str:
     """The receiver slot a compiled `async def` METHOD takes -- 'self', 'cls'
     or '' -- by the same single rule the generator meta uses
@@ -4515,7 +4501,6 @@ def _lower_one_async_gen(fn: N.FunctionDef, meta: list, base: str | None = None,
         'base': base, 'body_name': body_name,
         'params': c_params,
         'star_slot': _star_slot(real_params, len(c_params) - len(real_params)),
-        'kwargs_slot': _kwargs_slot(real_params, len(c_params) - len(real_params)),
         'nargs': len(real_params), 'value_ctype': 'int64_t', 'value_kind': 'i',
         'tuple_slot_ctypes': None,
         'no_wd_forward': _base_is_channel_free(base),
@@ -4552,7 +4537,6 @@ def _lower_one_async(fn: N.FunctionDef, meta: list, base: str | None = None,
         'base': base, 'body_name': body_name,
         'params': c_params,
         'star_slot': _star_slot(real_params, len(c_params) - len(real_params)),
-        'kwargs_slot': _kwargs_slot(real_params, len(c_params) - len(real_params)),
         'nargs': len(real_params), 'value_ctype': _KIND_CTYPE[kind], 'value_kind': kind,
         'tuple_slot_ctypes': None,
         'no_wd_forward': _base_is_channel_free(base),
@@ -7949,7 +7933,6 @@ def _lower_one(fn: N.FunctionDef, meta: list,
         'body_name': body_name,
         'params': c_params,
         'star_slot': _star_slot(real_params, len(_lead)),
-        'kwargs_slot': _kwargs_slot(real_params, len(_lead)),
         'nargs': len(real_params),
         'value_ctype': _KIND_CTYPE[kind],
         'value_kind': kind,
@@ -8391,7 +8374,6 @@ def register(gen, meta: list) -> None:
             # call site packs the positional arguments from there on into one
             # MojoList * -- see _star_slot.
             'star_slot': m.get('star_slot'),
-            'kwargs_slot': m.get('kwargs_slot'),
             'tuple_slot_ctypes': m.get('tuple_slot_ctypes'),
             'tuple_slot_nested': m.get('tuple_slot_nested'),
             'tuple_slot_elems': m.get('tuple_slot_elems'),

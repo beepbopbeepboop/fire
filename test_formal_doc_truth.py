@@ -580,20 +580,6 @@ CITATION_LINES = [
 
 
 def _lines_of(path):
-    # The model is a package now (`formal/model/`), so `formal/model.py` is a
-    # VIRTUAL file: every citation of it reads the union of its modules.  The
-    # documents still name `formal/model.py`, and that is what these checks are
-    # about, so the path stays and only the reader resolves it.
-    if path == 'formal/model.py':
-        out = []
-        for dirpath, dirnames, filenames in os.walk(
-                os.path.join(HERE, 'formal', 'model')):
-            dirnames[:] = [d for d in dirnames if d != '__pycache__']
-            for fn in sorted(filenames):
-                if fn.endswith('.py'):
-                    out += open(os.path.join(dirpath, fn), encoding='utf-8',
-                                errors='replace').read().splitlines()
-        return out
     return open(os.path.join(HERE, path), encoding='utf-8',
                 errors='replace').read().splitlines()
 
@@ -615,15 +601,8 @@ def group_citations():
             cache[path] = _lines_of(path)
         return cache[path]
 
-    def source_exists(path):
-        # `formal/model.py` is the model package's virtual file (see
-        # `_lines_of`): it exists as long as the package does.
-        if path == 'formal/model.py':
-            return os.path.isdir(os.path.join(HERE, 'formal', 'model'))
-        return os.path.exists(os.path.join(HERE, path))
-
     for document, symbol, path in CITATIONS:
-        check(source_exists(path),
+        check(os.path.exists(os.path.join(HERE, path)),
               f'{document} names {path}, which exists')
         if f'`{symbol}`' not in docs[document] and symbol not in docs[document]:
             check(False, f'{document} still names `{symbol}`',

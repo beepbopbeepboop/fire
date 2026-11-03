@@ -4185,7 +4185,8 @@ UNREGISTERED = {
     # differential fuzzer's suite above is: its heavier settings (thousands of
     # pairs across every mix, and the whole of `formal/examples`) are a sweep,
     # and CLAUDE.md's rule for a job no gate can afford is to declare it rather
-    # than quietly omit it. This file is what a change to the ten transformations must run.
+    # than quietly omit it. `bugs/formal/FORMAL_metamorphic_ledger.md` records the
+    # sweeps; this file is what a change to the ten transformations must run.
     'test_formal_metamorph.py':
         'Checks that each of tools/formal_metamorph.py\'s ten transformations '
         'preserves meaning, on a hand-written corpus, every generator mix and '
@@ -4194,7 +4195,8 @@ UNREGISTERED = {
         'Measured 2026-10-05: 27 tests, 39.6 s wall, 55 MB peak, two builds on '
         'the host. Declared rather than registered because its heavier '
         'settings are a sweep; CLAUDE.md\'s rule for a job no gate can afford '
-        'is to declare it.',
+        'is to declare it. bugs/formal/FORMAL_metamorphic_ledger.md records the '
+        'sweeps.',
     'test_formal_fuzz.py':
         'Builds and runs twenty generated images per architecture and compares '
         'each against CPython on the same text — a differential fuzzer\'s own '
