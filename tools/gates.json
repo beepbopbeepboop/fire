@@ -10,7 +10,7 @@
       "worker": "integrator",
       "since": "2026-11-02 11:07:53"
     },
-    "^(bootstrap\\-stage1\\-transitive|bootstrap\\-stage2\\-dumps|bootstrap\\-stage3\\-dumps|mojoc)$": {
+    "^(bootstrap\\-stage1\\-transitive|bootstrap\\-stage2\\-dumps|bootstrap\\-stage3\\-dumps)$": {
       "reason": "landing gate red on recover-land (gate red); see bugs/mid/GATE_red_recover-land_2026-11-02.md",
       "doc": "bugs/mid/GATE_red_recover-land_2026-11-02.md",
       "worker": "integrator",

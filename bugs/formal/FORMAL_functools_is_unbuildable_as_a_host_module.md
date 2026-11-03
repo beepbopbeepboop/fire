@@ -16,7 +16,7 @@ architectures. So the one thing a reader of the `import functools` refusal was
 told to add is already there. The entry now names what actually stops the module:
 the arithmetic (`reduce`/`partial`) can be written OUT, and the DECORATOR
 spellings are the gate — a decorator is parsed and never applied, which is
-`bugs/mid/COMPILE_FAIL_decorator_application_dropped.md`'s defect. Pinned by
+`bugs/hard/COMPILE_FAIL_decorator_application_dropped.md`'s defect. Pinned by
 `test_formal_imports.py`'s `test_host_module_advice_is_honest`, which fails if the
 phrase, or the absent decorator clause, comes back. **This changes no behavior and
 no scope**: `import functools` still refuses, and the module is still not
@@ -122,7 +122,7 @@ architectatures, and what stands between it and a `formal/hostmods/functools.moj
 is step 2 alone.
 
 **What has NOT moved, and is the rest of this document.** Step 2 — DECORATOR
-application — is unchanged and is `bugs/mid/COMPILE_FAIL_decorator_application_dropped.md`'s
+application — is unchanged and is `bugs/hard/COMPILE_FAIL_decorator_application_dropped.md`'s
 to own: a decorator is still parsed and never applied, so the eight names in the
 DECORATOR row are still refused and must stay refused, and §"Why this is not
 write it anyway" still holds for them. `get_cache_token()` still has no constant
@@ -194,7 +194,7 @@ author — `bugs/formal/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_tim
 and `formal/model.py`'s copy-construction refusal both name the same missing
 capability, and whichever lands first unblocks this. Step 2 (decorator
 application) must land before any decorator is exported, and it is
-`bugs/mid/COMPILE_FAIL_decorator_application_dropped.md`'s to own.
+`bugs/hard/COMPILE_FAIL_decorator_application_dropped.md`'s to own.
 
 ## Status, 2026-10-05: the SECOND of the two small steps is DONE, and
 ## `reduce` — the one name in this census a callable argument unblocked —
@@ -240,7 +240,7 @@ module exists, so without a row nothing would notice this capability regress.
 
 **What is left is exactly step 2, and it is not this file's to do.** Decorator
 application: `@tag` on a function is parsed and never applied
-(`bugs/mid/COMPILE_FAIL_decorator_application_dropped.md` owns that), so the eight
+(`bugs/hard/COMPILE_FAIL_decorator_application_dropped.md` owns that), so the eight
 DECORATOR-row names and `lru_cache` must stay refused, and §"Why this is not
 write it anyway" still holds for them — a module named after a standard-library
 namespace whose most-used member it refuses is the judgement this file makes and
@@ -301,7 +301,7 @@ assumed:
 * **A decorator is silently DROPPED.** `@tag` on a function and `@unique` on a
   class both build, and neither the decorator body nor anything it was supposed
   to enforce ever runs (measured with a `printf` inside the decorator: no
-  output). `bugs/mid/COMPILE_FAIL_decorator_application_dropped.md` owns the
+  output). `bugs/hard/COMPILE_FAIL_decorator_application_dropped.md` owns the
   general finding. So exporting `lru_cache` would make `@functools.lru_cache(maxsize=1)`
   build and cache nothing — which for `version()` happens to be answer-preserving
   and for anything else is a program that runs and skips the work it asked for.

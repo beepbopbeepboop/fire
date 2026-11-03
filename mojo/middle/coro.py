@@ -67,7 +67,22 @@ def _cm_as_str(x) -> str:
 from mojo.middle.exprtypes import _is_asyncio_sleep_call, _is_asyncio_sock_recv_call, _walk_ast_invalidate, _gmi_nested_struct_defs
 import mojo.middle.types as gimple_ctypes
 import mojo.middle.exprtypes as gimple_exprtypes
-from mojo.middle.exprtypes import module_qualifier
+try:
+    from mojo.middle.exprtypes import module_qualifier
+except Exception:
+    try:
+        from mojo.middle.module_shared import module_qualifier
+    except Exception:
+        def module_qualifier(q):  # type: ignore
+            if not q:
+                return ''
+            return q.replace('.', '_')
+# Attach for direct attribute access / compatibility
+import sys as _sys
+try:
+    _sys.modules[__name__].module_qualifier = module_qualifier
+except Exception:
+    pass
 from mojo.middle.literal_bindings import binding_index, unique_literal_value
 _ENV = 'MOJO_CORO'
 _MODE = 'stackswitch'
