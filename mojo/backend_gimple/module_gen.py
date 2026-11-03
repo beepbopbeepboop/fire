@@ -2868,6 +2868,51 @@ def _gmi_collect_self_reads(_method_names: set, body, found: dict) -> None:
 
 
 
+def _gmi_closure_visit(ci, by_name: dict, deps: dict, seen: set, out: list) -> None:
+    """Depth-first step of `_gmi_closures_callee_first`: emit every sibling `ci`
+    calls before `ci` itself. `seen` also breaks a cycle (mutual recursion)."""
+    key = _as_str(ci.lifted_name)
+    if key in seen:
+        return
+    seen.add(key)
+    for dn in deps[key]:
+        _gmi_closure_visit(by_name[dn], by_name, deps, seen, out)
+    out.append(ci)
+
+
+def _gmi_closures_callee_first(closure_map: dict) -> list:
+    """The nested closures of ONE parent, in the order their bodies are generated:
+    name order (lifted name, then def name -- deterministic), except that a sibling
+    which another sibling CALLS is generated first.
+
+    A lifted closure registers its parameter types (`func_param_types`) only when
+    its own body is generated, and `_emit_call` casts each argument to the callee's
+    registered parameter type. Generated in plain name order, a caller that sorts
+    before its callee (`_phase17_scan_if_branches` before `_phase17_value_type`)
+    looked up nothing and passed a `char *` straight into an `int64_t` parameter:
+    `-Wint-conversion` "makes integer from pointer without a cast", the gcc error
+    that kept `mojoc` from building. A cycle falls back to name order."""
+    ordered: list = sorted(closure_map.values(), key=lambda _x: (_as_str(getattr(_x, 'lifted_name', '')), _as_str(getattr(getattr(_x, 'inner_def', None), 'name', ''))))
+    by_name: dict = {}
+    for _c in ordered:
+        by_name[_as_str(_c.inner_def.name)] = _c
+    deps: dict = {}
+    for _c in ordered:
+        _own = _as_str(_c.inner_def.name)
+        _called: list = []
+        for _nd in _walk_ast(_c.inner_def.body):
+            if isinstance(_nd, CallExpr) and isinstance(_nd.func, IdentExpr):
+                _n = _as_str(_nd.func.name)
+                if _n in by_name and _n != _own and _n not in _called:
+                    _called.append(_n)
+        deps[_as_str(_c.lifted_name)] = _called
+    seen: set = set()
+    out: list = []
+    for _c in ordered:
+        _gmi_closure_visit(_c, by_name, deps, seen, out)
+    return out
+
+
 def _gmi_emit_closure_recursive(self, func_parts: list, _emitted_closures: set,
                                 _emitted_env_allocs: set, ci, outer_name) -> None:
     """Hoisted out of `gen_module_impl` — see `_gmi_prefold_toplevel_
@@ -2879,7 +2924,7 @@ def _gmi_emit_closure_recursive(self, func_parts: list, _emitted_closures: set,
     if ci.lifted_name in _emitted_closures:
         return
     _emitted_closures.add(ci.lifted_name)
-    for sub_ci in sorted(self._all_closures.get(ci.lifted_name, {}).values(), key=lambda _x: (_as_str(getattr(_x, 'lifted_name', '')), _as_str(getattr(getattr(_x, 'inner_def', None), 'name', '')))):
+    for sub_ci in _gmi_closures_callee_first(self._all_closures.get(ci.lifted_name, {})):
         _gmi_emit_closure_recursive(self, func_parts, _emitted_closures,
                                     _emitted_env_allocs, sub_ci, ci.lifted_name)
     if ci.env_struct and ci.env_struct not in _emitted_env_allocs:
@@ -14509,7 +14554,7 @@ def gen_module_impl(self, stmts: list):
             _func_outer_scope = self._push_import_scope()
             self._collect_body_import_bindings(stmt.body, _func_outer_scope)
             try:
-                for ci in sorted(self._all_closures.get(stmt.name, {}).values(), key=lambda _x: (_as_str(getattr(_x, 'lifted_name', '')), _as_str(getattr(getattr(_x, 'inner_def', None), 'name', '')))):
+                for ci in _gmi_closures_callee_first(self._all_closures.get(stmt.name, {})):
                     _gmi_emit_closure_recursive(self, func_parts, _emitted_closures, _emitted_env_allocs, ci, stmt.name)
                 self._lambda_parts = []
                 func_parts.append(self.gen_func(stmt))
@@ -14544,7 +14589,7 @@ def gen_module_impl(self, stmts: list):
                 method_outer_name = f"{stmt.name}_{m.name}{overload_id}"
                 _method_outer_scope = self._push_import_scope()
                 self._collect_body_import_bindings(m.body, _method_outer_scope)
-                for ci in sorted(self._all_closures.get(method_outer_name, {}).values(), key=lambda _x: (_as_str(getattr(_x, 'lifted_name', '')), _as_str(getattr(getattr(_x, 'inner_def', None), 'name', '')))):
+                for ci in _gmi_closures_callee_first(self._all_closures.get(method_outer_name, {})):
                     _gmi_emit_closure_recursive(self, func_parts, _emitted_closures, _emitted_env_allocs, ci, method_outer_name)
                 self._lambda_parts = []
                 # An INHERITED method body physically belongs to the base
