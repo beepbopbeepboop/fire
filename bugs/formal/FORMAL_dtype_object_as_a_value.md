@@ -9,8 +9,7 @@ value position refused as "a name with no register") is FIXED. A type is a
 - The regression rows are in `test_formal_run.py` (`TYPE_VALUE_CASES`,
   `TYPE_VALUE_DTYPE_CASES`, `TYPE_VALUE_REFUSALS`, `TYPE_VALUE_NUMBER_CASES`,
   `TYPE_VALUE_TAG_CASES`), with the answers taken from CPython and the interpreter.
-- The subscript-of-a-`DType`-field SIGSEGV is fixed by commit f0df70b2
-  (a subscript of a field declared a number is refused on both backends).
+- The subscript-of-a-`DType`-field SIGSEGV: per commit f0df70b2 (subject: a subscript of a field declared a number is refused on both backends). Not re-measured in the 2026-11-02 round.
 
 What remains is NOT the old defect. It is two limits, and both are true refusals
 about a thing this image cannot represent. Recorded here so they stay visible.
