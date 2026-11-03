@@ -4185,8 +4185,7 @@ UNREGISTERED = {
     # differential fuzzer's suite above is: its heavier settings (thousands of
     # pairs across every mix, and the whole of `formal/examples`) are a sweep,
     # and CLAUDE.md's rule for a job no gate can afford is to declare it rather
-    # than quietly omit it. `bugs/formal/FORMAL_metamorphic_ledger.md` records the
-    # sweeps; this file is what a change to the ten transformations must run.
+    # than quietly omit it. This file is what a change to the ten transformations must run.
     'test_formal_metamorph.py':
         'Checks that each of tools/formal_metamorph.py\'s ten transformations '
         'preserves meaning, on a hand-written corpus, every generator mix and '
