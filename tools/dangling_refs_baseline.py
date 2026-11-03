@@ -45,7 +45,6 @@ BASELINE = {
     'bugs/formal/FORMAL_model_package_split_left_duplicate_copies.md': 1,
     'bugs/formal/FORMAL_module_state_no_storage.md': 1,
     'bugs/formal/FORMAL_nested_short_circuit_chain_in_a_condition.md': 1,
-    'bugs/formal/FORMAL_one_opaque_flush_silently_replaces_the_universal_theorem.md': 3,
     'bugs/formal/FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md': 1,
     'bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md': 6,
     'bugs/formal/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md': 1,
