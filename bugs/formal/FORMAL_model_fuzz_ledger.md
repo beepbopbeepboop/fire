@@ -239,8 +239,8 @@ count that moved, measured:
 | `sweepC` | AGREE 208  WRONG 2  NOSTEP 86 | AGREE 210  WRONG 0  NOSTEP 86 |
 | `sweepB` | AGREE 197  WRONG 0  NOSTEP 99 | AGREE 197  WRONG 0  NOSTEP 99 |
 
-The 86/99 `NOSTEP`s are the nine encodings
-`bugs/formal/FORMAL_arm64_step_cannot_step_nine_wired_encodings.md` carries.
+The 86/99 `NOSTEP`s are the nine encodings the DELETED doc carried (CMN/TST,
+memreg/mem/select/flags forms, reg-offset LDR/STR, ldur/stur, narrow-width).
 ## Re-measured 2026-10-05 (`formal37-2`): **every row in §2 and §2.1 had moved,
 ## and `WRONG 0` was a day stale in the direction of "better"**
 
