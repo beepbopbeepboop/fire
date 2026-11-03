@@ -57,7 +57,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_a_calcsize_image_hangs_once_in_several.md` | **unclaimed** | a `calcsize` image hangs for 60 s about once in six suite runs, and is clean 10/10 standalone |
-| `FORMAL_arm64_exit_flush_is_not_published_as_a_compiler_trap.md` | **unclaimed** | FORMAL/arm64: `_emit_exit`'s `BL fflush` is not published as a compiler trap, so it reads as a program call |
 | `FORMAL_arm64_ieee754_has_no_step_arms.md` | **unclaimed** | ten IEEE-754 encoders the emitter calls, and no `arm64_step` arm |
 | `FORMAL_arm64_step_cannot_step_nine_wired_encodings.md` | **unclaimed** | `arm64_step` cannot step nine of the encodings `formal/arm64.py` emits |
 | `FORMAL_arm64_the_walk_cannot_discharge_a_call_on_a_conditional_path.md` | **unclaimed** | The arm64 exit cannot flush without a call, and a call on any proof-walked path breaks proof generation — the precondition for `FORMAL_arm64_exit_trap_does_not_flush_so_a_program_that_prints_then_exits_1_prints_nothing` |
