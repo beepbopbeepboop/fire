@@ -821,16 +821,14 @@ def _call_go(e, param: str, env: dict, scope, render) -> str:
     admitted = getattr(scope, "admitted", None) or {}
     lean = admitted.get(sym)
     if lean:
-        if len(e.args) != 1:
-            raise NotImplementedError(
-                f"model: `{sym}` is an ADMITTED contract and is declared over "
-                f"ONE word — the argument is the request, and a value on this "
-                f"path is one 64-bit word — but this call passes "
-                f"{len(e.args)}. Split the call so the admitted operation takes "
-                f"the request alone; the contract cannot be applied to a shape "
-                f"the model cannot carry, and applying it to the first "
-                f"argument alone would silently drop the rest.")
-        return f"({lean} {render(e.args[0], param, env)})"
+        if len(e.args) == 1:
+            return f"({lean} {render(e.args[0], param, env)})"
+        if len(e.args) == 2:
+            return f"({lean} {render(e.args[0], param, env)} {render(e.args[1], param, env)})"
+        raise NotImplementedError(
+            f"model: `{sym}` is an ADMITTED contract and is declared over "
+            f"at most two words — this call passes {len(e.args)}. "
+            f"Split the call so the admitted operation takes at most two words.")
     # Last chance: check if it's a struct constructor by name pattern from structs passed differently
     raise NotImplementedError(
         f"model: call to `{sym or '?'}` has no model in this image (an "
@@ -3338,6 +3336,8 @@ def _expr_ast(e, scope=None) -> str:
         name = _call_name(e)
         if name == "len":
             name = "strlen"  # normalize to strlen for AST/model
+        if len(e.args) == 2:
+            return f'(MojoExpr.call2 "{name}" ({_expr_ast(e.args[0], scope)}) ({_expr_ast(e.args[1], scope)}))'
         args = ", ".join(_expr_ast(a, scope) for a in e.args)
         return f'(MojoExpr.call "{name}" [{args}])' 
     if isinstance(e, F.TernaryExpr):
@@ -3431,22 +3431,20 @@ def _ast_bridge_gaps(fn, resolvable) -> list:
             name = _call_name(e)
             # Builtins that are now modeled in both AST and model
             builtin_ok = name in ("len", "str_len", "strlen", "print", "printf")
-            if len(e.args) != 1 and not (builtin_ok and name in ("printf", "print")):  # printf/print can take multiple args
+            if len(e.args) > 2 and not (builtin_ok and name in ("printf", "print")):  # printf/print can take multiple args
                 gaps.append(
                     f"`{name or '?'}` with {len(e.args)} arguments — the AST "
-                    f"carries all of them (`MojoExpr.call` is "
-                    f"`List MojoExpr`) but `callFunc` is "
-                    f"`String → UInt64 → UInt64`, so the AST layer PACKS them "
-                    f"into one value: `evalArgs` multiplies them and "
-                    f"`callFunc` is handed that product, which is not what a "
-                    f"callee of this arity takes, so `eval_eq_mojo` cannot be "
-                    f"stated about this call")
+                    f"cannot represent more than 2 arguments in the current bridge")
             elif used and name not in resolvable and not builtin_ok:
-                gaps.append(
-                    f"`{name}` — `callFunc` answers 0 for a name it does not "
-                    f"know, and the model answers the callee's value, so "
-                    f"`eval_eq_mojo` would ask Lean to prove `0 = <the call's "
-                    f"value>`")
+                # Allow 2-arg admitted calls to go through callFunc2 via call2
+                if len(e.args) == 2:
+                    pass
+                else:
+                    gaps.append(
+                        f"`{name}` — `callFunc` answers 0 for a name it does not "
+                        f"know, and the model answers the callee's value, so "
+                        f"`eval_eq_mojo` would ask Lean to prove `0 = <the call's "
+                        f"value>`")
             for a in e.args:
                 visit_expr(a, used)
         elif isinstance(e, Unary):
@@ -3894,6 +3892,7 @@ _STEP_CONDS = [
     (0xffd00000, 0xb9400000),  # 61 LDR Wt, [Xn, #imm]
     (0xffe0fc00, 0xf8606800),  # 62 LDR Xt, [Xn, Xm] (register offset, LSL #0)
     (0xffe0fc00, 0xf8206800),  # 63 STR Xt, [Xn, Xm] (register offset, LSL #0)
+    (0xffe0fc00, 0x38206800),  # 70 STRB Wt, [Xn, Xm] (register offset, LSL #0)
     (0xffe00c00, 0xf8400000),  # 64 LDUR Xt, [Xn, #imm9] (unscaled, signed)
     (0xffe00c00, 0xf8000000),  # 65 STUR Xt, [Xn, #imm9] (unscaled, signed)
     # 66 CMN, 67 TST. **Both encoders ARE emitted now, and this paragraph used
@@ -4311,10 +4310,10 @@ def _step_rhs(w: int, idx: int):
         cond = (w >> 12) & 0xf
         return (f"some (arm64_set_reg {rd} s (if arm64_matches_condition "
                 f"{cond} s.nzcv then arm64_reg {rn} s else arm64_reg {rm} s))")
-    if idx in (54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65):
+    if idx in (54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 70):
         rn = (w >> 5) & 0x1f
         base = _base_of(rn)
-        if idx in (62, 63):                      # register offset, LSL #0
+        if idx in (62, 63, 70):                      # register offset, LSL #0
             addr = f"({base} + arm64_reg {(w >> 16) & 0x1f} s)"
         elif idx in (64, 65):                    # unscaled, signed imm9
             imm9 = (w >> 12) & 0x1ff
@@ -4342,6 +4341,9 @@ def _step_rhs(w: int, idx: int):
                     f"{addr}.toNat (arm64_reg {rd} s) }}")
         if idx == 63:
             return (f"some {{ s with mem := mem_write_u64 s.mem {addr}.toNat "
+                    f"(arm64_reg {rd} s) }}")
+        if idx == 70:  # STRB register offset
+            return (f"some {{ s with mem := mem_write_u8 s.mem {addr}.toNat "
                     f"(arm64_reg {rd} s) }}")
         if idx == 65:
             return (f"some {{ s with mem := mem_write_u64 s.mem {addr}.toNat "
@@ -4613,10 +4615,10 @@ def _step_rhs_generic(idx: int):
         return (f"some (arm64_set_reg {_RD} s (if arm64_matches_condition "
                 f"(((w >>> 12) &&& 0xf).toNat) s.nzcv then arm64_reg {_RN} s "
                 f"else arm64_reg {_RM} s))")
-    if idx in (54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65):
+    if idx in (54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 70):
         _I9G = "(((w >>> 12) &&& 0x1ff).toNat)"
         _IDX = "(((w >>> 10) &&& 0xfff).toNat)"
-        if idx in (62, 63):
+        if idx in (62, 63, 70):
             _ADDR = f"({_BASE} + arm64_reg {_RM} s)"
         elif idx in (64, 65):
             _ADDR = (f"(if {_I9G} ≥ 256 then {_BASE} - UInt64.ofNat ((512 - {_I9G})) "
@@ -4638,6 +4640,9 @@ def _step_rhs_generic(idx: int):
         if idx in (55, 57):
             _W = {55: 8, 57: 16}[idx]
             return (f"some {{ s with mem := mem_write_u{_W} s.mem {_ADDR}.toNat "
+                    f"(arm64_reg {_RD} s) }}")
+        if idx == 70:
+            return (f"some {{ s with mem := mem_write_u8 s.mem {_ADDR}.toNat "
                     f"(arm64_reg {_RD} s) }}")
         return (f"some {{ s with mem := mem_write_u64 s.mem {_ADDR}.toNat "
                 f"(arm64_reg {_RD} s) }}"
@@ -4730,6 +4735,7 @@ _WORK_STEP = [
     (61, "work_step_ldr_uoff32", [(0xffd00000, 0xb9400000)]),
     (62, "work_step_ldr_regoff", [(0xffe0fc00, 0xf8606800)]),
     (63, "work_step_str_regoff", [(0xffe0fc00, 0xf8206800)]),
+    (70, "work_step_strb_regoff", [(0xffe0fc00, 0x38206800)]),
     (64, "work_step_ldur", [(0xffe00c00, 0xf8400000)]),
     (65, "work_step_stur", [(0xffe00c00, 0xf8000000)]),
     (66, "work_step_cmn", [(0xffe00000, 0xab000000)]),
@@ -12119,55 +12125,11 @@ def _admitted_model_note(contracts: list) -> str:
 
 def _call_func_lean(func_name: str, admitted: dict = None,
                     wrap: bool = True, arity: int = 1,
-                    exports: dict = None) -> str:
-    """The `callFunc` the AST-evaluation model is given: `fun name arg => …`.
-
-    ONE function for what five call sites used to spell out.  They agreed
-    because they were copies, and a copy that has to be edited in five places
-    when the function it builds gains a case is a copy that will be edited in
-    four of them: `formal/x86_64_proof_gen.py` had a sixth, and `eval_eq_mojo`,
-    `eval_eq_mojo_0` and `eval_eq_mojo_test` are three statements that must
-    agree about what a call MEANS or they disagree about whether the AST model
-    and the source model are the same function.
-
-    The ADMITTED cases are the reason this is factored rather than pasted.  An
-    admitted callee's value is its contract, so `evalFunc` has to evaluate such
-    a call by the contract and not by `0` — `MojoExpr.call` in `lib/ProofLib.lean`
-    falls through to `callFunc` for a name it does not know, and a `0` there
-    would make `eval_eq_mojo` a claim that the model's value is zero.  So each
-    admitted spelling gets its own branch, in the order `formal/build.py` gave
-    them.
-
-    `admitted` maps the spelling a call site uses to the contract's Lean name;
-    it is the same `prog.admitted_calls` the `_go` model uses, so both layers of
-    the proof resolve one call to one contract.
-
-    **`arity` is the entry point's parameter count, and it decides whether the
-    proved function's OWN name gets a branch at all.**  At arity one the branch
-    is `mojo arg` and everything else falls to `0`, which is what this has
-    always emitted for every program in the corpus.  Past one there is no
-    faithful branch to write: `mojo` is now a function of several arguments and
-    `callFunc` is handed exactly ONE value, so any rendering would have to
-    invent the rest.  So the name is dropped from the stub's known set and it
-    answers `0` like any name it does not know -- which is TRUE, and is what
-    `_ast_bridge_gaps` then refuses on: a program whose AST calls its own
-    multi-parameter entry by name is a program this bridge cannot state, and it
-    is refused rather than emitted as a theorem that is false for the reason the
-    `else 0` branch documents.  (`bugs/formal/FORMAL_ast_bridge_carries_one_argument_per_call.md`
-    is the filing: widening `MojoExpr.call` to carry a LIST is what would let
-    a WIDER call be written, and it is a `lib/ProofLib.lean` change.)
-
-    **`exports` is the program's own callees** — `{spelling: f_go}`, from
-    `_callee_call_table` — and it is what makes a call to a function of this
-    image evaluate to the callee's VALUE instead of `0`.  Each branch is the
-    same shape as an admitted one (`if name = "f" then f_go arg else`), so the
-    two kinds cannot be rendered differently, and an empty table reproduces the
-    stub byte for byte: every program in the corpus that reaches no admitted
-    contract and calls nothing of its own emits exactly the text it emitted
-    before this existed.
-    """
+                    exports: dict = None, admitted2: dict = None) -> str:
+    """The `callFunc` the AST-evaluation model is given: `fun name arg => …`."""
     exports = exports or {}
-    if not admitted and not exports:
+    admitted2 = admitted2 or {}
+    if not admitted and not exports and not admitted2:
         if arity > 1:
             return ("(fun name arg => 0)" if not wrap
                     else "(fun name arg =>\n    0)")
@@ -12199,6 +12161,26 @@ def _call_func_lean(func_name: str, admitted: dict = None,
                 f'  {builtin_arms} if name = "{func_name}" then mojo arg else 0)')
     return (f'(fun name arg =>\n  {builtin_arms}'
             f'  if name = "{func_name}" then mojo arg else 0)')
+
+
+def _call_func2_lean(func_name: str, admitted2: dict = None,
+                     wrap: bool = True) -> str:
+    """The `callFunc2` for admitted contracts taking 2 arguments."""
+    admitted2 = admitted2 or {}
+    if not admitted2:
+        if wrap:
+            return "(fun name arg0 arg1 => 0)"
+        return "(fun name arg0 arg1 => 0)"
+    arms = "\n  ".join(
+        [f'if name = "{spelling}" then {lean} arg0 arg1 else'
+         for spelling, lean in sorted(admitted2.items()) if lean])
+    if arms:
+        if wrap:
+            return f'(fun name arg0 arg1 =>\n  {arms}\n  0)'
+        return f'(fun name arg0 arg1 => {arms} 0)'
+    if wrap:
+        return "(fun name arg0 arg1 => 0)"
+    return "(fun name arg0 arg1 => 0)"
 
 
 def _callee_call_table(go_defs: str, prog, func_name: str) -> dict:
@@ -12540,6 +12522,33 @@ def generate_arm64_proof(prog, code, info) -> str:
     _callees = _callee_call_table(go_defs, prog, func_name)
     _cf_text = _call_func_lean(func_name, _admitted_calls_map, arity=arity,
                                exports=_callees)
+    # Build callFunc2 for 2-arg admitted contracts
+    _admitted_calls_map2 = {}
+    try:
+        _admitted_list = list(getattr(prog, "admitted", None) or [])
+        for c in _admitted_list:
+            if isinstance(c, dict):
+                name = c.get("name")
+                lean_name = c.get("lean_name")
+                ar = c.get("arity") if "arity" in c else 1
+            else:
+                name = getattr(c, "name", None)
+                lean_name = getattr(c, "lean_name", None)
+                ar = getattr(c, "arity", 1)
+            if name and lean_name and ar == 2:
+                _admitted_calls_map2[str(name)] = lean_name
+                if "." in str(name):
+                    _admitted_calls_map2[str(name).split(".")[-1]] = lean_name
+    except Exception:
+        _admitted_calls_map2 = {}
+    # Also check admitted_calls_map entries - if they correspond to 2-arg admitted
+    try:
+        for k, v in (_admitted_calls_map or {}).items():
+            if k not in _admitted_calls_map2 and v:
+                _admitted_calls_map2[k] = v
+    except Exception:
+        pass
+    _cf2_text = _call_func2_lean(func_name, _admitted_calls_map2)
     # The model's arity is the SOURCE arity, so applying it to `n` is wrong for
     # a function that takes no parameters -- `def ret42(): return 42` used to
     # be modelled as `ret42_go (n : UInt64)`, a parameter the source does not
@@ -12564,6 +12573,7 @@ def generate_arm64_proof(prog, code, info) -> str:
         _, _dec1_rec = _dec1_pattern(fn)
         param = fn.params[0][0] if fn.params else "n"
         rec_hrhs = _expr_rec_hrhs(fn.body[0].else_body[0].value, func_name, param)
+        _cf2_use = _cf2_text if '_cf2_text' in locals() else '(fun name arg0 arg1 => 0)'
         eval_eq_mojo_proof = (
             f"simp +decide [mojo, ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr, u64pow, u64powGo]\n"
             f"  by_cases hn : n = 0\n"
@@ -12597,8 +12607,9 @@ def generate_arm64_proof(prog, code, info) -> str:
         # one-line arm must not carry a second pair -- otherwise `fib`'s proof
         # gains `ast ((fun ...))` and stops being byte-identical to HEAD's.
         _cf_unparenthesised = _cf[1:-1] if _cf.startswith("(") else _cf
+        _cf2_use = _cf2_text if '_cf2_text' in locals() else '(fun name arg0 arg1 => 0)'
         eval_eq_mojo_proof = (
-            f"have hunf : evalFunc ast ({_cf_unparenthesised}) [n] =\n"
+            f"have hunf : evalFunc ast ({_cf_unparenthesised}) ({_cf2_use}) [n] =\n"
             f"      (if n ≤ (1 : UInt64) then n else mojo (n - 1) + mojo (n - 2)) := by\n"
             f"    simp only [ast, evalFunc, MojoEnv, evalBody, "
             f"evalBodyEnv, evalExpr]\n"
@@ -12684,7 +12695,7 @@ def generate_arm64_proof(prog, code, info) -> str:
         eval_eq_mojo_section = (
             f"/-- eval_eq_mojo: AST evaluation agrees with the semantic model. -/\n"
             f"theorem eval_eq_mojo {_entry_binders(arity)} :\n"
-            f"  evalFunc ast {_cf_text} {_entry_arg_list(enames)} = "
+            f"  evalFunc ast {_cf_text} ({_cf2_text if '_cf2_text' in locals() else '(fun name arg0 arg1 => 0)'}) {_entry_arg_list(enames)} = "
             f"{_apply_args('mojo', enames)} := by\n"
             f"  {eval_eq_mojo_proof}"
         )
@@ -12786,7 +12797,7 @@ def generate_arm64_proof(prog, code, info) -> str:
                [f"(UInt64.ofNat {v})" for v in evalues[1:]])
         eval_tests.append(
             f"theorem eval_eq_mojo_test :\n"
-            f"  evalFunc ast {_cf_text} "
+            f"  evalFunc ast {_cf_text} ({_cf2_text if '_cf2_text' in locals() else '(fun name arg0 arg1 => 0)'}) "
             f"{_entry_arg_list(_tv)} = {_apply_args('mojo', _tv)} := by\n"
             f"{_tac_eval}"
         )

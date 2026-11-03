@@ -445,6 +445,10 @@ def cases():
                   A.encode_ldr_xt_xn_xm(xt, base, xm)))
         c.append((f"str x{xt}, [{rn}, x{xm}]",
                   A.encode_str_xt_xn_xm(xt, base, xm)))
+    for (wd, base, xm) in ((0, 1, 2), (2, 3, 4), (8, 16, 19)):
+        rn = "sp" if base == 31 else "x%d" % base
+        c.append((f"strb w{wd}, [{rn}, x{xm}]",
+                  A.encode_strb_wd_wn_xm(wd, base, xm)))
     # ── ADRP, the linker's entry stub ────────────────────────────────────
     #
     # `as` takes a page offset as a plain number rather than a label (a

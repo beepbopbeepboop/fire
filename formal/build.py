@@ -2828,7 +2828,8 @@ def _admitted_summary(source_path: str) -> list:
                  "source": source_path, "line": 0,
                  "error": f"{type(e).__name__}: {e}"}]
     return [{"name": c.qualified, "assumes": c.assumes,
-             "lean_name": c.lean_name, "source": c.source, "line": c.line}
+             "lean_name": c.lean_name, "source": c.source, "line": c.line,
+             "arity": getattr(c, "arity", 1)}
             for c in contracts]
 
 
