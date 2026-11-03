@@ -3927,8 +3927,30 @@ def main():
     print(len(maps))
     print(out)
     print(nested)
+    both = out + nested
+    print(len(both))
 main()
-""", "out a\nout bb\nout ccc\nnested bb!\nnested ccc!\n2\n['a', 'bb', 'ccc']\n['bb!', 'ccc!']\n", filename='lld.py')
+""", "out a\nout bb\nout ccc\nnested bb!\nnested ccc!\n2\n['a', 'bb', 'ccc']\n['bb!', 'ccc!']\n5\n", filename='lld.py')
+
+    # Regression for list + list when both come from unpacking a call result
+    # (dyn words / boxed slots) — must use mojo_add_words/list concat path.
+    test_gimple_stdout("gimple_list_plus_on_unpacked_call_result", """\
+def hoist(stmts: list):
+    hoisted = []
+    maps = {}
+    for s in stmts:
+        if len(s) > 1:
+            hoisted.append(s + "!")
+            maps[s] = len(s)
+    return stmts, hoisted, maps
+
+def main():
+    out, nested, maps = hoist(["a", "bb", "ccc"])
+    both = out + nested
+    print(len(both))
+    print(both)
+main()
+""", "5\n['a', 'bb', 'ccc', 'bb!', 'ccc!']\n", filename='lldplus.py')
 
     # `StopIteration.value`: the generator's / coroutine's `return` value, the
     # argument of `raise StopIteration(x)`, None when there is none (it printed
