@@ -445,10 +445,47 @@ def builtin_module_constant_names(module: str) -> tuple:
 
 import re as _re
 
-# `module_qualifier` lives in mojo/middle/exprtypes.py (a leaf both coro and
-# funcs_shared can import at module scope without the coro <-> module_shared <->
-# funcs_shared cycle); re-exported here for the callers that import it from here.
-from mojo.middle.exprtypes import module_qualifier
+def module_qualifier(q) -> str:
+    """The ONE module-string -> C-qualifier sanitization every cross-module
+    registry key and symbol prefix in this codegen must agree on.
+
+    Every one of these keys is written by ONE half of the compiler and read
+    by the OTHER (a defining module registering its own signature/struct/-
+    generator under a `(home, name)` key; an importing module looking that
+    same key up to mangle its call site to the same symbol). Two internally
+    consistent but MUTUALLY DISAGREEING spellings of one module therefore
+    do not fail loudly — they make a lookup MISS, and a miss silently
+    falls through to a worse tier (the shared bare-name slot, all-int64_t
+    param types) whose overload hash then differs from the definition's,
+    producing `implicit declaration of function '<name>_<suffixA>'; did you
+    mean '<name>_<suffixB>'?` at g++ time.
+
+    That is exactly what happened for every module whose name carries a
+    leading depth dot AND an underscore of its own — the overwhelmingly
+    common `from . import _common` / `from ._regexes import ...` shape.
+    The leading-dot strip is load-bearing, NOT cosmetic:
+      `'._common'` -> lstrip-then-substitute -> `_common`   (correct)
+                   -> substitute-only        -> `__common`  (a key nothing
+                                                     will ever look up)
+    `._regexes` happens to agree under both (`_regexes` either way), which
+    is why the bug read as "sometimes it works" rather than "always
+    broken".
+
+    Callers that additionally need the per-compile `_inline_module_qualifiers`
+    remap keep doing that lookup themselves (it needs a `gen`; this is a pure
+    string function on purpose, so both the reference side and the defining
+    side can call it without one).
+
+    Consolidated out of four near-identical private copies
+    (`_func_qualifier._sanitize_qualifier`,
+    `_struct_method_qualifier._sanitize_qualifier`,
+    `_cpp_sanitize_module_qualifier`, and the inline chain in `_local_def_pts`
+    / `_imported_def_pts`), two of which omitted the lstrip. One
+    implementation, so the halves cannot drift again.
+    """
+    if not q:
+        return q
+    return q.lstrip('.').replace('.', '_').replace('-', '_')
 
 
 def _collect_import_modules(modules_to_compile: dict, node_list: list):

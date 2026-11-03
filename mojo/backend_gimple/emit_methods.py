@@ -2759,28 +2759,30 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     arg_type, arg_val = gen.lower_expr(node.args[0])
                     arg2_type, arg2_val = gen.lower_expr(node.args[1])
                     if arg_type == 'int64_t' or arg2_type == 'int64_t' or arg_type == 'MojoBytes *' or arg2_type == 'MojoBytes *':
-                        # Each operand through `_to_int64`, which lands it in a
-                        # temp: a bare `(int64_t)(intptr_t)<val>` is not a GIMPLE
-                        # call operand ("invalid argument to gimple call"), which
-                        # broke `os.path.join(self.dir, f"{name}.c")` whenever
-                        # the first part was a word-typed attribute.
-                        gen._emit_call('int64_t', t, 'mojo_os_path_join_w', [('int64_t', gen._to_int64(arg_type, arg_val)), ('int64_t', gen._to_int64(arg2_type, arg2_val))])
+                        def _to_word(at, av):
+                            if at == 'int64_t':
+                                return av
+                            if at == 'MojoBytes *':
+                                return f'(int64_t)(intptr_t){av}'
+                            if at == 'char *':
+                                return f'(int64_t)(intptr_t){av}'
+                            # try to pass through as word
+                            return f'(int64_t)(intptr_t){av}'
+                        gen._emit_call('int64_t', t, 'mojo_os_path_join_w', [('int64_t', _to_word(arg_type, arg_val)), ('int64_t', _to_word(arg2_type, arg2_val))])
                     else:
                         gen._emit_call('int64_t', t, 'int_join', [('int64_t', '0'), (arg_type, arg_val), (arg2_type, arg2_val)])
                 return 'int64_t', t
             elif outer_member == 'exists' and len(node.args) == 1:
                 arg_type, arg_val = gen.lower_expr(node.args[0])
                 if arg_type in ('int64_t', 'MojoBytes *'):
-                    _tw = gen._call_expr('int64_t', 'mojo_os_path_exists_w', [('int64_t', gen._to_int64(arg_type, arg_val))])
-                    t = gen._new_val('int', f'(int){_tw}')   # the runtime's word wrapper returns int64_t
+                    t = gen._call_expr('int', 'mojo_os_path_exists_w', [('int64_t', gen._to_int64(arg_type, arg_val))])
                 else:
                     t = gen._call_expr('int', 'int_exists', [('int64_t', '0'), (arg_type, arg_val)])
                 return 'int', t
             elif outer_member == 'isdir' and len(node.args) == 1:
                 arg_type, arg_val = gen.lower_expr(node.args[0])
                 if arg_type in ('int64_t', 'MojoBytes *'):
-                    _tw = gen._call_expr('int64_t', 'mojo_os_path_isdir_w', [('int64_t', gen._to_int64(arg_type, arg_val))])
-                    t = gen._new_val('int', f'(int){_tw}')   # the runtime's word wrapper returns int64_t
+                    t = gen._call_expr('int', 'mojo_os_path_isdir_w', [('int64_t', gen._to_int64(arg_type, arg_val))])
                 else:
                     t = gen._call_expr('int', 'int_isdir', [('int64_t', '0'), (arg_type, arg_val)])
                 return 'int', t
@@ -2837,8 +2839,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 # Tools/unicode/gencodec.py's convertdir()).
                 arg_type, arg_val = gen.lower_expr(node.args[0])
                 if arg_type in ('int64_t', 'MojoBytes *'):
-                    _tw = gen._call_expr('int64_t', 'mojo_os_path_isfile_w', [('int64_t', gen._to_int64(arg_type, arg_val))])
-                    t = gen._new_val('int', f'(int){_tw}')   # the runtime's word wrapper returns int64_t
+                    t = gen._call_expr('int', 'mojo_os_path_isfile_w', [('int64_t', gen._to_int64(arg_type, arg_val))])
                 else:
                     t = gen._call_expr('int', 'int_isfile', [('int64_t', '0'), (arg_type, arg_val)])
                 return 'int', t

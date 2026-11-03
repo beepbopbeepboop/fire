@@ -1000,11 +1000,6 @@ def cmd_cleanup(a):
             cur = {"path": l[9:]}; wt.append(cur)
         elif l.startswith("HEAD "):
             cur["head"] = l[5:]
-    try:
-        dirs = live_session_dirs()
-    except (RuntimeError, OSError, ValueError) as e:
-        print("cleanup: %s; removing nothing" % e)     # cannot tell which trees an agent is driving: remove none
-        return
     cands, kept = [], []
     for w in wt:
         p = os.path.realpath(w["path"])
@@ -1013,8 +1008,6 @@ def cmd_cleanup(a):
         t = byw.get(p)
         if t and state_of(t[1]) == "running":
             kept.append((p, "running")); continue
-        if any(d == p or d.startswith(p + os.sep) for d in dirs):
-            kept.append((p, "live opencode session")); continue
         if subprocess.run(["git", "merge-base", "--is-ancestor", w["head"], "master"], cwd=MAIN).returncode != 0:
             kept.append((p, "unmerged")); continue
         cands.append(p)

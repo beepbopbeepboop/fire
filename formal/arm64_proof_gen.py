@@ -92,6 +92,8 @@ CFG_LEAF_TAG = "arm64-cfg-leaf"
 #: `all_goals (first | done | sorry)` and the other seven are spelled
 #: differently.  All fifteen are here: a registry that quietly omits the
 #: admissions it was built to account for is the same defect one level up.
+#: The two the overflow flip (2026-11-02) added are at the bottom, with the
+#: walk shape that first reaches them.
 CFG_LEAF_SITES = {
     # `emit_block`'s terminal: the end of the value-flow chain, after the
     # per-block fold and the frame-slot reads.  Reached by EVERY program's
@@ -137,6 +139,17 @@ CFG_LEAF_SITES = {
     # against the loop's exit condition, and the branch's own step.
     "loop-cond-flag",
     "loop-cond-step",
+    # The trap stop's `hnone` when the `BL`'s target is INSIDE the code slice:
+    # the generator cannot mirror the model's decode, so it does not decide
+    # which in-slice word would halt; the walk closes the path there with an
+    # admission rather than certifying a block the model may step into.
+    "trap-stop-hnone",
+    # The loop back edge with NO loop contract in hand: the walk revisits the
+    # loop's test block and the only contract this generator can state is the
+    # single-block countdown one, so a body the overflow flip (2026-11-02)
+    # split across several blocks has none, and the walk admits the rest of
+    # the run here instead of walking an unbounded number of iterations.
+    "loop-back-edge-no-contract",
 }
 
 
@@ -8532,6 +8545,139 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
             return s_pc_facts.get(int(m.group(1)))
         return None
 
+    # The terminal value flow, as one function: the ret/halt block's
+    # terminal and the trap stop's entry==EXIT close are the same goal
+    # (`state.x0 = <model>` over the executed path) and used to be two
+    # copies of this ~100-line closer.  `bi`, `ctx` and `IND` are the
+    # path scoping the closer reads (the `hsid` chain, the branch
+    # sources, the defs); `def_names` is the TERMINAL block's own state
+    # functions — the per-block local the walk binds for the block it is
+    # closing, not the outer run-info loop's last one — and everything
+    # else is the enclosing generator's.
+    def _emit_terminal_flow(bi: int, ctx: dict, IND: str,
+                            def_names: list) -> None:
+        # Terminal value flow: unfold the block/instruction effects along
+        # the path and the source model; residual arithmetic/recursion
+        # obligations stay as structured placeholder leaves.
+        simp_names = ", ".join(
+            list(ctx["lets"]) + list(reversed(ctx["flow_hsid"]))
+            + list(ctx["flow_defs"]) + def_names
+            + ["arm64_reg", "Arm64State.init", "arm64_set_reg"]
+            + (go_lemmas or [])
+            + list(ctx.get("branch_srcs", [])))
+        _fno = frame or {}
+        # The comment states the THEOREM's proposition, read back rather
+        # than assumed, so it cannot claim `x0 = mojo n` for a theorem
+        # stated about something else (a call boundary's is `True`).  The
+        # default case keeps its original wording so that a generator
+        # change that does not affect it stays byte-identical.
+        if _fno:
+            _tmsg = "the frame contract"
+        elif _prop.startswith(_DEFAULT_TERM_PROP[:len("s.x0 = mojo")]):
+            # Read the model's application back out of the proposition
+            # rather than assuming one, so the comment cannot claim a
+            # statement the theorem does not make.
+            _tmsg = f"(s_{bi}).x0 = {_prop[len('s.x0 = '):]}"
+        else:
+            _tmsg = f"the halt state (s_{bi}) satisfies `{_prop}`"
+        A(f"{IND}-- terminal value flow: {_tmsg}")
+        A(f"{IND}have h8 : (8 : UInt64) = UInt64.ofNat 8 := rfl")
+        _mojo = "" if _fno.get("no_mojo") else "mojo, "
+        _goid = "" if (_tree or _fno.get("no_mojo")) else f"{name}_go, "
+        # `+decide` is what lets the terminal `simp` discharge the
+        # arithmetic side conditions of the memory lemmas, and it is
+        # also what makes it try to EVALUATE a large term.  A frame
+        # contract's terminal goal carries `MF.evalMethod`, whose
+        # `String`-keyed table is a `Decidable` instance, and with
+        # `+decide` the simplifier walks it and the declaration runs out
+        # of heartbeats.  The frame path's rewrites are hypotheses
+        # (no side conditions), so it does not need `decide`.
+        _sm = "only" if _fno.get("no_decide") else "+decide only"
+        A(f"{IND}simp {_sm} [h8, {_mojo}{_goid}{simp_names}, {_VSP}"
+          + ((", " + _fno["simp_extra"]) if _fno.get("simp_extra") else "")
+          + "]")
+        A(f"{IND}all_goals try rfl")
+        _bsrc = list(ctx.get("branch_srcs", []))
+        _msimp = ", ".join(["mem_read_after_write_u64",
+                            "mem_read_after_write_u64_ne",
+                            "mem_read_two_writes_same"] + _bsrc)
+        A(f"{IND}all_goals try simp [{_msimp}]")
+        if not _fno.get("strict"):
+            # `bv_decide` and `grind` are both EVALUATORS, and a frame
+            # contract's goal quantifies over the memory
+            # (`hmem : Nat -> UInt8`) and the receiver, so there is
+            # nothing closed for them to decide.  Left in, they burn the
+            # whole heartbeat budget trying.
+            A(f"{IND}all_goals try bv_decide")
+        A(f"{IND}all_goals try omega")
+        if not _fno.get("strict"):
+            A(f"{IND}all_goals try grind")
+        A(f"{IND}all_goals try assumption")
+        # The residual can be the branch condition itself (the model's
+        # `if P` and the CSET result both reduce to it); close it from the
+        # branch-source fact (e.g. `X ≤ Y` from `¬(X > Y)`).  The t-w defs
+        # are unfolded so the two sides match (the terminal simp already
+        # unfolded them in the goal, but not in the branch-source fact).
+        for _bs in ctx.get("branch_srcs", []):
+            A(f"{IND}all_goals try simpa [{_tw_defs}] using {_bs}"
+              if _tw_defs else f"{IND}all_goals try simpa using {_bs}")
+        _dec1 = _dec1_pattern(fn) if fn is not None else None
+        if (_dec1 is not None and _dec1[1].strip() != f"{name}_go k"
+                and ctx.get("branch_src")):
+            _bs = ctx["branch_src"]
+            A(f"{IND}all_goals try rw [{name}_go_eq _ {_bs}]")
+            A(f"{IND}all_goals try simp only [UInt64.ofNat_toNat, "
+               f"toNat_sub_one _ {_bs}]")
+            A(f"{IND}all_goals try rfl")
+        # Range-loop exit branch: the loop ran 0 iterations, so the
+        # bound is 0.  Derive `bound.toNat = 0` from the negated
+        # `0 < bound` branch source and close `0 = model 0 …`.
+        for _bs in ctx.get("branch_srcs", []):
+            _m = re.match(r"hsrc_(\d+)$", _bs)
+            _stext = None
+            if _m:
+                _bidx = int(_m.group(1))
+                if _bidx < len(blocks):
+                    _stext = _cbz_src_map.get(blocks[_bidx]["start"])
+            _mm = re.match(r"^0 < (\w+)$", _stext) if _stext else None
+            if _mm:
+                _bv = _mm.group(1)
+                A(f"{IND}all_goals try (have hn0 : {_bv}.toNat = 0 := "
+                  f"u64_not_lt_zero_toNat {_bv} {_bs}; simp [hn0]; "
+                  f"all_goals try rfl; all_goals try omega; "
+                  f"all_goals try grind)")
+        # UDIV/SDIV+MSUB remainder identity: `a - a/b*b = a%b` when b≠0.
+        # Unsigned model uses `%`/`/` (u64_div_msub); signed uses
+        # srem64/sdiv64 (srem64_sub).  Try both; `try` no-ops on miss.
+        if not _fno.get("strict"):
+            # These two are the unsigned/signed division-remainder
+            # identities, and `exact` against them makes Lean
+            # UNIFY the goal's right-hand side with `a % b` -- which for
+            # a frame contract's goal means delta-reducing
+            # `MF.evalMethod` through its `String`-keyed table.  That
+            # is where a getter contract's declaration ran out of
+            # heartbeats, on a goal neither lemma can ever apply to.
+            A(f"{IND}all_goals try exact u64_div_msub _ _ (by "
+              f"first | decide | omega | simp | native_decide)")
+            A(f"{IND}all_goals try exact srem64_sub _ _ (by "
+              f"first | decide | omega | simp | native_decide)")
+        for _pl in ((frame or {}).get("post") or []):
+            A(f"{IND}{_pl.lstrip()}")
+        # A STRICT frame contract is stated with NO `sorry` fallback:
+        # the whole point of the exercise is that this is the proof,
+        # and a fallback here is a theorem nobody has checked, so a gap
+        # in its terminal value flow is a hard error rather than an
+        # admission.  Everything else -- the ordinary `run_result_exit`
+        # walk of every program, and the dylib `halts` theorem -- keeps
+        # the fallback, because those are long proofs whose leaves this
+        # generator cannot always close and an unelaborated proof is not
+        # a smaller failure than an admitted one.
+        if (frame or {}).get("strict"):
+            A(f"{IND}all_goals done")
+        else:
+            _cfg_leaf(A, IND, "walk-terminal",
+                      "all_goals (first | done | sorry)")
+
     def emit_block(bi: int, state: str, fuel_n: int, depth: int, path: set,
                    ctx: dict = None):
         if bi in path:
@@ -8738,127 +8884,7 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                 else:
                     A(f"{IND}trivial")
             if _flow:
-                # Terminal value flow: unfold the block/instruction effects along
-                # the path and the source model; residual arithmetic/recursion
-                # obligations stay as structured placeholder leaves.
-                simp_names = ", ".join(
-                    list(ctx["lets"]) + list(reversed(ctx["flow_hsid"]))
-                    + list(ctx["flow_defs"]) + def_names
-                    + ["arm64_reg", "Arm64State.init", "arm64_set_reg"]
-                    + (go_lemmas or [])
-                    + list(ctx.get("branch_srcs", [])))
-                _fno = frame or {}
-                # The comment states the THEOREM's proposition, read back rather
-                # than assumed, so it cannot claim `x0 = mojo n` for a theorem
-                # stated about something else (a call boundary's is `True`).  The
-                # default case keeps its original wording so that a generator
-                # change that does not affect it stays byte-identical.
-                if _fno:
-                    _tmsg = "the frame contract"
-                elif _prop.startswith(_DEFAULT_TERM_PROP[:len("s.x0 = mojo")]):
-                    # Read the model's application back out of the proposition
-                    # rather than assuming one, so the comment cannot claim a
-                    # statement the theorem does not make.
-                    _tmsg = f"(s_{bi}).x0 = {_prop[len('s.x0 = '):]}"
-                else:
-                    _tmsg = f"the halt state (s_{bi}) satisfies `{_prop}`"
-                A(f"{IND}-- terminal value flow: {_tmsg}")
-                A(f"{IND}have h8 : (8 : UInt64) = UInt64.ofNat 8 := rfl")
-                _mojo = "" if _fno.get("no_mojo") else "mojo, "
-                _goid = "" if (_tree or _fno.get("no_mojo")) else f"{name}_go, "
-                # `+decide` is what lets the terminal `simp` discharge the
-                # arithmetic side conditions of the memory lemmas, and it is
-                # also what makes it try to EVALUATE a large term.  A frame
-                # contract's terminal goal carries `MF.evalMethod`, whose
-                # `String`-keyed table is a `Decidable` instance, and with
-                # `+decide` the simplifier walks it and the declaration runs out
-                # of heartbeats.  The frame path's rewrites are hypotheses
-                # (no side conditions), so it does not need `decide`.
-                _sm = "only" if _fno.get("no_decide") else "+decide only"
-                A(f"{IND}simp {_sm} [h8, {_mojo}{_goid}{simp_names}, {_VSP}"
-                  + ((", " + _fno["simp_extra"]) if _fno.get("simp_extra") else "")
-                  + "]")
-                A(f"{IND}all_goals try rfl")
-                _bsrc = list(ctx.get("branch_srcs", []))
-                _msimp = ", ".join(["mem_read_after_write_u64",
-                                    "mem_read_after_write_u64_ne",
-                                    "mem_read_two_writes_same"] + _bsrc)
-                A(f"{IND}all_goals try simp [{_msimp}]")
-                if not _fno.get("strict"):
-                    # `bv_decide` and `grind` are both EVALUATORS, and a frame
-                    # contract's goal quantifies over the memory
-                    # (`hmem : Nat -> UInt8`) and the receiver, so there is
-                    # nothing closed for them to decide.  Left in, they burn the
-                    # whole heartbeat budget trying.
-                    A(f"{IND}all_goals try bv_decide")
-                A(f"{IND}all_goals try omega")
-                if not _fno.get("strict"):
-                    A(f"{IND}all_goals try grind")
-                A(f"{IND}all_goals try assumption")
-                # The residual can be the branch condition itself (the model's
-                # `if P` and the CSET result both reduce to it); close it from the
-                # branch-source fact (e.g. `X ≤ Y` from `¬(X > Y)`).  The t-w defs
-                # are unfolded so the two sides match (the terminal simp already
-                # unfolded them in the goal, but not in the branch-source fact).
-                for _bs in ctx.get("branch_srcs", []):
-                    A(f"{IND}all_goals try simpa [{_tw_defs}] using {_bs}"
-                      if _tw_defs else f"{IND}all_goals try simpa using {_bs}")
-                _dec1 = _dec1_pattern(fn) if fn is not None else None
-                if (_dec1 is not None and _dec1[1].strip() != f"{name}_go k"
-                        and ctx.get("branch_src")):
-                    _bs = ctx["branch_src"]
-                    A(f"{IND}all_goals try rw [{name}_go_eq _ {_bs}]")
-                    A(f"{IND}all_goals try simp only [UInt64.ofNat_toNat, "
-                       f"toNat_sub_one _ {_bs}]")
-                    A(f"{IND}all_goals try rfl")
-                # Range-loop exit branch: the loop ran 0 iterations, so the
-                # bound is 0.  Derive `bound.toNat = 0` from the negated
-                # `0 < bound` branch source and close `0 = model 0 …`.
-                for _bs in ctx.get("branch_srcs", []):
-                    _m = re.match(r"hsrc_(\d+)$", _bs)
-                    _stext = None
-                    if _m:
-                        _bidx = int(_m.group(1))
-                        if _bidx < len(blocks):
-                            _stext = _cbz_src_map.get(blocks[_bidx]["start"])
-                    _mm = re.match(r"^0 < (\w+)$", _stext) if _stext else None
-                    if _mm:
-                        _bv = _mm.group(1)
-                        A(f"{IND}all_goals try (have hn0 : {_bv}.toNat = 0 := "
-                          f"u64_not_lt_zero_toNat {_bv} {_bs}; simp [hn0]; "
-                          f"all_goals try rfl; all_goals try omega; "
-                          f"all_goals try grind)")
-                # UDIV/SDIV+MSUB remainder identity: `a - a/b*b = a%b` when b≠0.
-                # Unsigned model uses `%`/`/` (u64_div_msub); signed uses
-                # srem64/sdiv64 (srem64_sub).  Try both; `try` no-ops on miss.
-                if not _fno.get("strict"):
-                    # These two are the unsigned/signed division-remainder
-                    # identities, and `exact` against them makes Lean
-                    # UNIFY the goal's right-hand side with `a % b` -- which for
-                    # a frame contract's goal means delta-reducing
-                    # `MF.evalMethod` through its `String`-keyed table.  That
-                    # is where a getter contract's declaration ran out of
-                    # heartbeats, on a goal neither lemma can ever apply to.
-                    A(f"{IND}all_goals try exact u64_div_msub _ _ (by "
-                      f"first | decide | omega | simp | native_decide)")
-                    A(f"{IND}all_goals try exact srem64_sub _ _ (by "
-                      f"first | decide | omega | simp | native_decide)")
-                for _pl in ((frame or {}).get("post") or []):
-                    A(f"{IND}{_pl.lstrip()}")
-                # A STRICT frame contract is stated with NO `sorry` fallback:
-                # the whole point of the exercise is that this is the proof,
-                # and a fallback here is a theorem nobody has checked, so a gap
-                # in its terminal value flow is a hard error rather than an
-                # admission.  Everything else -- the ordinary `run_result_exit`
-                # walk of every program, and the dylib `halts` theorem -- keeps
-                # the fallback, because those are long proofs whose leaves this
-                # generator cannot always close and an unelaborated proof is not
-                # a smaller failure than an admitted one.
-                if (frame or {}).get("strict"):
-                    A(f"{IND}all_goals done")
-                else:
-                    _cfg_leaf(A, IND, "walk-terminal",
-                              "all_goals (first | done | sorry)")
+                _emit_terminal_flow(bi, ctx, IND, def_names)
         elif kind == "seq":
             nxt_pc = block["instrs"][-1] + 4
             nxt_bi = start_to_bi.get(nxt_pc)
@@ -9014,9 +9040,28 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                         A(f"{IND}  omega")
                         A(f"{IND}simp [hx0f_{bi}, mojo, {name}_go_zero, hltc]")
                 else:
-                    raise ValueError(
-                        f"unsupported edge to {hex(tgt)} (loop back-edge / continuation; "
-                        "no loop contract matches)")
+                    if tgt_bi is None:
+                        raise ValueError(
+                            f"unsupported edge to {hex(tgt)} (loop back-edge / "
+                            "continuation; no loop contract matches)")
+                    # The loop revisits its own test block and no loop
+                    # contract matches: the only contract this generator
+                    # states is the single-block countdown one, and the
+                    # overflow flip (2026-11-02) splits a body the `subs`
+                    # overflow branch crosses into several blocks, so a
+                    # `while n != 0` loop like `wdiff` has no contract whose
+                    # `hbodyRun` the machine actually runs.  The walk cannot
+                    # bound the iterations without one, so the rest of the
+                    # run (back edge, remaining iterations, terminal) is a
+                    # named leaf rather than an untagged `sorry`.
+                    _cfg_leaf(A, IND, "loop-back-edge-no-contract",
+                              "all_goals (first | done | sorry)",
+                              note="the loop back edge revisits the test "
+                                   "block with no loop contract: the body "
+                                   "the overflow flip split across blocks "
+                                   "cannot be stated by the single-block "
+                                   "countdown contract, and the walk admits "
+                                   "the rest of the run here")
             else:
                 emit_block(tgt_bi, f"({{ {s_cur} with pc := {tgt} }})",
                            fuel_1, depth, path, ctx)
@@ -9150,9 +9195,8 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                     for _k in range(4):
                         if 0 <= _off + _k < len(_ext):
                             _none_word |= _ext[_off + _k] << (8 * _k)
-                A(f"{IND}have hnone_{bi} : arm64_go_exit {call_state} {C} "
-                  f"{EXIT} {fuel_1} = none := by")
-                if _hnone_ok:
+                    A(f"{IND}have hnone_{bi} : arm64_go_exit {call_state} {C} "
+                      f"{EXIT} {fuel_1} = none := by")
                     A(f"{IND}  -- the `BL` lands past the code slice, where the "
                       f"map answers the tail of the appended terminal `ret`; "
                       f"`native_decide` needs a CLOSED goal, so the pc "
@@ -9202,7 +9246,45 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                     A(f"{IND}      rw [if_neg hfuel_{bi}]")
                     A(f"{IND}      rw [if_neg hexit_{bi}]")
                     A(f"{IND}      rw [hstep_{bi}]")
+                    A(f"{IND}rw [hnone_{bi}]")
+                    # the statement's `none` arm is `True` (`| none => True` in
+                    # the emitted match); after `rw [hnone]` the goal reduces
+                    # to it
+                    A(f"{IND}exact True.intro")
+                elif entry == EXIT:
+                    # --- the trap stops AT the exit address: `go_exit` does
+                    # NOT halt here ---
+                    #
+                    # The overflow trap's own `BL` targets the program's exit
+                    # stub, which is the address `arm64_go_exit` was given as
+                    # `exit` — so at the call state the model answers `some
+                    # st`, and `hnone` above would be a FALSE statement.  The
+                    # run genuinely ends at the trap (the machine never steps
+                    # off the exit stub), and the statement's `some` arm says
+                    # exactly that: the returned value is the model's.  Close
+                    # the STATEMENT: unfold `go_exit`, split on the fuel, and
+                    # at `pc = exit` the definition is `some call_state`, so
+                    # the goal is the terminal value flow — the same closer
+                    # the ret block uses, over the same executed path.
+                    A(f"{IND}unfold arm64_go_exit")
+                    A(f"{IND}by_cases hfuel_{bi} : {fuel_1} = 0")
+                    A(f"{IND}·")
+                    A(f"{IND}  rw [hfuel_{bi}]")
+                    A(f"{IND}  exact True.intro")
+                    A(f"{IND}·")
+                    A(f"{IND}  rw [if_neg hfuel_{bi}]")
+                    A(f"{IND}  have hpc_exit_{bi} : ({call_state}).pc = {EXIT} "
+                      f":= by rfl")
+                    A(f"{IND}  rw [if_pos hpc_exit_{bi}]")
+                    _emit_terminal_flow(bi, ctx, IND + "  ", def_names)
                 else:
+                    # The `BL`'s target is INSIDE the slice: the generator
+                    # cannot mirror the model's decode, so it does not decide
+                    # which in-slice word would halt; the one-step halt above
+                    # is still the true statement (the model ends at the
+                    # trap) and the gap is this named leaf.
+                    A(f"{IND}have hnone_{bi} : arm64_go_exit {call_state} {C} "
+                      f"{EXIT} {fuel_1} = none := by")
                     _cfg_leaf(A, IND + "  ", "trap-stop-hnone",
                               "first | done | sorry",
                               note="the `BL`'s target decodes to a real "
@@ -9211,10 +9293,11 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
                                    "bytes have; the statement is still true "
                                    "(the model ends at the trap) and the gap "
                                    "is this named leaf")
-                A(f"{IND}rw [hnone_{bi}]")
-                # the statement's `none` arm is `True` (`| none => True` in the
-                # emitted match); after `rw [hnone]` the goal reduces to it
-                A(f"{IND}exact True.intro")
+                    A(f"{IND}rw [hnone_{bi}]")
+                    # the statement's `none` arm is `True` (`| none => True` in
+                    # the emitted match); after `rw [hnone]` the goal reduces
+                    # to it
+                    A(f"{IND}exact True.intro")
             else:
                 # `hspd`) is the PATH-SCOPED one — every `hsid_i` and every block
                 # state function the walk has emitted so far, in reverse order —
