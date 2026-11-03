@@ -98,7 +98,7 @@ Each is measured, not guessed, from the parent chain of the `mod.name` node:
   `DECORATOR` the bound name is the decorator of a `def`/`class`. Measured on
             this tree, a decorator on a function OR a class is DROPPED,
             silently, by both backends
-            (`bugs/mid/COMPILE_FAIL_decorator_application_dropped.md`), so
+            (`bugs/hard/COMPILE_FAIL_decorator_application_dropped.md`), so
             shipping the name would make the program build and enforce nothing
             — the outcome `formal/hostmods/enum.mojo` declines for `unique` and
             `verify`.
