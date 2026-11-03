@@ -5321,7 +5321,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         # are this backend's, and the plan needs them only for the five methods
         # whose arguments are read as `char *`.
         accept = None
-        if M.is_string_method(method):
+        recv_kind = self._method_recv_kind(e)
+        if M.is_string_method(method) and M.string_operand_is_string(recv_kind):
             args = list(e.args)
             plan, payload = M.string_method_call_plan(
                 method, _dotted(e.func), obj, args,
@@ -5336,7 +5337,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
                 return
             accept = payload
         reason = M.value_method_refusal(
-            method, self._method_recv_kind(e), _dotted(e.func),
+            method, recv_kind, _dotted(e.func),
             receiver_is_fd=self._expr_is_fd(obj),
             receiver_shape=M.receiver_shape(obj))
         if reason is not None:
