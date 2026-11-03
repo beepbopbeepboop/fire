@@ -24440,8 +24440,11 @@ GIMPLE_RUNTIME_PREFIX = "mojo_"
 # happened to cover.
 
 def _runtime_header_dir() -> str:
-    return os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "runtime")
+    # This file lives at formal/model/__init__.py since the package split, so
+    # the repo root is three levels up, not two. Two levels named formal/runtime,
+    # which does not exist, and runtime_abi() silently returned an empty table.
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return os.path.join(root, "runtime")
 
 
 _RUNTIME_ABI = None      # name -> entry; built once, see runtime_abi()
