@@ -30,6 +30,11 @@ point:
 | `ENC-MISMATCH` | `formal/arm64.py` and `as -arch arm64` disagree about the instruction | no — an encoder-table finding |
 | `ENC-FAIL` | `as` refused the pool's own text | no — a pool bug |
 
+To add a §2 row, run the sweep with `--ledger-row` and copy the row it prints
+(`ledger_row` in `tools/formal_model_fuzz.py`). The row is built from the same
+tally the run reports, so a number in this file no longer has to be retyped from
+stdout; the date and the "what came of it" column are still written by hand.
+
 Machine: 18-core arm64 macOS 25.6, clang 21, Python 3.14.7. Every run under
 `python3 tools/memslot.py --gb 4`, peak **2.3 GB** across all of the runs
 recorded here (`MEMLIMIT` well inside the 3-4 GB line in `BLOW.md`).
@@ -48,8 +53,6 @@ recorded here (`MEMLIMIT` well inside the 3-4 GB line in `BLOW.md`).
 
 ### 2.1 Per-mix coverage (60 cases per mix, seed `ledgerA`)
 
-| mix | AGREE | WRONG | NOSTEP | what the NOSTEPs are |
-|---|---|---|---|---|
 | mix | AGREE before | WRONG before | AGREE after | WRONG after | NOSTEP (unchanged) | what the NOSTEPs are |
 |---|---|---|---|---|---|---|
 | `shifts` | 60 | 0 | 60 | 0 | 0 | — the six shift instructions agree over the whole corpus |

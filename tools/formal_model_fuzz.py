@@ -1451,6 +1451,25 @@ def report(tally, findings, cases, limit=12):
         print("  ... and %d more finding(s)" % (len(findings) - limit))
 
 
+#: The verdict columns of `bugs/FORMAL_model_fuzz_ledger.md` §2, in the order
+#: that file writes them.
+LEDGER_VERDICTS = ("AGREE", "WRONG", "NOSTEP", "FAULT", "ENC-MISMATCH",
+                   "ENC-FAIL", "NO-REPORT", "NO-EVAL")
+
+
+def ledger_row(tally, n_cases, seed, mixes):
+    """One §2 row of `bugs/FORMAL_model_fuzz_ledger.md`, from a run's tally.
+
+    The ledger's numbers were copied by hand from stdout and drifted (§2.1 was
+    re-measured and found stale), so the row is produced from the same tally
+    `report` prints. The date and the "what came of it" column are the
+    person's to fill in: they are not facts the tool can measure.
+    """
+    verdicts = "  ".join("%s %d" % (k, tally.get(k, 0)) for k in LEDGER_VERDICTS)
+    return "| %s | %s | %d | %s |" % (
+        ", ".join(mixes), seed, n_cases, verdicts)
+
+
 # ── minimisation ────────────────────────────────────────────────────────
 #
 # A 6-instruction disagreement is a finding; a 1-instruction disagreement is a
@@ -1522,6 +1541,9 @@ def main(argv):
     ap.add_argument("--keep", action="store_true", help="do not delete the artifacts")
     ap.add_argument("--lean-chunk", type=int, default=25, metavar="N",
                     help="cases per lean process (default 25; see run_model)")
+    ap.add_argument("--ledger-row", action="store_true",
+                    help="also print this run as a row of "
+                         "bugs/FORMAL_model_fuzz_ledger.md §2")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
     verbose_report = args.verbose
@@ -1532,6 +1554,8 @@ def main(argv):
         cases = all_cases(args.cases, args.seed, mixes, args.length)
         tally, findings = sweep(cases, work, args.verbose, args.lean_chunk)
         report(tally, findings, cases)
+        if args.ledger_row:
+            print(ledger_row(tally, len(cases), args.seed, mixes))
         if args.minimise and findings:
             print("minimising %d finding(s):" % min(args.minimise, len(findings)))
             for i, case, _diffs in findings[:args.minimise]:
