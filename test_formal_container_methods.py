@@ -76,7 +76,7 @@ WHAT IS DELIBERATELY NOT IN HERE
 * A dict whose iteration order is observed. Insertion order is what a pair blob
   gives and it IS what CPython gives for a dict, but a dict whose keys hash
   COLLIDE does not agree, and this file has no business deciding that question —
-  see `bugs/FORMAL_set_value_model.md` for the set case, which is the same
+  see `bugs/formal/FORMAL_set_value_model.md` for the set case, which is the same
   question and is already written down.
 """
 
@@ -613,7 +613,7 @@ DICT_CASES = [
 
 SET_CASES = [
     ("s_len", ["s = {1, 2}"], "len(s)",
-     "a set lowers as a LIST here (`bugs/FORMAL_set_value_model.md`), so its "
+     "a set lowers as a LIST here (`bugs/formal/FORMAL_set_value_model.md`), so its "
      "count is the blob's count word"),
     ("s_in", ["s = {1, 2}"], "1 if 1 in s else 0",
      "a set's membership is a linear scan where CPython's is a hash probe — "

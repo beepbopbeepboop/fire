@@ -651,7 +651,7 @@ _UNRESOLVED_MARK = "not a stdlib or sibling module"
 # tree — said apart from `_HOST_MARK`'s on purpose, because the two differ in
 # something a reader acts on: a name in `host_module_tier`'s `modelled` or
 # `admitted` tier has an owner and a next step, and a name in NO tier has
-# neither (`bugs/FORMAL_stdlib_module_names_are_not_classified.md` is the queue;
+# neither (`bugs/formal/FORMAL_stdlib_module_names_are_not_classified.md` is the queue;
 # `formal/imports.py`'s own comment says the split is deliberate).
 #
 # Measured on the 2026-10-03 sweep, and the cost of not having this marker was
@@ -788,7 +788,7 @@ _MEMBER_RE = re.compile(r"\b([A-Za-z_]\w*)\.([A-Za-z_]\w*)")
 # Most of what it found is ONE design defect wearing five costumes, and the
 # families below are ordered so that the *distinction that changes what you
 # would do* wins over the one that does not. All five are recorded in
-# bugs/FORMAL_wide_receiver_by_reference.md; they are separated here because
+# bugs/formal/FORMAL_wide_receiver_by_reference.md; they are separated here because
 # they have different fixes:
 #
 #   * the address ESCAPES (returned, or aliased out of a method) — the caller
@@ -1465,7 +1465,7 @@ def _own_unprovided_methods(detail: str, path) -> list:
 
     Measured: `external_call["setenv", T]`'s bracket list put a 55-file family
     here, and `codegen coverage` read 10.2% instead of something lower for the
-    wrong reason (`bugs/FORMAL_env_family_next_terminal.md`).
+    wrong reason (`bugs/formal/FORMAL_env_family_next_terminal.md`).
 
     A LIST and not a boolean, because the two causes really do coexist in one
     image — a dangling call to an unlowered builtin AND a method this file never
@@ -1729,7 +1729,7 @@ def unclassified_report(pairs, total, say=print, other_classify=None,
     if loud:
         say("  (a shape over the bar is a HOLE IN THE RANKING TABLES rather "
             "than a row of work, and closing it is adding the row — the same "
-            "two-part job the `b12` round of `bugs/FORMAL_sweep_work_map.md` §5.2 "
+            "two-part job the `b12` round of `bugs/formal/FORMAL_sweep_work_map.md` §5.2 "
             "did for the refusal that hid 229 files behind one module)")
     return loud
 
@@ -2668,7 +2668,7 @@ def _bind_symbols(binary: bytes) -> list:
 # all, and until 2026-10-02 the tool answered that by refusing to answer —
 # which cost 7 correct images their verdict outright and made the x86-64 sweep's
 # pass count a floor rather than a number
-# (the `2026-10-01` round of `bugs/FORMAL_sweep_work_map.md` §4). Reading the trie answers the
+# (the `2026-10-01` round of `bugs/formal/FORMAL_sweep_work_map.md` §4). Reading the trie answers the
 # same question from the same bytes, on any host. `formal/build.py`'s
 # `macho_dylib_exports` is already this project's independent reader of that
 # format (an independent one deliberately: `formal/macho_linker.py` writes these
@@ -2742,7 +2742,7 @@ def _host_cputype():
     derived entirely from a limitation of the instrument. Measured: it is the
     whole of the arm64-vs-x86-64 pass difference, all 7 files, every one of them
     an image that builds and links correctly for its architecture
-    (the `2026-10-01` round of `bugs/FORMAL_sweep_work_map.md` §4).
+    (the `2026-10-01` round of `bugs/formal/FORMAL_sweep_work_map.md` §4).
 
     It then became a SECOND limitation, having stopped being the first: the same
     mismatch made the tool decline to look the names up at all, filing those 7
@@ -3697,7 +3697,7 @@ def report_history(prev, verdicts: dict) -> None:
 # that needs the second and could not use the first: 229 of 735 files stopped
 # building behind one module because six lines of em-dash prose were added to a
 # docstring, and the only record of it was a work map written afterwards from two
-# logs by hand (the `b12` round of `bugs/FORMAL_sweep_work_map.md` §1). Nobody ran
+# logs by hand (the `b12` round of `bugs/formal/FORMAL_sweep_work_map.md` §1). Nobody ran
 # the diff, because the diff needs the previous round's log, which is a file on
 # somebody's machine from three days ago.
 #
@@ -4173,7 +4173,7 @@ def report_baseline(path, prev, verdicts: dict, rows, total, unnamed_now=(),
     say("    (a class count that moved is not the finding; the file list is. "
         "A host model landing moves files in BOTH directions over one edit, so "
         "read the direction before reading the count — "
-        "the `b12` round of `bugs/FORMAL_sweep_work_map.md` §3.4 is the record)")
+        "the `b12` round of `bugs/formal/FORMAL_sweep_work_map.md` §3.4 is the record)")
     return True
 
 
@@ -4386,7 +4386,7 @@ def _drain_in_flight(futs, collect) -> None:
     pool had taken. Each of those publishes its verdict to the CAS before
     `run_one` returns, so a drain that ignored them would leave verdicts in the
     cache that the run's own output never mentions — which is what forced
-    the `b6` round of `bugs/FORMAL_sweep_work_map.md` §2.3 to reconstruct a run's
+    the `b6` round of `bugs/formal/FORMAL_sweep_work_map.md` §2.3 to reconstruct a run's
     numbers from the cache instead of reading its log.
 
     Waited for rather than killed, and the cost is bounded: each in-flight build

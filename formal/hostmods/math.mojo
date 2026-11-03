@@ -660,7 +660,7 @@ def _MAX_I64() -> int:
     """`2**63 - 1`, the largest value a word on this path holds.
 
     A FUNCTION because a module-level name is not exported as a word across a
-    dylib boundary (`bugs/FORMAL_module_state_no_storage.md`), which is the same
+    dylib boundary (`bugs/formal/FORMAL_module_state_no_storage.md`), which is the same
     reason `os.sep()` and `stat.S_IRUSR()` are functions. Three callers in this
     file need it and a constant in three places is a number in three places.
     """

@@ -46,6 +46,8 @@ is the integrator's job (tools/integrate.py), which merges finished branches
 together and gates them once.
 """
 import argparse, fcntl, json, os, re, shutil, subprocess, sys, time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import fleet_ledger
 from contextlib import contextmanager
 
 MAIN = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -191,6 +193,18 @@ def questions(t):
     return re.findall(r"^\s*QUESTION:\s*(.+)$", txt, re.M)
 
 
+def holds_claims(t):
+    """Whether task T still holds its bug claims. Only work holds: a live worker, or commits that have not landed. A
+    dead worker that committed nothing holds nothing, so a retry of the same bug is never refused by it (2026-11-01:
+    23 such entries, all with no commits, refused every retry for days)."""
+    st = state_of(t)
+    if st in TERMINAL:
+        return False
+    if st == "running":
+        return True
+    return ahead(t) > 0
+
+
 def ahead(t):
     r = subprocess.run(["git", "rev-list", "--count", "master.." + t["branch"]],
                        cwd=MAIN, capture_output=True, text=True)
@@ -217,12 +231,13 @@ def cmd_spawn(a):
         if a.name in tasks:
             sys.exit("task %s already exists" % a.name)
         for other, t in tasks.items():
-            if state_of(t) in TERMINAL:
+            if not holds_claims(t):
                 continue
             for c in a.claim:
                 for oc in t["claims"]:
                     if conflicts(c, oc):
-                        sys.exit("claim %r conflicts with %r held by task %s" % (c, oc, other))
+                        sys.exit("claim %r conflicts with %r held by task %s (%s, %d commits)" % (
+                            c, oc, other, state_of(t), ahead(t)))
         ext = external_conflicts(a.claim)
         if ext:
             sys.exit("claim %r conflicts with %r held by external session %s" % (ext[0][1], ext[0][2], ext[0][0]))
@@ -246,8 +261,10 @@ def cmd_spawn(a):
             # opencode v2: --model belongs to `run`, there is no --dir (cwd=wt below)
             cmd = ["opencode", "run", "--model", a.model, "--auto", "--title", a.name, instr]
         os.makedirs(os.path.join(wt, ".tmp"), exist_ok=True)
+        # the worker runs under a CPU ceiling (tools/cpu_cap.py): a runaway loop stops itself, and its CPU is recorded
+        capped = [sys.executable, os.path.join(MAIN, "tools", "cpu_cap.py"), "wrap", "--name", a.name, "--"] + cmd
         wrapper = 'export TMPDIR=%s PATH=%s:"$PATH"; ( %s ) >> work.log 2>&1 </dev/null; echo $? > exitcode' % (
-            sh(os.path.join(wt, ".tmp")), sh(git_shim_dir()), " ".join(map(sh, cmd)))
+            sh(os.path.join(wt, ".tmp")), sh(git_shim_dir()), " ".join(map(sh, capped)))
         open(os.path.join(wt, "work.log"), "a").write("=== control: spawned %s on %s at %s ===\n" % (
             a.name, a.model, time.strftime("%F %T")))
         p = subprocess.Popen(["sh", "-c", wrapper], cwd=wt, start_new_session=True,
@@ -255,8 +272,9 @@ def cmd_spawn(a):
         tasks[a.name] = dict(name=a.name, slot=n, worktree=wt, branch=branch, claims=a.claim,
                              model=a.model, pool=a.pool if sl else None, kind=kind, pid=p.pid,
                              started=time.strftime("%F %T"),
-                             base=a.base, files=a.file, task=task,   # what `bounce` needs to put it back on the queue
+                             base=a.base, files=a.file, task=task, cls=getattr(a, "cls", None),   # what `bounce` needs to put it back on the queue
                              state="running", summary=task.strip().splitlines()[0][:200])
+    fleet_ledger.record_spawn(ctl_dir(), a.name, p.pid, wt, cmd)     # the only processes the fleet may ever signal
     print("spawned %s: %s (pid %d), log %s/work.log" % (a.name, wt, p.pid, wt))
 
 
@@ -415,6 +433,9 @@ def cmd_mark(a):
     with registry() as tasks:
         if a.name not in tasks:
             sys.exit("no such task")
+        if a.state == "integrated" and ahead(tasks[a.name]) > 0:
+            sys.exit("%s is not integrated: branch %s has %d commit(s) master lacks (land it, or mark it superseded/abandoned)"
+                     % (a.name, tasks[a.name]["branch"], ahead(tasks[a.name])))
         tasks[a.name]["state"] = a.state
     print("%s -> %s" % (a.name, a.state))
 
@@ -450,13 +471,14 @@ def cmd_enqueue(a):
     task = a.task if a.task is not None else open(a.task_file).read()
     # a task queued without --pool runs on whichever slot is free first (see refill); --pool only prefers one
     item = dict(name=a.name, claims=a.claim, base=a.base, task=task, files=a.file, needs=a.needs or [],
-                added=time.time(), pool=getattr(a, "pool", None), only=bool(getattr(a, "only", False)))
+                added=time.time(), pool=getattr(a, "pool", None), only=bool(getattr(a, "only", False)),
+                cls=getattr(a, "cls", None))
     json.dump(item, open(os.path.join(qdir(), a.name + ".json"), "w"), indent=1)
     print("queued %s (needs: %s)" % (a.name, ", ".join(item["needs"]) or "nothing"))
 
 
 LIMIT_ERR = re.compile(r"model (is )?(unavailable|not found)|unknown model|usage limit|rate.?limit|quota|\b429\b|too many requests|insufficient (credit|balance)|"
-                       r"limit (exceeded|reached)|resets? (at|in) ", re.I)
+                       r"limit (exceeded|reached)|resets? (at|in) |hit your (weekly |daily |5-hour )?limit", re.I)
 BREAKER_MIN = 30   # after a worker dies on arrival, start nothing new for this long
 
 
@@ -490,15 +512,109 @@ def dead_models():
     return {m: e["until"] for m, e in _ledger().items() if e["until"] > time.time()}
 
 
-def mark_dead(model, sl):
-    """Ban MODEL for the slot SL's recovery time; the second limit inside a day uses the long window."""
-    d, now = _ledger(), time.time()
+RESET_MARGIN_S = 300   # a ban that ends at the printed reset time lifts five minutes after it, so the limit has really cleared
+RESET_RE = re.compile(r"resets (\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(([A-Za-z_/+-]+)\)", re.I)
+
+
+def next_wall_time(hour, minute, tz, now=None):
+    """The epoch time of the next HH:MM in zone TZ strictly after NOW (tomorrow if today's has passed)."""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    now = time.time() if now is None else now
+    t = datetime.fromtimestamp(now, ZoneInfo(tz)).replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if t.timestamp() <= now:
+        t += timedelta(days=1)
+    return t.timestamp()
+
+
+def replenish_at(sl, now=None):
+    """When a daily free tier gets its tokens back: the slot's `replenish` time plus its margin, or None when the slot
+    has no daily replenish. pool.json: "replenish": {"tz": "UTC", "at": "00:00", "margin_min": 1}."""
+    r = sl.get("replenish")
+    if not r:
+        return None
+    hh, mm = (int(x) for x in r["at"].split(":"))
+    return next_wall_time(hh, mm, r["tz"], now) + r.get("margin_min", 1) * 60
+
+
+def reset_at(text, now=None):
+    """The epoch time of the NEXT reset the claude CLI printed in a limit line ("resets 11am (America/Los_Angeles)"),
+    or None when the text carries no reset. The next occurrence of that wall-clock time in that zone, strictly after now."""
+    m = RESET_RE.search(text or "")
+    if not m:
+        return None
+    hour, minute = int(m.group(1)) % 12 + (12 if m.group(3).lower() == "pm" else 0), int(m.group(2) or 0)
+    return next_wall_time(hour, minute, m.group(4), now)
+
+
+def limit_reset(t):
+    """The reset time of the limit that stopped worker T, read from its own log; None if its log names none."""
+    lp = os.path.join(t["worktree"], "work.log")
+    if not os.path.exists(lp):
+        return None
+    return reset_at(re.sub(r"\x1b\[[0-9;]*m", "", open(lp, errors="replace").read()[-3000:]))
+
+
+def mark_dead(model, sl, until=None, now=None):
+    """Ban MODEL until UNTIL (a limit's printed reset) when given, else for the slot SL's recovery time. Without a reset,
+    the second limit inside a day uses the long window."""
+    d, now = _ledger(), time.time() if now is None else now
     prev = d.get(model, {})
     strikes = prev.get("strikes", 0) + 1 if now - prev.get("last", 0) < 86400 else 1
-    hours = sl.get("long_recover_days", 0) * 24 if strikes >= 2 and sl.get("long_recover_days") else sl["recover_hours"]
-    d[model] = {"until": now + hours * 3600, "strikes": strikes, "last": now}
+    if until and until > now:
+        end = until + RESET_MARGIN_S
+    elif replenish_at(sl, now):
+        end = replenish_at(sl, now)     # a daily free tier: back when its tokens come back, not a fixed block
+    else:
+        hours = sl.get("long_recover_days", 0) * 24 if strikes >= 2 and sl.get("long_recover_days") else sl["recover_hours"]
+        end = now + hours * 3600
+    hours = (end - now) / 3600
+    d[model] = {"until": end, "strikes": strikes, "last": now}
     json.dump(d, open(os.path.join(ctl_dir(), LEDGER), "w"), indent=1)
     return hours
+
+
+PROBE_EVERY_S = 12 * 3600   # a banned daily free tier is asked one word at most this often: they refill once a day
+PROBE_TIMEOUT_S = 180
+
+
+def probe_model(model):
+    """True when MODEL answers a one-word prompt. A limit's refusal, a timeout or a missing CLI is no answer."""
+    try:
+        r = subprocess.run(["opencode", "run", "--model", model, "Reply with the single word PONG."],
+                           capture_output=True, text=True, timeout=PROBE_TIMEOUT_S)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    out = re.sub(r"\x1b\[[0-9;]*m", "", r.stdout + r.stderr)
+    return r.returncode == 0 and "PONG" in out and not LIMIT_ERR.search(out)
+
+
+def probe_free_bans(now=None, probe=probe_model):
+    """Lift the ban on each banned daily free tier that answers. A free tier's ban is a guess (its replenish time),
+    and a limit can land minutes after a replenish, so the tier's own answer decides: the ban is lifted at once when
+    the tier answers, and otherwise re-asked every PROBE_EVERY_S. Returns the models it lifted."""
+    now = time.time() if now is None else now
+    d = _ledger()
+    daily = {sl["model"] for sl in load_pool()["slots"] if sl.get("replenish")}
+    lifted, changed = [], False
+    for m, e in d.items():
+        if m not in daily or e["until"] <= now or now - e.get("probed", 0) < PROBE_EVERY_S:
+            continue
+        e["probed"] = now
+        changed = True
+        if probe(m):
+            e["until"] = now
+            lifted.append(m)
+            print("probe: %s answers; its ban is lifted" % m, flush=True)
+        else:
+            print("probe: %s still refuses; next probe in %d s" % (m, PROBE_EVERY_S), flush=True)
+    if changed:
+        json.dump(d, open(os.path.join(ctl_dir(), LEDGER), "w"), indent=1)
+    return lifted
+
+
+def cmd_probe_free(a):
+    probe_free_bans()
 
 
 def running_by_slot(tasks=None):
@@ -526,7 +642,8 @@ def limit_hit(t):
     if not os.path.exists(lp):
         return False
     lines = re.sub(r"\x1b\[[0-9;]*m", "", open(lp, errors="replace").read()[-3000:]).splitlines()
-    errs = [l for l in lines if re.match(r"\s*Error:", l) or re.search(r"usage limit reached", l, re.I)]
+    errs = [l for l in lines if re.match(r"\s*Error:", l) or re.search(r"usage limit reached", l, re.I)
+            or re.match(r"\s*You've hit your", l)]   # the claude CLI's own limit line
     return any(LIMIT_ERR.search(l) for l in errs)
 
 
@@ -555,13 +672,14 @@ def bounce(name, t):
     if extra:
         return False
     if t.get("pool") and limit_hit(t):
-        mark_dead(t["model"], pool_slot(t["pool"]))   # the task stays on its slot; refill waits for the ban to lift
+        mark_dead(t["model"], pool_slot(t["pool"]), limit_reset(t))   # the ban ends at the printed reset, else the recovery time
     git("worktree", "remove", "--force", wt, check=False)
     git("branch", "-D", t["branch"], check=False)
     with registry() as reg:
         reg.pop(name, None)
     item = dict(name=name, claims=t["claims"], base=t.get("base") or "master", task=t.get("task") or _task_text(t),
-                files=t.get("files", []), needs=[], added=time.time(), model=t.get("model"), pool=t.get("pool"))
+                files=t.get("files", []), needs=[], added=time.time(), model=t.get("model"), pool=t.get("pool"),
+                cls=t.get("cls"))
     json.dump(item, open(os.path.join(qdir(), name + ".json"), "w"), indent=1)
     return True
 
@@ -571,8 +689,24 @@ def pick_slot(item, busy):
     pool order; None if every slot is full or banned. `busy` is running_by_slot() plus this pass's starts."""
     if item.get("only"):                       # pinned: its slot or nothing
         return pool_slot(item["pool"]) if item.get("pool") and slot_free(pool_slot(item["pool"]), busy) else None
-    order = ([pool_slot(item["pool"])] if item.get("pool") else []) + load_pool()["slots"]
+    slots = load_pool()["slots"]
+    if item.get("cls"):                        # a classed task stays in its class: its slots or nothing
+        slots = [x for x in slots if accepts(x, item["cls"])]
+    pref = item.get("pool")
+    order = [x for x in slots if x["name"] == pref] + [x for x in slots if x["name"] != pref]
     return next((x for x in order if slot_free(x, busy)), None)
+
+
+CLASSES = ("easy", "mid", "hard")   # the work classes, weakest model first; a slot without a class is easy
+
+
+def slot_class(sl):
+    return sl.get("class", "easy")
+
+
+def accepts(sl, cls):
+    """A slot takes tasks of its own class and of any class in its `also` list (pool.json)."""
+    return slot_class(sl) == cls or cls in sl.get("also", [])
 
 
 def cmd_refill(a):
@@ -607,6 +741,8 @@ def cmd_refill(a):
     items = sorted(items_all, key=lambda i: i["added"])
     started = 0
     items = [i for i in items if i["name"].startswith(tuple(a.prefix.split(",")))]
+    # The FORMAL lane is the owner's: its Qwen runs formal* tasks by hand, and the swarm never starts one, on any slot
+    # (2026-10-31: queued formal tasks were started on haiku, which is paid and not for the formal lane).
     for it in items:
         if live + started >= a.target and not it["name"].startswith("fix-landed"):
             continue                      # a red master is repaired at once, whatever the slot count
@@ -621,7 +757,7 @@ def cmd_refill(a):
         # were skipped on every pass as "already exists"); the task starts under a fresh name instead
         name = it["name"] if it["name"] not in tasks else "%s-%d" % (it["name"][:50], int(time.time() * 1000) % 1000000)
         ns = argparse.Namespace(name=name, claim=it["claims"], task=it["task"], task_file=None,
-                                file=it["files"], base=it["base"], model=None, pool=sl["name"])
+                                file=it["files"], base=it["base"], model=None, pool=sl["name"], cls=it.get("cls"))
         busy[sl["name"]] = busy.get(sl["name"], 0) + 1
         try:
             cmd_spawn(ns)
@@ -648,13 +784,20 @@ def cmd_gate(a):
             sys.exit("gate off needs --reason, --doc (an existing bugs/ doc) and --worker (who works the backlog)")
         if not os.path.exists(os.path.join(MAIN, a.doc)):
             sys.exit("no such doc: %s" % a.doc)
-        cfg.setdefault("off", {})[a.pattern] = dict(reason=a.reason, doc=a.doc, worker=a.worker,
-                                                  since=time.strftime("%F %T"))
+        gate_off_in(GATES_FILE, a.pattern, a.reason, a.doc, a.worker)
     else:
         if cfg.get("off", {}).pop(a.pattern, None) is None:
             sys.exit("no OFF gate %r" % a.pattern)
-    json.dump(cfg, open(GATES_FILE, "w"), indent=2)
+        json.dump(cfg, open(GATES_FILE, "w"), indent=2)
     print("gate %s %s" % (a.action, a.pattern))
+
+
+def gate_off_in(path, pattern, reason, doc, worker):
+    """Add one OFF entry to the gates file at PATH (the single writer of tools/gates.json: `gate off` and the
+    integrator's automatic ungate both come through here)."""
+    cfg = json.load(open(path))
+    cfg.setdefault("off", {})[pattern] = dict(reason=reason, doc=doc, worker=worker, since=time.strftime("%F %T"))
+    json.dump(cfg, open(path, "w"), indent=2)
 
 
 def priority_list():
@@ -719,64 +862,30 @@ def cmd_ps(a):
 
 
 def cmd_guard(a):
-    """Memory watchdog for OUR trees: SIGKILL any process whose cwd is inside a worker worktree (or the
-    integrator tree) once its resident size passes --limit-gb, and, because a per-process cap is defeated by
-    fan-out width, kill the largest such process whenever their SUM passes --total-gb. Says so in the log.
-
-    Why: the gate's own jobs run under tools/memcap.py, but a worker's direct `fire.py build` / self-host
-    compile does not, and this compiler has a known 190 GB+ blow-up (bugs/CODEGEN_bootstrap_resource_blowup.md).
-    2026-09-29 the user had to kill a 200 GB+ mojo compile by hand. The default limit is above the 55 GB the
-    `program` memclass is measured to need, so honest big jobs are not touched. RSS undercounts a process the
-    OS has compressed or swapped, so this is a floor on protection, not a guarantee. Never touches a process
-    outside our trees."""
-    def tree_roots():
-        # Recomputed every pass: workers are spawned all day, and a list taken once at start-up
-        # stopped covering every worktree created after the guard did (2026-10-03: two orphaned
-        # `lean` processes at 154 and 286 CPU-minutes ran for an hour inside work-337, a worktree
-        # born after the guard, and the lean time bound never matched their cwd).
-        return [os.path.realpath(p) for p in
-                [t["worktree"] for t in load().values()] + [os.path.join(PARENT, "work-integ")]]
-    roots = tree_roots()
+    """Memory watchdog for the groups the fleet started (fleet_ledger). A group whose resident size passes
+    --limit-gb is stopped: SIGTERM, then SIGKILL after the grace period, logged in kills.log. A process the fleet
+    did not start is never measured against the limit and never signalled. --total-gb caps the sum over all groups.
+    Runs once per invocation: loop it from the outside if you want it continuous."""
     limit_kb = int(a.limit_gb * 1048576)
     total_kb = int(a.total_gb * 1048576)
+    groups = {}
+    for name, t in load().items():
+        if state_of(t) != "running":
+            continue
+        for e in fleet_ledger.entries(ctl_dir(), name):
+            groups[e["pgid"]] = name
+    sizes = {g: fleet_ledger.group_rss_kb(g) for g in groups}
+    for g, kb in sizes.items():
+        if kb > limit_kb:
+            fleet_ledger._log(ctl_dir(), "guard: group %d (task %s) at %.1f GB over the %.1f GB limit" % (
+                g, groups[g], kb / 1048576, a.limit_gb))
+            fleet_ledger.kill_group(ctl_dir(), groups[g], "memory over limit")
+    if sum(sizes.values()) > total_kb and sizes:
+        g = max(sizes, key=sizes.get)
+        fleet_ledger._log(ctl_dir(), "guard: fleet total %.1f GB over %.1f GB; largest group %d (task %s)" % (
+            sum(sizes.values()) / 1048576, a.total_gb, g, groups[g]))
+        fleet_ledger.kill_group(ctl_dir(), groups[g], "fleet total over limit")
 
-    def cwd_of(pid):
-        r = subprocess.run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"], capture_output=True, text=True).stdout
-        m = re.search(r"^n(.*)$", r, re.M)
-        return os.path.realpath(m.group(1)) if m else ""
-
-    def kill(pid, why, rss, args):
-        print("%s guard: killed pid %d at %.1f GB (%s): %s" % (
-            time.strftime("%F %T"), pid, rss / 1048576, why, args[:110]), flush=True)
-        try: os.kill(pid, 9)
-        except OSError: pass
-
-    while True:
-        roots = tree_roots()
-        out = subprocess.run(["ps", "-axo", "pid=,rss=,args="], capture_output=True, text=True).stdout
-        big = []                                     # processes over 1 GB that live in our trees
-        for line in out.splitlines():
-            f = line.split(None, 2)
-            if len(f) < 3 or not f[1].isdigit() or int(f[1]) < 1048576 or "control.py guard" in f[2]:
-                continue
-            c = cwd_of(int(f[0]))
-            if any(c == x or c.startswith(x + os.sep) for x in roots):
-                big.append((int(f[1]), int(f[0]), f[2]))
-        for rss, pid, args in list(big):             # per-process ceiling
-            if rss >= limit_kb:
-                kill(pid, "over the %.0f GB per-process limit" % a.limit_gb, rss, args)
-                big.remove((rss, pid, args))
-        # Total budget: a per-process cap is defeated by fan-out width (2026-09-29: ~30 processes at ~30 GB
-        # each, none over any per-process limit, collapsed the machine). Kill the largest until under budget.
-        big.sort(reverse=True)
-        while big and sum(b[0] for b in big) > total_kb:
-            rss, pid, args = big.pop(0)
-            kill(pid, "tree total over the %.0f GB budget" % a.total_gb, rss, args)
-        _guard_lean_time(roots, a, cwd_of, kill)
-        _guard_runaway(roots, a, cwd_of, kill)
-        if a.once:
-            return
-        time.sleep(a.interval)
 
 
 def _ps_time(s):
@@ -846,6 +955,19 @@ def _guard_runaway(roots, a, cwd_of, kill):
             kill(int(f[0]), "runaway: %.0f min wall (limit %g)" % (wall / 60, a.runaway_min), 0, f[2])
 
 
+def _claimed_by_outside(path):
+    """True if an outside session (a user's own opencode, a hand-run agent) has claimed this directory or a parent of it.
+    A claim is a string; a path claim is compared as a path. Such a tree is never removed."""
+    for e in external().values():
+        for k in e.get("claims", []):
+            if not k.startswith("/") and "/" not in k:
+                continue
+            kp = os.path.realpath(k)
+            if path == kp or path.startswith(kp + os.sep) or kp.startswith(path + os.sep) or kp == path:
+                return True
+    return False
+
+
 def cmd_cleanup(a):
     """Remove the worktrees we created and no longer use: a `work-*` tree whose HEAD is already an ancestor of
     master, with a clean tree (no modified or untracked-and-not-ignored files), and no live worker.
@@ -863,6 +985,11 @@ def cmd_cleanup(a):
             cur = {"path": l[9:]}; wt.append(cur)
         elif l.startswith("HEAD "):
             cur["head"] = l[5:]
+    try:
+        dirs = live_session_dirs()
+    except (RuntimeError, OSError, ValueError) as e:
+        print("cleanup: %s; removing nothing" % e)     # cannot tell which trees an agent is driving: remove none
+        return
     cands, kept = [], []
     for w in wt:
         p = os.path.realpath(w["path"])
@@ -871,6 +998,10 @@ def cmd_cleanup(a):
         t = byw.get(p)
         if t and state_of(t[1]) == "running":
             kept.append((p, "running")); continue
+        if any(d == p or d.startswith(p + os.sep) for d in dirs):
+            kept.append((p, "live opencode session")); continue
+        if _claimed_by_outside(p):
+            kept.append((p, "claimed by an outside session")); continue
         if subprocess.run(["git", "merge-base", "--is-ancestor", w["head"], "master"], cwd=MAIN).returncode != 0:
             kept.append((p, "unmerged")); continue
         cands.append(p)
@@ -966,7 +1097,7 @@ def restart(name, why, model=None):
     git("commit", "-q", "-m", "WIP snapshot by controller: %s's uncommitted edits when it was restarted (%s)" % (name, why),
         cwd=wt, check=False)
     try:
-        os.killpg(t["pid"], 15)
+        fleet_ledger.kill_group(ctl_dir(), t["name"], "restart")
     except OSError:
         pass
     n = 2
@@ -979,7 +1110,7 @@ def restart(name, why, model=None):
             "commit is 'WIP snapshot by controller'); review it, keep what is right, and finish the task. Original task:\n\n%s"
             % (name, why, _task_text(t)))
     ns = argparse.Namespace(name=new, claim=t["claims"], task=task, task_file=None, file=[], base=t["branch"],
-                            model=None, pool=t.get("pool"))
+                            model=None, pool=t.get("pool"), cls=t.get("cls"))
     cmd_spawn(ns)
     return new
 
@@ -1036,33 +1167,70 @@ def cmd_unstick_dead(a):
                 print("   restarted as", restart(name, "died of a network error"))
 
 
-def cmd_reap(a):
-    """Kill processes still running with their cwd inside the worktree of a task whose worker has exited.
-
-    Workers' tests start `lean` proof checks (and gcc, fire.py builds) that outlive the test run when the
-    worker times out or moves on; reparented to launchd they burn a core each for hours (2026-09-29: 8 lean
-    processes, 4-6 h old, from three long-finished workers, took a third of the machine and pushed the gate's
-    jobs past their timeouts). Only trees of tasks that are NOT running are touched; anything else on the
-    machine (another session's processes) is left alone."""
-    live = {os.path.realpath(t["worktree"]) for t in load().values() if state_of(t) == "running"}
-    dead = {os.path.realpath(t["worktree"]): n for n, t in load().items() if state_of(t) != "running"}
-    out = subprocess.run(["lsof", "-d", "cwd", "-Fpn"], capture_output=True, text=True).stdout
-    pid, victims = None, []
+def descendants(pid):
+    """Every process under PID (its children, their children, and so on), from the live process table. A job a worker's
+    shell started (a test, a build) is one of these while the worker lives; once its parent dies the job is reparented
+    to launchd and the walk loses it, which is why reap also matches on the worktree (below)."""
+    out = subprocess.run(["ps", "-axo", "pid=,ppid="], capture_output=True, text=True).stdout
+    kids = {}
     for line in out.splitlines():
-        if line.startswith("p"):
-            pid = int(line[1:])
-        elif line.startswith("n") and pid:
-            cwd = os.path.realpath(line[1:])
-            for root, name in dead.items():
-                if (cwd == root or cwd.startswith(root + os.sep)) and pid != os.getpid():
-                    victims.append((pid, name))
-    for pid, name in victims:
-        cmd = subprocess.run(["ps", "-o", "etime=,command=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()[:110]
-        print("%s pid %d: %s" % ("would kill" if a.dry_run else "kill", pid, name + " | " + cmd))
+        f = line.split()
+        if len(f) == 2 and f[0].isdigit() and f[1].isdigit():
+            kids.setdefault(int(f[1]), []).append(int(f[0]))
+    found, todo = [], [pid]
+    while todo:
+        for k in kids.get(todo.pop(), []):
+            if k not in found:
+                found.append(k)
+                todo.append(k)
+    return found
+
+
+SESSION_WINDOW_S = 900   # an opencode session updated this recently is still working
+
+
+def live_session_dirs(window_s=SESSION_WINDOW_S, listing=None):
+    """Directories of opencode sessions updated within `window_s`: an agent that is still driving a worktree, even when
+    the registry task that owns the tree has exited (its CLI process is gone but the session on the service keeps
+    running). `listing` is the parsed `opencode session list --format json` (injectable for tests); raises if the
+    listing cannot be read, so the caller can refuse to act rather than guess."""
+    if listing is None:
+        r = subprocess.run(["opencode", "session", "list", "--format", "json"], capture_output=True, text=True, timeout=120)
+        if r.returncode != 0:
+            raise RuntimeError("opencode session list failed: " + (r.stderr or r.stdout).strip()[:200])
+        listing = json.loads(r.stdout)
+    now_ms = time.time() * 1000
+    return {os.path.realpath(s["directory"]) for s in listing
+            if s.get("directory") and now_ms - s.get("updated", 0) <= window_s * 1000}
+
+
+def busy_task_names(dirs, tasks):
+    """The names of tasks whose worktree contains (or is) one of the live session directories."""
+    busy = set()
+    for n, t in tasks.items():
+        root = os.path.realpath(t.get("worktree", "/nonexistent"))
+        if any(d == root or d.startswith(root + os.sep) for d in dirs):
+            busy.add(n)
+    return busy
+
+
+def cmd_reap(a):
+    """Stop the leftover process groups of finished workers. Only groups the fleet recorded at spawn (fleet_ledger):
+    never a process found by its working directory, command or port. A process started by anyone else, including a
+    user's own opencode session in a worktree, is never signalled. A group whose leader has exited is logged and left."""
+    for name, t in load().items():
+        if state_of(t) == "running":
+            continue
+        for e in fleet_ledger.entries(ctl_dir(), name):
+            members = fleet_ledger.group_members(e["pgid"])
+            if not members:
+                continue
+            if a.dry_run:
+                print("would stop %s group %d: %s" % (name, e["pgid"], "; ".join("%d %s" % (p, c[:60]) for p, c in members)))
         if not a.dry_run:
-            try: os.kill(pid, 15)
-            except OSError: pass
-    print("%d process(es)" % len(victims))
+            fleet_ledger.kill_group(ctl_dir(), name, "reap: task finished")
+    print("reap: %s" % ("dry run; nothing signalled" if a.dry_run else "done; see kills.log"))
+
 
 
 def cmd_report(a):
@@ -1120,7 +1288,9 @@ def main():
     s.add_argument("--file", action="append", default=[]); s.add_argument("--base", default="master")
     s.add_argument("--needs", nargs="*"); s.add_argument("--pool", default=None, help="the pool slot this task prefers")
     s.add_argument("--only", action="store_true", help="the task runs ONLY on its --pool slot (waits for it, never moves)")
+    s.add_argument("--cls", choices=CLASSES, default=None, help="the work class: only slots of this class take it")
     s.set_defaults(f=cmd_enqueue)
+    sub.add_parser("probe-free", help="lift the ban on any daily free tier that answers a one-word prompt").set_defaults(f=cmd_probe_free)
     s = sub.add_parser("refill"); s.add_argument("--target", type=int, default=None, help="default: the pool's total slots")
     s.add_argument("--prefix", default="", help="start only queued tasks whose name begins with this"); s.set_defaults(f=cmd_refill)
     s = sub.add_parser("priority"); s.add_argument("names", nargs="*"); s.set_defaults(f=cmd_priority)

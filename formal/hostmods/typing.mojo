@@ -37,7 +37,7 @@ where all of this tree's uses put it, and it will run.
 That is a fact about the BACKEND and not a promise this module makes, so it is
 stated here rather than left as a trap: a name used as a VALUE is a different
 question. `x = Optional[int]` is a subscript of a module-level name, and
-`bugs/FORMAL_module_state_no_storage.md` is why a module-level name is not
+`bugs/formal/FORMAL_module_state_no_storage.md` is why a module-level name is not
 exported as a word — so that program is refused, which is correct and is not
 something this file could fix by declaring `Optional`.
 
@@ -52,7 +52,7 @@ WHAT IS NOT HERE, AND WHY
     `get_args`, `get_origin`, `get_type_hints`, `reveal_type`,
     `TYPE_CHECKING` as a subscript — TYPES. A type is not a value on this path
     and cannot be returned from a module function, let alone stored in a
-    module-level name (`bugs/FORMAL_module_state_no_storage.md`).
+    module-level name (`bugs/formal/FORMAL_module_state_no_storage.md`).
     `formal/elf.py:25` imports `Optional` and `type_system.py:13` imports
     `Optional, Dict, Set, Tuple, Any` — six imported names across the two
     files, five of them distinct, and every one of the six appears in an
@@ -76,7 +76,7 @@ WHAT IS HERE
     TYPE_CHECKING-only imports, and this path erases annotations. It is a
     FUNCTION for the reason every constant in this directory is: a
     module-level name is not exported as a word
-    (`bugs/FORMAL_module_state_no_storage.md`).
+    (`bugs/formal/FORMAL_module_state_no_storage.md`).
 """
 
 def TYPE_CHECKING() -> int:

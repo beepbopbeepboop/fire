@@ -9,7 +9,7 @@ word, and the two answers disagreed with no diagnostic anywhere:
     if z is None: print("WRONG")
 
 arm64 and x86-64 both built that, ran it, and printed `WRONG`
-(`bugs/FORMAL_optional_needs_a_niche.md`). The null was not merely
+(`bugs/formal/FORMAL_optional_needs_a_niche.md`). The null was not merely
 unavailable; it was ambiguous, and an ambiguous null is the one outcome this
 backend's own rule forbids.
 
@@ -582,7 +582,7 @@ REFUSALS = [
     # source's job. So the UNWRAP refuses — it needs the receiver's `Optional`
     # type and there is none — while a bare `x is None` on the same unannotated
     # name still folds to `== 0`. That residue is a pre-existing fold
-    # (`bugs/FORMAL_optional_needs_a_niche.md` records it) and it is NOT what
+    # (`bugs/formal/FORMAL_optional_needs_a_niche.md` records it) and it is NOT what
     # this case pins: what it pins is that the construct which DEPENDS on the
     # representation refuses rather than answering, so an unannotated Optional
     # can never be unwrapped on a guess.
@@ -677,7 +677,7 @@ REFUSALS = [
     # **THE `bool()` SPELLING, and it is the one row here that never built.**
     # Every other row in this group is a program that USED to build and compute
     # the wrong answer; this one has never lowered, and it is here because a
-    # published table said it did. `bugs/FORMAL_optional_needs_a_niche.md`'s
+    # published table said it did. `bugs/formal/FORMAL_optional_needs_a_niche.md`'s
     # list of the niche lowerings carried a row reading
     #
     #     bool(x)            x != niche
@@ -889,7 +889,7 @@ def check_table(tmpdir, verbose):
     #      `Float32` and `DType` matched it — so a user who wrote a float was
     #      told this build had not read the fields of a struct it has no reason
     #      to read. The verdict was never wrong (`doc/ABI.md`'s niche table and
-    #      `bugs/FORMAL_optional_needs_a_niche.md` both list these two as
+    #      `bugs/formal/FORMAL_optional_needs_a_niche.md` both list these two as
     #      refused, which is why nothing went red); only the sentence, which is
     #      the part a user reads.
     #
