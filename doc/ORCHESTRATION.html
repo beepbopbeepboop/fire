@@ -164,8 +164,7 @@ The cure is to <b>land the finished branches</b> (§7), not to release claims by
 <pre><code>cd /Users/mrs/net/chatgpt/claude/mojo-reference
 nohup /opt/local/bin/python3 tools/swarm.py --interval 120 > .git/control/swarm.out 2>&1 &
 # who holds it (proved by the flock, not by a name match):  python3 tools/swarm.py --who
-# stop ONLY the pid --who prints, and only if it says 'command is tools/swarm.py: yes':  kill -TERM <pid>
-# never `pkill -f`: it matches every process whose command line contains the text, not only the swarm.
+# stop the pid --who prints (it verifies the command line first):  kill -TERM <pid>
 # state: .git/control/swarm.json   pid record and lock: .git/control/swarm.pid   --target defaults to the pool total</code></pre>
 <p>One pass, every <code>--interval</code> seconds:</p>
 <ol>
@@ -264,6 +263,17 @@ awk '/--- output: last 40 lines of JOBNAME ---/{f=1} f' build/suite.log | head -
 <p class="warn">Never infer a cause from a keyword count. (2026-10-15: <code>grep -c rate</code> counted the word inside source text and "rate limited" was reported wrongly.) Read the end of the log and the exit code.</p>
 
 <h2 id="resources">11. Memory, disk, processes</h2>
+<div class="warn"><b>Kill rules (2026-11-02, after the process losses).</b>
+<ol>
+<li>The fleet signals only processes it spawned and recorded. Every spawn is written to <code>.git/control/spawned.jsonl</code> with its pid, process group and start time (<code>tools/fleet_ledger.py</code>). Nothing else is ever signalled.</li>
+<li>Nothing is matched by working directory, command name or port. A process in a worktree is not ours unless it is in a recorded group.</li>
+<li>A user's own opencode session, and anything an outside session has claimed (<code>control.py claim</code>, including a claimed workdir), is never signalled and never removed. <code>cleanup</code> skips such trees.</li>
+<li>To stop a recorded worker, the fleet sends SIGTERM to its process group and waits 20 s so the workload can save. SIGKILL is sent only if the group is still alive after that wait. A recorded group whose leader has exited is not signalled; its members are logged and left alone.</li>
+<li>A recorded group is stopped only when its leader still has the start time recorded at spawn. A recycled pid is refused.</li>
+<li>Every spawn, signal, refusal and skip is appended to <code>.git/control/kills.log</code>. Read it before you decide anything about a process.</li>
+<li>Do not signal a process or session by hand. Do not interrupt or delete an opencode session the fleet did not start. If something must stop, ask the owner first.</li>
+</ol>
+Workers started before this rule have no record, so the fleet never signals them.</div>
 <ul>
 <li>The machine has a 96 GB memory <b>budget</b> shared by everything, enforced by <code>tools/memslot.py</code> (strict FIFO reservations). Anything heavy goes through the suite runner or <code>python3 tools/memslot.py --gb N --label X -- CMD</code>; the current holds: <code>python3 tools/memslot.py status</code>. Classes: tiny 4, small 8, module 24, program 55, stage 96 GB; each class comes from a measured peak (<code>MEASURED_PEAK_GB</code> in suite.py). Anything of ours over 3-4 GB is itself a bug (<code>doc/POLICY_memory_over_4gb.md</code>).</li>
 <li>Workers must not run the gate or whole-closure compiles; hard-problem agents may run one bootstrap at a time (~30 min) through the runner.</li>
@@ -303,6 +313,7 @@ awk '/--- output: last 40 lines of JOBNAME ---/{f=1} f' build/suite.log | head -
 <tr><td>2026-10-18</td><td><code>gate-wt/build/suite.log</code> is APPENDED across runs, never truncated. §8's per-job reader (<code>awk '/--- output: last 40 lines of JOBNAME ---/'</code>) therefore returns the FIRST matching block, which on a shared gate-wt is a PREVIOUS run's. A run whose own summary said <code>52 passed, 1 failed</code> was read as also failing <code>formal-sweep-truth</code> — from a stale block whose line numbers and timings matched an earlier run exactly.</td><td>Trust the summary and the <code>FAILED</code> section of <code>check-N.log</code>, which are that run only. When reading <code>build/suite.log</code> for a job's output take the LAST matching block, and confirm a claim with a narrow direct run of that one test file before acting on it.</td></tr>
 <tr><td>2026-10-18</td><td>A brew upgrade made <code>/opt/homebrew/bin/python3</code> <b>3.15.0</b>, and this file's own instruction (&ldquo;put <code>/opt/homebrew/bin</code> first — we need 3.14&rdquo;) began selecting the WRONG interpreter. <code>suite.py</code> runs jobs with <code>PY = sys.executable</code>, so every check inherited it: <code>test_formal_run.py</code> reports <code>FAIL=18</code> under 3.14 and <code>FAIL=32</code> under 3.15 on the same commit, because CPython 3.15 reworded a <code>TypeError</code> tests assert on. A worker found it and reported it as a surprise rather than acting on it.</td><td>Name the interpreter the project runs on (<code>/opt/local/bin</code>, 3.14) instead of the one that happens to lead PATH, and never treat <code>/opt/homebrew/bin</code> as stable — a brew upgrade changes it silently. Put the version in an ASSERTION (<code>keepfull.sh</code> now exits non-zero on the wrong one) rather than in a comment. Check <code>python3 --version</code> before believing any failure.</td></tr>
 <tr><td>2026-10-20</td><td>Landing <code>work/formal637-docs</code>: the branch added three theorems to <code>lib/X86.lean</code> but never re-pinned <code>AXIOM_CLOSURE</code>'s X86 row in <code>test_formal_admitted.py</code> (the worker verified without a Lean build), so the merged tree's first check ran <code>formal-sweep-truth</code> red.</td><td>When landing a branch that touches <code>lib/*.lean</code>, run the Lean-dependent check after the merge and commit any table movement as a separate re-pin (&ldquo;the table moves with the commit&rdquo; is the assertion's own design).</td></tr>
+<tr><td>2026-11-02</td><td>Live opencode sessions were lost. Causes, all from the operator's side: a <code>reap</code> that matched processes by working directory (it hit an owner's terminal session and live workers' commands); a swarm started before its retire/continue/feed steps checked live sessions, which retired and re-fed docs that live agents were working on, and spawned duplicate workers; class moves committed to master under live sessions (reverted); 15 duplicate sessions interrupted.</td><td>Kills are by recorded process group only (<code>fleet_ledger.py</code>, <code>kills.log</code>). Live sessions and outside claims are never signalled or removed. Class moves skip docs with live sessions. Stop with SIGTERM first, SIGKILL only after a grace period, and never on a process the fleet did not start.</td></tr>
 </table>
 
 <h2 id="standing">14. Standing instructions from the owner (in force as of 2026-10-17)</h2>
