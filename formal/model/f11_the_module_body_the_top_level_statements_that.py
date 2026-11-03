@@ -5392,7 +5392,7 @@ def module_entry_literal_facts() -> dict:
     table excludes a container constant because a blob has no literal to put at
     a READ, and this asks the weaker question "what is the value", which a blob
     answers. See
-    `bugs/formal/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`."""
+    the for-range empty-target bug."""
     slots = module_slots()
     out: dict = {}
     for name, sym in module_symbols().items():

@@ -5267,11 +5267,10 @@ def _range_is_nonempty(args, consts=None) -> bool:
     rather than a second reader of its own**: a `range` whose bound is a NAME
     decided by the preheader (`k = 0` then `range(0, k)`) is a fact about the
     program, exactly as `i = 0` then `while i < 3:` is. It is what
-    `bugs/formal/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`'s
-    option 2 asks for — "the emptiness as a predicate, carried along every
-    edge" — and what is left decided only at RUN time (a bound this path cannot
-    state as a literal, a parameter among them) is recorded as that doc's
-    residual rather than guessed.
+    (option 2 of that fix: the emptiness as a predicate, carried along every
+    edge) — and what is left decided only at RUN time (a bound this path cannot
+    state as a literal, a parameter among them) is handled by loop-bound flags
+    in both emitters rather than guessed.
 
     **The step's sign needs the NEGATION folded here**, because the parser does
     not keep `-1` as a negative literal: it is `UnaryOp('-', IntLiteral(1))`
@@ -5371,8 +5370,8 @@ def _for_emptiness(s, consts=None, seqs=None) -> str:
     rule is a closed-form function of its three arguments. Everything else is
     `'maybe'`, which is the answer that keeps the zero-iteration edge and the
     header's definition: both are the safe direction for a loop whose emptiness
-    is a run-time fact, and both are recorded as the residual of
-    `bugs/formal/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`.
+    is a run-time fact, and the read-side protection is provided by loop-bound
+    flags in both emitters.
     """
     it = getattr(s, "iterable", None)
     direct = _iterable_literal_emptiness(it)
@@ -5429,7 +5428,7 @@ def _for_target_never_binds(stmt, consts=None, seqs=None) -> bool:
     and a `range` the PREHEADER decides as well as one it writes out (`k = 0`
     then `range(0, k)`) — an emptiness this build cannot decide keeps the target
     defined, which is a real loss
-    (`bugs/formal/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`)
+    (the for-range empty-target bug)
     and the safe direction: keeping a definition can only let through a program
     whose range happened to be non-empty, where dropping it would refuse a
     program CPython runs.
@@ -5642,12 +5641,11 @@ def _preheader_facts(blocks: list, head_index: int, entry: int,
     `for` over a module-level literal sequence (`XS = []` at file level, then
     `for q in XS`) was `'maybe'`, the header's definition of the loop target
     survived, and a read after the loop answered the caller's leftover where
-    CPython raises `UnboundLocalError` — the second residual of
-    `bugs/formal/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`.
-    The facts are seeded at the ROOTS (a block with no in-region predecessor is
-    reached only from the function entry), and the ordinary intersection then
-    drops one wherever a path binds the name to something else, so a function
-    that shadows the module's name is unaffected.
+    CPython raises `UnboundLocalError`. The facts are seeded at the ROOTS (a
+    block with no in-region predecessor is reached only from the function
+    entry), and the ordinary intersection then drops one wherever a path binds
+    the name to something else, so a function that shadows the module's name
+    is unaffected.
 
     **One walk, two tables**, because the two facts are established by the same
     intersections along the same edges and a second walk would be the same
@@ -6114,8 +6112,7 @@ def _build_cfg(body, entry_facts: dict = None) -> tuple:
                 # `_cfg_block_defs` again: the header block already exists and
                 # holds exactly the statements this loop wrote. A name the
                 # preheader does not have keeps the header's definition, which
-                # is the safe direction — see
-                # `bugs/formal/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`.
+                # is the safe direction (and loop-bound flags protect the parameter case).
                 if _for_target_never_binds(s, loop_consts, loop_seqs):
                     head.defs -= _store_names(getattr(s, "target", None))
                 else_body = getattr(s, "else_body", None)
@@ -6926,8 +6923,7 @@ def read_before_store(fn, params: set = None, placed: set = None,
     or whose range bound is a module-level integer: without it the preheader
     walk starts empty and such a loop is `'maybe'`, so its target stays defined
     and a read after it answers the caller's leftover. A name the function
-    itself binds must NOT be passed — see the caller, and
-    `bugs/formal/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`.
+    itself binds must NOT be passed — see the caller.
 
     **THE ALGORITHM, and what it is worth.** A "definitely stored" fixpoint
     over the function's CFG: `_build_cfg` cuts the body into basic blocks once,
@@ -7338,8 +7334,7 @@ def loop_bound_flags(fn, params: set = None) -> dict:
     non-empty never takes its check — the dead-check direction is the safe
     one, while a module fact the emitter sees and `read_before_store` does not
     (or vice versa) would be two machines answering one loop differently.
-    See `bugs/formal/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`
-    for the residual this reader closes and the cases it deliberately leaves.
+    See the bug history for the residual this reader closes and the cases it deliberately leaves.
     """
     params = set(params if params is not None
                  else (getattr(fn, "params", None) or ()))
@@ -53606,8 +53601,7 @@ def module_entry_literal_facts() -> dict:
     (`_for_emptiness`). It is deliberately NOT `_module_constant_sites`: that
     table excludes a container constant because a blob has no literal to put at
     a READ, and this asks the weaker question "what is the value", which a blob
-    answers. See
-    `bugs/formal/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`."""
+    answers."""
     slots = module_slots()
     out: dict = {}
     for name, sym in module_symbols().items():

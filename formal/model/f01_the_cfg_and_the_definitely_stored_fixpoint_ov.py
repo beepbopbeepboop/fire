@@ -454,7 +454,7 @@ def _range_is_nonempty(args, consts=None) -> bool:
     rather than a second reader of its own**: a `range` whose bound is a NAME
     decided by the preheader (`k = 0` then `range(0, k)`) is a fact about the
     program, exactly as `i = 0` then `while i < 3:` is. It is what
-    `bugs/formal/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`'s
+    the for-range empty-target bug's
     option 2 asks for — "the emptiness as a predicate, carried along every
     edge" — and what is left decided only at RUN time (a bound this path cannot
     state as a literal, a parameter among them) is recorded as that doc's
@@ -559,7 +559,7 @@ def _for_emptiness(s, consts=None, seqs=None) -> str:
     `'maybe'`, which is the answer that keeps the zero-iteration edge and the
     header's definition: both are the safe direction for a loop whose emptiness
     is a run-time fact, and both are recorded as the residual of
-    `bugs/formal/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`.
+    the for-range empty-target bug.
     """
     it = getattr(s, "iterable", None)
     direct = _iterable_literal_emptiness(it)
@@ -616,7 +616,7 @@ def _for_target_never_binds(stmt, consts=None, seqs=None) -> bool:
     and a `range` the PREHEADER decides as well as one it writes out (`k = 0`
     then `range(0, k)`) — an emptiness this build cannot decide keeps the target
     defined, which is a real loss
-    (`bugs/formal/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`)
+    (the for-range empty-target bug)
     and the safe direction: keeping a definition can only let through a program
     whose range happened to be non-empty, where dropping it would refuse a
     program CPython runs.
@@ -830,7 +830,7 @@ def _preheader_facts(blocks: list, head_index: int, entry: int,
     `for q in XS`) was `'maybe'`, the header's definition of the loop target
     survived, and a read after the loop answered the caller's leftover where
     CPython raises `UnboundLocalError` — the second residual of
-    `bugs/formal/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`.
+    the for-range empty-target bug.
     The facts are seeded at the ROOTS (a block with no in-region predecessor is
     reached only from the function entry), and the ordinary intersection then
     drops one wherever a path binds the name to something else, so a function
@@ -1302,7 +1302,7 @@ def _build_cfg(body, entry_facts: dict = None) -> tuple:
                 # holds exactly the statements this loop wrote. A name the
                 # preheader does not have keeps the header's definition, which
                 # is the safe direction — see
-                # `bugs/formal/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`.
+                # the for-range empty-target bug.
                 if _for_target_never_binds(s, loop_consts, loop_seqs):
                     head.defs -= _store_names(getattr(s, "target", None))
                 else_body = getattr(s, "else_body", None)
@@ -2114,7 +2114,7 @@ def read_before_store(fn, params: set = None, placed: set = None,
     walk starts empty and such a loop is `'maybe'`, so its target stays defined
     and a read after it answers the caller's leftover. A name the function
     itself binds must NOT be passed — see the caller, and
-    `bugs/formal/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`.
+    the for-range empty-target bug.
 
     **THE ALGORITHM, and what it is worth.** A "definitely stored" fixpoint
     over the function's CFG: `_build_cfg` cuts the body into basic blocks once,
@@ -2525,7 +2525,7 @@ def loop_bound_flags(fn, params: set = None) -> dict:
     non-empty never takes its check — the dead-check direction is the safe
     one, while a module fact the emitter sees and `read_before_store` does not
     (or vice versa) would be two machines answering one loop differently.
-    See `bugs/formal/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`
+    See the for-range empty-target bug
     for the residual this reader closes and the cases it deliberately leaves.
     """
     params = set(params if params is not None

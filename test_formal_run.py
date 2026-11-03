@@ -15585,10 +15585,9 @@ WAVE6_TRUTHY_CASES = [
 
     # ── a `for` target whose range is a RUN-TIME fact ──────────────────────
     #
-    # The residual of
-    # `bugs/formal/FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md`:
-    # the target of a `for` whose range is empty at run time is not bound, and
-    # the image has no word for "unbound", so the emitter allocates a bound
+    # The residual of the for-range empty-target bug:
+    # The target of a `for` whose range is empty at run time is not bound,
+    # and the image has no word for "unbound", so the emitter allocates a bound
     # flag per such target — zero at entry, set by every store of the name,
     # branched on at a read the build-time state says may be unbound — and the
     # read takes the error exit where CPython raises `UnboundLocalError`.

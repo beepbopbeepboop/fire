@@ -139,7 +139,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_a_callee_that_is_an_expression_in_a_try_cannot_be_placed.md` | `bug-formal-formal-a-callee-that-is-an-ex-9847` | A callee that is an EXPRESSION inside a `try` is the whole of what is left of the unplaceable tier |
-| `FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty.md` | `bug-formal-formal-a-for-range-target-may` | FORMAL_a_for_range_target_may_be_read_when_the_range_is_empty |
 | `FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None.md` | `bug-formal-formal-a-function-with-no-ret` | FORMAL_a_function_with_no_return_yields_a_word_where_cpython_yields_None |
 | `FORMAL_a_try_handler_arm_is_still_never_emitted.md` | `bug-formal-formal-a-try-handler-arm-is-s-8121` | A `try` handler arm is still never emitted, and the reason it is not worth fixing in one function is that EVERY arm in this repository calls something |
 | `FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md` | `bug-formal-formal-a-type-cannot-be-const-9849` | `collections.namedtuple` and `copy.deepcopy` are one missing capability, and it is a reflection table |
