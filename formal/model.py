@@ -36912,7 +36912,7 @@ def eq_dispatch_candidates_disagree(spelled: str, struct_names, rows,
             "both structs a `__eq__` will not either: two owners is the case "
             "that refuses. Compare the fields, or make the two sides the same "
             "struct so the comparison names one `__eq__` — "
-            "bugs/FORMAL_eq_dispatch_on_a_frame_receiver.md")
+            "")
     return lead + (
         "Each name holds a different frame on each path that binds it, and "
         "this analysis has no path sensitivity to say which one is live at "
@@ -92799,7 +92799,7 @@ def eq_dispatch_candidates_disagree(spelled: str, struct_names, rows,
             "both structs a `__eq__` will not either: two owners is the case "
             "that refuses. Compare the fields, or make the two sides the same "
             "struct so the comparison names one `__eq__` — "
-            "bugs/FORMAL_eq_dispatch_on_a_frame_receiver.md")
+            "")
     return lead + (
         "Each name holds a different frame on each path that binds it, and "
         "this analysis has no path sensitivity to say which one is live at "
