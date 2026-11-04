@@ -569,11 +569,9 @@ those arms — it stops at the same place
 semantic model's missing struct DOMAIN: `Point()` is a call to a callee with no
 `_go` (`_call_go` refuses rather than guessing) and `p.x` is a `MemberExpr`
 whose value the model has no domain for (`_expr_go_t`'s `_no_value_model`
-arm). Both are `test_formal.py::EXPECTED_FAILURES` rows for that reason, and
-that domain is `bugs/formal/FORMAL_wide_recv_model_has_no_domain_for_a_struct.md`'s
-subject — a representation project, not a step in this one. What remains this
-step's own is the receiver's per-block value flow, which is downstream of the
-struct domain and not reachable before it.
+arm). Both were `test_formal.py::EXPECTED_FAILURES` rows for that reason;
+the struct-domain gap has since been closed. What remains this step's own is
+the receiver's per-block value flow.
 
 ## The 14 remaining receivers, by band
 

@@ -14208,7 +14208,8 @@ def _frame_section(prog, code: bytes, info: dict, methods: list,
                    "init_extra": init_extra, "no_mojo": True,
                    "no_change": True, "hbnd_binder": True, "lets": lets,
                    "strict": True, "no_decide": True, "hx30_lets": hx30_lets,
-                   "simp_extra": ", ".join(_FRAME_CANON), "post": post})
+                   "simp_extra": ", ".join(_FRAME_CANON), "post": post},
+            entry_arity=len(getattr(f, "params", None) or []))
         if thm is None:
             continue
         # The premises' consequences go first in the proof, before the walk:
