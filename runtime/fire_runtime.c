@@ -16741,9 +16741,38 @@ void mojo_type_fill_from_dict(int64_t cls, MojoDict *ns)
 {
     if (!ns) return;
     int64_t *order = mojo_dict_order_indices(ns);
-    for (int64_t oi = 0; oi < ns->used; oi++) {
-        _DictSlot *s = &ns->slots[order[oi]];
-        int64_t w = s->kind == 1 ? mojo_box_from_double(mojo_double_from_bits(s->val)) : s->val;
+    if (!order) return;
+    /* Count occupied slots in the dict */
+    int64_t n = 0;
+    for (int64_t i = 0; i < ns->cap; i++) {
+        if (ns->slots[i].key) n++;
+    }
+    if (n == 0) {
+        free(order);
+        return;
+    }
+    for (int64_t oi = 0; oi < n && oi < ns->used; oi++) {
+        int64_t idx = order[oi];
+        if (idx < 0 || idx >= ns->cap) continue;
+        _DictSlot *s = &ns->slots[idx];
+        if (!s->key) continue;
+        int64_t w;
+        if (s->kind == 1) {
+            w = mojo_box_from_double(mojo_double_from_bits(s->val));
+        } else if (s->kind == 2) {
+            /* char * string value */
+            char *str = (char *)(uintptr_t)s->val;
+            if (str) mojo_str_register(str);
+            w = s->val;
+        } else if (s->kind == 3) {
+            /* bool */
+            w = s->val ? 1 : 0;
+        } else if (s->kind == 4) {
+            /* None */
+            w = 0;
+        } else {
+            w = s->val;
+        }
         mojo_classobj_setattr(cls, _slot_key(s), w);
     }
     free(order);
