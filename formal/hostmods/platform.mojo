@@ -87,7 +87,7 @@ REFUSAL so an omission cannot read as an implementation.
     here.
   * the CLASSES `uname_result`, `AndroidVer`, `IOSVersionInfo` — a type is not
     a value on this path, which is the same limit
-    `bugs/formal/FORMAL_module_state_no_storage.md` records.
+    `FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted)` records.
   * the TUPLE-SHAPED three: `uname()`, `mac_ver()`, `system_alias()`,
     `java_ver()`, `win32_ver()`, `android_ver()`, `ios_ver()`. A tuple is a
     frame blob carved out of the callee's frame and cannot be returned across a
@@ -145,7 +145,7 @@ each it reports the architecture of the image it is running in, which is the
 whole point of the name. That claim in `_syscalls.mojo` has since been
 corrected in place, along with the five other modules that repeated it; what
 the x86-64 backend does need is the right symbol per call, which is
-`formal/model.py`'s `target_libc_symbol`.
+`formal/model/builtins.py`'s `target_libc_symbol`.
 
 A Rosetta-emulated x86-64 process on an Apple Silicon host sees
 `hw.machine == "x86_64"`, so the x86-64 image's answer is `x86_64` and not this
@@ -162,7 +162,7 @@ from os._syscalls import fs_free
 # Which fact `os._syscalls.fs_macho_field` is asked for, as the two NUMBERS it
 # takes. Numbers here rather than `os._syscalls`'s own names because a
 # module-level constant is not exported as a word across a dylib boundary
-# (`bugs/formal/FORMAL_module_state_no_storage.md`) — which is why `_syscalls.mojo`
+# (`FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted)`) — which is why `_syscalls.mojo`
 # spells the same two constants as `MACHO_WIDTH`/`MACHO_EXECUTABLE` for its own
 # callers and this module repeats the numbers it passes. 0 is the pointer width
 # in bits and 1 is "the kind of file `file -b` would call an executable"; both

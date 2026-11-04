@@ -10,7 +10,7 @@ deviations that are properties of this target and are stated on each one:
     was false, and it had a cost: `test_formal_os_backing.py` used to skip its
     `os.path` cases on x86-64 for this reason, which is where a silently wrong
     `stat` field survived. What the x86-64 backend has to get right is the
-    symbol each call binds, and `formal/model.py`'s `target_libc_symbol` is the
+    symbol each call binds, and `formal/model/builtins.py`'s `target_libc_symbol` is the
     table that says so.
 
   * A RESULT IS EITHER AN INTERIOR POINTER OR A `malloc`'d BUFFER. A string

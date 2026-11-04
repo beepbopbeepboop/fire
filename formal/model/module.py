@@ -2221,7 +2221,7 @@ def module_attribute_refusal(spelling: str, module: str, leaf: str,
     CALL: a dylib exports functions (as symbols) and module-level names the
     build FOLDED TO A LITERAL (as values, because a literal needs no storage to
     cross). `sys.argv` is neither — it is a list, and §(4) of
-    `bugs/formal/FORMAL_module_state_no_storage.md` records that the command line is
+    `FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)` records that the command line is
     gone before the first statement runs, so there is nothing in it either.
 
     **`variables` is the half that keeps the sentence true.** "A list, an
@@ -2294,7 +2294,7 @@ def module_attribute_refusal(spelling: str, module: str, leaf: str,
                 f"STARTED at. What `{module}` publishes: {shown} — give the "
                 f"module an accessor (`def get_{leaf}(): global {leaf}; return "
                 f"{leaf}`) and call that, which reads the same slot and lowers "
-                f"today. `bugs/formal/FORMAL_module_state_no_storage.md` §(2) records "
+                f"today. `FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)` §(2) records "
                 f"what it would take to publish the slot itself rather than a "
                 f"function that reads it")
     if leaf in set(containers or ()):
@@ -2314,7 +2314,7 @@ def module_attribute_refusal(spelling: str, module: str, leaf: str,
                 f"of it: `def {leaf}_at(i: Int) -> Int: return "
                 f"{leaf}[i]` in `{module}`, called as `{module}.{leaf}_at(0)`. "
                 f"What `{module}` publishes: {shown}. "
-                f"`bugs/formal/FORMAL_module_state_no_storage.md` §(2) records what "
+                f"`FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)` §(2) records what "
                 f"publishing the blob itself would take")
     if leaf not in set(published or ()):
         return (f"{who}{spelling} reads {leaf!r} out of the imported module "
@@ -2337,7 +2337,7 @@ def module_attribute_refusal(spelling: str, module: str, leaf: str,
                 f"`formal/hostmods/sys.mojo`'s own module docstring says which "
                 f"of those names it deliberately does not declare and why "
                 f"(`argv`, `stderr`, `stdout`, `modules`, `path`), and "
-                f"`bugs/formal/FORMAL_module_state_no_storage.md` §(2) and §(4) "
+                f"`FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)` §(2) and §(4) "
                 f"record what would have to be true to close the boundary for "
                 f"the ones CPython has and this path does not")
     return (f"{who}{spelling} reads {leaf!r} out of the imported module "
@@ -2354,7 +2354,7 @@ def module_attribute_refusal(spelling: str, module: str, leaf: str,
             f"side of the boundary, because every value a formal program can "
             f"name lives in a function's own stack scratch, which is reclaimed "
             f"when the function returns. What `{module}` publishes: {shown}. "
-            f"`bugs/formal/FORMAL_module_state_no_storage.md` records the design and "
+            f"`FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)` records the design and "
             f"what would have to be true to close it, and §(2) is this shape")
 
 
@@ -2455,7 +2455,7 @@ def module_global_refusal(name: str, sym, fn_name: str, variables=None,
                 f"a property of the value model rather than of this call: "
                 f"`{mod}.fn(...)` where `{mod}` publishes that function as a "
                 f"function is the same program with a representation. "
-                f"bugs/formal/FORMAL_module_state_no_storage.md records the design "
+                f"FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) records the design "
                 f"and what would have to be true to close it")
     if site == "declared":
         return (f"{who}{name!r} is declared at module level with no value "
@@ -3581,7 +3581,7 @@ def module_body_store_names(functions) -> set:
     This is why the module body cannot be scoped like an ordinary function.
     Read as one, `G` is a local of `__module_body__`, so `module_slot_for` sends
     its reads and writes to a register — and a register dies with the body,
-    which is the whole of `bugs/formal/FORMAL_module_state_no_storage.md`'s subject: the
+    which is the whole of `FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)`'s subject: the
     module's own value computed somewhere nobody can read it. The name needs the
     module's `__DATA` slot for the same reason a name written through
     `global G` inside a function needs one, and it needs it for the same
@@ -4022,7 +4022,7 @@ def collect_global_slots(stmts: list, functions: list, int_names=(),
         literal to put at the read — but it IS static data: the blob is a flat
         run of words whose first word is the count, so the linker can place it in
         `__DATA` and the slot can hold its address. `NUMS = [10,20,30]` read from
-        a function is the case `bugs/formal/FORMAL_module_state_no_storage.md` §1
+        a function is the case `FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)` §1
         measured as the first one, and it builds and runs correctly now.
         `[0] * 624` is the same value as the written-out literal, and
         `_is_static_container` asks the same question of it — see
@@ -4871,7 +4871,7 @@ def static_initializer_refusal_reason(slot) -> str:
     The zero an unwritten slot gives is therefore not what any read can see, in
     exactly the way it is not what any read can see for a slot that does have an
     initializer. Refusing here would be refusing a value the image computes
-    before its first read, which is the case `bugs/formal/FORMAL_module_state_no_storage.md`
+    before its first read, which is the case `FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)`
     §"the exact next step" item 1 is about.
     """
     if slot is None or slot.init[0] != "unknown":
@@ -4975,7 +4975,7 @@ def module_slot_unreadable_refusal(slot, fn) -> str:
                f"the slot holds it. A module-level assignment cannot read, or "
                f"call something that reads, the name it assigns. ")
     return head + why + ("Make the value a literal and the build folds it at "
-                          "every read instead. bugs/formal/FORMAL_module_state_no_storage.md"
+                          "every read instead. FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)"
                           " records the design")
 
 
@@ -5087,7 +5087,7 @@ def global_value_refusal(name: str, fn_name: str, why: str,
             "that module's dylib. A slot in THIS image cannot hold it; what a "
             "cross-module global needs is the other module's slot exported as a "
             "symbol, which this path does not do yet — "
-            "bugs/formal/FORMAL_module_state_no_storage.md"),
+            "FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)"),
         "unknown": (
             "the build cannot compute it from the module-level statement, and "
             "a value it cannot compute has no initializer to write into the "
@@ -5721,7 +5721,7 @@ def function_value_refusal(name: str, fn_name: str) -> str:
             f"a container, or returning one is refused rather than answered "
             f"with a number that means nothing. `formal/hostmods/` has no "
             f"module that hands back a callable for the same reason "
-            f"(`bugs/formal/FORMAL_functools_is_unbuildable_as_a_host_module.md`). Call "
+            f"`. Call "
             f"it directly, or move the work into a `def` and pass its results")
 
 

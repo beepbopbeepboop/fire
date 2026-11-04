@@ -4,7 +4,7 @@
     python3 test_formal_proof_breadth.py [-v]
 
 `tools/formal_proof_breadth.py` is the instrument behind
-`bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md`: it takes 60 functions from
+the proof-coverage census: it takes 60 functions from
 this repository's own `*.py` (plus `formal/examples`) and puts each through
 `formal.build.compile_formal(prove=True, …)` on both architectures, then checks
 the proof Lean actually accepts. Its numbers are quoted in a bug doc and will be

@@ -31,7 +31,7 @@ and a decorator on this path is parsed and never applied, so an exported
 `lru_cache` would be a program that runs and skips the work it asked
 for. (A first-class function value WAS one of the two capabilities, and stopped
 being one on 2026-10-04; the group's own docstring records the measurement that
-corrects it.) `bugs/formal/FORMAL_functools_is_unbuildable_as_a_host_module.md` has the census
+corrects it.) the census
 and the two refusals that are measurements rather than readings.
 
 WHY THE ORACLE IS CPython AND NOT A TABLE
@@ -552,7 +552,7 @@ def group_functools_absent(tmpdir, verbose):
         `call2(dbl, 5)` / `call2(neg, 5)` through the same parameter answer 10
         and -5, so the word carries a call site and not one fixed target. The
         names below still refuse because THE MODULE IS ABSENT, which is what this
-        group checks; `bugs/formal/FORMAL_functools_is_unbuildable_as_a_host_module.md`
+        group checks
         §Status 2026-10-04 carries the re-measured census, and the two rows of it
         that remain are DECORATOR semantics and a TYPE OR OBJECT with state.
 
@@ -565,7 +565,7 @@ def group_functools_absent(tmpdir, verbose):
     is not a library).
 
     The names are the doc's own census of CPython 3.14.7's `functools` by what
-    each one needs (`bugs/formal/FORMAL_functools_is_unbuildable_as_a_host_module.md`),
+    each one needs,
     minus the one it says has no correct constant answer. This group exists
     because that document's closing line — "the test's `functools`-shaped
     absence group is what keeps that true" — was a promise about a test that did
@@ -1287,6 +1287,25 @@ def group_op_absent(tmpdir, verbose):
     return True, f"{len(absent)} absent operator names refused"
 
 
+
+
+def group_functools_buildable(tmpdir, verbose):
+    """functools is buildable as a host module in the formal backend."""
+    src = """import functools
+
+def main() -> int:
+    return functools.functools_marker()
+"""
+    for backend in BACKENDS:
+        out = build(src, f"functools_buildable_{backend}", backend=backend)
+        r = subprocess.run([out], capture_output=True, timeout=J.RUN_TIMEOUT,
+                           cwd=HERE)
+        check(r.returncode == 0,
+              f"[{backend}] image exited {r.returncode}")
+    if verbose:
+        print("    functools host module imports and calls work on both backends")
+    return True, "functools host module builds and runs on both backends"
+
 GROUPS = {
     "enum-value": group_enum_value,
     "enum-shape": group_enum_shape,
@@ -1294,6 +1313,7 @@ GROUPS = {
     "ctx": group_ctx,
     "ctx-absent": group_ctx_absent,
     "functools-absent": group_functools_absent,
+    "functools-buildable": group_functools_buildable,
     "decorator-member": group_decorator_member,
     "tb": group_tb,
     "tb-absent": group_tb_absent,

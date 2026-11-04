@@ -9318,7 +9318,7 @@ BOTH_ARCH_CASES = [
 # which is false in every clause: `flush` is neither `sep` nor `end`, it is not
 # baked into anything, and it is the commonest keyword in THIS repository's own
 # source — nine of the sixty items `tools/formal_proof_breadth.py` measures land
-# on it (`bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md` §0.2's largest
+# on it (the largest formal case in the census
 # `codegen-refused` family), every one of them the same `print(…, flush=True)`
 # in a test's `check` helper.
 #
@@ -23392,7 +23392,7 @@ INT_PARSE_REFUSALS = [
 REFUSAL_CASES = [
     # A FUNCTION NAME in a value position, which is the first thing any
     # first-class-function work hits and the reason `functools` is not a host
-    # module (`bugs/formal/FORMAL_functools_is_unbuildable_as_a_host_module.md`).
+    # module.
     # The refusal used to be the unresolved-NAME one, whose reason clause is
     # "the register allocator collected no home for it, so the emitter and the
     # allocation walk disagree about this function's locals" — false in every

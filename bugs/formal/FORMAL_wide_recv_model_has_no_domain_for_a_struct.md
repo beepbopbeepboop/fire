@@ -157,7 +157,7 @@ reasons, not preference:
   `mojo`, `eval_eq_mojo`, the run tests, every per-export contract and both
   backends' generators. `mojo : UInt64 → UInt64` is quoted by name in eleven
   places in `formal/arm64_proof_gen.py` alone. A value-model change of that
-  width is a project, and it is the one `bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md`
+  width is a project, and it is the one tracked by proof-coverage measurement
   and `formal16-8`'s doc both already point at.
 
 **What landed, and why recording it is not silence.** `test_formal.py`'s

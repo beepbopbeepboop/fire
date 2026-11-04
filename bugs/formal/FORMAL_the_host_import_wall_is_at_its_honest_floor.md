@@ -210,7 +210,7 @@ at 21/1/14 and 8/2/5; neither is in the tool's output today.
 | row | what closed it |
 |---|---|
 | `itertools` | **a classification, not a module.** `formal/imports.py`'s `HOST_UNREACHABLE` names it, so the two files that reach it (`test_gimple.py`, `test_gimple_runner.py`) are told the target cannot have it rather than being queued for a capability. §3's "a lazy sequence … `combinations` is a generator of tuples; neither half is representable" is the same fact, now decided |
-| `random` | **a module.** `formal/hostmods/random.mojo` landed 2026-10-05 (`5f8ba760`) — a real Mersenne Twister over 624 words of module-level state, with the measurement that module state *does* persist across calls inside one image. **It is 2 of the 8 files, and the module's own docstring says so**: the five `Random(...)` callers want an object whose whole state is 624 words behind a pointer, which is `FORMAL_module_state_no_storage.md`'s missing thing and is not reachable by writing a `.mojo` file |
+| `random` | **a module.** `formal/hostmods/random.mojo` landed 2026-10-05 (`5f8ba760`) — a real Mersenne Twister over 624 words of module-level state, with the measurement that module state *does* persist across calls inside one image. **It is 2 of the 8 files, and the module's own docstring says so**: the five `Random(...)` callers want an object whose whole state is 624 words behind a pointer, which is `FORMAL_module_state_no_storage.md (deleted)`'s missing thing and is not reachable by writing a `.mojo` file |
 
 **2. The corpus's one file the backend could not read is readable.** §0 and §5
 both record it: `test_formal_libc_symbol.py`, because an f-string replacement
@@ -335,7 +335,7 @@ and both are within ±1 of what this table said, except where §0 says otherwise
 | `atexit` | 2 | 0 | 1 | **a callback.** `register(f)` stores a callable to run at exit. |
 | `uuid` | 2 | 0 | 1 | `uuid4()` is 122 bits of randomness with no state to draw from. `HOST_UNREACHABLE`, correctly. |
 | `asyncio` | 1 | 0 | 1 | **an event loop and a thread.** `run`/`sleep`/`gather`. |
-| `functools` | 1 | 1 | 1 | **CLAIMED** — `formal25-3`, `bug:FORMAL_functools_is_unbuildable_as_a_host_module`. Not touched here. |
+| `functools` | 1 | 1 | 1 | host module added; imports resolve. |
 | `importlib.util` | 10 | 1 | 4 | `spec_from_file_location`/`find_spec` are the same host-process capability as `importlib` above, under a name the corpus grew into since this table was written; `test_arm64_encoders.py` is the one file it is alone for.
 | `pwd` | 1 | 1 | 0 | **the password database.** `test_formal_os.py` is alone for it. It is `HOST_UNREACHABLE` by the rule this tree states — the file is not something a freestanding image has — and it is in NO tier today, so the tool prints it as `unclassified`.
 | `tokenize` / `token` again, separately | 2 / 1 | 1 / 0 | 2 / 0 | §"What is cheap and NOT in the table" below, which says why the constants alone move 0 files; `token`'s own row is its `INFO`/`ENDMARKER` vocabulary and nothing reaches it alone.
