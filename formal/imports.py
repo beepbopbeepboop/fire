@@ -641,7 +641,7 @@ HOST_MODELLED = frozenset((
     #     **It is 2 of the 8 files the row was worth, and the other six are not
     #     a module.** Five of them spell `random.Random(seed)` — an OBJECT with
     #     624 words of state behind a pointer, which is
-    #     `FORMAL_module_state_no_storage.md (deleted) (deleted)` and not something a `.mojo`
+    #     `bugs/formal/FORMAL_module_state_no_storage.md` and not something a `.mojo`
     #     file changes; the sixth is closure. What made the module reachable at
     #     all is that a module's OWN globals DO have storage: measured, both
     #     architectures, a module-level `var` written through `global` by one
@@ -3053,66 +3053,9 @@ HOST_MODULE_ADVICE = {
         "struct construction: build a new one and assign the fields. A copy "
         "chosen at run time, over a graph whose shape the build cannot see, has "
         "no answer here — the same missing thing as a type built at run time",
-    "functools":
-        # The first clause was "the higher-order functions are a callable this "
-        # path has no representation for", and it was FALSE the day it was
-        # written: a function value is a CODE ADDRESS on this path now (both
-        # backends' `_load_var` materializes it and `_emit_call` branches
-        # through it), and `reduce`'s own shape BUILDS and answers CPython on
-        # both architectures — it is `test_formal_specialization.py`'s
-        # `functools.reduce's own shape runs, on both`. So the sentence sent a
-        # reader to add a capability that exists. What actually stops a
-        # `formal/hostmods/functools.mojo` is the DECORATOR half, which is a
-        # different missing capability with a doc of its own
-        # (`bugs/hard/COMPILE_FAIL_decorator_application_dropped.md`).
-        "the arithmetic `reduce`/`partial` wrap can be written OUT — a loop, or "
-        "an ordinary leading argument — and that is the whole of what these "
-        "files want. The module's decorator spellings (`@lru_cache`, `@wraps`) "
-        "are the real gate and not a callable: this path parses a decorator and "
-        "never APPLIES it, so a decorator from this module cannot be honoured "
-        "(`bugs/hard/COMPILE_FAIL_decorator_application_dropped.md`). Its other "
-        "names build types or objects at run time (`itemgetter`, "
-        "`MappingProxyType`, `RLock`), which this path has no word for",
 }
 
-# Three entries, and three is the right size for a mechanism that must not become
-# a dumping ground: an entry is worth a row only when the answer is MEASURED and
-# the alternative is a spelling the reader can write today.  `math`, `argparse`
-# and `contextlib` are the other candidates and none qualifies yet — their files
-# answer, so the reader is not stuck.
 
-
-# ── A MODULE-OWNED BLOB: the second thing a manifest contract can say ───────
-#
-# `frame_params` is the first: a parameter of an export that is a FRAME ADDRESS
-# of a struct, published per parameter and read by an importer through
-# `check_imported_frame_handoffs`.  This is the other half of the same idea for
-# a value that is a POINTER whose WORDS the exporting module owns — the
-# `listdir`/`walk` convention, where word 0 is the entry count and words `1 + i`
-# are `malloc`'d names the module's own release walks and frees.
-#
-# **WHY IT IS DECLARED AND NOT DERIVED, stated plainly because it is the one
-# judgement in this file that could have gone the other way.**  The obvious
-# derivation is "returns a `malloc`'d block", and it is wrong: `str_alloc` also
-# returns a `malloc`'d block and the caller OWNS every word of it — `p[0] = 65`
-# through it is the supported route into a caller-allocated buffer, and
-# `test_formal_os.py`'s `blob` group pins it on both architectures.  So the fact
-# that separates the two is not the allocation, it is the LAYOUT: whose words are
-# the pointers, and who frees them.  A callee's own body cannot say that —
-# `listdir` hands its block to `_listdir_fill` to write `b[0]` and `b[1 + n]`, and
-# the release that makes the convention observable is a DIFFERENT export — so
-# reading it would mean an interprocedural layout analysis whose answer a reader
-# could not check by looking at one function.  Declared once, here, beside the
-# other host-module facts, and checked against the module's source by
-# `test_formal_blob_contract.py` so the declaration cannot drift from the layout
-# it claims.
-#
-# The value is the LAYOUT, because that is what the importer needs in order to
-# refuse a store by name: "word 0 is the count, word `1 + i` is a pointer this
-# module owns and frees".  The accessors are carried with it so the refusal can
-# name the functions that DO let a caller write (none of them write; they read
-# and release) and point at the route that does — `os._syscalls.str_alloc`,
-# whose buffer the caller owns.
 HOST_OWNED_BLOBS = {
     "os.listdir": {"returns": True, "count_word": 0, "entry_base": 1,
                    "release": "os.listdir_free"},
@@ -3126,11 +3069,6 @@ HOST_OWNED_BLOBS = {
                         "release": "os.listdir_free"},
     "os.walk_free": {"param": 0, "count_word": 0, "entry_base": 1,
                      "release": "os.walk_free"},
-    # `glob`'s answer is the same shape for the same reason (`-> List[String]`
-    # over a `malloc`'d `[count][char *]…`), and the caller owns every path in
-    # it. It is registered here for the same reason `os.listdir` is: without
-    # the row, `paths[i] = v` is a store into memory the caller does not own and
-    # nothing says so.
     "glob.glob": {"returns": True, "count_word": 0, "entry_base": 1,
                   "release": "glob.glob_free"},
     "glob.glob_free": {"param": 0, "count_word": 0, "entry_base": 1,
