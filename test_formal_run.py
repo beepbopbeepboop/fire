@@ -9235,6 +9235,64 @@ BOTH_ARCH_CASES = [
      "    var z = w * 0.0\n"
      "    printf(\"n=%d\", Int(z))\n"
      "    return 0\n", 0, "n="),
+    # ── `String(unsafe_from_utf8_ptr=p)` over a DECLARED byte pointer, on both
+    #    machines ────────────────────────────────────────────────────────────
+    #
+    # The string value model's constructor check reads the operand's KIND, and
+    # a `Pointer[UInt8]` the source declared — a parameter or a local — is in no
+    # kind vocabulary (`string_names` holds annotation spellings, and `Pointer`
+    # is not one: a `Pointer[Int64]` is not text, so the pointee decides), so
+    # the reader answered the "a word is an integer" DEFAULT rather than a
+    # classification, and the check used to read that default as positive
+    # evidence and REFUSE the conversion on both architectures — a false
+    # refusal, because on this path a string IS a `char *` and the conversion
+    # is the identity on a byte pointer. The keyword in the call is the
+    # source's own statement that the operand is a raw pointer, and
+    # `model.string_conversion_pointer_intent` is the one reader of that
+    # spelling; the exemption it grants is what these rows pin, and it is
+    # asked from both backends so the two cannot drift on which keyword means
+    # a pointer.
+    #
+    # The read-back is the assertion the bug asks for: the string read back
+    # must EQUAL what was written, so a misclassification cannot pass by
+    # reading an address as a `char *` — an identity that handed a later step
+    # an address the source never wrote would print garbage or die in
+    # `printf`, not exit 0 with the text. The bytes are written one at a time
+    # ('h', 'i', NUL) into a `malloc` the source owns, compared with `!=`
+    # before being printed, so both halves of the read-back are checked at run
+    # time on each architecture.
+    ("both_arch_string_of_a_declared_byte_pointer_parameter_reads_back_"
+     "what_was_written",
+     "def f(p: Pointer[UInt8]) -> String:\n"
+     "    return String(unsafe_from_utf8_ptr=p)\n"
+     "\n"
+     "def main() -> Int:\n"
+     "    var b: Pointer[UInt8] = malloc(8)\n"
+     "    b.value() = 104\n"
+     "    b[1] = 105\n"
+     "    b[2] = 0\n"
+     "    var s = f(b)\n"
+     "    if s != \"hi\":\n"
+     "        return 1\n"
+     "    printf(\"s=%s\", s)\n"
+     "    return 0\n", 0, "s=hi"),
+    # The LOCAL spelling of the same conversion. The parameter above gets its
+    # annotation from the signature, the local from its declaration, and the
+    # two reach the kind reader by different routes (the parameter's seeding
+    # loop versus the body's binding scan), so the bug was measured on both and
+    # the rows are two rather than one.
+    ("both_arch_string_of_a_declared_byte_pointer_local_reads_back_"
+     "what_was_written",
+     "def main() -> Int:\n"
+     "    var b: Pointer[UInt8] = malloc(8)\n"
+     "    b.value() = 104\n"
+     "    b[1] = 105\n"
+     "    b[2] = 0\n"
+     "    var s = String(unsafe_from_utf8_ptr=b)\n"
+     "    if s != \"hi\":\n"
+     "        return 1\n"
+     "    printf(\"s=%s\", s)\n"
+     "    return 0\n", 0, "s=hi"),
 ]
 
 # `print`'s KEYWORDS, and the rule that a keyword is dispatched BY NAME before
