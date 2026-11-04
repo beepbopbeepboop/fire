@@ -4844,6 +4844,11 @@ def gen_module_impl(self, stmts: list):
     # the experiment this replaces (which narrowed the feature instead of
     # fixing the cause, and so produced `conflicting types` regressions).
     stmts = list(stmts) + _elab_intu.run(self, stmts)
+    # Register imported non-generic structs after materialization (e.g. struct-valued elements)
+    try:
+        self._register_imported_structs(stmts)
+    except Exception:
+        pass
 
     for _s in stmts:
         if isinstance(_s, ComptimeVarStmt) and isinstance(_s.value, ListExpr):
