@@ -51,7 +51,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_a_calcsize_image_hangs_once_in_several.md` | `bug-formal-formal-a-calcsize-image-hangs` | a `calcsize` image hangs for 60 s about once in six suite runs, and is clean 10/10 standalone |
-| `FORMAL_arm64_ieee754_has_no_step_arms.md` | `bug-formal-formal-arm64-ieee754-has-no-s` | ten IEEE-754 encoders the emitter calls, and no `arm64_step` arm |
 | `FORMAL_no_exceptions.md` | **unclaimed** | a `raise` is a TERMINATION on this path, not a value the caller can catch |
 | `FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md` | **unclaimed** | FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more |
 
