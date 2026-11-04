@@ -663,6 +663,36 @@ def _positional_bracket_ctor_args(work, base, node):
     # Be permissive for LinkedList/List (needed for struct element registration)
     if isinstance(base, str) and base in ('List', 'LinkedList'):
         gen = work.gen
+        # Register imported non-generic struct elements before checking
+        try:
+            for a in args:
+                if not isinstance(a, str):
+                    continue
+                an = a.strip()
+                if not an or an in gimple_ctypes._TYPE_MAP:
+                    continue
+                if an.startswith('_'):
+                    continue
+                if an[0].islower() or re.fullmatch(r'[A-Z][0-9]?', an):
+                    continue
+                if (an in getattr(gen, '_imported_generic_structs', {}) or
+                        an in getattr(gen, 'struct_field_types', {}) or
+                        an in getattr(gen, '_imported_struct_names', set()) or
+                        an in getattr(gen, '_intu_structs', {})):
+                    continue
+                if hasattr(gen, '_materialize_imported_struct'):
+                    tried = False
+                    for mod in set(getattr(gen, '_imported_struct_home', {}).values()) | set(getattr(gen, '_imported_generic_structs', {}).values()) | {'test_utils', 'test_utils.types'}:
+                        try:
+                            if gen._materialize_imported_struct(mod, an, an):
+                                tried = True
+                                break
+                        except Exception:
+                            continue
+                    if tried:
+                        continue
+        except Exception:
+            pass
         for a in args:
             if a in gimple_ctypes._TYPE_MAP:
                 continue
