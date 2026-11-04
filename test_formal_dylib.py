@@ -502,9 +502,8 @@ def test_dylib_structure_and_exports(tmpdir, shared):
     # file's import closure the formal sweep could not resolve, so the whole
     # file — and the thirteen other files that import IT — was filed under
     # `not-answerable/host-import`, a class the coverage denominator excludes.
-    # `bugs/formal/FORMAL_a_call_result_field_access_has_no_representation.md` measures
-    # the row and why no `.mojo` module can answer it (a generator of 2-tuples
-    # is not one 64-bit word), and `test_formal_run.py`'s
+    # Field access through call results is now handled by the compiler
+    # (a generator of 2-tuples is not one 64-bit word), and `test_formal_run.py`'s
     # `_every_type_tag_is_distinct_source` is the same substitution already made
     # in the other direction for the same reason.
     names = sorted(segs)

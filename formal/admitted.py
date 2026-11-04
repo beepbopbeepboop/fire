@@ -91,7 +91,7 @@ answer is a claim about a host nobody checked.
 # missing one and costs the same. `tools/formal_host_import_shapes.py`
 # reads it as `DEAD` and `formal_sweep_causes.py`'s `mentions` column is
 # the older measure of the same thing; see
-# `bugs/formal/FORMAL_a_call_result_field_access_has_no_representation.md` §3.
+# `bugs/formal/FORMAL_a_call_result_field_access_has_no_representation.md (deleted)` §3.
 import os
 import re
 import sys

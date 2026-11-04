@@ -43,7 +43,7 @@ tool's reference and the ranking was its narrower first half.
 
 Its conclusion — the task's "next 4-6 modules by files blocked" does not exist
 as stated — is what §3's per-name table repeats, and
-`bugs/formal/FORMAL_a_call_result_field_access_has_no_representation.md` §0 measures
+Field access through call results is now supported by the compiler (§0 measurement context no longer applies)
 the same thing a second time with a per-use shape column. One of its own
 measurements was a tool defect: its `types` row read `0 uses — pure closure`
 because `tools/formal_sweep_causes.py::_host_declared_names` scanned
