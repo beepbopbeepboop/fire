@@ -320,6 +320,23 @@ def _assign_target(gen, tgt, et, ev):
             # must yield to any type that is not the default itself.
             _decl_t = et if et and et not in ('int64_t', 'int') else (hint or et or 'int64_t')
             gen._declare_var(tgt.name, _decl_t)
+        # A `None` / `False` / `True` / NULL-string slot read out of a
+        # kind-mixed tuple is a BOX, a non-zero heap cell, but the local that
+        # receives it is a plain word whose consumers (`x is None`, `if x:`,
+        # `x or d`, a parameter test in the callee) read it as 0 / 1. Bind the
+        # plain word and leave every other box as it was (a double or a string
+        # keeps its kind). The compiled compiler's own `is_generator, ids =
+        # _detect_generator(body)` bound a False box, so every function it
+        # parsed was a generator; `for pn, pt in params: self._param_ctype(pn,
+        # pt, s)` handed an unannotated parameter's None annotation to
+        # `strdup` as a "type".
+        if et == 'int64_t' and ev in getattr(gen, '_boxed_vals', ()):
+            _un = gen._new_temp('int64_t')
+            gen._emit(f"  {_un} = mojo_unbox_plain ({ev});")
+            if ev in gen._dyn_word_vals:
+                gen._dyn_word_vals.add(_un)
+            gen._boxed_vals.add(_un)
+            ev = _un
         gen._track_pointer_actual_type(tgt.name, gen.var_types[tgt.name], ev, et)
         gen._safe_coerce_emit(et, gen.var_types[tgt.name], ev, gen._write_dest(tgt.name))
         # A word of unknown kind landing in an int64_t local: the local is
