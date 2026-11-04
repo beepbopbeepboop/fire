@@ -605,8 +605,7 @@ HOST_SET_ADDED_TIERS = {
     # it, so nothing this tree can write would move a file.
     "sysconfig": "unreachable",
     # A clock `formal/hostmods/time.mojo` already reads, plus calendar
-    # arithmetic.  The answer is a shaped record, which is
-    # `bugs/formal/FORMAL_time_struct_shaped_answers.md`'s to design.
+    # arithmetic.  The answer is a shaped record.
     "datetime": "modelled",
     # `getrusage(2)` is libSystem and `struct rusage` is a fixed layout.
     "resource": "modelled",

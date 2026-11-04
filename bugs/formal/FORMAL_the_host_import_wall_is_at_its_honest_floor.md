@@ -323,7 +323,7 @@ and both are within ±1 of what this table said, except where §0 says otherwise
 | `abc` | 236 | 0 | 0 | **an interpreter.** `abc` is a metaclass and a registry; nothing here builds a type at run time. |
 | `collections` | 129 | 10 | 29 | **CLAIMED** — `hostmods-platform`, `module:platform+fnmatch+collections-rest`. Not touched here. |
 | `types` | 83 | 0 | 6 | **a namespace object.** `SimpleNamespace` (20 spellings) and `ModuleType` (3) are both run-time-constructed records, same missing thing as `copy` above. |
-| `resource` | 34 | 0 | 0 | `getrlimit` answers a **pair**, and `setrlimit` wants a pair to hand back — `bugs/formal/FORMAL_time_struct_shaped_answers.md`'s shape. The `RLIMIT_*` constants alone would be a module with no consumer. |
+| `resource` | 34 | 0 | 0 | `getrlimit` answers a **pair**, and `setrlimit` wants a pair to hand back. The `RLIMIT_*` constants alone would be a module with no consumer. |
 | `itertools` | 21 | 1 | 14 | **a lazy sequence.** `combinations` (the only name the swept files spell) is a generator of tuples; neither half is representable. |
 | `unittest` | 18 | 7 | 16 | **RE-MEASURED in §0, and this row's cause was the wrong one.** `TestCase` in 18 of 18 and `main()` in 17 of 18; the 7 `alone` files spell those two and nothing else. `main()` is a run-time type walk, so this is `abc`'s capability, not a module. |
 | `builtins` | 18 | 2 | 2 | **the interpreter's own namespace.** `set(dir(builtins))` — measured in `formal/imports.py`'s own comment, which is why `builtins` is a `HOST_UNREACHABLE` entry. |

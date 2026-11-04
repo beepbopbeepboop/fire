@@ -21278,7 +21278,8 @@ def write_dylib_manifest(dylib_path: str, install_name: str,
                      "declaration": e.get("declaration"),
                      "kind": e.get("kind"),
                      "frame_params": e.get("frame_params") or [],
-                     "owned_blob": e.get("owned_blob") or None}
+                     "owned_blob": e.get("owned_blob") or None,
+                     "returns_frame": e.get("returns_frame")}
                     for e in exports],
     }
     # Atomic, like every other manifest write: this one truncates a file other
@@ -22565,28 +22566,9 @@ def _formal_exports(source_paths: list, ordered: list, info: dict,
     exported = _export_entries(source_paths, prefixes)
     out = []
     emitted = set()
-    # A function that RETURNS A FRAME ADDRESS is not exportable, and the
-    # refusal is here rather than in the emitter because the emitter has no
-    # idea the function is being offered at a boundary.  The reason is the
-    # hidden word: the returned-frame convention is "the caller reserves a
-    # block and passes its address as one trailing argument", and that is a
-    # property of ONE image's calling convention.  An importer compiled the
-    # module's source with its own `_frame_receivers` pass, has no table saying
-    # which of this library's functions take the extra word, and passes
-    # arguments the way the source spells them — so an exported one copies its
-    # caller's block into whatever the argument register the caller passed it in
-    # held.  (The word, not the index: the hidden word travels by the REGISTER
-    # path on both backends — `model.RETURNED_FRAME_MAX_ARGS` — while source
-    # arguments past the register file travel in the caller's frame, so "the
-    # seventh argument register" names x86-64's first STACK slot.)
-    frame_returns = [fn.name for fn in ordered
-                     if getattr(fn, "_frame_return_status", None) == _RETURN_FRAME]
-    offered = [n for n in frame_returns
-               if n in exported or n in (methods or {})]
-    if offered:
-        raise CodegenError(M.dylib_frame_return_refusal(
-            source_paths[0] if source_paths else "this module",
-            sorted(offered)))
+    # A function that RETURNS A FRAME ADDRESS is now exportable to dylibs
+    # with the caller-owned returned frame convention, provided the manifest
+    # advertises it so importers can pass the trailing block.
     for fn in ordered:
         # An overload was renamed to `<name>__ovN` above, so it no longer
         # matches — which is what keeps a name that reflect *did* export from
@@ -22604,6 +22586,13 @@ def _formal_exports(source_paths: list, ordered: list, info: dict,
             # dylib, and every importer of it fails.
             emitted.add(fn.name)
             module, symbol, signature = methods[fn.name]
+            ret_frame = getattr(fn, "_returns_frame_struct", None)
+            ret_frame_info = None
+            if ret_frame is not None:
+                try:
+                    ret_frame_info = {"struct": getattr(ret_frame, "name", str(ret_frame))}
+                except Exception:
+                    ret_frame_info = {"struct": str(ret_frame)}
             out.append({
                 "module": module,
                 "name": fn.name,
@@ -22622,6 +22611,7 @@ def _formal_exports(source_paths: list, ordered: list, info: dict,
                 "kind": "method",
                 "frame_params": _export_frame_contract(fn),
                 "owned_blob": _export_owned_blob(module, fn.name),
+                "returns_frame": ret_frame_info,
             })
             continue
         if fn.name not in exported:
@@ -22640,6 +22630,13 @@ def _formal_exports(source_paths: list, ordered: list, info: dict,
                         # fallback symbol
                         symbol = fn.name
                     emitted.add(fn.name)
+                    ret_frame = getattr(fn, "_returns_frame_struct", None)
+                    ret_frame_info = None
+                    if ret_frame is not None:
+                        try:
+                            ret_frame_info = {"struct": getattr(ret_frame, "name", str(ret_frame))}
+                        except Exception:
+                            ret_frame_info = {"struct": str(ret_frame)}
                     out.append({
                         "module": prefix,
                         "name": fn.name,
@@ -22651,6 +22648,7 @@ def _formal_exports(source_paths: list, ordered: list, info: dict,
                         "kind": None,
                         "frame_params": _export_frame_contract(fn),
                         "owned_blob": _export_owned_blob(prefix, fn.name),
+                        "returns_frame": ret_frame_info,
                     })
                     continue
                 except Exception as e:
@@ -22658,6 +22656,13 @@ def _formal_exports(source_paths: list, ordered: list, info: dict,
             continue                      # private, generic, or overloaded
         emitted.add(fn.name)
         prefix, entry, symbol = exported[fn.name]
+        ret_frame = getattr(fn, "_returns_frame_struct", None)
+        ret_frame_info = None
+        if ret_frame is not None:
+            try:
+                ret_frame_info = {"struct": getattr(ret_frame, "name", str(ret_frame))}
+            except Exception:
+                ret_frame_info = {"struct": str(ret_frame)}
         out.append({
             "module": prefix,
             "name": fn.name,
@@ -22675,6 +22680,7 @@ def _formal_exports(source_paths: list, ordered: list, info: dict,
             "kind": entry.get("kind"),
             "frame_params": _export_frame_contract(fn),
             "owned_blob": _export_owned_blob(prefix, fn.name),
+            "returns_frame": ret_frame_info,
         })
     return out
 
@@ -23648,20 +23654,8 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     except Exception:
         pass
 
-    # A DYDLIB cannot export a function that returns a frame, and this is the
-    # one place that knows it: the convention needs the CALLER to reserve the
-    # block the object is copied into, and an importer of this library is a
-    # compilation this build does not perform — it binds the symbol and has no
-    # way to learn the width of the block it must reserve.  Refusing here is the
-    # honest answer rather than emitting a function every importer gets wrong,
-    # and it is the executable build's own answer that is absent here: `main`
-    # has a stub to refuse it and an exported function has nothing.
-    #
-    # Read off the per-function table `_frame_receivers` published rather than
-    # recomputed, so the question is the one the emitters will ask.
-    for fn in ordered:
-        if getattr(fn, "_returns_frame_struct", None) is not None:
-            raise FormalBuildError(M.returned_frame_library_refusal(fn.name))
+    # A DYDLIB can now export a function that returns a frame with the
+    # caller-owned returned frame convention; the manifest advertises it.
 
     # …and the frame that reaches the importer through the OTHER convention,
     # which is a hazard this loop above could not see because it is not a

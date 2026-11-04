@@ -1175,7 +1175,7 @@ NOT_YET = [
     ("os", "test_os.py's cases are filesystem operations, not pure functions."),
     ("time", "test_time.py's literals are `strftime` formats, and `strftime` is "
              "absent from the model "
-             "(`bugs/formal/FORMAL_time_struct_shaped_answers.md`)."),
+             "),",
     ("platform", "no literal calls; the answer is a property of the machine."),
     ("argparse", "CPython's cases are `parse_args` over argv LISTS and "
                  "SystemExit, and a list cannot cross a dylib boundary."),
