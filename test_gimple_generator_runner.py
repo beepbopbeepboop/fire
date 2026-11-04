@@ -11260,3 +11260,28 @@ if __name__ == '__main__':
     print(f"\n{_PASS} passed, {_FAIL} failed")
     if _FAIL:
         raise SystemExit(1)
+
+
+
+# Flag instance iteration via __iter__ yielding from self._iter_member_()
+# (enum.py Flag.__iter__ pattern) — _iter_member_ aliased to a generator
+# method, called via self._iter_member_() inside a generator method with
+# yield from.
+test_generator_stdout("flag_instance_iter_via_iter_member_alias", """\
+class Flag:
+    @classmethod
+    def _iter_member_by_value_(cls, value: Int):
+        yield 1
+        yield value
+
+    _iter_member_ = _iter_member_by_value_
+
+    def __iter__(self):
+        yield from self._iter_member_(7)
+
+def main():
+    f = Flag()
+    for x in f:
+        print(x)
+""", "1\n7\n")
+

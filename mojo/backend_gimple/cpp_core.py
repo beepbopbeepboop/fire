@@ -8090,20 +8090,39 @@ def _cpp_for_generator_delegate(gen, target, call: 'CallExpr', body: list,
                 "`for ... in <expr>.<method>(...)` is only supported "
                 "when <expr> is literally `self` (or `cls`) inside a generator "
                 "method on the same struct")
-        sub_name = f"{_self_struct}.{call.func.member}"
-        api = gen._generator_method_api.get((_self_struct, call.func.member))
-        if (api is None or (_self_struct, call.func.member)
+        _mname = call.func.member
+        if call.func.obj.name == 'self' and _mname == '_iter_member_':
+            for _cand in ('_iter_member_by_def_', '_iter_member_by_value_'):
+                if ((_self_struct, _cand) in getattr(gen, '_generator_method_api', {})
+                        and (_self_struct, _cand) in getattr(gen, '_supported_generator_methods', {})):
+                    _mname = _cand
+                    call.func.member = _cand
+                    break
+        sub_name = f"{_self_struct}.{_mname}"
+        api = gen._generator_method_api.get((_self_struct, _mname))
+        if (api is None or (_self_struct, _mname)
                 not in gen._supported_generator_methods):
             raise gimple_exprtypes._UnsupportedGeneratorShape(
-                f"`for ... in self.{call.func.member}(...)` does not "
+                f"`for ... in {call.func.obj.name}.{call.func.member}(...)` does not "
                 "consume a generator method this compile has itself "
                 "already translated via the C++20-coroutine path "
                 "(either it's not a generator this codegen supports, or "
                 "it's defined LATER among this struct's methods — the "
                 "consumed generator method must be defined earlier)")
-        receiver_exprs = [call.func.obj.name]
-        if call.func.obj.name == 'cls' and api.get('receiver') not in ('cls', 'self'):
+        _rcv_api = api.get('receiver')
+        if _rcv_api not in ('cls', 'self'):
             receiver_exprs = []   # a @staticmethod generator takes no receiver slot
+        elif _rcv_api == 'cls':
+            if call.func.obj.name == 'self' and _self_struct:
+                receiver_exprs = [_self_struct]
+            elif call.func.obj.name == 'cls':
+                receiver_exprs = ['cls']
+            else:
+                receiver_exprs = [_rcv_api]
+        elif _rcv_api == 'self':
+            receiver_exprs = ['self'] if call.func.obj.name == 'self' else [call.func.obj.name]
+        else:
+            receiver_exprs = [call.func.obj.name]
     else:
         sub_name = call.func.name
         # Self-recursion: `for <target> in <this-same-function>(...):`
@@ -10406,7 +10425,51 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
                        and isinstance(call.func.obj, gimple_ctypes.IdentExpr)
                        and call.func.obj.name == 'cls'
                        and bool(cls_struct))
-    is_gen_call = is_self_recursive or is_cls_gen_call or (
+    _self_method_name = call.func.member if (isinstance(call, gimple_ctypes.CallExpr) and isinstance(call.func, gimple_ctypes.MemberExpr)) else None
+    if (isinstance(call, gimple_ctypes.CallExpr) and isinstance(call.func, gimple_ctypes.MemberExpr)
+            and isinstance(call.func.obj, gimple_ctypes.IdentExpr)
+            and call.func.obj.name in ('self',) and bool(cls_struct)
+            and _self_method_name == '_iter_member_'):
+        # enum Flag.__iter__ does `yield from self._iter_member_(...)` where
+        # _iter_member_ is aliased to _iter_member_by_value_/_iter_member_by_def_
+        for _cand in ('_iter_member_by_def_', '_iter_member_by_value_'):
+            if ((cls_struct, _cand) in getattr(gen, '_generator_method_api', {})
+                    and (cls_struct, _cand) in getattr(gen, '_supported_generator_methods', {})):
+                _self_method_name = _cand
+                break
+    is_self_gen_call = (isinstance(call, gimple_ctypes.CallExpr)
+                        and isinstance(call.func, gimple_ctypes.MemberExpr)
+                        and isinstance(call.func.obj, gimple_ctypes.IdentExpr)
+                        and call.func.obj.name == 'self'
+                        and bool(cls_struct)
+                        and (_self_method_name or call.func.member)
+                        and (cls_struct, (_self_method_name or call.func.member)) in getattr(gen, '_generator_method_api', {})
+                        and (cls_struct, (_self_method_name or call.func.member)) in getattr(gen, '_supported_generator_methods', {}))
+    # Also handle ClassName.method() calls to generator methods
+    is_classname_gen_call = False
+    if (not is_cls_gen_call and not is_self_gen_call and isinstance(call, gimple_ctypes.CallExpr)
+            and isinstance(call.func, gimple_ctypes.MemberExpr)
+            and isinstance(call.func.obj, gimple_ctypes.IdentExpr)
+            and call.func.obj.name not in ('self', 'cls')
+            and call.func.obj.name in getattr(gen, '_generator_method_api_keys_by_struct', {}) or
+            any(call.func.obj.name == s for s in getattr(gen, '_generator_method_api', {}).keys())):
+        # try to find
+        pass
+    # simpler: check if calling as ClassName.method() where (ClassName, method) is a generator method
+    if (not is_cls_gen_call and not is_self_gen_call and isinstance(call, gimple_ctypes.CallExpr)
+            and isinstance(call.func, gimple_ctypes.MemberExpr)
+            and isinstance(call.func.obj, gimple_ctypes.IdentExpr)
+            and call.func.obj.name not in ('self', 'cls')):
+        _cname = call.func.obj.name
+        _mname_cand = _self_method_name or call.func.member
+        if ((_cname, _mname_cand) in getattr(gen, '_generator_method_api', {})
+                and (_cname, _mname_cand) in getattr(gen, '_supported_generator_methods', {})):
+            is_classname_gen_call = True
+            if _self_method_name and isinstance(call.func, gimple_ctypes.MemberExpr):
+                call.func.member = _self_method_name
+    if is_self_gen_call and _self_method_name and isinstance(call.func, gimple_ctypes.MemberExpr):
+        call.func.member = _self_method_name  # rewrite to actual generator method name
+    is_gen_call = is_self_recursive or is_cls_gen_call or is_self_gen_call or is_classname_gen_call or (
         isinstance(call, gimple_ctypes.CallExpr) and isinstance(call.func, gimple_ctypes.IdentExpr)
         and call.func.name in gen._generator_api)
     if not is_gen_call:
@@ -10496,40 +10559,54 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
         call.kwargs = []
         _walk_ast_invalidate(call)
     receiver_exprs = []
-    if is_cls_gen_call:
-        sub_name = f"{cls_struct}.{call.func.member}"
-        api = gen._generator_method_api.get((cls_struct, call.func.member))
-        if (api is None or (cls_struct, call.func.member)
+    if is_cls_gen_call or is_self_gen_call or is_classname_gen_call:
+        if is_classname_gen_call:
+            _call_struct = call.func.obj.name
+        else:
+            _call_struct = cls_struct
+        sub_name = f"{_call_struct}.{call.func.member}"
+        api = gen._generator_method_api.get((_call_struct, call.func.member))
+        if (api is None or (_call_struct, call.func.member)
                 not in gen._supported_generator_methods):
             raise gimple_exprtypes._UnsupportedGeneratorShape(
-                f"`yield from cls.{call.func.member}(...)` does not "
+                f"`yield from {call.func.obj.name}.{call.func.member}(...)` does not "
                 "delegate to a generator method this compile has itself "
                 "already translated via the C++20-coroutine path (either "
                 "it's not a generator this codegen supports, or it's "
                 "defined LATER among this struct's methods — the "
                 "delegated-to generator method must be defined earlier)")
         # The receiver slot, when the callee HAS one, is the literal
-        # `cls` (see the `is_cls_gen_call` branch's own comment: the
-        # placeholder is passed positionally, never dereferenced). A
-        # `@staticmethod` generator method has no receiver parameter at
-        # all -- its `param_ctypes` simply starts at the first real
-        # parameter. Which case this is comes from the api entry's own
-        # `receiver` key, recorded at registration (see
-        # `_cpp_method_receiver_name`), because the registered `params`
-        # are bare ctype strings with the names stripped.
-        #
-        # A MISSING key is refused rather than assumed: an api entry from a
-        # registration site that does not set it would otherwise produce a
-        # wrong-arity `_start(...)` call — exactly the class of silent
-        # wrongness this branch exists to end.
+        # `cls` or `self` (the placeholder is passed positionally, never
+        # dereferenced in the classmethod case; for instance methods self is
+        # the real receiver). A `@staticmethod` generator method has no
+        # receiver parameter at all.
         _rcv = api.get('receiver', _MISSING)
         if _rcv is _MISSING:
             raise gimple_exprtypes._UnsupportedGeneratorShape(
-                f"`yield from cls.{call.func.member}(...)`: the compiled "
+                f"`yield from {call.func.obj.name}.{call.func.member}(...)`: the compiled "
                 "generator method's registration carries no `receiver` "
                 "key, so its receiver arity cannot be determined")
         if _rcv in ('cls', 'self'):
-            receiver_exprs = ['cls']
+            # Pass receiver as the API expects (cls for classmethods, self for instance methods)
+            if _rcv == 'cls':
+                if is_classname_gen_call:
+                    receiver_exprs = [_call_struct]
+                elif call.func.obj.name == 'self' and cls_struct:
+                    receiver_exprs = [cls_struct]
+                elif call.func.obj.name == 'cls':
+                    receiver_exprs = ['cls']
+                else:
+                    receiver_exprs = [_rcv]
+            elif _rcv == 'self':
+                if call.func.obj.name == 'self':
+                    receiver_exprs = ['self']
+                elif is_classname_gen_call:
+                    # calling instance method as ClassName.method() is unusual; pass instance?
+                    receiver_exprs = ['self']  # fallback
+                else:
+                    receiver_exprs = [_rcv]
+            else:
+                receiver_exprs = [_rcv]
     else:
         sub_name = call.func.name
         if is_self_recursive:
