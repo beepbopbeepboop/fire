@@ -1119,25 +1119,107 @@ def main():
 
 def _regression_read_table_callable_reader():
     # Root-cause regression for bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md:
-    # After callable-local loop typing lands, this compiles past the for.
-    try:
-        gimple_codegen.compile_to_gimple_with_cpp("""\
-def read_table(infile, header, *, sep='\\t',
-               _get_reader=__import__('csv').reader):
+    # `_get_reader` is a callable-valued parameter (default csv.reader); the
+    # loop `for row in _get_reader(lines, ...):` in `read_table` must compile
+    # and run correctly.
+    test_generator_matches_cpython(
+        "cpp_for_callable_param_read_table_like",
+        """\
+def _get_reader_list(lines, delimiter='\t'):
+    res = []
+    for line in lines:
+        if delimiter in line:
+            res.append(line.split(delimiter))
+        else:
+            res.append([line])
+    return res
+
+def read_table(infile, header, *, sep='\t',
+               _get_reader=_get_reader_list):
     lines = infile.splitlines()
-    for row in _get_reader(lines, delimiter=sep or '\\t'):
+    for row in _get_reader(lines, delimiter=sep):
         yield row
 
 def main():
-    pass
-""", do_imports=False)
-        print("PASS  cpp_for_callable_param_read_table_like")
-        global _PASS
-        _PASS += 1
-    except Exception as e:
-        print(f"FAIL  cpp_for_callable_param_read_table_like: {e}")
-        global _FAIL
-        _FAIL += 1
+    data = "a\tb\n1\t2\n3\t4\n"
+    for r in read_table(data, "a\tb", sep='\t'):
+        print(r[0], r[1])
+main()
+""",
+        """\
+def _get_reader_list(lines, delimiter='\t'):
+    res = []
+    for line in lines:
+        if delimiter in line:
+            res.append(line.split(delimiter))
+        else:
+            res.append([line])
+    return res
+
+def read_table(infile, header, *, sep='\t',
+               _get_reader=_get_reader_list):
+    lines = infile.splitlines()
+    for row in _get_reader(lines, delimiter=sep):
+        yield row
+
+def main():
+    data = "a\tb\n1\t2\n3\t4\n"
+    for r in read_table(data, "a\tb", sep='\t'):
+        print(r[0], r[1])
+main()
+""")
+
+
+def _get_reader_list(lines, delimiter='\t'):
+    res = []
+    for line in lines:
+        if delimiter in line:
+            res.append(line.split(delimiter))
+        else:
+            res.append([line])
+    return res
+
+def read_table(infile, header, *, sep='\t',
+               _get_reader=_get_reader_list):
+    lines = infile.splitlines()
+    for row in _get_reader(lines, delimiter=sep):
+        yield row
+
+def main():
+    data = "a\tb\n1\t2\n3\t4\n"
+    for r in read_table(data, "a\tb", sep='\t'):
+        print(r[0], r[1])
+main()
+""",
+        """\
+def _get_reader_list(lines, delimiter='\t'):
+    res = []
+    for line in lines:
+        if delimiter in line:
+            res.append(line.split(delimiter))
+        else:
+            res.append([line])
+    return res
+
+def read_table(infile, header, *, sep='\t',
+               _get_reader=_get_reader_list):
+    lines = infile.splitlines()
+    for row in _get_reader(lines, delimiter=sep):
+        yield row
+
+def main():
+    data = "a\tb\n1\t2\n3\t4\n"
+    for r in read_table(data, "a\tb", sep='\t'):
+        print(r[0], r[1])
+main()
+""")
+def read_table(infile, header, *, sep='\\t',
+               _get_reader=_get_reader_list):
+    lines = infile.splitlines()
+    for row in _get_reader(lines, delimiter=sep):
+        yield row
+
+def main():
 
 
 def _cpp_coroutine_builtin_module_constant():

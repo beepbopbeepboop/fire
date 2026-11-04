@@ -9824,6 +9824,9 @@ char *mojo_repr_int(int64_t obj) {
     return strdup(buffer);
 }
 
+typedef struct MojoClassRec MojoClassRec;
+static MojoClassRec *_class_find(int64_t tag);
+
 char *mojo_repr_str(char *s) {
     /* Python repr() of a string is quoted: repr("hi") == "'hi'", with
      * control characters shown as escapes (repr("a\nb") == "'a\\nb'") rather
@@ -9844,6 +9847,26 @@ char *mojo_repr_str(char *s) {
      * own repr() once self-hosted-compiled and diffed against the
      * interpreted stage1 dump. */
     if (!s) s = "";
+    /* Check if this is actually an instance of a run-time class. */
+    {
+        int64_t addr = (int64_t)(intptr_t)s;
+        if (addr > 65536) {
+            int64_t magic = *(int64_t *)(intptr_t)addr;
+            if (magic == MOJO_INSTOBJ_MAGIC) {
+                int64_t tag = *(int64_t *)(intptr_t)(addr + 8);
+                MojoClassRec *c = _class_find(tag);
+                if (c) {
+                    char *cname = *(char **)((char *)c + 8);
+                    if (cname) {
+                        char *buf = malloc(256);
+                        snprintf(buf, 256, "<%s object at 0x%" PRIx64 ">",
+                                 cname, addr);
+                        return buf;
+                    }
+                }
+            }
+        }
+    }
     int has_squote = 0, has_dquote = 0;
     for (const char *c = s; *c; c++) {
         if (*c == '\'') has_squote = 1;
@@ -10455,6 +10478,9 @@ char *mojo_repr_list_kinds(MojoList *l, const char *kinds) {
     return mojo_str_cat_free(_buf, _is_tup ? ")" : "]");
 }
 
+typedef struct MojoClassRec MojoClassRec;
+static MojoClassRec *_class_find(int64_t tag);
+
 char *mojo_repr_obj(int64_t addr) {
     /* Fallback for anything that isn't a plain scalar or a string: a real
      * struct/list/dict/set pointer. A full Python-style field-by-field repr
@@ -10463,8 +10489,24 @@ char *mojo_repr_obj(int64_t addr) {
      * mojo_read_type_tag above, which is enough for isinstance() but not for
      * reconstructing field names. Format as an address instead of silently
      * printing a decimal number indistinguishable from real data. */
-    static char buffer[40];
+    static char buffer[256];
     if (!addr) return "None";
+    if (addr > 65536) {
+        /* Check if it's an instance of a run-time class. */
+        int64_t magic = *(int64_t *)(intptr_t)addr;
+        if (magic == MOJO_INSTOBJ_MAGIC) {
+            int64_t tag = *(int64_t *)(intptr_t)(addr + 8);
+            MojoClassRec *c = _class_find(tag);
+            if (c) {
+                char *cname = *(char **)((char *)c + 8);
+                if (cname) {
+                    snprintf(buffer, sizeof(buffer), "<%s object at 0x%" PRIx64 ">",
+                             cname, addr);
+                    return buffer;
+                }
+            }
+        }
+    }
     snprintf(buffer, sizeof(buffer), "<object at 0x%" PRIx64 ">", addr);
     return buffer;
 }

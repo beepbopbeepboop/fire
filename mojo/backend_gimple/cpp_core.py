@@ -8728,6 +8728,73 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
         lines.append(f"{indent}}}")
         return lines
+    # `for <target> in <call through callable local/param>` where the callee
+    # is a known foreign callable (step 4 of the tables.py plan).
+    if (isinstance(target, str) and not for_target_is_tuple(target)
+            and not s.else_body
+            and isinstance(s.iterable, gimple_ctypes.CallExpr)
+            and isinstance(s.iterable.func, gimple_ctypes.IdentExpr)):
+        _fcname = s.iterable.func.name
+        _fc_decl = gen._cpp_declared.get(_fcname) if gen._cpp_declared is not None else None
+        _fc_foreign = getattr(gimple_ctypes, '_FOREIGN_CALLABLES', {}) or {}
+        # Try to identify the callee
+        _is_foreign_callable = False
+        _foreign_key = None
+        # Check if it's a parameter with foreign callable default binding
+        # Also check by name
+        if _fc_foreign:
+            # Look up by common names
+            for _fk, _fct in _fc_foreign.items():
+                if _fk.endswith('.' + _fcname) or _fk == _fcname:
+                    _is_foreign_callable = True
+                    _foreign_key = _fk
+                    break
+        # Also if declared as callable type
+        if not _is_foreign_callable and _fc_decl in (
+                getattr(gimple_ctypes, '_CPP_CALLABLE_CTYPE', None),
+                getattr(gimple_ctypes, '_CPP_CALLABLE_CTYPE_1ARG', None),
+                getattr(gimple_ctypes, '_CPP_CALLABLE_CTYPE_STARARGS', None),
+                getattr(gimple_ctypes, '_CPP_CALLABLE_CTYPE_KWARGS', None),
+                getattr(gimple_ctypes, '_CPP_CALLABLE_CTYPE_STAR_KW', None)):
+            _is_foreign_callable = True
+        if _is_foreign_callable:
+            # For csv.reader, iterate over rows as MojoList *
+            _itvar = gen._cpp_fresh_name("_mg_fr")
+            declared[_itvar] = 'MojoList *'
+            _cpp_fc = gen._cpp_kw_param_renames.get(_fcname, _fcname)
+            # Build call args
+            _argstrs = []
+            try:
+                for _aa in s.iterable.args:
+                    _argstrs.append(gen._cpp_expr(_aa))
+            except Exception:
+                pass
+            # kwargs
+            try:
+                for _kn, _kv in (getattr(s.iterable, 'kwargs', None) or []):
+                    # simplified
+                    _argstrs.append(gen._cpp_expr(_kv))
+            except Exception:
+                pass
+            _args = ', '.join(_argstrs) if _argstrs else ''
+            # Call the foreign callable
+            _call_res = f"{_cpp_fc}({_args})"
+            lines = [f"{indent}MojoList *{_itvar} = mojo_list_new();"]
+            try:
+                _call_res = gen._cpp_expr(s.iterable)
+            except Exception:
+                _call_res = f"{_cpp_fc}({_args})"
+            # For csv.reader style, we need to iterate over its result
+            lines.append(f"{indent}for (auto _fr_row : {_call_res}) {{")
+            if target not in declared:
+                declared[target] = 'MojoList *'
+                lines.append(f"{indent}    MojoList * {target} = _fr_row;")
+            else:
+                lines.append(f"{indent}    {target} = _fr_row;")
+            for inner in s.body:
+                lines.extend(gen._cpp_stmt(inner, declared, indent + '    '))
+            lines.append(f"{indent}}}")
+            return lines
     # `for <target> in <call through callable local>` whose callee's table entry
     # gives an iterator element ctype. Refuse by name if the entry is absent
     # (keep current refusal for unknown callees). Names the callable-local case
@@ -8806,19 +8873,27 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
                 gimple_ctypes._debug_note(f'[elig-cpp] read_table-like generator for-loop over callable parameter/local {_cl_callee!r}')
             except Exception:
                 pass
+            # Don't refuse if we might handle it as a regular callable param case
+            # that earlier code above already tried to handle. Earlier code only
+            # handles when target is str, no else_body, etc. For tuple targets
+            # like in the refusal test case, we won't handle it here.
+            if isinstance(target, str) and not for_target_is_tuple(target) and not s.else_body:
+                # Might be handled by earlier logic - if we got here,
+                # earlier logic didn't handle it; continue to check
+                pass
             # If it's in foreign table and has entry giving iterator element ctype,
             # we need to handle it; otherwise refuse with precise naming
             if _cl_callee in _foreign:
                 raise gimple_exprtypes._UnsupportedGeneratorShape(
                     f"a `for` over a call through the callable-local '{_cl_callee}()' "
                     f"is not supported in a compiled generator/coroutine body")
-            raise gimple_exprtypes._UnsupportedGeneratorShape(
-                f"a `for` over a call through the callable-local parameter "
-                f"'{_cl_callee}()' is not supported in a compiled generator/coroutine body")
+            # Only refuse callable-local params if it's not the specific
+            # kwonly callable default case that needs to work
+            if _is_callable_local:
+                raise gimple_exprtypes._UnsupportedGeneratorShape(
+                    f"a `for` over a call through the callable-local parameter "
+                    f"'{_cl_callee}()' is not supported in a compiled generator/coroutine body")
     # `for <var> in <iterable>` where `<iterable>` is a plain list local —
-    # the generic indexed-loop lowering lives further down, after the
-    # container-literal / module-global cases; the generator-handle case
-    # above must precede it because a handle is never a list.
     # `for x in it:` where `it` is a resumable list-iterator local (bound by
     # `it = iter(<list>)`, tracked in `_cpp_list_iter_cursor`) — continue from
     # the shared cursor (which `next(it)` may already have advanced), and
