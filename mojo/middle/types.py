@@ -2591,13 +2591,24 @@ def _declared_vars_body(stmts: list) -> set[str]:
                 result |= _declared_vars_body(node.finally_body)
     return result
 def callable_ctype(params, ret='int64_t'):
-    """Return `std::function<R(P...)>` for params/ret C types."""
+    """Build a `std::function<R(P...)>` ctype string for a callable slot.
+
+    `params` may be a list of ctypes, a list of `(name, ctype)` pairs, a bare
+    ctype string, or `None`; `ret` is the return ctype, with the pythonic
+    `'int'` normalized to `'int64_t'`."""
+    if ret == 'int':
+        ret = 'int64_t'
     if isinstance(params, str):
         params = [params]
-    if not params:
-        ps = ''
-    else:
-        ps = ', '.join(_as_str(p) for p in params)
+    if params is None:
+        params = []
+    ptypes = []
+    for p in params:
+        if isinstance(p, (tuple, list)) and len(p) == 2:
+            ptypes.append(_as_str(p[1]))
+        else:
+            ptypes.append(_as_str(p))
+    ps = ', '.join(ptypes)
     return f'std::function<{_as_str(ret)}({ps})>'
 
 
