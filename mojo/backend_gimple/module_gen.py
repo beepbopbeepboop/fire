@@ -49,7 +49,22 @@ import mojo.middle.coro as gimple_gen_coro
 # deferred. This file is DOWNSTREAM of `gimple_codegen`, so a top-level
 # `import mojo.middle.infra_infer` here starts the chain before
 # `gimple_codegen` has defined anything, and `infra_infer`'s own top-level
-# `import gimple_codegen` then leads `emit_infra`'s top-level
+# `import gimple_codegen
+
+_ENUM_BASES = {'Enum', 'IntEnum', 'StrEnum', 'Flag', 'IntFlag', 'ReprEnum'}
+
+
+def _is_enum_class_def(node):
+    try:
+        bases = getattr(node, 'bases', None) or []
+        for b in bases:
+            if isinstance(b, str) and b in _ENUM_BASES:
+                return True
+            # could be other forms
+    except Exception:
+        pass
+    return False
+
 # `from mojo.middle.infra_infer import _FC_SEP, ...` back into a half-built
 # `infra_infer`:
 #
@@ -72,6 +87,34 @@ from mojo.middle.literal_bindings import (
 )
 from mojo.middle.exprtypes import _gmi_nested_struct_defs
 import gimple_codegen
+
+_ENUM_BASES = {'Enum', 'IntEnum', 'StrEnum', 'Flag', 'IntFlag', 'ReprEnum'}
+
+
+def _is_enum_class_def(node):
+    try:
+        bases = getattr(node, 'bases', None) or []
+        for b in bases:
+            if isinstance(b, str) and b in _ENUM_BASES:
+                return True
+            # could be other forms
+    except Exception:
+        pass
+    return False
+
+_ENUM_BASES = {'Enum', 'IntEnum', 'StrEnum', 'Flag', 'IntFlag', 'ReprEnum'}
+
+
+def _is_enum_class_def(node):
+    try:
+        bases = getattr(node, 'bases', None) or []
+        for b in bases:
+            if isinstance(b, str) and b in _ENUM_BASES:
+                return True
+            # could be other forms
+    except Exception:
+        pass
+    return False
 import mojo.backend_gimple.emit_funcs as _ggf_dup
 from mojo.middle.closures import discover_closures, closure_lifted_name
 import mojo.backend_gimple.device_select as _gmi_device_select
@@ -3753,7 +3796,7 @@ def _gmi_is_rebindable(gen, dec, scope: dict, def_name: str) -> bool:
         return False
     _ANNOTATION_DECORATORS = frozenset({
         'staticmethod', 'classmethod', 'export', 'doc_hidden', 'gpu', 'kernel',
-        'property', 'abstractmethod',
+        'property', 'abstractmethod', 'lldb_formatter_wrapping_type',
     })
     if _head in _ANNOTATION_DECORATORS:
         return False
@@ -16992,9 +17035,9 @@ def gen_module_impl(self, stmts: list):
     # dispatch's `_mojo_getattr_<Struct>` reads. Computed and emitted HERE,
     # ahead of both the reflection definitions (which call the arms' symbols)
     # and the function bodies.
-    struct_defs = [s for s in stmts if isinstance(s, StructDef)]
+    struct_defs = [s for s in stmts if isinstance(s, StructDef) and not _is_enum_class_def(s)]
     if not self.do_imports:
-        struct_defs += [s for s in (imported_stmts or []) if isinstance(s, StructDef)]
+        struct_defs += [s for s in (imported_stmts or []) if isinstance(s, StructDef) and not _is_enum_class_def(s)]
     # The method prototypes below can carry a `MojoGenerator *` return
     # (a generator method — row-25 entry C's `Mailbox___iter__`), but the
     # generator block that DEFINES the type emits later in this section.
@@ -18473,5 +18516,5 @@ def gen_module_impl(self, stmts: list):
     return self._dedup_variadic_externs(_drop_unreferenced_unimpl_stubs(_drop_unreachable_repr_cluster(parts)))
 
 def __getattr__(name):
-    import gimple_codegen as _gc
-    return getattr(_gc, name)
+    import gimple_codegen
+    return getattr(gimple_codegen, name)
