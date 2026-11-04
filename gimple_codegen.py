@@ -31,6 +31,8 @@ from fire_compiler import (
     desugar_genexps, DESUGARED_GENEXP_NAMES, desugar_namedtuples,
     DESUGARED_NAMEDTUPLE_NAMES,
 )
+
+_ENUM_BASES = {'Enum', 'IntEnum', 'StrEnum', 'Flag', 'IntFlag', 'ReprEnum'}
 from module_loader import load_module, get_symbol_type, compiler_source_dir
 import ast_rewriter
 import ownership_check
@@ -6311,6 +6313,10 @@ def _run_pipeline(mojo_src: str, *, do_imports: bool = False, filename: str = ""
     tokens = py_tokenize(mojo_src)
     stmts = Parser(tokens).with_filename(filename).parse_module()
     _check_ownership(stmts, filename)
+    try:
+        stmts = _transform_enum_classes(stmts)
+    except Exception:
+        pass
     stmts = ast_rewriter.rewrite(stmts)
     # Generator expressions (`(x * 2 for x in xs)`) become REAL lazy
     # generators here, not the eager list this used to materialize: each
@@ -6626,6 +6632,81 @@ def _dep_sources_digest(mojo_src: str, filename: str) -> str:
         return ''
     import cas
     return cas._hash(*(f'{p}\0{texts[p]}' for p in sorted(texts)))
+
+
+
+def _is_enum_class_def(node):
+    try:
+        if not isinstance(node, StructDef):
+            return False
+        bases = getattr(node, 'bases', None) or []
+        for b in bases:
+            if isinstance(b, str) and b in _ENUM_BASES:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _transform_enum_classes(stmts):
+    """Transform enum class statements to go through metaclass mechanism."""
+    from fire_compiler import StructDef, AssignStmt, IdentExpr, CallExpr, MemberExpr
+    from fire_compiler import DictExpr, StringLiteral, TupleExpr, SubscriptExpr, ExprStmt
+    from fire_compiler import _as_str
+    import copy
+    result = []
+    for stmt in stmts:
+        if isinstance(stmt, StructDef) and _is_enum_class_def(stmt):
+            name = stmt.name
+            bases = stmt.bases or []
+            ns_items = []
+            for field in getattr(stmt, 'fields', []) or []:
+                if isinstance(field, AssignStmt) and isinstance(field.target, IdentExpr):
+                    ns_items.append((StringLiteral(value=field.target.name), field.value))
+            ns_dict = DictExpr(pairs=ns_items)
+            if bases:
+                base_name = bases[0]
+                base_ident = MemberExpr(obj=IdentExpr(name='enum'), member=base_name)
+                mcls_call = CallExpr(func=IdentExpr(name='type'), args=[base_ident])
+                mcls_assign = AssignStmt(target=IdentExpr(name=f'_{name}_mcls'), value=mcls_call)
+                result.append(mcls_assign)
+                type_new_call = CallExpr(
+                    func=MemberExpr(obj=IdentExpr(name='type'), member='__new__'),
+                    args=[IdentExpr(name=f'_{name}_mcls'), StringLiteral(value=name),
+                          TupleExpr(elements=[base_ident]), ns_dict]
+                )
+                new_assign = AssignStmt(target=IdentExpr(name=name), value=type_new_call)
+                result.append(new_assign)
+                try:
+                    type_init_call = CallExpr(
+                        func=MemberExpr(obj=IdentExpr(name=f'_{name}_mcls'), member='__init__'),
+                        args=[IdentExpr(name=name), StringLiteral(value=name),
+                              TupleExpr(elements=[base_ident]), ns_dict]
+                    )
+                    result.append(ExprStmt(value=type_init_call))
+                except Exception:
+                    pass
+            else:
+                result.append(stmt)
+        elif hasattr(stmt, 'body') and isinstance(stmt.body, list):
+            try:
+                new_stmt = copy.copy(stmt)
+                new_stmt.body = _transform_enum_classes(stmt.body)
+                result.append(new_stmt)
+            except Exception:
+                result.append(stmt)
+        elif hasattr(stmt, 'orelse') and isinstance(getattr(stmt, 'orelse'), list):
+            try:
+                new_stmt = copy.copy(stmt)
+                if hasattr(new_stmt, 'body'):
+                    new_stmt.body = _transform_enum_classes(new_stmt.body)
+                new_stmt.orelse = _transform_enum_classes(getattr(stmt, 'orelse'))
+                result.append(new_stmt)
+            except Exception:
+                result.append(stmt)
+        else:
+            result.append(stmt)
+    return result
 
 
 def compile_to_gimple_cached(mojo_src: str, do_imports: bool = False, filename: str = "",

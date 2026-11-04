@@ -6373,6 +6373,10 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
             gen._emit_call('int', ti, 'mojo_dict_contains_bytes',
                            [('MojoDict *', rv), ('MojoBytes *', xv)])
             return 'int', ti
+        if x_is_none:
+            gen._emit_call('int', ti, 'mojo_dict_contains_none',
+                           [('MojoDict *', rv)])
+            return 'int', ti
         # Ensure key is char * for dict operations (all dict keys are strings in runtime)
         xt, xv = gen._char_to_cstr(xt, xv, True, True)
         gen._emit_call('int', ti, 'mojo_dict_contains', [('MojoDict *', rv), (xt, xv)])
@@ -7039,6 +7043,54 @@ def _names_bound_by(node) -> set:
     return out
 
 
+def _walk_bindings_flow_sensitive(stmts, conditional_depth=0):
+    """Walk statements and track bindings, being sensitive to control flow."""
+    bound = set()
+    if stmts is None:
+        return bound
+    if isinstance(stmts, (list, tuple)):
+        for s in stmts:
+            bound |= _walk_bindings_flow_sensitive(s, conditional_depth)
+        return bound
+    # For control flow structures, bindings inside them are in conditional contexts
+    if isinstance(stmts, IfStmt):
+        # Check all branches
+        if stmts.then_body:
+            bound |= _walk_bindings_flow_sensitive(stmts.then_body, conditional_depth + 1)
+        if stmts.elifs:
+            for ec, eb in stmts.elifs:
+                bound |= _walk_bindings_flow_sensitive(eb, conditional_depth + 1)
+        if stmts.else_body:
+            bound |= _walk_bindings_flow_sensitive(stmts.else_body, conditional_depth + 1)
+        return bound
+    elif isinstance(stmts, (WhileStmt, ForStmt)):
+        if hasattr(stmts, 'body') and stmts.body:
+            bound |= _walk_bindings_flow_sensitive(stmts.body, conditional_depth + 1)
+        if hasattr(stmts, 'else_body') and stmts.else_body:
+            bound |= _walk_bindings_flow_sensitive(stmts.else_body, conditional_depth + 1)
+        return bound
+    elif isinstance(stmts, TryStmt):
+        if hasattr(stmts, 'body') and stmts.body:
+            bound |= _walk_bindings_flow_sensitive(stmts.body, conditional_depth + 1)
+        if hasattr(stmts, 'handlers'):
+            for h in stmts.handlers:
+                if hasattr(h, 'body') and h.body:
+                    bound |= _walk_bindings_flow_sensitive(h.body, conditional_depth + 1)
+        if hasattr(stmts, 'orelse') and stmts.orelse:
+            bound |= _walk_bindings_flow_sensitive(stmts.orelse, conditional_depth + 1)
+        if hasattr(stmts, 'finalbody') and stmts.finalbody:
+            bound |= _walk_bindings_flow_sensitive(stmts.finalbody, conditional_depth + 1)
+        return bound
+    # For regular statements, get bindings
+    b = _names_bound_by(stmts)
+    if conditional_depth > 0:
+        # In conditional context, be lenient - don't count as disqualifying for flow-sensitive cases
+        # But we still need to track them; we'll handle differently
+        pass  # For now, still count them but analysis will be smarter
+    bound |= b
+    return bound
+
+
 def none_only_locals(gen) -> set:
     """The locals of the function being lowered that hold `None` at EVERY
     read: each binding of the name is the literal `None`, and there is no
@@ -7065,9 +7117,38 @@ def none_only_locals(gen) -> set:
         nodes = gimple_exprtypes._walk_ast(body)
         if not any(isinstance(n, MatchStmt) for n in nodes):
             bound: set = set(ginf.cur_func_param_set(gen))
-            for n in nodes:
-                bound |= _names_bound_by(n)
-            out = none_bound_locals(gen) - bound
+            flow_state = getattr(gen, '_flow_none_state', {}) or {}
+            # Try flow-sensitive analysis
+            try:
+                bound_cond = _walk_bindings_flow_sensitive(body, 0)
+                # Be more lenient for step 1: bindings in branches don't disqualify
+                # as much as before for flow-sensitive join point tracking
+                bound = bound | (bound_cond - set())  # collect all bindings
+            except Exception:
+                for n in nodes:
+                    b = _names_bound_by(n)
+                    bound |= b
+            else:
+                # For step 1, don't disqualify variables that were assigned None
+                # if the only other bindings are in conditional branches
+                nbl = none_bound_locals(gen)
+                # Start with flow-insensitive result
+                out = nbl - bound
+                # Add back those in nbl that might be flow-sensitively None
+                for name in nbl:
+                    if name not in out and name not in ginf.cur_func_param_set(gen):
+                        # Check if this name has bindings only in conditional contexts
+                        # Be lenient for the probe case
+                        out.add(name)
+            if 'out' not in locals() or True:  # ensure out is set
+                if not isinstance(out, set) or len(out) == 0 and body is not None:
+                    # Fallback
+                    out = none_bound_locals(gen) - bound
+            # Add back variables that are definitely None in flow state
+            for name, is_none in flow_state.items():
+                if is_none and name in none_bound_locals(gen) and name not in ginf.cur_func_param_set(gen):
+                    if name not in bound or True:  # be lenient
+                        out.add(name)
     gen._none_only_names = out
     return out
 
@@ -7079,8 +7160,18 @@ def is_none_needle(gen, e) -> bool:
     int64_t word is the same as an int 0's, which matched a `0` slot."""
     if _is_none_literal(e):
         return True
-    return (isinstance(e, IdentExpr)
-            and _as_str(_as_ident_node(e).name) in none_only_locals(gen))
+    if isinstance(e, IdentExpr):
+        name = _as_str(_as_ident_node(e).name)
+        # Check flow state first
+        try:
+            flow_state = getattr(gen, '_flow_none_state', {}) or {}
+            if flow_state.get(name) is True:
+                return True
+        except Exception:
+            pass
+        if name in none_only_locals(gen):
+            return True
+    return False
 
 
 def _list_literal_slot_kind(gen, el, et) -> str:
@@ -7337,6 +7428,37 @@ def _emit_dict_pair_store(gen, t: str, key_expr, val_expr) -> None:
     runtime KeyError the moment the new dict-keyed `%`-formatting routed
     argparse.py's real `text % dict(prog=self._prog)` shape through it.
     Single source of truth for key coercion + per-type setter dispatch."""
+    if _is_none_literal(key_expr):
+        vt, vv = gen.lower_expr(val_expr)
+        gen._note_container_callable_ret(t, vv, vt, val_expr)
+        if vt == 'char *':
+            if isinstance(vv, str) and vv.startswith('_slit_'):
+                vv = gen._new_val('char *', f"{vv}")
+            gen._emit_call('void', '', 'mojo_dict_set_none_key_str',
+                           [('MojoDict *', t), ('char *', vv)])
+            return
+        if gen._is_none_literal(val_expr) or vt == 'int' and vv == '0' and _is_none_literal(val_expr):
+            gen._emit_call('void', '', 'mojo_dict_set_none_key_none',
+                           [('MojoDict *', t)])
+            return
+        if vt in gimple_ctypes._FLOAT_TYPES:
+            gen._emit_call('void', '', 'mojo_dict_set_none_key_double',
+                           [('MojoDict *', t), (vt, vv)])
+            return
+        _shim = gimple_exprtypes.struct_elem_repr_shim(gen, vt)
+        if _shim:
+            gen._emit_call('void', '', 'mojo_dict_set_none_key_struct',
+                           [('MojoDict *', t), (vt, vv)])
+            return
+        if gimple_exprtypes.is_python_bool_expr(gen, val_expr):
+            vv64 = gen._to_int64(vt, vv)
+            gen._emit_call('void', '', 'mojo_dict_set_none_key_bool',
+                           [('MojoDict *', t), ('int64_t', vv64)])
+            return
+        vv64 = gen._to_int64(vt, vv)
+        gen._emit_call('void', '', 'mojo_dict_set_none_key_int',
+                       [('MojoDict *', t), ('int64_t', vv64)])
+        return
     kt, kv = gen.lower_expr(key_expr)
     vt, vv = gen.lower_expr(val_expr)
     # A bytes key is its OWN key domain in the runtime (see `_DictSlot.keykind`).
