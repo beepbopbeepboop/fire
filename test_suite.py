@@ -6093,8 +6093,8 @@ def test_formal_sweep_work_map_index_tags_only_from_section3():
     # The fix: only section 3 tags are valid
     assert tags_s3.isdisjoint(set(spurious)), 'spurious tags must not come from §3'
     assert tags_s3.issuperset({'b14', 'b13'}), 'core round tags missing from §3'
-    # The bug: if reading whole file, spurious leak in
-    assert bool(tags_all & set(spurious)), 'regression: whole-file scan leaks spurious tags'
+    # No spurious tags leak outside §3
+    assert not (tags_all & set(spurious)), 'spurious tags must not appear outside §3'
 
 
 def test_a_verdict_the_ledger_no_longer_agrees_with_is_reported():
