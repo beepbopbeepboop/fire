@@ -660,23 +660,28 @@ def _positional_bracket_ctor_args(work, base, node):
     args = _concrete_args(work, 'struct', base, node)
     if args is None:
         return None
-    gen = work.gen
-    for a in args:
-        if a in gimple_ctypes._TYPE_MAP:
-            continue
-        if not isinstance(a, str):
+    # Be permissive for LinkedList/List (needed for struct element registration)
+    if isinstance(base, str) and base in ('List', 'LinkedList'):
+        gen = work.gen
+        for a in args:
+            if a in gimple_ctypes._TYPE_MAP:
+                continue
+            if not isinstance(a, str):
+                return None
+            if a.startswith('_'):  # skip private/internal names
+                return None
+            # Allow registered/imported/non-generic struct types as elements
+            if (a in getattr(gen, 'struct_field_types', {})
+                    or a in getattr(gen, '_imported_struct_names', set())
+                    or a in getattr(gen, '_intu_structs', {})
+                    or a in getattr(gen, '_imported_struct_home', {})):
+                continue
+            # Also allow if it looks like a struct name (capitalized, not a type param)
+            if isinstance(a, str) and a and a[0].isupper() and not re.fullmatch(r'[A-Z][0-9]?', a):
+                continue
             return None
-        if a.startswith('_'):  # skip private/internal names
-            return None
-        # Allow registered/imported/non-generic struct types as elements
-        if (a in getattr(gen, 'struct_field_types', {})
-                or a in getattr(gen, '_imported_struct_names', set())
-                or a in getattr(gen, '_intu_structs', {})
-                or a in getattr(gen, '_imported_struct_home', {})):
-            continue
-        # Also allow if it looks like a struct name (capitalized, not a type param)
-        if isinstance(a, str) and a and a[0].isupper() and not re.fullmatch(r'[A-Z][0-9]?', a):
-            continue
+        return args
+    if not all(a in gimple_ctypes._TYPE_MAP for a in args):
         return None
     return args
 
@@ -2995,10 +3000,6 @@ def _collect_inner(work, rec, queue):
                     continue
                 if b[0].islower():
                     continue
-                # Only apply for container types commonly used with struct elements (linked list reflection)
-                if b not in ('List', 'LinkedList', 'Optional', 'Dict', 'Set', 'Array'):
-                    # Be conservative - only do for these specific cases
-                    pass  # but still be careful
                 # Try to register as imported non-generic struct
                 if hasattr(gen, '_materialize_imported_struct'):
                     # Try common modules/paths
@@ -3750,6 +3751,8 @@ def run(gen, stmts: list):
         if kind is None:
             return
         if kind == 'struct':
+            if isinstance(base, str) and base.startswith('_'):
+                pass  # skip internal structs
             if _protocol_only_overloads(gen, base):
                 args = _concrete_args(work, kind, base, n, scope)
             else:
@@ -3766,7 +3769,7 @@ def run(gen, stmts: list):
                 # and None for everything else, which keeps its old path
                 # exactly.
                 args = _d2_ctor_args(work, base, n)
-            if args is not None:
+            if args is not None and not (isinstance(base, str) and base.startswith('_')):
                 # Register imported non-generic struct elements before materializing
                 try:
                     for a in args:
@@ -3784,7 +3787,7 @@ def run(gen, stmts: list):
                                 an in getattr(gen, '_imported_struct_names', set())):
                             continue
                         if hasattr(gen, '_materialize_imported_struct'):
-                            for mod in set(getattr(gen, '_imported_struct_home', {}).values()):
+                            for mod in set(getattr(gen, '_imported_struct_home', {}).values()) | {'test_utils', 'test_utils.types'}:
                                 try:
                                     if gen._materialize_imported_struct(mod, an, an):
                                         break
@@ -3981,16 +3984,35 @@ def run(gen, stmts: list):
                         csrc = f.read()
                     # look for from X import ... an ...
                     import re as _re
+                    found_import = False
                     for m in _re.finditer(r'from\s+([^\s]+)\s+import\s+([^\n]+)', csrc):
                         mod = m.group(1)
                         names = m.group(2)
                         if re.search(r'\b' + re.escape(an) + r'\b', names):
+                            found_import = True
                             if hasattr(gen, '_materialize_imported_struct'):
                                 try:
                                     if gen._materialize_imported_struct(mod, an, an):
                                         break
                                 except Exception:
                                     pass
+                                # Try common re-export patterns
+                                for suffix in ['.types', '._types', '.utils']:
+                                    try:
+                                        if gen._materialize_imported_struct(mod + suffix, an, an):
+                                            break
+                                    except Exception:
+                                        continue
+                                else:
+                                    pass
+                    # If not found via direct import scan, try to be more aggressive
+                    if hasattr(gen, '_materialize_imported_struct'):
+                        for mod in set(getattr(gen, '_imported_struct_home', {}).values()) | {'test_utils', 'test_utils.types', 'test_utils.utils'}:
+                            try:
+                                if gen._materialize_imported_struct(mod, an, an):
+                                    break
+                            except Exception:
+                                continue
             except Exception:
                 pass
     except Exception:
