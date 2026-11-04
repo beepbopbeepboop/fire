@@ -799,9 +799,6 @@ def _reset_func(gen, body: list = None, params: list = None,
     # `None` at every read (a membership needle). Per function, for the same
     # reason.
     gen._none_only_names = None
-    # Flow-sensitive None tracking: for each local, whether it's definitely None
-    # at the current program point (join points merge states).
-    gen._flow_none_state = {}
     # Pre-seed known global dicts with their value types so .get() uses the right function.
     # Also seeded from self._global_dict_val_types (Phase 1.7, never
     # reset) for the same reason _elem_types is seeded from
@@ -954,7 +951,6 @@ class FuncState:
         self.fs_tagged_opt_read: object = None
         self.fs_none_bound_names: object = None
         self.fs_none_only_names: object = None
-        self.fs_flow_none_state: object = None
         self.fs_dict_val_types: dict = {}
         self.fs_dict_nested_val_types: dict = {}
         self.fs_struct_layout: dict = {}
@@ -1059,10 +1055,6 @@ def save_func_state(gen) -> FuncState:
     st.fs_tagged_opt_read = gen._tagged_opt_read
     st.fs_none_bound_names = gen._none_bound_names
     st.fs_none_only_names = gen._none_only_names
-    try:
-        st.fs_flow_none_state = dict(getattr(gen, '_flow_none_state', {}) or {})
-    except Exception:
-        st.fs_flow_none_state = getattr(gen, '_flow_none_state', {})
     st.fs_dict_val_types = gen._dict_val_types
     st.fs_dict_nested_val_types = gen._dict_nested_val_types
     st.fs_struct_layout = gen._struct_layout
@@ -1177,10 +1169,6 @@ def restore_func_state(gen, st: FuncState) -> None:
     gen._tagged_opt_read = st.fs_tagged_opt_read
     gen._none_bound_names = st.fs_none_bound_names
     gen._none_only_names = st.fs_none_only_names
-    try:
-        gen._flow_none_state = dict(getattr(st, 'fs_flow_none_state', {}) or {})
-    except Exception:
-        gen._flow_none_state = getattr(st, 'fs_flow_none_state', {}) or {}
     gen._dict_val_types = st.fs_dict_val_types
     gen._dict_nested_val_types = st.fs_dict_nested_val_types
     gen._struct_layout = st.fs_struct_layout

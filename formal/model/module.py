@@ -1,5 +1,4 @@
 from contextvars import ContextVar
-import keyword
 from . import *
 try:
     import fire_compiler as F

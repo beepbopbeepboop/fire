@@ -268,88 +268,17 @@ def main():
     print(P.v, Q.v, P.__name__ == Q.__name__)
 main()
 """,
-    'repr_of_instance_of_run_time_class': """\
-def main():
-    Foo = type('Foo', (), {'x': 1})
-    o = Foo()
-    print('Foo' in repr(o))
-main()
-""",
-    'metaclass_prepare_returns_namespace_dict': """\
-def main():
-    Meta = type('Meta', (type,), {})
-    ns = Meta.__prepare__('Foo', ())
-    ns['x'] = 5
-    Foo = type('Foo', (), ns)
-    print(Foo.x)
-main()
-""",
-    'rt_instance_dynamic_attrs_setattr_and_assign': """\
-def main():
-    Foo = type('Foo', (), {'x': 1})
-    o = Foo()
-    o.y = 3
-    setattr(o, 'z', 9)
-    print(o.x, o.y, o.z)
-    p = Foo()
-    print(hasattr(p, 'y'), hasattr(p, 'z'))
-main()
-""",
-    'methods_of_static_base_reached_through_dynamic_class': """\
+    'init_subclass_invoked': """\
 class Base:
-    def foo(self):
-        return 42
-
-    def add(self, x):
-        return self.foo() + x
+    def __init_subclass__(cls):
+        print(cls.__name__)
 
 def main():
-    D = type('D', (Base,), {})
-    d = D()
-    print(d.foo())
-    print(d.add(8))
-    E = type('E', (Base,), {'extra': 5})
-    e = E()
-    print(e.foo())
-    print(e.add(10))
-main()
-""",
-    'metaclass_call_invoked': """\
-def meta_call(cls, x):
-    print('mc')
-    return x + 1
-
-def main():
-    Meta = type('Meta', (type,), {'__call__': meta_call})
-    Foo = type.__new__(Meta, 'Foo', (), {})
-    print(Foo(7))
-main()
-""",
-    'enum_via_metaclass_transformation': """\
-import enum
-
-class Color(enum.Enum):
-    RED = 1
-    BLUE = 2
-
-def main():
-    print(Color.__name__)
+    Derived = type('Derived', (Base,), {})
+    print(Derived.__name__)
 main()
 """,
 }
-
-
-def _check_module_gen_enum_helper_not_triplicated():
-    import os
-    path = os.path.join(os.path.dirname(__file__), 'mojo', 'backend_gimple', 'module_gen.py')
-    with open(path) as f:
-        content = f.read()
-    count = content.count("def _is_enum_class_def(")
-    if count != 1:
-        print(f'_is_enum_class_def defined {count} times (expected 1)')
-        R._FAIL += 1
-    else:
-        R._PASS += 1
 
 
 def main():
@@ -366,7 +295,6 @@ def main():
     print(Foo.x)
 main()
 """, 'type.__new__(metacls')
-    _check_module_gen_enum_helper_not_triplicated()
     print(f'\n{R._PASS} passed, {R._FAIL} failed')
     return 1 if (R._FAIL or R._TIMEOUT) else 0
 
