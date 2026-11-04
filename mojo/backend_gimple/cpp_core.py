@@ -57,6 +57,117 @@ from mojo.middle.module_shared import (
 # guess an arity from) an api entry that does not record its receiver.
 _MISSING = object()
 
+
+def _cpp_parse_std_function(ctype: str):
+    """Parse a std::function<R(P...)> type into (ret_type, param_types).
+    Returns (None, None) if not parseable."""
+    if not isinstance(ctype, str):
+        return None, None
+    m = re.match(r'std::function<\s*(.+?)\s*\(\s*(.*?)\s*\)\s*>', ctype)
+    if not m:
+        return None, None
+    ret = m.group(1).strip()
+    params_str = m.group(2).strip()
+    if not params_str or params_str == 'void':
+        params = []
+    else:
+        # Simple split by commas at top level (not perfect but fine for our types)
+        params = []
+        depth = 0
+        current = []
+        for ch in params_str:
+            if ch in '<([':
+                depth += 1
+                current.append(ch)
+            elif ch in '>)]':
+                depth -= 1
+                current.append(ch)
+            elif ch == ',' and depth == 0:
+                params.append(''.join(current).strip())
+                current = []
+            else:
+                current.append(ch)
+        if current:
+            params.append(''.join(current).strip())
+    return ret, params
+
+
+def _cpp_is_callable_ctype(ctype: str) -> bool:
+    if not isinstance(ctype, str):
+        return False
+    return ctype.startswith('std::function<')
+
+
+def _cpp_callable_return_ctype_from_declared(gen, name: str):
+    """Try to get callable return type from various sources."""
+    declared = getattr(gen, '_cpp_declared', None)
+    if declared and name in declared:
+        ctype = declared[name]
+        if _cpp_is_callable_ctype(ctype):
+            ret, _ = _cpp_parse_std_function(ctype)
+            if ret:
+                return ret
+    # Try other sources
+    # Check closure factory info if stored
+    for attr in ['_cpp_closure_factory_callable_info', '_cpp_closure_factory_sigs',
+                 '_closure_factory_return_types', '_cpp_closure_factory_ret_types',
+                 '_closure_factory_closure_ret']:
+        info = getattr(gen, attr, None)
+        if info and name in info:
+            v = info[name]
+            if isinstance(v, tuple) and len(v) >= 2:
+                return v[1]
+            elif isinstance(v, str) and _cpp_is_callable_ctype(v):
+                ret, _ = _cpp_parse_std_function(v)
+                if ret:
+                    return ret
+            elif isinstance(v, str):
+                return v
+    # Check _callable_ret_types style tables
+    for attr in ['_callable_ret_types', '_global_callable_ret_types', '_return_callable_ret_types']:
+        info = getattr(gen, attr, None)
+        if info and name in info:
+            v = info[name]
+            if isinstance(v, str):
+                if _cpp_is_callable_ctype(v):
+                    ret, _ = _cpp_parse_std_function(v)
+                    if ret:
+                        return ret
+                return v
+    # Also check func_return_types
+    frt = getattr(gen, 'func_return_types', None)
+    if frt and name in frt:
+        rt = frt[name]
+        if isinstance(rt, str) and _cpp_is_callable_ctype(rt):
+            ret, _ = _cpp_parse_std_function(rt)
+            if ret:
+                return ret
+        elif isinstance(rt, str):
+            return rt
+    return None
+
+
+def _cpp_callable_param_ctypes_from_declared(gen, name: str):
+    declared = getattr(gen, '_cpp_declared', None)
+    if declared and name in declared:
+        ctype = declared[name]
+        if _cpp_is_callable_ctype(ctype):
+            _, params = _cpp_parse_std_function(ctype)
+            if params is not None:
+                return params
+    for attr in ['_cpp_closure_factory_callable_info', '_cpp_closure_factory_sigs',
+                 '_cpp_closure_factory_param_types']:
+        info = getattr(gen, attr, None)
+        if info and name in info:
+            v = info[name]
+            if isinstance(v, tuple) and len(v) >= 1:
+                return v[0]
+            elif isinstance(v, str) and _cpp_is_callable_ctype(v):
+                _, params = _cpp_parse_std_function(v)
+                if params is not None:
+                    return params
+    return None
+
 def _cpp_as(ctype: str, expr: str) -> str:
     """Cast `expr` to a container-kind C type (`MojoList *`/`MojoDict *`/
     `MojoSet *`/`MojoBytes *`) inside the C++ fallback lowering path.
@@ -4780,12 +4891,13 @@ def _cpp_expr(gen, e) -> str:
             # here rather than move under the refusal below. Same
             # C/C++-keyword rename agreement as every other read of a
             # renamed name (see _cpp_kw_param_renames).
-            if (gen._cpp_declared is not None
-                    and gen._cpp_declared.get(fname) in (
+            if gen._cpp_declared is not None:
+                _dcall = gen._cpp_declared.get(fname)
+                if (_dcall in (
                         gimple_ctypes._CPP_CALLABLE_CTYPE,
-                        gimple_ctypes._CPP_CALLABLE_CTYPE_1ARG)):
-                cpp_fname = gen._cpp_kw_param_renames.get(fname, fname)
-                return f"{cpp_fname}({', '.join(args)})"
+                        gimple_ctypes._CPP_CALLABLE_CTYPE_1ARG)) or _cpp_is_callable_ctype(_dcall):
+                    cpp_fname = gen._cpp_kw_param_renames.get(fname, fname)
+                    return f"{cpp_fname}({', '.join(args)})"
             # A call through a DECLARED `*args`/`**kwargs`-family
             # callable-value local (`e(4, 5)` after
             # `e = lambda *a: a[0] + a[1]`): the local's declared
@@ -5040,21 +5152,110 @@ def _cpp_expr(gen, e) -> str:
             if (isinstance(e.func.func, gimple_ctypes.IdentExpr)
                     and e.func.func.name in _fac
                     and not getattr(e, 'kwargs', None)
-                    and len(e.args) <= 4):
+                    and len(e.args) <= 8):
+                factory_name = e.func.func.name
                 inner = gen._cpp_expr(e.func)
+                # Try to get typed callable signature
+                c_ret = _cpp_callable_return_ctype_from_declared(gen, factory_name)
+                c_params = _cpp_callable_param_ctypes_from_declared(gen, factory_name)
+                # Also look up in various other places
+                if c_ret is None:
+                    for attr in ['_cpp_closure_factory_ret_types', '_closure_factory_closure_ret',
+                                 '_cpp_factory_to_closure_ret', '_mojogen_closure_ret_types']:
+                        info = getattr(gen, attr, None)
+                        if info and factory_name in info:
+                            c_ret = info[factory_name]
+                            break
+                if c_params is None:
+                    for attr in ['_cpp_closure_factory_param_types', '_cpp_factory_to_closure_params']:
+                        info = getattr(gen, attr, None)
+                        if info and factory_name in info:
+                            c_params = info[factory_name]
+                            break
+                # Try to look up for any closure name associated
+                if c_ret is None or c_params is None:
+                    # search all attrs
+                    for attr in dir(gen):
+                        if 'closure' in attr.lower() or 'factory' in attr.lower():
+                            try:
+                                info = getattr(gen, attr)
+                                if isinstance(info, dict):
+                                    for k, v in info.items():
+                                        if isinstance(v, tuple):
+                                            if len(v) >= 2 and (c_ret is None):
+                                                try:
+                                                    c_ret = v[1]
+                                                except Exception:
+                                                    pass
+                                            if len(v) >= 1 and (c_params is None):
+                                                try:
+                                                    c_params = v[0]
+                                                except Exception:
+                                                    pass
+                                        elif isinstance(v, str) and _cpp_is_callable_ctype(v):
+                                            if c_ret is None or c_params is None:
+                                                ret_p, par_p = _cpp_parse_std_function(v)
+                                                if c_ret is None and ret_p:
+                                                    c_ret = ret_p
+                                                if c_params is None and par_p is not None:
+                                                    c_params = par_p
+                            except Exception:
+                                pass
                 arg_exprs = []
-                for a in e.args:
+                for i, a in enumerate(e.args):
                     actype = gimple_exprtypes._infer_simple_expr_ctype(
                         a, gen._cpp_declared or {},
                         getattr(gen, '_cpp_gen_self_fields', None), gen._async_api)
-                    if actype not in ('int64_t', 'int', '_Bool'):
-                        raise gimple_exprtypes._UnsupportedGeneratorShape(
-                            f"calling the closure returned by '{e.func.func.name}': "
-                            "argument must be an int or bool expression")
                     ae = gen._cpp_expr(a)
-                    arg_exprs.append(ae if actype != '_Bool' else f"(int64_t)({ae})")
-                return (f"mojo_fnptr_call_{len(arg_exprs)}"
-                        f"((void *)({inner}){''.join(', ' + x for x in arg_exprs)})")
+                    # Use expected param type if known
+                    expected_pt = None
+                    if c_params and i < len(c_params):
+                        expected_pt = c_params[i]
+                    if expected_pt:
+                        # Cast to expected param type
+                        if expected_pt == 'double':
+                            arg_exprs.append(f"(double)({ae})" if actype != 'double' else ae)
+                            continue
+                        elif expected_pt in ('char *',) or (isinstance(expected_pt, str) and expected_pt.endswith(' *')):
+                            arg_exprs.append(f"({expected_pt})({ae})")
+                            continue
+                        elif expected_pt in ('int64_t', 'int', '_Bool', 'bool'):
+                            if actype == '_Bool' or expected_pt in ('_Bool', 'bool'):
+                                arg_exprs.append(f"(int64_t)({ae})")
+                            elif actype == 'char *' and expected_pt in ('int64_t', 'int'):
+                                arg_exprs.append(f"(int64_t)(intptr_t)({ae})")
+                            else:
+                                arg_exprs.append(f"({expected_pt})({ae})" if expected_pt != 'int64_t' else (ae if actype in ('int64_t', 'int') else f"(int64_t)({ae})"))
+                            continue
+                        else:
+                            arg_exprs.append(f"({expected_pt})({ae})")
+                            continue
+                    # Fallback to old behavior
+                    if actype not in ('int64_t', 'int', '_Bool', 'char *', 'double'):
+                        raise gimple_exprtypes._UnsupportedGeneratorShape(
+                            f"calling the closure returned by '{factory_name}': "
+                            "argument must be an int or bool expression")
+                    if actype == '_Bool':
+                        arg_exprs.append(f"(int64_t)({ae})")
+                    elif actype == 'double':
+                        arg_exprs.append(f"(double)({ae})")
+                    elif actype == 'char *':
+                        arg_exprs.append(f"(int64_t)(intptr_t)({ae})")
+                    else:
+                        arg_exprs.append(ae)  # pass as-is for int/int64_t to match old behavior
+                # Choose dispatch based on return type
+                if c_ret == 'double':
+                    helper = f"mojo_fnptr_call_d{len(arg_exprs)}"
+                    call = f"{helper}((void *)({inner}){''.join(', ' + x for x in arg_exprs)})"
+                    return call
+                elif c_ret in ('char *',) or (isinstance(c_ret, str) and c_ret.endswith(' *') and c_ret not in ('MojoList *', 'MojoDict *', 'MojoSet *')):
+                    helper = f"mojo_fnptr_call_{len(arg_exprs)}"
+                    call = f"{helper}((void *)({inner}){''.join(', ' + x for x in arg_exprs)})"
+                    return f"({c_ret})({call})"
+                else:
+                    helper = f"mojo_fnptr_call_{len(arg_exprs)}"
+                    return (f"{helper}"
+                            f"((void *)({inner}){''.join(', ' + x for x in arg_exprs)})")
             # Call of a call result: f()(args)  →  (f())(args)
             inner = gen._cpp_expr(e.func)
             args = ', '.join(gen._cpp_expr(a) for a in e.args)
@@ -6219,30 +6420,73 @@ def _cpp_stmt(gen, s, declared: dict, indent: str) -> list[str]:
         # see _lower_fnptr_call). Uses the SAME mojo_fnptr_call_N()
         # runtime helper (declared `static inline` in fire_runtime.h,
         # which this .cpp translation unit already #includes) rather
-        # than inventing a second indirect-call convention — only 0-4
-        # scalar arguments are supported, matching that helper's own
-        # fixed arity family.
+        # than inventing a second indirect-call convention.
         if (isinstance(s.value, gimple_ctypes.CallExpr) and isinstance(s.value.func, gimple_ctypes.IdentExpr)
-                and s.value.func.name in declared
-                and declared[s.value.func.name] == 'int64_t'
-                and not getattr(s.value, 'kwargs', None)
-                and len(s.value.args) <= 4):
+                and not getattr(s.value, 'kwargs', None)):
             fname = s.value.func.name
-            self_fields = getattr(gen, '_cpp_gen_self_fields', None)
-            arg_exprs = []
-            for a in s.value.args:
-                actype = gimple_exprtypes._infer_simple_expr_ctype(a, declared, self_fields, gen._async_api)
-                if actype not in ('int64_t', 'double', '_Bool', 'char *'):
-                    raise gimple_exprtypes._UnsupportedAsyncShape(
-                        f"calling captured function '{fname}': argument "
-                        "must be a scalar int64_t/double/_Bool/char* expression")
-                ae = gen._cpp_expr(a)
-                if actype != 'int64_t':
-                    ae = f"(int64_t)({ae})"
-                arg_exprs.append(ae)
-            helper = f"mojo_fnptr_call_{len(arg_exprs)}"
-            call_args = ', '.join([f"(void *){fname}"] + arg_exprs)
-            return [f"{indent}{helper}({call_args});"]
+            dct = declared.get(fname) if declared else None
+            # If it's a typed std::function (not int64_t boxed), prefer direct call
+            if _cpp_is_callable_ctype(dct) and dct not in (gimple_ctypes._CPP_CALLABLE_CTYPE, gimple_ctypes._CPP_CALLABLE_CTYPE_1ARG):
+                cpp_fname = gen._cpp_kw_param_renames.get(fname, fname)
+                args_list = [gen._cpp_expr(a) for a in s.value.args]
+                return [f"{indent}{cpp_fname}({', '.join(args_list)});"]
+            is_callable = False
+            if dct == 'int64_t':
+                is_callable = True
+            elif dct in (gimple_ctypes._CPP_CALLABLE_CTYPE, gimple_ctypes._CPP_CALLABLE_CTYPE_1ARG):
+                is_callable = True
+            elif _cpp_is_callable_ctype(dct):  # other callable types
+                is_callable = True  # try to handle
+            if is_callable and len(s.value.args) <= 8:
+                self_fields = getattr(gen, '_cpp_gen_self_fields', None)
+                c_ret = _cpp_callable_return_ctype_from_declared(gen, fname)
+                c_params = _cpp_callable_param_ctypes_from_declared(gen, fname)
+                arg_exprs = []
+                for i, a in enumerate(s.value.args):
+                    actype = gimple_exprtypes._infer_simple_expr_ctype(a, declared, self_fields, gen._async_api)
+                    ae = gen._cpp_expr(a)
+                    expected_pt = None
+                    if c_params and i < len(c_params):
+                        expected_pt = c_params[i]
+                    if expected_pt:
+                        if expected_pt == 'double':
+                            arg_exprs.append(f"(double)({ae})")
+                            continue
+                        elif isinstance(expected_pt, str) and expected_pt.endswith(' *'):
+                            arg_exprs.append(f"({expected_pt})({ae})")
+                            continue
+                        elif expected_pt in ('int64_t', 'int', '_Bool', 'bool'):
+                            if actype == '_Bool' or expected_pt in ('_Bool', 'bool'):
+                                arg_exprs.append(f"(int64_t)({ae})")
+                            elif actype == 'char *':
+                                arg_exprs.append(f"(int64_t)(intptr_t)({ae})")
+                            elif expected_pt == 'int64_t':
+                                arg_exprs.append(ae if actype in ('int64_t', 'int') else f"(int64_t)({ae})")
+                            else:
+                                arg_exprs.append(f"({expected_pt})({ae})")
+                            continue
+                        else:
+                            arg_exprs.append(f"({expected_pt})({ae})")
+                            continue
+                    if actype not in ('int64_t', 'int', 'double', '_Bool', 'char *'):
+                        raise gimple_exprtypes._UnsupportedAsyncShape(
+                            f"calling captured function '{fname}': argument "
+                            "must be a scalar int64_t/double/_Bool/char* expression")
+                    if actype == 'double':
+                        arg_exprs.append(f"(double)({ae})")
+                    elif actype == '_Bool':
+                        arg_exprs.append(f"(int64_t)({ae})")
+                    elif actype == 'char *':
+                        arg_exprs.append(f"(int64_t)(intptr_t)({ae})")
+                    else:
+                        arg_exprs.append(ae)  # int/int64_t passed as-is
+                if c_ret == 'double':
+                    helper = f"mojo_fnptr_call_d{len(arg_exprs)}"
+                    call_args = ', '.join([f"(void *){fname}"] + arg_exprs)
+                    return [f"{indent}{helper}({call_args});"]
+                helper = f"mojo_fnptr_call_{len(arg_exprs)}"
+                call_args = ', '.join([f"(void *){fname}"] + arg_exprs)
+                return [f"{indent}{helper}({call_args});"]
         # A bare `abort(...)` call (real Mojo's `std.os.abort`,
         # test_tracing.mojo's own `except e: abort(String(e))` shape) --
         # `abort`'s ENTIRE observable contract is "never returns,
