@@ -5374,6 +5374,38 @@ def global_slot_kind(name: str):
     return slot.kind
 
 
+def global_slot_container_init(name: str):
+    """`(shape, init_node)` for a module global whose initializer IS a
+    container literal, or None.
+
+    `global_slot_kind`'s shape half: the kind says `list:K` and cannot say
+    WHICH brackets — a list, a tuple, a set and a dict all classify as
+    `LIST_PREFIX` blobs, and `print`'s container plan writes different
+    brackets (and a dict a different walk) for each. The slot's `site` is the
+    initializer statement, and for a literal it is the literal, so the AST
+    node is the one evidence that separates the four — the same evidence the
+    literal's own spelling is asked of when the container is spelled inline.
+
+    Only the LITERAL initializers answer, for the same reason
+    `global_slot_kind` answers only from a literal: a blob a function fills
+    (`global L; L = …`) states no shape at module level, and a None there is
+    the plan's refusal rather than a guess at the brackets.
+    """
+    slot = module_slot(name)
+    if slot is None or slot.init[0] != "blob":
+        return None
+    val = getattr(getattr(slot, "site", None), "value", None)
+    if isinstance(val, F.ListExpr):
+        return "list", val
+    if isinstance(val, F.TupleExpr):
+        return "tuple", val
+    if isinstance(val, F.SetExpr):
+        return "set", val
+    if isinstance(val, F.DictExpr):
+        return "dict", val
+    return None
+
+
 def module_entry_literal_facts() -> dict:
     """`{name: literal node}` a FUNCTION's entry may treat as already known.
 
@@ -5721,7 +5753,7 @@ def function_value_refusal(name: str, fn_name: str) -> str:
             f"a container, or returning one is refused rather than answered "
             f"with a number that means nothing. `formal/hostmods/` has no "
             f"module that hands back a callable for the same reason "
-            f"`. Call "
+            f"(`bugs/formal/FORMAL_functools_is_unbuildable_as_a_host_module.md`). Call "
             f"it directly, or move the work into a `def` and pass its results")
 
 

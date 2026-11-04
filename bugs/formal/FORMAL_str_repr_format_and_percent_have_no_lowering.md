@@ -68,7 +68,8 @@ the five questions above:
   the only thing missing is the CALL. For any other kind it does not: `repr` of
   a `Bool` is `True`/`False`, of a `None` is `None`, of a `float` is
 shortest-round-trip, of a
-  container is its elements' (`FORMAL_a_print_of_a_container_needs_a_text_loop.md`),
+  container is its elements' — one `printf` per element, in a loop with the
+  brackets written around it,
   of a type is `<class 'int'>`. **`print`'s own per-kind table is therefore the
   right first step for `str`/`repr`, and it is already written** — which is the
   useful thing this doc records.

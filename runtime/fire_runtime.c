@@ -1949,34 +1949,17 @@ int64_t mojo_box_word(int64_t v)
 /* See the header. The shared kind-'n' box is the only word that IS None when
  * it is still boxed; a bare word cannot say so (an int 0 has the same bits). */
 int mojo_word_is_none(int64_t v);
-/* The plain word of a box whose kind is only a spelling of a machine word: a
- * `None` box and a NULL `char *` slot are 0, a bool box is its 0/1. Every other
- * word is unchanged (a double keeps its box, a string its pointer), so the
- * result is what a bare `0` / `True` / `False` / `None` would have been where
- * a function parameter or a local reads it. A kind-mixed tuple hands these
- * back boxed (`mojo_list_get_boxed`), and a non-zero box is TRUTHY: the
- * compiled compiler read `is_generator` out of `(False, None)` that way and
- * treated every function it parsed as a generator. */
-int64_t mojo_unbox_plain(int64_t v)
+/* A user function's parameter has no None word: the shared kind-'n' box becomes
+ * the 0 a `None` literal argument passes, and every other word is unchanged. */
+int64_t mojo_unbox_none(int64_t v)
 {
-    if (!mojo_is_boxed(v)) return v;
-    MojoBox *bx = (MojoBox *)(intptr_t)v;
-    if (bx->kind == 'n') return 0;
-    if (bx->kind == 'b') return bx->bits ? 1 : 0;
-    if ((bx->kind == 'p' || bx->kind == 's') && bx->bits == 0) return 0;
-    return v;
+    return mojo_word_is_none(v) ? 0 : v;
 }
 
 int mojo_word_is_none(int64_t v)
 {
     if (!mojo_is_boxed(v)) return 0;
-    MojoBox *bx = (MojoBox *)(intptr_t)v;
-    if (bx->kind == 'n') return 1;
-    /* A NULL `char *` / bytes slot of a kind-mixed list is a None too: the
-     * `(name, annotation)` rows of a parameter list are 'p' slots whose
-     * unannotated entry is NULL, and boxing that gives a kind-'p' box with
-     * no text in it. */
-    return (bx->kind == 'p' || bx->kind == 's') && bx->bits == 0;
+    return ((MojoBox *)(intptr_t)v)->kind == 'n';
 }
 
 /* Sets the TypeError slots (tag, message, object) for `detail` WITHOUT

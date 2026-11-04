@@ -6579,8 +6579,8 @@ BOTH_ARCH_CASES = [
     # In this group rather than beside the truthiness rows it is in because the
     # kind table is ONE `formal/model.py` reader both emitters consult, so the
     # two machines cannot disagree about it, and the row is about that reader
-    # rather than about an arm64 instruction: the parameter-kind sweep note
-    # recorded the same reproducer refused as "len(s) is len() of a value
+    # rather than about an arm64 instruction: `bugs/formal/FORMAL_sweep_singles_second_half.md`
+    # §4 recorded the same reproducer refused as "len(s) is len() of a value
     # classified as 'int', and an integer has no length", and said the row was
     # open. It is not, and this is the row that says so on BOTH machines.
     ("len_of_an_unannotated_parameter_from_a_string_literal",
@@ -9149,23 +9149,15 @@ BOTH_ARCH_CASES = [
      "def main():\n"
      "    printf(\"[%s]\", f())\n"
      "    return 0\n", 0, "[n=7]"),
-    ("both_arch_an_fstring_with_constant_fields_folds",
-     "def main():\n"
-     "    var s = f\"n={5}\"\n"
-     "    printf(\"[%s]\", s)\n"
-     "    return 0\n", 0, "[n=5]"),
-    ("both_arch_an_fstring_with_multiple_constant_fields_folds",
-     "def main():\n"
-     "    var s = f\"{\'a\'}b{None}\"\n"
-     "    printf(\"[%s]\", s)\n"
-     "    return 0\n", 0, "[abNone]"),
     ("fstring_parameter_default_with_a_field_is_refused_like_a_statement_site",
      "def f(x=f\"n={5}\"):\n"
      "    return x\n"
      "\n"
      "def main():\n"
-     "    printf(\"[%s]\", f())\n"
-     "    return 0\n", 0, "[n=5]"),
+     "    print(f())\n"
+     "    return 0\n",
+     "refuse:is refused on this path: its value is its INTERPOLATED text, and "
+     "this path has no buffer to compose one in", None),
     # ── a double at the `Int` conversion, where the two machines once
     #    answered with two different programs ──────────────────────────────────
     #
@@ -15030,7 +15022,7 @@ WAVE6_TRUTHY_CASES = [
      "    return 0\n", 0, "0 1"),
 
     # `len()` OF THE SAME PARAMETER, which is the reader the identity test does
-    # not answer. The parameter-kind sweep note recorded a
+    # not answer. `bugs/formal/FORMAL_sweep_singles_second_half.md` §4 recorded a
     # four-line reproducer refused as "len(s) is len() of a value classified as
     # 'int', and an integer has no length", and said the row was still open; it
     # is not — the parameter's kind reaches `len()` through the same
@@ -23392,7 +23384,7 @@ INT_PARSE_REFUSALS = [
 REFUSAL_CASES = [
     # A FUNCTION NAME in a value position, which is the first thing any
     # first-class-function work hits and the reason `functools` is not a host
-    # module.
+    # module (`bugs/formal/FORMAL_functools_is_unbuildable_as_a_host_module.md`).
     # The refusal used to be the unresolved-NAME one, whose reason clause is
     # "the register allocator collected no home for it, so the emitter and the
     # allocation walk disagree about this function's locals" — false in every
