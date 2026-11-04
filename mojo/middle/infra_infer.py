@@ -1571,18 +1571,26 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
     # callable table (e.g. `def f(x, _g=csv.reader)`) is a callable-typed
     # parameter: bind its inferred type to the table's ctype instead of the
     # int64_t fallback. Mirrors `_param_ctype`'s default-as-evidence rule.
+    try:
+        from mojo.middle.types import _get_qualified_name
+    except Exception:
+        def _get_qualified_name(expr):
+            if isinstance(expr, IdentExpr):
+                return expr.name
+            if isinstance(expr, MemberExpr):
+                obj_name = _get_qualified_name(expr.obj)
+                if obj_name is None:
+                    return None
+                return obj_name + '.' + getattr(expr, 'member')
+            return None
     _fdefaults = getattr(func, 'param_defaults', None) or {}
     for _fp in func.params:
         _fpn = _as_str(_fp[0]).lstrip('*')
         if _fpn in inferred:
             continue
         _pd = _fdefaults.get(_fpn)
-        _qname = None
-        if isinstance(_pd, IdentExpr):
-            _qname = _pd.name
-        elif isinstance(_pd, MemberExpr) and isinstance(_pd.obj, IdentExpr):
-            _qname = f"{_pd.obj.name}.{_pd.member}"
-        if _qname in _FOREIGN_CALLABLES:
+        _qname = _get_qualified_name(_pd) if _pd is not None else None
+        if _qname is not None and _qname in _FOREIGN_CALLABLES:
             inferred[_fpn] = _FOREIGN_CALLABLES[_qname]
     # A container guess is only as good as the body's own use of the name. A
     # parameter the body REBINDS to a container of another kind (`live =`
