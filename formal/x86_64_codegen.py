@@ -1271,6 +1271,7 @@ class X86_64Codegen:
 
         # String literal data goes after the code: its label is what the
         # RIP-relative LEAs point at, so it has to exist before resolve().
+        exec_code_end = len(self.asm.sections["text"])
         for label, data in self._strings:
             self.asm.label(label)
             self.asm.emit(data)
@@ -1292,6 +1293,7 @@ class X86_64Codegen:
             "base_addr": base_addr,
             "entry_offset": self.asm.labels.get(first_func_name, 0),
             "func_offset": self.asm.labels.get(first_func_name, 0),
+            "exec_code_end": exec_code_end,
             "labels": {n: a for n, a in self.asm.labels.items()
                        if n not in self._internal_labels},
             # The float-repr helper's entry, published separately because it is

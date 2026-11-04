@@ -1352,11 +1352,7 @@ def _build_cfg(body, entry_facts: dict = None) -> tuple:
                 # a store in only one handler not a dominating store.
                 #
                 # …and `else` hangs off the BODY's exits, never off the
-                # header. The header reaches `else` only when the body raised,
-                # which is precisely the path on which `else` does NOT run, so
-                # an edge from there is not a conservative extra edge — it is a
-                # claim that control reaches a clause the language skips, and
-                # it refused a program CPython runs:
+                # header.
                 #
                 #     try:
                 #         out = build(...)

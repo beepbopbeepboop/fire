@@ -1246,6 +1246,7 @@ dylib_exports: list = None, globals_base: int = None,
             self.asm.labels[name] = self.asm.labels[label]
 
         # Append string literal data (labels resolved for ADRP/ADD loads)
+        exec_code_end = len(self.asm.sections["text"])
         for label, data in self._strings:
             self.asm.label(label)
             self.asm.emit(data)
@@ -1266,6 +1267,7 @@ dylib_exports: list = None, globals_base: int = None,
             "base_addr": base_addr,
             "entry_offset": self.asm.labels.get(first_func_name, 0),
             "func_offset": self.asm.labels.get(first_func_name, 0),
+            "exec_code_end": exec_code_end,
             "labels": {n: a for n, a in self.asm.labels.items()
                        if n not in self._internal_labels},
             "func_name": first_func_name,

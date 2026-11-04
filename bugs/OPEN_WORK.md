@@ -51,18 +51,17 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 |---|---|---|
 | `FORMAL_no_exceptions.md` | `bug-formal-formal-no-exceptions` | a `raise` is a TERMINATION on this path, not a value the caller can catch |
 
-### `formal/arm64_proof_gen` — 3 documents, 3 claimed
+### `formal/arm64_proof_gen` — 2 documents, 2 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_absval_proof_does_not_check.md` | `bug-formal-formal-absval-proof-does-not-1557` | `formal/examples/absval.mojo`'s arm64 proof no longer checks — a frame-slot peel's address does not match the goal |
 | `FORMAL_float_step_functions.md` | `bug-formal-formal-float-step-functions-6979` | The binary64 semantics is modelled; the FP STEP FUNCTIONS are not, and a float program cannot be proved yet |
-| `FORMAL_the_last_dylib_exports_exportEnd_includes_the_interned_strings.md` | `fix-merge-fix-merge-fix-merge-fix-merge-fix-merge--941702` | the last export of every dylib gets an unprovable `_semantics_total`, and the two `test_formal_dylib.py` hole-count rows are red for it |
-
-### `formal/build` — 2 documents, 2 claimed
+### `formal/build` — 3 documents, 3 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
+| `FORMAL_a_call_result_field_access_has_no_representation.md` | `fix-merge-fix-merge-fix-merge-fix-merge-fix-merge--937688` | every remaining host-import row is one capability, and it is not a module |
 | `FORMAL_a_variadic_parameter_read_has_no_abi.md` | `bug-formal-formal-a-variadic-parameter-r-1927` | the row was unowned, and the refusal in it is CORRECT |
 | `FORMAL_string_value_model.md` | `fix-merge-fix-merge-fix-merge-fix-merge-bug-formal-formal-st` | what a string IS on the formal path, and the two things that want to be one |
 
