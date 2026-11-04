@@ -46,6 +46,8 @@ BASELINE = {
     'bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md': 9,
     'bugs/formal/FORMAL_str_repr_format_and_percent_have_no_lowering.md': 1,
     'bugs/formal/FORMAL_sweep_work_map.md': 1,
+    'bugs/formal/FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md': 2,
+    'bugs/formal/FORMAL_the_host_import_wall_is_at_its_honest_floor.md': 1,
     'bugs/formal/FORMAL_the_last_dylib_exports_exportEnd_includes_the_interned_strings.md': 1,
     'bugs/formal/FORMAL_wide_recv_model_has_no_domain_for_a_struct.md': 1,
     'bugs/hard/COMPILE_FAIL_Lib_contextlib_request_for_member_module_in_something_not_a_structure_or_union.md': 1,

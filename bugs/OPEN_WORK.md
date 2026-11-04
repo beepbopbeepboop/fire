@@ -60,7 +60,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 |---|---|---|
 | `FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md` | `bug-formal-formal-a-three-branch-certifi` | the cost is the per-PATH value-flow facts, and everything the earlier rounds blamed for it checks in 23 seconds |
 | `FORMAL_absval_proof_does_not_check.md` | `bug-formal-formal-absval-proof-does-not-4544` | `formal/examples/absval.mojo`'s arm64 proof no longer checks — a frame-slot peel's address does not match the goal |
-| `FORMAL_admitted_contract_is_one_word_wide.md` | `bug-formal-formal-admitted-contract-is-o` | An admitted host contract is one WORD wide, because `MojoExpr.call` is |
 | `FORMAL_ast_bridge_cannot_state_a_user_call_of_two_or_more_arguments.md` | `bug-formal-formal-ast-bridge-carries-one-900` | A call of two or more arguments to a USER function has no stated value: `callFunc2` answers only arity-2 admitted contracts and the callee table is one-parameter only. The node carries every argument; the 2-arg gap regression of `3d32c0e66` is fixed |
 | `FORMAL_dylib_export_loops_and_frame_bounds.md` | `bug-formal-formal-dylib-export-loops-and-5784` | dylib exports: the loop-fuel obligation, and a `FrameBound` that is ALREADY depth-indexed |
 | `FORMAL_float_step_functions.md` | **unclaimed** | The binary64 semantics is modelled; the FP STEP FUNCTIONS are not, and a float program cannot be proved yet |
