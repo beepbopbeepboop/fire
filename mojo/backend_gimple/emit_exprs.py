@@ -58,6 +58,7 @@ from mojo.middle.types import _BOXED_CONTAINER_CTYPES
 from mojo.middle.calls_shared import _callable_value_symbol
 from mojo.middle.calls_shared import _RUNTIME_CALLABLE_VALUES as _RUNTIME_CALLABLE_VALUES_NAMES
 from mojo.middle.calls_shared import _py_box_expr
+from mojo.middle.calls_shared import _struct_operator_receiver
 from mojo.middle.calls_shared import FRAME_SETTABLE_IDS
 
 def _lower_strided(gen, node, store: bool):
@@ -672,7 +673,7 @@ def _lower_IdentExpr(gen, node: IdentExpr) -> tuple[str, str]:
     if name in gen._struct_bases and name not in gen.var_types and name not in gen._global_var_types:
         # A static class named as a VALUE is its type tag -- the word the run-time class table
         # files it under (`type('C', (A, B), ns)` / `bases = (A, B)` hand it to
-        # `mojo_type_add_base`; bugs/mid/CODEGEN_enum_runtime_class_creation.md stage 3). Not the
+        # `mojo_type_add_base`; bugs/hard/CODEGEN_enum_runtime_class_creation.md stage 3). Not the
         # zero placeholder below, which every class would share.
         t = gen._new_temp('int64_t')
         gen._emit(f'  {t} = (int64_t){gimple_exprtypes._struct_type_id(name)}LL;  /* class {name} as value */')
@@ -3449,6 +3450,21 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
         _mixed_word = (not _bool_merge
                        and ((ltype == 'char *' and _rq == 'int64_t')
                             or (ltype == 'int64_t' and _rq == 'char *')))
+        # A `_Bool` against a word of unknown kind (`gen.is_generator or
+        # getattr(fn, 'is_async', False)`): the result is a word that holds
+        # the bool OR the attribute, so it is one of unknown kind too. And a
+        # word of unknown kind against a container pointer
+        # (`<that> or fn.param_has_default`) is a word, not the pointer the
+        # join would call it: the short-circuit edge stored the bool 1 into the
+        # pointer slot, and the truth test then ran `mojo_dict_len` on the
+        # address 1 (the self-hosted compiler's own crash in
+        # `_gmi_specialize_literal_kind_clones`).
+        _bool_word = (not _bool_merge and not _mixed_word
+                      and ((ltype == '_Bool' and _rq == 'int64_t')
+                           or (ltype == 'int64_t' and _rq in ('MojoDict *', 'MojoList *', 'MojoSet *')
+                               and gen._is_dyn_word(node.left, lval))))
+        if _bool_word:
+            _mixed_word = True
         if _mixed_word:
             res_type = 'int64_t'
         # A BYTES operand against a str or a word (`os.path.split(b'a/b')[0] or
@@ -3537,6 +3553,11 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
         if fast is not None:
             return fast
 
+    _sop = _struct_operator_receiver(gen, node.op, node.left, False)
+    if _sop is not None:
+        return gen.lower_expr(gimple_ctypes.CallExpr(
+            gimple_ctypes.MemberExpr(node.left, _sop, node.line, node.col),
+            [node.right], [], node.line, node.col))
     lt, lv = gen.lower_expr(node.left)
     rt, rv = gen.lower_expr(node.right)
     if ginf._float_param_arith_applies(gen, node.op, node.left, lt, node.right, rt):
@@ -6334,7 +6355,11 @@ def _lower_in_dispatch(gen, xt: str, xv: str, rt: str, rv: str, negate: bool,
             gen._emit_call('int', ti, 'mojo_set_contains_bytes',
                            [('MojoSet *', rv), ('MojoBytes *', xv)])
             return 'int', ti
-        if xt == 'char *':
+        if x_is_none:
+            # A None needle owns a slot tag of its own (mojo_set_add_none): the
+            # int 0 it shares a word with is a different member.
+            gen._emit_call('int', ti, 'mojo_set_contains_none', [('MojoSet *', rv)])
+        elif xt == 'char *':
             gen._emit_call('int', ti, 'mojo_set_contains_str', [('MojoSet *', rv), ('char *', xv)])
         elif xt == 'int64_t' and _set_needle_is_word(gen, xv):
             # A word of unknown kind against a set that is not known to hold
@@ -7456,6 +7481,9 @@ def _lower_set_literal(gen, node: gimple_ctypes.SetExpr) -> tuple[str, str]:
         if elem != 'int64_t':
             gen._elem_types[t] = elem
     for el in node.elements:
+        if _is_none_literal(el):
+            gen._emit_call('void', '', 'mojo_set_add_none', [('MojoSet *', t)])
+            continue
         et, ev = gen.lower_expr(el)
         if et == 'MojoBytes *':
             # A bytes element needs its own set slot domain (tag 2), not the

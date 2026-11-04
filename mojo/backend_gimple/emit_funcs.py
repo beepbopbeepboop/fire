@@ -1931,7 +1931,7 @@ def _record_home_def_pts(gen, bare_name: str, pts: list) -> None:
     '_common_set_capture_groups_6aabcf'?` (that 37bd8e suffix happened to
     coincide with an unrelated `_global._parse_next`), which refused
     c_parser/parser/__init__.py outright — see
-    bugs/mid/COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__.md.
+    bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_parser_parser___init__.md.
 
     The spelling RULE is `module_qualifier` (one copy, see its docstring);
     this call is about picking the RIGHT module, not sanitizing a fifth way.
@@ -2744,6 +2744,16 @@ def _func_csym(gen, bare_name: str) -> str:
     return mangled
 
 
+def _annotated_elem_ctype(gen, ann: str) -> str:
+    """C type of a container element / variadic element annotation. The
+    compile-time string types are REAL `char *` strings here, though the
+    general resolver keeps them as opaque int64_t handles -- the same override
+    a plain `p: StringSlice` parameter gets (funcs_shared, param ctype)."""
+    if ann in ('StaticString', 'StringLiteral', 'StringRef', 'StringSlice'):
+        return 'char *'
+    return gen._resolve_type(ann)
+
+
 def _seed_annotated_param_elem_types(gen, node) -> None:
     """Seed what a param's own declared annotation says about its contents.
 
@@ -2761,9 +2771,18 @@ def _seed_annotated_param_elem_types(gen, node) -> None:
       dereferenced the struct value (`invalid type argument of unary '*'`).
     """
     for pname, ptype in node.params:
-        if ptype is None or pname.startswith('*') or not isinstance(ptype, str):
+        if ptype is None or not isinstance(ptype, str):
             continue
         bare = pname.lstrip('*')
+        if pname.startswith('*'):
+            # `*parts: T` arrives as ONE MojoList * whose elements are T, the
+            # same contract a `list[T]` parameter gets. (`**kw` is a dict and
+            # keeps its own handling.)
+            if not pname.startswith('**'):
+                _vc = _annotated_elem_ctype(gen, ptype.strip())
+                if _vc and _vc != 'int64_t':
+                    gen._elem_types.setdefault(bare, _vc)
+            continue
         _pa = ptype.strip()
         _pbase = _pa.split('[', 1)[0].strip()
         if _pbase in ('Tuple', 'tuple') and '[' in _pa:
@@ -2822,7 +2841,7 @@ def _seed_annotated_param_elem_types(gen, node) -> None:
                 gen._elem_types.setdefault(bare, 'MojoList *')
                 gen._nested_elem_types.setdefault(bare, _sc)
         else:
-            _ec = gen._resolve_type(_eann)
+            _ec = _annotated_elem_ctype(gen, _eann)
             if _ec and _ec != 'int64_t':
                 gen._elem_types.setdefault(bare, _ec)
 

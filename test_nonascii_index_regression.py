@@ -12,6 +12,7 @@ bug doc's 2026-10-29 Status); the interpreter column passes today. Not
 registered in tools/suite.py for that reason.
 """
 import os
+from exec_budget import RUN_TIMEOUT_S
 import subprocess
 import sys
 import tempfile
@@ -43,7 +44,7 @@ def main():
 
 def _run(cmd, path):
     r = subprocess.run(cmd + [path], capture_output=True, text=True,
-                       encoding='utf-8', errors='replace', timeout=120)
+                       encoding='utf-8', errors='replace', timeout=RUN_TIMEOUT_S)
     return r.stdout.strip()
 
 

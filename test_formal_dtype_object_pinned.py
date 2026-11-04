@@ -5,6 +5,7 @@ Verifies that a bare TYPE name in value position is accepted and produces
 the correct tag, rather than "a name with no register".
 """
 import os, sys, subprocess, tempfile
+from exec_budget import COMPILE_TIMEOUT_S
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIRE = os.path.join(HERE, "fire.py")
 
@@ -22,7 +23,7 @@ def test_type_as_value():
     try:
         build = subprocess.run(
             [sys.executable, FIRE, "build", "--formal", "--no-prove", path],
-            capture_output=True, timeout=60)
+            capture_output=True, timeout=COMPILE_TIMEOUT_S)
         # We mainly care that it builds and runs; the regression is the build pass.
         # If build fails, that's a regression of the fixed defect.
         assert build.returncode == 0, f"build failed: {build.stderr.decode()[-800:]}"

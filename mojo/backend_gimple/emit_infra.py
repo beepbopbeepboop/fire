@@ -2663,6 +2663,21 @@ def _emit_call(gen, ret_type: str, result_var: str, fname: str, arg_pairs: list[
             _ub = gen._new_temp('int64_t')
             gen._emit(f"  {_ub} = mojo_box_int ({aval});")
             aval = _ub
+        if (atype == 'int64_t' and aval in getattr(gen, '_boxed_vals', ())
+                and not _is_pointer_view_helper(fname)
+                and not _as_str(fname).startswith('mojo_')):
+            # A slot read out of a kind-mixed tuple/list arrives as a BOX, and a
+            # `None` slot is the shared kind-'n' box. A USER function's
+            # parameter has no None word: it is `0` (the same word a `None`
+            # literal argument passes), and the callee's `ptype is None` /
+            # `x or default` tests read it that way. Handing the box through
+            # made `fn(name, None)` look like an annotation to `_param_ctype`
+            # (the box is non-zero) and crashed the self-hosted compiler in
+            # `strdup`. Every other kind of box is passed as it was; runtime
+            # helpers (`mojo_*`) are box-aware and keep the box.
+            _un = gen._new_temp('int64_t')
+            gen._emit(f"  {_un} = mojo_unbox_none ({aval});")
+            aval = _un
         if ptype == atype or ptype == '...':
             # Skip coercion only if C types match exactly
             coerced_args.append(aval)

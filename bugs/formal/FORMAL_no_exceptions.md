@@ -1,12 +1,15 @@
 # FORMAL_no_exceptions: a `raise` is a TERMINATION on this path, not a value the caller can catch
 
-**Status 2026-10-12 (`work/formal281-docs`): the rule stands and items 1 and 2
-are untouched; the only stale figure is the suite size.** `test_formal_exceptions.py`
-is **315 checks, green** (both architectures) — the two Status entries below quote
-**285**, the count at `formal126-docs`; the file has grown by the `raise`/`finally`
-rows that landed since. Every claim about the RULE below (a `raise` evaluates its
-expression, runs the enclosing `finally`, and terminates; a handler arm with a
-body is refused by name; the three host-module conventions) is unchanged.
+**Status 2026-10-31 (`formal2059-docs`): item 3 of "The next step" remains
+DONE; steps 1 and 2 (discoverable convention; EH runtime) remain open design
+projects. `test_formal_exceptions.py` is 331 checks, 0 failures (both
+architectures), measured here with `python3 test_formal_exceptions.py` wrapped
+in `python3 tools/memslot.py --gb 8 --label t` (exit 0, 0.2 GB peak). The
+suite has grown from 285 (2026-10-07) through 315 (2026-10-12) to 331; the
+rule, the three refusal rows, and the `finally`/termination behaviour are all
+unchanged.** The arm64 flush divergence (`bugs/FORMAL_arm64_flush_...`) was
+already deleted by its fix; no new divergence. The document stays open for
+items 1 and 2.
 
 **Status 2026-10-07 (`formal126-docs`): item 3 of "The next step" is DONE, and
 the claim below that "there is no test in the tree that raises on this path" is

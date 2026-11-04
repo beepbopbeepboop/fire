@@ -937,3 +937,40 @@ def _py_box_expr(gen, node):
     if tn == 'UnaryOp':
         return _py_box_expr(gen, getattr(node, 'operand', None))
     return False, False
+
+
+# Binary operator -> the dunder a user struct defines for it.
+_STRUCT_OP_DUNDER = {
+    '+': '__add__', '-': '__sub__', '*': '__mul__', '/': '__truediv__',
+    '//': '__floordiv__', '%': '__mod__', '**': '__pow__', '&': '__and__',
+    '|': '__or__', '^': '__xor__', '<<': '__lshift__', '>>': '__rshift__',
+}
+
+
+def _struct_operator_receiver(gen, op: str, left_node, aug: bool) -> str | None:
+    """The user struct whose operator method `left_node OP right` calls, or None.
+
+    A struct pointer on the left whose OWN methods include the operator's dunder
+    (`__itruediv__` for `/=` when `aug`, else `__truediv__`) is that method call,
+    not integer arithmetic on the pointer (`result /= part` in
+    std/pathlib/path.mojo was `(int64_t)result / part`, a pointer divided by a
+    string). Skipped inside a DUNDER method of the same struct: the stdlib's
+    builtin scalar wrappers (`Int`, `Scalar`, ...) implement their dunders with
+    raw arithmetic on `self` -- the boxed-scalar convention the cast further down
+    serves -- and dispatching there would recurse into the method being defined."""
+    dunder = _STRUCT_OP_DUNDER.get(op)
+    if dunder is None:
+        return None
+    if aug:
+        dunder = '__i' + dunder[2:]
+    qt = _as_str(gen._quick_type(left_node))
+    if not qt.endswith(' *') or qt in ('char *', 'void *', 'MojoList *', 'MojoDict *', 'MojoSet *', 'MojoStr *'):
+        return None
+    sname = gimple_exprtypes._struct_name_of(qt)
+    if sname not in gen.struct_field_types:
+        return None
+    if dunder not in gen._struct_method_names.get(sname, ()):
+        return None
+    if _as_str(getattr(gen, 'current_func_name', '')).startswith(sname + '___'):
+        return None
+    return dunder

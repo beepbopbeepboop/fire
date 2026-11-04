@@ -14450,7 +14450,9 @@ def main():
                   test_instance_write_shadows_class_attr_regression,
                   test_nested_class_attr_rebind_after_construction_regression,
                   test_namedtuple_shaped_class_runs_regression,
-                  test_none_bound_local_is_none_not_zero_in_membership):
+                  test_none_bound_local_is_none_not_zero_in_membership,
+                  test_none_member_of_a_set_is_not_the_int_zero,
+                  test_or_chain_of_bool_word_and_dict_does_not_run_len_on_a_bool):
         try:
             _late()
         except AssertionError as e:
@@ -14743,6 +14745,62 @@ def main():
     print(n not in ["a", None], n not in ["a"])
     print(f(), g())
 
+main()
+""")
+
+
+def test_none_member_of_a_set_is_not_the_int_zero():
+    """A set's `None` member has its own slot tag (3): `0 in {None, 1}` is
+    False, `None in {0}` is False, `None in {None, 0}` is True, and a None
+    local used as a needle against `{0, 1}` is False."""
+    test_gimple_matches_cpython("gimple_set_none_member_distinct_from_zero", """\
+def main():
+    s = {None, 1}
+    print(0 in s, None in s)
+    t = {0, 1}
+    print(None in t)
+    n = None
+    print(n in t)
+    u = {None, 0}
+    print(None in u, 0 in u, len(u))
+    v = set()
+    v.add(None)
+    v.add(None)
+    print(len(v), None in v, 0 in v)
+
+main()
+""")
+
+
+def test_or_chain_of_bool_word_and_dict_does_not_run_len_on_a_bool():
+    """`a.flag or getattr(a, 'x', False) or a.some_dict`: the middle link is a
+    word of unknown kind, and the last link joined it with a dict pointer, so
+    the bool 1 was stored into a `MojoDict *` slot and the truth test ran
+    `mojo_dict_len` on address 1 (SIGSEGV; the self-hosted compiler's own
+    crash in `_gmi_specialize_literal_kind_clones`)."""
+    test_gimple_matches_cpython("gimple_or_chain_bool_getattr_dict", """\
+class F:
+    def __init__(self, g, d):
+        self.is_generator = g
+        self.param_has_default = d
+        self.is_async = False
+
+def check(fn):
+    if fn.is_generator or getattr(fn, 'is_async', False) or fn.param_has_default:
+        return "skip"
+    return "keep"
+
+def main():
+    print(check(F(False, {})))
+    print(check(F(True, {})))
+    print(check(F(False, {1: 2})))
+    fs = {}
+    fs["a"] = F(False, {})
+    for k, v in fs.items():
+        if v.is_generator or getattr(v, 'is_async', False) or v.param_has_default:
+            print("skip")
+        else:
+            print("keep")
 main()
 """)
 

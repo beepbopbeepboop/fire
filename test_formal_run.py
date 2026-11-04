@@ -16850,7 +16850,7 @@ INTERPOLATED_FOLD_CASES = [
 
 # ── the POINTER VALUE MODEL (wave 6, F2) ────────────────────────────────────
 #
-# `bugs/formal/FORMAL_pointer_value_model.md` is the long form; the model is
+# the pointer value model (landed in f69079be0) is the long form; the model is
 # `formal/model.py`'s `POINTER_TYPE_CTORS` / `POINTEE_WIDTHS` /
 # `pointee_of_type_text` / `pointer_pointee` / `dereference_lowering`, and these
 # are the cases that hold each decision in place.
@@ -16936,7 +16936,7 @@ POINTER_DEREF_CASES = [
     # `Pointer[SomeStruct]` in a field — is `deref_refuse_struct_pointee`.)
     #
     # arm64 only, and the reason is a PRE-EXISTING x86-64 bug recorded in
-    # bugs/formal/FORMAL_pointer_value_model.md: `h.p` on a one-field struct reads 0 on
+    # the pointer value model (landed in f69079be0): `h.p` on a one-field struct reads 0 on
     # x86-64 and the field's value on arm64, on the pre-change tree too.
     # `deref_field_1slot_x86_bug` is the case that pins THAT.
     ("deref_pointer_in_a_frame_field",
@@ -18040,7 +18040,7 @@ POINTER_DEREF_REFUSALS = [
 # read an immediate 0.  Reproduced on `git archive HEAD` with no diff applied.
 # It is a member-read site in x86_64_codegen.py and NOT a dereference site, so
 # it is out of the pointer value model's lane; it was recorded in
-# bugs/formal/FORMAL_pointer_value_model.md with the exact reproducers.
+# the pointer value model (landed in f69079be0) with the exact reproducers.
 #
 # Wave 6 (F1) closed it, and closed it the only way that does not pick a
 # winner: a field access through a name bound as a PARAMETER has no layout on

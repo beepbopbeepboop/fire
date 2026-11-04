@@ -617,13 +617,27 @@ def cmd_probe_free(a):
     probe_free_bans()
 
 
-def running_by_slot(tasks=None):
-    """Running workers per pool slot. A worker started before slots existed has no `pool`: it is counted against the
-    slot that owns its model, so a slot is never over-filled by workers it does not know about."""
+def live_names(tasks):
+    """Names of tasks whose worktree still has an opencode session being driven, or None when the session listing
+    cannot be read (callers then refuse to act). A recorded pid is NOT enough: a worker's CLI pid can be gone while its
+    session keeps running, and state_of then says exited-err for a worker that is still working (2026-11-03: 31 of 52
+    'running' tasks had dead pids, so refill counted 2 running and over-filled iceman to 43 of 20)."""
+    try:
+        return busy_task_names(live_session_dirs(), tasks)
+    except Exception as e:      # a listing we cannot read is "unknown", never "nothing is live"
+        print("%s live sessions unreadable (%s); refill and reap do nothing this pass" % (
+            time.strftime("%T"), str(e)[:160]), flush=True)
+        return None
+
+
+def running_by_slot(tasks=None, live=frozenset()):
+    """Running workers per pool slot: a task is running when its pid is alive OR it has a live opencode session (`live`,
+    from live_names). A worker started before slots existed has no `pool`: it is counted against the slot that owns its
+    model, so a slot is never over-filled by workers it does not know about."""
     by_model = {sl["model"]: sl["name"] for sl in load_pool()["slots"]}
     n = {}
-    for t in (tasks or load()).values():
-        if state_of(t) == "running":
+    for name, t in (tasks or load()).items():
+        if state_of(t) == "running" or name in live:
             slot = t.get("pool") or by_model.get(t.get("model"))
             n[slot] = n.get(slot, 0) + 1
     return n
@@ -738,7 +752,11 @@ def cmd_refill(a):
         print("%s refill: %d worker(s) died on arrival (limit/outage), bounced to the queue; no starts for %d min" % (
             time.strftime("%T"), len(bounced), BREAKER_MIN), flush=True)
     items_all = [json.load(open(os.path.join(qdir(), f))) for f in os.listdir(qdir()) if f.endswith(".json")]
-    if items_all and not any(slot_free(sl, running_by_slot()) for sl in load_pool()["slots"]):
+    tasks = load()
+    live_set = live_names(tasks)
+    if live_set is None:
+        return                            # the session listing is unreadable: we cannot count the slots, so start nothing
+    if items_all and not any(slot_free(sl, running_by_slot(tasks, live_set)) for sl in load_pool()["slots"]):
         print("%s refill: every slot with queued work is full or banned (%s), starting nothing" % (
             time.strftime("%T"), ", ".join("%s until %s" % (m, time.strftime("%F %R", time.localtime(u)))
                                            for m, u in dead_models().items()) or "no bans"), flush=True)
@@ -747,10 +765,9 @@ def cmd_refill(a):
         print("%s refill: breaker open for %.0f more min, starting nothing" % (
             time.strftime("%T"), (breaker_until() - time.time()) / 60), flush=True)
         return
-    tasks = load()
     if a.target is None:
         a.target = pool_total()
-    busy = running_by_slot(tasks)
+    busy = running_by_slot(tasks, live_set)
     live = sum(busy.values())
     items = sorted(items_all, key=lambda i: i["added"])
     started = 0
@@ -1239,8 +1256,12 @@ def cmd_reap(a):
     """Stop the leftover process groups of finished workers. Only groups the fleet recorded at spawn (fleet_ledger):
     never a process found by its working directory, command or port. A process started by anyone else, including a
     user's own opencode session in a worktree, is never signalled. A group whose leader has exited is logged and left."""
-    for name, t in load().items():
-        if state_of(t) == "running":
+    tasks = load()
+    live_set = live_names(tasks)
+    if live_set is None:
+        return                            # cannot tell a finished worker from a live session: signal nothing
+    for name, t in tasks.items():
+        if state_of(t) == "running" or name in live_set:   # a live session is never "finished", whatever its pid says
             continue
         for e in fleet_ledger.entries(ctl_dir(), name):
             members = fleet_ledger.group_members(e["pgid"])

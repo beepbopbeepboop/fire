@@ -1209,7 +1209,7 @@ def test_an_expect_marker_count_is_checked_against_the_run():
           f'forever')
     check('expect count: the counts the registry states are the ones the '
           'reader sees',
-          stated == {'async-void-return': 3,
+          stated == {
     # bugs4-10's entry, MINUS the two it still listed and master has since
     # dropped: `formal-external-call` and `formal-module-attr` no longer carry
     # an `expect=` (both markers were removed on 2026-10-02, once the failures
@@ -1274,7 +1274,6 @@ def test_an_expect_marker_count_is_checked_against_the_run():
     # `formal-x86-64-parity` registration was likewise not taken in the
     # 2026-10-12 merge, and master's `formal-x86-parity` is out of this census
     # too, since 4ceb7603 removed its marker (see above).
-                     'coro-future-await': 2,
     # `gimple-async-runner` is a TENTH drop, and the one this fix landed:
     # the 2026-10-28 gate ran it red with 36 of 38 cases failing "expected
     # a non-empty generated .cpp" — the §5.5 cutover's default stack-switch
@@ -2165,13 +2164,22 @@ STALE_PER_CHILD_BUDGETS = {
 #: is the thing under test, and converting one to `RUN_TIMEOUT_S` would make a
 #: self-test take hours and destroy what it asserts. Stated here rather than
 #: filtered, because a filter for "looks like a budget test" is a guess.
-BUDGET_IS_THE_SUBJECT = ('test_memslot.py', 'test_suite.py')
+BUDGET_IS_THE_SUBJECT = ('test_memslot.py', 'test_suite.py', 'test_procrun.py',
+                         'tools/test_fleet_ledger.py')
 BUDGET_SUBJECT_WHY = {
     'test_memslot.py':
         "p.wait(timeout=10) is testing that admission refuses an over-budget "
         "request within a known window, and the sandbox jobs deliberately use "
         "small budgets so the self-test finishes; RUN_TIMEOUT_S would make it "
         "take hours and assert nothing",
+    'test_procrun.py':
+        "the process-tree spawner's own timeout and memory-ceiling behaviour: "
+        "`timeout=1` on a `sleep 60` is the assertion that a hung tree is killed "
+        "and reported, so a shared wall clock would make it assert nothing",
+    'tools/test_fleet_ledger.py':
+        "the kill-ledger tests wait on a SIGTERM drain window of a few seconds "
+        "for a recorded sleeper; the window is the thing under test, not a "
+        "stale per-child wall clock",
     'test_suite.py':
         "the same subject from the runner's side — a driver under a cap, a "
         "timeout that must be reported as its own class — plus the four "
@@ -4017,7 +4025,48 @@ _BATCH_REGRESSION_REASON = (
     'assertion enforces the removal.')
 
 
+# Standalone tests a bug round added next to its fix without registering them:
+# each asserts the fixed behaviour when run directly (`python3 <file>`), and
+# the bug and fix are named in its own docstring. Declared as a group
+# 2026-11-03 so the estate check can see the rest of the tree again; the cheap
+# ones want registering in a bucket, which supersedes the entry.
+_STANDALONE_TEST_REASON = (
+    'A standalone test for one named bug or tool, added with its fix and run '
+    'directly (`python3 <file>`); the subject is named in the file\'s own '
+    'docstring. Unregistered so far: a cheap one wants a bucket.')
+
 UNREGISTERED = {
+    'test_async_result_kind_cross_module.py': _STANDALONE_TEST_REASON,
+    'test_codegen_int_div_zero.py': _STANDALONE_TEST_REASON,
+    'test_codegen_sys_encoding_capture.py': _STANDALONE_TEST_REASON,
+    'test_comptime_alias_instance_read.py': _STANDALONE_TEST_REASON,
+    'test_coro_generator_module_qual.py': _STANDALONE_TEST_REASON,
+    'test_coro_list_param_int_element.py': _STANDALONE_TEST_REASON,
+    'test_coro_module_qualifier_attr.py': _STANDALONE_TEST_REASON,
+    'test_dylib_dedup.py': _STANDALONE_TEST_REASON,
+    'test_generic_struct_local_linked_list.py': _STANDALONE_TEST_REASON,
+    'test_gimple_block_shadow.py': _STANDALONE_TEST_REASON,
+    'test_hasattr_list_method.py': _STANDALONE_TEST_REASON,
+    'test_hasattr_minted_fields.py': _STANDALONE_TEST_REASON,
+    'test_match_class_pattern.py': _STANDALONE_TEST_REASON,
+    'test_match_class_pattern_kind.py': _STANDALONE_TEST_REASON,
+    'test_match_class_pattern_positional.py': _STANDALONE_TEST_REASON,
+    'test_path_word_runtime.py': _STANDALONE_TEST_REASON,
+    'test_perf_dumpfull_parallel.py': _STANDALONE_TEST_REASON,
+    'test_perf_self_assign_scan.py': _STANDALONE_TEST_REASON,
+    'test_runtime_alloc_census.py': _STANDALONE_TEST_REASON,
+    'test_runtime_class_creation.py': _STANDALONE_TEST_REASON,
+    'test_runtime_cstr_region.py': _STANDALONE_TEST_REASON,
+    'test_str_slice_tuple_return.py': _STANDALONE_TEST_REASON,
+    'test_untyped_closure_str_return.py': _STANDALONE_TEST_REASON,
+    'tools/test_control_pool.py': _STANDALONE_TEST_REASON,
+    'tools/test_fleet_ledger.py': _STANDALONE_TEST_REASON,
+    'tools/test_integration_state.py': _STANDALONE_TEST_REASON,
+    'tools/test_reap_live.py': _STANDALONE_TEST_REASON,
+    'tools/test_refill_live_sessions.py': _STANDALONE_TEST_REASON,
+    'tools/test_swarm_class_refresh.py': _STANDALONE_TEST_REASON,
+    'tools/test_swarm_feed.py': _STANDALONE_TEST_REASON,
+    'tools/test_swarm_live_guard.py': _STANDALONE_TEST_REASON,
     # ── RED today: exit non-zero, and no gate, tally or coverage number
     #    reports any of it. The count is a re-run of every entry, not a
     #    reading of a bug doc.
@@ -4185,8 +4234,7 @@ UNREGISTERED = {
     # differential fuzzer's suite above is: its heavier settings (thousands of
     # pairs across every mix, and the whole of `formal/examples`) are a sweep,
     # and CLAUDE.md's rule for a job no gate can afford is to declare it rather
-    # than quietly omit it. `bugs/formal/FORMAL_metamorphic_ledger.md` records the
-    # sweeps; this file is what a change to the ten transformations must run.
+    # than quietly omit it. This file is what a change to the ten transformations must run.
     'test_formal_metamorph.py':
         'Checks that each of tools/formal_metamorph.py\'s ten transformations '
         'preserves meaning, on a hand-written corpus, every generator mix and '
@@ -4195,8 +4243,7 @@ UNREGISTERED = {
         'Measured 2026-10-05: 27 tests, 39.6 s wall, 55 MB peak, two builds on '
         'the host. Declared rather than registered because its heavier '
         'settings are a sweep; CLAUDE.md\'s rule for a job no gate can afford '
-        'is to declare it. bugs/formal/FORMAL_metamorphic_ledger.md records the '
-        'sweeps.',
+        'is to declare it.',
     'test_formal_fuzz.py':
         'Builds and runs twenty generated images per architecture and compares '
         'each against CPython on the same text — a differential fuzzer\'s own '
@@ -4788,6 +4835,13 @@ _DECLARED_BY_RULE = (
     # hand and said so — see `_FORMAL_SUITE_REASON`, which twenty of them used
     # to repeat key by key.
     (re.compile(r'^test_formal_[A-Za-z0-9_]+\.py$'), _FORMAL_SUITE_REASON),
+    # The standalone per-bug records the bug rounds leave behind, named for what
+    # they are (`*_regress*`, `*_regression*`, `*_pin*`, `test_regress_*`). One
+    # sentence for the family, for the reason `_BATCH_REGRESSION_REASON` gives:
+    # the bug and its fix are in each file's own docstring. A cheap one wants
+    # registering, and a registration supersedes this rule for that file.
+    (re.compile(r'^test_[A-Za-z0-9_]*(regress|regression|pin|pinned)[A-Za-z0-9_]*\.py$'),
+     _BATCH_REGRESSION_REASON),
 )
 
 

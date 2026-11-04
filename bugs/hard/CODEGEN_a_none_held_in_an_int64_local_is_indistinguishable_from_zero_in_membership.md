@@ -152,3 +152,29 @@ regression tests for step 1-4. The stdlib-compile gate is the integrator's.
 touches every set and dict iteration/repr site, so it is a feature-sized round,
 not a quick fix. The flow-sensitive local case (`if` joins) is unchanged and
 still listed above.
+
+### 2026-11-03: the SET side landed (plan steps 1, 3, 4 for sets)
+
+- `runtime/fire_runtime.c`: a `None` member of a set has slot tag 3 (str-keyed
+  domain, empty key): `mojo_set_add_none` / `mojo_set_contains_none` /
+  `mojo_set_discard_none`. The rehash replay keeps tag 3, `mojo_set_print`
+  prints `None`, and `copy`/`union`/`update`/`intersection`/`difference`/`==`
+  carry it. Declared in `fire_runtime.h`.
+- Codegen: a `None` element of a set literal and `s.add(None)` call
+  `mojo_set_add_none`; the set arm of `_lower_in_dispatch` calls
+  `mojo_set_contains_none` for a None needle (literal, or a local that
+  `none_only_locals` proves is None).
+- Test: `test_none_member_of_a_set_is_not_the_int_zero` (CPython-identical):
+  `0 in {None, 1}`, `None in {0, 1}`, `n in {0, 1}`, `None in {None, 0}`,
+  `s.add(None)` twice. Before: every `0`/`None` pair answered True.
+- Known gaps in the set arm: iterating a set with a None member yields the int
+  0 (`mojo_set_iter_val_int`), and `mojo_set_sorted` skips it (CPython raises
+  TypeError there anyway).
+
+**Still open:** the DICT side (plan step 2 and the dict half of 3/4): a None
+KEY needs its own `keykind` (3 is the tuple domain, so use 4), a family of
+`mojo_dict_set_nonekey_<kind>` setters selected in
+`emit_infra.emit_dict_int_value_store` the way the `bytes_` prefix is, a
+`mojo_dict_contains_none`, and a key-repr arm in the dict repr (keys are
+printed as quoted strings today, so a None key would print `''`). The
+flow-sensitive local case (an `if` join) is also unchanged.

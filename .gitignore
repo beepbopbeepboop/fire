@@ -97,3 +97,6 @@ abt*_*.pyi
 
 # a compiled binary dropped at the repo root by `fire.py build <path>`
 /mine
+
+# Per-worker brief written by tools/control.py into each worktree; never tracked.
+TASK.md

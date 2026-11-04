@@ -879,6 +879,7 @@ int64_t     mojo_box_word(int64_t v);
  * Returns 1 only for that box; any other word answers 0, which is what the
  * constant comparison answered before this existed. */
 int         mojo_word_is_none(int64_t v);
+int64_t     mojo_unbox_none(int64_t v);
 /* Arithmetic on a possibly-boxed operand (`x + 1` on a None received by
  * `x = yield`): a None box raises a catchable TypeError, as CPython does,
  * instead of being unwrapped to its word (0) and computed with. `op` is the
@@ -1854,6 +1855,9 @@ void     mojo_set_add_str(MojoSet *s, char *v);
 int      mojo_set_contains_int(MojoSet *s, int64_t v);
 int      mojo_set_contains_str(MojoSet *s, char *v);
 void     mojo_set_add_bytes(MojoSet *s, MojoBytes *b);
+void     mojo_set_add_none(MojoSet *s);
+int      mojo_set_contains_none(MojoSet *s);
+void     mojo_set_discard_none(MojoSet *s);
 int      mojo_set_contains_bytes(MojoSet *s, MojoBytes *b);
 MojoBytes *mojo_set_val_bytes(MojoSet *s, int64_t idx);
 int64_t  mojo_set_len(MojoSet *s);

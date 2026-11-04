@@ -434,7 +434,9 @@ and the reasoning for `expect=` rather than `disabled=` on each.
 | test | marker | subject | cost it charges every gate |
 |---|---|---|---|
 | `ab-native` | `expect=`, count checked (1) | python vs native codegen over the A/B corpus | 0.1 GB / ~10 s measured, `program` (reserves 55 GB); `native` |
-| `coro-future-await` | `expect=`, count checked (17) | `await` on a Future in the coroutine runtime | `tiny`; `coroutine` |
+| `x86-containers` | `expect=`, count checked (1) | the x86_64 formal backend over the container examples (the `with-statement` case) | `tiny`; `proofs`, `x86` |
+| `formal-x86-endtoend` | `expect=`, count checked (1) | x86_64 end-to-end proofs (`wide_recv`: a `lean` memory ceiling) | `module`; `proofs`, `x86` |
+| `formal-x86-machine-model` | `expect=` | the x86_64 machine model against the examples (3 NO-RUN rows, no WRONG ones) | `tiny`; `proofs`, `x86` |
 
 `formal-toplevel` and `formal-module-attr` were in this table and are not any
 more: both markers were dropped on this tree, so `--list` reports neither and a

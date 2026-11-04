@@ -74,7 +74,7 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from exec_budget import RUN_TIMEOUT_S
+from exec_budget import COMPILE_TIMEOUT_S, RUN_TIMEOUT_S
 
 PROOF_GEN =os.path.join(HERE, "formal", "arm64_proof_gen.py")
 
@@ -9324,9 +9324,10 @@ def _generate_dir(tmp, src_path, name, out):
 class TestTheOneOpaqueCallIsAnnounced(unittest.TestCase):
     """One out-of-image call must SAY that it replaced the theorem it owed.
 
-    `bugs/formal/FORMAL_one_opaque_flush_silently_replaces_the_universal_theorem.md`'s
-    item 2, and it is the half of that gap which is silent. Two out-of-image
-    calls are REFUSED by name (`_cfg_decomposition_refusal`), because the walk
+    item 2 of the bug "one opaque flush silently replaces the universal
+    theorem" (its doc was deleted in a9daacdd1, once item 2 announced the
+    substitution), and it is the half of that gap which was silent. Two
+    out-of-image calls are REFUSED by name (`_cfg_decomposition_refusal`), because the walk
     halts at one address and a program with two of them has a path reaching the
     second without passing the first. ONE does not raise: the walk is given
     `exit_at=<that pc>`, and it discharges the terminal predicate by halting
@@ -9690,6 +9691,49 @@ class TestTheSignedOrderLemmaIsInTheLibrary(unittest.TestCase):
         self.assertTrue(ok, detail)
 
 
+class TestTheModelFuzzLedgerRowIsFromTheTally(unittest.TestCase):
+    """`ledger_row` writes a sweep-ledger row from a run's tally, so the ledger's
+    numbers are copied from a run's output by the
+    tool rather than retyped by hand (which is how §2.1 drifted stale).
+
+    Pure: no arm64 and no Lean, so this runs on any host.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "formal_model_fuzz_ledger",
+            os.path.join(HERE, "tools", "formal_model_fuzz.py"))
+        fm = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fm)
+        cls.fm = fm
+
+    def test_row_names_every_verdict_in_ledger_order(self):
+        fm = self.fm
+        tally = {"AGREE": 58, "WRONG": 1, "NOSTEP": 1}
+        row = fm.ledger_row(tally, 60, "ledgerA", ["alu", "mem"])
+        self.assertEqual(
+            row,
+            "| alu, mem | ledgerA | 60 | AGREE 58  WRONG 1  NOSTEP 1  "
+            "FAULT 0  ENC-MISMATCH 0  ENC-FAIL 0  NO-REPORT 0  NO-EVAL 0 |")
+
+    def test_absent_verdicts_are_zero_not_missing(self):
+        fm = self.fm
+        row = fm.ledger_row({}, 0, "s", ["shifts"])
+        self.assertIn("AGREE 0  WRONG 0  NOSTEP 0", row)
+        self.assertEqual(len(fm.LEDGER_VERDICTS), 8)
+
+    def test_the_verdicts_are_the_ones_the_report_tallies(self):
+        # The row must not drop a class the run can produce: every key the
+        # sweep's pass/fail exit code reads must appear in the row.
+        fm = self.fm
+        row = fm.ledger_row({}, 0, "s", ["shifts"])
+        for k in ("AGREE", "WRONG", "NOSTEP", "FAULT", "ENC-MISMATCH",
+                  "ENC-FAIL", "NO-REPORT", "NO-EVAL"):
+            self.assertIn(k, row)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 
@@ -9750,7 +9794,7 @@ class TestDecWhileSignedModelRegression(unittest.TestCase):
         with open(path, "w") as f:
             f.write(m.group(0) + "\n")
         r = subprocess.run(["lean", path], capture_output=True, text=True,
-                           timeout=600, cwd=self.tmp)
+                           timeout=COMPILE_TIMEOUT_S, cwd=self.tmp)
         self.assertEqual(r.returncode, 0,
                          "emitted _go block does not typecheck:\n"
                          + r.stdout + r.stderr)

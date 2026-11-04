@@ -1,6 +1,5 @@
 from . import *
 
-# # ── `__init__`'s ASSIGNMENTS: a second source for a field's type ─────────
 # ── `__init__`'s ASSIGNMENTS: a second source for a field's type ─────────
 #
 # `struct_field_declared_type` above reads a field's type out of the class
@@ -4646,7 +4645,3 @@ def struct_frame_block_layout(struct_def, decls: dict, depth=None):
     """
     return (struct_block_children(struct_def, decls, 0, depth),
             struct_frame_block_bytes(struct_def, decls, depth))
-
-
-
-

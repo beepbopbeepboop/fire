@@ -60,6 +60,7 @@ from mojo.middle.types import _is_empty_container_literal
 from mojo.middle.calls_shared import _is_pointer_ctype
 from mojo.middle.calls_shared import FRAME_SETTABLE_IDS
 from mojo.middle.calls_shared import _py_box_expr
+from mojo.middle.calls_shared import _struct_operator_receiver
 # `ZipLongestFillRefusal` and nothing else from there: the class has to be the
 # SAME object `emit_loops.py` raises and this module's `zip_longest` arm
 # re-raises, and `emit_loops` cannot be imported here (it goes through
@@ -2615,6 +2616,14 @@ def _gen_stmt_AugAssignStmt(gen, node):
     # BinaryOp path instead reaches _lower_binary's own `if node.op == '@':
     # return self._lower_matmul(node)` case, the same dunder-dispatch
     # `a.__matmul__(b)` lowering plain `a @ b` already uses.
+    # `s OP= v` on a struct that defines `__iOP__` is that in-place method,
+    # which mutates the receiver and rebinds nothing.
+    _inplace = _struct_operator_receiver(gen, base_op, node.target, True)
+    if _inplace is not None:
+        gen.lower_expr(gimple_ctypes.CallExpr(
+            gimple_ctypes.MemberExpr(node.target, _inplace, node.line, node.col),
+            [node.value], [], node.line, node.col))
+        return
     if base_op in ('//', '**', '+', '-', '*', '/', '%', '|', '&', '^', '<<', '>>', '@'):
         fake  = gimple_ctypes.BinaryOp(op=base_op, left=node.target, right=node.value)
         vtype, v = gen.lower_expr(fake)

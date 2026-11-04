@@ -100,6 +100,6 @@ either. So this one library change unblocks both.
 
 Do not widen the contract to two words and drop the second argument. That is the
 fabrication this project treats as its worst outcome
-(`bugs/FORMAL_known_limits.md`: "a **false PASS**, the worst outcome this project
+(`bugs/formal/FORMAL_known_limits.md`: "a **false PASS**, the worst outcome this project
 has"): the proof would typecheck, the census would count the hole, and the
 `trust:` line would name a contract that does not describe what the model did.

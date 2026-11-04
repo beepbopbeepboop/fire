@@ -1,6 +1,5 @@
 from . import *
 
-# # ── Constructs that are no-ops in the value flow ──────────────────────────
 # ── Constructs that are no-ops in the value flow ──────────────────────────
 #
 # These name source constructs whose only meaning is to the compiler, so a
@@ -292,8 +291,7 @@ def narrow_float_ctor_refusal(callee_name: str) -> str:
     one float kind `FLOAT_TYPE_CTORS` carries, `FLOAT_TYPE_NAMES` is its two
     spellings, and `FLOAT_KIND` is it.  Everything here is narrower than it or
     wider than one word, which is the whole of the boundary this document owns —
-    `FORMAL_float_binary64_only`: binary64 is the only float kind, the
-    narrow formats refused by name.
+    `bugs/formal/FORMAL_float_binary64_only.md`.
     """
     if callee_name == "UInt128":
         what = ("128 bits, and a formal value is one 64-bit word — so it is "
@@ -509,7 +507,7 @@ def type_constructor_kind(callee_name: str):
 #   * `Optional` — a value OR the empty one, and the empty one is the integer
 #     0, so an empty `Optional` is indistinguishable from `Some(0)`. This is
 #     the one-word value model showing through, and it is
-#     `bugs/formal/FORMAL_pointer_value_model.md`'s niche question, not a table entry.
+#     the pointer value model (landed in f69079be0)'s niche question, not a table entry.
 #   * `StringRef` / `InlineArray` / `Array` / `StaticTuple` — each is a blob in
 #     the *source* language with an element width or a pointer this path does
 #     not carry, so "empty" for them is a statement about a layout nothing here
@@ -4422,7 +4420,3 @@ def struct_width_cost(struct_def) -> str:
     return (f"{n} fields is not an ABI special case at all: it needs a calling "
             f"convention that passes aggregates, a register allocator that can "
             f"spill one, and a proof model whose values are no longer one word")
-
-
-
-

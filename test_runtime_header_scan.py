@@ -708,11 +708,11 @@ def test_non_exports_stay_excluded():
 # number — because "some comment in this file contains 668" is not a check, and
 # a loose one would pass on a stale figure sitting next to a correct one.
 CENSUS_QUOTES = (
-    ('formal/model.py',
+    ('formal/model/builtins.py',
      r'the shape answers the same question for all (\d+) entry\s*\n'
      r'# points the headers declare',
      ('total',)),
-    ('formal/model.py',
+    ('formal/model/builtins.py',
      r'a rule that refuses all (\d+) entry points for that reason',
      ('total',)),
     ('bugs/formal/FORMAL_known_limits.md',

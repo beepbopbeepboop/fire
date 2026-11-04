@@ -4162,6 +4162,13 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             _gm_kwarg_values = list(_gm_kwarg_dict.values())
             _gm_dflts = gen._func_param_defaults.get(f"{_gm_api['base']}_start", [])
             while len(all_args) < _gm_nfixed:
+                # The callee's own `**kwargs` slot (receiver included in the
+                # index): pack every keyword into a MojoDict, an empty one
+                # when there are none -- see ggc._emit_generator_start_call.
+                if _gm_api.get('kwargs_slot') is not None and len(all_args) == _gm_api['kwargs_slot']:
+                    all_args.append(('MojoDict *', ggc._pack_kwargs_dict(gen, _gm_kwarg_dict)))
+                    _gm_kwarg_values = []
+                    continue
                 if _gm_kwarg_values:
                     all_args.append(_gm_kwarg_values.pop(0))
                     continue
@@ -5289,6 +5296,12 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                            'unsafe_take_pointee')
             and not node.args and not (getattr(node, 'kwargs', None) or [])
             and f'{_recv_struct}_{method}' not in gen.func_return_types
+            # A struct reflected from a module dylib has its methods under the
+            # MODULE-QUALIFIED symbol (`rs_cnt_Counter_value`), which the bare
+            # key above never names, so its own `value()` was read as the
+            # pointer-wrapper accessor and answered the receiver's address.
+            and gen._struct_method_csym(_recv_struct, method, '') not in gen.func_return_types
+            and method not in gen._struct_method_names.get(_recv_struct, ())
             and _gmm_sms_key(_recv_struct, method) not in getattr(gen, '_struct_method_signatures', {})):
         t = gen._new_temp(ot)
         gen._emit(f'  {t} = {ov};')
@@ -6195,6 +6208,9 @@ def _lower_set_method(gen, ov: str, method: str, args: list) -> tuple:
         gen._emit_label(bb_after)
         return 'int', gen._new_val('int', '0')
     if method == 'add' and args:
+        if (isinstance(args[0], gimple_ctypes.NoneLiteral)
+                or (isinstance(args[0], gimple_ctypes.IdentExpr) and args[0].name == 'None')):
+            return gen._void_call('mojo_set_add_none', [('MojoSet *', ov)])
         at, av = gen.lower_expr(args[0])
         # Record the set's element type on the RECEIVER the same way a
         # `{...}` literal does (`_lower_set_literal`) — `s = set()` then
