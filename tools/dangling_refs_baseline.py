@@ -43,7 +43,6 @@ BASELINE = {
     'bugs/formal/FORMAL_len_of_a_readdir_name_is_refused_and_needs_a_bytes_kind.md': 1,
     'bugs/formal/FORMAL_listdir_no_run_time_sequence.md': 1,
     'bugs/formal/FORMAL_model_package_split_left_duplicate_copies.md': 1,
-    'bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md': 9,
     'bugs/formal/FORMAL_str_repr_format_and_percent_have_no_lowering.md': 1,
     'bugs/formal/FORMAL_sweep_work_map.md': 1,
     'bugs/formal/FORMAL_the_last_dylib_exports_exportEnd_includes_the_interned_strings.md': 1,
@@ -161,14 +160,13 @@ BASELINE = {
 # reason the header above gives for its prefixed entry.
 BARE_BASELINE = {
     'CRASH.md': 1,
-    'bugs/OPEN_WORK.md': 40,
+    'bugs/OPEN_WORK.md': 21,
     'bugs/formal/FORMAL_a_call_result_field_access_has_no_representation.md': 2,
     'bugs/formal/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md': 1,
     'bugs/formal/FORMAL_a_variadic_parameter_read_has_no_abi.md': 1,
     'bugs/formal/FORMAL_absval_proof_does_not_check.md': 1,
     'bugs/formal/FORMAL_arm64_instruction_coverage.md': 1,
     'bugs/formal/FORMAL_known_limits.md': 7,
-    'bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md': 3,
     'bugs/formal/FORMAL_string_value_model.md': 2,
     'bugs/formal/FORMAL_sweep_work_map.md': 5,
     'bugs/formal/FORMAL_the_last_dylib_exports_exportEnd_includes_the_interned_strings.md': 1,
