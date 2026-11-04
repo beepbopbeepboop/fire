@@ -3579,9 +3579,6 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
                 _oname = _as_str(node.left.obj.name)
                 if gen._rtobj_kinds.get(('l', _oname)) or gen._rtobj_kinds.get(('v', _oname)):
                     _try_rt = True
-        # For bitwise operators, be more aggressive for flag combination
-        if node.op in ('|', '&', '^'):
-            _try_rt = True
         if _try_rt:
             try:
                 return gen.lower_expr(gimple_ctypes.CallExpr(

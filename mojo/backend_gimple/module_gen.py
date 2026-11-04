@@ -3736,6 +3736,8 @@ def _gmi_decorator_pass(self, stmts: list, outer_defs: dict, at_module: bool) ->
             if isinstance(_rb_s, FunctionDef):
                 continue
             for _rb_d in _gmi_scope_defs([_rb_s]):
+                if not isinstance(_rb_d, FunctionDef):
+                    continue
                 for _rb_dec in _rb_d.decorators or []:
                     if _gmi_is_rebindable(self, _rb_dec, _rb_scope, _rb_d.name):
                         raise RuntimeError(
@@ -3752,7 +3754,9 @@ def _gmi_is_rebindable(gen, dec, scope: dict, def_name: str) -> bool:
         return False
     _ANNOTATION_DECORATORS = frozenset({
         'staticmethod', 'classmethod', 'export', 'doc_hidden', 'gpu', 'kernel',
-        'property', 'abstractmethod',
+        'property', 'abstractmethod', 'lldb_formatter_wrapping_type',
+        'stable', 'deprecated', 'value', 'register_passable',
+        'nonmaterializable', 'parameter', 'always_inline',
     })
     if _head in _ANNOTATION_DECORATORS:
         return False

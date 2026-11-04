@@ -3721,20 +3721,8 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     # `o.m(args)` on an instance of a class made at run time (or `Foo.m(args)` on the class):
     # the method is in the class table (found through the bases), never a container/struct
     # method of an untyped word.
-    _is_rtobj_call = False
-    if isinstance(func.obj, gimple_ctypes.IdentExpr):
-        if gen._rtobj_kinds.get(('l', _as_str(func.obj.name))) or gen._rtobj_kinds.get(('v', _as_str(func.obj.name))):
-            _is_rtobj_call = True
-    elif isinstance(func.obj, gimple_ctypes.MemberExpr):
-        if isinstance(func.obj.obj, gimple_ctypes.IdentExpr):
-            _oname = _as_str(func.obj.obj.name)
-            if gen._rtobj_kinds.get(('l', _oname)) or gen._rtobj_kinds.get(('v', _oname)):
-                _is_rtobj_call = True
-    if func.member in ('__or__', '__and__', '__xor__', '__ior__', '__iand__', '__ixor__',
-                       '__ror__', '__rand__', '__rxor__', '__add__', '__sub__', '__mul__',
-                       '__truediv__', '__floordiv__', '__eq__', '__ne__'):
-        _is_rtobj_call = True
-    if (_is_rtobj_call
+    if (isinstance(func.obj, gimple_ctypes.IdentExpr)
+            and gen._rtobj_kinds.get(('l', _as_str(func.obj.name)))
             and not getattr(node, 'kwargs', None)
             and not any(isinstance(a, gimple_ctypes.UnaryOp) and _as_str(a.op) in ('*', '**')
                         for a in node.args)):
