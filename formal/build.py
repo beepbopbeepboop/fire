@@ -2242,7 +2242,7 @@ def compile_formal(source_path: str, output: str = None,
         # substitution rather than a symbol; a module-level name the folder
         # could not fold has no value to substitute and is still refused by
         # name, which is what keeps `sys.argv` and `os.sep` different answers
-        # (`FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted; fixed by cross-module accessors for writable globals)`).
+        # (`(module state/model limits; cross-module accessors for writable globals) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted; fixed by cross-module accessors for writable globals)`).
         symbols = _publish_imported_constants(functions, symbols,
                                               import_manifests)
         # The link line as the CALL will resolve it: this program's own
@@ -13321,7 +13321,7 @@ def _module_constants(symbols: dict) -> dict:
     that compiled the module is the authority on it and the importer
     materializes the same literal. What is NOT here is every module-level name
     the folder could not fold — those are real globals, and a dylib has nowhere
-    to put one (`FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted; fixed by cross-module accessors for writable globals)`).
+    to put one (`(module state/model limits; cross-module accessors for writable globals) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted; fixed by cross-module accessors for writable globals)`).
 
     **A name with a `__DATA` SLOT is not here either, and that exclusion is the
     load-bearing half of what this function is.** The single-writer premise in
@@ -13673,7 +13673,7 @@ def _apply_imported_constant_sites(node, tables: dict, bound: set) -> int:
     rewritten in, and each is a node the walk HANDLES rather than descends:
 
       * `mod.K = 5` writes another module's state, which has nowhere to live and
-        is refused by name (`FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted; fixed by cross-module accessors for writable globals)`);
+        is refused by name (`(module state/model limits; cross-module accessors for writable globals) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted; fixed by cross-module accessors for writable globals)`);
         substituting it would trade a refused store for a dropped one. A `for`
         target is a store too and is excluded for the same reason;
       * `mod.f(...)` must not become `7(...)`, a call to a number, if some
@@ -13944,7 +13944,7 @@ def _rewrite_store_target(target, sites: dict, stores: set):
 
     **The base of the subscript is left alone**, deliberately: `out` is a read
     too, but a module-level constant is not something this path can subscript
-    into — a container global has no storage (`FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)`)
+    into — a container global has no storage (`(module state/model limits; cross-module accessors for writable globals) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted)`)
     — so rewriting the base would trade one honest refusal for a wrong answer.
     The INDEX is always an ordinary value expression, and that is the whole of
     what this walks.
@@ -15215,7 +15215,7 @@ def _materialize_entry_dunder_name(functions: list) -> int:
     imported module has no answer this path can give. Materializing it there
     too would answer a question the source does not ask with a value that is
     right only for this file — the same class of lie as a `PLATFORM` constant
-    in `FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted; fixed by cross-module accessors for writable globals)`.
+    in `(module state/model limits; cross-module accessors for writable globals) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted; fixed by cross-module accessors for writable globals)`.
 
     Uses the module-constant substitution's OWN rewriter rather than a second
     one, because the two have the same subtlety: a store target and a call's
@@ -18509,7 +18509,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
     # emitters report in `info["mod_init_addrs"]`. So the body is compiled for
     # both and run by whichever mechanism that image has. A store the body
     # computes and drops is not lost by being dropped: a module-level name has no
-    # storage here (`FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted; fixed by cross-module accessors for writable globals)`) and every read of
+    # storage here (`(module state/model limits; cross-module accessors for writable globals) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted; fixed by cross-module accessors for writable globals)`) and every read of
     # one is refused by name, so nothing in the image could have observed the
     # value — the same premise `module_body`'s two exemptions rest on.
     _refuse_unlowerable_module_body(body)
@@ -21243,7 +21243,7 @@ def write_dylib_manifest(dylib_path: str, install_name: str,
     address. A module-level name the build could NOT fold is not here — it is
     a real global with nowhere to live, and it stays refused, which is what
     keeps `sys.argv` and `os.sep` different answers
-    (`FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted; fixed by cross-module accessors for writable globals)`).
+    (`(module state/model limits; cross-module accessors for writable globals) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted; fixed by cross-module accessors for writable globals)`).
 
     `variables` is the module-level names this module's own functions WRITE
     through `global`, and it is the answer to the question the paragraph above
@@ -21362,7 +21362,7 @@ def load_dylib_manifests(dylib_paths: list) -> list:
         the only spelling a package has for a re-exported name — resolve.
       * `constants` — the module-level names the build folded to literals.
         A dylib cannot export a variable (there is nowhere for one to live,
-        `FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted; fixed by cross-module accessors for writable globals)`), but a LITERAL needs no
+        `(module state/model limits; cross-module accessors for writable globals) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted; fixed by cross-module accessors for writable globals)`), but a LITERAL needs no
         storage: the importer materializes the same value in its own image,
         which is what a module-level constant substitution already does inside
         one unit. That is the whole of what makes `mod.CONST` and `sys.argv`
@@ -22347,7 +22347,7 @@ def no_public_api_reason(source_paths: list) -> str:
                 f"would answer it are a value model for a container-valued "
                 f"module constant — inline it at the use site, which needs "
                 f"storage this path does not have "
-                f"(`FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted; fixed by cross-module accessors for writable globals)`) — and a BACKEND "
+                f"(`(module state/model limits; cross-module accessors for writable globals) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted; fixed by cross-module accessors for writable globals)`) — and a BACKEND "
                 f"rule that a module nothing binds needs no library at all, an "
                 f"importer reading the constant directly instead of linking a "
                 f"library for it (`bugs/formal/FORMAL_a_module_that_exports_nothing_"
@@ -23254,7 +23254,7 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     #
     # (a) the module-level names its own build folded to literals, which a
     # consumer materializes in its own image rather than reading an address for
-    # (there is nowhere for one to live — `FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted; fixed by cross-module accessors for writable globals)`
+    # (there is nowhere for one to live — `(module state/model limits; cross-module accessors for writable globals) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted) (deleted; fixed by cross-module accessors for writable globals)`
     # — and a literal does not need one). Collected from the module's own symbol
     # table, so the values are the ones THIS build folded rather than a second
     # reading of the source.
