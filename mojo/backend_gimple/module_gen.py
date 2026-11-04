@@ -3779,7 +3779,7 @@ def _gmi_decorator_pass(self, stmts: list, outer_defs: dict, at_module: bool) ->
             if isinstance(_rb_s, FunctionDef) or isinstance(_rb_s, StructDef):
                 continue
             for _rb_d in _gmi_scope_defs([_rb_s]):
-                if isinstance(_rb_d, FunctionDef):
+                if isinstance(_rb_d, (FunctionDef, StructDef)):
                     for _rb_dec in _rb_d.decorators or []:
                         if _gmi_is_rebindable(self, _rb_dec, _rb_scope, _rb_d.name):
                             raise RuntimeError(
