@@ -8467,9 +8467,11 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
         try:
             import mojo.middle.types as _mtypes_mod
             _foreign = getattr(_mtypes_mod, '_FOREIGN_CALLABLES', {}) or {}
+            _foreign_iter = getattr(_mtypes_mod, '_FOREIGN_CALLABLE_ITER_ELEM', {}) or {}
             _cpp_callable_ctype = getattr(_mtypes_mod, '_CPP_CALLABLE_CTYPE', None)
         except Exception:
             _foreign = {}
+            _foreign_iter = {}
             _cpp_callable_ctype = None
         _is_callable_local = False
         if (_cl_callee in getattr(gen, '_cpp_param_names', ()) or
@@ -8479,8 +8481,57 @@ def _cpp_for_stmt(gen, s: 'ForStmt', declared: dict, indent: str) -> list[str]:
             _dct = gen._cpp_declared.get(_cl_callee)
             if _dct in ('int64_t', 'char *') or (_cpp_callable_ctype and _dct == _cpp_callable_ctype):
                 _is_callable_local = True
-        # Check if callee itself is in foreign table or if it's associated with one
-        if _cl_callee in _foreign or _is_callable_local:
+        # Try to trace callable local to foreign table entry that gives iterator element ctype
+        _resolved_foreign = None
+        if _cl_callee in _foreign_iter:
+            _resolved_foreign = _cl_callee
+        elif _is_callable_local:
+            # Look up param default
+            try:
+                _pdefaults = getattr(gen, '_func_param_defaults', None) or {}
+                _pd = _pdefaults.get(_cl_callee)
+                if _pd is not None:
+                    # Try to extract qualified name
+                    try:
+                        from mojo.middle.types import _get_qualified_name
+                        _q = _get_qualified_name(_pd)
+                        if _q and _q in _foreign_iter:
+                            _resolved_foreign = _q
+                    except Exception:
+                        pass
+                # Also look in current function's AST if available
+                if _resolved_foreign is None and getattr(gen, '_func_node', None) is not None:
+                    try:
+                        _fn = gen._func_node
+                        _fdefaults = getattr(_fn, 'param_defaults', None) or {}
+                        _pd2 = _fdefaults.get(_cl_callee)
+                        if _pd2 is not None:
+                            try:
+                                from mojo.middle.types import _get_qualified_name
+                                _q = _get_qualified_name(_pd2)
+                                if _q and _q in _foreign_iter:
+                                    _resolved_foreign = _q
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        # If we have a resolved foreign table entry that gives iterator element ctype,
+        # we need to handle it (step 4)
+        if _resolved_foreign is not None and _resolved_foreign in _foreign_iter:
+            _wi = gen._cpp_fresh_name("_mg_witer")
+            declared[_wi] = 'MojoList *'
+            if not hasattr(gen, '_cpp_word_iter_locals'):
+                gen._cpp_word_iter_locals = set()
+            gen._cpp_word_iter_locals.add(_wi)
+            _call_txt = gen._cpp_expr(s.iterable)
+            _pre = [f"{indent}MojoList *{_wi} = mojo_iter_word((int64_t)(intptr_t)({_call_txt}));"]
+            _inner_for = gimple_ctypes.ForStmt(
+                target=s.target, iterable=gimple_ctypes.IdentExpr(name=_wi),
+                body=s.body, else_body=s.else_body)
+            return _pre + gen._cpp_for_stmt(_inner_for, declared, indent)
+        elif _cl_callee in _foreign or _is_callable_local:
             # If it's in foreign table and has entry giving iterator element ctype,
             # we need to handle it; otherwise refuse with precise naming
             if _cl_callee in _foreign:
