@@ -8322,7 +8322,7 @@ BOTH_ARCH_CASES = [
     # calling the next, with no call back into anything already on the stack.
     # Unbounded depth needs a cycle, so a chain like this walked straight past
     # the floor — and the corpus is already inside it, which is what
-    # `bugs/formal/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md` spent its life
+    # guarding an acyclic chain across the stack floor spent its life
     # measuring: `python3 tools/formal_call_depth_census.py` puts the deepest
     # single image in this repository at 89 frames against the 60 an arm64
     # budget affords (`formal/arm64_codegen.py`, and 78 for
@@ -8367,7 +8367,7 @@ BOTH_ARCH_CASES = [
     #
     # The two rules above are a predicate over a body. This one is a fact about
     # the IMAGE, and it is what closes the residual
-    # `bugs/formal/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md` measured: the
+    # guarding an acyclic chain across the stack floor measured: the
     # guard's floor is written by the first guarded function to RUN, so a guard
     # on only some prologues puts the floor wherever the program happens to reach
     # one first, and a chain of unguarded functions below that point is under a
@@ -26344,7 +26344,7 @@ _STACK_FLOOR_PROBES = [
     #
     # The cycle rule alone left a DAG of distinct functions free to walk past
     # the floor, and the measured cost of that is in
-    # `bugs/formal/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md`: the deepest
+    # guarding an acyclic chain across the stack floor: the deepest
     # single image in this corpus is 89 frames against the 60 an arm64 budget
     # affords (76 until 2026-10-05). So a body that already contains a
     # conditional branch is guarded whether or not anything calls back into it.
@@ -26783,7 +26783,7 @@ def check_comptime_nofold_is_rerun(verbose=False):
 
 
 # residual the guard cannot reach, and the number that decided
-# `bugs/formal/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md`'s widening.
+# guarding an acyclic chain across the stack floor's widening.
 #
 # These are GRAPHS, not modules, because the question is about the function and
 # not about the parse: a module the corpus already holds would make a test that
@@ -26795,7 +26795,7 @@ def check_comptime_nofold_is_rerun(verbose=False):
 # corpus. It is written down because the rule's own argument is that the corpus
 # is already inside the hole, and a reader who wants to know by how much needs
 # the number; it was 76 and 12 until 2026-10-05, when the census was re-run for
-# `bugs/formal/FORMAL_stack_floor_does_not_guard_an_acyclic_chain.md` and both halves
+# guarding an acyclic chain across the stack floor and both halves
 # of it had moved.
 _STACK_FLOOR_DEPTH_PROBES = [
     # A straight chain of n: the answer is n, and the point of the row is that
