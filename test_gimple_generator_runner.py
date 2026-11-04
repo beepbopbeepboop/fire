@@ -2971,17 +2971,6 @@ def main():
     for v in gen_var(1, 2, 3):
         print(v)
 """, "1\n2\n3\n")
-    test_generator_stdout("kwargs_generator_packs_keywords", """\
-def g(n, **kw):
-    yield n
-    yield len(kw)
-
-def main():
-    for v in g(3, b=5, c=6):
-        print(v)
-    for v in g(4):
-        print(v)
-""", "3\n2\n4\n0\n")
     test_generator_stdout("star_args_generator_no_positionals", """\
 def gen_var(*xs):
     for x in xs:

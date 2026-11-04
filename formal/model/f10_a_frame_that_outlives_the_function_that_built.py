@@ -1,5 +1,6 @@
 from . import *
 
+# # ── A frame that OUTLIVES the function that built it ─────────────────────
 # ── A frame that OUTLIVES the function that built it ─────────────────────
 #
 # `struct_constructor_sites` above is the whole of a frame's placement today,
@@ -3095,3 +3096,7 @@ def module_binding_literal(folded, value):
                            line=getattr(value, "line", 0) or 0,
                            col=getattr(value, "col", 0) or 0)
     return folded_literal_node(folded, value)
+
+
+
+

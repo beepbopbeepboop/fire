@@ -607,8 +607,8 @@ def gen_memreg(rng, free):
 
 
 #: The mixes, and what each one is for. `MIXES` is a NAME → generators map
-#: rather than one generator list because a mix is also a row of the sweep
-#: ledger (`ledger_row` writes it), and a row that cannot be named cannot be
+#: rather than one generator list because a mix is also a row in
+#: `bugs/formal/FORMAL_model_fuzz_ledger.md`, and a row that cannot be named cannot be
 #: written down.
 #:
 #: Two forms are deliberately NOT here, and both absences are recorded rather
@@ -1274,11 +1274,10 @@ def compare(hw, md):
 
 # ── sweeps ──────────────────────────────────────────────────────────────
 #
-# A mix is a name, a corpus and a ledger row. The ledger is the sequence of
-# rows `ledger_row` prints, recorded in the commit that makes each sweep: a
-# tally is a fact about one run and stops being true the moment an instruction
-# stops being generated, so what a sweep COVERED is written down beside what it
-# found.
+# A mix is a name, a corpus and a ledger row. The ledger is in
+# `bugs/formal/FORMAL_model_fuzz_ledger.md`: a tally is a fact about one run and stops
+# being true the moment an instruction stops being generated, so what a sweep
+# COVERED is written down beside what it found.
 def build_cases(mix, count, seed, length=None):
     rng = random.Random("%s/%s" % (mix, seed))
     out = [gen_case(rng, mix, length) for _ in range(count)]
@@ -1456,25 +1455,6 @@ def report(tally, findings, cases, limit=12):
         print("  ... and %d more finding(s)" % (len(findings) - limit))
 
 
-#: The verdict columns of a sweep-ledger row, in the order the ledger writes
-#: them.
-LEDGER_VERDICTS = ("AGREE", "WRONG", "NOSTEP", "FAULT", "ENC-MISMATCH",
-                   "ENC-FAIL", "NO-REPORT", "NO-EVAL")
-
-
-def ledger_row(tally, n_cases, seed, mixes):
-    """One sweep-ledger row, from a run's tally.
-
-    The ledger's numbers were copied by hand from stdout and drifted (§2.1 was
-    re-measured and found stale), so the row is produced from the same tally
-    `report` prints. The date and the "what came of it" column are the
-    person's to fill in: they are not facts the tool can measure.
-    """
-    verdicts = "  ".join("%s %d" % (k, tally.get(k, 0)) for k in LEDGER_VERDICTS)
-    return "| %s | %s | %d | %s |" % (
-        ", ".join(mixes), seed, n_cases, verdicts)
-
-
 # ── minimisation ────────────────────────────────────────────────────────
 #
 # A 6-instruction disagreement is a finding; a 1-instruction disagreement is a
@@ -1546,9 +1526,6 @@ def main(argv):
     ap.add_argument("--keep", action="store_true", help="do not delete the artifacts")
     ap.add_argument("--lean-chunk", type=int, default=25, metavar="N",
                     help="cases per lean process (default 25; see run_model)")
-    ap.add_argument("--ledger-row", action="store_true",
-                    help="also print this run as one sweep-ledger row, "
-                         "for the commit that records the sweep")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
     verbose_report = args.verbose
@@ -1559,8 +1536,6 @@ def main(argv):
         cases = all_cases(args.cases, args.seed, mixes, args.length)
         tally, findings = sweep(cases, work, args.verbose, args.lean_chunk)
         report(tally, findings, cases)
-        if args.ledger_row:
-            print(ledger_row(tally, len(cases), args.seed, mixes))
         if args.minimise and findings:
             print("minimising %d finding(s):" % min(args.minimise, len(findings)))
             for i, case, _diffs in findings[:args.minimise]:

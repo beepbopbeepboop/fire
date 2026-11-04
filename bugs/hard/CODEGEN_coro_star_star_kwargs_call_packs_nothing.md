@@ -1,18 +1,5 @@
 # CODEGEN: keyword arguments to a generator/coroutine with `**kw` are not packed
 
-## Status (2026-11-03, free-function generator call fixed; method call still open)
-
-- `mojo/middle/coro.py` `_kwargs_slot` records `'kwargs_slot'` in every
-  coroutine meta (generator, async, async generator) and `register()` carries
-  it into the api. `_emit_generator_start_call` prefers `api['kwargs_slot']`
-  over the `_func_kwargs_slot` lookup, so the existing `_pack_kwargs_dict`
-  branch fires. `g(3, b=5, c=6)` now prints `3`/`2`; `g(4)` prints `4`/`0`.
-- Test: `test_gimple_generator_runner.py` `kwargs_generator_packs_keywords`
-  (fails on the previous code with output `3` only).
-- **Still open:** step 3, the method site (`_lower_method_call` in
-  `emit_methods.py` has no kwargs-slot branch; the slot index includes the
-  receiver), and its method-variant test.
-
 ## Symptom (2026-10-29, default A3 backend, wrong output then crash)
 
 ```

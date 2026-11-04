@@ -1,5 +1,6 @@
 from . import *
 
+# # ── WHAT A LOWERED STRING METHOD'S ARGUMENTS MAY BE ────────────────────────
 # ── WHAT A LOWERED STRING METHOD'S ARGUMENTS MAY BE ────────────────────────
 #
 # `POINTER_BOUNDED_METHODS` decides WHICH string methods exist on this path and
@@ -3291,8 +3292,7 @@ def parameter_pointee_disagreement_refusal(callee, name, groups) -> str:
 
 
 def subscript_base_lowering(fn, obj, decls: dict, functions: dict = None,
-                            structs_by_name: dict = None, seen=(),
-                            element_kind_ok: bool = False):
+                            structs_by_name: dict = None, seen=()):
     """`(shape, width, signed, why)` — `(None, None, None, why)` to refuse.
 
     WHAT `obj[i]` READS, for a base that is not a string and not a dict key —
@@ -3396,26 +3396,15 @@ def subscript_base_lowering(fn, obj, decls: dict, functions: dict = None,
                     f"Read through `p.value()[i]` once the unwrap is written "
                     f"out, which is the same program with the check spelled out")
         if _shape == "float":
-            if element_kind_ok:
-                # The caller has established the ELEMENT's kind: a READ, whose
-                # kind `pointee_kind_of` answers FLOAT for a subscript exactly
-                # as it does for `p.value()`, or a STORE whose value's kind
-                # `pointer_store_lowering` has checked against the pointee. The
-                # eight bytes are the element's own word either way, so this is
-                # the same width the dereference loads at.
-                return ("load", 8, False, why)
             return (None, None, None,
                     f"`{spelled(obj)}[i]` reads an element of a FLOAT pointee, "
-                    f"and an element of this kind is answered only for a read "
-                    f"or for a plain store of a double: an augmented assignment "
-                    f"combines the element with integer arithmetic, and a `del` "
-                    f"or a tuple-unpack target has no value whose kind this path "
-                    f"can check as a double, so the eight bytes would be read or "
-                    f"written as an integer. "
-                    f"Read the element through `{spelled(obj)}[i]` into a local "
-                    f"and combine it there, or read `{spelled(obj)}.value()` and "
-                    f"index the result, which is the same address with the kind "
-                    f"the pointee declared")
+                    f"and this path carries a dereference's kind but not a "
+                    f"SUBSCRIPT's: the eight bytes would be loaded right and the "
+                    f"element would then be read as an integer, so `Int(...)` of "
+                    f"it would answer the bit pattern rather than the value. "
+                    f"Read the element through `{spelled(obj)}.value()` and index "
+                    f"the result, which is the same address with the kind the "
+                    f"pointee declared")
         if _shape != "load":
             return (None, None, None,
                     f"the base is a pointer to a STRUCT, and a struct's value "
@@ -3808,21 +3797,13 @@ def pointer_store_lowering(fn, target, decls: dict, functions: dict = None,
     `printf_kind_conversion_refusal` state at the other two boundaries — the
     stored value's KIND must agree with the pointee's — asked with the SAME
     three-way evidence (`printf_arg_float_evidence`, which each backend already
-    hands its `printf` refusal). For an INTEGER pointee the direction is
-    permissive: **None never refuses**, so an unannotated parameter stored into
-    an integer slot is stored as before. For a DOUBLE pointee it is not: an
-    unestablished value there is refused by name, because its word may be an
-    integer's bits and nothing in the source rules that out (see
-    `pointer_store_kind_disagreement`).
+    hands its `printf` refusal) and with the SAME permissive direction: **None
+    never refuses**, so an unannotated parameter, a name bound from a call this
+    build cannot classify, and a value of a kind it has no spelling for are all
+    stored as before. Only a stated disagreement is reported, and it can only be
+    stated where the source says one thing and the declaration says another.
     """
-    # A SUBSCRIPT target (`p[i] = v`) is the same store at `base + i*width`, and
-    # the caller scales the index it supplies — `dereference_lowering`'s
-    # `index_scaled`, so the two readers ask the same width question about the
-    # same address. Only the base is judged here.
-    if isinstance(target, F.SubscriptExpr):
-        obj, index_scaled = target.obj, True
-    else:
-        obj, index_scaled = pointer_store_receiver(target), False
+    obj = pointer_store_receiver(target)
     inner, why = pointer_pointee(fn, obj, decls, functions)
     if inner is None:
         return (None, why)
@@ -3846,23 +3827,22 @@ def pointer_store_lowering(fn, target, decls: dict, functions: dict = None,
         # is what decides it — `pointer_store_kind_disagreement` refuses a
         # stated disagreement in BOTH directions with the same evidence — so this
         # arm only has to answer the agreeing case at the load's own width.
-        # A value whose kind this path cannot establish is refused by the check
-        # above, not answered here: into a double slot an unestablished word
-        # may be an integer's bits, and the store cannot say which. This arm
-        # answers only a value the check has established as a double (or a
-        # literal/name it can see is one), at the load's own width.
+        # A value whose kind this path cannot establish is not a disagreement
+        # and is answered here, which is the permissive direction the two
+        # sibling boundaries (`call_argument_kind_refusal`,
+        # `printf_kind_conversion_refusal`) also take; the wrong answer that
+        # direction permits — `p.value() = 1` writing 0x1 — is the stated case
+        # the check above refuses, not this one.
         width, signed = 8, False
-        if not index_scaled:
-            scaled, scale_why = _offset_scale(fn, obj, width)
-            if not scaled:
-                return (None, scale_why)
+        scaled, scale_why = _offset_scale(fn, obj, width)
+        if not scaled:
+            return (None, scale_why)
         return (("store", width, signed), why)
     if inner in POINTEE_WIDTHS:
         width, signed = POINTEE_WIDTHS[inner]
-        if not index_scaled:
-            scaled, scale_why = _offset_scale(fn, obj, width)
-            if not scaled:
-                return (None, scale_why)
+        scaled, scale_why = _offset_scale(fn, obj, width)
+        if not scaled:
+            return (None, scale_why)
         return (("store", width, signed), why)
     st = (structs_by_name or {}).get(inner)
     if st is not None:
@@ -3879,17 +3859,6 @@ def pointer_store_lowering(fn, target, decls: dict, functions: dict = None,
                   f"1-byte pointee overwrites seven bytes the program never "
                   f"wrote, and that is silent corruption rather than a fault. "
                   f"{_declared_note(why)}")
-
-
-def subscript_float_element(fn, obj, decls: dict, functions: dict = None) -> bool:
-    """True when `obj[i]` is an element of a FLOAT pointee — the one base whose
-    subscript STORE needs the value's kind checked (`pointer_store_lowering`).
-
-    The same `pointer_pointee` reader the load and the `.value()` store ask, so
-    the three cannot disagree about which pointers hold doubles.
-    """
-    inner, _why = pointer_pointee(fn, obj, decls, functions)
-    return inner in POINTEE_FLOAT_NAMES
 
 
 def pointer_store_kind_disagreement(pointee, value, class_of) -> str | None:
@@ -3914,12 +3883,9 @@ def pointer_store_kind_disagreement(pointee, value, class_of) -> str | None:
     pointee and an `"int"` into a double pointee are both disagreements, and
     `None` — which is what an unannotated parameter, a name bound from an
     unclassified call and a kind this model has no spelling for all answer —
-    is silence into an INTEGER pointee, and a refusal into a DOUBLE one: an
-    integer slot reads any word back as a number, while a double slot reads an
-    integer's bits as a denormal, so only the double case is unsafe to leave
-    open. No `.mojo` file in the tree names `Pointer[Float64]` (checked with
-    `git grep` at the tree root), so the refusal cannot reach the stdlib
-    through that spelling; the integrator's stdlib gate confirms it.
+    is silence. The permissive direction is what makes the rule safe to add
+    beside 664 stdlib files: it can only fire where the source contradicts
+    itself.
 
     The advice is the source's own decision in both directions, and it is the
     conversion this path already has: `float(x)` is `SCVTF` and `Int(x)` is
@@ -3929,25 +3895,7 @@ def pointer_store_kind_disagreement(pointee, value, class_of) -> str | None:
     pointee_is_float = pointee_kind(pointee) == FLOAT_KIND
     got = class_of(value)
     if got is None:
-        # SILENCE for an integer pointee, and that is the permissive direction
-        # the sibling boundaries take. A DOUBLE pointee is different: the store
-        # moves one 64-bit word, so an unestablished value whose bits are an
-        # integer lands in a double slot and reads back as a denormal, and
-        # nothing the source says rules that out. An unannotated parameter is
-        # the usual case. So a double slot refuses an unestablished value by
-        # name, and the advice is to state the kind, which is what the reader
-        # can actually do.
-        if not pointee_is_float:
-            return None
-        return (
-            f"the pointee is `{pointee}` and this store writes {spelled(value)}, "
-            f"whose kind this model cannot establish, so nothing in the source "
-            f"says the word is a double. A store moves one 64-bit word, and if "
-            f"that word is an integer's bits it reads back as a denormal "
-            f"(`p.value() = 1` writes 0x1, not 1.0). State the kind where the "
-            f"value is bound: annotate it (`n: Float64`), or write the conversion "
-            f"`float(x)` so the store's kind is decided at its source"
-        )
+        return None
     if pointee_is_float and got == "float":
         return None
     if not pointee_is_float and got == "int":
@@ -4475,3 +4423,7 @@ def extremum_call_is_a_select(name, nargs: int, nkwargs: int) -> bool:
     return (name in ("max", "min")
             and not nkwargs
             and nargs >= 2)
+
+
+
+

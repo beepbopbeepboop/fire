@@ -1,5 +1,6 @@
 from . import *
 
+# # ── Everything else that reaches an INTEGER path holding a `char *` ───────
 # ── Everything else that reaches an INTEGER path holding a `char *` ───────
 #
 # `string_concat_refusal` above is one operator out of a table, and the reason
@@ -4508,3 +4509,7 @@ def pointer_bounded_method(method: str):
     """The lowering name of a pointer-bounded string method, or None."""
     entry = POINTER_BOUNDED_METHODS.get(method)
     return entry[0] if entry else None
+
+
+
+

@@ -1,22 +1,22 @@
-# Worker task: bug-formal-formal-metamorphic-ledger-381
+# Worker task: bug-formal-formal-string-constructor-ref
 
 You are an autonomous worker. You have your own git worktree and branch. Other
 workers are running in parallel on OTHER problems; a separate integrator merges
 and gates everyone's finished branches. Your job is to land one focused change.
 
-- Worktree (your ONLY working directory): /Users/mrs/net/chatgpt/claude/work-4387
-- Branch: work/bug-formal-formal-metamorphic-ledger-381
-- Your claims (the problem areas that are yours alone): bug:FORMAL_metamorphic_ledger
+- Worktree (your ONLY working directory): /Users/mrs/net/chatgpt/claude/work-4402
+- Branch: work/bug-formal-formal-string-constructor-ref
+- Your claims (the problem areas that are yours alone): bug:FORMAL_string_constructor_refuses_a_pointer_typed_value
 
 ## The task
 
-Fix the bug in bugs/formal/FORMAL_metamorphic_ledger.md at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test, or report). QUICK tests only: write a small regression test that FAILS before your fix and passes after (next to the existing tests for that area), and run just that test plus the one existing test file that covers the code you touched, each wrapped in python3 tools/memslot.py --gb 8 --label x --. No gate, no stdlib sweep, no self-host build: an integrator gates on the stdlib compile after you land. If the bug is fully fixed, git rm its doc in the same commit and run python3 tools/dangling_doc_refs.py --ratchet. Commit, end with a clean tree and the CONTROL-STATUS line.
+Fix the bug `FORMAL_string_constructor_refuses_a_pointer_typed_value` (`String(unsafe_from_utf8_ptr=p)` is refused because the value-kind reader calls a pointer `'int'`; its doc was git rm'd with this fix) at its ROOT CAUSE. Read the doc's Status/next step first; it may already be fixed on master (then delete the doc with a pinning test, or report). QUICK tests only: write a small regression test that FAILS before your fix and passes after (next to the existing tests for that area), and run just that test plus the one existing test file that covers the code you touched, each wrapped in python3 tools/memslot.py --gb 8 --label x --. No gate, no stdlib sweep, no self-host build: an integrator gates on the stdlib compile after you land. If the bug is fully fixed, git rm its doc in the same commit and run python3 tools/dangling_doc_refs.py --ratchet. Commit, end with a clean tree and the CONTROL-STATUS line.
 
 ## Rules
 
 1. **Stay in your worktree.** Never `cd` into /Users/mrs/net/chatgpt/claude/mojo-reference or any other `work-*`
-   directory, and never edit files there. Use relative paths from /Users/mrs/net/chatgpt/claude/work-4387.
-   **Scratch files go in `/Users/mrs/net/chatgpt/claude/work-4387/.tmp/`, never `/tmp` or any path outside
+   directory, and never edit files there. Use relative paths from /Users/mrs/net/chatgpt/claude/work-4402.
+   **Scratch files go in `/Users/mrs/net/chatgpt/claude/work-4402/.tmp/`, never `/tmp` or any path outside
    your worktree** — you are not permitted to write there and the command will
    fail. `TMPDIR` is already set to that directory; it is git-ignored.
 2. **You are a light worker; the integrator is the one heavy consumer.** Never run a whole-closure compile, a self-host build (`mojoc`, `stage*/mojo`, `fire.py build fire.py`), `--dump-full` of the compiler, a large `formal_sweep`, or lean proof runs beyond the one test that covers your change. Wrap anything that compiles in `python3 tools/memslot.py --gb 8 --label <what> -- <cmd>` (it reserves memory from a machine-wide budget before starting and kills the job if it exceeds 8 GB). If your change can only be verified by a heavy run, finish with `CONTROL-STATUS: PARTIAL`, list the exact suite jobs it needs under `NOT DONE`, and the controller will have the integrator run them.
@@ -66,7 +66,7 @@ something you could find by reading the code.
 Just before that status line, print a report in exactly this shape:
 
 ```
-=== REPORT bug-formal-formal-metamorphic-ledger-381 ===
+=== REPORT bug-formal-formal-string-constructor-ref ===
 COMMITS: <git log --oneline master..HEAD>
 VERIFIED: <the exact commands you ran and what they showed>
 NOT DONE: <anything left, with the bug doc path if you filed one>
