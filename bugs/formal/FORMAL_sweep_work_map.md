@@ -765,8 +765,8 @@ instrument changes:
 |---|---|---|
 | a build killed at the per-file memory ceiling was filed as `codegen` | a resource fact reported as a semantic one | `procrun.memcap_verdict` / `memcap_wrapper_died` are read FIRST, and a memory kill outranks every reading of the message; a dead WRAPPER is a distinct class from a breach |
 | the SIGTERM drain did not drain, and the summary never arrived | an interrupted run printed nothing, so its log looked like a short scope | the handler cancels what has not started and refuses to start a build once the signal has arrived; the summary is printed after the pool drains |
-| `--allow-concurrent` produced torn `manifest.json` reads | a `json.decoder.JSONDecodeError` filed as a `tool` class | `formal/build.py`'s `_write_json_atomic`; measured 0 of 12 792 torn reads after the fix |
-| `unknown` and `system-module-call` were not classes the classifier could produce | 18 files re-filed on a change to the classifier, and no number faked | both are now produced, and `-8` onwards is the first round with neither |
+| The flag `--allow-concurrent` produced torn `manifest.json` reads | a `json.decoder.JSONDecodeError` filed as a `tool` class | `formal/build.py`'s `_write_json_atomic`; measured 0 of 12 792 torn reads after the fix |
+| The classes `unknown` and `system-module-call` were not classes the classifier could produce | 18 files re-filed on a change to the classifier, and no number faked | both are now produced, and `-8` onwards is the first round with neither |
 
 **`other refusal` is the fifth defect and it is the one that is still open**: the
 bucket means *nobody has looked*, and it has twice held the largest row in the
