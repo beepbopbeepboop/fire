@@ -2590,21 +2590,26 @@ def _declared_vars_body(stmts: list) -> set[str]:
             if node.finally_body:
                 result |= _declared_vars_body(node.finally_body)
     return result
-def callable_ctype(params_ctypes, ret_ctype='int64_t'):
-    """Build a std::function<R(P...)> type string for a callable slot."""
-    if ret_ctype == 'int':
-        ret_ctype = 'int64_t'
-    if params_ctypes is None:
-        params_ctypes = []
-    # params_ctypes may be a list of (name, ctype) pairs or just ctypes
+def callable_ctype(params, ret='int64_t'):
+    """Build a `std::function<R(P...)>` ctype string for a callable slot.
+
+    `params` may be a list of ctypes, a list of `(name, ctype)` pairs, a bare
+    ctype string, or `None`; `ret` is the return ctype, with the pythonic
+    `'int'` normalized to `'int64_t'`."""
+    if ret == 'int':
+        ret = 'int64_t'
+    if isinstance(params, str):
+        params = [params]
+    if params is None:
+        params = []
     ptypes = []
-    for p in params_ctypes:
+    for p in params:
         if isinstance(p, (tuple, list)) and len(p) == 2:
-            ptypes.append(p[1])
+            ptypes.append(_as_str(p[1]))
         else:
-            ptypes.append(p)
-    pstr = ', '.join(str(pt) for pt in ptypes)
-    return f'std::function<{ret_ctype}({pstr})>'
+            ptypes.append(_as_str(p))
+    ps = ', '.join(ptypes)
+    return f'std::function<{_as_str(ret)}({ps})>'
 
 
 _CPP_CALLABLE_CTYPE = callable_ctype([], 'int64_t')
