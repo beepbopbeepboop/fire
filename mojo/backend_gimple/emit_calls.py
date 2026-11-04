@@ -1752,7 +1752,9 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         elif isinstance(_m, gimple_ctypes.IdentExpr):
             # Accept EnumType/metaclasses from enum module
             _mname = _as_str(_m.name)
-            if _mname in ('EnumType', 'EnumMeta') or _mname.endswith(('EnumType', 'EnumMeta')) or _mname == 'metacls' or _mname == 'cls' or 'meta' in _mname.lower():
+            if (_mname in ('EnumType', 'EnumMeta') or _mname.endswith(('EnumType', 'EnumMeta'))
+                    or _mname.endswith('_mcls') or 'EnumType' in _mname
+                    or _mname == 'metacls' or _mname == 'cls' or 'meta' in _mname.lower()):
                 _cls = _lower_type_new(gen, node, node.args[1:], meta=_m)
                 if _cls is not None:
                     return _cls

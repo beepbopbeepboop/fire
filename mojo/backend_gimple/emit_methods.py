@@ -3754,6 +3754,8 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                               ('char *', gen._intern_string(_as_str(func.member))),
                               ('int64_t', gen._new_val('int64_t', f'(int64_t){len(node.args)}'))]
                              + [('int64_t', w) for w in words])
+        if _as_str(func.member) == '__prepare__':
+            return 'MojoDict *', gen._new_val('MojoDict *', f'(MojoDict *){res}')
         gen._dyn_word_vals.add(res)
         return 'int64_t', res
     # The receiver's RAW lowered pair, before the resolution blocks below
