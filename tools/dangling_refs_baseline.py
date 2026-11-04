@@ -85,7 +85,7 @@ BASELINE = {
     'test_formal_cross_module.py': 1,
     'test_formal_declared_param_census.py': 1,
     'test_formal_eval_eq_mojo_bridge.py': 1,
-    'test_formal_fuzz.py': 7,
+    'test_formal_fuzz.py': 8,
     'test_formal_match.py': 1,
     'test_formal_monomorph.py': 1,
     'test_formal_proof_breadth.py': 1,
