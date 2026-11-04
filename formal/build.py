@@ -20835,10 +20835,23 @@ def _with_protocol(item, body, opened_tmp, enter, exit_, fn,
         # expression is answerable on both paths that reach here and a reader
         # sent to look at `open(…)` would find nothing wrong with it.
         raise CodegenError(M.refuse_unlowerable_with_alias(fn, item))
+    exit_stmt = F.ExprStmt(exit_)
+    try:
+        setattr(exit_stmt, '_with_exit_suppress', True)
+        setattr(exit_, '_with_exit_suppress', True)
+    except Exception:
+        pass
+    ts = F.TryStmt(body=[opened, *body], handlers=[], else_body=None,
+                   finally_body=[exit_stmt])
+    # Mark for exception suppression support
+    try:
+        # Mark all withs as suppressible for now to support computed returns
+        setattr(ts, '_with_suppressible', True)
+    except Exception:
+        pass
     return [
         opened_tmp,
-        F.TryStmt(body=[opened, *body], handlers=[], else_body=None,
-                  finally_body=[F.ExprStmt(exit_)]),
+        ts,
     ]
 
 
