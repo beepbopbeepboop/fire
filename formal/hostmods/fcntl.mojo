@@ -199,7 +199,7 @@ def FD_CLOEXEC() -> int:
 # `fcntl(2)` is `int fcntl(int fd, int cmd, ...)`. On Apple arm64 the unnamed
 # arguments do NOT go in argument registers: the caller reserves an area and the
 # i-th unnamed argument goes at offset 8*(i-1) from SP as it stands at the call.
-# `formal/model.py`'s `VARIADIC_LIBC` is where a callee is recorded as variadic
+# `formal/model/builtins.py`'s `VARIADIC_LIBC` is where a callee is recorded as variadic
 # and how many of its arguments are named, and `fcntl` was not in it — so the
 # third argument was emitted into X2, which is the generic convention and not
 # this target's, and nothing was written into the area at all.
@@ -332,7 +332,7 @@ def F_GETPATH() -> int:
 # `fcntl(2)` is `int fcntl(int fd, int cmd, ...)`. The third parameter is
 # VARIADIC, and on Apple arm64 a variadic argument is NOT passed in an argument
 # register: the caller reserves an area and the i-th unnamed argument goes at
-# offset 8*(i-1) from SP as it stands at the call. `formal/model.py`'s
+# offset 8*(i-1) from SP as it stands at the call. `formal/model/builtins.py`'s
 # `VARIADIC_LIBC` says which C entry points are variadic and how many of their
 # arguments are named, `arm64_codegen`'s `_emit_variadic_area` lays the area out
 # from that table, and **`fcntl` was not in the table**. So `fcntl(fd, cmd, arg)`

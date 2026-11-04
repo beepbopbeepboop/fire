@@ -152,7 +152,7 @@ WHAT IS NOT HERE, AND WHY — each measured, and none of them approximated
     — `io.mojo`'s rule again: a parameter is here when a caller needs it,
     checked rather than assumed. `suffix=` cannot be honoured by ANY
     implementation here: it goes at the END of the name, and this path has no
-    writable buffer to append into (`formal/model.py`'s
+    writable buffer to append into (`formal/model/cfg.py`'s
     `LENGTH_DEPENDENT_METHODS` is the same absence that keeps `mkdtemp` a
     one-parameter function). Both are CPython parameters, so a caller that
     passes one is refused with `unexpected keyword argument` naming it rather
@@ -408,7 +408,7 @@ struct TemporaryDirectory:
 
     **It is a struct with `__enter__` and `__exit__` because that is now what
     a `with` lowers to** (`formal/build.py`'s `_rewrite_with_statements`, and
-    `formal/model.py`'s `struct_is_context_manager` for the rule): `__enter__`
+    `formal/model/module.py`'s `struct_is_context_manager` for the rule): `__enter__`
     produces the name the body sees, `__exit__` runs on the way out, and a
     `with` whose value is not enterable and exitable is refused rather than
     quietly skipping the exit. Two consequences worth stating, because both are
