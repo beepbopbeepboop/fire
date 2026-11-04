@@ -1244,7 +1244,7 @@ CASES = [
     # READER's evidence alone.  It is the pin that the seeding declines — which
     # is the property, rather than the fact that some refusal fires — and it is
     # a different program from the frame-storing writer two rows below, which is
-    # what `FORMAL_wide_receiver_by_reference` refuses on its own account.
+    # what `FORMAL_wide_receiver_by_reference` (deleted; fixed) refuses on its own account.
     #
     # The NEEDLE is `DELEGATING_FIELD_ADVICE` rather than the emitter's
     # "'t.v' is a field access through 't'", and that is a merge, not a
@@ -1527,7 +1527,7 @@ CASES = [
     # So the shape that now BUILDS gets its own EXECUTED rows, both against
     # CPython and both architectures, because a lowering that reads a setter's
     # frame at the wrong slot or from the wrong scratch computes a number and
-    # exits 0 — the failure `bugs/formal/FORMAL_wide_receiver_by_reference.md` exists
+    # exits 0 — the failure `FORMAL_wide_receiver_by_reference.md` (deleted; fixed) exists
     # to prevent, and the only way to see it is to run it.
     ("a_delegating_setter_is_readable_through_the_field",
      "struct Opt:\n"

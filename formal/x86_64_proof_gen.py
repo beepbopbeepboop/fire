@@ -145,7 +145,7 @@ def _first_sentence(e) -> str:
 
 
 def _ast_value(fn, func_name: str, admitted: dict = None, scope=None,
-                callees: dict = None) -> str:
+                callees: dict = None, callees2: dict = None) -> str:
     """The `MojoFunc` value mirroring `fn`'s source AST.
 
     Raises whatever the shared emitter raises for a construct the untyped
@@ -170,8 +170,18 @@ def _ast_value(fn, func_name: str, admitted: dict = None, scope=None,
     resolvable = ({func_name} | set(callees or ())
                   | {c["name"] for c in (admitted or [])
                      if isinstance(c, dict) and c.get("name")})
-    gaps = AP._ast_bridge_gaps(fn, resolvable,
-                               frozenset(AP._admitted_arity2_map(admitted)))
+    # Include two-parameter callees in resolvable2 so the bridge can state
+    # calls to them.
+    resolvable2 = frozenset(AP._admitted_arity2_map(admitted)) | set(callees2 or ())
+    try:
+        for c in (admitted or []):
+            if isinstance(c, dict) and c.get("name") and c.get("lean_name"):
+                resolvable2 = frozenset(set(resolvable2) | {c.get("name")})
+            elif not isinstance(c, dict) and getattr(c, "name", None) and getattr(c, "lean_name", None):
+                resolvable2 = frozenset(set(resolvable2) | {getattr(c, "name")})
+    except Exception:
+        pass
+    gaps = AP._ast_bridge_gaps(fn, resolvable, resolvable2)
     if gaps:
         raise NotImplementedError(AP._ast_gap_message(gaps))
     body = "[" + ", ".join(AP._stmts_ast(fn.body, scope)) + "]"
@@ -185,7 +195,8 @@ def _ast_value(fn, func_name: str, admitted: dict = None, scope=None,
 
 def _eval_eq_mojo_section(func_name: str, fn, typed: bool,
                           go_lemmas: list = None, admitted: dict = None,
-                          arity: int = 1, scope=None, callees: dict = None) -> str:
+                          arity: int = 1, scope=None, callees: dict = None,
+                          go_defs: str = None, prog: SimpleNamespace = None) -> str:
     """`eval_eq_mojo`: the AST interpreter agrees with the source model.
 
     Proved for the shapes the shared generator can close by `simp` (a
@@ -198,7 +209,7 @@ def _eval_eq_mojo_section(func_name: str, fn, typed: bool,
     if typed:
         return ("/- Typed function: the untyped AST-eval bridge is omitted;\n"
                 "   correctness follows from the machine value flow. -/\n")
-    _ast_value(fn, func_name, admitted, scope, callees)   # probe: may raise
+    _ast_value(fn, func_name, admitted, scope, callees, callees2=callees2)
     from formal import arm64_proof_gen as AP
     if AP._is_recursive(fn) or AP._has_while(fn.body):
         return None       # caller emits the `sorry` form
@@ -262,10 +273,10 @@ def _eval_eq_mojo_section(func_name: str, fn, typed: bool,
     from formal import arm64_proof_gen as AP
     _cf = AP._call_func_lean(func_name, admitted, arity=arity,
                             exports=callees)
-    # build callFunc2: the arity-2 contracts, the same table the arm64 generator
-    # builds (`AP._admitted_arity2_map`).
+    # build callFunc2: the arity-2 contracts plus every two-parameter callee.
     _admitted_calls_map2 = AP._admitted_arity2_map(admitted)
-    _cf2 = AP._call_func2_lean(func_name, _admitted_calls_map2)
+    _callees2 = AP._callee_call_table(go_defs or "", prog or type('P', (), {'functions': []})(), func_name, arity=2) if (go_defs or prog) else {}
+    _cf2 = AP._call_func2_lean(func_name, _admitted_calls_map2, exports=_callees2)
     return (f"/-- eval_eq_mojo: AST evaluation agrees with the semantic model. -/\n"
             f"theorem eval_eq_mojo {AP._entry_binders(arity)} :\n"
             f"  evalFunc ast {_cf} {_cf2} {AP._entry_arg_list(_en)} = "
@@ -896,6 +907,9 @@ def generate_x86_64_proof(prog, code, info) -> str:
     # gap check below is asked with, so this backend cannot resolve a name its
     # `callFunc` has no branch for (or refuse one it has).
     _callees = AP._callee_call_table(go_defs, prog, func_name)
+    # The two-parameter analogue: callFunc2 branches over user functions that
+    # take two arguments, so `eval_eq_mojo` does not ask Lean to prove `0 = ...`.
+    _callees2 = AP._callee_call_table(go_defs, prog, func_name, arity=2)
     # The old one-liner verbatim at arity one, which is every program in the
     # corpus: a comment is not semantics, but re-inking it would invalidate
     # every cached verdict in ~/.gmojo for a wording change.
@@ -941,7 +955,8 @@ def generate_x86_64_proof(prog, code, info) -> str:
             section = _eval_eq_mojo_section(func_name, fn, typed,
                                             go_lemma_names, admitted=_admitted,
                                             arity=arity, scope=_vscope,
-                                            callees=_callees)
+                                            callees=_callees,
+                                            go_defs=go_defs, prog=prog)
         except Exception:                           # noqa: BLE001
             section = None
     if section is None:
@@ -957,7 +972,8 @@ def generate_x86_64_proof(prog, code, info) -> str:
         # described a behaviour the code did not have. Quoting the message
         # means a new gap is described by the gap's own words.
         try:
-            _ast_value(fn, func_name, _admitted, _vscope, _callees)
+            _ast_value(fn, func_name, _admitted, _vscope, _callees,
+                       callees2=_callees2)
             reason = ("this function's shape (recursive/looping): the bridge "
                       "is not closed yet")
         except Exception as e:                      # noqa: BLE001
@@ -971,7 +987,7 @@ def generate_x86_64_proof(prog, code, info) -> str:
         # instead of omitting the AST.
         try:
             ast_value = _ast_value(fn, func_name, _admitted, _vscope,
-                                   _callees)
+                                   _callees, callees2=_callees2)
         except Exception as e:                      # noqa: BLE001
             section = (f"/- AST omitted: {_first_sentence(e)} -/\n")
         else:

@@ -135,7 +135,7 @@ def size_c_bool() -> int:
     C type is NARROWER than a value on this path.  That is not a problem here
     because nothing crossing a dylib boundary is a `c_bool`: `c_bool` is a field
     of a struct, and a struct is a frame blob
-    (`bugs/formal/FORMAL_module_state_no_storage.md`).
+    (`FORMAL_module_state_no_storage.md (deleted) (deleted)`).
     """
     return 1
 

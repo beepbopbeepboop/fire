@@ -6675,10 +6675,6 @@ def compile_to_gimple_parallel_frozen(mojo_src: str, do_imports: bool = False,
     # Forward to serial path for byte-identity verification; parallel emission
     # scaffolding (frozen snapshot, work-unit keying, sorted assembly) is
     # wired below for when the emission phase is fully independent.
-    import multiprocessing
-    # Parallel parse scaffolding: parse imported modules in pool.
-    # For this light-worker round we establish the structure and fall back to
-    # serial emission so the output is byte-identical (no divergence).
     result, _gen = _run_pipeline(mojo_src, do_imports=do_imports, filename=filename,
                                  auto_gpu=auto_gpu)
     _refuse_dropped_companion(result, _gen)

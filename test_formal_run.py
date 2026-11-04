@@ -6579,8 +6579,8 @@ BOTH_ARCH_CASES = [
     # In this group rather than beside the truthiness rows it is in because the
     # kind table is ONE `formal/model.py` reader both emitters consult, so the
     # two machines cannot disagree about it, and the row is about that reader
-    # rather than about an arm64 instruction: `bugs/formal/FORMAL_sweep_singles_second_half.md`
-    # §4 recorded the same reproducer refused as "len(s) is len() of a value
+    # rather than about an arm64 instruction: the parameter-kind sweep note
+    # recorded the same reproducer refused as "len(s) is len() of a value
     # classified as 'int', and an integer has no length", and said the row was
     # open. It is not, and this is the row that says so on BOTH machines.
     ("len_of_an_unannotated_parameter_from_a_string_literal",
@@ -9149,15 +9149,23 @@ BOTH_ARCH_CASES = [
      "def main():\n"
      "    printf(\"[%s]\", f())\n"
      "    return 0\n", 0, "[n=7]"),
+    ("both_arch_an_fstring_with_constant_fields_folds",
+     "def main():\n"
+     "    var s = f\"n={5}\"\n"
+     "    printf(\"[%s]\", s)\n"
+     "    return 0\n", 0, "[n=5]"),
+    ("both_arch_an_fstring_with_multiple_constant_fields_folds",
+     "def main():\n"
+     "    var s = f\"{\'a\'}b{None}\"\n"
+     "    printf(\"[%s]\", s)\n"
+     "    return 0\n", 0, "[abNone]"),
     ("fstring_parameter_default_with_a_field_is_refused_like_a_statement_site",
      "def f(x=f\"n={5}\"):\n"
      "    return x\n"
      "\n"
      "def main():\n"
-     "    print(f())\n"
-     "    return 0\n",
-     "refuse:is refused on this path: its value is its INTERPOLATED text, and "
-     "this path has no buffer to compose one in", None),
+     "    printf(\"[%s]\", f())\n"
+     "    return 0\n", 0, "[n=5]"),
     # ── a double at the `Int` conversion, where the two machines once
     #    answered with two different programs ──────────────────────────────────
     #
@@ -9310,7 +9318,7 @@ BOTH_ARCH_CASES = [
 # which is false in every clause: `flush` is neither `sep` nor `end`, it is not
 # baked into anything, and it is the commonest keyword in THIS repository's own
 # source — nine of the sixty items `tools/formal_proof_breadth.py` measures land
-# on it (`bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md` §0.2's largest
+# on it (the largest formal case in the census
 # `codegen-refused` family), every one of them the same `print(…, flush=True)`
 # in a test's `check` helper.
 #
@@ -11754,6 +11762,35 @@ CONSTRUCTION_CASES = [
      "        return 50 + last\n"
      "    if src.get_v() != 40:\n"
      "        return 60 + src.get_v()\n"
+     "    return 7\n", 7, None),
+    # Copy construction from a call result returning the same struct type
+    # (reflection/type information driven copy construction).
+    ("constr_copy_from_call_result",
+     "struct Pair:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    fn get_a(self) -> Int:\n"
+     "        return self.a\n"
+     "\n"
+     "    fn get_b(self) -> Int:\n"
+     "        return self.b\n"
+     "\n"
+     "def make() -> Pair:\n"
+     "    return Pair(3, 4)\n"
+     "\n"
+     "def copyit() -> Pair:\n"
+     "    var q = Pair(make())\n"
+     "    q.a = q.a + 10\n"
+     "    return q\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var r = make()\n"
+     "    var q = copyit()\n"
+     "    if r.a != 3 or r.b != 4:\n"
+     "        return 10\n"
+     "    if q.a != 13 or q.b != 4:\n"
+     "        return 20\n"
      "    return 7\n", 7, None),
     # (7) A ONE-FIELD STRUCT with an argument — the value collapse, and the case
     # that shows `S(x)` on a value is not a copy at all: there is no block, the
@@ -15022,7 +15059,7 @@ WAVE6_TRUTHY_CASES = [
      "    return 0\n", 0, "0 1"),
 
     # `len()` OF THE SAME PARAMETER, which is the reader the identity test does
-    # not answer. `bugs/formal/FORMAL_sweep_singles_second_half.md` §4 recorded a
+    # not answer. The parameter-kind sweep note recorded a
     # four-line reproducer refused as "len(s) is len() of a value classified as
     # 'int', and an integer has no length", and said the row was still open; it
     # is not — the parameter's kind reaches `len()` through the same
@@ -17007,9 +17044,19 @@ POINTER_DEREF_CASES = [
      "    var mid = at(s, 1)\n"
      "    if read_back(mid, 0) != 5786930140093827657:      # …b'IJKLMNOP'\n"
      "        return 1\n"
-      "    if read_back(mid, 1) != 5208208757389214273:      # …b'ABCDEFGH'\n"
-      "        return 2\n"
-      "    return 0\n", 0, None),
+     "    if read_back(mid, 1) != 5208208757389214273:      # …b'ABCDEFGH'\n"
+     "        return 2\n"
+     "    return 0\n", 0, None),
+    # Chained pointer arithmetic must scale at each step for wide pointees.
+    ("deref_offset_scales_in_chained_arithmetic",
+     "def read_at(p: Pointer[Int64], k: Int) -> Int:\n"
+     "    var q = (p + 1) + k\n"
+     "    return Int(q.value())\n"
+     "def main(n: Int) -> Int:\n"
+     "    var s = \"ABCDEFGHIJKLMNOPQRSTUVWX\"\n"
+     "    if read_at(s, 1) != 6365651522798441041:      # …b'QRSTUVWX'\n"
+     "        return 1\n"
+     "    return 0\n", 0, None),
 
     # ── `p[i]` reads at the POINTEE'S width, the same width `p.value()` does ─
     #
@@ -23384,7 +23431,7 @@ INT_PARSE_REFUSALS = [
 REFUSAL_CASES = [
     # A FUNCTION NAME in a value position, which is the first thing any
     # first-class-function work hits and the reason `functools` is not a host
-    # module (`bugs/formal/FORMAL_functools_is_unbuildable_as_a_host_module.md`).
+    # module.
     # The refusal used to be the unresolved-NAME one, whose reason clause is
     # "the register allocator collected no home for it, so the emitter and the
     # allocation walk disagree about this function's locals" — false in every
@@ -25756,7 +25803,6 @@ def check_interpolated_literal_bound_census(verbose=False):
     it stopped existing would make step 1 worth nothing — so it is a fact about
     the corpus rather than a drifting proportion, and it is asserted exactly.
     """
-    import collections as _collections
     import os as _os
     import formal.types as _types
     build = __import__("formal.build", fromlist=["build"])
@@ -25827,11 +25873,13 @@ def check_interpolated_literal_bound_census(verbose=False):
         return None
 
     scanned = 0
-    shapes = _collections.Counter()
+    shapes = {}
     total_fields = 0
     total_literals = 0
     bounded = []                     # (path, spelled, bound)
-    one_obstacle = _collections.Counter()
+    one_obstacle = {}
+    def _inc(d, k):
+        d[k] = d.get(k, 0) + 1
     for root in roots:
         for dirpath, dirnames, filenames in _os.walk(root):
             dirnames[:] = [d for d in sorted(dirnames)
@@ -25881,7 +25929,7 @@ def check_interpolated_literal_bound_census(verbose=False):
                     vk = scope.get(id(node))
                     total_fields += len(fields)
                     for seg in fields:
-                        shapes[M.interpolated_field_shape(seg[1])] += 1
+                        _inc(shapes, M.interpolated_field_shape(seg[1]))
                     bound, _why = M.interpolated_literal_bound(
                         spelled, lambda e, _vk=vk: width_of(e, _vk))
                     if bound is not None:
@@ -25900,13 +25948,13 @@ def check_interpolated_literal_bound_census(verbose=False):
                         strays = [v for v in verdicts
                                   if v[0] == "name" and v[1] and v[1][0] == "str"]
                         if shapes_ != ["name"] * len(fields):
-                            one_obstacle["a-field-no-declaration-reaches"] += 1
+                            _inc(one_obstacle, "a-field-no-declaration-reaches")
                         elif len(strays) == len(fields):
-                            one_obstacle["every-field-is-a-string"] += 1
+                            _inc(one_obstacle, "every-field-is-a-string")
                         elif strays:
-                            one_obstacle["one-string-among-integers"] += 1
+                            _inc(one_obstacle, "one-string-among-integers")
                         else:
-                            one_obstacle["no-field-is-declared-at-all"] += 1
+                            _inc(one_obstacle, "no-field-is-declared-at-all")
     n = len(bounded)
     scope_free = sum(1 for _p, s, _b in bounded
                      if all(M.interpolated_field_shape(f[1]) in
@@ -25942,21 +25990,21 @@ def check_interpolated_literal_bound_census(verbose=False):
              "width, so this row is what a resolver with no type information "
              "can answer"),
             ("literals whose every field is a STRING-typed name",
-             one_obstacle["every-field-is-a-string"], 1,
+             one_obstacle.get("every-field-is-a-string", 0), 1,
              "THE decisive count: these are decidable the moment a string field "
              "has a width, and §7.1's \"a field's width is its declared type's\" "
              "is false of every one of them — the width is a `strlen` over the "
              "VALUE and a frame buffer is reserved before the program runs"),
             ("literals with a string field among integer ones",
-             one_obstacle["one-string-among-integers"], 0,
+             one_obstacle.get("one-string-among-integers", 0), 0,
              "the mixed shape, which is where a partial bound would be worst"),
             ("literals with a field no declaration reaches",
-             one_obstacle["a-field-no-declaration-reaches"], 1,
+             one_obstacle.get("a-field-no-declaration-reaches", 0), 1,
              "a call, a subscript, an attribute or an undeclared name: nothing "
              "in the source fixes a width, so no bound arithmetic reaches it "
              "and the reading is per name"),
             ("literals with every field undeclared",
-             one_obstacle["no-field-is-declared-at-all"], 1,
+             one_obstacle.get("no-field-is-declared-at-all", 0), 1,
              "the same shape with nothing at all stated — the value model doc "
              "(`FORMAL_string_value_model`) holds the next step for these")):
         if got >= floor:

@@ -84,7 +84,7 @@ skipped silently -- the point is to know what is and is not proved.
   PARTIAL, and no statement of it can be chained by this generator.  The long
   version, with why naming the quotient and remainder needs a side condition the
   generator cannot discharge and keeping the `match` stops the next address
-  from reducing, is in `bugs/formal/FORMAL_x86_64_end_to_end_proof.md`.
+  from reducing, is in the formal bug history.
 
   `setcc` (26) was the one that did NOT fall out of a generalisation, and it is
   worth saying why rather than leaving it in the list.  `cmp` and `test` are
@@ -3868,7 +3868,7 @@ def emit_terminates(path):
             at `PROOF_WALL_S` (1500 s), with `mem_write_bytes`'s `ite` chain and the
             nested `Int.ofNat … + disp` addresses being re-normalised at every one
             of the 131 levels. The file was 1500 s of wall and then a FAILURE about
-            the clock, which is the trade `bugs/formal/FORMAL_x86_64_end_to_end_proof.md`
+            the clock, which is the trade described in the formal bug history
             calls B21 from the wrong side — a worse report than the refusal it
             replaced.
 
@@ -3996,7 +3996,7 @@ def emit_terminates(path):
             # de-duplicates by name, so a chain with four admitted `hpop`s reads
             # as `proved, 1 sorry` exactly like one with a single gap in it.
             # The number is a bound and not a count of holes (which is what
-            # bugs/formal/FORMAL_x86_64_end_to_end_proof.md concluded about it
+            # the formal bug history concluded about it
             # independently), and these holes are countable by NAME in the
             # generated file: `hpop{k}`, one per returned-to.
             emit("have hpop%d : (mem_read_bytes %s.mem (%s.rsp.toNat) 8).toNat"
@@ -4188,7 +4188,7 @@ def emit_terminates(path):
                 # inequality over a `mem_write_bytes` chain, and it is stated
                 # with `repeat rw` because `rw` peels ONE layer and the chain is
                 # N deep -- see the B18 entry in
-                # bugs/formal/FORMAL_x86_64_end_to_end_proof.md for the measurement.
+                # the formal bug history for the measurement.
                 #
                 # Every step below is one that CANNOT fail: `simp` succeeds even
                 # when it simplifies nothing, and the rest are `try`. So the
@@ -4468,7 +4468,7 @@ def admitted_facts(text):
                   either way, because it reports "declaration 'terminates' uses
                   `sorry`" once per DECLARATION and
                   `formal/lean.py::_census_from_output` de-duplicates by name.
-                  `bugs/formal/FORMAL_x86_64_end_to_end_proof.md` reaches the same
+                  the formal bug history reaches the same
                   conclusion about `augassign` from the other end, and this is a
                   statement about the CENSUS rather than the proof.
 
