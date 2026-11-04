@@ -128,9 +128,7 @@ skipped silently -- the point is to know what is and is not proved.
       (`_tree`, B26) and the read at each followed return is PROVED rather than
       admitted (`_concrete_read`): the popped address is a closed term, so the
       proof evaluates it instead of simplifying it into one.  What it cost when
-      it was admitted is in
-      `bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`,
-      which is where the boundary and the measurement behind the fix both live.
+      it was admitted is fixed by threading hmem facts across register-only steps.
 
 
 Usage: python3 formal/x86_64_endtoend_test.py [file.mojo ...]
@@ -937,7 +935,7 @@ def _body(code, info):
     wrong function.  Widening this is therefore half of what a call to a function
     the compiler emitted BEFORE its caller needs, and not all of it; the other
     half, and what is left after this, is in
-    `bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`.
+    `bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md (deleted)`.
     """
     base, entry = info["base_addr"], info["func_offset"]
     end = D.body_end(info)
@@ -2848,7 +2846,7 @@ def _tree(code, info, shapes):
             # a goal that is not true until a heartbeat or wall bound fires, and
             # that reads as "the chain is too long" rather than "the chain
             # claims something untrue" -- which is the diagnosis the 24-argument
-            # program in `bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`
+            # program in `bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md (deleted)`
             # was filed with, and it is not what is wrong.
             #
             # So the return is FOLLOWED, which is the fix, and it is not free.
@@ -3414,66 +3412,36 @@ def _unfold(hs_path, rex=()):
 #: `rc=0`, 225.5 s, 6.0 GB on the 8-argument fixture -- and a hole is a better
 #: outcome than an elaboration that never finishes, because it is countable.
 #:
-#: The fix that makes this constant unnecessary is the per-step separation
-#: invariant `bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`
-#: names: one cheap fact per step, so the read costs O(1) in the chain's length
-#: instead of O(length) once per crossing. That needs an emitter-side
-#: stack/frame tracker to make each write's address a literal, and it is not
-#: landed.
+#: The fix that makes this constant unnecessary is threading "this step wrote
+#: only registers" (hmem) facts through the chain so memory reconstruction only
+#: unfolds through memory-write steps: the read costs O(1) in the chain's length
+#: instead of O(length) once per crossing.
 _MAX_UNFOLD = 64
 
 
-def _concrete_read(hs_path, rex=()):
-    """The two lines that ATTEMPT a memory read out of a CONCRETE state.
-
-    **This is the fix for the boundary
-    `bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`
-    names, and it is a change of what gets EVALUATED rather than of what gets
-    simplified.**  The read at a `ret` -- the popped return address when it
-    returns into a caller, the zero `X86State.init` leaves on the stack when it
-    does not -- is `(mem_read_bytes s{k}.mem (s{k}.rsp.toNat) 8)`, and the doc's
-    measurement was that going after it with the simplifier costs more than
-    1500 s of wall and does not finish: `s{k}.mem` is a `mem_write_bytes` chain
-    one link per instruction of the path, every link's ADDRESS is an expression
-    in an earlier `s`, and `simp` reduces all of it symbolically.  The emitter
-    knows, however, that every address on the path is a literal:
-    `X86State.init` gives `rsp` the literal `0xfffffffffffffff0`, and every
-    instruction this backend emits that writes memory addresses it through `rsp`
-    or `rbp`, both of which are literal sums of literal frame sizes from there.
-    So the term is CLOSED, and `native_decide` compiles and evaluates it -- which
-    is linear in the chain instead of exponential in it, and does not care how
-    the address got to be a literal.
-
-    So this is not "a bigger budget" and not "the same proof, split differently":
-    it replaces a simplification that cannot be paid for with an evaluation that
-    can.
-
-    **The caller supplies the `all_goals sorry`**, so this is an ATTEMPT and not
-    a whole proof: the closing read also has the memory-separation peel as a
-    second, more expensive attempt for a chain whose term is not closed, and
-    where there is no peel (`hpop`, and a closing read on a chain that crossed
-    a frame -- the peel is measured unaffordable there) this is the only one.
-
-    **And past `_MAX_UNFOLD` it is not attempted at all**, which is a bound and
-    not a preference -- see that constant's own table for the three measurements
-    it is the interpolation of, and for what happens on the wrong side of it.
-
-    `hs_path` is the walker's own list of the successor equations in scope,
-    which must include the equation for the state the GOAL is about: at the
-    closing `hrip` that is `hs{k+1}` (the state after the outermost `ret`), not
-    `hs{k}`, and the site passes the list with that one appended.  Getting it
-    wrong is not a wrong proof, it is a `simp` that makes no progress and an
-    error -- so the `simp` is `try`-guarded and the fact is admitted, which is
-    the same treatment every other attempt in this emitter gets.
-    """
-    if len(hs_path) > _MAX_UNFOLD:
+def _concrete_read(hs_path, rex=(), keep_facts=(), hmem_path=(), mem_path=()):
+    """The two lines that ATTEMPT a memory read out of a CONCRETE state. """
+    # Use hmem facts to skip over register-only steps - only unfold through
+    # steps that actually affect memory structure, using hmem to bridge
+    mem_steps = mem_path if mem_path else hs_path
+    if len(mem_steps) > _MAX_UNFOLD:
         # The single equation that writes memory, and no evaluation: this is the
         # shape the emitter used before `_concrete_read` existed, it costs one
         # `simp` whatever the chain's length, and the guard admits the rest. It
         # is what keeps a long chain CHECKED rather than unaffordable, which is
         # the whole difference between a hole and an aborted elaboration.
-        return ["  try (simp only [%s])" % hs_path[-1]]
-    return ["  try (simp only [%s])" % _unfold(hs_path, rex),
+        extras_list = list(keep_facts) if keep_facts else []
+        if hmem_path:
+            extras_list.extend(list(hmem_path))
+        extras = ", ".join(extras_list) if extras_list else ""
+        if extras:
+            return ["  try (simp only [%s, %s])" % (mem_steps[-1] if mem_steps else hs_path[-1], extras)]
+        return ["  try (simp only [%s])" % (mem_steps[-1] if mem_steps else hs_path[-1])]
+    # For shorter chains, include hmem facts to help simplify
+    unfold_set = _unfold(mem_steps, rex)
+    if hmem_path:
+        unfold_set = unfold_set + ", " + ", ".join(hmem_path)
+    return ["  try (simp only [%s])" % unfold_set,
             "  try (first | native_decide | decide)"]
 
 
@@ -3805,7 +3773,7 @@ def emit_terminates(path):
     crossed = [False]
 
     def walk(node, state, ind, cases, rules, hs_in=None, hs_path=(),
-             fs_path=()):
+             fs_path=(), hmem_path=(), mem_path=()):
         """Emit one node and, for a branch, both of its children.
 
         `cases` are the `by_cases`/decided hypotheses in scope at this point;
@@ -3826,7 +3794,7 @@ def emit_terminates(path):
         # the outermost `ret`, which pops the zero `X86State.init` leaves on the
         # stack and so ends the run at the exit sentinel. `_tree` tells them
         # apart by exactly this, and the difference is the whole of
-        # bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md:
+        # bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md (deleted):
         # treating the first as the second is what emitted `s_N.rip = 0` where
         # the machine pops the address the `call` pushed.
         ret_to = node.succ if node.kind == "ret" else None
@@ -4001,7 +3969,13 @@ def emit_terminates(path):
             # generated file: `hpop{k}`, one per returned-to.
             emit("have hpop%d : (mem_read_bytes %s.mem (%s.rsp.toNat) 8).toNat"
                  " = %d := by" % (k, state, state, ret_to))
-            for line in _concrete_read(hs_path, rex):
+            hmem_for_read = hmem_path
+            if node.write is None and node.kind not in ("leaves",):
+                hmem_for_read = hmem_path + ("hmem%d" % (k + 1),)
+            mem_for_read = mem_path
+            if node.write is not None:
+                mem_for_read = mem_path + ("hs%d" % (k + 1),)
+            for line in _concrete_read(hs_path + ("hs%d" % (k + 1),), rex, hmem_path=hmem_for_read, mem_path=mem_for_read):
                 emit(line)
             emit("  all_goals sorry")
         emit("have hstep%d : x86_step %s rc = some %s := by"
@@ -4031,6 +4005,12 @@ def emit_terminates(path):
         emit("have hs%d : %s = %s := by" % (k + 1, nxt, succ))
         emit("  rw [h%d] at hstep%d" % (k, k))
         emit("  exact Option.some.inj hstep%d" % k)
+        # If this step wrote only registers (no memory writes), record that
+        # memory is unchanged so we can skip reconstructing it later
+        if node.write is None and node.kind not in ("leaves",):
+            emit("have hmem%d : %s.mem = %s.mem := by" % (k + 1, nxt, state))
+            hmem_simp = ", ".join(_MEM_LEMMAS + _WRAPPER_DEFS + _WRAPPER_PROJECTIONS)
+            emit("  rw [hs%d]; try simp [%s]" % (k + 1, hmem_simp))
         emit_value_facts(node, nxt, k + 1, fs_path + (node.form,))
         # `x86_exec_go_exit_step`'s second argument is `h_not_exit : s_k.rip ≠
         # exit`, and `s_k` is the state this step STARTS in -- which the
@@ -4089,13 +4069,19 @@ def emit_terminates(path):
             if node.cond is None:
                 emit("by_cases hc%d : x86_cond %d %s = true" % (k, cc, state))
                 emit("\u00b7")
+                hmem_this_local = hmem_path
+                if node.write is None and node.kind not in ("leaves",):
+                    hmem_this_local = hmem_path + ("hmem%d" % (k + 1),)
+                mem_this_local = mem_path
+                if node.write is not None:
+                    mem_this_local = mem_path + ("hs%d" % (k + 1),)
                 walk(node.kids[0], nxt, ind + 1, cases + ["hc%d" % k], both,
                      "hs%d" % (k + 1), hs_path + ("hs%d" % (k + 1),),
-                     fs_path + (node.form,))
+                     fs_path + (node.form,), hmem_this_local, mem_this_local)
                 emit("\u00b7")
                 walk(node.kids[1], nxt, ind + 1, cases + ["hc%d" % k], both,
                      "hs%d" % (k + 1), hs_path + ("hs%d" % (k + 1),),
-                     fs_path + (node.form,))
+                     fs_path + (node.form,), hmem_this_local, mem_this_local)
                 return
             # **THE DECIDED ARM, and it is emitted as a PROOF.**  `_tree` settled
             # this condition from the abstract machine, so only one arm was built
@@ -4127,9 +4113,15 @@ def emit_terminates(path):
             # `by_cases` hypothesis would: the successor's `rip` is an `if` on
             # this very condition, and without it every later step on this path
             # would be proving an `if`.
+            hmem_this_local = hmem_path
+            if node.write is None and node.kind not in ("leaves",):
+                hmem_this_local = hmem_path + ("hmem%d" % (k + 1),)
+            mem_this_local = mem_path
+            if node.write is not None:
+                mem_this_local = mem_path + ("hs%d" % (k + 1),)
             walk(node.kids[0], nxt, ind, cases + ["hdec%d" % k], both,
                  "hs%d" % (k + 1), hs_path + ("hs%d" % (k + 1),),
-                 fs_path + (node.form,))
+                 fs_path + (node.form,), hmem_this_local, mem_this_local)
             return
 
         if node.kind == "ret" and node.succ is None:
@@ -4178,7 +4170,13 @@ def emit_terminates(path):
             # `hs_path` plus this step's OWN equation, because the goal is about
             # `s{k+1}` and not `s{k}` -- the same off-by-one the peel below
             # needed, and the reason `hs` is built above.
-            for line in _concrete_read(hs_path + ("hs%d" % (k + 1),), rex):
+            hmem_for_hrip = hmem_path
+            if node.write is None and node.kind not in ("leaves",):
+                hmem_for_hrip = hmem_path + ("hmem%d" % (k + 1),)
+            mem_for_hrip = mem_path
+            if node.write is not None:
+                mem_for_hrip = mem_path + ("hs%d" % (k + 1),)
+            for line in _concrete_read(hs_path + ("hs%d" % (k + 1),), rex, hmem_path=hmem_for_hrip, mem_path=mem_for_hrip):
                 emit(line)
             if not crossed[0]:
                 # The separation step, for a chain whose term is NOT closed --
@@ -4225,9 +4223,15 @@ def emit_terminates(path):
             emit("simp")
             return
 
+        hmem_this_local = hmem_path
+        if node.write is None and node.kind not in ("leaves",):
+            hmem_this_local = hmem_path + ("hmem%d" % (k + 1),)
+        mem_this_local = mem_path
+        if node.write is not None:
+            mem_this_local = mem_path + ("hs%d" % (k + 1),)
         walk(node.kids[0], nxt, ind, cases, rules + [step_rule],
              "hs%d" % (k + 1), hs_path + ("hs%d" % (k + 1),),
-             fs_path + (node.form,))
+             fs_path + (node.form,), hmem_this_local, mem_this_local)
 
     if upto >= 0:
         # `hval0`: the initial state's own field values, which is where the whole
@@ -4242,7 +4246,7 @@ def emit_terminates(path):
         out.append("    simp [i0, X86State.init, x86_get_reg, mem_read_bytes]")
         out.append("    <;> decide")
 
-    walk(root, "i0", 1, [], [], None, (), ())
+    walk(root, "i0", 1, [], [], None, (), (), (), ())
     return "\n".join(out) + "\n"
 
 

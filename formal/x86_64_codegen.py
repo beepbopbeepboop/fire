@@ -1832,7 +1832,7 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         `formal/x86_64_model_coverage_test.py`); what the disp32 form is NOT is
         reachable by a generated end-to-end proof yet, because the path through
         a call this wide does not close —
-        `bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`.
+        `bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md (deleted)`.
         """
         self.asm.emit(encode_mov_r64_rm64(
             Reg.R11, Reg.RBP, _STACK_ARG_OFF + 8 * (index - len(ARG_REGS))))

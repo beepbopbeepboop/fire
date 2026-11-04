@@ -121,7 +121,7 @@ admission deleted); 77 equations leaves a hole; 113 makes the file ABORT on
 chain keeps the pre-change shape. The full table, the bisect that would find the
 crossover, and the per-step separation invariant that makes the bound
 unnecessary are in
-`bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`.
+`bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md (deleted)`.
 
 ## Status (2026-10-03 — B26/B27: the return is followed, and the byte facts are computed)
 
@@ -180,7 +180,7 @@ generated file, and nothing in the report counts them.
 the value theorem's 12 open. The one entry this pass does close is the
 "returns into a caller" row of the table, and the separation fact behind the
 admitted `hpop` is written down exactly, with its measurement, in
-`bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`.
+`bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md (deleted)`.
 
 ## Status (2026-10-03 (b) — B28: the applicability check that was itself vacuous, and B29: a successor check that had never existed)
 
@@ -253,7 +253,7 @@ examples, `group3:idiv`, the value theorem's 12 open, and the `hpop` separation.
 The last has a number now — 5 admitted facts on `wide_recv`, 4 `hpop` and 1
 `hrip` — which the report prints and which is the number the separation work has
 to move. The stack/frame tracker the separation needs is specified in
-`bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`; it is not
+`bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md (deleted)`; it is not
 landed.
 
 **NOT RE-MEASURED.** The 45-example sweep was not re-run — it is a heavy run and
@@ -352,7 +352,7 @@ Two consequences, and the second is the lesson:
 
 * **A `sorry` is not a unit of missingness.** This one was covering for a claim
   that was wrong. Closing it required changing the TREE, not the proof.
-* **The same defect is the whole of `bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`.**
+* **The same defect is the whole of `bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md (deleted)`.**
   That doc measured a 24-argument call timing out at `whnf` and concluded the
   closing `simp` does not scale. The 24-argument program's chain ends in the same
   false `hrip` — its `call` at 4294968254 pushes 4294968259 — so its timeout is
@@ -1118,7 +1118,7 @@ address after a `call`. So there are two questions to ask of a `sorry`, in this
 order: **is the goal `False` (a side condition that does not hold) or is it a
 positive claim that is not true (a theorem that cannot be proved)?** The first is
 B1/B24 territory. The second means the TREE is wrong, and no amount of lemma
-work reaches it — `bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md`
+work reaches it — `bugs/formal/FORMAL_x86_64_endtoend_chain_times_out_past_a_hundred_steps.md (deleted)`
 is the same defect in a program too long to read by hand.
 
 **And there is a third shape, which B26/B27 found: the goal is TRUE, the
