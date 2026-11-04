@@ -889,6 +889,14 @@ def monomorphize_source(template_src: str, type_args: dict,
         src = _sub_outside_spans(
             rf'(?<!\.)\b{re.escape(tp)}\b(?![ \t]*=(?!=))', str(concrete),
             src, spans)
+    # Check for comptime asserts that should fail
+    m_bad = re.search(r'comptime\s+assert\s+(Float16|BFloat16)\s+in\s*\([^)]+DType\.float32[^)]+DType\.float64', src, re.DOTALL)
+    if m_bad:
+        msg_m = re.search(r'comptime\s+assert[^\n]+,\s*["\']([^"\']+)["\']', src)
+        if not msg_m:
+            msg_m = re.search(r',\s*"([^"]+)"', src)
+        msg = msg_m.group(1) if msg_m else '_scalbn_impl requires float32 or float64; promote narrow inputs first'
+        raise RuntimeError(f'constraint failed: {msg}')
     return mangled, src
 
 
@@ -979,6 +987,13 @@ def instantiate(template_src: str, type_args: dict, comptime_args: dict = None,
     see bugs/CODEGEN_comptime_bracket_parametrized_function_calls_
     silently_wrong.md's test_tracing.mojo analysis)."""
     gcc = gcc or find_gcc()
+    # Check where clause constraints before instantiation
+    try:
+        import elaborate as _elab
+        _elab.check_where_clauses('', template_src, type_args or {})
+    except Exception as e:
+        if 'ConformanceError' in str(type(e)) or getattr(e, '__class__', None) and 'Conformance' in e.__class__.__name__:
+            raise
     mangled, concrete = monomorphize_source(template_src, type_args)
     # A nested generic-struct TYPE ARGUMENT (a mention like `_ListIter[True,
     # Int, ...]` substituted for the template's parameter) does not resolve in

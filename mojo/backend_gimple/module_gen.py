@@ -14928,9 +14928,14 @@ def gen_module_impl(self, stmts: list):
         '#include <stdlib.h>',
         '#include <string.h>',
         '#include <math.h>',
+        'extern double copysign(double, double);',
         '#include <stdio.h>',
         '#include <setjmp.h>',
         '#include <dlfcn.h>',
+        '#include <sys/time.h>',
+        '#include <sys/socket.h>',
+        '#include <sys/types.h>',
+        '#include <time.h>',
         '#if USE_PYTHON',
         '#include <Python.h>',
         '#endif',
@@ -15386,12 +15391,25 @@ def gen_module_impl(self, stmts: list):
     if self.emit_struct_defs and hasattr(self, 'struct_field_types') and self.struct_field_types:
         parts.append('')
         emitted = set()
+        _system_structs = {
+            'timeval', 'linger', 'timespec', 'timezone',
+            'fd_set', 'rusage', 'rlimit', 'stat', 'stat64', 'dirent', 'dirent64',
+            'sockaddr', 'sockaddr_in', 'sockaddr_in6', 'sockaddr_un', 'sockaddr_storage',
+            'msghdr', 'cmsghdr', 'iovec', 'pollfd', 'sigaction', 'sigset_t',
+            'termios', 'winsize', 'passwd', 'group', 'utimbuf', 'tm'
+        }
         max_iterations = len(self.struct_field_types) + 1
         iteration = 0
         while emitted != set(self.struct_field_types.keys()) and iteration < max_iterations:
             iteration += 1
             for struct_name in sorted(self.struct_field_types.keys()):
                 if struct_name in emitted:
+                    continue
+                if struct_name in _system_structs:
+                    # Don't redefine system structs; rely on system headers
+                    emitted.add(struct_name)
+                    self._emitted_structs.add(struct_name)
+                    self._struct_typedef_texts[struct_name] = ''
                     continue
                 fields = _struct_typedef_fields(self, struct_name)
                 dependencies_met = True
@@ -17089,6 +17107,9 @@ def gen_module_impl(self, stmts: list):
             continue
         if _sn in self._LIBC_DECLARED and _sn not in _C_RESERVED_FUNCS:
             continue
+        _system_types_skip = {'time_t', 'suseconds_t', 'size_t', 'ssize_t', 'off_t', 'socklen_t', 'pid_t', 'uid_t', 'gid_t', 'useconds_t', 'clock_t', 'fd_set', 'sa_family_t', 'in_addr_t', 'in_port_t'}
+        if _sn in _system_types_skip or _as_str(sym_name) in _system_types_skip:
+            continue
 
         module = _as_str(sym_info.get('module', ''))
         if module in _stub_only_modules:
@@ -17110,13 +17131,17 @@ def gen_module_impl(self, stmts: list):
         safe = self._func_csym(_as_str(sym_name))
         if 'signature' in sym_info:
             if _sn in _C_RESERVED_FUNCS:
-                ret_type = _as_str(sym_info.get('c_return_type')) or _as_str(sym_info.get('return_type', 'int64_t'))
-                if ret_type and ret_type != 'unknown' and not any(
-                        c in ret_type for c in ('*', ' ', 'int', 'char', 'void', 'float', 'double')):
-                    ret_type = self._resolve_type(ret_type)
-                elif not ret_type or ret_type == 'unknown':
-                    ret_type = 'int64_t'
-                parts.append(f"#ifndef {safe}\nextern {ret_type} {safe} (...);  /* from {module} */\n#endif")
+                _system_types_skip = {'time_t', 'suseconds_t', 'size_t', 'ssize_t', 'off_t', 'socklen_t', 'pid_t', 'uid_t', 'gid_t', 'useconds_t', 'clock_t', 'fd_set', 'sa_family_t', 'in_addr_t', 'in_port_t'}
+                if _sn in _system_types_skip or safe in _system_types_skip:
+                    continue
+                else:
+                    ret_type = _as_str(sym_info.get('c_return_type')) or _as_str(sym_info.get('return_type', 'int64_t'))
+                    if ret_type and ret_type != 'unknown' and not any(
+                            c in ret_type for c in ('*', ' ', 'int', 'char', 'void', 'float', 'double')):
+                        ret_type = self._resolve_type(ret_type)
+                    elif not ret_type or ret_type == 'unknown':
+                        ret_type = 'int64_t'
+                    parts.append(f"#ifndef {safe}\nextern {ret_type} {safe} (...);  /* from {module} */\n#endif")
             else:
                 signature = _as_str(sym_info['signature'])
                 orig_name = sym_info.get('original_name', _sn)
@@ -17308,7 +17333,12 @@ def gen_module_impl(self, stmts: list):
                         "extern int64_t PythonObject (int64_t, ...);  /* from std.python: named dummy = fire_runtime's definition */\n"
                         "#endif")
                 else:
-                    parts.append(f"#ifndef {safe}\nextern {ret_type} {safe} (...);  /* from {module} */\n#endif")
+                    _system_types_skip = {'time_t', 'suseconds_t', 'size_t', 'ssize_t', 'off_t', 'socklen_t', 'pid_t', 'uid_t', 'gid_t', 'useconds_t', 'clock_t', 'fd_set', 'sa_family_t', 'in_addr_t', 'in_port_t'}
+                    if safe in _system_types_skip or _sn in _system_types_skip:
+                        continue
+                        pass
+                    else:
+                        parts.append(f"#ifndef {safe}\nextern {ret_type} {safe} (...);  /* from {module} */\n#endif")
 
     if self.imported_symbols:
         parts.append('')

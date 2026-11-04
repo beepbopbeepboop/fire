@@ -2508,6 +2508,7 @@ def _register_async_result_kinds(stmts: list, closure_stmts: list = ()) -> None:
     kind. Walks the current module plus `closure_stmts`."""
     _ASYNC_RESULT_KIND.clear()
     _ASYNC_HANDLE_KIND.clear()
+    _ASYNC_HANDLE_KIND_BY_FUNC.clear()
     all_stmts = list(stmts)
     for sub in closure_stmts:
         if isinstance(sub, (list, tuple)):
@@ -2520,23 +2521,69 @@ def _register_async_result_kinds(stmts: list, closure_stmts: list = ()) -> None:
                     and not any(isinstance(x, N.YieldExpr) for x in _walk(n))):
                 _note_async_kind(_ASYNC_RESULT_KIND, _cm_as_str(n.name),
                                  _async_result_kind(n))
+    # Track handles per-function to avoid cross-function name collisions
     for s in stmts:
-        for n in _walk(s):
-            if not isinstance(n, (N.AssignStmt, N.VarDecl)):
-                continue
-            call = _unwrap_transfer(n.value)
-            if _is_create_task_call(call) and call.args:
-                call = call.args[0]
-            tname = _await_target_name(call)
-            if tname is None or tname not in _ASYNC_RESULT_KIND:
-                continue
-            if isinstance(n, N.VarDecl):
-                var = n.name
-            else:
-                var = n.target.name if isinstance(n.target, N.IdentExpr) else None
-            if var:
-                _note_async_kind(_ASYNC_HANDLE_KIND, _cm_as_str(var),
-                                 _ASYNC_RESULT_KIND[tname])
+        # Walk with function context
+        def _walk_with_func(nodes, func_name=None):
+            for n in nodes:
+                if isinstance(n, N.FunctionDef):
+                    fname = _cm_as_str(getattr(n, 'name', ''))
+                    _walk_with_func(getattr(n, 'body', []) or [], fname)
+                    # Also check nested functions
+                    continue
+                if isinstance(n, (N.AssignStmt, N.VarDecl)):
+                    call = _unwrap_transfer(getattr(n, 'value', None))
+                    if _is_create_task_call(call) and getattr(call, 'args', None):
+                        call = call.args[0]
+                    tname = _await_target_name(call)
+                    if tname is not None and tname in _ASYNC_RESULT_KIND:
+                        if isinstance(n, N.VarDecl):
+                            var = n.name
+                        else:
+                            var = n.target.name if isinstance(n.target, N.IdentExpr) else None
+                        if var:
+                            kind = _ASYNC_RESULT_KIND[tname]
+                            # Record both globally (for backward compat) and per-function
+                            _note_async_kind(_ASYNC_HANDLE_KIND, _cm_as_str(var), kind)
+                            if func_name:
+                                _ASYNC_HANDLE_KIND_BY_FUNC.setdefault(func_name, {})
+                                _note_async_kind(_ASYNC_HANDLE_KIND_BY_FUNC[func_name], _cm_as_str(var), kind)
+                    # recurse into nested structures
+                    for k, v in list(vars(n).items()):
+                        if k in ('line', 'col'):
+                            continue
+                        if isinstance(v, list) and v and _looks_like_stmt_list(v):
+                            _walk_with_func(v, func_name)
+                        elif hasattr(v, '__dict__') and not isinstance(v, N.FunctionDef):
+                            _walk_with_func([v], func_name)
+                else:
+                    for k, v in list(vars(n).items()):
+                        if k in ('line', 'col'):
+                            continue
+                        if isinstance(v, list) and v and _looks_like_stmt_list(v):
+                            _walk_with_func(v, func_name)
+                        elif hasattr(v, '__dict__') and not isinstance(v, N.FunctionDef):
+                            _walk_with_func([v], func_name)
+        try:
+            _walk_with_func([s], None)
+        except Exception:
+            # Fallback to old behavior
+            for n in _walk(s):
+                if not isinstance(n, (N.AssignStmt, N.VarDecl)):
+                    continue
+                call = _unwrap_transfer(n.value)
+                if _is_create_task_call(call) and call.args:
+                    call = call.args[0]
+                tname = _await_target_name(call)
+                if tname is None or tname not in _ASYNC_RESULT_KIND:
+                    continue
+                if isinstance(n, N.VarDecl):
+                    var = n.name
+                else:
+                    var = n.target.name if isinstance(n.target, N.IdentExpr) else None
+                if var:
+                    _note_async_kind(_ASYNC_HANDLE_KIND, _cm_as_str(var),
+                                     _ASYNC_RESULT_KIND[tname])
 
 
 def _async_result_read(kind: str, raw):
@@ -2559,19 +2606,41 @@ def _result_kind_of(expr) -> str:
     name = _await_target_name(u)
     if name is not None:
         table, key = _ASYNC_RESULT_KIND, name
+        if key not in table:
+            return 'i'
+        kind = table[key]
+        if kind is None:
+            raise RuntimeError(
+                f'cannot compile module: {key!r} names async functions whose '
+                'results have different kinds, so this await cannot tell which '
+                'result slot to read (v0)')
+        return kind
     elif isinstance(u, N.IdentExpr):
-        table, key = _ASYNC_HANDLE_KIND, _cm_as_str(u.name)
+        vkey = _cm_as_str(u.name)
+        # Try function-scoped first
+        if _ASYNC_CUR_FUNC and _ASYNC_CUR_FUNC in _ASYNC_HANDLE_KIND_BY_FUNC:
+            table = _ASYNC_HANDLE_KIND_BY_FUNC[_ASYNC_CUR_FUNC]
+            if vkey in table:
+                kind = table[vkey]
+                if kind is None:
+                    raise RuntimeError(
+                        f'cannot compile module: {vkey!r} names async functions whose '
+                        'results have different kinds, so this await cannot tell which '
+                        'result slot to read (v0)')
+                return kind
+        # Fall back to global
+        table, key = _ASYNC_HANDLE_KIND, vkey
+        if key not in table:
+            return 'i'
+        kind = table[key]
+        if kind is None:
+            raise RuntimeError(
+                f'cannot compile module: {key!r} names async functions whose '
+                'results have different kinds, so this await cannot tell which '
+                'result slot to read (v0)')
+        return kind
     else:
         return 'i'
-    if key not in table:
-        return 'i'
-    kind = table[key]
-    if kind is None:
-        raise RuntimeError(
-            f'cannot compile module: {key!r} names async functions whose '
-            'results have different kinds, so this await cannot tell which '
-            'result slot to read (v0)')
-    return kind
 
 
 # The C slot type a yield of each kind needs in the COMPILED (cpp) path's
@@ -2958,6 +3027,10 @@ _ASYNC_RET_KIND: list = ['i']
 # call (or `create_task(call)`) to such a name.
 _ASYNC_RESULT_KIND: dict = {}
 _ASYNC_HANDLE_KIND: dict = {}
+# Per-function handle kinds to avoid cross-function name collisions.
+_ASYNC_HANDLE_KIND_BY_FUNC: dict = {}
+# Current function being rewritten (for scope-aware lookups).
+_ASYNC_CUR_FUNC: str | None = None
 
 # Bare names of struct `async def` METHODS in the module currently being
 # lowered that passed async-method eligibility -- populated fresh at the
@@ -4499,12 +4572,18 @@ def _mark_coro_param_elem_kinds(body_fd, real_params, env):
 
 def _lower_one_async_gen(fn: N.FunctionDef, meta: list, base: str | None = None,
                          struct_name: str | None = None, struct_def=None) -> N.FunctionDef:
+    global _ASYNC_CUR_FUNC
     base, is_method, real_params, prologue, body_params, c_params = \
         _async_method_setup(fn, base, struct_name)
     body_name = f'{base}_body'
     _TASK_VARS.clear()
     _TASK_VARS.update(_scan_task_vars(fn))
-    new_body = prologue + _rewrite_async_gen_stmts([_deep_copy_stmt(s) for s in fn.body], _CVAR)
+    old_cur = _ASYNC_CUR_FUNC
+    try:
+        _ASYNC_CUR_FUNC = _cm_as_str(fn.name)
+        new_body = prologue + _rewrite_async_gen_stmts([_deep_copy_stmt(s) for s in fn.body], _CVAR)
+    finally:
+        _ASYNC_CUR_FUNC = old_cur
     body_fd = N.FunctionDef(name=body_name, params=body_params, return_type=None, body=new_body)
     body_fd.is_generator = False
     body_fd.is_async = False
@@ -4526,6 +4605,7 @@ def _lower_one_async_gen(fn: N.FunctionDef, meta: list, base: str | None = None,
 
 def _lower_one_async(fn: N.FunctionDef, meta: list, base: str | None = None,
                      struct_name: str | None = None, struct_def=None) -> N.FunctionDef:
+    global _ASYNC_CUR_FUNC
     _refusal = _async_return_refusal(fn)
     if _refusal is not None:
         raise RuntimeError(f'cannot compile module: {_refusal}')
@@ -4536,7 +4616,12 @@ def _lower_one_async(fn: N.FunctionDef, meta: list, base: str | None = None,
     _TASK_VARS.clear()
     _TASK_VARS.update(_scan_task_vars(fn))
     _ASYNC_RET_KIND[0] = kind
-    new_body = prologue + _rewrite_async_stmts([_deep_copy_stmt(s) for s in fn.body], _CVAR)
+    old_cur = _ASYNC_CUR_FUNC
+    try:
+        _ASYNC_CUR_FUNC = _cm_as_str(fn.name)
+        new_body = prologue + _rewrite_async_stmts([_deep_copy_stmt(s) for s in fn.body], _CVAR)
+    finally:
+        _ASYNC_CUR_FUNC = old_cur
     body_fd = N.FunctionDef(name=body_name, params=body_params, return_type=None, body=new_body)
     body_fd.is_generator = False
     body_fd.is_async = False
@@ -4717,6 +4802,7 @@ def _rewrite_asyncio_run_stmts(stmts: list, cvar: str | None, task_vars: set | N
     lm = local_map or {}
     hv = handle_vars or set()
     out = []
+    global _ASYNC_CUR_FUNC
     for s in stmts:
         if isinstance(s, N.FunctionDef):
             fn_ordinary = not getattr(s, 'is_generator', False) and not getattr(s, 'is_async', False)
@@ -4735,8 +4821,13 @@ def _rewrite_asyncio_run_stmts(stmts: list, cvar: str | None, task_vars: set | N
             # qualified-`{base}_start` rename. Matches real Python lexical
             # scoping (an inner def sees every enclosing scope's bindings).
             fn_lm = {**lm, **lmaps.get(s.name, {})} if fn_ordinary else {}
-            s.body = _rewrite_asyncio_run_stmts(s.body, cvar, fn_task_vars, fn_lm,
-                                                  lmaps, fn_handle_vars)
+            old_cur = _ASYNC_CUR_FUNC
+            try:
+                _ASYNC_CUR_FUNC = _cm_as_str(s.name)
+                s.body = _rewrite_asyncio_run_stmts(s.body, cvar, fn_task_vars, fn_lm,
+                                                      lmaps, fn_handle_vars)
+            finally:
+                _ASYNC_CUR_FUNC = old_cur
             out.append(s)
             continue
         tv = task_vars or set()

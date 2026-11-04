@@ -4343,6 +4343,10 @@ class GimpleGen:
         'Dict', 'List', 'Set', 'Array', 'Map', 'Kwargs', 'Tuple', 'Span',
         'Optional', 'Pointer', 'StringSlice', 'UnsafePointer', 'OwnedPointer',
         'ArcPointer', 'MojoList', 'MojoDict', 'MojoSet',
+        'timeval', 'timespec', 'linger', 'timezone',
+        'sockaddr', 'sockaddr_in', 'sockaddr_in6', 'sockaddr_un', 'sockaddr_storage',
+        'msghdr', 'cmsghdr', 'iovec', 'pollfd', 'fd_set', 'rusage', 'rlimit',
+        'stat', 'stat64', 'dirent', 'dirent64', 'termios', 'winsize',
     })
 
     # Generic free functions available without an explicit import — real Mojo

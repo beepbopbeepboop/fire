@@ -54,6 +54,9 @@ UnaryOp = _fc.UnaryOp
 BinaryOp = _fc.BinaryOp
 CompareChain = _fc.CompareChain
 CallExpr = _fc.CallExpr
+TupleExpr = getattr(_fc, 'TupleExpr', None)
+ListExpr = getattr(_fc, 'ListExpr', None)
+DottedLiteral = getattr(_fc, 'DottedLiteral', None)
 
 
 def compare_op(op: str, left, right):
@@ -75,6 +78,16 @@ def compare_op(op: str, left, right):
     if op == '<=':  return left <= right
     if op == '>':   return left > right
     if op == '>=':  return left >= right
+    if op == 'in':
+        try:
+            return left in right
+        except Exception:
+            return None
+    if op == 'not in':
+        try:
+            return left not in right
+        except Exception:
+            return None
     return None
 
 
@@ -200,6 +213,28 @@ def eval_const(node, bindings: dict, platform: str = None):
     if isinstance(node, BoolLiteral): return node.value
     if isinstance(node, IntLiteral):  return node.value
     if isinstance(node, StringLiteral): return node.value
+    if DottedLiteral is not None and isinstance(node, DottedLiteral):
+        # .name - for enum/DType values, return a marker
+        try:
+            return ('.', getattr(node, 'name'))
+        except Exception:
+            return None
+    if TupleExpr is not None and isinstance(node, TupleExpr):
+        res = []
+        for e in getattr(node, 'elements', []) or []:
+            v = eval_const(e, bindings, platform)
+            if v is None:
+                return None
+            res.append(v)
+        return tuple(res)
+    if ListExpr is not None and isinstance(node, ListExpr):
+        res = []
+        for e in getattr(node, 'elements', []) or []:
+            v = eval_const(e, bindings, platform)
+            if v is None:
+                return None
+            res.append(v)
+        return res
     # PART 6 (2026-10-23, family S): the string-wrapping CONSTRUCTOR over a
     # single foldable argument — `StringSlice("x")`, `StaticString("x")`,
     # `String("x")`, `StringSpan("x")`. In every backend of this tree the

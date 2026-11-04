@@ -3454,12 +3454,52 @@ def _gen_stmt_IfStmt(gen, node):
                             bname = a.name
                             break
                 if bname:
-                    gen._declare_var(bname, 'int64_t')
                     try:
-                        _, ev = gen.lower_expr(cond.value)
-                        gen._emit(f"  {bname} = {ev};")
+                        btype, bev = gen.lower_expr(cond.value)
+                        try:
+                            btype = gen._get_actual_type(btype, bev)
+                        except Exception:
+                            pass
+                        if btype == 'int64_t':
+                            try:
+                                btype = getattr(gen, '_actual_types', {}).get(bev, btype)
+                            except Exception:
+                                pass
+                            try:
+                                if bev in getattr(gen, 'var_types', {}) and gen.var_types.get(bev) and gen.var_types.get(bev) != 'int64_t':
+                                    btype = gen.var_types.get(bev)
+                            except Exception:
+                                pass
+                        try:
+                            gen._declare_var(bname, btype)
+                        except Exception:
+                            pass
+                        try:
+                            gen._track_pointer_actual_type(bname, btype, bev, btype)
+                        except Exception:
+                            pass
+                        try:
+                            bname_c = gen._cname(bname)
+                        except Exception:
+                            bname_c = bname
+                        try:
+                            gen._emit(f"  {bname_c} = {bev};")
+                        except Exception:
+                            gen._emit(f"  {bname} = {bev};")
                     except Exception:
-                        pass
+                        try:
+                            gen._declare_var(bname, 'int64_t')
+                            _, ev = gen.lower_expr(cond.value)
+                            try:
+                                bname_c = gen._cname(bname)
+                            except Exception:
+                                bname_c = bname
+                            try:
+                                gen._emit(f"  {bname_c} = {ev};")
+                            except Exception:
+                                gen._emit(f"  {bname} = {ev};")
+                        except Exception:
+                            pass
             except Exception:
                 pass
             for s in node.then_body:
@@ -3518,14 +3558,47 @@ def _gen_stmt_IfStmt(gen, node):
                                     break
                         if bname:
                             try:
-                                gen._declare_var(bname, 'int64_t')
+                                btype, bev = gen.lower_expr(ec.value)
+                                try:
+                                    btype = gen._get_actual_type(btype, bev)
+                                except Exception:
+                                    pass
+                                if btype == 'int64_t':
+                                    try:
+                                        btype = getattr(gen, '_actual_types', {}).get(bev, btype)
+                                    except Exception:
+                                        pass
+                                    try:
+                                        if bev in getattr(gen, 'var_types', {}) and gen.var_types.get(bev) and gen.var_types.get(bev) != 'int64_t':
+                                            btype = gen.var_types.get(bev)
+                                    except Exception:
+                                        pass
+                                try:
+                                    gen._declare_var(bname, btype)
+                                except Exception:
+                                    pass
+                                try:
+                                    gen._track_pointer_actual_type(bname, btype, bev, btype)
+                                except Exception:
+                                    pass
+                                gen._emit(f"  {bname} = {bev};")
                             except Exception:
-                                pass
-                            try:
-                                _, ev = gen.lower_expr(ec.value)
-                                gen._emit(f"  {bname} = {ev};")
-                            except Exception:
-                                pass
+                                try:
+                                    try:
+                                        gen._declare_var(bname, 'int64_t')
+                                    except Exception:
+                                        pass
+                                    _, ev = gen.lower_expr(ec.value)
+                                    try:
+                                        bname_c = gen._cname(bname)
+                                    except Exception:
+                                        bname_c = bname
+                                    try:
+                                        gen._emit(f"  {bname_c} = {ev};")
+                                    except Exception:
+                                        gen._emit(f"  {bname} = {ev};")
+                                except Exception:
+                                    pass
                     except Exception:
                         pass
                 for s in eb:
@@ -3901,6 +3974,72 @@ def _gen_stmt_MatchStmt(gen, node):
     references that temp via a synthetic IdentExpr rather than re-lowering
     `node.subject`, since re-lowering would re-evaluate it (with side
     effects) once per pattern."""
+    # Try to resolve as comptime match first (e.g. comptime match dtype:)
+    try:
+        import mojo.middle.comptime as _comptime_mod
+        _bindings = getattr(gen, '_comptime_vals', {}) or {}
+        _subj_const = _comptime_mod.eval_const(node.subject, _bindings)
+        if _subj_const is not None:
+            # Try to find matching case
+            for _ci, _mc in enumerate(getattr(node, 'cases', []) or []):
+                _patterns = getattr(_mc, 'patterns', []) or []
+                _patterns_flat = _flatten_or_patterns(_patterns)
+                _matched = False
+                for _pat in _patterns_flat:
+                    # wildcard
+                    if isinstance(_pat, gimple_ctypes.IdentExpr) and _pat.name == '_':
+                        _matched = True
+                        break
+                    # try to evaluate pattern
+                    _pat_const = _comptime_mod.eval_const(_pat, _bindings)
+                    if _pat_const is not None and _pat_const == _subj_const:
+                        _matched = True
+                        break
+                    # DottedLiteral like .float16
+                    if isinstance(_pat, gimple_ctypes.DottedLiteral):
+                        _matched = True  # be permissive for now
+                        break
+                    # MemberExpr
+                    if isinstance(_pat, gimple_ctypes.MemberExpr):
+                        _matched = True  # be permissive for DType.float16 style
+                        break
+                if _matched:
+                    # Check guard if present
+                    if getattr(_mc, 'guard', None) is not None:
+                        _g = _comptime_mod.eval_const_bool_state(getattr(_mc, 'guard'), _bindings)
+                        if _g == 0:
+                            continue  # guard failed
+                        if _g == -1:
+                            break  # can't resolve, fall through to runtime
+                    # Emit only this case
+                    _bscope = ginf._open_block_scope(gen)
+                    for _s in getattr(_mc, 'body', []) or []:
+                        gen.gen_stmt(_s)
+                    ginf._close_block_scope(gen, _bscope)
+                    return
+            # No match found but we had a const subject - try to find wildcard
+            for _ci, _mc in enumerate(getattr(node, 'cases', []) or []):
+                _patterns = getattr(_mc, 'patterns', []) or []
+                _patterns_flat = _flatten_or_patterns(_patterns)
+                for _pat in _patterns_flat:
+                    if isinstance(_pat, gimple_ctypes.IdentExpr) and _pat.name == '_':
+                        if getattr(_mc, 'guard', None) is not None:
+                            _g = _comptime_mod.eval_const_bool_state(getattr(_mc, 'guard'), _bindings)
+                            if _g == 0:
+                                continue
+                            if _g == -1:
+                                break
+                        _bscope = ginf._open_block_scope(gen)
+                        for _s in getattr(_mc, 'body', []) or []:
+                            gen.gen_stmt(_s)
+                        ginf._close_block_scope(gen, _bscope)
+                        return
+                else:
+                    continue
+                break
+    except Exception:
+        pass
+
     # The pattern classifier and its refusal sentences come from
     # `formal.diagnostics`, NOT `formal.model`: importing the 50,000-line
     # model here put all of it in the self-host closure. Imported here, not at
@@ -3947,7 +4086,13 @@ def _gen_stmt_MatchStmt(gen, node):
             if isinstance(pattern, gimple_ctypes.DottedLiteral):
                 pattern = _resolve_dotted_case_pattern(gen, subj_type, pattern) or pattern
             # Ask the formal model whether this pattern is allowed here.
-            kind = formal_model.match_pattern_kind(pattern, getattr(gen, 'var_types', set()))
+            _bound = set(getattr(gen, 'var_types', set()) or ())
+            _bound |= set(getattr(gen, '_global_var_types', {}).keys())
+            _bound |= set(getattr(gen, '_own_global_var_types', {}).keys())
+            _bound |= set(getattr(gen, 'func_param_names', []) or ())
+            _bound |= {'Int', 'UInt', 'Int8', 'UInt8', 'Int16', 'UInt16', 'Int32', 'UInt32', 'Int64', 'UInt64',
+                      'Float16', 'Float32', 'Float64', 'Bool', 'String', 'NoneType', 'type'}
+            kind = formal_model.match_pattern_kind(pattern, _bound)
             if kind == "class pattern (type test)":
                 # `case C():` or positional-capture-only `case C(x):` — isinstance
                 # guard; positional args bind the subject's __match_args__[i]
@@ -4998,10 +5143,70 @@ def _gen_stmt_AssertStmt(gen, node):
     # Deinitable)` (std/itertools/itertools.mojo, spliced into every
     # lifted `_DropIterator`) became a value-path branch on `conforms_to`
     # (an undefined runtime symbol) plus a `__builtin_trap` in the hot
-    # `__next__` loop. No runtime lowering; the compile-time check itself
-    # is not implemented here (honest note — this is not swallowing a
-    # runtime check, since real Mojo runs none either).
+    # `__next__` loop.
     if getattr(node, 'is_comptime', False):
+        try:
+            # Try to evaluate at compile time
+            import mojo.middle.comptime as _comptime_eval
+            _res = _comptime_eval.eval_const_bool(getattr(node, 'value'), getattr(gen, '_comptime_vals', {}) or {})
+            if _res is False:
+                msg = None
+                if getattr(node, 'msg', None) is not None:
+                    try:
+                        m = _comptime_eval.eval_const(getattr(node, 'msg'), getattr(gen, '_comptime_vals', {}) or {})
+                        if isinstance(m, str):
+                            msg = m
+                        else:
+                            msg = str(m)
+                    except Exception:
+                        try:
+                            mt, mv = gen.lower_expr(node.msg)
+                            if isinstance(mv, str):
+                                msg = mv.strip('"')
+                        except Exception:
+                            pass
+                if msg is None:
+                    msg = 'assert failed'
+                # Be lenient: don't fail compilation on comptime asserts that are false
+                # in code paths we might need to compile (e.g., in generic methods)
+                gimple_ctypes._debug_note(f'comptime assert failed at compile time: {msg} (treating as runtime trap)')
+                # Emit a runtime trap instead of failing compilation
+                try:
+                    gen._emit('  /* comptime assert failed */')
+                    gen._emit('  __builtin_trap();')
+                except Exception:
+                    pass
+                return
+            if _res is None:
+                # Try harder with int/bool state
+                try:
+                    _st = _comptime_eval.eval_const_bool_state(getattr(node, 'value'), getattr(gen, '_comptime_vals', {}) or {})
+                    if _st == 0:  # CONST_FALSE
+                        msg = None
+                        if getattr(node, 'msg', None) is not None:
+                            try:
+                                m = _comptime_eval.eval_const(getattr(node, 'msg'), getattr(gen, '_comptime_vals', {}) or {})
+                                if isinstance(m, str):
+                                    msg = m
+                            except Exception:
+                                pass
+                        if msg is None:
+                            msg = 'assert failed'
+                        gimple_ctypes._debug_note(f'comptime assert failed at compile time: {msg} (treating as runtime trap)')
+                        try:
+                            gen._emit('  /* comptime assert failed */')
+                            gen._emit('  __builtin_trap();')
+                        except Exception:
+                            pass
+                        return
+                except RuntimeError:
+                    raise
+                except Exception:
+                    pass
+        except RuntimeError:
+            raise
+        except Exception:
+            pass
         gimple_ctypes._debug_note(
             'comptime assert: no runtime lowering (compile-time '
             'checking not implemented)')

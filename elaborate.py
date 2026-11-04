@@ -529,6 +529,71 @@ def check_conformance(module_src: str, type_name: str, trait_name: str):
     return (not missing), missing
 
 
+_FLOAT_DTYPES = {
+    'Float64', 'Float32', 'Float16', 'BFloat16', 'Float8_E5M2', 'Float8_E4M3FN',
+    'Float8_E5M2FNUZ', 'Float8_E4M3FNUZ', 'Float8_E4M3B11FNUZ'
+}
+
+
+def _is_float_dtype(t: str) -> bool:
+    t = str(t).strip()
+    if t in _FLOAT_DTYPES:
+        return True
+    # DType.float32 style
+    if t.startswith('DType.'):
+        name = t.split('.')[-1]
+        if name in {'float64', 'float32', 'float16', 'bfloat16'}:
+            return True
+        if 'float' in name.lower():
+            return True
+    if 'float' in t.lower() and 'int' not in t.lower():
+        # be conservative but check common cases
+        if t in {'Float64', 'Float32'}:
+            return True
+    return False
+
+
+def _is_int_dtype(t: str) -> bool:
+    t = str(t).strip()
+    if t.startswith('Int') or t.startswith('UInt'):
+        # exclude floats
+        if t.startswith('Float'):
+            return False
+        return True
+    if t.startswith('DType.'):
+        name = t.split('.')[-1]
+        if name.startswith('int') or name.startswith('uint'):
+            return True
+    return False
+
+
+def check_where_clauses(module_src: str, template_src: str, targs: dict):
+    """Check where clause constraints like dtype.is_floating_point()."""
+    # Look for where clauses
+    # Simple pattern matching
+    for m in re.finditer(r'where\s+(.+?)(?::|\n|$)', template_src):
+        clause = m.group(1).strip()
+        # Check for X.is_floating_point()
+        for mp in re.finditer(r'([A-Za-z_][A-Za-z0-9_]*)\.is_floating_point\s*\(\s*\)', clause):
+            pname = mp.group(1)
+            if pname in targs:
+                conc = targs[pname]
+                if not _is_float_dtype(conc):
+                    raise ConformanceError(
+                        f"type '{conc}' does not satisfy constraint "
+                        f"'{clause}' (required by parameter '{pname}')")
+        # Check for X.is_integral()
+        for mp in re.finditer(r'([A-Za-z_][A-Za-z0-9_]*)\.is_integral\s*\(\s*\)', clause):
+            pname = mp.group(1)
+            if pname in targs:
+                conc = targs[pname]
+                if _is_float_dtype(conc):
+                    raise ConformanceError(
+                        f"type '{conc}' does not satisfy constraint "
+                        f"'{clause}' (required by parameter '{pname}')")
+        # Check for X.is_signed()/is_unsigned() etc if needed
+
+
 def check_bounds(module_src: str, template_src: str, targs: dict):
     """Verify each concrete type arg satisfies its parameter's trait bound.
     Raises ConformanceError (a clear compile error) on the first violation."""
@@ -543,6 +608,13 @@ def check_bounds(module_src: str, template_src: str, targs: dict):
             raise ConformanceError(
                 f"type '{conc}' does not conform to trait '{bound}' "
                 f"(required by parameter '{pname}'): {why}")
+    # Also check where clause constraints
+    try:
+        check_where_clauses(module_src, template_src, targs)
+    except ConformanceError:
+        raise
+    except Exception:
+        pass
 
 
 def extract_struct_source(module_src: str, name: str):

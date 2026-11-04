@@ -2304,7 +2304,11 @@ static ssize_t _mojo_getline(void *lp, void *n, void *f) {
  * `mach_absolute_time` is declared signed for the same reason and on the same
  * reasoning; nothing in the stdlib calls it today, so nothing constrains it
  * yet, and consistency is the safer default for a future `external_call`. */
-long long clock_gettime_nsec_np(int clockid);
+#include <time.h>
+#include <stdint.h>
+#ifndef clock_gettime_nsec_np
+__uint64_t clock_gettime_nsec_np(clockid_t __clock_id);
+#endif
 long long mach_absolute_time(void);
 #endif
 static int _mojo_vprintf(char *fmt, void *ap) {

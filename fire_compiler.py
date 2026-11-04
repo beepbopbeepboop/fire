@@ -260,6 +260,8 @@ class StringLiteral:
     # parser does not build (a fold, a manifest value, a synthesized format),
     # which are all already-decoded text.
     is_interpolated: bool = False
+    # True if this is a t-string (template string) rather than an f-string
+    is_tstring: bool = False
 
 @dataclass
 class TstringLiteral:
@@ -1326,31 +1328,32 @@ def _prefix_is_interpolated(prefix: str) -> bool:
     """True when `prefix` -- the letters immediately before a quote -- makes the
     literal it opens an INTERPOLATED one: an f-string or a t-string, whose
     `{...}` replacement fields are CODE rather than text.
-
-    THE one answer, asked from two places that could otherwise disagree:
-    `_process_nested_tstrings` (which needs to know whether to use the
-    brace-depth-aware closing-quote scan) and `replace_multiline_strings` (which
-    needs to know whether a newline inside the literal is content, and whether
-    the literal has to be collapsed to a placeholder). The second of those was
-    a bug of its own, and it is named by what it did rather than by a doc
-    path: `fire_compiler.py` refused a PEP 701 f-string whose replacement
-    field spans **lines**, which `test_formal_libc_symbol.py` was the one
-    file in the 2026-10-04 sweep to meet (its refusal read `unterminated
-    string literal`). It is fixed — at `cca2a17f`, recorded at
-    `bugs/formal/FORMAL_sweep_work_map.md` §3.1's `b13` row and §1.13's `#### 1.5` —
-    and `test_string_literal_lexing.py`'s `LITERALS` block is what holds it
-    there. With no shared predicate the scanner asked "is there a line end
-    here?" without ever asking "am I inside code?", and CPython's rule for
-    a replacement field is that it MAY span lines.
-
-    Explicit `==` comparisons, not `c in 'fFtT'`, for the reason
-    `_string_prefix_start` gives in full: this codegen's compiled `in`-for-char*
-    path is a documented stub that always returns False, so an `in`-based check
-    here would silently disable the branch under self-hosting.
     """
     for c in prefix:
         if c == 'f' or c == 'F' or c == 't' or c == 'T':
             return True
+    return False
+
+
+def _prefix_is_tstring(prefix: str) -> bool:
+    for c in prefix:
+        if c == 't' or c == 'T':
+            return True
+    return False
+
+
+def _raw_string_is_tstring(raw: str) -> bool:
+    _n = 0
+    while _n < len(raw) and _n < 2:
+        _c = raw[_n]
+        _is_prefix = (_c == 'f' or _c == 'F' or _c == 'r' or _c == 'R'
+                      or _c == 'b' or _c == 'B' or _c == 'u' or _c == 'U'
+                      or _c == 't' or _c == 'T')
+        if not _is_prefix:
+            break
+        if _c == 't' or _c == 'T':
+            return True
+        _n += 1
     return False
 
 
@@ -5662,9 +5665,9 @@ class Parser:
     def _parse_unary(self):
         t = self._peek()
         # `await expr` — `await` lexes as a plain NAME (not a keyword).
-        if (t.kind == "NAME" and t.value == "await"
+        if (t.kind == "NAME" and t.value in ("await", "__await")
                 and self._peek(1).kind in ("NAME", "KW", "STRING", "INT",
-                    "FLOAT", "IMAG", "LPAREN", "LBRACKET", "LBRACE")):
+                    "FLOAT", "IMAG", "LPAREN", "LBRACKET", "LBRACE", "^")):
             self._advance()
             return AwaitExpr(value=self._parse_unary(), line=t.line, col=t.col)
         if t.kind == "OP" and t.value in ("-", "+", "~"):
@@ -6077,6 +6080,20 @@ class Parser:
             _n += 1
         return False
 
+    def _raw_string_is_tstring(self, raw: str) -> bool:
+        _n = 0
+        while _n < len(raw) and _n < 2:
+            _c = raw[_n]
+            _is_prefix = (_c == 'f' or _c == 'F' or _c == 'r' or _c == 'R'
+                          or _c == 'b' or _c == 'B' or _c == 'u' or _c == 'U'
+                          or _c == 't' or _c == 'T')
+            if not _is_prefix:
+                break
+            if _c == 't' or _c == 'T':
+                return True
+            _n += 1
+        return False
+
     def _string_literal_inner(self, raw: str) -> str:
         """The inner content of a raw STRING token — prefix and the outer
         quote delimiters removed, `{...}` interpolations and escapes left
@@ -6284,16 +6301,12 @@ class Parser:
                     break
             return StringLiteral(_val, line=line, col=col, is_raw=_all_raw)
         _merged = ''
+        _is_t = False
         for _r in raws:
+            if self._raw_string_is_tstring(_r):
+                _is_t = True
             _inner = self._string_literal_inner(_r)
             if not self._raw_string_is_ftstring(_r):
-                # A plain piece is LITERAL text, but the merged body is an
-                # f-string, where `{...}` is an interpolation and a backslash
-                # is decoded. Without escaping, `f"[{a}]" "{ q }"` interpolated
-                # `q` (CPython: `[A]{ q }`), and the compiled path lowered the
-                # `{ mojo_exc_pending_set(0); ` in cpp_core's C-text emitter as
-                # a call. Double the braces, except a `\N{NAME}` escape, which
-                # is one token; a raw piece's backslashes are doubled too.
                 if self._raw_string_is_raw(_r):
                     _inner = _inner.replace('\\', '\\\\')
                 _inner = re.sub(r'(\\N\{[^{}]*\})|([{}])',
@@ -6303,23 +6316,15 @@ class Parser:
             _merged += _inner
         _dq3 = '"' * 3
         _sq3 = "'" * 3
-        # `is_interpolated=True` on all three returns, and the evidence is the
-        # `_any_ft` this branch is reached under: one of the run's TOKENS
-        # carried an f/t prefix. The re-wrapped value still starts with an `f`
-        # (the consumers strip it), so a reader that sniffed it would agree —
-        # which is exactly why the flag is set here rather than left to be
-        # sniffed, so that a value whose OWN TEXT begins with `f"` cannot be
-        # confused with one.
+        _prefix = 't' if _is_t else 'f'
         if _dq3 not in _merged:
-            return StringLiteral('f' + _dq3 + _merged + _dq3, line=line, col=col,
-                                 is_interpolated=True)
+            return StringLiteral(_prefix + _dq3 + _merged + _dq3, line=line, col=col,
+                                 is_interpolated=True, is_tstring=_is_t)
         if _sq3 not in _merged:
-            return StringLiteral('f' + _sq3 + _merged + _sq3, line=line, col=col,
-                                 is_interpolated=True)
-        # Both triple-quote runs present in the content (extraordinarily
-        # rare) — fall back to a double-quoted wrap with `"` escaped.
-        return StringLiteral('f"' + _merged.replace('"', '\\"') + '"',
-                             line=line, col=col, is_interpolated=True)
+            return StringLiteral(_prefix + _sq3 + _merged + _sq3, line=line, col=col,
+                                 is_interpolated=True, is_tstring=_is_t)
+        return StringLiteral(_prefix + '"' + _merged.replace('"', '\\"') + '"',
+                             line=line, col=col, is_interpolated=True, is_tstring=_is_t)
 
     def _parse_primary(self):
         t = self._peek()
@@ -6390,7 +6395,8 @@ class Parser:
             return StringLiteral(self._strip_string_prefix_and_quotes(_raw0),
                                  line=line, col=col,
                                  is_raw=self._raw_string_is_raw(_raw0),
-                                 is_interpolated=self._raw_string_is_ftstring(_raw0))
+                                 is_interpolated=self._raw_string_is_ftstring(_raw0),
+                                 is_tstring=self._raw_string_is_tstring(_raw0))
         if t.kind == "LBRACKET": return self._parse_list_or_compr()
         if t.kind == "LBRACE": return self._parse_dict_or_set()
         if t.kind == "LPAREN":
@@ -8219,19 +8225,19 @@ class Parser:
         # `async def` — the decorated path (`@dec\nasync def f(): ...`) is
         # handled separately below, in the `@` decorator block, which strips
         # a leading `async` before dispatching to `def`/`fn`.
-        if t.kind == "NAME" and t.value == "async":
+        if t.kind == "NAME" and t.value in ("async", "__async"):
             nxt = self._peek(1)
             if nxt.kind == "KW" and nxt.value in ("def", "fn"):
-                self._advance()  # consume 'async'
+                self._advance()  # consume 'async'/'__async'
                 self._advance()  # consume 'def'/'fn'
                 return self._parse_funcdef([], is_async=True)
             if nxt.kind == "KW" and nxt.value == "for":
-                self._advance()  # consume 'async'
+                self._advance()  # consume 'async'/'__async'
                 stmt = self._parse_for()
                 stmt.is_async = True
                 return stmt
             if nxt.kind == "KW" and nxt.value == "with":
-                self._advance()  # consume 'async'
+                self._advance()  # consume 'async'/'__async'
                 stmt = self._parse_with()
                 stmt.is_async = True
                 return stmt
@@ -8501,7 +8507,7 @@ class Parser:
             # 3a: build a real is_async=True FunctionDef instead of silently
             # discarding the `async` token (see AwaitExpr's docstring).
             is_async = False
-            if kw.kind == "NAME" and kw.value == "async":
+            if kw.kind == "NAME" and kw.value in ("async", "__async"):
                 is_async = True
                 self._advance()
                 kw = self._peek()

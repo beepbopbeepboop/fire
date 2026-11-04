@@ -1661,6 +1661,11 @@ _PY_BUILTIN_NAMES = frozenset(n for n in dir(_py_builtins) if not n.startswith('
 
 
 def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
+    try:
+        if isinstance(node.func, gimple_ctypes.IdentExpr):
+            print(f"LOWER_CALL_IDENT: {node.func.name}", flush=True)
+    except Exception:
+        pass
     _dealloc = gen._lower_dealloc_thin_allocation(node)
     if _dealloc is not None:
         return _dealloc
@@ -2137,6 +2142,11 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if isinstance(node.func, gimple_ctypes.SubscriptExpr) and isinstance(node.func.obj, gimple_ctypes.IdentExpr):
         _acl_key2 = (gen.current_func_name, node.func.obj.name)
         _api2 = gen._async_closure_api.get(_acl_key2)
+        if _api2 is None:
+            for (encl, name), cand in getattr(gen, '_async_closure_api', {}).items():
+                if name == node.func.obj.name:
+                    _api2 = cand
+                    break
         if _api2 is not None and _api2.get('comptime_params'):
             _cp_list = _api2['comptime_params']
             _idx2 = node.func.index
@@ -2335,38 +2345,17 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
         _recv_ct = gen._quick_type(node.func.obj.obj)
         _struct_name = _recv_ct[:-2] if _recv_ct.endswith(' *') else _recv_ct
         orders_by_oid = gen._method_comptime_param_order.get((_struct_name, method_name))
+        idx = node.func.index
+        # Keyword-form bracket arguments
+        _bracket_attrs = getattr(node.func, 'attrs', None) or []
+        _kw_bracket = {nm: val for nm, val in _bracket_attrs if nm is not None}
+        if _bracket_attrs:
+            elems = [val for nm, val in _bracket_attrs if nm is None]
+        else:
+            elems = idx.elements if isinstance(idx, gimple_ctypes.TupleExpr) else [idx]
         if orders_by_oid:
-            idx = node.func.index
-            # Keyword-form bracket arguments (`m[f_val=fmt.write_to[V]](...)`)
-            # are kept in SubscriptExpr.attrs as (name, value) pairs — the
-            # parser emits them there precisely so they survive (see its
-            # "keyword-style bracket" branch); the index itself is just the
-            # empty-subscript placeholder in that form. Positional form keeps
-            # flowing through `index`. Dict.mojo/counter.mojo bind their
-            # function-typed comptime params exclusively by keyword, so
-            # ignoring attrs here silently forwarded NO function values — the
-            # arity padder in _lower_struct_method_call then filled the gap
-            # with literal zeros ("call through NULL" segfaults), while any
-            # param NOT covered by threading degraded to the weak stub.
-            _bracket_attrs = getattr(node.func, 'attrs', None) or []
-            _kw_bracket = {nm: val for nm, val in _bracket_attrs if nm is not None}
-            if _bracket_attrs:
-                elems = [val for nm, val in _bracket_attrs if nm is None]
-            else:
-                elems = idx.elements if isinstance(idx, gimple_ctypes.TupleExpr) else [idx]
             # Which sibling overload does this call site's bracket-
-            # argument COUNT match? Real overload resolution happens
-            # deeper (in _lower_method_call, called below), which this
-            # narrow, textual pre-scan doesn't have access to — but the
-            # comptime-param arity alone is enough to disambiguate
-            # honestly: if exactly one candidate overload's
-            # comptime_params list is the same length as the bracket-
-            # argument list actually supplied here, use its threaded-
-            # parameter set; if zero or more than one match (genuinely
-            # ambiguous), do nothing — the pre-existing "drop the
-            # bracket" behavior — rather than guess and risk forwarding
-            # an extra argument to an overload compiled WITHOUT a
-            # matching trailing parameter.
+            # argument COUNT match?
             _candidates = [oid for oid, order in orders_by_oid.items()
                            if len(order) == len(elems) + len(_kw_bracket)]
             if len(_candidates) == 1:
@@ -2379,8 +2368,16 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                     _arg = _kw_bracket.get(cp_name)
                     if _arg is None and i < len(elems):
                         _arg = elems[i]
-                    if _arg is not None:
+                    if _arg is not None and _arg not in extra_args:
                         extra_args.append(_arg)
+        # Preserve bracket params for endian methods
+        if method_name in ('to_endian', 'from_endian', 'as_bytes', 'from_bytes'):
+            for _e in elems:
+                if _e not in extra_args:
+                    extra_args.append(_e)
+            for _kn, _kv in _kw_bracket.items():
+                if _kv not in extra_args:
+                    extra_args.append(_kv)
         inner = gimple_ctypes.CallExpr(func=node.func.obj, args=list(node.args) + extra_args,
                          kwargs=getattr(node, 'kwargs', []), line=getattr(node, 'line', 0))
         return gen._lower_method_call(inner)
@@ -8900,6 +8897,20 @@ def _pack_kwargs_slot_call(gen, fname, fname_raw, arg_pairs, kwarg_dict,
 
 def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """Final dispatch for user-defined and C stdlib functions."""
+    print(f"NAMED_CALL: {fname_raw}", flush=True)
+    if fname_raw == 'copysign' and len(getattr(node, 'args', []) or []) == 2:
+        try:
+            _x_t, _x_v = gen.lower_expr(node.args[0])
+            _y_t, _y_v = gen.lower_expr(node.args[1])
+            _x_d = gen._coerce_to_type(_x_t, 'double', _x_v)
+            _y_d = gen._coerce_to_type(_y_t, 'double', _y_v)
+            _res = gen._new_temp('double')
+            gen._emit(f'  {_res} = copysign ({_x_d}, {_y_d});')
+            _res_i64 = gen._new_temp('int64_t')
+            gen._emit(f'  {_res_i64} = (int64_t){_res};')
+            return 'int64_t', _res_i64
+        except Exception:
+            pass
     # `_locally_binds_name` gate: BUILTIN_VALUE_MAP's entries (open,
     # filter, enumerate, str, len, sorted, ...) are all ordinary
     # identifiers a module can legally shadow with its own top-level

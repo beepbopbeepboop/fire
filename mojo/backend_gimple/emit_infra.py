@@ -1389,6 +1389,10 @@ def _emit_stdlib_import_externs(gen, stmts: list) -> None:
         # Linux-specific libc wrappers that collide with GCC declarations
         'get_errno', 'set_errno', '_getpw_linux', '_lstat_linux_x86_64',
         '_stat_linux_x86_64', '_fstat_linux_x86_64',
+        # POSIX typedefs that come from system headers
+        'in_addr_t', 'in_port_t', 'suseconds_t', 'socklen_t',
+        'sa_family_t', 'size_t', 'ssize_t', 'off_t', 'pid_t', 'uid_t', 'gid_t',
+        'time_t', 'clock_t', 'useconds_t', 'nfds_t',
     })
 
     def _resolve_relative(mod, pkg_prefix):
@@ -5156,7 +5160,7 @@ def _stringify_value(gen, et: str, ev: str, enode=None) -> str:
             return gen._call_expr('char *', 'mojo_cstr_or_int_str', [('int64_t', ev)])
         nv = gen._to_int64(et, ev)
         return gen._call_expr('char *', 'mojo_str_from_int', [('int64_t', nv)])
-    if et in ('double', 'float'):
+    if et in ('double', 'float', '__fp16'):
         fv = ev if et == 'double' else gen._new_val('double', f'(double){ev}')
         return gen._call_expr('char *', 'mojo_repr_float', [('double', fv)])
     if et.endswith(' *') and et != 'void *':
