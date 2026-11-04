@@ -9318,7 +9318,7 @@ BOTH_ARCH_CASES = [
 # which is false in every clause: `flush` is neither `sep` nor `end`, it is not
 # baked into anything, and it is the commonest keyword in THIS repository's own
 # source — nine of the sixty items `tools/formal_proof_breadth.py` measures land
-# on it (`bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md` §0.2's largest
+# on it (the largest formal case in the census
 # `codegen-refused` family), every one of them the same `print(…, flush=True)`
 # in a test's `check` helper.
 #
@@ -11762,6 +11762,35 @@ CONSTRUCTION_CASES = [
      "        return 50 + last\n"
      "    if src.get_v() != 40:\n"
      "        return 60 + src.get_v()\n"
+     "    return 7\n", 7, None),
+    # Copy construction from a call result returning the same struct type
+    # (reflection/type information driven copy construction).
+    ("constr_copy_from_call_result",
+     "struct Pair:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    fn get_a(self) -> Int:\n"
+     "        return self.a\n"
+     "\n"
+     "    fn get_b(self) -> Int:\n"
+     "        return self.b\n"
+     "\n"
+     "def make() -> Pair:\n"
+     "    return Pair(3, 4)\n"
+     "\n"
+     "def copyit() -> Pair:\n"
+     "    var q = Pair(make())\n"
+     "    q.a = q.a + 10\n"
+     "    return q\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var r = make()\n"
+     "    var q = copyit()\n"
+     "    if r.a != 3 or r.b != 4:\n"
+     "        return 10\n"
+     "    if q.a != 13 or q.b != 4:\n"
+     "        return 20\n"
      "    return 7\n", 7, None),
     # (7) A ONE-FIELD STRUCT with an argument — the value collapse, and the case
     # that shows `S(x)` on a value is not a copy at all: there is no block, the
