@@ -170,7 +170,6 @@ BARE_BASELINE = {
     'bugs/formal/FORMAL_string_value_model.md': 2,
     'bugs/formal/FORMAL_sweep_work_map.md': 2,
     'bugs/formal/FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md': 2,
-    'bugs/formal/FORMAL_the_host_import_wall_is_at_its_honest_floor.md': 3,
     'bugs/formal/FORMAL_the_last_dylib_exports_exportEnd_includes_the_interned_strings.md': 1,
     'bugs/formal/FORMAL_time_struct_shaped_answers.md': 1,
     'bugs/hard/COMPILE_FAIL_Tools_cases_generator_analyzer.md': 3,

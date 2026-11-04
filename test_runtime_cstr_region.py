@@ -20,7 +20,6 @@ not what the scan uses.
 Run with:  python3 test_runtime_cstr_region.py
 """
 
-import itertools
 import os
 import random
 import subprocess
@@ -98,8 +97,9 @@ def _cases(rng: random.Random):
     bounds = range(-8, 13)
     for s in strings:
         for needle in needles:
-            for start, stop in itertools.product(bounds, bounds):
-                yield s, start, stop, needle
+            for start in bounds:
+                for stop in bounds:
+                    yield s, start, stop, needle
 
 
 def main() -> int:
