@@ -2643,7 +2643,7 @@ def instantiation_demands(module_path: str, consumer_src: str,
     # alone would drop a consumer whose only bracket is a literal.
     found = MM.all_instantiation_calls(consumer_src)
     loose = MM.all_bracketed_calls(consumer_src)
-    if not loose:
+    if not loose and not consumer_src:
         return {}
     if closure is None:
         templates = module_templates_by_path(module_path, project_root)
@@ -2665,6 +2665,33 @@ def instantiation_demands(module_path: str, consumer_src: str,
                 for a in args:
                     if a not in got[name]:
                         got[name].append(a)
+        # Also try inferred bare calls
+        try:
+            try:
+                with open('/tmp/DEBUG_ID.txt', 'a') as _f:
+                    _f.write(f"CALL {p} names={names}\n")
+            except Exception:
+                pass
+            res = MM.inferred_demands_for(
+                    consumer_src, module_source_text(p), names,
+                    own=own_here)
+            try:
+                with open('/tmp/DEBUG_ID.txt', 'a') as _f:
+                    _f.write(f"GOT {res}\n")
+            except Exception:
+                pass
+            for name, args in res.items():
+                got.setdefault(name, [])
+                for a in args:
+                    if a not in got[name]:
+                        got[name].append(a)
+        except Exception as e:
+            try:
+                with open('/tmp/DEBUG_ID.txt', 'a') as _f:
+                    _f.write(f"ERR {e}\n")
+            except Exception:
+                pass
+            pass
         if got:
             out[p] = got
     return out

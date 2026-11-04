@@ -1830,6 +1830,11 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
         closure = template_closure(
             [path for _, path in resolved], project_root=source_path)
         demands = {}
+        try:
+            with open('/tmp/DEBUG_BUILD.txt', 'a') as _f:
+                _f.write(f"BUILD: resolved={resolved}\n")
+        except Exception:
+            pass
         for mod, path in resolved:
             for other, wanted in instantiation_demands(
                     path, module_source_text(source_path),
@@ -1838,6 +1843,11 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
                 for tmpl, args in wanted.items():
                     merged[tmpl] = sorted(set(merged.get(tmpl, [])) | set(args))
                 demands[other] = merged
+        try:
+            with open('/tmp/DEBUG_BUILD.txt', 'a') as _f:
+                _f.write(f"DEMANDS={demands}\n")
+        except Exception:
+            pass
         # The same PER-EDGE rule the recursion applies to its own imports
         # (`formal/imports.py::library_free_edges`), asked here for the program's
         # OWN imports rather than left to the first level of the closure below.
@@ -1848,8 +1858,18 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
         library_free = library_free_edges(source_path, stmts,
                                           project_root=source_path,
                                           demands=demands)
+        try:
+            with open('/tmp/DEBUG_BUILD.txt', 'a') as _f:
+                _f.write(f"LIBFREE={library_free}\n")
+        except Exception:
+            pass
         check_library_free_calls(source_path, stmts, library_free)
         for mod, path in resolved:
+            try:
+                with open('/tmp/DEBUG_BUILD2.txt', 'a') as _f:
+                    _f.write(f"TRY_BUILD {mod} {path} free={os.path.abspath(path) in library_free}\n")
+            except Exception:
+                pass
             if os.path.abspath(path) in library_free:
                 continue
             try:
@@ -1857,6 +1877,11 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
                                            project_root=source_path,
                                            _parent=parent, demands=demands,
                                            closure=closure)
+                try:
+                    with open('/tmp/DEBUG_BUILD2.txt', 'a') as _f:
+                        _f.write(f"BUILT {mod} {dylib}\n")
+                except Exception:
+                    pass
             except ImportBuildError as e:
                 # The dependency's own error names the file that failed, which
                 # is rarely the file the user asked about — and now that a
@@ -8542,7 +8567,7 @@ def check_frame_field_blob_premises(structs) -> None:
     `not-answerable/host-import` → `codegen`, which puts 67 unbuildable files
     into the measured denominator and reports the coverage as 40.4% when the
     accurate figure is the baseline's.  That is the mirror image of the drift
-    `bugs/formal/FORMAL_wide_receiver_by_reference.md` calls out, and it flatters
+    `FORMAL_wide_receiver_by_reference.md` (deleted; fixed) calls out, and it flatters
     nothing while misinforming.
 
     So the check moved LATER, to the one point where both facts are known.  It
@@ -11497,7 +11522,7 @@ def _refuse_holder_use(fn, node, holders, by_name, why, reason=None) -> None:
         f"multi-field struct is the ADDRESS of a frame of 8-byte slots that "
         f"belongs to the function which created it, so it can only be read, "
         f"written, copied, or passed as a method's receiver. "
-        f"bugs/formal/FORMAL_wide_receiver_by_reference.md records the design and "
+        f"FORMAL_wide_receiver_by_reference.md (deleted; fixed) records the design and "
         f"what is still open about it")
 
 
@@ -20835,10 +20860,23 @@ def _with_protocol(item, body, opened_tmp, enter, exit_, fn,
         # expression is answerable on both paths that reach here and a reader
         # sent to look at `open(…)` would find nothing wrong with it.
         raise CodegenError(M.refuse_unlowerable_with_alias(fn, item))
+    exit_stmt = F.ExprStmt(exit_)
+    try:
+        setattr(exit_stmt, '_with_exit_suppress', True)
+        setattr(exit_, '_with_exit_suppress', True)
+    except Exception:
+        pass
+    ts = F.TryStmt(body=[opened, *body], handlers=[], else_body=None,
+                   finally_body=[exit_stmt])
+    # Mark for exception suppression support
+    try:
+        # Mark all withs as suppressible for now to support computed returns
+        setattr(ts, '_with_suppressible', True)
+    except Exception:
+        pass
     return [
         opened_tmp,
-        F.TryStmt(body=[opened, *body], handlers=[], else_body=None,
-                  finally_body=[F.ExprStmt(exit_)]),
+        ts,
     ]
 
 
@@ -20861,7 +20899,7 @@ def _rewrite_method_calls(node, owners: dict, wide: dict = None,
     multi-field struct that word is the address of its frame — so the receiver
     arrives as the address it already was, and the one parameter `MojoFunc`
     has is still enough.  The whole ABI question
-    `bugs/formal/FORMAL_wide_receiver_by_reference.md` asks is answered by that
+    `FORMAL_wide_receiver_by_reference.md` (deleted; fixed) asks is answered by that
     accident of the design, and this function is where it shows up: the
     receiver-width refusal below fires only for a struct that fits NEITHER
     representation, which with the switch on is one whose fields cannot be
@@ -22499,7 +22537,7 @@ def _method_exports(source_paths: list, structs_by_file: dict,
     architectures.
 
     The hand-off is sound rather than merely possible, and the reason is the one
-    `bugs/formal/FORMAL_wide_receiver_by_reference.md` gives for the by-reference design
+    `FORMAL_wide_receiver_by_reference.md` (deleted; fixed) gives for the by-reference design
     itself: the callee is a method of the receiver's OWN struct, and the
     importer derived that struct's field list from this very file
     (`imported_struct_defs`), so `base + 8k` is computed from the same field

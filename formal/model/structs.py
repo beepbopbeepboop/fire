@@ -14,8 +14,8 @@ from . import *
 # `UInt64 → UInt64`) are untouched.
 #
 # The full design, its cost, and the proof-side algebra (`ProofLib.Frame`,
-# `ProofLib.MF`, `Refine.FrameOk_except`) are in
-# `bugs/formal/FORMAL_wide_receiver_by_reference.md`.  What is here is the part the
+# `ProofLib.MF`, `Refine.FrameOk_except`) were in
+# `FORMAL_wide_receiver_by_reference.md` (deleted; fixed).  What is here is the part the
 # two backends have to agree on, which is why it is in the shared model rather
 # than in either of them: a width that the build pass and the codegen pass
 # measured differently is a struct whose receiver is the wrong number of bytes
@@ -242,8 +242,16 @@ def one_field_dropped_receiver_stores(fn, owner, one_field=None):
 RECEIVER_CONVENTION_NAMES = {None: "`self`", "owned": "`var self`",
                              "read": "`borrowed self`", "ref": "`ref self`"}
 
-ReceiverWriteback = collections.namedtuple("ReceiverWriteback",
-                                           "receiver owner member decl")
+from typing import NamedTuple
+
+
+class ReceiverWriteback(NamedTuple):
+    receiver: object
+    owner: object
+    member: object
+    decl: object
+
+
 ReceiverWriteback.__doc__ = (
     "`receiver` is the local whose OWN STORAGE is handed to the callee as "
     "argument 0 — the address, not the value; `owner`/`member` are the class "

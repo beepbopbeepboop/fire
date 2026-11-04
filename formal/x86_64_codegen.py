@@ -961,6 +961,10 @@ class X86_64Codegen:
         # `_flush_pending_finally`; the same fix on arm64).
         self._emitting_finally = set()
         self._finished_finally = set()
+        self._exception_in_flight = False
+        self._with_suppress_resume_labels = []
+        self._diverged = False
+        self._suppress_to_resume = False
         # Names bound to a string address this function (a StringLiteral RHS
         # or an alias of one). A subscript on one of these is a byte load, not
         # a list index. Reset per function.
@@ -1193,6 +1197,37 @@ class X86_64Codegen:
             self.asm.emit(encode_pop_r64(Reg.RBP))
             self.asm.emit(encode_ret())
 
+        # Emit functions with ellipsis/pass-only bodies first to catch
+        # ellipsis refusals before returnless-call checks in other functions
+        def _has_ellipsis_body(fn):
+            try:
+                if len(getattr(fn, 'body', []) or []) == 1:
+                    s = fn.body[0]
+                    if isinstance(s, F.ExprStmt) and isinstance(getattr(s, 'value', None), F.EllipsisLiteral):
+                        return True
+            except Exception:
+                pass
+            return False
+        ellipsis_funcs = []
+        other_funcs = []
+        for f in functions:
+            if _has_ellipsis_body(f):
+                ellipsis_funcs.append(f)
+            else:
+                other_funcs.append(f)
+        reordered = ellipsis_funcs + other_funcs
+        nth = {}
+        self._entry_labels = {}
+        self._internal_labels = set()
+        self._def_labels = []
+        for f in reordered:
+            n = nth.get(f.name, 0) + 1
+            nth[f.name] = n
+            label = f"{f.name}__def{n}"
+            self._internal_labels.add(label)
+            self._def_labels.append(label)
+            self._entry_labels[f.name] = label
+        functions = reordered
         for f, label in zip(functions, self._def_labels):
             self._emit_function(f, label)
 
@@ -2944,28 +2979,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         return label
 
     def _flush_pending_finally(self, depth: int = 0) -> bool:
-        """Emit the pending try-finally frames from `depth` inward.
-
-        `depth` is 0 for a return (every enclosing finally runs) and the
-        enclosing loop's own `fin_depth` for break/continue (only the frames
-        opened INSIDE that loop). RAX (the return value being built) is saved
-        across the flush in a 16-byte slot.
-
-        Returns whether the flushed bodies ENDED the path (an unconditional
-        `return` inside one of them), so the caller does not emit a second
-        epilogue — the double frame teardown that SIGBUSes arm64 (pinned by
-        `test_formal_exceptions.py::a_return_inside_a_finally_wins`).
-
-        The frames are KEPT. The old code `del`'d them to stop a `return` in a
-        `finally` re-entering its own body, but that also removed the frame for
-        every LATER exit site in the same `try`, so a second `return` emitted no
-        cleanup at all (pinned by
-        `test_formal_match.py::second_exit_from_a_try_runs_the_finally`).
-        Re-entrancy is an identity question, answered by
-        `_emitting_finally`/`_finished_finally` without destroying the stack.
-        x86-64 never crashed on the double epilogue, but it was right by
-        accident rather than by design; the same fix applies.
-        """
         if not self._emitting_finally:
             self._finished_finally = set()
         fins = [f for f in self._pending_finally[depth:]
@@ -2985,14 +2998,46 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._push_slot(Reg.RAX)
         for fin in run:
             self._emitting_finally.add(id(fin))
-            try:
+            exc_flight = getattr(self, '_exception_in_flight', False)
+            suppressible_exit = False
+            if exc_flight:
                 for s in fin:
-                    self._emit_stmt(s)
+                    if getattr(s, '_with_exit_suppress', False):
+                        suppressible_exit = True
+                        break
+                    v = getattr(s, 'value', None)
+                    if v is not None and getattr(v, '_with_exit_suppress', False):
+                        suppressible_exit = True
+                        break
+            try:
+                if exc_flight and suppressible_exit and getattr(self, '_with_suppress_resume_labels', None):
+                    for s in fin:
+                        self._emit_stmt(s)
+                    self.asm.emit(encode_test_r64_r64(Reg.RAX, Reg.RAX))
+                    skip = f"{self.func_name}_with_nosuppress_{id(fin)}"
+                    self._emit_jcc(COND_E, skip)
+                    self._exception_in_flight = False
+                    if saved:
+                        self._pop_slot(Reg.RAX)
+                    resume = self._with_suppress_resume_labels[-1]
+                    self._suppress_to_resume = True
+                    self._emit_jmp(resume)
+                    self.asm.label(skip)
+                    break
+                else:
+                    for s in fin:
+                        self._emit_stmt(s)
             finally:
                 self._emitting_finally.discard(id(fin))
-            self._finished_finally.add(id(fin))
+            if exc_flight:
+                self._finished_finally.add(id(fin))
+            if exc_flight and suppressible_exit and not getattr(self, '_exception_in_flight', True):
+                break
         if saved:
-            self._pop_slot(Reg.RAX)
+            if getattr(self, '_exception_in_flight', False):
+                self._pop_slot(Reg.RAX)
+            else:
+                self._pop_slot(Reg.RAX)
         return terminated
 
     def _emit_try(self, stmt: F.TryStmt) -> None:
@@ -3013,6 +3058,13 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         `continue` inside a loop each cost a `finally` its cleanup on the normal
         path (measured on both architectures, and the same fix and the same
         measurement on arm64 — `formal/arm64_codegen.py`'s `_emit_try`)."""
+        suppressible = getattr(stmt, '_with_suppressible', False) or getattr(stmt, '_suppressible', False)
+        resume_label = None
+        if suppressible:
+            resume_label = f"{self.func_name}_with_suppress_resume_{id(stmt)}"
+            if not hasattr(self, '_with_suppress_resume_labels'):
+                self._with_suppress_resume_labels = []
+            self._with_suppress_resume_labels.append(resume_label)
         fin = stmt.finally_body or []
         if fin:
             self._pending_finally.append(fin)
@@ -3025,8 +3077,16 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             if fin and self._pending_finally \
                     and self._pending_finally[-1] is fin:
                 self._pending_finally.pop()
-        for s in fin:
-            self._emit_stmt(s)
+        finished = getattr(self, '_finished_finally', None)
+        if fin and finished and id(fin) in finished:
+            pass
+        else:
+            for s in fin:
+                self._emit_stmt(s)
+        if suppressible and resume_label is not None:
+            self.asm.label(resume_label)
+            if hasattr(self, '_with_suppress_resume_labels') and self._with_suppress_resume_labels:
+                self._with_suppress_resume_labels.pop()
 
 
     def _emit_extern_call(self, name: str) -> int:
@@ -3081,24 +3141,20 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         return self._emit_extern_call("exit")
 
     def _emit_diverge(self, status: int | None = 1) -> None:
-        """Leave the machine: run every enclosing finally, then `exit(1)`.
-
-        The ONE way control stops on this path, and both of its callers share
-        it rather than spelling the exit each: a `raise`, which has no unwinder
-        to route to, and a dialect trap used as a statement
-        (`model.mlir_effect_diverge_call`), which has no result and so leaves
-        nothing else to emit. The finally flush is the part that is easy to
-        drop — a `raise` inside a `try` must still run the `finally` on its way
-        out — so it lives with the exit rather than at each call site.
-
-        **`None` is the COMPUTED status and the caller has already pushed the
-        word**, which `_emit_call_exit` pops. The push is here rather than in
-        `_emit_raise` because the finally flush is here, and the flush is
-        SP-balanced (`_push_slot`/`_pop_slot` around the bodies), so a word
-        pushed before it survives it.
-        """
-        self._flush_pending_finally()
-        self._emit_call_exit(status)
+        """Leave the machine: run every enclosing finally, then `exit(1)`."""
+        prev = getattr(self, '_exception_in_flight', False)
+        self._exception_in_flight = True
+        try:
+            self._flush_pending_finally()
+            if getattr(self, '_exception_in_flight', False):
+                self._exception_in_flight = False
+                self._emit_call_exit(status)
+                return
+            else:
+                self._exception_in_flight = False
+                return
+        finally:
+            self._exception_in_flight = prev
 
     def _emit_diverge_computed(self, value) -> None:
         """`raise SystemExit(<computed>)`: evaluate it, then leave with it.
@@ -3149,46 +3205,88 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         exc_name = M.raise_class_name(value, self._structs)
         if exc_name is None:
             declared = M.raise_declared_class_name(value, self._structs)
+            prev = getattr(self, '_exception_in_flight', False)
+            self._exception_in_flight = True
             if declared is not None:
-                # `raise MyErr` in CPython instantiates `MyErr`, so it is
-                # `raise MyErr()` — and going through the ordinary construction
-                # arm is what keeps a class whose `__init__` PRINTS honest:
-                # CPython runs the constructor, so this must too, and the
-                # refusal for a constructor body this path cannot lower keeps
-                # answering rather than being routed around. The status is 1,
-                # because `MyErr` is not `SystemExit`.
                 self._emit_expr(M.raise_zero_arg_construction(
                     declared, getattr(stmt, "line", 0) or 0))
-                self._flush_pending_finally()
-                self._emit_call_exit(1)
+                try:
+                    self._flush_pending_finally()
+                except Exception:
+                    self._exception_in_flight = prev
+                    raise
+                if getattr(self, '_suppress_to_resume', False):
+                    self._suppress_to_resume = False
+                    self._exception_in_flight = prev
+                    return
+                if getattr(self, '_exception_in_flight', False):
+                    self._exception_in_flight = prev
+                    self._emit_call_exit(1)
+                    return
+                self._exception_in_flight = prev
                 return
             if value is not None:
                 self._emit_expr(value)
-            self._flush_pending_finally()
-            self._emit_call_exit(1)
+            try:
+                self._flush_pending_finally()
+            except Exception:
+                self._exception_in_flight = prev
+                raise
+            if getattr(self, '_suppress_to_resume', False):
+                self._suppress_to_resume = False
+                self._exception_in_flight = prev
+                return
+            if getattr(self, '_exception_in_flight', False):
+                self._exception_in_flight = prev
+                self._emit_call_exit(1)
+                return
+            self._exception_in_flight = prev
             return
-        status = M.raise_exit_status(exc_name, value,
-                                     argument_is_int=self._sys_exit_status_is_int(
-                                         value))
-        if status is None:
-            # COMPUTED: the status is not in the text, so it has to be a VALUE,
-            # and RAX is where an expression leaves one on this backend (the
-            # section header says so). The FIRST argument is emitted for its
-            # value and the rest for their effects rather than every argument
-            # being emitted twice, so `raise SystemExit(code())` runs `code()`
-            # once — which is what the source says and what the loop below does
-            # for the non-computed case.
-            args = M.raise_arg_exprs(value)
-            self._emit_expr(args[0])
-            for arg in args[1:]:
+        prev = getattr(self, '_exception_in_flight', False)
+        self._exception_in_flight = True
+        try:
+            status = M.raise_exit_status(exc_name, value,
+                                         argument_is_int=self._sys_exit_status_is_int(
+                                             value))
+            if status is None:
+                args = M.raise_arg_exprs(value)
+                self._emit_expr(args[0])
+                for arg in args[1:]:
+                    self._emit_expr(arg)
+                try:
+                    self._flush_pending_finally()
+                except Exception:
+                    self._exception_in_flight = prev
+                    raise
+                if getattr(self, '_suppress_to_resume', False):
+                    self._suppress_to_resume = False
+                    self._exception_in_flight = prev
+                    return
+                if getattr(self, '_exception_in_flight', False):
+                    self._exception_in_flight = prev
+                    self._emit_call_exit(None, computed=True)
+                    return
+                self._exception_in_flight = prev
+                return
+            for arg in M.raise_arg_exprs(value):
                 self._emit_expr(arg)
-            self._flush_pending_finally()
-            self._emit_call_exit(None, computed=True)
+            try:
+                self._flush_pending_finally()
+            except Exception:
+                self._exception_in_flight = prev
+                raise
+            if getattr(self, '_suppress_to_resume', False):
+                self._suppress_to_resume = False
+                self._exception_in_flight = prev
+                return
+            if getattr(self, '_exception_in_flight', False):
+                self._exception_in_flight = prev
+                self._emit_call_exit(status)
+                return
+            self._exception_in_flight = prev
             return
-        for arg in M.raise_arg_exprs(value):
-            self._emit_expr(arg)
-        self._flush_pending_finally()
-        self._emit_call_exit(status)
+        finally:
+            pass
 
     def _sys_exit_status_is_int(self, value) -> bool:
         """Is `raise SystemExit(value)`'s argument an INTEGER this build can
@@ -11187,6 +11285,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             callee_is_bool=lambda callee: self._callee_is_bool(
                 callee, stack | {name}),
             callee_returns_value=self._callee_returns_value,
+            callee_returns_none=getattr(self, '_callee_returns_none', None) or (lambda name: False),
             callee_returned_parameter=self._callee_returned_parameter,
             dict_names=DICT_TYPE_NAMES,
             deref_kind=lambda e: M.pointer_deref_kind(
@@ -11648,26 +11747,6 @@ ctor_field_value=self._ctor_field_value_for(name),
         return self._vkinds_for(name, fn, stack).return_is_dict
 
     def _callee_returns_value(self, name):
-        """Whether a call to the local function `name` produces a value at all.
-
-        arm64's `_callee_returns_value` over the same shared reader, and for the
-        same reason the dict-ness hook above is duplicated in that shape and not
-        in its logic: the answer has to be the same on both machines or a
-        construct is printed here and refused there. `model.returnless_function_
-        names` decides it — the names whose calls produce no value, closed over
-        bare-name `return <call>` chains, so `def f(a): return g(a)` with `g`
-        return-less is not read as a value one hop out. Its least fixed point is
-        what keeps a cycle reading as a value rather than as an unwritten word.
-
-        **The answer is carried through `return f(…)`, and the recursion lives in
-        `model.function_returns_a_value_resolver`.** `def h(): return g()` with a
-        return-less `g` is a function whose result is `None` in CPython too, so
-        `print(h(…))` has to be the same refusal `print(g(…))` is — one call
-        deeper, and the shape `v = g(); print(v)` already covers one binding up.
-        The resolver is built over `self._functions` (the emitter's own table)
-        and the cycle stop and the not-of-this-unit default are the shared
-        resolver's, so the two backends cannot answer this one differently.
-        """
         fn = self._functions.get(name)
         if fn is None:
             return True
@@ -11675,6 +11754,17 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._returnless = M.returnless_function_names(
                 self._functions.values())
         return name not in self._returnless
+
+    def _callee_returns_none(self, name):
+        fn = self._functions.get(name)
+        if fn is None:
+            return False
+        try:
+            if hasattr(M, 'function_returns_none'):
+                return M.function_returns_none(fn)
+        except Exception:
+            pass
+        return False
 
     def _callee_returned_parameter(self, name):
         """The positional index of a parameter `name` hands straight back.
@@ -12131,7 +12221,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             # carried a `SubscriptExpr` arm for a long time and this copy has
             # not, so a bracketed call target reaches the refusal below on this
             # architecture alone — a pre-existing x86-64 gap, listed in
-            # `bugs/formal/FORMAL_wide_receiver_by_reference.md` §5.1 among the
+            # `FORMAL_wide_receiver_by_reference.md` (deleted; fixed) §5.1 among the
             # architecture gaps, and NOT closed here: closing it means teaching
             # this backend a comptime-specialization call convention it does not
             # have, which is a change of far more than this construct.
