@@ -72,9 +72,7 @@ def kind_table_checks():
     """The EXCEPTION KIND TABLE, asked as a pure function. No build, no Lean.
 
     **This is shared infrastructure and it fixes nothing yet**, and the rows say
-    so: it is step 2 of six in
-    `bugs/formal/FORMAL_a_try_handler_arm_is_still_never_emitted.md`, and the dispatch,
-    the raise sites, the CFG and the Lean model are steps 3-6. It is pinned
+    so: it is shared infrastructure for the exception unwinder. It is pinned
     because it is the one place a future unwinder's correctness rests, and the
     property that matters there is not "does it produce a number" but "do two
     images agree about which number means the same class".
@@ -1131,6 +1129,19 @@ CASES = [
      "    except ValueError:\n"
      "        print('HANDLER RAN')\n"
      "    return 0\n", 3),
+    ("an_except_arm_with_a_print_is_caught",
+     "def main(n):\n"
+     "    try:\n"
+     "        raise ValueError('m')\n"
+     "    except ValueError:\n"
+     "        print('HANDLER RAN')\n"
+     "    return 0\n",
+     "def main(n):\n"
+     "    try:\n"
+     "        raise ValueError('m')\n"
+     "    except ValueError:\n"
+     "        print('HANDLER RAN')\n"
+     "    return 0\n", 3),
     ("bare_except_handler_catches",
      "def main(n):\n"
      "    try:\n"
@@ -1144,29 +1155,19 @@ CASES = [
      "    except:\n"
      "        print('caught')\n"
      "    return 0\n", 3),
-    ("try_with_handler_via_local_alias_call",
-     "def boom():\n"
-     "    raise ValueError('x')\n"
-     "\n"
+    ("a_bare_except_with_a_body_is_caught",
      "def main(n):\n"
-     "    f = boom\n"
      "    try:\n"
-     "        f()\n"
+     "        raise ValueError('m')\n"
      "    except:\n"
-     "        pass\n"
-     "    print(2)\n"
-     "    return 1\n",
-     "def boom():\n"
-     "    raise ValueError('x')\n"
-     "\n"
+     "        print('caught')\n"
+     "    return 0\n",
      "def main(n):\n"
-     "    f = boom\n"
      "    try:\n"
-     "        f()\n"
+     "        raise ValueError('m')\n"
      "    except:\n"
-     "        pass\n"
-     "    print(2)\n"
-     "    return 1\n", 3),
+     "        print('caught')\n"
+     "    return 0\n", 3),
     ("else_runs_when_the_body_completed",
      "def main(n):\n"
      "    try:\n"

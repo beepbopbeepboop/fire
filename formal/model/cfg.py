@@ -1338,11 +1338,13 @@ def _build_cfg(body, entry_facts: dict = None) -> tuple:
                                  [t.index])
                 body_end = len(blocks)
                 arm_exits = list(body_exits)
-                # Handler arms are now emitted and can run on exception paths.
+                # Handler arms are now emitted and can be entered on exception
+                # paths; run them and add their exits to arm_exits.
                 for handler in (getattr(s, "handlers", None) or []):
-                    hbody = getattr(handler, "body", None) or []
-                    if hbody:
-                        arm_exits += run(hbody, loops, [t.index])
+                    handler_body = getattr(handler, "body", None) or []
+                    if handler_body:
+                        h_exits = run(handler_body, loops, body_exits)
+                        arm_exits += h_exits
                 # `else` runs only when the body did NOT raise and `finally`
                 # runs either way, so both are ARMS of the one statement
                 # rather than a chain. That is what makes a `return` inside

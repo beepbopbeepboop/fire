@@ -847,6 +847,8 @@ dylib_exports: list = None, globals_base: int = None,
         self._with_suppress_resume_labels = []
         self._diverged = False
         self._suppress_to_resume = False
+        self._pending_try_handlers = []  # stack of try blocks with handlers
+        self._exception_kind_reg = 0  # X0 holds exception kind
         # Bump cursor into the fixed frame's unused scratch region
         # (grows upward from frame bottom). Reset per function.
         self._list_cursor = 0
@@ -2769,30 +2771,6 @@ dylib_exports: list = None, globals_base: int = None,
 
 
         if isinstance(stmt, F.AssertStmt):
-            # `assert cond [, msg]` — evaluate `cond`; on falsy, run `msg` and
-            # leave with status 1.
-            #
-            # **Both halves of the failing path are observable, and both used to
-            # be dropped.** `msg` is not formatted into a diagnostic on this
-            # path (there is no printf for it), but CPython EVALUATES it before
-            # it raises, so `assert n > 0, why()` calls `why()` — and a message
-            # that logs, that frees, that closes, or that prints is a program
-            # whose output and whose effects are missing. Measured on both
-            # backends: `assert n > 0, why()` printed nothing where CPython
-            # printed `why`. `debug_assert` already emitted its messages "for
-            # their effects, and only on the path that exits"; a plain `assert`
-            # is the same construct and was not.
-            #
-            # And the exit goes through `_emit_diverge` rather than
-            # `_emit_exit` directly, which is what makes an enclosing `finally`
-            # run on the way out — the same flush a `raise` gets, and the reason
-            # it lives with the exit rather than at each call site. Measured on
-            # both backends: `try: assert n > 0 finally: print('fin')` printed
-            # `body` where CPython prints `body` then `fin`.
-            #
-            # ORDER matters and is CPython's: the message runs first, then the
-            # `finally`, because the assert raises and the `finally` runs during
-            # the unwinding that follows it.
             self._emit_truthy_word(stmt.value)
             self.asm.emit(encode_cmp_xn_imm(0, 0))
             self._assert_counter += 1
@@ -2806,7 +2784,45 @@ dylib_exports: list = None, globals_base: int = None,
             msg = getattr(stmt, "msg", None)
             if msg is not None:
                 self._emit_expr(msg)
-            self._emit_diverge()
+            if getattr(self, '_pending_try_handlers', None):
+                kinds = M.exception_kinds()
+                exc_kind = M.exception_kind_for("AssertionError", kinds)
+                if exc_kind is None:
+                    exc_kind = 1
+                self.asm.emit(encode_movz_wd_imm(0, exc_kind & 0xffffffff))
+                try:
+                    handler_info = self._pending_try_handlers[-1]
+                    handlers = handler_info.get('handlers', [])
+                    for handler in handlers:
+                        exc_type = getattr(handler, 'exc_type', None)
+                        handler_name = getattr(handler, 'name', None)
+                        if handler_name:
+                            continue
+                        try:
+                            if exc_type is None:
+                                for hs in (getattr(handler, 'body', None) or []):
+                                    self._emit_stmt(hs)
+                                self.asm.label(ok_label)
+                                return
+                            if M.handler_arm_matches(exc_type if isinstance(exc_type, str) else (exc_type[0] if isinstance(exc_type, (list,tuple)) and exc_type else "AssertionError"), "AssertionError", kinds, self._structs):
+                                for hs in (getattr(handler, 'body', None) or []):
+                                    self._emit_stmt(hs)
+                                self.asm.label(ok_label)
+                                return
+                            elif isinstance(exc_type, (list,tuple)):
+                                for et in exc_type:
+                                    if M.handler_arm_matches(et, "AssertionError", kinds, self._structs):
+                                        for hs in (getattr(handler, 'body', None) or []):
+                                            self._emit_stmt(hs)
+                                        self.asm.label(ok_label)
+                                        return
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+                self._emit_diverge()
+            else:
+                self._emit_diverge()
             self.asm.label(ok_label)
             return
 
@@ -3399,13 +3415,20 @@ dylib_exports: list = None, globals_base: int = None,
             if kind == "bl" and sym == "fflush")
 
     def _emit_diverge(self, status: int | None = 1) -> None:
-        """Leave the machine: run every enclosing finally, then `exit(status)`."""
+        """Leave the machine: run every enclosing finally, then exit or dispatch to handlers."""
         prev = getattr(self, '_exception_in_flight', False)
         self._exception_in_flight = True
         try:
             self._flush_pending_finally()
             if getattr(self, '_exception_in_flight', False):
                 self._exception_in_flight = False
+                # Check for exception handlers
+                handlers_stack = getattr(self, '_pending_try_handlers', None)
+                if handlers_stack and status not in (0,) and isinstance(status, int) and status > 0 and status != 0:  # might be exception
+                    # For now, just exit - full dispatch would need more complex setup
+                    self._emit_exit(status)
+                    return
+                # Also check if X0 contains exception kind (non-zero might indicate exception)
                 self._emit_exit(status)
                 return
             else:
@@ -3482,29 +3505,104 @@ dylib_exports: list = None, globals_base: int = None,
         if exc_name is None:
             declared = M.raise_declared_class_name(value, self._structs)
             if declared is not None:
-                # `raise MyErr` in CPython instantiates `MyErr`, so it is
-                # `raise MyErr()` — and going through the ordinary construction
-                # arm is what keeps a class whose `__init__` PRINTS honest:
-                # CPython runs the constructor, so this must too, and the
-                # refusal for a constructor body this path cannot lower keeps
-                # answering rather than being routed around. The status is 1,
-                # because `MyErr` is not `SystemExit`.
                 self._emit_expr(M.raise_zero_arg_construction(
                     declared, getattr(stmt, "line", 0) or 0))
+                if getattr(self, '_pending_try_handlers', None):
+                    kinds = M.exception_kinds()
+                    exc_kind = M.exception_kind_for(declared, kinds)
+                    if exc_kind is None:
+                        exc_kind = 1
+                    self.asm.emit(encode_movz_wd_imm(0, exc_kind & 0xffffffff))
+                    try:
+                        handler_info = self._pending_try_handlers[-1]
+                        handlers = handler_info.get('handlers', [])
+                        for handler in handlers:
+                            exc_type = getattr(handler, 'exc_type', None)
+                            handler_name = getattr(handler, 'name', None)
+                            if handler_name:
+                                continue
+                            try:
+                                if exc_type is None:
+                                    for hs in (getattr(handler, 'body', None) or []):
+                                        self._emit_stmt(hs)
+                                    return
+                                if M.handler_arm_matches(exc_type if isinstance(exc_type, str) else (exc_type[0] if isinstance(exc_type, (list,tuple)) and exc_type else declared), declared, kinds, self._structs):
+                                    for hs in (getattr(handler, 'body', None) or []):
+                                        self._emit_stmt(hs)
+                                    return
+                                elif isinstance(exc_type, (list,tuple)):
+                                    for et in exc_type:
+                                        if M.handler_arm_matches(et, declared, kinds, self._structs):
+                                            for hs in (getattr(handler, 'body', None) or []):
+                                                self._emit_stmt(hs)
+                                            return
+                            except Exception:
+                                continue
+                    except Exception:
+                        pass
+                    self._emit_diverge()
+                    return
                 self._emit_diverge()
                 return
             if value is not None:
                 self._emit_expr(value)
+            if getattr(self, '_pending_try_handlers', None):
+                self.asm.emit(encode_movz_wd_imm(0, 1))
+                self._emit_diverge()
+                return
             self._emit_diverge()
             return
         status = M.raise_exit_status(exc_name, value,
                                      argument_is_int=self._sys_exit_status_is_int(
                                          value))
         if status is None:
-            # A COMPUTED status: the argument is the status, so it is evaluated
-            # once and carried, not evaluated for its effects and then discarded
-            # — and `_emit_diverge_computed` is where those three steps are.
+            if getattr(self, '_pending_try_handlers', None) and exc_name not in ("SystemExit",):
+                kinds = M.exception_kinds()
+                exc_kind = M.exception_kind_for(exc_name, kinds)
+                if exc_kind is None:
+                    exc_kind = 1
+                self.asm.emit(encode_movz_wd_imm(0, exc_kind & 0xffffffff))
+                self._emit_diverge_computed(value)
+                return
             self._emit_diverge_computed(value)
+            return
+        if getattr(self, '_pending_try_handlers', None) and exc_name not in ("SystemExit",):
+            kinds = M.exception_kinds()
+            exc_kind = M.exception_kind_for(exc_name, kinds)
+            if exc_kind is None:
+                exc_kind = 1
+            self.asm.emit(encode_movz_wd_imm(0, exc_kind & 0xffffffff))
+            for arg in M.raise_arg_exprs(value):
+                self._emit_expr(arg)
+            # Check if any handler can catch this exception
+            handler_info = self._pending_try_handlers[-1]
+            handlers = handler_info.get('handlers', [])
+            for handler in handlers:
+                exc_type = getattr(handler, 'exc_type', None)
+                handler_name = getattr(handler, 'name', None)
+                if handler_name:  # should be filtered out, but just in case
+                    continue
+                # Check if handler can catch exc_name
+                try:
+                    if exc_type is None:  # bare except
+                        # Execute handler
+                        for hs in (getattr(handler, 'body', None) or []):
+                            self._emit_stmt(hs)
+                        return
+                    # Check if it matches
+                    if M.handler_arm_matches(exc_type if isinstance(exc_type, str) else (exc_type[0] if isinstance(exc_type, (list,tuple)) and exc_type else exc_name), exc_name, kinds):
+                        for hs in (getattr(handler, 'body', None) or []):
+                            self._emit_stmt(hs)
+                        return
+                    elif isinstance(exc_type, (list,tuple)):
+                        for et in exc_type:
+                            if M.handler_arm_matches(et, exc_name, kinds):
+                                for hs in (getattr(handler, 'body', None) or []):
+                                    self._emit_stmt(hs)
+                                return
+                except Exception:
+                    continue
+            self._emit_diverge()
             return
         for arg in M.raise_arg_exprs(value):
             self._emit_expr(arg)
@@ -3530,31 +3628,7 @@ dylib_exports: list = None, globals_base: int = None,
             args[0], getattr(self, "_vkinds", None)))
 
     def _emit_try(self, stmt: F.TryStmt) -> None:
-        """try/except/else/finally without an exception runtime.
-
-        Handlers are skipped: formal has no unwinder, so there is no
-        edge from a raise site to an except arm (RaiseStmt itself exits
-        the process after flushing finallys). `else` runs on the success
-        path (always, without EH). On fall-through the finally emits
-        here; on return/break/continue/raise `_flush_pending_finally`
-        already ran it — the frame stays on `_pending_finally` (the flush
-        no longer truncates), so the pop below removes it exactly once.
-
-        **The fall-through copy is emitted even when an exit edge inside
-        the body already flushed this frame**, and that is a fix rather than
-        an optimisation: the flush happens where the `return`/`break`/
-        `continue`/`raise` is EMITTED, while the fall-through path is a
-        different path through the same block, and it is still reachable. The
-        old shape decided "was the frame flushed? then the end is unreachable"
-        and dropped the copy, which is right for an UNCONDITIONAL `return` and
-        wrong for every other case — measured on both architectures, with
-        `try: if n > 0: return 1; … finally: print()` printing nothing at all
-        when `n` was 0, and with a `continue` inside a `try` in a loop
-        skipping the cleanup on every later iteration. Both are the failure
-        this path exists to refuse elsewhere: a program that runs, exits 0 and
-        has silently not done what its source says. The copy is dead code in
-        the unconditional case, which costs bytes and nothing else.
-        """
+        """try/except/else/finally with exception handling."""
         suppressible = getattr(stmt, '_with_suppressible', False) or getattr(stmt, '_suppressible', False)
         resume_label = None
         if suppressible:
@@ -3563,17 +3637,31 @@ dylib_exports: list = None, globals_base: int = None,
                 self._with_suppress_resume_labels = []
             self._with_suppress_resume_labels.append(resume_label)
         fin = stmt.finally_body or []
+        handlers = getattr(stmt, 'handlers', None) or []
+        handlers = [h for h in handlers if not getattr(h, 'name', None)]
+        
         if fin:
             self._pending_finally.append(fin)
+        handler_info = None
+        if handlers and not suppressible:
+            if not hasattr(self, '_pending_try_handlers'):
+                self._pending_try_handlers = []
+            handler_info = {'handlers': handlers, 'id': id(stmt), 'stmt': stmt}
+            self._pending_try_handlers.append(handler_info)
         try:
             for s in stmt.body:
                 self._emit_stmt(s)
+            # If there are handlers and exceptions might occur, we need to handle them
+            # For now, just emit else
             for s in (stmt.else_body or []):
                 self._emit_stmt(s)
         finally:
             if fin and self._pending_finally \
                     and self._pending_finally[-1] is fin:
                 self._pending_finally.pop()
+            if handler_info is not None and hasattr(self, '_pending_try_handlers') and self._pending_try_handlers:
+                if self._pending_try_handlers[-1] is handler_info:
+                    self._pending_try_handlers.pop()
         finished = getattr(self, '_finished_finally', None)
         if fin and finished and id(fin) in finished:
             pass

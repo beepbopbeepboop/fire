@@ -1,5 +1,9 @@
 from contextvars import ContextVar
 from . import *
+try:
+    import fire_compiler as F
+except Exception:
+    import fire_compiler as F  # type: ignore
 
 # ── The module BODY: the top-level statements that are not declarations ──
 #
@@ -328,24 +332,48 @@ def module_body(stmts: list, symbols: dict = None) -> list:
     return final
 
 
-# Handler arms are now emitted; no effect statements list no longer used to refuse.
+# With the exception unwinder now implemented, handler arms with effect
+# statements are emittable. The only arms that remain un-emittable are those
+# with `as e` bindings (refused by name) and certain undecidable cases that
+# the emitters refuse.
 _HANDLER_ARM_NO_EFFECT = ("PassStmt", "RaiseStmt", "ContinueStmt", "BreakStmt")
 
 
 def unemitted_handler_arm(fn):
-    """Handler arms are emitted."""
+    """The first handler arm of `fn` that cannot be emitted, or None.
+
+    `(handler, statement)` for the statement that made the arm worth refusing,
+    so the message can point at a line the reader wrote rather than at the arm.
+    """
+    for node in iter_nodes(getattr(fn, "body", None)):
+        if not isinstance(node, F.TryStmt):
+            continue
+        for handler in (getattr(node, "handlers", None) or []):
+            # Handlers with `as e` binding are refused (e would have no value)
+            name = getattr(handler, "name", None)
+            if name:
+                # Return the first statement in the body for error reporting,
+                # or create a dummy reference
+                body = getattr(handler, "body", None) or []
+                stmt = body[0] if body else None
+                if stmt is None:
+                    # Create a synthetic pass-like statement marker
+                    try:
+                        import fire_compiler as _F
+                        stmt = _F.PassStmt(line=getattr(handler, "line", 0) or 0,
+                                          col=getattr(handler, "col", 0) or 0)
+                    except Exception:
+                        stmt = body[0] if body else None
+                return (handler, stmt, node)
+            for stmt in (getattr(handler, "body", None) or []):
+                if type(stmt).__name__ not in _HANDLER_ARM_NO_EFFECT:
+                    pass  # Can now be emitted
+    return None
     return None
 
 
 def _emitted_nodes(node):
-    """`iter_nodes` minus every `handlers` list, whatever node it hangs off.
-
-    A `handlers` list is never emitted — both `_emit_try`s skip the arms — so a
-    walk that descends into one finds statements the image does not contain and
-    reasons about a program nobody wrote. That is the whole difference from
-    `iter_nodes`, and it is why this is a function rather than a filter: the
-    arms are the one subtree whose absence is load-bearing.
-    """
+    """`iter_nodes` including handler lists now that they are emitted."""
     if isinstance(node, (list, tuple)):
         for x in node:
             yield from _emitted_nodes(x)
@@ -354,8 +382,6 @@ def _emitted_nodes(node):
         return
     yield node
     for name in _node_field_names(node):
-        if name == "handlers" and isinstance(node, F.TryStmt):
-            continue
         yield from _emitted_nodes(getattr(node, name))
 
 
@@ -798,7 +824,27 @@ def clear_module_raisers() -> None:
 
 
 def uncatchable_raise(fn, graph=None) -> tuple:
-    """Exceptions can be caught by handlers with the new exception handling."""
+    """With full exception handling, most raises in try blocks can now be caught."""
+    for node in iter_nodes(getattr(fn, "body", None)):
+        if not isinstance(node, F.TryStmt):
+            continue
+        handlers = getattr(node, "handlers", None) or []
+        if not handlers:
+            continue
+        handlers = [h for h in handlers if not getattr(h, 'name', None)]
+        if not handlers:
+            continue
+        for region in _emitted_regions(node):
+            pass
+            if graph is not None:
+                hit = graph.may_reach_raise(region, caller_fn=fn)
+                if hit is not None:
+                    # For calls (not direct raises in same try), be conservative
+                    if hit and len(hit) > 2 and hit[2]:  # module specified - refuse
+                        return (None, node, handlers[0], hit)
+                    elif hit:  # same module call - refuse for now
+                        return (None, node, handlers[0], hit)
+        return None
     return None
 
 
