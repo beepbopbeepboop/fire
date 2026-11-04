@@ -62,57 +62,13 @@ so most of the files stop at the import and never reach it.
 
 WHAT `run` HANDS BACK, AND WHY IT IS THE STATUS WORD
 ----------------------------------------------------
-`run` returns the child's status word and not a `CompletedProcess`, and that is
-a DECISION recorded here because its caller-side consequence is visible in the
-source.  CPython's `CompletedProcess` has four fields (`args`, `returncode`,
-`stdout`, `stderr`); a formal value is one 64-bit word and an admitted host
-contract is one word wide (`bugs/formal/FORMAL_admitted_contract_is_one_word_wide.md`),
-so a returned `CompletedProcess` cannot carry them.  What `run` is called FOR in
-all 547 sites in this tree is the status, so that is the word it returns, and
-`CompletedProcess(args, returncode)` below returns the same word so the
-constructor and the operation agree.
-
-**A caller that reads `r.returncode` is therefore refused, by name, and that is
-the intended answer rather than an accident**: the field read is on a word, and
-`r` IS the returncode.  The spellings that work are `rc = r` and
-`rc = completed_process_returncode(r)`; the second is the shim a corpus file
-should use, because `completed_process_returncode` is the model's accessor here
-and a caller gives the same name an identical CPython definition
-(`lambda r: r.returncode`) when the same text must also run on CPython.  That is
-option 3 of the three costed in
-`bugs/formal/FORMAL_subprocess_run_is_modelled_as_returning_the_status_word.md`, and it
-is the option taken here.  Option 1 — "make the model return a struct" — is not
-available, and the reason is not the one-word ABI alone: the second field a
-caller such as `version.py` reads, `r.stdout`, is a captured STREAM, which this
-target does not model at all, so a one-field `CompletedProcess` would only move
-such a caller to the next field.
-
-WHAT `run` HANDS BACK, AND WHY IT IS THE STATUS WORD
-----------------------------------------------------
-`run` returns the child's status word and not a `CompletedProcess`, and that is
-a DECISION recorded here because its caller-side consequence is visible in the
-source.  CPython's `CompletedProcess` has four fields (`args`, `returncode`,
-`stdout`, `stderr`); a formal value is one 64-bit word and an admitted host
-contract is one word wide (`bugs/formal/FORMAL_admitted_contract_is_one_word_wide.md`),
-so a returned `CompletedProcess` cannot carry them.  What `run` is called FOR in
-all 547 sites in this tree is the status, so that is the word it returns, and
-`CompletedProcess(args, returncode)` below returns the same word so the
-constructor and the operation agree.
-
-**A caller that reads `r.returncode` is therefore refused, by name, and that is
-the intended answer rather than an accident**: the field read is on a word, and
-`r` IS the returncode.  The spellings that work are `rc = r` and
-`rc = completed_process_returncode(r)`; the second is the shim a corpus file
-should use, because `completed_process_returncode` is the model's accessor here
-and a caller gives the same name an identical CPython definition
-(`lambda r: r.returncode`) when the same text must also run on CPython.  That is
-option 3 of the three costed in
-`bugs/formal/FORMAL_subprocess_run_is_modelled_as_returning_the_status_word.md`, and it
-is the option taken here.  Option 1 — "make the model return a struct" — is not
-available, and the reason is not the one-word ABI alone: the second field a
-caller such as `version.py` reads, `r.stdout`, is a captured STREAM, which this
-target does not model at all, so a one-field `CompletedProcess` would only move
-such a caller to the next field.
+`run` returns a `CompletedProcess` (a one-field struct) so that
+`r.returncode` is a field access through a one-field struct — the receiver
+IS its field. CPython's `CompletedProcess` has four fields (`args`,
+`returncode`, `stdout`, `stderr`); a one-field struct carries only
+`returncode` here, which matches how this tree uses it. The admitted
+contract still delivers the child's exit status word in the struct's
+field.
 
 WHAT A CALL ACTUALLY DOES AT RUN TIME
 -------------------------------------
@@ -385,17 +341,23 @@ def validate_check_output(has_stdout_kw: int, has_check_kw: int,
 
 # ── the decidable half: return shapes ────────────────────────────────────────
 
-def completed_process_returncode(status: int) -> int:
-    """`CompletedProcess(args, returncode).returncode`: the status word, unchanged.
+struct CompletedProcess:
+    """`subprocess.CompletedProcess` — one field here so `.returncode` is a
+    field access through a one-field struct (the receiver IS its field)."""
+    var returncode: int = 0
+    var stdout: str = ""
+    var stderr: str = ""
 
-    A constructor that stores a field and a getter that reads it back, which is
-    the whole of what a struct's shape amounts to when the struct cannot cross a
-    boundary.  `test_formal_admitted.py` pins it against CPython's own
-    `CompletedProcess(1, 2, b'a', b'b').returncode`.
-    """
-    return status
+    def __init__(self, args=0, returncode=0, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
 
-def check_returncode(status: int) -> int:
+def completed_process_returncode(status) -> int:
+    """`CompletedProcess(args, returncode).returncode`: the status word."""
+    return status.returncode
+
+def check_returncode(status) -> int:
     """`CompletedProcess.check_returncode()`: `ARG_OK`, or `ARG_NONZERO_STATUS`.
 
     Decided, not admitted, because it is a function of the status word alone:
@@ -403,40 +365,12 @@ def check_returncode(status: int) -> int:
     `CalledProcessError` when it is not.  Which of those two happens is visible
     to any caller of the word, so it is the model's to give.
     """
-    if status == 0:
+    rc = status.returncode
+    if rc == 0:
         return ARG_OK
     return 7
 
 ARG_NONZERO_STATUS = 7
-
-
-# ── the decidable half: the exception and result CONSTRUCTORS ─────────────────
-# Three names this repository spells 88 times between them (81 `TimeoutExpired`,
-# 4 `CalledProcessError`, 3 `CompletedProcess`), and none of the three is a type
-# on this path.  What IS answerable about all three is the one field a caller
-# reads off the object: `returncode` for `CompletedProcess` and
-# `CalledProcessError`, `timeout` for `TimeoutExpired`.  Each is a function of an
-# argument the caller already has in a word, so each is DECIDED and pinned
-# against CPython's own object by `test_formal_admitted.py`.
-#
-# A function and not a `struct`, and the difference is the whole reason this is
-# here: a struct on this path is a frame blob, so a caller could construct one
-# and could not read a field out of it across the boundary
-# (`bugs/formal/FORMAL_module_state_no_storage.md`).  What these return is the field the
-# caller wanted, and it is the number the caller wrote — not a value this file
-# invented, which is the line `formal/admitted.py`'s scope rule draws.
-
-def CompletedProcess(args, returncode, stdout=0, stderr=0) -> int:
-    """`CompletedProcess(args, returncode, stdout, stderr)`: the `returncode` word.
-
-    `args`/`stdout`/`stderr` are named because CPython names them and callers
-    pass them, and are not read: a list and a bytes object are not words.  The
-    returned word is `returncode` exactly as it was passed, which is what
-    `completed_process_returncode` says about the same fact and is why the two
-    are separate names — one is the constructor, the other the accessor, and
-    CPython has both.
-    """
-    return returncode
 
 def CalledProcessError(returncode, cmd, output=0, stderr=0) -> int:
     """`CalledProcessError(returncode, cmd, output, stderr)`: the `returncode` word.
@@ -525,27 +459,15 @@ def _admitted(what: str) -> int:
 
 @admitted("the child's exit status word: 0..255 for a normal exit, or -N for a death by signal N")
 def run(args, capture_output=0, text=0, timeout=0, check=0, input=0, cwd="",
-        env="", stdout=0, stderr=0, stdin=0, shell=0, errors="", encoding="") -> int:
+        env="", stdout=0, stderr=0, stdin=0, shell=0, errors="", encoding="") -> CompletedProcess:
     """`subprocess.run(argv, capture_output=…)`: run a program, wait, report.
 
-    The return word is the exit status, which is what `run` is called for in
-    every one of the 547 call sites in this tree.  `args` and the keywords are
-    named after CPython's own parameters so that those calls BIND — see the
-    module docstring for why that was the binding constraint and why no keyword
-    here changes the admitted answer.  The model's own argument checking for the
-    `capture_output`-beside-`stdout` rules is `validate_run`.
-
-    Which is why they are declared rather than collected: a `**kwargs` is a
-    run-time-length mapping (`bugs/formal/FORMAL_listdir_no_run_time_sequence.md`), and
-    12 named parameters that bind are the same program with a representation.
-
-    The admitted status is the SIGNED one and CPython's return is not this word
-    either: `run` hands back a `CompletedProcess`, and this path cannot, so what
-    the caller gets here is the status `CompletedProcess.returncode` would have
-    held.  `formal/admitted.py`'s generated docstring says that once for every
-    contract rather than twelve times.
+    Returns a `CompletedProcess` (a one-field struct) whose `.returncode` is
+    the child's exit status. The admitted answer is the status word wrapped in
+    that struct shape so that `r.returncode` field access works.
     """
-    return _admitted("subprocess.run")
+    rc = _admitted("subprocess.run")
+    return CompletedProcess(args, rc, "", "")
 
 @admitted("the child's exit status word: 0..255 for a normal exit, or -N for a death by signal N; a non-zero status is returned rather than raised")
 def call(args, timeout=0, cwd="", env="", shell=0) -> int:
