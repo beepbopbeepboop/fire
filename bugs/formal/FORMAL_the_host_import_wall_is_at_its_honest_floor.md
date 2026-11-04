@@ -210,7 +210,7 @@ at 21/1/14 and 8/2/5; neither is in the tool's output today.
 | row | what closed it |
 |---|---|
 | `itertools` | **a classification, not a module.** `formal/imports.py`'s `HOST_UNREACHABLE` names it, so the two files that reach it (`test_gimple.py`, `test_gimple_runner.py`) are told the target cannot have it rather than being queued for a capability. §3's "a lazy sequence … `combinations` is a generator of tuples; neither half is representable" is the same fact, now decided |
-| `random` | **a module.** `formal/hostmods/random.mojo` landed 2026-10-05 (`5f8ba760`) — a real Mersenne Twister over 624 words of module-level state, with the measurement that module state *does* persist across calls inside one image. **It is 2 of the 8 files, and the module's own docstring says so**: the five `Random(...)` callers want an object whose whole state is 624 words behind a pointer, which is `FORMAL_module_state_no_storage.md`'s missing thing and is not reachable by writing a `.mojo` file |
+| `random` | **a module.** `formal/hostmods/random.mojo` landed 2026-10-05 (`5f8ba760`) — a real Mersenne Twister over 624 words of module-level state, with the measurement that module state *does* persist across calls inside one image. **It is 2 of the 8 files, and the module's own docstring says so**: the five `Random(...)` callers want an object whose whole state is 624 words behind a pointer, which is `FORMAL_module_state_no_storage.md (deleted)`'s missing thing and is not reachable by writing a `.mojo` file |
 
 **2. The corpus's one file the backend could not read is readable.** §0 and §5
 both record it: `test_formal_libc_symbol.py`, because an f-string replacement

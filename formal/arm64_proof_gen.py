@@ -7597,7 +7597,7 @@ def _trap_terminating(blocks: list, words: dict) -> set:
     block that ENDS in the raw `SYS_exit` the emitter ends every bounded stop
     with (`_is_svc`), or a block that ends in a `BL` whose fall-through block
     is itself such a block.  The second is the shape of the compiler's own
-    trap — `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
+    trap — `integer overflow at runtime (trapped)`'s
     `def q(a, b): return a // b` divides by zero into a block that ends in
     `BL fflush` and then that tail — and it is the shape a `BL` "cannot
     return" means in `_unfollowable_calls`'s terminal rule a few lines below:
@@ -7691,7 +7691,7 @@ def _unfollowable_calls(code: bytes, base: int, func_entry: int,
     the model steps as a no-op but which is the machine's own `SYS_exit`), and a
     block that ends in `svc` has no `RET`, so the call returns nowhere.  The
     compiler's own trap is the measured case: `def q(a, b): return a // b`
-    (`bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
+    (`integer overflow at runtime (trapped)`'s
     fixture) ends its divide-by-zero arm in `BL fflush` followed by that tail,
     and counting the `BL` made the halt address a call the concrete run never
     takes, which is the false `main_pre_0.pc = …` premise the doc names.  The
@@ -7863,7 +7863,7 @@ def _reached_without_a_condition(code: bytes, base: int, func_entry: int,
         is false
 
     Measured on this tree before the check existed, and it is
-    `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s own
+    `integer overflow at runtime (trapped)`'s own
     reproducer — `def main(n): if n > 100: printf("hi"); return 0` at test input
     10 — which is `exit 1` and eleven Lean errors from a program with no integer
     arithmetic in it at all. That is what makes this a limit of the WALK and not
@@ -13061,7 +13061,7 @@ def generate_arm64_proof(prog, code, info) -> str:
     # is the stack-floor guard every compiled function carries, and the model
     # steps through that tail rather than halting in it, so the statement
     # would weaken for a program whose run never does.  See
-    # `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s step
+    # `integer overflow at runtime (trapped)`'s step
     # 2 for the shape: `def q(a, b): return a // b`'s divide-by-zero arm ends
     # in `BL fflush` and the `movz`/`svc` tail.
     _trap_words = {base_addr + i: int.from_bytes(code[i:i + 4], "little")

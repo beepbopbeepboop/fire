@@ -121,7 +121,7 @@ WHAT IS NOT HERE, AND WHY
     as attributes, `.stdin.write`, `.stdout.read`.  A process handle is a
     descriptor, a status word and a pair of pipes; a value cannot cross a dylib
     boundary unless it is one 64-bit word
-    (`bugs/formal/FORMAL_module_state_no_storage.md`), which is the same limit that took
+    (`FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted)`), which is the same limit that took
     `sys.stdout` out of `formal/hostmods/sys.mojo`, and a method call on a value
     receiver is not lowered either.  What IS here is `Popen` as a FUNCTION
     returning the child's process id — which is the handle, so `.pid` needs no
@@ -129,7 +129,7 @@ WHAT IS NOT HERE, AND WHY
     the old `popen_wait` had.
   * `subprocess.PIPE` used as a VALUE rather than called (`stdout=subprocess.PIPE`,
     13 call sites).  Reading a module-level name that is not folded to a literal is
-    `bugs/formal/FORMAL_module_state_no_storage.md`; the constants are here as the
+    `FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted)`; the constants are here as the
     zero-argument functions every other hostmod uses, because a module-level name
     is folded at every read on this path and a folded function name is not a word.
   * `SubprocessError` and `SubprocessError` as a catchable type.  It is the base

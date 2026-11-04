@@ -63,7 +63,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_ast_bridge_cannot_state_a_user_call_of_two_or_more_arguments.md` | `bug-formal-formal-ast-bridge-carries-one-900` | A call of two or more arguments to a USER function has no stated value: `callFunc2` answers only arity-2 admitted contracts and the callee table is one-parameter only. The node carries every argument; the 2-arg gap regression of `3d32c0e66` is fixed |
 | `FORMAL_dylib_export_loops_and_frame_bounds.md` | `bug-formal-formal-dylib-export-loops-and-5784` | dylib exports: the loop-fuel obligation, and a `FrameBound` that is ALREADY depth-indexed |
 | `FORMAL_float_step_functions.md` | **unclaimed** | The binary64 semantics is modelled; the FP STEP FUNCTIONS are not, and a float program cannot be proved yet |
-| `FORMAL_integer_overflow_at_run_time_is_still_untrapped.md` | `bug-formal-formal-integer-overflow-at-ru` | Integer overflow at RUN TIME is still a silent wrap on a variable operand |
+| `FORMAL_integer_overflow_at_run_time_is_still_untrapped.md (deleted)` | **unclaimed** | Integer overflow at RUN TIME is still a silent wrap on a variable operand |
 | `FORMAL_one_opaque_flush_silently_replaces_the_universal_theorem.md` | **unclaimed** | ONE opaque `fflush` SILENTLY replaces the universal theorem with `prop := True`, and three rows of `test_formal_call_proof_gen.py` are red because the div0 false goal can no longer be reached |
 | `FORMAL_the_contract_slot_trackers_scale_the_addsub_immediate_by_eight.md` | **unclaimed** | four contract-slot `sp` trackers read the `ADD`/`SUB` immediate and multiply it by 8 |
 | `FORMAL_the_last_dylib_exports_exportEnd_includes_the_interned_strings.md` | **unclaimed** | the last export of every dylib gets an unprovable `_semantics_total`, and the two `test_formal_dylib.py` hole-count rows are red for it |
@@ -78,7 +78,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_a_variadic_parameter_read_has_no_abi.md` | `bug-formal-formal-a-variadic-parameter-r` | the row was unowned, and the refusal in it is CORRECT |
 | `FORMAL_a_with_exit_whose_value_is_computed_can_suppress.md` | **unclaimed** | A `__exit__` whose RETURN VALUE is computed can still suppress, and the gate that catches the foldable half cannot see this one |
 | (removed) | — | bug fixed and doc deleted |
-| `FORMAL_module_state_no_storage.md` | **unclaimed** | a module cannot hold state, so `sys.argv`, `sys.path` and the stream objects cannot exist on this path |
+| `FORMAL_module_state_no_storage.md (deleted)` | **unclaimed** | a module cannot hold state, so `sys.argv`, `sys.path` and the stream objects cannot exist on this path |
 | `FORMAL_optional_needs_a_niche.md` | **unclaimed** | `Optional[T]` has a representation now, and the payloads it cannot answer are exactly the ones with no word left |
 | `FORMAL_pointer_value_model.md` | **unclaimed** | what a pointer IS on the formal path, and why the 54-file group was never about that |
 | `FORMAL_string_value_model.md` | **unclaimed** | what a string IS on the formal path, and the two things that want to be one |
