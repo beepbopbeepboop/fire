@@ -298,6 +298,17 @@ def main():
     print(Foo(7))
 main()
 """,
+    'enum_via_metaclass_transformation': """\
+import enum
+
+class Color(enum.Enum):
+    RED = 1
+    BLUE = 2
+
+def main():
+    print(Color.__name__)
+main()
+""",
 }
 
 
