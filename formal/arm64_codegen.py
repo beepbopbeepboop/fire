@@ -4778,6 +4778,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             callee_is_bool=lambda callee: self._callee_is_bool(
                 callee, stack | {name}),
             callee_returns_value=self._callee_returns_value,
+            callee_returns_none=self._callee_returns_none,
             callee_returned_parameter=self._callee_returned_parameter,
             dict_names=DICT_TYPE_NAMES,
             deref_kind=lambda e: M.pointer_deref_kind(
@@ -5214,29 +5215,6 @@ ctor_field_value=self._ctor_field_value_for(name),
             entry.get("signature") or "").strip() == "void"
 
     def _callee_returns_value(self, name, _seen=frozenset()):
-        """Whether a call to the local function `name` produces a value at all.
-
-        The seventh question `ValueKinds` asks about a callee, and the only one
-        whose answer is not about a KIND: a function with no `return` produces
-        nothing, CPython calls that `None`, and a value here is one 64-bit word,
-        so the honest answer for such a call is "not a value this path can carry"
-        rather than a kind.
-
-        **The answer is the TRANSITIVE one.** `model.returnless_function_names`
-        is the ONE reader, and it closes the question over bare-name
-        `return <call>` chains, because `def f(a): return g(a)` with `g`
-        return-less is the same `None` one hop out: reading the chain as a value
-        is what let `print(f(1))` print a word nothing wrote. Its least fixed
-        point is what keeps a cycle (two functions returning each other) reading
-        as a value rather than as an unwritten word. The x86-64 backend asks the
-        same reader, because two readings of "does this function return" is how
-        the two machines come to disagree about a construct.
-
-        The default for a name that is not a function of this unit is True, which
-        is the safe direction: it leaves the caller with the answer it had, so a
-        linked module's export (whose sources are not here to be read) changes
-        nothing.
-        """
         fn = self._functions.get(name)
         if fn is None:
             return True
@@ -5244,6 +5222,17 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._returnless = M.returnless_function_names(
                 self._functions.values())
         return name not in self._returnless
+
+    def _callee_returns_none(self, name):
+        fn = self._functions.get(name)
+        if fn is None:
+            return False
+        try:
+            if hasattr(M, 'function_returns_none'):
+                return M.function_returns_none(fn)
+        except Exception:
+            pass
+        return False
 
     def _callee_returned_parameter(self, name):
         """The positional index of a parameter `name` hands straight back.

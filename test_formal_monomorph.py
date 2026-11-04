@@ -3959,6 +3959,26 @@ def test_a_module_called_through_its_import_alias_loweres_to_that_module(tmpdir)
         check(got == "42\n", f"[{arch}] printed {got!r}, expected '42\\n'")
 
 
+def test_a_bare_call_to_an_imported_template_is_inferred_from_argument_annotation(tmpdir):
+    lib = ("def widen[T: Intable](v: T) -> T:\n"
+           "    return v\n")
+    prog = ("from pairlib import widen\n"
+            "\n"
+            "def main():\n"
+            "    var x: Int = 7\n"
+            "    print(widen(x))\n")
+    cpython = ("def widen(v):\n"
+               "    return v\n"
+               "\n"
+               "def main():\n"
+               "    x = 7\n"
+               "    print(widen(x))\n")
+    for arch in ARCHES:
+        fresh_cas()
+        got = run_pair_case(tmpdir, arch, "mm_bareinfer", lib, prog, cpython)
+        check(got == "7\n", f"[{arch}] printed {got!r}, expected '7\\n'")
+
+
 TESTS = [
     ("a generic struct template is instantiated at the importer's type",
      test_a_generic_struct_template_is_instantiated_at_the_importers_type),
@@ -3988,6 +4008,8 @@ TESTS = [
      test_an_instantiation_agrees_with_the_concrete_struct_of_the_same_shape),
     ("a bare call to an imported generic is still refused",
      test_a_bare_call_to_an_imported_generic_is_still_refused),
+    ("a bare call to an imported template is inferred from argument annotation",
+     test_a_bare_call_to_an_imported_template_is_inferred_from_argument_annotation),
     ("an inferred-parameter function is called without the bracket",
      test_an_inferred_parameter_function_is_called_without_the_bracket),
     ("a constants-only module builds and its constants read back",

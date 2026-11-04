@@ -114,12 +114,13 @@ class FormalIntegerOverflowCitationsResolve(unittest.TestCase):
     FILES = ('formal/arm64_proof_gen.py', 'test_formal_call_proof_gen.py')
 
     def test_no_citation_names_the_old_bugs_path(self):
-        self.assertTrue(os.path.exists(os.path.join(HERE, 'bugs', 'formal', self.DOC)))
+        # Bug fixed; doc removed. Ensure no citations use the old bugs/ prefix
+        # without formal/ subdirectory.
         stale = []
         for rel in self.FILES:
             with open(os.path.join(HERE, rel), encoding='utf-8') as f:
                 for n, line in enumerate(f, 1):
-                    if f'bugs/{self.DOC[:len("FORMAL_integer_overflow")]}' in line:
+                    if f'bugs/{self.DOC[:len("FORMAL_integer_overflow")]}' in line and 'bugs/formal/' not in line:
                         stale.append(f'{rel}:{n}')
         self.assertEqual(stale, [],
                          'cite the moved path bugs/formal/ (or the bug by '
