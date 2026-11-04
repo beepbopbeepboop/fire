@@ -110,8 +110,6 @@ def x86_get_xmm (s : X86State) (i : Nat) : UInt64 :=
   match i with
   | 0 => s.xmm0 | 1 => s.xmm1 | 2 => s.xmm2 | 3 => s.xmm3
   | 4 => s.xmm4 | 5 => s.xmm5 | 6 => s.xmm6 | 7 => s.xmm7
-  | 8 => s.xmm8 | 9 => s.xmm9 | 10 => s.xmm10 | 11 => s.xmm11
-  | 12 => s.xmm12 | 13 => s.xmm13 | 14 => s.xmm14 | 15 => s.xmm15
   | _ => 0
 
 def x86_set_xmm (s : X86State) (i : Nat) (v : UInt64) : X86State :=
@@ -120,10 +118,6 @@ def x86_set_xmm (s : X86State) (i : Nat) (v : UInt64) : X86State :=
   | 2 => {s with xmm2 := v} | 3 => {s with xmm3 := v}
   | 4 => {s with xmm4 := v} | 5 => {s with xmm5 := v}
   | 6 => {s with xmm6 := v} | 7 => {s with xmm7 := v}
-  | 8 => {s with xmm8 := v} | 9 => {s with xmm9 := v}
-  | 10 => {s with xmm10 := v} | 11 => {s with xmm11 := v}
-  | 12 => {s with xmm12 := v} | 13 => {s with xmm13 := v}
-  | 14 => {s with xmm14 := v} | 15 => {s with xmm15 := v}
   | _ => s
 
 /-! ### A register write does not change memory
@@ -1367,7 +1361,7 @@ their own, rather than inline in the plain one. The reason to keep it separate
 is instruction LENGTH: a `0x66`-prefixed opcode sits one byte further along than
 the same opcode without it, so a decoder that shared the plain path's byte
 positions would compute a successor that lands inside the next instruction.
-That is B6 in the formal x86-64 end-to-end proof bug history, where the `0x0F` escape
+That is B6 in `bugs/formal/FORMAL_x86_64_end_to_end_proof.md`, where the `0x0F` escape
 being dispatched in two places is recorded as the costliest single bug in that
 file precisely because the two disagreed about the length. -/
 
@@ -1398,7 +1392,7 @@ def x86_step_op66 (s : X86State) (code : Nat → UInt8) (rex : UInt8) :
     -- `encode_mov_rm16_r16` always emits, `_rex` being 0x40 at a minimum), the
     -- opcode at `rip + 2` and the ModRM at `rip + 3` -- ONE byte further along
     -- than the same opcode without the prefix, which is B6 in
-    -- the formal bug history and the reason this is not a
+    -- `bugs/formal/FORMAL_x86_64_end_to_end_proof.md` and the reason this is not a
     -- fourth arm of `x86_step_plain`.
     let modrm := code (rip + 3)
     let extra := match x86_mem_addr s code rex modrm (rip + 3) (rip + 4) with
@@ -1732,7 +1726,7 @@ def x86_step_plain (s : X86State) (code : Nat → UInt8) (b0 : UInt8) : Option X
     -- `0x66`, so the plain decoder is what sees it. Adding a third dispatcher
     -- for one instruction would have been a second place that has to agree with
     -- this one about instruction LENGTH, which is B6 in
-    -- the formal bug history — the `0x0F` escape is already
+    -- `bugs/formal/FORMAL_x86_64_end_to_end_proof.md` — the `0x0F` escape is already
     -- dispatched twice and the two dispatches disagreed about it once.
     --
     -- So the two prefixes are read here, in the order they are encoded: `0x66`,

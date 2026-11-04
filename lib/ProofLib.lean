@@ -24,7 +24,7 @@ instruction that performs it. This file's stated rule is that it models every
 instruction form `formal/x86_64.py` can encode and nothing else, so the
 alternative was not "no XMM file" — it was a step that decoded the instruction
 and recorded no effect, which is a FALSE step: it says the machine left XMM0
-alone when it did not, and the formal x86-64 end-to-end proof bug history's B2 and B24 are
+alone when it did not, and `FORMAL_x86_64_end_to_end_proof.md`'s B2 and B24 are
 about exactly how much worse that is than an absent instruction.
 
 Each XMM is one `UInt64` and not a `Vector`, and the reason is that this value
@@ -64,14 +64,6 @@ structure X86State where
   xmm5 : UInt64
   xmm6 : UInt64
   xmm7 : UInt64
-  xmm8 : UInt64 := 0
-  xmm9 : UInt64 := 0
-  xmm10 : UInt64 := 0
-  xmm11 : UInt64 := 0
-  xmm12 : UInt64 := 0
-  xmm13 : UInt64 := 0
-  xmm14 : UInt64 := 0
-  xmm15 : UInt64 := 0
   rip : Nat
   zf : Bool
   sf : Bool
@@ -87,8 +79,6 @@ def X86State.init (input : UInt64) (entry : Nat) : X86State :=
     r12 := 0, r13 := 0, r14 := 0, r15 := 0
     xmm0 := 0, xmm1 := 0, xmm2 := 0, xmm3 := 0
     xmm4 := 0, xmm5 := 0, xmm6 := 0, xmm7 := 0
-    xmm8 := 0, xmm9 := 0, xmm10 := 0, xmm11 := 0
-    xmm12 := 0, xmm13 := 0, xmm14 := 0, xmm15 := 0
     rip := entry, zf := false, sf := false, cf := false, of_ := false
     mem := fun _ => 0 }
 
@@ -313,11 +303,6 @@ theorem winfix (v i k : Nat) :
   have hb : val.toNat < 2 ^ 64 := UInt64.toNat_lt val
   simp only [Nat.testBit_or, UInt8.toNat_ofNat, nat64, n8,
              Nat.testBit_mod_two_pow, Nat.testBit_shiftLeft, Nat.testBit_shiftRight]
-
-@[simp] theorem mem_write_u64_same_addr (mem : Nat → UInt8) (addr : Nat) (v1 v2 : UInt64) :
-    mem_write_u64 (mem_write_u64 mem addr v1) addr v2 = mem_write_u64 mem addr v2 := by
-  ext i
-  simp [mem_write_u64, mem_read_u64]
   simp only [winfix]
   by_cases h64 : i < 64
   · -- i in some window [8j, 8j+8)
@@ -860,114 +845,6 @@ theorem u64_toNat_sub_lit (a : UInt64) (b : Nat) (hb : b < 2 ^ 64) (hge : b ≤ 
     (a - UInt64.ofNat b).toNat = a.toNat - b :=
   u64_slot_nowrap a hb hge
 
-/-- **Block memory window (per-block).**  Stores below `sp` do not affect
-    reads in a window at or above `sp`.  This is the block-local analogue of
-    `FrameOk`'s memory clause: peel every store written by the block below
-    `sp` and the read lands in the memory state before those stores (the
-    "window" view).  The generator uses this to read from an earlier memory
-    without traversing the entire nested store stack. -/
-@[simp] theorem mem_read_after_writes_below_sp (mem : Nat → UInt8) (sp : UInt64)
-    {K : Nat} (hK : 8 ≤ K) (hKnw : K ≤ sp.toNat) (a : Nat) (ha : sp.toNat ≤ a)
-    (val : UInt64) :
-    mem_read_u64 (mem_write_u64 mem (sp - UInt64.ofNat K).toNat val) a =
-    mem_read_u64 mem a := by
-  apply mem_read_after_write_u64_ne
-  right
-  have ha' : a < 2^64 := by omega
-  have hw : (sp - UInt64.ofNat K).toNat = sp.toNat - K := u64_slot_nowrap sp (by omega) hKnw
-  rw [hw]
-  omega
-
-/-- Variant for multiple disjoint stores below `sp`. -/
-theorem mem_read_after_writes_below_sp' (mem : Nat → UInt8) (sp : UInt64)
-    {K : Nat} (hK : 8 ≤ K) (hKnw : K ≤ sp.toNat) (a : Nat) (ha : sp.toNat ≤ a)
-    (val : UInt64) :
-    mem_read_u64 (mem_write_u64 mem (sp - UInt64.ofNat K).toNat val) a =
-    mem_read_u64 mem a :=
-  mem_read_after_writes_below_sp mem sp hK hKnw a ha val
-
-/-- **Memory window: reads above `sp` preserved by stores below `sp`.**
-    This lets the flow read from an earlier memory state without peeling
-    every store in a block. -/
-theorem mem_read_u64_block_window (mem : Nat → UInt8) (sp : UInt64)
-    {K : Nat} (hK : 8 ≤ K) (hKnw : K ≤ sp.toNat) (j : Nat)
-    (hjnw : sp.toNat + j < 2 ^ 64) (val : UInt64) :
-    mem_read_u64 (mem_write_u64 mem (sp - UInt64.ofNat K).toNat val)
-        ((sp + UInt64.ofNat j).toNat) =
-    mem_read_u64 mem ((sp + UInt64.ofNat j).toNat) :=
-  mem_read_after_write_u64_high_nw mem sp hK hKnw hjnw val
-
-/-- Memory window preserved across a block: reads above `sp` in `mem'` equal
-    those in `mem`. Analogue of `FrameOk`'s memory clause for within-function
-    blocks. -/
-def BlockMemWindow (sp : UInt64) (mem mem' : Nat → UInt8) : Prop :=
-  ∀ j, sp.toNat + j < 2 ^ 64 →
-    mem_read_u64 mem' ((sp + UInt64.ofNat j).toNat) =
-    mem_read_u64 mem ((sp + UInt64.ofNat j).toNat)
-
-/-- Chain through a memory window for reads above `sp`. -/
-theorem mem_read_u64_block_window_chain (mem0 mem1 : Nat → UInt8) (sp : UInt64)
-    (j : Nat) (hjnw : sp.toNat + j < 2 ^ 64)
-    (hwin : mem_read_u64 mem1 ((sp + UInt64.ofNat j).toNat) =
-            mem_read_u64 mem0 ((sp + UInt64.ofNat j).toNat)) :
-    mem_read_u64 mem1 ((sp + UInt64.ofNat j).toNat) =
-    mem_read_u64 mem0 ((sp + UInt64.ofNat j).toNat) := hwin
-
-@[simp] theorem BlockMemWindow_read (sp : UInt64) (mem mem' : Nat → UInt8)
-    (hwin : BlockMemWindow sp mem mem') (j : Nat) (hjnw : sp.toNat + j < 2 ^ 64) :
-    mem_read_u64 mem' ((sp + UInt64.ofNat j).toNat) =
-    mem_read_u64 mem ((sp + UInt64.ofNat j).toNat) :=
-  hwin j hjnw
-
-/-- A single write below `sp` preserves the window above `sp`. -/
-theorem BlockMemWindow_write_below (sp : UInt64) (mem : Nat → UInt8)
-    {K : Nat} (hK : 8 ≤ K) (hKnw : K ≤ sp.toNat) (val : UInt64) :
-    BlockMemWindow sp mem (mem_write_u64 mem (sp - UInt64.ofNat K).toNat val) := by
-  intro j hjnw
-  apply mem_read_after_write_u64_high_nw
-  · omega
-  · exact hKnw
-  · exact hjnw
-  · exact val
-
-/-- Chain of writes below `sp` preserves the window. -/
-theorem BlockMemWindow_write_below_chain (sp : UInt64) (mem0 mem1 : Nat → UInt8)
-    (hwin : BlockMemWindow sp mem0 mem1)
-    {K : Nat} (hK : 8 ≤ K) (hKnw : K ≤ sp.toNat) (val : UInt64) :
-    BlockMemWindow sp mem0 (mem_write_u64 mem1 (sp - UInt64.ofNat K).toNat val) := by
-  intro j hjnw
-  rw [mem_read_after_write_u64_high_nw _ _ hK hKnw hjnw val]
-  exact hwin j hjnw
-
-
-
-/-- **Block memory window**: all stores below `sp` leave reads above `sp`
-    unchanged. Apply repeatedly to peel a block's frame stores without
-    traversing the full nested stack. -/
-@[simp] theorem block_mem_read_above_sp (mem : Nat → UInt8) (sp : UInt64)
-    (addr : Nat) (hge : sp.toNat ≤ addr)
-    {K : Nat} (hK : 8 ≤ K) (hKnw : K ≤ sp.toNat) (val : UInt64) :
-    mem_read_u64 (mem_write_u64 mem (sp - UInt64.ofNat K).toNat val) addr =
-    mem_read_u64 mem addr :=
-  mem_read_after_writes_below_sp mem sp hK hKnw addr hge val
-
-/-- Peel a write at address below `sp` when reading from any address >= `sp`
-    (with explicit disjointness). -/
-@[simp] theorem mem_read_u64_write_below_sp (mem : Nat → UInt8) (sp : UInt64)
-    (waddr : Nat) (raddr : Nat) (hge : sp.toNat ≤ raddr)
-    (hdisj : waddr + 8 ≤ raddr ∨ raddr + 8 ≤ waddr)
-    (val : UInt64) :
-    mem_read_u64 (mem_write_u64 mem waddr val) raddr = mem_read_u64 mem raddr := by
-  apply mem_read_after_write_u64_ne
-  exact hdisj
-
-/-- Read from original memory if all writes are to addresses below `sp` and
-    read is at or above `sp`. General form that tries to avoid deep peeling. -/
-theorem mem_read_u64_above_sp_from_base (mem0 : Nat → UInt8) (sp : UInt64)
-    (raddr : Nat) (hge : sp.toNat ≤ raddr) (mem1 : Nat → UInt8)
-    (h : mem1 = mem0) : mem_read_u64 mem1 raddr = mem_read_u64 mem0 raddr := by
-  rw [h]
-
 /-- `(a - 1).toNat = a.toNat - 1` for a non-zero `UInt64`, via `u64_toNat_sub_lit`. -/
 theorem u64_toNat_sub_one' (a : UInt64) (hne : a ≠ 0) :
     (a - 1).toNat = a.toNat - 1 := by
@@ -1071,7 +948,6 @@ def getByte (bytes : List UInt8) (i : Nat) : UInt8 :=
 inductive MojoExpr where
   | int (v : UInt64)
   | bool (v : Bool)
-  | float (v : UInt64)
   | var (name : String)
   | unop (op : String) (operand : MojoExpr)
   | binop (op : String) (left : MojoExpr) (right : MojoExpr)
@@ -1307,11 +1183,8 @@ def evalExpr (callFunc : String → UInt64 → UInt64) (callFunc2 : String → U
   match e with
   | MojoExpr.int v => v
   | MojoExpr.bool v => if v then 1 else 0
-  | MojoExpr.float v => v
   | MojoExpr.var name => env name
   | MojoExpr.unop "neg" operand => (0 : UInt64) - evalExpr callFunc callFunc2 operand env
-  | MojoExpr.unop "-" operand => fnegBits (evalExpr callFunc callFunc2 operand env)
-  | MojoExpr.unop "fneg" operand => fnegBits (evalExpr callFunc callFunc2 operand env)
   | MojoExpr.unop "not" operand => if evalExpr callFunc callFunc2 operand env = 0 then 1 else 0
   | MojoExpr.unop "lnot" operand => if evalExpr callFunc callFunc2 operand env = 0 then 1 else 0
   | MojoExpr.unop "inv" operand => evalExpr callFunc callFunc2 operand env ^^^ (0xFFFFFFFFFFFFFFFF : UInt64)
@@ -1321,14 +1194,6 @@ def evalExpr (callFunc : String → UInt64 → UInt64) (callFunc2 : String → U
   | MojoExpr.binop "+" l r => evalExpr callFunc callFunc2 l env + evalExpr callFunc callFunc2 r env
   | MojoExpr.binop "-" l r => evalExpr callFunc callFunc2 l env - evalExpr callFunc callFunc2 r env
   | MojoExpr.binop "*" l r => evalExpr callFunc callFunc2 l env * evalExpr callFunc callFunc2 r env
-  | MojoExpr.binop "+." l r => faddBits (evalExpr callFunc callFunc2 l env) (evalExpr callFunc callFunc2 r env)
-  | MojoExpr.binop "-." l r => fsubBits (evalExpr callFunc callFunc2 l env) (evalExpr callFunc callFunc2 r env)
-  | MojoExpr.binop "*." l r => fmulBits (evalExpr callFunc callFunc2 l env) (evalExpr callFunc callFunc2 r env)
-  | MojoExpr.binop "/." l r => fdivBits (evalExpr callFunc callFunc2 l env) (evalExpr callFunc callFunc2 r env)
-  | MojoExpr.binop "fadd" l r => faddBits (evalExpr callFunc callFunc2 l env) (evalExpr callFunc callFunc2 r env)
-  | MojoExpr.binop "fsub" l r => fsubBits (evalExpr callFunc callFunc2 l env) (evalExpr callFunc callFunc2 r env)
-  | MojoExpr.binop "fmul" l r => fmulBits (evalExpr callFunc callFunc2 l env) (evalExpr callFunc callFunc2 r env)
-  | MojoExpr.binop "fdiv" l r => fdivBits (evalExpr callFunc callFunc2 l env) (evalExpr callFunc callFunc2 r env)
   | MojoExpr.binop "<=" l r => if sKey (evalExpr callFunc callFunc2 l env) ≤ sKey (evalExpr callFunc callFunc2 r env) then 1 else 0
   | MojoExpr.binop "<" l r => if sKey (evalExpr callFunc callFunc2 l env) < sKey (evalExpr callFunc callFunc2 r env) then 1 else 0
   | MojoExpr.binop ">" l r => if sKey (evalExpr callFunc callFunc2 l env) > sKey (evalExpr callFunc callFunc2 r env) then 1 else 0
@@ -1926,32 +1791,6 @@ def arm64_set_reg_d (i : Nat) (s : Arm64State) (val : UInt64) : Arm64State :=
     arm64_reg j { s with nzcv := c } = arm64_reg j s := by
   cases j <;> rfl
 
-/-- Make memory irrelevant for register-focused reasoning. -/
-def mem_erase (s : Arm64State) : Arm64State := { s with mem := fun _ => 0 }
-
-@[simp] theorem arm64_reg_mem_erase (i : Nat) (s : Arm64State) :
-  arm64_reg i (mem_erase s) = arm64_reg i s := by
-  simp [mem_erase]
-
-@[simp] theorem arm64_state_mem_erase_regs (s : Arm64State) (i : Nat) :
-  arm64_reg i (mem_erase s) = arm64_reg i s := arm64_reg_mem_erase i s
-
-/-- Erasing memory doesn't change register values. -/
-@[simp] theorem arm64_reg_after_mem_erase (i : Nat) (s : Arm64State) :
-  arm64_reg i {s with mem := fun _ => 0} = arm64_reg i s := by
-  simp [arm64_reg_mem]
-
-/-- Normalize interleaved record updates so that `mem` is not repeatedly
-    threaded through register updates; irrelevant to register projections but
-    keeps large generated terms tractable. -/
-@[simp] theorem arm64_state_update_mem_mem (s : Arm64State) (m1 m2 : Nat → UInt8) :
-    ({ s with mem := m1 } with mem := m2) = { s with mem := m2 } := by
-  ext <;> simp
-
-@[simp] theorem arm64_state_update_reg_mem (s : Arm64State) (i : Nat) (v : UInt64) (m : Nat → UInt8) :
-    ({ arm64_set_reg i s v with mem := m }) = arm64_set_reg i { s with mem := m } v := by
-  cases i <;> ext <;> simp [arm64_set_reg]
-
 /-- `Rn` read the way the INSTRUCTION that names it reads it: register 31 is
 `SP` in the forms that HAVE an SP encoding, and `XZR` in the forms that do not.
 
@@ -2548,7 +2387,7 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
   -- Nothing in `formal/examples/*.mojo` contains this encoding, which is why
   -- the 40-example suite stayed green throughout: the mis-modelled form is
   -- reachable only from a program that touches memory through a non-SP base,
-  -- and the examples are register-only.  `FORMAL_wide_receiver_by_reference.md` (deleted; fixed)
+  -- and the examples are register-only.  `bugs/formal/FORMAL_wide_receiver_by_reference.md`
   -- records the measurement and what it gates.
   else if (insn &&& 0xffe00000) = 0xF9400000 then
     let rt := (insn &&& 0x1f).toNat
@@ -5649,9 +5488,7 @@ theorem work_step_mov (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UI
   have hne_2 : ¬ ((w &&& 0xffe00000) = 0x2a00fa00) := by intro t; bv_decide
   have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
   have hne_70 : ¬ ((w &&& 0xffe0fc00) = 0x1e602000) := by intro t; bv_decide
-  rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_70]; try dsimp; try rfl; try simp
-
-theorem work_step_mul (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+  rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hnetheorem work_step_mul (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe07c00) = 0x9b007c00) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s * arm64_reg (((w >>> 16) &&& 0x1f).toNat) s)) := by
@@ -5672,9 +5509,7 @@ theorem work_step_mul (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UI
   have hne_3 : ¬ ((w &&& 0xffe00000) = 0x8b000000) := by intro t; bv_decide
   have hne_4 : ¬ ((w &&& 0xffe00000) = 0xcb000000) := by intro t; bv_decide
   have hne_70 : ¬ ((w &&& 0xffe0fc00) = 0x1e602000) := by intro t; bv_decide
-  rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_70]; try dsimp; try rfl; try simp
-
-theorem work_step_neg (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+  rw [if_neg hne_ret, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hnetheorem work_step_neg (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xfffffc1f) = 0xcb0003e0) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (-(arm64_reg (((w >>> 16) &&& 0x1f).toNat) s))) := by
@@ -5917,9 +5752,7 @@ arm64_step s code = some { (arm64_set_reg ((w &&& 0x1f).toNat) s (arm64_reg (((w
     else moves -- in particular `sp` does not, which is the whole point.  The
     base is the instruction's `Rn`, not `SP`.
 
-    Named `_uoff` (unsigned offset) to match the A64 encoding. -/
-
-theorem work_step_ldr_uoff (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    Named `_uoff` (unsigned offset) to match the A64 encodintheorem work_step_ldr_uoff (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe00000) = 0xf9400000) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (mem_read_u64 s.mem
@@ -5965,9 +5798,8 @@ theorem work_step_ldr_uoff (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w
 
     `STR Wt, [Xn, #imm]` (0xB9000000): `mem32[Xn + imm*4] := Wt`, and nothing
     else moves -- in particular neither `Rt` nor `sp`.  The base is the
-    instruction's `Rn`, and the scale is 4 not 8 because this is the 32-bit form. -/
-
-theorem work_step_str_uoff32 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    instruction's `Rn`, and the scale is 4 not 8 because this is the 32-bit
+    form.  This replaces `work_step_ldr_post`, which asserted atheorem work_step_str_uoff32 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe00000) = 0xb9000000) :
     arm64_step s code = some { s with
@@ -6485,9 +6317,8 @@ theorem work_step_movk (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : U
 /-- Per-instruction step: `work_step_str_uoff`.
 
     `STR Xt, [Xn, #imm]` (0xF9000000): `mem64[Xn + imm] := Xt`, nothing else
-    moves.  The base is the instruction's `Rn`. -/
-
-theorem work_step_str_uoff (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    moves.  The base is the instruction's `Rn`; this used to be `s.sp`,
+    hardwired, which agrees with the architecture only theorem work_step_str_uoff (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe00000) = 0xf9000000) :
     arm64_step s code = some { s with
@@ -6768,9 +6599,7 @@ set_option maxHeartbeats 4000000 in
     which is visible: it states the `¬` fact for **every** branch before this
     one — 65 of them, the 65 earlier arms plus the equality test — and each is
     a `bv_decide` over the hypothesis `h` and all 2^32 words of `w`.  So these
-    lemmas ARE the measurement that no earlier arm matches. -/
-
-theorem work_step_cmn (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    lemmas ARE the measurement that no eatheorem work_step_cmn (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe00000) = 0xab000000) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) { s with nzcv := arm64_adds_flags (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) (arm64_shifted_reg w s (((w >>> 16) &&& 0x1f).toNat)) } (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s + arm64_shifted_reg w s (((w >>> 16) &&& 0x1f).toNat))) := by
@@ -6862,10 +6691,7 @@ set_option maxHeartbeats 4000000 in
     which is visible: it states the `¬` fact for **every** branch before this
     one — 66 of them, the 66 earlier arms plus the equality test — and each is
     a `bv_decide` over the hypothesis `h` and all 2^32 words of `w`.  So these
-    lemmas ARE the measure.
-
-  -/
-theorem work_step_tst (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    lemmas ARE the measuretheorem work_step_tst (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe00000) = 0xea000000) :
     arm64_step s code = some { s with nzcv := arm64_logic_flags (arm64_reg (((w >>> 5) &&& 0x1f).toNat) s &&& arm64_shifted_reg w s (((w >>> 16) &&& 0x1f).toNat)) } := by
@@ -6958,10 +6784,7 @@ set_option maxHeartbeats 4000000 in
     which is visible: it states the `¬` fact for **every** branch before this
     one — 54 of them, the 54 earlier arms plus the equality test — and each is
     a `bv_decide` over the hypothesis `h` and all 2^32 words of `w`.  So these
-    lemmas ARE the measure.
-
-  -/
-theorem work_step_ldrb (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    lemmas ARE the measuretheorem work_step_ldrb (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffd00000) = 0x39400000) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (mem_read_u8 s.mem ((if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat)).toNat)) := by
@@ -7042,10 +6865,7 @@ set_option maxHeartbeats 4000000 in
     which is visible: it states the `¬` fact for **every** branch before this
     one — 55 of them, the 55 earlier arms plus the equality test — and each is
     a `bv_decide` over the hypothesis `h` and all 2^32 words of `w`.  So these
-    lemmas ARE the measure.
-
-  -/
-theorem work_step_strb (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    lemmas ARE the measuretheorem work_step_strb (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffd00000) = 0x39000000) :
     arm64_step s code = some { s with mem := mem_write_u8 s.mem ((if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat)).toNat (arm64_reg ((w &&& 0x1f).toNat) s) } := by
@@ -7127,10 +6947,7 @@ set_option maxHeartbeats 4000000 in
     which is visible: it states the `¬` fact for **every** branch before this
     one — 56 of them, the 56 earlier arms plus the equality test — and each is
     a `bv_decide` over the hypothesis `h` and all 2^32 words of `w`.  So these
-    lemmas ARE the measure.
-
-  -/
-theorem work_step_ldrh (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    lemmas ARE the measuretheorem work_step_ldrh (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffd00000) = 0x79400000) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (mem_read_u16 s.mem ((if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 2)).toNat)) := by
@@ -7213,10 +7030,7 @@ set_option maxHeartbeats 4000000 in
     which is visible: it states the `¬` fact for **every** branch before this
     one — 57 of them, the 57 earlier arms plus the equality test — and each is
     a `bv_decide` over the hypothesis `h` and all 2^32 words of `w`.  So these
-    lemmas ARE the measure.
-
-  -/
-theorem work_step_strh (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    lemmas ARE the measuretheorem work_step_strh (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffd00000) = 0x79000000) :
     arm64_step s code = some { s with mem := mem_write_u16 s.mem ((if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 2)).toNat (arm64_reg ((w &&& 0x1f).toNat) s) } := by
@@ -7300,10 +7114,7 @@ set_option maxHeartbeats 4000000 in
     which is visible: it states the `¬` fact for **every** branch before this
     one — 58 of them, the 58 earlier arms plus the equality test — and each is
     a `bv_decide` over the hypothesis `h` and all 2^32 words of `w`.  So these
-    lemmas ARE the measure.
-
-  -/
-theorem work_step_ldrsb (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    lemmas ARE the measuretheorem work_step_ldrsb (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffd00000) = 0x39800000) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (t8s (mem_read_u8 s.mem ((if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat (((w >>> 10) &&& 0xfff).toNat)).toNat))) := by
@@ -7388,10 +7199,7 @@ set_option maxHeartbeats 4000000 in
     which is visible: it states the `¬` fact for **every** branch before this
     one — 59 of them, the 59 earlier arms plus the equality test — and each is
     a `bv_decide` over the hypothesis `h` and all 2^32 words of `w`.  So these
-    lemmas ARE the measure.
-
-  -/
-theorem work_step_ldrsh (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    lemmas ARE the measuretheorem work_step_ldrsh (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffd00000) = 0x79800000) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (t16s (mem_read_u16 s.mem ((if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 2)).toNat))) := by
@@ -7477,10 +7285,7 @@ set_option maxHeartbeats 4000000 in
     which is visible: it states the `¬` fact for **every** branch before this
     one — 60 of them, the 60 earlier arms plus the equality test — and each is
     a `bv_decide` over the hypothesis `h` and all 2^32 words of `w`.  So these
-    lemmas ARE the measure.
-
-  -/
-theorem work_step_ldrsw (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    lemmas ARE the measuretheorem work_step_ldrsw (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffd00000) = 0xb9800000) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (t32s (mem_read_u32 s.mem ((if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 4)).toNat))) := by
@@ -7567,10 +7372,7 @@ set_option maxHeartbeats 4000000 in
     which is visible: it states the `¬` fact for **every** branch before this
     one — 61 of them, the 61 earlier arms plus the equality test — and each is
     a `bv_decide` over the hypothesis `h` and all 2^32 words of `w`.  So these
-    lemmas ARE the measure.
-
-  -/
-theorem work_step_ldr_uoff32 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    lemmas ARE the measuretheorem work_step_ldr_uoff32 (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffd00000) = 0xb9400000) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (mem_read_u32 s.mem ((if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat ((((w >>> 10) &&& 0xfff).toNat) * 4)).toNat)) := by
@@ -7658,10 +7460,7 @@ set_option maxHeartbeats 4000000 in
     which is visible: it states the `¬` fact for **every** branch before this
     one — 62 of them, the 62 earlier arms plus the equality test — and each is
     a `bv_decide` over the hypothesis `h` and all 2^32 words of `w`.  So these
-    lemmas ARE the measure.
-
-  -/
-theorem work_step_ldr_regoff (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    lemmas ARE the measuretheorem work_step_ldr_regoff (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe0fc00) = 0xf8606800) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (mem_read_u64 s.mem ((if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + arm64_reg (((w >>> 16) &&& 0x1f).toNat) s).toNat)) := by
@@ -7750,10 +7549,7 @@ set_option maxHeartbeats 4000000 in
     which is visible: it states the `¬` fact for **every** branch before this
     one — 63 of them, the 63 earlier arms plus the equality test — and each is
     a `bv_decide` over the hypothesis `h` and all 2^32 words of `w`.  So these
-    lemmas ARE the measure.
-
-  -/
-theorem work_step_str_regoff (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    lemmas ARE the measuretheorem work_step_str_regoff (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe0fc00) = 0xf8206800) :
     arm64_step s code = some { s with mem := mem_write_u64 s.mem ((if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + arm64_reg (((w >>> 16) &&& 0x1f).toNat) s).toNat (arm64_reg ((w &&& 0x1f).toNat) s) } := by
@@ -7843,10 +7639,7 @@ set_option maxHeartbeats 4000000 in
     which is visible: it states the `¬` fact for **every** branch before this
     one — 64 of them, the 64 earlier arms plus the equality test — and each is
     a `bv_decide` over the hypothesis `h` and all 2^32 words of `w`.  So these
-    lemmas ARE the measure.
-
-  -/
-theorem work_step_ldur (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    lemmas ARE the measuretheorem work_step_ldur (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe00c00) = 0xf8400000) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s (mem_read_u64 s.mem (if (((w >>> 12) &&& 0x1ff).toNat) ≥ 256 then (if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) - UInt64.ofNat ((512 - (((w >>> 12) &&& 0x1ff).toNat))) else (if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat (((w >>> 12) &&& 0x1ff).toNat)).toNat)) := by
@@ -7937,10 +7730,7 @@ set_option maxHeartbeats 4000000 in
     which is visible: it states the `¬` fact for **every** branch before this
     one — 67 of them, the 67 earlier arms plus the equality test — and each is
     a `bv_decide` over the hypothesis `h` and all 2^32 words of `w`.  So these
-    lemmas ARE the measure.
-
-  -/
-theorem work_step_stur (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    lemmas ARE the measuretheorem work_step_stur (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe00c00) = 0xf8000000) :
     arm64_step s code = some { s with mem := mem_write_u64 s.mem (if (((w >>> 12) &&& 0x1ff).toNat) ≥ 256 then (if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) - UInt64.ofNat ((512 - (((w >>> 12) &&& 0x1ff).toNat))) else (if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + UInt64.ofNat (((w >>> 12) &&& 0x1ff).toNat)).toNat (arm64_reg ((w &&& 0x1f).toNat) s) } := by
@@ -8048,10 +7838,7 @@ def cbnz_off64 (w : UInt32) : UInt64 :=
   let imm19 := (w >>> 5) &&& 0x7ffff
   if (imm19 &&& 0x40000) ≠ 0
     then (UInt64.ofNat imm19.toNat) - (UInt64.ofNat (2^19))
-    else UInt64.ofNat imm19.toNat
-
-/-- CBZ step lemma. -/
-theorem work_step_cbz (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    else UInt64.ofNtheorem work_step_cbz (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xff000000) = 0xb4000000) :
     arm64_step s code
@@ -8110,8 +7897,7 @@ theorem work_step_cbz (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UI
       if_neg hne_16, if_neg hne_19]
   simp [h, cbz_off64, cbnz_off64]
 
-/-- CBNZ step lemma. -/
-theorem work_step_cbnz (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+/-- theorem work_step_cbnz (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xff000000) = 0xb5000000) :
     arm64_step s code
@@ -8256,10 +8042,7 @@ theorem mem_read_write_pair_below (mem : Nat → UInt8) (sp : UInt64)
   have hlt : sp.toNat < 2 ^ 64 := UInt64.toNat_lt sp
   have hlt' : sp.toNat ≤ 18446744073709551615 := by omega
   have h8n : (UInt64.ofNat 8).toNat = 8 := rfl
-  -- `8 ≤ K` puts the pair's second half back inside the frame, so the stores do not
-  -- overwrite each other.
-
-theorem work_step_smulh (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+  -- `8 ≤ K` puts the pair's second half back inside the frame, stheorem work_step_smulh (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe07c00) = 0x9b407c00) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s
@@ -8365,10 +8148,7 @@ set_option maxHeartbeats 4000000 in
     arm is the last one, so every earlier lemma's rewrite chain is untouched,
     and the 69 `if_neg` facts here are the measurement that no earlier branch
     claims these words.  The two that share the CSEL mask with the arm
-    (`hne_64`, `hne_67`) are closed by the same.
-
-  -/
-theorem work_step_csel (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (`hne_64`, `hne_67`) are closed by the sametheorem work_step_csel (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe00c00) = 0x9a800000) :
     arm64_step s code = some (arm64_set_reg ((w &&& 0x1f).toNat) s
@@ -8995,7 +8775,7 @@ evaluator, not a change to `evalExpr`) and on the *callee contract* side
 `FrameOk`'s "caller's slots preserved" clause by construction).  Both are
 additions beside the existing definitions.
 
-`FORMAL_wide_receiver_by_reference.md` (deleted; fixed) has the full design, the cost, and
+`bugs/formal/FORMAL_wide_receiver_by_reference.md` has the full design, the cost, and
 what is not done.
 -/
 
@@ -9564,7 +9344,7 @@ theorem frameRead_in_range (b : UInt64) (n k : Nat)
 
 /-! ### A NESTED receiver: a field whose agreed declared type is a framed struct
 
-`FORMAL_wide_receiver_by_reference.md` (deleted; fixed)'s next step is a field's DECLARED
+`bugs/formal/FORMAL_wide_receiver_by_reference.md`'s next step is a field's DECLARED
 type, used only when every binding of the name agrees on it
 (`formal/model.py`'s `frame_field_type_candidates`).  When the agreed type is a
 framed struct of the same module, the slot holds the ADDRESS of that struct's
@@ -9822,9 +9602,6 @@ def mfEnv (fields : List String) (flds locals : String → UInt64) (name : Strin
     name with no escaping. -/
 theorem fieldTag_inj (a b : String) (h : a ≠ b) : fieldTag a ≠ fieldTag b := by
   simp [fieldTag, h]
-
-theorem fieldTag_inj' (a b : String) (h : a ≠ b) : fieldTag a ≠ fieldTag b :=
-  fieldTag_inj a b h
 
 /-- **A field read finds the field.** -/
 theorem mfEnv_fieldTag (fields : List String) (flds locals : String → UInt64) (n : String)
@@ -10167,9 +9944,7 @@ theorem evalMFBody_congr (fields : List String) (flds flds' locals locals' : Str
     (hflds : ∀ x, flds x = flds' x) (hlocals : ∀ x, locals x = locals' x) :
     evalMFBody fields flds locals call stmts = evalMFBody fields flds' locals' call stmts := by
   refine evalBodyEnv_congr call (liftMFStmts stmts)
-    (env := mfEnv fields flds locals)
-
-theorem work_step_strb_regoff (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
+    (env := mfEnv fields flds locals) (env' := mfEnv fields flds' loctheorem work_step_strb_regoff (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w : UInt32)
     (hpc : s.pc = pc) (hread : arm64_read_insn code pc = w)
     (h : (w &&& 0xffe0fc00) = 0x38206800) :
     arm64_step s code = some { s with mem := mem_write_u8 s.mem ((if (((w >>> 5) &&& 0x1f).toNat) = 31 then s.sp else arm64_reg (((w >>> 5) &&& 0x1f).toNat) s) + arm64_reg (((w >>> 16) &&& 0x1f).toNat) s).toNat (arm64_reg ((w &&& 0x1f).toNat) s) } := by
@@ -11039,5 +10814,3 @@ theorem work_step_fcvtzs (s : Arm64State) (code : Nat → UInt8) (pc : Nat) (w :
   have hne_70 : ¬ ((w &&& 0xffe0fc00) = 0x1e602000) := by intro t; bv_decide
   rw [if_neg hne_ret, if_neg hne_1, if_neg hne_2, if_neg hne_3, if_neg hne_4, if_neg hne_5, if_neg hne_6, if_neg hne_7, if_neg hne_8, if_neg hne_9, if_neg hne_10, if_neg hne_11, if_neg hne_12, if_neg hne_13, if_neg hne_14, if_neg hne_15, if_neg hne_16, if_neg hne_17, if_neg hne_18, if_neg hne_19, if_neg hne_20, if_neg hne_21, if_neg hne_22, if_neg hne_23, if_neg hne_24, if_neg hne_25, if_neg hne_26, if_neg hne_27, if_neg hne_28, if_neg hne_29, if_neg hne_30, if_neg hne_31, if_neg hne_32, if_neg hne_33, if_neg hne_34, if_neg hne_35, if_neg hne_36, if_neg hne_37, if_neg hne_38, if_neg hne_39, if_neg hne_40, if_neg hne_41, if_neg hne_42, if_neg hne_43, if_neg hne_44, if_neg hne_45, if_neg hne_46, if_neg hne_47, if_neg hne_48, if_neg hne_49, if_neg hne_50, if_neg hne_51, if_neg hne_52, if_neg hne_53, if_neg hne_54, if_neg hne_55, if_neg hne_56, if_neg hne_57, if_neg hne_58, if_neg hne_59, if_neg hne_60, if_neg hne_61, if_neg hne_62, if_neg hne_63, if_neg hne_64, if_neg hne_65, if_neg hne_66, if_neg hne_67, if_neg hne_68, if_neg hne_69, if_neg hne_70, if_pos h]
   try dsimp; try rfl; try simp
-
-end MF
