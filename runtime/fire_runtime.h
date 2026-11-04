@@ -1558,6 +1558,14 @@ void        mojo_dict_set_bool(MojoDict *d, char *key, int v);
  * it every plain `0` in a dict printed as `None`, because the generic value
  * repr answers "None" for a zero word. */
 void        mojo_dict_set_none(MojoDict *d, char *key);
+void        mojo_dict_set_none_key(MojoDict *d, int64_t v);
+void        mojo_dict_set_none_key_int(MojoDict *d, int64_t v);
+void        mojo_dict_set_none_key_str(MojoDict *d, char *v);
+void        mojo_dict_set_none_key_double(MojoDict *d, double v);
+void        mojo_dict_set_none_key_bool(MojoDict *d, int v);
+void        mojo_dict_set_none_key_none(MojoDict *d);
+void        mojo_dict_set_none_key_struct(MojoDict *d, void *v);
+void        mojo_dict_set_bytes_none_key(MojoDict *d, MojoBytes *key, int64_t v);
 
 /* A STRUCT stored as a dict VALUE: the boxed pointer, tagged `kind == 5` so
  * the dict's repr asks `mojo_dict_repr_val` instead of dispatching on a type
@@ -1756,6 +1764,7 @@ int64_t     mojo_hash_str(char *s);
 int64_t     mojo_hash(int64_t val);
 
 int         mojo_dict_contains(MojoDict *d, char *key);
+int         mojo_dict_contains_none(MojoDict *d);
 /* bytes-keyed access — its own key DOMAIN (see _DictSlot.keykind), so
  * `d[b'x']` and `d['x']` stay distinct entries. Keyed by content. */
 void        mojo_dict_set_bytes_int(MojoDict *d, MojoBytes *key, int64_t v);

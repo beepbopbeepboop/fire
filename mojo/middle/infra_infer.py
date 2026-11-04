@@ -17,6 +17,7 @@ import ownership_destruct
 from ownership_check import _block_terminates
 from mojo.middle.types import *  # noqa: F401,F403
 from mojo.middle.types import _struct_value_codes  # underscore name: `import *` won't carry it
+from mojo.middle.types import _FOREIGN_CALLABLES  # underscore name: `import *` won't carry it
 from mojo.middle.exprtypes import *  # noqa: F401,F403
 from mojo.middle.solvers import *  # noqa: F401,F403
 # NO module-level `import gimple_codegen` here: nothing in this file reads
@@ -1538,14 +1539,119 @@ def _infer_param_types(gen, func: gimple_ctypes.FunctionDef,
     # with the signature: `def keep(scale=0.5): return scale` inferred
     # `int64_t` and printed 0 for 0.5. Weaker than any usage evidence above.
     _fdefaults = getattr(func, 'param_defaults', None) or {}
+    _foreign_callables = getattr(gimple_ctypes, '_FOREIGN_CALLABLES', {}) or {}
+
+    def _foreign_callable_qualname(default):
+        try:
+            if isinstance(default, gimple_ctypes.IdentExpr):
+                return _as_str(getattr(default, 'name'))
+            if isinstance(default, gimple_ctypes.MemberExpr):
+                # Build qualified name like csv.reader
+                mems = []
+                cur = default
+                while isinstance(cur, gimple_ctypes.MemberExpr):
+                    mems.append(_as_str(getattr(cur, 'member')))
+                    cur = getattr(cur, 'obj')
+                # Check for __import__('csv').reader pattern
+                if isinstance(cur, gimple_ctypes.CallExpr):
+                    try:
+                        func = getattr(cur, 'func')
+                        if isinstance(func, gimple_ctypes.IdentExpr) and _as_str(getattr(func, 'name')) == '__import__':
+                            args = getattr(cur, 'args') or []
+                            if args:
+                                arg = args[0]
+                                # String literal
+                                if hasattr(arg, 'value'):
+                                    mod = _as_str(arg.value)
+                                    mems.reverse()
+                                    if mems:
+                                        return mod + '.' + '.'.join(mems)
+                    except Exception:
+                        pass
+                if isinstance(cur, gimple_ctypes.IdentExpr):
+                    mems.append(_as_str(getattr(cur, 'name')))
+                    mems.reverse()
+                    return '.'.join(mems)
+            # also try direct attribute access patterns
+        except Exception:
+            pass
+        return None
     for _fp in func.params:
         _fpn = _as_str(_fp[0]).lstrip('*')
+        _fpn = _as_str(_fp[0]).lstrip('*')
+        if _fpn not in inferred:
+            _def = _fp[1] if len(_fp) > 1 else None
+            if _def is None:
+                _def = _fdefaults.get(_fpn)
+            if _def is not None:
+                # Try helper from master approach
+                _qname = _foreign_callable_qualname(_def)
+                if _qname:
+                    if _qname in _FOREIGN_CALLABLES:
+                        inferred[_fpn] = _FOREIGN_CALLABLES[_qname]
+                        continue
+                    if _foreign_callables and _qname in _foreign_callables:
+                        inferred[_fpn] = _foreign_callables[_qname]
+                        continue
+                # HEAD's direct resolution as fallback
+                if _foreign_callables:
+                    _qname2 = None
+                    try:
+                        if isinstance(_def, MemberExpr):
+                            if isinstance(getattr(_def, 'obj'), IdentExpr):
+                                _qname2 = f"{getattr(_def.obj, 'name')}.{getattr(_def, 'member')}"
+                            elif isinstance(getattr(_def, 'obj'), CallExpr):
+                                _obj = _def.obj
+                                if isinstance(getattr(_obj, 'func'), IdentExpr) and getattr(_obj.func, 'name') == '__import__':
+                                    if getattr(_obj, 'args'):
+                                        _a0 = _obj.args[0]
+                                        try:
+                                            _val = getattr(_a0, 'value')
+                                        except Exception:
+                                            _val = _as_str(_a0)
+                                        _qname2 = f"{_val}.{getattr(_def, 'member')}"
+                        elif isinstance(_def, IdentExpr):
+                            _qname2 = getattr(_def, 'name')
+                    except Exception:
+                        _qname2 = None
+                    if _qname2 and _qname2 in _foreign_callables:
+                        inferred[_fpn] = _foreign_callables[_qname2]
+                        continue
+                if isinstance(_def, FloatLiteral):
+                    inferred[_fpn] = 'double'
+                    continue
         if (_fp[1] is None and _fpn not in inferred
                 and isinstance(_fdefaults.get(_fpn), FloatLiteral)):
             inferred[_fpn] = 'double'
 
+
+    # A parameter whose declared default is a name present in the foreign-
+    # callable table (e.g. `def f(x, _g=csv.reader)`) is a callable-typed
+    # parameter: bind its inferred type to the table's ctype instead of the
+    # int64_t fallback. Mirrors `_param_ctype`'s default-as-evidence rule.
+    try:
+        from mojo.middle.types import _get_qualified_name
+    except Exception:
+        def _get_qualified_name(expr):
+            if isinstance(expr, IdentExpr):
+                return expr.name
+            if isinstance(expr, MemberExpr):
+                obj_name = _get_qualified_name(expr.obj)
+                if obj_name is None:
+                    return None
+                return obj_name + '.' + getattr(expr, 'member')
+            return None
+    _fdefaults = getattr(func, 'param_defaults', None) or {}
+    for _fp in func.params:
+        _fpn = _as_str(_fp[0]).lstrip('*')
+        if _fpn in inferred:
+            continue
+        _pd = _fdefaults.get(_fpn)
+        _qname = _get_qualified_name(_pd) if _pd is not None else None
+        if _qname is not None and _qname in _FOREIGN_CALLABLES:
+            inferred[_fpn] = _FOREIGN_CALLABLES[_qname]
     # A container guess is only as good as the body's own use of the name. A
-    # parameter the body REBINDS to a container of another kind (`live =
+    # parameter the body REBINDS to a container of another kind (`live =`
     # set(live)` after a `for x in live`, or after `set(live)` alone) has one
     # C variable that must hold both, and no single container pointer does:
     # the store then reaches `_sce_simple_emit`'s container-kind refusal, and

@@ -6963,6 +6963,12 @@ static char _ikey_lazy[1] = {0};
 
 static char *_slot_key(_DictSlot *sl)
 {
+    if (sl->keykind == 3) {
+        if (!sl->key || sl->key == _ikey_lazy) {
+            sl->key = strdup("None");
+        }
+        return sl->key;
+    }
     if (sl->key == _ikey_lazy) {
         char tmp[_INT_STR_BLOCK];
         char *p = _fmt_int(sl->ikey, tmp);
@@ -7128,13 +7134,24 @@ static _DictSlot *_dict_find_k(MojoDict *d, char *key, int64_t keykind)
 {
     int64_t iv;
     if (keykind == 0 && _canon_int(key, &iv)) return _dict_find_ik(d, iv);
+    if (keykind == 3) {
+        uint64_t mask = (uint64_t)d->cap - 1;
+        uint64_t h = _ik_hash(0) & mask;
+        for (int64_t i = 0; i < d->cap; i++) {
+            int64_t idx = (int64_t)((h + (uint64_t)i) & mask);
+            _DictSlot *sl = &d->slots[idx];
+            if (!sl->key) return sl;
+            if (sl->keykind == 3) return sl;
+        }
+        return NULL;
+    }
     uint64_t mask = (uint64_t)d->cap - 1;      /* cap is a power of two */
-    uint64_t h = _str_hash(key) & mask;
+    uint64_t h = _str_hash(key ? key : "") & mask;
     for (int64_t i = 0; i < d->cap; i++) {
         int64_t idx = (int64_t)((h + (uint64_t)i) & mask);
         _DictSlot *sl = &d->slots[idx];
         if (!sl->key) return sl;          /* empty — insertion point */
-        if (sl->keykind == keykind && strcmp(sl->key, key) == 0) return sl;
+        if (sl->keykind == keykind && strcmp(sl->key ? sl->key : "", key ? key : "") == 0) return sl;
     }
     return NULL;
 }
@@ -7156,12 +7173,16 @@ static void _dict_set_raw_seq_kind_k(MojoDict *d, char *key, int64_t val,
     _DictSlot *sl = _dict_find_k(d, key, keykind);
     if (!sl->key) {
         int64_t iv;
-        if (keykind == 0 && _canon_int(key, &iv)) {
+        if (keykind == 3) {
+            sl->key = _ikey_lazy ? _ikey_lazy : strdup("");
+            sl->keykind = 3;
+            sl->ikey = 0;
+        } else if (keykind == 0 && key && _canon_int(key, &iv)) {
             sl->key = _ikey_lazy;
             sl->keykind = 2;
             sl->ikey = iv;
         } else {
-            sl->key = strdup(key);
+            sl->key = strdup(key ? key : "");
             sl->keykind = keykind;
         }
         sl->seq = (seq >= 0) ? seq : d->next_seq++;
@@ -7212,6 +7233,7 @@ static void _dict_grow(MojoDict *d)
     for (int64_t i = 0; i < old_cap; i++) {
         if (!old[i].key) continue;
         uint64_t j = (old[i].keykind == 2 ? _ik_hash(old[i].ikey)
+                                          : old[i].keykind == 3 ? (_ik_hash(0) & mask)
                                           : _str_hash(old[i].key)) & mask;
         while (d->slots[j].key) j = (j + 1) & mask;
         d->slots[j] = old[i];
@@ -7302,6 +7324,67 @@ void mojo_dict_set_none(MojoDict *d, char *key)
     _dict_set_raw(d, key, 0, 4);
 }
 
+static void _dict_set_none_key_raw(MojoDict *d, int64_t v, int64_t kind)
+{
+    if (!d) return;
+    if (d->used * 2 >= d->cap) _dict_grow(d);
+    _DictSlot *sl = _dict_find_k(d, "", 3);
+    if (!sl->key) {
+        sl->key = _ikey_lazy ? _ikey_lazy : strdup("");
+        sl->keykind = 3;
+        sl->ikey = 0;
+        sl->seq = d->next_seq++;
+        if (sl->seq >= d->next_seq) d->next_seq = sl->seq + 1;
+        d->used++;
+    }
+    sl->val = v;
+    sl->kind = kind;
+    sl->key_from_str = 0;
+}
+
+void mojo_dict_set_none_key(MojoDict *d, int64_t v)
+{
+    _dict_set_none_key_raw(d, v, 0);
+}
+
+void mojo_dict_set_none_key_int(MojoDict *d, int64_t v)
+{
+    _dict_set_none_key_raw(d, v, 0);
+}
+
+void mojo_dict_set_none_key_str(MojoDict *d, char *v)
+{
+    _dict_set_none_key_raw(d, (int64_t)(uintptr_t)v, 2);
+}
+
+void mojo_dict_set_none_key_double(MojoDict *d, double v)
+{
+    int64_t bits;
+    memcpy(&bits, &v, sizeof(bits));
+    _dict_set_none_key_raw(d, bits, 1);
+}
+
+void mojo_dict_set_none_key_bool(MojoDict *d, int v)
+{
+    _dict_set_none_key_raw(d, v ? 1 : 0, 3);
+}
+
+void mojo_dict_set_none_key_none(MojoDict *d)
+{
+    _dict_set_none_key_raw(d, 0, 4);
+}
+
+void mojo_dict_set_none_key_struct(MojoDict *d, void *v)
+{
+    _dict_set_none_key_raw(d, (int64_t)(uintptr_t)v, 5);
+}
+
+void mojo_dict_set_bytes_none_key(MojoDict *d, MojoBytes *key, int64_t v)
+{
+    (void)key;
+    mojo_dict_set_none_key(d, v);
+}
+
 /* A struct stored as a dict VALUE, plus the function that renders it. See
  * MojoDict.val_repr's own comment for why the function travels on the value
  * rather than in a global address->type table.
@@ -7349,6 +7432,17 @@ char *mojo_dict_repr_val(MojoDict *d, int64_t v)
 static _DictSlot *_dict_lookup_k(MojoDict *d, char *key, int64_t keykind)
 {
     if (!d || !d->cap || !d->slots) return NULL;
+    if (keykind == 3) {
+        uint64_t mask = (uint64_t)d->cap - 1;
+        uint64_t h = _ik_hash(0) & mask;
+        for (int64_t i = 0; i < d->cap; i++) {
+            int64_t idx = (int64_t)((h + (uint64_t)i) & mask);
+            _DictSlot *sl = &d->slots[idx];
+            if (!sl->key) return NULL;
+            if (sl->keykind == 3) return sl;
+        }
+        return NULL;
+    }
     /* A NULL key is Python's `None` (or an erased `str` that was never set):
      * no dict holds it -- a NULL `key` field is what marks an EMPTY slot -- so
      * `None in d` / `d.get(None)` are a plain miss, not a `strcmp (…, NULL)`.
@@ -7411,6 +7505,11 @@ char *mojo_dict_repr_slot(MojoDict *d, char *key)
 int mojo_dict_contains(MojoDict *d, char *key)
 {
     return _dict_lookup(d, key) != NULL;
+}
+
+int mojo_dict_contains_none(MojoDict *d)
+{
+    return _dict_lookup_k(d, "", 3) != NULL;
 }
 
 /* ── bytes-keyed dict access ─────────────────────────────────────────────
@@ -16538,8 +16637,50 @@ static int _class_lookup(int64_t tag, const char *name, int64_t *out, int depth)
     if (!c || depth > 32) return 0;
     if (mojo_dict_contains(c->attrs, (char *)name)) { *out = mojo_dict_get_int(c->attrs, (char *)name); return 1; }
     for (int i = 0; i < _n_classattr_readers; i++)
-        if (_classattr_readers[i](tag, (char *)name, out)) return 1;
-    for (int i = 0; i < c->nbases; i++) if (_class_lookup(c->bases[i], name, out, depth + 1)) return 1;
+        if (_classattr_readers[i](tag, (char *)name, out)) {
+            return 1;
+        }
+    for (int i = 0; i < c->nbases; i++) {
+        if (_class_lookup(c->bases[i], name, out, depth + 1)) {
+            return 1;
+        }
+    }
+    /* Fallback: look up mangled method names in static classes/bases */
+    if (name) {
+        /* Try common mangling patterns */
+        char buf[512];
+        if (c->name) {
+            /* Pattern: ClassName___methodname__ or ClassName_methodname */
+            snprintf(buf, sizeof(buf), "%s___%s__", c->name, name);
+            void *fp = dlsym(RTLD_DEFAULT, buf);
+            if (!fp) {
+                snprintf(buf, sizeof(buf), "%s___%s", c->name, name);
+                fp = dlsym(RTLD_DEFAULT, buf);
+            }
+            if (!fp) {
+                snprintf(buf, sizeof(buf), "%s_%s", c->name, name);
+                fp = dlsym(RTLD_DEFAULT, buf);
+            }
+            if (fp) {
+                *out = (int64_t)(intptr_t)fp;
+                return 1;
+            }
+        }
+        /* Also try global search for method name patterns */
+        const char *prefixes[] = {"Flag", "IntFlag", "Enum", "EnumMeta", "Base", 0};
+        for (int pi = 0; prefixes[pi]; pi++) {
+            snprintf(buf, sizeof(buf), "%s___%s__", prefixes[pi], name);
+            void *fp = dlsym(RTLD_DEFAULT, buf);
+            if (!fp) {
+                snprintf(buf, sizeof(buf), "%s_%s", prefixes[pi], name);
+                fp = dlsym(RTLD_DEFAULT, buf);
+            }
+            if (fp) {
+                *out = (int64_t)(intptr_t)fp;
+                return 1;
+            }
+        }
+    }
     return 0;
 }
 int mojo_class_hasattr(int64_t tag, char *name)
@@ -16624,8 +16765,17 @@ static int64_t _call_words(int64_t fn, int64_t n, const int64_t *a)
 }
 int64_t mojo_classobj_call(int64_t cls, int64_t n, int64_t a0, int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6)
 {
+    int64_t ctag = ((MojoClassObj *)(intptr_t)cls)->tag;
+    MojoClassRec *rc = _class_find(ctag);
+    if (rc && rc->meta) {
+        int64_t call_fn;
+        if (_class_lookup(rc->meta, "__call__", &call_fn, 0)) {
+            int64_t a[8] = { cls, a0, a1, a2, a3, a4, a5, a6 };
+            return _call_words(call_fn, n + 1, a);
+        }
+    }
     MojoInstObj *o = (MojoInstObj *)malloc(sizeof *o);
-    o->magic = MOJO_INSTOBJ_MAGIC; o->tag = ((MojoClassObj *)(intptr_t)cls)->tag;
+    o->magic = MOJO_INSTOBJ_MAGIC; o->tag = ctag;
     _pr_add(&_reg_instobj, (uint64_t)(uintptr_t)o);
     int64_t self = (int64_t)(intptr_t)o, init;
     if (_class_lookup(o->tag, "__init__", &init, 0)) {
@@ -16654,9 +16804,16 @@ int64_t mojo_rtobj_method_call(int64_t recv, char *name, int64_t n, int64_t a0, 
         if (!_class_lookup(((MojoClassObj *)(intptr_t)recv)->tag, name, &fn, 0)) {
             /* a method of the METACLASS: bound to the class, which goes first as `self` */
             MojoClassRec *rc = _class_find(((MojoClassObj *)(intptr_t)recv)->tag);
-            if (rc && rc->meta && _class_lookup(rc->meta, name, &fn, 0)) {
-                a[0] = recv; a[1] = a0; a[2] = a1; a[3] = a2; a[4] = a3; a[5] = a4; a[6] = a5; a[7] = a6;
-                return _call_words(fn, n + 1, a);
+            if (rc) {
+                if (rc->meta && _class_lookup(rc->meta, name, &fn, 0)) {
+                    a[0] = recv; a[1] = a0; a[2] = a1; a[3] = a2; a[4] = a3; a[5] = a4; a[6] = a5; a[7] = a6;
+                    return _call_words(fn, n + 1, a);
+                }
+                if (!rc->meta && !strcmp(name, "__prepare__")) {
+                    /* default metaclass type.__prepare__ returns empty dict */
+                    int64_t d = (int64_t)(intptr_t)mojo_dict_new();
+                    return d;
+                }
             }
             mojo_raise_attribute_error(name);
             return 0;
@@ -16741,9 +16898,38 @@ void mojo_type_fill_from_dict(int64_t cls, MojoDict *ns)
 {
     if (!ns) return;
     int64_t *order = mojo_dict_order_indices(ns);
-    for (int64_t oi = 0; oi < ns->used; oi++) {
-        _DictSlot *s = &ns->slots[order[oi]];
-        int64_t w = s->kind == 1 ? mojo_box_from_double(mojo_double_from_bits(s->val)) : s->val;
+    if (!order) return;
+    /* Count occupied slots in the dict */
+    int64_t n = 0;
+    for (int64_t i = 0; i < ns->cap; i++) {
+        if (ns->slots[i].key) n++;
+    }
+    if (n == 0) {
+        free(order);
+        return;
+    }
+    for (int64_t oi = 0; oi < n && oi < ns->used; oi++) {
+        int64_t idx = order[oi];
+        if (idx < 0 || idx >= ns->cap) continue;
+        _DictSlot *s = &ns->slots[idx];
+        if (!s->key) continue;
+        int64_t w;
+        if (s->kind == 1) {
+            w = mojo_box_from_double(mojo_double_from_bits(s->val));
+        } else if (s->kind == 2) {
+            /* char * string value */
+            char *str = (char *)(uintptr_t)s->val;
+            if (str) mojo_str_register(str);
+            w = s->val;
+        } else if (s->kind == 3) {
+            /* bool */
+            w = s->val ? 1 : 0;
+        } else if (s->kind == 4) {
+            /* None */
+            w = 0;
+        } else {
+            w = s->val;
+        }
         mojo_classobj_setattr(cls, _slot_key(s), w);
     }
     free(order);
@@ -16758,12 +16944,23 @@ int mojo_classobj_lookup(void *obj, char *attr, int64_t *out)
     if (_class_lookup(((MojoClassObj *)obj)->tag, attr, out, 0)) return 1;
     /* a miss on the class and its bases: the METACLASS answers - its own attributes first,
      * then `Meta.__getattr__(cls, name)` (CPython's `type.__getattribute__` order). */
-    if (c && c->meta) {
-        if (_class_lookup(c->meta, attr, out, 0)) return 1;
-        int64_t ga, a[2] = { (int64_t)(intptr_t)obj, (int64_t)(intptr_t)attr };
-        if (strcmp(attr, "__getattr__") && _class_lookup(c->meta, "__getattr__", &ga, 0)) {
-            *out = _call_words(ga, 2, a);
-            return 1;
+    if (c) {
+        int64_t mtag = c->meta;
+        if (mtag) {
+            if (_class_lookup(mtag, attr, out, 0)) return 1;
+            int64_t ga, a[2] = { (int64_t)(intptr_t)obj, (int64_t)(intptr_t)attr };
+            if (strcmp(attr, "__getattr__") && _class_lookup(mtag, "__getattr__", &ga, 0)) {
+                *out = _call_words(ga, 2, a);
+                return 1;
+            }
+        } else {
+            /* default metaclass is type; __prepare__ and other type attributes */
+            if (!strcmp(attr, "__prepare__")) {
+                /* type.__prepare__ returns an empty dict */
+                int64_t d = (int64_t)(intptr_t)mojo_dict_new();
+                *out = d;
+                return 1;
+            }
         }
     }
     return 0;

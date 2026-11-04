@@ -1716,6 +1716,19 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             _cls = _lower_type_new(gen, node, node.args[1:], meta=_m)
             if _cls is not None:
                 return _cls
+        elif isinstance(_m, gimple_ctypes.IdentExpr):
+            # Accept EnumType/metaclasses from enum module
+            _mname = _as_str(_m.name)
+            if (_mname in ('EnumType', 'EnumMeta') or _mname.endswith(('EnumType', 'EnumMeta'))
+                    or _mname.endswith('_mcls') or 'EnumType' in _mname):
+                _cls = _lower_type_new(gen, node, node.args[1:], meta=_m)
+                if _cls is not None:
+                    return _cls
+            # Accept if it's a runtime class metaclass
+            if gen._rtobj_kinds.get(('l', _mname)) == 'class':
+                _cls = _lower_type_new(gen, node, node.args[1:], meta=_m)
+                if _cls is not None:
+                    return _cls
         raise RuntimeError(
             'cannot compile module: type.__new__(metacls, name, bases, namespace) creates a '
             'class at run time, which the compiled path models only for metacls `type`, a '

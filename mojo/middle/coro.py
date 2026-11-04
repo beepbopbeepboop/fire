@@ -2811,6 +2811,22 @@ def _eligible(fn: N.FunctionDef, struct_name: str | None = None,
     if struct_name is None:
         _pnames = {p[0] for p in fn.params}
         for _n in _walk(fn):
+            if isinstance(_n, N.CallExpr) and isinstance(_n.func, N.IdentExpr) and _n.func.name in _pnames:
+                try:
+                    from mojo.middle.types import _debug_note
+                    _debug_note(f'[elig] read_table-like generator {getattr(fn, "name", "?")} calls callable parameter {_n.func.name!r}')
+                except Exception:
+                    pass
+            # Measure read_table-like: for over call through callable parameter
+            if isinstance(_n, N.ForStmt) and isinstance(getattr(_n, 'iterable', None), N.CallExpr):
+                _it = _n.iterable
+                if isinstance(getattr(_it, 'func', None), N.IdentExpr) and _it.func.name in _pnames:
+                    try:
+                        from mojo.middle.types import _debug_note
+                        _debug_note(f'[elig] read_table-like generator {getattr(fn, "name", "?")} iterates over call to callable parameter {_it.func.name!r}')
+                    except Exception:
+                        pass
+        for _n in _walk(fn):
             if (isinstance(_n, N.CallExpr) and isinstance(_n.func, N.IdentExpr)
                     and _n.func.name in _pnames):
                 return False, ('calls a parameter (a function value: driven '
@@ -3809,7 +3825,9 @@ def _eligible_async_common(fn: N.FunctionDef, nested: bool = False,
         if pann not in _SCALARISH and not _is_struct_param(pann):
             return False, f'param {pname!r} type {pann!r} (v0 scalar / struct only)'
     if getattr(fn, 'kwonly', None):
-        return False, 'kwonly params (v0)'
+        _kwbad = _unrepresentable_kwonly(fn)
+        if _kwbad:
+            return False, f'kwonly params (v0): {_kwbad}'
     # NORMALIZE, then judge. `_async_awaits_ok` below only accepts an
     # `AwaitExpr` in STATEMENT position, so an `await` nested inside a
     # call's argument list would otherwise make the function ineligible
@@ -6383,6 +6401,13 @@ def _lift_capture_free_nested_scopes(stmts: list) -> None:
                     continue
                 if getattr(h, 'param_defaults', None):
                     continue
+                # A closure that does `nonlocal` assignment needs shared cells and
+                # is outside the factory model; never lift in that case.
+                try:
+                    if any(isinstance(n, N.NonlocalStmt) for n in _walk(h)):
+                        continue
+                except Exception:
+                    pass
                 # names `m` binds
                 m_bound = set()
                 for pn, _pa in m.params:
@@ -8607,6 +8632,15 @@ def register(gen, meta: list) -> None:
         _by_param = {}
         for _pn, _gn in _cpg.items():
             _api = gen._generator_api.get(_gn)
+            if _api is None:
+                _api = (getattr(gen, '_async_gen_api', None) or {}).get(_gn)
+            if _api is None:
+                _api = (getattr(gen, '_async_api', None) or {}).get(_gn)
+            if _api is None:
+                for _aname in ('_generator_var_api', '_cpp_generator_var_api'):
+                    _api = (getattr(gen, _aname, None) or {}).get(_gn)
+                    if _api is not None:
+                        break
             if _api is not None:
                 _by_param[_pn] = _api
         if _by_param:
