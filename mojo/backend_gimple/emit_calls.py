@@ -1753,8 +1753,7 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             # Accept EnumType/metaclasses from enum module
             _mname = _as_str(_m.name)
             if (_mname in ('EnumType', 'EnumMeta') or _mname.endswith(('EnumType', 'EnumMeta'))
-                    or _mname.endswith('_mcls') or 'EnumType' in _mname
-                    or _mname == 'metacls' or _mname == 'cls' or 'meta' in _mname.lower()):
+                    or _mname.endswith('_mcls') or 'EnumType' in _mname):
                 _cls = _lower_type_new(gen, node, node.args[1:], meta=_m)
                 if _cls is not None:
                     return _cls
@@ -1763,10 +1762,24 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 _cls = _lower_type_new(gen, node, node.args[1:], meta=_m)
                 if _cls is not None:
                     return _cls
-            # Be permissive and try anyway
-            _cls = _lower_type_new(gen, node, node.args[1:], meta=_m)
-            if _cls is not None:
-                return _cls
+            # Be permissive for metaclass parameters passed as variables in certain contexts
+            # but not for statically defined user classes
+            if _mname == 'metacls' or _mname == 'cls':
+                _is_static_class = (_mname in getattr(gen, '_struct_bases', set())
+                                    and _mname not in getattr(gen, 'var_types', {})
+                                    and _mname not in getattr(gen, '_global_var_types', {}))
+                if not _is_static_class and gen._rtobj_kinds.get(('l', _mname)) != 'class':
+                    _cls = _lower_type_new(gen, node, node.args[1:], meta=_m)
+                    if _cls is not None:
+                        return _cls
+            # Be permissive and try anyway only for non-static cases
+            _is_static_class = (_mname in getattr(gen, '_struct_bases', set())
+                                and _mname not in getattr(gen, 'var_types', {})
+                                and _mname not in getattr(gen, '_global_var_types', {}))
+            if not _is_static_class or gen._rtobj_kinds.get(('l', _mname)) == 'class':
+                _cls = _lower_type_new(gen, node, node.args[1:], meta=_m)
+                if _cls is not None:
+                    return _cls
         raise RuntimeError(
             'cannot compile module: type.__new__(metacls, name, bases, namespace) creates a '
             'class at run time, which the compiled path models only for metacls `type`, a '
