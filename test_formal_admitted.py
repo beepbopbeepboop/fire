@@ -93,14 +93,21 @@ BACKENDS = ("arm64", "x86_64")
 ADMITTED_COUNTS = {
     "argparse": 0,
     "ast": 0,
+    "builtins": 0,
+    "collections": 0,
     "concurrent": 0,
     "concurrent.futures": 2,       # Executor.submit, Executor.shutdown
     "contextlib": 0,
+    "contextvars": 0,
+    "copy": 0,
     "ctypes": 2,                   # CDLL, a call through the handle
     "enum": 0,
     "fcntl": 0,                    # the real flock(2); nothing is admitted
     "fnmatch": 0,
     "functools": 0,
+    "importlib": 0,
+    "keyword": 0,
+    "multiprocessing": 0,
     # `glob` is 0 and the reason is the same one `tempfile`'s zero is: every
     # answer this module gives is computed.  The directory entries come from
     # `readdir(3)` through `os.listdir`, the pattern language is
