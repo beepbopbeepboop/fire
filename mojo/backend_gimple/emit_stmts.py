@@ -60,7 +60,7 @@ from mojo.middle.types import _is_empty_container_literal
 from mojo.middle.calls_shared import _is_pointer_ctype
 from mojo.middle.calls_shared import FRAME_SETTABLE_IDS
 from mojo.middle.calls_shared import _py_box_expr
-from mojo.middle.calls_shared import _struct_operator_receiver
+from mojo.middle.calls_shared import _struct_operator_receiver, _STRUCT_OP_DUNDER
 # `ZipLongestFillRefusal` and nothing else from there: the class has to be the
 # SAME object `emit_loops.py` raises and this module's `zip_longest` arm
 # re-raises, and `emit_loops` cannot be imported here (it goes through
@@ -2689,6 +2689,33 @@ def _gen_stmt_AugAssignStmt(gen, node):
             gimple_ctypes.MemberExpr(node.target, _inplace, node.line, node.col),
             [node.value], [], node.line, node.col))
         return
+    # Runtime objects: try in-place or regular method dispatch
+    _rt_dunder = _STRUCT_OP_DUNDER.get(base_op)
+    if _rt_dunder is not None and isinstance(node.target, gimple_ctypes.IdentExpr):
+        _tname = node.target.name
+        if getattr(gen, '_rtobj_kinds', {}).get(('l', _tname)):
+            try:
+                # Try __iop__ first if it makes sense, else __op__
+                _iop = '__i' + _rt_dunder[2:] if len(_rt_dunder) > 2 else None
+                # Try iop first
+                if _iop:
+                    try:
+                        gen.lower_expr(gimple_ctypes.CallExpr(
+                            gimple_ctypes.MemberExpr(node.target, _iop, node.line, node.col),
+                            [node.value], [], node.line, node.col))
+                        return
+                    except Exception:
+                        pass
+                res = gen.lower_expr(gimple_ctypes.CallExpr(
+                    gimple_ctypes.MemberExpr(node.target, _rt_dunder, node.line, node.col),
+                    [node.value], [], node.line, node.col))
+                # Rebind target if it's a simple assignment
+                if isinstance(node.target, gimple_ctypes.IdentExpr):
+                    tname = node.target.name
+                    gen._assign_to_name(tname, res[0], res[1]) if hasattr(gen, '_assign_to_name') else None
+                return
+            except Exception:
+                pass
     if base_op in ('//', '**', '+', '-', '*', '/', '%', '|', '&', '^', '<<', '>>', '@'):
         fake  = gimple_ctypes.BinaryOp(op=base_op, left=node.target, right=node.value)
         vtype, v = gen.lower_expr(fake)

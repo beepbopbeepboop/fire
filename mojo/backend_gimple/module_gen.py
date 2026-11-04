@@ -3797,6 +3797,8 @@ def _gmi_is_rebindable(gen, dec, scope: dict, def_name: str) -> bool:
     _ANNOTATION_DECORATORS = frozenset({
         'staticmethod', 'classmethod', 'export', 'doc_hidden', 'gpu', 'kernel',
         'property', 'abstractmethod', 'lldb_formatter_wrapping_type',
+        'stable', 'deprecated', 'value', 'register_passable',
+        'nonmaterializable', 'parameter', 'always_inline',
     })
     if _head in _ANNOTATION_DECORATORS:
         return False

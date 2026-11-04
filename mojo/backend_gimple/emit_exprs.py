@@ -58,7 +58,7 @@ from mojo.middle.types import _BOXED_CONTAINER_CTYPES
 from mojo.middle.calls_shared import _callable_value_symbol
 from mojo.middle.calls_shared import _RUNTIME_CALLABLE_VALUES as _RUNTIME_CALLABLE_VALUES_NAMES
 from mojo.middle.calls_shared import _py_box_expr
-from mojo.middle.calls_shared import _struct_operator_receiver
+from mojo.middle.calls_shared import _struct_operator_receiver, _STRUCT_OP_DUNDER
 from mojo.middle.calls_shared import FRAME_SETTABLE_IDS
 
 def _lower_strided(gen, node, store: bool):
@@ -3563,6 +3563,29 @@ def _lower_binary(gen, node: gimple_ctypes.BinaryOp) -> tuple[str, str]:
         return gen.lower_expr(gimple_ctypes.CallExpr(
             gimple_ctypes.MemberExpr(node.left, _sop, node.line, node.col),
             [node.right], [], node.line, node.col))
+    # Runtime objects (instances of dynamically created classes): dispatch
+    # binary operators to the corresponding dunder method via the runtime
+    # method-call path (mojo_rtobj_method_call). This enables Flag/IntFlag
+    # combination (|, &) and other operator overloading on runtime classes.
+    _rt_dunder = _STRUCT_OP_DUNDER.get(node.op)
+    if _rt_dunder is not None:
+        _try_rt = False
+        if isinstance(node.left, gimple_ctypes.IdentExpr):
+            _lname = _as_str(node.left.name)
+            if gen._rtobj_kinds.get(('l', _lname)) or gen._rtobj_kinds.get(('v', _lname)):
+                _try_rt = True
+        elif isinstance(node.left, gimple_ctypes.MemberExpr):
+            if isinstance(node.left.obj, gimple_ctypes.IdentExpr):
+                _oname = _as_str(node.left.obj.name)
+                if gen._rtobj_kinds.get(('l', _oname)) or gen._rtobj_kinds.get(('v', _oname)):
+                    _try_rt = True
+        if _try_rt:
+            try:
+                return gen.lower_expr(gimple_ctypes.CallExpr(
+                    gimple_ctypes.MemberExpr(node.left, _rt_dunder, node.line, node.col),
+                    [node.right], [], node.line, node.col))
+            except Exception:
+                pass
     lt, lv = gen.lower_expr(node.left)
     rt, rv = gen.lower_expr(node.right)
     if ginf._float_param_arith_applies(gen, node.op, node.left, lt, node.right, rt):
