@@ -242,8 +242,16 @@ def one_field_dropped_receiver_stores(fn, owner, one_field=None):
 RECEIVER_CONVENTION_NAMES = {None: "`self`", "owned": "`var self`",
                              "read": "`borrowed self`", "ref": "`ref self`"}
 
-ReceiverWriteback = collections.namedtuple("ReceiverWriteback",
-                                           "receiver owner member decl")
+from typing import NamedTuple
+
+
+class ReceiverWriteback(NamedTuple):
+    receiver: object
+    owner: object
+    member: object
+    decl: object
+
+
 ReceiverWriteback.__doc__ = (
     "`receiver` is the local whose OWN STORAGE is handed to the callee as "
     "argument 0 — the address, not the value; `owner`/`member` are the class "
