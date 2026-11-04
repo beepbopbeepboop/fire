@@ -422,6 +422,29 @@ def _gen_stmt_VarDecl(gen, node):
     if node.value is not None and _try_bind_iter_cursor(
             gen, node.name, node.value, is_decl=True):
         return
+    # Flow-sensitive None tracking for VarDecl
+    try:
+        if isinstance(node.name, str) and ',' not in node.name and getattr(node, 'value', None) is not None:
+            _fs = getattr(gen, '_flow_none_state', None)
+            if _fs is None:
+                gen._flow_none_state = {}
+                _fs = gen._flow_none_state
+            _val = node.value
+            _is_none_assign = False
+            try:
+                from fire_compiler import NoneLiteral
+                if isinstance(_val, NoneLiteral):
+                    _is_none_assign = True
+            except Exception:
+                pass
+            if not _is_none_assign and isinstance(_val, gimple_ctypes.IdentExpr) and getattr(_val, 'name', None) == 'None':
+                _is_none_assign = True
+            if _is_none_assign:
+                _fs[_as_str(node.name)] = True
+            else:
+                _fs.pop(_as_str(node.name), None)
+    except Exception:
+        pass
     # A box-producing initializer (2026-10-21 part 4, further,
     # test_python_object): `var py_float = PythonObject(0.123...)` stores
     # the literal's BITS (recorded in _pybox_double_vars so a later
@@ -1359,6 +1382,30 @@ def _gen_stmt_AssignStmt(gen, node):
     vtype, v = gen.lower_expr(node.value)
     if isinstance(node.target, gimple_ctypes.IdentExpr):
         tname = node.target.name
+        # Flow-sensitive None tracking
+        try:
+            _fs = getattr(gen, '_flow_none_state', None)
+            if _fs is None:
+                gen._flow_none_state = {}
+                _fs = gen._flow_none_state
+            # Check if assigning None
+            _val = getattr(node, 'value', None)
+            _is_none_assign = False
+            try:
+                from fire_compiler import NoneLiteral
+                if isinstance(_val, NoneLiteral):
+                    _is_none_assign = True
+            except Exception:
+                pass
+            if not _is_none_assign and isinstance(_val, gimple_ctypes.IdentExpr) and getattr(_val, 'name', None) == 'None':
+                _is_none_assign = True
+            if _is_none_assign:
+                _fs[_as_str(tname)] = True
+            else:
+                # If assigning non-None, it's no longer definitely None
+                _fs.pop(_as_str(tname), None)
+        except Exception:
+            pass
         # A name bound to a word of UNKNOWN kind (`d = os.path.split(b'a/b')[0]`,
         # a list element of a bytes split) is one too: its later reads are the
         # name itself, so its truthiness and its `or`/`and` ask the runtime
