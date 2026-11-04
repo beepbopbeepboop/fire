@@ -241,11 +241,10 @@ recursive AST evaluator.
 
 The failure direction is the safe one: Lean says "I cannot prove this" and the
 build fails. Nothing is admitted and no theorem is asserted that is not
-checked. It matters because it is the *denominator* of the census
-(`bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md`): a program in this class
-counts as "reached the proof layer" and then does not typecheck, so a census
-that counts generation and a census that counts `pass` disagree by exactly these
-7.
+checked. It matters because it is the *denominator* of a proof-coverage
+census: a program in this class counts as "reached the proof layer" and then
+does not typecheck, so a census that counts generation and a census that counts
+`pass` disagree by exactly these 7.
 
 Two things about the class, both measurements rather than opinions.
 
