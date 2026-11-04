@@ -822,9 +822,16 @@ def one_word_store_refusal(name: str, field: str, arg, candidates: dict,
     return None
 
 
-InitShape = collections.namedtuple("InitShape",
-                                   "method params positional required optional "
-                                   "required_names")
+from typing import NamedTuple
+
+
+class InitShape(NamedTuple):
+    method: object
+    params: object
+    positional: object
+    required: object
+    optional: object
+    required_names: object
 InitShape.__doc__ = (
     "One `__init__` this struct declares.  A named tuple and not a bare one "
     "because the arity window below is arithmetic over four of the five "
@@ -3809,7 +3816,7 @@ def frame_field_premise_refusal(struct_def) -> str:
         f"in a method would then append into reclaimed stack, which is a "
         f"number the source never wrote rather than a failure. "
         + (f"({note}) " if note else "")
-        + f"bugs/formal/FORMAL_wide_receiver_by_reference.md records the premise and "
+        + f"FORMAL_wide_receiver_by_reference.md (deleted; fixed) records the premise and "
         f"which decisions it currently rests on; the value-method work is what "
         f"has to keep it true")
 

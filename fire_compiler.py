@@ -21,8 +21,8 @@ class ArcPointer(_MojoPointerBase): pass
 class UnsafePointer(_MojoPointerBase): pass
 
 # ── Mojo Python interop helpers ────────────────────────────────────
-import importlib as _importlib
-def _python_import(name): return _importlib.import_module(name)
+def _python_import(name): 
+    return __import__(name, fromlist=[''])
 
 # ── Mojo testing helpers ───────────────────────────────────────────
 def assert_equal(a, b, msg=""): assert a == b, msg or f"{a!r} != {b!r}"

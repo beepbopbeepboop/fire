@@ -2442,7 +2442,7 @@ def arm64_step (s : Arm64State) (code : Nat → UInt8) : Option Arm64State :=
   -- Nothing in `formal/examples/*.mojo` contains this encoding, which is why
   -- the 40-example suite stayed green throughout: the mis-modelled form is
   -- reachable only from a program that touches memory through a non-SP base,
-  -- and the examples are register-only.  `bugs/formal/FORMAL_wide_receiver_by_reference.md`
+  -- and the examples are register-only.  `FORMAL_wide_receiver_by_reference.md` (deleted; fixed)
   -- records the measurement and what it gates.
   else if (insn &&& 0xffe00000) = 0xF9400000 then
     let rt := (insn &&& 0x1f).toNat
@@ -8830,7 +8830,7 @@ evaluator, not a change to `evalExpr`) and on the *callee contract* side
 `FrameOk`'s "caller's slots preserved" clause by construction).  Both are
 additions beside the existing definitions.
 
-`bugs/formal/FORMAL_wide_receiver_by_reference.md` has the full design, the cost, and
+`FORMAL_wide_receiver_by_reference.md` (deleted; fixed) has the full design, the cost, and
 what is not done.
 -/
 
@@ -9399,7 +9399,7 @@ theorem frameRead_in_range (b : UInt64) (n k : Nat)
 
 /-! ### A NESTED receiver: a field whose agreed declared type is a framed struct
 
-`bugs/formal/FORMAL_wide_receiver_by_reference.md`'s next step is a field's DECLARED
+`FORMAL_wide_receiver_by_reference.md` (deleted; fixed)'s next step is a field's DECLARED
 type, used only when every binding of the name agrees on it
 (`formal/model.py`'s `frame_field_type_candidates`).  When the agreed type is a
 framed struct of the same module, the slot holds the ADDRESS of that struct's

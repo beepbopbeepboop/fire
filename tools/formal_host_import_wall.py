@@ -8,13 +8,12 @@ name would TAKE rather than by how many files mention it.
     python3 tools/formal_host_import_wall.py --unmodelled glob --unmodelled fnmatch
 
 **Why this is a tool and not a fourth document.** Three documents described this
-same measurement in prose — `bugs/formal/FORMAL_the_host_import_wall_is_at_its_honest_floor.md`
-§5, the thirteen-row `terminal`-vs-`closure` walk whose doc is deleted with this
-promotion (its numbers were 2026-10-03, and every one of its four reachable
-names has since landed: `glob`, `shlex`, `signal`, `fnmatch`), and the `b11`
-round, whose census is `bugs/formal/FORMAL_sweep_work_map.md` §1.13 — and the first of
-those says the scratch "should have become a second tool rather than a fourth
-description of one". This is that tool.
+same measurement in prose; the thirteen-row `terminal`-vs-`closure` walk whose
+doc is deleted with this promotion (its numbers were 2026-10-03, and every one
+of its four reachable names has since landed: `glob`, `shlex`, `signal`,
+`fnmatch`), and the `b11` round, whose census is `bugs/formal/FORMAL_sweep_work_map.md`
+§1.13 — and the first of those says the scratch "should have become a second
+tool rather than a fourth description of one". This is that tool.
 
 ## The three columns, and why they are three and not one
 
