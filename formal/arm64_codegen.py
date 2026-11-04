@@ -1158,6 +1158,47 @@ dylib_exports: list = None, globals_base: int = None,
             self.asm.emit(encode_ldp_sp_post(29, 30))
             self.asm.emit(encode_ret())
 
+        # Emit functions with ellipsis/pass-only bodies first to catch
+        # ellipsis refusals before returnless-call checks in other functions
+        def _has_ellipsis_body(fn):
+            try:
+                for stmt in getattr(fn, 'body', []) or []:
+                    if isinstance(stmt, F.ExprStmt):
+                        if isinstance(getattr(stmt, 'value', None), F.EllipsisLiteral):
+                            return True
+                    # if it's the only statement and it's ellipsis
+                # also check if body is just ellipsis
+                if len(getattr(fn, 'body', []) or []) == 1:
+                    s = fn.body[0]
+                    if isinstance(s, F.ExprStmt) and isinstance(getattr(s, 'value', None), F.EllipsisLiteral):
+                        return True
+            except Exception:
+                pass
+            return False
+        # Separate functions
+        ellipsis_funcs = []
+        other_funcs = []
+        for f in functions:
+            if _has_ellipsis_body(f):
+                ellipsis_funcs.append(f)
+            else:
+                other_funcs.append(f)
+        # Keep entry function position? The entry is needed for startup jump
+        # but we can emit its body in any order as long as label is set
+        reordered = ellipsis_funcs + other_funcs
+        # Rebuild labels in new order
+        nth = {}
+        self._entry_labels = {}
+        self._internal_labels = set()
+        self._def_labels = []
+        for f in reordered:
+            n = nth.get(f.name, 0) + 1
+            nth[f.name] = n
+            label = f"{f.name}__def{n}"
+            self._internal_labels.add(label)
+            self._def_labels.append(label)
+            self._entry_labels[f.name] = label
+        functions = reordered
         for f, label in zip(functions, self._def_labels):
             self._emit_function(f, label)
 
@@ -1438,7 +1479,7 @@ dylib_exports: list = None, globals_base: int = None,
         # `SP + k` is INSIDE it and a method that writes its receiver does not
         # satisfy `FrameOk` — which is why the callee contract for a method is
         # `Refine.FrameOk_except`, the predicate
-        # `bugs/formal/FORMAL_wide_receiver_by_reference.md` lands for exactly this.
+        # `FORMAL_wide_receiver_by_reference.md` (deleted; fixed) lands for exactly this.
         # The layout itself is `formal/model.py`'s, so the x86-64 backend
         # reserves the same bytes in the same order.
         self._frame_sites = M.struct_constructor_sites(f, self._structs)
@@ -4735,6 +4776,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             callee_is_bool=lambda callee: self._callee_is_bool(
                 callee, stack | {name}),
             callee_returns_value=self._callee_returns_value,
+            callee_returns_none=self._callee_returns_none,
             callee_returned_parameter=self._callee_returned_parameter,
             dict_names=DICT_TYPE_NAMES,
             deref_kind=lambda e: M.pointer_deref_kind(
@@ -5171,29 +5213,6 @@ ctor_field_value=self._ctor_field_value_for(name),
             entry.get("signature") or "").strip() == "void"
 
     def _callee_returns_value(self, name, _seen=frozenset()):
-        """Whether a call to the local function `name` produces a value at all.
-
-        The seventh question `ValueKinds` asks about a callee, and the only one
-        whose answer is not about a KIND: a function with no `return` produces
-        nothing, CPython calls that `None`, and a value here is one 64-bit word,
-        so the honest answer for such a call is "not a value this path can carry"
-        rather than a kind.
-
-        **The answer is the TRANSITIVE one.** `model.returnless_function_names`
-        is the ONE reader, and it closes the question over bare-name
-        `return <call>` chains, because `def f(a): return g(a)` with `g`
-        return-less is the same `None` one hop out: reading the chain as a value
-        is what let `print(f(1))` print a word nothing wrote. Its least fixed
-        point is what keeps a cycle (two functions returning each other) reading
-        as a value rather than as an unwritten word. The x86-64 backend asks the
-        same reader, because two readings of "does this function return" is how
-        the two machines come to disagree about a construct.
-
-        The default for a name that is not a function of this unit is True, which
-        is the safe direction: it leaves the caller with the answer it had, so a
-        linked module's export (whose sources are not here to be read) changes
-        nothing.
-        """
         fn = self._functions.get(name)
         if fn is None:
             return True
@@ -5201,6 +5220,17 @@ ctor_field_value=self._ctor_field_value_for(name),
             self._returnless = M.returnless_function_names(
                 self._functions.values())
         return name not in self._returnless
+
+    def _callee_returns_none(self, name):
+        fn = self._functions.get(name)
+        if fn is None:
+            return False
+        try:
+            if hasattr(M, 'function_returns_none'):
+                return M.function_returns_none(fn)
+        except Exception:
+            pass
+        return False
 
     def _callee_returned_parameter(self, name):
         """The positional index of a parameter `name` hands straight back.

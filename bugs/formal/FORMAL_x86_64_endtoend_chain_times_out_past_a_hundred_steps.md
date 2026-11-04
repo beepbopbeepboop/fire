@@ -82,7 +82,7 @@ per-step separation invariant, so the closing read needs no unfold at all. The
 interim answer (`_concrete_read` unfolding up to 64 equations and
 `native_decide`-ing the result) is what makes `wide_recv` abort, and the durable
 one is a `mem` lemma per step that keeps the intermediate state abstract — which
-is what `bugs/formal/FORMAL_x86_64_end_to_end_proof.md`'s remaining section also asks
+is what the companion x86-64 end-to-end proof document's remaining section also asks
 for. **The concrete next step is unchanged and is in the generator, not in
 `X86.lean`:** thread a "this step wrote only registers" fact through the chain,
 so `.mem` never has to be reconstructed from 113 record updates.
@@ -175,7 +175,7 @@ chain's length instead of O(length) per crossing. It needs an emitter-side
 stack/frame tracker to make each write's address a literal, which is this doc's
 own option 1 and was never the wrong idea — it was the wrong SIZE. The 45-example
 sweep is NOT re-measured (it is a heavy run), so
-`FORMAL_x86_64_end_to_end_proof.md`'s table stands as of 2026-10-02 and the one
+the companion end-to-end proof document's table stands as of 2026-10-02 and the one
 prediction to check first is still `terminates proved with no sorry`.
 
 Everything below this line is earlier and is left as written.
@@ -307,7 +307,7 @@ sorry. Its residual goal, taken with `all_goals sorry` → `all_goals trace_stat
 ⊢ (mem_read_bytes (mem_read_bytes … ) 8) = 0
 ```
 
-which this doc's companion (`FORMAL_x86_64_end_to_end_proof.md`) read as B18's
+which this doc's companion read as B18's
 "a memory-separation inequality over a symbolic address", and which is in fact
 the same false claim: the `call` at 4294967946 pushed **4294967951**.
 
@@ -509,7 +509,7 @@ touches the model. The two boundaries in the table above were not re-measured
 either — they were already fixed before this pass and this change does not touch
 them. **And neither was the 45-example sweep**: this pass ran the two programs
 this doc is about plus `bitops` and `const2` as the no-call control, so the
-corpus-wide numbers in `bugs/formal/FORMAL_x86_64_end_to_end_proof.md` are NOT
+corpus-wide numbers in the companion end-to-end proof document are NOT
 re-measured and its table stands as of 2026-10-02. The one prediction to check
 first is `terminates proved with no sorry`, which must still read 32: the
 return-following code is unreachable for an image with no `call`, and that is

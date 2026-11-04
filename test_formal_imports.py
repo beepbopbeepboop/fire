@@ -4983,9 +4983,8 @@ def test_the_exclusion_table_does_not_change_the_export_set(tmpdir, _shared):
 # names, which is the question a sweep's `not-answerable/host-import` class
 # cannot answer: the class is one bucket over a queue of unrelated capabilities,
 # and a module landing unmasks the row behind it. The doc that asked for the
-# tool is `bugs/formal/FORMAL_the_host_import_wall_is_at_its_honest_floor.md` §5, and
-# these are its pins — the properties that make the ranking a MEASUREMENT rather
-# than a second description to drift.
+# tool's behavior is pinned here — the properties that make the ranking a
+# MEASUREMENT rather than a second description to drift.
 #
 # Everything here is Lean-free and builds nothing: the instrument reads the
 # backend's own readers, so a bug in it is a wrong TABLE, not a wrong image, and

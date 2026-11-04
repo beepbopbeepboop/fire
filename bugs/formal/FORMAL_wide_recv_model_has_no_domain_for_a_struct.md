@@ -26,7 +26,7 @@ half-model that answers some field reads and not others is worse than none. And
 "make the two backends alike" would mean arm64 giving up an admitted theorem it
 does not have, for no coverage.
 
-The nearest owner is `formal16-8` (`bugs/formal/FORMAL_wide_receiver_by_reference.md`), which
+The nearest owner is `formal16-8` (`FORMAL_wide_receiver_by_reference.md` (deleted; fixed)), which
 owns the frame-contract half of this example and does not claim the model's
 domain.
 
@@ -82,7 +82,7 @@ struct's field is not a function of `n`: `p.x` is 4 and `p.y` is 0 whatever `n`
 is. So there is no term to emit, and answering 0 would be a false statement about
 the source, which is why the arm refuses rather than defaulting.
 
-**The machine half is fine.** `bugs/formal/FORMAL_wide_receiver_by_reference.md` §"The
+**The machine half is fine.** `FORMAL_wide_receiver_by_reference.md` (deleted; fixed) §"The
 proposition" quotes the emitted `main_Point_set_x_frame_contract` — the mutator's
 frame contract generates — and the corpus's run tests build and run this program
 on both architectures. What is missing is the SOURCE half, and it is a model
@@ -200,7 +200,7 @@ One field read needs, all of it before `wide_recv` can be proved:
 2. **the frame's slots related to those fields.** The source value is `4`; the
    machine's is the word the emitter stored at `[rsp + k]`, and nothing emitted
    says they are the same word. `Frame.frameToEnv`-shaped, per
-   `bugs/formal/FORMAL_wide_receiver_by_reference.md`.
+   `FORMAL_wide_receiver_by_reference.md` (deleted; fixed).
 3. **the method call's value.** `p.get_x()` is a call whose receiver is a frame
    address; the model needs the frame's contents as an environment value, which
    is (1) and (2) again from the other side.

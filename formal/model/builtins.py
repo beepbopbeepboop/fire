@@ -1232,7 +1232,7 @@ def frame_undefined_callee_refusal(callee: str, struct_names,
             f"A frame address would be meaningful to a callee compiled against "
             f"the same field list, but there is no such callee here to be "
             f"compiled. "
-            f"bugs/formal/FORMAL_wide_receiver_by_reference.md records the design and "
+            f"FORMAL_wide_receiver_by_reference.md (deleted; fixed) records the design and "
             f"what is still open about it")
 
 
@@ -1941,7 +1941,7 @@ def frame_return_refusal(owner, received: bool, struct_names) -> str:
             f"created it, and that frame is reclaimed when the function "
             f"returns, so the address the caller would dereference names "
             f"reclaimed stack." + tail + ". "
-            f"bugs/formal/FORMAL_wide_receiver_by_reference.md records the design and "
+            f"FORMAL_wide_receiver_by_reference.md (deleted; fixed) records the design and "
             f"what is still open about it")
 
 
