@@ -51,6 +51,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_a_calcsize_image_hangs_once_in_several.md` | `bug-formal-formal-a-calcsize-image-hangs` | a `calcsize` image hangs for 60 s about once in six suite runs, and is clean 10/10 standalone |
+| `FORMAL_arm64_ieee754_has_no_step_arms.md` | `bug-formal-formal-arm64-ieee754-has-no-s` | ten IEEE-754 encoders the emitter calls, and no `arm64_step` arm |
 | `FORMAL_no_exceptions.md` | **unclaimed** | a `raise` is a TERMINATION on this path, not a value the caller can catch |
 | `FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md` | **unclaimed** | FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more |
 
@@ -58,6 +59,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
+| `FORMAL_a_fold_over_a_blob_needs_a_proof_model_and_not_only_codegen.md` | `bug-formal-formal-a-fold-over-a-blob-nee` | FORMAL_a_fold_over_a_blob_needs_a_proof_model_and_not_only_codegen |
 | `FORMAL_a_three_branch_certificate_exceeds_the_lean_bound.md` | `bug-formal-formal-a-three-branch-certifi` | the cost is the per-PATH value-flow facts, and everything the earlier rounds blamed for it checks in 23 seconds |
 | `FORMAL_absval_proof_does_not_check.md` | `bug-formal-formal-absval-proof-does-not-4544` | `formal/examples/absval.mojo`'s arm64 proof no longer checks — a frame-slot peel's address does not match the goal |
 | `FORMAL_admitted_contract_is_one_word_wide.md` | `bug-formal-formal-admitted-contract-is-o` | An admitted host contract is one WORD wide, because `MojoExpr.call` is |
@@ -79,7 +81,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_a_variadic_parameter_read_has_no_abi.md` | `bug-formal-formal-a-variadic-parameter-r` | the row was unowned, and the refusal in it is CORRECT |
 | `FORMAL_a_with_exit_whose_value_is_computed_can_suppress.md` | **unclaimed** | A `__exit__` whose RETURN VALUE is computed can still suppress, and the gate that catches the foldable half cannot see this one |
 | (removed) | — | bug fixed and doc deleted |
-| `FORMAL_module_state_no_storage.md` | **unclaimed** | a module cannot hold state, so `sys.argv`, `sys.path` and the stream objects cannot exist on this path |
+| `FORMAL_module_state_no_storage.md (deleted)` | **unclaimed** | a module cannot hold state, so `sys.argv`, `sys.path` and the stream objects cannot exist on this path |
 | `FORMAL_optional_needs_a_niche.md` | **unclaimed** | `Optional[T]` has a representation now, and the payloads it cannot answer are exactly the ones with no word left |
 | `FORMAL_pointer_value_model.md` | **unclaimed** | what a pointer IS on the formal path, and why the 54-file group was never about that |
 | `FORMAL_string_value_model.md` | **unclaimed** | what a string IS on the formal path, and the two things that want to be one |
@@ -122,6 +124,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_a_try_handler_arm_is_still_never_emitted.md` | `bug-formal-formal-a-try-handler-arm-is-s-8121` | A `try` handler arm is still never emitted, and the reason it is not worth fixing in one function is that EVERY arm in this repository calls something |
 | `FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md` | **unclaimed** | `collections.namedtuple` and `copy.deepcopy` are one missing capability, and it is a reflection table |
 | `FORMAL_function_value_calls_are_not_proved_to_be_calls.md` | **unclaimed** | A call through a VALUE is not proved to be a call: the word might not be an address |
+| `FORMAL_functools_is_unbuildable_as_a_host_module.md` | **unclaimed** | every name in CPython's `functools` needs a capability this path lacks, and a module that exports nothing is refused |
 | `FORMAL_fuzz_ledger.md` | **unclaimed** | what `tools/formal_fuzz.py` has measured, and what came of it |
 | `FORMAL_len_of_a_readdir_name_is_refused_and_needs_a_bytes_kind.md` | **unclaimed** | the ELEMENT half of the foreign-bytes question is closed, and the `len` half is not |
 | `FORMAL_listdir_no_run_time_sequence.md` | **unclaimed** | a run-time-length blob is answerable; a run-time-length LIST is not |
@@ -135,6 +138,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_stdlib_optional_needs_a_representation.md` | **unclaimed** | `std/builtin/builtin_slice.mojo` needs a REPRESENTATION for `Optional`, not a lowering — and that is what the 13-file row is really waiting on |
 | `FORMAL_str_repr_format_and_percent_have_no_lowering.md` | **unclaimed** | `str()`, `repr()`, `format()`, `%` and `.format()` have no lowering: a value's TEXT is not a compile-time constant |
 | `FORMAL_string_composition_has_no_buffer.md` | **unclaimed** | 115 files stop at `f"…"`, and the ceiling of closing them is 0 passes |
+| `FORMAL_sweep_singles_second_half.md` | **unclaimed** | four of §3.2's eight remaining single-file causes are not patches, measured |
 | `FORMAL_sweep_work_map.md` | **unclaimed** | the formal sweep series — the current census, the measurements that outlived their round, and the index of the twenty-one rounds it replaces |
 | `FORMAL_test_formal_run_two_cases_red_on_master.md` | **unclaimed** | two cases in test_formal_run.py fail |
 | `FORMAL_time_struct_shaped_answers.md` | **unclaimed** | five `time` names are absent because their answer is a struct |

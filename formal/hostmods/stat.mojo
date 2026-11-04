@@ -25,7 +25,7 @@ CPython's own over a corpus that includes the modes no real file has.
     module-level name is not exported as a word across a dylib boundary —
     there is no storage for one, because every value a formal program can name
     lives in a function's own stack scratch
-    (`bugs/formal/FORMAL_module_state_no_storage.md`). So `S_IRUSR()` is a
+    (`FORMAL_module_state_no_storage.md (deleted) (deleted)`). So `S_IRUSR()` is a
     zero-argument function and `stat.S_IRUSR` is spelled `S_IRUSR()`. This is
     the same rule `os.sep()` follows and the same reason
     (`formal/hostmods/os/__init__.mojo` says it at length). The

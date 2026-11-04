@@ -591,7 +591,29 @@ BACKLOG = {
     # encoder can produce (every `Rn`/`Rm` including 31, every condition code)
     # decode to that row, and no CSET word does — its encoder sets bit 10,
     # which the class keeps clear — with the row's LEAN column reading `yes`.
-
+    "encode_fadd_dd_dn_dm": (
+        "bugs/formal/FORMAL_arm64_ieee754_has_no_step_arms.md",
+        "IEEE-754 binary64, scalar: ten encoders the emitter calls, no arm in "
+        "`arm64_step`, and no V register file in the harness"),
+    "encode_fsub_dd_dn_dm": ("bugs/formal/FORMAL_arm64_ieee754_has_no_step_arms.md",
+                             "as `encode_fadd_dd_dn_dm`"),
+    "encode_fmul_dd_dn_dm": ("bugs/formal/FORMAL_arm64_ieee754_has_no_step_arms.md",
+                             "as `encode_fadd_dd_dn_dm`"),
+    "encode_fdiv_dd_dn_dm": ("bugs/formal/FORMAL_arm64_ieee754_has_no_step_arms.md",
+                             "as `encode_fadd_dd_dn_dm`"),
+    "encode_fneg_dd_dn": ("bugs/formal/FORMAL_arm64_ieee754_has_no_step_arms.md",
+                          "as `encode_fadd_dd_dn_dm`"),
+    "encode_fcmp_dn_dm": ("bugs/formal/FORMAL_arm64_ieee754_has_no_step_arms.md",
+                         "as `encode_fadd_dd_dn_dm`; the one whose FLAGS the "
+                         "floating comparison is decided from"),
+    "encode_fmov_gpr_to_v": ("bugs/formal/FORMAL_arm64_ieee754_has_no_step_arms.md",
+                             "as `encode_fadd_dd_dn_dm`"),
+    "encode_fmov_v_to_gpr": ("bugs/formal/FORMAL_arm64_ieee754_has_no_step_arms.md",
+                             "as `encode_fadd_dd_dn_dm`"),
+    "encode_scvtf_dn_xn": ("bugs/formal/FORMAL_arm64_ieee754_has_no_step_arms.md",
+                           "as `encode_fadd_dd_dn_dm`"),
+    "encode_fcvtzs_xn_dn": ("bugs/formal/FORMAL_arm64_ieee754_has_no_step_arms.md",
+                            "as `encode_fadd_dd_dn_dm`"),
     # ── x86-64: NO BACKLOG ROW AT ALL, as of 2026-10-08 ─────────────────
     #
     # `encode_imul_r64_r64_imm` was removed on 2026-10-06
