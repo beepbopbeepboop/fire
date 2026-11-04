@@ -70,7 +70,7 @@ out rather than guessed at:
     macOS exports `readdir`, `opendir`, `stat` and the rest of this file's
     entry points twice — once for a 32-bit `ino_t` and once for a 64-bit one —
     and on x86-64 the bare name is the 32-bit function, whose `struct dirent`
-    and `struct stat` are laid out differently. `formal/model/builtins.py`'s
+    and `struct stat` are laid out differently. `formal/model.py`'s
     `target_libc_symbol` is that table;
     `FORMAL_x86_64_byte_read_of_a_libc_returned_pointer_reads_the_wrong_bytes`
     records what reading the wrong one of the two costs. A host with no x86-64

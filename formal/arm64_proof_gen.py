@@ -1008,26 +1008,15 @@ def _cond_nodes(fn, param: str, env: dict = None, vtypes: dict = None,
                 # Loop-top condition `i < end`, with the counter bound to its
                 # initial (start) value: the universal walk meets this cbz at
                 # the first visit, where the counter register holds `start`.
-                try:
-                    _rs, _re, _rs_ = _range_bounds(_range_args_of(st))
-                    _env2 = dict(env)
-                    _tname = _target_name(st)
-                    _env2[_tname] = _expr_go(_rs, param, env, vtypes or {},
-                                             call_types or {}, scope)
-                    out.append((BinOp(op="<", left=Var(name=_tname), right=_re),
-                                _env2))
-                    walk(st.body, _env2)
-                    walk((st.else_body or []), _env2)
-                except Exception:
-                    # Could be a blob loop - bind the loop variable
-                    _env2 = dict(env)
-                    _tname = _target_name(st)
-                    try:
-                        _env2[_tname] = "(0 : UInt64)"
-                    except Exception:
-                        pass
-                    walk(st.body, _env2)
-                    walk((st.else_body or []), _env2)
+                _rs, _re, _rs_ = _range_bounds(_range_args_of(st))
+                _env2 = dict(env)
+                _tname = _target_name(st)
+                _env2[_tname] = _expr_go(_rs, param, env, vtypes or {},
+                                         call_types or {}, scope)
+                out.append((BinOp(op="<", left=Var(name=_tname), right=_re),
+                            _env2))
+                walk(st.body, _env2)
+                walk((st.else_body or []), _env2)
 
     walk(fn.body, base)
     return out
@@ -2320,10 +2309,7 @@ def _range_loop_pattern(fn):
     if collect(fn.body) == "while" or len(fors) != 1:
         return None
     f = fors[0]
-    try:
-        rargs = _range_args_of(f)
-    except Exception:
-        return None
+    rargs = _range_args_of(f)
     if len(rargs) not in (1, 2):
         return None
     if len(rargs) == 1:
@@ -2388,112 +2374,13 @@ def _range_loop_pattern(fn):
             and isinstance(fn.body[-1].value, Var)
             and fn.body[-1].value.name == acc):
         return None
-    return {"target": target, "acc": acc, "param": param, "body": body_stmts, "start": start, "range_args": rargs, "kind": "range"}
-
-
-def _blob_loop_pattern(fn):
-    """Detect a fold over a blob/list iterable: `for x in <blob>` with accumulator."""
-    if not fn.params or len(fn.params) != 1:
-        return None
-    param = fn.params[0][0]  # blob base/pointer parameter
-    fors: list = []
-
-    def collect(stmts) -> str:
-        for st in stmts:
-            if isinstance(st, ForStmt):
-                fors.append(st)
-            elif isinstance(st, WhileStmt):
-                return "while"
-            elif isinstance(st, IfStmt):
-                for sub in [st.then_body] + [b for _, b in (st.elifs or [])] + [st.else_body or []]:
-                    if collect(sub) == "while":
-                        return "while"
-        return ""
-    if collect(fn.body) == "while" or len(fors) != 1:
-        return None
-    f = fors[0]
-    # Must not be a range loop
-    try:
-        rargs = _range_args_of(f)
-        if rargs is not None:
-            return None
-    except Exception:
-        pass
-    # Iterable should be the parameter (the blob) or related to it
-    it = getattr(f, 'iterable', None)
-    # Accept if iterable is the parameter
-    if not isinstance(it, Var) or it.name != param:
-        # Could be other forms, but try to be permissive for now
-        pass  # Try to match anyway for now
-    target = f.target  # the loop variable (element)
-
-    def refs(e, names) -> bool:
-        if isinstance(e, Var):
-            return e.name in names
-        if isinstance(e, (Int, Bool)):
-            return True
-        if isinstance(e, Unary):
-            return refs(e.operand, names)
-        if isinstance(e, BinOp):
-            return refs(e.left, names) and refs(e.right, names)
-        return False
-
-    acc = None
-    body_stmts = []
-    for st in f.body:
-        if isinstance(st, AugAssign):
-            if acc is None:
-                acc = _target_name(st)
-            elif _target_name(st) != acc:
-                return None
-            # Allow refs to acc and target (element)
-            if not refs(st.value, {acc, target}):
-                return None
-            body_stmts.append(st)
-        elif isinstance(st, Assign):
-            tgt = _target_name(st)
-            if acc is None:
-                acc = tgt
-            elif tgt != acc:
-                return None
-            val = st.value
-            if isinstance(val, BinOp) and isinstance(val.left, Var) and val.left.name == acc:
-                if val.op in ('+', '-', '*', '&', '|', '^'):
-                    aug = AugAssign(target=val.left, op=val.op + '=', value=val.right)
-                    if not refs(val.right, {acc, target}):
-                        return None
-                    body_stmts.append(aug)
-                    continue
-            return None
-        else:
-            return None
-    if acc is None or not body_stmts:
-        return None
-    # Check for initial assignment to acc
-    # Look in fn.body before the for loop
-    if not (isinstance(fn.body[-1], Return)
-            and isinstance(fn.body[-1].value, Var)
-            and fn.body[-1].value.name == acc):
-        return None
-    return {"target": target, "acc": acc, "param": param, "body": body_stmts,
-            "start": Int(value=0), "kind": "blob", "blob_param": param}
+    return {"target": target, "acc": acc, "param": param, "body": body_stmts, "start": start, "range_args": rargs}
 
 
 def _range_loop_step_lean(body, acc_name: str, target_name: str) -> str:
     """Lean term for the loop body's effect on the accumulator, as a term in
     free vars `acc` (current accumulator) and `i` (current counter)."""
     env = {acc_name: "acc", target_name: "i"}
-    term = "acc"
-    for st in body:
-        if isinstance(st, AugAssign):
-            e = _expr_go(st.value, "n", env)
-            term = f"({term} {st.op.rstrip(chr(61))} {e})"
-    return term
-
-
-def _blob_loop_step_lean(body, acc_name: str, elem_name: str) -> str:
-    """Lean term for blob loop step: element comes from memory read."""
-    env = {acc_name: "acc", elem_name: "elem"}
     term = "acc"
     for st in body:
         if isinstance(st, AugAssign):
@@ -2594,62 +2481,6 @@ def _gen_range_loop_model(fn, info: dict, vregs: dict) -> str:
     return "\n".join(L)
 
 
-def _gen_blob_loop_model(fn, info: dict, vregs: dict) -> str:
-    """Emit the semantic model for a `for x in blob` accumulator loop."""
-    fname = fn.name
-    blob_param = info.get("blob_param") or info.get("param")
-    elem = info["target"]  # loop variable (element)
-    acc = info["acc"]
-    # Try to get registers if available
-    try:
-        reg_b = vregs[blob_param]
-        reg_i = vregs.get(elem) if elem in vregs else None
-        reg_a = vregs[acc]
-    except Exception:
-        reg_b = None
-        reg_i = None
-        reg_a = None
-    step = _blob_loop_step_lean(info["body"], acc, elem)  # element comes from memory
-    L = []
-    A = L.append
-    # Blob layout: [count:i64][elem0:i64]...
-    A(f"def {fname}_loop_go (rem : Nat) (acc : UInt64) (i : UInt64) (blob_base : UInt64) (mem : Nat → UInt8) : UInt64 :=\n"
-      f"  match rem with\n"
-      f"  | 0 => acc\n"
-      f"  | k + 1 =>\n"
-      f"    let elem := mem_read_u64 mem (blob_base.toNat + 8 + i.toNat * 8);\n"
-      f"    {fname}_loop_go k ({step}) (i + UInt64.ofNat 1) blob_base mem")
-    A("")
-    # Top level go takes blob base as parameter (matching function arity)
-    # Try to read memory from state context if possible - but in pure model context,
-    # this is tricky. For now, pass dummy memory; the loop_model will be used in CFG proofs
-    A(f"def {fname}_go ({blob_param} : UInt64) : UInt64 :=\n"
-      f"  let mem := (fun _ : Nat => (0 : UInt8));\n"
-      f"  let count := mem_read_u64 mem ({blob_param}.toNat);\n"
-      f"  {fname}_loop_go count.toNat (0 : UInt64) (0 : UInt64) {blob_param} mem")
-    A("")
-    A(f"theorem {fname}_loop_go_unfold (rem : Nat) (acc : UInt64) (i : UInt64) (blob_base : UInt64) (mem : Nat → UInt8) :\n"
-      f"    {fname}_loop_go (rem + 1) acc i blob_base mem =\n"
-      f"    {fname}_loop_go rem ({step}) (i + UInt64.ofNat 1) blob_base mem := by rfl")
-    A("")
-    A(f"theorem {fname}_loop_go_zero (acc : UInt64) (i : UInt64) (blob_base : UInt64) (mem : Nat → UInt8) :\n"
-      f"    {fname}_loop_go 0 acc i blob_base mem = acc := by rfl")
-    A("")
-    if reg_b is not None and reg_a is not None:
-        A(f"def {fname}_loop_model (st : Arm64State) : UInt64 :=\n"
-          f"  let blob_base := arm64_reg {reg_b} st;\n"
-          f"  let count := mem_read_u64 st.mem blob_base.toNat;\n"
-          f"  {fname}_loop_go count.toNat (arm64_reg {reg_a} st) (0 : UInt64) blob_base st.mem")
-        A("")
-    else:
-        A(f"def {fname}_loop_model (st : Arm64State) : UInt64 :=\n"
-          f"  let blob_base := arm64_reg {reg_b} st if reg_b is not None else (UInt64.ofNat 0);\n"
-          f"  let count := mem_read_u64 st.mem blob_base.toNat;\n"
-          f"  {fname}_loop_go count.toNat (0 : UInt64) (0 : UInt64) blob_base st.mem")
-        A("")
-    return "\n".join(L)
-
-
 def _gen_go(fn, tc: dict = None) -> list:
     """Generate the semantic model (helpers first, then main).
 
@@ -2677,24 +2508,16 @@ def _gen_go(fn, tc: dict = None) -> list:
     sig = (" " + " ".join(f"({p} : UInt64)" for p in params)) if params else ""
     helpers = []
     loop_counter = [0]
-    rpat = _range_loop_pattern(fn)
-    if rpat is not None:
+    if _range_loop_pattern(fn) is not None:
         if len(params) != 1:
             raise NotImplementedError(
                 f"model: {fname} matches the for-range loop pattern with "
                 f"{len(params)} parameters; the pattern's model is defined "
                 f"for one, and widening it is a model change, not a "
                 f"generator fix")
-        helpers.append(_gen_range_loop_model(fn, rpat,
+        helpers.append(_gen_range_loop_model(fn, _range_loop_pattern(fn),
                                              var_register_map(fn)))
         return helpers
-    bpat = _blob_loop_pattern(fn)
-    if bpat is not None:
-        try:
-            helpers.append(_gen_blob_loop_model(fn, bpat, var_register_map(fn)))
-            return helpers
-        except Exception:
-            raise
     if (tc and tc.get("typed") and not _is_recursive(fn)
             and _dec1_pattern(fn) is None and _dec_while_pattern(fn) is None
             and _count_self_calls(fn) < 2):
@@ -3756,9 +3579,41 @@ def _ast_gap_message(gaps: list) -> str:
 
 
 def _ast_model_cannot_state(fn) -> str:
-    """Why the untyped AST model cannot state `fn`'s body, or `''` when it can."""
-    if _range_loop_pattern(fn) is not None or _blob_loop_pattern(fn) is not None:
-        return "a for-range/for-blob loop (`MojoStmt` has no loop form)"
+    """Why the untyped AST model cannot state `fn`'s body, or `''` when it can.
+
+    **One predicate for four decisions**, which used to be three reads of
+    `_range_loop_pattern` and could have been a fourth read of anything else:
+    whether `eval_eq_mojo` is emitted, whether `ast_def` is built at all,
+    whether the call-gap check runs, and whether the concrete
+    `eval_eq_mojo_N` instances are emitted. They are one decision — "is there
+    an AST to cross-check the model against" — and a caller that answers it
+    one way and another caller the other way produces a file whose `ast` value
+    is emitted and never used, or a theorem over an `ast` that was never
+    written (the concrete instances used to be exactly that fourth caller:
+    five theorems referring to an `ast` the file never declared, one Lean
+    `Expected type must not contain free variables` per theorem).
+
+    Two shapes, and the second is new:
+
+      * a `for`-range accumulator loop. `MojoStmt` has no loop form at all, so
+        there is no `MojoFunc` to write and nothing to cross-check.
+      * **a conditional expression in a value position.** The MODEL can state
+        `a if c else b` (`_ternary_go`), and `MojoExpr` cannot, because
+        `if` in this library is a `MojoStmt` and an expression has nowhere to
+        put one. So the model's half of the two layers is real and the bridge's
+        is absent, which is a stated gap rather than a reason to refuse the
+        proof: `bugs/formal/FORMAL_a_conditional_expression_has_no_value_in_the_semantic_model.md`
+        records the measurement that a ternary was 37 of 60 generated programs'
+        refusals, and refusing a proof the machine half can carry over the AST
+        model's missing constructor would be refusing it for the wrong reason.
+
+    The search is over the STATEMENTS the AST renders (`_stmts_ast`'s
+    vocabulary) rather than over every node, so a ternary in a position the AST
+    never reaches — the bound of a `for` this predicate has already answered
+    for, a `while` body — does not cost a bridge that was there before.
+    """
+    if _range_loop_pattern(fn) is not None:
+        return "a for-range loop (`MojoStmt` has no loop form)"
 
     def mentions_ternary(node) -> bool:
         if isinstance(node, F.TernaryExpr):
@@ -4165,16 +4020,6 @@ _STEP_CONDS = [
     (0xffe00c00, 0x9a800000),  # 69 CSEL Xd, Xn, Xm, cond
     # 70 FCMP Dn, Dm (scalar double): flags only, no result register.
     (0xffe0fc00, 0x1e602000),
-    # 71-79: scalar double FP arithmetic/conversions/moves
-    (0xffe0fc00, 0x1e602800),  # 71 FADD Dd, Dn, Dm
-    (0xffe0fc00, 0x1e603800),  # 72 FSUB Dd, Dn, Dm
-    (0xffe0fc00, 0x1e600800),  # 73 FMUL Dd, Dn, Dm
-    (0xffe0fc00, 0x1e601800),  # 74 FDIV Dd, Dn, Dm
-    (0xfffffc00, 0x1e614000),  # 75 FNEG Dd, Dn
-    (0xfffffc00, 0x9e670000),  # 76 FMOV Dd, Xn (GPR->V)
-    (0xfffffc00, 0x9e660000),  # 77 FMOV Xd, Dn (V->GPR)
-    (0xfffffc00, 0x9e620000),  # 78 SCVTF Dd, Xn
-    (0xfffffc00, 0x9e780000),  # 79 FCVTZS Xd, Dn
 ]
 
 
@@ -4951,15 +4796,6 @@ _WORK_STEP = [
     # 64/65 — claims these words.
     (69, "work_step_csel", [(0xffe00c00, 0x9a800000)]),
     (70, "work_step_fcmp", [(0xffe0fc00, 0x1e602000)]),
-    (71, "work_step_fadd", [(0xffe0fc00, 0x1e602800)]),
-    (72, "work_step_fsub", [(0xffe0fc00, 0x1e603800)]),
-    (73, "work_step_fmul", [(0xffe0fc00, 0x1e600800)]),
-    (74, "work_step_fdiv", [(0xffe0fc00, 0x1e601800)]),
-    (75, "work_step_fneg", [(0xfffffc00, 0x1e614000)]),
-    (76, "work_step_fmov_gpr_v", [(0xfffffc00, 0x9e670000)]),
-    (77, "work_step_fmov_v_gpr", [(0xfffffc00, 0x9e660000)]),
-    (78, "work_step_scvtf", [(0xfffffc00, 0x9e620000)]),
-    (79, "work_step_fcvtzs", [(0xfffffc00, 0x9e780000)]),
 ]
 
 _WORK_STEP_BY_IDX = {idx: (lemma, tests) for idx, lemma, tests in _WORK_STEP}

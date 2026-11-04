@@ -70,7 +70,7 @@ WHAT IS NOT HERE, AND WHY
 THE TWO THINGS THAT ARE NOT QUITE CPYTHON, STATED HERE
 ------------------------------------------------------
   * `print_exc()` returns 0 where CPython returns `None`. `None` folds to the
-    word 0 on this path (`formal/model/frames.py`, `NONE_WORD`), which is the only
+    word 0 on this path (`formal/model.py`, `NONE_WORD`), which is the only
     thing a one-word value can say; `formal/hostmods/contextlib.mojo` states
     the same about `nullcontext()` and this is that fold, not a substitute
     computed at the call.
