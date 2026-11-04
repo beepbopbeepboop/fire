@@ -32,8 +32,7 @@ name, a call, a subscript) and a set COMPREHENSION both still lower with their
 repeats, so `{x, x, 2}` still reports 3. Establishing distinctness for a
 run-time value needs a hash or a scan, and x86-64 has no set emitter at all
 (`set_union_refusal`), so the durable fix is a set runtime on both backends —
-the same project `FORMAL_the_host_import_wall_is_at_its_honest_floor.md`'s
-"run-time-length container" row names. Until then the honest statement is: a
+a "run-time-length container" capability. Until then the honest statement is: a
 set literal is a list of the DISTINCT words it was written with.
 
 ---

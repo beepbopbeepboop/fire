@@ -318,8 +318,7 @@ Twenty-two rows. Against them:
 wave to measure that (the first measured it too and had no column to say it
 with; §0 is the column). The first wave's ranking document is deleted now that
 its whole queue has closed — `glob`, `shlex.quote` and `random` all landed — and
-its conclusion is folded into
-`bugs/formal/FORMAL_the_host_import_wall_is_at_its_honest_floor.md`'s Status.
+its conclusion was folded into the host-import wall analysis.
 
 ### 4.1 Nine of those files want CPython ON PURPOSE, and that is a third answer
 

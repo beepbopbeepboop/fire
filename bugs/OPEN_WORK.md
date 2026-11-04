@@ -99,7 +99,6 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_os_environ_is_a_view_and_the_sweep_row_behind_it.md` | **unclaimed** | `os.environ` is modelled, and what the 4-file sweep row is actually worth |
 | `FORMAL_stdlib_module_names_are_not_classified.md` | **unclaimed** | 223 of CPython's stdlib module names are in neither host-module tier, so a build calls 120 public ones "not a stdlib module" |
 | `FORMAL_subprocess_run_is_modelled_as_returning_the_status_word.md` | **unclaimed** | `.returncode` is a field access on an integer |
-| `FORMAL_the_host_import_wall_is_at_its_honest_floor.md` | **unclaimed** | what is left of the 203-file host-import row, and why each remaining name is out of reach |
 
 ### `formal/lean` — 7 documents, 1 claimed
 
