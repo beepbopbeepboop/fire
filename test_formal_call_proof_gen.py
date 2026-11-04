@@ -7325,9 +7325,9 @@ class TestCfgLeafCensus(unittest.TestCase):
 
 # ── A SYMBOLIC DIVISOR, and why the terminal value flow cannot close it ──────
 #
-# `def q(a, b): return a // b` is the shape the doc
-# `bugs/formal/FORMAL_a_division_by_a_symbolic_value_leaves_the_zero_guard_open.md`
-# is about, and the doc's own next step — put the enclosing `by_cases hc_N` into
+# `def q(a, b): return a // b` is the shape the former bug
+# `bugs/formal/FORMAL_a_division_by_a_symbolic_value_leaves_the_zero_guard_open.md` (now deleted)
+# was about, and the doc's own next step — put the enclosing `by_cases hc_N` into
 # the terminal value flow's `simp only [h8, mojo, …]` list — was measured here
 # and **changes nothing**: the eight terminal flows' residual goals are
 # byte-identical with and without it. Two facts explain that, and both are
@@ -7462,9 +7462,9 @@ class TestTheZeroDivisorGuardIsAFalseGoal(unittest.TestCase):
             m.group(1), "0",
             "fdiv64's div0 arm is no longer 0 — the arm64 div0 path leaves x0 = "
             "1 and exits, so if this changed the walk's terminal value flow may "
-            "now close; re-read "
+            "now close; re-read the former bug "
             "bugs/formal/FORMAL_a_division_by_a_symbolic_value_leaves_the_zero_guard_open.md "
-            "before assuming it does not")
+            "(deleted) before assuming it does not")
 
     def test_a_zero_divisor_leaves_the_image_with_status_one(self):
         """The other half, observed: `10 // 0` exits 1 and prints nothing.
