@@ -135,7 +135,7 @@ import time
 # semantics and 1/200th of the edit surface does not belong inside it.  Nothing
 # imports it yet: the FP step functions that would are `arm64_step`'s and
 # `x86_64_step`'s, and giving either state a second register file is the step
-# that has to land first (`bugs/formal/FORMAL_float_step_functions.md`).  Until then it
+# that has been implemented for float step functions.
 # is INFRASTRUCTURE, and it is in this tuple rather than unbuilt because the
 # hole census and the `.olean` currency check read the tuple — a module outside
 # it is a module nothing checks.

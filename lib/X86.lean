@@ -110,6 +110,8 @@ def x86_get_xmm (s : X86State) (i : Nat) : UInt64 :=
   match i with
   | 0 => s.xmm0 | 1 => s.xmm1 | 2 => s.xmm2 | 3 => s.xmm3
   | 4 => s.xmm4 | 5 => s.xmm5 | 6 => s.xmm6 | 7 => s.xmm7
+  | 8 => s.xmm8 | 9 => s.xmm9 | 10 => s.xmm10 | 11 => s.xmm11
+  | 12 => s.xmm12 | 13 => s.xmm13 | 14 => s.xmm14 | 15 => s.xmm15
   | _ => 0
 
 def x86_set_xmm (s : X86State) (i : Nat) (v : UInt64) : X86State :=
@@ -118,6 +120,10 @@ def x86_set_xmm (s : X86State) (i : Nat) (v : UInt64) : X86State :=
   | 2 => {s with xmm2 := v} | 3 => {s with xmm3 := v}
   | 4 => {s with xmm4 := v} | 5 => {s with xmm5 := v}
   | 6 => {s with xmm6 := v} | 7 => {s with xmm7 := v}
+  | 8 => {s with xmm8 := v} | 9 => {s with xmm9 := v}
+  | 10 => {s with xmm10 := v} | 11 => {s with xmm11 := v}
+  | 12 => {s with xmm12 := v} | 13 => {s with xmm13 := v}
+  | 14 => {s with xmm14 := v} | 15 => {s with xmm15 := v}
   | _ => s
 
 /-! ### A register write does not change memory

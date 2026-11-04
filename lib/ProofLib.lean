@@ -64,6 +64,14 @@ structure X86State where
   xmm5 : UInt64
   xmm6 : UInt64
   xmm7 : UInt64
+  xmm8 : UInt64 := 0
+  xmm9 : UInt64 := 0
+  xmm10 : UInt64 := 0
+  xmm11 : UInt64 := 0
+  xmm12 : UInt64 := 0
+  xmm13 : UInt64 := 0
+  xmm14 : UInt64 := 0
+  xmm15 : UInt64 := 0
   rip : Nat
   zf : Bool
   sf : Bool
@@ -79,6 +87,8 @@ def X86State.init (input : UInt64) (entry : Nat) : X86State :=
     r12 := 0, r13 := 0, r14 := 0, r15 := 0
     xmm0 := 0, xmm1 := 0, xmm2 := 0, xmm3 := 0
     xmm4 := 0, xmm5 := 0, xmm6 := 0, xmm7 := 0
+    xmm8 := 0, xmm9 := 0, xmm10 := 0, xmm11 := 0
+    xmm12 := 0, xmm13 := 0, xmm14 := 0, xmm15 := 0
     rip := entry, zf := false, sf := false, cf := false, of_ := false
     mem := fun _ => 0 }
 
@@ -1061,6 +1071,7 @@ def getByte (bytes : List UInt8) (i : Nat) : UInt8 :=
 inductive MojoExpr where
   | int (v : UInt64)
   | bool (v : Bool)
+  | float (v : UInt64)
   | var (name : String)
   | unop (op : String) (operand : MojoExpr)
   | binop (op : String) (left : MojoExpr) (right : MojoExpr)
@@ -1296,8 +1307,11 @@ def evalExpr (callFunc : String → UInt64 → UInt64) (callFunc2 : String → U
   match e with
   | MojoExpr.int v => v
   | MojoExpr.bool v => if v then 1 else 0
+  | MojoExpr.float v => v
   | MojoExpr.var name => env name
   | MojoExpr.unop "neg" operand => (0 : UInt64) - evalExpr callFunc callFunc2 operand env
+  | MojoExpr.unop "-" operand => fnegBits (evalExpr callFunc callFunc2 operand env)
+  | MojoExpr.unop "fneg" operand => fnegBits (evalExpr callFunc callFunc2 operand env)
   | MojoExpr.unop "not" operand => if evalExpr callFunc callFunc2 operand env = 0 then 1 else 0
   | MojoExpr.unop "lnot" operand => if evalExpr callFunc callFunc2 operand env = 0 then 1 else 0
   | MojoExpr.unop "inv" operand => evalExpr callFunc callFunc2 operand env ^^^ (0xFFFFFFFFFFFFFFFF : UInt64)
@@ -1307,6 +1321,14 @@ def evalExpr (callFunc : String → UInt64 → UInt64) (callFunc2 : String → U
   | MojoExpr.binop "+" l r => evalExpr callFunc callFunc2 l env + evalExpr callFunc callFunc2 r env
   | MojoExpr.binop "-" l r => evalExpr callFunc callFunc2 l env - evalExpr callFunc callFunc2 r env
   | MojoExpr.binop "*" l r => evalExpr callFunc callFunc2 l env * evalExpr callFunc callFunc2 r env
+  | MojoExpr.binop "+." l r => faddBits (evalExpr callFunc callFunc2 l env) (evalExpr callFunc callFunc2 r env)
+  | MojoExpr.binop "-." l r => fsubBits (evalExpr callFunc callFunc2 l env) (evalExpr callFunc callFunc2 r env)
+  | MojoExpr.binop "*." l r => fmulBits (evalExpr callFunc callFunc2 l env) (evalExpr callFunc callFunc2 r env)
+  | MojoExpr.binop "/." l r => fdivBits (evalExpr callFunc callFunc2 l env) (evalExpr callFunc callFunc2 r env)
+  | MojoExpr.binop "fadd" l r => faddBits (evalExpr callFunc callFunc2 l env) (evalExpr callFunc callFunc2 r env)
+  | MojoExpr.binop "fsub" l r => fsubBits (evalExpr callFunc callFunc2 l env) (evalExpr callFunc callFunc2 r env)
+  | MojoExpr.binop "fmul" l r => fmulBits (evalExpr callFunc callFunc2 l env) (evalExpr callFunc callFunc2 r env)
+  | MojoExpr.binop "fdiv" l r => fdivBits (evalExpr callFunc callFunc2 l env) (evalExpr callFunc callFunc2 r env)
   | MojoExpr.binop "<=" l r => if sKey (evalExpr callFunc callFunc2 l env) ≤ sKey (evalExpr callFunc callFunc2 r env) then 1 else 0
   | MojoExpr.binop "<" l r => if sKey (evalExpr callFunc callFunc2 l env) < sKey (evalExpr callFunc callFunc2 r env) then 1 else 0
   | MojoExpr.binop ">" l r => if sKey (evalExpr callFunc callFunc2 l env) > sKey (evalExpr callFunc callFunc2 r env) then 1 else 0
