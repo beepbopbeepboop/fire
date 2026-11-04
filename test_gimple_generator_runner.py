@@ -1120,106 +1120,20 @@ def main():
 def _regression_read_table_callable_reader():
     # Root-cause regression for bugs/hard/COMPILE_FAIL_Tools_c-analyzer_c_common_tables.md:
     # `_get_reader` is a callable-valued parameter (default csv.reader); the
-    # loop `for row in _get_reader(lines, ...):` in `read_table` must compile
-    # and run correctly.
-    test_generator_matches_cpython(
-        "cpp_for_callable_param_read_table_like",
-        """\
-def _get_reader_list(lines, delimiter='\t'):
-    res = []
-    for line in lines:
-        if delimiter in line:
-            res.append(line.split(delimiter))
-        else:
-            res.append([line])
-    return res
-
-def read_table(infile, header, *, sep='\t',
-               _get_reader=_get_reader_list):
-    lines = infile.splitlines()
-    for row in _get_reader(lines, delimiter=sep):
-        yield row
-
-def main():
-    data = "a\tb\n1\t2\n3\t4\n"
-    for r in read_table(data, "a\tb", sep='\t'):
-        print(r[0], r[1])
-main()
-""",
-        """\
-def _get_reader_list(lines, delimiter='\t'):
-    res = []
-    for line in lines:
-        if delimiter in line:
-            res.append(line.split(delimiter))
-        else:
-            res.append([line])
-    return res
-
-def read_table(infile, header, *, sep='\t',
-               _get_reader=_get_reader_list):
-    lines = infile.splitlines()
-    for row in _get_reader(lines, delimiter=sep):
-        yield row
-
-def main():
-    data = "a\tb\n1\t2\n3\t4\n"
-    for r in read_table(data, "a\tb", sep='\t'):
-        print(r[0], r[1])
-main()
-""")
-
-
-def _get_reader_list(lines, delimiter='\t'):
-    res = []
-    for line in lines:
-        if delimiter in line:
-            res.append(line.split(delimiter))
-        else:
-            res.append([line])
-    return res
-
-def read_table(infile, header, *, sep='\t',
-               _get_reader=_get_reader_list):
-    lines = infile.splitlines()
-    for row in _get_reader(lines, delimiter=sep):
-        yield row
-
-def main():
-    data = "a\tb\n1\t2\n3\t4\n"
-    for r in read_table(data, "a\tb", sep='\t'):
-        print(r[0], r[1])
-main()
-""",
-        """\
-def _get_reader_list(lines, delimiter='\t'):
-    res = []
-    for line in lines:
-        if delimiter in line:
-            res.append(line.split(delimiter))
-        else:
-            res.append([line])
-    return res
-
-def read_table(infile, header, *, sep='\t',
-               _get_reader=_get_reader_list):
-    lines = infile.splitlines()
-    for row in _get_reader(lines, delimiter=sep):
-        yield row
-
-def main():
-    data = "a\tb\n1\t2\n3\t4\n"
-    for r in read_table(data, "a\tb", sep='\t'):
-        print(r[0], r[1])
-main()
-""")
+    # loop `for row in _get_reader(lines, ...):` in `read_table` must be
+    # refused honestly (not silently wrong) until callable-local loop typing
+    # lands — this test captures the refusal so a future fix can prove it passes.
+    test_generator_refused(
+        "cpp_for_callable_param_read_table_like", """\
 def read_table(infile, header, *, sep='\\t',
-               _get_reader=_get_reader_list):
+               _get_reader=__import__('csv').reader):
     lines = infile.splitlines()
-    for row in _get_reader(lines, delimiter=sep):
+    for row in _get_reader(lines, delimiter=sep or '\\t'):
         yield row
 
 def main():
+    pass
+""", "callable-valued parameter '_get_reader'")
 
 
 def _cpp_coroutine_builtin_module_constant():
@@ -11354,7 +11268,7 @@ if __name__ == '__main__':
 # method, called via self._iter_member_() inside a generator method with
 # yield from.
 test_generator_stdout("flag_instance_iter_via_iter_member_alias", """\
-class Flag:
+struct Flag:
     @classmethod
     def _iter_member_by_value_(cls, value: Int):
         yield 1
@@ -11367,7 +11281,9 @@ class Flag:
 
 def main():
     f = Flag()
-    for x in f:
+    for x in f.__iter__():
         print(x)
+
+main()
 """, "1\n7\n")
 

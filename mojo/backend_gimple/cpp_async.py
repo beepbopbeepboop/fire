@@ -38,7 +38,6 @@ import mlir
 # "unavailable in compiled mode" stub returning 0.
 from fire_compiler import for_target_names
 import mojo.middle.types as gimple_ctypes
-from mojo.middle.types import _FOREIGN_CALLABLES
 import mojo.middle.solvers as gimple_solvers
 import mojo.middle.exprtypes as gimple_exprtypes
 from mojo.middle.exprtypes import _cpp_word_of_kind, _fstring_field_names
@@ -687,28 +686,6 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
             param_ctypes.append((pn[1:], 'MojoList *'))
             continue
         ctype = gen._param_ctype(pn, pt, fn)
-        # For foreign callable defaults used in generators, pass as word
-        try:
-            _fc_tbl = getattr(gimple_ctypes, '_FOREIGN_CALLABLES', {}) or {}
-            if _fc_tbl and ctype in (getattr(gimple_ctypes, '_CPP_CALLABLE_CTYPE', None),
-                                     getattr(gimple_ctypes, '_CPP_CALLABLE_CTYPE_1ARG', None)):
-                # Check if it's a known foreign callable
-                _pdflt = (getattr(fn, 'param_defaults', None) or {}).get(pn.lstrip('*'))
-                if _pdflt is not None:
-                    from fire_compiler import MemberExpr, IdentExpr, CallExpr, StringLiteral
-                    _qname = None
-                    if isinstance(_pdflt, MemberExpr):
-                        if isinstance(_pdflt.obj, IdentExpr):
-                            _qname = f"{_pdflt.obj.name}.{_pdflt.member}"
-                        elif isinstance(_pdflt.obj, CallExpr) and isinstance(_pdflt.obj.func, IdentExpr) and _pdflt.obj.func.name == '__import__':
-                            if getattr(_pdflt.obj, 'args', None):
-                                _a0 = _pdflt.obj.args[0]
-                                if isinstance(_a0, StringLiteral):
-                                    _qname = f"{getattr(_a0, 'value', '')}.{_pdflt.member}"
-                    if _qname in _fc_tbl or ctype in (getattr(gimple_ctypes, '_CPP_CALLABLE_CTYPE', None),):
-                        ctype = 'int64_t'
-        except Exception:
-            pass
         if (ctype == 'char *' and (pt is None or pt == '')
                 and pn in coro_mod._PTR_EVIDENCE.get(fn.name, ())
                 and any(isinstance(_n, gimple_ctypes.CallExpr)
@@ -742,9 +719,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
                           and ctype[:-2] in gen.struct_field_types)
         if _is_struct_ptr:
             gen._cpp_param_struct_names.add(ctype[:-2])
-        # Allow foreign callable types (from foreign callable table)
-        _is_foreign_callable = isinstance(ctype, str) and ctype.startswith('std::function')
-        if ctype not in _GENERATOR_PARAM_CTYPES and not _is_struct_ptr and not _is_foreign_callable:
+        if ctype not in _GENERATOR_PARAM_CTYPES and not _is_struct_ptr:
             raise gimple_exprtypes._UnsupportedGeneratorShape(
                 f"{fn.name}: generator parameter '{pn}' has unsupported "
                 f"type {ctype!r} (only int64_t/double/_Bool/char*/"
@@ -760,8 +735,7 @@ def _gen_cpp_generator_unit(gen, fn: gimple_ctypes.FunctionDef,
     # `nonlocal` write cannot reach here.
     if extra_captures:
         for _cap_name, _cap_ctype in extra_captures:
-            _is_foreign_callable_cap = isinstance(_cap_ctype, str) and _cap_ctype.startswith('std::function')
-            if _cap_ctype not in _GENERATOR_PARAM_CTYPES and not _is_foreign_callable_cap:
+            if _cap_ctype not in _GENERATOR_PARAM_CTYPES:
                 raise gimple_exprtypes._UnsupportedGeneratorShape(
                     f"{fn.name}: enclosing-scope variable {_cap_name!r} has "
                     f"type {_cap_ctype!r}, which a nested generator cannot yet "
