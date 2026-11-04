@@ -1229,7 +1229,7 @@ def fs_name_is_dot(name: Pointer[UInt8]) -> int:
 # read at a declared offset is what C does, and it is now answerable.
 #
 # The offsets are CONSTANTS, and a module-level constant is not exported as a
-# word across a dylib boundary (`bugs/formal/FORMAL_module_state_no_storage.md`), so they
+# word across a dylib boundary (`FORMAL_module_state_no_storage.md (deleted) (deleted)`), so they
 # are `int` PARAMETERS of the readers and the values live at the use sites.
 # The names are spelled `ST_*` here as the numbers they are; the spellings a
 # caller uses are the functions further down, which is also where the layout is
