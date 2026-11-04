@@ -12210,16 +12210,27 @@ def _call_func_lean(func_name: str, admitted: dict = None,
 
 
 def _call_func2_lean(func_name: str, admitted2: dict = None,
-                     wrap: bool = True) -> str:
-    """The `callFunc2` for admitted contracts taking 2 arguments."""
+                     wrap: bool = True, exports: dict = None) -> str:
+    """The `callFunc2` for admitted contracts taking 2 arguments.
+
+    `exports` is the arity-2 analogue of `callFunc`'s `exports`: branches over
+    this image's OWN two-parameter callees whose `_go` definition was emitted,
+    so `if name = "_scalar_max2" then _scalar_max2_go arg0 arg1`.  Without them
+    the stub answers `0` for every user callee, and `eval_eq_mojo` asks Lean
+    to prove `0 = <the call's value>` — the false theorem this whole family of
+    bugs is about.
+    """
+    exports = exports or {}
     admitted2 = admitted2 or {}
-    if not admitted2:
+    if not admitted2 and not exports:
         if wrap:
             return "(fun name arg0 arg1 => 0)"
         return "(fun name arg0 arg1 => 0)"
     arms = "\n  ".join(
         [f'if name = "{spelling}" then {lean} arg0 arg1 else'
-         for spelling, lean in sorted(admitted2.items()) if lean])
+         for spelling, lean in sorted(admitted2.items()) if lean]
+        + [f'if name = "{spelling}" then {go} arg0 arg1 else'
+           for spelling, go in sorted(exports.items())])
     if arms:
         if wrap:
             return f'(fun name arg0 arg1 =>\n  {arms}\n  0)'
@@ -12229,8 +12240,14 @@ def _call_func2_lean(func_name: str, admitted2: dict = None,
     return "(fun name arg0 arg1 => 0)"
 
 
-def _callee_call_table(go_defs: str, prog, func_name: str) -> dict:
+def _callee_call_table(go_defs: str, prog, func_name: str, arity: int = 1) -> dict:
     """`{spelling: the `_go` definition to call}` for every callee with a model.
+
+    `arity` is the argument count the BRANCH must supply. `callFunc` is unary
+    and `callFunc2` is binary — they both answer `0` for names they don't know
+    about, so `callFunc` answers `0` for two-parameter callees, which means
+    `eval_eq_mojo` is FALSE: `0 = <the callee's value>` (measured on
+    `_scalar_max2(x, x)`).
 
     **The one-parameter callee table, and the half that was never a
     `lib/ProofLib.lean` change** (its two-parameter analogue is open:
@@ -12247,10 +12264,9 @@ def _callee_call_table(go_defs: str, prog, func_name: str) -> dict:
       * **not the entry** — its branch is `mojo arg`, which `_call_func_lean`
         already emits, and two branches for one name would be a redefinition of
         the same answer;
-      * **exactly one parameter** — `callFunc` is `String → UInt64 → UInt64`, so
-        it is handed ONE value, and a two-parameter `_go` has no faithful
-        `f_go arg`.  This is the same limit the entry's own branch has, and for
-        the same reason: the AST layer packs nothing;
+      * **arity parameter matches** — `callFunc` is `String → UInt64 → UInt64`,
+        so a unary branch (`callFunc`) cannot call a binary callee, and a binary
+        branch (`callFunc2`) cannot call a unary callee;
       * **the model is IN `go_defs`** — read back off the emitted text rather
         than predicted from the source, because `_gen_go` does not always
         define one: a for-range-loop function returns its loop model and no
@@ -12261,7 +12277,7 @@ def _callee_call_table(go_defs: str, prog, func_name: str) -> dict:
     out = {}
     for g in sorted(getattr(prog, "functions", None) or [],
                     key=lambda f: f.name):
-        if g.name == func_name or _entry_arity(g) != 1:
+        if g.name == func_name or _entry_arity(g) != arity:
             continue
         if re.search(r"^(partial )?def %s_go\b" % re.escape(g.name), go_defs,
                      re.M):
@@ -12582,7 +12598,13 @@ def generate_arm64_proof(prog, code, info) -> str:
                 _admitted_calls_map2[k] = v
     except Exception:
         pass
-    _cf2_text = _call_func2_lean(func_name, _admitted_calls_map2)
+    # Also build a callFunc2 branch for every two-parameter callee whose model
+    # is in go_defs.  Without them the stub answers 0 for every user callee, and
+    # eval_eq_mojo asks Lean to prove 0 = <the call's value> — the false theorem
+    # this whole family of bugs is about.
+    _callees2 = _callee_call_table(go_defs, prog, func_name, arity=2)
+    _cf2_text = _call_func2_lean(func_name, _admitted_calls_map2,
+                                exports=_callees2)
     # The model's arity is the SOURCE arity, so applying it to `n` is wrong for
     # a function that takes no parameters -- `def ret42(): return 42` used to
     # be modelled as `ret42_go (n : UInt64)`, a parameter the source does not
@@ -13007,9 +13029,11 @@ def generate_arm64_proof(prog, code, info) -> str:
     # which is the opposite of what this check is for. `sum_range`'s `range(n)`
     # is the measured loop case: caught by the check, refused, and worth 2
     # holes on both architectures.
+    # Add the two-parameter callee names to the arity-2 handler's resolvable
+    # set: the bridge must know it CAN state a call to them.
+    _resolvable2 = frozenset(_admitted_map2_own) | set(_callees2)
     _gaps = ([] if ast_cannot
-             else _ast_bridge_gaps(fn, _resolvable,
-                                   frozenset(_admitted_map2_own)))
+             else _ast_bridge_gaps(fn, _resolvable, _resolvable2))
     if _gaps:
         raise NotImplementedError(_ast_gap_message(_gaps))
 
