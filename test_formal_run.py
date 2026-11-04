@@ -11763,6 +11763,35 @@ CONSTRUCTION_CASES = [
      "    if src.get_v() != 40:\n"
      "        return 60 + src.get_v()\n"
      "    return 7\n", 7, None),
+    # Copy construction from a call result returning the same struct type
+    # (reflection/type information driven copy construction).
+    ("constr_copy_from_call_result",
+     "struct Pair:\n"
+     "    var a: Int\n"
+     "    var b: Int\n"
+     "\n"
+     "    fn get_a(self) -> Int:\n"
+     "        return self.a\n"
+     "\n"
+     "    fn get_b(self) -> Int:\n"
+     "        return self.b\n"
+     "\n"
+     "def make() -> Pair:\n"
+     "    return Pair(3, 4)\n"
+     "\n"
+     "def copyit() -> Pair:\n"
+     "    var q = Pair(make())\n"
+     "    q.a = q.a + 10\n"
+     "    return q\n"
+     "\n"
+     "def main(n: Int) -> Int:\n"
+     "    var r = make()\n"
+     "    var q = copyit()\n"
+     "    if r.a != 3 or r.b != 4:\n"
+     "        return 10\n"
+     "    if q.a != 13 or q.b != 4:\n"
+     "        return 20\n"
+     "    return 7\n", 7, None),
     # (7) A ONE-FIELD STRUCT with an argument — the value collapse, and the case
     # that shows `S(x)` on a value is not a copy at all: there is no block, the
     # receiver IS the field, so the argument is not stored, it IS the result.
