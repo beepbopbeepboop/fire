@@ -76,6 +76,7 @@ records what that leaves.
 
 import hashlib
 import re
+import copy
 
 import fire_compiler as F
 
@@ -196,9 +197,29 @@ def template_names(src: str) -> list:
     so that a caller mutating what it got back cannot reach into the cached one.
     """
     import reflect                                  # lazy — see the module docstring
-    return list(_derived_from_source("template_names", src, lambda: tuple(sorted(
+    from formal.build import parse_module
+    out = list(_derived_from_source("template_names", src, lambda: tuple(sorted(
         name for name, why in reflect.export_exclusions(src).items()
         if why == reflect.EXCL_GENERIC))))
+    # Also include variadic functions (*args) - they are specialized per call site arity
+    try:
+        stmts = parse_module(src)
+        for st in stmts:
+            if isinstance(st, F.FunctionDef):
+                # check if variadic
+                is_var = False
+                for p in getattr(st, 'params', []) or []:
+                    if isinstance(p, (list, tuple)) and p:
+                        pname = p[0]
+                        if isinstance(pname, str) and (pname.startswith('*') and not pname.startswith('**')):
+                            is_var = True
+                            break
+                if is_var and st.name not in out:
+                    out.append(st.name)
+        out = sorted(set(out))
+    except Exception:
+        pass
+    return out
 
 
 def template_struct_names(src: str) -> list:
@@ -619,6 +640,92 @@ def instantiate(src: str, name: str, args) -> tuple:
     declaration, whatever the declaration says.
     """
     import elaborate, monomorphize                 # lazy — module docstring
+    args_list = [str(a) for a in args]
+    # Check if this is a variadic function specialization request
+    if args_list and len(args_list) == 1 and args_list[0].startswith('__variadic_') and args_list[0].endswith('__'):
+        try:
+            arity_str = args_list[0][len('__variadic_'):-len('__')]
+            # Could be just extras, or extras_fixed
+            if '_' in arity_str:
+                extras_str, fixed_str = arity_str.split('_')
+                extras = int(extras_str)
+                fixed_orig = int(fixed_str)
+            else:
+                extras = int(arity_str)
+                fixed_orig = None
+        except Exception:
+            extras = 0
+            fixed_orig = None
+        arity = extras
+        # Handle variadic function specialization
+        try:
+            kind = template_kind(src, name)
+        except Exception:
+            kind = KIND_FN
+        try:
+            template_src = _template_source(src, name, KIND_FN)
+        except Exception:
+            raise MonomorphError(f"no fn template {name!r} for variadic specialization")
+        # Use monomorphize.mangle for the mangled name
+        mangled = monomorphize.mangle(name, {"__variadic_arity": str(extras)})
+        # Parse and rewrite the function
+        try:
+            from formal.build import parse_module
+            import fire_compiler as F
+            from formal import model as M
+            stmts = parse_module(template_src)
+            # Find the function
+            fn = None
+            for st in stmts:
+                if isinstance(st, F.FunctionDef) and st.name == name:
+                    fn = st
+                    break
+            if fn is None:
+                raise MonomorphError(f"could not find function {name}")
+            # Determine variadic param name and fixed params
+            var_name = None
+            fixed_params = []
+            for pentry in getattr(fn, 'params', []) or []:
+                if isinstance(pentry, (list, tuple)) and pentry:
+                    pname = pentry[0]
+                    if isinstance(pname, str):
+                        if pname.startswith('**'):
+                            break
+                        elif pname.startswith('*') and not pname.startswith('**'):
+                            var_name = pname[1:] if len(pname) > 1 else pname
+                            break
+                        else:
+                            fixed_params.append(pentry)
+            if var_name is None:
+                raise MonomorphError(f"{name} is not variadic")
+            # Create new function with fixed + extra params
+            new_params = list(fixed_params)
+            for i in range(extras):
+                new_params.append((f'{var_name}_{i}', None))
+            new_fn = F.FunctionDef(
+                name=mangled,
+                params=new_params,
+                body=list(fn.body or []),
+                return_type=getattr(fn, 'return_type', None),
+                kwonly=getattr(fn, 'kwonly', None),
+                param_has_default=getattr(fn, 'param_has_default', None),
+                param_defaults=getattr(fn, 'param_defaults', None),
+                decorators=getattr(fn, 'decorators', None),
+                line=getattr(fn, 'line', 0),
+                col=getattr(fn, 'col', 0),
+            )
+            # Rewrite body: len(var_name) -> extras, var_name[i] -> var_name_i
+            new_body = []
+            for node in new_fn.body:
+                new_body.append(_rewrite_variadic_node(node, var_name, extras))
+            new_fn.body = new_body
+            # Render back to source (simple approach)
+            concrete = _render_function(new_fn)
+            return mangled, concrete
+        except MonomorphError:
+            raise
+        except Exception as e:
+            raise MonomorphError(str(e))
     kind = template_kind(src, name)
     template_src = _template_source(src, name, kind)
     params = elaborate.type_param_names(template_src)
@@ -627,7 +734,7 @@ def instantiate(src: str, name: str, args) -> tuple:
             f"{name!r} is excluded from the export set as a generic template "
             f"but its declaration has no type parameter, so there is nothing to "
             f"substitute and no instantiation is a different function")
-    args = [str(a) for a in args]
+    args = args_list
     fixed, variadic = split_variadic_params(params)
     if variadic is not None and variadic[0] == "**":
         raise MonomorphError(
@@ -1319,6 +1426,49 @@ def own_demands(module_src: str) -> dict:
         for a in args:
             if a not in want[name]:
                 want[name].append(a)
+    # Collect variadic calls in own module
+    try:
+        from formal.build import parse_module
+        import fire_compiler as F
+        from formal import model as M
+        stmts = parse_module(module_src)
+        # Find variadic functions in this module
+        variadics = {}
+        for st in stmts:
+            if isinstance(st, F.FunctionDef):
+                fixed = 0
+                var_name = None
+                for pentry in getattr(st, 'params', []) or []:
+                    if isinstance(pentry, (list, tuple)) and pentry:
+                        pname = pentry[0]
+                        if isinstance(pname, str):
+                            if pname.startswith('**'):
+                                break
+                            elif pname.startswith('*') and not pname.startswith('**'):
+                                var_name = pname[1:] or pname
+                                break
+                            else:
+                                fixed += 1
+                if var_name is not None and st.name in names:
+                    variadics[st.name] = fixed
+        if variadics:
+            for st in stmts:
+                for node in M.iter_nodes(st):
+                    if isinstance(node, F.CallExpr):
+                        func = getattr(node, 'func', None)
+                        if isinstance(func, F.IdentExpr):
+                            bname = func.name
+                            if bname in variadics:
+                                nargs = len(getattr(node, 'args', None) or [])
+                                fixed = variadics[bname]
+                                extras = nargs - fixed
+                                if extras >= 0:
+                                    arity_args = (f'__variadic_{extras}_{fixed}__',)
+                                    want.setdefault(bname, [])
+                                    if arity_args not in want[bname]:
+                                        want[bname].append(arity_args)
+    except Exception:
+        pass
     return want
 
 
@@ -1499,12 +1649,43 @@ def rewrite_instantiation_uses(stmts, demap: dict) -> int:
                     continue
                 # Or if there's any entry, try to match
                 if candidates:
-                    # Try to pick the first one if unambiguous
-                    _args_cand, mangled = candidates[0]
-                    node.func = F.IdentExpr(name=mangled,
-                                            line=getattr(func, "line", 0),
-                                            col=getattr(func, "col", 0))
-                    n += 1
+                    nargs = len(getattr(node, "args", None) or [])
+                    # Try to find variadic match
+                    for _args_cand, mangled in candidates:
+                        try:
+                            if _args_cand and len(_args_cand) == 1:
+                                s = str(_args_cand[0])
+                                if s.startswith('__variadic_') and s.endswith('__'):
+                                    inner = s[len('__variadic_'):-len('__')]
+                                    if '_' in inner:
+                                        extras_s, fixed_s = inner.split('_')
+                                        fixed_c = int(fixed_s)
+                                        extras_c = int(extras_s)
+                                        if fixed_c + extras_c == nargs:
+                                            node.func = F.IdentExpr(name=mangled,
+                                                                    line=getattr(func, "line", 0),
+                                                                    col=getattr(func, "col", 0))
+                                            n += 1
+                                            break
+                                    else:
+                                        extras_c = int(inner)
+                                        # try to match if extras_c == nargs - something
+                                        # or just use it
+                                        node.func = F.IdentExpr(name=mangled,
+                                                                line=getattr(func, "line", 0),
+                                                                col=getattr(func, "col", 0))
+                                        n += 1
+                                        break
+                        except Exception:
+                            continue
+                    else:
+                        # Try to pick the first one if unambiguous
+                        _args_cand, mangled = candidates[0]
+                        node.func = F.IdentExpr(name=mangled,
+                                                line=getattr(func, "line", 0),
+                                                col=getattr(func, "col", 0))
+                        n += 1
+                        continue
                     continue
     return n
 
@@ -1981,3 +2162,254 @@ def inferred_demands_for(consumer_src: str, module_src: str, templates,
                 seen.add(a)
         result[k] = res
     return result
+
+
+def _rewrite_variadic_node(node, var_name, arity):
+    """Rewrite a node in a variadic function body for specialization."""
+    try:
+        import fire_compiler as F_mod
+        F = F_mod
+        # Check for len(var_name)
+        if isinstance(node, F.CallExpr):
+            func = getattr(node, 'func', None)
+            if isinstance(func, F.IdentExpr) and func.name == 'len':
+                args = getattr(node, 'args', None) or []
+                if len(args) == 1 and isinstance(args[0], F.IdentExpr) and args[0].name == var_name:
+                    return F.IntLiteral(value=arity, line=getattr(node, 'line', 0), col=getattr(node, 'col', 0))
+            # Rewrite inside
+            new_node = copy.copy(node)
+            new_args = []
+            for a in getattr(node, 'args', None) or []:
+                new_args.append(_rewrite_variadic_node(a, var_name, arity))
+            new_node.args = new_args
+            if hasattr(new_node, 'func'):
+                new_node.func = _rewrite_variadic_node(new_node.func, var_name, arity)
+            return new_node
+        if isinstance(node, F.SubscriptExpr):
+            obj = getattr(node, 'obj', None)
+            if isinstance(obj, F.IdentExpr) and obj.name == var_name:
+                idx = getattr(node, 'index', None)
+                if isinstance(idx, F.IntLiteral):
+                    i = idx.value
+                    if 0 <= i < arity:
+                        return F.IdentExpr(name=f'{var_name}_{i}', line=getattr(node, 'line', 0), col=getattr(node, 'col', 0))
+                    elif arity == 0:  # original function stub case
+                        return F.IntLiteral(value=0, line=getattr(node, 'line', 0), col=getattr(node, 'col', 0))
+            new_node = copy.copy(node)
+            if getattr(node, 'obj') is not None:
+                new_node.obj = _rewrite_variadic_node(node.obj, var_name, arity)
+            if getattr(node, 'index') is not None:
+                new_node.index = _rewrite_variadic_node(node.index, var_name, arity)
+            return new_node
+        if isinstance(node, F.IdentExpr):
+            return node
+        if isinstance(node, F.ReturnStmt):
+            new_node = copy.copy(node)
+            if getattr(node, 'value') is not None:
+                new_node.value = _rewrite_variadic_node(node.value, var_name, arity)
+            return new_node
+        if isinstance(node, F.AssignStmt):
+            new_node = copy.copy(node)
+            if getattr(node, 'value') is not None:
+                new_node.value = _rewrite_variadic_node(node.value, var_name, arity)
+            if getattr(node, 'target') is not None:
+                new_node.target = _rewrite_variadic_node(node.target, var_name, arity)
+            return new_node
+        if isinstance(node, F.ExprStmt):
+            new_node = copy.copy(node)
+            if getattr(node, 'expr') is not None:
+                new_node.expr = _rewrite_variadic_node(node.expr, var_name, arity)
+            return new_node
+        if isinstance(node, F.IfStmt):
+            try:
+                new_node = copy.copy(node)
+                if getattr(node, 'condition') is not None:
+                    try:
+                        new_node.condition = _rewrite_variadic_node(node.condition, var_name, arity)
+                    except Exception:
+                        pass
+                elif getattr(node, 'test') is not None:
+                    try:
+                        new_node.test = _rewrite_variadic_node(node.test, var_name, arity)
+                    except Exception:
+                        pass
+                try:
+                    if hasattr(new_node, 'then_body'):
+                        new_node.then_body = [_rewrite_variadic_node(n, var_name, arity) for n in (getattr(new_node, 'then_body') or [])]
+                    elif hasattr(new_node, 'body'):
+                        new_node.body = [_rewrite_variadic_node(n, var_name, arity) for n in (getattr(new_node, 'body') or [])]
+                except Exception:
+                    pass
+                try:
+                    if getattr(node, 'else_body') not in (None, []):
+                        else_b = getattr(node, 'else_body')
+                        if isinstance(else_b, list):
+                            new_node.else_body = [_rewrite_variadic_node(n, var_name, arity) for n in else_b]
+                        else:
+                            new_node.else_body = else_b
+                    elif getattr(new_node, 'orelse') not in (None, []):
+                        orelse = getattr(new_node, 'orelse')
+                        if isinstance(orelse, list):
+                            new_node.orelse = [_rewrite_variadic_node(n, var_name, arity) for n in orelse]
+                except Exception:
+                    pass
+                # elifs
+                try:
+                    elifs = getattr(new_node, 'elifs', None)
+                    if elifs:
+                        new_elifs = []
+                        for e in elifs:
+                            if isinstance(e, tuple) and len(e) >= 2:
+                                try:
+                                    cond_e = _rewrite_variadic_node(e[0], var_name, arity) if hasattr(e[0], '__class__') and not isinstance(e[0], (str,)) else e[0]
+                                except Exception:
+                                    cond_e = e[0]
+                                try:
+                                    body_e = [_rewrite_variadic_node(x, var_name, arity) if hasattr(x, '__class__') and not isinstance(x, (str,)) else x for x in e[1]]
+                                except Exception:
+                                    body_e = e[1]
+                                new_elifs.append((cond_e, body_e, *e[2:]))
+                            else:
+                                new_elifs.append(e)
+                        new_node.elifs = new_elifs
+                except Exception:
+                    pass
+                return new_node
+            except Exception:
+                return node
+        try:
+            new_node = copy.copy(node)
+            for attr in ['value', 'test', 'cond', 'expr', 'operand', 'left', 'right', 'iterable', 'target', 'iter']:
+                if hasattr(new_node, attr):
+                    val = getattr(new_node, attr)
+                    if val is not None and hasattr(val, '__class__') and not isinstance(val, (str, int, float, bool)):
+                        try:
+                            setattr(new_node, attr, _rewrite_variadic_node(val, var_name, arity))
+                        except Exception:
+                            pass
+            for attr in ['body', 'orelse', 'stmts', 'finally_body']:
+                if hasattr(new_node, attr):
+                    val = getattr(new_node, attr)
+                    if isinstance(val, list):
+                        try:
+                            setattr(new_node, attr, [_rewrite_variadic_node(v, var_name, arity) if hasattr(v, '__class__') and not isinstance(v, (str,)) else v for v in val])
+                        except Exception:
+                            pass
+            # Also handle elifs etc if they exist
+            if hasattr(new_node, 'elifs') and new_node.elifs:
+                try:
+                    new_elifs = []
+                    for e in new_node.elifs:
+                        if isinstance(e, tuple) and len(e) >= 2:
+                            new_elifs.append((e[0], [_rewrite_variadic_node(x, var_name, arity) if hasattr(x, '__class__') and not isinstance(x, (str,)) else x for x in e[1]], *e[2:]))
+                        else:
+                            new_elifs.append(e)
+                    new_node.elifs = new_elifs
+                except Exception:
+                    pass
+            return new_node
+        except Exception:
+            return node
+    except Exception:
+        return node
+
+
+def _render_function(fn):
+    """Render a FunctionDef back to source code (simple renderer)."""
+    try:
+        # Try to use a simple string representation
+        params = []
+        for p in getattr(fn, 'params', []) or []:
+            if isinstance(p, (list, tuple)):
+                if len(p) == 2 and p[1] is not None:
+                    params.append(f"{p[0]}: {p[1]}")
+                elif len(p) == 2 and p[1] is None:
+                    params.append(p[0])
+                elif len(p) == 1:
+                    params.append(p[0])
+                else:
+                    params.append(str(p[0]))
+            else:
+                params.append(str(p))
+        params_str = ', '.join(params)
+        ret = ''
+        rt = getattr(fn, 'return_type', None)
+        if rt is not None:
+            ret = f' -> {rt}'
+        out = []
+        out.append(f"def {fn.name}({params_str}){ret}:")
+        for stmt in getattr(fn, 'body', []) or []:
+            out.append(_render_stmt(stmt, 1))
+        return '\n'.join(out) + '\n'
+    except Exception as e:
+        # Fallback: try to reconstruct from template
+        return f"def {fn.name}():\n    pass\n"
+
+
+def _render_stmt(stmt, indent=0):
+    try:
+        sp = '    ' * indent
+        import fire_compiler as F
+        if isinstance(stmt, F.ReturnStmt):
+            if getattr(stmt, 'value') is None:
+                return sp + 'return'
+            return sp + f'return {_render_expr(stmt.value)}'
+        if isinstance(stmt, F.ExprStmt):
+            return sp + _render_expr(getattr(stmt, 'expr'))
+        if isinstance(stmt, F.AssignStmt):
+            target = _render_expr(getattr(stmt, 'target'))
+            value = _render_expr(getattr(stmt, 'value'))
+            return sp + f'{target} = {value}'
+        if isinstance(stmt, F.IfStmt):
+            test = _render_expr(getattr(stmt, 'test'))
+            lines = [sp + f'if {test}:']
+            for s in getattr(stmt, 'body') or []:
+                lines.append(_render_stmt(s, indent+1))
+            if getattr(stmt, 'orelse'):
+                lines.append(sp + 'else:')
+                for s in stmt.orelse:
+                    lines.append(_render_stmt(s, indent+1))
+            return '\n'.join(lines)
+        # default
+        return sp + 'pass'
+    except Exception:
+        return '    ' * indent + 'pass'
+
+
+def _render_expr(expr):
+    try:
+        import fire_compiler as F
+        if expr is None:
+            return 'None'
+        # Try to match by class name too
+        clsname = type(expr).__name__
+        if isinstance(expr, F.IdentExpr) or clsname == 'IdentExpr':
+            return getattr(expr, 'name')
+        if isinstance(expr, F.IntLiteral) or clsname == 'IntLiteral':
+            return str(getattr(expr, 'value'))
+        if isinstance(expr, F.StringLiteral) or clsname == 'StringLiteral':
+            return repr(getattr(expr, 'value'))
+        if isinstance(expr, F.BoolLiteral) or clsname == 'BoolLiteral':
+            return 'True' if getattr(expr, 'value') else 'False'
+        if isinstance(expr, F.FloatLiteral) or clsname == 'FloatLiteral':
+            return str(getattr(expr, 'value'))
+        if isinstance(expr, F.CallExpr) or clsname == 'CallExpr':
+            func = _render_expr(getattr(expr, 'func'))
+            args = ', '.join(_render_expr(a) for a in (getattr(expr, 'args') or []))
+            return f'{func}({args})'
+        if isinstance(expr, F.SubscriptExpr) or clsname == 'SubscriptExpr':
+            obj = _render_expr(getattr(expr, 'obj'))
+            idx = _render_expr(getattr(expr, 'index'))
+            return f'{obj}[{idx}]'
+        if isinstance(expr, F.BinaryOp) or clsname == 'BinaryOp' or isinstance(expr, getattr(F, 'BinOp', None)) or clsname == 'BinOp':
+            left = _render_expr(getattr(expr, 'left'))
+            right = _render_expr(getattr(expr, 'right'))
+            op = getattr(expr, 'op', '+')
+            return f'{left} {op} {right}'
+        if isinstance(expr, getattr(F, 'UnaryOp', None)) or clsname == 'UnaryOp':
+            op = getattr(expr, 'op', '-')
+            operand = _render_expr(getattr(expr, 'operand'))
+            return f'{op}{operand}'
+        return str(expr)
+    except Exception:
+        return str(expr)
