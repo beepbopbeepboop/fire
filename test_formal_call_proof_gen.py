@@ -7666,11 +7666,10 @@ class TestTheZeroDivisorGuardIsAFalseGoal(unittest.TestCase):
 class TestFloatOrderIsDecidableAndFloatEqualityIsNot(unittest.TestCase):
     """Which of the ten IEEE-754 arms a `work_step_*` can be written for AT ALL.
 
-    `bugs/formal/FORMAL_arm64_ieee754_has_no_step_arms.md` says to start with `FCMP`
-    and not with the arithmetic, and gives a reason about the FLAGS ("it has
-    the flags to get right rather than a register") rather than about
-    PROVABILITY. This class is the measurement behind that choice, and it is a
-    question about LEAN rather than about arm64 — which is why it is three
+    The approach is to start with `FCMP` and not with the arithmetic, for a reason
+    about the FLAGS ("it has the flags to get right rather than a register")
+    rather than about PROVABILITY. This class is the measurement behind that choice,
+    and it is a question about LEAN rather than about arm64 — which is why it is three
     two-line files with no ProofLib import (0.3 s each, not a proof run), one
     per question, so each verdict is its own exit status and nothing has to be
     parsed out of a shared transcript:
@@ -7741,7 +7740,7 @@ class TestFloatOrderIsDecidableAndFloatEqualityIsNot(unittest.TestCase):
             self.assertEqual(rc, 0,
                              "%s: Lean's answer changed, and this class is "
                              "the measurement behind the ORDER of work in "
-                             "`bugs/formal/FORMAL_arm64_ieee754_has_no_step_arms.md` "
+                             "the FP step-arms plan "
                              "-- re-read it before believing the row below: %s"
                              % (name, out[:400]))
         else:

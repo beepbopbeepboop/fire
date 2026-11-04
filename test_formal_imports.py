@@ -2413,6 +2413,59 @@ def test_the_five_find_spec_decided_names_are_unreachable(tmpdir, _shared):
               "no-spec measurement this placement rests on does not hold")
 
 
+def test_the_terminal_reading_names_are_unreachable(tmpdir, _shared):
+    """The EIGHT of the doc's §"The next step" terminal reading, and the one
+    CORRECTION the reading made on the way in.
+
+    `bugs/formal/FORMAL_stdlib_module_names_are_not_classified.md`'s next step
+    listed `curses`, `tty`, `pty`, `readline`, `rlcompleter`, `tkinter`,
+    `turtle` and `cmd` under `unreachable` — "a terminal" — with `wsgiref` in
+    the same list.  The object each one needs is a terminal, the object
+    `HOST_UNREACHABLE`'s own heading names (`getpass` and `webbrowser` are its
+    pre-existing rows) and which a freestanding image that links libSystem and
+    nothing else does not have; `wsgiref` is the one the reading CORRECTS, the
+    way `posix` was corrected into `HOST_MODELLED`: its load-bearing half is
+    the reference SERVER — `wsgiref.simple_server.WSGIServer` is a subclass of
+    `http.server.HTTPServer` — so it is a SOCKET, and it sits under the socket
+    heading for the same object as `http`.
+
+    A spec EXISTS for every one of the nine here, so the no-spec oracle that
+    placed the five 2026-10-07 names does not decide these: the placement is
+    the per-name reading the doc's list is, with the evidence row for each in
+    `formal/imports.py`'s own comment.  The precondition that keeps the row
+    about the queue is that every name is a CPython standard-library module
+    with no source in this tree.
+    """
+    import sys as _sys
+    import formal.imports as I
+    terminal = ("cmd", "curses", "pty", "readline", "rlcompleter",
+                "tkinter", "tty", "turtle")
+    socket = ("wsgiref",)
+    for name in terminal + socket:
+        check(name in _sys.stdlib_module_names,
+              f"precondition: {name} is not a CPython standard-library "
+              "module, so this row is not about the queue")
+        check(name in I.HOST_UNREACHABLE,
+              f"{name} is not in HOST_UNREACHABLE, so the rule at the top of "
+              "formal/imports.py has not been applied to it")
+        answer, _detail = I.host_module_verdict(name)
+        check(answer == "unreachable",
+              f"host_module_verdict({name!r}) answered {answer!r}, not "
+              "'unreachable'")
+    # The placement carries its private accelerator WITHOUT a second entry:
+    # `curses` in a claim tier is what `capability_sibling_tier` answers for
+    # `_curses`, the CPython internal that binds libncurses (outside
+    # libSystem) — a derivation, not a remembered row, so it is pinned rather
+    # than written into a table.
+    check(I.host_module_tier("_curses") == "unreachable",
+          "`curses` is unreachable, so its accelerator `_curses` answers with "
+          "the same tier by capability_sibling_tier; an empty answer would "
+          "mean the placement did not carry the private half")
+    check(I.host_module_verdict("_curses")[0] == "unreachable",
+          "host_module_verdict('_curses') must answer with the derived tier, "
+          "so the reach accounting sees it")
+
+
 def test_mojo_source_beats_host_module(tmpdir, _shared):
     """The other precedence: a real Mojo module beats the host-module list.
 
@@ -5635,6 +5688,9 @@ TESTS = [
      test_every_name_has_one_named_verdict_and_no_answer_is_an_absence),
     ("the five find_spec-decided names are unreachable",
      test_the_five_find_spec_decided_names_are_unreachable),
+    ("the terminal reading's eight names are unreachable, and wsgiref is a "
+     "socket",
+     test_the_terminal_reading_names_are_unreachable),
     ("the host-import wall's instrument reads the backend's own tree",
      test_the_wall_instrument_uses_the_backends_own_readers),
     ("the wall instrument separates reach from alone",

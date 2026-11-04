@@ -1,5 +1,60 @@
 # FORMAL_stdlib_module_names_are_not_classified: 223 of CPython's stdlib module names are in neither host-module tier, so a build calls 120 public ones "not a stdlib module"
 
+**Status 2026-11-03 (`work/bug-formal-formal-stdlib-module-names-ar-5613`):
+the EIGHT names §"The next step" lists under `unreachable` — "a terminal" —
+are in `HOST_UNREACHABLE`, and `wsgiref`, which the same list carried there,
+is in it under the SOCKET reading instead.** The pass takes the doc's own
+reading list one name at a time with the rule at the top of `formal/imports.py`
+applied to each: the object each one needs is a terminal — the object
+`getpass` and `webbrowser` are in that heading for — and a freestanding image
+that links libSystem and nothing else has none. `tty` (terminal mode for
+`/dev/tty`), `pty` (a pseudo-terminal pair), `readline` (line editing; CPython
+on this host binds libedit, outside libSystem — the library reading and the
+terminal reading agree), `rlcompleter` (on readline), `curses` (terminal UI;
+CPython's is a wrapper over `_curses`, which binds libncurses), `tkinter`
+(the Tcl/Tk runtime its private half needs — `_tkinter` is in the set by the
+10-07 no-spec measurement — and a display), `turtle` (canvas graphics on
+`tkinter`; the `HOST_NOT_A_MODULE` comment states the reading verbatim) and
+`cmd` (the command STREAM — NOT its optional `readline` import, which is
+§0.5's mechanism 2: an optional import is not a dependency). A spec EXISTS for
+every one of the eight here, so the no-spec oracle that placed the five 10-07
+names does not decide these; the placement is the per-name reading the list
+is, with the evidence row for each in `formal/imports.py`'s own comment. The
+public `curses` in the claim tier takes `_curses` out of the queue with it,
+by `capability_sibling_tier` — a derivation, so there is no entry for it and
+none is wanted. `wsgiref` is the one the reading CORRECTS, the way `posix`
+was corrected into `HOST_MODELLED`: the doc's list had it under terminal, but
+the load-bearing half of the package is the reference SERVER —
+`wsgiref.simple_server.WSGIServer` is a subclass of `http.server.HTTPServer`,
+measured on the interpreter that runs this tree — so it sits under the socket
+heading for the same object as `http`. Re-measured on this tree 2026-11-03
+(CPython 3.15.2): `unclassified 169 → 159`, `unreachable 32 → 42`, everything
+else unchanged (`modelled 57`, `written 30`, `admitted 4`, `not-code 3`,
+`front-end 1`) — the counts are a fact about the table and the interpreter's
+own list, so they are printed by the accessor rather than inferred, as §0.5
+said. Pinned by
+`test_formal_imports.py::test_the_terminal_reading_names_are_unreachable`
+(tier membership, the verdict, the shipped-and-source-less precondition, and
+the derived `_curses` half — the test fails on the pre-placement tree), with
+the nine rows in `test_formal_link_accounting.py::HOST_SET_ADDED_TIERS`.
+Verified: `test_formal_imports.py` 95/0 and `tools/formal_stdlib_reach.py
+--check` OK with 0 problems and 159 names in no tier. `test_formal_link_
+accounting.py` is red on master for a reason this pass did not make — eight
+hostmod docstrings cite the deleted `formal/model.py`, the model package
+split's tail, another worker's claim — and that is filed as
+`bugs/formal/FORMAL_hostmod_docstrings_cite_a_deleted_model_py.md` rather than
+fixed here. **What is still not done, unchanged in kind:** the rest of
+§"The next step"'s list — next in line its `unreachable` second-process
+reading (`multiprocessing`, `venv`, `ensurepip`, …) and its library-outside-
+libSystem group (`sqlite3`, `bz2`, `lzma`, `ssl`, … — §0.5's table measured
+the library for each), and its `modelled` list. The murkier readings are
+recorded where they are murky: `pdb`/`bdb` are a terminal AND the interpreter's
+own frames, `pstats` is data processing over a profile dump, `compileall`
+wants the embedded CPython's compiler, and `binascii` is pinned
+`unclassified` by `test_every_name_has_one_named_verdict_and_no_answer_is_an_
+absence` while its 3.15 evidence row is a binary that links libz — it wants
+its own reading before it moves.
+
 **Status 2026-10-07, landed in parallel by `work/formal114-docs`,
 `work/formal135-docs`, `work/formal155-docs`, `work/formal175-docs` and
 `work/formal181-docs` (which dated its own measurement 2026-10-08): the FIVE

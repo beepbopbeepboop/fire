@@ -157,7 +157,7 @@ TWO_BRACKET_CALL_CPYTHON = "7"           # add(2, 5) — the 10 is a third argum
 BARE_AND_VIA_LOCAL_CPYTHON = "406\n107"  # bare: 100+101+102+103; local: 7+100
 
 # `functools.reduce`'s own shape, which is the ONE host-module function in
-# `bugs/formal/FORMAL_functools_is_unbuildable_as_a_host_module.md`'s census that a
+# that a
 # first-class callable plus a LIST PARAMETER would make writable — and which was
 # refused until 2026-10-05 on the second half alone:
 #

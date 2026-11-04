@@ -145,7 +145,7 @@ each it reports the architecture of the image it is running in, which is the
 whole point of the name. That claim in `_syscalls.mojo` has since been
 corrected in place, along with the five other modules that repeated it; what
 the x86-64 backend does need is the right symbol per call, which is
-`formal/model.py`'s `target_libc_symbol`.
+`formal/model/builtins.py`'s `target_libc_symbol`.
 
 A Rosetta-emulated x86-64 process on an Apple Silicon host sees
 `hw.machine == "x86_64"`, so the x86-64 image's answer is `x86_64` and not this

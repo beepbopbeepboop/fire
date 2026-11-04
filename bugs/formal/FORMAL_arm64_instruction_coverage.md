@@ -11,9 +11,8 @@ cannot see" says which and why it is not a mnemonic row.
 **Status, 2026-10-13: one claim in the tail was FALSE and is corrected.**
 "none of which this backend has a use for on a target that is int-only"
 (§"The six encoders of 2026-10-02 are still six", below) is not true of arm64:
-`formal/arm64_codegen.py` emits ten scalar binary64 encoders, the same ten
-`FORMAL_arm64_ieee754_has_no_step_arms.md` counts and the ten the ISA census
-reports `LEAN: no` for.  The genuinely-uncovered FP rows are the forms this
+`formal/arm64_codegen.py` emits ten scalar binary64 encoders, all now
+covered by `arm64_step`.  The genuinely-uncovered FP rows are the forms this
 backend does NOT emit, which is a different claim from "it emits no FP".  No
 number in this file is changed by that correction, and none is updated here:
 the audit's disassembly corpus moved between readings (4 026 231 instructions
@@ -420,10 +419,10 @@ stand here is FALSE for arm64 and is corrected rather than left to mislead:**
 so floating-point arithmetic IS emitted, and the genuinely-uncovered FP rows
 above (`fcvt`, `ucvtf`, `fcsel`, `movi.2d`) are the forms it does NOT emit —
 not evidence that it emits none.  `formal/types.py`'s int-only reading is a
-statement about when the survey was written.  The model half of that gap is
-`FORMAL_arm64_ieee754_has_no_step_arms.md`: the encoders exist and are
-byte-exact, and `arm64_step` has no arm for any of them. **Not a bug and no bug
-doc: this file is the survey, and it stays because the answer is not guessable**
+statement about when the survey was written.  The model half of that gap has
+been closed: the encoders exist and are byte-exact, and `arm64_step` now has
+arms for all of them. **Not a bug and no bug doc: this file is the survey, and
+it stays because the answer is not guessable**
 — more so now, since the answer has moved twice already (the 2026-10-03 method
 change, and the TBZ/TBNZ wiring).
 
