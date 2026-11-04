@@ -334,16 +334,10 @@ group(
         # the character count are the same number, so it is the shape that cannot
         # see the third lowering — which is why the next four are here.
         #
-        # **THE CHARACTERS ARE WRITTED OUT, not spelled as `\uXXXX`, and that is
-        # a decision rather than a style one.** A `\uXXXX` escape in a literal is
-        # not decoded by this tree's lexer, so `len("h\\u00e9llo")` counts TEN
-        # characters where CPython counts five — measured on both backends. That
-        # is `LEXER unicode escapes are not decoded`, it is about the
-        # LEXER rather than about `len`, and it is not this table's to fix; a case
-        # here that spelled the characters as escapes would be reporting a
-        # lexer's bug as a `len` divergence on every row. The UTF-8 bytes are
-        # what both engines see either way, so writing them out measures the
-        # codepoint fold and leaves the escape where it is filed.
+        # **THE CHARACTERS ARE WRITTEN OUT, not spelled as `\uXXXX`.**
+        # `\uXXXX`/`\UXXXXXXXX`/`\N{…}` escapes are decoded by the shared decoder
+        # (`fire_compiler.decode_c_escapes`) now, so `len` counts code points
+        # correctly; writing characters out directly keeps the rows simple.
         ("of_an_ascii_literal", ["printf(\"L%lld\\n\", len(\"hello\"))"]),
         ("of_an_empty_literal", ["printf(\"L%lld\\n\", len(\"\"))"]),
         ("of_a_two_byte_character",

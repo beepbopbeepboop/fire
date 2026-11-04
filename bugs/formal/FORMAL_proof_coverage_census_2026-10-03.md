@@ -245,7 +245,7 @@ entry is `(None, 0xd65f03c0)` and `_SELFHOST_SIGS` holds `NoneType`-shaped
 values, and the reason string `static_initializer_refusal_reason` picked —
 **"one of its elements is computed by a call"** — is false of a program with no
 call in it. The full account, and the second false clause found beside it, is
-`bugs/formal/FORMAL_module_state_no_storage.md`'s Status at the head;
+`FORMAL_module_state_no_storage.md (deleted) (deleted)`'s Status at the head;
 `test_formal_globals.py` is 54/54 with the two new rows.
 
 **Status: §0 is new and it CORRECTS this census. Twenty-eight of its 39

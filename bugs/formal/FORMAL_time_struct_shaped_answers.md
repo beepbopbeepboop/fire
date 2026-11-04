@@ -170,7 +170,7 @@ cannot do is WRITE, and that is what the five names are waiting on:
 
 * `localtime`/`gmtime` take a `const time_t *`, and the eight bytes that pointer
   must address cannot be built on this path (no store, and a module has no state
-  of its own — `bugs/formal/FORMAL_module_state_no_storage.md`). Passing an integer
+  of its own — `FORMAL_module_state_no_storage.md (deleted) (deleted)`). Passing an integer
   instead passes a null pointer and the image segfaults inside libc: measured,
   exit -11, which is why this is a refusal here and not a plausible answer there;
 * `mktime`/`strftime` take a `struct tm *`, i.e. 36 bytes to fill one field at a

@@ -321,7 +321,7 @@ modules that refuse the other 70, and 4 of the 45 in-file findings:
 | file | files it blocks | what it lands on with the f-strings gone |
 |---|---|---|
 | `cas.py` | 40 | a **handler arm with a body** (line 131, `except OSError`) — a refusal that is **correct**: `formal` has no unwinder, so every statement in an arm would be absent from the program that runs |
-| `module_loader.py` | 21 | `os.environ` read as a **module attribute** — `FORMAL_module_state_no_storage.md` §(2): an exported slot is a symbol kind, a relocation the loader honours, and a lifetime story in the proof |
+| `module_loader.py` | 21 | `os.environ` read as a **module attribute** — `FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted)` §(2): an exported slot is a symbol kind, a relocation the loader honours, and a lifetime story in the proof |
 | `tools/memslot.py` | 5 | a **handler arm with a body** (line 507) — correct, as above |
 | `type_system.py` | 2 | a frame address passed where a value is wanted (`isinstance()`), `FORMAL_known_limits.md` |
 | `determinism_trace.py` | 2 | `os.environ.get()` — a call **through a value**, the value-model half of the same module-state doc |
@@ -371,7 +371,7 @@ rather than the buffer (115).
 * **A `char *` buffer in the frame scratch.** A formal value lives in a
   function's own stack scratch and is reclaimed when the function returns, so a
   composed string whose value outlives the frame that composed it has nowhere to
-  live — which is the same reason `FORMAL_module_state_no_storage.md` §(2) is a
+  live — which is the same reason `FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted)` §(2) is a
   project and not a patch.
 
 ## 7. The exact next step, for whoever takes it
@@ -448,7 +448,7 @@ general case is worth a project:
    `strlen` walk over bytes that exist) and may not be STORED anywhere that
    outlives that frame (a second buffer would be in a frame that may already be
    gone).** That is a lifetime rule with a named owner — the same one
-   `FORMAL_module_state_no_storage.md` §(2) is about, and the same reason §6's
+   `FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted)` §(2) is about, and the same reason §6's
    "`char *` buffer in the frame scratch" bullet says a composed string whose
    value outlives its frame has nowhere to live — but it is a rule about WHERE a
    value may go, and the emitter already has a place that answers it
@@ -559,7 +559,7 @@ measures that rather than asserting it: `formal` has no exception unwinder, a
 raise site into an arm and every statement in an arm's body would be absent from
 the program that runs. Its doc was deleted with the fix that established that,
 and the claim `formal8-5` still carries its name; there is nothing to work on.
-The other wall, `FORMAL_module_state_no_storage.md`, is **unowned** — the `-10`
+The other wall, `FORMAL_module_state_no_storage.md (deleted) (deleted) (deleted) (deleted)`, is **unowned** — the `-10`
 map recorded it as `formal19-4`'s, and that branch has landed and released the
 claim, so the 23 files behind `module_loader.py` are waiting on a project (an
 exported slot: a symbol kind, a relocation the loader honours, and a lifetime

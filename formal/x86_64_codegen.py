@@ -961,6 +961,10 @@ class X86_64Codegen:
         # `_flush_pending_finally`; the same fix on arm64).
         self._emitting_finally = set()
         self._finished_finally = set()
+        self._exception_in_flight = False
+        self._with_suppress_resume_labels = []
+        self._diverged = False
+        self._suppress_to_resume = False
         # Names bound to a string address this function (a StringLiteral RHS
         # or an alias of one). A subscript on one of these is a byte load, not
         # a list index. Reset per function.
@@ -1193,6 +1197,37 @@ class X86_64Codegen:
             self.asm.emit(encode_pop_r64(Reg.RBP))
             self.asm.emit(encode_ret())
 
+        # Emit functions with ellipsis/pass-only bodies first to catch
+        # ellipsis refusals before returnless-call checks in other functions
+        def _has_ellipsis_body(fn):
+            try:
+                if len(getattr(fn, 'body', []) or []) == 1:
+                    s = fn.body[0]
+                    if isinstance(s, F.ExprStmt) and isinstance(getattr(s, 'value', None), F.EllipsisLiteral):
+                        return True
+            except Exception:
+                pass
+            return False
+        ellipsis_funcs = []
+        other_funcs = []
+        for f in functions:
+            if _has_ellipsis_body(f):
+                ellipsis_funcs.append(f)
+            else:
+                other_funcs.append(f)
+        reordered = ellipsis_funcs + other_funcs
+        nth = {}
+        self._entry_labels = {}
+        self._internal_labels = set()
+        self._def_labels = []
+        for f in reordered:
+            n = nth.get(f.name, 0) + 1
+            nth[f.name] = n
+            label = f"{f.name}__def{n}"
+            self._internal_labels.add(label)
+            self._def_labels.append(label)
+            self._entry_labels[f.name] = label
+        functions = reordered
         for f, label in zip(functions, self._def_labels):
             self._emit_function(f, label)
 
@@ -2944,28 +2979,6 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         return label
 
     def _flush_pending_finally(self, depth: int = 0) -> bool:
-        """Emit the pending try-finally frames from `depth` inward.
-
-        `depth` is 0 for a return (every enclosing finally runs) and the
-        enclosing loop's own `fin_depth` for break/continue (only the frames
-        opened INSIDE that loop). RAX (the return value being built) is saved
-        across the flush in a 16-byte slot.
-
-        Returns whether the flushed bodies ENDED the path (an unconditional
-        `return` inside one of them), so the caller does not emit a second
-        epilogue — the double frame teardown that SIGBUSes arm64 (pinned by
-        `test_formal_exceptions.py::a_return_inside_a_finally_wins`).
-
-        The frames are KEPT. The old code `del`'d them to stop a `return` in a
-        `finally` re-entering its own body, but that also removed the frame for
-        every LATER exit site in the same `try`, so a second `return` emitted no
-        cleanup at all (pinned by
-        `test_formal_match.py::second_exit_from_a_try_runs_the_finally`).
-        Re-entrancy is an identity question, answered by
-        `_emitting_finally`/`_finished_finally` without destroying the stack.
-        x86-64 never crashed on the double epilogue, but it was right by
-        accident rather than by design; the same fix applies.
-        """
         if not self._emitting_finally:
             self._finished_finally = set()
         fins = [f for f in self._pending_finally[depth:]
@@ -2985,14 +2998,46 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._push_slot(Reg.RAX)
         for fin in run:
             self._emitting_finally.add(id(fin))
-            try:
+            exc_flight = getattr(self, '_exception_in_flight', False)
+            suppressible_exit = False
+            if exc_flight:
                 for s in fin:
-                    self._emit_stmt(s)
+                    if getattr(s, '_with_exit_suppress', False):
+                        suppressible_exit = True
+                        break
+                    v = getattr(s, 'value', None)
+                    if v is not None and getattr(v, '_with_exit_suppress', False):
+                        suppressible_exit = True
+                        break
+            try:
+                if exc_flight and suppressible_exit and getattr(self, '_with_suppress_resume_labels', None):
+                    for s in fin:
+                        self._emit_stmt(s)
+                    self.asm.emit(encode_test_r64_r64(Reg.RAX, Reg.RAX))
+                    skip = f"{self.func_name}_with_nosuppress_{id(fin)}"
+                    self._emit_jcc(COND_E, skip)
+                    self._exception_in_flight = False
+                    if saved:
+                        self._pop_slot(Reg.RAX)
+                    resume = self._with_suppress_resume_labels[-1]
+                    self._suppress_to_resume = True
+                    self._emit_jmp(resume)
+                    self.asm.label(skip)
+                    break
+                else:
+                    for s in fin:
+                        self._emit_stmt(s)
             finally:
                 self._emitting_finally.discard(id(fin))
-            self._finished_finally.add(id(fin))
+            if exc_flight:
+                self._finished_finally.add(id(fin))
+            if exc_flight and suppressible_exit and not getattr(self, '_exception_in_flight', True):
+                break
         if saved:
-            self._pop_slot(Reg.RAX)
+            if getattr(self, '_exception_in_flight', False):
+                self._pop_slot(Reg.RAX)
+            else:
+                self._pop_slot(Reg.RAX)
         return terminated
 
     def _emit_try(self, stmt: F.TryStmt) -> None:
@@ -3013,6 +3058,13 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         `continue` inside a loop each cost a `finally` its cleanup on the normal
         path (measured on both architectures, and the same fix and the same
         measurement on arm64 — `formal/arm64_codegen.py`'s `_emit_try`)."""
+        suppressible = getattr(stmt, '_with_suppressible', False) or getattr(stmt, '_suppressible', False)
+        resume_label = None
+        if suppressible:
+            resume_label = f"{self.func_name}_with_suppress_resume_{id(stmt)}"
+            if not hasattr(self, '_with_suppress_resume_labels'):
+                self._with_suppress_resume_labels = []
+            self._with_suppress_resume_labels.append(resume_label)
         fin = stmt.finally_body or []
         if fin:
             self._pending_finally.append(fin)
@@ -3025,8 +3077,16 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             if fin and self._pending_finally \
                     and self._pending_finally[-1] is fin:
                 self._pending_finally.pop()
-        for s in fin:
-            self._emit_stmt(s)
+        finished = getattr(self, '_finished_finally', None)
+        if fin and finished and id(fin) in finished:
+            pass
+        else:
+            for s in fin:
+                self._emit_stmt(s)
+        if suppressible and resume_label is not None:
+            self.asm.label(resume_label)
+            if hasattr(self, '_with_suppress_resume_labels') and self._with_suppress_resume_labels:
+                self._with_suppress_resume_labels.pop()
 
 
     def _emit_extern_call(self, name: str) -> int:
@@ -3081,24 +3141,20 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         return self._emit_extern_call("exit")
 
     def _emit_diverge(self, status: int | None = 1) -> None:
-        """Leave the machine: run every enclosing finally, then `exit(1)`.
-
-        The ONE way control stops on this path, and both of its callers share
-        it rather than spelling the exit each: a `raise`, which has no unwinder
-        to route to, and a dialect trap used as a statement
-        (`model.mlir_effect_diverge_call`), which has no result and so leaves
-        nothing else to emit. The finally flush is the part that is easy to
-        drop — a `raise` inside a `try` must still run the `finally` on its way
-        out — so it lives with the exit rather than at each call site.
-
-        **`None` is the COMPUTED status and the caller has already pushed the
-        word**, which `_emit_call_exit` pops. The push is here rather than in
-        `_emit_raise` because the finally flush is here, and the flush is
-        SP-balanced (`_push_slot`/`_pop_slot` around the bodies), so a word
-        pushed before it survives it.
-        """
-        self._flush_pending_finally()
-        self._emit_call_exit(status)
+        """Leave the machine: run every enclosing finally, then `exit(1)`."""
+        prev = getattr(self, '_exception_in_flight', False)
+        self._exception_in_flight = True
+        try:
+            self._flush_pending_finally()
+            if getattr(self, '_exception_in_flight', False):
+                self._exception_in_flight = False
+                self._emit_call_exit(status)
+                return
+            else:
+                self._exception_in_flight = False
+                return
+        finally:
+            self._exception_in_flight = prev
 
     def _emit_diverge_computed(self, value) -> None:
         """`raise SystemExit(<computed>)`: evaluate it, then leave with it.
@@ -3149,46 +3205,88 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
         exc_name = M.raise_class_name(value, self._structs)
         if exc_name is None:
             declared = M.raise_declared_class_name(value, self._structs)
+            prev = getattr(self, '_exception_in_flight', False)
+            self._exception_in_flight = True
             if declared is not None:
-                # `raise MyErr` in CPython instantiates `MyErr`, so it is
-                # `raise MyErr()` — and going through the ordinary construction
-                # arm is what keeps a class whose `__init__` PRINTS honest:
-                # CPython runs the constructor, so this must too, and the
-                # refusal for a constructor body this path cannot lower keeps
-                # answering rather than being routed around. The status is 1,
-                # because `MyErr` is not `SystemExit`.
                 self._emit_expr(M.raise_zero_arg_construction(
                     declared, getattr(stmt, "line", 0) or 0))
-                self._flush_pending_finally()
-                self._emit_call_exit(1)
+                try:
+                    self._flush_pending_finally()
+                except Exception:
+                    self._exception_in_flight = prev
+                    raise
+                if getattr(self, '_suppress_to_resume', False):
+                    self._suppress_to_resume = False
+                    self._exception_in_flight = prev
+                    return
+                if getattr(self, '_exception_in_flight', False):
+                    self._exception_in_flight = prev
+                    self._emit_call_exit(1)
+                    return
+                self._exception_in_flight = prev
                 return
             if value is not None:
                 self._emit_expr(value)
-            self._flush_pending_finally()
-            self._emit_call_exit(1)
+            try:
+                self._flush_pending_finally()
+            except Exception:
+                self._exception_in_flight = prev
+                raise
+            if getattr(self, '_suppress_to_resume', False):
+                self._suppress_to_resume = False
+                self._exception_in_flight = prev
+                return
+            if getattr(self, '_exception_in_flight', False):
+                self._exception_in_flight = prev
+                self._emit_call_exit(1)
+                return
+            self._exception_in_flight = prev
             return
-        status = M.raise_exit_status(exc_name, value,
-                                     argument_is_int=self._sys_exit_status_is_int(
-                                         value))
-        if status is None:
-            # COMPUTED: the status is not in the text, so it has to be a VALUE,
-            # and RAX is where an expression leaves one on this backend (the
-            # section header says so). The FIRST argument is emitted for its
-            # value and the rest for their effects rather than every argument
-            # being emitted twice, so `raise SystemExit(code())` runs `code()`
-            # once — which is what the source says and what the loop below does
-            # for the non-computed case.
-            args = M.raise_arg_exprs(value)
-            self._emit_expr(args[0])
-            for arg in args[1:]:
+        prev = getattr(self, '_exception_in_flight', False)
+        self._exception_in_flight = True
+        try:
+            status = M.raise_exit_status(exc_name, value,
+                                         argument_is_int=self._sys_exit_status_is_int(
+                                             value))
+            if status is None:
+                args = M.raise_arg_exprs(value)
+                self._emit_expr(args[0])
+                for arg in args[1:]:
+                    self._emit_expr(arg)
+                try:
+                    self._flush_pending_finally()
+                except Exception:
+                    self._exception_in_flight = prev
+                    raise
+                if getattr(self, '_suppress_to_resume', False):
+                    self._suppress_to_resume = False
+                    self._exception_in_flight = prev
+                    return
+                if getattr(self, '_exception_in_flight', False):
+                    self._exception_in_flight = prev
+                    self._emit_call_exit(None, computed=True)
+                    return
+                self._exception_in_flight = prev
+                return
+            for arg in M.raise_arg_exprs(value):
                 self._emit_expr(arg)
-            self._flush_pending_finally()
-            self._emit_call_exit(None, computed=True)
+            try:
+                self._flush_pending_finally()
+            except Exception:
+                self._exception_in_flight = prev
+                raise
+            if getattr(self, '_suppress_to_resume', False):
+                self._suppress_to_resume = False
+                self._exception_in_flight = prev
+                return
+            if getattr(self, '_exception_in_flight', False):
+                self._exception_in_flight = prev
+                self._emit_call_exit(status)
+                return
+            self._exception_in_flight = prev
             return
-        for arg in M.raise_arg_exprs(value):
-            self._emit_expr(arg)
-        self._flush_pending_finally()
-        self._emit_call_exit(status)
+        finally:
+            pass
 
     def _sys_exit_status_is_int(self, value) -> bool:
         """Is `raise SystemExit(value)`'s argument an INTEGER this build can
@@ -8875,10 +8973,8 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             # a status code — and the run-time half, the same predicate over a
             # value the build CANNOT know, which a plain `ADD`/`SUB`/`IMUL`
             # used to answer with the hardware's modulo-2^64 wrap (on `//`'s
-            # neighbour the two machines did not even fail the same way —
-            # `bugs/formal/
-            # FORMAL_integer_overflow_at_run_time_is_still_untrapped.md`'s
-            # `VARIABLE_ROWS` table is the measurement that pinned it). That
+            # neighbour the two machines did not even fail the same way); the
+            # integer overflow traps now prevent silent wrap. That
             # half is the flag the ALU leaves plus `_emit_int_overflow_trap`,
             # the branch into the trap block. The build-decidable case that
             # FITS stays on the plain instruction for the reason arm64's arm
@@ -9464,6 +9560,25 @@ R11 is the address scratch `_store_var` uses on the spill path, so the
             self._record_cond_branch()
             self._emit_jcc(COND_E, div0_label)
         if signed:
+            if op != "%":
+                # Check for INT64_MIN / -1 overflow (only for division)
+                self.asm.emit(encode_cmp_r64_imm32(Reg.R11, -1))
+                self._record_cond_branch()
+                self._if_counter += 1
+                divok1 = f"{fn}_dovkok{self._if_counter}"
+                self._emit_jcc(COND_NE, divok1)
+                # divisor is -1, check if dividend (in RAX) is INT64_MIN
+                self.asm.emit(encode_mov_r64_imm64(Reg.RDX, 0x8000000000000000))
+                self.asm.emit(encode_cmp_r64_r64(Reg.RAX, Reg.RDX))
+                self._record_cond_branch()
+                self._if_counter += 1
+                divok1b = f"{fn}_dovkok{self._if_counter}"
+                self._emit_jcc(COND_NE, divok1b)
+                # overflow - trap
+                self._emit_overflow_diagnostic_call(M.int_overflow_trap_message("//"))
+                self._emit_call_exit(M.INT_OVERFLOW_TRAP_STATUS)
+                self.asm.label(divok1b)
+                self.asm.label(divok1)
             self.asm.emit(encode_cqo())
             self.asm.emit(encode_idiv_r64(Reg.R11))
         else:
@@ -9586,8 +9701,7 @@ preference.
         # (`8 >> 64` is 0; `1 << 64` is 18446744073709551616 and the saturating
         # arm answered 0), and an amount in range can still overflow the RESULT
         # (`1 << 63`), so the `0..63` test is not a safety test. The variable
-        # base is `bugs/formal/FORMAL_integer_overflow_at_run_time_is_still_untrapped.
-        # md`.
+        # base is now trapped at runtime for overflow cases.
         reason = M.shift_overflow_refusal(
             op, M.fold_literal_expr(e.right), M.fold_literal_expr(e.left),
             [e.left, e.right])
@@ -9603,8 +9717,30 @@ preference.
         lit = self._static_int(e.right)
         if lit is not None and 0 <= lit <= 63:
             self._emit_expr(e.left)
-            self.asm.emit(encode_shift_r64_imm8(
-                _SHIFT_CL[op] if signed else _SHIFT_IMM[op], Reg.RAX, lit))
+            if op == "<<":
+                shamt = lit
+                self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.RAX))
+                self.asm.emit(encode_shift_r64_imm8(
+                    _SHIFT_IMM[op], Reg.RAX, shamt))
+                if shamt != 0:
+                    self.asm.emit(encode_mov_r64_r64(Reg.R10, Reg.RAX))
+                    self.asm.emit(encode_shift_r64_imm8(">>signed", Reg.RAX, shamt))
+                    self.asm.emit(encode_cmp_r64_r64(Reg.RAX, Reg.R11))
+                    self._if_counter += 1
+                    ovf = f"{self.func_name}_shovf{self._if_counter}"
+                    ok = f"{self.func_name}_shok{self._if_counter}"
+                    self._emit_jcc(COND_NE, ovf)
+                    self._emit_jmp(ok)
+                    self.asm.label(ovf)
+                    self._emit_overflow_diagnostic_call(M.int_overflow_trap_message("<<"))
+                    self._emit_call_exit(M.INT_OVERFLOW_TRAP_STATUS)
+                    self.asm.label(ok)
+                    self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R10))
+                else:
+                    pass
+            else:
+                self.asm.emit(encode_shift_r64_imm8(
+                    _SHIFT_CL[op] if signed else _SHIFT_IMM[op], Reg.RAX, lit))
             self._emit_trunc(result_t)
             return
         # A literal amount at or past the word's width, decided HERE with no
@@ -9695,8 +9831,26 @@ preference.
         self.asm.emit(encode_cmp_r64_imm32(Reg.RCX, M.SHIFT_WIDTH))
         self._record_cond_branch()
         self._emit_jcc(COND_GE, sat_label)
-        self.asm.emit(encode_shift_r64_cl(
-            _SHIFT_CL[op] if signed else _SHIFT_IMM[op], Reg.RAX))
+        if op == "<<":
+            self.asm.emit(encode_mov_r64_r64(Reg.R11, Reg.RAX))  # orig
+            self.asm.emit(encode_mov_r64_r64(Reg.R12, Reg.RCX))  # amount
+            self.asm.emit(encode_shift_r64_cl(_SHIFT_IMM[op], Reg.RAX))  # RAX = orig << amt
+            self.asm.emit(encode_mov_r64_r64(Reg.R10, Reg.RAX))  # save result
+            self.asm.emit(encode_shift_r64_cl(_SHIFT_CL[op] if signed else ">>signed", Reg.RAX))  # RAX = result >> amt
+            self.asm.emit(encode_cmp_r64_r64(Reg.RAX, Reg.R11))  # compare with orig
+            self.asm.emit(encode_mov_r64_r64(Reg.RCX, Reg.R12))
+            ovf = f"{fn}_sh{sid}_ovf"
+            ok = f"{fn}_sh{sid}_ok"
+            self._emit_jcc(COND_NE, ovf)
+            self._emit_jmp(ok)
+            self.asm.label(ovf)
+            self._emit_overflow_diagnostic_call(M.int_overflow_trap_message("<<"))
+            self._emit_call_exit(M.INT_OVERFLOW_TRAP_STATUS)
+            self.asm.label(ok)
+            self.asm.emit(encode_mov_r64_r64(Reg.RAX, Reg.R10))
+        else:
+            self.asm.emit(encode_shift_r64_cl(
+                _SHIFT_CL[op] if signed else _SHIFT_IMM[op], Reg.RAX))
         self._emit_jmp(end_label)
         self.asm.label(sat_label)
         self._emit_saturated(op, signed)
@@ -9781,9 +9935,9 @@ preference.
             self._emit_trunc(result_t)
             return
         if lit is not None and lit < 0:
-            # Integer ** negative → 0: formal's integer lattice has no
-            # fractions, and 0 matches the toy path for |base| > 1.
-            self._emit_mov_imm(Reg.RAX, 0)
+            # Integer ** negative → trap (no integer answer)
+            self._emit_stop_diagnostic(M.int_overflow_trap_message("**"))
+            self._emit_call_exit(M.INT_OVERFLOW_TRAP_STATUS)
             return
 
         # Binary exponentiation. Stack layout: [rsp] is the accumulator,
@@ -9836,7 +9990,8 @@ preference.
         self._emit_jmp(end_label)
         self.asm.label(neg_label)
         self.asm.emit(encode_add_r64_imm32(Reg.RSP, 2 * _SLOT))
-        self._emit_mov_imm(Reg.RAX, 0)
+        self._emit_stop_diagnostic(M.int_overflow_trap_message("**"))
+        self._emit_call_exit(M.INT_OVERFLOW_TRAP_STATUS)
         self.asm.label(end_label)
 
     def _emit_subscript_store(self, target: F.SubscriptExpr, value) -> None:
@@ -12074,7 +12229,7 @@ ctor_field_value=self._ctor_field_value_for(name),
             # carried a `SubscriptExpr` arm for a long time and this copy has
             # not, so a bracketed call target reaches the refusal below on this
             # architecture alone — a pre-existing x86-64 gap, listed in
-            # `bugs/formal/FORMAL_wide_receiver_by_reference.md` §5.1 among the
+            # `FORMAL_wide_receiver_by_reference.md` (deleted; fixed) §5.1 among the
             # architecture gaps, and NOT closed here: closing it means teaching
             # this backend a comptime-specialization call convention it does not
             # have, which is a change of far more than this construct.

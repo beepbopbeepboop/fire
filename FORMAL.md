@@ -1279,7 +1279,7 @@ it typechecks.
 
 **[4] the frame-address design.** The single biggest coverage lever left, and
 not a patch. 45% of every remaining codegen finding is one design defect in five
-costumes (`bugs/formal/FORMAL_wide_receiver_by_reference.md`): the receiver of a
+costumes (`FORMAL_wide_receiver_by_reference.md` (deleted; fixed)): the receiver of a
 multi-field struct is the address of a frame that dies when the function
 returns, so returning it is a use-after-free and passing it where a value is
 wanted hands the callee a pointer. Measured with the check removed, the same

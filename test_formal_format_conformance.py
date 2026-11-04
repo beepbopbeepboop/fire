@@ -225,6 +225,7 @@ ROWS = [
     # an escape.
     ("str_non_ascii", prog('print("h\\u00e9llo")'.replace("\\u00e9", "é")),
      ("value",)),
+    ("unicode_escape", prog('print("\\u00e9")'), ("value",)),
     ("str_name", in_main('s = "abc"', 'print(s)'), ("value",)),
     ("str_concat_literals", prog('print("a" "b")'), ("value",)),
 
@@ -334,14 +335,6 @@ ROWS = [
 # names the bug doc; when the doc's fix lands the row becomes `("value",)` and
 # the doc is deleted with it.
 DIVERGENT_ROWS = [
-    # A `\\uXXXX` escape is not decoded by `fire_compiler.decode_c_escapes`, so
-    # the six characters reach stdout. CPython prints the character. The
-    # decoder is SHARED with the interpreter (`python3 fire.py run` prints
-    # `\u00e9` too) and with the compiled path, so this is a FRONT-END
-    # question and not a print one, and it is already filed there with its whole
-    # table: `LEXER unicode escapes are not decoded`.
-    ("unicode_escape", prog('print("\\u00e9")'),
-     ("divergent", "\\u00e9\n", "é\n")),
     # A TYPE VALUE is a 64-bit tag on this path and `is_number_kind` says a tag
     # prints as a number, DELIBERATELY (`formal/model.py`'s `TYPE_KIND`, and
     # `test_formal_run.py`'s `TYPE_VALUE_NUMBER_CASES` pins the tag). CPython's

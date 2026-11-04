@@ -641,7 +641,7 @@ HOST_MODELLED = frozenset((
     #     **It is 2 of the 8 files the row was worth, and the other six are not
     #     a module.** Five of them spell `random.Random(seed)` — an OBJECT with
     #     624 words of state behind a pointer, which is
-    #     `bugs/formal/FORMAL_module_state_no_storage.md` and not something a `.mojo`
+    #     `FORMAL_module_state_no_storage.md (deleted) (deleted)` and not something a `.mojo`
     #     file changes; the sixth is closure. What made the module reachable at
     #     all is that a module's OWN globals DO have storage: measured, both
     #     architectures, a module-level `var` written through `global` by one
