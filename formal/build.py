@@ -1831,7 +1831,10 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
             [path for _, path in resolved], project_root=source_path)
         demands = {}
         try:
-            with open('/tmp/DEBUG_BUILD.txt', 'a') as _f:
+            import os
+            _dbg = os.path.join(os.path.dirname(__file__), '..', '.tmp', 'DEBUG_BUILD.txt')
+            os.makedirs(os.path.dirname(_dbg), exist_ok=True)
+            with open(_dbg, 'a') as _f:
                 _f.write(f"BUILD: resolved={resolved}\n")
         except Exception:
             pass
@@ -1844,7 +1847,7 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
                     merged[tmpl] = sorted(set(merged.get(tmpl, [])) | set(args))
                 demands[other] = merged
         try:
-            with open('/tmp/DEBUG_BUILD.txt', 'a') as _f:
+            with open(os.path.join(os.path.dirname(__file__), '..', '.tmp', 'DEBUG_BUILD.txt'), 'a') as _f:
                 _f.write(f"DEMANDS={demands}\n")
         except Exception:
             pass
@@ -1859,14 +1862,14 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
                                           project_root=source_path,
                                           demands=demands)
         try:
-            with open('/tmp/DEBUG_BUILD.txt', 'a') as _f:
+            with open(os.path.join(os.path.dirname(__file__), '..', '.tmp', 'DEBUG_BUILD.txt'), 'a') as _f:
                 _f.write(f"LIBFREE={library_free}\n")
         except Exception:
             pass
         check_library_free_calls(source_path, stmts, library_free)
         for mod, path in resolved:
             try:
-                with open('/tmp/DEBUG_BUILD2.txt', 'a') as _f:
+                with open(os.path.join(os.path.dirname(__file__), '..', '.tmp', 'DEBUG_BUILD2.txt'), 'a') as _f:
                     _f.write(f"TRY_BUILD {mod} {path} free={os.path.abspath(path) in library_free}\n")
             except Exception:
                 pass
@@ -1878,7 +1881,7 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
                                            _parent=parent, demands=demands,
                                            closure=closure)
                 try:
-                    with open('/tmp/DEBUG_BUILD2.txt', 'a') as _f:
+                    with open(os.path.join(os.path.dirname(__file__), '..', '.tmp', 'DEBUG_BUILD2.txt'), 'a') as _f:
                         _f.write(f"BUILT {mod} {dylib}\n")
                 except Exception:
                     pass
@@ -13543,24 +13546,49 @@ def _publish_imported_constants(functions: list, symbols: dict,
     Returns the symbols table the substitution needs the callers to PUBLISH, so
     one function owns both halves and they cannot be applied out of order: the
     rewrite needs the sites, and the checks after it need the table those sites
-    came from."""
+    came from.
+
+    Both spellings of the read are answered, because they are two spellings of
+    one question — what is the value of a module-level name another module
+    declares:
+
+      * a BARE read — `from mod import CONST`, then `CONST` — goes through the
+        module-constant substitution this unit already runs, because a name a
+        linked module publishes as a literal is foldable in exactly the sense
+        that pass means. It is done by re-publishing the table with those names
+        promoted and re-running the pass, rather than by a second rewriter, so
+        the two can never disagree about a name that is BOTH a unit-level
+        constant and an imported one (the unit's own binding wins, which is
+        what the shadowing rule already says) or about a store position.
+      * a DOTTED read — `mod.CONST`, the spelling `import mod` binds and the one
+        this is for — is answered from the module its own qualifier names. There
+        is no bare name in it to fold, so it is its own walk, and it is here
+        rather than in a backend because it is a source-to-source rewrite: both
+        architectures have to see the same literal, and a rewrite performed in
+        an emitter is two implementations of one decision.
+
+    A STORE is not a read and is left alone: `mod.X = 5` writes another
+    module's state, which has nowhere to live and is refused by name
+    (`bugs/formal/FORMAL_module_state_no_storage.md`). Substituting it would trade a
+    refused store for a dropped one.
+
+    `imported` is the link line's `load_dylib_manifests` entries, which is the
+    only place the answer exists: the build that compiled each module is the
+    only place its folded values were ever computed, and it left them in that
+    module's manifest. An empty list is a no-op, so an image with no dylibs on
+    its line behaves exactly as it did before."""
     tables = M.dylib_module_constants(imported)
-    if tables:
-        sites = _imported_constant_sites(imported, symbols)
-        merged = _with_imported_constants(symbols, sites)
-        if sites:
-            M.publish_module_symbols(merged)
-            _substitute_module_constants(functions)
-        for fn in functions:
-            _apply_imported_constant_sites(fn.body, tables,
-                                           _function_locals(fn))
-    # Transform cross-module accesses to writable globals into accessor calls.
-    if imported:
-        try:
-            _apply_imported_variable_accessors(functions, imported, symbols)
-        except Exception as e:
-            pass
-    return symbols
+    if not tables:
+        return symbols
+    sites = _imported_constant_sites(imported, symbols)
+    merged = _with_imported_constants(symbols, sites)
+    if sites:
+        M.publish_module_symbols(merged)
+        _substitute_module_constants(functions)
+    for fn in functions:
+        _apply_imported_constant_sites(fn.body, tables,
+                                       _function_locals(fn))
+    return merged
 
 
 def _imported_constant_sites(imported: list, symbols: dict) -> dict:
@@ -13936,7 +13964,7 @@ def _rewrite_store_target(target, sites: dict, stores: set):
             return out
 
     Which is the `has no home` refusal `tools/memslot.py:448:held_env` measured
-    in `bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md`'s round-2 census, and
+    in the proof-coverage census, and
     the third instance of one shape: a position where a name is a READ and the
     walk treated the enclosing node as a store. The two before it are the
     assignment value (`x = G`) and the `elif` arm, both fixed in the branch
@@ -14661,117 +14689,6 @@ def _lower_dialect_casts(functions: list, structs_by_name: dict = None) -> int:
         done += count[0]
     return done
 
-
-def _apply_imported_variable_accessors(functions: list, imported: list,
-                                        symbols: dict = None) -> int:
-    """Transform cross-module accesses to writable globals into accessor calls."""
-    import fire_compiler as F
-    # Build map of module -> set of variable names
-    try:
-        var_tables = M.dylib_module_variables(dylib_export_lists(imported)) if imported else {}
-    except Exception:
-        return 0
-    if not var_tables:
-        return 0
-    # Also build by_module bindings from symbols
-    module_by_local = {}
-    var_names_by_module = {}
-    for name, sym in (symbols or {}).items():
-        if getattr(sym, "site", None) == "imported":
-            mod = getattr(sym, "module", None)
-            if mod:
-                module_by_local[name] = (mod, name)  # local name -> (module, defining name)
-    done = 0
-    for fn in functions:
-        body = getattr(fn, "body", None)
-        if not isinstance(body, list):
-            continue
-        locals_set = _function_locals(fn)
-        def transform(node, parent=None, parent_attr=None):
-            nonlocal done
-            # Check if this is an assignment target
-            if isinstance(node, F.AssignStmt):
-                tgt = getattr(node, "target", None)
-                if isinstance(tgt, F.MemberExpr):
-                    root = tgt.obj
-                    if isinstance(root, F.IdentExpr):
-                        root_name = root.name
-                        if root_name in locals_set:
-                            return node
-                        leaf = tgt.member
-                        is_var = False
-                        for m, vlist in var_tables.items():
-                            if leaf in (vlist or []):
-                                is_var = True
-                                break
-                        if is_var:
-                            call = F.CallExpr(
-                                func=F.MemberExpr(obj=F.IdentExpr(name=root_name),
-                                                  member=f"set_{leaf}"),
-                                args=[getattr(node, "value")],
-                                kwargs=[])
-                            done += 1
-                            return F.ExprStmt(expr=call)
-                elif isinstance(tgt, F.IdentExpr):
-                    tname = tgt.name
-                    if tname in locals_set:
-                        return node
-                    if tname in module_by_local:
-                        mod, defname = module_by_local[tname]
-                        is_var = False
-                        for m, vlist in var_tables.items():
-                            if defname in (vlist or []):
-                                is_var = True
-                                break
-                        if is_var:
-                            call = F.CallExpr(
-                                func=F.MemberExpr(obj=F.IdentExpr(name=mod),
-                                                  member=f"set_{defname}"),
-                                args=[getattr(node, "value")],
-                                kwargs=[])
-                            done += 1
-                            return F.ExprStmt(expr=call)
-            # Handle reads
-            if isinstance(node, F.MemberExpr):
-                root = node.obj
-                if isinstance(root, F.IdentExpr):
-                    root_name = root.name
-                    if root_name in locals_set:
-                        return node
-                    leaf = node.member
-                    is_var = False
-                    for m, vlist in var_tables.items():
-                        if leaf in (vlist or []):
-                            is_var = True
-                            break
-                    if is_var:
-                        call = F.CallExpr(
-                            func=F.MemberExpr(obj=F.IdentExpr(name=root_name),
-                                              member=f"get_{leaf}"),
-                            args=[], kwargs=[])
-                        done += 1
-                        return call
-            if isinstance(node, F.IdentExpr):
-                n = node.name
-                if n in locals_set:
-                    return node
-                if n in module_by_local:
-                    mod, defname = module_by_local[n]
-                    is_var = False
-                    for m, vlist in var_tables.items():
-                        if defname in (vlist or []):
-                            is_var = True
-                            break
-                    if is_var:
-                        call = F.CallExpr(
-                            func=F.MemberExpr(obj=F.IdentExpr(name=mod),
-                                              member=f"get_{defname}"),
-                            args=[], kwargs=[])
-                        done += 1
-                        return call
-            return node
-        M.rewrite_tree(body, transform)
-    return done
 
 
 def _dialect_cast_replacement(node, ctx: dict):
@@ -23472,34 +23389,6 @@ def compile_formal_dylib(source_paths: list, output: str = None,
     library_containers = sorted(n for n, s in library_slots.items()
                                 if not s.mutable)
 
-    # Auto-generate accessors for writable globals so cross-module access
-    # goes through exported functions (item 2 of FORMAL_module_state_no_storage).
-    existing_names = {getattr(fn, "name", "") for fn in ordered}
-    for varname in library_variables:
-        getter_name = f"get_{varname}"
-        if getter_name not in existing_names:
-            getter = F.FunctionDef(
-                name=getter_name,
-                params=[],
-                return_type=None,
-                body=[F.GlobalStmt(names=[varname]),
-                      F.ReturnStmt(value=F.IdentExpr(name=varname))],
-                line=0, col=0)
-            ordered.append(getter)
-            existing_names.add(getter_name)
-        setter_name = f"set_{varname}"
-        if setter_name not in existing_names:
-            setter = F.FunctionDef(
-                name=setter_name,
-                params=[(f"_{varname}_val", None)],
-                return_type=None,
-                body=[F.GlobalStmt(names=[varname]),
-                      F.AssignStmt(target=F.IdentExpr(name=varname),
-                                   value=F.IdentExpr(name=f"_{varname}_val"))],
-                line=0, col=0)
-            ordered.append(setter)
-            existing_names.add(setter_name)
-
     # The gimple runtime's C library, on THIS library's link line, for the same
     # reason and under the same condition as on the executable path — and here it
     # is not tidiness. A module dylib that binds `mojo_strlen` has a symbol in
@@ -23681,12 +23570,6 @@ def compile_formal_dylib(source_paths: list, output: str = None,
             variables=_namespace_variables(reexports, linked),
             containers=_namespace_containers(reexports, linked),
             traits=traits)
-
-    # Transform cross-module variable accesses to accessors in library code too.
-    try:
-        _apply_imported_variable_accessors(ordered, linked, {})
-    except Exception:
-        pass
 
     # A DYDLIB cannot export a function that returns a frame, and this is the
     # one place that knows it: the convention needs the CALLER to reserve the

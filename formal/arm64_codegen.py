@@ -7174,8 +7174,7 @@ ctor_field_value=self._ctor_field_value_for(name),
 
         **Two lines of delegation**, and `M.print_kwargs`'s docstring is where
         the decision and its reasons are: `flush=` is answered there (the
-        largest `codegen-refused` family in this repository's own source, per
-        `bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md` §0.2), and the rule
+        largest `codegen-refused` family in this repository's own source), and the rule
         that the keyword is dispatched BEFORE its value is inspected is what
         stops a bool from being refused with a sentence about `sep`."""
         return M.print_kwargs(e, "arm64")

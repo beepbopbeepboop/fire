@@ -3328,7 +3328,7 @@ def print_kwargs(e, backend: str):
     nine of the sixty items `tools/formal_proof_breadth.py` measures reach this
     refusal on arm64, and every one of the nine is the same `print(…, flush=True)`
     in a test's `check` helper
-    (`bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md` §0.2, the largest
+    (the largest
     `codegen-refused` family there).
 
     `flush` is answered as a LITERAL bool only, and `False` is the default so it

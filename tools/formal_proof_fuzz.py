@@ -566,7 +566,7 @@ def _lean_memory_detail(detail):
 
     which is a statement about the MACHINE and not about the proof: the file was
     never finished with. It is its own class for the reason `run_lean`'s
-    `bound-exceeded` is one — `bugs/formal/FORMAL_proof_coverage_census_2026-10-03.md`
+    `bound-exceeded` is one
     §0.3 measured Lean's memory ceiling as the binding constraint on this half —
     and a campaign that counted it as `lean-rejected` would report a resource
     outcome as a fact about the generator, which is the one inference this tool
