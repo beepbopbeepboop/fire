@@ -7413,6 +7413,18 @@ class TestCfgLeafCensus(unittest.TestCase):
 # and the doc's next step becomes worth re-reading.
 _SYMBOLIC_DIVISOR = "def q(a, b):\n    return a // b\n"
 
+#: A LITERAL non-zero divisor.  The model can step the divide at build time,
+#: so `formal/model.py::division_needs_zero_guard` is decidable and the
+#: divide-by-zero arm is NOT emitted.  This avoids the compiler's `fflush`
+#: trap on the universal path, so the universal theorem IS emitted with
+#: the walk terminal's admission — exactly what
+#: `TestTheZeroDivisorGuardAgainstLean` needs to measure a residual.
+#:
+#: This is the fixture switch from
+#: `bugs/formal/FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md`
+#: (step 2 option 2), measured working 2026-10-18.
+_LITERAL_DIVISOR = "def q(a):\n    return a // 4\n"
+
 #: The walk terminal's admission, and the marker that prints the goals it
 #: absorbs.  `all_goals (first | done | sorry)` is the admission the doc is
 #: about; replacing `sorry` with `trace_state` is how a residual is READ, and
@@ -7436,6 +7448,26 @@ def _symbolic_divisor_proof(tmp):
     with open(src, "w") as f:
         f.write(_SYMBOLIC_DIVISOR)
     out = os.path.join(tmp, "symdiv.aout")
+    path = fb.compile_formal(src, arch="arm64", output=out, prove=True,
+                             check=False)["proof_path"]
+    text = open(path).read()
+    head, sep, tail = text.partition("theorem q_compiles_correctly_universal")
+    return head.replace(_CONCRETE, ":= by\n  sorry\n"), sep + tail
+
+
+def _literal_divisor_proof(tmp):
+    """The arm64 proof for `a // 4`, with the concrete tests neutralised.
+
+    The literal divisor avoids the compiler's divide-by-zero arm entirely,
+    so `q_compiles_correctly_universal` IS emitted and the class can measure
+    its residual. This implements the fixture switch from
+    `bugs/formal/FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md`.
+    """
+    import formal.build as fb
+    src = os.path.join(tmp, "litdiv.mojo")
+    with open(src, "w") as f:
+        f.write(_LITERAL_DIVISOR)
+    out = os.path.join(tmp, "litdiv.aout")
     path = fb.compile_formal(src, arch="arm64", output=out, prove=True,
                              check=False)["proof_path"]
     text = open(path).read()
@@ -7601,6 +7633,32 @@ class TestTheZeroDivisorGuardIsAFalseGoal(unittest.TestCase):
                       "theorem is NOT emitted; the announcement this row checks "
                       "is that sentence, not merely the theorem's name (a name "
                       "can appear in a comment that does not withdraw it)")
+
+    def test_literal_divisor_proof_produces_correct_proof(self):
+        """Regression for bugs/formal/FORMAL_the_div0_guard_measurement_class_traces_nothing_any_more.md.
+
+        Before the fixture switch (the doc's step 2 option 2), the measurement
+        class `TestTheZeroDivisorGuardAgainstLean` used `_symbolic_divisor_proof`,
+        which produces a proof with a reachability substitution instead of the
+        universal theorem + admission. After switching to `_literal_divisor_proof`,
+        the universal theorem IS emitted with its `_ADMIT`, so the measurement
+        mechanism fires. This test verifies that structural property directly.
+        """
+        import tempfile
+        tmp = tempfile.mkdtemp(prefix="regress-")
+        try:
+            head, tail = _literal_divisor_proof(tmp)
+            self.assertIn(
+                "q_compiles_correctly_universal", head + tail,
+                "literal divisor proof should emit q_compiles_correctly_universal")
+            self.assertNotIn(
+                "reaches_call_at_", head + tail,
+                "literal divisor proof should not have a reachability substitution")
+            self.assertIn(
+                _ADMIT, tail,
+                "literal divisor proof should carry _ADMIT in the tail")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
     def test_a_literal_divisor_RESTORES_the_classs_subject(self):
         """The doc's step-2 option 2 is no longer refuted: MEASURED, not argued.
@@ -7789,6 +7847,11 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
     `test_the_measurement_class_can_still_see_what_it_measures` fails by name
     when it did not, so this class can only report the `fdiv64` diagnosis
     when it really measured a residual.
+
+    After the fix this doc wants (the fixture switch), this class should use
+    `def q(a): return a // 4` instead of `def q(a, b): return a // b`.
+    The literal divisor avoids the flush arm, so the universal theorem IS
+    emitted and the class can measure its residual.
     """
 
     #: The two spellings, and each one's patch (the doc's next step, applied).
@@ -7827,7 +7890,10 @@ class TestTheZeroDivisorGuardAgainstLean(unittest.TestCase):
         cls.blind = {}
         for label, patch in cls.SPELLINGS:
             try:
-                head, tail = _symbolic_divisor_proof(cls.tmp)
+                # FIXTURE SWITCH (from the doc's step-2 option 2): the literal
+                # divisor `a // 4` avoids the compiler's div0 arm, so the
+                # universal theorem IS emitted with its admission.
+                head, tail = _literal_divisor_proof(cls.tmp)
             except Exception as e:                      # noqa: BLE001
                 cls.blind[label] = (
                     f"the fixture no longer generates a proof at all, so the "
