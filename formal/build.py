@@ -18516,6 +18516,7 @@ def _prepare_functions(stmts: list, synthetic: bool = True,
         if _own:
             M.publish_module_raisers(_own, raise_graph.raising)
     for fn in functions:
+
         found = M.unemitted_handler_arm(fn)
         if found is not None:
             raise CodegenError(M.refuse_dropped_handler_arm(fn, found))

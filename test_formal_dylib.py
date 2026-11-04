@@ -976,7 +976,10 @@ def test_several_exports_and_no_derivable_spec(tmpdir, shared):
         # `exportEnd_here` is what says the exit is this export's end, and it is
         # proved by `native_decide` over the image's export table -- so it is a
         # check that the emitter's extent and the library's fold agree.
-        end = entries[i + 1] if i + 1 < len(entries) else base + len(built["code"])
+        if i + 1 < len(entries):
+            end = entries[i + 1]
+        else:
+            end = base + built["info"].get("exec_code_end", len(built["code"]))
         check(f"DylibExport.exportEnd dylib_image {ident} = {end}" in text,
               f"{ident}'s contract is not stated at its OWN end ({end}), so it "
               f"is about the image's exit or another export's code")

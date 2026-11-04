@@ -369,6 +369,7 @@ def unemitted_handler_arm(fn):
                 if type(stmt).__name__ not in _HANDLER_ARM_NO_EFFECT:
                     pass  # Can now be emitted
     return None
+    return None
 
 
 def _emitted_nodes(node):
@@ -841,8 +842,9 @@ def uncatchable_raise(fn, graph=None) -> tuple:
                     # For calls (not direct raises in same try), be conservative
                     if hit and len(hit) > 2 and hit[2]:  # module specified - refuse
                         return (None, node, handlers[0], hit)
-                    elif hit:  # same module call - refuse for now as our hacky approach doesn't handle it well
+                    elif hit:  # same module call - refuse for now
                         return (None, node, handlers[0], hit)
+        return None
     return None
 
 
