@@ -8092,7 +8092,27 @@ def _gen_universal_e2e_cfg(name: str, code: bytes, base: int, func_entry: int,
     _reach = [blocks[i] for i in _order if i in _reach_i]
     if fuel is not None:
         _acyclic = all(t > b["instrs"][-1] for b in _reach for t in b["targets"])
-        if (recursive or not _acyclic or fuel < _TOTAL
+        # Loop-contract machinery (below, ~line 8286/10707) handles cyclic
+        # exports that have a recognized loop shape.  Detect it from the
+        # reachable blocks so the acyclicity bail does not kill them first.
+        # Countdown: a `b` whose target is a `cbz`; bottom-tested: a `cbz`
+        # whose taken edge is its own start.
+        _starts = {b["start"]: i for i, b in enumerate(_reach)}
+        _has_loop = False
+        for _bi_r, _b_r in enumerate(_reach):
+            if _b_r["kind"] == "b" and _b_r.get("targets"):
+                _tgt = _b_r["targets"][0]
+                if _tgt in _starts:
+                    _tgt_b = _reach[_starts[_tgt]]
+                    if _tgt_b["kind"] == "cbz":
+                        _has_loop = True
+                        break
+            elif _b_r["kind"] == "cbz" and len(_b_r.get("targets", [])) > 1:
+                if _b_r["targets"][1] == _b_r["start"]:
+                    _has_loop = True
+                    break
+        if (recursive or (not _acyclic and not _has_loop)
+                or fuel < _TOTAL
                 or any(b["kind"] == "bl" for b in _reach)):
             return None
     _RETS = ", ".join(str(b["instrs"][-1]) for b in blocks if b["kind"] == "ret")
