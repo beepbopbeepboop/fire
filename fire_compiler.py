@@ -313,6 +313,13 @@ class IdentExpr:
     col: int = 0
 
 @dataclass
+class CastExpr:
+    ctype: str
+    value: object
+    line: int = 0
+    col: int = 0
+
+@dataclass
 class DottedLiteral:
     """A dot-relative value reference: `.always`, `.uint64`, `.of_bytes`.
 

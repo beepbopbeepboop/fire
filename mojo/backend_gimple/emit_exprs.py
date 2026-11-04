@@ -104,6 +104,11 @@ def lower_expr(gen, node) -> tuple[str, str]:
         return gen._lower_StringLiteral(node)
     elif isinstance(node, gimple_ctypes.IdentExpr):
         return gen._lower_IdentExpr(node)
+    elif isinstance(node, gimple_ctypes.CastExpr):
+        _ct, _cv = gen.lower_expr(node.value)
+        _tmp = gen._new_temp(node.ctype)
+        gen._emit(f'  {_tmp} = ({node.ctype})({_cv});')
+        return node.ctype, _tmp
     elif isinstance(node, gimple_ctypes.WalrusExpr):
         return gen._lower_WalrusExpr(node)
     elif isinstance(node, gimple_ctypes.BinaryOp):

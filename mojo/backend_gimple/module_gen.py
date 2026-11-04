@@ -3737,7 +3737,7 @@ def _gmi_decorator_pass(self, stmts: list, outer_defs: dict, at_module: bool) ->
                 continue
             for _rb_d in _gmi_scope_defs([_rb_s]):
                 for _rb_dec in _rb_d.decorators or []:
-                    if _gmi_is_rebindable(_rb_dec, _rb_scope, _rb_d.name):
+                    if _gmi_is_rebindable(self, _rb_dec, _rb_scope, _rb_d.name):
                         raise RuntimeError(
                             f"decorator {_gmi_decorator_head(_rb_dec)!r} on {_rb_d.name!r} is inside a "
                             f"module-level block, which the compiled path cannot rebind yet; it would "
@@ -3746,20 +3746,21 @@ def _gmi_decorator_pass(self, stmts: list, outer_defs: dict, at_module: bool) ->
     return _gmi_rebind_block(self, stmts, _rb_scope, at_module)
 
 
-def _gmi_is_rebindable(dec, scope: dict, def_name: str) -> bool:
-    """True when decorator `dec` on `def_name` names a def in `scope`, so the
-    decoration is applied by rebinding (see `_gmi_decorator_pass`)."""
+def _gmi_is_rebindable(gen, dec, scope: dict, def_name: str) -> bool:
     _head = _gmi_decorator_head(dec)
-    if _head is None or _head not in scope or _head == def_name:
+    if _head is None or _head == def_name:
         return False
-    # Don't rebind decorators that are classes/constructors in a way that
-    # would break things? Classes are callable - but the decoration pass
-    # expects to transform function defs. Be permissive.
-    _target = scope.get(_head)
-    if isinstance(_target, StructDef):
-        # A class used as decorator - rare, but treat carefully
+    _ANNOTATION_DECORATORS = frozenset({
+        'staticmethod', 'classmethod', 'export', 'doc_hidden', 'gpu', 'kernel',
+        'property', 'abstractmethod',
+    })
+    if _head in _ANNOTATION_DECORATORS:
+        return False
+    if _head in scope:
         return True
-    return True
+    if _head in getattr(gen, '_gmi_imported_names', set()):
+        return True
+    return False
 
 
 def _gmi_child_blocks(stmt) -> list:
@@ -3861,7 +3862,7 @@ def _gmi_rebind_stmt(self, s, scope: dict, at_module: bool) -> list:
     _rb_applied = []
     _rb_kept = []
     for _rb_dec in s.decorators or []:
-        if _gmi_is_rebindable(_rb_dec, scope, s.name):
+        if _gmi_is_rebindable(self, _rb_dec, scope, s.name):
             _rb_applied.append(_rb_dec)
         else:
             _rb_kept.append(_rb_dec)
@@ -3884,6 +3885,13 @@ def _gmi_rebind_stmt(self, s, scope: dict, at_module: bool) -> list:
         for _rb_dec in reversed(_rb_applied):
             _rb_callee = IdentExpr(_rb_dec, line=s.line, col=s.col) if isinstance(_rb_dec, str) else _rb_dec
             _rb_value = CallExpr(func=_rb_callee, args=[_rb_value], line=s.line, col=s.col)
+        # Imported decorators return closures typed as MojoBoundMethod *;
+        # store the result as the int64_t function value the global holds.
+        _rb_imported_applied = any(
+            (d if isinstance(d, str) else _gmi_decorator_head(d)) in getattr(self, '_gmi_imported_names', set())
+            for d in _rb_applied)
+        if _rb_imported_applied:
+            _rb_value = gimple_ctypes.CastExpr('int64_t', _rb_value, line=s.line, col=s.col)
         _rb_out.append(AssignStmt(target=IdentExpr(s.name, line=s.line, col=s.col),
                                   value=_rb_value, line=s.line, col=s.col))
         if at_module:
@@ -4251,6 +4259,20 @@ def gen_module_impl(self, stmts: list):
     stmts = _gmi_hoist_nested_structs(self, stmts)
     _declare_posthoc_class_attrs(stmts)
     _gmi_capture_nested_class_enclosing_reads(stmts)
+    _imported_names = set()
+    for _s in stmts or []:
+        if isinstance(_s, FromImportStmt):
+            for _na in (_s.names or []):
+                _nm = _na[0] if isinstance(_na, (tuple, list)) else _na
+                _al = _na[1] if isinstance(_na, (tuple, list)) and len(_na) > 1 else None
+                _imported_names.add(_al if _al else _nm)
+        elif isinstance(_s, ImportStmt):
+            _al = _s.alias
+            _imported_names.add(_al if _al else _s.module.split('.')[-1])
+            if _s.extra:
+                for _em, _ea in _s.extra:
+                    _imported_names.add(_ea if _ea else _em.split('.')[-1])
+    self._gmi_imported_names = _imported_names
     stmts = _gmi_decorator_pass(self, stmts, {}, True)
     # A function called with a list at one site and a str at another, and
     # iterated in its body, gets one clone per argument kind before any
