@@ -12893,19 +12893,28 @@ def generate_arm64_proof(prog, code, info) -> str:
         # generator has had `sKey` in this set for the same reason.
         simp_lems = f"mojo, {func_name}_go, ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr, u64pow, u64powGo, sKey"
         if len(conds) == 0:
-            eval_eq_mojo_proof = f"simp +decide [{hs_join}{simp_lems}]"
+            eval_eq_mojo_proof = f"simp only [ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr]\n    simp +decide [{hs_join}{simp_lems}]"
         else:
             # `_eval_eq_conds_tactic` decides the constant conditions with
             # `have`/`native_decide` and splits only the argument-dependent
             # ones; it returns None (the historical full-`by_cases` text) for
             # a program whose conditions are all beyond its subset.
-            eval_eq_mojo_proof = (
-                _eval_eq_conds_tactic(
+            _t = _eval_eq_conds_tactic(
                     conds, hs, simp_lems,
                     extra=", u64_lt_iff_false_of_le, u64_le_iff_false_of_lt")
-                or f"{by_cases} simp_all +decide [{hs_join}{simp_lems}, "
-                   f"u64_lt_iff_false_of_le, u64_le_iff_false_of_lt]"
-            )
+            if _t is not None:
+                eval_eq_mojo_proof = f"simp only [ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr]\n    {_t}"
+            else:
+                if len(conds) > 4:
+                    mid = len(conds) // 2
+                    by_cases1 = " ".join(f"by_cases h{i} : {conds[i]} <;>" for i in range(mid))
+                    by_cases2 = " ".join(f"by_cases h{i} : {conds[i]} <;>" for i in range(mid, len(conds)))
+                    hs_mid = ", ".join(f"h{i}" for i in range(mid)) + (", " if mid > 0 else "")
+                    hs_all = ", ".join(f"h{i}" for i in range(len(conds)))
+                    eval_eq_mojo_proof = f"simp only [ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr]\n    {by_cases1} simp_all +decide [{hs_mid}{simp_lems}, u64_lt_iff_false_of_le, u64_le_iff_false_of_lt]\n    {by_cases2} simp_all +decide [{hs_all}, {simp_lems}, u64_lt_iff_false_of_le, u64_le_iff_false_of_lt]"
+                else:
+                    eval_eq_mojo_proof = f"simp only [ast, evalFunc, MojoEnv, evalBody, evalBodyEnv, evalExpr]\n    {by_cases} simp_all +decide [{hs_join}{simp_lems}, " \
+                       f"u64_lt_iff_false_of_le, u64_le_iff_false_of_lt]"
     else:
         eval_eq_mojo_proof = None
 

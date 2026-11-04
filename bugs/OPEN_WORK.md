@@ -67,12 +67,11 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_string_value_model.md` | `fix-merge-fix-merge-fix-merge-fix-merge-bug-formal-formal-st` | what a string IS on the formal path, and the two things that want to be one |
 | `FORMAL_a_call_result_field_access_has_no_representation.md` | **unclaimed** | every remaining host-import row is one capability, and it is not a module |
 
-### `formal/lean` — 3 documents, 2 claimed
+### `formal/lean` — 2 documents, 2 claimed
 
 | doc | claim | what it is (its own title) |
 |---|---|---|
 | `FORMAL_a_division_by_a_symbolic_value_leaves_the_zero_guard_open.md` | `fix-merge-bug-formal-formal-a-division-by-a-symbol-7956` | the theorem for `a // b` with a symbolic `b` is ADMITTED **and false**, so no `simp` closes it |
-| `FORMAL_eval_eq_mojo_is_undecidable_over_a_free_n.md` | `bug-formal-formal-eval-eq-mojo-is-undeci-1593` | An `if` whose condition reads a LOCAL leaves `eval_eq_mojo` unproved, and the goal it leaves is not decidable |
 | `FORMAL_the_arm64_proof_time_floor_is_one_composition_theorem.md` | **unclaimed** | The arm64 proof-time floor after the step-OK swap is ONE declaration: `compiles_correctly_universal`, at 83% of the file |
 
 ### `formal/model` — 12 documents, 12 claimed
@@ -82,7 +81,7 @@ are — so the old "not here" paragraph is gone with the table it belonged to.
 | `FORMAL_a_print_of_a_container_needs_a_text_loop.md` | `bug-formal-formal-a-print-of-a-container-1349` | `print(<a container>)` is refused: rendering one is a loop emitting text, and `_print_call` builds ONE format |
 | `FORMAL_a_try_handler_arm_is_still_never_emitted.md` | `bug-formal-formal-a-try-handler-arm-is-s-7166` | A `try` handler arm is still never emitted, and the reason it is not worth fixing in one function is that EVERY arm in this repository calls something |
 | `FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md` | `fix-merge-fix-merge-fix-merge-bug-formal-formal-a-type-canno` | `collections.namedtuple` and `copy.deepcopy` are one missing capability, and it is a reflection table |
-| `FORMAL_function_value_calls_are_not_proved_to_be_calls.md` | `fix-merge-fix-merge-fix-merge-bug-formal-formal-function-val` | A call through a VALUE is not proved to be a call: the word might not be an address |
+| `FORMAL_function_value_calls_are_not_proved_to_be_calls.md` (deleted) | `fix-merge-fix-merge-fix-merge-bug-formal-formal-function-val` | A call through a VALUE is not proved to be a call: the word might not be an address |
 | `FORMAL_known_limits.md` | `fix-merge-bug-formal-formal-known-limits-1382` | the sweep residue, audited — which refusals are true |
 | `FORMAL_len_of_a_readdir_name_is_refused_and_needs_a_bytes_kind.md` | `fix-merge-bug-formal-formal-len-of-a-readdir-name-6416` | the ELEMENT half of the foreign-bytes question is closed, and the `len` half is not |
 | `FORMAL_listdir_no_run_time_sequence.md` | `fix-merge-fix-merge-fix-merge-bug-formal-formal-listdir-no-r` | a run-time-length blob is answerable; a run-time-length LIST is not |

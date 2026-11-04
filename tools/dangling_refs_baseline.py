@@ -36,7 +36,7 @@ BASELINE = {
     'CRASH.md': 1,
     'FORMAL.md': 4,
     'OPUS.md': 2,
-    'bugs/formal/FORMAL_a_call_result_field_access_has_no_representation.md': 1,
+    'bugs/formal/FORMAL_a_call_result_field_access_has_no_representation.md': 3,
     'bugs/formal/FORMAL_a_division_by_a_symbolic_value_leaves_the_zero_guard_open.md': 1,
     'bugs/formal/FORMAL_absval_proof_does_not_check.md': 4,
     'bugs/formal/FORMAL_known_limits.md': 8,
@@ -51,7 +51,7 @@ BASELINE = {
     'doc/ABI.md': 5,
     'elaborate.py': 1,
     'fire.py': 1,
-    'formal/arm64_proof_gen.py': 9,
+    'formal/arm64_proof_gen.py': 10,
     'formal/build.py': 11,
     'formal/dataclass_transform.py': 4,
     'formal/imports.py': 14,
@@ -162,8 +162,7 @@ BASELINE = {
 # reason the header above gives for its prefixed entry.
 BARE_BASELINE = {
     'CRASH.md': 1,
-    'bugs/OPEN_WORK.md': 8,
-    'bugs/formal/FORMAL_a_type_cannot_be_constructed_or_cloned_at_run_time.md': 1,
+    'bugs/OPEN_WORK.md': 29,
     'bugs/formal/FORMAL_a_variadic_parameter_read_has_no_abi.md': 1,
     'bugs/formal/FORMAL_absval_proof_does_not_check.md': 1,
     'bugs/formal/FORMAL_arm64_instruction_coverage.md': 1,

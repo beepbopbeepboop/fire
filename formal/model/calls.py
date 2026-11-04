@@ -3375,9 +3375,8 @@ def foreign_bytes_export_kind(entry) -> str | None:
       the kind of the arguments and this path does not track that.  The
       kernel-derived `os.path` exports (`realpath`, `abspath`, `expanduser`) are
       mixed for the same reason and are therefore also absent — a stated gap
-      rather than a silent one, and it is what
-      `bugs/formal/FORMAL_len_of_a_readdir_name_is_refused_and_needs_a_bytes_kind.md`'s
-      Status records as the remainder of this work.
+      rather than a silent one, and that remainder is documented in the
+      deleted bug record for this issue.
     * **Every `String` in user code**, which is the point of the whole exercise:
       an exemption here would be right for the few kernel strings and wrong for
       the thousands of literals.

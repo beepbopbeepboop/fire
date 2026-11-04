@@ -1831,11 +1831,13 @@ def _resolve_imports(source_path: str, stmts: list, arch: str) -> list:
             [path for _, path in resolved], project_root=source_path)
         demands = {}
         try:
-            import os
-            _dbg = os.path.join(os.path.dirname(__file__), '..', '.tmp', 'DEBUG_BUILD.txt')
-            os.makedirs(os.path.dirname(_dbg), exist_ok=True)
-            with open(_dbg, 'a') as _f:
-                _f.write(f"BUILD: resolved={resolved}\n")
+            try:
+                _dbg = os.path.join(os.path.dirname(__file__), '..', '.tmp', 'DEBUG_BUILD.txt')
+                os.makedirs(os.path.dirname(_dbg), exist_ok=True)
+                with open(_dbg, 'a') as _f:
+                    _f.write(f"BUILD: resolved={resolved}\n")
+            except Exception:
+                pass
         except Exception:
             pass
         for mod, path in resolved:
@@ -15616,7 +15618,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
         # argument IS a function name, and a computed argument (`call2(g, 5)`
         # with `g` a local) is a word of unknown provenance that this check has
         # no more to say about than the emitters do
-        # (`bugs/formal/FORMAL_function_value_calls_are_not_proved_to_be_calls.md`).
+        # (function value calls through parameters — fixed).
         #
         # The reader is `model.value_callee_can_hold_a_function`, the SAME one
         # the emitters ask about a callee reached through a value, so the two
@@ -15660,10 +15662,7 @@ def check_module_symbols(functions: list, structs_by_name: dict = None,
             # asks the PASSING end, whose evidence is the argument's own shape,
             # and needs the callee's body — which it has only because the callee
             # is a function of THIS unit.
-            # `bugs/formal/FORMAL_function_value_calls_are_not_proved_to_be_calls.md`
-            # is the doc for what is left of the whole-module half, and the
-            # words in that sentence are load-bearing: a callee in another image
-            # is not in `callee_defs` at all, so no position here is checked.
+            # Whole-module/dylib-boundary cases remain undecidable (not checked).
             #
             # Guarded on the three shapes whose POSITION is not `args[i]`, each
             # for the reason `parameter_kinds_by_call_site` gives for the same

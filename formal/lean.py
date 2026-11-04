@@ -1704,9 +1704,8 @@ def lean_version(lean: str, timeout: float = 120.0) -> str:
 # `1:0`, before the theorem is read, and **that false verdict was published and
 # is content-addressed on inputs that do not change when the path is fixed**:
 # the proof's bytes and the library's `.olean` digests are identical either way,
-# so every later caller with the same file replayed it. `bugs/
-# FORMAL_eval_eq_mojo_is_undecidable_over_a_free_n.md`'s measurements were taken
-# through that entry point, which is why this bump and not a cache flush: a
+# so every later caller with the same file replayed it. Earlier measurements
+# were taken through that entry point, which is why this bump and not a cache flush: a
 # flush cannot be done from a worktree (the CAS is machine-wide and shared), and
 # a version bump retires exactly the entries whose key cannot tell the two runs
 # apart.
