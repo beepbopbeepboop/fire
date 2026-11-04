@@ -896,7 +896,7 @@ def monomorphize_source(template_src: str, type_args: dict,
         if not msg_m:
             msg_m = re.search(r',\s*"([^"]+)"', src)
         msg = msg_m.group(1) if msg_m else '_scalbn_impl requires float32 or float64; promote narrow inputs first'
-        raise RuntimeError(f'constraint failed: {msg}')
+        raise RuntimeError(f'codegen: constraint failed: {msg}')
     return mangled, src
 
 

@@ -5892,7 +5892,20 @@ class Parser:
                         # defaults reports `0:0`, which is what
                         # myinterpreter.py's unbindable-comptime-parameter
                         # TypeError used to print.
-                        expr = SubscriptExpr(obj=expr, index=IntLiteral(value=0, raw=''), attrs=_attrs,
+                        # Build index for backward compatibility
+                        _pos_items = [val for nm, val in _attrs if nm is None]
+                        if len(_pos_items) == 0:
+                            if len(_attrs) == 1:
+                                _compat_idx = _attrs[0][1]
+                            elif len(_attrs) > 1:
+                                _compat_idx = TupleExpr(elements=[val for _, val in _attrs])
+                            else:
+                                _compat_idx = IntLiteral(value=0, raw='')
+                        elif len(_pos_items) == 1:
+                            _compat_idx = _pos_items[0]
+                        else:
+                            _compat_idx = TupleExpr(elements=_pos_items)
+                        expr = SubscriptExpr(obj=expr, index=_compat_idx, attrs=_attrs,
                                              line=expr.line, col=expr.col)
                     else:
                         # Parse a comma-separated list of subscript items. Each
@@ -6601,6 +6614,8 @@ class Parser:
             if self._peek().kind == "COMMA":
                 self._advance(); self._skip_newlines()
         self._skip_newlines()
+        if self._peek().kind == "RPAREN":
+            self._advance()
         return params, param_types
 
     def _parse_lambda(self):
@@ -6626,8 +6641,6 @@ class Parser:
         param_types = []
         if self._peek().kind == "LPAREN":
             params, param_types = self._parse_lambda_paren_params()
-            if self._peek().kind == "RPAREN":
-                self._advance()
         else:
             # Bare parameter list — the pre-existing loop, kept verbatim in
             # behaviour: scan to the COLON that opens the body.

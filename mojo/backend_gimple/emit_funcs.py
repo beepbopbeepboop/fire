@@ -897,6 +897,20 @@ def _gen_stmt_ComptimeVarStmt(gen, node):
         if isinstance(val, str):
             gen._comptime_str_names.add(_ct_target)
         gen._comptime_vals[_ct_target] = val
+    else:
+        # Handle type aliases like `comptime socklen_t = c_uint` where
+        # c_uint is itself a comptime alias to UInt32 (a scalar type).
+        rhs = _ct_node.value
+        if isinstance(rhs, IdentExpr):
+            rhs_name = _as_str(rhs.name)
+            # Direct scalar type constructor
+            if rhs_name in gimple_ctypes._SCALAR_CTORS:
+                gen._comptime_vals[_ct_target] = rhs_name
+            # Follow comptime alias chain
+            elif rhs_name in getattr(gen, '_comptime_vals', {}):
+                _aliased = gen._comptime_vals[rhs_name]
+                if isinstance(_aliased, str) and _aliased in gimple_ctypes._SCALAR_CTORS:
+                    gen._comptime_vals[_ct_target] = _aliased
     if isinstance(_ct_node.value, gimple_ctypes.ListExpr):
         gen._comptime_list_asts[_ct_target] = _ct_node.value
     return

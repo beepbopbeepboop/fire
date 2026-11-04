@@ -1664,7 +1664,6 @@ _PY_BUILTIN_NAMES = frozenset(n for n in dir(_py_builtins) if not n.startswith('
 def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     try:
         if isinstance(node.func, gimple_ctypes.IdentExpr):
-            print(f"LOWER_CALL_IDENT: {node.func.name}", flush=True)
     except Exception:
         pass
     _dealloc = gen._lower_dealloc_thin_allocation(node)
@@ -4227,6 +4226,13 @@ def _lower_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     if (fname_raw in gimple_ctypes._SCALAR_CTORS and fname_raw not in gen.func_return_types
             and fname_raw not in gen.imported_symbols):
         return gen._lower_scalar_ctor(fname_raw, gimple_ctypes._SCALAR_CTORS[fname_raw], node)
+    # Comptime type aliases (e.g. `comptime socklen_t = c_uint` where c_uint = UInt32)
+    _ct_alias = getattr(gen, '_comptime_vals', {}).get(fname_raw)
+    if (isinstance(_ct_alias, str) and _ct_alias in gimple_ctypes._SCALAR_CTORS
+            and fname_raw not in gen.func_return_types
+            and fname_raw not in gen.imported_symbols
+            and fname_raw not in gimple_ctypes._C_RESERVED_FUNCS):
+        return gen._lower_scalar_ctor(fname_raw, gimple_ctypes._SCALAR_CTORS[_ct_alias], node)
 
     # Closure / recursive self-call
     inner_name = getattr(gen, '_inner_func_name', '')
@@ -7578,33 +7584,43 @@ def _lower_LambdaExpr(gen, node) -> tuple:
     ci.call_site_param_types = getattr(node, '_call_site_param_types', None) or {}
     # Register return type and param types now so call sites resolve correctly
     ret_type = gen._infer_return_type(syn_body)
+    try:
+        if getattr(node, 'return_type', None):
+            try:
+                rt = gen._resolve_type(node.return_type)
+                if rt:
+                    ret_type = rt
+            except Exception:
+                pass
+    except Exception:
+        pass
     gen.func_return_types[lifted_name] = ret_type
     param_ctypes = []
     seen_lambda_varargs = False
-    for pname, ptype in node.params:
-        # A lambda's own *args/**kwargs (e.g. `lambda *args, **kwargs:
-        # cls(loader(*args, **kwargs))`, importlib/util.py's LazyLoader.
-        # factory) must resolve to the SAME concrete MojoList*/MojoDict*
-        # convention _gen_lifted_closure's real param-building loop
-        # below uses for the actual definition (see its `pname.
-        # startswith('**')`/`startswith('*')` branches) — this list
-        # feeds the forward declaration / static fn-pointer cast type,
-        # which must match the definition exactly or GCC rejects it as
-        # "conflicting types". Previously this loop had no `*`/`**`-
-        # prefix handling at all: a literal `'*args'`/`'**kwargs'` name (the
-        # star baked into the string) never matched anything in
-        # var_types below, so both fell through to the plain `int64_t`
-        # default — a forward decl silently mismatched against the
-        # real MojoList*/MojoDict* body it was declaring.
+    _panns = getattr(node, 'param_types', None) or []
+    for _pi, (pname, ptype) in enumerate(node.params):
+        # A lambda's own *args/**kwargs
         if pname.startswith('**'):
             param_ctypes.append('MojoDict *')
+            continue
         elif pname.startswith('*'):
             if not seen_lambda_varargs:
                 param_ctypes.append('MojoList *')
                 seen_lambda_varargs = True
+            else:
+                param_ctypes.append('int64_t')
+            continue
+        # Try to use explicit param type annotation
+        if _pi < len(_panns) and _panns[_pi]:
+            try:
+                pct = gen._resolve_type(_panns[_pi])
+                if pct:
+                    param_ctypes.append(pct)
+                    continue
+            except Exception:
+                pass
         # Lambda params: second element is default value (AST node), not a type annotation.
-        # Resolve from var_types context; default to int64_t.
-        elif pname in gen.var_types:
+        if pname in gen.var_types:
             param_ctypes.append(gen.var_types[pname])
         else:
             param_ctypes.append('int64_t')
@@ -8939,7 +8955,6 @@ def _pack_kwargs_slot_call(gen, fname, fname_raw, arg_pairs, kwarg_dict,
 
 def _lower_named_call(gen, fname_raw: str, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
     """Final dispatch for user-defined and C stdlib functions."""
-    print(f"NAMED_CALL: {fname_raw}", flush=True)
     if fname_raw == 'copysign' and len(getattr(node, 'args', []) or []) == 2:
         try:
             _x_t, _x_v = gen.lower_expr(node.args[0])

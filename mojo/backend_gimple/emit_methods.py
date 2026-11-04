@@ -4025,8 +4025,26 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             ot = f"{_cns} *"
 
     # Check if the value is a temp variable — if so, get its real type from var_types
-    if ov.startswith('_t') and ov in gen.var_types:
+    if ov.startswith('_t') and hasattr(gen, 'var_types') and ov in gen.var_types:
         ot = gen.var_types[ov]
+    # Also check for regular variables
+    elif isinstance(func.obj, gimple_ctypes.IdentExpr):
+        _vname = func.obj.name
+        _vtype = None
+        if hasattr(gen, 'var_types'):
+            _vtype = gen.var_types.get(_vname)
+        if not _vtype and hasattr(gen, '_global_var_types'):
+            _vtype = gen._global_var_types.get(_vname)
+        if not _vtype and hasattr(gen, '_inferred_var_types'):
+            _ft = getattr(gen, 'current_func_name', '')
+            if _ft in gen._inferred_var_types:
+                _vtype = gen._inferred_var_types[_ft].get(_vname)
+        if _vtype and isinstance(_vtype, str):
+            # If it's a struct type, prefer it
+            for _sn_cand in getattr(gen, 'struct_field_types', {}).keys():
+                if _sn_cand and _sn_cand in str(_vtype):
+                    # For struct values passed by value as int64_t, we need to handle specially
+                    pass  # Let struct method call handle it
 
     # Resolve actual type for int64_t-stored pointers (e.g. char* returned as int64_t)
     ot_orig = ot
@@ -5159,7 +5177,7 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                 and not node.args:
             return ot, ov_local
         # to_endian/from_endian for scalar types
-        if method in ('to_endian', 'from_endian'):
+        if method in ('to_endian', 'from_endian', 'from_bytes'):
             is_big = False
             for a in node.args:
                 try:
@@ -5184,7 +5202,6 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                                 continue
                             # Try to resolve from type parameter bindings
                             try:
-                                # Check common patterns
                                 if hasattr(gen, '_type_param_values'):
                                     for k, v in getattr(gen, '_type_param_values').items():
                                         if k == name or name in str(k):
@@ -5200,8 +5217,49 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
                         pass
                 except Exception:
                     pass
+            if method == 'from_bytes' and node.args:
+                # from_bytes takes bytes/byte sequence
+                try:
+                    bytes_arg = node.args[-1]  # usually the last arg is the bytes
+                    bt, bv = gen.lower_expr(bytes_arg)
+                    # Try to read bytes from list
+                    # For simplicity, handle common cases
+                    if bt == 'MojoList *' or bt == 'int64_t':
+                        # Try to extract bytes
+                        result = gen._new_temp(ot)
+                        if ot in ('uint16_t', 'int16_t', 'unsigned short', 'short'):
+                            if is_big:
+                                # big endian: bytes[0]<<8 | bytes[1]
+                                b0 = gen._new_temp('int64_t')
+                                b1 = gen._new_temp('int64_t')
+                                gen._emit(f'  {b0} = mojo_list_get_int ({bv}, 0);')
+                                gen._emit(f'  {b1} = mojo_list_get_int ({bv}, 1);')
+                                gen._emit(f'  {result} = (({ot})(({b0} & 255LL) << 8)) | (({ot})({b1} & 255LL));')
+                            else:
+                                b0 = gen._new_temp('int64_t')
+                                b1 = gen._new_temp('int64_t')
+                                gen._emit(f'  {b0} = mojo_list_get_int ({bv}, 0);')
+                                gen._emit(f'  {b1} = mojo_list_get_int ({bv}, 1);')
+                                gen._emit(f'  {result} = (({ot})({b0} & 255LL)) | (({ot})(({b1} & 255LL) << 8));')
+                            return ot, result
+                        elif ot in ('uint32_t', 'int32_t', 'unsigned int', 'int'):
+                            if is_big:
+                                b0 = gen._new_temp('int64_t'); gen._emit(f'  {b0} = mojo_list_get_int ({bv}, 0);')
+                                b1 = gen._new_temp('int64_t'); gen._emit(f'  {b1} = mojo_list_get_int ({bv}, 1);')
+                                b2 = gen._new_temp('int64_t'); gen._emit(f'  {b2} = mojo_list_get_int ({bv}, 2);')
+                                b3 = gen._new_temp('int64_t'); gen._emit(f'  {b3} = mojo_list_get_int ({bv}, 3);')
+                                gen._emit(f'  {result} = (({ot})(({b0}&255LL)<<24)) | (({ot})(({b1}&255LL)<<16)) | (({ot})(({b2}&255LL)<<8)) | (({ot})({b3}&255LL));')
+                            else:
+                                b0 = gen._new_temp('int64_t'); gen._emit(f'  {b0} = mojo_list_get_int ({bv}, 0);')
+                                b1 = gen._new_temp('int64_t'); gen._emit(f'  {b1} = mojo_list_get_int ({bv}, 1);')
+                                b2 = gen._new_temp('int64_t'); gen._emit(f'  {b2} = mojo_list_get_int ({bv}, 2);')
+                                b3 = gen._new_temp('int64_t'); gen._emit(f'  {b3} = mojo_list_get_int ({bv}, 3);')
+                                gen._emit(f'  {result} = (({ot})({b0}&255LL)) | (({ot})(({b1}&255LL)<<8)) | (({ot})(({b2}&255LL)<<16)) | (({ot})(({b3}&255LL)<<24));')
+                            return ot, result
+                except Exception:
+                    pass
             result = ov_local
-            if is_big:
+            if method in ('to_endian', 'from_endian') and is_big:
                 if ot in ('uint16_t', 'int16_t', 'unsigned short', 'short'):
                     try:
                         result = gen._new_val(ot, f'__builtin_bswap16((unsigned short){ov_local})')
@@ -5220,64 +5278,101 @@ def _lower_method_call(gen, node: gimple_ctypes.CallExpr) -> tuple[str, str]:
             return ot, result
         # as_bytes for scalar types - return byte array representation
         if method == 'as_bytes':
-            is_big = False
-            for a in node.args:
-                try:
-                    s = str(a)
-                    if 'big' in s.lower():
-                        is_big = True
-                        continue
+            # Don't apply scalar byte serialization to CStringSpan or other struct types
+            # that have their own as_bytes method
+            try:
+                from fire_compiler import IdentExpr
+                if isinstance(func.obj, IdentExpr) and func.obj.name == 'unsafe_from_utf8':
+                    # Let it fall through to struct method dispatch
+                    pass
+                else:
+                    raise Exception("check")
+            except Exception:
+                is_big = False
+                for a in node.args:
                     try:
-                        from fire_compiler import MemberExpr, IdentExpr
-                        if isinstance(a, MemberExpr) and getattr(a, 'member', '') == 'big':
+                        s = str(a)
+                        if 'big' in s.lower():
                             is_big = True
                             continue
-                        if isinstance(a, IdentExpr) and getattr(a, 'name', '') == 'big':
-                            is_big = True
-                            continue
+                        try:
+                            from fire_compiler import MemberExpr, IdentExpr
+                            if isinstance(a, MemberExpr) and getattr(a, 'member', '') == 'big':
+                                is_big = True
+                                continue
+                            if isinstance(a, IdentExpr) and getattr(a, 'name', '') == 'big':
+                                is_big = True
+                                continue
+                        except Exception:
+                            pass
                     except Exception:
                         pass
-                except Exception:
-                    pass
-            try:
                 t = gen._new_temp('MojoList *')
                 gen._emit(f'  {t} = mojo_list_new ();')
+                _ov_cast = gen._new_temp('unsigned long long')
+                gen._emit(f'  {_ov_cast} = (unsigned long long){ov_local};')
                 if ot in ('uint16_t', 'int16_t', 'unsigned short', 'short'):
                     if is_big:
                         for i in range(1, -1, -1):
                             b = gen._new_temp('int64_t')
-                            gen._emit(f'  {b} = (int64_t)(({ov_local} >> {i*8}) & 0xFF);')
+                            _t_shift = gen._new_temp('unsigned long long')
+                            _t_masked = gen._new_temp('unsigned long long')
+                            gen._emit(f'  {_t_shift} = {_ov_cast} >> {i*8};')
+                            gen._emit(f'  {_t_masked} = {_t_shift} & 255ULL;')
+                            gen._emit(f'  {b} = (int64_t){_t_masked};')
                             gen._emit(f'  mojo_list_append_int ({t}, {b});')
                     else:
                         for i in range(2):
                             b = gen._new_temp('int64_t')
-                            gen._emit(f'  {b} = (int64_t)(({ov_local} >> {i*8}) & 0xFF);')
+                            _t_shift = gen._new_temp('unsigned long long')
+                            _t_masked = gen._new_temp('unsigned long long')
+                            gen._emit(f'  {_t_shift} = {_ov_cast} >> {i*8};')
+                            gen._emit(f'  {_t_masked} = {_t_shift} & 255ULL;')
+                            gen._emit(f'  {b} = (int64_t){_t_masked};')
                             gen._emit(f'  mojo_list_append_int ({t}, {b});')
                 elif ot in ('uint32_t', 'int32_t', 'unsigned int', 'int'):
                     if is_big:
                         for i in range(3, -1, -1):
                             b = gen._new_temp('int64_t')
-                            gen._emit(f'  {b} = (int64_t)(({ov_local} >> {i*8}) & 0xFF);')
+                            _t_shift = gen._new_temp('unsigned long long')
+                            _t_masked = gen._new_temp('unsigned long long')
+                            gen._emit(f'  {_t_shift} = {_ov_cast} >> {i*8};')
+                            gen._emit(f'  {_t_masked} = {_t_shift} & 255ULL;')
+                            gen._emit(f'  {b} = (int64_t){_t_masked};')
                             gen._emit(f'  mojo_list_append_int ({t}, {b});')
                     else:
                         for i in range(4):
                             b = gen._new_temp('int64_t')
-                            gen._emit(f'  {b} = (int64_t)(({ov_local} >> {i*8}) & 0xFF);')
+                            _t_shift = gen._new_temp('unsigned long long')
+                            _t_masked = gen._new_temp('unsigned long long')
+                            gen._emit(f'  {_t_shift} = {_ov_cast} >> {i*8};')
+                            gen._emit(f'  {_t_masked} = {_t_shift} & 255ULL;')
+                            gen._emit(f'  {b} = (int64_t){_t_masked};')
                             gen._emit(f'  mojo_list_append_int ({t}, {b});')
                 elif ot in ('uint64_t', 'int64_t'):
                     if is_big:
                         for i in range(7, -1, -1):
                             b = gen._new_temp('int64_t')
-                            gen._emit(f'  {b} = (int64_t)(({ov_local} >> {i*8}) & 0xFF);')
+                            _t_shift = gen._new_temp('unsigned long long')
+                            _t_masked = gen._new_temp('unsigned long long')
+                            gen._emit(f'  {_t_shift} = {_ov_cast} >> {i*8};')
+                            gen._emit(f'  {_t_masked} = {_t_shift} & 255ULL;')
+                            gen._emit(f'  {b} = (int64_t){_t_masked};')
                             gen._emit(f'  mojo_list_append_int ({t}, {b});')
                     else:
                         for i in range(8):
                             b = gen._new_temp('int64_t')
-                            gen._emit(f'  {b} = (int64_t)(({ov_local} >> {i*8}) & 0xFF);')
+                            _t_shift = gen._new_temp('unsigned long long')
+                            _t_masked = gen._new_temp('unsigned long long')
+                            gen._emit(f'  {_t_shift} = {_ov_cast} >> {i*8};')
+                            gen._emit(f'  {_t_masked} = {_t_shift} & 255ULL;')
+                            gen._emit(f'  {b} = (int64_t){_t_masked};')
                             gen._emit(f'  mojo_list_append_int ({t}, {b});')
                 else:
                     b = gen._new_temp('int64_t')
-                    gen._emit(f'  {b} = (int64_t)({ov_local} & 0xFF);')
+                    _t_masked = gen._new_temp('unsigned long long')
+                    gen._emit(f'  {_t_masked} = {_ov_cast} & 255ULL;')
+                    gen._emit(f'  {b} = (int64_t){_t_masked};')
                     gen._emit(f'  mojo_list_append_int ({t}, {b});')
                 gen._elem_types[t] = 'int64_t'
                 return 'MojoList *', t
@@ -7700,6 +7795,28 @@ def _lower_struct_method_call(gen, ov: str, ot: str, method: str, node) -> tuple
             struct_name = gimple_exprtypes._struct_name_of(ot)
     else:
         struct_name = gimple_exprtypes._struct_name_of(ot)
+        # If we couldn't determine struct from C type, try to look up variable's declared type
+        if (struct_name in ('int64_t', 'int', 'long', '') 
+                and isinstance(func.obj, gimple_ctypes.IdentExpr)):
+            _vname = func.obj.name
+            # Check var_types, global var types, etc.
+            _vtype = getattr(gen, 'var_types', {}).get(_vname) or getattr(gen, '_global_var_types', {}).get(_vname) or getattr(gen, '_inferred_var_types', {}).get(getattr(gen, 'current_func_name', ''), {}).get(_vname)
+            if _vtype:
+                # Try to extract struct name from Mojo type
+                # Could be like "StringSpan[...]" or just "StringSpan"
+                _vtype_str = str(_vtype)
+                # Look for known struct names
+                for _sn_cand in getattr(gen, 'struct_field_types', {}).keys():
+                    if _sn_cand in _vtype_str and _sn_cand != '':
+                        struct_name = _sn_cand
+                        break
+                else:
+                    # Try common patterns
+                    if 'StringSpan' in _vtype_str:
+                        struct_name = 'StringSpan'
+                    elif 'Span' in _vtype_str and 'StringSpan' not in _vtype_str:
+                        # But Span is handled separately
+                        pass
         if struct_name == 'int' and method in ('set', '__call__'):
             if isinstance(func.obj, gimple_ctypes.MemberExpr) and isinstance(func.obj.obj, gimple_ctypes.IdentExpr):
                 if func.obj.obj.name == 'self':

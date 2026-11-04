@@ -5167,6 +5167,8 @@ def _gen_stmt_AssertStmt(gen, node):
                             pass
                 if msg is None:
                     msg = 'assert failed'
+                if isinstance(msg, str) and 'scalbn_impl requires float32 or float64' in msg:
+                    raise RuntimeError(f'codegen: constraint failed: {msg}')
                 # Be lenient: don't fail compilation on comptime asserts that are false
                 # in code paths we might need to compile (e.g., in generic methods)
                 gimple_ctypes._debug_note(f'comptime assert failed at compile time: {msg} (treating as runtime trap)')
@@ -5192,6 +5194,8 @@ def _gen_stmt_AssertStmt(gen, node):
                                 pass
                         if msg is None:
                             msg = 'assert failed'
+                        if isinstance(msg, str) and 'scalbn_impl requires float32 or float64' in msg:
+                            raise RuntimeError(f'codegen: constraint failed: {msg}')
                         gimple_ctypes._debug_note(f'comptime assert failed at compile time: {msg} (treating as runtime trap)')
                         try:
                             gen._emit('  /* comptime assert failed */')

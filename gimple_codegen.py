@@ -4156,6 +4156,7 @@ class GimpleGen:
         # Time functions
         'time', 'clock', 'difftime', 'mktime', 'strftime',
         'gmtime', 'localtime', 'asctime', 'ctime',
+        'clock_gettime', 'clock_gettime_nsec_np',
         # Signal
         'signal', 'raise',
         # Wide char (wchar.h)
@@ -4255,6 +4256,8 @@ class GimpleGen:
         'chdir': ('int', ['char *']),
         'execve': ('int', ['char *', 'char *', 'char *']),
         'unsetenv': ('int', ['char *']),
+        'clock_gettime': ('int', ['int', 'struct timespec *']),
+        'clock_gettime_nsec_np': ('int64_t', ['int']),
     }
 
     # ── _lower_call sub-handlers ──────────────────────────────────────────

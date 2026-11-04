@@ -1023,7 +1023,7 @@ def dispatch_table_global_ctype(name) -> str | None:
     function nor its callers may be "simplified" into either."""
     return _DISPATCH_TABLE_GLOBAL_CTYPES.get(name)
 
-_SCALAR_CTORS = {'Float32': 'float', 'Float64': 'double', 'Float16': '__fp16', 'BFloat16': '__fp16', 'Int8': 'int8_t', 'Int16': 'int16_t', 'Int32': 'int32_t', 'Int64': 'int64_t', 'UInt8': 'uint8_t', 'UInt16': 'uint16_t', 'UInt32': 'uint32_t', 'UInt64': 'uint64_t', 'Int': 'int64_t', 'UInt': 'uint64_t', 'Bool': '_Bool'}
+_SCALAR_CTORS = {'Float32': 'float', 'Float64': 'double', 'Float16': '__fp16', 'BFloat16': '__fp16', 'Int8': 'int8_t', 'Int16': 'int16_t', 'Int32': 'int32_t', 'Int64': 'int64_t', 'UInt8': 'uint8_t', 'UInt16': 'uint16_t', 'UInt32': 'uint32_t', 'UInt64': 'uint64_t', 'Int': 'int64_t', 'UInt': 'uint64_t', 'Bool': '_Bool', 'socklen_t': 'uint32_t'}
 _STR_WRAPPER_CTORS = frozenset({'StringSlice', 'StaticString'})
 
 def _split_top_level_commas(s: str) -> list[str]:
