@@ -502,12 +502,11 @@ HOST_MODELLED = frozenset((
     #     on this path — `formal/arm64_codegen.py` truncates a `FloatLiteral`
     #     to an integer and there is no float arithmetic — so the fractional
     #     `time.time()` is the IEEE-754 BIT PATTERN of one, verified bit-exact
-    #     against exact rational arithmetic over 534 inputs. What it cannot
-    #     answer is written at the top of the file: `localtime`, `gmtime`,
-    #     `mktime`, `strftime` and `get_clock_info` all return a `struct tm`
-    #     or a named tuple, and a struct is a frame blob, so they are absent
-    #     rather than approximated. Filed as
-    #     `bugs/formal/FORMAL_time_struct_shaped_answers.md`.
+    #     against exact rational arithmetic over 534 inputs. `localtime`,
+    #     `gmtime`, `mktime`, `strftime` and `get_clock_info` now return
+    #     `struct_time` / values through the `struct tm` pointer route
+    #     (`formal/hostmods/time.mojo`), which `test_formal_time.py`'s
+    #     `structroute` group measures.
     #   `hashlib` — `formal/hostmods/hashlib.mojo`, checked BYTE FOR BYTE
     #     against CPython's own digests by `test_formal_hashlib.py`: six
     #     digests from CommonCrypto (which libSystem provides) and BLAKE2b
@@ -785,12 +784,11 @@ HOST_MODELLED = frozenset((
     #     does.
     #   `datetime`  — a CLOCK plus calendar arithmetic, and both halves are
     #     reachable: `formal/hostmods/time.mojo` has every clock `datetime` can
-    #     read, and the arithmetic is integer work. What is NOT reachable is its
-    #     ANSWER: a `datetime` object is a record of six fields and
-    #     `strftime` is a formatted record, which is the same limit that keeps
-    #     `time.localtime` out of that module
-    #     (`bugs/formal/FORMAL_time_struct_shaped_answers.md`). The two files that want
-    #     it (`run_stdlib_tests.py`, `scripts/bootstrap_full_test.py`) spell
+    #     read, and the arithmetic is integer work. A `datetime` object / `strftime`
+    #     shaped answers go through the same `struct tm` pointer route now
+    #     available in `formal/hostmods/time.mojo` (`localtime`/`gmtime`/
+    #     `mktime`/`strftime`/`get_clock_info`). The two files that want it
+    #     (`run_stdlib_tests.py`, `scripts/bootstrap_full_test.py`) spell
     #     `from datetime import datetime` and `datetime.now()` — the one call
     #     whose answer is that object.
     #   `resource`  — `getrusage(2)` is libSystem, so the CALL is reachable and
@@ -856,11 +854,10 @@ HOST_MODELLED = frozenset((
     #     `formal/hostmods/os/_syscalls.mojo`, because this path lowers `open`
     #     itself and refuses the C library's three-argument spelling of it.
     #     What it cannot answer is at the top of that file: `disk_usage` is a
-    #     three-tuple (`bugs/formal/FORMAL_time_struct_shaped_answers.md`),
-    #     `get_terminal_size` is the terminal that IS unavailable, `move` has no
-    #     cross-device fallback because `errno` cannot be bound
-    #     (`__error` has a leading underscore), and the archives are a library
-    #     with a struct layout nobody in the sweep asks for.
+    #     three-tuple (struct-shaped answer), `get_terminal_size` is the terminal
+    #     that IS unavailable, `move` has no cross-device fallback because `errno`
+    #     cannot be bound (`__error` has a leading underscore), and the archives
+    #     are a library with a struct layout nobody in the sweep asks for.
     #   `tempfile`  — `formal/hostmods/tempfile.mojo`, checked against
     #     CPython's own `tempfile` by `test_formal_tempfile.py`: `gettempdir`
     #     over CPython's candidate list, `gettempprefix`, `TMP_MAX`, and
