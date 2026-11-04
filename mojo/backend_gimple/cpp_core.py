@@ -11006,8 +11006,10 @@ def _cpp_yield_from(gen, yf: 'YieldFromExpr', indent: str) -> list[str]:
             if _rcv == 'cls':
                 if is_classname_gen_call:
                     receiver_exprs = [_call_struct]
-                elif call.func.obj.name == 'self' and cls_struct:
-                    receiver_exprs = [cls_struct]
+                elif call.func.obj.name == 'self':
+                    # Pass self as the receiver (instance); for classmethods the
+                    # class is resolved by name in the callee, so any value works
+                    receiver_exprs = ['self']
                 elif call.func.obj.name == 'cls':
                     receiver_exprs = ['cls']
                 else:

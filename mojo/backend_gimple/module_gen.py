@@ -17978,11 +17978,14 @@ def gen_module_impl(self, stmts: list):
             if self._struct_name_owner.get(_sdcname) is not _sd:
                 continue
             _sdtag = gimple_exprtypes._struct_type_id(_sdcname)
+            _gen_meths = self._struct_generator_method_names.get(_sdcname, set())
             for _m in getattr(_sd, 'methods', None) or []:
                 _mname = getattr(_m, 'name', None)
                 if _mname is None:
                     continue
                 _mname_s = _as_str(_mname)
+                if getattr(_m, 'is_generator', False) or _mname_s in _gen_meths:
+                    continue
                 if _mname_s.startswith('__') and _mname_s.endswith('__') and _mname_s not in ('__init__', '__new__', '__call__'):
                     continue
                 try:
@@ -18015,11 +18018,14 @@ def gen_module_impl(self, stmts: list):
                 _sdtag = gimple_exprtypes._struct_type_id(_sdcname)
             except Exception:
                 continue
+            _gen_meths = self._struct_generator_method_names.get(_sdcname, set())
             for _m in getattr(_sd, 'methods', None) or []:
                 _mname = getattr(_m, 'name', None)
                 if _mname is None:
                     continue
                 _mname_s = _as_str(_mname)
+                if getattr(_m, 'is_generator', False) or _mname_s in _gen_meths:
+                    continue
                 if _mname_s.startswith('__') and _mname_s.endswith('__') and _mname_s not in ('__init__', '__new__', '__call__'):
                     continue
                 try:
